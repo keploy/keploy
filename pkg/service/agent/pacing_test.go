@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"slices"
 	"sort"
@@ -280,6 +281,85 @@ func TestUpdateMockParamsLoadsCarryOverAhead(t *testing.T) {
 				t.Fatalf("lax mode loaded a lookahead: %v", got)
 			}
 		})
+	}
+}
+
+// A carry-over SEND whose recorder stated no lifetime, as enterprise's Pulsar
+// and Redis recorders leave theirs, recorded in the gap after test-7: under
+// the default strict window over the on-disk store, the agent's carry-over
+// lookahead hands it to the carry-over tier at test-7's window, not before,
+// and neither it nor an unstated FLOW in the same gap reaches the session
+// pool in any window: no filter sees an out-of-window per-test mock to
+// promote. The agent's one serve decision, asked on the window the replayer's
+// mock prune holds an unanswered test-7 by (strict, the lookahead run),
+// releases it there, so the prune keeps it for that test.
+func TestUpdateMockParamsServesAnUnstatedCarryOverFromTheCarryTier(t *testing.T) {
+	t.Cleanup(models.RegisterCarryOver(agentPulsar, func(m *models.Mock) bool {
+		return m.Spec.Metadata["commandType"] == "SEND"
+	}))
+	base := time.Date(2026, 9, 30, 9, 0, 0, 0, time.UTC)
+	at := func(s float64) time.Time { return base.Add(time.Duration(s * float64(time.Second))) }
+	var ws []models.TestWindow
+	for i := 1; i <= 8; i++ {
+		ws = append(ws, models.TestWindow{TestCase: fmt.Sprintf("test-%d", i), Start: at(float64(10 * i)), End: at(float64(10*i + 2))})
+	}
+	send := agentBroker("send-gap-7", agentPulsar, "SEND", at(73))
+	flow := agentBroker("flow-gap-7", agentPulsar, "FLOW", at(73.2))
+	if send.StatesLifetime() || flow.StatesLifetime() {
+		t.Fatal("precondition: the mocks state no lifetime")
+	}
+	if !models.IsCarryOver(send) || models.IsCarryOver(flow) {
+		t.Fatal("precondition: the SEND, and not the FLOW, is a carry-over mock")
+	}
+
+	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.ResetForReplaySession()
+	a := diskAgent(t, &mgrProxy{mm: mm}, send, flow)
+	call := func(p models.MockFilterParams) {
+		t.Helper()
+		p.StrictMockWindow = true
+		if err := a.UpdateMockParams(context.Background(), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	has := func(read func() ([]*models.Mock, error), name string) bool {
+		t.Helper()
+		got, err := read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range got {
+			if m != nil && m.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	call(models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now(), FirstRecordedTestStart: ws[0].Start, RecordedWindows: ws})
+	for i := 0; i <= 6; i++ {
+		call(models.MockFilterParams{AfterTime: ws[i].Start, BeforeTime: ws[i].End})
+		for _, n := range []string{send.Name, flow.Name} {
+			if has(mm.GetUnFilteredMocks, n) {
+				t.Errorf("%s: the session pool holds %s", ws[i].TestCase, n)
+			}
+		}
+		carried := has(mm.GetCarryOverMocks, send.Name)
+		switch {
+		case i < 6 && carried:
+			t.Errorf("%s: the carry-over tier holds the SEND before test-7's window", ws[i].TestCase)
+		case i == 6 && !carried:
+			t.Errorf("test-7: the carry-over tier does not hold the SEND")
+		}
+	}
+
+	sched := models.NewWindowSchedule(ws)
+	sw := pkg.ServeWindow{Start: ws[6].Start, End: ws[6].End, FirstStart: ws[0].Start, StrictWindow: true, Recorded: sched, Lookahead: true}
+	if from, ok := sched.GapBefore(sw.Start); ok {
+		sw.InFlightFrom = from
+	}
+	if got := pkg.ServeInWindow(send, false, sw); got != pkg.ServedReleased {
+		t.Errorf("pkg.ServeInWindow on the unanswered test-7's window: %d, want %d (released there)", got, pkg.ServedReleased)
 	}
 }
 

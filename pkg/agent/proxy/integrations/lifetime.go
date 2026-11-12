@@ -140,3 +140,29 @@ func WithoutKept(db MockMemDb, mocks []*models.Mock) []*models.Mock {
 	}
 	return out
 }
+
+// RepeatClaimer is the optional part of a RepeatKeeper that keeps a per-test
+// recording for its test's byte-identical repeats at the consume that serves
+// it first, whichever request that is, in one step: ClaimForRepeats keeps m
+// (KeptForRepeats then names it) and marks it used (MarkMockAsUsed: counted
+// as served, and left in its tier, so a repeat can be served it again). It
+// reports false, keeping nothing, when m is not the open test's own
+// (TestOwner) or is of an earlier set, and when a consume kept it already, so
+// only one request that does not repeat it is ever served it. Ownership and
+// the keep are decided under the lock a staging takes, and every staging
+// drops what was kept: a consume that straddles a test's end keeps nothing
+// for the next test.
+type RepeatClaimer interface {
+	ClaimForRepeats(m models.Mock) bool
+}
+
+// ClaimForRepeats is db's claim of m for its test's repeats (RepeatClaimer).
+// claims is false when db keeps no recording that way: the caller then
+// consumes m as any per-test recording is consumed, once.
+func ClaimForRepeats(db MockMemDb, m models.Mock) (claimed, claims bool) {
+	c, ok := db.(RepeatClaimer)
+	if !ok {
+		return false, false
+	}
+	return c.ClaimForRepeats(m), true
+}

@@ -19,18 +19,19 @@ on:
 # queued and 3 of the 4 runners sat idle. That constant group was a
 # band-aid for the fact that concurrent jobs collided on shared-VM
 # resources: the host-published keploy proxy port (-p 127.0.0.1:16789:16789,
-# which still allocates the host port and still collides), a
-# machine-wide keploy.exe kill that would abort a sibling's CLI, and the
-# shared docker-compose project name (network/volumes). (This lane
-# intercepts via a per-job eBPF keploy-agent container in the compose
-# network, not the host WinDivert driver, so driver coexistence is not
-# the concern here.)
+# which allocated the host port and collided; the agent container no
+# longer publishes it), a machine-wide keploy.exe kill that would abort a
+# sibling's CLI, and the shared docker-compose project name
+# (network/volumes). (This lane intercepts via a per-job eBPF
+# keploy-agent container in the compose network, not the host WinDivert
+# driver, so driver coexistence is not the concern here.)
 #
-# Those collisions are now removed at the source: every shared-VM
-# resource is made per-job unique and every kill is job-scoped (see
-# golang-docker-windows.ps1 and the "Recover stale runner state" step
-# below). With the collisions gone, serialization is pure waste, so it
-# is deleted — all 4 runners can now pick up jobs in parallel.
+# Those collisions are now removed at the source: the proxy-port publish
+# is gone, every other shared-VM resource is made per-job unique and
+# every kill is job-scoped (see golang-docker-windows.ps1 and the
+# "Recover stale runner state" step below). With the collisions gone,
+# serialization is pure waste, so it is deleted — all 4 runners can now
+# pick up jobs in parallel.
 #
 # Superseded-push cancellation is still handled one level up: the only
 # caller, prepare_and_run.yml, sets
@@ -227,7 +228,7 @@ jobs:
 
       - name: Download Replay Binary (${{ matrix.config.replay_src }})
         if: matrix.config.replay_src != matrix.config.record_src
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: ${{ matrix.config.replay_src }}
           path: replay-bin

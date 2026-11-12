@@ -47,6 +47,10 @@ func TestAnUnnamedOriginTravelsAndIsNeverPersisted(t *testing.T) {
 	if p := (&Origin{Unnamed: UnnamedPIDNamespace, PID: 7}).Persisted(); p != nil {
 		t.Fatalf("Persisted of an origin with only why = %+v; want none", p)
 	}
+	// A command line alone (no pid, no why) only travels too.
+	if p := (&Origin{Comm: "api", Exe: "./api", Cmdline: "./api --token <redacted>"}).Persisted(); p == nil || *p != (Origin{Comm: "api", Exe: "./api"}) {
+		t.Fatalf("Persisted of an origin with a command line alone = %+v; want its comm and exe", p)
+	}
 	named := &Origin{Clock: "c", Comm: "sqs", Exe: "./sqs"}
 	if named.Persisted() != named {
 		t.Fatal("Persisted copied an origin with nothing to drop")

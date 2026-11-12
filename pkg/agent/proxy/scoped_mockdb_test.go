@@ -466,6 +466,7 @@ func TestAViewOverAStoreThatCannotServeExactlyForwardsNothing(t *testing.T) {
 	view := &scopedMockDb{MockMemDb: &fakeMockDb{}}
 	require.False(t, integrations.ExactServing(view))
 	require.Nil(t, view.ConsumedTestMocks())
+	require.Nil(t, view.SkippedReadsAnswered())
 	require.Nil(t, view.ExactTakenCandidates(""))
 	_, ok := view.ClaimantOf("mock-1")
 	require.False(t, ok)

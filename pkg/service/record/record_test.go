@@ -491,6 +491,9 @@ type recTestDB struct {
 	// failNames fails only the named test cases, so a recording can
 	// persist some and lose others. Same construction-time rule.
 	failNames map[string]bool
+	// refuseNames refuses only the named test cases for their own payload, as
+	// the store refuses a body its format cannot hold.
+	refuseNames map[string]bool
 }
 
 func (d *recTestDB) GetAllTestSetIDs(context.Context) ([]string, error) { return nil, nil }
@@ -500,6 +503,9 @@ func (d *recTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ str
 	}
 	if d.failNames[tc.Name] {
 		return errors.New("no space left on device")
+	}
+	if d.refuseNames[tc.Name] {
+		return fmt.Errorf("%w: testdb: the response body is not valid UTF-8", models.ErrTestCaseEncode)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -519,9 +525,15 @@ type recMockDB struct {
 	mu          sync.Mutex
 	unencodable map[string]bool
 	inserted    []string
+	// gate, when set before the recording starts, holds the insert of each
+	// mock it names until its channel is closed: a save the test releases.
+	gate map[string]chan struct{}
 }
 
 func (d *recMockDB) InsertMock(_ context.Context, m *models.Mock, _ string) error {
+	if ch := d.gate[m.Name]; ch != nil {
+		<-ch
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.unencodable[m.Name] {
@@ -537,6 +549,8 @@ func (d *recMockDB) ResetCounterID()                                 {}
 type recMappingDB struct {
 	mu      sync.Mutex
 	batches []map[string][]models.MockEntry
+	// upserted, when set, is signalled (without blocking) after each batch.
+	upserted chan struct{}
 	// worker is the worker scope written last (UpsertWorker), and workers
 	// how many times it was.
 	worker  []models.MockEntry
@@ -561,6 +575,12 @@ func (d *recMappingDB) UpsertBatch(_ context.Context, _ string, byTest map[strin
 		cp[k] = append([]models.MockEntry(nil), v...)
 	}
 	d.batches = append(d.batches, cp)
+	if d.upserted != nil {
+		select {
+		case d.upserted <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -587,6 +607,9 @@ type recTelemetry struct {
 	sessionRecorded  bool
 	sessionStatus    string
 	sessionReason    string
+	// testsAndMocks counts RecordedTestAndMocks: the call says a test case
+	// was recorded, and only a stored one is.
+	testsAndMocks int
 }
 
 func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]int, metadata map[string]interface{}) {
@@ -598,7 +621,11 @@ func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]
 }
 func (tl *recTelemetry) RecordedTestCaseMock(string)  {}
 func (tl *recTelemetry) RecordedMocks(map[string]int) {}
-func (tl *recTelemetry) RecordedTestAndMocks()        {}
+func (tl *recTelemetry) RecordedTestAndMocks() {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	tl.testsAndMocks++
+}
 func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, status string, reason string) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
@@ -760,10 +787,10 @@ func TestStart_UnencodableMockIsSkippedAndItsTestRevoked(t *testing.T) {
 // for the one data-loss class this change deliberately does NOT revoke.
 //
 // A mock that never correlates leaves its test persisted with an incomplete
-// mock set. Not revoking it is a judgement call — a timeout is an inference,
-// not the known-drop fact — and the ONLY thing that makes that call defensible
-// is that the frequency becomes measurable. The motivating case is a
-// correlation timeout under parallelism with a perfectly healthy encoder, i.e.
+// mock set. Not revoking it is a judgement call — a mock that never came is an
+// inference, not the known-drop fact — and the ONLY thing that makes that call
+// defensible is that the frequency becomes measurable. The motivating case is
+// a mock the agent names but never sends, with a perfectly healthy encoder, i.e.
 // ZERO dropped mocks, so gating the counters behind the drop counter would
 // leave them invisible in exactly the recording they were added to measure.
 func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
@@ -833,12 +860,12 @@ func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
 		t.Fatal("Start did not return")
 	}
 
-	// Not revoked — the timeout is an inference, so the test still ships.
+	// Not revoked — a mock that never came is an inference, so the test still ships.
 	testDB.mu.Lock()
 	deleted := append([]string(nil), testDB.deleted...)
 	testDB.mu.Unlock()
 	assert.NotContains(t, deleted, "test-1",
-		"a correlation timeout revoked a test; that converts a latency event into data destruction")
+		"a mock that never came revoked a test; that converts a missing frame into data destruction")
 
 	tele.mu.Lock()
 	suite := tele.suite
@@ -860,7 +887,7 @@ func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
 // A capacity-dropped test is a prime candidate for also having an uncorrelated
 // mock, so counting it would inflate tests-short-pool with exactly the
 // population the metric claims to exclude. Since that metric's credibility is
-// the entire justification for not revoking on a correlation timeout, both
+// the entire justification for not revoking on a mock that never came, both
 // revoke paths have to be subtracted, which is why the totals are computed at
 // teardown instead of accumulated as mappings arrive.
 func TestStart_AgentRevokedTestIsNotCountedAsShortPool(t *testing.T) {
@@ -991,7 +1018,7 @@ func TestStart_AgentRevokedTestIsNotCountedAsShortPool(t *testing.T) {
 // The trap: AsyncRecorder sets info.Skip and returns BEFORE assigning
 // Spec.Async, so a skipped mock reports IsAsync()==false. Gating the marker on
 // mock.IsAsync() — the obvious thing to write — makes the guard a silent no-op,
-// and the skipped tempID then burns the full ~500ms correlation spin and is
+// and the skipped tempID then waits for a save that never comes and is
 // reported as an incomplete mock set on a healthy test. This test drives the
 // real hook rather than a fake so that trap cannot be re-introduced.
 func TestStart_HookSkippedMockIsExcludedFromMappings(t *testing.T) {
@@ -1002,14 +1029,6 @@ func TestStart_HookSkippedMockIsExcludedFromMappings(t *testing.T) {
 	}
 	testDB := &recTestDB{}
 	tele := &recTelemetry{}
-
-	// Force the BEST-EFFORT half (droppedMockSet's benign cache) to decline
-	// every entry, which is the steady state of a long poll-heavy recording.
-	// What remains is the unconditional asyncMockIDs marker — the correctness
-	// guarantee — and this test exists to prove it carries the load alone.
-	prevCap := maxLiveBenignMockIDs
-	maxLiveBenignMockIDs = 0
-	t.Cleanup(func() { maxLiveBenignMockIDs = prevCap })
 
 	r := &Recorder{
 		logger:          zap.NewNop(),

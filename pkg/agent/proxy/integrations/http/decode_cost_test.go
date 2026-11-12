@@ -214,7 +214,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 		bodyLen := int64(len(shapeBody("live")))
 		wantOnce(t, logs, "decodeHTTP debug logs for input", map[string]interface{}{
 			"method":       "POST",
-			"path":         "/u",
+			"path":         "/{}",
 			"header names": []interface{}{"Authorization", "Content-Length", "Content-Type", "Cookie", "Host"},
 			"body bytes":   bodyLen,
 		})
@@ -322,7 +322,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			// Every field, so one added beside these (a header of the
 			// answer, a value's first characters) fails the row too.
 			wantOnce(t, logs, msg, map[string]interface{}{
-				"metadata": map[string]string{"method": "POST", "host": "api.example", "path": "/u", "query keys": "token"},
+				"metadata": map[string]string{"method": "POST", "host": "api.example", "path": "/{}", "query keys": "token"},
 				"policy":   string(policy),
 			})
 			noValueLogged(t, logs, append(shapeValues("live"), "dep-an5wer", "dep-c00k1e"))
@@ -342,8 +342,8 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			t.Fatalf("decodeHTTP = %v", err)
 		}
 		pt := logs.FilterMessage("egress passthrough: serving without mock match").All()
-		if len(pt) != 1 || pt[0].ContextMap()["path"] != "/u" || !reflect.DeepEqual(metadataOf(pt[0]), reqMeta("/u")) {
-			t.Errorf("logged the passthrough as %v, want its path and the request's method, host, path and query keys", pt)
+		if len(pt) != 1 || pt[0].ContextMap()["path"] != "/{}" || !reflect.DeepEqual(metadataOf(pt[0]), reqMeta("/{}")) {
+			t.Errorf("logged the passthrough as %v, want its path shape and the request's method, host, path shape and query keys", pt)
 		}
 		noValueLogged(t, logs, shapeValues("live"))
 	})
@@ -357,7 +357,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			t.Fatalf("decodeHTTP = nil, want the body's decode error")
 		}
 		failed := logs.FilterMessage("failed to decode the http request body").All()
-		if len(failed) != 1 || failed[0].Level != zapcore.ErrorLevel || !reflect.DeepEqual(metadataOf(failed[0]), reqMeta("/u")) {
+		if len(failed) != 1 || failed[0].Level != zapcore.ErrorLevel || !reflect.DeepEqual(metadataOf(failed[0]), reqMeta("/{}")) {
 			t.Errorf("logged the failure as %v, want one error entry with the request's method, host, path and query keys", failed)
 		}
 		noValueLogged(t, logs, shapeValues("live"))
@@ -565,8 +565,8 @@ func TestAServedCallLogsItsDebugEntriesWithDebugOn(t *testing.T) {
 		t.Fatalf("served %q, want the mock's answer", got)
 	}
 	input := logs.FilterMessage("decodeHTTP debug logs for input").All()
-	if len(input) != 1 || input[0].ContextMap()["path"] != "/u" || input[0].ContextMap()["body bytes"] != int64(4) {
-		t.Errorf("logged the input as %v, want its path and body length", input)
+	if len(input) != 1 || input[0].ContextMap()["path"] != "/{}" || input[0].ContextMap()["body bytes"] != int64(4) {
+		t.Errorf("logged the input as %v, want its path shape and body length", input)
 	}
 	for _, msg := range []string{"header noise", "body noise", "url noise", "after matching the http request",
 		"mocks under consideration for match function", "http mock schema match results", "exact body match found"} {

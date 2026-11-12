@@ -3,126 +3,113 @@
 package log
 
 import (
-	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"syscall"
 )
 
-// oNoFollow makes an open of the log refuse a symlink at its name, and
-// oNonBlock keeps it from waiting forever on a named pipe planted there.
+// oNoFollow makes ReadLogFile's open refuse a symlink at the log's name, and
+// oNonBlock keeps it from waiting forever on a named pipe put there.
 const (
 	oNoFollow = syscall.O_NOFOLLOW
 	oNonBlock = syscall.O_NONBLOCK
 )
 
-// openLogFile opens LogFileName in the working directory for this run to
-// append to. A file there that is not safely this run's (see LogFileName) is
-// refused -- nil, and why -- and the run logs to the console; a log that
-// cannot be opened at all is an error, which New turns into a console-only
-// run too (a read-only directory must not fail the command).
-func openLogFile() (*os.File, string, error) {
-	const flags = os.O_APPEND | os.O_CREATE | os.O_WRONLY | oNoFollow | oNonBlock
-	// Created by this open, or already there: told by the open itself
-	// (O_EXCL), not by a look beforehand that a file appearing or going in
-	// between would make wrong.
-	f, err := os.OpenFile(LogFileName, flags|os.O_EXCL, logFileMode)
-	created := err == nil
-	if errors.Is(err, os.ErrExist) {
-		f, err = os.OpenFile(LogFileName, flags, logFileMode)
-	}
+// openClientLogFile opens path, the log the CLI that started this agent named
+// (ClientLogFileFlag), to append to. A root agent writes it, so it takes only
+// a file the user who started it could write anyway, each check made once:
+//   - the name is a regular file that already exists: nothing is created, and
+//     a link, a pipe or a device is not even opened, as opening some devices
+//     acts;
+//   - it is opened without following a link, which a name swapped since
+//     would be;
+//   - the file opened is a regular file and belongs to that user
+//     (invokingUID).
+func openClientLogFile(path string) (*os.File, error) {
+	want, err := invokingUID()
 	if err != nil {
-		switch {
-		case errors.Is(err, syscall.ELOOP):
-			return nil, "it is a symbolic link", nil
-		case errors.Is(err, syscall.ENXIO):
-			return nil, "it is a named pipe or a socket", nil
-		}
-		return nil, "", err
+		return nil, err
+	}
+	named, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("the CLI's log: %w", err)
+	}
+	if !named.Mode().IsRegular() {
+		return nil, fmt.Errorf("the CLI's log %s is not a regular file (%v)", path, named.Mode().Type())
+	}
+	f, err := openFile(path, os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
+	if err != nil {
+		return nil, fmt.Errorf("the CLI's log: %w", err)
 	}
 	fi, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, "", err
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("the CLI's log %s is not a regular file (%v)", path, fi.Mode().Type())
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		_ = f.Close()
-		return nil, "cannot tell who owns it", nil
-	}
-	switch {
-	case !fi.Mode().IsRegular():
-		_ = f.Close()
-		return nil, "it is not a regular file", nil
-	case uint64(st.Nlink) != 1:
-		_ = f.Close()
-		return nil, fmt.Sprintf("it has %d hard links, so it is also some other file", st.Nlink), nil
-	case !mayKeepLog(st.Uid):
-		_ = f.Close()
-		return nil, fmt.Sprintf("it belongs to another user (uid %d); remove it to keep a log here", st.Uid), nil
-	}
-	if created && os.Geteuid() == 0 {
-		// Root made it: it is the log of whoever root runs for, so a later run
-		// of theirs, without sudo, can write it too.
-		if uid, gid, ok := logOwnerForRoot(); ok {
-			_ = f.Chown(uid, gid)
+	if err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); !ok {
+			err = fmt.Errorf("the CLI's log %s: no owner to check", path)
+		} else if st.Uid != want {
+			err = fmt.Errorf("the CLI's log %s belongs to uid %d, not to the user that started this agent (uid %d)", path, st.Uid, want)
 		}
 	}
-	// A log an older keploy left 0777 is narrowed, through the open file,
-	// never by name; one already stricter than logFileMode is left as it is.
-	if perm := fi.Mode().Perm(); perm&^logFileMode != 0 {
-		_ = f.Chmod(perm & logFileMode)
-	}
-	return f, "", nil
-}
-
-// mayKeepLog reports whether a log owned by uid is this run's to write: the
-// user running keploy's, the user who ran sudo's, or the directory owner's.
-func mayKeepLog(uid uint32) bool {
-	if int(uid) == os.Geteuid() {
-		return true
-	}
-	if os.Geteuid() == 0 {
-		if sudoUID, _, ok := sudoInvoker(); ok && uid == uint32(sudoUID) {
-			return true
-		}
-	}
-	dirUID, _, ok := dirOwner()
-	return ok && uid == uint32(dirUID)
-}
-
-// logOwnerForRoot is who a log root creates should belong to: the user who
-// ran sudo, or else the owner of the directory when that is not root.
-func logOwnerForRoot() (uid, gid int, ok bool) {
-	if uid, gid, ok := sudoInvoker(); ok {
-		return uid, gid, true
-	}
-	if uid, gid, ok := dirOwner(); ok && uid != 0 {
-		return uid, gid, true
-	}
-	return 0, 0, false
-}
-
-// sudoInvoker is the user who ran sudo, from the variables sudo sets.
-func sudoInvoker() (uid, gid int, ok bool) {
-	u, uerr := strconv.Atoi(os.Getenv("SUDO_UID"))
-	g, gerr := strconv.Atoi(os.Getenv("SUDO_GID"))
-	if uerr != nil || gerr != nil || u < 0 || g < 0 {
-		return 0, 0, false
-	}
-	return u, g, true
-}
-
-// dirOwner is the owner of the working directory.
-func dirOwner() (uid, gid int, ok bool) {
-	fi, err := os.Stat(".")
 	if err != nil {
-		return 0, 0, false
+		_ = f.Close()
+		return nil, err
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, 0, false
+	return f, nil
+}
+
+// invokingUID is the user that started this agent: the one sudo ran it for
+// (SUDO_UID), else the agent's own, which is the CLI's when no sudo stands
+// between them.
+func invokingUID() (uint32, error) {
+	s := os.Getenv("SUDO_UID")
+	if s == "" {
+		return uint32(os.Getuid()), nil
 	}
-	return int(st.Uid), int(st.Gid), true
+	uid, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("SUDO_UID %q is not a uid: %w", s, err)
+	}
+	return uint32(uid), nil
+}
+
+// chownFile is (*os.File).Chown, fchown(2) on the descriptor; a test swaps in
+// one that records the call.
+var chownFile = (*os.File).Chown
+
+// giveLogToSudoUser hands f, a log this run has just created, to the user sudo
+// ran keploy for (SUDO_UID, and SUDO_GID's group where it is set), so the log
+// the run names is that user's to read, and the native agent, which appends
+// only to that user's file (openClientLogFile), appends to it: one run, one
+// file. It changes the descriptor's file, never a name, which a link swapped
+// in could send elsewhere; mode 0600 stays. Without SUDO_UID the file is
+// already the user's, and nothing is changed.
+func giveLogToSudoUser(f *os.File) error {
+	s := os.Getenv("SUDO_UID")
+	if s == "" {
+		return nil
+	}
+	uid, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return fmt.Errorf("SUDO_UID %q is not a uid: %w", s, err)
+	}
+	// Chown takes an int, which is 32 bits on 386 and arm, and systemd tells
+	// distributions to avoid ids from 2^31 up, since tools read uid_t as
+	// signed. So keploy hands a log only to a uid below 2^31, the same on
+	// every arch. That also refuses 4294967295, which fchown reads as -1,
+	// "keep the owner": the log would stay root's with nothing said.
+	if uid > math.MaxInt32 {
+		return fmt.Errorf("SUDO_UID %d is past the largest uid keploy hands a file to (%d)", uid, math.MaxInt32)
+	}
+	gid := -1
+	if g, err := strconv.ParseUint(os.Getenv("SUDO_GID"), 10, 32); err == nil && g <= math.MaxInt32 {
+		gid = int(g)
+	}
+	if err := chownFile(f, int(uid), gid); err != nil {
+		return fmt.Errorf("giving %s to uid %d: %w", f.Name(), uid, err)
+	}
+	return nil
 }

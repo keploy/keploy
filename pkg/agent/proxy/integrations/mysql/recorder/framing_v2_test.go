@@ -370,7 +370,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(ctx, logger, h.sess) }()
+	go func() { done <- recordV2NoPanic(t, ctx, logger, h.sess) }()
 
 	var pushers sync.WaitGroup
 	pushers.Add(2)
@@ -929,7 +929,7 @@ func (j *joinedMidStream) exchange(command []byte, reply [][]byte) {
 func (j *joinedMidStream) run(t *testing.T) ([]*models.Mock, error) {
 	t.Helper()
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(j.ctx, j.h.logger, j.h.sess) }()
+	go func() { done <- recordV2NoPanic(t, j.ctx, j.h.logger, j.h.sess) }()
 	j.h.closeStreams()
 	var err error
 	select {
@@ -1273,7 +1273,7 @@ func TestRecordV2_PostTLS_APrepareWaitingToSettleIsNotPendingWork(t *testing.T) 
 	// what came before the PREPARE.
 	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(j.ctx, j.h.logger, j.h.sess) }()
+	go func() { done <- recordV2NoPanic(t, j.ctx, j.h.logger, j.h.sess) }()
 	if !waitFor(func() bool { return cleared.Load() >= 2 }) {
 		t.Fatalf("pending work cleared %d times after the config mock and SELECT 1, want 2", cleared.Load())
 	}
@@ -1321,7 +1321,7 @@ func TestRecordV2_PostTLS_CommandsAfterAnUnsettledPrepareAreRead(t *testing.T) {
 				cleared.Add(1)
 			}
 			done := make(chan error, 1)
-			go func() { done <- RecordV2(j.ctx, j.h.logger, j.h.sess) }()
+			go func() { done <- recordV2NoPanic(t, j.ctx, j.h.logger, j.h.sess) }()
 			j.exchange(prepare, prepareOK(c.deprecateEOF, [][]byte{def, def}, nil))
 			// The config mock, and the PREPARE read whole.
 			read := waitFor(func() bool { return cleared.Load() >= 2 })
@@ -1401,7 +1401,7 @@ func TestRecordV2_PostTLS_AnUnsettledPrepareIsLeftOutWhenTheRecordingStops(t *te
 		j.h.pushDest(p, j.at())
 	}
 	done := make(chan error, 1)
-	go func() { done <- RecordV2(ctx, j.h.logger, j.h.sess) }()
+	go func() { done <- recordV2NoPanic(t, ctx, j.h.logger, j.h.sess) }()
 	// The config mock, and the PREPARE read whole.
 	read := waitFor(func() bool { return cleared.Load() >= 2 })
 	cancel()
@@ -1707,7 +1707,7 @@ func recordBuffered(t *testing.T, xs []exchange) buffered {
 	h.closeStreams()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	b.err = RecordV2(ctx, h.logger, h.sess)
+	b.err = recordV2NoPanic(t, ctx, h.logger, h.sess)
 	return b
 }
 
@@ -1835,7 +1835,7 @@ func recordFramed(t *testing.T, deprecateEOF bool, push func(h *v2Harness, at fu
 	h.closeStreams()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	err = RecordV2(ctx, h.logger, h.sess)
+	err = recordV2NoPanic(t, ctx, h.logger, h.sess)
 	var mocks []*models.Mock
 	for {
 		select {
@@ -1991,7 +1991,7 @@ func TestRecordV2_ACursorsFetchesAreFramedAndLeftOut(t *testing.T) {
 			if rs == nil || len(rs.Columns) != c.cols || len(rs.Rows) != 0 {
 				t.Fatalf("the EXECUTE recorded %s, want %d columns and no rows", describeBinary(rs), c.cols)
 			}
-			replayed, err := query.EncodeBinaryResultSet(context.Background(), zap.NewNop(), rs)
+			replayed, err := query.EncodeBinaryResultSet(context.Background(), zap.NewNop(), rs, 0)
 			if err != nil {
 				t.Fatal(err)
 			}

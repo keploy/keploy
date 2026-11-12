@@ -374,6 +374,12 @@ func TestDiskMocks_ResidentBounded(t *testing.T) {
 		if !m.HasSpilledResponse() {
 			t.Fatalf("mock %s should carry a lazy response hydrator", m.Name)
 		}
+		// The store counts the bytes it keeps the mock in, its parked body
+		// with them, before the body is read back (the learn step's
+		// readers reserve by them).
+		if m.StoredSize() < int64(bodyBytes) {
+			t.Fatalf("mock %s is counted as %d bytes in the store: want its record and its parked %d-byte body", m.Name, m.StoredSize(), bodyBytes)
+		}
 	}
 	residentWithWindow := int64(heapInUse()) - int64(baseline)
 	runtime.KeepAlive(win)

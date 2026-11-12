@@ -153,7 +153,7 @@ func TestRecordV2_AFramingLossFoundAsTheRecordingStopsIsNotWarnedOf(t *testing.T
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := RecordV2(ctx, logger, h.sess); !errors.Is(err, ErrFramingLost) {
+			if err := recordV2NoPanic(t, ctx, logger, h.sess); !errors.Is(err, ErrFramingLost) {
 				t.Fatalf("RecordV2 = %v, want ErrFramingLost", err)
 			}
 

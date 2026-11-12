@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-start-wait.sh"
 
 # E2E test for MySQL dual-connection handshake matching.
 #
@@ -50,6 +51,7 @@ wait_for_app() {
     sleep 1
   done
   echo "::error::App did not start in time"
+  save_keploy_start_evidence
   endsec; return 1
 }
 
@@ -161,6 +163,9 @@ do_record_iteration() {
     > "${app_name}.txt" 2>&1 &
   local KEPLOY_PID=$!
 
+  # The app starts once keploy's agent is ready: its wait, with its full
+  # budget, starts there (keploy-start-wait.sh).
+  await_agent_ready "${app_name}.txt" "$KEPLOY_PID" || exit 1
   send_request "$KEPLOY_PID"
 
   set +e
@@ -255,7 +260,7 @@ else
 
     # The exact corruptions this bug produced for a column holding 9.99.
     if grep -qE '1\.0926057e\+09|4\.621813488089437e\+18' "$mf"; then
-      grep -nE '1\.0926057e\+09|4\.621813488089437e\+18' "$mf" | head -10
+      grep -nE '1\.0926057e\+09|4\.621813488089437e\+18' "$mf" | sed -n 1,10p
       guard_fail "keploy#4426 regression in $mf: a FLOAT/DOUBLE column was recorded as its IEEE-754 bit pattern"
     fi
 
@@ -275,7 +280,7 @@ else
     # set, whose values are length-encoded strings — that path never touches
     # the binary decode this guard exists to protect.
     if ! grep -qE '(value: 9\.99$|"value": ?9\.99)' "$mf"; then
-      grep -nE '"?name"?: ?"?(price_f|ratio_d)"?' -A 1 "$mf" | head -20
+      grep -nE '"?name"?: ?"?(price_f|ratio_d)"?' -A 1 "$mf" | sed -n 1,20p
       guard_fail "keploy#4426 guard: no unquoted 9.99 in $mf — a quoted \"9.99\" means a TEXT result set, which does not exercise the binary decode path"
     fi
 
@@ -284,7 +289,7 @@ else
     # same number (18446744073709551615 -> 18446744073709552000, or
     # -9223372036854775808 once that float is narrowed to an integer).
     if ! grep -q '18446744073709551615' "$mf"; then
-      grep -nE '"?name"?: ?"?big_u"?' -A 1 "$mf" | head -20
+      grep -nE '"?name"?: ?"?big_u"?' -A 1 "$mf" | sed -n 1,20p
       guard_fail "keploy#4426 guard: BIGINT UNSIGNED max lost precision in $mf"
     fi
   done
@@ -355,7 +360,7 @@ fi
 section "Guard: system-variable matcher (keploy#4372)"
 if grep -qi "Could not map transaction isolation" test_logs.txt 2>/dev/null; then
   echo "::error::keploy#4372 regression: 'Could not map transaction isolation' in replay log — a system-variable read was cross-served the wrong mock"
-  grep -i "Could not map transaction isolation" test_logs.txt | head -5
+  grep -i "Could not map transaction isolation" test_logs.txt | sed -n 1,5p
   exit 1
 fi
 echo "OK: no transaction-isolation cross-match marker in replay log."

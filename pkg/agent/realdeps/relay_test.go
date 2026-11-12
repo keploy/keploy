@@ -527,13 +527,13 @@ func TestAPooledRelayReachesItsDestinationInEveryRead(t *testing.T) {
 	app, client := tcpPair(t)
 	dest, server := tcpPair(t)
 	tr := newTracker()
-	tr.Dialed(1, "db:5432", true)
+	tr.Dialed(Origin{}, 1, "db:5432", true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		done <- (&Relay{Client: client, In: bufio.NewReaderSize(client, ReaderSize), Dest: dest,
-			Sent:     func(int) { tr.Sent(1, "db:5432") },
+			Sent:     func(int) { tr.Sent(Origin{}, 1, "db:5432") },
 			Answered: func() { tr.Answered("db:5432") }}).Run(ctx)
 	}()
 	exchange := func() {

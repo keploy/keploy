@@ -34,6 +34,39 @@ type AppClockReader interface {
 	AppClock(real time.Time) (time.Time, bool)
 }
 
+// AppClockRunReader is an optional AgentHooks capability, beside
+// AppClockReader: AppClockRunBegan is the real instant from which the app's
+// clock has run as one to the real instant real, as the hooks moved it: the
+// end of the last move they wrote at or before real (the first instant
+// AppClock reads the moved clock at), told from the moves they made, false
+// where AppClock(real) is. The agent hands it to the proxy
+// (coreAgent.AppClockRunSetter): a test's first call, whose span on the
+// app's clock would otherwise start at the previous test's last serve,
+// before the test's begin moved the clock, and so be none, starts its span
+// at the move. Hooks without it leave that call with no span, and a replay
+// refuses its learned clock reads; and a span from the previous serve is
+// then read at its two ends, which takes a stretch the clock left and came
+// back to the same offset by (a real test, a frozen one, a real one) for
+// one run, and passes a read made before it: hooks that move the clock
+// should tell it. Where AppClock(real) is known it must tell it too; a
+// false there gives the call no span.
+type AppClockRunReader interface {
+	AppClockRunBegan(real time.Time) (time.Time, bool)
+}
+
+// BackgroundClockReader is an optional AgentHooks capability, for the
+// check that a call no recording answered is one more run of the set's
+// background work with the proven switch off (learn.CallSpanOf):
+// BackgroundAppClock is the instant the app's clock showed at the real
+// instant real, told only where the hooks know no clock of theirs is moved
+// in the run, so the app reads the real one; false otherwise (a moved
+// clock's runs are not told with the switch off, so no span is read on
+// it). The agent hands it to the proxy (coreAgent.BackgroundClockSetter);
+// the learn step reads nothing of it.
+type BackgroundClockReader interface {
+	BackgroundAppClock(real time.Time) (time.Time, bool)
+}
+
 type AgentHook struct{}
 
 func (n *AgentHook) BeforeSimulate(ctx context.Context, t time.Time, testSetID string, tcName string) error {

@@ -58,6 +58,26 @@ env:
 
 jobs:
   # ---------------------------------------------------------------
+  # keploy/integrations' tests against the tagged tree, with KEPLOY_PROVEN
+  # unset and set (integrations-tests.yml, against INTEGRATION_REF as the
+  # builds below are). It runs beside the builds; release (the binaries) and
+  # build-docker (the images) wait for it, so a tag whose tree fails
+  # integrations' tests publishes neither. Once integrations is fixed, re-run
+  # the failed jobs (`gh run rerun <run> --failed`) within a day, while the
+  # builds' artifacts last (retention-days: 1): it tests integrations' ref
+  # again and publishes. After a day, re-run all jobs.
+  # ---------------------------------------------------------------
+  integrations-tests:
+    uses: ./.github/workflows/integrations-tests.yml
+    # What integrations-tests.yml asks for; the workflow's contents: write is
+    # not passed on.
+    permissions:
+      contents: read
+      pull-requests: read
+    secrets:
+      INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
+  # ---------------------------------------------------------------
   # Linux native builds (amd64 + arm64).
   #
   # Produces TWO binaries per arch:
@@ -402,7 +422,7 @@ jobs:
     # The longest healthy job in this repo runs ~32 min, so this is ~2x
     # headroom and cannot trip a job that is merely slow.
     timeout-minutes: 60
-    needs: [build-linux, build-darwin, build-windows]
+    needs: [build-linux, build-darwin, build-windows, integrations-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -412,25 +432,25 @@ jobs:
           fetch-depth: 0
 
       - name: Download linux amd64 archive
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: release-archive-linux-amd64
           path: release-assets
 
       - name: Download linux arm64 archive
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: release-archive-linux-arm64
           path: release-assets
 
       - name: Download darwin archive
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: release-archive-darwin-arm64
           path: release-assets
 
       - name: Download windows binary
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: release-archive-windows-amd64
           path: release-assets
@@ -497,7 +517,7 @@ jobs:
     # The longest healthy job in this repo runs ~32 min, so this is ~2x
     # headroom and cannot trip a job that is merely slow.
     timeout-minutes: 60
-    needs: build-linux
+    needs: [build-linux, integrations-tests]
     strategy:
       fail-fast: true
       matrix:
@@ -537,7 +557,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
 
       - name: Download prebuilt binary
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/download-artifact-retry
         with:
           name: ${{ matrix.artifact }}
           path: dist/keploy-linux-${{ matrix.arch }}
@@ -606,8 +626,16 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
 
+      # The download is this repo's own action, which is read from the
+      # checkout; nothing else here needs one.
+      - name: Checkout the repository's actions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          persist-credentials: false
+
       - name: Download per-arch digests
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/download-artifact-retry
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*

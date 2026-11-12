@@ -367,7 +367,9 @@ func TestIngressAnswersAnUploadTheAppTurnsDownWithoutItsBody(t *testing.T) {
 		for _, path := range []string{"/refuse", "/refuse-after-hints"} {
 			t.Run(mode+path, func(t *testing.T) {
 				core, logs := observer.New(zap.WarnLevel)
-				client, done, recorded := interimIngressLogged(t, mode, app, zap.New(core))
+				pm, ctx, recorded := interimManager(t, mode, zap.New(core))
+				client, done := ingressPipeOn(t, ctx, pm, app, make(chan struct{}, 1), nil)
+				_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
 				if _, err := io.WriteString(client, "POST "+path+" HTTP/1.1\r\nHost: app.local\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\n"); err != nil {
 					t.Fatal(err)
 				}
@@ -400,6 +402,11 @@ func TestIngressAnswersAnUploadTheAppTurnsDownWithoutItsBody(t *testing.T) {
 				warned := logs.FilterMessageSnippet("Not recording this request as a test case").FilterField(zap.Int("status_code", http.StatusExpectationFailed))
 				if warned.Len() != 1 {
 					t.Fatalf("logged %v, want one warning that the exchange is not recorded and why", logs.All())
+				}
+				// A request cut short, with no pause, is not the memory
+				// guard's: it is not counted as one the pause cost.
+				if got := syncMock.FromContext(ctx).NotRecordedUnderPressure(); got.Total != 0 {
+					t.Fatalf("a request cut short with no pause was counted %d time(s) as not recorded under pressure, want 0", got.Total)
 				}
 			})
 		}

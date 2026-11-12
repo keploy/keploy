@@ -12,7 +12,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -64,65 +63,58 @@ func tcpOwner(self, peer netip.AddrPort) (int, error) {
 		if err != nil {
 			continue
 		}
-		pid, err := strconv.Atoi(strings.SplitN(filepath.ToSlash(rel), "/", 2)[0])
+		name := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+		pid, err := pidOf(name)
 		if err != nil {
-			continue
+			// A holder whose name is no process ID could be the caller
+			// itself: taking another holder for it would hand the run to
+			// the wrong process, and reading no holder would hide why the
+			// caller is unknown.
+			return 0, fmt.Errorf("the socket %s -> %s (inode %s) is held by %s, which is not a process ID: %w", self, peer, inode, filepath.Join(procRoot, name), err)
 		}
 		holders[pid] = true
 	}
 	if len(holders) == 0 {
 		return 0, fmt.Errorf("no process holds the socket %s -> %s (inode %s)", self, peer, inode)
 	}
-	// A child the caller is starting (between its fork and its exec) holds
-	// a copy of the caller's socket for a moment: the holder every other one
-	// descends from is the caller. A socket processes share otherwise
-	// (passed, or inherited by a child that kept it) names no one caller.
-	for pid := range holders {
-		all := true
-		for other := range holders {
-			if other != pid && !descendsFrom(other, pid) {
-				all = false
-				break
-			}
-		}
-		if all {
-			return pid, nil
-		}
-	}
-	pids := make([]int, 0, len(holders))
-	for pid := range holders {
-		pids = append(pids, pid)
-	}
-	sort.Ints(pids)
-	return 0, fmt.Errorf("the socket %s -> %s is held by processes %v", self, peer, pids)
+	return soleHolder(self, peer, holders, procParent)
 }
 
-// descendsFrom reports whether pid is a descendant of ancestor, from the
-// parent chain in procRoot.
-func descendsFrom(pid, ancestor int) bool {
-	for i := 0; i < 64 && pid > 1; i++ {
-		raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
-		if err != nil {
-			return false
-		}
-		i := strings.LastIndexByte(string(raw), ')')
-		if i < 0 {
-			return false
-		}
-		f := strings.Fields(string(raw[i+1:]))
-		if len(f) < 2 {
-			return false
-		}
-		ppid, err := strconv.Atoi(f[1])
-		if err != nil {
-			return false
-		}
-		if ppid == ancestor {
-			return true
-		}
-		pid = ppid
+// pidOf reads a /proc directory's name as the process ID it is: a pid_t,
+// a positive 32-bit signed integer. Parsed at 32 bits, it fits the agent's
+// int and the u32 TGID the instance stamp keys on, so no later conversion
+// can truncate it; a name outside that range is no process, never one whose
+// low bits name another.
+func pidOf(name string) (int, error) {
+	v, err := strconv.ParseInt(name, 10, 32)
+	if err != nil {
+		return 0, err
 	}
-	return false
+	if v <= 0 || strconv.FormatInt(v, 10) != name {
+		return 0, fmt.Errorf("%q is not a process ID as the kernel writes one", name)
+	}
+	return int(v), nil
+}
+
+// procParent is pid's parent, from its stat in procRoot.
+func procParent(pid int) (int, bool) {
+	raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0, false
+	}
+	i := strings.LastIndexByte(string(raw), ')')
+	if i < 0 {
+		return 0, false
+	}
+	f := strings.Fields(string(raw[i+1:]))
+	if len(f) < 2 {
+		return 0, false
+	}
+	ppid, err := strconv.Atoi(f[1])
+	if err != nil {
+		return 0, false
+	}
+	return ppid, true
 }
 
 // tcpInode is the inode of the TCP socket bound to self and connected to peer,
@@ -187,9 +179,4 @@ func procAddrPort(s string) (netip.AddrPort, bool) {
 		return netip.AddrPort{}, false
 	}
 	return netip.AddrPortFrom(addr, uint16(port)), true
-}
-
-// sameEndpoint compares two endpoints with IPv4-mapped IPv6 read as IPv4.
-func sameEndpoint(a, b netip.AddrPort) bool {
-	return a.Port() == b.Port() && a.Addr().Unmap() == b.Addr().Unmap()
 }

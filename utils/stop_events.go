@@ -22,3 +22,7 @@ const (
 // app's exit offers to kill it at the user's next Ctrl+C (StopNowNotice), as
 // the stop of the daemons an app leaves behind does. A test sets it shorter.
 var StopOffer = 5 * time.Second
+
+// OfferKillNow is a stop's offer to end at the user's next Ctrl+C while it
+// waits for the app's processes: the press kills them.
+const OfferKillNow = "keploy waits for the application to stop, as long as it makes progress on its way out; press Ctrl+C again to kill it now"

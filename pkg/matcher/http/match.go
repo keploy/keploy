@@ -247,7 +247,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			// Mark body as passing when compareAll is false and body is not JSON
 		} else if !skipBody {
 			bodyActuallyCompared = true
-			if tc.HTTPResp.Body != actualResponse.Body {
+			// A body that is a presigned URL is compared but for its
+			// signature and session token (matcher presigned.go).
+			if tc.HTTPResp.Body != actualResponse.Body && !matcherUtils.SamePresignedSigV4(tc.HTTPResp.Body, actualResponse.Body) {
 				pass = false
 			}
 		}
@@ -273,6 +275,11 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	headersMatched := matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise)
 	res.HeadersResult = *hRes
 	if !headersMatched {
+		// A header keploy.yml's noise lets vary only within patterns, a
+		// side's value outside them: why it is compared, legibly.
+		for _, why := range matcherUtils.HeaderPatternWhys(*hRes, headerNoise) {
+			logger.Warn("a keploy.yml noise pattern does not excuse a field", zap.String("testCase", tc.Name), zap.String("reason", why))
+		}
 
 		// Forgive a VALUE difference on a header the server mints fresh per call.
 		//

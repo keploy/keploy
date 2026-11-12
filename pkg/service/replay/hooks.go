@@ -100,7 +100,44 @@ func (h *Hooks) beforeSimulate(ctx context.Context, tc *models.TestCase, at *tim
 	return nil
 }
 
+// runLifeKey keys, in a test set's context, its run's own context
+// (withRunLife).
+type runLifeKey struct{}
+
+// withRunLife marks set, a test set's context, with run, the context of the
+// run it is part of, for the agent's hooks a test case calls
+// (agentHookContext).
+func withRunLife(set, run context.Context) context.Context {
+	return context.WithValue(set, runLifeKey{}, run)
+}
+
+// agentHookContext is what SimulateRequest calls the agent's hooks on: the
+// run's context when ctx is a test set's (withRunLife), and ctx otherwise.
+// The set's context is cancelled at any instant: when the set's app exits
+// (its watcher) or a test loop fails. A hook the agent answers with no body
+// can still be waiting for that answer after the client has put its
+// connection back in the pool (net/http, golang/go#82547); a cancel then
+// closes the connection under the next request, which took it, and keploy's
+// next read of the agent fails with the hook's cancel, on a context nothing
+// cancelled ("failed to get scope windows ...: context canceled"). A set's
+// app exiting does not cancel the run's context. What does: the user's stop,
+// the run's teardown, and a failure on the run's errgroup (Start). That is
+// the agent's unexpected exit, which ends a hook anyway (callHook), or, when
+// the app is kept alive across sets (--keep-app-alive, or docker compose with
+// mocks), the app's failure. That last one cuts hooks at any instant again,
+// but the run then fails on the app's error, so no verdict rests on them.
+// The test's own request stays on ctx: the app's exit ends it.
+func agentHookContext(ctx context.Context) context.Context {
+	if run, ok := ctx.Value(runLifeKey{}).(context.Context); ok {
+		return run
+	}
+	return ctx
+}
+
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
+	// The agent's hooks are keploy's own calls, on the run's context
+	// (agentHookContext); the request to the app is on ctx.
+	hookCtx := agentHookContext(ctx)
 
 	// Extract URL replacements and port mappings: merge global + per-test-set
 	// (test-set level overrides global for same key)
@@ -108,7 +145,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 	switch tc.Kind {
 	case models.HTTP:
-		if err := h.beforeSimulate(ctx, tc, &tc.HTTPReq.Timestamp, testSetID); err != nil {
+		if err := h.beforeSimulate(hookCtx, tc, &tc.HTTPReq.Timestamp, testSetID); err != nil {
 			return nil, err
 		}
 
@@ -157,7 +194,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			h.logger.Debug("Simulating HTTP streaming request", zap.Any("Test case", tc.Name))
 			resp, err := pkg.SimulateHTTPStreaming(ctx, tc, testSetID, h.logger, cfg)
 
-			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
+			if afterErr := h.instrumentation.AfterSimulate(hookCtx, tc.Name, testSetID); afterErr != nil {
 				utils.LogError(h.logger, afterErr, "failed to call AfterSimulate hook")
 			}
 
@@ -167,14 +204,14 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
-		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
+		if err := h.instrumentation.AfterSimulate(hookCtx, tc.Name, testSetID); err != nil {
 			utils.LogError(h.logger, err, "failed to call AfterSimulate hook")
 		}
 
 		return resp, err
 	case models.GRPC_EXPORT:
 
-		if err := h.beforeSimulate(ctx, tc, &tc.GrpcReq.Timestamp, testSetID); err != nil {
+		if err := h.beforeSimulate(hookCtx, tc, &tc.GrpcReq.Timestamp, testSetID); err != nil {
 			return nil, err
 		}
 
@@ -216,7 +253,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			PublishedPort:       publishedPortsOf(h.logger, h.instrumentation).of(testSetID),
 		})
 
-		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
+		if err := h.instrumentation.AfterSimulate(hookCtx, tc.Name, testSetID); err != nil {
 			utils.LogError(h.logger, err, "failed to call AfterSimulate hook")
 		}
 
@@ -427,6 +464,15 @@ func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs [
 	}
 
 	if err := h.instrumentation.AfterTestRun(ctx, testRunID, testSetIDs, coverage); err != nil {
+		// Under the proven switch the agent's end of the run is part of the
+		// run's checks: an enterprise agent refuses it when it could not
+		// write the row of a program it saw off the run's clock. The error
+		// is the caller's (models.AgentRunUnfinishedError), so that it does
+		// not judge the run on checks the agent did not finish; the caller
+		// logs it.
+		if provenswitch.On() {
+			return models.AgentRunUnfinished(ctx, err)
+		}
 		utils.LogError(h.logger, err, "failed to call AfterTestRun hook")
 	}
 	return nil

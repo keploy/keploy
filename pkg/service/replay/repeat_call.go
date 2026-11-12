@@ -329,14 +329,21 @@ func earlierConsumer(tests []string, test string) string {
 func repeatLine(test string, c *models.UnmatchedCall) string {
 	n := c.Repeat
 	by := n.Test
-	if by == "" {
+	switch {
+	case n.OutsideTests:
+		by = "a call outside every test"
+	case by == "":
 		by = "an earlier test"
 	}
 	when := "earlier"
 	if n.ReplayGapFromStart {
 		when = "before this test began"
 	}
-	line := fmt.Sprintf("%s: %s repeats %s, answered for %s %.2fs %s at replay", test, c.ActualSummary, n.Mock, by, n.ReplayGapSeconds, when)
+	mock := n.Mock
+	if n.Background != "" {
+		mock += " (" + n.Background + ")"
+	}
+	line := fmt.Sprintf("%s: %s repeats %s, answered for %s %.2fs %s at replay", test, c.Named(), mock, by, n.ReplayGapSeconds, when)
 	if n.RecordGapKnown {
 		line += fmt.Sprintf(", %.2fs after %s at record", n.RecordGapSeconds, n.RecordedLast)
 	}

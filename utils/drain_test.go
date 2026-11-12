@@ -99,6 +99,7 @@ func TestDrainErrGroupStatusTimeoutReportsTimedOut(t *testing.T) {
 func TestADrainWaitsForAnAgentStopInProgress(t *testing.T) {
 	for _, progressDrain := range []bool{false, true} {
 		end := BeginAgentStop()
+		t.Cleanup(end) // a failed row leaves no stop in progress to hold later ones
 		var g errgroup.Group
 		release := make(chan struct{})
 		g.Go(func() error { <-release; return nil }) // the stop goroutine
@@ -157,6 +158,7 @@ func TestAwaitAgentExit(t *testing.T) {
 	}
 
 	end := BeginAgentStop()
+	t.Cleanup(end) // a failed row leaves no stop in progress to hold later ones
 	gone := make(chan struct{})
 	returned := make(chan bool, 1)
 	go func() { returned <- AwaitAgentExit(gone, time.Millisecond, nil) }()

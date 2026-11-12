@@ -3,8 +3,19 @@
 package utils
 
 import (
+	"context"
+	"errors"
 	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"syscall"
 	"testing"
+	"unicode/utf8"
+
+	keployLog "go.keploy.io/server/v3/utils/log"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestIsCloudReplayCmd(t *testing.T) {
@@ -171,5 +182,282 @@ func TestShouldReexecWithSudo_NotForDockerStart(t *testing.T) {
 	os.Args = []string{"keploy", "record", "-c", "docker run --name app img"}
 	if !ShouldReexecWithSudo() {
 		t.Error("ShouldReexecWithSudo() = false for docker run")
+	}
+}
+
+// The run goes on in the process the sudo exec starts, which keeps a log of
+// its own. This process's log, a temp file, is gone by the exec: nothing would
+// be left to remove it, one log left in the temp directory per Docker or cloud
+// replay run that re-executes itself with sudo.
+func TestReexecWithSudo_RemovesThisProcesssLogBeforeTheExec(t *testing.T) {
+	bin := t.TempDir()
+	sudo := filepath.Join(bin, "sudo")
+	if err := os.WriteFile(sudo, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("TMPDIR", t.TempDir())
+	_, f, err := keployLog.New()
+	if err != nil || f == nil {
+		t.Fatalf("log.New = %v, %v; want a log file", f, err)
+	}
+	t.Cleanup(func() {
+		_ = keployLog.CloseLogFile(f)
+		keployLog.TestOnlyResetSink()
+	})
+	prevLog := LogFile
+	LogFile = f
+	t.Cleanup(func() { LogFile = prevLog })
+
+	execed, leftBehind := "", true
+	prev := execProcess
+	execProcess = func(path string, _ []string, _ []string) error {
+		execed = path
+		_, err := os.Lstat(f.Name())
+		leftBehind = !os.IsNotExist(err)
+		return nil
+	}
+	t.Cleanup(func() { execProcess = prev })
+
+	if err := ReexecWithSudo(zap.NewNop()); err != nil {
+		t.Fatalf("ReexecWithSudo = %v, want nil where its exec succeeds", err)
+	}
+	if execed != sudo {
+		t.Fatalf("ReexecWithSudo exec'd %q, want %s", execed, sudo)
+	}
+	if leftBehind {
+		t.Errorf("this process's log %s was still there at the exec", f.Name())
+	}
+}
+
+// A re-exec that cannot happen ends the run through its caller, with an
+// error, not inside ReexecWithSudo: an os.Exit there skipped every deferred
+// call of the run, the removal of its temp log among them (here it would end
+// this test binary). Where the exec itself fails, the log's name is gone
+// already, and closing the log after it is no error.
+func TestReexecWithSudo_AFailureReturnsToItsCaller(t *testing.T) {
+	t.Run("no sudo on PATH", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		execed := false
+		prev := execProcess
+		execProcess = func(string, []string, []string) error { execed = true; return nil }
+		t.Cleanup(func() { execProcess = prev })
+		if err := ReexecWithSudo(zap.NewNop()); err == nil {
+			t.Error("ReexecWithSudo = nil with no sudo on PATH, want an error")
+		}
+		if execed {
+			t.Error("ReexecWithSudo exec'd with no sudo on PATH")
+		}
+	})
+	t.Run("the exec fails", func(t *testing.T) {
+		bin := t.TempDir()
+		sudo := filepath.Join(bin, "sudo")
+		if err := os.WriteFile(sudo, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin)
+		t.Setenv("TMPDIR", t.TempDir())
+		_, f, err := keployLog.New()
+		if err != nil || f == nil {
+			t.Fatalf("log.New = %v, %v; want a log file", f, err)
+		}
+		t.Cleanup(keployLog.TestOnlyResetSink)
+		prevLog := LogFile
+		LogFile = f
+		t.Cleanup(func() { LogFile = prevLog })
+		prev := execProcess
+		execProcess = func(string, []string, []string) error { return syscall.EACCES }
+		t.Cleanup(func() { execProcess = prev })
+
+		if err := ReexecWithSudo(zap.NewNop()); !errors.Is(err, syscall.EACCES) {
+			t.Errorf("ReexecWithSudo = %v, want the exec's own error", err)
+		}
+		if _, err := os.Lstat(f.Name()); !os.IsNotExist(err) {
+			t.Errorf("this process's log %s is still there after a failed exec (lstat: %v)", f.Name(), err)
+		}
+		if err := keployLog.CloseLogFile(f); err != nil {
+			t.Errorf("CloseLogFile after a failed exec = %v, want nil", err)
+		}
+	})
+}
+
+// sudo-rs (Ubuntu 26.04's sudo) ignores -E, so a re-exec through `sudo -E`
+// ran keploy, and the app it runs, without the user's environment. The
+// command names every variable for sudo to keep instead, which sudo and
+// sudo-rs both honour, and leaves out what sudo sets itself, as -E did.
+func TestSudoReexecArgs(t *testing.T) {
+	t.Run("names every variable but the ones sudo sets", func(t *testing.T) {
+		environ := []string{
+			"FOO=foo-val", "HOME=/home/u1", "PATH=/home/u1/bin:/usr/bin",
+			"USER=u1", "LOGNAME=u1", "USERNAME=u1", "SUDO_USER=stale", "SUDO_UID=4242",
+			"STAMP_CREATED_AT=2026-11-04T00:00:00Z", "KEPLOY_API_KEY=s3cr3t-value",
+			"A,B=comma", "FOO=second", "=no-name", "MAIL=/var/mail/u1", "EMPTY=",
+			"N\xffU=not-utf-8", "OK=\xff",
+		}
+		argv, unkept := sudoReexecArgs(environ, "/home/u1/bin:/usr/bin", "/opt/keploy", []string{"record", "-c", "docker compose up"})
+		want := []string{
+			"sudo",
+			"--preserve-env=FOO,HOME,STAMP_CREATED_AT,KEPLOY_API_KEY,MAIL,EMPTY,OK",
+			"env", "PATH=/home/u1/bin:/usr/bin", "/opt/keploy",
+			"record", "-c", "docker compose up",
+		}
+		if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
+			t.Errorf("sudoReexecArgs =\n  %q\nwant\n  %q", argv, want)
+		}
+		if strings.Join(unkept, "\x00") != "A,B\x00N\xffU" {
+			t.Errorf("unkept = %q, want the name with a comma and the name that is not UTF-8, [A,B N\xffU] (a value that is not UTF-8 is kept: only the name goes in the list)", unkept)
+		}
+		for _, a := range argv {
+			if a == "-E" {
+				t.Error("the command still asks for -E, which sudo-rs ignores")
+			}
+			if strings.Contains(a, "s3cr3t-value") || strings.Contains(a, "foo-val") {
+				t.Errorf("a value is on the command line, which any user can read: %q", a)
+			}
+		}
+	})
+	t.Run("no list when nothing is left to name", func(t *testing.T) {
+		argv, unkept := sudoReexecArgs([]string{"PATH=/usr/bin", "USER=u1", "SUDO_GID=7"}, "/usr/bin", "/opt/keploy", nil)
+		want := []string{"sudo", "env", "PATH=/usr/bin", "/opt/keploy"}
+		if strings.Join(argv, "\x00") != strings.Join(want, "\x00") || len(unkept) != 0 {
+			t.Errorf("sudoReexecArgs = %q, %q; want %q, none unkept", argv, unkept, want)
+		}
+	})
+}
+
+// A sudo that would not keep the list is refused before anything runs:
+// sudo-rs before 0.2.7 ignores it, with a warning only, and sudo before 1.8.21
+// rejects it as a usage error. Any other sudo gets the command, with the
+// values in the environment it execs with.
+func TestReexecWithSudo_TheEnvironmentReachesSudoOrTheRunIsRefused(t *testing.T) {
+	bin := t.TempDir()
+	sudo := filepath.Join(bin, "sudo")
+	if err := os.WriteFile(sudo, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("STAMP_CREATED_AT", "2026-11-04T00:00:00Z")
+	prevLog := LogFile
+	LogFile = nil
+	t.Cleanup(func() { LogFile = prevLog })
+	for _, tc := range []struct {
+		version string
+		refused string // what the refusal names; empty where sudo runs
+	}{
+		{version: "sudo-rs 0.2.5\n", refused: "sudo-rs 0.2.5 ignores that list"},
+		{version: "sudo-rs 0.2.6\n", refused: "sudo-rs 0.2.6"},
+		{version: "sudo-rs 0.2.6-1\n", refused: "implements it from 0.2.7 on), so the run would go on without your environment. Upgrade sudo-rs to 0.2.7 or later"},
+		{version: "Sudo version 1.8.16\n", refused: "sudo 1.8.16 does not accept that list"},
+		{version: "Sudo version 1.8.20p2\n", refused: "(sudo accepts it from 1.8.21 on). Upgrade sudo to 1.8.21 or later"},
+		{version: "sudo-rs 0.2.7\n"},
+		{version: "sudo-rs 0.2.13-0ubuntu1.2\n"},
+		{version: "Sudo version 1.8.21p2\n"},
+		{version: "Sudo version 1.9.15p5\nSudoers policy plugin version 1.9.15p5\n"},
+		{version: ""},
+	} {
+		t.Run(strings.TrimSpace(tc.version), func(t *testing.T) {
+			prevVersion := sudoVersionOf
+			sudoVersionOf = func(context.Context) string { return tc.version }
+			t.Cleanup(func() { sudoVersionOf = prevVersion })
+			var execed string
+			var argv, envv []string
+			prev := execProcess
+			execProcess = func(path string, a, e []string) error { execed, argv, envv = path, a, e; return nil }
+			t.Cleanup(func() { execProcess = prev })
+
+			err := ReexecWithSudo(zap.NewNop())
+			if tc.refused != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.refused) {
+					t.Fatalf("ReexecWithSudo = %v, want a refusal naming %q", err, tc.refused)
+				}
+				if execed != "" {
+					t.Errorf("ReexecWithSudo exec'd %s %q through a sudo it refused", execed, argv)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ReexecWithSudo = %v, want the exec", err)
+			}
+			if execed != sudo || len(argv) < 2 || !strings.HasPrefix(argv[1], "--preserve-env=") ||
+				!slices.Contains(strings.Split(strings.TrimPrefix(argv[1], "--preserve-env="), ","), "STAMP_CREATED_AT") {
+				t.Errorf("ReexecWithSudo exec'd %s %q, want %s --preserve-env=…,STAMP_CREATED_AT,… env PATH=…", execed, argv, sudo)
+			}
+			if !slices.Contains(envv, "STAMP_CREATED_AT=2026-11-04T00:00:00Z") {
+				t.Error("the environment sudo is exec'd with has no STAMP_CREATED_AT: the list names a variable sudo does not get")
+			}
+		})
+	}
+}
+
+// A name with a comma cannot be in the --preserve-env list: the run goes on
+// without that variable, and says which it is. A run with no such name says
+// nothing.
+func TestReexecWithSudo_SaysWhichVariablesTheListCannotCarry(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "sudo"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	prevLog := LogFile
+	LogFile = nil
+	t.Cleanup(func() { LogFile = prevLog })
+	prevVersion := sudoVersionOf
+	sudoVersionOf = func(context.Context) string { return "sudo-rs 0.2.13\n" }
+	t.Cleanup(func() { sudoVersionOf = prevVersion })
+	prev := execProcess
+	execProcess = func(string, []string, []string) error { return nil }
+	t.Cleanup(func() { execProcess = prev })
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.Contains(name, ",") || !utf8.ValidString(name) {
+			t.Skipf("this test's own environment has %q, a name the list cannot carry", name)
+		}
+	}
+	warnings := func() []observer.LoggedEntry {
+		core, logs := observer.New(zap.WarnLevel)
+		if err := ReexecWithSudo(zap.New(core)); err != nil {
+			t.Fatalf("ReexecWithSudo = %v, want the exec", err)
+		}
+		return logs.All()
+	}
+
+	if w := warnings(); len(w) != 0 {
+		t.Errorf("ReexecWithSudo warned %q with no name the list cannot carry", w[0].Message)
+	}
+	t.Setenv("A,B", "comma")
+	w := warnings()
+	if len(w) != 1 || !strings.Contains(w[0].Message, "comma") || !slices.Contains(w[0].ContextMap()["variables"].([]interface{}), any("A,B")) {
+		t.Errorf("ReexecWithSudo warned %v, want one warning that names A,B", w)
+	}
+	// sudo-rs refuses a whole command line that is not UTF-8.
+	t.Setenv("N\xffU", "not-utf-8")
+	w = warnings()
+	if len(w) != 1 || !strings.Contains(w[0].Message, "not UTF-8") || len(w[0].ContextMap()["variables"].([]interface{})) != 2 {
+		t.Errorf("ReexecWithSudo warned %v, want one warning that names A,B and the name that is not UTF-8", w)
+	}
+}
+
+func TestSudoPreserveEnvListGap(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    string // the gap's String; empty for none
+		ignored bool
+	}{
+		{version: "sudo-rs 0.2.6\n", want: "sudo-rs 0.2.6", ignored: true},
+		{version: "sudo-rs 0.1.9\n", want: "sudo-rs 0.1.9", ignored: true},
+		{version: "sudo-rs 0.2.7\n"},
+		{version: "sudo-rs 1.0.0\n"},
+		{version: "Sudo version 1.8.20p2\n", want: "sudo 1.8.20"},
+		{version: "Sudo version 1.7.30\n", want: "sudo 1.7.30"},
+		{version: "Sudo version 1.8.21\n"},
+		{version: "Sudo version 2.0.0\n"},
+		{version: "sudo: unable to resolve host box\nSudo version 1.8.20\n", want: "sudo 1.8.20"},
+		{version: "sudo: unknown option --version\n"},
+		// A version past what an int holds names none: let through.
+		{version: "sudo-rs 0.1.99999999999999999999\n"},
+	} {
+		gap, ok := SudoPreserveEnvListGap(tc.version)
+		if got := map[bool]string{true: gap.String()}[ok]; got != tc.want || (ok && gap.Ignored != tc.ignored) {
+			t.Errorf("SudoPreserveEnvListGap(%q) = %v %v (ignored %v), want %q (ignored %v)", tc.version, gap, ok, gap.Ignored, tc.want, tc.ignored)
+		}
 	}
 }

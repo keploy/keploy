@@ -180,8 +180,9 @@ func TestAnsweredLogKeepsTheNewest(t *testing.T) {
 }
 
 // What the log keeps of a recording is what a match reads: its request, name,
-// kind, times and noise, never its response, nor the loader that would read
-// one back from disk.
+// kind, times, noise and learned clock reads (a match checks a clock read's
+// place as one, in its zone), never its response, nor the loader that would
+// read one back from disk.
 func TestAnsweredLogKeepsNoResponse(t *testing.T) {
 	byURL(t)
 	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
@@ -189,6 +190,8 @@ func TestAnsweredLogKeepsNoResponse(t *testing.T) {
 	mk.Noise = []string{"secret"}
 	mk.Spec.Metadata = map[string]string{"type": "http-client"}
 	mk.Spec.ReqBodyNoise = map[string][]string{"body.ts": nil}
+	clock := models.ClockOffset{Res: time.Millisecond, Zone: models.ZoneApp}
+	mk.Spec.Clocks = map[string]models.ClockOffset{"body.seenAt": clock}
 	mk.Spec.HTTPReq.Body = `{"q":1}`
 	mk.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: strings.Repeat("r", 64<<10)}
 	mk.Spec.MongoResponses = []models.MongoResponse{{}}
@@ -208,6 +211,9 @@ func TestAnsweredLogKeepsNoResponse(t *testing.T) {
 	if p.Name != mk.Name || p.Kind != mk.Kind || p.Spec.HTTPReq == nil || p.Spec.HTTPReq.Body != mk.Spec.HTTPReq.Body ||
 		!p.Spec.ReqTimestampMock.Equal(t0) || len(p.Noise) != 1 || p.Spec.Metadata["type"] != "http-client" || len(p.Spec.ReqBodyNoise) != 1 {
 		t.Fatalf("the log lost what a match or the note reads: %+v", p)
+	}
+	if got := p.Spec.Clocks["body.seenAt"]; len(p.Spec.Clocks) != 1 || got != clock {
+		t.Fatalf("the log kept clock reads %+v; want the recording's %+v", p.Spec.Clocks, mk.Spec.Clocks)
 	}
 	if c[0].size >= 8<<10 {
 		t.Fatalf("an entry with a small request counts %d bytes", c[0].size)
@@ -418,4 +424,257 @@ func TestFindAnsweredEarlierLeavesOutAPreviousSetsConsume(t *testing.T) {
 	if got, ok := mm.FindAnsweredEarlier(models.HTTP, []string{"url:/count"}, all); !ok || got.Mock.Name != "mock-2" {
 		t.Fatalf("found %v (%v), want this set's mock-2", got.Mock, ok)
 	}
+}
+
+// A recording a door keeps answers call after call (noteLatest): the log
+// holds it once, copied at its first answer alone, at the time it last
+// answered. An answer noted after a later one does not move that time back,
+// and a recording of the same name an earlier test set's staging pooled
+// moves nothing.
+func TestAnsweredLogNotesAKeptRecordingOnceAtItsLastAnswer(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	mk := keyedRecording("mock-0", models.HTTP, 0, "/echo/rates", t0)
+	mk.TestModeInfo.Lifetime = models.LifetimeSession
+	var l answeredLog
+	l.fence(2)
+	for i := 1; i <= 3; i++ {
+		l.noteLatest(mk, t0.Add(time.Duration(i)*time.Second))
+	}
+	if n := l.copies.Load(); n != 1 {
+		t.Fatalf("three answers made %d copies of the recording; want 1", n)
+	}
+	last := t0.Add(3 * time.Second)
+	at := func() time.Time {
+		t.Helper()
+		c := l.candidates([]string{"url:/echo/rates"})
+		if len(c) != 1 || l.live != 1 {
+			t.Fatalf("the log holds %d entries (%d candidates); want the recording once", l.live, len(c))
+		}
+		return c[0].at
+	}
+	if got := at(); !got.Equal(last) {
+		t.Fatalf("noted at %v; want its last answer, %v", got, last)
+	}
+	l.noteLatest(mk, t0.Add(time.Second))
+	if got := at(); !got.Equal(last) {
+		t.Fatalf("an earlier answer moved the time to %v; want %v kept", got, last)
+	}
+	old := *mk
+	old.TestModeInfo.StagedSet = 1
+	l.noteLatest(&old, t0.Add(9*time.Second))
+	if got := at(); !got.Equal(last) {
+		t.Fatalf("an earlier set's recording of the same name moved the time to %v; want %v kept", got, last)
+	}
+	// Two calls that both found no entry each note it: the second moves the
+	// first's time forward, never back, and files nothing of its own.
+	l.noteAs(mk, t0.Add(5*time.Second), "", false, true)
+	l.noteAs(mk, t0.Add(4*time.Second), "", false, true)
+	if got := at(); !got.Equal(t0.Add(5 * time.Second)) {
+		t.Fatalf("racing notes left the time at %v; want %v", got, t0.Add(5*time.Second))
+	}
+	checkAnsweredCounts(t, &l)
+	// Once the log drops it, the next answer notes it afresh.
+	l.fence(3)
+	if l.latest != nil {
+		t.Fatalf("a fence kept %d kept recordings' entries", len(l.latest))
+	}
+	l.noteLatest(mk, t0.Add(6*time.Second))
+	if got := at(); !got.Equal(t0.Add(6 * time.Second)) {
+		t.Fatalf("after a fence the recording was noted at %v; want %v", got, t0.Add(6*time.Second))
+	}
+	// Newer recordings of its key push its entry out: its next answer is
+	// noted afresh, not moved on the entry dropped.
+	for i := 1; i <= answeredPerKey; i++ {
+		l.note(keyedRecording(fmt.Sprintf("m%d", i), models.HTTP, i, "/echo/rates", t0), t0.Add(7*time.Second))
+	}
+	l.noteLatest(mk, t0.Add(8*time.Second))
+	found := false
+	for _, e := range l.candidates([]string{"url:/echo/rates"}) {
+		if e.mock.Name == "mock-0" {
+			found = e.at.Equal(t0.Add(8 * time.Second))
+		}
+	}
+	if !found {
+		t.Fatalf("after its entry was pushed out, the recording's next answer was not noted at %v", t0.Add(8*time.Second))
+	}
+	checkAnsweredCounts(t, &l)
+	// A reset forgets it too.
+	l.reset()
+	l.noteLatest(mk, t0.Add(10*time.Second))
+	if got := at(); !got.Equal(t0.Add(10 * time.Second)) {
+		t.Fatalf("after a reset the recording was noted at %v; want %v", got, t0.Add(10*time.Second))
+	}
+	// An entry of the same name noted another way, pushed out, leaves the
+	// kept recording's entry where it is.
+	l.reset()
+	l.note(keyedRecording("mock-0", models.HTTP, 0, "/echo/rates", t0), t0.Add(11*time.Second))
+	l.noteLatest(mk, t0.Add(12*time.Second))
+	for i := 1; i < answeredPerKey; i++ {
+		l.note(keyedRecording(fmt.Sprintf("m%d", i), models.HTTP, i, "/echo/rates", t0), t0.Add(13*time.Second))
+	}
+	copies := l.copies.Load()
+	l.noteLatest(mk, t0.Add(14*time.Second))
+	if n := l.copies.Load() - copies; n != 0 {
+		t.Fatalf("pushing out another entry of its name made its next answer copy it %d times; want its entry moved", n)
+	}
+	// A note of another door (a background's spend, with its scope) files an
+	// entry of its own beside the kept one's, never moves that one.
+	l.noteFrom(mk, t0.Add(15*time.Second), "worker", false)
+	var bg string
+	for _, e := range l.candidates([]string{"url:/echo/rates"}) {
+		if e.mock.Name == "mock-0" {
+			bg = e.background
+			break
+		}
+	}
+	if bg != "worker" {
+		t.Fatalf("a background's note of the kept recording is newest as scope %q; want an entry of its own, of worker", bg)
+	}
+	checkAnsweredCounts(t, &l)
+}
+
+// The byte bound pushes out the recording that answered least recently: a
+// kept recording that answers again (noteLatest) moves to the back of the
+// queue, so one noted after its first answer and before its last goes
+// before it (whichever path notes the answer), and while it answers between
+// the notes of newer keys it stays however many those push out. Once it
+// answers no more it goes in its turn. The queue it leaves its places in
+// stays bounded (compact), also when it answers on its own call after call.
+func TestTheAnsweredLogPushesOutTheLeastRecentlyAnswered(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	big := func(name string, i int, url string) *models.Mock {
+		m := keyedRecording(name, models.HTTP, i, url, t0)
+		m.Spec.HTTPReq.Body = strings.Repeat("b", answeredMaxEntryBytes/4)
+		return m
+	}
+	kept := big("mock-0", 0, "/echo/rates")
+	kept.TestModeInfo.Lifetime = models.LifetimeSession
+	var l answeredLog
+	l.fence(2)
+	held := func(url string) bool { return len(l.candidates([]string{"url:" + url})) > 0 }
+	at := time.Duration(0)
+	answer := func() {
+		at += time.Second
+		l.noteLatest(kept, t0.Add(at))
+	}
+	answer()
+	l.note(big("old", 1, "/old"), t0.Add(at))
+	// Its second answer as a call that found no entry files it: another call
+	// filed one first (noteAs), and this one moves it.
+	at += time.Second
+	l.noteAs(kept, t0.Add(at), "", false, true)
+	limit := 8 * answeredMaxBytes / (answeredMaxEntryBytes / 4)
+	n := 0
+	note := func() {
+		t.Helper()
+		if n > limit {
+			t.Fatalf("%d newer keys noted, %d bytes held: no byte bound", n, l.bytes)
+		}
+		l.note(big(fmt.Sprintf("k%d", n), n+2, fmt.Sprintf("/k%d", n)), t0.Add(at))
+		n++
+	}
+	for held("/old") {
+		if !held("/echo/rates") {
+			t.Fatalf("after %d newer keys the kept recording, answered after old, was pushed out before it", n)
+		}
+		note()
+	}
+	if !held("/echo/rates") {
+		t.Fatal("the byte bound pushed out the kept recording with old, though it answered after old")
+	}
+	for first := n; held("/k0") || n < first+limit/4; {
+		answer()
+		note()
+		if !held("/echo/rates") {
+			t.Fatalf("a kept recording answering between the notes of %d newer keys was pushed out", n)
+		}
+		if l.bytes > answeredMaxBytes {
+			t.Fatalf("the log holds %d bytes, over its bound %d", l.bytes, answeredMaxBytes)
+		}
+		if len(l.queue) > 2*l.live+64+1 {
+			t.Fatalf("a kept recording answered %d times queues %d places for %d entries", n, len(l.queue), l.live)
+		}
+	}
+	checkAnsweredCounts(t, &l)
+	// A test that makes the call again and again, with nothing else noted
+	// between: the places it leaves are shed as it goes.
+	for i := 0; i < 10000; i++ {
+		answer()
+	}
+	if len(l.queue) > 2*l.live+64+1 {
+		t.Fatalf("a kept recording answered 10000 times on its own queues %d places for %d entries", len(l.queue), l.live)
+	}
+	checkAnsweredCounts(t, &l)
+	for held("/echo/rates") {
+		note()
+	}
+	checkAnsweredCounts(t, &l)
+}
+
+// A kept recording answered again at the same clock reading as its last
+// answer (a coarse clock) still moves to the back of the bound's queue: what
+// was noted between the two answers is pushed out first, and answers at one
+// reading leave the queue bounded. An answer at an earlier reading moves
+// neither its time nor its place.
+func TestAKeptRecordingAnsweredAtTheSameReadingMovesToTheBack(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	big := func(name string, i int, url string) *models.Mock {
+		m := keyedRecording(name, models.HTTP, i, url, t0)
+		m.Spec.HTTPReq.Body = strings.Repeat("b", answeredMaxEntryBytes/4)
+		return m
+	}
+	kept := big("mock-0", 0, "/echo/rates")
+	kept.TestModeInfo.Lifetime = models.LifetimeSession
+	var l answeredLog
+	l.fence(2)
+	held := func(url string) bool { return len(l.candidates([]string{"url:" + url})) > 0 }
+	limit := 8 * answeredMaxBytes / (answeredMaxEntryBytes / 4)
+	n := 0
+	note := func() {
+		t.Helper()
+		if n > limit {
+			t.Fatalf("%d newer keys noted, %d bytes held: no byte bound", n, l.bytes)
+		}
+		l.note(big(fmt.Sprintf("k%d", n), n+3, fmt.Sprintf("/k%d", n)), t0)
+		n++
+	}
+	l.noteLatest(kept, t0)
+	l.note(big("old", 1, "/old"), t0)
+	l.noteLatest(kept, t0)
+	for held("/old") {
+		if !held("/echo/rates") {
+			t.Fatalf("after %d newer keys the kept recording, answered again at old's clock reading, was pushed out before old", n)
+		}
+		note()
+	}
+	if !held("/echo/rates") {
+		t.Fatal("the byte bound pushed out the kept recording with old, though it answered again after old")
+	}
+	// A test that makes the call again and again within one clock reading:
+	// the places it leaves are shed as it goes.
+	for i := 0; i < 10000; i++ {
+		l.noteLatest(kept, t0)
+	}
+	if len(l.queue) > 2*l.live+64+1 {
+		t.Fatalf("a kept recording answered 10000 times at one clock reading queues %d places for %d entries", len(l.queue), l.live)
+	}
+	checkAnsweredCounts(t, &l)
+	l = answeredLog{}
+	l.fence(2)
+	l.noteLatest(kept, t0)
+	l.note(big("later", 2, "/later"), t0)
+	l.noteLatest(kept, t0.Add(-time.Second))
+	if e := l.latest[kept.Name]; e == nil || !e.at.Equal(t0) {
+		t.Fatalf("an answer at an earlier reading moved the kept recording's time: %+v", e)
+	}
+	for held("/echo/rates") {
+		if !held("/later") {
+			t.Fatal("an answer at an earlier reading moved the kept recording behind a note filed after its last answer")
+		}
+		note()
+	}
+	checkAnsweredCounts(t, &l)
 }

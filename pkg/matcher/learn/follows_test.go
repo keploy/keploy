@@ -66,7 +66,7 @@ func classifyF(t *testing.T, recorded, live string, earlier []Earlier, raw []Raw
 	t.Helper()
 	const path = "bind.$8"
 	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}
-	got := ClassifyFollowing(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, earlier, raw, resp, nil, nil)
+	got := ClassifyFollowing(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, earlier, raw, resp, nil, nil)
 	if len(got) != 1 {
 		t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
 	}
@@ -97,7 +97,7 @@ func TestEFlywayExecutionTimeBesideStartupWordsIsLearnedVarying(t *testing.T) {
 			t.Errorf("execution_time 82 at record, %s in F (%s): %s (%q), want noise", tc.f, tc.matched, got.Kind, got.Why)
 		}
 		path := "bind.$8"
-		today := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.f}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}, eRecAt, nil, eStartup(), nil, nil, nil)
+		today := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.f}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}, eRecAt, nil, eStartup(), nil, nil, nil)
 		if today[0].Kind != KindUnaccounted {
 			t.Errorf("ClassifyGiven, execution_time 82 at record, %s in F: %s, want refused (the rule is ClassifyFollowing's)", tc.f, today[0].Kind)
 		}
@@ -122,7 +122,8 @@ func eLeaf(at time.Time, n int, recorded, live string) Earlier {
 // before the call and the value of one of them lacks it; and refused, saying
 // which condition failed, where the recording did not give it (made at or
 // after the call, or the leaf's recorded text lacks it: a real echo, whose
-// source moved with it), where F did not (not served, or served drifted),
+// source moved with it), where F did not (not served, or served changed with
+// no view of it, or at a leaf served without it and nothing new),
 // where both values hold it, or where keploy cannot read when the recording
 // gave it.
 func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
@@ -169,7 +170,11 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 		{"F's word, at a leaf recorded after the call", "took 82 ms", "took 7 ms", []Earlier{eLeaf(eRecAt.Add(time.Millisecond), 6, "7", "7")}, eStartup(), "appears in mock-8, a recording record's full round gave the application before the call that was recorded after the call", "mock-8"},
 		{"F's word, at a payload F did not serve", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond))), noF, "mock-1"},
 		{"F's word, at a payload F served changed", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond)).ServedAs(2)), noF, "mock-1"},
-		{"the recorded word, at a leaf F served drifted", "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82", "83")}, eStartup(), noF, "mock-8"},
+		// F gave the application 83 at the leaf, and the value took none
+		// of it: a copy moves with its source, so it is no copy of 82 there
+		// (TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt).
+		{"the recorded word, at a leaf F served drifted", "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82", "83")}, eStartup(), "", ""},
+		{"the recorded word, at a leaf F served without it and nothing new", "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82 7", "7")}, eStartup(), "record's full round gave the application another value there, which holds no word the recorded one lacked", "mock-8"},
 		{"a word both values hold", "82 1", "4 1 1", nil, eStartup(), both, "mock-1"},
 		{"a payload whose recorded time keploy cannot read", "82", "1", nil, with(eStartup(), 1, mock1(time.Time{}).ServedAs(2).ServedAsRecorded()), untimed, "mock-1"},
 		{"a leaf whose recorded time keploy cannot read", "took 82 ms", "took 7 ms", []Earlier{eLeaf(time.Time{}, 6, "7", "7")}, eStartup(), "keploy cannot read when the recording gave the application mock-8", "mock-8"},
@@ -197,6 +202,151 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 	} {
 		if got := classifyF(t, "1", "82", nil, raw, nil); got.Kind != KindVariable || got.From.Mock != "mock-1" {
 			t.Errorf("1 recorded beside SELECT 1, %s, 82 in F: %s (%q), want a variable of mock-1", name, got.Kind, got.Why)
+		}
+	}
+}
+
+// The random ids of the chance-word case: an earlier answer's job id, as
+// recorded and as record's full round gave it, and the call's own random
+// value, which holds "48d1" of the job's recorded id by chance.
+const (
+	chanceSrcRec  = "bb7ed9ee-670e-48d1-982f-b54b2b73982f"
+	chanceSrcLive = "0c1d2e3f-4a5b-6c7d-8e9f-a0b1c2d3e4f5"
+	chanceValRec  = "1111aaaa-2222-3333-48d1-444455556666"
+	chanceValLive = "9999cccc-7777-8888-dddd-000011112222"
+	// chanceCopy took "6c7d", the word F gave in place of "48d1".
+	chanceCopy = "9999cccc-7777-8888-6c7d-000011112222"
+)
+
+// eJobs is a job's row, id and n, answered to the application 100ms before
+// eRecAt (after eStartup's places), as recorded, or as record's full round
+// gave it (the view ServedLive takes).
+func eJobs(id, n string) Raw {
+	return ePg("mock-6", 100*time.Millisecond, "SELECT id, n FROM jobs", []models.PostgresV3Cells{{{Value: id}, {Value: n}}}, "SELECT 1")
+}
+
+// eRow is one row of three columns, answered as eJobs is.
+func eRow(a, b, c string) Raw {
+	return eRows([]models.PostgresV3Cells{{{Value: a}, {Value: b}, {Value: c}}})
+}
+
+// eRows is rows, answered as eJobs is.
+func eRows(rows []models.PostgresV3Cells) Raw {
+	return ePg("mock-6", 100*time.Millisecond, "SELECT a, b, c FROM t", rows, "SELECT 1")
+}
+
+// jobsServed is eJobs(id, n) served by F as the 6th serve, after eStartup's,
+// with F's view of it (live; the zero Raw: an adapter that states no view,
+// which never calls ServedLive).
+func jobsServed(id, n string, live Raw) []Raw {
+	x := eJobs(id, n).ServedAs(6)
+	if live.mock != "" {
+		x = x.ServedLive(live)
+	}
+	return append(eStartup(), x)
+}
+
+// A word of the value at a place F gave the application another value at
+// (a leaf F served drifted, or a field of a payload F served changed and
+// gave its view of: Raw.ServedLive) is no word the value copied there where
+// the value took none of the words the place gained, in any form: a copy
+// moves with its source. The call's random value held "48d1" of an earlier
+// answer's random id by chance; F gave the application another id there,
+// and the value took none of it: noise, naming the place set aside. Where
+// the value took a word of what F gave there (a copy), or the place
+// gained nothing, or F's view of it is missing, lacks the field, or holds
+// the value F saw, it stays where the value came from (a variable), or the
+// word is refused: fail closed. ClassifyGiven, the rule's absence, never
+// learns it. Where the call's answer echoes the value, each value learned
+// as noise here is learned as that echo instead, naming the same place.
+func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt(t *testing.T) {
+	const (
+		moved   = "where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source"
+		took    = "record's full round gave the application another value there, and the value took a word of it"
+		nothing = "record's full round gave the application another value there, which holds no word the recorded one lacked"
+		holds   = "record's full round gave the application another value there, and it holds a word the value took"
+		other   = ", where the recording did not, so it cannot show the value does not follow it"
+		fOnly   = "where the recording did not give the application that word"
+	)
+	before := eRecAt.Add(-50 * time.Millisecond)
+	leaf := func(rec, live string) []Earlier {
+		return []Earlier{{Mock: "mock-8", At: before, Payload: eLeaf(before, 6, "", "").Payload, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.cmd.documents.0._id", Type: String, Value: rec}, Live: live},
+		}}}
+	}
+	for _, tc := range []struct {
+		name           string
+		recorded, live string
+		earlier        []Earlier
+		raw            []Raw
+		kind           Kind
+		why            string // what the reason holds ("" for a variable: the place it names)
+		from           string // a variable's place
+	}{
+		{"payload, F's view, the value took none of what F gave", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, "6")), KindNoise, "(its characters 20 to 23) stands in mock-6 at spec.postgresV3.query.response.rows[0][0], " + moved, ""},
+		{"payload, F's view, the value took the word F gave there (a copy)", chanceValRec, chanceCopy, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, "6")), KindVariable, "", "mock-6"},
+		{"payload, F's view, F gave that word as recorded there", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcRec, "6")), KindNoise, "where record's full round gave the application that word as recorded, while the value changed", ""},
+		{"payload, F's view holds the value F saw", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, chanceValLive)), KindVariable, "", "mock-6"},
+		{"payload, F's view lacks the field", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", ePg("mock-6", 100*time.Millisecond, "SELECT id, n FROM jobs", nil, "SELECT 0")), KindVariable, "", "mock-6"},
+		{"payload, served changed with no view", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", Raw{}), KindVariable, "", "mock-6"},
+		// The value whole at a field F gave another value at: a whole value
+		// is followed (sources), as at a leaf.
+		{"payload, F's view, the recorded value whole there", chanceSrcRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, "6")), KindVariable, "", "mock-6"},
+		// 48d1 at the id F moved, which the value took none of; 77 at the
+		// count F gave 78 at, which the value took: the search goes past
+		// the first to the second, a place.
+		{"payload, F's view, one word moved away from, one followed", "48d1 77", "dddd 78", nil, jobsServed(chanceSrcRec, "77", eJobs(chanceSrcLive, "78")), KindVariable, "", "mock-6"},
+		// A word the value holds now that only F's view holds there: F gave
+		// it, the recording did not.
+		{"payload, F's view alone holds the word the value holds now", "82", "6c7d", nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, "5")), KindUnaccounted, "appears in an earlier recording, in mock-6 at spec.postgresV3.query.response.rows[0][0], as record's full round gave it, " + fOnly, ""},
+		// F gave the rows in another order: the id's field holds the other
+		// job's there, and the value took the word F gave at the row the
+		// recorded id moved to, which the recording did not give.
+		{"payload, F's view moved the row, the value took its word", chanceValRec, chanceCopy, nil, append(eStartup(), ePg("mock-6", 100*time.Millisecond, "SELECT id FROM jobs", []models.PostgresV3Cells{{{Value: chanceSrcRec}}, {{Value: "c0ffee00-1234-4321-abcd-0000000000ff"}}}, "SELECT 2").ServedAs(6).ServedLive(ePg("mock-6", 100*time.Millisecond, "SELECT id FROM jobs", []models.PostgresV3Cells{{{Value: "c0ffee00-1234-4321-abcd-0000000000ff"}}, {{Value: chanceSrcLive}}}, "SELECT 2"))), KindUnaccounted, "appears in an earlier recording, in mock-6 at spec.postgresV3.query.response.rows[1][0], as record's full round gave it, " + fOnly, ""},
+		// F gave the word the value took at another field than the one
+		// whose recorded text holds it, or at a field the recording lacks:
+		// what F gave there is read field by field, never as moved.
+		{"payload, F's view moved the word the value took to another column", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("9998", "9999", "6c7d"))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[0][2]" + other, ""},
+		{"payload, F's view gave the word the value took at two columns", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("9999", "6c7d", "6c7d"))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[0][2]" + other, ""},
+		{"payload, F's view gave the word the value took at a column besides the one both gave it at", "k-zzzz", "k-6c7d", nil, append(eStartup(), eRow("qqqq", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("qqqq", "6c7d", "6c7d"))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[0][2]" + other, ""},
+		{"payload, F's view grew a row holding the word the value took", "k-48d1", "k-6c7d", nil, append(eStartup(), eRows([]models.PostgresV3Cells{{{Value: "48d1"}, {Value: "6c7d"}}}).ServedAs(6).ServedLive(eRows([]models.PostgresV3Cells{{{Value: "9999"}, {Value: "6c7d"}}, {{Value: "6c7d"}, {Value: "1"}}}))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[1][0]" + other, ""},
+		// A view of another mock is no view of this one: one keploy could
+		// not read (ServedLive), so a word only F's serve may have given is
+		// refused; a value copied where the recording gave it is still bound
+		// there, checked at replay.
+		{"payload, a view of another mock", chanceValRec, chanceCopy, nil, jobsServed(chanceSrcRec, "5", ePg("mock-7", 100*time.Millisecond, "SELECT name FROM users", []models.PostgresV3Cells{{{Value: "zzzz"}, {Value: "5"}}}, "SELECT 1")), KindVariable, "", "mock-6"},
+		// F gave 48d1's place a longer word that holds what the value took.
+		{"payload, F's view, the value took a part of a longer word F gave", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1 aaaa", "x", "y").ServedAs(6).ServedLive(eRow("6c7daaaa", "x", "y"))), KindVariable, "", "mock-6"},
+		{"leaf, the value took a part of a longer word F gave", "k-48d1", "k-6c7d", leaf("48d1 aaaa", "6c7daaaa"), eStartup(), KindUnaccounted, holds, ""},
+		{"leaf, the value took a word F gave inside a longer word", "k-48d1", "k-x6c7dx", leaf("48d1", "6c7d"), eStartup(), KindUnaccounted, took, ""},
+		{"leaf, the value took none of what F gave", chanceValRec, chanceValLive, leaf(chanceSrcRec, chanceSrcLive), eStartup(), KindNoise, "a word of its recorded value (its characters 20 to 23) stands in mock-8 at body.cmd.documents.0._id, " + moved, ""},
+		{"leaf, the value took the word F gave there (a copy)", chanceValRec, chanceCopy, leaf(chanceSrcRec, chanceSrcLive), eStartup(), KindVariable, "", "mock-8"},
+		{"leaf, the value holds a word F gave there it held before", "82 b", "5 b", leaf("82", "b"), eStartup(), KindUnaccounted, took, ""},
+		{"leaf, F gave nothing new there", "took 82 ms", "took 5 ms", leaf("82 7", "7"), eStartup(), KindUnaccounted, nothing, ""},
+	} {
+		got := classifyF(t, tc.recorded, tc.live, tc.earlier, tc.raw, nil)
+		switch {
+		case got.Kind != tc.kind:
+			t.Errorf("FALSE GREEN? %s: %q recorded, %q in F: %s (%q), want %s", tc.name, tc.recorded, tc.live, got.Kind, got.Why, tc.kind)
+		case tc.kind == KindVariable && got.From.Mock != tc.from:
+			t.Errorf("%s: a variable of %q (%+v), want of %s", tc.name, got.From.Mock, got.From, tc.from)
+		case tc.why != "" && !strings.Contains(got.Why, tc.why):
+			t.Errorf("%s: %s, why %q, want it to hold %q", tc.name, got.Kind, got.Why, tc.why)
+		}
+		if tc.kind != KindNoise {
+			continue
+		}
+		path := "bind.$8"
+		given := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, tc.earlier, tc.raw, nil, nil, nil)
+		if given[0].Kind == KindNoise {
+			t.Errorf("FALSE GREEN? ClassifyGiven, %s: noise (%q), want it never learned (the rule is ClassifyFollowing's)", tc.name, given[0].Why)
+		}
+		// The same value echoed by the call's answer: the echo stands
+		// beside the place set aside, and names it as the noise does
+		// (follows.setAside), not only the word the rule let go there.
+		echo := []Leaf{{Path: "rows[0][2]", Noise: "rows[0][2]", Type: String, Value: tc.recorded}}
+		if got := classifyF(t, tc.recorded, tc.live, tc.earlier, tc.raw, echo); got.Kind != KindEcho || !strings.Contains(got.Why, tc.why) || !strings.HasSuffix(got.Why, echoLearned) {
+			t.Errorf("%s, echoed: %s (%q); want an echo naming %q", tc.name, got.Kind, got.Why, tc.why)
 		}
 	}
 }
@@ -233,10 +383,10 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 	before := eRecAt.Add(-150 * time.Millisecond)
 	startup := func(x Raw) []Raw { return append(eStartup(), x) }
 	got := classifyF(t, "50", "7", nil, startup(eHistory(before, 6, true)), nil)
-	if got.Kind != KindNoise || !strings.Contains(got.Why, "its recorded value stands whole in mock-5 at") || !strings.Contains(got.Why, "which record's full round sent and gave the application as recorded, byte for byte, while the value changed: a copy moves with its source, so the value is no copy of it, and keploy learns it as varying") {
+	if got.Kind != KindNoise || !strings.Contains(got.Why, "its recorded value stands whole in mock-5 at") || !strings.Contains(got.Why, "which record's full round sent and gave the application as recorded, while the value changed: a copy moves with its source, so the value is no copy of it, and keploy learns it as varying") {
 		t.Errorf("50 recorded beside VARCHAR(50) F sent unchanged, 7 in F: %s (%q), want noise naming mock-5", got.Kind, got.Why)
 	}
-	if today := ClassifyGiven(NewDriftCache(), []string{"bind.$8"}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "7"}}}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "50"}}}, eRecAt, nil, startup(eHistory(before, 6, true)), nil, nil, nil); today[0].Kind != KindVariable || today[0].From.Mock != "mock-5" {
+	if today := ClassifyGiven(clockedDrifts(), []string{"bind.$8"}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "7"}}}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "50"}}}, eRecAt, nil, startup(eHistory(before, 6, true)), nil, nil, nil); today[0].Kind != KindVariable || today[0].From.Mock != "mock-5" {
 		t.Errorf("ClassifyGiven, 50 beside VARCHAR(50), 7 in F: %s (%q), want a variable of mock-5 (the rule is ClassifyFollowing's)", today[0].Kind, today[0].Why)
 	}
 	for _, tc := range []struct {
@@ -263,9 +413,16 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 		}
 	}
 	// The call's recorded answer echoes the value: an echo beside a source
-	// set aside is refused, as one beside a word the rule let go is.
-	if got := classifyF(t, "50", "7", nil, startup(eHistory(before, 6, true)), []Leaf{{Path: "rows[0][0]", Type: String, Value: "50"}}); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "in mock-5 at") {
-		t.Errorf("FALSE GREEN? 50 beside VARCHAR(50) F sent unchanged, echoed in the answer, 7 in F: %s (%q), want refused naming mock-5", got.Kind, got.Why)
+	// set aside is learned as the echo, naming it, as one beside a word the
+	// rule let go is; past a source F gave only in an older test of the set
+	// it is refused, naming the echo and why
+	// (TestAnEchoPastPlacesTheCopyRuleShowedNoSourceIsLearnedAsTheEcho).
+	echo := []Leaf{{Path: "rows[0][0]", Type: String, Value: "50"}}
+	if got := classifyF(t, "50", "7", nil, startup(eHistory(before, 6, true)), echo); got.Kind != KindEcho || !strings.Contains(got.Why, "in mock-5 at") || !strings.HasSuffix(got.Why, echoLearned) {
+		t.Errorf("50 beside VARCHAR(50) F sent unchanged, echoed in the answer, 7 in F: %s (%q), want an echo naming mock-5", got.Kind, got.Why)
+	}
+	if got := classifyF(t, "50", "7", nil, startup(eHistory(before, 6, true).ServedInAnOlderTest()), echo); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "in mock-5 at") || !strings.Contains(got.Why, echoSetAside+"record's full round gave the application mock-5 "+olderSetAside) {
+		t.Errorf("FALSE GREEN? 50 beside VARCHAR(50) F sent unchanged only in an older test, echoed in the answer, 7 in F: %s (%q), want refused naming mock-5 and why", got.Kind, got.Why)
 	}
 	// F served the CREATE TABLE before Flyway's seed row (mock-4), which the
 	// recording gave the application first. The seed row holds no word of
@@ -289,13 +446,20 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 }
 
 // An echo (the call's recorded answer holds the recorded value) beside a
-// word the word rule let go is refused, naming the word's place, as
-// ClassifyGiven refuses it.
-func TestAnEchoBesideAWordFoundEarlierIsRefused(t *testing.T) {
+// word the word rule let go is learned as the echo, naming the word's place,
+// where the order of its candidate sources is shown; ClassifyGiven, the
+// rule's absence, still refuses it, naming the word's place. An echo beside
+// a word both values hold stays refused under the rule too
+// (TestAnEchoPastPlacesTheCopyRuleShowedNoSourceIsLearnedAsTheEcho).
+func TestAnEchoBesideAWordFoundEarlierIsLearnedAsTheEcho(t *testing.T) {
 	resp := []Leaf{{Path: "rows[0][0]", Type: String, Value: "82"}}
-	got := classifyF(t, "82", "1", nil, eStartup(), resp)
-	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "appears in an earlier recording, in mock-1") {
-		t.Errorf("82 echoed in the answer, 1 in F beside SELECT 1: %s (%q), want refused naming mock-1", got.Kind, got.Why)
+	if got := classifyF(t, "82", "1", nil, eStartup(), resp); got.Kind != KindEcho || !strings.Contains(got.Why, "stands in mock-1") {
+		t.Errorf("82 echoed in the answer, 1 in F beside SELECT 1: %s (%q), want an echo naming mock-1", got.Kind, got.Why)
+	}
+	path := "bind.$8"
+	today := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "1"}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}, eRecAt, nil, eStartup(), resp, nil, nil)
+	if today[0].Kind != KindUnaccounted || !strings.Contains(today[0].Why, "appears in an earlier recording, in mock-1") {
+		t.Errorf("ClassifyGiven, 82 echoed in the answer, 1 in F beside SELECT 1: %s (%q), want refused naming mock-1", today[0].Kind, today[0].Why)
 	}
 }
 
@@ -578,27 +742,40 @@ func TestOnlyTheValuesCandidateSourcesAreOrdered(t *testing.T) {
 	}
 	// The pool's exchange in flight with the source itself (SELECT
 	// version(), 800 ms to 700 ms before the call, on connection 0): with no
-	// word of the value, read for nothing; holding the word, two candidate
-	// sources whose order the recording cannot show on two connections
-	// (refused), and shows on one at known positions (by the wire), unless
-	// the positions disagree with when the requests were recorded.
+	// word of the value, read for nothing; holding the word at another field
+	// (its second row), two candidate sources whose order the recording
+	// cannot show on two connections (refused), and shows on one at known
+	// positions (by the wire), unless the positions disagree with when the
+	// requests were recorded. Holding it at the same field as the source
+	// (its first row's cell), the two need no order: a copy of that field
+	// takes the same words from either (alike).
 	version := ePgAnswered("mock-2", 800*time.Millisecond, eRecAt.Add(-700*time.Millisecond), "SELECT version()", []models.PostgresV3Cells{{{Value: "PostgreSQL 16.4 (Debian 16.4-1.pgdg120+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit"}}}, "SELECT 1").SentOn("0", 3).ServedAs(6).ServedAsRecorded()
-	inside := func(word, conn string, pos uint64) []Raw {
-		raw := startup(span("mock-p", 790*time.Millisecond, 750*time.Millisecond, "SHOW server_version", word).SentOn(conn, pos).ServedAs(7).ServedAsRecorded())
+	inside := func(rows []models.PostgresV3Cells, conn string, pos uint64) []Raw {
+		raw := startup(ePgAnswered("mock-p", 790*time.Millisecond, eRecAt.Add(-750*time.Millisecond), "SHOW server_version", rows, "SHOW").SentOn(conn, pos).ServedAs(7).ServedAsRecorded())
 		raw[2] = version
 		return raw
 	}
-	if got := classifyF(t, "82", "16", nil, inside("PostgreSQL JDBC Driver", "2", 1), nil); got.Kind != KindNoise {
+	sameField := []models.PostgresV3Cells{{{Value: "16"}}}
+	otherField := []models.PostgresV3Cells{{{Value: "x"}}, {{Value: "16"}}}
+	if got := classifyF(t, "82", "16", nil, inside([]models.PostgresV3Cells{{{Value: "PostgreSQL JDBC Driver"}}}, "2", 1), nil); got.Kind != KindNoise {
 		t.Errorf("the pool's exchange, no word of the value, in flight with the source: %s (%q), want noise", got.Kind, got.Why)
 	}
-	if got := classifyF(t, "82", "16", nil, inside("16", "2", 1), nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-2 and mock-p were in flight together") {
+	if got := classifyF(t, "82", "16", nil, inside(otherField, "2", 1), nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-2 and mock-p were in flight together") {
 		t.Errorf("FALSE GREEN? two candidate sources in flight together on two connections: %s (%q), want refused", got.Kind, got.Why)
 	}
-	if got := classifyF(t, "82", "16", nil, inside("16", "0", 4), nil); got.Kind != KindNoise {
+	if got := classifyF(t, "82", "16", nil, inside(otherField, "0", 4), nil); got.Kind != KindNoise {
 		t.Errorf("two candidate sources in flight together on one connection, positions in their order: %s (%q), want noise", got.Kind, got.Why)
 	}
-	if got := classifyF(t, "82", "16", nil, inside("16", "0", 2), nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "on one connection at positions that disagree") {
+	if got := classifyF(t, "82", "16", nil, inside(otherField, "0", 2), nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "on one connection at positions that disagree") {
 		t.Errorf("FALSE GREEN? two candidate sources on one connection, positions against their order: %s (%q), want refused", got.Kind, got.Why)
+	}
+	for _, at := range []struct {
+		conn string
+		pos  uint64
+	}{{"2", 1}, {"0", 2}} {
+		if got := classifyF(t, "82", "16", nil, inside(sameField, at.conn, at.pos), nil); got.Kind != KindNoise {
+			t.Errorf("two candidate sources in flight together holding the word at the same field (connection %s, position %d): %s (%q), want noise", at.conn, at.pos, got.Kind, got.Why)
+		}
 	}
 }
 
@@ -674,7 +851,7 @@ func TestAValueCopiedFromAStartUpIsRefusedWhenItsConnectionsSwapRoles(t *testing
 	const path = "bind.$8"
 	given := func(recorded, live string, raw []Raw) Learned {
 		t.Helper()
-		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
 		if len(got) != 1 {
 			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
 		}
@@ -773,7 +950,7 @@ func TestAValueRecordedAsAWordEveryStartUpCarriesAlikeIsReadAsAnyRecordings(t *t
 		if got := classifyF(t, tc.recorded, tc.live, nil, raw, nil); got.Kind != KindNoise {
 			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, the rule a copy follows its source: %s (%q); want noise", tc.recorded, tc.field, tc.live, got.Kind, got.Why)
 		}
-		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, nil, raw, nil, nil, nil)
 		if len(got) != 1 || got[0].Kind != KindVariable || got[0].From.Mock != "mock-hs-81" || got[0].From.startUp {
 			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, without the rule: %+v; want a variable at mock-hs-81 like any recording's word, not a start-up refusal", tc.recorded, tc.field, tc.live, got)
 		}
@@ -792,7 +969,7 @@ func TestAStartUpWordTheConnectionsDifferInIsRefusedWhateverItsField(t *testing.
 	const path = "bind.$8"
 	given := func(recorded, live string, raw []Raw) Learned {
 		t.Helper()
-		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
 		if len(got) != 1 {
 			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
 		}
@@ -840,17 +1017,265 @@ func TestAStartUpWordTheConnectionsDifferInIsRefusedWhateverItsField(t *testing.
 func TestAStartUpMatchInNoOneFieldIsReadAsASwapsWord(t *testing.T) {
 	a, b := RawOf(eLaneSession("mock-hs-81", 900*time.Millisecond, 81), false), RawOf(eLaneSession("mock-hs-82", 850*time.Millisecond, 82), false)
 	raw := []Raw{a, b}
-	if !a.swapHolds(a.text, raw, func(string) bool { return false }) {
+	if !a.swapHolds(a.payload().text, raw, func(string) bool { return false }) {
 		t.Error("a start-up's match in no one field is not read as a swap's word; want refused")
 	}
-	if a.swapHolds(a.text, raw, func(own string) bool { return own == "UTF8" }) {
+	if a.swapHolds(a.payload().text, raw, func(own string) bool { return own == "UTF8" }) {
 		t.Error("a start-up's match in a field every start-up carries alike is read as a swap's word")
 	}
-	if !a.swapHolds(a.text, raw, func(own string) bool { return own == "81" }) {
+	if !a.swapHolds(a.payload().text, raw, func(own string) bool { return own == "81" }) {
 		t.Error("a start-up's backend pid is not read as a swap's word")
 	}
 	other := RawOf(&models.Mock{Name: "mock-q", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://deps.example/a"}}}, false)
-	if other.swapHolds(other.text, raw, func(string) bool { return false }) {
+	if other.swapHolds(other.payload().text, raw, func(string) bool { return false }) {
 		t.Error("a recording that is no start-up is read as one")
+	}
+}
+
+// Two candidate sources the recording gave in an order it does not show (in
+// flight together on two connections) need no order where each word of the
+// value found at the sources stands at the same fields in both, and F served
+// both as recorded: an application that copies a field of the last answer
+// it got takes the same words from either, so the order cannot change the
+// value it made (a ruling of 2026-11-03). node-jwt's pool start-ups, each
+// holding the server version's "1", or one statement sent on two
+// connections. c, answered before both, holds the recorded 82; a and b, in
+// flight together, F's 7. Where a word stands at different fields of the two
+// (a copy of one field takes it from one and nothing from the other), where
+// one holds a found word the other lacks, or where F served one changed, the
+// order stays unread and the value refused.
+func TestTiedSourcesHoldingTheValuesWordsAtTheSameFieldsNeedNoOrder(t *testing.T) {
+	c := eAnswer("mock-c", 500*time.Millisecond, "82").ServedAs(1).ServedAsRecorded()
+	tied := func(name string, before, answered time.Duration, rows []models.PostgresV3Cells, tag string) Raw {
+		return ePgAnswered(name, before, eRecAt.Add(-answered), "SELECT next_slot FROM slots", rows, tag)
+	}
+	seven := []models.PostgresV3Cells{{{Value: "7"}}}
+	a := tied("mock-a", 300*time.Millisecond, 100*time.Millisecond, seven, "SELECT 1")
+	b := tied("mock-b", 250*time.Millisecond, 200*time.Millisecond, seven, "SELECT 1")
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+	}{
+		{"F served a then b", []Raw{c, a.ServedAs(2).ServedAsRecorded(), b.ServedAs(3).ServedAsRecorded()}},
+		{"F served b then a", []Raw{c, a.ServedAs(3).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}},
+		{"on two connections at positions", []Raw{c, a.SentOn("0", 1).ServedAs(3).ServedAsRecorded(), b.SentOn("1", 2).ServedAs(2).ServedAsRecorded()}},
+		{"at one instant on two connections", []Raw{c, a.SentOn("0", 1).ServedAs(3).ServedAsRecorded(), tied("mock-b", 300*time.Millisecond, 100*time.Millisecond, seven, "SELECT 1").SentOn("1", 1).ServedAs(2).ServedAsRecorded()}},
+	} {
+		if got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil); got.Kind != KindNoise {
+			t.Errorf("%s, a and b holding 7 at the same field: %s (%q), want noise", tc.name, got.Kind, got.Why)
+		}
+	}
+	const inFlight = "the recording's requests for mock-a and mock-b were in flight together"
+	moved := tied("mock-b", 250*time.Millisecond, 200*time.Millisecond, []models.PostgresV3Cells{{{Value: "9"}}}, "SELECT 7")
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+		want string
+	}{
+		{"b holds 7 at another field", []Raw{c, a.ServedAs(2).ServedAsRecorded(), moved.ServedAs(3).ServedAsRecorded()}, inFlight},
+		{"b holds 7 at the same field and at another", []Raw{c, a.ServedAs(2).ServedAsRecorded(), tied("mock-b", 250*time.Millisecond, 200*time.Millisecond, seven, "SELECT 7").ServedAs(3).ServedAsRecorded()}, inFlight},
+		{"b holds the recorded 82 too", []Raw{c, a.ServedAs(2).ServedAsRecorded(), tied("mock-b", 250*time.Millisecond, 200*time.Millisecond, []models.PostgresV3Cells{{{Value: "7"}}, {{Value: "82"}}}, "SELECT 2").ServedAs(3).ServedAsRecorded()}, inFlight},
+		{"F served b changed, giving 7 where it was recorded", []Raw{c, a.ServedAs(2).ServedAsRecorded(), b.ServedAs(3).ServedLive(tied("mock-b", 250*time.Millisecond, 200*time.Millisecond, seven, "SELECT 2"))}, inFlight},
+		{"an exchange's leaf beside b", nil, "mock-8 and mock-b at one instant"},
+	} {
+		var earlier []Earlier
+		if tc.raw == nil {
+			at := eRecAt.Add(-300 * time.Millisecond)
+			e := eLeaf(at, 2, "7", "7")
+			e.Payload = RawOf(&models.Mock{Name: "mock-8", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: eRecAt.Add(-100 * time.Millisecond)}}, true).ServedAs(2)
+			earlier = []Earlier{e}
+			tc.raw = []Raw{c, tied("mock-b", 300*time.Millisecond, 200*time.Millisecond, seven, "SELECT 1").ServedAs(3).ServedAsRecorded()}
+		}
+		got := classifyF(t, "slot 82", "slot 7", earlier, tc.raw, nil)
+		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) {
+			t.Errorf("FALSE GREEN? %s: %s (%q), want refused: %q", tc.name, got.Kind, got.Why, tc.want)
+		}
+	}
+	// Places tied alike are one place to the order alone: F giving c after
+	// them is still another order.
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{eAnswer("mock-c", 500*time.Millisecond, "82").ServedAs(3).ServedAsRecorded(), a.ServedAs(1).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the 1st earlier answer was mock-c in the recording and mock-a in record's full round") {
+		t.Errorf("FALSE GREEN? F gave c after the tied pair: %s (%q), want refused for the order", got.Kind, got.Why)
+	}
+}
+
+// Two tied sources read as one place only where each word of the value
+// stands at fields of both (alike). A word that stands in a source's text
+// but in no one field of it gives no fields to compare: here "abcd", read
+// where a quoted-printable soft break ("ab=" then "cd") joins two cells,
+// at the first two cells of a and the last two of b. Copied by position,
+// the order could change it, so the order is read: in flight together it
+// stays refused, and with a answered before b was asked it is learned.
+func TestATiedWordStandingInNoOneFieldLeavesTheOrderRead(t *testing.T) {
+	src := func(name string, before, answered time.Duration, n int, cells ...string) Raw {
+		var row models.PostgresV3Cells
+		for _, v := range cells {
+			row = append(row, models.PostgresV3Cell{Value: v})
+		}
+		return ePgAnswered(name, before, eRecAt.Add(-answered), "SELECT next_slot FROM slots", []models.PostgresV3Cells{row}, "SELECT 1").ServedAs(n).ServedAsRecorded()
+	}
+	a := src("mock-a", 300*time.Millisecond, 100*time.Millisecond, 1, "ab=", "cd")
+	together := src("mock-b", 250*time.Millisecond, 200*time.Millisecond, 2, "x", "ab=", "cd")
+	if got := classifyF(t, "abcd", "efgh", nil, []Raw{a, together}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-a and mock-b were in flight together") {
+		t.Errorf("FALSE GREEN? abcd in no one field of a and b, in flight together: %s (%q), want refused for the order", got.Kind, got.Why)
+	}
+	after := src("mock-b", 50*time.Millisecond, 20*time.Millisecond, 2, "x", "ab=", "cd")
+	if got := classifyF(t, "abcd", "efgh", nil, []Raw{a, after}, nil); got.Kind != KindNoise {
+		t.Errorf("abcd in no one field of a and b, a answered before b was asked: %s (%q), want noise", got.Kind, got.Why)
+	}
+}
+
+// Only recordings tie alike (alike): two exchanges of the call's own test in
+// flight together, each holding F's 7 at the same leaf, stay refused, as
+// keploy reads an exchange's words at its leaves and not in its payload.
+// And a word a place holds as a key is not the word another holds as the
+// value at that key: two answers whose headers hold 7, as a name in one and
+// as that name's value in the other, stay refused; as a name in both, they
+// tie alike.
+func TestTiedExchangesAndKeysStayInTheirOrder(t *testing.T) {
+	c := eAnswer("mock-c", 500*time.Millisecond, "82").ServedAs(1).ServedAsRecorded()
+	exchange := func(name string, before, answered time.Duration, n int) Earlier {
+		at := eRecAt.Add(-before)
+		return Earlier{Mock: name, At: at, Payload: RawOf(&models.Mock{Name: name, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: eRecAt.Add(-answered)}}, true).ServedAs(n), Seen: []Seen{
+			{Side: Response, Leaf: Leaf{Path: "body.retries", Type: Number, Value: "7"}, Live: "7"},
+		}}
+	}
+	earlier := []Earlier{exchange("mock-8", 300*time.Millisecond, 100*time.Millisecond, 2), exchange("mock-9", 250*time.Millisecond, 200*time.Millisecond, 3)}
+	if got := classifyF(t, "slot 82", "slot 7", earlier, []Raw{c}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-8 and mock-9 were in flight together") {
+		t.Errorf("FALSE GREEN? two exchanges in flight together: %s (%q), want refused", got.Kind, got.Why)
+	}
+	answer := func(name string, before, answered time.Duration, header map[string]string) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			ReqTimestampMock: eRecAt.Add(-before), ResTimestampMock: eRecAt.Add(-answered),
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://api/slots"},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Header: header},
+		}}, false)
+	}
+	a := answer("mock-a", 300*time.Millisecond, 100*time.Millisecond, map[string]string{"7": "x"}).ServedAs(2).ServedAsRecorded()
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{c, a, answer("mock-b", 250*time.Millisecond, 200*time.Millisecond, map[string]string{"7": "x"}).ServedAs(3).ServedAsRecorded()}, nil); got.Kind != KindNoise {
+		t.Errorf("7 a header's name in both: %s (%q), want noise", got.Kind, got.Why)
+	}
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{c, a, answer("mock-b", 250*time.Millisecond, 200*time.Millisecond, map[string]string{"7": "7"}).ServedAs(3).ServedAsRecorded()}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-a and mock-b were in flight together") {
+		t.Errorf("FALSE GREEN? 7 a header's name in one, and its value too in the other: %s (%q), want refused", got.Kind, got.Why)
+	}
+}
+
+// node-jwt's signup (the lane's leg r30F-2): the bcrypt hash an INSERT ...
+// RETURNING echoes held, as F saw it, a one-character run "1" that stands in
+// the test case's User-Agent (curl/8.14.1), in the server version every
+// start-up carries (10.5-2.pgdg90+1), and in the "$1" of Sequelize's
+// statements. Two pool start-ups opened together on two connections hold it
+// at the same fields: their order cannot change what a copy takes, and the
+// echo is learned. A statement's "$1" is no word of data. A start-up beside
+// a role INSERT whose bind holds 1 on another connection, in flight together,
+// holds it at other fields: the order is unread, and the echo stays refused
+// (a stated limit).
+func TestNodeJwtsSignupEchoPastStartUpsTiedAlike(t *testing.T) {
+	const rec = "$2a$08$naN9ja.m2B8b.yduH.xmdeNQdwsIyJPVq2bf1D9Ruy/NZ0T3Z8TRu"
+	const live = "$2a$08$Qx7mUu3rYkoT9pLkWw2zEe.aBcDeFgHiJkLmNoPqRsTuVwXyZ/1.z"
+	echo := []Leaf{{Path: "rows[0][3]", Noise: "rows[0][3]", Type: String, Value: rec}}
+	ua := []Earlier{{Mock: givenPlace("post-api-auth-signup-1"), Given: true, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "header.User-Agent", Type: String, Value: "curl/8.14.1"}, Live: "curl/8.14.1"},
+	}}}
+	stmt := func(name string, before time.Duration, sql string, binds ...string) Raw {
+		var cells models.PostgresV3Cells
+		for _, v := range binds {
+			cells = append(cells, models.PostgresV3Cell{Value: v})
+		}
+		return RawOf(&models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: eRecAt.Add(-before), ResTimestampMock: eRecAt.Add(-before + 3*time.Millisecond),
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+				SQLNormalized: sql, BindValues: cells, Response: &models.PostgresV3Response{CommandComplete: "SET"},
+			}},
+		}}, false)
+	}
+	startup := func(name string, before, took time.Duration) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: eRecAt.Add(-before), ResTimestampMock: eRecAt.Add(-before + took),
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeSession, Session: &models.PostgresV3SessionSpec{
+				ProtocolVersion: "3.0", ServerVersion: "10.5 (Debian 10.5-2.pgdg90+1)",
+				ParameterStatus:  map[string]string{"server_version": "10.5 (Debian 10.5-2.pgdg90+1)", "TimeZone": "UTC"},
+				BackendProcessID: 80, BackendSecretKey: 12345,
+			}},
+		}}, false)
+	}
+	served := func(raw ...Raw) []Raw {
+		out := make([]Raw, len(raw))
+		for i, x := range raw {
+			out[i] = x.ServedAs(i + 1).ServedAsRecorded()
+		}
+		return out
+	}
+	set1 := stmt("mock-1", 700*time.Millisecond, "SET client_min_messages TO $1", "warning").SentOn("0", 1)
+	set2 := stmt("mock-2", 700*time.Millisecond, "SET TIME ZONE INTERVAL $1 HOUR TO MINUTE", "+00:00").SentOn("0", 2)
+	insert := func(id string) Raw {
+		return stmt("mock-16", 550*time.Millisecond, `INSERT INTO "roles" ("id","name","createdAt","updatedAt") VALUES ($1,$2,$3,$4) RETURNING "id"`, id, "user", "2026-10-24 09:55:53.388 +00:00", "2026-10-24 09:55:53.388 +00:00").SentOn("2", 7)
+	}
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+	}{
+		{"two pool start-ups in flight together", served(set1, set2, startup("mock-17", 548*time.Millisecond, 4*time.Millisecond), startup("mock-18", 547*time.Millisecond, 5*time.Millisecond))},
+		{"a role INSERT whose binds hold no 1 beside a pool start-up", served(set1, set2, insert("2"), startup("mock-17", 548*time.Millisecond, 4*time.Millisecond))},
+	} {
+		if got := classifyF(t, rec, live, ua, tc.raw, echo); got.Kind != KindEcho {
+			t.Errorf("%s: %s (%q), want the echo", tc.name, got.Kind, got.Why)
+		}
+	}
+	got := classifyF(t, rec, live, ua, served(set1, set2, insert("1"), startup("mock-17", 548*time.Millisecond, 4*time.Millisecond)), echo)
+	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording's requests for mock-16 and mock-17 were in flight together") {
+		t.Errorf("FALSE GREEN? a role INSERT whose bind holds 1 beside a pool start-up: %s (%q), want refused for the order", got.Kind, got.Why)
+	}
+}
+
+// A start-up's word a swap can change is no source the value is learned
+// from (swapHolds): a value holding only that word ("flyway" of the pool's
+// application_name, in "flyway-7") is refused, naming the start-up. A later
+// payload made before the call that holds the value whole (the
+// application's own earlier query sent "flyway-7") outranks that part: the
+// value is learned as its variable, which every replay checks, under the
+// rule a copy follows its source and without it. One recorded after the
+// call that F had not served before it is no place, and the refusal stands.
+func TestAWholeCopyInALaterPayloadOutranksAStartUpsPart(t *testing.T) {
+	const path = "bind.$8"
+	given := func(raw []Raw) Learned {
+		t.Helper()
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "hikari-7"}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "flyway-7"}}}, eRecAt, nil, raw, nil, nil, nil)
+		if len(got) != 1 {
+			t.Fatalf("%+v", got)
+		}
+		return got[0]
+	}
+	named := func(name string, before time.Duration, pid int32, app string) *models.Mock {
+		m := eLaneSession(name, before, pid)
+		m.Spec.PostgresV3.Session.ParameterStatus["application_name"] = app
+		return m
+	}
+	startUps := func() []Raw {
+		return []Raw{RawOf(named("mock-hs-81", 900*time.Millisecond, 81, "flyway"), false).ServedAs(1).ServedAsRecorded(),
+			RawOf(named("mock-hs-82", 850*time.Millisecond, 82, "hikari"), false).ServedAs(2).ServedAsRecorded()}
+	}
+	query := func(at time.Time) Raw {
+		return RawOf(&models.Mock{Name: "mock-q-3", Kind: "Pulsar", Spec: models.MockSpec{
+			GenericRequests:  []models.Payload{{Origin: "client", Message: []models.OutputBinary{{Type: "json", Data: `{"commandType":"SEND","payload":{"pool":"flyway-7"}}`}}}},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+		}}, false)
+	}
+	for _, c := range []struct {
+		what  string
+		raw   []Raw
+		whole bool
+	}{
+		{"the start-up's part alone", startUps(), false},
+		{"a later query holding the value whole", append(startUps(), query(eRecAt.Add(-100*time.Millisecond))), true},
+		{"the query recorded after the call, not served before it", append(startUps(), query(eRecAt.Add(100*time.Millisecond))), false},
+	} {
+		for rule, got := range map[string]Learned{"a copy follows its source": classifyF(t, "flyway-7", "hikari-7", nil, c.raw, nil), "without it": given(c.raw)} {
+			switch {
+			case c.whole && (got.Kind != KindVariable || got.From.Mock != "mock-q-3" || got.From.Held != "flyway-7"):
+				t.Errorf("%s, %s: %s from %q held %q (%s); want the variable of mock-q-3 holding the value whole", c.what, rule, got.Kind, got.From.Mock, got.From.Held, got.Why)
+			case !c.whole && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-hs-81 at spec.postgresV3.session.parameterStatus.application_name, a connection's recorded start-up")):
+				t.Errorf("FALSE GREEN? %s, %s: %s from %q (%s); want refused, naming mock-hs-81's application_name", c.what, rule, got.Kind, got.From.Mock, got.Why)
+			}
+		}
 	}
 }

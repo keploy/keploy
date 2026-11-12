@@ -3,7 +3,6 @@
 package linux
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -140,7 +139,7 @@ func TestTheClientsRegistrationKeepsItsPIDNamespace(t *testing.T) {
 	h := &Hooks{logger: zap.NewNop(), clientRegistrationMap: m}
 	var opts config.Agent
 	opts.ClientNSPID, opts.ClientPIDNS = 10, "100@b"
-	if err := h.RegisterClient(context.Background(), opts, nil); err != nil {
+	if err := h.registerClient(structs.ClientInfo{ClientNSPID: opts.ClientNSPID}, opts); err != nil {
 		t.Fatal(err)
 	}
 	h.clientMu.Lock()

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
@@ -61,13 +62,15 @@ func (c *relayedConn) warnings() []observer.LoggedEntry {
 // (its context ends, as at a timeout) and closes the connection (close(2), not
 // a half-close), and the dependency answers once the FIN has reached it. The
 // relay forwards the answer, and the client's TCP stack refuses it with a
-// reset: the application never read it. It is not recorded as a mock, and
-// nothing is left out for it: the call got no answer the application saw, as
-// when the dependency does not answer before the connection ends. Before, the
-// answer was recorded, a mock for a call whose test case saw a timeout. The
-// call's context is cancelled once the dependency has the request, not by a
-// deadline, so a slow runner cannot end the call before its request is out.
-func TestRecordV2_ThroughTheRelayALateAnswerToACallTheClientGaveUpOnIsNotRecorded(t *testing.T) {
+// reset: the application never read it. The call is recorded as what the
+// application saw, a timeout fault (no answer before it closed), and the late
+// answer is not in it: replay holds the call unanswered until the application
+// gives up again. Nothing is left out for it. Before, the answer was recorded,
+// a mock for a call whose test case saw a timeout; then nothing was, and
+// replay had no mock for the call. The call's context is cancelled once the
+// dependency has the request, not by a deadline, so a slow runner cannot end
+// the call before its request is out.
+func TestRecordV2_ThroughTheRelayALateAnswerToACallTheClientGaveUpOnIsRecordedAsATimeout(t *testing.T) {
 	c := newRelayedConn(t)
 	c.start(t)
 	client := &nethttp.Client{
@@ -103,21 +106,22 @@ func TestRecordV2_ThroughTheRelayALateAnswerToACallTheClientGaveUpOnIsNotRecorde
 		t.Fatal(err)
 	}
 	mocks := c.end(t)
-	if len(mocks) != 0 {
-		t.Fatalf("recorded %d mock(s), the first %s -> %q; want none: the client had closed, and never read the answer",
-			len(mocks), mocks[0].Spec.HTTPReq.URL, mocks[0].Spec.HTTPResp.Body)
+	if len(mocks) != 1 {
+		t.Fatalf("recorded %d mock(s), want 1: the call the client gave up on, as a timeout", len(mocks))
+	}
+	m := mocks[0]
+	// A timeout before any answer: the client closed with nothing read.
+	wantFault(t, m, models.Fault{Kind: models.FaultTimeout})
+	if r := m.Spec.HTTPResp; r != nil && (r.StatusCode != 0 || r.Body != "" || len(r.Header) != 0) {
+		t.Fatalf("recorded answer %+v, want none: the client never read the late answer", r)
 	}
 	if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
-		t.Fatalf("left out %v (%d counted), want nothing: the call got no answer the application read", s, c.mgr.MocksLeftOut())
+		t.Fatalf("left out %v (%d counted), want nothing: the call is recorded", s, c.mgr.MocksLeftOut())
 	}
-	if w := c.warnings(); len(w) != 0 {
-		t.Fatalf("logged at %v: %q", w[0].Level, w[0].Message)
-	}
-	// Said apart at Debug, as the one silent end that can hide a response an
-	// application read (a half-closed client that reset before its stack
-	// acknowledged it).
-	if n := c.logs.FilterMessageSnippet("the client closed the connection before its stack acknowledged any of the response").Len(); n != 1 {
-		t.Fatalf("%d Debug lines say the client closed before its stack acknowledged any of the response, want one", n)
+	for _, w := range c.warnings() {
+		if !strings.Contains(w.Message, "keploy now records a call that ended in a fault") {
+			t.Fatalf("logged at %v: %q", w.Level, w.Message)
+		}
 	}
 }
 
@@ -318,7 +322,8 @@ func TestRecordV2_ThroughTheRelayAStreamTheSessionClosedIsNotTheClientsClosePart
 // it refuses. The parser reads the first response knowing the stream ended
 // where the client stopped, and records it all the same: it is whole, and only
 // a response the stream ends in the middle of is left out. The second request
-// got none of its answer, so it is not recorded, and nothing is left out.
+// got none of its answer: it is recorded as what the client saw, a timeout
+// (the client gave up on it), and nothing is left out.
 func TestRecordV2_ThroughTheRelayAWholeResponseBeforeTheClientStoppedIsRecorded(t *testing.T) {
 	c := newRelayedConn(t)
 	c.startRelay(t)
@@ -347,12 +352,19 @@ func TestRecordV2_ThroughTheRelayAWholeResponseBeforeTheClientStoppedIsRecorded(
 		t.Fatal("the relay did not say the destination's stream ended where the client stopped")
 	}
 	c.startParser(t)
-	assertPairs(t, c.end(t), 7)
+	mocks := c.end(t)
+	if len(mocks) != 2 {
+		t.Fatalf("recorded %d mocks, want 2: the whole response, then the call the client gave up on", len(mocks))
+	}
+	wantFault(t, mocks[1], models.Fault{Kind: models.FaultTimeout})
+	assertPairs(t, mocks[:1], 7)
 	if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
 		t.Fatalf("left out %v (%d counted), want nothing", s, c.mgr.MocksLeftOut())
 	}
-	if w := c.warnings(); len(w) != 0 {
-		t.Fatalf("logged at %v: %q", w[0].Level, w[0].Message)
+	for _, w := range c.warnings() {
+		if !strings.Contains(w.Message, "keploy now records a call that ended in a fault") {
+			t.Fatalf("logged at %v: %q", w.Level, w.Message)
+		}
 	}
 }
 

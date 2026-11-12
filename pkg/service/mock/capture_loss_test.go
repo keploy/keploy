@@ -2,8 +2,12 @@ package mock
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +129,15 @@ func TestAReplayThatLostACallFailsUnderTheSwitchOnly(t *testing.T) {
 	r := mustReceipt(t, dir)
 	require.True(t, r.Isolated)
 	require.Empty(t, r.FailedBy)
+	require.Empty(t, r.CaptureIncomplete)
+	// A run that lost nothing names no such field, in the receipt's file or
+	// its JSON (keploy mock status --json): older readers see what they did.
+	raw, err := os.ReadFile(filepath.Join(dir, "set", ReceiptFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "captureIncomplete")
+	j, err := json.Marshal(r)
+	require.NoError(t, err)
+	require.NotContains(t, string(j), "captureIncomplete")
 
 	provenOn(t)
 	on := &lossCounter{after: tls}
@@ -135,6 +148,31 @@ func TestAReplayThatLostACallFailsUnderTheSwitchOnly(t *testing.T) {
 	require.Equal(t, FailedByCaptureIncomplete, r.FailedBy)
 	require.False(t, r.Isolated)
 	require.Contains(t, logged(logs), "keploy could not capture every call the test command made")
+	require.Equal(t, tls, r.CaptureIncomplete, "the receipt keeps the run's loss as data")
+
+	// A PID map's refusal and another loss in one run: the receipt keeps
+	// both as data, the refusal with its own errno, as its note says both.
+	refused := models.PIDMapRefusals{Target: 2, LastTargetErr: -7}
+	dir, code, _ = replayIn(t, replayCase{losses: &lossCounter{after: tls}, pidMaps: &pidMapCounter{after: refused}, mapped: true, keployFails: true})
+	require.Equal(t, 1, code)
+	r = mustReceipt(t, dir)
+	require.Equal(t, FailedByCaptureIncomplete, r.FailedBy)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, What: refused.CaptureIncomplete(), Err: -7}, tls[0]}, r.CaptureIncomplete)
+	require.Contains(t, r.IsolationNote, refused.CaptureIncomplete())
+	require.Contains(t, r.IsolationNote, "to db:5432")
+
+	// A loss keploy judges, one it cannot capture at all and the kernel's
+	// evidence, in one run: only the judged loss fails the run, so only it is
+	// the receipt's CaptureIncomplete; the one keploy cannot capture is its
+	// CannotCapture alone, and the evidence is neither.
+	unix := models.CaptureLoss{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}
+	skip := models.CaptureLoss{Kind: models.CaptureLossKernelSkip, Count: 3}
+	dir, code, _ = replayIn(t, replayCase{losses: &lossCounter{after: models.CaptureLosses{tls[0], unix, skip}}, mapped: true, keployFails: true})
+	require.Equal(t, 1, code)
+	r = mustReceipt(t, dir)
+	require.Equal(t, FailedByCaptureIncomplete, r.FailedBy)
+	require.Equal(t, tls, r.CaptureIncomplete, "only what fails the run")
+	require.Equal(t, models.CaptureLosses{unix}, r.CannotCapture)
 
 	// Lost before the test command ran: not this run's.
 	before := &lossCounter{before: tls, after: tls}
@@ -218,6 +256,99 @@ func TestAReplayWhoseLossCountIsLostIsUnverified(t *testing.T) {
 	require.Contains(t, r.IsolationNote, "could not read whether the agent captured every call")
 	require.Contains(t, logged(logs), "keploy could not read whether the agent captured every call the test command made")
 	require.NotContains(t, logged(logs), "tracked every process")
+}
+
+// pidLossReplayInstr is replayIn's runner whose agent counts both the
+// processes it could not track and the calls it could not capture.
+type pidLossReplayInstr struct {
+	*runWrites
+	*lossCounter
+	*pidMapCounter
+}
+
+// Each of the agent's counts that keploy could not read stays on the
+// receipt as data, whatever reason the isolation note keeps. The note keeps
+// one: a call that matched nothing, a failed test command, a process the
+// agent could not track, a capture loss the agent counted, or the PID-map
+// count ahead of the capture-loss count. A reader judging a test that
+// passed beside another test's misses has no other way to learn the run is
+// not proven. Mutation: drop either field, set one only while the run
+// still reads isolated, set the capture-loss one only when the PID-map
+// count was read or no process was refused, or set the PID-map one only
+// when no capture loss failed the run.
+func TestAReceiptKeepsEachUnreadCountAsData(t *testing.T) {
+	provenOn(t)
+	tracking := errors.New("agent returned 500: read pid_map_insert_failures[target_namespace_pids]: bad file descriptor")
+	capture := errors.New("connection reset")
+	missed := []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x"}}
+	failed := models.AppError{AppErrorType: models.ErrUnExpected, ExitCode: 1}
+	for _, tc := range []struct {
+		name                   string
+		c                      replayCase
+		wantNote               string
+		wantTracking, wantLoss bool
+		wantExitZero           bool
+	}{
+		{name: "process tracking unread beside a call that matched nothing",
+			c:        replayCase{mockErrs: missed, pidMaps: &pidMapCounter{afterErr: tracking}},
+			wantNote: "1 call(s) matched nothing", wantTracking: true},
+		{name: "call capture unread beside a call that matched nothing",
+			c:        replayCase{mockErrs: missed, pidMaps: &pidMapCounter{}, losses: &lossCounter{errAt: map[int]error{2: capture}}},
+			wantNote: "1 call(s) matched nothing", wantLoss: true},
+		{name: "both unread, the test command failed",
+			c:        replayCase{runExit: failed, pidMaps: &pidMapCounter{afterErr: tracking}, losses: &lossCounter{errAt: map[int]error{2: capture}}},
+			wantNote: "the test command failed", wantTracking: true, wantLoss: true},
+		{name: "both unread, a clean run: the note keeps process tracking",
+			c:        replayCase{pidMaps: &pidMapCounter{afterErr: tracking}, losses: &lossCounter{errAt: map[int]error{2: capture}}},
+			wantNote: "could not read whether the agent tracked every process", wantTracking: true, wantLoss: true, wantExitZero: true},
+		// A process the agent refused fails the run, and the note names
+		// it; the capture-loss count unread is still kept.
+		{name: "call capture unread beside a process the agent could not track",
+			c:        replayCase{keployFails: true, pidMaps: &pidMapCounter{after: models.PIDMapRefusals{Target: 1}}, losses: &lossCounter{errAt: map[int]error{2: capture}}},
+			wantNote: "capture incomplete", wantLoss: true},
+		// A capture loss the agent counted fails the run, and the note
+		// names it; the PID-map count unread is still kept.
+		{name: "process tracking unread beside a capture loss the agent counted",
+			c: replayCase{keployFails: true, pidMaps: &pidMapCounter{afterErr: tracking},
+				losses: &lossCounter{after: models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to 10.0.0.1:443"}}}},
+			wantNote: "capture incomplete", wantTracking: true},
+		// Controls: both counts read.
+		{name: "both read, a call that matched nothing",
+			c:        replayCase{mockErrs: missed, pidMaps: &pidMapCounter{}},
+			wantNote: "1 call(s) matched nothing"},
+		{name: "both read, a clean run", c: replayCase{pidMaps: &pidMapCounter{}}, wantExitZero: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.c.mapped = true
+			dir, code, _ := replayIn(t, tc.c)
+			if tc.wantExitZero {
+				require.Zero(t, code, "no --strict: an unread count alone fails nothing")
+			}
+			r := mustReceipt(t, dir)
+			if tc.wantNote == "" {
+				require.True(t, r.Isolated, r.IsolationNote)
+			} else {
+				require.False(t, r.Isolated)
+				require.Contains(t, r.IsolationNote, tc.wantNote)
+			}
+			if tc.wantTracking {
+				require.Contains(t, r.ProcessTrackingUnread, "could not read whether the agent tracked every process")
+				require.Contains(t, r.ProcessTrackingUnread, "bad file descriptor", "why it could not be read")
+			} else {
+				require.Empty(t, r.ProcessTrackingUnread)
+			}
+			if tc.wantLoss {
+				require.Contains(t, r.CallCaptureUnread, "could not read whether the agent captured every call")
+				require.Contains(t, r.CallCaptureUnread, "connection reset", "why it could not be read")
+			} else {
+				require.Empty(t, r.CallCaptureUnread)
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, "set", ReceiptFile))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantTracking, strings.Contains(string(raw), "processTrackingUnread:"), "written to the file, and only when unread")
+			require.Equal(t, tc.wantLoss, strings.Contains(string(raw), "callCaptureUnread:"), "written to the file, and only when unread")
+		})
+	}
 }
 
 // Decision 20: a test command that called what keploy cannot capture at all
@@ -317,4 +448,75 @@ func TestARecordsTestsFileCarriesWhatKeployCannotCapture(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, r, "no per-test file")
 	require.Equal(t, db, r.CannotCapture)
+}
+
+// A record of two test workers whose tests overlap, with a call from a
+// process in no worker's keploy instance made while both were open: a build
+// that judges the record keeps the recording, and its per-test file charges
+// each open test, and only those, with the call, which leaves them without a
+// verdict; a build that does not judge it keeps no recording, and fails.
+func TestARecordChargesEachTestOpenAtACallFromNoWorker(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	passed := models.AppError{AppErrorType: models.ErrAppStopped}
+	run := func(t *testing.T, appErr models.AppError) (*mockService, string, error) {
+		dir := t.TempDir()
+		ws := []models.ScopeWindow{mark("orders::TestA", 0, 10*time.Millisecond), mark("orders::TestB", 2*time.Millisecond, 12*time.Millisecond), mark("orders::TestC", 20*time.Millisecond, 30*time.Millisecond)}
+		for i, inst := range []uint32{1, 2, 1} {
+			ws[i].Outcome, ws[i].Dir, ws[i].Instance = models.ScopeOutcomePassed, "orders", inst
+		}
+		instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, appErr), windows: ws}
+		shared, own := mockAt("shared-0", runnerT0.Add(5*time.Millisecond)), mockAt("own-c", runnerT0.Add(25*time.Millisecond))
+		shared.SourcePID, own.Instance = 4242, 1
+		instr.mocks = []*models.Mock{shared, own}
+		cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 2 -json ./...")
+		cfg.Path = dir
+		utils.ErrCode = 0
+		t.Cleanup(func() { utils.ErrCode = 0 })
+		svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+		return &mockService{config: cfg}, dir, svc.Record(context.Background())
+	}
+	t.Run("judged", func(t *testing.T) {
+		judgedBuild(t)
+		ms, dir, err := run(t, passed)
+		require.NoError(t, err)
+		r, err := ReadRecordTestsReceipt(dir, ms.setName())
+		require.NoError(t, err)
+		require.NotNil(t, r, "no per-test file")
+		charged := map[string]models.CaptureLosses{}
+		for _, tr := range r.Tests {
+			if tr.Evidence != nil {
+				charged[tr.Name] = tr.Evidence.CannotCapture
+			}
+		}
+		want := models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock mock-0, from process 4242"}} // named as recorded
+		require.Equal(t, map[string]models.CaptureLosses{"orders::TestA": want, "orders::TestB": want}, charged)
+	})
+	notJudged := func(t *testing.T, appErr models.AppError, code int) {
+		ms, dir, err := run(t, appErr)
+		require.ErrorContains(t, err, "1 call(s) came from no test worker while workers' tests were open")
+		require.Equal(t, code, utils.ErrCode)
+		_, statErr := os.Stat(filepath.Join(dir, ms.setName(), "mocks.yaml"))
+		require.True(t, os.IsNotExist(statErr), "the recording was kept: %v", statErr)
+		_, statErr = os.Stat(filepath.Join(dir, stagingSetID(ms.setName())))
+		require.True(t, os.IsNotExist(statErr), "the staging set was left behind: %v", statErr)
+	}
+	t.Run("not judged", func(t *testing.T) { notJudged(t, passed, utils.ExitKeployError) })
+	// A test command that failed on its own keeps its exit code: keploy's
+	// refusal does not hide the command's verdict.
+	t.Run("not judged, the test command failed", func(t *testing.T) {
+		notJudged(t, models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}, 3)
+	})
+}
+
+// The run's PID map losses each carry their own map's errno as data, beside
+// the run's verdict as words, so a reader of both never takes one map's
+// cause for the other's.
+func TestTheRunsPIDMapLossesCarryEachMapsOwnErrno(t *testing.T) {
+	refused := models.PIDMapRefusals{Target: 4, LastTargetErr: -7, Excluded: 2, LastExcludedErr: -110}
+	got, err := (&mockService{}).runLosses(context.Background(), lossBase{checked: true}, nil, nil, refused)
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{
+		{Kind: models.CaptureLossPIDMap, Count: 4, What: refused.CaptureIncomplete(), Err: -7},
+		{Kind: models.CaptureLossPIDMapExcluded, Count: 2, What: refused.CaptureIncomplete(), Err: -110},
+	}, got)
 }

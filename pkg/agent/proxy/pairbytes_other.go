@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package proxy
 
@@ -27,7 +27,7 @@ func (p *Proxy) proveAppVisible(*net.TCPConn) {}
 
 // pairClosing notes a paired connection's close; none is paired here.
 func (p *Proxy) pairClosing(_ context.Context, conn net.Conn, _ *trackedConn) {
-	_, _, _ = p.paired.closing(conn)
+	_, _, _ = p.paired.closing(conn, nil)
 }
 
 func readUnread(*net.TCPConn) (int, error) {

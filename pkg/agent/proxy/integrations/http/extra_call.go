@@ -14,24 +14,123 @@ import (
 // proven switch), whether it is one call more than the open test recorded:
 // identical, as the matcher judges it, to a call the test's own mocks already
 // answered. It returns how many times that call was recorded for the test,
-// 0 when the request is not such a call or exact serving is off.
+// 0 when the request is not such a call or exact serving is off, and the
+// earliest request time of those recordings (notOwnedRecordingBefore's
+// before): zero when none has one, so keploy cannot place them. It returns
+// -1 when the call's view moved (integrations.ConsumedInCallView): its miss
+// and the test's answered list may be of two views, so it is told neither
+// one call more than recorded nor not one, which would pair it or name a
+// recording made elsewhere for it; it misses plainly.
 //
 // The test's answered mocks are matched as the live pool would be, on a view
 // that holds only them and that no match can consume, so one definition of
 // "the same call" serves both the answer and this verdict.
-func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) int {
-	er, ok := mockDb.(integrations.ExactConsumedReader)
-	if !ok {
-		return 0
+func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (int, time.Time) {
+	n, first, _ := h.extraCallOf(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
+	return n, first
+}
+
+// extraCallOf is extraCall, and the test's answered mocks the request
+// matches each on its own (matched): the recordings of the call it is one
+// more of, which a repeated read is answered again from
+// (integrations.AnswerRepeatRead). matched may be empty where n is not 0:
+// the request matches the answered mocks together and none alone. It is
+// empty where n is -1 (the call's view moved): no recording of a list that
+// may be of another view answers the call again.
+func (h *HTTP) extraCallOf(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (int, time.Time, []*models.Mock) {
+	consumed, oneView := integrations.ConsumedInCallView(mockDb)
+	if !oneView {
+		return -1, time.Time{}, nil
 	}
-	answered := FilterHTTPMocks(er.ConsumedTestMocks())
+	answered := FilterHTTPMocks(consumed)
 	if len(answered) == 0 {
-		return 0
+		return 0, time.Time{}, nil
 	}
-	// The test's bindings, on a copy: a mock that declares a variable is
-	// matched as it was answered, and the dry match binds nothing.
+	dry := h.answeredMatch(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
+	if !dry(answered) {
+		return 0, time.Time{}, nil
+	}
+	// How often the test recorded the call: each answered mock the call
+	// matches on its own (recordings of one call may differ where its
+	// variables sit), and the earliest of them.
+	var matched []*models.Mock
+	var first time.Time
+	for _, a := range answered {
+		if !dry([]*models.Mock{a}) {
+			continue
+		}
+		matched = append(matched, a)
+		if at := a.Spec.ReqTimestampMock; !at.IsZero() && (first.IsZero() || at.Before(first)) {
+			first = at
+		}
+	}
+	return max(len(matched), 1), first, matched
+}
+
+// skippedReadsOf names, for a request one more than the open test recorded
+// (extraCall), the reads of tests the replay's gate skips that answered the
+// same call in the test's window (integrations.ExactSkippedReadsReader), in
+// the order they did: each matched on its own, as the matcher judges it
+// (answeredMatch). The test made those calls too, which its recordings do
+// not count, so its extra-call line counts them (MockMismatchReport.
+// SkippedReads). None when the store keeps none, as with no gate skip, and
+// none when the call's view moved (integrations.SkippedReadsInCallView): the
+// list may then be another test's.
+func (h *HTTP) skippedReadsOf(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) []string {
+	reads := FilterHTTPMocks(integrations.SkippedReadsInCallView(mockDb))
+	if len(reads) == 0 {
+		return nil
+	}
+	dry := h.answeredMatch(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
+	var names []string
+	for _, a := range reads {
+		if dry([]*models.Mock{a}) {
+			names = append(names, a.Name)
+		}
+	}
+	return names
+}
+
+// ownCall reports whether the request is one of the open test's own calls
+// (integrations.OwnRepeatRead): whether it matches one of the test's own HTTP
+// recordings, answered or not, as the matcher judges it (answeredMatch). It
+// reads only the recordings the strict pass's index of the test's own files
+// for the request (strictOwned.at: those of its method and masked path, those
+// of its method that learned a place of their URL, and those that declare
+// variables), the only ones the variable and strict passes, which decide
+// every call under the proven switch, may answer it with: never every
+// recording the test owns. db is the call's held store, base the store it is
+// held from, whose index the strict pass keeps too.
+func (h *HTTP) ownCall(ctx context.Context, input *req, db, base integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseStrict bool) bool {
+	sr, ok := db.(integrations.SharedReads)
+	if !ok {
+		return false
+	}
+	n := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+	ix, _, owned, ok := h.strictIx.owned.of(base, sr, urlNoiseKey(n.url), func(owned []*models.Mock) *strictOwned { return buildStrictOwned(owned, n) })
+	if !ok {
+		return false
+	}
+	at := ix.at(newStrictSieve(input, n))
+	if len(at) == 0 {
+		return false
+	}
+	mocks := make([]*models.Mock, len(at))
+	for i, p := range at {
+		mocks[i] = owned[p]
+	}
+	return h.answeredMatch(ctx, input, db, headerNoise, bodyNoise, urlNoise, autoURLDynamic, false, schemaNoiseStrict, true)(mocks)
+}
+
+// answeredMatch is the dry match extraCall and ownCall read a request
+// against some of the open test's own mocks with: whether the request
+// matches one of mocks, as the matcher judges it, on a view that holds only
+// them and that no match can consume, with the test's bindings on a copy (a
+// mock that declares a variable is matched as it was answered, and the dry
+// match binds nothing).
+func (h *HTTP) answeredMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) func(mocks []*models.Mock) bool {
 	vars := variableTable(mockDb)
-	dry := func(mocks []*models.Mock) bool {
+	return func(mocks []*models.Mock) bool {
 		v := vars
 		if v != nil {
 			v = v.Clone()
@@ -39,19 +138,6 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 		matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: mocks, vars: v}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, false, mockCorrelation)
 		return err == nil && matched && mk != nil && mk.Spec.HTTPReq != nil
 	}
-	if !dry(answered) {
-		return 0
-	}
-	// How often the test recorded the call: each answered mock the call
-	// matches on its own (recordings of one call may differ where its
-	// variables sit).
-	n := 0
-	for _, a := range answered {
-		if dry([]*models.Mock{a}) {
-			n++
-		}
-	}
-	return max(n, 1)
 }
 
 // answeredDiag widens the diagnosis of a miss, under exact serving (the
@@ -64,20 +150,19 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 // live pool's first on a tie, and the diagnosis takes the closer. As in the
 // live pool, a mock that declares variable places is not compared strictly
 // (the variable pass's evidence reports those). They are only compared,
-// never served: the match already failed. diag is returned as
-// it is when exact serving is off, when the test has no answered mock, and
-// for a miss whose recording fit but whose variables did not hold, and for a
-// stateful walk's (matchDiag.answered): that is what each reports. The caller leaves an extra call's diagnosis as the
-// match found it.
+// never served: the match already failed. diag is returned as it is when
+// exact serving is off, when the test has no answered mock, when the call's
+// view moved (integrations.ConsumedInCallView tells none: the list may be of
+// another view than the miss), for a miss whose recording fit but whose
+// variables did not hold, and for a stateful walk's (matchDiag.answered):
+// that is what each reports. The caller leaves an extra call's diagnosis as
+// the match found it.
 func (h *HTTP) answeredDiag(ctx context.Context, input *req, mockDb integrations.MockMemDb, diag *matchDiag, headerNoise, bodyNoise map[string][]string, urlNoise []string) *matchDiag {
 	if !provenswitch.On() || (diag != nil && (diag.variable != nil || diag.answered != nil)) {
 		return diag
 	}
-	er, ok := mockDb.(integrations.ExactConsumedReader)
-	if !ok {
-		return diag
-	}
-	_, answered := splitVariableMocks(FilterHTTPMocks(er.ConsumedTestMocks()))
+	consumed, _ := integrations.ConsumedInCallView(mockDb)
+	_, answered := splitVariableMocks(FilterHTTPMocks(consumed))
 	if len(answered) == 0 {
 		return diag
 	}

@@ -121,9 +121,16 @@ type TestMockMapping struct {
 type ScopeReq struct {
 	Name string `json:"name"`
 	// Pid is the calling test WORKER's PID (e.g. Node process.pid, os.Getpid()).
-	// It keys the per-worker scope so parallel workers don't stomp each other
-	// (Design A). Optional: 0/omitted falls back to the single global scope
-	// (correct for sequential single-worker runs and suite-level).
+	// It keys the per-worker scope so two workers never overwrite one filter;
+	// it does not keep parallel tests apart. A replay narrows by it only in a
+	// run with the marks: every connection's view is then resolved from the
+	// app starts on every read, and a connection of a process the worker did
+	// not start (a shared app server) is served the one open test's mocks, or
+	// refused while more than one test is open. Without the marks a replay
+	// refuses a mapped test that begins with a pid (422): the test fails, and
+	// the replay with it, whatever the harness does with the answer.
+	// Optional: 0/omitted falls back to the single global scope, which
+	// narrows every connection (a sequential run, a shared app, suite-level).
 	Pid int `json:"pid,omitempty"`
 	// At is the runner's own clock for this boundary; zero means the agent stamps its read time.
 	At    time.Time `json:"at,omitzero"`
@@ -145,15 +152,74 @@ type ScopeReq struct {
 	// A Go test sends neither; its instance's key is the path.
 	File    string `json:"file,omitempty"`
 	Project string `json:"project,omitempty"`
+	// Random says how the test's browser drew its random numbers
+	// (ScopeRandomSeeded or ScopeRandomOwn), from a harness that drives one
+	// (@keploy/playwright). Sent with /agent/scope/begin, it is what the
+	// harness means to do; sent with /agent/scope/end, what it did, which
+	// replaces the begin's. Optional: without it keploy knows nothing of the
+	// test's randomness.
+	Random string `json:"random,omitempty"`
+	// Seed, sent with /agent/scope/begin, is a seed the harness drew afresh
+	// for the test's browser (NormalizeScopeSeed). It asks keploy for the
+	// seed to draw from (ScopeBeginResp.Seed): a record keeps the begin's,
+	// and a replay answers the one the test's recording kept instead.
+	Seed string `json:"seed,omitempty"`
 }
 
-// The verdicts a harness reports in ScopeReq.Outcome, and ScopeOutcomeGated,
-// which the agent records for a test the replay told not to run.
+// How a test's browser drew its random numbers (ScopeReq.Random):
+// ScopeRandomSeeded from the seed keploy answered its begin with
+// (ScopeBeginResp.Seed), the same in its recording and every replay, so a
+// call that still varies is drawn where the seeding does not reach (a
+// server, a worker); ScopeRandomOwn from the browser's own, as its harness
+// was told not to seed them or keploy gave it no seed.
+const (
+	ScopeRandomSeeded = "seeded"
+	ScopeRandomOwn    = "own"
+)
+
+// maxScopeSeed bounds a seed's length: a seed is a number, which a harness
+// sends as hex, and a longer one is no seed keploy keeps.
+const maxScopeSeed = 64
+
+// NormalizeScopeSeed is a begin's seed in lower case when it is 8 to
+// maxScopeSeed hex digits, and "" for anything else: keploy keeps and
+// answers no seed it cannot write back as it was sent.
+func NormalizeScopeSeed(s string) string {
+	v := strings.ToLower(strings.TrimSpace(s))
+	if len(v) < 8 || len(v) > maxScopeSeed {
+		return ""
+	}
+	for _, c := range v {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
+	}
+	return v
+}
+
+// NormalizeScopeRandom is ScopeRandomSeeded or ScopeRandomOwn for a begin or
+// an end that says one of them, in any case, and "" for anything else: a
+// word keploy does not know says nothing of the test's randomness.
+func NormalizeScopeRandom(s string) string {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case ScopeRandomSeeded, ScopeRandomOwn:
+		return v
+	}
+	return ""
+}
+
+// The verdicts a harness reports in ScopeReq.Outcome, and the two the agent
+// records for a test the replay told not to run: ScopeOutcomeGated, which the
+// gate's list (ScopeGateReq.Run or Skip) skipped, and ScopeOutcomeUnmet,
+// skipped because a test it needs (ScopeGateReq.Needs) had not begun before
+// it in this replay. An unmet test's run says nothing of it: the run that
+// selects the test it needs runs it.
 const (
 	ScopeOutcomePassed  = "passed"
 	ScopeOutcomeFailed  = "failed"
 	ScopeOutcomeSkipped = "skipped"
 	ScopeOutcomeGated   = "gated"
+	ScopeOutcomeUnmet   = "unmet"
 )
 
 // maxScopeOutcome bounds a verdict a harness sends; anything longer is not one.
@@ -194,6 +260,14 @@ type ScopeBeginResp struct {
 	Status string `json:"status"`
 	Action string `json:"action,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Seed is the seed the test's browser draws its random numbers from,
+	// answered to a begin that sent one (ScopeReq.Seed): in a record, the
+	// begin's own, or the one the test's first attempt in the record drew
+	// (a retry draws the same numbers); in a replay, the one its recording
+	// kept (MappedTestCase.Seed). "" when there is none: the test was
+	// recorded with seeding off or before keploy kept seeds, and its
+	// browser draws its own.
+	Seed string `json:"seed,omitempty"`
 }
 
 // ScopeActionSkip is the ScopeBeginResp.Action telling a harness to skip.
@@ -214,20 +288,41 @@ type ScopeGateReq struct {
 	// deny list: every test it does not name runs. Read under the proven
 	// switch, where it replaces Run.
 	Skip map[string]string `json:"skip,omitempty"`
+	// Needs, read with Skip, holds a test to tests that must run before it:
+	// at its begin, the first ScopeNeed whose Test has not begun earlier in
+	// this replay skips it with that need's Reason. Its call holds a value
+	// their calls send in the same run (a run's variable), so it cannot run
+	// without them.
+	Needs map[string][]ScopeNeed `json:"needs,omitempty"`
+}
+
+// ScopeNeed is one test a replayed test needs to have begun before it
+// (ScopeGateReq.Needs), and the reason its harness skips it with when that
+// test has not.
+type ScopeNeed struct {
+	Test   string `json:"test"`
+	Reason string `json:"reason"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
 // which the named test made its outgoing calls. Record correlates captured
 // mocks into these windows to build mappings.yaml — by source PID when the
-// worker reported one (exact, parallel-safe), else by request timestamp.
+// worker reported one, else by request timestamp. The PID match is exact only
+// for a call the worker makes itself while one test of it is open: it is not
+// parallel-safe (see PID).
 type ScopeWindow struct {
 	Name  string    `json:"name"`
 	Start time.Time `json:"start"`
 	End   time.Time `json:"end"`
 	// PID is the reporting worker's PID (ScopeReq.Pid), 0 if none. When set,
-	// record attributes a captured mock to this window if the mock's own source
-	// PID resolves (up the /proc tree) to this worker — exact even when windows
-	// from parallel workers overlap in time.
+	// record attributes a captured mock to this window if the mock's source PID
+	// (the kernel PID of the caller, not walked up the /proc tree) is this
+	// worker's. Any other call (one from a child of the worker or from a
+	// shared app server, or one with no source PID) falls back to the time
+	// scan, which charges it to the latest-begun window open at that time,
+	// whatever worker's; and two windows open at once in one worker (parallel
+	// tests of one go test binary) share its PID, so the later-begun one takes
+	// both tests' calls.
 	PID     uint32    `json:"pid,omitempty"`
 	Dir     string    `json:"dir,omitempty"`
 	Suite   bool      `json:"suite,omitempty"`
@@ -239,9 +334,27 @@ type ScopeWindow struct {
 	Ready   time.Time `json:"ready,omitzero"`
 	Ref     string    `json:"ref,omitempty"`
 	Worker  uint32    `json:"worker,omitempty"`
+	// Instance is, under the proven wire, the keploy instance of the test
+	// worker whose test this window is (InstanceReq.Workers): only its
+	// calls (models.Mock.Instance) are this window's. 0 in a run of one
+	// worker, whose calls carry none.
+	Instance uint32 `json:"instance,omitempty"`
 	// Outcome is the verdict the test's harness reported when it ended the
 	// scope (ScopeReq.Outcome); "" when it reported none.
 	Outcome string `json:"outcome,omitempty"`
+	// BeginRefused is, in a replay, why keploy refused the test at its begin,
+	// on a window with no extent and the failed Outcome: the replay then
+	// fails, whatever the test's harness did with the refusal and whatever
+	// its runner exits. "" when keploy refused nothing.
+	BeginRefused string `json:"beginRefused,omitempty"`
+	// Random is how the test's browser drew its random numbers, as its end
+	// said, else its begin (ScopeReq.Random, normalized); "" when neither
+	// said.
+	Random string `json:"random,omitempty"`
+	// Seed is the seed keploy answered the test's begin with
+	// (ScopeBeginResp.Seed); "" when it answered none. A record writes it
+	// into the test's mapping (MappedTestCase.Seed).
+	Seed string `json:"seed,omitempty"`
 	// Evidence is, under the proven wire, what keploy saw that failed the
 	// test at its end in a replay; nil when nothing did.
 	Evidence *ScopeEvidence `json:"evidence,omitempty"`
@@ -249,12 +362,26 @@ type ScopeWindow struct {
 	// used while it was open (design v14 §4): its REAL rows, and in a
 	// record, the REAL list its recording carries.
 	Real []RealUse `json:"real,omitempty"`
+	// Given is, under the proven wire, the values the test gave while it
+	// was open (POST /agent/scope/given), in the order it gave them: in a
+	// record, the givens its mapping keeps (MappedTestCase.Given).
+	Given []GivenValue `json:"given,omitempty"`
+	// SkippedReads is, under the proven wire, in a replay, the names of the
+	// reads of tests the replay's gate skips (moved to the worker scope)
+	// that answered the test's calls while it was open, in the order they
+	// did, whatever its outcome. A replay that never loads the skipped
+	// tests' recordings has no answer for those calls.
+	SkippedReads []string `json:"skippedReads,omitempty"`
 	// Claim, under the proven wire, makes this no test's window but a claim:
 	// from Start on, the run's test process is the one that claimed it with
 	// this key (POST /agent/instance), until the next claim. A call made
 	// while no test is open belongs to the pool slice of that key (design
 	// v14 §5.2).
 	Claim string `json:"claim,omitempty"`
+	// Workers is, on a test worker's claim, how many test workers its
+	// process declared the run's framework runs at once
+	// (InstanceReq.Workers); 0 on a single test process's claim.
+	Workers int `json:"workers,omitempty"`
 	// Refused, under the proven wire, makes this no test's window but a
 	// refusal keploy made at Start (RunRefusal).
 	Refused *RunRefusal `json:"refused,omitempty"`
@@ -283,6 +410,75 @@ type ScopeTableReq struct {
 	// omitzero: an empty pool ({}) is sent, and means "serve no pool mock
 	// between tests"; only a nil one is left out (with the switch off).
 	Pool map[string][]string `json:"pool,omitzero"`
+	// Windows is, under the proven switch, the recorded window of every test
+	// of the set, the gated ones included: what keploy test's staging sends
+	// as MockFilterParams.RecordedWindows. keploy mock replay derives each
+	// from the set's mappings (the test's recorded begin and its own
+	// recordings), so the learn step tells a test's own recordings from
+	// another test's (integrations.TestWindows). With the switch off,
+	// keploy mock replay sends them too, derived the same way. Under either
+	// switch the agent reads them for the run's place (models.RunPlace) as
+	// RunWindows says: an answer recorded in a later test than its call is
+	// written once the replay reaches that test. Absent from an older CLI
+	// and from a set with no test: the agent then knows none.
+	Windows []TestWindow `json:"windows,omitempty"`
+	// Given is, under the proven switch, the values each test gave when it
+	// was recorded (MappedTestCase.Given), by test ID: a replay's given is
+	// bound with the recorded value of its variable, so the learn step and
+	// the replay pair the two. Absent when no test gave any.
+	Given map[string][]GivenValue `json:"given,omitempty"`
+	// Worker is, under the proven switch, each key's worker scope as keploy
+	// mock replay reads the set's mappings.yaml (Mapping.Worker): the names
+	// of the key's pool slice that worker: lists. Unlike the rest of the
+	// slice, which answers only while no test is open, they answer whether a
+	// test is open or not, after the open test's own, each at most one
+	// request in the staging, and no test is required to make them. A name
+	// no slice of its key holds is not served. Absent from an older CLI:
+	// worker: entries then answer between tests only, as the pool's.
+	Worker map[string][]string `json:"worker,omitempty"`
+	// Trails is, under the proven switch, the test each worker-scope
+	// recording trails (MockEntry.Trails), by the recording's name: only
+	// names Worker holds, each naming a test of Mappings. The learn step
+	// reads the places that test's own list left the run as such a call's
+	// own (learn.Trail). Absent when no entry trails a test, and from an
+	// older CLI: every call then reads only its own test's places.
+	Trails map[string]string `json:"trails,omitempty"`
+	// RepeatReads is, under the proven switch, each test's repeated reads
+	// by test ID, as whatever names them for the replay named them
+	// (mock.RegisterRepeatReadNamer): recordings of one read the test made
+	// at least twice, every time with one answer. Exact serving answers
+	// such a read once more than recorded, and does not charge one of its
+	// recordings left unmade, when the recordings prove it
+	// (TestModeInfo.RepeatRead). Absent when no test has one: every test
+	// is then served its exact count.
+	RepeatReads map[string][]RepeatRead `json:"repeatReads,omitempty"`
+	// NotRequired is, under the proven switch, by test ID, the names of the
+	// test's own list (Mappings) that keploy's judging marked served, not
+	// required (MockEntry.NotRequired): each answers that test as its other
+	// recordings do, and the test is not charged when its call is not made.
+	// An agent that cannot take it refuses a table that has one. Absent
+	// when no entry is marked.
+	NotRequired map[string][]string `json:"notRequired,omitempty"`
+	// SkippedReads is, under the proven switch, the names of Worker that
+	// keploy mock replay moved there from the tests its gate skips: reads
+	// the app made once and kept (an HTTP GET, HEAD or OPTIONS a test
+	// recorded), made now in the window of whichever test runs first. Each
+	// answers at most one request in the staging's windows, as the rest of
+	// Worker does, and also a request one more than the open test's own
+	// recordings of it, which the rest never answers: so a read answers at
+	// most as many requests in the windows as the skipped test recorded it.
+	// Each name maps to the skipped test that lists it, which a test's
+	// extra-call line names (UnmatchedCall.SkippedReads). Absent from an
+	// older CLI and when the gate skips no test.
+	SkippedReads map[string]string `json:"skippedReads,omitempty"`
+}
+
+// RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its
+// name, which keploy says when it answers it once more, and the names of the
+// test's own recordings of it, in recorded order.
+type RepeatRead struct {
+	Name  string   `json:"name"`
+	Mocks []string `json:"mocks"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
@@ -296,6 +492,10 @@ type TestBeginsReq struct {
 	// a test runs on the real clock, not at its recorded begin (design v14
 	// §3.4, F3). Absent when no test lists any.
 	Real map[string][]string `json:"real,omitempty"`
+	// Seeds is, by test, the seed its recording kept for its browser's
+	// random numbers (MappedTestCase.Seed): a begin that asks for one is
+	// answered it (ScopeBeginResp.Seed). Absent when no test kept one.
+	Seeds map[string]string `json:"seeds,omitempty"`
 }
 
 type SetTable struct {
@@ -416,6 +616,17 @@ type MockFilterParams struct {
 	BeforeTime      time.Time    `json:"beforeTime,omitempty"`
 	MockMapping     []string     `json:"mockMapping,omitempty"`
 	UseMappingBased bool         `json:"useMappingBased"`
+	// BackgroundMocks names the set's background recordings: its
+	// mappings.yaml worker: and startup: mocks, the calls the application
+	// made on its own rather than for a test's request. Sent on the staging
+	// call only, beside RecordedWindows, under either switch. The agent
+	// hands them to the proxy read-only, served or not, each with its
+	// recorded span (BackgroundRecording), through the optional
+	// BackgroundRecordingsSeeder capability, so a parser can tell a miss is
+	// one more run of one of them (MockMismatchReport.Background). No test
+	// is served differently for it. Empty: the set has none, and every miss
+	// stays its test's.
+	BackgroundMocks []string `json:"backgroundMocks,omitempty"`
 	// AgentOwnsConsumed, when true, tells the agent to apply filterOutDeleted
 	// from its OWN persistent consumption history instead of the
 	// TotalConsumedMocks map the client would otherwise re-send every testcase
@@ -444,6 +655,11 @@ type MockFilterParams struct {
 	// in: an enabling value forces strict; an explicit disabling value
 	// ("0") forces strict off regardless of the per-call flag.
 	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
+	// ExactStaging marks the agent's own staging of keploy mock replay, which
+	// asks for the strict window's staging load (StrictMockWindow) but is no
+	// user's strict window: the strict window's notice, about keploy test's
+	// per-test windows, is not printed for it. Never on the wire.
+	ExactStaging bool `json:"-"`
 
 	// Variables are the test variables the test's own request carries (its
 	// test case's template values), under the proven switch: a mock filter
@@ -520,6 +736,13 @@ type TestRequest struct {
 	// kind it reads no request of, a body kept apart from the test case),
 	// "" when it could. A request keploy could not read has no parts.
 	Unread string `json:"unread,omitempty"`
+	// RecordedAt is when the test case's request reached the application
+	// in its recording, the instant keploy test's begin moves the app's
+	// clock to: where the test began in its recording, which the learn step
+	// reads its calls' windows from too (learn.Tracker.GiveRequest).
+	// Zero where the recording holds none, or from a keploy older than its
+	// agent: the windows then start at each call's previous call alone.
+	RecordedAt time.Time `json:"recordedAt,omitzero"`
 }
 
 // TestRequestPart is one part of a test case's request, as recorded and as
@@ -555,11 +778,41 @@ type ExactServing struct {
 	// Worker is, on the staging call, the set's worker scope
 	// (Mapping.Worker): the mocks no test case owns, each with its place
 	// (MockEntry.Place). The agent stages them with the pool, and each
-	// answers from its place in the set's run on (once the test case it is
-	// placed after has begun; from the start for an empty place), whether a
-	// test case is open or not, after the open test case's own, at most one
-	// request in the staging.
+	// answers from its place in the set's run on (once the run has reached
+	// the test case it is placed after, see Order; from the start for an
+	// empty place), whether a test case is open or not, after the open test
+	// case's own, at most one request in the staging.
 	Worker []MockEntry `json:"worker,omitempty"`
+	// Order is, on the staging call, every test case of the set in the order
+	// the run takes them up: recorded order, with the streaming test cases
+	// (which the replay runs after the rest) last. It holds the ones the run
+	// will not open too: those a --testcase selection leaves out, quarantined
+	// or ignored ones, and those refused or failed unsent. When a test case
+	// opens, the run has passed every test case before it in Order, opened
+	// or not, so the worker-scope mocks placed after any of them answer from
+	// then on: a place at a test case the run skipped is reached all the
+	// same. A test case after the open one in Order is not passed until a
+	// later one opens or a pass of the run ends (Passed), and a test case
+	// that is not in Order is reached only as it opens. An agent that
+	// predates it ignores it and reaches a place only when its test case
+	// opens: a worker mock placed at a skipped test case then answers no
+	// call, as before.
+	Order []string `json:"order,omitempty"`
+	// Passed is, on a call that serves the pool (no Stage, no Test), how
+	// many test cases of Order, from its start, the run has passed. The
+	// replay sends it as a pass of the set's run ends: its main loop (the
+	// test cases before the streaming ones, or all of Order when no
+	// streaming pass follows), and its streaming pass (all of Order). So a
+	// test case the run skipped after the last one it opened (a quarantined
+	// last test case, a --testcase selection that ends before the set does,
+	// a skipped one before the streaming pass) reaches the worker-scope
+	// mocks placed after it, for the calls the application makes after its
+	// last test case. One no greater than what the run has passed already
+	// passes nothing more, and one greater than Order's length passes all
+	// of it. An agent that predates it ignores it and serves the pool
+	// again: a place at a test case skipped after the last one opened then
+	// answers no call, as before.
+	Passed int `json:"passed,omitempty"`
 	// Concurrent is, on a call that opens a test case (Test), the
 	// recordings it may answer with beside Owned: those recorded while its
 	// request and other tests' requests were open together, which keploy
@@ -641,6 +894,99 @@ const (
 // scope required by its end) whatever it asked for: never looser than the
 // rules the set was served by.
 const BackgroundRulesHeader = "X-Keploy-Background-Rules"
+
+// MockWindowHeader is the /updatemockparams response header in which an agent
+// says how it served the call's window (MockWindowMode.String): its strict
+// mock window mode, with its own KEPLOY_STRICT_MOCK_WINDOW folded in, and its
+// per-test load mode. The agent's process reads that env, which the replay's
+// does not share: sudo drops it on the way to a native agent, a docker agent's
+// container is not given it, and a k8s-proxy agent runs in its own pod. An
+// agent that does not send the header, every agent released before it, has
+// said nothing, and the replay's mock prune then assumes the mode that holds
+// the most (MockWindowsSaid).
+const MockWindowHeader = "X-Keploy-Mock-Window"
+
+// The per-test load modes an agent says in MockWindowHeader: which per-test
+// mocks its on-disk store loads for a call (the agent's perTestLoadMode).
+const (
+	// MockLoadMapping: the mocks the test's mapping names, and the
+	// carry-over lookahead.
+	MockLoadMapping = "mapping"
+	// MockLoadStrictWindow: the window's mocks, the startup band, the calls
+	// in flight, and the carry-over lookahead.
+	MockLoadStrictWindow = "strict-window"
+	// MockLoadLaxAll: every per-test mock, which the lax window filter
+	// routes; no lookahead.
+	MockLoadLaxAll = "lax-all"
+)
+
+// MockWindowMode is how an agent served one /updatemockparams call's window,
+// as it says in MockWindowHeader.
+type MockWindowMode struct {
+	// Strict: its strict mock window was on for the call
+	// (pkg.IsStrictMockWindow of the call's StrictMockWindow in the agent's
+	// process).
+	Strict bool
+	// Load is its per-test load mode: MockLoadMapping, MockLoadStrictWindow
+	// or MockLoadLaxAll.
+	Load string
+}
+
+// Lookahead says the load runs the carry-over lookahead: a load by mapping or
+// by the strict window, whenever the agent holds the per-test mocks on disk.
+func (m MockWindowMode) Lookahead() bool {
+	return m.Load == MockLoadMapping || m.Load == MockLoadStrictWindow
+}
+
+// String is m as MockWindowHeader carries it: "strict=on;load=<mode>", or
+// "strict=off;load=<mode>".
+func (m MockWindowMode) String() string {
+	strict := "off"
+	if m.Strict {
+		strict = "on"
+	}
+	return "strict=" + strict + ";load=" + m.Load
+}
+
+// ParseMockWindowMode reads a MockWindowHeader value (MockWindowMode.String).
+// ok is false for one that says nothing, or what this keploy cannot read.
+func ParseMockWindowMode(v string) (m MockWindowMode, ok bool) {
+	strict, load, found := strings.Cut(strings.TrimSpace(v), ";")
+	if !found {
+		return MockWindowMode{}, false
+	}
+	switch strict {
+	case "strict=on":
+		m.Strict = true
+	case "strict=off":
+	default:
+		return MockWindowMode{}, false
+	}
+	switch load {
+	case "load=" + MockLoadMapping, "load=" + MockLoadStrictWindow, "load=" + MockLoadLaxAll:
+		m.Load = strings.TrimPrefix(load, "load=")
+	default:
+		return MockWindowMode{}, false
+	}
+	return m, true
+}
+
+// MockWindowsSaid is what an agent said in MockWindowHeader over a set's
+// /updatemockparams calls, its staging and every test's window: Strict, that
+// some call ran its strict mock window; Lookahead, that some call's load ran
+// the carry-over lookahead. Either is the mode that holds more: the replay's
+// mock prune asks what the agent serves a test that got no answer by them
+// (pkg.ServeWindow), and holding one more mock is safe where deleting one the
+// agent serves is not. When the agent has not said, the prune takes both.
+type MockWindowsSaid struct {
+	Strict, Lookahead bool
+}
+
+// Add folds one call's mode into s.
+func (s *MockWindowsSaid) Add(m MockWindowMode) {
+	s.Strict = s.Strict || m.Strict
+	s.Lookahead = s.Lookahead || m.Lookahead()
+}
 
 // TestRequestReadHeader is the /updatemockparams response header in which an
 // agent says, answering the filter that opens a keploy test case
@@ -920,6 +1266,20 @@ type StreamEndSummary struct {
 	// LeftOutInFlight: test cases left out because each stayed in flight
 	// while mocks it may have made had to be let go.
 	LeftOutInFlight uint64 `json:"tcs_left_out_in_flight"`
+	// NotHandedOn: test cases of requests the app served that never reached
+	// the stream: the agent's ingress stopped first.
+	NotHandedOn uint64 `json:"tcs_not_handed_on,omitempty"`
+	// UnnamedCallerConns: connections to a listener of the run's own process
+	// tree whose caller the agent could not name in its PID namespace, so it
+	// could not tell whether a test made the calls they carried: none was
+	// recorded as a test case. Connections, not calls: the agent relays them
+	// without reading the calls, so a keep-alive connection counts once.
+	UnnamedCallerConns uint64 `json:"connections_from_unnamed_callers,omitempty"`
+	// TLSRelayedConns: connections to the app that opened with a TLS
+	// handshake, which the agent relayed to the app's own TLS unread: their
+	// calls are encrypted, so none was recorded as a test case. Connections,
+	// not calls: a keep-alive connection counts once.
+	TLSRelayedConns uint64 `json:"connections_relayed_tls,omitempty"`
 	// Unsettled: test cases saved before the agent had parsed all the
 	// traffic they overlap.
 	Unsettled int `json:"tcs_released_unsettled"`
@@ -994,6 +1354,15 @@ const DrainsOnAgentStopHeader = "Keploy-Drains-On-Agent-Stop"
 // a stop signal has reached the agent and the agent waits for the client to
 // drain its streams. 404 from an agent that predates it.
 const StopNoticePath = "/record/stopping"
+
+// NetworkNamesPath is the agent route, under its prefix, the keploy CLI gives
+// a docker-mode agent the names the replay's docker networks answer
+// themselves on (netnames.List), and NetworkNamesAskPath the one it holds open
+// for the agent's ask for a fresh list.
+const (
+	NetworkNamesPath    = "/dns/names"
+	NetworkNamesAskPath = "/dns/names/ask"
+)
 
 type agentStopNoticeKey struct{}
 

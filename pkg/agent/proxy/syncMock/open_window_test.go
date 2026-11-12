@@ -1454,8 +1454,27 @@ func TestOpenWindowNoOpenWindowLosesAMock(t *testing.T) {
 		out := make(chan *models.Mock, 1<<17)
 		maps := make(chan models.TestMockMapping, 1<<17)
 		mgr := openWindowManager(out, maps)
-		base := time.Now().Add(-70 * time.Second)
+		// Every mock the model makes is requested before the seed began, as a
+		// real mock is requested before it is decoded and added. A pressure
+		// span runs on the real clock, from the moment the pause begins, so
+		// it covers no real mock added before it; a mock it covers was
+		// requested while recording was paused, and the next pause drops it
+		// (lostToPressureLocked), as the recording leaves out the test case
+		// it belongs to (WasPressureActiveInWindow). A mock the model dated
+		// after the seed began breaks that: on a slow run the real clock
+		// reached its time inside a pause, and the next pause dropped it
+		// while a window that may own it was open (S1).
+		began := time.Now()
+		base := began.Add(-70 * time.Second)
 		at := func() time.Time { return base.Add(time.Duration(rng.Intn(68_000)) * time.Millisecond) }
+		// upTo draws whole milliseconds under n, cut so that from plus them
+		// is still before began.
+		upTo := func(from time.Time, n int) time.Duration {
+			if n = min(n, int(began.Sub(from)/time.Millisecond)); n <= 0 {
+				return 0
+			}
+			return time.Duration(rng.Intn(n)) * time.Millisecond
+		}
 
 		type win struct {
 			w       *Window
@@ -1495,6 +1514,9 @@ func TestOpenWindowNoOpenWindowLosesAMock(t *testing.T) {
 			return p
 		}
 		add := func(m *models.Mock) {
+			if !m.Spec.ReqTimestampMock.Before(began) {
+				t.Fatalf("seed %d: the model made a mock requested at +%v, not before the seed began (+70s)", seed, m.Spec.ReqTimestampMock.Sub(base))
+			}
 			mgr.AddMock(m)
 			for _, x := range wins {
 				if !x.closed && !m.Spec.ReqTimestampMock.Before(x.start) {
@@ -1591,16 +1613,16 @@ func TestOpenWindowNoOpenWindowLosesAMock(t *testing.T) {
 				if x.closed {
 					continue
 				}
-				y := x.start.Add(time.Duration(rng.Intn(8000)) * time.Millisecond)
+				y := x.start.Add(upTo(x.start, 8000))
 				x.w.Yield(y)
 				if x.yield.IsZero() || y.Before(x.yield) {
 					x.yield = y
 				}
 				// The next request, which runs beside the rest of it.
-				s := y.Add(time.Duration(rng.Intn(500)) * time.Millisecond)
+				s := y.Add(upTo(y, 500))
 				wins = append(wins, &win{w: mgr.OpenWindow(s, nil), start: s})
 				for i, n := 0, 1+rng.Intn(3); i < n; i++ {
-					add(httpMockAt(s.Add(time.Duration(rng.Intn(1000)) * time.Millisecond)))
+					add(httpMockAt(s.Add(upTo(s, 1000))))
 				}
 			default:
 				op = "close"

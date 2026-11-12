@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
@@ -29,8 +29,11 @@ import (
 // resolved from this copy once the answer is in (resolveExpected): a hook that
 // changes the case it is handed in place, such as enterprise's
 // DecryptingTestHooks decrypting it, changes this copy, and what is compared.
+// A hook that rewrites the copy's expected body says so on the copy
+// (models.TestCase.ExpectedRewrite), and only for that send.
 func toSend(run *templates.Run, tc *models.TestCase) models.TestCase {
 	sent := *tc
+	sent.ExpectedRewrite = nil
 	switch tc.Kind {
 	case models.GRPC_EXPORT:
 		sent.GrpcReq = run.GRPCRequest(tc.GrpcReq)
@@ -75,8 +78,16 @@ func (r *Replayer) resolveExpected(run *templates.Run, check *templates.CheckRes
 	exp := *sent
 	exp.HTTPResp = res.Resp
 	var opts []httpMatcher.MatchOption
-	if res.BodyTemplated {
+	switch {
+	case res.BodyTemplated:
+		// A templated body a hook also rewrote: its recorded body is
+		// rendered from the rewritten one, which no recorded digest was
+		// computed over, so each digest header is compared as written.
 		opts = append(opts, httpMatcher.WithRecordedBody(res.RecordedBody))
+	case sent.ExpectedRewrite != nil:
+		// A hook rewrote the expected body for this send: its digest
+		// headers were computed over the body as recorded.
+		opts = append(opts, httpMatcher.WithRecordedBody(sent.ExpectedRewrite.RecordedBody))
 	}
 	if len(res.Failures) > 0 {
 		// The test case has failed on its own: a comparison that matches
@@ -647,15 +658,23 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 		}
 		results = append(results, *res)
 	}
+	return true, r.failSetUnrun(ctx, testRunID, testSetID, results, why.Error(), started)
+}
+
+// failSetUnrun writes the FAILED report of a test set keploy fails without
+// running any of its test cases, and counts it in the run's summary. results
+// are the set's rows, each FAILED, unsent and graded HIGH, and written to the
+// store already; why is the set's failure reason.
+func (r *Replayer) failSetUnrun(ctx context.Context, testRunID, testSetID string, results []models.TestResult, why string, started time.Time) error {
 	timeTaken := time.Since(started)
 	report := &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,
 		Status:        string(models.TestSetStatusFailed),
-		FailureReason: why.Error(),
-		Failure:       len(testCases),
-		Total:         len(testCases),
-		HighRisk:      len(testCases),
+		FailureReason: why,
+		Failure:       len(results),
+		Total:         len(results),
+		HighRisk:      len(results),
 		Tests:         results,
 		TimeTaken:     timeTaken.String(),
 		CmdUsed:       r.config.Test.CmdUsed,
@@ -664,7 +683,7 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	r.noteSetEnd(report)
 	if err := r.reportDB.InsertReport(ctx, testRunID, testSetID, report); err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
-		return true, err
+		return err
 	}
 	r.completeTestReportMu.Lock()
 	r.completeTestReport[testSetID] = TestReportVerdict{
@@ -678,18 +697,20 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	r.totalTestFailed += report.Failure
 	r.totalTestTimeTaken += timeTaken
 	r.completeTestReportMu.Unlock()
-	return true, nil
+	return nil
 }
 
 // mustPassDeletions splits the failed test cases of a run in two for
-// --must-pass: those it removes, and those refused when their set loaded
-// (every template failure a refusal), which were never sent and are kept.
+// --must-pass: those it removes, and those never sent, which are kept: those
+// refused when their set loaded (every template failure a refusal), and
+// those selected that are not on disk (notFoundUnsent), with nothing to
+// remove.
 func mustPassDeletions(results []models.TestResult) (deletable, refused []string) {
 	for _, res := range results {
 		if res.Status != models.TestStatusFailed {
 			continue
 		}
-		if refusedUnsent(res) {
+		if refusedUnsent(res) || notFoundUnsent(res) {
 			refused = append(refused, res.TestCaseID)
 			continue
 		}
@@ -768,6 +789,9 @@ func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *
 		return nil
 	}
 	out := &models.TestRequest{Test: tc.Name}
+	// Where the test began in its recording, whatever of its request keploy
+	// reads below.
+	out.RecordedAt, _ = recordReqResTimestamps(tc)
 	sent := toSend(run, tc)
 	var parts []models.TestRequestPart
 	size := 0
@@ -780,11 +804,10 @@ func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *
 			add(prefix+k, rec[k], live[k])
 		}
 	}
+	// A file kept beside the test case is read only inside its recording,
+	// as the replay sends it (pkg.ReadRecordingFile).
 	read := func(path string) (string, error) {
-		if keployPath != "" && !filepath.IsAbs(path) {
-			path = filepath.Join(keployPath, path)
-		}
-		b, err := os.ReadFile(path)
+		b, err := pkg.ReadRecordingFile(keployPath, path)
 		return string(b), err
 	}
 	// numbered names the n-th part (from 0) of a name: the name, then

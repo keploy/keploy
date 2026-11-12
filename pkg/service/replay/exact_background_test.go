@@ -342,7 +342,7 @@ func TestUnderTheSwitchAWindowOwnedSetGivesNoMoveBack(t *testing.T) {
 
 // returnStaleMoves gives back only a drift move whose owner runs and that the
 // set has, in recorded order among the owner's entries, as recorded (no
-// place, line or tie); it leaves its inputs as they are, and hands them back
+// place, line, tie or trail); it leaves its inputs as they are, and hands them back
 // untouched when nothing goes back.
 func TestReturnStaleMovesGivesBackOnlyARunningOwnersDriftMoves(t *testing.T) {
 	at := func(ms int) string { return models.FormatMockTimestamp(attrAt(ms)) }
@@ -352,7 +352,7 @@ func TestReturnStaleMovesGivesBackOnlyARunningOwnersDriftMoves(t *testing.T) {
 	}
 	worker := []models.MockEntry{
 		{Name: "boot"},
-		{Name: "b", Owner: "runs", Drift: true, Place: "runs", Reason: "moved", ReqTimestampMock: at(20)},
+		{Name: "b", Owner: "runs", Drift: true, Place: "runs", Reason: "moved", Trails: "skipped", ReqTimestampMock: at(20)},
 		{Name: "x", Owner: "runs", ReqTimestampMock: at(25)},                 // exact: stays
 		{Name: "q", Owner: "skipped", Drift: true, ReqTimestampMock: at(45)}, // its owner skipped: stays
 		{Name: "g", Owner: "gone", Drift: true, ReqTimestampMock: at(50)},    // its owner gone: stays
@@ -366,7 +366,7 @@ func TestReturnStaleMovesGivesBackOnlyARunningOwnersDriftMoves(t *testing.T) {
 	var names []string
 	for _, e := range gotM["runs"] {
 		names = append(names, e.Name)
-		if e.Name == "b" && (e.Owner != "" || e.Drift || e.Place != "" || e.Reason != "") {
+		if e.Name == "b" && (e.Owner != "" || e.Drift || e.Place != "" || e.Reason != "" || e.Trails != "") {
 			t.Fatalf("b went back with its move's marks: %+v", e)
 		}
 	}

@@ -2,10 +2,16 @@ package record
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type panicRecordHooks struct{ BaseRecordHooks }
@@ -57,5 +63,369 @@ func TestAfterRecordingComplete_PassesLiveContext(t *testing.T) {
 
 	if h.gotErr != nil {
 		t.Fatalf("hook must receive a live (non-cancelled) context; got ctx.Err()=%v", h.gotErr)
+	}
+}
+
+type ctxEndHooks struct {
+	BaseRecordHooks
+	onCall      func(ctx context.Context)
+	hasDeadline bool
+	errAtStart  error
+	causeAtEnd  error
+}
+
+func (h *ctxEndHooks) AfterRecordingComplete(ctx context.Context, _ *RecordingCompleteContext) error {
+	_, h.hasDeadline = ctx.Deadline()
+	h.errAtStart = ctx.Err()
+	if h.onCall != nil {
+		h.onCall(ctx)
+		h.causeAtEnd = context.Cause(ctx)
+	}
+	return nil
+}
+
+func newHookRecorder(t *testing.T, logger *zap.Logger, h RecordHooks) *Recorder {
+	t.Helper()
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	return &Recorder{
+		logger:     logger,
+		config:     &config.Config{Path: t.TempDir()},
+		hooks:      h,
+		waitNotice: 20 * time.Millisecond,
+	}
+}
+
+// The end-of-recording hook runs the enterprise Basic-Auth re-key, which
+// bounds itself by the comparisons it counts. A 30 s deadline on its context
+// cut that pass short on a loaded recorder, which left logins redacted and
+// failed them (401) at replay, though an idle machine finished the same
+// pass. The hook's context carries no deadline.
+func TestAfterRecordingComplete_HookContextHasNoDeadline(t *testing.T) {
+	h := &ctxEndHooks{}
+	r := newHookRecorder(t, zap.NewNop(), h)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+
+	r.afterRecordingComplete(ctx, "test-set-1")
+
+	if h.hasDeadline {
+		t.Fatal("the end-of-recording hook's context has a deadline; a clock must not decide how much of the pass runs")
+	}
+	if h.errAtStart != nil {
+		t.Fatalf("the hook's context had ended before the hook ran: %v", h.errAtStart)
+	}
+}
+
+// saidWithin waits until logs hold a line with snippet, and reports whether
+// they came to. The bound is a fail-safe for a stop that never says it.
+func saidWithin(logs *observer.ObservedLogs, snippet string) bool {
+	return saidTimesWithin(logs, snippet, 1)
+}
+
+// saidTimesWithin waits until logs hold n lines with snippet, and reports
+// whether they came to. The bound is a fail-safe for a stop that never says
+// them.
+func saidTimesWithin(logs *observer.ObservedLogs, snippet string, n int) bool {
+	deadline := time.Now().Add(30 * time.Second) // bounds only a stop that never says them
+	for logs.FilterMessageSnippet(snippet).Len() < n {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
+const (
+	hookStillSnippet   = "Still running the post-record pass"
+	hookOfferSnippet   = "press Ctrl+C again to stop it now"
+	hookStoppedSnippet = "Stopping the post-record pass now"
+)
+
+// With no clock to end it, the pass is waited for as the stop's other
+// unbounded work is: the stop says it is still running and, once the run was
+// interrupted, that another interrupt stops it now. That interrupt ends the
+// hook's context, and its cause says why, so the hook can say what it leaves.
+func TestAfterRecordingComplete_ASecondInterruptAtTheOfferStopsTheHook(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	h := &ctxEndHooks{onCall: func(ctx context.Context) {
+		if !saidWithin(logs, hookOfferSnippet) {
+			t.Errorf("the stop never offered to end the post-record pass: %v", logs.All())
+			return
+		}
+		if ctx.Err() != nil {
+			t.Errorf("the hook's context ended before the user's second interrupt: %v", context.Cause(ctx))
+			return
+		}
+		if !utils.MarkInterruptedAgain() {
+			t.Error("the user's press after the offer did not stop the post-record pass")
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(30 * time.Second): // bounds only a press that never ends the hook
+			t.Error("the user's press after the offer never ended the hook's context")
+		}
+	}}
+	r := newHookRecorder(t, zap.New(core), h)
+	utils.MarkInterrupted() // the stop
+
+	r.afterRecordingComplete(context.Background(), "test-set-1")
+
+	if t.Failed() {
+		return
+	}
+	if !errors.Is(h.causeAtEnd, ErrHookStoppedNow) {
+		t.Fatalf("the hook's context ended with cause %v, want %v", h.causeAtEnd, ErrHookStoppedNow)
+	}
+	if logs.FilterMessageSnippet(hookStillSnippet).Len() == 0 {
+		t.Fatalf("the stop never said it waits for the post-record pass: %v", logs.All())
+	}
+	if logs.FilterMessageSnippet(hookStoppedSnippet).FilterField(zap.String("testSetID", "test-set-1")).Len() != 1 {
+		t.Fatalf("the stop did not say once that the second interrupt stopped the pass: %v", logs.All())
+	}
+	if utils.MarkInterruptedAgain() {
+		t.Fatal("the offer to stop the pass still stands after the pass ended")
+	}
+}
+
+// A pass that ends on its own withdraws the offer as it ends: a later
+// interrupt is no answer to a wait that is over.
+func TestAfterRecordingComplete_ThePassWithdrawsItsOfferAsItEnds(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	h := &ctxEndHooks{onCall: func(context.Context) {
+		if !saidWithin(logs, hookOfferSnippet) {
+			t.Errorf("the stop never offered to end the post-record pass: %v", logs.All())
+		}
+	}}
+	r := newHookRecorder(t, zap.New(core), h)
+	utils.MarkInterrupted() // the stop
+
+	r.afterRecordingComplete(context.Background(), "test-set-1")
+
+	if utils.MarkInterruptedAgain() {
+		t.Fatal("the offer to stop the pass still stands after the pass ended")
+	}
+	if h.causeAtEnd != nil {
+		t.Fatalf("the pass's context ended though no one stopped it: %v", h.causeAtEnd)
+	}
+}
+
+// A stop that began on its own (the app exited, a record timer) has no
+// interrupt to answer: the stop still says it waits for the pass, and offers
+// nothing until the user interrupts.
+func TestAfterRecordingComplete_SaysItWaitsForThePassWithoutAnInterrupt(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	h := &ctxEndHooks{onCall: func(context.Context) {
+		if !saidWithin(logs, hookStillSnippet) {
+			t.Errorf("the stop never said it waits for the post-record pass: %v", logs.All())
+		}
+	}}
+	r := newHookRecorder(t, zap.New(core), h)
+
+	r.afterRecordingComplete(context.Background(), "test-set-1")
+
+	if n := logs.FilterMessageSnippet(hookOfferSnippet).Len(); n != 0 {
+		t.Fatalf("the stop offered to end the pass %d times with no interrupt to answer: %v", n, logs.All())
+	}
+	if h.causeAtEnd != nil {
+		t.Fatalf("the pass's context ended though no one stopped it: %v", h.causeAtEnd)
+	}
+}
+
+// A long pass that says nothing reads as a hang: the stop says again, at
+// every notice period, that the pass is still running, as the stop's other
+// waits do.
+func TestAfterRecordingComplete_SaysAtEveryNoticeThatThePassIsStillRunning(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	h := &ctxEndHooks{onCall: func(context.Context) {
+		if !saidTimesWithin(logs, hookStillSnippet, 3) {
+			t.Errorf("the stop said %d times that it waits for the post-record pass, want one at each of 3 notices: %v",
+				logs.FilterMessageSnippet(hookStillSnippet).Len(), logs.All())
+		}
+	}}
+	r := newHookRecorder(t, zap.New(core), h)
+
+	r.afterRecordingComplete(context.Background(), "test-set-1")
+
+	if n := logs.FilterMessageSnippet(hookOfferSnippet).Len(); n != 0 {
+		t.Fatalf("the stop offered to end the pass %d times with no interrupt to answer: %v", n, logs.All())
+	}
+}
+
+// A stop that began on its own (the app exited, a record timer) and is then
+// interrupted while the pass runs: the notices after that interrupt offer
+// that another one stops the pass now, and it does.
+func TestAfterRecordingComplete_AnInterruptDuringThePassBringsTheOffer(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	h := &ctxEndHooks{onCall: func(ctx context.Context) {
+		if !saidWithin(logs, hookStillSnippet) {
+			t.Errorf("the stop never said it waits for the post-record pass: %v", logs.All())
+			return
+		}
+		if n := logs.FilterMessageSnippet(hookOfferSnippet).Len(); n != 0 {
+			t.Errorf("the stop offered to end the pass %d times before any interrupt: %v", n, logs.All())
+			return
+		}
+		utils.MarkInterrupted() // the user's first Ctrl+C, while the pass runs
+		if !saidWithin(logs, hookOfferSnippet) {
+			t.Errorf("the stop never offered to end the post-record pass after the interrupt: %v", logs.All())
+			return
+		}
+		if ctx.Err() != nil {
+			t.Errorf("the hook's context ended before the user's second interrupt: %v", context.Cause(ctx))
+			return
+		}
+		if !utils.MarkInterruptedAgain() {
+			t.Error("the user's press after the offer did not stop the post-record pass")
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(30 * time.Second): // bounds only a press that never ends the hook
+			t.Error("the user's press after the offer never ended the hook's context")
+		}
+	}}
+	r := newHookRecorder(t, zap.New(core), h)
+
+	r.afterRecordingComplete(context.Background(), "test-set-1")
+
+	if t.Failed() {
+		return
+	}
+	if !errors.Is(h.causeAtEnd, ErrHookStoppedNow) {
+		t.Fatalf("the hook's context ended with cause %v, want %v", h.causeAtEnd, ErrHookStoppedNow)
+	}
+}
+
+// A Ctrl+C that answered an earlier wait's offer (a drain's "press Ctrl+C
+// again to stop now") closes utils.StopNow for the rest of the process. The
+// post-record pass never offered to stop at that press, so it does not stop
+// at it: it runs, says it is running, and makes its own offer. So the pass's
+// stop hears only the interrupt after its own offer, while the stop's other
+// waits (the drains) select on StopNow. Were the pass to select on StopNow
+// too, that earlier press would end it before it compared anything, and every
+// Basic-Auth login it would have re-keyed would stay redacted and fail (401)
+// at replay.
+func TestAfterRecordingComplete_APressAtAnEarlierWaitDoesNotStopThePass(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	h := &ctxEndHooks{onCall: func(ctx context.Context) {
+		if !saidWithin(logs, hookOfferSnippet) {
+			t.Errorf("the pass never made its own offer: %v", logs.All())
+			return
+		}
+		if ctx.Err() != nil {
+			t.Errorf("the pass was stopped by a press it never offered to stop at: %v", context.Cause(ctx))
+		}
+	}}
+	r := newHookRecorder(t, zap.New(core), h)
+	utils.MarkInterrupted()             // the stop
+	_, withdraw := utils.OfferStopNow() // a drain offers to stop now
+	if !utils.MarkInterruptedAgain() {  // the user answers the drain's offer
+		t.Fatal("setup: the drain's offer did not take the press")
+	}
+	withdraw()
+	select {
+	case <-utils.StopNow():
+	default:
+		t.Fatal("setup: StopNow is not closed after the press at the drain's offer")
+	}
+
+	r.afterRecordingComplete(context.Background(), "test-set-1")
+
+	if h.causeAtEnd != nil {
+		t.Fatalf("the pass's context ended with %v, though no press answered its offer", h.causeAtEnd)
+	}
+	if n := logs.FilterMessageSnippet(hookStoppedSnippet).Len(); n != 0 {
+		t.Fatalf("the stop said %d times that it stopped the pass, though no press answered its offer: %v", n, logs.All())
+	}
+}
+
+// `sudo pkill -f keploy`, as CI stops a recording, reaches keploy twice: once
+// directly and once from sudo, which hands its copy on. A copy that comes
+// while the pass runs, before the pass has offered to stop, answers no offer,
+// so it does not stop the pass: only an interrupt after the pass's own offer
+// does. The notices' clock is held, so the offer waits until the row moves it
+// on, after the copy.
+func TestAfterRecordingComplete_AnInterruptBeforeThePassOffersDoesNotStopIt(t *testing.T) {
+	var mu sync.Mutex
+	at := time.Unix(1_800_000_000, 0)
+	defer utils.SetNoticeClockForTest(func() time.Time { mu.Lock(); defer mu.Unlock(); return at })()
+	core, logs := observer.New(zapcore.InfoLevel)
+	h := &ctxEndHooks{onCall: func(ctx context.Context) {
+		if !saidWithin(logs, hookStillSnippet) {
+			t.Errorf("the stop never said it waits for the post-record pass: %v", logs.All())
+			return
+		}
+		if n := logs.FilterMessageSnippet(hookOfferSnippet).Len(); n != 0 {
+			t.Errorf("the pass offered to stop %d times before a whole notice period after the stop's signal (the notices' clock is held): %v", n, logs.All())
+			return
+		}
+		if utils.MarkInterruptedAgain() { // sudo's copy of the stop's signal
+			t.Error("an offer to stop stood before the pass made its own, so sudo's copy of the stop's signal stopped it")
+			return
+		}
+		// A stop that took the copy ends its notices; five more say it did not.
+		if !saidTimesWithin(logs, hookStillSnippet, logs.FilterMessageSnippet(hookStillSnippet).Len()+5) {
+			t.Errorf("the stop stopped saying the pass runs after an interrupt that answered no offer: %v", logs.All())
+			return
+		}
+		if ctx.Err() != nil {
+			t.Errorf("the pass was stopped by an interrupt that came before its offer: %v", context.Cause(ctx))
+			return
+		}
+		mu.Lock()
+		at = at.Add(time.Hour) // a whole notice period after the stop's signal
+		mu.Unlock()
+		if !saidWithin(logs, hookOfferSnippet) {
+			t.Errorf("the pass never made its own offer: %v", logs.All())
+			return
+		}
+		if ctx.Err() != nil {
+			t.Errorf("the pass was stopped by an interrupt that came before its offer: %v", context.Cause(ctx))
+		}
+	}}
+	r := newHookRecorder(t, zap.New(core), h)
+	utils.MarkInterrupted() // the stop
+
+	r.afterRecordingComplete(context.Background(), "test-set-1")
+
+	if t.Failed() {
+		return
+	}
+	if h.causeAtEnd != nil {
+		t.Fatalf("the pass's context ended with %v, though no press answered its offer", h.causeAtEnd)
+	}
+	if n := logs.FilterMessageSnippet(hookStoppedSnippet).Len(); n != 0 {
+		t.Fatalf("the stop said %d times that it stopped the pass, though no press answered its offer: %v", n, logs.All())
+	}
+}
+
+type hookCtxKey struct{}
+
+type ctxValueHooks struct {
+	BaseRecordHooks
+	got any
+}
+
+func (h *ctxValueHooks) AfterRecordingComplete(ctx context.Context, _ *RecordingCompleteContext) error {
+	h.got = ctx.Value(hookCtxKey{})
+	return nil
+}
+
+// The hook's context drops the recorder context's cancellation and deadline,
+// not its values: what the recorder's context carries reaches the hook.
+func TestAfterRecordingComplete_HookContextKeepsTheRecordersValues(t *testing.T) {
+	h := &ctxValueHooks{}
+	r := newHookRecorder(t, zap.NewNop(), h)
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), hookCtxKey{}, "the recorder's value"))
+	cancel() // recorder ctx already cancelled, as on a normal stop
+
+	r.afterRecordingComplete(ctx, "test-set-1")
+
+	if h.got != "the recorder's value" {
+		t.Fatalf("the hook's context carries %v for the recorder's key, want the recorder's value", h.got)
 	}
 }

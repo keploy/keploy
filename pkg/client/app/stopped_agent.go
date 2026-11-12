@@ -19,11 +19,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// stoppedAgentReadBudget bounds everything readStoppedAgent asks the docker
-// daemon. Not on the Ctrl+C path -- readStoppedAgent skips an interrupted run
-// -- so it is sized for a busy daemon rather than for the teardown drain.
-const stoppedAgentReadBudget = 10 * time.Second
-
 // maxAgentOutcomeBytes caps the outcome file keploy reads back from the agent's
 // container. It lists every mock served and every call missed; a suite with
 // tens of thousands of dependency calls stays far under this.
@@ -195,6 +190,12 @@ func (a *App) StoppedAgent() (StoppedAgent, bool) {
 // must run after `docker compose up` has returned and before ComposeDown
 // removes the container: run() defers it after the teardown, so it runs
 // first.
+//
+// What it reads decides the run's verdict, so each read goes on until the
+// daemon answers or ctx ends (composeEndRead), and no clock ends one: an app
+// nobody could read is one that may have run, and compose's 0 then stands for
+// an app it never started. A run interrupted during the read reports what one
+// interrupted before it does: nothing.
 func (a *App) readStoppedAgent(ctx context.Context) {
 	if a.kind != utils.DockerCompose || a.keployContainer == "" || !(a.opts.MockMode || a.opts.Mode == models.MODE_RECORD) {
 		return
@@ -204,13 +205,11 @@ func (a *App) readStoppedAgent(ctx context.Context) {
 		// interrupted run reports neither an outcome nor a failure.
 		return
 	}
-	readCtx, cancel := context.WithTimeout(context.Background(), stoppedAgentReadBudget)
-	defer cancel()
 	read := &StoppedAgent{Container: a.keployContainer}
 	var agentErr error
-	read.Agent, agentErr = a.containerState(readCtx, a.keployContainer)
+	read.Agent, agentErr = a.stoppedContainerState(ctx, a.keployContainer)
 	if a.container != "" {
-		read.App, _ = a.containerState(readCtx, a.container)
+		read.App, _ = a.stoppedContainerState(ctx, a.container)
 	}
 	if a.opts.MockMode && a.opts.Mode == models.MODE_TEST {
 		if agentErr != nil {
@@ -220,16 +219,36 @@ func (a *App) readStoppedAgent(ctx context.Context) {
 			// keploy asks, or that daemon could not be reached.
 			read.OutcomeErr = fmt.Errorf("keploy could not find the keploy-agent container %s on the docker daemon it talks to: %w", a.keployContainer, agentErr)
 		} else {
-			read.Outcome, read.OutcomeErr = readContainerFile(readCtx, a.docker, a.keployContainer, docker.AgentOutcomeFile, maxAgentOutcomeBytes)
+			// Its error is ctx's or a lost daemon's: OutcomeErr holds the last
+			// read's failure then too.
+			_ = a.composeEndRead(ctx, "the replay outcome the keploy-agent container left", func(rctx context.Context) error {
+				read.Outcome, read.OutcomeErr = readContainerFile(rctx, a.docker, a.keployContainer, docker.AgentOutcomeFile, maxAgentOutcomeBytes)
+				return read.OutcomeErr
+			})
 		}
 		if read.OutcomeErr != nil {
 			a.logger.Debug("could not read the replay outcome the keploy-agent container left",
 				zap.String("container", a.keployContainer), zap.Error(read.OutcomeErr))
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	a.stopped.mu.Lock()
 	a.stopped.read = read
 	a.stopped.mu.Unlock()
+}
+
+// stoppedContainerState is how name ended, read until the daemon answers
+// (composeEndRead), or why docker could not say.
+func (a *App) stoppedContainerState(ctx context.Context, name string) (state *container.State, err error) {
+	// Its error is ctx's or a lost daemon's: err holds the last read's failure
+	// then too.
+	_ = a.composeEndRead(ctx, "how a compose container ended", func(rctx context.Context) error {
+		state, err = a.containerState(rctx, name)
+		return err
+	})
+	return state, err
 }
 
 // containerState is how name ended, or why docker could not say.
@@ -251,7 +270,7 @@ func readContainerFile(ctx context.Context, client docker.Client, name, path str
 	rc, _, err := client.CopyFromContainer(ctx, name, path)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
-			return nil, fmt.Errorf("the keploy-agent container %s left no %s", name, path)
+			return nil, fmt.Errorf("the keploy-agent container %s left no %s: %w", name, path, err)
 		}
 		return nil, fmt.Errorf("failed to read %s from the keploy-agent container %s: %w", path, name, err)
 	}

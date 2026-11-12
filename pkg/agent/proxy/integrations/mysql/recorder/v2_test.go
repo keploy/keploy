@@ -215,7 +215,7 @@ func TestRecordV2_HappyPath_HandshakeAndOneQuery(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 
 	// Collect mocks; we expect two: one "config" for the handshake and
@@ -340,7 +340,7 @@ func TestRecordV2_TLSUpgrade_DirectiveAndResume(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 
 	// Expect exactly one mock (the config mock).
@@ -405,7 +405,7 @@ func TestRecordV2_TLSUpgrade_FailureReturnsItsErrorAndLeavesNoMark(t *testing.T)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 
 	select {
@@ -561,7 +561,7 @@ func runPostTLS(t *testing.T, h *v2Harness, ctx context.Context, want int) []*mo
 	go func() {
 		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		done <- RecordV2(cctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, cctx, h.logger, h.sess)
 	}()
 	var got []*models.Mock
 	for len(got) < want {
@@ -773,7 +773,7 @@ func TestRecordV2_TLSUpgrade_ClientHelloDiscardedFromParserStream(t *testing.T) 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		done <- RecordV2(ctx, h.logger, h.sess)
+		done <- recordV2NoPanic(t, ctx, h.logger, h.sess)
 	}()
 
 	select {

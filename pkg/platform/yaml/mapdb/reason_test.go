@@ -22,7 +22,7 @@ func TestMoveToWorkerWritesEachMovesReason(t *testing.T) {
 			if err := db.Insert(context.Background(), m); err != nil {
 				t.Fatal(err)
 			}
-			moved := "mock-6 (Mongo insert keploy.events) moved from post-url-1 to background. Undo: move this entry back under tests[post-url-1].mocks and delete this line."
+			moved := "mock-6 (Mongo insert keploy.events) moved from post-url-1 to background. Undo: move this entry back under `tests[post-url-1].mock_entries`, without its `reason`."
 			if _, err := db.MoveToWorker(context.Background(), "test-set-0", []models.MockEntry{
 				{Name: "mock-6", Reason: moved}, // a test's entry moves, with its line
 				{Name: "mock-2", Place: ""},     // a worker entry is placed, with no line
@@ -56,7 +56,7 @@ func TestMoveToWorkerWritesEachMovesReason(t *testing.T) {
 // on a worker entry and on a test's alike.
 func TestAReasonSurvivesARewriteWithoutTheSwitch(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
-	routed := "mock-5 (SQS DeleteMessage) was sent before post-url-1 began and answered inside it, by one clock. Undo: move this entry under tests[post-url-1].mocks and delete this line."
+	routed := "mock-5 (SQS DeleteMessage) was sent before post-url-1 began and answered inside it, by one clock. Undo: move this entry back under `tests[post-url-1].mock_entries`, without its `reason`."
 	owned := "kept on its test by hand. Undo: delete this line."
 	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
 		t.Run(format.FileExtension(), func(t *testing.T) {

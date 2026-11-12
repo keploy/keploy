@@ -1,15 +1,12 @@
 package recorder
 
 import (
-	"context"
 	"encoding/binary"
+	"fmt"
 	"testing"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
-	"go.uber.org/zap/zaptest"
 )
 
 // typedExecuteCommand is a COM_STMT_EXECUTE of statementID binding an INT and
@@ -36,47 +33,35 @@ func typedExecuteCommand(statementID uint32, bound bool, n int32, s string) []by
 // the values it bound, read with the types its statement was last sent with.
 // It used to fail to decode: its exchange was not recorded, and the test case
 // over it was left out of the recording.
-func TestAsyncMySQLDecode_AnExecuteWithoutTypesIsRecorded(t *testing.T) {
-	const statementID = uint32(7)
-	clientConn := newPipeConn()
-	decodeCtx := buildPostHandshakeDecodeCtx(clientConn)
-	decodeCtx.LastOp.Store(clientConn, wire.RESET)
-	decodeCtx.PreparedStatements[statementID] = &mysql.StmtPrepareOkPacket{StatementID: statementID, NumParams: 2}
-
-	mocks := make(chan *models.Mock, 8)
-	wireSyncMockOutput(t, mocks)
-	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "unbound-types")
-
-	base := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
-	items := []mysqlDecodeItem{
-		{fromClient: true, data: typedExecuteCommand(statementID, true, 1001, "item-1")},
-		{data: okResponseWithAffectedRows(1, 1)},
-		{fromClient: true, data: typedExecuteCommand(statementID, false, 1002, "item-2")},
-		{data: okResponseWithAffectedRows(1, 2)},
-		{fromClient: true, data: typedExecuteCommand(statementID, false, 1003, "item-3")},
-		{data: okResponseWithAffectedRows(1, 3)},
-	}
-	decodeItems := make(chan mysqlDecodeItem, len(items))
-	for i, it := range items {
-		it.ts = base.Add(time.Duration(i) * time.Millisecond)
-		decodeItems <- it
-	}
-	close(decodeItems)
-	asyncMySQLDecode(ctx, zaptest.NewLogger(t), decodeItems, mocks, decodeCtx, clientConn,
-		models.OutgoingOptions{DstCfg: &models.ConditionalDstCfg{Addr: "127.0.0.1:3306"}})
-
-	var got []*mysql.StmtExecutePacket
-	for len(mocks) > 0 {
-		m := <-mocks
-		if e, ok := m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket); ok {
-			got = append(got, e)
+func TestRecordV2_AnExecuteWithoutTypesIsRecorded(t *testing.T) {
+	t.Parallel()
+	param := &mysql.ColumnDefinition41{Catalog: "def", Name: "?", FixedLength: 0x0c, CharacterSet: 0x3f, Type: byte(mysql.FieldTypeVarString)}
+	got, leftOut, err := runRecordV2(t, func(h *v2Harness, at func() time.Time) {
+		h.pushClient(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO items (n, s) VALUES (?, ?)"...), 0), at())
+		for _, p := range prepareOK(false, [][]byte{columnPayload(t, param), columnPayload(t, param)}, nil) {
+			h.pushDest(p, at())
 		}
+		for i, bound := range []bool{true, false, false} {
+			h.pushClient(typedExecuteCommand(undecodableStmtID, bound, int32(1001+i), fmt.Sprintf("item-%d", i+1)), at())
+			h.pushDest(okResponseWithAffectedRows(1, byte(i+1)), at())
+		}
+	})
+	if err != nil {
+		t.Fatalf("RecordV2: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("recorded %d EXECUTEs, want all 3", len(got))
+	if leftOut.count() != 0 {
+		t.Fatalf("%d exchanges left out, want none", leftOut.count())
 	}
-	for i, e := range got {
-		want := []interface{}{int32(1001 + i), "item-" + string(rune('1'+i))}
+	executes := mocksOf(got, "COM_STMT_EXECUTE")
+	if len(executes) != 3 {
+		t.Fatalf("recorded %d EXECUTEs, want all 3", len(executes))
+	}
+	for i, m := range executes {
+		e, ok := m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket)
+		if !ok {
+			t.Fatalf("EXECUTE %d recorded a %T", i, m.Spec.MySQLRequests[0].Message)
+		}
+		want := []interface{}{int32(1001 + i), fmt.Sprintf("item-%d", i+1)}
 		if len(e.Parameters) != 2 || e.Parameters[0].Value != want[0] || e.Parameters[1].Value != want[1] ||
 			e.Parameters[0].Type != uint16(mysql.FieldTypeLong) {
 			t.Errorf("EXECUTE %d recorded %+v, want LONG %v and %v", i, e.Parameters, want[0], want[1])

@@ -39,8 +39,7 @@ func TestStrictGate_ExecuteTypesAreComparedOnlyWhenBothPacketsSentThem(t *testin
 		{"both sent other types", executeBundle(1, param{Type: 254, Value: "a"}), executeBundle(1, param{Type: 253, Value: "a"}), false, "body.parameters.0.type"},
 	} {
 		live := tc.live
-		liveBody, _ := mysqlRequestBodyJSON(&live)
-		gate := newStrictGate(mocknoise.New(mysqlNoiseAdapter{}, false, true), zap.NewNop(), "COM_STMT_EXECUTE", &live, liveBody, true, nil)
+		gate := newStrictGate(mocknoise.New(mysqlNoiseAdapter{}, false, true), zap.NewNop(), "COM_STMT_EXECUTE", &live, -1, "", nil)
 		rec := &models.Mock{Name: "rec", Kind: models.MySQL}
 		rec.Spec.MySQLRequests = []mysql.Request{{PacketBundle: tc.rec}}
 		if got := gate.allows(rec); got != tc.allowed {
@@ -120,5 +119,50 @@ func TestMatchCommand_LearnsNoNoiseFromAnOlderKeploysReading(t *testing.T) {
 	}
 	if len(db.learned) != 0 {
 		t.Errorf("learned %v as noise from a recording read as its keploy read it", db.learned)
+	}
+}
+
+// TestAStrictCommandComparesEachRecordingWithItsOwnReading: under strict
+// enforcement, a live EXECUTE that an older keploy read otherwise
+// (LegacyParameters) is compared with this keploy's recording as the packet
+// reads now, and with that keploy's recording as that keploy read it: one
+// body for each reading (strictGate.bodyDocFor). The eager gate compares
+// each recording as the walk meets it: this keploy's recording, made with
+// other values, first, which it refuses; then the older keploy's recording
+// of the same call, which answers.
+func TestAStrictCommandComparesEachRecordingWithItsOwnReading(t *testing.T) {
+	at := stmtT0.Add(time.Second)
+	// What that keploy recorded for INT 2 then "small-2" (see above).
+	legacy := executedMock("mock-execute-legacy", 1, at, "row", ordersInsert, "\x00\x00", "")
+	msg := legacy.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket)
+	msg.NewParamsBindFlag = 0
+	for i := range msg.Parameters {
+		msg.Parameters[i].Type = uint16(mysql.FieldTypeString)
+	}
+	current := executedMock("mock-execute-current", 1, at.Add(-time.Millisecond), "other-row", ordersInsert)
+	cur := current.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket)
+	cur.ParameterCount = 2
+	cur.Parameters = []mysql.Parameter{{Type: uint16(mysql.FieldTypeLong), Value: int32(3)}, {Type: 253, Value: "small-3"}}
+	if legacyRecordedMock(current) || !legacyRecordedMock(legacy) {
+		t.Fatal("the row needs one recording of this keploy and one of an older keploy")
+	}
+	db := &fakeMockDb{session: []*models.Mock{current, legacy}, winStart: at.Add(-time.Second), winEnd: at.Add(time.Second)}
+	req := liveExecute()
+	live := req.Message.(*mysql.StmtExecutePacket)
+	live.NewParamsBindFlag, live.ParameterCount = 0, 2
+	live.Parameters = []mysql.Parameter{{Type: uint16(mysql.FieldTypeLong), Value: int32(2)}, {Type: 253, Value: "small-2"}}
+	live.LegacyParameters = []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Value: "\x00\x00"}, {Type: uint16(mysql.FieldTypeString), Value: ""}}
+	dctx := newDecodeCtx()
+	dctx.StmtIDToQuery[33] = ordersInsert
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+	var compared int
+	var docs []*mocknoise.JSONBody
+	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, mocknoise.New(mysqlNoiseAdapter{}, false, true), nil,
+		matchOptions{compared: &compared, docsMade: &docs, eagerGate: true, wholeWalk: true})
+	if err != nil || !ok || resp.Payload != "row" {
+		t.Fatalf("served %v (ok %v, %v), want the older keploy's recording's row", resp, ok, err)
+	}
+	if compared != 2 || len(docs) != 2 {
+		t.Errorf("the gate compared %d recordings with %d bodies, want 2 with 2 (one for each reading)", compared, len(docs))
 	}
 }

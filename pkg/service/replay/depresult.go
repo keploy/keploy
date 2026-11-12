@@ -36,6 +36,15 @@ type mockDisplayInfo struct {
 	// carry a whole recorded command, are worked out when a report names it
 	// rather than held for every mock of the set.
 	onDisk *models.Mock
+	// carryOver: a carry-over mock (models.IsCarryOver), the application's
+	// asynchronous output, placed at place (models.PlaceOf), which the release
+	// rule gives to the test whose window or gap after it holds it.
+	carryOver bool
+	place     time.Time
+	// fault is the mock's models.Mock.FaultServed: the line the set's
+	// summary says of it when the replay served it (logFaultsServed), "" for
+	// a mock whose answer ends in no fault.
+	fault string
 }
 
 // summaryOf is the mock's summary (models.MockSummaryFromSpec).
@@ -425,6 +434,21 @@ type depAssertion struct {
 // A user who wants every row has the mapping itself (mappings.yaml) and
 // TestResult.MockMismatches, both of which carry the full expected set.
 const depMissingRowCap = 50
+
+// mockMismatchesFor is a test's TestResult.MockMismatches on the main replay
+// loop: the asserted mocks its mapping names and the mocks it consumed,
+// present whenever what it consumed was read, even when both are empty. On
+// that loop, absent means the consumed mocks could not be read (the per-test
+// GetConsumedMocks failed, in either mode, so nothing stale is reported), so
+// a reader can tell a test that consumed nothing from one whose consumption
+// is unknown; left out when empty, the two looked the same. (Other paths,
+// such as streaming tests and results built before the loop, never set it.)
+func mockMismatchesFor(consumedKnown bool, expected, actual []models.MockMismatchMock) *models.MockMismatchInfo {
+	if !consumedKnown {
+		return nil
+	}
+	return &models.MockMismatchInfo{ExpectedMocks: expected, ActualMocks: actual}
+}
 
 // depTypeFor resolves the normalised protocol family of a mapping entry,
 // preferring the entry's own Kind and falling back to the loaded-mock lookup

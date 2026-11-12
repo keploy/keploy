@@ -1,5 +1,7 @@
 package learn
 
+import "time"
+
 // Flight is one request of the application's on one of its connections to
 // keploy: aloft from the first bytes of it keploy read until keploy starts
 // to write the answer back (Land), or until keploy knows the application is
@@ -56,8 +58,23 @@ package learn
 // handshake makes no other request's serve untold: a pool's handshake on its
 // own connection beside a statement leaves the statement its place, and the
 // handshake none.
+//
+// Any other protocol phase (a Postgres connection's setup statement or
+// catalog read, a driver's heartbeat: Mock.IsProtocolPhase) is a request's
+// answer too where its parser says which request it served it in
+// (ServedMockIn): it has that request's place, told once the request landed,
+// and none where the request was aloft beside one that was a serve, got a
+// handshake or got such a phase. It makes no data-plane serve and no
+// handshake untold, as a handshake makes none. Said in no request, or with
+// none said, it has no place once a connection lifted: a greeting a server
+// sends first answers no request.
 type Flight struct {
 	t *Tracker
+	// at is the real instant it lifted (Lift): when its first bytes reached
+	// keploy, the instant a serve made in it is bounded from (servedIn).
+	// Zero for a request a serve caused (LiftCaused), which the application
+	// did not send, and for NoRequest.
+	at time.Time
 	// overlaps are the requests aloft at an instant this one was: those
 	// aloft when it lifted, and those lifted while it was aloft.
 	overlaps []*Flight
@@ -80,10 +97,23 @@ type Flight struct {
 	// only its own set's numbers (Order.byRead).
 	answering                int
 	servingSet, answeringSet uint64
+	// phasing is the number of the first other protocol phase its parser
+	// said was served in this request (Tracker.ServedMockIn of a mock
+	// IsProtocolPhase reads so: a Postgres connection's setup statement or
+	// catalog read, a driver's heartbeat), placed or not; phasingSet the set
+	// epoch it was numbered in. Like answering, it makes no data-plane serve
+	// and no handshake one keploy cannot tell; another such phase aloft
+	// beside it is (two connections' setups at once).
+	phasing    int
+	phasingSet uint64
 	// landed is the tracker's count of landings once this one landed (0
 	// while aloft): a read of the order (Placed) reads it only if it landed
 	// before the read, so later requests change no read's verdict.
 	landed uint64
+	// landedAt is the real instant it landed (zero while aloft): a serve
+	// made in it gave the application nothing before then (Order.ArrivedAt
+	// reads it).
+	landedAt time.Time
 	// untold is the tracker's count of landings once this one ended untold
 	// (EndUntold; 0 while it has not): a read made since reads none of its
 	// serves, and a read made before keeps the verdict it gave.
@@ -99,7 +129,7 @@ func (t *Tracker) Lift() *Flight {
 	if t == nil {
 		return nil
 	}
-	f := &Flight{t: t}
+	f := &Flight{t: t, at: time.Now()}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for g := range t.aloft {
@@ -136,6 +166,18 @@ var noRequest = &Flight{}
 // request of its tells. It never lifts or lands: Land on it is nothing, and
 // LiftCaused of it is it.
 func NoRequest() *Flight { return noRequest }
+
+// arrivedBy is the real instant the call a serve of t's made at the real
+// instant at answers reached keploy, where f is the request it was served
+// in: f's lift, where f is one of t's that lifted no later than at; else
+// at itself (no request said, NoRequest, a request a serve caused, or
+// another tracker's).
+func (f *Flight) arrivedBy(t *Tracker, at time.Time) time.Time {
+	if f == nil || f.t != t || f.at.IsZero() || f.at.After(at) {
+		return at
+	}
+	return f.at
+}
 
 // LiftCaused is the request of a serve f caused, made once f's own serve
 // was (a server push f's PUBLISH let go, consumed on the subscriber's
@@ -201,7 +243,7 @@ func (f *Flight) Land() {
 	}
 	delete(t.aloft, f)
 	t.landings++
-	f.landed = t.landings
+	f.landed, f.landedAt = t.landings, time.Now()
 }
 
 // EndUntold is the end of f whose answer the application is not given: no
@@ -247,11 +289,15 @@ func (f *Flight) EndUntold() {
 // flightOfLocked is the request the serve numbered now (t.seq) is made in,
 // which it makes a serve (Flight.serving): in, the request its parser said
 // it serves, while that one is aloft; with none said, the one request
-// aloft. nil for a protocol phase (a greeting the server sends first is no
-// request's, and makes none a serve), for a serve its parser said was made
-// in no request (NoRequest), which makes none a serve either, for a serve in
-// no request, in one already landed, or with several aloft and none said,
-// when every one aloft becomes a serve. A handshake (k.handshake: its parser
+// aloft. A protocol phase makes no request a serve: one its parser said was
+// served in in, a request of t's (a connection's setup statement or catalog
+// read, a driver's heartbeat), is in's while in is aloft, and makes in one
+// that got a phase (Flight.phasing); said in no request, or with none said,
+// it is nil (a greeting a server sends first answers no request). nil too
+// for a serve its parser said was made in no request (NoRequest), which
+// makes none a serve either, for a serve in no request, in one already
+// landed, or with several aloft and none said, when every one aloft becomes
+// a serve. A handshake (k.handshake: its parser
 // said it answers in, ServedHandshakeIn) makes in, a request of t's, one
 // that got a handshake (Flight.answering), never a serve, and is in's while
 // in is aloft and the handshake was chosen in it (k.placed); nil otherwise,
@@ -270,7 +316,23 @@ func (t *Tracker) flightOfLocked(protocol bool, in *Flight, k serveKind) *Flight
 		}
 		return in
 	}
-	if protocol || in == noRequest {
+	if protocol {
+		// A protocol phase its parser said was served in in (ServedMockIn)
+		// is in's, placed as a handshake chosen in in is: the application
+		// asked for it there. Said in no request, or none said, it is no
+		// request's: a greeting a server sends first answers none.
+		if in == nil || in.t != t {
+			return nil
+		}
+		if in.phasing == 0 {
+			in.phasing, in.phasingSet = t.seq, t.setEpoch
+		}
+		if in.landed != 0 {
+			return nil
+		}
+		return in
+	}
+	if in == noRequest {
 		return nil
 	}
 	serves := func(f *Flight) {
@@ -302,7 +364,9 @@ func (t *Tracker) flightOfLocked(protocol bool, in *Flight, k serveKind) *Flight
 // F's claims are the only order there is); with them, only a serve made in
 // one request that landed before the read and had not ended untold by then
 // (EndUntold), and overlapped no request that was a serve by then; a
-// handshake (Flight.answering), no request either that got one by then.
+// handshake (Flight.answering), no request either that got one by then; a
+// protocol phase placed in its request (Flight.phasing), no request that got
+// a handshake or such a phase by then.
 // o.t.mu is held.
 func (o Order) told(s int) bool {
 	if !o.flying {
@@ -318,12 +382,15 @@ func (o Order) told(s int) bool {
 	if f.untold != 0 && f.untold <= o.landings {
 		return false
 	}
-	handshake := o.handshakes[s]
+	handshake, phase := o.handshakes[s], o.phases[s]
 	for _, g := range f.overlaps {
 		if o.byRead(g.serving, g.servingSet) {
 			return false
 		}
-		if handshake && o.byRead(g.answering, g.answeringSet) {
+		if (handshake || phase) && o.byRead(g.answering, g.answeringSet) {
+			return false
+		}
+		if phase && o.byRead(g.phasing, g.phasingSet) {
 			return false
 		}
 	}

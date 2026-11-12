@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
-	"strings"
 	"time"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -61,15 +59,14 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 
 	// The framing headers are read from the header section only: a body line
 	// such as a multipart part's "Content-Length: 10" is not a header.
-	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
+	contentLength, chunked, err := parseHeaders(head, false)
+	if err != nil {
+		utils.LogError(h.Logger, err, "failed to read the request's framing")
+		return fmt.Errorf("failed to handle chunked request: %w", err)
+	}
 
 	//Handle chunked requests
-	if contentLengthHeader != "" {
-		contentLength, err := strconv.Atoi(contentLengthHeader)
-		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get the content-length header")
-			return fmt.Errorf("failed to handle chunked request")
-		}
+	if contentLength >= 0 {
 		//Get the length of the body in the request.
 		contentLength -= len(*finalReq) - bodyStart
 		if contentLength > 0 {
@@ -78,11 +75,9 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 				return err
 			}
 		}
-	} else if transferEncodingHeader != "" {
-		if strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
-			if err := h.chunkedRequest(ctx, finalReq, clientConn, destConn); err != nil {
-				return err
-			}
+	} else if chunked {
+		if err := h.chunkedRequest(ctx, finalReq, clientConn, destConn); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -302,19 +297,19 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 		resp = append(resp, respHeader...)
 	}
 
-	if responseHasNoBody(reqMethod, status) {
+	// The framing headers of the final response, read from its header section
+	// only (a body line is not a header), whatever its status: net/http reads
+	// them too, and refuses the ones it refuses.
+	contentLength, chunked, err := parseHeaders(head, true)
+	if err != nil {
+		utils.LogError(h.Logger, err, "failed to read the response's framing")
+		return fmt.Errorf("failed to handle chunked response: %w", err)
+	}
+	if framedHeadOnly(reqMethod, status) {
 		return nil // no body, whatever the headers say
 	}
-	// The framing headers of the final response, read from its header section
-	// only (a body line is not a header).
-	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
-	if contentLengthHeader != "" {
-		contentLength, err := strconv.Atoi(contentLengthHeader)
-		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get the content-length header")
-			return fmt.Errorf("failed to handle chunked response")
-		}
+	if contentLength >= 0 {
 		contentLength -= len(resp) - bodyStart
 		if contentLength > 0 {
 			err := h.contentLengthResponse(ctx, finalResp, clientConn, destConn, contentLength)
@@ -322,7 +317,7 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 				return err
 			}
 		}
-	} else if strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
+	} else if chunked {
 		if err := h.chunkedResponse(ctx, finalResp, clientConn, destConn); err != nil {
 			return err
 		}

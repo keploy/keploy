@@ -32,6 +32,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../sudo_env.sh" || exit 1
 sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.keploy/installation-id.yaml >/dev/null || true
 
 # This lane's directory: the shared harness (keploy_v1.py).
@@ -52,7 +54,7 @@ cp "$MOCK_DIR/keploy_v1.py" keploy_v1.py || { echo "FAIL: no keploy_v1.py beside
 
 # Tear down only this project, by name. Never a blanket prune.
 cleanup() {
-  for f in docker-compose.yml docker-compose.nodep.yml docker-compose.fail.yml docker-compose.miss.yml docker-compose.linger.yml docker-compose.reclinger.yml; do
+  for f in docker-compose.yml docker-compose.nodep.yml docker-compose.fail.yml docker-compose.miss.yml docker-compose.linger.yml docker-compose.reclinger.yml docker-compose.neverran.yml; do
     [ -f "$f" ] && sudo docker compose -f "$f" down --remove-orphans >/dev/null 2>&1
   done
   # After the project is down, so a dependency still starting cannot write its
@@ -258,7 +260,7 @@ echo "== 0. under the proven switch, a compose record and replay are refused bef
 for verb in record replay; do
   BIN=$RECORD_BIN
   [ "$verb" = replay ] && BIN=$REPLAY_BIN
-  sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$BIN" mock "$verb" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$BIN" mock "$verb" \
     -c "docker compose up" --container-name mockc-runner --name e2e-proven --disable-tele > "proven-$verb.log" 2>&1
   RC=$?
   echo "$verb under the switch exit=$RC"
@@ -273,7 +275,7 @@ fi
 
 if half off; then
 echo "== 1. record a compose project =="
-sudo -E env PATH="$PATH" "$RECORD_BIN" mock record \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" mock record \
   -c "docker compose up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee rec.log
 grep -q "RUNNER PASSED 3" rec.log || { echo "FAIL: the runner never completed under record"; FAIL=1; }
 assert_agent_guarded rec.log
@@ -283,7 +285,7 @@ echo "recorded /price/ mocks: $MOCKS"
 # Compose stops the agent with the project, and it closes its mock stream
 # without a word that it handed over every mock: the recording is saved, and
 # keploy says it cannot confirm it whole, naming the set.
-grep "keploy cannot confirm this recording holds them all" rec.log | grep -q '"mock-set": "e2e"' ||
+grep "keploy cannot confirm this recording holds them all" rec.log | grep '"mock-set": "e2e"' >/dev/null ||
   { echo "FAIL: a compose recording whose agent closed its stream unconfirmed was saved without saying so"; FAIL=1; }
 cleanup
 
@@ -300,7 +302,7 @@ printf '#!/bin/sh\necho "keploy ran sudo as root: sudo $*" >&2\nexit 97\n' > "$T
 chmod +x "$TRIPWIRE/sudo"
 
 echo "== 2. replay with the dependency service DELETED (must serve from mocks), under sudo docker compose =="
-sudo -E env PATH="$TRIPWIRE:$PATH" "$REPLAY_BIN" mock replay \
+sudo env PATH="$TRIPWIRE:$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" mock replay \
   -c "sudo docker compose -f docker-compose.nodep.yml up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee rep.log
 RC=${PIPESTATUS[0]}
 echo "replay exit=$RC"
@@ -317,11 +319,11 @@ grep -q 'mock replay summary.*"consumed": [1-9]' rep.log || { echo "FAIL: the re
 grep -q "incomplete" rep.log && { echo "FAIL: the replay summary is incomplete under compose"; FAIL=1; }
 sudo grep -q '^isolated: true' keploy/e2e/last-replay.yaml || { echo "FAIL: the receipt does not prove the run isolated:"; sudo cat keploy/e2e/last-replay.yaml; FAIL=1; }
 # The test's verdict and window reached the CLI from the stopped agent.
-sudo grep -A1 -x '    - name: compose_test' keploy/e2e/last-replay-tests.yaml | grep -qx '      outcome: passed' || { echo "FAIL: the replay does not know the scoped test passed under compose:"; sudo cat keploy/e2e/last-replay-tests.yaml; FAIL=1; }
+sudo grep -A1 -x '    - name: compose_test' keploy/e2e/last-replay-tests.yaml | grep -x '      outcome: passed' >/dev/null || { echo "FAIL: the replay does not know the scoped test passed under compose:"; sudo cat keploy/e2e/last-replay-tests.yaml; FAIL=1; }
 cleanup
 
 echo "== 3. --strict passes a compose replay it can now verify =="
-sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" mock replay \
   -c "docker compose -f docker-compose.nodep.yml up" --container-name mockc-runner --name e2e --disable-tele --strict 2>&1 | tee strict.log
 RC=${PIPESTATUS[0]}
 echo "strict replay exit=$RC"
@@ -331,7 +333,7 @@ grep -q "could not be proven" strict.log && { echo "FAIL: --strict could not rea
 cleanup
 
 echo "== 3b. --strict fails on a call the recording lacks, read back from the stopped agent =="
-sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" mock replay \
   -c "docker compose -f docker-compose.miss.yml up" --container-name mockc-runner --name e2e --disable-tele --strict 2>&1 | tee miss.log
 RC=${PIPESTATUS[0]}
 echo "strict replay with an unrecorded call exit=$RC"
@@ -342,7 +344,7 @@ sudo grep -q '^failedBy: strict' keploy/e2e/last-replay.yaml || { echo "FAIL: th
 cleanup
 
 echo "== 4. exit-code propagation: a failing runner must fail keploy =="
-sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" mock replay \
   -c "docker compose -f docker-compose.fail.yml up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee fail.log
 RC=${PIPESTATUS[0]}
 echo "failing-runner replay exit=$RC"
@@ -371,7 +373,7 @@ echo "== 5. an agent that dies mid-run is keploy's failure, not the runner's =="
   echo "killing the agent container ${agent:-<none found>}"
   [ -n "$agent" ] && sudo docker kill "$agent" >/dev/null' ) &
 KILLER=$!
-sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$REPLAY_BIN" mock replay \
   -c "docker compose -f docker-compose.linger.yml up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee agentdies.log
 RC=${PIPESTATUS[0]}
 touch agentdies.done
@@ -399,7 +401,7 @@ echo "== 6. keploy record: an agent that crashes after it was ready fails the re
   echo "crashing the agent container ${agent:-<none found>} (SIGQUIT)"
   [ -n "$agent" ] && sudo docker kill -s QUIT "$agent" >/dev/null' ) &
 KILLER=$!
-sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record \
   -c "docker compose -f docker-compose.reclinger.yml up" --container-name mockc-runner --disable-tele 2>&1 | tee recdies.log
 RC=${PIPESTATUS[0]}
 touch recdies.done
@@ -416,7 +418,7 @@ echo "== 7. keploy record: the app stopped (docker stop) ends the recording norm
 # own stop of the agent with it is not the agent's failure.
 ( when_runner_passed recstop.log recstop.done sh -c 'echo "stopping the runner (docker stop)"; sudo docker stop mockc-runner >/dev/null' ) &
 STOPPER=$!
-sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" record \
   -c "docker compose -f docker-compose.reclinger.yml up" --container-name mockc-runner --disable-tele 2>&1 | tee recstop.log
 RC=${PIPESTATUS[0]}
 touch recstop.done
@@ -426,6 +428,45 @@ grep -q "RUNNER PASSED 3" recstop.log || { echo "FAIL: the runner never got as f
 [ "$RC" -eq 0 ] || { echo "FAIL: keploy record must end normally (exit 0) when its app is stopped by SIGTERM, got $RC"; FAIL=1; }
 grep -q '"app_exit_code": 143' recstop.log || { echo "FAIL: keploy record did not take the app's SIGTERM for a stop"; FAIL=1; }
 grep -q "failed to record" recstop.log && { echo "FAIL: keploy record says a stopped recording failed"; FAIL=1; }
+cleanup
+
+echo "== 8. keploy mock record: a test command compose never started fails the run =="
+# dep exits 0 before it is ever healthy, so compose stops the project and
+# never starts the runner, and dep did not crash, so keploy has no retry to
+# make. Compose then exits 1 or 0 by a race: v5.1.3, on GitHub's runners, stops
+# the project in a goroutine that overwrites the failed start's error. Either
+# way nothing ran, so the run must fail and the recording of step 1 must stand.
+cat > docker-compose.neverran.yml <<'YML'
+services:
+  runner:
+    image: python:3.11-slim
+    container_name: mockc-runner
+    working_dir: /w
+    volumes: [".:/w"]
+    command: ["sh", "-c", "touch /w/runner-ran"]
+    environment:
+      - KEPLOY_MOCK_AGENT
+    depends_on:
+      dep: {condition: service_healthy}
+  dep:
+    image: python:3.11-slim
+    container_name: mockc-dep
+    command: ["sh", "-c", "sleep 6; exit 0"]
+    healthcheck:
+      test: ["CMD", "false"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+YML
+SET_BEFORE=$(sudo cat keploy/e2e/mocks.yaml | md5sum)
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" "$RECORD_BIN" mock record \
+  -c "docker compose -f docker-compose.neverran.yml up" --container-name mockc-runner --name e2e --disable-tele 2>&1 | tee neverran.log
+RC=${PIPESTATUS[0]}
+echo "mock record of a test command compose never started exit=$RC"
+[ ! -e runner-ran ] || { echo "FAIL: the case is void: compose started the runner"; FAIL=1; }
+[ "$RC" -ne 0 ] || { echo "FAIL: keploy mock record must fail a run whose test command never ran, got exit 0"; FAIL=1; }
+grep -q "test command finished successfully" neverran.log && { echo "FAIL: keploy says a test command it never ran finished successfully"; FAIL=1; }
+[ "$(sudo cat keploy/e2e/mocks.yaml | md5sum)" = "$SET_BEFORE" ] || { echo "FAIL: a run that ran nothing changed the mock set"; FAIL=1; }
 fi
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK COMPOSE E2E: PASSED"; else echo "MOCK COMPOSE E2E: FAILED"; fi

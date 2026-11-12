@@ -90,11 +90,11 @@ func TestClassifyPutsEachStartupCallWithItsOwnStart(t *testing.T) {
 func TestTestAtUsesTheOnlyOpenTestWhenTheCallerHasNone(t *testing.T) {
 	at := time.Date(2026, 10, 5, 10, 0, 1, 0, time.UTC)
 	tests := []models.ScopeWindow{{Name: "login", Start: at.Add(-time.Second), End: at.Add(time.Second), PID: 30}}
-	if got := testAt(tests, 10, at); got != "login" {
+	if got := testAt(tests, 10, 0, at); got != "login" {
 		t.Fatalf("testAt = %q", got)
 	}
 	tests = append(tests, models.ScopeWindow{Name: "other", Start: at.Add(-time.Second), End: at.Add(time.Second), PID: 31})
-	if got := testAt(tests, 10, at); got != "" {
+	if got := testAt(tests, 10, 0, at); got != "" {
 		t.Fatalf("two workers with open tests must be ambiguous, got %q", got)
 	}
 }

@@ -68,16 +68,28 @@ func TestRecorderStatesHTTPLifetimes(t *testing.T) {
 
 // A miss on a recording that serves each test its own HTTP calls says how to
 // serve a call to every test (keploy.yaml sessionCalls, or recording again):
-// the call may be one another test recorded. A miss on a recording made
-// before says nothing of it, as every recorded call is served to every test;
-// nor does one under the proven switch, where a test is served what its
-// mapping names whatever is declared.
+// the call may be one another test recorded or, under the proven switch, one
+// the application made outside every test, which is what a declaration serves
+// there; another test's recording stays that test's. Under the switch a call
+// keploy.yaml declares already is told what the declaration serves, not to
+// declare it. A miss on a recording made before says nothing of it, as every
+// recorded call is served to every test.
 func TestMissOnAStatedRecordingTellsHowToShareACall(t *testing.T) {
 	h := newHTTP()
 	stated := httpMockOnHost("mock-1", "GET", "/api/orders?id=90", "192.0.2.10")
 	stated.Spec.Metadata = map[string]string{"type": string(models.HTTPClient), models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
 	legacy := httpMockOnHost("mock-2", "GET", "/api/orders?id=90", "192.0.2.10")
 	legacy.Spec.Metadata = map[string]string{"type": string(models.HTTPClient)}
+	const (
+		none     = ""
+		off      = "If another test recorded this call"
+		on       = "If the application made this call outside every test (in TestMain or at start-up)"
+		declared = "keploy.yaml declares this call a session call, which serves a recording of it made outside every test"
+		prefix   = "A keploy.yaml sessionCalls entry covers this call only by a path prefix or with no method"
+	)
+	decl := []models.SessionCallRule{{Host: "auth.example.com", Method: "POST", PathPrefix: "/oauth"}}
+	exact := []models.SessionCallRule{{Host: "auth.example.com", Method: "POST", PathPrefix: "/oauth/token"}}
+	anyMethod := []models.SessionCallRule{{Host: "auth.example.com", PathPrefix: "/oauth/token"}}
 	for _, tc := range []struct {
 		name string
 		pool []*models.Mock
@@ -85,15 +97,25 @@ func TestMissOnAStatedRecordingTellsHowToShareACall(t *testing.T) {
 		// (integrations.LifetimeStater), when it says anything.
 		recording *bool
 		proven    bool
-		want      bool
+		rules     []models.SessionCallRule
+		want      string
 	}{
-		{"stated recording", []*models.Mock{stated}, nil, false, true},
-		{"stated recording, proven switch on", []*models.Mock{stated}, nil, true, false},
-		{"recording made before", []*models.Mock{legacy}, nil, false, false},
+		{"stated recording", []*models.Mock{stated}, nil, false, nil, off},
+		{"stated recording, proven switch on", []*models.Mock{stated}, nil, true, nil, on},
+		{"stated recording, call declared", []*models.Mock{stated}, nil, false, decl, off},
+		{"stated recording, call declared exactly", []*models.Mock{stated}, nil, false, exact, off},
+		{"stated recording, call declared by a path prefix, proven switch on", []*models.Mock{stated}, nil, true, decl, prefix},
+		{"stated recording, call declared exactly, proven switch on", []*models.Mock{stated}, nil, true, exact, declared},
+		{"stated recording, call's path declared for any method, proven switch on", []*models.Mock{stated}, nil, true, anyMethod, prefix},
+		{"stated recording, another call declared, proven switch on", []*models.Mock{stated}, nil, true,
+			[]models.SessionCallRule{{Host: "auth.example.com", Method: "GET"}}, on},
+		{"recording made before", []*models.Mock{legacy}, nil, false, nil, none},
+		{"recording made before, proven switch on", []*models.Mock{legacy}, nil, true, decl, none},
 		// The test's own calls are consumed, and it holds no other HTTP mock:
 		// the mock db knows the set's recording states its lifetimes.
-		{"stated recording, nothing left to the test", nil, ptrTo(true), false, true},
-		{"recording made before, nothing left to the test", nil, ptrTo(false), false, false},
+		{"stated recording, nothing left to the test", nil, ptrTo(true), false, nil, off},
+		{"stated recording, nothing left to the test, proven switch on", nil, ptrTo(true), true, nil, on},
+		{"recording made before, nothing left to the test", nil, ptrTo(false), false, nil, none},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.proven {
@@ -101,15 +123,25 @@ func TestMissOnAStatedRecordingTellsHowToShareACall(t *testing.T) {
 			} else {
 				t.Setenv(provenswitch.Env, "0")
 			}
+			models.SetSessionCalls(tc.rules)
+			t.Cleanup(func() { models.SetSessionCalls(nil) })
 			var db integrations.MockMemDb = &mockMemDb{mocks: tc.pool}
 			if tc.recording != nil {
 				db = statedDb{MockMemDb: db, states: *tc.recording}
 			}
 			report := h.buildHTTPMismatchReport(reqToHost("POST", "/oauth/token", "auth.example.com"), nil, db, tc.pool, nil, nil,
 				&matchDiag{phase: models.MatchPhaseSchema, candidates: len(tc.pool)})
-			got := strings.Contains(report.NextSteps, `sessionCalls: [{host: "auth.example.com", method: "POST", pathPrefix: "/oauth/token"}]`)
-			if got != tc.want {
-				t.Fatalf("hint present %v, want %v:\n%s", got, tc.want, report.NextSteps)
+			snippet := strings.Contains(report.NextSteps, `sessionCalls: [{host: "auth.example.com", method: "POST", pathPrefix: "/oauth/token"}]`)
+			for _, hint := range []string{off, on, declared, prefix} {
+				if got := strings.Contains(report.NextSteps, hint); got != (hint == tc.want) {
+					t.Fatalf("hint %q present %v, want %v:\n%s", hint, got, hint == tc.want, report.NextSteps)
+				}
+			}
+			if want := tc.want == off || tc.want == on || tc.want == prefix; snippet != want {
+				t.Fatalf("declaration snippet present %v, want %v:\n%s", snippet, want, report.NextSteps)
+			}
+			if (tc.want == on || tc.want == prefix) && !strings.Contains(report.NextSteps, "A recording another test made of it is served to that test only, declared or not") && !strings.Contains(report.NextSteps, "a recording another test made of it is served to that test only, declared or not") {
+				t.Fatalf("the switch's hint does not say another test's recording stays that test's:\n%s", report.NextSteps)
 			}
 		})
 	}
@@ -123,5 +155,11 @@ type statedDb struct {
 }
 
 func (d statedDb) StatesLifetimes(kind models.Kind) bool { return d.states && kind == models.HTTP }
+
+// AnsweredRedacting forwards the db's (integrations.AnsweredRedactingReader),
+// as the proxy's mock manager tells both.
+func (d statedDb) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
+	return integrations.AnsweredRedacting(d.MockMemDb, kind)
+}
 
 func ptrTo[T any](v T) *T { return &v }

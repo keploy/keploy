@@ -249,3 +249,27 @@ func TestDockerModeAgentTakesPushedContainers(t *testing.T) {
 		t.Fatal("a docker-mode agent without the switch touched container keys")
 	}
 }
+
+// CI's lanes under the proven switch run the agent's exact view in verify mode,
+// which reaches the agent only as the flag provenswitch.AgentArgs appends: the
+// agent turns the mode on from it, and makes no call without it (the agent's
+// own KEPLOY_EXACT_VIEW_VERIFY is read by the proxy package's init alone).
+func TestAgentExactViewVerifyFlagTurnsTheModeOn(t *testing.T) {
+	var set []bool
+	prev := setExactViewVerify
+	setExactViewVerify = func(on bool) { set = append(set, on) }
+	t.Cleanup(func() { setExactViewVerify = prev })
+
+	t.Setenv(provenswitch.Env, "")
+	t.Setenv(provenswitch.VerifyEnv, "")
+	runAgentFlags(t, "--"+provenswitch.AgentFlag, "--"+provenswitch.VerifyFlag)
+	if !reflect.DeepEqual(set, []bool{true}) {
+		t.Fatalf("`keploy agent --proven --exact-view-verify` set the verify mode %v, want [true]: CI's lanes would serve without recomputing a read", set)
+	}
+	set = nil
+	t.Setenv(provenswitch.VerifyEnv, "1")
+	runAgentFlags(t, "--"+provenswitch.AgentFlag)
+	if len(set) != 0 {
+		t.Fatalf("`keploy agent --proven` set the verify mode %v, want no call: the flag alone decides", set)
+	}
+}

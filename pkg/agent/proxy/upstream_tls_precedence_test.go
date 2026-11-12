@@ -235,9 +235,10 @@ func TestApplyUpstreamTLSOptions(t *testing.T) {
 	})
 
 	t.Run("an agent that resolved verify on stamps on", func(t *testing.T) {
-		// No caCert: LoadUpstreamRootCAs returns (nil, nil) — "use Go's
-		// default roots" — which is a valid, populated trust store and NOT
-		// "trust nothing".
+		// No caCert: LoadUpstreamRootCAs returns the roots of the apps' trust
+		// bundle on Linux, and elsewhere (nil, nil) — "use Go's default
+		// roots" — which is a valid, populated trust store and NOT "trust
+		// nothing".
 		p, logs := newProxyForUpstreamTLS(t, func(cfg *config.Config) {
 			cfg.Record.UpstreamTLS.Verify = true
 		})

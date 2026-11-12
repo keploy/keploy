@@ -103,11 +103,20 @@ type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
 	TLSPrivateKey string
-	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay time.Duration // This is the same as Application delay.
-	Mocking  bool          // used to enable/disable mocking
-	SwapIDs  bool
+	// Synchronous sits with Mocking and SwapIDs, in one word: the word it
+	// took alone before SQLDelay holds LearnTests.
+	Synchronous bool
+	Mocking     bool // used to enable/disable mocking
+	SwapIDs     bool
+	// SrcInstance is the test worker instance the kernel stamped THIS
+	// connection with (0: none). Runtime, per-connection: json:"-" like
+	// SrcPid. It sits in the word the three bools above leave four bytes
+	// of: supervisor.Session holds these options by value, once per
+	// connection, and stays in the 640 B size class only so
+	// (TestASessionStaysInThe640ByteSizeClass).
+	SrcInstance uint32 `json:"-"`
 	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
 	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
 	// default), "passthrough" (dial the real upstream, don't persist), or
@@ -229,6 +238,17 @@ type OutgoingOptions struct {
 	// (MockManager.ArmSetFence). Like Learn it sits in the padding after the
 	// TLS switches.
 	StartsTestSet bool `json:"StartsTestSet,omitempty"`
+	// LearnTests, when not nil, are the tests whose recordings the round
+	// learns onto (config.Test.LearnTests: the tests a record has just
+	// recorded anew). A test outside it keeps an earlier record's recording
+	// (a partial record, or a test that failed against real infra), so it
+	// holds that record's times: run after a test recorded later, it is no
+	// test begun out of its recorded order, and its own recording learns
+	// nothing (pkg/service/agent keepRecordedOrder, holdLearn). nil: every
+	// test's recording learns (a CLI from before it). Never omitted, so an
+	// empty list (no test learns) is not read as nil. A map, one word: a
+	// Session holds these options by value (supervisor.Session).
+	LearnTests map[string]bool `json:"LearnTests"`
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial
@@ -287,6 +307,19 @@ type OutgoingOptions struct {
 	// older CLI that never sets it never receives one — the version-skew
 	// guard for the deferred-orphan revoke protocol. Record path only.
 	SupportsDroppedRevoke bool
+	// ReadsSetEnds is a capability flag set by the CLI on the replay
+	// session's /mock request: when true, the CLI reads each of its test
+	// sets' end with a set's end read (WithSetEndRead), as keploy test does
+	// under the proven switch. The run's mock manager takes a parser's
+	// set's end registration (integrations.SetEndFiler), which the parser
+	// makes at each call it would hold for a later test, ONLY in a session
+	// that sets it, so under a client that never makes the read (keploy
+	// mock, a keploy test without the switch or from before the read) a
+	// parser holds no call for a later test: it misses it at once instead.
+	// The agent passes it on only to a Proxy that files those calls at the
+	// read (agent.SetEndFilingProxy), and false to any other. Replay path
+	// only.
+	ReadsSetEnds bool
 	// UpstreamTLSVerify mirrors config.Record.UpstreamTLS.Verify: when true,
 	// keploy's own dial to the REAL destination validates the server's
 	// certificate chain and hostname instead of skipping verification.
@@ -320,6 +353,13 @@ type OutgoingOptions struct {
 	// options and uses it to pick the worker's scoped mock view (per-PID
 	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
 	SrcPid uint32 `json:"-"`
+	// SrcNsPid is that process's PID in keploy's agent's own PID namespace
+	// (the eBPF redirect's agentNsPid), by which the agent reads it in its own
+	// /proc: the kernel's PID for an agent in the initial namespace, another
+	// number for one in a container's. 0 when the process is outside the
+	// agent's namespace or unknown. Runtime, per-connection: json:"-" like
+	// SrcPid.
+	SrcNsPid uint32 `json:"-"`
 	// NetNS names the network namespace THIS connection was made from, as an
 	// opaque token. It exists because some destination addresses name a
 	// different server in every network namespace: 127.0.0.0/8, ::1, link-local
@@ -365,6 +405,19 @@ type ConditionalDstCfg struct {
 type IncomingOptions struct {
 	Filters  []Filter
 	BasePath string
+}
+
+// AppDNS is an app container's resolver settings, as docker run takes them:
+// name servers (IP addresses), search domains and resolver options.
+type AppDNS struct {
+	Servers []string
+	Search  []string
+	Options []string
+}
+
+// Empty says the app set none of its own.
+func (d AppDNS) Empty() bool {
+	return len(d.Servers) == 0 && len(d.Search) == 0 && len(d.Options) == 0
 }
 
 type SetupOptions struct {
@@ -417,6 +470,10 @@ type SetupOptions struct {
 	// kernel's count before it listens. Forwarded as --settle-reads.
 	SettleReads       bool
 	GlobalPassthrough bool
+	// AllowEgress mirrors config.Test.AllowEgress: what a replay may reach for
+	// real, by the entries models.NormalizeAllowEgress accepts. Forwarded to the
+	// agent as --allow-egress; record ignores it.
+	AllowEgress []string
 	// DisableHandshakeHold turns off holding each redirected connection's
 	// handshake until its destination answers (pkg/agent/proxy/synhold), so
 	// the proxy accepts every connection at once as it used to. Forwarded to
@@ -458,6 +515,15 @@ type SetupOptions struct {
 	// from the /etc/hosts it shares with it. A compose service's extra_hosts
 	// are moved onto the keploy-agent service instead (ModifyComposeForAgent).
 	AppExtraHosts []string
+	// AppDNS is the app's own resolver settings (docker run --dns,
+	// --dns-search, --dns-option; a container's DNS, DNSSearch and
+	// DNSOptions). Under the agent container's network mode Docker refuses
+	// DNS servers of the app's own ("conflicting options: dns and the network
+	// mode") and ignores its search list and options: the app shares the
+	// agent container's /etc/resolv.conf. So the agent container carries
+	// them. A compose service's dns, dns_search and dns_opt are moved onto the
+	// keploy-agent service instead (ModifyComposeForAgent).
+	AppDNS AppDNS
 	// HostGateway says the daemon resolves the address host-gateway (Docker
 	// Engine 20.10, API 1.41; Podman 4.7): the agent container then maps
 	// host.docker.internal to it, as Docker Desktop does for every container,

@@ -30,23 +30,18 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 		zap.Int("config_mocks", cfg),
 		zap.Int("data_mocks_available", data))
 
-	// Shared schema-noise engine for this connection's command phase. MySQL is
-	// a client of the same engine HTTP uses — mysqlNoiseAdapter owns only the
-	// MySQL-specific bit (canonicalizing command packets into diffable JSON).
+	// Shared mock-noise engine for this connection's command phase, built from
+	// MySQL's own declared adapter — as HTTP builds it from h.MockNoise()
+	// (http/match.go) and as this package's drift engine does (schema_noise.go).
+	// Building it here, rather than reading one injected on ctx, keeps the
+	// replayer self-contained: a caller that drives it directly (not through the
+	// proxy's injection) still gets noise detection instead of a silent nil engine.
 	noiseEngine := mocknoise.New(mysqlNoiseAdapter{}, opts.NoiseDetection(), opts.NoiseStrict())
 
 	// User request-body noise from test.globalNoise.requestBody — the same
 	// DEDICATED request-matching bucket HTTP consumes (see http/decode.go for
 	// why the response "body" bucket must not soften request matching).
-	// Lowercased, presence-only: request-body matching and drift detection are
-	// path-based, a value-regex cannot gate here.
-	var userBodyNoise map[string][]string
-	if bn, ok := opts.NoiseConfig["requestbody"]; ok {
-		userBodyNoise = make(map[string][]string, len(bn))
-		for k := range bn {
-			userBodyNoise[strings.ToLower(k)] = []string{}
-		}
-	}
+	userBodyNoise := requestBodyNoise(opts.NoiseConfig)
 
 	commandCount := 0
 	for {
@@ -98,9 +93,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return err
 			}
 
-			logger.Debug("Successfully read command from client",
-				zap.Int("command_count", commandCount),
-				zap.Int("command_size_bytes", len(command)))
+			if ce := logger.Check(zap.DebugLevel, "Successfully read command from client"); ce != nil {
+				ce.Write(zap.Int("command_count", commandCount),
+					zap.Int("command_size_bytes", len(command)))
+			}
 
 			// reset the read deadline
 			err = clientConn.SetReadDeadline(time.Time{})
@@ -142,8 +138,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				if miss == nil {
 					// Defensive: matchCommand always returns a miss alongside a
 					// nil error. matchPhase is set explicitly so an unexpected
-					// path cannot masquerade as an empty mock pool.
-					miss = &mockMiss{matchPhase: models.MatchPhaseExhausted}
+					// path cannot masquerade as an empty mock pool. It read no
+					// pool's places, so it shows the command redacted whole.
+					miss = &mockMiss{matchPhase: models.MatchPhaseExhausted, places: everyPlace}
 				}
 				// Report the STATEMENT, not the wire text. A Datadog DBM /
 				// sqlcommenter comment runs to a couple of hundred bytes in front
@@ -156,28 +153,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				// rendered bound parameters appended below: those are arbitrary
 				// user data, and a value containing "#" or "-- " would have the
 				// rest of the parameter list silently deleted from the report.
-				actualQuery := ""
-				switch msg := req.Message.(type) {
-				case *mysql.QueryPacket:
-					actualQuery = sqlStatementIdentity(msg.Query)
-				case *mysql.StmtPreparePacket:
-					actualQuery = sqlStatementIdentity(msg.Query)
-				case *mysql.StmtExecutePacket:
-					// EXECUTE carries no SQL text of its own — resolve the
-					// prepared query via the runtime stmtID map and show the
-					// bound parameter values, so the report isn't a blank
-					// "COM_STMT_EXECUTE".
-					if msg != nil {
-						if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
-							actualQuery = sqlStatementIdentity(decodeCtx.StmtIDToQuery[msg.StatementID])
-						}
-						actualQuery = strings.TrimSpace(actualQuery + " " + formatExecParams(msg.Parameters))
-					}
-				case *mysql.StmtSendLongDataPacket:
-					if msg != nil {
-						actualQuery = fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
-					}
-				}
+				actualQuery := miss.liveCommand(req.Message, decodeCtx)
 				closestQuery := sqlStatementIdentity(miss.closestQuery)
 				diff := ""
 				if actualQuery != "" || closestQuery != "" {
@@ -215,7 +191,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				// The miss was decided where the command first read the
 				// round: whether that read found a staging is told from it.
 				integrations.StampMark(report, miss.call)
-				if miss.matchPhase == models.MatchPhaseNoMocks && !miss.restaged {
+				if miss.extraCall > 0 {
+					report.MissKind, report.Recorded = models.MissExtraCall, miss.extraCall
+				}
+				if miss.matchPhase == models.MatchPhaseNoMocks && !miss.restaged && miss.extraCall == 0 {
 					// The pool held no data mock for the command phase to compare
 					// against — at most handshake/config mocks survived the
 					// lifetime filter, or the pool was empty. That is a
@@ -236,39 +215,47 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 						zap.String("hint", "check mappings.yaml: this test set has no MySQL data mock for the command phase — either the query was never recorded, or its mock was dropped at record time (teardown lag or memory pressure)"),
 					)
 				}
+				baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)
+				missErr := models.NewMockMismatchError(baseErr, report)
 				// next_step reuses the strict-aware guidance computed for the
 				// mismatch report above — under schemaNoiseStrict the accurate
 				// advice is "mark/learn the drifted fields", not "re-record".
-				logger.Error("Connection closing due to no matching mock found.",
+				missFields := []zap.Field{
 					zap.Int("commands_processed", commandCount),
 					zap.String("request_type", req.Header.Type),
 					zap.String("closest_mock", miss.closestMock),
 					zap.Int("candidates", miss.candidateCount),
 					zap.String("match_phase", miss.matchPhase),
 					zap.Int("strict_rejected_candidates", miss.strictRejected),
-					zap.String("next_step", nextSteps))
-				baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)
-				return models.NewMockMismatchError(baseErr, report)
-			}
-
-			logger.Debug("Matched the command with the mock", zap.Any("mock", resp))
-
-			// Handle prepared statement cleanup for COM_STMT_CLOSE
-			if commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {
-				if closePacket, ok := commandPkt.Message.(*mysql.StmtClosePacket); ok {
-					delete(decodeCtx.PreparedStatements, closePacket.StatementID)
-					if decodeCtx.StmtIDToQuery != nil {
-						delete(decodeCtx.StmtIDToQuery, closePacket.StatementID)
-					}
-					logger.Debug("Cleaned up prepared statement", zap.Uint32("StatementID", closePacket.StatementID))
+					zap.String("next_step", nextSteps),
 				}
+				// The connection serves on after a miss: a statement the
+				// client closed is forgotten whether or not its close matched.
+				forgetClosedStatement(logger, commandPkt, decodeCtx)
+				answered, err := answerMiss(ctx, logger, clientConn, req, decodeCtx, missErr)
+				if !answered {
+					logger.Error("Connection closing due to no matching mock found.", missFields...)
+					return err
+				}
+				logger.Warn("No matching mock found for the command; answered it with a MySQL error and kept the connection open.", missFields...)
+				continue
 			}
+
+			if ce := logger.Check(zap.DebugLevel, "Matched the command with the mock"); ce != nil {
+				ce.Write(zap.Any("mock", resp))
+			}
+
+			forgetClosedStatement(logger, commandPkt, decodeCtx)
 
 			// We could have just returned before matching the command for no response commands.
 			// But we need to remove the corresponding mock from the mockDb for no response commands.
 			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 				// No response for COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA
-				logger.Debug("No response for the command", zap.Any("command", command))
+				// Its type and size, not its bytes: a SEND_LONG_DATA's are a
+				// bound value, a secret wherever a recording redacted one.
+				if ce := logger.Check(zap.DebugLevel, "No response for the command"); ce != nil {
+					ce.Write(zap.String("command_type", commandPkt.Header.Type), zap.Int("command_size_bytes", len(command)))
+				}
 				continue
 			}
 
@@ -279,11 +266,12 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return err
 			}
 
-			logger.Debug("About to write response to client",
-				zap.String("request_type", req.Header.Type),
-				zap.String("response_type", resp.Header.Type),
-				zap.Int("response_size_bytes", len(buf)),
-				zap.Int("commands_processed", commandCount))
+			if ce := logger.Check(zap.DebugLevel, "About to write response to client"); ce != nil {
+				ce.Write(zap.String("request_type", req.Header.Type),
+					zap.String("response_type", resp.Header.Type),
+					zap.Int("response_size_bytes", len(buf)),
+					zap.Int("commands_processed", commandCount))
+			}
 
 			// Write the response to the client
 			_, err = clientConn.Write(buf)
@@ -300,23 +288,133 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return err
 			}
 
-			logger.Debug("successfully wrote the response to the client",
-				zap.Any("request", req.Header.Type),
-				zap.String("response_type", resp.Header.Type),
-				zap.Int("response_size_bytes", len(buf)),
-				zap.Int("commands_processed", commandCount))
+			if ce := logger.Check(zap.DebugLevel, "successfully wrote the response to the client"); ce != nil {
+				ce.Write(zap.Any("request", req.Header.Type),
+					zap.String("response_type", resp.Header.Type),
+					zap.Int("response_size_bytes", len(buf)),
+					zap.Int("commands_processed", commandCount))
+			}
 
 			// Check connection state after writing large response
 			if len(buf) > 1000 {
-				logger.Debug("Large response written, checking connection state",
-					zap.Int("response_size_bytes", len(buf)),
-					zap.String("request_type", req.Header.Type))
+				if ce := logger.Check(zap.DebugLevel, "Large response written, checking connection state"); ce != nil {
+					ce.Write(zap.Int("response_size_bytes", len(buf)),
+						zap.String("request_type", req.Header.Type))
+				}
 			}
 
-			// Add a small delay and log to see if connection is still alive
-			logger.Debug("Response write completed, continuing to next iteration",
-				zap.Int("commands_processed", commandCount),
-				zap.String("last_request", req.Header.Type))
+			if ce := logger.Check(zap.DebugLevel, "Response write completed, continuing to next iteration"); ce != nil {
+				ce.Write(zap.Int("commands_processed", commandCount),
+					zap.String("last_request", req.Header.Type))
+			}
 		}
 	}
+}
+
+// requestBodyNoise is the requestBody bucket of the user's noise
+// (test.globalNoise) as the matcher compares it: lowercased, root-relative
+// (parameters.0.value), each entry with its patterns (an entry with
+// patterns excuses a field only when the recorded and the live value each
+// match one; one with none, whatever it holds). A key may also
+// be written as a miss lists the field, with its leading "body."
+// (body.parameters.0.value): a MySQL command's body has no field named
+// body, so the prefix only ever names the body itself. Without it, the
+// field a miss lists, copied as listed, changed nothing.
+func requestBodyNoise(cfg map[string]map[string][]string) map[string][]string {
+	bn, ok := cfg["requestbody"]
+	if !ok {
+		return nil
+	}
+	out := make(map[string][]string, len(bn))
+	for k, v := range bn {
+		out[strings.TrimPrefix(strings.ToLower(k), "body.")] = append([]string{}, v...)
+	}
+	return out
+}
+
+// forgetClosedStatement drops the prepared statement a COM_STMT_CLOSE closes
+// from the connection's decode state. It runs once the close has been
+// matched, or has missed: the matcher reads the statement's query to match
+// the close.
+func forgetClosedStatement(logger *zap.Logger, commandPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) {
+	if commandPkt.Header.Type != mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {
+		return
+	}
+	closePacket, ok := commandPkt.Message.(*mysql.StmtClosePacket)
+	if !ok {
+		return
+	}
+	delete(decodeCtx.PreparedStatements, closePacket.StatementID)
+	if decodeCtx.StmtIDToQuery != nil {
+		delete(decodeCtx.StmtIDToQuery, closePacket.StatementID)
+	}
+	if ce := logger.Check(zap.DebugLevel, "Cleaned up prepared statement"); ce != nil {
+		ce.Write(zap.Uint32("StatementID", closePacket.StatementID))
+	}
+}
+
+// The error a command with no matching mock is answered with:
+// ER_UNKNOWN_ERROR, SQLSTATE HY000, the server's generic failure of one
+// statement. A client library raises it as that statement's error and keeps
+// its connection.
+const (
+	missErrCode    uint16 = 1105
+	missErrState          = "HY000"
+	missErrMessage        = "keploy: no recorded mock matches this command"
+)
+
+// answerMiss answers a command that matched no mock as a server answers a
+// statement it cannot run: with an ERR packet, on a connection that stays
+// open. It reports the miss first (models.ReportMockMismatch), so the miss is
+// queued for the test that made it before the app can read the answer and
+// end that test.
+//
+// Closing the connection instead, as the replay did, made one unmatched
+// statement cost the app its connection. Inside a transaction the client may
+// not reconnect, so every later statement of the request failed with it: a
+// Rails request whose best-effort UPDATE drifted from its recording returned
+// 500 (keploy/api-server#2514), and a pool such as Makara then blacklisted
+// the connection for the requests after it.
+//
+// It returns answered false, and the miss as err, when the miss cannot be
+// reported without returning it (no reporter on ctx): the connection ends as
+// before, so no miss goes unreported. A command the client expects no answer
+// to (COM_STMT_CLOSE, COM_STMT_SEND_LONG_DATA) is reported and left
+// unanswered: an ERR packet there would be read as the answer to the client's
+// next command. (COM_QUIT never misses: matchCommand ends the connection on
+// it.)
+// When the ERR packet cannot be written the connection ends: answered is
+// false, and err is the miss marked reported (models.MismatchReported), so the
+// proxy logs it and does not queue it a second time.
+func answerMiss(ctx context.Context, logger *zap.Logger, clientConn net.Conn, req mysql.Request, decodeCtx *wire.DecodeContext, missErr error) (answered bool, err error) {
+	if !models.ReportMockMismatch(ctx, missErr) {
+		return false, missErr
+	}
+	if wire.IsNoResponseCommand(req.Header.Type) {
+		return true, nil
+	}
+	// The answer's sequence id is one past the command's, as every answer's.
+	var seq uint8 = 1
+	if req.Header != nil && req.Header.Header != nil {
+		seq = req.Header.Header.SequenceID + 1
+	}
+	errPkt := &mysql.PacketBundle{
+		Header: &mysql.PacketInfo{Type: mysql.StatusToString(mysql.ERR), Header: &mysql.Header{SequenceID: seq}},
+		Message: &mysql.ERRPacket{
+			Header:         mysql.ERR,
+			ErrorCode:      missErrCode,
+			SQLStateMarker: "#",
+			SQLState:       missErrState,
+			ErrorMessage:   missErrMessage,
+		},
+	}
+	buf, err := wire.EncodeToBinary(ctx, logger, errPkt, clientConn, decodeCtx)
+	if err == nil {
+		_, err = clientConn.Write(buf)
+	}
+	if err != nil {
+		logger.Debug("could not answer a command with no matching mock with an error", zap.Error(err))
+		return false, models.MismatchReported{Err: missErr}
+	}
+	return true, nil
 }

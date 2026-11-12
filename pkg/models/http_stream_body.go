@@ -37,10 +37,13 @@ type HTTPStreamDataField struct {
 // For NDJSON and plain-text streams this is one newline-delimited line.
 // For binary streams this is the full captured body.
 //
-// TS is the wall-clock time the chunk was received during recording,
-// used by the replay engine to preserve the inter-chunk timing when replaying.
+// TS is when the chunk reached the application during recording: for a mock
+// recorded with marks (HTTPResp.Marks), the time of the write that completed
+// it. Replay keeps no timing between chunks: it writes each part of an
+// answer once the replay has reached or passed its recorded place, which it
+// reads from the marks.
 type HTTPStreamChunk struct {
-	TS   time.Time             // Wall-clock time this chunk arrived during recording
+	TS   time.Time             // When this chunk reached the application during recording
 	Data []HTTPStreamDataField // Key-value fields that make up this chunk
 }
 
@@ -84,8 +87,16 @@ func (c HTTPStreamChunk) ValueByKey(key string) (string, bool) {
 // as a YAML sequence of chunks. Otherwise, it is written as a plain scalar string.
 func (h HTTPResp) MarshalYAML() (interface{}, error) {
 	bodyNode := &yamlLib.Node{}
+	marks := h.Marks
 	if chunks, ok := streamChunksForYAML(h); ok {
-		// Streaming response — encode as a YAML sequence of chunks
+		// Streaming response — encode as a YAML sequence of chunks. A fresh
+		// recording's frames are split from its body here: each takes the
+		// time of the write that completed it, and the marks move to the
+		// body the frames read back as. A response read back from frames
+		// (StreamBody) has both already.
+		if marks != nil && len(h.StreamBody) == 0 {
+			chunks, marks = marksOnFrames(h, chunks)
+		}
 		bodyNode = encodeStreamChunksNode(chunks)
 	} else {
 		// Non-streaming response, OR a stream whose bytes cannot survive the
@@ -122,6 +133,7 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		Timestamp     time.Time         `yaml:"timestamp"`
 
 		HeaderLineLengths HeaderLineLengths `yaml:"header_line_lengths,omitempty"`
+		Marks             *HTTPAnswerMarks  `yaml:"marks,omitempty"`
 	}
 
 	return httpRespYAML{
@@ -137,6 +149,7 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 		Timestamp:     h.Timestamp,
 
 		HeaderLineLengths: h.HeaderLineLengths,
+		Marks:             marks,
 	}, nil
 }
 
@@ -157,6 +170,7 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 		Timestamp     time.Time         `yaml:"timestamp"`
 
 		HeaderLineLengths HeaderLineLengths `yaml:"header_line_lengths,omitempty"`
+		Marks             *HTTPAnswerMarks  `yaml:"marks,omitempty"`
 	}
 
 	var raw httpRespYAML
@@ -174,6 +188,7 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 	h.Binary = raw.Binary
 	h.Timestamp = raw.Timestamp
 	h.HeaderLineLengths = raw.HeaderLineLengths
+	h.Marks = raw.Marks
 
 	// Decode body — may produce a plain string body, streaming chunks, or both.
 	// StreamBody is populated only when the YAML body field was a sequence node.
@@ -228,7 +243,10 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 		return cloneStreamChunks(resp.StreamBody), true
 	}
 
-	if resp.Body != "" {
+	if resp.Body != "" && !resp.bodyOnWire {
+		// A fault's body is the bytes the upstream sent before it
+		// (bodyOnWire): kept as they came, never split.
+		//
 		// A non-UTF-8 body is not a text stream, and must never reach the
 		// chunkers below.
 		//
@@ -257,6 +275,17 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 		// Content-Length (Go's JSON written with no Content-Type), is one
 		// document, kept whole, and replayed as one (recordedFramesOf).
 		format := recordedFramesOf(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type"))
+		if format == HTTPStreamSSE && !sseEndsItsLastEvent(resp.Body) {
+			// An SSE stream that ended inside its last event, before the
+			// blank line that ends it, is kept as its bytes. Its frames would
+			// read back with that event ended (streamChunksToLegacyBody), and
+			// replay would send an event its client never dispatched at
+			// record: a close-delimited body the upstream closed mid-event,
+			// or a server that never ended its last event. Kept so, replay
+			// sends the bytes as recorded, and the client drops the
+			// unfinished event as it did.
+			return nil, false
+		}
 		if chunks := splitStreamBody(format, resp.Body, resp.Timestamp); len(chunks) > 0 {
 			return chunks, true
 		}
@@ -456,7 +485,8 @@ func encodeStreamChunksNode(chunks []HTTPStreamChunk) *yamlLib.Node {
 // even though the YAML file now stores structured streaming data.
 //
 // For SSE bodies, each chunk becomes an SSE frame (fields joined by \n,
-// frames joined by \n\n, matching the SSE wire format).
+// each frame ended by a blank line, the last one too, matching the SSE wire
+// format).
 //
 // For all other streaming formats (NDJSON, plain text, binary), each chunk's
 // "raw" field value becomes one line.
@@ -478,39 +508,30 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 	switch kind {
 	case streamBodyKindSSE:
 		// Reconstruct SSE wire format: each frame is a block of "key:value" lines
-		// separated by \n, and frames are separated by \n\n.
+		// separated by \n, and each frame ends in a blank line.
 		frames := make([]string, 0, len(chunks))
 		for _, chunk := range chunks {
-			lines := make([]string, 0, len(chunk.Data))
-			for _, field := range chunk.Data {
-				key := strings.TrimSpace(field.Key)
-				if strings.EqualFold(key, "comment") {
-					// SSE comments start with ':' and have no key prefix.
-					lines = appendSSEFieldLines(lines, ":", field.Value, false)
-					continue
-				}
-				if key == "" {
-					continue
-				}
-				// strings.ToLower rewrites every invalid byte to U+FFFD, so it
-				// must not touch a field name that is not valid UTF-8. This is
-				// reachable precisely because MarshalYAML now routes non-UTF-8
-				// chunks through here as its flat-body fallback — lower-casing
-				// them would reintroduce the silent corruption the fallback
-				// exists to avoid. SSE field names are ASCII in practice, so
-				// skipping the fold for the pathological case costs nothing.
-				name := key
-				if utf8.ValidString(name) {
-					name = strings.ToLower(name)
-				}
-				lines = appendSSEFieldLines(lines, name+":", field.Value, true)
+			if frame := sseFrame(chunk); frame != "" {
+				frames = append(frames, frame)
 			}
-			if len(lines) == 0 {
-				continue
-			}
-			frames = append(frames, strings.Join(lines, "\n"))
 		}
-		return strings.Join(frames, "\n\n")
+		body := strings.Join(frames, "\n\n")
+		if len(frames) > 0 {
+			// The last event ends in its blank line as every other does: a
+			// client dispatches an event only at the blank line after it, and
+			// drops the one a stream ends inside (the WHATWG event-stream
+			// parse), so a body that stopped at its last field would lose its
+			// last event on replay (an LLM stream's "data: [DONE]"). A frame
+			// never ends in a blank line of its own (every line carries its
+			// field's name or the comment's ':'), so this is the one blank
+			// line. A recording keeps a stream that ended inside its last
+			// event as its bytes, never as frames (streamChunksForYAML), so
+			// frames are of a stream that ended its last event. Frames an
+			// earlier keploy kept of one that did not carry no word of it,
+			// and read back with that event ended.
+			body += "\n\n"
+		}
+		return body
 
 	default:
 		// NDJSON, plain text, binary — each chunk contributes one line via its "raw" field.
@@ -534,6 +555,48 @@ func streamChunksToLegacyBody(chunks []HTTPStreamChunk, kind streamBodyKind) str
 		}
 		return body
 	}
+}
+
+// sseEndsItsLastEvent reports whether an SSE body ends in a blank line: two
+// line ends in a row, each "\r\n", "\n" or "\r" as the WHATWG event-stream
+// parse reads them ("\r\n\r\n", "\n\r", "\r\r" too). A client dispatches an
+// event at the blank line that ends it, and drops the one a stream ends
+// inside. Only the line ends the body ends in are read: no "\r\n" spans the
+// last other byte and them.
+func sseEndsItsLastEvent(body string) bool {
+	ends := body[len(strings.TrimRight(body, "\r\n")):]
+	return len(normalizeModelLineEndings(ends)) >= 2
+}
+
+// sseFrame is chunk as an SSE event's lines, joined by "\n", without the blank
+// line that ends the event; "" for a chunk of no line, which the body leaves
+// out.
+func sseFrame(chunk HTTPStreamChunk) string {
+	lines := make([]string, 0, len(chunk.Data))
+	for _, field := range chunk.Data {
+		key := strings.TrimSpace(field.Key)
+		if strings.EqualFold(key, "comment") {
+			// SSE comments start with ':' and have no key prefix.
+			lines = appendSSEFieldLines(lines, ":", field.Value, false)
+			continue
+		}
+		if key == "" {
+			continue
+		}
+		// strings.ToLower rewrites every invalid byte to U+FFFD, so it
+		// must not touch a field name that is not valid UTF-8. This is
+		// reachable precisely because MarshalYAML now routes non-UTF-8
+		// chunks through here as its flat-body fallback — lower-casing
+		// them would reintroduce the silent corruption the fallback
+		// exists to avoid. SSE field names are ASCII in practice, so
+		// skipping the fold for the pathological case costs nothing.
+		name := key
+		if utf8.ValidString(name) {
+			name = strings.ToLower(name)
+		}
+		lines = appendSSEFieldLines(lines, name+":", field.Value, true)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // appendSSEFieldLines appends an SSE field's lines to lines: prefix (its

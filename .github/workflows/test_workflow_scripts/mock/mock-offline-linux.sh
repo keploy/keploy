@@ -36,13 +36,25 @@
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
 
-# This lane's directory: lane_switch.sh.
+# This lane's directory: lane_switch.sh; its parent: sudo_env.sh.
 # shellcheck source-path=SCRIPTDIR
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A lane that could not load it would skip both halves and pass: fail instead.
 # shellcheck source=lane_switch.sh
 if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
   echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
+# shellcheck source=../sudo_env.sh
+if ! source "$MOCK_DIR/../sudo_env.sh" || ! declare -F verify_ran >/dev/null; then
+  echo "FAIL: could not load sudo_env.sh from $MOCK_DIR/.."
+  exit 1
+fi
+# http_mocks_are and http_mocks_only: what a record kept is the client's two
+# calls, as Http mocks, and DNS mocks only where the phase looks the name up.
+# shellcheck source=../mock-kinds.sh
+if ! source "$MOCK_DIR/../mock-kinds.sh" || ! declare -F http_mocks_only >/dev/null; then
+  echo "FAIL: could not load mock-kinds.sh from $MOCK_DIR/.."
   exit 1
 fi
 
@@ -209,7 +221,7 @@ phase() {
   local name=$1 direct=$2 failed=$FAIL
   FAIL=0
   echo "--- $name ---"
-  sudo env PATH="$PATH" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
     unshare -n -m --propagation private "$WORK/inside.sh" "$name" || fail "$name: the namespace itself failed"
   cat "$WORK/$name.addr" 2>/dev/null
   [ "$(cat "$WORK/$name.direct" 2>/dev/null)" = "$direct" ] ||
@@ -217,7 +229,9 @@ phase() {
   local got
   got="$(cat "$WORK/$name.exit" 2>/dev/null)"
   [ "$got" = 0 ] || fail "$name: keploy exited ${got:-nothing}, want 0"
-  grep -c "^ok /" "$WORK/$name.log" | grep -qx 2 || fail "$name: the test command did not get both answers"
+  # A *-proven phase records under the switch (inside.sh).
+  [ "${name%-proven}" = "$name" ] || verify_ran 1 "$WORK/$name.log" || FAIL=1
+  grep -c "^ok /" "$WORK/$name.log" | grep -x 2 >/dev/null || fail "$name: the test command did not get both answers"
   if [ "$FAIL" -ne 0 ]; then
     echo "--- $name: the last 40 lines keploy logged ---"
     tail -n 40 "$WORK/$name.log" 2>/dev/null
@@ -239,16 +253,16 @@ if half off; then
 phase online 0
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/online/mocks.yaml" 2>/dev/null)" -ge 1 ] ||
   fail "online: no DNS lookup was recorded"
-[ "$(grep -c '^kind: Http' "$WORK/keploy/online/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "online: want 2 HTTP mocks"
+MOCKS=$(http_mocks_are "$WORK/keploy/online/mocks.yaml" 2) ||
+  fail "online: want 2 Http mocks and no mock but DNS beside them, got $MOCKS"
 phase offline 1
 proven_offline online
 
 phase hosts-record 0
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/hosts/mocks.yaml" 2>/dev/null)" -eq 0 ] ||
   fail "hosts-record: a DNS lookup was recorded for a name /etc/hosts answers"
-[ "$(grep -c '^kind: Http' "$WORK/keploy/hosts/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "hosts-record: want 2 HTTP mocks"
+MOCKS=$(http_mocks_only "$WORK/keploy/hosts/mocks.yaml" 2) ||
+  fail "hosts-record: want 2 Http mocks and no other, got $MOCKS"
 phase hosts-replay 1
 grep -aq 'synthesized A fallback.*"query": "dep.keploy.test.".*"proxy_ip4": "127.0.0.1"' "$WORK/hosts-replay.log" ||
   fail "hosts-replay: keploy's DNS server did not answer dep.keploy.test with loopback"
@@ -259,8 +273,8 @@ grep -qx 'consumed: 2' "$WORK/keploy/hosts/last-replay.yaml" 2>/dev/null ||
   fail "hosts-replay: the calls did not reach both recorded mocks"
 
 phase loopback-record 0
-[ "$(grep -c '^kind: Http' "$WORK/keploy/loopback/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "loopback-record: want 2 HTTP mocks"
+MOCKS=$(http_mocks_only "$WORK/keploy/loopback/mocks.yaml" 2) ||
+  fail "loopback-record: want 2 Http mocks and no other, got $MOCKS"
 phase loopback-replay 1
 proven_offline loopback
 fi
@@ -270,21 +284,21 @@ if half on; then
 phase online-proven 0
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/online-proven/mocks.yaml" 2>/dev/null)" -ge 1 ] ||
   fail "online-proven: no DNS lookup was recorded"
-[ "$(grep -c '^kind: Http' "$WORK/keploy/online-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "online-proven: want 2 HTTP mocks"
+MOCKS=$(http_mocks_are "$WORK/keploy/online-proven/mocks.yaml" 2) ||
+  fail "online-proven: want 2 Http mocks and no mock but DNS beside them, got $MOCKS"
 phase hosts-record-proven 0
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/hosts-proven/mocks.yaml" 2>/dev/null)" -eq 0 ] ||
   fail "hosts-record-proven: a DNS lookup was recorded for a name /etc/hosts answers"
-[ "$(grep -c '^kind: Http' "$WORK/keploy/hosts-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "hosts-record-proven: want 2 HTTP mocks"
+MOCKS=$(http_mocks_only "$WORK/keploy/hosts-proven/mocks.yaml" 2) ||
+  fail "hosts-record-proven: want 2 Http mocks and no other, got $MOCKS"
 phase loopback-record-proven 0
-[ "$(grep -c '^kind: Http' "$WORK/keploy/loopback-proven/mocks.yaml" 2>/dev/null)" -eq 2 ] ||
-  fail "loopback-record-proven: want 2 HTTP mocks"
+MOCKS=$(http_mocks_only "$WORK/keploy/loopback-proven/mocks.yaml" 2) ||
+  fail "loopback-record-proven: want 2 Http mocks and no other, got $MOCKS"
 
 # ...and this build refuses the replay under it, offline, before the test
 # command runs.
 echo "--- offline-proven ---"
-sudo env PATH="$PATH" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" WORK="$WORK" BIN="$BIN" PORT="$PORT" DEP_IP="$DEP_IP" \
   unshare -n -m --propagation private "$WORK/inside.sh" offline-proven || fail "offline-proven: the namespace itself failed"
 [ "$(cat "$WORK/offline-proven.exit" 2>/dev/null)" = 1 ] ||
   fail "offline-proven: keploy exited $(cat "$WORK/offline-proven.exit" 2>/dev/null), want this build's refusal (1)"

@@ -20,25 +20,57 @@
 #              makes the kernel's SIGHUP arrive while keploy is stopping, which
 #              a handler that stopped listening after the first SIGHUP would
 #              die of
-#   hup-nogap  the same with no gap, so the kernel's SIGHUP lands at once
+#   hup-drain  hup-gap whose test command dies of keploy's signal at once
+#              (no late call, below), so the kernel's SIGHUP lands while
+#              keploy drains its recording or stops its agent
+#   hup-nogap  the same as hup-gap with no gap, so the kernel's SIGHUP lands
+#              at once
 #   hup-user   hup-gap for keploy run as this user rather than root, as the
 #              extension runs it, with sudo credentials it can use without a
 #              prompt: keploy starts its agent with `sudo -n`
 #   hup-pty    hup-user for a user sudo would ask for a password: keploy
-#              starts its agent under sudo on a terminal of its own, and stops
-#              it by closing that terminal if asking it to stop fails
+#              starts its agent under sudo on a terminal of its own and, if
+#              asking it to stop fails, sends sudo SIGTERM, which sudo hands
+#              on; it closes that terminal only once the agent has exited
 # and then wants keploy to exit by itself within 60s, with SIGTERM's exit
-# code, leaving no keploy or test-command process behind and no
-# keploy-logs.txt.
+# code, with the dependency call in the mock set it recorded, leaving no
+# keploy or test-command process behind, nothing named
+# keploy-logs.txt in its working directory, and no log of the CLI's left in
+# its temp directory (each case's own TMPDIR).
+#
+# In the hup cases but hup-drain the test command, once keploy stops it,
+# waits for the terminal to have hung up (hangup.py says so in
+# <case>/hungup), calls the dependency once more, and then dies of the signal
+# keploy stopped it with, as a test that finishes the call it was making
+# does. In hup-user that call makes keploy's agent write after the hang-up:
+# with --debug the agent prints a line for each connection it takes, and the
+# case wants that line for the first call and the late call in its mock set,
+# so that it cannot pass without the write. sudo runs the agent on a
+# terminal of sudo's own (use_pty, the default since sudo 1.9.14, and in
+# Debian's and Ubuntu's sudoers before it), copies what it prints to
+# keploy's terminal, and sends it SIGHUP at its first write once keploy's
+# terminal has hung up. An agent that died
+# of it ended its streams to keploy part way, and keploy exited 1 and kept
+# no recording. Without the late call the agent's first write after the
+# hang-up was most often a log line of its own stop, and it died before it
+# had ended its streams about once in 146 runs; with it, every time.
+# hup-user also wants keploy to have started its agent with `sudo -n`, and
+# sudo to run what it is given there on a terminal of its own (ttys.py):
+# without either, nothing sends the agent SIGHUP, and the case would pass
+# without checking what it is for.
 #
 # Every case runs with HOME in the case's own directory, in a network
 # namespace of its own (unshare -n) with only loopback, as in
 # mock-offline-linux.sh, and a mount namespace of its own (unshare -m) in
 # which root's home is an empty tmpfs, for the agents hup-user and hup-pty
 # start through sudo. keploy tells those two apart by whether `sudo -n -v`
-# succeeds, so each has sudoers.d to itself: the user may run anything
-# without a password, and `sudo -v` asks for none (hup-user) or always asks
-# for one (hup-pty), so no password is ever typed.
+# succeeds, so each has sudoers.d to itself. hup-user's user may run anything
+# without a password, so `sudo -v` asks for none. hup-pty's may run keploy's
+# binary without one and anything else only with one, so `sudo -n -v` fails
+# while the agent's `sudo <keploy>` asks for none: no password is ever typed.
+# A rule for keploy alone, and not `Defaults verifypw=always`, which sudo-rs
+# (Ubuntu 26.04's sudo) does not honour: there `sudo -n -v` succeeded, keploy
+# rightly took `sudo -n`, and the case did not check what it is for.
 #
 # Every case runs twice: without the proven switch (today's default) and under
 # KEPLOY_PROVEN=1, which the flip makes the default (cases named *-proven). A
@@ -50,13 +82,18 @@
 # Env: RECORD_BIN (the keploy binary under test).
 set -uo pipefail
 
-# This lane's directory: lane_switch.sh.
+# This lane's directory: lane_switch.sh; its parent: sudo_env.sh.
 # shellcheck source-path=SCRIPTDIR
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A lane that could not load it would skip both halves and pass: fail instead.
 # shellcheck source=lane_switch.sh
 if ! source "$MOCK_DIR/lane_switch.sh" || ! declare -F half >/dev/null; then
   echo "FAIL: could not load lane_switch.sh from $MOCK_DIR"
+  exit 1
+fi
+# shellcheck source=../sudo_env.sh
+if ! source "$MOCK_DIR/../sudo_env.sh" || ! declare -F verify_ran >/dev/null; then
+  echo "FAIL: could not load sudo_env.sh from $MOCK_DIR/.."
   exit 1
 fi
 BIN="${RECORD_BIN:-keploy}"
@@ -98,14 +135,43 @@ with socketserver.TCPServer((sys.argv[1], int(sys.argv[2])), H) as s:
 PY
 
 # The test command: leaves its pid in <dir>/test.pid, calls the dependency,
-# says so in <dir>/started, and runs until it is stopped.
+# says so in <dir>/started, and runs until it is stopped. With "late", once
+# stopped by SIGINT or SIGTERM, it waits for <dir>/hungup, calls the
+# dependency again, writes how that call went to <dir>/late ("ok" or the
+# error), and dies of that signal.
 cat > "$WORK/slowtest.py" <<'PY'
-import os, sys, time, urllib.request
+import os, signal, sys, time, urllib.request
 d, url = sys.argv[1], sys.argv[2]
+late = sys.argv[3:] == ["late"]
+
+
+def call(n):
+    with urllib.request.urlopen(url + "/users?id=%d" % n, timeout=5) as r:
+        r.read()
+
+
+def stopped(sig, _frame):
+    for s in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(s, signal.SIG_IGN)
+    while not os.path.exists(os.path.join(d, "hungup")):
+        time.sleep(0.02)
+    try:
+        call(2)
+        result = "ok"
+    except Exception as e:
+        result = "%s: %s" % (type(e).__name__, e)
+    with open(os.path.join(d, "late"), "w") as f:
+        f.write(result)
+    signal.signal(sig, signal.SIG_DFL)
+    os.kill(os.getpid(), sig)
+
+
 with open(os.path.join(d, "test.pid"), "w") as f:
     f.write(str(os.getpid()))
-with urllib.request.urlopen(url + "/users?id=1", timeout=5) as r:
-    r.read()
+call(1)
+if late:
+    for s in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(s, stopped)
 open(os.path.join(d, "started"), "w").close()
 time.sleep(600)
 PY
@@ -116,7 +182,9 @@ PY
 # until it is closed. Exits with the command's exit code, 128+N for a death by
 # signal N, 124 if it ran on 60s after it was told to stop, or 125 if it had
 # exited by itself before a hup case closed its terminal, so that the case
-# never sent it the terminal's SIGHUP.
+# never sent it the terminal's SIGHUP. A hup case, once it has closed the
+# terminal, makes hungup beside <marker>: the kernel has hung the terminal up
+# by the time close returns.
 cat > "$WORK/hangup.py" <<'PY'
 import os, pty, select, signal, sys, time
 
@@ -152,6 +220,7 @@ if mode == "hup":
     if done:
         sys.exit(128 + os.WTERMSIG(status) if os.WIFSIGNALED(status) else 125)
     os.close(term)
+    open(os.path.join(os.path.dirname(marker), "hungup"), "w").close()
 deadline = time.time() + 60
 while True:
     done, status = os.waitpid(pid, os.WNOHANG)
@@ -167,6 +236,40 @@ out.close()
 sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
 PY
 
+# ttys.py prints, one line each, the terminal a process run as the session
+# leader of a new terminal is on, and the one `sudo -n` runs a command on
+# from there: they differ when sudo runs what it is given on a terminal of
+# its own (use_pty). The names are taken from what the two printed, which
+# may hold more (a sudo that marks its session in escape sequences); that
+# goes to stderr whole. If the two have not ended within 30s, ttys.py kills
+# its shell, which hangs up the terminal, and stops reading.
+cat > "$WORK/ttys.py" <<'PY'
+import os, pty, re, select, signal, sys, time
+
+pid, term = pty.fork()
+if pid == 0:
+    os.execvp("sh", ["sh", "-c", "tty; sudo -n tty"])
+out = b""
+deadline = time.time() + 30
+while True:
+    left = deadline - time.time()
+    if left <= 0 or not select.select([term], [], [], left)[0]:
+        os.kill(pid, signal.SIGKILL)
+        out += b"(ttys.py: no end within 30s)"
+        break
+    try:
+        data = os.read(term, 65536)
+    except OSError:
+        break
+    if not data:
+        break
+    out += data
+os.waitpid(pid, 0)
+sys.stderr.write(repr(out) + "\n")
+for name in re.findall(rb"/dev/pts/[0-9]+", out):
+    print(name.decode())
+PY
+
 # Runs inside the namespaces as root: $1 is the case, $2 the mode, $3 the
 # gap, $4, if set, the user to run keploy as, and $5, if set, anything else
 # keploy is given. Leaves keploy's exit code in <case>/exit and what it
@@ -179,7 +282,7 @@ D="$WORK/$CASE"
 BASE=${CASE%-proven}
 PROVEN=""
 [ "$BASE" != "$CASE" ] && PROVEN=1
-mkdir -p "$D/home" "$D/app"
+mkdir -p "$D/home" "$D/app" "$D/tmp"
 export HOME="$D/home"
 ip link set lo up || exit 1
 mount -t tmpfs -o mode=0700 tmpfs /root || exit 1
@@ -187,24 +290,39 @@ python3 "$WORK/depserver.py" 127.0.0.1 "$PORT" &
 DEP=$!
 trap 'kill $DEP 2>/dev/null' EXIT
 cd "$D/app" || exit 1
+# A hup case's test command calls the dependency again once the terminal has
+# hung up (see the top of this file).
+LATE=""
+[ "$MODE" = hup ] && [ "$BASE" != hup-drain ] && LATE=late
 set --
 if [ -n "$AS" ]; then
   chown -R "$AS" "$D"
   # keploy runs `sudo -n -v` to learn whether sudo would ask it for a
-  # password.
-  VERIFYPW=never
-  [ "$BASE" = hup-pty ] && VERIFYPW=always
+  # password (see the top of this file). Of two rules that match a command,
+  # sudo and sudo-rs both apply the last.
   mount -t tmpfs -o mode=0755 tmpfs /etc/sudoers.d || exit 1
-  printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\nDefaults:%s verifypw=%s\n' "$AS" "$AS" "$VERIFYPW" > /etc/sudoers.d/keploy-hangup
+  if [ "$BASE" = hup-pty ]; then
+    printf '%s ALL=(ALL:ALL) ALL\n%s ALL=(ALL:ALL) NOPASSWD: %s\n' "$AS" "$AS" "$WORK/bin/keploy"
+  else
+    printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$AS"
+  fi > /etc/sudoers.d/keploy-hangup
   chmod 0440 /etc/sudoers.d/keploy-hangup
   # Without what sudo tells the program it runs: keploy reads SUDO_USER as
   # the user who ran it under sudo, and it was not run under sudo.
   set -- sudo -u "$AS" env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND HOME="$HOME" PATH="$PATH"
+  # Whether sudo -n runs what this user gives it on a terminal of its own,
+  # with this case's sudoers: see ttys.py.
+  if [ "$BASE" = hup-user ]; then
+    "$@" python3 "$WORK/ttys.py" > "$D/ttys" 2> "$D/ttys.out"
+  fi
 fi
-set -- "$@" env KEPLOY_PROVEN="$PROVEN"
+# The CLI's log is a temp file (keploy-logs-*.txt): in the case's own temp
+# directory, where run_case looks for one the CLI left. The workflow's
+# KEPLOY_EXACT_VIEW_VERIFY, only while it is set (sudo_env.sh).
+set -- "$@" env KEPLOY_PROVEN="$PROVEN" TMPDIR="$D/tmp" ${KEPLOY_EXACT_VIEW_VERIFY+"KEPLOY_EXACT_VIEW_VERIFY=$KEPLOY_EXACT_VIEW_VERIFY"}
 # shellcheck disable=SC2086 # EXTRA is flags, split on purpose
 "$@" python3 "$WORK/hangup.py" "$MODE" "$GAP" "$D/started" "$D/out" \
-  "$WORK/bin/keploy" mock record -c "python3 $WORK/slowtest.py $D http://127.0.0.1:$PORT" \
+  "$WORK/bin/keploy" mock record -c "python3 $WORK/slowtest.py $D http://127.0.0.1:$PORT $LATE" \
   --name "$CASE" --disable-tele $EXTRA
 echo $? > "$D/exit"
 exit 0
@@ -234,13 +352,15 @@ kill_left() {
 # run_case <case> <hup|term> <gap> [user [flags]]: runs the case and checks
 # what it leaves; its exit code is left in EXIT_CODE.
 run_case() {
-  local name=$1 mode=$2 gap=$3 user=${4:-} extra=${5:-} left
+  local name=$1 mode=$2 gap=$3 user=${4:-} extra=${5:-} left logs
   echo "--- $name ---"
-  sudo env PATH="$PATH" WORK="$WORK" PORT="$PORT" \
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" WORK="$WORK" PORT="$PORT" \
     unshare -n -m --propagation private "$WORK/inside.sh" "$name" "$mode" "$gap" "$user" "$extra" ||
     fail "$name: the namespaces themselves failed"
   EXIT_CODE=$(cat "$WORK/$name/exit" 2>/dev/null)
   echo "keploy exited ${EXIT_CODE:-nothing}"
+  # A *-proven case runs under the switch (inside.sh).
+  [ "${name%-proven}" = "$name" ] || verify_ran 1 "$WORK/$name/out" || FAIL=1
   if [ ! -e "$WORK/$name/started" ]; then
     fail "$name: the test command never called the dependency"
   fi
@@ -262,16 +382,43 @@ run_case() {
     kill_left "$name"
   fi
   if [ -e "$WORK/$name/app/keploy-logs.txt" ]; then
-    fail "$name: keploy left its keploy-logs.txt behind"
+    fail "$name: keploy left a keploy-logs.txt in its working directory"
   fi
+  logs=$(find "$WORK/$name/tmp" -maxdepth 1 -name 'keploy-logs-*.txt' 2>/dev/null)
+  if [ -n "$logs" ]; then
+    fail "$name: keploy left its log behind in its temp directory: $logs"
+  fi
+  recorded "$name" 1 || fail "$name: the mock set keploy recorded does not hold the test command's call to the dependency"
+}
+
+# sudo_own_pty <case>: whether sudo -n ran a command for the case's user on a
+# terminal of its own, not on the one it was run from (ttys.py).
+sudo_own_pty() {
+  local own="" via=""
+  { read -r own; read -r via; } 2>/dev/null < "$WORK/$1/ttys"
+  [[ $own == /dev/pts/* && $via == /dev/pts/* && $own != "$via" ]]
+}
+
+# recorded <case> <id>: whether the case's mock set holds the call for id.
+recorded() {
+  grep -Fq "/users?id=$2" "$WORK/$1/app/keploy/$1/mocks.yaml" 2>/dev/null
 }
 
 # hup_case <case> <gap> [user [flags]]: run_case for a hang-up, whose exit
-# code must be the one SIGTERM gave.
+# code must be the one SIGTERM gave, and whose test command called the
+# dependency again after the terminal hung up (but hup-drain's, which must
+# not have).
 hup_case() {
   local name=$1
   run_case "$name" hup "${@:2}"
   [ "$EXIT_CODE" = "$TERM_EXIT" ] || fail "$name: keploy exited ${EXIT_CODE:-nothing} on a hang-up, and $TERM_EXIT on SIGTERM"
+  if [ "${name%-proven}" = hup-drain ]; then
+    [ ! -e "$WORK/$name/late" ] || fail "$name: the test command called the dependency again after the terminal hung up, so the case did not check what it is for"
+  elif [ ! -e "$WORK/$name/late" ]; then
+    fail "$name: the test command did not call the dependency again after the terminal hung up, so the case did not check what it is for"
+  elif [ "$(cat "$WORK/$name/late")" != ok ]; then
+    fail "$name: the test command's call to the dependency after the terminal hung up failed: $(cat "$WORK/$name/late")"
+  fi
 }
 
 # all_cases <suffix>: every case, each named <case><suffix> ("-proven": under
@@ -282,13 +429,24 @@ all_cases() {
   TERM_EXIT=$EXIT_CODE
   [ "$TERM_EXIT" = 0 ] || fail "term$x: keploy exited ${TERM_EXIT:-nothing} on SIGTERM, want 0 (a stopped recording is not a failure)"
   hup_case "hup-gap$x" 0.1
+  hup_case "hup-drain$x" 0.1
   hup_case "hup-nogap$x" 0
-  # --debug: only its debug log says which way keploy started its agent.
+  # --debug: only its debug log says which way keploy started its agent, and
+  # only with it does the agent print a line for each connection it takes.
   hup_case "hup-user$x" 0.1 "$(id -un)" --debug
   if ! grep -aq "Starting native agent with args" "$WORK/hup-user$x/out" ||
     grep -aq "Starting native agent with PTY" "$WORK/hup-user$x/out"; then
     fail "hup-user$x: keploy did not start its agent with sudo -n, so the case did not check what it is for"
   fi
+  sudo_own_pty "hup-user$x" ||
+    fail "hup-user$x: sudo -n did not run what it was given on a terminal of its own (sudo's use_pty), so nothing sent keploy's agent SIGHUP: the case did not check what it is for (ttys.py found $(tr '\n' ' ' 2>/dev/null < "$WORK/hup-user$x/ttys")in $(cat 2>/dev/null "$WORK/hup-user$x/ttys.out"))"
+  # The agent wrote after the hang-up: it took the late call, which came after
+  # the terminal hung up, and it prints a line for each connection it takes,
+  # as it did for the first call, before the hang-up.
+  grep -aq "Keploy(agent):.*Inside handleConnection" "$WORK/hup-user$x/out" ||
+    fail "hup-user$x: keploy's agent printed nothing for the first call, so the late call need not make it write after the hang-up: the case did not check what it is for"
+  recorded "hup-user$x" 2 ||
+    fail "hup-user$x: the mock set does not hold the call made after the terminal hung up: keploy lost it, or its agent never took it and need not have written after the hang-up"
   hup_case "hup-pty$x" 0.1 "$(id -un)" --debug
   grep -aq "Starting native agent with PTY" "$WORK/hup-pty$x/out" ||
     fail "hup-pty$x: keploy did not start its agent on a terminal of its own, so the case did not check what it is for"
@@ -297,7 +455,7 @@ half off && all_cases ""
 half on && all_cases -proven
 
 if [ "$FAIL" -ne 0 ]; then
-  for c in term hup-gap hup-nogap hup-user hup-pty term-proven hup-gap-proven hup-nogap-proven hup-user-proven hup-pty-proven; do
+  for c in term hup-gap hup-drain hup-nogap hup-user hup-pty term-proven hup-gap-proven hup-drain-proven hup-nogap-proven hup-user-proven hup-pty-proven; do
     echo "--- $c: the last 40 lines keploy printed ---"
     tail -n 40 "$WORK/$c/out" 2>/dev/null
   done

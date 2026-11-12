@@ -90,6 +90,28 @@ const (
 	CLIENT_REMEMBER_OPTIONS
 )
 
+// MariaDB's extended capabilities.
+// https://mariadb.com/kb/en/connection/#capabilities
+const (
+	// CLIENT_MYSQL is bit 0 (CLIENT_LONG_PASSWORD, which every MySQL server
+	// and client sets). A MariaDB server clears it in its greeting, and a
+	// client that speaks MariaDB's extensions clears it in its
+	// HandshakeResponse41: both then send their extended capabilities, the
+	// server in the greeting's reserved bytes, the client in the last four
+	// bytes of its filler.
+	CLIENT_MYSQL = CLIENT_LONG_PASSWORD
+
+	// The extended capabilities below are bits 32-63 of the 64-bit
+	// capabilities, given here as bits of the 32-bit word the wire carries.
+
+	// MARIADB_CLIENT_EXTENDED_METADATA: every column definition carries
+	// extended type information after its org_name.
+	MARIADB_CLIENT_EXTENDED_METADATA uint32 = 1 << 3
+	// MARIADB_CLIENT_CACHE_METADATA: a result set's column count is followed
+	// by a byte that says whether its column definitions follow.
+	MARIADB_CLIENT_CACHE_METADATA uint32 = 1 << 4
+)
+
 type FieldType byte
 
 // Field Types

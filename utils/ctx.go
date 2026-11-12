@@ -565,12 +565,14 @@ func notifyHangups() chan os.Signal {
 
 // DieOnHangup gives SIGHUP back the action it had before NewCtx heard it:
 // death, or nothing if it was ignored as this process started. It is for a
-// process whose owner counts on a hang-up killing it: `keploy agent`, whose
-// terminal goes away with the user's (the CLI's PTY, an ssh session), and
-// whose enterprise self-update supervisor hands it the SIGHUPs it gets and
-// counts a death by one as a deliberate stop. A SIGHUP that arrives between NewCtx and
-// this call takes NewCtx's path, and stops the process gracefully instead.
-// Once the process is shutting down, IgnoreHangupOnceStopping takes over.
+// process whose owner counts on a hang-up killing it: a `keploy agent` no
+// keploy client started, whose enterprise self-update supervisor hands it the
+// SIGHUPs it gets and counts a death by one as a deliberate stop. Not for one
+// a client started: the client owns its lifetime and takes the same hang-up
+// as a stop, and so does the agent (cli.Agent). A SIGHUP that arrives between
+// NewCtx and this call takes NewCtx's path, and stops the process gracefully
+// instead. Once the process is shutting down, IgnoreHangupOnceStopping takes
+// over.
 func DieOnHangup() {
 	signal.Reset(syscall.SIGHUP)
 }
@@ -583,15 +585,17 @@ func DieOnHangup() {
 // to unregister, leaking uprobe"), and loses what it was still saving. The CLI
 // that started an agent on a PTY no longer closes that terminal to stop a
 // running agent, but its own exit closes it, and so does a closed window or a
-// dropped ssh session. Before the shutdown a hang-up still kills (DieOnHangup).
+// dropped ssh session. Before the shutdown a hang-up still kills an agent no
+// client started (DieOnHangup).
 //
 // The switch is made by the root context's own cancel -- NewCtx's signal
 // handler and ExecCancel (Stop) -- just BEFORE it cancels, so nothing that
 // runs on the cancellation can be cut off by a hang-up arriving as it starts.
 // In NewCtx that is after the signal hold (SetSignalHold): while the agent
-// only waits for its recording client, nothing has been torn down yet, and a
-// hang-up still kills it. For a context ctx that ends some other way, the
-// switch is made when ctx is done.
+// only waits for its recording client, nothing has been torn down yet. A
+// hang-up then still kills an agent no client started (DieOnHangup), and one
+// a client started says it ignored it (NewCtx). For a context ctx that ends
+// some other way, the switch is made when ctx is done.
 //
 // SIGHUP is ignored (SIG_IGN), which a program the agent starts from then on
 // inherits: the CA-restore tools its shutdown runs (keytool, certutil,

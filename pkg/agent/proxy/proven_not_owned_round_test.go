@@ -50,8 +50,21 @@ func (h *heldFirstRead) RoundSnapshot(q integrations.RoundQuery) (integrations.R
 // returns its miss's report, nil when it was answered.
 func sendForMiss(t *testing.T, db integrations.MockMemDb, opts models.OutgoingOptions, tracker *learn.Tracker, request string) *models.MockMismatchReport {
 	t.Helper()
+	return sendForMissIn(t, context.Background(), db, opts, tracker, request)
+}
+
+// sendForMissIn is sendForMiss with the integration's ctx made from ctx, so a
+// row can end a request whose matcher would read without end.
+func sendForMissIn(t *testing.T, parent context.Context, db integrations.MockMemDb, opts models.OutgoingOptions, tracker *learn.Tracker, request string) *models.MockMismatchReport {
+	t.Helper()
+	return sendForMissLogged(t, parent, zap.NewNop(), db, opts, tracker, request)
+}
+
+// sendForMissLogged is sendForMissIn with the integration logging to logger.
+func sendForMissLogged(t *testing.T, parent context.Context, logger *zap.Logger, db integrations.MockMemDb, opts models.OutgoingOptions, tracker *learn.Tracker, request string) *models.MockMismatchReport {
+	t.Helper()
 	var reported atomic.Value
-	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported.Store(err) })
+	ctx := models.WithMockMismatchReporter(parent, func(err error) { reported.Store(err) })
 	if tracker != nil {
 		ctx = learn.WithTracker(ctx, tracker)
 	}
@@ -59,7 +72,7 @@ func sendForMiss(t *testing.T, db integrations.MockMemDb, opts models.OutgoingOp
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, db, opts)
+		_ = httpint.New(logger).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, db, opts)
 		_ = agentEnd.Close()
 	}()
 	t.Cleanup(func() { _ = app.Close(); <-done })
@@ -68,7 +81,7 @@ func sendForMiss(t *testing.T, db integrations.MockMemDb, opts models.OutgoingOp
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
 	if err != nil {
-		t.Fatalf("the app got no answer: %v", err)
+		t.Fatalf("the app got no answer: %v (the request's context: %v)", err, parent.Err())
 	}
 	_ = resp.Body.Close()
 	_ = app.Close()
@@ -409,9 +422,31 @@ func TestACallWhoseTestEndedUnderItIsNotItsOwnRecordingMadeElsewhere(t *testing.
 			mm.ServeExactTest("T", []*models.Mock{own})
 			db := &heldFirstRead{MockManager: mm, moved: func() { mm.ServeExactPool("k", nil) }}
 
-			r := sendForMiss(t, db, tc.opts, learn.NewTracker(), jobsCall)
+			// The call is read in T's view and offered own. Its one claim
+			// asks the store twice, by the delete door and then the update
+			// door (the session pool's fallback); both settle in the view
+			// in force (no test open) and are refused, and the call reads
+			// again, now in the view in force, which does not show own. A
+			// third consume of own is the call offered the refused
+			// recording again, which it would read and claim without end:
+			// the request's ctx ends at that consume, so the row fails by
+			// its own assertion rather than by the package's deadline.
+			ctx, offeredAgain := context.WithCancel(context.Background())
+			defer offeredAgain()
+			var consumes atomic.Int32
+			mm.OnConsume(func(name string) {
+				if name == own.Name && consumes.Add(1) == 3 {
+					t.Errorf("the call was offered %s again after the view in force refused its claim; want the view in force's read, without it: a matcher that reads again on a refused claim spins on it", name)
+					offeredAgain()
+				}
+			})
+			r := sendForMissIn(t, ctx, db, tc.opts, learn.NewTracker(), jobsCall)
+			mm.OnConsume(nil)
 			if !db.fired.Load() {
 				t.Fatal("precondition: the replay never ended the test under the call")
+			}
+			if n := consumes.Load(); n != 2 {
+				t.Fatalf("precondition: the call asked the store to consume %s %d times; want twice, its one claim's two doors, in T's view, refused in the view in force", own.Name, n)
 			}
 			if r == nil {
 				t.Fatalf("a call of a test the replay ended was answered from that test's recording as another test's")

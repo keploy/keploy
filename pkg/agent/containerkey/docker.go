@@ -2,8 +2,10 @@ package containerkey
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"net/netip"
@@ -32,6 +34,10 @@ type dockerAPI interface {
 	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
 	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
 	ImageInspect(ctx context.Context, imageID string, inspectOpts ...client.ImageInspectOption) (image.InspectResponse, error)
+	// ContainerStatPath and CopyFromContainer read an app container's zone
+	// files (containerZone).
+	ContainerStatPath(ctx context.Context, containerID, path string) (container.PathStat, error)
+	CopyFromContainer(ctx context.Context, containerID, srcPath string) (io.ReadCloser, container.PathStat, error)
 	Events(ctx context.Context, options events.ListOptions) (<-chan events.Message, <-chan error)
 	DaemonHost() string
 	Close() error
@@ -208,6 +214,11 @@ type watchState struct {
 	// legacy is each container's fingerprint of the legacy form
 	// (legacyFingerprint), read with its Fingerprint.
 	legacy map[string]string
+	// zones is the Zone of each container that runs in another's PID
+	// namespace (an app container, in the keploy agent's), read with its
+	// Fingerprint: the zone its processes write a wall clock in, which
+	// the docker-mode agent cannot read from /proc.
+	zones map[string]Zone
 	// imageConfigs caches each image's defaults, by image ID, for
 	// Fingerprint: an image ID names one configuration for good.
 	imageConfigs map[string]ImageConfig
@@ -872,6 +883,10 @@ type entry struct {
 	// one (legacyFingerprint); "" from the list, which does not carry its
 	// configuration.
 	fingerprint, legacy string
+	// zone is the container's Zone, read with its configuration where it
+	// runs in another container's PID namespace (an app container); nil
+	// otherwise, and from the list.
+	zone *Zone
 	// placed: putting it ends its placing (placeFromList, or a read that
 	// found where it is), in the same change, so no list shows it neither
 	// placing nor placed.
@@ -879,7 +894,7 @@ type entry struct {
 	// fromList: what the daemon's list gives, with no configuration: the
 	// container keeps the fingerprint the index has of it (its read may
 	// have put it in first), since a container's configuration does not
-	// change while it lives.
+	// change while it lives. It keeps its Zone too.
 	fromList bool
 	ips      []netip.Addr
 	bindings []binding
@@ -1000,6 +1015,15 @@ func (r *dockerIndex) read(ctx context.Context, api dockerAPI, st *watchState, i
 	default:
 		e.fingerprint, e.legacy = fp, legacy
 	}
+	if got.HostConfig != nil && got.HostConfig.PidMode.IsContainer() {
+		// An app container, in the keploy agent's PID namespace: its
+		// zone, which that agent cannot read from /proc.
+		z := readZone(ctx, api, id, got.Config)
+		if ctx.Err() != nil {
+			return nil // the watch ended
+		}
+		e.zone = &z
+	}
 	if ns := got.NetworkSettings; ns != nil {
 		for _, n := range ns.Networks {
 			if n != nil {
@@ -1069,6 +1093,9 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	if e.fromList && e.fingerprint == "" {
 		e.fingerprint, e.legacy = st.fingerprints[e.id], st.legacy[e.id]
 	}
+	if z, ok := st.zones[e.id]; ok && e.fromList && e.zone == nil {
+		e.zone = &z
+	}
 	if e.image == "" {
 		st.drop(e.id)
 		if had {
@@ -1094,6 +1121,9 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 	if e.fingerprint != "" {
 		st.fingerprints[e.id] = e.fingerprint
 		st.legacy[e.id] = e.legacy
+	}
+	if e.zone != nil {
+		st.zones[e.id] = *e.zone
 	}
 	for _, a := range e.ips {
 		st.byIP[a] = e.id
@@ -1124,6 +1154,9 @@ func (r *dockerIndex) apply(st *watchState, e entry, seq int) bool {
 func (st *watchState) viewLocked(id string, ips []netip.Addr, ports []uint16) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%q %q %q %q;", st.images[id], st.names[id], st.fingerprints[id], st.legacy[id])
+	if z, ok := st.zones[id]; ok {
+		fmt.Fprintf(&b, "zone %q %q %x;", z.Name, z.Err, sha256.Sum256(z.Data))
+	}
 	for _, a := range ips {
 		fmt.Fprintf(&b, "%s=%q;", a, st.byIP[a])
 	}
@@ -1186,7 +1219,7 @@ func newWatchState() *watchState {
 	return &watchState{synced: make(chan struct{}), done: make(chan struct{}), stop: func() {},
 		seq: map[string]int{}, reading: map[string]bool{}, dirty: map[string]bool{}, destroyed: map[string]bool{}, stalled: map[string]bool{},
 		placing: map[string]bool{}, placingRun: map[string]bool{}, placingDirty: map[string]bool{}, imageReads: map[string]*imageRead{},
-		images: map[string]string{}, names: map[string]string{}, fingerprints: map[string]string{}, legacy: map[string]string{}, imageConfigs: map[string]ImageConfig{}, readEnded: make(chan struct{}),
+		images: map[string]string{}, names: map[string]string{}, fingerprints: map[string]string{}, legacy: map[string]string{}, zones: map[string]Zone{}, imageConfigs: map[string]ImageConfig{}, readEnded: make(chan struct{}),
 		byIP: map[netip.Addr]string{}, published: map[uint16][]binding{},
 		ownIPs: map[string][]netip.Addr{}, ownPorts: map[string][]uint16{}, loopbackIsHost: true}
 }
@@ -1217,6 +1250,7 @@ func (st *watchState) drop(id string) {
 	delete(st.names, id)
 	delete(st.fingerprints, id)
 	delete(st.legacy, id)
+	delete(st.zones, id)
 }
 
 // overlap reports whether two bindings of one host port reach the same

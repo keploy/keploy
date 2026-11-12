@@ -72,7 +72,7 @@ func queryOf(r *models.HTTPReq) url.Values {
 		}
 		return vals
 	}
-	if u, err := url.Parse(r.URL); err == nil {
+	if u, err := parseRecordedURL(r.URL); err == nil {
 		return u.Query()
 	}
 	return nil
@@ -136,7 +136,7 @@ func hostAndPath(r *models.HTTPReq) (host, p string) {
 	if r.Header != nil && r.Header["Host"] != "" {
 		host = r.Header["Host"]
 	}
-	if u, err := url.Parse(r.URL); err == nil {
+	if u, err := parseRecordedURL(r.URL); err == nil {
 		if host == "" {
 			host = u.Host
 		}
@@ -165,7 +165,7 @@ func stripVolatile(m *models.Mock, vol map[string]bool) *models.Mock {
 		return m
 	}
 	req := *m.Spec.HTTPReq
-	if u, err := url.Parse(req.URL); err == nil {
+	if u, err := parseRecordedURL(req.URL); err == nil {
 		q := u.Query()
 		for k := range vol {
 			q.Del(k)
@@ -191,7 +191,7 @@ func stripVolatile(m *models.Mock, vol map[string]bool) *models.Mock {
 
 // mockToReq builds the matcher's `req` value from a recorded/live mock.
 func mockToReq(m *models.Mock) (*req, error) {
-	u, err := url.Parse(m.Spec.HTTPReq.URL)
+	u, err := parseRecordedURL(m.Spec.HTTPReq.URL)
 	if err != nil {
 		return nil, err
 	}

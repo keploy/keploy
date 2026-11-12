@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 const (
@@ -131,8 +132,8 @@ func TestMatch_DetectThenHonor(t *testing.T) {
 		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
 			setProven(t, proven)
 			h := newHTTP()
-			m := correlationMock(recUUID, false) // no Correlations annotation
-			mocknoise.MaterializeCorrelations(m) // the replay-ingest step populates it
+			m := correlationMock(recUUID, false)               // no Correlations annotation
+			mocknoise.MaterializeCorrelations(zap.NewNop(), m) // the replay-ingest step populates it
 			if proven {
 				if len(m.Spec.Correlations) != 0 {
 					t.Fatalf("a correlation was detected under the switch: %+v", m.Spec.Correlations)

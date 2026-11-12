@@ -29,6 +29,8 @@
 # Env: RECORD_BIN (the keploy binary under test). Needs a sudo that works
 # without a password (a CI runner's) for one setup step, before the stand-in.
 set -uo pipefail
+# shellcheck source=hang_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/hang_guard.sh" || exit 1
 
 BIN="${RECORD_BIN:-keploy}"
 BIN="$(command -v "$BIN" || echo "$BIN")"
@@ -65,7 +67,7 @@ refusal() {
   shift 2
   rm -f "$WORK/sudo.calls"
   mkdir -p "$WORK/$name" && cd "$WORK/$name" || exit 1
-  out=$(timeout 60 "$BIN" "$@" --disable-tele 2>&1 </dev/null)
+  out=$(bounded 60 "$BIN" "$@" --disable-tele 2>&1 </dev/null)
   rc=$?
   cd "$WORK" || exit 1
   [ "$rc" -eq 4 ] || fail "$name: exit $rc, want 4 (ExitUnsupportedPlatform)"
@@ -95,7 +97,7 @@ not_refused() {
   shift
   rm -f "$WORK/sudo.calls"
   mkdir -p "$WORK/$name" && cd "$WORK/$name" || exit 1
-  out=$(timeout 60 "$BIN" "$@" --disable-tele 2>&1 </dev/null)
+  out=$(bounded 60 "$BIN" "$@" --disable-tele 2>&1 </dev/null)
   rc=$?
   cd "$WORK" || exit 1
   [ "$rc" -ne 4 ] || fail "$name: exit 4, as a refusal"

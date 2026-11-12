@@ -56,8 +56,8 @@ import (
 //     (models.CaptureLossKernelSkip, models.CaptureLossKind.Evidence): the
 //     count is the kernel's recursion_misses (5.12+), so it fails no test
 //     and leaves none not judged, and a kernel without it (5.10) judges the
-//     same. No program of keploy's own is in it today; one the map does not
-//     name is (skipOf);
+//     same. k_stop_signal is in it; so is a program the map does not name
+//     (skipOf);
 //   - unsupported: the program reports what keploy does not support (the
 //     unixconn report: Unix sockets). Its skips are said at INFO in the
 //     session's summary, and charge nothing.
@@ -121,6 +121,7 @@ var programSkips = map[string]programSkip{
 	"k_post_bind4":       guardFree,
 	"k_post_bind6":       guardFree,
 	"k_sock_create":      guardFree,
+	"k_app_conn_release": guardFree,
 	"k_sockops":          guardFree,
 	"k_udp4_recvmsg":     guardFree,
 	"k_udp4_sendmsg":     guardFree,
@@ -145,9 +146,25 @@ var programSkips = map[string]programSkip{
 	},
 	"k_process_exit": {
 		class:    skipCovered,
-		does:     "removes an exited process's PID-map entries",
-		backstop: "every entry keploy's kernel programs make records its process's start time (pid_start_times; one whose start time cannot be read, or that finds the map full, is taken as it is), so none of pid_filter, its parent check and the readiness watch takes a dead process's entry for the next process the kernel gives its TGID, whose own classification replaces it; and an agent in the initial PID namespace deletes the entries of processes that are gone (sweepGonePIDs). An entry user space wrote without a start time is taken as it is",
+		does:     "removes an exited process's PID-map entries, and its entry in a test worker's keploy instance (instance_of_tgid)",
+		backstop: "every entry keploy's kernel programs make records its process's start time (pid_start_times; one whose start time cannot be read, or that finds the map full, is taken as it is), so none of pid_filter, its parent check and the readiness watch takes a dead process's entry for the next process the kernel gives its TGID, whose own classification replaces it; and an agent in the initial PID namespace deletes the entries of processes that are gone (sweepGonePIDs), instance_of_tgid's among them. An entry user space wrote without a start time is taken as it is",
 		by:       []string{"pid_start_times"},
+		gap:      "instance_of_tgid keeps no start time: k_instance_fork takes a dead member's entry out when the kernel gives its TGID to a new process, but where that run was skipped too, the new process is taken as in that member's instance, and its connections carry it, until the instance ends (Hooks.EndInstance)",
+	},
+	"k_instance_fork": {
+		class:    skipCovered,
+		does:     "puts each process a test worker's keploy instance forks in that instance (instance_of_tgid), so that its connections carry the instance, and takes out the entry a dead process left under the PID the kernel gives a new task",
+		backstop: "a process a skipped run left out is in no instance, nor is any process it forks: the connect hooks stamp its connections with no instance (0), which names no worker, so none of its calls carries another worker's",
+		by:       []string{"k_connect4", "k_connect6"},
+		gap:      "the calls of a process a skipped run left out, and of every process it forks, carry no instance: they are not told apart from calls no test worker made",
+	},
+	// The kernel generates a signal with its target's siglock held and
+	// interrupts off, so a run is neither preempted nor nested on its CPU,
+	// and none is expected to be skipped. Nothing else notes the signal: a
+	// skipped run is said as the loss it may be.
+	"k_stop_signal": {
+		class: skipLoses,
+		does:  "notes a stop signal another process sent the application's process (stop_signals), so that its exit from a handler of it reads as the signal's end, not its own (after a skipped run, the calls it had open record no fault)",
 	},
 	"k_ready_fork": {class: skipCovered, does: "counts a member's fork as progress of the application's start", backstop: readinessBackstop},
 	"k_ready_exec": {class: skipCovered, does: "counts a member's exec as progress of the application's start, and records a container's main process", backstop: readinessBackstop},
@@ -535,8 +552,14 @@ var sweepPIDs = sweepGonePIDs
 var errNotHostPIDs = errors.New("the agent is not in the initial PID namespace, whose numbers the PID maps hold")
 
 // sweepGonePIDs deletes the PID-map entries (target_namespace_pids,
-// excluded_pids, pid_start_times) of every TGID no process has: what
+// excluded_pids, pid_start_times) and the keploy instance entries
+// (instance_of_tgid, instances) of every TGID no process has: what
 // k_process_exit leaves when the kernel skips its run for a process's exit.
+// An instance entry has no start time: k_instance_fork takes it out when the
+// kernel gives the TGID to a new process, but where that run was skipped too,
+// a process given the TGID before the sweep is taken as in the dead one's
+// instance (its connections carry it), and one given it between the look and
+// the delete loses its entry (its connections carry none).
 // Once another process has the TGID, pid_filter, its parent check and the
 // readiness watch take such an entry for none (pid_entry_stale; the unixconn
 // report's owner check does not compare start times). But it holds a slot,
@@ -565,7 +588,7 @@ var errNotHostPIDs = errors.New("the agent is not in the initial PID namespace, 
 // skipped when the start time is no longer the one read, which a
 // classification of the new process, or a user-space writer (which deletes
 // it), changes.
-func sweepGonePIDs(targets, excluded, starts *ebpf.Map, only []uint32) (cleared int, zombies []uint32, err error) {
+func sweepGonePIDs(targets, excluded, starts, instances *ebpf.Map, only []uint32) (cleared int, zombies []uint32, err error) {
 	var st unix.Stat_t
 	if err := unix.Stat("/proc/self/ns/pid", &st); err != nil {
 		return 0, nil, err
@@ -585,6 +608,10 @@ func sweepGonePIDs(targets, excluded, starts *ebpf.Map, only []uint32) (cleared 
 				}
 			}
 			if starts != nil && starts.Lookup(tgid, &start) == nil {
+				held = true
+			}
+			var inst uint32
+			if instances != nil && instances.Lookup(tgid, &inst) == nil {
 				held = true
 			}
 			if held {
@@ -607,6 +634,16 @@ func sweepGonePIDs(targets, excluded, starts *ebpf.Map, only []uint32) (cleared 
 		}
 		if err := it.Err(); err != nil {
 			return 0, nil, fmt.Errorf("iterate the PID map %s: %w", m.String(), err)
+		}
+	}
+	if instances != nil && only == nil {
+		var k, v uint32
+		it := instances.Iterate()
+		for it.Next(&k, &v) {
+			tgids[k] = 0
+		}
+		if err := it.Err(); err != nil {
+			return 0, nil, fmt.Errorf("iterate instance_of_tgid: %w", err)
 		}
 	}
 	if starts != nil && only == nil {
@@ -636,7 +673,7 @@ func sweepGonePIDs(targets, excluded, starts *ebpf.Map, only []uint32) (cleared 
 				continue // classified again since: a new process's
 			}
 		}
-		for _, m := range []*ebpf.Map{targets, excluded, starts} {
+		for _, m := range []*ebpf.Map{targets, excluded, starts, instances} {
 			if m != nil {
 				_ = m.Delete(tgid)
 			}
@@ -686,7 +723,7 @@ func (h *Hooks) sweepIfExitsSkipped() {
 	if !sweep {
 		return
 	}
-	n, zombies, err := sweepPIDs(h.objects.TargetNamespacePids, h.objects.ExcludedPids, h.objects.PidStartTimes, only)
+	n, zombies, err := sweepPIDs(h.objects.TargetNamespacePids, h.objects.ExcludedPids, h.objects.PidStartTimes, h.objects.InstanceOfTgid, only)
 	switch {
 	case err != nil && !errors.Is(err, errNotHostPIDs):
 		// A sweep a map's churn cut short (an iteration aborted): the

@@ -756,3 +756,41 @@ func TestRunTestSetWiresTheRepeatNotes(t *testing.T) {
 		t.Fatalf("RunTestSet notes the tests' starts as %v, want %v: without a start a note's replay gap runs to the call, and its cause is not judged", writes, want)
 	}
 }
+
+// A call that repeats a recording of the set's background (its note's
+// Background: the worker scope's, or the pool's) is named with the test that
+// consumed it, and its next step and the set log's line say which scope the
+// recording is of and that it answers once: never that it is an earlier
+// test's own recording.
+func TestMarkRepeatOfSaysABackgroundRecordingsScope(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	note := func(mock, scope string) *models.RepeatNote {
+		n := anchoredNote(mock, rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))
+		n.Background = scope
+		return n
+	}
+	results := []models.TestResult{
+		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+			{ActualSummary: "GET /tokens", ClosestMock: "mock-7", Repeat: note("mock-7", models.RepeatBackgroundWorker)},
+			{ActualSummary: "GET /leases", ClosestMock: "mock-8", Repeat: note("mock-8", models.RepeatBackgroundPool)},
+		}}},
+	}
+	consumers := map[string][]string{"mock-7": {"test-3"}, "mock-8": {"test-4"}}
+	lines, _, _ := markRepeatOf(results, consumers, nil, nil, nil)
+	calls := results[0].FailureInfo.UnmatchedCalls
+	for i, want := range []struct{ test, scope, phrase string }{
+		{"test-3", models.RepeatBackgroundWorker, "worker scope (mappings.yaml worker:), which answers at most one call in a replay's test windows"},
+		{"test-4", models.RepeatBackgroundPool, "the set's pool), which answers at most one call in a replay"},
+	} {
+		c := calls[i]
+		if c.Repeat.Test != want.test || !strings.Contains(c.NextSteps, want.phrase) || !strings.Contains(c.NextSteps, "consumed by test "+want.test) {
+			t.Fatalf("call %d's note names %q; next step: %s", i, c.Repeat.Test, c.NextSteps)
+		}
+		if strings.Contains(c.NextSteps, "earlier test") {
+			t.Fatalf("call %d's next step calls a %s recording an earlier test's: %s", i, want.scope, c.NextSteps)
+		}
+		if len(lines) != 2 || !strings.Contains(lines[i], c.Repeat.Mock+" ("+want.scope+"), answered for "+want.test) {
+			t.Fatalf("the set log lines are %q", lines)
+		}
+	}
+}

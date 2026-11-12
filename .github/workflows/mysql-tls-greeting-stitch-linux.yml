@@ -10,10 +10,11 @@ name: MySQL TLS Greeting-Stitch Regression (Linux)
 # connection reused across cycles yields a decrypted leg with no handshake of its
 # own, so both keys miss. resolvePreTLSGreeting has a documented last-resort
 # fallback (cachedGreeting, backed by RememberLast/Last) for exactly that case —
-# but the only caller of RememberLast was the LEGACY handleInitialHandshake,
-# which the V2 path never runs. The fallback was dead code, so such a connection
-# fell through to fetchServerGreeting, dialled a destination the capture layer
-# had only synthesized, got ECONNREFUSED, and the record was SILENTLY DISCARDED.
+# but the only caller of RememberLast was the LEGACY capture's handshake handler
+# (since removed), which the V2 path never ran. The fallback was dead code, so
+# such a connection fell through to fetchServerGreeting, dialled a destination
+# the capture layer had only synthesized, got ECONNREFUSED, and the record was
+# SILENTLY DISCARDED.
 # Downstream that surfaces as a dirty replay verdict with no visible error.
 #
 # These tests are also run by the normal `go test ./...` lane. This lane exists
@@ -70,7 +71,7 @@ jobs:
       - name: Greeting-stitch regression tests
         run: |
           go test ./pkg/models/ ./pkg/agent/proxy/integrations/mysql/recorder/ \
-            -run 'TestStorePreTLSHandshakeV2|TestHandshakeLastPortKey|TestRecordV2_PostTLS_PooledConn|TestRecordV2_PostTLS_LostStash|TestTLSHandshakeStore|TestResolvePreTLSGreeting|TestRememberLast|TestAmbiguityLatch|TestTombstone|TestLastGreeting|TestGreetingServerIdentity|TestRecordV2_RawLeg|TestRawLegIdentity|TestHandshakeLastKey|TestLatchSurvives|TestIdentityRecords|TestPayloadlessEntriesAreBounded|TestLastForPortIsAtomic|TestLegacyPostTLSUsesTheLastGreetingCache|TestAddrIsNetnsLocal|TestHandshakeServerKey|TestServerGreeting|TestFetchServerGreeting|TestRememberServerGreeting|TestRecordV2_PostTLS_FreshConnWithALateRawLeg|TestRecordV2_PostTLS_JoinedConnTakesOnly|TestRecordV2_PostTLS_FetchedCacheDoesNotPreempt|TestRecordV2_PostTLS_ConcurrentPooledConns|TestRecordV2_PostTLS_TeardownDuringStashWait|TestLegacyRawLegRemembers|TestLegacyPostTLS|TestPostTLSHandshakeV2|TestPopWaitForPairsByOwner|TestHandshakeOwnerMayTake|TestRecordV2_PostTLS_OneCaptureStitchesOneConfigMock|TestRecordV2_PostTLS_EachStreamGetsItsOwnConnectionsGreeting|TestRecordV2_PostTLS_ReplicasDoNotShareALoopbackGreeting|TestLastGreetingKey' \
+            -run 'TestStorePreTLSHandshakeV2|TestHandshakeLastPortKey|TestRecordV2_PostTLS_PooledConn|TestRecordV2_PostTLS_LostStash|TestTLSHandshakeStore|TestResolvePreTLSGreeting|TestRememberLast|TestAmbiguityLatch|TestTombstone|TestLastGreeting|TestGreetingServerIdentity|TestRecordV2_RawLeg|TestRawLegIdentity|TestHandshakeLastKey|TestLatchSurvives|TestIdentityRecords|TestPayloadlessEntriesAreBounded|TestLastForPortIsAtomic|TestAddrIsNetnsLocal|TestHandshakeServerKey|TestServerGreeting|TestFetchServerGreeting|TestRememberServerGreeting|TestRecordV2_PostTLS_FreshConnWithALateRawLeg|TestRecordV2_PostTLS_JoinedConnTakesOnly|TestRecordV2_PostTLS_FetchedCacheDoesNotPreempt|TestRecordV2_PostTLS_ConcurrentPooledConns|TestRecordV2_PostTLS_TeardownDuringStashWait|TestPostTLSHandshakeV2|TestPopWaitForPairsByOwner|TestHandshakeOwnerMayTake|TestRecordV2_PostTLS_OneCaptureStitchesOneConfigMock|TestRecordV2_PostTLS_EachStreamGetsItsOwnConnectionsGreeting|TestRecordV2_PostTLS_ReplicasDoNotShareALoopbackGreeting|TestLastGreetingKey' \
             -race -count=3 -v
 
       - name: Full MySQL + models suites
@@ -159,39 +160,66 @@ jobs:
           echo "OK: blanking the server identity fails the raw-leg test, as it must."
           git checkout -- "$f"
 
-          # Mutant 3: the LEGACY post-TLS reader (conn.go). The previous guard for
-          # this path asserted on SOURCE TEXT -- it grepped conn.go for
-          # "hsStore.Last(lastKey)" -- so flipping the surrounding condition to
-          # `if false` left the string in place, killed the whole fallback, and the
-          # suite stayed green. That is the same write-with-no-reader defect this
-          # workflow exists to catch, one file over. conn.go was never mutated by
-          # this job at all, which is exactly how it slipped through.
-          c=pkg/agent/proxy/integrations/mysql/recorder/conn.go
-          if ! grep -q 'if !ok || len(entry.RespPackets) == 0 {' "$c"; then
-            echo "::error::the legacy post-TLS cache-read guard moved in $c; update this mutant with it"
+          # Mutant 3: the READER half. Mutants 1 and 2 leave the reader whole; these
+          # leave the writer whole and stop the reader, cachedGreeting in
+          # resolvePreTLSGreeting, from reading the cache, so the seeding is a
+          # write with no reader again: the defect this workflow exists to catch.
+          # A guard on source text cannot see that. The legacy reader's guard
+          # grepped for its Last call, so an `if false` around the call kept the
+          # suite green, until a mutant like these was added for it. That reader
+          # went with the legacy capture; cachedGreeting is the only reader left,
+          # and it reads two keys: 3a stops the address key, 3b the port key.
+          if ! grep -qF 'if c, ok := hsStore.Last(lastKey); ok && usable(c) {' "$f"; then
+            echo "::error::the V2 address-key cache read moved in $f; update this mutant with it"
             exit 1
           fi
-          perl -0pi -e 's/\tif !ok \|\| len\(entry\.RespPackets\) == 0 \{\n\t\tif lastKey :=/\tif false {\n\t\tif lastKey :=/' "$c"
-          if ! grep -q 'if false {' "$c"; then
-            echo "::error::mutant 3 did not apply; rework it alongside the code it mutates"
-            git checkout -- "$c"; exit 1
+          perl -0pi -e 's/\t\tif lastKey != "" \{\n\t\t\tif c, ok := hsStore\.Last\(lastKey\); ok && usable\(c\) \{/\t\tif false \&\& lastKey != "" {\n\t\t\tif c, ok := hsStore.Last(lastKey); ok \&\& usable(c) {/' "$f"
+          if git diff --quiet -- "$f"; then
+            echo "::error::mutant 3a did not apply; rework it alongside the code it mutates"
+            exit 1
           fi
           go build ./pkg/agent/proxy/integrations/mysql/... || {
-            echo "::error::the disabled-legacy-read mutant does not compile, so a test failure would" \
+            echo "::error::the disabled-address-read mutant does not compile, so a test failure would" \
                  "score a FALSE kill; rework the guard"
-            git checkout -- "$c"; exit 1
+            git checkout -- "$f"; exit 1
           }
           if go test ./pkg/agent/proxy/integrations/mysql/recorder/ \
-               -run 'TestLegacyPostTLSUsesTheLastGreetingCacheInsteadOfDialling' \
-               -count=1 >/tmp/mutant3.log 2>&1; then
-            echo "::error::VACUOUS TEST: disabling the legacy post-TLS cache read still passes." \
-                 "The seeding in handleInitialHandshake is a write with no reader and a pooled" \
-                 "connection loses its command phase on that path."
-            tail -30 /tmp/mutant3.log
-            git checkout -- "$c"; exit 1
+               -run 'TestRecordV2_PostTLS_LostStash_GreetingCacheFallback' \
+               -count=1 >/tmp/mutant3a.log 2>&1; then
+            echo "::error::VACUOUS TEST: not reading the address-key cache still passes. RememberLast's" \
+                 "seeding is then a write with no reader, and a connection whose own greeting was" \
+                 "consumed loses its command phase."
+            tail -30 /tmp/mutant3a.log
+            git checkout -- "$f"; exit 1
           fi
-          echo "OK: disabling the legacy cache read fails its behavioural test, as it must."
-          git checkout -- "$c"
+          echo "OK: not reading the address-key cache fails its behavioural test, as it must."
+          git checkout -- "$f"
+
+          if ! grep -qF 'c, ok, ambiguous := hsStore.LastForPort(lastPortKey)' "$f"; then
+            echo "::error::the V2 port-key cache read moved in $f; update this mutant with it"
+            exit 1
+          fi
+          perl -0pi -e 's/\t\tif lastPortKey != "" \{\n\t\t\tc, ok, ambiguous := hsStore\.LastForPort\(lastPortKey\)/\t\tif false \&\& lastPortKey != "" {\n\t\t\tc, ok, ambiguous := hsStore.LastForPort(lastPortKey)/' "$f"
+          if git diff --quiet -- "$f"; then
+            echo "::error::mutant 3b did not apply; rework it alongside the code it mutates"
+            exit 1
+          fi
+          go build ./pkg/agent/proxy/integrations/mysql/... || {
+            echo "::error::the disabled-port-read mutant does not compile, so a test failure would" \
+                 "score a FALSE kill; rework the guard"
+            git checkout -- "$f"; exit 1
+          }
+          if go test ./pkg/agent/proxy/integrations/mysql/recorder/ \
+               -run 'TestRecordV2_PostTLS_PooledConn_BridgesRealWriterToFabricatedReader' \
+               -count=1 >/tmp/mutant3b.log 2>&1; then
+            echo "::error::VACUOUS TEST: not reading the port-key cache still passes. RememberLastForPort's" \
+                 "seeding is then a write with no reader, and a pooled connection whose address is a" \
+                 "stand-in loses its command phase."
+            tail -30 /tmp/mutant3b.log
+            git checkout -- "$f"; exit 1
+          fi
+          echo "OK: not reading the port-key cache fails its behavioural test, as it must."
+          git checkout -- "$f"
 
           # Mutant 4: the ambiguity latch's DURABILITY. The latch is the only thing
           # stopping a port key from serving one server's greeting to a connection
@@ -404,25 +432,19 @@ jobs:
             's/if nsDial := models\.DstDialerFrom\(ctx\); nsDial != nil \{/if nsDial := models.DstDialerFrom(ctx); false \&\& nsDial != nil {/' \
             "./$r/" 'TestFetchServerGreeting_DialsThroughTheConnectionsDialer'
 
-          # A connection that joined mid-stream does not wait (V2, then legacy)...
+          # A connection that joined mid-stream does not wait...
           expect_mutant_fails v2-joined-waits "$r/record_v2.go" \
             's/\tif joinedMidStream \{\n\t\t\/\/ Only an entry provably its own; see above\./\tif false \&\& joinedMidStream {\n\t\t\/\/ Only an entry provably its own; see above./' \
             "./$r/" 'TestRecordV2_PostTLS_PooledConnRecordsPromptlyWithDefaultStashWait'
-          expect_mutant_fails legacy-joined-waits "$r/conn.go" \
-            's/\tif joinedMidStream \{\n\t\tif owner\.Conn == "" \{/\tif false \&\& joinedMidStream {\n\t\tif owner.Conn == "" {/' \
-            "./$r/" 'TestLegacyPostTLS_JoinedConnTakesOnlyItsOwnEntry'
           # ...but a FRESH connection still waits for its own late raw leg...
           expect_mutant_fails v2-fresh-skips-wait "$r/record_v2.go" \
             's/\tif joinedMidStream \{\n\t\t\/\/ Only an entry provably its own; see above\./\tif true {\n\t\t\/\/ Only an entry provably its own; see above./' \
             "./$r/" 'TestRecordV2_PostTLS_FreshConnWithALateRawLegGetsItsOwnGreetingNotTheMemo'
           # ...and a joined connection takes no entry that is not provably its
-          # own: it may be a fresh connection's, not yet reached (V2, legacy).
+          # own: it may be a fresh connection's, not yet reached.
           expect_mutant_fails v2-joined-takes-others "$r/record_v2.go" \
             's/\t\tif owner\.Conn != "" \{\n\t\t\tif entry, taker, src := take\(true, 0\); src != greetingNone \{/\t\tif true {\n\t\t\tif entry, taker, src := take(false, 0); src != greetingNone {/' \
             "./$r/" 'TestRecordV2_PostTLS_JoinedConnTakesOnlyItsOwnEntry|TestResolvePreTLSGreeting_JoinedConnLeavesAFreshConnsLeg'
-          expect_mutant_fails legacy-joined-takes-others "$r/conn.go" \
-            's/\t\tif owner\.Conn == "" \{\n\t\t\treturn models\.TLSHandshakeEntry\{\}, models\.HandshakeOwner\{\}, false, false\n\t\t\}\n\t\tentry, taker, ok = hsStore\.PopWaitFor\(portKey, owner, true, 0\)/\t\tentry, taker, ok = hsStore.PopWaitFor(portKey, owner, false, 0)/' \
-            "./$r/" 'TestLegacyPostTLS_JoinedConnTakesOnlyItsOwnEntry'
 
           # Each decrypted stream is paired with its OWN raw leg: never another
           # known connection's or another process's, its own first...
@@ -435,32 +457,28 @@ jobs:
           expect_mutant_fails store-own-not-first "$m" \
             's/\t\tif owner\.Is\(q\[i\]\.owner\) \{/\t\tif false \&\& owner.Is(q[i].owner) {/' \
             "./pkg/models/" 'TestPopWaitForPairsByOwner'
-          expect_mutant_fails legacy-fresh-pairs-by-arrival "$r/conn.go" \
-            's/\tentry, taker, ok = hsStore\.PopWaitFor\(portKey, owner, false, 5\*time\.Second\)/\tentry, taker, ok = hsStore.PopWaitFor(portKey, models.HandshakeOwner{}, false, 5*time.Second)/' \
-            "./$r/" 'TestLegacyPostTLS_EachStreamGetsItsOwnConnectionsGreeting'
+          # ...as long as the stream asks as itself: one that asks as nobody takes
+          # the oldest entry, whoever's it is, and the streams pair by arrival...
+          expect_mutant_fails v2-reader-unowned "$r/record_v2.go" \
+            's/\t\tentry, taker, ok := hsStore\.PopWaitFor\(portKey, owner, ownOnly, wait\)/\t\tentry, taker, ok := hsStore.PopWaitFor(portKey, models.HandshakeOwner{}, ownOnly, wait)/' \
+            "./$r/" 'TestRecordV2_PostTLS_EachStreamGetsItsOwnConnectionsGreeting'
           # ...a full queue makes room at the expense of whoever fills it...
           expect_mutant_fails queue-evicts-oldest-first "$m" \
             's/\t\tq = evictForRoom\(q\)/\t\tq = q[1:]/' \
             "./pkg/models/" 'TestTLSHandshakeStore_FullQueueEvictsFromTheProcessFillingIt'
-          # ...which the raw legs tag with their connection (V2, legacy)...
+          # ...which the raw legs tag with their connection...
           expect_mutant_fails v2-raw-leg-unowned "$r/record_v2.go" \
             's/\thsStore\.PushFor\(portKey, models\.HandshakeOwnerOf\(sess\.Opts\), hsEntry\)/\thsStore.Push(portKey, hsEntry)/' \
             "./$r/" 'TestRecordV2_PostTLS_EachStreamGetsItsOwnConnectionsGreeting'
-          expect_mutant_fails legacy-raw-leg-unowned "$r/conn.go" \
-            's/\t\t\thsStore\.PushFor\(portKey, models\.HandshakeOwnerOf\(opts\), hsEntry\)/\t\t\thsStore.Push(portKey, hsEntry)/' \
-            "./$r/" 'TestLegacyRawLegRemembersTheServerGreeting'
           # ...and queue ONCE: a second copy is stitched into another stream,
           # with the same ReqTimestampMock (treedb.sameMock)...
           expect_mutant_fails v2-raw-leg-queued-twice "$r/record_v2.go" \
             's/\thsStore\.PushFor\(portKey, models\.HandshakeOwnerOf\(sess\.Opts\), hsEntry\)\n/\thsStore.PushFor(portKey, models.HandshakeOwnerOf(sess.Opts), hsEntry)\n\thsStore.Push(portKey, hsEntry)\n/' \
             "./$r/" 'TestRecordV2_PostTLS_OneCaptureStitchesOneConfigMock'
-          # ...and an unused entry goes back to its owner (V2, legacy).
+          # ...and an unused entry goes back to its owner.
           expect_mutant_fails v2-restore-drops-owner "$r/record_v2.go" \
             's/hsStore\.PushFor\(sharedKey, taker, sharedEntry\)/hsStore.PushFor(sharedKey, models.HandshakeOwner{Proc: taker.Proc}, sharedEntry)/' \
             "./$r/" 'TestPostTLSHandshakeV2_RestoredGreetingCarriesNoTimestamp'
-          expect_mutant_fails legacy-restore-drops-owner "$r/conn.go" \
-            's/hsStore\.PushFor\(storeKey, taker, sharedEntry\)/hsStore.PushFor(storeKey, models.HandshakeOwner{Proc: taker.Proc}, sharedEntry)/' \
-            "./$r/" 'TestLegacyPostTLS_RestoresUnusedSharedGreeting'
 
   # A real MySQL 8 server, a pooled TLS client, and the server's own count of
   # aborted handshakes. See the header of this file and greeting_e2e_test.go.
@@ -486,7 +504,7 @@ jobs:
 
       # A real client's caching_sha2_password full authentication over TLS
       # sends its password in clear inside the TLS: the recording holds its
-      # length and not the password (recorder/auth_redact.go).
+      # length and not the password (utils/auth_redact.go).
       - name: A TLS full authentication records no password
         env:
           KEPLOY_E2E_MYSQL_RUN: TestE2E_MySQLTLSFullAuth_
@@ -497,14 +515,14 @@ jobs:
           KEPLOY_E2E_MYSQL_RUN: TestE2E_MySQLTLSFullAuth_
         run: |
           set -uo pipefail
-          f=pkg/agent/proxy/integrations/mysql/recorder/auth_redact.go
+          f=pkg/agent/proxy/integrations/mysql/utils/auth_redact.go
           cp "$f" /tmp/auth-mutant.orig
           perl -0pi -e 's/intgUtils\.EncodeBase64\(make\(\[\]byte, len\(pkt\.Payload\)\)\)/intgUtils.EncodeBase64(pkt.Payload)/' "$f"
           if cmp -s "$f" /tmp/auth-mutant.orig; then
             echo "::error::the mutant did not apply to $f; update it with the code it mutates"
             exit 1
           fi
-          if ! go vet ./pkg/agent/proxy/integrations/mysql/recorder/ >/tmp/auth-mutant-build.log 2>&1; then
+          if ! go vet ./pkg/agent/proxy/integrations/mysql/utils/ ./pkg/agent/proxy/integrations/mysql/recorder/ >/tmp/auth-mutant-build.log 2>&1; then
             cat /tmp/auth-mutant-build.log
             echo "::error::the mutant does not compile, so a failure would score a FALSE kill"
             cp /tmp/auth-mutant.orig "$f"; exit 1

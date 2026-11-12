@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
@@ -287,12 +287,7 @@ func TestStart_AComposeAgentWhoseStartStoppedFailsTheRun(t *testing.T) {
 	defer stop()
 	utils.SetCancel(stop)
 	t.Cleanup(func() { utils.SetCancel(nil) })
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := closed.Addr().String()
-	_ = closed.Close()
+	addr := testnet.RefusedAddr(t, "tcp")
 	instr := &startWatchingInstr{fakeInstr: newFakeInstr()}
 	r := exitCodeRecorder(instr)
 	r.config.CommandType = string(utils.DockerCompose)
@@ -346,12 +341,7 @@ func (c *composeDiesInstr) ComposeAgentFailure() error {
 func TestStart_AComposeProjectThatStopsBeforeTheAgentIsReadyFailsAtOnce(t *testing.T) {
 	// A budget the run must not wait out: the test fails on the reason if it
 	// does.
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := closed.Addr().String()
-	_ = closed.Close()
+	addr := testnet.RefusedAddr(t, "tcp")
 	dependencyFailed := models.AppError{AppErrorType: models.ErrUnExpected, Err: errors.New("dependency failed to start: container keploy-v3 exited (6)"), ExitCode: 1}
 	for _, tc := range []struct {
 		name  string

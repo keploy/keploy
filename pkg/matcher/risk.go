@@ -3,9 +3,11 @@ package matcher
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -14,6 +16,64 @@ import (
 type pathMaps struct {
 	types  map[string]string // path -> type ("string","number","boolean","null")
 	values map[string]string // path -> scalar stringified value (only for primitives)
+	// coveredTypes and coveredValues hold, as types and values do, the
+	// scalars a pattern-guarded noise entry matched. They are set aside, not
+	// dropped: a pattern excuses a field only when the recorded and the live
+	// side each match it (bothSides), which one side cannot tell alone. Nil
+	// until a pattern matches.
+	coveredTypes  map[string]string
+	coveredValues map[string]string
+}
+
+func newPathMaps() pathMaps {
+	return pathMaps{types: map[string]string{}, values: map[string]string{}}
+}
+
+// coveredOnly reports whether every scalar m holds at path is one a
+// pattern-guarded noise entry matched.
+func (m *pathMaps) coveredOnly(path string) bool {
+	if _, plain := m.types[path]; plain {
+		return false
+	}
+	_, covered := m.coveredTypes[path]
+	return covered
+}
+
+// collectBoth collects the recorded (exp) and the live (act) document under
+// one noise index and applies bothSides to them.
+func collectBoth(exp, act interface{}, ni noiseIndex) (expMaps, actMaps pathMaps) {
+	expMaps, actMaps = newPathMaps(), newPathMaps()
+	collectJSON(exp, "", ni, &expMaps)
+	collectJSON(act, "", ni, &actMaps)
+	bothSides(&expMaps, &actMaps)
+	return expMaps, actMaps
+}
+
+// bothSides decides the scalars a pattern-guarded noise entry matched on
+// either side. A pattern says the field may vary within it, so it excuses a
+// path only when every scalar both sides hold there matches it. Anywhere else
+// the matched scalars are compared like any other: the recorded id 1 under
+// {"id": ["^1$"]} against a live id 2 is a changed value, not a recorded id
+// hidden and a live one added, and a matched field the other side lacks is
+// missing from it. A scalar that did not match keeps its place before one
+// that did, as before.
+func bothSides(exp, act *pathMaps) {
+	// A path is restored on a side that holds only matched scalars there when
+	// the other side does not, so restoring exp first cannot change what act
+	// decides: act was not matched-only at any path exp restores.
+	restore := func(m, other *pathMaps) {
+		for p, typ := range m.coveredTypes {
+			if _, plain := m.types[p]; plain || other.coveredOnly(p) {
+				continue
+			}
+			m.types[p] = typ
+			if v, ok := m.coveredValues[p]; ok {
+				m.values[p] = v
+			}
+		}
+	}
+	restore(exp, act)
+	restore(act, exp)
 }
 
 func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string][]string, ignoreOrdering bool) (*models.FailureAssessment, error) {
@@ -32,11 +92,16 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 
 	idx := buildNoiseIndex(bodyNoise, nil) // already in matcher/utils.go
 
-	expMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
-	actMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
-
+	// collectBoth, reading first where the live side holds only values a
+	// pattern matched: the reasons below name the other side there.
+	expMaps, actMaps := newPathMaps(), newPathMaps()
 	collectJSON(exp, "", idx, &expMaps)
 	collectJSON(act, "", idx, &actMaps)
+	liveIn := map[string]bool{}
+	for p := range actMaps.coveredTypes {
+		liveIn[p] = actMaps.coveredOnly(p)
+	}
+	bothSides(&expMaps, &actMaps)
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
@@ -133,6 +198,12 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 		assess.Risk = models.Medium
 	}
 
+	// A field keploy.yml's noise lets vary only within patterns is compared
+	// when a side's value is outside them: name the field, the patterns and
+	// that side, as mock matching does.
+	changed := slices.Concat(removed, typeChanges, valueChanges, added)
+	assess.Reasons = append(assess.Reasons, bodyPatternWhys(idx, bodyNoise, expMaps, actMaps, liveIn, changed)...)
+
 	return assess, nil
 }
 
@@ -172,7 +243,13 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, t
 	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
 		return nil
 	}
+	return ChangedDecodedJSONFieldPaths(exp, act, known, typeStrict, valueChangesOnly, excludeRecordedValue)
+}
 
+// ChangedDecodedJSONFieldPaths is ChangedJSONFieldPaths over two bodies
+// already decoded, each by json.Unmarshal into an interface{}: a body
+// compared with many others is decoded once. It only reads exp and act.
+func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]string, typeStrict map[string]struct{}, valueChangesOnly bool, excludeRecordedValue func(string) bool) []string {
 	idx := buildNoiseIndex(known, nil)
 	// typeStrict paths are LEARNED-dynamic: their VALUE is ignored but their TYPE
 	// must match. Marked on the index so they resolve under the same
@@ -180,22 +257,54 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, t
 	// still wins and keeps its own semantics. Empty => behaviour is unchanged.
 	idx.markTypeStrict(typeStrict)
 
-	expMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
-	actMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
-
-	collectJSON(exp, "", idx, &expMaps)
-	collectJSON(act, "", idx, &actMaps)
+	expMaps, actMaps := collectBoth(exp, act, idx)
 
 	_, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
+	// live is the live document read alone, each scalar a pattern-guarded
+	// entry matched set aside: whether the live value at a path is inside
+	// its patterns, which bothSides no longer tells. Read on first need.
+	live := sync.OnceValue(func() pathMaps {
+		m := newPathMaps()
+		collectJSON(act, "", idx, &m)
+		return m
+	})
+	// heldRecorded is the paths where the recorded document, read alone,
+	// holds a scalar outside a pattern-guarded entry's patterns that the
+	// obfuscator did not redact: wherever it stands in an array, which the
+	// path maps, holding one value per path, do not tell. Read on first
+	// need.
+	heldRecorded := sync.OnceValue(func() map[string]bool {
+		out := map[string]bool{}
+		eachJSONScalar(exp, "", func(path string, v interface{}) {
+			regs, _, _ := idx.matchKind(strings.ToLower(path))
+			str, _ := jsonScalarToString(v)
+			if _, val := scalarTypeValue(v); !anyRegexpMatchStr(str, regs) && !excludeRecordedValue(val) {
+				out[path] = true
+			}
+		})
+		return out
+	})
 	keep := func(path string) bool {
 		if excludeRecordedValue == nil {
 			return true
 		}
-		if v, ok := expMaps.values[path]; ok && excludeRecordedValue(v) {
+		v, ok := expMaps.values[path]
+		if !ok || !excludeRecordedValue(v) {
+			return true
+		}
+		// The obfuscator redacted the recorded value, so it is not
+		// compared. Where an entry with patterns guards the path, the live
+		// value alone is held to them, and so is every recorded value
+		// there it did not redact: one outside them, or none, is a change.
+		if regs, _, _ := idx.matchKind(strings.ToLower(path)); len(regs) == 0 {
 			return false
 		}
-		return true
+		if heldRecorded()[path] {
+			return true
+		}
+		m := live()
+		return !m.coveredOnly(path)
 	}
 
 	groups := [][]string{valueChanges, typeChanges, removed}
@@ -240,11 +349,7 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 
 	idx := buildNoiseIndex(known, nil)
 
-	expMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
-	actMaps := pathMaps{types: map[string]string{}, values: map[string]string{}}
-
-	collectJSON(exp, "", idx, &expMaps)
-	collectJSON(act, "", idx, &actMaps)
+	expMaps, actMaps := collectBoth(exp, act, idx)
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
@@ -323,10 +428,17 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 		// hides only a scalar it actually matches — the matcher keeps walking a
 		// guarded container, so dropping it here would report "nothing changed"
 		// for a test the matcher just failed.
+		// A matched scalar is set aside rather than dropped: whether the
+		// pattern excuses it depends on the other side too (bothSides).
 		if len(regs) == 0 {
 			return
 		}
 		if str, isScalar := jsonScalarToString(v); isScalar && anyRegexpMatchStr(str, regs) {
+			if out.coveredTypes == nil {
+				out.coveredTypes, out.coveredValues = map[string]string{}, map[string]string{}
+			}
+			typ, val := scalarTypeValue(v)
+			out.coveredTypes[path], out.coveredValues[path] = typ, val
 			return
 		}
 	}
@@ -351,29 +463,50 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 		for _, e := range t {
 			collectJSON(e, p, ni, out)
 		}
-	case string:
-		out.types[path] = "string"
+	case string, float64, bool, nil:
+		typ, val := scalarTypeValue(t)
+		out.types[path] = typ
 		if !typeStrict {
-			out.values[path] = t
-		}
-	case float64:
-		out.types[path] = "number"
-		if !typeStrict {
-			out.values[path] = fmt.Sprintf("%v", t)
-		}
-	case bool:
-		out.types[path] = "boolean"
-		if !typeStrict {
-			out.values[path] = strconv.FormatBool(t)
-		}
-	case nil:
-		out.types[path] = "null"
-		if !typeStrict {
-			out.values[path] = "null"
+			out.values[path] = val
 		}
 	default:
 		// other JSON forms won't appear here
 	}
+}
+
+// eachJSONScalar calls fn with every scalar of v and its path, as collectJSON
+// names it (object keys dot-joined, an array's elements under "[]").
+func eachJSONScalar(v interface{}, path string, fn func(path string, v interface{})) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, child := range t {
+			p := k
+			if path != "" {
+				p = path + "." + k
+			}
+			eachJSONScalar(child, p, fn)
+		}
+	case []interface{}:
+		for _, e := range t {
+			eachJSONScalar(e, path+"[]", fn)
+		}
+	case string, float64, bool, nil:
+		fn(path, t)
+	}
+}
+
+// scalarTypeValue is a JSON scalar's type and value as the path maps hold
+// them.
+func scalarTypeValue(v interface{}) (typ, val string) {
+	switch t := v.(type) {
+	case string:
+		return "string", t
+	case float64:
+		return "number", fmt.Sprintf("%v", t)
+	case bool:
+		return "boolean", strconv.FormatBool(t)
+	}
+	return "null", "null"
 }
 
 func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []string) {

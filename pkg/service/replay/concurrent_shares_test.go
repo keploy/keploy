@@ -433,8 +433,10 @@ func TestSettleSharesAmbiguousClasses(t *testing.T) {
 	})
 }
 
-// A conflict (the learn step paired a call of a with a recording b answered
-// with) charges b too, in either order, and the recording goes to b.
+// A conflict (the learn step found a call of a closest to a recording b
+// answered with) charges b too, in either order, and the recording goes to
+// b. The charge says both calls are closest to it, true of a call paired
+// with it and of one apart from it in more than values alike.
 func TestSettleSharesChargesAConflictsClaimant(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	registerShareKeys(t)
@@ -455,7 +457,8 @@ func TestSettleSharesChargesAConflictsClaimant(t *testing.T) {
 		if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"b"}) {
 			t.Fatalf("order %v: charged %v; want b, the claimant (a has its own miss)", order, charged)
 		}
-		if c := s.resultOf("b").FailureInfo.UnmatchedCalls; len(c) != 1 || c[0].Concurrent.Case != models.ConcurrentCaseConflict || c[0].Concurrent.Claimant != "a" {
+		if c := s.resultOf("b").FailureInfo.UnmatchedCalls; len(c) != 1 || c[0].Concurrent.Case != models.ConcurrentCaseConflict || c[0].Concurrent.Claimant != "a" ||
+			!strings.HasPrefix(c[0].NextSteps, "its call and a's are both closest to c, recorded once while both were open") {
 			t.Fatalf("order %v: b's charge %+v", order, c)
 		}
 		got, _ := s.p.setShares(models.TestSetStatusFailed)
@@ -1284,4 +1287,64 @@ func sharePlanOf(conc *setConcurrency, worker []models.MockEntry, stored ...[]*m
 		panic(err)
 	}
 	return sp
+}
+
+// A clock read the learn step learned on a consumed recording is learning a
+// share was paired by, like noise: it is excused in the request keys of its
+// component (learnedAt), names the place a candidate answered only through
+// it differs at (learnedOn, learnedPlaces: never pinned), and is stripped
+// from a share the settlement did not pin (stripUnresolved).
+func TestAClockReadIsLearningASharedRecordingIsPairedBy(t *testing.T) {
+	st := models.MockState{Name: "shared-1", Clocks: map[string]models.ClockOffset{"body.createdAt": {Res: time.Millisecond}}}
+	if !learnedOn(st) {
+		t.Fatal("learnedOn: a clock read is no learning")
+	}
+	if got := learnedPlaces(st); !reflect.DeepEqual(got, []string{"body.createdAt"}) {
+		t.Fatalf("learnedPlaces = %v", got)
+	}
+	if got := learnedAt(st); !reflect.DeepEqual(got, []string{"body.createdAt"}) {
+		t.Fatalf("learnedAt = %v", got)
+	}
+	p := &exactPlan{share: &sharePlan{sharing: true, candOf: map[string][]string{"shared-1": {"test-1", "test-2"}}}}
+	if got := p.stripUnresolved(map[string]models.MockState{"shared-1": st}); got["shared-1"].Clocks != nil {
+		t.Fatalf("stripUnresolved kept %+v of an unpinned share", got["shared-1"].Clocks)
+	}
+	if len(st.Clocks) != 1 {
+		t.Fatal("stripUnresolved changed the consumed state")
+	}
+}
+
+// A shared recording charged to a test names the operation its request
+// carries, beside its summary: from the recording the plan holds, or the one
+// a replay left on disk.
+func TestASharedCallNamesItsOperation(t *testing.T) {
+	unregister := models.RegisterHTTPOperation(func(r *models.HTTPReq) (models.HTTPOperation, bool) {
+		if r.Body == "" {
+			return models.HTTPOperation{}, false
+		}
+		return models.HTTPOperation{Label: "query " + r.Body}, true
+	})
+	t.Cleanup(unregister)
+	gql := func(op string) *models.Mock {
+		return &models.Mock{Name: "mock-" + op, Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{
+			Method: "POST", URL: "http://localhost:8083/query", Body: op}}}
+	}
+	held, onDisk := gql("GetAppLabels"), gql("GetSubscription")
+	s := &settlement{
+		lookup: map[string]mockDisplayInfo{
+			held.Name:   {protocol: "HTTP", summary: "POST http://localhost:8083/query"},
+			onDisk.Name: {protocol: "HTTP", onDisk: onDisk},
+		},
+		sp: &sharePlan{info: map[string]*shareInfo{held.Name: {mock: held}}},
+	}
+	for _, tc := range []struct{ mock, op string }{
+		{held.Name, "query GetAppLabels"},
+		{onDisk.Name, "query GetSubscription"},
+		{"mock-unknown", ""},
+	} {
+		c := s.call(tc.mock, "shared", nil, "why")
+		if c.Operation != tc.op || (tc.op != "" && c.ActualSummary != "POST http://localhost:8083/query") {
+			t.Fatalf("%s: summary %q operation %q; want operation %q", tc.mock, c.ActualSummary, c.Operation, tc.op)
+		}
+	}
 }

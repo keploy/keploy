@@ -456,6 +456,76 @@ func TestARepeatNoteJoinsANotOwnedMissAndLeavesAnExtraCall(t *testing.T) {
 	}
 }
 
+// Under exact serving a call one more than the test recorded (extra_call)
+// whose identical recording an earlier test's window holds, which no call
+// consumed (that test was skipped, or never made it), is named as that
+// recording made elsewhere (not owned): the call moved into this test from
+// the earlier one, which judging names as the recording to move. It stays an
+// extra call. A call whose identical recording only a later test's window
+// holds stays the plain extra call: it never claims a recording of a test
+// the replay has not reached. Nor is one named that keploy cannot place
+// before the earliest of the test's own recordings of the call (no request
+// time on it, none on any of those, or made after the earliest). The learn
+// round of record names it alike.
+func TestAnExtraCallNamesTheEarlierTestsRecordingItMovedFrom(t *testing.T) {
+	const addr, host = "127.0.0.1:8099", "localhost:8099"
+	const path = "/sap/A_BusinessPartner/$count?$filter=x"
+	t.Setenv(provenswitch.Env, "1")
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	own := sapCount("mock-own", host, rec)
+	early := sapCount("mock-early", host, rec.Add(-time.Minute))
+	late := sapCount("mock-late", host, rec.Add(time.Minute))
+	alone := earlierDb{mockMemDb: &mockMemDb{}}
+
+	extra := func(t *testing.T, db integrations.MockMemDb, opts models.OutgoingOptions) *models.MockMismatchReport {
+		t.Helper()
+		r := missReport(t, db, addr, host, path, opts)
+		if r.MissKind != models.MissExtraCall || r.Recorded != 1 {
+			t.Fatalf("the call is kind %q, recorded %d; want one call more than recorded once", r.MissKind, r.Recorded)
+		}
+		return r
+	}
+	for name, opts := range map[string]models.OutgoingOptions{"replay": {}, "learn": {Learn: true, LearnPool: true}} {
+		t.Run(name, func(t *testing.T) {
+			db := func(staged ...*models.Mock) integrations.MockMemDb {
+				return roundGateDb{gateDb{earlierDb: alone, consumed: []*models.Mock{own}, staged: staged}}
+			}
+			if r := extra(t, db(late, early), opts); !r.NotOwned || r.ClosestMock != "mock-early" || len(r.FieldDiffs) != 0 || !strings.Contains(r.NextSteps, "mock-early") {
+				t.Fatalf("an extra call an earlier test recorded is closest %q, not owned %v, diffs %v, next step %q; want mock-early made elsewhere", r.ClosestMock, r.NotOwned, r.FieldDiffs, r.NextSteps)
+			}
+			if r := extra(t, db(late), opts); r.NotOwned || r.ClosestMock == "mock-late" {
+				t.Fatalf("an extra call only a later test recorded is closest %q, not owned %v; want the plain extra call", r.ClosestMock, r.NotOwned)
+			}
+			untimed := sapCount("mock-untimed", host, time.Time{})
+			if r := extra(t, db(untimed), opts); r.NotOwned || r.ClosestMock == "mock-untimed" {
+				t.Fatalf("an extra call is named as %q, a recording with no request time (not owned %v); want the plain extra call", r.ClosestMock, r.NotOwned)
+			}
+			ownUntimed := sapCount("mock-own-untimed", host, time.Time{})
+			if r := extra(t, roundGateDb{gateDb{earlierDb: alone, consumed: []*models.Mock{ownUntimed}, staged: []*models.Mock{early}}}, opts); r.NotOwned || r.ClosestMock == "mock-early" {
+				t.Fatalf("an extra call whose own recording has no request time is named as %q (not owned %v); want the plain extra call", r.ClosestMock, r.NotOwned)
+			}
+			// Recorded twice: the bound is the earliest own recording with
+			// a request time, whichever order the test answered them in.
+			twice := func(staged *models.Mock, own ...*models.Mock) *models.MockMismatchReport {
+				t.Helper()
+				r := missReport(t, roundGateDb{gateDb{earlierDb: alone, consumed: own, staged: []*models.Mock{staged}}}, addr, host, path, opts)
+				if r.MissKind != models.MissExtraCall || r.Recorded != 2 {
+					t.Fatalf("the call is kind %q, recorded %d; want one call more than recorded twice", r.MissKind, r.Recorded)
+				}
+				return r
+			}
+			if r := twice(early, own, ownUntimed); !r.NotOwned || r.ClosestMock != "mock-early" {
+				t.Fatalf("with an own recording of no request time beside one of %v the call is closest %q, not owned %v; want mock-early", rec, r.ClosestMock, r.NotOwned)
+			}
+			second := sapCount("mock-own-2", host, rec.Add(2*time.Minute))
+			between := sapCount("mock-between", host, rec.Add(time.Minute))
+			if r := twice(between, second, own); r.NotOwned || r.ClosestMock == "mock-between" {
+				t.Fatalf("a recording made between the test's own two is named as %q (not owned %v); want the plain extra call", r.ClosestMock, r.NotOwned)
+			}
+		})
+	}
+}
+
 // perTestDb is earlierDb whose per-test read shows perTest, or fails with
 // readErr; spent are the recordings it reports spent (integrations.
 // SpentReader), and others those it tells are not the open test's own
@@ -519,6 +589,13 @@ func TestARepeatNamesTheTwinWithNoOtherRecordingsDiffs(t *testing.T) {
 	r := missReport(t, twin, addr, host, path, models.OutgoingOptions{})
 	if r.ClosestMock != "mock-7" || r.Repeat == nil || len(r.FieldDiffs) != 0 || len(r.Differs) != 0 || r.Diff != "" {
 		t.Fatalf("the repeat's miss is closest %q, note %+v, diffs %v, differs %v, diff %q; want mock-7 with no difference named", r.ClosestMock, r.Repeat, r.FieldDiffs, r.Differs, r.Diff)
+	}
+	// Nor why a field of the other recording was refused.
+	other := &models.MockMismatchReport{ClosestMock: "mock-near", Differs: []string{"body.since"},
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: "body.since was learned as a read of the application's clock"}}}
+	markRepeat(other, twin.answered[0], false, "")
+	if other.ClosestMock != "mock-7" || other.FieldReasons != nil || other.Differs != nil {
+		t.Fatalf("the repeat's miss is closest %q, differs %v, reasons %+v; want mock-7 with no reason of another recording's", other.ClosestMock, other.Differs, other.FieldReasons)
 	}
 }
 

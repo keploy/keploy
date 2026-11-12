@@ -641,7 +641,7 @@ func TestTheGRPCAppsKeepalivesAreNoProgress(t *testing.T) {
 	}
 
 	t.Run("R4 against a server whose keepalives come every second", func(t *testing.T) {
-		counted := startKeepaliveServer(t, 1000, func(_ interface{}, _ grpc.ServerStream) error {
+		counted := startKeepaliveServer(t, 1000, nil, func(_ interface{}, _ grpc.ServerStream) error {
 			<-hold
 			return nil
 		})
@@ -663,7 +663,7 @@ func TestTheGRPCAppsKeepalivesAreNoProgress(t *testing.T) {
 	})
 
 	t.Run("a large request the app reads slowly", func(t *testing.T) {
-		slow := startGRPCServer(t, 1000, time.Second, func(_ interface{}, stream grpc.ServerStream) error {
+		slow := startGRPCServer(t, 1000, nil, time.Second, func(_ interface{}, stream grpc.ServerStream) error {
 			var m rawMessage
 			for stream.RecvMsg(&m) == nil {
 				time.Sleep(25 * time.Millisecond)
@@ -683,7 +683,7 @@ func TestTheGRPCAppsKeepalivesAreNoProgress(t *testing.T) {
 
 	t.Run("nothing of the answer, the stall rule's grace", func(t *testing.T) {
 		addr := startStreamingServer(t, &streamingServer{holdOpen: hold})
-		addrHeaders := startGRPCServer(t, 1000, 0, func(_ interface{}, stream grpc.ServerStream) error {
+		addrHeaders := startGRPCServer(t, 1000, nil, 0, func(_ interface{}, stream grpc.ServerStream) error {
 			drain(stream)
 			_ = stream.SendHeader(nil)
 			<-hold
@@ -706,12 +706,12 @@ func TestTheGRPCAppsKeepalivesAreNoProgress(t *testing.T) {
 	})
 
 	t.Run("nothing of the answer, the app's keepalives", func(t *testing.T) {
-		never := startKeepaliveServer(t, 1000, func(_ interface{}, stream grpc.ServerStream) error {
+		never := startKeepaliveServer(t, 1000, nil, func(_ interface{}, stream grpc.ServerStream) error {
 			drain(stream)
 			<-hold
 			return nil
 		}).Addr().String()
-		headers := startKeepaliveServer(t, 1000, func(_ interface{}, stream grpc.ServerStream) error {
+		headers := startKeepaliveServer(t, 1000, nil, func(_ interface{}, stream grpc.ServerStream) error {
 			drain(stream)
 			_ = stream.SendHeader(nil)
 			<-hold

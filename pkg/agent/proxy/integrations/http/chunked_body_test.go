@@ -211,7 +211,7 @@ func TestHandleChunkedRequestsSkipsEmptyLinesBeforeTheRequestLine(t *testing.T) 
 		send([]byte("hello"), now, now)
 		var finalReq []byte
 		done := make(chan error, 1)
-		go func() { done <- h.readRequestV2(context.Background(), stream, &finalReq) }()
+		go func() { done <- h.readRequestV2(stream, &finalReq) }()
 		select {
 		case err := <-done:
 			if err != nil || string(finalReq) != head+"hello" {
@@ -316,7 +316,7 @@ func TestChunkedResponsesWithoutABody(t *testing.T) {
 			send([]byte(head), time.Now(), time.Now())
 			var v2Resp []byte
 			go func() {
-				_, err := h.readResponseV2(context.Background(), stream, &v2Resp, tc.method)
+				_, err := h.readResponseV2(stream, &v2Resp, tc.method)
 				done <- err
 			}()
 			for i := 0; i < 2; i++ {
@@ -493,7 +493,7 @@ func TestReadRequestV2ChunkedFraming(t *testing.T) {
 			}
 			var finalReq []byte
 			done := make(chan error, 1)
-			go func() { done <- h.readRequestV2(context.Background(), stream, &finalReq) }()
+			go func() { done <- h.readRequestV2(stream, &finalReq) }()
 			select {
 			case err := <-done:
 				if err != nil {
@@ -519,7 +519,7 @@ func TestReadResponseV2ChunkedTrailer(t *testing.T) {
 	}
 	var finalResp []byte
 	done := make(chan error, 1)
-	go func() { _, err := h.readResponseV2(context.Background(), stream, &finalResp, "GET"); done <- err }()
+	go func() { _, err := h.readResponseV2(stream, &finalResp, "GET"); done <- err }()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -636,8 +636,8 @@ func TestMockOfAResponseAfterAnInterimResponse(t *testing.T) {
 func TestTransferEncodingOverridesContentLength(t *testing.T) {
 	const both = "POST /v1/echo HTTP/1.1\r\nHost: tlsup\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n"
 	body := []string{"5\r\nhel", "lo\r\n0\r\n\r\n"}
-	if cl, te := parseHeaders([]byte(both)); cl != "" || te != "chunked" {
-		t.Errorf("parseHeaders = (%q, %q), want (\"\", \"chunked\")", cl, te)
+	if cl, chunked, err := parseHeaders([]byte(both), false); err != nil || cl != -1 || !chunked {
+		t.Errorf("parseHeaders = (%d, %v, %v), want (-1, true, nil)", cl, chunked, err)
 	}
 
 	t.Run("replay request", func(t *testing.T) {
@@ -654,7 +654,7 @@ func TestTransferEncodingOverridesContentLength(t *testing.T) {
 		send([]byte(body[1]), now, now)
 		var finalReq []byte
 		done := make(chan error, 1)
-		go func() { done <- h.readRequestV2(context.Background(), stream, &finalReq) }()
+		go func() { done <- h.readRequestV2(stream, &finalReq) }()
 		select {
 		case err := <-done:
 			if err != nil || string(finalReq) != both+strings.Join(body, "") {
@@ -687,31 +687,37 @@ func TestTransferEncodingOverridesContentLength(t *testing.T) {
 }
 
 // A 101 Switching Protocols (WebSocket) ends the HTTP exchange but not the
-// connection: what follows is the other protocol. The V2 record path reads it
-// to the close as one response, as before, instead of taking the upgraded
-// stream for the next HTTP request.
-func TestReadResponseV2ReadsAnUpgradedConnectionToItsClose(t *testing.T) {
+// connection: what follows is the other protocol. net/http frames the 101 as
+// its head alone, and so does the V2 record path: it returns at the head's
+// end, the switched-to protocol's bytes in the head's read cut off, and its
+// writes end there. It read them as the 101's body, to the connection's close.
+func TestReadResponseV2FramesA101AsItsHeadAlone(t *testing.T) {
+	const head = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
-	stream, send, closeStream := makeStream(t, fakeconn.FromDest, 8)
-	now := time.Now()
-	head := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
-	send([]byte("\x81\x05hello"), now, now)
-	finalResp := []byte(head) // the first chunk, already read by recordV2
+	stream, send, _ := makeStream(t, fakeconn.FromDest, 8)
+	first, second := time.Now(), time.Now().Add(time.Millisecond)
+	send([]byte(head[20:]+"\x81\x05hello"), second, second) // the head's end, and a frame
+	finalResp := []byte(head[:20])                          // the first chunk, already read by recordV2
+	writes := []respWrite{{end: 20, at: first}}
 	done := make(chan error, 1)
-	go func() { _, err := h.readResponseV2(context.Background(), stream, &finalResp, "GET"); done <- err }()
+	go func() { _, err := h.readResponseWrites(stream, &finalResp, "GET", &writes); done <- err }()
 	select {
 	case err := <-done:
-		t.Fatalf("readResponseV2 returned (%v) at the 101's head, with the connection still open", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	closeStream()
-	select {
-	case <-done:
+		if err != nil {
+			t.Fatalf("readResponseWrites = %v at the 101's head", err)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("readResponseV2 did not return at the close")
+		t.Fatal("readResponseWrites did not return at the 101's head: it waits on the switched-to protocol's bytes")
 	}
-	if string(finalResp) != head+"\x81\x05hello" {
-		t.Fatalf("finalResp = %q", finalResp)
+	if string(finalResp) != head {
+		t.Fatalf("finalResp = %q, want the 101's head alone", finalResp)
+	}
+	if len(writes) != 2 || writes[0].end != 20 || writes[1].end != len(head) {
+		t.Fatalf("writes = %+v, want the second to end at the head's end, %d", writes, len(head))
+	}
+	marks := answerMarks(finalResp, writes, "", 0)
+	if marks == nil || !marks.Head.Equal(second) || len(marks.Writes) != 1 || marks.Writes[0].Offset != 0 {
+		t.Fatalf("answerMarks = %+v, want the head at the second write, and no body", marks)
 	}
 }
 
@@ -752,5 +758,66 @@ func TestExpectsContinueIgnoresCase(t *testing.T) {
 		if got := expectsContinue([]byte(req)); got != want {
 			t.Errorf("expectsContinue(%q) = %v, want %v", req, got, want)
 		}
+	}
+}
+
+// chunkedEndRefused: what a client that closed the connection refused, after a
+// chunked response its stream ended in the middle of, ends that response with
+// framing alone (the rest of a chunk's CRLF, the last chunk, the empty line),
+// so the client had every byte of content and the response is whole; or it
+// holds content the client never had (chunk data, a trailer field), or does
+// not end the body, and the exchange stays left out.
+func TestChunkedEndRefused(t *testing.T) {
+	const head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+	const chunk = "5\r\nhello\r\n"
+	for _, row := range []struct {
+		name, resp, refused string
+		// whole is the response recorded; "" when it is left out.
+		whole string
+	}{
+		{name: "the last chunk and the empty line", resp: head + chunk, refused: "0\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
+		{name: "bytes after the end are not the response's", resp: head + chunk, refused: "0\r\n\r\nHTTP/1.1 200 OK\r\n", whole: head + chunk + "0\r\n\r\n"},
+		{name: "a last chunk with an extension", resp: head + chunk, refused: "0;done=1\r\n\r\n", whole: head + chunk + "0;done=1\r\n\r\n"},
+		{name: "the CRLF after the data the client had", resp: head + "5\r\nhello", refused: "\r\n0\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
+		{name: "the rest of the last chunk's line", resp: head + chunk + "0", refused: "\r\n\r\n", whole: head + chunk + "0\r\n\r\n"},
+		{name: "the empty line alone", resp: head + chunk + "0\r\n", refused: "\r\n", whole: head + chunk + "0\r\n\r\n"},
+		{name: "after a trailer field the client had", resp: head + chunk + "0\r\nX-A: 1\r\n", refused: "\r\n", whole: head + chunk + "0\r\nX-A: 1\r\n\r\n"},
+		{name: "after a trailer field the client had all but the CRLF of", resp: head + chunk + "0\r\nX-A: 1", refused: "\r\n\r\n", whole: head + chunk + "0\r\nX-A: 1\r\n\r\n"},
+		{name: "an empty body", resp: head, refused: "0\r\n\r\n", whole: head + "0\r\n\r\n"},
+		{name: "chunked in any case", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n" + chunk, refused: "0\r\n\r\n",
+			whole: "HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n" + chunk + "0\r\n\r\n"},
+		// net/http refuses a coding other than chunked alone: its framing is
+		// not read (parseHeaders), so it is not ended either.
+		{name: "chunked among other codings", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n" + chunk, refused: "0\r\n\r\n"},
+		{name: "after an interim response", resp: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk, refused: "0\r\n\r\n", whole: "HTTP/1.1 100 Continue\r\n\r\n" + head + chunk + "0\r\n\r\n"},
+		{name: "a data chunk", resp: head + chunk, refused: "3\r\nabc\r\n0\r\n\r\n"},
+		{name: "the rest of a chunk's data", resp: head + "5\r\nhel", refused: "lo\r\n0\r\n\r\n"},
+		{name: "the data of a chunk whose size line the client had", resp: head + "5\r\n", refused: "hello\r\n0\r\n\r\n"},
+		{name: "a trailer field", resp: head + chunk, refused: "0\r\nX-A: 1\r\n\r\n"},
+		{name: "the rest of a trailer field", resp: head + chunk + "0\r\nX-A", refused: ": 1\r\n\r\n"},
+		{name: "no empty line", resp: head + chunk, refused: "0\r\n"},
+		{name: "nothing refused", resp: head + chunk, refused: ""},
+		{name: "cut short, as the relay keeps only the start", resp: head + chunk, refused: "0;" + strings.Repeat("x", 100)},
+		{name: "a bare LF", resp: head + chunk, refused: "0\n\n"},
+		{name: "a head the client did not have whole", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n", refused: "\r\n0\r\n\r\n"},
+		{name: "a Content-Length body", resp: "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n", refused: "0\r\n\r\n"},
+		{name: "a body read to the connection's end", resp: "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", refused: "0\r\n\r\n"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			resp := []byte(row.resp)
+			got, ok := chunkedEndRefused(resp, []byte(row.refused))
+			if row.whole == "" {
+				if ok {
+					t.Fatalf("whole %q, want it left out: the client did not have it all", got)
+				}
+				return
+			}
+			if !ok || string(got) != row.whole {
+				t.Fatalf("got %q, %v; want %q, whole", got, ok, row.whole)
+			}
+			if string(resp) != row.resp {
+				t.Fatalf("resp changed to %q", resp)
+			}
+		})
 	}
 }

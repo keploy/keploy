@@ -300,7 +300,18 @@ func TestReportBootProgressToWritesNextToTheTeardownFile(t *testing.T) {
 // file, then the rename) into that directory while the test's cleanup removed
 // it, which failed the cleanup with "directory not empty".
 func TestStopTeardownReportingEndsTheBootReporters(t *testing.T) {
+	// An earlier test's reporter may still be ending (it wrote its last
+	// report, and lets go of its clock): ended and waited for here, it is
+	// not counted below.
+	StopTeardownReporting()
 	resetBoot(t)
+	// End the reporters earlier tests started before counting this test's.
+	// An earlier test's reporter ends with that test's cancel, and its
+	// watcher (trackReporter) leaves the count only after that, on its own
+	// goroutine: counted at once, it was still there in 9 of 300 runs
+	// beside a busy host. StopTeardownReporting returns once every watcher
+	// has left it.
+	StopTeardownReporting()
 	ctx, cancel := context.WithCancel(context.Background()) // the agent never stops
 	defer cancel()
 	dir := t.TempDir()

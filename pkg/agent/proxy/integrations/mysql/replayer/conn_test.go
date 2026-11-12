@@ -549,7 +549,7 @@ func TestAPlainPasswordIsNotCompared(t *testing.T) {
 				refused, err := simulatePlainPassword(context.Background(), zap.NewNop(), agentEnd, testDBAddr, reqResp{
 					req:  []mysql.Request{{PacketBundle: bundle(5, "plain password", "cmVjb3JkZWQtc2VjcmV0AA==")}}, // "recorded-secret\x00"
 					resp: []mysql.Response{okAnswer(6)},
-				}, hs, &poolDb{fakeMockDb{session: []*models.Mock{hs}}}, decodeCtx)
+				}, &servedHandshake{mock: hs}, &poolDb{fakeMockDb{session: []*models.Mock{hs}}}, decodeCtx)
 				ret <- outcome{refused, err}
 			}()
 			c := mysqlClient{t: t, c: app}
@@ -763,11 +763,14 @@ func TestARecordingOfOnlyTheCredentialsLengthIsServed(t *testing.T) {
 			err     error
 		}
 		ret := make(chan outcome, 1)
+		recorded := bundle(5, mysql.PlainPassword, zeros(len("app-password\x00")))
+		recorded.Header.Header.PayloadLength = uint32(len("app-password\x00"))
+		served := &servedHandshake{mock: hs}
 		go func() {
 			refused, err := simulatePlainPassword(context.Background(), zap.NewNop(), agentEnd, testDBAddr, reqResp{
-				req:  []mysql.Request{{PacketBundle: bundle(5, mysql.PlainPassword, zeros(len("app-password\x00")))}},
+				req:  []mysql.Request{{PacketBundle: recorded}},
 				resp: []mysql.Response{okAnswer(6)},
-			}, hs, &poolDb{fakeMockDb{session: []*models.Mock{hs}}}, decodeCtx)
+			}, served, &poolDb{fakeMockDb{session: []*models.Mock{hs}}}, decodeCtx)
 			ret <- outcome{refused, err}
 		}()
 		c := mysqlClient{t: t, c: app}
@@ -778,6 +781,13 @@ func TestARecordingOfOnlyTheCredentialsLengthIsServed(t *testing.T) {
 		}
 		if len(verdict) == 0 || verdict[0] != mysql.OK {
 			t.Fatalf("the client read %x; want the recorded OK", verdict)
+		}
+		// What the serve states it gave holds the password as the recording
+		// does, by its length only: the recorded packet, never the password.
+		sent, _ := packetKeys(served.sent)
+		want, _ := packetKey(&recorded)
+		if len(sent) != 1 || sent[0] != want || strings.Contains(sent[0], "app-password") {
+			t.Fatalf("the serve noted the client sent %q; want the recorded password packet %q, never the password", sent, want)
 		}
 	})
 }

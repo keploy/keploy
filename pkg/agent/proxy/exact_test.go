@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -260,6 +261,391 @@ func TestBetweenTestsThePoolSliceAnswers(t *testing.T) {
 	}
 	if snap := mm.WindowSnapshot(); snap.Active || !snap.FirstTestFired {
 		t.Fatalf("between tests: %+v", snap)
+	}
+}
+
+// exactMongo is an untagged Mongo recording of lifetime lt.
+func exactMongo(name string, at time.Duration, lt models.Lifetime) *models.Mock {
+	m := exactMock(name, at, lt)
+	m.Kind = models.Mongo
+	return m
+}
+
+// perTestReads checks every per-test read of mm (GetFilteredMocks, by kind,
+// in window, and the round snapshot's) shows want, of kind Mongo, and that
+// another kind's read shows nothing.
+func perTestReads(t *testing.T, mm *MockManager, what string, want ...string) {
+	t.Helper()
+	pt, _ := mm.GetFilteredMocks()
+	equalNames(t, what+": GetFilteredMocks", pt, want...)
+	byKind, _ := mm.GetFilteredMocksByKind(models.Mongo)
+	equalNames(t, what+": GetFilteredMocksByKind", byKind, want...)
+	inWindow, _ := mm.GetFilteredMocksInWindow()
+	equalNames(t, what+": GetFilteredMocksInWindow", inWindow, want...)
+	other, _ := mm.GetFilteredMocksByKind(models.HTTP)
+	equalNames(t, what+": another kind's read", other)
+	snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Kind: models.Mongo})
+	if !ok {
+		t.Fatalf("%s: no round snapshot under exact serving", what)
+	}
+	equalNames(t, what+": the round snapshot's per-test read", snap.PerTest, want...)
+}
+
+// exactWindows seeds mm's recorded windows of the set (the staging call's
+// RecordedWindows): T over [0.5s, 1.5s] and T2 over [1.7s, 2.5s] of exactT0.
+func exactWindows(mm *MockManager) {
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{TestCase: "T", Start: exactT0.Add(500 * time.Millisecond), End: exactT0.Add(1500 * time.Millisecond)},
+		{TestCase: "T2", Start: exactT0.Add(1700 * time.Millisecond), End: exactT0.Add(2500 * time.Millisecond)},
+	})
+}
+
+// A per-test recording the pool slice holds that was sent after the set's
+// last recorded test (a Go mongo-driver's endSessions at client.Disconnect)
+// is filed by the staging in the startup tree alone. Once the first test
+// fired a parser reads only the per-test tier for it (Mongo's index), so
+// every per-test read shows it while no test is open after a test, and the
+// round snapshot shows the same. Before the first test the startup read is
+// the parsers' own and nothing is added, and in a test nothing changes. It
+// stays fail-closed: the slice's per-test recordings sent before the first
+// test, in the gap between two tests, or in the last test's window (answered
+// after it) are never shown in a per-test read
+// (a late call paired with one, made before another test's own recording,
+// would learn what that test's answer gave the app), nor is a teardown
+// recording outside the slice, and once the teardown recording answered
+// through Mongo's delete door, a second call finds nothing through any door.
+func TestAfterTheLastTestTheSetsTeardownRecordingAnswersAPerTestRead(t *testing.T) {
+	boot := exactMongo("boot", 200*time.Millisecond, models.LifetimePerTest)
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	gap := exactMongo("gap", 1600*time.Millisecond, models.LifetimePerTest)
+	owned2 := exactMongo("owned-2", 2*time.Second, models.LifetimePerTest)
+	// Sent in T2's window and answered after it: in flight as the last
+	// test ended, not sent after it.
+	straddle := exactMongo("straddle", 2400*time.Millisecond, models.LifetimePerTest)
+	straddle.Spec.ResTimestampMock = exactT0.Add(2600 * time.Millisecond)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	unlisted := exactMongo("unlisted", 4*time.Second, models.LifetimePerTest)
+	// A session-tier recording of the slice is a reusable read's (the
+	// staging files it in the session tree too), never a per-test read's.
+	session := exactMongo("session-tier", 5*time.Second, models.LifetimeSession)
+	mm := stagedManager(t, []*models.Mock{boot, owned, gap, owned2, straddle, end, unlisted}, []*models.Mock{session})
+	exactWindows(mm)
+	slice := []string{"boot", "gap", "straddle", "end-sessions", "session-tier"}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	perTestReads(t, mm, "in the first test", "owned")
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatal("precondition: the test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "between two tests", "end-sessions")
+	mm.ServeExactTest("T2", []*models.Mock{owned2})
+	perTestReads(t, mm, "in the second test", "owned-2")
+	if !mm.DeleteFilteredMock(*owned2) {
+		t.Fatal("precondition: the second test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "after the last test", "end-sessions")
+	if sess, _ := mm.GetSessionMocks(); !hasName(sess, "session-tier") {
+		t.Fatalf("after the last test the reusable read lost the slice's session-tier recording: %v", exactNames(sess))
+	}
+	if !mm.DeleteFilteredMock(*end) {
+		t.Fatal("the pool's recording of the call after the last test did not answer it")
+	}
+	perTestReads(t, mm, "after it answered")
+	c := *end
+	if mm.DeleteFilteredMock(*end) || mm.DeleteStartupMock(*end) || mm.UpdateUnFilteredMock(end, &c) || mm.MarkMockAsUsed(*end) {
+		t.Fatal("the call after the last test, made once more, was answered by the recording that already answered it")
+	}
+	if mm.DeleteFilteredMock(*unlisted) {
+		t.Fatal("a call after the last test was answered by a recording the pool slice does not hold")
+	}
+}
+
+// keploy mock replay sends no recorded windows but stages the whole
+// recording and names the pool's recordings (SetPoolNames): there the set's
+// teardown is what was sent after the place (models.PlaceOf) of every
+// recording a test owns, consumed or not, so after the tests a per-test read
+// shows the pool's recordings made after the last test's, never one made
+// before the first test or between two tests. A test's recording sent before
+// a pool recording bounds it by its place, where record charged it, though
+// its answer was stamped after: record charged the pool recording outside
+// the test's scope. With neither windows nor pool names, or with pool names
+// but no recording a test owns, nothing tells the teardown, and a per-test
+// read after the test shows none.
+func TestWithNoRecordedWindowsTheTeardownIsAfterEveryRecordingATestOwns(t *testing.T) {
+	boot := exactMongo("boot", 200*time.Millisecond, models.LifetimePerTest)
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	gap := exactMongo("gap", 1600*time.Millisecond, models.LifetimePerTest)
+	owned2 := exactMongo("owned-2", 2*time.Second, models.LifetimePerTest)
+	// Sent after T2's own and before T2's unconsumed recording: no teardown.
+	beforeReused := exactMongo("before-reused", 2050*time.Millisecond, models.LifetimePerTest)
+	// A session-tier recording a test owns, never consumed, answered later
+	// than its request: placed at its request.
+	reused := exactMongo("reused", 2100*time.Millisecond, models.LifetimeSession)
+	reused.Spec.ResTimestampMock = exactT0.Add(2900 * time.Millisecond)
+	beforeAnswer := exactMongo("before-answer", 2800*time.Millisecond, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	// A protocol-phase recording made later is no test's.
+	hs := configMock("handshake", 3500*time.Millisecond)
+	slice := []string{"boot", "gap", "before-reused", "before-answer", "end-sessions"}
+	mm := stagedManager(t, []*models.Mock{boot, owned, gap, owned2, beforeReused, beforeAnswer, end}, []*models.Mock{reused, hs})
+	mm.SetPoolNames(slice)
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatal("precondition: the test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "between two tests", "before-answer", "end-sessions")
+	mm.ServeExactTest("T2", []*models.Mock{owned2, reused})
+	if !mm.DeleteFilteredMock(*owned2) {
+		t.Fatal("precondition: the second test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "after the last test", "before-answer", "end-sessions")
+
+	bare := stagedManager(t, []*models.Mock{owned, end}, nil)
+	bare.ServeExactPool("k", []string{"end-sessions"})
+	bare.ServeExactTest("T", []*models.Mock{owned})
+	bare.ServeExactPool("k", []string{"end-sessions"})
+	perTestReads(t, bare, "after the test, no windows and no pool names")
+
+	// Pool names, but no test owns a recording: nothing tells where the
+	// tests were, so none is added either.
+	pooled := stagedManager(t, []*models.Mock{boot, end}, nil)
+	pooled.SetPoolNames([]string{"boot", "end-sessions"})
+	pooled.ServeExactPool("k", []string{"boot", "end-sessions"})
+	pooled.ServeExactTest("T", nil)
+	pooled.ServeExactPool("k", []string{"boot", "end-sessions"})
+	perTestReads(t, pooled, "after a test, no recording a test owns")
+}
+
+// keploy mock replay of a suite of several test processes run one after
+// another (go test ./..., one test binary per package): each binary sends
+// its own calls after its own last test (a Go mongo-driver's endSessions at
+// client.Disconnect), recorded in its key's pool slice. Each process's
+// teardown is bounded by its own tests' recordings alone (SetPoolOwners): a
+// recording only another key's tests list is no bound of it. So after a's
+// last test a per-test read shows a's teardown, though b's tests were
+// recorded later, and b's after b's; neither before its first test (b's is
+// shown in b's start-up, once a test fired: a stated limit), nor another
+// key's. It stays fail-closed: with no owners (an agent that sent none), a
+// recording whose owner key is not known (its test's ID names its test file
+// rather than a key, or tests of both keys list it), or a second process of
+// key a after b, a's teardown is bounded by those tests too, and no per-test
+// read shows it after a's last test.
+func TestEachTestProcessesTeardownIsBoundedByItsOwnTests(t *testing.T) {
+	aBoot := exactMongo("a-boot", 100*time.Millisecond, models.LifetimePerTest)
+	a1 := exactMongo("a1", time.Second, models.LifetimePerTest)
+	a2 := exactMongo("a2", 1500*time.Millisecond, models.LifetimePerTest)
+	aEnd := exactMongo("a-end", 2*time.Second, models.LifetimePerTest)
+	bBoot := exactMongo("b-boot", 2500*time.Millisecond, models.LifetimePerTest)
+	b1 := exactMongo("b1", 3*time.Second, models.LifetimePerTest)
+	bEnd := exactMongo("b-end", 3500*time.Millisecond, models.LifetimePerTest)
+	aSlice, bSlice := []string{"a-boot", "a-end"}, []string{"b-boot", "b-end"}
+	all := []*models.Mock{aBoot, a1, a2, aEnd, bBoot, b1, bEnd}
+	owners := map[string]string{"a1": "a", "a2": "a", "b1": "b"}
+	// As the agent hands them (agent.PoolNamesSetter): the owners with the
+	// pool names, through the proxy.
+	setup := func(owners map[string]string) *MockManager {
+		mm := stagedManager(t, all, nil)
+		if err := (&Proxy{mockManager: mm}).SetPoolNames(append(append([]string{}, aSlice...), bSlice...), owners, nil); err != nil {
+			t.Fatalf("SetPoolNames: %v", err)
+		}
+		return mm
+	}
+	runA := func(mm *MockManager) {
+		mm.ServeExactPool("a", aSlice)
+		perTestReads(t, mm, "a's start-up")
+		mm.ServeExactTest("a::TestA1", []*models.Mock{a1})
+		if !mm.DeleteFilteredMock(*a1) {
+			t.Fatal("precondition: a1 did not answer TestA1")
+		}
+		mm.ServeExactPool("a", aSlice)
+		mm.ServeExactTest("a::TestA2", []*models.Mock{a2})
+		if !mm.DeleteFilteredMock(*a2) {
+			t.Fatal("precondition: a2 did not answer TestA2")
+		}
+		mm.ServeExactPool("a", aSlice)
+	}
+
+	// One staging generation, bounds read by key in turn: each key's own (the cache
+	// is one key's), and outside every claim (PoolKeyNone) every test's.
+	mm := setup(owners)
+	at := aEnd.Spec.ReqTimestampMock
+	for i, tc := range []struct {
+		key  string
+		want bool
+	}{{"a", true}, {"a", true}, {"b", false}, {"a", true}, {models.PoolKeyNone, false}} {
+		if after := mm.teardownAfter(tc.key, ""); after == nil || after(at) != tc.want {
+			t.Errorf("read %d, key %q: a-end is the teardown = %v, want %v", i, tc.key, after != nil && after(at), tc.want)
+		}
+	}
+	if after := mm.teardownAfter("b", ""); after == nil || !after(bEnd.Spec.ReqTimestampMock) {
+		t.Errorf("key b: b-end is not b's teardown")
+	}
+	// New owners in the same generation move a's bound: b1 now a's too.
+	mm.teardownAfter("a", "")
+	mm.SetPoolOwners(map[string]string{"a1": "a", "a2": "a", "b1": "a"})
+	if after := mm.teardownAfter("a", ""); after == nil || after(at) {
+		t.Errorf("FALSE GREEN? new owners naming b1 a's: a-end still a's teardown (a stale bound)")
+	}
+	mm.SetPoolOwners(owners)
+	runA(mm)
+	perTestReads(t, mm, "after a's last test", "a-end")
+	if !mm.DeleteFilteredMock(*aEnd) {
+		t.Fatal("a's call after its last test was not answered by its own recording of it")
+	}
+	perTestReads(t, mm, "after a's teardown answered")
+	mm.ServeExactPool("b", bSlice)
+	perTestReads(t, mm, "b's start-up, a test fired", "b-end")
+	mm.ServeExactTest("b::TestB", []*models.Mock{b1})
+	if !mm.DeleteFilteredMock(*b1) {
+		t.Fatal("precondition: b1 did not answer TestB")
+	}
+	mm.ServeExactPool("b", bSlice)
+	perTestReads(t, mm, "after b's last test", "b-end")
+	if !mm.DeleteFilteredMock(*bEnd) {
+		t.Fatal("b's call after its last test was not answered by its own recording of it")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		owners map[string]string
+	}{
+		{"no owners sent", nil},
+		{"b's recording of no known key", map[string]string{"a1": "a", "a2": "a", "b1": ""}},
+		{"a second process of key a after b", map[string]string{"a1": "a", "a2": "a", "b1": "a"}},
+	} {
+		mm := setup(tc.owners)
+		runA(mm)
+		perTestReads(t, mm, "FALSE GREEN? after a's last test, "+tc.name)
+	}
+}
+
+// keploy mock replay's teardown bound is read once per staging generation
+// of the trees: the per-test reads of one burst (GetFilteredMocks, its
+// by-kind read, ...) reuse it while the generation and the scope table
+// stand, not every staged recording at every read. An exact serve moves
+// Revision but not the staging generation (exact serving hides what it
+// serves rather than deleting it from the trees, and the bound reads the
+// trees alone), so the next burst reuses it too: main read the trees again
+// after each served call. A new staging (a recording a test owns, made
+// later) moves it, so the pool's recording made before that one is no
+// teardown any more; a new scope table moves it too.
+func TestTheTeardownBoundIsReadOncePerTreeRevision(t *testing.T) {
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{owned, end}, nil)
+	mm.SetPoolNames([]string{"end-sessions"})
+	after := mm.teardownAfter("k", "")
+	b := mm.exact.teardownLast.Load()
+	if after == nil || b == nil || !after(end.Spec.ReqTimestampMock) || after(owned.Spec.ReqTimestampMock) {
+		t.Fatalf("precondition: end-sessions is not the teardown alone (bound %+v)", b)
+	}
+	if mm.teardownAfter("k", ""); mm.exact.teardownLast.Load() != b {
+		t.Errorf("a second read in one revision read the trees again")
+	}
+	// Three bursts of three reads, an exact serve after the second: one scan
+	// of the trees, where every read scanned them (nine), and one per
+	// revision two.
+	slice := []string{"end-sessions"}
+	mm.ServeExactPool("k", slice)
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatalf("precondition: owned did not answer its test")
+	}
+	mm.ServeExactPool("k", slice)
+	scans, last := 0, mm.exact.teardownLast.Load()
+	burst := func() {
+		for _, read := range []func(){
+			func() { _, _ = mm.GetFilteredMocks() },
+			func() { _, _ = mm.GetFilteredMocksByKind(models.Mongo) },
+			func() { mm.teardownAfter("k", "") },
+		} {
+			read()
+			if c := mm.exact.teardownLast.Load(); c != last {
+				scans, last = scans+1, c
+			}
+		}
+	}
+	burst()
+	burst()
+	rev := mm.Revision()
+	if !mm.DeleteFilteredMock(*end) {
+		t.Fatalf("precondition: end-sessions, the teardown, did not answer from the pool")
+	}
+	if mm.Revision() == rev {
+		t.Fatalf("precondition: an exact serve did not move the revision")
+	}
+	burst()
+	if scans != 1 || last == nil || last.last != b.last {
+		t.Errorf("three bursts, an exact serve between: %d scans (bound %+v), want 1 to the same bound %s", scans, last, b.last)
+	}
+	mm.ServeExactPool("k", nil)
+	late := exactMongo("owned-late", 4*time.Second, models.LifetimePerTest)
+	mm.SetMocksWithWindow([]*models.Mock{owned, end, late}, nil, models.BaseTime, time.Now())
+	if after := mm.teardownAfter("k", ""); after == nil || after(end.Spec.ReqTimestampMock) || !after(late.Spec.ResTimestampMock.Add(time.Millisecond)) {
+		t.Errorf("FALSE GREEN? a new staging, a test's recording made after end-sessions: end-sessions still the teardown (a stale bound)")
+	}
+	mm.SetPoolNames([]string{"end-sessions", "owned-late"})
+	if after := mm.teardownAfter("k", ""); after == nil || !after(end.Spec.ReqTimestampMock) {
+		t.Errorf("a new scope table naming owned-late the pool's: end-sessions is not the teardown (a stale bound)")
+	}
+}
+
+// The reached worker scope is shown whether a test is open or not, so after
+// a test a per-test read shows its per-test recordings of the set's teardown,
+// as it shows the pool slice's, then the rest of the reached worker scope's
+// per-test recordings. In a test a per-test read shows the test's own, then
+// the worker scope's per-test recordings in their order (windowWorker): the
+// staging files those in the startup tree alone, and a parser that reads
+// per-test-lifetime recordings from its per-test tier only (Postgres) found
+// them in no read of a window. Changed from "the test's own alone", a stated
+// limit the one rule for the worker scope removes (a worker: recording
+// answers at most once in the windows, wherever a parser reads it). After
+// the test, changed from "the teardown alone, never one made before the
+// set's last test ended": the same rule answers a worker: recording again
+// outside every window, and Mongo reads a per-test-lifetime recording
+// through its per-test reads alone once a test fired, so worker-early, one
+// of the worker scope's made before the test, answered no call after it.
+func TestAfterTheLastTestAPerTestReadShowsTheReachedWorkerScopesTeardown(t *testing.T) {
+	early := exactMongo("worker-early", 200*time.Millisecond, models.LifetimePerTest)
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	w := exactMongo("worker", 3*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{early, owned, w}, nil)
+	exactWindows(mm)
+	mm.ServeExactWorker([]string{"worker-early", "worker"})
+	mm.ServeExactPool("k", nil)
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	perTestReads(t, mm, "in the test", "owned", "worker-early", "worker")
+	mm.ServeExactPool("k", nil)
+	perTestReads(t, mm, "after the test", "worker", "worker-early")
+}
+
+// Under the background rules (a set recorded with proven routing) the call
+// after the last test is answered from the pool's recording too, once.
+func TestUnderTheBackgroundRulesTheCallAfterTheLastTestAnswersOnce(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{owned, end}, nil)
+	exactWindows(mm)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"end-sessions"}, nil)
+	mm.ServeExactPool(models.PoolKeyNone, []string{"end-sessions"})
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatal("precondition: the test's own recording did not answer it")
+	}
+	mm.ServeExactPool(models.PoolKeyNone, []string{"end-sessions"})
+	perTestReads(t, mm, "after the last test", "end-sessions")
+	if !mm.DeleteFilteredMock(*end) || mm.DeleteFilteredMock(*end) {
+		t.Fatal("under the background rules the call after the last test was not answered exactly once")
 	}
 }
 
@@ -605,8 +991,13 @@ func TestACallReadBeforeATestOpensIsWalkedInTheViewItWasReadIn(t *testing.T) {
 			}
 			gap := probe(t, db)
 			open()
-			if first := probe(t, mm); gap != "s0" || first != "s1" {
-				t.Fatalf("the call made between tests answered %q and test A's first %q; want s0 and s1, whenever the test opened", gap, first)
+			// The gap call walks the calls between tests' cursor, the
+			// view it was read in; the windows walk their own, so test
+			// A's first is s0 too. Main's row wanted s1: one cursor for
+			// both, so A's answer moved with the calls between tests. A
+			// gap call walked in A's view would advance A's and give s1.
+			if first := probe(t, mm); gap != "s0" || first != "s0" {
+				t.Fatalf("the call made between tests answered %q and test A's first %q; want s0 and s0, whenever the test opened: the windows' sequence is apart from the calls between tests'", gap, first)
 			}
 		})
 	}
@@ -710,11 +1101,14 @@ func probe(t *testing.T, db integrations.MockMemDb) string {
 // kept set), whichever tests ran before it. Once its own are spent, the set's
 // worker scope answers the request: it belongs to no test, so it is walked by
 // placement from the set's start on, as between tests (a test that recorded
-// none of the request is answered the same). The proxy cannot tell a test's
-// call from the worker's, so a test's call past its own recordings takes the
-// worker scope's next reached recording, as main answers it. Then nothing,
-// never an earlier recording again. Each case runs through every pass that
-// walks the sequence (workerWalkPasses).
+// none of the request is answered the same). With the proven switch off, a
+// test's call past its own recordings takes the worker scope's next reached
+// recording. Under the switch, a call identical to one the test's own
+// recordings answered is one call more than the test recorded
+// (integrations.OwnRepeatRead): the worker scope never answers it, and its
+// recordings stay unspent for the request between tests. Then nothing, never
+// an earlier recording again. Each case runs through every pass that walks
+// the sequence (workerWalkPasses).
 func TestATestsOwnRecordingsAnswerInRecordOrderThenTheWorkerScope(t *testing.T) {
 	win := func(name string, from, to time.Duration) models.TestWindow {
 		return models.TestWindow{TestCase: name, Start: exactT0.Add(from), End: exactT0.Add(to)}
@@ -773,8 +1167,18 @@ func TestATestsOwnRecordingsAnswerInRecordOrderThenTheWorkerScope(t *testing.T) 
 				mm.ServeExactPool("k", nil)
 				mm.ServeExactWorker([]string{"s0", "s1"})
 				mm.ServeExactTest("A", []*models.Mock{own})
-				if got := asks(mm, 4); !reflect.DeepEqual(got, []string{"mine", "false", "true", miss}) {
-					t.Fatalf("test A answered %v; want its own, then the worker scope's by placement, then nothing", got)
+				if pass.sw == "" {
+					if got := asks(mm, 4); !reflect.DeepEqual(got, []string{"mine", "false", "true", miss}) {
+						t.Fatalf("test A answered %v; want its own, then the worker scope's by placement, then nothing", got)
+					}
+					return
+				}
+				if got := asks(mm, 3); !reflect.DeepEqual(got, []string{"mine", miss, miss}) {
+					t.Fatalf("test A answered %v; want its own, then nothing: each call after it is one more than the test recorded", got)
+				}
+				mm.ServeExactPool("k", nil)
+				if got := asks(mm, 3); !reflect.DeepEqual(got, []string{"false", "true", miss}) {
+					t.Fatalf("between tests answered %v; want the worker scope's by placement, unspent by test A, then nothing", got)
 				}
 			})
 			t.Run("a test that recorded none", func(t *testing.T) {
@@ -796,13 +1200,16 @@ func TestATestsOwnRecordingsAnswerInRecordOrderThenTheWorkerScope(t *testing.T) 
 
 // A worker-scope request (models.Mapping.Worker) belongs to no test: record
 // places each of its recordings in the gap it was made in, so no test's
-// recorded window holds one. Its sequence is the set's, walked by placement
-// on one cursor wherever its calls land: a poll recorded in the gap after a
-// test that replay makes inside that test, or inside the next one, is
-// answered the recording placed there, as when it lands in the gap, and the
-// set's end finds every worker-scope recording it reached answered. A
-// recording whose place the run has not reached answers nothing, in a test
-// or out of one. Each case runs through every pass that walks the sequence,
+// recorded window holds one. It is walked by placement on two cursors: one
+// across the test windows and one across the calls between tests. Main
+// walked one sequence for both, so how many polls landed between tests
+// moved what a later window was answered, and with it the test's verdict,
+// with load. Now neither's count moves the other's answers: polls made only
+// between tests are answered as recorded, a poll made in a window is
+// answered the windows' next recording by placement, and the set's end may
+// find a reached recording unanswered (the worker scope is required of
+// none). A recording whose place the run has not reached answers nothing, in
+// a test or out of one. Each case runs through every pass that walks the sequence,
 // with the proven switch off and on, and the agent's order of calls: the
 // worker set named before each view goes in.
 func TestAWorkerScopeRequestIsWalkedByPlacementWhereverItsCallsLand(t *testing.T) {
@@ -865,23 +1272,36 @@ func TestAWorkerScopeRequestIsWalkedByPlacementWhereverItsCallsLand(t *testing.T
 				}
 				return got, unanswered
 			}
-			for _, lands := range [][]string{
-				{"start", "gapA", "gapB"},
-				{"start", "inA", "gapB"},
-				{"start", "inB", "gapB"},
-				{"inA", "gapA", "gapB"},
-				{"start", "gapA", "inB"},
+			for _, c := range []struct {
+				lands      []string
+				want       []string
+				unanswered []string
+				why        string
+			}{
+				{[]string{"start", "gapA", "gapB"}, []string{"0", "1", "2"}, nil,
+					"made where recorded, all between tests: one sequence, as on main"},
+				{[]string{"start", "inA", "gapB"}, []string{"0", "0", "1"}, []string{"g2"},
+					"A's poll starts the windows' sequence at g0, whatever the gap answered; gapB goes on from the gap's g0"},
+				{[]string{"start", "inB", "gapB"}, []string{"0", "0", "1"}, []string{"g2"},
+					"B's poll starts the windows' sequence at g0; gapB goes on from the gap's g0"},
+				{[]string{"inA", "gapA", "gapB"}, []string{"0", "0", "1"}, []string{"g2"},
+					"the gaps' sequence starts at g0, whatever A's window answered"},
+				{[]string{"start", "gapA", "inB"}, []string{"0", "1", "0"}, []string{"g2"},
+					"B's poll starts the windows' sequence at g0, however many polls the gaps made"},
 			} {
-				got, unanswered := run(lands...)
-				if !reflect.DeepEqual(got, []string{"0", "1", "2"}) || len(unanswered) != 0 {
-					t.Errorf("polls made %v answered %v, leaving %v unanswered at the set's end; want 0 1 2 and none, as made where recorded", lands, got, unanswered)
+				got, unanswered := run(c.lands...)
+				if !reflect.DeepEqual(got, c.want) || !reflect.DeepEqual(unanswered, c.unanswered) {
+					t.Errorf("polls made %v answered %v, leaving %v unanswered at the set's end; want %v and %v: %s", c.lands, got, unanswered, c.want, c.unanswered, c.why)
 				}
 			}
-			// One poll more than the set recorded is answered nothing,
-			// never an earlier recording again; and a recording whose
-			// place the run has not reached answers nothing in a test.
-			if got, _ := run("start", "inA", "inA"); !reflect.DeepEqual(got, []string{"0", "1", miss}) {
-				t.Errorf("three polls by A's end answered %v; want 0 1, then nothing: g2's place is after B began", got)
+			// Polls in one window walk the windows' sequence in placement
+			// order, never an earlier recording again; and a recording
+			// whose place the run has not reached answers nothing in a
+			// test: three polls in A take g0 and g1 (g2's place is after
+			// B began), then nothing. The gap's poll before them moves
+			// none of A's answers.
+			if got, _ := run("start", "inA", "inA", "inA"); !reflect.DeepEqual(got, []string{"0", "0", "1", miss}) {
+				t.Errorf("a gap poll, then three polls in A, answered %v; want 0, then 0 1 and nothing: g2's place is after B began", got)
 			}
 		})
 	}
@@ -983,6 +1403,25 @@ func TestASessionResetEndsTheSessionsExactServing(t *testing.T) {
 	equalNames(t, "without exact serving", sess, "a")
 }
 
+// A session reset forgets the outcome of the session's last ended test too,
+// as it does the open one's: until the next session opens a test, the
+// outcome names no test. The outcome is trusted by its test's name, so one
+// left over would report the previous session's test as this one's.
+func TestASessionResetForgetsTheLastEndedTestsOutcome(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a}, nil)
+	mm.ServeExactPool("-", nil)
+	mm.ServeExactTest("T", []*models.Mock{a})
+	mm.ServeExactPool("-", nil)
+	if test, _, unconsumed, ok := mm.ExactTestOutcome(); !ok || test != "T" || len(unconsumed) != 1 {
+		t.Fatalf("before the reset the outcome is %q %v (ok %v); want test T's, with a unconsumed", test, unconsumed, ok)
+	}
+	mm.ResetForReplaySession()
+	if test, consumed, unconsumed, ok := mm.ExactTestOutcome(); !ok || test != "" || len(consumed)+len(unconsumed) != 0 {
+		t.Fatalf("after the reset the outcome is %q %v %v (ok %v); want no test's", test, consumed, unconsumed, ok)
+	}
+}
+
 // A consume that read a view before another replaced it settles nothing in
 // the view it read: that view is closed, and what it says it consumed is
 // final. It is settled against the view in force instead (closedWait), here
@@ -998,7 +1437,7 @@ func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 	mm.ServeExactPool("-", nil)
 	// The race: a consume that loaded v before the swap.
 	mk := *held[0]
-	verdict, wait, _ := mm.exactConsumeIn(v, &mk, true)
+	verdict, wait, _ := mm.exactConsumeIn(v, &mk, true, nil)
 	if verdict != exactRefused || wait == nil {
 		t.Fatalf("a consume in a replaced view: %v, wait %v; want refused, to be settled in the view in force", verdict, wait)
 	}
@@ -1023,12 +1462,14 @@ func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 }
 
 // A miss says where it was made, only under exact serving: in the open test,
-// as one call more than recorded when its matcher says so, or outside every
-// test.
+// as one call more than recorded when its matcher says so, with the skipped
+// tests' reads that answered the same call, or outside every test.
 func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 	report := func(kind string, recorded int) *models.MockMismatchReport {
 		return &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /n", MissKind: kind, Recorded: recorded}
 	}
+	skippedReport := report(models.MissExtraCall, 1)
+	skippedReport.SkippedReads = []string{"mock-skipped"}
 	cases := []struct {
 		name         string
 		arm          func(mm *MockManager)
@@ -1039,6 +1480,7 @@ func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 		{"off", func(*MockManager) {}, report("", 0), "", 0},
 		{"in test", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report("", 0), models.MissInTest, 0},
 		{"extra call", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report(models.MissExtraCall, 2), models.MissExtraCall, 2},
+		{"extra call after a skipped test's read", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, skippedReport, models.MissExtraCall, 1},
 		{"outside", func(mm *MockManager) { mm.ServeExactPool("-", nil) }, report("", 0), models.MissOutsideTest, 0},
 		// The matcher found it one more than the test recorded while the
 		// test was open; it is filed once the test's end has served the pool.
@@ -1062,6 +1504,9 @@ func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 			}
 			if got[0].Kind != tc.wantKind || got[0].Recorded != tc.wantRecorded {
 				t.Fatalf("filed %q/%d, want %q/%d", got[0].Kind, got[0].Recorded, tc.wantKind, tc.wantRecorded)
+			}
+			if !slices.Equal(got[0].SkippedReads, tc.report.SkippedReads) {
+				t.Fatalf("filed skipped reads %v, want %v", got[0].SkippedReads, tc.report.SkippedReads)
 			}
 		})
 	}
@@ -2270,10 +2715,18 @@ func TestTheNextTestsCallInFlightBindsInItsScopeInTheGap(t *testing.T) {
 
 // The set's worker scope (ServeExactWorker): a worker-scope mock the run has
 // reached the place of answers whether a test is open or not, after the open
-// test's own, and at most one request in the staging, through whichever door
-// a parser consumes it: a consume in a test spends it for the gap after and
-// the next test too. One the run has not reached the place of answers
-// nothing, in a test or out of one, until a later ServeExactWorker names it.
+// test's own. In a test's window it answers at most one request in the
+// staging's windows, through whichever door a parser consumes it: a consume
+// in a test spends it for the next test too. Outside every test it is served
+// again, whatever a window spent and through any door: a delete door (this
+// parser's) answers each call outside every window, and spends nothing a
+// window reads. Changed from "a delete door answers once in the staging and
+// spends it for every view after", the pool slice's rule: a per-test-lifetime
+// recording a mapping edit moved to worker: then answered the first call
+// between tests alone (the one rule: a worker: recording answers at most
+// once inside a window, and again outside every window).
+// One the run has not reached the place of answers nothing, in a test or
+// out of one, until a later ServeExactWorker names it.
 func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
 	own := httpCall("own", 0, "/orders")
 	boot := httpCall("w-boot", time.Second, "/receive")
@@ -2309,20 +2762,33 @@ func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
 	}
 
 	// T1 ends: w-later's place (after T1) is reached. w-boot, spent in T1,
-	// stays spent in the gap and the next test.
+	// answers every call of the gap after through the delete door, and the
+	// next test finds it spent for the windows by T1.
 	mm.ServeExactWorker([]string{"w-boot", "w-later"})
 	mm.ServeExactPool("k", []string{"pool"})
-	if got := pollFirst(t, mm, "w-boot"); got != "a miss" {
-		t.Fatalf("a worker mock spent in a test answered again in the gap after: %s", got)
+	for i := 0; i < 3; i++ {
+		if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
+			t.Fatalf("gap call %d: a worker mock spent in a test was answered %s; want w-boot: outside every window it answers again", i+1, got)
+		}
 	}
 	mm.ServeExactWorker([]string{"w-boot", "w-later"})
 	mm.ServeExactTest("T2", nil)
+	if got := pollFirst(t, mm, "w-boot"); got != "a miss" {
+		t.Fatalf("a worker mock T1's window spent answered in T2: %s", got)
+	}
 	if got := pollFirst(t, mm, "w-later"); got != "w-later" {
 		t.Fatalf("a worker mock placed after T1 did not answer in T2: %s", got)
 	}
-	mm.ServeExactPool("k", []string{"pool"})
 	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
-		t.Fatalf("a worker mock answered again after its one request: %s", got)
+		t.Fatalf("a worker mock answered twice in a test: %s", got)
+	}
+	mm.ServeExactTest("T3", nil)
+	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
+		t.Fatalf("a worker mock spent in T2's window answered in T3's: %s", got)
+	}
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := pollFirst(t, mm, "w-later"); got != "w-later" {
+		t.Fatalf("a worker mock spent in a test did not answer outside every test: %s", got)
 	}
 	// The next staging answers afresh.
 	mm.SetMocksWithWindow(nil, []*models.Mock{own, boot, later, pool}, models.BaseTime, time.Now())
@@ -2331,6 +2797,59 @@ func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
 	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
 		t.Fatalf("the next staging's worker mock did not answer: %s", got)
 	}
+}
+
+// A worker-scope recording a parser serves through a door that keeps it
+// (HTTP's MarkMockAsUsed of a reusable or cursor recording) is served
+// between tests as the pool slice's is: again and again, whatever a test's
+// window spent. In a window it answers once in the staging's windows. A
+// poller that calls twice as often between tests when replay is slower is
+// answered every time, as before its recording was listed in worker:.
+func TestAWorkerRecordingAKeepingDoorServesAnswersEveryCallBetweenTests(t *testing.T) {
+	poll := httpCall("w-poll", time.Second, "/poll")
+	mm := stagedManager(t, nil, []*models.Mock{poll})
+	mm.ServeExactWorker([]string{"w-poll"})
+	mm.ServeExactPool("k", []string{"w-poll"})
+	for i := 0; i < 4; i++ {
+		if got := markFirst(t, mm, "w-poll"); got != "w-poll" {
+			t.Fatalf("between tests, call %d of the poller: %s; want w-poll, as the pool answers it", i+1, got)
+		}
+	}
+	mm.ServeExactTest("T1", nil)
+	if got := markFirst(t, mm, "w-poll"); got != "w-poll" {
+		t.Fatalf("the worker recording did not answer in a test's window: %s", got)
+	}
+	if got := markFirst(t, mm, "w-poll"); got != "a miss" {
+		t.Fatalf("the worker recording answered twice in a test's window: %s", got)
+	}
+	mm.ServeExactPool("k", []string{"w-poll"})
+	for i := 0; i < 4; i++ {
+		if got := markFirst(t, mm, "w-poll"); got != "w-poll" {
+			t.Fatalf("after a window spent it, call %d between tests: %s; want w-poll", i+1, got)
+		}
+	}
+	mm.ServeExactTest("T2", nil)
+	if got := markFirst(t, mm, "w-poll"); got != "a miss" {
+		t.Fatalf("the worker recording answered in a second window of the staging: %s", got)
+	}
+}
+
+// markFirst answers a call as a parser that takes the first recording in
+// read order and serves it through a door that keeps it (MarkMockAsUsed, as
+// HTTP does a reusable recording); "a miss" when none is read or the consume
+// is refused.
+func markFirst(t *testing.T, mm *MockManager, prefix string) string {
+	t.Helper()
+	mocks, _ := mm.GetSessionScopedMocks()
+	for _, mk := range mocks {
+		if strings.HasPrefix(mk.Name, prefix) {
+			if mm.MarkMockAsUsed(*mk) {
+				return mk.Name
+			}
+			return "a miss"
+		}
+	}
+	return "a miss"
 }
 
 // stagedNotOwnedNow is mm's lookup of a recording made elsewhere for a call
@@ -3062,12 +3581,36 @@ func TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn(t *testing.T) {
 		t.Fatalf("another test's exchange was not named: %+v", r)
 	}
 
-	// T1 ends between the request's first read and the matcher's.
+	// T1 ends between the request's first read and the matcher's. The
+	// matcher reads in T1's view and is offered ex-mine; its consume,
+	// settled in T2's view, is refused, and the matcher reads again, now in
+	// T2's view, which does not show ex-mine. A second consume of ex-mine is
+	// the matcher offered the refused recording again, which it would read
+	// and consume without end: the request's ctx ends at that consume, so
+	// the row fails by its own assertion rather than by the package's
+	// deadline.
 	mm.exact.onMarked = func() {
 		mm.exact.onMarked = nil
 		mm.ServeExactTest("T2", nil)
 	}
-	if r := genericMiss(t, mm, "AUTH step2"); r.NotOwned {
+	ctx, offeredAgain := context.WithCancel(context.Background())
+	defer offeredAgain()
+	var consumes atomic.Int32
+	mm.OnConsume(func(name string) {
+		if name == mine.Name && consumes.Add(1) == 2 {
+			t.Errorf("the matcher was offered %s again after the view in force refused its consume; want the view in force's read, without it: a matcher that reads again on a refused consume spins on it", name)
+			offeredAgain()
+		}
+	})
+	r := genericServeIn(t, ctx, mm, "AUTH step2")
+	mm.OnConsume(nil)
+	if n := consumes.Load(); n != 1 {
+		t.Fatalf("precondition: the matcher consumed %s %d times; want once, in T1's view, refused in T2's", mine.Name, n)
+	}
+	if r == nil {
+		t.Fatal(`"AUTH step2": no miss with a report: the parser answered it`)
+	}
+	if r.NotOwned {
 		t.Fatalf("the exchange the call's test owned when its request was read was named as made elsewhere: %+v", r)
 	}
 
@@ -3343,10 +3886,13 @@ func timedServe(t *testing.T, mm integrations.MockMemDb) (string, time.Duration)
 }
 
 // In the variable pass, with a request id bound per call (each call sends a
-// new one) or one id, a test's call is answered the test's own recording,
-// then the worker scope's (by placement: it belongs to no test), then
-// nothing, never a spent recording again though its variable no longer holds
-// for the next call.
+// new one), a test's call is answered the test's own recording, then the
+// worker scope's (by placement: it belongs to no test), then nothing, never a
+// spent recording again though its variable no longer holds for the next
+// call. With one id, each call after the test's own is the call its own
+// recording answered, one more than the test recorded
+// (integrations.OwnRepeatRead): the worker scope never answers it, and its
+// recording answers the call between tests.
 func TestAVariableCallWithANewIdEachCallIsAnsweredItsOwnThenTheWorkerScope(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	rec := func(name string, at time.Duration, body string) *models.Mock {
@@ -3358,9 +3904,12 @@ func TestAVariableCallWithANewIdEachCallIsAnsweredItsOwnThenTheWorkerScope(t *te
 	for _, c := range []struct {
 		name string
 		ids  []string
+		want []string
+		// between is what the call is answered once test A ends.
+		between string
 	}{
-		{"a new id each call", []string{"r1", "r2", "r3"}},
-		{"one id", []string{"rec", "rec", "rec"}},
+		{"a new id each call", []string{"r1", "r2", "r3"}, []string{"mine", "start", "no answer"}, "no answer"},
+		{"one id", []string{"rec", "rec", "rec"}, []string{"mine", "no answer", "no answer"}, "start"},
 	} {
 		own := rec("a0", 3500*time.Millisecond, "mine")
 		mm := stagedManager(t, nil, []*models.Mock{rec("s1", 2*time.Second, "start"), own})
@@ -3369,17 +3918,23 @@ func TestAVariableCallWithANewIdEachCallIsAnsweredItsOwnThenTheWorkerScope(t *te
 		mm.ServeExactPool("k", nil)
 		mm.ServeExactWorker([]string{"s1"})
 		mm.ServeExactTest("A", []*models.Mock{own})
-		var got []string
-		for _, id := range c.ids {
+		ask := func(id string) string {
 			resp, body := learnServe(t, httpint.New(zap.NewNop()), mm, context.Background(), models.OutgoingOptions{}, "GET /probe HTTP/1.1\r\nHost: deps\r\nX-Req-Id: "+id+"\r\n\r\n")
 			if resp == nil || resp.StatusCode != http.StatusOK {
-				got = append(got, "no answer")
-				continue
+				return "no answer"
 			}
-			got = append(got, string(body))
+			return string(body)
 		}
-		if want := []string{"mine", "start", "no answer"}; !reflect.DeepEqual(got, want) {
-			t.Fatalf("%s: test A answered %v; want %v (its own recording, then the worker scope's, then nothing)", c.name, got, want)
+		var got []string
+		for _, id := range c.ids {
+			got = append(got, ask(id))
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Fatalf("%s: test A answered %v; want %v", c.name, got, c.want)
+		}
+		mm.ServeExactPool("k", nil)
+		if got := ask("r9"); got != c.between {
+			t.Fatalf("%s: between tests the call was answered %q; want %q", c.name, got, c.between)
 		}
 	}
 }
@@ -3418,5 +3973,1097 @@ func TestAVariableCallPastItsRecordingsIsAnsweredNothingBetweenTests(t *testing.
 		if want := []string{"p0", "p1", "no answer", "no answer"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("worker scope %v: ids r1 r2 r1 r1 answered %v; want %v: past its recordings, nothing", worker, got, want)
 		}
+	}
+}
+
+// ExactTestServed names a test only while its view is in force: not while
+// its view is being installed, before it serves (a pool call ending then
+// wrote its bytes before the test began), whichever view serves then (none
+// for the first, the pool's after a test ended, the test's before it), and
+// not once a pool view or a session reset replaced it.
+func TestExactTestServedNamesATestOnlyWhileItsViewIsInForce(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a}, nil)
+	if got := mm.ExactTestServed(); got != "" {
+		t.Fatalf("before exact serving: %q, want none", got)
+	}
+	installing := map[string]string{}
+	mm.exact.beforePublish = func(v *exactView) {
+		if _, ok := installing[v.test]; !ok && v.test != "" {
+			installing[v.test] = mm.ExactTestServed()
+		}
+	}
+	mm.ServeExactTest("T", []*models.Mock{a})
+	if got := installing["T"]; got != "" {
+		t.Fatalf("as T's view, the first, was installed: %q, want none: it was not serving yet", got)
+	}
+	if got := mm.ExactTestServed(); got != "T" {
+		t.Fatalf("while T's view serves: %q, want T", got)
+	}
+	mm.ServeExactPool("-", nil)
+	if got := mm.ExactTestServed(); got != "" {
+		t.Fatalf("after T's end: %q, want none", got)
+	}
+	mm.ServeExactTest("U", []*models.Mock{a})
+	if got := installing["U"]; got != "" {
+		t.Fatalf("as U's view was installed after the pool's: %q, want none: the pool served", got)
+	}
+	mm.ServeExactTest("V", []*models.Mock{a})
+	if got := installing["V"]; got != "U" {
+		t.Fatalf("as V's view was installed over U's: %q, want U: U's view served", got)
+	}
+	if got := mm.ExactTestServed(); got != "V" {
+		t.Fatalf("while V's view serves: %q, want V", got)
+	}
+	mm.ResetForReplaySession()
+	if got := mm.ExactTestServed(); got != "" {
+		t.Fatalf("after a session reset: %q, want none", got)
+	}
+}
+
+// A test window's answers never depend on how many calls landed between
+// tests before it. The windows and the calls between tests read the worker
+// scope apart: a call between tests that consumes a worker: recording
+// through a delete door (this parser's, enterprise SQS's) spends nothing (it
+// answers again outside every window), and a window's call spends it for the
+// windows only. So a poller recorded three times, polled
+// 0, 1, 3 or 10 times between tests as a slower or faster replay makes it,
+// is answered the same in the next test's window every time: its three
+// recordings once each, in placement order, then a miss. Through a door
+// that keeps the recording (MarkMockAsUsed) the same holds.
+func TestAWindowsWorkerAnswersDoNotMoveWithTheCallsBetweenTests(t *testing.T) {
+	for _, door := range []struct {
+		name string
+		ask  func(*testing.T, *MockManager, string) string
+	}{{"delete door", pollFirst}, {"keeping door", markFirst}} {
+		t.Run(door.name, func(t *testing.T) {
+			window := func(gap int) []string {
+				polls := []*models.Mock{httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll"), httpCall("w-2", 3*time.Second, "/poll")}
+				mm := stagedManager(t, nil, polls)
+				names := []string{"w-0", "w-1", "w-2"}
+				mm.ServeExactWorker(names)
+				mm.ServeExactTest("TestA", nil)
+				mm.ServeExactWorker(names)
+				mm.ServeExactPool("k", nil)
+				for i := 0; i < gap; i++ {
+					door.ask(t, mm, "w-")
+				}
+				mm.ServeExactWorker(names)
+				mm.ServeExactTest("TestB", nil)
+				var got []string
+				for i := 0; i < 4; i++ {
+					got = append(got, door.ask(t, mm, "w-"))
+				}
+				return got
+			}
+			want := []string{"w-0", "w-1", "w-2", "a miss"}
+			for _, gap := range []int{0, 1, 3, 10} {
+				if got := window(gap); !reflect.DeepEqual(got, want) {
+					t.Errorf("after %d calls between tests, TestB's window was answered %v; want %v whatever the gap made", gap, got, want)
+				}
+			}
+		})
+	}
+}
+
+// A worker-scope consume is spent for the view its call was read in, not the
+// one in force as its commit lands. A held call (HoldToRound) settles in the
+// view in force while its staging holds, which a begin or an end may have
+// replaced since its read, more often the slower the replay. So a call read
+// between tests that commits after the next test opened spends nothing a
+// window reads, and a test's call that commits after its end still spends
+// its recording for the windows: whether a commit lands before or after a
+// begin or an end never moves what a window is answered. Both through a
+// delete door (DeleteUnFilteredMock, enterprise SQS's) and through a door
+// that keeps the recording (MarkMockAsUsed, HTTP's).
+func TestAWorkerSpendFollowsTheViewTheCallWasReadIn(t *testing.T) {
+	names := []string{"w-0", "w-1"}
+	setup := func(t *testing.T) (*MockManager, models.Mock) {
+		polls := []*models.Mock{httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")}
+		mm := stagedManager(t, nil, polls)
+		mm.ServeExactWorker(names)
+		return mm, *polls[0]
+	}
+	for _, door := range []struct {
+		name    string
+		consume func(integrations.MockMemDb, models.Mock) bool
+		ask     func(*testing.T, *MockManager, string) string
+		evicts  bool
+	}{
+		{"delete door", func(db integrations.MockMemDb, mk models.Mock) bool { return db.DeleteUnFilteredMock(mk) }, pollFirst, true},
+		{"keeping door", func(db integrations.MockMemDb, mk models.Mock) bool { return db.MarkMockAsUsed(mk) }, markFirst, false},
+	} {
+		t.Run(door.name+"/read between tests, committed after the test opened", func(t *testing.T) {
+			mm, w0 := setup(t)
+			mm.ServeExactPool("k", nil)
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestA", nil)
+			if ok := door.consume(held, w0); door.evicts && !ok {
+				t.Fatal("a call read between tests could not consume w-0 as one of the calls between tests once the test opened")
+			}
+			var got []string
+			for i := 0; i < 3; i++ {
+				got = append(got, door.ask(t, mm, "w-"))
+			}
+			// Settled as TestA's window's, the gap call would spend w-0
+			// for the windows and TestA would be answered w-1, then a
+			// miss: its answers would move with when the commit landed.
+			if want := []string{"w-0", "w-1", "a miss"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("TestA's window was answered %v after a call read between tests committed in it; want %v, as when the commit lands before the begin", got, want)
+			}
+		})
+		t.Run(door.name+"/read in a test, committed after its end", func(t *testing.T) {
+			mm, w0 := setup(t)
+			mm.ServeExactTest("TestA", nil)
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			mm.ServeExactWorker(names)
+			mm.ServeExactPool("k", nil)
+			if !door.consume(held, w0) {
+				t.Fatal("TestA's call could not spend w-0 for the windows once its test ended")
+			}
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestB", nil)
+			var got []string
+			for i := 0; i < 2; i++ {
+				got = append(got, door.ask(t, mm, "w-"))
+			}
+			// Settled as one of the calls between tests, TestA's call
+			// would leave w-0 unspent for the windows and TestB would be
+			// answered it again: one recording, two windows' answers.
+			if want := []string{"w-1", "a miss"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("TestB's window was answered %v after TestA's call committed past TestA's end; want %v: w-0 answered TestA's window, as when the commit lands before the end", got, want)
+			}
+		})
+	}
+}
+
+// heldFirst answers a call held to its mark (HoldToRound) as a parser that
+// takes the first recording of the request it reads from the held store and
+// consumes it there does: "refused" when the door refused the one the read
+// offered.
+func heldFirst(t *testing.T, held integrations.MockMemDb, prefix string, evicts bool) string {
+	t.Helper()
+	mocks, _ := held.GetSessionScopedMocks()
+	for _, mk := range mocks {
+		if !strings.HasPrefix(mk.Name, prefix) {
+			continue
+		}
+		var ok bool
+		if evicts {
+			ok = held.DeleteUnFilteredMock(*mk)
+		} else {
+			ok = held.MarkMockAsUsed(*mk)
+		}
+		if ok {
+			return mk.Name
+		}
+		return "refused"
+	}
+	return "a miss"
+}
+
+// A held call reads the worker scope in the view it was read in, as it walks
+// it and spends it there, never in a view a test's begin or end installed
+// after its read: so a read that lands late is answered as one that landed
+// on time, and a call's answer never moves with when its read lands. A call
+// read between tests whose read lands after the next test opened reads the
+// worker scope as the calls between tests do: by gap order (what a call
+// between tests consumed after the rest), and whatever a window spent. A
+// test's call whose read lands after its end reads it as the windows do: what
+// a window spent is gone. Both through a delete door and a door that keeps
+// the recording.
+func TestAHeldCallReadsTheWorkerScopeInTheViewItWasReadIn(t *testing.T) {
+	names := []string{"w-0", "w-1"}
+	setup := func(t *testing.T) *MockManager {
+		polls := []*models.Mock{httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")}
+		mm := stagedManager(t, nil, polls)
+		mm.ServeExactWorker(names)
+		return mm
+	}
+	open := func(mm *MockManager, test string) {
+		mm.ServeExactWorker(names)
+		if test == "" {
+			mm.ServeExactPool("k", nil)
+			return
+		}
+		mm.ServeExactTest(test, nil)
+	}
+	for _, door := range []struct {
+		name   string
+		ask    func(*testing.T, *MockManager, string) string
+		evicts bool
+	}{{"delete door", pollFirst, true}, {"keeping door", markFirst, false}} {
+		t.Run(door.name+"/read between tests after a call between tests, landing in the next test", func(t *testing.T) {
+			mm := setup(t)
+			open(mm, "")
+			if got := door.ask(t, mm, "w-"); got != "w-0" {
+				t.Fatalf("the first call between tests was answered %s; want w-0", got)
+			}
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			open(mm, "TestA")
+			if w, ok := held.(interface{ IsTestWindowActive() bool }); !ok || w.IsTestWindowActive() {
+				t.Error("the held store of a call read between tests says a test window is active once TestA opened; want no window, the view the call was read in: a parser routes its tier by it")
+			}
+			// Read in TestA's view, the call would be answered w-0 again:
+			// TestA's view orders no call between tests, and the window
+			// spent nothing.
+			if got := heldFirst(t, held, "w-", door.evicts); got != "w-1" {
+				t.Errorf("a call read between tests, its read landing after TestA opened, was answered %s; want w-1, as when its read lands before the begin: the calls between tests walk w-0, then w-1", got)
+			}
+			var win []string
+			for i := 0; i < 3; i++ {
+				win = append(win, door.ask(t, mm, "w-"))
+			}
+			if want := []string{"w-0", "w-1", "a miss"}; !reflect.DeepEqual(win, want) {
+				t.Errorf("TestA's window was answered %v; want %v: no call between tests spends for the windows", win, want)
+			}
+		})
+		t.Run(door.name+"/read between tests after a window spent it, landing in the next test", func(t *testing.T) {
+			mm := setup(t)
+			open(mm, "TestA")
+			if got := door.ask(t, mm, "w-"); got != "w-0" {
+				t.Fatalf("TestA's window was answered %s; want w-0", got)
+			}
+			open(mm, "")
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			open(mm, "TestB")
+			// Read in TestB's view, w-0 would be hidden as the windows
+			// spent it, and the call answered w-1, which TestB's window
+			// then never gets.
+			if got := heldFirst(t, held, "w-", door.evicts); got != "w-0" {
+				t.Errorf("a call read between tests, its read landing after TestB opened, was answered %s; want w-0, as when its read lands before the begin: outside every window a worker recording answers again", got)
+			}
+			var win []string
+			for i := 0; i < 2; i++ {
+				win = append(win, door.ask(t, mm, "w-"))
+			}
+			if want := []string{"w-1", "a miss"}; !reflect.DeepEqual(win, want) {
+				t.Errorf("TestB's window was answered %v; want %v: the windows' cursor, which TestA left at w-1", win, want)
+			}
+		})
+		t.Run(door.name+"/read in a test after its window spent one, landing after its end", func(t *testing.T) {
+			mm := setup(t)
+			open(mm, "TestA")
+			if got := door.ask(t, mm, "w-"); got != "w-0" {
+				t.Fatalf("TestA's window was answered %s; want w-0", got)
+			}
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			open(mm, "")
+			// Read in the view between tests, w-0 would be offered first
+			// and the door, which spends for the windows, refuse it.
+			if got := heldFirst(t, held, "w-", door.evicts); got != "w-1" {
+				t.Errorf("TestA's second call, its read landing after TestA ended, was answered %s; want w-1, as when its read lands before the end", got)
+			}
+			open(mm, "TestB")
+			if got := door.ask(t, mm, "w-"); got != "a miss" {
+				t.Errorf("TestB's window was answered %s; want a miss: TestA's window spent both", got)
+			}
+		})
+	}
+}
+
+// A held call whose consume the view in force refused is not offered that
+// recording again. The call is read in T1, T1 ends before its matcher reads,
+// and the matcher reads in T1's view (the view it was read in): it is offered
+// T1's own exchange, and the consume, settled in T2's view, is refused. A
+// parser takes a refused consume for a recording another call took and reads
+// again; offered the same recording again, the Generic parser's matcher spun
+// on it without end (TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn
+// timed out). Through each consume door, the read after the refusal is the
+// view in force's: T1's exchange is not in it.
+func TestAHeldCallIsNotOfferedARecordingTheViewInForceRefused(t *testing.T) {
+	has := func(ms []*models.Mock, name string) bool {
+		for _, mk := range ms {
+			if mk != nil && mk.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	for _, door := range []struct {
+		name    string
+		consume func(h integrations.MockMemDb, mk *models.Mock) bool
+	}{
+		{"UpdateUnFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool {
+			served := *mk
+			return h.UpdateUnFilteredMock(mk, &served)
+		}},
+		{"DeleteUnFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.DeleteUnFilteredMock(*mk) }},
+		{"DeleteFilteredMock", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.DeleteFilteredMock(*mk) }},
+		{"MarkMockAsUsed", func(h integrations.MockMemDb, mk *models.Mock) bool { return h.MarkMockAsUsed(*mk) }},
+	} {
+		t.Run(door.name, func(t *testing.T) {
+			mine := genericExchange("ex-mine", 0, "AUTH step2")
+			mm := stagedManager(t, nil, []*models.Mock{mine})
+			mm.ServeExactTest("T1", []*models.Mock{mine})
+			call := mm.MarkCallRound()
+			mm.ServeExactTest("T2", nil)
+			h, _ := mm.HoldToRound(call)
+			if door.consume(h, mine) {
+				t.Fatal("T2's view settled the consume of T1's own exchange; want it refused: the row is about a refused consume")
+			}
+			//nolint:staticcheck // SA1019: the Generic parser reads through GetSessionMocks, and its spin is what this row is about.
+			got, _ := h.GetSessionMocks()
+			if has(got, "ex-mine") {
+				t.Fatalf("after its consume was refused the held call was offered %v again; want the view in force's read, without it: a parser that reads again on a refused consume spins on it", exactNames(got))
+			}
+			if again, _ := h.GetSessionScopedMocks(); has(again, "ex-mine") {
+				t.Fatalf("GetSessionScopedMocks offered %v after the refusal; want it without ex-mine", exactNames(again))
+			}
+		})
+	}
+}
+
+// viewMovedAtMark is mm with a test's begin or end landing between a call's
+// mark and its matcher's reads, as a slow replay lands it: its MarkCallRound
+// marks the call, then runs move, once. Every call of a row goes through the
+// same one, so a parser's index of its reads is kept for one store, as the
+// agent's is.
+type viewMovedAtMark struct {
+	*MockManager
+	move func()
+}
+
+func (v *viewMovedAtMark) MarkCallRound() integrations.CallRound {
+	c := v.MockManager.MarkCallRound()
+	if move := v.move; move != nil {
+		v.move = nil
+		move()
+	}
+	return c
+}
+
+// A held HTTP call is answered in the view it was read in through every
+// pass of the HTTP parser that holds a call to its mark, its indexes of the
+// reads included. An index is keyed on what the store says it reads: its
+// staging generation, or the shared generation of an open test's reads. A
+// held store that read in one view and said the generation, or the shared
+// reads, of the view in force had the call answered from the view in force's
+// index, and an index of the view it read in filed under the view in force,
+// for the next call to be answered from. One parser serves every call, as
+// the agent's does, so what it indexed is kept between calls.
+//   - A call read between tests after a call between tests, its read landing
+//     after TestA opened, is answered 1, the next of the calls between tests;
+//     TestA's window then walks 0, 1, its own cursor.
+//   - TestA's call after its window spent 0, its read landing after TestA's
+//     end and after a call between tests nothing answers, is answered 1, the
+//     windows' next; the calls between tests then walk 0, then 1.
+//
+// The learn step reads a round snapshot taken whole at its first read
+// (integrations.SnapshotRound) and holds no call to a mark.
+func TestAHeldHTTPCallIsAnsweredInTheViewItWasReadInThroughTheIndexes(t *testing.T) {
+	for _, pass := range workerWalkPasses() {
+		if pass.sw == "" || pass.opts.Learn {
+			continue // neither holds a call to its mark
+		}
+		setup := func(t *testing.T) (db *viewMovedAtMark, ask func(path string) string, late func(path string, move func()) string, open func(test string)) {
+			t.Setenv(provenswitch.Env, pass.sw)
+			names := []string{"w-0", "w-1"}
+			mm := stagedManager(t, nil, []*models.Mock{pass.rec("w-0", time.Second, "0"), pass.rec("w-1", 2*time.Second, "1")})
+			db = &viewMovedAtMark{MockManager: mm}
+			h := httpint.New(zap.NewNop())
+			calls := 0
+			ask = func(path string) string {
+				t.Helper()
+				calls++
+				id := "rec"
+				if pass.vary {
+					id = "r" + strconv.Itoa(calls)
+				}
+				resp, body := learnServe(t, h, db, context.Background(), pass.opts, "GET "+path+" HTTP/1.1\r\nHost: deps\r\nX-Req-Id: "+id+"\r\n\r\n")
+				if resp == nil || resp.StatusCode != http.StatusOK {
+					return "no answer"
+				}
+				return string(body)
+			}
+			// late asks path, its read held at its mark while move runs.
+			late = func(path string, move func()) string {
+				t.Helper()
+				marked, release := make(chan struct{}), make(chan struct{})
+				db.move = func() { close(marked); <-release }
+				answered := make(chan string, 1)
+				go func() { answered <- ask(path) }()
+				select {
+				case <-marked:
+				case got := <-answered:
+					t.Fatalf("the call was answered %s and never marked; the row is about a call held to its mark", got)
+				}
+				move()
+				close(release)
+				return <-answered
+			}
+			open = func(test string) {
+				mm.ServeExactWorker(names)
+				if test == "" {
+					mm.ServeExactPool("k", nil)
+					return
+				}
+				mm.ServeExactTest(test, nil)
+			}
+			return db, ask, late, open
+		}
+		t.Run(pass.name+"/read between tests, landing in the next test", func(t *testing.T) {
+			_, ask, late, open := setup(t)
+			open("")
+			if got := ask("/probe"); got != "0" {
+				t.Fatalf("the first call between tests was answered %s; want 0", got)
+			}
+			if got := late("/probe", func() { open("TestA") }); got != "1" {
+				t.Errorf("a call read between tests, its read landing after TestA opened, was answered %s; want 1, as when its read lands before the begin: the calls between tests walk 0, then 1", got)
+			}
+			var win []string
+			for i := 0; i < 3; i++ {
+				win = append(win, ask("/probe"))
+			}
+			if want := []string{"0", "1", "no answer"}; !reflect.DeepEqual(win, want) {
+				t.Errorf("TestA's window was answered %v; want %v: no call between tests spends for the windows", win, want)
+			}
+		})
+		t.Run(pass.name+"/read in a test, landing after its end", func(t *testing.T) {
+			_, ask, late, open := setup(t)
+			open("TestA")
+			if got := ask("/probe"); got != "0" {
+				t.Fatalf("TestA's window was answered %s; want 0", got)
+			}
+			// A call between tests that nothing answers reads the view
+			// between tests and moves no generation: the held call's read
+			// is the second at it.
+			got := late("/probe", func() {
+				open("")
+				if got := ask("/none"); got != "no answer" {
+					t.Errorf("the call of /none between tests was answered %s; want no answer: nothing recorded it", got)
+				}
+			})
+			if got != "1" {
+				t.Errorf("TestA's second call, its read landing after TestA ended, was answered %s; want 1, as when its read lands before the end", got)
+			}
+			var gap []string
+			for i := 0; i < 3; i++ {
+				gap = append(gap, ask("/probe"))
+			}
+			if want := []string{"0", "1", "1"}; !reflect.DeepEqual(gap, want) {
+				t.Errorf("the calls between tests after TestA were answered %v; want %v: they walk the worker scope by their own order, and answer the latest they consumed again", gap, want)
+			}
+		})
+	}
+}
+
+// A held store that reads in a view other than the one in force says what it
+// reads, as integrations.StagingGenerations and integrations.SharedReads
+// tell a parser: a generation and a revision of its own, the same at each
+// sample and no other store's, beyond every generation a store counts
+// (integrations.ElsewhereGeneration); no shared reads, which are the view in
+// force's open test's; and MockSpent of the view it reads in, so a recording
+// its reads show is not skipped because the view in force spent it. Once a
+// consume the view in force refused makes it read the view in force
+// (heldScope.settled), it says the manager's again.
+func TestAHeldStoreThatReadsInAnotherViewSaysWhatItReads(t *testing.T) {
+	names := []string{"w-0", "w-1"}
+	mm := stagedManager(t, nil, []*models.Mock{httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")})
+	mm.ServeExactWorker(names)
+	mm.ServeExactPool("k", nil)
+	call := mm.MarkCallRound()
+	held, _ := mm.HoldToRound(call)
+	other, _ := mm.HoldToRound(call)
+	mm.ServeExactWorker(names)
+	mm.ServeExactTest("TestA", nil)
+	if got := pollFirst(t, mm, "w-"); got != "w-0" {
+		t.Fatalf("TestA's window was answered %s; want w-0", got)
+	}
+	type gens interface {
+		integrations.StagingGenerations
+		Revision() uint64
+		RevisionByKind(models.Kind) uint64
+	}
+	samples := func(db integrations.MockMemDb) []uint64 {
+		g := db.(gens)
+		return []uint64{g.StagingGeneration(), g.StagingGenerationByKind(models.HTTP), g.Revision(), g.RevisionByKind(models.HTTP)}
+	}
+	inForce := samples(mm)
+	first, again, theirs := samples(held), samples(held), samples(other)
+	for i, what := range []string{"StagingGeneration", "StagingGenerationByKind", "Revision", "RevisionByKind"} {
+		if first[i] < integrations.ElsewhereGeneration || first[i] == integrations.RestagedGeneration {
+			t.Errorf("%s of a held store that reads in another view is %d; want one of its own, at or past ElsewhereGeneration (the view in force's is %d)", what, first[i], inForce[i])
+		}
+		if again[i] != first[i] {
+			t.Errorf("%s moved from %d to %d between two samples with nothing between; want the same: a parser keeps an index only when both samples agree", what, first[i], again[i])
+		}
+		if theirs[i] == first[i] {
+			t.Errorf("%s of two held stores that read in another view is %d for both; want each its own: neither reads what the other read", what, first[i])
+		}
+	}
+	sr := held.(integrations.SharedReads)
+	if _, ok := sr.SharedGeneration(models.HTTP); ok {
+		t.Error("SharedGeneration of a held store that reads between tests says TestA's; want none: its reads are not TestA's")
+	}
+	if _, _, ok := sr.SharedMocks(); ok {
+		t.Error("SharedMocks of a held store that reads between tests gave TestA's; want none")
+	}
+	if _, ok := sr.OwnedUnanswered(); ok {
+		t.Error("OwnedUnanswered of a held store that reads between tests gave TestA's; want none")
+	}
+	if _, _, ok := sr.OwnedRecordings(); ok {
+		t.Error("OwnedRecordings of a held store that reads between tests gave TestA's; want none")
+	}
+	read, _ := held.GetSessionScopedMocks()
+	if !reflect.DeepEqual(exactNames(read), names) {
+		t.Fatalf("the held store read %v; want %v: between tests a worker recording a window spent answers again", exactNames(read), names)
+	}
+	spent := held.(integrations.StagingGenerations)
+	for _, mk := range read {
+		if spent.MockSpent(mk.Name) {
+			t.Errorf("MockSpent(%s) of the held store is true while its read shows it; want false: TestA's window spent it, not the view the store reads in", mk.Name)
+		}
+	}
+
+	// Refused once, a held call reads the view in force, and says its
+	// generation again.
+	mine := genericExchange("ex-mine", 0, "AUTH step2")
+	mm2 := stagedManager(t, nil, []*models.Mock{mine})
+	mm2.ServeExactTest("T1", []*models.Mock{mine})
+	h2, _ := mm2.HoldToRound(mm2.MarkCallRound())
+	mm2.ServeExactTest("T2", nil)
+	if g := h2.(integrations.StagingGenerations).StagingGeneration(); g < integrations.ElsewhereGeneration {
+		t.Fatalf("before the refusal the held store's generation is %d; want its own: it reads in T1's view", g)
+	}
+	if h2.DeleteUnFilteredMock(*mine) {
+		t.Fatal("T2's view settled the consume of T1's own exchange; want it refused")
+	}
+	if got, want := h2.(integrations.StagingGenerations).StagingGeneration(), mm2.StagingGeneration(); got != want {
+		t.Errorf("after the refusal the held store's generation is %d; want the manager's %d: it reads in the view in force", got, want)
+	}
+	if _, ok := h2.(integrations.SharedReads).SharedGeneration(models.GENERIC); !ok {
+		t.Error("after the refusal the held store has no shared reads; want T2's: it reads in T2's view")
+	}
+}
+
+// A worker: recording of per-test lifetime is offered by a test's per-test
+// read. The staging files a per-test-lifetime recording in the startup tree
+// alone, and a parser that serves only session-lifetime recordings from its
+// session tier (Postgres) reads per-test-lifetime ones from its per-test tier
+// only: a recording a mapping edit moved to worker: answered no call in any
+// window. Every per-test read offers it (GetPerTestMocksInWindow,
+// RangePerTestMocksInWindow, GetFilteredMocksByKind, the round snapshot,
+// SharedMocks), and every read that drops what was spent drops it once a
+// window spent it: it answers at most one call in the windows of the staging.
+// SharedMocks is what the view shows whatever it spent (showsStatic). A
+// startup: recording is not offered in a window.
+func TestAWorkerRecordingIsInAWindowsPerTestRead(t *testing.T) {
+	w := exactMock("w-0", time.Second, models.LifetimePerTest)
+	s := exactMock("s-0", 2*time.Second, models.LifetimePerTest)
+	if w.IsProtocolPhase() {
+		t.Fatal("the fixture is protocol-phase; the row is about a data-plane recording")
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetMocksWithWindowThreeTier(nil, nil, []*models.Mock{w, s}, models.BaseTime, time.Now())
+	open := func(test string) {
+		mm.ServeExactWorker([]string{"w-0"})
+		mm.ServeExactPool("k", []string{"s-0"})
+		mm.ServeExactWorker([]string{"w-0"})
+		mm.ServeExactTest(test, nil)
+	}
+	reads := []struct {
+		name   string
+		read   func() []*models.Mock
+		static bool
+	}{
+		{"GetPerTestMocksInWindow", func() []*models.Mock { got, _ := mm.GetPerTestMocksInWindow(); return got }, false},
+		{"RangePerTestMocksInWindow", func() []*models.Mock {
+			var got []*models.Mock
+			_ = mm.RangePerTestMocksInWindow(func(mk *models.Mock) bool { got = append(got, mk); return true })
+			return got
+		}, false},
+		{"GetFilteredMocksByKind", func() []*models.Mock { got, _ := mm.GetFilteredMocksByKind(w.Kind); return got }, false},
+		{"RoundSnapshot", func() []*models.Mock {
+			snap, _ := mm.RoundSnapshot(integrations.RoundQuery{Kind: w.Kind})
+			return snap.PerTest
+		}, false},
+		{"SharedMocks", func() []*models.Mock { got, _, _ := mm.SharedMocks(); return got }, true},
+	}
+	has := func(ms []*models.Mock, name string) bool {
+		for _, mk := range ms {
+			if mk != nil && mk.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	open("TestA")
+	for _, r := range reads {
+		got := r.read()
+		if !has(got, "w-0") {
+			t.Errorf("TestA's %s offered %v; want w-0, the worker scope's recording, which no other read of a lifetime-honouring parser serves in a window", r.name, exactNames(got))
+		}
+		if has(got, "s-0") {
+			t.Errorf("TestA's %s offered s-0, a startup: recording: start-up recordings are served between tests only", r.name)
+		}
+	}
+	if !mm.MarkMockAsUsed(*w) {
+		t.Fatal("TestA could not consume w-0")
+	}
+	open("TestB")
+	for _, r := range reads {
+		if got := r.read(); !r.static && has(got, "w-0") {
+			t.Errorf("TestB's %s offered w-0 again; want it spent: a worker: recording answers at most one call in the windows of the staging", r.name)
+		}
+	}
+}
+
+// pollPerTest answers a call as a parser that reads a kind's per-test tier
+// once a test fired and consumes through its delete door does (Mongo v2's
+// per-test consume, DeleteFilteredMock); "a miss" when no recording is read.
+func pollPerTest(t *testing.T, mm *MockManager, kind models.Kind, prefix string) string {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		mocks, _ := mm.GetFilteredMocksByKind(kind)
+		var hit *models.Mock
+		for _, mk := range mocks {
+			if strings.HasPrefix(mk.Name, prefix) {
+				hit = mk
+				break
+			}
+		}
+		if hit == nil {
+			return "a miss"
+		}
+		if mm.DeleteFilteredMock(*hit) {
+			return hit.Name
+		}
+	}
+	t.Fatalf("%s: every consume was refused", prefix)
+	return ""
+}
+
+// One rule for the worker scope, for every lifetime and door: a worker:
+// recording answers at most once inside the test windows, and again outside
+// every window. One recording, called twice in each of the four shapes
+// (window then window, window then between, between then window, between
+// then between), per-test and session lifetime, through a delete door that
+// reads the reusable tiers (enterprise SQS's), one that reads the per-test
+// tier (Mongo's per-test consume) and a door that keeps the recording
+// (MarkMockAsUsed, HTTP's and Postgres's). A per-test-lifetime recording a
+// mapping edit moved to worker: answered the first call between tests
+// alone, and a call between tests after a test's window spent it found
+// nothing through Mongo's per-test read: the edit we tell users to make did
+// not work for an app's statement. A test fired before each shape, so every
+// door reads the tier it reads once tests run.
+func TestAWorkerRecordingAnswersOnceInTheWindowsAndAgainOutsideThem(t *testing.T) {
+	kind := models.Mongo
+	doors := []struct {
+		name string
+		ask  func(*testing.T, *MockManager) string
+	}{
+		{"reusable read, delete door", func(t *testing.T, mm *MockManager) string { return pollFirst(t, mm, "w-") }},
+		{"per-test read, delete door", func(t *testing.T, mm *MockManager) string { return pollPerTest(t, mm, kind, "w-") }},
+		{"keeping door", func(t *testing.T, mm *MockManager) string { return markFirst(t, mm, "w-") }},
+	}
+	for _, lt := range []models.Lifetime{models.LifetimePerTest, models.LifetimeSession} {
+		for _, door := range doors {
+			if lt == models.LifetimeSession && door.name == "per-test read, delete door" {
+				// A session-lifetime recording is read from the
+				// reusable tiers (Mongo's MarkMockAsUsed path).
+				continue
+			}
+			for _, c := range []struct {
+				shape  string
+				places []string
+				want   []string
+			}{
+				{"window,window", []string{"A", "B"}, []string{"w-0", "a miss"}},
+				{"window,between", []string{"A", ""}, []string{"w-0", "w-0"}},
+				{"between,window", []string{"", "A"}, []string{"w-0", "w-0"}},
+				{"between,between", []string{"", ""}, []string{"w-0", "w-0"}},
+			} {
+				t.Run(fmt.Sprintf("%s/%s/%s", lt, door.name, c.shape), func(t *testing.T) {
+					w := exactMongo("w-0", time.Second, lt)
+					mm := NewMockManager(nil, nil, zap.NewNop())
+					t.Cleanup(mm.Close)
+					if lt == models.LifetimePerTest {
+						mm.SetMocksWithWindowThreeTier(nil, nil, []*models.Mock{w}, models.BaseTime, time.Now())
+					} else {
+						mm.SetMocksWithWindow(nil, []*models.Mock{w}, models.BaseTime, time.Now())
+					}
+					names := []string{"w-0"}
+					serve := func(test string) {
+						mm.ServeExactWorker(names)
+						if test == "" {
+							mm.ServeExactPool("k", names)
+							return
+						}
+						mm.ServeExactTest(test, nil)
+					}
+					serve("T0")
+					var got []string
+					for _, where := range c.places {
+						serve("")
+						if where != "" {
+							serve(where)
+						}
+						got = append(got, door.ask(t, mm))
+					}
+					if !reflect.DeepEqual(got, c.want) {
+						t.Errorf("calls made %q answered %v; want %v: a worker: recording answers once in the windows and again outside every window", c.places, got, c.want)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A test process that claims its key again (a retried package,
+// --rerun-fails: RestartExactKey) starts the key's worker: recordings afresh
+// in the test windows too, as the rest of its pool slice: one a window of
+// the first run answered answers one window of the retried run again. The
+// other key's window spend is its own. Without it, a retried package's test
+// that needed a worker: recording missed because the first run had used it.
+func TestAKeyStartedAfreshAnswersItsWorkerRecordingsInTheWindowsAgain(t *testing.T) {
+	for _, door := range []struct {
+		name string
+		ask  func(*testing.T, *MockManager, string) string
+	}{{"delete door", pollFirst}, {"keeping door", markFirst}} {
+		t.Run(door.name, func(t *testing.T) {
+			mm := stagedManager(t, nil, []*models.Mock{httpCall("w-0", time.Second, "/w"), httpCall("v-0", 2*time.Second, "/v")})
+			window := func(key, test, name string) string {
+				t.Helper()
+				names := []string{name}
+				mm.ServeExactWorker(names)
+				mm.ServeExactPool(key, names)
+				mm.ServeExactWorker(names)
+				mm.ServeExactTest(test, nil)
+				return door.ask(t, mm, name)
+			}
+			for _, c := range []struct{ key, test, name, want, why string }{
+				{"k1", "TestA", "w-0", "w-0", "k1's first window"},
+				{"k2", "TestB", "v-0", "v-0", "k2's first window"},
+				{"k1", "TestC", "w-0", "a miss", "a second window of k1's run: a worker: recording answers once in the windows"},
+			} {
+				if got := window(c.key, c.test, c.name); got != c.want {
+					t.Fatalf("%s was answered %s; want %s", c.why, got, c.want)
+				}
+			}
+			mm.RestartExactKey("k1", []string{"w-0"})
+			if got := window("k1", "TestA", "w-0"); got != "w-0" {
+				t.Fatalf("the retried run of k1 was answered %s in TestA's window; want w-0: a key started afresh answers its worker: recordings in the windows again", got)
+			}
+			if got := window("k2", "TestB", "v-0"); got != "a miss" {
+				t.Fatalf("k2 was answered %s after k1 started afresh; want a miss: k2's window spend is its own", got)
+			}
+		})
+	}
+}
+
+// worker: changes nothing for a protocol-phase recording it lists (a
+// connection's handshake or session setting the app made between tests):
+// in a test's window and between tests, through a delete door and one that
+// keeps it, it answers call for call as when worker: does not list it. The
+// worker rules (at most once in the windows, walked between tests) are a
+// data-plane recording's; a protocol-phase one belongs to its connection.
+func TestAProtocolPhaseRecordingWorkerListsKeepsTheProtocolPhaseRule(t *testing.T) {
+	for _, door := range []struct {
+		name string
+		ask  func(*testing.T, *MockManager, string) string
+	}{{"delete door", pollFirst}, {"keeping door", markFirst}} {
+		for _, place := range []string{"in a window", "between tests"} {
+			t.Run(door.name+"/"+place, func(t *testing.T) {
+				answers := func(listed bool) []string {
+					mm := stagedManager(t, nil, []*models.Mock{configMock("w-cfg", time.Second)})
+					var worker []string
+					if listed {
+						worker = []string{"w-cfg"}
+					}
+					mm.ServeExactWorker(worker)
+					mm.ServeExactPool("k", []string{"w-cfg"})
+					if place == "in a window" {
+						mm.ServeExactWorker(worker)
+						mm.ServeExactTest("T1", nil)
+					}
+					var got []string
+					for i := 0; i < 3; i++ {
+						got = append(got, door.ask(t, mm, "w-"))
+					}
+					return got
+				}
+				if want, got := answers(false), answers(true); !reflect.DeepEqual(got, want) {
+					t.Errorf("three calls %s were answered %v with w-cfg in worker:, %v without it; want the same: worker: changes nothing for a protocol-phase recording", place, got, want)
+				}
+			})
+		}
+	}
+}
+
+// Outside every window the worker scope's recordings of one request are
+// walked by placement, then the last answers again: a gap consume orders the
+// next gap read (gapOrder), never hides one. So a parser that takes the
+// first recording it reads walks w-0, w-1, w-2 between tests and stays on
+// w-2, through a delete door and through one that keeps it, whatever the
+// windows spent; and a consume through a door that keeps it moves the
+// revisions, so a parser that indexes what it read (Postgres's pool index)
+// reads it again. The window after reads the worker scope on its own cursor.
+func TestBetweenTestsAWorkerRequestWalksItsRecordingsThenStaysOnItsLast(t *testing.T) {
+	for _, door := range []struct {
+		name string
+		ask  func(*testing.T, *MockManager, string) string
+	}{{"delete door", pollFirst}, {"keeping door", markFirst}} {
+		t.Run(door.name, func(t *testing.T) {
+			polls := []*models.Mock{httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll"), httpCall("w-2", 3*time.Second, "/poll"), httpCall("x-0", 4*time.Second, "/other")}
+			mm := stagedManager(t, nil, polls)
+			names := []string{"w-0", "w-1", "w-2", "x-0"}
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestA", nil)
+			if got := door.ask(t, mm, "w-"); got != "w-0" {
+				t.Fatalf("TestA's window was answered %s; want w-0", got)
+			}
+			mm.ServeExactWorker(names)
+			mm.ServeExactPool("k", nil)
+			var got []string
+			for i := 0; i < 5; i++ {
+				rev := mm.RevisionByKind(polls[0].Kind)
+				got = append(got, door.ask(t, mm, "w-"))
+				if mm.RevisionByKind(polls[0].Kind) == rev {
+					t.Errorf("gap call %d moved no revision: a parser that indexes what it read would not read the recording again", i+1)
+				}
+				if i == 1 {
+					if other := door.ask(t, mm, "x-"); other != "x-0" {
+						t.Errorf("another request between tests was answered %s; want x-0", other)
+					}
+				}
+			}
+			if want := []string{"w-0", "w-1", "w-2", "w-2", "w-2"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("five polls between tests were answered %v; want %v: walked by placement, whatever TestA's window spent, then the last again", got, want)
+			}
+			if other := door.ask(t, mm, "x-"); other != "x-0" {
+				t.Errorf("another request between tests, called again, was answered %s; want x-0 again", other)
+			}
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestB", nil)
+			var win []string
+			for i := 0; i < 3; i++ {
+				win = append(win, door.ask(t, mm, "w-"))
+			}
+			if want := []string{"w-1", "w-2", "a miss"}; !reflect.DeepEqual(win, want) {
+				t.Errorf("TestB's window was answered %v; want %v: the windows' own cursor, which TestA left at w-1", win, want)
+			}
+		})
+	}
+}
+
+// spendFirstByKind answers a call as a parser that answers by kind
+// (integrations.SpendByKind): the first of the kind's background recordings
+// named with prefix that it can spend, or "a miss".
+func spendFirstByKind(t *testing.T, mm *MockManager, prefix string) string {
+	t.Helper()
+	unused, _ := mm.KindBackground(models.HTTP)
+	for _, mk := range unused {
+		if strings.HasPrefix(mk.Name, prefix) && mm.SpendByKind(mk) {
+			return mk.Name
+		}
+	}
+	return "a miss"
+}
+
+// A call marked where keploy's learn tracker began TestB before the store
+// opened it (integrations.CallRound.TrackerAhead) is decided in the test the
+// store opens next: it reads the view in force (heldScope.readView), so it
+// spends and walks the worker scope there too. keploy mock's begin opens the
+// learn tracker's test before it installs the test's view, so a poller's
+// call marked in that gap and read after the install is TestB's window's: a
+// worker: recording it is answered with answers no other call in the
+// windows, through each door (the by-kind one under the background rules),
+// and it walks the windows' cursor, as a call marked once the store opened
+// TestB does. Before, it was spent as a call between tests, and the same
+// recording answered TestB's next call too: how a window was answered moved
+// with how long the install took.
+func TestACallMarkedWithTheTrackerAheadSpendsAndWalksTheWorkerScopeInItsTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	names := []string{"w-0", "w-1"}
+	for _, door := range []struct {
+		name    string
+		bg      bool
+		consume func(integrations.MockMemDb, *models.Mock) bool
+		ask     func(*testing.T, *MockManager, string) string
+	}{
+		{"delete door", false, func(db integrations.MockMemDb, mk *models.Mock) bool { return db.DeleteUnFilteredMock(*mk) }, pollFirst},
+		{"keeping door", false, func(db integrations.MockMemDb, mk *models.Mock) bool { return db.MarkMockAsUsed(*mk) }, markFirst},
+		{"by-kind door", true, integrations.SpendByKind, spendFirstByKind},
+	} {
+		for _, ahead := range []bool{false, true} {
+			name := door.name + "/marked once the store opened TestB"
+			if ahead {
+				name = door.name + "/marked with the tracker ahead of the store"
+			}
+			t.Run(name, func(t *testing.T) {
+				a := httpCall("a", 0, "/a")
+				mm := stagedManager(t, nil, []*models.Mock{a, httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")})
+				if door.bg {
+					mm.ServeExactBackground(models.RecordedWithS12Routing, nil, names)
+				}
+				tr := learn.NewTracker()
+				mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+				mm.ServeExactWorker(names)
+				mm.ServeExactTest("TestA", []*models.Mock{a})
+				mm.LearnBoundary(tr, func(t *learn.Tracker) { t.End() })
+				mm.ServeExactWorker(names)
+				mm.ServeExactPool(models.PoolKeyNone, nil)
+				mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+				var call integrations.CallRound
+				if ahead {
+					snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+					if !ok || !snap.TrackerAhead() {
+						t.Fatalf("precondition: want the tracker ahead of the store, got %v (%s)", snap.Phase, snap.Boundary)
+					}
+					call = mm.MarkCallRound()
+					if !call.TrackerAhead() {
+						t.Fatal("precondition: the call's mark does not say the tracker was ahead of the store")
+					}
+				}
+				mm.ServeExactWorker(names)
+				mm.ServeExactTest("TestB", nil)
+				if !ahead {
+					call = mm.MarkCallRound()
+				}
+				held, _ := mm.HoldToRound(call)
+				sv, ok := integrations.SequenceViewOf(held)
+				if _, windows := sv.Between.(windowsCursor); !ok || sv.Test != "TestB" || sv.Worker == nil || !windows {
+					t.Errorf("the call walks %q's view (worker band %v, windows' cursor %v); want TestB's, with the worker scope on the windows' cursor", sv.Test, sv.Worker != nil, windows)
+				}
+				first := "a miss"
+				mocks, _ := held.GetSessionScopedMocks()
+				for _, mk := range mocks {
+					if strings.HasPrefix(mk.Name, "w-") {
+						if door.consume(held, mk) {
+							first = mk.Name
+						}
+						break
+					}
+				}
+				got := []string{first, door.ask(t, mm, "w-"), door.ask(t, mm, "w-")}
+				if want := []string{"w-0", "w-1", "a miss"}; !reflect.DeepEqual(got, want) {
+					t.Errorf("TestB's window was answered %v; want %v (each worker: recording at most once in the windows)", got, want)
+				}
+			})
+		}
+	}
+}
+
+// A call whose mark kept no view (a round snapshot's,
+// integrations.RoundSnapshot.CallRound, which HTTP's learn step marks a
+// call with) reads, walks and spends the worker scope in the view in force
+// (heldScope.readView). Marked between tests and read once TestB opened, a
+// worker: recording it is answered with is spent for the windows, so it
+// answers no other call in them, through each door (the by-kind one under
+// the background rules). Before, its read and walk were TestB's but its
+// spend followed the mark's InTest (between tests), and the same recording
+// answered TestB's next call too.
+func TestACallMarkedByARoundSnapshotSpendsTheWorkerScopeInTheViewInForce(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	names := []string{"w-0", "w-1"}
+	for _, door := range []struct {
+		name    string
+		bg      bool
+		consume func(integrations.MockMemDb, *models.Mock) bool
+		ask     func(*testing.T, *MockManager, string) string
+	}{
+		{"delete door", false, func(db integrations.MockMemDb, mk *models.Mock) bool { return db.DeleteUnFilteredMock(*mk) }, pollFirst},
+		{"keeping door", false, func(db integrations.MockMemDb, mk *models.Mock) bool { return db.MarkMockAsUsed(*mk) }, markFirst},
+		{"by-kind door", true, integrations.SpendByKind, spendFirstByKind},
+	} {
+		t.Run(door.name, func(t *testing.T) {
+			a := httpCall("a", 0, "/a")
+			mm := stagedManager(t, nil, []*models.Mock{a, httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")})
+			if door.bg {
+				mm.ServeExactBackground(models.RecordedWithS12Routing, nil, names)
+			}
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestA", []*models.Mock{a})
+			mm.ServeExactWorker(names)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{})
+			if !ok || snap.Test != "" {
+				t.Fatalf("precondition: want a snapshot of the pool view between tests, got %q's", snap.Test)
+			}
+			call := snap.CallRound()
+			if _, kept := call.Sequence(); kept || !call.Read() || call.InTest() || call.TrackerAhead() {
+				t.Fatalf("precondition: want a read between tests whose mark kept no view (kept %v, read %v, in a test %v, tracker ahead %v)", kept, call.Read(), call.InTest(), call.TrackerAhead())
+			}
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestB", nil)
+			held, _ := mm.HoldToRound(call)
+			sv, ok := integrations.SequenceViewOf(held)
+			if _, windows := sv.Between.(windowsCursor); !ok || sv.Test != "TestB" || sv.Worker == nil || !windows {
+				t.Errorf("the call walks %q's view (worker band %v, windows' cursor %v); want TestB's, with the worker scope on the windows' cursor", sv.Test, sv.Worker != nil, windows)
+			}
+			first := "a miss"
+			mocks, _ := held.GetSessionScopedMocks()
+			for _, mk := range mocks {
+				if strings.HasPrefix(mk.Name, "w-") {
+					if door.consume(held, mk) {
+						first = mk.Name
+					}
+					break
+				}
+			}
+			got := []string{first, door.ask(t, mm, "w-"), door.ask(t, mm, "w-")}
+			if want := []string{"w-0", "w-1", "a miss"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("TestB's window was answered %v; want %v (each worker: recording at most once in the windows)", got, want)
+			}
+		})
+	}
+}
+
+// A call read in TestA's window whose consume the view in force refuses
+// once TestA ended (heldScope.settled) reads, from then on, what a call made
+// between tests reads, and spends and walks there too: the worker: recording
+// it is then answered with is spent for the calls between tests (nothing),
+// so TestB's window is still answered by it. Before, the call read the pool
+// view but spent as TestA's window, and TestB's window missed a recording no
+// window had answered.
+func TestACallRefusedAfterItsTestEndedSpendsTheWorkerScopeAsTheCallsBetweenTests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	names := []string{"w-0", "w-1"}
+	for _, door := range []struct {
+		name    string
+		consume func(integrations.MockMemDb, *models.Mock) bool
+		ask     func(*testing.T, *MockManager, string) string
+	}{
+		{"delete door", func(db integrations.MockMemDb, mk *models.Mock) bool { return db.DeleteUnFilteredMock(*mk) }, pollFirst},
+		{"keeping door", func(db integrations.MockMemDb, mk *models.Mock) bool { return db.MarkMockAsUsed(*mk) }, markFirst},
+	} {
+		t.Run(door.name, func(t *testing.T) {
+			a := httpCall("a", 0, "/a")
+			mm := stagedManager(t, nil, []*models.Mock{a, httpCall("w-0", time.Second, "/poll"), httpCall("w-1", 2*time.Second, "/poll")})
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestA", []*models.Mock{a})
+			call := mm.MarkCallRound()
+			held, _ := mm.HoldToRound(call)
+			mm.ServeExactWorker(names)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			if door.consume(held, a) {
+				t.Fatal("precondition: the pool view took TestA's own recording after TestA ended")
+			}
+			if sv, ok := integrations.SequenceViewOf(held); !ok || sv.Test != "" || sv.Worker != nil {
+				t.Errorf("after the refusal the call walks %q's view (worker band %v); want the pool view's", sv.Test, sv.Worker != nil)
+			}
+			first := "a miss"
+			mocks, _ := held.GetSessionScopedMocks()
+			for _, mk := range mocks {
+				if strings.HasPrefix(mk.Name, "w-") {
+					if door.consume(held, mk) {
+						first = mk.Name
+					}
+					break
+				}
+			}
+			if first != "w-0" {
+				t.Fatalf("precondition: the call read again between tests was answered %s; want w-0", first)
+			}
+			mm.ServeExactWorker(names)
+			mm.ServeExactTest("TestB", nil)
+			got := []string{door.ask(t, mm, "w-"), door.ask(t, mm, "w-"), door.ask(t, mm, "w-")}
+			if want := []string{"w-0", "w-1", "a miss"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("TestB's window was answered %v; want %v (the call between tests spent nothing for the windows)", got, want)
+			}
+		})
 	}
 }

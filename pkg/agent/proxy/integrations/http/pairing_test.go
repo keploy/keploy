@@ -410,6 +410,51 @@ func (d earlierPairingDb) FindAnsweredEarlier(kind models.Kind, keys []string, m
 	return earlierDb{answered: d.answered}.FindAnsweredEarlier(kind, keys, match)
 }
 
+// pairedRateReport is the report of a GET of /rates?base=CHF to host
+// (addr), sent in record's full round to the HTTP parser over db: it fails
+// t unless the call is answered with mock-3's {"rate":1.1} and reported
+// once, as the pairing with mock-3, another test's recording.
+func pairedRateReport(t *testing.T, db integrations.MockMemDb, addr, host string) *models.MockMismatchReport {
+	t.Helper()
+	var reported []error
+	ctx := learn.WithTracker(models.WithMockMismatchReporter(context.Background(), func(err error) { reported = append(reported, err) }), learn.NewTracker())
+	app, prox := net.Pipe()
+	defer func() { _ = app.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, models.OutgoingOptions{Learn: true})
+	}()
+	if _, err := io.WriteString(app, "GET /rates?base=CHF HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+	if err != nil {
+		t.Fatalf("the app got no answer: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	_ = app.Close()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the parser did not return")
+	}
+	if resp.StatusCode != 200 || string(body) != `{"rate":1.1}` || len(reported) != 1 {
+		t.Fatalf("the app got %d %q with %d reports; want mock-3's answer, reported once", resp.StatusCode, body, len(reported))
+	}
+	var withReport interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.Is(reported[0], models.ErrAnswered) || !errors.As(reported[0], &withReport) {
+		t.Fatalf("reported %v; want an answer", reported[0])
+	}
+	r := withReport.MismatchReport()
+	if r.Answer != models.AnswerProvisional || !r.NotOwned || r.ClosestMock != "mock-3" {
+		t.Fatalf("the answer's report is %+v; want the pairing with mock-3", r)
+	}
+	return r
+}
+
 // A paired call that is also identical to a recording an earlier test made,
 // which already answered at this replay (an answer the app kept for a span
 // the round outlasted, asked again), carries the note a missed call made
@@ -431,43 +476,7 @@ func TestAPairedRepeatedCallCarriesTheRepeatNote(t *testing.T) {
 		earlier.Spec.ReqTimestampMock = rec
 		db := earlierPairingDb{pairingDb: &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{other}},
 			answered: []integrations.AnsweredCall{{Mock: earlier, AnsweredAt: time.Now().Add(-9 * time.Second)}}}
-		var reported []error
-		ctx := learn.WithTracker(models.WithMockMismatchReporter(context.Background(), func(err error) { reported = append(reported, err) }), learn.NewTracker())
-		app, prox := net.Pipe()
-		defer app.Close()
-		done := make(chan error, 1)
-		go func() {
-			done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, models.OutgoingOptions{Learn: true})
-		}()
-		if _, err := io.WriteString(app, "GET /rates?base=CHF HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\n\r\n"); err != nil {
-			t.Fatal(err)
-		}
-		resp, err := http.ReadResponse(bufio.NewReader(app), nil)
-		if err != nil {
-			t.Fatalf("the app got no answer: %v", err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		_ = app.Close()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatal("the parser did not return")
-		}
-		if resp.StatusCode != 200 || string(body) != `{"rate":1.1}` || len(reported) != 1 {
-			t.Fatalf("the app got %d %q with %d reports; want mock-3's answer, reported once", resp.StatusCode, body, len(reported))
-		}
-		var withReport interface {
-			MismatchReport() *models.MockMismatchReport
-		}
-		if !errors.Is(reported[0], models.ErrAnswered) || !errors.As(reported[0], &withReport) {
-			t.Fatalf("reported %v; want an answer", reported[0])
-		}
-		r := withReport.MismatchReport()
-		if r.Answer != models.AnswerProvisional || !r.NotOwned || r.ClosestMock != "mock-3" {
-			t.Fatalf("the answer's report is %+v; want the pairing with mock-3", r)
-		}
-		return r
+		return pairedRateReport(t, db, addr, host)
 	}
 
 	r := pair(t, "/rates?base=CHF")
@@ -479,6 +488,84 @@ func TestAPairedRepeatedCallCarriesTheRepeatNote(t *testing.T) {
 	}
 	if r := pair(t, "/rates?base=EUR"); r.Repeat != nil {
 		t.Fatalf("a pairing no earlier answer is identical to carries the note %+v", r.Repeat)
+	}
+}
+
+// heldNoteDb is roundPairingDb whose call's hold (integrations.RoundHolder)
+// is a store of its own, hold, and whose own answered log, unheld, names
+// answered (integrations.AnsweredFinder). holds counts the holds.
+type heldNoteDb struct {
+	*roundPairingDb
+	answered []integrations.AnsweredCall
+	hold     *heldNote
+	holds    int
+}
+
+func (d *heldNoteDb) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
+	return earlierDb{answered: d.answered}.FindAnsweredEarlier(kind, keys, match)
+}
+
+func (d *heldNoteDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	d.holds++
+	return d.hold, func() bool { return false }
+}
+
+// heldNote is a call's hold whose reads show nothing and whose answered log
+// names answered: once the replay staged another set after the call's
+// claim, none (the agent's hold looks up the call's staging alone, and a
+// recording's name restarts in each set).
+type heldNote struct {
+	*mockMemDb
+	answered []integrations.AnsweredCall
+}
+
+func (h *heldNote) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
+	return earlierDb{answered: h.answered}.FindAnsweredEarlier(kind, keys, match)
+}
+
+var (
+	_ integrations.RoundReader    = (*heldNoteDb)(nil)
+	_ integrations.RoundHolder    = (*heldNoteDb)(nil)
+	_ integrations.AnsweredFinder = (*heldNote)(nil)
+)
+
+// In record's full round a paired call's repeat note is read of the call's
+// one hold, as its own-repeat count and a miss's note are, never of the
+// store the call is held from. The call is exactly mock-3, another test's
+// recording, and identical to mock-1, an earlier test's recording that
+// answered. The hold names mock-1 and the store none: the pairing carries
+// mock-1's note. The store names mock-1 and the hold none (the replay staged
+// the next set after the call's claim, and the store's log is that set's):
+// the pairing carries no note.
+func TestAPairedCallsRepeatNoteIsReadOfTheCallsHold(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const addr, host = "127.0.0.1:50003", "localhost:50003"
+	rec := time.Date(2026, 10, 26, 8, 0, 0, 0, time.UTC)
+	for _, inHold := range []bool{true, false} {
+		name := map[bool]string{true: "the hold names the earlier answer, the store none", false: "the store names it, the hold none"}[inHold]
+		t.Run(name, func(t *testing.T) {
+			other := answered(onHost("mock-3", "/rates?base=CHF", host), 20*time.Second, 200, `{"rate":1.1}`)
+			earlier := onHost("mock-1", "/rates?base=CHF", host)
+			earlier.Spec.ReqTimestampMock = rec
+			note := []integrations.AnsweredCall{{Mock: earlier, AnsweredAt: time.Now().Add(-9 * time.Second)}}
+			db := &heldNoteDb{roundPairingDb: &roundPairingDb{pairingDb: &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{other}}}, hold: &heldNote{mockMemDb: &mockMemDb{}}}
+			if inHold {
+				db.hold.answered = note
+			} else {
+				db.answered = note
+			}
+			r := pairedRateReport(t, db, addr, host)
+			if !db.claimed["mock-3"] || db.holds != 1 {
+				t.Fatalf("mock-3 claimed %v, the call held %d times; want it claimed, held once", db.claimed["mock-3"], db.holds)
+			}
+			noted := r.Repeat != nil && r.Repeat.Mock == "mock-1"
+			if inHold && !noted {
+				t.Fatalf("the pairing's repeat note is %+v; want mock-1's, which the call's hold names", r.Repeat)
+			}
+			if !inHold && r.Repeat != nil {
+				t.Fatalf("the pairing's repeat note is %+v; want none: only the store the call is held from names mock-1", r.Repeat)
+			}
+		})
 	}
 }
 

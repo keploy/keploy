@@ -139,7 +139,9 @@ func watchCaptureLosses(ctx context.Context, logger *zap.Logger, instr Instrumen
 	// the agent captured (Start), and each test case it saves is checked
 	// against this count, so a stop that cut the read short would fail the
 	// recording the user stopped as "not verified". A second interrupt, which
-	// gives the drain up, ends it.
+	// gives the drain up, ends it, and so does an agent that made no answer
+	// while keploy had stall.HangBudget of its own runnable time (the agent
+	// client's bound, AgentClient.GetCaptureLosses).
 	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelRead()
 	go func() {
@@ -184,6 +186,11 @@ func (w *captureWatch) afterTestCase(ctx context.Context, name string) {
 		w.mu.Unlock()
 		return
 	}
+	// Not ended by the stop, as the base read is not: the agent's answer
+	// ends it, or the interrupt that gives the stop's waits up, or an agent
+	// that made no answer while keploy had stall.HangBudget of its own
+	// runnable time (the agent client's bound, AgentClient.GetCaptureLosses):
+	// the test case is then not verified, and the recording fails.
 	now, err := w.reader.GetCaptureLosses(context.WithoutCancel(ctx))
 	now = now.Without(models.CaptureLossContainerUnread) // charged by its mock (mapped)
 	w.mu.Lock()
@@ -303,7 +310,9 @@ func (w *captureWatch) afterTestCases(ctx context.Context) {
 	}
 	// No deadline of its own (rule 15), as the base read: the agent's
 	// answer ends it, or the second interrupt, which gives the stop's waits
-	// up (the read is then "not verified", and the recording fails).
+	// up, or an agent that made no answer while keploy had stall.HangBudget
+	// of its own runnable time (the agent client's bound); the read is then
+	// "not verified", and the recording fails.
 	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelRead()
 	go func() {

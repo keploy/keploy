@@ -43,6 +43,9 @@ type TextResultSet struct {
 	EOFAfterColumns []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
 	Rows            []*TextRow            `yaml:"rows" json:"rows"`
 	FinalResponse   *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
+
+	// wire caches the encoded answer for replay (see EncodedPayload).
+	wire EncodedPayload
 }
 
 // BinaryProtocolResultSet is used as a response packet for COM_STMT_EXECUTE
@@ -52,6 +55,9 @@ type BinaryProtocolResultSet struct {
 	EOFAfterColumns []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
 	Rows            []*BinaryRow          `yaml:"rows" json:"rows"`
 	FinalResponse   *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
+
+	// wire caches the encoded answer for replay (see EncodedPayload).
+	wire EncodedPayload
 }
 
 type GenericResponse struct {
@@ -67,22 +73,61 @@ type ColumnCount struct {
 }
 
 type ColumnDefinition41 struct {
-	Header       Header `yaml:"header" json:"header"`
-	Catalog      string `yaml:"catalog" json:"catalog"`
-	Schema       string `yaml:"schema" json:"schema"`
-	Table        string `yaml:"table" json:"table"`
-	OrgTable     string `yaml:"org_table" json:"org_table"`
-	Name         string `yaml:"name" json:"name"`
-	OrgName      string `yaml:"org_name" json:"org_name"`
-	FixedLength  byte   `yaml:"fixed_length" json:"fixed_length"`
-	CharacterSet uint16 `yaml:"character_set" json:"character_set"`
-	ColumnLength uint32 `yaml:"column_length" json:"column_length"`
-	Type         byte   `yaml:"type" json:"type"`
-	Flags        uint16 `yaml:"flags" json:"flags"`
-	Decimals     byte   `yaml:"decimals" json:"decimals"`
-	Filler       []byte `yaml:"filler" json:"filler"`
-	DefaultValue string `yaml:"defaultValue" json:"defaultValue"`
+	Header   Header `yaml:"header" json:"header"`
+	Catalog  string `yaml:"catalog" json:"catalog"`
+	Schema   string `yaml:"schema" json:"schema"`
+	Table    string `yaml:"table" json:"table"`
+	OrgTable string `yaml:"org_table" json:"org_table"`
+	Name     string `yaml:"name" json:"name"`
+	OrgName  string `yaml:"org_name" json:"org_name"`
+	// ExtendedMetadata is the extended type information a MariaDB server
+	// sends after org_name when the connection negotiated
+	// MARIADB_CLIENT_EXTENDED_METADATA, as format "json" for a JSON column.
+	// Empty for most columns, and for every column of a connection that did
+	// not negotiate it.
+	ExtendedMetadata []ColumnExtendedMetadata `yaml:"extended_metadata,omitempty" json:"extended_metadata,omitempty"`
+	FixedLength      byte                     `yaml:"fixed_length" json:"fixed_length"`
+	CharacterSet     uint16                   `yaml:"character_set" json:"character_set"`
+	ColumnLength     uint32                   `yaml:"column_length" json:"column_length"`
+	Type             byte                     `yaml:"type" json:"type"`
+	Flags            uint16                   `yaml:"flags" json:"flags"`
+	Decimals         byte                     `yaml:"decimals" json:"decimals"`
+	Filler           []byte                   `yaml:"filler" json:"filler"`
+	DefaultValue     string                   `yaml:"defaultValue" json:"defaultValue"`
 }
+
+// ColumnExtendedMetadata is one entry of a column definition's MariaDB
+// extended type information: what it names (Kind) and its value.
+type ColumnExtendedMetadata struct {
+	// Kind is MariaDB's attribute id: 0 the data type name (as "inet6"), 1 the
+	// format name (as "json").
+	Kind  uint8  `yaml:"kind" json:"kind"`
+	Value string `yaml:"value" json:"value"`
+}
+
+// MetadataFraming says which of MariaDB's optional result-set metadata fields
+// a connection's responses carry. They follow the capabilities the connection
+// negotiated, as a server's answers do, not the connection a mock was
+// recorded on.
+type MetadataFraming uint8
+
+const (
+	// FramingExtendedMetadata: every column definition carries its extended
+	// type information (MARIADB_CLIENT_EXTENDED_METADATA).
+	FramingExtendedMetadata MetadataFraming = 1 << iota
+	// FramingMetadataFollows: a result set's column count is followed by one
+	// byte that says whether its column definitions follow
+	// (MARIADB_CLIENT_CACHE_METADATA).
+	FramingMetadataFollows
+)
+
+// ExtendedMetadata reports whether column definitions carry their extended
+// type information.
+func (f MetadataFraming) ExtendedMetadata() bool { return f&FramingExtendedMetadata != 0 }
+
+// MetadataFollows reports whether a column count is followed by its
+// metadata-follows byte.
+func (f MetadataFraming) MetadataFollows() bool { return f&FramingMetadataFollows != 0 }
 
 //Rows
 

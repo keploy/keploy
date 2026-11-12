@@ -571,9 +571,9 @@ func TestResolveCommandType_ConfigWarningOnlyWhenItWouldDiffer(t *testing.T) {
 // usage text silenced under it, and cobra's error line silenced by AddFlags,
 // one returned unsaid would leave the command to exit 1 saying nothing. The
 // one it returned unsaid was appName's, the last directory of the working
-// directory, which cannot be read once that directory is gone. (The binary
-// opens keploy-logs.txt in the working directory before any command runs, and
-// stops there when it is gone, so this is driven in-process.)
+// directory, which cannot be read once that directory is gone. (This is
+// driven in-process, where the working directory can be removed under the
+// command.)
 func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 	original := NativeCommandSupported
 	t.Cleanup(func() { NativeCommandSupported = original })
@@ -598,9 +598,6 @@ func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 	if err := os.Remove(gone); err != nil {
 		t.Skipf("this system keeps a working directory from being removed: %v", err)
 	}
-	if _, err := os.Getwd(); err == nil {
-		t.Skip("this system still reads a working directory that was removed")
-	}
 
 	core, logs := observer.New(zapcore.InfoLevel)
 	c := NewCmdConfigurator(zap.New(core), config.New())
@@ -615,8 +612,8 @@ func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 
 	const refusal = "failed to get the last directory for appName"
 	err := c.Validate(context.Background(), cmd)
-	if err == nil || !strings.HasPrefix(err.Error(), refusal) {
-		t.Fatalf("Validate = %v, want %q", err, refusal)
+	if err == nil || !strings.HasPrefix(err.Error(), refusal) || !strings.Contains(err.Error(), "the working directory is gone: ") {
+		t.Fatalf("Validate = %v, want %q, saying the working directory is gone", err, refusal)
 	}
 	var said []string
 	n := 0

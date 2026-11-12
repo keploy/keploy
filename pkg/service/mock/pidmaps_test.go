@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -74,7 +75,15 @@ func logged(logs *observer.ObservedLogs) string {
 // command ran are not the run's, and an agent that cannot count leaves the run
 // as it was.
 func TestReplayDuringWhichAProcessWasNotTrackedFails(t *testing.T) {
-	refused3 := models.PIDMapRefusals{Target: 3, LastTargetTGID: 4242}
+	refused3 := models.PIDMapRefusals{Target: 3, LastTargetTGID: 4242, LastTargetErr: -7}
+	// Both maps refused, each for a cause of its own (a full map; from Linux
+	// 6.15, the map's bucket lock: EBUSY).
+	both := models.PIDMapRefusals{Target: 4, Excluded: 2, LastTargetErr: -7, LastExcludedErr: -16}
+	// pidMap is the receipt's data for a map's refusal (Receipt.
+	// CaptureIncomplete): its count and its own errno, with the run's words.
+	pidMap := func(kind models.CaptureLossKind, n uint64, err int32, of models.PIDMapRefusals) models.CaptureLoss {
+		return models.CaptureLoss{Kind: kind, Count: n, What: of.CaptureIncomplete(), Err: err}
+	}
 	for _, tc := range []struct {
 		name         string
 		counter      *pidMapCounter
@@ -86,6 +95,7 @@ func TestReplayDuringWhichAProcessWasNotTrackedFails(t *testing.T) {
 		wantLog      string
 		unwantLog    string
 		wantNote     string // the receipt's isolationNote; "capture incomplete" when failed and unset
+		wantLosses   models.CaptureLosses
 	}{
 		{
 			name:         "refused during the run: capture incomplete",
@@ -94,6 +104,21 @@ func TestReplayDuringWhichAProcessWasNotTrackedFails(t *testing.T) {
 			wantExit:     1,
 			wantFailedBy: FailedByCaptureIncomplete,
 			wantLog:      "replay failed: the agent could not track every process the test command ran",
+			wantLosses:   models.CaptureLosses{pidMap(models.CaptureLossPIDMap, 3, -7, refused3)},
+		},
+		{
+			// Counted from the test command's start: what was refused
+			// before it is not the run's.
+			name:         "both maps refused, each for its own cause: each keeps its own errno",
+			counter:      &pidMapCounter{before: models.PIDMapRefusals{Target: 1, LastTargetErr: -7}, after: both},
+			runner:       models.AppError{AppErrorType: models.ErrAppStopped},
+			wantExit:     1,
+			wantFailedBy: FailedByCaptureIncomplete,
+			wantLog:      "replay failed: the agent could not track every process the test command ran",
+			wantLosses: models.CaptureLosses{
+				pidMap(models.CaptureLossPIDMap, 3, -7, models.PIDMapRefusals{Target: 3, Excluded: 2, LastTargetErr: -7, LastExcludedErr: -16}),
+				pidMap(models.CaptureLossPIDMapExcluded, 2, -16, models.PIDMapRefusals{Target: 3, Excluded: 2, LastTargetErr: -7, LastExcludedErr: -16}),
+			},
 		},
 		{
 			name:         "only excluded_pids refused: still incomplete",
@@ -102,6 +127,7 @@ func TestReplayDuringWhichAProcessWasNotTrackedFails(t *testing.T) {
 			wantExit:     1,
 			wantFailedBy: FailedByCaptureIncomplete,
 			wantLog:      "excluded_pids",
+			wantLosses:   models.CaptureLosses{pidMap(models.CaptureLossPIDMapExcluded, 1, 0, models.PIDMapRefusals{Excluded: 1})},
 		},
 		{
 			name:         "a failing runner keeps its exit code; the receipt names the incomplete capture",
@@ -111,6 +137,7 @@ func TestReplayDuringWhichAProcessWasNotTrackedFails(t *testing.T) {
 			wantRunner:   7,
 			wantFailedBy: FailedByCaptureIncomplete,
 			wantLog:      "replay failed: the agent could not track every process",
+			wantLosses:   models.CaptureLosses{pidMap(models.CaptureLossPIDMap, 3, -7, refused3)},
 		},
 		{
 			// Keploy's own failure is the one thing the incomplete capture does
@@ -125,6 +152,9 @@ func TestReplayDuringWhichAProcessWasNotTrackedFails(t *testing.T) {
 			wantFailedBy: FailedByKeploy,
 			wantLog:      "replay failed: the agent could not track every process",
 			wantNote:     "keploy did not complete the run",
+			// The refusal is kept as data too: the note names keploy's
+			// failure.
+			wantLosses: models.CaptureLosses{pidMap(models.CaptureLossPIDMap, 3, -7, refused3)},
 		},
 		{
 			name:         "refused only before the test command ran: not this run's",
@@ -193,6 +223,9 @@ func TestReplayDuringWhichAProcessWasNotTrackedFails(t *testing.T) {
 				if !strings.Contains(r.IsolationNote, note) {
 					t.Errorf("receipt isolationNote %q does not say %q", r.IsolationNote, note)
 				}
+			}
+			if !reflect.DeepEqual(r.CaptureIncomplete, tc.wantLosses) {
+				t.Errorf("receipt captureIncomplete %+v; want %+v", r.CaptureIncomplete, tc.wantLosses)
 			}
 		})
 	}
@@ -269,6 +302,14 @@ func TestReplayWhoseUntrackedCountIsLostIsUnverified(t *testing.T) {
 			}
 			if !tc.wantIsolated && !strings.HasPrefix(r.IsolationNote, "capture unverified") {
 				t.Errorf("receipt isolationNote %q does not say the capture is unverified", r.IsolationNote)
+			}
+			// The count lost is on the receipt as data too, also with the
+			// proven switch off; a count read, or never kept, is not.
+			if lost := !tc.wantIsolated; lost != strings.Contains(r.ProcessTrackingUnread, "could not read whether the agent tracked every process") {
+				t.Errorf("receipt processTrackingUnread %q; want it to say the count was not read: %v", r.ProcessTrackingUnread, lost)
+			}
+			if r.CallCaptureUnread != "" {
+				t.Errorf("receipt callCaptureUnread %q, with the switch off, where nothing reads that count", r.CallCaptureUnread)
 			}
 		})
 	}
