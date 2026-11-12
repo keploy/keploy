@@ -23,3 +23,20 @@ func TestCountsByKindWithTheLatestExample(t *testing.T) {
 		t.Fatalf("Snapshot() = %+v, want %+v", got, want)
 	}
 }
+
+// AddN counts a read's n losses at once, as n Adds would, and zero counts
+// nothing: no kind appears for it.
+func TestAddNCountsSeveralAtOnce(t *testing.T) {
+	var c Counter
+	c.AddN(models.CaptureLossListenerDropped, 0, "none")
+	if got := c.Snapshot(); len(got) != 0 {
+		t.Fatalf("zero counted: %+v", got)
+	}
+	c.AddN(models.CaptureLossListenerDropped, 3, "")
+	c.AddN(models.CaptureLossListenerDropped, 2, "the latest")
+	got := c.Snapshot()
+	want := models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 5, What: "the latest"}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("Snapshot() = %+v, want %+v", got, want)
+	}
+}

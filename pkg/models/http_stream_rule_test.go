@@ -167,7 +167,7 @@ func TestHTTPResp_YAML_AContentTypeSentTwice(t *testing.T) {
 		if err := yamlLib.Unmarshal(out, &back); err != nil {
 			t.Fatal(err)
 		}
-		if want := "data:one\n\ndata:two"; back.Body != want {
+		if want := "data:one\n\ndata:two\n\n"; back.Body != want {
 			t.Errorf("an older recording's SSE events under %q were read back as %q; want the SSE they were, %q", contentType, back.Body, want)
 		}
 	}

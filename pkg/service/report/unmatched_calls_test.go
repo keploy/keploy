@@ -47,6 +47,33 @@ func TestRenderUnmatchedCalls_StructuredOutput(t *testing.T) {
 	}
 }
 
+// A field the replay refused for a reason of its own (a learned read of the
+// application's clock the call does not carry) is rendered with its why, as
+// the miss report carries it (models.UnmatchedCall.FieldReasons), between
+// the field differences and the next steps; a miss with none renders no such
+// line.
+func TestRenderUnmatchedCalls_SaysWhyAFieldWasRefused(t *testing.T) {
+	why := "body.since was learned as a read of the application's clock, and the value this call carries is not a read of the application's clock made in this call's window: it changed"
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /v1/usage", ClosestMock: "mock-3", MatchPhase: models.MatchPhaseStrict,
+		NextSteps:    "re-record",
+		FieldDiffs:   []models.MockFieldDiff{{Path: "body.since", Kind: models.DiffKindValueChanged, Expected: "a", Actual: "b"}},
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: why}}}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{miss}}})
+	out := sb.String()
+	line := "    refused body.since: " + why + "\n"
+	at := strings.Index(out, line)
+	if at < 0 || at < strings.Index(out, "body.since: recorded") || at > strings.Index(out, "next steps: re-record") {
+		t.Fatalf("the refusal's why is not rendered between the field differences and the next steps:\n%s", out)
+	}
+	miss.FieldReasons = nil
+	sb.Reset()
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{miss}}})
+	if strings.Contains(sb.String(), "refused") {
+		t.Fatalf("a miss with no refused field renders one:\n%s", sb.String())
+	}
+}
+
 func TestRenderUnmatchedCalls_EmptyIsSilent(t *testing.T) {
 	var sb strings.Builder
 	renderUnmatchedCalls(&sb, models.TestResult{})
@@ -212,5 +239,42 @@ func TestRenderUnmatchedCalls_AVariableThatDidNotHold(t *testing.T) {
 	}
 	if strings.Contains(out, "recorded \"o1\"") {
 		t.Errorf("the variable's value is rendered as the recording's:\n%s", out)
+	}
+}
+
+// A miss names the operation it carries after its call.
+func TestRenderUnmatchedCalls_NamesTheOperation(t *testing.T) {
+	var sb strings.Builder
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /query", Operation: "query GetAppLabels"}
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{miss}}})
+	if !strings.Contains(sb.String(), "  [HTTP] POST /query {query GetAppLabels}") {
+		t.Fatalf("the miss does not name its operation:\n%s", sb.String())
+	}
+}
+
+// A background miss is listed apart from the test's own misses, counted,
+// under a heading that says it counts against no test, never under "likely
+// root cause"; a test with only background misses has no root-cause block.
+func TestRenderUnmatchedCalls_ListsBackgroundMissesApart(t *testing.T) {
+	poll := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "findAndModify ptw_endpoints", MatchPhase: models.MatchPhaseBody, Background: true}
+	own := models.UnmatchedCall{Protocol: "Mongo", ActualSummary: "find users", MatchPhase: models.MatchPhaseBody}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{poll, own, poll}}})
+	out := sb.String()
+	root := strings.Index(out, "(likely root cause)")
+	bg := strings.Index(out, "=== 2 BACKGROUND CALL(S) WITH NO MATCHING MOCK (count against no test) ===")
+	if root < 0 || bg < 0 || bg < root {
+		t.Fatalf("want the own miss under the root-cause heading, then 2 background misses apart:\n%s", out)
+	}
+	if strings.Contains(out[root:bg], "ptw_endpoints") || !strings.Contains(out[root:bg], "find users") {
+		t.Fatalf("the root-cause block holds a background miss, or not the test's own:\n%s", out)
+	}
+	if strings.Count(out[bg:], "findAndModify ptw_endpoints") != 2 || strings.Contains(out[bg:], "find users") {
+		t.Fatalf("the background block does not list exactly the two background misses:\n%s", out)
+	}
+	sb.Reset()
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{poll}}})
+	if out := sb.String(); strings.Contains(out, "likely root cause") || !strings.Contains(out, "1 BACKGROUND CALL(S)") {
+		t.Fatalf("a test with only a background miss:\n%s", out)
 	}
 }

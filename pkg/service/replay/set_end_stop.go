@@ -33,6 +33,17 @@ func whyAppNotStopped(cmdType utils.CmdType, serveTest bool) string {
 	}
 }
 
+// whyStopNotRead says why the set's end read nothing of what its application
+// consumed as it stopped: its docker compose app exited on its own before
+// the set's end (halted: the set is APP_HALTED, and the exit took keploy's
+// agent down with the stack), or keploy did not stop it (whyAppNotStopped).
+func whyStopNotRead(cmdType utils.CmdType, serveTest, halted bool) string {
+	if halted {
+		return "the application exited on its own before the set's end: the set is APP_HALTED, and the exit took keploy's agent down with the application's docker compose stack, so nothing the application consumed as it stopped could be read"
+	}
+	return whyAppNotStopped(cmdType, serveTest)
+}
+
 // keepAliveStopper gives the app --keep-app-alive keeps across a run's sets a
 // context of its own, under the proven switch, and the stop of it the last
 // set's end calls before its read (P101-c): stop cancels the app's context
@@ -76,7 +87,8 @@ func noAttemptFollows(attempt int, test config.Test) bool {
 // switch (AgentClient; P101-c).
 type composeAppStopper interface {
 	StopComposeApp(ctx context.Context) (string, error)
-	// StartComposeApp says whether it started a container that was not
-	// running (anew).
-	StartComposeApp(ctx context.Context) (anew bool, err error)
+	// StartComposeApp says what keploy read of the container as it started
+	// it: one that was not running (a new app), one found running, or one
+	// the docker daemon gave no answer of.
+	StartComposeApp(ctx context.Context) (models.ComposeAppStart, error)
 }

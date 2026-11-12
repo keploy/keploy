@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -46,7 +47,7 @@ func TestGetAlias_LinuxPublishesAgentPortToHostLoopbackOnly(t *testing.T) {
 		Mode:            models.MODE_RECORD,
 	}
 
-	alias, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+	alias, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 	if err != nil {
 		t.Fatalf("getAlias: %v", err)
 	}
@@ -63,17 +64,14 @@ func TestGetAlias_LinuxPublishesAgentPortToHostLoopbackOnly(t *testing.T) {
 		t.Errorf("linux getAlias also published the agent control port on all host interfaces (%q).\ngot: %s", unrestricted, alias)
 	}
 
-	// The proxy port is scoped the same way. It is the interception point for
-	// the application's outgoing dependency calls, and the application reaches
-	// it through the agent's network namespace (the app container is started
-	// with --network=container:<keploy container>, see pkg/client/app), not
-	// through this publish.
-	wantProxy := fmt.Sprintf("-p 127.0.0.1:%d:%d", opts.ProxyPort, opts.ProxyPort)
-	if !strings.Contains(alias, wantProxy) {
-		t.Errorf("linux getAlias must publish the proxy port to the host's loopback only (want %q).\ngot: %s", wantProxy, alias)
-	}
-	if unrestrictedProxy := fmt.Sprintf("-p %d:%d", opts.ProxyPort, opts.ProxyPort); strings.Contains(alias, unrestrictedProxy) {
-		t.Errorf("linux getAlias also published the proxy port on all host interfaces (%q).\ngot: %s", unrestrictedProxy, alias)
+	// The proxy's port is not published: the application reaches it through
+	// the agent's network namespace (the app container is started with
+	// --network=container:<keploy container>, see pkg/client/app), where the
+	// agent binds it and moves off one another socket holds. A publish
+	// claimed it on the host too, where two runs started together on the
+	// configured ports collided ("port is already allocated").
+	if proxy := fmt.Sprintf("%d:%d", opts.ProxyPort, opts.ProxyPort); strings.Contains(alias, proxy) {
+		t.Errorf("linux getAlias published the proxy port (%q).\ngot: %s", proxy, alias)
 	}
 }
 
@@ -90,7 +88,7 @@ func TestGetAlias_LinuxPublishesAgentPortToHostLoopbackOnly(t *testing.T) {
 // second, unrestricted "-p <port>:<port>" — which re-exposes the control plane
 // while leaving a presence check green. So also require that no arm builds a
 // "-p" fragment of its own. That is exact here: the only other publishes in
-// getAlias (proxy and app ports) are assembled before the switch.
+// getAlias (app ports) are assembled before the switch.
 func TestGetAlias_EveryPlatformBranchPublishesAgentPortViaHelper(t *testing.T) {
 	t.Parallel()
 
@@ -109,7 +107,7 @@ func TestGetAlias_EveryPlatformBranchPublishesAgentPortViaHelper(t *testing.T) {
 
 		for _, stmt := range list {
 			if lit, ok := stmtAssignsAliasFromLiteralContaining(stmt, "-p "); ok {
-				t.Errorf("%s: this getAlias platform branch builds its own %q publish fragment instead of using agentPortPublish. Proxy and app ports are assembled before the switch, so an arm has no reason to; a second publish here would re-expose the agent control plane on every host interface while agentPortPublish is still called", pos, lit)
+				t.Errorf("%s: this getAlias platform branch builds its own %q publish fragment instead of using agentPortPublish. App ports are assembled before the switch, so an arm has no reason to; a second publish here would re-expose the agent control plane on every host interface while agentPortPublish is still called", pos, lit)
 			}
 		}
 	})

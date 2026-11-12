@@ -1226,6 +1226,15 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 				return h
 			}
 		}
+		// composeUnread is a compose stack's harness whose next set's start
+		// gets no answer of the app's container from the daemon: it cannot
+		// tell whether its app is a new one.
+		composeUnread := func(t *testing.T) *prRun {
+			c := &composeInstr{unread: true}
+			h := composeHarness(t, c)
+			h.replayer.instrumentation = &composeLossInstr{composeInstr: c, loss: &prLossInstr{prInstr: h.instr, answers: answers}}
+			return h
+		}
 		leftADaemon := func(t *testing.T) *prRun {
 			h := plain(t)
 			h.instr.leftRunning = "daemons keploy cannot see (pids [41])"
@@ -1244,6 +1253,9 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 			{"a compose stack's app started again for the next set", compose(nil), true, false, false, ""},
 			// The stop's failure leaves the first set unjudged too.
 			{"a compose stack's app whose stop failed", compose(errors.New("keploy could not interrupt the application's container: context deadline exceeded")), true, false, true, "keploy found the application's container still running when it started it for this test-set"},
+			// A start the daemon never answered of the container keeps the
+			// losses, and says so; it found no container running.
+			{"a compose stack's app whose start could not read its container", composeUnread, true, false, true, "keploy could not read the application's container from the docker daemon when it started it for this test-set"},
 			{"started anew for each set", plain, false, false, false, ""},
 			{"started anew, but its stop left a daemon running", leftADaemon, false, false, true, "the stop of the application at test-set test-set-0's end left running daemons keploy cannot see (pids [41])"},
 		} {
@@ -1325,6 +1337,27 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 	}
 }
 
+// What a set's tests are charged
+// from before it began (appLossesCarriedIn) is each loss as the agent's
+// record gives it, a PID map refusal's errno (models.CaptureLoss.Err) kept,
+// with only its count moved to what was lost before the set's mark. Here the
+// application lost 4 of target_namespace_pids's inserts before this set
+// (2 of them before its start, which are not its) and 1 more in the set.
+func TestACarriedInPIDMapRefusalKeepsItsErrno(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	stall := models.CaptureLoss{Kind: models.CaptureLossParserStall, Count: 1, What: "to 10.0.0.9:5432"}
+	r := &Replayer{
+		lossAppBase:  models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, Err: -7}},
+		lossMark:     captureLossMark{at: models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 6, Err: -7}}, known: true},
+		lossLastRead: true,
+		lossLast:     models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 7, What: "target_namespace_pids, E2BIG", Err: -7}, stall},
+	}
+	want := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 4, What: "target_namespace_pids, E2BIG", Err: -7}}
+	if got := r.appLossesCarriedIn(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the losses carried into the set: %+v; want %+v (its errno kept)", got, want)
+	}
+}
+
 // errorWhy is the "why" field of the first of logs' entries at ERROR that
 // says what; "" where none does, or it has no such field.
 func errorWhy(logs *observer.ObservedLogs, what string) string {
@@ -1360,15 +1393,15 @@ type composeStartsInstr struct {
 	failStarts int
 }
 
-func (c *composeStartsInstr) StartComposeApp(context.Context) (bool, error) {
+func (c *composeStartsInstr) StartComposeApp(context.Context) (models.ComposeAppStart, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.starts++
 	if c.starts <= c.failStarts {
 		c.now = c.lost
-		return false, errors.New(`keploy could not start the application's container "app" again: context deadline exceeded`)
+		return models.ComposeAppUnread, errors.New(`keploy could not start the application's container "app" again: context deadline exceeded`)
 	}
-	return false, nil
+	return models.ComposeAppFoundRunning, nil
 }
 
 func (c *composeStartsInstr) GetCaptureLosses(context.Context) (models.CaptureLosses, error) {
@@ -2049,6 +2082,40 @@ func TestAnAgentUpRunCountsAUnixConnectionOpenedBeforeIt(t *testing.T) {
 		if r.Status == models.TestStatusFailed || len(r.FailureInfo.CannotCapture) == 0 {
 			t.Fatalf("%s: status %s, not judged %+v; want not judged, never failed", r.TestCaseID, r.Status, r.FailureInfo.CannotCapture)
 		}
+	}
+}
+
+// Under the proven switch, a connection attempt the kernel dropped at
+// keploy's proxy listener while a test ran (the agent counts it as that
+// test's own loss, at its end) leaves that test without a verdict -- never
+// FAILED -- and the others with theirs; the set's reason names the test, the
+// drop and where to look.
+func TestUnderTheSwitchAListenerDropLeavesOnlyItsTestNotJudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dropped := models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}
+	h := newPartialRunHarness(t, 3, 0)
+	h.replayer.config.Test.Mocking = true
+	// The mark, then a read as each test ends (the last repeating): while
+	// test-2 ran.
+	h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, dropped}}
+	h.replayer.markPIDMaps(context.Background())
+	if status := h.run(t); status != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+		t.Fatalf("status %q, not judged %v; want %q and not judged", status, h.replayer.notJudged("test-set-0"), models.TestSetStatusInternalErr)
+	}
+	for _, r := range h.report.report.Tests {
+		if r.Status == models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 0 {
+			t.Fatalf("%s: %s %+v: a listener's drop never fails a test", r.TestCaseID, r.Status, r.FailureInfo.CaptureIncomplete)
+		}
+		want := models.CaptureLosses(nil)
+		if r.TestCaseID == "test-2" {
+			want = dropped
+		}
+		if fmt.Sprint(r.FailureInfo.CannotCapture) != fmt.Sprint(want) || (len(r.FailureInfo.NotJudged()) > 0) != (want != nil) {
+			t.Fatalf("%s: not judged %+v (%v), want %+v", r.TestCaseID, r.FailureInfo.CannotCapture, r.FailureInfo.NotJudged(), want)
+		}
+	}
+	if reason := h.report.report.FailureReason; !strings.Contains(reason, "test-2") || !strings.Contains(reason, "connection attempt(s) at keploy's proxy listener") {
+		t.Fatalf("the set's reason %q does not name the test and the drop", reason)
 	}
 }
 

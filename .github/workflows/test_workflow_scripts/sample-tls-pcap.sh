@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
+# keploy runs under sudo, which hands it only the variables its command line
+# names (sudo-rs, Ubuntu 26.04's sudo, ignores -E): SUDO_ENV names the
+# switches a workflow sets for keploy, each only while it is set.
+# shellcheck source=sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sudo_env.sh" || exit 1
+
 source "$(dirname "${BASH_SOURCE[0]}")/go-retry.sh"
+# http_mock_count: the Http mocks of mocks.yaml, by their kind whole.
+source "$(dirname "${BASH_SOURCE[0]}")/mock-kinds.sh" || exit 1
 # E2E validation for keploy's TLS capture features.
 #
 # Runs the sample-tls-app under keploy with $KEPLOY_FLAGS — either
@@ -58,6 +66,8 @@ dump_state() {
   [[ -f keploy/test-set-0/sslkeys.log ]] && sudo head -10 keploy/test-set-0/sslkeys.log || true
   echo "== capinfos =="
   [[ -f keploy/test-set-0/traffic.pcap ]] && sudo capinfos -c -i keploy/test-set-0/traffic.pcap 2>/dev/null || true
+  echo "== tshark stderr, by call =="
+  [[ -n "${TSHARK_ERR:-}" && -f "$TSHARK_ERR" ]] && cat "$TSHARK_ERR" || true
   echo "== mysql/postgres docker logs =="
   docker logs sample-mysql-tls 2>&1 | tail -40 || true
   docker logs sample-pg-tls 2>&1 | tail -40 || true
@@ -65,8 +75,18 @@ dump_state() {
 # On EXIT, not ERR: most assertions below fail with `exit 1`, which never
 # fires an ERR trap, so every assertion failure used to end the job with none
 # of this context - run 36092000545's decrypt failure left no keploy log, no
-# keylog and no capture summary to look at.
-trap 'rc=$?; trap - EXIT; if [[ $rc -ne 0 ]]; then dump_state "$rc"; fi; exit "$rc"' EXIT
+# keylog and no capture summary to look at. It also removes the temp files
+# the decrypt below makes, which are named here first: this file is sourced,
+# so a name left over in the caller's shell must not be removed.
+TSHARK_IN='' TSHARK_ERR='' REMAPPED_PCAP=''
+remove_temp_files() {
+  [[ -z "$TSHARK_IN" ]] || sudo rm -rf "$TSHARK_IN"
+  local f
+  for f in "$TSHARK_ERR" "$REMAPPED_PCAP"; do
+    [[ -z "$f" ]] || rm -f "$f"
+  done
+}
+trap 'rc=$?; trap - EXIT; if [[ $rc -ne 0 ]]; then dump_state "$rc"; fi; remove_temp_files || true; exit "$rc"' EXIT
 
 wait_for_http() {
   local url="$1" tries="${2:-90}"
@@ -327,7 +347,7 @@ export ECHO_URL="https://${ECHO_HOST}:${UPSTREAM_PORT}/anything"
 go_retry build -o sample-tls-app .
 
 # shellcheck disable=SC2086
-sudo -E env PATH="$PATH" MYSQL_DSN="$MYSQL_DSN" POSTGRES_DSN="$POSTGRES_DSN" \
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" MYSQL_DSN="$MYSQL_DSN" POSTGRES_DSN="$POSTGRES_DSN" \
   QUOTE_URL="$QUOTE_URL" ECHO_URL="$ECHO_URL" \
   "$RECORD_BIN" record \
   -c "./sample-tls-app" \
@@ -367,7 +387,7 @@ echo "good! HTTP routes returned"
 curl -fsS -X POST "http://localhost:8080/mysql/items?name=ci-${MODE_NAME}-mysql" >/dev/null
 MYSQL_BODY=$(curl -fsS http://localhost:8080/mysql/items)
 echo "mysql GET body: $MYSQL_BODY"
-echo "$MYSQL_BODY" | grep -q "ci-${MODE_NAME}-mysql" || {
+echo "$MYSQL_BODY" | grep "ci-${MODE_NAME}-mysql" >/dev/null || {
   echo "::error::MySQL round-trip failed — inserted name not present in GET response"
   exit 1
 }
@@ -377,7 +397,7 @@ echo "good! MySQL round-trip succeeded through keploy proxy"
 curl -fsS -X POST "http://localhost:8080/postgres/items?name=ci-${MODE_NAME}-pg" >/dev/null
 PG_BODY=$(curl -fsS http://localhost:8080/postgres/items)
 echo "postgres GET body: $PG_BODY"
-echo "$PG_BODY" | grep -q "ci-${MODE_NAME}-pg" || {
+echo "$PG_BODY" | grep "ci-${MODE_NAME}-pg" >/dev/null || {
   echo "::error::Postgres round-trip failed — inserted name not present in GET response"
   exit 1
 }
@@ -491,15 +511,50 @@ endsec
 # complete capture onto 44818 reproduces 36092000545's output exactly).
 # Measured over every port of the range, a real capture's ClientHello decodes
 # as TLS on all 28232 with -d, and on 28224 without it under 4.2.2.
+#
+# tshark reads copies of its inputs in a directory root owns under /tmp, not
+# the files themselves. Ubuntu 26.04 confines /usr/bin/tshark with an AppArmor
+# profile (/etc/apparmor.d/tshark): besides its own data files, the journal and
+# the system files every program reads, it may read only files it owns under
+# /tmp, /var/tmp and ~/tmp (<abstractions/user-tmp>). Given the capture where
+# keploy writes it (the workspace), or a copy the runner user owns in /tmp, it
+# says "You don't have permission to read the file" and decodes nothing, and it
+# silently skips a keylog it may not read. That is why the decrypt below, given
+# the workspace files, found no request on any ubuntu-26.04 runner, though the
+# same files decrypt in full unconfined. tshark runs as root here (sudo), so a
+# copy root owns is one it may read, under that profile and without it. What
+# tshark says on stderr goes to TSHARK_ERR, under a line naming the call, and a
+# failure prints it (it went to /dev/null, which hid that refusal).
+TSHARK_IN=$(sudo mktemp -d -p /tmp)
+TSHARK_ERR=$(mktemp)
+sudo cp "$KEYLOG" "$TSHARK_IN/sslkeys.log"
+# tshark_input FILE: prints the path of a copy of FILE that tshark may read.
+tshark_input() {
+  local copy
+  copy="$TSHARK_IN/$(basename "$1")"
+  sudo cp "$1" "$copy" && echo "$copy"
+}
+# tshark_run ARGS...: sudo tshark ARGS, its stdout as it is, its stderr
+# appended to TSHARK_ERR under a line naming the call, with tshark's exit code.
+# The warning every tshark run as root prints is left out (sed, not grep: sed
+# ends 0 when nothing is left).
+tshark_run() {
+  printf '== tshark %s\n' "$*" >>"$TSHARK_ERR"
+  { sudo tshark "$@" 2>&1 >&3 3>&- | sed '/^Running as user "root" and group "root"\. This could be dangerous\.$/d' >>"$TSHARK_ERR" 3>&-; } 3>&1
+}
 tshark_tls() {
-  local pcap=$1; shift
-  sudo tshark -r "$pcap" -o "tls.keylog_file:$KEYLOG" -d "tcp.port==${KEPLOY_PROXY_PORT},tls" "$@" 2>/dev/null
+  local pcap
+  pcap=$(tshark_input "$1") || return 1
+  shift
+  tshark_run -r "$pcap" -o "tls.keylog_file:$TSHARK_IN/sslkeys.log" -d "tcp.port==${KEPLOY_PROXY_PORT},tls" "$@"
 }
 # The same without -d: TLS found only by the heuristic, as before the fix.
 # Used only to tell whether the port check below can fail on this tshark.
 tshark_tls_heuristic() {
-  local pcap=$1; shift
-  sudo tshark -r "$pcap" -o "tls.keylog_file:$KEYLOG" "$@" 2>/dev/null
+  local pcap
+  pcap=$(tshark_input "$1") || return 1
+  shift
+  tshark_run -r "$pcap" -o "tls.keylog_file:$TSHARK_IN/sslkeys.log" "$@"
 }
 
 section "Assert tshark + keylog decrypts HTTP-over-TLS sessions"
@@ -507,15 +562,15 @@ DECRYPTED_REQS=$(tshark_tls "$PCAP" -Y "http.request" -T fields -e http.host -e 
 echo "decrypted HTTP requests:"
 echo "$DECRYPTED_REQS"
 
-echo "$DECRYPTED_REQS" | grep -q "$QUOTE_HOST" || {
+echo "$DECRYPTED_REQS" | grep "$QUOTE_HOST" >/dev/null || {
   echo "::error::tshark did not see decrypted GET to $QUOTE_HOST"
   exit 1
 }
-echo "$DECRYPTED_REQS" | grep -q "$ECHO_HOST" || {
+echo "$DECRYPTED_REQS" | grep "$ECHO_HOST" >/dev/null || {
   echo "::error::tshark did not see decrypted GET to $ECHO_HOST"
   exit 1
 }
-echo "$DECRYPTED_REQS" | grep -q "ci-${MODE_NAME}" || {
+echo "$DECRYPTED_REQS" | grep "ci-${MODE_NAME}" >/dev/null || {
   echo "::error::ci-${MODE_NAME} query string did not survive into the decrypted pcap"
   exit 1
 }
@@ -612,6 +667,7 @@ sys.stderr.write(str(moved))
   fi
 done
 rm -f "$REMAPPED_PCAP"
+REMAPPED_PCAP=
 if [[ ${#HEURISTIC_HELD[@]} -eq $(( COPIES * N_CONN )) ]]; then
   echo "::notice::this tshark ($(tshark --version | head -n1)) decrypts the moved copies even without -d, so this check cannot fail here; it guards the fix only under Wireshark 4.2.x"
 elif [[ ${#HEURISTIC_HELD[@]} -gt 0 ]]; then
@@ -645,11 +701,11 @@ HELLO_SNIS=$(tshark_tls "$PCAP" -Y "tls.handshake.type==1" \
 HELLO_COUNT=$(tshark_tls "$PCAP" -Y "tls.handshake.type==1" | wc -l)
 echo "TLS ClientHello frames in pcap: $HELLO_COUNT"
 echo "ClientHello SNIs:"; echo "$HELLO_SNIS"
-echo "$HELLO_SNIS" | grep -q "$QUOTE_HOST" || {
+echo "$HELLO_SNIS" | grep "$QUOTE_HOST" >/dev/null || {
   echo "::error::no captured ClientHello carried SNI $QUOTE_HOST — /quote did not cross the proxy as TLS"
   exit 1
 }
-echo "$HELLO_SNIS" | grep -q "$ECHO_HOST" || {
+echo "$HELLO_SNIS" | grep "$ECHO_HOST" >/dev/null || {
   echo "::error::no captured ClientHello carried SNI $ECHO_HOST — /echo did not cross the proxy as TLS"
   exit 1
 }
@@ -663,7 +719,7 @@ case "$MODE_NAME" in
     # (MySQL/Postgres mocks may also appear depending on which
     # integrations are linked into the build.)
     sudo test -s "$MOCKS" || { echo "::error::missing or empty $MOCKS"; exit 1; }
-    HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    HTTP_MOCKS=$(http_mock_count <(sudo cat "$MOCKS"))
     echo "Http mock records: $HTTP_MOCKS"
     if [[ "$HTTP_MOCKS" -lt 2 ]]; then
       echo "::error::expected >=2 'kind: Http' mocks (one per upstream host); saw $HTTP_MOCKS"
@@ -680,6 +736,8 @@ case "$MODE_NAME" in
     # issues no outbound DNS — there are no DNS mocks to write, and with
     # parser dispatch bypassed there are no Http mocks either. Treat a
     # missing/empty file as zero Http mocks rather than a failure.
+    # The `Http` prefix counts the Http2 and HttpFault mocks too: the HTTP
+    # parsers write those as well, so none may appear here either.
     if sudo test -s "$MOCKS"; then
       HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
     else
@@ -727,7 +785,7 @@ case "$MODE_NAME" in
     echo "== recorded mock kinds =="
     sudo grep "^kind: " "$MOCKS" | sort | uniq -c || true
 
-    HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
+    HTTP_MOCKS=$(http_mock_count <(sudo cat "$MOCKS"))
     MYSQL_MOCKS=$(sudo grep -c "^kind: MySQL" "$MOCKS" || true)
     # The `Postgres` prefix deliberately covers all three parser
     # generations (Postgres / PostgresV2 / PostgresV3) — which one is
@@ -771,7 +829,8 @@ case "$MODE_NAME" in
     # Mock shape here is the with-opportunistic shape, not the
     # verify-upstream one: parser dispatch is bypassed, so there must be
     # NO Http mocks. Verification changes which upstreams keploy is
-    # willing to talk to, never whether parsers run.
+    # willing to talk to, never whether parsers run. As there, the `Http`
+    # prefix counts the Http2 and HttpFault mocks too.
     if sudo test -s "$MOCKS"; then
       HTTP_MOCKS=$(sudo grep -c "^kind: Http" "$MOCKS" || true)
     else

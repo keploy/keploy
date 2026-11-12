@@ -229,3 +229,39 @@ func TestTheGenericParserAnswersARequestReturnedWithItsEOF(t *testing.T) {
 		readAnswer(t, app, "PONGPONG")
 	})
 }
+
+// A request longer than one read is answered with its recording, whether
+// the old read loop recorded it whole or the relay in its pieces: the
+// parser reads it in pieces of at most ReadChunkSize, as they arrive, and
+// matched them piece by piece with a recording made in other pieces (none).
+func TestTheGenericParserAnswersARequestLongerThanARead(t *testing.T) {
+	req := varied(40<<10, true)
+	for name, recorded := range map[string]*models.Mock{
+		"recorded whole":     recordedAs("mock-big", req),
+		"recorded in pieces": recordedAs("mock-big", req[:32<<10], req[32<<10:]),
+	} {
+		recorded.TestModeInfo.IsFiltered = true
+		recorded.Spec.GenericResponses = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: "BIGOK"}}}}
+		store := eofStore{mocks: []*models.Mock{recordedExchange("mock-ping", "PING", "PONG"), recorded}}
+		t.Run(name, func(t *testing.T) {
+			eachSwitch(t, func(t *testing.T) {
+				app, proxySide := tcpPair(t)
+				done := make(chan error, 1)
+				go func() {
+					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), proxySide, nil, store, models.OutgoingOptions{})
+				}()
+				readAnswer(t, app, "PONG")
+				// One write, then the half-close: the request's end is its
+				// EOF, whatever pieces its reads return.
+				if _, err := app.Write(req); err != nil {
+					t.Fatal(err)
+				}
+				if err := app.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				readAnswer(t, app, "BIGOK")
+				awaitEnd(t, done, "a half-closed connection")
+			})
+		})
+	}
+}

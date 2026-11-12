@@ -90,6 +90,11 @@ type SnapshotContainer struct {
 	// made before secrets were left out of it.
 	LegacyFingerprint string `json:"legacyFingerprint,omitempty"`
 	Reading           bool   `json:"reading,omitempty"`
+	// Zone is the zone the processes of a container in another's PID
+	// namespace (an app container, in the agent's) write a wall clock in,
+	// read with its Fingerprint; nil for any other container, and while
+	// that read is in flight.
+	Zone *Zone `json:"zone,omitempty"`
 	// Stalled says that read has made no progress for the stall window, in
 	// time the CLI could run: the agent stops waiting for it, the
 	// container's identity unknown, until a list says the read ended.
@@ -148,6 +153,9 @@ func (r *dockerIndex) snapshot(exclude string) (Snapshot, uint64, bool) {
 		s.Containers = append(s.Containers, SnapshotContainer{ID: id, Image: image, Name: strings.TrimPrefix(st.names[id], "/"),
 			Fingerprint: st.fingerprints[id], LegacyFingerprint: st.legacy[id], Reading: st.fingerprints[id] == "" && st.reading[id],
 			Stalled: st.fingerprints[id] == "" && st.reading[id] && st.stalled[id]})
+		if z, ok := st.zones[id]; ok {
+			s.Containers[at[id]].Zone = &z
+		}
 	}
 	// Each IP goes to the container the index names at it (byIP): a
 	// container that took an IP whose old holder's die never arrived holds
@@ -191,6 +199,10 @@ type pushedIndex struct {
 	asking          chan struct{}
 	answers         bool
 	boot            string
+
+	// zoneWaits, when set (tests), is told each container whose zone
+	// ContainerZone waits for a list of, as the wait begins.
+	zoneWaits func(id string)
 }
 
 func newPushedIndex() *pushedIndex {
@@ -238,6 +250,9 @@ func (p *pushedIndex) apply(s Snapshot) {
 		} else if c.Reading {
 			st.reading[e.id] = true
 			st.stalled[e.id] = c.Stalled
+		}
+		if c.Zone != nil {
+			st.zones[e.id] = *c.Zone
 		}
 		for _, a := range e.ips {
 			st.byIP[a] = e.id
@@ -395,6 +410,39 @@ func (p *pushedIndex) FingerprintsOrStall(ctx context.Context, id string) (strin
 		case <-applied:
 		case <-ctx.Done():
 			return "", "", false, ""
+		}
+	}
+}
+
+// ContainerZone is the Zone of app container id in the list held, waiting,
+// while the CLI is reading the container's configuration, for a list that
+// carries it (as FingerprintsOrStall waits); false where the list holds
+// none: a container that is no app container, or one gone, or a read that
+// stalled.
+func (p *pushedIndex) ContainerZone(ctx context.Context, id string) (Zone, bool) {
+	for {
+		p.mu.Lock()
+		st, applied := p.st, p.applied
+		var z Zone
+		held, reading, stalled := false, false, false
+		if st != nil && st.err == nil && st.images[id] != "" {
+			z, held = st.zones[id]
+			reading, stalled = st.reading[id], st.stalled[id]
+		}
+		p.mu.Unlock()
+		switch {
+		case held:
+			return z, true
+		case !reading, stalled:
+			return Zone{}, false
+		}
+		if p.zoneWaits != nil {
+			p.zoneWaits(id)
+		}
+		select {
+		case <-applied:
+		case <-ctx.Done():
+			return Zone{}, false
 		}
 	}
 }

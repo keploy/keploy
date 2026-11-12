@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,9 +35,12 @@ import (
 // Postgres) still go through the legacy YAML path because their specs
 // contain pre-encoded yaml.Node fields (req.Message).
 func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDocJSON, bool, error) {
+	if err := faultDropped(mock); err != nil {
+		return nil, false, err
+	}
 	doc := &yaml.NetworkTrafficDocJSON{
 		Version:      mock.Version,
-		Kind:         mock.Kind,
+		Kind:         mock.DiskKind(),
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
 		Start:        mock.Start,
@@ -51,6 +55,9 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
 		Variables: mock.Spec.Variables.Clone(),
+		// The places the learn step learned as a read of the application's
+		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block.
+		Clocks: maps.Clone(mock.Spec.Clocks),
 		// Where the call came from (models.Mock.Origin): written whenever
 		// the mock has one, whatever the switch, so a rewrite keeps what
 		// the decoders read (nil, so omitted, for a mock without one).
@@ -67,6 +74,7 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 			Created:          mock.Spec.Created,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
+			Fault:            mock.Spec.Fault,
 		}
 	case models.DNS:
 		var dnsReq models.DNSReq
@@ -305,9 +313,12 @@ var errMapperEncode = errors.New("mock encode mapper failure")
 
 func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 
+	if err := faultDropped(mock); err != nil {
+		return nil, err
+	}
 	yamlDoc := yaml.NetworkTrafficDoc{
 		Version:      mock.Version,
-		Kind:         mock.Kind,
+		Kind:         mock.DiskKind(),
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
 		Start:        mock.Start,
@@ -324,6 +335,9 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
 		Variables: mock.Spec.Variables.Clone(),
+		// The places the learn step learned as a read of the application's
+		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block.
+		Clocks: maps.Clone(mock.Spec.Clocks),
 		// Where the call came from (models.Mock.Origin): written whenever
 		// the mock has one, whatever the switch, so a rewrite keeps what
 		// the decoders read (nil, so omitted, for a mock without one).
@@ -593,7 +607,7 @@ const (
 // pipeline surfaces it all the way up and aborts record/replay,
 // which is the right behaviour because a null payload silently
 // corrupts replay.
-var errPostgresV3NilPayload = errors.New("postgres_v3 mock missing typed payload")
+var errPostgresV3NilPayload = errors.New("postgres_v3 mock has no typed payload")
 
 // errPacketWithoutHeader is a MySQL or Mongo packet whose document has no
 // header. The recorders write one for every packet, and the header types the
@@ -683,6 +697,16 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			Start:        m.Start,
 			Origin:       m.Origin,
 		}
+		// A fault is read on an HTTP call only (the case below). Any other
+		// kind's schema has no place for one and would drop it, serving
+		// the recorded answer whole: such a document with a `fault:` key
+		// is skipped instead (faultSupported), and the read says why.
+		if m.Kind != models.HTTP && m.Kind != models.HTTPFault {
+			mock.Spec.Fault = yamlSpecFault(&m.Spec)
+			if !faultSupported(&mock, logger, rewrite) {
+				continue
+			}
+		}
 		mapped, err := decodeWithMapper(m, &mock)
 		if err != nil {
 			wrapped := fmt.Errorf("mockdb: decode mapper for mock %q kind %q: %w", m.Name, m.Kind, err)
@@ -703,6 +727,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			// mapped branch) — this guards a future mapper-registered AsyncParser.
 			mock.Spec.Async = m.Async
 			mock.Spec.Variables = m.Variables.Clone()
+			mock.Spec.Clocks = maps.Clone(m.Clocks)
 			mock.Origin = m.Origin // the mapper may have rebuilt the mock whole
 			mocks = append(mocks, &mock)
 			continue
@@ -713,7 +738,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			continue
 		}
 		switch m.Kind {
-		case models.HTTP:
+		case models.HTTP, models.HTTPFault:
 			httpSpec := models.HTTPSchema{}
 			err := m.Spec.Decode(&httpSpec)
 			if err != nil {
@@ -729,6 +754,11 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 				Created:          httpSpec.Created,
 				ReqTimestampMock: httpSpec.ReqTimestampMock,
 				ResTimestampMock: httpSpec.ResTimestampMock,
+				Fault:            httpSpec.Fault,
+			}
+			mock.Kind = models.HTTP
+			if !faultKindSupported(m.Kind, &mock, logger, rewrite) {
+				continue
 			}
 		case models.DNS:
 			dnsSpec := models.DNSSchema{}
@@ -890,6 +920,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 		}
 		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
 		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
+		mock.Spec.Clocks = maps.Clone(m.Clocks)   // kind-agnostic, like variables
 		mocks = append(mocks, &mock)
 	}
 
@@ -1112,6 +1143,102 @@ func connFailureSupported(mock *models.Mock, logger *zap.Logger, rewrite bool) b
 		return true
 	}
 	skipConnFailure(logger, mock.Name, err, rewrite)
+	return false
+}
+
+// faultDropped is why mock is not written: a fault on a call of a kind other
+// than HTTP (Mock.ValidateFault). No such kind's document has a place for
+// one, so the write would drop the fault and leave the recorded answer for a
+// replay to serve whole. nil for every other mock: an HTTP mock's fault is
+// written as it is (kind HttpFault), for the reader to enact or refuse.
+func faultDropped(mock *models.Mock) error {
+	if mock.Kind == models.HTTP {
+		return nil
+	}
+	return mock.ValidateFault()
+}
+
+// yamlSpecFault is the fault under a document spec's `fault:` key, found
+// the way the YAML decoder finds models.HTTPSchema's Fault on an HTTP call:
+// the key itself, or one a merge key (`<<:`) brings in, of a spec given in
+// place or by an alias. nil for a spec with none, or one that is no
+// mapping. A value that is no fault (a hand edit, null included) reads as
+// one of no kind, which no keploy enacts.
+func yamlSpecFault(spec *yamlLib.Node) *models.Fault {
+	var s struct {
+		Fault yamlLib.Node `yaml:"fault"`
+	}
+	// An error leaves s.Fault as the decoder left it: unset for a spec that
+	// is no mapping, which its kind's own decode refuses too, and the first
+	// of a key given twice.
+	_ = spec.Decode(&s)
+	if s.Fault.Kind == 0 {
+		return nil
+	}
+	f := &models.Fault{}
+	_ = s.Fault.Decode(f) // a value that is no fault stays one of no kind
+	return f
+}
+
+// jsonSpecFault is yamlSpecFault for an NDJSON document's spec, found the
+// way encoding/json finds models.HTTPSchema's Fault: by a key that unescapes
+// to "fault" in any case ("Fault", "FAULT", "\u0066ault"), the last such key
+// of the spec's own object, never one inside a value. A text search for
+// `"fault"` misses the others, and a document of any kind but HTTP that
+// holds one would be served whole.
+func jsonSpecFault(spec json.RawMessage) *models.Fault {
+	var s struct {
+		Fault json.RawMessage `json:"fault"`
+	}
+	// An error leaves s.Fault nil: of the valid JSON an NDJSON document's
+	// spec is, only one that is no object fails, and so does its kind's
+	// own decode.
+	_ = json.Unmarshal(spec, &s)
+	if s.Fault == nil {
+		return nil
+	}
+	f := &models.Fault{}
+	_ = json.Unmarshal(s.Fault, f) // a value that is no fault (null included) stays one of no kind
+	return f
+}
+
+// faultKindSupported is faultSupported for a mock read from a document of
+// kind docKind, which must go with its fault (models.FaultKindMismatch): a
+// fault under kind Http, the kind an older keploy serves whole, or kind
+// HttpFault with no fault, is skipped, never served, and the read says why.
+func faultKindSupported(docKind models.Kind, mock *models.Mock, logger *zap.Logger, rewrite bool) bool {
+	why := models.FaultKindMismatch(docKind, mock.Spec.Fault)
+	if why == "" {
+		return faultSupported(mock, logger, rewrite)
+	}
+	err := fmt.Errorf("%w: mock %q: %s", models.ErrFaultUnsupported, mock.Name, why)
+	if rewrite {
+		logger.Debug("kept as written: a mock whose kind does not go with its fault", zap.String("mock", mock.Name), zap.Error(err))
+		return false
+	}
+	utils.LogError(logger, err, "skipping a mock whose kind does not go with its fault",
+		zap.String("mock", mock.Name), zap.String("kind", string(docKind)))
+	return false
+}
+
+// faultSupported validates a decoded mock's fault (Mock.ValidateFault), and
+// skips one this keploy cannot enact: a kind or a spelling from a newer
+// keploy, a hand edit, or a fault on a call of a protocol it enacts none for.
+// Skipped, it is never served (not its head, not as a whole answer), and the
+// read says why, as for a connection failure (skipConnFailure).
+func faultSupported(mock *models.Mock, logger *zap.Logger, rewrite bool) bool {
+	err := mock.ValidateFault()
+	if err == nil {
+		return true
+	}
+	if rewrite {
+		logger.Debug("kept as written: a mock whose fault this keploy cannot enact", zap.String("mock", mock.Name), zap.Error(err))
+		return false
+	}
+	utils.LogError(logger, err, "skipping a mock whose fault this keploy cannot enact",
+		zap.String("mock", mock.Name),
+		zap.String("keploy_version", keployVersion()),
+		zap.String("next_step", "if the error says to upgrade, the mock was recorded by a newer keploy: upgrade keploy to replay it; otherwise fix or re-record the mock"))
 	return false
 }
 
@@ -1654,6 +1781,14 @@ func DecodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger) ([]
 func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rewrite bool) ([]*models.Mock, error) {
 	mocks := make([]*models.Mock, 0, len(docs))
 	for _, m := range docs {
+		// A fault on a call of any kind but HTTP, skipped and named, the way
+		// DecodeMocks skips it.
+		if m.Kind != models.HTTP && m.Kind != models.HTTPFault {
+			faulted := models.Mock{Name: m.Name, Kind: m.Kind, Spec: models.MockSpec{Fault: jsonSpecFault(m.Spec)}}
+			if !faultSupported(&faulted, logger, rewrite) {
+				continue
+			}
+		}
 		// Skip enterprise-only kinds the way DecodeMocks does.
 		if strings.Count(string(m.Kind), "-") > 0 {
 			logger.Debug("This dependency does not belong to open source version, will be skipped", zap.String("mock kind:", string(m.Kind)))
@@ -1671,7 +1806,7 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 		}
 
 		switch m.Kind {
-		case models.HTTP:
+		case models.HTTP, models.HTTPFault:
 			var s models.HTTPSchema
 			if err := json.Unmarshal(m.Spec, &s); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal http mock %q: %w", m.Name, err)
@@ -1683,6 +1818,11 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 				Created:          s.Created,
 				ReqTimestampMock: s.ReqTimestampMock,
 				ResTimestampMock: s.ResTimestampMock,
+				Fault:            s.Fault,
+			}
+			mock.Kind = models.HTTP
+			if !faultKindSupported(m.Kind, &mock, logger, rewrite) {
+				continue
 			}
 		case models.DNS:
 			var s models.DNSSchema
@@ -1937,6 +2077,7 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 		}
 		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
 		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
+		mock.Spec.Clocks = maps.Clone(m.Clocks)   // kind-agnostic, like variables
 		mocks = append(mocks, &mock)
 	}
 	return mocks, nil

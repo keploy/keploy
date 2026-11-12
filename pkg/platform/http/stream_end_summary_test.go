@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 )
@@ -26,7 +27,7 @@ import (
 // The requests a pause of the memory guard cost are said with their count and
 // the number of connections they came on.
 func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
-	sum := models.StreamEndSummary{TestCasesSent: 3, TestCasesSuppressed: 9, LeftOutInFlight: 2, Unsettled: 1, MassSuppressed: true,
+	sum := models.StreamEndSummary{TestCasesSent: 3, TestCasesSuppressed: 9, LeftOutInFlight: 2, NotHandedOn: 4, UnnamedCallerConns: 6, TLSRelayedConns: 7, Unsettled: 1, MassSuppressed: true,
 		NotRecordedUnderPressure: models.PressureSkipSummary{Requests: 5, Connections: 2}}
 	const pauseSaid = "the keploy agent did not record some requests: it was short of memory when they came, and its memory guard had paused recording; each connection's requests after the pause are recorded"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +73,11 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 		said := map[string]bool{}
 		for _, e := range logs.All() {
 			said[e.Message] = true
+			if e.Message == tlsRelayedConnsSaid {
+				if f := e.ContextMap(); f["connections"] != uint64(7) || f["next_step"] == nil {
+					t.Fatalf("the TLS connections relayed unread were said as %v, want 7 connections and a next step", f)
+				}
+			}
 			if e.Message == pauseSaid {
 				f := e.ContextMap()
 				if f["requests"] != uint64(5) || f["connections"] != int64(2) {
@@ -84,6 +90,9 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 			"the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
 			"the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
 			pauseSaid,
+			"the keploy agent lost some test cases: the app served their requests, and the agent's ingress stopped before their test cases reached the recording",
+			unnamedCallerConnsSaid,
+			tlsRelayedConnsSaid,
 		}
 		for _, m := range want {
 			if !started && !said[m] {
@@ -93,5 +102,18 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 		if started && logs.Len() != 0 {
 			t.Fatalf("for an agent the client started, whose log is the user's own, it said %v", logs.All())
 		}
+	}
+}
+
+// A session that lost only TLS connections, relayed to the app's own TLS
+// unread, is said by the client on its own: no other loss in the summary is
+// what makes the client say it.
+func TestTheClientSaysASessionThatLostOnlyTLSConnections(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := &AgentClient{logger: zap.New(core)}
+	a.sayAgentSummary(models.StreamEndSummary{TLSRelayedConns: 2})
+	said := logs.FilterMessage(tlsRelayedConnsSaid).All()
+	if len(said) != 1 || said[0].Level != zapcore.WarnLevel || said[0].ContextMap()["connections"] != uint64(2) {
+		t.Fatalf("a session that lost only TLS connections was said %v, want once at WARN with its 2 connections", said)
 	}
 }

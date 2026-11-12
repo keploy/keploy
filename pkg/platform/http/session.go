@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -417,8 +418,11 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	// replaced, whether or not the setup below takes: the replay counts
 	// what this one counts from its start (AgentStartedBeforeApp).
 	instancesAt(agentHost(a.conf.Agent.AgentURI)).startedBeforeApp()
-	// A docker-mode agent that restarted holds no container list.
+	// A docker-mode agent that restarted holds no container list, nor the
+	// names its networks answer.
 	a.pushContainers(ctx)
+	forgetNetworkNames(a.conf.Agent.AgentURI)
+	a.pushNetworkNames(ctx)
 	if err := a.session().reapply(ctx, a.logger); err != nil {
 		return err
 	}
@@ -438,14 +442,21 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	start := a.WatchAgentStart(ctx)
+	start, over := a.watchAgent(ctx, false)
+	if over != nil {
+		// The wait ends only once its watch has, its look with it.
+		defer func() {
+			cancel()
+			<-over
+		}()
+	}
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		probe, cancelProbe := context.WithTimeout(ctx, 500*time.Millisecond)
-		req, err := http.NewRequestWithContext(probe, http.MethodGet, a.conf.Agent.AgentURI+"/health", nil)
+		req, err := newAgentRequest(probe, http.MethodGet, a.conf.Agent.AgentURI+"/health", nil)
 		if err == nil {
-			if res, err := a.client.Do(req); err == nil {
+			if res, err := doAgent(&a.client, req); err == nil {
 				_ = res.Body.Close()
 				if res.StatusCode == http.StatusOK {
 					cancelProbe()
@@ -457,10 +468,10 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("keploy's agent, started again by docker compose, did not answer at %s: %w",
-				a.conf.Agent.AgentURI, ctx.Err())
+				pkg.ShownAgentURI(a.conf.Agent.AgentURI), ctx.Err())
 		case err := <-start:
 			return fmt.Errorf("keploy's agent, started again by docker compose, did not come up at %s: %w",
-				a.conf.Agent.AgentURI, err)
+				pkg.ShownAgentURI(a.conf.Agent.AgentURI), err)
 		case <-tick.C:
 		}
 	}
@@ -485,6 +496,7 @@ func copyMockParams(params models.MockFilterParams) (_ models.MockFilterParams, 
 	}
 	params.TotalConsumedMocks = maps.Clone(params.TotalConsumedMocks)
 	params.RecordedWindows = slices.Clone(params.RecordedWindows)
+	params.BackgroundMocks = slices.Clone(params.BackgroundMocks)
 	params.MockMapping = slices.Clone(params.MockMapping)
 	params.Variables = slices.Clone(params.Variables)
 	if params.Exact != nil {
@@ -508,13 +520,13 @@ func mockParamsStep(params models.MockFilterParams) string {
 
 // resumeStream is called when a stream's connection ended. Once the session
 // is set up on a restarted agent, it makes the stream's request again, the
-// same method, path and body, on a new connection, and returns its response.
+// same request (newRequest), on a new connection, and returns its response.
 // A stream that cannot reconnect waits for the next agent compose starts. It
 // reports false when the stream is over (see awaitRestart).
-func (a *AgentClient) resumeStream(ctx context.Context, stream *sessionStream, name, method, path string, body []byte) (*http.Response, bool) {
+func (a *AgentClient) resumeStream(ctx context.Context, stream *sessionStream, name string, newRequest streamRequest) (*http.Response, bool) {
 	for stream.awaitRestart(ctx) {
 		conn := stream.connect(ctx)
-		res, err := a.reopenStream(conn.ctx, name, method, path, body)
+		res, err := a.reopenStream(conn.ctx, name, newRequest)
 		if err == nil {
 			res.Body = conn.body(res.Body)
 			stream.caughtUp(conn)
@@ -542,15 +554,20 @@ var (
 	reopenBackoff = 500 * time.Millisecond
 )
 
-// reopenStream makes a stream's request again: see resumeStream.
-func (a *AgentClient) reopenStream(ctx context.Context, name, method, path string, body []byte) (*http.Response, error) {
-	var lastErr error
-	for attempt := 1; attempt <= reopenRetries; attempt++ {
+// streamRequest makes a stream's request on ctx, a new one each time. A
+// reopened stream calls the same one, so all a stream asks of its agent is
+// asked again of the agent that replaces it.
+type streamRequest func(ctx context.Context) (*http.Request, error)
+
+// streamRequestOf is the streamRequest of a stream that sends only its method,
+// path and body.
+func (a *AgentClient) streamRequestOf(method, path string, body []byte) streamRequest {
+	return func(ctx context.Context) (*http.Request, error) {
 		var rd io.Reader
 		if body != nil {
 			rd = bytes.NewReader(body)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, a.conf.Agent.AgentURI+path, rd)
+		req, err := newAgentRequest(ctx, method, a.conf.Agent.AgentURI+path, rd)
 		if err != nil {
 			return nil, err
 		}
@@ -558,7 +575,19 @@ func (a *AgentClient) reopenStream(ctx context.Context, name, method, path strin
 			req.Header.Set("Content-Type", "application/json")
 		}
 		a.markDrainsAfterStop(ctx, req)
-		res, err := a.client.Do(req)
+		return req, nil
+	}
+}
+
+// reopenStream makes a stream's request again: see resumeStream.
+func (a *AgentClient) reopenStream(ctx context.Context, name string, newRequest streamRequest) (*http.Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= reopenRetries; attempt++ {
+		req, err := newRequest(ctx)
+		if err != nil {
+			return nil, err
+		}
+		res, err := doAgent(&a.client, req)
 		if err == nil {
 			if err := agentStreamStatus(name, res); err != nil {
 				return nil, err

@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -207,6 +210,12 @@ type trickleInstrumentation struct {
 	spacing    time.Duration
 	count      int
 	wg         sync.WaitGroup
+	// sent is how many it has handed over: on its unbuffered stream, taken
+	// by the client.
+	sent atomic.Int32
+	// holdOpen keeps the stream open after the last mock until the client
+	// ends it, as a live agent does.
+	holdOpen bool
 }
 
 func (d *trickleInstrumentation) Setup(context.Context, string, models.SetupOptions) error {
@@ -236,7 +245,11 @@ func (d *trickleInstrumentation) Run(_ context.Context, _ models.RunOptions) mod
 			case <-d.captureCtx.Done():
 				return
 			case d.out <- &models.Mock{Name: "trickle-" + string(rune('a'+i)), Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: captured}}:
+				d.sent.Add(1)
 			}
+		}
+		if d.holdOpen {
+			<-d.captureCtx.Done()
 		}
 	}()
 	return models.AppError{}
@@ -244,50 +257,67 @@ func (d *trickleInstrumentation) Run(_ context.Context, _ models.RunOptions) mod
 
 func (d *trickleInstrumentation) NotifyGracefulShutdown(context.Context) error { return nil }
 
-// TestRecord_DrainKeepsWaitingWhileMocksStillArrive pins the quiescence reset.
-// A drain that returned at its first quiet tick, or that never noticed
-// arrivals, would keep the previous test green — one trailing mock lands well
-// inside the first window — while still truncating a suite whose agent is
-// handing over a backlog.
-//
-// The spacing straddles the tick deliberately: each mock arrives inside the
-// window opened by the previous one, so only a drain that RESETS on arrival
-// sees them all. It is under mockDrainQuiet rather than over it because a first
-// mock arriving after a whole quiet period is outside what this drain promises
-// — the real agent-to-exit gap measured 6.5ms median, 22.8ms max — and a test
-// asserting more than the fix provides would be testing a wish.
-func TestRecord_DrainKeepsWaitingWhileMocksStillArrive(t *testing.T) {
-	const want = 3
-	inst := &trickleInstrumentation{
-		out:     make(chan *models.Mock, want),
-		spacing: mockDrainQuiet - 150*time.Millisecond,
-		count:   want,
+// The drain's quiet resets on every arrival, and while the consumer is
+// still persisting one: with an agent that cannot say what it still holds,
+// quiet is all the drain has to go by, and one that ended at its first quiet
+// look, or did not see what came between looks, would cut off a backlog
+// still coming. Driven by what the consumer has taken at each look, not by
+// when mocks come, so no load on the host decides it: the drain ends at the
+// first look that finds nothing new and the consumer free, and that end is
+// unconfirmed (tailQuiet), never silent.
+func TestDrainTrailingMocks_QuietResetsOnEveryArrival(t *testing.T) {
+	// What the consumer has taken, and whether it is persisting one, at the
+	// drain's start and at each look after: the last holds from then on.
+	steps := []struct {
+		taken uint64
+		busy  bool
+	}{{0, false}, {1, false}, {1, true}, {2, false}, {2, false}}
+	var looked int // read and written on the drain's goroutine only
+	held := func() (uint64, bool) {
+		s := steps[min(looked, len(steps)-1)]
+		looked++
+		return s.taken, s.busy
 	}
-	db := &recordingMockDB{}
-
-	cfg := &config.Config{}
-	cfg.Mock.Name = "trickle-test"
-
-	if err := New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background()); err != nil {
-		t.Fatalf("Record: %v", err)
+	m := &mockService{logger: zap.NewNop(), instrumentation: struct{ Instrumentation }{}}
+	lost, tail := m.drainTrailingMocks(make(chan struct{}), time.Now(), true, held, func() uint64 { return 0 }, recordDrainWords, nil)
+	if looked != len(steps) {
+		t.Fatalf("the drain read what the consumer had taken %d time(s), want %d: it ended while mocks were still coming or being persisted, or waited past the first quiet look", looked, len(steps))
 	}
-	inst.wg.Wait()
-
-	if got := db.inserted(); len(got) != want {
-		t.Fatalf("persisted %d mock(s) %v, want %d — the drain stopped waiting while the agent was still handing mocks over", len(got), got, want)
+	if lost || tail != tailQuiet {
+		t.Fatalf("a drain ended on quiet: lost %v, unconfirmed %v, want not lost and tailQuiet", lost, tail)
 	}
 }
 
-// A backlog the agent is still handing over when the runner exits is drained
-// for as long as it keeps coming: a sink still draining is not cut off at a
-// fixed deadline (it used to be, at 5 s).
-func TestRecord_DrainIsNotCutOffWhileMocksStillArrive(t *testing.T) {
-	const want = 20
-	inst := &trickleInstrumentation{
-		out:     make(chan *models.Mock, want),
-		spacing: mockDrainQuiet - 150*time.Millisecond, // 20 of them: ~7 s
-		count:   want,
+// tellingTrickle is a trickle from an agent that can tell: until it has handed
+// over its last mock it says it may still hand one over from before the run
+// ended, its progress moving with each (AgentClient.BacklogBefore).
+type tellingTrickle struct {
+	trickleInstrumentation
+	asked atomic.Int32
+}
+
+func (d *tellingTrickle) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	d.asked.Add(1)
+	if n := d.sent.Load(); int(n) < d.count {
+		return models.AgentBacklog{Verdict: models.BacklogPending, Progress: uint64(n)}, nil
 	}
+	return models.AgentBacklog{Verdict: models.BacklogClear}, nil
+}
+
+// A backlog the agent is still handing over when the runner exits is drained
+// for as long as the agent says it may still hand over a mock from before the
+// run ended, however far apart they come: further apart than the drain's
+// quiet bound, and for longer in all than the fixed 5 s it was once cut off
+// at. The end is the agent's word, not the stream's quiet: a load that slows
+// the agent down cannot cut it short.
+func TestRecord_DrainIsNotCutOffWhileMocksStillArrive(t *testing.T) {
+	const want = 6
+	inst := &tellingTrickle{trickleInstrumentation: trickleInstrumentation{
+		out:      make(chan *models.Mock),
+		spacing:  2 * mockDrainQuiet, // 6 of them: ~6 s
+		count:    want,
+		holdOpen: true,
+	}}
 	db := &recordingMockDB{}
 	cfg := &config.Config{}
 	cfg.Mock.Name = "backlog-test"
@@ -295,9 +325,131 @@ func TestRecord_DrainIsNotCutOffWhileMocksStillArrive(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 	inst.wg.Wait()
-	if got := db.inserted(); len(got) != want {
-		t.Fatalf("persisted %d of %d mocks: the drain was cut off while the agent was still handing them over", len(got), want)
+	if got := db.inserted(); len(got) != want || inst.asked.Load() == 0 {
+		t.Fatalf("persisted %d of %d mocks (the agent was asked %d times): the drain was cut off while the agent was still handing them over", len(got), want, inst.asked.Load())
 	}
+}
+
+// openStreamAgent hands over one mock while the runner runs, then holds its
+// stream open until the client ends it, as a live agent does. It cannot be
+// asked what it still holds.
+type openStreamAgent struct{ trickleInstrumentation }
+
+func (a *openStreamAgent) Run(context.Context, models.RunOptions) models.AppError {
+	// Unbuffered: taken by the client before the run ends.
+	a.out <- &models.Mock{Name: "mock-0", Kind: models.HTTP}
+	ctx := a.captureCtx
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		defer close(a.out)
+		<-ctx.Done()
+	}()
+	return models.AppError{}
+}
+
+// unsupportedAgent is an openStreamAgent that answers the question, but
+// cannot tell, and never will: it predates the route, or its capture has no
+// watermark (models.BacklogUnsupported).
+type unsupportedAgent struct{ *openStreamAgent }
+
+func (unsupportedAgent) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return models.AgentBacklog{Verdict: models.BacklogUnsupported}, nil
+}
+
+// An agent that cannot say what it still holds leaves the drain only the
+// stream's quiet to go by: a mock it hands over later than that is not in the
+// recording, and nothing says whether there was one. keploy mock record saves
+// what it has, and says at WARN, naming the set and its mocks, that it cannot
+// confirm the recording holds them all. It used to save it as whole, in
+// silence: under load, short of the mocks a slow agent was still handing over.
+func TestRecord_ADrainEndedOnQuietIsSaid(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		inst func(*openStreamAgent) Instrumentation
+	}{
+		{"an agent that cannot be asked", func(a *openStreamAgent) Instrumentation { return a }},
+		{"an agent that cannot tell", func(a *openStreamAgent) Instrumentation { return unsupportedAgent{a} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &openStreamAgent{trickleInstrumentation{out: make(chan *models.Mock)}}
+			db := &recordingMockDB{}
+			cfg := &config.Config{}
+			cfg.Mock.Name = "quiet-test"
+			core, logs := observer.New(zapcore.WarnLevel)
+			require.NoError(t, New(zap.New(core), tc.inst(a), db, nil, FileStore{}, nil, cfg).Record(context.Background()))
+			a.wg.Wait()
+			require.Equal(t, []string{"mock-0"}, db.inserted())
+			require.True(t, db.promoted.Load())
+			warned := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(quietTailUnconfirmed).All()
+			require.Len(t, warned, 1, "the saved recording was not said to be unconfirmed: %v", logs.All())
+			ctx := warned[0].ContextMap()
+			require.Equal(t, "quiet-test", ctx["mock-set"])
+			require.EqualValues(t, 1, ctx["mocks"])
+			require.Equal(t, quietTailUnconfirmedNext, ctx["next_step"])
+		})
+	}
+}
+
+// How the drain ends once the stream has gone quiet, by what the agent says
+// and whether the round can end on its markers: only an agent that said it
+// holds nothing more, to a round it can end by its markers, confirms the
+// tail. Every other end came on quiet alone.
+func TestDrainTrailingMocks_OnlyTheAgentsWordConfirmsTheTail(t *testing.T) {
+	ender := kindEnder{}
+	for _, tc := range []struct {
+		name  string
+		inst  Instrumentation
+		round *roundEnd
+		want  unconfirmedTail
+	}{
+		{"cannot be asked", struct{ Instrumentation }{}, &roundEnd{ender: ender, token: "t"}, tailQuiet},
+		{"cannot tell", backlogSays{verdict: models.BacklogUnsupported}, &roundEnd{ender: ender, token: "t"}, tailQuiet},
+		{"clear, without markers", backlogSays{verdict: models.BacklogClear}, &roundEnd{ender: ender, token: "t"}, tailQuiet},
+		{"clear with markers, no round to end", backlogSays{verdict: models.BacklogClear, markers: true}, nil, tailQuiet},
+		{"clear with markers", backlogSays{verdict: models.BacklogClear, markers: true}, &roundEnd{ender: ender, token: "t"}, tailConfirmed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockService{logger: zap.NewNop(), instrumentation: tc.inst}
+			lost, tail := m.drainTrailingMocks(make(chan struct{}), time.Now(), true, func() (uint64, bool) { return 0, false }, func() uint64 { return 0 }, recordDrainWords, tc.round)
+			if lost || tail != tc.want {
+				t.Fatalf("lost %v, unconfirmed %v, want not lost and %v", lost, tail, tc.want)
+			}
+		})
+	}
+}
+
+// backlogSays answers every look with verdict, and says it ends its streams
+// on request when markers is set.
+type backlogSays struct {
+	Instrumentation
+	verdict models.BacklogVerdict
+	markers bool
+}
+
+func (b backlogSays) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return models.AgentBacklog{Verdict: b.verdict, EndMarkers: b.markers}, nil
+}
+
+// A producer that never finishes ends the drain in a named loss, never a
+// silent cut: an agent that says look after look that it still holds a mock
+// from before the run ended, its capture making no progress and nothing
+// coming, is given up after mockDrainStallLooks looks. It is said at ERROR,
+// the run fails with keploy's exit code, and the drain is lost: its caller
+// saves nothing.
+func TestDrainTrailingMocks_AProducerThatHangsIsANamedLoss(t *testing.T) {
+	defer func(n int) { mockDrainStallLooks = n }(mockDrainStallLooks)
+	mockDrainStallLooks = 2
+	defer func(code int) { utils.ErrCode = code }(utils.ErrCode)
+	utils.ErrCode = 0
+	core, logs := observer.New(zapcore.ErrorLevel)
+	m := &mockService{logger: zap.New(core), instrumentation: alwaysPending{}}
+	lost, tail := m.drainTrailingMocks(make(chan struct{}), time.Now(), true, func() (uint64, bool) { return 0, false }, func() uint64 { return 0 }, recordDrainWords, nil)
+	if !lost || tail != tailConfirmed {
+		t.Fatalf("a drain on an agent that never finishes: lost %v, unconfirmed %v, want lost", lost, tail)
+	}
+	require.Equal(t, 1, logs.FilterMessage(recordDrainWords.stalled).Len(), "%v", logs.All())
+	require.Equal(t, utils.ExitKeployError, utils.ErrCode)
 }
 
 // Ctrl+C stops the recording, not the drain of what the agent already has.
@@ -310,7 +462,12 @@ func TestRecord_InterruptStillDrainsWhatTheAgentHas(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Mock.Name = "interrupt-test"
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // the user interrupted; the runner has already exited
+	defer cancel()
+	// The user interrupts as the test command runs, once the recording is
+	// set up. A stop before Record raced the setup gate (NewSetupGate's
+	// AfterFunc against its Up), and a Ctrl+C during setup rightly ends the
+	// run before anything is captured: the row failed 2 runs in 300.
+	inst.onRun = cancel
 	_ = New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(ctx)
 	inst.wg.Wait()
 	if got := db.inserted(); len(got) != 2 {
@@ -531,6 +688,55 @@ func TestRecord_AStopDeliveredTwiceStillSavesWhatTheAgentHolds(t *testing.T) {
 	}
 }
 
+// A drain the user gives up at its offer (a second Ctrl+C) leaves out the mock
+// the agent still holds: the recording is not saved over the set, and the run
+// fails. keploy mock record's command returns no error for a run the user
+// stopped (an interrupt is not a failure), so the exit code is what says it:
+// 128+N for the signal that stopped the run, as keploy mock replay exits for a
+// run the user stopped before it finished, or keploy's 1 where no signal's
+// number is known (a build with its own handler). Before, it was 0, a pass.
+func TestRecord_ADrainTheUserGaveUpIsNotSavedAndExitsNonZero(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	for _, tc := range []struct {
+		name         string
+		signal, code int
+	}{{"stopped by SIGINT", 2, 130}, {"no signal number known", 0, utils.ExitKeployError}} {
+		t.Run(tc.name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			utils.ClearInterrupted()
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+			t.Cleanup(utils.SetInterruptSignalForTest(tc.signal))
+			utils.MarkInterrupted() // the stop
+			inst := &pendingInstrumentation{
+				trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)},
+				quietFor:               time.Hour, // the agent still holds its mock when the user gives up
+			}
+			db := &recordingMockDB{}
+			cfg := &config.Config{}
+			cfg.Mock.Name = "given-up-drain"
+			core, logs := observer.New(zapcore.InfoLevel)
+			returned := make(chan error, 1)
+			go func() {
+				returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background())
+			}()
+			if err, early := untilSaid(t, logs, recordDrainWords.saving+"; "+recordDrainWords.stopNow, returned); early {
+				t.Fatalf("Record returned (%v) before its drain offered to stop now", err)
+			}
+			if !utils.MarkInterruptedAgain() { // the user, as told
+				t.Fatal("setup: no offer standing")
+			}
+			err := returnedWithin(t, returned)
+			inst.wg.Wait()
+			require.Error(t, err, "a recording short of the mock the agent held ended as a success")
+			require.False(t, db.promoted.Load(), "a recording short of the mock the agent held was saved over the set")
+			require.Equal(t, 1, logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(recordDrainWords.gaveUp).Len(), "the give-up was not said: %v", logs.All())
+			require.Equal(t, tc.code, utils.ErrCode, "a recording the user gave up, not saved, left exit code %d", utils.ErrCode)
+		})
+	}
+}
+
 // unansweredInstrumentation is pendingInstrumentation whose agent does not
 // answer the drain's looks while its parser is behind (a /record/pending that
 // times out), and says it holds nothing more once it has handed the mock over.
@@ -570,9 +776,10 @@ func TestRecord_ALookTheAgentDoesNotAnswerDoesNotLoseAMock(t *testing.T) {
 // (killed, or crashed) without handing it over: its stream ends.
 type goneInstrumentation struct {
 	trickleInstrumentation
-	looked chan struct{}
-	once   sync.Once
-	asked  atomic.Int32
+	refused error // what a look gets once it has gone (refusedErr)
+	looked  chan struct{}
+	once    sync.Once
+	asked   atomic.Int32
 }
 
 func (g *goneInstrumentation) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
@@ -580,7 +787,7 @@ func (g *goneInstrumentation) BacklogBefore(context.Context, time.Time) (models.
 	if g.looked == nil {
 		// Gone before the drain asks: a look that comes anyway (a slow
 		// machine) finds it unreachable, and says nothing of what it held.
-		return models.AgentBacklog{}, refusedErr()
+		return models.AgentBacklog{}, g.refused
 	}
 	g.once.Do(func() { close(g.looked) })
 	// Its capture moving on every look: the drain never gives up on it, so
@@ -621,7 +828,7 @@ func recordGone(t *testing.T, lookFirst bool) (*goneInstrumentation, *observer.O
 	t.Helper()
 	defer func(code int) { utils.ErrCode = code }(utils.ErrCode)
 	utils.ErrCode = 0
-	inst := &goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}}
+	inst := &goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}, refused: refusedErr(t)}
 	if lookFirst {
 		inst.looked = make(chan struct{})
 	}
@@ -674,30 +881,24 @@ type gatedBacklog struct {
 	asked           atomic.Int32
 	err             error
 	// goneAtSecond, when set, runs at the second look, which then finds the
-	// agent unreachable: it ends the stream there.
+	// agent unreachable (refused): it ends the stream there.
 	goneAtSecond func()
+	refused      error
 }
 
 // refusedErr is the error of a real refused dial: the platform's own, as an
-// agent that is gone gives it.
-func refusedErr() error {
-	refusedOnce.Do(func() {
-		ln, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			refused = err
-			return
-		}
-		addr := ln.Addr().String()
-		_ = ln.Close()
-		_, refused = net.Dial("tcp4", addr)
-	})
-	return refused
+// agent that is gone gives it. The port dialled is held for the test's life
+// with nothing listening there (testnet.RefusedAddr), so no other socket can
+// take it and answer the dial.
+func refusedErr(t *testing.T) error {
+	t.Helper()
+	c, err := net.Dial("tcp", testnet.RefusedAddr(t, "tcp"))
+	if err == nil {
+		_ = c.Close()
+	}
+	require.True(t, neterr.IsConnRefused(err), "a dial to a held port nothing listens at was not refused: %v", err)
+	return err
 }
-
-var (
-	refusedOnce sync.Once
-	refused     error
-)
 
 func (g *gatedBacklog) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
 	n := g.asked.Add(1)
@@ -707,7 +908,7 @@ func (g *gatedBacklog) BacklogBefore(context.Context, time.Time) (models.AgentBa
 	})
 	if n >= 2 && g.goneAtSecond != nil {
 		g.goneAtSecond()
-		return models.AgentBacklog{}, refusedErr()
+		return models.AgentBacklog{}, g.refused
 	}
 	if g.err != nil {
 		return models.AgentBacklog{}, g.err
@@ -746,6 +947,7 @@ func gatedDrain(t *testing.T, lookErr error, frames *atomic.Uint64, whileLooking
 	if atSecond {
 		var end sync.Once                                                     // a later look, on a slow machine, finds it ended
 		inst.goneAtSecond = func() { end.Do(func() { close(consumerDone) }) } // the agent's stream ends
+		inst.refused = refusedErr(t)
 	}
 	wait(inst.entered, "the drain's look")
 	whileLooking()
@@ -790,7 +992,7 @@ func TestDrainTrailingMocks_AnAgentGoneAfterSayingItHeldAMockFailsTheRun(t *test
 func TestDrainTrailingMocks_AnAgentGoneAtTheFirstLookIsAWarning(t *testing.T) {
 	var frames atomic.Uint64
 	frames.Store(1)
-	lost, logs, code := gatedDrain(t, refusedErr(), &frames, func() {})
+	lost, logs, code := gatedDrain(t, refusedErr(t), &frames, func() {})
 	if lost || code != 0 || logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("ended its mock stream before it said").Len() != 1 {
 		t.Fatalf("want one WARN and the run not failed: lost=%v exit code %d: %v", lost, code, logs.All())
 	}
@@ -858,7 +1060,7 @@ func TestDrainTrailingMocks_AnAgentGoneAtTheNextLookGoesByTheOneBefore(t *testin
 func TestDrainTrailingMocks_MocksStillComingBeforeAnyAnswerAreAWarning(t *testing.T) {
 	var frames atomic.Uint64
 	frames.Store(1)
-	lost, logs, code := gatedDrain(t, refusedErr(), &frames, func() { frames.Add(1) }, true)
+	lost, logs, code := gatedDrain(t, refusedErr(t), &frames, func() { frames.Add(1) }, true)
 	if lost || code != 0 || logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("ended its mock stream before it said").Len() != 1 {
 		t.Fatalf("want one WARN and the run not failed: lost=%v exit code %d: %v", lost, code, logs.All())
 	}
@@ -933,7 +1135,7 @@ func (ownedGone) StartedAgent() bool { return true }
 func TestRecord_AnAgentThisClientStartedGoneBeforeTheDrainAsksFailsTheRun(t *testing.T) {
 	defer func(code int) { utils.ErrCode = code }(utils.ErrCode)
 	utils.ErrCode = 0
-	inst := &goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}}
+	inst := &goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}, refused: refusedErr(t)}
 	core, logs := observer.New(zapcore.WarnLevel)
 	cfg := &config.Config{}
 	cfg.Mock.Name = "owned-gone-test"
@@ -1024,7 +1226,7 @@ func TestRecord_AnAgentThatDiedUnderTheRunFailsWithItsExit(t *testing.T) {
 	defer func(code int) { utils.ErrCode = code }(utils.ErrCode)
 	utils.ErrCode = 0
 	inst := diedAgent{
-		ownedGone: ownedGone{&goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}}},
+		ownedGone: ownedGone{&goneInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)}, refused: refusedErr(t)}},
 		exited:    make(chan struct{}),
 	}
 	cfg := &config.Config{}
@@ -1109,7 +1311,7 @@ func TestDrainTrailingMocks_AComposeAgentsClosedStreamIsUnconfirmed(t *testing.T
 		closed := make(chan struct{})
 		close(closed)
 		lost, unconfirmed := m.drainTrailingMocks(closed, time.Now(), holds, func() (uint64, bool) { return 0, false }, func() uint64 { return 0 }, recordDrainWords, nil)
-		if unconfirmed != !holds || (!holds && lost) {
+		if (unconfirmed == tailStreamClosed) != !holds || (holds && unconfirmed != tailConfirmed) || (!holds && lost) {
 			t.Fatalf("agent holds %v, its stream closed: lost %v, unconfirmed %v", holds, lost, unconfirmed)
 		}
 		if n := logs.FilterMessage(composeTailUnconfirmed).Len(); n != 0 {

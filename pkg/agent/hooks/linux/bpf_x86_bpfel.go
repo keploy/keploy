@@ -16,20 +16,26 @@ import (
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	bpfMapAppBindSocks                = "app_bind_socks"
+	bpfMapAppConnEnds                 = "app_conn_ends"
 	bpfMapAppConnEvents               = "app_conn_events"
 	bpfMapAppConnEventsDropped        = "app_conn_events_dropped"
 	bpfMapAppConns                    = "app_conns"
 	bpfMapAppConnsEstablished         = "app_conns_established"
 	bpfMapAppConnsOn                  = "app_conns_on"
+	bpfMapAppPortBinds                = "app_port_binds"
 	bpfMapAppPortInfo                 = "app_port_info"
 	bpfMapBindEvents                  = "bind_events"
 	bpfMapExcludedPids                = "excluded_pids"
+	bpfMapInstanceLost                = "instance_lost"
+	bpfMapInstanceOfTgid              = "instance_of_tgid"
 	bpfMapKeployAgentKernelPidMap     = "keploy_agent_kernel_pid_map"
 	bpfMapKeployAgentRegistrationMap  = "keploy_agent_registration_map"
 	bpfMapKeployClientKernelPidMap    = "keploy_client_kernel_pid_map"
 	bpfMapKeployClientRegistrationMap = "keploy_client_registration_map"
 	bpfMapOrigDstByCookie             = "orig_dst_by_cookie"
 	bpfMapPendingBinds                = "pending_binds"
+	bpfMapPendingHolds                = "pending_holds"
 	bpfMapPidMapInsertFailures        = "pid_map_insert_failures"
 	bpfMapPidStartTimes               = "pid_start_times"
 	bpfMapProxyConnsEstablished       = "proxy_conns_established"
@@ -48,6 +54,7 @@ const (
 	bpfMapReadySocks                  = "ready_socks"
 	bpfMapRedirectProxyMap            = "redirect_proxy_map"
 	bpfMapSocketClassifyFailures      = "socket_classify_failures"
+	bpfMapStopSignals                 = "stop_signals"
 	bpfMapTargetNamespacePids         = "target_namespace_pids"
 	bpfMapUdpMemberAddrs              = "udp_member_addrs"
 	bpfMapUdpMemberSocks              = "udp_member_socks"
@@ -56,12 +63,14 @@ const (
 	bpfMapUdpReplyEpoch               = "udp_reply_epoch"
 	bpfMapUdpReplyEvents              = "udp_reply_events"
 	bpfMapUdpReplyEventsLost          = "udp_reply_events_lost"
+	bpfProgK_appConnRelease           = "k_app_conn_release"
 	bpfProgK_bind4                    = "k_bind4"
 	bpfProgK_bind6                    = "k_bind6"
 	bpfProgK_connect4                 = "k_connect4"
 	bpfProgK_connect6                 = "k_connect6"
 	bpfProgK_getpeername4             = "k_getpeername4"
 	bpfProgK_getpeername6             = "k_getpeername6"
+	bpfProgK_instanceFork             = "k_instance_fork"
 	bpfProgK_postBind4                = "k_post_bind4"
 	bpfProgK_postBind6                = "k_post_bind6"
 	bpfProgK_processExit              = "k_process_exit"
@@ -74,6 +83,7 @@ const (
 	bpfProgK_readyFork                = "k_ready_fork"
 	bpfProgK_sockCreate               = "k_sock_create"
 	bpfProgK_sockops                  = "k_sockops"
+	bpfProgK_stopSignal               = "k_stop_signal"
 	bpfProgK_udp4Recvmsg              = "k_udp4_recvmsg"
 	bpfProgK_udp4Sendmsg              = "k_udp4_sendmsg"
 	bpfProgK_udp6Recvmsg              = "k_udp6_recvmsg"
@@ -128,12 +138,14 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
+	K_appConnRelease        *ebpf.ProgramSpec `ebpf:"k_app_conn_release"`
 	K_bind4                 *ebpf.ProgramSpec `ebpf:"k_bind4"`
 	K_bind6                 *ebpf.ProgramSpec `ebpf:"k_bind6"`
 	K_connect4              *ebpf.ProgramSpec `ebpf:"k_connect4"`
 	K_connect6              *ebpf.ProgramSpec `ebpf:"k_connect6"`
 	K_getpeername4          *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
 	K_getpeername6          *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
+	K_instanceFork          *ebpf.ProgramSpec `ebpf:"k_instance_fork"`
 	K_postBind4             *ebpf.ProgramSpec `ebpf:"k_post_bind4"`
 	K_postBind6             *ebpf.ProgramSpec `ebpf:"k_post_bind6"`
 	K_processExit           *ebpf.ProgramSpec `ebpf:"k_process_exit"`
@@ -146,6 +158,7 @@ type bpfProgramSpecs struct {
 	K_readyFork             *ebpf.ProgramSpec `ebpf:"k_ready_fork"`
 	K_sockCreate            *ebpf.ProgramSpec `ebpf:"k_sock_create"`
 	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
+	K_stopSignal            *ebpf.ProgramSpec `ebpf:"k_stop_signal"`
 	K_udp4Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_recvmsg"`
@@ -162,20 +175,26 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
+	AppBindSocks                *ebpf.MapSpec `ebpf:"app_bind_socks"`
+	AppConnEnds                 *ebpf.MapSpec `ebpf:"app_conn_ends"`
 	AppConnEvents               *ebpf.MapSpec `ebpf:"app_conn_events"`
 	AppConnEventsDropped        *ebpf.MapSpec `ebpf:"app_conn_events_dropped"`
 	AppConns                    *ebpf.MapSpec `ebpf:"app_conns"`
 	AppConnsEstablished         *ebpf.MapSpec `ebpf:"app_conns_established"`
 	AppConnsOn                  *ebpf.MapSpec `ebpf:"app_conns_on"`
+	AppPortBinds                *ebpf.MapSpec `ebpf:"app_port_binds"`
 	AppPortInfo                 *ebpf.MapSpec `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.MapSpec `ebpf:"bind_events"`
 	ExcludedPids                *ebpf.MapSpec `ebpf:"excluded_pids"`
+	InstanceLost                *ebpf.MapSpec `ebpf:"instance_lost"`
+	InstanceOfTgid              *ebpf.MapSpec `ebpf:"instance_of_tgid"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
 	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.MapSpec `ebpf:"pending_binds"`
+	PendingHolds                *ebpf.MapSpec `ebpf:"pending_holds"`
 	PidMapInsertFailures        *ebpf.MapSpec `ebpf:"pid_map_insert_failures"`
 	PidStartTimes               *ebpf.MapSpec `ebpf:"pid_start_times"`
 	ProxyConnsEstablished       *ebpf.MapSpec `ebpf:"proxy_conns_established"`
@@ -194,6 +213,7 @@ type bpfMapSpecs struct {
 	ReadySocks                  *ebpf.MapSpec `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketClassifyFailures      *ebpf.MapSpec `ebpf:"socket_classify_failures"`
+	StopSignals                 *ebpf.MapSpec `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 	UdpMemberAddrs              *ebpf.MapSpec `ebpf:"udp_member_addrs"`
 	UdpMemberSocks              *ebpf.MapSpec `ebpf:"udp_member_socks"`
@@ -230,20 +250,26 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
+	AppBindSocks                *ebpf.Map `ebpf:"app_bind_socks"`
+	AppConnEnds                 *ebpf.Map `ebpf:"app_conn_ends"`
 	AppConnEvents               *ebpf.Map `ebpf:"app_conn_events"`
 	AppConnEventsDropped        *ebpf.Map `ebpf:"app_conn_events_dropped"`
 	AppConns                    *ebpf.Map `ebpf:"app_conns"`
 	AppConnsEstablished         *ebpf.Map `ebpf:"app_conns_established"`
 	AppConnsOn                  *ebpf.Map `ebpf:"app_conns_on"`
+	AppPortBinds                *ebpf.Map `ebpf:"app_port_binds"`
 	AppPortInfo                 *ebpf.Map `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.Map `ebpf:"bind_events"`
 	ExcludedPids                *ebpf.Map `ebpf:"excluded_pids"`
+	InstanceLost                *ebpf.Map `ebpf:"instance_lost"`
+	InstanceOfTgid              *ebpf.Map `ebpf:"instance_of_tgid"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
 	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.Map `ebpf:"pending_binds"`
+	PendingHolds                *ebpf.Map `ebpf:"pending_holds"`
 	PidMapInsertFailures        *ebpf.Map `ebpf:"pid_map_insert_failures"`
 	PidStartTimes               *ebpf.Map `ebpf:"pid_start_times"`
 	ProxyConnsEstablished       *ebpf.Map `ebpf:"proxy_conns_established"`
@@ -262,6 +288,7 @@ type bpfMaps struct {
 	ReadySocks                  *ebpf.Map `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketClassifyFailures      *ebpf.Map `ebpf:"socket_classify_failures"`
+	StopSignals                 *ebpf.Map `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 	UdpMemberAddrs              *ebpf.Map `ebpf:"udp_member_addrs"`
 	UdpMemberSocks              *ebpf.Map `ebpf:"udp_member_socks"`
@@ -274,20 +301,26 @@ type bpfMaps struct {
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.AppBindSocks,
+		m.AppConnEnds,
 		m.AppConnEvents,
 		m.AppConnEventsDropped,
 		m.AppConns,
 		m.AppConnsEstablished,
 		m.AppConnsOn,
+		m.AppPortBinds,
 		m.AppPortInfo,
 		m.BindEvents,
 		m.ExcludedPids,
+		m.InstanceLost,
+		m.InstanceOfTgid,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
 		m.OrigDstByCookie,
 		m.PendingBinds,
+		m.PendingHolds,
 		m.PidMapInsertFailures,
 		m.PidStartTimes,
 		m.ProxyConnsEstablished,
@@ -306,6 +339,7 @@ func (m *bpfMaps) Close() error {
 		m.ReadySocks,
 		m.RedirectProxyMap,
 		m.SocketClassifyFailures,
+		m.StopSignals,
 		m.TargetNamespacePids,
 		m.UdpMemberAddrs,
 		m.UdpMemberSocks,
@@ -327,12 +361,14 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
+	K_appConnRelease        *ebpf.Program `ebpf:"k_app_conn_release"`
 	K_bind4                 *ebpf.Program `ebpf:"k_bind4"`
 	K_bind6                 *ebpf.Program `ebpf:"k_bind6"`
 	K_connect4              *ebpf.Program `ebpf:"k_connect4"`
 	K_connect6              *ebpf.Program `ebpf:"k_connect6"`
 	K_getpeername4          *ebpf.Program `ebpf:"k_getpeername4"`
 	K_getpeername6          *ebpf.Program `ebpf:"k_getpeername6"`
+	K_instanceFork          *ebpf.Program `ebpf:"k_instance_fork"`
 	K_postBind4             *ebpf.Program `ebpf:"k_post_bind4"`
 	K_postBind6             *ebpf.Program `ebpf:"k_post_bind6"`
 	K_processExit           *ebpf.Program `ebpf:"k_process_exit"`
@@ -345,6 +381,7 @@ type bpfPrograms struct {
 	K_readyFork             *ebpf.Program `ebpf:"k_ready_fork"`
 	K_sockCreate            *ebpf.Program `ebpf:"k_sock_create"`
 	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
+	K_stopSignal            *ebpf.Program `ebpf:"k_stop_signal"`
 	K_udp4Recvmsg           *ebpf.Program `ebpf:"k_udp4_recvmsg"`
 	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
 	K_udp6Recvmsg           *ebpf.Program `ebpf:"k_udp6_recvmsg"`
@@ -359,12 +396,14 @@ type bpfPrograms struct {
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
+		p.K_appConnRelease,
 		p.K_bind4,
 		p.K_bind6,
 		p.K_connect4,
 		p.K_connect6,
 		p.K_getpeername4,
 		p.K_getpeername6,
+		p.K_instanceFork,
 		p.K_postBind4,
 		p.K_postBind6,
 		p.K_processExit,
@@ -377,6 +416,7 @@ func (p *bpfPrograms) Close() error {
 		p.K_readyFork,
 		p.K_sockCreate,
 		p.K_sockops,
+		p.K_stopSignal,
 		p.K_udp4Recvmsg,
 		p.K_udp4Sendmsg,
 		p.K_udp6Recvmsg,

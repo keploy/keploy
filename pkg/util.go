@@ -19,10 +19,12 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -355,9 +357,12 @@ type SimulationConfig struct {
 	// Unbounded: no clock bounds the app's answer, and APITimeout is not
 	// applied. The replay sets it under the proven switch when the user set
 	// no apiTimeout of their own (config.Test.APITimeoutSet, rule 15).
-	Unbounded       bool
-	RequestTimeout  time.Duration
-	ConfigPort      uint32
+	Unbounded      bool
+	RequestTimeout time.Duration
+	ConfigPort     uint32
+	// KeployPath is the recording's directory, the root the test case's
+	// files (a body or a form part kept beside it) are named from and read
+	// inside (ReadRecordingFile). With none, such a file is not read.
 	KeployPath      string
 	ConfigHost      string
 	URLReplacements map[string]string
@@ -627,22 +632,17 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
 
-	// If the request body was offloaded to an asset file (>1MB), load it back
+	// A body kept beside the test case (over 1 MB) is read back from its
+	// recording, cfg.KeployPath, and only from inside it (ReadRecordingFile).
 	if tc.HTTPReq.BodyRef.Path != "" {
-		bodyRefPath := tc.HTTPReq.BodyRef.Path
-		// Resolve relative paths against keployPath so assets work even if
-		// the keploy directory has been moved since recording.
-		if cfg.KeployPath != "" && !filepath.IsAbs(bodyRefPath) {
-			bodyRefPath = filepath.Join(cfg.KeployPath, bodyRefPath)
-		}
-		bodyData, readErr := os.ReadFile(bodyRefPath)
+		bodyData, readErr := ReadRecordingFile(cfg.KeployPath, tc.HTTPReq.BodyRef.Path)
 		if readErr != nil {
-			utils.LogError(logger, readErr, "failed to read request body from asset file", zap.String("path", bodyRefPath))
+			utils.LogError(logger, readErr, "failed to read the request body kept beside the test case")
 			return nil, readErr
 		}
 		reqBody = bodyData
 		logger.Debug("loaded request body from asset file",
-			zap.String("path", bodyRefPath),
+			zap.String("path", tc.HTTPReq.BodyRef.Path),
 			zap.Int("size", len(bodyData)))
 	}
 
@@ -652,13 +652,9 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			for j, value := range form.Values {
 				if value == "" && j < len(form.Paths) && form.Paths[j] != "" {
 					formPath := form.Paths[j]
-					if cfg.KeployPath != "" && !filepath.IsAbs(formPath) {
-						formPath = filepath.Join(cfg.KeployPath, formPath)
-					}
-					valData, readErr := os.ReadFile(formPath)
+					valData, readErr := ReadRecordingFile(cfg.KeployPath, formPath)
 					if readErr != nil {
-						utils.LogError(logger, readErr, "failed to read form value from asset file",
-							zap.String("path", formPath),
+						utils.LogError(logger, readErr, "failed to read the form value kept beside the test case",
 							zap.String("key", form.Key))
 						return nil, readErr
 					}
@@ -691,18 +687,14 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				zap.Int("paths", len(field.Paths)),
 			)
 			for _, path := range field.Paths {
-				// Resolve relative paths against keployPath
-				resolvedPath := path
-				if cfg.KeployPath != "" && !filepath.IsAbs(path) {
-					resolvedPath = filepath.Join(cfg.KeployPath, path)
-				}
-				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", field.Key))
-				file, ferr := os.Open(resolvedPath)
+				// Read from the recording, and only inside it (OpenRecordingFile).
+				logger.Debug("multipart file path", zap.String("path", path), zap.String("field", field.Key))
+				file, ferr := OpenRecordingFile(cfg.KeployPath, path)
 				if ferr != nil {
-					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", resolvedPath))
+					utils.LogError(logger, ferr, "failed to open the multipart file kept beside the test case", zap.String("field", field.Key))
 					return nil, ferr
 				}
-				part, perr := writer.CreateFormFile(field.Key, filepath.Base(resolvedPath))
+				part, perr := writer.CreateFormFile(field.Key, filepath.Base(path))
 				if perr != nil {
 					file.Close()
 					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
@@ -964,7 +956,9 @@ func (b *connClosingBody) Close() error {
 }
 
 // maxConnRefusedRetries bounds how many times a replay test request is re-sent
-// when the connection is REFUSED before the app accepts it. A refused connection
+// when the connection is REFUSED before the app accepts it, on a context
+// EndsWithApp did not mark (an application keploy did not start); on one it
+// marked the request waits for its address to accept instead (waitToReSend). A refused connection
 // proves the app never received the request — zero bytes sent, zero single-use
 // mocks consumed — so re-sending is safe and does NOT fabricate a result: it
 // obtains the real response the suite must assert on instead of a false
@@ -978,6 +972,283 @@ const (
 	maxConnRefusedRetries   = 3
 	connRefusedRetryBackoff = 150 * time.Millisecond
 )
+
+type endsWithAppKey struct{}
+
+// EndsWithApp marks ctx as the run of an application whose process keploy
+// runs itself: ctx is cancelled when that process exits (or when keploy is
+// stopped). A test request refused on such a context waits for its address
+// to accept a connection and is then sent again, with no count of re-sends
+// and no time limit: the application's exit is what ends the wait. A context
+// not marked (keploy did not start the application, or an embedder's run of
+// it does not end when it exits, so nothing would end the wait) keeps the
+// bounded re-send, maxConnRefusedRetries.
+func EndsWithApp(ctx context.Context) context.Context {
+	return context.WithValue(ctx, endsWithAppKey{}, true)
+}
+
+// AppExitEnds reports whether EndsWithApp marked ctx: the exit of the
+// application the test requests go to ends it.
+func AppExitEnds(ctx context.Context) bool {
+	marked, _ := ctx.Value(endsWithAppKey{}).(bool)
+	return marked
+}
+
+// acceptPollInterval is how often WaitForAccept dials an address that has
+// not accepted yet.
+const acceptPollInterval = 250 * time.Millisecond
+
+// WaitForAccept dials addr over TCP until it accepts a connection, which it
+// closes at once. Only ctx ends the wait: it returns nil once addr accepted,
+// or ctx's error. refused, when not nil, is called once, with the first
+// dial's error, when that dial is not accepted; from then on the wait says
+// every stillWaitingEvery that it still waits (SayStillWaiting).
+func WaitForAccept(ctx context.Context, logger *zap.Logger, addr string, refused func(error)) error {
+	dialer := net.Dialer{Timeout: 800 * time.Millisecond}
+	began := time.Now()
+	said := false
+	still := func() {}
+	defer func() { still() }()
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !said {
+			said = true
+			if refused != nil {
+				refused(err)
+			}
+			still = SayStillWaiting(ctx, logger, "accept a connection", addr, began)
+		}
+		retry := time.NewTimer(acceptPollInterval)
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return ctx.Err()
+		case <-retry.C:
+		}
+	}
+}
+
+// stillWaitingEvery is how often a wait for the application with no time
+// limit says it is still waiting. A var only so that a test can shorten it.
+var stillWaitingEvery = 30 * time.Second
+
+// SayStillWaiting logs, every stillWaitingEvery until the returned stop is
+// called or ctx ends, that keploy still waits for the application to do what
+// on addr, and how long it has waited since began: a wait that only the
+// application's exit or keploy's stop ends says what it waits on. A log
+// line, never a verdict. When the application keploy started listens on
+// other ports but not on addr's (utils.AppListenPorts), the line names them,
+// so a wrong port is plain. A nil logger says nothing. stop returns once the
+// line can no longer be said: a line that was being said as stop was called
+// is said before stop returns, never after.
+func SayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string, began time.Time) (stop func()) {
+	return sayStillWaiting(ctx, logger, what, addr, began, nil)
+}
+
+// stillGate holds a still-waiting line between the waits of one request: no
+// line is said while it is held. hold returns only once no line can be said
+// until open: a line that was being said as it was called is said before it
+// returns, never after. The zero value is open.
+type stillGate struct {
+	mu   sync.Mutex
+	held bool
+}
+
+func (g *stillGate) hold() { g.set(true) }
+func (g *stillGate) open() { g.set(false) }
+
+func (g *stillGate) set(held bool) {
+	g.mu.Lock()
+	g.held = held
+	g.mu.Unlock()
+}
+
+// sayIfOpen says line unless g holds it; a nil g holds nothing.
+func (g *stillGate) sayIfOpen(say func()) {
+	if g == nil {
+		say()
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.held {
+		say()
+	}
+}
+
+// sayStillWaiting is SayStillWaiting, with the line said only while gate is
+// open (always with a nil gate): its timer runs from began across the holds,
+// so a wait held and opened more often than stillWaitingEvery still says it
+// waits.
+func sayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string, began time.Time, gate *stillGate) (stop func()) {
+	if logger == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	every := stillWaitingEvery
+	go func() {
+		defer close(exited)
+		tick := time.NewTicker(every)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case now := <-tick.C:
+				gate.sayIfOpen(func() { logger.Info(stillWaitingLine(ctx, what, addr, now.Sub(began))) })
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(done) })
+		<-exited
+	}
+}
+
+// stillWaitingLine is SayStillWaiting's line.
+func stillWaitingLine(ctx context.Context, what, addr string, waited time.Duration) string {
+	line := fmt.Sprintf("still waiting for the application to %s on %s: %s so far. The wait ends when it does, when the application exits, or when keploy is stopped", what, addr, waited.Round(time.Second))
+	if other := otherListenPorts(ctx, addr); other != "" {
+		line += ". " + other
+	}
+	return line
+}
+
+// otherListenPorts says which ports the application keploy started listens
+// on when they do not include addr's: "" when they do, or when they are not
+// known.
+func otherListenPorts(ctx context.Context, addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	ports := utils.AppListenPorts(ctx)
+	if len(ports) == 0 {
+		return ""
+	}
+	listed := make([]string, len(ports))
+	for i, p := range ports {
+		listed[i] = strconv.Itoa(p)
+		if listed[i] == port {
+			return ""
+		}
+	}
+	return fmt.Sprintf("The application listens on %s, not on %s", strings.Join(listed, ", "), port)
+}
+
+type noAddressProbeKey struct{}
+
+// WithoutAddressProbe marks ctx as one on which keploy may not dial the
+// application's address only to learn whether it accepts, a connection it
+// opens and closes having sent nothing (config.Test.DisableAppReadyProbe:
+// at a port-forward, such a connection can tear the forward down). A test
+// request refused on such a context EndsWithApp marked is sent again every
+// acceptPollInterval instead (waitToReSend): a refused connection carries
+// none of it, and an accepted one is the test's own.
+func WithoutAddressProbe(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noAddressProbeKey{}, true)
+}
+
+// AddressProbeAllowed reports whether keploy may dial the application's
+// address on ctx only to learn whether it accepts: true unless
+// WithoutAddressProbe marked ctx.
+func AddressProbeAllowed(ctx context.Context) bool {
+	off, _ := ctx.Value(noAddressProbeKey{}).(bool)
+	return !off
+}
+
+// reSendWait is what the waits of one test request (or gRPC dial) refused on
+// a context EndsWithApp marked share: when the first began (zero before it),
+// and the line that says every stillWaitingEvery that it still waits for the
+// application to accept a connection. The line is said only while the
+// request waits for that: from each wait until its address accepted the
+// probe, or, where it may not be probed, until the request's own connection
+// was made (connMade); gate holds it in between. end stops it.
+type reSendWait struct {
+	began time.Time
+	gate  stillGate
+	still func()
+}
+
+// connMade holds the line: the request's own connection was made, so it no
+// longer waits for the application to accept one.
+func (w *reSendWait) connMade() { w.gate.hold() }
+
+// end stops the line that says the request still waits.
+func (w *reSendWait) end() {
+	if w.still != nil {
+		w.still()
+	}
+}
+
+// heldOnConnection returns req with a trace that holds w's line once req has
+// its connection (httptrace GotConn: called in client.Do's own goroutine,
+// before req is written, for a new connection or a reused one alike).
+func heldOnConnection(req *http.Request, w *reSendWait) *http.Request {
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { w.connMade() },
+	}))
+}
+
+// waitToReSend is the wait of a test request refused at addr on a context
+// EndsWithApp marked, until it may be sent again: until addr accepts a
+// connection, or, where the address may not be probed (AddressProbeAllowed),
+// for acceptPollInterval. Only ctx ends it before then. The request's first
+// wait says, once, that it waits and what for; every later one (the request
+// was refused again after its address accepted) begins with a pause of
+// acceptPollInterval, so that a request whose address accepts but whose own
+// connection is refused is sent again at that pace, never at once. Its line
+// that says it still waits (w) is said from each wait until addr accepted;
+// where addr may not be probed, the caller holds it once the request's own
+// connection is made (heldOnConnection). keploy waits here for an event of
+// its own choosing, not on the application's answer: under the proven
+// switch the answer stall rule does not count the wait (holdAnswerStall).
+func waitToReSend(ctx context.Context, logger *zap.Logger, what, addr string, refusal error, w *reSendWait) error {
+	defer holdAnswerStall(ctx)()
+	probe := AddressProbeAllowed(ctx)
+	first := w.began.IsZero()
+	if first {
+		w.began = time.Now()
+		if probe {
+			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; waiting for it to accept a connection, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped", what, addr),
+				zap.Error(refusal))
+		} else {
+			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; sending it again every %s until it is accepted (probing the application's address is disabled by configuration). The wait ends when it is, when the application exits, or when keploy is stopped", what, addr, acceptPollInterval),
+				zap.Error(refusal))
+		}
+		w.still = sayStillWaiting(ctx, logger, "accept a connection", addr, w.began, &w.gate)
+	} else {
+		w.gate.open()
+	}
+	if !first || !probe {
+		pause := time.NewTimer(acceptPollInterval)
+		select {
+		case <-ctx.Done():
+			pause.Stop()
+			return ctx.Err()
+		case <-pause.C:
+		}
+	}
+	if !probe {
+		return nil
+	}
+	if err := WaitForAccept(ctx, nil, addr, nil); err != nil {
+		return err
+	}
+	w.gate.hold()
+	return nil
+}
 
 // isPreResponseConnRefused reports whether err is a pure "connection refused".
 // errors.Is unwraps the *url.Error -> *net.OpError -> *os.SyscallError ->
@@ -1082,8 +1353,11 @@ func IsAppConnectionError(err error) bool {
 // context.Canceled), or the connection closed part-way through the answer
 // (isAnswerCutShort). grpc-go turns the end of a call's
 // context into a status and keeps no cause, so a gRPC call's is its code
-// (isGRPCNoAnswer). This is replay's no-answer mark, which holds off the mocks
-// prune and a new mappings.yaml, and replay asks only this to set it.
+// (isGRPCNoAnswer). This is replay's no-answer mark, and replay asks only this
+// to set it. It holds off a new mappings.yaml. The mocks prune runs past it,
+// keeping each marked test's own mocks, unless a cancel ended the request
+// (IsNoAnswerCanceled) or those mocks could not be read: then it holds the
+// whole set.
 //
 // It is not APP_CONNECTION_ERROR: a stop's cancel is not the app being down.
 // An answer that came back whole but does not decode (answerDoesNotDecode) is
@@ -1097,6 +1371,18 @@ func IsAppNoAnswer(err error) bool {
 		isAnswerCutShort(err) ||
 		isGRPCNoAnswer(err) ||
 		errors.Is(err, ErrAnswerStalled)
+}
+
+// IsNoAnswerCanceled reports whether err is a no-answer (IsAppNoAnswer) that a
+// cancel ended: context.Canceled, or a gRPC call's Canceled code. That is a
+// stop's, the user's or the run's, and says nothing of the test whose request
+// it ended, so replay's mock prune holds the whole set for it, where it holds
+// only each test's own mocks for a test that got no answer of its own.
+func IsNoAnswerCanceled(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || isGRPCCanceled(err)
 }
 
 // IsTransportConnReset reports whether err is a transport-level connection
@@ -1132,15 +1418,22 @@ func IsTransportConnReset(err error) bool {
 }
 
 // doRequestWithConnRefusedRetry executes client.Do, re-sending ONLY on a
-// pre-response connection-refused (bounded, ctx-aware backoff, request body
-// rewound via GetBody). Any other error, or a real response, returns
-// immediately — so a genuinely crashed/unreachable app still fails fast after
-// the bounded retries, and a mid-response reset is never retried. A refusal,
+// pre-response connection-refused (request body rewound via GetBody): on a
+// context EndsWithApp marked, once the request's address accepts a
+// connection (or every acceptPollInterval where it may not be probed,
+// WithoutAddressProbe), with only the context ending the wait; on any other, a bounded
+// number of times with a ctx-aware backoff. Any other error, or a real
+// response, returns immediately, and a mid-response reset is never retried. A refusal,
 // reset or drop at an address reach says the app's server on appPort (the port
 // the test was recorded on, 0 when not known) can never be reached at fails at
 // once, saying why, as an *UnreachableAppPortError.
 func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability, appPort uint16) (*http.Response, error) {
 	asked := false
+	var wait reSendWait
+	defer wait.end()
+	// The request's own connection ends its wait for the application to
+	// accept one: where the address may not be probed, nothing else does.
+	req = heldOnConnection(req, &wait)
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err == nil {
@@ -1160,7 +1453,8 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 		if !refused {
 			return nil, err
 		}
-		if attempt >= maxConnRefusedRetries {
+		waits := AppExitEnds(ctx)
+		if !waits && attempt >= maxConnRefusedRetries {
 			return nil, err
 		}
 		// Only retry if we can faithfully re-send the body; otherwise stop so we
@@ -1174,6 +1468,13 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 				return nil, err
 			}
 			req.Body = body
+		}
+		if waits {
+			host, port := urlHostPort(req.URL)
+			if waitToReSend(ctx, logger, "test request", net.JoinHostPort(host, port), err, &wait) != nil {
+				return nil, err
+			}
+			continue
 		}
 		logger.Warn("test request refused by app (app not yet accepting connections); re-sending — the request was never processed, so this is not a retry of an assertion",
 			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(err))
@@ -1842,12 +2143,12 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 					if nextExpected == 0 {
 						// A recording of no frame, and the app sent
 						// none: nothing of the answer to compare.
-						return false, strings.Join(actualQueue, "\n\n"), nil, keptOpenWithKeepalivesOnly()
+						return false, sseBodyOf(actualQueue), nil, keptOpenWithKeepalivesOnly()
 					}
-					return true, strings.Join(actualQueue, "\n\n"), nil, ErrStreamHeldOpen
+					return true, sseBodyOf(actualQueue), nil, ErrStreamHeldOpen
 				}
 				actualQueue = append(actualQueue, frame)
-				return false, strings.Join(actualQueue, "\n\n"), trailingFrame(len(expectedQueue), frame), nil
+				return false, sseBodyOf(actualQueue), trailingFrame(len(expectedQueue), frame), nil
 			}
 			logger.Debug("received additional SSE data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
@@ -1869,7 +2170,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 				ActualFrame:   frame,
 				Reason:        reason,
 			}
-			return false, strings.Join(actualQueue, "\n\n"), mismatchInfo, nil
+			return false, sseBodyOf(actualQueue), mismatchInfo, nil
 		}
 
 		nextExpected++
@@ -1881,7 +2182,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "frame")
+		return false, sseBodyOf(actualQueue), nil, streamCut(err, nextExpected, len(expectedQueue), "frame")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -1899,10 +2200,21 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 			ActualFrame:   "(stream ended - no more frames)",
 			Reason:        fmt.Sprintf("expected %d frames but only received %d", len(expectedQueue), nextExpected),
 		}
-		return false, strings.Join(actualQueue, "\n\n"), mismatchInfo, nil
+		return false, sseBodyOf(actualQueue), mismatchInfo, nil
 	}
 
-	return true, strings.Join(actualQueue, "\n\n"), nil, nil
+	return true, sseBodyOf(actualQueue), nil, nil
+}
+
+// sseBodyOf is the body of an SSE stream of frames, as the wire carries it:
+// each frame ended by a blank line, the last one too, as a recording's body
+// reads back (models.HTTPResp: its frames each ended), so a diff of the two
+// shows no blank line that only one has. No frame is no body.
+func sseBodyOf(frames []string) string {
+	if len(frames) == 0 {
+		return ""
+	}
+	return strings.Join(frames, "\n\n") + "\n\n"
 }
 
 func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
@@ -3240,6 +3552,81 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 	return err
 }
 
+// ShownAgentURI is uri as keploy says it, in its logs and in what it
+// reports: all of what comes before its last @ is shown as xxxxx, past its
+// scheme's :// where it has one. That is all of its userinfo, a name as much
+// as a password (k8s-proxy seals a token into keploy-agent://), whatever
+// characters it has: nothing parses the URI to decide what to hide, so one
+// that does not parse, or whose password a raw / ? or # breaks up, shows none
+// of it either, and a URI with an @ past its host shows less of itself than
+// it could. A URI with no @ has no userinfo, and is shown as it is. The scheme
+// is said as RFC 3986 reads it: a token spelled as a scheme, before a :// of
+// its own (t0ken://x@host), is not told from one, and is said.
+func ShownAgentURI(uri string) string {
+	at := strings.LastIndex(uri, "@")
+	if at < 0 {
+		return uri
+	}
+	return agentURIScheme.FindString(uri) + "xxxxx" + uri[at:]
+}
+
+// agentURIScheme is a URI's scheme, as RFC 3986 spells one, and its ://: all
+// that ShownAgentURI says of what comes before the URI's last @.
+var agentURIScheme = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*://`)
+
+// agentURIAtEndsUserinfo reports whether uri parses with a host and its one @
+// ends that host's userinfo. With a scheme, all that a password in it can then
+// be is what url.URL.User holds. With none it can be more: a request for
+// //://tok@h has the URL //tok@h, whose tok came from a path. Such a request
+// goes no further than net/http's "unsupported protocol scheme", which quotes
+// none of the URI.
+func agentURIAtEndsUserinfo(uri string) bool {
+	u, err := url.Parse(uri)
+	return err == nil && u.User != nil && strings.Count(uri, "@") == 1
+}
+
+// ShownAgentURIError is err, an error from making or sending a request to an
+// agent URI, as keploy says it; every such error goes through it before a log
+// line or a reason says it. An error with no url.Error in it names no URI, and
+// is err as it is. One with a url.Error in it:
+//   - url.Parse's is said with none of its text, with or without an @: it
+//     names the URI, cut short at a raw # in a password, where no @ is left to
+//     show where the password ends, and its inner error quotes it too (a bad
+//     port, a bad escape). The caller says the URI itself (ShownAgentURI);
+//   - a request's, for a URI with no @, is err as it is: that URI has no
+//     userinfo;
+//   - any other request's has its URI shown as ShownAgentURI shows it. Its
+//     inner error is kept only for a URI whose @ ends its userinfo, the one
+//     shape whose host and port hold nothing of a password.
+func ShownAgentURIError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	if ue.Op == "parse" {
+		return errAgentURINotParsed
+	}
+	if !strings.Contains(ue.URL, "@") {
+		return err
+	}
+	inner := ue.Err
+	if !agentURIAtEndsUserinfo(ue.URL) {
+		inner = &agentRequestFailed{err: ue.Err}
+	}
+	return &url.Error{Op: ue.Op, URL: ShownAgentURI(ue.URL), Err: inner}
+}
+
+// errAgentURINotParsed is what ShownAgentURIError says of url.Parse's error.
+var errAgentURINotParsed = errors.New("the agent URI does not parse")
+
+// agentRequestFailed is what ShownAgentURIError says in place of a request's
+// inner error: none of err's text, while errors.Is and errors.As still read it
+// (a cancelled request stays one).
+type agentRequestFailed struct{ err error }
+
+func (e *agentRequestFailed) Error() string { return "the request failed" }
+func (e *agentRequestFailed) Unwrap() error { return e.err }
+
 // agentHealthFirstWait is how long the first agent health check waits for its
 // answer. An agent on the same host answers in well under a millisecond, and one
 // that is not up yet refuses the connection at once, so this keeps the local case
@@ -3250,6 +3637,27 @@ func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx con
 const (
 	agentHealthFirstWait = 500 * time.Millisecond
 	agentHealthMaxWait   = 30 * time.Second
+)
+
+// agentHealthFirstLook is how soon after its start the agent health check
+// first looks, and AgentHealthEvery how long it pauses between two checks
+// after that, timed from the start of the check before (agentHealthTicker): an
+// agent is found ready within about AgentHealthEvery of answering, however
+// long it took to start. No busy loop: a check of an agent not up yet on this
+// host is one refused connect, twenty a second at most.
+//
+// No signal replaces the checks. The agent's only channel to keploy that every
+// way of running it has (native under sudo, its docker container, a port
+// forwarded to a remote one) is this health endpoint: sudo closes inherited
+// descriptors above stderr, so a pipe or a descriptor the agent could close
+// needs a sudoers change; the file a native agent reports its start in
+// (utils.MarkBootReady) is on this host for a native agent alone, and keploy
+// reads it by looking, as it checks this endpoint; and nothing answers a long
+// poll before the agent listens. The health check must be answered anyway,
+// for the proven switch its headers carry.
+const (
+	agentHealthFirstLook = 10 * time.Millisecond
+	AgentHealthEvery     = 50 * time.Millisecond
 )
 
 // nextAgentHealthWait is how long the next agent health check waits: twice the
@@ -3272,8 +3680,9 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 	return 2 * wait
 }
 
-// AgentHealthTicker checks the agent's health endpoint every checkInterval
-// until an answer finds it healthy, sends true on agentReadyCh, and returns. It
+// AgentHealthTicker checks the agent's health endpoint until an answer finds
+// it healthy, sends true on agentReadyCh, and returns. It checks
+// agentHealthFirstLook after it starts, then once every AgentHealthEvery. It
 // returns when ctx ends too, and closes agentReadyCh either way, so a receive
 // that gets false means ctx ended first.
 //
@@ -3285,9 +3694,9 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 // for it, off this goroutine and after the readiness signal, so the check never
 // spends the caller's readiness budget. That check can log at error level, which
 // keploy's CI treats as fatal.
-func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
+func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool) {
 	defer close(agentReadyCh)
-	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(http.Header) bool {
+	agentHealthTicker(ctx, logger, wallClock{}, agentURI, func(http.Header) bool {
 		select {
 		case agentReadyCh <- true:
 			return true
@@ -3302,9 +3711,9 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 // so the caller reads what that same answer said, with no second request that
 // an agent which has since stopped answering, or a budget that has since run
 // out, could fail. A receive that gets nil means ctx ended first.
-func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI string, answers chan<- http.Header, checkInterval time.Duration) {
+func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI string, answers chan<- http.Header) {
 	defer close(answers)
-	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(header http.Header) bool {
+	agentHealthTicker(ctx, logger, wallClock{}, agentURI, func(header http.Header) bool {
 		select {
 		case answers <- header:
 			return true
@@ -3314,49 +3723,87 @@ func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentU
 	})
 }
 
-// agentHealthTicker is the loop of the two above: it checks the agent's health
-// every checkInterval until an answer finds it healthy, hands that answer's
-// headers to ready, which reports whether it delivered them (false when ctx
-// ended first), and returns; or it returns when ctx ends.
-func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, checkInterval time.Duration, ready func(http.Header) bool) {
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
+// agentHealthClock is the time agentHealthTicker paces its checks and times
+// each one out by: wallClock in keploy. Its tests run it on a clock they move
+// themselves, so when the checks come does not depend on how busy the machine
+// running them is.
+type agentHealthClock interface {
+	Now() time.Time
+	// Sleep waits d, or until ctx ends, and reports whether d passed first.
+	// A d of zero or less waits for nothing.
+	Sleep(ctx context.Context, d time.Duration) bool
+	// WithTimeout is context.WithTimeout, timed by this clock.
+	WithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc)
+}
 
+// wallClock is the agentHealthClock of the time of day.
+type wallClock struct{}
+
+func (wallClock) Now() time.Time { return time.Now() }
+
+func (wallClock) Sleep(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (wallClock) WithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, d)
+}
+
+// agentHealthTicker is the loop of the two above: it checks the agent's health
+// until an answer finds it healthy, hands that answer's headers to ready, which
+// reports whether it delivered them (false when ctx ended first), and returns;
+// or it returns when ctx ends. The first check comes agentHealthFirstLook
+// after the start, and the next ones AgentHealthEvery apart, timed from the
+// start of the check before (one that took longer, as a check through a slow
+// port forward may, is followed at once): an agent up a few milliseconds
+// after keploy started it is found then, and one slow to start within about
+// AgentHealthEvery of coming up. All of it is timed by clock.
+func agentHealthTicker(ctx context.Context, logger *zap.Logger, clock agentHealthClock, agentURI string, ready func(http.Header) bool) {
 	// No client-wide timeout: each check waits as long as `wait` (below).
 	client := &http.Client{}
 	wait := agentHealthFirstWait
+	// Said once, not at each check: twenty a second would bury the log.
+	logger.Debug("Checking agent health", zap.String("url", ShownAgentURI(agentURI+"/health")), zap.Duration("every", AgentHealthEvery))
 
+	pause := agentHealthFirstLook
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			checkCtx, cancel := context.WithTimeout(ctx, wait)
-			header := agentHealthAnswer(checkCtx, logger, client, agentURI)
-			timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
-			cancel()
-			if next := nextAgentHealthWait(wait, timedOut); next != wait {
-				logger.Debug("agent health check ran out of time; the next one waits longer",
-					zap.String("agentURI", agentURI), zap.Duration("waited", wait), zap.Duration("next_wait", next))
-				wait = next
-			}
-			if header == nil {
-				continue
-			}
-			if ready(header) {
-				// Only now, and off this goroutine. The check is a
-				// diagnostic: every caller races this signal against a
-				// readiness deadline, and spending any of that budget on it
-				// could fail the user's run with "did not become ready"
-				// against an agent that had just answered its health check.
-				// Detached from ctx for the same reason it runs at all --
-				// the caller cancels this context as soon as it has its
-				// answer, which would cancel the check before it could
-				// report anything.
-				go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
-			}
+		if !clock.Sleep(ctx, pause) {
 			return
 		}
+		began := clock.Now()
+		checkCtx, cancel := clock.WithTimeout(ctx, wait)
+		header := agentHealthAnswer(checkCtx, logger, client, agentURI)
+		timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+		cancel()
+		if next := nextAgentHealthWait(wait, timedOut); next != wait {
+			logger.Debug("agent health check ran out of time; the next one waits longer",
+				zap.String("agentURI", ShownAgentURI(agentURI)), zap.Duration("waited", wait), zap.Duration("next_wait", next))
+			wait = next
+		}
+		if header == nil {
+			pause = AgentHealthEvery - clock.Now().Sub(began)
+			continue
+		}
+		if ready(header) {
+			// Only now, and off this goroutine. The check is a
+			// diagnostic: every caller races this signal against a
+			// readiness deadline, and spending any of that budget on it
+			// could fail the user's run with "did not become ready"
+			// against an agent that had just answered its health check.
+			// Detached from ctx for the same reason it runs at all --
+			// the caller cancels this context as soon as it has its
+			// answer, which would cancel the check before it could
+			// report anything.
+			go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
+		}
+		return
 	}
 }
 
@@ -3366,11 +3813,9 @@ func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 // other than 200, whose headers say nothing about the agent.
 func agentHealthAnswer(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) http.Header {
 	healthURL := fmt.Sprintf("%s/health", agentURI)
-	logger.Debug("Checking agent health", zap.String("url", healthURL))
-
 	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
-		logger.Debug("Failed to create health check request", zap.Error(err))
+		logger.Debug("Failed to create health check request", zap.Error(ShownAgentURIError(err)))
 		return nil
 	}
 
@@ -3415,6 +3860,17 @@ type TestSetMocksReader interface {
 // the mock to the agent (models.Mock.WithPayload).
 type TestSetMockIndexReader interface {
 	IndexTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
+// TestSetMockWalker is an optional extension of the mock store: every mock of a
+// test set's mock file, before the mapping prune and the window filter (what
+// TestSetMocks.AllPerTest and AllSession hold), handed to visit one at a time
+// as it is decoded, with the pools it is in (both, for the gob store's
+// PostgresV2 mocks of session or connection lifetime). A reader that keeps a
+// few fields of each mock then holds one decoded mock at a time, never the
+// set. visit must not keep m.
+type TestSetMockWalker interface {
+	WalkTestSetMocks(ctx context.Context, testSetID string, visit func(m *models.Mock, perTest, session bool)) error
 }
 
 // ConsumedScopeReader is an optional extension of the instrumentation a replay
@@ -3489,6 +3945,17 @@ type TestCaseFilterSender interface {
 // today's rules.
 type BackgroundRulesReader interface {
 	AgentServesBackground() string
+}
+
+// MockWindowReader is an optional extension of the instrumentation a replay
+// talks to the agent through: what the agent's answers to /updatemockparams,
+// since the set's mocks were stored, said of how it served their windows
+// (models.MockWindowHeader): its strict mock window mode, with the agent's own
+// KEPLOY_STRICT_MOCK_WINDOW folded in, and whether its per-test load ran the
+// carry-over lookahead. ok is false when it has not said, as an agent older
+// than the header does. Without it, or not ok, the agent has not said.
+type MockWindowReader interface {
+	AgentMockWindow() (said models.MockWindowsSaid, ok bool)
 }
 
 // PerTestRegion is the set of names of the per-test mocks a test set hands the
@@ -3947,6 +4414,7 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 	}
 
 	strict := strictWindowEnabled(strictPerCall)
+	w := ServeWindow{Start: afterTime, End: beforeTime, FirstStart: firstWindowStart, InFlightFrom: inFlightFrom, StrictPerCall: strictPerCall, StrictWindow: strictWindow}
 	isNonKeploy := false
 	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 
@@ -3960,190 +4428,101 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
-		// A window-bound mock (a connection failure) is served from its own
-		// window or the startup band and nowhere else, in both modes — see
-		// placeWindowBound. Routed before every rule below, each of which can
-		// otherwise hand it to every test: the untimed branch, the session
-		// short-circuit, the config/connection tag fallback, lax promotion.
-		if models.WindowBound(p.Kind) {
-			if placeWindowBound(p, afterTime, beforeTime, firstWindowStart) == windowBoundDropped {
-				droppedWindowBound++
-				continue
-			}
+		// Each mock is routed by the rule ServeInWindow names (serveRuleOf),
+		// the one decision the replayer's mock prune asks too. The rules, in
+		// the order they apply:
+		//
+		//   - A window-bound mock (a connection failure) is served from its own
+		//     window or the startup band and nowhere else, in both modes — see
+		//     placeWindowBound. Routed before every rule below, each of which can
+		//     otherwise hand it to every test: the untimed branch, the session
+		//     short-circuit, the config/connection tag fallback, lax promotion.
+		//   - A mock missing a timestamp is kept in the per-test slice.
+		//   - Lifetime-first routing (mockdb/filter-layer authoritative
+		//     attribution design): Session- and Connection-lifetime mocks
+		//     belong in the session/unfiltered pool REGARDLESS of whether their
+		//     request-timestamp falls inside the current test window. They are
+		//     cross-test reusable by contract — a BEGIN / SET / SHOW / handshake
+		//     probe captured during test-N's window is still a session-lifetime
+		//     probe; routing it into test-N's per-test pool would make it
+		//     invisible to every subsequent test. The metadata.scope field is
+		//     NOT read for pool routing anywhere in the filter/mockmanager
+		//     layer; scope and lifetime may legitimately disagree on the wire.
+		//   - BELOW that short-circuit, deliberately: a mock whose response is
+		//     stamped before its request is left out (LeaveOutAnsweredBeforeAsked).
+		//     Only per-test mocks are window-routed, so a skewed pair cannot
+		//     mis-route a session or config mock; running it above the
+		//     short-circuit dropped clock-skewed session mocks (an auth or
+		//     handshake recording) out of EVERY pool.
+		//   - Defensive fallback: DeriveLifetime may not have run on mocks built
+		//     inline by tests or legacy ingest paths, so the raw
+		//     Metadata["type"] config/connection tag routes to the session pool
+		//     when no lifetime is stated. metadata.scope is NOT consulted.
+		//   - In-window = placed inside [afterTime, beforeTime] (models.PlaceOf):
+		//     its request time, or its answer's for a mock placed at its answer.
+		//     The response may straggle past beforeTime; the cross-test bleed
+		//     strict mode protects against is out-of-window REQUESTS.
+		//   - Startup-init (placed before firstWindowStart) is preserved in the
+		//     filtered slice, in BOTH modes, so MockManager.SetMocksWithWindow's
+		//     startup-tier partition routes it into the startup tree, where the
+		//     tier-aware dispatcher reaches it via GetStartupMocks. It used to sit
+		//     inside the strict branch, and agentStrict is permanently false on a
+		//     WindowedProxy, so the startup tier was EMPTY for the whole run and a
+		//     bootstrap query issued while a window was open missed with
+		//     candidates:0. A zero firstWindowStart means "no cutoff yet".
+		//   - In flight when the window began: sent in the gap before it and
+		//     answered at or after its start (a consumer's long poll). The
+		//     window's test's, in the user's strict window mode, and for a stated
+		//     mock in lax mode too.
+		//   - A per-test mock whose recorder stated its lifetime is the data of
+		//     the test it was recorded in, and is served to no other test
+		//     whatever the window mode: lax promotion exists for recordings whose
+		//     recorders could not tell data from shared traffic. Nor does
+		//     KEPLOY_STRICT_MOCK_WINDOW=0 serve it to another test: an HTTP call
+		//     every test may make is declared in keploy.yaml
+		//     (models.SessionCallRule). Under strict, an out-of-window per-test
+		//     mock is dropped — the strictMockWindow guarantee.
+		//   - Legacy (lax, unstated): anything out-of-window goes to the
+		//     unfiltered pool, where parsers may still pick it up as a fallback.
+		switch serveRuleOf(logger, p, w) {
+		case ruleWindowBoundDropped:
+			droppedWindowBound++
+		case ruleWindowBoundInWindow, ruleWindowBoundStartup:
 			p.TestModeInfo.Lifetime = models.LifetimePerTest
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
-			continue
-		}
-		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
+		case ruleUntimed:
 			logger.Debug("request or response timestamp of mock is missing",
 				zap.String("mock", p.Name), zap.Bool("strict", strict))
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
-			continue
-		}
-
-		// Lifetime-first routing (mockdb/filter-layer authoritative
-		// attribution design): Session- and Connection-lifetime mocks
-		// belong in the session/unfiltered pool REGARDLESS of whether
-		// their request-timestamp happens to fall inside the current
-		// test window. Semantics: these are cross-test reusable by
-		// contract — a BEGIN / SET / SHOW / handshake probe that was
-		// captured during test-N's window is still a session-lifetime
-		// probe; routing it into test-N's per-test pool would make it
-		// invisible to every subsequent test (per-test pools are
-		// single-test-scoped). This is load-bearing for the user's
-		// "route by lifetime + reqTimestampMock, ignore metadata.scope"
-		// design — a perTest-lifetime mock stamped scope=session by the
-		// recorder (scope is informational-only on the wire) but whose
-		// req-timestamp sits inside test-N's window still falls through
-		// to the timestamp-based in-window check below and lands in
-		// test-N's per-test pool. The metadata.scope field is NOT read
-		// for pool routing anywhere in the filter/mockmanager layer;
-		// scope and lifetime may legitimately disagree on the wire when
-		// the recorder's context-probe captured a session-scope fire
-		// inside a live test window.
-		if p.TestModeInfo.Lifetime == models.LifetimeSession ||
-			p.TestModeInfo.Lifetime == models.LifetimeConnection {
-			p.TestModeInfo.IsFiltered = false
-			unfilteredMocks = append(unfilteredMocks, p)
-			continue
-		}
-		// NOTE: this runs BELOW the session/connection short-circuit above,
-		// deliberately. It is a window-ordering sanity check, and only per-test
-		// mocks are window-routed — a session or config mock is never compared
-		// against a test window, so a skewed pair cannot mis-route it. Running
-		// it above the short-circuit dropped clock-skewed session mocks (an
-		// auth or handshake recording) out of EVERY pool, which is a hard miss
-		// on traffic that had a perfectly good mock. mockmanager's own
-		// equivalent check is per-test-scoped for the same reason.
-		// Defensive sanity check: if the response-timestamp is BEFORE the
-		// request-timestamp the recording is inconsistent (clock skew,
-		// serialisation bug, or file corruption). Skip it — keeping such
-		// a mock in either pool risks confusing downstream scoring.
-		if LeaveOutAnsweredBeforeAsked(logger, p) {
+		case ruleAnsweredBeforeAsked:
 			droppedInvalidOrder++
-			continue
-		}
-		// Defensive fallback: DeriveLifetime may not have run on mocks
-		// constructed inline by tests or produced by legacy ingest
-		// paths. Fall back to the raw Metadata["type"] tag so a
-		// config/connection-tagged mock still routes to the session
-		// pool even when the cached Lifetime field is the zero value
-		// (LifetimePerTest). metadata.scope is deliberately NOT
-		// consulted here.
-		if p.Spec.Metadata != nil && !p.StatesLifetime() &&
-			(p.Spec.Metadata["type"] == "config" || p.Spec.Metadata["type"] == "connection") {
-			if p.Spec.Metadata["type"] == "config" {
-				p.TestModeInfo.Lifetime = models.LifetimeSession
-			} else {
+		case ruleTaggedConfig, ruleTaggedConnection:
+			p.TestModeInfo.Lifetime = models.LifetimeSession
+			if p.Spec.Metadata["type"] == "connection" {
 				p.TestModeInfo.Lifetime = models.LifetimeConnection
 			}
 			p.TestModeInfo.IsFiltered = false
 			unfilteredMocks = append(unfilteredMocks, p)
-			continue
-		}
-
-		// In-window = placed inside [afterTime, beforeTime] (models.PlaceOf).
-		// The response may straggle past beforeTime — DB/HTTP downstream
-		// responses routinely complete a few micro-to-milliseconds after
-		// the outer test response is captured. The cross-test bleed bug
-		// strict mode protects against is caused by out-of-window REQUESTS
-		// (a different test's data mock getting reused here), not by
-		// in-flight responses landing late. Checking req is sufficient
-		// in both modes — the strict-vs-lax difference is solely in the
-		// out-of-window handling below (strict drops, lax promotes to
-		// the cross-test config pool).
-		//
-		// Only per-test-lifetime mocks reach this predicate — session/
-		// connection-lifetime mocks short-circuited above to the session
-		// pool. A perTest-lifetime mock placed inside
-		// [afterTime, beforeTime] lands in the per-test pool; outside
-		// the window it falls through to the strict/lax out-of-window
-		// handling below.
-		// A mock is in the window its place is in (models.PlaceOf): its
-		// request time, or its answer's for a mock placed at its answer.
-		place := models.PlaceOf(p)
-		inWindow := !place.Before(afterTime) && !place.After(beforeTime)
-		if inWindow {
+		case ruleSessionLifetime, ruleLaxPromoted:
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, p)
+		case ruleInWindow, ruleInFlight:
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
-			continue
-		}
-
-		// Out-of-window handling for per-test-lifetime mocks only.
-		// Session/connection-lifetime mocks were already routed into
-		// the unfiltered pool by the lifetime-first short-circuit
-		// above, so the strict/lax divergence here applies exclusively
-		// to the perTest class that actually needs window containment.
-		// Startup-init (req < firstWindowStart) is preserved in the filtered
-		// slice so MockManager.SetMocksWithWindow's startup-tier partition
-		// routes it into the startup tree, where the tier-aware dispatcher
-		// reaches it via GetStartupMocks.
-		//
-		// This runs in BOTH modes, deliberately. It used to sit inside the
-		// strict branch below, and `agentStrict` is permanently false on a
-		// WindowedProxy (agent.go: `params.StrictMockWindow && !isWindowedProxy`),
-		// so on every windowed replay the lax branch diverted these mocks into
-		// the session/unfiltered pool instead — a pool the mongo tier-aware
-		// path never consults for bootstrap traffic (it reads GetFilteredMocks
-		// and GetStartupMocks only). The startup tier was therefore EMPTY for
-		// the whole run, and a bootstrap query issued while a window was open
-		// missed with candidates:0 even though its mock was on disk.
-		//
-		// It is not a widening of what may be served: these mocks predate the
-		// first test window, so they can only be bootstrap traffic, and routing
-		// them to the tier built for exactly that is what both modes intend.
-		// A zero firstWindowStart still means "no cutoff yet" and falls through
-		// to the legacy behaviour below, unchanged.
-		if !firstWindowStart.IsZero() && place.Before(firstWindowStart) {
+		case ruleStartup:
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			preservedStartup++
-			continue
-		}
-
-		// A per-test mock whose recorder stated its lifetime is the data of
-		// the test it was recorded in, and is served to no other test whatever
-		// the window mode: lax promotion exists for recordings whose recorders
-		// could not tell data from shared traffic, which this one did. Nor does
-		// KEPLOY_STRICT_MOCK_WINDOW=0, that promotion's escape hatch, serve it
-		// to another test: an HTTP call every test may make is declared in
-		// keploy.yaml (models.SessionCallRule).
-		// In flight when the window began: sent in the gap before it and
-		// answered at or after its start (a consumer's long poll). The
-		// window's test's, as the mock manager holds it, in the user's
-		// strict window mode, and for a stated mock in lax mode too, where
-		// it would otherwise be dropped. Lax mode promotes an unstated one
-		// to the session pool below, as every unstated per-test mock out of
-		// the window.
-		if !inFlightFrom.IsZero() && (strictWindowEnabled(strictWindow) || p.StatesLifetime()) && models.InFlightEligible(p) &&
-			models.SentInGapAnsweredBy(p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock, inFlightFrom, afterTime) {
-			p.TestModeInfo.IsFiltered = true
-			filteredMocks = append(filteredMocks, p)
-			continue
-		}
-
-		if strict || p.StatesLifetime() {
-			// Per-test, out-of-window. Genuine stale cross-test bleed
-			// (firstWindowStart <= req < afterTime, or req > beforeTime) is
-			// dropped — the strictMockWindow guarantee. The startup-init band
-			// was already preserved above, in both modes.
-			// Per-mock diagnostic: emit the hash + window + actual ts
-			// at Debug for the strict-drop path so a CI log can
-			// pinpoint which postgres / http / mongo mock the per-test
-			// cohort lost. Without this, "candidates: 0" downstream is
-			// the only visible signal and operators have no way to
-			// confirm whether the mock was on disk at all vs filtered
-			// out. Aggregate count is preserved below for parity.
+		default: // ruleOutOfWindow; ruleReleased needs w.Recorded, which is nil here
+			// Per-mock diagnostic: the hash + window + actual ts, so a CI log
+			// can pinpoint which mock the per-test cohort lost. Info-level
+			// (not Debug) under strict so it surfaces in default CI runs;
+			// tagged "diag/". A stated mock dropped outside strict mode is at
+			// Debug: every test's staging leaves out every other test's mocks,
+			// which is the design, not a regression.
 			if logger != nil {
-				// Info-level (not Debug) so this surfaces in default CI
-				// runs without --debug. Tagged with "diag/" so it is
-				// obviously diagnostic. Will be demoted/removed once the
-				// strict-window regression on listmonk + pgtype-tour is
-				// root-caused. A stated mock dropped outside strict mode is
-				// at Debug: every test's staging leaves out every other
-				// test's mocks, which is the design, not a regression.
 				log := logger.Info
 				if !strict {
 					log = logger.Debug
@@ -4161,11 +4540,6 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 				)
 			}
 			droppedOutOfWindow++
-		} else {
-			// Legacy: anything out-of-window goes to the unfiltered pool
-			// (where parsers may still pick it up as a fallback).
-			p.TestModeInfo.IsFiltered = false
-			unfilteredMocks = append(unfilteredMocks, p)
 		}
 	}
 	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 || droppedWindowBound > 0 {
@@ -4608,39 +4982,236 @@ func (c *cappedReadCloser) Close() error { return c.closer.Close() }
 
 // readAllCapped reads r to EOF, failing with ErrDecompressedTooLarge once
 // the stream exceeds limit bytes. Unlike io.ReadAll, buffer capacity is
-// never grown past limit+1, so at most limit+1 bytes are read from r and
-// the returned slice retains no doubling slack (io.ReadAll can retain ~2x
-// the limit near the cap).
+// never grown past limit+1 rounded up to whole heap pages (wholePages), at
+// most limit+1 bytes are read from r, and the returned slice retains no
+// doubling slack (io.ReadAll can retain ~2x the limit near the cap).
 func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
-	errTooLarge := fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, limit)
-	startCap := int64(64 * 1024)
-	if startCap > limit+1 {
-		startCap = limit + 1
+	return readAllReserved(r, limit, nil)
+}
+
+// ErrDecodeRefused reports that a DecompressReserving caller's reserve func
+// refused room for memory the decode was about to hold: the decode stopped
+// there and holds nothing. The caller that refused counts and reports it.
+var ErrDecodeRefused = errors.New("decode refused: no room for the decoded body")
+
+// gzipDecoderStateBytes is the most a gzip decoder holds beside its output,
+// at the format's limits (compress/gzip and compress/flate, Go 1.27), as the
+// allocator gives it:
+//   - gzipInflaterBytes: gzip.Reader and flate's decompressor;
+//   - gzipLinkBytes: the link tables of the decompressor's Huffman decoders;
+//   - gzipHeaderBytes twice: the first member's header, which gzip.Reader
+//     keeps, and the next member's, as it reads it;
+//   - gzipLatin1Bytes: the runes it converts a name or comment through.
+//
+// TestAGzipDecodeReservesItsDecoderAtTheFormatsLimits pins it against the
+// decoder.
+const gzipDecoderStateBytes = gzipInflaterBytes + gzipLinkBytes + 2*gzipHeaderBytes + gzipLatin1Bytes
+
+// The parts of gzipDecoderStateBytes, in bytes as the allocator gives them.
+const (
+	// gzipInflaterBytes: gzip.Reader (704), flate's decompressor (4,864: its
+	// two Huffman decoders' 2 KiB chunk tables are in it), its code-length
+	// arrays (2,688 and 160), and its 32 KiB history window.
+	gzipInflaterBytes = 704 + 4_864 + 2_688 + 160 + 32<<10
+
+	// gzipLinkBytes: a Huffman decoder links each 9-bit prefix of its codes
+	// longer than 9 bits to a table of 2^(longest-9) entries of 4 bytes, so
+	// 256 bytes when its longest code is 15 bits, and indexes them in a
+	// slice of 24-byte headers. A complete code of 286 literal/length
+	// symbols with a 15-bit code among them takes at most 137 such
+	// prefixes: each takes at least two codes, the one with the 15-bit
+	// code seven, and the codes of 9 bits or fewer take at least one per
+	// bit set in the 512ths of the code space they cover, so 137 prefixes
+	// take 2*137 + 5 + 7 = 286 codes and 138 would take 287. One of 30
+	// distance symbols takes at most 8 (27 codes; 9 would take 31). Their
+	// indexes are 3,456 and 192 bytes.
+	gzipLinkBytes = 137*256 + 3_456 + 8*256 + 192
+
+	// gzipHeaderBytes: a member's header at the most: an extra field of
+	// 65,535 bytes (65,536 given), and a name and a comment of 511 bytes
+	// each, held as UTF-8: 1,022 bytes when every byte is Latin-1 past
+	// ASCII. The runtime makes such a string from its runes with room for
+	// one more rune of 3 bytes (slicerunetostring asks for size+3), so it
+	// asks for 1,025 bytes, and the allocator gives 1,152 (its size class).
+	gzipHeaderBytes = 65_536 + 1_152 + 1_152
+
+	// gzipLatin1Bytes: the 511 runes of 4 bytes readString converts a name
+	// or comment through (2,048 given).
+	gzipLatin1Bytes = 2_048
+)
+
+// brotliReaderBytes is what a brotli decoder holds beside its ring buffer and
+// its prefix-code tables (brotliTableBytes, brotliTableRegrowBytes): its
+// 32 KiB input buffer, its state, its block-type trees, and one metablock's
+// context maps and tree headers, with one group's headers again while it
+// regrows them, at the format's limits (92,952 bytes in
+// github.com/andybalholm/brotli v1.2.3).
+// TestBrotliDecoderStateIsReservedAtTheFormatsLimits pins it against the
+// decoder.
+const brotliReaderBytes = 96 << 10
+
+// The format's limits on a brotli decoder's prefix-code tables. Each
+// metablock has three groups of prefix codes, one per alphabet, each of at
+// most 256 trees (RFC 7932 §9.2: NTREESL, NBLTYPESI, NTREESD), and
+// github.com/andybalholm/brotli allocates every tree of a group at the most
+// its alphabet's table can take (kMaxHuffmanTableSize: root table bits 8,
+// codes up to 15 bits), as soon as it has read the group's count and before
+// it reads a tree. So the tables a stream makes the decoder hold are the
+// count its header declares, never what its trees need, and a few bytes can
+// declare the most.
+const (
+	brotliMaxTreesPerGroup     = 256
+	brotliTableEntryBytes      = 4    // one entry: its bits and its symbol
+	brotliLiteralTableEntries  = 630  // a tree of the 256 literals
+	brotliCommandTableEntries  = 1080 // of the 704 insert-and-copy codes
+	brotliDistanceTableEntries = 920  // of the most distance codes a stream may declare: 520 (NPOSTFIX 3, NDIRECT 120)
+)
+
+// brotliTableBytes is the most a brotli decoder keeps of its prefix-code
+// tables: three groups, each at the format's limit (2,693,120 bytes).
+// github.com/andybalholm/brotli v1.2.3 keeps each group's table buffer from
+// one metablock to the next and reuses it (makeCodesBuffer), so what it keeps
+// is never more than the largest each group has needed, and that is at most
+// the format's limit.
+const brotliTableBytes = brotliMaxTreesPerGroup * brotliTableEntryBytes *
+	(brotliLiteralTableEntries + brotliCommandTableEntries + brotliDistanceTableEntries)
+
+// brotliTableRegrowBytes is what a brotli decoder holds of its prefix-code
+// tables beside brotliTableBytes, at the most, while it regrows one group's:
+// when a metablock declares more trees than the group's kept buffer holds
+// (or, for the distance group, a larger alphabet), the decoder allocates the
+// larger buffer while it still holds the smaller one, and drops that only
+// once the new one is in place. The smaller one is less than the group's
+// limit, and the groups are regrown one at a time, so this is the largest
+// group's limit: insert-and-copy's, 256 trees of 1,080 entries (1,105,920
+// bytes). TestABrotliDecodeReservesTheTablesItsDecoderRegrows pins it.
+const brotliTableRegrowBytes = brotliMaxTreesPerGroup * brotliTableEntryBytes * brotliCommandTableEntries
+
+// brotliRingBytes is the most a brotli decoder holds of its ring buffer for
+// a stream that declares a window of 2^wbits bytes (RFC 7932 §9.1): the
+// window, with the decoder's write-ahead slack, and, while it grows the ring
+// to fit the output, the ring it replaces (half the new one), so 1.5 times
+// the window. github.com/andybalholm/brotli sizes the ring to the output and
+// the metablock it decodes (calculateRingBufferSize), never past the window,
+// and allocates it before it writes a byte of the metablock, so the decode
+// reserves the whole bound before it starts.
+func brotliRingBytes(wbits uint) int64 {
+	w := int64(1) << wbits
+	return w + w/2 + 1024
+}
+
+// brotliWindowBits reads the window size a brotli stream declares in its
+// first bits (RFC 7932 §9.1, WBITS), and reports false for a stream too short
+// to say, or one that asks for a large window (which the decoder refuses).
+func brotliWindowBits(data []byte) (uint, bool) {
+	if len(data) == 0 {
+		return 0, false
+	}
+	b := data[0]
+	if b&1 == 0 {
+		return 16, true
+	}
+	if n := (b >> 1) & 7; n != 0 {
+		return 17 + uint(n), true
+	}
+	switch n := (b >> 4) & 7; n {
+	case 0:
+		return 17, true
+	case 1:
+		return 0, false // the large-window marker
+	default:
+		return 8 + uint(n), true
+	}
+}
+
+// heapPageBytes is the Go allocator's page. It gives a buffer of more than
+// 32 KiB whole pages, and one of 8, 16, 24 or 32 KiB a size class of
+// exactly its size, so it gives a buffer whose capacity is whole pages
+// exactly that capacity.
+const heapPageBytes = 8 << 10
+
+// maxWholePages is the most whole heapPageBytes an int64 holds.
+const maxWholePages = math.MaxInt64 &^ (heapPageBytes - 1)
+
+// wholePages is n rounded up to whole heapPageBytes; an n past
+// maxWholePages, which rounding up would take past the most an int64 holds,
+// is maxWholePages. No buffer is that large: the allocator refuses one far
+// smaller.
+func wholePages(n int64) int64 {
+	if n > maxWholePages {
+		return maxWholePages
+	}
+	return (n + heapPageBytes - 1) &^ (heapPageBytes - 1)
+}
+
+// reserveFor asks reserve for n bytes before the decode holds them; a nil
+// reserve lets the decode hold anything (Decompress).
+func reserveFor(reserve func(int64) bool, n int64) bool {
+	return reserve == nil || n <= 0 || reserve(n)
+}
+
+// giveBack tells reserve the decode holds n bytes less.
+func giveBack(reserve func(int64) bool, n int64) {
+	if reserve != nil && n > 0 {
+		reserve(-n)
+	}
+}
+
+// readAllReserved is readAllCapped, asking reserve for each buffer before it
+// allocates it, and giving the buffer it outgrew back once it has copied it
+// to the new one: what it holds of r's output is never more than reserve let
+// it hold. On success what stays reserved is the returned slice's capacity;
+// on any error (reserve refused, ErrDecodeRefused; the stream was too large,
+// or failed) nothing does: it gives back the buffer it drops.
+func readAllReserved(r io.Reader, limit int64, reserve func(int64) bool) ([]byte, error) {
+	// The error is made only when it is returned, so a decode that fits
+	// allocates none (fmt would take its printer from its pool, and keep
+	// that pool's per-P array).
+	tooLarge := func() error {
+		return fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, limit)
+	}
+	// Each buffer's capacity is whole pages, the last one's too (it holds
+	// limit+1 bytes), so what it reserves for a buffer is what the
+	// allocator gives the buffer. The min keeps limit+1 in an int64.
+	lastCap := wholePages(min(limit, maxWholePages) + 1)
+	startCap := min(int64(64*1024), lastCap)
+	if !reserveFor(reserve, startCap) {
+		return nil, ErrDecodeRefused
 	}
 	data := make([]byte, 0, startCap)
+	fail := func(err error) ([]byte, error) {
+		giveBack(reserve, int64(cap(data)))
+		return nil, err
+	}
 	for {
+		if int64(len(data)) > limit {
+			return fail(tooLarge())
+		}
 		if len(data) == cap(data) {
-			if int64(len(data)) > limit {
-				return nil, errTooLarge
-			}
-			newCap := int64(cap(data)) * 2
-			if newCap > limit+1 {
-				newCap = limit + 1
+			newCap := min(int64(cap(data))*2, lastCap)
+			if !reserveFor(reserve, newCap) {
+				return fail(ErrDecodeRefused)
 			}
 			grown := make([]byte, len(data), newCap)
 			copy(grown, data)
+			outgrown := int64(cap(data))
 			data = grown
+			giveBack(reserve, outgrown)
 		}
-		n, err := r.Read(data[len(data):cap(data)])
+		end := int64(cap(data))
+		if end > limit {
+			end = limit + 1 // the last buffer's pages may hold more than it reads
+		}
+		n, err := r.Read(data[len(data):end])
 		data = data[:len(data)+n]
 		if err == io.EOF {
 			if int64(len(data)) > limit {
-				return nil, errTooLarge
+				return fail(tooLarge())
 			}
 			return data, nil
 		}
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
 	}
 }
@@ -4652,16 +5223,46 @@ func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
 // Compress uses the same matching, so a recorded body round-trips at replay.
 // An unsupported encoding (e.g. zstd, deflate) is returned undecompressed.
 func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) ([]byte, error) {
+	return DecompressReserving(logger, encoding, data, limit, nil)
+}
+
+// DecompressReserving is Decompress for a caller that bounds what its
+// decodes hold (the enterprise agent's capture bound): the decode asks
+// reserve(n), n > 0, before it holds n more bytes (its output buffer as it
+// grows it, in whole heap pages, and the decoder's own state: gzip's window,
+// tables and headers as large as the format allows, brotli's ring buffer as
+// large as the stream's window allows and its prefix-code tables as large
+// as the format allows, with one group's again while it regrows them), and
+// tells it reserve(-n) once it holds n bytes less (the buffer it outgrew, the decoder
+// it closed). A refusal stops the decode at once: it returns
+// ErrDecodeRefused, holding nothing. On success what stays reserved is the
+// returned slice's capacity; on any error, nothing. An encoding it does not
+// decode reserves nothing: data is returned as it is. A nil reserve is
+// Decompress.
+func DecompressReserving(logger *zap.Logger, encoding string, data []byte, limit int64, reserve func(n int64) bool) ([]byte, error) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "br":
 		logger.Debug("decompressing brotli compressed data")
+		var state int64
+		if reserve != nil {
+			wbits, ok := brotliWindowBits(data)
+			if !ok {
+				wbits = 24 // the largest window a stream may declare without the large-window flag
+			}
+			state = brotliReaderBytes + brotliTableBytes + brotliTableRegrowBytes + brotliRingBytes(wbits)
+			if !reserveFor(reserve, state) {
+				return nil, ErrDecodeRefused
+			}
+		}
 		reader := brotli.NewReader(bytes.NewReader(data))
-		decodedData, err := readAllCapped(reader, limit)
+		decodedData, err := readAllReserved(reader, limit, reserve)
+		giveBack(reserve, state) // the reader, and its ring buffer, are dropped here
 		if err != nil {
 			// Over-limit is reported by the caller (e.g. Capture logs it as
 			// the regular size-limit drop) — logging it here too would
-			// double-report every oversized body as a decode failure.
-			if !errors.Is(err, ErrDecompressedTooLarge) {
+			// double-report every oversized body as a decode failure. So is
+			// a refusal: the caller that refused counts it.
+			if !errors.Is(err, ErrDecompressedTooLarge) && !errors.Is(err, ErrDecodeRefused) {
 				utils.LogError(logger, err, "failed to read the brotli compressed data")
 			}
 			return nil, err
@@ -4669,16 +5270,25 @@ func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) (
 		return decodedData, nil
 	case "gzip":
 		logger.Debug("decoding gzip compressed data")
+		var state int64
+		if reserve != nil {
+			state = gzipDecoderStateBytes
+			if !reserveFor(reserve, state) {
+				return nil, ErrDecodeRefused
+			}
+		}
+		defer giveBack(reserve, state)
 		reader, err := gzip.NewReader(bytes.NewReader(data))
 		if err != nil {
 			utils.LogError(logger, err, "failed to create gzip reader")
 			return nil, err
 		}
 		defer reader.Close()
-		decodedData, err := readAllCapped(reader, limit)
+		decodedData, err := readAllReserved(reader, limit, reserve)
 		if err != nil {
-			// See the brotli branch: over-limit is the caller's to report.
-			if !errors.Is(err, ErrDecompressedTooLarge) {
+			// See the brotli branch: over-limit and a refusal are the
+			// caller's to report.
+			if !errors.Is(err, ErrDecompressedTooLarge) && !errors.Is(err, ErrDecodeRefused) {
 				utils.LogError(logger, err, "failed to read the gzip compressed data")
 			}
 			return nil, err
@@ -4697,6 +5307,36 @@ func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) (
 	}
 }
 
+// Compress keeps its writers between calls. A new writer builds its whole
+// state for each body it compresses: a brotli writer at the default
+// quality allocates and clears a hash table of 2 MiB (4 MiB from a 1 MiB
+// body on), a gzip writer about 1 MiB of flate state. A kept writer is
+// Reset to the new buffer, which makes it what a new writer is (both
+// packages' Reset), so the bytes are the same.
+// TestCompressWithAKeptWriterIsWhatANewWriterGives pins that.
+var gzipWriters = sync.Pool{New: func() any { return gzip.NewWriter(nil) }}
+
+// brotliWriters keeps brotli writers by the size of the bodies they
+// compress (brotliClass). A brotli writer picks its hash table's kind at its
+// first body, by that body's size: at the default quality one kind under
+// brotliLargeBody and another from it on (andybalholm/brotli's
+// chooseHasher). Reset keeps the table, so a kept writer takes only bodies
+// on the same side of brotliLargeBody as the one it was made for, and
+// compresses them as a new writer would.
+var brotliWriters [2]sync.Pool
+
+// brotliLargeBody is the body size from which a brotli writer at the
+// default quality and window hashes with its large table.
+const brotliLargeBody = 1 << 20
+
+// brotliClass is the brotliWriters pool for a body of n bytes.
+func brotliClass(n int) int {
+	if n >= brotliLargeBody {
+		return 1
+	}
+	return 0
+}
+
 // Compress deflates data per the given Content-Encoding. The encoding is
 // matched case-insensitively after trimming — symmetric with Decompress, so
 // a body stored decompressed at record time is re-compressed at replay even
@@ -4707,7 +5347,8 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 	case "gzip":
 		logger.Debug("compressing data using gzip")
 		var compressedBuffer bytes.Buffer
-		gw := gzip.NewWriter(&compressedBuffer)
+		gw := gzipWriters.Get().(*gzip.Writer)
+		gw.Reset(&compressedBuffer)
 		_, err := gw.Write(data)
 		if err != nil {
 			utils.LogError(logger, err, "failed to write compressed data to gzip writer")
@@ -4718,11 +5359,17 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 			utils.LogError(logger, err, "failed to close gzip writer")
 			return nil, err
 		}
+		gzipWriters.Put(gw)
 		return compressedBuffer.Bytes(), nil
 	case "br":
 		logger.Debug("compressing data using brotli")
 		var compressedBuffer bytes.Buffer
-		bw := brotli.NewWriter(&compressedBuffer)
+		pool := &brotliWriters[brotliClass(len(data))]
+		bw, _ := pool.Get().(*brotli.Writer)
+		if bw == nil {
+			bw = brotli.NewWriter(nil)
+		}
+		bw.Reset(&compressedBuffer)
 		_, err := bw.Write(data)
 		if err != nil {
 			utils.LogError(logger, err, "failed to write compressed data to brotli writer")
@@ -4733,6 +5380,7 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 			utils.LogError(logger, err, "failed to close brotli writer")
 			return nil, err
 		}
+		pool.Put(bw)
 		return compressedBuffer.Bytes(), nil
 	}
 	return data, nil
@@ -4968,7 +5616,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 	launch, launched := token.Launched(agentURI)
 	if !launched {
 		logger.Debug("not checking the control-plane authentication of an agent this process did not launch",
-			zap.String("agent", agentURI))
+			zap.String("agent", ShownAgentURI(agentURI)))
 		return
 	}
 	key := fmt.Sprintf("%s#%d", agentURI, launch)
@@ -4978,7 +5626,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agentURI+token.ProbePath, nil)
 	if err != nil {
-		logger.Debug("could not build the agent authentication probe", zap.Error(err))
+		logger.Debug("could not build the agent authentication probe", zap.Error(ShownAgentURIError(err)))
 		return
 	}
 	// Wrong by construction, and a bare client: a request carrying the real
@@ -4991,7 +5639,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 		// is not evidence either way. Saying nothing beats crying wolf with an
 		// error that fails CI — and this attempt is deliberately NOT recorded,
 		// so a later readiness gate for the same agent tries again.
-		logger.Debug("agent authentication probe did not complete", zap.Error(err))
+		logger.Debug("agent authentication probe did not complete", zap.Error(ShownAgentURIError(err)))
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -5001,7 +5649,7 @@ func verifyControlPlaneGuarded(ctx context.Context, logger *zap.Logger, agentURI
 	controlPlaneProbed.Store(key, struct{}{})
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		logger.Debug("agent control-plane authentication verified", zap.String("agent", agentURI))
+		logger.Debug("agent control-plane authentication verified", zap.String("agent", ShownAgentURI(agentURI)))
 		return
 	}
 

@@ -53,6 +53,14 @@ func newHarness(t *testing.T, cfg Config) *relayHarness {
 // pipe does (nil: srcProxy itself).
 func newHarnessOver(t *testing.T, cfg Config, src func(net.Conn) net.Conn) *relayHarness {
 	t.Helper()
+	return newHarnessOverBoth(t, cfg, src, nil)
+}
+
+// newHarnessOverBoth is newHarnessOver with the relay reading the
+// destination through dst(the Upstream over its socket) too (nil: the
+// Upstream itself).
+func newHarnessOverBoth(t *testing.T, cfg Config, src func(net.Conn) net.Conn, dst func(*connseq.Upstream) net.Conn) *relayHarness {
+	t.Helper()
 	clientApp, srcProxy := net.Pipe()
 	dstProxy, destSvc := net.Pipe()
 
@@ -65,7 +73,11 @@ func newHarnessOver(t *testing.T, cfg Config, src func(net.Conn) net.Conn) *rela
 	if src != nil {
 		relaySrc = src(srcProxy)
 	}
-	r := New(cfg, relaySrc, connseq.NewUpstream(dstProxy))
+	var relayDst net.Conn = connseq.NewUpstream(dstProxy)
+	if dst != nil {
+		relayDst = dst(relayDst.(*connseq.Upstream))
+	}
+	r := New(cfg, relaySrc, relayDst)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	h := &relayHarness{

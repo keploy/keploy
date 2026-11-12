@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/go-connections/nat"
+	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.uber.org/zap"
 )
@@ -75,7 +76,7 @@ func TestAppNetworkingFromContainerPortSpecs(t *testing.T) {
 					HostConfig: &container.HostConfig{PortBindings: tc.bindings, PublishAllPorts: tc.publish},
 				},
 			})
-			ports, _, _, err := a.appNetworkingFromContainer(context.Background(), "app")
+			ports, _, _, _, err := a.appNetworkingFromContainer(context.Background(), "app")
 			if err != nil {
 				t.Fatalf("appNetworkingFromContainer: %v", err)
 			}
@@ -96,7 +97,7 @@ func TestAppNetworkingPortSpecsAreParseable(t *testing.T) {
 			}},
 		},
 	})
-	ports, _, _, err := a.appNetworkingFromContainer(context.Background(), "app")
+	ports, _, _, _, err := a.appNetworkingFromContainer(context.Background(), "app")
 	if err != nil {
 		t.Fatalf("appNetworkingFromContainer: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestAppNetworkingFromContainerSkipsPredefinedNetworks(t *testing.T) {
 			"bridge": {}, "host": {}, "none": {}, "backend": {}, "frontend": {},
 		}},
 	})
-	_, networks, _, err := a.appNetworkingFromContainer(context.Background(), "app")
+	_, networks, _, _, err := a.appNetworkingFromContainer(context.Background(), "app")
 	if err != nil {
 		t.Fatalf("appNetworkingFromContainer: %v", err)
 	}
@@ -134,11 +135,29 @@ func TestAppNetworkingFromContainerHostEntries(t *testing.T) {
 	a := agentFor(container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{
 		HostConfig: &container.HostConfig{ExtraHosts: []string{"db.test:10.1.2.3", "host.docker.internal:host-gateway"}},
 	}})
-	_, _, hosts, err := a.appNetworkingFromContainer(context.Background(), "app")
+	_, _, hosts, _, err := a.appNetworkingFromContainer(context.Background(), "app")
 	if err != nil {
 		t.Fatalf("appNetworkingFromContainer: %v", err)
 	}
 	if want := []string{"db.test:10.1.2.3", "host.docker.internal:host-gateway"}; !reflect.DeepEqual(hosts, want) {
 		t.Fatalf("hosts %q, want %q", hosts, want)
+	}
+}
+
+// A --from-container app's resolver settings are read off it: its replacement
+// cannot carry them under the agent's network mode (replicaConfig drops them),
+// so the agent does. Until it did, they were dropped and the app resolved
+// through the agent's defaults.
+func TestAppNetworkingFromContainerResolverSettings(t *testing.T) {
+	a := agentFor(container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{
+		HostConfig: &container.HostConfig{DNS: []string{"10.0.0.2"}, DNSSearch: []string{"corp.example"}, DNSOptions: []string{"ndots:2"}},
+	}})
+	_, _, _, dns, err := a.appNetworkingFromContainer(context.Background(), "app")
+	if err != nil {
+		t.Fatalf("appNetworkingFromContainer: %v", err)
+	}
+	want := models.AppDNS{Servers: []string{"10.0.0.2"}, Search: []string{"corp.example"}, Options: []string{"ndots:2"}}
+	if !reflect.DeepEqual(dns, want) {
+		t.Fatalf("dns %+v, want %+v", dns, want)
 	}
 }

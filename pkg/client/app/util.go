@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/compose/v5/pkg/api"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -343,14 +342,14 @@ func composeUpOffset(cmd string, intoQuoted bool) (int, bool) {
 // user-supplied --exit-code-from / --abort-* untouched, and only the final
 // string records which of the two decided them.
 func composeUpSemantics(cmd string) docker.ComposeUpOptions {
-	opts := docker.ComposeUpOptions{OnExit: api.CascadeIgnore}
+	opts := docker.ComposeUpOptions{OnExit: docker.ComposeOnExitIgnore}
 	parts := strings.Fields(cmd)
 	for i := 0; i < len(parts); i++ {
 		switch {
 		case parts[i] == "--abort-on-container-exit":
-			opts.OnExit = api.CascadeStop
+			opts.OnExit = docker.ComposeOnExitStop
 		case parts[i] == "--abort-on-container-failure":
-			opts.OnExit = api.CascadeFail
+			opts.OnExit = docker.ComposeOnExitFail
 		case parts[i] == "--exit-code-from" && i+1 < len(parts):
 			opts.ExitCodeFrom = parts[i+1]
 			i++
@@ -369,8 +368,8 @@ func composeUpSemantics(cmd string) docker.ComposeUpOptions {
 	// exactly why it is worth stating: the claim above is that the two paths
 	// cannot disagree, and that has to hold for inputs keploy does not
 	// currently produce, not only for the ones it does.
-	if opts.ExitCodeFrom != "" && opts.OnExit == api.CascadeIgnore {
-		opts.OnExit = api.CascadeStop
+	if opts.ExitCodeFrom != "" && opts.OnExit == docker.ComposeOnExitIgnore {
+		opts.OnExit = docker.ComposeOnExitStop
 	}
 	return opts
 }
@@ -379,26 +378,52 @@ func composeUpSemantics(cmd string) docker.ComposeUpOptions {
 // values from the command, so the library resolves the SAME project the
 // shell-out would have. Both are empty when the command sets neither, which is
 // the normal case: compose then derives the name from the document or the
-// working directory.
+// working directory. A value in quotes (`-p "proj"`) is taken without them,
+// as the shell hands it to compose.
 func composeProjectScope(cmd string) (projectName, projectDir string) {
 	parts := strings.Fields(cmd)
 	for i := 0; i < len(parts); i++ {
 		switch {
 		case (parts[i] == "-p" || parts[i] == "--project-name") && i+1 < len(parts):
-			projectName = parts[i+1]
+			projectName = unquoteWord(parts[i+1])
 			i++
 		case strings.HasPrefix(parts[i], "-p="):
-			projectName = strings.TrimPrefix(parts[i], "-p=")
+			projectName = unquoteWord(strings.TrimPrefix(parts[i], "-p="))
 		case strings.HasPrefix(parts[i], "--project-name="):
-			projectName = strings.TrimPrefix(parts[i], "--project-name=")
+			projectName = unquoteWord(strings.TrimPrefix(parts[i], "--project-name="))
 		case parts[i] == "--project-directory" && i+1 < len(parts):
-			projectDir = parts[i+1]
+			projectDir = unquoteWord(parts[i+1])
 			i++
 		case strings.HasPrefix(parts[i], "--project-directory="):
-			projectDir = strings.TrimPrefix(parts[i], "--project-directory=")
+			projectDir = unquoteWord(strings.TrimPrefix(parts[i], "--project-directory="))
 		}
 	}
 	return projectName, projectDir
+}
+
+// composeEnvFiles returns the command's --env-file values, in order (compose
+// takes the flag more than once), so the library and the shell-out's tail
+// resolve the document against the env files compose reads; nil when it
+// gives none, when compose reads COMPOSE_ENV_FILES or the project's .env.
+func composeEnvFiles(cmd string) []string {
+	var files []string
+	parts := strings.Fields(cmd)
+	for i := 0; i < len(parts); i++ {
+		switch {
+		case parts[i] == "--env-file" && i+1 < len(parts):
+			files = append(files, unquoteWord(parts[i+1]))
+			i++
+		case strings.HasPrefix(parts[i], "--env-file="):
+			files = append(files, unquoteWord(strings.TrimPrefix(parts[i], "--env-file=")))
+		}
+	}
+	return files
+}
+
+// unquoteWord is a command word without the quotes around it, as the shell
+// passes it on: `"proj"` and `'proj'` are proj.
+func unquoteWord(w string) string {
+	return strings.Trim(w, `"'`)
 }
 
 // composeAbortFlag matches, with the space before it, a compose up flag that

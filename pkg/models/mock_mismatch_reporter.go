@@ -83,6 +83,7 @@ func ReportAnswer(ctx context.Context, r *MockMismatchReport) bool {
 	answered := *r
 	answered.FieldDiffs = slices.Clone(r.FieldDiffs)
 	answered.Differs = slices.Clone(r.Differs)
+	answered.FieldReasons = slices.Clone(r.FieldReasons)
 	answered.VariablePlaces = slices.Clone(r.VariablePlaces)
 	answered.Source = r.Source.clone()
 	report(NewMockMismatchError(ErrAnswered, &answered))

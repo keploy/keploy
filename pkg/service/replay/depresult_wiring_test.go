@@ -1037,3 +1037,48 @@ func TestRunTestSetDerivesItsExpectationListFromTheSharedFilter(t *testing.T) {
 		}
 	}
 }
+
+// RunTestSet reports a test with no dependency as having used none: its row
+// carries mock_mismatches, empty, since what it consumed was read. Left out,
+// the row looked the same as one whose consumed mocks could not be read.
+func TestRunTestSetReportsATestThatUsedNoMockAsSuch(t *testing.T) {
+	h := newPartialRunHarness(t, 1, 0)
+	h.run(t)
+	var found bool
+	for _, r := range h.report.results {
+		if r.TestCaseID != "test-1" {
+			continue
+		}
+		found = true
+		if r.MockMismatches == nil {
+			t.Fatal("a test whose consumed mocks were read, and were none, has no mock_mismatches")
+		}
+		if len(r.MockMismatches.ExpectedMocks)+len(r.MockMismatches.ActualMocks) != 0 {
+			t.Fatalf("precondition: the test has no mock, yet its row lists %+v", r.MockMismatches)
+		}
+	}
+	if !found {
+		t.Fatal("no row for test-1")
+	}
+}
+
+// A test whose consumed mocks could not be read reports no mock_mismatches:
+// an empty one would say it used none.
+func TestRunTestSetLeavesOutTheMocksOfATestWhoseConsumptionWasUnread(t *testing.T) {
+	h := newPartialRunHarness(t, 1, 0)
+	h.replayer.hookImpl = consumedReadFails{}
+	h.run(t)
+	var found bool
+	for _, r := range h.report.results {
+		if r.TestCaseID != "test-1" {
+			continue
+		}
+		found = true
+		if r.MockMismatches != nil {
+			t.Fatalf("consumed mocks unread, yet the row reports %+v: read as used none", r.MockMismatches)
+		}
+	}
+	if !found {
+		t.Fatal("no row for test-1")
+	}
+}

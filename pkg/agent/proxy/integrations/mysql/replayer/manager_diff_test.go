@@ -2,11 +2,13 @@ package replayer_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math/rand"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,17 +36,21 @@ import (
 // statement IDs reused for another query, between-window and undated mocks,
 // and commands that arrive between tests.
 func TestFirstPassesServeWhatTheFullScanServes(t *testing.T) {
+	sideBySide(t)
 	seeds := int64(60)
 	if testing.Short() {
 		seeds = 10
 	}
 	commands := 0
 	for seed := int64(1); seed <= seeds; seed++ {
-		for _, strict := range []bool{false, true} {
+		// noWindow runs every command with no test window active, as under
+		// exact serving, whose store reports none.
+		for _, mode := range []struct{ strict, noWindow bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+			strict, noWindow := mode.strict, mode.noWindow
 			r := rand.New(rand.NewSource(seed))
 			windows := 4 + r.Intn(5)
 			pool := diffPool(r, windows)
-			ref, fast := newDiffSide(pool), newDiffSide(pool)
+			ref, fast := newDiffSide(t, pool), newDiffSide(t, pool)
 			eng := func() *schemanoise.Engine {
 				if strict {
 					return replayer.StrictEngineForTest()
@@ -60,7 +66,7 @@ func TestFirstPassesServeWhatTheFullScanServes(t *testing.T) {
 					s.stage(start, end)
 				}
 				for c := 0; c < 5+r.Intn(25); c++ {
-					between := r.Intn(8) == 0
+					between := r.Intn(8) == 0 || noWindow
 					if between {
 						ref.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
 						fast.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
@@ -74,8 +80,8 @@ func TestFirstPassesServeWhatTheFullScanServes(t *testing.T) {
 					want := ref.match(ctx, req, eng(), true)
 					got := fast.match(ctx, req, eng(), false)
 					if want != got {
-						t.Fatalf("seed %d strict=%v window %d command %d (%s), between tests=%v:\n full scan:   %s\n first pass:  %s",
-							seed, strict, w, c, desc, between, want, got)
+						t.Fatalf("seed %d strict=%v noWindow=%v window %d command %d (%s), between tests=%v:\n full scan:   %s\n first pass:  %s",
+							seed, strict, noWindow, w, c, desc, between, want, got)
 					}
 					if between {
 						ref.mm.SetCurrentTestWindow(start, end)
@@ -277,7 +283,14 @@ func diffPool(r *rand.Rand, windows int) []*models.Mock {
 			pool = append(pool, prep)
 			for k := 0; k < 1+r.Intn(2); k++ {
 				lt, typ := diffLifetime(r)
-				pool = append(pool, diffMock(name("exec"), c, []mysql.Request{executeReq(id, fmt.Sprintf("k%d", r.Intn(5)))}, ts.Add(time.Duration(k+1)*100*time.Microsecond), lt, typ))
+				exec := executeReq(id, fmt.Sprintf("k%d", r.Intn(5)))
+				// Most recordings keep the statement's query on the EXECUTE,
+				// as its client sent it (another case, a trace comment) or
+				// another statement's; older ones keep none.
+				if r.Intn(3) != 0 {
+					exec.SetStoredQuery(diffStoredQuery(r, prep))
+				}
+				pool = append(pool, diffMock(name("exec"), c, []mysql.Request{exec}, ts.Add(time.Duration(k+1)*100*time.Microsecond), lt, typ))
 			}
 			if r.Intn(3) != 0 {
 				cl := closeReq(id)
@@ -289,6 +302,23 @@ func diffPool(r *rand.Rand, windows int) []*models.Mock {
 		}
 	}
 	return pool
+}
+
+// diffStoredQuery is the query a recorder kept on an EXECUTE of the statement
+// prep prepared: its own, in another case or behind a trace comment, or now and
+// then another statement's.
+func diffStoredQuery(r *rand.Rand, prep *models.Mock) string {
+	q := prep.Spec.MySQLRequests[0].Message.(*mysql.StmtPreparePacket).Query
+	switch r.Intn(6) {
+	case 0:
+		return strings.ToLower(q)
+	case 1:
+		return diffPrepareText(r, q)
+	case 2:
+		return []string{diffQueryA, diffQueryB, diffQueryC}[r.Intn(3)]
+	default:
+		return q
+	}
 }
 
 // diffCommand is a live command: queries recorded and not, PREPAREs of
@@ -326,7 +356,9 @@ type diffSide struct {
 	dctx     *wire.DecodeContext
 }
 
-func newDiffSide(pool []*models.Mock) *diffSide {
+func newDiffSide(t testing.TB, pool []*models.Mock) *diffSide {
+	t.Helper()
+	unwrittenSpecs(t, pool)
 	return &diffSide{
 		mm:       proxy.NewMockManager(nil, nil, zap.NewNop()),
 		pool:     pool,
@@ -339,10 +371,75 @@ func newDiffSide(pool []*models.Mock) *diffSide {
 	}
 }
 
-// stage stages the window [start, end] as the agent does in lax mode: fresh
-// copies, per-test mocks inside the window in the per-test tier and the rest
-// promoted to the session pool after the reusable mocks, each part in recorded
-// order, and per-test mocks already consumed left out.
+// stagedCopy is the copy of a pool mock that a staging hands the mock
+// manager: a TestModeInfo of its own, which staging and serving write (the
+// tree ID, the sort order, the filtered and pooled marks), and the
+// recording's Spec shared, as the mock manager re-stages a pooled mock itself
+// (mockOwner.own, Mock.ShallowCopy). The agent hands it fresh deep copies;
+// the two serve alike while nothing writes through a staged mock's Spec. The
+// matcher does not: it updates and consumes value copies of a mock and merges
+// noise into new maps. unwrittenSpecs holds every row that stages through a
+// diffSide to that.
+func stagedCopy(m *models.Mock) *models.Mock { return m.ShallowCopy() }
+
+// guardedPool names one pool unwrittenSpecs guards for one test: its backing
+// array and length.
+type guardedPool struct {
+	t     testing.TB
+	first **models.Mock
+	n     int
+}
+
+// guardedPools holds the pools guarded by tests still running.
+var guardedPools sync.Map
+
+// unwrittenSpecs fails t, once it ends, for every mock of pool whose Spec
+// (requests, responses, metadata, noise, variables) is not what it was when
+// t staged it first: a staging or serving wrote through a copy stagedCopy
+// shares, and a later staging would serve what it wrote.
+//
+// Both sides of a row stage the one pool, so it is guarded once per test: the
+// first call digests it, and a later one for the same pool adds nothing.
+func unwrittenSpecs(t testing.TB, pool []*models.Mock) {
+	t.Helper()
+	if len(pool) == 0 {
+		return
+	}
+	k := guardedPool{t, &pool[0], len(pool)}
+	if _, dup := guardedPools.LoadOrStore(k, struct{}{}); dup {
+		return
+	}
+	digest := func(m *models.Mock) [sha256.Size]byte {
+		b, err := json.Marshal(m.Spec)
+		if err != nil {
+			t.Fatalf("encode the Spec of %s: %v", m.Name, err)
+		}
+		return sha256.Sum256(b)
+	}
+	was := make([][sha256.Size]byte, len(pool))
+	for i, m := range pool {
+		was[i] = digest(m)
+	}
+	t.Cleanup(func() {
+		guardedPools.Delete(k)
+		changed := 0
+		for i, m := range pool {
+			if digest(m) != was[i] {
+				if changed++; changed <= 3 {
+					t.Errorf("the Spec of pool mock %s changed while staged: a staging or serving wrote through a shared copy (stagedCopy)", m.Name)
+				}
+			}
+		}
+		if changed > 3 {
+			t.Errorf("%d pool mocks' Specs changed in all", changed)
+		}
+	})
+}
+
+// stage stages the window [start, end] as the agent does in lax mode: copies
+// (stagedCopy), per-test mocks inside the window in the per-test tier and the
+// rest promoted to the session pool after the reusable mocks, each part in
+// recorded order, and per-test mocks already consumed left out.
 func (s *diffSide) stage(start, end time.Time) {
 	for _, st := range s.mm.GetConsumedMocks() {
 		if st.Usage == models.Deleted {
@@ -351,7 +448,7 @@ func (s *diffSide) stage(start, end time.Time) {
 	}
 	var perTest, reusable, promoted []*models.Mock
 	for _, m := range s.pool {
-		c := m.DeepCopy()
+		c := stagedCopy(m)
 		if c.TestModeInfo.Lifetime != models.LifetimePerTest || c.Spec.Metadata["type"] == "config" {
 			reusable = append(reusable, c)
 			continue
@@ -377,6 +474,11 @@ func (s *diffSide) stage(start, end time.Time) {
 // of the pools a later command reads.
 func (s *diffSide) match(ctx context.Context, req mysql.Request, eng *schemanoise.Engine, fullScan bool) string {
 	resp, ok, miss, err := replayer.MatchCommandForTest(ctx, zap.NewNop(), req, s.mm, s.dctx, eng, fullScan)
+	return s.describe(resp, ok, miss, err)
+}
+
+// describe is what match returns for a command matched as resp, ok, miss, err.
+func (s *diffSide) describe(resp *mysql.Response, ok bool, miss string, err error) string {
 	var b strings.Builder
 	if resp != nil {
 		body, _ := json.Marshal(resp.Message)

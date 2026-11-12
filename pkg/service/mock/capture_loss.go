@@ -71,13 +71,7 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 		unchargedErr = err
 		m.logger.Warn("keploy could not read which of the run's capture losses no test was charged with, so every one of them is the run's", zap.Error(err))
 	}
-	all := append(models.CaptureLosses(nil), lost...)
-	if refused.Target > 0 {
-		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refused.Target, What: refused.CaptureIncomplete()})
-	}
-	if refused.Excluded > 0 {
-		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refused.Excluded, What: refused.CaptureIncomplete()})
-	}
+	all := append(append(models.CaptureLosses(nil), lost...), pidMapLosses(refused)...)
 	switch {
 	case lostErr != nil && unchargedErr != nil:
 		return all, fmt.Errorf("%w; nor which of them no test was charged with: %v", lostErr, unchargedErr)
@@ -85,6 +79,22 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 		return all, lostErr
 	}
 	return all, nil
+}
+
+// pidMapLosses are refused as capture losses, one for each PID map that
+// refused an insert: the inserts it refused, the run's sentence for both
+// maps (PIDMapRefusals.CaptureIncomplete), and the kernel's errno for that
+// map's latest refusal, so a reader takes each map's cause from its own
+// loss. nil when neither refused one.
+func pidMapLosses(refused models.PIDMapRefusals) models.CaptureLosses {
+	var out models.CaptureLosses
+	if refused.Target > 0 {
+		out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refused.Target, What: refused.CaptureIncomplete(), Err: refused.LastTargetErr})
+	}
+	if refused.Excluded > 0 {
+		out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refused.Excluded, What: refused.CaptureIncomplete(), Err: refused.LastExcludedErr})
+	}
+	return out
 }
 
 // captureLossesDuring is what the agent could not capture while the test
@@ -96,12 +106,28 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 // failed handshake, which is only its own test's; this is the run's own
 // verdict, which also covers a loss outside every test. An error is a count
 // that could not be read, at the start or now.
+//
+// What the kernel dropped at keploy's proxy listener after the last test is
+// counted only when the agent closes the drops' window no test holds, which
+// its read of the losses no test was charged with does (the agent's
+// closeDropsGap). That read is made first, so this one has those drops,
+// where every other loss after the last test is: a record's warning and its
+// per-test file's CannotCapture say them, as they do a TLS handshake
+// abandoned at the same moment. A test still open (its process went away;
+// the record's read of the windows ends it) keeps its drops to its end.
+// If that read fails, this one goes on without those drops, as runLosses
+// goes on without it (an agent older than it has no such drops).
 func (m *mockService) captureLossesDuring(ctx context.Context, base lossBase) (models.CaptureLosses, error) {
 	if !base.checked {
 		return nil, nil
 	}
 	if base.err != nil {
 		return nil, fmt.Errorf("before the test command ran: %w", base.err)
+	}
+	if un, ok := m.instrumentation.(UnchargedLossReader); ok {
+		if _, err := un.GetUnchargedCaptureLosses(ctx); err != nil {
+			m.logger.Debug("keploy's agent could not count what its proxy listener dropped after the last test before its read of the run's capture losses", zap.Error(err))
+		}
 	}
 	reader := m.instrumentation.(CaptureLossReader)
 	now, err := reader.GetCaptureLosses(ctx)

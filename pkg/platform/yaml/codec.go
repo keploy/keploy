@@ -64,6 +64,9 @@ type NetworkTrafficDocJSON struct {
 
 	Variables models.MockVariables `json:"variables,omitempty"`
 
+	// Clocks is NetworkTrafficDoc.Clocks.
+	Clocks map[string]models.ClockOffset `json:"clocks,omitempty"`
+
 	// Real is NetworkTrafficDoc.Real.
 	Real []string `json:"real,omitempty"`
 
@@ -96,6 +99,8 @@ func DocToJSON(doc *NetworkTrafficDoc) (*NetworkTrafficDocJSON, error) {
 		ConnectionID: doc.ConnectionID,
 		Start:        doc.Start,
 		Variables:    doc.Variables,
+		Clocks:       doc.Clocks,
+		Real:         doc.Real,
 		Origin:       doc.Origin,
 	}, nil
 }
@@ -164,6 +169,8 @@ func jsonDocToYamlDoc(jsonDoc *NetworkTrafficDocJSON) (*NetworkTrafficDoc, error
 		ConnectionID: jsonDoc.ConnectionID,
 		Start:        jsonDoc.Start,
 		Variables:    jsonDoc.Variables,
+		Clocks:       jsonDoc.Clocks,
+		Real:         jsonDoc.Real,
 		Origin:       jsonDoc.Origin,
 	}
 

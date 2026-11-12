@@ -175,6 +175,15 @@ func TestCallShape(t *testing.T) {
 		{"Postgres", "PostgresV2", "SELECT 1", "SELECT ?"},
 		{"SQL withheld from its first byte", "MySQL", "/* ping */ SELECT 1", "…"},
 		{"another protocol has no shape", "Redis", "GET session:alice", ""},
+		{"MongoDB", "MongoDB", "find on app_config_audits", "find on app_config_audits"},
+		{"MongoDB, a tenant's collection", "MongoDB", "find on orders_tenant42", "find on {}"},
+		{"MongoDB, a namespace", "MongoDB", "find on api.app_config_audits filter appId,name", "find on api.app_config_audits filter appId,name"},
+		{"MongoDB, a key that is a value", "MongoDB", "find on {}.users filter alice@example.com,items.0.sku,…", "find on {}.users filter {}.com,items.{}.sku,…"},
+		{"MongoDB, a handshake", "MongoDB", "hello", "hello"},
+		{"MongoDB, no collection", "MongoDB", "hello on ", "hello"},
+		{"MongoDB, the legacy command collection", "MongoDB", "isMaster on $cmd", "isMaster on $cmd"},
+		{"MongoDB, a cursor's number", "MongoDB", "getMore on 8723648723", "getMore on {}"},
+		{"MongoDB, what else a summary holds is left out", "MongoDB", "find on users where alice", "find on users"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -204,6 +213,49 @@ func TestMissShape(t *testing.T) {
 	require.Equal(t, "GET /orders/{}/lines/{}", MissShape(declared))
 }
 
+// A MongoDB miss's shape names the database its command ran in and its
+// filter's keys, from the request the matcher rendered, each part a name or
+// {}, never a value the filter holds (a key's dots are the steps of a path
+// into the document, as the server reads them, so each step is shaped on its
+// own); a miss with no rendered request, or
+// one that does not read as a command, is shaped by its summary alone. The
+// shape is its own shape, as a report's evidence reads it again.
+func TestMissShape_MongoDB(t *testing.T) {
+	miss := func(summary, req string) UnmatchedCall {
+		return UnmatchedCall{Protocol: "MongoDB", ActualSummary: summary, ReceivedReq: req}
+	}
+	cases := []struct {
+		name string
+		m    UnmatchedCall
+		want string
+	}{
+		{"a find by a test's id, as api-server's app_config_audits read", miss("find on app_config_audits",
+			`{"cmd":{"$db":"api","find":"app_config_audits","filter":{"appId":"6720b1c2e4b0a1b2c3d4e5f6","name":"[E2E] app-crud-1761734400123456789"},"limit":1}}`),
+			"find on api.app_config_audits filter appId,name"},
+		{"a tenant's database and keys that are values", miss("find on users",
+			`{"cmd":{"$db":"tenant_42","find":"users","filter":{"profile.city":"Pune","alice@example.com":1,"items.0.sku":"x","":2}}}`),
+			"find on {}.users filter {},{}.com,items.{}.sku,profile.city"},
+		{"count reads its query", miss("count on orders", `{"cmd":{"$db":"shop","count":"orders","query":{"status":"open"}}}`), "count on shop.orders filter status"},
+		{"switch off renders no database", miss("find on app_config_audits", `{"cmd":{"find":"app_config_audits","filter":{"appId":"x"}}}`), "find on app_config_audits filter appId"},
+		{"no filter", miss("insert on events", `{"cmd":{"$db":"api","insert":"events"},"docs":[{"_id":"x"}]}`), "insert on api.events"},
+		{"more keys than a shape names", miss("find on t", `{"cmd":{"$db":"d","find":"t","filter":{"a":1,"b":1,"c":1,"d":1,"e":1,"f":1,"g":1,"h":1,"i":1}}}`), "find on d.t filter a,b,c,d,e,f,g,h,…"},
+		{"no rendered request", miss("find on app_config_audits", ""), "find on app_config_audits"},
+		{"a request that does not parse", miss("find on app_config_audits", `{"cmd":`), "find on app_config_audits"},
+		{"a cursor's number is no collection", miss("getMore on 8723648723", `{"cmd":{"$db":"api","getMore":8723648723,"collection":"app_config_audits"}}`), "getMore on {}"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := MissShape(c.m)
+			require.Equal(t, c.want, got)
+			require.Equal(t, got, CallShape(c.m.Protocol, got), "a shape is its own shape")
+			require.Equal(t, got, MissShape(UnmatchedCall{Protocol: c.m.Protocol, ActualSummary: got}), "a sanitized miss shapes to itself")
+			for _, v := range []string{"6720b1c2", "app-crud", "Pune", "alice", "open", "tenant_42"} {
+				require.NotContains(t, got, v)
+			}
+		})
+	}
+}
+
 // A mock's declared path places: each variable's bind and use places that
 // are URL path segments, once, in the order of the variables' names.
 func TestDeclaredPathPlaces(t *testing.T) {
@@ -214,7 +266,19 @@ func TestDeclaredPathPlaces(t *testing.T) {
 	require.Equal(t, []string{"url.path[1]", "url.path[3]"}, DeclaredPathPlaces(m))
 	require.Nil(t, DeclaredPathPlaces(nil))
 	require.True(t, IsPathPlace("url.path[0]"))
-	for _, p := range []string{"", "url.path[]", "url.path[x]", "url.query.id", "body.id", "url.path[1]x"} {
+	// A word of a segment (a word address another protocol's learn step
+	// writes) names that segment.
+	require.True(t, IsPathPlace("url.path[2]#1"))
+	require.True(t, IsPathPlace("url.path[2]|pct#0"))
+	for _, p := range []string{"url.path[2]|json#10", "url.path[2]|b64|b64url", "url.path[2]|cookie.sid", "url.path[2]|jwt.sub#3", `url.path[2]|jwt.a\|b#0`, `url.path[2]|jwt.a\`} {
+		require.True(t, IsPathPlace(p), p)
+	}
+	for _, p := range []string{"", "url.path[]", "url.path[x]", "url.query.id", "body.id", "url.path[1]x", "url.path[1]x#0", "url.path[x]#0"} {
+		require.False(t, IsPathPlace(p), p)
+	}
+	// What variables.ParseAddress refuses after a segment is no word of it.
+	for _, p := range []string{"url.path[1]#x", "url.path[1]#", "url.path[1]|", "url.path[1]#01", "url.path[1]#-1", "url.path[1]#+1", "url.path[1]0",
+		"url.path[1]#0#1", "url.path[1]#0|pct", "url.path[1]|foo", "url.path[1]|jwt.", "url.path[1]|cookie.", "url.path[1]|pct|foo#0"} {
 		require.False(t, IsPathPlace(p), p)
 	}
 }
@@ -235,9 +299,13 @@ func TestMockURLShape(t *testing.T) {
 		{"a bare host", mock("http://pay.internal", nil), "pay.internal"},
 		{"a declared bind place", mock("http://store/orders/kqzxwv", MockVariables{"orderId": {Recorded: "kqzxwv", Bind: "url.path[1]"}}), "store/orders/{}"},
 		{"a declared use place", mock("http://store/orders/kqzxwv/items", MockVariables{"orderId": {Recorded: "kqzxwv", Use: []string{"body.id", "url.path[1]"}}}), "store/orders/{}/items"},
+		{"a declared word of a segment", mock("http://store/apps/app-kqzxwv/items", MockVariables{"appId": {Recorded: "kqzxwv", Use: []string{"url.path[1]#1"}}}), "store/apps/{}/items"},
 		{"a path alone", mock("/orders/12345", nil), "/orders/{}"},
 		{"a URL that does not parse", mock("http://h/a%zz/alice", nil), "{}"},
-		{"a path that starts //, read as a place reads it", mock("//orders/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[0]"}}}), "orders/{}"},
+		// A path-only URL is read as a request line (ParseRequestURL), as a
+		// place reads it: "//orders/kqzxwv" is a path whose first segment is
+		// empty, not the host "orders".
+		{"a path that starts //, read as a place reads it", mock("//orders/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[2]"}}}), "//orders/{}"},
 		{"an encoded slash before a place", mock("http://store/files/a%2Fb/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[2]"}}}), "store/files/{}/{}"},
 		{"a relative URL, counted as a place counts it", mock("orders/kqzxwv", MockVariables{"orderId": {Use: []string{"url.path[1]"}}}), "orders/{}"},
 		{"no HTTP request", &Mock{Kind: HTTP}, ""},
@@ -292,6 +360,26 @@ func TestFieldShape(t *testing.T) {
 		{"body.x[y]", "body.{}"},
 		{"body.orders[4111111111111111].total", "body.{}.total"},
 		{"body.line1", "body.{}"},
+		// An SQL call's place names (a Postgres statement's bind.$N, the
+		// Nth constant of its text literal.N) are positions keploy counts,
+		// not values the app sent: kept whole. Anything else of their look
+		// is shaped as every key is.
+		{"bind.$1", "bind.$1"},
+		{"bind.$65535", "bind.$65535"},
+		{"literal.3", "literal.3"},
+		{"literal.12", "literal.12"},
+		{"bind.$0", "bind.{}"},
+		{"bind.$01", "bind.{}"},
+		{"bind.$123456", "bind.{}"},
+		{"bind.$1a", "bind.{}"},
+		{"bind.1", "bind.{}"},
+		{"literal.0", "literal.{}"},
+		{"literal.$1", "literal.{}"},
+		{"literal.123456", "literal.{}"},
+		{"bind.$1.total", "bind.{}.total"},
+		{"body.bind.$1", "body.bind.{}"},
+		{"body.literal.7", "body.literal.{}"},
+		{"header.bind.$1", "header.bind.{}"},
 	}
 	for _, c := range cases {
 		require.Equal(t, c.want, FieldShape(c.in), c.in)

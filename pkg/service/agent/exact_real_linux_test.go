@@ -98,11 +98,11 @@ func TestATestWithAnExactMockARealRowAndACaptureLoss(t *testing.T) {
 			require.Equal(t, 200, code)
 			require.Equal(t, "a", body)
 			// The test's REAL connection: relayed before any matcher.
-			p.tracker.Dialed(1, "db.real:8080", true)
-			p.tracker.Sent(1, "db.real:8080")
-			lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full"}}
+			p.tracker.Dialed(realdeps.Origin{}, 1, "db.real:8080", true)
+			p.tracker.Sent(realdeps.Origin{}, 1, "db.real:8080")
+			lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full", Err: -7}}
 			if tc.taint {
-				p.tracker.Incomplete("10.0.0.7:443", "keploy could not read which name it was opened for")
+				p.tracker.Incomplete(realdeps.Origin{}, "10.0.0.7:443", "keploy could not read which name it was opened for")
 				a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 2, LastTargetErr: -7}}
 			}
 			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
@@ -167,8 +167,8 @@ func TestARecordedCallIsItsTestsUnlessItsConnectionIsListedReal(t *testing.T) {
 			require.Equal(t, 200, code)
 			require.Equal(t, "a", body)
 			if tc.madeReal != "" {
-				p.tracker.Dialed(1, tc.madeReal, true)
-				p.tracker.Sent(1, tc.madeReal)
+				p.tracker.Dialed(realdeps.Origin{}, 1, tc.madeReal, true)
+				p.tracker.Sent(realdeps.Origin{}, 1, tc.madeReal)
 			}
 			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
 			require.Nil(t, serr)

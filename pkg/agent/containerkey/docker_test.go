@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -75,6 +76,12 @@ type fakeDocker struct {
 	inspects     int
 	closes       int
 	opts         events.ListOptions
+
+	// zoneFiles is the files of each container its zone is read from
+	// (containerZone), by container ID: a container not here holds none
+	// (no /etc at all). zoneReads counts the reads of each one's.
+	zoneFiles map[string]*fakeZoneAPI
+	zoneReads map[string]int
 }
 
 func newFakeDocker() *fakeDocker {
@@ -186,6 +193,44 @@ func (f *fakeDocker) ContainerInspect(ctx context.Context, id string) (container
 		return container.InspectResponse{}, notFound{}
 	}
 	return got, nil
+}
+
+// zoneFilesOf counts a read of container id's files and gives them: none
+// (no /etc at all) where zoneFiles has none of it; not found where the
+// container is gone. f.mu is held.
+func (f *fakeDocker) zoneFilesOf(id string) (*fakeZoneAPI, error) {
+	f.calls++
+	if f.zoneReads == nil {
+		f.zoneReads = map[string]int{}
+	}
+	f.zoneReads[id]++
+	if _, ok := f.containers[id]; !ok {
+		return nil, notFound{}
+	}
+	if z := f.zoneFiles[id]; z != nil {
+		return z, nil
+	}
+	return &fakeZoneAPI{}, nil
+}
+
+func (f *fakeDocker) ContainerStatPath(ctx context.Context, id, p string) (container.PathStat, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	z, err := f.zoneFilesOf(id)
+	if err != nil {
+		return container.PathStat{}, err
+	}
+	return z.ContainerStatPath(ctx, id, p)
+}
+
+func (f *fakeDocker) CopyFromContainer(ctx context.Context, id, p string) (io.ReadCloser, container.PathStat, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	z, err := f.zoneFilesOf(id)
+	if err != nil {
+		return nil, container.PathStat{}, err
+	}
+	return z.CopyFromContainer(ctx, id, p)
 }
 
 func (f *fakeDocker) ImageInspect(ctx context.Context, id string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {

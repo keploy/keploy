@@ -7,6 +7,58 @@ name: Linux CI scripts
 # index is broken, which an ordinary run never shows. The tests make all three
 # happen on purpose, against a stub mirror. They run on every change to the
 # helper or its tests.
+#
+# Also here: free-port.sh, the port the compose lanes publish their app on,
+# whose window keeps clear of the port Docker's DNS server holds in every
+# container on a user-defined network. Its tests check that on Docker itself.
+#
+# And compose-proven-setend-linux.tests.sh: the lane "proven set-end stop
+# (docker_compose)"'s record() and await() against a fake keploy. A recording
+# that lacks a test case, as a failed request or keploy dropping one leaves it,
+# has to end with its log printed, not hold the lane until its job is
+# cancelled; and one that has them all has to pass, its test cases written as
+# the requests are answered or as keploy record stops. Under the verify switch,
+# with sudo resetting the environment as both sudos do, one whose agent says
+# verify mode is on has to pass and one whose agent never says it has to fail.
+# The functions run from a copy, which loads sudo_env.sh by the lane's own
+# directory, as the lane does. await() has to wait for a log keploy makes after
+# it begins, and fail once keploy exits with none.
+#
+# And keploy-installer.tests.sh: keploy.sh, served as https://keploy.io/install.sh,
+# on its default route (the hand-off to https://keploy.io/ent/install.sh) and
+# its --oss route, sourced under bash and zsh against a curl stub. Run from a
+# repo root that has its own install.sh, it must leave the caller's directory
+# alone: download into a temp directory of its own, never over ./install.sh,
+# never source a local install.sh in place of a failed download, and delete
+# nothing there. With --oss it must download and extract in a temp directory
+# of its own too, and touch no fixed /tmp path, nor anyone else's files.
+#
+# And mock-kinds.tests.sh: http_mocks_are, the check of a lane that counts
+# the Http mocks its own calls make and may record DNS mocks beside them
+# (the DNS mocks of the runner's own name, which only some runners'
+# resolvers answer, in repeated-headers' busy --sync pass); an Http mock
+# lost or duplicated, or a mock of any other kind, fails. And
+# http_mocks_only, the check of a lane whose code makes no DNS query: a
+# DNS mock fails there too. And http_mock_count, the count of the Http
+# mocks of a lane that records other kinds beside them. All three match the
+# kind whole: an Http2 or HttpFault mock is not an Http one, though a
+# `^kind: Http` prefix counts it.
+#
+# And keploy-start-wait.tests.sh: await_agent_ready, the wait of a lane that
+# starts keploy record for its agent's ready line, after which the app's wait
+# starts with its full budget: the line ends it, a keploy that exits first or
+# a start past the bound fails it, and it says the step a slow start is in.
+# And save_keploy_start_evidence, which copies keploy's logs and each agent's
+# boot.json, removed when keploy exits, for the lane's upload.
+#
+# And golang/gin_mongo/golang-docker.tests.sh and
+# golang/echo_sql/golang-docker.tests.sh: the gin-mongo and echo-sql lanes of
+# golang_docker.yml, sourced by `bash -e` as their step runs them, against a
+# fake keploy. A keploy record or keploy test that exits non-zero has to fail
+# the lane with keploy's own exit code and a line naming that command and its
+# exit, the failed test sets and tests of the test run it wrote, and the
+# command's log; under `bash -e` the lane ended at that command with none of
+# them, and an echo-sql record, its exit taken as tee's, did not stop it.
 
 on:
   push:
@@ -15,11 +67,57 @@ on:
     paths:
       - '.github/workflows/test_workflow_scripts/apt-install.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.tests.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
+      - 'keploy.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-start-wait.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-start-wait.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.sh'
+      - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/golang-docker-fakes.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-exit-helpers.sh'
+      - '.github/workflows/test_workflow_scripts/test-iid.sh'
+      - '.github/workflows/test_workflow_scripts/docker-build-retry.sh'
+      - '.github/workflows/test_workflow_scripts/mongo-ci.sh'
+      - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
+      - '.github/workflows/test_workflow_scripts/sudo_env.sh'
+      - '.github/workflows/test_workflow_scripts/hang_guard.sh'
+      - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
       - '.github/workflows/test_workflow_scripts/apt-install.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.tests.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
+      - 'keploy.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.sh'
+      - '.github/workflows/test_workflow_scripts/mock-kinds.tests.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-start-wait.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-start-wait.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh'
+      - '.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.sh'
+      - '.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/golang-docker-fakes.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-exit-helpers.sh'
+      - '.github/workflows/test_workflow_scripts/test-iid.sh'
+      - '.github/workflows/test_workflow_scripts/docker-build-retry.sh'
+      - '.github/workflows/test_workflow_scripts/mongo-ci.sh'
+      - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
+      - '.github/workflows/test_workflow_scripts/sudo_env.sh'
+      - '.github/workflows/test_workflow_scripts/hang_guard.sh'
+      - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -27,19 +125,20 @@ permissions:
 
 jobs:
   apt-install:
-    # Seven ubuntu containers that fetch the package lists once each (through
-    # the stub, which asks the real mirror for each list only the first time),
-    # one that builds the test repository, and two with no network. About four
-    # minutes of a run are waits the cases are made of: against the stub, the
-    # 45 s limit of a control, two slices of 20 s and a budget of 90 s; in each
-    # of the two offline containers, half a minute of slices and budgets of 1
-    # to 8 s. The fetching and installing comes on top, and how long that takes
-    # on a runner is in the job's own history, not here.
+    # Eleven ubuntu containers that fetch the package lists once or more each
+    # (through the stub, which asks the real mirror for each list only the
+    # first time), one that builds the test repository, and two with no
+    # network. About seven minutes of a run are waits the cases are made of:
+    # against the stub, the 45 s limits of two controls, seven slices of 20 s
+    # and two budgets of 90 s; in each of the two offline containers, under a
+    # minute of slices and budgets of 1 to 8 s. The fetching and installing
+    # comes on top, and how long that takes on a runner is in the job's own
+    # history, not here.
     #
     # Each networked case is capped at 300 s and prints its log as soon as it
-    # has failed. Seven of them at the cap are 35 minutes, so this limit lets a
-    # run in which every one of them hangs end by itself, with every log.
-    timeout-minutes: 45
+    # has failed. Eleven of them at the cap are 55 minutes, so this limit lets
+    # a run in which every one of them hangs end by itself, with every log.
+    timeout-minutes: 65
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,3 +208,82 @@ jobs:
             echo "::error::apt's list cleanup kept the sentinel, so the check above proves nothing"
             exit 1
           fi
+
+  # Docker's DNS server listens in each container on a user-defined network
+  # on a port of the ephemeral range, so an app given a port the kernel picked
+  # could not bind it there (job 124142018005). The tests start one such
+  # container: its pull and start are most of a run.
+  free-port:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test free-port.sh (its window and order, busy and skipped ports, host ranges, Docker's DNS port)
+        run: bash .github/workflows/test_workflow_scripts/free-port.tests.sh
+
+  compose-proven-setend:
+    # Eight cases (six of record(), two of await()), a few seconds; each
+    # bounds the hang it tests for at 60 s, so all eight hanging take 8 min,
+    # and the logs the script prints at its end still show.
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test compose-proven-setend-linux.sh (a recording's test cases counted once keploy record has stopped; a recording under the verify switch whose agent never said verify mode is on fails; await on a log made late or never)
+        run: bash .github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh
+
+  installer:
+    # Thirty-two cases, under bash and under zsh; a few seconds. The one on a
+    # terminal (script(1), in bsdutils on ubuntu) bounds itself at 120 s per
+    # shell, so both hanging still leave the log time to show.
+    timeout-minutes: 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zsh, which macOS users source the installer from
+        run: bash .github/workflows/test_workflow_scripts/apt-install.sh zsh
+
+      - name: Test keploy.sh (leaves the caller's directory alone; downloads into a temp directory of its own)
+        env:
+          REQUIRE_ZSH: '1'
+          REQUIRE_PTY: '1'
+        run: bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh
+
+  mock-kinds:
+    # Thirty-three cases on files the script writes; under a second.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test mock-kinds.sh (DNS mocks beside the Http ones pass; an Http mock lost or duplicated, or another kind, fails)
+        run: bash .github/workflows/test_workflow_scripts/mock-kinds.tests.sh
+
+  keploy-start-wait:
+    # Thirteen cases, about twenty seconds: the waits are real.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test keploy-start-wait.sh (the agent's ready line ends the wait; an exit or the bound fails it; the evidence is copied)
+        run: bash .github/workflows/test_workflow_scripts/keploy-start-wait.tests.sh
+
+  golang-docker-lanes:
+    # Forty-two cases against fakes, a few seconds in all; each is bounded
+    # at 60 s.
+    timeout-minutes: 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test gin_mongo/golang-docker.sh (a keploy record or keploy test that exits non-zero is named, with its reports and log)
+        run: bash .github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.tests.sh
+
+      - name: Test echo_sql/golang-docker.sh (a keploy record or keploy test that exits non-zero is named, with its reports and log)
+        # Runs even when the gin_mongo step failed, so one run reports both.
+        if: ${{ !cancelled() }}
+        run: bash .github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh

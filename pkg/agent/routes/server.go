@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
 )
 
@@ -166,7 +167,9 @@ func agentBindAddr(port int, isDocker bool) string {
 func listenWithRetry(ctx context.Context, logger *zap.Logger, addr string, budget, interval time.Duration) (net.Listener, error) {
 	deadline := time.Now().Add(budget)
 	for {
-		ln, err := net.Listen("tcp", addr)
+		// Plain TCP, never Go's default MPTCP: in docker the agent listens on
+		// every interface of its container.
+		ln, err := plaintcp.Listen(context.Background(), "tcp", addr)
 		if err == nil {
 			return ln, nil
 		}

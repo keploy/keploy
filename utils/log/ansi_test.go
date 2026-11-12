@@ -207,7 +207,8 @@ func (o bodyObject) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 // enterprise's does, and brings in a colour of its own, which each output
 // shows as its encoder would.
 func TestConsoleLoggersPassOnlySGRToTheTerminal(t *testing.T) {
-	t.Chdir(t.TempDir()) // New() opens keploy-logs.txt in the working directory.
+	t.Chdir(t.TempDir())
+	t.Setenv("TMPDIR", t.TempDir()) // New() creates its log file there.
 	// TestOnlyResetSink, not the sink PrimarySink reports: that is an explicit
 	// os.Stdout, which a later test that swaps os.Stdout for a pipe would not
 	// see through.
@@ -328,7 +329,7 @@ func TestConsoleLoggersPassOnlySGRToTheTerminal(t *testing.T) {
 		outputs []output
 	}{
 		{"New", func(t *testing.T) (*zap.Logger, error) { return newForTest(t), nil },
-			[]output{{"console", console, true, colouredError}, {"keploy-logs.txt", file("keploy-logs.txt"), true, colouredError}}},
+			[]output{{"console", console, true, colouredError}, {"the log file", func() string { return lastLogFile }, true, colouredError}}},
 		{"ChangeLogLevel (--debug)", func(*testing.T) (*zap.Logger, error) { return ChangeLogLevel(zapcore.DebugLevel) },
 			[]output{{"console", console, true, colouredError}}},
 		{"AddMode (agent)", func(*testing.T) (*zap.Logger, error) { return AddMode("agent") },
@@ -470,9 +471,15 @@ func newForTest(t *testing.T) *zap.Logger {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = logFile.Close() })
+	if logFile != nil {
+		lastLogFile = logFile.Name()
+	}
+	t.Cleanup(func() { _ = CloseLogFile(logFile) })
 	return logger
 }
+
+// lastLogFile is the name of the log file newForTest's New last created.
+var lastLogFile string
 
 // createForTest creates a file in the working directory, closed when the test
 // ends.

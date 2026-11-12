@@ -74,8 +74,8 @@ for img in $IMAGES; do
     set -u
     . /etc/os-release
     echo "distro: $PRETTY_NAME ($(uname -m)), libc: $(ldd --version 2>&1 | head -n 1)"
-    # The working directory, /pg, is read-only: keploy logs to the console
-    # only when it cannot write keploy-logs.txt there, and must still run.
+    # The working directory, /pg, is read-only: keploy writes nothing there
+    # (its log is a temp file) and must still run.
     out="$(/b/keploy --version 2>&1)"; rc=$?
     printf "%s\n" "$out" | tail -n 3
     if [ "$rc" -ne 0 ]; then echo "FAIL: --version exited $rc"; exit 1; fi

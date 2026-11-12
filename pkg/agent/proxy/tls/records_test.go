@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
@@ -158,4 +160,25 @@ func tcpPair(t *testing.T) (app, srv net.Conn) {
 	}
 	t.Cleanup(func() { _ = app.Close(); _ = srv.Close() })
 	return app, srv
+}
+
+// The client's connection under keploy's TLS server answers a half-close for
+// the conn beneath it: nil, with the FIN sent, over TCP, and
+// util.ErrCannotHalfClose, not nil, over a conn that cannot half-close. A
+// relay that keeps the other direction open for the answer to that FIN must
+// know the FIN was sent. Red with recordConn's CloseWrite masking that
+// error to nil.
+func TestARecordConnSaysWhenItCannotHalfClose(t *testing.T) {
+	pipe, other := net.Pipe()
+	t.Cleanup(func() { _ = pipe.Close(); _ = other.Close() })
+	if err := newRecordConn(struct{ net.Conn }{pipe}).CloseWrite(); !errors.Is(err, util.ErrCannotHalfClose) {
+		t.Errorf("CloseWrite over a conn with no CloseWrite = %v, want util.ErrCannotHalfClose", err)
+	}
+	app, srv := tcpPair(t)
+	if err := newRecordConn(srv).CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite over TCP = %v, want nil", err)
+	}
+	if n, err := app.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		t.Fatalf("the peer read (%d, %v), want the FIN (0, io.EOF)", n, err)
+	}
 }

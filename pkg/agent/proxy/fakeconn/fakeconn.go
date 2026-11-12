@@ -17,7 +17,10 @@ var ErrFakeConnNoWrite = errors.New("fakeconn: Write is not permitted; parsers m
 // ErrClosed is returned by Read/ReadChunk after Close, once the reader has
 // taken every chunk already on the channel, while the producer has not ended
 // the stream (closed its channel). A stream its producer ended reads io.EOF,
-// Close or not. io.EOF says only that: the producer ended the stream, not that
+// Close or not. The relay never ends a stream whose reader was closed before
+// its end (its tee leaves the channel open), so a reader the session closed
+// reads ErrClosed after what it was handed, however far behind its capture it
+// gets there. io.EOF says only that: the producer ended the stream, not that
 // every chunk the connection carried reached the channel. A producer that ends
 // a stream before the connection's end (it gave up on its consumer, or the
 // capture lost a chunk) says so itself, apart from the stream.
@@ -143,9 +146,12 @@ type FakeConn struct {
 	closed          atomic.Bool
 	// first is the first floor DropBefore was given (guarded by mu), 0 until
 	// then: the stream's start is what was captured before it (started). In
-	// the padding after closed, so a FakeConn stays in the 288 B size class.
+	// the padding after closed.
 	first   uint32
 	closeCh chan struct{}
+	// endCh is closed (under mu) as the reader is first handed io.EOF: it has
+	// read the stream to the end its producer gave it (ReadToEnd).
+	endCh chan struct{}
 
 	deadlineMu        sync.Mutex
 	deadlineCh        chan struct{}
@@ -199,6 +205,7 @@ func newWithLogger(ch <-chan Chunk, localAddr, remoteAddr net.Addr, log logger) 
 		ch:      ch,
 		logger:  log,
 		closeCh: make(chan struct{}),
+		endCh:   make(chan struct{}),
 		local:   localAddr,
 		remote:  remoteAddr,
 	}
@@ -580,7 +587,7 @@ func (f *FakeConn) receive() (Chunk, error) {
 			select {
 			case c, ok := <-f.ch:
 				if !ok {
-					return Chunk{}, io.EOF
+					return Chunk{}, f.readEnd()
 				}
 				return c, nil
 			default:
@@ -591,7 +598,7 @@ func (f *FakeConn) receive() (Chunk, error) {
 		select {
 		case c, ok := <-f.ch:
 			if !ok {
-				return Chunk{}, io.EOF
+				return Chunk{}, f.readEnd()
 			}
 			return c, nil
 		default:
@@ -607,7 +614,7 @@ func (f *FakeConn) receive() (Chunk, error) {
 		case c, ok := <-f.ch:
 			f.waiting.Store(false)
 			if !ok {
-				return Chunk{}, io.EOF
+				return Chunk{}, f.readEnd()
 			}
 			return c, nil
 		case <-f.closeCh:
@@ -622,6 +629,29 @@ func (f *FakeConn) receive() (Chunk, error) {
 		}
 	}
 }
+
+// readEnd notes that the reader has read the stream to its end (ReadToEnd),
+// and returns the io.EOF it reads there.
+func (f *FakeConn) readEnd() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	select {
+	case <-f.endCh:
+	default:
+		close(f.endCh)
+	}
+	return io.EOF
+}
+
+// ReadToEnd returns a channel closed once the reader has read this stream to
+// the end its producer gave it: it was handed every chunk the producer put on
+// the channel, and then io.EOF. Nothing more can reach the reader then. The
+// relay ends a stream so only once its tee has handed on every chunk it
+// captured for it (or where a hole cut the stream, which it says itself:
+// Config.EndAtHole), so a reader past it holds nothing of the capture unread.
+// A reader closed before its producer ended the stream reads ErrClosed, not
+// the end, and never gets there.
+func (f *FakeConn) ReadToEnd() <-chan struct{} { return f.endCh }
 
 // Dropped is a run of chunks the floor dropped (FakeConn.DropBefore), reported
 // once as it ends.
@@ -863,8 +893,8 @@ func (f *FakeConn) LastReadTime() time.Time {
 // LastWrittenTime returns the WrittenAt timestamp of the most recently
 // delivered Chunk, or the zero time if no Chunk has been delivered or
 // no chunk carried a non-zero WrittenAt. Parsers that need response-
-// side semantics (time the relay handed the byte off to the real peer)
-// should prefer this over LastReadTime for consistency with other V2
+// side semantics (time the relay began handing the bytes to the real
+// peer, Chunk.WrittenAt) should prefer this over LastReadTime for consistency with other V2
 // recorders that anchor ResTimestampMock to chunk.WrittenAt.
 func (f *FakeConn) LastWrittenTime() time.Time {
 	n := f.lastWrittenNano.Load()
@@ -901,8 +931,10 @@ func (f *FakeConn) Close() error {
 // session's abort, as its parser is retired; by the proxy's dispatcher once
 // the parser has returned; or by the relay at its teardown, once its tees'
 // drains have returned (a parser behind its capture may still be reading what
-// the channel holds then). The relay's tee selects on this while delivering:
-// a consumer that is merely slow must never cost a recorded chunk, so
+// the channel holds then). The relay's tee reads it as it ends the stream,
+// and leaves open a stream closed before its end, so its reader reads
+// ErrClosed there. It selects on it while delivering, too: a consumer that is
+// merely slow must never cost a recorded chunk, so
 // delivery blocks, and this is the only signal that says the consumer is
 // genuinely gone rather than behind. At the relay's teardown no tee selects
 // on it any more.

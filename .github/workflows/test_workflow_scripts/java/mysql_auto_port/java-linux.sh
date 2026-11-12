@@ -47,6 +47,7 @@
 set -Eeuo pipefail
 
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
+source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/keploy-start-wait.sh"
 
 MYSQL_PORT=3307
 # The port the application is pointed at for the SECOND replay, to simulate an
@@ -77,7 +78,7 @@ trap die ERR
 # honest against binaries older than both changes.
 mysql_auto_detect_supported() {
   local bin="$1"
-  "$bin" config defaults 2>/dev/null | grep -q "disableMysqlAutoDetect" && return 0
+  "$bin" config defaults 2>/dev/null | grep "disableMysqlAutoDetect" >/dev/null && return 0
   local probe_dir rc=1
   probe_dir=$(mktemp -d)
   # No guard here: probe_dir is a fresh mktemp, so there is never a config in
@@ -138,7 +139,7 @@ assert_no_mysql_ports_config() {
 
   # 2. The generated config.
   if [[ -f keploy.yml ]]; then
-    if grep -E "^\s*mysqlPorts:" keploy.yml | grep -q "${port}"; then
+    if grep -E "^\s*mysqlPorts:" keploy.yml | grep "${port}" >/dev/null; then
       echo "::error::keploy.yml lists ${port} in mysqlPorts — this test no longer exercises auto-detection"
       exit 1
     fi
@@ -179,6 +180,7 @@ wait_for_app() {
     sleep 1
   done
   echo "::error::App did not start in time — a stuck MySQL handshake on :${MYSQL_PORT} is the likely cause (auto-detection regression)"
+  save_keploy_start_evidence
   endsec; return 1
 }
 
@@ -265,6 +267,9 @@ assert_no_mysql_ports_config
 section "Record (MySQL on :${MYSQL_PORT}, nothing configured)"
 "$RECORD_BIN" record -c "java -jar $JAR_NAME" > autoPort_record.txt 2>&1 &
 KEPLOY_PID=$!
+# The app starts once keploy's agent is ready: its wait, with its full
+# budget, starts there (keploy-start-wait.sh).
+await_agent_ready autoPort_record.txt "$KEPLOY_PID" || exit 1
 send_request "$KEPLOY_PID"
 set +e
 wait "$KEPLOY_PID"
@@ -480,7 +485,7 @@ section "Assert the mocks were served on the listed port"
 # effect it still talks to :${MYSQL_PORT}, which IS in the recorded set, and
 # every test passes. Require keploy's verdict that a connection to
 # :${DRIFT_PORT} is MySQL because the port is listed.
-if ! grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT_PORT}" | grep -q '"reason": "configured-port"'; then
+if ! grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT_PORT}" | grep '"reason": "configured-port"' >/dev/null; then
   if reports_all_passed "$PRE_DRIFT_RUN_DIR"; then
     echo "::error::every test passed but keploy judged no connection to :${DRIFT_PORT}, which means the"
     echo "::error::application was still talking to :${MYSQL_PORT} — the file:./application.properties"
@@ -499,7 +504,7 @@ if ! grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT
   tail -n 120 test_logs_drift.txt
   exit 1
 fi
-grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT_PORT}" | head -n 3
+grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT_PORT}" | sed -n 1,3p
 endsec
 
 check_reports "drifted endpoint :${DRIFT_PORT}" "$DRIFT_RC" "$PRE_DRIFT_RUN_DIR"

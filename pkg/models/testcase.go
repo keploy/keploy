@@ -97,6 +97,33 @@ type TestCase struct {
 	// each capture, not be inferred from mutable registries. Never set by
 	// agents or on the wire ("-" everywhere).
 	SourceNode string `json:"-" yaml:"-" bson:"-"`
+	// ExpectedRewrite is set only on the copy of a test case a replay hands
+	// to SimulateRequest for one send (replay's toSend), by a hook that
+	// rewrote that copy's expected body before the answer is compared with
+	// it: what the body was as recorded, and each place it rewrote. The
+	// matcher then asserts each body-digest header recorded over that body
+	// (an ETag) as the same digest of the answer's body, and the test's
+	// result names the places (TestResult.Rewritten). Never persisted.
+	ExpectedRewrite *ExpectedRewrite `json:"-" yaml:"-" bson:"-"`
+}
+
+// ExpectedRewrite is how a replay hook rewrote the expected body of the copy
+// of a test case it was handed for one send (TestCase.ExpectedRewrite).
+type ExpectedRewrite struct {
+	// RecordedBody is the expected body as it was recorded, before the
+	// rewrite: the body its digest headers were computed over.
+	RecordedBody string
+	// Places are the places rewritten.
+	Places []RewrittenPlace
+}
+
+// RewrittenPlace is one place of a test case's expected response that a
+// replay hook rewrote for one send, before the app's answer was compared with
+// it: where, what it held as recorded, and why the hook rewrote it.
+type RewrittenPlace struct {
+	Where    string `json:"where" yaml:"where"`
+	Recorded string `json:"recorded" yaml:"recorded"`
+	Why      string `json:"why" yaml:"why"`
 }
 
 func (tc *TestCase) GetKind() string {

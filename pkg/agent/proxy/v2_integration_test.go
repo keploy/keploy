@@ -299,7 +299,7 @@ func (errParserDecode) Error() string { return "synthetic parser decode error" }
 
 // TestV2_ErrorDoesNotBlockTraffic mirrors TestV2_PanicDoesNotBlockTraffic
 // for the clean error-return path. A real parser returning an error
-// (e.g. http recordv2 on "invalid content-length: ...") must not tear
+// (e.g. http recordv2 on a Content-Length that is not a number) must not tear
 // down the application's TCP connection. Confirmed empirically against
 // the V2 HTTP parser via /api/stalls/v2gap/http?case=bad-cl in the
 // sample-app validators; this is the unit-level regression guard.

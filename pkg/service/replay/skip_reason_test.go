@@ -14,28 +14,52 @@ func skipReasonsFor(set string, reasons map[string]string) map[string]map[string
 	return map[string]map[string]string{set: reasons}
 }
 
+// skipCase is one way a run reaches a skip: the proven switch on or off, and
+// whether the run's caller gave the set's tests a reason.
+type skipCase struct {
+	name     string
+	on       bool
+	reasoned bool
+}
+
+// skipCases: under the switch the gate gives the reasons; with it off only a
+// caller that skips for a reason does (a cloud replay skipping a test with no
+// mapping entry), and every other run must stay what it was.
+var skipCases = []skipCase{
+	{name: "switch on", on: true, reasoned: true},
+	{name: "switch off, a caller gave reasons", on: false, reasoned: true},
+	{name: "switch off, no reason", on: false, reasoned: false},
+}
+
+func (c skipCase) setSwitch(t *testing.T) {
+	t.Helper()
+	if c.on {
+		t.Setenv(provenswitch.Env, "1")
+	} else {
+		t.Setenv(provenswitch.Env, "")
+	}
+}
+
 // A test set the run ignores whole used to be reported as counts with no rows,
 // so neither the report nor JUnit could name the skipped tests or say why.
-// Under the switch each test is one IGNORED row with its reason; with the
-// switch off the report is what it was.
+// Under the switch, or when the run's caller gave a reason for the set's
+// tests, each test is one IGNORED row with its reason. With the switch off and
+// no reason for the set, the report is what it was: a reason given for another
+// set does not change it.
 func TestRunTestSet_FullyIgnoredSetHasARowPerTest(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		name := "switch off"
-		if on {
-			name = "switch on"
-		}
-		t.Run(name, func(t *testing.T) {
-			if on {
-				t.Setenv(provenswitch.Env, "1")
-			} else {
-				t.Setenv(provenswitch.Env, "")
-			}
+	for _, c := range skipCases {
+		t.Run(c.name, func(t *testing.T) {
+			c.setSwitch(t)
 			h := newPartialRunHarness(t, 3, 0)
 			h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {}}
-			h.replayer.config.Test.SkipReasons = skipReasonsFor("test-set-0", map[string]string{
-				"test-1": "flaky/replay_only: why one",
-				"test-3": "manual: why three",
-			})
+			if c.reasoned {
+				h.replayer.config.Test.SkipReasons = skipReasonsFor("test-set-0", map[string]string{
+					"test-1": "flaky/replay_only: why one",
+					"test-3": "manual: why three",
+				})
+			} else {
+				h.replayer.config.Test.SkipReasons = skipReasonsFor("test-set-1", map[string]string{"test-1": "manual: another set's"})
+			}
 
 			if status := h.run(t); status != models.TestSetStatusIgnored {
 				t.Fatalf("status = %s, want IGNORED", status)
@@ -44,9 +68,9 @@ func TestRunTestSet_FullyIgnoredSetHasARowPerTest(t *testing.T) {
 			if rep.Total != 3 || rep.Ignored != 3 {
 				t.Fatalf("total %d, ignored %d; want 3 and 3", rep.Total, rep.Ignored)
 			}
-			if !on {
+			if !c.on && !c.reasoned {
 				if len(rep.Tests) != 0 || len(h.report.results) != 0 {
-					t.Fatalf("switch off: the report grew %d rows (%d stored); it must stay as it was", len(rep.Tests), len(h.report.results))
+					t.Fatalf("switch off, no reason: the report grew %d rows (%d stored); it must stay as it was", len(rep.Tests), len(h.report.results))
 				}
 				return
 			}
@@ -80,30 +104,22 @@ func TestRunTestSet_FullyIgnoredSetRowsFollowTheSelection(t *testing.T) {
 	}
 }
 
-// A test the run skips inside a set that otherwise runs carries its reason
-// under the switch, and none with it off.
+// A test the run skips inside a set that otherwise runs carries the reason its
+// caller gave, with the switch on or off, and none when no caller gave one.
 func TestRunTestSet_IgnoredTestCarriesItsReason(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		name := "switch off"
-		if on {
-			name = "switch on"
-		}
-		t.Run(name, func(t *testing.T) {
-			if on {
-				t.Setenv(provenswitch.Env, "1")
-			} else {
-				t.Setenv(provenswitch.Env, "")
-			}
+	for _, c := range skipCases {
+		t.Run(c.name, func(t *testing.T) {
+			c.setSwitch(t)
 			h := newPartialRunHarness(t, 2, 0)
 			h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-2"}}
-			h.replayer.config.Test.SkipReasons = skipReasonsFor("test-set-0", map[string]string{"test-2": "manual: why two"})
+			want := ""
+			if c.reasoned {
+				want = "manual: why two"
+				h.replayer.config.Test.SkipReasons = skipReasonsFor("test-set-0", map[string]string{"test-2": want})
+			}
 
 			if status := h.run(t); status != models.TestSetStatusPassed {
 				t.Fatalf("status = %s, want PASSED", status)
-			}
-			want := ""
-			if on {
-				want = "manual: why two"
 			}
 			found := false
 			for _, row := range h.report.report.Tests {
@@ -127,42 +143,41 @@ func TestRunTestSet_IgnoredTestCarriesItsReason(t *testing.T) {
 
 // A test skipped for a reason is said as it is skipped (at Debug: the run's
 // summary is where it is listed), once, with its reason, and listed in the
-// run's summary, under the switch. With it off nothing is
-// said and the summary lists nothing.
+// run's summary, with the switch on or off. Only under the switch do the line
+// and the summary's heading name it. A test skipped with no reason is not
+// said, and the summary lists nothing.
 func TestRunTestSet_AQuarantinedTestIsSaidAndSummarised(t *testing.T) {
 	reason := models.SkipReasonText("flaky", "replay_only", "failed the replay after record\nwith no keploy evidence")
-	for _, on := range []bool{false, true} {
-		name := "switch off"
-		if on {
-			name = "switch on"
-		}
-		t.Run(name, func(t *testing.T) {
-			if on {
-				t.Setenv(provenswitch.Env, "1")
-			} else {
-				t.Setenv(provenswitch.Env, "")
-			}
+	for _, c := range skipCases {
+		t.Run(c.name, func(t *testing.T) {
+			c.setSwitch(t)
 			h := newPartialRunHarness(t, 2, 0)
 			h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-2"}}
-			h.replayer.config.Test.SkipReasons = skipReasonsFor("test-set-0", map[string]string{"test-2": reason})
+			if c.reasoned {
+				h.replayer.config.Test.SkipReasons = skipReasonsFor("test-set-0", map[string]string{"test-2": reason})
+			}
 			core, logs := observer.New(zap.DebugLevel)
 			h.replayer.logger = zap.New(core)
 
 			h.run(t)
 			h.run(t) // a flaky-check attempt runs the set again: still said once
-			said := logs.FilterMessageSnippet("skipping a quarantined test").All()
+			said := logs.FilterMessageSnippet("skipping a ").All()
 			summary := h.replayer.quarantinedSummary()
-			if !on {
+			if !c.reasoned {
 				if len(said) != 0 || summary != "" {
-					t.Fatalf("switch off: said %d times, summary %q; want nothing", len(said), summary)
+					t.Fatalf("no reason: said %d times, summary %q; want nothing", len(said), summary)
 				}
 				return
 			}
-			if len(said) != 1 || said[0].ContextMap()["testcase"] != "test-2" || said[0].ContextMap()["reason"] != reason {
-				t.Fatalf("said %+v; want once, for test-2, with its reason", said)
+			line, heading := "skipping a test for a reason", "\tTests skipped by keploy for a reason: 1\n"
+			if c.on {
+				line, heading = "skipping a quarantined test (KEPLOY_PROVEN=1)", "\tQuarantined tests, skipped by keploy (KEPLOY_PROVEN=1): 1\n"
 			}
-			if want := "test-set-0/test-2: flaky/replay_only: failed the replay after record with no keploy evidence\n"; !strings.Contains(summary, want) || !strings.Contains(summary, ": 1\n") {
-				t.Fatalf("summary %q; want it to list test-2 on one line", summary)
+			if len(said) != 1 || said[0].Message != line || said[0].ContextMap()["testcase"] != "test-2" || said[0].ContextMap()["reason"] != reason {
+				t.Fatalf("said %+v; want %q once, for test-2, with its reason", said, line)
+			}
+			if want := "test-set-0/test-2: flaky/replay_only: failed the replay after record with no keploy evidence\n"; !strings.Contains(summary, heading) || !strings.Contains(summary, want) {
+				t.Fatalf("summary %q; want the heading %q and test-2 on one line", summary, heading)
 			}
 		})
 	}

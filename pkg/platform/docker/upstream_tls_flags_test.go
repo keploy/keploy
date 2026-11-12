@@ -245,7 +245,7 @@ func TestGetAlias_LinuxForwardsUpstreamTLS(t *testing.T) {
 	t.Run("unconfigured still forwards an explicit off and an empty CA", func(t *testing.T) {
 		t.Parallel()
 
-		alias, err := getAlias(context.Background(), zap.NewNop(), baseOpts, false)
+		alias, err := getAlias(context.Background(), zap.NewNop(), baseOpts, &config.Config{})
 		if err != nil {
 			t.Fatalf("getAlias: %v", err)
 		}
@@ -267,7 +267,7 @@ func TestGetAlias_LinuxForwardsUpstreamTLS(t *testing.T) {
 		opts.UpstreamTLSVerify = true
 		opts.UpstreamTLSCACert = "/etc/corp/ca.pem"
 
-		alias, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+		alias, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 		if err != nil {
 			t.Fatalf("getAlias: %v", err)
 		}
@@ -284,7 +284,7 @@ func TestGetAlias_LinuxForwardsUpstreamTLS(t *testing.T) {
 		opts.UpstreamTLSVerify = false
 		opts.UpstreamTLSCACert = "/etc/corp/ca.pem"
 
-		alias, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+		alias, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 		if err != nil {
 			t.Fatalf("getAlias: %v", err)
 		}
@@ -302,7 +302,7 @@ func TestGetAlias_LinuxForwardsUpstreamTLS(t *testing.T) {
 		opts.UpstreamTLSVerify = true
 		opts.UpstreamTLSCACert = caPath
 
-		alias, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+		alias, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 		if err != nil {
 			t.Fatalf("getAlias: %v", err)
 		}

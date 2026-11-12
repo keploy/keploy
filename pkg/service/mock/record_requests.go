@@ -2,6 +2,8 @@ package mock
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,8 +20,17 @@ type caseCapture struct {
 	mu    sync.Mutex
 	cases []capturedMock
 	// handled counts the cases taken off the stream and dealt with (stored,
-	// or failed to be): the capture's progress, which wait bounds.
+	// or failed to be): the capture's progress, said while Record waits for
+	// it (waitConsumers).
 	handled atomic.Uint64
+	// refused counts the cases the test-case store did not write (a full
+	// disk, a permission), and firstErr is the first of its errors. leftOut
+	// counts those it refused for their own body (models.ErrTestCaseEncode):
+	// not written either, but they do not end the run. Read only once done is
+	// closed (notWritten).
+	refused  int
+	leftOut  int
+	firstErr error
 }
 
 func (m *mockService) requests() bool {
@@ -56,7 +67,20 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 				m.logger.Debug("BeforeTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
 			}
 			if err := m.testDB.InsertTestCase(persistCtx, tc, name, true); err != nil {
+				if errors.Is(err, models.ErrTestCaseEncode) {
+					// THIS case's body, not the storage: the store said so at
+					// ERROR, and the next case may be fine. Left out and
+					// counted, as Record drops an unencodable mock.
+					c.leftOut++
+					c.handled.Add(1)
+					continue
+				}
+				// Not in the recording: counted, and the run then ends as one
+				// that is not saved (Record, after closeStore).
 				utils.LogError(m.logger, err, "failed to persist test case", zap.String("case", tc.Name))
+				if c.refused++; c.firstErr == nil {
+					c.firstErr = err
+				}
 				c.handled.Add(1)
 				continue
 			}
@@ -66,8 +90,25 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 			c.add(tc)
 			c.handled.Add(1)
 		}
+		if c.leftOut > 0 {
+			m.logger.Warn("test cases left out of the recording: their bodies cannot be stored in this format, and each is said above",
+				zap.Int("testCasesLeftOut", c.leftOut),
+				zap.String("next_step", "set storageFormat to yaml and record them again; the yaml encoder stores binary bodies as !!binary without loss"))
+		}
 	}()
 	return c
+}
+
+// notWritten says how many of the cases handed to the test-case store it did
+// not write, those left out among them, with the first error of a write that
+// failed; nil when no write failed, or requests are off. Left-out cases alone
+// are nil: they do not end the run. Read only once done is closed.
+func (c *caseCapture) notWritten() error {
+	if c == nil || c.refused == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d of the %d test cases handed to the test-case store were not written; the first write failed: %w",
+		c.refused+c.leftOut, c.handled.Load(), c.firstErr)
 }
 
 func (c *caseCapture) add(tc *models.TestCase) {
@@ -92,16 +133,6 @@ func caseEnd(tc *models.TestCase) time.Time {
 		return tc.HTTPResp.Timestamp
 	}
 	return tc.GrpcResp.Timestamp
-}
-
-// wait blocks until the incoming stream has been drained, or it has stored
-// nothing for bound of the time this process could run (utils/stall), as the
-// mock drain before it does.
-func (c *caseCapture) wait(bound time.Duration) {
-	if c == nil {
-		return
-	}
-	utils.WaitWhileProgressing(c.done, bound, c.handled.Load)
 }
 
 // list is every stored case with the time its request arrived.

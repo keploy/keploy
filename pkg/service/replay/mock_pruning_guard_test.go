@@ -208,9 +208,17 @@ func TestShouldPrune_WiresTheGuardIntoTheDecision(t *testing.T) {
 		},
 		{
 			name: "a request with no answer is named ahead of a lost count", removeUnusedMocks: true, instrument: true,
-			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.captureUnverified, r.noAnswer = true, true }),
+			run: with(complete(3, 0, healthy), func(r *pruneRun) {
+				r.captureUnverified, r.noAnswer, r.noAnswerUnheld = true, true, true
+			}),
 			reason: "no_answer",
 			why:    "an unread count is the weakest evidence; the request that got no answer is what happened",
+		},
+		{
+			name: "a lost count still refuses a run whose unanswered tests are held", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.captureUnverified, r.noAnswer = true, true }),
+			reason: "capture_unverified",
+			why:    "the per-test hold answers only the no-answer rule; every rule after it still refuses",
 		},
 		{
 			name: "a capture-incomplete run is named ahead of the stop", removeUnusedMocks: true, instrument: true,
@@ -247,10 +255,24 @@ func TestShouldPrune_WiresTheGuardIntoTheDecision(t *testing.T) {
 			why:    "the connection-error rule reads the results; without them it cannot see a refused request",
 		},
 		{
-			name: "a request that got no answer never prunes", removeUnusedMocks: true, instrument: true,
-			run:    with(complete(1, 1, healthy), func(r *pruneRun) { r.noAnswer = true }),
+			name: "a request that got no answer prunes around its test", removeUnusedMocks: true, instrument: true,
+			run:  with(complete(1, 1, healthy), func(r *pruneRun) { r.noAnswer = true }),
+			want: true,
+			why: "a timed-out request consumed nothing for want of an answer, not for want of need, and the " +
+				"caller keeps that test's own mocks (holdNoAnswerMocks); holding the whole set for it kept " +
+				"every mock of a recording, every cycle, for one test that kept timing out",
+		},
+		{
+			name: "a request a cancel ended never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(1, 1, healthy), func(r *pruneRun) { r.noAnswer, r.noAnswerCanceled = true, true }),
 			reason: "no_answer",
-			why:    "a timed-out request consumed nothing for want of an answer, not for want of need",
+			why:    "a stop's cancel says nothing of the test it ended, so nothing names what to hold",
+		},
+		{
+			name: "a request that got no answer never prunes when its test's mocks cannot be read", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(1, 1, healthy), func(r *pruneRun) { r.noAnswer, r.noAnswerUnheld = true, true }),
+			reason: "no_answer",
+			why:    "without the read nothing names the test's own mocks, so the whole set is held, as before",
 		},
 		{
 			name: "no test passed never prunes", removeUnusedMocks: true, instrument: true,

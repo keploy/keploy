@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -216,15 +217,16 @@ func r3SendIn(t *testing.T, parent context.Context, p *Proxy, mm *MockManager, o
 }
 
 // r3SendVia is r3SendIn through the HTTP integration h: one the row keeps
-// across calls, as the agent's proxy keeps its parser.
-func r3SendVia(t *testing.T, parent context.Context, h integrations.Integrations, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
+// across calls, as the agent's proxy keeps its parser. The parser reads db:
+// the manager, or a row's view over it.
+func r3SendVia(t *testing.T, parent context.Context, h integrations.Integrations, p *Proxy, db integrations.MockMemDb, opts models.OutgoingOptions, request string) (int, string) {
 	t.Helper()
 	app, agentEnd := net.Pipe()
 	ctx := models.WithMockMismatchReporter(parent, p.sendMockNotFoundError)
 	ctx = learn.WithTracker(ctx, p.learnTracker)
 	defer app.Close()
 	go func() {
-		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, opts)
+		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, db, opts)
 		_ = agentEnd.Close()
 	}()
 	if _, err := app.Write([]byte(request)); err != nil {
@@ -587,11 +589,13 @@ func TestALearnStepOwnMockAnswersOnceSoTheNextIsPaired(t *testing.T) {
 // default, so test 1's recordings stay visible in test 2. A visible
 // recording of another recorded test is no earlier place of test 2's calls:
 // test 1's call in the same second does not refuse test 2's own clock read
-// (request_changed), as the mocks served before test 2 began do not.
+// (request_changed), as the mocks served before test 2 began do not: it is
+// learned as a read of the clock.
 func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	p := startedDrainProxy(t, 100)
 	p.learnTracker = learn.NewTracker()
+	p.learnTracker.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
 	now := time.Now()
 	m1 := r3Mock("mock-t1", now.Add(500*time.Millisecond), "POST", "/ping", `{"at":1760436000}`, `{}`)
 	m2 := r3Mock("mock-t2", now.Add(2500*time.Millisecond), "POST", "/pong", `{"at":1760436000}`, `{}`)
@@ -614,8 +618,12 @@ func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
 		misses, _ := p.GetMockErrors(context.Background())
 		t.Fatalf("test 2's own clock read was refused because test 1's recording (same second) is visible: %d %s %+v", code, got, misses)
 	}
-	if _, ok := r3States(mm)["mock-t2"].ReqBodyNoise["body.at"]; !ok {
-		t.Fatalf("test 2's clock read is noise: %+v", r3States(mm)["mock-t2"])
+	// One instant whole (an epoch second) in a test's own call, which has no
+	// window, read 93 s after its recording (no lead moves it): a read of the
+	// clock a replay checks in its call's own span, never noise.
+	st := r3States(mm)["mock-t2"]
+	if _, ok := st.Clocks["body.at"]; !ok || st.ReqBodyNoise["body.at"] != nil {
+		t.Fatalf("test 2's clock read is no read of the clock: %+v", st)
 	}
 }
 
@@ -1062,12 +1070,15 @@ func TestATestsOwnCallIsNotRefusedForAnotherTestsRowOnDisk(t *testing.T) {
 
 // Through the HTTP integration, the call's window ends when decodeHTTP had
 // the request whole: a start-up pool call's clock read in it is learned as
-// noise, whatever the receive's Date header holds. Read by the lead alone
-// (the minute and second words of the receive's Date header, in GMT as HTTP
-// writes it), it is learned where that header is its server's stamp, and
-// refused where the server's clock ran a second ahead (its Date header
-// after its answer is no stamp): only the window learns that one. The
-// instants are fixed in UTC, so the row reads the same in every zone.
+// a read of the clock, whatever the receive's Date header holds: a read a
+// replay checks in its call's window, never noise, which would pass any value
+// at every replay. With no app clock (keploy cannot tell which clock the
+// application reads), the call has no window, the lead alone does not read
+// the value (F's clock ran 2 s past the lead), and no replay could check a
+// read of the clock: it is refused at learn (the reason says so: learn's
+// TestAnInstantIsRefusedAtLearnWhereKeployCannotTellTheAppsClock), whether
+// or not that header is its server's stamp. The instants are fixed in UTC,
+// so the row reads the same in every zone.
 func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
@@ -1103,15 +1114,20 @@ func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T)
 				body := `{"processed_at":"` + iso(served.Add(offset)) + `"}`
 				code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
 					"POST /v1/events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
-				noise := r3States(mm)["mock-1"].ReqBodyNoise
-				if window || tc.stamp {
-					if code != http.StatusOK || got != `{"ok":true}` || noise["body.processed_at"] == nil {
-						t.Fatalf("answered %d %s, learned %v; want the pool recording, its clock read learned at body.processed_at", code, got, noise)
+				st := r3States(mm)["mock-1"]
+				noise := st.ReqBodyNoise
+				if window {
+					// An instant whole its call's window holds: a read of the
+					// clock, still compared at every replay (MockState.Clocks),
+					// never noise.
+					_, clock := st.Clocks["body.processed_at"]
+					if code != http.StatusOK || got != `{"ok":true}` || !clock || noise["body.processed_at"] != nil {
+						t.Fatalf("answered %d %s, learned noise %v clocks %v; want the pool recording, its clock read learned at body.processed_at", code, got, noise, st.Clocks)
 					}
 					return
 				}
-				if code == http.StatusOK || noise["body.processed_at"] != nil {
-					t.Fatalf("by the lead alone, the server's clock a second ahead: answered %d %s, learned %v; want refused", code, got, noise)
+				if code == http.StatusOK || noise["body.processed_at"] != nil || len(st.Clocks) != 0 {
+					t.Fatalf("by the lead alone, no app clock: answered %d %s, learned noise %v clocks %v; want refused", code, got, noise, st.Clocks)
 				}
 			})
 		}
@@ -1170,6 +1186,46 @@ func TestALearnStepRefusesAPickFromTheTestCasesRequest(t *testing.T) {
 	}
 }
 
+// The test case's request carries where the test began in its recording
+// (models.TestRequest.RecordedAt), which the agent hands the learn step with
+// it (learn.Tracker.GiveRequest): a server test's call whose previous
+// recorded call came after that begin has its window in the recording carry
+// it. A request of none, none handed, or the switch off: none.
+func TestTheTestCasesRecordedBeginReachesTheLearnStepsWindow(t *testing.T) {
+	recBegin := time.Date(2026, 10, 31, 8, 53, 33, 933_485_077, time.UTC)
+	paired := &models.Mock{Name: "mock-5", Kind: models.Mongo}
+	paired.Spec.ReqTimestampMock = recBegin.Add(2 * time.Millisecond)
+	for _, c := range []struct {
+		name string
+		on   string
+		req  *models.TestRequest
+		want time.Time
+	}{
+		{"handed its recorded begin", "1", &models.TestRequest{Test: "test-1", RecordedAt: recBegin}, recBegin},
+		{"a request of none", "1", &models.TestRequest{Test: "test-1"}, time.Time{}},
+		{"handed none", "1", nil, time.Time{}},
+		{"the switch off", "0", &models.TestRequest{Test: "test-1", RecordedAt: recBegin}, time.Time{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, c.on)
+			start := time.Now()
+			p := &Proxy{learnTracker: learn.NewTracker()}
+			p.learnTracker.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+			p.learnTracker.SetAppClockRun(func(time.Time) (time.Time, bool) { return start, true })
+			p.learnTracker.NewSetAt(start)
+			p.learnTracker.BeginAwaiting()
+			p.TakeTestRequest(c.req)
+			w := p.learnTracker.CallWindowFrom(recBegin.Add(time.Millisecond), paired, time.Now())
+			if w == nil {
+				t.Fatal("no window")
+			}
+			if !w.Rec.TestFrom.Equal(c.want) {
+				t.Fatalf("the recording's span carries the test's begin %v; want %v", w.Rec.TestFrom, c.want)
+			}
+		})
+	}
+}
+
 // An agent that serves keploy mock (its --mock-mode) learns its tests as a
 // test harness's client tests (learn.Tracker.SetClientTests); one that serves
 // keploy test does not.
@@ -1196,8 +1252,24 @@ func TestAMockModeAgentsLearnStepReadsTheAppsZoneAndATestsRecordedBegin(t *testi
 			cfg := config.New()
 			cfg.Agent.MockMode = true
 			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
-			if got := p.learnTracker.Drifts().Zone(); got != time.Local {
-				t.Fatalf("the learn step's zone %v; want the agent's own, %v", got, time.Local)
+			// The agent's own zone, with its name where its TZ or
+			// /etc/localtime gives one (learn.ReadZone), so a learning that
+			// depends on it names it; it writes Go's time.Local's offsets.
+			tz, tzSet := os.LookupEnv("TZ")
+			want, err := learn.ReadZone("/", tz, tzSet)
+			if err != nil {
+				want = time.Local
+			}
+			got := p.learnTracker.Drifts().Zone()
+			if got == nil || got.String() != want.String() {
+				t.Fatalf("the learn step's zone %v; want the agent's own, %v", got, want)
+			}
+			for _, at := range []time.Time{time.Now(), time.Now().AddDate(0, 6, 0)} {
+				_, g := at.In(got).Zone()
+				_, l := at.In(time.Local).Zone()
+				if g != l {
+					t.Fatalf("the learn step's zone %v writes offset %d at %s; Go's time.Local %d", got, g, at, l)
+				}
 			}
 			rec := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
 			paired := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rec.Add(time.Second)}}
@@ -1272,10 +1344,11 @@ func TestATestCasesCaptureWindowAwaitsItsRequest(t *testing.T) {
 // test-2's mock-t, test-3's mock-u, test-5's mock-v, and test-4 recorded
 // none. In record's full round test-1 makes it (mock-s answers) and test-2
 // makes it twice: its own mock-t answers the first, and the second, one call
-// more than test-2 recorded, is paired with mock-u and carries no note, as
-// its miss would carry none (it repeats test-2's own recorded call, so a note
-// saying the test recorded no such call would be false). test-4's call,
-// which it recorded nothing like, is paired with mock-v and carries the note
+// more than test-2 recorded, its own recording spent, is never paired: it
+// misses as one call more than the test recorded (models.MissExtraCall,
+// recorded 1), with no note, and claims none of the other tests'
+// recordings. test-4's call, which it recorded nothing like, is paired with
+// one of the unclaimed others' (mock-u or mock-v) and carries the note
 // naming a recording an earlier test's call consumed.
 func TestAPairedCallsRepeatNoteFollowsTheMissesRule(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
@@ -1319,13 +1392,14 @@ func TestAPairedCallsRepeatNoteFollowsTheMissesRule(t *testing.T) {
 	}
 	p.ContinueTestErrorCapture()
 	mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-t")})
-	for i := 1; i <= 2; i++ {
-		if code, got := r3Send(t, p, mm, opts, get); code != http.StatusOK {
-			t.Fatalf("test-2's call %d: %d %s", i, code, got)
-		}
+	if code, got := r3Send(t, p, mm, opts, get); code != http.StatusOK {
+		t.Fatalf("test-2's call 1: %d %s", code, got)
 	}
-	if a := answers(t); len(a) != 1 || a[0].ClosestMock != "mock-u" || a[0].Repeat != nil {
-		t.Fatalf("test-2's answers are %+v; want one pairing with mock-u, with no repeat note", a)
+	if code, got, err := callWithinOpts(httpint.New(zap.NewNop()), p, mm, opts, get, true); err == nil && code == http.StatusOK {
+		t.Fatalf("test-2's call 2, one more than it recorded, was answered %s; want a miss, never another test's recording paired", got)
+	}
+	if calls, err := p.GetMockErrors(context.Background()); err != nil || len(calls) != 1 || calls[0].Answer != "" || calls[0].Kind != models.MissExtraCall || calls[0].Recorded != 1 || calls[0].Repeat != nil {
+		t.Fatalf("test-2's reports are %+v (%v); want one extra_call miss, recorded 1, with no repeat note", calls, err)
 	}
 	p.ContinueTestErrorCapture()
 	mm.ServeExactTest("test-4", nil)
@@ -1333,7 +1407,7 @@ func TestAPairedCallsRepeatNoteFollowsTheMissesRule(t *testing.T) {
 		t.Fatalf("test-4's call: %d %s", code, got)
 	}
 	a := answers(t)
-	if len(a) != 1 || a[0].ClosestMock != "mock-v" || a[0].Repeat == nil || (a[0].Repeat.Mock != "mock-s" && a[0].Repeat.Mock != "mock-t") {
-		t.Fatalf("test-4's answers are %+v; want one pairing with mock-v, noting mock-s or mock-t", a)
+	if len(a) != 1 || (a[0].ClosestMock != "mock-u" && a[0].ClosestMock != "mock-v") || a[0].Repeat == nil || (a[0].Repeat.Mock != "mock-s" && a[0].Repeat.Mock != "mock-t") {
+		t.Fatalf("test-4's answers are %+v; want one pairing with mock-u or mock-v, noting mock-s or mock-t", a)
 	}
 }

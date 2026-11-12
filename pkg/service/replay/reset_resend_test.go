@@ -94,7 +94,7 @@ func TestRetryResetOnce_RecoversWhenNoMockConsumed(t *testing.T) {
 	r := newTestReplayer(hook)
 	tc := &models.TestCase{Name: "get-root-1", Kind: models.HTTP}
 
-	resp, retried, drained := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
+	resp, retried, drained, _ := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
 	if !retried {
 		t.Fatal("expected the reset to be re-sent and recovered")
 	}
@@ -126,7 +126,7 @@ func TestRetryResetOnce_RefusesWhenMockConsumed(t *testing.T) {
 	r := newTestReplayer(hook)
 	tc := &models.TestCase{Name: "create-user-1", Kind: models.HTTP}
 
-	resp, retried, drained := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
+	resp, retried, drained, _ := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
 	if retried {
 		t.Fatalf("must NOT retry a reset that consumed a mock; got resp=%#v", resp)
 	}
@@ -151,7 +151,7 @@ func TestRetryResetOnce_FailSafeOnConsumedFetchError(t *testing.T) {
 	r := newTestReplayer(hook)
 	tc := &models.TestCase{Name: "get-root-1", Kind: models.HTTP}
 
-	_, retried, drained := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
+	_, retried, drained, _ := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
 	if retried {
 		t.Fatal("must not retry when consumed-mock count is unknown")
 	}
@@ -174,7 +174,7 @@ func TestRetryResetOnce_BoundedAndStopsWithoutFabricating(t *testing.T) {
 	r := newTestReplayer(hook)
 	tc := &models.TestCase{Name: "get-root-1", Kind: models.HTTP}
 
-	resp, retried, drained := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
+	resp, retried, drained, _ := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
 	if retried || resp != nil {
 		t.Fatalf("a persistently reset app must not yield a fabricated response; retried=%v resp=%#v", retried, resp)
 	}
@@ -195,7 +195,7 @@ func TestRetryResetOnce_StopsOnNonResetError(t *testing.T) {
 	r := newTestReplayer(hook)
 	tc := &models.TestCase{Name: "get-root-1", Kind: models.HTTP}
 
-	_, retried, _ := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
+	_, retried, _, _ := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
 	if retried {
 		t.Fatal("a non-reset failure on re-send must not be treated as a recovery")
 	}
@@ -216,7 +216,7 @@ func TestRetryResetOnce_PerAttemptGateUsesPerCallDrain(t *testing.T) {
 	r := newTestReplayer(hook)
 	tc := &models.TestCase{Name: "get-root-1", Kind: models.HTTP}
 
-	resp, retried, drained := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
+	resp, retried, drained, _ := r.retryResetOnce(context.Background(), tc, "test-set-0", connResetURLErr())
 	if retried || resp != nil {
 		t.Fatalf("the second attempt burned a mock then reset; must refuse, got retried=%v resp=%#v", retried, resp)
 	}
@@ -261,7 +261,7 @@ func TestRetryResetOnce_NotForAnUnreachableAppPort(t *testing.T) {
 	tc := &models.TestCase{Name: "post-echo-1", Kind: models.HTTP}
 
 	unreachable := &pkg.UnreachableAppPortError{Port: 8097, Reason: "the app listens on port 8097 only on 127.0.0.1", Err: connResetURLErr()}
-	resp, retried, drained := r.retryResetOnce(context.Background(), tc, "test-set-0", unreachable)
+	resp, retried, drained, _ := r.retryResetOnce(context.Background(), tc, "test-set-0", unreachable)
 	if retried || resp != nil || drained != nil {
 		t.Fatalf("got retried=%v resp=%v drained=%v; want no re-send", retried, resp, drained)
 	}

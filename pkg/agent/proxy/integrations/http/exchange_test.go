@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap/zaptest"
 	"golang.org/x/sync/errgroup"
@@ -261,7 +262,7 @@ func TestARequestAfterEmptyLinesIsParsed(t *testing.T) {
 		send([]byte("\r\n"), now, now)
 		send([]byte("\r\n"+req), now, now)
 		var finalReq []byte
-		if err := h.readRequestV2(context.Background(), stream, &finalReq); err != nil || string(finalReq) != req {
+		if err := h.readRequestV2(stream, &finalReq); err != nil || string(finalReq) != req {
 			t.Fatalf("readRequestV2 = (%q, %v), want the request from its request line: %q", finalReq, err, req)
 		}
 		m, err := h.buildHTTPMock(&FinalHTTP{Req: finalReq, Resp: []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"),
@@ -287,6 +288,9 @@ func TestARequestAfterEmptyLinesIsParsed(t *testing.T) {
 func TestHandleChunkedResponsesHandsOverAfterAProtocolSwitch(t *testing.T) {
 	for _, c := range []struct{ method, head string }{
 		{"GET", "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"},
+		// net/http frames a 101 as its head whatever its fields say.
+		{"GET", "HTTP/1.1 101 Switching Protocols\r\nContent-Length: 5\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n"},
+		{"GET", "HTTP/1.1 101 Switching Protocols\r\nTransfer-Encoding: chunked\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n"},
 		{"CONNECT", "HTTP/1.1 200 Connection Established\r\n\r\n"},
 	} {
 		dest := newScriptedConn() // the upgraded stream: nothing more yet
@@ -337,7 +341,7 @@ func TestReadResponseV2ReadsPastAHundredContinueInItsOwnRead(t *testing.T) {
 	send([]byte("hello"), now, now)
 	finalResp := []byte("HTTP/1.1 100 Continue\r\n\r\n") // the first read, already taken by recordV2
 	done := make(chan error, 1)
-	go func() { _, err := h.readResponseV2(context.Background(), stream, &finalResp, "POST"); done <- err }()
+	go func() { _, err := h.readResponseV2(stream, &finalResp, "POST"); done <- err }()
 	select {
 	case err := <-done:
 		if err != nil || string(finalResp) != "HTTP/1.1 100 Continue\r\n\r\n"+final {
@@ -386,6 +390,53 @@ func encodeHarness(t *testing.T, first string, upstream func(net.Conn)) (app net
 		_ = g.Wait()
 	})
 	return app, d, out
+}
+
+// A recording waits for a keep-alive connection's next request on a small
+// read (pUtil.WaitReadSize, as the old loop read): the read holds its buffer
+// for as long as the connection is idle, which for a client's pool is hours.
+func TestEncodeHTTPWaitsForTheNextRequestOnASmallRead(t *testing.T) {
+	out := make(chan *models.Mock, 4)
+	if mgr := syncMock.Get(); mgr != nil {
+		mgr.SetOutputChannel(out)
+		t.Cleanup(func() { mgr.SetOutputChannel(make(chan<- *models.Mock, 1)) })
+	}
+	app, proxyClient := tcpPair(t)
+	up, proxyDest := tcpPair(t)
+	go func() {
+		_ = readUntil(up, "\r\n\r\n", time.Minute)
+		_, _ = up.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	}()
+	conn := &readWatchedConn{Conn: proxyClient, reading: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	g, gctx := errgroup.WithContext(ctx)
+	gctx = context.WithValue(gctx, models.ErrGroupKey, g)
+	gctx = context.WithValue(gctx, models.ClientConnectionIDKey, "test-conn")
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		_ = h.encodeHTTP(gctx, []byte("GET /x HTTP/1.1\r\nHost: up\r\n\r\n"), conn, proxyDest, out, models.OutgoingOptions{}, nil)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = proxyClient.Close()
+		_ = proxyDest.Close()
+		<-returned
+		_ = g.Wait()
+	})
+	// The bounds below only turn a hang into a failure.
+	if got := readUntil(app, "\r\n\r\nok", time.Minute); !strings.HasSuffix(got, "\r\n\r\nok") {
+		t.Fatalf("the app got %q", got)
+	}
+	select {
+	case <-conn.reading: // waiting for the next request
+	case <-time.After(time.Minute):
+		t.Fatal("encodeHTTP did not read on for the next request")
+	}
+	if got := conn.waitSize.Load(); got != pUtil.WaitReadSize {
+		t.Fatalf("encodeHTTP waits for the next request on a %d-byte read, want pUtil.WaitReadSize (%d)", got, pUtil.WaitReadSize)
+	}
 }
 
 // A mock recorded after an interim response is the final response, and it is

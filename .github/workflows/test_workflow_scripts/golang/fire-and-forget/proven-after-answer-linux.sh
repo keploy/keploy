@@ -84,6 +84,8 @@
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
+# shellcheck source=../../sudo_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
@@ -167,7 +169,7 @@ record() {
     ../ff-broker >broker.log 2>&1 &
     BROKER_PID=$!
     wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=$proto BROKER=$broker $APP_ENV ../ff-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=$proto BROKER=$broker $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -183,6 +185,7 @@ record() {
     wait "$BROKER_PID" 2>/dev/null
     BROKER_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     grep -q "after 1" keploy/test-set-0/mocks.yaml 2>/dev/null || fail "$dir: the publish was not recorded"
     cd "$WORK" || exit 1
 }
@@ -195,7 +198,7 @@ record_shutdown() {
     ../ff-broker >broker.log 2>&1 &
     BROKER_PID=$!
     wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -207,6 +210,7 @@ record_shutdown() {
     wait "$BROKER_PID" 2>/dev/null
     BROKER_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     grep -q "shutdown published" record.log || fail "$dir: the app did not publish as keploy record stopped it"
     grep -q "shutdown" keploy/test-set-0/mocks.yaml 2>/dev/null || fail "$dir: the shutdown publish was not recorded"
     cd "$WORK" || exit 1
@@ -231,7 +235,7 @@ record_startup() {
     ../ff-broker >broker.log 2>&1 &
     BROKER_PID=$!
     wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -243,6 +247,7 @@ record_startup() {
     wait "$BROKER_PID" 2>/dev/null
     BROKER_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     grep -q "startup published" record.log || fail "$dir: the app did not publish as it started under keploy record"
     grep -q "startup" keploy/test-set-0/mocks.yaml 2>/dev/null || fail "$dir: the startup publish was not recorded"
     cd "$WORK" || exit 1
@@ -256,9 +261,10 @@ replay() {
     REPLAY_DIR="$WORK/$dir"
     cd "$REPLAY_DIR" || exit 1
     before="$(newest_run)"
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$(app_cmd "env PROTO=$proto BROKER=$broker SUFFIX=$suffix NOPUBLISH=$nopublish $APP_ENV ../ff-app")" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$(app_cmd "env PROTO=$proto BROKER=$broker SUFFIX=$suffix NOPUBLISH=$nopublish $APP_ENV ../ff-app")" \
         --delay 2 --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
     RC=$?
+    verify_ran 1 "$name.log" || FAIL=$((FAIL + 1))
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
         fail "$dir, $name: keploy test wrote no report (exit $RC)"
@@ -315,7 +321,7 @@ replay shutdown changed http "-changed"
 if [ "$RC" -eq 0 ] || [ "$(set_status)" != FAILED ]; then
     fail "7 (HTTP, changed shutdown publish): the set must fail, keploy test non-zero (exit $RC, status $(set_status))"
 fi
-yq -r '.unclaimed_calls[]? | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep -q '/publish' ||
+yq -r '.unclaimed_calls[]? | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep '/publish' >/dev/null ||
     fail "7 (HTTP, changed shutdown publish): the report does not name the publish among the calls made after the set's last test: $(grep -n -A3 'unclaimed' "$(REPORT)" | head -12)"
 [ "$(test_status get-c-ping-1)" = PASSED ] ||
     fail "7 (HTTP, changed shutdown publish): c-ping, whose answer the call followed, did not pass ($(test_status get-c-ping-1))"
@@ -329,7 +335,7 @@ replay shutdown bg-changed http "-changed"
 if [ "$RC" -eq 0 ] || [ "$(set_status)" != FAILED ]; then
     fail "9 (in the background, a changed shutdown publish): the set must fail, keploy test non-zero (exit $RC, status $(set_status))"
 fi
-yq -r '.unclaimed_calls[]? | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep -q '/publish' ||
+yq -r '.unclaimed_calls[]? | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep '/publish' >/dev/null ||
     fail "9 (in the background, a changed shutdown publish): the report does not name the publish"
 echo "== 10. that app never ending once it is stopping =="
 APP_ENV="SHUTDOWN_PUBLISH=1 HANG_ON_STOP=1"
@@ -337,7 +343,7 @@ replay shutdown bg-hangs http
 if [ "$RC" -eq 0 ] || [ "$(set_status)" != INTERNAL_ERR ]; then
     fail "10 (in the background, never ending): the set must not be judged, keploy test non-zero (exit $RC, status $(set_status))"
 fi
-grep -m1 '^failure_reason:' "$(REPORT)" | grep -q 'made no progress on its way out' ||
+grep -m1 '^failure_reason:' "$(REPORT)" | grep 'made no progress on its way out' >/dev/null ||
     fail "10 (in the background, never ending): the report does not name the kill: $(grep -m1 '^failure_reason:' "$(REPORT)")"
 APP_WRAP=""
 
@@ -345,7 +351,7 @@ APP_ENV="IGNORE_INT=1"
 record_ping() {
     local dir="$1"
     mkdir -p "$dir" && cd "$dir" || exit 1
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -354,6 +360,7 @@ record_ping() {
     stop_pid "$REC_PID"
     REC_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     cd "$WORK" || exit 1
 }
 record_ping ignores
@@ -363,7 +370,7 @@ if [ "$RC" -eq 0 ] || [ "$(set_status)" != INTERNAL_ERR ]; then
     fail "8 (an app that ignores SIGINT): the set must not be judged, keploy test non-zero (exit $RC, status $(set_status))"
 fi
 # (The report's YAML doubles an apostrophe: keploy''s.)
-grep -m1 '^failure_reason:' "$(REPORT)" | grep -q "made no progress on its way out for .* runnable time after keploy interrupted it, so keploy killed it" ||
+grep -m1 '^failure_reason:' "$(REPORT)" | grep "made no progress on its way out for .* runnable time after keploy interrupted it, so keploy killed it" >/dev/null ||
     fail "8 (an app that ignores SIGINT): the report does not name the kill and the stall: $(grep -m1 '^failure_reason:' "$(REPORT)")"
 
 APP_ENV="SHUTDOWN_PUBLISH=1 HANG_ON_STOP=1"
@@ -375,7 +382,7 @@ record_cut() {
     ../ff-broker >broker.log 2>&1 &
     BROKER_PID=$!
     wait_listen 9099 "$BROKER_PID" || { echo "::error::the broker did not start"; exit 1; }
-    sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
+    sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" record -c "env PROTO=http BROKER=127.0.0.1:9099 $APP_ENV ../ff-app" \
         --generateGithubActions=false --disable-tele >record.log 2>&1 </dev/null &
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::$dir: the app did not start under keploy record"; tail -30 record.log; exit 1; }
@@ -387,6 +394,7 @@ record_cut() {
     wait "$BROKER_PID" 2>/dev/null
     BROKER_PID=""
     own
+    verify_ran 1 record.log || FAIL=$((FAIL + 1))
     grep -q "shutdown published" record.log && fail "$dir: the app published as keploy record stopped it; its stop was to be cut"
     grep -q "recordStopKilled" keploy/test-set-0/config.yaml 2>/dev/null ||
         fail "$dir: the test-set's config does not say its recording's stop killed the app: $(cat keploy/test-set-0/config.yaml 2>/dev/null)"
@@ -400,7 +408,7 @@ if [ "$RC" -eq 0 ] || [ "$(set_status)" != INTERNAL_ERR ]; then
     fail "11 (a recording cut by its stop): the set must not be judged, keploy test non-zero (exit $RC, status $(set_status))"
 fi
 # The report's YAML doubles an apostrophe, so the check reads past one.
-grep -m1 '^failure_reason:' "$(REPORT)" | grep -q "stop had to kill the application (keploy stopped the application at the recording" ||
+grep -m1 '^failure_reason:' "$(REPORT)" | grep "stop had to kill the application (keploy stopped the application at the recording" >/dev/null ||
     fail "11 (a recording cut by its stop): the report does not name the recording's kill: $(grep -m1 '^failure_reason:' "$(REPORT)")"
 
 APP_ENV="STARTUP_PUBLISH=1"
@@ -413,10 +421,10 @@ replay startup changed http "-changed"
 if [ "$RC" -eq 0 ] || [ "$(set_status)" != FAILED ]; then
     fail "13 (HTTP, changed startup publish): the set must fail, keploy test non-zero (exit $RC, status $(set_status))"
 fi
-yq -r '.unclaimed_calls[]? | select(.before_set == true) | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep -q '/publish' ||
+yq -r '.unclaimed_calls[]? | select(.before_set == true) | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep '/publish' >/dev/null ||
     fail "13 (HTTP, changed startup publish): the report does not name the publish among the calls made before the set's first test: $(grep -n -A4 'unclaimed' "$(REPORT)" | head -14)"
 # The report's yaml doubles the quote in "set's": match around it.
-grep -m1 '^failure_reason:' "$(REPORT)" | grep -q "before the set.*first test" ||
+grep -m1 '^failure_reason:' "$(REPORT)" | grep "before the set.*first test" >/dev/null ||
     fail "13 (HTTP, changed startup publish): the reason does not say the call was made before the set's first test: $(grep -m1 '^failure_reason:' "$(REPORT)")"
 [ "$(test_status get-c-ping-1)" = PASSED ] ||
     fail "13 (HTTP, changed startup publish): c-ping did not pass ($(test_status get-c-ping-1))"

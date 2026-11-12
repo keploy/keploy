@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
@@ -21,7 +22,8 @@ import (
 // names it too (models.UnmatchedCall.Source). No committed file holds more of
 // its command line: the whole of it, with its secrets redacted
 // (containerkey.RedactArgs), goes to the record log once per process, at
-// debug, beside its pid.
+// debug, beside its pid, and travels with a miss (SourceOf) to keploy mock's
+// local receipt, which names the process of a call no test was charged with.
 //
 // The proxy notes each connection's process as it accepts the connection
 // (NoteOrigin: the pid the kernel's redirect gave it), and forgets it once
@@ -102,16 +104,42 @@ type origins struct {
 
 // connOrigin is one connection's process, named once, at its first stamp.
 type connOrigin struct {
-	pid   uint32
-	name  procName
-	named bool
+	pid uint32
+	// instance is the keploy instance (a test worker's) the kernel stamped
+	// the connection with (NoteOriginIn): 0 for none.
+	instance uint32
+	// endedAt is when the worker of instance ended (InstanceEnded) while
+	// the connection was noted; zero while it lives. bornEnded: it had
+	// ended, or was never live, when the connection was noted, so every
+	// call on it is an ended worker's.
+	endedAt   time.Time
+	bornEnded bool
+	name      procName
+	named     bool
+}
+
+// liveAt reports whether a call whose request keploy read at at, on c, was
+// made while c's worker was live: the worker had not ended when c was
+// noted, nor by at. A call read at the instant it ended, or with no time,
+// is not (fail closed: charged as one from no live worker).
+func (c *connOrigin) liveAt(at time.Time) bool {
+	switch {
+	case c.bornEnded:
+		return false
+	case c.endedAt.IsZero():
+		return true
+	}
+	return !at.IsZero() && at.Before(c.endedAt)
 }
 
 // procName is a process's comm and argv[0]; ok is false when it could not
 // be read. foreign: its pid is a kernel pid keploy does not read a process by
-// (KernelPids), so nothing was read. pid is the pid it was asked by.
+// (KernelPids), so nothing was read. pid is the pid it was asked by. line is
+// its whole command line, redacted (containerkey.RedactArgs), which only a
+// call's source carries (SourceOf), never a mock's origin.
 type procName struct {
 	comm, exe string
+	line      string
 	ok        bool
 	foreign   bool
 	pid       uint32
@@ -128,6 +156,13 @@ func (r *Registry) SetLogger(l *zap.Logger) {
 // A connection ID noted again while it is open is the later connection's;
 // only its last ForgetOrigin closes it.
 func (r *Registry) NoteOrigin(conn string, pid uint32) {
+	r.NoteOriginIn(conn, pid, 0)
+}
+
+// NoteOriginIn is NoteOrigin for a connection the kernel stamped with the
+// keploy instance its process was in (agent.NetworkAddress.Instance; 0 for
+// none), which each mock it records carries (StampInstance).
+func (r *Registry) NoteOriginIn(conn string, pid, instance uint32) {
 	if conn == "" || pid == 0 {
 		return
 	}
@@ -138,8 +173,10 @@ func (r *Registry) NoteOrigin(conn string, pid uint32) {
 		o.conns, o.opened = map[string]*connOrigin{}, map[string]int{}
 	}
 	cur, known := o.conns[conn]
-	if !known || cur.pid != pid {
-		o.conns[conn] = &connOrigin{pid: pid}
+	if !known || cur.pid != pid || cur.instance != instance {
+		// Under o.mu, as InstanceEnded marks a worker's connections: one
+		// noted after its worker ended is born ended.
+		o.conns[conn] = &connOrigin{pid: pid, instance: instance, bornEnded: r.InstanceGone(instance)}
 	}
 	o.opened[conn]++
 	// Noted afresh: no longer among the closed (a later close puts it
@@ -201,6 +238,36 @@ func (r *Registry) StampOrigin(m *models.Mock) {
 	m.Origin = o
 }
 
+// StampInstance gives m, a recorded mock, the keploy instance its
+// connection was stamped with (NoteOriginIn), which record charges it by
+// (models.Mock.Instance). One whose request keploy read after its worker
+// ended (connOrigin.liveAt: by the order of the read, m's
+// ReqTimestampMock, and the end, never by when its parser hands it over) is
+// no live worker's: m gets it as its EndedInstance and no instance, so
+// record charges it as a call from a process in no worker. A mock that
+// carries either already, or whose connection is not known, is left as it
+// is.
+func (r *Registry) StampInstance(m *models.Mock) {
+	if m == nil || m.Instance != 0 || m.EndedInstance != 0 {
+		return
+	}
+	id := m.ConnectionID
+	if id == "" && m.Spec.Metadata != nil {
+		id = m.Spec.Metadata["connID"]
+	}
+	o := &r.origin
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	c := o.conns[id]
+	switch {
+	case c == nil:
+	case c.liveAt(m.Spec.ReqTimestampMock):
+		m.Instance = c.instance
+	default:
+		m.EndedInstance = c.instance
+	}
+}
+
 // origin is the origin a mock or a call from n's process names it by: its
 // comm and argv[0], or, for a process keploy would not read (foreign), why,
 // with its kernel pid; nil when n names nothing.
@@ -226,16 +293,21 @@ func (r *Registry) ProcessOf(pid uint32) (comm, exe string, ok bool) {
 }
 
 // SourceOf is how a call from process pid (a kernel pid) names it
-// (models.UnmatchedCall.Source): its comm and argv[0]; where keploy does not
-// read a process by a kernel pid (KernelPids), no name, why, and the pid;
-// nil for pid 0, or a process that cannot be read.
+// (models.UnmatchedCall.Source): its comm and argv[0], with the pid and its
+// whole command line, redacted, which only travel (models.Origin.Cmdline);
+// where keploy does not read a process by a kernel pid (KernelPids), no
+// name, why, and the pid; nil for pid 0, or a process that cannot be read.
 func (r *Registry) SourceOf(pid uint32) *models.Origin {
 	if pid == 0 {
 		return nil
 	}
 	n := r.nameOf(pid)
 	n.pid = pid
-	return n.origin()
+	o := n.origin()
+	if o != nil && n.ok {
+		o.PID, o.Cmdline = pid, n.line
+	}
+	return o
 }
 
 // connName is the process of connection id, named once (at its first
@@ -310,6 +382,7 @@ func (r *Registry) nameOf(pid uint32) procName {
 		n.exe = r.programOf(cmd, pid, argv[0])
 	}
 	line := strings.Join(containerkey.RedactArgs(argv), " ")
+	n.line = line
 	if !bornKnown {
 		// Not kept, but its command line is logged all the same, once per
 		// pid: a routing line may name it.

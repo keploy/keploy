@@ -16,6 +16,7 @@ import (
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	unixconnMapAppConnEnds                 = "app_conn_ends"
 	unixconnMapAppConnEvents               = "app_conn_events"
 	unixconnMapAppConnEventsDropped        = "app_conn_events_dropped"
 	unixconnMapAppConns                    = "app_conns"
@@ -36,6 +37,7 @@ const (
 	unixconnMapProxyListenerMark           = "proxy_listener_mark"
 	unixconnMapRedirectProxyMap            = "redirect_proxy_map"
 	unixconnMapSocketClassifyFailures      = "socket_classify_failures"
+	unixconnMapStopSignals                 = "stop_signals"
 	unixconnMapTargetNamespacePids         = "target_namespace_pids"
 	unixconnMapUnixConnectEvents           = "unix_connect_events"
 	unixconnMapUnixConnectEventsLost       = "unix_connect_events_lost"
@@ -109,6 +111,7 @@ type unixconnProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type unixconnMapSpecs struct {
+	AppConnEnds                 *ebpf.MapSpec `ebpf:"app_conn_ends"`
 	AppConnEvents               *ebpf.MapSpec `ebpf:"app_conn_events"`
 	AppConnEventsDropped        *ebpf.MapSpec `ebpf:"app_conn_events_dropped"`
 	AppConns                    *ebpf.MapSpec `ebpf:"app_conns"`
@@ -129,6 +132,7 @@ type unixconnMapSpecs struct {
 	ProxyListenerMark           *ebpf.MapSpec `ebpf:"proxy_listener_mark"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketClassifyFailures      *ebpf.MapSpec `ebpf:"socket_classify_failures"`
+	StopSignals                 *ebpf.MapSpec `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 	UnixConnectEvents           *ebpf.MapSpec `ebpf:"unix_connect_events"`
 	UnixConnectEventsLost       *ebpf.MapSpec `ebpf:"unix_connect_events_lost"`
@@ -162,6 +166,7 @@ func (o *unixconnObjects) Close() error {
 //
 // It can be passed to loadUnixconnObjects or ebpf.CollectionSpec.LoadAndAssign.
 type unixconnMaps struct {
+	AppConnEnds                 *ebpf.Map `ebpf:"app_conn_ends"`
 	AppConnEvents               *ebpf.Map `ebpf:"app_conn_events"`
 	AppConnEventsDropped        *ebpf.Map `ebpf:"app_conn_events_dropped"`
 	AppConns                    *ebpf.Map `ebpf:"app_conns"`
@@ -182,6 +187,7 @@ type unixconnMaps struct {
 	ProxyListenerMark           *ebpf.Map `ebpf:"proxy_listener_mark"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketClassifyFailures      *ebpf.Map `ebpf:"socket_classify_failures"`
+	StopSignals                 *ebpf.Map `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 	UnixConnectEvents           *ebpf.Map `ebpf:"unix_connect_events"`
 	UnixConnectEventsLost       *ebpf.Map `ebpf:"unix_connect_events_lost"`
@@ -191,6 +197,7 @@ type unixconnMaps struct {
 
 func (m *unixconnMaps) Close() error {
 	return _UnixconnClose(
+		m.AppConnEnds,
 		m.AppConnEvents,
 		m.AppConnEventsDropped,
 		m.AppConns,
@@ -211,6 +218,7 @@ func (m *unixconnMaps) Close() error {
 		m.ProxyListenerMark,
 		m.RedirectProxyMap,
 		m.SocketClassifyFailures,
+		m.StopSignals,
 		m.TargetNamespacePids,
 		m.UnixConnectEvents,
 		m.UnixConnectEventsLost,

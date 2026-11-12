@@ -54,11 +54,13 @@ var concurrentKeys = struct {
 func RegisterConcurrentKeys(kind Kind, k ConcurrentKeys) (restore func()) {
 	concurrentKeys.mu.Lock()
 	defer concurrentKeys.mu.Unlock()
+	defer mockRulesChanged()
 	prev, had := concurrentKeys.keys[kind]
 	concurrentKeys.keys[kind] = k
 	return func() {
 		concurrentKeys.mu.Lock()
 		defer concurrentKeys.mu.Unlock()
+		defer mockRulesChanged()
 		if had {
 			concurrentKeys.keys[kind] = prev
 		} else {

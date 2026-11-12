@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,12 +18,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -225,15 +228,152 @@ func TestStartupMocks(t *testing.T) {
 	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-2", Key: "orders"}, {Name: "mock-4", Key: "users"}}, startupMocks(windows, mocks, claims))
 }
 
-func TestClaimKeyAt(t *testing.T) {
+// keploy decides no call's owner: a call a test's window holds is that
+// test's, and every other one is the set's. Under the proven switch the set
+// scope is split as mappings.yaml lists it: startup: before the first test
+// began (and the protocol-phase and app-start calls, wherever they fell),
+// worker: between or after the tests, in recorded order, each with its
+// claim's key. Without a window every call is startup:'s.
+func TestSetScopeMocks(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{
+		{Name: "orders/e2e.TestB", Start: at(150), End: at(200)},
+		{Name: "orders/e2e.TestA", Start: at(0), End: at(100)},
+	}
+	mocks := []capturedMock{
+		{name: "mock-0", kind: string(models.Postgres), ts: at(-5)},
+		{name: "mock-1", ts: at(20)},
+		{name: "mock-2", ts: at(60), boot: true},
+		{name: "mock-3", kind: string(models.HTTP), ts: at(120)},
+		{name: "mock-4", ts: at(130), protocol: true},
+		{name: "mock-5", ts: at(170)},
+		{name: "mock-6", kind: string(models.Mongo), ts: at(250)},
+	}
+	startup, worker := setScopeMocks(windows, mocks, nil)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0", Kind: string(models.Postgres)}, {Name: "mock-2"}, {Name: "mock-4"}}, startup)
+	require.Equal(t, []models.MockEntry{{Name: "mock-3", Kind: string(models.HTTP)}, {Name: "mock-6", Kind: string(models.Mongo)}}, worker)
+
+	startup, worker = setScopeMocks(nil, mocks, nil)
+	require.Len(t, startup, len(mocks))
+	require.Empty(t, worker)
+
+	// Under claims each call keeps its claim's key. users claimed the run
+	// after the last test and began none: its call never reached a test of
+	// its own, so it is start-up's.
+	claims := []models.ScopeWindow{{Claim: "orders", Start: at(-1)}, {Claim: "users", Start: at(200)}}
+	startup, worker = setScopeMocks(windows, mocks, claims)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0", Kind: string(models.Postgres)}, {Name: "mock-2", Key: "orders"}, {Name: "mock-4", Key: "orders"}, {Name: "mock-6", Kind: string(models.Mongo), Key: "users"}}, startup)
+	require.Equal(t, []models.MockEntry{{Name: "mock-3", Kind: string(models.HTTP), Key: "orders"}}, worker)
+}
+
+// A run of two test binaries (go test ./... runs one per package, each
+// claiming the run under its own key): each binary's start-up is what it did
+// before its own first test, so second's init and TestMain calls, made after
+// first's tests ended, are start-up's, under second's key, and only what a
+// binary did between or after its own tests is worker:'s. A call made under
+// no claim keeps the run's first test. Mutation: split by the run's first
+// test for every key (the split before), and users' init call is worker:'s.
+func TestSetScopeMocksTwoKeys(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	claims := []models.ScopeWindow{{Claim: "orders", Start: at(-1)}, {Claim: "users", Start: at(110)}, {Claim: "audit", Start: at(300)}}
+	windows := []models.ScopeWindow{
+		{Name: "orders/e2e.TestA", Start: at(0), End: at(100)},
+		{Name: "users/e2e.TestB", Start: at(150), End: at(200)},
+		{Name: "users/e2e.TestC", Start: at(210), End: at(240)},
+	}
+	mocks := []capturedMock{
+		{name: "mock-0", ts: at(-5)},                  // before every claim
+		{name: "mock-1", ts: at(20)},                  // TestA's
+		{name: "mock-2", ts: at(105)},                 // orders, after its test
+		{name: "mock-3", ts: at(120)},                 // users' init, after orders' test
+		{name: "mock-4", ts: at(130), protocol: true}, // users' handshake
+		{name: "mock-5", ts: at(170)},                 // TestB's
+		{name: "mock-6", ts: at(205)},                 // users, between its tests
+		{name: "mock-7", ts: at(250)},                 // users' TestMain, after its last test
+		{name: "mock-8", ts: at(310)},                 // audit, which began no test
+	}
+	startup, worker := setScopeMocks(windows, mocks, claims)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-3", Key: "users"}, {Name: "mock-4", Key: "users"}, {Name: "mock-8", Key: "audit"}}, startup)
+	require.Equal(t, []models.MockEntry{{Name: "mock-2", Key: "orders"}, {Name: "mock-6", Key: "users"}, {Name: "mock-7", Key: "users"}}, worker)
+
+	// Recorded without claims, every call keeps the run's first test.
+	startup, worker = setScopeMocks(windows, mocks, nil)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-4"}}, startup)
+	require.Equal(t, []models.MockEntry{{Name: "mock-2"}, {Name: "mock-3"}, {Name: "mock-6"}, {Name: "mock-7"}, {Name: "mock-8"}}, worker)
+}
+
+// Under the proven switch keploy mock record writes the whole contract into
+// mappings.yaml: each test's own calls in its list, what came before the
+// first test in startup:, and what came between or after the tests in
+// worker:, so a reader who finds a test's call is the app's own work moves
+// it to worker: by hand. Without the switch every call outside every window
+// stays in startup:, as before. Each test's entry keeps the key of the claim
+// it ran under (its test process's), which a moved entry needs to be served
+// in a set of two test processes. Mutation: drop the worker write
+// (upsertWorker), the split (setScopeMocks) or the keys (stampKeys), and
+// the proven row fails.
+func TestMockRecordListsCallsOutsideEveryWindowAsTheSets(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+				judgedBuild(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			dir := t.TempDir()
+			a, b := mark("orders::TestA", 0, 10*time.Millisecond), mark("users::TestB", 20*time.Millisecond, 30*time.Millisecond)
+			a.Outcome, b.Outcome = models.ScopeOutcomePassed, models.ScopeOutcomePassed
+			claims := []models.ScopeWindow{{Claim: "orders", Start: runnerT0.Add(-time.Millisecond)}, {Claim: "users", Start: runnerT0.Add(18 * time.Millisecond)}}
+			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{}), windows: []models.ScopeWindow{claims[0], a, claims[1], b}}
+			instr.mocks = []*models.Mock{
+				mockAt("mock-0", runnerT0.Add(-5*time.Millisecond)),
+				mockAt("mock-1", runnerT0.Add(5*time.Millisecond)),
+				mockAt("mock-2", runnerT0.Add(15*time.Millisecond)),
+				mockAt("mock-3", runnerT0.Add(25*time.Millisecond)),
+				mockAt("mock-4", runnerT0.Add(40*time.Millisecond)),
+			}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+			cfg.Path = dir
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+			require.NoError(t, svc.Record(context.Background()))
+			set := (&mockService{config: cfg}).setName()
+			mapping, err := mapdb.New(zap.NewNop(), dir, "").GetMapping(context.Background(), set)
+			require.NoError(t, err)
+			require.NotNil(t, mapping)
+			own, keys := map[string][]string{}, map[string]string{}
+			for _, tc := range mapping.TestCases {
+				own[tc.ID], keys[tc.ID] = tc.MockNames(), tc.Key
+			}
+			require.Equal(t, map[string][]string{"orders::TestA": {"mock-1"}, "users::TestB": {"mock-3"}}, own)
+			var worker []string
+			for _, e := range mapping.Worker {
+				worker = append(worker, e.Name)
+			}
+			if !proven {
+				require.Equal(t, []string{"mock-0", "mock-2", "mock-4"}, mapping.StartupMockNames())
+				require.Empty(t, worker)
+				require.Equal(t, map[string]string{"orders::TestA": "", "users::TestB": ""}, keys, "without the switch no test's key is written")
+				return
+			}
+			require.Equal(t, map[string]string{"orders::TestA": "orders", "users::TestB": "users"}, keys, "each test keeps its process's claim key")
+			require.Equal(t, []string{"mock-0"}, mapping.StartupMockNames(), "only what came before the first test is startup:")
+			require.Equal(t, []string{"mock-2", "mock-4"}, worker, "what came between and after the tests is worker:")
+		})
+	}
+}
+
+func TestClaimKeyOf(t *testing.T) {
 	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
 	claims := []models.ScopeWindow{{Claim: "a", Start: at(0)}, {Claim: "b", Start: at(10)}}
-	require.Equal(t, "", claimKeyAt(claims, at(-1)))
-	require.Equal(t, "a", claimKeyAt(claims, at(0)), "a call at the claim's own instant is its")
-	require.Equal(t, "a", claimKeyAt(claims, at(9)))
-	require.Equal(t, "b", claimKeyAt(claims, at(10)))
-	require.Equal(t, "b", claimKeyAt(claims, at(1000)), "until the next claim")
-	require.Equal(t, "", claimKeyAt(nil, at(5)))
+	require.Equal(t, "", claimKeyOf(claims, 0, at(-1)))
+	require.Equal(t, "a", claimKeyOf(claims, 0, at(0)), "a call at the claim's own instant is its")
+	require.Equal(t, "a", claimKeyOf(claims, 0, at(9)))
+	require.Equal(t, "b", claimKeyOf(claims, 0, at(10)))
+	require.Equal(t, "b", claimKeyOf(claims, 0, at(1000)), "until the next claim")
+	require.Equal(t, "", claimKeyOf(nil, 0, at(5)))
 }
 
 func stepsMarks() []models.ScopeWindow {
@@ -312,6 +452,10 @@ type hookSpy struct {
 	mu       sync.Mutex
 	calls    []string
 	complete []rec.RecordingCompleteContext
+	// stoppable says, for each AfterRecordingComplete, whether its context
+	// can end (a second interrupt stops the pass through it) and has no
+	// deadline.
+	stoppable []bool
 }
 
 func (h *hookSpy) add(s string) {
@@ -340,10 +484,12 @@ func (h *hookSpy) AfterMockInsert(_ context.Context, info *rec.MockContext) erro
 	return nil
 }
 
-func (h *hookSpy) AfterRecordingComplete(_ context.Context, info *rec.RecordingCompleteContext) error {
+func (h *hookSpy) AfterRecordingComplete(ctx context.Context, info *rec.RecordingCompleteContext) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.complete = append(h.complete, *info)
+	_, hasDeadline := ctx.Deadline()
+	h.stoppable = append(h.stoppable, ctx.Done() != nil && !hasDeadline && ctx.Err() == nil)
 	return nil
 }
 
@@ -365,8 +511,81 @@ func TestRecordPassesCasesAndMocksThroughTheHooks(t *testing.T) {
 	require.ElementsMatch(t, []string{"before-case set test-1", "after-case set test-1", "before-mock set.keploy-staging mock-0", "after-mock set.keploy-staging mock-0"}, hooks.calls)
 	require.Less(t, slices.Index(hooks.calls, "before-case set test-1"), slices.Index(hooks.calls, "after-case set test-1"))
 	require.Equal(t, []rec.RecordingCompleteContext{{TestSetID: "set", Path: cfg.Path}}, hooks.complete)
+	// The post-record pass runs as keploy record's does
+	// (rec.RunAfterRecordingHook): live, with no deadline, and under a
+	// context a second interrupt can end, so a long pass can be stopped.
+	require.Equal(t, []bool{true}, hooks.stoppable, "the hook's context is live, has no deadline, and can be ended")
 	_, err := os.Stat(filepath.Join(dir, "set", "mappings.yaml"))
 	require.NoError(t, err, "the hook ran after the mappings were written")
+}
+
+// stopAtOfferHook is a post-record pass the user stops: it waits for the
+// stop's offer to end it (rec.RunAfterRecordingHook), presses Ctrl+C again,
+// and returns once its context has ended, with the cause it ended with.
+type stopAtOfferHook struct {
+	rec.BaseRecordHooks
+	logs    *observer.ObservedLogs
+	pressed bool
+	cause   error
+	failure string
+}
+
+func (h *stopAtOfferHook) AfterRecordingComplete(ctx context.Context, _ *rec.RecordingCompleteContext) error {
+	deadline := time.Now().Add(30 * time.Second) // bounds only a stop that never offers
+	for h.logs.FilterMessageSnippet("press Ctrl+C again to stop it now").Len() == 0 {
+		if time.Now().After(deadline) {
+			h.failure = "the stop never offered to end the post-record pass"
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if ctx.Err() != nil {
+		h.failure = fmt.Sprintf("the pass's context ended before the user's second interrupt: %v", context.Cause(ctx))
+		return nil
+	}
+	h.pressed = utils.MarkInterruptedAgain()
+	select {
+	case <-ctx.Done():
+		h.cause = context.Cause(ctx)
+	case <-time.After(30 * time.Second): // bounds only a press that never ends the pass
+		h.failure = "the user's press after the offer never ended the pass's context"
+	}
+	return nil
+}
+
+// keploy mock record runs the post-record pass as keploy record does: with
+// no deadline, so a long pass is waited for, and, once the run was
+// interrupted, the stop offers that another Ctrl+C stops the pass now. That
+// press ends the pass's context with rec.ErrHookStoppedNow as its cause.
+// Before, the pass ran under the record's persistCtx, which nothing ends:
+// only SIGKILL stopped a long one.
+func TestRecordAPressAtTheOfferStopsThePostRecordPass(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr.incoming = []*models.TestCase{caseAt("test-1", runnerT0.Add(5*time.Millisecond))}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(6*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = t.TempDir()
+	withRequests(cfg)
+	core, logs := observer.New(zapcore.InfoLevel)
+	hook := &stopAtOfferHook{logs: logs}
+	svc := New(zap.New(core), instr, stubMockDB{}, mapdb.New(zap.NewNop(), t.TempDir(), ""), nil, hook, cfg)
+	svc.(TestDBSetter).SetTestDB(&memTestDB{})
+	utils.MarkInterrupted() // the stop
+
+	require.NoError(t, svc.Record(context.Background()))
+
+	require.Empty(t, hook.failure, "%s: %v", hook.failure, logs.All())
+	require.True(t, hook.pressed, "the user's press after the offer did not stop the post-record pass")
+	require.ErrorIs(t, hook.cause, rec.ErrHookStoppedNow, "the pass's context ended with the cause of the user's stop")
+	require.Equal(t, 1, logs.FilterMessageSnippet("Stopping the post-record pass now").FilterField(zap.String("testSetID", "set")).Len(),
+		"the stop says once that the second interrupt stopped the pass: %v", logs.All())
+	require.False(t, utils.MarkInterruptedAgain(), "the offer to stop the pass still stands after the pass ended")
 }
 
 func TestCorrelateCasesPairsAMockWithACaseOfTheSameFlowAcrossEntries(t *testing.T) {
@@ -487,6 +706,272 @@ func TestARefusedRecordLeavesTheSetExactlyAsItWas(t *testing.T) {
 			require.Equal(t, before, snapshotTree(t, dir))
 		})
 	}
+}
+
+// refusingTestDB is the real test-case store, whose disk refuses the second
+// test case it is handed (a full disk).
+type refusingTestDB struct {
+	*testdb.TestYaml
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *refusingTestDB) InsertTestCase(ctx context.Context, tc *models.TestCase, set string, enableLog bool) error {
+	d.mu.Lock()
+	d.calls++
+	refuse := d.calls == 2
+	d.mu.Unlock()
+	if refuse {
+		return errors.New("write the test case: no space left on device")
+	}
+	return d.TestYaml.InsertTestCase(ctx, tc, set, enableLog)
+}
+
+// refusesMocksDB is the real mock store, whose disk refuses every mock.
+type refusesMocksDB struct{ *mockdb.MockYaml }
+
+func (refusesMocksDB) InsertMock(context.Context, *models.Mock, string) error {
+	return errors.New("write the mock: no space left on device")
+}
+
+// keploy mock record --record-requests whose test-case store refused a test
+// case (a full disk): the run ends as a recording that is NOT saved, said at
+// ERROR with how many of the test cases handed to the store it did not write
+// and the store's first error; the set is left exactly as it was. The exit
+// code is the test command's own when it failed, else keploy's 1. Before,
+// the case was said at ERROR and left out, and the set was saved without
+// it, exit 0: a recording short of a test case looked complete. When the
+// mock store refused mocks too, the run says both.
+func TestRecordRequests_ATestCaseTheStoreRefusedEndsAsARecordingNotSaved(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		run         models.AppError
+		code        int
+		refuseMocks bool
+	}{
+		{"the test command passed", models.AppError{}, utils.ExitKeployError, false},
+		{"the test command failed with 3", models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}, 3, false},
+		{"the mock store refused its mock too", models.AppError{}, utils.ExitKeployError, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			set := filepath.Join(dir, "set")
+			require.NoError(t, os.MkdirAll(filepath.Join(set, "tests"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(set, "mocks.yaml"), []byte("# old mocks\nversion: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(set, "tests", "test-1.yaml"), []byte("# old case\nname: test-1\n"), 0o644))
+			before := snapshotTree(t, dir)
+
+			instr := newRunnerInstr(t, sequentialMarks()...)
+			instr.runResult = tc.run
+			instr.incoming = []*models.TestCase{
+				caseAt("", runnerT0.Add(5*time.Millisecond)),
+				caseAt("", runnerT0.Add(15*time.Millisecond)),
+				caseAt("", runnerT0.Add(50*time.Millisecond)),
+			}
+			instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+			cfg.Path = dir
+			withRequests(cfg)
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			core, logs := observer.New(zapcore.InfoLevel)
+			var db MockDB = mockdb.New(zap.NewNop(), dir, "")
+			said := recordDrainWords.casesNotWritten
+			if tc.refuseMocks {
+				db, said = refusesMocksDB{mockdb.New(zap.NewNop(), dir, "")}, recordDrainWords.storeNotWritten
+			}
+			svc := New(zap.New(core), instr, db, mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+			svc.(TestDBSetter).SetTestDB(&refusingTestDB{TestYaml: testdb.New(zap.NewNop(), dir)})
+			err := svc.Record(context.Background())
+			require.ErrorContains(t, err, "1 of the 3 test cases handed to the test-case store were not written")
+			require.ErrorContains(t, err, "write the test case: no space left on device", "the store's own error was not said")
+			if tc.refuseMocks {
+				require.ErrorIs(t, err, models.ErrMocksNotWritten)
+				require.ErrorContains(t, err, "1 of the 1 mocks handed to the mock store were not written")
+			} else {
+				require.ErrorContains(t, err, "the recording was not saved: 1 of the 3 test cases")
+			}
+			require.Equal(t, tc.code, utils.ErrCode)
+			require.Equal(t, before, snapshotTree(t, dir), "the set was not left exactly as it was")
+			require.Equal(t, 1, logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessage(said).Len(), "the recording not saved was not said at ERROR")
+		})
+	}
+}
+
+// binaryCaseAt is a test case with a response body the json format cannot hold.
+func binaryCaseAt(at time.Time) *models.TestCase {
+	tc := caseAt("", at)
+	tc.HTTPResp.Body = "\x08\x96\x01\xff\xfeproto"
+	return tc
+}
+
+// recordJSONCases records cases through keploy mock record --record-requests
+// into db, returning its logs, the folder it wrote and Record's error.
+func recordJSONCases(t *testing.T, db func(dir string) TestDB, cases ...*models.TestCase) (*observer.ObservedLogs, string, error) {
+	t.Helper()
+	return recordJSONCasesWith(t, nil, db, cases...)
+}
+
+// recordJSONCasesWith is recordJSONCases with the run's record hooks.
+func recordJSONCasesWith(t *testing.T, hooks rec.RecordHooks, db func(dir string) TestDB, cases ...*models.TestCase) (*observer.ObservedLogs, string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr.incoming = cases
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = dir
+	withRequests(cfg)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	core, logs := observer.New(zapcore.InfoLevel)
+	svc := New(zap.New(core), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, hooks, cfg)
+	svc.(TestDBSetter).SetTestDB(db(dir))
+	return logs, dir, svc.Record(context.Background())
+}
+
+func jsonStore(dir string) TestDB { return testdb.NewWithFormat(zap.NewNop(), dir, yaml.FormatJSON) }
+
+// One test case whose body the storage format cannot hold is left out and
+// counted; the run is saved, with the others. It says nothing about the disk,
+// so the run is not ended as one the store failed: the rule for an unencodable
+// mock in the same run.
+func TestRecordRequests_ATestCaseItsFormatCannotHoldIsLeftOutAndCounted(t *testing.T) {
+	logs, dir, err := recordJSONCases(t, jsonStore,
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(15*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(25*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)))
+	require.NoError(t, err)
+	require.Zero(t, utils.ErrCode)
+	files, err := filepath.Glob(filepath.Join(dir, "set", "tests", "*.json"))
+	require.NoError(t, err)
+	require.Len(t, files, 2, "the text test cases are kept, the binary ones left out")
+	said := logs.FilterMessageSnippet("test cases left out of the recording").All()
+	require.Len(t, said, 1)
+	require.Equal(t, zapcore.WarnLevel, said[0].Level, "a run that lost test cases says so above Info")
+	require.EqualValues(t, 2, said[0].ContextMap()["testCasesLeftOut"])
+	recorded := logs.FilterMessage("recorded test cases").All()
+	require.Len(t, recorded, 1)
+	require.EqualValues(t, 2, recorded[0].ContextMap()["cases"], "a case left out is no case of the recording")
+}
+
+// The line is for a run that left test cases out.
+func TestRecordRequests_NothingLeftOutSaysNothingOfIt(t *testing.T) {
+	logs, _, err := recordJSONCases(t, jsonStore, caseAt("", runnerT0.Add(5*time.Millisecond)))
+	require.NoError(t, err)
+	require.Zero(t, logs.FilterMessageSnippet("test cases left out of the recording").Len())
+}
+
+// failsThirdTestDB is the real JSON store, whose disk fails the third test case
+// it is handed.
+type failsThirdTestDB struct {
+	*testdb.TestYaml
+	calls int
+}
+
+func (d *failsThirdTestDB) InsertTestCase(ctx context.Context, tc *models.TestCase, set string, enableLog bool) error {
+	if d.calls++; d.calls == 3 {
+		return errors.New("write the test case: no space left on device")
+	}
+	return d.TestYaml.InsertTestCase(ctx, tc, set, enableLog)
+}
+
+// A test case left out was not written, so the count a real store failure beside
+// it ends the run with has both, of the three the store was handed. It does not
+// hide that failure: the run still ends as not saved, on the failure's error.
+func TestRecordRequests_ACaseLeftOutCountsAsNotWritten(t *testing.T) {
+	logs, _, err := recordJSONCases(t, func(dir string) TestDB {
+		return &failsThirdTestDB{TestYaml: testdb.NewWithFormat(zap.NewNop(), dir, yaml.FormatJSON)}
+	},
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(15*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)))
+	require.ErrorContains(t, err, "2 of the 3 test cases handed to the test-case store were not written")
+	require.ErrorContains(t, err, "no space left on device")
+	require.NotZero(t, utils.ErrCode, "a run with a case left out and one the store failed exits as one that failed")
+	said := logs.FilterMessageSnippet("test cases left out of the recording").All()
+	require.Len(t, said, 1, "one left out is said as two are")
+	require.EqualValues(t, 1, said[0].ContextMap()["testCasesLeftOut"])
+}
+
+// A left-out test case is in no recording, so what runs after an insert (an
+// embedder's post-insert work) does not run for it.
+func TestRecordRequests_ACaseLeftOutRunsNoAfterInsertHook(t *testing.T) {
+	hooks := &hookSpy{}
+	_, _, err := recordJSONCasesWith(t, hooks, jsonStore,
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		binaryCaseAt(runnerT0.Add(15*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)))
+	require.NoError(t, err)
+	var before, after int
+	for _, call := range hooks.calls {
+		switch {
+		case strings.HasPrefix(call, "before-case "):
+			before++
+		case strings.HasPrefix(call, "after-case "):
+			after++
+		}
+	}
+	require.Equal(t, 3, before, "every case goes to the store: %v", hooks.calls)
+	require.Equal(t, 2, after, "the left-out case ran the after-insert hook: %v", hooks.calls)
+}
+
+// refusesTwoTestDB is the real test-case store, whose disk refuses the first
+// and the third test case it is handed, each with its own error.
+type refusesTwoTestDB struct {
+	*testdb.TestYaml
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *refusesTwoTestDB) InsertTestCase(ctx context.Context, tc *models.TestCase, set string, enableLog bool) error {
+	d.mu.Lock()
+	d.calls++
+	n := d.calls
+	d.mu.Unlock()
+	switch n {
+	case 1:
+		return errors.New("write the test case: no space left on device (the first refusal)")
+	case 3:
+		return errors.New("write the test case: disk quota exceeded (the second refusal)")
+	}
+	return d.TestYaml.InsertTestCase(ctx, tc, set, enableLog)
+}
+
+// keploy mock record --record-requests whose test-case store refused two of
+// four test cases: the run counts every refusal ("2 of the 4"), and the error
+// it says is the first refusal's, not a later one's. The exit code is
+// keploy's 1 and the set is left exactly as it was.
+func TestRecordRequests_EveryTestCaseTheStoreRefusedIsCountedAndTheFirstErrorSaid(t *testing.T) {
+	dir := t.TempDir()
+	set := filepath.Join(dir, "set")
+	require.NoError(t, os.MkdirAll(filepath.Join(set, "tests"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(set, "mocks.yaml"), []byte("# old mocks\nversion: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(set, "tests", "test-1.yaml"), []byte("# old case\nname: test-1\n"), 0o644))
+	before := snapshotTree(t, dir)
+
+	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr.incoming = []*models.TestCase{
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		caseAt("", runnerT0.Add(15*time.Millisecond)),
+		caseAt("", runnerT0.Add(30*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)),
+	}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = dir
+	withRequests(cfg)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	svc.(TestDBSetter).SetTestDB(&refusesTwoTestDB{TestYaml: testdb.New(zap.NewNop(), dir)})
+	err := svc.Record(context.Background())
+	require.ErrorContains(t, err, "2 of the 4 test cases handed to the test-case store were not written")
+	require.ErrorContains(t, err, "(the first refusal)", "the first error was not the one said")
+	require.NotContains(t, err.Error(), "(the second refusal)", "a later error was said as the first")
+	require.Equal(t, utils.ExitKeployError, utils.ErrCode)
+	require.Equal(t, before, snapshotTree(t, dir), "the set was not left exactly as it was")
 }
 
 func TestAnAcceptedRecordReplacesTheSetAndLeavesNoCopy(t *testing.T) {
@@ -728,4 +1213,55 @@ func TestAMappingListsDataPlaneMocksOnly(t *testing.T) {
 	}
 	require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0"}, {Name: "mock-1"}, {Name: "mock-2"}}}, correlateScopes(windows, dataPlane(mocks)))
 	require.Empty(t, startupMocks(windows, mocks, nil))
+}
+
+// An answer the client never read (models.Mock.IsUndelivered), made inside a
+// test, is in no test's mapping under either switch: no replay serves it, so
+// no test makes the call it recorded. It goes to the pool (startup:), which
+// requires none, while the answer the client read beside it is the test's.
+func TestAMappingListsNoAnswerTheClientNeverRead(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{{Name: "o::TestA", Start: at(0), End: at(100)}}
+	mock := func(name string, ms int, unread bool) *models.Mock {
+		m := &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"type": "HTTP_CLIENT"}, ReqTimestampMock: at(ms)}}
+		if unread {
+			m.MarkUndelivered()
+		}
+		return m
+	}
+	for _, on := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, on)
+			mocks := []capturedMock{capturedOf(mock("mock-0", 10, false)), capturedOf(mock("mock-1", 20, true))}
+			require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0", Kind: "Http"}}}, correlateScopes(windows, dataPlane(mocks)))
+			require.Equal(t, []models.MockEntry{{Name: "mock-1", Kind: "Http"}}, startupMocks(windows, mocks, nil))
+			// With a runner's starts (classify), filed by its start's worker
+			// and by its own pid alike.
+			tests := []models.ScopeWindow{{Name: "o::TestA", Start: at(0), End: at(100), PID: 10}}
+			starts := []models.ScopeWindow{{App: true, Ref: "s1", Name: "app#1", Dir: "/r", Program: "app", N: 1, Ready: at(5), Worker: 10}}
+			var withStarts []capturedMock
+			for _, c := range mocks {
+				byStart, byPID := c, c
+				byStart.name, byStart.ref = c.name+"@s1", "s1"
+				byPID.pid = 10
+				withStarts = append(withStarts, byStart, byPID)
+			}
+			plan := classify(tests, starts, []models.SuiteSpan{{Dir: "/r", Start: at(0), End: at(200)}}, withStarts)
+			require.Equal(t, map[string][]models.MockEntry{"o::TestA": {{Name: "mock-0@s1", Kind: "Http", Start: "app#1"}, {Name: "mock-0", Kind: "Http"}}}, plan.tests)
+			// A case's mocks list it on neither path either: correlateCases
+			// reads every mock in the case's span, with starts (perTest) and
+			// without (every mock recorded).
+			cases := []capturedMock{{name: "case-1", ts: at(5), end: at(30)}}
+			for path, owned := range map[string][]capturedMock{"with starts": plan.perTest, "without starts": mocks} {
+				var listed []string
+				for _, tc := range correlateCases(windows, owned, cases, nil) {
+					listed = append(listed, tc.CaseMocks["case-1"]...)
+				}
+				require.NotEmpty(t, listed, "%s: the case's mocks", path)
+				for _, n := range listed {
+					require.NotContains(t, n, "mock-1", "%s: a case's mocks list an answer the client never read", path)
+				}
+			}
+		})
+	}
 }

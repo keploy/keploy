@@ -88,3 +88,74 @@ func TestALearningNotKeptLeavesATestWithNoVerdict(t *testing.T) {
 		t.Fatalf("no reason: NotJudged %v", got)
 	}
 }
+
+// FieldReasonShapes keeps, once each, the reasons a reason may name: those
+// whose field is its own shape (FieldShape). One whose field may name a
+// value (an object key the app sent) is left out, as its why may quote that
+// field; so are an empty field or why. A miss's field_reasons are written
+// in YAML and JSON as field and why, and a miss without any writes none.
+// A Postgres call's reason survives FieldReasonShapes: its field is an SQL
+// place name (bind.$N, literal.N), a position keploy counts, which is its own
+// shape; a key of that look anywhere else may be a value and is still left
+// out.
+func TestFieldReasonShapesKeepSQLPlaces(t *testing.T) {
+	bind := "bind.$1 was learned as clock, a read of the application's clock, and the call sends no value there: it changed"
+	lit := "literal.2 was learned as clock, a read of the application's clock, and the call's SQL text carries no value there: it changed"
+	got := FieldReasonShapes([]FieldReason{
+		{Field: "bind.$1", Why: bind},
+		{Field: "literal.2", Why: lit},
+		{Field: "body.bind.$1", Why: "body.bind.$1 was learned as a read of the application's clock"},
+		{Field: "bind.$123456", Why: "bind.$123456 was learned as a read of the application's clock"},
+		{Field: "bind.$1", Why: bind},
+	})
+	want := []FieldReason{{Field: "bind.$1", Why: bind}, {Field: "literal.2", Why: lit}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FieldReasonShapes = %+v; want %+v", got, want)
+	}
+}
+
+func TestFieldReasonShapesKeepOnlyFieldsThatNameNoValue(t *testing.T) {
+	why := "body.since was learned as a read of the application's clock: it changed"
+	got := FieldReasonShapes([]FieldReason{
+		{Field: "body.since", Why: why},
+		{Field: "body.users.kqzx9w.since", Why: "body.users.kqzx9w.since was learned as a read of the application's clock"},
+		{Field: "body.users.{}.since", Why: "body.users.{}.since was learned as a read of the application's clock"},
+		{Field: "body.since", Why: why},
+		{Field: "", Why: why},
+		{Field: "body.until"},
+	})
+	want := []FieldReason{{Field: "body.since", Why: why}, {Field: "body.users.{}.since", Why: "body.users.{}.since was learned as a read of the application's clock"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FieldReasonShapes = %+v; want %+v", got, want)
+	}
+	if FieldReasonShapes(nil) != nil {
+		t.Fatal("no reasons gave some")
+	}
+
+	miss := UnmatchedCall{Protocol: "HTTP", FieldReasons: []FieldReason{{Field: "body.since", Why: why}}}
+	y, err := yaml.Marshal(miss)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(y), "field_reasons:\n") || !strings.Contains(string(y), "- field: body.since\n") || !strings.Contains(string(y), "  why: ") {
+		t.Fatalf("the YAML miss is\n%s", y)
+	}
+	j, err := json.Marshal(miss)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(j), `"field_reasons":[{"field":"body.since","why":"`+why+`"}]`) {
+		t.Fatalf("the JSON miss is %s", j)
+	}
+	var back UnmatchedCall
+	if err := yaml.Unmarshal(y, &back); err != nil || !reflect.DeepEqual(back.FieldReasons, miss.FieldReasons) {
+		t.Fatalf("the YAML miss read back as %+v (%v)", back.FieldReasons, err)
+	}
+	for _, none := range []UnmatchedCall{{Protocol: "HTTP"}} {
+		y, _ := yaml.Marshal(none)
+		j, _ := json.Marshal(none)
+		if strings.Contains(string(y), "field_reasons") || strings.Contains(string(j), "field_reasons") {
+			t.Fatalf("a miss with no field reasons writes them: %s / %s", y, j)
+		}
+	}
+}

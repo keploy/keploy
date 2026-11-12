@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
@@ -60,10 +61,11 @@ func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 // each time a test case is written again) gets this noise, as it always has.
 // Under the switch it gets none: a field is noise only when it is declared, or
 // when the learn step of record's full round F saw it drift (F replays every
-// test 61.5 s past its recording, so a value the app reads from its clock
-// drifts there and is learned from the drift). A date-shaped value that stays
-// the same from record to replay (a created_at read back from a mocked
-// database) is then asserted. Noised by its shape, a change to it would pass.
+// test about a minute past its recording, learn.FullRoundLead, so a value the
+// app reads from its clock drifts there and is learned from the drift). A
+// date-shaped value that stays the same from record to replay (a created_at
+// read back from a mocked database) is then asserted. Noised by its shape, a
+// change to it would pass.
 // The Date header a server mints on every answer is not asserted either way:
 // the replay forgives it by its name (models.IsVolatileResponseHeader, unless
 // --disableAutoHeaderNoise), never by its value.
@@ -139,6 +141,22 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 	}
 	switch tc.Kind {
 	case models.HTTP:
+		// encoding/json has no lossless form for a string that is not UTF-8:
+		// it writes U+FFFD for each bad byte and returns no error, so the file
+		// would hold another body, and the test fail at replay, unexplained. A
+		// file has no reader to ask for a body object, so refuse, as the mock
+		// writer does (mockdb). Tagged as this test case's own fault, the
+		// recorder skips and counts it and keeps recording. YAML stores such a
+		// body as !!binary, and a body saveAssets took out of the document is
+		// no longer here.
+		if field, ok := firstNonUTF8Body(tc); !ok {
+			err := fmt.Errorf("%w: testdb: %s is not valid UTF-8 and the json format cannot store it losslessly; record with storageFormat yaml to keep binary bodies", models.ErrTestCaseEncode, field)
+			utils.LogError(logger, err, "refusing to write a binary body as JSON",
+				zap.String("method", string(tc.HTTPReq.Method)),
+				zap.String("url", tc.HTTPReq.URL),
+				zap.String("next_step", "set storageFormat to yaml; the yaml encoder stores binary bodies as !!binary without loss"))
+			return nil, err
+		}
 		doc.Curl = tc.Curl
 		specBytes, err := json.Marshal(buildHTTPSchema(tc, logger))
 		if err != nil {
@@ -158,6 +176,18 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 		return nil, errors.New("type of testcases is invalid")
 	}
 	return doc, nil
+}
+
+// firstNonUTF8Body reports whether both HTTP bodies of tc are valid UTF-8,
+// naming the first that is not.
+func firstNonUTF8Body(tc models.TestCase) (string, bool) {
+	if !utf8.ValidString(tc.HTTPReq.Body) {
+		return "the request body", false
+	}
+	if !utf8.ValidString(tc.HTTPResp.Body) {
+		return "the response body", false
+	}
+	return "", true
 }
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {

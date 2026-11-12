@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -48,6 +49,9 @@ type Config struct {
 	// several tests need though only one recorded it misses in the others;
 	// declaring it here serves it to every test, without recording again.
 	// Each rule names a host, and optionally a method and a path prefix.
+	// Under the proven switch (KEPLOY_PROVEN) a rule serves every test only
+	// a recording made outside every test (in TestMain or at start-up), of
+	// a call it names exactly: its method, and the whole path as pathPrefix.
 	SessionCalls []models.SessionCallRule `json:"sessionCalls,omitempty" yaml:"sessionCalls,omitempty" mapstructure:"sessionCalls"`
 	// MysqlPorts pins destination ports to the MySQL parser, skipping
 	// auto-detection for them; a non-empty list replaces the built-in
@@ -442,8 +446,10 @@ type Normalize struct {
 	EditedBy      string          `json:"-" yaml:"-" mapstructure:"-"`
 }
 
-// DefaultHealthPollTimeout is the ceiling for every pre-test app-readiness gate
-// when test.healthPollTimeout is unset or non-positive.
+// DefaultHealthPollTimeout is how long the pre-test wait asks for an HTTP
+// answer when test.healthPollTimeout is unset or non-positive (see
+// Test.HealthPollTimeout). It never ends the wait for the app to accept a
+// connection on its port: only the app's exit or the user's stop does.
 //
 // It lives here, not beside the gate, because the yaml default in
 // config/default.go and the code fallback are two sources of truth for the same
@@ -456,10 +462,9 @@ type Normalize struct {
 // serving: a ready app satisfies the gate on its first probe, so raising it costs
 // a healthy run nothing. A cold application start on a loaded shared runner —
 // the condition the gate exists for — was measured at 17-28s for the process and
-// ~55s from spawn to first serve, against a previous 60s ceiling that therefore
-// expired and fired tests into a not-yet-listening app. Timing out only warns and
-// proceeds, so an over-generous ceiling can never fail a run that would otherwise
-// pass; an under-generous one can.
+// ~55s from spawn to first serve. Past it the wait settles for the app's TCP
+// accept and warns, so an over-generous value can never fail a run that would
+// otherwise pass.
 const DefaultHealthPollTimeout = 3 * time.Minute
 
 type Test struct {
@@ -467,8 +472,8 @@ type Test struct {
 	GlobalNoise       Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
 	ReplaceWith       ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
 	Delay             uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
-	HealthURL         string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; empty preserves the fixed --delay behavior
-	HealthPollTimeout time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // ceiling for the pre-test health poll loop before falling back to --delay
+	HealthURL         string              `json:"healthUrl" yaml:"healthUrl" mapstructure:"healthUrl"`                         // optional HTTP(S) URL polled before firing the first test; with no 2xx within healthPollTimeout the first test waits for the app to accept a connection on its port instead
+	HealthPollTimeout time.Duration       `json:"healthPollTimeout" yaml:"healthPollTimeout" mapstructure:"healthPollTimeout"` // how long the pre-test wait asks for an HTTP answer (healthUrl's 2xx, or any answer on the app's port once it accepts) before it settles for the app accepting a TCP connection on its port; that accept is waited for with no time limit, until the app exits or keploy is stopped
 	HealthPath        string              `json:"healthPath" yaml:"healthPath" mapstructure:"healthPath"`                      // optional request path probed on the app's OWN auto-detected address (docker/compose published port, or appReadyProbeAddr) before the first test. Unlike healthUrl it needs no host or port, so it works when the published port is assigned at runtime. Any completed HTTP response counts as ready — a health endpoint returning 503 has still proved the app is answering. Empty uses a keploy-reserved probe path.
 	HealthScheme      string              `json:"healthScheme" yaml:"healthScheme" mapstructure:"healthScheme"`                // optional override for the readiness probe scheme ("http" or "https"). Empty (the default) uses the scheme the recorded tests actually dial; only consulted when the app is probed over HTTP, and ignored entirely when healthUrl is set.
 	AppReadyProbeAddr string              `json:"appReadyProbeAddr" yaml:"appReadyProbeAddr" mapstructure:"appReadyProbeAddr"` // optional host:port TCP-polled after the --delay floor (bounded by healthPollTimeout) before firing the first test — the TCP-accept analog of healthUrl for apps with no HTTP health endpoint (e.g. a k8s replay pod's app Service, or a native app on a fixed port). Empty preserves the fixed --delay behavior. Unlike test.port it NEVER affects request routing; it is only a readiness probe.
@@ -489,8 +494,17 @@ type Test struct {
 	// DisableAppReadyProbe turns off the app-readiness probing that
 	// runs before the first test fires — the docker/compose
 	// published-port gates, AppReadyProbeAddr, and the resolved
-	// test-target fallback. --health-url is unaffected: that is an
-	// explicit operator request, not an inferred probe.
+	// test-target fallback — and every other connect-then-close dial
+	// of the app's address: the reset re-send's readiness re-gate, and
+	// the wait of a test request the app refused. --health-url is still
+	// polled, as an explicit operator request rather than an inferred
+	// probe. For an app whose process keploy runs, its exit ends the
+	// waits, so they have no time limit: past HealthPollTimeout the
+	// health URL is polled on until it answers 2xx, saying every so
+	// often that it still waits, and a refused test request is sent
+	// again every so often instead of being preceded by a probe. For
+	// any other, the waits stay bounded: past HealthPollTimeout the
+	// fixed Delay, and the bounded re-sends of a refused request.
 	//
 	// It exists for embedders that drive replay as a library in an
 	// environment where a connect-then-close probe is DESTRUCTIVE.
@@ -604,10 +618,15 @@ type Test struct {
 	CmdUsed                     string        `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
 	// SkipReasons is why a test the run skips is skipped: test set -> test case
 	// -> reason. Set at run time by whatever fills IgnoredTests with a reason
-	// (the proven model's verdicts gate), never read from keploy.yml. The
-	// replayer writes it into the IGNORED result's SkipReason under the proven
-	// switch.
+	// (the proven model's verdicts gate, or a cloud replay skipping a test with
+	// no mapping entry), never read from keploy.yml. The replayer writes it
+	// into the IGNORED result's SkipReason, with the proven switch on or off.
 	SkipReasons map[string]map[string]string `json:"-" yaml:"-" mapstructure:"-"`
+	// AllowEgress names what a replay may reach on the real network, by the
+	// entries models.NormalizeAllowEgress accepts (models.AllowEgressDNS). What a
+	// replay does not answer from its mocks otherwise stays inside the replay;
+	// an entry keploy does not act on is refused at start.
+	AllowEgress []string `json:"allowEgress" yaml:"allowEgress" mapstructure:"allowEgress"`
 }
 
 // Report output formats for `keploy report --format`.
@@ -715,12 +734,73 @@ func SetByPassPorts(conf *Config, ports []uint) {
 	}
 }
 
+// GetByPassPorts is the ports keploy passes through whole, in the kernel: the
+// ports of the port-only bypassRules (no host, no path). The agent gets them as
+// --pass-through-ports, and the kernel leaves every connect to them alone.
+//
+// A rule with a host or a path is not one of them. It names some of a port's
+// calls, not all, so only keploy's proxy can tell them apart (an HTTP call's
+// Host and path, a TLS connection's server name), and the proxy gets the rules
+// themselves (OutgoingOptions.Rules). Before, every rule's port went to the
+// kernel, so a rule for one host on port 443 passed every host's calls on 443
+// through, unrecorded and unmocked.
 func GetByPassPorts(conf *Config) []uint {
 	var ports []uint
 	for _, rule := range conf.BypassRules {
-		ports = append(ports, rule.Port)
+		if rule.Host == "" && rule.Path == "" && rule.Port != 0 {
+			ports = append(ports, rule.Port)
+		}
 	}
 	return ports
+}
+
+// CheckBypassRules refuses a bypassRule that keploy could not apply as it is
+// written. One whose host or path is not a regular expression Go reads names
+// no call, and the proxy would meet the error on each connection; the error
+// names the rule and what is wrong with its pattern. And one with a host or a
+// path on a port whose calls keploy's proxy reads
+// with no host or path in them. Those are the mysqlPorts ports, pinned to the
+// MySQL parser: MySQL names no host, and its TLS starts after the server's
+// greeting, past the point where the proxy reads a server name. Such a rule
+// would decide none of its port's calls, and passing them all through would
+// pass through calls it does not name.
+// The error names each such rule and the port-only rule that passes the whole
+// port through.
+//
+// On any other port the protocol shows only in each connection, so the proxy
+// says, once for each rule, when it meets a connection to the rule's port in
+// which it can see no host or path, and passes it through (pkg/agent/proxy,
+// bypassRulesUndecided).
+func CheckBypassRules(conf *Config) error {
+	mysql := make(map[uint]bool, len(conf.MysqlPorts))
+	for _, p := range conf.MysqlPorts {
+		mysql[uint(p)] = true
+	}
+	var broken []string
+	for _, rule := range conf.BypassRules {
+		for _, f := range []struct{ name, pattern string }{{"host", rule.Host}, {"path", rule.Path}} {
+			if f.pattern == "" {
+				continue
+			}
+			if _, err := regexp.Compile(f.pattern); err != nil {
+				broken = append(broken, fmt.Sprintf("{host: %q, path: %q, port: %d}, whose %s is not a regular expression: %v", rule.Host, rule.Path, rule.Port, f.name, err))
+			}
+		}
+	}
+	if len(broken) > 0 {
+		return fmt.Errorf("keploy cannot apply the bypassRules %s. A rule's host and path are regular expressions (Go's syntax): fix the pattern, or escape its special characters (a dot as \\.)", strings.Join(broken, "; "))
+	}
+	var bad []string
+	for _, rule := range conf.BypassRules {
+		if (rule.Host == "" && rule.Path == "") || !mysql[rule.Port] {
+			continue
+		}
+		bad = append(bad, fmt.Sprintf("{host: %q, path: %q, port: %d}", rule.Host, rule.Path, rule.Port))
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return fmt.Errorf("keploy cannot apply the bypassRules %s: their ports are in mysqlPorts, and a MySQL connection shows keploy no host or path to match them by. To pass every call to such a port through, use a rule with the port alone ({port: N}); to record or mock them, remove the rule", strings.Join(bad, ", "))
 }
 
 // SetSelectedTests selects the test sets testSets names for a run. A

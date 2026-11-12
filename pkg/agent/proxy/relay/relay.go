@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
@@ -124,6 +125,9 @@ type Relay struct {
 	// (io.EOF), so a look that finds the connection closed finds the FIN.
 	finMu                sync.Mutex
 	clientFIN, clientEOF atomic.Bool
+	// clientWriteErr is the error the first failed write to the client
+	// failed with (noteClientWriteFailed), for clientEnd.
+	clientWriteErr atomic.Pointer[error]
 	// clientStopped: destination chunks were refused, and no later one is
 	// teed. Set under verdictMu, read without it.
 	clientStopped atomic.Bool
@@ -138,6 +142,9 @@ type Relay struct {
 	awaitingFrom []uint64
 	resolverDone chan struct{}
 	awaitingMark string
+	// notTaken is the start of what the client refused (refuse,
+	// notTakenSoFar): nil until it refused, stored under verdictMu.
+	notTaken atomic.Pointer[[]byte]
 	// lastLook is closed by run once both forwarders have returned and a
 	// waiting resolve has had HalfCloseGrace more (awaitClientVerdict): the
 	// next look at the client's socket is the last.
@@ -145,6 +152,10 @@ type Relay struct {
 	// notTakenChunks and notTakenBytes count the destination chunks the
 	// client did not take, which the parser was not given.
 	notTakenChunks, notTakenBytes atomic.Int64
+	// destReset: the destination's forwarder read a reset (ECONNRESET), so
+	// run makes the proxy's close of the client a reset too
+	// (resetClientOnClose).
+	destReset atomic.Bool
 
 	// runOnce ensures Run's one-time startup path executes exactly once.
 	runOnce sync.Once
@@ -280,6 +291,9 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.OnMarkMockIncomplete,
 		cfg.Logger,
 	)
+	// A Read on the destination's conn beneath its layers is when no chunk
+	// read from it so far is left to be numbered (StreamedBefore).
+	r.order.OnRead(r.teeD2C.progress.changed.wake)
 
 	// Assigned after construction rather than threaded through newTee's
 	// positional signature, which is already at six arguments.
@@ -613,12 +627,29 @@ func (r *Relay) run(ctx context.Context) error {
 	// for its answer (client_took.go): they are teed or refused before the
 	// tees close.
 	r.awaitClientVerdict()
+	// What the client's socket says once the relay is done with it, before
+	// the streams end and before the relay closes or resets it
+	// (client_end.go).
+	r.clientEnd(ctx)
 	if n := r.notTakenBytes.Load(); n > 0 && r.cfg.Logger != nil {
 		r.cfg.Logger.Debug("relay: the client had closed its side and did not take what the destination sent it after; "+
 			"the parser was not given those bytes (the client's stack acknowledged none of them)",
 			zap.Int64("bytes", n),
 			zap.Int64("chunks", r.notTakenChunks.Load()),
 		)
+	}
+
+	// The destination reset the connection: the client is given a reset
+	// too, its socket closed here, under any TLS layer (no close_notify), so
+	// it reads ECONNRESET as it would from the destination, not the end of a
+	// stream it did not get. Both forwarders are gone, so nothing writes to
+	// the client any more.
+	if c := r.src.Load(); r.destReset.Load() && c != nil {
+		reset := resetClientOnClose(ctx, *c, r.cfg.HalfCloseGrace)
+		if log := r.cfg.Logger; log != nil {
+			log.Debug("relay: the destination reset the connection; the client's socket is reset as well",
+				zap.Bool("reset", reset))
+		}
 	}
 
 	// Both forwarders are gone, so nothing can add to the hold stash
@@ -642,10 +673,13 @@ func (r *Relay) run(ctx context.Context) error {
 	r.teeD2C.waitDone()
 
 	// Close the FakeConns. Their streams have ended by now (each drain
-	// closed its channel as it returned), so a parser still reading takes
-	// what is left and then reads io.EOF, whether it gets there before this
-	// Close or after it: the Close changes nothing a reader sees. It closes
-	// FakeConn.Done, on which the tees, which have returned, selected.
+	// ended its stream as it returned: tee.endStream), but for one whose
+	// FakeConn the session closed before its end, which was left open. A
+	// parser still reading an ended stream takes what is left and then reads
+	// io.EOF; one reading a stream left open reads fakeconn.ErrClosed. Either
+	// way it reads the same whether it gets there before this Close or after
+	// it: the Close changes nothing a reader sees. It closes FakeConn.Done,
+	// on which the tees, which have returned, selected.
 	_ = r.clientStream.Close()
 	_ = r.destStream.Close()
 
@@ -685,7 +719,8 @@ func (r *Relay) noteCarried(t *tee, c fakeconn.Chunk, teed bool) {
 //  2. Read up to ForwardBuf bytes from src, and make their Chunk, once:
 //     ReadAt, the number (order) that orders it against the other
 //     direction's (fakeconn.Chunk.ConnSeq), and a copy of the bytes.
-//  3. Write to dst; stamp the Chunk's WrittenAt after Write returns.
+//  3. Stamp the Chunk's WrittenAt, then write to dst: the stamp is taken
+//     before the Write, so the peer cannot have acted on the bytes before it.
 //  4. Push the Chunk into the tee (non-blocking), with its SeqNo, and tell
 //     the owner it was carried (Config.OnCarried). A destination chunk
 //     written to a client after its FIN may instead be set aside until the
@@ -756,7 +791,7 @@ func (r *Relay) forward(
 		// The chunk the Read returned, made once, here, and teed as it is by
 		// whichever path below takes the bytes (written on, stashed, held):
 		// each sets only what is its own, SeqNo as it tees and WrittenAt
-		// once the bytes are written on. It is numbered here, as the Read
+		// as the bytes are written on. It is numbered here, as the Read
 		// returns: a client chunk after every byte the destination had sent
 		// by now, read or not, a destination chunk by when its bytes reached
 		// the proxy (connseq.Upstream). Its bytes are an owned copy, so the
@@ -784,6 +819,7 @@ func (r *Relay) forward(
 				// before these bytes were forwarded to it.
 				chunk.ConnSeq, chunk.AfterClientClose = r.order.FromDest()
 			}
+			t.noteNumbered(chunk.ConnSeq)
 			chunk.Bytes = make([]byte, n)
 			copy(chunk.Bytes, buf[:n])
 		}
@@ -982,8 +1018,16 @@ func (r *Relay) forward(
 			if dir == fakeconn.FromDest {
 				finBefore, from = r.clientFINBefore()
 			}
-			wn, werr := dst.Write(chunk.Bytes)
+			// Stamped before the Write, not after it returns. Once the bytes
+			// are on the peer's socket the peer can take them and act on
+			// them (an application reads an answer, then reads its clock or
+			// sends its next request) before this forwarder gets its CPU
+			// back, so a stamp taken after the Write can be later than what
+			// the peer did with the bytes; on a starved host by
+			// milliseconds. Taken here it is no later than the peer could
+			// have seen any of them, and no earlier than ReadAt.
 			chunk.WrittenAt = time.Now()
+			wn, werr := dst.Write(chunk.Bytes)
 
 			// The incomplete-mock mark this chunk's Write earns, set below
 			// once the chunk is teed.
@@ -1033,6 +1077,7 @@ func (r *Relay) forward(
 				// The write failure means the opposite peer has
 				// gone. Flag and return: the other forwarder will
 				// see EOF/error too.
+				r.noteClientWriteFailed(dir, werr)
 				if log != nil {
 					log.Debug("relay: forward write error",
 						zap.String("dir", dir.String()),
@@ -1086,7 +1131,21 @@ func (r *Relay) forward(
 					// destination can answer it (client_took.go).
 					r.clientFINRead()
 				}
+				if r.cfg.PeerEnded != nil {
+					r.cfg.PeerEnded(dir, false)
+				}
 				return io.EOF
+			}
+			if errors.Is(err, syscall.ECONNRESET) {
+				// The peer reset the connection: told as its end, as a FIN
+				// is, before onForwarderExit tears the other direction down.
+				if r.cfg.PeerEnded != nil {
+					r.cfg.PeerEnded(dir, true)
+				}
+				if dir == fakeconn.FromDest {
+					r.destReset.Store(true)
+				}
+				return err
 			}
 			// A SetReadDeadline-driven timeout fired by beginPause
 			// (and cleared by endPause once the pause lifts) is the

@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/agentargs"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -39,6 +40,22 @@ const (
 	// setup is complete. Used by the Docker Compose healthcheck and cleared
 	// on agent startup to prevent stale state from passing the healthcheck.
 	AgentReadyFile = "/tmp/agent.ready"
+
+	// InternalNetworkName, InternalSubnet and AgentInternalIP address the agent
+	// on a compose network that denies the replayed app any egress.
+	//
+	// A STATIC address, because the agent's URI is settled before the container
+	// exists (AgentClient.Setup), so there is nothing to inspect yet. Both ends
+	// read these constants: the generator pins the agent here, and the caller
+	// that shares the daemon's network namespace dials it here.
+	//
+	// The subnet is deliberately obscure. It only has to avoid colliding with
+	// the Pod's own networks, and a replay Pod is short-lived and otherwise
+	// empty, so a fixed range costs nothing and removes an inspect-then-wire
+	// ordering problem entirely.
+	InternalNetworkName = "default"
+	InternalSubnet      = "172.31.253.0/24"
+	AgentInternalIP     = "172.31.253.10"
 
 	// AgentOutcomeFile is where a containerised agent serving a mock replay
 	// leaves what it served and what it could not match (models.MockOutcome)
@@ -861,24 +878,15 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		// port in the first place.
 		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.AgentPort, opts.AgentPort))
 	}
-	if opts.ProxyPort != 0 {
-		// Host loopback only, for the same reason as the agent port above.
-		//
-		// The proxy is the interception point for the application's outgoing
-		// dependency calls: reaching it means being able to drive mock
-		// matching and to see what a recorded dependency answers. The app does
-		// not need this publish to get there — it runs in the agent's own
-		// network namespace (`network_mode: service:keploy-agent`, set in
-		// modifyAppService) and reaches the proxy over that namespace's
-		// loopback. The DNS port, used exactly the same way, is not published
-		// at all, which is the clearest evidence the publish was never what
-		// made interception work.
-		//
-		// It dates from the agent/client split, where it was introduced as a
-		// copy of the agent port's `%d:%d` line; the agent port has since been
-		// narrowed and this one had not been.
-		ports = append(ports, fmt.Sprintf("127.0.0.1:%d:%d", opts.ProxyPort, opts.ProxyPort))
-	}
+	// The proxy's port is not published, as the DNS server's is not. The
+	// proxy is the interception point for the application's outgoing
+	// dependency calls, and the app reaches it over the loopback of the
+	// agent's network namespace, which it runs in (`network_mode:
+	// service:keploy-agent`, set in modifyAppService), where the agent binds
+	// it and moves off it when another socket holds it
+	// (agent.letProxyPortsMove). A publish claimed the port on the host too:
+	// two runs started together on the configured ports collided there, and
+	// after a move it named a port the proxy did not listen on.
 
 	ports = append(ports, opts.AppPorts...)
 
@@ -913,9 +921,11 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		command = append(command, "--client-pid-ns", ns)
 	}
 
-	if idc.conf.Debug {
-		command = append(command, "--debug")
-	}
+	// The CLI's root-level settings (--debug, --disable-tele, --disable-ansi,
+	// --disable-mapping), each with its value: the keploy.yml directory is not
+	// bind-mounted into the agent's filesystem, so the agent's own config
+	// would otherwise hold the defaults, whatever the CLI resolved.
+	command = append(command, agentargs.Root(idc.conf)...)
 	if opts.MockMode && opts.AgentPort != 0 {
 		idc.mockAgentURL = fmt.Sprintf("http://localhost:%d", opts.AgentPort)
 	}
@@ -936,12 +946,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}
-	// Forward the operator's --disable-mapping (root-level config) into
-	// the agent container. The keploy.yml directory isn't bind-mounted
-	// into the agent's filesystem, so viper inside the container would
-	// otherwise default to true and disable record-side mapping
-	// production regardless of the host config.
-	command = append(command, fmt.Sprintf("--disable-mapping=%t", idc.conf.DisableMapping))
 	if idc.conf.Record.EnableSampling > 0 {
 		command = append(command, fmt.Sprintf("--enable-sampling=%d", idc.conf.Record.EnableSampling))
 	}
@@ -958,6 +962,13 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.GlobalPassthrough {
 		command = append(command, "--global-passthrough")
 	}
+	allowEgress, err := models.NormalizeAllowEgress(opts.AllowEgress)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range allowEgress {
+		command = append(command, "--allow-egress="+e)
+	}
 	if opts.DisableHandshakeHold {
 		command = append(command, "--disable-handshake-hold")
 	}
@@ -971,7 +982,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		command = append(command, "--channel-binding-shim")
 	}
 	// Upstream TLS verification. Forwarded unconditionally as =%t, matching
-	// --disable-mapping above and the native launcher, so that the precedence
+	// the root settings above and the native launcher, so that the precedence
 	// flag > yaml > default resolves IDENTICALLY here and on a native run —
 	// see proxy.resolveUpstreamTLSConfig. The CA path is resolved inside the
 	// agent container, so the operator must bind-mount the PEM (or point at a
@@ -985,9 +996,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 	if opts.MemoryLimit > 0 {
 		command = append(command, "--memory-limit", strconv.FormatUint(opts.MemoryLimit, 10))
-	}
-	if models.IsAnsiDisabled {
-		command = append(command, "--disable-ansi")
 	}
 	if len(opts.PassThroughPorts) > 0 {
 		portStrings := make([]string, len(opts.PassThroughPorts))
@@ -1100,8 +1108,28 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		)
 	}
 
-	// Add networks if specified
-	if len(opts.NetworkAliases) > 0 {
+	// Add networks if specified.
+	//
+	// The pinned-address branch comes FIRST and is exclusive: a caller that
+	// presets Agent.AgentURI shares the docker daemon's network namespace and
+	// dials the agent directly, on a compose network that denies the replayed
+	// app egress. That stack has one generated network and no aliases, and a
+	// second `networks` key here would be a duplicate mapping key -- invalid
+	// YAML that compose rejects.
+	if ip := PresetAgentIP(idc.conf); ip != "" {
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "networks"},
+			&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: InternalNetworkName},
+				{Kind: yaml.MappingNode, Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Value: "ipv4_address"},
+					{Kind: yaml.ScalarNode, Value: ip, Tag: "!!str"},
+				}},
+			}},
+		)
+		idc.logger.Info("pinned the keploy-agent to a static compose address",
+			zap.String("ip", ip), zap.String("network", InternalNetworkName))
+	} else if len(opts.NetworkAliases) > 0 {
 		networksMapNode := &yaml.Node{Kind: yaml.MappingNode}
 
 		for netName, aliases := range opts.NetworkAliases {

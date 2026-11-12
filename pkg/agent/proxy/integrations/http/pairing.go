@@ -130,7 +130,7 @@ func (h *HTTP) pairExactlyIn(ctx context.Context, input *req, n strictNoise, can
 			if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || m.IsProtocolPhase() || m.IsAsync() || hasVariables(m) {
 				continue
 			}
-			if len(strictDiff(input, live, m, n)) == 0 {
+			if len(strictDiff(ctx, input, live, m, n)) == 0 {
 				out = append(out, m)
 			}
 		}
@@ -261,14 +261,17 @@ func sqsPoll(input *req) bool {
 func reportPairing(ctx context.Context, input *req, x *models.Mock, a integrations.AnsweredCall, repeat bool) {
 	path, dest := "/", input.header.Get("Host")
 	if input.url != nil {
-		if input.url.Path != "" {
-			path = input.url.Path
+		if escaped := input.url.EscapedPath(); escaped != "" {
+			path = escaped
 		}
 		if dest == "" {
 			dest = input.url.Host
 		}
 	}
-	r := mismatch.NewReport(mismatch.ProtocolHTTP, input.method+" "+path).WithDestination(dest).Build()
+	// The path shows the segments x redacted redacted: the call sent its
+	// secret there.
+	r := mismatch.NewReport(mismatch.ProtocolHTTP, placesOf(x).summary(input.method, path)).WithDestination(dest).Build()
+	r.Operation = models.HTTPOperationLabel(liveRequest(nil, input))
 	r.Answer, r.ClosestMock, r.NotOwned = models.AnswerProvisional, x.Name, true
 	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)
 	if repeat {
@@ -284,5 +287,13 @@ func reportPairing(ctx context.Context, input *req, x *models.Mock, a integratio
 		} else {
 			t.ServedMockAtIn(x, input.arrived, in)
 		}
+		// F answered with x's recorded answer whole (pairExactlyIn): its
+		// view is x as the application sent its request and F answered it,
+		// stated after the serve, as the learn step states its own
+		// (servedExchange). Without it a later call of the set reads x as
+		// a serve no adapter stated, and refuses every changed value that
+		// may stand there.
+		view, key := servedLiveView(x, input)
+		t.ServedMockLive(x, key, view)
 	}
 }

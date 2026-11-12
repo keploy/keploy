@@ -157,6 +157,10 @@ type Keyer struct {
 	// groups (a key in one scope) whose mocks came from two or more
 	// containers: SetRecorded.
 	recorded map[recordedGroup]bool
+	// recordedGen moves with every SetRecorded: what a reader derived
+	// from RecordedAmbiguous (a parser's recording parsed once) holds
+	// while it is unchanged (RecordedGeneration).
+	recordedGen atomic.Uint64
 	// recordedNamed: that test set was recorded naming containers
 	// (RecordedTally.named).
 	recordedNamed bool

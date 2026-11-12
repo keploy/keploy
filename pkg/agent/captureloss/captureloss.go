@@ -23,6 +23,16 @@ type Counter struct {
 
 // Add counts one loss of kind; what names it (never a value the app sent).
 func (c *Counter) Add(kind models.CaptureLossKind, what string) {
+	c.AddN(kind, 1, what)
+}
+
+// AddN counts n losses of kind at once, as Add does one: a count the agent
+// reads whole, such as the kernel's drops at the proxy's listener in one
+// test's window. Zero counts nothing.
+func (c *Counter) AddN(kind models.CaptureLossKind, n uint64, what string) {
+	if n == 0 {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.byKind == nil {
@@ -33,7 +43,7 @@ func (c *Counter) Add(kind models.CaptureLossKind, what string) {
 		l = &models.CaptureLoss{Kind: kind}
 		c.byKind[kind] = l
 	}
-	l.Count++
+	l.Count += n
 	l.What = what
 }
 

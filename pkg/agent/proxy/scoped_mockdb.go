@@ -18,12 +18,19 @@ import (
 
 // Per-PID (worker-keyed) mock scoping — "Design A".
 //
-// Parallel test runners (Playwright, jest, pytest-xdist, `go test` -parallel)
-// spawn WORKER PROCESSES that each run their tests sequentially. The scope API
-// (POST /agent/scope/begin|end) lets a worker mark its current test so replay
-// serves only that test's recorded mocks. With a single global filter, two
-// workers' begin/end calls stomp each other; keying the filter by the worker's
-// PID instead lets them run concurrently without a shared "current scope".
+// A test process (a worker) marks its current test through the scope API
+// (POST /agent/scope/begin|end) so replay serves only that test's recorded
+// mocks. Keying the filter by the worker's PID keeps two workers' begin/end
+// calls from overwriting one shared filter, but it does NOT isolate tests that
+// run at the same time: it narrows only the worker's own process tree. So a
+// replay without the suite mark or an app-start mark refuses a begin with a pid
+// (service/agent pidCannotScope); with them, a process no registered worker
+// started (an app server the tests share) is served the one open test's
+// mocks, or refused while more than one test is open (scopedFor,
+// starts.Unattributed). At record such a process's calls, and every call of
+// two tests open at once in one process, are charged by time (service/mock
+// correlateScopes). Run scoped tests one at a time; a shared app server needs
+// a begin without a pid, which narrows the global pool.
 //
 // A worker self-reports its PID in the scope call (ScopeReq.Pid — e.g. Node
 // process.pid), which registers an allowlist of that test's mock names on the
@@ -94,6 +101,9 @@ type workerView struct {
 	allow    map[string]struct{}
 	universe map[string]struct{}
 	scope    string // the worker's current scope ("" for none); keys stateful cursors
+	// refused is why keploy refused the worker's open test at its begin
+	// (Proxy.RefuseWorker): every read of the view is refused with it.
+	refused string
 	// version is the proxy's scope sequence at the latest change to anything
 	// this view is made from: the scope of a worker on its chain, or the
 	// mapped universe. It only grows, and never returns to an earlier value.
@@ -138,9 +148,16 @@ func (s *scopedMockDb) keep(mocks []*models.Mock, err error) ([]*models.Mock, er
 		return mocks, err
 	}
 	if s.live {
-		return without(byStart(s.pid, mocks), s.consumed(workerView{})), nil
+		shown, err := byStart(s.pid, mocks)
+		if err != nil {
+			return nil, err
+		}
+		return without(shown, s.consumed(workerView{})), nil
 	}
 	v := s.current()
+	if v.refused != "" {
+		return nil, v.refusal()
+	}
 	gone := s.consumed(v)
 	if v.allow == nil || v.universe == nil {
 		return without(mocks, gone), nil
@@ -323,9 +340,27 @@ func (s *scopedMockDb) ClaimPairing(m *models.Mock) bool {
 	return integrations.ClaimPairing(s.MockMemDb, m)
 }
 
+// LearnElsewhereCandidates and LearnElsewhere forward the store's
+// learning-only pairing (integrations.LearnElsewhere): nil and false from a
+// store that has none.
+func (s *scopedMockDb) LearnElsewhereCandidates(kind models.Kind, keys []string) []*models.Mock {
+	return integrations.LearnElsewhereCandidates(s.MockMemDb, kind, keys)
+}
+
+func (s *scopedMockDb) LearnElsewhere(m *models.Mock, clocks map[string]models.ClockOffset) bool {
+	return integrations.LearnElsewhereOnto(s.MockMemDb, m, clocks)
+}
+
+// LearnElsewhereCounted forwards integrations.LearnElsewhereCounter.
+func (s *scopedMockDb) LearnElsewhereCounted(kind models.Kind, operation, outcome string) {
+	integrations.CountLearnElsewhere(s.MockMemDb, kind, operation, outcome)
+}
+
 var (
-	_ integrations.ExactBackground = (*scopedMockDb)(nil)
-	_ integrations.Pairing         = (*scopedMockDb)(nil)
+	_ integrations.ExactBackground       = (*scopedMockDb)(nil)
+	_ integrations.Pairing               = (*scopedMockDb)(nil)
+	_ integrations.LearnElsewhere        = (*scopedMockDb)(nil)
+	_ integrations.LearnElsewhereCounter = (*scopedMockDb)(nil)
 )
 
 // RoundSnapshot, WithinRound, ClaimPairingIn, SpendByKindIn and TakenLog
@@ -445,6 +480,54 @@ func (s *scopedMockDb) HoldToRound(call integrations.CallRound) (integrations.Mo
 	return &c, restaged
 }
 
+// DiagnoseInCallView implements integrations.CallViewDiagnoser: this view
+// over the store DiagnoseInCallView returned for it.
+func (s *scopedMockDb) DiagnoseInCallView() integrations.MockMemDb {
+	c := *s
+	c.MockMemDb = integrations.DiagnoseInCallView(s.MockMemDb)
+	return &c
+}
+
+// HideBackgroundWhen implements integrations.BackgroundHider: this view over
+// the store HideBackgroundWhen returned for it, a held store being one
+// call's, as HoldToRound's copy is. Under exact serving scopedFor wraps no
+// new connection, but scopedFor decides once per connection: one opened
+// before exact serving began keeps this view, and its calls must keep the
+// held store's decision too, or the background would answer a call one more
+// than the test recorded on that connection.
+func (s *scopedMockDb) HideBackgroundWhen(owns func() bool) integrations.MockMemDb {
+	h, ok := s.MockMemDb.(integrations.BackgroundHider)
+	if !ok {
+		return s
+	}
+	inner := h.HideBackgroundWhen(owns)
+	if inner == s.MockMemDb {
+		return s
+	}
+	c := *s
+	c.MockMemDb = inner
+	return &c
+}
+
+// HidesBackground implements integrations.BackgroundHider: the held store's.
+func (s *scopedMockDb) HidesBackground() bool {
+	return integrations.OwnRepeat(s.MockMemDb)
+}
+
+// RefusesAnswer implements integrations.BackgroundHider: the held store's.
+func (s *scopedMockDb) RefusesAnswer(mk *models.Mock) bool {
+	return integrations.RefusesAnswer(s.MockMemDb, mk)
+}
+
+var _ integrations.BackgroundHider = (*scopedMockDb)(nil)
+
+// InBackground implements integrations.BackgroundMember: the store's.
+func (s *scopedMockDb) InBackground(name string) bool {
+	return integrations.InBackground(s.MockMemDb, name)
+}
+
+var _ integrations.BackgroundMember = (*scopedMockDb)(nil)
+
 // Unheld implements integrations.UnheldTeller: the store's, so a view over
 // the fail-closed store HoldToRound made says why its call read nothing.
 func (s *scopedMockDb) Unheld() string { return integrations.UnheldWhy(s.MockMemDb) }
@@ -452,6 +535,7 @@ func (s *scopedMockDb) Unheld() string { return integrations.UnheldWhy(s.MockMem
 var (
 	_ integrations.RoundHolder  = (*scopedMockDb)(nil)
 	_ integrations.UnheldTeller = (*scopedMockDb)(nil)
+	_ integrations.TestOwner    = (*scopedMockDb)(nil)
 )
 
 // passThrough reports whether this view passes every read and consume
@@ -480,6 +564,37 @@ func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
 	return nil
 }
 
+// AnswerRepeatRead forwards the store's answer to a call one more than the
+// open test recorded (integrations.RepeatReadAnswerer), none when it has
+// none.
+func (s *scopedMockDb) AnswerRepeatRead(matched []*models.Mock) (integrations.RepeatReadAnswer, bool) {
+	return integrations.AnswerRepeatRead(s.MockMemDb, matched)
+}
+
+// CallViewMoved forwards the held store's answer (integrations.CallViewTeller)
+// with its answered test mocks (ConsumedTestMocks): false over a store that
+// tells none.
+func (s *scopedMockDb) CallViewMoved() bool { return integrations.CallViewMoved(s.MockMemDb) }
+
+// CallViewGoneWhy forwards the held store's answer
+// (integrations.CallViewGoneTeller).
+func (s *scopedMockDb) CallViewGoneWhy() string { return integrations.CallViewGoneWhy(s.MockMemDb) }
+
+var (
+	_ integrations.CallViewTeller     = (*scopedMockDb)(nil)
+	_ integrations.CallViewGoneTeller = (*scopedMockDb)(nil)
+)
+
+// SkippedReadsAnswered forwards the store's skipped tests' reads that
+// answered in the open test's window (integrations.ExactSkippedReadsReader),
+// none when it keeps none.
+func (s *scopedMockDb) SkippedReadsAnswered() []*models.Mock {
+	if sr, ok := s.MockMemDb.(integrations.ExactSkippedReadsReader); ok {
+		return sr.SkippedReadsAnswered()
+	}
+	return nil
+}
+
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
 // keeps none, so a learn step on a scoped view reads the store's account as
@@ -500,11 +615,31 @@ func (s *scopedMockDb) FindAnsweredEarlier(kind models.Kind, keys []string, matc
 	return integrations.AnsweredCall{}, false
 }
 
+// AnsweredRedacting forwards the store's answered recordings that hold a
+// pattern (integrations.AnsweredRedactingReader).
+func (s *scopedMockDb) AnsweredRedacting(kind models.Kind) ([]*models.Mock, bool) {
+	return integrations.AnsweredRedacting(s.MockMemDb, kind)
+}
+
+// HasUnservedRecording forwards the store's check of an unserved recording
+// (integrations.UnservedRecordingFinder), whatever this view's allowlist
+// shows: the set holds the recording a parser's hold waits for, and each
+// window change re-reads it through the view. Over a store without the check
+// it finds none, so the parser holds no call.
+func (s *scopedMockDb) HasUnservedRecording(kind models.Kind, match func(*models.Mock) bool) (bool, error) {
+	if f, ok := s.MockMemDb.(integrations.UnservedRecordingFinder); ok {
+		return f.HasUnservedRecording(kind, match)
+	}
+	return false, nil
+}
+
 var (
-	_ integrations.AnsweredFinder      = (*scopedMockDb)(nil)
-	_ integrations.ExactServingReader  = (*scopedMockDb)(nil)
-	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
-	_ integrations.ExactServedReader   = (*scopedMockDb)(nil)
+	_ integrations.AnsweredRedactingReader = (*scopedMockDb)(nil)
+	_ integrations.AnsweredFinder          = (*scopedMockDb)(nil)
+	_ integrations.UnservedRecordingFinder = (*scopedMockDb)(nil)
+	_ integrations.ExactServingReader      = (*scopedMockDb)(nil)
+	_ integrations.ExactConsumedReader     = (*scopedMockDb)(nil)
+	_ integrations.ExactServedReader       = (*scopedMockDb)(nil)
 )
 
 // ClaimantOf and ExactTakenCandidates forward what the store's open test's view says of the recordings it shares
@@ -604,6 +739,36 @@ func (s *scopedMockDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetPerTestMocksInWindow())
 }
 
+// RangePerTestMocksInWindow forwards the per-test walk of the wrapped store
+// through the same name filter as GetPerTestMocksInWindow. A store without
+// the walk, or a live view (which orders the read by start), is read whole.
+func (s *scopedMockDb) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error {
+	r, ok := s.MockMemDb.(integrations.PerTestRanger)
+	if ok && s.passThrough() {
+		return r.RangePerTestMocksInWindow(fn)
+	}
+	if !ok || s.live {
+		all, err := s.GetPerTestMocksInWindow()
+		if err != nil {
+			return err
+		}
+		for _, mk := range all {
+			if !fn(mk) {
+				break
+			}
+		}
+		return nil
+	}
+	v := s.current()
+	if v.refused != "" {
+		return v.refusal()
+	}
+	gone := s.consumed(v)
+	return r.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
+		return !visibleIn(v, mk) || (gone != nil && gone(mk.Name)) || fn(mk)
+	})
+}
+
 func (s *scopedMockDb) GetSessionMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetSessionMocks())
 }
@@ -638,9 +803,19 @@ func (s *scopedMockDb) RangeSessionMocksWithKey(ix *integrations.MockIndex, key 
 			return r.RangeSessionMocksWithKey(ix, key, fn)
 		}
 		v := s.current()
+		if v.refused != "" {
+			return v.refusal()
+		}
 		gone := s.consumed(v)
+		shown := func(mk *models.Mock) bool { return visibleIn(v, mk) }
+		if s.live {
+			var err error
+			if shown, err = startShown(s.pid); err != nil {
+				return err
+			}
+		}
 		return r.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
-			return !visibleIn(v, mk) || (gone != nil && gone(mk.Name)) || fn(mk)
+			return !shown(mk) || (gone != nil && gone(mk.Name)) || fn(mk)
 		})
 	}
 	all, err := s.GetSessionMocks()
@@ -706,6 +881,45 @@ func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
 	}
 	return rev + s.viewVersion()
 }
+
+// StagingGeneration and StagingGenerationByKind are the store's
+// (integrations.StagingGenerations) plus the view's version, as Revision is:
+// a worker beginning or ending a test changes what this view shows.
+func (s *scopedMockDb) StagingGeneration() uint64 {
+	var gen uint64
+	if g, ok := s.MockMemDb.(integrations.StagingGenerations); ok {
+		gen = g.StagingGeneration()
+	} else if r, ok := s.MockMemDb.(interface{ Revision() uint64 }); ok {
+		gen = r.Revision()
+	}
+	return gen + s.viewVersion()
+}
+
+func (s *scopedMockDb) StagingGenerationByKind(kind models.Kind) uint64 {
+	var gen uint64
+	if g, ok := s.MockMemDb.(integrations.StagingGenerations); ok {
+		gen = g.StagingGenerationByKind(kind)
+	} else if r, ok := s.MockMemDb.(interface {
+		RevisionByKind(models.Kind) uint64
+	}); ok {
+		gen = r.RevisionByKind(kind)
+	}
+	return gen + s.viewVersion()
+}
+
+// MockSpent is the store's while this view passes through to it (exact
+// serving). A view that narrows the reads itself drops a consumed recording
+// through a consume that moves the store's revisions, and with them its
+// staging generations (holdUsedUp, Spend), so it reports none.
+func (s *scopedMockDb) MockSpent(name string) bool {
+	if !s.passThrough() {
+		return false
+	}
+	g, ok := s.MockMemDb.(integrations.StagingGenerations)
+	return ok && g.MockSpent(name)
+}
+
+var _ integrations.StagingGenerations = (*scopedMockDb)(nil)
 
 func (s *scopedMockDb) viewVersion() uint64 {
 	if s.src == nil {
@@ -819,6 +1033,14 @@ func (s *scopedMockDb) InPool(m *models.Mock) (bool, bool) {
 	return integrations.InPool(s.MockMemDb, m)
 }
 
+// TrailOf forwards integrations.TrailedTests: the test a recording trails
+// by the replay's scope table is the store's, whatever view a worker reads.
+func (s *scopedMockDb) TrailOf(mock string) learn.Trail {
+	return integrations.TrailOf(s.MockMemDb, mock)
+}
+
+var _ integrations.TrailedTests = (*scopedMockDb)(nil)
+
 // RecordedWindowIndex forwards integrations.RecordedWindowIndex.
 func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
 	if w, ok := s.MockMemDb.(integrations.RecordedWindowIndex); ok {
@@ -865,6 +1087,13 @@ func (s *scopedMockDb) cursorKey(key string) string {
 	return s.lastScope + "\x00" + key
 }
 
+// BackgroundRecordings is the set's background recordings whatever this
+// view's allowlist (integrations.BackgroundRecordingReader): they are read,
+// never served.
+func (s *scopedMockDb) BackgroundRecordings(kind models.Kind) []models.BackgroundRecording {
+	return integrations.BackgroundRecordingsOf(s.MockMemDb, kind)
+}
+
 // RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
 // pass straight through.
 func (s *scopedMockDb) RecordedWindows() *models.WindowSchedule {
@@ -883,6 +1112,50 @@ func (s *scopedMockDb) WindowChanged() <-chan struct{} {
 	return nil
 }
 
+// RunPlace and RunPlaceChanged carry no mock data either. A wrapped store
+// without the facet reports the set's end and a channel that never fires: a
+// parser holds nothing over it, as over a store with no facet at all.
+func (s *scopedMockDb) RunPlace() models.RunPlace {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.RunPlace()
+	}
+	return models.RunPlace{SetEnd: true}
+}
+
+func (s *scopedMockDb) RunPlaceChanged() <-chan struct{} {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.RunPlaceChanged()
+	}
+	return nil
+}
+
+// IdleUntilRunPlaceChanges over a wrapped store without the facet marks
+// nothing: its place is the set's end, so no parser waits on it.
+func (s *scopedMockDb) IdleUntilRunPlaceChanges(changed <-chan struct{}, mark func() (release func())) (func(), bool) {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.IdleUntilRunPlaceChanges(changed, mark)
+	}
+	return func() {}, false
+}
+
+// OpenTestRecordings is the wrapped store's: a parser reads it for the
+// recordings a call could have been answered with in its test, so more of
+// them only makes it hold less. ClaimHold of a wrapped store without the
+// facet claims nothing: no parser holds over it.
+func (s *scopedMockDb) OpenTestRecordings() []*models.Mock {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.OpenTestRecordings()
+	}
+	return nil
+}
+
+func (s *scopedMockDb) ClaimHold(name string) bool {
+	if p, ok := s.MockMemDb.(integrations.RunPlacer); ok {
+		return p.ClaimHold(name)
+	}
+	return false
+}
+
 // The carry-over tier is a read tier like the others, so it goes through keep().
 func (s *scopedMockDb) GetCarryOverMocks() ([]*models.Mock, error) {
 	if r, ok := s.MockMemDb.(integrations.CarryOverReader); ok {
@@ -896,6 +1169,17 @@ func (s *scopedMockDb) GetCarryOverMocksByKind(kind models.Kind) ([]*models.Mock
 		return s.keep(r.GetCarryOverMocksByKind(kind))
 	}
 	return nil, nil
+}
+
+// AtSetEnd hands on the wrapped store's SetEndFiler: a scoped connection's
+// misses are filed where its store's are, so the store's set's end read is
+// its own. Over a test worker's manager, or a store without the facet, it is
+// !ok, as theirs is.
+func (s *scopedMockDb) AtSetEnd(kind models.Kind, file func(ctx context.Context)) (cancel func(), ok bool) {
+	if f, ok := s.MockMemDb.(integrations.SetEndFiler); ok {
+		return f.AtSetEnd(kind, file)
+	}
+	return func() {}, false
 }
 
 func (s *scopedMockDb) StagingEpoch() uint64 {
@@ -966,6 +1250,32 @@ func (p *Proxy) SetWorkerScope(pid uint32, names []string) {
 	p.workerScope[pid] = workerScopeEntry{allow: set, scope: fmt.Sprintf("w%d.%d", pid, at)}
 	p.workerScopeMu.Unlock()
 	consumeRetained(ended)
+}
+
+// RefuseWorker refuses every read of a connection worker pid, or a process
+// it started, opened while it is registered, until its test ends
+// (ClearWorkerScope) or it registers its next one: keploy refused the
+// worker's test at its begin, for the reason why, and a harness that runs
+// the test anyway is never served the whole pool. A view made for the
+// worker's previous test follows it, so it is refused too.
+func (p *Proxy) RefuseWorker(pid uint32, why string) {
+	if pid == 0 {
+		return
+	}
+	p.workerScopeMu.Lock()
+	if p.workerScope == nil {
+		p.workerScope = make(map[uint32]workerScopeEntry)
+	}
+	ended := p.takeRetainedLocked(p.workerScope[pid].scope)
+	at := p.stampWorkerLocked(pid)
+	p.workerScope[pid] = workerScopeEntry{refused: why, scope: fmt.Sprintf("w%d.%d", pid, at)}
+	p.workerScopeMu.Unlock()
+	consumeRetained(ended)
+}
+
+// refusal is the error every read of a view of a refused worker returns.
+func (v workerView) refusal() error {
+	return fmt.Errorf("keploy serves no recording to a call of a test it refused at its begin, until that test ends: %s", v.refused)
 }
 
 // retainedUse is a per-test recording of a stateful dependency a worker's
@@ -1112,6 +1422,9 @@ func (s *scopedMockDb) Spent(m *models.Mock) bool {
 type workerScopeEntry struct {
 	allow map[string]struct{}
 	scope string
+	// refused, set by RefuseWorker, is why keploy refused the test at its
+	// begin; allow is nil then.
+	refused string
 }
 
 // stampWorkerLocked records that pid's scope changed now, and returns the
@@ -1171,20 +1484,28 @@ func (p *Proxy) SetMappedUniverse(names []string) {
 	p.workerScopeMu.Unlock()
 }
 
-// scopedFor returns a mock view for an outgoing call from kpid. A call whose
-// process descends from a registered worker gets a view that follows that
-// worker from test to test, resolved on every read (see scopedMockDb.src);
-// any other call gets the bare manager (whole pool), as does kpid == 0
-// (non-eBPF platform / lookup miss).
+// scopedFor returns a mock view for an outgoing call from kpid. In a run with
+// the suite mark or an app-start mark (starts.Default.Active) every call, kpid == 0
+// (non-eBPF platform / lookup miss) included, gets a view resolved from the
+// app starts on every read (scopedMockDb.live): a call of no test process is
+// the one open test's, or refused while more than one is open (starts
+// Unattributed). Otherwise a call whose process descends from a registered
+// worker gets a view that follows that worker from test to test, resolved on
+// every read (see scopedMockDb.src); any other call gets the bare manager
+// (whole pool), as does kpid == 0.
 //
 // A connection opened before its process (or an ancestor) registered as a
 // worker — a client a test binary dialled during its setup — keeps the bare
 // manager: it is not wrapped on the chance that it might belong to a worker
 // later, because a wrap is a new store identity, and parsers that key their
 // indexes and stateful cursors on the store (enterprise Redis, Memcached,
-// Couchbase, HBase) would then split one app's state per connection.
+// Couchbase, HBase) would then split one app's state per connection. So a
+// pid begin cannot narrow a connection its app opened outside a test (its pool
+// at boot, or one opened between two tests), and keploy refuses a pid begin in
+// a run without the suite mark or an app-start mark (service/agent pidCannotScope).
+// Under exact serving (below) a begin with any pid is served exactly.
 func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.MockMemDb {
-	if kpid == 0 || mgr == nil {
+	if mgr == nil {
 		return mgr
 	}
 	// Under exact serving (the proven switch) the manager itself decides what
@@ -1196,6 +1517,9 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	if starts.Default.Active() {
 		return &scopedMockDb{MockMemDb: mgr, pid: kpid, live: true}
 	}
+	if kpid == 0 {
+		return mgr
+	}
 	p.workerScopeMu.RLock()
 	nobody := len(p.workerScope) == 0
 	p.workerScopeMu.RUnlock()
@@ -1203,7 +1527,7 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 		return mgr // fast path: no worker scoped — no /proc walk, exact old behavior
 	}
 	chain := ancestorChain(kpid)
-	if p.workerViewFor(chain).allow == nil {
+	if v := p.workerViewFor(chain); v.allow == nil && v.refused == "" {
 		return mgr
 	}
 	p.workerScopeMu.Lock()
@@ -1247,8 +1571,8 @@ func (p *Proxy) workerViewFor(chain []uint32) workerView {
 		// Every worker on the chain counts, not only the nearest: one that
 		// ended its test changed this view as much as one that began.
 		v.version = max(v.version, p.workerScopeAt[pid])
-		if e, ok := p.workerScope[pid]; ok && v.allow == nil {
-			v.allow, v.scope = e.allow, e.scope
+		if e, ok := p.workerScope[pid]; ok && v.allow == nil && v.refused == "" {
+			v.allow, v.scope, v.refused = e.allow, e.scope, e.refused
 		}
 	}
 	return v
@@ -1264,10 +1588,16 @@ func ppidFromStat(pid uint32) (uint32, bool) {
 	return uint32(st.PPID), true
 }
 
-func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
-	rank, universe, ok := starts.Default.View(pid, time.Now())
+// byStart is mocks as a live view for pid shows them (starts View): those it
+// may be served, in its order. An error refuses the call every recording
+// (starts.Unattributed).
+func byStart(pid uint32, mocks []*models.Mock) ([]*models.Mock, error) {
+	rank, universe, ok, err := starts.Default.View(pid, time.Now())
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
-		return mocks
+		return mocks, nil
 	}
 	type ranked struct {
 		m *models.Mock
@@ -1291,7 +1621,28 @@ func byStart(pid uint32, mocks []*models.Mock) []*models.Mock {
 	for i, k := range kept {
 		out[i] = k.m
 	}
-	return out
+	return out, nil
+}
+
+// startShown is whether a live view for pid shows a mock, as byStart keeps
+// it, for a walk that keeps its own order (a keyed walk of the session
+// tier). An error refuses the call every recording. With no view (View's ok
+// false) rank and universe are nil, and every mock is shown.
+func startShown(pid uint32) (func(*models.Mock) bool, error) {
+	rank, universe, _, err := starts.Default.View(pid, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	return func(m *models.Mock) bool {
+		if m == nil {
+			return false
+		}
+		if _, ranked := rank[m.Name]; ranked {
+			return true
+		}
+		_, known := universe[m.Name]
+		return !known
+	}, nil
 }
 
 // Every MockMemDb the proxy hands a parser must keep the stateful cursor.
@@ -1306,3 +1657,20 @@ var (
 func (s *scopedMockDb) StatesLifetimes(kind models.Kind) bool {
 	return integrations.StatesLifetimes(s.MockMemDb, kind)
 }
+
+// WhenRestaged implements integrations.Restaged: the store's, so a parser's
+// index of the reads through a view made before exact serving began goes
+// with the store's recordings too. Over a store that does not tell, the
+// parser's data goes at its next call that reads another generation, as
+// over that store itself.
+func (s *scopedMockDb) WhenRestaged(slot any, release func()) {
+	integrations.WhenRestaged(s.MockMemDb, slot, release)
+}
+
+// Keep implements integrations.ParserKeep: the store's, so what a parser keeps
+// through a view is the store's; nothing over a store that keeps nothing.
+func (s *scopedMockDb) Keep(slot any, mk func() any) (any, bool) {
+	return integrations.Keep(s.MockMemDb, slot, mk)
+}
+
+var _ integrations.ParserKeep = (*scopedMockDb)(nil)

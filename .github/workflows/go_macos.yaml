@@ -32,14 +32,12 @@ jobs:
       # CGO_ENABLED=0, and under that combination any cgo-only dependency stops
       # linking rather than silently switching implementation.
       #
-      # That is not hypothetical: compose v2's backend reached
-      # github.com/fsnotify/fsevents through pkg/watch, fsevents is cgo-only on
-      # darwin, and adding the compose library broke a downstream darwin build
-      # with `undefined: EventFlags` while this workflow stayed green. The fix
-      # kept the backend out of darwin builds
-      # (pkg/platform/docker/compose_backend_unsupported.go). compose v5 no
-      # longer links fsevents without its own `fsnotify` tag; this step is what
-      # catches the next cgo-only dependency.
+      # That is not hypothetical: the docker-compose library keploy briefly
+      # linked reached github.com/fsnotify/fsevents through pkg/watch, fsevents
+      # is cgo-only on darwin, and it broke a downstream darwin build with
+      # `undefined: EventFlags` while this workflow stayed green. That library
+      # is gone again, so this step is now purely what catches the NEXT
+      # cgo-only dependency.
       - name: Build darwin/arm64 without cgo (downstream cross-compile shape)
         run: GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build ./...
 
@@ -59,3 +57,30 @@ jobs:
       # macOS before this job.
       - name: Test connseq on darwin
         run: go test -count=1 ./pkg/agent/proxy/connseq/
+
+      # A native macOS run serves its app's callers as live calls too, so the
+      # proxy watches each caller for its hang-up there (util.WatchPeerEnd,
+      # peer_end_unix.go) and tells the app when the caller leaves mid-answer
+      # (incoming/client_watch.go). How a socket shows a FIN or a reset, and
+      # how a read deadline ends a peek, are the kernel's: these rows check
+      # them on darwin's own sockets, which a Linux runner cannot.
+      - name: Test the client hang-up watch on darwin
+        run: go test -count=1 ./pkg/agent/proxy/util/ ./pkg/agent/proxy/incoming/
+
+      # The proven flow on macOS: the claimant's start time and zombie state
+      # from the kernel's process table (claimer_darwin.go), the caller read
+      # from the process socket tables (caller_darwin.go), and the proxy's
+      # byte and connection counts from the TCP table (pairbytes_darwin.go,
+      # inflight_darwin.go, accepts_darwin.go). A Linux runner builds the
+      # other implementation of each, so only this job runs these rows.
+      #
+      # pkg/service/agent runs whole. pkg/agent/proxy and pkg/agent/routes run
+      # the rows of their macOS test files only: each holds a test that does
+      # not end on macOS (proxy's DNS server that cannot bind, routes' bind to
+      # a port still held), so a whole run of either is not a check. The
+      # script fails unless every row it reads from those files passed.
+      - name: Test the proven flow on darwin
+        run: |
+          go test -count=1 ./pkg/service/agent/
+          bash .github/scripts/macos/go-test-darwin-rows.sh pkg/agent/proxy pkg/agent/proxy/*_darwin_test.go
+          bash .github/scripts/macos/go-test-darwin-rows.sh pkg/agent/routes pkg/agent/routes/*_darwin_test.go pkg/agent/routes/caller_claim_test.go

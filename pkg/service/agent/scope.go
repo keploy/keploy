@@ -8,6 +8,7 @@ import (
 	"time"
 
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -64,11 +65,22 @@ type scopeKey struct {
 // the served pool to this test's mocks when the CLI supplied a mapping table.
 //
 // pid is the calling worker's PID (ScopeReq.Pid). When > 0 the scope is keyed to
-// that worker so PARALLEL workers each get their own served view without
-// stomping each other (Design A); pid == 0 falls back to the single global
-// scope (sequential single-worker runs, and the suite-level default).
+// that worker, so two workers never overwrite one served view. A replay
+// narrows by it only with the suite mark or an app-start mark: every connection's
+// view is then resolved from the app starts on every read, and a connection
+// of no test process is served the one open test's mocks, or refused while
+// more than one test is open (starts.Unattributed). Without the marks a
+// replay refuses a begin with a pid (pidCannotScope), which would narrow only
+// the connections opened while a test is open. pid == 0 falls back to the
+// single global scope, which narrows every connection (sequential runs, a
+// shared app, and the suite-level default).
 func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.Time) error {
-	return a.beginScopeAt(ctx, name, pid, at, nil)
+	if err := a.beginScopeAt(ctx, name, pid, at, nil); err != nil {
+		return err
+	}
+	// The run's place reaches the test's window once its pool is in.
+	a.reachRunTest(name, true)
+	return nil
 }
 
 // beginScopeAt is BeginScopeAt, calling onClock (when not nil) once the
@@ -82,6 +94,18 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 		return nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
+		if a.pidCannotScope(name, pid) {
+			// The test fails, and the replay with it, whatever its harness
+			// does with the refusal. A harness that runs it anyway is refused
+			// every call of the worker's that keploy can tell (RefuseWorker)
+			// until the test's end, which clears it (restorePool). Only with
+			// the switch off, where no begin moves the clock (testClock), so
+			// there is nothing to give back.
+			err := fmt.Errorf("%s began with the pid %d: %w.\n%s", name, pid, ErrPidBeginWithoutMarks, PidBeginRemedy)
+			a.noteScopeFailed(name, pid, at, err)
+			a.RefuseWorker(uint32(pid), err.Error())
+			return err
+		}
 		took, lost, err := a.beginTestClock(ctx, name, pid)
 		if lost.key.name != "" {
 			a.failLostScope(ctx, lost, at)
@@ -89,8 +113,9 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 		if err != nil {
 			// The test fails whatever its harness does with the refusal: it
 			// cannot run on its recording's clock.
-			a.noteScopeFailed(name, pid, at)
-			return fmt.Errorf("keploy could not move the clock to when %s began in its recording: %w", name, err)
+			err = fmt.Errorf("keploy could not move the clock to when %s began in its recording: %w", name, err)
+			a.noteScopeFailed(name, pid, at, err)
+			return err
 		}
 		if onClock != nil {
 			onClock()
@@ -108,12 +133,17 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 				a.ResetVariables()
 			}
 		}
-		if pid == 0 && provenswitch.On() {
+		if pid >= 0 && provenswitch.On() {
 			// The proven wire serves a test exactly its own mocks
 			// (exact_proven.go): one with no mapping, or none in it, owns
 			// none, so any data-plane call of its own is a miss. Its
 			// variables begin as it opens, in the same step, so no call its
-			// mocks answer binds before them (serveTestExactly).
+			// mocks answer binds before them (serveTestExactly). A worker
+			// pid (an in-process caller's: the wire refuses one) names the
+			// clock's holder only: exact serving decides what every
+			// connection reads, whenever it opened, and no per-worker view
+			// narrows it (proxy scopedFor), so its test is served exactly
+			// as one without a pid is.
 			if err := a.serveTestExactly(ctx, name); err != nil {
 				return a.refuseBegin(ctx, name, pid, at, took, err)
 			}
@@ -139,8 +169,12 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 			beginVariables()
 			return nil
 		case pid > 0:
-			// Parallel-safe: narrow ONLY this worker's served view, keyed by its
-			// PID, so concurrent workers never overwrite one shared filter.
+			// Narrow ONLY this worker's served view, keyed by its PID, so two
+			// workers never overwrite one shared filter. Only a run with the
+			// marks reaches here (pidCannotScope): there a process the worker
+			// did not start (a shared app server) is served the one open
+			// test's mocks, or refused while more than one test is open
+			// (proxy scopedFor, starts.Unattributed), never the whole pool.
 			a.logger.Debug("scope begin: worker-scoped pool", zap.String("test", name), zap.Int("worker", pid), zap.Int("mocks", len(names)))
 			a.SetWorkerScope(uint32(pid), names)
 			beginVariables()
@@ -154,9 +188,9 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 		default:
 			// Only a negative pid under the switch, which the proven wire
 			// refuses (oldWireFields), so only an in-process caller passes one:
-			// pid 0 under the switch was served exactly above, and with the
-			// switch off case !provenswitch.On() staged it. Restrict the single
-			// global pool, the pre-Design-A behavior.
+			// any other pid under the switch was served exactly above, and with
+			// the switch off case !provenswitch.On() staged it. Restrict the
+			// single global pool, the pre-Design-A behavior.
 			a.logger.Debug("scope begin: restricting served pool to test", zap.String("test", name), zap.Int("mocks", len(names)))
 			params = models.MockFilterParams{
 				MockMapping:     names,
@@ -184,6 +218,43 @@ func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.
 	return nil
 }
 
+// ErrPidBeginWithoutMarks refuses a replayed test that begins with a worker
+// pid in a run with neither the suite mark nor an app-start mark (pidCannotScope). The
+// refusal names the test and its pid, then PidBeginRemedy.
+var ErrPidBeginWithoutMarks = errors.New("keploy narrows a test to its own mocks by the pid of its test process only in a run recorded with the suite mark or an app-start mark: without one, a connection the app opened before the test began (its database pool at boot, or one opened between two tests) is served every test's mocks, so the test could pass on another test's recording")
+
+// PidBeginRemedy is the two ways out of ErrPidBeginWithoutMarks, one line
+// each: the marks, which keep the pid, or no pid and one test at a time.
+const PidBeginRemedy = "Either add the suite mark, at record and at replay: begin a scope with \"suite\": true and the pid before the first test and end it after the last; when the tests start the app, also POST /agent/app/start {\"pid\": <the app's pid>} each time they do.\n" +
+	"Or send the begin without a pid, and run the tests one at a time: keploy then narrows every connection to the open test."
+
+// pidCannotScope is whether a replayed test that begins with pid would be
+// served another test's mocks: it begins with a worker pid, in a run whose
+// replay has a mapping for it, with neither the suite mark nor an app-start mark
+// (starts.Default.Active).
+//
+// A pid begin narrows only the connections the proxy wraps for the worker's
+// process tree (proxy scopedFor), and the proxy wraps a connection only when
+// it opens while a test of the worker is open. A connection opened before
+// that keeps the bare manager, which a pid begin never narrows; wrapping
+// every connection instead would split, per connection, the state parsers
+// keep per store (enterprise Redis, Memcached, Couchbase, HBase cursors) in
+// every run, those that begin without a pid included. With the marks, every
+// connection's view is resolved from the app starts on every read, whenever
+// it opened. Under the proven switch every connection reads the manager's
+// exact view, which a begin with any pid serves exactly the test's own
+// mocks, so nothing is refused there. A test with no mapping is served the
+// whole pool with a pid or without one, so its begin is not refused.
+func (a *Agent) pidCannotScope(name string, pid int) bool {
+	if pid <= 0 || provenswitch.On() || starts.Default.Active() {
+		return false
+	}
+	a.scopeMu.Lock()
+	_, mapped := a.scopeTable[name]
+	a.scopeMu.Unlock()
+	return mapped
+}
+
 // refuseBegin fails a replayed test's begin with err, after its window
 // opened. A test that took the clock gives it back now, and is failed
 // whatever its harness does with the refusal (an end it sends closes
@@ -193,7 +264,7 @@ func (a *Agent) refuseBegin(ctx context.Context, name string, pid int, at time.T
 		return err
 	}
 	a.withdrawWindow(name, pid)
-	a.noteScopeFailed(name, pid, at)
+	a.noteScopeFailed(name, pid, at, err)
 	return errors.Join(err, a.endTestClock(ctx, name, pid))
 }
 
@@ -206,11 +277,13 @@ func (a *Agent) openWindow(name string, pid int, at time.Time) {
 		// new process's on its pid (failLostScope).
 		proc = procStartTime(pid)
 	}
+	start := boundaryTime(at)
 	a.scopeMu.Lock()
 	if a.workerOpen == nil {
 		a.workerOpen = make(map[scopeKey]time.Time)
 	}
-	a.workerOpen[k] = boundaryTime(at)
+	a.workerOpen[k] = start
+	a.recordScopeLocked(k, start)
 	if proc != "" {
 		if a.openProc == nil {
 			a.openProc = make(map[scopeKey]string)
@@ -248,12 +321,15 @@ func (a *Agent) failLostScope(ctx context.Context, lost lostScope, at time.Time)
 	a.scopeMu.Unlock()
 	for _, o := range open {
 		a.closeWindow(o.name, int(o.pid), at)
-		if err := a.restorePool(ctx, o.name, int(o.pid)); err != nil {
+		// A worker pid's scope is no test worker's (scopeInstance): the
+		// wire sends a pid only with the switch off, and an in-process
+		// caller's is served on the run's manager.
+		if err := a.restorePool(ctx, o.name, int(o.pid), 0); err != nil {
 			a.logger.Debug("could not give back the pool of a test whose worker exited", zap.String("test", o.name), zap.Error(err))
 		}
 	}
 	if len(open) == 0 {
-		a.noteScopeFailed(k.name, int(k.pid), at)
+		a.noteScopeFailed(k.name, int(k.pid), at, nil)
 	}
 }
 
@@ -265,7 +341,45 @@ func (a *Agent) withdrawWindow(name string, pid int) {
 	delete(a.workerOpen, k)
 	delete(a.openProc, k)
 	delete(a.scopeMeta, k)
+	a.abandonScopeLocked(k)
 	a.scopeMu.Unlock()
+}
+
+// recordScopeLocked opens, in a recording under the proven switch, the test
+// scope of the window k opened at start on the recording's mock manager
+// (syncMock.TestScope): keploy mock record's tests make calls and answer
+// none of keploy's, so no recorder opens a window for them, and without it
+// a recorder that asks what test a call was made in (the Generic recorder's
+// preambleHold) is told none, and states a connection made wholly inside a
+// test its preamble, served to every test. A window k already had leaves
+// its scope abandoned: its begin was replaced. Nothing with the switch off,
+// or in a replay. Caller holds scopeMu.
+func (a *Agent) recordScopeLocked(k scopeKey, start time.Time) {
+	a.abandonScopeLocked(k)
+	if !provenswitch.On() || (a.config != nil && a.config.Agent.Mode == models.MODE_TEST) {
+		return
+	}
+	mgr := a.spanMgr
+	if mgr == nil {
+		mgr = syncMock.Get()
+	}
+	s := mgr.BeginTestScope(start)
+	if s == nil {
+		return
+	}
+	if a.openScopes == nil {
+		a.openScopes = make(map[scopeKey]*syncMock.TestScope)
+	}
+	a.openScopes[k] = s
+}
+
+// abandonScopeLocked takes k's test scope, if it has one, out of the open
+// ones with no span noted: its window is no test's. Caller holds scopeMu.
+func (a *Agent) abandonScopeLocked(k scopeKey) {
+	if s, ok := a.openScopes[k]; ok {
+		s.Abandon()
+		delete(a.openScopes, k)
+	}
 }
 
 // closeWindow turns a started test into a window once it says it ended, and
@@ -275,14 +389,23 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 	k := scopeKey{pid: uint32(pid), name: name}
 	start, ok := a.workerOpen[k]
 	if ok {
+		end := boundaryTime(at)
 		delete(a.workerOpen, k)
 		delete(a.openProc, k)
+		// Its span is the window's.
+		a.openScopes[k].End(end)
+		delete(a.openScopes, k)
 		meta := a.scopeMeta[k]
 		ev := meta.evidence
 		if len(meta.unread) > 0 {
 			ev = withUnread(ev, meta.unread)
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: ev, Real: meta.real})
+		// A replay's givens end with their test (ProvenGive): only a
+		// record's window keeps them, for the test's mapping.
+		if a.replaying() {
+			meta.given = nil
+		}
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given, SkippedReads: meta.skippedReads, Instance: meta.instance})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -305,6 +428,9 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
 		a.noteEndOfGated(name, pid)
+		// The test worker whose pool the end serves again, read before
+		// the window that names it closes.
+		worker := a.scopeInstance(name)
 		closed := a.closeWindow(name, pid, at)
 		// Under the switch, only the end of a begin that opened a window gives
 		// the pool back: a test keploy refused or withdrew at its begin, or an
@@ -315,8 +441,11 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		// this test holds, or its own move still in force.
 		var err error
 		if closed || !provenswitch.On() {
-			err = a.restorePool(ctx, name, pid)
+			err = a.restorePool(ctx, name, pid, worker)
 		}
+		// The test has ended: the run's place reaches its end, the pool
+		// restored or not.
+		a.reachRunTest(name, false)
 		if cerr := a.endTestClock(ctx, name, pid); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("keploy could not move the clock back after %s: %w", name, cerr))
 		}
@@ -331,25 +460,28 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 // restorePool gives a worker, or the whole run, back the whole pool after a
 // test whose mapping narrowed it (the whole run, with the switch off, less
 // what tests consumed: stageScope); under the proven wire, the current key's
-// pool slice after any test.
-func (a *Agent) restorePool(ctx context.Context, name string, pid int) error {
+// pool slice after any test: of the test worker that ran it (worker), 0 in
+// the run of one test process.
+func (a *Agent) restorePool(ctx context.Context, name string, pid int, worker uint32) error {
 	a.scopeMu.Lock()
 	_, scoped := a.scopeTable[name]
 	a.scopeMu.Unlock()
-	// The proven wire narrowed even a test without a mapping entry.
-	if !scoped && !(pid == 0 && provenswitch.On()) {
+	// The proven wire narrowed even a test without a mapping entry, with a
+	// worker pid or without one (beginScopeAt).
+	exact := pid >= 0 && provenswitch.On()
+	if !scoped && !exact {
 		return nil
+	}
+	if exact {
+		// Between tests the proven wire serves the current key's pool
+		// slice (exact_proven.go), of the worker that ran the test.
+		a.logger.Debug("scope end: serving the pool slice of the current key", zap.String("test", name))
+		return a.servePoolExactly(ctx, worker)
 	}
 	if pid > 0 {
 		a.logger.Debug("scope end: clearing worker scope", zap.String("test", name), zap.Int("worker", pid))
 		a.ClearWorkerScope(uint32(pid))
 		return nil
-	}
-	if pid == 0 && provenswitch.On() {
-		// Between tests the proven wire serves the current key's pool
-		// slice (exact_proven.go).
-		a.logger.Debug("scope end: serving the pool slice of the current key", zap.String("test", name))
-		return a.servePoolExactly(ctx)
 	}
 	a.logger.Debug("scope end: restoring whole pool", zap.String("test", name))
 	if !provenswitch.On() {
@@ -358,8 +490,8 @@ func (a *Agent) restorePool(ctx context.Context, name string, pid int) error {
 		return a.stageScope(ctx, nil, false)
 	}
 	// Only a negative pid under the switch, from an in-process caller,
-	// reaches here: pid 0 under the switch served its pool slice exactly
-	// above.
+	// reaches here: any other pid under the switch served its pool slice
+	// exactly above.
 	return a.UpdateMockParams(ctx, models.MockFilterParams{
 		AfterTime:  models.BaseTime,
 		BeforeTime: time.Now(),
@@ -451,16 +583,31 @@ func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 }
 
 type scopeMeta struct {
-	dir      string
-	suite    bool
-	outcome  string
+	dir     string
+	suite   bool
+	outcome string
+	// random is how the test's browser drew its random numbers, as its
+	// end said, else its begin (ScopeWindow.Random).
+	random string
+	// seed is the seed keploy answered the test's begin with
+	// (ScopeWindow.Seed).
+	seed     string
 	evidence *models.ScopeEvidence
 	// real are the mock.real destinations the test used while open.
 	real []models.RealUse
+	// given are the values the test gave while open, in order (ProvenGive).
+	given []models.GivenValue
+	// skippedReads are, in a replay, the skipped tests' reads that answered
+	// the test's calls while open, in order (ScopeWindow.SkippedReads).
+	skippedReads []string
 	// unread is what the test was charged while open with mocks of its
 	// whose container the Docker daemon did not answer the read of
 	// (unreadMock): its window says so as it closes.
 	unread models.CaptureLosses
+	// instance is, under the proven wire, the keploy instance of the test
+	// worker that began the test (ProvenBegin), which its window carries
+	// (models.ScopeWindow.Instance): 0 in a run of one worker.
+	instance uint32
 }
 
 func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {
@@ -473,6 +620,76 @@ func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {
 	}
 	a.scopeMeta[scopeKey{pid: uint32(pid), name: name}] = scopeMeta{dir: dir, suite: suite}
 	a.scopeMu.Unlock()
+}
+
+// noteScopeRandom records how a beginning test's browser draws its random
+// numbers (ScopeWindow.Random) and the seed keploy answered its begin with
+// (ScopeWindow.Seed), after NoteScope noted the test's folder: NoteScope
+// starts the test's notes afresh. A begin that says nothing clears what an
+// earlier begin of the test left.
+func (a *Agent) noteScopeRandom(name string, pid int, random, seed string) {
+	if name == "" {
+		return
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	k := scopeKey{pid: uint32(pid), name: name}
+	meta, ok := a.scopeMeta[k]
+	if !ok && random == "" && seed == "" {
+		return
+	}
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	meta.random, meta.seed = random, seed
+	a.scopeMeta[k] = meta
+}
+
+// noteScopeRandomDone records how an ending test's browser drew its random
+// numbers, as its end said (ScopeWindow.Random): what its harness did
+// replaces what its begin meant to do. An end that says nothing leaves the
+// begin's, and an end of a test that is not open notes nothing.
+func (a *Agent) noteScopeRandomDone(name string, pid int, random string) {
+	if name == "" || random == "" {
+		return
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	k := scopeKey{pid: uint32(pid), name: name}
+	if _, open := a.workerOpen[k]; !open {
+		return
+	}
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	meta := a.scopeMeta[k]
+	meta.random = random
+	a.scopeMeta[k] = meta
+}
+
+// noteScopeInstance records, under the proven wire, that test name was begun
+// by the test worker with keploy instance inst, for the window its end
+// closes: record charges it only that worker's calls. inst 0: the test of a
+// run of one worker, whose window holds the calls of no worker.
+func (a *Agent) noteScopeInstance(name string, inst uint32) {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	k := scopeKey{pid: 0, name: name}
+	meta := a.scopeMeta[k]
+	meta.instance = inst
+	a.scopeMeta[k] = meta
+}
+
+// scopeInstance is the keploy instance of the test worker that began test
+// name (noteScopeInstance), while its window is open; 0 in a run of one test
+// process.
+func (a *Agent) scopeInstance(name string) uint32 {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	return a.scopeMeta[scopeKey{pid: 0, name: name}].instance
 }
 
 // NoteScopeOutcome records the verdict a test's harness reported as it ended
@@ -501,12 +718,18 @@ func (a *Agent) NoteScopeOutcome(name string, pid int, outcome string) {
 // no extent and the ScopeOutcomeGated verdict, so the replay's outcome and
 // receipt say it was gated rather than that it never appeared.
 func (a *Agent) NoteScopeGated(name string, pid int, at time.Time) {
+	a.noteScopeNotRun(name, pid, at, models.ScopeOutcomeGated)
+}
+
+// noteScopeNotRun is NoteScopeGated with the verdict that says why:
+// ScopeOutcomeGated, or ScopeOutcomeUnmet for a test whose need was not met.
+func (a *Agent) noteScopeNotRun(name string, pid int, at time.Time, outcome string) {
 	if name == "" {
 		return
 	}
 	t := boundaryTime(at)
 	a.scopeMu.Lock()
-	a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: models.ScopeOutcomeGated})
+	a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: outcome})
 	if a.gatedScopes == nil {
 		a.gatedScopes = make(map[scopeKey]struct{})
 	}
@@ -514,13 +737,20 @@ func (a *Agent) NoteScopeGated(name string, pid int, at time.Time) {
 	a.scopeMu.Unlock()
 }
 
-// noteScopeFailed records a test keploy failed at its begin, as a window with
-// no extent and the failed verdict, so the replay's outcome and receipt count
-// it failed even when its harness ignores the refusal and runs it.
-func (a *Agent) noteScopeFailed(name string, pid int, at time.Time) {
+// noteScopeFailed records a test keploy failed, as a window with no extent
+// and the failed verdict, so the replay's outcome and receipt count it failed
+// even when its harness ignores the refusal and runs it. refused is why
+// keploy refused the test at its begin (models.ScopeWindow.BeginRefused),
+// which fails the replay whatever the test's runner exits; nil for a test
+// keploy failed after it began (failLostScope).
+func (a *Agent) noteScopeFailed(name string, pid int, at time.Time, refused error) {
 	t := boundaryTime(at)
+	w := models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: models.ScopeOutcomeFailed}
+	if refused != nil {
+		w.BeginRefused = refused.Error()
+	}
 	a.scopeMu.Lock()
-	a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: models.ScopeOutcomeFailed})
+	a.scopeWindows = append(a.scopeWindows, w)
 	a.scopeMu.Unlock()
 }
 

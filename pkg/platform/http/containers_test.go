@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -63,8 +62,19 @@ func standInContainersAgent(t *testing.T, takes bool) (url string, asked *atomic
 // starts gave 2. With no daemon, a list says so, and nothing changes.
 func withNoDockerDaemon(t *testing.T) {
 	t.Helper()
-	t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(t.TempDir(), "docker.sock"))
+	t.Setenv("DOCKER_HOST", noDaemonHost)
 }
+
+// noDaemonHost is a DOCKER_HOST no daemon can serve: nothing can be made
+// under /dev/null, which is not a directory. It is not a socket in the
+// test's temporary directory: a unix socket's path holds at most 107 bytes
+// (103 on macOS), and that directory's grows with GOTMPDIR (else TMPDIR) and
+// the test's name. Past that bound the engine API's client refuses the path
+// itself ("unix socket path ... is too long"), so a test meant for an engine
+// that is not there tested a client that was never made: in docker mode,
+// startInDocker returned before its `docker run`, and a row waiting for that
+// `docker run` waited out its bound.
+const noDaemonHost = "unix:///dev/null/no-daemon.sock"
 
 // Under the proven switch a client gives an agent that takes container lists
 // the list before its session starts: synchronously, so the list is there

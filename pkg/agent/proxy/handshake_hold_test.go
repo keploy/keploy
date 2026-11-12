@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
-	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -365,8 +365,8 @@ func TestHoldStartsWithTheFirstSessionThatDials(t *testing.T) {
 }
 
 func TestDecideHandshakeRefusesALoopbackPortNothingOwnsInMockMode(t *testing.T) {
-	recorded.reset()
-	t.Cleanup(recorded.reset)
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 	addr, _ := listenCounting(t)
 	free := testnet.RefusedAddr(t, "tcp")
 

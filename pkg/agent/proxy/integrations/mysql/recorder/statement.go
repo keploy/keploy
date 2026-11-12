@@ -12,7 +12,7 @@ import (
 // test set can lose that one (keploy #4810), and a statement the connection
 // prepared before the recording began has none.
 //
-// Both recorders read a connection's packets in one goroutine with one
+// The recorder reads a connection's packets in one goroutine with one
 // decodeCtx, so decodeCtx.StmtIDToQuery is the connection's map of the
 // statements it prepared, by ID.
 
@@ -48,4 +48,22 @@ func stampStatementQuery(decodeCtx *wire.DecodeContext, cmd *mysql.PacketBundle)
 	if _, closes := cmd.Message.(*mysql.StmtClosePacket); closes {
 		delete(decodeCtx.StmtIDToQuery, stmtID)
 	}
+}
+
+// forgetPrepared forgets the statement sp named when its COM_STMT_PREPARE's
+// exchange is left out (sp nil, a reply that is no COM_STMT_PREPARE_OK,
+// forgets nothing). The wire decoder learns a statement from its
+// COM_STMT_PREPARE_OK head, before the rest of the reply is read; kept, a
+// later COM_STMT_EXECUTE of it would decode and be recorded, and it cannot
+// replay without the PREPARE's mock. Forgotten, the statement is one the
+// recording never saw prepared, as one prepared before the recording began
+// is: its EXECUTE does not decode, so its exchange is left out with the test
+// cases over it, and a command that names it is recorded without its query.
+// A later PREPARE the server answers with the same ID makes it known again.
+func forgetPrepared(decodeCtx *wire.DecodeContext, sp *mysql.StmtPrepareOkPacket) {
+	if sp == nil {
+		return
+	}
+	delete(decodeCtx.PreparedStatements, sp.StatementID)
+	delete(decodeCtx.StmtIDToQuery, sp.StatementID)
 }

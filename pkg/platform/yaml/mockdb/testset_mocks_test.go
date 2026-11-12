@@ -632,3 +632,68 @@ func TestGetTestSetMocksReadsAnEmptyOrMissingFileAsTheSinglePoolReadersDo(t *tes
 		}
 	})
 }
+
+// WalkTestSetMocks hands over, one mock at a time, what IndexTestSetMocks
+// returns whole: every mock of AllPerTest and of AllSession, with the same
+// pools (a gob PostgresV2 mock of session lifetime in both), decoded with its
+// payload, from every format.
+func TestWalkTestSetMocksVisitsWhatIndexTestSetMocksReturns(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "") // it would override the format each subtest writes
+	for _, format := range []string{"yaml", "json", "gob"} {
+		t.Run(format, func(t *testing.T) {
+			ys := writeTestSetMocks(t, t.TempDir(), format)
+			ctx := context.Background()
+			set, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+			if err != nil {
+				t.Fatalf("IndexTestSetMocks: %v", err)
+			}
+			var perTest, session []*models.Mock
+			if err := ys.WalkTestSetMocks(ctx, "set-0", func(m *models.Mock, inPerTest, inSession bool) {
+				if m.PayloadOnDisk() {
+					t.Errorf("%s was visited with its payload left in the file", m.Name)
+				}
+				if inPerTest {
+					perTest = append(perTest, m)
+				}
+				if inSession {
+					session = append(session, m)
+				}
+			}); err != nil {
+				t.Fatalf("WalkTestSetMocks: %v", err)
+			}
+			// The pools' members, not the filtered mark the window filter
+			// gives AllSession's mocks after the read.
+			members := func(pool []*models.Mock) string {
+				out := make([]*models.Mock, 0, len(pool))
+				for _, m := range pool {
+					c := *m
+					c.TestModeInfo.IsFiltered = false
+					out = append(out, &c)
+				}
+				return sortedPoolString(out)
+			}
+			if got, want := members(perTest), members(set.AllPerTest); got != want {
+				t.Errorf("the walk's per-test mocks are not AllPerTest:\n got %s\nwant %s", got, want)
+			}
+			if got, want := members(session), members(set.AllSession); got != want {
+				t.Errorf("the walk's session mocks are not AllSession:\n got %s\nwant %s", got, want)
+			}
+			if len(perTest)+len(session) == 0 {
+				t.Fatal("precondition: the corpus holds no mock")
+			}
+		})
+	}
+}
+
+// A walk of a set with no mock file visits nothing and does not fail, as the
+// set readers read none.
+func TestWalkTestSetMocksOfAMissingFileVisitsNothing(t *testing.T) {
+	ys := New(zap.NewNop(), t.TempDir(), "mocks")
+	visited := 0
+	if err := ys.WalkTestSetMocks(context.Background(), "set-0", func(*models.Mock, bool, bool) { visited++ }); err != nil {
+		t.Fatalf("WalkTestSetMocks: %v", err)
+	}
+	if visited != 0 {
+		t.Fatalf("a missing file visited %d mocks", visited)
+	}
+}

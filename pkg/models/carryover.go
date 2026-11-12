@@ -12,6 +12,28 @@ import "time"
 // bound on time, not a rule about content.
 const CarryOverLookahead = time.Second
 
+// CarryOverReachable reports whether a carry-over mock recorded at req is
+// reachable once the current window starts at start: the release window of
+// req - CarryOverLookahead has started (WindowSchedule.Released). The agent's
+// carry-over tier keeps it so until it is consumed. With no schedule,
+// everything is.
+func (s *WindowSchedule) CarryOverReachable(req, start time.Time) bool {
+	return s.Released(carryOverReleaseTime(req), start)
+}
+
+// CarryOverReachedFirstAt reports whether the window that starts at start is
+// the first at which a carry-over mock recorded at req is reachable
+// (CarryOverReachable, WindowSchedule.ReleasedFirstAt).
+func (s *WindowSchedule) CarryOverReachedFirstAt(req, start time.Time) bool {
+	return s.ReleasedFirstAt(carryOverReleaseTime(req), start)
+}
+
+// carryOverReleaseTime is the recorded moment whose release makes a carry-over
+// mock recorded at req reachable.
+func carryOverReleaseTime(req time.Time) time.Time {
+	return req.Add(-CarryOverLookahead)
+}
+
 // RegisterCarryOver declares that the per-test mocks of kind for which
 // isCarryOver returns true do not depend on one test window: the application
 // can produce them a few windows away from where they were recorded, because

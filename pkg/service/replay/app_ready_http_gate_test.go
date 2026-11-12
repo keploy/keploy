@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/testnet"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -145,6 +147,34 @@ func TestGateOnAppAddress_ServingAppIsReadyImmediately(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("a ready app waited %v; the gate must satisfy on the first probe", elapsed)
+	}
+}
+
+// For an application whose process keploy does not run, both stages share
+// --health-poll-timeout, as on main. An address that accepts only as the
+// ceiling runs out leaves no time for the HTTP stage: the gate fires the tests
+// at once, starts no HTTP probe, and so says nothing about one.
+func TestGateOnAppAddress_AnAcceptThatSpendsTheCeilingStartsNoHTTPStage(t *testing.T) {
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	core, logs := observer.New(zapcore.DebugLevel)
+
+	// A ceiling of a nanosecond is spent by the time the address accepts the
+	// gate's first dial, which it makes whatever the ceiling.
+	if !gateOnAppAddress(context.Background(), zap.New(core), gateCfg(time.Nanosecond), host, port, "test",
+		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
+		t.Fatal("not ready, want the tests fired once the address accepted")
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("the gate sent %d HTTP probes with no time left for them, want none", n)
+	}
+	if n := logs.FilterMessageSnippet("never completed an HTTP round-trip").Len(); n != 0 {
+		t.Errorf("said %d times that no HTTP round-trip completed, when none was tried", n)
 	}
 }
 
@@ -563,19 +593,25 @@ func TestWaitForAppReady_NativeAppGatesOnTheResolvedTarget(t *testing.T) {
 }
 
 // ...and it must not gate when the test set gave no resolvable HTTP target,
-// preserving the pure --delay behaviour for non-HTTP native apps.
+// preserving the pure --delay behaviour for non-HTTP native apps. The wait
+// runs under the row's own bound: a gate on some address would have no end.
 func TestWaitForAppReady_NativeAppWithoutEvidenceIsNotGated(t *testing.T) {
 	cfg := gateCfg(10 * time.Second)
 	cfg.Command = "python3 recorded_app.py"
 	cfg.Test.Delay = 0
 
-	start := time.Now()
-	if !waitForAppReady(context.Background(), zap.NewNop(), cfg, httpProbeTarget{}) {
-		t.Fatal("must proceed")
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("waited %v with no resolvable target; a non-HTTP native app must keep the "+
-			"pure --delay behaviour", elapsed)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- waitForAppReady(ctx, zap.NewNop(), cfg, httpProbeTarget{}) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("must proceed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("still waiting after 2s with no resolvable target; a non-HTTP native app must keep the " +
+			"pure --delay behaviour")
 	}
 }
 
@@ -730,14 +766,9 @@ func TestWaitForAppReady_DockerStartKeepsItsGate(t *testing.T) {
 // (status_code=0 because nothing was listening yet).
 func TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved(t *testing.T) {
 	// A port nothing listens on: TCP never accepts.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	host, port, _ := net.SplitHostPort(ln.Addr().String())
-	_ = ln.Close() // free it so connects are refused
+	host, port, _ := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
 
-	core, logs := observer.New(zapcore.WarnLevel)
+	core, logs := observer.New(zapcore.InfoLevel)
 	logger := zap.New(core)
 
 	cfg := gateCfg(700 * time.Millisecond)
@@ -745,14 +776,17 @@ func TestWaitForAppReady_UnreachableTargetReportsWhatWasObserved(t *testing.T) {
 	cfg.CommandType = "native"
 	cfg.Test.Delay = 0
 
-	if !waitForAppReady(context.Background(), logger, cfg,
+	// The app's exit cancels its run's context: only that ends the wait.
+	ctx, cancel := context.WithTimeout(pkg.EndsWithApp(context.Background()), 1500*time.Millisecond)
+	defer cancel()
+	if waitForAppReady(ctx, logger, cfg,
 		httpProbeTarget{scheme: "http", host: host, port: port, ok: true}) {
-		t.Fatal("the gate must stay best-effort and proceed, never fail the run")
+		t.Fatal("the gate fired at an address that never accepted")
 	}
 
 	var got string
 	for _, e := range logs.All() {
-		if strings.Contains(e.Message, "app address did not accept a connection") {
+		if strings.Contains(e.Message, "waiting for the application to accept a connection on "+net.JoinHostPort(host, port)) {
 			got = e.Message
 		}
 		if strings.Contains(e.Message, "app accepted TCP but never completed") {
@@ -856,7 +890,7 @@ func TestWaitForResetResendReady_HonoursTheDisableFlag(t *testing.T) {
 					Kind:    models.HTTP,
 					HTTPReq: models.HTTPReq{URL: "http://" + host + ":" + port + "/x"},
 				},
-				"test-set-0")
+				"test-set-0", new(bool))
 
 			made := conns.Load()
 			if tc.disabled && made != 0 {

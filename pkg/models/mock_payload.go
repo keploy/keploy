@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
+	"unsafe"
 )
 
 // A replay reads a test set's mocks before its first test: it sorts them into
@@ -64,6 +66,22 @@ var ErrPayloadFileReplaced = errors.New("the mock file was rewritten after its m
 // before it is sent any mock.
 var ErrPayloadMutatorChangedMock = errors.New("a mock payload hook changed what decides the mock's pool")
 
+// MockPayloadRefusal is the error of a PayloadMutator that failed on a mock:
+// the replay's hooks refused to hand the mock to the agent (Keploy Enterprise
+// refuses a sealed value its key service did not open). Err is the hook's
+// reason. The replay fails the mock's test set, unrun, with it, and goes on
+// to the next set.
+type MockPayloadRefusal struct {
+	Mock string
+	Err  error
+}
+
+func (e *MockPayloadRefusal) Error() string {
+	return fmt.Sprintf("the mock payload hook failed on mock %q: %v", e.Mock, e.Err)
+}
+
+func (e *MockPayloadRefusal) Unwrap() error { return e.Err }
+
 // payloadOnDisk is where a mock's payload was left, and what the replay asks
 // of the payload, answered before it was.
 type payloadOnDisk struct {
@@ -85,6 +103,9 @@ type payloadOnDisk struct {
 	// IsMySQLStatementLifecycle's and mysqlIsSessionReusableCommand's.
 	mysqlStatementLifecycle bool
 	mysqlSessionReusable    bool
+	// fault is a copy of the mock's Spec.Fault (FaultOf), nil for none: what
+	// a replay's summary names when the mock was served (FaultServed).
+	fault *Fault
 }
 
 // onDiskPredicates is every registry whose predicates read a mock's payload;
@@ -116,6 +137,11 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d.fingerprint = requestFingerprint(m)
 	d.summary, d.longSummary = keptDisplay(MockSummaryFromSpec(m))
 	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
+	if f := m.Spec.Fault; f != nil {
+		kept := *f
+		kept.Observed = strings.Clone(f.Observed)
+		d.fault = &kept
+	}
 	for i, r := range onDiskPredicates {
 		if r.match(m) {
 			d.matched |= 1 << i
@@ -164,6 +190,76 @@ func (d *payloadOnDisk) display(m *Mock, of func(*Mock) string, unknown string) 
 	return of(&c)
 }
 
+// IndexEntryFrom is a copy of m, a mock whose payload is on disk
+// (LeavePayloadOnDisk), whose payload src reads back from the same place in
+// its file: the entry a read of a mock file left, reused for a later read of a
+// file of the same content (mockdb's index cache). The copy is m as that read
+// left it, unpooled, and shares nothing a replay changes in place with m: its
+// metadata, async block and origin are its own. It is nil when m's payload is
+// not on disk.
+func (m *Mock) IndexEntryFrom(src PayloadSource) *Mock {
+	if !m.PayloadOnDisk() {
+		return nil
+	}
+	c := *m
+	c.pooled = false
+	c.responseHydrator = nil
+	d := *m.onDisk
+	d.src = src
+	c.onDisk = &d
+	if m.Spec.Metadata != nil {
+		c.Spec.Metadata = maps.Clone(m.Spec.Metadata)
+	}
+	if m.Spec.Async != nil {
+		a := *m.Spec.Async
+		c.Spec.Async = &a
+	}
+	c.Origin = m.Origin.clone()
+	return &c
+}
+
+// IndexEntryBytes estimates the heap m, a mock whose payload is on disk, holds
+// of its own: the Mock and what LeavePayloadOnDisk kept of it (its strings,
+// metadata, async block and origin, and the payload's place and the answers
+// read from it). It is what a kept entry costs a cache of entries, 0 when m's
+// payload is not on disk.
+func (m *Mock) IndexEntryBytes() int64 {
+	if !m.PayloadOnDisk() {
+		return 0
+	}
+	// A string's bytes are allocated in a size class, a little more than
+	// its length; a map takes its header and groups of eight slots, each
+	// slot a key's and a value's string header, filled to seven.
+	const slot = 2 * int(unsafe.Sizeof(""))
+	str := func(s string) int {
+		if s == "" {
+			return 0
+		}
+		return len(s) + 8
+	}
+	n := int(unsafe.Sizeof(*m)) + int(unsafe.Sizeof(*m.onDisk))
+	n += str(string(m.Version)) + str(m.Name) + str(string(m.Kind)) + str(m.ConnectionID) + str(m.Start) + str(m.StartRef)
+	if md := m.Spec.Metadata; md != nil {
+		n += 48 + max(1, (len(md)+6)/7)*(8+8*slot)
+		for k, v := range md {
+			n += str(k) + str(v)
+		}
+	}
+	if a := m.Spec.Async; a != nil {
+		n += int(unsafe.Sizeof(*a)) + str(a.Lane) + str(a.AnchorAfter)
+	}
+	if o := m.Origin; o != nil {
+		n += int(unsafe.Sizeof(*o)) + str(o.Clock) + str(o.Comm) + str(o.Exe)
+	}
+	d := m.onDisk
+	// d.at.Name is m.Name's string, not a copy.
+	n += str(d.summary) + str(d.target) + str(d.fingerprint)
+	if f := d.fault; f != nil {
+		n += int(unsafe.Sizeof(*f)) + str(f.Observed)
+	}
+	return int64(n)
+}
+
 // PayloadOnDisk reports whether m's payload was left on disk
 // (LeavePayloadOnDisk): m is not the mock as recorded until WithPayload reads
 // it back.
@@ -192,16 +288,16 @@ func (m *Mock) WithPayload(ctx context.Context) (*Mock, error) {
 	return c, nil
 }
 
-// MutatePayload has mutate change m's payload, and fails when it changed
-// anything else that decides m's pool or its place in it
-// (ErrPayloadMutatorChangedMock). A nil mutate changes nothing.
+// MutatePayload has mutate change m's payload, and fails when mutate fails
+// (MockPayloadRefusal) or changed anything else that decides m's pool or its
+// place in it (ErrPayloadMutatorChangedMock). A nil mutate changes nothing.
 func MutatePayload(ctx context.Context, m *Mock, mutate PayloadMutator) error {
 	if mutate == nil {
 		return nil
 	}
 	before := poolKeyOf(m)
 	if err := mutate(ctx, m); err != nil {
-		return fmt.Errorf("the mock payload hook failed on mock %q: %w", before.name, err)
+		return &MockPayloadRefusal{Mock: before.name, Err: err}
 	}
 	if after := poolKeyOf(m); after != before {
 		return fmt.Errorf("%w: mock %q, before %+v, after %+v", ErrPayloadMutatorChangedMock, before.name, before, after)

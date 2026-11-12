@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/plaintcp/plaintcptest"
 )
 
 // fakeCounter stands in for the hooks (agent.ListenerCounter): its mark notes
@@ -477,19 +478,14 @@ func TestAStopAsARoundTakesAKeptConnectionClosesIt(t *testing.T) {
 	}
 }
 
-// Not counted (the switch off): the proxy listens exactly as it always did,
-// net.Listen, MPTCP wherever the kernel (and GODEBUG) has it, makes no canary
-// connection, and says its counts are unknown.
-func TestUncountedTheProxyListensAsBefore(t *testing.T) {
+// Not counted (the switch off): the proxy listens unmarked, plain TCP as the
+// counted one (never Go's default MPTCP: it listens on every interface),
+// makes no canary connection, and says its counts are unknown.
+func TestUncountedTheProxyListensPlainTCPAndCountsNothing(t *testing.T) {
 	p, _ := startListening(t, nil)
-	ref, err := net.Listen("tcp", ":0") // what net.Listen makes here
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ref.Close()
-	if got, want := protocolOf(t, p.Listener), protocolOf(t, ref); got != want {
-		t.Fatalf("the uncounted proxy listens with protocol %d, want net.Listen's %d", got, want)
-	}
+	// A subtest, so that where the check cannot tell (it skips) the rest
+	// still runs.
+	t.Run("plain TCP", func(t *testing.T) { plaintcptest.RequirePlainTCP(t, p.Listener) })
 	if _, err := p.Accepted(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 		t.Fatalf("Accepted() uncounted: %v, want ErrProxyConnsUnsupported", err)
 	}
@@ -516,6 +512,15 @@ func TestAClosedListenerEndsTheWaitsAtOnce(t *testing.T) {
 	ready := make(chan error, 1)
 	done := make(chan error, 1)
 	go func() { done <- p.Serve(ctx, ready) }()
+	// The gate holds the shutdown in its teardown work, which every test of
+	// the process reads (utils.TeardownBusy): it is let go, and the shutdown
+	// waited for, however this test ends, so a failure here is this test's
+	// alone.
+	t.Cleanup(func() {
+		cancel()
+		close(gate.release)
+		<-done
+	})
 	if err := <-ready; err != nil {
 		t.Fatal(err)
 	}
@@ -533,8 +538,39 @@ func TestAClosedListenerEndsTheWaitsAtOnce(t *testing.T) {
 	if err := <-waited; !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("a wait across the listener's close: %v, want ErrProxyConnsUnsupported saying it closed", err)
 	}
-	close(gate.release)
-	<-done
+}
+
+// A read of the counts as the listener closes says it closed, never that it
+// was not marked: the close dropped the listener, and then failed the counts,
+// each under its own lock, and a read between the two found neither the
+// listener nor a failure, and took the listener for one never marked. A wait
+// begun as the proxy stopped then said so. Each round reads the counts until
+// they fail, beside a close; every read that fails must say closed.
+func TestACountReadAsTheListenerClosesSaysItClosed(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	for round := 0; round < 2000; round++ {
+		p := &Proxy{acceptsLn: ln}
+		reading := make(chan struct{})
+		read := make(chan error, 1)
+		go func() {
+			close(reading)
+			for {
+				if _, err := p.Accepted(); err != nil {
+					read <- err
+					return
+				}
+			}
+		}()
+		<-reading
+		p.closeAccepts()
+		if err := <-read; !errors.Is(err, errListenerClosed) {
+			t.Fatalf("round %d: a read of the counts as the listener closed: %v; want %v", round, err, errListenerClosed)
+		}
+	}
 }
 
 // The proxy's own marked listener (dual-stack, as the proxy opens it) reports
@@ -550,8 +586,8 @@ func TestTheMarkedListenersDropsAreItsOwn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	if n, err := p.ListenDrops(); err != nil || n != 0 {
-		t.Fatalf("a fresh marked listener's drops: %d, %v; want 0", n, err)
+	if n, err := p.ListenDrops(); err != nil || n.Listener != 0 {
+		t.Fatalf("a fresh marked listener's drops: %+v, %v; want 0", n, err)
 	}
 	rc, err := ln.(*net.TCPListener).SyscallConn()
 	if err != nil {
@@ -576,8 +612,83 @@ func TestTheMarkedListenersDropsAreItsOwn(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}
-	if n, err := p.ListenDrops(); err != nil || n < raw {
-		t.Fatalf("the marked listener's drops: %d, %v; want at least the kernel's %d", n, err, raw)
+	if n, err := p.ListenDrops(); err != nil || n.Listener < raw {
+		t.Fatalf("the marked listener's drops: %+v, %v; want at least the kernel's %d", n, err, raw)
+	}
+}
+
+// A namespace count keploy cannot read is said, never read as 0: ListenDrops
+// gives it as unread, with why, so every drop at the listener counts (the
+// agent's chargeDrops). A 0 there would charge every real drop min(own, 0),
+// nothing.
+func TestANamespaceCountNotReadIsUnreadNeverNone(t *testing.T) {
+	p := New(zap.NewNop(), plainDestInfo{}, config.New())
+	p.SetListenerCounter(&fakeCounter{})
+	ln, err := p.listen(context.Background(), ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	// Without CAP_NET_ADMIN the listener's namespace cannot be told
+	// (SIOCGSKNS) either: unread too, with that why. A process that holds
+	// it (root, as CI's listener-drops job runs this row) must be told, so
+	// that the netstat half below is checked where CI can fail it.
+	d, err := p.ListenDrops()
+	if err != nil || d.NetKnown != (d.NetUnread == "") {
+		t.Fatalf("the namespace's count: %+v, %v; want it read, or unread with why", d, err)
+	}
+	told := d.NetKnown || !strings.Contains(d.NetUnread, "SIOCGSKNS")
+	if !told && holdsNetAdmin(t) {
+		t.Fatalf("the namespace's count with CAP_NET_ADMIN held: %+v; want the listener's namespace told (SIOCGSKNS), so its netstat missing is checked", d)
+	}
+	was := netstatPath
+	t.Cleanup(func() { netstatPath = was })
+	netstatPath = filepath.Join(t.TempDir(), "no-netstat")
+	d, err = p.ListenDrops()
+	if err != nil {
+		t.Fatalf("the listener's own count is read whatever the namespace's: %v", err)
+	}
+	if d.NetKnown || d.Net != 0 || d.NetUnread == "" {
+		t.Fatalf("the namespace's count, unreadable: %+v; want it unread, with why", d)
+	}
+	if told && !strings.Contains(d.NetUnread, "read the network namespace's TCP counters") {
+		t.Fatalf("the namespace's count, its netstat missing: %+v; want that why", d)
+	}
+}
+
+// holdsNetAdmin says whether this process holds CAP_NET_ADMIN in its
+// effective set: with it, the kernel tells a socket's network namespace
+// (SIOCGSKNS) in the process's own.
+func holdsNetAdmin(t *testing.T) bool {
+	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	var data [2]unix.CapUserData
+	if err := unix.Capget(&hdr, &data[0]); err != nil {
+		t.Fatalf("read this process's capabilities: %v", err)
+	}
+	return data[unix.CAP_NET_ADMIN/32].Effective&(1<<(unix.CAP_NET_ADMIN%32)) != 0
+}
+
+// parseListenDrops reads TcpExtListenDrops out of /proc/net/netstat's text,
+// by its name, never by a position a kernel may move; text without it, or
+// whose values do not match the names, is no count.
+func TestParseListenDropsReadsTheNamespacesCount(t *testing.T) {
+	const netstat = "TcpExt: SyncookiesSent EmbryonicRsts ListenOverflows ListenDrops TCPBacklogDrop\n" +
+		"TcpExt: 0 5 2 3 0\n" +
+		"IpExt: InNoRoutes ListenDrops\n" +
+		"IpExt: 0 99\n"
+	if n, err := parseListenDrops([]byte(netstat)); err != nil || n != 3 {
+		t.Fatalf("parseListenDrops = %d, %v; want 3", n, err)
+	}
+	for name, text := range map[string]string{
+		"no ListenDrops":           "TcpExt: SyncookiesSent EmbryonicRsts\nTcpExt: 0 5\n",
+		"no values":                "TcpExt: SyncookiesSent ListenDrops\n",
+		"values that do not fit":   "TcpExt: SyncookiesSent ListenDrops\nTcpExt: 0\n",
+		"a value that is no count": "TcpExt: SyncookiesSent ListenDrops\nTcpExt: 0 x\n",
+		"no TcpExt":                "IpExt: InNoRoutes ListenDrops\nIpExt: 0 99\n",
+	} {
+		if n, err := parseListenDrops([]byte(text)); err == nil {
+			t.Errorf("%s: parseListenDrops = %d, want an error", name, n)
+		}
 	}
 }
 
@@ -743,15 +854,24 @@ func TestAnUnpairedConnectionIsRefusedAsACaptureLoss(t *testing.T) {
 	if len(losses) != 1 || losses[0].Kind != models.CaptureLossUnpairedConn || losses[0].Count != 1 {
 		t.Fatalf("CaptureLosses = %+v, want one unpaired connection", losses)
 	}
+	// Neither the refused connection's pairing nor the canary's, which no
+	// handler takes, is left behind.
+	pairs := 0
+	p.pairs.Range(func(any, any) bool { pairs++; return true })
+	if pairs != 0 {
+		t.Fatalf("%d pairings left in the proxy's map, want none", pairs)
+	}
 }
 
 // With the switch off, a connection the kernel tied to none of the
 // application's (a NAT between them) is routed by its source port, as it
 // always was, so the application's calls work: a proxy whose calls were
 // counted from its start drops to not counted, for good, says why once, and
-// its CountingLost says so (its agent then answers every later read unread);
-// one that was not counted (no sock_diag, here) pairs nothing. Neither takes
-// a capture loss: the call is routed.
+// its CountingLost says so (its agent then answers every later read unread),
+// while every paired connection still goes where its own pairing says
+// (TestOneNATdConnectionAmongPairedOnesLosesOnlyItsOwnPairing); one that was
+// not counted (no sock_diag, here) pairs nothing. Neither takes a capture
+// loss: the call is routed.
 func TestASettlingProxyRoutesANATdConnectionAsBeforeWithTheSwitchOff(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "")
 	for _, counted := range []bool{true, false} {
@@ -797,8 +917,8 @@ func TestASettlingProxyRoutesANATdConnectionAsBeforeWithTheSwitchOff(t *testing.
 			default:
 				t.Fatal("counted: CountingLost's channel is not closed")
 			}
-			if p.usesPairing() || p.keepsConnections() {
-				t.Fatal("counted: the proxy still pairs or keeps connections after the NAT'd one")
+			if !p.usesPairing() || p.keepsConnections() {
+				t.Fatalf("counted: after the NAT'd one usesPairing %v, keepsConnections %v; want the pairing still used for every paired connection, and nothing kept", p.usesPairing(), p.keepsConnections())
 			}
 			if n := logs.FilterMessageSnippet("NAT'd connection it cannot attribute").Len(); n != 1 {
 				t.Fatalf("counted: %d WARNs of the NAT, want 1 for two NAT'd connections", n)
@@ -833,7 +953,9 @@ func TestNATdConnectionsHandledAtOnceAllDropTheCount(t *testing.T) {
 	}
 	defer c.Close()
 	core, logs := observer.New(zap.WarnLevel)
-	p := New(zap.New(core), fakeDestInfo{}, config.New())
+	cfg := config.New()
+	cfg.Agent.SettleReads = true // whose reads wait for the count: a WARN
+	p := New(zap.New(core), fakeDestInfo{}, cfg)
 	for i := 0; i < 20000; i++ {
 		// A counted proxy again, its drop undone.
 		p.countingLost.Store(nil)

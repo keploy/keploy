@@ -79,7 +79,8 @@ func (f *filedBases) base(epoch uint64, name string) *models.Mock {
 // out, does not: variables or binds a learn step learned on it
 // (MockSpec.Learned, LearnedBinds; a recording the store hands out carries
 // none), a noise path or a noise pattern base lacks (an empty pattern list
-// ignores the whole field), or a variable base lacks. No parser in the tree
+// ignores the whole field), a variable base lacks, or a clock read base
+// lacks or holds with another offset (MockSpec.Clocks). No parser in the tree
 // reaches three of these today, and they have no row: a new pattern on a
 // noise path base holds, a whole-field noise over base's patterns (every
 // noise merge keeps the keys and patterns it holds), and learned binds with
@@ -93,8 +94,9 @@ func learnsBeyond(base, caller *models.Mock) bool {
 	}
 	var noise map[string][]string
 	var vars models.MockVariables
+	var clocks map[string]models.ClockOffset
 	if base != nil {
-		noise, vars = base.Spec.ReqBodyNoise, base.Spec.Variables
+		noise, vars, clocks = base.Spec.ReqBodyNoise, base.Spec.Variables, base.Spec.Clocks
 	}
 	for path, patterns := range caller.Spec.ReqBodyNoise {
 		had, ok := noise[path]
@@ -118,6 +120,11 @@ func learnsBeyond(base, caller *models.Mock) bool {
 			return true
 		}
 	}
+	for path, o := range caller.Spec.Clocks {
+		if had, ok := clocks[path]; !ok || had != o {
+			return true
+		}
+	}
 	return false
 }
 
@@ -136,14 +143,32 @@ func (m *MockManager) servedAs(mk *models.Mock) *models.Mock {
 }
 
 // learnedAfterEndNamed is learnedAfterEnd for a door that names only the
-// caller's copy (a spend, MarkMockAsUsed, a tree's delete door): its base is
-// the staged recording of the caller's name as exact serving hands it out
+// caller's copy (a spend, a tree's delete door): its base is the staged
+// recording of the caller's name as exact serving hands it out
 // (servedAsNamed).
 func (m *MockManager) learnedAfterEndNamed(caller *models.Mock) bool {
 	if caller == nil || !provenswitch.On() || !m.exact.learnEnded.Load() {
 		return false
 	}
 	return learnsBeyond(m.servedAsNamed(caller), caller)
+}
+
+// learnedAfterEndPrepared is learnedAfterEndNamed for a tier that may hold
+// the round lock (MarkMockAsUsed's), which must not take swapMu to read the
+// staging: it reads the outside answers the door prepared before it. ok is
+// false when they are not this staging's (a staging landed, or the learn step
+// ended, since the door looked), so nothing says what the consume learned.
+// The tier refuses that consume and the parser reads again, as a consume
+// outside every test does while a staging lands (consumeOutside).
+func (m *MockManager) learnedAfterEndPrepared(caller *models.Mock) (learned, ok bool) {
+	if !provenswitch.On() || !m.exact.learnEnded.Load() {
+		return false, true
+	}
+	st := m.outsideNow()
+	if st == nil {
+		return false, false
+	}
+	return learnsBeyond(m.servedAsIn(st, caller), caller), true
 }
 
 // learnedAfterEndAt is learnedAfterEnd for a door that found found, the
@@ -162,20 +187,42 @@ func (m *MockManager) learnedAfterEndAt(found, caller *models.Mock) bool {
 // noise path and variable caller carries reads as learned beyond it (fail
 // closed: its consumers get no verdict, never a pass through what nothing
 // keeps), said in a Warn naming the recording, once a staging per name
-// (warnUnstaged). A door that took the value out of its tree passes it
-// instead (learnedAfterEndAt): the staging's values may be read after the
-// take.
+// (warnUnstaged). nil too when a staging starts its epoch between building
+// the outside answers and reading them: there is no base to read against
+// then, said in its own Warn (warnStagingBegunUnder). A door that took the
+// value out of its tree passes it instead (learnedAfterEndAt): the staging's
+// values may be read after the take.
 func (m *MockManager) servedAsNamed(caller *models.Mock) *models.Mock {
 	m.prepareOutside()
-	if st := m.exact.outside.cur.Load(); st != nil && st.epoch == m.stagingEpoch.Load() {
-		if r := st.staged[caller.Name]; r != nil {
-			return m.servedAs(r)
-		}
-		if _, said := st.unstaged.LoadOrStore(caller.Name, true); said {
-			return nil
-		}
+	if f := m.exact.outside.onPrepared; f != nil {
+		f()
 	}
-	m.warnUnstaged(caller.Name)
+	st := m.outsideNow()
+	if st == nil {
+		m.warnStagingBegunUnder(caller.Name)
+		return nil
+	}
+	return m.servedAsIn(st, caller)
+}
+
+// outsideNow is the outside answers prepared for the current staging, nil
+// when none are. It takes no lock.
+func (m *MockManager) outsideNow() *outsideState {
+	if st := m.exact.outside.cur.Load(); st != nil && st.epoch == m.stagingEpoch.Load() {
+		return st
+	}
+	return nil
+}
+
+// servedAsIn is servedAsNamed read from st, the current staging's outside
+// answers.
+func (m *MockManager) servedAsIn(st *outsideState, caller *models.Mock) *models.Mock {
+	if r := st.staged[caller.Name]; r != nil {
+		return m.servedAs(r)
+	}
+	if _, said := st.unstaged.LoadOrStore(caller.Name, true); !said {
+		m.warnUnstaged(caller.Name)
+	}
 	return nil
 }
 
@@ -190,13 +237,28 @@ func (m *MockManager) warnUnstaged(name string) {
 		zap.String("mock", name))
 }
 
+// warnStagingBegunUnder says that a new staging began while keploy read the
+// staged base of name, a recording a parser consumed after the set's learn
+// step ended: with no base to read its copy against, everything the copy
+// carries is read as learned then (servedAsNamed). The recording may well be
+// staged; the staging moved under the read.
+func (m *MockManager) warnStagingBegunUnder(name string) {
+	if m.logger == nil {
+		return
+	}
+	m.logger.Warn("a new staging began while keploy read the staged recording a parser consumed after the test set's learn step ended, so keploy has no base to read its copy against: it reads every noise path and variable the copy carries as learned then, and the tests that consumed it have no verdict",
+		zap.String("mock", name))
+}
+
 // asStaged is mk, a copy a matcher filed over the staged recording base,
-// with base's noise and variables and none of what the learn step learned on
-// the copy: the rest of the copy (its place in the trees) is mk's.
+// with base's noise, variables and clock reads and none of what the learn
+// step learned on the copy: the rest of the copy (its place in the trees) is
+// mk's.
 func asStaged(mk, base *models.Mock) *models.Mock {
 	c := mk.ShallowCopy()
 	c.Spec.ReqBodyNoise = base.Spec.ReqBodyNoise
 	c.Spec.Variables = base.Spec.Variables
+	c.Spec.Clocks = base.Spec.Clocks
 	c.Spec.SetLearned(base.Spec.Learned(), base.Spec.LearnedBinds())
 	return c
 }

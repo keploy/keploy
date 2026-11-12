@@ -500,10 +500,10 @@ func (p endsAsTheRecordingStopsParser) RecordOutgoing(ctx context.Context, s *in
 // retired" WARN, which would say that every test case recorded from then on is
 // left out. One rule decides both, the recording's context being done, however
 // the parser ends and whatever status the supervisor gives it: a parked parser
-// returns once the relay ends its stream, or is aborted once the supervisor's
-// grace is over (canceled); one that panics is retired (panicked); and one
-// that returns an error returns within the grace, after the supervisor has
-// seen the stop, and is not retired. The WARN was decided apart, by a status
+// returns once the relay ends its stream, or is aborted once it has read its
+// streams to their end (canceled); one that panics is retired (panicked); and
+// one that returns an error returns after the supervisor has seen the stop,
+// and is not retired. The WARN was decided apart, by a status
 // of canceled: a parser that panicked as the recording stopped had its WARN
 // logged, with no span opened. A parser's return wins the supervisor's select
 // over the stop (error) only if it comes before the stop: its stop is then
@@ -516,8 +516,8 @@ func TestRecordViaSupervisor_ARecordingsStopOpensNoSpanAndLogsNoRetirement(t *te
 		// (Result.FallthroughToPassthrough unset).
 		statuses []string
 	}{
-		// Canceled, if the parser does not return within the supervisor's
-		// grace: in each case, if it is not run in time on a starved agent.
+		// Canceled, if the supervisor sees the parser's streams read to
+		// their end before its return.
 		{ends: "parked", statuses: []string{"", supervisor.StatusCanceled.String()}},
 		{ends: "panics", statuses: []string{supervisor.StatusPanicked.String(), supervisor.StatusCanceled.String()}},
 		// Error, if the supervisor reaches its select only after both the

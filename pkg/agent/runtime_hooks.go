@@ -74,6 +74,8 @@ func RegisterIncomingProxy(ip IncomingProxy) {
 type ExtraPassThroughPortsFn func() []uint
 
 // ExtraPassThroughPortsHook allows external providers to append passthrough ports.
+// It is called once, as the agent starts loading its hooks, and its ports go into
+// the kernel's pass-through list before the user's bypassRules ports.
 var ExtraPassThroughPortsHook ExtraPassThroughPortsFn
 
 func RegisterExtraPassThroughPortsHook(h ExtraPassThroughPortsFn) {
