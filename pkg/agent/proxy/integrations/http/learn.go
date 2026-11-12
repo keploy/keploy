@@ -2562,7 +2562,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	echoed := map[string]string{} // recorded value -> its echo variable
 	for _, l := range learned {
 		r := l.Recorded
-		if g, ok := givenFor(r, l.Live, given); ok {
+		if g, pair, ok := givenFor(r, l.Live, given); ok {
 			// The test case gave this value: a use of its key, no bind.
 			place, placeable := learn.VarPlace(r, jsonReq)
 			switch {
@@ -2571,9 +2571,16 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			case !own:
 				return p, r.Path + " carries " + learn.GivenNamed(g.Name) + ", and only a test's own calls carry its variables"
 			}
+			held := l
+			if pair != "" {
+				// The value of one pair of the Cookie header: the use is at
+				// that pair's step, and its answers hold the given whole.
+				place = variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: "cookie"}, Steps: []variables.Step{variables.Cookie(pair)}, Word: -1}.String()
+				held.Recorded.Value = g.Recorded
+			}
 			v := p.vars[g.Name]
 			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, place)
-			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			v.Answer = appendNew(v.Answer, answers(held, respLeavesOf(m))...)
 			if models.IsGivenVariable(g.Name) {
 				// A value the test gave says where, and how to undo it.
 				v.Why = learn.GivenWhy(g.Name, g.Place, g.Recorded, g.Value)
@@ -2838,14 +2845,57 @@ func givenSource(given []variables.Binding, name string) string {
 // givenFor is the given value the drifted leaf carries: the key's value
 // when recorded (r) and in this run (live). An equal recorded value alone is
 // not the key's (two counters both at 1 when recorded are two values).
-func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding, bool) {
+// pair is "" where the leaf is that value whole. A Cookie header holds a
+// value as one pair's, beside the jar's other pairs (session=<token>;
+// theme=dark): where the given is the value of one pair, named once, whole
+// in both runs, and the header is otherwise as recorded, pair is that
+// pair's name (givenCookie). A given inside a pair's value, or a jar whose
+// other pairs changed too, is no given's use: the call stays refused
+// (learnPlan), as a value made from a given is.
+func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding, string, bool) {
 	number := r.Type == learn.Number
 	for _, g := range given {
 		if r.Value != "" && variables.SameValue(g.Recorded, r.Value, number) && variables.SameValue(g.Value, live.Value, number) {
-			return g, true
+			return g, "", true
 		}
 	}
-	return variables.Binding{}, false
+	if r.Path != "header.cookie" {
+		return variables.Binding{}, "", false
+	}
+	for _, g := range given {
+		if name, ok := givenCookie(r.Value, live.Value, g); ok {
+			return g, name, true
+		}
+	}
+	return variables.Binding{}, "", false
+}
+
+// givenCookie is the name of the pair of rec, a Cookie header's text as
+// recorded, whose value is g's recorded value whole: live, the header's
+// text in this run, holds g's value whole as that pair's, and live with g's
+// recorded value written there is rec, so the pair holds it in rec and
+// every other byte of the header is as recorded. A pair named twice in a
+// text holds no value there (variables.Cookie). ok is false where no pair
+// is so; two cannot be, where rec and live differ.
+func givenCookie(rec, live string, g variables.Binding) (string, bool) {
+	if g.Recorded == "" {
+		return "", false
+	}
+	for _, pair := range strings.Split(rec, ";") {
+		name, _, _ := strings.Cut(pair, "=")
+		if name = strings.TrimSpace(name); name == "" {
+			continue
+		}
+		at := variables.Address{Steps: []variables.Step{variables.Cookie(name)}, Word: -1}
+		if v, _ := at.WordOf(live); v != g.Value {
+			continue
+		}
+		if back, _ := at.ReplaceWord(live, g.Recorded); back != rec {
+			continue
+		}
+		return name, true
+	}
+	return "", false
 }
 
 // respLeavesOf are the leaves of m's recorded answer.
