@@ -745,8 +745,10 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 	return []strictField{field(valueDiff("path", rec, live)).staleNoise(why)}
 }
 
-// segmentMayDiffer reports whether the path segment at i may differ from its
-// recording's: the mock learned it as noise, or as a read of the
+// segmentMayDiffer reports whether the path segment at i, a segment of both
+// paths (pathDiffs reads only paths of as many segments), may differ from
+// its recording's: the mock learned it as noise, by its words and the call's
+// segment differs only in those words (wordsAt), or as a read of the
 // application's clock and, in the reading clockDiffs checks (rec and live
 // are the two paths, urlPath.at, clockReadAt), keploy.yml's url noise
 // covers the read in both, where clockDiffs checks none, or the call's
@@ -761,19 +763,19 @@ func (k strictKnown) pathDiffs(rec, live string) []strictField {
 // Where it may not, why is the reason a replay gives for it, if any.
 func (k strictKnown) segmentMayDiffer(i int, rec, live urlPath, read pathReadings) (bool, string) {
 	place := "url.path." + strconv.Itoa(i)
-	r, inRec := rec.at(i)
-	l, inLive := live.at(i)
+	r, _ := rec.at(i)
+	l, _ := live.at(i)
 	o, clock := k.clocks[place]
 	// Noise an older keploy learned whole at a segment of more than one
 	// word (staleWhole) no longer excuses it: why, for the report.
 	stale := ""
 	if k.learnedNoiseAt(place, "") {
-		if clock || !inRec || !staleWhole(k.learned, place, "", r.masked) {
+		if clock || !staleWhole(k.learned, place, "", r.masked) {
 			return true, ""
 		}
 		stale = staleWholeWhy("path")
 	}
-	if inRec && inLive && k.wordsAt(place, r.masked, l.masked) {
+	if k.wordsAt(place, r.masked, l.masked) {
 		return true, ""
 	}
 	if !clock || read.of(i) == readOwn {
