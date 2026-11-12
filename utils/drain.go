@@ -14,7 +14,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// DrainErrGroup waits for g.Wait() to return, but gives up after `timeout`.
+// DrainErrGroup waits for g.Wait() to return, but gives up once the process
+// could run for `timeout` (utils/stall) without the group joining.
 //
 // Why this exists: keploy's record/replay teardown runs in a deferred function
 // that is also the path SIGINT/SIGTERM takes (the signal cancels the root
@@ -33,6 +34,11 @@ import (
 // timeout it logs (so the offending goroutine is discoverable) and returns
 // nil; the leaked goroutine is reaped when the process exits. In the normal
 // case the goroutines drain in well under the timeout, so this is a no-op.
+//
+// The timeout is time the process could run, not wall time: a CLI starved
+// of CPU (a loaded host, a frozen laptop) has not seen the group wedge, only
+// not run. Counted in wall time, a drain on a loaded host gave up on a group
+// whose last goroutine was runnable but had not had a CPU yet.
 func DrainErrGroup(logger *zap.Logger, name string, g *errgroup.Group, timeout time.Duration) error {
 	err, _ := DrainErrGroupStatus(logger, name, g, timeout)
 	return err
@@ -46,7 +52,7 @@ func DrainErrGroup(logger *zap.Logger, name string, g *errgroup.Group, timeout t
 //
 // The bound does not cut off a stop of a keploy agent still in progress
 // (BeginAgentStop): it ends on its own, and the rest of the group gets the
-// bound again once it has.
+// bound again once it has (drainErrGroupProgress).
 //
 // So `!timedOut` is the "every goroutine in the group has returned" signal: a
 // non-nil err still means the group finished (one goroutine returned an error),
@@ -54,32 +60,12 @@ func DrainErrGroup(logger *zap.Logger, name string, g *errgroup.Group, timeout t
 // a wedged group goroutine could also be writing — e.g. a post-record pass that
 // rewrites the mock file — must gate on `!timedOut`, not on `err == nil`.
 func DrainErrGroupStatus(logger *zap.Logger, name string, g *errgroup.Group, timeout time.Duration) (err error, timedOut bool) {
-	done := make(chan error, 1)
-	go func() { done <- g.Wait() }()
-	for {
-		select {
-		case e := <-done:
-			return e, false
-		case <-time.After(timeout):
-		}
-		// An agent stop still in progress is waited for; once it ends, the
-		// rest of the group gets the bound again.
-		idle, inProgress := agentStopsIdle()
-		if !inProgress {
-			break
-		}
-		logger.Info(stopWaitedFor(), zap.String("group", name))
-		select {
-		case e := <-done:
-			return e, false
-		case <-idle:
-		}
-	}
-	logger.Error("teardown drain timed out after cancellation; forcing shutdown so stop/SIGINT isn't swallowed — a goroutine is ignoring context cancellation",
-		zap.String("group", name),
-		zap.Duration("timeout", timeout))
-	return nil, true
+	return drainErrGroupProgress(nil, logger, name, g, timeout, noProgress, nil)
 }
+
+// noProgress is the progress of a drain bounded by time alone
+// (DrainErrGroupStatus): it never moves.
+func noProgress() uint64 { return 0 }
 
 // DrainErrGroupProgress is DrainErrGroupStatus bounded by progress instead of by
 // a fixed time: it waits for as long as progress() keeps changing, and gives up
@@ -109,15 +95,52 @@ func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *
 	done := make(chan struct{})
 	var werr error
 	go func() { werr = g.Wait(); close(done) }()
-	for !waitWhileProgressing(clk, done, bound, progress, watch) {
+	if drainUntil(clk, logger, name, done, bound, progress, watch) {
+		return nil, true
+	}
+	return werr, false
+}
+
+// drainUntil is drainErrGroupProgress's wait for done, closed once the group
+// has joined: it reports timedOut once the group has made no progress for
+// bound with no stop in progress (BeginAgentStop).
+//
+// A stop that ended since the stall began gives the rest of the group the
+// bound again at the verdict, whether the drain was waiting for the stop or
+// still measuring its stall when the stop ended: the stop's own goroutine
+// returns only after the stop has ended, and a stall run while the stop was
+// in progress was the stop's time, not the rest of the group's. Before, a
+// verdict that came just after a stop ended, on a stall begun before it, gave
+// up on a group whose last goroutine was on its way out. Read with whether a
+// stop is in progress (agentStopsNow), so a stop that ends between the
+// verdict and that read is not missed.
+//
+// A group that has joined is never given up on: when its join and the
+// verdict come together (a drain held off the CPU finds both ready), the join
+// wins.
+func drainUntil(clk stall.Clock, logger *zap.Logger, name string, done <-chan struct{}, bound time.Duration, progress func() uint64, watch func(*stall.Meter)) (timedOut bool) {
+	for {
+		joined, ended := waitWhileProgressing(clk, done, bound, progress, watch)
+		if joined {
+			return false
+		}
 		// An agent stop still in progress is waited for; once it ends, the
-		// rest of the group gets the bound again.
-		idle, inProgress := agentStopsIdle()
+		// rest of the group gets the bound again. One that ended since the
+		// stall began gives it the bound again now.
+		idle, inProgress, endedNow := agentStopsNow()
+		if endedNow != ended {
+			continue
+		}
 		if !inProgress {
+			select {
+			case <-done:
+				return false
+			default:
+			}
 			logger.Error("teardown drain made no progress; forcing shutdown so stop/SIGINT isn't swallowed — a goroutine is ignoring context cancellation",
 				zap.String("group", name),
 				zap.Duration("stalledFor", bound))
-			return nil, true
+			return true
 		}
 		logger.Info(stopWaitedFor(), zap.String("group", name))
 		select {
@@ -125,19 +148,21 @@ func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *
 		case <-idle:
 		}
 	}
-	return werr, false
 }
 
 // waitWhileProgressing waits for done for as long as progress() keeps
-// changing, and reports false once it has not changed for bound, in the time
-// this process could run on clk (nil: the process's own runnable clock)
-// (true: done closed). It looks at progress every tenth of the bound, at most
-// a second (stall.CheckEvery) of wall time, before it looks at the stall: a
-// change starts the stall again. Only the teardown drain uses it: a consumer
-// that writes what a run captured is waited for until it ends
-// (pkg/service/mock waitConsumers), never cut off by a stall. watch, if set,
-// is handed the meter before the first look at progress.
-func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Duration, progress func() uint64, watch func(*stall.Meter)) bool {
+// changing, and reports joined=false once it has not changed for bound, in
+// the time this process could run on clk (nil: the process's own runnable
+// clock) (true: done closed), with how many stops had ended as the wait began
+// (agentStopsEnded). It looks at progress every tenth of the bound, at most a
+// second (stall.CheckEvery) of wall time, before it looks at the stall: a
+// change starts the stall again.
+// Only the teardown drain uses it: a consumer that writes what a run captured
+// is waited for until it ends (pkg/service/mock waitConsumers), never cut off
+// by a stall. watch, if set, is handed the meter before the first look at
+// progress.
+func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Duration, progress func() uint64, watch func(*stall.Meter)) (joined bool, ended uint64) {
+	ended = agentStopsEnded() // before the stall starts: no stop's end slips between
 	m := stall.NewMeter(clk, bound)
 	defer m.Stop()
 	if watch != nil {
@@ -147,13 +172,13 @@ func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Dura
 	for {
 		select {
 		case <-done:
-			return true
+			return true, ended
 		case <-m.Wait():
 			if p := progress(); p != last {
 				last = p
 				m.Reset()
 			} else if m.Expired() {
-				return false
+				return false, ended
 			}
 		}
 	}
@@ -277,9 +302,12 @@ func (l *BacklogLooks) Held() bool {
 // agentStops counts this process's stops of a keploy agent still in progress
 // (BeginAgentStop); idle is closed whenever there are none.
 var agentStops = struct {
-	mu   sync.Mutex
-	n    int
-	idle chan struct{}
+	mu sync.Mutex
+	n  int
+	// ended counts the stops that have ended: each gives a drain's group the
+	// bound again (drainUntil).
+	ended uint64
+	idle  chan struct{}
 }{idle: closedChannel()}
 
 func closedChannel() chan struct{} {
@@ -308,6 +336,7 @@ func BeginAgentStop() (end func()) {
 	return func() {
 		once.Do(func() {
 			agentStops.mu.Lock()
+			agentStops.ended++
 			if agentStops.n--; agentStops.n == 0 {
 				close(agentStops.idle)
 			}
@@ -404,9 +433,23 @@ func agentOnlyStopsIdle() (idle <-chan struct{}, inProgress bool) {
 // agentStopsIdle returns a channel closed once no agent stop is in progress
 // (BeginAgentStop), and whether one is now.
 func agentStopsIdle() (idle <-chan struct{}, inProgress bool) {
+	idle, inProgress, _ = agentStopsNow()
+	return idle, inProgress
+}
+
+// agentStopsNow is agentStopsIdle with how many stops have ended so far
+// (agentStopsEnded), read together.
+func agentStopsNow() (idle <-chan struct{}, inProgress bool, ended uint64) {
 	agentStops.mu.Lock()
 	defer agentStops.mu.Unlock()
-	return agentStops.idle, agentStops.n > 0
+	return agentStops.idle, agentStops.n > 0, agentStops.ended
+}
+
+// agentStopsEnded is how many stops (BeginAgentStop) have ended so far.
+func agentStopsEnded() uint64 {
+	agentStops.mu.Lock()
+	defer agentStops.mu.Unlock()
+	return agentStops.ended
 }
 
 // AwaitAgentExit waits for an agent this process stopped to exit (gone), for

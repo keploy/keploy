@@ -30,26 +30,30 @@ func TestDrainErrGroupReturnsError(t *testing.T) {
 // TestDrainErrGroupTimesOutOnHang is the regression guard for the shutdown
 // deadlock: a goroutine that ignores cancellation (here, blocks forever) must
 // NOT be able to make DrainErrGroup block past its timeout. Without the bound,
-// the teardown that calls this would hang until an external SIGKILL.
+// the teardown that calls this would hang until an external SIGKILL. The
+// timeout is time the process could run, which on a loaded host passes far
+// slower than wall time, so no wall bound holds here: that the drain gives up
+// once the process could run for the bound, and not before, is
+// TestDrainErrGroupProgressGivesUpOnAStall's, on the drain's own meter.
 func TestDrainErrGroupTimesOutOnHang(t *testing.T) {
 	var g errgroup.Group
 	block := make(chan struct{})
+	defer close(block) // unblock the leaked goroutine so the test process stays clean
 	g.Go(func() error {
 		<-block // simulates a goroutine that never observes context cancellation
 		return nil
 	})
 
-	start := time.Now()
-	got := DrainErrGroup(zap.NewNop(), "test", &g, 50*time.Millisecond)
-	elapsed := time.Since(start)
-
-	if got != nil {
-		t.Fatalf("DrainErrGroup err = %v, want nil on timeout", got)
+	returned := make(chan error, 1)
+	go func() { returned <- DrainErrGroup(zap.NewNop(), "test", &g, 50*time.Millisecond) }()
+	select {
+	case got := <-returned:
+		if got != nil {
+			t.Fatalf("DrainErrGroup err = %v, want nil on timeout", got)
+		}
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("DrainErrGroup never returned on a hung group: the deadlock would persist")
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("DrainErrGroup did not return promptly on a hung group: took %s (the deadlock would persist)", elapsed)
-	}
-	close(block) // unblock the leaked goroutine so the test process stays clean
 }
 
 // TestDrainErrGroupStatusCleanNotTimedOut verifies the signal the record
