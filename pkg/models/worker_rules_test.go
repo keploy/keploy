@@ -2,9 +2,11 @@ package models
 
 import (
 	"encoding/base64"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
@@ -265,5 +267,126 @@ func TestWorkerMockRulesRefuseWhatWouldMisfire(t *testing.T) {
 	}
 	if tls.Matches(httpMock("GET", "https://auth.example.com:8443/jwks")) {
 		t.Fatal("a :443 rule matched another port")
+	}
+}
+
+var longSelect = "SELECT " + strings.Repeat("`users`.`column_with_a_long_name`, ", 20) + "`users`.`id` FROM `users` WHERE `users`.`id` = ?"
+
+// longSelectPrefix is the regex a rule of longSelect holds: its longest
+// quoted prefix within a rule's 512 characters, never cutting an escape.
+var longSelectPrefix = func() string {
+	q := "^"
+	for _, r := range longSelect {
+		piece := regexp.QuoteMeta(string(r))
+		if len(q)+len(piece) > maxWorkerRuleRegex {
+			break
+		}
+		q += piece
+	}
+	return q
+}()
+
+// A rule suggested from a recorded mock names that mock's call, narrowly: it
+// matches the mock, and does not match a different call of the same kind. A
+// mock whose call keploy cannot read is named by its destination; a call
+// keploy reads but cannot name in a rule is refused, never widened to its
+// destination (every call to that database).
+func TestARuleSuggestedFromAMockNamesItsCall(t *testing.T) {
+	pg := func(stmt string) *Mock {
+		return &Mock{Kind: PostgresV3, Spec: MockSpec{PostgresV3: &PostgresV3Spec{Type: PostgresV3TypeQuery, Query: &PostgresV3QuerySpec{SQLNormalized: stmt}}}}
+	}
+	mongo := &Mock{Kind: Mongo, Spec: MockSpec{Metadata: map[string]string{"destAddr": "mongo:27017"}}}
+	for _, row := range []struct {
+		name  string
+		mock  *Mock
+		other *Mock // a different call of the same kind
+		want  map[string]string
+	}{
+		{"HTTP", httpMock("get", "http://auth.example.com/.well-known/jwks.json?x=1"), httpMock("GET", "http://auth.example.com/other"),
+			map[string]string{"method": "GET", "host": "auth.example.com", "path": "/.well-known/jwks.json"}},
+		{"HTTP with glob characters in its path", httpMock("GET", "http://api/a*b/[c]"), httpMock("GET", "http://api/axxb/c"),
+			map[string]string{"method": "GET", "host": "api", "path": `/a\*b/\[c\]`}},
+		{"MySQL", mysqlMock("db:3306", "SHOW FULL FIELDS FROM `users`"), mysqlMock("db:3306", "SHOW FULL FIELDS FROM `users` LIKE 'id'"),
+			map[string]string{"query": "^SHOW FULL FIELDS FROM `users`$"}},
+		{"HTTP with an upper-case host", httpMock("GET", "http://Auth.Example.COM/jwks"), httpMock("GET", "http://other.example.com/jwks"),
+			map[string]string{"method": "GET", "host": "auth.example.com", "path": "/jwks"}},
+		{"MySQL too long for a whole rule, by its longest prefix", mysqlMock("db:3306", longSelect), mysqlMock("db:3306", "DELETE FROM orders"),
+			map[string]string{"query": longSelectPrefix}},
+		{"MySQL with bytes that are not UTF-8", mysqlMock("db:3306", "SELECT * FROM t WHERE b = _binary'\xff\xfe'"), mysqlMock("db:3306", "SELECT * FROM t WHERE b = _binary'ab'"),
+			map[string]string{"query": `^SELECT \* FROM t WHERE b = _binary'\x{FFFD}\x{FFFD}'$`}},
+		{"Redis reading several keys", redisMock(false, []string{"GET", "a"}, []string{"GET", "b"}), redisMock(false, []string{"GET", "session:123"}),
+			map[string]string{"command": "GET", "key": "^(?:a|b)$"}},
+		{"Redis with a key that is not UTF-8", redisMock(false, []string{"GET", "k\xff"}), redisMock(false, []string{"GET", "k"}),
+			map[string]string{"command": "GET", "key": `^k\x{FFFD}$`}},
+		{"Redis AUTH, without its password", redisMock(false, []string{"AUTH", "hunter2"}), redisMock(false, []string{"GET", "hunter2"}),
+			map[string]string{"command": "AUTH"}},
+		{"Redis HELLO, without its credentials", redisMock(false, []string{"HELLO", "3", "AUTH", "user", "hunter2"}), redisMock(false, []string{"GET", "3"}),
+			map[string]string{"command": "HELLO"}},
+		{"Postgres", pg("SELECT * FROM users WHERE id = $1"), pg("SELECT * FROM orders WHERE id = $1"),
+			map[string]string{"query": `^SELECT \* FROM users WHERE id = \$1$`}},
+		{"Redis", redisMock(false, []string{"GET", "jwks:v1"}), redisMock(false, []string{"GET", "jwks:v1:old"}),
+			map[string]string{"command": "GET", "key": "^jwks:v1$"}},
+		{"another kind, by its destination", mongo, &Mock{Kind: Mongo, Spec: MockSpec{Metadata: map[string]string{"destAddr": "other:27017"}}},
+			map[string]string{"destination": "mongo:27017"}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			rule, err := SuggestWorkerMockRule(row.mock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rule.Match) != len(row.want) {
+				t.Fatalf("rule %+v; want match %v", rule, row.want)
+			}
+			for k, v := range row.want {
+				if rule.Match[k] != v {
+					t.Fatalf("rule %+v; want match %v", rule, row.want)
+				}
+			}
+			if !rule.Matches(row.mock) {
+				t.Fatalf("rule %+v does not match the mock it came from", rule)
+			}
+			if rule.Matches(row.other) {
+				t.Fatalf("rule %+v also matches a different call", rule)
+			}
+		})
+	}
+	if _, err := SuggestWorkerMockRule(&Mock{Kind: Mongo, Name: "mock-9"}); err == nil {
+		t.Fatal("a mock with no readable call and no destination got a rule")
+	}
+	// A mock whose invalid bytes became U+FFFD on the way (JSON does) gives
+	// the rule, and the rule id, of the mock as recorded: a server derives it
+	// again at a merge.
+	raw, err := SuggestWorkerMockRule(mysqlMock("db:3306", "SELECT * FROM t WHERE b = _binary'\xff'"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleaned, err := SuggestWorkerMockRule(mysqlMock("db:3306", "SELECT * FROM t WHERE b = _binary'\uFFFD'"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.EffectiveID() != cleaned.EffectiveID() {
+		t.Fatalf("rules %v and %v of one mock have different ids", raw.Match, cleaned.Match)
+	}
+	// A prefix cut never splits a character or an escape, and stays within a
+	// rule's length, whatever the statement's characters.
+	for _, unit := range []string{"é", "日本", "\xff", "*"} {
+		stmt := "SELECT '" + strings.Repeat(unit, 600) + "'"
+		rule, err := SuggestWorkerMockRule(mysqlMock("db:3306", stmt))
+		if err != nil {
+			t.Fatalf("a long statement of %q: %v", unit, err)
+		}
+		if q := rule.Match["query"]; len(q) > maxWorkerRuleRegex || !utf8.ValidString(q) {
+			t.Fatalf("a long statement of %q gives a %d-character or invalid regex", unit, len(q))
+		}
+	}
+	for name, m := range map[string]*Mock{
+		// An alternation would also match a mock of SET NAMES alone.
+		"MySQL with several statements": mysqlMock("db:3306", "SET NAMES utf8mb4", "SHOW FULL FIELDS FROM users"),
+		"MySQL with no statement":       mysqlMock("db:3306"),
+		"Redis with two commands":       redisMock(false, []string{"GET", "a"}, []string{"SET", "a", "1"}),
+	} {
+		if rule, err := SuggestWorkerMockRule(m); err == nil {
+			t.Fatalf("%s: got rule %+v; want it refused, not widened", name, rule)
+		}
 	}
 }

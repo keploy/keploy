@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
@@ -550,4 +551,178 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// SuggestWorkerMockRule is the narrowest rule that names the call m records,
+// for a user who points at a recorded mock and says "serve this to every
+// test": an HTTP call by its method, host and path (no query); a MySQL or
+// Postgres (PostgresV3) call by its statements, each whole; a Redis call by
+// its command and key. A mock none of that can be read from is named by its
+// destination, the broadest rule (DestinationOnly in api-server), which the
+// caller says is broad. The rule is read by the same extractors Matches
+// reads, and is returned only when it validates and matches m.
+func SuggestWorkerMockRule(m *Mock) (WorkerMockRule, error) {
+	if m == nil {
+		return WorkerMockRule{}, fmt.Errorf("no mock")
+	}
+	rule := WorkerMockRule{Kind: string(m.Kind)}
+	// A kind keploy reads the call of is named by that call, or not at all:
+	// widening a statement it cannot name to the mock's destination would
+	// mark every call to that database or cache, served to every test.
+	var err error
+	switch m.Kind {
+	case HTTP, HTTP2:
+		method, host, p, ok := httpCallOf(m)
+		if !ok || method == "" || !strings.HasPrefix(p, "/") {
+			return WorkerMockRule{}, fmt.Errorf("mock %s records no HTTP request keploy can name", m.Name)
+		}
+		rule.Match = map[string]string{"method": strings.ToUpper(method), "path": globLiteral(p)}
+		// Lower case: the host matches case-insensitively, and one call
+		// must give one rule (and one rule id) however it was recorded.
+		if host = strings.ToLower(strings.TrimSpace(host)); host != "" {
+			rule.Match["host"] = globLiteral(host)
+		}
+	case MySQL:
+		rule.Match, err = statementRule(m.Name, mysqlStatements(m))
+	case PostgresV3:
+		rule.Match, err = statementRule(m.Name, postgresV3Statements(m))
+	case REDIS:
+		rule.Match, err = redisRule(m.Name, redisCommands(m))
+	default:
+		// A kind whose call keploy does not read: its destination is all
+		// a rule can name.
+		dest := strings.TrimSpace(m.Spec.Metadata["destAddr"])
+		if dest == "" {
+			return WorkerMockRule{}, fmt.Errorf("mock %s records no call keploy can name, and no destination", m.Name)
+		}
+		rule.Match = map[string]string{"destination": globLiteral(dest)}
+	}
+	if err != nil {
+		return WorkerMockRule{}, err
+	}
+	if problems := rule.Validate(); len(problems) > 0 {
+		return WorkerMockRule{}, fmt.Errorf("the rule derived from mock %s is refused: %s", m.Name, strings.Join(problems, "; "))
+	}
+	if !rule.Matches(m) {
+		return WorkerMockRule{}, fmt.Errorf("the rule derived from mock %s does not match it", m.Name)
+	}
+	return rule, nil
+}
+
+// statementRule matches the one statement the mock records: anchored, or,
+// when the whole statement would make a regex longer than a rule may hold,
+// its longest prefix that fits (a 30-column SELECT is told apart by its
+// columns). A mock of several different statements is refused: the matcher
+// requires every statement of a mock to match, so the only rule it would
+// take is an alternation, which also matches a mock of any one of them
+// alone (a lone SET NAMES: every connection's setup).
+func statementRule(name string, statements []string) (map[string]string, error) {
+	distinct := map[string]bool{}
+	for _, s := range statements {
+		if s = strings.TrimSpace(s); s != "" {
+			distinct[s] = true
+		}
+	}
+	switch len(distinct) {
+	case 0:
+		return nil, fmt.Errorf("mock %s records no statement keploy can name", name)
+	case 1:
+	default:
+		return nil, fmt.Errorf("mock %s records %d different statements, and a rule naming them all would also match a mock of any one alone; mark it with a rule of your own (a query regex) instead", name, len(distinct))
+	}
+	return map[string]string{"query": anchoredLiteral(sortedKeys(distinct)[0])}, nil
+}
+
+// redisRule names the commands given by their command and the key or keys
+// they read (an alternation of the distinct keys), or the command alone for
+// AUTH and HELLO, whose arguments are credentials. Refused when they are not
+// all one command, or when the keys do not fit in a rule: a command alone
+// would match every call of it.
+func redisRule(name string, commands [][]string) (map[string]string, error) {
+	if len(commands) == 0 || len(commands[0]) == 0 {
+		return nil, fmt.Errorf("mock %s records no Redis command keploy can name", name)
+	}
+	cmd := strings.ToUpper(commands[0][0])
+	keys := map[string]bool{}
+	for _, c := range commands {
+		if len(c) == 0 || !strings.EqualFold(c[0], cmd) {
+			return nil, fmt.Errorf("mock %s records more than one Redis command; mark it with a rule of your own instead", name)
+		}
+		if len(c) > 1 {
+			keys[c[1]] = true
+		}
+	}
+	out := map[string]string{"command": cmd}
+	if cmd == "AUTH" || cmd == "HELLO" || len(keys) == 0 {
+		return out, nil
+	}
+	sorted := sortedKeys(keys)
+	if len(sorted) == 1 {
+		out["key"] = anchoredLiteral(sorted[0])
+		return out, nil
+	}
+	quoted := make([]string, 0, len(sorted))
+	for _, k := range sorted {
+		quoted = append(quoted, quoteLiteral(k))
+	}
+	q := "^(?:" + strings.Join(quoted, "|") + ")$"
+	if len(q) > maxWorkerRuleRegex {
+		return nil, fmt.Errorf("mock %s reads %d keys, more than a rule can name; mark it with a rule of your own instead", name, len(sorted))
+	}
+	out["key"] = q
+	return out, nil
+}
+
+// anchoredLiteral is a regex matching s alone, or, when that would be longer
+// than a rule may hold, every string starting with s's longest prefix that
+// fits.
+func anchoredLiteral(s string) string {
+	if q := "^" + quoteLiteral(s) + "$"; len(q) <= maxWorkerRuleRegex {
+		return q
+	}
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(s); {
+		_, size := utf8.DecodeRuneInString(s[i:])
+		piece := quoteLiteral(s[i : i+size])
+		if b.Len()+len(piece) > maxWorkerRuleRegex {
+			break
+		}
+		b.WriteString(piece)
+		i += size
+	}
+	return b.String()
+}
+
+// quoteLiteral is regexp.QuoteMeta for any bytes. U+FFFD is written
+// \x{FFFD} whether s holds the character or a byte that is not UTF-8 (a
+// _binary literal, a binary key), which is how the regexp engine reads such a
+// byte: the regex compiles and matches s, and a mock whose invalid bytes were
+// turned into U+FFFD on the way (JSON does) gives the same rule, and the same
+// rule id, as the mock as recorded.
+func quoteLiteral(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError {
+			b.WriteString(`\x{FFFD}`)
+		} else {
+			b.WriteString(regexp.QuoteMeta(s[i : i+size]))
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// globLiteral is a path.Match glob that matches s alone.
+func globLiteral(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '*', '?', '[', ']', '\\':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
