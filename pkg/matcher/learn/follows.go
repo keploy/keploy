@@ -134,7 +134,8 @@ import (
 // the two values do not both hold it; otherwise it is refused, saying why
 // (refused).
 //
-// A call read without the rule (ClassifyGiven: HTTP, Mongo) reads under it
+// A call read without the rule (ClassifyGiven, ClassifyArrived and
+// ClassifyIn: HTTP's learn step, every caller alike) reads under it
 // a short part of the value alone (short, reads): a word or part shorter
 // than minChancePart bytes that is neither value whole. A run of a few
 // digits or letters stands in many payloads by chance (the "10" of
