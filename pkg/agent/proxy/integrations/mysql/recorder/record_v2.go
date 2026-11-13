@@ -1504,7 +1504,18 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// held is a PREPARE whose response left an assumed framing open, held
 	// until the next response settles it (heldPrepare).
 	var held *heldPrepare
+	// taken is the exchange taken up after a response left out, held until
+	// the capture's order confirms its answer (takenUp).
+	var taken *takenUp
 	defer func() {
+		if taken != nil && taken.read {
+			// Its answer was read; the recording ended before anything
+			// confirmed it.
+			if taken.emit != nil {
+				leaveOut(sess, taken.reqTs, taken.resTs, notRecorded("the recording ended before the next answer confirmed the answer taken up after a response left out"))
+			}
+			taken.flush()
+		}
 		if held != nil {
 			held.leaveOut(sess, decodeCtx, notRecorded("the recording stopped before a packet settled the %s response's framing", held.what))
 		}
@@ -1583,7 +1594,24 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		if err == nil || streamEnded(err) {
 			return err
 		}
-		if !errors.Is(err, ErrFramingLost) || pipelined {
+		realign := errors.Is(err, ErrFramingLost) && !pipelined
+		if t := taken; t != nil {
+			taken = nil
+			if sess.DestStream.Consumed() != t.consumed {
+				// The answer to the command taken up after a response left
+				// out does not frame as its answer: what the re-align took
+				// for its start is not proven to be (takenUp). No second
+				// re-align.
+				realign = false
+				err = found("V2: mysql answer taken up after a response left out does not frame", framingLost("the answer to the command taken up after a response left out is not confirmed (%v)", err))
+			}
+			// Otherwise not a byte of it was read: the fault is the
+			// command's (one whose answer the recorder cannot frame), which
+			// says nothing of where its answer starts. It is left out alone
+			// as any such, and the command after it is taken up in its
+			// place.
+		}
+		if !realign {
 			reportFault(logger, sess, err, false)
 			return leaveOutInFlight(sess, reqTs, err)
 		}
@@ -1607,8 +1635,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// sent before that command was captured is the rest of the response left
 	// out (fakeconn.FakeConn.SkipThrough). A stream that cannot be cut there
 	// stops the recording, as lost framing does.
-	realignAnswer := func(reqTs time.Time) error {
+	realignAnswer := func(reqTs time.Time, cmdFirst uint32) error {
 		n, _, err := sess.DestStream.SkipThrough(reqTs)
+		if err == nil {
+			err = answerStartsAfter(sess, cmdFirst, sess.ClientStream.LastReadConnSeq())
+		}
 		if err != nil {
 			if streamEnded(err) {
 				return err
@@ -1635,8 +1666,16 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		if !serverRealign {
 			lastAnswerSeq = sess.DestStream.LastReadConnSeq()
 		}
+		if taken != nil && !taken.read {
+			// The exchange taken up was handled (recorded and held, or left
+			// out) without a fault: its answer ended at the last byte read.
+			taken.read, taken.answerEnd = true, lastAnswerSeq
+		}
 		var cmdBuf []byte
 		var err error
+		// first is the chunk the command starts in (none for the command the
+		// handshake read).
+		var first fakeconn.Chunk
 		// The sequence id the response starts at: 1, or more after a command
 		// that continued over several packets.
 		var respFirst byte
@@ -1651,7 +1690,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			joined = continues(cmdBuf)
 		} else if clientRealign {
 			clientRealign = false
-			cmdBuf, respFirst, joined, err = nextCommandAfterFault(ctx, logger, sess)
+			cmdBuf, respFirst, joined, first, err = nextCommandAfterFault(ctx, logger, sess)
 			if err != nil {
 				if errors.Is(err, ErrFramingLost) {
 					warnFramingLost(logger, sess, "V2: mysql client stream cannot be taken up after a response left out; the connection is no longer recorded", err)
@@ -1665,15 +1704,34 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			}
 		} else {
 			var cs commandSeq
-			// first is the chunk the command starts in.
-			var first fakeconn.Chunk
 			// While a PREPARE is held, the server's bytes after its
-			// definitions are still its own (heldPrepare).
-			if first, err = sess.NextRequest(models.MySQL, held != nil); err == nil {
+			// definitions are still its own (heldPrepare), and while an
+			// exchange taken up is held, what the server sent next is what
+			// confirms it or not (takenUp.confirm): the floor stays below
+			// both.
+			if first, err = sess.NextRequest(models.MySQL, held != nil || taken != nil); err == nil {
 				cmdBuf, err = readPacketChecked(logger, sess.ClientStream, cs.take)
 			}
 			respFirst, joined = cs.next, cs.joined
 			if err != nil {
+				if taken != nil && streamEnded(err) {
+					// The client's stream ended with the exchange taken up
+					// held: no command after it, so nothing confirms it
+					// (takenUp.confirm). It is left out, and a PREPARE held
+					// for its framing besides (heldPrepare.end does not
+					// confirm it).
+					t := taken
+					taken = nil
+					why := notRecorded("the answer taken up after a response left out is not confirmed: the client's stream ended with no command after it whose answer would confirm it")
+					if t.emit != nil {
+						leaveOut(sess, t.reqTs, t.resTs, why)
+					}
+					if h := held; h != nil {
+						held = nil
+						h.leaveOut(sess, decodeCtx, why)
+					}
+					t.flush()
+				}
 				if held != nil && ctx.Err() == nil && (errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed)) {
 					// The client's stream ended with a PREPARE held: what the
 					// server sent after it is all on its stream.
@@ -1708,10 +1766,36 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		// prefetch read in the handshake, or the read just above), so at least
 		// one chunk has been consumed and LastReadTime is set.
 		reqTs := sess.ClientStream.LastReadTime()
+		if taken != nil && len(cmdBuf) > 4 && answered(cmdBuf[4]) {
+			// The next answer the server sends: the exchange taken up is
+			// confirmed here, or the recording stops (takenUp).
+			t := taken
+			taken = nil
+			if why := t.confirm(sess, first.ConnSeq, pipelined); why != "" {
+				err := found("V2: mysql answer taken up after a response left out is not confirmed", framingLost("the answer to the command taken up after a response left out is not confirmed: %s", why))
+				// The exchange the recording stops in: the one taken up when
+				// it is not left out already, which spans this command too.
+				stopTs := reqTs
+				if h := held; h != nil {
+					held = nil
+					forgetPrepared(decodeCtx, h.sp)
+					h.flush()
+					stopTs = t.reqTs
+				}
+				if t.emit != nil {
+					stopTs = t.reqTs
+				}
+				t.flush()
+				reportFault(logger, sess, err, false)
+				return leaveOutInFlight(sess, stopTs, err)
+			}
+			t.release()
+		}
 		if serverRealign && len(cmdBuf) > 4 && answered(cmdBuf[4]) {
-			if err := realignAnswer(reqTs); err != nil {
+			if err := realignAnswer(reqTs, first.ConnSeq); err != nil {
 				return err
 			}
+			taken = &takenUp{reqTs: reqTs, consumed: sess.DestStream.Consumed()}
 		}
 
 		cmdPkt, err := wire.DecodePayload(ctx, logger, cmdBuf, clientKey, decodeCtx)
@@ -1769,6 +1853,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			if held != nil {
 				// Recorded behind the PREPARE, in the order sent.
 				held.queue(sess, emit)
+				continue
+			}
+			if taken != nil {
+				// Recorded behind the exchange taken up, in the order sent.
+				taken.queue(sess, emit)
 				continue
 			}
 			emit()
@@ -1897,6 +1986,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// before the client's next command: the floor stays below it
 			// while the PREPARE is held (Session.NextRequest's answerUnread).
 			held = &heldPrepare{what: seq.what, sp: sp, eofSeq: seq.next, reqTs: reqTs, resTs: resTs, record: record}
+			clearPending(sess)
+			continue
+		}
+		if taken != nil {
+			// The exchange taken up after a response left out: held until the
+			// next answer confirms it (takenUp).
+			taken.emit, taken.resTs = func() { record(resTs) }, resTs
 			clearPending(sess)
 			continue
 		}

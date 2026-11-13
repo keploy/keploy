@@ -89,8 +89,8 @@ func TestRecordV2_PostTLS_AnAnswerInFlightIsReportedWhenTheFirstResponseCannotBe
 		// COM_FIELD_LIST's, and the answer in flight.
 		mocks, leftOut int
 	}{
-		{"an answer in flight, then a command whose response it cannot frame", true, true, 1, 2},
-		{"no answer in flight, then a command whose response it cannot frame", false, true, 1, 1},
+		{"an answer in flight, then a command whose response it cannot frame", true, true, 2, 2},
+		{"no answer in flight, then a command whose response it cannot frame", false, true, 2, 1},
 		{"an answer in flight, then a query", true, false, 2, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -124,12 +124,18 @@ func TestRecordV2_PostTLS_AnAnswerInFlightIsReportedWhenTheFirstResponseCannotBe
 				j.exchange(cannedCOMQuery(t, 0, "SELECT n FROM t"), resultSet(true, [][]byte{col}, [][]byte{textRowPayload("a")}))
 			}
 			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
+			if c.unframable {
+				// SELECT 1 is taken up after the response left out, and the
+				// query after it confirms it (takenUp): the end of the
+				// connection would not.
+				j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{cannedOK(t, 1, j.caps)})
+			}
 			mocks, err := j.run(t)
 			if err != nil {
 				t.Fatalf("RecordV2 = %v", err)
 			}
 			if len(mocks) != c.mocks || describe(mocks[len(mocks)-1]) != "a OK" {
-				t.Fatalf("%d mocks, want %d, the last SELECT 1 with its OK", len(mocks), c.mocks)
+				t.Fatalf("%d mocks, want %d, the last a query with its OK", len(mocks), c.mocks)
 			}
 			if !c.unframable && describe(mocks[0]) != "a result of 1 rows" {
 				t.Fatalf("SELECT n recorded %s, want its own row", describe(mocks[0]))

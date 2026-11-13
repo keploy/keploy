@@ -3,6 +3,7 @@ package recorder
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A pooled connection carries the traffic of every request that borrows it.
@@ -535,12 +537,15 @@ func TestRecordV2_PostTLS_APrepareHeldWhenTheNextResponseCannotBeFramed(t *testi
 	// COM_FIELD_LIST: a reply it cannot frame.
 	j.exchange(wrapPacket(append([]byte{0x04}, "t\x00"...), 0), frame([][]byte{def("id"), eofPayload}))
 	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
+	// The query after SELECT 1 confirms it, taken up after the COM_FIELD_LIST
+	// left out (takenUp): the end of the connection would not.
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{cannedOK(t, 1, j.caps)})
 	mocks, err := j.run(t)
 	if err != nil {
 		t.Fatalf("RecordV2 = %v", err)
 	}
-	if len(mocks) != 1 || describe(mocks[0]) != "a OK" {
-		t.Fatalf("%d mocks, want SELECT 1's OK alone", len(mocks))
+	if len(mocks) != 2 || describe(mocks[0]) != "a OK" || describe(mocks[1]) != "a OK" {
+		t.Fatalf("%d mocks, want the OKs of SELECT 1 and SELECT 2 alone", len(mocks))
 	}
 	if leftOut.count() != 2 {
 		t.Fatalf("%d exchanges left out, want the PREPARE and the COM_FIELD_LIST", leftOut.count())
@@ -603,5 +608,151 @@ func TestRecordV2_AnAnswerStampedAlikeWithItsCommandStopsTheConnection(t *testin
 	}
 	if got := rec.leftOut.count(); got != 2 {
 		t.Fatalf("%d exchanges left out, want the one it could not frame and the one the recording stopped in", got)
+	}
+}
+
+// intoTheTail lays out the 18 exchanges of kitTraffic(7, 8) with the client's
+// 4th command (exchange 3) pipelined into the tail of the 3rd answer: sent
+// after packet sentAfter of that answer reached the capture, before the rest
+// of it, each packet a chunk of its own, then tail (the bytes the server sent
+// after the command and before its answer), then the 4th answer, captured
+// before the 5th command, as a client that waits for each answer from then on
+// sends it. An empty packet stands where the 3rd answer's column count should
+// be: a response the recorder cannot frame.
+func intoTheTail(t *testing.T, sentAfter int, tail [][]byte) (client, server []fakeconn.Chunk) {
+	t.Helper()
+	laid, xs := upToTheTail(t, sentAfter, tail)
+	laid = append(laid, exchange{reply: [][]byte{bytes.Join(xs[3].reply, nil)}})
+	laid = append(laid, xs[4:]...)
+	return onTheWire(laid, 1<<20)
+}
+
+// upToTheTail is intoTheTail's layout up to the tail, and the 18 exchanges it
+// lays out.
+func upToTheTail(t *testing.T, sentAfter int, tail [][]byte) (laid, xs []exchange) {
+	t.Helper()
+	xs = kitTraffic(t, []int{7, 8}, false) // 18 exchanges, the 3rd a SELECT
+	reply := append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[2].reply...)
+	if sentAfter < 4 || sentAfter >= len(reply)-1 {
+		t.Fatalf("fixture: the command is sent after packet %d of %d", sentAfter, len(reply))
+	}
+	laid = append([]exchange{}, xs[:2]...)
+	for j, p := range reply[:sentAfter+1] {
+		x := exchange{reply: [][]byte{p}}
+		if j == 0 {
+			x.command = xs[2].command
+		}
+		laid = append(laid, x)
+	}
+	for j, p := range tail {
+		x := exchange{reply: [][]byte{p}}
+		if j == 0 {
+			x.command = xs[3].command
+		}
+		laid = append(laid, x)
+	}
+	return laid, xs
+}
+
+// requireUnconfirmedStop asserts the recording stopped at the answer taken up
+// after a response left out, which the capture's order did not confirm: no
+// wrong mock, the error naming it, the stop stamped once, and the exchanges
+// before the response left out recorded.
+func requireUnconfirmedStop(t *testing.T, rec recording, want string) {
+	t.Helper()
+	requireFramingLost(t, rec)
+	if !strings.Contains(rec.err.Error(), "the answer to the command taken up after a response left out is not confirmed") || !strings.Contains(rec.err.Error(), want) {
+		t.Fatalf("RecordV2 = %v, want the stop to name the answer taken up that is not confirmed, %s", rec.err, want)
+	}
+	if got := queryMocks(rec.mocks); got != 2 {
+		t.Fatalf("%d query mocks, want the 2 before the response left out", got)
+	}
+}
+
+// A client that pipelines its next command into the tail of an answer the
+// recorder left out (it cannot be framed), though it had not pipelined before, has the rest of that answer captured after its
+// command: the re-align takes the server's first chunk captured after the
+// command for the start of its answer. A tail packet there whose sequence id is
+// not 1 is no answer's first: the exchange taken up is not confirmed, and the
+// recording stops at it, with no wrong mock (takenUp). Going on, it was left
+// out alone in turn, and the next re-align was the same guess.
+func TestRecordV2_ACommandPipelinedIntoTheTailOfAnAnswerLeftOutStops(t *testing.T) {
+	t.Parallel()
+	xs := kitTraffic(t, []int{7, 8}, false)
+	reply := append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[2].reply...)
+	// Sent after the column definitions and 5 rows: the tail is the other rows
+	// and the terminator, numbered on from there.
+	at := 1 + 6 + 1 + 5
+	tail := reply[at+1:]
+	if tail[0][3] == 1 {
+		t.Fatal("fixture: the tail's first packet has sequence id 1")
+	}
+	client, server := intoTheTail(t, at, tail)
+	rec := recordChunks(t, client, server, true, time.Minute)
+	requireUnconfirmedStop(t, rec, "where 1 comes next")
+}
+
+// The same, where the tail's first packet after the command has sequence id 1
+// (the sequence wraps every 256 packets) and frames whole as an answer to the
+// command (an OK), and the command's own answer follows, captured before the
+// client's next command, as a client that waits for the answer it reads sends
+// it. Recorded at once, the command had the tail's packet for its answer: a
+// wrong mock. Held, the server's next bytes after it, captured before the
+// client's next command, do not confirm it: the recording stops there, with no
+// wrong mock.
+func TestRecordV2_ATailThatFramesAsTheAnswerTakenUpIsNotConfirmed(t *testing.T) {
+	t.Parallel()
+	ok := frame([][]byte{{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}})
+	client, server := intoTheTail(t, 1+6+1+5, ok)
+	rec := recordChunks(t, client, server, true, time.Minute)
+	requireUnconfirmedStop(t, rec, "the server's next bytes after it were captured before the client's next command")
+}
+
+// Nor does the end of the server's stream confirm the answer taken up: a
+// capture that loses bytes of a stream (a capture hole) ends it there, with
+// the io.EOF the connection's end reads, and what it lost may be the rest of
+// the answer the re-align cut into. Here the tail's packet at sequence id 1
+// frames as an OK, and then the server's stream ends: the client goes on with
+// its next queries (the capture lost the server's answers to them), or ends
+// too. Confirmed by that end, the command was recorded with the tail's packet:
+// a wrong mock. It is left out, with no wrong mock: the recording stops at the
+// client's next query, naming the end, or ends with the client's stream.
+func TestRecordV2_TheEndOfTheServersStreamDoesNotConfirmTheAnswerTakenUp(t *testing.T) {
+	t.Parallel()
+	ok := frame([][]byte{{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}})
+	for _, clientGoesOn := range []bool{true, false} {
+		t.Run(fmt.Sprintf("clientGoesOn=%v", clientGoesOn), func(t *testing.T) {
+			t.Parallel()
+			laid, xs := upToTheTail(t, 1+6+1+5, ok)
+			if clientGoesOn {
+				for _, x := range xs[4:6] {
+					laid = append(laid, exchange{command: x.command})
+				}
+			}
+			client, server := onTheWire(laid, 1<<20)
+			rec := recordChunks(t, client, server, true, time.Minute)
+			if clientGoesOn {
+				requireUnconfirmedStop(t, rec, "the server's stream ended before its next bytes after it")
+				return
+			}
+			if w := wrongMocks(t, rec.mocks); len(w) > 0 {
+				t.Fatalf("%d wrong mock(s) recorded; the first: %s", len(w), w[0])
+			}
+			if !rec.returned || rec.err != nil {
+				t.Fatalf("RecordV2 = %v (returned %v), want nil at the end of the connection", rec.err, rec.returned)
+			}
+			if got := queryMocks(rec.mocks); got != 2 {
+				t.Fatalf("%d query mocks, want the 2 before the response left out", got)
+			}
+			if got := rec.leftOut.count(); got != 2 {
+				t.Fatalf("%d exchanges left out, want the one it could not frame and the one taken up after it", got)
+			}
+			if n := rec.logs.FilterFieldKey("reason").Filter(func(e observer.LoggedEntry) bool {
+				r, _ := e.ContextMap()["reason"].(string)
+				return strings.Contains(r, "the client's stream ended with no command after it whose answer would confirm it")
+			}).Len(); n != 1 {
+				t.Fatalf("%d exchanges left out for the end of the client's stream, want the one taken up", n)
+			}
+		})
 	}
 }

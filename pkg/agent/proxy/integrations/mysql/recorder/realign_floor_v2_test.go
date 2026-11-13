@@ -3,6 +3,7 @@ package recorder
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,10 +56,17 @@ func TestRecordV2_AStaleAnswerAfterAResponseLeftOutIsDroppedOnce(t *testing.T) {
 		// floored how many runs the floor drops.
 		skipped bool
 		floored int
+		// stops: captured after the answer taken up after the response left
+		// out and before the client's next command, it is what the rest of
+		// an answer the re-align cut into looks like (the client pipelined
+		// that command into it, and the answer taken up is that answer's
+		// tail): the answer taken up is not confirmed, and the recording
+		// stops (takenUp), with no wrong mock.
+		stops bool
 	}{
-		{"captured before the command after the response left out", 3, false, true, 0},
-		{"numbered before the command after the response left out, stamped after it", 3, true, false, 1},
-		{"captured before the command after that one", 4, false, false, 1},
+		{"captured before the command after the response left out", 3, false, true, 0, false},
+		{"numbered before the command after the response left out, stamped after it", 3, true, false, 1, false},
+		{"captured before the command after that one", 4, false, false, 1, true},
 	} {
 		for _, n := range []int{512, 16384} {
 			t.Run(fmt.Sprintf("%s, reads of %d", c.name, n), func(t *testing.T) {
@@ -88,6 +96,16 @@ func TestRecordV2_AStaleAnswerAfterAResponseLeftOutIsDroppedOnce(t *testing.T) {
 				staleAt := server[at].ReadAt
 
 				rec := recordChunks(t, client, server, true, time.Minute)
+				if c.stops {
+					requireFramingLost(t, rec)
+					if !strings.Contains(rec.err.Error(), "is not confirmed: the server's next bytes after it were captured before the client's next command") {
+						t.Fatalf("RecordV2 = %v, want the stop to name the answer taken up that the server's next bytes do not confirm", rec.err)
+					}
+					if got := queryMocks(rec.mocks); got != 2 {
+						t.Fatalf("%d query mocks, want the 2 before the response left out", got)
+					}
+					return
+				}
 				// Every exchange but the one left out is recorded, each with
 				// its own answer: no live byte was dropped, and the stale
 				// answer was recorded as no command's.

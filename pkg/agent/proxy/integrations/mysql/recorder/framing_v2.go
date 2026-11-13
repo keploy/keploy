@@ -108,6 +108,129 @@ func leftOutAlone(err error) error {
 		strings.TrimPrefix(err.Error(), ErrFramingLost.Error()+": "))
 }
 
+// takenUp is the exchange the recording took up after a response it left out
+// (handleCommandsV2's fail, realignAnswer): the first command after it that
+// the server answers. Its mock is held, not emitted, until the capture's order
+// confirms the bytes taken as its answer were its answer.
+//
+// The re-align takes the server's first chunk captured after the command for
+// the start of its answer. That holds for a client that waits for each answer
+// before its next command. A client that sent the command before the answer
+// left out ended (it pipelined into that answer's tail, though it had not
+// pipelined before) has the rest of that answer captured after its command,
+// and the re-align took it for the command's answer: a packet in it whose
+// sequence id is not 1 does not frame as one, but a packet at 1 (the sequence
+// wraps every 256 packets) that parses as one did, and the command was
+// recorded with another answer's bytes. So the answer taken up is held until:
+//   - (answerStartsAfter) it starts at the server's first chunk captured after
+//     the command, every server byte read or skipped before it was captured
+//     before the command, its first packet's sequence id is the one the
+//     command's answer starts at, and it parses whole as an answer to that
+//     command; a fault once a byte of it is read stops the recording
+//     (fail), it is never left out alone to re-align again (a command whose
+//     answer the recorder cannot frame, found before it reads a byte of it,
+//     is left out alone, and the next one is taken up in its place); and
+//   - (confirm) the server's next bytes after it were captured after the
+//     client's next command that the server answers, sent itself after the
+//     answer's last byte (not pipelined). The rest of an answer the re-align
+//     cut into comes before the client's next command, which waits for the
+//     answer it is reading. The end of a stream confirms nothing: a capture
+//     hole ends one as the connection's end does.
+//
+// Then its mock is emitted, and the mocks of the commands without a response
+// sent after it (queued), in the order they were sent. Otherwise it is left
+// out, counted, and the recording stops: what the server sent cannot be told
+// apart from what it answered.
+type takenUp struct {
+	reqTs, resTs time.Time
+	// consumed is how many server bytes the recorder had consumed when the
+	// re-align's cut put the stream at its answer.
+	consumed int64
+	// read: its answer has been read whole, ending in the server's chunk
+	// numbered answerEnd.
+	read      bool
+	answerEnd uint32
+	// emit records its mock; nil when it records none (left out, or a PREPARE
+	// held for its framing: heldPrepare records it).
+	emit   func()
+	queued []func()
+}
+
+// queue holds the mock emit records behind the exchange taken up, as
+// heldPrepare.queue does.
+func (t *takenUp) queue(sess *supervisor.Session, emit func()) {
+	t.queued = append(t.queued, emit)
+	clearPending(sess)
+}
+
+// release emits the exchange's mock, if it has one, and those queued behind it.
+func (t *takenUp) release() {
+	if t.emit != nil {
+		t.emit()
+	}
+	t.flush()
+}
+
+func (t *takenUp) flush() {
+	for _, emit := range t.queued {
+		emit()
+	}
+	t.queued = nil
+}
+
+// answerStartsAfter checks where the server's stream stands after the cut of a
+// re-align (realignAnswer) for the answer to the command taken up, which began
+// in the client's chunk numbered cmdFirst and ended in cmdLast: every server
+// byte read or skipped so far was captured before the command, and the next
+// one starts a chunk captured after it (takenUp). The next chunk is waited for
+// as reading the answer would. A fault there is
+// lost framing; the end of the stream is returned as it is.
+func answerStartsAfter(sess *supervisor.Session, cmdFirst, cmdLast uint32) error {
+	if last := sess.DestStream.LastReadConnSeq(); last != 0 && !(fakeconn.Chunk{ConnSeq: last}).CapturedBefore(cmdFirst) {
+		return framingLost("the server's bytes read or skipped before the answer to the command taken up after a response left out were not all captured before that command")
+	}
+	next, err := sess.DestStream.Peek()
+	if err != nil {
+		if streamEnded(err) {
+			return err
+		}
+		return framingLost("the answer to the command taken up after a response left out cannot be found: %v", err)
+	}
+	if !sess.DestStream.AtChunkBoundary() || !(fakeconn.Chunk{ConnSeq: cmdLast}).CapturedBefore(next.ConnSeq) {
+		return framingLost("the server's next bytes after the response left out were not captured after the command taken up, so they cannot be told to be its answer")
+	}
+	return nil
+}
+
+// confirm decides whether the exchange taken up (takenUp) was recorded with its
+// own answer, once its answer is read, at the client's next command the server
+// answers, which began in the chunk numbered cmdFirst. pipelined: a command
+// sent since was captured before the answer's last byte. It returns why it is not, empty
+// when it is; it reads nothing.
+//
+// Only the server's next bytes, captured after that command, confirm it. The
+// end of the server's stream does not: a connection that ends with nothing
+// more from the server ends it, but so do a capture hole (a capture that lost
+// bytes of the stream ends it there, with the io.EOF the connection's end
+// reads) and the recording's stop, and the rest of an answer the re-align cut
+// into may be what was lost. So an exchange still held when the client's or
+// the server's stream ends is left out.
+func (t *takenUp) confirm(sess *supervisor.Session, cmdFirst uint32, pipelined bool) string {
+	if pipelined {
+		return "the client sent its next command before the answer taken up ended"
+	}
+	next, err := sess.DestStream.Peek()
+	switch {
+	case err == nil && !(fakeconn.Chunk{ConnSeq: cmdFirst}).CapturedBefore(next.ConnSeq):
+		return "the server's next bytes after it were captured before the client's next command"
+	case err == nil:
+		return ""
+	case !streamEnded(err):
+		return fmt.Sprintf("the server's stream after it cannot be read (%v)", err)
+	}
+	return fmt.Sprintf("the server's stream ended before its next bytes after it (%v), as a capture hole or the recording's stop ends it too", err)
+}
+
 // answered reports whether the server answers a command (the command's first
 // byte): all but COM_QUIT, COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA
 // (wire.IsNoResponseCommand).
@@ -141,14 +264,14 @@ func answered(command byte) bool {
 // NextRequest found and has not taken is whole). One that does not (in the
 // middle of a chunk) is not where the client's stream can be taken up again:
 // lost framing.
-func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) (cmdBuf []byte, respFirst byte, joined bool, err error) {
+func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) (cmdBuf []byte, respFirst byte, joined bool, first fakeconn.Chunk, err error) {
 	// prevSeq and prevData: the last packet passed over ended at sequence id
 	// prevSeq, and carried data (one has been passed over: passed).
 	var prevSeq byte
 	prevData, passed := false, false
 	for {
-		if _, err := sess.NextRequest(models.MySQL, false); err != nil {
-			return nil, 0, false, err
+		if first, err = sess.NextRequest(models.MySQL, false); err != nil {
+			return nil, 0, false, first, err
 		}
 		atChunk := sess.ClientStream.AtChunkBoundary()
 		var cs commandSeq
@@ -165,7 +288,7 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 			return cs.take(header)
 		})
 		if err != nil {
-			return nil, 0, false, err
+			return nil, 0, false, first, err
 		}
 		if inExchange {
 			prevSeq, prevData, passed = lastSeq, len(buf) > 4, true
@@ -173,9 +296,9 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 			continue
 		}
 		if !atChunk {
-			return nil, 0, false, framingLost("the command after a response left out does not start a chunk of the capture: the client did not send it on its own")
+			return nil, 0, false, first, framingLost("the command after a response left out does not start a chunk of the capture: the client did not send it on its own")
 		}
-		return buf, cs.next, cs.joined, nil
+		return buf, cs.next, cs.joined, first, nil
 	}
 }
 
