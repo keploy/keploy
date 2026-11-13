@@ -3,6 +3,9 @@ package user
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"runtime"
 
@@ -86,17 +89,31 @@ func New(logger *zap.Logger, cfg *config.Config) *Db {
 	}
 }
 
+// machineID reads the OS machine id (/etc/machine-id, IOPlatformUUID,
+// MachineGuid). A variable so tests can give one.
+var machineID = machineid.ID
+
+// installationAppID keys the installation id to keploy (installationID).
+const installationAppID = "keploy"
+
+// GetInstallationID returns this machine's installation id: a keyed hash of
+// the OS machine id, never the id itself, which systemd says must not leave
+// the machine (machine-id(5)); "" when the machine has none. In a container
+// keploy started (KEPLOY_INDOCKER), it is the INSTALLATION_ID the host keploy
+// passed, already hashed there.
 func (db *Db) GetInstallationID(_ context.Context) (string, error) {
 	var id string
-	var err error
 	inDocker := os.Getenv("KEPLOY_INDOCKER")
 	if inDocker == "true" {
 		id = os.Getenv("INSTALLATION_ID")
 	} else {
-		id, err = machineid.ID()
+		raw, err := machineID()
 		if err != nil {
 			db.logger.Debug("failed to get machine id", zap.Error(err))
 			return "", nil
+		}
+		if raw != "" {
+			id = installationID(raw)
 		}
 	}
 	if id == "" {
@@ -104,4 +121,15 @@ func (db *Db) GetInstallationID(_ context.Context) (string, error) {
 		return "", nil
 	}
 	return id, nil
+}
+
+// installationID is the id keploy sends for the machine whose OS id is raw:
+// the hex HMAC-SHA256 of installationAppID keyed by raw, which is
+// machineid.ProtectedID("keploy"). It names the machine alike on every run
+// and cannot be turned back into raw; whoever holds a raw id an older keploy
+// sent can compute it, so the two can be joined.
+func installationID(raw string) string {
+	mac := hmac.New(sha256.New, []byte(raw))
+	mac.Write([]byte(installationAppID))
+	return hex.EncodeToString(mac.Sum(nil))
 }
