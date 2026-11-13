@@ -402,7 +402,7 @@ func TestALossRevokesTheTestCasesSentBeforeItThatReachPastItsRequest(t *testing.
 		t.Fatal("a test case that ended before the lost mock's request was revoked")
 	}
 	m.sharedLossMu.Lock()
-	named := len(m.sentTCs.of("").tcs)
+	named := len(m.sentTCs.of("").tcs) + len(m.sentTCs.of("").open)
 	m.sharedLossMu.Unlock()
 	if named != 1 {
 		t.Fatalf("%d test cases still named after the loss, want only tc-0: a revoked one is taken out", named)

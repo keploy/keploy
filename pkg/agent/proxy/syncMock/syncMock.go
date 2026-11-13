@@ -666,6 +666,13 @@ type SyncMockManager struct {
 	// sharedLossMu, as lostOver is, so a test case whose window holds one is
 	// left out or revoked, never sent between the two.
 	cutLost Spans
+	// lostFrom is the earliest request the current recording recorded in
+	// lostOver or cutLost (leaveOutSpan), zero when none: the window of its
+	// test case with no request time (tcWindow.open) is read from it, so it
+	// holds every request of the recording's that a loss reached, and none
+	// of an older recording's, which those spans still keep. Guarded by
+	// sharedLossMu.
+	lostFrom time.Time
 	// cutDrops counts the per-test mocks the stale cutoff dropped, and
 	// cutLeftOut the test cases a cutLost request left out at their verdict
 	// (SendingTestCase), since the session opened (StartDropSession): the
@@ -2060,6 +2067,9 @@ func (m *SyncMockManager) leaveOutSpan(mock *models.Mock, from, to time.Time, sp
 		return leftOut{}
 	}
 	spans.Record(from, to)
+	if m.lostFrom.IsZero() || from.Before(m.lostFrom) {
+		m.lostFrom = from
+	}
 	deletes := m.revokeCapable.Load()
 	revoked := m.sentTCs.revokeReaching(from, to, deletes, func(name string) {
 		m.recordDroppedTCFor(name, epoch)
@@ -2113,15 +2123,15 @@ func (m *SyncMockManager) SendingTestCase(name string, start, end time.Time) boo
 		return true
 	}
 	sent := m.sentName(name, start)
-	start, end = sendingWindow(start, end)
+	w := sendingWindow(start, end)
 	m.sharedLossMu.Lock()
-	out, cut := m.leavesOutLocked(start, end)
+	out, cut := m.leavesOutLocked(w)
 	if !out {
-		m.noteSentLocked("", sent, start, end)
+		m.noteSentLocked("", sent, w)
 	}
 	m.sharedLossMu.Unlock()
 	if cut {
-		m.sayCutLeftOut(name, start, end)
+		m.sayCutLeftOut(name, w)
 	}
 	return !out
 }
@@ -2163,11 +2173,10 @@ func SendTestCaseOf(mgrs []*SyncMockManager, dest, name string, start, end time.
 			ms = append(ms, m)
 		}
 	}
-	rawStart := start
-	start, end = sendingWindow(start, end)
-	sent, cutBy := sendTestCaseOfLocked(ms, dest, name, rawStart, start, end, send)
+	w := sendingWindow(start, end)
+	sent, cutBy := sendTestCaseOfLocked(ms, dest, name, start, w, send)
 	if cutBy != nil {
-		cutBy.sayCutLeftOut(name, start, end)
+		cutBy.sayCutLeftOut(name, w)
 	}
 	return sent
 }
@@ -2176,7 +2185,7 @@ func SendTestCaseOf(mgrs []*SyncMockManager, dest, name string, start, end time.
 // takes and lets go of. cutBy is the manager whose stale cutoff's loss
 // (cutLost) left the test case out, for the line that names it once the
 // locks are let go of; nil when none did.
-func sendTestCaseOfLocked(ms []*SyncMockManager, dest, name string, rawStart, start, end time.Time, send func() bool) (sent bool, cutBy *SyncMockManager) {
+func sendTestCaseOfLocked(ms []*SyncMockManager, dest, name string, rawStart time.Time, w tcWindow, send func() bool) (sent bool, cutBy *SyncMockManager) {
 	sendingTestCaseOfMu.Lock()
 	defer sendingTestCaseOfMu.Unlock()
 	for _, m := range ms {
@@ -2188,7 +2197,7 @@ func sendTestCaseOfLocked(ms []*SyncMockManager, dest, name string, rawStart, st
 		}
 	}()
 	for _, m := range ms {
-		if out, cut := m.leavesOutLocked(start, end); out {
+		if out, cut := m.leavesOutLocked(w); out {
 			if cut {
 				cutBy = m
 			}
@@ -2199,46 +2208,76 @@ func sendTestCaseOfLocked(ms []*SyncMockManager, dest, name string, rawStart, st
 		return false, nil
 	}
 	for _, m := range ms {
-		m.noteSentLocked(m.destKey(dest), m.sentName(name, rawStart), start, end)
+		m.noteSentLocked(m.destKey(dest), m.sentName(name, rawStart), w)
 	}
 	return true, nil
 }
 
+// tcWindow is a test case's window as SendingTestCase reads it
+// (sendingWindow).
+type tcWindow struct {
+	start, end time.Time
+	// open: the test case has no request time to trust (none, or one after
+	// its end). It is read as holding every request of its recording made
+	// before end, as any of them may be its own (fail closed), so a loss of
+	// the recording's requested no later than end leaves it out; and as
+	// starting at end (start is end), the latest
+	// its request can have been, for the recording's first test case, so no
+	// start-up mock requested before end is read as a test's.
+	open bool
+}
+
 // sendingWindow is a test case's window as SendingTestCase reads it: a zero
 // end as now, the latest the window can have ended, and a zero start, or one
-// after end, as end.
-func sendingWindow(start, end time.Time) (time.Time, time.Time) {
+// after end, as no request time (tcWindow.open).
+func sendingWindow(start, end time.Time) tcWindow {
 	if end.IsZero() {
 		end = time.Now()
 	}
 	if start.IsZero() || start.After(end) {
-		start = end
+		return tcWindow{start: end, end: end, open: true}
 	}
-	return start, end
+	return tcWindow{start: start, end: end}
 }
 
+// noRequestTime is what a line says of the window start of a test case with
+// no request time (tcWindow.open).
+const noRequestTime = "none it can trust: read as holding every request before window_end"
+
 // leavesOutLocked reports whether the recording leaves out a test case whose
-// window is [start, end]: a loss of a mock any test may need, requested no
-// later than end, or the request of a lost test's mock no test owns inside
-// the window, or the request of a test's mock the stale cutoff dropped inside
-// the window (SendingTestCase): cut says it was the last alone. Called under
+// window is w: a loss of a mock any test may need, requested no later than
+// its end, or the request of a lost test's mock no test owns inside the
+// window, or the request of a test's mock the stale cutoff dropped inside
+// the window (SendingTestCase): cut says it was the last alone. The window of
+// one with no request time (open) holds every request of the recording's
+// before its end: it is read from the earliest one a loss reached
+// (lostFrom), and, with none, a span check makes no claim. Called under
 // sharedLossMu.
-func (m *SyncMockManager) leavesOutLocked(start, end time.Time) (out, cut bool) {
-	if m.sharedLoss.close != nil && !end.Before(m.sharedLoss.from) {
+func (m *SyncMockManager) leavesOutLocked(w tcWindow) (out, cut bool) {
+	if m.sharedLoss.close != nil && !w.end.Before(m.sharedLoss.from) {
 		return true, false
 	}
-	if over, _ := m.lostOver.Overlaps(start, end); over {
+	from := w.start
+	if w.open {
+		from = m.lostFrom
+	}
+	if over, _ := m.lostOver.Overlaps(from, w.end); over {
 		return true, false
 	}
-	over, _ := m.cutLost.Overlaps(start, end)
+	over, _ := m.cutLost.Overlaps(from, w.end)
 	return over, over
 }
 
-// noteSentLocked notes the test case named name, whose window is [start,
-// end], sent by the recording's stream to dest (destKey) (SendingTestCase).
-// Called under sharedLossMu.
-func (m *SyncMockManager) noteSentLocked(dest, name string, start, end time.Time) {
-	m.sentTCs.of(dest).add(name, start, end)
+// noteSentLocked notes the test case named name, whose window is w, sent by
+// the recording's stream to dest (destKey) (SendingTestCase). Called under
+// sharedLossMu.
+func (m *SyncMockManager) noteSentLocked(dest, name string, w tcWindow) {
+	l := m.sentTCs.of(dest)
+	if w.open {
+		l.addOpen(name, w.end)
+	} else {
+		l.add(name, w.start, w.end)
+	}
 	m.noteFirstSentLocked()
 }
 
@@ -2280,8 +2319,9 @@ func (m *SyncMockManager) noteFirstSentLocked() {
 
 // endSharedLoss ends the span of test cases a recording leaves out for a mock
 // it lost (leaveOutAfter), and lets go the test cases its stream sent, the
-// losses it counts and the one it may re-read (startupLost): a new
-// recording's are neither left out nor revoked for it.
+// losses it counts, where they reached from (lostFrom) and the one it may
+// re-read (startupLost): a new recording's are neither left out nor revoked
+// for it.
 func (m *SyncMockManager) endSharedLoss() {
 	m.sharedLossMu.Lock()
 	defer m.sharedLossMu.Unlock()
@@ -2289,7 +2329,7 @@ func (m *SyncMockManager) endSharedLoss() {
 		m.sharedLoss.close()
 	}
 	m.sharedLoss = sharedLoss{}
-	m.sentTCs, m.perTestUnnamed = sentByDest{}, 0
+	m.sentTCs, m.perTestUnnamed, m.lostFrom = sentByDest{}, 0, time.Time{}
 	m.perTestKept, m.perTestKeptSent, m.startupLost = 0, 0, nil
 	m.firstSent.Store(nil)
 }
@@ -2367,12 +2407,12 @@ const lossNextStep = "re-record once the client that reads the agent's mocks kee
 // cutNextStep is what a line of a stale cutoff's loss says to do.
 const cutNextStep = "a request decided more than 7 s after its calls were made, with no window open for it, loses them: re-record once the agent's verdicts keep up with the app (its CPU, a stalled app), or record that ingress through one that opens a window per request"
 
-// sayCutLeftOut says that the test case named name, whose window is [start,
-// end], was left out at its verdict for the request of a test's mock the
-// stale cutoff dropped inside its window (cutLost): at WARN for the first
-// dropNamesMax of the session and the sampled ones, the rest at Debug. Never
-// called under a lock of the manager's.
-func (m *SyncMockManager) sayCutLeftOut(name string, start, end time.Time) {
+// sayCutLeftOut says that the test case named name, whose window is w, was
+// left out at its verdict for the request of a test's mock the stale cutoff
+// dropped inside its window (cutLost): at WARN for the first dropNamesMax of
+// the session and the sampled ones, the rest at Debug. Never called under a
+// lock of the manager's.
+func (m *SyncMockManager) sayCutLeftOut(name string, w tcWindow) {
 	n := m.cutLeftOut.Add(1)
 	level := zapcore.DebugLevel
 	if n <= dropNamesMax || sampled(n) {
@@ -2382,9 +2422,13 @@ func (m *SyncMockManager) sayCutLeftOut(name string, start, end time.Time) {
 	if ce == nil {
 		return
 	}
+	start := w.start.Format(time.RFC3339Nano)
+	if w.open {
+		start = noRequestTime
+	}
 	ce.Write(zap.String("test_case", name),
-		zap.String("window_start", start.Format(time.RFC3339Nano)),
-		zap.String("window_end", end.Format(time.RFC3339Nano)),
+		zap.String("window_start", start),
+		zap.String("window_end", w.end.Format(time.RFC3339Nano)),
 		zap.Uint64("left_out_so_far", n),
 		zap.String("next_step", cutNextStep))
 }

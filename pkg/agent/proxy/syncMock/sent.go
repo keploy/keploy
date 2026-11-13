@@ -29,7 +29,13 @@ const maxSentTCs = maxDroppedTCNames
 // latest end, which a loss says it cannot revoke past. Guarded by the
 // manager's sharedLossMu; the zero value is empty.
 type sentList struct {
-	tcs     []sentTC
+	tcs []sentTC
+	// open is the test cases sent with no request time (tcWindow.open),
+	// sorted by window end, each with its start at its end: a loss requested
+	// no later than its end may be its own, so it revokes it, whenever it
+	// was requested; and it counts toward the first at its end. Apart from
+	// tcs, so a loss still finds those it reaches by a search.
+	open    []sentTC
 	byName  map[string]time.Time
 	longest time.Duration
 	// letGo is set once some were let go or sent with no name, with
@@ -60,7 +66,7 @@ func (l *sentList) add(name string, start, end time.Time) {
 		l.noteUnnamed("", start, end)
 		return
 	}
-	if len(l.tcs) == maxSentTCs {
+	if len(l.tcs)+len(l.open) == maxSentTCs {
 		l.letGoHalf()
 	}
 	if d := end.Sub(start); d > l.longest {
@@ -74,18 +80,44 @@ func (l *sentList) add(name string, start, end time.Time) {
 	l.byName[name] = start
 }
 
-// letGoHalf lets go the half of the test cases named that started first,
-// at once, so the cap costs a copy per maxSentTCs/2 test cases, not one per
-// test case.
+// addOpen notes the test case named name, sent with no request time and its
+// window ending at end (tcWindow.open), as sent: it is read as starting at
+// end. One with no name is one it does not name (unnamed), as add's.
+func (l *sentList) addOpen(name string, end time.Time) {
+	if name == "" {
+		l.noteUnnamed("", end, end)
+		return
+	}
+	if len(l.tcs)+len(l.open) == maxSentTCs {
+		l.letGoHalf()
+	}
+	i := sort.Search(len(l.open), func(k int) bool { return l.open[k].end.After(end) })
+	l.open = slices.Insert(l.open, i, sentTC{name: name, start: end, end: end})
+	if l.byName == nil {
+		l.byName = make(map[string]time.Time)
+	}
+	l.byName[name] = end
+}
+
+// letGoHalf lets go the half of the test cases named that started first, of
+// those with a request time and of those with none (open), at once, so the
+// cap costs a copy per maxSentTCs/2 test cases, not one per test case.
 func (l *sentList) letGoHalf() {
-	half := len(l.tcs) / 2
-	for _, tc := range l.tcs[:half] {
+	l.tcs = l.letGoFirstHalf(l.tcs)
+	l.open = l.letGoFirstHalf(l.open)
+}
+
+// letGoFirstHalf lets go the first half of tcs, a list of l's, and returns
+// what is left of it.
+func (l *sentList) letGoFirstHalf(tcs []sentTC) []sentTC {
+	half := len(tcs) / 2
+	for _, tc := range tcs[:half] {
 		l.noteUnnamed(tc.name, tc.start, tc.end)
 		delete(l.byName, tc.name)
 	}
-	k := copy(l.tcs, l.tcs[half:])
-	clear(l.tcs[k:])
-	l.tcs = l.tcs[:k]
+	k := copy(tcs, tcs[half:])
+	clear(tcs[k:])
+	return tcs[:k]
 }
 
 // noteUnnamed notes the test case named name ("" for none), sent with the
@@ -110,7 +142,9 @@ func (l *sentList) from(t time.Time) int {
 
 // revokeReaching takes out every test case named whose window ends at or
 // after from, and those whose window starts after to, when to is not zero,
-// are kept: it hands each one taken out to revoke, and returns how many.
+// are kept, except one with no request time (open), whose window may hold
+// any request before its end: it hands each one taken out to revoke, and
+// returns how many.
 // applied says whether the client deletes them: one that cannot keeps them
 // in the recording, so they still count toward its first (keptFirst).
 func (l *sentList) revokeReaching(from, to time.Time, applied bool, revoke func(name string)) int {
@@ -137,6 +171,17 @@ func (l *sentList) revokeReaching(from, to time.Time, applied bool, revoke func(
 		clear(l.tcs[k:])
 		l.tcs = l.tcs[:k]
 	}
+	i := sort.Search(len(l.open), func(k int) bool { return !l.open[k].end.Before(from) })
+	for _, tc := range l.open[i:] {
+		delete(l.byName, tc.name)
+		if !applied {
+			l.keep(tc.start)
+		}
+		revoke(tc.name)
+	}
+	n += len(l.open) - i
+	clear(l.open[i:])
+	l.open = l.open[:i]
 	return n
 }
 
@@ -159,12 +204,22 @@ func (l *sentList) forget(name string, applied bool) {
 	if !applied {
 		l.keep(start)
 	}
-	for i := sort.Search(len(l.tcs), func(k int) bool { return !l.tcs[k].start.Before(start) }); i < len(l.tcs) && l.tcs[i].start.Equal(start); i++ {
-		if l.tcs[i].name == name {
-			l.tcs = slices.Delete(l.tcs, i, i+1)
-			return
+	if !takeNamed(&l.tcs, name, start) {
+		takeNamed(&l.open, name, start)
+	}
+}
+
+// takeNamed takes the test case named name, which starts at start, out of
+// tcs, sorted by start, and reports whether tcs held it.
+func takeNamed(tcs *[]sentTC, name string, start time.Time) bool {
+	s := *tcs
+	for i := sort.Search(len(s), func(k int) bool { return !s[k].start.Before(start) }); i < len(s) && s[i].start.Equal(start); i++ {
+		if s[i].name == name {
+			*tcs = slices.Delete(s, i, i+1)
+			return true
 		}
 	}
+	return false
 }
 
 // keep notes start as that of a revoked test case the client keeps
@@ -194,6 +249,9 @@ func (l *sentList) first() (at time.Time, ok, exact bool) {
 	}
 	if len(l.tcs) > 0 {
 		pick(l.tcs[0].start)
+	}
+	if len(l.open) > 0 {
+		pick(l.open[0].start)
 	}
 	if !l.keptFirst.IsZero() {
 		pick(l.keptFirst)
