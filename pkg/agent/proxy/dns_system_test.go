@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func TestOnWindowsTheUpstreamIsTheAdaptersDNSServers(t *testing.T) {
 		{up: true, servers: []dnsAdapterServer{server(t, "10.8.0.1", 5)}},
 	}, nil)
 
-	config, source, err := upstreamConfig("windows")
+	config, adapter, source, err := upstreamConfig("windows")
 	if err != nil {
 		t.Fatalf("upstreamConfig(windows): %v", err)
 	}
@@ -48,6 +49,9 @@ func TestOnWindowsTheUpstreamIsTheAdaptersDNSServers(t *testing.T) {
 	if !slices.Equal(config.Servers, []string{"10.8.0.1"}) || config.Port != "53" {
 		t.Fatalf("servers %v port %q, want [10.8.0.1] on 53", config.Servers, config.Port)
 	}
+	if !maps.Equal(adapter, map[string]int{"10.8.0.1": 0}) {
+		t.Fatalf("the adapters the servers are asked on: %v, want 10.8.0.1 on the first", adapter)
+	}
 	if source != "the DNS servers of the machine's network adapters" {
 		t.Fatalf("source %q does not say the adapters were read", source)
 	}
@@ -56,7 +60,7 @@ func TestOnWindowsTheUpstreamIsTheAdaptersDNSServers(t *testing.T) {
 // Elsewhere the adapters are not read: resolv.conf is.
 func TestOffWindowsTheUpstreamIsResolvConf(t *testing.T) {
 	asked := withAdapters(t, nil, errors.New("not on this OS"))
-	_, source, _ := upstreamConfig("linux")
+	_, _, source, _ := upstreamConfig("linux")
 	if *asked != 0 || source != defaultResolvConfPath {
 		t.Fatalf("on linux: adapters read %d times, source %q; want resolv.conf alone", *asked, source)
 	}
@@ -73,9 +77,9 @@ func TestOnWindowsANamedResolvConfIsRead(t *testing.T) {
 	resolvConfPath = path
 	t.Cleanup(func() { resolvConfPath = orig })
 
-	config, source, err := upstreamConfig("windows")
-	if err != nil || *asked != 0 || source != path || !slices.Equal(config.Servers, []string{"192.0.2.53"}) {
-		t.Fatalf("got %v from %q (err %v, adapters read %d times); want the named file's server", config, source, err, *asked)
+	config, adapter, source, err := upstreamConfig("windows")
+	if err != nil || *asked != 0 || source != path || !slices.Equal(config.Servers, []string{"192.0.2.53"}) || adapter != nil {
+		t.Fatalf("got %v on adapters %v from %q (err %v, adapters read %d times); want the named file's server, on no adapter", config, adapter, source, err, *asked)
 	}
 }
 
@@ -83,8 +87,8 @@ func TestOnWindowsANamedResolvConfIsRead(t *testing.T) {
 // it looked; captureDNSUpstream then has no upstream.
 func TestOnWindowsAnAdapterReadFailureIsSaid(t *testing.T) {
 	withAdapters(t, []dnsAdapter{{up: true, servers: []dnsAdapterServer{server(t, "10.8.0.1", 1)}}}, errors.New("GetAdaptersAddresses: access denied"))
-	config, source, err := upstreamConfig("windows")
-	if err == nil || config != nil || source != "the DNS servers of the machine's network adapters" {
+	config, adapter, source, err := upstreamConfig("windows")
+	if err == nil || config != nil || adapter != nil || source != "the DNS servers of the machine's network adapters" {
 		t.Fatalf("got config %v, source %q, err %v; want the failure and where it looked", config, source, err)
 	}
 }
@@ -105,12 +109,19 @@ func TestTheResolversOfAdaptersAreTheOnesWindowsAsks(t *testing.T) {
 		{up: true, servers: []dnsAdapterServer{server(t, "10.8.0.1", 5), server(t, "192.168.1.2", 5)}},
 	}
 	want := []string{"10.8.0.1", "192.168.1.2", "192.168.1.1", "fe80::1%12"}
-	if got := resolversOfAdapters(adapters); !slices.Equal(got, want) {
+	got, adapter := resolversOfAdapters(adapters)
+	if !slices.Equal(got, want) {
 		t.Fatalf("resolversOfAdapters = %v, want %v", got, want)
+	}
+	// Each server is asked on its adapter (its index in the list); the one
+	// two adapters share on the one that asks it first.
+	wantAdapter := map[string]int{"10.8.0.1": 3, "192.168.1.2": 3, "192.168.1.1": 0, "fe80::1%12": 0}
+	if !maps.Equal(adapter, wantAdapter) {
+		t.Fatalf("the adapters the servers are asked on: %v, want %v", adapter, wantAdapter)
 	}
 	// Equal metrics keep the order Windows lists them in.
 	same := []dnsAdapter{{up: true, servers: []dnsAdapterServer{server(t, "10.0.0.2", 7), server(t, "10.0.0.1", 7)}}}
-	if got := resolversOfAdapters(same); !slices.Equal(got, []string{"10.0.0.2", "10.0.0.1"}) {
+	if got, _ := resolversOfAdapters(same); !slices.Equal(got, []string{"10.0.0.2", "10.0.0.1"}) {
 		t.Fatalf("equal metrics: %v, want Windows's order [10.0.0.2 10.0.0.1]", got)
 	}
 }

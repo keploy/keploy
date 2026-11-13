@@ -42,19 +42,26 @@ var readDNSAdapters = machineDNSAdapters
 // or on Windows, which has none, the DNS servers of its adapters that are up
 // (resolversOfAdapters). It also says where it read them, for the log.
 //
+// On Windows it gives the adapter each server is asked on (its index in the
+// list GetAdaptersAddresses gives): a name one adapter's server denies is
+// still asked on the others (forwardDNS), as Windows asks them. resolv.conf's
+// servers are on no adapter: they are one list, and the first answer is the
+// answer, as Linux's resolver takes it.
+//
 // A row that points resolvConfPath at its own file reads that file on every
 // GOOS, so the parsing rows run on Windows as well.
-func upstreamConfig(goos string) (*dns.ClientConfig, string, error) {
+func upstreamConfig(goos string) (*dns.ClientConfig, map[string]int, string, error) {
 	if goos == "windows" && resolvConfPath == defaultResolvConfPath {
 		const source = "the DNS servers of the machine's network adapters"
 		adapters, err := readDNSAdapters()
 		if err != nil {
-			return nil, source, err
+			return nil, nil, source, err
 		}
-		return &dns.ClientConfig{Servers: resolversOfAdapters(adapters), Port: "53"}, source, nil
+		servers, adapter := resolversOfAdapters(adapters)
+		return &dns.ClientConfig{Servers: servers, Port: "53"}, adapter, source, nil
 	}
 	config, err := dns.ClientConfigFromFile(resolvConfPath)
-	return config, resolvConfPath, err
+	return config, nil, resolvConfPath, err
 }
 
 // resolversOfAdapters lists the DNS servers Windows asks, the way Linux's
@@ -64,9 +71,17 @@ func upstreamConfig(goos string) (*dns.ClientConfig, string, error) {
 // server once. A site-local IPv6 server (fec0::/10, deprecated by RFC 3879)
 // is not one: Windows lists fec0:0:0:ffff::1 to ::3 on an adapter with no
 // IPv6 DNS server configured, and no server answers there.
-func resolversOfAdapters(adapters []dnsAdapter) []string {
-	var servers []dnsAdapterServer
-	for _, a := range adapters {
+//
+// It also says which adapter each server is asked on (its index in
+// adapters): a server two adapters list is asked on the one it is asked on
+// first.
+func resolversOfAdapters(adapters []dnsAdapter) ([]string, map[string]int) {
+	type adapterServer struct {
+		dnsAdapterServer
+		adapter int
+	}
+	var servers []adapterServer
+	for i, a := range adapters {
 		if !a.up || a.loopback {
 			continue
 		}
@@ -74,19 +89,21 @@ func resolversOfAdapters(adapters []dnsAdapter) []string {
 			if !s.addr.IsValid() || s.addr.IsUnspecified() || isSiteLocal(s.addr) {
 				continue
 			}
-			servers = append(servers, s)
+			servers = append(servers, adapterServer{s, i})
 		}
 	}
-	slices.SortStableFunc(servers, func(a, b dnsAdapterServer) int {
+	slices.SortStableFunc(servers, func(a, b adapterServer) int {
 		return cmp.Compare(a.metric, b.metric)
 	})
 	out := make([]string, 0, len(servers))
+	adapter := make(map[string]int, len(servers))
 	for _, s := range servers {
 		if name := s.addr.String(); !slices.Contains(out, name) {
 			out = append(out, name)
+			adapter[name] = s.adapter
 		}
 	}
-	return out
+	return out, adapter
 }
 
 // The values of GetAdaptersAddresses's fields that adapterOf and serverOf
