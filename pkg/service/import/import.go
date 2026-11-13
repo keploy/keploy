@@ -455,11 +455,28 @@ func processUrlencodedBody(body []map[string]interface{}) string {
 
 func processFormdataBody(body []map[string]interface{}) []models.FormData {
 	form := []models.FormData{}
+
 	for _, formData := range body {
-		form = append(form, models.FormData{
-			Key:    formData["key"].(string),
-			Values: []string{formData["value"].(string)},
-		})
+
+		//Checking the key if its string
+		key, _ := formData["key"].(string)
+
+		if formData["type"] == "file" {
+			src, _ := formData["src"].(string)
+			form = append(form, models.FormData{
+				Key:   key,
+				Paths: []string{src},
+			})
+
+		} else {
+			val, _ := formData["value"].(string)
+			form = append(form, models.FormData{
+				Key:    key,
+				Values: []string{val},
+			})
+
+		}
+
 	}
 	return form
 }
