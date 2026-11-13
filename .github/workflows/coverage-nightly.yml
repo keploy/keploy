@@ -1,0 +1,258 @@
+# Each night, keploy's own coverage from its unit tests and from real record
+# and replay runs, merged into one number and held at the merged floor in
+# .github/coverage-floor.yaml (coverage-floor.sh says how it is counted).
+# The unit number alone, which every PR checks (prepare_and_run.yml's
+# unit_coverage), misses what only runs against a live app: the agent's
+# capture and the replay paths.
+#
+# The record and replay runs are the public golang_linux.yml lanes, run by
+# keploy built with -cover -coverpkg=./... and the lanes' own scripts, which
+# read only RECORD_BIN and REPLAY_BIN. This workflow has its own matrix
+# rather than an input on golang_linux.yml, so the PR matrix stays as it is.
+# The binary sits at a path ending in /build/keploy, which the scripts take
+# for the PR's build.
+#
+# The binary writes its counters to GOCOVERDIR, in two processes: the CLI,
+# and the agent it starts with plain sudo. sudo drops the environment, so
+# each lane keeps GOCOVERDIR for it with a sudoers env_keep line written on
+# the runner, and keploy itself is unchanged. The directory is mode 1777 so
+# both the root agent and the runner's CLI can write there. covdata-assert.sh
+# then fails a lane whose data has no sign of the agent, rather than let it
+# report a lower number quietly.
+#
+# A failure (a lane, the unit run, or the merged number below its floor)
+# opens or updates an issue through report-nightly-failure. A PR that
+# changes this workflow, its scripts, the floor file or the reporter runs it
+# in short: one lane, the number printed but not held to the floor, and no
+# issue.
+name: Nightly coverage
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/coverage-nightly.yml"
+      - ".github/workflows/test_workflow_scripts/covdata-assert.sh"
+      - ".github/workflows/test_workflow_scripts/coverage-floor.sh"
+      - ".github/coverage-floor.yaml"
+      - ".github/actions/report-nightly-failure/action.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # A fork inherits the schedule, not the reason to run it.
+    if: github.event_name != 'schedule' || github.repository == 'keploy/keploy'
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # As build-and-upload in prepare_and_run.yml, with coverage on and no
+      # race detector; set mode matches the unit tests', which the merge
+      # needs.
+      - name: Build keploy with coverage
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p out/build-cover
+          go build -tags=viper_bind_struct -cover -covermode=set -coverpkg=./... -o out/build-cover/keploy
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-cover
+          path: out/build-cover/keploy
+          retention-days: 3
+
+  lanes:
+    needs: build
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # golang_linux.yml's public apps, each recorded and replayed by the
+        # covered build; a PR runs the first only.
+        app: ${{ fromJSON(github.event_name == 'pull_request' && '[{"name":"http-pokeapi","path":"http-pokeapi","script_dir":"http_pokeapi"}]' || '[{"name":"http-pokeapi","path":"http-pokeapi","script_dir":"http_pokeapi"},{"name":"echo-mysql","path":"echo-mysql","script_dir":"echo_mysql"},{"name":"sse-preflight","path":"sse-preflight","script_dir":"sse_preflight"},{"name":"connect-tunnel","path":"connect-tunnel","script_dir":"connect_tunnel"},{"name":"dns-mock-test","path":"dns-mock-test","script_dir":"dns_mock"},{"name":"risk-profile","path":"risk-profile","script_dir":"risk_profile"}]') }}
+    name: ${{ matrix.app.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # Preinstalled on the ubuntu-24.04 image, as golang_linux.yml notes.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - uses: ./.github/actions/download-artifact-retry
+        with:
+          name: build-cover
+          path: build
+
+      - name: Make the binary executable
+        run: chmod +x build/keploy
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+          ref: main
+
+      - name: Let the agent write coverage data
+        run: |
+          mkdir -p "$RUNNER_TEMP/covdata"
+          chmod 1777 "$RUNNER_TEMP/covdata"
+          echo 'Defaults env_keep += "GOCOVERDIR"' | sudo tee /etc/sudoers.d/keploy-gocoverdir
+          sudo chmod 0440 /etc/sudoers.d/keploy-gocoverdir
+          sudo visudo -c
+
+      - name: Run ${{ matrix.app.name }}
+        env:
+          RECORD_BIN: ${{ github.workspace }}/build/keploy
+          REPLAY_BIN: ${{ github.workspace }}/build/keploy
+          ENABLE_SSL: "false"
+          GOCOVERDIR: ${{ runner.temp }}/covdata
+        run: |
+          cd samples-go/${{ matrix.app.path }}
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh"
+
+      - name: Check that the agent wrote coverage data
+        run: bash .github/workflows/test_workflow_scripts/covdata-assert.sh "$RUNNER_TEMP/covdata" pkg/agent/proxy/proxy.go '*Proxy.StartProxy'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: covdata-lane-${{ matrix.app.name }}
+          path: ${{ runner.temp }}/covdata
+          retention-days: 7
+
+  unit:
+    if: github.event_name != 'schedule' || github.repository == 'keploy/keploy'
+    # As unit_coverage in prepare_and_run.yml.
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install build essentials and gcc
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" build-essential gcc libc-dev \
+            pkg-config \
+            libgl1-mesa-dev          \
+            libxi-dev libxcursor-dev \
+            libxrandr-dev libxinerama-dev \
+            libxxf86vm-dev libx11-dev libx11-xcb-dev
+
+      - name: Download modules
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry list -deps -test ./... > /dev/null
+
+      - name: Run the unit tests with coverage
+        run: |
+          mkdir -p "$RUNNER_TEMP/covdata"
+          go test -cover -covermode=set ./... -args -test.gocoverdir="$RUNNER_TEMP/covdata"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: covdata-unit
+          path: ${{ runner.temp }}/covdata
+          retention-days: 7
+
+  merge:
+    needs: [build, lanes, unit]
+    # Runs after a failed lane too, so the failure is reported.
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Check that the build, every lane and the unit run passed
+        env:
+          BUILD: ${{ needs.build.result }}
+          LANES: ${{ needs.lanes.result }}
+          UNIT: ${{ needs.unit.result }}
+        run: |
+          if [ "$BUILD" != success ] || [ "$LANES" != success ] || [ "$UNIT" != success ]; then
+            echo "::error::build $BUILD, lanes $LANES, unit $UNIT: the merged number needs all of them"
+            exit 1
+          fi
+
+      - uses: ./.github/actions/download-artifact-retry
+        with:
+          pattern: covdata-*
+          path: covdata
+
+      - name: Merge the coverage data
+        run: |
+          dirs=$(find covdata -mindepth 1 -maxdepth 1 -type d | sort | paste -sd, -)
+          echo "merging $dirs"
+          mkdir -p merged
+          go tool covdata merge -i="$dirs" -o=merged
+
+      - name: Check the merged floor
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          # The unit number for reference only (each PR holds it to its
+          # floor). The two count different statements: unit only packages
+          # with a test file, merged every package linked into keploy.
+          bash .github/workflows/test_workflow_scripts/coverage-floor.sh check unit covdata/covdata-unit || true
+          if [ "$EVENT" = pull_request ]; then
+            # One lane cannot reach a floor set from all of them.
+            bash .github/workflows/test_workflow_scripts/coverage-floor.sh check merged merged ||
+              echo "a PR runs one lane, so its merged number is not held to the floor"
+          else
+            bash .github/workflows/test_workflow_scripts/coverage-floor.sh check merged merged
+          fi
+
+      - name: Per-package coverage of the agent and the services
+        if: ${{ !cancelled() && hashFiles('merged/covmeta.*') != '' }}
+        run: go tool covdata percent -i=merged | grep -E 'server/v3/pkg/(agent|service)/' || true
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && hashFiles('merged/covmeta.*') != '' }}
+        with:
+          name: covdata-merged
+          path: merged
+          retention-days: 14
+
+      - name: Report the failure
+        if: failure()
+        uses: ./.github/actions/report-nightly-failure
+        with:
+          title: "Nightly coverage failed"
+          body: |
+            The nightly merged-coverage run failed: a lane, the unit run, the check that the agent wrote coverage data, or the merged number below its floor in `.github/coverage-floor.yaml`. The run's log says which.
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

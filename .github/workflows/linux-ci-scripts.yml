@@ -71,6 +71,11 @@ name: Linux CI scripts
 # fuzz-nightly.yml runs, read from `go test -list`. Each package's Fuzz names
 # become entries with its import path and directory, other names add
 # nothing, and a listing that fails or finds no target fails.
+#
+# And covdata-assert.tests.sh: covdata-assert.sh, the check that a lane of
+# coverage-nightly.yml has the agent's coverage data, not only the CLI's: a
+# function only the agent runs must have run. At 0% or absent it fails, and
+# so does a directory with no data.
 
 on:
   push:
@@ -105,6 +110,8 @@ on:
       - '.github/workflows/test_workflow_scripts/coverage-floor.tests.sh'
       - '.github/workflows/test_workflow_scripts/fuzz-targets.sh'
       - '.github/workflows/test_workflow_scripts/fuzz-targets.tests.sh'
+      - '.github/workflows/test_workflow_scripts/covdata-assert.sh'
+      - '.github/workflows/test_workflow_scripts/covdata-assert.tests.sh'
       - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
@@ -137,6 +144,8 @@ on:
       - '.github/workflows/test_workflow_scripts/coverage-floor.tests.sh'
       - '.github/workflows/test_workflow_scripts/fuzz-targets.sh'
       - '.github/workflows/test_workflow_scripts/fuzz-targets.tests.sh'
+      - '.github/workflows/test_workflow_scripts/covdata-assert.sh'
+      - '.github/workflows/test_workflow_scripts/covdata-assert.tests.sh'
       - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
 
@@ -328,3 +337,13 @@ jobs:
 
       - name: Test fuzz-targets.sh (each package's Fuzz names become matrix entries; a failed or empty listing fails)
         run: bash .github/workflows/test_workflow_scripts/fuzz-targets.tests.sh
+
+  covdata-assert:
+    # Four cases against a stub go; under a second.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test covdata-assert.sh (a lane passes only when a function only the agent runs has run)
+        run: bash .github/workflows/test_workflow_scripts/covdata-assert.tests.sh
