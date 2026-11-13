@@ -222,6 +222,10 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				}
 
 				requestJSON := ConvertKeployHTTPToPostmanCollection(logger, &httpSchema)
+				if requestJSON == nil {
+					logger.Warn("skipping a test case that is not an HTTP request with a host", zap.String("testcase name", testFile.Name()))
+					continue
+				}
 				requestJSONString, err := json.Marshal(requestJSON)
 				if err != nil {
 					utils.LogError(logger, err, "failed to marshal requestJSON to string")

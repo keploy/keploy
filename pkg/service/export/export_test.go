@@ -168,6 +168,14 @@ func TestExport(t *testing.T) {
 			},
 			want: []exportedFolder{testSet0},
 		},
+		{
+			name: "a gRPC test case is left out, not exported as null",
+			extraLayout: func(t *testing.T, keployDir string) {
+				grpcCase := "version: api.keploy.io/v1beta1\nkind: gRPC\nname: test-3\nspec:\n    grpcReq:\n        headers:\n            pseudo_headers:\n                ':authority': localhost:50051\n                ':path': /user.UserService/GetUser\n"
+				require.NoError(t, os.WriteFile(filepath.Join(keployDir, "test-set-0", "tests", "test-3.yaml"), []byte(grpcCase), 0o644))
+			},
+			want: []exportedFolder{testSet0},
+		},
 	}
 
 	for _, tt := range tests {

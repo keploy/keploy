@@ -52,6 +52,19 @@ func TestGetCoverage_TextProfile(t *testing.T) {
 			wantErr: "go coverage file is malformed at 2",
 		},
 		{
+			// An empty function is a block of no statements.
+			name:    "a file whose only block has no statements",
+			profile: "empty-file.txt",
+			want: models.TestCoverage{
+				FileCov: map[string]string{
+					"example.com/app/empty.go": "0.00%",
+					"example.com/app/full.go":  "100.00%",
+				},
+				TotalCov: "100.00%",
+				Loc:      models.Loc{Total: 2, Covered: 2},
+			},
+		},
+		{
 			name:    "profile with only the mode line",
 			profile: "mode-only.txt",
 			want:    models.TestCoverage{FileCov: map[string]string{}, TotalCov: "0.00%"},
