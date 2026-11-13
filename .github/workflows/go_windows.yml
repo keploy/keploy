@@ -150,3 +150,12 @@ jobs:
       - name: Test the proxy's accept count (amd64)
         run: go test -count=1 -run "TestOnWindowsAFullBacklogLosesNoConnectionTheClientCompleted|TestWithAShimsCount" ./pkg/agent/proxy/
         shell: cmd
+
+      # The resolvers a recording asks on Windows: the DNS servers of the
+      # adapters that are up, read with GetAdaptersAddresses and checked
+      # against PowerShell's list, and a name only they answer (a private
+      # address's PTR) recorded with their answer rather than a public
+      # resolver's.
+      - name: Test the machine's DNS resolvers (amd64)
+        run: go test -count=1 -run "TestOnWindowsTheRecordingAsksTheMachinesResolvers|TestOnWindowsTheAdaptersAreReadWhateverTheFirstBufferSize|TestOnWindowsAFailedAdapterReadIsAnError|TestOnWindowsEachAdapterAndServerOfTheListIsRead" ./pkg/agent/proxy/
+        shell: cmd
