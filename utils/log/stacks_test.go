@@ -22,9 +22,10 @@ func TestWriteStacksWritesEveryGoroutinesStackBesideTheLog(t *testing.T) {
 	prev := logFileSink.Swap(logf)
 	t.Cleanup(func() { logFileSink.Store(prev) })
 
-	parked := make(chan struct{})
+	parked, ready := make(chan struct{}), make(chan struct{})
 	t.Cleanup(func() { close(parked) })
-	go parkForStacks(parked)
+	go parkForStacks(ready, parked)
+	<-ready
 
 	name, err := WriteStacks()
 	if err != nil {
@@ -78,8 +79,16 @@ func TestWriteStacksWithNoLogWritesToTheTempDir(t *testing.T) {
 	}
 }
 
+// parkForStacks says it has begun (ready), then parks until c closes. Its
+// caller waits for ready before it looks: a goroutine that has not begun yet
+// shows in the stacks as its go statement's wrapper, not as this function (1
+// look in about 50 found it so).
+//
 //go:noinline
-func parkForStacks(c chan struct{}) { <-c }
+func parkForStacks(ready, c chan struct{}) {
+	close(ready)
+	<-c
+}
 
 // A log folder WriteStacks cannot create its file in is an error, naming no
 // file; a file it could not write all of is named, with why.
