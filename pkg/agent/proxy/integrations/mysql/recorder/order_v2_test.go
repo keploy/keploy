@@ -442,3 +442,26 @@ func TestRecordV2_ACommandWithNoCaptureNumberIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// On a stream joined mid-connection, the server's packets are followed from
+// the end of the first response the recorder read whole (packetWalk): a
+// response it cannot frame after that is left out alone, and the recording
+// goes on from the next command, as on a stream read from its handshake.
+func TestRecordV2_PostTLS_AResponseLeftOutAfterOneReadWholeOnAStreamJoinedMidConnection(t *testing.T) {
+	col := columnPayload(t, &mysql.ColumnDefinition41{Catalog: "def", Name: "n", OrgName: "n", FixedLength: 0x0c, CharacterSet: 0x2e, ColumnLength: 64, Type: byte(mysql.FieldTypeVarString)})
+	j := newJoinedMidStream(t)
+	j.exchange(cannedCOMQuery(t, 0, "SELECT n FROM t"), resultSet(true, [][]byte{col}, [][]byte{textRowPayload("a")}))
+	j.h.pushClient(wrapPacket(append([]byte{0x04}, "t\x00"...), 0), j.at())
+	for _, p := range frame([][]byte{col, okEOFPayload}) {
+		j.h.pushDest(p, j.at())
+	}
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{cannedOK(t, 1, j.caps)})
+	mocks, err := j.run(t)
+	if err != nil {
+		t.Fatalf("RecordV2 = %v, want the recording to go on past the response left out", err)
+	}
+	if len(mocks) != 3 || describe(mocks[0]) != "a result of 1 rows" || describe(mocks[2]) != "a OK" {
+		t.Fatalf("%d mocks, want SELECT n with its row, then SELECT 1 and SELECT 2 with their OKs", len(mocks))
+	}
+}

@@ -298,7 +298,7 @@ func (f *FakeConn) skipLocked(n int) {
 // and tells the tap of them. Caller holds mu.
 func (f *FakeConn) advanceLocked(b []byte) {
 	f.consumed.Add(int64(len(b)))
-	if f.tap != nil && len(b) > 0 {
+	if f.tap != nil {
 		f.tap(b)
 	}
 }

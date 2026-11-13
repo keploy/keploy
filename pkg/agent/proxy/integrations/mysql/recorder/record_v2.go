@@ -1819,8 +1819,9 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			}
 			taken = &takenUp{reqTs: reqTs, consumed: sess.DestStream.Consumed()}
 		}
-		if !serverRealign && len(cmdBuf) > 4 && answered(cmdBuf[4]) {
-			// The server's next bytes start its answer.
+		if len(cmdBuf) > 4 && answered(cmdBuf[4]) {
+			// The server's next bytes start its answer (the stream was cut
+			// to it above when it was taken up).
 			walk.mark()
 		}
 
