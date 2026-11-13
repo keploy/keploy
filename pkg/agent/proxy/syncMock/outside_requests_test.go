@@ -120,19 +120,6 @@ func TestOutsideRequestsNoWindowEverMarksNothing(t *testing.T) {
 	}
 }
 
-func TestOutsideRequestsWindowlessIngressMarksNothingFromThenOn(t *testing.T) {
-	m := New(zap.NewNop())
-	ended := endedWindow(t, m)
-	m.NoteWindowlessIngress()
-	if addCall(m, ended.Add(time.Second), ended.Add(2*time.Second)) {
-		t.Fatal("a call was marked after a request that opens no window came")
-	}
-	ended = endedWindow(t, m)
-	if addCall(m, ended.Add(time.Second), ended.Add(2*time.Second)) {
-		t.Fatal("a window ending lifted the latch")
-	}
-}
-
 func TestOutsideRequestsNeedsBothTimes(t *testing.T) {
 	m := New(zap.NewNop())
 	ended := endedWindow(t, m)
@@ -144,12 +131,10 @@ func TestOutsideRequestsNeedsBothTimes(t *testing.T) {
 	}
 }
 
-func TestOutsideRequestsNilMockAndManagerAreSafe(t *testing.T) {
+func TestOutsideRequestsNilMockIsSafe(t *testing.T) {
 	m := New(zap.NewNop())
 	endedWindow(t, m)
 	m.stampOutsideRequestsLocked(nil)
-	var none *SyncMockManager
-	none.NoteWindowlessIngress()
 }
 
 // A request given up while it is in flight (by memory pressure, by the hold's

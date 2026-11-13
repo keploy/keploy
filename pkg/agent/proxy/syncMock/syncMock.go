@@ -281,14 +281,12 @@ type SyncMockManager struct {
 	// open[0]. A per-test mock requested at or after its start may be one of
 	// theirs, so no reaper drops it (see held). Guarded by mu.
 	open windowHeap
-	// lastWindowEnd is when the latest window ended, givenUpInFlight how
-	// many windows were given up while their requests are still in flight
-	// (noteGivenUpInFlightLocked), and windowlessIngress that this agent's
-	// ingress also takes requests that open no window
-	// (stampOutsideRequestsLocked). Guarded by mu.
-	lastWindowEnd     time.Time
-	givenUpInFlight   int
-	windowlessIngress bool
+	// lastWindowEnd is when the latest window ended, and givenUpInFlight
+	// how many windows were given up while their requests are still in
+	// flight (noteGivenUpInFlightLocked; stampOutsideRequestsLocked).
+	// Guarded by mu.
+	lastWindowEnd   time.Time
+	givenUpInFlight int
 	// stopFound is the windows of the requests in flight that began by the
 	// instant a recording stops at (NoteStop), less those that ended since:
 	// the requests its stop found in flight. They stay the stopping
@@ -3763,11 +3761,8 @@ func (c LossCause) String() string {
 // recording's while that drains, and is given up once it has ended
 // (EndStoppedRecording): it is no request of the next one (LostToStop).
 //
-// Only the incoming proxy's HTTP/1 ingress opens windows. gRPC capture
-// (CaptureGRPC) opens none and resolves
-// its window only in sync mode, so a gRPC call is not covered: one that outlives
-// the stale horizon while other requests are decided can still lose the mocks
-// it made early on.
+// The incoming proxy's ingress opens one per HTTP/1 request it may capture and
+// one per gRPC call, each before the app can read the request.
 func (m *SyncMockManager) OpenWindow(start time.Time, lost func(LossCause) (takeBack func())) *Window {
 	if m == nil || start.IsZero() {
 		return nil

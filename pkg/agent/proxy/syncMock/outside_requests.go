@@ -18,12 +18,10 @@ import (
 // what it calls.
 //
 // It marks nothing unless a window has ended here, so an agent whose ingress
-// opens none, the proxyless one, says nothing, and nothing once a request that
-// opens no window has come (NoteWindowlessIngress): the windows no longer cover
-// the requests. Nor a call missing either of its times, which the checks below
-// cannot place. Caller holds mu.
+// opens none says nothing. Nor a call missing either of its times, which the
+// checks below cannot place. Caller holds mu.
 func (m *SyncMockManager) stampOutsideRequestsLocked(mock *models.Mock) {
-	if mock == nil || m.windowlessIngress || m.lastWindowEnd.IsZero() || m.givenUpInFlight > 0 {
+	if mock == nil || m.lastWindowEnd.IsZero() || m.givenUpInFlight > 0 {
 		return
 	}
 	req, res := mock.Spec.ReqTimestampMock, mock.Spec.ResTimestampMock
@@ -53,18 +51,4 @@ func (m *SyncMockManager) givenUpEndedLocked(w *Window) {
 	w.inFlight = false
 	m.givenUpInFlight--
 	m.lastWindowEnd = time.Now()
-}
-
-// NoteWindowlessIngress says this agent's ingress took a request that opens no
-// window and that a recording can keep, a gRPC call: from now on no mock is
-// marked outside the requests (stampOutsideRequestsLocked). It stays so for the
-// manager's life, as such requests leave no trace here to tell a later call's
-// span from theirs.
-func (m *SyncMockManager) NoteWindowlessIngress() {
-	if m == nil {
-		return
-	}
-	m.mu.Lock()
-	m.windowlessIngress = true
-	m.mu.Unlock()
 }

@@ -28,8 +28,12 @@ import (
 // because it forwards the client's original HTTP/2 handshake directly to the app
 // without creating a separate gRPC session.
 func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, _ string, synchronous, mapping bool) error {
-	// Before any of its calls reaches the app: they open no window.
-	syncMock.FromContextOrGlobal(ctx).NoteWindowlessIngress()
+	// Each call's window, on the manager its capture resolves on, from
+	// before the app can read its request until its capture decides it
+	// (callWindows). Whatever is left open when the connection's calls are
+	// all handled ends then: a call with no answer, or cut off.
+	calls := newCallWindows(syncMock.FromContextOrGlobal(ctx))
+	defer calls.stop()
 
 	// Close connections on ctx cancellation to unblock all goroutines.
 	// This ensures no goroutine leaks during shutdown/StopIngress. ctx is
@@ -80,14 +84,14 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// Forward client → dest, tee copies to channel
 	go func() {
 		defer close(clientFrameCh)
-		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app", false, building, stopAsked)
+		forwardAndTee(clientConn, destConn, clientFrameCh, logger, "client→app", false, building, stopAsked, calls)
 	}()
 
 	// Forward dest → client, tee copies to channel; what ends a stream is
 	// stamped before its client can see it (toClient).
 	go func() {
 		defer close(destFrameCh)
-		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client", true, building, stopAsked)
+		forwardAndTee(destConn, clientConn, destFrameCh, logger, "app→client", true, building, stopAsked, nil)
 	}()
 
 	// captureStream closes over ctx, t, appPort, synchronous, and mapping so
@@ -96,9 +100,13 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// before it writes it on (forwardAndTee), so a call's request stamp,
 	// its window's start, is taken before the app sees it, on the proxy's
 	// clock.
+	// The capture takes the call's window and decides it (CaptureGRPC); it
+	// ends here once the capture has, on every path.
 	windowCtx := Utils.WithWindowClock(ctx, fakeconn.NameProxyClock())
 	captureStream := func(stream *pkg.HTTP2Stream) {
-		Utils.CaptureGRPC(windowCtx, logger, t, stream, appPort, synchronous, mapping)
+		win := calls.take(stream.ID)
+		defer win.Close()
+		Utils.CaptureGRPC(syncMock.WithWindow(windowCtx, win), logger, t, stream, appPort, synchronous, mapping)
 	}
 
 	// Single emitter goroutine to avoid duplicate test case emission. Each
@@ -145,13 +153,13 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// Parse client→app frames (requests)
 	go func() {
 		defer parseWg.Done()
-		parseFramesFromChan(logger, clientFrameCh, sm, false, parsed)
+		parseFramesFromChan(logger, clientFrameCh, sm, false, parsed, calls)
 	}()
 
 	// Parse app→client frames (responses)
 	go func() {
 		defer parseWg.Done()
-		parseFramesFromChan(logger, destFrameCh, sm, true, parsed)
+		parseFramesFromChan(logger, destFrameCh, sm, true, parsed, calls)
 	}()
 
 	parseWg.Wait()
@@ -209,7 +217,9 @@ func release(built func()) {
 // its stamp is told of it, however long the forwarder waits between the two.
 //
 // What the client sends the app (toClient false) is noted and stamped as it
-// is read, before its write.
+// is read, before its write. Each call whose request it opens gets its window
+// then, at that stamp, before the write (calls, callWindows.started): no call
+// the app makes for it is older than its window, nor made before it is open.
 //
 // What the app sends its client (toClient true) is noted and stamped after
 // the write that may wait on the client, so a write blocked on a client that
@@ -228,7 +238,7 @@ func release(built func()) {
 // waits on the client with nothing noted that it holds: the parser has the
 // read already. A read that ends no stream is noted and stamped after its
 // write, as before.
-func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, direction string, toClient bool, building func(time.Time) func(), stopAsked func() time.Time) {
+func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, direction string, toClient bool, building func(time.Time) func(), stopAsked func() time.Time, calls *callWindows) {
 	buf := make([]byte, 32*1024)
 	var ends endScanner
 	// noteAndStamp notes a chunk as being built, then reads its stamp: a
@@ -289,6 +299,7 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 			switch {
 			case !toClient:
 				built, at := noteAndStamp(false)
+				calls.started(b, at)
 				if !write(b, built) {
 					return
 				}
@@ -412,12 +423,24 @@ func (s *endScanner) scan(b []byte) []int {
 // whose request or response the forwarders had not wholly read when the stop
 // closed the connections is cut off: its client sees its connection close,
 // not the app's answer. No test case is built of it, and no count says it.
-func parseFramesFromChan(logger *zap.Logger, ch <-chan frameChunk, sm *pkg.DefaultStreamManager, isOutgoing bool, parsed func(built []func())) {
+//
+// A call either side resets (RST_STREAM) before it is complete is forgotten
+// (ResetStream), and its window ends (calls). A parser that gives up ends
+// every window of the connection and opens none from then on: no call on it
+// completes any more, and a window left open would hold every later mock
+// until the hold's bound gave it up.
+func parseFramesFromChan(logger *zap.Logger, ch <-chan frameChunk, sm *pkg.DefaultStreamManager, isOutgoing bool, parsed func(built []func()), calls *callWindows) {
 	var buffer []byte
 	prefaceRead := isOutgoing
 	// One reader for all of the direction's frames: a header block split
 	// across a HEADERS frame and CONTINUATION frames is read as one.
 	frames := pkg.NewFrameReader()
+
+	// giveUp ends the connection's windows, then takes what is left of ch.
+	giveUp := func() {
+		calls.stop()
+		drainFrameChunks(ch)
+	}
 
 	// letGo lets go of a chunk's note once its frames are handled.
 	letGo := func(c frameChunk, handled bool) {
@@ -448,7 +471,7 @@ func parseFramesFromChan(logger *zap.Logger, ch <-chan frameChunk, sm *pkg.Defau
 			if !bytes.Equal(buffer[:len(http2.ClientPreface)], []byte(http2.ClientPreface)) {
 				logger.Debug("unexpected bytes instead of HTTP/2 preface")
 				release(chunk.built)
-				drainFrameChunks(ch)
+				giveUp()
 				return
 			}
 			buffer = buffer[len(http2.ClientPreface):]
@@ -467,7 +490,7 @@ func parseFramesFromChan(logger *zap.Logger, ch <-chan frameChunk, sm *pkg.Defau
 					zap.Uint32("frameLength", frameLength),
 					zap.Uint32("maxFrameSize", pkg.MaxFrameSize))
 				letGo(chunk, handled)
-				drainFrameChunks(ch)
+				giveUp()
 				return
 			}
 			frameSize := int(frameLength) + 9
@@ -479,7 +502,7 @@ func parseFramesFromChan(logger *zap.Logger, ch <-chan frameChunk, sm *pkg.Defau
 			if err != nil {
 				logger.Debug("frame parser finished", zap.Bool("isOutgoing", isOutgoing), zap.Error(err))
 				letGo(chunk, handled)
-				drainFrameChunks(ch)
+				giveUp()
 				return
 			}
 			buffer = buffer[frameSize:]
@@ -489,6 +512,9 @@ func parseFramesFromChan(logger *zap.Logger, ch <-chan frameChunk, sm *pkg.Defau
 
 			if err := sm.HandleFrameRead(frame, isOutgoing, chunk.timestamp, chunk.paused); err != nil {
 				logger.Debug("stream manager error", zap.Error(err))
+			}
+			if rst, ok := frame.(*http2.RSTStreamFrame); ok && sm.ResetStream(rst.StreamID) {
+				calls.reset(rst.StreamID)
 			}
 			handled = true
 		}

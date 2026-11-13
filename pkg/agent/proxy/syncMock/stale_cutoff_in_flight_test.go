@@ -487,8 +487,8 @@ func TestAStaleCutoffOverALargeBufferWritesNoLineUnderMu(t *testing.T) {
 const heldThenLetGo = "held_then_let_go"
 
 // TestAHeldStaleMockLetGoWhenItsWindowClosesLeavesOutTheWindowlessRequest is
-// the gRPC shape beside an HTTP one: request A opens no window (its ingress
-// opens none), while an HTTP request W, which did, is in flight from before
+// a windowless request beside an HTTP one: request A opens no window (its
+// ingress opens none), while an HTTP request W, which did, is in flight from before
 // A's call. The cutoff holds A's call for W. W then ends without taking it
 // (closed with no verdict: aborted, or filtered), and the hold lets go of it.
 // A, decided after, must be left out with the drop told to OnDrop at once and
