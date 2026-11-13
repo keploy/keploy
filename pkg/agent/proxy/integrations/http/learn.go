@@ -1923,14 +1923,12 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			// A Cookie header that lost only pairs the page itself sets
 			// while its test runs (pagePairsGone) learns those pairs'
-			// noise, and is no change of the header to classify.
+			// noise, and is no change of the header to classify. A leaf
+			// drifts only where both sides hold it (a header one side
+			// lacks differs in more than values).
 			var pagePairs []learn.Learned
 			if slices.Contains(drift, cookieLeaf) {
-				r, inRec := c.Shape.Leaves[cookieLeaf]
-				l, inLive := liveShape.Leaves[cookieLeaf]
-				if inRec && inLive {
-					pagePairs = pagePairsGone(m, r.Value, l.Value, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...))
-				}
+				pagePairs = pagePairsGone(m, c.Shape.Leaves[cookieLeaf].Value, liveShape.Leaves[cookieLeaf].Value, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...))
 			}
 			if len(pagePairs) > 0 {
 				drift = slices.DeleteFunc(slices.Clone(drift), func(p string) bool { return p == cookieLeaf })

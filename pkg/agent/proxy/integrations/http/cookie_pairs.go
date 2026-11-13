@@ -173,7 +173,7 @@ func goneAsLearned(learned map[string][]string, rec, live string) bool {
 }
 
 // pagePairsGone are the learned noise of a call paired with m, an HTTP
-// mock, whose Cookie header rec, as recorded, lost pairs in this run (live:
+// mock (its request recorded), whose Cookie header rec, as recorded, lost pairs in this run (live:
 // pairsGone) that the page itself set while the test ran: noise at each
 // such pair's key (cookieSetByPage). A pair is the page's where m's earlier
 // recordings (earlier: those the learn step reads as m's earlier places)
@@ -186,13 +186,14 @@ func goneAsLearned(learned map[string][]string, rec, live string) bool {
 // header is then learned, or refused, as before.
 func pagePairsGone(m *models.Mock, rec, live string, earlier []*models.Mock) []learn.Learned {
 	gone, ok := pairsGone(rec, live)
-	if !ok || m == nil || m.Spec.HTTPReq == nil {
+	if !ok {
+		// Nothing gone: no recording before m is read.
 		return nil
 	}
 	at, host := m.Spec.ReqTimestampMock, hostOf(m.Spec.HTTPReq)
 	without := make(map[string]bool, len(gone))
 	for _, b := range earlier {
-		if b == nil || b == m || b.Kind != models.HTTP || b.Spec.HTTPReq == nil || !b.Spec.ReqTimestampMock.Before(at) {
+		if b == nil || b.Spec.HTTPReq == nil || !b.Spec.ReqTimestampMock.Before(at) {
 			continue
 		}
 		answered, err := withResponse(b)

@@ -229,6 +229,15 @@ func pageCall(name string, at time.Duration, cookie, set string) *models.Mock {
 	return m
 }
 
+func urlAt(m *models.Mock, u string) *models.Mock { m.Spec.HTTPReq.URL = u; return m }
+
+func hostAt(m *models.Mock, host string) *models.Mock { m.Spec.HTTPReq.Header["Host"] = host; return m }
+
+func lowerSet(m *models.Mock, set string) *models.Mock {
+	m.Spec.HTTPResp.Header["set-cookie"] = set
+	return m
+}
+
 // learnPageCookie runs the learn step on a POST /v1/apps recorded with the
 // Cookie header rec after the test's earlier calls, sent in this run with
 // live: what it learned onto the mock, or why it refused the call.
@@ -250,8 +259,48 @@ func learnPageCookie(t *testing.T, earlier []*models.Mock, rec, live string) (ma
 	return db.consumed[0].Spec.ReqBodyNoise, ""
 }
 
+// livePageCall is the POST /v1/apps sent with the Cookie header cookie
+// (none where "").
 func livePageCall(cookie string) *req {
+	if cookie == "" {
+		return live("POST", "/v1/apps", `{"name":"a"}`, nil)
+	}
 	return live("POST", "/v1/apps", `{"name":"a"}`, map[string]string{"Cookie": cookie})
+}
+
+// pagePairsGone reads past what is no earlier HTTP recording of the call (a
+// nil, another protocol's mock), and a recording whose answer keploy cannot
+// read back is one that may have set the pair.
+func TestPagePairsGoneReadsOnlyHTTPRecordings(t *testing.T) {
+	m := learnRecorded("mock-9", -time.Hour+300*time.Millisecond, "POST", "/v1/apps", `{}`, map[string]string{"Cookie": "session=s1; sub=pro"}, `{}`)
+	without := pageCall("mock-1", -200*time.Millisecond, "session=s1", "")
+	other := &models.Mock{Name: "mock-2", Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: without.Spec.ReqTimestampMock}}
+	unread := pageCall("mock-3", -100*time.Millisecond, "session=s1", "")
+	unread.Spec.HTTPResp = nil
+	for _, c := range []struct {
+		name    string
+		earlier []*models.Mock
+		page    bool
+	}{
+		{"a nil among them", []*models.Mock{nil, without}, true},
+		{"another protocol's mock", []*models.Mock{other, without}, true},
+		{"an answer keploy cannot read back", []*models.Mock{without, unread}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var got []learn.Learned
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("pagePairsGone panicked: %v", r)
+					}
+				}()
+				got = pagePairsGone(m, "session=s1; sub=pro", "session=s1", c.earlier)
+			}()
+			if (len(got) == 1 && got[0].Recorded.Path == cookieSetByPage+"sub") != c.page || len(got) > 1 {
+				t.Fatalf("learned %+v, want the page's pair %v", got, c.page)
+			}
+		})
+	}
 }
 
 // A call that goes without a Cookie pair the page set while its test ran
@@ -259,8 +308,9 @@ func livePageCall(cookie string) *req {
 // without it; and no answer before the call set it) learns that pair as
 // the page's (cookieSetByPage), not the whole header as noise. A pair the
 // test began with, one a service set, or a header that changed otherwise is
-// learned as before (nil: the whole header as noise, or the call refused
-// naming the pairs that differ), never as the page's.
+// learned as before (nil: the whole header as noise, or the call refused,
+// naming the pairs that differ where only values did), never as the
+// page's.
 func TestLearnMatchLearnsAPairThePageSets(t *testing.T) {
 	const rec = "session=s1; sub=pro"
 	page := map[string][]string{cookieSetByPage + "sub": {}}
@@ -281,6 +331,11 @@ func TestLearnMatchLearnsAPairThePageSets(t *testing.T) {
 	}{
 		{"set by the page", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "")}, "session=s1", page},
 		{"set by the page, the first call sent no Cookie", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "", "")}, "session=s1", page},
+		{"set by the page, the first call's URL names the host", []*models.Mock{urlAt(pageCall("mock-1", -200*time.Millisecond, "session=s1", ""), "http://API.test/v1/plan")}, "session=s1", page},
+		{"set by the page, the first call's Host in capitals", []*models.Mock{hostAt(pageCall("mock-1", -200*time.Millisecond, "session=s1", ""), "API.Test")}, "session=s1", page},
+		{"set by the page beside a service's pair named like it", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "subtotal=9; Path=/")}, "session=s1", page},
+		{"a service set it, its header in lower case", []*models.Mock{lowerSet(pageCall("mock-1", -200*time.Millisecond, "session=s1", ""), "sub=pro")}, "session=s1", whole},
+		{"the call sent no Cookie header", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "", "")}, "", whole},
 		{"no earlier call", nil, "session=s1", whole},
 		{"the test began with it", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, rec, "")}, "session=s1", whole},
 		{"only a call to another host went without it", []*models.Mock{other}, "session=s1", whole},
@@ -299,8 +354,8 @@ func TestLearnMatchLearnsAPairThePageSets(t *testing.T) {
 				}
 				return
 			}
-			if _, page := got[cookieSetByPage+"sub"]; page || why != "" && !strings.Contains(why, "header.cookie (pair") || why == "" && !reflect.DeepEqual(got, map[string][]string{cookieLeaf: {}}) {
-				t.Fatalf("learned %v (refused: %q), want the whole header as noise or a refusal naming its pairs", got, why)
+			if _, page := got[cookieSetByPage+"sub"]; page || why == "" && !reflect.DeepEqual(got, map[string][]string{cookieLeaf: {}}) {
+				t.Fatalf("learned %v (refused: %q), want the whole header as noise or a refusal", got, why)
 			}
 		})
 	}
@@ -324,16 +379,21 @@ func TestStrictServesACallWithoutAPairThePageSets(t *testing.T) {
 		{"the session changed", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s2", false},
 		{"nothing learned", nil, nil, "session=s1", false},
 		{"keploy.yml's patterns guard the header", map[string][]string{cookieSetByPage + "sub": {}}, map[string][]string{"cookie": {"^z$"}}, "session=s1", false},
+		{"another header holding pairs", map[string][]string{cookieSetByPage + "sub": {}}, nil, "x-jar:session=s1", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			rec := recorded("m", "/v1/apps", map[string]string{"Cookie": "session=s1; sub=pro"}, "")
+			name, live, field := "Cookie", c.live, "header.cookie"
+			if v, ok := strings.CutPrefix(live, "x-jar:"); ok {
+				name, live, field = "X-Jar", v, "header.x-jar"
+			}
+			rec := recorded("m", "/v1/apps", map[string]string{name: "session=s1; sub=pro"}, "")
 			rec.Spec.ReqBodyNoise = c.learned
-			got, diag := strictMatch(t, sent("/v1/apps", map[string]string{"Cookie": c.live}, ""), c.noise, nil, nil, rec)
+			got, diag := strictMatch(t, sent("/v1/apps", map[string]string{name: live}, ""), c.noise, nil, nil, rec)
 			if (got != nil) != c.served {
 				t.Fatalf("served %v, want %v (differs %v)", got != nil, c.served, differs(diag))
 			}
-			if !c.served && !hasField(differs(diag), "header.cookie") {
-				t.Fatalf("differs %v does not name header.cookie", differs(diag))
+			if !c.served && !hasField(differs(diag), field) {
+				t.Fatalf("differs %v does not name %s", differs(diag), field)
 			}
 		})
 	}
@@ -357,6 +417,11 @@ func TestExcusedPairOfAPairThePageSets(t *testing.T) {
 	}
 	if ok, _ := k.ExcusedPair(rec, gone, true, false); ok {
 		t.Fatal("a header the call did not send is excused")
+	}
+	jar, jarGone := rec, gone
+	jar.Path, jar.Noise, jarGone.Path, jarGone.Noise = "header.x-jar", "header.x-jar", "header.x-jar", "header.x-jar"
+	if ok, _ := k.ExcusedPair(jar, jarGone, true, true); ok {
+		t.Fatal("another header holding pairs is excused")
 	}
 	opts.NoiseConfig = map[string]map[string][]string{"header": {"cookie": {"^z$"}}}
 	if ok, _ := (httpKnown{n: h.newLearnNoise(opts, nil, nil), learned: learned}).ExcusedPair(rec, gone, true, true); ok {
