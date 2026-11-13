@@ -12,7 +12,10 @@ import (
 // polled is the i-th of a page's polls of query q that no test was charged
 // with, as the proxy hands it at a run's end: every occurrence lands at its
 // own moment, in its own window, from its own renderer process and worker,
-// a repeat of the same spent recording at its own gaps.
+// a repeat of the same spent recording at its own gaps. The callers poll
+// the queries in turn (i%4), so whether a gap runs from the test's start
+// or its record gap is known turns on i/4: it changes between the polls of
+// one query, as it does in a run.
 func polled(q string, i int) models.UnmatchedCall {
 	at := time.Date(2026, 11, 12, 21, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Second)
 	return models.UnmatchedCall{
@@ -27,7 +30,7 @@ func polled(q string, i int) models.UnmatchedCall {
 		Instance:      uint32(i % 3),
 		Source:        &models.Origin{PID: uint32(1000 + i), Comm: "chrome-headless", Exe: "/ms-playwright/chrome", Cmdline: fmt.Sprintf("chrome --renderer-client-id=%d", i)},
 		Repeat: &models.RepeatNote{Mock: "mock-611", Test: "atg-features::pages/schema.spec.ts::test", RecordedAt: time.Date(2026, 11, 12, 20, 0, 0, 0, time.UTC),
-			ReplayGapSeconds: float64(i), ReplayGapFromStart: i%2 == 0, RecordGapSeconds: float64(2 * i), RecordGapKnown: i%2 == 1,
+			ReplayGapSeconds: float64(i), ReplayGapFromStart: (i/4)%2 == 0, RecordGapSeconds: float64(2 * i), RecordGapKnown: (i/4)%3 == 1,
 			RecordedLast: fmt.Sprintf("mock-%d", 700+i)},
 	}
 }
