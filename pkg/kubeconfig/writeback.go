@@ -342,7 +342,9 @@ func prunedOf(n *yaml.Node) any {
 	return v
 }
 
-// rootOf is the config data holds, or nil when it holds none.
+// rootOf is the config data holds, or nil when it holds none (an empty
+// file). A root that is no mapping, null too, is refused, as Rewrite and
+// applied refuse it.
 func rootOf(data []byte) (*yaml.Node, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
@@ -353,10 +355,6 @@ func rootOf(data []byte) (*yaml.Node, error) {
 	}
 	root := deref(doc.Content[0])
 	if root.Kind != yaml.MappingNode {
-		var v any
-		if err := root.Decode(&v); err == nil && v == nil {
-			return nil, nil // null: an empty config
-		}
 		return nil, fmt.Errorf("not a YAML mapping")
 	}
 	return root, nil
@@ -374,11 +372,17 @@ func itemNamed(root *yaml.Node, list, name string) *yaml.Node {
 		return nil
 	}
 	for _, it := range get(root, list).Content {
-		if it = deref(it); it.Kind == yaml.MappingNode && get(it, "name").Value == name {
-			return it
+		if isNamed(it, name) {
+			return deref(it)
 		}
 	}
 	return nil
+}
+
+// isNamed is whether it, an item of a list, is a mapping named name.
+func isNamed(it *yaml.Node, name string) bool {
+	it = deref(it)
+	return it.Kind == yaml.MappingNode && get(it, "name").Value == name
 }
 
 // valueOf is the value of key in mapping m, or nil.
@@ -397,9 +401,6 @@ func keysOf(ms ...*yaml.Node) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, m := range ms {
-		if m == nil {
-			continue
-		}
 		for i := 0; i+1 < len(m.Content); i += 2 {
 			if k := m.Content[i].Value; !seen[k] {
 				seen[k] = true
@@ -444,7 +445,7 @@ func appendItem(root *yaml.Node, list string, item *yaml.Node) {
 	l.Style = 0 // a list written [] goes on as a block
 	name := get(item, "name").Value
 	for i, it := range l.Content {
-		if it = deref(it); it.Kind == yaml.MappingNode && get(it, "name").Value == name {
+		if isNamed(it, name) {
 			l.Content[i] = item
 			return
 		}
@@ -452,18 +453,15 @@ func appendItem(root *yaml.Node, list string, item *yaml.Node) {
 	l.Content = append(l.Content, item)
 }
 
-// removeItem removes each item of root's list named name.
+// removeItem removes each item of root's list named name; a list root does
+// not hold is left so.
 func removeItem(root *yaml.Node, list, name string) {
-	l, ok := lookup(root, list)
-	if !ok {
-		return
-	}
+	l := get(root, list)
 	kept := l.Content[:0]
 	for _, it := range l.Content {
-		if d := deref(it); d.Kind == yaml.MappingNode && get(d, "name").Value == name {
-			continue
+		if !isNamed(it, name) {
+			kept = append(kept, it)
 		}
-		kept = append(kept, it)
 	}
 	l.Content = kept
 }
@@ -518,7 +516,10 @@ func writeNew(ref, infix string, data []byte, mode os.FileMode, opt WriteOptions
 		if err != nil {
 			return "", err
 		}
-		return p, finish(f, ref, data, mode, opt)
+		if err := finish(f, ref, data, mode, opt); err != nil {
+			return "", err // finish removed it
+		}
+		return p, nil
 	}
 }
 
