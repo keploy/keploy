@@ -914,3 +914,30 @@ func TestRecordV2_TwoDeepPipeliningIntoTheTailOfAnAnswerLeftOut(t *testing.T) {
 		})
 	}
 }
+
+// The client's next command after the exchange taken up confirms it however
+// short the command is: a COM_PING is one byte. On a connection that ends
+// after the ping, the exchange taken up is recorded, confirmed at the ping;
+// held on to the end, it was left out.
+func TestRecordV2_APingConfirmsTheAnswerTakenUp(t *testing.T) {
+	t.Parallel()
+	xs := kitTraffic(t, []int{7, 8}, false)
+	xs[2].reply = append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[2].reply...)
+	ping := exchange{command: wrapPacket([]byte{mysql.COM_PING}, 0), reply: frame([][]byte{{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}})}
+	laid := append(append([]exchange{}, xs[:4]...), ping)
+	rec := recordWire(t, laid, 16384, true, time.Minute)
+	pings := 0
+	var queries []*models.Mock
+	for _, m := range rec.mocks {
+		if m.Spec.Metadata["requestOperation"] == "COM_PING" {
+			pings++
+			continue
+		}
+		queries = append(queries, m)
+	}
+	if pings != 1 {
+		t.Fatalf("%d COM_PING mocks, want 1", pings)
+	}
+	rec.mocks = queries
+	requireRealigned(t, rec, commandAt(t, laid, 16384, 2), 3)
+}
