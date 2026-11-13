@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,6 +220,71 @@ func TestOnlyACallsTimeAndValuesMayDifferForItToFold(t *testing.T) {
 			}
 			if n := len(heldTimes(t, held[0])); row.fold != (n > 0) {
 				t.Fatalf("the held miss carries %d folded times; folded %v", n, row.fold)
+			}
+		})
+	}
+}
+
+// A miss with no report (a protocol whose matcher emits none) says nothing of
+// what it was, so no miss is alike to it: past its list's room each one is
+// kept on its own, never folded into another, even one of the same call.
+func TestAMissWithNoReportNeverFolds(t *testing.T) {
+	unreported := func(i int) error {
+		return models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: fmt.Errorf("call %d: %w", i, models.ErrNoMockMatched)}
+	}
+	a := &testErrorAccumulator{}
+	if !a.addBounded(unreported(0), 1) {
+		t.Fatal("the first miss was not held")
+	}
+	for i := 1; i <= 2; i++ {
+		if !a.addBounded(unreported(i), 1) {
+			t.Fatalf("miss %d past the room was not kept: %s", i, a.lostWhy())
+		}
+	}
+	if n := func() int {
+		if a.spill == nil {
+			return 0
+		}
+		return a.spill.n
+	}(); n != 2 {
+		t.Fatalf("the disk keeps %d misses; want the 2 past the room, each on its own", n)
+	}
+	got := drained(t, a)
+	if len(got) != 3 {
+		t.Fatalf("read back %d misses; want the held one and the 2 kept past it", len(got))
+	}
+	for i, err := range got {
+		pe, ok := err.(models.ParserError)
+		if !ok || pe.MismatchReport != nil || pe.Err == nil || !strings.HasPrefix(pe.Err.Error(), fmt.Sprintf("call %d:", i)) {
+			t.Fatalf("miss %d reads %#v; want call %d's, with no report", i, err, i)
+		}
+	}
+}
+
+// A miss made before its set and one made in an earlier set are read apart
+// (the read says which), so neither folds into the other, though their call
+// is the same. One list holds both: a call of an earlier set's test that the
+// set's start kept, and one made before the set's first test.
+func TestMissesMadeInDifferentSetsAreNotAlike(t *testing.T) {
+	noSpillRoom(t)
+	for name, wrap := range map[string][2]func(error) error{
+		"one made in an earlier set past one made before its set": {asBeforeSet, asEarlierSet},
+		"one made before its set past one made in an earlier set": {asEarlierSet, asBeforeSet},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := &testErrorAccumulator{}
+			if !a.addBounded(wrap[0](pollerMiss(0)), 1) {
+				t.Fatal("the first miss was not held")
+			}
+			if a.addBounded(wrap[1](pollerMiss(1)), 1) {
+				t.Fatal("a miss made in another set was folded into the held one")
+			}
+			held := drained(t, a)
+			if len(held) != 1 {
+				t.Fatalf("the list holds %d misses; want the one it had room for", len(held))
+			}
+			if at := heldTimes(t, held[0]); len(at) != 0 {
+				t.Fatalf("the held miss carries the folded times %v; want none", at)
 			}
 		})
 	}
