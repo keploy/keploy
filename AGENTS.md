@@ -247,7 +247,15 @@ Note: All of the things mentioned in Conventions can be ignored if you are not s
    - `grpc_linux.yml` — gRPC-specific go matrix
    - `schema_match_linux.yml` — schema-match matrix (python)
    - `fuzzer_linux.yml`, `node_mapping.yml` — specialised
-4. **Gates on a single job `gate`**. That's the only required status check — re-running the `gate` alone is pointless; it just re-checks upstream results.
+4. **Measures unit coverage** in the `unit_coverage` job: `go test -cover ./...` without private parsers or lane-only env vars, checked against the floor in `.github/coverage-floor.yaml` (see below).
+5. **Gates on a single job `gate`**. That's the only required status check — re-running the `gate` alone is pointless; it just re-checks upstream results.
+
+### Coverage floor and nightly fuzzing
+
+- **Coverage floor.** `.github/coverage-floor.yaml` holds the lowest coverage of keploy's own code CI accepts: `unit` (checked on every PR by `unit_coverage`) and `merged` (unit plus the native-Linux record/replay lanes, checked each night by `coverage-nightly.yml`), each with a tolerance. `test_workflow_scripts/coverage-floor.sh` measures and checks them. A floor can only go up: a PR that lowers one fails. When a run prints headroom you want to keep, raise the floor in the same PR, to the measured value rounded down to one decimal. The unit number leaves out packages with no test file; the merged number has every package linked into keploy, so the two are not comparable.
+- **Nightly coverage.** `coverage-nightly.yml` builds keploy with `-cover -coverpkg=./...`, runs the public `golang_linux.yml` lanes with it, merges their data with the unit run's, and fails a lane whose data shows the agent never ran (`covdata-assert.sh`).
+- **Nightly fuzzing.** `fuzz-nightly.yml` fuzzes every `Fuzz*` target for 10 minutes each night; `fuzz-targets.sh` finds them with `go test -list`, so a new target needs no workflow edit. To reproduce a crash, download the run's `fuzz-crasher-*` artifact into `<pkg>/testdata/fuzz/<FuzzName>/` and run `go test -run '<FuzzName>/<file>' ./<pkg>`. Commit the file with the fix so every PR runs it; `testdata` is in `.gitignore`, so re-include that directory there, as the other checked-in fixtures are.
+- A failing nightly check opens or updates one issue labelled `nightly-failure` (`.github/actions/report-nightly-failure`).
 
 ### Matrix structure (the pattern every language workflow follows)
 

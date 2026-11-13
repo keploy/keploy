@@ -46,6 +46,10 @@ Advantages are identical to the binary‑artifact strategy – and the image nev
 | `.github/actions/download-artifact-retry/action.yml` | Composite action – `actions/download-artifact@v8`, tried up to three times. Every artifact download goes through it (`check-artifact-downloads.sh` keeps it so): v8 fails at once on one reset connection to the artifact service. A job that uses it checks out this repository first. |
 | `.github/workflows/*_linux.yml`, `*_docker.yml`, … | Language/sample workflows. They declare the 3‑row matrix and obtain the two binaries (and, for Docker flows, the image) via the composite actions.                                  |
 | `.github/workflows/test_workflow_scripts/*.sh`     | Bash helpers that run the sample under record / replay. All scripts use the two env vars **`$RECORD_BIN`** / **`$REPLAY_BIN`** that the workflow passes in.                         |
+| `.github/coverage-floor.yaml`                      | The lowest unit and merged (unit plus record/replay) coverage of keploy's own code CI accepts. `coverage-floor.sh` checks it; a PR may raise a floor, never lower it.              |
+| `.github/workflows/coverage-nightly.yml`           | Nightly: the public Go Linux lanes run by a keploy built with `-cover`, merged with the unit run's coverage and checked against the merged floor.                                  |
+| `.github/workflows/fuzz-nightly.yml`               | Nightly: every `Fuzz*` target fuzzed for 10 minutes; a crash uploads its input and opens an issue.                                                                                 |
+| `.github/actions/report-nightly-failure/action.yml` | Composite action – opens an issue labelled `nightly-failure` for a failed nightly check, or comments on the open one with the same title.                                       |
 
 ### Why fail-fast: false in every matrix?
 
