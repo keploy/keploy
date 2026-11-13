@@ -337,7 +337,7 @@ func TestAClientThatLeftBeforeTheAnswersEndLeavesNoNoteForAStop(t *testing.T) {
 		t.Run(fmt.Sprintf("synchronous %v, half-closed %v", tc.synchronous, tc.halfClose), func(t *testing.T) {
 			gone := make(chan struct{})
 			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				if f, ok := w.(http.Flusher); ok {

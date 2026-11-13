@@ -860,6 +860,106 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 	}
 }
 
+// What the application left runs on only where keploy adopts it: a child
+// keploy holds no pidfd on (one a library forked) is not the application's
+// when keploy adopts nothing; a read of its children that fails says nothing
+// runs on, and one whose children keep changing that something may.
+func TestAppRunsOnOnlyWhatKeployAdopted(t *testing.T) {
+	pid, err := syscall.ForkExec("/bin/sh", []string{"sh", "-c", "sleep 30"}, &syscall.ProcAttr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		var ws syscall.WaitStatus
+		_, _ = syscall.Wait4(pid, &ws, 0, nil)
+	})
+	await(t, "the child running", func() bool { return parentIs(pid, os.Getpid()) })
+	was := adopting.Load()
+	t.Cleanup(func() { adopting.Store(was) })
+	adopting.Store(false)
+	if appRunsOn(zap.NewNop(), nil) {
+		t.Fatal("a child keploy did not adopt reads as the application running on")
+	}
+	adopting.Store(true)
+	scan := scanChildren
+	t.Cleanup(func() { scanChildren = scan })
+	scanChildren = func() ([]child, error) { return nil, errors.New("proc is gone") }
+	if appRunsOn(zap.NewNop(), nil) {
+		t.Fatal("a read of the children that failed says the application runs on")
+	}
+	n := 0
+	scanChildren = func() ([]child, error) { n++; return []child{{pid: 1<<22 + n}}, nil }
+	if !appRunsOn(zap.NewNop(), nil) {
+		t.Fatal("children that kept changing over every read say nothing runs on")
+	}
+}
+
+// An application whose command exits on its own, leaving a daemon that
+// runs on, is waited on before keploy stops that daemon: the run's
+// BeforeStop is called while the daemon runs, says so, and says so no more
+// once the daemon ended on its own; the daemon finished what it does after
+// the command's exit (its last write), not stopped. A run keploy stopped at
+// a set's end calls no BeforeStop.
+func TestARunWaitsOnWhatTheCommandLeftBeforeItStopsIt(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	for _, ownExit := range []bool{true, false} {
+		dir := t.TempDir()
+		ready, goOn, done := filepath.Join(dir, "ready"), filepath.Join(dir, "go"), filepath.Join(dir, "done")
+		daemon := `: > ` + ready + `; until [ -e ` + goOn + ` ]; do sleep 0.02; done; : > ` + done
+		then := "exec " + testproc.UntilTheTestEnds
+		if ownExit {
+			then = "until [ -e " + ready + " ]; do sleep 0.02; done; exit 0"
+		}
+		cfg := &config.Config{}
+		cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
+		client := New(zap.NewNop(), nil, cfg)
+		client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
+			`sh -c 'setsid sh -c "`+daemon+`" >/dev/null 2>&1 </dev/null &'; `+then, nil,
+			models.SetupOptions{CommandType: string(utils.Native)}))
+		var ranAtStart, ranAtEnd, called bool
+		opts := models.RunOptions{BeforeStop: func(_ context.Context, running func() bool) {
+			called = true
+			ranAtStart = running()
+			if err := os.WriteFile(goOn, nil, 0o644); err != nil {
+				t.Error(err)
+				return
+			}
+			await(t, "the daemon ends on its own", func() bool { return !running() })
+			_, err := os.Stat(done)
+			ranAtEnd = err == nil
+		}}
+		ctx, cancel := context.WithCancelCause(context.Background())
+		result := make(chan models.AppError, 1)
+		go func() { result <- client.Run(ctx, opts) }()
+		await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+		if !ownExit {
+			cancel(models.ErrAppStoppedForSetEnd)
+		}
+		<-result
+		cancel(nil)
+		if !ownExit {
+			if called {
+				t.Fatal("a run keploy stopped at the set's end called BeforeStop")
+			}
+			continue
+		}
+		if !called || !ranAtStart {
+			t.Fatalf("BeforeStop called %v, running at its start %v; want it called while the daemon ran", called, ranAtStart)
+		}
+		if !ranAtEnd {
+			t.Fatal("the daemon was stopped before it made its last write")
+		}
+	}
+}
+
 // Only a step on a daemon's way out moves the run's teardown: one that opens
 // and closes a file over and over, ignoring the request to stop, moves it at
 // most once (its first look below where the stop found it is a file fewer,

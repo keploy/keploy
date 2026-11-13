@@ -258,7 +258,14 @@ func sqsPoll(input *req) bool {
 // the pairing, its answer and x stay as they are, and the replay names the
 // earlier test and measures the gaps at the set's end (markRepeatOf), as it
 // does a miss's.
-func reportPairing(ctx context.Context, input *req, x *models.Mock, a integrations.AnsweredCall, repeat bool) {
+//
+// The report carries the round its call was made in (call, where the
+// request's first read of the round found it: integrations.StampMark), as a
+// miss's does: the proxy lists an answer under the test whose read takes it,
+// and places it by that mark, so a pairing keploy decides after the next
+// test's install is listed under the test that made the call, never the
+// next one.
+func reportPairing(ctx context.Context, input *req, x *models.Mock, a integrations.AnsweredCall, repeat bool, call integrations.CallRound) {
 	path, dest := "/", input.header.Get("Host")
 	if input.url != nil {
 		if escaped := input.url.EscapedPath(); escaped != "" {
@@ -277,6 +284,7 @@ func reportPairing(ctx context.Context, input *req, x *models.Mock, a integratio
 	if repeat {
 		r.Repeat = models.NewRepeatNote(a.Mock.Name, a.AnsweredAt, a.Mock.Spec.ReqTimestampMock, r.At)
 	}
+	integrations.StampMark(r, call)
 	models.ReportAnswer(ctx, r)
 	if t := learn.TrackerFrom(ctx); t != nil {
 		// In this connection's request (integrations.InFlightOf), as a

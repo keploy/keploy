@@ -76,7 +76,7 @@ func TestTheSkippedReadsAndTheMarksCrossTheScopeTableWire(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	client := agenthttp.New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv.URL}})
-	if err := client.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-2"}}, map[string]string{"mock-2": "o::TestCRUD"}, nil, nil, nil, nil, map[string][]string{"o::TestA": {"mock-3"}}); err != nil {
+	if err := client.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-2"}}, map[string]string{"mock-2": "o::TestCRUD"}, nil, nil, nil, nil, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(body, `"skippedReads":{"mock-2":"o::TestCRUD"}`) || !strings.Contains(body, `"notRequired":{"o::TestA":["mock-3"]}`) {
@@ -118,7 +118,7 @@ func TestTheSkippedReadsAndTheTrailsCrossTheScopeTableWireApart(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := agenthttp.New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv.URL}})
 	worker := map[string][]string{"o": {"mock-1", "mock-2"}}
-	if err := client.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, worker, worker, map[string]string{"mock-2": "o::TestCRUD"}, map[string]string{"mock-1": "o::TestA"}, nil, nil, nil, nil); err != nil {
+	if err := client.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, worker, worker, map[string]string{"mock-2": "o::TestCRUD"}, map[string]string{"mock-1": "o::TestA"}, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(body, `"skippedReads":{"mock-2":"o::TestCRUD"}`) || !strings.Contains(body, `"trails":{"mock-1":"o::TestA"}`) {
@@ -126,5 +126,68 @@ func TestTheSkippedReadsAndTheTrailsCrossTheScopeTableWireApart(t *testing.T) {
 	}
 	if !maps.Equal(skipped, map[string]string{"mock-2": "o::TestCRUD"}) || !maps.Equal(trails, map[string]string{"mock-1": "o::TestA"}) || !slices.Equal(ps.order, []string{"windows", "worker", "skipped", "trails", "pool"}) {
 		t.Fatalf("the agent installed skipped reads %v, trails %v, in the order %v; want each its own, before the pool", skipped, trails, ps.order)
+	}
+}
+
+// backgroundSvc is workerSvc that also takes the set's background
+// recordings' names (scopeBackgroundSetter).
+type backgroundSvc struct {
+	workerSvc
+	background *[]string
+	set        *int
+}
+
+func (s backgroundSvc) SetScopeBackground(_ context.Context, names []string) error {
+	*s.background = names
+	*s.set++
+	s.order = append(s.order, "background")
+	return nil
+}
+
+// The set's background recordings (its worker: and startup: mocks) cross
+// the scope table's wire under "background", and the route installs them
+// before the pool, whose serving stages the set and hands them to the proxy
+// with it: installed after, the staging would hand the proxy none, and no
+// parser could mark a poll made once more than recorded as the
+// application's own. A table that names none installs none, so a set never
+// keeps the previous set's; an agent that cannot take them takes the table
+// all the same, and every miss stays its test's.
+func TestTheBackgroundRecordingsCrossTheScopeTableWireBeforeThePool(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ps, background, set := &poolSvc{}, []string{}, 0
+	a := &Agent{logger: zap.NewNop(), svc: backgroundSvc{workerSvc{ps}, &background, &set}}
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		a.HandleScopeTable(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	client := agenthttp.New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv.URL}})
+	pool := map[string][]string{".": {"mock-0", "mock-3733", "mock-3735"}}
+	worker := map[string][]string{".": {"mock-3733", "mock-3735"}}
+	if err := client.PushProvenTable(context.Background(), map[string][]string{".::TestGetCurrentUser": {"mock-3734"}}, pool, worker, nil, nil, nil, nil, nil, nil, []string{"mock-3733", "mock-3735", "mock-0"}, nil, nil, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, `"background":["mock-3733","mock-3735","mock-0"]`) {
+		t.Fatalf("the CLI posted %s; want the background recordings under \"background\"", body)
+	}
+	if !slices.Equal(background, []string{"mock-3733", "mock-3735", "mock-0"}) || !slices.Equal(ps.order, []string{"windows", "worker", "background", "pool"}) {
+		t.Fatalf("the agent installed the background recordings %v, in the order %v; want them, before the pool", background, ps.order)
+	}
+	if err := client.PushProvenTable(context.Background(), map[string][]string{".::TestGetCurrentUser": {"mock-3734"}}, pool, worker, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, `"background"`) || background != nil || set != 2 {
+		t.Fatalf("a table naming none posted %s and installed %v (%d installs); want none installed, the previous set's cleared", body, background, set)
+	}
+	// An agent that cannot take them takes the table.
+	b := &Agent{logger: zap.NewNop(), svc: workerSvc{&poolSvc{}}}
+	srv2 := httptest.NewServer(http.HandlerFunc(b.HandleScopeTable))
+	t.Cleanup(srv2.Close)
+	client2 := agenthttp.New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv2.URL}})
+	if err := client2.PushProvenTable(context.Background(), map[string][]string{".::TestGetCurrentUser": {"mock-3734"}}, pool, worker, nil, nil, nil, nil, nil, nil, []string{"mock-3733"}, nil, nil, nil, false); err != nil {
+		t.Fatalf("an agent that takes no background recordings refused the table: %v", err)
 	}
 }

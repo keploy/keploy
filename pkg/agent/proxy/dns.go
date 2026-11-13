@@ -16,6 +16,7 @@ import (
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -522,6 +523,11 @@ func (p *Proxy) isRedundantSearchExpansion(name string) bool {
 func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) dnsCacheEntry {
 	switch mode {
 	case models.MODE_TEST:
+		// The question's round as it reaches keploy, which its miss carries
+		// (StampMark): forwarding it below can take long enough for the
+		// replay to begin the next test before the miss is filed, and the
+		// miss is listed where its question was asked.
+		mark := p.dnsCallRound()
 		// Use recorded DNS mocks only.
 		if mockingEnabled {
 			if resp, mocked := p.getMockedDNSResponse(question); mocked {
@@ -766,16 +772,21 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				zap.String("hint", "DNS mocks may be missing. Re-record to capture DNS queries."),
 			)
 			missed := time.Now()
+			report := &models.MockMismatchReport{
+				At:            missed,
+				Protocol:      "DNS",
+				ActualSummary: fmt.Sprintf("%s %s", dns.TypeToString[question.Qtype], question.Name),
+				// The query's type names the call; its name is the
+				// value it asked for.
+				Command:   dns.TypeToString[question.Qtype],
+				NextSteps: "DNS mocks may be missing. Re-record to capture DNS queries.",
+			}
+			integrations.StampMark(report, mark)
 			proxyErr := models.ParserError{
 				ParserErrorType: models.ErrMockNotFound,
 				Err:             fmt.Errorf("DNS mock not found for query: %s (%s)", question.Name, dns.TypeToString[question.Qtype]),
 				At:              missed,
-				MismatchReport: &models.MockMismatchReport{
-					At:            missed,
-					Protocol:      "DNS",
-					ActualSummary: fmt.Sprintf("%s %s", dns.TypeToString[question.Qtype], question.Name),
-					NextSteps:     "DNS mocks may be missing. Re-record to capture DNS queries.",
-				},
+				MismatchReport:  report,
 			}
 			p.sendDNSMiss(proxyErr, question)
 		}
@@ -907,6 +918,16 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 		p.logger.Debug("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
 		return resp
 	}
+}
+
+// dnsCallRound is the run's store's round now (integrations.MarkCallRound),
+// as a DNS question reaches keploy; the zero CallRound with no store.
+func (p *Proxy) dnsCallRound() integrations.CallRound {
+	mgr := p.getMockManager()
+	if mgr == nil {
+		return integrations.CallRound{}
+	}
+	return integrations.MarkCallRound(mgr)
 }
 
 func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool) {

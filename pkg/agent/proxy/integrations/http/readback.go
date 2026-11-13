@@ -2,6 +2,8 @@ package http
 
 import (
 	"sort"
+	"strconv"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -31,22 +33,51 @@ import (
 // calls served before it in the order served, that the reader follows for
 // the read), and p does not answer already, the place learn.ReadBack finds
 // in earlier with the reader's marks of what each call stored, when the
-// test's own call made it. A leaf whose write holds a variable of the test
+// test's own call made it and no call the reader does not follow may have
+// written the leaf's value otherwise (HTTP's own store's
+// putWrittenElsewhere). A leaf whose write holds a variable of the test
 // already (bound or used there) answers that variable; any other is a new
-// variable bound at the write (p.binds). p is returned as it was where no
+// variable bound at the write (p.binds), but where the write's leaf is a read
+// of the application's clock its call learned (clockWritten), which is
+// answered as recorded. p is returned as it was where no
 // reader reads m, or where the answer of a call the reader follows cannot be
 // read back. Only the answers of the calls the reader follows are loaded
 // (models.HTTPStoreFollows decides from the requests alone), so a read loads
 // no answer of another API's call.
-func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *models.Mock, served []*models.Mock, earlier []learn.Earlier, given []variables.Binding, p pairing) pairing {
-	if answered == nil || !models.HTTPStoreReads(answered.Spec.HTTPReq) {
+func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *models.Mock, live learn.Shape, served []*models.Mock, earlier []learn.Earlier, given []variables.Binding, p pairing) pairing {
+	if answered == nil {
 		return p
 	}
+	follows := func(read, call *models.Mock) bool {
+		return models.HTTPStoreFollows(read.Spec.HTTPReq, call.Spec.HTTPReq)
+	}
+	accessOf := models.HTTPStoreAccessOf
+	// elsewhere names a call the reader does not follow that may have
+	// written a value the read answers (recorded, as the write that stored
+	// it sent live) otherwise: none for a registered reader, which follows
+	// every call of its API that writes a record.
+	elsewhere := func(string, string, string) (string, bool) { return "", false }
+	if !models.HTTPStoreReads(answered.Spec.HTTPReq) {
+		// No registered reader reads it: HTTP's own store does where it is
+		// a GET (putstore.go).
+		if !putReads(answered) {
+			return p
+		}
+		follows = putFollows
+		accessOf = func(read *models.Mock, calls []*models.Mock) (models.HTTPStoreAccess, bool) {
+			return putAccess(read, calls, earlier, live)
+		}
+		elsewhere = func(write, recorded, live string) (string, bool) {
+			return putWrittenElsewhere(answered, served, earlier, write, recorded, live)
+		}
+	}
 	calls := make([]*models.Mock, 0, len(served))
+	learned := map[string]models.MockVariables{}
 	for _, s := range served {
-		if !models.HTTPStoreFollows(answered.Spec.HTTPReq, s.Spec.HTTPReq) {
+		if !follows(answered, s) {
 			continue
 		}
+		learned[s.Name] = s.Spec.Learned()
 		c, err := withResponse(s)
 		if err != nil {
 			h.Logger.Warn("keploy cannot read back the recorded answer of a call served earlier in the test, so it answers a later read of what the test stored as recorded",
@@ -55,7 +86,7 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		}
 		calls = append(calls, c)
 	}
-	access, ok := models.HTTPStoreAccessOf(answered, calls)
+	access, ok := accessOf(answered, calls)
 	if !ok {
 		return p
 	}
@@ -70,7 +101,8 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		h.Logger.Info("keploy answers fields of a read with their recorded values, not with what this run wrote, because of a write it cannot follow",
 			zap.String("mock", answered.Name), zap.Int("fields", len(paths)), zap.String("first", paths[0]), zap.String("why", access.Unread[paths[0]]))
 	}
-	if len(access.Read) == 0 {
+	if len(access.Read) == 0 || !storedAny(access.Written) {
+		// No call stored a leaf: learn.ReadBack reads back none.
 		return p
 	}
 	// The tracker holds each mock it served once (Tracker.Placed), so a
@@ -90,6 +122,20 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 	for _, g := range given {
 		reserved[g.Name] = true
 	}
+	// held is each answer field elsewhere left as recorded, with the call.
+	held := map[string]string{}
+	defer func() {
+		if len(held) == 0 {
+			return
+		}
+		paths := make([]string, 0, len(held))
+		for path := range held {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		h.Logger.Info("keploy answers fields of a read with their recorded values, not with what this run's PUT stored, because a later call to another URL of the store may have written them",
+			zap.String("mock", answered.Name), zap.Int("fields", len(paths)), zap.String("first", paths[0]), zap.String("call", held[paths[0]]))
+	}()
 	for _, a := range respLeaves(answered.Spec.HTTPResp) {
 		record, ok := access.Read[a.Path]
 		if !ok {
@@ -103,6 +149,35 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		if !ok || !from.Own {
 			continue
 		}
+		if name, k, ok := wordUsedAt(learned[from.Mock], from.Var, a.Value); ok {
+			// The write's place holds a variable of the test at one word
+			// (learn.Place.Word: a word a client test sent), the rest of it
+			// held to the recording: the read answers that variable at the
+			// same word of its place, never a second one bound at the
+			// whole write.
+			w := variables.Words(from.Live)
+			if k >= len(w) {
+				// wordUsedAt read the recorded write; F's holds no such
+				// word: the field is answered as recorded.
+				continue
+			}
+			if c, ok := elsewhere(from.Mock, learned[from.Mock][name].Recorded, from.Live[w[k][0]:w[k][1]]); ok {
+				held[a.Path] = c
+				continue
+			}
+			v := p.vars[name]
+			v.Recorded, v.Answer = learned[from.Mock][name].Recorded, appendNew(v.Answer, place+"#"+strconv.Itoa(k))
+			p.vars[name] = v
+			taken[place] = true
+			if _, ok := p.values[name]; !ok {
+				p.values[name] = variables.Binding{Name: name, Value: from.Live[w[k][0]:w[k][1]], Recorded: v.Recorded, Mock: from.Mock, Place: from.Var + "#" + strconv.Itoa(k)}
+			}
+			continue
+		}
+		if c, ok := elsewhere(from.Mock, a.Value, from.Live); ok {
+			held[a.Path] = c
+			continue
+		}
 		if from.Name != "" {
 			// The write's place holds a variable of the test already: the
 			// read answers that variable, bound where its value was first
@@ -114,6 +189,15 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 			if _, ok := p.values[from.Name]; !ok {
 				p.values[from.Name] = variables.Binding{Name: from.Name, Value: from.Live, Recorded: a.Value, Mock: from.Mock, Place: from.Var}
 			}
+			continue
+		}
+		if clockWritten(marked, from) {
+			// The write's leaf is a read of the application's clock its
+			// call's learn step learned (MockSpec.Clocks: a stamp the store
+			// keeps). A variable bound there too is a place the HTTP replay
+			// refuses (it cannot hold one value to both), so the write's
+			// call would be refused in every later replay: the read is
+			// answered as recorded there.
 			continue
 		}
 		name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
@@ -164,4 +248,48 @@ func markWritten(earlier []learn.Earlier, written map[string]map[string]string) 
 		out[i].Seen = seen
 	}
 	return out
+}
+
+// clockWritten reports whether from, a request leaf of a call served earlier
+// (learn.ReadBack's place), is one that call's learn step learned as a read
+// of the application's clock, plain or plus an offset (learn.Named's
+// Seen.Offset, as MockSpec.Clocks keys it).
+func clockWritten(earlier []learn.Earlier, from learn.Place) bool {
+	for _, e := range earlier {
+		if e.Mock != from.Mock || e.Given {
+			continue
+		}
+		for _, s := range e.Seen {
+			if s.Side == learn.Request && s.Leaf.Path == from.Path && s.Offset != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// wordUsedAt is the variable vars (a write's learned variables) uses at one
+// word of place, the write's leaf, whose recorded value is that word of
+// value, the read's recorded field, and the word's index. place holds value
+// whole (learn.ReadBack), so the read is answered at that word. None, or
+// two: false.
+func wordUsedAt(vars models.MockVariables, place, value string) (string, int, bool) {
+	name, word, n := "", -1, 0
+	words := variables.Words(value)
+	for k, v := range vars {
+		for _, u := range v.Use {
+			// A use at a whole place has no "#", and its word "" reads
+			// no index.
+			path, at, _ := strings.Cut(u, "#")
+			if path != place {
+				continue
+			}
+			i, err := strconv.Atoi(at)
+			if err != nil || i < 0 || i >= len(words) || value[words[i][0]:words[i][1]] != v.Recorded {
+				continue
+			}
+			name, word, n = k, i, n+1
+		}
+	}
+	return name, word, n == 1
 }

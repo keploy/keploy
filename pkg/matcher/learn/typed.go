@@ -498,8 +498,10 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.From = KindVariable, from
 		return ln
 	}
-	// No other rule reads a value the test gave (classifyRead).
-	served = withoutGave(served)
+	// No other rule reads a value the test gave (classifyRead), nor a client
+	// test's request where the call's own window holds the read
+	// (readOverClients).
+	served = readOverClients(withoutGave(served), w, []driftedInstant{{rec: rec, live: live}}, dc.zone)
 	// The echo, before any provenance excuses the instant.
 	if echoed := echoedPairs([]driftedInstant{{rec: rec, live: live}}, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)); len(echoed) > 0 {
 		where := dc.heldAt(echoed, at, served, raw)
@@ -1277,7 +1279,7 @@ func clockOffsetEchoedWhy(path string, off models.ClockOffset) string {
 // the test gave keploy (Earlier.Gave) is one only where its text is r's.
 func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earlier) (Place, bool) {
 	var best Place
-	rank := 7
+	rank := noPlaceRank
 	for _, e := range served {
 		for _, s := range e.Seen {
 			if s.Live == s.Leaf.Value {
@@ -1307,7 +1309,7 @@ func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earli
 			}
 		}
 	}
-	return best, rank < 7
+	return best, rank < noPlaceRank
 }
 
 // seenMoment is the moment value names where l, a leaf of an earlier
@@ -1432,7 +1434,7 @@ func (dc *DriftCache) instantCoDrifted(rec, live string, rm, lm moment) bool {
 // then a payload served or recorded before at, its field where one holds it.
 func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
 	var best Place
-	rank := 7
+	rank := noPlaceRank
 	for _, e := range served {
 		for _, s := range e.Seen {
 			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
@@ -1448,7 +1450,7 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 			}
 		}
 	}
-	if rank < 7 {
+	if rank < noPlaceRank {
 		return best, true
 	}
 	for _, x := range raw {
@@ -1479,7 +1481,7 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 // test case's own request, which requestHolds reads.
 func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Place, bool) {
 	var best Place
-	rank := 7
+	rank := noPlaceRank
 	for _, e := range served {
 		if e.Given {
 			continue
@@ -1500,7 +1502,7 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 			}
 		}
 	}
-	return best, rank < 7
+	return best, rank < noPlaceRank
 }
 
 // instantRawFrom is the first payload served earlier in the test or recorded

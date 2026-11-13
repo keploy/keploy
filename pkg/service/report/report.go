@@ -1219,7 +1219,32 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 	if len(background) > 0 {
 		fmt.Fprintf(sb, "=== %d BACKGROUND CALL(S) WITH NO MATCHING MOCK (count against no test) ===\n", len(background))
 		sb.WriteString("  each is the same request as a recording of the set's background (mappings.yaml worker: or startup:), made once more than one was left to answer it\n")
+		renderBackgroundBound(sb, background)
 		renderMissList(sb, background)
+	}
+}
+
+// renderBackgroundBound writes, for each background miss that differs from
+// its background recording by values its test bound (UnmatchedCall.
+// BackgroundBound), which places do and where the test bound each: the
+// evidence that the call is that recording's, by names alone. A sanitized
+// miss keeps no learned variable's name (BackgroundBinding.Sanitized): its
+// place holds "a value" the test bound. A value an ended test bound, which
+// the call carries as its clean-up (BackgroundBinding.BoundTest), names that
+// test as its binder.
+func renderBackgroundBound(sb *strings.Builder, calls []models.UnmatchedCall) {
+	for _, uc := range calls {
+		for _, b := range uc.BackgroundBound {
+			held := b.Variable
+			if held == "" {
+				held = "a value"
+			}
+			by := "this test"
+			if b.BoundTest != "" {
+				by = b.BoundTest
+			}
+			fmt.Fprintf(sb, "  %s: like background recording %s but at %s, which holds %s as %s bound it at %s %s\n", uc.ActualSummary, b.Recording, b.Place, held, by, b.BoundMock, b.BoundPlace)
+		}
 	}
 }
 

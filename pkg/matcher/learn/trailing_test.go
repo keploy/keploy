@@ -289,3 +289,99 @@ func TestATrailReadsATestsRecordingOnlyWhereThatTestLeftIt(t *testing.T) {
 		t.Fatalf("a trailing call with another id: %s, from %+v; want nothing bound at mock-31", oDescribe([]Decision{d}), d.From)
 	}
 }
+
+// The recording's own documents: TestAuthorizationDirectives creates an app,
+// which the application mints the id of and inserts (mock-807, a Mongo
+// insert into app_name_reservations, appId), and its client sends the id
+// back in a GraphQL query (test case post-query-15, variables.appID). The
+// application's worker deletes the app's sessions by that id after the test
+// answered (mock-841, a delete on uiSessions, q.app_id): keploy record
+// marked that worker: recording trailing the test. In record's full round
+// the delete lands in the test's own window, after the query. directivesCall
+// is that delete, its id recorded rID and fID in round F, mock-807 the
+// test's own place (served in its window) and post-query-15 the client's.
+func directivesCall(t *testing.T, rID, fID string) Input {
+	t.Helper()
+	rAt := time.Date(2026, 11, 10, 13, 27, 42, 979528237, time.UTC)
+	gap := 3*time.Minute + 41*time.Second
+	query := func(id string, at time.Time) *models.HTTPReq {
+		return &models.HTTPReq{Method: "POST", ProtoMajor: 1, ProtoMinor: 1, URL: "http://localhost:8083/query", Timestamp: at,
+			Header: map[string]string{"Content-Type": "application/json", "Host": "localhost:8083"},
+			Body:   `{"query":"query GetSchemaCoverage($appID: String!, $baseURL: String!, $schema: String!, $branchId: String) {\n  getSchemaCoverage(appID: $appID, baseURL: $baseURL, schema: $schema, branchId: $branchId) {\n    coveragePercentage\n  }\n}\n","variables":{"appID":"` + id + `","baseURL":"http://localhost:8083","schema":"type Query { ping: String }"}}`}
+	}
+	qAt := time.Date(2026, 11, 10, 13, 27, 42, 948756071, time.UTC)
+	insertAt := time.Date(2026, 11, 10, 13, 27, 42, 945562684, time.UTC)
+	insert := Earlier{Mock: "mock-807", At: insertAt, Own: true, Payload: oPayload("mock-807", insertAt), Seen: []Seen{
+		{Side: Request, Leaf: oText("body.docs.msgs.0.appId", rID), Live: fID, Place: "body.docs.msgs.0.appId"},
+	}}
+	earlier := append(clientPlaced(t, "post-query-15", query(rID, qAt), query(fID, qAt.Add(gap)), qAt.Add(gap)), insert)
+	in := oInput("body.docs.msgs.0.q.app_id", rID, fID, earlier, nil)
+	in.At, in.Arrived = rAt, rAt.Add(gap)
+	in.Test, in.Mock = "TestAuthorizationDirectives", "mock-841"
+	return in
+}
+
+// A call no test lists (a worker: recording keploy record marked trailing a
+// test) has no client test's request among its places: a value bound there
+// is a variable of the test whose list holds the call, and none holds this
+// one, so learning the delete's id there failed the whole record round ("a
+// variable of mock-841 bound at test case post-query-15, from a recording
+// no test lists"). It reads its words as main does: each word of the id
+// stays bound at the trailed test's insert, the run's variable, which a
+// replay keeps past the test's end. The test's own call (no trail) still
+// binds the id at the client's request, which comes first.
+func TestATrailingCallIsNoCallOfItsTestsClientRequests(t *testing.T) {
+	const rID, fID = "961ad63b-9151-4789-a680-acd90efec8f2", "0b7d4c1e-2f6a-4a39-8e15-d3c9a7b5e204"
+	in := directivesCall(t, rID, fID)
+	in.Trails = Trail{Test: "TestAuthorizationDirectives", Mocks: []string{"mock-807"}}
+	ds := Decide(in)
+	if len(ds) != 5 {
+		t.Fatalf("the trailing delete's id: %s; want its five words decided", oDescribe(ds))
+	}
+	for _, d := range ds {
+		if d.Outcome != OutcomeValue || d.From.Mock != "mock-807" || d.From.Path != "body.docs.msgs.0.appId" || !d.From.Run || d.From.Client || !strings.Contains(d.Line, "which this call trails") {
+			t.Fatalf("the trailing delete's word %q -> %q: %s, from %+v; want it bound at mock-807's appId as the run's variable, no client's request", d.Recorded, d.Full, oDescribe([]Decision{d}), d.From)
+		}
+	}
+	// Only the client's requests leave its places: a value the test gave
+	// keploy (Tracker.GiveValue) stays one, as on main.
+	gave := directivesCall(t, rID, fID)
+	gave.Trails = in.Trails
+	gave.Earlier = append(gave.Earlier, TestGiven("test TestAuthorizationDirectives", "given:appID", rID, fID))
+	for _, d := range Decide(gave) {
+		if !strings.Contains(d.Line, "given:appID") || d.From.Client {
+			t.Fatalf("the trailing delete's word %q -> %q beside a value the test gave: %s, from %+v; want it read with the given, no client's request", d.Recorded, d.Full, oDescribe([]Decision{d}), d.From)
+		}
+	}
+	own := directivesCall(t, rID, fID)
+	for _, d := range Decide(own) {
+		if d.Outcome != OutcomeValue || d.From.Mock != "test case post-query-15" || !d.From.Client {
+			t.Fatalf("the test's own call's word %q -> %q: %s, from %+v; want it bound at the client's request", d.Recorded, d.Full, oDescribe([]Decision{d}), d.From)
+		}
+	}
+	// Where mappings.yaml places the call (Input.Scope), its list decides:
+	// the test's own list keeps the client's request a place; worker:, the
+	// start-up's and another test's list do not.
+	for _, tc := range []struct {
+		scope  Scope
+		client bool
+	}{
+		{ScopeTest("TestAuthorizationDirectives"), true},
+		{ScopeWorker, false},
+		{ScopeStartup, false},
+		{ScopeTest("TestAppCRUD"), false},
+	} {
+		in := directivesCall(t, rID, fID)
+		in.Scope = func(mock string) Scope {
+			if mock == "mock-841" {
+				return tc.scope
+			}
+			return ScopeTest("TestAuthorizationDirectives")
+		}
+		for _, d := range Decide(in) {
+			if tc.client && (!d.From.Client || d.From.Mock != "test case post-query-15") || !tc.client && (d.From.Client || d.From.Mock != "mock-807") || d.Outcome != OutcomeValue {
+				t.Fatalf("the call listed in %q, word %q -> %q: %s, from %+v; want bound at the client's request: %v", tc.scope, d.Recorded, d.Full, oDescribe([]Decision{d}), d.From, tc.client)
+			}
+		}
+	}
+}

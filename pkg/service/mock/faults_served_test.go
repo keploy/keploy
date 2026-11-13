@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -28,7 +29,8 @@ func (p partialConsumed) GetConsumedMocks(context.Context) ([]models.MockState, 
 // first served them, as the application met it ("mock-12: upstream reset after
 // 0 bytes, as recorded"); a mock with a whole answer, or a fault mock no call
 // consumed, is not named. A read of what was served that came back cut short
-// still names the faults it holds: each was served.
+// still names the faults it holds, and those the wait for the owed series read
+// before it: each was served.
 func TestTheReplaySummaryNamesEachFaultServed(t *testing.T) {
 	fault := func(name string, f *models.Fault) *models.Mock {
 		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{Fault: f}}
@@ -43,14 +45,33 @@ func TestTheReplaySummaryNamesEachFaultServed(t *testing.T) {
 		"mock-12: upstream reset after 0 bytes, as recorded",
 		"mock-3: upstream sent the head and 10 body bytes, then closed, as recorded",
 	}
-	for name, inst := range map[string]Instrumentation{
-		"the whole read":     outcomeInstr{consumed: consumed},
-		"a read cut short":   partialConsumed{outcomeInstr{consumed: consumed}},
-		"nothing was served": outcomeInstr{},
+	// The wait for the owed series may have read some before the run's end
+	// (seriesRead): those were served too, whatever the end's read gives.
+	type read struct {
+		inst Instrumentation
+		wait []models.MockState
+		// proven runs it under the switch, where the agent first finishes
+		// its end of the run (settleRun).
+		proven bool
+	}
+	var calls []string
+	for name, c := range map[string]read{
+		"the whole read":                          {inst: outcomeInstr{consumed: consumed}},
+		"a read cut short":                        {inst: partialConsumed{outcomeInstr{consumed: consumed}}},
+		"nothing was served":                      {inst: outcomeInstr{}},
+		"the wait read one, the end the rest":     {inst: outcomeInstr{consumed: consumed[:2]}, wait: consumed[2:]},
+		"the wait read one, the end cut short":    {inst: partialConsumed{outcomeInstr{consumed: consumed[:2]}}, wait: consumed[2:]},
+		"the wait read one, the end read nothing": {inst: partialConsumed{outcomeInstr{}}, wait: consumed},
+		// The agent did not finish its end of the run: nothing more is
+		// read, and what the wait read was still served.
+		"the wait read all, the end did not finish": {inst: settleInstr{outcomeInstr: outcomeInstr{consumed: consumed}, calls: &calls, err: errors.New("agent gone")}, wait: consumed, proven: true},
 	} {
 		t.Run(name, func(t *testing.T) {
+			if c.proven {
+				t.Setenv(provenswitch.Env, "1")
+			}
 			core, logs := observer.New(zap.InfoLevel)
-			m := &mockService{config: &config.Config{}, logger: zap.New(core), instrumentation: inst}
+			m := &mockService{config: &config.Config{}, logger: zap.New(core), instrumentation: c.inst, seriesRead: c.wait}
 			m.reportOutcome(context.Background(), 4, replayDetail{set: "s", faults: faults}, func() bool { return false })
 			var got []string
 			for _, e := range logs.FilterMessage("served a mock's fault").All() {

@@ -183,9 +183,12 @@ type SharedGen struct {
 // lasts only as long as its view, so a parser keeps one index of it per
 // SharedGen and skips at lookup what MockSpent reports. Every method reports
 // false (or nothing) while no test is open, and for a store held to a call
-// once the staging moved from the call's, or while it reads in a view other
-// than the one in force (RoundHolder, ElsewhereGeneration): such a parser
-// keys on the staging generation then.
+// once the staging moved from the call's. SharedGeneration and SharedMocks
+// report false, too, while such a store reads in a view other than the one
+// in force (RoundHolder, ElsewhereGeneration): a parser keys on the staging
+// generation then. The owned reads of such a store are those of the view it
+// reads in, while that view is a test's: a call keploy decides after the
+// replay began the next test is still its own test's.
 //
 // A parser builds its index in this order: sample SharedGeneration, read
 // SharedMocks, sample SharedGeneration again, and keep the index only when
@@ -208,12 +211,13 @@ type SharedReads interface {
 	SharedMocks() (perTest, session []*models.Mock, ok bool)
 	OwnedUnanswered() ([]*models.Mock, bool)
 	// OwnedRecordings is the open test's own recordings and the number of
-	// the view that shows them; the caller never changes the list. False
-	// while no test is open.
+	// the view that shows them (for a held store, the test's whose view its
+	// call was read in); the caller never changes the list. False while no
+	// test is open.
 	OwnedRecordings() (view uint64, owned []*models.Mock, ok bool)
 	// OwnedUnansweredAt is the positions of at, in OwnedRecordings of the
 	// view numbered view, whose recordings have not answered, in at's
-	// order. False when that view is not the open test's now.
+	// order. False when that view is not the one OwnedRecordings reads now.
 	OwnedUnansweredAt(view uint64, at []int) ([]int, bool)
 }
 

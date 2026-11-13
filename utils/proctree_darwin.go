@@ -44,3 +44,29 @@ func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 // groupReached reads no process on macOS, which has no /proc:
 // InterruptProcessTreeReached says none there.
 func groupReached(int, syscall.Signal) []Reached { return nil }
+
+// GroupRunsOn reports whether a process of process group pgid runs: one
+// the kernel's process table holds in that group (sysctl kern.proc.pgrp
+// reads that group alone) that has not exited. A zombie has exited, and a table keploy cannot read says none
+// runs. A native application's command leads a process group of its own
+// (ExecuteCommand), so once the command has exited, a process it started that
+// is still in its group is the application running on.
+func GroupRunsOn(pgid int) bool {
+	if pgid <= 1 {
+		return false
+	}
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", pgid)
+	if err != nil {
+		return false
+	}
+	for _, p := range procs {
+		if p.Proc.P_stat != sZomb {
+			return true
+		}
+	}
+	return false
+}
+
+// sZomb is XNU's p_stat of a process that has exited and waits for its
+// parent to reap it (bsd/sys/proc.h SZOMB).
+const sZomb = 5

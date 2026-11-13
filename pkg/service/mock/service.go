@@ -139,10 +139,11 @@ type ScopeGatePusher interface {
 
 // TestBeginsPusher is an optional Instrumentation extension: under the proven
 // switch Replay hands the agent when each test of the recording began, so the
-// agent moves the run's clock per test (design v14 §3.4), and the seed each
-// test's recording kept for its browser's random numbers.
+// agent moves the run's clock per test (design v14 §3.4), the seed each
+// test's recording kept for its browser's random numbers, and the requests
+// each client test sent the application in its recording.
 type TestBeginsPusher interface {
-	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string) error
+	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string, cases map[string][]models.ClientCase) error
 }
 
 type SetPusher interface {
@@ -158,11 +159,14 @@ type SetPusher interface {
 // that lists it (models.ScopeTableReq.SkippedReads), the test each worker
 // recording trails (models.ScopeTableReq.Trails), the values each test
 // gave when it was recorded (models.ScopeTableReq.Given), each test's
-// repeated reads (models.ScopeTableReq.RepeatReads) and the names of each
+// repeated reads (models.ScopeTableReq.RepeatReads), the names of each
 // test's list keploy's judging marked served, not required
-// (models.ScopeTableReq.NotRequired).
+// (models.ScopeTableReq.NotRequired), and the names of the set's background
+// recordings, its worker: and startup: mocks (models.ScopeTableReq.Background),
+// and whether the learn step checks a changed time by its form alone
+// (models.ScopeTableReq.TimeForm, config.MockCmd.TimeForm).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error
+	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm bool) error
 }
 
 type MappingReader interface {

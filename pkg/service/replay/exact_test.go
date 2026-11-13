@@ -796,3 +796,31 @@ func TestTheLearningServedAfterTheLearnStepEndedIsEveryStateThatCarriesSome(t *t
 		t.Fatalf("the states sent with the learn step ended are %v; want %v (a binds-only and a clock-only state among them)", got, want)
 	}
 }
+
+// Under the background rules the set's end requires no worker-scope
+// recording but a trailing write (models.MockEntry.Trails): a recording a
+// trail move put there, once the run reached its place, is required as
+// without them, and answered it is not. An ordinary background recording
+// stays not required, and one whose place the run did not reach is not due.
+func TestUnderTheBackgroundRulesATrailingWriteIsStillRequired(t *testing.T) {
+	p := &exactPlan{background: true, bootSeen: true, begun: map[string]bool{"TestA": true}, worker: []models.MockEntry{
+		{Name: "w"}, {Name: "w-trail", Place: "TestA", Trails: "TestA"}, {Name: "w-unreached", Place: "TestB", Trails: "TestB"},
+	}}
+	if got := p.unansweredWorker(nil, false); !reflect.DeepEqual(got, []string{"w-trail"}) {
+		t.Fatalf("never made, the set's end requires %v; want [w-trail]", got)
+	}
+	if got := p.unansweredWorker(map[string]models.MockState{"w-trail": {Name: "w-trail"}}, false); got != nil {
+		t.Fatalf("made once, the set's end requires %v; want none", got)
+	}
+	if got := p.trailingWrites(); !reflect.DeepEqual(got, map[string]bool{"w-trail": true, "w-unreached": true}) {
+		t.Fatalf("trailingWrites = %v", got)
+	}
+	var none *exactPlan
+	if none.unansweredWorker(nil, false) != nil || none.trailingWrites() != nil {
+		t.Fatal("no plan requires nothing")
+	}
+	without := &exactPlan{bootSeen: true, begun: map[string]bool{"TestA": true}, worker: p.worker}
+	if got := without.unansweredWorker(nil, false); !reflect.DeepEqual(got, []string{"w", "w-trail"}) {
+		t.Fatalf("without the background rules the set's end requires %v; want [w w-trail]", got)
+	}
+}

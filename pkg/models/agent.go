@@ -302,6 +302,17 @@ type ScopeGateReq struct {
 type ScopeNeed struct {
 	Test   string `json:"test"`
 	Reason string `json:"reason"`
+	// Answers, when set, are the run's variables (RunVariable) Test makes
+	// that the replayed test only receives: every place of each in its
+	// recordings is in an answer, none in a request it sends. Such a need
+	// never skips the test: where Test has not begun before it, the agent
+	// answers each at its answer places with its recorded value, which no
+	// check of the test's requests reads. A proxy that cannot answer them
+	// so skips the test with Reason, as does an agent that predates the
+	// field. An answer-only need may name no Test: no recording in this
+	// run sends those values, so no test begins with them and the agent
+	// always answers them as recorded.
+	Answers []string `json:"answers,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -397,6 +408,28 @@ type ScopeWindow struct {
 // (design v14 U21).
 const PoolKeyNone = "-"
 
+// ScopeTableResp is the answer to POST /agent/scope/table: Served names the
+// fields of the table the agent applied that an older agent ignores
+// ("series"). An older agent answers with none, and the CLI refuses it for
+// a table that has one of them: it would serve every recording of a series
+// once, and a slower replay's repeat would miss.
+type ScopeTableResp struct {
+	Status string   `json:"status"`
+	Served []string `json:"served,omitempty"`
+}
+
+// ScopeTableServedSeries is ScopeTableResp.Served's name for
+// ScopeTableReq.Series.
+const ScopeTableServedSeries = "series"
+
+// ScopeTableServedSources is ScopeTableResp.Served's name for
+// ScopeTableReq.Sources.
+const ScopeTableServedSources = "sources"
+
+// ScopeTableServedOnce is ScopeTableResp.Served's name for
+// ScopeTableReq.Once.
+const ScopeTableServedOnce = "once"
+
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
@@ -443,6 +476,45 @@ type ScopeTableReq struct {
 	// own (learn.Trail). Absent when no entry trails a test, and from an
 	// older CLI: every call then reads only its own test's places.
 	Trails map[string]string `json:"trails,omitempty"`
+	// Series is, under the proven switch, by series (MockEntry.Series), the
+	// names of the worker-scope recordings a rule the user declared in
+	// keploy.yml placed there, in placement order: only names Worker holds.
+	// Every recording of one series answers one request with one answer.
+	// Inside the windows each answers at most once, as the rest of Worker
+	// does, until every recording of its series has; from then on the
+	// series' last-placed recording answers each repeat of the request.
+	// Between tests they answer again, as the rest of Worker does. Absent
+	// when no rule placed any. The agent's answer to the table names it
+	// (ScopeTableResp.Served) when it serves it; the CLI refuses an agent
+	// that does not.
+	Series map[string][]string `json:"series,omitempty"`
+	// Once is, under the proven switch, the series of Series whose
+	// recordings each answer once in the run (MockEntry.Once): in a test's
+	// window or between tests, through any door, and never again, so no
+	// last-placed recording answers a repeat and a second call of the
+	// request misses. Only ids Series holds. Absent when no series is once.
+	// The agent's answer to the table names it (ScopeTableResp.Served) when
+	// it serves it; the CLI refuses an agent that does not: an older agent
+	// would answer the request again and again.
+	Once []string `json:"once,omitempty"`
+	// Sources is, under the proven switch, by recording name, the sources
+	// rules the user declared in keploy.yml give fields of the recording's
+	// request (MockEntry.Sources): only names the agent holds. The learn
+	// step decides such a field by its source where learning alone could
+	// not tell which source the value has. Absent when no rule declares
+	// one. The agent's answer to the table names it
+	// (ScopeTableResp.Served) when it learns by it, and refuses a source
+	// of a kind it does not know (DeclaredSource.Check); the CLI refuses an
+	// agent that does not name it.
+	Sources map[string][]DeclaredSource `json:"sources,omitempty"`
+	// TimeForm, under the proven switch, turns on the learn step's time
+	// default (learn.Input.TimeForm): a changed time passes with any value
+	// of the type and form it was recorded in. A caller that sets
+	// MockCmd.TimeForm (keploy's T2 commands, unless keploy.yml asks for
+	// strict times) sends it; every other caller sends none. An agent that
+	// cannot take it decides times by the clock checks alone, as with none:
+	// it refuses more, never passes more.
+	TimeForm bool `json:"timeForm,omitempty"`
 	// RepeatReads is, under the proven switch, each test's repeated reads
 	// by test ID, as whatever names them for the replay named them
 	// (mock.RegisterRepeatReadNamer): recordings of one read the test made
@@ -471,6 +543,19 @@ type ScopeTableReq struct {
 	// extra-call line names (UnmatchedCall.SkippedReads). Absent from an
 	// older CLI and when the gate skips no test.
 	SkippedReads map[string]string `json:"skippedReads,omitempty"`
+	// Background is, under the proven switch, the names of the set's
+	// background recordings, the calls the application made on its own
+	// rather than for a test's request: its mappings.yaml worker: mocks,
+	// then its startup: mocks, each a pool slice holds, as keploy test's
+	// staging names them (MockFilterParams.BackgroundMocks). The agent's
+	// staging hands them to the proxy read-only, served or not, so a parser
+	// can tell a miss is one more run of one of them
+	// (MockMismatchReport.Background): listed, it counts against no test.
+	// No call is served differently for it. The reads keploy mock replay
+	// moved to Worker from the tests its gate skips (SkippedReads) are none
+	// of them: they are tests' calls. Absent from an older CLI and from a
+	// set with none: every miss stays its test's.
+	Background []string `json:"background,omitempty"`
 }
 
 // RepeatRead is one repeated read of a test (ScopeTableReq.RepeatReads): its
@@ -496,6 +581,33 @@ type TestBeginsReq struct {
 	// random numbers (MappedTestCase.Seed): a begin that asks for one is
 	// answered it (ScopeBeginResp.Seed). Absent when no test kept one.
 	Seeds map[string]string `json:"seeds,omitempty"`
+	// Cases is, by test, the requests its client test sent the application
+	// in its recording, in the order it sent them (MappedTestCase.Cases, each
+	// read from its test case): under the proven switch the agent pairs each
+	// request of the test that reaches the application with one of them, as
+	// an earlier place of the test's calls (learn.Tracker.Incoming). Absent
+	// when no test's recording kept its requests.
+	Cases map[string][]ClientCase `json:"cases,omitempty"`
+}
+
+// ClientCase is one request a client test sent the application in its
+// recording: its test case's name and its request as recorded, and each
+// variable of the test bound at that request (MappedTestCase.Variables,
+// CaseBind): a replay binds it from the request of the test that pairs with
+// this one, before the application is given it.
+type ClientCase struct {
+	Name  string           `json:"name"`
+	Req   HTTPReq          `json:"req"`
+	Binds []ClientCaseBind `json:"binds,omitempty"`
+}
+
+// ClientCaseBind is one variable a client test case's request binds: its
+// name, its recorded value, and its place in the request (CaseBind's place,
+// in the grammar of a MockVariable's places).
+type ClientCaseBind struct {
+	Name     string `json:"name"`
+	Recorded string `json:"recorded"`
+	Place    string `json:"place"`
 }
 
 type SetTable struct {
@@ -537,6 +649,15 @@ type MockStats struct {
 	Loaded   int `json:"loaded"`
 	Consumed int `json:"consumed"`
 	Missed   int `json:"missed"`
+	// SeriesCounted says the agent counts the calls in tests each series of
+	// a declared rule (ScopeTableReq.Series) answered past its recorded
+	// count, in SeriesRepeats. False from an agent that does not: its
+	// SeriesRepeats is no count, not a count of none.
+	SeriesCounted bool `json:"seriesCounted,omitempty"`
+	// SeriesRepeats is, by series, how many calls in the current staging's
+	// tests the series' last-placed recording answered past the series'
+	// recorded count. A series with none is left out.
+	SeriesRepeats map[string]int64 `json:"seriesRepeats,omitempty"`
 }
 
 type SetMocksReq struct {

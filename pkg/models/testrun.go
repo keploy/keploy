@@ -528,6 +528,11 @@ type UnmatchedCall struct {
 	// sanitized call keeps it. A line for a person names the call with it
 	// (Named); ActualSummary never holds it, so no shape or identity does.
 	Operation string `json:"operation,omitempty" yaml:"operation,omitempty"`
+	// Command mirrors MockMismatchReport.Command: the name of a call of a
+	// protocol keploy has no shape of ("GET", "Produce"), "" when its parser
+	// names none. It names no value, so a sanitized call keeps it
+	// (CommandName) and its shape is it (MissShape).
+	Command string `json:"command,omitempty" yaml:"command,omitempty"`
 	// LiveDestination is, under the proven switch, the address the call was
 	// made to when Destination names it as the recording does instead (the
 	// mocks' destAddr: 127.0.0.1:27017 where the app reached [::1]:27017,
@@ -560,9 +565,16 @@ type UnmatchedCall struct {
 	// VariablePlaces mirrors MockMismatchReport.VariablePlaces: the URL path
 	// places of a test variable on this call, under the proven switch only.
 	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
+	// BoundIn mirrors MockMismatchReport.BoundIn: the recordings at which
+	// this run bound the test variables a variable miss's refusal read, by
+	// name, never a value.
+	BoundIn []string `json:"bound_in,omitempty" yaml:"bound_in,omitempty"`
 	// Given mirrors MockMismatchReport.Given: the given a variable miss is
 	// about, by its name, never its value.
 	Given string `json:"given,omitempty" yaml:"given,omitempty"`
+	// VariableWhy mirrors MockMismatchReport.VariableWhy: why the variable
+	// pass refused the call as ClosestMock's, by names, never a value.
+	VariableWhy string `json:"variable_why,omitempty" yaml:"variable_why,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 	// Kind is where the call was made, under the proven switch (MissInTest,
@@ -583,6 +595,29 @@ type UnmatchedCall struct {
 	// no test's: the replay fails the set with it, naming the call, and
 	// charges no test (the read of the set's first test carries it).
 	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
+	// EarlierSetTest names, under the proven switch, the test of an earlier
+	// test set whose view the call was marked in (Marked.Test), when keploy
+	// decided the call only after the next set's mocks were staged: that
+	// test's own call, which no read of its set could take any more. Its Kind
+	// is MissOutsideTest and BeforeSet is false: it is no call of the set
+	// whose read returns it, nor of any of that set's tests, and none of them
+	// is charged with it. keploy test fails the run with it, naming the test
+	// and the set it was made in; keploy mock's agent lists it under that
+	// test (WindowOf), charged to no test. Empty for every other call.
+	EarlierSetTest string `json:"earlier_set_test,omitempty" yaml:"earlier_set_test,omitempty"`
+	// EarlierSet is, under the proven switch, for a call of an earlier test
+	// set that keploy decided only after the next set's mocks were staged,
+	// how many sets before the one whose read returns it the call was made
+	// in (1: the set run just before), by the agent's count of set starts:
+	// a call with EarlierSetTest, or one of no test, made in that set while
+	// no test's view named one (between two of its tests, or after its
+	// last), before that set's last read, which at zero latency would have
+	// failed that set with it. Its Kind is MissOutsideTest and BeforeSet is
+	// false, as for EarlierSetTest: keploy test fails the run with it,
+	// naming the set it was made in (and its test, where it names one), and
+	// charges no set or test; keploy mock's agent lists it, charged to no
+	// test. 0 for every other call.
+	EarlierSet int `json:"earlier_set,omitempty" yaml:"earlier_set,omitempty"`
 	// Held mirrors MockMismatchReport.HeldPastWindow: a parser held the call
 	// past its own window for a later test's recording, and none answered it
 	// by the set's end or its connection's end, where its miss was filed. It
@@ -608,9 +643,23 @@ type UnmatchedCall struct {
 	// test's own is that call (it is no extra call of the test's, nor a
 	// recording another test made). Such a call never fails the test whose
 	// window it lands in; the receipt lists it, by this name, so a reader
-	// sees where it landed. Empty for every other call, and for one made
-	// before that test began being served, whose window is not known.
+	// sees where it landed. It also names the test a call was marked in
+	// (Marked.Test) when its miss reached keploy only after that test's end was
+	// read, and the call was marked before the test that read it began being
+	// served: that test's own call, which keploy decided late, is charged to no
+	// test it did not make (the test that read it), and is listed under this
+	// name, filed in or between tests alike, and when keploy decided it only
+	// after the next test set's mocks were staged (the next set's first read
+	// then carries it as an earlier set's test's call, EarlierSetTest). A background
+	// repeat with a mark is listed under
+	// the test whose view it was marked in, none for a pool view. Empty for
+	// every other call, and for one made before that test began being served,
+	// whose window is not known.
 	WindowOf string `json:"window_of,omitempty" yaml:"window_of,omitempty"`
+	// Marked is, under the proven switch, the round the call's parser marked it
+	// in (MockMismatchReport.Mark): the zero MissMark for a parser that marks
+	// no round. Never written to a report: the agent reads it at a test's end.
+	Marked MissMark `json:"-" yaml:"-"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
@@ -629,6 +678,19 @@ type UnmatchedCall struct {
 	// application's background work made it, so it fails no test and no set,
 	// and holds back no noise learning.
 	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
+	// BackgroundBound mirrors MockMismatchReport.BackgroundBound: of a
+	// background miss, each place at which it differs from its background
+	// recording only by a value its own test bound before it, and where the
+	// test bound it. Names only, never a value.
+	BackgroundBound []BackgroundBinding `json:"background_bound,omitempty" yaml:"background_bound,omitempty"`
+	// TrailsOf mirrors MockMismatchReport.TrailsOf: the test whose kept value
+	// the call carries, whose clean-up it is. Charged to no test's window
+	// (ChargedTo is empty, WindowOf names the window it landed in), it still
+	// counts against the tests (CountsAgainstTest), so the run's receipt
+	// lists it (Receipt.UnchargedMisses) and the run fails on it; judging
+	// fails the trailed test. A test ID, never a value, so a sanitized call
+	// keeps it.
+	TrailsOf string `json:"trailsOf,omitempty" yaml:"trailsOf,omitempty"`
 	// RecordedIn names, under the proven switch, the other test of the set
 	// that owns the recording a NotOwned call is (ClosestMock): the call is
 	// likely one that test recorded, such as a later exchange of a connection

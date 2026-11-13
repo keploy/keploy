@@ -291,3 +291,16 @@ func TestRenderFieldDiffs_NoValuesNamesTheFieldAlone(t *testing.T) {
 		t.Fatalf("RenderFieldDiffs = %q, want %q", got, want)
 	}
 }
+
+// A parser of a protocol keploy has no shape of names its call by its
+// command (WithCommand), and the report carries it beside the summary, so a
+// sanitized miss of it is named by the command and by no word of the summary.
+func TestBuilder_WithCommandNamesTheCall(t *testing.T) {
+	report := NewReport(ProtocolRedis, "GET").WithCommand("GET").Build()
+	if report.Command != "GET" {
+		t.Fatalf("report Command = %q, want GET", report.Command)
+	}
+	if got := NewReport(ProtocolRedis, "GET").Build().Command; got != "" {
+		t.Fatalf("a report no parser named a command for has Command %q, want none", got)
+	}
+}

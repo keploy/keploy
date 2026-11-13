@@ -508,7 +508,7 @@ func TestOutcomeCostThePlacesKeepNoRecordingsText(t *testing.T) {
 		return st.HeapAlloc
 	}
 	before := heap()
-	ps, unread := placesOf(in)
+	ps, unread, _ := placesOf(in)
 	ps = withTexts(newReaderIndex(dc), ps)
 	grew := int64(heap()) - int64(before)
 	runtime.KeepAlive(ps)
@@ -4055,7 +4055,7 @@ func TestOutcomeCostACallsPlacesAreListedOnce(t *testing.T) {
 		runtime.GC()
 		runtime.ReadMemStats(&a)
 		d = payloadDecodes.Load()
-		ps, _ := placesOf(in)
+		ps, _, _ := placesOf(in)
 		d = payloadDecodes.Load() - d
 		runtime.ReadMemStats(&b)
 		if d != 0 {
@@ -4076,7 +4076,7 @@ func TestOutcomeCostACallsPlacesAreListedOnce(t *testing.T) {
 	// Each recording's handles (withTexts): one block of them for the
 	// call, and a recording's place reads its text through one handle of
 	// the recording, none of a handed text it does not hold.
-	ps, _ := placesOf(Input{At: eRecAt, Raw: raws})
+	ps, _, _ := placesOf(Input{At: eRecAt, Raw: raws})
 	x := newReaderIndex(nil)
 	var a, b runtime.MemStats
 	runtime.GC()

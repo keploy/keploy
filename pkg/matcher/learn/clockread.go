@@ -846,17 +846,52 @@ func spanOf(o models.ClockOffset, s Span) (Span, string) {
 // so that serve bounds no read of this call. s is checked first, so a read
 // plus an offset checkable in s alone is checked there as before; a value
 // outside both is refused with s's reason.
+//
+// CheckClockRead checks with the time default off (keploy.yml's
+// mock.times: strict, or a replay outside keploy mock), as
+// CheckClockReadForm does with timeForm false: it fails closed for a
+// caller that does not say the replay turned the default on.
 func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known bool) (bool, string) {
+	return CheckClockReadForm(path, o, live, s, known, false)
+}
+
+// CheckClockReadForm is CheckClockRead for a replay that says whether it
+// turned the time default on (timeForm: integrations.TimeFormOf of its
+// store). On, an o learned with a form (models.ClockOffset.Form) passes any
+// value of that form. Off (keploy.yml's mock.times: strict), the form is
+// set aside and o is checked by its range, cut, zone and provenance, as
+// before the default was; an o learned with a form alone, whose range the
+// learn step never learned (no cut: the default settled a refusal there),
+// is refused, saying to record it again under strict.
+func CheckClockReadForm(path string, o models.ClockOffset, live Leaf, s Span, known, timeForm bool) (bool, string) {
 	if o.Empty() {
 		return false, path + " was learned at more than one call as " + o.String() + ": no one read of the application's clock explains them all, so keploy refuses the value whatever it is. Record the test again; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
+	if o.Form != "" && !timeForm {
+		if o.Res <= 0 {
+			return false, path + " was learned as a time written as " + o.Forms() + ", checked by its form alone: learned under the time default; re-record with mock.times: strict to check its range"
+		}
+		o.Form, o.FormF = "", ""
+	}
 	learned := learnedAs(path, o)
+	if o.Form != "" {
+		learned = path + " was learned as a time written as " + o.Forms()
+	}
 	if !o.Word.IsZero() {
 		word, why := wordIn(o.Word, live)
 		if why != "" {
 			return false, learned + why
 		}
 		o.Word, live = models.ClockWord{}, word
+	}
+	if o.Form != "" {
+		// The time default: any instant of the form passes (TimeForm), of
+		// either form where the two record runs wrote two (FormF); a word
+		// keeps its leaf's type (wordIn).
+		if f := TimeForm(live); !o.WrittenAs(f) {
+			return false, learned + ", and the value this call carries is " + formWhy(f) + ": it changed"
+		}
+		return true, ""
 	}
 	ok, why := checkClockRead(o, live, s, known, learned)
 	if ok || s.TestFrom.IsZero() || !s.TestFrom.Before(s.From) {
@@ -915,6 +950,9 @@ func ReadsAsClockRead(o models.ClockOffset, live Leaf) bool {
 			return false
 		}
 		live = word
+	}
+	if o.Form != "" {
+		return o.WrittenAs(TimeForm(live))
 	}
 	if models.LayoutTimeOfDay(o.Layout) {
 		_, _, lay, ok := timeOfDayOf(live)

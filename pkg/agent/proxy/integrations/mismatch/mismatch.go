@@ -103,6 +103,17 @@ func (b *Builder) WithDestination(dest string) *Builder {
 	return b
 }
 
+// WithCommand names the call by its command, as the parser read it from
+// the request, for a protocol keploy has no shape of (models.CallShape ""):
+// a cache command ("GET"), a broker API ("Produce"), a queue operation
+// ("SendMessage"). It must never be a value the call sent (a key, a topic, a
+// queue URL): the miss's shape is the command (models.MissShape), which a
+// sanitized miss keeps and judging compares with a recording's call.
+func (b *Builder) WithCommand(command string) *Builder {
+	b.report.Command = command
+	return b
+}
+
 // WithComparedDestinations supplies the upstream authority of every mock this
 // miss was actually compared against, so Build() can tell a call whose
 // upstream is absent from that set apart from a drifted request.

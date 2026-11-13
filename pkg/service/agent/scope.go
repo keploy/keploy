@@ -574,12 +574,14 @@ func (a *Agent) DrainCapturedMocks(_ context.Context) ([]*models.Mock, error) {
 
 // MockStats returns a non-draining snapshot for /agent/mock/stats. Consumed and
 // missed totals are surfaced in the CLI's end-of-run summary (they drain their
-// capture windows), so this live endpoint reports the loaded count only.
+// capture windows), so this live endpoint reports the loaded count only, and,
+// from a proxy that serves declared rules' series, how many calls each
+// answered past its recorded count (withSeriesRepeats).
 func (a *Agent) MockStats(_ context.Context) (models.MockStats, error) {
 	a.scopeMu.Lock()
 	loaded := a.loadedMocks
 	a.scopeMu.Unlock()
-	return models.MockStats{Loaded: loaded}, nil
+	return a.withSeriesRepeats(models.MockStats{Loaded: loaded})
 }
 
 type scopeMeta struct {

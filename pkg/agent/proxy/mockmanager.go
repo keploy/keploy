@@ -249,6 +249,14 @@ type MockManager struct {
 	testHookOwnerRead func()
 	testHookKeep      func()
 	testHookMark      func()
+	// testHookBoundRead, set only by a test before the manager is shared,
+	// runs in BoundValuesIn once it read which set's bound values are kept
+	// and which scope table the session reset kept, before it reads the set
+	// in force; testHookSetSwitch in NewVariableSet once the table forgot the
+	// ending set, before the rest of the switch. Neither holds a lock: a
+	// session reset or a new set may land there.
+	testHookBoundRead func()
+	testHookSetSwitch func()
 	// usedUp are the recordings a worker's test consumed, held for the test
 	// instead of deleted, so a run of the same test again is served them
 	// (scopedMockDb.DeleteFilteredMock); by its scope and the name. Guarded by
@@ -275,6 +283,14 @@ type MockManager struct {
 	// every other call of the gap reads and binds in. It is carried into the
 	// next test's scope as it begins (StartVariables).
 	aheadVars variables.Table
+	// caseNotes are the notes the next scope of a test's variables begins
+	// with (NoteExactTestAtOpen), under caseNotesMu.
+	caseNotesMu sync.Mutex
+	caseNotes   pendingNotes
+	// asRecorded are the run's variables the next scope of a test's
+	// variables answers as recorded (AnswerAsRecordedAtOpen), under
+	// caseNotesMu.
+	asRecorded pendingAnswers
 
 	// exact is exact serving, under the proven switch (exact.go): when on,
 	// it decides what every read shows and which consume succeeds.
@@ -421,9 +437,22 @@ type MockManager struct {
 	// seed at a set boundary is parked (backgroundSeeded) until that set's
 	// staging call installs it with the trees it describes, and a set that
 	// seeds none has none, not the previous one's: names are unique only
-	// within a set. Stored under swapMu, read lock-free.
-	background       atomic.Pointer[map[models.Kind][]models.BackgroundRecording]
-	backgroundSeeded *map[models.Kind][]models.BackgroundRecording
+	// within a set. Each install is kept with the staging epoch it took
+	// effect at, and the one before it too (backgroundInstall), for a call
+	// marked in the set before to be judged by that set's
+	// (BackgroundRecordingsIn). Stored under swapMu, read lock-free.
+	background       atomic.Pointer[backgroundInstall]
+	backgroundSeeded map[models.Kind][]models.BackgroundRecording
+	// boundKept is the bound values of the set whose variables the last new
+	// set forgot (NewVariableSet), for that set's calls keploy decides after
+	// (BoundValuesIn), and scopeEnded the scope table's trails and tests the
+	// session reset cleared as that set ended (ResetForReplaySession), with
+	// the staging epoch it was cleared in, until the new set keeps them
+	// with its bound values. boundKept is stored under the variable table's
+	// lock and swapMu, scopeEnded before the reset clears the table; both
+	// are read lock-free.
+	boundKept  atomic.Pointer[boundKept]
+	scopeEnded atomic.Pointer[trailsCleared]
 	// repeatNoise is the header noise the session's matcher compares the
 	// set's calls with, which proves a test's repeated reads
 	// (SetRepeatReadNoise); nil, none, until the session sets it.
@@ -476,6 +505,14 @@ type MockManager struct {
 	// an agent replacement. State a consumer builds from one staging snapshot
 	// is valid for one epoch. Written under swapMu, read lock-free.
 	stagingEpoch atomic.Uint64
+
+	// windowReads is how many reads have begun of the misses window this
+	// manager's calls file their misses in (the run's, or the test worker's
+	// it serves): the proxy's getMockErrorsOn moves it as each read begins,
+	// and a call's mark carries it (integrations.CallRound.AfterReads), so
+	// the set-start cut tells a call marked before its set's last read of
+	// that window from one marked after it (missWindow.keptAsEarlierSet).
+	windowReads atomic.Uint64
 
 	// carry is the carry-over tier: carry-over mocks (models.IsCarryOver: a
 	// RegisterCarryOver kind's, a StagingRelease need's) that stay reachable
@@ -655,6 +692,11 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 	}
 	mm.setGen.Store(1)
 	mm.answered.fence(1)
+	// The test variables keep what each ended test's scope bound, for the
+	// background calls the application makes for that test after it ended
+	// (variables.Table.EndedOf). The scope the next test's calls in flight
+	// bind in (aheadVars) is read by none of them, and keeps none.
+	mm.vars.KeepEnded()
 	// Start the per-connection idle sweeper. Reclaims
 	// connection-scoped pools whose last activity exceeded
 	// connectionIdleRetention so long-running agents don't accumulate
@@ -793,7 +835,13 @@ func (m *MockManager) ResetForReplaySession() {
 	// Nor its scope table's pool names (SetPoolNames), owners
 	// (SetPoolOwners) and tests (SetPoolTests): until the next session sends
 	// its own, whose mock is the pool's, and whose tests list each, is not
-	// known.
+	// known. The trails and tests the ended set's table gave are kept with
+	// its bound values (NewVariableSet): a call of that set keploy decides
+	// after reads its recordings' trails by them (BoundValuesIn).
+	m.scopeEnded.Store(&trailsCleared{
+		scopeTrails: scopeTrails{trails: m.exact.poolTrails.Load(), tests: m.exact.poolTests.Load()},
+		upTo:        m.stagingEpoch.Load(),
+	})
 	m.exact.poolNames.Store(nil)
 	m.exact.poolOwners.Store(nil)
 	m.exact.poolTests.Store(nil)
@@ -1745,6 +1793,15 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		}
 	}
 	if isInitialStaging {
+		// A set boundary installs the set's background recordings as of the
+		// epoch this staging starts, before it starts it: no call can be
+		// marked in that epoch while the previous set's are still in force
+		// there, and a call marked before it is judged by the previous
+		// set's (BackgroundRecordingsIn).
+		if m.boundaryPending {
+			m.installBackgroundLocked(m.backgroundSeeded, m.stagingEpoch.Load()+1)
+			m.backgroundSeeded = nil
+		}
 		// Every staging call starts a new epoch, boundary or not: whatever a
 		// consumer built from the previous staging snapshot is stale now.
 		m.bumpStagingEpoch()
@@ -1779,8 +1836,6 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 			// The run's place's too (SeedRunPlaceWindows).
 			m.placeWindows.Store(m.placeWindowsSeeded)
 			m.placeWindowsSeeded = nil
-			m.background.Store(m.backgroundSeeded)
-			m.backgroundSeeded = nil
 			m.windowMu.Lock()
 			m.windowStart = time.Time{}
 			m.windowEnd = time.Time{}
@@ -2882,12 +2937,144 @@ func (m *MockManager) ResetVariables() {
 // as does the scope the next test's calls in flight bind in before it
 // begins (AheadVariables). A test's own bindings stay its own: each test
 // begins with none of the test before it (StartVariables, ResetVariables).
+//
+// What the ending set had bound is kept, with the trails and tests its
+// scope table gave (scopeEnded), for its calls keploy decides after
+// (BoundValuesIn): every call marked in a staging up to now is that set's.
+// It is kept in the step the table forgets it (variables.Table.
+// NewSetKeeping), so a call of the ending set decided while the set
+// switches reads its set's, as at once. A new set begun again with no
+// staging since the last (the replay's re-registration of a set's mocks
+// before it stages them) keeps the set kept then: each set's first staging
+// starts an epoch, so no test of the set begun since has opened, and the
+// calls marked up to now are still the set's before.
 func (m *MockManager) NewVariableSet() {
-	m.vars.NewSet()
+	m.vars.NewSetKeeping(m.keepBound)
+	if m.testHookSetSwitch != nil {
+		m.testHookSetSwitch()
+	}
 	m.vars.KeepRun()
 	m.aheadVars.NewSet()
 	m.aheadVars.ReadRunOf(&m.vars)
 }
+
+// keepBound keeps vars, what the ending set had bound, with the trails and
+// tests its scope table gave (scopeEnded), as the set the calls marked up to
+// now read (boundKept). It runs under the variable table's lock, before the
+// table forgets vars (NewVariableSet).
+func (m *MockManager) keepBound(vars *variables.SetBound) {
+	scope := m.scopeEnded.Swap(nil)
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+	k := &boundKept{vars: vars, upTo: m.stagingEpoch.Load()}
+	if scope != nil {
+		k.scope = scope.scopeTrails
+	}
+	if prev := m.boundKept.Load(); prev != nil {
+		if prev.upTo == k.upTo {
+			return
+		}
+		k.after, k.older = prev.upTo, true
+	}
+	m.boundKept.Store(k)
+}
+
+// trailsCleared is a scope table's trails and tests as the session reset
+// cleared them (scopeEnded), and the staging epoch they were cleared in
+// (upTo): the trails a call marked up to then reads (BoundValuesIn).
+type trailsCleared struct {
+	scopeTrails
+	upTo uint64
+}
+
+// scopeTrails is a scope table's trails (SetPoolTrails) and tests
+// (SetPoolTests), as TrailOf reads them; nil: none sent.
+type scopeTrails struct {
+	trails *map[string]string
+	tests  *poolTests
+}
+
+// boundKept is the bound values of a set whose variables a new set forgot
+// (NewVariableSet), as a background miss reads them (integrations.
+// BoundValues, through keptFor): what its table had bound (vars) and its scope
+// table's trails (scope), for the calls marked in a staging epoch after
+// after (any, where older is false) and up to upTo.
+type boundKept struct {
+	vars        *variables.SetBound
+	scope       scopeTrails
+	upTo, after uint64
+	older       bool
+}
+
+// keptFor is k as a call marked in test's view, with the variable scope
+// numbered scope in force (scoped: the mark keeps one), reads it (Own: that
+// scope's, variables.SetBound.OwnIn; test's, variables.SetBound.OwnOf, for
+// a mark that keeps none).
+type keptFor struct {
+	k      *boundKept
+	test   string
+	scope  uint64
+	scoped bool
+}
+
+func (r keptFor) Own() []variables.Binding {
+	if r.scoped {
+		return r.k.vars.OwnIn(r.scope)
+	}
+	return r.k.vars.OwnOf(r.test)
+}
+
+func (r keptFor) EndedOf(test string) []variables.Binding { return r.k.vars.EndedOf(test) }
+func (r keptFor) TrailOf(mock string) learn.Trail         { return trailIn(r.k.scope, mock) }
+func (r keptFor) LookupOf(test, name string) (variables.Binding, bool, bool) {
+	return r.k.vars.LookupOf(test, name)
+}
+
+// BoundValuesIn returns the bound values of the set the call was marked in
+// (integrations.RoundBoundReader): the set's in force (Variables, TrailOf)
+// for a call marked after the last new set began, or of no mark; the set's
+// before it (boundKept) for a call marked up to then, which keploy decides
+// once the replay began the next set; nil for a call marked before both
+// (no value is bound for it: its background miss counts). Each reads, as
+// the call's own test's, the variable scope in force in the view the call
+// was marked in (integrations.CallRound.VariableScope, variables.Table.
+// OwnIn): the replay can begin the set's next test before keploy decides a
+// test's call, or a pool view's call between tests (the ended test's: its
+// scope runs until the next begins), and a test can run again in its set.
+//
+// Each is read in one step, as keploy decides the call: what the set in
+// force has bound then (variables.Table.Bound), read again where a new set
+// or a session reset landed while it was read, and the trails the session
+// reset cleared for a call marked up to it (scopeEnded): a call of the
+// ending set decided while the set switches reads its set's, as at once.
+func (m *MockManager) BoundValuesIn(call integrations.CallRound) integrations.BoundValues {
+	if !call.Read() {
+		return integrations.BoundNow(&m.vars, m, call)
+	}
+	scope, scoped := call.VariableScope()
+	for {
+		k, cleared := m.boundKept.Load(), m.scopeEnded.Load()
+		if k != nil && call.Epoch() <= k.upTo {
+			if k.older && call.Epoch() <= k.after {
+				return nil
+			}
+			return keptFor{k: k, test: call.Test(), scope: scope, scoped: scoped}
+		}
+		if m.testHookBoundRead != nil {
+			m.testHookBoundRead()
+		}
+		now := &boundKept{scope: scopeTrails{trails: m.exact.poolTrails.Load(), tests: m.exact.poolTests.Load()}}
+		if cleared != nil && call.Epoch() <= cleared.upTo {
+			now.scope = cleared.scopeTrails
+		}
+		now.vars = m.vars.Bound()
+		if m.boundKept.Load() == k && m.scopeEnded.Load() == cleared {
+			return keptFor{k: now, test: call.Test(), scope: scope, scoped: scoped}
+		}
+	}
+}
+
+var _ integrations.RoundBoundReader = (*MockManager)(nil)
 
 // GetStartupMocks returns the startup-tier mocks — exactly the set
 // whose ReqTimestampMock predates the earliest test window this manager
@@ -4506,20 +4693,19 @@ func (m *MockManager) SeedRecordedWindows(ws []models.TestWindow) {
 // staging call installs its trees (see testWindows). Read-only: never served,
 // never consumed. nil or empty installs none.
 func (m *MockManager) SeedBackgroundRecordings(recs []models.BackgroundRecording) {
-	var byKind *map[models.Kind][]models.BackgroundRecording
+	var byKind map[models.Kind][]models.BackgroundRecording
 	if len(recs) > 0 {
-		kinds := map[models.Kind][]models.BackgroundRecording{}
+		byKind = map[models.Kind][]models.BackgroundRecording{}
 		for _, r := range recs {
 			if r.Mock != nil {
-				kinds[r.Mock.Kind] = append(kinds[r.Mock.Kind], r)
+				byKind[r.Mock.Kind] = append(byKind[r.Mock.Kind], r)
 			}
 		}
-		for _, list := range kinds {
+		for _, list := range byKind {
 			slices.SortStableFunc(list, func(a, b models.BackgroundRecording) int {
 				return a.Mock.Spec.ReqTimestampMock.Compare(b.Mock.Spec.ReqTimestampMock)
 			})
 		}
-		byKind = &kinds
 	}
 	m.swapMu.Lock()
 	defer m.swapMu.Unlock()
@@ -4527,7 +4713,33 @@ func (m *MockManager) SeedBackgroundRecordings(recs []models.BackgroundRecording
 		m.backgroundSeeded = byKind
 		return
 	}
-	m.background.Store(byKind)
+	m.installBackgroundLocked(byKind, m.stagingEpoch.Load())
+}
+
+// backgroundInstall is one install of a set's background recordings by kind
+// (byKind, nil: none), in force from the staging epoch from on, and the
+// install it replaced (prev, which keeps none before it).
+type backgroundInstall struct {
+	from   uint64
+	byKind map[models.Kind][]models.BackgroundRecording
+	prev   *backgroundInstall
+}
+
+// installBackgroundLocked installs byKind as the background recordings in
+// force from the staging epoch from on, keeping the install it replaces
+// for the calls marked before from; one made within the epoch the install
+// in force took effect at replaces it there (a call marked in that epoch
+// reads the latest, as it did before). Holding swapMu.
+func (m *MockManager) installBackgroundLocked(byKind map[models.Kind][]models.BackgroundRecording, from uint64) {
+	in := &backgroundInstall{from: from, byKind: byKind}
+	if cur := m.background.Load(); cur != nil {
+		if cur.from < from {
+			in.prev = &backgroundInstall{from: cur.from, byKind: cur.byKind}
+		} else if cur.prev != nil {
+			in.prev = cur.prev
+		}
+	}
+	m.background.Store(in)
 }
 
 // BackgroundRecordings returns the current set's background recordings of
@@ -4535,14 +4747,40 @@ func (m *MockManager) SeedBackgroundRecordings(recs []models.BackgroundRecording
 // the open view shows; nil when the set has none. The slice and its mocks
 // are shared: a caller reads them and changes nothing.
 func (m *MockManager) BackgroundRecordings(kind models.Kind) []models.BackgroundRecording {
-	byKind := m.background.Load()
-	if byKind == nil {
-		return nil
-	}
-	return (*byKind)[kind]
+	return m.background.Load().of(kind)
 }
 
-var _ integrations.BackgroundRecordingReader = (*MockManager)(nil)
+// BackgroundRecordingsIn returns the background recordings of kind of the
+// set in force in the staging epoch call was marked in
+// (integrations.RoundBackgroundReader): the current set's, or the set's
+// before it for a call marked before the current set's install, which the
+// replay can stage before keploy decides the call. nil for a call marked
+// before both (it is read as no background call, and counts), and the
+// current set's for the zero CallRound.
+func (m *MockManager) BackgroundRecordingsIn(call integrations.CallRound, kind models.Kind) []models.BackgroundRecording {
+	in := m.background.Load()
+	if !call.Read() {
+		return in.of(kind)
+	}
+	for ; in != nil; in = in.prev {
+		if in.from <= call.Epoch() {
+			return in.of(kind)
+		}
+	}
+	return nil
+}
+
+func (in *backgroundInstall) of(kind models.Kind) []models.BackgroundRecording {
+	if in == nil {
+		return nil
+	}
+	return in.byKind[kind]
+}
+
+var (
+	_ integrations.BackgroundRecordingReader = (*MockManager)(nil)
+	_ integrations.RoundBackgroundReader     = (*MockManager)(nil)
+)
 
 // RecordedWindows returns the current set's recorded test windows, or nil when
 // the replayer sent none (mock replay, an older CLI, SetFilteredMocks-only

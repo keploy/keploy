@@ -1415,3 +1415,47 @@ func TestOutcomeAOneRunPlaceStaysAServeOrderCandidate(t *testing.T) {
 	alone := oWord(t, Decide(oInput(path, rec, live, []Earlier{late}, nil)), r, f)
 	oOneSideLine(t, alone, "the recording's own piece of the id stands at mock-45 body.note, which round F did not give the application before the call: round F's making its own piece shows nothing of whether the application cut it from there")
 }
+
+// A cluster's access key whose words happen to pair in the two runs (runs
+// m1c-x2, m1p-p1 and fsm2a-a2: the record bound access_key#0 and #1 at
+// mock-1236, 1511 and 1567, and the judges then missed the clusters insert
+// in exactly those runs, "with its variables' recorded values put back, the
+// call is not the recording"): a key with no '+' or '/' in either run, or
+// one '+' in each at another spot, is still one random value, never two
+// words learned apart, since the next run's '+' and '/' fall elsewhere. The
+// keys are made up in the runs' shape (44 characters of standard base64,
+// one '='), no run's key copied. Two alphabets mixed, another length and a
+// run that decodes to text, words paired, stay no such key.
+func TestOutcomeAStandardBase64KeyWhoseWordsPairIsOneValue(t *testing.T) {
+	for _, tc := range []struct{ name, r, f string }{
+		{"no '+' or '/' in either run (x2 mock-1511's shape)", "aK7mQ2xZ9pWr4Tn8Vb3Lc6Hd1Sg5Jf0Ey2Ro9Ui7Mq4=", "Zq81Lm0XpVb4Nc7Hd2Sg6Jf3Ey9Ro5Ui1Tn8Kw0Pa2B="},
+		{"one '+' in each run, at another spot (x2 mock-1567's shape)", "aK7mQ2xZ9pWr4Tn8Vb3Lc6Hd1Sg5Jf0Ey2Ro9U+7Mq4=", "Zq81Lm0+pVb4Nc7Hd2Sg6Jf3Ey9Ro5Ui1Tn8Kw0Pa2B="},
+		{"a '+' and a '/' in each run, at the same spots", "aK7mQ2xZ9p+r4Tn8Vb3Lc6/d1Sg5Jf0Ey2Ro9Ui7Mq4=", "Zq81Lm0Xp+b4Nc7Hd2Sg6J/3Ey9Ro5Ui1Tn8Kw0Pa2B="},
+	} {
+		if len(tc.r) != 44 || len(tc.f) != 44 {
+			t.Fatalf("%s: keys of %d and %d characters; want 44", tc.name, len(tc.r), len(tc.f))
+		}
+		ds := Decide(oInput("body.docs.msgs.0.access_key", tc.r, tc.f, nil, nil))
+		if len(ds) != 1 || ds[0].Outcome != OutcomeFresh || ds[0].At.Word != -1 || ds[0].Recorded != tc.r || ds[0].Full != tc.f {
+			t.Errorf("%s: %s; want one fresh value, the field whole", tc.name, oDescribe(ds))
+		}
+		ds = Decide(oInput("body.cmd.filter.access_key", tc.r, tc.f, oSent(tc.r, tc.f), nil))
+		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "mock-0" || ds[0].At.Word != -1 {
+			t.Errorf("%s, a later send of the key: %s; want a Value bound at the first send, the field whole", tc.name, oDescribe(ds))
+		}
+	}
+	text := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	for _, tc := range []struct{ name, r, f string }{
+		{"two alphabets mixed, words paired", "aK7mQ2xZ9p+r4Tn8Vb3Lc6_d1Sg5Jf0Ey2Ro9Ui7Mq4=", "Zq81Lm0Xp+b4Nc7Hd2Sg6J_3Ey9Ro5Ui1Tn8Kw0Pa2B="},
+		{"another length, no '+' or '/'", "aK7mQ2xZ9pWr4Tn8Vb3Lc6Hd1Sg5Jf0Ey2Ro9Ui7Mq4=", "Zq81Lm0XpVb4Nc7Hd2Sg6Jf3Ey9Ro5Ui1Tn8Kw0Pa2BxYz4="},
+		{"a text in standard base64, no '+' or '/'", text(`{"name":"Ivan Petrov","n":1}`), text(`{"name":"Petr Sidrov","n":2}`)},
+	} {
+		if strings.ContainsAny(tc.r+tc.f, "+/") && !strings.Contains(tc.name, "mixed") {
+			t.Fatalf("%s: the row's values hold '+' or '/'", tc.name)
+		}
+		ds := Decide(oInput("body.docs.msgs.0.access_key", tc.r, tc.f, nil, nil))
+		if slices.ContainsFunc(ds, func(d Decision) bool { return d.Outcome == OutcomeFresh && d.At.Word < 0 }) {
+			t.Errorf("FALSE GREEN? %s: %s; want no one fresh value", tc.name, oDescribe(ds))
+		}
+	}
+}

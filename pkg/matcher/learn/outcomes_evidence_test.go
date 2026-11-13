@@ -989,7 +989,7 @@ func TestOutcomeAnExchangeAskedAfterTheCallIsPlacedAsARecordingIs(t *testing.T) 
 	in := answeredAtInput(answeredAtHow[1], late, late.Add(time.Millisecond), false)
 	seen := []Seen{{Side: Request, Leaf: Leaf{Path: "q.id", Type: String, Value: "82"}, Live: "82"}}
 	in.Earlier = []Earlier{{Mock: "mock-77", At: late, Own: true, Seen: seen}, {At: late, Given: true, Seen: seen}}
-	ps, _ := placesOf(in)
+	ps, _, _ := placesOf(in)
 	found := 0
 	for _, p := range ps {
 		switch {

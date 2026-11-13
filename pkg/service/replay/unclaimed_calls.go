@@ -47,6 +47,9 @@ func (r *Replayer) unclaimedCalls(ctx context.Context) (calls, answered []models
 	// answer (models.WithSetEndRead).
 	read, err := r.instrumentation.GetMockErrors(models.WithSetEndRead(ctx))
 	r.keptInside.add(read)
+	// A call an earlier set's test made is the run's, not this set's
+	// (earlier_set_calls.go).
+	read = r.takeEarlierSetCalls(read)
 	// A set whose first test's read did not take what was missed before it
 	// (the read was cut short) hands it over here: still the set's, as are
 	// the held calls the read filed (setsCall).

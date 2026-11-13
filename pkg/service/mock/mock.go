@@ -78,6 +78,22 @@ type mockService struct {
 	// past such a read (models.RepeatNote.SkippedRead), its test
 	// (withSkippedTest).
 	skippedReadOf map[string]string
+	// series is, under the proven switch, each series a declared rule
+	// placed in the worker scope (models.MockEntry.Series), as
+	// pushProvenTable read the set's mappings: each is required once per run
+	// when it is due (requiredNotMade).
+	series map[string]seriesDue
+	// placed is, as series is, every series a declared rule (or keploy
+	// record's own trail move) placed in the worker scope, the ones served,
+	// not required, among them (placedSeries): what the run's RULE USED
+	// lines count.
+	placed map[string]seriesDue
+	// repeats is what the run's end read of how many calls in tests each
+	// series answered past its recorded count (readSeriesRepeats).
+	repeats seriesRepeats
+	// seriesRead is what the agent consumed that the wait for the series the
+	// run owes read (awaitRequiredSeries), before the run's end's read.
+	seriesRead []models.MockState
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil
