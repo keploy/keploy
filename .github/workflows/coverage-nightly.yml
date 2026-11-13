@@ -229,8 +229,10 @@ jobs:
           # with a test file, merged every package linked into keploy.
           bash .github/workflows/test_workflow_scripts/coverage-floor.sh check unit covdata/covdata-unit || true
           # A PR runs one lane, which cannot reach a floor set from all of
-          # them: there the number is printed but not held to the floor.
-          bash .github/workflows/test_workflow_scripts/coverage-floor.sh check merged merged || [ "$EVENT" = pull_request ]
+          # them: there a number below the floor (exit 3) is printed but not
+          # held to it. Data the script cannot read fails a PR run too.
+          bash .github/workflows/test_workflow_scripts/coverage-floor.sh check merged merged ||
+            { rc=$?; [ "$EVENT" = pull_request ] && [ "$rc" -eq 3 ]; }
 
       - name: Per-package coverage of the agent and the services
         if: ${{ !cancelled() && hashFiles('merged/covmeta.*') != '' }}

@@ -23,6 +23,13 @@
 # it. testdata is in .gitignore, so re-include the directory there, as the
 # other checked-in fixtures are.
 #
+# The crashing input is as public as this repository: an artifact anyone can
+# download, and an issue that points to it. A parser crash stops the keploy
+# session that read the input, which comes from the user's own app and its
+# dependencies. If the maintainers decide such a crash is a vulnerability to
+# report privately (SECURITY.md), the proxy parsers' inputs must not be
+# uploaded here.
+#
 # A PR that changes this workflow, its script or the reporter runs it in
 # short: one target for 30 seconds, no cache saved and no issue.
 name: Nightly fuzzing

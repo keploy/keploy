@@ -9,7 +9,9 @@
 #       -test.gocoverdir=DIR` run, the GOCOVERDIR of a keploy built with
 #       -cover, or the output of `go tool covdata merge`. Prints the measured
 #       percentage, the floor and the headroom, pass or fail, and fails when
-#       the percentage is below the floor less the layer's tolerance.
+#       the percentage is below the floor less the layer's tolerance (exit 3,
+#       so a caller can tell a drop from data or a floor file it could not
+#       read, exit 1).
 #   bash .github/workflows/test_workflow_scripts/coverage-floor.sh ratchet BASE_REF
 #       Fails when a floor in the working copy is lower than at BASE_REF, or
 #       is gone, and when a floor less its tolerance is lower than at
@@ -115,7 +117,7 @@ check() {
         return 0
     fi
     echo "::error::$layer coverage ${measured}% is below its floor $floor less its tolerance $tolerance (headroom $headroom)"
-    return 1
+    return 3
 }
 
 # bar FLOOR TOLERANCE: prints the floor less its tolerance, in hundredths, the

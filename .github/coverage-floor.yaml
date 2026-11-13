@@ -17,7 +17,7 @@
 # A tolerance is how far a run may fall below its floor and still pass: the
 # unit number moves a little with tests that skip or branch on timing, and
 # the e2e paths move more.
-unit: 0
+unit: 80.0
 unit_tolerance: 0.2
 merged: 0
 merged_tolerance: 1.0

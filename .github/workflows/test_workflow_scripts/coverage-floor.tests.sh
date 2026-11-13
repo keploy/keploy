@@ -13,8 +13,8 @@
 # first run of the jobs that call the script.
 #
 # check: a run above its floor passes and prints its headroom; one below the
-# floor less its tolerance fails and names the layer, the percentage and the
-# floor; one exactly at the floor less its tolerance passes. A generated
+# floor less its tolerance fails with exit 3 and names the layer, the
+# percentage and the floor; one exactly at the floor less its tolerance passes. A generated
 # file's statements leave the percentage as it was, and a block that two
 # binaries' data both hold counts once, covered when either covered it. A
 # layer the floor file lacks fails with a line naming it.
@@ -59,10 +59,9 @@ floors() {
 }
 
 # expect NAME WANT_RC WANT_TEXT RC OUT: the case passes when RC is WANT_RC
-# (0, or 1 for any failure) and OUT holds WANT_TEXT.
+# and OUT holds WANT_TEXT.
 expect() {
     local name=$1 want_rc=$2 want=$3 rc=$4 out=$5
-    [ "$rc" -eq 0 ] || rc=1
     if [ "$rc" -ne "$want_rc" ] || [[ $out != *"$want"* ]]; then
         echo "FAIL $name: returned $rc, want $want_rc"
         echo "     printed: $out"
@@ -97,7 +96,7 @@ check_case above-floor 0 'unit coverage 61.40%: floor 61.0, tolerance 0.2, headr
 
 p607='example.com/m/a.go:1.1,2.1 607 1
 example.com/m/b.go:1.1,2.1 393 0'
-check_case below-floor 1 'unit coverage 60.70% is below its floor 61.0 less its tolerance 0.2' \
+check_case below-floor 3 'unit coverage 60.70% is below its floor 61.0 less its tolerance 0.2' \
     unit 'unit=61.0 unit_tolerance=0.2' "$p607"
 
 p608='example.com/m/a.go:1.1,2.1 608 1
