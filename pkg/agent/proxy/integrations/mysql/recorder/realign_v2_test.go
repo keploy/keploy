@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap/zapcore"
@@ -325,6 +326,39 @@ func TestRecordV2_ACommandStampedNotAfterTheAnswerBeforeItIsNotPipelining(t *tes
 			rec := recordChunks(t, client, server, true, time.Minute)
 			requireRealigned(t, rec, commandAt(t, xs, 16384, 5), 18-1)
 		})
+	}
+}
+
+// A command is sent from its first byte on: one whose first chunk was captured
+// before the last byte of the answer before it was sent before the client
+// could have read that answer whole, though the chunk it ends in was captured
+// after. The client pipelines, and the response it cannot frame stops the
+// recording, as for a command captured whole before that byte.
+func TestRecordV2_ACommandBegunBeforeTheAnswerBeforeItEndedIsPipelining(t *testing.T) {
+	t.Parallel()
+	xs := kitTraffic(t, []int{7, 8}, false)
+	xs[5].reply = append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[5].reply...)
+	client, server := onTheWire(xs, 16384)
+	// Room between every two capture numbers, for a chunk numbered between.
+	for i := range client {
+		client[i].ConnSeq *= 2
+	}
+	for i := range server {
+		server[i].ConnSeq *= 2
+	}
+	// The 2nd command in two chunks: its first captured before the answer to
+	// the 1st (one chunk), its last after it, as onTheWire numbered it whole.
+	head, tail := client[1], client[1]
+	head.Bytes, tail.Bytes = client[1].Bytes[:2], client[1].Bytes[2:]
+	head.ConnSeq, head.ReadAt = server[0].ConnSeq-1, server[0].ReadAt.Add(-time.Nanosecond)
+	if !client[0].CapturedBefore(head.ConnSeq) || !head.CapturedBefore(server[0].ConnSeq) || !server[0].CapturedBefore(tail.ConnSeq) {
+		t.Fatal("fixture: the 2nd command must start after the 1st and before the answer to it, and end after that answer")
+	}
+	client = append([]fakeconn.Chunk{client[0], head, tail}, client[2:]...)
+	rec := recordChunks(t, client, server, true, time.Minute)
+	requireFramingLost(t, rec)
+	if got := queryMocks(rec.mocks); got != 5 {
+		t.Fatalf("%d query mocks, want the 5 before the response it could not frame", got)
 	}
 }
 
