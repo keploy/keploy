@@ -149,7 +149,7 @@ func TestTee_AStalledParserWritesTheStacksOnceWhileItsConnectionIsOpen(t *testin
 				clk.Advance(stall.CheckEvery(testStallGrace))
 				time.Sleep(time.Millisecond)
 			}
-			warns := logs.FilterMessage(StalledParserMsg).All()
+			warns := logs.FilterMessageSnippet(StalledParserMsg).All()
 			if len(warns) != 1 || warns[0].Level != zapcore.WarnLevel {
 				t.Fatalf("%d stall WARNs; want one: %v", len(warns), warns)
 			}
@@ -161,6 +161,11 @@ func TestTee_AStalledParserWritesTheStacksOnceWhileItsConnectionIsOpen(t *testin
 			}
 			if f["stalledFor"].(time.Duration) < testStallGrace {
 				t.Errorf("the WARN says the parser stalled for %v; want a whole window, %v", f["stalledFor"], testStallGrace)
+			}
+			// It says what was seen, and where the stacks are.
+			if want := fmt.Sprintf("%s for %s, %d bytes waiting; goroutine stacks in /logs/keploy-stacks-1.txt",
+				StalledParserMsg, f["stalledFor"].(time.Duration).Round(time.Millisecond), c.bytes); warns[0].Message != want {
+				t.Errorf("the WARN says %q; want %q", warns[0].Message, want)
 			}
 			if _, ok := f["stacksError"]; ok {
 				t.Errorf("the WARN carries an error for stacks that were written: %v", f["stacksError"])
@@ -216,7 +221,7 @@ func TestTee_ASlowParserThatKeepsTakingWritesNoStacks(t *testing.T) {
 			if n := stacksFiles.Load(); n != 0 {
 				t.Fatalf("%d stack files for a parser that took some within every window; want none", n)
 			}
-			if n := logs.FilterMessage(StalledParserMsg).Len(); n != 0 {
+			if n := logs.FilterMessageSnippet(StalledParserMsg).Len(); n != 0 {
 				t.Fatalf("%d stall WARNs for a slow parser; want none", n)
 			}
 			if got := rec.snapshot(); len(got) != 0 {
@@ -245,7 +250,7 @@ func TestTee_ASecondStallWritesNoSecondFile(t *testing.T) {
 	if n := stacksFiles.Load(); n != 1 {
 		t.Fatalf("%d stack files; want 1 for the run", n)
 	}
-	if n := firstLogs.FilterMessage(StalledParserMsg).Len() + secondLogs.FilterMessage(StalledParserMsg).Len(); n != 1 {
+	if n := firstLogs.FilterMessageSnippet(StalledParserMsg).Len() + secondLogs.FilterMessageSnippet(StalledParserMsg).Len(); n != 1 {
 		t.Fatalf("%d stall WARNs; want 1 for the run", n)
 	}
 	if clk.Waits != 0 {
@@ -329,7 +334,7 @@ func TestTee_AStallFirstSeenAtTheCloseWritesTheStacksAsItAbandons(t *testing.T) 
 	if n := stacksFiles.Load(); n != 1 {
 		t.Fatalf("%d stack files; want 1, written as the tee gave up", n)
 	}
-	warns := logs.FilterMessage(StalledParserMsg).All()
+	warns := logs.FilterMessageSnippet(StalledParserMsg).All()
 	if len(warns) != 1 {
 		t.Fatalf("%d stall WARNs; want 1", len(warns))
 	}
@@ -350,7 +355,7 @@ func TestTee_StacksThatCouldNotBeWrittenAreSaidWithWhy(t *testing.T) {
 	t.Cleanup(func() { writeStacks = prev })
 	core, logs := observer.New(zapcore.InfoLevel)
 	parserStalled(zap.New(core), fakeconn.FromClient, testStallGrace, 2, 2)
-	warns := logs.FilterMessage(StalledParserMsg).All()
+	warns := logs.FilterMessageSnippet(StalledParserMsg).All()
 	if len(warns) != 1 {
 		t.Fatalf("%d stall WARNs; want 1", len(warns))
 	}
@@ -360,6 +365,53 @@ func TestTee_StacksThatCouldNotBeWrittenAreSaidWithWhy(t *testing.T) {
 	}
 	if f["stacksError"] != "no room" {
 		t.Errorf("the WARN says %v of the failed write; want its error", f["stacksError"])
+	}
+	if want := StalledParserMsg + " for 150ms, 2 bytes waiting; the goroutine stacks could not be written (stacksError)"; warns[0].Message != want {
+		t.Errorf("the WARN says %q; want %q", warns[0].Message, want)
+	}
+}
+
+// A tee with no reader count (tee.consumed: a package test's, reading its
+// channel itself) is not looked at, however many bytes it handed on: nothing
+// is known to wait. The look is asked here on the test's own goroutine, so a
+// look that fell over on it fails this row.
+func TestTee_ATeeWithNoReaderCountIsNotLookedAt(t *testing.T) {
+	freshStacks(t)
+	clk := &stall.ManualClock{}
+	tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil)
+	tt.clock = clk
+	tt.mu.Lock()
+	tt.noteDeliveringLocked(mkChunk("handed"))
+	tt.mu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("looking at a tee with no reader count fell over: %v", r)
+		}
+	}()
+	var look parserLook
+	if c := tt.armLook(&look); c != nil || clk.Waits != 0 {
+		t.Fatalf("a look armed (%d clock waits) at a tee with no reader count; want none", clk.Waits)
+	}
+	// One with a count that took none of them is looked at.
+	took := &atomic.Int64{}
+	tt.consumed = took.Load
+	if c := tt.armLook(&look); c == nil {
+		t.Fatal("no look armed at a tee whose parser took none of the 6 bytes handed it")
+	}
+	look.stop()
+}
+
+// A look waits on the tee's own clock, and, outside tests (no clock of its
+// own), on the process clock unheld, whose timers are wall time.
+func TestTee_ALookWaitsOnTheTeesClock(t *testing.T) {
+	tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil)
+	if got := tt.lookClock(); got != stall.ProcessClock() {
+		t.Fatalf("a tee with no clock of its own looks on %#v; want the process clock", got)
+	}
+	clk := &stall.ManualClock{}
+	tt.clock = clk
+	if got := tt.lookClock(); got != stall.Clock(clk) {
+		t.Fatalf("a tee on a test's clock looks on %#v; want that clock", got)
 	}
 }
 

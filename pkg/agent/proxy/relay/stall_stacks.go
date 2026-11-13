@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -10,9 +11,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// StalledParserMsg is the WARN parserStalled logs, once per process.
-const StalledParserMsg = "a connection's parser took none of the bytes captured for it for a whole stall window: " +
-	"every goroutine's stack is written to the file named here, once per run"
+// StalledParserMsg begins the WARN parserStalled logs, once per process. The
+// WARN says what was seen (how long, how many bytes waiting, and the stacks'
+// file), not a fault: a parser waiting on a slow upstream can take nothing
+// for as long.
+const StalledParserMsg = "a parser took none of the bytes captured for it"
 
 // stacksWritten is set once this process has written its goroutines' stacks
 // for a stalled parser (parserStalled): a stall after that writes nothing.
@@ -58,16 +61,21 @@ func parserStalled(logger *zap.Logger, dir fakeconn.Direction, stalled time.Dura
 		zap.Duration("stalledFor", stalled),
 		zap.Int("chunksWaiting", waitingChunks),
 		zap.Int64("bytesWaiting", waitingBytes),
-		zap.String("next_step", "the app's traffic is unaffected. If the parser is still stalled when this connection "+
-			"closes with its channel full, what is left is not recorded (reason=consumer_gone). The stacks show what the "+
-			"parser waited on: attach the file to a bug report; it holds no captured bytes"),
+		zap.String("next_step", "nothing to do unless mocks are missing: the app's traffic is unaffected, and a parser "+
+			"waiting on a slow upstream can take nothing for this long. If this connection closes with its parser's "+
+			"channel full and the parser still taking nothing, what is left is not recorded (reason=consumer_gone); "+
+			"then attach the stacks file to the bug report. It holds goroutine stacks only, never a captured byte"),
 	}
 	// A nil err is no field (zap.NamedError).
 	fields = append(fields, zap.NamedError("stacksError", err))
+	msg := fmt.Sprintf("%s for %s, %d bytes waiting; ", StalledParserMsg, stalled.Round(time.Millisecond), waitingBytes)
 	if name != "" {
 		fields = append(fields, zap.String("stacks", name))
+		msg += "goroutine stacks in " + name
+	} else {
+		msg += "the goroutine stacks could not be written (stacksError)"
 	}
-	logger.Warn(StalledParserMsg, fields...)
+	logger.Warn(msg, fields...)
 }
 
 // parserLook is a drain's look at its parser while the connection is open,
@@ -127,8 +135,10 @@ func (t *tee) lookClock() stall.Clock {
 // (tee.consumed), and how many of those the drain has handed it it has not
 // taken yet. Nothing waits for a parser that closed its FakeConn
 // (consumerGone): it will take nothing more, and has not stalled. Nor is
-// anything known to wait on a tee with no reader count (tee.consumed: New
-// sets one for every connection, so a tee of a package test only).
+// anything known to wait on a tee with no reader count: New sets one for
+// every connection, and a tee of a package test that reads its channel
+// itself has none, which the capture watermark takes as not known too
+// (trimDeliveredLocked, directionState, caughtUp).
 func (t *tee) parserWaiting() (took, waiting int64) {
 	if t.consumed == nil {
 		return 0, 0
