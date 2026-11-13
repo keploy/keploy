@@ -690,6 +690,14 @@ func (t *tee) drain() {
 		// against a consumer that is about to take the chunk. That abandoned
 		// a live consumer's chunks (TestTee_SlowConsumerLosesNothing, at
 		// host load 9). See utils/stall for how the time is measured.
+		//
+		// look watches the same window while the connection is open: a
+		// consumer that frees nothing for it is not abandoned, but the
+		// process's stacks are written down once (parserStalled). Armed once
+		// for the chunk, so it measures from the first wait whatever close()
+		// does meanwhile; a drain that first waits after close() has the
+		// stall bound's own verdict to say it.
+		look, lookC := t.lookAtStall()
 	deliver:
 		for {
 			var meter *stall.Meter
@@ -709,6 +717,7 @@ func (t *tee) drain() {
 				select {
 				case t.out <- c:
 					meter.Stop()
+					look.Stop()
 					break deliver
 
 				case <-t.consumerGone:
@@ -716,8 +725,20 @@ func (t *tee) drain() {
 					// and the verdict covers the whole connection, not just
 					// the chunk in hand.
 					meter.Stop()
+					look.Stop()
 					t.abandon(c)
 					return
+
+				case <-lookC:
+					if !look.Expired() {
+						lookC = look.Wait()
+						continue
+					}
+					stalled := look.Stalled()
+					look.Stop()
+					look, lookC = nil, nil
+					parserStalled(t.logger, t.dir, stalled, len(t.out)+1)
+					continue
 
 				case <-stallC:
 					if !meter.Expired() {
@@ -732,7 +753,10 @@ func (t *tee) drain() {
 					// flush tempting in the first place. Deciding once gets
 					// both: a progressing consumer never trips the window, a
 					// stopped one costs one window total.
+					stalled := meter.Stalled()
 					meter.Stop()
+					look.Stop()
+					parserStalled(t.logger, t.dir, stalled, len(t.out)+1)
 					t.abandon(c)
 					return
 
