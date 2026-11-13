@@ -215,6 +215,11 @@ type SyncMockManager struct {
 	mappingGen   uint64
 	firstReqSeen bool
 	memoryPause  bool
+	// recordingFrom is when the current recording started
+	// (StartRecordSession), in Unix nanoseconds, zero before the first: no
+	// request of its comes before it (RecordingFrom). Atomic, so a test
+	// case's checks never wait on mu behind a long walk.
+	recordingFrom atomic.Int64
 
 	// resolvedTestCount is the number of UNIQUE recorded test cases resolved so
 	// far (incremented once per kept ResolveRange — duplicates skipped by static
@@ -4838,8 +4843,23 @@ func (m *SyncMockManager) StartRecordSession() {
 	m.firstReqSeen = false
 	m.resolvedTestCount = 0
 	m.destTCs = nil
+	m.recordingFrom.Store(time.Now().UnixNano())
 	m.mu.Unlock()
 	m.EndStoppedRecording()
+}
+
+// RecordingFrom is when the current recording started (StartRecordSession):
+// no request of its comes before it. Zero when none has started, and for a
+// nil manager.
+func (m *SyncMockManager) RecordingFrom() time.Time {
+	if m == nil {
+		return time.Time{}
+	}
+	at := m.recordingFrom.Load()
+	if at == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, at)
 }
 
 // NoteStop notes that the recording stops at the instant at: the requests in

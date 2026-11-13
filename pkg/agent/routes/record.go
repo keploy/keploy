@@ -499,6 +499,49 @@ func streamWriteFailed(logger *zap.Logger, r *http.Request, msg string, err erro
 	logger.Error(msg, zap.Error(err))
 }
 
+// spanWindow is the window HandleIncoming checks a test case over against the
+// memory guard's pauses and the holes in a connection's capture
+// (WasPressureActiveInWindow, WasMockOrphanedInWindow), on which a zero bound
+// makes no claim. A test case with no response time is read as ending now, the
+// latest it can have ended. One with no request time to trust (none, or one
+// after its end) is read as holding every request of its recording made before
+// its end, any of which may be its own (fail closed), as SendingTestCase reads
+// it: from from, the earliest one can have come (requestsFrom); with from
+// unknown (zero) or after its end, whatever recording it is of, as holding
+// every request made before its end.
+func spanWindow(req, resp, from time.Time) (time.Time, time.Time) {
+	if resp.IsZero() {
+		resp = time.Now()
+	}
+	if !req.IsZero() && !req.After(resp) {
+		return req, resp
+	}
+	if from.IsZero() || from.After(resp) {
+		from = time.Unix(0, 0)
+	}
+	return from, resp
+}
+
+// requestsFrom is the earliest a request of a test case an incoming stream
+// checks can have come: the start of its recording (recording,
+// StartRecordSession), of the stream itself (stream, before its ingress
+// started), or a request the stop of a recording that has ended found in
+// flight (leftovers, by Unix nanoseconds), whose test case can come to this
+// stream. Zero, unknown, when no recording has started (a zero recording):
+// no time is before it.
+func requestsFrom(recording, stream time.Time, leftovers map[int64]struct{}) time.Time {
+	from := recording
+	if stream.Before(from) {
+		from = stream
+	}
+	for at := range leftovers {
+		if l := time.Unix(0, at); l.Before(from) {
+			from = l
+		}
+	}
+	return from
+}
+
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// A recording's client that drains this stream after its stop holds it
 	// open until it has: a stop signal waits for that (holdForDrain).
@@ -544,6 +587,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		k.KeepRealUses(true)
 		defer k.KeepRealUses(false)
 	}
+	// Before the ingress starts: no request of this stream's own comes
+	// before it (requestsFrom).
+	streamFrom := time.Now()
 	tc, err := a.svc.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"
@@ -672,13 +718,18 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Time("request_time", tcReqTime))
 			return true
 		}
+		// The window the span checks below read (spanWindow): a zero bound
+		// makes no claim there, so a test case with no request or response
+		// time was streamed over any pause or hole.
+		spanFrom, spanTo := spanWindow(tcReqTime, tcRespTime,
+			requestsFrom(syncmgr.Get().RecordingFrom(), streamFrom, leftovers))
 		// Skip this test case if memory pressure overlapped its window
 		// [request, response]: under pressure the paired mock may have been
 		// dropped, so sending the TC would orphan it at replay. We check the
 		// TC window against recorded pressure ranges (not individual mock
 		// drops) because that check is race-free regardless of when the
 		// mock's goroutine runs relative to this handler.
-		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(tcReqTime, tcRespTime)
+		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(spanFrom, spanTo)
 		// An exchange a connection carried but did not record as a mock
 		// strands its TC mock-less, whether or not a pressure range covers
 		// it: a parser's hole (a mongo/v2 reassembly resync), an exchange a
@@ -691,7 +742,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// only the TCs checked after it: without a watermark (the hold
 		// below), a TC streamed before it is saved without the mock, as the
 		// WARN that reports the exchange says.
-		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(tcReqTime, tcRespTime)
+		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(spanFrom, spanTo)
 		// A capacity drop (outChan overflow / already-closed channel)
 		// feeds nothing into pressureRanges, so the pressure-overlap check
 		// above cannot catch it. Suppress by EXACT owning test name so a
@@ -706,6 +757,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.String("tc_name", t.Name),
 				zap.Int64("tc_req_ms", tcReqTime.UnixMilli()),
 				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
+				zap.Int64("checked_from_ms", spanFrom.UnixMilli()),
+				zap.Int64("checked_to_ms", spanTo.UnixMilli()),
 				zap.Int("pressure_overlaps", pressureOverlaps),
 				zap.Int("orphan_overlaps", orphanOverlaps),
 				zap.Bool("capacity_drop", mockDropped),

@@ -152,7 +152,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
 		defer done()
 		for _, n := range []string{"test-1", "test-2"} {
-			svc.tc <- &models.TestCase{Name: n}
+			svc.tc <- windowedNow(n)
 		}
 		// Requests a pause of the memory guard cost this session, three on
 		// two connections, noted once its stream is open: what the session
@@ -308,7 +308,7 @@ func TestEachRecordingSessionSaysItsOwnTLSConnectionsRelayedUnread(t *testing.T)
 		a := &Agent{logger: zap.New(core), svc: svc}
 		tok := rand.Text() // its own each run: a token ended stays ended
 		resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
-		svc.tc <- &models.TestCase{Name: "test-1"}
+		svc.tc <- windowedNow("test-1")
 		for i := 0; i < relayed; i++ {
 			if first := syncmgr.Get().NoteTLSRelayedConn(8443); first != (i == 0) {
 				t.Fatalf("session %d's TLS connection %d to 8443: first=%v, want %v (the session's first is said at WARN as it comes)", session+1, i+1, first, i == 0)
@@ -467,4 +467,14 @@ func TestTheAgentKeepsABoundedRecordOfRecordingsStreams(t *testing.T) {
 	default:
 		t.Fatal("a stream reopened by the latest recording ended is not ended at once")
 	}
+}
+
+// windowedNow is an HTTP test case named name whose request came and response
+// went now: one with no request time is read over every request of its
+// recording (spanWindow), and left out over a pause or a hole an earlier test
+// recorded.
+func windowedNow(name string) *models.TestCase {
+	now := time.Now()
+	return &models.TestCase{Name: name, Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{Timestamp: now}, HTTPResp: models.HTTPResp{Timestamp: now}}
 }

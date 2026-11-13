@@ -378,3 +378,28 @@ func TestAStartUpReadInAFilteredProbesWindowIsKeptOrSaid(t *testing.T) {
 		t.Fatalf("%d ERRORs say what the loss left out, want 1", n)
 	}
 }
+
+// A recording's start is when StartRecordSession began it, and the next one
+// moves it on; before the first, and on a nil manager, it is unknown (zero),
+// so the stream that reads it (routes' requestsFrom) reads a test case with
+// no request time over every request before its end.
+func TestRecordingFromIsWhenTheRecordingStarted(t *testing.T) {
+	var none *SyncMockManager
+	if got := none.RecordingFrom(); !got.IsZero() {
+		t.Fatalf("a nil manager's recording started at %v, want zero", got)
+	}
+	m := New(zap.NewNop())
+	if got := m.RecordingFrom(); !got.IsZero() {
+		t.Fatalf("before any recording: started at %v, want zero", got)
+	}
+	var last time.Time
+	for i := range 2 {
+		before := time.Now()
+		m.StartRecordSession()
+		got := m.RecordingFrom()
+		if got.Before(before) || got.After(time.Now()) || !got.After(last) {
+			t.Fatalf("recording %d started at %v, want when it started (after %v, and after the last at %v)", i, got, before, last)
+		}
+		last = got
+	}
+}
