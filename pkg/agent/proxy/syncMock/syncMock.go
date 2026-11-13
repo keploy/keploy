@@ -647,6 +647,17 @@ type SyncMockManager struct {
 	// lock, and one given up later on is spanned only here.
 	lostOver Spans
 
+	// cutLost is the requests of the per-test mocks the stale cutoff dropped
+	// (leaveOutCut), each an instant: recorded and checked under
+	// sharedLossMu, as lostOver is, so a test case whose window holds one is
+	// left out or revoked, never sent between the two.
+	cutLost Spans
+	// cutDrops counts the per-test mocks the stale cutoff dropped, and
+	// cutLeftOut the test cases a cutLost request left out at their verdict
+	// (SendingTestCase), since the session opened (StartDropSession): the
+	// lines that say them name the first dropNamesMax and the sampled ones.
+	cutDrops, cutLeftOut atomic.Uint64
+
 	// sharedLoss is the span the current recording leaves its test cases out
 	// over since it lost a mock that any of them may need (servedToAnyTest)
 	// on the way out (leaveOutAfter): open in orphans from that mock's
@@ -1990,14 +2001,56 @@ func (m *SyncMockManager) leaveOutOver(mock *models.Mock, epoch uint64, why stri
 	if to.Before(from) {
 		to = from
 	}
+	return m.leaveOutSpan(mock, from, to, &m.lostOver, epoch, why, func(string) {})
+}
+
+// staleCutoffWhy is why a drop at the stale cutoff was made (leaveOutCut).
+const staleCutoffWhy = "the buffer's stale cutoff: a per-test mock more than 7 s past its request that no window, resolved or open, held"
+
+// leaveOutCut leaves out, once mock, a per-test mock that no window resolved
+// or open held, was dropped at the stale cutoff (resolveRange) while the
+// current recording (epoch) was open, the test cases whose window holds its
+// request: those whose resolve would have taken it, as a window takes the
+// per-test mocks requested inside it. A request still in flight for which no
+// window was opened (OpenWindow: an ingress that opens none, as the
+// proxyless capture's and gRPC's do) is among them: it is left out at its
+// verdict, never saved without the mock. It records the request (cutLost),
+// which SendingTestCase finds for the test cases checked from now on, and
+// revokes by name those the stream sent already whose window holds it,
+// telling named of each, as leaveOutOver does over a call's span. The
+// request alone, not the call's span: a test case that started after the
+// request did not take the mock, and where every request opens a window,
+// none still in flight holds a request the cutoff drops (it would be held),
+// so the cutoff leaves out none there: its drops are a duplicate's
+// leftovers and calls no request made. A mock any test may need (one with
+// no request time, servedToAnyTest) is left out as leaveOutAfter does, and
+// an unread answer, or one no test needs (neededByNone), leaves out none.
+// shared says it was one any test may need.
+func (m *SyncMockManager) leaveOutCut(mock *models.Mock, epoch uint64, named func(string)) (left leftOut, shared bool) {
+	if mock.IsUndelivered() || m.neededByNone(mock, epoch) {
+		return leftOut{}, false
+	}
+	if m.servedToAnyTest(mock, "") {
+		return m.leaveOutAfter(mock, "", epoch, staleCutoffWhy), true
+	}
+	at := mock.Spec.ReqTimestampMock
+	return m.leaveOutSpan(mock, at, at, &m.cutLost, epoch, staleCutoffWhy, named), false
+}
+
+// leaveOutSpan is leaveOutOver over [from, to], recorded in spans, telling
+// named of each test case it revokes.
+func (m *SyncMockManager) leaveOutSpan(mock *models.Mock, from, to time.Time, spans *Spans, epoch uint64, why string, named func(string)) leftOut {
 	m.sharedLossMu.Lock()
 	defer m.sharedLossMu.Unlock()
 	if epoch != m.revokeEpoch.Load() {
 		return leftOut{}
 	}
-	m.lostOver.Record(from, to)
+	spans.Record(from, to)
 	deletes := m.revokeCapable.Load()
-	revoked := m.sentTCs.revokeReaching(from, to, deletes, func(name string) { m.recordDroppedTCFor(name, epoch) })
+	revoked := m.sentTCs.revokeReaching(from, to, deletes, func(name string) {
+		m.recordDroppedTCFor(name, epoch)
+		named(name)
+	})
 	m.noteFirstSentLocked()
 	if mock.TestModeInfo.IsStartup {
 		// Kept per destination, re-read against its first. One whose
@@ -2047,12 +2100,15 @@ func (m *SyncMockManager) SendingTestCase(name string, start, end time.Time) boo
 	sent := m.sentName(name, start)
 	start, end = sendingWindow(start, end)
 	m.sharedLossMu.Lock()
-	defer m.sharedLossMu.Unlock()
-	if m.leavesOutLocked(start, end) {
-		return false
+	out, cut := m.leavesOutLocked(start, end)
+	if !out {
+		m.noteSentLocked("", sent, start, end)
 	}
-	m.noteSentLocked("", sent, start, end)
-	return true
+	m.sharedLossMu.Unlock()
+	if cut {
+		m.sayCutLeftOut(name, start, end)
+	}
+	return !out
 }
 
 // sendingTestCaseOfMu is held by SendTestCaseOf while it holds its
@@ -2094,6 +2150,18 @@ func SendTestCaseOf(mgrs []*SyncMockManager, dest, name string, start, end time.
 	}
 	rawStart := start
 	start, end = sendingWindow(start, end)
+	sent, cutBy := sendTestCaseOfLocked(ms, dest, name, rawStart, start, end, send)
+	if cutBy != nil {
+		cutBy.sayCutLeftOut(name, start, end)
+	}
+	return sent
+}
+
+// sendTestCaseOfLocked is SendTestCaseOf under its managers' locks, which it
+// takes and lets go of. cutBy is the manager whose stale cutoff's loss
+// (cutLost) left the test case out, for the line that names it once the
+// locks are let go of; nil when none did.
+func sendTestCaseOfLocked(ms []*SyncMockManager, dest, name string, rawStart, start, end time.Time, send func() bool) (sent bool, cutBy *SyncMockManager) {
 	sendingTestCaseOfMu.Lock()
 	defer sendingTestCaseOfMu.Unlock()
 	for _, m := range ms {
@@ -2105,17 +2173,20 @@ func SendTestCaseOf(mgrs []*SyncMockManager, dest, name string, start, end time.
 		}
 	}()
 	for _, m := range ms {
-		if m.leavesOutLocked(start, end) {
-			return false
+		if out, cut := m.leavesOutLocked(start, end); out {
+			if cut {
+				cutBy = m
+			}
+			return false, cutBy
 		}
 	}
 	if send != nil && !send() {
-		return false
+		return false, nil
 	}
 	for _, m := range ms {
 		m.noteSentLocked(m.destKey(dest), m.sentName(name, rawStart), start, end)
 	}
-	return true
+	return true, nil
 }
 
 // sendingWindow is a test case's window as SendingTestCase reads it: a zero
@@ -2134,13 +2205,18 @@ func sendingWindow(start, end time.Time) (time.Time, time.Time) {
 // leavesOutLocked reports whether the recording leaves out a test case whose
 // window is [start, end]: a loss of a mock any test may need, requested no
 // later than end, or the span of a lost test's mock no test owns over the
-// window (SendingTestCase). Called under sharedLossMu.
-func (m *SyncMockManager) leavesOutLocked(start, end time.Time) bool {
+// window, or the request of a test's mock the stale cutoff dropped inside
+// the window (SendingTestCase): cut says it was the last alone. Called under
+// sharedLossMu.
+func (m *SyncMockManager) leavesOutLocked(start, end time.Time) (out, cut bool) {
 	if m.sharedLoss.close != nil && !end.Before(m.sharedLoss.from) {
-		return true
+		return true, false
 	}
-	over, _ := m.lostOver.Overlaps(start, end)
-	return over
+	if over, _ := m.lostOver.Overlaps(start, end); over {
+		return true, false
+	}
+	over, _ := m.cutLost.Overlaps(start, end)
+	return over, over
 }
 
 // noteSentLocked notes the test case named name, whose window is [start,
@@ -2206,7 +2282,7 @@ func (m *SyncMockManager) endSharedLoss() {
 // sharedLossMsg opens the ERROR that says a loss of a mock any test of the
 // recording may need (sayLeftOutAfter); what it says of the test cases sent
 // already follows.
-const sharedLossMsg = "syncMock: a mock that any test of the recording may need (a session's, a connection's or a start-up one) (or one with no request time) was dropped on its way out of the agent: the recording leaves out every test case whose window reaches past its request that its stream has not sent"
+const sharedLossMsg = "syncMock: a mock that any test of the recording may need (a session's, a connection's or a start-up one) (or one with no request time) was dropped before the recording held it (why says where): the recording leaves out every test case whose window reaches past its request that its stream has not sent"
 
 // sayLeftOutAfter says, at ERROR, that the recording leaves out every test
 // case from left.from on for mock, the n-th drop of why (leaveOutAfter), and
@@ -2272,6 +2348,112 @@ const keptSentMsg = "syncMock: a test's mock was dropped on its way out of the a
 
 // lossNextStep is what a line of a loss that leaves test cases out says to do.
 const lossNextStep = "re-record once the client that reads the agent's mocks keeps up with the app's traffic: its CPU, its disk, its network to the agent"
+
+// cutNextStep is what a line of a stale cutoff's loss says to do.
+const cutNextStep = "a request decided more than 7 s after its calls were made, with no window open for it, loses them: re-record once the agent's verdicts keep up with the app (its CPU, a stalled app), or record that ingress through one that opens a window per request"
+
+// sayCutLeftOut says that the test case named name, whose window is [start,
+// end], was left out at its verdict for the request of a test's mock the
+// stale cutoff dropped inside its window (cutLost): at WARN for the first
+// dropNamesMax of the session and the sampled ones, the rest at Debug. Never
+// called under a lock of the manager's.
+func (m *SyncMockManager) sayCutLeftOut(name string, start, end time.Time) {
+	n := m.cutLeftOut.Add(1)
+	level := zapcore.DebugLevel
+	if n <= dropNamesMax || sampled(n) {
+		level = zapcore.WarnLevel
+	}
+	ce := m.dropLogger().Check(level, "syncMock: a test case was left out: a mock requested inside its window was dropped at the stale cutoff, more than 7 s past its request, while no window was open for the request, so a replay of it would find no matching mock")
+	if ce == nil {
+		return
+	}
+	ce.Write(zap.String("test_case", name),
+		zap.String("window_start", start.Format(time.RFC3339Nano)),
+		zap.String("window_end", end.Format(time.RFC3339Nano)),
+		zap.Uint64("left_out_so_far", n),
+		zap.String("next_step", cutNextStep))
+}
+
+// cutReport is what one resolve's stale cutoff dropped and left out
+// (cutDropped), for the line that says it.
+type cutReport struct {
+	dropped        int
+	oldest         time.Time
+	revoked        int
+	names          []string
+	unnamedThrough time.Time
+}
+
+// name notes a test case the cutoff's loss revoked, while the line has room.
+func (r *cutReport) name(n string) {
+	r.revoked++
+	if len(r.names) < dropNamesMax {
+		r.names = append(r.names, n)
+	}
+}
+
+// cutDropped counts, tells OnDrop of, and leaves out the test cases for, the
+// per-test mocks a resolve (resolving) dropped at the stale cutoff, after it
+// let go of mu: under it, the walk only collects them, as a line or a hook
+// written there would hold up every AddMock and resolve of the manager. With
+// the output bound (a recording open, epoch its channel's), each leaves out
+// the test cases whose window holds its request (leaveOutCut); one with none
+// leaves out nothing, as a drop of the closed output does. It says one line
+// for them all: at WARN when they revoked test cases the stream sent, named,
+// else at Debug, as a test case still to be decided that one leaves out is
+// named at its verdict (sayCutLeftOut). A mock any test may need, or a
+// start-up mock re-read as one, is said as leaveOutAfter's are.
+func (m *SyncMockManager) cutDropped(cut []*models.Mock, epoch uint64, bound bool, resolving string) {
+	if len(cut) == 0 {
+		return
+	}
+	r := cutReport{dropped: len(cut)}
+	for _, mk := range cut {
+		if at := mk.Spec.ReqTimestampMock; r.oldest.IsZero() || at.Before(r.oldest) {
+			r.oldest = at
+		}
+		if bound {
+			left, shared := m.leaveOutCut(mk, epoch, r.name)
+			if shared {
+				// One any test may need (leaveOutAfter): said as
+				// its loss on the way out is.
+				m.sayLeftOutAfter(mk, staleCutoffWhy, 0, left)
+			} else {
+				m.sayLeftOutAfter(nil, "", 0, leftOut{reread: left.reread})
+				if left.unnamedThrough.After(r.unnamedThrough) {
+					r.unnamedThrough = left.unnamedThrough
+				}
+			}
+		}
+		m.toldDropped(mk)
+	}
+	total := m.cutDrops.Add(uint64(len(cut)))
+	level, msg := zapcore.DebugLevel, "syncMock: per-test mocks that no window, resolved or open, held were dropped at the stale cutoff, more than 7 s past their request: a test case decided from now on whose window holds one's request is left out at its verdict, and named then"
+	if r.revoked > 0 || !r.unnamedThrough.IsZero() {
+		level = zapcore.WarnLevel
+		msg = "syncMock: per-test mocks that no window, resolved or open, held were dropped at the stale cutoff, more than 7 s past their request: the recording revokes the test cases its stream sent whose window holds one's request (revoked_sent_names; the client deletes them when client_deletes_revoked, else they stay recorded without the mock and may fail at replay with no matching mock), and leaves out those decided from now on"
+	}
+	ce := m.dropLogger().Check(level, msg)
+	if ce == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.Int("dropped", r.dropped),
+		zap.Uint64("dropped_so_far", total),
+		zap.String("oldest_request", r.oldest.Format(time.RFC3339Nano)),
+		zap.Duration("oldest_request_age", time.Since(r.oldest)),
+		zap.String("resolving_test", resolving),
+		zap.Bool("recording_open", bound),
+		zap.Int("revoked_sent", r.revoked),
+		zap.Strings("revoked_sent_names", r.names),
+		zap.Bool("client_deletes_revoked", m.revokeCapable.Load()),
+	}
+	if !r.unnamedThrough.IsZero() {
+		fields = append(fields, zap.String("unnamed_sent_through", r.unnamedThrough.Format(time.RFC3339Nano)),
+			zap.String("unnamed_sent", "test cases the stream sent and cannot name, whose window ended after a dropped mock's request and by unnamed_sent_through, are not revoked and may stay recorded without it"))
+	}
+	ce.Write(append(fields, zap.String("next_step", cutNextStep))...)
+}
 
 // saySharedLoss says, at ERROR, what the loss of a mock any test may need
 // left out (left), with fields naming it.
@@ -2920,6 +3102,8 @@ func (m *SyncMockManager) StartDropSession() DropMark {
 	m.outChanClosedDrops.Store(0)
 	m.overflowDrops.Store(0)
 	m.pressureSampled.Store(0)
+	m.cutDrops.Store(0)
+	m.cutLeftOut.Store(0)
 	return DropMark{
 		added:     m.totalAdded.Load(),
 		pressure:  m.pressureDropped.Load(),
@@ -4909,6 +5093,7 @@ func (m *SyncMockManager) CheckedBefore(t time.Time) {
 	m.pressure.CheckedBefore(t)
 	m.orphans.CheckedBefore(t)
 	m.lostOver.CheckedBefore(t)
+	m.cutLost.CheckedBefore(t)
 }
 
 // pressureActiveAtLocked reports whether instant t fell inside any recorded
@@ -5417,6 +5602,10 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// sendToOutChan which reacquires the RLock and will skip the
 	// send itself when outChanClosed is true.
 	outChanBound, _ := m.outChanStatus()
+	// The recording whose test cases a stale cutoff's drop leaves out
+	// (cutDropped): the output's as bound now.
+	cutEpoch := m.revokeEpoch.Load()
+	var cut []*models.Mock
 	mappingChan := m.mappingChan
 	// Requests still in flight own what was requested since the earliest of
 	// them started: a mock this call would drop is held for them instead.
@@ -5761,25 +5950,12 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			if m.holdOrDropLocked(mock, droppedOutsideAnyWindow, openFrom, open, &tally, nil) {
 				continue
 			}
-			// Per-mock diagnostic: a per-test mock that fell off the
-			// stale-buffer cutoff almost always means the recorder
-			// kept emitting after the dedup queue had advanced past
-			// the matching test's window — log enough context for
-			// post-hoc CI analysis. Sampled via dropLogger to honour
-			// the same flood-prevention as the outChan-overflow path.
-			if logger := m.dropLogger(); logger != nil {
-				logger.Debug("diag/ResolveRange: stale-cutoff drop (per-test mock older than 7s that no resolved or open window owns)",
-					zap.String("mock_name", mock.Name),
-					zap.String("mock_kind", string(mock.Kind)),
-					zap.String("connID", mock.ConnectionID),
-					zap.String("lifetime", mock.TestModeInfo.Lifetime.String()),
-					zap.Time("mock_req_ts", mockTime),
-					zap.Time("window_start", start),
-					zap.Time("window_end", end),
-					zap.Time("cutoff", cutoffTime),
-					zap.String("test_name", testName),
-				)
-			}
+			// Collected, and said, told and left out for after mu
+			// (cutDropped): a request in flight with no window open
+			// for it may still be decided with this mock inside its
+			// window, and a line written here would hold mu once per
+			// mock.
+			cut = append(cut, mock)
 			continue
 		}
 
@@ -5886,6 +6062,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	paidLate := m.oweLateMappingsLocked(mappingChan != nil, lateMappings, mocksToSend)
 
 	m.mu.Unlock()
+	m.cutDropped(cut, cutEpoch, outChanBound, testName)
 	m.reportGivenUp(gaveUp, LostToHoldBound)
 	m.settlePool()
 
