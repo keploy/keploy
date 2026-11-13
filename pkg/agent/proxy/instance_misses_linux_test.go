@@ -335,6 +335,8 @@ func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
 // open test's list or with none open, never in both, so the set start re-files
 // no more than a window keeps.
 func TestAWorkersLateCallsLostForRoomAtTheSetsStartAreItsNextReadsLoss(t *testing.T) {
+	// Past the room in memory and on the disk (missSpill).
+	noSpillRoom(t)
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50101"))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -400,6 +402,8 @@ func TestAWorkersReadWithNoErrorDrainIsIncompleteAndTakesNoMiss(t *testing.T) {
 // cause: not the run's, and one of a worker keploy does not serve is no
 // read's.
 func TestAWorkersLostMissMakesOnlyItsOwnReadIncomplete(t *testing.T) {
+	// Past the room in memory and on the disk (missSpill).
+	noSpillRoom(t)
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50085"))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -438,6 +442,8 @@ func TestAWorkersLostMissMakesOnlyItsOwnReadIncomplete(t *testing.T) {
 // A test worker's tail lost for room is said at the next set's start, as
 // the run's is.
 func TestAWorkersTailLostForRoomIsSaidAtTheSetsStart(t *testing.T) {
+	// Past the room in memory and on the disk (missSpill).
+	noSpillRoom(t)
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50087"))
 	core, logs := observer.New(zap.WarnLevel)

@@ -208,9 +208,10 @@ func TestGetMockErrors_ReportsALostMiss(t *testing.T) {
 }
 
 // A miss the bounded list of its test's window has no room for
-// (maxPendingMockErrors), alike to none it holds (missAlikeKey), is not
-// dropped silently: the read says it is incomplete, with what it read.
-func TestGetMockErrors_ReportsAMissPastTheBound(t *testing.T) {
+// (maxPendingMockErrors), alike to none it holds (missAlikeKey), is kept on
+// the agent's disk (missSpill) and read back: the read lists every miss, and
+// is complete.
+func TestGetMockErrors_KeepsAMissPastTheListOnDisk(t *testing.T) {
 	eitherSwitch(t, func(t *testing.T) {
 		p := startedDrainProxy(t, maxPendingMockErrors+2)
 		p.BeginTestErrorCapture()
@@ -218,12 +219,39 @@ func TestGetMockErrors_ReportsAMissPastTheBound(t *testing.T) {
 			p.SendError(distinctMiss(i))
 		}
 		got, err := p.GetMockErrors(context.Background())
+		if err != nil || len(got) != maxPendingMockErrors+1 {
+			t.Fatalf("read %d misses, err %v; want all %d, complete", len(got), err, maxPendingMockErrors+1)
+		}
+		if last := got[maxPendingMockErrors]; last.ClosestMock != fmt.Sprintf("mock-%d", maxPendingMockErrors) {
+			t.Fatalf("the miss kept on the disk was read back as %+v", last)
+		}
+	})
+}
+
+// Past the disk's bound too, a miss is dropped, and not silently: the read
+// says it is incomplete, naming the full list and why the disk took no more,
+// with what it read, and the agent says the loss at Warn, once, with what to
+// do.
+func TestGetMockErrors_ReportsAMissPastTheDiskBound(t *testing.T) {
+	eitherSwitch(t, func(t *testing.T) {
+		noSpillRoom(t)
+		core, logs := observer.New(zap.WarnLevel)
+		p := startedDrainProxyLogging(t, maxPendingMockErrors+4, zap.New(core))
+		p.BeginTestErrorCapture()
+		for i := 0; i <= maxPendingMockErrors+1; i++ {
+			p.SendError(distinctMiss(i))
+		}
+		got, err := p.GetMockErrors(context.Background())
 		// The cause is the full list, not a stopped drain: the drain ran.
-		if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostListFull) || strings.Contains(err.Error(), "drain") {
-			t.Fatalf("GetMockErrors = %v with one miss past the bound; want ErrUnmatchedCallsUnread naming the full list", err)
+		if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostListFull+": they reached the 0 MiB") || strings.Contains(err.Error(), "drain") {
+			t.Fatalf("GetMockErrors = %v with misses past the disk's bound; want ErrUnmatchedCallsUnread naming the full list and the disk's bound", err)
 		}
 		if len(got) != maxPendingMockErrors {
 			t.Fatalf("got %d misses, want the %d the window held", len(got), maxPendingMockErrors)
+		}
+		said := logs.FilterMessageSnippet("a miss was lost").All()
+		if len(said) != 1 || said[0].ContextMap()["next_step"] != missLostNextStep {
+			t.Fatalf("the loss was said %d times (%+v); want once at Warn, with what to do", len(said), said)
 		}
 	})
 }
@@ -247,129 +275,187 @@ func overflowPending(p *Proxy) {
 	flushDrain(p)
 }
 
-// Misses made while no test's window is open, past what keploy keeps, are no
-// test's when a set's first test opens its window: with the proven switch off
-// they are discarded, the drop is said, and no read is made incomplete by
-// them. Under the switch they are the set's: the first test reads those kept,
-// marked as made before the set, and its read says it is short of the rest.
+// Misses made while no test's window is open, past the list's room, are kept
+// on the agent's disk and are the set's first test's as the rest are: with
+// the proven switch off they are discarded, said, and no read is made
+// incomplete by them; under the switch the first test reads every one, marked
+// as made before the set, complete. Past the disk's bound they are dropped:
+// with the switch off the drop is said; under it the first test's read says
+// it is short of them.
 func TestBeginTestErrorCapture_SaysAPendingOverflowAndJudgesTheTest(t *testing.T) {
-	eitherSwitch(t, func(t *testing.T) {
-		// The logger is the proxy's before its drain starts: the drain reads it.
-		core, logs := observer.New(zap.WarnLevel)
-		p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 8)}
-		ctx, cancel := context.WithCancel(context.Background())
-		t.Cleanup(cancel)
-		p.StartErrorDrain(ctx)
-		overflowPending(p)
-		p.BeginTestErrorCapture()
-		got, err := p.GetMockErrors(context.Background())
-		if provenswitch.On() {
-			if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostBeforeSetFull) {
-				t.Fatalf("the set's first test's read err %v; want it short of the misses made before the set", err)
-			}
-			if len(got) != maxPendingMockErrors || !got[0].BeforeSet {
-				t.Fatalf("the set's first test read %d misses (first %+v); want the %d kept, marked as the set's", len(got), got[0], maxPendingMockErrors)
-			}
-			return
-		}
-		if err != nil || len(got) != 0 {
-			t.Fatalf("the set's first test read %d misses, err %v; want none, complete", len(got), err)
-		}
-		if n := len(logs.FilterMessageSnippet("than keploy keeps; the rest were dropped").All()); n != 1 {
-			t.Fatalf("the drop was said %d times; want once", n)
-		}
-	})
+	for _, full := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disk full %v", full), func(t *testing.T) {
+			eitherSwitch(t, func(t *testing.T) {
+				if full {
+					noSpillRoom(t)
+				}
+				// The logger is the proxy's before its drain starts: the drain reads it.
+				core, logs := observer.New(zap.WarnLevel)
+				p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 8)}
+				ctx, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				p.StartErrorDrain(ctx)
+				overflowPending(p)
+				p.BeginTestErrorCapture()
+				got, err := p.GetMockErrors(context.Background())
+				kept := maxPendingMockErrors + 1
+				if full {
+					kept = maxPendingMockErrors
+				}
+				if provenswitch.On() {
+					if full != errors.Is(err, models.ErrUnmatchedCallsUnread) || (full && !strings.Contains(err.Error(), missLostBeforeSetFull)) {
+						t.Fatalf("the set's first test's read err %v; want it short of the misses made before the set only past the disk's bound", err)
+					}
+					if len(got) != kept || !got[0].BeforeSet || !got[len(got)-1].BeforeSet {
+						t.Fatalf("the set's first test read %d misses (first %+v); want the %d kept, marked as the set's", len(got), got[0], kept)
+					}
+					return
+				}
+				if err != nil || len(got) != 0 {
+					t.Fatalf("the set's first test read %d misses, err %v; want none, complete", len(got), err)
+				}
+				if n := len(logs.FilterMessageSnippet("than keploy keeps; the rest were dropped").All()); n != map[bool]int{false: 0, true: 1}[full] {
+					t.Fatalf("the drop was said %d times; want it said once, past the disk's bound only", n)
+				}
+			})
+		})
+	}
 }
 
-// Misses made between two tests, past what keploy keeps, are the next test's:
-// its read says it is incomplete, and why.
+// Misses made between two tests, past the list's room, are kept on the
+// agent's disk and are the next test's; past the disk's bound, its read says
+// it is incomplete, and why.
 func TestContinueTestErrorCapture_ReportsAPendingOverflow(t *testing.T) {
-	eitherSwitch(t, func(t *testing.T) {
-		p := startedDrainProxy(t, 8)
-		overflowPending(p)
-		p.ContinueTestErrorCapture()
-		got, err := p.GetMockErrors(context.Background())
-		if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostBetweenFull) {
-			t.Fatalf("GetMockErrors = %v; want ErrUnmatchedCallsUnread naming the full between-tests list", err)
-		}
-		if len(got) != maxPendingMockErrors {
-			t.Fatalf("got %d misses, want the %d kept", len(got), maxPendingMockErrors)
-		}
-		if _, err := p.GetMockErrors(context.Background()); err != nil {
-			t.Fatalf("the loss was reported again on the next read: %v", err)
-		}
-	})
+	for _, full := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disk full %v", full), func(t *testing.T) {
+			eitherSwitch(t, func(t *testing.T) {
+				if full {
+					noSpillRoom(t)
+				}
+				p := startedDrainProxy(t, 8)
+				overflowPending(p)
+				p.ContinueTestErrorCapture()
+				got, err := p.GetMockErrors(context.Background())
+				if !full {
+					if err != nil || len(got) != maxPendingMockErrors+1 {
+						t.Fatalf("read %d misses, err %v; want all %d, complete", len(got), err, maxPendingMockErrors+1)
+					}
+					return
+				}
+				if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostBetweenFull) {
+					t.Fatalf("GetMockErrors = %v; want ErrUnmatchedCallsUnread naming the full between-tests list", err)
+				}
+				if len(got) != maxPendingMockErrors {
+					t.Fatalf("got %d misses, want the %d kept", len(got), maxPendingMockErrors)
+				}
+				if _, err := p.GetMockErrors(context.Background()); err != nil {
+					t.Fatalf("the loss was reported again on the next read: %v", err)
+				}
+			})
+		})
+	}
 }
 
-// With no window ever opened, a read takes the kept misses; past what keploy
-// keeps, it says it is incomplete.
+// With no window ever opened, a read takes the kept misses, those kept on the
+// agent's disk too; past the disk's bound, it says it is incomplete.
 func TestGetMockErrors_ReportsAPendingOverflowWithNoWindow(t *testing.T) {
-	eitherSwitch(t, func(t *testing.T) {
-		p := startedDrainProxy(t, 8)
-		overflowPending(p)
-		got, err := p.GetMockErrors(context.Background())
-		if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostBetweenFull) {
-			t.Fatalf("GetMockErrors = %v; want ErrUnmatchedCallsUnread naming the full list", err)
-		}
-		if len(got) != maxPendingMockErrors {
-			t.Fatalf("got %d misses, want the %d kept", len(got), maxPendingMockErrors)
-		}
-	})
+	for _, full := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disk full %v", full), func(t *testing.T) {
+			eitherSwitch(t, func(t *testing.T) {
+				if full {
+					noSpillRoom(t)
+				}
+				p := startedDrainProxy(t, 8)
+				overflowPending(p)
+				got, err := p.GetMockErrors(context.Background())
+				if !full {
+					if err != nil || len(got) != maxPendingMockErrors+1 {
+						t.Fatalf("read %d misses, err %v; want all %d, complete", len(got), err, maxPendingMockErrors+1)
+					}
+					return
+				}
+				if !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostBetweenFull) {
+					t.Fatalf("GetMockErrors = %v; want ErrUnmatchedCallsUnread naming the full list", err)
+				}
+				if len(got) != maxPendingMockErrors {
+					t.Fatalf("got %d misses, want the %d kept", len(got), maxPendingMockErrors)
+				}
+			})
+		})
+	}
 }
 
 // A dropped miss that counts against no test is no loss: a DNS lookup's, which
 // the proxy answers itself. `keploy mock` opens no test window with the switch
 // off, so every miss of its run waits as one made between tests; a run with
 // more DNS misses than keploy keeps would otherwise read as incomplete, and
-// fail --strict for misses that never count.
+// fail --strict for misses that never count. Past the list's room they are
+// kept on the agent's disk; past its bound too, dropped, with no loss.
 func TestAPendingOverflowOfDNSMissesIsNoLoss(t *testing.T) {
-	eitherSwitch(t, func(t *testing.T) {
-		p := startedDrainProxy(t, 8)
-		for i := 0; i <= maxPendingMockErrors; i++ {
-			p.SendError(models.ParserError{
-				ParserErrorType: models.ErrMockNotFound,
-				MismatchReport:  &models.MockMismatchReport{Protocol: "DNS", ActualSummary: fmt.Sprintf("A host%d.example", i), ClosestMock: fmt.Sprintf("dns-%d", i)},
+	for _, full := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disk full %v", full), func(t *testing.T) {
+			eitherSwitch(t, func(t *testing.T) {
+				if full {
+					noSpillRoom(t)
+				}
+				p := startedDrainProxy(t, 8)
+				for i := 0; i <= maxPendingMockErrors; i++ {
+					p.SendError(dnsMiss(i))
+				}
+				flushDrain(p)
+				got, err := p.GetMockErrors(context.Background())
+				if err != nil {
+					t.Fatalf("GetMockErrors = %v; dropped DNS misses count against no test, so the read is not short of one", err)
+				}
+				if want := map[bool]int{false: maxPendingMockErrors + 1, true: maxPendingMockErrors}[full]; len(got) != want {
+					t.Fatalf("got %d misses, want the %d kept", len(got), want)
+				}
 			})
-		}
-		flushDrain(p)
-		got, err := p.GetMockErrors(context.Background())
-		if err != nil {
-			t.Fatalf("GetMockErrors = %v; dropped DNS misses count against no test, so the read is not short of one", err)
-		}
-		if len(got) != maxPendingMockErrors {
-			t.Fatalf("got %d misses, want the %d kept", len(got), maxPendingMockErrors)
-		}
-	})
+		})
+	}
 }
 
-// The same in a test's window: a DNS miss its full list drops counts against
-// no test, so the read is not short of one (noteMissLost's missCounts), with
-// the proven switch on or off.
+// dnsMiss is a DNS lookup's miss, alike to no other i's.
+func dnsMiss(i int) models.ParserError {
+	return models.ParserError{
+		ParserErrorType: models.ErrMockNotFound,
+		MismatchReport:  &models.MockMismatchReport{Protocol: "DNS", ActualSummary: fmt.Sprintf("A host%d.example", i), ClosestMock: fmt.Sprintf("dns-%d", i)},
+	}
+}
+
+// The same in a test's window: a DNS miss its full list, and the disk past
+// it, drop counts against no test, so the read is not short of one
+// (noteMissLost's missCounts), with the proven switch on or off.
 func TestAWindowOverflowOfDNSMissesIsNoLoss(t *testing.T) {
-	eitherSwitch(t, func(t *testing.T) {
-		p := startedDrainProxy(t, maxPendingMockErrors+2)
-		p.BeginTestErrorCapture()
-		for i := 0; i <= maxPendingMockErrors; i++ {
-			p.SendError(models.ParserError{
-				ParserErrorType: models.ErrMockNotFound,
-				MismatchReport:  &models.MockMismatchReport{Protocol: "DNS", ActualSummary: fmt.Sprintf("A host%d.example", i), ClosestMock: fmt.Sprintf("dns-%d", i)},
+	for _, full := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disk full %v", full), func(t *testing.T) {
+			eitherSwitch(t, func(t *testing.T) {
+				if full {
+					noSpillRoom(t)
+				}
+				p := startedDrainProxy(t, maxPendingMockErrors+2)
+				p.BeginTestErrorCapture()
+				for i := 0; i <= maxPendingMockErrors; i++ {
+					p.SendError(dnsMiss(i))
+				}
+				got, err := p.GetMockErrors(context.Background())
+				if err != nil {
+					t.Fatalf("GetMockErrors = %v; a dropped DNS miss counts against no test, so the read is not short of one", err)
+				}
+				if want := map[bool]int{false: maxPendingMockErrors + 1, true: maxPendingMockErrors}[full]; len(got) != want {
+					t.Fatalf("got %d misses, want the %d kept", len(got), want)
+				}
 			})
-		}
-		got, err := p.GetMockErrors(context.Background())
-		if err != nil {
-			t.Fatalf("GetMockErrors = %v; a dropped DNS miss counts against no test, so the read is not short of one", err)
-		}
-		if len(got) != maxPendingMockErrors {
-			t.Fatalf("got %d misses, want the %d the window held", len(got), maxPendingMockErrors)
-		}
-	})
+		})
+	}
 }
 
 // A miss that carries no report (a protocol whose matcher emits none) says
-// nothing of what it was, so it counts: one its test's full list drops is a
-// loss, and the read says so.
+// nothing of what it was, so it counts: one its test's full list, and the
+// disk past it, drop is a loss, and the read says so.
 func TestAWindowOverflowOfUnreportedMissesIsALoss(t *testing.T) {
 	eitherSwitch(t, func(t *testing.T) {
+		noSpillRoom(t)
 		p := startedDrainProxy(t, maxPendingMockErrors+2)
 		p.BeginTestErrorCapture()
 		for i := 0; i <= maxPendingMockErrors; i++ {

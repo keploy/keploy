@@ -197,6 +197,9 @@ func TestOnlyACallsTimeAndValuesMayDifferForItToFold(t *testing.T) {
 			return *pe
 		}},
 	}
+	// A miss alike to none would be kept on the disk (missSpill): with no
+	// room there, only a fold keeps it.
+	noSpillRoom(t)
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			a := &testErrorAccumulator{}
@@ -210,7 +213,7 @@ func TestOnlyACallsTimeAndValuesMayDifferForItToFold(t *testing.T) {
 			if kept := a.addBounded(row.edit(&pe, &r), 1); kept != row.fold {
 				t.Fatalf("a miss past the room differing in %s was kept %v; want %v", row.name, kept, row.fold)
 			}
-			held := a.drain()
+			held := drained(t, a)
 			if len(held) != 1 {
 				t.Fatalf("the list holds %d; want the one it had room for", len(held))
 			}
@@ -231,7 +234,7 @@ func TestAMovedMissFoldsWithTheTimesFoldedIntoIt(t *testing.T) {
 	if !a.addBounded(moved, 1) {
 		t.Fatal("the moved miss was not folded")
 	}
-	got := heldTimes(t, a.drain()[0])
+	got := heldTimes(t, drained(t, a)[0])
 	want := []time.Time{pollerMiss(1).MismatchReport.At, pollerMiss(2).MismatchReport.At}
 	if len(got) != 2 || !got[0].Equal(want[0]) || !got[1].Equal(want[1]) {
 		t.Fatalf("the held miss carries %v; want %v", got, want)
@@ -245,12 +248,12 @@ func TestAMissFoldsIntoTheFirstAlikeAndADrainForgetsTheFolds(t *testing.T) {
 	a.addBounded(pollerMiss(0), 2)
 	a.addBounded(pollerMiss(1), 2)
 	a.addBounded(pollerMiss(2), 2)
-	held := a.drain()
+	held := drained(t, a)
 	if n0, n1 := len(heldTimes(t, held[0])), len(heldTimes(t, held[1])); n0 != 1 || n1 != 0 {
 		t.Fatalf("folded %d into the first alike and %d into the second; want 1 and 0", n0, n1)
 	}
 	a.addBounded(pollerMiss(3), 2)
-	if held = a.drain(); len(held) != 1 || len(heldTimes(t, held[0])) != 0 {
+	if held = drained(t, a); len(held) != 1 || len(heldTimes(t, held[0])) != 0 {
 		t.Fatalf("after a drain the list holds %d, the first with times %v; want one miss, as made", len(held), heldTimes(t, held[0]))
 	}
 }
@@ -268,7 +271,7 @@ func TestAnAnswerPastItsRoomIsNotFolded(t *testing.T) {
 	if a.addBounded(answer(), 1) {
 		t.Fatal("an answer past its room was kept")
 	}
-	if n := len(heldTimes(t, a.drain()[0])); n != 0 {
+	if n := len(heldTimes(t, drained(t, a)[0])); n != 0 {
 		t.Fatalf("the held answer carries %d folded times; want none", n)
 	}
 }
@@ -296,7 +299,7 @@ func TestAFoldKeepsHowTheHeldMissIsFiled(t *testing.T) {
 			if !a.addBounded(wrap(pollerMiss(1)), 1) {
 				t.Fatal("an alike miss filed the same way was not folded")
 			}
-			held := a.drain()[0]
+			held := drained(t, a)[0]
 			_, _, marks := filedMiss(held)
 			_, _, want := filedMiss(wrap(orig))
 			if len(marks) != 1 || marks[0] != want[0] || len(heldTimes(t, held)) != 1 {

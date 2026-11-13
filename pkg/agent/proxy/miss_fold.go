@@ -12,51 +12,82 @@ import (
 )
 
 // missFolds is what a testErrorAccumulator folded into the misses it holds
-// once their room was full (foldAlike): each held miss by its alike key
-// (missAlikeKey), and, by a held miss's index in the list, the times of the
-// misses folded into it, in the order they were.
+// or spilled once their room was full (foldAlike): each such miss by its
+// alike key (missAlikeKey), and, by its place, the times of the misses folded
+// into it, in the order they were.
 type missFolds struct {
-	held map[string]int
-	at   map[int][]time.Time
+	held map[string]foldTarget
+	at   map[foldTarget][]time.Time
 }
 
-// foldAlike folds err, a miss past its accumulator's room, into the first
-// held miss it is alike to (missAlikeKey): err's time, and the times folded
-// into err before (a miss moved from one list to another), join that miss's.
-// It returns false, folding nothing, for a miss alike to none held and for
-// one keploy cannot tell alike (missAlikeKey). Under a.mu.
-func (a *testErrorAccumulator) foldAlike(err error) bool {
-	key, ok := missAlikeKey(err)
-	if !ok {
-		return false
+// foldTarget is where a miss misses fold into is: its index in its
+// accumulator's list, or, spilled, its place on the spill (missSpill.keep).
+type foldTarget struct {
+	spilled bool
+	i       int
+}
+
+// keepPast keeps err, a miss past its accumulator's room: folded into the
+// first miss held or spilled it is alike to (foldAlike), or else kept on the
+// accumulator's spill, where the misses alike to it fold into it. It
+// returns false when err was not kept: the spill is full, or err is no
+// parser's miss (missSpill.keep). Under a.mu.
+func (a *testErrorAccumulator) keepPast(err error) bool {
+	key, alike := missAlikeKey(err)
+	if alike && a.foldAlike(key, err) {
+		return true
 	}
+	if a.spill == nil {
+		a.spill = &missSpill{}
+	}
+	i, kept := a.spill.keep(err)
+	if kept && alike {
+		a.folds.held[key] = foldTarget{spilled: true, i: i}
+	}
+	return kept
+}
+
+// foldAlike folds err, a miss past its accumulator's room whose alike key is
+// key (missAlikeKey), into the first miss held or spilled it is alike to:
+// err's time, and the times folded into err before (a miss moved from one
+// list to another), join that miss's. It returns false, folding nothing, for
+// a miss alike to none. Under a.mu; a.folds is set after it.
+func (a *testErrorAccumulator) foldAlike(key string, err error) bool {
 	if a.folds == nil {
-		a.folds = &missFolds{held: make(map[string]int, len(a.errs)), at: map[int][]time.Time{}}
+		a.folds = &missFolds{held: make(map[string]foldTarget, len(a.errs)), at: map[foldTarget][]time.Time{}}
 		for i, e := range a.errs {
 			if k, ok := missAlikeKey(e); ok {
 				if _, dup := a.folds.held[k]; !dup {
-					a.folds.held[k] = i
+					a.folds.held[k] = foldTarget{i: i}
 				}
 			}
 		}
 	}
-	i, ok := a.folds.held[key]
+	at, ok := a.folds.held[key]
 	if !ok {
 		return false
 	}
 	pe, _, _ := filedMiss(err)
-	a.folds.at[i] = append(append(a.folds.at[i], pe.MismatchReport.At), pe.MismatchReport.AlikeAt...)
+	a.folds.at[at] = append(append(a.folds.at[at], pe.MismatchReport.At), pe.MismatchReport.AlikeAt...)
 	return true
 }
 
-// applyTo writes into errs, the list f's misses were folded into, the times
-// folded into each held miss (withAlikeAt). A nil f folded nothing.
-func (f *missFolds) applyTo(errs []error) {
+// applyTo writes into errs and spilled, the misses f's were folded into, in
+// the list and read back from its spill, the times folded into each
+// (withAlikeAt). A nil f folded nothing; a spilled miss not read back
+// (missSpill.readBack) takes none.
+func (f *missFolds) applyTo(errs, spilled []error) {
 	if f == nil {
 		return
 	}
-	for i, at := range f.at {
-		errs[i] = withAlikeAt(errs[i], at)
+	for t, at := range f.at {
+		into := errs
+		if t.spilled {
+			into = spilled
+		}
+		if t.i < len(into) {
+			into[t.i] = withAlikeAt(into[t.i], at)
+		}
 	}
 }
 
