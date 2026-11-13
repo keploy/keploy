@@ -67,6 +67,93 @@ func TestOutcomeAPairedURLSafeTokenShownWholeIsOneUse(t *testing.T) {
 	}
 }
 
+// The rows the whole copy of a paired text must not loosen. A paired signed
+// id no earlier place holds whole, or one only another test's place holds
+// whole, is read word by word as before, its kept words compared. A paired
+// text whose changed words are no random token ("order-17 paid 100" to
+// "order-42 paid 100", shown whole before) keeps its words too: its kept
+// words stay compared with the recording. An earlier place that held the
+// recorded id whole where round F gave another value there binds nothing
+// whole.
+func TestOutcomeAPairedTextCopiedWholeOnlyWhereARandomTokenChanged(t *testing.T) {
+	const (
+		recJSON = "AXsibiI6IkUyRSBIb3N0ZWQgQWdlbnQiLCJyIjpbImh0dHBzOi8vY2IuZTJlLTE3OTQ1NjI1OTE1MzM4OTg2NDcuYmxvY2tlZC5leGFtcGxlL2NhbGxiYWNrIl0sImciOlsiYXV0aG9yaXphdGlvbl9jb2RlIiwicmVmcmVzaF90b2tlbiJdfQ"
+		rec     = "kepclient_" + recJSON + ".EzmeWljStycZlr5RPS_JdQ"
+		live    = "kepclient_" + recJSON + ".Nq3wK8vLm-2XpR7tYc4hZg"
+	)
+	wholeValue := func(ds []Decision) bool {
+		return slices.ContainsFunc(ds, func(d Decision) bool { return d.Outcome == OutcomeValue && d.At.Word == -1 })
+	}
+	byWords := func(what string, ds []Decision) {
+		t.Helper()
+		if len(ds) == 0 {
+			t.Errorf("%s: no decision", what)
+		}
+		for _, d := range ds {
+			if d.At.Word < 0 {
+				t.Errorf("%s: %s decided whole; want its words to decide it", what, oDescribe(ds))
+			}
+		}
+	}
+	byWords("a paired signed id no earlier place holds", Decide(oInput("body.docs.msgs.0.client_id", rec, live, nil, nil)))
+
+	other := oSent(rec, live)
+	other[0].Own, other[0].Run = false, true
+	byWords("a paired signed id only another test's place holds whole", Decide(oInput("body.docs.msgs.0.client_id", rec, live, other, nil)))
+
+	const recNote, liveNote = "order-17 paid 100", "order-42 paid 100"
+	ds := Decide(oInput("body.note", recNote, liveNote, oSent(recNote, liveNote), nil))
+	byWords("a paired text whose changed word is no random token", ds)
+	if d := oWord(t, ds, "17", "42"); d.Outcome != OutcomeValue || d.At.Word != 1 || d.From.Mock != "mock-0" {
+		t.Errorf("a paired text whose changed word is no random token: %s; want word 1 bound at mock-0", oDescribe(ds))
+	}
+
+	moved := oSent(rec, "kepclient_"+recJSON+".ZZ0aYb1Xc2Wd3Ve4Uf5Tg6")
+	if ds := Decide(oInput("body.docs.msgs.0.client_id", rec, live, moved, nil)); wholeValue(ds) {
+		t.Errorf("FALSE GREEN? an earlier place held the recorded id whole and round F gave another there: %s; want no whole bind", oDescribe(ds))
+	}
+
+	// A text whose words do not pair, a random token in it or not, is a
+	// whole copy where an earlier place holds it whole, as before: a word
+	// added or dropped ("ref 12-7" to "ref 129"), or the text between the
+	// words changed ("ref 12-7" to "ref 34:9").
+	for _, tc := range [][2]string{{"ref 12-7", "ref 129"}, {"ref 12-7", "ref 34:9"}} {
+		ds := Decide(oInput("body.note", tc[0], tc[1], oSent(tc[0], tc[1]), nil))
+		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].At.Word != -1 || ds[0].From.Mock != "mock-0" {
+			t.Errorf("%q to %q, shown whole before: %s; want one Value, the field whole, bound at mock-0", tc[0], tc[1], oDescribe(ds))
+		}
+	}
+}
+
+// randomURLToken reads the two runs' URL-safe tokens side by side, one index
+// at a time, and names only a random token that is a part of its text in
+// both runs: never one that is a run's whole text (oneToken's), nor tokens of
+// two indexes, where one run has tokens the other has not.
+func TestRandomURLTokenReadsOneIndexOfBothRuns(t *testing.T) {
+	const (
+		tokA = "EzmeWljStycZlr5RPS_JdQ"
+		tokB = "Nq3wK8vLm-2XpR7tYc4hZg"
+	)
+	for _, tc := range []struct {
+		name      string
+		rec, live string
+		want      bool
+	}{
+		{"a signed id's tag", "kepclient_AXsib." + tokA, "kepclient_AXsib." + tokB, true},
+		{"one random token whole in both runs", tokA, tokB, false},
+		{"a token whole in the recording alone", tokA, tokB + ".q", false},
+		{"a token whole in round F alone", tokA + ".q", tokB, false},
+		{"round F's tokens end first", "x.y.z." + tokA, tokB + ".q", false},
+		{"the recording's tokens end first", tokA + ".q", "x.y.z." + tokB, false},
+		{"no random token changed", "order-17.paid", "order-42.paid", false},
+		{"the tag kept", "kepclient_AXsib." + tokA, "kepclient_BYtjc." + tokA, false},
+	} {
+		if got := randomURLToken(tc.rec, tc.live); got != tc.want {
+			t.Errorf("%s: randomURLToken(%q, %q) = %v; want %v", tc.name, tc.rec, tc.live, got, tc.want)
+		}
+	}
+}
+
 // A token an earlier place shows only inside a longer text (a consent URL,
 // a Location header) is bound at its own token there (|token.<n>), paired
 // or not: a replay reads that token whole, so the next run's id, whose '-'

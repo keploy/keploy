@@ -23,7 +23,11 @@ import (
 // of the two runs' client_ids fall at other places, so keploy's words of
 // the two runs do not pair: the field was refused as unknown, "a word was
 // added or dropped beside one it holds", naming the very request that holds
-// it whole in both runs.
+// it whole in both runs. Where they paired by chance (one '_' in the
+// recorded tag, one '-' in round F's), the field was bound word by word, and
+// the next run's tag, whose '-' and '_' fell elsewhere again, had another
+// count of words: the replay found no word to bind, and the insert matched
+// no recording.
 
 // sealedClientID is a client_id as api-server seals it (clientid.go
 // sealClientID), its client named name, under key.
@@ -79,7 +83,7 @@ func staffBlockCall(t *testing.T, rec, live, rq, fq string) Input {
 // client_id is the authorize request's url.query.client_id whole, in both
 // runs: a Value bound there whole, its words paired or not.
 func TestAClientIDTheClientTestSentWholeIsBoundAtItsRequest(t *testing.T) {
-	for _, kind := range []string{"unpaired", "shape"} {
+	for _, kind := range []string{"unpaired", "shape", "paired"} {
 		t.Run(kind, func(t *testing.T) {
 			rec, live := sealedPair(t, 1794446576090003375, kind)
 			d := oWord(t, Decide(staffBlockCall(t, rec, live, rec, live)), rec, live)
@@ -93,9 +97,9 @@ func TestAClientIDTheClientTestSentWholeIsBoundAtItsRequest(t *testing.T) {
 
 // TestAClientIDNoEarlierLeafHoldsWholeInBothRunsStaysRefused: where no leaf
 // before the call holds the field whole in both runs (the request sent
-// another client_id in one run, or it is another test's), or the runs'
-// words pair, the whole-copy rule decides nothing: the field is refused as
-// before, or read word by word.
+// another client_id in one run, or it is another test's), the whole-copy
+// rule decides nothing, whether the runs' words pair or not: the field is
+// refused as before, or read word by word.
 func TestAClientIDNoEarlierLeafHoldsWholeInBothRunsStaysRefused(t *testing.T) {
 	rec, live := sealedPair(t, 1794446576090003375, "unpaired")
 	other, _ := sealedPair(t, 1794446576090003375+int64(time.Hour), "unpaired")
@@ -122,9 +126,16 @@ func TestAClientIDNoEarlierLeafHoldsWholeInBothRunsStaysRefused(t *testing.T) {
 	})
 	t.Run("the words pair", func(t *testing.T) {
 		rec, live := sealedPair(t, 1794446576090003375, "paired")
-		for _, d := range Decide(staffBlockCall(t, rec, live, rec, live)) {
-			if d.At.Word < 0 {
-				t.Fatalf("decided whole: %s; want its changed words read one by one", d.Line)
+		other, _ := sealedPair(t, 1794446576090003375+int64(time.Hour), "paired")
+		for _, q := range [][2]string{{rec, other}, {other, live}} {
+			ds := Decide(staffBlockCall(t, rec, live, q[0], q[1]))
+			if len(ds) == 0 {
+				t.Fatal("no decision")
+			}
+			for _, d := range ds {
+				if d.Outcome == OutcomeValue && d.At.Word < 0 {
+					t.Fatalf("bound whole: %s; want no whole bind where no leaf before the call holds it whole in both runs", d.Line)
+				}
 			}
 		}
 	})

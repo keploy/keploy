@@ -812,9 +812,13 @@ func stdGroups(rec, live string) bool {
 // elsewhere in each run). Word by word replay could never write it back;
 // whole, it is that leaf's value in each run, bound at the earliest such
 // leaf of the call's scope placed before it, as a word one place shows in
-// both runs is (wordBy). A text that holds an instant is left to the
-// instant's rules, and one no such leaf holds to the refusals after this:
-// ok is false there.
+// both runs is (wordBy). A text whose words pair is so too where a random
+// token of it changed (randomURLToken: the client_id's tag, one '_' in the
+// recording and one '-' in round F at another spot): its words paired by
+// chance, and the next run's, whose '-' and '_' fall elsewhere, would not;
+// any other paired text keeps its words, each compared or bound as before.
+// A text that holds an instant is left to the instant's rules, and one no
+// such leaf holds to the refusals after this: ok is false there.
 //
 // The leaves read are an exchange's (p.rec and p.live: a recording's place
 // keeps its Raw, never a text), so stateBefore alone places one before the
@@ -824,7 +828,11 @@ func stdGroups(rec, live string) bool {
 // a longer value), so no echo is answered here, as none is for a whole word
 // wordBy binds.
 func (dc *decider) wholeCopy(path string, bare variables.Address, rec, live string, rd textReading) (Decision, bool) {
-	if len(rd.Instants) > 0 || !rd.ChangedShape && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 }) {
+	if len(rd.Instants) > 0 {
+		return Decision{}, false
+	}
+	paired := !rd.ChangedShape && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 })
+	if paired && !randomURLToken(rec, live) {
 		return Decision{}, false
 	}
 	var src []evPlace
@@ -837,6 +845,30 @@ func (dc *decider) wholeCopy(path string, bare variables.Address, rec, live stri
 		return Decision{}, false
 	}
 	return dc.bound(path, bare, -1, changedInstant{r: rec, l: live, rec: rec}, src, ", the earliest place before the call that holds it whole in both runs"), true
+}
+
+// randomURLToken reports whether rec and live, two runs of one text, hold
+// at one index of the URL-safe cut (variables.NextURLToken: runs of letters,
+// digits, '-' and '_', which any other byte ends: '.', '/', '+') two tokens
+// that are one random value (randomToken, which two equal tokens never
+// are), each a part of its text: a signed id's tag, whose '-' and '_' are
+// letters of its alphabet, not separators. A text that is such a token
+// whole is oneToken's, which binds it whole only where its bind address
+// reads it so (boundWhole): never here. Each text is read once, their n-th
+// tokens side by side, as cutTokenAt reads them.
+func randomURLToken(rec, live string) bool {
+	r, l := 0, 0
+	for {
+		rs, re, rok := variables.NextURLToken(rec, r, len(rec))
+		ls, le, lok := variables.NextURLToken(live, l, len(live))
+		if !rok || !lok {
+			return false
+		}
+		if re-rs < len(rec) && le-ls < len(live) && randomToken(rec[rs:re], live[ls:le]) {
+			return true
+		}
+		r, l = re, le
+	}
 }
 
 // unpaired decides a text where a word was added or dropped: refused whole
