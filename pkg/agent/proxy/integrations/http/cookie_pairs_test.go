@@ -808,6 +808,7 @@ func TestCookiePairsLearned(t *testing.T) {
 		{"a sent pair the page could have set", "session=s1; sub=pro; x=1", "session=s1; x=1; sub=pro", nil, "session=s1; sub=pro; x=1"},
 		{"the page's pair named twice", "session=s1; sub=a; sub=b", "session=s1", nil, "session=s1; sub=a; sub=b"},
 		{"a raced pair sent twice", "session=s1; x=1", "session=s2; session=s2; x=2", nil, "session=s1; x=1"},
+		{"a raced pair recorded twice", "session=s1; session=s1; x=1", "session=s2; x=2", nil, "session=s1; session=s1; x=1"},
 		{"nothing differs", "session=s1", "session=s1", nil, "session=s1"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
