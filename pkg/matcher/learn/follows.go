@@ -317,11 +317,11 @@ func (f *follows) rawHolds(x Raw) holds {
 }
 
 // givenHolds is holds of g's answer, as the recording and F gave it
-// (stamps too).
+// (inAnswer: its words, its stamps' words and its view's).
 func givenHolds(g givenWords) holds {
 	return func(w string) bool {
 		for i := range max(len(g.words), len(g.gave)) {
-			if g.holds(i, w, true) || g.inAnswer(i, w) != "" {
+			if g.inAnswer(i, w) != "" {
 				return true
 			}
 		}

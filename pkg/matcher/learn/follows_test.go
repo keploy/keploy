@@ -1536,18 +1536,35 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 		}}, true).ServedAs(1).ServedAsRecorded().OfAnotherTest()
 	}
 	const other = "c0ffee11-4b7d-4a1b-8c2d-0123456789ab"
+	headedAt := func(name, value string, at time.Time) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://example.invalid/", Header: map[string]string{"X-Job": value}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `ok`},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+		}}, false)
+	}
+	headed := func(name, value string) Raw { return headedAt(name, value, eRecAt.Add(-2*time.Second)) }
+	// A payload F gave the application changed: as recorded, it held
+	// recorded; as F gave it, seen.
+	viewed := func(name, recorded, seen string) Raw {
+		return headed(name, recorded).ServedAs(1).ServedLive(headed(name, seen))
+	}
 	for name, c := range map[string]struct {
-		ee     []Earlier
-		places []Raw
+		ee          []Earlier
+		raw, places []Raw
 	}{
-		"the recorded group in a request":    {ee: []Earlier{same("mock-1215", other, Request, 1)}},
-		"the recorded group in an answer":    {ee: []Earlier{same("mock-1215", other, Response, 1)}},
-		"the recorded group alone":           {ee: []Earlier{same("mock-1215", "4b7d", Request, 1)}},
-		"each run's group at its own place":  {ee: []Earlier{same("mock-1215", other, Request, 1), same("mock-1300", "deadbeef-a0f9-4c11-9d2d-ba9876543210", Request, 2)}},
-		"F's group in another test's answer": {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"_id":"deadbeef-a0f9-4c11-9d2d-ba9876543210"}`)}},
+		"the recorded group in a request":          {ee: []Earlier{same("mock-1215", other, Request, 1)}},
+		"the recorded group in an answer":          {ee: []Earlier{same("mock-1215", other, Response, 1)}},
+		"the recorded group alone":                 {ee: []Earlier{same("mock-1215", "4b7d", Request, 1)}},
+		"each run's group at its own place":        {ee: []Earlier{same("mock-1215", other, Request, 1), same("mock-1300", "deadbeef-a0f9-4c11-9d2d-ba9876543210", Request, 2)}},
+		"F's group in another test's answer":       {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"_id":"deadbeef-a0f9-4c11-9d2d-ba9876543210"}`)}},
+		"F's group where F gave a payload changed": {raw: []Raw{viewed("mock-1290", "job 0000", "deadbeef-a0f9-4c11-9d2d-ba9876543210")}},
+		"the whole id in a payload recorded after": {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{headedAt("mock-1400", rec, eRecAt.Add(2*time.Second))}},
+		"F's whole id in a payload recorded after": {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{headedAt("mock-1400", live, eRecAt.Add(2*time.Second))}},
 	} {
 		places = c.places
-		if got := given(c.ee); got.Kind != KindNoise || !strings.Contains(got.Why, piece) || !strings.Contains(got.Why, "learns it as varying") {
+		if got := given(c.ee, c.raw...); got.Kind != KindNoise || !strings.Contains(got.Why, piece) || !strings.Contains(got.Why, "learns it as varying") {
 			t.Errorf("%s: %s from %q (%q); want noise naming the minted id", name, got.Kind, got.From.Mock, got.Why)
 		}
 	}
@@ -1556,14 +1573,6 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 	// value moved with: followed.
 	if got := given([]Earlier{earlier("mock-1215", rec, live, Response, 1)}); got.Kind != KindVariable || got.From.Mock != "mock-1215" {
 		t.Errorf("a whole-id copy: %s from %q (%q); want a variable of mock-1215", got.Kind, got.From.Mock, got.Why)
-	}
-	headed := func(name, value string) Raw {
-		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
-			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
-			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://example.invalid/", Header: map[string]string{"X-Job": value}},
-			HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `ok`},
-			ReqTimestampMock: eRecAt.Add(-2 * time.Second), ResTimestampMock: eRecAt.Add(-2*time.Second + time.Millisecond),
-		}}, false)
 	}
 	// A long word of either run's UUID standing elsewhere: refused, as
 	// the first reading refused it.
@@ -1574,6 +1583,7 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 		"F's 8-hex word where the recording gave it":         {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job 8e1d2c3b", "job 11112222", Request, 2)}},
 		"the recorded 48-bit word where F gave it":           {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job 11112222", "job 1a2b3c4d5e6f", Request, 2)}},
 		"F's 8-hex word in a payload recorded before":        {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{headed("mock-1290", "job 8e1d2c3b")}},
+		"F's 8-hex word where F gave a payload changed":      {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{viewed("mock-1290", "job 11112222", "job 8e1d2c3b")}},
 		"F's 8-hex word in another test's answer":            {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"job":"8e1d2c3b"}`)}},
 		"the recorded group beside another of its words":     {ee: []Earlier{same("mock-1215", "c0ffee11-4b7d-4e2a-8c2d-0123456789ab", Request, 1)}},
 		"the recorded group beside another, in a payload":    {raw: []Raw{headed("mock-1290", "c0ffee11-4b7d-4e2a-8c2d-0123456789ab")}},
@@ -1614,5 +1624,109 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 	ee = []Earlier{same("mock-1300", "deadbeef-𝐀𝐁𝐂𝐃-4c11-9d2d-ba9876543210", Request, 2)}
 	if took := (&follows{dc: dc, rec: rec, live: wide, at: eRecAt, short: true, served: ee}).tookElsewhere(dc.of(rec, wide), "4b7d"); !strings.Contains(took, "mock-1300") {
 		t.Errorf("a 16-byte group: took %q; want mock-1300", took)
+	}
+}
+
+// The word rule's re-read of a value it refused (follows.idOnly) lets a
+// short part go only as a chance piece of a minted id: at a payload F gave
+// as recorded, at a payload F gave changed and at another test's answer, a
+// short part of a value that is no id, which the short-part reading lets go
+// there (a value set aside as a variable), stays refused on it. The took
+// term skips a chance piece at a payload and at another test's answer too,
+// where short parts alone are read, and names the place under the rule.
+func TestTheWordRuleReReadLetsGoOnlyAPieceOfAMintedID(t *testing.T) {
+	const (
+		rec  = "3f2a9c1e-4b7d-4e2a-9f3c-1a2b3c4d5e6f"
+		live = "8e1d2c3b-a0f9-4c8b-b7a6-5f4e3d2c1b0a"
+	)
+	headed := func(name, value string) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://example.invalid/jobs"},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `{"job":"` + value + `"}`},
+			ReqTimestampMock: eRecAt.Add(-2 * time.Second), ResTimestampMock: eRecAt.Add(-2*time.Second + time.Millisecond),
+		}}, true)
+	}
+	reading := func(toks []map[string]bool, w string) int {
+		t.Helper()
+		for i, tok := range toks {
+			if tok[w] {
+				return i
+			}
+		}
+		t.Fatalf("no reading holds %q", w)
+		return -1
+	}
+	dc := clockedDrifts()
+	reRead := func(r, l string, idOnly bool) *follows {
+		return &follows{dc: dc, rec: r, live: l, at: eRecAt, short: true, idOnly: idOnly}
+	}
+	for _, c := range []struct {
+		name, rec, live, word string
+		excused               func(f *follows, v *valueDrift) bool
+	}{
+		{"a payload F gave as recorded", "slot 4b7d", "slot 9e9e", "4b7d", func(f *follows, v *valueDrift) bool {
+			x := headed("mock-1290", "job 4b7d").ServedAs(1).ServedAsRecorded()
+			return f.excusedRaw(x, v, reading(v.recTok, "4b7d"), "4b7d", eRecAt, "why", "mock-1290 at spec.res.body.job")
+		}},
+		{"a payload F gave changed", "slot 7e7e", "slot a0f9", "a0f9", func(f *follows, v *valueDrift) bool {
+			x := headed("mock-1290", "job 1111").ServedAs(1).ServedLive(headed("mock-1290", "job a0f9"))
+			return f.excusedLive(x, v, reading(v.liveTok, "a0f9"), "a0f9", eRecAt, "why", "mock-1290's payload")
+		}},
+		{"another test's answer", "slot 4b7d", "slot 9e9e", "4b7d", func(f *follows, v *valueDrift) bool {
+			x := headed("mock-1290", "job 4b7d").ServedAs(1).ServedAsRecorded().OfAnotherTest()
+			op := dc.offsetPlacesOf(eRecAt, nil, nil, []GivenPlaces{PlacesOf(x)})
+			if len(op.words) != 1 {
+				t.Fatalf("another test's answer: %d places", len(op.words))
+			}
+			return f.excusedGiven(op.words[0], v, reading(v.recTok, "4b7d"), "4b7d", eRecAt, "why")
+		}},
+	} {
+		v := dc.of(c.rec, c.live)
+		if !c.excused(reRead(c.rec, c.live, false), v) {
+			t.Fatalf("%s: the short-part reading refused %q; the row reads nothing", c.name, c.word)
+		}
+		if f := reRead(c.rec, c.live, true); c.excused(f, v) || f.piece != "" {
+			t.Errorf("FALSE GREEN? %s: the word rule's re-read let %q, a part of no id, go (%q)", c.name, c.word, f.piece)
+		}
+	}
+	// A piece of a minted id at a payload F gave as recorded and at one F
+	// gave changed: let go on the re-read, and named.
+	v := dc.of(rec, live)
+	for _, c := range []struct {
+		name    string
+		excused func(f *follows) bool
+	}{
+		{"a payload F gave as recorded", func(f *follows) bool {
+			x := headed("mock-1290", "c0ffee11-4b7d-4a1b-8c2d-0123456789ab").ServedAs(1).ServedAsRecorded()
+			return f.excusedRaw(x, v, reading(v.recTok, "4b7d"), "4b7d", eRecAt, "why", "mock-1290 at spec.res.body.job")
+		}},
+		{"a payload F gave changed", func(f *follows) bool {
+			x := headed("mock-1290", "job 1111").ServedAs(1).ServedLive(headed("mock-1290", "deadbeef-a0f9-4c11-9d2d-ba9876543210"))
+			return f.excusedLive(x, v, reading(v.liveTok, "a0f9"), "a0f9", eRecAt, "why", "mock-1290's payload")
+		}},
+	} {
+		if f := reRead(rec, live, true); !c.excused(f) || !strings.Contains(f.piece, "stands in mock-1290") {
+			t.Errorf("%s: a piece of a minted id refused on the re-read (%q); want it let go and named", c.name, f.piece)
+		}
+	}
+	// The took term at a payload and at another test's answer: F's group
+	// standing inside another UUID there is no word F's value took, where
+	// short parts alone are read; under the rule, the place is named.
+	x := headed("mock-1300", "deadbeef-a0f9-4c11-9d2d-ba9876543210")
+	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, short: true, raw: []Raw{x}}).tookElsewhere(v, "4b7d"); took != "" {
+		t.Errorf("a payload, short parts alone: took %q; want none", took)
+	}
+	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, raw: []Raw{x}}).tookElsewhere(v, "4b7d"); !strings.Contains(took, "mock-1300") {
+		t.Errorf("a payload, under the rule: took %q; want mock-1300", took)
+	}
+	ans := headed("mock-1300", "deadbeef-a0f9-4c11-9d2d-ba9876543210").ServedAs(1).ServedAsRecorded().OfAnotherTest()
+	op := dc.offsetPlacesOf(eRecAt, nil, nil, []GivenPlaces{PlacesOf(ans)})
+	places := func() *offsetPlaces { return op }
+	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, short: true, places: places}).tookElsewhere(v, "4b7d"); took != "" {
+		t.Errorf("another test's answer, short parts alone: took %q; want none", took)
+	}
+	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, places: places}).tookElsewhere(v, "4b7d"); !strings.Contains(took, "mock-1300") {
+		t.Errorf("another test's answer, under the rule: took %q; want mock-1300", took)
 	}
 }
