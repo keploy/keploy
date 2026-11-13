@@ -29,9 +29,11 @@ func TestOnWindowsTheAdaptersAreReadWhateverTheFirstBufferSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the adapters from a 1-byte buffer: %v", err)
 	}
-	if len(grown) != len(whole) || !slices.Equal(resolversOfAdapters(grown), resolversOfAdapters(whole)) {
+	grownServers, _ := resolversOfAdapters(grown)
+	wholeServers, _ := resolversOfAdapters(whole)
+	if len(grown) != len(whole) || !slices.Equal(grownServers, wholeServers) {
 		t.Fatalf("from a 1-byte buffer: %d adapters, resolvers %v; at once: %d, %v",
-			len(grown), resolversOfAdapters(grown), len(whole), resolversOfAdapters(whole))
+			len(grown), grownServers, len(whole), wholeServers)
 	}
 }
 

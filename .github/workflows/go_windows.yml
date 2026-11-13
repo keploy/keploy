@@ -155,7 +155,9 @@ jobs:
       # adapters that are up, read with GetAdaptersAddresses and checked
       # against PowerShell's list, and a name only they answer (a private
       # address's PTR) recorded with their answer rather than a public
-      # resolver's.
+      # resolver's. A name one adapter's server denies is asked on the next
+      # adapter, as Windows asks it: the row gives a second adapter a DNS
+      # server of its own and compares the recording with Resolve-DnsName.
       - name: Test the machine's DNS resolvers (amd64)
-        run: go test -count=1 -run "TestOnWindowsTheRecordingAsksTheMachinesResolvers|TestOnWindowsTheAdaptersAreReadWhateverTheFirstBufferSize|TestOnWindowsAFailedAdapterReadIsAnError|TestOnWindowsEachAdapterAndServerOfTheListIsRead" ./pkg/agent/proxy/
+        run: go test -count=1 -v -run "TestOnWindowsARecordingAsksEachAdapterAsWindowsDoes|TestOnWindowsTheRecordingAsksTheMachinesResolvers|TestOnWindowsTheAdaptersAreReadWhateverTheFirstBufferSize|TestOnWindowsAFailedAdapterReadIsAnError|TestOnWindowsEachAdapterAndServerOfTheListIsRead" ./pkg/agent/proxy/
         shell: cmd
