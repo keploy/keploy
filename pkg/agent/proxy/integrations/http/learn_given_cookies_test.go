@@ -83,3 +83,17 @@ func TestVariables_AGivenInTwoCookiePairsIsPassedOnOrTheCallIsRefused(t *testing
 		t.Fatalf("the call carrying the given value in both its pairs was refused: %+v", diag)
 	}
 }
+
+// A pair named twice holds no value (variables.Cookie), so it is no place
+// of a given, even one whose value in this run is empty: the given is
+// followed into the one pair that holds it whole, and the pair named twice
+// stays as recorded beside it. Were the pair named twice taken as holding
+// the empty value, the given could not be written back there and the call
+// would be refused.
+func TestGivenCookiesSkipsAPairNamedTwice(t *testing.T) {
+	g := variables.Binding{Name: "given:session", Recorded: "tok-1", Value: ""}
+	steps, ok := givenCookies("jwt=tok-1; t=1; t=2", "jwt=; t=1; t=2", g)
+	if !ok || !reflect.DeepEqual(steps, []variables.Step{variables.Cookie("jwt")}) {
+		t.Fatalf("givenCookies = %v, %v; want [%s], true", steps, ok, variables.Cookie("jwt"))
+	}
+}
