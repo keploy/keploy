@@ -127,7 +127,11 @@ func TestGivenAnswers_AValueThatCannotStandThereServesTheRecording(t *testing.T)
 	m := listMock(`{"run":1794544425372}`)
 	run := variables.Binding{Name: "given:run", Value: "run-9", Recorded: "1794544425372", Mock: "test o::TestClusters"}
 	if got := h.givenAnswers(m, gaveDb(t, nil, run)); got != m {
-		t.Fatalf("served %q; want the recording", got.Spec.HTTPResp.Body)
+		served := "no mock"
+		if got != nil && got.Spec.HTTPResp != nil {
+			served = got.Spec.HTTPResp.Body
+		}
+		t.Fatalf("served %q; want the recording", served)
 	}
 	if n := logs.FilterMessageSnippet("keploy serves it as recorded").Len(); n != 1 {
 		t.Fatalf("%d warnings say the answer is served as recorded; want 1 (logs %v)", n, logs.All())
