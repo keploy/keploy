@@ -562,11 +562,18 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 		return true, true
 	}
 	both := inRec && inLive
-	if !guarded && both && ref.Path == cookieLeaf && pairsAsLearned(k.learned, rec.Value, live.Value) {
+	sent := ""
+	if inLive {
+		sent = live.Value
+	}
+	if !guarded && inRec && ref.Path == cookieLeaf && pairsAsLearned(k.learned, rec.Value, sent) {
 		// Pairs the page sets while its test runs gone from the header,
 		// pairs a race set at another of the race's values, and the
-		// others as recorded (cookieSetByPage, cookieSetByRace).
-		return true, true
+		// others as recorded (cookieSetByPage, cookieSetByRace). A call
+		// that sends no Cookie header sends no pair: it is excused where
+		// every recorded pair is the page's, and only there, so the leaf
+		// may then be missing (untyped).
+		return true, inLive
 	}
 	switch {
 	case strings.HasPrefix(ref.Noise, "body."):
@@ -1862,6 +1869,10 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 		}
 
 		readEarlier := earlier
+		// pairShape is the call as Pair paired it: liveShape, or, for a
+		// call that sends no Cookie header, one that sends it with no
+		// pair (pairedWithoutCookie).
+		pairShape := liveShape
 		// classify reads what drift, leaves of the call that drifted from m
 		// (c, its candidate; own, the test's own), carry, as a paired call's
 		// are read (learn.ClassifyGiven): m with its answer read back, and the
@@ -1929,11 +1940,13 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// change to classify where they are all that differs, and is
 			// classified as it reads with them excused (rest) where other
 			// pairs differ too. A leaf drifts only where both sides hold
-			// it (a header one side lacks differs in more than values).
+			// it (a header one side lacks differs in more than values),
+			// but for a call that sends no Cookie header, read as one with
+			// no pair where the page set every recorded pair (pairShape).
 			var pagePairs []learn.Learned
 			recShape := c.Shape
 			if slices.Contains(drift, cookieLeaf) {
-				recCookie, liveCookie := c.Shape.Leaves[cookieLeaf], liveShape.Leaves[cookieLeaf].Value
+				recCookie, liveCookie := c.Shape.Leaves[cookieLeaf], pairShape.Leaves[cookieLeaf].Value
 				var rest string
 				pagePairs, rest = cookiePairsLearned(m, recCookie.Value, liveCookie, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...))
 				switch {
@@ -1950,7 +1963,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// the call in both runs is a place of it (learn.ClassifyArrived),
 			// where its test case binds a value the call carries whole.
 			answer := classifiedAnswer(answered)
-			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, recShape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
+			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, pairShape, recShape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
 			if recShape.Leaves[cookieLeaf].Value != c.Shape.Leaves[cookieLeaf].Value && !pairwiseKept(learned) {
 				// A replay reads a Cookie header learned with pairs excused
 				// pair by pair only where its other pairs are noise, or
@@ -1958,7 +1971,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				// variable, a clock read) holds of the header's whole
 				// text, which has those pairs. It is read whole, as before.
 				pagePairs = nil
-				learned = learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
+				learned = learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, pairShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
 			}
 			timeForm := integrations.TimeFormOf(mockDb)
 			// A time the offset rule refused that learning read as the
@@ -1971,6 +1984,18 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			return append(boundTimesOf(learned, n.sources, m, w, timeForm), pagePairs...), answered, earlier, ""
 		}
 		res := learn.Pair(liveShape, sc.cands)
+		if again, s, ok := pairedWithoutCookie(liveShape, sc.cands, res); ok {
+			// A call that sends no Cookie header, paired as one that sends
+			// it with no pair, is paired so only where every recorded pair
+			// is one the page set while its test ran (cookiePairsLearned,
+			// as classify reads them): its miss stands otherwise.
+			m, own := sc.mocks[again.Index], sc.own[again.Index]
+			rec := sc.cands[again.Index].Shape.Leaves[cookieLeaf].Value
+			pairs, _ := cookiePairsLearned(m, rec, "", append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(stagedOf(mockDb), m, windows, own)...))
+			if pairsAsLearned(learnedKeys(pairs), rec, "") {
+				res, pairShape = again, s
+			}
+		}
 		switch res.Outcome {
 		case learn.Exact:
 			m := sc.mocks[res.Index]
@@ -2149,7 +2174,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			if stuck(m, read.at) {
 				return refused(m, res, sc)
 			}
-			if why := n.patternWhy(res.Diff.Drift, liveShape, c.Shape); why != "" {
+			if why := n.patternWhy(res.Diff.Drift, pairShape, c.Shape); why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}

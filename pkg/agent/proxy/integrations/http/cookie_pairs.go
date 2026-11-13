@@ -3,6 +3,7 @@ package http
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	"net/url"
 	"slices"
 	"strconv"
@@ -247,6 +248,30 @@ func cookiePairsLearned(m *models.Mock, rec, live string, earlier []*models.Mock
 		kept = append(kept, part)
 	}
 	return out, strings.TrimLeft(strings.Join(kept, ";"), " \t")
+}
+
+// pairedWithoutCookie is res, the learn step's pairing of live, a call's
+// shape, read again where the call sends no Cookie header and missed: as a
+// call that sends the header with no pair (an empty list of pairs). A page
+// that sets its only pairs itself sends none before it set them, and a
+// mock that answers sooner than its service did lets it call first. It is
+// that pairing, and the shape it read, only where the call then pairs
+// (learn.Paired) with a recording whose Cookie header is what drifted; the
+// caller still holds every recorded pair to the page's rule
+// (cookiePairsLearned) before it takes it.
+func pairedWithoutCookie(live learn.Shape, cands []learn.Candidate, res learn.Result) (learn.Result, learn.Shape, bool) {
+	if _, sent := live.Leaves[cookieLeaf]; sent || res.Outcome != learn.Miss {
+		return res, live, false
+	}
+	s := live
+	s.Leaves = make(map[string]learn.Leaf, len(live.Leaves)+1)
+	maps.Copy(s.Leaves, live.Leaves)
+	s.Leaves[cookieLeaf] = learn.Leaf{Path: cookieLeaf, Noise: cookieLeaf, Type: learn.String}
+	again := learn.Pair(s, cands)
+	if again.Outcome != learn.Paired || !slices.Contains(again.Diff.Drift, cookieLeaf) {
+		return res, live, false
+	}
+	return again, s, true
 }
 
 // learnedNoise is what the mock's learned noise holds at a KindNoise leaf r

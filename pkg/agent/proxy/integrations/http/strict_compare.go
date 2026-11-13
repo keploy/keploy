@@ -1141,6 +1141,12 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 			return matcher.PatternWhy(path, patternStrings(pats), side, valueShape(v, ok))
 		}
 		switch {
+		case !inLive && name == "cookie" && !guarded && pairsAsLearned(k.learned, rv, ""):
+			// A call that sends no Cookie header sends no pair: the
+			// recorded one where every pair is one the page sets while
+			// its test runs (cookieSetByPage), and keploy.yml's patterns
+			// do not guard the header.
+			continue
 		case !inLive:
 			f := field(models.MockFieldDiff{Path: path, Kind: models.DiffKindMissingInLive, Expected: rv})
 			f.why = why("live", "", false)
