@@ -485,3 +485,80 @@ func TestAValueSentAgainBindsAtItsFirstSendAndMissesWhereTheSecondDiffers(t *tes
 		})
 	}
 }
+
+// Two requests of one call that differ only by a value the application
+// minted earlier in the test (an account's id each names), reaching the
+// application in the other order than in its recording, each pair with
+// their own recorded request, as the learn step paired them: the value the
+// test's variables bound this run is read as the recorded one it stands
+// for. With no such variable bound, they pair by order, and the variable
+// bound at the second binds nothing from the first.
+func TestSwappedRequestsHoldingAValueTheTestBoundPairWithTheirOwnTestCase(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Date(2026, 11, 13, 6, 1, 42, 0, time.UTC)
+	cases := func() []models.ClientCase {
+		first, second := appsCase("post-apps-1"), appsCase("post-apps-2", keyAtName)
+		first.Req.Body, second.Req.Body = `{"owner":"acct-R1","name":"app-0"}`, `{"owner":"acct-R2","name":"app-1"}`
+		return []models.ClientCase{first, second}
+	}
+	accounts := []models.VariableBinding{
+		{Name: "acct1", Value: "acct-L1", Recorded: "acct-R1", Mock: "mock-1", Place: "body.documents.0._id"},
+		{Name: "acct2", Value: "acct-L2", Recorded: "acct-R2", Mock: "mock-2", Place: "body.documents.0._id"},
+	}
+	for _, bound := range []bool{true, false} {
+		p, mm, logs, open := caseBindsProxy(t)
+		p.TakeClientCases("test-1", cases())
+		open()
+		if bound {
+			for _, b := range accounts {
+				if err := mm.GiveExactTest("test-1", b); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		p.TakeIncoming(liveApps(`{"owner":"acct-L2","name":"app-2"}`), "", nil, at)
+		b, ok := mm.vars.Lookup("key")
+		if bound && (!ok || b.Value != "app-2" || b.Mock != "test case post-apps-2") {
+			t.Fatalf("the second test case's request, sent first, bound %+v (%v); want app-2 at test case post-apps-2", b, ok)
+		}
+		if !bound && ok {
+			t.Fatalf("with no account bound, the request bound %+v; want it paired by order, binding nothing", b)
+		}
+		if bound && logs.Len() != 0 {
+			t.Fatalf("warned %v", logs.All())
+		}
+	}
+}
+
+// The values a test's variables bound are read for that test alone, while
+// keploy serves it: another test's, a manager serving no test and a proxy
+// with no manager give none.
+func TestTheBoundDriftsAreOnlyTheServedTestsOwn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p, mm, _, open := caseBindsProxy(t)
+	open()
+	if err := mm.GiveExactTest("test-1", models.VariableBinding{Name: "acct2", Value: "acct-L2", Recorded: "acct-R2"}); err != nil {
+		t.Fatal(err)
+	}
+	if d := p.boundDrifts("test-1"); len(d["acct-L2"]) != 1 || d["acct-L2"][0] != "acct-R2" {
+		t.Fatalf("the served test's drifts %v; want acct-L2 standing for acct-R2", d)
+	}
+	if d := p.boundDrifts("test-2"); len(d) != 0 {
+		t.Fatalf("another test's drifts %v; want none", d)
+	}
+	for name, p := range map[string]*Proxy{
+		"a manager serving no test": {mockManager: stagedManager(t, nil, nil), learnTracker: learn.NewTracker()},
+		"no manager":                {learnTracker: learn.NewTracker()},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("%s: reading the drifts panicked: %v", name, r)
+				}
+			}()
+			if d := p.boundDrifts("test-1"); len(d) != 0 {
+				t.Fatalf("%s: drifts %v; want none", name, d)
+			}
+		}()
+	}
+}

@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/json"
 	"net/url"
 	"regexp"
 	"slices"
@@ -79,19 +80,27 @@ type caseCursor struct {
 //
 // Where one is left, live pairs with it. Where more are, the test sent the
 // call more than once, and a run may send them in another order than its
-// recording did (two workers of the test, each with its own request): live
-// pairs with the one whose recording holds the most of live's words
-// (pairWords: of its URL, and of its body where body says keploy read it),
-// each counted once, and with the first of those in the recording's order.
-// A word every request left holds tells none from another, and one none
-// holds (a value this run made: a name from its clock, an id) is no nearer
-// one than another. So requests that send the same words but for the values
-// their run made pair by order, the n-th of the run with the n-th of the
-// recording, as do the requests of a test that keploy cannot tell apart; a
-// request paired with another's recording binds no variable there (the
-// recording does not hold the variable's value at its place) or a value no
-// call carries, and the call misses.
-func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq, body bool) (int, bool) {
+// recording did (two workers of the test, each with its own request; a test
+// that ranges over a map): live pairs with the one whose recording holds the
+// most of live's words (pairWords: of its URL, and of its body where body
+// says keploy read it, a JWT's claims among them), each counted once, and
+// with the first of those in the recording's order. A word every request
+// left holds tells none from another. A word of live that holds a value the
+// test's earlier exchanges held another than their recording did (drifts:
+// an id the application minted this run, a name the test made and sent
+// before) is read as the recording held it there too, whole or as a part
+// of the word between its ':' (driftForms): live sends that value where its
+// recording sent the recorded one, so the recording that holds the word so
+// read is its own. drifts is read only where more than one is left; nil
+// reads none. A word that holds no such value and none of the recordings
+// holds (a value this run made that no earlier exchange carried: a name
+// from its clock) is no nearer one than another. So requests that send the
+// same words but for the values their run made pair by order, the n-th of
+// the run with the n-th of the recording, as do the requests of a test that
+// keploy cannot tell apart; a request paired with another's recording binds
+// no variable there (the recording does not hold the variable's value at
+// its place) or a value no call carries, and the call misses.
+func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq, body bool, drifts func() Drifts) (int, bool) {
 	if live == nil {
 		return -1, false
 	}
@@ -111,8 +120,12 @@ func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq, body bool) 
 	case 1:
 		return left[0], true
 	}
+	var d Drifts
+	if drifts != nil {
+		d = drifts()
+	}
 	sent := map[string]bool{}
-	pairWords(live, body, func(w string) { sent[w] = true })
+	pairForms(live, body, d, func(w string) { sent[w] = true })
 	best, most := left[0], 0
 	for _, i := range left {
 		held := map[string]bool{}
@@ -128,15 +141,107 @@ func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq, body bool) 
 	return best, true
 }
 
+// Drifts are the values the running test's earlier exchanges held another
+// than their recording did, by the value as this run held it: the recorded
+// values it stood in for there (Add). PairCase reads a live request's words
+// through them.
+type Drifts map[string][]string
+
+// Add notes that live stood where the recording held recorded, once. A
+// value that did not drift is no drift, nor is an empty one: no word holds
+// it, and a JWT's empty claim is no value the test sent.
+func (d Drifts) Add(live, recorded string) {
+	if live == "" || live == recorded || slices.Contains(d[live], recorded) {
+		return
+	}
+	d[live] = append(d[live], recorded)
+}
+
+// maxDriftForms is the most forms driftForms makes of one word: a word of
+// many parts each of which drifted to several values pairs by what the
+// first of them read as.
+const maxDriftForms = 16
+
+// driftForms are the forms of w, a word of a live request, as its
+// recording held it (d): each recorded value w stood in for whole, then w
+// with each part between its ':' (an RFC 8693 audience
+// keploy:service-account:<id>, a URN, a JWT's subject) that drifted read as
+// a recorded value it stood in for, the rest kept. Each form is another
+// than w; nil where none of it drifted.
+func driftForms(w string, d Drifts) []string {
+	if len(d) == 0 {
+		return nil // what follows makes no form: an early end, no allocation
+	}
+	out := append([]string(nil), d[w]...)
+	type form struct {
+		text    string
+		drifted bool
+	}
+	forms := []form{{}}
+	for i, part := range strings.Split(w, ":") {
+		alts := append([]string{part}, d[part]...)
+		next := make([]form, 0, len(forms)*len(alts))
+		for _, f := range forms {
+			for k, a := range alts {
+				if len(next) == maxDriftForms {
+					break
+				}
+				if i > 0 {
+					a = f.text + ":" + a
+				}
+				next = append(next, form{text: a, drifted: f.drifted || k > 0})
+			}
+		}
+		forms = next
+	}
+	for _, f := range forms {
+		if f.drifted && !slices.Contains(out, f.text) {
+			out = append(out, f.text)
+		}
+	}
+	return out
+}
+
+// pairForms hands each word of live as pairWords does, and each form of it
+// its recording held where its values drifted (driftForms), of a JWT's
+// claim the claim's value's forms.
+func pairForms(live *models.HTTPReq, body bool, d Drifts, each func(string)) {
+	pairText(live, body, func(w string) {
+		each(w)
+		for _, f := range driftForms(w, d) {
+			each(f)
+		}
+		for _, c := range jwtClaimWords(w) {
+			each(c.name + "=" + c.value)
+			for _, f := range driftForms(c.value, d) {
+				each(c.name + "=" + f)
+			}
+		}
+	})
+}
+
 // pairWordsBytes is the most of a request's body PairCase reads the words
 // of: two requests of a call that differ only past it pair by order.
 const pairWordsBytes = 64 << 10
 
 // pairWords hands each word of what tells req from another request of its
 // call: of its URL, and, where body says keploy read it, of the first
-// pairWordsBytes of its body and of the values of its form's parts. Its
-// headers are not read: they hold what every run makes anew (a date, a
-// trace id, a signature).
+// pairWordsBytes of its body and of the values of its form's parts
+// (pairText); of a word that is a JWT, each of its claims too, as one word
+// "name=value" (jwtClaimWords). Its headers are not read: they hold what
+// every run makes anew (a date, a trace id, a signature).
+func pairWords(req *models.HTTPReq, body bool, each func(string)) {
+	pairText(req, body, func(w string) {
+		each(w)
+		for _, c := range jwtClaimWords(w) {
+			each(c.name + "=" + c.value)
+		}
+	})
+}
+
+// pairText hands each word of req's URL, and, where body says keploy read
+// it, of the first pairWordsBytes of its body and of the values of its
+// form's parts.
 //
 // A word here is a whole value as its text delimits it: a run of bytes
 // with no space, quote, bracket, comma, nor a mark that parts a URL's or a
@@ -145,7 +250,7 @@ const pairWordsBytes = 64 << 10
 // digits (eachWord) would cut it into pieces (a second, a hex group) that
 // another run's value holds by chance, pairing the request with a
 // recording that is not its own.
-func pairWords(req *models.HTTPReq, body bool, each func(string)) {
+func pairText(req *models.HTTPReq, body bool, each func(string)) {
 	words := func(s string) {
 		for _, w := range strings.FieldsFunc(s, func(r rune) bool { return r <= ' ' || strings.ContainsRune(pairWordEnds, r) }) {
 			each(w)
@@ -165,6 +270,26 @@ func pairWords(req *models.HTTPReq, body bool, each func(string)) {
 			words(v)
 		}
 	}
+}
+
+// pairClaim is one claim of a JWT as PairCase reads it: its name, and its
+// value, a string's own text or any other's JSON as the token holds it.
+type pairClaim struct{ name, value string }
+
+// jwtClaimWords are w's claims where w is a JWT (jwtClaims), in no order:
+// PairCase reads words as a set. None where it is not. A token the run
+// signed anew is one word no recording holds, while its claims say what it
+// asks: a CI job's repository, branch and event, the audience it was minted
+// for.
+func jwtClaimWords(w string) []pairClaim {
+	_, claims, _ := jwtClaims(w) // nil where w is no JWT
+	out := make([]pairClaim, 0, len(claims))
+	for name, raw := range claims {
+		s := string(raw)
+		_ = json.Unmarshal(raw, &s) // a string's own text; any other value leaves s its JSON
+		out = append(out, pairClaim{name: name, value: s})
+	}
+	return out
 }
 
 // pairWordEnds are the marks, beside a space and a control byte, that end a

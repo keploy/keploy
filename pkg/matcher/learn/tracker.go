@@ -843,14 +843,16 @@ func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time, passed func
 
 // pairIncomingLocked pairs live, which reached the application at at, with
 // the running client test's recorded request it pairs with (PairCase, by
-// its body's words too where keploy read it: unread is ""), and notes it as an earlier place of the test's calls (incomingPlace): its
-// index among t.incoming, and the case. ok is false where no test is open or
-// live pairs with none. t.mu is held.
+// its body's words too where keploy read it: unread is "", each read as its
+// recording held it where it holds a value the test's earlier exchanges
+// drifted: pairDriftsLocked), and notes it as an earlier place of the
+// test's calls (incomingPlace): its index among t.incoming, and the case.
+// ok is false where no test is open or live pairs with none. t.mu is held.
 func (t *Tracker) pairIncomingLocked(live *models.HTTPReq, unread string, words *RequestWords, at time.Time) (k int, c ClientCase, ok bool) {
 	if !t.open {
 		return -1, ClientCase{}, false
 	}
-	i, ok := PairCase(t.cases.cases, t.cases.used, live, unread == "")
+	i, ok := PairCase(t.cases.cases, t.cases.used, live, unread == "", t.pairDriftsLocked)
 	if !ok {
 		return -1, ClientCase{}, false
 	}
@@ -858,6 +860,24 @@ func (t *Tracker) pairIncomingLocked(live *models.HTTPReq, unread string, words 
 	c = t.cases.cases[i]
 	t.incoming = append(t.incoming, incomingPlace(c, live, unread, t.keepWordsLocked(unread, words), at))
 	return len(t.incoming) - 1, c, true
+}
+
+// pairDriftsLocked are the values the running test's earlier exchanges
+// held another than their recording did (Drifts), as the replay's pairing
+// reads them from the variables the test bound so far: every leaf, sent or
+// answered, of the run's exchanges (run), of the test's own (served), of
+// its requests paired before (incoming) and of the values it gave (gave),
+// whose value this run is another than the recorded one. t.mu is held.
+func (t *Tracker) pairDriftsLocked() Drifts {
+	d := Drifts{}
+	for _, places := range [][]Earlier{t.run, t.served, t.incoming, t.gave} {
+		for _, e := range places {
+			for _, s := range e.Seen {
+				d.Add(s.Live, s.Leaf.Value)
+			}
+		}
+	}
+	return d
 }
 
 // maxRequestWords is how many requests' words (RequestWords) a test keeps:

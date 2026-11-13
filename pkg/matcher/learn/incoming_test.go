@@ -145,7 +145,7 @@ func TestAClientTestsRequestPairsByOrderMethodAndPath(t *testing.T) {
 		{Name: "delete-client-v1-apps-by-id-1", Req: req("DELETE", "http://localhost:8083/client/v1/apps/68d4148edcd121253694486c", "")},
 	}
 	cases = append([]ClientCase{{Name: "post-client-v1-apps-0"}}, cases...)
-	if i, ok := PairCase(cases, nil, nil, true); ok {
+	if i, ok := PairCase(cases, nil, nil, true, nil); ok {
 		t.Fatalf("no request paired with %d", i)
 	}
 	tr := NewTracker()
@@ -703,7 +703,7 @@ func TestRequestsOfOneCallPairByTheirWordsThenByOrder(t *testing.T) {
 		for i, r := range c.recs {
 			cases = append(cases, ClientCase{Name: strconv.Itoa(i), Req: r})
 		}
-		if got, ok := PairCase(cases, c.used, c.live, c.body); got != c.want || ok != (c.want >= 0) {
+		if got, ok := PairCase(cases, c.used, c.live, c.body, nil); got != c.want || ok != (c.want >= 0) {
 			t.Errorf("%s: paired with %d (%v); want %d", c.name, got, ok, c.want)
 		}
 	}

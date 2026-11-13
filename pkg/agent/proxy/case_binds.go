@@ -70,12 +70,14 @@ func (c *caseBinds) wants() bool {
 
 // pair pairs live with the recorded request not yet paired it pairs with
 // (learn.PairCase, as the learn step paired it: by its body's words too
-// where body says keploy read it), and returns the test, that request and
-// the variables bound at it; ok is false where none is left.
-func (c *caseBinds) pair(live *models.HTTPReq, body bool) (test string, rec learn.ClientCase, binds []models.ClientCaseBind, ok bool) {
+// where body says keploy read it, each read as its recording held it where
+// it holds a value drifts(test), the values the test's earlier exchanges
+// drifted, takes the place of), and returns the test, that request and the
+// variables bound at it; ok is false where none is left.
+func (c *caseBinds) pair(live *models.HTTPReq, body bool, drifts func(test string) learn.Drifts) (test string, rec learn.ClientCase, binds []models.ClientCaseBind, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	i, ok := learn.PairCase(c.cases, c.used, live, body)
+	i, ok := learn.PairCase(c.cases, c.used, live, body, func() learn.Drifts { return drifts(c.test) })
 	if !ok {
 		return "", learn.ClientCase{}, nil, false
 	}
@@ -135,7 +137,7 @@ func atHead(rec *models.HTTPReq, place string) bool {
 // (atHead) and notes the others; called again once keploy has the body, it
 // binds those, and leaves the ones it bound.
 func (p *Proxy) pairCase(live *models.HTTPReq, unread string) func(*models.HTTPReq, string) {
-	test, rec, binds, ok := p.caseBinds.pair(live, unread == "")
+	test, rec, binds, ok := p.caseBinds.pair(live, unread == "", p.boundDrifts)
 	if !ok {
 		return nil
 	}
@@ -167,6 +169,28 @@ func (p *Proxy) pairCase(live *models.HTTPReq, unread string) func(*models.HTTPR
 			}
 		}
 	}
+}
+
+// boundDrifts are the values test's variables bound so far this run in
+// another value than their recording's (learn.Drifts: each binding's live
+// value, standing for its recorded one), the run's among them: what a value
+// the application or the test made earlier in the test, and the test sends
+// again, held in its recording. None where keploy does not serve test now.
+// It is what the learn step read as the test's earlier exchanges' drifted
+// values (learn.Tracker's pairing), at the places it bound them.
+func (p *Proxy) boundDrifts(test string) learn.Drifts {
+	d := learn.Drifts{}
+	m := p.getMockManager()
+	if m == nil {
+		return d
+	}
+	if v := m.exactView(); v == nil || v.test != test {
+		return d
+	}
+	for _, b := range m.BoundVariables() {
+		d.Add(b.Value, b.Recorded)
+	}
+	return d
 }
 
 // warnCaseBind says that keploy could not bind, or note, variable b of
