@@ -89,16 +89,17 @@ func WriteBack(file, copyPath string, orig, wrote, now, ca []byte, opt WriteOpti
 	if err != nil {
 		return w, w.keep(target, eds, ca, opt, fmt.Errorf("keploy could not read the kubeconfig %s: %w", target, err))
 	}
+	doc, root, err := docOf(cur)
+	if err != nil {
+		return w, w.keep(target, eds, ca, opt, fmt.Errorf("the kubeconfig %s, as it is now: %w", target, err))
+	}
 	if !bytes.Equal(cur, orig) {
-		w.Conflict, err = conflictsOf(eds, orig, cur)
-		if err != nil {
-			return w, w.keep(target, eds, ca, opt, fmt.Errorf("the kubeconfig %s, as it is now: %w", target, err))
-		}
-		if len(w.Conflict) > 0 {
+		// orig parses: keploy wrote the copy from it (Rewrite).
+		if w.Conflict = conflictsOf(eds, rootOrNil(orig), root); len(w.Conflict) > 0 {
 			return w, w.keep(target, eds, ca, opt, nil)
 		}
 	}
-	out, err := applied(cur, eds, ca)
+	out, err := applied(doc, root, eds, ca)
 	if err != nil {
 		return w, w.keep(target, eds, ca, opt, fmt.Errorf("the kubeconfig %s, as it is now: %w", target, err))
 	}
@@ -203,16 +204,9 @@ func editsOf(ch Changes, wrote, now *yaml.Node) []edit {
 
 // conflictsOf is each of eds whose entry was changed in the user's file
 // during the run (it differs between orig, the file as the run started, and
-// cur, the file now), unless to what the test changed it to.
-func conflictsOf(eds []edit, orig, cur []byte) ([]string, error) {
-	was, err := rootOf(orig)
-	if err != nil {
-		return nil, err
-	}
-	is, err := rootOf(cur)
-	if err != nil {
-		return nil, err
-	}
+// cur, the file now: was and is, their roots), unless to what the test
+// changed it to.
+func conflictsOf(eds []edit, was, is *yaml.Node) []string {
 	var out []string
 	for _, e := range eds {
 		a, b := valueOf(was, e.key), valueOf(is, e.key)
@@ -223,23 +217,25 @@ func conflictsOf(eds []edit, orig, cur []byte) ([]string, error) {
 			out = append(out, e.what)
 		}
 	}
-	return out, nil
+	return out
 }
 
-// applied is cur, the user's file, with eds made in it.
-func applied(cur []byte, eds []edit, ca []byte) ([]byte, error) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(cur, &doc); err != nil {
-		return nil, fmt.Errorf("not YAML kubectl reads: %w", err)
-	}
-	if len(doc.Content) == 0 {
-		doc = *newConfig()
-	}
-	root := deref(doc.Content[0])
-	if root.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("not a YAML mapping")
-	}
+// applied is doc, the user's file as it is now, with eds made in its root
+// mapping root, written as kubectl reads it.
+//
+// The file may share a node between places: an alias (*a) stands for the
+// node anchored &a before it. An edit changes only the place kubectl's copy
+// changed, so a list or item it edits, and all the item holds, is first made
+// its own (own); and once the edits are made, an alias whose node was
+// removed, replaced or changed by them stands for what it stood for as
+// written (relink), so the file still parses and reads as it did there.
+func applied(doc, root *yaml.Node, eds []edit, ca []byte) ([]byte, error) {
+	was := map[*yaml.Node]*yaml.Node{}
+	aliased(doc, was)
 	for _, e := range eds {
+		if e.list != "" {
+			own(root, e.list, e.name)
+		}
 		switch {
 		case e.list == "" && e.to == nil:
 			del(root, e.key)
@@ -257,13 +253,91 @@ func applied(cur []byte, eds []edit, ca []byte) ([]byte, error) {
 			}
 			body, ok := lookup(mine, e.field)
 			if !ok || body.Kind != yaml.MappingNode {
-				setNode(mine, e.field, clone(get(e.item(ca), e.field)))
-				continue
+				setOrDel(mine, e.field, field(e.item(ca), e.field))
+			} else {
+				merge(body, get(e.from, e.field), get(e.to, e.field), e.list == "clusters", ca)
 			}
-			merge(body, get(e.from, e.field), get(e.to, e.field), e.list == "clusters", ca)
+			// Beside its body an item holds nothing kubectl writes: what the
+			// test wrote there itself is written too.
+			for _, k := range keysOf(e.to, e.from) {
+				if k != e.field && !same(field(e.from, k), field(e.to, k)) {
+					setOrDel(mine, k, field(e.to, k))
+				}
+			}
 		}
 	}
-	return encode(&doc)
+	relink(doc, was)
+	return encode(doc)
+}
+
+// aliased records in was a copy of each node an alias in n stands for, as it
+// is now.
+func aliased(n *yaml.Node, was map[*yaml.Node]*yaml.Node) {
+	if n.Kind == yaml.AliasNode {
+		was[n.Alias] = clone(n.Alias)
+		return
+	}
+	for _, c := range n.Content {
+		aliased(c, was)
+	}
+}
+
+// own makes root's list, and each item of it named name with all the item
+// holds, share no node with the rest of the file: an alias there becomes a
+// copy of what it stands for, so an edit made there changes it alone, never
+// the node the alias stands for elsewhere.
+func own(root *yaml.Node, list, name string) {
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != list {
+			continue
+		}
+		l := unshared(root.Content[i+1], false)
+		root.Content[i+1] = l
+		for j, it := range l.Content {
+			if isNamed(it, name) {
+				l.Content[j] = unshared(it, true)
+			}
+		}
+	}
+}
+
+// unshared is n, an alias made a copy of what it stands for; with deep, each
+// alias in it too.
+func unshared(n *yaml.Node, deep bool) *yaml.Node {
+	if n.Kind == yaml.AliasNode {
+		return clone(n)
+	}
+	if deep {
+		for i, c := range n.Content {
+			n.Content[i] = unshared(c, true)
+		}
+	}
+	return n
+}
+
+// relink makes each alias in doc that no longer stands for what it stood for
+// as the file was read (was: a copy of each node an alias stood for) a copy
+// of that: its node was removed or replaced (the name now names an earlier
+// node of that name, or none, and the file would not parse), or an edit
+// changed it.
+func relink(doc *yaml.Node, was map[*yaml.Node]*yaml.Node) {
+	named := map[string]*yaml.Node{}
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n.Anchor != "" {
+			named[n.Anchor] = n
+		}
+		for i, c := range n.Content {
+			if c.Kind != yaml.AliasNode {
+				walk(c)
+				continue
+			}
+			if named[c.Value] != c.Alias || !reflect.DeepEqual(clone(c.Alias), was[c.Alias]) {
+				n.Content[i] = clone(was[c.Alias])
+			}
+		}
+	}
+	walk(doc)
 }
 
 const (
@@ -342,26 +416,27 @@ func prunedOf(n *yaml.Node) any {
 	return v
 }
 
-// rootOf is the config data holds, or nil when it holds none (an empty
-// file). A root that is no mapping, null too, is refused, as Rewrite and
-// applied refuse it.
-func rootOf(data []byte) (*yaml.Node, error) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("not YAML kubectl reads: %w", err)
+// docOf is the document data holds and its root, the config: a new one
+// when data holds none (an empty file). A root that is no mapping, null too,
+// is refused, as Rewrite refuses it.
+func docOf(data []byte) (doc, root *yaml.Node, err error) {
+	doc = &yaml.Node{}
+	if err := yaml.Unmarshal(data, doc); err != nil {
+		return nil, nil, fmt.Errorf("not YAML kubectl reads: %w", err)
 	}
 	if len(doc.Content) == 0 {
-		return nil, nil
+		doc = newConfig()
 	}
-	root := deref(doc.Content[0])
+	root = deref(doc.Content[0])
 	if root.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("not a YAML mapping")
+		return nil, nil, fmt.Errorf("not a YAML mapping")
 	}
-	return root, nil
+	return doc, root, nil
 }
 
+// rootOrNil is the config data holds, or nil when it is refused (docOf).
 func rootOrNil(data []byte) *yaml.Node {
-	root, _ := rootOf(data)
+	_, root, _ := docOf(data)
 	return root
 }
 

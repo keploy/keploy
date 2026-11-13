@@ -572,7 +572,10 @@ func TestSameComparesWhatItCannotDecodeAsWritten(t *testing.T) {
 // WriteBack makes what the user's file lacks for the test's change, in the
 // block style kubectl writes: a list that is null or written [], an item's
 // body that is null or absent; and a value the test's copy aliases is written
-// whole, its anchor left where it was.
+// whole, its anchor left where it was. Where the user's file shares a node
+// (an alias), the test's change reaches only the place it changed, and an
+// alias whose node it removed or changed keeps what it stood for, so the
+// file still parses.
 func TestWriteBackMakesWhatTheUsersFileLacks(t *testing.T) {
 	keploy := newCA(t, "keploy")
 	stamp := time.Date(2026, 11, 13, 16, 10, 0, 0, time.UTC)
@@ -607,6 +610,31 @@ func TestWriteBackMakesWhatTheUsersFileLacks(t *testing.T) {
 				})
 			},
 			want: head + "contexts:\n- name: bare\n  context:\n    namespace: web\n- name: nokey\n  context:\n    namespace: web\n"},
+		{name: "a context whose body is null: the test leaves it none and changes a key beside it",
+			orig: head + "contexts:\n- name: bare # mine\n  context: null\n  x-note: a\n  x-keep: k\n",
+			test: func(t *testing.T, wrote []byte) []byte {
+				return kubectlEdit(t, wrote, func(cfg map[string]any) {
+					it := itemOf(cfg, "contexts", "bare")
+					delete(it, "context")
+					it["x-note"] = "b"
+				})
+			},
+			want: head + "contexts:\n- name: bare\n  x-note: b\n  x-keep: k\n",
+			check: func(t *testing.T, after string) {
+				if !strings.Contains(after, "name: bare # mine") {
+					t.Errorf("a key the test left as it was is not as the user wrote it:\n%s", after)
+				}
+			}},
+		{name: "the test removes a key beside a context's body and changes the body",
+			orig: head + "contexts:\n- name: c\n  context:\n    cluster: x\n  x-note: a\n",
+			test: func(t *testing.T, wrote []byte) []byte {
+				return kubectlEdit(t, wrote, func(cfg map[string]any) {
+					it := itemOf(cfg, "contexts", "c")
+					delete(it, "x-note")
+					it["context"].(map[string]any)["cluster"] = "y"
+				})
+			},
+			want: head + "contexts:\n- name: c\n  context:\n    cluster: y\n"},
 		{name: "the test removes a context: an item of its name that is no mapping stays",
 			orig: head + "contexts:\n- [name, c]\n- name: c\n  context:\n    cluster: x\n",
 			test: func(t *testing.T, wrote []byte) []byte {
@@ -640,6 +668,61 @@ func TestWriteBackMakesWhatTheUsersFileLacks(t *testing.T) {
 					t.Errorf("want the user's anchor once and its alias once, the test's cluster written whole:\n%s", after)
 				}
 			}},
+		{name: "the test removes the cluster whose server another's aliases: that one keeps the value whole",
+			orig: head + "clusters:\n- name: a\n  cluster:\n    server: &srv https://10.0.0.1:6443\n- name: b\n  cluster:\n    server: *srv\n",
+			test: func(t *testing.T, wrote []byte) []byte {
+				return kubectlEdit(t, wrote, func(cfg map[string]any) { cfg["clusters"] = cfg["clusters"].([]any)[1:] })
+			},
+			want: head + "clusters:\n- name: b\n  cluster:\n    server: https://10.0.0.1:6443\n"},
+		{name: "the test changes the server another's aliases: that one keeps the old value",
+			orig: head + "clusters:\n- name: a\n  cluster:\n    server: &srv https://10.0.0.1:6443\n- name: b\n  cluster:\n    server: *srv\n",
+			test: func(t *testing.T, wrote []byte) []byte {
+				return kubectlEdit(t, wrote, func(cfg map[string]any) {
+					itemOf(cfg, "clusters", "a")["cluster"].(map[string]any)["server"] = "https://10.0.0.9:6443"
+				})
+			},
+			want: head + "clusters:\n- name: a\n  cluster:\n    server: https://10.0.0.9:6443\n- name: b\n  cluster:\n    server: https://10.0.0.1:6443\n"},
+		{name: "the test changes a cluster another's aliases whole: that one keeps the old cluster",
+			orig: head + "clusters:\n- name: a\n  cluster: &c\n    server: https://10.0.0.1:6443\n- name: b\n  cluster: *c\n",
+			test: func(t *testing.T, wrote []byte) []byte {
+				return kubectlEdit(t, wrote, func(cfg map[string]any) {
+					itemOf(cfg, "clusters", "a")["cluster"].(map[string]any)["server"] = "https://10.0.0.9:6443"
+				})
+			},
+			want: head + "clusters:\n- name: a\n  cluster:\n    server: https://10.0.0.9:6443\n- name: b\n  cluster:\n    server: https://10.0.0.1:6443\n"},
+		{name: "the test changes a cluster that aliases another's whole: the other keeps its own",
+			orig: head + "clusters:\n- name: a\n  cluster: &c\n    server: https://10.0.0.1:6443\n- name: b\n  cluster: *c\n",
+			test: func(t *testing.T, wrote []byte) []byte {
+				return kubectlEdit(t, wrote, func(cfg map[string]any) {
+					itemOf(cfg, "clusters", "b")["cluster"].(map[string]any)["server"] = "https://10.0.0.9:6443"
+				})
+			},
+			want: head + "clusters:\n- name: a\n  cluster:\n    server: https://10.0.0.1:6443\n- name: b\n  cluster:\n    server: https://10.0.0.9:6443\n"},
+		{name: "an anchor named twice: the test removes the later one, whose value the alias keeps",
+			orig: head + "clusters:\n- name: a\n  cluster:\n    server: &s https://10.0.0.1:6443\n- name: b\n  cluster:\n    server: &s https://10.0.0.2:6443\n- name: c\n  cluster:\n    server: *s\n",
+			test: func(t *testing.T, wrote []byte) []byte {
+				return kubectlEdit(t, wrote, func(cfg map[string]any) {
+					l := cfg["clusters"].([]any)
+					cfg["clusters"] = []any{l[0], l[2]}
+				})
+			},
+			want: head + "clusters:\n- name: a\n  cluster:\n    server: https://10.0.0.1:6443\n- name: c\n  cluster:\n    server: https://10.0.0.2:6443\n"},
+		{name: "the clusters list an alias of another key's: the test adds a cluster, the other key keeps its list",
+			orig: head + "x-seed: &l\n- name: a\n  cluster:\n    server: https://10.0.0.1:6443\nclusters: *l\n",
+			test: func(t *testing.T, wrote []byte) []byte {
+				return kubectlEdit(t, wrote, func(cfg map[string]any) {
+					cfg["clusters"] = append(cfg["clusters"].([]any), map[string]any{"name": "b", "cluster": map[string]any{"server": "https://10.0.0.2:6443"}})
+				})
+			},
+			want: head + "x-seed:\n- name: a\n  cluster:\n    server: https://10.0.0.1:6443\n" +
+				"clusters:\n- name: a\n  cluster:\n    server: https://10.0.0.1:6443\n- name: b\n  cluster:\n    server: https://10.0.0.2:6443\n"},
+		{name: "the clusters list an alias of another key's: the test removes a cluster, the other key keeps its list",
+			orig: head + "x-seed: &l\n- name: a\n  cluster:\n    server: https://10.0.0.1:6443\n- name: b\n  cluster:\n    server: https://10.0.0.2:6443\nclusters: *l\n",
+			test: func(t *testing.T, wrote []byte) []byte {
+				return kubectlEdit(t, wrote, func(cfg map[string]any) { cfg["clusters"] = cfg["clusters"].([]any)[:1] })
+			},
+			want: head + "x-seed:\n- name: a\n  cluster:\n    server: https://10.0.0.1:6443\n- name: b\n  cluster:\n    server: https://10.0.0.2:6443\n" +
+				"clusters:\n- name: a\n  cluster:\n    server: https://10.0.0.1:6443\n"},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "config")
