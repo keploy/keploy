@@ -31,21 +31,28 @@ var ciProviders = []struct {
 	{"HARNESS_BUILD_ID", "harness"},
 	{"WOODPECKER", "woodpecker"},
 	{"SEMAPHORE", "semaphore"},
+	{"APPVEYOR", "appveyor"},
+	// Bamboo and GoCD set no CI variable: each is known by its own.
+	{"bamboo_planKey", "bamboo"},
+	{"GO_PIPELINE_LABEL", "gocd"},
 }
 
 // CI-specific env vars that hold the repository slug (owner/repo).
 var ciRepoVars = []string{
-	"GITHUB_REPOSITORY",        // github-actions: "owner/repo"
-	"CI_PROJECT_PATH",          // gitlab-ci:      "group/project"
-	"TRAVIS_REPO_SLUG",         // travis-ci:      "owner/repo"
-	"CIRCLE_PROJECT_REPONAME",  // circleci:       "repo" (no owner)
-	"BUILDKITE_REPO",           // buildkite:      git URL
-	"BITBUCKET_REPO_FULL_NAME", // bitbucket:      "owner/repo"
-	"BUILD_REPOSITORY_NAME",    // azure-pipelines
-	"DRONE_REPO",               // drone:          "owner/repo"
-	"CI_REPO",                  // woodpecker:     "owner/repo"
-	"SEMAPHORE_GIT_REPO_SLUG",  // semaphore:      "owner/repo"
-	"HARNESS_REPO",             // harness
+	"GITHUB_REPOSITORY",                   // github-actions: "owner/repo"
+	"CI_PROJECT_PATH",                     // gitlab-ci:      "group/project"
+	"TRAVIS_REPO_SLUG",                    // travis-ci:      "owner/repo"
+	"CIRCLE_PROJECT_REPONAME",             // circleci:       "repo" (no owner)
+	"BUILDKITE_REPO",                      // buildkite:      git URL
+	"BITBUCKET_REPO_FULL_NAME",            // bitbucket:      "owner/repo"
+	"BUILD_REPOSITORY_NAME",               // azure-pipelines
+	"DRONE_REPO",                          // drone:          "owner/repo"
+	"CI_REPO",                             // woodpecker:     "owner/repo"
+	"SEMAPHORE_GIT_REPO_SLUG",             // semaphore:      "owner/repo"
+	"HARNESS_REPO",                        // harness
+	"APPVEYOR_REPO_NAME",                  // appveyor:       "owner/repo"
+	"bamboo_planRepository_repositoryUrl", // bamboo: git URL
+	// gocd names no repository in its variables.
 }
 
 // detectCI returns whether the process is running inside a CI environment
