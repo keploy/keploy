@@ -125,6 +125,9 @@ func TestAWindowlessRequestsMockPastTheStaleCutoffIsNeverSavedWithout(t *testing
 		if len(sum) != 1 || sum[0].Level != zapcore.DebugLevel || sum[0].ContextMap()["revoked_sent"] != int64(0) {
 			t.Fatalf("a drop that revoked nothing is not said once at Debug: %+v", sum)
 		}
+		if _, held := sum[0].ContextMap()[heldThenLetGo]; held {
+			t.Fatal("the cutoff's own drop is said as one the hold let go of")
+		}
 	}
 }
 
@@ -643,6 +646,38 @@ func TestAHeldStaleMockLetGoInAnEndedRecordingLeavesOutNoneOfTheNext(t *testing.
 	mgr.settleLetGo()
 	if got := len(cutLines(logs, cutSummary)); got != 1 {
 		t.Fatalf("%d lines after a second settle with nothing let go, want 1", got)
+	}
+	if n := logs.FilterMessageSnippet("past the bound kept for them").Len(); n != 0 {
+		t.Fatalf("%d lines of startup notes forgotten, when none was", n)
+	}
+}
+
+// TestAHeldStaleMockLetGoWithNoRecordingOpenLeavesOutNone: with no output set
+// the hold's let-go is told and said with no recording open, and leaves out
+// none of the recording that opens next.
+func TestAHeldStaleMockLetGoWithNoRecordingOpenLeavesOutNone(t *testing.T) {
+	mgr := &SyncMockManager{}
+	mgr.SetFirstRequestSignaled()
+	mgr.resolvedTestCount = models.StartupMockTestCaseWindow
+	var told atomic.Int64
+	mgr.OnDrop(func(*models.Mock) { told.Add(1) })
+	logs := cutLogs(mgr)
+	now := time.Now()
+	reqA := now.Add(-10 * time.Second)
+	w := mgr.OpenWindow(reqA.Add(-time.Millisecond), nil)
+	mgr.AddMock(staleAt(reqA.Add(time.Millisecond), time.Millisecond))
+	mgr.ResolveRange(now.Add(-5*time.Millisecond), now, "test-B", true, false)
+	w.Close()
+	if told.Load() != 1 {
+		t.Fatalf("OnDrop told %d, want the let-go mock once", told.Load())
+	}
+	sum := cutLines(logs, cutSummary)
+	if len(sum) != 1 || sum[0].ContextMap()["recording_open"] != false {
+		t.Fatalf("a let-go with no output set is not said once with no recording open: %+v", sum)
+	}
+	mgr.SetOutputChannel(make(chan *models.Mock, 4))
+	if !mgr.SendingTestCase("test-A", reqA, time.Now()) {
+		t.Fatal("the next recording's test case was left out for a let-go with no recording open")
 	}
 }
 

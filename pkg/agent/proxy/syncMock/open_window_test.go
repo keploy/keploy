@@ -2387,7 +2387,11 @@ func TestStartupMockNotesAreBounded(t *testing.T) {
 	for i := 0; i <= maxSentClaimed; i++ {
 		mk := httpMockAt(start.Add(time.Duration(i) * time.Microsecond))
 		mk.Name = fmt.Sprintf("mock-%d", i)
-		mgr.noteSentClaimedLocked(mk, nil, nil)
+		var owner *resolvedWindow
+		if i == 0 {
+			owner = &resolvedWindow{} // one followed: going back to a window
+		}
+		mgr.noteSentClaimedLocked(mk, nil, owner)
 	}
 	if got, want := len(mgr.sentClaimed), maxSentClaimed-maxSentClaimed/8+1; got != want {
 		t.Fatalf("%d notes past the bound, want %d", got, want)
@@ -2404,8 +2408,8 @@ func TestStartupMockNotesAreBounded(t *testing.T) {
 	mgr.mu.Unlock()
 	mgr.settlePool()
 	lines := logs.FilterMessageSnippet("past the bound kept for them").AllUntimed()
-	if len(lines) != 1 || lines[0].ContextMap()["forgotten"] != int64(maxSentClaimed/8) {
-		t.Fatalf("the notes forgotten are not said once, with how many, after the lock: %+v", lines)
+	if len(lines) != 1 || lines[0].ContextMap()["forgotten"] != int64(maxSentClaimed/8) || lines[0].ContextMap()["forgottenFollowed"] != int64(1) {
+		t.Fatalf("the notes forgotten are not said once, with how many and how many were followed, after the lock: %+v", lines)
 	}
 	mgr.settlePool()
 	if n := logs.FilterMessageSnippet("past the bound kept for them").Len(); n != 1 {
