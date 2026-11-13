@@ -220,6 +220,9 @@ func TestPrepareRefusesAnUnregisteredEngine(t *testing.T) {
 func TestPrepareMakesARegisteredEngineActiveAndExportsItsEndpoint(t *testing.T) {
 	withRegistry(t)
 	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	// DOCKER_HOST was keploy's, from a docker context (UseDockerContext).
+	t.Setenv(ContextEnv, "rancher-desktop")
+	t.Setenv(ContextHostEnv, "unix:///var/run/docker.sock")
 	want := Runtime{
 		Name:              Podman,
 		CLI:               "/usr/bin/podman",
@@ -239,6 +242,16 @@ func TestPrepareMakesARegisteredEngineActiveAndExportsItsEndpoint(t *testing.T) 
 	}
 	if h := os.Getenv("DOCKER_HOST"); h != want.Host {
 		t.Fatalf("DOCKER_HOST = %q, want the engine's endpoint %q", h, want.Host)
+	}
+	// The engine's endpoint is no docker context's: the markers that said
+	// so are gone, for this process and the ones it starts.
+	if got := DockerHostContext(); got != "" {
+		t.Fatalf("DockerHostContext() = %q after Prepare, want \"\"", got)
+	}
+	for _, k := range []string{ContextEnv, ContextHostEnv} {
+		if v, set := os.LookupEnv(k); set {
+			t.Fatalf("%s = %q after Prepare, want it unset", k, v)
+		}
 	}
 
 	// Back to Docker: its runtime, and the environment's endpoint is left as
