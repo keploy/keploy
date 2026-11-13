@@ -710,3 +710,21 @@ func TestAHeldStaleMockLetGoInTwoRecordingsIsSaidOncePerRecording(t *testing.T) 
 		t.Fatal("the current recording's test case holding its let-go mock was sent")
 	}
 }
+
+// TestEachLetGoIsToldOnce: what the hold lets go of is told once, at its own
+// let-go, and not again at the next one.
+func TestEachLetGoIsToldOnce(t *testing.T) {
+	mgr, _, told := staleCutoffFixture(t)
+	now := time.Now()
+	for i := range 2 {
+		at := now.Add(-10*time.Second + time.Duration(i)*time.Second)
+		w := mgr.OpenWindow(at.Add(-time.Millisecond), nil)
+		mgr.AddMock(staleAt(at, time.Millisecond))
+		k := time.Now()
+		mgr.ResolveRange(k.Add(-time.Millisecond), k, fmt.Sprintf("test-B%d", i), true, false)
+		w.Close()
+		if got := len(told()); got != i+1 {
+			t.Fatalf("after let-go %d OnDrop was told %d mocks, want %d", i+1, got, i+1)
+		}
+	}
+}
