@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -408,4 +410,127 @@ func TestRecordV2_PostTLS_AConnectionCapturedBeforeTheStopIsRecordedWithItsGreet
 		t.Errorf("config ReqTimestampMock = %v, want the raw leg's %v", got[0].Spec.ReqTimestampMock, base)
 	}
 	assertQueryMock(t, got[1])
+}
+
+// freshTLSConnectionAtTheStop captures, on h, a fresh TLS connection's
+// decrypted streams, its HandshakeResponse41 and a query with their answers,
+// none read, ends both streams as the relay does at its teardown, and points the
+// session at addr, the server a greeting fetch dials. No greeting is in store
+// and none is remembered. The recording has stopped (ctx).
+func freshTLSConnectionAtTheStop(t *testing.T, h *v2Harness, addr string) (context.Context, time.Time) {
+	t.Helper()
+	base := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), cannedHandshakeV10(t)[4:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.pushClient(cannedHandshakeResponse41(t, 2, false), base.Add(5*time.Millisecond))
+	h.pushDest(cannedOK(t, 3, greeting.CapabilityFlags), base.Add(10*time.Millisecond))
+	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base.Add(20*time.Millisecond))
+	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
+	h.closeStreams()
+	h.sess.Opts.DstCfg = &models.ConditionalDstCfg{Addr: addr, Port: 3306}
+	return stoppedRecording(postTLSCtxWithStore(models.NewTLSHandshakeStore()), h.sess), base.Add(5 * time.Millisecond)
+}
+
+// A fresh TLS connection captured before the stop whose raw-leg greeting never
+// comes, and whose server's greeting is not remembered: at the stop the
+// recorder fetches the greeting from the server, as it would while the
+// recording runs, and records the connection with it. Before, the stop refused
+// the dial, and the connection was left out without a word.
+func TestRecordV2_PostTLS_AtTheStopTheGreetingIsFetchedAndTheConnectionRecorded(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "100")
+	srv := startFakeMySQLGreeter(t, cannedHandshakeV10(t), 0)
+	h := newV2Harness(t)
+	ctx, _ := freshTLSConnectionAtTheStop(t, h, srv.addr)
+	if err := recordV2NoPanic(t, ctx, h.logger, h.sess); err != nil {
+		t.Fatalf("RecordV2 = %v, want nil: the server answers with its greeting", err)
+	}
+	got := takeMocks(h, 2)
+	if len(got) != 2 {
+		t.Fatalf("%d mock(s); want the config mock and the query's", len(got))
+	}
+	if got[0].Name != "config" || len(got[0].Spec.MySQLResponses) < 1 {
+		t.Fatalf("first mock %q with %d response(s); want the config mock with the fetched greeting", got[0].Name, len(got[0].Spec.MySQLResponses))
+	}
+	if _, ok := got[0].Spec.MySQLResponses[0].Message.(*mysql.HandshakeV10Packet); !ok {
+		t.Fatalf("the config mock's first response is %T; want the fetched HandshakeV10", got[0].Spec.MySQLResponses[0].Message)
+	}
+	assertQueryMock(t, got[1])
+	if n := srv.accepted.Load(); n != 1 {
+		t.Fatalf("the server was dialled %d times; want once, for the greeting", n)
+	}
+}
+
+// When that fetch fails (the server refuses the dial), the connection is left
+// out at the stop as it would be while the recording runs, and says so: one
+// left-out WARN that names the failed fetch, counted, spanned from its first
+// client packet. Before, the stop made the loss silent.
+func TestRecordV2_PostTLS_AtTheStopAFailedGreetingFetchLeavesTheConnectionOutNamed(t *testing.T) {
+	resetWarnLimiters()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := ln.Addr().String()
+	_ = ln.Close()
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "100")
+	core, logs := observer.New(zapcore.DebugLevel)
+	h := newV2Harness(t)
+	h.logger = zap.New(core)
+	h.sess.Logger = h.logger
+	mgr := syncMock.New(nil)
+	h.sess.Mgr = mgr
+	spans := &orphanSpans{}
+	h.sess.Orphans = spans
+	ctx, firstAt := freshTLSConnectionAtTheStop(t, h, refused)
+	_ = recordV2NoPanic(t, ctx, h.logger, h.sess)
+	if len(h.mocks) != 0 {
+		t.Fatalf("%d mock(s) recorded with no greeting", len(h.mocks))
+	}
+	warns := leftOutWarnings(logs)
+	if len(warns) != 1 || mgr.MocksLeftOut() != 1 || spans.count() != 1 {
+		t.Fatalf("%d left-out WARN(s), %d counted, %d span(s); want the connection left out once", len(warns), mgr.MocksLeftOut(), spans.count())
+	}
+	if reason, _ := warns[0].ContextMap()["reason"].(string); !strings.Contains(reason, "direct fetch failed") || !strings.Contains(reason, refused) {
+		t.Fatalf("left out for %q; want the failed fetch from %s named", reason, refused)
+	}
+	if start := spans.windows[0][0]; !start.Equal(firstAt) {
+		t.Fatalf("the span starts at %v; want the first client packet's %v", start, firstAt)
+	}
+}
+
+// A parser the supervisor retires at the stop (here the stop's own deadline)
+// while it waits for a TLS connection's greeting ends the wait within a poll
+// slice and never dials the server: nothing it records from its retirement is
+// kept. Before, it waited out the 30 s bound.
+func TestRecordV2_PostTLS_AParserRetiredAtTheStopEndsItsGreetingWait(t *testing.T) {
+	t.Parallel()
+	srv := startFakeMySQLGreeter(t, cannedHandshakeV10(t), 0)
+	h := newV2Harness(t)
+	ctx, _ := freshTLSConnectionAtTheStop(t, h, srv.addr)
+	s := supervisor.New(supervisor.Config{Logger: zap.NewNop(), HangBudget: time.Hour})
+	deadline := make(chan struct{})
+	s.StopDeadline = deadline
+	returned := make(chan error, 1)
+	go s.Run(ctx, func(pctx context.Context, sess *supervisor.Session) error {
+		err := recordV2NoPanic(t, pctx, h.logger, sess)
+		returned <- err
+		return err
+	}, h.sess)
+	time.Sleep(300 * time.Millisecond) // into the wait for the raw leg's greeting
+	select {
+	case err := <-returned:
+		t.Fatalf("RecordV2 = %v before its retirement: the stop alone ended the greeting wait", err)
+	default:
+	}
+	close(deadline)
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("RecordV2 still waits for the greeting 10 s after the supervisor retired it; want within a poll slice, never its 30 s bound")
+	}
+	if n := srv.accepted.Load(); n != 0 {
+		t.Fatalf("the retired parser dialled the server %d times", n)
+	}
 }

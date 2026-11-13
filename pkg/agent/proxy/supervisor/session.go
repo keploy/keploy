@@ -284,6 +284,26 @@ type Session struct {
 	// (StoppedAt), in Unix nanoseconds: 0 until StoppedAt first reads the
 	// clock. The call that stores it tells OnStop.
 	stoppedAt atomic.Int64
+
+	// retired is the supervisor's, closed as it retires the parser (Retired);
+	// Supervisor.Run sets it before the parser runs.
+	retired <-chan struct{}
+}
+
+// Retired is closed once the supervisor running this session's parser retires
+// it: a hang, a panic, the memory cap, an error the parser returned, or, at
+// the recording's stop, the parser's streams read to their end or the stop's
+// own deadline (Supervisor.Run). From then on nothing the parser records is
+// kept. Unlike Ctx, which the recording's stop ends as well, it says the parser
+// itself is done: a parser that still reads, at the stop, what was captured
+// before it waits on what that needs (a TLS connection's greeting, say) until
+// this is closed, never longer. nil, never closed, for a session no supervisor
+// runs. Nil-safe.
+func (s *Session) Retired() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.retired
 }
 
 // AddPostRecordHook adds h to the front of the session's post-record chain

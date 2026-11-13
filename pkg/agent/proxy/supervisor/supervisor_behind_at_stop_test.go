@@ -193,6 +193,8 @@ func TestRun_AtTheStopAbortsOnceBothStreamsAreReadToTheirEndOrTheDeadlinePasses(
 				select {
 				case <-aborted:
 					t.Fatal("the supervisor aborted a parser that had not read its server stream to its end, before the stop's deadline")
+				case <-sess.Retired():
+					t.Fatal("the stop alone retired the parser (Session.Retired), before the stop's deadline")
 				case res := <-resc:
 					t.Fatalf("Run returned %+v before the stop's deadline", res)
 				case <-time.After(300 * time.Millisecond):
@@ -210,10 +212,58 @@ func TestRun_AtTheStopAbortsOnceBothStreamsAreReadToTheirEndOrTheDeadlinePasses(
 			default:
 				t.Fatalf("Run returned %+v without aborting the parser", res)
 			}
+			select {
+			case <-sess.Retired():
+			default:
+				t.Fatal("the parser the stop's abort retired, still waiting, was not told (Session.Retired)")
+			}
 			if res.Status != StatusCanceled || !res.FallthroughToPassthrough {
 				t.Fatalf("result %+v, want canceled and retired", res)
 			}
 		})
+	}
+}
+
+// Session.Retired is closed as the supervisor retires the parser, whether or
+// not the run has a SessionOnAbort, and only then: never for a session no
+// supervisor runs, nor by a parser's clean return.
+func TestRun_RetiredIsClosedOnlyAsTheParserIsRetired(t *testing.T) {
+	t.Parallel()
+	var none *Session
+	if none.Retired() != nil || (&Session{}).Retired() != nil {
+		t.Fatal("Retired of a session no supervisor runs is not nil")
+	}
+
+	clean := &Session{}
+	s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour})
+	if res := s.Run(context.Background(), func(context.Context, *Session) error { return nil }, clean); res.Status != StatusOK {
+		t.Fatalf("clean run: %+v", res)
+	}
+	select {
+	case <-clean.Retired():
+		t.Fatal("a parser's clean return closed Retired")
+	default:
+	}
+
+	capped := &Session{}
+	s = New(Config{Logger: zap.NewNop(), HangBudget: time.Hour}) // no SessionOnAbort
+	res := s.Run(context.Background(), func(ctx context.Context, sess *Session) error {
+		select {
+		case <-sess.Retired():
+			t.Error("Retired closed before the parser was retired")
+		default:
+		}
+		s.MarkMemCapExceeded()
+		select {
+		case <-sess.Retired():
+		case <-time.After(10 * time.Second):
+			t.Error("the memory cap retired the parser and Retired stayed open")
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}, capped)
+	if res.Status != StatusMemCap {
+		t.Fatalf("memory-cap run: %+v", res)
 	}
 }
 

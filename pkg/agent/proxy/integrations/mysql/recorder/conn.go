@@ -265,8 +265,10 @@ type greetingFetchResult struct {
 //     stream's teardown does not fail the others waiting on it. It stays bounded
 //     by fetchServerGreeting's own dial and read limits. Each caller stops
 //     waiting when its own ctx ends, and a caller whose ctx has already ended
-//     never STARTS a dial: recording stop is not a reason to reach the server.
-//     It still takes a greeting remembered for the server, which reaches none.
+//     never STARTS a dial. It still takes a greeting remembered for the server,
+//     which reaches none. The recorder's ctx for it ends with its parser, not
+//     at the recording's stop (untilParserEnds): a connection captured before
+//     the stop still lacks only its greeting, and is recorded with it.
 //   - A failed fetch caches nothing as a success. Callers already waiting share
 //     its error, and callers arriving within greetingFetchFailureBackoff get
 //     that error without dialling again. After that the next caller dials. A
@@ -290,9 +292,8 @@ func fetchServerGreetingShared(ctx context.Context, logger *zap.Logger, hsStore 
 	}
 	// Same order as inside the flight: a remembered greeting (for instance one a
 	// raw leg recorded since the last failure) beats a remembered failure. It
-	// is read before the caller's end is: it reaches no server, so a caller at
-	// the recording's stop, whose connection's capture is still being read,
-	// takes it too.
+	// is read before the caller's end is: it reaches no server, so a caller
+	// whose ctx has ended takes it too.
 	if g, ok := hsStore.ServerGreeting(key); ok {
 		logger.Debug("post-TLS MySQL: using the greeting remembered for this server; not dialling",
 			zap.String("serverKey", key))

@@ -1334,10 +1334,12 @@ func TestRecordV2_PostTLS_ConcurrentPooledConnsDialTheServerOnce(t *testing.T) {
 	}
 }
 
-// Recording stop during the stash wait must not dial the server: the wait
-// exits on ctx cancellation and the connection is being torn down, so there is
-// nothing to fetch a greeting for — only an aborted handshake to cost the host.
-// A fresh connection (HandshakeResponse41) is the one that waits.
+// The parser's teardown during the stash wait (its ctx ends while the
+// recording runs) must not dial the server: the wait exits on it and the
+// connection is being torn down, so there is nothing to fetch a greeting for —
+// only an aborted handshake to cost the host. A fresh connection
+// (HandshakeResponse41) is the one that waits. The recording's stop is not a
+// teardown: see TestRecordV2_PostTLS_AtTheStopTheGreetingIsFetchedAndTheConnectionRecorded.
 func TestRecordV2_PostTLS_TeardownDuringStashWaitNeverDials(t *testing.T) {
 	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "5000")
 	srv := startFakeMySQLGreeter(t, cannedHandshakeV10(t), 0)

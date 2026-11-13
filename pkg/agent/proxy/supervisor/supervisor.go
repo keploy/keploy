@@ -143,6 +143,12 @@ type Supervisor struct {
 	// abortOnce guards SessionOnAbort invocation.
 	abortOnce sync.Once
 
+	// retired is closed, once (retireOnce), as the run is aborted
+	// (fireOnAbort): the parser is retired from then on. Its session reads it
+	// through Session.Retired.
+	retired    chan struct{}
+	retireOnce sync.Once
+
 	// closed guards repeated Close calls.
 	closed atomic.Bool
 }
@@ -174,6 +180,7 @@ func New(cfg Config) *Supervisor {
 		clk:        clk,
 		holdClk:    holdClk,
 		hungCh:     make(chan struct{}),
+		retired:    make(chan struct{}),
 		wdStop:     make(chan struct{}),
 		wdDone:     make(chan struct{}),
 	}
@@ -278,6 +285,7 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 
 	if sess != nil {
 		sess.Ctx = runCtx
+		sess.retired = s.retired
 	}
 
 	// Run the parser in its own goroutine so we can select on it
@@ -713,8 +721,11 @@ func wrapPanic(v any) error {
 
 // fireOnAbort invokes SessionOnAbort at most once, guarded so parallel
 // abort reasons (hang + outer cancel racing) do not invoke the
-// callback twice and a panicking callback does not propagate.
+// callback twice and a panicking callback does not propagate. It first
+// says the parser is retired (Session.Retired), with or without a
+// callback.
 func (s *Supervisor) fireOnAbort() {
+	s.retireOnce.Do(func() { close(s.retired) })
 	if s.SessionOnAbort == nil {
 		return
 	}

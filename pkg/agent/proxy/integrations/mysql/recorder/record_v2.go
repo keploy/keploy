@@ -125,6 +125,17 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 			return nil
 		}
 		if ctx.Err() != nil {
+			if !sess.RecordingStopping() {
+				return ctx.Err()
+			}
+			// The recording's stop. The handshake was captured before it and
+			// read on after it (a TLS connection's greeting is fetched then
+			// too: untilParserEnds), so a failure that is not the end of a
+			// stream or of the parser leaves the connection out: counted,
+			// named, and spanned from its first client packet where that is
+			// known (leaveOutInFlight), as the exchange a lost frame is in.
+			// Before, the stop made it silent.
+			_ = leaveOutInFlight(sess, handshake.firstCmdAt, err)
 			return ctx.Err()
 		}
 		if errors.Is(err, ErrFramingLost) {
@@ -572,8 +583,14 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		// server counts against the dialling host). fetchServerGreeting refuses
 		// fabricated destinations (see models.ConditionalDstCfg.AddrFabricated),
 		// so this cannot dial an address the capture layer merely invented.
+		// The recording's stop does not refuse it (untilParserEnds): this
+		// connection was captured before the stop, and the greeting is all its
+		// capture lacks. The fetch reads the greeting and hangs up, bounded by
+		// its own dial and read limits; the parser's end cuts it short.
 		var gErr error
-		greetingBuf, gErr = fetchServerGreetingShared(ctx, logger, hsStore, sess.Opts)
+		fetchCtx, endFetch := untilParserEnds(ctx, sess)
+		greetingBuf, gErr = fetchServerGreetingShared(fetchCtx, logger, hsStore, sess.Opts)
+		endFetch()
 		if gErr != nil {
 			return res, fmt.Errorf("post-TLS V2: no greeting in store (key port %d) and direct fetch failed: %w", dstPort, gErr)
 		}
@@ -1031,6 +1048,54 @@ const (
 	greetingCached
 )
 
+// parserEnded reports whether ctx ended with the parser itself: its teardown
+// while the recording runs (a hang, a panic, the memory cap), or, at the
+// recording's stop, its retirement (Session.Retired). The recording's stop alone
+// ends ctx too, but not the parser: it reads on what was captured before the
+// stop, and what that needs, a TLS connection's greeting, is still worth
+// waiting for and fetching.
+func parserEnded(ctx context.Context, sess *supervisor.Session) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	if !sess.RecordingStopping() {
+		return true
+	}
+	select {
+	case <-sess.Retired():
+		return true
+	default:
+		return false
+	}
+}
+
+// untilParserEnds is ctx, with its values, for what the parser fetches from
+// outside its capture (the server's greeting): it ends when the parser does
+// (parserEnded), not at the recording's stop. The caller calls the returned
+// func once it is done with it. A parser that has ended already gets a ctx
+// that has ended: the end ctx had is not left to a goroutine to pass on while
+// the fetch dials.
+func untilParserEnds(ctx context.Context, sess *supervisor.Session) (context.Context, context.CancelFunc) {
+	fetch, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	if parserEnded(ctx, sess) {
+		cancel()
+		return fetch, cancel
+	}
+	stop := context.AfterFunc(ctx, func() {
+		if sess.RecordingStopping() {
+			select {
+			case <-sess.Retired():
+			case <-fetch.Done():
+			}
+		}
+		cancel()
+	})
+	return fetch, func() {
+		stop()
+		cancel()
+	}
+}
+
 // resolvePreTLSGreeting obtains the pre-TLS greeting (+SSLRequest) for a
 // decrypted tls-* stream, and the owner the stashed entry was pushed with. It
 // prefers THIS connection's own raw-leg stash, but a genuinely-dropped raw leg
@@ -1048,13 +1113,15 @@ const (
 //     `overall`, since nothing better can serve this connection. The caller
 //     then consults the per-server memo, and only then dials.
 //
-// ctx cancellation (the parser's teardown: a hang, a panic, the memory cap)
-// cuts any wait short within one poll slice. The recording's stop, which
-// cancels ctx too, does not (sess.RecordingStopping): the raw leg's greeting
-// was captured before the stop as this stream's bytes were, and its parser
-// reads what was captured to its stream's end and pushes the greeting then, so
-// the wait goes on to its bounds. On a final miss it returns greetingNone so
-// the caller can fetchServerGreetingShared / abort cleanly.
+// The parser's end (parserEnded: its teardown while the recording runs, a
+// hang, a panic, the memory cap, or its retirement at the stop) cuts any wait
+// short within one poll slice. The recording's stop alone, which cancels ctx
+// too, does not: the raw leg's greeting was captured before the stop as this
+// stream's bytes were, and its parser reads what was captured to its stream's
+// end and pushes the greeting then, so the wait goes on to its bounds, or until
+// the supervisor retires this parser (Session.Retired), from when nothing it
+// records is kept. On a final miss it returns greetingNone so the caller can
+// fetchServerGreetingShared / abort cleanly.
 //
 // Every raw leg pushes its entry once, under the destination port's key,
 // tagged with the connection identity the capture layer gave it (owner; see
@@ -1222,9 +1289,9 @@ func resolvePreTLSGreeting(ctx context.Context, sess *supervisor.Session, hsStor
 				return entry, models.HandshakeOwner{}, greetingCached
 			}
 		}
-		// 3. Overall bound / teardown. Not the recording's stop: the raw leg's
-		//    parser still pushes what was captured before it.
-		if !now.Before(overallDeadline) || (ctx.Err() != nil && !sess.RecordingStopping()) {
+		// 3. Overall bound / the parser's end. Not the recording's stop: the
+		//    raw leg's parser still pushes what was captured before it.
+		if !now.Before(overallDeadline) || parserEnded(ctx, sess) {
 			break
 		}
 		// 4. Block on the port's queue, waking the moment a Push broadcasts the
