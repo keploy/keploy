@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -341,6 +342,51 @@ func TestRecordIncoming_AGRPCOnlySyncRecordingMapsEachCallsMocksToItsTestCase(t 
 // when it may be recorded: not one read while the memory guard had paused
 // recording, nor one on a connection whose calls are all handled (no window
 // opens).
+// RecordIncoming hands each call's window the pause it read the call's bytes
+// under: a --sync call read while the memory guard has paused recording may not
+// be recorded, so it does not signal the recording's first request, and the
+// next one read once recording runs again does.
+func TestRecordIncoming_ASyncCallReadDuringAPauseSignalsNoFirstRequest(t *testing.T) {
+	m := syncMock.New(zap.NewNop())
+	restore := memoryguard.SetRecordingPausedForTest(true)
+	defer restore()
+	tcCh := make(chan *models.TestCase, 4)
+	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), m))
+	defer cancel()
+	cliApp, cliProxy := net.Pipe()
+	appProxy, appApp := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", true, true)
+	}()
+	defer func() {
+		cancel()
+		_ = cliApp.Close()
+		_ = appApp.Close()
+		<-done
+	}()
+	// The forwarder opens a call's window before it writes the call's bytes
+	// on, so once the app has read them the signal is decided.
+	send := func(req []byte) {
+		go func() { _, _ = cliApp.Write(req) }()
+		if _, err := io.ReadFull(appApp, make([]byte, len(req))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req, _ := pingCallOn(t, 1, true)
+	send(req)
+	if m.GetFirstReqSeen() {
+		t.Fatal("a --sync call read while recording was paused signalled the first request")
+	}
+	restore()
+	req, _ = pingCallOn(t, 3, false)
+	send(req)
+	if !m.GetFirstReqSeen() {
+		t.Fatal("a --sync call read while recording runs did not signal the first request")
+	}
+}
+
 func TestCallWindowsSignalTheFirstRequestOnlyForARecordableSyncCall(t *testing.T) {
 	req, _ := pingCallOn(t, 1, true)
 	later := headersFrameBytes(t, 3, reqFields, false)
