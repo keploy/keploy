@@ -35,7 +35,7 @@ func TestProcStartAndProcAliveReadAProcessAsTheAgentDoes(t *testing.T) {
 	require.True(t, ProcAlive(os.Getpid(), me))
 	require.False(t, ProcAlive(os.Getpid(), me+1), "another start time is another process on the pid")
 
-	cmd := exec.Command(os.Args[0])
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), holdStdinEnv+"=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	in, err := cmd.StdinPipe()
@@ -54,7 +54,10 @@ func TestProcStartAndProcAliveReadAProcessAsTheAgentDoes(t *testing.T) {
 
 	require.NoError(t, in.Close())
 	require.NoError(t, cmd.Wait())
-	_, ok = ProcStart(pid)
-	require.False(t, ok, "a child that exited and was reaped has no start time")
+	// The kernel may give pid to a new process by now: only one with the
+	// child's own start time would be the child still found.
+	if got, ok := ProcStart(pid); ok {
+		require.NotEqual(t, start, got, "a child that exited and was reaped has no start time")
+	}
 	require.False(t, ProcAlive(pid, start), "a child that exited is not alive")
 }
