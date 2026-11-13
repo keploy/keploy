@@ -56,7 +56,12 @@ func detectCI() (bool, string) {
 			return true, p.provider
 		}
 	}
-	if os.Getenv("CI") != "" {
+	if ci := os.Getenv("CI"); ci != "" {
+		// Woodpecker sets no WOODPECKER variable: every step has
+		// CI=woodpecker, its system name, beside CI_REPO.
+		if strings.EqualFold(strings.TrimSpace(ci), "woodpecker") {
+			return true, "woodpecker"
+		}
 		return true, "unknown"
 	}
 	return false, ""
