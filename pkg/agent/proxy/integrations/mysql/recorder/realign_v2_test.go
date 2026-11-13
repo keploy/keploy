@@ -842,10 +842,10 @@ func TestRecordV2_TwoDeepPipeliningIntoTheTailOfAnAnswerLeftOut(t *testing.T) {
 	// 255, 0, and an OK at 1, then on to 3.
 	var wrapped [][]byte
 	for id := 1; id <= 258; id++ {
-		switch {
-		case id == 1:
+		switch id {
+		case 1:
 			wrapped = append(wrapped, wrapPacket(nil, 1))
-		case id == 257:
+		case 257:
 			wrapped = append(wrapped, at(ok, 1))
 		default:
 			wrapped = append(wrapped, wrapPacket([]byte("row"), byte(id)))
