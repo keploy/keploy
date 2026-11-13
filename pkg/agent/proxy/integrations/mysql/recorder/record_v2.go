@@ -1562,23 +1562,18 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// parser behind its connection, and counts what the connection carries
 	// from there as not recorded.
 	//
-	// Two rules then meet on the server's stream at that command. realignAnswer
-	// cuts it by capture time (SkipThrough), and the floor every command sets,
-	// this one included (Session.NextRequest), drops what was captured before
-	// the command, by capture number. The cut by time comes first: SkipThrough
-	// takes the stream as it was captured, before the floor, so what it
-	// discards, and when it refuses, are what they are with no floor. The
-	// floor then drops only what that cut left that was numbered before the
-	// command: nothing, when the capture's times and numbers agree, since the
-	// cut has discarded it already. So no byte leaves the stream twice, and
-	// the floor takes nothing the capture numbered after the command. Where
-	// the server's stream starts, before the recorder has read a byte of it
-	// (a first command whose response it finds it cannot frame at once), what
-	// the cut discards of what was captured before the first command is
-	// counted in the floor's run there (SkipThrough), which ends at the first
-	// byte of that command's response: an answer in flight when the capture
-	// joined the connection is reported once all the same, over its own bytes
-	// (Session.NextRequest), and the response is the exchange left out here.
+	// The server's stream is cut at that command by capture number, by the
+	// floor every command sets, this one included (Session.NextRequest): it
+	// drops what was captured before the command, the rest of the response
+	// left out (answerStartsAfter), and never by capture time, so a clock too
+	// coarse to order the command and the answers around it cuts as a fine
+	// one does. Where the server's stream starts, before the recorder has
+	// read a byte of it (a first command whose response it finds it cannot
+	// frame at once), the floor's run there holds what was captured before
+	// the first command, and ends at the first byte captured after it: an
+	// answer in flight when the capture joined the connection is reported once
+	// all the same, over its own bytes (Session.NextRequest), and the response
+	// is the exchange left out here.
 	clientRealign, serverRealign := false, false
 	// lastAnswerSeq is the capture number (fakeconn.Chunk.ConnSeq) of the
 	// chunk the last byte of the last answer read came in. pipelined: the
@@ -1610,19 +1605,32 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		realign := errors.Is(err, ErrFramingLost) && !pipelined
 		if t := taken; t != nil {
 			taken = nil
-			if sess.DestStream.Consumed() != t.consumed {
-				// The answer to the command taken up after a response left
-				// out does not frame as its answer: what the re-align took
-				// for its start is not proven to be (takenUp). No second
-				// re-align.
+			switch {
+			case t.read:
+				// The fault is a command's after it, one the server does not
+				// answer (the next it answers confirms the exchange taken up,
+				// or stops the recording): nothing confirms it now. It is
+				// left out, counted, and the mocks queued behind it, of
+				// commands without an answer, are recorded.
+				if t.emit != nil {
+					leaveOut(sess, t.reqTs, t.resTs, notRecorded("the answer taken up after a response left out is not confirmed: a command after it was left out before the server's next answer"))
+				}
+				t.flush()
+			case walk.startedOff(t.first):
+				// The first packet read where the answer to the command taken
+				// up should start is not at the sequence id that answer starts
+				// at: what the re-align took for its start is not proven to
+				// be (takenUp). No second re-align.
 				realign = false
 				err = found("V2: mysql answer taken up after a response left out does not frame", framingLost("the answer to the command taken up after a response left out is not confirmed (%v)", err))
 			}
-			// Otherwise not a byte of it was read: the fault is the
+			// Otherwise its first packet is where its answer starts, so the
+			// walk proved the cut, and the fault is that answer's own
+			// framing; or not a packet of it was read, and the fault is the
 			// command's (one whose answer the recorder cannot frame), which
-			// says nothing of where its answer starts. It is left out alone
-			// as any such, and the command after it is taken up in its
-			// place.
+			// says nothing of where its answer starts. Either way it is left
+			// out alone as any such, and the command after it is taken up in
+			// its place.
 		}
 		if !realign {
 			reportFault(logger, sess, err, false)
@@ -1646,13 +1654,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// realignAnswer puts the server's stream at the start of the answer to the
 	// command read at reqTs, after a response left out (fail): what the server
 	// sent before that command was captured is the rest of the response left
-	// out (fakeconn.FakeConn.SkipThrough). A stream that cannot be cut there
-	// stops the recording, as lost framing does.
+	// out, which the command's floor drops (answerStartsAfter). A stream that
+	// cannot be cut there stops the recording, as lost framing does.
 	realignAnswer := func(reqTs time.Time, cmdFirst uint32, respFirst byte) error {
-		n, _, err := sess.DestStream.SkipThrough(reqTs)
-		if err == nil {
-			err = answerStartsAfter(sess, cmdFirst, sess.ClientStream.LastReadConnSeq())
-		}
+		before := sess.DestStream.Consumed()
+		err := answerStartsAfter(sess, cmdFirst, sess.ClientStream.LastReadConnSeq())
 		if err == nil {
 			if why := walk.cut(respFirst); why != "" {
 				err = fmt.Errorf("the server's packets do not show the response left out ended at the cut: %s", why)
@@ -1668,7 +1674,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		}
 		serverRealign = false
 		logger.Debug("V2: skipped the rest of a mysql response left out; the recording goes on from the next command",
-			zap.String("connID", sess.ClientConnID), zap.Int64("skippedBytes", n))
+			zap.String("connID", sess.ClientConnID), zap.Int64("skippedBytes", sess.DestStream.Consumed()-before))
 		return nil
 	}
 	// The loop does not end on the context's end: at the recording's stop a
@@ -1820,7 +1826,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			if err := realignAnswer(reqTs, first.ConnSeq, respFirst); err != nil {
 				return err
 			}
-			taken = &takenUp{reqTs: reqTs, consumed: sess.DestStream.Consumed()}
+			taken = &takenUp{reqTs: reqTs, first: respFirst}
 		}
 		if len(cmdBuf) > 4 && answered(cmdBuf[4]) {
 			// The server's next bytes start its answer (the stream was cut

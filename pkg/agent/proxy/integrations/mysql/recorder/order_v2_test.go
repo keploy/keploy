@@ -61,11 +61,11 @@ func TestRecordV2_PostTLS_AnAnswerCapturedBeforeTheFirstCommandIsNotItsAnswer(t 
 // once however the recorder leaves it. Here the first command the capture has
 // is one whose response the recorder cannot frame, found before it reads a
 // byte of the server's stream (COM_FIELD_LIST): it leaves that exchange out,
-// and skips the server's stream by capture time to the next command's answer
-// (fakeconn.FakeConn.SkipThrough), which takes the answer in flight with it,
-// unread. The skip counts what of it was captured before the first command
-// in the floor's run there (the stream's start), and ends that run at the
-// first byte of the response left out, captured after that command, so the
+// and the next command's floor drops the server's stream up to that command's
+// answer, the answer in flight with it, unread. What of it was captured before
+// the first command is in the floor's run there (the stream's start), which
+// ends at the first byte of the response left out, captured after that
+// command, so the
 // answer in flight is reported as it is when the recorder reads up to it:
 // once, with its own cause, over a span of its own bytes alone. The exchange
 // left out is reported too, by the recorder. The stream joined mid-connection

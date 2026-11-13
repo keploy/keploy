@@ -14,7 +14,7 @@ import (
 // meaning it cannot parse.
 //
 // It is what proves a re-align's cut (handleCommandsV2's realignAnswer). The
-// cut is made by capture time, at the client's next command (C2) after a
+// cut is made by capture number, at the client's next command (C2) after a
 // response left out (A1). A client that pipelined C2 into A1's tail, though it
 // had not pipelined before, has A1's tail captured after C2, and the cut lands
 // in it. A tail packet at sequence id 1 (the sequence wraps every 256 packets)
@@ -37,9 +37,10 @@ type packetWalk struct {
 	hdr  [4]byte
 	rest int
 	// Since the answer the stream is at began (mark): seen is set once a
-	// header was walked, last is the sequence id of the last one.
-	seen bool
-	last byte
+	// header was walked, first is the sequence id of the first one, and last
+	// of the last one.
+	seen        bool
+	first, last byte
 	// client: the client sent packets inside that exchange
 	// (nextCommandAfterFault passes them over: a LOCAL INFILE upload, an auth
 	// switch response), the last one numbered clientLast. The exchange takes
@@ -68,6 +69,9 @@ func (w *packetWalk) feed(b []byte) {
 		}
 		w.hdrN = 0
 		w.rest = int(mysqlUtils.GetPayloadLength(w.hdr[:3]))
+		if !w.seen {
+			w.first = w.hdr[3]
+		}
 		w.seen, w.last = true, w.hdr[3]
 	}
 }
@@ -87,6 +91,14 @@ func (w *packetWalk) mark() {
 // passed says the client sent a packet inside the exchange, numbered seq.
 func (w *packetWalk) passed(seq byte) {
 	w.client, w.clientLast = true, seq
+}
+
+// startedOff reports whether the answer the stream is at (mark) started with a
+// packet whose sequence id is not first, the one it starts at: its first
+// header was walked, and is at another. One whose header has not been walked
+// yet has started with nothing.
+func (w *packetWalk) startedOff(first byte) bool {
+	return w.seen && w.first != first
 }
 
 // cut says why the server's next bytes, after a re-align's cut, cannot be

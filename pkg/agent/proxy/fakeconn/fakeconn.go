@@ -922,8 +922,9 @@ func (f *FakeConn) LastReadTime() time.Time {
 }
 
 // LastReadConnSeq returns the capture sequence (Chunk.ConnSeq) of the chunk
-// the reader was last handed bytes of (Read, ReadChunk; not Peek, nor a chunk
-// the floor dropped), or 0 if none carried one. It orders what was read
+// the reader was last handed bytes of (Read, ReadChunk, and what SkipThrough
+// discards, which it delivers; not Peek, nor a chunk the floor dropped), or 0
+// if none carried one. It orders what was read
 // against the other direction's chunks (Chunk.CapturedBefore) where their
 // capture times cannot: two chunks stamped alike, or one not stamped at all.
 func (f *FakeConn) LastReadConnSeq() uint32 { return f.lastReadSeq.Load() }

@@ -123,13 +123,16 @@ func leftOutAlone(err error) error {
 // wraps every 256 packets) that parses as one did, and the command was
 // recorded with another answer's bytes. So the answer taken up is held until:
 //   - (answerStartsAfter) it starts at the server's first chunk captured after
-//     the command, every server byte read or skipped before it was captured
-//     before the command, its first packet's sequence id is the one the
-//     command's answer starts at, and it parses whole as an answer to that
-//     command; a fault once a byte of it is read stops the recording
-//     (fail), it is never left out alone to re-align again (a command whose
-//     answer the recorder cannot frame, found before it reads a byte of it,
-//     is left out alone, and the next one is taken up in its place); and
+//     the command, every server byte read before it was captured before the
+//     command, and (packetWalk.cut) the server's packets show the response
+//     left out ended there; its first packet's sequence id is the one the
+//     command's answer starts at, or the recording stops (fail): that packet
+//     is not the start of an answer, so the cut is not proven. Once it is,
+//     the walk has proved the cut, and the answer is the command's: a later
+//     fault in it is that answer's own framing, and the exchange is left out
+//     alone, as any such, and the recording goes on from the next command,
+//     re-aligned as this one was (a command whose answer the recorder cannot
+//     frame, found before it reads a byte of it, is too); and
 //   - (confirm) the server's next bytes after it were captured after the
 //     client's next command that the server answers, sent itself after the
 //     answer's last byte (not pipelined). The rest of an answer the re-align
@@ -143,9 +146,8 @@ func leftOutAlone(err error) error {
 // apart from what it answered.
 type takenUp struct {
 	reqTs, resTs time.Time
-	// consumed is how many server bytes the recorder had consumed when the
-	// re-align's cut put the stream at its answer.
-	consumed int64
+	// first is the sequence id its answer starts at.
+	first byte
 	// read: its answer has been read whole.
 	read bool
 	// emit records its mock; nil when it records none (left out, or a PREPARE
@@ -176,16 +178,20 @@ func (t *takenUp) flush() {
 	t.queued = nil
 }
 
-// answerStartsAfter checks where the server's stream stands after the cut of a
-// re-align (realignAnswer) for the answer to the command taken up, which began
-// in the client's chunk numbered cmdFirst and ended in cmdLast: every server
-// byte read or skipped so far was captured before the command, and the next
-// one starts a chunk captured after it (takenUp). The next chunk is waited for
-// as reading the answer would. A fault there is
-// lost framing; the end of the stream is returned as it is.
+// answerStartsAfter makes the cut of a re-align (realignAnswer) for the answer
+// to the command taken up, which began in the client's chunk numbered cmdFirst
+// and ended in cmdLast, and checks where it leaves the server's stream: every
+// server byte read so far was captured before the command, and the next one
+// starts a chunk captured after it (takenUp). The cut is the floor's, by
+// capture number: the command's floor (Session.NextRequest) drops what is
+// left of the server's stream that was captured before the command (the rest
+// of the response left out) as the next chunk is waited for, as reading the
+// answer would wait for it. Capture times play no part: a clock too coarse to
+// tell the command from the answers around it cuts as a fine one does. A fault
+// there is lost framing; the end of the stream is returned as it is.
 func answerStartsAfter(sess *supervisor.Session, cmdFirst, cmdLast uint32) error {
 	if last := sess.DestStream.LastReadConnSeq(); last != 0 && !(fakeconn.Chunk{ConnSeq: last}).CapturedBefore(cmdFirst) {
-		return framingLost("the server's bytes read or skipped before the answer to the command taken up after a response left out were not all captured before that command")
+		return framingLost("the server's bytes read before the answer to the command taken up after a response left out were not all captured before that command")
 	}
 	next, err := sess.DestStream.Peek()
 	if err != nil {
