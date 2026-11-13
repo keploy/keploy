@@ -288,8 +288,13 @@ func TestOpenWindowHoldIsBoundedByGivingUpTheOldestWindow(t *testing.T) {
 	if lostTold != 1 {
 		t.Fatalf("the given-up window's lost was told %d times, want once", lostTold)
 	}
-	if told != 0 {
-		t.Fatalf("told %d mocks to OnDrop: a given-up window costs its own test case, not a mock loss for others", told)
+	// What it let go of was held at the stale cutoff: a request with no window
+	// (gRPC, the proxyless capture) whose window holds one of them may have
+	// owned it, so each is told, as the cutoff's own drops are (cutDropped).
+	// A request whose window holds none of them is not left out for them: the
+	// younger one is sent (below).
+	if told != maxHeldMocks+5 {
+		t.Fatalf("told %d mocks to OnDrop, want the %d the given-up window let go of", told, maxHeldMocks+5)
 	}
 	mgr.mu.Lock()
 	held := len(mgr.held)
@@ -300,10 +305,14 @@ func TestOpenWindowHoldIsBoundedByGivingUpTheOldestWindow(t *testing.T) {
 	if !young.Keep() {
 		t.Fatalf("a younger window was given up too")
 	}
-	mgr.ResolveRange(youngStart, time.Now(), "test-young", true, true)
+	youngEnd := time.Now()
+	mgr.ResolveRange(youngStart, youngEnd, "test-young", true, true)
 	young.Close()
 	if got := sentMocks(out); !hasMock(got, own) || len(got) != 1 {
 		t.Fatalf("the younger request's own mock must be recorded, and only it: sent %d", len(got))
+	}
+	if !mgr.SendingTestCase("test-young", youngStart, youngEnd) {
+		t.Fatal("the younger request was left out for mocks its window does not hold")
 	}
 	// The given-up request ends as not kept: its window's mocks are pruned,
 	// and what it held is cleaned up.
@@ -2363,8 +2372,9 @@ func TestStartupMockSentForAClaimAndDroppedIsToldToTheTestThatTakesIt(t *testing
 
 // The notes are bounded (maxSentClaimed): at the bound the oldest eighth is
 // forgotten at once, not one at every note, which copied the whole list under
-// the manager's lock at each, and it is said: a test case may be saved without
-// a mock it took in its mapping.
+// the manager's lock at each, and it is said, once the lock is let go (no line
+// is written under it): a test case may be saved without a mock it took in its
+// mapping.
 func TestStartupMockNotesAreBounded(t *testing.T) {
 	t.Parallel()
 	mgr := lateMockTestManager(make(chan *models.Mock, 1), make(chan models.TestMockMapping, 1), true)
@@ -2374,7 +2384,6 @@ func TestStartupMockNotesAreBounded(t *testing.T) {
 	w := mgr.OpenWindow(start, nil)
 	defer w.Close()
 	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
 	for i := 0; i <= maxSentClaimed; i++ {
 		mk := httpMockAt(start.Add(time.Duration(i) * time.Microsecond))
 		mk.Name = fmt.Sprintf("mock-%d", i)
@@ -2389,8 +2398,18 @@ func TestStartupMockNotesAreBounded(t *testing.T) {
 	if n := mgr.sentClaimedEvicted.Load(); n != maxSentClaimed/8 {
 		t.Fatalf("%d notes counted as forgotten, want %d", n, maxSentClaimed/8)
 	}
+	if n := logs.FilterMessageSnippet("past the bound kept for them").Len(); n != 0 {
+		t.Fatalf("%d WARN lines for the notes forgotten written under the manager's lock, want none", n)
+	}
+	mgr.mu.Unlock()
+	mgr.settlePool()
+	lines := logs.FilterMessageSnippet("past the bound kept for them").AllUntimed()
+	if len(lines) != 1 || lines[0].ContextMap()["forgotten"] != int64(maxSentClaimed/8) {
+		t.Fatalf("the notes forgotten are not said once, with how many, after the lock: %+v", lines)
+	}
+	mgr.settlePool()
 	if n := logs.FilterMessageSnippet("past the bound kept for them").Len(); n != 1 {
-		t.Fatalf("%d WARN lines for the notes forgotten, want 1", n)
+		t.Fatalf("%d WARN lines after a second settle with nothing forgotten since, want 1", n)
 	}
 }
 

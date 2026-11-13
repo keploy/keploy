@@ -478,3 +478,200 @@ func TestAStaleCutoffOverALargeBufferWritesNoLineUnderMu(t *testing.T) {
 	}
 	t.Logf("a pass dropping %d mocks at the cutoff took %v under a Debug logger", n, took)
 }
+
+// heldThenLetGo is the field the cutoff's summary carries for mocks held for
+// a request in flight and let go when its window ended without them.
+const heldThenLetGo = "held_then_let_go"
+
+// TestAHeldStaleMockLetGoWhenItsWindowClosesLeavesOutTheWindowlessRequest is
+// the gRPC shape beside an HTTP one: request A opens no window (its ingress
+// opens none), while an HTTP request W, which did, is in flight from before
+// A's call. The cutoff holds A's call for W. W then ends without taking it
+// (closed with no verdict: aborted, or filtered), and the hold lets go of it.
+// A, decided after, must be left out with the drop told to OnDrop at once and
+// said as the cutoff's: never sent without its mock. The orphan let go beside
+// it leaves out no test case whose window does not hold its request.
+func TestAHeldStaleMockLetGoWhenItsWindowClosesLeavesOutTheWindowlessRequest(t *testing.T) {
+	mgr, ch, told := staleCutoffFixture(t)
+	logs := cutLogs(mgr)
+	now := time.Now()
+	reqA := now.Add(-10 * time.Second)
+	w := mgr.OpenWindow(reqA.Add(-time.Millisecond), nil)
+	mock := staleAt(reqA.Add(time.Millisecond), time.Millisecond)
+	orphan := staleAt(reqA.Add(2*time.Second), time.Millisecond)
+	mgr.AddMock(mock)
+	mgr.AddMock(orphan)
+
+	mgr.ResolveRange(now.Add(-5*time.Millisecond), now, "test-B", true, false)
+	if got := told(); len(got) != 0 {
+		t.Fatalf("OnDrop told %d mocks the hold keeps for an open window, want none", len(got))
+	}
+	w.Close()
+	// At once, as the window closes: not at the manager's next reaper call.
+	if got := told(); len(got) != 2 {
+		t.Fatalf("OnDrop told %d mocks as the hold let go of them, want both", len(got))
+	}
+	if got := mgr.cutDrops.Load(); got != 2 {
+		t.Fatalf("stale cutoff drops counted %d, want 2", got)
+	}
+	sum := cutLines(logs, cutSummary)
+	if len(sum) != 1 || sum[0].ContextMap()["dropped"] != int64(2) || sum[0].ContextMap()[heldThenLetGo] == nil || sum[0].ContextMap()["recording_open"] != true {
+		t.Fatalf("the hold's let-go is not said once, as held then let go, for both: %+v", sum)
+	}
+
+	endA := time.Now()
+	mgr.ResolveRange(reqA, endA, "test-A", true, false)
+	for _, m := range drained(ch) {
+		if m == mock {
+			t.Fatal("A's mock was handed on after the hold let go of it")
+		}
+	}
+	if mgr.SendingTestCase("test-A", reqA, endA) {
+		t.Fatal("A's test case was sent without its mock: the hold let go of a mock held at the cutoff and nothing left A out")
+	}
+	if !mgr.SendingTestCase("test-D", reqA.Add(time.Second), reqA.Add(1500*time.Millisecond)) {
+		t.Fatal("D, whose window holds neither let-go mock's request, was left out")
+	}
+}
+
+// TestAHeldStaleMockLetGoAsAKeptWindowEndsLeavesOutTheWindowlessRequest: the
+// window the hold kept the call for is decided, kept, over a span that does
+// not hold the call, so it ends without it (a reaper's own call: the resolve
+// lets go of what no open window may own). The drop is told by the end of
+// that resolve, and A, decided after, is left out.
+func TestAHeldStaleMockLetGoAsAKeptWindowEndsLeavesOutTheWindowlessRequest(t *testing.T) {
+	mgr, _, told := staleCutoffFixture(t)
+	now := time.Now()
+	reqA := now.Add(-10 * time.Second)
+	w := mgr.OpenWindow(reqA.Add(-time.Millisecond), nil)
+	mock := staleAt(reqA.Add(time.Millisecond), time.Millisecond)
+	mgr.AddMock(mock)
+	mgr.ResolveRange(now.Add(-5*time.Millisecond), now, "test-B", true, false)
+	if !w.Keep() {
+		t.Fatal("W's window was given up")
+	}
+	mgr.ResolveKept(w, w.Start(), reqA, "test-W", false)
+	if got := told(); len(got) != 1 || got[0] != mock {
+		t.Fatalf("OnDrop told %d mocks by the end of the resolve that let go of A's call, want it once", len(got))
+	}
+	w.Close()
+	endA := time.Now()
+	mgr.ResolveRange(reqA, endA, "test-A", true, false)
+	if mgr.SendingTestCase("test-A", reqA, endA) {
+		t.Fatal("A's test case was sent without its mock")
+	}
+}
+
+// TestAHeldStaleMockLetGoUnderMemoryPressureLeavesOutTheWindowlessRequest:
+// memory pressure lets go of the hold and gives up the open windows that may
+// own it, but a request with no window is not among them, and its response
+// may have ended before the pressure span opened, which then does not cover
+// it. Its test case is left out for the call the hold let go of, told at once.
+func TestAHeldStaleMockLetGoUnderMemoryPressureLeavesOutTheWindowlessRequest(t *testing.T) {
+	mgr, _, told := staleCutoffFixture(t)
+	now := time.Now()
+	reqA := now.Add(-10 * time.Second)
+	w := mgr.OpenWindow(reqA.Add(-time.Millisecond), nil)
+	defer w.Close()
+	mock := staleAt(reqA.Add(time.Millisecond), time.Millisecond)
+	mgr.AddMock(mock)
+	mgr.ResolveRange(now.Add(-5*time.Millisecond), now, "test-B", true, false)
+	endA := time.Now() // A's response ends before the pressure span opens
+	time.Sleep(time.Millisecond)
+	mgr.SetMemoryPressure(true)
+	if got := told(); len(got) != 1 || got[0] != mock {
+		t.Fatalf("OnDrop told %d mocks as pressure let go of the hold, want A's call once", len(got))
+	}
+	mgr.SetMemoryPressure(false)
+	if w.Keep() {
+		t.Fatal("pressure did not give W's window up")
+	}
+	mgr.ResolveRange(reqA, endA, "test-A", true, false)
+	if mgr.SendingTestCase("test-A", reqA, endA) {
+		t.Fatal("A's test case was sent without the call pressure let go of")
+	}
+}
+
+// TestAHeldDuplicatesLeftoverLetGoLeavesOutNone: a duplicate's leftover held
+// for an open window is the duplicate's (its own window holds it): let go, it
+// is not the cutoff's, and leaves out no test case, nor is it told.
+func TestAHeldDuplicatesLeftoverLetGoLeavesOutNone(t *testing.T) {
+	mgr, _, told := staleCutoffFixture(t)
+	now := time.Now()
+	reqA := now.Add(-10 * time.Second)
+	w := mgr.OpenWindow(reqA.Add(-time.Millisecond), nil)
+	mock := staleAt(reqA.Add(time.Millisecond), time.Millisecond)
+	mgr.AddMock(mock)
+	mgr.ResolveRange(reqA, reqA.Add(2*time.Millisecond), "test-0", false, false)
+	w.Close()
+	if got := told(); len(got) != 0 {
+		t.Fatalf("OnDrop told %d of a duplicate's leftover let go, want none", len(got))
+	}
+	if got := mgr.cutDrops.Load(); got != 0 {
+		t.Fatalf("stale cutoff drops counted %d for a duplicate's leftover, want 0", got)
+	}
+	if !mgr.SendingTestCase("test-A", reqA, time.Now()) {
+		t.Fatal("a test case whose window holds a duplicate's leftover was left out")
+	}
+}
+
+// TestAHeldStaleMockLetGoInAnEndedRecordingLeavesOutNoneOfTheNext: what the
+// hold let go of in a recording whose output was set again before it was
+// said leaves out none of the next recording's test cases, and is said with
+// no recording open; it is still told.
+func TestAHeldStaleMockLetGoInAnEndedRecordingLeavesOutNoneOfTheNext(t *testing.T) {
+	mgr, _, told := staleCutoffFixture(t)
+	logs := cutLogs(mgr)
+	at := time.Now().Add(-10 * time.Second)
+	mock := staleAt(at, time.Millisecond)
+	mgr.mu.Lock()
+	mgr.heldCut = append(mgr.heldCut, cutHeld{mock: mock, epoch: mgr.revokeEpoch.Load()})
+	mgr.letGo.Store(true)
+	mgr.mu.Unlock()
+	mgr.SetOutputChannel(make(chan *models.Mock, 4))
+	mgr.settleLetGo()
+	if got := told(); len(got) != 1 {
+		t.Fatalf("OnDrop told %d, want the let-go mock once", len(got))
+	}
+	if !mgr.SendingTestCase("test-A", at.Add(-time.Millisecond), at.Add(time.Millisecond)) {
+		t.Fatal("a test case of the next recording was left out for the last one's let-go mock")
+	}
+	sum := cutLines(logs, cutSummary)
+	if len(sum) != 1 || sum[0].ContextMap()["recording_open"] != false {
+		t.Fatalf("an older recording's let-go is not said once with no recording open: %+v", sum)
+	}
+	mgr.settleLetGo()
+	if got := len(cutLines(logs, cutSummary)); got != 1 {
+		t.Fatalf("%d lines after a second settle with nothing let go, want 1", got)
+	}
+}
+
+// TestAHeldStaleMockLetGoInTwoRecordingsIsSaidOncePerRecording: let-go mocks
+// of two recordings, waiting together, are said in one line each, each with
+// its own recording.
+func TestAHeldStaleMockLetGoInTwoRecordingsIsSaidOncePerRecording(t *testing.T) {
+	mgr, _, told := staleCutoffFixture(t)
+	logs := cutLogs(mgr)
+	at := time.Now().Add(-10 * time.Second)
+	mgr.mu.Lock()
+	old := mgr.revokeEpoch.Load()
+	mgr.heldCut = append(mgr.heldCut, cutHeld{mock: staleAt(at, 0), epoch: old}, cutHeld{mock: staleAt(at, 0), epoch: old})
+	mgr.mu.Unlock()
+	mgr.SetOutputChannel(make(chan *models.Mock, 4))
+	mgr.mu.Lock()
+	mgr.heldCut = append(mgr.heldCut, cutHeld{mock: staleAt(at.Add(time.Second), 0), epoch: mgr.revokeEpoch.Load()})
+	mgr.letGo.Store(true)
+	mgr.mu.Unlock()
+	mgr.settleLetGo()
+	if got := told(); len(got) != 3 {
+		t.Fatalf("OnDrop told %d, want 3", len(got))
+	}
+	sum := cutLines(logs, cutSummary)
+	if len(sum) != 2 || sum[0].ContextMap()["dropped"] != int64(2) || sum[0].ContextMap()["recording_open"] != false ||
+		sum[1].ContextMap()["dropped"] != int64(1) || sum[1].ContextMap()["recording_open"] != true {
+		t.Fatalf("let-go mocks of two recordings are not said once per recording: %+v", sum)
+	}
+	if mgr.SendingTestCase("test-A", at.Add(time.Second-time.Millisecond), at.Add(time.Second+time.Millisecond)) {
+		t.Fatal("the current recording's test case holding its let-go mock was sent")
+	}
+}

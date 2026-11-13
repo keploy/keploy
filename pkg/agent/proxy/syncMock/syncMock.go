@@ -271,6 +271,10 @@ type SyncMockManager struct {
 	// sentClaimedEvicted counts the notes forgotten at the bound
 	// (evictSentClaimedLocked).
 	sentClaimedEvicted atomic.Uint64
+	// evicted is what evictSentClaimedLocked forgot that settleLetGo has not
+	// said yet: it counts under mu, and the line is written once mu is let
+	// go. Guarded by mu.
+	evicted evictedNotes
 
 	// open is the windows of requests read but not decided yet (OpenWindow),
 	// a min-heap on start: the earliest, the one every reaper asks for, is
@@ -346,6 +350,17 @@ type SyncMockManager struct {
 	// the holds of the process's other managers (fitHoldLocked, settlePool),
 	// and memory pressure empties it (giveUpForPressureLocked). Guarded by mu.
 	held []heldMock
+	// heldCut is the mocks held at the stale cutoff (droppedOutsideAnyWindow)
+	// that the hold let go of with no window taking them (dropHeldLocked),
+	// each with the recording it was let go in: a request in flight with no
+	// window open for it (gRPC, the proxyless capture) may still be decided
+	// with one inside its window. settleLetGo leaves out its test cases as the
+	// cutoff's own drops do (cutDropped), once mu is let go; letGo says some
+	// wait. Guarded by mu.
+	heldCut []cutHeld
+	// letGo is set, under mu, while heldCut or evicted holds something for
+	// settleLetGo: one atomic load where nothing does.
+	letGo atomic.Bool
 	// heldBytes is the size of all of held, kept as held changes (holdLocked,
 	// unholdLocked), so no fit sums the hold. Guarded by mu.
 	heldBytes int64
@@ -2402,8 +2417,11 @@ func (r *cutReport) name(n string) {
 // for them all: at WARN when they revoked test cases the stream sent, named,
 // else at Debug, as a test case still to be decided that one leaves out is
 // named at its verdict (sayCutLeftOut). A mock any test may need, or a
-// start-up mock re-read as one, is said as leaveOutAfter's are.
-func (m *SyncMockManager) cutDropped(cut []*models.Mock, epoch uint64, bound bool, resolving string) {
+// start-up mock re-read as one, is said as leaveOutAfter's are. held says the
+// mocks were held for the requests in flight and let go when the windows that
+// may have owned them ended without taking them (settleLetGo): the line says
+// so.
+func (m *SyncMockManager) cutDropped(cut []*models.Mock, epoch uint64, bound bool, resolving string, held bool) {
 	if len(cut) == 0 {
 		return
 	}
@@ -2447,6 +2465,9 @@ func (m *SyncMockManager) cutDropped(cut []*models.Mock, epoch uint64, bound boo
 		zap.Int("revoked_sent", r.revoked),
 		zap.Strings("revoked_sent_names", r.names),
 		zap.Bool("client_deletes_revoked", m.revokeCapable.Load()),
+	}
+	if held {
+		fields = append(fields, zap.String("held_then_let_go", "held past the cutoff for the requests in flight whose window opened before them, and let go when those windows ended without taking them"))
 	}
 	if !r.unnamedThrough.IsZero() {
 		fields = append(fields, zap.String("unnamed_sent_through", r.unnamedThrough.Format(time.RFC3339Nano)),
@@ -2545,8 +2566,10 @@ func lostFields(mock *models.Mock, why string) []zap.Field {
 
 // OnDrop has fn told of every mock dropped on its way to outChan: on the
 // capacity path (the channel closed or never set, the queue's byte bound
-// reached, or its consumer stalled: send), and by AddMock once the channel is
-// closed (CloseOutChan). The test cases that used such a
+// reached, or its consumer stalled: send), by AddMock once the channel is
+// closed (CloseOutChan), and of a per-test mock the stale cutoff drops, at
+// once or held for the requests in flight and let go when their windows end
+// without it (cutDropped, settleLetGo). The test cases that used such a
 // mock lack it: a capture whose test cases are not named (proxyless, a
 // DaemonSet) cannot find them by owner, as WasMockDroppedForTC does, and
 // leaves out those that ran while the mock was requested instead. A dropped
@@ -4055,6 +4078,7 @@ func (w *Window) Close() {
 		m.publishHoldLocked()
 		hold := m.holdStateLocked()
 		m.mu.Unlock()
+		m.settleLetGo()
 		if t.dropped() > 0 {
 			if ce := m.dropLogger().Check(zap.DebugLevel, "diag/syncMock: window ended: dropped the held mocks no request in flight may own"); ce != nil {
 				ce.Write(append(t.fields(), hold.fields()...)...)
@@ -4177,13 +4201,22 @@ func (m *SyncMockManager) oweUnclaimedLocked(from time.Time) {
 // window owns one: one resolved over it took it (ResolveKept, ResolveRange).
 // The rest is dropped and counted in t (if not nil): as the cleanup each was
 // held instead of, or, when a window was given up (givenUp), as let go with
-// it, the loss a kept verdict on it would reveal. Returns the mocks dropped.
-// Caller holds mu.
+// it, the loss a kept verdict on it would reveal. One held at the stale
+// cutoff is the cutoff's drop, made late: a request in flight with no window
+// open for it may still be decided with it inside its window, so it goes to
+// heldCut, for settleLetGo to leave that request's test case out once mu is
+// let go (cutDropped). A duplicate's leftover does not: its own window says
+// it is that duplicate's. Returns the mocks dropped. Caller holds mu.
 func (m *SyncMockManager) dropHeldLocked(n int, t *dropTally, givenUp bool) (dropped []*models.Mock) {
+	epoch := m.revokeEpoch.Load()
 	for _, h := range m.held[:n] {
 		if h.owner != nil {
 			m.owed = append(m.owed, owedMock{mock: h.mock, to: h.owner})
 			continue
+		}
+		if h.why == droppedOutsideAnyWindow {
+			m.heldCut = append(m.heldCut, cutHeld{mock: h.mock, epoch: epoch})
+			m.letGo.Store(true)
 		}
 		dropped = append(dropped, h.mock)
 		switch {
@@ -5252,6 +5285,11 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 		}
 	}
 	m.mu.Unlock() // NEVER hold mu while logging — logging inside a lock causes a deadlock under I/O pressure (see BUG 5: 70-minute CI hang)
+	// A held mock it let go of that was held at the stale cutoff leaves out
+	// the test case of a request in flight with no window whose window holds
+	// it, as the cutoff's own drops do: giving up the open windows does not
+	// reach that request.
+	m.settleLetGo()
 	// Dropped, so no longer added (SessionDrops).
 	m.totalAdded.Add(-int64(len(wiped) + len(heldGone)))
 	for _, mk := range wiped {
@@ -5392,26 +5430,87 @@ func (m *SyncMockManager) noteSentClaimedLocked(mk *models.Mock, self *Window, o
 }
 
 // evictSentClaimedLocked forgets the oldest eighth of the notes at the bound
-// (maxSentClaimed), and says so: those a request took, or that were to go
-// back to a window, are no longer followed, so a drop of one is told to no
-// test, and one going back to a window is in no mapping. Caller holds m.mu.
+// (maxSentClaimed), and counts them for settleLetGo to say once mu is let go
+// (sayEvicted): those a request took, or that were to go back to a window,
+// are no longer followed, so a drop of one is told to no test, and one going
+// back to a window is in no mapping. Caller holds m.mu.
 func (m *SyncMockManager) evictSentClaimedLocked() {
 	evict := m.sentClaimed[:maxSentClaimed/8]
-	followed := 0
 	for _, c := range evict {
 		if c.takenBy != "" || c.owner != nil {
-			followed++
+			m.evicted.followed++
 		}
 	}
 	n := copy(m.sentClaimed, m.sentClaimed[maxSentClaimed/8:])
 	clear(m.sentClaimed[n:])
 	m.sentClaimed = m.sentClaimed[:n]
-	total := m.sentClaimedEvicted.Add(uint64(len(evict)))
-	if logger := m.dropLogger(); logger != nil {
-		logger.Warn("startup mocks sent while requests that may take them were in flight are past the bound kept for them; the oldest are forgotten, and a test case that takes one of them may be saved without it in its mapping",
-			zap.Int("forgotten", len(evict)), zap.Int("forgottenFollowed", followed), zap.Uint64("forgottenSoFar", total),
-			zap.Int("bound", maxSentClaimed),
-			zap.String("next_step", "a request in flight since the recording's start (a long stream) keeps every startup mock after it claimable; end it, or record past the startup window, and re-record the test cases this run saved"))
+	m.sentClaimedEvicted.Add(uint64(len(evict)))
+	m.evicted.forgotten += len(evict)
+	m.letGo.Store(true)
+}
+
+// evictedNotes is what evictSentClaimedLocked forgot since it was last said.
+type evictedNotes struct{ forgotten, followed int }
+
+// sayEvicted says e, the notes forgotten at the bound, at WARN. Never called
+// under mu.
+func (m *SyncMockManager) sayEvicted(e evictedNotes) {
+	if e.forgotten == 0 {
+		return
+	}
+	ce := m.dropLogger().Check(zapcore.WarnLevel, "startup mocks sent while requests that may take them were in flight are past the bound kept for them; the oldest are forgotten, and a test case that takes one of them may be saved without it in its mapping")
+	if ce == nil {
+		return
+	}
+	ce.Write(zap.Int("forgotten", e.forgotten), zap.Int("forgottenFollowed", e.followed),
+		zap.Uint64("forgottenSoFar", m.sentClaimedEvicted.Load()),
+		zap.Int("bound", maxSentClaimed),
+		zap.String("next_step", "a request in flight since the recording's start (a long stream) keeps every startup mock after it claimable; end it, or record past the startup window, and re-record the test cases this run saved"))
+}
+
+// cutHeld is a mock the hold let go of that it held at the stale cutoff
+// (heldCut), with the revokeEpoch it was let go in.
+type cutHeld struct {
+	mock  *models.Mock
+	epoch uint64
+}
+
+// settleLetGo does, once mu is let go, what a call under it left for after:
+// it leaves out the test cases whose window holds a mock the hold let go of
+// that it held at the stale cutoff (heldCut), as the cutoff's own drops do
+// (cutDropped), and says the startup notes forgotten at their bound
+// (evictSentClaimedLocked). Under mu neither a line nor the hook is written:
+// each would hold up every AddMock and resolve of the manager. Every reaper
+// that may let go of the hold or forget notes calls it after its Unlock
+// (settlePool, Window.Close, SetMemoryPressure, the pool's give-up report).
+// One atomic load when nothing waits. Caller does not hold mu.
+func (m *SyncMockManager) settleLetGo() {
+	if !m.letGo.Load() {
+		return
+	}
+	m.mu.Lock()
+	held, evicted := m.heldCut, m.evicted
+	m.heldCut, m.evicted = nil, evictedNotes{}
+	m.letGo.Store(false)
+	m.mu.Unlock()
+	m.sayEvicted(evicted)
+	if len(held) == 0 {
+		return
+	}
+	bound, _ := m.outChanStatus()
+	// In runs of one recording: a later one's leaves out none of an
+	// earlier's test cases (leaveOutSpan checks the epoch).
+	for len(held) > 0 {
+		epoch, n := held[0].epoch, 1
+		for n < len(held) && held[n].epoch == epoch {
+			n++
+		}
+		cut := make([]*models.Mock, n)
+		for i := range cut {
+			cut[i] = held[i].mock
+		}
+		m.cutDropped(cut, epoch, bound && epoch == m.revokeEpoch.Load(), "", true)
+		held = held[n:]
 	}
 }
 
@@ -6062,7 +6161,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	paidLate := m.oweLateMappingsLocked(mappingChan != nil, lateMappings, mocksToSend)
 
 	m.mu.Unlock()
-	m.cutDropped(cut, cutEpoch, outChanBound, testName)
+	m.cutDropped(cut, cutEpoch, outChanBound, testName, false)
 	m.reportGivenUp(gaveUp, LostToHoldBound)
 	m.settlePool()
 
