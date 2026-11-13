@@ -80,6 +80,10 @@ testdata
 !pkg/platform/coverage/javascript/testdata/**
 !pkg/platform/coverage/java/testdata/
 !pkg/platform/coverage/java/testdata/**
+# A test set as keploy record writes it, one YAML and one JSON test case,
+# for `keploy export`'s Postman collection.
+!pkg/service/export/testdata/
+!pkg/service/export/testdata/**
 # Mocks as the recorder writes them (a production-shape recording's): the
 # in-place YAML encoder must write them byte for byte as EncodeMock did.
 !pkg/platform/yaml/mockdb/testdata/
