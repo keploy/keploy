@@ -159,6 +159,9 @@ func TestADriftedWordsFormsAreItsRecordedValuesWholeThenByItsParts(t *testing.T)
 	d.Add("z", "Z1")
 	d.Add("z", "Z2")
 	d.Add("v", "w")
+	d.Add("12:00:01", "09:30:00") // a whole value holding ':', no part of it drifted
+	d.Add("m:n", "M0:N0")
+	d.Add("n", "N1")
 	for _, c := range []struct {
 		w    string
 		d    Drifts
@@ -166,6 +169,8 @@ func TestADriftedWordsFormsAreItsRecordedValuesWholeThenByItsParts(t *testing.T)
 	}{
 		{w: "v", d: d, want: []string{"w"}},
 		{w: "a:b", d: d, want: []string{"a:c"}},
+		{w: "12:00:01", d: d, want: []string{"09:30:00"}},
+		{w: "m:n", d: d, want: []string{"M0:N0", "m:N1"}},
 		{w: "x:y:z", d: d, want: []string{"x:y:Z1", "x:y:Z2", "X:y:z", "X:y:Z1", "X:y:Z2"}},
 		{w: "q:y", d: d, want: nil},
 		{w: "v", d: nil, want: nil},
@@ -390,4 +395,37 @@ func mustAtoi(t *testing.T, s string) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// TestACallerWithNoDriftSourcePairsByWordsAndOrderAlone: PairCase's drift
+// source is optional (nil where a caller knows of no drift, as the replay
+// with no bound variables and every pairing row before drifts): it pairs by
+// the words and the recording order alone, and never calls the absent
+// source. A pairing that cannot proceed is a refusal of the row, not a
+// crash of the learn step.
+func TestACallerWithNoDriftSourcePairsByWordsAndOrderAlone(t *testing.T) {
+	req := func(body string) *models.HTTPReq {
+		return &models.HTTPReq{Method: "POST", URL: "http://api/apps", Body: body, Header: map[string]string{"Content-Type": "application/json"}}
+	}
+	cases := []ClientCase{{Name: "post-apps-1", Req: req(`{"kind":"alpha","name":"n-111"}`)}, {Name: "post-apps-2", Req: req(`{"kind":"beta","name":"n-222"}`)}}
+	for _, c := range []struct {
+		live string
+		used []bool
+		want int
+	}{
+		{live: `{"kind":"beta","name":"n-999"}`, want: 1},
+		{live: `{"kind":"gamma","name":"n-999"}`, want: 0},
+		{live: `{"kind":"gamma","name":"n-999"}`, used: []bool{true, false}, want: 1},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("live %s with no drift source: PairCase panicked: %v", c.live, r)
+				}
+			}()
+			if got, ok := PairCase(cases, c.used, req(c.live), true, nil); got != c.want || !ok {
+				t.Errorf("live %s with no drift source paired %d (%v); want %d", c.live, got, ok, c.want)
+			}
+		}()
+	}
 }
