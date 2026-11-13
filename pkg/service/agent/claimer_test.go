@@ -4,6 +4,7 @@ package agent
 
 import (
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"syscall"
@@ -26,14 +27,19 @@ func init() {
 
 // ProcStart and ProcAlive are the agent's own reads of a process's start
 // time and liveness: a live process is alive as the one that started then
-// and not with another start time, and once it has exited and been reaped
-// neither read finds it.
+// and not with another start time, once it has exited and been reaped
+// neither read finds it, and a pid no process can have has no start time.
 func TestProcStartAndProcAliveReadAProcessAsTheAgentDoes(t *testing.T) {
 	me, ok := ProcStart(os.Getpid())
 	require.True(t, ok, "this process has a start time")
 	require.NotZero(t, me)
 	require.True(t, ProcAlive(os.Getpid(), me))
 	require.False(t, ProcAlive(os.Getpid(), me+1), "another start time is another process on the pid")
+
+	// No process can have a pid above the kernel's limit (2^22 on Linux,
+	// 99999 on macOS): ProcStart finds none there, whatever runs now.
+	_, ok = ProcStart(math.MaxInt32)
+	require.False(t, ok, "a pid no process can have has no start time")
 
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), holdStdinEnv+"=1")
