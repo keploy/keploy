@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
@@ -240,40 +241,49 @@ func oversizedNotRecorded(command, what string) error {
 // framingWarnEvery is how often each of these warnings may be logged.
 const framingWarnEvery = 10 * time.Second
 
-// framingWarns lets each of the recorder's own warnings (warnLimited) through
-// once per framingWarnEvery, keyed by its message, so one held back is counted
-// under its own message, never under another cause's. Each retires a
-// connection's recording or leaves an exchange out, so none of them may be
-// silent: each one held back is logged at DEBUG, and the next one let through
-// says how many it stands for. A node recording hundreds of connections
-// through one fault must not log hundreds of WARN lines either. The errors
-// that retire a connection wrap supervisor.ErrReported, so the dispatcher does
-// not warn of each retirement again. The exchanges the recorder leaves out are
-// counted and reported as every mock left out is, apart from these
-// (leaveOut, leaveOutInFlight).
+// framingWarns lets each of the recorder's warnings of an exchange left out
+// (warnLimited) through once per framingWarnEvery, keyed by its message, so
+// one held back is counted under its own message, never under another
+// cause's. None of them may be silent: each one held back is logged at DEBUG,
+// and the next one let through says how many it stands for. A node recording
+// hundreds of exchanges through one fault must not log hundreds of WARN lines.
+// A connection whose recording stops is not limited (warnFramingLost). The
+// exchanges the recorder leaves out are counted and reported as every mock
+// left out is, apart from these (leaveOut, leaveOutInFlight).
 var framingWarns = supervisor.NewWarnLimiters(framingWarnEvery)
 
-// warnFramingLost logs that a connection's recording stopped at err, at most
-// once per framingWarnEvery for msg, at WARN: what the connection carries from
-// here is not recorded, and an operator has to be able to find out why.
+// connectionsStopped counts the connections whose recording the recorder
+// stopped while the recording ran (warnFramingLost), in this process.
+var connectionsStopped atomic.Uint64
+
+// warnFramingLost logs that a connection's recording stopped at err, at WARN,
+// once for each connection, with how many connections' recordings the
+// recorder has stopped so far: what the connection carries from here is not
+// recorded, and an operator has to be able to find out why, and on how many
+// connections. A limit per message held all but one of them back: a recording
+// whose pooled connections stopped one after another, dozens of them, said so
+// once every framingWarnEvery, and read as one connection lost. The errors
+// that stop a connection wrap supervisor.ErrReported, so the dispatcher does
+// not warn of each again.
 //
 // It is called where the recorder decides that the connection's recording
-// stops, and only there, so it stamps the stop (Session.StoppedAt) first,
-// before it logs: the span of what the connection carries from here opens
-// there (Session.OnStop), and the exchange the recording stops in is spanned
-// up to it (leaveOutInFlight). A response that cannot be framed does not
-// decide it: its exchange is left out alone when the recording can go on from
-// the next command (handleCommandsV2's fail, reportFault), and a stop stamped
-// for it would leave out every test case the connection carries after it.
+// stops, and only there, once (the recorder returns on it), so it stamps the
+// stop (Session.StoppedAt) first, before it logs: the span of what the
+// connection carries from here opens there (Session.OnStop), and the exchange
+// the recording stops in is spanned up to it (leaveOutInFlight). A response
+// that cannot be framed does not decide it: its exchange is left out alone
+// when the recording can go on from the next command (handleCommandsV2's
+// fail, reportFault), and a stop stamped for it would leave out every test
+// case the connection carries after it.
 //
 // The WARN takes the place of the dispatcher's "parser retired" one (the
 // error wraps supervisor.ErrReported), so it follows the same rule
 // (Session.RecordingStopping), read after the stamp, as the dispatcher reads
 // it: as the recording itself stops, the connection is torn down with it, no
 // span opens, and nothing it would carry is left out, so the loss is logged
-// at DEBUG, and the limit is not spent on it. The recorder runs behind the
-// traffic, so it can find the loss after the recording stopped, in bytes the
-// connection carried before. The exchange it was in is reported all the same
+// at DEBUG, and is not counted. The recorder runs behind the traffic, so it
+// can find the loss after the recording stopped, in bytes the connection
+// carried before. The exchange it was in is reported all the same
 // (leaveOutInFlight): its bytes were captured, and it is not recorded.
 func warnFramingLost(logger *zap.Logger, sess *supervisor.Session, msg string, err error) {
 	sess.StoppedAt()
@@ -281,7 +291,13 @@ func warnFramingLost(logger *zap.Logger, sess *supervisor.Session, msg string, e
 		logger.Debug(msg, append(warnFields(sess, err), zap.Bool("recordingStopping", true))...)
 		return
 	}
-	warnLimited(logger, sess, msg, err, "user traffic is unaffected: the relay keeps forwarding raw bytes. This connection's later queries are not recorded rather than paired with the wrong responses, and every test case recorded while it carries traffic is left out of the recording rather than saved without its mocks. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)")
+	stopped := connectionsStopped.Add(1)
+	if logger == nil {
+		return
+	}
+	logger.Warn(msg, append(warnFields(sess, err),
+		zap.Uint64("connectionsStopped", stopped),
+		zap.String("next_step", "user traffic is unaffected: the relay keeps forwarding raw bytes. This connection's later queries are not recorded rather than paired with the wrong responses, and every test case recorded while it carries traffic is left out of the recording rather than saved without its mocks. connectionsStopped counts the connections whose recording stopped so far. If this repeats, set KEPLOY_DISABLE_PARSING=1 to disable record parsing entirely (raw passthrough)"))...)
 }
 
 // warnLimited logs msg at WARN through its limiter, with err, the connection,

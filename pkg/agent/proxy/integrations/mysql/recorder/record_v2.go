@@ -1556,11 +1556,17 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// joined the connection is reported once all the same, over its own bytes
 	// (Session.NextRequest), and the response is the exchange left out here.
 	clientRealign, serverRealign := false, false
-	// lastAnswerEnd is when the last byte of the last answer read was
-	// captured. pipelined: the client once sent a command not after that, so
-	// its answers cannot be told to start after their commands, and a
-	// response of its that cannot be framed cannot be realigned.
-	var lastAnswerEnd time.Time
+	// lastAnswerSeq is the capture number (fakeconn.Chunk.ConnSeq) of the
+	// chunk the last byte of the last answer read came in. pipelined: the
+	// capture's order proved that the client once sent a command before that
+	// byte reached the capture (its first chunk was numbered before), so its
+	// answers cannot be told to start after their commands, and a response of
+	// its that cannot be framed cannot be realigned. Only the numbers prove
+	// it, never the capture times: a clock that stamps a command alike with
+	// the answer before it, or a chunk with no stamp, says nothing of which
+	// came first, and a client taken for pipelining on it lost the rest of its
+	// connection's recording at the first response it could not frame.
+	var lastAnswerSeq uint32
 	pipelined := false
 	// fail handles an exchange whose command was read at reqTs and whose
 	// response could not be handled (err). A stream or a recording that ended
@@ -1602,7 +1608,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// out (fakeconn.FakeConn.SkipThrough). A stream that cannot be cut there
 	// stops the recording, as lost framing does.
 	realignAnswer := func(reqTs time.Time) error {
-		n, last, err := sess.DestStream.SkipThrough(reqTs)
+		n, _, err := sess.DestStream.SkipThrough(reqTs)
 		if err != nil {
 			if streamEnded(err) {
 				return err
@@ -1612,9 +1618,6 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			return leaveOutInFlight(sess, reqTs, err)
 		}
 		serverRealign = false
-		if !last.IsZero() {
-			lastAnswerEnd = last
-		}
 		logger.Debug("V2: skipped the rest of a mysql response left out; the recording goes on from the next command",
 			zap.String("connID", sess.ClientConnID), zap.Int64("skippedBytes", n))
 		return nil
@@ -1630,7 +1633,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// or reporting them.
 	for {
 		if !serverRealign {
-			lastAnswerEnd = sess.DestStream.LastReadTime()
+			lastAnswerSeq = sess.DestStream.LastReadConnSeq()
 		}
 		var cmdBuf []byte
 		var err error
@@ -1662,9 +1665,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			}
 		} else {
 			var cs commandSeq
+			// first is the chunk the command starts in.
+			var first fakeconn.Chunk
 			// While a PREPARE is held, the server's bytes after its
 			// definitions are still its own (heldPrepare).
-			if _, err = sess.NextRequest(models.MySQL, held != nil); err == nil {
+			if first, err = sess.NextRequest(models.MySQL, held != nil); err == nil {
 				cmdBuf, err = readPacketChecked(logger, sess.ClientStream, cs.take)
 			}
 			respFirst, joined = cs.next, cs.joined
@@ -1689,16 +1694,20 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				}
 				return err
 			}
+			if !serverRealign && lastAnswerSeq != 0 && first.CapturedBefore(lastAnswerSeq) {
+				// Captured before the last byte of the answer before it:
+				// sent before the client could have read that answer whole.
+				// No answer read yet (lastAnswerSeq 0) is none to compare
+				// with. The command the handshake read is the first, and
+				// the one taken up after a response left out comes while
+				// the server's stream is realigned (serverRealign).
+				pipelined = true
+			}
 		}
 		// Chunk-derived timestamp: a ReadPacketBuffer has succeeded (either the
 		// prefetch read in the handshake, or the read just above), so at least
 		// one chunk has been consumed and LastReadTime is set.
 		reqTs := sess.ClientStream.LastReadTime()
-		if !serverRealign && !lastAnswerEnd.IsZero() && !reqTs.After(lastAnswerEnd) {
-			// Sent before the last answer was read, or not known to be after
-			// it (no capture time, or a clock that stamped the two alike).
-			pipelined = true
-		}
 		if serverRealign && len(cmdBuf) > 4 && answered(cmdBuf[4]) {
 			if err := realignAnswer(reqTs); err != nil {
 				return err

@@ -147,8 +147,12 @@ type FakeConn struct {
 	// first is the first floor DropBefore was given (guarded by mu), 0 until
 	// then: the stream's start is what was captured before it (started). In
 	// the padding after closed.
-	first   uint32
-	closeCh chan struct{}
+	first uint32
+	// lastReadSeq is the ConnSeq of the chunk the reader was last handed
+	// bytes of (LastReadConnSeq), 0 until one with a number was. In the
+	// padding after first.
+	lastReadSeq atomic.Uint32
+	closeCh     chan struct{}
 	// endCh is closed (under mu) as the reader is first handed io.EOF: it has
 	// read the stream to the end its producer gave it (ReadToEnd).
 	endCh chan struct{}
@@ -294,8 +298,8 @@ func (f *FakeConn) advanceLocked(n int) {
 }
 
 // deliverLocked hands the reader n bytes of c: they leave the FakeConn, and
-// c's times are the last delivered (LastReadTime, LastWrittenTime). Caller
-// holds mu.
+// c's times and capture number are the last delivered (LastReadTime,
+// LastWrittenTime, LastReadConnSeq). Caller holds mu.
 func (f *FakeConn) deliverLocked(c Chunk, n int) {
 	f.advanceLocked(n)
 	if !c.ReadAt.IsZero() {
@@ -303,6 +307,9 @@ func (f *FakeConn) deliverLocked(c Chunk, n int) {
 	}
 	if !c.WrittenAt.IsZero() {
 		f.lastWrittenNano.Store(c.WrittenAt.UnixNano())
+	}
+	if c.ConnSeq != 0 {
+		f.lastReadSeq.Store(c.ConnSeq)
 	}
 }
 
@@ -889,6 +896,13 @@ func (f *FakeConn) LastReadTime() time.Time {
 	}
 	return time.Unix(0, n)
 }
+
+// LastReadConnSeq returns the capture sequence (Chunk.ConnSeq) of the chunk
+// the reader was last handed bytes of (Read, ReadChunk; not Peek, nor a chunk
+// the floor dropped), or 0 if none carried one. It orders what was read
+// against the other direction's chunks (Chunk.CapturedBefore) where their
+// capture times cannot: two chunks stamped alike, or one not stamped at all.
+func (f *FakeConn) LastReadConnSeq() uint32 { return f.lastReadSeq.Load() }
 
 // LastWrittenTime returns the WrittenAt timestamp of the most recently
 // delivered Chunk, or the zero time if no Chunk has been delivered or

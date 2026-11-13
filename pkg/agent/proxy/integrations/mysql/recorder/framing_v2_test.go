@@ -2142,8 +2142,9 @@ func TestLeaveOutSaysOnlyWhatHoldsOfTheTestCasesOverIt(t *testing.T) {
 // stopped being recorded, at WARN, and so does the exchange left out after a
 // retirement's WARN. Held back behind it, the second would wait out the
 // interval, and the next WARN of the first would count it as one of its own.
-// One held back behind a WARN of its own kind is said at DEBUG: a retirement
-// or an exchange left out never leaves no line at all.
+// An exchange left out held back behind a WARN of its own kind is said at
+// DEBUG: it never leaves no line at all. A retirement is never held back
+// (TestEachConnectionWhoseRecordingStopsIsWarnedOf).
 // Not parallel: the WARN limit is process-wide.
 func TestEachRecorderWarningIsLimitedByItsOwnMessage(t *testing.T) {
 	resetWarnLimiters()
@@ -2166,16 +2167,17 @@ func TestEachRecorderWarningIsLimitedByItsOwnMessage(t *testing.T) {
 		}
 	}
 
-	// The same kinds again, within the interval, are held back from WARN and
-	// said at DEBUG.
+	// The same kinds again, within the interval: the exchange left out is
+	// held back from WARN and said at DEBUG; another connection's retirement
+	// is said at WARN all the same.
 	logs.TakeAll()
 	leaveOut(sess, at, at.Add(time.Millisecond), notRecorded("a test"))
-	warnFramingLost(logger, sess, lost, errors.New("a test"))
-	if n := len(warns()); n != 0 {
-		t.Fatalf("%d WARN lines for warnings already logged within the interval, want 0", n)
+	warnFramingLost(logger, &supervisor.Session{ClientConnID: "c2"}, lost, errors.New("a test"))
+	if w := warns(); len(w) != 1 || w[0].Message != lost {
+		t.Fatalf("logged %d WARN lines within the interval, want the second connection's retirement only: the exchange left out is held back, a retirement never is", len(w))
 	}
-	if d := logs.FilterLevelExact(zapcore.DebugLevel).All(); len(d) != 2 || d[0].ContextMap()["reason"] != "mysql exchange not recorded: a test" || d[1].Message != lost {
-		t.Fatalf("%d DEBUG lines for the two held back, want the exchange left out and then the framing loss: one left no trace", len(d))
+	if d := logs.FilterLevelExact(zapcore.DebugLevel).All(); len(d) != 1 || d[0].ContextMap()["reason"] != "mysql exchange not recorded: a test" {
+		t.Fatalf("%d DEBUG lines for the exchange left out held back, want it alone: it left no trace", len(d))
 	}
 	// Another message is not held back, nor counts the one held back of the
 	// first as its own.
@@ -2187,6 +2189,58 @@ func TestEachRecorderWarningIsLimitedByItsOwnMessage(t *testing.T) {
 		t.Fatalf("logged %d WARN lines, want the out-of-sequence one: it was held back behind another message", len(w))
 	}
 	if held, ok := w[0].ContextMap()["sameWarningsHeldBack"]; ok {
-		t.Fatalf("the out-of-sequence WARN says %v of the same warning were held back: it counts the framing loss held back before it", held)
+		t.Fatalf("the out-of-sequence WARN says %v of the same warning were held back: it counts another warning's", held)
+	}
+}
+
+// Each connection whose recording stops says so at WARN, once, with how many
+// connections' recordings the recorder has stopped so far. Limited by its
+// message, the same stop on dozens of pooled connections, one after another,
+// was one WARN per interval, which reads as one connection lost, with no count
+// of the rest. A connection whose recording stops as the recording itself
+// stops is said at DEBUG and not counted
+// (TestWarnFramingLostWarnsOnlyWhileTheRecordingRuns).
+// Not parallel: the count is process-wide.
+func TestEachConnectionWhoseRecordingStopsIsWarnedOf(t *testing.T) {
+	resetWarnLimiters()
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core)
+	const lost = "V2: mysql response framing lost; the connection is no longer recorded"
+	before := connectionsStopped.Load()
+	stopped := make(chan struct{})
+	close(stopped)
+	warnFramingLost(logger, &supervisor.Session{ClientConnID: "as the recording stops", RecordingDone: stopped}, lost, ErrFramingLost)
+	const conns = 5
+	for i := range conns {
+		warnFramingLost(logger, &supervisor.Session{ClientConnID: strconv.Itoa(i), RecordingDone: make(chan struct{})}, lost, ErrFramingLost)
+	}
+	w := logs.FilterMessage(lost).FilterLevelExact(zapcore.WarnLevel).All()
+	if len(w) != conns {
+		t.Fatalf("%d WARN lines for %d connections whose recording stopped, want one each", len(w), conns)
+	}
+	for i, e := range w {
+		m := e.ContextMap()
+		if m["connID"] != strconv.Itoa(i) {
+			t.Fatalf("WARN %d is for connection %v, want %d", i, m["connID"], i)
+		}
+		if got, want := m["connectionsStopped"], before+uint64(i)+1; got != want {
+			t.Fatalf("WARN %d says connectionsStopped=%v, want %d: each connection whose recording stopped is counted once", i, got, want)
+		}
+	}
+	// With no logger, the stop is still stamped and counted.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("warnFramingLost with no logger panicked: %v", r)
+			}
+		}()
+		stamped := false
+		warnFramingLost(nil, &supervisor.Session{ClientConnID: "no logger", RecordingDone: make(chan struct{}), OnStop: func(time.Time) { stamped = true }}, lost, ErrFramingLost)
+		if !stamped {
+			t.Fatal("the stop of a connection with no logger was not stamped")
+		}
+	}()
+	if got, want := connectionsStopped.Load(), before+conns+1; got != want {
+		t.Fatalf("connectionsStopped = %d after a stop with no logger, want %d", got, want)
 	}
 }

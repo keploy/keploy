@@ -263,11 +263,9 @@ func TestRecordV2_ACommandWithoutAnAnswerAfterAResponseLeftOut(t *testing.T) {
 // A client that pipelines its commands, sending one before it read all of the
 // answer to the one before, gets answers that do not start after their
 // commands: the rest of a response it cannot frame cannot be told from the
-// next answer, and the recording stops, as it did for every response.
-//
-// So does a client whose command the capture's clock stamped alike with the
-// last byte of the answer before it: that command cannot be told to come after
-// the answer.
+// next answer, and the recording stops, as it did for every response. The
+// capture's order says so (fakeconn.Chunk.ConnSeq): the command was captured
+// before the last byte of the answer before it, whatever the clock stamped.
 func TestRecordV2_APipeliningClientsResponseItCannotFrameStopsTheConnection(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
@@ -276,14 +274,16 @@ func TestRecordV2_APipeliningClientsResponseItCannotFrameStopsTheConnection(t *t
 		// and the last byte of the answer to it.
 		stamp func(command, answered time.Time) time.Time
 	}{
-		{"a command sent before the answer to the one before arrived", func(command, _ time.Time) time.Time { return command.Add(time.Nanosecond) }},
-		{"a command stamped alike with the end of the answer before it", func(_, answered time.Time) time.Time { return answered }},
+		{"stamped before the answer to the one before arrived", func(command, _ time.Time) time.Time { return command.Add(time.Nanosecond) }},
+		{"stamped after the answer to the one before arrived", func(_, answered time.Time) time.Time { return answered.Add(time.Microsecond) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			xs := kitTraffic(t, []int{7, 8}, false)
 			xs[5].reply = append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[5].reply...)
 			client, server := onTheWire(xs, 16384)
+			// The 2nd command was captured before the answer to the 1st.
+			client[1].ConnSeq, server[0].ConnSeq = server[0].ConnSeq, client[1].ConnSeq
 			client[1].ReadAt = c.stamp(client[0].ReadAt, server[0].ReadAt)
 			rec := recordChunks(t, client, server, true, time.Minute)
 			requireFramingLost(t, rec)
@@ -296,6 +296,34 @@ func TestRecordV2_APipeliningClientsResponseItCannotFrameStopsTheConnection(t *t
 			if w, _ := rec.leftOut.last(); w[1].Before(server[len(server)-1].ReadAt) {
 				t.Fatalf("the window left out ends at %v, before the last byte the connection carried (%v)", w[1].Format(time.StampMicro), server[len(server)-1].ReadAt.Format(time.StampMicro))
 			}
+		})
+	}
+}
+
+// A client that waits for each answer is not taken for one that pipelines on
+// the capture's clock: a command stamped alike with the last byte of the
+// answer before it, or before it (a clock that is coarse, or steps back), was
+// still captured after that byte (fakeconn.Chunk.ConnSeq). So a response of
+// its that cannot be framed costs its own exchange, and the recording goes
+// on. Taken for pipelining, the connection was no longer recorded from that
+// response on: on one recording, dozens of pooled connections stopped so.
+func TestRecordV2_ACommandStampedNotAfterTheAnswerBeforeItIsNotPipelining(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		stamp func(command, answered time.Time) time.Time
+	}{
+		{"stamped alike with the end of the answer before it", func(_, answered time.Time) time.Time { return answered }},
+		{"stamped before the answer before it arrived", func(command, _ time.Time) time.Time { return command.Add(time.Nanosecond) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			xs := kitTraffic(t, []int{7, 8}, false)
+			xs[5].reply = append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[5].reply...)
+			client, server := onTheWire(xs, 16384)
+			client[1].ReadAt = c.stamp(client[0].ReadAt, server[0].ReadAt)
+			rec := recordChunks(t, client, server, true, time.Minute)
+			requireRealigned(t, rec, commandAt(t, xs, 16384, 5), 18-1)
 		})
 	}
 }
