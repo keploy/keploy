@@ -63,6 +63,10 @@ type RequiredNotMade struct {
 	// run ended before its rule's timer bound (Receipt.RequiredNotDue), that
 	// bound ("10s"); empty on a series required and not made.
 	Due string `yaml:"due,omitempty" json:"due,omitempty"`
+	// TrailsFailed is, of a trailing series, whether the test it trails
+	// failed: the series not made may follow from that failure, and the run
+	// did not wait for it (seriesDue.holdsWait).
+	TrailsFailed bool `yaml:"trails_failed,omitempty" json:"trails_failed,omitempty"`
 }
 
 // requiredSeries is, by series, each series a declared rule placed in mp's
@@ -140,6 +144,12 @@ func requiredNotMade(req map[string]seriesDue, tests []TestReceipt, consumed []m
 	if len(req) == 0 {
 		return nil, nil, nil
 	}
+	failed := map[string]bool{}
+	for _, t := range tests {
+		if t.Outcome == models.ScopeOutcomeFailed {
+			failed[t.Name] = true
+		}
+	}
 	for _, id := range owedSeries(req, ranTests(tests), usedNames(consumed)) {
 		s := req[id]
 		if !known {
@@ -153,7 +163,7 @@ func requiredNotMade(req map[string]seriesDue, tests []TestReceipt, consumed []m
 			unread[s.Trails] = true
 			continue
 		}
-		notMade = append(notMade, RequiredNotMade{Series: id, Rule: s.Rule, Trails: s.Trails, Names: s.makers()})
+		notMade = append(notMade, RequiredNotMade{Series: id, Rule: s.Rule, Trails: s.Trails, Names: s.makers(), TrailsFailed: failed[s.Trails]})
 	}
 	return notMade, unread, unreadSets
 }
@@ -411,6 +421,10 @@ func RuleNotMadeLine(n RequiredNotMade) string {
 		fields["trails"] = n.Trails
 		what = fmt.Sprintf("%s ran and its trailing series %s (%s) answered no call by the run's end; the app no longer makes it, or makes another request; %s fails and CI would be red",
 			n.Trails, num, strings.Join(n.Names, ", "), n.Trails)
+		if n.TrailsFailed {
+			what = fmt.Sprintf("%s failed, and its trailing series %s (%s) answered no call by the run's end, which may follow from that failure: keploy waits for a trailing series only after a test that passed; fix %s's failure first, then this series if a run where %s passes does not make it",
+				n.Trails, num, strings.Join(n.Names, ", "), n.Trails, n.Trails)
+		}
 	} else {
 		what = fmt.Sprintf("the run reached its background series %s (%s), which answered no call by the run's end; the app no longer makes it, or makes another request; the set fails and CI would be red",
 			num, strings.Join(n.Names, ", "))
