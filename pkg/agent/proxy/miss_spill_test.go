@@ -43,9 +43,12 @@ func drained(t *testing.T, a *testErrorAccumulator) []error {
 	return errs
 }
 
-// fill sets every field v holds, through pointers, lists and structs, to a
-// value no zero value equals, n counting on; an interface is left as it is.
-func fill(v reflect.Value, n *int) {
+// setEveryValue sets every value v holds, through pointers, lists and
+// structs, to one no zero value equals, n counting on; an interface is left
+// as it is (a parser error's Err: a row sets the one it needs). fillEveryField
+// fills a report alone and refuses a kind it was not taught, an interface
+// among them.
+func setEveryValue(v reflect.Value, n *int) {
 	*n++
 	switch v.Kind() {
 	case reflect.String:
@@ -60,11 +63,11 @@ func fill(v reflect.Value, n *int) {
 		v.SetFloat(float64(*n) + 0.5)
 	case reflect.Pointer:
 		v.Set(reflect.New(v.Type().Elem()))
-		fill(v.Elem(), n)
+		setEveryValue(v.Elem(), n)
 	case reflect.Slice:
 		v.Set(reflect.MakeSlice(v.Type(), 2, 2))
-		fill(v.Index(0), n)
-		fill(v.Index(1), n)
+		setEveryValue(v.Index(0), n)
+		setEveryValue(v.Index(1), n)
 	case reflect.Struct:
 		if v.Type() == reflect.TypeOf(time.Time{}) {
 			v.Set(reflect.ValueOf(time.Unix(int64(1_700_000_000+*n), int64(*n)).UTC()))
@@ -72,7 +75,7 @@ func fill(v reflect.Value, n *int) {
 		}
 		for i := 0; i < v.NumField(); i++ {
 			if v.Type().Field(i).IsExported() {
-				fill(v.Field(i), n)
+				setEveryValue(v.Field(i), n)
 			}
 		}
 	}
@@ -83,7 +86,7 @@ func fill(v reflect.Value, n *int) {
 func filledMiss() models.ParserError {
 	var pe models.ParserError
 	n := 0
-	fill(reflect.ValueOf(&pe).Elem(), &n)
+	setEveryValue(reflect.ValueOf(&pe).Elem(), &n)
 	pe.ParserErrorType = models.ErrMockNotFound
 	pe.MismatchReport.Answer = ""
 	return pe
