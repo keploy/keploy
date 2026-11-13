@@ -534,3 +534,67 @@ func TestRecordV2_PostTLS_AParserRetiredAtTheStopEndsItsGreetingWait(t *testing.
 		t.Fatalf("the retired parser dialled the server %d times", n)
 	}
 }
+
+// A parser the supervisor retires at the stop while its greeting fetch waits on
+// the server ends the fetch then: the fetch fails with the parser's end, not
+// with a fault of the server's, so the recorder does not report the connection
+// left out for a failed fetch (the retirement's loss is the supervisor's to
+// tell). Before the fetch watched the retirement, it waited out its 3 s read
+// bound and blamed the server.
+func TestRecordV2_PostTLS_AParserRetiredAtTheStopMidFetchEndsTheFetch(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "100")
+	gate := make(chan struct{}) // the server never answers
+	srv := startGatedFakeMySQLGreeter(t, cannedHandshakeV10(t), 0, gate)
+	t.Cleanup(func() { close(gate) })
+	resetWarnLimiters()
+	core, logs := observer.New(zapcore.DebugLevel)
+	h := newV2Harness(t)
+	h.logger = zap.New(core)
+	h.sess.Logger = h.logger
+	mgr := syncMock.New(nil)
+	h.sess.Mgr = mgr
+	ctx, _ := freshTLSConnectionAtTheStop(t, h, srv.addr)
+	s := supervisor.New(supervisor.Config{Logger: zap.NewNop(), HangBudget: time.Hour})
+	deadline := make(chan struct{})
+	s.StopDeadline = deadline
+	returned := make(chan error, 1)
+	go s.Run(ctx, func(pctx context.Context, sess *supervisor.Session) error {
+		err := recordV2NoPanic(t, pctx, h.logger, sess)
+		returned <- err
+		return err
+	}, h.sess)
+	waitAccepted(t, srv, 1) // the fetch has dialled, and waits for the greeting
+	close(deadline)
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("RecordV2 did not return after its retirement")
+	}
+	if n := mgr.MocksLeftOut(); n != 0 || len(leftOutWarnings(logs)) != 0 {
+		t.Fatalf("%d left out, %d WARN(s): the retirement's end of the fetch was reported as a failed fetch", n, len(leftOutWarnings(logs)))
+	}
+}
+
+// While the recording runs, a parser torn down mid-handshake (its ctx ends:
+// a hang, the memory cap) returns its context's end, and reports nothing
+// itself: the supervisor's retirement tells it, and a report here would tell
+// it twice. Here the greeting fetch then fails on its own (a stand-in
+// destination), not with the parser's end.
+func TestRecordV2_PostTLS_ATornDownParsersHandshakeFailureIsNotReportedTwice(t *testing.T) {
+	t.Parallel()
+	h := newV2Harness(t)
+	mgr := syncMock.New(nil)
+	h.sess.Mgr = mgr
+	h.pushClient(cannedHandshakeResponse41(t, 2, false), time.Now())
+	h.closeStreams()
+	h.sess.Opts.DstCfg = &models.ConditionalDstCfg{Addr: "10.0.0.5:3306", Port: 3306, AddrFabricated: true}
+	h.sess.RecordingDone = make(chan struct{}) // the recording runs
+	ctx, cancel := context.WithCancel(postTLSCtxWithStore(models.NewTLSHandshakeStore()))
+	cancel()
+	if err := recordV2NoPanic(t, ctx, h.logger, h.sess); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RecordV2 = %v; want the teardown's context.Canceled", err)
+	}
+	if n := mgr.MocksLeftOut(); n != 0 {
+		t.Fatalf("%d left out by the recorder of a torn-down parser; want none (the supervisor tells it)", n)
+	}
+}

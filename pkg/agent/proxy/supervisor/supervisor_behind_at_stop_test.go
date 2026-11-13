@@ -229,10 +229,17 @@ func TestRun_AtTheStopAbortsOnceBothStreamsAreReadToTheirEndOrTheDeadlinePasses(
 // supervisor runs, nor by a parser's clean return.
 func TestRun_RetiredIsClosedOnlyAsTheParserIsRetired(t *testing.T) {
 	t.Parallel()
-	var none *Session
-	if none.Retired() != nil || (&Session{}).Retired() != nil {
-		t.Fatal("Retired of a session no supervisor runs is not nil")
-	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("Retired of a nil session panicked: %v", r)
+			}
+		}()
+		var none *Session
+		if none.Retired() != nil || (&Session{}).Retired() != nil {
+			t.Fatal("Retired of a session no supervisor runs is not nil")
+		}
+	}()
 
 	clean := &Session{}
 	s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour})
