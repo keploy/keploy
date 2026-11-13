@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
+	"go.keploy.io/server/v3/pkg/kubeconfig"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -549,6 +550,8 @@ func isolateCertEnv(t *testing.T) {
 	for _, k := range []string{"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CARGO_HTTP_CAINFO", envSSLCertFile, envSSLCertDir} {
 		t.Setenv(k, os.Getenv(k))
 	}
+	// No kubeconfig of the machine's: a test that wants one sets its own.
+	t.Setenv(kubeconfig.EnvVar, filepath.Join(t.TempDir(), "no-kubeconfig"))
 	certFileEnv.Lock()
 	ours := make(map[string]bool, len(certFileEnv.ours))
 	for k, v := range certFileEnv.ours {

@@ -20,6 +20,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/kubeconfig"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -3232,6 +3233,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		}
 		tlsPrivateKey = string(keyBytes)
 	}
+	// kubectl and helm send their kubeconfig user's certificate: keploy
+	// presents it with that user's client key.
+	tlsPrivateKey = kubeconfig.WithClientKeys(r.logger, tlsPrivateKey, utils.IsDockerCmd(utils.CmdType(r.config.CommandType)))
 
 	// Under the proven switch the agent is handed the run's mock.real first
 	// (design v14 §4): its destinations are reached for real, never

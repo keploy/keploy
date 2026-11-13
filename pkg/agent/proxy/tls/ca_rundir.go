@@ -61,8 +61,9 @@ func newRunTrustDir() (*runTrustDir, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 0755: the app may run as another user than keploy (under sudo), and
-	// the directory holds public certificates only.
+	// 0755: the app may run as another user than keploy (under sudo). The
+	// directory holds public certificates, and copies of the user's files
+	// that only their owner reads (writePrivate).
 	if err := os.Chmod(dir, 0o755); err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, err
@@ -87,6 +88,17 @@ func (r *runTrustDir) write(name string, data []byte) (string, error) {
 	// keploy runs with umask 0, a test with the user's: the mode is set, not
 	// left to the umask.
 	return p, os.Chmod(p, 0o644)
+}
+
+// writePrivate writes data to name in the run's directory, readable by its
+// owner alone (mode 0600): a copy of a file that may hold secrets, such as a
+// kubeconfig's client keys. It returns its path.
+func (r *runTrustDir) writePrivate(name string, data []byte) (string, error) {
+	p := filepath.Join(r.dir, name)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		return "", err
+	}
+	return p, os.Chmod(p, 0o600)
 }
 
 // removeWhenDone removes the run's directory when ctx ends.

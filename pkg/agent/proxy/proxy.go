@@ -4354,40 +4354,64 @@ func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certif
 	return nil
 }
 
-// clientCert is peer, the certificate a client sent, with keyPEM, the
-// private key keploy was given for it: what keploy presents to the server in
-// the client's place. An error names which of these failed: no key, no PEM
-// block, a block that is no private key keploy reads, or a key that is not
-// peer's own (the server would refuse the handshake, and the call would look
-// like the server's failure).
+// clientCert is peer, the certificate a client sent, with its private key
+// from keyPEM, the keys keploy was given (record.tlsPrivateKeyPath's file,
+// then the client keys of the kubeconfig's users): what keploy presents to
+// the server in the client's place. keyPEM may hold many PEM blocks; the key
+// presented is the one whose public key is peer's. An error names why there
+// is none: no key, no PEM block, no block that is a private key keploy reads,
+// or no key that is peer's own (the server would refuse the handshake, and
+// the call would look like the server's failure).
 func clientCert(peer *x509.Certificate, keyPEM string) (tls.Certificate, error) {
 	if keyPEM == "" {
-		return tls.Certificate{}, errors.New("keploy was given no private key for the certificate the client sent (record.tlsPrivateKeyPath)")
+		return tls.Certificate{}, errors.New(clientKeyNone)
 	}
-	block, _ := pem.Decode([]byte(keyPEM))
-	if block == nil {
-		return tls.Certificate{}, errors.New("record.tlsPrivateKeyPath holds no PEM block")
+	blocks, keys := 0, 0
+	for block, rest := pem.Decode([]byte(keyPEM)); block != nil; block, rest = pem.Decode(rest) {
+		blocks++
+		privKey := parsePrivateKey(block.Bytes)
+		if privKey == nil {
+			continue
+		}
+		keys++
+		signer, ok := privKey.(crypto.Signer)
+		if !ok {
+			continue
+		}
+		if pub, ok := signer.Public().(interface{ Equal(crypto.PublicKey) bool }); ok && pub.Equal(peer.PublicKey) {
+			return tls.Certificate{Certificate: [][]byte{peer.Raw}, PrivateKey: privKey}, nil
+		}
 	}
-	var privKey any
-	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		privKey = key
-	} else if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		privKey = key
-	} else if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
-		privKey = key
+	switch {
+	case blocks == 0:
+		return tls.Certificate{}, errors.New(clientKeyNoPEM)
+	case keys == 0:
+		return tls.Certificate{}, errors.New(clientKeyNotAKey)
+	default:
+		return tls.Certificate{}, errors.New(clientKeyNotItsOwn)
 	}
-	if privKey == nil {
-		return tls.Certificate{}, errors.New("record.tlsPrivateKeyPath's PEM block is no private key keploy reads (PKCS1, PKCS8 or EC)")
+}
+
+// Why keploy cannot present the certificate a client sent (clientCert).
+const (
+	clientKeyNone      = "keploy was given no private key for the certificate the client sent (record.tlsPrivateKeyPath, or a client key in the kubeconfig)"
+	clientKeyNoPEM     = "the private keys keploy was given hold no PEM block"
+	clientKeyNotAKey   = "no PEM block keploy was given is a private key keploy reads (PKCS1, PKCS8 or EC)"
+	clientKeyNotItsOwn = "no private key keploy was given is the key of the certificate the client sent"
+)
+
+// parsePrivateKey is der as a PKCS#1, PKCS#8 or SEC 1 private key, or nil.
+func parsePrivateKey(der []byte) any {
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return key
 	}
-	signer, ok := privKey.(crypto.Signer)
-	if !ok {
-		return tls.Certificate{}, errors.New("record.tlsPrivateKeyPath's key is not the private key of the certificate the client sent")
+	if key, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		return key
 	}
-	pub, ok := signer.Public().(interface{ Equal(crypto.PublicKey) bool })
-	if !ok || !pub.Equal(peer.PublicKey) {
-		return tls.Certificate{}, errors.New("record.tlsPrivateKeyPath's key is not the private key of the certificate the client sent")
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key
 	}
-	return tls.Certificate{Certificate: [][]byte{peer.Raw}, PrivateKey: privKey}, nil
+	return nil
 }
 
 // applyUpstreamTLSOptions stamps the agent-resolved upstream-TLS trust material

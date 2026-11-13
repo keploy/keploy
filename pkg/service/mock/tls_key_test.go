@@ -2,12 +2,14 @@ package mock
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/kubeconfig"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -36,6 +38,7 @@ func (k *keyInstrumentation) GetOutgoing(ctx context.Context, o models.OutgoingO
 // key, as keploy record does: without it the agent could not dial the server
 // for such a client, and the call was lost.
 func TestMockRecordHandsTheAgentTheTLSPrivateKey(t *testing.T) {
+	noKubeconfig(t)
 	const key = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIA==\n-----END EC PRIVATE KEY-----\n"
 	path := filepath.Join(t.TempDir(), "client.key")
 	if err := os.WriteFile(path, []byte(key), 0o600); err != nil {
@@ -57,8 +60,43 @@ func TestMockRecordHandsTheAgentTheTLSPrivateKey(t *testing.T) {
 	}
 }
 
+// noKubeconfig keeps the machine's kubeconfig out of a test.
+func noKubeconfig(t *testing.T) {
+	t.Helper()
+	t.Setenv(kubeconfig.EnvVar, filepath.Join(t.TempDir(), "no-kubeconfig"))
+}
+
+// kubectl and helm send their kubeconfig user's client certificate: keploy
+// mock record hands the agent that user's key after record.tlsPrivateKeyPath's,
+// read from the kubeconfig the test command reads.
+func TestMockRecordHandsTheAgentTheKubeconfigUsersKey(t *testing.T) {
+	const key = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIA==\n-----END EC PRIVATE KEY-----\n"
+	const kube = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n"
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "client.key"), []byte(key), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "kubeconfig")
+	if err := os.WriteFile(cfgPath, []byte("users:\n- name: kind-kp\n  user:\n    client-key-data: "+base64.StdEncoding.EncodeToString([]byte(kube))+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(kubeconfig.EnvVar, cfgPath)
+	inst := &keyInstrumentation{emptyInstrumentation: emptyInstrumentation{out: make(chan *models.Mock)}}
+	cfg := &config.Config{}
+	cfg.Mock.Name = "kube"
+	cfg.Record.TLSPrivateKeyPath = filepath.Join(dir, "client.key")
+
+	if err := New(zap.NewNop(), inst, newStatefulMockDB(), nil, FileStore{}, nil, cfg).Record(context.Background()); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if inst.opts == nil || inst.opts.TLSPrivateKey != key+kube {
+		t.Fatalf("the agent was handed %+v, want record.tlsPrivateKeyPath's key, then the kubeconfig user's", inst.opts)
+	}
+}
+
 // With no record.tlsPrivateKeyPath the agent is handed no key, as before.
 func TestMockRecordHandsNoKeyWhenNoneIsSet(t *testing.T) {
+	noKubeconfig(t)
 	inst := &keyInstrumentation{emptyInstrumentation: emptyInstrumentation{out: make(chan *models.Mock)}}
 	cfg := &config.Config{}
 	cfg.Mock.Name = "kube"

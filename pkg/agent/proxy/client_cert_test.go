@@ -73,10 +73,10 @@ func rsaCert(t *testing.T) (*x509.Certificate, *rsa.PrivateKey) {
 }
 
 const (
-	noKey      = "keploy was given no private key for the certificate the client sent (record.tlsPrivateKeyPath)"
-	noPEM      = "record.tlsPrivateKeyPath holds no PEM block"
-	notAKey    = "record.tlsPrivateKeyPath's PEM block is no private key keploy reads (PKCS1, PKCS8 or EC)"
-	notItsOwn  = "record.tlsPrivateKeyPath's key is not the private key of the certificate the client sent"
+	noKey      = "keploy was given no private key for the certificate the client sent (record.tlsPrivateKeyPath, or a client key in the kubeconfig)"
+	noPEM      = "the private keys keploy was given hold no PEM block"
+	notAKey    = "no PEM block keploy was given is a private key keploy reads (PKCS1, PKCS8 or EC)"
+	notItsOwn  = "no private key keploy was given is the key of the certificate the client sent"
 	certUnsent = models.CaptureLossClientCertUnsent
 )
 
@@ -106,6 +106,13 @@ func TestClientCertIsTheClientsCertificateWithItsOwnKey(t *testing.T) {
 		{"the certificate's own EC key (SEC 1)", ecLeaf, ecKeyPEM(t, ec, false), ""},
 		{"the certificate's own EC key (PKCS#8)", ecLeaf, ecKeyPEM(t, ec, true), ""},
 		{"the certificate's own RSA key (PKCS#1)", rsaLeaf, rsaPKCS1, ""},
+		// Many keys (record.tlsPrivateKeyPath's, then each kubeconfig user's):
+		// the one presented is the certificate's own, wherever it stands.
+		{"its own key after another's", ecLeaf, ecKeyPEM(t, other, false) + ecKeyPEM(t, ec, true), ""},
+		{"its own key after a certificate block", rsaLeaf, pemOf("CERTIFICATE", ecLeaf.Raw) + rsaPKCS1, ""},
+		{"its own key between others", rsaLeaf, ecKeyPEM(t, other, true) + rsaPKCS1 + ecKeyPEM(t, ec, false), ""},
+		{"only other certificates' keys", ecLeaf, ecKeyPEM(t, other, false) + rsaPKCS1, notItsOwn},
+		{"only blocks that are no key", ecLeaf, pemOf("CERTIFICATE", ecLeaf.Raw) + pemOf("CERTIFICATE", rsaLeaf.Raw), notAKey},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cert, err := clientCert(tc.peer, tc.key)

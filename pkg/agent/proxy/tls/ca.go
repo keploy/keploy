@@ -32,6 +32,7 @@ import (
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/kubeconfig"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	nssbundle "golang.org/x/crypto/x509roots/fallback/bundle"
@@ -330,7 +331,8 @@ func SetupCaCertEnv(ctx context.Context, logger *zap.Logger, certPEM []byte) err
 	// built into keploy) plus keploy's CA, as in docker and k8s. Node adds
 	// NODE_EXTRA_CA_CERTS to its own roots, so it gets keploy's CA alone.
 	systemBundle, _ := loadSystemCABundleFn(logger)
-	bundlePath, err := run.write(runBundleFile, mergeCABundle(systemBundle, certPEM))
+	bundle := mergeCABundle(systemBundle, certPEM)
+	bundlePath, err := run.write(runBundleFile, bundle)
 	if err != nil {
 		_ = run.remove()
 		utils.LogError(logger, err, "Failed to write the app's CA bundle to the tmp folder")
@@ -340,6 +342,9 @@ func SetupCaCertEnv(ctx context.Context, logger *zap.Logger, certPEM []byte) err
 		_ = run.remove()
 		return err
 	}
+	// kubectl and helm trust the CA their kubeconfig names, not the variables
+	// above: they get copies of it that trust keploy's CA too.
+	pointKubeconfig(logger, run, kubeconfig.Trust{CA: certPEM, Bundle: bundle})
 	// Java: point the JVM at a merged truststore via JAVA_TOOL_OPTIONS instead of
 	// importing the keploy CA into the JDK's own cacerts. Best-effort and additive
 	// — a machine with no JDK, or a failure to build the store, must not fail CA

@@ -283,7 +283,7 @@ const (
 
 // ClientCertRemedy is what to do about a client's certificate keploy could
 // not present to the server (CaptureLossClientCertUnsent).
-const ClientCertRemedy = "set record.tlsPrivateKeyPath in keploy.yml (keploy record also takes --tls-private-key-path) to the PEM file of that certificate's private key (PKCS1, PKCS8 or EC), and record again"
+const ClientCertRemedy = "set record.tlsPrivateKeyPath in keploy.yml (keploy record also takes --tls-private-key-path) to the PEM file of that certificate's private key (PKCS1, PKCS8 or EC), and record again; a kubeconfig user's client key (client-key-data or client-key) keploy reads by itself when it can"
 
 // UnattributedRemedy is what to do about a call from a process in no test
 // worker's keploy instance while workers' tests were open
