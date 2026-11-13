@@ -1477,3 +1477,142 @@ func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
 		t.Errorf("a leaf that uses the run's variable beside a short part set aside: %s from %q (%q); want noise naming mock-b and no mock-9", got.Kind, got.From.Mock, got.Why)
 	}
 }
+
+// A test step's id header (x-keploy-test-step-id) is a UUID the test makes
+// anew in each run. Its 16-bit groups stand in api-server's sets by chance
+// (a v4 UUID's third group, nine times in ten): the recorded one inside an
+// earlier test's UUID _id. Where no word of 32 bits or more of either run's
+// UUID stands anywhere either run gave the application, each run minted its
+// id, and a piece of it found elsewhere is no source, on every term of the
+// word rule: the recorded group, inside another UUID or alone, both runs'
+// groups each at its own place, in a request, an answer or another test's
+// recording. The controls: a whole-id copy from an earlier answer is still
+// followed; a long word of either run's UUID standing elsewhere (in an
+// exchange the recording or F gave, a payload recorded before the call, or
+// another test's answer) keeps the refusal; so does a place that holds the
+// group beside another word of its UUID; a value with no long word is no
+// minted id, and its short part stays refused on this reading; and a call
+// read under the rule a copy follows its source (ClassifyFollowing) reads
+// as before. A part of 16 bytes or more is no piece on the took term.
+func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
+	const (
+		path  = "header.x-keploy-test-step-id"
+		rec   = "3f2a9c1e-4b7d-4e2a-9f3c-1a2b3c4d5e6f"
+		live  = "8e1d2c3b-a0f9-4c8b-b7a6-5f4e3d2c1b0a"
+		piece = "beside no other word of the value's id, and the value is an id minted in each run"
+	)
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: v}}}
+	}
+	earlier := func(mock, id, seen string, side Side, served int) Earlier {
+		at := eRecAt.Add(-5 * time.Second)
+		m := RawOf(&models.Mock{Name: mock, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
+		return Earlier{Mock: mock, At: at, Run: true, Payload: m.ServedAs(served).ServedAsRecorded(), Seen: []Seen{{Side: side,
+			Leaf: Leaf{Path: "body.docs.msgs.{}._id", Type: String, Value: id}, Live: seen, Place: "body.docs.msgs.{}._id"}}}
+	}
+	same := func(mock, id string, side Side, served int) Earlier { return earlier(mock, id, id, side, served) }
+	var places []Raw
+	givenPlaces := func() ([]GivenPlaces, error) {
+		var gp []GivenPlaces
+		for _, x := range places {
+			gp = append(gp, PlacesOf(x))
+		}
+		return gp, nil
+	}
+	given := func(ee []Earlier, raw ...Raw) Learned {
+		t.Helper()
+		got := ClassifyGiven(clockedDrifts(), []string{path}, shape(live), shape(rec), eRecAt, ee, raw, nil, nil, givenPlaces)
+		if len(got) != 1 {
+			t.Fatalf("%+v", got)
+		}
+		return got[0]
+	}
+	answered := func(name, body string) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://example.invalid/jobs"},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: body},
+			ReqTimestampMock: eRecAt.Add(-3 * time.Second), ResTimestampMock: eRecAt.Add(-3*time.Second + time.Millisecond),
+		}}, true).ServedAs(1).ServedAsRecorded().OfAnotherTest()
+	}
+	const other = "c0ffee11-4b7d-4a1b-8c2d-0123456789ab"
+	for name, c := range map[string]struct {
+		ee     []Earlier
+		places []Raw
+	}{
+		"the recorded group in a request":    {ee: []Earlier{same("mock-1215", other, Request, 1)}},
+		"the recorded group in an answer":    {ee: []Earlier{same("mock-1215", other, Response, 1)}},
+		"the recorded group alone":           {ee: []Earlier{same("mock-1215", "4b7d", Request, 1)}},
+		"each run's group at its own place":  {ee: []Earlier{same("mock-1215", other, Request, 1), same("mock-1300", "deadbeef-a0f9-4c11-9d2d-ba9876543210", Request, 2)}},
+		"F's group in another test's answer": {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"_id":"deadbeef-a0f9-4c11-9d2d-ba9876543210"}`)}},
+	} {
+		places = c.places
+		if got := given(c.ee); got.Kind != KindNoise || !strings.Contains(got.Why, piece) || !strings.Contains(got.Why, "learns it as varying") {
+			t.Errorf("%s: %s from %q (%q); want noise naming the minted id", name, got.Kind, got.From.Mock, got.Why)
+		}
+	}
+	places = nil
+	// A whole-id copy from an earlier answer, which F gave changed and the
+	// value moved with: followed.
+	if got := given([]Earlier{earlier("mock-1215", rec, live, Response, 1)}); got.Kind != KindVariable || got.From.Mock != "mock-1215" {
+		t.Errorf("a whole-id copy: %s from %q (%q); want a variable of mock-1215", got.Kind, got.From.Mock, got.Why)
+	}
+	headed := func(name, value string) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://example.invalid/", Header: map[string]string{"X-Job": value}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `ok`},
+			ReqTimestampMock: eRecAt.Add(-2 * time.Second), ResTimestampMock: eRecAt.Add(-2*time.Second + time.Millisecond),
+		}}, false)
+	}
+	// A long word of either run's UUID standing elsewhere: refused, as
+	// the first reading refused it.
+	for name, c := range map[string]struct {
+		ee          []Earlier
+		raw, places []Raw
+	}{
+		"F's 8-hex word where the recording gave it":         {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job 8e1d2c3b", "job 11112222", Request, 2)}},
+		"the recorded 48-bit word where F gave it":           {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job 11112222", "job 1a2b3c4d5e6f", Request, 2)}},
+		"F's 8-hex word in a payload recorded before":        {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{headed("mock-1290", "job 8e1d2c3b")}},
+		"F's 8-hex word in another test's answer":            {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"job":"8e1d2c3b"}`)}},
+		"the recorded group beside another of its words":     {ee: []Earlier{same("mock-1215", "c0ffee11-4b7d-4e2a-8c2d-0123456789ab", Request, 1)}},
+		"the recorded group beside another, in a payload":    {raw: []Raw{headed("mock-1290", "c0ffee11-4b7d-4e2a-8c2d-0123456789ab")}},
+		"F's group beside another, in another test's answer": {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"_id":"deadbeef-a0f9-4c8b-9d2d-ba9876543210"}`)}},
+	} {
+		places = c.places
+		if got := given(c.ee, c.raw...); got.Kind == KindNoise || strings.Contains(got.Why, piece) {
+			t.Errorf("%s: %s from %q (%q); want it refused or followed, never varying", name, got.Kind, got.From.Mock, got.Why)
+		}
+	}
+	places = nil
+	// No long word: no minted id, and the short part stays refused here.
+	short := ClassifyGiven(clockedDrifts(), []string{path}, shape("ab12-cd34"), shape("ef56-4b7d"), eRecAt, []Earlier{same("mock-1215", other, Request, 1)}, nil, nil, nil, nil)
+	if len(short) != 1 || short[0].Kind != KindUnaccounted {
+		t.Errorf("a value with no long word: %+v; want refused", short)
+	}
+	// Under the rule a copy follows its source, as before: where each
+	// run's group stands at its own place, each value may be a copy of a
+	// word its run picked, and it is refused.
+	both := []Earlier{same("mock-1215", other, Request, 1), same("mock-1300", "deadbeef-a0f9-4c11-9d2d-ba9876543210", Request, 2)}
+	if got := ClassifyFollowing(clockedDrifts(), []string{path}, shape(live), shape(rec), eRecAt, both, nil, nil, nil, nil); len(got) != 1 || got[0].Kind != KindUnaccounted {
+		t.Errorf("ClassifyFollowing: %+v; want refused", got)
+	}
+	// The took term: where the recorded value's word is read, F's group
+	// standing inside another test's UUID is no word F's value took there.
+	dc := clockedDrifts()
+	v := dc.of(rec, live)
+	ee := []Earlier{same("mock-1300", "deadbeef-a0f9-4c11-9d2d-ba9876543210", Request, 2)}
+	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, short: true, served: ee}).tookElsewhere(v, "4b7d"); took != "" {
+		t.Errorf("short parts alone: took %q; want none", took)
+	}
+	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, served: ee}).tookElsewhere(v, "4b7d"); !strings.Contains(took, "mock-1300") {
+		t.Errorf("under the rule: took %q; want mock-1300", took)
+	}
+	// A group of four 4-byte letters is 16 bytes: no short part, so no
+	// piece, however few bits it carries.
+	const wide = "8e1d2c3b-𝐀𝐁𝐂𝐃-4c8b-b7a6-5f4e3d2c1b0a"
+	ee = []Earlier{same("mock-1300", "deadbeef-𝐀𝐁𝐂𝐃-4c11-9d2d-ba9876543210", Request, 2)}
+	if took := (&follows{dc: dc, rec: rec, live: wide, at: eRecAt, short: true, served: ee}).tookElsewhere(dc.of(rec, wide), "4b7d"); !strings.Contains(took, "mock-1300") {
+		t.Errorf("a 16-byte group: took %q; want mock-1300", took)
+	}
+}

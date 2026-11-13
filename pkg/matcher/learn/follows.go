@@ -154,6 +154,16 @@ type follows struct {
 	// short reads a short part of the value alone under the rule (reads),
 	// for a call read without it.
 	short bool
+	// idOnly, beside short, lets a short part go only where it is a
+	// chance piece of a minted id (chancePiece): the re-read of a value
+	// the word rule refused (leafIn), which reads no other part anew.
+	idOnly bool
+	// piece, where a chance piece of a minted id was let go
+	// (chancePiece), names the first: what a value learned as noise says
+	// of it, where nothing else was let go. longShown caches mintedID's
+	// answer once read (longRead).
+	piece               string
+	longShown, longRead bool
 	// first is the word rule's reason at the first match let go: what the
 	// reason of a refusal for the order names.
 	first   string
@@ -244,6 +254,169 @@ func (f *follows) reads(t string, v *valueDrift) bool {
 		return false
 	}
 	return !f.short || len(t) < minChancePart && t != v.rec && t != v.live && t != v.decRec && t != v.decLive
+}
+
+// idPiece returns the other words of the id that t, a short part of the
+// drifted value v (reads, where f reads short parts alone: short), stands
+// in, where that id changed whole between the runs (valueDrift.idParts)
+// and holds a word of chanceBits or more, and v's ids were minted
+// (mintedID); ok false otherwise, and for a t of chanceBits or more: such
+// a word is one of the long words, never a piece.
+func (f *follows) idPiece(v *valueDrift, t string) (others map[string]bool, ok bool) {
+	if f == nil || !f.short || !f.reads(t, v) || wordBits(t) >= chanceBits {
+		return nil, false
+	}
+	for side := range v.idParts {
+		if others, ok = v.idParts[side][t]; ok {
+			break
+		}
+	}
+	if !ok {
+		return nil, false
+	}
+	for o := range others {
+		if wordBits(o) >= chanceBits {
+			return others, f.mintedID(v)
+		}
+	}
+	return nil, false
+}
+
+// holds says whether a place holds a word, in any reading, as either run
+// gave it there.
+type holds func(w string) bool
+
+// tokHolds is holds of a place whose words are toks (one set per reading).
+func tokHolds(toks ...[]map[string]bool) holds {
+	return func(w string) bool {
+		for _, by := range toks {
+			for _, tok := range by {
+				if tok[w] {
+					return true
+				}
+			}
+		}
+		return false
+	}
+}
+
+// seenHolds is holds of a leaf of an exchange F served, as the recording
+// and F gave it (ed), stamps too.
+func seenHolds(ed *valueDrift) holds { return tokHolds(ed.recTok, ed.liveTok) }
+
+// rawHolds is holds of x's payload, as the recording and F gave it
+// (searchedTokens, stamps too).
+func (f *follows) rawHolds(x Raw) holds {
+	var toks [][]map[string]bool
+	for _, y := range []Raw{x, f.liveOf(x, false)} {
+		if y.isRead() {
+			toks = append(toks, f.dc.searchedTokens(y, true))
+		}
+	}
+	return tokHolds(toks...)
+}
+
+// givenHolds is holds of g's answer, as the recording and F gave it
+// (stamps too).
+func givenHolds(g givenWords) holds {
+	return func(w string) bool {
+		for i := range max(len(g.words), len(g.gave)) {
+			if g.holds(i, w, true) || g.inAnswer(i, w) != "" {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// mintedID reports whether every id of the drifted value v that changed
+// whole (valueDrift.idParts), as recorded and as F saw it, was minted
+// anew in its run: no word of chanceBits or more of any of them stands in
+// any place the word rule reads, in what either run gave there (a leaf of
+// an exchange F served earlier in the call's own test or in an earlier
+// test; a payload recorded before the call; an answer F gave the
+// application elsewhere before the call; stamps too). Read once.
+func (f *follows) mintedID(v *valueDrift) bool {
+	if f.longRead {
+		return !f.longShown
+	}
+	f.longRead = true
+	var long []string
+	for _, side := range v.idParts {
+		for w, others := range side {
+			for o := range others {
+				if wordBits(o) >= chanceBits {
+					long = append(long, o)
+				}
+			}
+			if wordBits(w) >= chanceBits {
+				long = append(long, w)
+			}
+		}
+	}
+	shows := func(h holds) bool { return slices.ContainsFunc(long, func(w string) bool { return h(w) }) }
+	shown := func() bool {
+		for _, e := range f.served {
+			for _, s := range e.Seen {
+				if shows(seenHolds(f.dc.of(s.Leaf.Value, s.Live))) {
+					return true
+				}
+			}
+		}
+		for _, x := range f.raw {
+			if x.earlierThan(f.at) && shows(f.rawHolds(x)) {
+				return true
+			}
+		}
+		if f.places != nil {
+			for _, g := range f.places().words {
+				if shows(givenHolds(g)) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	f.longShown = len(long) == 0 || shown()
+	return !f.longShown
+}
+
+// chancePiece reports whether t, a word of the drifted value v found at a
+// place (stands: the word and where it stands, as a reason names it) that
+// holds what at says, is a chance piece of a minted id there (the
+// founder's minted default, 2026-11-11, read for a piece): a piece of an
+// id (idPiece) that the place holds beside no other word of that id
+// (pieceAt). An application makes an id whole, and no long word of the
+// value's ids stands anywhere either run gave the application, so each
+// run minted its id: a place holding one short piece of it holds it by
+// chance, at any order of the places, whatever the other value took
+// elsewhere, in any test (on every term of the rule, where short parts
+// alone are read). A 16-bit group of a fresh v4 UUID stands in
+// api-server's sets nine times in ten (chanceBits). The first is named
+// (piece).
+func (f *follows) chancePiece(v *valueDrift, t, stands string, at holds) bool {
+	if !f.pieceAt(v, t, at) {
+		return false
+	}
+	if f.piece == "" {
+		f.piece = stands + ", beside no other word of the value's id, and the value is an id minted in each run (no word of 32 bits or more of it, recorded or as record's full round saw it, stands in any place either run gave the application before the call): an application makes an id whole, so a short piece of it found elsewhere is chance, and the value is no copy of it"
+	}
+	return true
+}
+
+// pieceAt reports whether t, a word of v, is a chance piece of a minted id
+// at a place that holds what at says (chancePiece), naming nothing.
+func (f *follows) pieceAt(v *valueDrift, t string, at holds) bool {
+	others, ok := f.idPiece(v, t)
+	if !ok {
+		return false
+	}
+	for o := range others {
+		if at(o) {
+			return false
+		}
+	}
+	return true
 }
 
 // source notes mock as a candidate source of the value, found holding its
@@ -553,8 +726,9 @@ func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, w
 // one, by an order neither run shows: a map's iteration, a concurrent
 // consumer), and the word the other value holds shows nothing. Stamps are
 // read as the word rule reads them (stampsEchoed); a clock word is no word
-// (eachChanged). Where both values hold t, neither lacks it, and excused
-// refuses it already.
+// (eachChanged). Where short parts alone are read, a chance piece of a
+// minted id at a place (pieceAt) is no word taken there. Where both values
+// hold t, neither lacks it, and excused refuses it already.
 func (f *follows) tookElsewhere(v *valueDrift, t string) string {
 	side := 0
 	switch {
@@ -583,7 +757,7 @@ func (f *follows) tookElsewhere(v *valueDrift, t string) string {
 				if stamped(s) && !keep || s.Leaf.Type == Instant {
 					continue
 				}
-				if ed := f.dc.of(s.Leaf.Value, s.Live); recorded && ed.recTok[i][w] || !recorded && ed.liveTok[i][w] {
+				if ed := f.dc.of(s.Leaf.Value, s.Live); (recorded && ed.recTok[i][w] || !recorded && ed.liveTok[i][w]) && !f.pieceAt(v, w, seenHolds(ed)) {
 					return lacks + v.wordOf(w, recorded) + " stands in " + e.Mock + " at " + s.Leaf.Path
 				}
 			}
@@ -593,7 +767,7 @@ func (f *follows) tookElsewhere(v *valueDrift, t string) string {
 				continue
 			}
 			for _, y := range []Raw{x, f.liveOf(x, recorded)} {
-				if y.isRead() && f.dc.searchedTokens(y, keep)[i][w] {
+				if y.isRead() && f.dc.searchedTokens(y, keep)[i][w] && !f.pieceAt(v, w, f.rawHolds(x)) {
 					if fd, _ := f.dc.fieldOf(y, f.dc.searched(y, keep), w); fd != "" {
 						return lacks + v.wordOf(w, recorded) + " stands in " + x.mock + " at " + fd
 					}
@@ -603,7 +777,7 @@ func (f *follows) tookElsewhere(v *valueDrift, t string) string {
 		}
 		if op != nil {
 			for _, g := range op.words {
-				if as := g.inAnswer(i, w); as != "" {
+				if as := g.inAnswer(i, w); as != "" && !f.pieceAt(v, w, givenHolds(g)) {
 					return lacks + v.wordOf(w, recorded) + " stands in " + g.mock + "'s answer " + as
 				}
 			}
@@ -784,6 +958,12 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 	if !f.reads(t, v) {
 		return false
 	}
+	if f.chancePiece(v, t, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path, seenHolds(ed)) {
+		return true
+	}
+	if f.idOnly {
+		return false
+	}
 	before, untimed := e.Given, ""
 	if !e.Given {
 		before, untimed = recordedGave(e.recordedAt(), e.Payload.answered, at, e.Mock)
@@ -823,6 +1003,12 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 // lets a word go (noteOlder): a value left noise past it is refused.
 func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time, why, place string) bool {
 	if !f.reads(t, v) {
+		return false
+	}
+	if f.chancePiece(v, t, v.wordOf(t, v.recTok[i][t])+" stands in "+place, f.rawHolds(x)) {
+		return true
+	}
+	if f.idOnly {
 		return false
 	}
 	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
@@ -871,6 +1057,12 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 // a value left noise past it is refused.
 func (f *follows) excusedLive(x Raw, v *valueDrift, i int, t string, at time.Time, why, place string) bool {
 	if !f.reads(t, v) {
+		return false
+	}
+	if f.chancePiece(v, t, v.wordOf(t, false)+" stands in "+place, f.rawHolds(x)) {
+		return true
+	}
+	if f.idOnly {
 		return false
 	}
 	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
@@ -1054,6 +1246,12 @@ func movedFrom(ed, v *valueDrift) string {
 // nothing, and the word stays refused, naming why.
 func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at time.Time, why string) bool {
 	if !f.reads(t, v) {
+		return false
+	}
+	if f.chancePiece(v, t, v.wordOf(t, v.recTok[i][t])+" stands in "+g.mock, givenHolds(g)) {
+		return true
+	}
+	if f.idOnly {
 		return false
 	}
 	gat := g.at

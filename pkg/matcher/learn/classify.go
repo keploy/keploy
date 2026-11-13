@@ -1091,6 +1091,12 @@ type Learned struct {
 	// the test began reads again (classifyRead); stale (not Why) once a
 	// later step refuses it for another reason (unreadHeld).
 	unreadWhy string
+	// wordRefused: the refusal is the word rule's (unaccounted, givenWhy):
+	// a word of what changed stands at a place the call cannot follow.
+	// Read without the rule a copy follows its source, the leaf is read
+	// again letting a chance piece of a minted id go (leafIn,
+	// follows.idOnly).
+	wordRefused bool
 	// strictRefusal: the refusal the HTTP learn step's re-read since the
 	// test began learned instead as this read (the offset rule's own,
 	// offsetRefused, or one of no clock read, unreadWhy), or the variable of
@@ -1782,8 +1788,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// of rd, without the rules skip names (skipRule), every other rule as
 	// it stands; where short is set (a call read without the rule a copy
 	// follows its source), with the rule reading its short parts alone
-	// (follows.short).
-	leafRead := func(rd *reading, r, l Leaf, w *Window, skip skipRule, short bool) Learned {
+	// (follows.short), and, where idOnly is set too, letting one go only
+	// as a chance piece of a minted id (follows.idOnly).
+	leafRead := func(rd *reading, r, l Leaf, w *Window, skip skipRule, short, idOnly bool) Learned {
 		raw, all, places, eh := rd.raw, rd.all, rd.places, &rd.eh
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
@@ -1795,7 +1802,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
 		if follow || short {
-			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places, short: short}
+			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places, short: short, idOnly: idOnly}
 		}
 		if r.Value != "" {
 			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, placed, raw, fol, eh); ok && skip&skipSource == 0 {
@@ -1936,6 +1943,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Bindable = bindable
 				ln.byOffset = why == offWhy
 				ln.unreadWhy = unreadWhy
+				ln.wordRefused = sourced
 				if ln.byOffset {
 					// Which source its moment has is all the offset rule
 					// cannot tell: a read of the clock plus that offset
@@ -1983,6 +1991,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				}
 				ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, served, all)
 			}
+		}
+		// Only chance pieces of a minted id let go (follows.chancePiece):
+		// no source to order, and noise named so.
+		if fol != nil && fol.piece != "" && fol.first == "" && fol.refuted == "" && ln.Kind == KindNoise {
+			ln.Why = fol.piece + ", and keploy learns it as varying"
 		}
 		// A leaf set aside as no source (follows.refuteSeen), and nothing
 		// else: an echo beside it stands as beside any source set aside
@@ -2117,12 +2130,25 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// found whole or by a longer part, a place the rule does not set
 	// aside, a late call (notFromWhy), and every value of a call read
 	// under the rule are read once, as before.
+	//
+	// So is a value the word rule refused (Learned.wordRefused: a word of
+	// it stands at a place it cannot follow), read again where only a
+	// chance piece of a minted id is let go (follows.idOnly): a 16-bit
+	// group of the UUID a test step sends, standing inside an earlier
+	// test's UUID _id, where no long word of either run's UUID stands
+	// anywhere either run gave the application (the founder's minted
+	// default, 2026-11-11). Every other word reads as the first reading
+	// read it.
 	leafIn := func(rd *reading, r, l Leaf, w *Window, skip skipRule) Learned {
-		ln := leafRead(rd, r, l, w, skip, false)
-		if follow || ln.Kind != KindVariable || !ln.From.SetAside || !(&follows{short: true}).reads(ln.From.Held, dc.ofIn(r.Value, l.Value, w, at)) {
+		ln := leafRead(rd, r, l, w, skip, false, false)
+		if follow {
 			return ln
 		}
-		if again := leafRead(rd, r, l, w, skip, true); again.Kind != KindUnaccounted {
+		setAside := ln.Kind == KindVariable && ln.From.SetAside && (&follows{short: true}).reads(ln.From.Held, dc.ofIn(r.Value, l.Value, w, at))
+		if !setAside && (ln.Kind != KindUnaccounted || !ln.wordRefused) {
+			return ln
+		}
+		if again := leafRead(rd, r, l, w, skip, true, !setAside); again.Kind != KindUnaccounted {
 			return again
 		}
 		return ln
