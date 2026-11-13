@@ -31,7 +31,10 @@ func (timeFormDb) TimeForm() bool { return true }
 // keploy.yml's two clock rules declare both fields reads of the clock; with
 // the T2 time default on, a declared clock passes by its type and form, so
 // the PUT is answered and both fields are learned as clocks checked by
-// their form. Without the rules it is refused as before. The application's
+// their form. Without the rules, under the time default, a time never
+// blocks keeping a test: both fields are the reads of the clock their
+// call's window holds in both runs, learned as such; with keploy.yml's times
+// strict it is refused as before. The application's
 // clock is known in the call's span in both runs, as the hooks tell it in
 // record's full round.
 func TestLearnMatchHoldsADeclaredClockAnEarlierNameEchoes(t *testing.T) {
@@ -99,9 +102,23 @@ func TestLearnMatchHoldsADeclaredClockAnEarlierNameEchoes(t *testing.T) {
 		return served, miss, db
 	}
 
-	served, miss, _ := run(nil, true, version)
+	// No rules, under the time default: both stamps are the reads of the
+	// clock their call's window holds in both runs, learned so (no form:
+	// no rule declares them), the name's second a coincidence of two reads
+	// in one second. With keploy.yml's times strict the PUT is refused on
+	// the name's echo, as the run refused it.
+	served, miss, db := run(nil, true, version)
+	if served == nil || miss != nil || len(db.consumed) != 1 {
+		t.Fatalf("no rules, time default: served %v, miss %+v; want the PUT answered", served != nil, miss)
+	}
+	for _, f := range []string{"body.data.lastUsedAt", "body.data.updatedAt"} {
+		if o, ok := db.consumed[0].Spec.Clocks[f]; !ok || o.Form != "" || o.Since != "" {
+			t.Errorf("no rules, time default: %s learned as %+v (clocks %v); want a read of the clock in its call's window", f, o, db.consumed[0].Spec.Clocks)
+		}
+	}
+	served, miss, _ = run(nil, false, version)
 	if served != nil || miss == nil || !strings.Contains(miss.res.Why, "body.data.lastUsedAt carries a value test case post-client-v1-apps-1 sent earlier in the test at body.name, inside a longer value or at a place keploy cannot bind it") {
-		t.Fatalf("no rules: served %v, miss %+v; want the PUT refused on the name's echo, as the run refused it", served != nil, miss)
+		t.Fatalf("no rules, times strict: served %v, miss %+v; want the PUT refused on the name's echo, as the run refused it", served != nil, miss)
 	}
 	// Under the time default both fields are checked by their form; with
 	// keploy.yml's times strict, by the rules' range in the call's span, in

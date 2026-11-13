@@ -24,8 +24,11 @@ import (
 // clock (expiresAt one plus 365 days); the rule settles which source the
 // moment has, so the PUT is answered and both stamps are learned as clocks:
 // under the time default checked by their form, with keploy.yml's times
-// strict by the rules' ranges. Without the rules it is refused as before,
-// and so is a value the rule's range does not hold where times are strict.
+// strict by the rules' ranges. Without the rules, under the time default,
+// a time never blocks keeping a test: the stamps are the reads of the clock
+// (createdAt, updatedAt) and of the clock plus 365 days (expiresAt) their
+// call's windows hold in both runs, learned as such. With times strict it is
+// refused as before, and so is a value the rule's range does not hold.
 func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 	const ttl = 365 * 24 * time.Hour
 	path := func(id string) string { return "/v1/secret/data/keploy/personal-access-tokens/keploy.io/" + id }
@@ -102,8 +105,9 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 		return served, miss, db
 	}
 
-	// Without the rules the PUT is refused (createdAt, a pick from the
-	// name by the clock as far as keploy can tell). With the stamps' rules
+	// Without the rules the PUT is refused where times are strict
+	// (createdAt, a pick from the name by the clock as far as keploy can
+	// tell), and answered under the time default. With the stamps' rules
 	// but expiresAt's, the run refused it on expiresAt, built by the offset
 	// on the name; its call's window holds it as a read of the clock plus
 	// 365 days in both runs, so it is a time all the same, learned as that
@@ -113,16 +117,25 @@ func TestLearnMatchHoldsADeclaredExpiryAnEarlierNameMovesBy(t *testing.T) {
 	stamps := []models.DeclaredSource{rules[0], rules[2]}
 	const offsetLine = "body.data.expiresAt changed, and its moment, to the second, stands 8760h0m0s after the moment test case post-query-83 at body.variables.input.name holds"
 	for _, timeForm := range []bool{true, false} {
-		if served, miss, _ := run(nil, timeForm, ttl, ""); served != nil || miss == nil {
-			t.Fatalf("no rules, time default %v: served %v, miss %+v; want the PUT refused", timeForm, served != nil, miss)
+		served, miss, db := run(nil, timeForm, ttl, "")
+		if timeForm != (served != nil) || timeForm == (miss != nil) {
+			t.Fatalf("no rules, time default %v: served %v, miss %+v; want the PUT answered under the time default alone", timeForm, served != nil, miss)
+		}
+		if timeForm {
+			clocks := db.consumed[0].Spec.Clocks
+			for f, since := range map[string]string{"body.data.createdAt": "", "body.data.updatedAt": "", "body.data.expiresAt": models.SinceTestBegin} {
+				if o, ok := clocks[f]; !ok || o.Since != since || (f == "body.data.expiresAt") != (o.Min >= ttl-time.Second) {
+					t.Errorf("no rules, time default: %s learned as %+v (clocks %v); want a read of the clock (expiresAt plus 365 days, since its test began)", f, o, clocks)
+				}
+			}
 		}
 		shift = -time.Hour
-		served, miss, _ := run(stamps, timeForm, ttl, "")
+		served, miss, _ = run(stamps, timeForm, ttl, "")
 		shift = 0
 		if served != nil || miss == nil || timeForm && !strings.Contains(miss.res.Why, offsetLine) {
 			t.Fatalf("no expiry rule, stamps an hour off round F's clock, time default %v: served %v, miss %+v; want the PUT refused (on the offset under the time default)", timeForm, served != nil, miss)
 		}
-		served, miss, db := run(stamps, timeForm, ttl, "")
+		served, miss, db = run(stamps, timeForm, ttl, "")
 		if !timeForm {
 			// mock.times: strict checks a time by its range and
 			// provenance: the read since the test began keeps the range

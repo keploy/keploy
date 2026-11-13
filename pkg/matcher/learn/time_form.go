@@ -63,6 +63,23 @@ import (
 // writes in no form of an instant keeps its refusal: a time of another type
 // or form is refused, as is anything that is no time.
 //
+// In keploy mock's client tests (T2; keploy record's server tests, T1, are
+// unchanged), a value the classify path's source search found in what an
+// earlier call of the test sent, inside a longer value where no variable
+// binds it, is a read of the clock where, read with no source, its call's
+// window holds it as one in both runs (classifyRead's ofTimePart): a
+// heartbeat's epoch second that stands inside a name stamped with the test's
+// clock in the same second, in both runs. Its digits matching the name is a
+// coincidence of two reads in one second, which never turns the read into a
+// bound value nor refuses it; a replay checks it in its call's window, as any
+// read of the clock it learns. A value the test gave (a given) holds no read
+// of the clock: the search reads a given's text alone. A place that binds the
+// value whole keeps its bind, as below; one in an answer, a pick from what
+// the application was given, keeps its reading; and keploy.yml's times
+// strict, or a clock rule it declares at the field, decides the place's
+// variable as before (Learned.strictRefusal, Learned.placeRefused). A real
+// given that is no time is still followed whole, and a part of it refused.
+//
 // A time learning bound to an earlier place that holds its value (a Value,
 // a variable bound whole) keeps that bind wherever the bind holds. Where it
 // does not (round F's call carries another value than the place it was bound
