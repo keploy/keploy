@@ -728,8 +728,11 @@ var answerNeverAnEOF = map[byte]bool{
 // the client's stream ends first, what the server sent after the definitions
 // does (end). The mocks of the commands without a response sent meanwhile are
 // recorded behind the PREPARE's (queued), so mocks are emitted in the order
-// their commands were sent. A recording that stops while a PREPARE is held
-// leaves it out, reported as every exchange the recorder leaves out is
+// their commands were sent. At the recording's stop the client's stream ends
+// as it does at any other end, once the relay has handed on what it captured
+// before the stop, so what the server sent after the definitions settles the
+// PREPARE there too (end). A recorder that stops reading while a PREPARE is
+// held leaves it out, reported as every exchange the recorder leaves out is
 // (heldPrepare.leaveOut).
 type heldPrepare struct {
 	what string

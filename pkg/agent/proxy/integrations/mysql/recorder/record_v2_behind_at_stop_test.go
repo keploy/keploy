@@ -1,6 +1,7 @@
 package recorder
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -216,4 +217,39 @@ func emitAtStopMock(name string) *models.Mock {
 func spanCount(s *syncMock.Spans) int {
 	n, _ := s.Counts()
 	return n
+}
+
+// A connection joined mid-stream frames on an assumption, so a PREPARE with one
+// run of definitions is held until a packet settles its framing
+// (heldPrepare). The recording can stop with the PREPARE held and nothing sent
+// after it on the client's stream: what the server sent after the definitions,
+// its EOF here, was captured before the stop, and the relay ends both streams
+// once it has handed that on. The recorder settles the PREPARE from it as at
+// any end of the client's stream, and records it with its EOF, leaving nothing
+// out. Before, it settled it so only while the recording ran: at the stop it
+// left the PREPARE out, though its capture held it whole.
+func TestRecordV2_PostTLS_APrepareHeldAtTheStopIsSettledByWhatTheServerSent(t *testing.T) {
+	t.Parallel()
+	def := columnPayload(t, &mysql.ColumnDefinition41{Catalog: "def", Name: "?", OrgName: "?", FixedLength: 0x0c, CharacterSet: 0x3f, ColumnLength: 20, Type: byte(mysql.FieldTypeLongLong)})
+	j := newJoinedMidStream(t)
+	leftOut := &orphanSpans{}
+	j.h.sess.Orphans = leftOut
+	reply := prepareOK(false, [][]byte{def, def}, nil) // PREPARE_OK, 2 definitions, EOF
+	j.exchange(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "SELECT id FROM t WHERE a = ? AND b = ?"...), 0), reply)
+	ctx, cancel := context.WithCancel(j.ctx)
+	cancel()
+	j.ctx = ctx
+	j.h.sess.Ctx = ctx
+	j.h.sess.RecordingDone = ctx.Done()
+	mocks, err := j.run(t)
+	if err != nil {
+		t.Fatalf("RecordV2 = %v, want nil: the streams' end ends the recording", err)
+	}
+	if len(mocks) != 1 || leftOut.count() != 0 {
+		t.Fatalf("%d mock(s), %d left out; want the PREPARE recorded, nothing left out", len(mocks), leftOut.count())
+	}
+	sp, ok := mocks[0].Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket)
+	if !ok || len(sp.ParamDefs) != 2 || !bytes.Equal(sp.EOFAfterParamDefs, reply[len(reply)-1]) {
+		t.Fatalf("the PREPARE recorded %+v; want its 2 definitions and the EOF it was sent", mocks[0].Spec.MySQLResponses[0].Message)
+	}
 }

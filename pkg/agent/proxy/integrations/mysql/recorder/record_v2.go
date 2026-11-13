@@ -1506,7 +1506,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	var held *heldPrepare
 	defer func() {
 		if held != nil {
-			held.leaveOut(sess, decodeCtx, notRecorded("the recording stopped before a packet settled the %s response's framing", held.what))
+			held.leaveOut(sess, decodeCtx, notRecorded("the connection's recording ended before a packet settled the %s response's framing", held.what))
 		}
 	}()
 	// carry is the first packet of the response about to be read, read by
@@ -1669,9 +1669,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			}
 			respFirst, joined = cs.next, cs.joined
 			if err != nil {
-				if held != nil && ctx.Err() == nil && (errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed)) {
+				if held != nil && (errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed)) {
 					// The client's stream ended with a PREPARE held: what the
-					// server sent after it is all on its stream.
+					// server sent after it is all on its stream. At the
+					// recording's stop too: the relay ends both streams once
+					// it has handed on what it captured before the stop.
 					h := held
 					held = nil
 					if endErr := h.end(ctx, logger, sess, decodeCtx); endErr != nil {
