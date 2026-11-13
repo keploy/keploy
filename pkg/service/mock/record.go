@@ -89,6 +89,10 @@ func (m *mockService) Record(ctx context.Context) error {
 	if err := m.checkRealDeps(); err != nil {
 		return err
 	}
+	tlsPrivateKey, err := m.tlsPrivateKey()
+	if err != nil {
+		return err
+	}
 	m.logger.Info("Recording mocks for your test command",
 		zap.String("mock-set", name),
 		zap.String("command", m.userCommand))
@@ -315,6 +319,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	outgoing, err := m.instrumentation.GetOutgoing(captureCtx, models.OutgoingOptions{
 		Rules:                     m.config.BypassRules,
 		MongoPassword:             m.config.Test.MongoPassword,
+		TLSPrivateKey:             tlsPrivateKey,
 		MysqlPorts:                m.config.MysqlPorts,
 		DisableMysqlAutoDetect:    m.config.DisableMysqlAutoDetect,
 		DisableMysqlEndpointDrift: m.config.DisableMysqlEndpointDrift,
