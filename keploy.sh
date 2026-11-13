@@ -205,6 +205,25 @@ installKeploy (){
     fi
 
 
+    # Runs one step of the install that needs root: as it is when the install
+    # runs as root, through sudo otherwise. A container's root often has no
+    # sudo at all (debian and ubuntu images ship none), and calling sudo there
+    # failed the install.
+    keploy_as_root() {
+        if [ "$(id -u)" = 0 ]; then
+            "$@"
+        else
+            sudo "$@"
+        fi
+    }
+
+
+    # Whether the install can run a step as root: it is root, or it has sudo.
+    keploy_can_be_root() {
+        [ "$(id -u)" = 0 ] || command -v sudo >/dev/null 2>&1
+    }
+
+
     # The release tarball was extracted into $keploy_tmp_dir (see the bottom of
     # this script), so the binary is $keploy_tmp_dir/keploy on every platform.
     # `return`, never `exit`: users source this script, and an `exit` closes
@@ -241,7 +260,7 @@ installKeploy (){
                 return 1
             fi
         else
-            if ! { sudo mkdir -p /usr/local/bin && sudo mv "$source_dir" /usr/local/bin/keploy; }; then
+            if ! { keploy_as_root mkdir -p /usr/local/bin && keploy_as_root mv "$source_dir" /usr/local/bin/keploy; }; then
                 echo "Error: Failed to move the keploy binary from $source_dir to /usr/local/bin" >&2
                 return 1
             fi
@@ -355,7 +374,10 @@ installKeploy (){
             fi
         else
             # Only set alias for v2.x.x versions (including pre-release like -alpha, -beta, -rc, etc.)
-            if [[ "$version" =~ ^v2\.[0-9]+\.[0-9]+ ]]; then
+            # That alias runs keploy through sudo. Root runs it as it is, and a
+            # container's root may have no sudo at all, where the alias would
+            # leave it no keploy that runs: root gets none.
+            if [[ "$version" =~ ^v2\.[0-9]+\.[0-9]+ ]] && [ "$(id -u)" != 0 ]; then
                 ALIAS_CMD="alias keploy='sudo -E env PATH=\"\$PATH\" keploy'"
                 # Handle zsh or bash for non-macOS systems
                 if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
@@ -477,6 +499,16 @@ installKeploy (){
     if [ "$OS_NAME" = "Darwin" ]; then
         NO_ROOT=true
     fi
+    # Without -noRoot, keploy goes in /usr/local/bin (and outside CI, debugfs
+    # is mounted), which takes root. A user who is not root and has no sudo is
+    # stopped here, before anything is downloaded, and told how to install
+    # without it.
+    if [ "$NO_ROOT" = false ] && ! keploy_can_be_root; then
+        echo "Error: keploy installs in /usr/local/bin, which takes root, and this user is not root and has no sudo." >&2
+        # shellcheck disable=SC2016
+        echo 'Run the install as root, or add -noRoot to install keploy in ~/.keploy/bin for this user; in a pipeline, put $HOME/.keploy/bin on PATH for the steps after it.' >&2
+        return 1
+    fi
 
 
     if [ "$IS_CI" = false ]; then
@@ -486,7 +518,7 @@ installKeploy (){
         fi
         if [ "$NO_ROOT" = false ]; then
             if ! mountpoint -q /sys/kernel/debug; then
-                sudo mount -t debugfs debugfs /sys/kernel/debug
+                keploy_as_root mount -t debugfs debugfs /sys/kernel/debug
             fi
         fi
         if [ "$ARCH" = "x86_64" ]; then
