@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"crypto/sha256"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -14,9 +15,13 @@ import (
 // entry it is to become (Reason models.WorkerRuleReason of the rule), waiting
 // until the set's mapping file can take it.
 //
-// Every matching mock is marked, the ones a test consumed and the ones no test
-// did (a call made outside every test's window, which no test's entry ever
-// lists): a worker call's mock is often of the second kind.
+// For each call a rule matches, its first mock is marked, whether a test
+// consumed it or none did (a call made outside every test's window, which no
+// test's entry ever lists): a worker call's mock is often of the second kind.
+// One per call is enough: a marked mock is served to every test for the whole
+// session, so the other workers' recordings of the same call
+// (models.WorkerMockCallKey) add nothing but clutter. A rule that names
+// several calls (every table's schema read) marks one mock of each.
 //
 // The entries are written by the mapping stream's consumer, right after it
 // writes a batch of tests' mappings (consumeMappingsFor), and once more after
@@ -31,15 +36,20 @@ type workerMarks struct {
 	mu      sync.Mutex
 	pending []models.MockEntry
 	written int
-	// overflowed is set once pending reached maxPendingWorkerMarks and a
-	// mark was dropped: said once.
+	// marked is the calls a rule marked a mock of already, as a digest of
+	// the rule id and call key (a key can hold a whole Redis value, or an
+	// AUTH password): pending holds at most a mark per call.
+	marked map[[sha256.Size]byte]struct{}
+	// overflowed is set once marked reached maxWorkerMarkCalls and a call
+	// went unmarked: said once.
 	overflowed bool
 }
 
-// maxPendingWorkerMarks bounds the marks waiting for the set's mapping file. A
-// recording that never writes one (keploy record without --sync) would
-// otherwise hold every mark a rule makes for as long as it runs.
-const maxPendingWorkerMarks = 10000
+// maxWorkerMarkCalls bounds the calls a recording marks: a rule matching a
+// call per request (every session key's GET) would otherwise grow the marks,
+// and the ones waiting for the set's mapping file, for as long as the
+// recording runs.
+const maxWorkerMarkCalls = 10000
 
 // newWorkerMarks is the marks of a recording under rules, into db: nil,
 // marking nothing, when there are none, when db cannot add to a set's worker
@@ -80,18 +90,26 @@ func (w *workerMarks) add(m *models.Mock) {
 		ResTimestampMock: models.FormatMockTimestamp(m.Spec.ResTimestampMock),
 		Reason:           models.WorkerRuleReason(id),
 	}
+	call := sha256.Sum256([]byte(id + "\x00" + models.WorkerMockCallKey(m)))
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.pending) >= maxPendingWorkerMarks {
+	if _, done := w.marked[call]; done {
+		return
+	}
+	if len(w.marked) >= maxWorkerMarkCalls {
 		if !w.overflowed {
 			w.overflowed = true
-			w.logger.Warn("worker-mock rules matched more mocks than can wait for the test set's mapping file; later matches are not marked",
-				zap.Int("waiting", len(w.pending)),
-				zap.String("next_step", "record with --sync, so the mapping file is written as the recording goes"))
+			w.logger.Warn("worker-mock rules matched more distinct calls than a recording marks; later calls are not marked",
+				zap.Int("calls", len(w.marked)),
+				zap.String("next_step", "a worker-mock rule names a call each worker makes once: narrow a rule that matches a call per request"))
 		}
 		return
 	}
 	w.pending = append(w.pending, e)
+	if w.marked == nil {
+		w.marked = map[[sha256.Size]byte]struct{}{}
+	}
+	w.marked[call] = struct{}{}
 }
 
 // workerAdder is the mapping store's AddToWorker.

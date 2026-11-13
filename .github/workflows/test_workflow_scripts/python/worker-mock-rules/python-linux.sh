@@ -13,16 +13,17 @@
 # the test fails.
 #
 # The user names such a read in keploy.yml (record.workerMocks): each leg
-# writes one rule for its read. keploy record adds every mock a rule matches
-# to the set's worker scope (mappings.yaml `worker:`, reason
-# worker-rule:<rule id>) and keeps it in its test's list, so a keploy that
-# does not read the scope replays the set as before; keploy test serves those
-# mocks to every test.
+# writes one rule for its read. keploy record adds one mock of each distinct
+# call a rule matches (each leg's read is one call, so one mock) to the set's
+# worker scope (mappings.yaml `worker:`, reason worker-rule:<rule id>; one
+# copy is served to every test for the session)
+# and keeps it in its test's list, so a keploy that does not read the scope
+# replays the set as before; keploy test serves it to every test.
 #
 # Each leg records with --sync (a recording without it writes no
 # mappings.yaml, and record marks only a set that has one), sending requests
 # until both workers have made the read. It checks that exactly the read's
-# mocks are marked, stops the dependency so replay can only answer from
+# first mock is marked, stops the dependency so replay can only answer from
 # mocks, and replays until a run has had a cold worker reached by another
 # test than at record (the app logs which request made each read): the set
 # with its marks taken out must fail such a run, and the set as recorded must
@@ -227,8 +228,10 @@ run_leg() {
         ls -la "$set" 2>/dev/null
         return 1
     fi
-    # Each mock of the read must be in the worker scope, marked, and still
-    # in the list of the test that recorded it.
+    # The read's first recorded mock must be in the worker scope, marked (one
+    # copy is served to every test for the session, so the rule marks one),
+    # and every mock of the read still in the list of the test that recorded
+    # it.
     if ! python3 - "${set}/mappings.yaml" "${set}/mocks.yaml" "$holds" "$rule_id" <<'EOF'
 import re, sys
 mappings, mocks, holds = open(sys.argv[1]).read(), open(sys.argv[2]).read(), sys.argv[3]
@@ -242,8 +245,9 @@ worker_part, tests_part = section("worker"), section("tests")
 worker = re.findall(r"- name: (\S+)", worker_part)
 marked = re.findall(r"- name: (\S+)\n(?:\s+\w+: .*\n)*?\s+reason: worker-rule:" + re.escape(sys.argv[4]) + r"\b", worker_part)
 print("mocks of the read:", reads, "worker scope:", worker, "marked:", marked)
-# Exactly the read's mocks are marked, by the leg's rule: no other call.
-ok = len(reads) >= 2 and sorted(marked) == sorted(reads)
+# Exactly the read's first mock is marked, by the leg's rule: not the other
+# workers' copies, and no other call.
+ok = len(reads) >= 2 and marked == reads[:1]
 for n in reads:
     if not re.search(r"- name: " + re.escape(n) + r"\n", tests_part):
         print("not in any test's list:", n)

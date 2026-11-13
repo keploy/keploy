@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -41,6 +42,13 @@ import (
 //   - PostgresV3: "query", a regex on the mock's normalized statement.
 //   - Redis: "command" (case-insensitive) and "key", a regex on its first
 //     argument; every command the mock records must match.
+//   - Http, Http2, MySQL, Redis: "response", an optional regex on what the
+//     call answered (the HTTP body; the MySQL result packets as JSON, column
+//     names and values included, so a quote or backslash in a value reads
+//     escaped, \" and \\, and bytes that are not UTF-8 read as U+FFFD; the
+//     Redis reply), to name one of a call's copies (the one carrying a new
+//     key, say). Only a user's rule holds it: a rule derived from a mock
+//     (SuggestWorkerMockRule) never does.
 //
 // Regexes are RE2 (linear time) and unanchored: a rule anchors with ^ and $.
 type WorkerMockRule struct {
@@ -71,15 +79,15 @@ var workerRuleID = regexp.MustCompile(workerRuleIDPattern)
 // workerRuleKeys are the match keys each kind reads; "destination" is read for
 // every kind.
 var workerRuleKeys = map[Kind][]string{
-	HTTP:       {"method", "host", "path", "pathregex"},
-	HTTP2:      {"method", "host", "path", "pathregex"},
-	MySQL:      {"query"},
+	HTTP:       {"method", "host", "path", "pathregex", "response"},
+	HTTP2:      {"method", "host", "path", "pathregex", "response"},
+	MySQL:      {"query", "response"},
 	PostgresV3: {"query"},
-	REDIS:      {"command", "key"},
+	REDIS:      {"command", "key", "response"},
 }
 
 // workerRuleRegexKeys are the keys whose values are regexes.
-var workerRuleRegexKeys = map[string]bool{"pathregex": true, "query": true, "key": true}
+var workerRuleRegexKeys = map[string]bool{"pathregex": true, "query": true, "key": true, "response": true}
 
 // workerRuleKinds are the kinds this tree records. A rule naming one of them
 // with another case (http for Http) is refused, as the typo it is; a kind not
@@ -173,11 +181,32 @@ func (r WorkerMockRule) Validate() []string {
 	if set == 0 && strings.TrimSpace(r.Kind) != "" {
 		problems = append(problems, "it matches on nothing: set at least one match key")
 	}
-	if set == 1 {
-		for _, k := range []string{"host", "destination"} {
-			if g, ok := mt[k]; ok && globMatchesEverything(k, g) {
-				problems = append(problems, "its only match key matches everything")
+	// The request names the call; a response alone would name every call of
+	// the kind that answered alike. A request key that matches everything
+	// names none.
+	// A method or a Redis command alone names no call either (every GET to
+	// any host, every GET of any key), so a response rule needs more.
+	naming, callNaming, regexAll := 0, 0, false
+	for k, v := range mt {
+		switch {
+		case k == "response", strings.TrimSpace(v) == "":
+		case workerRuleRegexKeys[k] && matchesEverything(v):
+			regexAll = true // said above
+		case (k == "host" || k == "destination") && globMatchesEverything(k, v):
+		default:
+			naming++
+			if k != "method" && k != "command" {
+				callNaming++
 			}
+		}
+	}
+	if response := strings.TrimSpace(mt["response"]) != ""; response && callNaming == 0 {
+		problems = append(problems, "it matches on the response alone: name the call too (a request key, or destination)")
+	} else if !response && naming == 0 && set > 0 && !regexAll {
+		if set == 1 {
+			problems = append(problems, "its only match key matches everything")
+		} else {
+			problems = append(problems, "every match key of it matches everything")
 		}
 	}
 	return problems
@@ -255,6 +284,81 @@ func MatchWorkerMockRules(rules []WorkerMockRule, m *Mock) (string, bool) {
 	return "", false
 }
 
+// WorkerMockCallKey is the call m records: an HTTP request's method, host,
+// path and query, with a digest of its body when it has one; the statements
+// of a SQL mock and the commands of a Redis one, with the destination they
+// went to. Two mocks with one key record the same call (another worker's copy
+// of it), and one of them, served to every test for the session, answers it
+// for all. A mock whose call keploy cannot name (another kind, or one that
+// records no statement or command it reads) is a call of its own: its key
+// names the mock, so it is never taken for another's copy.
+func WorkerMockCallKey(m *Mock) string {
+	if m == nil {
+		return ""
+	}
+	kind := string(m.Kind)
+	dest := strings.TrimSpace(m.Spec.Metadata["destAddr"])
+	own := kind + "\x00mock\x00" + m.Name
+	switch m.Kind {
+	case HTTP, HTTP2:
+		method, host, p, ok := httpCallOf(m)
+		if !ok {
+			return own
+		}
+		query, body := httpQueryAndBodyOf(m)
+		parts := []string{kind, strings.ToUpper(method), strings.ToLower(host), p, query}
+		if body != "" {
+			sum := sha256.Sum256([]byte(body))
+			parts = append(parts, hex.EncodeToString(sum[:]))
+		}
+		return strings.Join(parts, "\x00")
+	case MySQL:
+		if st := mysqlStatements(m); len(st) > 0 {
+			return strings.Join(append([]string{kind, dest}, st...), "\x00")
+		}
+	case PostgresV3:
+		if st := postgresV3Statements(m); len(st) > 0 {
+			parts := append([]string{kind, dest}, st...)
+			// The normalized statement has its constants as $N: the
+			// values (each table's schema read names its table there)
+			// are the call too.
+			if q := m.Spec.PostgresV3.Query; len(q.BindValues) > 0 || len(q.Literals) > 0 {
+				raw, err := json.Marshal(struct{ B, L PostgresV3Cells }{q.BindValues, q.Literals})
+				if err != nil {
+					return own
+				}
+				sum := sha256.Sum256(raw)
+				parts = append(parts, hex.EncodeToString(sum[:]))
+			}
+			return strings.Join(parts, "\x00")
+		}
+	case REDIS:
+		if cmds := redisCommands(m); len(cmds) > 0 {
+			parts := []string{kind, dest}
+			for _, c := range cmds {
+				parts = append(parts, strings.Join(c, " "))
+			}
+			return strings.Join(parts, "\x00")
+		}
+	}
+	return own
+}
+
+// httpQueryAndBodyOf is the query string and body of m's HTTP request.
+func httpQueryAndBodyOf(m *Mock) (query, body string) {
+	var raw string
+	switch {
+	case m.Kind == HTTP && m.Spec.HTTPReq != nil:
+		raw, body = m.Spec.HTTPReq.URL, m.Spec.HTTPReq.Body
+	case m.Kind == HTTP2 && m.Spec.HTTP2Req != nil:
+		raw, body = m.Spec.HTTP2Req.URL, m.Spec.HTTP2Req.Body
+	}
+	if u, err := ParseRequestURL(raw); err == nil {
+		query = u.RawQuery
+	}
+	return query, body
+}
+
 // Matches reports whether m is a call the rule names: its kind is the rule's
 // and every match key holds.
 func (r WorkerMockRule) Matches(m *Mock) bool {
@@ -268,17 +372,67 @@ func (r WorkerMockRule) Matches(m *Mock) bool {
 			return false
 		}
 	}
+	request := true
 	switch m.Kind {
 	case HTTP, HTTP2:
-		return r.matchesHTTP(m)
+		request = r.matchesHTTP(m)
 	case MySQL:
-		return r.matchesStatements(mysqlStatements(m))
+		request = r.matchesStatements(mysqlStatements(m))
 	case PostgresV3:
-		return r.matchesStatements(postgresV3Statements(m))
+		request = r.matchesStatements(postgresV3Statements(m))
 	case REDIS:
-		return r.matchesRedis(m)
+		request = r.matchesRedis(m)
+	}
+	if !request {
+		return false
+	}
+	// The response last: reading it (a MySQL result as JSON) costs more than
+	// any request key.
+	if v, set := mt["response"]; set && !workerRegexMatches(v, workerMockResponseText(m)) {
+		return false
 	}
 	return true
+}
+
+// workerMockResponseText is what m's call answered, as a rule's "response"
+// reads it: the HTTP body, the MySQL result packets as JSON (one per line),
+// the Redis reply. "" for a kind whose answer it does not read.
+func workerMockResponseText(m *Mock) string {
+	switch m.Kind {
+	case HTTP:
+		if m.Spec.HTTPResp != nil {
+			return m.Spec.HTTPResp.Body
+		}
+	case HTTP2:
+		if m.Spec.HTTP2Resp != nil {
+			return m.Spec.HTTP2Resp.Body
+		}
+	case MySQL:
+		// JSON as written, < > & included, so a regex reads the values
+		// as the rows hold them.
+		var b strings.Builder
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(false)
+		for _, resp := range m.Spec.MySQLResponses {
+			_ = enc.Encode(resp.Message) // one JSON value and a newline each
+		}
+		return b.String()
+	case REDIS:
+		var b strings.Builder
+		for _, p := range m.Spec.GenericResponses {
+			for _, msg := range p.Message {
+				data := msg.Data
+				if msg.Type == "binary" {
+					if raw, err := base64.StdEncoding.DecodeString(msg.Data); err == nil {
+						data = string(raw)
+					}
+				}
+				b.WriteString(data)
+			}
+		}
+		return b.String()
+	}
+	return ""
 }
 
 // applicable is the part of Validate a match needs, cheap enough to run for
@@ -442,9 +596,9 @@ func mysqlStatements(m *Mock) []string {
 	for _, req := range m.Spec.MySQLRequests {
 		switch p := req.Message.(type) {
 		case *mysql.QueryPacket:
-			out = append(out, collapseSpace(p.Query))
+			out = append(out, collapseSpace(stripSQLComments(p.Query)))
 		case *mysql.StmtPreparePacket:
-			out = append(out, collapseSpace(p.Query))
+			out = append(out, collapseSpace(stripSQLComments(p.Query)))
 		}
 	}
 	return out
@@ -456,7 +610,7 @@ func postgresV3Statements(m *Mock) []string {
 	if s == nil || s.Query == nil || strings.TrimSpace(s.Query.SQLNormalized) == "" {
 		return nil
 	}
-	return []string{collapseSpace(s.Query.SQLNormalized)}
+	return []string{collapseSpace(stripPostgresComments(s.Query.SQLNormalized))}
 }
 
 // redisCommands is each command m's Redis requests send, as its arguments
@@ -522,6 +676,150 @@ func parseRESPCommands(s string) [][]string {
 const maxRESPBulk = 1 << 20
 
 func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// stripSQLComments drops q's plain block comments, the /*...*/ a tracer or a
+// query tagger adds to every statement (dd-trace's sqlcommenter carries a
+// fresh traceparent in each, Rails' query log tags the caller): the same call
+// is then one statement however it was tagged, so a rule derived from one
+// copy names the others and the next recording's, and the recorder marks one
+// copy of it. An optimizer hint (/*+ ... */) and an executable comment
+// (MySQL's /*! ... */, MariaDB's /*M! ... */) are part of the statement and
+// stay, as does anything inside a quoted string or identifier, or in a line
+// comment (-- or #, to the line's end, kept as it is). A removed comment
+// leaves a space, so the words around it stay apart. An unterminated comment
+// is kept as it is.
+func stripSQLComments(q string) string { return stripComments(q, false) }
+
+// stripPostgresComments is stripSQLComments in PostgreSQL's dialect: any --
+// starts a line comment (MySQL's needs a space after it), # is an operator,
+// block comments nest, a backslash in a string is a character except in an
+// E'...' string, where it escapes the next byte as in MySQL, and a
+// $tag$...$tag$ string is kept whole. A hint (/*+ ... */, pg_hint_plan's)
+// stays; MySQL's executable comments are comments here.
+func stripPostgresComments(q string) string { return stripComments(q, true) }
+
+func stripComments(q string, postgres bool) string {
+	if !strings.Contains(q, "/*") {
+		return q
+	}
+	var b strings.Builder
+	b.Grow(len(q))
+	for i := 0; i < len(q); {
+		c := q[i]
+		switch {
+		case c == '\'' || c == '"' || (c == '`' && !postgres):
+			// A quoted run, to its closing quote: a doubled quote stays
+			// inside, and in a MySQL string, or a PostgreSQL E'...' one, a
+			// backslash escapes the next byte.
+			escapes := !postgres && c != '`' || postgres && c == '\'' && escapeString(q, i)
+			j := i + 1
+			for j < len(q) {
+				if escapes && q[j] == '\\' && j+1 < len(q) {
+					j += 2
+					continue
+				}
+				if q[j] == c {
+					if j+1 < len(q) && q[j+1] == c {
+						j += 2
+						continue
+					}
+					break
+				}
+				j++
+			}
+			if j < len(q) {
+				j++
+			}
+			b.WriteString(q[i:j])
+			i = j
+		case postgres && c == '$' && (i == 0 || !identByte(q[i-1])):
+			// A dollar-quoted string, $tag$ to the same $tag$, kept whole.
+			if tag := dollarTag(q[i:]); tag != "" {
+				end := strings.Index(q[i+len(tag):], tag)
+				if end < 0 {
+					b.WriteString(q[i:])
+					return b.String()
+				}
+				j := i + len(tag) + end + len(tag)
+				b.WriteString(q[i:j])
+				i = j
+				continue
+			}
+			b.WriteByte(c)
+			i++
+		case (c == '#' && !postgres) || (c == '-' && i+1 < len(q) && q[i+1] == '-' && (postgres || i+2 == len(q) || q[i+2] <= ' ')):
+			// A line comment, to its line's end: a quote in it opens nothing.
+			j := strings.IndexByte(q[i:], '\n')
+			if j < 0 {
+				b.WriteString(q[i:])
+				return b.String()
+			}
+			b.WriteString(q[i : i+j+1])
+			i += j + 1
+		case c == '/' && i+2 < len(q) && q[i+1] == '*' && q[i+2] != '+' &&
+			(postgres || (q[i+2] != '!' && !strings.HasPrefix(q[i+2:], "M!"))):
+			end := blockCommentEnd(q, i, postgres)
+			if end < 0 {
+				b.WriteString(q[i:])
+				return b.String()
+			}
+			b.WriteByte(' ')
+			i = end
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
+}
+
+// blockCommentEnd is the index just past the block comment opening at q[i],
+// or -1 when it is not closed. PostgreSQL's nest; MySQL's end at the first */.
+func blockCommentEnd(q string, i int, nested bool) int {
+	depth := 0
+	for j := i; j+1 < len(q); {
+		switch {
+		case q[j] == '/' && q[j+1] == '*':
+			depth++
+			j += 2
+		case q[j] == '*' && q[j+1] == '/':
+			depth--
+			j += 2
+			if depth == 0 || !nested {
+				return j
+			}
+		default:
+			j++
+		}
+	}
+	return -1
+}
+
+// escapeString reports whether the quote at q[i] opens a PostgreSQL E'...'
+// string: an E (or e) before it that is not the end of a longer name.
+func escapeString(q string, i int) bool {
+	return i > 0 && (q[i-1] == 'E' || q[i-1] == 'e') && (i == 1 || !identByte(q[i-2]))
+}
+
+// identByte reports whether b can be part of a PostgreSQL name ($ included).
+func identByte(b byte) bool {
+	return b == '_' || b == '$' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b >= 0x80
+}
+
+// dollarTag is the $tag$ opening a PostgreSQL dollar-quoted string at the
+// start of s ($$ included), or "" when s does not start with one.
+func dollarTag(s string) string {
+	for j := 1; j < len(s); j++ {
+		c := s[j]
+		if c == '$' {
+			return s[:j+1]
+		}
+		if !(c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || (j > 1 && c >= '0' && c <= '9')) {
+			return ""
+		}
+	}
+	return ""
+}
 
 // workerRegexes caches the compiled regexes of rules: a recording matches
 // every mock against them.
