@@ -146,10 +146,8 @@ type takenUp struct {
 	// consumed is how many server bytes the recorder had consumed when the
 	// re-align's cut put the stream at its answer.
 	consumed int64
-	// read: its answer has been read whole, ending in the server's chunk
-	// numbered answerEnd.
-	read      bool
-	answerEnd uint32
+	// read: its answer has been read whole.
+	read bool
 	// emit records its mock; nil when it records none (left out, or a PREPARE
 	// held for its framing: heldPrepare records it).
 	emit   func()

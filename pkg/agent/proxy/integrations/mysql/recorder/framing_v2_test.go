@@ -337,6 +337,14 @@ func recordChunksStamped(t *testing.T, client, server []fakeconn.Chunk, closeAtE
 			t.Fatal("fixture: a chunk with no capture number, which the recorder refuses (fakeconn.ErrUnnumbered)")
 		}
 	}
+	return recordPushed(t, client, server, closeAtEnd, deadline, stamp)
+}
+
+// recordPushed is recordChunksStamped without its check of the fixture: a
+// chunk with no capture number is handed to the recorder as it is, for a row
+// of what the recorder does with one.
+func recordPushed(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool, deadline time.Duration, stamp bool) recording {
+	t.Helper()
 	core, logs := observer.New(zapcore.DebugLevel)
 	logger := zap.New(core)
 	h := newV2Harness(t)

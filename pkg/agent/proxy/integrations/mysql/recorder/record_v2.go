@@ -1694,7 +1694,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		if taken != nil && !taken.read {
 			// The exchange taken up was handled (recorded and held, or left
 			// out) without a fault: its answer ended at the last byte read.
-			taken.read, taken.answerEnd = true, lastAnswerSeq
+			taken.read = true
 		}
 		var cmdBuf []byte
 		var err error
