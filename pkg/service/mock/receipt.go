@@ -606,9 +606,44 @@ func readTestsFile(keployDir, set, file, whose string) (*TestsReceipt, error) {
 	return &r, nil
 }
 
-// ReceiptBytes bounds a receipt read. A receipt is a handful of scalar fields
-// and a coverage summary; the largest keploy writes is well under a kilobyte.
-const ReceiptBytes = 1 << 20
+// ReceiptBytes bounds a receipt read, and so what keploy writes as one. A
+// receipt is a handful of scalar fields and a coverage summary, and the lists
+// a run fills under the proven switch: one entry per miss charged to no test
+// (UnchargedMisses, about a kilobyte each) and per required series. Those grow
+// with the run's calls as the per-test results grow with its tests, so the
+// bound is the per-test results' (TestsReceiptBytes): a Playwright project of
+// 344 tests left 4459 uncharged misses in one round, a receipt of megabytes.
+const ReceiptBytes = TestsReceiptBytes
+
+// receiptCap is the bound both ReadReceipt and writeReceipt hold a receipt
+// to, ReceiptBytes; a row lowers it.
+var receiptCap int64 = ReceiptBytes
+
+// receiptHead opens every receipt writeReceipt writes, before its body.
+const receiptHead = "# Written by `keploy mock replay`: what the last replay of this set proved\n" +
+	"# on this machine. Local and git-ignored; tools read it instead of re-running the replay.\n"
+
+// receiptBody is r as writeReceipt writes it, after receiptHead.
+func receiptBody(r Receipt) ([]byte, error) {
+	return yaml.Marshal(r)
+}
+
+// pastBound is r, whose receipt would be size bytes, past receiptCap, as
+// keploy writes it instead: a receipt ReadReceipt reads back, which says
+// keploy did not complete the run and why, with r's counts and none of its
+// lists. A reader judges no round from it (FailedByKeploy), never one from a
+// receipt that lost the misses it lists.
+func pastBound(r Receipt, size int) Receipt {
+	why := fmt.Sprintf("keploy's receipt of this run is %d bytes, past the %d it reads back, so it lists none of the run's %d misses charged to no test and %d required series; the run has no verdict. Re-run fewer tests at once (split the test command) so each run's receipt fits",
+		size, receiptCap, len(r.UnchargedMisses), len(r.RequiredNotMade)+len(r.RequiredNotDue))
+	if r.Error != "" {
+		why = r.Error + "; " + why
+	}
+	r.FailedBy, r.Error = FailedByKeploy, why
+	r.UnchargedMisses, r.RequiredNotMade, r.RequiredNotDue = nil, nil, nil
+	r.Refusals, r.CannotCapture, r.CaptureIncomplete = nil, nil, nil
+	return r
+}
 
 // ReadReceipt reads keploy/<set>/last-replay.yaml. A missing file is
 // (nil, nil): the set has simply never been replayed here.
@@ -618,7 +653,7 @@ const ReceiptBytes = 1 << 20
 // safeyaml, which refuses anything but a regular file of at most ReceiptBytes,
 // rather than reading to EOF as it once did.
 func ReadReceipt(keployDir, set string) (*Receipt, error) {
-	raw, err := safeyaml.ReadFile(filepath.Join(keployDir, set, ReceiptFile), ReceiptBytes)
+	raw, err := safeyaml.ReadFile(filepath.Join(keployDir, set, ReceiptFile), receiptCap)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -684,13 +719,19 @@ func writeReceipt(logger *zap.Logger, keployDir string, r Receipt) {
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return
 	}
-	body, err := yaml.Marshal(r)
+	head := []byte(receiptHead)
+	body, err := receiptBody(r)
+	if err == nil && int64(len(head)+len(body)) > receiptCap {
+		// Never a receipt ReadReceipt refuses: one that says why it is
+		// not this run's whole receipt.
+		logger.Warn("the replay receipt is past the size keploy reads back, so it records that the run has no verdict",
+			zap.Int("bytes", len(head)+len(body)), zap.Int64("bound", receiptCap))
+		body, err = receiptBody(pastBound(r, len(head)+len(body)))
+	}
 	if err != nil {
 		logger.Debug("failed to encode the replay receipt", zap.Error(err))
 		return
 	}
-	head := []byte("# Written by `keploy mock replay`: what the last replay of this set proved\n" +
-		"# on this machine. Local and git-ignored; tools read it instead of re-running the replay.\n")
 	// One exit for every failure to write: say so, and take the previous
 	// receipt with it. Leaving it is worse than losing it -- it is green,
 	// isolated, and about a run that has just been superseded by one whose
