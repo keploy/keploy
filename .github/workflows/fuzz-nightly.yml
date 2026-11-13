@@ -16,7 +16,8 @@
 #
 # A failure (a crashing input, a failing seed, a build error) fails the job,
 # uploads the crashing input go test wrote to DIR/testdata/fuzz/NAME/, and
-# opens or updates an issue through report-nightly-failure. To keep the
+# opens or updates an issue through report-nightly-failure; a listing that
+# fails, which runs no fuzz job at all, is reported the same way. To keep the
 # input as a regression test, put it in that directory and run
 # `go test -run 'NAME/FILE' ./DIR`; once committed, every PR's go test runs
 # it. testdata is in .gitignore, so re-include the directory there, as the
@@ -140,7 +141,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Report the failure
-        if: failure() && steps.fuzz.outcome == 'failure'
+        if: failure()
         uses: ./.github/actions/report-nightly-failure
         with:
           title: "Nightly fuzzing: ${{ matrix.target.name }} in ${{ matrix.target.dir }} failed"
@@ -150,3 +151,25 @@ jobs:
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
             A crashing input is in the run's artifact `fuzz-crasher-${{ strategy.job-index }}-${{ matrix.target.name }}`. To reproduce, put its file in `${{ matrix.target.dir }}/testdata/fuzz/${{ matrix.target.name }}/` and run `go test -run '${{ matrix.target.name }}/<file>' ./${{ matrix.target.dir }}`.
+
+  # A failed listing skips every fuzz job, and with them the report each one
+  # makes, so the listing's failure is reported here.
+  report-discovery:
+    needs: discover
+    if: failure() && needs.discover.result == 'failure'
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the failure
+        uses: ./.github/actions/report-nightly-failure
+        with:
+          title: "Nightly fuzzing: listing the fuzz targets failed"
+          body: |
+            The nightly fuzz run could not list its targets, so it fuzzed nothing: a package that does not build, a listing with no Fuzz target, or a module download that failed. The discover job's log says which.
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

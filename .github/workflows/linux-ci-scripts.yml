@@ -64,8 +64,9 @@ name: Linux CI scripts
 # coverage against .github/coverage-floor.yaml and of that file against main.
 # A run below its floor less its tolerance fails and one at it passes; a
 # generated file's statements and a block two binaries' data share do not
-# change the sum; a floor lowered since main fails, and so does a main the
-# checkout does not have.
+# change the sum; a floor lowered or removed since main fails, and so does a
+# tolerance raised further than its floor, and a main the checkout does not
+# have.
 #
 # And fuzz-targets.tests.sh: fuzz-targets.sh, the list of Fuzz targets
 # fuzz-nightly.yml runs, read from `go test -list`. Each package's Fuzz names
@@ -318,14 +319,14 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh
 
   coverage-floor:
-    # Ten cases against a stub go and throwaway git repositories; a second or
-    # two.
+    # Thirteen cases against a stub go and throwaway git repositories; a
+    # second or two.
     timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test coverage-floor.sh (a run below its floor less its tolerance fails; generated files and shared blocks leave the sum alone; a lowered floor fails)
+      - name: Test coverage-floor.sh (a run below its floor less its tolerance fails; generated files and shared blocks leave the sum alone; a lowered floor or a raised tolerance fails)
         run: bash .github/workflows/test_workflow_scripts/coverage-floor.tests.sh
 
   fuzz-targets:

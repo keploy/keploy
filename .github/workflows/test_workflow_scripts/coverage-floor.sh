@@ -12,7 +12,8 @@
 #       the percentage is below the floor less the layer's tolerance.
 #   bash .github/workflows/test_workflow_scripts/coverage-floor.sh ratchet BASE_REF
 #       Fails when a floor in the working copy is lower than at BASE_REF, or
-#       is gone. A floor file BASE_REF does not have yet passes; a BASE_REF
+#       is gone, and when a floor less its tolerance is lower than at
+#       BASE_REF. A floor file BASE_REF does not have yet passes; a BASE_REF
 #       that is not there (a shallow checkout) fails, as it would otherwise
 #       pass every change.
 #
@@ -117,8 +118,14 @@ check() {
     return 1
 }
 
+# bar FLOOR TOLERANCE: prints the floor less its tolerance, in hundredths, the
+# line check holds a run to.
+bar() {
+    awk -v f="$1" -v t="$2" 'BEGIN { x = (f - t) * 100; print (x < 0 ? -int(-x + 0.5) : int(x + 0.5)) }'
+}
+
 ratchet() {
-    local base=$1 base_copy key was now fails=0
+    local base=$1 base_copy key was now was_tol now_tol was_bar now_bar fails=0
     if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
         echo "::error::$base is not a commit here, so the floors cannot be compared with it (is the checkout shallow?)"
         return 1
@@ -132,12 +139,24 @@ ratchet() {
     while IFS= read -r key; do
         was=$(floor_value "$base_copy" "$key")
         now=$(floor_value "$floor_file" "$key")
+        was_tol=$(floor_value "$base_copy" "${key}_tolerance")
+        now_tol=$(floor_value "$floor_file" "${key}_tolerance")
         is_number "$was" || continue
         if ! is_number "$now"; then
             echo "::error::the '$key' floor was $was at $base and is gone or not a number here ('$now')"
             fails=$((fails + 1))
         elif awk -v n="$now" -v w="$was" 'BEGIN { exit !(n < w) }'; then
             echo "::error::the '$key' floor was $was at $base and is $now here; a floor can only go up"
+            fails=$((fails + 1))
+        elif is_number "$was_tol" && ! is_number "$now_tol"; then
+            echo "::error::'${key}_tolerance' was $was_tol at $base and is gone or not a number here ('$now_tol')"
+            fails=$((fails + 1))
+        elif is_number "$was_tol" && [ "$(bar "$now" "$now_tol")" -lt "$(bar "$was" "$was_tol")" ]; then
+            # The tolerance is checked too: raising it lowers the line a run
+            # must reach as surely as lowering the floor does.
+            was_bar=$(awk -v x="$(bar "$was" "$was_tol")" 'BEGIN { printf "%.2f", x / 100 }')
+            now_bar=$(awk -v x="$(bar "$now" "$now_tol")" 'BEGIN { printf "%.2f", x / 100 }')
+            echo "::error::the '$key' floor less its tolerance was $was_bar at $base and is $now_bar here; a tolerance may grow only as much as its floor does"
             fails=$((fails + 1))
         else
             echo "'$key' floor $was at $base, $now here: ok"

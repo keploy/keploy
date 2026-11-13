@@ -19,9 +19,10 @@
 # binaries' data both hold counts once, covered when either covered it. A
 # layer the floor file lacks fails with a line naming it.
 #
-# ratchet: a floor raised since the base passes, one lowered fails and is
-# named, a floor file the base does not have passes, and a base that is not a
-# commit here fails.
+# ratchet: a floor raised since the base passes, one lowered or removed fails
+# and is named, a tolerance raised with the floor unchanged fails, a floor and
+# tolerance raised by the same amount pass, a floor file the base does not
+# have passes, and a base that is not a commit here fails.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 script="$here/coverage-floor.sh"
@@ -145,6 +146,19 @@ ratchet_case floor-raised 0 "'unit' floor 61.0 at HEAD, 61.5 here: ok" \
 ratchet_case floor-lowered 1 "the 'merged' floor was 55.0 at HEAD and is 54.9 here; a floor can only go up" \
     'unit=61.0 unit_tolerance=0.2 merged=55.0 merged_tolerance=1.0' \
     'unit=61.0 unit_tolerance=0.2 merged=54.9 merged_tolerance=1.0'
+
+ratchet_case floor-removed 1 "the 'merged' floor was 55.0 at HEAD and is gone or not a number here" \
+    'unit=61.0 unit_tolerance=0.2 merged=55.0 merged_tolerance=1.0' \
+    'unit=61.0 unit_tolerance=0.2'
+
+# A tolerance as large as its floor would pass a run at 0%.
+ratchet_case tolerance-raised 1 "the 'unit' floor less its tolerance was 60.80 at HEAD and is 0.00 here" \
+    'unit=61.0 unit_tolerance=0.2 merged=55.0 merged_tolerance=1.0' \
+    'unit=61.0 unit_tolerance=61.0 merged=55.0 merged_tolerance=1.0'
+
+ratchet_case floor-and-tolerance-raised 0 "'unit' floor 61.0 at HEAD, 62.0 here: ok" \
+    'unit=61.0 unit_tolerance=0.2 merged=55.0 merged_tolerance=1.0' \
+    'unit=62.0 unit_tolerance=1.2 merged=55.0 merged_tolerance=1.0'
 
 ratchet_case new-floor-file 0 'is new since HEAD: nothing to compare' \
     '' 'unit=61.0 unit_tolerance=0.2'
