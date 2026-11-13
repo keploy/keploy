@@ -272,13 +272,18 @@ func TestRacedValues(t *testing.T) {
 	unread.Spec.HTTPResp = nil
 	twice := pageCall("mock-7", -100*time.Millisecond, "session=s0; session=s0", "session=s2")
 	unsent := pageCall("mock-8", -100*time.Millisecond, "", "session=s2")
+	quiet := pageCall("mock-10", -120*time.Millisecond, "session=s0", "")
+	setTwice := pageCall("mock-11", -100*time.Millisecond, "session=s0", "session=s8, session=s2")
+	noRequest := &models.Mock{Name: "mock-12", Kind: models.Mongo, Spec: models.MockSpec{HTTPResp: &models.HTTPResp{Header: map[string]string{"Set-Cookie": "session=s2"}}}}
 	for _, c := range []struct {
 		name    string
 		earlier []*models.Mock
 		live    string
 		want    []string
 	}{
-		{"two answers raced", []*models.Mock{a, b}, "s2", []string{"s1", "s2"}},
+		{"two answers raced", []*models.Mock{a, quiet, b}, "s2", []string{"s1", "s2"}},
+		{"the last value an answer set", []*models.Mock{a, setTwice}, "s2", []string{"s1", "s2"}},
+		{"an answer with no request", []*models.Mock{a, noRequest}, "s2", nil},
 		{"three answers raced", []*models.Mock{a, b, c3}, "s2", []string{"s1", "s2", "s3"}},
 		{"a nil and another protocol's mock among them", []*models.Mock{nil, {Name: "mock-0", Kind: models.Mongo}, a, b}, "s2", []string{"s1", "s2"}},
 		{"a value no answer set", []*models.Mock{a, b}, "s9", nil},
@@ -290,7 +295,15 @@ func TestRacedValues(t *testing.T) {
 		{"the other request sent no pair", []*models.Mock{a, unsent}, "s2", nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := racedValues(m, "session", "s1", c.live, c.earlier)
+			var got []string
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("racedValues panicked: %v", r)
+					}
+				}()
+				got = racedValues(m, "session", "s1", c.live, c.earlier)
+			}()
 			slices.Sort(got)
 			if !reflect.DeepEqual(got, c.want) {
 				t.Fatalf("racedValues = %q, want %q", got, c.want)
@@ -476,13 +489,19 @@ func TestLearnMatchLearnsCookiePairsOneByOne(t *testing.T) {
 		{"the race's other value", []*models.Mock{a, b}, "session=s2; sub=pro", race, ""},
 		{"the race's other value, the page's pair gone", []*models.Mock{without, a, b}, "session=s2", with(race, page), ""},
 		{"the page's pair gone, the session changed", []*models.Mock{without}, "session=s2", with(page, map[string][]string{cookieLeaf: {}}), ""},
+		{"the race's other value, another pair with no source", []*models.Mock{a, b}, "session=s2; sub=pro; t=yv3x", with(race, map[string][]string{cookieLeaf: {}}), ""},
 		{"the race's other value, a pair sent in this run only", []*models.Mock{a, b}, "session=s2; sub=pro; x=1", nil, "(pair session holds another value; pair x is sent in this run only)"},
 		{"a value no racing answer set", []*models.Mock{a, b}, "session=s9; sub=pro", nil, "(pair session holds another value)"},
 		{"one answer set the pair", []*models.Mock{b}, "session=s2; sub=pro", nil, "(pair session holds another value)"},
 		{"a rotation, not a race", []*models.Mock{a, rotated}, "session=s2; sub=pro", nil, "(pair session holds another value)"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got, why := learnPageCookie(t, c.earlier, rec, c.live)
+			recorded := rec
+			if strings.Contains(c.live, "t=") {
+				// A pair whose value no recording holds.
+				recorded += "; t=zq7w"
+			}
+			got, why := learnPageCookie(t, c.earlier, recorded, c.live)
 			if c.want != nil {
 				if why != "" || !reflect.DeepEqual(got, c.want) {
 					t.Fatalf("learned %v (refused: %q), want %v", got, why, c.want)
@@ -631,6 +650,44 @@ func TestPairwiseKept(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := pairwiseKept(c.learned); got != c.want {
 				t.Fatalf("pairwiseKept = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// cookiePairsLearned learns a key for each pair its rule excuses and gives
+// the header's text with those pairs as the call sends them: a pair the
+// page set dropped, a raced pair at its live value, every other part kept
+// as recorded (a part with no '=' is no pair, though named like one), and
+// no blank left at its start. A pair named twice is no pair a rule reads.
+func TestCookiePairsLearned(t *testing.T) {
+	m := learnRecorded("mock-9", -time.Hour+300*time.Millisecond, "POST", "/v1/apps", `{}`, nil, `{}`)
+	without := pageCall("mock-1", -300*time.Millisecond, "session=s0", "")
+	a := pageCall("mock-2", -200*time.Millisecond, "session=s0", "session=s1; Path=/")
+	b := pageCall("mock-3", -150*time.Millisecond, "session=s0", "session=s2; Path=/")
+	earlier := []*models.Mock{without, a, b}
+	for _, c := range []struct {
+		name, rec, live string
+		keys            []string
+		rest            string
+	}{
+		{"the page's pair first", "sub=pro; session=s1", "session=s1", []string{cookieSetByPage + "sub"}, "session=s1"},
+		{"a part named like the page's pair", "session=s1; sub; sub=pro", "session=s1; sub", []string{cookieSetByPage + "sub"}, "session=s1; sub"},
+		{"the race's other value", "session=s1; x=1", "session=s2; x=2", []string{cookieSetByRace + "session"}, "session=s2; x=1"},
+		{"a part named like the raced pair", "session=s1; session; x=1", "session=s2; session; x=2", []string{cookieSetByRace + "session"}, "session=s2; session; x=1"},
+		{"a sent pair the page could have set", "session=s1; sub=pro; x=1", "session=s1; x=1; sub=pro", nil, "session=s1; sub=pro; x=1"},
+		{"the page's pair named twice", "session=s1; sub=a; sub=b", "session=s1", nil, "session=s1; sub=a; sub=b"},
+		{"a raced pair sent twice", "session=s1; x=1", "session=s2; session=s2; x=2", nil, "session=s1; x=1"},
+		{"nothing differs", "session=s1", "session=s1", nil, "session=s1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, rest := cookiePairsLearned(m, c.rec, c.live, earlier)
+			var keys []string
+			for _, l := range got {
+				keys = append(keys, l.Recorded.Path)
+			}
+			if !reflect.DeepEqual(keys, c.keys) || rest != c.rest {
+				t.Fatalf("cookiePairsLearned = %v, %q; want %v, %q", keys, rest, c.keys, c.rest)
 			}
 		})
 	}
