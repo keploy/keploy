@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -987,5 +988,232 @@ func TestDNSForwardLinesSayMockMissOnlyOnAMiss(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// byServers answers each server's query through p.dnsExchange as answers
+// says: an IPv4 address (an A record), "NXDOMAIN", "NODATA" (no record of
+// the type), or nothing for a server that does not answer. A
+// negative answer names its server in a TXT record of its additional
+// section (answeredBy). It returns the servers asked, in order.
+func byServers(p *Proxy, answers map[string]string) *[]string {
+	var mu sync.Mutex
+	asked := new([]string)
+	p.dnsExchange = func(_ *dns.Client, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, 0, err
+		}
+		mu.Lock()
+		*asked = append(*asked, host)
+		mu.Unlock()
+		answer, ok := answers[host]
+		if !ok {
+			return nil, 0, fmt.Errorf("read udp %s: i/o timeout", addr)
+		}
+		r := new(dns.Msg)
+		r.SetReply(m)
+		switch answer {
+		case "NXDOMAIN":
+			r.Rcode = dns.RcodeNameError
+		case "NODATA":
+		default:
+			r.Answer = append(r.Answer, &dns.A{
+				Hdr: dns.RR_Header{Name: m.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+				A:   net.ParseIP(answer),
+			})
+		}
+		r.Extra = append(r.Extra, &dns.TXT{
+			Hdr: dns.RR_Header{Name: "answered-by.", Rrtype: dns.TypeTXT, Class: dns.ClassINET},
+			Txt: []string{host},
+		})
+		return r, 0, nil
+	}
+	return asked
+}
+
+// answeredBy is what an answer of byServers says: its rcode, its A record,
+// and the server that gave it.
+func answeredBy(m *dns.Msg) string {
+	if m == nil {
+		return "no answer"
+	}
+	var a, by string
+	for _, rr := range m.Answer {
+		if rec, ok := rr.(*dns.A); ok {
+			a = " " + rec.A.String()
+		}
+	}
+	for _, rr := range m.Extra {
+		if txt, ok := rr.(*dns.TXT); ok && len(txt.Txt) == 1 {
+			by = txt.Txt[0]
+		}
+	}
+	return dns.RcodeToString[m.Rcode] + a + " from " + by
+}
+
+// windowsUpstream is the forwarder of a Windows machine whose preferred
+// adapter (0) has the servers 10.0.0.1 and 10.0.0.2 and whose second adapter
+// (1), a VPN's, has 10.8.0.1, as upstreamConfig reads them.
+func windowsUpstream(t *testing.T) *Proxy {
+	t.Helper()
+	withAdapters(t, []dnsAdapter{
+		{up: true, servers: []dnsAdapterServer{server(t, "10.0.0.1", 25), server(t, "10.0.0.2", 25)}},
+		{up: true, servers: []dnsAdapterServer{server(t, "10.8.0.1", 50)}},
+	}, nil)
+	orig := dnsGOOS
+	dnsGOOS = "windows"
+	t.Cleanup(func() { dnsGOOS = orig })
+	p := &Proxy{logger: zap.NewNop(), DNSPort: 26789, dnsForwardTimeout: 2 * time.Second}
+	p.captureDNSUpstream()
+	if !slices.Equal(p.dnsUpstreamServers, []string{"10.0.0.1", "10.0.0.2", "10.8.0.1"}) {
+		t.Fatalf("the upstream is %v, want the adapters' servers [10.0.0.1 10.0.0.2 10.8.0.1]", p.dnsUpstreamServers)
+	}
+	return p
+}
+
+// On Windows a name one adapter's server says does not exist, or has no
+// record of the type asked, is asked on the next adapter, as Windows asks it:
+// a VPN's or a LAN's own name is recorded with the answer its resolver gives
+// the application, not the preferred adapter's NXDOMAIN. The adapter that
+// answered negatively is not asked again, through its other server.
+func TestOnWindowsANameOneAdapterDeniesIsAskedOnTheNext(t *testing.T) {
+	q := dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	for _, negative := range []string{"NXDOMAIN", "NODATA"} {
+		p := windowsUpstream(t)
+		asked := byServers(p, map[string]string{"10.0.0.1": negative, "10.0.0.2": "192.0.2.2", "10.8.0.1": "10.8.0.9"})
+		resp, err := p.forwardDNSUpstream(q)
+		if err != nil {
+			t.Fatalf("%s from the preferred adapter: %v", negative, err)
+		}
+		if got := answeredBy(resp); got != "NOERROR 10.8.0.9 from 10.8.0.1" {
+			t.Errorf("%s from the preferred adapter: answered %q, want the VPN adapter's NOERROR 10.8.0.9 from 10.8.0.1", negative, got)
+		}
+		if !slices.Equal(*asked, []string{"10.0.0.1", "10.8.0.1"}) {
+			t.Errorf("%s from the preferred adapter: asked %v, want [10.0.0.1 10.8.0.1]", negative, *asked)
+		}
+	}
+}
+
+// When every adapter answers negatively, the answer is the preferred
+// adapter's, the first negative answer, after each adapter was asked once.
+func TestOnWindowsANameEveryAdapterDeniesGetsThePreferredAdaptersAnswer(t *testing.T) {
+	q := dns.Question{Name: "nowhere.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	for _, c := range []struct{ preferred, vpn, want string }{
+		{"NXDOMAIN", "NXDOMAIN", "NXDOMAIN from 10.0.0.1"},
+		{"NODATA", "NXDOMAIN", "NOERROR from 10.0.0.1"},
+		{"NXDOMAIN", "NODATA", "NXDOMAIN from 10.0.0.1"},
+	} {
+		p := windowsUpstream(t)
+		asked := byServers(p, map[string]string{"10.0.0.1": c.preferred, "10.0.0.2": "192.0.2.2", "10.8.0.1": c.vpn})
+		resp, err := p.forwardDNSUpstream(q)
+		if err != nil {
+			t.Fatalf("%s then %s: %v", c.preferred, c.vpn, err)
+		}
+		if got := answeredBy(resp); got != c.want {
+			t.Errorf("%s then %s: answered %q, want %q", c.preferred, c.vpn, got, c.want)
+		}
+		if !slices.Equal(*asked, []string{"10.0.0.1", "10.8.0.1"}) {
+			t.Errorf("%s then %s: asked %v, want each adapter once [10.0.0.1 10.8.0.1]", c.preferred, c.vpn, *asked)
+		}
+	}
+}
+
+// On Windows the preferred adapter's answer ends the search; a server that
+// does not answer passes the query to its adapter's next server; and a
+// negative answer is still the answer when the adapter that would answer
+// otherwise does not answer at all.
+func TestOnWindowsAnAnswerEndsTheSearchAndASilentServerPassesItOn(t *testing.T) {
+	q := dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	for _, c := range []struct {
+		name    string
+		answers map[string]string
+		want    string
+		asked   []string
+	}{
+		{"an answer", map[string]string{"10.0.0.1": "192.0.2.1", "10.8.0.1": "10.8.0.9"}, "NOERROR 192.0.2.1 from 10.0.0.1", []string{"10.0.0.1"}},
+		{"a silent server", map[string]string{"10.0.0.2": "192.0.2.2", "10.8.0.1": "10.8.0.9"}, "NOERROR 192.0.2.2 from 10.0.0.2", []string{"10.0.0.1", "10.0.0.2"}},
+		{"a silent VPN", map[string]string{"10.0.0.1": "NXDOMAIN"}, "NXDOMAIN from 10.0.0.1", []string{"10.0.0.1", "10.8.0.1"}},
+	} {
+		p := windowsUpstream(t)
+		asked := byServers(p, c.answers)
+		resp, err := p.forwardDNSUpstream(q)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := answeredBy(resp); got != c.want {
+			t.Errorf("%s: answered %q, want %q", c.name, got, c.want)
+		}
+		if !slices.Equal(*asked, c.asked) {
+			t.Errorf("%s: asked %v, want %v", c.name, *asked, c.asked)
+		}
+	}
+}
+
+// resolv.conf's servers are one list, as Linux's resolver takes them: the
+// first server's answer is the answer, a negative one too.
+func TestResolvConfsFirstAnswerIsTheAnswerANegativeOneToo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(path, []byte("nameserver 10.0.0.1\nnameserver 10.8.0.1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orig := resolvConfPath
+	resolvConfPath = path
+	t.Cleanup(func() { resolvConfPath = orig })
+	q := dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	for _, negative := range []string{"NXDOMAIN", "NODATA"} {
+		p := &Proxy{logger: zap.NewNop(), DNSPort: 26789, dnsForwardTimeout: 2 * time.Second}
+		p.captureDNSUpstream()
+		asked := byServers(p, map[string]string{"10.0.0.1": negative, "10.8.0.1": "10.8.0.9"})
+		resp, err := p.forwardDNSUpstream(q)
+		if err != nil {
+			t.Fatalf("%s: %v", negative, err)
+		}
+		if got, want := answeredBy(resp), dns.RcodeToString[resp.Rcode]+" from 10.0.0.1"; got != want || !slices.Equal(*asked, []string{"10.0.0.1"}) {
+			t.Errorf("%s from resolv.conf's first server: answered %q after asking %v, want %q after asking [10.0.0.1]", negative, got, *asked, want)
+		}
+	}
+}
+
+// A negative answer (RFC 2308) says the name does not exist or has no record
+// of the type asked; an answer with records, and a failure, are not one.
+func TestANegativeAnswerIsNXDOMAINOrNODATA(t *testing.T) {
+	a := &dns.A{Hdr: dns.RR_Header{Name: "x.", Rrtype: dns.TypeA, Class: dns.ClassINET}, A: net.ParseIP("192.0.2.1")}
+	for _, c := range []struct {
+		rcode   int
+		answer  []dns.RR
+		negates bool
+	}{
+		{dns.RcodeNameError, nil, true},
+		{dns.RcodeSuccess, nil, true},
+		{dns.RcodeSuccess, []dns.RR{a}, false},
+		{dns.RcodeServerFailure, nil, false},
+		{dns.RcodeRefused, nil, false},
+	} {
+		m := &dns.Msg{Answer: c.answer}
+		m.Rcode = c.rcode
+		if got := isNegativeAnswer(m); got != c.negates {
+			t.Errorf("%s with %d record(s): negative %v, want %v", dns.RcodeToString[c.rcode], len(c.answer), got, c.negates)
+		}
+	}
+}
+
+// A server on no adapter is not ruled out by an adapter's negative answer:
+// only the servers of the adapter that answered are passed over.
+func TestAServerOnNoAdapterIsAskedAfterAnAdapterDenies(t *testing.T) {
+	p := &Proxy{
+		logger:             zap.NewNop(),
+		dnsUpstreamServers: []string{"10.0.0.1", "10.0.0.2"},
+		dnsUpstreamAdapter: map[string]int{"10.0.0.1": 0},
+		dnsUpstreamPort:    "53",
+		dnsForwardTimeout:  2 * time.Second,
+	}
+	asked := byServers(p, map[string]string{"10.0.0.1": "NXDOMAIN", "10.0.0.2": "192.0.2.2"})
+	resp, err := p.forwardDNSUpstream(dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := answeredBy(resp); got != "NOERROR 192.0.2.2 from 10.0.0.2" || !slices.Equal(*asked, []string{"10.0.0.1", "10.0.0.2"}) {
+		t.Fatalf("answered %q after asking %v, want NOERROR 192.0.2.2 from 10.0.0.2 after asking [10.0.0.1 10.0.0.2]", got, *asked)
 	}
 }
