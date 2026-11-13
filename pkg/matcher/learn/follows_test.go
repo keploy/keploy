@@ -1493,7 +1493,11 @@ func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
 // group beside another word of its UUID; a value with no long word is no
 // minted id, and its short part stays refused on this reading; and a call
 // read under the rule a copy follows its source (ClassifyFollowing) reads
-// as before. A part of 16 bytes or more is no piece on the took term.
+// as before. A part of 16 bytes or more is no piece on the took term. A long
+// word glued inside a longer word of a place stands there too (fail closed).
+// The minted default is a rule of keploy mock's tests (DriftCache.ClientTests,
+// mockDrifts): keploy test refuses each learned row, and its took term names
+// the place, as before.
 func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 	const (
 		path  = "header.x-keploy-test-step-id"
@@ -1519,13 +1523,17 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 		}
 		return gp, nil
 	}
-	given := func(ee []Earlier, raw ...Raw) Learned {
+	givenIn := func(dc *DriftCache, ee []Earlier, raw ...Raw) Learned {
 		t.Helper()
-		got := ClassifyGiven(clockedDrifts(), []string{path}, shape(live), shape(rec), eRecAt, ee, raw, nil, nil, givenPlaces)
+		got := ClassifyGiven(dc, []string{path}, shape(live), shape(rec), eRecAt, ee, raw, nil, nil, givenPlaces)
 		if len(got) != 1 {
 			t.Fatalf("%+v", got)
 		}
 		return got[0]
+	}
+	given := func(ee []Earlier, raw ...Raw) Learned {
+		t.Helper()
+		return givenIn(mockDrifts(), ee, raw...)
 	}
 	answered := func(name, body string) Raw {
 		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
@@ -1567,6 +1575,9 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 		if got := given(c.ee, c.raw...); got.Kind != KindNoise || !strings.Contains(got.Why, piece) || !strings.Contains(got.Why, "learns it as varying") {
 			t.Errorf("%s: %s from %q (%q); want noise naming the minted id", name, got.Kind, got.From.Mock, got.Why)
 		}
+		if got := givenIn(clockedDrifts(), c.ee, c.raw...); got.Kind != KindUnaccounted || strings.Contains(got.Why, piece) {
+			t.Errorf("%s, keploy test: %s from %q (%q); want it refused as before", name, got.Kind, got.From.Mock, got.Why)
+		}
 	}
 	places = nil
 	// A whole-id copy from an earlier answer, which F gave changed and the
@@ -1588,6 +1599,13 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 		"the recorded group beside another of its words":     {ee: []Earlier{same("mock-1215", "c0ffee11-4b7d-4e2a-8c2d-0123456789ab", Request, 1)}},
 		"the recorded group beside another, in a payload":    {raw: []Raw{headed("mock-1290", "c0ffee11-4b7d-4e2a-8c2d-0123456789ab")}},
 		"F's group beside another, in another test's answer": {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"_id":"deadbeef-a0f9-4c8b-9d2d-ba9876543210"}`)}},
+		// Glued: a long word inside a longer word of the place.
+		"F's 8-hex word glued, where the recording gave it":     {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job q8e1d2c3bq", "job 11112222", Request, 2)}},
+		"F's 8-hex word glued, where F gave it":                 {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job 11112222", "job q8e1d2c3bq", Request, 2)}},
+		"F's 8-hex word glued, in a payload recorded before":    {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{headed("mock-1290", "job q8e1d2c3bq")}},
+		"F's 8-hex word glued, where F gave a payload changed":  {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{viewed("mock-1290", "job 11112222", "job q8e1d2c3bq")}},
+		"F's 8-hex word glued, in another test's answer":        {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"job":"q8e1d2c3bq"}`)}},
+		"the recorded 48-bit word glued, in another test's one": {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"job":"x1a2b3c4d5e6fx"}`)}},
 	} {
 		places = c.places
 		if got := given(c.ee, c.raw...); got.Kind == KindNoise || strings.Contains(got.Why, piece) {
@@ -1596,7 +1614,7 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 	}
 	places = nil
 	// No long word: no minted id, and the short part stays refused here.
-	short := ClassifyGiven(clockedDrifts(), []string{path}, shape("ab12-cd34"), shape("ef56-4b7d"), eRecAt, []Earlier{same("mock-1215", other, Request, 1)}, nil, nil, nil, nil)
+	short := ClassifyGiven(mockDrifts(), []string{path}, shape("ab12-cd34"), shape("ef56-4b7d"), eRecAt, []Earlier{same("mock-1215", other, Request, 1)}, nil, nil, nil, nil)
 	if len(short) != 1 || short[0].Kind != KindUnaccounted {
 		t.Errorf("a value with no long word: %+v; want refused", short)
 	}
@@ -1608,12 +1626,17 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 		t.Errorf("ClassifyFollowing: %+v; want refused", got)
 	}
 	// The took term: where the recorded value's word is read, F's group
-	// standing inside another test's UUID is no word F's value took there.
-	dc := clockedDrifts()
+	// standing inside another test's UUID is no word F's value took there;
+	// in keploy test's, it is, as before.
+	dc := mockDrifts()
 	v := dc.of(rec, live)
 	ee := []Earlier{same("mock-1300", "deadbeef-a0f9-4c11-9d2d-ba9876543210", Request, 2)}
 	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, short: true, served: ee}).tookElsewhere(v, "4b7d"); took != "" {
 		t.Errorf("short parts alone: took %q; want none", took)
+	}
+	kt := clockedDrifts()
+	if took := (&follows{dc: kt, rec: rec, live: live, at: eRecAt, short: true, served: ee}).tookElsewhere(kt.of(rec, live), "4b7d"); !strings.Contains(took, "mock-1300") {
+		t.Errorf("short parts alone, keploy test: took %q; want mock-1300", took)
 	}
 	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, served: ee}).tookElsewhere(v, "4b7d"); !strings.Contains(took, "mock-1300") {
 		t.Errorf("under the rule: took %q; want mock-1300", took)
@@ -1627,6 +1650,15 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 	}
 }
 
+// mockDrifts is clockedDrifts of one of keploy mock's client tests
+// (DriftCache.ClientTests): the learn step of keploy mock record and
+// replay, where the founder's minted default reads a short piece of an id.
+func mockDrifts() *DriftCache {
+	dc := clockedDrifts()
+	dc.clientTests = true
+	return dc
+}
+
 // The word rule's re-read of a value it refused (follows.idOnly) lets a
 // short part go only as a chance piece of a minted id: at a payload F gave
 // as recorded, at a payload F gave changed and at another test's answer, a
@@ -1634,6 +1666,8 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 // there (a value set aside as a variable), stays refused on it. The took
 // term skips a chance piece at a payload and at another test's answer too,
 // where short parts alone are read, and names the place under the rule.
+// Each is keploy mock's (mockDrifts); in keploy test's the piece is
+// refused and the took term names the place, as before.
 func TestTheWordRuleReReadLetsGoOnlyAPieceOfAMintedID(t *testing.T) {
 	const (
 		rec  = "3f2a9c1e-4b7d-4e2a-9f3c-1a2b3c4d5e6f"
@@ -1657,7 +1691,7 @@ func TestTheWordRuleReReadLetsGoOnlyAPieceOfAMintedID(t *testing.T) {
 		t.Fatalf("no reading holds %q", w)
 		return -1
 	}
-	dc := clockedDrifts()
+	dc, kt := mockDrifts(), clockedDrifts()
 	reRead := func(r, l string, idOnly bool) *follows {
 		return &follows{dc: dc, rec: r, live: l, at: eRecAt, short: true, idOnly: idOnly}
 	}
@@ -1709,6 +1743,14 @@ func TestTheWordRuleReReadLetsGoOnlyAPieceOfAMintedID(t *testing.T) {
 		if f := reRead(rec, live, true); !c.excused(f) || !strings.Contains(f.piece, "stands in mock-1290") {
 			t.Errorf("%s: a piece of a minted id refused on the re-read (%q); want it let go and named", c.name, f.piece)
 		}
+		// keploy test: no piece on the re-read, and the short-part reading
+		// (a value set aside) reads the part as it did, never as a piece.
+		if f := (&follows{dc: kt, rec: rec, live: live, at: eRecAt, short: true, idOnly: true}); c.excused(f) || f.piece != "" {
+			t.Errorf("%s, keploy test: a piece of a minted id let go on the re-read (%q); want it refused as before", c.name, f.piece)
+		}
+		if f := (&follows{dc: kt, rec: rec, live: live, at: eRecAt, short: true}); c.excused(f) && f.piece != "" {
+			t.Errorf("%s, keploy test, short parts alone: let go as a piece of a minted id (%q); want the short-part rule's reading alone", c.name, f.piece)
+		}
 	}
 	// The took term at a payload and at another test's answer: F's group
 	// standing inside another UUID there is no word F's value took, where
@@ -1716,6 +1758,9 @@ func TestTheWordRuleReReadLetsGoOnlyAPieceOfAMintedID(t *testing.T) {
 	x := headed("mock-1300", "deadbeef-a0f9-4c11-9d2d-ba9876543210")
 	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, short: true, raw: []Raw{x}}).tookElsewhere(v, "4b7d"); took != "" {
 		t.Errorf("a payload, short parts alone: took %q; want none", took)
+	}
+	if took := (&follows{dc: kt, rec: rec, live: live, at: eRecAt, short: true, raw: []Raw{x}}).tookElsewhere(kt.of(rec, live), "4b7d"); !strings.Contains(took, "mock-1300") {
+		t.Errorf("a payload, short parts alone, keploy test: took %q; want mock-1300", took)
 	}
 	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, raw: []Raw{x}}).tookElsewhere(v, "4b7d"); !strings.Contains(took, "mock-1300") {
 		t.Errorf("a payload, under the rule: took %q; want mock-1300", took)
@@ -1725,6 +1770,9 @@ func TestTheWordRuleReReadLetsGoOnlyAPieceOfAMintedID(t *testing.T) {
 	places := func() *offsetPlaces { return op }
 	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, short: true, places: places}).tookElsewhere(v, "4b7d"); took != "" {
 		t.Errorf("another test's answer, short parts alone: took %q; want none", took)
+	}
+	if took := (&follows{dc: kt, rec: rec, live: live, at: eRecAt, short: true, places: places}).tookElsewhere(kt.of(rec, live), "4b7d"); !strings.Contains(took, "mock-1300") {
+		t.Errorf("another test's answer, short parts alone, keploy test: took %q; want mock-1300", took)
 	}
 	if took := (&follows{dc: dc, rec: rec, live: live, at: eRecAt, places: places}).tookElsewhere(v, "4b7d"); !strings.Contains(took, "mock-1300") {
 		t.Errorf("another test's answer, under the rule: took %q; want mock-1300", took)

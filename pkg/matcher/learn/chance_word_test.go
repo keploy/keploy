@@ -52,6 +52,22 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 	if bodyMoved.Spec.HTTPResp.Body == okSrc.Spec.HTTPResp.Body || okSrc.Spec.HTTPResp.Header["X-Amzn-Requestid"] == elsewhere.Spec.HTTPResp.Header["X-Amzn-Requestid"] {
 		t.Fatal("the view did not change")
 	}
+	// keploy mock's client tests learn these as a chance piece of a minted
+	// id (checkMinted): "48d1" stands in mock-31 beside no other word of
+	// the value's id, and no long word of either run's id stands anywhere.
+	// Two groups of the id in one answer is a piece beside another word of
+	// its id; a view giving another id there holds other's 8-hex word glued
+	// in its last group; served changed with no view, F's view of the place
+	// cannot be read: each stays refused there as keploy test refuses it.
+	minted := map[string]bool{
+		"the recorded id's group, served as recorded":                                                          true,
+		"the id's group F saw, served as recorded":                                                             true,
+		"served changed, its view giving the word at the same field":                                           true,
+		"the id's group F saw, served changed, its view giving the word at the same field":                     true,
+		"served changed, its view giving the word at another field too (a header the recording's lacks it at)": true,
+		"answered at the call": true,
+		"no answer time":       true,
+	}
 	for _, row := range []struct {
 		name      string
 		m         *models.Mock
@@ -110,7 +126,72 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 					}
 				}
 			}
+			checkMinted(t, row.name, viaSet, minted[row.name], row.rec, mock31Run(p, viaSet, row.m, row.raw, row.rec, row.live), refusedAtMock31)
 		}
+	}
+}
+
+// mock31Run is checkMinted's run of a row of p whose one place is m, as
+// raw makes it: mock-31, another test's recording F gave the application
+// (viaSet: among the recordings F gave earlier in the set), beside extra.
+func mock31Run(p string, viaSet bool, m *models.Mock, raw func(dc *DriftCache, m *models.Mock) Raw, rec, live string) func(extra ...Raw) Learned {
+	return func(extra ...Raw) Learned {
+		dc := mockDrifts()
+		x := raw(dc, m)
+		if viaSet {
+			return ClassifyGiven(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, nil, extra, nil, nil, func() ([]GivenPlaces, error) {
+				return []GivenPlaces{PlacesOf(x)}, nil
+			})[0]
+		}
+		return ClassifyGiven(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, nil, append([]Raw{x.OfAnotherTest()}, extra...), nil, nil, nil)[0]
+	}
+}
+
+// refusedAtMock31 reports whether ln is refused for a word of mock-31,
+// another test's recording, as keploy test refuses the rows that read it.
+func refusedAtMock31(ln Learned) bool {
+	return ln.Kind == KindUnaccounted && strings.Contains(ln.Why, "appears in mock-31, a recording record's full round gave the application before the call that is another test's")
+}
+
+// mintedPiece is what a value keploy mock's client tests learn as a chance
+// piece of a minted id names (follows.chancePiece).
+const mintedPiece = "beside no other word of the value's id, and the value is an id minted in each run"
+
+// checkMinted checks a row of keploy test's rows read in keploy mock's
+// client tests (mockDrifts), where the founder's minted default reads a
+// short piece of an id: run reads the row with extra recordings of the
+// call's own test, made a minute before the call. Where minted, the row is
+// noise naming a chance piece of a minted id, and stays so beside a
+// recording holding a word of no id ("q00000000q"); beside one holding the
+// first word of id (32 bits) glued inside a longer word, a long word of the
+// id stands at a place the application was given (follows.mintedID), and
+// the row is refused as keploy test refuses it (asBefore). A row not minted
+// is refused as keploy test refuses it.
+func checkMinted(t *testing.T, name string, viaSet, minted bool, id string, run func(extra ...Raw) Learned, asBefore func(Learned) bool) {
+	t.Helper()
+	// A queue receive holding word as its one message's id, and no stamp: a
+	// row's value may hold a weekday a Date header would hold.
+	holding := func(word string) Raw {
+		m := receiveOf("mock-90", word, r1Insert.Add(-time.Minute))
+		m.Spec.HTTPResp.Header = map[string]string{"Content-Type": "application/x-amz-json-1.0"}
+		return RawOf(m, true).ServedAs(9).ServedAsRecorded()
+	}
+	if !minted {
+		if ln := run(); !asBefore(ln) {
+			t.Errorf("%s (set %v), keploy mock: %s (%s); want it refused as keploy test refuses it", name, viaSet, ln.Kind, ln.Why)
+		}
+		return
+	}
+	for _, c := range []struct {
+		name  string
+		extra []Raw
+	}{{"", nil}, {", beside a word of no id", []Raw{holding("q00000000q")}}} {
+		if ln := run(c.extra...); ln.Kind != KindNoise || !strings.Contains(ln.Why, mintedPiece) || !strings.Contains(ln.Why, "learns it as varying") {
+			t.Errorf("%s%s (set %v), keploy mock: %s (%s); want noise naming the minted id", name, c.name, viaSet, ln.Kind, ln.Why)
+		}
+	}
+	if ln := run(holding("q" + id[:8] + "q")); !asBefore(ln) || strings.Contains(ln.Why, mintedPiece) {
+		t.Errorf("FALSE GREEN? %s, a long word of the id glued at a place (set %v), keploy mock: %s (%s); want it refused as keploy test refuses it", name, viaSet, ln.Kind, ln.Why)
 	}
 }
 
@@ -193,6 +274,17 @@ func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAnotherWordOfThatPayl
 		}
 	}
 	const recorded, gave = "stands in mock-31's answer as the recording gave it", "stands in mock-31's answer as record's full round gave it"
+	// keploy mock's client tests learn these as a chance piece of a minted
+	// id (checkMinted): chance's "48d1" stands in mock-31's answer, inside
+	// idA, beside no other word of chance's id, and no long word of either
+	// run's id stands anywhere. The rows of two ids hold a whole id there:
+	// refused.
+	minted := map[string]bool{
+		"the recorded value's word stands only in the recording's stamp":   true,
+		"the recorded value's word stands only in the view's stamp":        true,
+		"the word of the value F saw stands only in the recording's stamp": true,
+		"the word of the value F saw stands only in the view's stamp":      true,
+	}
 	for _, row := range []struct {
 		name      string
 		m         *models.Mock
@@ -232,6 +324,7 @@ func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAnotherWordOfThatPayl
 					t.Errorf("%s (set %v), keploy test: %s (%s); want it refused as before", row.name, viaSet, ln.Kind, ln.Why)
 				}
 			}
+			checkMinted(t, row.name, viaSet, minted[row.name], row.rec, mock31Run(p, viaSet, row.m, row.raw, row.rec, row.live), refusedAtMock31)
 		}
 	}
 }
@@ -272,16 +365,9 @@ func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAWordOfAnyPlaceBothRu
 		{"a fresh id at record, a word by chance in F", true, fresh, chance, ""},
 	} {
 		for _, viaSet := range []bool{false, true} {
-			for _, follow := range []bool{false, true} {
-				dc := clockedDrifts()
+			places := func(dc *DriftCache) (raw []Raw, set GivenEarlier) {
 				x1 := dc.RawOf(receiveOf("mock-31", idA, before), true).ServedAs(3).ServedAsRecorded()
 				x2 := dc.RawOf(receiveOf("mock-32", idB, before.Add(5*time.Second)), true).ServedAs(4).ServedAsRecorded()
-				classify := ClassifyGiven
-				if follow {
-					classify = ClassifyFollowing
-				}
-				var raw []Raw
-				var set GivenEarlier
 				switch {
 				case row.own && viaSet:
 					raw = []Raw{x2}
@@ -293,6 +379,25 @@ func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAWordOfAnyPlaceBothRu
 				default:
 					raw = []Raw{x1.OfAnotherTest(), x2.OfAnotherTest()}
 				}
+				return raw, set
+			}
+			// keploy mock's client tests learn the rows a fresh id stands
+			// in (noise under ClassifyFollowing) as a chance piece of a
+			// minted id (checkMinted); a value that is mock-31's or
+			// mock-32's id whole stays refused, or bound, as keploy test
+			// reads it.
+			checkMinted(t, row.name, viaSet, row.want == "", row.rec, func(extra ...Raw) Learned {
+				dc := mockDrifts()
+				raw, set := places(dc)
+				return ClassifyGiven(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, nil, append(raw, extra...), nil, nil, set)[0]
+			}, func(ln Learned) bool { return ln.Kind != KindNoise })
+			for _, follow := range []bool{false, true} {
+				dc := clockedDrifts()
+				classify := ClassifyGiven
+				if follow {
+					classify = ClassifyFollowing
+				}
+				raw, set := places(dc)
 				ln := classify(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, nil, raw, nil, nil, set)[0]
 				switch {
 				case !follow && ln.Kind == KindNoise:

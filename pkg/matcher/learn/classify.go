@@ -2138,14 +2138,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// test's UUID _id, where no long word of either run's UUID stands
 	// anywhere either run gave the application (the founder's minted
 	// default, 2026-11-11). Every other word reads as the first reading
-	// read it.
+	// read it. That default is a rule of keploy mock's tests alone
+	// (DriftCache.ClientTests, follows.idPiece): keploy test reads such a
+	// value once, as before.
 	leafIn := func(rd *reading, r, l Leaf, w *Window, skip skipRule) Learned {
 		ln := leafRead(rd, r, l, w, skip, false, false)
 		if follow {
 			return ln
 		}
 		setAside := ln.Kind == KindVariable && ln.From.SetAside && (&follows{short: true}).reads(ln.From.Held, dc.ofIn(r.Value, l.Value, w, at))
-		if !setAside && (ln.Kind != KindUnaccounted || !ln.wordRefused) {
+		if !setAside && (ln.Kind != KindUnaccounted || !ln.wordRefused || !dc.clientTests) {
 			return ln
 		}
 		if again := leafRead(rd, r, l, w, skip, true, !setAside); again.Kind != KindUnaccounted {

@@ -116,6 +116,20 @@ func TestAChanceWordOfWhatTheFullRoundGaveIsLearnedAsVarying(t *testing.T) {
 				}
 			}
 		}
+		// keploy mock's client tests (checkMinted): where the place lost no
+		// word, chance's "48d1" stands alone in the view, beside no other
+		// word of its id, and no long word of either run's id stands
+		// anywhere, so it is learned as a chance piece of a minted id. Each
+		// other view gives liveID, whose last group holds other's first
+		// word glued, or its recording or view holds a whole id: each stays
+		// refused as keploy test refuses it.
+		checkMinted(t, row.name, false, row.name == "the place lost no word", row.rec, func(extra ...Raw) Learned {
+			dc := mockDrifts()
+			x := row.raw(dc, row.m)
+			return ClassifyGiven(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, nil, append([]Raw{x}, extra...), nil, nil, nil)[0]
+		}, func(ln Learned) bool {
+			return ln.Kind == KindUnaccounted && strings.Contains(ln.Why, "where the recording did not give the application that word")
+		})
 	}
 }
 
@@ -241,6 +255,16 @@ func TestAChanceWordStaysRefusedWhereTheRecordedValueTookAWordOfThePayloadsStamp
 				t.Errorf("%s, keploy test: %s (%s); want it refused as before", row.name, ln.Kind, ln.Why)
 			}
 		}
+		// keploy mock's client tests (checkMinted): the view gives liveID,
+		// whose last group holds other's first word glued, so the value is
+		// no minted id, and it stays refused as keploy test refuses it.
+		checkMinted(t, row.name, false, false, row.rec, func(extra ...Raw) Learned {
+			dc := mockDrifts()
+			x := dc.RawOf(src, true).ServedAs(3).ServedLive(dc.RawOf(view, true))
+			return ClassifyGiven(dc, []string{p}, strLeaf(p, chance), strLeaf(p, row.rec), r1Insert, nil, append([]Raw{x}, extra...), nil, nil, nil)[0]
+		}, func(ln Learned) bool {
+			return ln.Kind == KindUnaccounted && strings.Contains(ln.Why, "where the recording did not give the application that word")
+		})
 	}
 }
 

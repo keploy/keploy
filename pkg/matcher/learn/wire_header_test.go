@@ -25,7 +25,12 @@ import (
 // frames' headers hold the word.
 //
 // The same word in a frame's message (a document of it) is still a
-// candidate source.
+// candidate source. In keploy mock's client tests, read under the word
+// rule, no long word of either run's UUID stands anywhere, so each run
+// minted its id and a 16-bit group of what F saw there is a chance piece of
+// it (the founder's minted default): learned as varying, naming the
+// message. This row asserted a variable or a refusal there before that
+// default; the recorded value's group is still found there as a variable.
 func TestAWordOfAValueIsNeverFollowedFromAFramesHeader(t *testing.T) {
 	at := time.Date(2026, 10, 29, 12, 39, 20, 0, time.UTC)
 	w := &Window{
@@ -86,10 +91,19 @@ func TestAWordOfAValueIsNeverFollowedFromAFramesHeader(t *testing.T) {
 					}
 				}
 				// Still a candidate source: the word in the frame's message.
+				// In a client test, read under the word rule (ClassifyIn),
+				// the founder's minted default reads a word of what F saw
+				// there as a chance piece of each run's minted id, naming
+				// the message (the recorded value's word is found there by
+				// the search for a variable, as before).
 				got := c(mode.dc(), atgFind(7, `,"run":"2486"`, false), v.rec, v.live)
 				variable := got.Kind == KindVariable && got.From.Mock == "mock-2124"
 				refused := got.Kind == KindUnaccounted && !got.Bindable && strings.Contains(got.Why, "mock-2124")
-				if !variable && !refused {
+				if name == "ClassifyIn" && mode.name == "client test" && v.what == "a word of what F saw" {
+					if got.Kind != KindNoise || !strings.Contains(got.Why, "stands in mock-2124 at spec.responses[0].message.sections[0], "+mintedPiece) {
+						t.Errorf("%s, %s, %s, the word in the frame's message: %s from %q (%q); want noise naming it a chance piece of a minted id in mock-2124's message", name, mode.name, v.what, got.Kind, got.From.Mock, got.Why)
+					}
+				} else if !variable && !refused {
 					t.Errorf("FALSE GREEN? %s, %s, %s, the word in the frame's message: %s from %q bindable=%v (%q); want a variable of mock-2124 or refused naming it", name, mode.name, v.what, got.Kind, got.From.Mock, got.Bindable, got.Why)
 				}
 			}

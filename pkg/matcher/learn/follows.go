@@ -261,9 +261,12 @@ func (f *follows) reads(t string, v *valueDrift) bool {
 // in, where that id changed whole between the runs (valueDrift.idParts)
 // and holds a word of chanceBits or more, and v's ids were minted
 // (mintedID); ok false otherwise, and for a t of chanceBits or more: such
-// a word is one of the long words, never a piece.
+// a word is one of the long words, never a piece. The founder's minted
+// default is a rule of keploy mock's tests (DriftCache.ClientTests); in
+// keploy test's no part is such a piece, and every term of the rule reads
+// it as before.
 func (f *follows) idPiece(v *valueDrift, t string) (others map[string]bool, ok bool) {
-	if f == nil || !f.short || !f.reads(t, v) || wordBits(t) >= chanceBits {
+	if f == nil || !f.short || !f.dc.ClientTests() || !f.reads(t, v) || wordBits(t) >= chanceBits {
 		return nil, false
 	}
 	for side := range v.idParts {
