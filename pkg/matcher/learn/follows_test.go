@@ -1324,14 +1324,19 @@ func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
 			ReqTimestampMock: eRecAt.Add(-2 * time.Second), ResTimestampMock: eRecAt.Add(-2*time.Second + time.Millisecond),
 		}}, false)
 	}
-	classify := func(recorded, live string, raw ...Raw) Learned {
+	none := func() ([]GivenPlaces, error) { return nil, nil }
+	classifyAt := func(recorded, live string, earlier []Earlier, given GivenEarlier, raw ...Raw) Learned {
 		t.Helper()
 		rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}
-		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, nil, raw, nil, nil, func() ([]GivenPlaces, error) { return nil, nil })
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, earlier, raw, nil, nil, given)
 		if len(got) != 1 {
 			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
 		}
 		return got[0]
+	}
+	classify := func(recorded, live string, raw ...Raw) Learned {
+		t.Helper()
+		return classifyAt(recorded, live, nil, none, raw...)
 	}
 	uaRaw := headed("mock-1658", "User-Agent", ua).ServedAs(1).ServedAsRecorded()
 
@@ -1414,5 +1419,45 @@ func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
 	got = classify("pos 82 "+build, "pos 7 Zz1Yy2Xx3Ww4Vv5U", a.ServedAs(1), b.ServedAs(2), headed("mock-7", "X-Build", build).ServedAs(3).ServedAsRecorded())
 	if got.Kind != KindVariable || got.From.Mock != "mock-7" || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
 		t.Errorf("a long part after a short one: %s from %q set aside %v (%q); want a variable of mock-7 set aside, refused", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
+	}
+
+	// The re-read reads a short part alone at every kind of place the word
+	// rule reads; a long part or the whole value stays refused at each. Here
+	// the first reading sets the short 82 aside at mock-b, so the value is
+	// read again, and the other part stands, served before mock-b, at: a
+	// leaf of an exchange the test's own earlier call got, served as
+	// recorded (excusedSeen); a payload F served changed, in F's view of it
+	// alone (excusedLive); a recording F gave the application earlier in the
+	// set, or another test's (excusedGiven). The first reading's refusal
+	// stands at each.
+	const build2 = "Zz1Yy2Xx3Ww4Vv5U"
+	ownLeaf := func(held string) Earlier {
+		at := eRecAt.Add(-300 * time.Millisecond)
+		payload := RawOf(&models.Mock{Name: "mock-8", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
+		return Earlier{Mock: "mock-8", At: at, Own: true, Payload: payload.ServedAs(1), Seen: []Seen{
+			{Side: Response, Leaf: Leaf{Path: "body.slot", Type: String, Value: held}, Live: held},
+		}}
+	}
+	b2 := b.ServedAs(2)
+	other := eAnswer("mock-g", 250*time.Millisecond, build).ServedAs(1).ServedAsRecorded()
+	for _, row := range []struct {
+		name, recorded, live string
+		earlier              []Earlier
+		given                GivenEarlier
+		raw                  []Raw
+	}{
+		{"a long part at a leaf of the test's own earlier exchange", "pos 82 " + build, "pos 7 " + build2, []Earlier{ownLeaf(build)}, none, []Raw{b2}},
+		{"the value whole at a leaf of the test's own earlier exchange", "pos 82", "7", []Earlier{ownLeaf("7")}, none, []Raw{b2}},
+		{"a long part F gave in its view of a payload served changed", "pos 82 " + build, "pos 7 " + build2, nil, none, []Raw{
+			eAnswer("mock-c", 250*time.Millisecond, "Q0Q0Q0Q0Q0Q0Q0Q0").ServedAs(1).ServedLive(eAnswer("mock-c", 250*time.Millisecond, build2)), b2}},
+		{"the value whole in F's view of a payload served changed", "pos 82", "7", nil, none, []Raw{
+			eAnswer("mock-c", 250*time.Millisecond, "11").ServedAs(1).ServedLive(eAnswer("mock-c", 250*time.Millisecond, "7")), b2}},
+		{"a long part in a recording F gave earlier in the set", "pos 82 " + build, "pos 7 " + build2, nil, func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(other)}, nil }, []Raw{b2}},
+		{"a long part in another test's recording", "pos 82 " + build, "pos 7 " + build2, nil, none, []Raw{b2, other.OfAnotherTest()}},
+	} {
+		got = classifyAt(row.recorded, row.live, row.earlier, row.given, row.raw...)
+		if got.Kind != KindVariable || got.From.Mock != "mock-b" || !got.From.SetAside || got.From.Held != "82" || !strings.Contains(got.Why, unnamed) {
+			t.Errorf("FALSE GREEN? %s, beside a short part set aside: %s from %q set aside %v held %q (%q); want the first reading's refusal, set aside at mock-b", row.name, got.Kind, got.From.Mock, got.From.SetAside, got.From.Held, got.Why)
+		}
 	}
 }
