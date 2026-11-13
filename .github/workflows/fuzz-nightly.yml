@@ -60,6 +60,13 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # go test cannot be wrapped in go_retry, so the modules the listing
+      # loads are fetched first, as go-test.yaml does.
+      - name: Download modules
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry list -deps -test ./... > /dev/null
+
       - name: List the fuzz targets
         id: list
         env:
@@ -89,12 +96,18 @@ jobs:
       FUZZTIME: ${{ github.event_name == 'pull_request' && '30s' || inputs.fuzztime || '10m' }}
       PKG: ${{ matrix.target.pkg }}
       NAME: ${{ matrix.target.name }}
+      CORPUS_KEY_PREFIX: fuzz-corpus-${{ matrix.target.pkg }}-${{ matrix.target.name }}-
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      - name: Download modules
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry list -deps -test "$PKG" > /dev/null
 
       - name: Find the corpus directory
         id: corpus
@@ -103,8 +116,8 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: ${{ steps.corpus.outputs.dir }}
-          key: fuzz-corpus-${{ matrix.target.pkg }}-${{ matrix.target.name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: fuzz-corpus-${{ matrix.target.pkg }}-${{ matrix.target.name }}-
+          key: ${{ env.CORPUS_KEY_PREFIX }}${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ env.CORPUS_KEY_PREFIX }}
 
       - name: Fuzz for ${{ env.FUZZTIME }}
         id: fuzz
@@ -115,7 +128,7 @@ jobs:
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         with:
           path: ${{ steps.corpus.outputs.dir }}
-          key: fuzz-corpus-${{ matrix.target.pkg }}-${{ matrix.target.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ env.CORPUS_KEY_PREFIX }}${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload the crashing input
         if: failure() && steps.fuzz.outcome == 'failure'

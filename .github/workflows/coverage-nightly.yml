@@ -228,13 +228,9 @@ jobs:
           # floor). The two count different statements: unit only packages
           # with a test file, merged every package linked into keploy.
           bash .github/workflows/test_workflow_scripts/coverage-floor.sh check unit covdata/covdata-unit || true
-          if [ "$EVENT" = pull_request ]; then
-            # One lane cannot reach a floor set from all of them.
-            bash .github/workflows/test_workflow_scripts/coverage-floor.sh check merged merged ||
-              echo "a PR runs one lane, so its merged number is not held to the floor"
-          else
-            bash .github/workflows/test_workflow_scripts/coverage-floor.sh check merged merged
-          fi
+          # A PR runs one lane, which cannot reach a floor set from all of
+          # them: there the number is printed but not held to the floor.
+          bash .github/workflows/test_workflow_scripts/coverage-floor.sh check merged merged || [ "$EVENT" = pull_request ]
 
       - name: Per-package coverage of the agent and the services
         if: ${{ !cancelled() && hashFiles('merged/covmeta.*') != '' }}

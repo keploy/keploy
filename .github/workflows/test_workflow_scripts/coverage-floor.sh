@@ -59,21 +59,22 @@ is_number() { [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
 # measure DIR: prints the percentage of statements DIR's coverage data
 # covers, to two decimals, or fails.
 measure() {
-    local dir=$1 tmp=$work module
-    if ! go tool covdata textfmt -i="$dir" -o="$tmp/profile.txt"; then
+    local dir=$1 module
+    if ! go tool covdata textfmt -i="$dir" -o="$work/profile.txt"; then
         echo "::error::go tool covdata could not read the coverage data in $dir" >&2
         return 1
     fi
     module=$(awk '$1 == "module" { print $2; exit }' go.mod 2>/dev/null)
-    awk '!/^mode:/ { f = $1; sub(/:[^:]*$/, "", f); print f }' "$tmp/profile.txt" | sort -u |
-        while IFS= read -r f; do
-            rel=${f#"$module"/}
-            if [ -n "$module" ] && [ "$rel" != "$f" ] && [ -f "$rel" ] &&
-                grep -qE '^// Code generated .* DO NOT EDIT\.$' "$rel"; then
-                printf '%s\n' "$f"
-            fi
-        done >"$tmp/generated"
-    awk -v gl="$tmp/generated" '
+    # The profile's files by their path in the checkout, one grep over all of
+    # them, and the generated ones back under their import path.
+    awk -v m="$module/" '!/^mode:/ {
+            f = $1
+            sub(/:[^:]*$/, "", f)
+            if (m != "/" && index(f, m) == 1) print substr(f, length(m) + 1)
+        }' "$work/profile.txt" | sort -u | tr '\n' '\0' |
+        xargs -0 grep -lsE '^// Code generated .* DO NOT EDIT\.$' -- |
+        sed "s|^|$module/|" >"$work/generated"
+    awk -v gl="$work/generated" '
         FILENAME == gl { generated[$0] = 1; next }
         /^mode:/ { next }
         {
@@ -86,7 +87,7 @@ measure() {
         END {
             if (total == 0) exit 1
             printf "%.2f\n", 100 * covered / total
-        }' "$tmp/generated" "$tmp/profile.txt" || {
+        }' "$work/generated" "$work/profile.txt" || {
         echo "::error::the coverage data in $dir counts no statements outside generated files" >&2
         return 1
     }

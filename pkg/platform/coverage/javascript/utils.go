@@ -23,9 +23,9 @@ type ProcessInfo struct {
 
 func getCoverageFilePathsJavascript(path string) ([]string, error) {
 	filePaths := []string{}
-	walkfn := func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	walkfn := func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 		if !info.IsDir() && !strings.HasSuffix(path, "index.json") {
 			fileData, err := os.ReadFile(path)
