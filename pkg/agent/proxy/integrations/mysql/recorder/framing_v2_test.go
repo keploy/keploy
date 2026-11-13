@@ -325,6 +325,13 @@ func recordWire(t *testing.T, xs []exchange, n int, closeAtEnd bool, deadline ti
 // alike.
 func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool, deadline time.Duration) recording {
 	t.Helper()
+	return recordChunksStamped(t, client, server, closeAtEnd, deadline, true)
+}
+
+// recordChunksStamped is recordChunks; stamp false hands the recorder a chunk
+// with no capture time as it is, as a capture that stamped none does.
+func recordChunksStamped(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool, deadline time.Duration, stamp bool) recording {
+	t.Helper()
 	for _, c := range append(append([]fakeconn.Chunk{}, client...), server...) {
 		if c.ConnSeq == 0 {
 			t.Fatal("fixture: a chunk with no capture number, which the recorder refuses (fakeconn.ErrUnnumbered)")
@@ -378,7 +385,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 		defer pushers.Done()
 		h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: 2, Bytes: cannedHandshakeResponse41(t, 1, false), ReadAt: at()}
 		for _, c := range client {
-			if c.ReadAt.IsZero() {
+			if c.ReadAt.IsZero() && stamp {
 				c.ReadAt = at()
 			}
 			select {
@@ -393,7 +400,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: 1, Bytes: greetingBuf, ReadAt: at()}
 		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: handshakeChunks, Bytes: cannedOK(t, 2, greeting.CapabilityFlags), ReadAt: at()}
 		for _, c := range server {
-			if c.ReadAt.IsZero() {
+			if c.ReadAt.IsZero() && stamp {
 				c.ReadAt = at()
 			}
 			select {

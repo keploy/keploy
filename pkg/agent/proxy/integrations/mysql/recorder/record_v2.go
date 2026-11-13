@@ -1508,12 +1508,14 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// the capture's order confirms its answer (takenUp).
 	var taken *takenUp
 	// walk follows the server stream's packet headers, through every byte that
-	// leaves it, to prove a re-align's cut (packetWalk). The stream is at a
-	// packet boundary where the loop starts when the handshake read it.
+	// leaves it, to prove a re-align's cut (packetWalk). It is anchored at the
+	// top of the loop once a server byte was read (the handshake's, or an
+	// answer read whole): until then, on a stream joined mid-connection,
+	// nothing shows where a packet starts, and bytes the floor dropped
+	// (Session.NextRequest) are not read.
 	walk := &packetWalk{}
 	sess.DestStream.Tap(walk.feed)
 	defer sess.DestStream.Tap(nil)
-	atBoundary := sess.DestStream.Consumed() > 0
 	defer func() {
 		if taken != nil && taken.read {
 			// Its answer was read; the recording ended before anything
@@ -1682,11 +1684,12 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		if !serverRealign {
 			lastAnswerSeq = sess.DestStream.LastReadConnSeq()
 			// Every server byte read so far was read in whole packets, and
-			// the last exchange's without a fault.
-			if atBoundary {
+			// the last exchange's without a fault. None read yet (a stream
+			// joined mid-connection, its commands so far without an answer)
+			// shows no boundary.
+			if lastAnswerSeq != 0 {
 				walk.anchor()
 			}
-			atBoundary = true
 		}
 		if taken != nil && !taken.read {
 			// The exchange taken up was handled (recorded and held, or left

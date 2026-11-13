@@ -2,6 +2,7 @@ package recorder
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -341,7 +343,9 @@ func TestRecordV2_ACommandStampedNotAfterTheAnswerBeforeItIsNotPipelining(t *tes
 		{"stamped before the answer before it arrived", func(command *fakeconn.Chunk, first, _ fakeconn.Chunk) {
 			command.ReadAt = first.ReadAt.Add(time.Nanosecond)
 		}},
-		{"not stamped", func(command *fakeconn.Chunk, _, _ fakeconn.Chunk) { command.ReadAt = time.Time{} }},
+		{"not stamped", func(command *fakeconn.Chunk, _, _ fakeconn.Chunk) {
+			command.ReadAt, command.WrittenAt = time.Time{}, time.Time{}
+		}},
 		{"numbered alike with the end of the answer before it", func(command *fakeconn.Chunk, _, answer fakeconn.Chunk) { command.ConnSeq = answer.ConnSeq }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -353,7 +357,9 @@ func TestRecordV2_ACommandStampedNotAfterTheAnswerBeforeItIsNotPipelining(t *tes
 				t.Fatal("fixture: the 2nd command must be numbered after the answer to the 1st")
 			}
 			c.mark(&client[1], client[0], server[0])
-			rec := recordChunks(t, client, server, true, time.Minute)
+			// A chunk left with no capture time reaches the recorder with none
+			// (recordChunksStamped).
+			rec := recordChunksStamped(t, client, server, true, time.Minute, false)
 			requireRealigned(t, rec, commandAt(t, xs, 16384, 5), 18-1)
 		})
 	}
@@ -588,6 +594,7 @@ func TestRecordV2_PostTLS_APrepareHeldWhenTheNextResponseCannotBeFramed(t *testi
 func TestRecordV2_PostTLS_APrepareTakenUpAndHeldIsLeftOutAtTheClientsEnd(t *testing.T) {
 	t.Parallel()
 	j := newJoinedMidStream(t)
+	logs := j.observe()
 	leftOut := &orphanSpans{}
 	j.h.sess.Orphans = leftOut
 	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
@@ -608,6 +615,12 @@ func TestRecordV2_PostTLS_APrepareTakenUpAndHeldIsLeftOutAtTheClientsEnd(t *test
 	}
 	if leftOut.count() != 2 {
 		t.Fatalf("%d exchanges left out, want the COM_FIELD_LIST and the PREPARE", leftOut.count())
+	}
+	// Left out as the exchange taken up that nothing confirms, at the
+	// client's end, not later as a PREPARE whose framing the recording's end
+	// did not settle.
+	if n := leftOutFor(logs, "the client's stream ended with no command after it whose answer would confirm it"); n != 1 {
+		t.Fatalf("%d exchanges left out for the end of the client's stream, want the PREPARE taken up", n)
 	}
 }
 
@@ -765,6 +778,22 @@ func TestRecordV2_ATailThatFramesAsTheAnswerTakenUpIsNotConfirmed(t *testing.T) 
 	client, server := intoTheTail(t, 1+6+1+5, ok)
 	rec := recordChunks(t, client, server, true, time.Minute)
 	requireUnconfirmedStop(t, rec, "the server's next bytes after it were captured before the client's next command")
+	// The exchange the recording stops in is the one taken up: the window left
+	// out at the stop holds when its command was sent, so the test case that
+	// sent it is left out with it.
+	xs := kitTraffic(t, []int{7, 8}, false)
+	var sentAt time.Time
+	for _, c := range client {
+		if bytes.Equal(c.Bytes, xs[3].command) {
+			sentAt = c.ReadAt
+		}
+	}
+	if sentAt.IsZero() {
+		t.Fatal("fixture: the command taken up is not on the wire")
+	}
+	if w, _ := rec.leftOut.last(); w[0].After(sentAt) {
+		t.Fatalf("the window left out at the stop starts at %v, after the command taken up was sent (%v)", w[0].Format(time.StampMicro), sentAt.Format(time.StampMicro))
+	}
 }
 
 // Nor does the end of the server's stream confirm the answer taken up: a
@@ -940,4 +969,224 @@ func TestRecordV2_APingConfirmsTheAnswerTakenUp(t *testing.T) {
 	}
 	rec.mocks = queries
 	requireRealigned(t, rec, commandAt(t, laid, 16384, 2), 3)
+}
+
+// A command without an answer (COM_STMT_CLOSE) sent after the exchange taken
+// up after a response left out is recorded behind it, in the order sent, once
+// the next answer confirms it; and when the client's stream ends with the
+// exchange taken up unconfirmed, it is left out and the CLOSE recorded still:
+// a command without an answer has no answer to be paired wrong (takenUp).
+func TestRecordV2_ACommandWithoutAnAnswerAfterTheAnswerTakenUpIsRecordedBehindIt(t *testing.T) {
+	t.Parallel()
+	stmtClose := exchange{command: wrapPacket([]byte{mysql.COM_STMT_CLOSE, 1, 0, 0, 0}, 0)}
+	for _, clientEnds := range []bool{false, true} {
+		t.Run(fmt.Sprintf("clientEnds=%v", clientEnds), func(t *testing.T) {
+			t.Parallel()
+			xs := kitTraffic(t, []int{7, 8}, false)
+			xs[2].reply = append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[2].reply...)
+			laid := insert(xs, 4, stmtClose)
+			if clientEnds {
+				laid = laid[:5]
+			}
+			rec := recordWire(t, laid, 16384, true, time.Minute)
+			at := -1
+			var queries []*models.Mock
+			for i, m := range rec.mocks {
+				if m.Spec.Metadata["requestOperation"] == "COM_STMT_CLOSE" {
+					if at >= 0 {
+						t.Fatal("2 COM_STMT_CLOSE mocks, want 1")
+					}
+					at = i
+					continue
+				}
+				queries = append(queries, m)
+			}
+			if !clientEnds {
+				// The handshake's, the 2 exchanges' before the response left
+				// out, the one taken up, then the CLOSE sent after it.
+				if at != 4 {
+					t.Fatalf("the COM_STMT_CLOSE is mock %d of %d, want mock 4: behind the exchange taken up, as it was sent", at, len(rec.mocks))
+				}
+				rec.mocks = queries
+				requireRealigned(t, rec, commandAt(t, laid, 16384, 2), 18-1)
+				return
+			}
+			if at < 0 {
+				t.Fatal("no COM_STMT_CLOSE mock: the command without an answer queued behind the exchange taken up is lost at the client's end")
+			}
+			if w := wrongMocks(t, queries); len(w) > 0 {
+				t.Fatalf("%d wrong mock(s) recorded; the first: %s", len(w), w[0])
+			}
+			if !rec.returned || rec.err != nil {
+				t.Fatalf("RecordV2 = %v (returned %v), want nil at the end of the connection", rec.err, rec.returned)
+			}
+			if got := queryMocks(queries); got != 2 {
+				t.Fatalf("%d query mocks, want the 2 before the response left out", got)
+			}
+			if got := rec.leftOut.count(); got != 2 {
+				t.Fatalf("%d exchanges left out, want the one it could not frame and the one taken up after it", got)
+			}
+		})
+	}
+}
+
+// A command without an answer (COM_STMT_CLOSE) does not confirm the exchange
+// taken up after a response left out: the server sends nothing for it, so the
+// server's next bytes after it say nothing of where the answer taken up
+// ended. Here the tail of the response left out frames as the answer (the
+// sequence wraps to 1), the client sends a CLOSE, and the command's own answer
+// follows, captured after the CLOSE and before the client's next query.
+// Confirmed at the CLOSE, the command was recorded with the tail's packet: a
+// wrong mock. The next query does not confirm it, and the recording stops
+// there, with no wrong mock.
+func TestRecordV2_ACommandWithoutAnAnswerDoesNotConfirmTheAnswerTakenUp(t *testing.T) {
+	t.Parallel()
+	ok := frame([][]byte{{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}})
+	laid, xs := upToTheTail(t, 1+6+1+5, ok)
+	laid = append(laid, exchange{command: wrapPacket([]byte{mysql.COM_STMT_CLOSE, 1, 0, 0, 0}, 0)})
+	laid = append(laid, exchange{reply: [][]byte{bytes.Join(xs[3].reply, nil)}})
+	laid = append(laid, xs[4:]...)
+	client, server := onTheWire(laid, 1<<20)
+	rec := recordChunks(t, client, server, true, time.Minute)
+	// The CLOSE queued behind the exchange taken up is recorded at the stop:
+	// it has no answer to be paired wrong.
+	var queries []*models.Mock
+	for _, m := range rec.mocks {
+		if m.Spec.Metadata["requestOperation"] != "COM_STMT_CLOSE" {
+			queries = append(queries, m)
+		}
+	}
+	if n := len(rec.mocks) - len(queries); n != 1 {
+		t.Fatalf("%d COM_STMT_CLOSE mocks, want 1", n)
+	}
+	rec.mocks = queries
+	requireUnconfirmedStop(t, rec, "the server's next bytes after it were captured before the client's next command")
+}
+
+// A command whose first chunk is numbered past half the number space (a
+// connection that carried that many chunks) is not taken for pipelining when
+// no answer was read before it: there is no answer's last byte to compare its
+// number with (fakeconn.Chunk.CapturedBefore against no number is a wrapped
+// comparison). Taken for it, the response it cannot frame stopped the
+// recording; here it costs its exchange alone.
+func TestRecordV2_PostTLS_ACommandWithNoAnswerReadBeforeItIsNotPipelining(t *testing.T) {
+	t.Parallel()
+	j := newJoinedMidStream(t)
+	leftOut := &orphanSpans{}
+	j.h.sess.Orphans = leftOut
+	j.h.captured.Store(1 << 31)
+	j.exchange(stmtCloseCommand(0, 7), nil)
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
+	// COM_FIELD_LIST: a reply it cannot frame.
+	j.exchange(wrapPacket(append([]byte{0x04}, "t\x00"...), 0), frame([][]byte{columnPayload(t, undecodableColumns[0]), eofPayload}))
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{cannedOK(t, 1, j.caps)})
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 3"), [][]byte{cannedOK(t, 1, j.caps)})
+	mocks, err := j.run(t)
+	if err != nil {
+		t.Fatalf("RecordV2 = %v: a command with no answer read before it is not pipelining", err)
+	}
+	if n := len(mocksOf(mocks, "COM_QUERY")); n != 3 || len(mocks) != 4 {
+		t.Fatalf("%d mocks (%d queries), want the CLOSE and the 3 queries' OKs", len(mocks), n)
+	}
+	if leftOut.count() != 1 {
+		t.Fatalf("%d exchanges left out, want the COM_FIELD_LIST", leftOut.count())
+	}
+}
+
+// observe makes the joined connection log to an observer, and returns it.
+func (j *joinedMidStream) observe() *observer.ObservedLogs {
+	core, logs := observer.New(zapcore.DebugLevel)
+	j.h.logger = zap.New(core)
+	j.h.sess.Logger = j.h.logger
+	return logs
+}
+
+// leftOutFor counts the exchanges logged as left out for a reason holding why.
+func leftOutFor(logs *observer.ObservedLogs, why string) int {
+	return logs.FilterFieldKey("reason").Filter(func(e observer.LoggedEntry) bool {
+		r, _ := e.ContextMap()["reason"].(string)
+		return strings.Contains(r, why)
+	}).Len()
+}
+
+// A PREPARE taken up after a response left out and held for its framing, when
+// the server's next bytes after it were captured before the client's next
+// command: the answer taken as the PREPARE's is not confirmed (takenUp), and
+// the recording stops there, with the PREPARE left out once, in the exchange
+// the recording stops in, not again as a PREPARE whose framing nothing
+// settled.
+func TestRecordV2_PostTLS_APrepareTakenUpAndHeldThatIsNotConfirmedIsLeftOutOnce(t *testing.T) {
+	t.Parallel()
+	j := newJoinedMidStream(t)
+	logs := j.observe()
+	leftOut := &orphanSpans{}
+	j.h.sess.Orphans = leftOut
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
+	// COM_FIELD_LIST: a reply it cannot frame.
+	j.exchange(wrapPacket(append([]byte{0x04}, "t\x00"...), 0), frame([][]byte{columnPayload(t, undecodableColumns[0]), eofPayload}))
+	// Columns only, no EOF (CLIENT_DEPRECATE_EOF): held, its framing open.
+	j.exchange(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "SELECT id FROM t"...), 0),
+		prepareOK(true, nil, [][]byte{columnPayload(t, undecodableColumns[0])}))
+	j.h.pushDest(cannedOK(t, 1, j.caps), j.at())
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{cannedOK(t, 1, j.caps)})
+	mocks, err := j.run(t)
+	if !errors.Is(err, ErrFramingLost) || !strings.Contains(err.Error(), "the answer to the command taken up after a response left out is not confirmed") {
+		t.Fatalf("RecordV2 = %v, want the stop at the answer taken up that is not confirmed", err)
+	}
+	if n := len(mocksOf(mocks, "COM_STMT_PREPARE")); n != 0 {
+		t.Fatalf("recorded %d PREPAREs whose answer taken up is not confirmed", n)
+	}
+	if len(mocks) != 1 || describe(mocks[0]) != "a OK" {
+		t.Fatalf("%d mocks, want SELECT 1's OK alone", len(mocks))
+	}
+	if leftOut.count() != 2 {
+		t.Fatalf("%d exchanges left out, want the COM_FIELD_LIST and the PREPARE the recording stopped in", leftOut.count())
+	}
+	if n := leftOutFor(logs, "settled the"); n != 0 {
+		t.Fatalf("the PREPARE was left out %d more times as one whose framing nothing settled", n)
+	}
+}
+
+// A post-TLS stream joined mid-connection whose first command has no answer
+// (COM_STMT_CLOSE) has had no server byte read when the next command comes: no
+// response read whole puts the packet walk at a packet boundary yet
+// (packetWalk), as for the first command's own response. A response the
+// recorder cannot frame there stops the recording, naming it, as it does
+// for the first command's: the server's first bytes on a stream joined
+// mid-way may be the rest of an answer sent before it, and a walk anchored at
+// them follows the wrong headers to the cut.
+//
+// The same after server bytes the floor dropped before a second command
+// without an answer: dropped, not read, they show no boundary either.
+func TestRecordV2_PostTLS_AResponseLeftOutBeforeAnyWasReadWholeStopsAfterACommandWithoutAnAnswer(t *testing.T) {
+	t.Parallel()
+	for _, dropped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dropped=%v", dropped), func(t *testing.T) {
+			t.Parallel()
+			j := newJoinedMidStream(t)
+			leftOut := &orphanSpans{}
+			j.h.sess.Orphans = leftOut
+			closes := 1
+			if dropped {
+				// The rest of an answer sent before the stream was joined,
+				// captured before the second CLOSE.
+				j.exchange(stmtCloseCommand(0, 7), [][]byte{cannedOK(t, 1, j.caps)[2:]})
+				j.exchange(stmtCloseCommand(0, 8), nil)
+				closes = 2
+			} else {
+				j.exchange(stmtCloseCommand(0, 7), nil)
+			}
+			// COM_FIELD_LIST: a reply it cannot frame.
+			j.exchange(wrapPacket(append([]byte{0x04}, "t\x00"...), 0), frame([][]byte{columnPayload(t, undecodableColumns[0]), eofPayload}))
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{cannedOK(t, 1, j.caps)})
+			mocks, err := j.run(t)
+			if !errors.Is(err, ErrFramingLost) || !strings.Contains(err.Error(), "the server's packets were not followed from a packet boundary to it") {
+				t.Fatalf("RecordV2 = %v, want the stop at the cut no response read whole anchors", err)
+			}
+			if len(mocks) != closes || len(mocksOf(mocks, "COM_STMT_CLOSE")) != closes {
+				t.Fatalf("%d mocks, want the %d CLOSE(s) alone", len(mocks), closes)
+			}
+		})
+	}
 }
