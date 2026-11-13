@@ -1217,9 +1217,26 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 		if name == "cookie" && !guarded && goneAsLearned(k.learned, rv, lv) {
 			continue
 		}
-		out = append(out, patternField(field(valueDiff(path, rv, lv))))
+		f := patternField(field(valueDiff(path, rv, lv)))
+		if name == "cookie" {
+			f.shape = cookieShape(path, rv, lv)
+		}
+		out = append(out, f)
 	}
 	return out
+}
+
+// cookieShape is how a miss names a Cookie header that differs (path) by
+// what its pairs do (cookiePairsDiffer): a jar holds a session token beside
+// pairs the page sets itself, and "header.cookie differs" alone does not say
+// which of them the call sent otherwise. It names pairs, never a value; the
+// header's path alone where no pair differs (only the bytes between pairs
+// did).
+func cookieShape(path, rec, live string) string {
+	if pairs := cookiePairsDiffer(rec, live); pairs != "" {
+		return path + " (" + pairs + ")"
+	}
+	return path
 }
 
 // sameHeaderValue reports whether a header's recorded value (its lines joined

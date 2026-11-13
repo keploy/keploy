@@ -371,20 +371,26 @@ func TestStrictServesACallWithoutAPairThePageSets(t *testing.T) {
 		noise   map[string][]string
 		live    string
 		served  bool
+		// field is how the miss names the header: a Cookie header by the
+		// pairs that differ (cookieShape).
+		field string
 	}{
-		{"the page's pair gone", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s1", true},
-		{"as recorded", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s1; sub=pro", true},
-		{"the page's pair with another value", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s1; sub=free", false},
-		{"the session gone", map[string][]string{cookieSetByPage + "sub": {}}, nil, "sub=pro", false},
-		{"the session changed", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s2", false},
-		{"nothing learned", nil, nil, "session=s1", false},
-		{"keploy.yml's patterns guard the header", map[string][]string{cookieSetByPage + "sub": {}}, map[string][]string{"cookie": {"^z$"}}, "session=s1", false},
-		{"another header holding pairs", map[string][]string{cookieSetByPage + "sub": {}}, nil, "x-jar:session=s1", false},
+		{"the page's pair gone", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s1", true, ""},
+		{"as recorded", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s1; sub=pro", true, ""},
+		{"the page's pair with another value", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s1; sub=free", false, "header.cookie (pair sub holds another value)"},
+		{"the session gone", map[string][]string{cookieSetByPage + "sub": {}}, nil, "sub=pro", false, "header.cookie (pair session is not sent in this run)"},
+		{"the session changed", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s2", false, "header.cookie (pair session holds another value; pair sub is not sent in this run)"},
+		{"nothing learned", nil, nil, "session=s1", false, "header.cookie (pair sub is not sent in this run)"},
+		{"keploy.yml's patterns guard the header", map[string][]string{cookieSetByPage + "sub": {}}, map[string][]string{"cookie": {"^z$"}}, "session=s1", false, "header.cookie (pair sub is not sent in this run)"},
+		{"a pair sent in this run only", nil, nil, "session=s1; sub=pro; ab=b", false, "header.cookie (pair ab is sent in this run only)"},
+		{"the pairs in another order", nil, nil, "sub=pro; session=s1", false, "header.cookie (its pairs are sent in another order)"},
+		{"only the bytes between pairs differ", nil, nil, "session=s1;sub=pro", false, "header.cookie"},
+		{"another header holding pairs", map[string][]string{cookieSetByPage + "sub": {}}, nil, "x-jar:session=s1", false, "header.x-jar"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			name, live, field := "Cookie", c.live, "header.cookie"
+			name, live := "Cookie", c.live
 			if v, ok := strings.CutPrefix(live, "x-jar:"); ok {
-				name, live, field = "X-Jar", v, "header.x-jar"
+				name, live = "X-Jar", v
 			}
 			rec := recorded("m", "/v1/apps", map[string]string{name: "session=s1; sub=pro"}, "")
 			rec.Spec.ReqBodyNoise = c.learned
@@ -392,8 +398,25 @@ func TestStrictServesACallWithoutAPairThePageSets(t *testing.T) {
 			if (got != nil) != c.served {
 				t.Fatalf("served %v, want %v (differs %v)", got != nil, c.served, differs(diag))
 			}
-			if !c.served && !hasField(differs(diag), field) {
-				t.Fatalf("differs %v does not name %s", differs(diag), field)
+			if c.served {
+				return
+			}
+			if !hasField(differs(diag), c.field) {
+				t.Fatalf("differs %v does not name %s", differs(diag), c.field)
+			}
+			for _, d := range differs(diag) {
+				for _, v := range []string{"s1", "s2", "pro", "free"} {
+					if strings.Contains(d, "="+v) || strings.Contains(d, " "+v) {
+						t.Fatalf("differs %v holds the value %q", differs(diag), v)
+					}
+				}
+			}
+			// The report's path stays the header's: the redaction and
+			// keploy.yml's hints read it.
+			for _, f := range diag.differs {
+				if !strings.HasPrefix(c.field, f.diff.Path) {
+					t.Fatalf("the report's path %q is not the header's (%s)", f.diff.Path, c.field)
+				}
 			}
 		})
 	}
