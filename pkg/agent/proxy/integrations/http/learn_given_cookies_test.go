@@ -52,7 +52,8 @@ func TestLearnMatchFollowsAGivenOnlyIntoThePairsThatHoldIt(t *testing.T) {
 	if m != nil {
 		t.Fatalf("served, learning %+v; want the call refused", m.Spec.Learned())
 	}
-	if why := learn.GivenDerivedWhy("header.cookie", "given:session", "apps_test.go:20"); !strings.Contains(miss.res.Why, why) {
+	// The refusal names the pairs that differ, never their values.
+	if why := learn.GivenDerivedWhy("header.cookie (pair jwt holds another value; pair refresh holds another value)", "given:session", "apps_test.go:20"); !strings.Contains(miss.res.Why, why) {
 		t.Fatalf("refused: %s; want %q", miss.res.Why, why)
 	}
 }

@@ -2540,7 +2540,15 @@ func newPairing() pairing {
 //     key's name with no bind, whatever else Classify found: the test case is
 //     earlier than any call it makes. Its name is the key's alone in the
 //     test: no other variable takes it. A given's says why (learn.GivenWhy).
-func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
+func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (plan pairing, refusal string) {
+	// Each refusal below is of the leaf the loop reads: a Cookie header's
+	// names the pairs that differ (withCookiePairs).
+	var refused learn.Learned
+	defer func() {
+		if refusal != "" {
+			refusal = withCookiePairs(refusal, refused.Recorded, refused.Live)
+		}
+	}()
 	p := newPairing()
 	jsonReq := rec.Fixed["body"] == "json"
 	reserved := make(map[string]bool, len(given))
@@ -2561,6 +2569,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	}
 	echoed := map[string]string{} // recorded value -> its echo variable
 	for _, l := range learned {
+		refused = l
 		r := l.Recorded
 		if g, steps, ok := givenFor(r, l.Live, given); ok {
 			// The test case gave this value: a use of its key, no bind.
