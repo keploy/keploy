@@ -1328,11 +1328,11 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// asked when keploy captured no upstream of the app's: resolv.conf
 	// is missing or unreadable, or names no resolver keploy can use (no
 	// nameserver given as a plain IP, or only keploy's own listener),
-	// and always on Windows, where keploy reads none. The forwarder
-	// treats this as "no upstream" and we would otherwise be stuck.
-	// Those servers are keploy's pick, not the app's, so a failure to
-	// reach them is not marked errNoUpstreamAnswered, and it stays an
-	// ERROR.
+	// or on Windows when no adapter that is up has a DNS server. The
+	// forwarder treats this as "no upstream" and we would otherwise be
+	// stuck. Those servers are keploy's pick, not the app's, so a
+	// failure to reach them is not marked errNoUpstreamAnswered, and it
+	// stays an ERROR.
 	var addrs []string
 	appUpstream := p.hasDNSUpstream()
 	if appUpstream {
