@@ -8,6 +8,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// minAnswerGiven is the length, in bytes, of the shortest recorded value of a
+// given that a later answer is answered with. A place there is found by the
+// recorded value alone: the call's request does not carry the given, as it
+// does where the learn step follows one (givenFor reads both runs' values).
+// A short value, such as a count, a flag, a word or a clock read, stands
+// whole in answers that never echoed what the test gave, and answering those
+// would change what the dependency said. Sixteen is the length the learn
+// step reads as a value no answer holds by chance (its minLateRun). The
+// values tests give per run are longer: a cluster name that holds the run's
+// clock is 21 characters or more, a signed session token hundreds. A shorter
+// given is still followed in the requests that carry it.
+const minAnswerGiven = 16
+
 // givenAnswers is stub, the recording a call of the running test is answered
 // with, with each place of its recorded answer that holds a value the test
 // gave (a given: models.GivenReq, bound in the table the call binds in,
@@ -24,8 +37,9 @@ import (
 // the given's recorded value whole. A value inside a longer one is no such
 // place, as a request's is not (givenFor). Where the value the test gave
 // cannot stand at a place (text where the recording holds a number), the
-// answer is served as recorded, as before, and the log says why. stub is
-// never changed: an answer served with a given is a copy (renderAnswers).
+// answer is served as recorded, as before, and the log says why. So is a
+// place of a given recorded shorter than minAnswerGiven. stub is never
+// changed: an answer served with a given is a copy (renderAnswers).
 func (h *HTTP) givenAnswers(stub *models.Mock, mockDb integrations.MockMemDb) *models.Mock {
 	// The table as varScope.of picks it, read here with nothing allocated:
 	// every call's serve asks it.
@@ -56,8 +70,19 @@ func (h *HTTP) givenAnswers(stub *models.Mock, mockDb integrations.MockMemDb) *m
 	}
 	leaves := respLeaves(loaded.Spec.HTTPResp)
 	hit := &varHit{mock: loaded, local: make(map[string]variables.Binding, len(moved))}
-	var places []string
+	var places, short []string
 	for _, g := range moved {
+		if len(g.Recorded) < minAnswerGiven {
+			for _, a := range leaves {
+				if !learn.WholeEcho(learn.Leaf{Value: g.Recorded}, a) {
+					continue
+				}
+				if place, ok := learn.VarPlace(a, true); ok {
+					short = append(short, g.Name+" at "+place)
+				}
+			}
+			continue
+		}
 		d := varDecl{name: g.Name, recorded: g.Recorded}
 		for _, a := range leaves {
 			if !learn.WholeEcho(learn.Leaf{Value: g.Recorded}, a) {
@@ -70,6 +95,10 @@ func (h *HTTP) givenAnswers(stub *models.Mock, mockDb integrations.MockMemDb) *m
 		}
 		hit.decls = append(hit.decls, d)
 		hit.local[g.Name] = g
+	}
+	if len(short) > 0 {
+		h.Logger.Warn("a recorded answer holds a value the test gave, and keploy serves it as recorded there: the value was recorded shorter than the shortest one keploy answers later answers with, and a value that short stands in answers that never echoed it; give a value of at least that many characters, such as a name that holds the run's clock, and record again",
+			zap.String("mock", stub.Name), zap.Strings("places", short), zap.Int("shortest", minAnswerGiven))
 	}
 	if len(places) == 0 {
 		return stub
