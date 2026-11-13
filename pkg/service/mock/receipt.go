@@ -3,6 +3,7 @@ package mock
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -163,7 +164,9 @@ type Receipt struct {
 	// test's own is, is the set's too, wherever it lands, and names the
 	// window it was made in (models.UnmatchedCall.WindowOf). Each
 	// is as evidence keeps a miss (models.UnmatchedCall.Sanitized: no value
-	// the app sent), with the process that made it. nil when the misses
+	// the app sent), with the process that made it, once for every time the
+	// run made that same call (UnchargedMiss.Count): a page that polls
+	// between tests is a few entries, not one per poll. nil when the misses
 	// were not read, and with the switch off.
 	UnchargedMisses []UnchargedMiss `yaml:"unchargedMisses,omitempty" json:"unchargedMisses,omitempty"`
 	// RequiredNotMade are, under the proven switch, the series declared rules
@@ -203,9 +206,32 @@ type Receipt struct {
 // with (Receipt.UnchargedMisses), and the process that made it.
 type UnchargedMiss struct {
 	models.UnmatchedCall `yaml:",inline"`
+	// Count is how many of the run's misses charged to no test are this
+	// call: the same call as evidence keeps it (sameMiss), made again by the
+	// same kind of process, wherever in the run it landed. When the call was
+	// made, the window it landed in and its process are its first's (At,
+	// WindowOf, Process). 0, in a receipt that predates it, is one call
+	// (Calls).
+	Count int `yaml:"count,omitempty" json:"count,omitempty"`
 	// Process is the process that made the call, as the agent saw it then;
 	// nil when it named none.
 	Process *MissProcess `yaml:"process,omitempty" json:"process,omitempty"`
+}
+
+// Calls is how many of the run's misses charged to no test u stands for: its
+// Count, and one for a receipt that predates it.
+func (u UnchargedMiss) Calls() int {
+	return max(u.Count, 1)
+}
+
+// UnchargedCalls is how many misses charged to no test ms lists: the sum of
+// their Calls.
+func UnchargedCalls(ms []UnchargedMiss) int {
+	n := 0
+	for _, m := range ms {
+		n += m.Calls()
+	}
+	return n
 }
 
 // MissProcess names the process that made a call: its pid, its comm and its
@@ -229,14 +255,17 @@ type MissProcess struct {
 // no test was charged with, each as evidence keeps a miss, with its process.
 // The calls a test's end charged come from the agent already kept so; the
 // rest, read from the proxy at the run's end, carry the call's values, which
-// the receipt never holds.
+// the receipt never holds. A call the run made again is its first entry's
+// Count, in the order each call was first made: a receipt grows with the
+// distinct calls a run left uncharged, not with how often it made them.
 func unchargedMisses(misses []models.UnmatchedCall) []UnchargedMiss {
 	var out []UnchargedMiss
+	seen := map[string]int{}
 	for _, m := range misses {
 		if m.ChargedTo != "" || !m.CountsAgainstTest() {
 			continue
 		}
-		u := UnchargedMiss{UnmatchedCall: m.Sanitized()}
+		u := UnchargedMiss{UnmatchedCall: m.Sanitized(), Count: 1}
 		if src := m.Source; src != nil {
 			u.Process = &MissProcess{PID: src.PID, Comm: src.Comm, Exe: src.Exe, Cmdline: src.Cmdline, Unnamed: src.Unnamed}
 			// Process holds what only travels; the call's own source keeps
@@ -244,9 +273,42 @@ func unchargedMisses(misses []models.UnmatchedCall) []UnchargedMiss {
 			// or command line through it either.
 			u.Source = src.Persisted()
 		}
+		if key, ok := sameMiss(u); ok {
+			if i, again := seen[key]; again {
+				out[i].Count++
+				continue
+			}
+			seen[key] = len(out)
+		}
 		out = append(out, u)
 	}
 	return out
+}
+
+// sameMiss is what makes u the same uncharged call as another: every field
+// evidence keeps of it but when it was made and the window it landed in (At,
+// WindowOf); of a repeat of a spent recording, how
+// long after that recording's answer, and after its record time, this one
+// came (models.RepeatNote's gaps and RecordedLast, which depend on the window
+// it landed in); and of its process the pid and command line, which differ
+// for each process of one kind (a browser's renderers) and which the JSON form
+// the key is leaves out (MissProcess). What it names of the call, where the
+// match stopped, the recording it repeats, the test it trails, its set and the
+// process's comm and executable all count. ok is false when u cannot be keyed
+// (a time outside the years JSON writes): it is then an entry of its own, never another's
+// count.
+func sameMiss(u UnchargedMiss) (key string, ok bool) {
+	u.At, u.WindowOf = time.Time{}, ""
+	if u.Repeat != nil {
+		r := *u.Repeat
+		r.ReplayGapSeconds, r.ReplayGapFromStart, r.RecordGapSeconds, r.RecordGapKnown, r.RecordedLast = 0, false, 0, false, ""
+		u.Repeat = &r
+	}
+	b, err := json.Marshal(u)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
 }
 
 // TestCounts counts a replay's tests by their verdict this run.
@@ -608,12 +670,14 @@ func readTestsFile(keployDir, set, file, whose string) (*TestsReceipt, error) {
 
 // ReceiptBytes bounds a receipt read, and so what keploy writes as one. A
 // receipt is a handful of scalar fields and a coverage summary, and the lists
-// a run fills under the proven switch: one entry per miss charged to no test
-// (UnchargedMisses, about a kilobyte each) and per required series. Those grow
-// with the run's calls as the per-test results grow with its tests, so the
-// bound is the per-test results' (TestsReceiptBytes): a Playwright project of
-// 344 tests left 4459 uncharged misses in one round, a receipt of megabytes.
-const ReceiptBytes = TestsReceiptBytes
+// a run fills under the proven switch: one entry per distinct call charged to
+// no test (UnchargedMisses, about a kilobyte each, a call made again counted on
+// its first) and per required series. So it grows with the distinct calls a
+// run leaves uncharged, not with how often it makes them (a page that polls
+// the same few queries between tests). 4 MiB holds thousands of distinct
+// calls, and the readers that decode it whole (keploy mock status, judging)
+// stay small.
+const ReceiptBytes = 4 << 20
 
 // receiptCap is the bound both ReadReceipt and writeReceipt hold a receipt
 // to, ReceiptBytes; a row lowers it.
@@ -634,8 +698,8 @@ func receiptBody(r Receipt) ([]byte, error) {
 // lists. A reader judges no round from it (FailedByKeploy), never one from a
 // receipt that lost the misses it lists.
 func pastBound(r Receipt, size int) Receipt {
-	why := fmt.Sprintf("keploy's receipt of this run is %d bytes, past the %d it reads back, so it lists none of the run's %d misses charged to no test and %d required series; the run has no verdict. Re-run fewer tests at once (split the test command) so each run's receipt fits",
-		size, receiptCap, len(r.UnchargedMisses), len(r.RequiredNotMade)+len(r.RequiredNotDue))
+	why := fmt.Sprintf("keploy's receipt of this run is %d bytes, past the %d it reads back, so it lists none of the run's %d misses charged to no test (%d distinct calls) and %d required series; the run has no verdict. Re-run fewer tests at once (split the test command) so each run's receipt fits",
+		size, receiptCap, UnchargedCalls(r.UnchargedMisses), len(r.UnchargedMisses), len(r.RequiredNotMade)+len(r.RequiredNotDue))
 	if r.Error != "" {
 		why = r.Error + "; " + why
 	}

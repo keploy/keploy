@@ -31,16 +31,16 @@ func manyUncharged(n int) []UnchargedMiss {
 	return out
 }
 
-// A round whose misses outside every test fill more than a megabyte writes a
-// receipt keploy reads back whole: the receipt holds one entry per such miss,
-// so it grows with the run's calls, as the per-test results do, and a reader
-// that refused it would leave the whole round unjudged.
+// A round whose distinct calls outside every test fill more than a megabyte
+// writes a receipt keploy reads back whole: the receipt holds one entry per
+// such call, so it grows with the distinct calls a run leaves uncharged, and a
+// reader that refused it would leave the whole round unjudged.
 func TestReceiptOfManyUnchargedMissesReadsBack(t *testing.T) {
 	keployDir := filepath.Join(t.TempDir(), "keploy")
 	if err := os.MkdirAll(filepath.Join(keployDir, "set"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	misses := manyUncharged(5000)
+	misses := manyUncharged(2000)
 	writeReceipt(zap.NewNop(), keployDir, Receipt{Set: "set", OnMiss: "fail", UnchargedMisses: misses})
 	info, err := os.Stat(filepath.Join(keployDir, "set", ReceiptFile))
 	if err != nil {
@@ -133,5 +133,14 @@ func TestReceiptWithinTheBoundIsWrittenWhole(t *testing.T) {
 	receiptCap = int64(len(receiptHead) + len(body))
 	if got := writeAndRead(t, r); got.FailedBy != "" || len(got.UnchargedMisses) != 20 {
 		t.Fatalf("failedBy %q, %d uncharged misses; want the receipt whole", got.FailedBy, len(got.UnchargedMisses))
+	}
+}
+
+// The bound is 4 MiB: thousands of distinct calls charged to no test are past
+// it, and keploy writes the receipt that says the run has no verdict.
+func TestReceiptOfThousandsOfDistinctCallsIsPastTheBound(t *testing.T) {
+	got := writeAndRead(t, Receipt{Set: "set", OnMiss: "fail", UnchargedMisses: manyUncharged(5000)})
+	if got.FailedBy != FailedByKeploy || !strings.Contains(got.Error, fmt.Sprintf("past the %d it reads back", 4<<20)) {
+		t.Fatalf("failedBy %q, error %q; want keploy, past the 4 MiB bound", got.FailedBy, got.Error)
 	}
 }
