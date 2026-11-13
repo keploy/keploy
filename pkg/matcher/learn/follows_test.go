@@ -1389,4 +1389,18 @@ func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
 	if got.Kind != KindNoise {
 		t.Errorf("the answers in the recording's order: %s (%q); want noise", got.Kind, got.Why)
 	}
+	// The value F saw is a's answer whole: a whole value is a source, never
+	// a part held by chance, so the rule refuses it, and the first
+	// reading's reason stands.
+	got = classify("pos 82", "7", a.ServedAs(1), b.ServedAs(2))
+	if got.Kind != KindVariable || got.From.Mock != "mock-b" || !got.From.SetAside {
+		t.Errorf("FALSE GREEN? F saw a's answer whole: %s from %q set aside %v (%q); want the first reading's refusal, set aside at mock-b", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
+	}
+	// A short part set aside, then a part of 16 bytes or more set aside at
+	// a later payload: read again, the short part is no source, and the
+	// long part's place is named, set aside, refused.
+	got = classify("pos 82 "+build, "pos 7 Zz1Yy2Xx3Ww4Vv5U", a.ServedAs(1), b.ServedAs(2), headed("mock-7", "X-Build", build).ServedAs(3).ServedAsRecorded())
+	if got.Kind != KindVariable || got.From.Mock != "mock-7" || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
+		t.Errorf("a long part after a short one: %s from %q set aside %v (%q); want a variable of mock-7 set aside, refused", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
+	}
 }
