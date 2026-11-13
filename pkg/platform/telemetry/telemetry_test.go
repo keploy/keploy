@@ -289,10 +289,12 @@ func TestTelemetry_ShutdownWithAnUnansweredRequestReturnsAfterTheClientTimeout(t
 		close(shutdownDone)
 	}()
 
-	// The client gives up on a request after 2s; allow 1s more for scheduling.
+	// The client gives up on a request after 2s. The 4s on top keep a busy
+	// runner, or one running with coverage on, from failing this, and still
+	// fail a Shutdown that waits on the request for good.
 	select {
 	case <-shutdownDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Shutdown was still waiting 3s after it started on a request the server never answers")
+	case <-time.After(6 * time.Second):
+		t.Fatal("Shutdown was still waiting 6s after it started on a request the server never answers")
 	}
 }
