@@ -83,10 +83,12 @@ func TestOnlyAMockBeforeTheFirstTestCaseIsOneOfTheStartUpWindows(t *testing.T) {
 }
 
 // The async capture's mock of a test, lost at the bound, leaves out only the
-// test cases whose window overlaps its call, and says no ERROR: those before
-// and after it are sent. It is bounded as a test's mock is, so the room kept
-// for the mocks any test may need stays theirs.
-func TestATestsMockNoTestOwnsLostAtTheBoundLeavesOutOnlyTheTestsOverIt(t *testing.T) {
+// test cases whose window holds its request, and says no ERROR: those before
+// and after it are sent, and so is one over only its call's answer, which
+// started after the request: its replay does not look for the mock. It is
+// bounded as a test's mock is, so the room kept for the mocks any test may
+// need stays theirs.
+func TestATestsMockNoTestOwnsLostAtTheBoundLeavesOutOnlyTheTestsHoldingItsRequest(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	m := New(zap.New(core))
 	fullLane(t, m)
@@ -109,10 +111,20 @@ func TestATestsMockNoTestOwnsLostAtTheBoundLeavesOutOnlyTheTestsOverIt(t *testin
 		t.Fatal("a test case before the lost test's mock was left out")
 	}
 	for name, w := range map[string][2]time.Time{
-		"over its request": {at.Add(-time.Second), at},
-		"over its answer":  {at.Add(time.Second), at.Add(2 * time.Second)},
-		"inside its call":  {at.Add(100 * time.Millisecond), at.Add(200 * time.Millisecond)},
-		"around its call":  {at.Add(-time.Second), at.Add(2 * time.Second)},
+		"over its answer only":        {at.Add(time.Second), at.Add(2 * time.Second)},
+		"inside its call":             {at.Add(100 * time.Millisecond), at.Add(200 * time.Millisecond)},
+		"from just after its request": {at.Add(time.Nanosecond), at.Add(2 * time.Second)},
+		"up to just before it":        {at.Add(-time.Second), at.Add(-time.Nanosecond)},
+	} {
+		if !m.SendingTestCase(name, w[0], w[1]) {
+			t.Fatalf("a test case whose window is %s, not holding the lost mock's request, was left out", name)
+		}
+	}
+	for name, w := range map[string][2]time.Time{
+		"over its request":      {at.Add(-time.Second), at},
+		"from its request":      {at, at.Add(500 * time.Millisecond)},
+		"around its call":       {at.Add(-time.Second), at.Add(2 * time.Second)},
+		"its request's instant": {at, at},
 	} {
 		if m.SendingTestCase(name, w[0], w[1]) {
 			t.Fatalf("a test case whose window is %s was sent without the lost mock", name)
@@ -150,8 +162,10 @@ func TestATestsMockNoTestOwnsAnsweredBeforeItsRequestSpansItsRequest(t *testing.
 
 // Given up on with the consumer stalled, the async capture's mock of a test
 // revokes by name the test cases the stream sent before it whose window
-// overlaps its call, and only those; one given up on an older recording's
-// channel revokes none of the current one's.
+// holds its request, and only those: not one over only its answer, nor one
+// with no start that ended after the request (read as starting at its end);
+// one given up on an older recording's channel revokes none of the current
+// one's.
 func TestATestsMockNoTestOwnsGivenUpRevokesTheSentTestCasesOverIt(t *testing.T) {
 	t.Run("the current recording", func(t *testing.T) {
 		m := New(nil)
@@ -161,10 +175,12 @@ func TestATestsMockNoTestOwnsGivenUpRevokesTheSentTestCasesOverIt(t *testing.T) 
 		sentFirstAt(m, t0)
 		at := t0.Add(10 * time.Second)
 		for name, w := range map[string][2]time.Time{
-			"ended-before":  {at.Add(-2 * time.Second), at.Add(-time.Second)},
-			"over":          {at.Add(-time.Second), at.Add(time.Second)},
-			"no-start":      {{}, at.Add(time.Millisecond)},
-			"started-after": {at.Add(2 * time.Second), at.Add(3 * time.Second)},
+			"ended-before":     {at.Add(-2 * time.Second), at.Add(-time.Second)},
+			"over":             {at.Add(-time.Second), at.Add(time.Second)},
+			"no-start-at":      {{}, at},
+			"no-start":         {{}, at.Add(time.Millisecond)},
+			"over-answer-only": {at.Add(time.Millisecond), at.Add(2 * time.Second)},
+			"started-after":    {at.Add(2 * time.Second), at.Add(3 * time.Second)},
 		} {
 			if !m.SendingTestCase(name, w[0], w[1]) {
 				t.Fatalf("%s was left out with no mock lost", name)
@@ -182,17 +198,20 @@ func TestATestsMockNoTestOwnsGivenUpRevokesTheSentTestCasesOverIt(t *testing.T) 
 		for _, n := range revokesQueued(m) {
 			got[n] = true
 		}
-		if len(got) != 2 || !got["over"] || !got["no-start"] {
-			t.Fatalf("revoked %v, want over and no-start", revokesQueued(m))
+		if len(got) != 2 || !got["over"] || !got["no-start-at"] {
+			t.Fatalf("revoked %v, want over and no-start-at", revokesQueued(m))
 		}
 		m.sharedLossMu.Lock()
 		named := len(m.sentTCs.of("").tcs)
 		m.sharedLossMu.Unlock()
-		if named != 3 {
-			t.Fatalf("%d test cases still named after the loss, want 3: a revoked one is taken out", named)
+		if named != 5 {
+			t.Fatalf("%d test cases still named after the loss, want 5: a revoked one is taken out", named)
 		}
 		if m.SendingTestCase("checked-after", at, at.Add(time.Millisecond)) {
-			t.Fatal("a test case over the given-up mock's call, checked after it, was sent")
+			t.Fatal("a test case holding the given-up mock's request, checked after it, was sent")
+		}
+		if !m.SendingTestCase("answer-checked-after", at.Add(time.Millisecond), at.Add(time.Second)) {
+			t.Fatal("a test case over only the given-up mock's answer, checked after it, was left out")
 		}
 	})
 	t.Run("an older recording's channel", func(t *testing.T) {
@@ -277,8 +296,9 @@ func TestATestsMockNoTestOwnsLostSaysTheSentTestCasesItCanNoLongerName(t *testin
 }
 
 // A test case with no window start is read as its end, and one whose start
-// is after its end as starting at its end: either over a lost test's mock's
-// call is left out.
+// is after its end as starting at its end: either is left out when that end
+// is a lost test's mock's request, and sent when it ends inside the call,
+// after the request (read as starting there, it did not make the call).
 func TestATestCaseWithNoOrABackwardWindowIsCheckedAtItsEnd(t *testing.T) {
 	m := New(nil)
 	fullLane(t, m)
@@ -289,16 +309,22 @@ func TestATestCaseWithNoOrABackwardWindowIsCheckedAtItsEnd(t *testing.T) {
 	mk := asyncAt("c1", at)
 	mk.Spec.ResTimestampMock = at.Add(time.Second)
 	sendNow(m, mk, "")
-	if m.SendingTestCase("no-start", time.Time{}, at.Add(500*time.Millisecond)) {
-		t.Fatal("a test case with no start that ends inside the lost mock's call was sent")
+	if m.SendingTestCase("no-start", time.Time{}, at) {
+		t.Fatal("a test case with no start that ends at the lost mock's request was sent")
 	}
-	if m.SendingTestCase("backward", at.Add(5*time.Second), at.Add(500*time.Millisecond)) {
-		t.Fatal("a test case whose start is after its end, ending inside the lost mock's call, was sent")
+	if m.SendingTestCase("backward", at.Add(5*time.Second), at) {
+		t.Fatal("a test case whose start is after its end, ending at the lost mock's request, was sent")
+	}
+	if !m.SendingTestCase("no-start-inside", time.Time{}, at.Add(500*time.Millisecond)) {
+		t.Fatal("a test case with no start that ends inside the lost mock's call, after its request, was left out")
+	}
+	if !m.SendingTestCase("backward-inside", at.Add(5*time.Second), at.Add(500*time.Millisecond)) {
+		t.Fatal("a test case whose start is after its end, ending after the lost mock's request, was left out")
 	}
 }
 
 // A mock a test owns, lost, leaves out its test by name and no other: a test
-// case over its call is sent. Nor does an answer the client never read leave
+// case whose window holds its request is sent. Nor does an answer the client never read leave
 // out one over it.
 func TestAnOwnedMockOrAnUnreadAnswerLostSpansNoCall(t *testing.T) {
 	m := New(nil)

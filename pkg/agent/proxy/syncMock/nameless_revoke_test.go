@@ -24,8 +24,9 @@ func unnamedWarns(logs *observer.ObservedLogs) (int, map[string]interface{}) {
 }
 
 // The async capture hands the stream its test cases with no name: the
-// client names each as it saves it. A test's mock no test owns, lost over the
-// window of one the stream sent so, revokes it by the name a revoke gives it,
+// client names each as it saves it. A test's mock no test owns, lost with its
+// request inside the window of one the stream sent so, revokes it by the name
+// a revoke gives it,
 // its request time (models.RevokeNameByRequest), when the client finds it by
 // that; with a client that does not, or for one whose window start the client
 // cannot read (zero), no revoke can name it, and the loss says at WARN that it
@@ -61,7 +62,7 @@ func TestATestsMockLostOverATestCaseSentWithNoNameRevokesItByItsRequestTime(t *t
 		}
 		lose(t, m, clk, at)
 		if got := revokesQueued(m); len(got) != 1 || got[0] != models.RevokeNameByRequest(over) {
-			t.Fatalf("revoked %v, want only %q: the test case over the lost call, by its request time", got, models.RevokeNameByRequest(over))
+			t.Fatalf("revoked %v, want only %q: the test case holding the lost call's request, by its request time", got, models.RevokeNameByRequest(over))
 		}
 		if n, f := unnamedWarns(logs); n != 0 {
 			t.Fatalf("a loss whose test case it revoked by its request time says one may stay: %v", f)
@@ -69,14 +70,15 @@ func TestATestsMockLostOverATestCaseSentWithNoNameRevokesItByItsRequestTime(t *t
 	})
 	// Its name is the request stamp the client reads from the test case it
 	// saves, whatever the response stamp says: one stamped before the
-	// request (the stream reads the window as [end, end]) or not at all (as
-	// [start, now]) is still found by it, through either entry point.
+	// request (the stream reads the window as [end, end], here the lost
+	// call's request) or not at all (as [start, now]) is still found by it,
+	// through either entry point.
 	for _, c := range []struct {
 		name  string
 		start func(at time.Time) time.Time
 		end   func(at time.Time) time.Time
 	}{
-		{"a response stamped before its request", func(at time.Time) time.Time { return at.Add(2 * time.Second) }, func(at time.Time) time.Time { return at.Add(time.Second / 2) }},
+		{"a response stamped before its request", func(at time.Time) time.Time { return at.Add(2 * time.Second) }, func(at time.Time) time.Time { return at }},
 		{"a test case with no window end", func(at time.Time) time.Time { return at.Add(-time.Second) }, func(time.Time) time.Time { return time.Time{} }},
 	} {
 		for _, of := range []bool{false, true} {
@@ -101,7 +103,7 @@ func TestATestsMockLostOverATestCaseSentWithNoNameRevokesItByItsRequestTime(t *t
 				}
 				lose(t, m, clk, at)
 				if got := revokesQueued(m); len(got) != 1 || got[0] != models.RevokeNameByRequest(start) {
-					t.Fatalf("revoked %v, want only %q: the test case over the lost call, by its request stamp", got, models.RevokeNameByRequest(start))
+					t.Fatalf("revoked %v, want only %q: the test case holding the lost call's request, by its request stamp", got, models.RevokeNameByRequest(start))
 				}
 				if n, f := unnamedWarns(logs); n != 0 {
 					t.Fatalf("a loss whose test case it revoked by its request time says one may stay: %v", f)

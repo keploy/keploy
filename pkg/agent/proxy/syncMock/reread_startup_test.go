@@ -245,12 +245,14 @@ func TestATestsMockLostSaysTheSentTestCasesAClientThatCannotDeleteKeeps(t *testi
 		if got := revokesQueued(m); len(got) != 0 {
 			t.Fatalf("queued %v to revoke for a client that cannot delete them", got)
 		}
+		// A long call whose answer reaches tc-2's window revokes only tc-1,
+		// whose window holds its request.
 		long := callAt("c2", t0.Add(10*time.Second+500*time.Millisecond))
 		long.Spec.ResTimestampMock = t0.Add(26 * time.Second)
 		m.dropOut(long, "", m.revokeEpoch.Load(), string(MockDroppedOutputFull))
 		d := keptLines(logs, zapcore.DebugLevel)
-		if len(keptLines(logs, zapcore.WarnLevel)) != 1 || len(d) != 1 || d[0]["revoked_sent"] != int64(2) || d[0]["kept_sent_so_far"] != uint64(3) || d[0]["such_losses_so_far"] != uint64(2) {
-			t.Fatalf("the second such loss said WARN %v, Debug %v: want it at Debug, with 3 kept so far", keptLines(logs, zapcore.WarnLevel), d)
+		if len(keptLines(logs, zapcore.WarnLevel)) != 1 || len(d) != 1 || d[0]["revoked_sent"] != int64(1) || d[0]["kept_sent_so_far"] != uint64(2) || d[0]["such_losses_so_far"] != uint64(2) {
+			t.Fatalf("the second such loss said WARN %v, Debug %v: want it at Debug, with 2 kept so far", keptLines(logs, zapcore.WarnLevel), d)
 		}
 		if leftOutLines(logs) != 0 {
 			t.Fatal("a test's mock lost said the recording leaves out the test cases after it")

@@ -715,12 +715,13 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		}
 		// Asked last, as it notes the test case sent: a mock any test may
 		// need, lost from now on and requested before its window ended, or a
-		// mock no test owns lost over its window, revokes it by name, and one
+		// mock no test owns lost and requested inside its window, revokes it
+		// by name, and one
 		// lost since the checks above leaves it out here
 		// (SyncMockManager.SendingTestCase).
 		if !syncmgr.Get().SendingTestCase(t.Name, tcReqTime, tcRespTime) {
 			tcsSuppressedSoFar++
-			a.logger.Debug("agent: TC suppressed — a mock it may need was lost: one any test of the recording may need, requested before its window ended, or one no test owns over its window; not sent to CLI",
+			a.logger.Debug("agent: TC suppressed — a mock it may need was lost: one any test of the recording may need, requested before its window ended, or one no test owns requested inside its window; not sent to CLI",
 				zap.String("tc_name", t.Name),
 				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),

@@ -227,7 +227,7 @@ func TestHandleIncoming_ALostSessionMockRevokesTheTestCasesSentBeforeIt(t *testi
 
 // A test case the stream sent before a test's mock no test owns (the async
 // capture's, requested after the first test case the stream sent) is lost on its
-// way out, whose window overlaps that mock's call, is revoked by name: the
+// way out, whose window holds that mock's request, is revoked by name: the
 // stream gives the manager its window's start as well as its end. One sent
 // after the loss whose window ends before the call is sent. In a late
 // stretch: the loss revokes the only test case sent, so the start-up mock is
@@ -259,7 +259,7 @@ func TestHandleIncoming_ALostAsyncMockRevokesTheTestCaseSentOverItsCall(t *testi
 	}
 	mgr.CloseOutChan() // given up once the consumer took nothing for the close's bound
 	if !mgr.WasMockDroppedForTC("sent-over-its-call") {
-		t.Fatal("a test case sent before a test's mock no test owns was lost, whose window overlaps its call, was not revoked")
+		t.Fatal("a test case sent before a test's mock no test owns was lost, whose window holds its request, was not revoked")
 	}
 	tcs <- &models.TestCase{Name: "ended-before-the-call", Kind: models.HTTP,
 		HTTPReq: models.HTTPReq{Timestamp: start.Add(-1500 * time.Millisecond)}, HTTPResp: models.HTTPResp{Timestamp: start.Add(-time.Second)}}
