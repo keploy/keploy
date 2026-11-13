@@ -264,6 +264,15 @@ installKeploy (){
                 echo "Error: Failed to move the keploy binary from $source_dir to /usr/local/bin" >&2
                 return 1
             fi
+            # Root runs this keploy (v2's alias runs it with sudo, and so do
+            # users' own `sudo keploy ...`), so it must be root's: mv keeps
+            # the owner of the file it moves, which for a user with sudo is
+            # that user, who could then replace what root runs. 0:0 is
+            # root:root (root:wheel on macOS).
+            if ! keploy_as_root chown 0:0 /usr/local/bin/keploy; then
+                echo "Error: Failed to make /usr/local/bin/keploy owned by root" >&2
+                return 1
+            fi
         fi
         set_alias
     }
@@ -384,7 +393,13 @@ installKeploy (){
             # leave it no keploy that runs: root gets none.
             if [[ "$version" =~ ^v2\.[0-9]+\.[0-9]+ ]] && [ "$(id -u)" != 0 ]; then
                 ALIAS_CMD="alias keploy='sudo -E env PATH=\"\$PATH\" keploy'"
+                # With no rc file, the alias is set in this shell only: the
+                # same alias the rc file gets, $PATH read when keploy runs.
+                # (`alias keploy="$ALIAS_CMD"` made keploy stand for the whole
+                # alias command, so typing keploy defined an alias and ran
+                # nothing.)
                 # Handle zsh or bash for non-macOS systems
+                # shellcheck disable=SC2016
                 if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
                     if [ -f "$HOME/.zshrc" ]; then
                         if grep -q "alias keploy=" "$HOME/.zshrc"; then
@@ -392,7 +407,7 @@ installKeploy (){
                         fi
                         append_to_rc "$ALIAS_CMD" ~/.zshrc
                     else
-                        alias keploy="$ALIAS_CMD"
+                        alias keploy='sudo -E env PATH="$PATH" keploy'
                     fi
                 elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
                     if [ -f "$HOME/.bashrc" ]; then
@@ -401,7 +416,7 @@ installKeploy (){
                         fi
                         append_to_rc "$ALIAS_CMD" ~/.bashrc
                     else
-                        alias keploy="$ALIAS_CMD"
+                        alias keploy='sudo -E env PATH="$PATH" keploy'
                     fi
                 else
                     if [ -f "$HOME/.profile" ]; then
@@ -410,7 +425,7 @@ installKeploy (){
                         fi
                         append_to_rc "$ALIAS_CMD" ~/.profile
                     else
-                        alias keploy="$ALIAS_CMD"
+                        alias keploy='sudo -E env PATH="$PATH" keploy'
                     fi
                 fi
             fi
