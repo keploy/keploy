@@ -2261,8 +2261,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// keeping a test, so the read wins. A place that binds the value (a
 	// value sent whole, a client test's word) keeps the bind, and the time
 	// default checks a bound time by its form where the bind does not hold
-	// (BoundTimeLearned); a place in an answer, or in a payload keploy reads
-	// no side of, keeps its reading. A value the test gave holds no read of
+	// (BoundTimeLearned); a place that held the value whole keeps its
+	// reading where no variable binds there either (a copy of an earlier
+	// read sent whole is no name holding it by chance: the read rule decides
+	// it, TestAClientTestLearnsACopyOfAnEarlierReadItsOwnWindowHoldsAsAReadSinceItsTestBegan);
+	// a place in an answer, or in a payload keploy reads no side of, keeps
+	// its reading. A value the test gave holds no read of
 	// the clock to begin with: the search reads a given's text alone, never
 	// a clock read's words (sourcesBy, Earlier.Gave). The refusal the place
 	// gave stays the leaf's under keploy.yml's times strict
@@ -2273,7 +2277,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if !dc.clientTests || ln.Kind != KindVariable || from.Side != Request {
 			return ln
 		}
-		if _, _, bindable := from.BindAt(); bindable {
+		if _, _, bindable := from.BindAt(); bindable || from.Whole {
 			return ln
 		}
 		own, ok := ownRead(r, l, w)
