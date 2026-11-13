@@ -1019,6 +1019,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Consumed:        counts.consumed,
 		Missed:          counts.missed,
 		MissedData:      provenCount(counts.missedData),
+		MissedWhy:       counts.missesUnread,
 		Tests:           tests,
 		Bypass:          bypass,
 		Isolated:        isolated,

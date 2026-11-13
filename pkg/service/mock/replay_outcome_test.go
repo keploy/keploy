@@ -312,6 +312,9 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 		wantFields   map[string]any
 		wantLogs     []string
 		unwantLogs   []string
+		// wantMissedWhy is the receipt's MissedWhy: why its misses were
+		// not all read, as the agent or the failed read said it.
+		wantMissedWhy string
 	}{
 		{
 			name:         "the agent left its account: the run is proven",
@@ -342,6 +345,9 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			// --strict names why the read was incomplete, not a guess at it.
 			wantLogs:   []string{"incomplete", "could not read every call no mock answered", "could not be proven", "why:keploy's error drain stopped before this read"},
 			unwantLogs: []string{"writes what it served and missed as compose stops it", "check the agent logs for why it stopped"},
+			// The receipt keeps the agent's reason, not only the terminal:
+			// a judge reading the run says what to fix.
+			wantMissedWhy: "keploy's error drain stopped before this read",
 		},
 		{
 			// With no account there are no per-test windows either, so keploy
@@ -354,6 +360,8 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			wantErr:    true,
 			wantFields: map[string]any{"consumed": "unknown", "missed": "unknown", "reason": "the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
 			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "cannot tell whether it refused a test at its begin", "error:keploy could not read what each test did from its agent: the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
+			// A read that failed whole: its error is why.
+			wantMissedWhy: "the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -429,6 +437,9 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			}
 			if r.Consumed != wantConsumed || r.Missed != wantMissed {
 				t.Errorf("receipt consumed/missed = %d/%d, want %d/%d", r.Consumed, r.Missed, wantConsumed, wantMissed)
+			}
+			if r.MissedWhy != tc.wantMissedWhy {
+				t.Errorf("receipt missedWhy = %q, want %q", r.MissedWhy, tc.wantMissedWhy)
 			}
 		})
 	}
