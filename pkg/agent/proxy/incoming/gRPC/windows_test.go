@@ -293,7 +293,7 @@ func TestRecordIncoming_AGRPCOnlySyncRecordingMapsEachCallsMocksToItsTestCase(t 
 		_ = appApp.Close()
 		<-done
 	}()
-	want := map[string]string{}
+	want := map[string]*models.Mock{}
 	for i, id := range []uint32{1, 3} {
 		req, resp := pingCallOn(t, id, i == 0)
 		go func() { _, _ = cliApp.Write(req) }()
@@ -317,7 +317,19 @@ func TestRecordIncoming_AGRPCOnlySyncRecordingMapsEachCallsMocksToItsTestCase(t 
 		if !m.SendingTestCase(tc.Name, start, end) {
 			t.Fatalf("%s is left out", tc.Name)
 		}
-		want[tc.Name] = mk.Name
+		want[tc.Name] = mk
+	}
+	// The manager names each mock afresh as it hands it on to its test case,
+	// and the mapping carries that name: read it from the mock as it comes out,
+	// not from the mock the manager is renaming meanwhile.
+	named := map[*models.Mock]string{}
+	for len(named) < len(want) {
+		select {
+		case mk := <-out:
+			named[mk] = mk.Name
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%d of the calls' mocks came out, want %d", len(named), len(want))
+		}
 	}
 	got := map[string][]string{}
 	deadline := time.After(10 * time.Second)
@@ -331,9 +343,9 @@ func TestRecordIncoming_AGRPCOnlySyncRecordingMapsEachCallsMocksToItsTestCase(t 
 			t.Fatalf("mapped %v, want %v", got, want)
 		}
 	}
-	for name, mock := range want {
-		if ids := got[name]; len(ids) != 1 || ids[0] != mock {
-			t.Errorf("mapped %v to %s, want [%s]", ids, name, mock)
+	for name, mk := range want {
+		if ids := got[name]; len(ids) != 1 || ids[0] != named[mk] {
+			t.Errorf("mapped %v to %s, want [%s]", ids, name, named[mk])
 		}
 	}
 }
