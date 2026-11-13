@@ -70,6 +70,16 @@ testdata
 # the parser is tested against what the runners actually emit.
 !pkg/platform/coverage/report/testdata/
 !pkg/platform/coverage/report/testdata/**
+# What go tool covdata, coverage.py, nyc and JaCoCo hand the per-language
+# coverage reporters, which turn it into the report's coverage numbers.
+!pkg/platform/coverage/golang/testdata/
+!pkg/platform/coverage/golang/testdata/**
+!pkg/platform/coverage/python/testdata/
+!pkg/platform/coverage/python/testdata/**
+!pkg/platform/coverage/javascript/testdata/
+!pkg/platform/coverage/javascript/testdata/**
+!pkg/platform/coverage/java/testdata/
+!pkg/platform/coverage/java/testdata/**
 # Mocks as the recorder writes them (a production-shape recording's): the
 # in-place YAML encoder must write them byte for byte as EncodeMock did.
 !pkg/platform/yaml/mockdb/testdata/

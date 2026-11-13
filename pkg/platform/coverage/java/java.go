@@ -45,8 +45,12 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 	var err error
 	jacocoAgentPath, err = utils.ExpandPath(jacocoAgentPath)
 	if err == nil {
-		isFileExist, err := utils.FileExists(jacocoAgentPath)
-		if err == nil && isFileExist {
+		var isFileExist bool
+		isFileExist, err = utils.FileExists(jacocoAgentPath)
+		if err == nil && !isFileExist {
+			err = fmt.Errorf("jacoco agent not found at %s", jacocoAgentPath)
+		}
+		if err == nil {
 			j.cmd = strings.Replace(
 				j.cmd,
 				j.executable,
