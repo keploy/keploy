@@ -179,3 +179,47 @@ func TestAMockOnlyAHookMovedIsNotTheClampsToCount(t *testing.T) {
 		})
 	}
 }
+
+// A mock with no answer (a request-only one: zookeeper's close, kafka's
+// fire-and-forget Produce) is stamped answered as it was asked. The clamp
+// raising its request stamp leaves it answered before it was asked, as it
+// would one with an answer: it is counted.
+func TestARequestOnlyMockTheClampRaisesIsCounted(t *testing.T) {
+	zk := models.Kind("ZooKeeper")
+	requestOnly := zkAt("zk-close", zk, 50)
+	requestOnly.Spec.ResTimestampMock = requestOnly.Spec.ReqTimestampMock
+	warns := clampedOutRun(t, nil, zkAt("zk-0", zk, 100), requestOnly)
+	if len(warns) != 1 || warns[0].Message != ClampedOutMsg {
+		t.Fatalf("%d WARNs; want the clamp's, once: %v", len(warns), warns)
+	}
+	if f := warns[0].ContextMap(); f["mocks"] != int64(1) || f["firstMock"] != "zk-close" {
+		t.Errorf("the WARN counts %v mocks, first %v; want 1, zk-close", f["mocks"], f["firstMock"])
+	}
+}
+
+// A parser can panic after the clamp left some of its mocks answered before
+// they were asked. Those mocks were recorded, and the supervisor says so all
+// the same, once, as it recovers the panic.
+func TestTheRequestClampsLossIsSaidWhenTheParserPanics(t *testing.T) {
+	zk := models.Kind("ZooKeeper")
+	core, logs := observer.New(zapcore.InfoLevel)
+	sess := &Session{Mocks: make(chan *models.Mock, 2), Ctx: context.Background(), Logger: zap.New(core), ClientConnID: "conn-2"}
+	res := New(Config{Logger: zap.NewNop()}).Run(context.Background(), func(_ context.Context, sess *Session) error {
+		for _, m := range []*models.Mock{zkAt("zk-0", zk, 100), zkAt("zk-1", zk, 50)} {
+			if err := sess.EmitMock(m); err != nil {
+				return err
+			}
+		}
+		panic("a decoder bug")
+	}, sess)
+	if res.Status != StatusPanicked {
+		t.Fatalf("Run ended %s; want %s", res.Status, StatusPanicked)
+	}
+	warns := logs.FilterMessage(ClampedOutMsg).All()
+	if len(warns) != 1 {
+		t.Fatalf("%d clamp WARNs; want 1, said as the panic is recovered", len(warns))
+	}
+	if f := warns[0].ContextMap(); f["mocks"] != int64(1) || f["firstMock"] != "zk-1" {
+		t.Errorf("the WARN counts %v mocks, first %v; want 1, zk-1", f["mocks"], f["firstMock"])
+	}
+}

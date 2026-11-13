@@ -3,10 +3,12 @@ package recorder
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
@@ -244,6 +246,46 @@ func TestRecordV2_PostTLS_APrepareHeldAtTheStopIsSettledByWhatTheServerSent(t *t
 	mocks, err := j.run(t)
 	if err != nil {
 		t.Fatalf("RecordV2 = %v, want nil: the streams' end ends the recording", err)
+	}
+	if len(mocks) != 1 || leftOut.count() != 0 {
+		t.Fatalf("%d mock(s), %d left out; want the PREPARE recorded, nothing left out", len(mocks), leftOut.count())
+	}
+	sp, ok := mocks[0].Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket)
+	if !ok || len(sp.ParamDefs) != 2 || !bytes.Equal(sp.EOFAfterParamDefs, reply[len(reply)-1]) {
+		t.Fatalf("the PREPARE recorded %+v; want its 2 definitions and the EOF it was sent", mocks[0].Spec.MySQLResponses[0].Message)
+	}
+}
+
+// The client's reader can be closed while its producer could still send (the
+// supervisor's teardown): it then reads fakeconn.ErrClosed, not io.EOF, once it
+// has taken what it was handed. With a PREPARE held, what the server sent
+// after the definitions settles it there too: it is recorded with its EOF, and
+// nothing is left out.
+func TestRecordV2_PostTLS_APrepareHeldAsTheClientsReaderIsClosedIsSettled(t *testing.T) {
+	t.Parallel()
+	def := columnPayload(t, &mysql.ColumnDefinition41{Catalog: "def", Name: "?", OrgName: "?", FixedLength: 0x0c, CharacterSet: 0x3f, ColumnLength: 20, Type: byte(mysql.FieldTypeLongLong)})
+	j := newJoinedMidStream(t)
+	leftOut := &orphanSpans{}
+	j.h.sess.Orphans = leftOut
+	reply := prepareOK(false, [][]byte{def, def}, nil) // PREPARE_OK, 2 definitions, EOF
+	j.exchange(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "SELECT id FROM t WHERE a = ? AND b = ?"...), 0), reply)
+	close(j.h.destCh)
+	_ = j.h.sess.ClientStream.Close() // its channel stays open
+	done := make(chan error, 1)
+	go func() { done <- recordV2NoPanic(t, j.ctx, j.h.logger, j.h.sess) }()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, fakeconn.ErrClosed) {
+			t.Fatalf("RecordV2 = %v; want nil or the client reader's close", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("RecordV2 still running a minute after the client's reader was closed")
+	}
+	var mocks []*models.Mock
+	for len(j.h.mocks) > 0 {
+		if m := <-j.h.mocks; m.Spec.Metadata["type"] != "config" {
+			mocks = append(mocks, m)
+		}
 	}
 	if len(mocks) != 1 || leftOut.count() != 0 {
 		t.Fatalf("%d mock(s), %d left out; want the PREPARE recorded, nothing left out", len(mocks), leftOut.count())

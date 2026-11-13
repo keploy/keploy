@@ -184,6 +184,22 @@ func TestTee_AStalledParserWritesTheStacksOnceWhileItsConnectionIsOpen(t *testin
 	}
 }
 
+// The drain's first look at a parser comes a check's while (stall.CheckEvery)
+// after it starts waiting with bytes handed on, and the stall window is counted
+// from that look: a parser that takes nothing has its stacks written a window
+// and a check after the wait began, not a window later than that.
+func TestTee_AStallIsWrittenAWindowAfterTheFirstLook(t *testing.T) {
+	freshStacks(t)
+	clk := &stall.ManualClock{Step: stall.OnTime}
+	tt, _, _, _ := stalledTee(t, clk, 16)
+	tt.push(mkChunk("x"))
+	waitStacks(t, 1)
+	check := stall.CheckEvery(testStallGrace)
+	if got, most := clk.Runnable(), testStallGrace+2*check; got < testStallGrace || got > most {
+		t.Errorf("the stacks were written %v into the wait; want a window (%v) and at most two checks (%v) after it began", got, testStallGrace, most)
+	}
+}
+
 // A parser that is slow, but takes some of its bytes within each stall
 // window, is no stall: however long it takes in all, no stacks are written.
 // So whether the drain waits on its full channel or on an empty queue.

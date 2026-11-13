@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -48,9 +49,26 @@ func TestWriteStacksWritesEveryGoroutinesStackBesideTheLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"TestWriteStacksWritesEveryGoroutinesStackBesideTheLog", "parkForStacks"} {
-		if !strings.Contains(string(b), want) {
-			t.Errorf("the stacks file has no frame of %s:\n%s", want, b)
+	// Each stack under its goroutine's own header, with its state, as a panic
+	// prints them: a stall is read from what each goroutine waits on. The
+	// goroutine that wrote them is running.
+	header := regexp.MustCompile(`^goroutine \d+ \[[^\]]+\]:\n`)
+	for _, want := range []struct{ frame, state string }{
+		{"TestWriteStacksWritesEveryGoroutinesStackBesideTheLog", "[running]"},
+		{"parkForStacks", ""},
+	} {
+		var found bool
+		for _, g := range strings.Split(string(b), "\n\n") {
+			if !strings.Contains(g, want.frame+"(") { // a call, not a "created by" line
+				continue
+			}
+			found = true
+			if !header.MatchString(g) || !strings.Contains(strings.SplitN(g, "\n", 2)[0], want.state) {
+				t.Errorf("the stack of %s has no goroutine header with its state %q:\n%s", want.frame, want.state, g)
+			}
+		}
+		if !found {
+			t.Errorf("the stacks file has no frame of %s:\n%s", want.frame, b)
 		}
 	}
 

@@ -488,11 +488,13 @@ func TestTee_StalledConsumerCostsOneGraceNotOnePerChunk(t *testing.T) {
 	t.Parallel()
 	const queued = 200
 	clk := &stall.ManualClock{Step: stall.OnTime}
-	chunks := make([]fakeconn.Chunk, queued)
-	for i := range chunks {
-		chunks[i] = mkChunk(fmt.Sprintf("c%03d", i))
+	tt, rec := newTestTeeClock(t, 1<<30, 1, clk) // consumer never reads
+
+	for i := 0; i < queued; i++ {
+		tt.push(mkChunk(fmt.Sprintf("c%03d", i)))
 	}
-	tt, rec := newClosedTestTeeClock(t, 1<<30, 1, clk, chunks...) // consumer never reads
+
+	tt.close()
 	tt.waitDone()
 
 	// Per-chunk re-decision would take queued windows of samples.
