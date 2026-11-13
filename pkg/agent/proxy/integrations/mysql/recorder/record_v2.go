@@ -2415,14 +2415,20 @@ func emitMockV2(ctx context.Context, sess *supervisor.Session, requests []mysql.
 const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange read whole was handed over"
 
 // emitV2 hands the session m, the mock of an exchange read whole, whether or
-// not the session's context (Session.Ctx) has ended: EmitMock while it lasts,
-// EmitMockOnShutdown once it has ended, as at the recording's stop, where
-// EmitMock refuses every mock. A mock EmitMock refuses all the same, as the
-// context ends between the check and its own, is left out and said so
-// (leftOutRefusedAtStop), not dropped: EmitMock refuses a mock only for its
-// context's end.
+// not the session's context (Session.Ctx) has ended. Through the sync-mock
+// manager, as the agent records (RouteMocksViaSyncMock), it is always
+// EmitMockOnShutdown: there it differs from EmitMock only in skipping
+// EmitMock's look at the context, which comes after the post-record hooks, so
+// a recording's stop that came while the hooks ran would refuse a mock
+// captured before the stop, which the supervisor's stop waits for the
+// recorder to record. Straight to the session's channel: EmitMock while the
+// context lasts, EmitMockOnShutdown once it has ended, as at the recording's
+// stop, where EmitMock refuses every mock. A mock EmitMock refuses all the
+// same, as the context ends between the check and its own, is left out and
+// said so (leftOutRefusedAtStop), not dropped: EmitMock refuses a mock only
+// for its context's end.
 func emitV2(sess *supervisor.Session, m *models.Mock) {
-	if c := sess.Ctx; c != nil && c.Err() != nil {
+	if c := sess.Ctx; sess.RouteMocksViaSyncMock || (c != nil && c.Err() != nil) {
 		_ = sess.EmitMockOnShutdown(m)
 		return
 	}

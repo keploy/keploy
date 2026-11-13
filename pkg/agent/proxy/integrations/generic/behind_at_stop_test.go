@@ -150,36 +150,110 @@ func TestV2_BehindAtTheStopRecordsEveryExchangeCapturedWhole(t *testing.T) {
 	}
 }
 
-// A mock the session refuses as the stop comes (the context ends after the
-// parser checked it and before EmitMock checks it: here in the record hook
-// EmitMock runs first) is left out with its reason, counted and spanned, not
-// dropped with nothing said; the exchanges after it, handed over once the
-// context has ended, are recorded. On the channel the refusal is a select's
-// coin (the mock may be taken), so there each exchange is recorded or left
-// out, and at most the one is left out.
-func TestV2_AMockRefusedAsTheStopComesIsLeftOut(t *testing.T) {
+// The recording's stop can come inside EmitMock, after the parser saw the
+// context last and before EmitMock's own look at it, which comes after the
+// post-record hooks: here in the first mock's record hook. Through the
+// sync-mock manager, as the agent records, that mock is recorded all the
+// same, and so is every exchange after it, with nothing left out: each was
+// captured whole before the stop, and the supervisor's stop waits for the
+// parser to read what was captured.
+//
+// Before, EmitMock refused the first mock, and it was left out with the test
+// cases over it.
+func TestV2_AMockHandedOverAsTheStopComesIsRecorded(t *testing.T) {
 	const n = 3
-	for _, viaSyncMock := range []bool{true, false} {
-		t.Run(fmt.Sprint("viaSyncMock=", viaSyncMock), func(t *testing.T) {
-			r := runBehindAtTheStop(t, n, viaSyncMock, false, false)
-			if len(r.recorded)+len(r.leftOut) != n {
-				t.Fatalf("recorded %d (%q) and left out %d (%q) of the %d exchanges captured whole: some vanished with nothing said",
-					len(r.recorded), reqsOf(r.recorded), len(r.leftOut), r.leftOut, n)
-			}
-			if viaSyncMock && len(r.leftOut) != 1 {
-				t.Fatalf("left out %d (%q); want the one refused as the stop came", len(r.leftOut), r.leftOut)
-			}
-			if len(r.leftOut) > 1 {
-				t.Fatalf("left out %d (%q); want at most the one refused as the stop came", len(r.leftOut), r.leftOut)
-			}
-			for _, reason := range r.leftOut {
-				if reason != leftOutRefusedAtStop {
-					t.Fatalf("left out for %q, want %q", reason, leftOutRefusedAtStop)
-				}
-			}
-			if r.spans != len(r.leftOut) {
-				t.Fatalf("%d span(s) left out for %d mock(s) left out; want each one's span", r.spans, len(r.leftOut))
-			}
-		})
+	r := runBehindAtTheStop(t, n, true, false, false)
+	if got := reqsOf(r.recorded); len(r.recorded) != n || len(got) != n || len(r.leftOut) != 0 || r.spans != 0 {
+		t.Fatalf("recorded %d of the %d exchanges captured whole (%q), %d left out (%q), %d span(s); want every one recorded",
+			len(r.recorded), n, got, len(r.leftOut), r.leftOut, r.spans)
+	}
+}
+
+// Straight to the session's channel, a mock handed over as the stop comes is
+// recorded or refused by a select's coin (the send and the context's end are
+// both ready, the channel having room): a refused one is left out with its
+// reason, counted and spanned, not dropped with nothing said, and the
+// exchanges after it, handed over once the context has ended, are recorded.
+func TestV2_AMockHandedOverAsTheStopComesOnTheChannelIsRecordedOrLeftOut(t *testing.T) {
+	const n = 3
+	r := runBehindAtTheStop(t, n, false, false, false)
+	if len(r.recorded)+len(r.leftOut) != n {
+		t.Fatalf("recorded %d (%q) and left out %d (%q) of the %d exchanges captured whole: some vanished with nothing said",
+			len(r.recorded), reqsOf(r.recorded), len(r.leftOut), r.leftOut, n)
+	}
+	if len(r.leftOut) > 1 {
+		t.Fatalf("left out %d (%q); want at most the one refused as the stop came", len(r.leftOut), r.leftOut)
+	}
+	for _, reason := range r.leftOut {
+		if reason != leftOutRefusedAtStop {
+			t.Fatalf("left out for %q, want %q", reason, leftOutRefusedAtStop)
+		}
+	}
+	if r.spans != len(r.leftOut) {
+		t.Fatalf("%d span(s) left out for %d mock(s) left out; want each one's span", r.spans, len(r.leftOut))
+	}
+}
+
+// emitAtStopMock is a mock with the times of an exchange, so a mock left out
+// gets its span.
+func emitAtStopMock(name string) *models.Mock {
+	at := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	return &models.Mock{Kind: models.GENERIC, Name: name, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}
+}
+
+// Straight to the session's channel, a mock EmitMock refuses as the stop
+// comes (the context ends between emitV2's look at it and EmitMock's own,
+// here in the hook EmitMock runs before it, with no room on the channel) is
+// left out with its reason, counted and spanned, not dropped with nothing
+// said, and emitV2 says it was left out.
+func TestEmitV2_AMockRefusedAsTheStopComesIsLeftOut(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	mgr := syncMock.New(nil)
+	spans := &syncMock.Spans{}
+	core, logs := observer.New(zapcore.DebugLevel)
+	sess := &supervisor.Session{
+		Ctx:            ctx,
+		Mgr:            mgr,
+		Mocks:          make(chan *models.Mock),
+		OnMockRecorded: func(*models.Mock) { cancel() },
+		Orphans:        spans,
+		Logger:         zap.New(core),
+	}
+	leftOut := emitV2(sess, sess.Logger, emitAtStopMock("refused"))
+	var reasons []string
+	for _, e := range logs.All() {
+		if e.Message == supervisor.LeftOutWarnMsg || e.Message == supervisor.LeftOutDebugMsg {
+			reasons = append(reasons, fmt.Sprint(e.ContextMap()["reason"]))
+		}
+	}
+	s, _ := spans.Counts()
+	if !leftOut || mgr.MocksLeftOut() != 1 || s != 1 || len(reasons) != 1 || reasons[0] != leftOutRefusedAtStop {
+		t.Fatalf("emitV2 = %v, %d left out (%q), %d span(s); want the refused mock left out once for %q, with its span, and said so",
+			leftOut, mgr.MocksLeftOut(), reasons, s, leftOutRefusedAtStop)
+	}
+}
+
+// Straight to the session's channel, every mock handed over after the stop
+// is recorded while the channel has room: EmitMock would refuse each one
+// whose send it did not pick (a select between the send and the context's
+// end, both ready), so emitV2 uses EmitMockOnShutdown once the context has
+// ended.
+func TestEmitV2_MocksHandedOverAfterTheStopAreRecorded(t *testing.T) {
+	const n = 24
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mgr := syncMock.New(nil)
+	out := make(chan *models.Mock, n)
+	core, _ := observer.New(zapcore.DebugLevel)
+	sess := &supervisor.Session{Ctx: ctx, Mgr: mgr, Mocks: out, Orphans: &syncMock.Spans{}, Logger: zap.New(core)}
+	var leftOut int
+	for i := 0; i < n; i++ {
+		if emitV2(sess, sess.Logger, emitAtStopMock(fmt.Sprint("after the stop ", i))) {
+			leftOut++
+		}
+	}
+	if got := len(out); got != n || leftOut != 0 || mgr.MocksLeftOut() != 0 {
+		t.Fatalf("recorded %d of the %d mocks handed over after the stop, %d (%d) left out; want every one recorded", got, n, leftOut, mgr.MocksLeftOut())
 	}
 }

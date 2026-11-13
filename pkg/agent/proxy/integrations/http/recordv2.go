@@ -512,18 +512,24 @@ func (h *HTTP) recordFault(ctx context.Context, sess *supervisor.Session, logger
 const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange read whole was handed over"
 
 // emitV2 hands the session m, the mock of an exchange recordV2 read whole,
-// whether or not the session's context (Session.Ctx) has ended: EmitMock
-// while it lasts, EmitMockOnShutdown once it has ended, as at the recording's
-// stop, where EmitMock refuses every mock. A mock EmitMock refuses all the
-// same, as the context ends between the check and its own, is left out and
-// said so (leftOutRefusedAtStop), not dropped: EmitMock refuses a mock only
-// for its context's end, after which the recording goes on with
-// EmitMockOnShutdown. It returns whether m was lost: left out, by the session
-// or here, or dropped by the session's manager as it was handed over
-// (EmitMockOutcome), which counted it. A recordOne representative lost so is
-// not one: its caller gives its mark back (ptMark.giveBack).
+// whether or not the session's context (Session.Ctx) has ended. Through the
+// sync-mock manager, as the agent records (RouteMocksViaSyncMock), it is
+// always EmitMockOnShutdown: there it differs from EmitMock only in skipping
+// EmitMock's look at the context, which comes after the post-record hooks, so
+// a recording's stop that came while the hooks ran would refuse a mock
+// captured before the stop, which the supervisor's stop waits for the parser
+// to record. Straight to the session's channel: EmitMock while the context
+// lasts, EmitMockOnShutdown once it has ended, as at the recording's stop,
+// where EmitMock refuses every mock. A mock EmitMock refuses all the same, as
+// the context ends between the check and its own, is left out and said so
+// (leftOutRefusedAtStop), not dropped: EmitMock refuses a mock only for its
+// context's end, after which the recording goes on with EmitMockOnShutdown.
+// It returns whether m was lost: left out, by the session or here, or dropped
+// by the session's manager as it was handed over (EmitMockOutcome), which
+// counted it. A recordOne representative lost so is not one: its caller gives
+// its mark back (ptMark.giveBack).
 func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) (lost bool) {
-	if c := sess.Ctx; c != nil && c.Err() != nil {
+	if c := sess.Ctx; sess.RouteMocksViaSyncMock || (c != nil && c.Err() != nil) {
 		lost, _ = sess.EmitMockOutcome(m, true)
 		return lost
 	}

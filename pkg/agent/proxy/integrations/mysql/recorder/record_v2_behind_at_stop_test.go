@@ -7,6 +7,7 @@ import (
 	"time"
 
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -114,14 +115,19 @@ func TestRecordV2_BehindAtTheStopRecordsEveryExchangeCapturedWhole(t *testing.T)
 	}
 }
 
-// A mock the session refuses as its context ends (between the recorder's
-// check of it and EmitMock's own) is left out with its reason, not dropped.
-// The context here ends inside EmitMock, in the hook it runs before its own
-// check: the handshake's mock is refused and left out, and the queries after
-// it, read once the context has ended, are recorded.
+// The recording's stop can come inside EmitMock, after the recorder saw the
+// context last and before EmitMock's own look at it, which comes after the
+// post-record hooks. Here the stop comes as the handshake's mock is handed
+// over (its record hook). Through the sync-mock manager, as the agent
+// records, the mock is recorded all the same: it was captured before the
+// stop, and the supervisor's stop waits for the recorder to read what was
+// captured. Nothing is left out, and the queries read after it are recorded.
+//
+// Before, EmitMock refused the handshake's mock, and it was left out with
+// the test cases over it.
 //
 // Not parallel: the WARNs are limited process-wide, and this test reads them.
-func TestRecordV2_AMockRefusedAsTheStopComesIsLeftOut(t *testing.T) {
+func TestRecordV2_AMockHandedOverAsTheStopComesIsRecorded(t *testing.T) {
 	resetWarnLimiters()
 	h := newV2Harness(t)
 	_, mgr := behindAtStop(t, h, 2, true)
@@ -134,15 +140,80 @@ func TestRecordV2_AMockRefusedAsTheStopComesIsLeftOut(t *testing.T) {
 	if err := recordV2NoPanic(t, ctx, zaptest.NewLogger(t), h.sess); err != nil {
 		t.Fatalf("RecordV2 = %v, want nil", err)
 	}
-	got := takeMocks(h, 2)
-	if len(got) != 2 || got[0].Spec.Metadata["type"] == "config" {
-		t.Fatalf("recorded %d mock(s), want the 2 queries read after the stop", len(got))
+	got := takeMocks(h, 3)
+	if len(got) != 3 || got[0].Spec.Metadata["type"] != "config" {
+		t.Fatalf("recorded %d mock(s), want the handshake's and the 2 queries' (every exchange was captured before the stop)", len(got))
 	}
 	var reasons []string
 	for _, e := range leftOutWarnings(logs) {
 		reasons = append(reasons, fmt.Sprint(e.ContextMap()["reason"]))
 	}
-	if n := mgr.MocksLeftOut(); n != 1 || len(reasons) != 1 || reasons[0] != leftOutRefusedAtStop {
-		t.Fatalf("%d left out, reasons %q; want the handshake's mock left out once for %q", n, reasons, leftOutRefusedAtStop)
+	if n := mgr.MocksLeftOut(); n != 0 || len(reasons) != 0 {
+		t.Fatalf("%d left out, reasons %q; want none", n, reasons)
 	}
+}
+
+// Straight to the session's channel, a mock EmitMock refuses as the stop
+// comes (the context ends between emitV2's look at it and EmitMock's own,
+// here in the hook EmitMock runs before it, with no room on the channel) is
+// left out with its reason, counted and spanned, not dropped with nothing
+// said.
+//
+// Not parallel: the WARNs are limited process-wide, and this test reads them.
+func TestEmitV2_AMockRefusedAsTheStopComesIsLeftOut(t *testing.T) {
+	resetWarnLimiters()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	mgr := syncMock.New(nil)
+	spans := &syncMock.Spans{}
+	core, logs := observer.New(zapcore.DebugLevel)
+	sess := &supervisor.Session{
+		Ctx:            ctx,
+		Mgr:            mgr,
+		Mocks:          make(chan *models.Mock),
+		OnMockRecorded: func(*models.Mock) { cancel() },
+		Orphans:        spans,
+		Logger:         zap.New(core),
+	}
+	emitV2(sess, emitAtStopMock("refused"))
+	var reasons []string
+	for _, e := range leftOutWarnings(logs) {
+		reasons = append(reasons, fmt.Sprint(e.ContextMap()["reason"]))
+	}
+	if n, s := mgr.MocksLeftOut(), spanCount(spans); n != 1 || s != 1 || len(reasons) != 1 || reasons[0] != leftOutRefusedAtStop {
+		t.Fatalf("%d left out (%q), %d span(s); want the refused mock left out once for %q, with its span", n, reasons, s, leftOutRefusedAtStop)
+	}
+}
+
+// Straight to the session's channel, every mock handed over after the stop
+// is recorded while the channel has room: EmitMock would refuse each one
+// whose send it did not pick (a select between the send and the context's
+// end, both ready), so emitV2 uses EmitMockOnShutdown once the context has
+// ended.
+func TestEmitV2_MocksHandedOverAfterTheStopAreRecorded(t *testing.T) {
+	const n = 24
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mgr := syncMock.New(nil)
+	out := make(chan *models.Mock, n)
+	sess := &supervisor.Session{Ctx: ctx, Mgr: mgr, Mocks: out, Orphans: &syncMock.Spans{}, Logger: zaptest.NewLogger(t)}
+	for i := 0; i < n; i++ {
+		emitV2(sess, emitAtStopMock(fmt.Sprint("after the stop ", i)))
+	}
+	if got, left := len(out), mgr.MocksLeftOut(); got != n || left != 0 {
+		t.Fatalf("recorded %d of the %d mocks handed over after the stop, %d left out; want every one recorded", got, n, left)
+	}
+}
+
+// emitAtStopMock is a mock with the times of an exchange, so a mock left out
+// gets its span.
+func emitAtStopMock(name string) *models.Mock {
+	at := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	return &models.Mock{Kind: models.MySQL, Name: name, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}
+}
+
+// spanCount is how many spans s holds.
+func spanCount(s *syncMock.Spans) int {
+	n, _ := s.Counts()
+	return n
 }

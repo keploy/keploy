@@ -899,18 +899,23 @@ func readOrWritten(ev chunkEvent) time.Time {
 const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange read whole was handed over"
 
 // emitV2 hands the session m, the mock of an exchange read whole, whether or
-// not the session's context (Session.Ctx) has ended: EmitMock refuses every
-// mock once it has, so a mock handed over after the recording's stop, by a
-// parser behind its capture, goes through EmitMockOnShutdown, which records
-// it. Before, every exchange recorded after the stop was refused, with a
-// Debug line only. A mock refused all the same (the context ended between
-// this check and EmitMock's own) is left out with its reason, counted and
-// spanned, never dropped with nothing said. It returns whether m was lost:
-// left out, by the session or here, or dropped by the session's manager as it
-// was handed over (EmitMockOutcome), which counted it.
+// not the session's context (Session.Ctx) has ended. Through the sync-mock
+// manager, as the agent records (RouteMocksViaSyncMock), it is always
+// EmitMockOnShutdown: there it differs from EmitMock only in skipping
+// EmitMock's look at the context, which comes after the post-record hooks, so
+// a recording's stop that came while the hooks ran would refuse a mock
+// captured before the stop, which the supervisor's stop waits for the parser
+// to record. Straight to the session's channel: EmitMock while the context
+// lasts, EmitMockOnShutdown once it has ended, as at the recording's stop,
+// where EmitMock refuses every mock, so a mock handed over after the stop, by
+// a parser behind its capture, is recorded. A mock refused all the same (the
+// context ended between this check and EmitMock's own) is left out with its
+// reason, counted and spanned, never dropped with nothing said. It returns
+// whether m was lost: left out, by the session or here, or dropped by the
+// session's manager as it was handed over (EmitMockOutcome), which counted it.
 func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) (lost bool) {
-	atStop := sess.Ctx != nil && sess.Ctx.Err() != nil
-	lost, err := sess.EmitMockOutcome(m, atStop)
+	shutdown := sess.RouteMocksViaSyncMock || (sess.Ctx != nil && sess.Ctx.Err() != nil)
+	lost, err := sess.EmitMockOutcome(m, shutdown)
 	if err != nil {
 		if logger != nil {
 			logger.Debug("generic v2: the session refused a mock as its context ended", zap.Error(err))
