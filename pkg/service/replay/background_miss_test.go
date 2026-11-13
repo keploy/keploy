@@ -66,11 +66,14 @@ func TestTheMismatchStoreKeepsTheBackgroundMark(t *testing.T) {
 }
 
 // The set's staging call names its background recordings, its mappings.yaml
-// worker: and startup: mocks, and no per-test call does.
+// worker: and startup: mocks, and no per-test call does. A mock a
+// worker-mock rule marked in the worker scope (models.WorkerRuleReason("jwks"))
+// is not one: keploy test serves it to every test as a session mock
+// (models.ServeAsSession), not as a background recording.
 func TestTheStagingCallNamesTheSetsBackgroundRecordings(t *testing.T) {
 	h := newPartialRunHarness(t, 2, 0)
 	h.replayer.mappingDB = &shMappingDB{prMappingDB: &prMappingDB{}, mapping: &models.Mapping{
-		Worker:  []models.MockEntry{{Name: "poll-1"}, {Name: "poll-2"}},
+		Worker:  []models.MockEntry{{Name: "poll-1"}, {Name: "jwks-1", Reason: models.WorkerRuleReason("jwks")}, {Name: "poll-2"}},
 		Startup: []models.MockEntry{{Name: "boot-1"}},
 	}}
 	if status := h.run(t); status != models.TestSetStatusPassed {

@@ -449,7 +449,7 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // This form has no mock stream beside it: every mock's outcome is already
 // published, so an entry whose mock is unknown counts as uncorrelated at once.
 func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map) error {
-	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil)
+	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil, nil)
 }
 
 // consumeMappingsFor is consumeMappings beside a live mock stream, and telling
@@ -464,7 +464,7 @@ func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappin
 // Nothing here is bounded by a clock: on a loaded host a mock is saved long
 // after the mapping that names it, and giving up on a clock is what left such
 // a mock out of its test's mapping while it sat in the mocks file.
-func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry)) error {
+func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry), marks *workerMarks) error {
 	persistCtx := context.WithoutCancel(ctx)
 
 	// pending batches mappings so the file is rewritten once per batch instead of
@@ -496,6 +496,10 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 				zap.Strings("tests", names),
 				zap.Error(err),
 				zap.String("next_step", "these tests' mocks will be missing from mappings.yaml and replay will report no_mocks for them; re-record the test set"))
+		} else {
+			// The marks of the worker-mock rules go in right after a write of
+			// the file, never beside one: each rewrites it whole.
+			marks.flush(persistCtx, r.mappingDb, testSetID, false)
 		}
 		clear(pending)
 	}
@@ -1705,6 +1709,14 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
 	windowMaps := r.newWindowMappings()
+	// The marks of the user's worker-mock rules (config record.workerMocks),
+	// written to the set's worker scope as the recording goes; nil without
+	// rules.
+	var workerRules []models.WorkerMockRule
+	if r.config != nil {
+		workerRules = r.config.Record.WorkerMocks
+	}
+	marks := newWorkerMarks(workerRules, r.mappingDb, r.logger)
 	// The moment the recording is stopped (a stop signal, the record timer,
 	// a caller's cancel each end ctx first) is when the application's
 	// shutdown begins: what it records from then on is the shutdown's
@@ -1948,6 +1960,23 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			if err := r.closeMockStore(r.mockDB, drainProgressEvery); err != nil {
 				r.mocksNotWritten(err)
 				storeWrote = false
+			}
+		}
+
+		// The worker-mock rules' marks not written yet (a mock recorded after
+		// the last batch of mappings), once the mapping stream's consumer has
+		// joined (its writes and this one each rewrite the whole mapping
+		// file) and only when the mock store wrote every mock (a worker entry
+		// must name a mock that is on disk). Before the end-of-recording hook,
+		// so a pass it runs over the mappings reads them.
+		if recordingStarted && newTestSetID != "" {
+			switch {
+			case !recordDrainedCleanly:
+				marks.lost(newTestSetID, "the record drain timed out, so the mapping file may still be being written")
+			case !storeWrote:
+				marks.lost(newTestSetID, "the mock store could not write every mock")
+			default:
+				marks.flush(persistCtx, r.mappingDb, newTestSetID, true)
 			}
 		}
 
@@ -2928,6 +2957,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					mappingHolds.arrived(tempID)
 				}
 				windowMaps.addMock(mock)
+				marks.add(mock)
 				mockCountMapMu.Lock()
 				mockCountMap[mock.GetKind()]++
 				mockCountMapMu.Unlock()
@@ -2947,7 +2977,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				revokedNames[testName] = struct{}{}
 				revokedMu.Unlock()
 				mappingHolds.revoke([]string{testName})
-			}, &shortPoolByTest, capWatch.mapped)
+			}, &shortPoolByTest, capWatch.mapped, marks)
 	})
 
 	// Every frame channel now has a reader, so the shutdown hand-over can no

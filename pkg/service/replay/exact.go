@@ -393,7 +393,9 @@ func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[
 			for _, tc := range m.TestCases {
 				mappings[tc.ID] = tc.Mocks
 			}
-			worker = m.Worker
+			// The entries worker-mock rules marked are no part of the
+			// scope the switch serves (models.WithoutWorkerRuleEntries).
+			worker = models.WithoutWorkerRuleEntries(m.Worker)
 			conc = concurrencyOf(m.Groups, mappings, m.Shared)
 			recordedWith = m.RecordedWith
 		}
