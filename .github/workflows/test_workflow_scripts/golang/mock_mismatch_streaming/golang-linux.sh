@@ -17,11 +17,12 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 # no window and carried no unmatched_calls. Success here is INVERTED: we assert the
 # streaming mismatch is reported, not that every test passes.
 #
-# A keploy built from this tree records no streaming answer as a test case
-# (models.IsHTTPStreamResponse): with it as the recorder the set holds the
-# text/plain test and no stream, the record log says so for each stream, and
-# the forced miss is asserted on the text/plain test alone. A released
-# recorder records the streams, and the streaming path must report it on them.
+# A keploy built from this tree, or released from v3.7.2, records no streaming
+# answer as a test case (models.IsHTTPStreamResponse): with it as the recorder
+# the set holds the text/plain test and no stream, the record log says so for
+# each stream, and the forced miss is asserted on the text/plain test alone.
+# An older released recorder records the streams, and the streaming path must
+# report it on them.
 
 echo "$RECORD_BIN"
 echo "$REPLAY_BIN"
@@ -116,25 +117,40 @@ stream_tests() {
         esac
     done
 }
+# Whether the streams were recorded is read from what the recorder did, not
+# from which binary it is: this tree's keploy records none, and so does every
+# release from v3.7.2 (#5236), while an older 'latest' records them all. Either
+# way it is all or none: some streams recorded and some not is a failure, and
+# a recorder that recorded none says so for each.
+stream_count=$(stream_tests | grep -c . || true)
+told=$(grep -c "Not recording a streaming response as a test case" record_logs.txt || true)
 case "$RECORD_BIN" in
-    */build/keploy|*/build-no-race/keploy) streams_recorded=false ;;
-    *) streams_recorded=true ;;
+    */build/keploy|*/build-no-race/keploy) this_tree=true ;;
+    *) this_tree=false ;;
 esac
-if [ "$streams_recorded" = false ]; then
-    stream_count=$(stream_tests | grep -c . || true)
-    if [ "$stream_count" -ne 0 ]; then
-        echo "::error::this tree's keploy recorded $stream_count streaming answers as test cases; want none"
+if [ "$stream_count" -ne 0 ]; then
+    if [ "$this_tree" = true ] || [ "$told" -ne 0 ]; then
+        echo "::error::the recorder recorded $stream_count streaming answers as test cases and told $told as not recorded; this tree's keploy (and a release from v3.7.2) records none"
         stream_tests
         docker compose down 2>/dev/null || true
         exit 1
     fi
-    told=$(grep -c "Not recording a streaming response as a test case" record_logs.txt || true)
+    if [ "$stream_count" -lt 3 ]; then
+        echo "::error::the recorder recorded $stream_count streaming answers as test cases; want all of the SSE, NDJSON and multipart answers or none"
+        stream_tests
+        docker compose down 2>/dev/null || true
+        exit 1
+    fi
+    streams_recorded=true
+    echo "✓ the recorder ($RECORD_BIN) recorded $stream_count streaming answers as test cases"
+else
     if [ "$told" -lt 3 ]; then
         echo "::error::the record log tells $told streams as not recorded; want one for each of the SSE, NDJSON and multipart GETs"
         tail -40 record_logs.txt
         docker compose down 2>/dev/null || true
         exit 1
     fi
+    streams_recorded=false
     echo "✓ no streaming answer was recorded as a test case ($told told as not recorded)"
 fi
 
