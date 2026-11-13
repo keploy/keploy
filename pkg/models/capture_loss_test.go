@@ -682,3 +682,32 @@ func TestARefusedUnattributedCallLeavesOnlyTheTestsOpenThenNotJudged(t *testing.
 		t.Fatalf("remedy %q does not say to stop a worker's process before the worker ends", r)
 	}
 }
+
+// A client's certificate keploy could not present to the server, at record,
+// is the test's it happened in (PerTest), counted from the previous test's
+// end, never a taint of every later test, and judges it (keploy's failure,
+// not a call it cannot tell was lost): the reason says it is keploy's, not
+// the server's, names the destination and why, and says how to give keploy
+// the key.
+func TestAClientCertificateKeployCouldNotPresentIsTheTestsOwnLoss(t *testing.T) {
+	k := CaptureLossClientCertUnsent
+	if !k.PerTest() || k.NotJudged() || k.Evidence() || k.AppLife() || k.runScoped() {
+		t.Fatal("a client certificate keploy could not present is a test's own loss, and judges it")
+	}
+	at := func(n uint64) CaptureLosses {
+		return CaptureLosses{{Kind: k, Count: n, What: "to 172.18.0.2:6443: keploy was given no private key"}}
+	}
+	if got := at(3).Charged(LossBases{Set: at(1), App: at(1)}, at(2)); !reflect.DeepEqual(got, at(1)) {
+		t.Fatalf("Charged = %+v, want only the one since the previous test", got)
+	}
+	judged, notJudged := at(1).Split()
+	if !reflect.DeepEqual(judged, at(1)) || len(notJudged) != 0 {
+		t.Fatalf("Split = %+v, %+v: judged, never left without a verdict", judged, notJudged)
+	}
+	txt := at(1).Text()
+	for _, want := range []string{"certificate (mutual TLS) 1 time(s)", "keploy's failure, not the server's", "record.tlsPrivateKeyPath", "--tls-private-key-path", "(to 172.18.0.2:6443: keploy was given no private key)"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("%q lacks %q", txt, want)
+		}
+	}
+}

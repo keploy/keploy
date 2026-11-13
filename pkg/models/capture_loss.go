@@ -270,7 +270,20 @@ const (
 	// charged with it is left without a verdict (NotJudged), never failed.
 	// What names the latest such call and its process.
 	CaptureLossUnattributed CaptureLossKind = "call_unattributed"
+	// CaptureLossClientCertUnsent: at record, a client sent keploy's proxy a
+	// certificate in its TLS handshake (mutual TLS) and its call, and keploy
+	// could not present that certificate to the server for it: it was given
+	// no private key (record.tlsPrivateKeyPath), or a key it cannot read, or
+	// one that is not the key of that certificate. keploy did not dial the
+	// server, so the call was neither recorded nor answered: keploy's
+	// failure, not the server's. What names the destination and which of
+	// those it was. Charged to the test it happened in only (PerTest).
+	CaptureLossClientCertUnsent CaptureLossKind = "client_cert_unsent"
 )
+
+// ClientCertRemedy is what to do about a client's certificate keploy could
+// not present to the server (CaptureLossClientCertUnsent).
+const ClientCertRemedy = "set record.tlsPrivateKeyPath in keploy.yml (keploy record also takes --tls-private-key-path) to the PEM file of that certificate's private key (PKCS1, PKCS8 or EC), and record again"
 
 // UnattributedRemedy is what to do about a call from a process in no test
 // worker's keploy instance while workers' tests were open
@@ -643,6 +656,10 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 //     process in no served worker's instance (call_unattributed): no test
 //     can be told to have made it, so the count lands in each test open
 //     then, every one of them charged.
+//   - a call keploy did not dial the server for, at record, for want of the
+//     key of the certificate its client sent (client_cert_unsent): that
+//     one call; the client's next connection presents its certificate
+//     again, and is lost or recorded on its own.
 //
 // One between two tests is the next test's, as a miss between tests is;
 // one before a test process's claim, or after the run's last test, is the
@@ -660,7 +677,7 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // build does not know. (CaptureLossRealUncaptured is a test's own too, but never in the
 // agent's counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossAppBytesLost || k == CaptureLossProcessUnshimmed || k == CaptureLossUnattributed
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossAppBytesLost || k == CaptureLossProcessUnshimmed || k == CaptureLossUnattributed || k == CaptureLossClientCertUnsent
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -872,6 +889,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("a process of the run ran a program keploy's shim is not in (macOS drops DYLD_INSERT_LIBRARIES for a platform, hardened-runtime or restricted binary), so keploy saw none of its calls while this test ran (found %d time(s): as it started, and at each test end it outlived)", c.Count)
 	case CaptureLossUnattributed:
 		return fmt.Sprintf("the application made %d call(s) from a process in no test worker's keploy instance, or in that of a worker keploy does not serve, while this test was open (or, in a replay, while no test was, before it began), in a run of test workers, so keploy cannot tell which test made them: a record keeps them in none of the tests' recordings, and a replay refuses them unanswered", c.Count)
+	case CaptureLossClientCertUnsent:
+		return fmt.Sprintf("a client sent keploy's proxy a certificate (mutual TLS) %d time(s) that keploy could not present to the server, so it did not dial the server and those calls were neither recorded nor answered: keploy's failure, not the server's; "+ClientCertRemedy, c.Count)
 	case CaptureLossAgentStartedAgain:
 		return "keploy's agent was started again while the application ran on, and what the agent before counted went with it: a process of the application's that it could not place, or a call keploy cannot capture at all, may taint this test, and the new agent cannot see it (keploy judges the tests again once it starts the application anew)"
 	default:
