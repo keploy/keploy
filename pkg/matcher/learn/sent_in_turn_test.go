@@ -234,3 +234,45 @@ func TestAValueSentInTheOtherOrderNeedsEveryPartOfTheRule(t *testing.T) {
 	}
 	oRefused(t, "beside the other call, a recording round F served before the call, stating no view", sentInTurnDecide(t, twin, RawOf(sentInTurnMock("mock-1786", sentInTurnRec, req, res), true).ServedAs(7)), RefusalUnknown, "mock-1786")
 }
+
+// A place that decides a word by itself decides it before a send in turn
+// does: the call's answer where the adapter cannot bind a word inside the
+// field, a recording of another test that shows the value in both runs,
+// and a recording of the call's own test that round F gave as recorded
+// before the call, whose recorded value did not follow. Beside each, the
+// other call's send leaves the word as that place decides it. A recording
+// of the test the call trails stays unknown too, though its scope names
+// the call's own test.
+func TestAValueSentInTheOtherOrderYieldsToAPlaceThatDecides(t *testing.T) {
+	us := time.Microsecond
+	req, res := oAt.Add(-8*us), oAt.Add(220*us)
+	inTurn := RawOf(sentInTurnMock("mock-1784", sentInTurnRec, req, res), true).ServedAs(6).ServedAsRecorded()
+	inTurn.servedAfter = true
+	decide := func(edit func(*Input), raw ...Raw) Decision {
+		in := oInput(sentInTurnPath, sentInTurnRec, sentInTurnLive, nil, raw)
+		in.Scope = func(mock string) Scope {
+			if mock == "mock-1790" {
+				return ScopeTest("test-1")
+			}
+			return ScopeTest("test-2")
+		}
+		if edit != nil {
+			edit(&in)
+		}
+		return oWord(t, Decide(in), "95ad0386", "4fbd76ad")
+	}
+	if d := decide(nil, inTurn); d.Outcome != OutcomeValue || !d.EitherOrder || d.From.Mock != "mock-1784" {
+		t.Fatalf("FALSE RED: the other call sent the id before the call, round F only after: %s (either order %v); want bound to mock-1784 in either order", oDescribe([]Decision{d}), d.EitherOrder)
+	}
+
+	if d := decide(func(in *Input) { in.Caps.BindAtWord = false }, inTurn); d.EitherOrder || d.Outcome == OutcomeValue || d.Outcome == OutcomeFresh {
+		t.Errorf("FALSE GREEN? the adapter cannot bind a word inside the field: %s; want it unchecked, never bound", oDescribe([]Decision{d}))
+	}
+	shown := RawOf(sentInTurnMock("mock-1790", sentInTurnRec, req, res), true).ServedAs(7).
+		ServedLive(RawOf(sentInTurnMock("mock-1790", sentInTurnLive, req, res), true))
+	oRefused(t, "beside the other call, another test's recording shows the value in both runs", decide(nil, inTurn, shown), RefusalAnotherScope, "mock-1790")
+	gaveRecorded := RawOf(sentInTurnMock("mock-1786", sentInTurnRec, req, res), true).ServedAs(7).ServedAsRecorded()
+	oRefused(t, "beside the other call, round F gave a recording of the test as recorded before the call", decide(nil, inTurn, gaveRecorded), RefusalConflict, "mock-1786")
+	trails := func(in *Input) { in.Trails = Trail{Test: "test-2", Mocks: []string{"mock-1784"}} }
+	oRefused(t, "the other call is a recording of the test the call trails", decide(trails, inTurn), RefusalUnknown, "mock-1784")
+}

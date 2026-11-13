@@ -3174,8 +3174,12 @@ const sentInTurnRule = ", another call of the test that sent the value too: the 
 // test, a test the call trails, or a recording of a scope keploy was not
 // told): any other place stays unknown (fail closed), and so does one round
 // F served before the call reached keploy, which shows what it gave there.
+// A recording the scope names the call's own test is neither the start-up's
+// nor another test's (inScope), so the scope alone rules those out; a
+// recording of the test the call trails can still be of that scope, so it
+// is ruled out by name.
 func (dc *decider) sentInTurn(p evPlace, w readWord, rec, live string) bool {
-	if p.raw == 0 || p.otherTest || p.startUp || p.trailed || dc.in.ScopeOf(p.mock) != ScopeTest(dc.in.Test) {
+	if p.raw == 0 || p.trailed || dc.in.ScopeOf(p.mock) != ScopeTest(dc.in.Test) {
 		return false
 	}
 	r := dc.in.Raw[p.raw-1]
