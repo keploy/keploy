@@ -1058,7 +1058,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	// lastReq + 1ns so the matcher's ordering invariant still holds.
 	// The clamp is strictly within the same connection; sessions
 	// across connections are independent.
-	asked := s.enforceReqMonotonic(m)
+	raisedFrom := s.enforceReqMonotonic(m)
 
 	s.emitMu.Lock()
 	hook := s.OnMockRecorded
@@ -1069,7 +1069,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	// Whether the clamp left the mock answered before it was asked is known
 	// only now: a hook may move its stamps (zookeeper's carries its response
 	// stamp up to the clamped request's).
-	s.countClampedOut(m, asked)
+	s.countClampedOut(m, raisedFrom)
 
 	// Route through the session's SyncMockManager (Session.manager)
 	// when the caller opts in. Legacy parsers (http, mysql, generic, etc.)
@@ -1680,8 +1680,8 @@ type emitOrder struct {
 // session's latest request stamp + 1ns when a regression is detected, and
 // updates the session's latest stamp. In debug builds we panic instead so
 // regressions surface during testing. Thread-safe: holds emitMu while
-// comparing + writing back. It returns the request stamp m's parser gave
-// it, before any clamp.
+// comparing + writing back. When it raises m's request stamp it returns the
+// stamp m's parser gave it, and otherwise the zero time.
 //
 // Zero-valued ReqTimestampMock values pass through untouched
 // (parsers that haven't populated them, e.g. tests with pre-built
@@ -1712,44 +1712,48 @@ type emitOrder struct {
 // So ResTimestampMock is load-bearing at replay in ways this call site
 // cannot see, and mutating it here is the wrong lever; a parser that knows
 // its stamps may (zookeeper's hook does).
-func (s *Session) enforceReqMonotonic(m *models.Mock) (asked time.Time) {
+func (s *Session) enforceReqMonotonic(m *models.Mock) (raisedFrom time.Time) {
 	req := m.Spec.ReqTimestampMock
 	if req.IsZero() {
-		return req
+		return time.Time{}
 	}
 	s.emitMu.Lock()
 	defer s.emitMu.Unlock()
 	if s.order == nil {
 		s.order = &emitOrder{lastReq: req}
-		return req
+		return time.Time{}
 	}
-	asked = req
 	if req.Before(s.order.lastReq) {
 		clamped := s.order.lastReq.Add(time.Nanosecond)
 		if debugMonotonic.Load() {
 			panic("supervisor.Session.EmitMock: out-of-order ReqTimestampMock detected; parser emitted a mock with a timestamp earlier than a previously-emitted mock on the same session — this violates I5 in PLAN.md and would cause wrong-mock selection at replay time")
 		}
 		m.Spec.ReqTimestampMock = clamped
+		raisedFrom = req
 		req = clamped
 	}
 	s.order.lastReq = req
-	return asked
+	return raisedFrom
 }
 
 // countClampedOut counts m, after the post-record hooks, when the clamp
-// (enforceReqMonotonic, given asked, the request stamp its parser gave it)
-// left it answered before it was asked: its parser stamped it well-ordered,
-// and it is not any more. A replay without the proven switch leaves such a
-// mock out (pkg.LeaveOutAnsweredBeforeAsked), unless its kind is placed by
-// its window alone (models.WindowBound), which that rule never asks of. One
-// its parser stamped answered before asked is warnAnsweredBeforeAsked's, said
-// as it is recorded; one a hook carried back into order loses nothing.
-func (s *Session) countClampedOut(m *models.Mock, asked time.Time) {
+// raised its request stamp (enforceReqMonotonic, which gave raisedFrom, the
+// stamp its parser gave it) and left it answered before it was asked: its
+// parser stamped it well-ordered, and it is not any more. A replay without the
+// proven switch leaves such a mock out (pkg.LeaveOutAnsweredBeforeAsked),
+// unless its kind is placed by its window alone (models.WindowBound), which
+// that rule never asks of. One its parser stamped answered before asked is
+// warnAnsweredBeforeAsked's, said as it is recorded; one a hook carried back
+// into order loses nothing.
+func (s *Session) countClampedOut(m *models.Mock, raisedFrom time.Time) {
+	// A mock the clamp did not raise is not its to count, whatever a hook
+	// stamped on it since. One it raised has a session order to count in: the
+	// clamp raises a stamp only past one it keeps there.
+	if raisedFrom.IsZero() {
+		return
+	}
 	req, res := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
-	// A mock with no stamp of either kind is out at the first two checks: it
-	// is answered before it was asked only from a zero request stamp, which the
-	// parser gave it, and then before that too.
-	if !res.Before(req) || res.Before(asked) || models.WindowBound(m.Kind) {
+	if !res.Before(req) || res.Before(raisedFrom) || models.WindowBound(m.Kind) {
 		return
 	}
 	s.emitMu.Lock()

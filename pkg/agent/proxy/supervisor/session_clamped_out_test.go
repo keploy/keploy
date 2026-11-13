@@ -134,3 +134,42 @@ func TestTheRequestClampsReportWithNoLoggerSaysNothing(t *testing.T) {
 	sess.ReportClampedOut()
 	(*Session)(nil).ReportClampedOut()
 }
+
+// A post-record hook may stamp a request on a mock its parser left unstamped,
+// or move a stamped one's request past its answer. The clamp raised neither,
+// so nothing of it is the clamp's: it is not counted, and the session does not
+// fall over, whether or not the clamp has kept a stamp on the connection yet.
+func TestAMockOnlyAHookMovedIsNotTheClampsToCount(t *testing.T) {
+	zk := models.Kind("ZooKeeper")
+	unstamped := func(name string, resMs int) *models.Mock {
+		m := zkAt(name, zk, resMs)
+		m.Spec.ResTimestampMock, m.Spec.ReqTimestampMock = m.Spec.ReqTimestampMock, time.Time{}
+		return m
+	}
+	stampAfterAnswer := func(m *models.Mock) {
+		if m.Spec.ReqTimestampMock.IsZero() {
+			m.Spec.ReqTimestampMock = m.Spec.ResTimestampMock.Add(time.Millisecond)
+		}
+	}
+	movePastAnswer := func(m *models.Mock) {
+		m.Spec.ReqTimestampMock = m.Spec.ResTimestampMock.Add(time.Millisecond)
+	}
+	for _, c := range []struct {
+		name  string
+		hook  PostRecordHook
+		mocks []*models.Mock
+	}{
+		{"unstamped, first on the connection", stampAfterAnswer, []*models.Mock{unstamped("zk-0", 10)}},
+		{"unstamped, after a stamped one", stampAfterAnswer, []*models.Mock{zkAt("zk-0", zk, 100), unstamped("zk-1", 200)}},
+		{"stamped, first on the connection", movePastAnswer, []*models.Mock{zkAt("zk-0", zk, 100)}},
+		{"stamped, in order after another", movePastAnswer, []*models.Mock{zkAt("zk-0", zk, 100), zkAt("zk-1", zk, 200)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, w := range clampedOutRun(t, c.hook, c.mocks...) {
+				if w.Message == ClampedOutMsg {
+					t.Fatalf("the clamp's WARN for a mock it never raised: %v", w.ContextMap())
+				}
+			}
+		})
+	}
+}
