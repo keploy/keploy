@@ -1363,6 +1363,18 @@ func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
 	if got.Kind != KindVariable || got.From.Mock != "mock-1658" || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
 		t.Errorf("a whole value of 10 beside a User-Agent's 10: %s from %q set aside %v (%q); want a variable of mock-1658 set aside, refused", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
 	}
+	// Nor the value whole as decoded: its recorded text escapes it
+	// ("caf%C3%A9" is "café"), and the earlier payload holds it whole.
+	got = classify("caf%C3%A9", "th%C3%A9", headed("mock-9", "X-Note", "un café noir").ServedAs(1).ServedAsRecorded())
+	if got.Kind != KindVariable || got.From.Mock != "mock-9" || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
+		t.Errorf("FALSE GREEN? a whole decoded café beside a header's café: %s from %q set aside %v (%q); want a variable of mock-9 set aside, refused", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
+	}
+	// Nor the value whole as written, escape and all ("x%2F42"), in the
+	// earlier payload.
+	got = classify("x%2F42", "y%2F57", headed("mock-9", "X-Ref", "see x%2F42 now").ServedAs(1).ServedAsRecorded())
+	if got.Kind != KindVariable || got.From.Mock != "mock-9" || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
+		t.Errorf("FALSE GREEN? a whole x%%2F42 beside a header's x%%2F42: %s from %q set aside %v (%q); want a variable of mock-9 set aside, refused", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
+	}
 	// Nor where F saw the value whole there.
 	got = classify(events("10"), events("1.45"), headed("mock-1658", "User-Agent", ua).ServedAs(1).ServedLive(headed("mock-1658", "User-Agent", "Mozilla/5.0 (Windows NT 1.45)")))
 	if got.Kind == KindNoise {
