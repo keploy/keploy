@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"runtime"
 	"slices"
@@ -19,9 +20,9 @@ import (
 )
 
 // defaultResolvConfPath is the production path captureDNSUpstream
-// reads on non-Windows hosts. Kept as a typed constant so the
-// Windows-short-circuit check below compares against the actual
-// production literal rather than re-spelling it.
+// reads on non-Windows hosts. Kept as a typed constant so upstreamConfig's
+// Windows check compares against the actual production literal rather
+// than re-spelling it.
 const defaultResolvConfPath = "/etc/resolv.conf"
 
 // resolvConfPath is the file the forwarder snapshots at startup to
@@ -29,11 +30,12 @@ const defaultResolvConfPath = "/etc/resolv.conf"
 // swap in a temp file without hitting host DNS.
 var resolvConfPath = defaultResolvConfPath
 
-// captureDNSUpstream snapshots the cluster resolver list from
-// /etc/resolv.conf into p.dnsUpstreamServers / p.dnsUpstreamPort. Must
-// be called exactly once, at proxy startup, BEFORE p.DNSPort is bound
-// as the app container's resolver — see the call site in StartProxy
-// for the ordering rationale.
+// captureDNSUpstream snapshots the machine's resolver list
+// (upstreamConfig: /etc/resolv.conf, or the DNS servers of the adapters on
+// Windows) into p.dnsUpstreamServers / p.dnsUpstreamPort. Must be called
+// exactly once, at proxy startup, BEFORE p.DNSPort is bound as the app
+// container's resolver — see the call site in StartProxy for the ordering
+// rationale.
 //
 // A loopback nameserver is filtered out ONLY when the effective
 // resolver port in use matches the proxy's own DNS listen port
@@ -56,28 +58,17 @@ var resolvConfPath = defaultResolvConfPath
 // returning "no upstream configured" and letting the caller fall back
 // to the legacy synthetic response.
 //
-// Windows has no /etc/resolv.conf and this feature — forward-on-miss
-// to cluster resolvers — is only meaningful in Linux sidecar
-// environments where the k8s injector has rewritten resolv.conf. On
-// Windows with the default path we short-circuit to a clean no-op
-// so we neither burn a stat on a path that can never exist nor log
-// a misleading "file not found" at every agent startup.
-// hasDNSUpstream() then returns false and the proxy's DNS handler
-// falls back to the legacy synthetic response, matching pre-feature
-// behavior exactly.
-//
-// The `resolvConfPath == defaultResolvConfPath` guard means tests
-// that swap in a temp resolv.conf (via the resolvConfPath package
-// var) still exercise the full parsing/filter path on every GOOS,
-// so `go test ./...` on Windows stays green.
+// On Windows a recording asks these servers what a name it records
+// resolves to, as it does on Linux: a name only the machine's own resolvers
+// answer (a VPN's or a LAN's internal name, a private address's PTR) is
+// recorded with the answer the application gets, not a public resolver's.
+// The search list stays empty there: the shim asks keploy for the name the
+// application passed, before Windows appends a suffix to it.
 func (p *Proxy) captureDNSUpstream() {
-	if runtime.GOOS == "windows" && resolvConfPath == defaultResolvConfPath {
-		return
-	}
-	config, err := dns.ClientConfigFromFile(resolvConfPath)
+	config, source, err := upstreamConfig(runtime.GOOS)
 	if err != nil {
-		p.logger.Info("could not read resolv.conf for upstream forwarding; a DNS query no mock answers gets a synthetic response",
-			zap.String("path", resolvConfPath),
+		p.logger.Info("could not read the machine's DNS resolvers for upstream forwarding; a DNS query no mock answers gets a synthetic response",
+			zap.String("source", source),
 			zap.Error(err))
 		return
 	}
@@ -101,8 +92,12 @@ func (p *Proxy) captureDNSUpstream() {
 
 	filtered := make([]string, 0, len(config.Servers))
 	for _, s := range config.Servers {
-		ip := net.ParseIP(s)
-		if ip == nil {
+		// netip, not net.ParseIP: a link-local IPv6 server carries the
+		// zone it is reached in (fe80::1%12), which net.ParseIP refuses.
+		// netip's IsLoopback takes an IPv4-mapped 127.0.0.1 as loopback,
+		// as net.IP's does.
+		ip, err := netip.ParseAddr(s)
+		if err != nil {
 			continue
 		}
 		// Only drop loopback when it points at our own listener.
@@ -130,7 +125,8 @@ func (p *Proxy) captureDNSUpstream() {
 		zap.Strings("in_network", p.dnsInNetworkServers),
 		zap.String("cluster_domain", p.dnsClusterDomain),
 		zap.String("port", p.dnsUpstreamPort),
-		zap.Strings("search", p.dnsSearch))
+		zap.Strings("search", p.dnsSearch),
+		zap.String("source", source))
 	p.logReplayDNSForwarding()
 }
 
@@ -359,7 +355,7 @@ func (p *Proxy) logReplayDNSForwarding() {
 		knob = "--global-passthrough"
 	}
 	if knob != "" {
-		agent.LogRealEgress(p.logger, knob, "a DNS query no mock answers is forwarded to the resolvers in resolv.conf",
+		agent.LogRealEgress(p.logger, knob, "a DNS query no mock answers is forwarded to the machine's resolvers",
 			zap.Strings("resolvers", p.dnsUpstreamServers))
 		return
 	}

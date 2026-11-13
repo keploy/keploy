@@ -1195,8 +1195,9 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	//
 	// The public-DNS fallback (8.8.8.8 / 1.1.1.1) is retained for the
 	// rare local-dev case where the proxy runs outside a cluster AND
-	// resolv.conf is entirely missing — the forwarder treats this as
-	// "no upstream" and we would otherwise be stuck.
+	// resolv.conf is entirely missing (on Windows: no adapter that is up
+	// has a DNS server) — the forwarder treats this as "no upstream" and
+	// we would otherwise be stuck.
 	var servers []string
 	port := "53"
 	if p.hasDNSUpstream() {
