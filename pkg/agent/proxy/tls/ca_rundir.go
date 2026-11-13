@@ -46,6 +46,9 @@ type runTrustDir struct {
 	dir  string
 	lock *os.File
 	once sync.Once
+
+	mu    sync.Mutex
+	atEnd []func() // run by remove, before the directory goes (atRemove)
 }
 
 // liveRunDirs holds every run directory this process has made and not yet
@@ -101,6 +104,14 @@ func (r *runTrustDir) writePrivate(name string, data []byte) (string, error) {
 	return p, os.Chmod(p, 0o600)
 }
 
+// atRemove has f run when the run ends, before its directory is removed: f
+// may read what the run's files hold then.
+func (r *runTrustDir) atRemove(f func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.atEnd = append(r.atEnd, f)
+}
+
 // removeWhenDone removes the run's directory when ctx ends.
 func (r *runTrustDir) removeWhenDone(ctx context.Context, logger *zap.Logger) {
 	context.AfterFunc(ctx, func() {
@@ -110,11 +121,19 @@ func (r *runTrustDir) removeWhenDone(ctx context.Context, logger *zap.Logger) {
 	})
 }
 
-// remove lets the lock go and removes the run's directory, once.
+// remove runs what the run left for its end (atRemove), then lets the lock
+// go and removes the run's directory, once.
 func (r *runTrustDir) remove() error {
 	var err error
 	r.once.Do(func() {
-		// First: Windows renames no directory while a file in it is open.
+		r.mu.Lock()
+		atEnd := r.atEnd
+		r.atEnd = nil
+		r.mu.Unlock()
+		for _, f := range atEnd {
+			f()
+		}
+		// Then: Windows renames no directory while a file in it is open.
 		_ = r.lock.Close()
 		err = retireRunDir(r.dir)
 		// Last: a test waits on this to know the whole removal is done.
