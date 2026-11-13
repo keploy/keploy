@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -28,6 +29,13 @@ import (
 // ended name whole. A run killed between making its directory and taking its
 // lock leaves that directory, with no certificate in it: nothing tells it from
 // a run starting, so it stays.
+//
+// A run that pointed its test at copies of the user's kubeconfig keeps beside
+// each copy what writing the test's changes back takes (kubeconfigRecord),
+// until its end has written them back. A run that ended without its cleanup
+// (killed, crashed) leaves them, and the next run writes them back
+// (writeBackEndedRun), holding the ended run's lock, before it removes the
+// directory: the test's changes are never lost with it.
 const (
 	runDirPrefix  = "keploy-ca-"
 	runLockName   = "run.lock"
@@ -43,9 +51,10 @@ func runDirPattern() string { return fmt.Sprintf("%s%d-", runDirPrefix, os.Geteu
 
 // runTrustDir is one run's directory and the lock that says the run lives.
 type runTrustDir struct {
-	dir  string
-	lock *os.File
-	once sync.Once
+	dir     string
+	lock    *os.File
+	started time.Time // when the run made it, for the run's records
+	once    sync.Once
 
 	mu    sync.Mutex
 	atEnd []func() // run by remove, before the directory goes (atRemove)
@@ -76,7 +85,7 @@ func newRunTrustDir() (*runTrustDir, error) {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
-	r := &runTrustDir{dir: dir, lock: lock}
+	r := &runTrustDir{dir: dir, lock: lock, started: time.Now()}
 	liveRunDirs.Store(r, struct{}{})
 	return r, nil
 }
@@ -199,8 +208,13 @@ func reapEndedRunDirs(logger *zap.Logger) {
 			if !ended {
 				continue
 			}
-			// First: Windows renames no directory while a file in it is open.
+			// Holding its lock, so no other run starting now writes it too.
+			kept := !writeBackEndedRun(logger, dir)
+			// Then: Windows renames no directory while a file in it is open.
 			release()
+			if kept {
+				continue
+			}
 			err = retireRunDir(dir)
 		}
 		if err != nil {

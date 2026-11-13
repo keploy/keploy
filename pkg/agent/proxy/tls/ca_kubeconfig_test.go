@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/kubeconfig"
 	"go.uber.org/zap"
@@ -492,5 +493,210 @@ func kubectlWrites(t *testing.T, p string, f func(cfg map[string]any)) {
 	}
 	if err := os.WriteFile(p, out, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// dieWithoutCleanup leaves run as a run killed outright (SIGKILL) leaves it:
+// its lock let go, as the system does at its exit, and nothing of its end
+// done, its directory and records left.
+func dieWithoutCleanup(run *runTrustDir) {
+	run.once.Do(func() {})
+	_ = run.lock.Close()
+	liveRunDirs.Delete(run)
+}
+
+// What the test of a run that ended without its cleanup (killed, crashed)
+// changed in its kubeconfig is written back by the next run, before it removes
+// the ended run's directory, as the run's own end would have: merged onto a
+// file changed since elsewhere, refused when changed in the same entry; each
+// line names the ended run's pid and start. A run that ends as it should, or
+// whose test changed nothing, leaves the next run nothing to write; a live
+// run's directory is left alone; a record keploy cannot read keeps the
+// directory, whose copy holds the test's changes, and says so.
+func TestReapEndedRunDirs_WritesADeadRunsKubeconfigChangesBack(t *testing.T) {
+	isolateCertEnv(t)
+	tmp := useTempDir(t)
+	withSystemSearch(t, nil, nil)
+	t.Setenv(EnvJavaToolOptions, "")
+	dir := t.TempDir()
+	user := filepath.Join(dir, "config")
+	kindCA := mustGenerateTestCA().certPEM
+	src := []byte("apiVersion: v1\nkind: Config\ncurrent-context: kind-a\nclusters:\n- name: kind-a\n  cluster:\n    server: https://127.0.0.1:36205\ncontexts:\n- name: kind-a\n  context:\n    cluster: kind-a\n    user: kind-a\nusers:\n- name: kind-a\n  user:\n    client-key-data: c2VjcmV0\n")
+	t.Setenv(kubeconfig.EnvVar, user)
+	orig := chownCopy
+	chownCopy = func(string, string) error { return nil }
+	t.Cleanup(func() { chownCopy = orig })
+
+	edit := func(f func(cfg map[string]any)) func(t *testing.T, path string) {
+		return func(t *testing.T, path string) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cfg map[string]any
+			if err := yaml.Unmarshal(data, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			f(cfg)
+			out, err := yaml.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, out, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	kindCreate := edit(func(cfg map[string]any) {
+		cfg["clusters"] = append(cfg["clusters"].([]any), map[string]any{"name": "kind-b", "cluster": map[string]any{
+			"server": "https://127.0.0.1:40001", "certificate-authority-data": base64.StdEncoding.EncodeToString(kindCA)}})
+		cfg["contexts"] = append(cfg["contexts"].([]any), map[string]any{"name": "kind-b", "context": map[string]any{"cluster": "kind-b", "user": "kind-b"}})
+		cfg["current-context"] = "kind-b"
+	})
+	namespace := func(ns string) func(t *testing.T, path string) {
+		return edit(func(cfg map[string]any) {
+			cfg["contexts"].([]any)[0].(map[string]any)["context"].(map[string]any)["namespace"] = ns
+		})
+	}
+	addUser := edit(func(cfg map[string]any) {
+		cfg["users"] = append(cfg["users"].([]any), map[string]any{"name": "ops", "user": map[string]any{"token": "dG9r"}})
+	})
+	ctxOf := func(cfg map[string]any) map[string]any {
+		return cfg["contexts"].([]any)[0].(map[string]any)["context"].(map[string]any)
+	}
+	const wroteBack = "keploy wrote to the kubeconfig what the test changed in it during the run"
+	rows := []struct {
+		name    string
+		do      func(t *testing.T, cp string)
+		outside func(t *testing.T, file string) // a write to the user's file after the run, before the next
+		ownEnd  bool                            // the run's end wrote back before it was killed
+		want    []logLine
+		written func(cfg map[string]any) // the user's file after; nil: as it was
+		kept    bool                     // the ended run's directory stays
+	}{
+		{name: "its test changed nothing"},
+		{name: "kind create cluster", do: kindCreate, want: []logLine{
+			{wroteBack, `added=[cluster kind-b context kind-b] current_context="kind-a" -> "kind-b"`},
+			{"kubectl and helm do not trust keploy's certificate for a cluster the test added or changed", "cluster=[kind-b (https://127.0.0.1:40001)]"},
+		}, written: func(cfg map[string]any) {
+			if cfg["current-context"] != "kind-b" || len(cfg["clusters"].([]any)) != 2 || len(cfg["contexts"].([]any)) != 2 {
+				t.Errorf("kind create cluster: the user's file holds %v; want kind-b's cluster and context, and current", cfg)
+			}
+		}},
+		{name: "the user's file changed since in another entry", do: namespace("web"), outside: addUser, want: []logLine{
+			{wroteBack, "changed=[context kind-a]"},
+		}, written: func(cfg map[string]any) {
+			if ns := ctxOf(cfg)["namespace"]; ns != "web" || len(cfg["users"].([]any)) != 2 {
+				t.Errorf("merged: namespace %v and users %v; want web, and kind-a and ops", ns, cfg["users"])
+			}
+		}},
+		{name: "the user's file changed since in the same entry", do: namespace("web"), outside: namespace("ops"), want: []logLine{
+			{"the kubeconfig was changed during the run, outside the test, in entries the test changed too", "changed=[context kind-a] conflict=[context kind-a] test_changes"},
+		}},
+		{name: "killed after its own end wrote back", do: namespace("web"), ownEnd: true, written: func(cfg map[string]any) {
+			if ns := ctxOf(cfg)["namespace"]; ns != "web" {
+				t.Errorf("own end: namespace %v; want web", ns)
+			}
+		}},
+		{name: "a record keploy cannot read", do: func(t *testing.T, cp string) {
+			namespace("web")(t, cp)
+			if err := os.WriteFile(cp+recordSuffix, []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, kept: true},
+	}
+	for _, r := range rows {
+		for _, e := range mustReadDir(t, dir) {
+			_ = os.Remove(filepath.Join(dir, e))
+		}
+		if err := os.WriteFile(user, src, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		runLog, _ := observer.New(zap.InfoLevel)
+		if err := SetupCaCertEnv(ctx, zap.New(runLog), testCACertPEM()); err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		runDir := filepath.Dir(os.Getenv("NODE_EXTRA_CA_CERTS"))
+		live := liveRunOf(t, runDir)
+		started := live.started
+		cp := os.Getenv(kubeconfig.EnvVar)
+		if r.do != nil {
+			r.do(t, cp)
+		}
+		// A live run's directory is left alone: its records too.
+		reapEndedRunDirs(zap.NewNop())
+		if got, _ := os.ReadFile(user); !bytes.Equal(got, src) {
+			t.Errorf("%s: the user's file was written while the run lived", r.name)
+		}
+		if _, err := os.Stat(cp + recordSuffix); err != nil {
+			t.Errorf("%s: the live run's record: %v", r.name, err)
+		}
+		if r.ownEnd {
+			live.mu.Lock()
+			for _, f := range live.atEnd {
+				f()
+			}
+			live.mu.Unlock()
+		}
+		dieWithoutCleanup(live)
+		cancel()
+		before, _ := os.ReadFile(user)
+		if r.outside != nil {
+			r.outside(t, user)
+			before, _ = os.ReadFile(user)
+		}
+
+		core, logs := observer.New(zap.InfoLevel)
+		reapEndedRunDirs(zap.New(core))
+		if got := linesFor(t, logs, user); !sameLines(got, r.want) {
+			t.Errorf("%s: logged %+v; want %+v (each message's start)", r.name, got, r.want)
+		}
+		ended := fmt.Sprintf("pid %d, started %s; it ended without its cleanup (killed or crashed)", os.Getpid(), started.Format(time.RFC3339))
+		for _, e := range logs.FilterField(zap.String("kubeconfig", user)).All() {
+			if got := e.ContextMap()["ended_run"]; got != ended {
+				t.Errorf("%s: %q names the ended run %v; want %q", r.name, e.Message, got, ended)
+			}
+		}
+		unread := logs.FilterMessageSnippet("keploy could not read what a run that ended without its cleanup").FilterField(zap.String("dir", runDir)).Len()
+		_, statErr := os.Stat(filepath.Join(runDir, "kubeconfig-0"))
+		if r.kept {
+			if unread != 1 || statErr != nil {
+				t.Errorf("%s: %d warnings name the directory, and its copy: %v; want one, and the copy kept", r.name, unread, statErr)
+			}
+			if err := os.RemoveAll(runDir); err != nil {
+				t.Fatal(err)
+			}
+		} else if unread != 0 || len(runDirsIn(t, tmp)) != 0 {
+			t.Errorf("%s: %d warnings on an unreadable record, run directories %q left; want none", r.name, unread, runDirsIn(t, tmp))
+		}
+
+		after, err := os.ReadFile(user)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backups, keptChanges := 0, 0
+		for _, e := range mustReadDir(t, dir) {
+			backups += strings.Count(e, "config.keploy-backup-")
+			keptChanges += strings.Count(e, "config.keploy-test-changes-")
+		}
+		if wantKept := len(r.want) > 0 && r.written == nil; (keptChanges == 1) != wantKept {
+			t.Errorf("%s: %d files keep the test's changes; want them kept: %v", r.name, keptChanges, wantKept)
+		}
+		if r.written == nil {
+			if !bytes.Equal(after, before) || backups != 0 {
+				t.Errorf("%s: the user's file was written (%d backups); want it left as it was", r.name, backups)
+			}
+			continue
+		}
+		if backups != 1 {
+			t.Errorf("%s: %d backups; want one", r.name, backups)
+		}
+		var cfg map[string]any
+		if err := yaml.Unmarshal(after, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		r.written(cfg)
 	}
 }

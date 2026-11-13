@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/kubeconfig"
 	"go.uber.org/zap"
 )
 
@@ -327,14 +328,16 @@ func TestReapEndedRunDirs_ARunsRemovalAfterAReaperTookItIsNoError(t *testing.T) 
 const envRunDirChild = "KEPLOY_TEST_RUNDIR_CHILD"
 
 // A run killed outright (SIGKILL on Unix) leaves its directory, which a run
-// started meanwhile leaves alone while it lives and the next one removes.
+// started meanwhile leaves alone while it lives and the next one removes,
+// once it has written back what the killed run's test changed in its
+// kubeconfig.
 func TestReapEndedRunDirs_AKilledRunsDirectoryGoesAtTheNextStart(t *testing.T) {
 	if os.Getenv(envRunDirChild) != "" {
 		if err := SetupCaCertEnv(context.Background(), zap.NewNop(), testCACertPEM()); err != nil {
 			println("SetupCaCertEnv:", err.Error())
 			os.Exit(2)
 		}
-		if _, err := os.Stdout.WriteString("dir=" + filepath.Dir(os.Getenv("NODE_EXTRA_CA_CERTS")) + "\n"); err != nil {
+		if _, err := os.Stdout.WriteString("kubeconfig=" + os.Getenv(kubeconfig.EnvVar) + "\ndir=" + filepath.Dir(os.Getenv("NODE_EXTRA_CA_CERTS")) + "\n"); err != nil {
 			println("write the run's directory:", err.Error())
 			os.Exit(4)
 		}
@@ -347,7 +350,12 @@ func TestReapEndedRunDirs_AKilledRunsDirectoryGoesAtTheNextStart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReapEndedRunDirs_AKilledRunsDirectoryGoesAtTheNextStart$", "-test.count=1")
-	cmd.Env = append(os.Environ(), envRunDirChild+"=1", EnvJavaToolOptions+"=")
+	user := filepath.Join(t.TempDir(), "config")
+	src := "apiVersion: v1\nkind: Config\ncontexts:\n- name: a\n  context:\n    cluster: a\n"
+	if err := os.WriteFile(user, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Env = append(os.Environ(), envRunDirChild+"=1", EnvJavaToolOptions+"=", kubeconfig.EnvVar+"="+user)
 	setOwnProcessGroup(cmd)
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	cmd.WaitDelay = 10 * time.Second
@@ -359,17 +367,26 @@ func TestReapEndedRunDirs_AKilledRunsDirectoryGoesAtTheNextStart(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	var dir string
+	var dir, cp string
 	sc := bufio.NewScanner(out)
 	for sc.Scan() {
+		if c, ok := strings.CutPrefix(sc.Text(), "kubeconfig="); ok {
+			cp = c
+		}
 		if d, ok := strings.CutPrefix(sc.Text(), "dir="); ok {
 			dir = d
 			break
 		}
 	}
-	if dir == "" || filepath.Dir(dir) != tmp {
+	if dir == "" || filepath.Dir(dir) != tmp || filepath.Dir(cp) != dir {
 		_ = killProcessGroup(cmd)
-		t.Fatalf("the child said no run directory in %q (got %q; %v)", tmp, dir, sc.Err())
+		t.Fatalf("the child said no run directory in %q, or no copy of the kubeconfig in it (got %q, %q; %v)", tmp, dir, cp, sc.Err())
+	}
+	// The killed run's test sets its context's namespace (kubectl config
+	// set-context --current --namespace=web).
+	if err := os.WriteFile(cp, []byte(src+"    namespace: web\n"), 0o600); err != nil {
+		_ = killProcessGroup(cmd)
+		t.Fatal(err)
 	}
 
 	reapEndedRunDirs(zap.NewNop())
@@ -401,6 +418,9 @@ func TestReapEndedRunDirs_AKilledRunsDirectoryGoesAtTheNextStart(t *testing.T) {
 	})
 	if left := runDirsIn(t, tmp); len(left) != 1 || left[0] != nextDir {
 		t.Fatalf("after the next run's start the temp directory holds %q; want only its own, %q", left, nextDir)
+	}
+	if got, err := os.ReadFile(user); err != nil || !strings.Contains(string(got), "namespace: web") {
+		t.Fatalf("the killed run's test set its context's namespace; the kubeconfig after the next run's start holds\n%s\n(%v)", got, err)
 	}
 }
 
