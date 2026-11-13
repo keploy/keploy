@@ -208,14 +208,14 @@ func TestGetMockErrors_ReportsALostMiss(t *testing.T) {
 }
 
 // A miss the bounded list of its test's window has no room for
-// (maxPendingMockErrors) is not dropped silently: the read says it is
-// incomplete, with what it read.
+// (maxPendingMockErrors), alike to none it holds (missAlikeKey), is not
+// dropped silently: the read says it is incomplete, with what it read.
 func TestGetMockErrors_ReportsAMissPastTheBound(t *testing.T) {
 	eitherSwitch(t, func(t *testing.T) {
 		p := startedDrainProxy(t, maxPendingMockErrors+2)
 		p.BeginTestErrorCapture()
 		for i := 0; i <= maxPendingMockErrors; i++ {
-			p.SendError(mockMiss(fmt.Sprintf("GET /%d", i)))
+			p.SendError(distinctMiss(i))
 		}
 		got, err := p.GetMockErrors(context.Background())
 		// The cause is the full list, not a stopped drain: the drain ran.
@@ -238,10 +238,11 @@ func flushDrain(p *Proxy) {
 }
 
 // overflowPending makes one more miss than keploy keeps while no test's
-// window is open, with the drain routing them, and returns once it has.
+// window is open, each alike to no other, with the drain routing them, and
+// returns once it has.
 func overflowPending(p *Proxy) {
 	for i := 0; i <= maxPendingMockErrors; i++ {
-		p.SendError(mockMiss(fmt.Sprintf("GET /between/%d", i)))
+		p.SendError(distinctMiss(i))
 	}
 	flushDrain(p)
 }
@@ -327,7 +328,7 @@ func TestAPendingOverflowOfDNSMissesIsNoLoss(t *testing.T) {
 		for i := 0; i <= maxPendingMockErrors; i++ {
 			p.SendError(models.ParserError{
 				ParserErrorType: models.ErrMockNotFound,
-				MismatchReport:  &models.MockMismatchReport{Protocol: "DNS", ActualSummary: fmt.Sprintf("A host%d.example", i)},
+				MismatchReport:  &models.MockMismatchReport{Protocol: "DNS", ActualSummary: fmt.Sprintf("A host%d.example", i), ClosestMock: fmt.Sprintf("dns-%d", i)},
 			})
 		}
 		flushDrain(p)
@@ -351,7 +352,7 @@ func TestAWindowOverflowOfDNSMissesIsNoLoss(t *testing.T) {
 		for i := 0; i <= maxPendingMockErrors; i++ {
 			p.SendError(models.ParserError{
 				ParserErrorType: models.ErrMockNotFound,
-				MismatchReport:  &models.MockMismatchReport{Protocol: "DNS", ActualSummary: fmt.Sprintf("A host%d.example", i)},
+				MismatchReport:  &models.MockMismatchReport{Protocol: "DNS", ActualSummary: fmt.Sprintf("A host%d.example", i), ClosestMock: fmt.Sprintf("dns-%d", i)},
 			})
 		}
 		got, err := p.GetMockErrors(context.Background())

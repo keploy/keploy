@@ -480,6 +480,18 @@ type MockMismatchReport struct {
 	// ClosestMock is the recording that answered, and the note names the
 	// earlier one, for information only.
 	Repeat *RepeatNote
+	// AlikeAt are the times more calls alike to this one missed, in the
+	// order they did, after the list of misses this one is held in was full
+	// (the proxy's missAlikeKey: the same call in its shape, missed the same
+	// way, marked in the same round, by the same test worker): each folded
+	// into this one, so a flood of one call is held as one report and a time
+	// a call, never dropped. Never written to a report: the proxy's read
+	// lists each as a call of its own (UnmatchedCall.Folded).
+	AlikeAt []time.Time `json:"-" yaml:"-"`
+	// Folded mirrors UnmatchedCall.Folded on a test's failure: the call was
+	// folded into an alike miss in the agent, so its ReceivedReq, Diff and
+	// field values are that miss's, not its own.
+	Folded bool `json:"folded,omitempty" yaml:"folded,omitempty"`
 }
 
 // RoundMark is where a call was when its first read of the round was made

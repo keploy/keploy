@@ -702,8 +702,15 @@ func TestAnswersAndMissesHaveRoomOfTheirOwn(t *testing.T) {
 			t.Fatalf("miss %d was dropped before its room was full", i+1)
 		}
 	}
-	if acc.addBounded(miss, maxPendingMockErrors) {
-		t.Fatal("a miss past its room was kept")
+	// Past its room a miss alike to none held is dropped, and one alike to
+	// a held miss is folded into it (foldAlike): the list grows no longer.
+	other := models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: errors.New("no match"),
+		MismatchReport: &models.MockMismatchReport{Protocol: "Mongo", ClosestMock: "mock-other"}}
+	if acc.addBounded(other, maxPendingMockErrors) {
+		t.Fatal("a miss past its room, alike to none held, was kept")
+	}
+	if !acc.addBounded(miss, maxPendingMockErrors) {
+		t.Fatal("a miss past its room, alike to one held, was not folded into it")
 	}
 	if got := len(acc.drain()); got != 2*maxPendingMockErrors {
 		t.Fatalf("the window held %d reports; want %d answers and %d misses", got, maxPendingMockErrors, maxPendingMockErrors)

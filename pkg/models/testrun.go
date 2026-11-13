@@ -660,6 +660,13 @@ type UnmatchedCall struct {
 	// in (MockMismatchReport.Mark): the zero MissMark for a parser that marks
 	// no round. Never written to a report: the agent reads it at a test's end.
 	Marked MissMark `json:"-" yaml:"-"`
+	// Folded is that the call missed alike to the miss listed before it whose
+	// Folded is false (MockMismatchReport.AlikeAt) after its window's list of
+	// misses was full: it is a miss of its own, at its own time (At), and
+	// everything else it says is that miss's. Its rendered request, diff and
+	// field values are that miss's too, as only those can differ between
+	// alike calls; its own were not kept.
+	Folded bool `json:"folded,omitempty" yaml:"folded,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`

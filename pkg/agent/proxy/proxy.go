@@ -5675,6 +5675,9 @@ type testErrorAccumulator struct {
 	// it could not close (the degenerate path): what is filed into it after
 	// that was made after its test's misses were taken, between two tests.
 	read bool
+	// folds holds what was folded into the misses held once their room was
+	// full (addBounded, foldAlike); nil until a miss first folds.
+	folds *missFolds
 }
 
 func (a *testErrorAccumulator) add(err error) {
@@ -5686,11 +5689,14 @@ func (a *testErrorAccumulator) add(err error) {
 	a.mu.Unlock()
 }
 
+// drain takes what the accumulator holds, each miss carrying the times of
+// the misses folded into it (MockMismatchReport.AlikeAt), and empties it.
 func (a *testErrorAccumulator) drain() []error {
 	a.mu.Lock()
-	e := a.errs
-	a.errs, a.answers = nil, 0
+	e, folds := a.errs, a.folds
+	a.errs, a.answers, a.folds = nil, 0, nil
 	a.mu.Unlock()
+	folds.applyTo(e)
 	return e
 }
 
@@ -5704,7 +5710,10 @@ const maxPendingMockErrors = 512
 // of its class: misses (and every other error) and answered calls' reports
 // (models.ReportAnswer) each have room for max, so a background writer
 // answered by its kind, as often as it writes, never takes a miss's room.
-// Returns false when the entry was dropped.
+// A miss past its room is folded into a held miss it is alike to
+// (missAlikeKey), kept as a time: a flood of one call, however long, is
+// never dropped. Returns false when the entry was dropped: an answer past
+// its room, or a miss alike to none held.
 func (a *testErrorAccumulator) addBounded(err error, max int) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -5714,7 +5723,7 @@ func (a *testErrorAccumulator) addBounded(err error, max int) bool {
 		held = a.answers
 	}
 	if held >= max {
-		return false
+		return !answer && a.foldAlike(err)
 	}
 	a.errs = append(a.errs, err)
 	if answer {
@@ -6571,7 +6580,11 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					// Where its parser marked the call: a test's end places
 					// the miss by it, not by when it was filed.
 					Marked: missMark(parserErr.MismatchReport),
+					Folded: parserErr.MismatchReport.Folded,
 				})
+				// The calls folded into it past its list's room, each a
+				// miss of its own at its own time.
+				errs = appendFolded(errs, parserErr.MismatchReport.AlikeAt)
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach
 				// the user's report — silently dropping it here is how whole

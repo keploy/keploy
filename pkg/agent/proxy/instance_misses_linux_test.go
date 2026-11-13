@@ -342,7 +342,7 @@ func TestAWorkersLateCallsLostForRoomAtTheSetsStartAreItsNextReadsLoss(t *testin
 	p.StartErrorDrain(ctx)
 	w := servedWorker(t, p, 1)
 	named := func(i int) error {
-		r := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: fmt.Sprintf("POST /late/%d", i), MarkedTest: "o::TestX", MarkedInTest: true, Mark: models.RoundMarkedSettled, MarkEpoch: 1}
+		r := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "POST /late/" + shapeName(i), MarkedTest: "o::TestX", MarkedInTest: true, Mark: models.RoundMarkedSettled, MarkEpoch: 1}
 		return models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: models.ErrNoMockMatched, Instance: 1, MismatchReport: r, MissKind: models.MissInTest, At: time.Now()}
 	}
 	// Worker 1's last test's window, read, and its tail: one more of its
@@ -409,7 +409,7 @@ func TestAWorkersLostMissMakesOnlyItsOwnReadIncomplete(t *testing.T) {
 	w.ContinueTestErrorCapture()
 	p.ContinueTestErrorCapture()
 	for i := 0; i <= maxPendingMockErrors; i++ {
-		workerMiss(p, fmt.Sprintf("GET /%d", i), 1)
+		workerMiss(p, "GET /"+shapeName(i), 1)
 	}
 	if _, err := w.GetMockErrors(ctx); !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostListFull) {
 		t.Fatalf("worker 1's read, its list overfull, returned %v; want it incomplete: %s", err, missLostListFull)
@@ -447,7 +447,7 @@ func TestAWorkersTailLostForRoomIsSaidAtTheSetsStart(t *testing.T) {
 	p.StartErrorDrain(ctx)
 	servedWorker(t, p, 1)
 	for i := 0; i <= maxPendingMockErrors; i++ {
-		workerMiss(p, fmt.Sprintf("GET /%d", i), 1)
+		workerMiss(p, "GET /"+shapeName(i), 1)
 	}
 	flushDrain(p)
 	p.cutMissesAtSetStart(ctx)
