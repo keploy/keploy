@@ -11,6 +11,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // The learn step's refusal of a Cookie header names the pairs that differ,
@@ -755,6 +757,8 @@ func TestExcusedPairOfAPairThePageSets(t *testing.T) {
 func TestPairwiseKept(t *testing.T) {
 	cookie := learn.Leaf{Path: cookieLeaf}
 	other := learn.Leaf{Path: "header.x-trace"}
+	jar := func(tok string) learn.Leaf { return learn.Leaf{Path: cookieLeaf, Value: "theme=dark; session=" + tok} }
+	whole := func(tok string) learn.Leaf { return learn.Leaf{Path: cookieLeaf, Value: tok} }
 	for _, c := range []struct {
 		name    string
 		learned []learn.Learned
@@ -767,9 +771,14 @@ func TestPairwiseKept(t *testing.T) {
 		{"the header an echo", []learn.Learned{{Kind: learn.KindEcho, Recorded: cookie}}, false},
 		{"the header a read of the clock", []learn.Learned{{Kind: learn.KindClockRead, Recorded: cookie}}, false},
 		{"another header a variable", []learn.Learned{{Kind: learn.KindVariable, Recorded: other}}, true},
+		{"the header a given's use at a pair", []learn.Learned{{Kind: learn.KindVariable, Recorded: jar(givenTokRec), Live: jar(givenTokFull)}}, true},
+		{"the header a given's use at a pair, learned as a clock", []learn.Learned{{Kind: learn.KindClockRead, Recorded: jar(givenTokRec), Live: jar(givenTokFull)}}, true},
+		{"the header holding a given whole", []learn.Learned{{Kind: learn.KindVariable, Recorded: whole(givenTokRec), Live: whole(givenTokFull)}}, false},
+		{"the header holding another value than the given", []learn.Learned{{Kind: learn.KindVariable, Recorded: jar(givenTokRec), Live: jar(givenTokOther)}}, false},
+		{"another pair changed beside the given", []learn.Learned{{Kind: learn.KindVariable, Recorded: jar(givenTokRec), Live: learn.Leaf{Path: cookieLeaf, Value: "theme=light; session=" + givenTokFull}}}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := pairwiseKept(c.learned); got != c.want {
+			if got := pairwiseKept(c.learned, []variables.Binding{tokGiven}); got != c.want {
 				t.Fatalf("pairwiseKept = %v, want %v", got, c.want)
 			}
 		})
@@ -811,5 +820,139 @@ func TestCookiePairsLearned(t *testing.T) {
 				t.Fatalf("cookiePairsLearned = %v, %q; want %v, %q", keys, rest, c.keys, c.rest)
 			}
 		})
+	}
+}
+
+// A token the test gave keploy (given:session): as recorded, in record's
+// full round, and another value.
+const (
+	givenTokRec   = "tok-1761609600123"
+	givenTokFull  = "tok-1761700000456"
+	givenTokOther = "tok-1761700000999"
+)
+
+var tokGiven = variables.Binding{Name: "given:session", Value: givenTokFull, Recorded: givenTokRec, Mock: "test o::TestApps", Place: "apps_test.go:20", Given: true}
+
+// learnGivenPageCookie runs the learn step on a POST /v1/apps recorded with
+// the Cookie header rec after the test's earlier calls, while the open test
+// gave given:session (tokGiven), sent
+// in this run with live: the recording it served, or why it refused it.
+func learnGivenPageCookie(t *testing.T, earlier []*models.Mock, rec, live string) (*models.Mock, string) {
+	t.Helper()
+	h, n, opts := learnOn(t)
+	m := learnRecorded("mock-9", -time.Hour+300*time.Millisecond, "POST", "/v1/apps", `{"name":"a"}`, map[string]string{"Cookie": rec}, `{"id":7}`)
+	db := &givenDb{learnDb: &learnDb{perTest: append(append([]*models.Mock(nil), earlier...), m)}}
+	db.table.Start(nil)
+	if _, ok := db.table.Give(tokGiven); !ok {
+		t.Fatal("the test's given did not bind")
+	}
+	tr := learn.NewTracker()
+	tr.Begin()
+	tr.GiveValue(learn.TestGiven(tokGiven.Mock, tokGiven.Name, tokGiven.Recorded, tokGiven.Value))
+	served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), livePageCall(live), db, n, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miss != nil {
+		return nil, miss.res.Why
+	}
+	if served == nil || len(db.consumed) != 1 {
+		t.Fatalf("served %v, consumed %d", served, len(db.consumed))
+	}
+	return &db.consumed[0], ""
+}
+
+// A pair holding a value the test gave, beside a pair the page set (gone in
+// this run) or a pair two racing answers set (at the race's other value), is
+// read pair by pair like every other: the given's use at its pair, and the
+// page's or the race's key at the other. A pair whose value is not the one
+// the test gave, or another pair that changed with it, is read as it is with
+// no page or race pair beside it: here, a session the test's earlier call
+// sent as recorded, which keploy follows from there.
+func TestLearnMatchFollowsAGivenPairBesideAPageOrRacedPair(t *testing.T) {
+	without := pageCall("mock-1", -300*time.Millisecond, "session="+givenTokRec, "")
+	a := pageCall("mock-2", -200*time.Millisecond, "session="+givenTokRec+"; sid=s0", "sid=s1; Path=/")
+	b := pageCall("mock-3", -150*time.Millisecond, "session="+givenTokRec+"; sid=s0", "sid=s2; Path=/")
+	race := raced("sid", "s1", "s2")
+	slices.Sort(race[cookieSetByRace+"sid"])
+	page := map[string][]string{cookieSetByPage + "sub": {}}
+	use := []string{"header.cookie|cookie.session"}
+	for _, c := range []struct {
+		name      string
+		earlier   []*models.Mock
+		rec, live string
+		// noise is what the mock learns; use, the given's use (nil: none).
+		noise map[string][]string
+		use   []string
+		// refused names what a refusal says, where noise is nil.
+		refused string
+	}{
+		{"beside a pair the page set", []*models.Mock{without}, "session=" + givenTokRec + "; sub=pro", "session=" + givenTokFull, page, use, ""},
+		{"beside a raced pair", []*models.Mock{a, b}, "session=" + givenTokRec + "; sid=s1", "session=" + givenTokFull + "; sid=s2", race, use, ""},
+		{"beside both", []*models.Mock{without, a, b}, "session=" + givenTokRec + "; sid=s1; sub=pro", "session=" + givenTokFull + "; sid=s2", with(race, page), use, ""},
+		{"no pair excused", []*models.Mock{without}, "session=" + givenTokRec + "; sub=pro", "session=" + givenTokFull + "; sub=pro", map[string][]string{}, use, ""},
+		{"not the value the test gave", []*models.Mock{without}, "session=" + givenTokRec + "; sub=pro", "session=" + givenTokOther, nil, nil, "(pair session holds another value; pair sub is not sent in this run) carries a value the test's recording holds earlier (in mock-1)"},
+		{"another pair changed too", []*models.Mock{without}, "session=" + givenTokRec + "; theme=dark; sub=pro", "session=" + givenTokFull + "; theme=light", nil, nil, "given:session"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m, why := learnGivenPageCookie(t, c.earlier, c.rec, c.live)
+			if c.noise == nil {
+				if m != nil || !strings.Contains(why, c.refused) {
+					t.Fatalf("served %v (refused: %q); want a refusal naming %s", m != nil, why, c.refused)
+				}
+				return
+			}
+			if m == nil {
+				t.Fatalf("refused: %s", why)
+			}
+			noise := m.Spec.ReqBodyNoise
+			if noise == nil {
+				noise = map[string][]string{}
+			}
+			if !reflect.DeepEqual(noise, c.noise) {
+				t.Fatalf("learned %v, want %v", noise, c.noise)
+			}
+			v, used := m.Spec.Learned()["given:session"]
+			if (c.use != nil) != used || used && (!reflect.DeepEqual(v.Use, c.use) || v.Recorded != givenTokRec) {
+				t.Fatalf("given:session %+v (used %v), want used at %v", v, used, c.use)
+			}
+		})
+	}
+}
+
+// A replay holds a given used at a pair of the Cookie header beside a pair
+// the mock learned as the page's: the call that carries the value the test
+// gave and goes without the page's pair, or sends it as recorded, is
+// answered; one that carries another value is refused naming the given, and
+// one that sends the page's pair with another value is refused on the
+// header.
+func TestVariables_AGivenPairBesideAPagePairIsPassedOnOrTheCallIsRefused(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	match := func(cookie string) (bool, *matchDiag) {
+		h := newHTTP()
+		m := at(varMock("mock-1", "POST", "http://store/apps", `{"name":"a"}`, 201, `{"id":7}`,
+			models.MockVariables{"given:session": useV(givenTokRec, []string{"header.cookie|cookie.session"})}), 1)
+		m.Spec.HTTPReq.Header["Cookie"] = "session=" + givenTokRec + "; sub=pro"
+		m.Spec.ReqBodyNoise = map[string][]string{cookieSetByPage + "sub": {}}
+		db := &varDb{perTest: []*models.Mock{m}}
+		db.table.Start(nil)
+		if _, ok := db.table.Give(tokGiven); !ok {
+			t.Fatal("the test's given did not bind")
+		}
+		r := liveReq("POST", "/apps", `{"name":"a"}`)
+		r.header.Set("Cookie", cookie)
+		ok, _, diag := matchVar(t, h, db, r)
+		return ok, diag
+	}
+	for _, served := range []string{"session=" + givenTokFull, "session=" + givenTokFull + "; sub=pro"} {
+		if ok, diag := match(served); !ok {
+			t.Fatalf("%q, the given's value without or with the page's pair as recorded, was refused: %+v", served, diag)
+		}
+	}
+	ok, diag := match("session=" + givenTokOther)
+	wantProblem(t, ok, diag, `the test gave given:session = "`+givenTokFull+`" (apps_test.go:20)`)
+	ok, diag = match("session=" + givenTokFull + "; sub=free")
+	if ok || diag == nil || diag.variable != nil {
+		t.Fatalf("the page's pair with another value: answered %v, miss %+v; want a miss of the header, not of the given", ok, diag)
 	}
 }

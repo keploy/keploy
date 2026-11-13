@@ -1964,12 +1964,13 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// where its test case binds a value the call carries whole.
 			answer := classifiedAnswer(answered)
 			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, pairShape, recShape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
-			if recShape.Leaves[cookieLeaf].Value != c.Shape.Leaves[cookieLeaf].Value && !pairwiseKept(learned) {
+			if recShape.Leaves[cookieLeaf].Value != c.Shape.Leaves[cookieLeaf].Value && !pairwiseKept(learned, givenBindings(mockDb)) {
 				// A replay reads a Cookie header learned with pairs excused
-				// pair by pair only where its other pairs are noise, or
-				// the call is refused: anything else learned of it (a
-				// variable, a clock read) holds of the header's whole
-				// text, which has those pairs. It is read whole, as before.
+				// pair by pair only where its other pairs are noise, the
+				// use of a value the test gave at their pairs, or the call
+				// is refused: anything else learned of it (a variable, a
+				// clock read) holds of the header's whole text, which has
+				// those pairs. It is read whole, as before.
 				pagePairs = nil
 				learned = learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, pairShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
 			}

@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // cookieLeaf is the learn step's path of the Cookie header (learnNoise.shape
@@ -287,13 +288,21 @@ func learnedNoise(r learn.Leaf) []string {
 // pairwiseKept reports whether learned, what the learn step learned of a
 // call whose Cookie header it read with pairs excused (cookiePairsLearned),
 // learned the header's other pairs as a replay compares them pair by pair:
-// as noise, or refused (unaccounted). A variable, an echo or a read of the
-// clock is checked against the header's whole text.
-func pairwiseKept(learned []learn.Learned) bool {
+// as noise, refused (unaccounted), or as the use of a value the test gave
+// (given) at one or more of its pairs (givenFor's steps), which a replay
+// writes at each such pair of the recorded header before it compares the
+// pairs one by one (pairsAsLearned). A variable, an echo or a read of the
+// clock is checked against the header's whole text, and so is a given the
+// header's text holds whole: no pair holds it.
+func pairwiseKept(learned []learn.Learned, given []variables.Binding) bool {
 	for _, l := range learned {
-		if l.Recorded.Path == cookieLeaf && l.Kind != learn.KindNoise && l.Kind != learn.KindUnaccounted {
-			return false
+		if l.Recorded.Path != cookieLeaf || l.Kind == learn.KindNoise || l.Kind == learn.KindUnaccounted {
+			continue
 		}
+		if _, steps, ok := givenFor(l.Recorded, l.Live, given); ok && len(steps) > 0 {
+			continue
+		}
+		return false
 	}
 	return true
 }
