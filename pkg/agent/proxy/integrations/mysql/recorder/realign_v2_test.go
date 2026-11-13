@@ -305,26 +305,37 @@ func TestRecordV2_APipeliningClientsResponseItCannotFrameStopsTheConnection(t *t
 
 // A client that waits for each answer is not taken for one that pipelines on
 // the capture's clock: a command stamped alike with the last byte of the
-// answer before it, or before it (a clock that is coarse, or steps back), was
-// still captured after that byte (fakeconn.Chunk.ConnSeq). So a response of
-// its that cannot be framed costs its own exchange, and the recording goes
-// on. Taken for pipelining, the connection was no longer recorded from that
-// response on: on one recording, dozens of pooled connections stopped so.
+// answer before it, or before it (a clock that is coarse, or steps back), or
+// not stamped at all, was still captured after that byte
+// (fakeconn.Chunk.ConnSeq). Nor is one numbered alike with that byte: only a
+// command numbered before it was sent before it. So a response of its that
+// cannot be framed costs its own exchange, and the recording goes on. Taken
+// for pipelining, the connection was no longer recorded from that response
+// on: on one recording, dozens of pooled connections stopped so.
 func TestRecordV2_ACommandStampedNotAfterTheAnswerBeforeItIsNotPipelining(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
-		name  string
-		stamp func(command, answered time.Time) time.Time
+		name string
+		// mark changes the 2nd command's chunk (command) against the chunk
+		// the answer to the 1st ends in (answer).
+		mark func(command *fakeconn.Chunk, first, answer fakeconn.Chunk)
 	}{
-		{"stamped alike with the end of the answer before it", func(_, answered time.Time) time.Time { return answered }},
-		{"stamped before the answer before it arrived", func(command, _ time.Time) time.Time { return command.Add(time.Nanosecond) }},
+		{"stamped alike with the end of the answer before it", func(command *fakeconn.Chunk, _, answer fakeconn.Chunk) { command.ReadAt = answer.ReadAt }},
+		{"stamped before the answer before it arrived", func(command *fakeconn.Chunk, first, _ fakeconn.Chunk) {
+			command.ReadAt = first.ReadAt.Add(time.Nanosecond)
+		}},
+		{"not stamped", func(command *fakeconn.Chunk, _, _ fakeconn.Chunk) { command.ReadAt = time.Time{} }},
+		{"numbered alike with the end of the answer before it", func(command *fakeconn.Chunk, _, answer fakeconn.Chunk) { command.ConnSeq = answer.ConnSeq }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			xs := kitTraffic(t, []int{7, 8}, false)
 			xs[5].reply = append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[5].reply...)
 			client, server := onTheWire(xs, 16384)
-			client[1].ReadAt = c.stamp(client[0].ReadAt, server[0].ReadAt)
+			if !server[0].CapturedBefore(client[1].ConnSeq) {
+				t.Fatal("fixture: the 2nd command must be numbered after the answer to the 1st")
+			}
+			c.mark(&client[1], client[0], server[0])
 			rec := recordChunks(t, client, server, true, time.Minute)
 			requireRealigned(t, rec, commandAt(t, xs, 16384, 5), 18-1)
 		})
@@ -549,6 +560,37 @@ func TestRecordV2_PostTLS_APrepareHeldWhenTheNextResponseCannotBeFramed(t *testi
 	}
 	if leftOut.count() != 2 {
 		t.Fatalf("%d exchanges left out, want the PREPARE and the COM_FIELD_LIST", leftOut.count())
+	}
+}
+
+// A PREPARE taken up after a response left out, and held for its framing
+// besides, when the client's stream ends with no command after it: nothing
+// confirms the answer taken as its own (takenUp), so it is left out with its
+// framing unsettled, and the end of the server's stream does not settle it
+// into a mock (heldPrepare.end).
+func TestRecordV2_PostTLS_APrepareTakenUpAndHeldIsLeftOutAtTheClientsEnd(t *testing.T) {
+	t.Parallel()
+	j := newJoinedMidStream(t)
+	leftOut := &orphanSpans{}
+	j.h.sess.Orphans = leftOut
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
+	// COM_FIELD_LIST: a reply it cannot frame.
+	j.exchange(wrapPacket(append([]byte{0x04}, "t\x00"...), 0), frame([][]byte{columnPayload(t, undecodableColumns[0]), eofPayload}))
+	// Columns only, no EOF (CLIENT_DEPRECATE_EOF): held, its framing open.
+	j.exchange(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "SELECT id FROM t"...), 0),
+		prepareOK(true, nil, [][]byte{columnPayload(t, undecodableColumns[0])}))
+	mocks, err := j.run(t)
+	if err != nil {
+		t.Fatalf("RecordV2 = %v", err)
+	}
+	if n := len(mocksOf(mocks, "COM_STMT_PREPARE")); n != 0 {
+		t.Fatalf("recorded %d PREPAREs taken up after a response left out with nothing to confirm their answer", n)
+	}
+	if len(mocks) != 1 || describe(mocks[0]) != "a OK" {
+		t.Fatalf("%d mocks, want SELECT 1's OK alone", len(mocks))
+	}
+	if leftOut.count() != 2 {
+		t.Fatalf("%d exchanges left out, want the COM_FIELD_LIST and the PREPARE", leftOut.count())
 	}
 }
 
