@@ -302,6 +302,9 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 				// recorded what it read, and is not stopped here.
 				sess.StoppedAt()
 			}
+			// The parser emits nothing more on its session: say, once for
+			// the connection, what the request clamp cost it.
+			sess.ReportClampedOut()
 			if r != nil {
 				ret = fnReturn{
 					panicked: true,

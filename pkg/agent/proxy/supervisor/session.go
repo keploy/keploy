@@ -260,10 +260,15 @@ type Session struct {
 	// hole, and why (MarkEndedAtHole). nil while it has not.
 	endedAtHole [2]atomic.Pointer[string]
 	// emitMu guards OnMockRecorded's chain (AddMockHook, EmitMock) and
-	// lastReqTimestamp (enforceReqMonotonic), each taken alone, never one
-	// inside the other. One mutex for both keeps a Session in its size class.
-	emitMu           sync.Mutex
-	lastReqTimestamp time.Time // most recent ReqTimestampMock emitted on this session
+	// order (enforceReqMonotonic, countClampedOut), each taken alone, never
+	// one inside the other. One mutex for both keeps a Session in its size
+	// class.
+	emitMu sync.Mutex
+	// order is what enforceReqMonotonic keeps of the mocks emitted on this
+	// session: nil until the first one with a request stamp. Out of line, so
+	// a connection that records nothing pays nothing for it and a Session
+	// stays in its size class.
+	order *emitOrder
 
 	// incomplete is the incomplete-mock flag (MarkMockIncomplete): nil while
 	// it is clear, else why it was set, the first reason since it was last
@@ -1053,7 +1058,7 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	// lastReq + 1ns so the matcher's ordering invariant still holds.
 	// The clamp is strictly within the same connection; sessions
 	// across connections are independent.
-	s.enforceReqMonotonic(m)
+	asked := s.enforceReqMonotonic(m)
 
 	s.emitMu.Lock()
 	hook := s.OnMockRecorded
@@ -1061,6 +1066,10 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	if hook != nil {
 		hook(m)
 	}
+	// Whether the clamp left the mock answered before it was asked is known
+	// only now: a hook may move its stamps (zookeeper's carries its response
+	// stamp up to the clamped request's).
+	s.countClampedOut(m, asked)
 
 	// Route through the session's SyncMockManager (Session.manager)
 	// when the caller opts in. Legacy parsers (http, mysql, generic, etc.)
@@ -1654,71 +1663,136 @@ func leftOutKnob(class string) string {
 	return "Re-run with --debug to see each mock left out and why it could not be recorded"
 }
 
-// enforceReqMonotonic clamps m.Spec.ReqTimestampMock to at least
-// s.lastReqTimestamp + 1ns when a regression is detected, and
-// updates the session's last-seen timestamp. In debug builds we
-// panic instead so regressions surface during testing. Thread-safe:
-// holds emitMu while comparing + writing back.
+// emitOrder is what enforceReqMonotonic keeps of a session's mocks
+// (Session.order), under emitMu.
+type emitOrder struct {
+	// lastReq is the latest ReqTimestampMock emitted on the session.
+	lastReq time.Time
+	// clampedOut is how many of its mocks the clamp left answered before they
+	// were asked (countClampedOut); first names the first of them, and most is
+	// the largest such inversion.
+	clampedOut int
+	first      string
+	most       time.Duration
+}
+
+// enforceReqMonotonic clamps m.Spec.ReqTimestampMock to at least the
+// session's latest request stamp + 1ns when a regression is detected, and
+// updates the session's latest stamp. In debug builds we panic instead so
+// regressions surface during testing. Thread-safe: holds emitMu while
+// comparing + writing back. It returns the request stamp m's parser gave
+// it, before any clamp.
 //
 // Zero-valued ReqTimestampMock values pass through untouched
 // (parsers that haven't populated them, e.g. tests with pre-built
 // minimal mocks, shouldn't trigger the clamp).
-func (s *Session) enforceReqMonotonic(m *models.Mock) {
+//
+// Raising the request stamp can push it PAST the response stamp on a mock
+// that arrived perfectly well-ordered, and a replay without the proven switch
+// leaves out a mock answered before it was asked
+// (pkg.LeaveOutAnsweredBeforeAsked). Measured: a pair (req 17.820597769, res
+// 17.607310086) leaves EmitMock inverted by 79.4ms. Whether it does is known
+// only once the post-record hooks have run, so countClampedOut decides it
+// after them, and ReportClampedOut says it once for the connection.
+//
+// The clamp does not repair the response stamp, deliberately. Two attempts to
+// repair it by adjusting ResTimestampMock both regressed
+// go-memory-load-mongo, and the second one narrowly:
+//
+//   - clamping every inverted window resurrected mocks the filter had been
+//     discarding, and they were consumed ahead of the real ones: the lane
+//     went from green to 52 "no matching mock" failures.
+//   - carrying the response stamp along ONLY for the inversion introduced
+//     here still broke record_build_replay_latest with candidates=0, while
+//     record_build_replay_build passed. Same recording, different replay
+//     binary, different outcome -- i.e. it produced recordings the
+//     RELEASED replayer cannot consume. Those lanes exist to catch exactly
+//     that.
+//
+// So ResTimestampMock is load-bearing at replay in ways this call site
+// cannot see, and mutating it here is the wrong lever; a parser that knows
+// its stamps may (zookeeper's hook does).
+func (s *Session) enforceReqMonotonic(m *models.Mock) (asked time.Time) {
 	req := m.Spec.ReqTimestampMock
 	if req.IsZero() {
-		return
+		return req
 	}
 	s.emitMu.Lock()
 	defer s.emitMu.Unlock()
-	if s.lastReqTimestamp.IsZero() {
-		s.lastReqTimestamp = req
-		return
+	if s.order == nil {
+		s.order = &emitOrder{lastReq: req}
+		return req
 	}
-	if req.Before(s.lastReqTimestamp) {
-		clamped := s.lastReqTimestamp.Add(time.Nanosecond)
+	asked = req
+	if req.Before(s.order.lastReq) {
+		clamped := s.order.lastReq.Add(time.Nanosecond)
 		if debugMonotonic.Load() {
 			panic("supervisor.Session.EmitMock: out-of-order ReqTimestampMock detected; parser emitted a mock with a timestamp earlier than a previously-emitted mock on the same session — this violates I5 in PLAN.md and would cause wrong-mock selection at replay time")
 		}
 		m.Spec.ReqTimestampMock = clamped
-
-		// Raising the request stamp can push it PAST the response stamp on a mock
-		// that arrived perfectly well-ordered. filterByTimeStamp drops any mock
-		// with res < req (pkg/util.go), so that mock is then silently discarded at
-		// replay -- orphaned by this function, not by the recorder. Measured: a
-		// pair (req 17.820597769, res 17.607310086) leaves EmitMock inverted by
-		// 79.4ms.
-		//
-		// This REPORTS it and does not repair it, deliberately. Two attempts to
-		// repair it by adjusting ResTimestampMock both regressed
-		// go-memory-load-mongo, and the second one narrowly:
-		//
-		//   - clamping every inverted window resurrected mocks the filter had been
-		//     discarding, and they were consumed ahead of the real ones: the lane
-		//     went from green to 52 "no matching mock" failures.
-		//   - carrying the response stamp along ONLY for the inversion introduced
-		//     here still broke record_build_replay_latest with candidates=0, while
-		//     record_build_replay_build passed. Same recording, different replay
-		//     binary, different outcome -- i.e. it produced recordings the
-		//     RELEASED replayer cannot consume. Those lanes exist to catch exactly
-		//     that.
-		//
-		// So ResTimestampMock is load-bearing at replay in ways this call site
-		// cannot see, and mutating it here is the wrong lever. The real repair
-		// belongs where the ordering invariant and the window filter are designed
-		// together. Until then this makes the loss visible instead of silent,
-		// which is what was actually missing: the first instance was found only by
-		// diffing recorded YAML by hand.
-		if s.Logger != nil && !m.Spec.ResTimestampMock.IsZero() && m.Spec.ResTimestampMock.Before(clamped) {
-			s.Logger.Warn("monotonic clamping inverted this mock's window; replay will DROP it (filterByTimeStamp discards res < req)",
-				zap.String("mock", m.Name),
-				zap.Duration("inversion", clamped.Sub(m.Spec.ResTimestampMock)),
-				zap.Time("reqTimestampMock", clamped),
-				zap.Time("resTimestampMock", m.Spec.ResTimestampMock),
-				zap.Time("originalReqTimestampMock", req))
-		}
 		req = clamped
 	}
-	s.lastReqTimestamp = req
+	s.order.lastReq = req
+	return asked
+}
+
+// countClampedOut counts m, after the post-record hooks, when the clamp
+// (enforceReqMonotonic, given asked, the request stamp its parser gave it)
+// left it answered before it was asked: its parser stamped it well-ordered,
+// and it is not any more. A replay without the proven switch leaves such a
+// mock out (pkg.LeaveOutAnsweredBeforeAsked), unless its kind is placed by
+// its window alone (models.WindowBound), which that rule never asks of. One
+// its parser stamped answered before asked is warnAnsweredBeforeAsked's, said
+// as it is recorded; one a hook carried back into order loses nothing.
+func (s *Session) countClampedOut(m *models.Mock, asked time.Time) {
+	req, res := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+	// A mock with no stamp of either kind is out at the first two checks: it
+	// is answered before it was asked only from a zero request stamp, which the
+	// parser gave it, and then before that too.
+	if !res.Before(req) || res.Before(asked) || models.WindowBound(m.Kind) {
+		return
+	}
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	o := s.order
+	if o.clampedOut == 0 {
+		o.first = m.Name
+	}
+	o.clampedOut++
+	o.most = max(o.most, req.Sub(res))
+}
+
+// ClampedOutMsg is the warning ReportClampedOut logs.
+const ClampedOutMsg = "keeping this connection's requests in order left mocks answered before they were asked: a replay without KEPLOY_PROVEN leaves them out"
+
+// ReportClampedOut says, once for the session, how many of its mocks the
+// request clamp left answered before they were asked (countClampedOut), and
+// nothing when it left none. The supervisor calls it as the session's parser
+// returns: nothing is emitted on the session after that.
+func (s *Session) ReportClampedOut() {
+	if s == nil || s.Logger == nil {
+		return
+	}
+	s.emitMu.Lock()
+	o := s.order
+	var n int
+	var first string
+	var most time.Duration
+	if o != nil {
+		n, first, most = o.clampedOut, o.first, o.most
+		o.clampedOut = 0
+	}
+	s.emitMu.Unlock()
+	if n == 0 {
+		return
+	}
+	s.Logger.Warn(ClampedOutMsg,
+		zap.String("connID", s.ClientConnID),
+		zap.Int("mocks", n),
+		zap.String("firstMock", first),
+		zap.Duration("mostAnsweredBeforeAskedBy", most),
+		zap.String("next_step", "the parser emitted these mocks out of their requests' order, and raising each one's request stamp "+
+			"to keep the order put it after its response; a replay with KEPLOY_PROVEN=1 keeps them. Report the kind with this line"))
 }
 
 // AnsweredBeforeAskedMsg is the warning EmitMock logs for a mock its parser
@@ -1737,8 +1811,8 @@ var answeredBeforeAskedWarns = NewWarnLimiters(answeredBeforeAskedWarnEvery)
 // warnAnsweredBeforeAsked says, as m is recorded, that its parser stamped it
 // answered before it was asked: its response time before its request time. A
 // correct parser never does: its request is read before its answer is
-// written. The stamps are the parser's (enforceReqMonotonic, which runs after,
-// says of an inversion it makes itself). What it costs depends on the replay:
+// written. The stamps are the parser's (an inversion enforceReqMonotonic, which
+// runs after, makes itself is countClampedOut's). What it costs depends on the replay:
 // one without the proven switch leaves a per-test mock like this out
 // (pkg.LeaveOutAnsweredBeforeAsked), so a call it recorded is answered by
 // another mock or by none, and said only there it is found as a miss, a
