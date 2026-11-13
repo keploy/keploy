@@ -382,7 +382,9 @@ func TestFilesAreTheOnesKubectlReadsInItsOrder(t *testing.T) {
 	if got := Files(); !reflect.DeepEqual(got, []string{cfg}) {
 		t.Fatalf("Files() = %q with KUBECONFIG empty; want the home's %q", got, cfg)
 	}
-	os.Unsetenv(EnvVar)
+	if err := os.Unsetenv(EnvVar); err != nil {
+		t.Fatal(err)
+	}
 	if got := Files(); !reflect.DeepEqual(got, []string{cfg}) {
 		t.Fatalf("Files() = %q with KUBECONFIG unset; want the home's %q", got, cfg)
 	}
@@ -458,7 +460,9 @@ func TestUserEnvIsTheUsersAfterKeployPointsAtCopies(t *testing.T) {
 	if v := UserEnv(); v != other {
 		t.Fatalf("UserEnv() = %q after the variable was set again; want %q", v, other)
 	}
-	os.Unsetenv(EnvVar)
+	if err := os.Unsetenv(EnvVar); err != nil {
+		t.Fatal(err)
+	}
 	if err := Point([]string{filepath.Join(dir, "copy-4")}); err != nil {
 		t.Fatal(err)
 	}

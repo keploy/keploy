@@ -176,7 +176,9 @@ func TestSetupCaCertEnv_NoKubeconfigLeavesKUBECONFIGAlone(t *testing.T) {
 	t.Setenv(EnvJavaToolOptions, "")
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(kubeconfig.EnvVar, "")
-	os.Unsetenv(kubeconfig.EnvVar)
+	if err := os.Unsetenv(kubeconfig.EnvVar); err != nil {
+		t.Fatal(err)
+	}
 	runUntilCleanup(t, zap.NewNop())
 	if v, ok := os.LookupEnv(kubeconfig.EnvVar); ok {
 		t.Fatalf("KUBECONFIG=%q with no kubeconfig; want it unset", v)
