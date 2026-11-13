@@ -186,24 +186,87 @@ func TestSetupCaCertEnv_NoKubeconfigLeavesKUBECONFIGAlone(t *testing.T) {
 	}
 }
 
-// What a test writes to keploy's copy of its kubeconfig goes with the run:
-// keploy never writes the user's file. As the run ends keploy says what was
-// lost, by name (never what the copy holds), and names a cluster the test
-// added whose CA leaves keploy's out: kubectl refused keploy's certificate
-// for it. A copy left as keploy wrote it, or written again as it was, says
-// nothing.
-func TestSetupCaCertEnv_SaysWhatTheTestWroteToItsKubeconfigCopy(t *testing.T) {
+// logLine is a log line about one kubeconfig: the start of its message, and
+// its fields but the kubeconfig, next_step, written and backup (error,
+// test_changes by their key alone).
+type logLine struct{ msg, fields string }
+
+// linesFor is each line logs hold that names the kubeconfig file, at Info or
+// above; every warning says a next step, but one that says keploy could not
+// read its copy.
+func linesFor(t *testing.T, logs *observer.ObservedLogs, file string) []logLine {
+	t.Helper()
+	var got []logLine
+	for _, e := range logs.FilterField(zap.String("kubeconfig", file)).All() {
+		fields := e.ContextMap()
+		var fs []string
+		for _, k := range []string{"added", "changed", "removed", "current_context", "preferences", "conflict", "cluster", "error", "test_changes"} {
+			if v, ok := fields[k]; ok && (k == "error" || k == "test_changes") {
+				fs = append(fs, k)
+			} else if ok {
+				fs = append(fs, fmt.Sprintf("%s=%v", k, v))
+			}
+		}
+		if _, says := fields["next_step"]; !says && e.Level > zap.InfoLevel && !strings.HasPrefix(e.Message, "keploy could not read") {
+			t.Errorf("%q says no next step", e.Message)
+		}
+		got = append(got, logLine{e.Message, strings.Join(fs, " ")})
+	}
+	return got
+}
+
+func sameLines(got, want []logLine) bool {
+	ok := len(got) == len(want)
+	for i := 0; ok && i < len(got); i++ {
+		ok = strings.HasPrefix(got[i].msg, want[i].msg) && got[i].fields == want[i].fields
+	}
+	return ok
+}
+
+// kubeconfigRun runs SetupCaCertEnv until do, given the copy (or copies)
+// KUBECONFIG names, has written what the test writes, and returns what the
+// run logged at Info and above.
+func kubeconfigRun(t *testing.T, tmp string, do func(copies []string)) *observer.ObservedLogs {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	core, logs := observer.New(zap.InfoLevel)
+	if err := SetupCaCertEnv(ctx, zap.New(core), testCACertPEM()); err != nil {
+		t.Fatal(err)
+	}
+	dirs := runDirsIn(t, tmp)
+	if len(dirs) != 1 {
+		t.Fatalf("%d run directories; want one", len(dirs))
+	}
+	live := liveRunOf(t, dirs[0])
+	if do != nil {
+		do(filepath.SplitList(os.Getenv(kubeconfig.EnvVar)))
+	}
+	if n := logs.FilterMessageSnippet("during the run").Len() + logs.FilterMessageSnippet("as the run ended").Len(); n != 0 {
+		t.Fatalf("%d lines on what the test wrote before the run ended; want none", n)
+	}
+	cancel()
+	waitRunGone(t, live)
+	return logs
+}
+
+// As a native run ends, what the test wrote to keploy's copy of its
+// kubeconfig is written back to the user's file, a backup kept beside it,
+// and one line says what changed and where the backup is; a test that
+// changed nothing writes nothing. A cluster the test added whose CA leaves
+// keploy's out is named: its calls were neither recorded nor mocked. When the
+// user's file changed during the run in the entry the test changed, nothing
+// is written and the warning names the conflict and the test's changes.
+func TestSetupCaCertEnv_WritesWhatTheTestWroteToItsKubeconfigBack(t *testing.T) {
 	isolateCertEnv(t)
 	tmp := useTempDir(t)
 	withSystemSearch(t, nil, nil)
 	t.Setenv(EnvJavaToolOptions, "")
-	user := filepath.Join(t.TempDir(), "config")
+	dir := t.TempDir()
+	user := filepath.Join(dir, "config")
 	clusterCA, kindCA := mustGenerateTestCA().certPEM, mustGenerateTestCA().certPEM
 	src := []byte("apiVersion: v1\nkind: Config\ncurrent-context: kind-a\nclusters:\n- name: kind-a\n  cluster:\n    server: https://127.0.0.1:36205\n    certificate-authority-data: " +
 		base64.StdEncoding.EncodeToString(clusterCA) + "\ncontexts:\n- name: kind-a\n  context:\n    cluster: kind-a\n    user: kind-a\nusers:\n- name: kind-a\n  user:\n    client-key-data: c2VjcmV0\n")
-	if err := os.WriteFile(user, src, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv(kubeconfig.EnvVar, user)
 	orig := chownCopy
 	chownCopy = func(string, string) error { return nil }
@@ -216,7 +279,7 @@ func TestSetupCaCertEnv_SaysWhatTheTestWroteToItsKubeconfigCopy(t *testing.T) {
 			}
 		}
 	}
-	// edit has f change the copy as kubectl does: read whole, written again
+	// edit has f change the file as kubectl does: read whole, written again
 	// whole (in its own order).
 	edit := func(f func(cfg map[string]any)) func(t *testing.T, cp string) {
 		return func(t *testing.T, cp string) {
@@ -234,7 +297,7 @@ func TestSetupCaCertEnv_SaysWhatTheTestWroteToItsKubeconfigCopy(t *testing.T) {
 				t.Fatal(err)
 			}
 			if bytes.Equal(out, data) {
-				t.Fatal("the row writes the copy as it was, byte for byte: it tests nothing")
+				t.Fatal("the row writes the file as it was, byte for byte: it tests nothing")
 			}
 			write(string(out))(t, cp)
 		}
@@ -248,31 +311,47 @@ func TestSetupCaCertEnv_SaysWhatTheTestWroteToItsKubeconfigCopy(t *testing.T) {
 	})
 	// Written again in sorted order, with preferences: {} as kubectl adds.
 	again := edit(func(cfg map[string]any) { cfg["preferences"] = map[string]any{} })
-	setNamespace := edit(func(cfg map[string]any) {
-		cfg["contexts"].([]any)[0].(map[string]any)["context"].(map[string]any)["namespace"] = "web"
-	})
-	// A warning that names the kubeconfig: the start of its message, and its
-	// fields but the kubeconfig and next_step (an error by its key alone).
-	type warning struct{ msg, fields string }
-	const changed = "the test changed its kubeconfig during the run; keploy had pointed it at a copy"
+	namespace := func(ns string) func(t *testing.T, cp string) {
+		return edit(func(cfg map[string]any) {
+			cfg["contexts"].([]any)[0].(map[string]any)["context"].(map[string]any)["namespace"] = ns
+		})
+	}
+	const wroteBack = "keploy wrote to the kubeconfig what the test changed in it during the run"
 	rows := []struct {
-		name string
-		do   func(t *testing.T, cp string)
-		want []warning
+		name    string
+		do      func(t *testing.T, cp string)
+		outside func(t *testing.T, file string) // someone else's write to the user's file during the run
+		want    []logLine
+		written func(cfg map[string]any) // the user's file after; nil: as it was
 	}{
-		{"left as keploy wrote it", nil, nil},
-		{"written again as it was, in kubectl's order", again, nil},
-		{"kind create cluster", kindCreate, []warning{
-			{changed, `added=[cluster kind-b context kind-b user kind-b] current_context="kind-a" -> "kind-b"`},
+		{"left as keploy wrote it", nil, nil, nil, nil},
+		{"written again as it was, in kubectl's order", again, nil, nil, nil},
+		{"kind create cluster", kindCreate, nil, []logLine{
+			{wroteBack, `added=[cluster kind-b context kind-b user kind-b] current_context="kind-a" -> "kind-b"`},
 			{"kubectl and helm do not trust keploy's certificate for a cluster the test added or changed", "cluster=[kind-b (https://127.0.0.1:40001)]"},
+		}, func(cfg map[string]any) {
+			if cfg["current-context"] != "kind-b" || len(cfg["clusters"].([]any)) != 2 || len(cfg["users"].([]any)) != 2 {
+				t.Errorf("kind create cluster: the user's file holds %v; want kind-b's cluster, context and user, and current", cfg)
+			}
 		}},
-		{"kubectl config set-context --namespace", setNamespace, []warning{{changed, "changed=[context kind-a]"}}},
+		{"kubectl config set-context --namespace", namespace("web"), nil, []logLine{{wroteBack, "changed=[context kind-a]"}}, func(cfg map[string]any) {
+			if ns := cfg["contexts"].([]any)[0].(map[string]any)["context"].(map[string]any)["namespace"]; ns != "web" {
+				t.Errorf("set-context: namespace %v; want web", ns)
+			}
+			ca, _ := base64.StdEncoding.DecodeString(cfg["clusters"].([]any)[0].(map[string]any)["cluster"].(map[string]any)["certificate-authority-data"].(string))
+			if !bytes.Equal(ca, clusterCA) {
+				t.Errorf("set-context: the cluster's CA is now\n%s\nwant the user's own alone", ca)
+			}
+		}},
+		{"the context changed outside the test too", namespace("web"), namespace("ops"), []logLine{
+			{"the kubeconfig was changed during the run, outside the test, in entries the test changed too", "changed=[context kind-a] conflict=[context kind-a] test_changes"},
+		}, nil},
 		{"removed", func(t *testing.T, cp string) {
 			if err := os.Remove(cp); err != nil {
 				t.Fatal(err)
 			}
-		}, []warning{{"the test removed its kubeconfig during the run; keploy had pointed it at a copy", ""}}},
-		{"left as no YAML", write("clusters: [\n"), []warning{{"the test changed its kubeconfig during the run, in a way keploy cannot read", "error"}}},
+		}, nil, []logLine{{"the test removed its kubeconfig during the run", ""}}, nil},
+		{"left as no YAML", write("clusters: [\n"), nil, []logLine{{"keploy could not write what the test changed in its kubeconfig", "error"}}, nil},
 		{"replaced by a directory", func(t *testing.T, cp string) {
 			if err := os.Remove(cp); err != nil {
 				t.Fatal(err)
@@ -280,56 +359,138 @@ func TestSetupCaCertEnv_SaysWhatTheTestWroteToItsKubeconfigCopy(t *testing.T) {
 			if err := os.Mkdir(cp, 0o700); err != nil {
 				t.Fatal(err)
 			}
-		}, []warning{{"keploy could not read its copy of the kubeconfig as the run ended", "error"}}},
+		}, nil, []logLine{{"keploy could not read its copy of the kubeconfig as the run ended", "error"}}, nil},
 	}
 	for _, r := range rows {
-		ctx, cancel := context.WithCancel(context.Background())
-		core, logs := observer.New(zap.WarnLevel)
-		if err := SetupCaCertEnv(ctx, zap.New(core), testCACertPEM()); err != nil {
-			cancel()
+		for _, e := range mustReadDir(t, dir) {
+			_ = os.Remove(filepath.Join(dir, e))
+		}
+		if err := os.WriteFile(user, src, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		dirs := runDirsIn(t, tmp)
-		if len(dirs) != 1 {
-			cancel()
-			t.Fatalf("%s: %d run directories; want one", r.name, len(dirs))
+		before := src
+		logs := kubeconfigRun(t, tmp, func(copies []string) {
+			if r.do != nil {
+				r.do(t, copies[0])
+			}
+			if r.outside != nil {
+				r.outside(t, user)
+				before, _ = os.ReadFile(user)
+			}
+		})
+		if got := linesFor(t, logs, user); !sameLines(got, r.want) {
+			t.Errorf("%s: logged %+v; want %+v (each message's start)", r.name, got, r.want)
 		}
-		live := liveRunOf(t, dirs[0])
-		if r.do != nil {
-			r.do(t, os.Getenv(kubeconfig.EnvVar))
+		after, err := os.ReadFile(user)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if n := logs.FilterField(zap.String("kubeconfig", user)).Len(); n != 0 {
-			cancel()
-			t.Fatalf("%s: %d warnings name the kubeconfig before the run ended; want none", r.name, n)
-		}
-		cancel()
-		waitRunGone(t, live)
-		var got []warning
-		for _, e := range logs.FilterField(zap.String("kubeconfig", user)).All() {
-			fields := e.ContextMap()
-			var fs []string
-			for _, k := range []string{"added", "changed", "removed", "current_context", "cluster", "error"} {
-				if v, ok := fields[k]; ok && k == "error" {
-					fs = append(fs, k)
-				} else if ok {
-					fs = append(fs, fmt.Sprintf("%s=%v", k, v))
+		backups := 0
+		for _, e := range mustReadDir(t, dir) {
+			if strings.HasPrefix(e, "config.keploy-backup-") {
+				backups++
+				if b, _ := os.ReadFile(filepath.Join(dir, e)); !bytes.Equal(b, src) {
+					t.Errorf("%s: the backup does not hold the user's file as it was", r.name)
 				}
 			}
-			_, says := fields["next_step"]
-			if !says && !strings.HasPrefix(e.Message, "keploy could not read") {
-				t.Errorf("%s: %q says no next step", r.name, e.Message)
+		}
+		if r.written == nil {
+			if !bytes.Equal(after, before) || backups != 0 {
+				t.Errorf("%s: the user's file was written (%d backups); want it left as it was", r.name, backups)
 			}
-			got = append(got, warning{e.Message, strings.Join(fs, " ")})
+			continue
 		}
-		ok := len(got) == len(r.want)
-		for i := 0; ok && i < len(got); i++ {
-			ok = strings.HasPrefix(got[i].msg, r.want[i].msg) && got[i].fields == r.want[i].fields
+		if backups != 1 {
+			t.Errorf("%s: %d backups; want one", r.name, backups)
 		}
-		if !ok {
-			t.Errorf("%s: warnings %+v; want %+v (each message's start)", r.name, got, r.want)
+		var cfg map[string]any
+		if err := yaml.Unmarshal(after, &cfg); err != nil {
+			t.Fatal(err)
 		}
-		if got, err := os.ReadFile(user); err != nil || !bytes.Equal(got, src) {
-			t.Fatalf("%s: the user's kubeconfig changed (%v)", r.name, err)
+		r.written(cfg)
+	}
+}
+
+func mustReadDir(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		out = append(out, e.Name())
+	}
+	return out
+}
+
+// kubectl writes a new entry to the first file KUBECONFIG names and a change
+// to the file that holds the entry: keploy's copies are in the same order, so
+// each change reaches its own file, relative KUBECONFIG entries made absolute
+// from where keploy started.
+func TestSetupCaCertEnv_WritesEachChangeToTheKubeconfigItCameFrom(t *testing.T) {
+	isolateCertEnv(t)
+	tmp := useTempDir(t)
+	withSystemSearch(t, nil, nil)
+	t.Setenv(EnvJavaToolOptions, "")
+	orig := chownCopy
+	chownCopy = func(string, string) error { return nil }
+	t.Cleanup(func() { chownCopy = orig })
+	work := t.TempDir()
+	t.Chdir(work)
+	a := "apiVersion: v1\nkind: Config\ncurrent-context: a\ncontexts:\n- name: a\n  context:\n    cluster: a\n"
+	b := "apiVersion: v1\nkind: Config\ncontexts:\n- name: b\n  context:\n    cluster: b\n"
+	for _, list := range [][]string{{"a/config"}, {"a/config", "b/config"}} {
+		for _, f := range []string{"a/config", "b/config"} {
+			if err := os.MkdirAll(filepath.Dir(f), 0o700); err != nil {
+				t.Fatal(err)
+			}
 		}
+		if err := os.WriteFile("a/config", []byte(a), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile("b/config", []byte(b), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(kubeconfig.EnvVar, strings.Join(list, string(os.PathListSeparator)))
+		kubeconfigRun(t, tmp, func(copies []string) {
+			if len(copies) != len(list) {
+				t.Fatalf("KUBECONFIG names %v; want a copy of each of %v", copies, list)
+			}
+			// kubectl config set-context new: a new entry, to the first file.
+			kubectlWrites(t, copies[0], func(cfg map[string]any) {
+				cfg["contexts"] = append(cfg["contexts"].([]any), map[string]any{"name": "new", "context": map[string]any{"cluster": "new"}})
+			})
+			if len(copies) > 1 { // set-context b --namespace: to b's file
+				kubectlWrites(t, copies[1], func(cfg map[string]any) {
+					cfg["contexts"].([]any)[0].(map[string]any)["context"].(map[string]any)["namespace"] = "web"
+				})
+			}
+		})
+		gotA, gotB := string(mustRead(t, "a/config")), string(mustRead(t, "b/config"))
+		if !strings.Contains(gotA, "name: new") || strings.Contains(gotA, "web") {
+			t.Errorf("KUBECONFIG=%v: a/config is\n%s\nwant the new context alone added", list, gotA)
+		}
+		if wantB := len(list) > 1; strings.Contains(gotB, "namespace: web") != wantB || strings.Contains(gotB, "new") {
+			t.Errorf("KUBECONFIG=%v: b/config is\n%s\nwant b's namespace: %v, and no new context", list, gotB, wantB)
+		}
+	}
+}
+
+// kubectlWrites has f change the kubeconfig at p as kubectl does: read whole,
+// written again whole.
+func kubectlWrites(t *testing.T, p string, f func(cfg map[string]any)) {
+	t.Helper()
+	var cfg map[string]any
+	if err := yaml.Unmarshal(mustRead(t, p), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	f(cfg)
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, out, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

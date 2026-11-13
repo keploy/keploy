@@ -14,10 +14,8 @@ import (
 
 // Changes is what a test wrote, while it ran, to a copy of the kubeconfig
 // keploy pointed it at (Rewrite). kubectl config, kind create cluster and helm
-// write the first file KUBECONFIG names, which is keploy's copy; the copy goes
-// with the run, and keploy never writes the user's file, so the user's file
-// does not get what the test wrote. keploy says so at the run's end, naming
-// what was lost.
+// write the copy KUBECONFIG names, not the user's file; keploy writes what the
+// test changed back to the user's file as the run ends (WriteBack).
 type Changes struct {
 	// Added, Changed and Removed are the clusters, contexts and users the test
 	// added, changed or removed, as "cluster NAME", "context NAME" and
@@ -26,6 +24,8 @@ type Changes struct {
 	// CurrentContext is `"FROM" -> "TO"` when the test switched the current
 	// context, else "".
 	CurrentContext string
+	// Preferences is whether the test changed the kubeconfig's preferences.
+	Preferences bool
 	// Untrusted is each cluster the test added or changed whose own CA leaves
 	// keploy's out, as "NAME (SERVER)": kubectl and helm refuse keploy's
 	// certificate for it, so their calls to it through keploy are neither
@@ -36,9 +36,9 @@ type Changes struct {
 }
 
 // Empty is whether the test changed none of the kubeconfig's clusters,
-// contexts and users, nor its current context.
+// contexts and users, nor its current context or preferences.
 func (c Changes) Empty() bool {
-	return len(c.Added) == 0 && len(c.Changed) == 0 && len(c.Removed) == 0 && c.CurrentContext == ""
+	return len(c.Added) == 0 && len(c.Changed) == 0 && len(c.Removed) == 0 && c.CurrentContext == "" && !c.Preferences
 }
 
 // Diff is what now, the copy at path as the run ends, holds that wrote, the
@@ -92,6 +92,7 @@ func Diff(path string, wrote, now, ca []byte) (Changes, error) {
 	if from != to {
 		c.CurrentContext = fmt.Sprintf("%q -> %q", from, to)
 	}
+	c.Preferences = !reflect.DeepEqual(before["preferences"], after["preferences"])
 	return c, nil
 }
 

@@ -5,10 +5,12 @@
 // kubeconfig names (certificate-authority or certificate-authority-data), not
 // against the trust store the environment names (SSL_CERT_FILE and its kind,
 // which keploy points at its CA for the app). So every call they made through
-// keploy's proxy failed its handshake with keploy's certificate. keploy never
-// edits the user's files: the app is pointed (KUBECONFIG) at copies, one per
-// file kubectl reads and in kubectl's order, so kubectl merges the copies as
-// it merges the files themselves.
+// keploy's proxy failed its handshake with keploy's certificate. The app is
+// pointed (KUBECONFIG) at copies, one per file kubectl reads and in kubectl's
+// order, so kubectl merges the copies as it merges the files themselves. As
+// the run ends, what the test changed in the copies (a cluster kind made, a
+// context it set) is written back to the user's files (WriteBack), never
+// what keploy itself set in them.
 //
 // A user that authenticates with a client certificate sends it to keploy's
 // proxy, which presents it to the real API server at record with that
