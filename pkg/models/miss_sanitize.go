@@ -13,11 +13,13 @@ import (
 // reason, in record's full round), how an answered call was answered and the
 // process that made the call (UnmatchedCall.Answer, Source: names,
 // no value), the operation an HTTP call carries (Operation: names, no
-// value; one that is not a label validOperationLabel takes is dropped), and
-// the call's shape
+// value; one that is not a label validOperationLabel takes is dropped), the
+// command a call of a protocol with no shape names (Command, as CommandName
+// keeps it), and the call's shape
 // (MissShape): for HTTP and gRPC the method and the target's shape,
 // for SQL the statement with its literals written "?", for MongoDB the
-// command, its namespace and its filter's keys. No body, no bound
+// command, its namespace and its filter's keys, for any other protocol its
+// command alone. No body, no bound
 // parameter, no SQL literal, no query value, and no path segment that looks
 // like a value (PathShape says which do) or that a test variable's
 // place on the call names (VariablePlaces: one the miss names, one the
@@ -25,15 +27,19 @@ import (
 // value the test bound). The next step is the matcher's advice, or the
 // learn step's reason, with each field path it names in its shape
 // (SanitizedNextStep); a variable miss's is keploy's own sentence, which
-// names a given (Given) and no learned variable. ChargedTo and WindowOf
-// stay: each names a test, no value.
+// names a given (Given), or says the variable pass's why (VariableWhy: the
+// variable by its name, which is a field path, its places in their shape,
+// and what bound it, never a value). ChargedTo, WindowOf and TrailsOf
+// stay: each names a test, no value; so does BoundIn, each a recording. A
+// background miss's bound places (BackgroundBound) keep the recordings'
+// names and each place's shape (BackgroundBinding.Sanitized).
 func (m UnmatchedCall) Sanitized() UnmatchedCall {
 	out := UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Operation: SanitizedOperation(m.Operation), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
-		Kind: m.Kind, Recorded: m.Recorded, SkippedReads: slices.Clone(m.SkippedReads), NotOwned: m.NotOwned, Background: m.Background, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
+		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Operation: SanitizedOperation(m.Operation), Command: CommandName(m.Command), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
+		Kind: m.Kind, Recorded: m.Recorded, SkippedReads: slices.Clone(m.SkippedReads), BoundIn: slices.Clone(m.BoundIn), NotOwned: m.NotOwned, Background: m.Background, BackgroundBound: sanitizedBindings(m.BackgroundBound), Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.
-		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn, OrderDependent: m.OrderDependent, Earlier: m.Earlier, EarlierIn: m.EarlierIn, ChargedTo: m.ChargedTo, WindowOf: m.WindowOf,
+		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn, OrderDependent: m.OrderDependent, Earlier: m.Earlier, EarlierIn: m.EarlierIn, ChargedTo: m.ChargedTo, WindowOf: m.WindowOf, TrailsOf: m.TrailsOf,
 		Repeat: m.Repeat.Clone()}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (MissShape) still writes them {}. Any other place
@@ -57,9 +63,17 @@ func (m UnmatchedCall) Sanitized() UnmatchedCall {
 			out.FieldDiffs = append(out.FieldDiffs, MockFieldDiff{Path: path, Kind: d.Kind})
 		}
 		out.NextSteps = "a test variable did not hold in " + m.ClosestMock + " (the call sent another value than the one the test bound, a value of another type, or a value before the call that binds it), or that mock's variables cannot be followed: fix the application, or re-record the test with 'keploy mock record' if that is intended"
-		// A learned variable's name stays out, as its value does: it can be
-		// a JSON key that is a value. A given's is the test's own name for a
-		// value it chose (ValidGivenVariable), and is kept.
+		// The variable pass's own why (VariableWhy) names the variable,
+		// its place and what bound it in this run: a variable's name is the
+		// field path it was learned at, not a value, and each body path
+		// the why names keeps its shape alone, as a next step's does. The
+		// why holds no value (MockMismatchReport.VariableWhy).
+		if why := m.variableWhy(m.VariableWhy); why != "" {
+			out.VariableWhy = why
+			out.NextSteps = "keploy's variable pass refused the call as " + m.ClosestMock + "'s call: " + why + ": fix the application, or re-record the test with 'keploy mock record' if that is intended"
+		}
+		// A given's is the test's own name for a value it chose
+		// (ValidGivenVariable), and is kept.
 		if ValidGivenVariable(m.Given) {
 			out.Given = m.Given
 			out.NextSteps = givenNextStep(m.Given, m.ClosestMock, out.FieldDiffs)
@@ -117,10 +131,41 @@ func (m UnmatchedCall) SanitizedNextStep() string {
 	return next + " (" + strings.Join(whys, "; ") + ")"
 }
 
+// variableWhy is why, the variable pass's own why (VariableWhy), as
+// evidence keeps it: shaped as m's next step is (shapedText), and "" when a
+// variable it names is not named as keploy names one (keptVariableName): a
+// variables block edited by hand can hold any name, a value among them.
+func (m UnmatchedCall) variableWhy(why string) string {
+	for _, sub := range namedVariable.FindAllStringSubmatch(why, -1) {
+		if !keptVariableName(sub[1]) {
+			return ""
+		}
+	}
+	return m.shapedText(why)
+}
+
+// namedVariable is how a variable pass's why names a variable or an echo:
+// "variable appId0's value", "variable run-appId0-carried-2 is".
+var namedVariable = regexp.MustCompile(`\b(?:variable|echo) ([^\s,;:()'"]+?)(?:'s\b|[\s,;:()]|$)`)
+
+// keptVariableName reports whether name is named as keploy names a
+// variable it learned at a field (a JSON key's letters, digits, '_' and '-',
+// a word's "#N"), or a given (ValidGivenVariable): no '@', '.', '/' or
+// space, which a value carries and a key keploy learns at does not.
+func keptVariableName(name string) bool {
+	return ValidGivenVariable(name) || (len(name) <= 128 && learnedName.MatchString(name))
+}
+
+var learnedName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*(#[1-9][0-9]*)?$`)
+
 // shapedNextStep is m's own next step with every field path it names in its
 // shape (SanitizedNextStep).
-func (m UnmatchedCall) shapedNextStep() string {
-	text := m.NextSteps
+func (m UnmatchedCall) shapedNextStep() string { return m.shapedText(m.NextSteps) }
+
+// shapedText is text, a matcher's or a parser's own words about m, with
+// every field path it names in its shape: each of m's field diffs' paths
+// (whole or without its "body.") and every body path (bodyPlace).
+func (m UnmatchedCall) shapedText(text string) string {
 	if text == "" {
 		return ""
 	}

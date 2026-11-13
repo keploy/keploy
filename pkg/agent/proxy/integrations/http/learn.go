@@ -24,7 +24,6 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -60,6 +59,11 @@ var credentialHeaders = map[string]bool{
 
 // learnNoise is the noise keploy.yml declares, as the learn step reads it.
 type learnNoise struct {
+	// declaredRules are what keploy mock replay's scope table declares of
+	// each recording (declaredIn): its clock rules are checked as reads of
+	// the clock (clocksWith, declaredClocksOf). The zero value declares
+	// none.
+	declaredRules
 	// headers are the header names never compared: keploy.yml's, and the
 	// static list's (models.FlakyHeaders) but the credentials.
 	headers map[string]bool
@@ -91,6 +95,13 @@ type learnNoise struct {
 	// candidate; one held LearnEchoOnly is learned only as an echo
 	// (heldLearned).
 	hold func(leaf string) LearnHold
+}
+
+// withSources is n reading what db's scope table declares of each
+// recording (declaredIn).
+func (n learnNoise) withSources(db integrations.MockMemDb) learnNoise {
+	n.declaredRules = declaredIn(db)
+	return n
 }
 
 func (h *HTTP) newLearnNoise(opts models.OutgoingOptions, bodyNoise map[string][]string, urlNoise []string) learnNoise {
@@ -450,7 +461,55 @@ func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string
 // known is what a comparison with the recorded mock m excuses: keploy.yml's
 // noise, the noise learned onto m, and m's obfuscated values (Mock.Noise).
 func (n learnNoise) known(m *models.Mock) learn.Known {
-	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m)}
+	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksWith(m, n.declaredRules), declared: declaredClockFields(m, n.declaredRules)}
+}
+
+// declaredClocksOf is learned, the drifted leaves of a call paired with m,
+// each one a clock rule keploy.yml declares at its body field (the sources
+// the scope table gives m, read at each leaf's path as a replay reads them:
+// learn.DeclaredBodySources) decided by that rule
+// (learn.DeclaredClockLearned): in w, the call's window, and under the time
+// default where timeForm is set. learned as it is where no rule declares a
+// body field of m, and, with the time default off, at a leaf whose recorded
+// value answered holds (the call's recorded answer: learn.Echoes), whose
+// recorded moment a replay would serve, as Mongo's learning refuses it.
+func declaredClocksOf(learned []learn.Learned, sources func(mock string) []models.DeclaredSource, m *models.Mock, w *learn.Window, timeForm bool, drifts *learn.DriftCache, answered []learn.Leaf) []learn.Learned {
+	if sources == nil {
+		return learned
+	}
+	src := learn.DeclaredBodySources(sources(m.Name))
+	if src == nil {
+		return learned
+	}
+	for i, l := range learned {
+		if s, ok := src(l.Recorded.Path); ok && (timeForm || len(learn.Echoes(drifts, l.Recorded, answered)) == 0) {
+			learned[i] = learn.DeclaredClockLearned(l, s, w, timeForm)
+		}
+	}
+	return learned
+}
+
+// boundTimesOf is learned, the drifted leaves of a call paired with m, each
+// variable bound whole whose field is a time given its time default's check
+// by form (learn.BoundTimeLearned: declared where a clock rule keploy.yml
+// declares names its body field, as declaredClocksOf reads the rules), in w,
+// the call's window, under the time default where timeForm is set. learnPlan
+// takes that check where round F's call does not carry the bound place's
+// value.
+func boundTimesOf(learned []learn.Learned, sources func(mock string) []models.DeclaredSource, m *models.Mock, w *learn.Window, timeForm bool) []learn.Learned {
+	var src func(path string) (learn.Source, bool)
+	if sources != nil {
+		src = learn.DeclaredBodySources(sources(m.Name))
+	}
+	for i, l := range learned {
+		declared := false
+		if src != nil {
+			s, ok := src(l.Recorded.Path)
+			declared = ok && s.Kind == learn.SourceClock
+		}
+		learned[i] = learn.BoundTimeLearned(l, declared, w, timeForm)
+	}
+	return learned
 }
 
 // knownAsRecorded is known without the noise learned onto m: the recording
@@ -467,6 +526,10 @@ type httpKnown struct {
 	// application's clock (clocksOf): no learned noise excuses them, so the
 	// learn step reads each again, in this call's window.
 	clocks map[string]models.ClockOffset
+	// declared are the body fields a clock rule names in the mock
+	// (declaredClockFields): no learned noise excuses one, so the learn
+	// step reads it again and the rule decides it (declaredClocksOf).
+	declared map[string]models.ClockOffset
 }
 
 // Excused implements learn.Known: ExcusedPair of one value.
@@ -494,7 +557,8 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	// noise learned there excuses a value its patterns refuse.
 	_, guarded := k.n.userPatterns(ref.Noise)
 	_, clock := k.clocks[ref.Path]
-	if !guarded && !clock && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && hasKey(k.learned, ref.Noise)) {
+	_, declared := k.declared[ref.Path]
+	if !guarded && !clock && !declared && (learnedCovers(k.learned, ref.Path) || ref.Noise != ref.Path && hasKey(k.learned, ref.Noise)) {
 		return true, true
 	}
 	both := inRec && inLive
@@ -1852,7 +1916,20 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				}
 				w = oc.Window(input.arrived)
 			}
-			return learn.ClassifyGiven(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order)), answered, earlier, ""
+			// A client test's request that reached the application before
+			// the call in both runs is a place of it (learn.ClassifyArrived),
+			// where its test case binds a value the call carries whole.
+			answer := classifiedAnswer(answered)
+			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
+			timeForm := integrations.TimeFormOf(mockDb)
+			// A time the offset rule refused that learning read as the
+			// clock since its test began stays refused under mock.times:
+			// strict (learn.OffsetReadUnder).
+			for i, l := range learned {
+				learned[i] = learn.OffsetReadUnder(l, timeForm)
+			}
+			learned = declaredClocksOf(learned, n.sources, m, w, timeForm, tracker.DriftsOf(ctx), answer)
+			return boundTimesOf(learned, n.sources, m, w, timeForm), answered, earlier, ""
 		}
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
@@ -1885,7 +1962,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			if stuck(picked, read.at) {
 				return refused(picked, res, sc)
 			}
-			if own && models.HTTPStoreReads(picked.Spec.HTTPReq) {
+			if own && (models.HTTPStoreReads(picked.Spec.HTTPReq) || putReads(picked)) {
 				// A read of a record the test wrote (a store's API:
 				// readBackPlan) is answered with what this run wrote, though
 				// its request is exactly the recorded one (a Scan of a
@@ -1894,7 +1971,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				if err != nil {
 					return nil, nil, err
 				}
-				plan := h.readBackPlan(tracker, test, answered, served, earlierThan(earlier, picked), givenBindings(mockDb), newPairing())
+				plan := h.readBackPlan(tracker, test, answered, n.unmaskedShape(live), served, earlierThan(earlier, picked), givenBindings(mockDb), newPairing())
 				if len(plan.vars) > 0 {
 					if !tracker.Answer(test, picked) {
 						retake = true
@@ -2062,7 +2139,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if own {
-				plan = h.readBackPlan(tracker, test, answered, served, earlier, givenVars, plan)
+				plan = h.readBackPlan(tracker, test, answered, n.unmaskedShape(live), served, earlier, givenVars, plan)
 			}
 			if own && !tracker.Answer(test, m) {
 				retake = true
@@ -2450,6 +2527,10 @@ func newPairing() pairing {
 //   - A variable is bound at its earlier place, a request place of one of
 //     the test's own HTTP mocks F served, which held the value whole, and is
 //     used here: it holds when the live value here is the one F saw there.
+//     A client test's request (learn.Place.Client) is such a place: the
+//     bind is its test case's ("test case <name>" in binds), which record's
+//     full round writes on the test's mappings entry, and each replay binds
+//     from the request that pairs with the test case.
 //   - An echo is a variable of this call alone (echo: true), bound here and
 //     answered where the recorded answer holds the value whole. Leaves of
 //     this call that drifted from the same recorded value are one variable.
@@ -2517,6 +2598,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 
 		case learn.KindVariable:
 			from := l.From
+			// A place that held the value whole binds at its variable
+			// place; one that held it inside a JWT claim, at the claim's
+			// word (learn.Place.Claim), and its live value is that word.
+			bindAt, bindLive, bindable := from.BindAt()
 			switch {
 			case from.Given && from.Gave:
 				// A value made from one the test gave keploy
@@ -2532,9 +2617,12 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 					why += "; " + l.Why
 				}
 				return p, why
-			case from.Given:
-				// The test case's own request (learn.Earlier.Given): what
+			case from.Given && !from.Client:
+				// The request keploy test sent (learn.Earlier.Given): what
 				// the application was given, which no variable binds at.
+				// A client test's request (from.Client) is the test's own
+				// first place: its test case binds the variable there,
+				// below, as an earlier call of the test does.
 				why := r.Path + " carries a value the test case's own request holds (" + from.Mock + " at " + from.Path + "), which keploy cannot follow into a call yet"
 				if l.Why != "" {
 					why += "; " + l.Why
@@ -2558,33 +2646,98 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 					why += "; " + l.Why
 				}
 				return p, why
-			case !from.Whole || from.Var == "":
-				why := r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+			case !bindable:
+				why := r.Path + " carries a value " + from.Mock + " sent " + learn.SentWhere(from) + " at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+				// Inside a JWT claim, the refusal names the claim, and why
+				// it is no place: a call's request, or a client test's whose
+				// token in this run holds the value at no place of it.
+				if claim := learn.ClaimRefused(from.Mock, from.Path, sentText(earlier, from.Mock, from.Path), from.Live, r.Value, from.Client); claim != "" {
+					why = r.Path + " carries a value " + from.Mock + " sent " + learn.SentWhere(from) + " " + strings.TrimPrefix(claim, from.Mock+" sent this value ")
+				}
 				if l.Why != "" {
 					why += "; " + l.Why
 				}
 				return p, why
-			case !own || !from.Own && (!from.Run || !provenswitch.On()):
+			case !own || !from.Client && !from.CallBinds():
 				// A value the run made, sent by the set's start-up or an
 				// earlier test's own call (from.Run), is the run's variable:
 				// bound there, used here, under the proven switch; without
 				// it only a test's own calls carry its variables.
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
+				return p, r.Path + " carries a value " + from.Mock + " sent " + learn.SentWhere(from) + ", and only a test's own calls carry its variables"
 			}
 			use, ok := learn.VarPlace(r, jsonReq)
 			if !ok {
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
+				return p, r.Path + " carries a value " + from.Mock + " sent " + learn.SentWhere(from) + ", at a place keploy cannot follow a variable to (a form or multipart field)"
 			}
-			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
-				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
+			// u is what the variable is at r, recorded and as F saw it: r
+			// whole, or, bound at a word of a client test's request
+			// (learn.Place.Word), r's one changed word (learn.ChangedWord),
+			// used at that word where r is longer than it. A replay reads a
+			// word only of a string.
+			u, uLive := r, l.Live.Value
+			if from.Word != "" {
+				pl, _ := variables.Parse(use)
+				k, _ := learn.ChangedWord(r.Value, l.Live.Value)
+				at := variables.Address{Place: pl, Word: k}
+				u.Value, _ = at.WordOf(r.Value)
+				uLive, _ = at.WordOf(l.Live.Value)
+				if u.Value != r.Value {
+					if r.Type != learn.String {
+						return p, r.Path + " carries a word " + from.Mock + " sent " + learn.SentWhere(from) + " at " + bindAt + ", inside a value that is no string, which a replay reads no word of"
+					}
+					use = at.String()
+				}
 			}
-			name, ok := tracker.PlaceName(test, from, reserved)
+			if !variables.SameValue(bindLive, uLive, u.Type == learn.Number) {
+				// The run's place (from.Run) is an earlier test's call or
+				// the set's start-up's, never this test's: the refusal
+				// names whose it is.
+				held := r.Path + " does not hold the value the test sent at " + bindAt + " of " + from.Mock + ", which it held when recorded"
+				if from.Run {
+					held = r.Path + " does not hold the value " + from.Mock + ", " + learn.RunCallWhose(from) + ", sent at " + bindAt + ", which it held when recorded"
+				}
+				if l.ByForm != nil {
+					// A time whose bind does not hold in round F: two reads
+					// of the clock that fell in one second when recorded,
+					// no copy. The time default checks it by its form alone
+					// (learn.BoundTimeLearned).
+					o := *l.ByForm
+					o.Why += ": " + held
+					if p.clocks == nil {
+						p.clocks = map[string]models.ClockOffset{}
+					}
+					p.clocks[r.Path] = o
+					continue
+				}
+				return p, held
+			}
+			// A claim's word, or a word of a client test's request, is its
+			// own variable: named by the place it binds at, never as the
+			// leaf whole.
+			named := from
+			named.Var = bindAt
+			name, ok := tracker.PlaceName(test, named, reserved)
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
 			v := p.vars[name]
-			v.Recorded, v.Use = r.Value, appendNew(v.Use, use)
-			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			lu := l
+			lu.Recorded = u
+			v.Recorded, v.Use = u.Value, appendNew(v.Use, use)
+			v.Answer = appendNew(v.Answer, answers(lu, respLeavesOf(m))...)
+			if l.ByForm != nil && !learn.AnsweredWhole(earlier, from.Mock, r) {
+				// A time the application stamped, whose bind holds in round
+				// F: a replay checks the bind, and where it does not hold
+				// (two reads of the clock that fell in one second here, in
+				// two there) the time default checks it by its form alone
+				// (models.MockVariable.ByForm). One the bound call answered
+				// whole, at any leaf, may be a copy of that answer: checked
+				// exactly (learn.AnsweredWhole).
+				if v.ByForm == nil {
+					v.ByForm = map[string]models.ClockOffset{}
+				}
+				v.ByForm[use] = *l.ByForm
+			}
 			p.vars[name] = v
 			b := p.binds[from.Mock]
 			if b == nil {
@@ -2592,17 +2745,17 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				p.binds[from.Mock] = b
 			}
 			bv := b[name]
-			bv.Recorded, bv.Bind = r.Value, from.Var
+			bv.Recorded, bv.Bind = u.Value, bindAt
 			// F's clock evidence, read where the variable is bound: a clock
 			// read that moved by the lead there may share its live value with
 			// another one read in the same second in a replay
 			// (models.MockVariable.Clock). None in keploy mock's client
 			// tests, where the lead shows no read of the app's clock
 			// (learn.DriftCache.ClockReads).
-			bv.Clock = tracker.Drifts().ClockReads(r.Value, from.Live)
-			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
+			bv.Clock = tracker.Drifts().ClockReads(u.Value, bindLive)
+			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, u)...)
 			b[name] = bv
-			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}
+			p.values[name] = variables.Binding{Name: name, Value: bindLive, Recorded: u.Value, Mock: from.Mock, Place: bindAt}
 
 		case learn.KindUnaccounted:
 			return p, r.Path + " changed, and " + l.Why
@@ -2697,6 +2850,22 @@ func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding,
 
 // respLeavesOf are the leaves of m's recorded answer.
 func respLeavesOf(m *models.Mock) []learn.Leaf { return respLeaves(m.Spec.HTTPResp) }
+
+// sentText is the text mock's request was sent with at path, as recorded:
+// "" where earlier holds no such leaf.
+func sentText(earlier []learn.Earlier, mock, path string) string {
+	for _, e := range earlier {
+		if e.Mock != mock {
+			continue
+		}
+		for _, s := range e.Seen {
+			if s.Side == learn.Request && s.Leaf.Path == path {
+				return s.Leaf.Value
+			}
+		}
+	}
+	return ""
+}
 
 // earlierAnswers are the answer places of the earlier mock that hold r's
 // recorded value whole: where a variable bound in its request is answered.
@@ -2952,6 +3121,13 @@ func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Moc
 		e.View, e.ViewKey = servedView(m, in, av, served.Spec.HTTPResp)
 	}
 	return e, true
+}
+
+// unmaskedShape is live as an exchange served keeps it (servedExchange):
+// with no url noise masked, so its URL leaves read as an earlier exchange's.
+func (n learnNoise) unmaskedShape(live httpParts) learn.Shape {
+	n.url = nil
+	return n.shape(live, sameDest)
 }
 
 // earlierOf is the exchange F just served from m (own: one of the test's own

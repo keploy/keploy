@@ -138,6 +138,26 @@ func (a *Agent) SetTestSeeds(_ context.Context, seeds map[string]string) {
 	a.scopeMu.Unlock()
 }
 
+// SetTestCases installs, by test name, the requests each client test sent
+// the application in its recording (models.TestBeginsReq.Cases): a replayed
+// test's begin gives the learn step its own (ProvenBegin,
+// coreAgent.ClientCasesTaker). The CLI installs them with the tests' begins;
+// a new session clears them (resetScopeState).
+func (a *Agent) SetTestCases(_ context.Context, cases map[string][]models.ClientCase) {
+	a.scopeMu.Lock()
+	a.testCases = nil
+	for test, cs := range cases {
+		if len(cs) == 0 {
+			continue
+		}
+		if a.testCases == nil {
+			a.testCases = map[string][]models.ClientCase{}
+		}
+		a.testCases[test] = slices.Clone(cs)
+	}
+	a.scopeMu.Unlock()
+}
+
 // anyReal reports whether any test lists a mock.real destination.
 func anyReal(real map[string][]string) bool {
 	for _, dests := range real {

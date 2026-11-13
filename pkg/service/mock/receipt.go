@@ -65,6 +65,11 @@ const (
 	// (models.ScopeWindow.BeginRefused), and the test fails whatever its
 	// harness did next.
 	FailedByBeginRefused = "begin_refused"
+	// FailedByRuleNotMade: under the proven switch, a series a declared rule
+	// placed in the worker scope (models.MockEntry.Series) was due and the
+	// run never answered it (Receipt.RequiredNotMade), or whether it did
+	// could not be read.
+	FailedByRuleNotMade = "rule_not_made"
 )
 
 // Receipt is what one `keploy mock replay` proved.
@@ -161,6 +166,19 @@ type Receipt struct {
 	// the app sent), with the process that made it. nil when the misses
 	// were not read, and with the switch off.
 	UnchargedMisses []UnchargedMiss `yaml:"unchargedMisses,omitempty" json:"unchargedMisses,omitempty"`
+	// RequiredNotMade are, under the proven switch, the series declared rules
+	// placed in the worker scope (models.MockEntry.Series) that were due in
+	// the run and that it never answered: keploy requires each once per run
+	// when due, a trailing series once its test ran, a background one once
+	// the run reached its place. Each fails the run; a trailing one fails
+	// the test it trails too. nil for none, and with the switch off.
+	RequiredNotMade []RequiredNotMade `yaml:"requiredNotMade,omitempty" json:"requiredNotMade,omitempty"`
+	// RequiredNotDue are, under the proven switch, the series of once rules
+	// with a timer bound (models.MockEntry.Due) that the run reached and
+	// never answered, and did not require: the application exited before
+	// the bound (each with its RequiredNotMade.Due). None fails the run.
+	// nil for none, and with the switch off.
+	RequiredNotDue []RequiredNotMade `yaml:"requiredNotDue,omitempty" json:"requiredNotDue,omitempty"`
 	// ProcessTrackingUnread and CallCaptureUnread each say, when keploy
 	// asked for one of the agent's counts at the run's end and could not
 	// read it, what that leaves unproven and why it could not be read: the

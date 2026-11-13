@@ -13,7 +13,7 @@
 # judge each test (keploy enterprise does), refuses the replay before it runs
 # the test command; a TLS client's hang-ups are charged only for a process
 # that sends no call through keploy's certificate in the same test; a client
-# that hangs up on a quiet streaming answer from an app the test command
+# that hangs up on a quiet answer from an app the test command
 # started ends its call, and its test's end does not wait on it. The
 # suite's harness speaks scope protocol v1 both ways (keploy_v1.py,
 # conftest_v1.py); without the switch it sends no pid, as a suite that
@@ -613,22 +613,24 @@ HUNG=$(grep -o 'a client hung up on [0-9]* TLS handshake(s)' rec-tls.log | sort 
 [ "$HUNG" = "a client hung up on 1 TLS handshake(s)" ] ||
   { echo "FAIL: want only the rejecting process's hang-up charged (a client hung up on 1 TLS handshake(s)), got: ${HUNG:-none}"; FAIL=1; }
 
-echo "== 9. under the proven switch, a client that hangs up on a quiet streaming answer ends its call, and its test's end does not wait on it =="
-# A test's client follows a stream of a job's events, or a long poll, from an
-# app the test command started, and hangs up while the app sends nothing (no
-# heartbeat). keploy relays the call to the app live. Without keploy the app
-# would see its client go; keploy must tell it, and the test's end must not
-# wait on an exchange its client left. Before, keploy read only the app while
-# it relayed the answer: the app never learned its client went, the call's
-# connection held the test's end, and keploy's agent gave up on it ("made no
-# progress settling the test's calls"), so the test was not judged.
+echo "== 9. under the proven switch, a client that hangs up on a quiet answer ends its call, and its test's end does not wait on it =="
+# A test's client follows a job's status, which the app writes as it goes, or a
+# long poll, from an app the test command started, and hangs up while the app
+# sends nothing (no heartbeat). The answer is JSON written as it goes, not a
+# stream (keploy records no stream, so it would not say why it left one out).
+# keploy relays the call to the app live. Without keploy the app would see its
+# client go; keploy must tell it, and the test's end must not wait on an
+# exchange its client left. Before, keploy read only the app while it relayed
+# the answer: the app never learned its client went, the call's connection held
+# the test's end, and keploy's agent gave up on it ("made no progress settling
+# the test's calls"), so the test was not judged.
 # In a record a call's connection holds its test's end only while bytes its
 # client sent are untaken, so the lane makes the failing run's shape: once
 # its client has hung up, the app sends one more event, keploy relays it, and
 # the client's kernel resets keploy's side (the client's FIN is then counted
 # as a byte its handler never read). streamapp.py, a child of pytest (so its
 # calls are live, not mocked):
-#   /events  one NDJSON event, then nothing; it watches its socket for its
+#   /events  one JSON line, then nothing; it watches its socket for its
 #            client's going, as a Go server's request context does
 #   /poll    the answer's headers, then nothing; deaf: it never looks at its
 #            client again
@@ -687,7 +689,7 @@ class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Content-Type", "application/json")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
         with lock:
@@ -779,7 +781,7 @@ APP_PID=$(cat streamapp.pid 2>/dev/null)
 # "3 passed in": a test keploy fails at its end is an error at its teardown
 # ("3 passed, 2 errors in").
 [ "$RC" -eq 0 ] && grep -q "3 passed in" rec-stream.log ||
-  { echo "FAIL: a client's hang-up on a quiet streaming answer should leave its test judged (exit 0, 3 passed), got $RC"; FAIL=1; }
+  { echo "FAIL: a client's hang-up on a quiet answer should leave its test judged (exit 0, 3 passed), got $RC"; FAIL=1; }
 GAVE=$(grep -c "made no progress settling" rec-stream.log)
 [ "$GAVE" -eq 0 ] || { echo "FAIL: keploy's agent gave up settling a test's calls ($GAVE line(s)): the client's hang-up held the test's end"; FAIL=1; }
 echo "the app's log:"; cat streamapp.log

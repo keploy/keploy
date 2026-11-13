@@ -1041,6 +1041,23 @@ func (s *scopedMockDb) TrailOf(mock string) learn.Trail {
 
 var _ integrations.TrailedTests = (*scopedMockDb)(nil)
 
+// SourcesOf forwards integrations.DeclaredSourcesOf: the sources rules
+// declared give a recording's fields by the replay's scope table are the
+// store's, whatever view a worker reads.
+func (s *scopedMockDb) SourcesOf(mock string) []models.DeclaredSource {
+	return integrations.SourcesOf(s.MockMemDb, mock)
+}
+
+var _ integrations.DeclaredSourcesOf = (*scopedMockDb)(nil)
+
+// TimeForm forwards integrations.TimeFormReader: whether the replay turned
+// the time default on is the store's, whatever view a worker reads.
+func (s *scopedMockDb) TimeForm() bool {
+	return integrations.TimeFormOf(s.MockMemDb)
+}
+
+var _ integrations.TimeFormReader = (*scopedMockDb)(nil)
+
 // RecordedWindowIndex forwards integrations.RecordedWindowIndex.
 func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
 	if w, ok := s.MockMemDb.(integrations.RecordedWindowIndex); ok {
@@ -1093,6 +1110,23 @@ func (s *scopedMockDb) cursorKey(key string) string {
 func (s *scopedMockDb) BackgroundRecordings(kind models.Kind) []models.BackgroundRecording {
 	return integrations.BackgroundRecordingsOf(s.MockMemDb, kind)
 }
+
+// BackgroundRecordingsIn is the background recordings of the set call was
+// marked in (integrations.RoundBackgroundReader), whatever this view's
+// allowlist.
+func (s *scopedMockDb) BackgroundRecordingsIn(call integrations.CallRound, kind models.Kind) []models.BackgroundRecording {
+	return integrations.BackgroundRecordingsAt(s.MockMemDb, call, kind)
+}
+
+var _ integrations.RoundBackgroundReader = (*scopedMockDb)(nil)
+
+// BoundValuesIn is the bound values of the set call was marked in
+// (integrations.RoundBoundReader): the store's, as Variables and TrailOf.
+func (s *scopedMockDb) BoundValuesIn(call integrations.CallRound) integrations.BoundValues {
+	return integrations.BoundValuesAt(s.MockMemDb, call)
+}
+
+var _ integrations.RoundBoundReader = (*scopedMockDb)(nil)
 
 // RecordedWindows, WindowChanged and StagingEpoch carry no mock data, so they
 // pass straight through.

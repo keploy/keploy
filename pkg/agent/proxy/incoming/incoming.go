@@ -94,6 +94,9 @@ type IngressProxyManager struct {
 	captures sync.WaitGroup
 
 	ingressHook IngressHook
+	// requestTaker is given each HTTP/1 request before it is forwarded,
+	// while it wants them (SetRequestTaker, takeRequest).
+	requestTaker RequestTaker
 
 	// portHolder is the hooks, when they hold the application's moved ports
 	// from inside their bind (ingress_lookup.c): the manager serves what its

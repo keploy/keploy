@@ -995,3 +995,48 @@ func TestUnderTheSwitchAFailedSetDoesNotWaitForItsWorkerScope(t *testing.T) {
 		t.Fatalf("a failed set waited for its worker scope %d time(s) and named a call missing %d time(s); want neither", waited, workerNamed(logs))
 	}
 }
+
+// Under the background rules a trailing write (a worker: entry a trail move
+// put there, models.MockEntry.Trails) is still required by the set's end once
+// the run reached its place: never made, the set fails and the line that says
+// background calls are neither required nor waited for does not list it;
+// made once, the set passes.
+func TestUnderTheBackgroundRulesATrailingWriteIsRequiredByTheSetsEnd(t *testing.T) {
+	for _, made := range []bool{false, true} {
+		t.Run(fmt.Sprintf("made %v", made), func(t *testing.T) {
+			setSwitch(t, true)
+			s12 := true
+			enableS12(t, &s12)
+			fastWorkerWait(t)
+			h := newPartialRunHarness(t, 1, 0)
+			pinWindows(h)
+			core, logs := observer.New(zap.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-cleanup", 1500)}
+			db := mappingFile(t, h, map[string][]models.MockEntry{"test-1": mongoEntries("mock-a")})
+			if err := db.UpsertWorker(context.Background(), "test-set-0", []models.MockEntry{
+				{Name: "mock-cleanup", Kind: string(models.HTTP), Place: "test-1", Trails: "test-1"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.MarkRecordedWith(context.Background(), "test-set-0", models.RecordedWithS12Routing); err != nil {
+				t.Fatal(err)
+			}
+			consumed := []models.MockState{mongoAt("mock-a", 1010)}
+			if made {
+				consumed = append(consumed, mongoAt("mock-cleanup", 1500))
+			}
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": consumed})}
+			want := map[bool]models.TestSetStatus{false: models.TestSetStatusFailed, true: models.TestSetStatusPassed}[made]
+			if got := h.run(t); got != want {
+				t.Fatalf("set %s, want %s", got, want)
+			}
+			if h.replayer.exact == nil || !h.replayer.exact.background {
+				t.Fatal("the set was not served by the background rules")
+			}
+			if n := logs.FilterMessageSnippet("background recordings of this test set that its end had not read answered").Len(); n != 0 {
+				t.Fatalf("the set said %d time(s) a trailing write is a background call it does not require", n)
+			}
+		})
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"time"
 
@@ -203,7 +205,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 // keepEntries gives each test entry Insert rebuilt from the tests' mocks
 // alone the rest of its entry (models.MappedTestCase): what the caller wrote
 // for it, else what the file held for it, so a write of a test's mocks keeps
-// its cases, dir, starts, at, real, given, key and seed. The mocks stay the
+// its cases, dir, starts, at, real, given, variables, key and seed. The mocks stay the
 // rebuild's.
 func keepEntries(rebuilt *models.Mapping, onDisk, written []models.MappedTestCase) {
 	before := make(map[string]models.MappedTestCase, len(onDisk))
@@ -257,6 +259,9 @@ func entryOver(o, w models.MappedTestCase) models.MappedTestCase {
 	}
 	if len(w.Given) > 0 {
 		o.Given = w.Given
+	}
+	if len(w.Variables) > 0 {
+		o.Variables = w.Variables
 	}
 	if w.Key != "" {
 		o.Key = w.Key
@@ -464,7 +469,12 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 // moved it, and its undo) is written on the entry as given: the entry's line
 // is the last placement's. So are its Drift (MockEntry.Drift: the move rests
 // on its owner's quarantine) and its Trails (MockEntry.Trails: the earlier
-// test whose call it trails, which only the move that proved it names). Under the switch a mock taken out of a test's list
+// test whose call it trails, which only the move that proved it names), and
+// its Rule, Series, Read, Unchanged and Once (MockEntry.Rule, Series, Read,
+// Unchanged, Once: the declared rule that placed it, its series, whether
+// that series only reads, whether the write it recorded changed nothing,
+// and whether the series answers once in a run, which only that rule's
+// move names). Under the switch a mock taken out of a test's list
 // names that test as its Owner (MockEntry.Owner), unless the move names one;
 // a worker entry placed again keeps its owner unless the move names one.
 // Without the switch no owner is written, so a move writes what it wrote
@@ -535,6 +545,9 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			mapping.Worker[i].Reason = mv.Reason
 			mapping.Worker[i].Drift = mv.Drift
 			mapping.Worker[i].Trails = mv.Trails
+			mapping.Worker[i].Rule, mapping.Worker[i].Series, mapping.Worker[i].Read = mv.Rule, mv.Series, mv.Read
+			mapping.Worker[i].Unchanged, mapping.Worker[i].Once, mapping.Worker[i].Optional = mv.Unchanged, mv.Once, mv.Optional
+			mapping.Worker[i].Due = mv.Due
 			if mv.Owner != "" {
 				mapping.Worker[i].Owner = mv.Owner
 			}
@@ -570,6 +583,9 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	entry.Reason = mv.Reason
 	entry.Drift = mv.Drift
 	entry.Trails = mv.Trails
+	entry.Rule, entry.Series, entry.Read = mv.Rule, mv.Series, mv.Read
+	entry.Unchanged, entry.Once, entry.Optional = mv.Unchanged, mv.Once, mv.Optional
+	entry.Due = mv.Due
 	// A replay serves a worker entry only while a test process of its key
 	// holds the run, and a moved entry with none would sit in the slice no
 	// test process holds: the move's key, else the test's. A test with no
@@ -624,6 +640,112 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 		return nil
 	}
 	mapping.RecordedWith = append(mapping.RecordedWith, feature)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// SetRules writes digest as the set's rules digest (models.Mapping.Rules:
+// the rules declared in keploy.yml that keploy mock record placed the set's
+// entries by), keeping every other section, comment and hand edit as it is.
+// An empty digest removes the key, and a digest the file carries already
+// writes nothing. A set with no mapping file is refused, not created: its
+// record wrote no entry a rule could place.
+func (db *MappingDb) SetRules(ctx context.Context, testSetID, digest string) error {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("write %s's rules digest: the set has no mappings file", testSetID)
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return err
+	}
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
+	if err != nil {
+		return err
+	}
+	if mapping.Rules == digest {
+		return nil
+	}
+	mapping.Rules = digest
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// SetSources writes, on every entry of the set's mapping file, the sources
+// rules declared in keploy.yml give fields of its recording's request
+// (models.MockEntry.Sources), by recording name: an entry sources names
+// gets them in every list that holds it, and every other entry loses any
+// it had, so a set never keeps an earlier record's. Every other section,
+// comment and hand edit stays as it is, and a file that holds them already
+// writes nothing. Sources this keploy cannot decide a field by
+// (models.CheckSources), a name no entry has, and a set with no mapping
+// file are refused, writing nothing.
+func (db *MappingDb) SetSources(ctx context.Context, testSetID string, sources map[string][]models.DeclaredSource) error {
+	for name, of := range sources {
+		if err := models.CheckSources(of); err != nil {
+			return fmt.Errorf("write %s's declared sources of %s: %w", testSetID, name, err)
+		}
+	}
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("write %s's declared sources: the set has no mappings file", testSetID)
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return err
+	}
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
+	if err != nil {
+		return err
+	}
+	lists := [][]models.MockEntry{mapping.Startup, mapping.Runner, mapping.Worker, mapping.Shared}
+	for i := range mapping.TestCases {
+		lists = append(lists, mapping.TestCases[i].Mocks)
+	}
+	for i := range mapping.Boots {
+		lists = append(lists, mapping.Boots[i].Mocks)
+	}
+	changed, seen := false, make(map[string]bool, len(sources))
+	for _, list := range lists {
+		for i := range list {
+			want := sources[list[i].Name]
+			seen[list[i].Name] = true
+			if !reflect.DeepEqual(list[i].Sources, want) {
+				list[i].Sources = slices.Clone(want)
+				changed = true
+			}
+		}
+	}
+	for name := range sources {
+		if !seen[name] {
+			return fmt.Errorf("write %s's declared sources: its mappings file lists no recording %s", testSetID, name)
+		}
+	}
+	if !changed {
+		return nil
+	}
 	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
 	if err != nil {
 		return err
@@ -725,10 +847,18 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 			// replace what an earlier record wrote, none included, as they
 			// pair with this record's calls.
 			tc.Given = in.Given
+			// The variables a client test's request binds pair with the
+			// calls of the record that learned them: record's full round
+			// writes this record's below, none included.
+			tc.Variables = nil
 			// The seed its browser drew from in this record, none included
 			// (seeding off): the calls it pairs with were drawn from it.
 			tc.Seed = in.Seed
 		}
+		// What record's full round learned a client test's request binds
+		// (proven switch only), beside what it learned before in the round:
+		// none leaves them as they are.
+		tc.Variables = models.MergeVariables(tc.Variables, in.Variables)
 		// The mock.real destinations this record's run of the test used
 		// (proven switch only): they replace what an earlier record wrote.
 		if len(in.Real) > 0 {

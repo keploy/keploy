@@ -26,19 +26,19 @@ import (
 )
 
 // A test's client that hangs up on a live call while the app's answer still
-// streams (a job's event stream the client stops following) is told to the
-// app, as it would be without keploy, and the call's connection settles: the
-// test's end does not wait on it. Before, the HTTP/1 ingress read only the
-// app while it forwarded the answer: an app that sent nothing more (it waits
-// for events that never come) held the handler, so the app never learned its
-// client had gone and the connection held work for good. Its socket in
-// CLOSE_WAIT, it held a request not answered; once the app wrote again and
-// the client's kernel reset the socket (TCP_CLOSE), its counts took the
-// client's FIN for one byte no read returned, and the settle's watchdog gave
-// up on it ("held 1 byte(s) the application had sent that its handler had not
-// read"), leaving the test not judged, its window open for the app's
-// background calls to fill. The exchange its client left is not recorded: the
-// client did not take the answer.
+// comes (a job's status, written as it goes, that the client stops following)
+// is told to the app, as it would be without keploy, and the call's connection
+// settles: the test's end does not wait on it. Before, the HTTP/1 ingress read
+// only the app while it forwarded the answer: an app that sent nothing more (it
+// waits for events that never come) held the handler, so the app never learned
+// its client had gone and the connection held work for good. Its socket in
+// CLOSE_WAIT, it held a request not answered; once the app wrote again and the
+// client's kernel reset the socket (TCP_CLOSE), its counts took the client's
+// FIN for one byte no read returned, and the settle's watchdog gave up on it
+// ("held 1 byte(s) the application had sent that its handler had not read"),
+// leaving the test not judged, its window open for the app's background calls
+// to fill. The exchange its client left is not recorded: the client did not
+// take the answer.
 func TestALiveClientsHangUpMidAnswerReachesTheAppAndSettles(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -58,7 +58,7 @@ func TestALiveClientsHangUpMidAnswerReachesTheAppAndSettles(t *testing.T) {
 			release := make(chan struct{})
 			t.Cleanup(sync.OnceFunc(func() { close(release) }))
 			lc := serveLiveCallWith(t, tc.sync, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
@@ -120,7 +120,7 @@ func TestALiveClientsHangUpReachesTheAppThroughTheProxysChain(t *testing.T) {
 			release := make(chan struct{})
 			t.Cleanup(sync.OnceFunc(func() { close(release) }))
 			lc, handed := serveTreeCall(t, tc.sync, tc.real, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
@@ -197,7 +197,7 @@ func deafAppsClientHangsUp(t *testing.T, serve func(http.Handler) *liveCall) {
 	gone, release := make(chan struct{}), make(chan struct{})
 	t.Cleanup(sync.OnceFunc(func() { close(release) }))
 	lc := serve(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 		w.(http.Flusher).Flush()
@@ -339,7 +339,7 @@ func TestALiveCallsAnswerStillHoldsWorkWhileTheClientWaits(t *testing.T) {
 	free := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(free)
 	lc := serveLiveCall(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 		w.(http.Flusher).Flush()
@@ -395,7 +395,7 @@ func TestALiveCallsPipelinedRequestIsStillServed(t *testing.T) {
 					_, _ = fmt.Fprint(w, "fast")
 					return
 				}
-				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
@@ -459,7 +459,7 @@ func TestALiveCallsPipelinedRequestIsStillServed(t *testing.T) {
 func TestALiveCallsHalfClosingClientGetsTheWholeAnswer(t *testing.T) {
 	t.Parallel()
 	lc := serveLiveCall(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintln(w, `{"line":1}`)
 		w.(http.Flusher).Flush()

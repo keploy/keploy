@@ -2,6 +2,7 @@ package models
 
 import (
 	"mime"
+	"net/http"
 	"strings"
 	"time"
 
@@ -24,10 +25,11 @@ const (
 
 // HTTPStreamOf is keploy's one rule for whether an HTTP response is a stream,
 // and in which format. Record and replay both read it: the recording keeps a
-// stream's body as its frames (recordedFramesOf), and the replay runs a
-// stream's test case as one (pkg.DetectHTTPStreamConfig: after the set's
-// other test cases, with a stream's mock window, its answer read frame by
-// frame).
+// stream's body as its frames (recordedFramesOf) and records no streaming
+// answer the app gives as a test case (IsHTTPStreamResponse), and the replay
+// runs a stream's test case an older keploy recorded as one
+// (pkg.DetectHTTPStreamConfig: after the set's other test cases, with a
+// stream's mock window, its answer read frame by frame).
 //
 // A response is a stream only on evidence of one:
 //
@@ -49,6 +51,20 @@ const (
 // as text/plain, chunked once it is over 2 KB, and is one document.
 func HTTPStreamOf(contentType string, framed bool) HTTPStreamFormat {
 	return streamOf(mediaTypeOf(contentType), framed)
+}
+
+// IsHTTPStreamResponse reports whether resp, an answer the app gives, is a
+// stream by its Content-Type (HTTPStreamOf): keploy records no such answer as
+// a test case. An answer HTTP says has no body (HTTPResponseHasNoBody: to a
+// HEAD, a 1xx, a 204 or a 304) is no stream, whatever its Content-Type says,
+// and is recorded as any answer is. resp.Request is the request it answers
+// (http.ReadResponse sets it).
+func IsHTTPStreamResponse(resp *http.Response) bool {
+	method := ""
+	if resp.Request != nil {
+		method = resp.Request.Method
+	}
+	return !HTTPResponseHasNoBody(method, resp.StatusCode) && HTTPStreamOf(resp.Header.Get("Content-Type"), false) != HTTPStreamNone
 }
 
 // streamOf is HTTPStreamOf of a parsed media type. A format that frames a

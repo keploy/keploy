@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -83,11 +85,52 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// Minted is, for a variable keploy.yml's rule of kind minted declares
+	// made anew at its Bind (an id the application mints there), the rule
+	// and the shape the learn step read the value with: a replay binds it
+	// only to a value that is not its recorded one, that no minted
+	// variable bound earlier in the run, and that keeps the rule's form
+	// (variables.Table.BindAll). Only the learn step sets
+	// it, with a Bind; none for any other variable.
+	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty" bson:"minted,omitempty"`
+	// ByForm is, by use place (one of Use, never Bind), the time default's
+	// check of a time the application stamped there (keploy.yml's times
+	// setting at its default; ClockOffset.Form, learned by the learn step's
+	// BoundTimeLearned): a replay whose call does not hold the variable's
+	// value at that place passes it where its value is a time of that form
+	// (or of FormF beside it, where the record runs wrote two), and refuses
+	// it otherwise, as at a use with no entry. Two reads of the
+	// application's clock that fell in one second when recorded may fall in
+	// two in a replay: one is no copy of the other. The learn step sets it
+	// only for a field that is a time (a decoder-typed time, a field a clock
+	// rule declares, or a value bound where keploy learned a read of the
+	// application's clock) whose bound place no earlier answer holds: never
+	// for an echo, a value copied from an answer, an id or a minted value. A
+	// replay under mock.times: strict, and a keploy that does not read it,
+	// checks the place exactly.
+	ByForm map[string]ClockOffset `json:"by_form,omitempty" yaml:"by_form,omitempty" bson:"by_form,omitempty"`
 	// Why is, for a variable the learn step wrote, why it is one and how to
 	// undo it, for a person or a tool reading the mock (the legibility
 	// rule). Only given variables (GivenPrefix) carry one for now
 	// (learn.GivenWhy). Nothing replays it.
 	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
+}
+
+// MintedShape is what a minted rule decided of a variable's value
+// (MockVariable.Minted): the id of the rule (Rule), and the form a value
+// bound there keeps (MintedForm: the prefix and the range of lengths).
+type MintedShape struct {
+	Rule       string `json:"rule" yaml:"rule" bson:"rule"`
+	MintedForm `yaml:",inline" bson:",inline"`
+}
+
+// clone is a copy of s that shares nothing with it; nil for nil.
+func (s *MintedShape) clone() *MintedShape {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	return &c
 }
 
 // ClockRead is one clock read a recorded value holds, as the learn step read
@@ -299,6 +342,35 @@ type ClockOffset struct {
 	Zone    string        `json:"zone,omitempty" yaml:"zone,omitempty" bson:"zone,omitempty"`
 	Layout  string        `json:"layout,omitempty" yaml:"layout,omitempty" bson:"layout,omitempty"`
 	AppZone string        `json:"app_zone,omitempty" yaml:"app_zone,omitempty" bson:"app_zone,omitempty"`
+	// Form, where set, is the time default's check (keploy.yml's times
+	// setting left at its default): the place is a time, and a replay passes
+	// any value of this form, whatever instant it names, with no range, cut,
+	// zone or provenance checked (learn's TimeForm names it: the decoder's
+	// type, and the text's layout with every digit and letter abstracted, so
+	// an epoch keeps its unit and a text its field order, separators and zone
+	// form; a fraction of a second is no part of a form). "" checks the read
+	// by every field above, as before the default was. Two learnings of one
+	// place meet with the forms both checked by (Meet): FormApart, which
+	// Empty refuses, where they share none; one with a Form and one without
+	// meet as the one without (its checks).
+	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
+	// FormF, set only beside a Form, is the second form of a time whose two
+	// record runs wrote it in two: a replay passes a value written in either
+	// (WrittenAs), never checking its range. The two stand in one order, the
+	// lesser in Form (FormsOf), so learnings that saw the same two forms
+	// hold one offset, whichever run wrote which. "" where both runs wrote
+	// one form.
+	FormF string `json:"form_f,omitempty" yaml:"form_f,omitempty" bson:"form_f,omitempty"`
+	// Claim, of a time the learn step read as the value whole of one claim
+	// of a JWT its place holds (a token the application signed and sent),
+	// names that claim: a replay opens the JWT its call carries there and
+	// checks that claim's value by Form alone (learn.HoldsClaimByForm), the
+	// claim's JSON type kept. It is learned under keploy.yml's times setting
+	// at its default only, so Form is set; every other part of the token is
+	// checked as its own learning says. "" otherwise, and then omitted. A
+	// keploy that does not read Claim checks the whole value by Form, which
+	// a token is not: it refuses it (fail closed).
+	Claim string `json:"claim,omitempty" yaml:"claim,omitempty" bson:"claim,omitempty"`
 	// Since is where a replay's span for the read starts: "" at its call's
 	// window (after the previous data-plane call); SinceTestBegin at the
 	// running test's begin, for a read the learn step saw made before its
@@ -1585,6 +1657,11 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 	if m.Word, m.WallWord, m.Zone, ok = meetWord(o, p); !ok {
 		m.Layout = LayoutApart
 	}
+	// A read in one claim of a token and one in another, or one whole, were
+	// written in two forms too.
+	if m.Claim = o.Claim; o.Claim != p.Claim {
+		m.Layout = LayoutApart
+	}
 	// A learning whose value a replay reads in no zone of the application's
 	// (CutInAppZone: one cut to the minute or finer), that names none, says
 	// nothing of the zone a meet read in it holds: the other's reading says
@@ -1617,8 +1694,67 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 		// either zone held, met with one in UTC) names none.
 		m.AppZone = ""
 	}
+	// The forms both learnings checked by are kept: of a learning that
+	// passes two (FormF) and one that passes one of them, that one, the
+	// stricter. Two that share none are no one check (FormApart; a meet
+	// that was apart shares none, as no time's form is FormApart). One
+	// learning that checked the read by its range keeps that check (Form
+	// ""), the stricter of the two.
+	switch {
+	case o.Form == "" || p.Form == "":
+	default:
+		var both []string
+		for _, f := range []string{o.Form, o.FormF} {
+			if p.WrittenAs(f) {
+				both = append(both, f)
+			}
+		}
+		switch len(both) {
+		case 0:
+			m.Form = FormApart
+		case 1:
+			m.Form = both[0]
+		default:
+			m.Form, m.FormF = FormsOf(both[0], both[1])
+		}
+	}
 	return m
 }
+
+// FormsOf is the Form and FormF of a time two record runs wrote in forms a
+// and b (learn's TimeForm): the one form where a and b are one, else the
+// two, the lesser first, so that two learnings of one place that saw the
+// same two forms hold one ClockOffset whichever run wrote which (Meet is
+// the same in either order).
+func FormsOf(a, b string) (form, formF string) {
+	switch {
+	case a == b:
+		return a, ""
+	case b < a:
+		return b, a
+	}
+	return a, b
+}
+
+// WrittenAs reports whether form, a time's form (learn's TimeForm), is one
+// o's time default checks by: its Form, or FormF beside it. False for "",
+// which names no time.
+func (o ClockOffset) WrittenAs(form string) bool {
+	return form != "" && (form == o.Form || form == o.FormF)
+}
+
+// Forms is how a message names the forms o checks by: its Form, or "Form
+// or FormF".
+func (o ClockOffset) Forms() string {
+	if o.FormF == "" {
+		return o.Form
+	}
+	return o.Form + " or " + o.FormF
+}
+
+// FormApart is the Form of a Meet of two learnings of one place that share
+// no form (ClockOffset.Form, FormF): Empty refuses it.
+const FormApart = "apart"
 
 // Empty reports whether o is the Meet of learnings of one place that share
 // no offset: a Max not above its Min, other than a Plain o's (a Plain and
@@ -1627,7 +1763,7 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 // written in different layouts (LayoutApart); or at different Steps
 // (StepApart). Holds holds nothing for it, and String says why.
 func (o ClockOffset) Empty() bool {
-	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart || o.Step < 0
+	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart || o.Step < 0 || o.Form == FormApart
 }
 
 // MergeClocks is a and b, two sets of the places a call's learn steps
@@ -1963,16 +2099,71 @@ func (v MockVariables) Clone() MockVariables {
 		mv.Use = append([]string(nil), mv.Use...)
 		mv.Answer = append([]string(nil), mv.Answer...)
 		mv.Clock = append([]ClockRead(nil), mv.Clock...)
+		mv.Minted = mv.Minted.clone()
+		mv.ByForm = maps.Clone(mv.ByForm)
 		out[name] = mv
 	}
 	return out
+}
+
+// MergeByForm is the check by form (MockVariable.ByForm) of a variable
+// whose uses are aUse, with a's checks aBy, and bUse, with bBy, as one: a
+// use only one of them names keeps its check; one both name keeps it only
+// where both learned it, the stricter of the two (byFormMeet), and is
+// checked exactly otherwise. A learning that checks a use exactly, or by
+// fewer forms, is never loosened by another's. nil where none is left.
+func MergeByForm(aUse []string, aBy map[string]ClockOffset, bUse []string, bBy map[string]ClockOffset) map[string]ClockOffset {
+	in := func(uses []string, place string) bool { return slices.Contains(uses, place) }
+	var out map[string]ClockOffset
+	keep := func(place string, o ClockOffset) {
+		if out == nil {
+			out = map[string]ClockOffset{}
+		}
+		out[place] = o
+	}
+	for place, o := range aBy {
+		if !in(bUse, place) {
+			keep(place, o)
+			continue
+		}
+		if p, ok := bBy[place]; ok {
+			if m, ok := byFormMeet(o, p); ok {
+				keep(place, m)
+			}
+		}
+	}
+	for place, o := range bBy {
+		if !in(aUse, place) {
+			keep(place, o)
+		}
+	}
+	return out
+}
+
+// byFormMeet is the one of a and b, two learnings' checks by form of one
+// use, that passes only forms the other passes too (its Form, and FormF
+// beside it: WrittenAs), a where both pass the same; ok is false where
+// neither does (two forms against two others, one shared): the use is then
+// checked exactly.
+func byFormMeet(a, b ClockOffset) (ClockOffset, bool) {
+	within := func(x, y ClockOffset) bool {
+		return y.WrittenAs(x.Form) && (x.FormF == "" || y.WrittenAs(x.FormF))
+	}
+	switch {
+	case within(a, b):
+		return a, true
+	case within(b, a):
+		return b, true
+	}
+	return ClockOffset{}, false
 }
 
 // MergeVariables is a and b as one block (neither is changed): a variable in
 // both keeps a's bind and both's uses and answers, and is an echo only when
 // both say so. Clock goes with the bind it was read at: a's bind keeps a's,
 // one taken from b keeps b's, and a variable both bind is a clock read only
-// when both say so.
+// when both say so. Minted goes with the bind as well: a's bind keeps a's
+// (a variable both bind is checked as a says), one taken from b keeps b's.
 func MergeVariables(a, b MockVariables) MockVariables {
 	out := a.Clone()
 	for name, v := range b {
@@ -1986,9 +2177,11 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		}
 		if cur.Bind == "" {
 			cur.Bind, cur.Clock = v.Bind, append([]ClockRead(nil), v.Clock...)
+			cur.Minted = v.Minted.clone()
 		} else if v.Bind != "" && len(v.Clock) == 0 {
 			cur.Clock = nil
 		}
+		cur.ByForm = MergeByForm(cur.Use, cur.ByForm, v.Use, v.ByForm)
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
 		cur.Echo = cur.Echo && v.Echo
@@ -2070,6 +2263,16 @@ type VariableBinding struct {
 	// variable's binding whose reads were made in the same second
 	// (ReadInOneSecond), and with no other.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty"`
+	// Minted is, for a binding of a minted variable, its shape
+	// (MockVariable.Minted): the table binds it only to a value that is
+	// new and keeps that shape (variables.MintedWhy).
+	Minted *MintedShape `json:"minted,omitempty" yaml:"minted,omitempty"`
+	// Call marks a binding of this call alone (an echo, MockVariable.Echo:
+	// a recording no test owns that each serve mints a value at anew). The
+	// table never binds its name in a scope; a minted one's value is still
+	// checked against the run's minted values and kept among them, so a
+	// later reuse of it is refused (variables.Table.BindAll).
+	Call bool `json:"call,omitempty" yaml:"call,omitempty"`
 	// WordRun is, for a binding at a word of a value (a word address), the
 	// value span its word is in: the words its call binds at consecutive
 	// words of that text, its own among them, that hold one value (a

@@ -16,6 +16,12 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 # capture window AFTER stream consumption; before it, the streaming path opened
 # no window and carried no unmatched_calls. Success here is INVERTED: we assert the
 # streaming mismatch is reported, not that every test passes.
+#
+# A keploy built from this tree records no streaming answer as a test case
+# (models.IsHTTPStreamResponse): with it as the recorder the set holds the
+# text/plain test and no stream, the record log says so for each stream, and
+# the forced miss is asserted on the text/plain test alone. A released
+# recorder records the streams, and the streaming path must report it on them.
 
 echo "$RECORD_BIN"
 echo "$REPLAY_BIN"
@@ -96,7 +102,41 @@ if grep "WARNING: DATA RACE" record_logs.txt; then
     exit 1
 fi
 wait
-echo "Recorded streaming test cases and Redis mocks"
+echo "Recorded test cases and Redis mocks"
+
+# stream_tests lists the recorded test cases whose answer is a stream by its
+# Content-Type.
+stream_tests() {
+    local f
+    for f in ./keploy/test-set-*/tests/*.yaml; do
+        [ -e "$f" ] || continue
+        case "$(yq '.spec.resp.header["Content-Type"] // ""' "$f")" in
+            text/event-stream*|application/x-ndjson*|application/ndjson*|multipart/x-mixed-replace*|multipart/mixed*)
+                echo "$f" ;;
+        esac
+    done
+}
+case "$RECORD_BIN" in
+    */build/keploy|*/build-no-race/keploy) streams_recorded=false ;;
+    *) streams_recorded=true ;;
+esac
+if [ "$streams_recorded" = false ]; then
+    stream_count=$(stream_tests | grep -c . || true)
+    if [ "$stream_count" -ne 0 ]; then
+        echo "::error::this tree's keploy recorded $stream_count streaming answers as test cases; want none"
+        stream_tests
+        docker compose down 2>/dev/null || true
+        exit 1
+    fi
+    told=$(grep -c "Not recording a streaming response as a test case" record_logs.txt || true)
+    if [ "$told" -lt 3 ]; then
+        echo "::error::the record log tells $told streams as not recorded; want one for each of the SSE, NDJSON and multipart GETs"
+        tail -40 record_logs.txt
+        docker compose down 2>/dev/null || true
+        exit 1
+    fi
+    echo "✓ no streaming answer was recorded as a test case ($told told as not recorded)"
+fi
 
 # Force a streaming mock mismatch: rewrite the recorded LRANGE read key only.
 # The streaming GETs read the message list with `lrange sse-demo:messages 0 -1`;
@@ -193,7 +233,7 @@ for rf in "${reports[@]}"; do
     fi
 done
 
-if [ "$streaming_reported" != true ]; then
+if [ "$streams_recorded" = true ] && [ "$streaming_reported" != true ]; then
     echo "::error::replay did NOT report the forced streaming mock mismatch on any streaming test"
     echo "--- mismatch/unmatched lines in test_logs.txt ---"
     grep -iE "mismatch|unmatched|no matching" test_logs.txt | head -20
@@ -261,7 +301,7 @@ for rf in "${proven_reports[@]}"; do
         proven_streaming_reported=true
     fi
 done
-if [ "$proven_streaming_reported" != true ]; then
+if [ "$streams_recorded" = true ] && [ "$proven_streaming_reported" != true ]; then
     echo "::error::under the proven switch the forced misses never reached a streaming test"
     tail -40 test_logs_proven.txt
     docker compose down 2>/dev/null || true
@@ -270,6 +310,6 @@ fi
 require_plain_miss test_logs_proven.txt "${proven_reports[@]}"
 echo "✓ under KEPLOY_PROVEN=1 the agent got the switch, every forced miss reached its test, and no read was incomplete"
 
-echo "streaming mock-mismatch e2e passed: a streaming test reported the forced unmatched Redis read"
+echo "streaming mock-mismatch e2e passed: the forced unmatched Redis read was reported"
 docker compose down 2>/dev/null || true
 exit 0

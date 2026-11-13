@@ -237,13 +237,17 @@ func TestAClientTestLearnsACopyOfAnEarlierReadItsOwnWindowHoldsAsAReadSinceItsTe
 // (models.SinceTestBegin), never refused: both explanations hold in the
 // rounds, and that read holds under both. api-server's app.createdAt stood
 // so, and the offset rule set twelve of its tests aside. Replays whose read
-// lies in their test pass; one a day before its test misses.
+// lies in their test pass; one a day before its test misses. The rule's
+// absence (ClassifyGiven: the HTTP learn step's reading) learns the same
+// read of epoch seconds, keeping the offset rule's refusal, which
+// mock.times: strict puts back (OffsetReadUnder); a typed instant, which no
+// HTTP body carries, stays refused there.
 //
-// Where only the offset holds it stays refused, naming the two recordings:
-// a value its own window does not hold (read two seconds before the call
-// before it), a call whose window knows no test begin a replay could check
-// the read from (keploy test's), and the rule's absence (ClassifyGiven: the
-// proven switch off). A typed instant to the second is read the same.
+// Where only the offset holds it stays refused, naming the two recordings,
+// under either reading: a value its own window does not hold (read two
+// seconds before the call before it), and a call whose window knows no test
+// begin a replay could check the read from (keploy test's). A typed instant
+// to the second is read the same.
 func TestAClientTestLearnsAnOffsetOfAGivenInstantItsOwnWindowHoldsAsAReadSinceItsTestBegan(t *testing.T) {
 	const p = "body.cmd.documents.0.app.createdAt"
 	const gap = 5*time.Minute + 23*time.Second
@@ -296,6 +300,39 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantItsOwnWindowHoldsAsAReadSinceIt
 			if ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != models.SinceTestBegin {
 				t.Fatalf("%s Read=%+v from %+v (%s); want a plain read of the clock checked since the test began", ln.Kind, ln.Read, ln.From, ln.Why)
 			}
+			// Without the rule a copy follows its source (the HTTP learn
+			// step's reading: ClassifyArrived, ClassifyGiven) it is learned
+			// the same, keeping the offset rule's refusal it stands in for
+			// (Learned.offsetRefused), which mock.times: strict puts back
+			// (OffsetReadUnder).
+			// A typed instant reaches no HTTP learn step (a JSON body carries
+			// none); the typed reading's rescue runs under the rule alone, so
+			// without it a typed instant stays refused by the offset rule.
+			g := learn(fm, rec, f, true, false)
+			if fm.name != forms[0].name {
+				if g.Kind != KindUnaccounted || !strings.Contains(g.Why, offsetRule) {
+					t.Fatalf("the rule's absence (ClassifyGiven), a typed instant: %s (%s); want refused by the offset rule", g.Kind, g.Why)
+				}
+			} else {
+				if og, gok := g.Clock(); g.Kind != KindClockRead || !gok || !reflect.DeepEqual(og, o) || g.offsetRefused == nil || !offsetHeld(*g.offsetRefused) {
+					t.Fatalf("the rule's absence (ClassifyGiven): %s Read=%+v (%s), refusal kept %v; want the read the rule learns, keeping the offset rule's refusal", g.Kind, g.Read, g.Why, g.offsetRefused != nil)
+				}
+				if s := OffsetReadUnder(g, false); s.Kind != KindUnaccounted || !strings.Contains(s.Why, offsetRule) || !strings.Contains(s.Why, "mock-3") {
+					t.Fatalf("the rule's absence under mock.times: strict: %s (%s); want the offset rule's refusal", s.Kind, s.Why)
+				}
+				if d := OffsetReadUnder(g, true); d.Kind != KindClockRead {
+					t.Fatalf("the rule's absence under the time default: %s (%s); want the read", d.Kind, d.Why)
+				}
+				// A rule of another kind at the field (a minted rule)
+				// decides nothing of a read of the clock: the read the
+				// re-read learned stands, never the refusal it keeps.
+				for _, timeForm := range []bool{true, false} {
+					m := DeclaredClockLearned(g, Source{Kind: SourceMinted, Rule: "minted-at-the-field"}, &Window{Rec: rec.window(true), F: f.window(true)}, timeForm)
+					if mo, mok := m.Clock(); m.Kind != KindClockRead || !mok || !reflect.DeepEqual(mo, o) {
+						t.Fatalf("a minted rule at the field (time default %v): %s Read=%+v (%s); want the read the re-read learned", timeForm, m.Kind, m.Read, m.Why)
+					}
+				}
+			}
 			for _, r := range []struct {
 				name string
 				at   func(r copyOrReadRun) time.Time
@@ -326,7 +363,8 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantItsOwnWindowHoldsAsAReadSinceIt
 			}{
 				{"a value its own window does not hold", early(rec), early(f), true, true},
 				{"a call whose window knows no test begin", rec, f, false, true},
-				{"the rule's absence (ClassifyGiven)", rec, f, true, false},
+				{"the rule's absence (ClassifyGiven), a value its own window does not hold", early(rec), early(f), true, false},
+				{"the rule's absence (ClassifyGiven), a call whose window knows no test begin", rec, f, false, false},
 			} {
 				if ln := learn(fm, c.r, c.f, c.began, c.following); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
 					t.Fatalf("%s: %s Read=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", c.name, ln.Kind, ln.Read, ln.Why)
@@ -379,11 +417,15 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantItsOwnWindowHoldsAsAReadSinceIt
 // full round), and a typed instant as a number of seconds is (the offset rule
 // refuses each: classifyInstant, classifyRead).
 //
+// ClassifyGiven (the rule's absence: the HTTP learn step's reading) learns
+// the same read of epoch seconds, keeping the offset rule's refusal for
+// mock.times: strict; a typed instant, which no HTTP body carries, stays
+// refused there, and the earlier test's insert is that insert's variable.
 // Where neither run's own window holds the read (read two seconds before the
-// call before it in both), where a window knows no test begin, under
-// ClassifyGiven (the proven switch off), and where an answer earlier in the
-// test that F served as recorded holds the recorded second (a source the
-// rescue's reading keeps), it stays refused, naming mock-3 and mock-11.
+// call before it in both), where a window knows no test begin, and where an
+// answer earlier in the test that F served as recorded holds the recorded
+// second (a source the rescue's reading keeps), it stays refused under either
+// reading, naming mock-3 and mock-11.
 func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSinceItsTestBegan(t *testing.T) {
 	const p = "body.docs.msgs.0.app.createdAt.$numberLong"
 	const gap = 11484*time.Hour + 35*time.Minute + 49*time.Second
@@ -462,6 +504,30 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSin
 				if ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != models.SinceTestBegin {
 					t.Fatalf("%s Read=%+v from %+v (%s); want a plain read of the clock checked since the test began", ln.Kind, ln.Read, ln.From, ln.Why)
 				}
+				// The rule's absence (the HTTP learn step's reading) learns
+				// the same read, keeping the offset rule's refusal, which
+				// mock.times: strict puts back (OffsetReadUnder).
+				// A typed instant reaches no HTTP learn step (a JSON body carries
+				// none); the typed reading's rescue runs under the rule alone, so
+				// without it a typed instant stays refused by the offset rule.
+				// The earlier test's same-second insert is a copy there, which
+				// the copy rule alone reads again (a variable of that insert
+				// without it, whose replay holds the bind).
+				g := learn(fm, c.r, c.f, true, false, c.earlierTest)
+				switch {
+				case c.earlierTest:
+				case fm.name != forms[0].name:
+					if g.Kind != KindUnaccounted || !strings.Contains(g.Why, offsetRule) {
+						t.Fatalf("the rule's absence (ClassifyGiven), a typed instant: %s (%s); want refused by the offset rule", g.Kind, g.Why)
+					}
+				default:
+					if og, gok := g.Clock(); g.Kind != KindClockRead || !gok || !reflect.DeepEqual(og, o) || g.offsetRefused == nil || !offsetHeld(*g.offsetRefused) {
+						t.Fatalf("the rule's absence (ClassifyGiven): %s Read=%+v (%s), refusal kept %v; want the read the rule learns, keeping the offset rule's refusal", g.Kind, g.Read, g.Why, g.offsetRefused != nil)
+					}
+					if s := OffsetReadUnder(g, false); s.Kind != KindUnaccounted || !strings.Contains(s.Why, offsetRule) {
+						t.Fatalf("the rule's absence under mock.times: strict: %s (%s); want the offset rule's refusal", s.Kind, s.Why)
+					}
+				}
 				x := copyOrReadRun{began: time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC), audited: time.Millisecond, insert: 300 * time.Millisecond, audit: 301 * time.Millisecond}
 				for _, r := range []struct {
 					name string
@@ -491,7 +557,8 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSin
 		}{
 			{"neither run's own window holds it", early(rec), early(f), true, true},
 			{"a call whose window knows no test begin", rec, f, false, true},
-			{"the rule's absence (ClassifyGiven)", rec, f, true, false},
+			{"the rule's absence (ClassifyGiven), neither run's own window holds it", early(rec), early(f), true, false},
+			{"the rule's absence (ClassifyGiven), a call whose window knows no test begin", rec, f, false, false},
 		} {
 			if ln := learn(fm, c.r, c.f, c.began, c.following, false); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
 				t.Fatalf("%s, %s: %s Read=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", fm.name, c.name, ln.Kind, ln.Read, ln.Why)
@@ -512,6 +579,11 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSin
 	held.Spec.ReqTimestampMock, held.Spec.ResTimestampMock = rec.at(3*time.Millisecond), rec.at(4*time.Millisecond)
 	if ln := learn(forms[0], rec, f, true, true, false, RawOf(held, true).ServedAs(3).ServedAsRecorded()); ln.Kind != KindUnaccounted || !ln.byOffset || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
 		t.Fatalf("an answer F served as recorded holds the recorded second: %s Read=%+v from %+v (%s); want refused by the offset rule, naming mock-3 and mock-11", ln.Kind, ln.Read, ln.From, ln.Why)
+	}
+	// Under the rule's absence (the HTTP learn step's reading) the value
+	// is that answer's variable, whose replay holds the bind: never a read.
+	if ln := learn(forms[0], rec, f, true, false, false, RawOf(held, true).ServedAs(3).ServedAsRecorded()); ln.Kind != KindVariable || ln.From.Mock != "mock-h" {
+		t.Fatalf("the rule's absence, an answer F served as recorded holds the recorded second: %s from %s (%s); want that answer's variable", ln.Kind, ln.From.Mock, ln.Why)
 	}
 }
 
@@ -570,7 +642,12 @@ func TestAClientTestKeepsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsRef
 // without the offset rule in those windows, the value is refused today by
 // the search for its source too (F served mock-3 and mock-11 with no view an
 // adapter stated, and the windows show no plain read), so the rescue's own
-// restriction to a plain read is not what keeps it refused here.
+// restriction to a plain read is not what keeps it refused here. Where an
+// adapter said F served mock-3 and mock-11 as recorded, no search refuses
+// it there, and the read plus thirty days those windows hold would be
+// learned past the offset rule's refusal if the rescue took a read plus an
+// offset under the rule a copy follows its source: that restriction alone
+// keeps it refused.
 func TestAClientTestKeepsAnOffsetRefusedExpiryOnlyOneRunsOwnWindowHoldsRefused(t *testing.T) {
 	const p = "body.docs.msgs.0.token.expiresAt.$numberLong"
 	const month = 30 * 24 * time.Hour
@@ -589,11 +666,16 @@ func TestAClientTestKeepsAnOffsetRefusedExpiryOnlyOneRunsOwnWindowHoldsRefused(t
 	leaf := func(x copyOrReadRun) Leaf {
 		return Leaf{Path: p, Noise: p, Type: Number, Value: secs(x.at(x.audited).Add(month))}
 	}
-	learn := func(r, f copyOrReadRun) Learned {
+	learn := func(r, f copyOrReadRun, asRecorded bool) Learned {
 		dc := clientTestCache()
 		raw := []Raw{
 			dc.RawOf(stamp("mock-3", r.at(r.audited).Add(month-gap), r.began.Add(-6*time.Minute)), true),
 			dc.RawOf(stamp("mock-11", f.at(f.audited).Add(month-gap), r.began.Add(-5*time.Minute)), true),
+		}
+		if asRecorded {
+			for i := range raw {
+				raw[i] = raw[i].ServedAsRecorded()
+			}
 		}
 		w := (&Window{Rec: r.window(true), F: f.window(true)}).ComparesOffsets()
 		shape := func(x copyOrReadRun) Shape { return Shape{Leaves: map[string]Leaf{p: leaf(x)}} }
@@ -602,15 +684,17 @@ func TestAClientTestKeepsAnOffsetRefusedExpiryOnlyOneRunsOwnWindowHoldsRefused(t
 	if secs(slow.at(slow.audited)) == secs(slow.at(slow.insert)) || secs(rec.at(rec.audited)) != secs(rec.at(rec.insert)) {
 		t.Fatal("fixture: the read must lie in the recording's own window and outside the slow round's")
 	}
-	for _, c := range []struct {
-		name string
-		r, f copyOrReadRun
-	}{
-		{"the recording's own window", rec, slow},
-		{"record's full round's own window", slow, rec},
-	} {
-		if ln := learn(c.r, c.f); ln.Kind != KindUnaccounted || !ln.byOffset || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
-			t.Fatalf("%s alone: %s Read=%+v Offset=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", c.name, ln.Kind, ln.Read, ln.Offset, ln.Why)
+	for _, asRecorded := range []bool{false, true} {
+		for _, c := range []struct {
+			name string
+			r, f copyOrReadRun
+		}{
+			{"the recording's own window", rec, slow},
+			{"record's full round's own window", slow, rec},
+		} {
+			if ln := learn(c.r, c.f, asRecorded); ln.Kind != KindUnaccounted || !ln.byOffset || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
+				t.Fatalf("%s alone, served as recorded %v: %s Read=%+v Offset=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", c.name, asRecorded, ln.Kind, ln.Read, ln.Offset, ln.Why)
+			}
 		}
 	}
 }
@@ -738,8 +822,11 @@ func TestAClientTestLearnsACopyThatIsAlsoAnOffsetOfAGivenInstantAsAReadSinceItsT
 // holds under both, as for a plain read (the row above). Replays inside their
 // test and at its begin pass, for epoch seconds and a typed instant to the
 // second; one a day before its test, one that keeps the recorded value, and
-// one a day longer miss. A value its own window does not hold, a window with
-// no test begin, and ClassifyGiven stay refused by the offset rule.
+// one a day longer miss. ClassifyGiven (the rule's absence: the HTTP learn
+// step's reading) learns the same of epoch seconds, keeping the offset
+// rule's refusal for mock.times: strict; a typed instant, which no HTTP body
+// carries, stays refused there. A value its own window does not hold and a window with
+// no test begin stay refused by the offset rule, under either reading.
 func TestAClientTestLearnsAnOffsetOfAGivenInstantThatIsItsOwnClockPlusAnOffsetAsThatOffsetSinceItsTestBegan(t *testing.T) {
 	const p = "body.cmd.documents.0.app.expiresAt"
 	const month = 30 * 24 * time.Hour
@@ -790,6 +877,25 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantThatIsItsOwnClockPlusAnOffsetAs
 			if ln.Kind != KindClockOffset || !ok || o.Plain() || o.Min > month || o.Max <= month || o.Since != models.SinceTestBegin {
 				t.Fatalf("%s Offset=%+v from %+v (%s); want the clock plus thirty days, checked since the test began", ln.Kind, ln.Offset, ln.From, ln.Why)
 			}
+			// The rule's absence (the HTTP learn step's reading) learns the
+			// same offset, keeping the offset rule's refusal, which
+			// mock.times: strict puts back (OffsetReadUnder).
+			// A typed instant reaches no HTTP learn step (a JSON body carries
+			// none); the typed reading's rescue runs under the rule alone, so
+			// without it a typed instant stays refused by the offset rule.
+			g := learn(fm, rec, f, true, false)
+			if fm.name != forms[0].name {
+				if g.Kind != KindUnaccounted || !strings.Contains(g.Why, offsetRule) {
+					t.Fatalf("the rule's absence (ClassifyGiven), a typed instant: %s (%s); want refused by the offset rule", g.Kind, g.Why)
+				}
+			} else {
+				if og, gok := g.Clock(); g.Kind != KindClockOffset || !gok || !reflect.DeepEqual(og, o) || g.offsetRefused == nil || !offsetHeld(*g.offsetRefused) {
+					t.Fatalf("the rule's absence (ClassifyGiven): %s Offset=%+v (%s), refusal kept %v; want the offset the rule learns, keeping the offset rule's refusal", g.Kind, g.Offset, g.Why, g.offsetRefused != nil)
+				}
+				if s := OffsetReadUnder(g, false); s.Kind != KindUnaccounted || !strings.Contains(s.Why, offsetRule) {
+					t.Fatalf("the rule's absence under mock.times: strict: %s (%s); want the offset rule's refusal", s.Kind, s.Why)
+				}
+			}
 			for _, r := range []struct {
 				name string
 				at   func(r copyOrReadRun) time.Time
@@ -819,7 +925,8 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantThatIsItsOwnClockPlusAnOffsetAs
 			}{
 				{"a value its own window does not hold", early(rec), early(f), true, true},
 				{"a call whose window knows no test begin", rec, f, false, true},
-				{"the rule's absence (ClassifyGiven)", rec, f, true, false},
+				{"the rule's absence (ClassifyGiven), a value its own window does not hold", early(rec), early(f), true, false},
+				{"the rule's absence (ClassifyGiven), a call whose window knows no test begin", rec, f, false, false},
 			} {
 				if ln := learn(fm, c.r, c.f, c.began, c.following); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
 					t.Fatalf("%s: %s Offset=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", c.name, ln.Kind, ln.Offset, ln.Why)
@@ -2020,7 +2127,7 @@ func TestAClientTestLearnsItsAuditReadAnEarlierAnswersClockNameRoundsToAsARead(t
 		// application was given, from the app's createdAt, which in F held
 		// another second than the audit where the insert crossed one.
 		v := dc.ofIn(rec, live, w, r0.Add(254*ms))
-		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil, nil), rec, earlier)
+		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil, nil), rec, live, earlier)
 		// The call's earlier places read once (earlierHeld) are what the
 		// echo reads of them each time it reads them anew.
 		var eh earlierHeld

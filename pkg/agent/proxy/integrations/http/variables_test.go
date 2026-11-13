@@ -485,6 +485,22 @@ func TestVariables_AUseBeforeItsBindingCallIsAMiss(t *testing.T) {
 	wantProblem(t, ok, diag, "before the call that binds it")
 }
 
+// A variable the test binds at a client test case's request, which bound
+// nothing this run, misses saying why (variables.Table.Note), never naming a
+// call that binds it.
+func TestVariables_AUseOfAVariableItsTestCaseBoundNothingSaysWhy(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{perTest: createAndReadBack("ord-rec-1")}
+	db.table.Start(nil)
+	db.table.Note("orderId", "the test binds it at test case post-orders-1's request, at body.id, which bound nothing this run")
+	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/ord-live-9", ""))
+	p := wantProblem(t, ok, diag, "variable orderId is used at url.path[1], and the test binds it at test case post-orders-1's request")
+	if strings.Contains(p.why, "before the call that binds it") || !strings.Contains(p.next, "did not bind it") {
+		t.Fatalf("the miss says %q, next %q", p.why, p.next)
+	}
+}
+
 func TestVariables_ABindingPlaceHoldsTheBoundValue(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h := newHTTP()
