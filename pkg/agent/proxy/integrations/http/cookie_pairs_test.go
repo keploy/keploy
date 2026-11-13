@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -408,7 +409,8 @@ func TestCookiePairsLearnedReadsOnlyHTTPRecordings(t *testing.T) {
 // test began with, one a service set, or a header that changed otherwise is
 // learned as before (nil: the whole header as noise, or the call refused,
 // naming the pairs that differ where only values did), never as the
-// page's.
+// page's. A call that sends no Cookie header sends no pair: each recorded
+// pair is the page's by the same rule.
 func TestLearnMatchLearnsAPairThePageSets(t *testing.T) {
 	const rec = "session=s1; sub=pro"
 	page := map[string][]string{cookieSetByPage + "sub": {}}
@@ -433,7 +435,7 @@ func TestLearnMatchLearnsAPairThePageSets(t *testing.T) {
 		{"set by the page, the first call's Host in capitals", []*models.Mock{hostAt(pageCall("mock-1", -200*time.Millisecond, "session=s1", ""), "API.Test")}, "session=s1", page},
 		{"set by the page beside a service's pair named like it", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "subtotal=9; Path=/")}, "session=s1", page},
 		{"a service set it, its header in lower case", []*models.Mock{lowerSet(pageCall("mock-1", -200*time.Millisecond, "session=s1", ""), "sub=pro")}, "session=s1", whole},
-		{"the call sent no Cookie header", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "", "")}, "", whole},
+		{"the call sent no Cookie header, the page set both pairs", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "", "")}, "", with(page, map[string][]string{cookieSetByPage + "session": {}})},
 		{"no earlier call", nil, "session=s1", whole},
 		{"the test began with it", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, rec, "")}, "session=s1", whole},
 		{"only a call to another host went without it", []*models.Mock{other}, "session=s1", whole},
@@ -453,6 +455,90 @@ func TestLearnMatchLearnsAPairThePageSets(t *testing.T) {
 			}
 			if _, page := got[cookieSetByPage+"sub"]; page || why == "" && !reflect.DeepEqual(got, map[string][]string{cookieLeaf: {}}) {
 				t.Fatalf("learned %v (refused: %q), want the whole header as noise or a refusal", got, why)
+			}
+		})
+	}
+}
+
+// learnCalls runs the learn step on r, a POST /v1/apps, against the test's
+// recordings mocks: the recording it served and what it learned onto it,
+// or why it refused the call.
+func learnCalls(t *testing.T, mocks []*models.Mock, r *req) (string, map[string][]string, string) {
+	t.Helper()
+	h, n, opts := learnOn(t)
+	db := &learnDb{perTest: mocks}
+	served, miss, err := h.learnMatch(context.Background(), r, db, n, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miss != nil {
+		return "", nil, miss.res.Why
+	}
+	if served == nil || len(db.consumed) != 1 {
+		t.Fatalf("served %v, consumed %d", served, len(db.consumed))
+	}
+	return db.consumed[0].Name, db.consumed[0].Spec.ReqBodyNoise, ""
+}
+
+// A call that sends no Cookie header, where its recording sent pairs the
+// page set while its test ran (C1's rule, pair by pair), is read as a call
+// that sends the header with no pair: it pairs with that recording, which
+// learns every pair as the page's, and any other value that drifted as it
+// would. Its miss stands otherwise: a pair the test began with, one a
+// service set, no earlier call; a recording it pairs with as sent; a call
+// that sends a Cookie header (read as sent); a header the recording learned
+// whole (typed noise: one the call lacks differs in more than values); a
+// reading that pairs with no one recording.
+func TestLearnMatchReadsACallWithNoCookieHeader(t *testing.T) {
+	at := func(ms int) time.Duration { return -time.Hour + time.Duration(ms)*time.Millisecond }
+	apps := func(name string, ms int, header map[string]string, body string) *models.Mock {
+		return learnRecorded(name, at(ms), "POST", "/v1/apps", body, header, `{"id":7}`)
+	}
+	call := func(header map[string]string, body string) *req { return live("POST", "/v1/apps", body, header) }
+	without := pageCall("mock-1", -200*time.Millisecond, "", "")
+	learnedWhole := apps("mock-9", 300, map[string]string{"Cookie": "sub=pro"}, `{"name":"zq7w"}`)
+	learnedWhole.Spec.ReqBodyNoise = map[string][]string{cookieLeaf: {}}
+	const missing = "in more than values: header"
+	for _, c := range []struct {
+		name  string
+		mocks []*models.Mock
+		r     *req
+		// served and keys: the recording served and the keys it learned;
+		// else why names the miss.
+		served string
+		keys   []string
+		why    string
+	}{
+		{"the page set every pair", []*models.Mock{without, apps("mock-9", 300, map[string]string{"Cookie": "session=s1; sub=pro"}, `{"name":"a"}`)}, call(nil, `{"name":"a"}`),
+			"mock-9", []string{cookieSetByPage + "session", cookieSetByPage + "sub"}, ""},
+		{"the page set its only pair, another value drifted", []*models.Mock{without, apps("mock-9", 300, map[string]string{"Cookie": "sub=pro"}, `{"name":"zq7w"}`)}, call(nil, `{"name":"yv3x"}`),
+			"mock-9", []string{"body.name", cookieSetByPage + "sub"}, ""},
+		{"the test began with a pair", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", ""), apps("mock-9", 300, map[string]string{"Cookie": "session=s1; sub=pro"}, `{"name":"a"}`)}, call(nil, `{"name":"a"}`),
+			"", nil, missing},
+		{"a service set the pair", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "", "sub=pro; Path=/"), apps("mock-9", 300, map[string]string{"Cookie": "sub=pro"}, `{"name":"a"}`)}, call(nil, `{"name":"a"}`),
+			"", nil, missing},
+		{"no earlier call", []*models.Mock{apps("mock-9", 300, map[string]string{"Cookie": "sub=pro"}, `{"name":"a"}`)}, call(nil, `{"name":"a"}`),
+			"", nil, missing},
+		{"a recording it pairs with as sent", []*models.Mock{without, apps("mock-5", 250, nil, `{"name":"zq7w"}`), apps("mock-9", 300, map[string]string{"Cookie": "sub=pro"}, `{"name":"yv3x"}`)}, call(nil, `{"name":"yv3x"}`),
+			"mock-5", []string{"body.name"}, ""},
+		{"a call that sends a Cookie header", []*models.Mock{without, apps("mock-8", 300, map[string]string{"Cookie": "sub=pro"}, `{"name":"a"}`), apps("mock-9", 310, map[string]string{"Cookie": "x=1"}, `{"name":"b"}`)}, call(map[string]string{"Cookie": "x=1"}, `{"name":"a"}`),
+			"", nil, "differ from it as much"},
+		{"the header learned whole", []*models.Mock{without, learnedWhole}, call(nil, `{"name":"yv3x"}`),
+			"", nil, missing},
+		{"no one recording pairs", []*models.Mock{without, apps("mock-8", 300, map[string]string{"Cookie": "sub=pro", "X-Trace": "t2"}, `{"name":"b"}`), apps("mock-9", 310, map[string]string{"Cookie": "sub=pro", "X-Trace": "t1"}, `{"name":"a"}`)}, call(map[string]string{"X-Trace": "t2"}, `{"name":"a"}`),
+			"", nil, missing},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			served, got, why := learnCalls(t, c.mocks, c.r)
+			if c.why != "" {
+				if !strings.Contains(why, c.why) {
+					t.Fatalf("served %q learned %v (refused: %q), want a miss naming %q", served, got, why, c.why)
+				}
+				return
+			}
+			keys := slices.Sorted(maps.Keys(got))
+			if why != "" || served != c.served || !slices.Equal(keys, c.keys) {
+				t.Fatalf("served %q learned %v (refused: %q), want %s learning %v", served, keys, why, c.served, c.keys)
 			}
 		})
 	}
@@ -525,8 +611,11 @@ func TestLearnMatchLearnsCookiePairsOneByOne(t *testing.T) {
 
 // A replay serves a call that goes without a pair its mock learned as the
 // page's, and compares every other pair, the page's own value where it is
-// sent, and a header keploy.yml's patterns guard as before.
+// sent, and a header keploy.yml's patterns guard as before. A call that
+// sends no Cookie header is served only where every recorded pair is the
+// page's; another header it does not send is still missing.
 func TestStrictServesACallWithoutAPairThePageSets(t *testing.T) {
+	both := map[string][]string{cookieSetByPage + "session": {}, cookieSetByPage + "sub": {}}
 	for _, c := range []struct {
 		name    string
 		learned map[string][]string
@@ -553,6 +642,14 @@ func TestStrictServesACallWithoutAPairThePageSets(t *testing.T) {
 		{"a value the race did not set", raced("session", "s1", "s2"), nil, "session=s3; sub=pro", false, "header.cookie (pair session holds another value)"},
 		{"the race's value, another pair changed", raced("session", "s1", "s2"), nil, "session=s2; sub=free", false, "header.cookie (pair session holds another value; pair sub holds another value)"},
 		{"the race's value, keploy.yml's patterns guard the header", raced("session", "s1", "s2"), map[string][]string{"cookie": {"^z$"}}, "session=s2; sub=pro", false, "header.cookie (pair session holds another value)"},
+		// "-": the call sends no such header, no pair at all.
+		{"no Cookie header, every pair the page's", both, nil, "-", true, ""},
+		{"every pair the page's, one sent with another value", both, nil, "session=s2; sub=pro", false, "header.cookie (pair session holds another value)"},
+		{"no Cookie header, one pair the page's", map[string][]string{cookieSetByPage + "sub": {}}, nil, "-", false, "header.cookie"},
+		{"no Cookie header, nothing learned", nil, nil, "-", false, "header.cookie"},
+		{"no Cookie header, keploy.yml's patterns guard the header", both, map[string][]string{"cookie": {"^z$"}}, "-", false, "header.cookie"},
+		{"no Cookie header, a race's pair beside the page's", with(raced("session", "s1", "s2"), map[string][]string{cookieSetByPage + "sub": {}}), nil, "-", false, "header.cookie"},
+		{"no other header holding pairs", both, nil, "x-jar:-", false, "header.x-jar"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			name, live := "Cookie", c.live
@@ -561,7 +658,11 @@ func TestStrictServesACallWithoutAPairThePageSets(t *testing.T) {
 			}
 			rec := recorded("m", "/v1/apps", map[string]string{name: "session=s1; sub=pro"}, "")
 			rec.Spec.ReqBodyNoise = c.learned
-			got, diag := strictMatch(t, sent("/v1/apps", map[string]string{name: live}, ""), c.noise, nil, nil, rec)
+			header := map[string]string{name: live}
+			if live == "-" {
+				header = nil
+			}
+			got, diag := strictMatch(t, sent("/v1/apps", header, ""), c.noise, nil, nil, rec)
 			if (got != nil) != c.served {
 				t.Fatalf("served %v, want %v (differs %v)", got != nil, c.served, differs(diag))
 			}
@@ -606,7 +707,21 @@ func TestExcusedPairOfAPairThePageSets(t *testing.T) {
 		t.Fatal("a changed session is excused")
 	}
 	if ok, _ := k.ExcusedPair(rec, gone, true, false); ok {
-		t.Fatal("a header the call did not send is excused")
+		t.Fatal("a header the call did not send is excused where a pair is not the page's")
+	}
+	// A call that sends no Cookie header (the zero leaf) where every
+	// recorded pair is the page's: excused, and untyped so the leaf may be
+	// missing; the same pairs on a header keploy.yml's patterns guard, or
+	// on another header, are not.
+	allPage := httpKnown{n: n, learned: map[string][]string{cookieSetByPage + "session": {}, cookieSetByPage + "sub": {}}}
+	if ok, typed := allPage.ExcusedPair(rec, learn.Leaf{}, true, false); !ok || typed {
+		t.Fatalf("a call with no Cookie header, every pair the page's: excused %v typed %v, want excused untyped", ok, typed)
+	}
+	if ok, typed := allPage.ExcusedPair(rec, gone, true, true); !ok || !typed {
+		t.Fatalf("the page's pair gone: excused %v typed %v, want excused typed", ok, typed)
+	}
+	if ok, _ := allPage.ExcusedPair(learn.Leaf{}, rec, false, true); ok {
+		t.Fatal("a Cookie header the recording lacks is excused")
 	}
 	racedLive, notRaced := rec, rec
 	racedLive.Value, notRaced.Value = "session=s2; sub=pro", "session=s3; sub=pro"
@@ -622,9 +737,15 @@ func TestExcusedPairOfAPairThePageSets(t *testing.T) {
 	if ok, _ := k.ExcusedPair(jar, jarGone, true, true); ok {
 		t.Fatal("another header holding pairs is excused")
 	}
+	if ok, _ := allPage.ExcusedPair(jar, learn.Leaf{}, true, false); ok {
+		t.Fatal("another header holding pairs, not sent, is excused")
+	}
 	opts.NoiseConfig = map[string]map[string][]string{"header": {"cookie": {"^z$"}}}
 	if ok, _ := (httpKnown{n: h.newLearnNoise(opts, nil, nil), learned: learned}).ExcusedPair(rec, gone, true, true); ok {
 		t.Fatal("a header keploy.yml's patterns guard is excused")
+	}
+	if ok, _ := (httpKnown{n: h.newLearnNoise(opts, nil, nil), learned: allPage.learned}).ExcusedPair(rec, learn.Leaf{}, true, false); ok {
+		t.Fatal("a header keploy.yml's patterns guard, not sent, is excused")
 	}
 }
 
