@@ -356,6 +356,33 @@ func TestFetchServerGreetingShared_CancelledCallerNeverDials(t *testing.T) {
 	}
 }
 
+// A caller at the recording's stop takes the greeting remembered for its server:
+// that reaches no server, and the connection's capture, still being read, needs
+// it. Before, the stop refused it as it refuses a dial, and the connection was
+// left out.
+func TestFetchServerGreetingShared_ACallerAtTheStopTakesTheRememberedGreeting(t *testing.T) {
+	t.Parallel()
+	srv := startFakeMySQLGreeter(t, cannedHandshakeV10(t), 0)
+	store := models.NewTLSHandshakeStore()
+	opts := models.OutgoingOptions{
+		DstCfg:           &models.ConditionalDstCfg{Addr: srv.addr, Port: 3306},
+		PassThroughScope: "ns/app/ts0",
+		NetNS:            testNetNS,
+	}
+	remembered := cannedHandshakeV10(t)
+	store.RememberServerGreeting(greetingMemoKey(opts), remembered, "server-a")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := fetchServerGreetingShared(ctx, zap.NewNop(), store, opts)
+	if err != nil || !bytes.Equal(got, remembered) {
+		t.Fatalf("got %d bytes, err %v; want the remembered greeting", len(got), err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := srv.accepted.Load(); n != 0 {
+		t.Fatalf("a caller at the stop dialled the server %d times", n)
+	}
+}
+
 // A fabricated destination is never dialled, however many callers ask, and
 // nothing is remembered under its (stand-in) address.
 func TestFetchServerGreetingShared_FabricatedDestNeverDials(t *testing.T) {

@@ -483,13 +483,14 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 	// under CPU pressure it can land arbitrarily late — a short fixed timeout
 	// here converted that lateness into total capture loss (the CI "served but
 	// NOT recorded" shortfall). For a fresh connection resolvePreTLSGreeting
-	// waits (bounded by ctx and by the store TTL) for this connection's own
+	// waits (bounded by the parser's teardown, not the recording's stop, and by
+	// the store TTL) for this connection's own
 	// greeting, but falls back FAST to the port's last-greeting cache when the
 	// raw leg was genuinely dropped — so a dropped leg does not stall the whole
 	// overall window and push the COM_QUERY decode past the CI (2a) gate. A
 	// connection that joined mid-stream does not wait at all: see
 	// resolvePreTLSGreeting.
-	entry, taker, source := resolvePreTLSGreeting(ctx, hsStore, models.HandshakeOwnerOf(sess.Opts), dstPort, sess.Opts.PassThroughScope, sess.Opts.NetNS, sess.Opts.DstCfg, joinedMidStream)
+	entry, taker, source := resolvePreTLSGreeting(ctx, sess, hsStore, models.HandshakeOwnerOf(sess.Opts), dstPort, sess.Opts.PassThroughScope, sess.Opts.NetNS, sess.Opts.DstCfg, joinedMidStream)
 	// A greetingShared entry came off the port's queue without being provably
 	// this connection's (the capture layer could not name its connection on one
 	// of the legs), so it may be another stream's, which draws from the same
@@ -1047,9 +1048,13 @@ const (
 //     `overall`, since nothing better can serve this connection. The caller
 //     then consults the per-server memo, and only then dials.
 //
-// ctx cancellation (stream/session teardown) cuts any wait short within one
-// poll slice. On a final miss it returns greetingNone so the caller can
-// fetchServerGreetingShared / abort cleanly.
+// ctx cancellation (the parser's teardown: a hang, a panic, the memory cap)
+// cuts any wait short within one poll slice. The recording's stop, which
+// cancels ctx too, does not (sess.RecordingStopping): the raw leg's greeting
+// was captured before the stop as this stream's bytes were, and its parser
+// reads what was captured to its stream's end and pushes the greeting then, so
+// the wait goes on to its bounds. On a final miss it returns greetingNone so
+// the caller can fetchServerGreetingShared / abort cleanly.
 //
 // Every raw leg pushes its entry once, under the destination port's key,
 // tagged with the connection identity the capture layer gave it (owner; see
@@ -1087,7 +1092,7 @@ const (
 // greeting. Main waited out the stash bound (30s default) per pooled
 // connection at every recording start, and took every entry that landed on the
 // port meanwhile.
-func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStore, owner models.HandshakeOwner, dstPort uint16, scope, netNS string, dst *models.ConditionalDstCfg, joinedMidStream bool) (models.TLSHandshakeEntry, models.HandshakeOwner, preTLSGreetingSource) {
+func resolvePreTLSGreeting(ctx context.Context, sess *supervisor.Session, hsStore *models.TLSHandshakeStore, owner models.HandshakeOwner, dstPort uint16, scope, netNS string, dst *models.ConditionalDstCfg, joinedMidStream bool) (models.TLSHandshakeEntry, models.HandshakeOwner, preTLSGreetingSource) {
 	portKey := models.HandshakeStoreKey("", dstPort)
 	// The cross-connection fallback has TWO keys. One names the destination: the
 	// fields it lets us reuse (capability flags, protocol version, auth plugin)
@@ -1217,8 +1222,9 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 				return entry, models.HandshakeOwner{}, greetingCached
 			}
 		}
-		// 3. Overall bound / teardown.
-		if !now.Before(overallDeadline) || ctx.Err() != nil {
+		// 3. Overall bound / teardown. Not the recording's stop: the raw leg's
+		//    parser still pushes what was captured before it.
+		if !now.Before(overallDeadline) || (ctx.Err() != nil && !sess.RecordingStopping()) {
 			break
 		}
 		// 4. Block on the port's queue, waking the moment a Push broadcasts the

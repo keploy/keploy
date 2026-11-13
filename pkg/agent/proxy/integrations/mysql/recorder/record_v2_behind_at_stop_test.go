@@ -253,3 +253,117 @@ func TestRecordV2_PostTLS_APrepareHeldAtTheStopIsSettledByWhatTheServerSent(t *t
 		t.Fatalf("the PREPARE recorded %+v; want its 2 definitions and the EOF it was sent", mocks[0].Spec.MySQLResponses[0].Message)
 	}
 }
+
+// stoppedRecording is a recording that has stopped: the parser's context ends
+// with it, and the session is told (RecordingDone).
+func stoppedRecording(parent context.Context, sess *supervisor.Session) context.Context {
+	ctx, cancel := context.WithCancel(parent)
+	cancel()
+	sess.Ctx = ctx
+	sess.RecordingDone = ctx.Done()
+	return ctx
+}
+
+// TestResolvePreTLSGreeting_TheStopDoesNotEndTheWait: the recording stops
+// before the raw leg's parser reads the greeting it captured, and that parser
+// pushes it 150 ms into the decrypted stream's wait. The wait takes it: the
+// stop ends the parser's context, but the greeting it waits for was captured
+// before the stop. Before, the stop ended the wait at once and the
+// connection's capture was left out.
+func TestResolvePreTLSGreeting_TheStopDoesNotEndTheWait(t *testing.T) {
+	t.Parallel()
+	store := models.NewTLSHandshakeStore()
+	sess := &supervisor.Session{}
+	ctx := stoppedRecording(context.Background(), sess)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		store.Push(models.HandshakeStoreKey("", 3306), models.TLSHandshakeEntry{RespPackets: [][]byte{[]byte("own-greeting")}})
+	}()
+	entry, _, source := resolvePreTLSGreeting(ctx, sess, store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
+	if source == greetingNone || len(entry.RespPackets) != 1 || string(entry.RespPackets[0]) != "own-greeting" {
+		t.Fatalf("source %v, entry %+v; want the greeting the raw leg pushed after the stop", source, entry)
+	}
+}
+
+// TestResolvePreTLSGreeting_AtTheStopTheWaitKeepsItsBound: a raw leg that never
+// pushes leaves the wait at the stop to its overall bound, not to the stop
+// and not beyond the bound.
+func TestResolvePreTLSGreeting_AtTheStopTheWaitKeepsItsBound(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "300")
+	store := models.NewTLSHandshakeStore()
+	sess := &supervisor.Session{}
+	ctx := stoppedRecording(context.Background(), sess)
+	start := time.Now()
+	sources := make(chan preTLSGreetingSource, 1)
+	go func() {
+		_, _, source := resolvePreTLSGreeting(ctx, sess, store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
+		sources <- source
+	}()
+	select {
+	case source := <-sources:
+		if source != greetingNone {
+			t.Fatalf("source = %v, want greetingNone: nothing was pushed", source)
+		}
+		if elapsed := time.Since(start); elapsed < 300*time.Millisecond {
+			t.Fatalf("the wait at the stop took %v; want its 300ms bound", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait at the stop did not end at its 300ms bound")
+	}
+}
+
+// TestRecordV2_PostTLS_AConnectionCapturedBeforeTheStopIsRecordedWithItsGreeting:
+// a fresh TLS connection's decrypted streams hold its HandshakeResponse41 and a
+// query with their answers, all captured, none read, when the recording stops;
+// the relay has ended both streams. Its raw leg's parser pushes the pre-TLS
+// greeting 150 ms after the recorder starts waiting for it. The connection is
+// recorded whole: its config mock with the greeting and SSLRequest, and its
+// query. Before, the stop ended the wait at once, the recorder refused to dial
+// the server at the stop, and the connection was left out.
+func TestRecordV2_PostTLS_AConnectionCapturedBeforeTheStopIsRecordedWithItsGreeting(t *testing.T) {
+	t.Parallel()
+	h := newV2Harness(t)
+	base := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	handshakeBuf := cannedHandshakeV10(t)
+	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), handshakeBuf[4:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.pushClient(cannedHandshakeResponse41(t, 2, false), base.Add(5*time.Millisecond))
+	h.pushDest(cannedOK(t, 3, greeting.CapabilityFlags), base.Add(10*time.Millisecond))
+	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base.Add(20*time.Millisecond))
+	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
+	h.closeStreams()
+	store := models.NewTLSHandshakeStore()
+	ctx := stoppedRecording(postTLSCtxWithStore(store), h.sess)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		store.Push(models.HandshakeStoreKey("", 3306), models.TLSHandshakeEntry{
+			RespPackets:  [][]byte{handshakeBuf},
+			ReqPackets:   [][]byte{cannedSSLRequest(t, 1)},
+			ReqTimestamp: base,
+		})
+	}()
+	done := make(chan error, 1)
+	go func() { done <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RecordV2 = %v, want nil: the greeting was captured before the stop", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("RecordV2 did not return")
+	}
+	got := takeMocks(h, 2)
+	if len(got) != 2 {
+		t.Fatalf("%d mock(s); want the config mock and the query's", len(got))
+	}
+	if got[0].Name != "config" || len(got[0].Spec.MySQLResponses) < 1 || len(got[0].Spec.MySQLRequests) < 2 {
+		t.Fatalf("first mock %q with %d request(s), %d response(s); want the config mock with the SSLRequest, the HandshakeResponse41 and the greeting",
+			got[0].Name, len(got[0].Spec.MySQLRequests), len(got[0].Spec.MySQLResponses))
+	}
+	if !got[0].Spec.ReqTimestampMock.Equal(base) {
+		t.Errorf("config ReqTimestampMock = %v, want the raw leg's %v", got[0].Spec.ReqTimestampMock, base)
+	}
+	assertQueryMock(t, got[1])
+}

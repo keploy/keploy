@@ -282,7 +282,7 @@ func TestResolvePreTLSGreeting_CtxCancelUnblocks(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, _, source := resolvePreTLSGreeting(ctx, store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
+	_, _, source := resolvePreTLSGreeting(ctx, nil, store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
 	elapsed := time.Since(start)
 	if source != greetingNone {
 		t.Fatalf("resolvePreTLSGreeting must return greetingNone on an empty store, got %v", source)
@@ -316,7 +316,7 @@ func TestResolvePreTLSGreeting_DroppedLegHitsCacheAtPrimaryBound(t *testing.T) {
 	})
 
 	start := time.Now()
-	entry, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
+	entry, _, source := resolvePreTLSGreeting(context.Background(), nil, store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
 	elapsed := time.Since(start)
 	if source != greetingCached {
 		t.Fatalf("source = %v, want greetingCached (the dropped-leg cache fallback)", source)
@@ -358,7 +358,7 @@ func TestResolvePreTLSGreeting_OwnLatePreferredOverCache(t *testing.T) {
 		})
 	}()
 
-	entry, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
+	entry, _, source := resolvePreTLSGreeting(context.Background(), nil, store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.5:3306"), false)
 	if source != greetingShared {
 		t.Fatalf("source = %v, want greetingShared (a late own leg within the primary bound beats the cache)", source)
 	}
@@ -387,7 +387,7 @@ func TestResolvePreTLSGreeting_DoesNotServeOneServersGreetingToAnother(t *testin
 	// A different server, same port. Past the primary bound the fallback would
 	// fire if the cache were port-keyed.
 	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "0")
-	_, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.9:3306"), false)
+	_, _, source := resolvePreTLSGreeting(context.Background(), nil, store, models.HandshakeOwner{}, 3306, "", "", testDst("10.0.0.9:3306"), false)
 	if source == greetingCached {
 		t.Fatal("served server A's greeting to a connection destined for server B; the cache must be " +
 			"scoped to a server, not to a port")
@@ -409,14 +409,14 @@ func TestResolvePreTLSGreeting_DoesNotServeOneAppsGreetingToAnother(t *testing.T
 	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "0")
 
 	// App B, same placeholder address, different scope: must NOT borrow.
-	if _, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306,
+	if _, _, source := resolvePreTLSGreeting(context.Background(), nil, store, models.HandshakeOwner{}, 3306,
 		"ns/app-b/test-set-0", "", fabricated(), false); source == greetingCached {
 		t.Fatal("served app A's greeting to app B; a store shared across a node must isolate by scope")
 	}
 
 	// App A itself must still get the fallback — this is the case the feature
 	// exists for, and a fabricated address must not disable it.
-	if _, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306,
+	if _, _, source := resolvePreTLSGreeting(context.Background(), nil, store, models.HandshakeOwner{}, 3306,
 		"ns/app-a/test-set-0", "", fabricated(), false); source != greetingCached {
 		t.Fatalf("app A lost its own cached fallback (source=%v); the fabricated proxyless "+
 			"destination is exactly the case this fallback was built for", source)
@@ -602,7 +602,7 @@ func TestResolvePreTLSGreeting_PortKeyRefusesCrossServer(t *testing.T) {
 		models.TLSHandshakeEntry{RespPackets: [][]byte{{0x0a, 'B'}}})
 
 	fabricated := &models.ConditionalDstCfg{Addr: "127.0.0.1:3306", Port: 3306, AddrFabricated: true}
-	if _, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306, scope, "", fabricated, false); source == greetingCached {
+	if _, _, source := resolvePreTLSGreeting(context.Background(), nil, store, models.HandshakeOwner{}, 3306, scope, "", fabricated, false); source == greetingCached {
 		t.Error("resolver served a greeting from a port key that has seen two servers — " +
 			"the borrower would stitch the wrong capability flags into its config mock")
 	}
@@ -624,7 +624,7 @@ func TestResolvePreTLSGreeting_UnscopedSidecarStillRecovers(t *testing.T) {
 	// Reader: the decrypted leg, destination unresolved, so its address is a
 	// stand-in that cannot match the writer's address key.
 	fabricated := &models.ConditionalDstCfg{Addr: "127.0.0.1:3306", Port: 3306, AddrFabricated: true}
-	entry, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306, "", "", fabricated, false)
+	entry, _, source := resolvePreTLSGreeting(context.Background(), nil, store, models.HandshakeOwner{}, 3306, "", "", fabricated, false)
 	if source != greetingCached {
 		t.Fatalf("unscoped caller did not recover the greeting (source=%v); the fix would be inert "+
 			"in every OSS deployment", source)
@@ -657,7 +657,7 @@ func TestResolvePreTLSGreeting_ResolvedReaderIgnoresPortKey(t *testing.T) {
 
 			// A different server, whose destination this leg resolved perfectly.
 			resolved := &models.ConditionalDstCfg{Addr: "10.0.0.9:3306", Port: 3306}
-			if _, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306, scope, "", resolved, false); source == greetingCached {
+			if _, _, source := resolvePreTLSGreeting(context.Background(), nil, store, models.HandshakeOwner{}, 3306, scope, "", resolved, false); source == greetingCached {
 				t.Error("a leg that knows its own destination was served another server's greeting " +
 					"from the port key; it must fall through and fetch its own")
 			}
@@ -761,7 +761,7 @@ func TestResolvePreTLSGreeting_LatchedPortKeyDeclinesAddressBucket(t *testing.T)
 	store.RememberLast(models.HandshakeLastKey(scope, fab),
 		models.TLSHandshakeEntry{RespPackets: [][]byte{{0x0a, 'C'}}})
 
-	if _, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306, scope, "", fab, false); source == greetingCached {
+	if _, _, source := resolvePreTLSGreeting(context.Background(), nil, store, models.HandshakeOwner{}, 3306, scope, "", fab, false); source == greetingCached {
 		t.Error("served from the identity-less address bucket after the port key was latched; " +
 			"a latch is proof that this scope+port has more than one server")
 	}
@@ -915,7 +915,7 @@ func TestResolvePreTLSGreeting_PortKeyWinsOverSharedAddressBucket(t *testing.T) 
 	store.RememberLast(models.HandshakeLastKey(scope, fab),
 		models.TLSHandshakeEntry{RespPackets: [][]byte{{0x0a, 'B'}}})
 
-	entry, _, source := resolvePreTLSGreeting(context.Background(), store, models.HandshakeOwner{}, 3306, scope, "", fab, false)
+	entry, _, source := resolvePreTLSGreeting(context.Background(), nil, store, models.HandshakeOwner{}, 3306, scope, "", fab, false)
 	if source != greetingCached {
 		t.Fatalf("no cached greeting served (source=%v)", source)
 	}
@@ -939,12 +939,12 @@ func TestResolvePreTLSGreeting_GateHandlesNilAndEmptyAddr(t *testing.T) {
 		return s
 	}
 	// A nil DstCfg must not panic, and cannot be a "resolved" reader.
-	if _, _, source := resolvePreTLSGreeting(context.Background(), seed(), models.HandshakeOwner{}, 3306, scope, "", nil, false); source != greetingCached {
+	if _, _, source := resolvePreTLSGreeting(context.Background(), nil, seed(), models.HandshakeOwner{}, 3306, scope, "", nil, false); source != greetingCached {
 		t.Errorf("nil DstCfg: source = %v, want the port key to answer", source)
 	}
 	// A DstCfg with no address is likewise unresolved.
 	noAddr := &models.ConditionalDstCfg{Port: 3306}
-	if _, _, source := resolvePreTLSGreeting(context.Background(), seed(), models.HandshakeOwner{}, 3306, scope, "", noAddr, false); source != greetingCached {
+	if _, _, source := resolvePreTLSGreeting(context.Background(), nil, seed(), models.HandshakeOwner{}, 3306, scope, "", noAddr, false); source != greetingCached {
 		t.Errorf("empty Addr: source = %v, want the port key to answer", source)
 	}
 }
@@ -1094,7 +1094,7 @@ func TestResolvePreTLSGreeting_ConnKeyedEntryIsOwnNotShared(t *testing.T) {
 	store.PushFor(portKey, connB, models.TLSHandshakeEntry{RespPackets: [][]byte{[]byte("B")}})
 	store.PushFor(portKey, connA, models.TLSHandshakeEntry{RespPackets: [][]byte{[]byte("A")}})
 
-	entry, taker, source := resolvePreTLSGreeting(context.Background(), store, connA, 3306, "", "", testDst("10.0.0.5:3306"), false)
+	entry, taker, source := resolvePreTLSGreeting(context.Background(), nil, store, connA, 3306, "", "", testDst("10.0.0.5:3306"), false)
 	if source != greetingOwn || taker != connA {
 		t.Fatalf("source = %v (owner %v), want greetingOwn for the entry pushed under its own identity", source, taker)
 	}
@@ -1748,10 +1748,10 @@ func TestResolvePreTLSGreeting_JoinedConnLeavesAFreshConnsLeg(t *testing.T) {
 				store.RememberLast(models.HandshakeLastKey("s", dst), own)
 				fresh := make(chan models.TLSHandshakeEntry, 1)
 				go func() {
-					e, _, _ := resolvePreTLSGreeting(context.Background(), store, tc.fresh, 3306, "s", "", dst, false)
+					e, _, _ := resolvePreTLSGreeting(context.Background(), nil, store, tc.fresh, 3306, "s", "", dst, false)
 					fresh <- e
 				}()
-				if e, _, src := resolvePreTLSGreeting(context.Background(), store, tc.pooled, 3306, "s", "", dst, true); src != greetingCached {
+				if e, _, src := resolvePreTLSGreeting(context.Background(), nil, store, tc.pooled, 3306, "s", "", dst, true); src != greetingCached {
 					t.Fatalf("iteration %d: the pooled connection got %v from %v, want the cache: the queue "+
 						"held only the fresh connection's leg", i, e, src)
 				}
@@ -1774,7 +1774,7 @@ func TestResolvePreTLSGreeting_JoinedConnTakesItsOwnEntry(t *testing.T) {
 	store.PushFor(portKey, connA, models.TLSHandshakeEntry{RespPackets: [][]byte{{0x0a, 'o'}}})
 
 	start := time.Now()
-	entry, _, source := resolvePreTLSGreeting(context.Background(), store, connA, 3306, "", "", testDst("10.0.0.5:3306"), true)
+	entry, _, source := resolvePreTLSGreeting(context.Background(), nil, store, connA, 3306, "", "", testDst("10.0.0.5:3306"), true)
 	if source != greetingOwn || len(entry.RespPackets) != 1 || entry.RespPackets[0][1] != 'o' {
 		t.Fatalf("got %v from source %v, want the own entry", entry, source)
 	}
@@ -1824,7 +1824,7 @@ func TestResolvePreTLSGreeting_PairsEachStreamWithItsOwnLeg(t *testing.T) {
 				wg.Add(1)
 				go func(i int) {
 					defer wg.Done()
-					e, _, src := resolvePreTLSGreeting(context.Background(), store, tc.ownerOf(i), 3306, "s", "", dst, false)
+					e, _, src := resolvePreTLSGreeting(context.Background(), nil, store, tc.ownerOf(i), 3306, "s", "", dst, false)
 					if src == greetingNone {
 						got[i] = 0xff
 						return
