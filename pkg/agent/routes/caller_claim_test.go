@@ -62,6 +62,45 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// CallerPID names the process that sent a request (this test binary run
+// again), not the server's own, so a server other than the agent that answers
+// the agent's routes reads callers as the agent does.
+func TestCallerPIDNamesTheSendingProcess(t *testing.T) {
+	type caller struct {
+		pid int
+		err error
+	}
+	read := make(chan caller, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		pid, err := CallerPID(r)
+		read <- caller{pid, err}
+	}))
+	defer srv.Close()
+	c := exec.Command(os.Args[0], "-test.run=^$")
+	c.Env = append(os.Environ(), envClaimFrom+"="+srv.URL)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("the sending child failed: %v: %s", err, out)
+	}
+	var got caller
+	select {
+	case got = <-read:
+	default:
+		t.Fatal("the server read no request")
+	}
+	if got.err != nil || got.pid != c.Process.Pid {
+		t.Fatalf("CallerPID = %d, %v; want the child %d", got.pid, got.err, c.Process.Pid)
+	}
+}
+
+// A request with no connection behind it names no caller: CallerPID says so
+// rather than naming a process.
+func TestCallerPIDIsAnErrorWithNoConnection(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/agent/instance", strings.NewReader("{}"))
+	if pid, err := CallerPID(r); err == nil {
+		t.Fatalf("CallerPID = %d with no connection, want an error", pid)
+	}
+}
+
 // The claim reads the caller from the connection: a claim made by another
 // process (this test binary run again) hands the service that process's ID,
 // not the server's, and a pid in the body is ignored.
