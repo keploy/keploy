@@ -274,7 +274,7 @@ func (captureless) ExactTestOutcome() (string, []string, []string, bool) {
 // wireAgent is an agent whose CLI (its registered client) is this test
 // process's parent, so the test process and its children are the run's. The
 // proven switch is on: the wire is served only under it.
-func wireAgent(t *testing.T, mode models.Mode) (*Agent, *wireProxy) {
+func wireAgent(t testing.TB, mode models.Mode) (*Agent, *wireProxy) {
 	t.Setenv(provenswitch.Env, "1")
 	p := &wireProxy{served: map[string]uint64{}}
 	cfg := &config.Config{}
