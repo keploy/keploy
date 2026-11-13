@@ -589,7 +589,15 @@ func (t *tee) drain() {
 	// waits on done and then closes the FakeConns, so that close comes after
 	// endStream has read consumerGone. Signalled first, it could land before
 	// that read and leave open a stream that ended normally (ErrClosed).
+	// look is the drain's look at a parser that takes none of what it was
+	// handed while its connection is open (parserLook): it is not abandoned
+	// for that, but the process's stacks are written down once
+	// (parserStalled). Armed as the drain waits, on an empty queue or a full
+	// channel, it goes on across chunks, so it measures from when the parser
+	// last took anything, however few bytes wait.
+	var look parserLook
 	defer func() {
+		look.stop()
 		t.endStream()
 		close(t.done)
 	}()
@@ -619,6 +627,8 @@ func (t *tee) drain() {
 			select {
 			case <-t.wake:
 			case <-t.shutdown:
+			case <-t.armLook(&look):
+				t.lookedAt(&look, len(t.out))
 			}
 			continue
 		}
@@ -691,13 +701,9 @@ func (t *tee) drain() {
 		// a live consumer's chunks (TestTee_SlowConsumerLosesNothing, at
 		// host load 9). See utils/stall for how the time is measured.
 		//
-		// look watches the same window while the connection is open: a
-		// consumer that frees nothing for it is not abandoned, but the
-		// process's stacks are written down once (parserStalled). Armed once
-		// for the chunk, so it measures from the first wait whatever close()
-		// does meanwhile; a drain that first waits after close() has the
-		// stall bound's own verdict to say it.
-		look, lookC := t.lookAtStall()
+		// look watches the parser here too: a look armed before close() goes
+		// on; a drain that first waits after close() has the stall bound's
+		// own verdict to say it.
 	deliver:
 		for {
 			var meter *stall.Meter
@@ -717,7 +723,6 @@ func (t *tee) drain() {
 				select {
 				case t.out <- c:
 					meter.Stop()
-					look.Stop()
 					break deliver
 
 				case <-t.consumerGone:
@@ -725,19 +730,11 @@ func (t *tee) drain() {
 					// and the verdict covers the whole connection, not just
 					// the chunk in hand.
 					meter.Stop()
-					look.Stop()
 					t.abandon(c)
 					return
 
-				case <-lookC:
-					if !look.Expired() {
-						lookC = look.Wait()
-						continue
-					}
-					stalled := look.Stalled()
-					look.Stop()
-					look, lookC = nil, nil
-					parserStalled(t.logger, t.dir, stalled, len(t.out)+1)
+				case <-t.armLook(&look):
+					t.lookedAt(&look, len(t.out)+1)
 					continue
 
 				case <-stallC:
@@ -755,8 +752,9 @@ func (t *tee) drain() {
 					// stopped one costs one window total.
 					stalled := meter.Stalled()
 					meter.Stop()
-					look.Stop()
-					parserStalled(t.logger, t.dir, stalled, len(t.out)+1)
+					look.stop()
+					_, waiting := t.parserWaiting()
+					parserStalled(t.logger, t.dir, stalled, len(t.out)+1, waiting)
 					t.abandon(c)
 					return
 

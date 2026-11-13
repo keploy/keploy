@@ -26,8 +26,8 @@ func newTestTeeClock(t *testing.T, capBytes int64, buf int, clk stall.Clock) (*t
 // newClosedTestTeeClock is newTestTeeClock for a tee closed with chunks queued
 // before its drain starts: the drain first waits on its consumer after
 // close(), so the stall bound's verdict is all that measures the stall (a
-// drain that waits while the tee is open looks at the stall too:
-// lookAtStall), and the looks the clock is asked for are the verdict's alone.
+// drain that waits while the tee is open looks at its parser too:
+// armLook), and the looks the clock is asked for are the verdict's alone.
 func newClosedTestTeeClock(t *testing.T, capBytes int64, buf int, clk stall.Clock, chunks ...fakeconn.Chunk) (*tee, *dropRecorder) {
 	t.Helper()
 	rec := &dropRecorder{}
