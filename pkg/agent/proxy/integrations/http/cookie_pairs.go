@@ -1,6 +1,8 @@
 package http
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"slices"
 	"strconv"
@@ -126,72 +128,176 @@ func pairName(name string) string {
 // covered by it (learnedCovers).
 const cookieSetByPage = cookieLeaf + "|set-by-page:"
 
-// pairsGone are the pairs of rec, a Cookie header's recorded text, that
-// live, its text in this run, does not send; ok is true where those are its
-// only difference: every other pair is sent once, in the recorded order,
-// with its recorded value, live sends no pair rec lacks, and each pair gone
-// is named once in rec. ok is false where no pair is gone.
-func pairsGone(rec, live string) (gone []string, ok bool) {
+// cookieSetByRace begins the learned-noise key of a pair of a recorded
+// Cookie header whose value two or more answers of its test set in a race
+// (racedValues): "header.cookie|set-by-race:" then the pair's name, holding
+// the sha256 digest of each value the race set (cookieDigest), never a
+// value itself. The jar keeps whichever racing answer the browser read
+// last, which differs run to run; a replay's call may send the pair with
+// any one of those values, and only with one of them: every other pair is
+// compared as recorded.
+const cookieSetByRace = cookieLeaf + "|set-by-race:"
+
+// cookieDigest is how a set-by-race key holds a value: its sha256, in hex.
+func cookieDigest(v string) string {
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:])
+}
+
+// pairsAsLearned reports whether live, a Cookie header's text in this run,
+// is rec, its recorded text, with pairs the mock learned excused and
+// otherwise as recorded, pair by pair: a pair the page sets (cookieSetByPage)
+// gone, named once in rec; a pair a race set (cookieSetByRace) sent once with
+// a value whose digest the key holds, sent once in rec. Every other pair is
+// sent with its recorded values, in the recorded order, and live sends no
+// pair rec lacks. false where no pair is excused.
+func pairsAsLearned(learned map[string][]string, rec, live string) bool {
 	rn, rv := cookieJar(rec)
 	ln, lv := cookieJar(live)
 	var kept []string
+	excused := false
 	for _, name := range rn {
-		if _, sent := lv[name]; sent {
-			kept = append(kept, name)
+		l, sent := lv[name]
+		switch {
+		case !sent:
+			if _, page := learned[cookieSetByPage+name]; !page || len(rv[name]) != 1 {
+				return false
+			}
+			excused = true
 			continue
+		case !slices.Equal(rv[name], l):
+			digests, raced := learned[cookieSetByRace+name]
+			if !raced || len(rv[name]) != 1 || len(l) != 1 || !slices.Contains(digests, cookieDigest(l[0])) {
+				return false
+			}
+			excused = true
 		}
-		if len(rv[name]) != 1 {
-			return nil, false
-		}
-		gone = append(gone, name)
+		kept = append(kept, name)
 	}
-	if len(gone) == 0 || !slices.Equal(kept, ln) {
-		return nil, false
-	}
-	for _, name := range ln {
-		if !slices.Equal(rv[name], lv[name]) {
-			return nil, false
-		}
-	}
-	return gone, true
+	return excused && slices.Equal(kept, ln)
 }
 
-// goneAsLearned reports whether live, a Cookie header's text in this run,
-// is rec, its recorded text, without pairs the mock learned the page sets
-// while its test runs (cookieSetByPage), and otherwise as recorded.
-func goneAsLearned(learned map[string][]string, rec, live string) bool {
-	gone, ok := pairsGone(rec, live)
-	if !ok {
-		return false
+// cookiePairsLearned is what a call paired with m, an HTTP mock (its request
+// recorded), learns pair by pair of its Cookie header, rec as recorded and
+// live in this run, from m's earlier recordings (those the learn step reads
+// as m's earlier places): noise at the key of each pair live does not send
+// that the page itself set while the test ran (cookieSetByPage: pageSet), and
+// at the key of each pair live sends with another value where answers of
+// the test set both values in a race (cookieSetByRace: racedValues). rest is
+// rec with those pairs as live sends them (a pair gone dropped, a raced pair
+// at its live value): the learn step reads it as the header's recorded text,
+// so every other pair that differs is learned, or refused, by the header's
+// own rule. nil and rec where no pair is excused.
+func cookiePairsLearned(m *models.Mock, rec, live string, earlier []*models.Mock) ([]learn.Learned, string) {
+	rn, rv := cookieJar(rec)
+	_, lv := cookieJar(live)
+	var gone, changed []string
+	for _, name := range rn {
+		l, sent := lv[name]
+		switch {
+		case !sent && len(rv[name]) == 1:
+			gone = append(gone, name)
+		case sent && len(rv[name]) == 1 && len(l) == 1 && rv[name][0] != l[0]:
+			changed = append(changed, name)
+		}
 	}
-	for _, name := range gone {
-		if _, set := learned[cookieSetByPage+name]; !set {
+	if len(gone) == 0 && len(changed) == 0 {
+		// Nothing a pair's rule reads: no recording before m is read.
+		return nil, rec
+	}
+	var out []learn.Learned
+	drop := map[string]bool{}
+	to := map[string]string{}
+	for _, name := range pageSet(m, gone, earlier) {
+		key := cookieSetByPage + name
+		l := learn.Leaf{Path: key, Noise: key, Type: learn.String}
+		out = append(out, learn.Learned{Kind: learn.KindNoise, Recorded: l, Live: l})
+		drop[name] = true
+	}
+	for _, name := range changed {
+		values := racedValues(m, name, rv[name][0], lv[name][0], earlier)
+		if values == nil {
+			continue
+		}
+		digests := make([]string, 0, len(values))
+		for _, v := range values {
+			digests = appendNew(digests, cookieDigest(v))
+		}
+		slices.Sort(digests)
+		key := cookieSetByRace + name
+		l := learn.Leaf{Path: key, Noise: key, Type: learn.String, Value: strings.Join(digests, ",")}
+		out = append(out, learn.Learned{Kind: learn.KindNoise, Recorded: l, Live: l})
+		to[name] = lv[name][0]
+	}
+	if len(out) == 0 {
+		return nil, rec
+	}
+	parts := strings.Split(rec, ";")
+	kept := parts[:0]
+	for _, part := range parts {
+		name, _, ok := strings.Cut(part, "=")
+		name = strings.TrimSpace(name)
+		v, raced := to[name]
+		switch {
+		case ok && drop[name]:
+			continue
+		case ok && raced:
+			part = part[:strings.Index(part, "=")+1] + v
+		}
+		kept = append(kept, part)
+	}
+	return out, strings.TrimLeft(strings.Join(kept, ";"), " \t")
+}
+
+// learnedNoise is what the mock's learned noise holds at a KindNoise leaf r
+// learned: the digests of a set-by-race key (cookieSetByRace), nothing at
+// any other.
+func learnedNoise(r learn.Leaf) []string {
+	if !strings.HasPrefix(r.Path, cookieSetByRace) || r.Value == "" {
+		return []string{}
+	}
+	return strings.Split(r.Value, ",")
+}
+
+// pairwiseKept reports whether learned, what the learn step learned of a
+// call whose Cookie header it read with pairs excused (cookiePairsLearned),
+// learned the header's other pairs as a replay compares them pair by pair:
+// as noise, or refused (unaccounted). A variable, an echo or a read of the
+// clock is checked against the header's whole text.
+func pairwiseKept(learned []learn.Learned) bool {
+	for _, l := range learned {
+		if l.Recorded.Path == cookieLeaf && l.Kind != learn.KindNoise && l.Kind != learn.KindUnaccounted {
 			return false
 		}
 	}
 	return true
 }
 
-// pagePairsGone are the learned noise of a call paired with m, an HTTP
-// mock (its request recorded), whose Cookie header rec, as recorded, lost pairs in this run (live:
-// pairsGone) that the page itself set while the test ran: noise at each
-// such pair's key (cookieSetByPage). A pair is the page's where m's earlier
-// recordings (earlier: those the learn step reads as m's earlier places)
-// show both that a call to m's host recorded before m went without it, so
-// the test began without it, and that no answer recorded before m set it
-// (Set-Cookie), so no service did: a session cookie a service sets, and
-// one the test began with, stay compared, and a call that goes without
-// them is refused. An answer that cannot be read back counts as one that
-// set it. nil where any pair gone is not the page's: the call's Cookie
-// header is then learned, or refused, as before.
-func pagePairsGone(m *models.Mock, rec, live string, earlier []*models.Mock) []learn.Learned {
-	gone, ok := pairsGone(rec, live)
-	if !ok {
-		// Nothing gone: no recording before m is read.
+// learnedKeys is the learned noise a mock holds for learned, its leaves
+// learned as noise (learnedNoise).
+func learnedKeys(learned []learn.Learned) map[string][]string {
+	out := make(map[string][]string, len(learned))
+	for _, l := range learned {
+		out[l.Recorded.Path] = learnedNoise(l.Recorded)
+	}
+	return out
+}
+
+// pageSet are those of gone, pairs of m's recorded Cookie header a call in
+// this run went without, that the page itself set while the test ran. A
+// pair is the page's where m's earlier recordings show both that a call to
+// m's host recorded before m went without it, so the test began without it,
+// and that no answer recorded before m set it (Set-Cookie), so no service
+// did: a session cookie a service sets, and one the test began with, stay
+// compared, and a call that goes without them is refused. An answer that
+// cannot be read back counts as one that set every pair gone.
+func pageSet(m *models.Mock, gone []string, earlier []*models.Mock) []string {
+	if len(gone) == 0 {
 		return nil
 	}
 	at, host := m.Spec.ReqTimestampMock, hostOf(m.Spec.HTTPReq)
 	without := make(map[string]bool, len(gone))
+	set := make(map[string]bool, len(gone))
 	for _, b := range earlier {
 		if b == nil || b.Spec.HTTPReq == nil || !b.Spec.ReqTimestampMock.Before(at) {
 			continue
@@ -200,10 +306,10 @@ func pagePairsGone(m *models.Mock, rec, live string, earlier []*models.Mock) []l
 		if err != nil || answered.Spec.HTTPResp == nil {
 			return nil
 		}
-		set := headerOf(answered.Spec.HTTPResp.Header, "Set-Cookie")
+		text := headerOf(answered.Spec.HTTPResp.Header, "Set-Cookie")
 		for _, name := range gone {
-			if strings.Contains(set, name+"=") {
-				return nil
+			if strings.Contains(text, name+"=") {
+				set[name] = true
 			}
 		}
 		if hostOf(b.Spec.HTTPReq) != host {
@@ -216,14 +322,89 @@ func pagePairsGone(m *models.Mock, rec, live string, earlier []*models.Mock) []l
 			}
 		}
 	}
-	out := make([]learn.Learned, 0, len(gone))
+	var out []string
 	for _, name := range gone {
-		if !without[name] {
-			return nil
+		if without[name] && !set[name] {
+			out = append(out, name)
 		}
-		key := cookieSetByPage + name
-		l := learn.Leaf{Path: key, Noise: key, Type: learn.String}
-		out = append(out, learn.Learned{Kind: learn.KindNoise, Recorded: l, Live: l})
+	}
+	return out
+}
+
+// racedValues are the values of the pair name that answers of m's test
+// recorded before m set in a race, where one of them set rv, the pair's
+// value in m's recorded Cookie header, and another lv, its value in this
+// run: answers (Set-Cookie of name; the last such cookie of an answer) to
+// requests that each sent the pair once, all with one earlier value. The
+// browser keeps whichever of them it read last, so the pair holds any one
+// of their values. nil where no such race set both: a value no answer of
+// the test set, one a single answer set, two answers to requests that sent
+// other values (a rotation, not a race). An answer that cannot be read back
+// is no answer of a race.
+func racedValues(m *models.Mock, name, rv, lv string, earlier []*models.Mock) []string {
+	type answer struct{ mock, value string }
+	at := m.Spec.ReqTimestampMock
+	races := map[string][]answer{}
+	for _, b := range earlier {
+		if b == nil || b.Spec.HTTPReq == nil || !b.Spec.ReqTimestampMock.Before(at) {
+			continue
+		}
+		answered, err := withResponse(b)
+		if err != nil || answered.Spec.HTTPResp == nil {
+			continue
+		}
+		values := setCookieValues(headerOf(answered.Spec.HTTPResp.Header, "Set-Cookie"), name)
+		_, sent := cookieJar(headerOf(b.Spec.HTTPReq.Header, "Cookie"))
+		if len(values) == 0 || len(sent[name]) != 1 {
+			continue
+		}
+		from := sent[name][0]
+		races[from] = append(races[from], answer{b.Name, values[len(values)-1]})
+	}
+	for _, race := range races {
+		setRec, setLive := "", ""
+		for _, a := range race {
+			switch a.value {
+			case rv:
+				setRec = a.mock
+			case lv:
+				setLive = a.mock
+			}
+		}
+		if setRec == "" || setLive == "" || setRec == setLive {
+			continue
+		}
+		var out []string
+		for _, a := range race {
+			out = appendNew(out, a.value)
+		}
+		return out
+	}
+	return nil
+}
+
+// setCookieValues are the values text, a recorded Set-Cookie header (its
+// lines joined with ","), sets for the cookie name, in order: each line's
+// first pair whose name is name. A line starts the text or follows a ','
+// (and blanks); its value runs to the next ';' or ',', which a cookie's
+// value never holds (RFC 6265 §4.1.1).
+func setCookieValues(text, name string) []string {
+	var out []string
+	for i := 0; i < len(text); {
+		at := strings.Index(text[i:], name+"=")
+		if at < 0 {
+			break
+		}
+		at += i
+		i = at + len(name) + 1
+		if strings.TrimRight(text[:at], " \t") != "" && !strings.HasSuffix(strings.TrimRight(text[:at], " \t"), ",") {
+			continue
+		}
+		end := strings.IndexAny(text[i:], ";,")
+		if end < 0 {
+			end = len(text) - i
+		}
+		out = append(out, strings.TrimSpace(text[i:i+end]))
 	}
 	return out
 }

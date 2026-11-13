@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -160,40 +161,35 @@ func TestLearnPlanNamesCookiePairs(t *testing.T) {
 	})
 }
 
-// pairsGone is the pairs a Cookie header lost and nothing else: every other
-// pair sent once, in the recorded order, with its recorded value, and no
-// pair more.
-func TestPairsGone(t *testing.T) {
-	for _, c := range []struct {
-		name, rec, live string
-		gone            []string
-	}{
-		{"one pair gone", "session=s1; sub=pro", "session=s1", []string{"sub"}},
-		{"a middle pair gone", "a=1; b=2; c=3", "a=1; c=3", []string{"b"}},
-		{"every pair gone", "a=1; b=2", "", []string{"a", "b"}},
-		{"blanks between pairs", "a=1;b=2", "a=1", []string{"b"}},
-		{"a name sent twice kept whole", "a=1; a=2; b=2", "a=1; a=2", []string{"b"}},
-		{"none gone", "session=s1; sub=pro", "session=s1; sub=pro", nil},
-		{"none gone, another order", "a=1; b=2", "b=2; a=1", nil},
-		{"the rest in another order", "a=1; b=2; c=3", "c=3; a=1", nil},
-		{"another pair's value changed", "a=1; b=2", "a=2", nil},
-		{"a pair sent in this run only", "a=1; b=2", "a=1; x=9", nil},
-		{"the gone pair named twice", "a=1; b=2; b=3", "a=1", nil},
-		{"a name sent twice lost a value", "a=1; a=2; b=2", "a=1", nil},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			gone, ok := pairsGone(c.rec, c.live)
-			if ok != (c.gone != nil) || !reflect.DeepEqual(gone, c.gone) {
-				t.Fatalf("pairsGone(%q, %q) = %v, %v; want %v", c.rec, c.live, gone, ok, c.gone)
-			}
-		})
+// raced is the learned noise of the pair name set in a race to values.
+func raced(name string, values ...string) map[string][]string {
+	var digests []string
+	for _, v := range values {
+		digests = append(digests, cookieDigest(v))
 	}
+	return map[string][]string{cookieSetByRace + name: digests}
 }
 
-// A Cookie header without pairs learned as the page's is as recorded, and
-// only where every pair gone was learned so.
-func TestGoneAsLearned(t *testing.T) {
+// with is learned and more, merged.
+func with(learned map[string][]string, more map[string][]string) map[string][]string {
+	out := map[string][]string{}
+	for k, v := range learned {
+		out[k] = v
+	}
+	for k, v := range more {
+		out[k] = v
+	}
+	return out
+}
+
+// A Cookie header is as recorded pair by pair: a pair learned as the
+// page's may be gone, a pair learned as set by a race may hold another of
+// the race's values, and every other pair is sent once, in the recorded
+// order, with its recorded value, and no pair more.
+func TestPairsAsLearned(t *testing.T) {
+	page := map[string][]string{cookieSetByPage + "a": {}, cookieSetByPage + "b": {}, cookieSetByPage + "sub": {}}
 	sub := map[string][]string{cookieSetByPage + "sub": {}}
+	race := raced("session", "s1", "s2")
 	for _, c := range []struct {
 		name      string
 		learned   map[string][]string
@@ -201,14 +197,103 @@ func TestGoneAsLearned(t *testing.T) {
 		want      bool
 	}{
 		{"the page's pair gone", sub, "session=s1; sub=pro", "session=s1", true},
+		{"a middle pair gone", page, "a=1; b=2; c=3", "a=1; c=3", true},
+		{"every pair gone", page, "a=1; b=2", "", true},
+		{"blanks between pairs", page, "a=1;b=2", "a=1", true},
+		{"a name sent twice kept whole", page, "a=1; a=2; b=2", "a=1; a=2", true},
 		{"another pair gone", sub, "session=s1; sub=pro", "sub=pro", false},
 		{"two gone, one learned", sub, "session=s1; sub=pro; a=1", "session=s1", false},
 		{"none gone", sub, "session=s1; sub=pro", "session=s1; sub=pro", false},
+		{"none gone, another order", page, "a=1; b=2", "b=2; a=1", false},
+		{"the rest in another order", page, "a=1; b=2; c=3", "c=3; a=1", false},
+		{"another pair's value changed", page, "a=1; c=2", "a=1; c=3", false},
+		{"a pair sent in this run only", page, "a=1; b=2", "a=1; x=9", false},
+		{"the gone pair named twice", page, "a=1; b=2; b=3", "a=1", false},
+		{"a name sent twice lost a value", page, "a=1; a=2; b=2", "a=1", false},
 		{"the whole header learned", map[string][]string{cookieLeaf: {}}, "session=s1; sub=pro", "session=s1", false},
+		{"the race's other value", race, "session=s1; sub=pro", "session=s2; sub=pro", true},
+		{"the race's other value, the page's pair gone", with(race, sub), "session=s1; sub=pro", "session=s2", true},
+		{"a value the race did not set", race, "session=s1; sub=pro", "session=s9; sub=pro", false},
+		{"the race's value at another pair", race, "session=s1; sub=pro", "session=s1; sub=s2", false},
+		{"a race of another pair", raced("other", "s1", "s2"), "session=s1; sub=pro", "session=s2; sub=pro", false},
+		{"a raced pair sent twice", race, "session=s1; sub=pro", "session=s2; session=s2; sub=pro", false},
+		{"a raced pair recorded twice", race, "session=s1; session=s1; sub=pro", "session=s2; sub=pro", false},
+		{"a race that learned no value", map[string][]string{cookieSetByRace + "session": {}}, "session=s1; sub=pro", "session=s2; sub=pro", false},
+		{"a raced pair gone", race, "session=s1; sub=pro", "sub=pro", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := goneAsLearned(c.learned, c.rec, c.live); got != c.want {
-				t.Fatalf("goneAsLearned = %v, want %v", got, c.want)
+			if got := pairsAsLearned(c.learned, c.rec, c.live); got != c.want {
+				t.Fatalf("pairsAsLearned(%q, %q) = %v, want %v", c.rec, c.live, got, c.want)
+			}
+		})
+	}
+}
+
+// setCookieValues reads each line of a recorded Set-Cookie header (lines
+// joined with ","), a date's comma in an attribute included, and only a
+// line's own first pair.
+func TestSetCookieValues(t *testing.T) {
+	for _, c := range []struct {
+		name, text string
+		want       []string
+	}{
+		{"one line", "session=s1; Path=/; HttpOnly", []string{"s1"}},
+		{"two lines", "a=1; Path=/,session=s2; Path=/", []string{"s2"}},
+		{"after a date's comma", "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT, session=s2; Secure", []string{"s2"}},
+		{"set twice", "session=s1, session=s2", []string{"s1", "s2"}},
+		{"a value to the end", "session=s3", []string{"s3"}},
+		{"an empty value", "session=; Max-Age=0", []string{""}},
+		{"a name it ends", "xsession=s1; Path=/", nil},
+		{"an attribute named like it", "a=1; session=s1", nil},
+		{"none", "", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := setCookieValues(c.text, "session"); !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("setCookieValues(%q) = %q, want %q", c.text, got, c.want)
+			}
+		})
+	}
+}
+
+// racedValues finds a race only where answers of the test recorded before
+// the call, to requests that sent one earlier value of the pair, set both
+// the recorded and the live value: a value no answer set, one a single
+// answer set, a rotation (answers to requests that sent other values), an
+// answer recorded after the call, one keploy cannot read back, and a
+// request that sent the pair twice are none.
+func TestRacedValues(t *testing.T) {
+	m := learnRecorded("mock-9", -time.Hour+300*time.Millisecond, "POST", "/v1/apps", `{}`, map[string]string{"Cookie": "session=s1"}, `{}`)
+	a := pageCall("mock-1", -200*time.Millisecond, "session=s0", "session=s1; Path=/; HttpOnly")
+	b := pageCall("mock-2", -150*time.Millisecond, "sub=pro; session=s0", "x=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT, session=s2; Path=/")
+	c3 := pageCall("mock-3", -100*time.Millisecond, "session=s0", "session=s3")
+	rotated := pageCall("mock-4", -100*time.Millisecond, "session=s1", "session=s2")
+	later := pageCall("mock-5", 100*time.Millisecond, "session=s0", "session=s2")
+	unread := pageCall("mock-6", -100*time.Millisecond, "session=s0", "session=s2")
+	unread.Spec.HTTPResp = nil
+	twice := pageCall("mock-7", -100*time.Millisecond, "session=s0; session=s0", "session=s2")
+	unsent := pageCall("mock-8", -100*time.Millisecond, "", "session=s2")
+	for _, c := range []struct {
+		name    string
+		earlier []*models.Mock
+		live    string
+		want    []string
+	}{
+		{"two answers raced", []*models.Mock{a, b}, "s2", []string{"s1", "s2"}},
+		{"three answers raced", []*models.Mock{a, b, c3}, "s2", []string{"s1", "s2", "s3"}},
+		{"a nil and another protocol's mock among them", []*models.Mock{nil, {Name: "mock-0", Kind: models.Mongo}, a, b}, "s2", []string{"s1", "s2"}},
+		{"a value no answer set", []*models.Mock{a, b}, "s9", nil},
+		{"one answer set the pair", []*models.Mock{a}, "s2", nil},
+		{"a rotation, not a race", []*models.Mock{a, rotated}, "s2", nil},
+		{"the other answer recorded after the call", []*models.Mock{a, later}, "s2", nil},
+		{"the other answer unread", []*models.Mock{a, unread}, "s2", nil},
+		{"the other request sent the pair twice", []*models.Mock{a, twice}, "s2", nil},
+		{"the other request sent no pair", []*models.Mock{a, unsent}, "s2", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := racedValues(m, "session", "s1", c.live, c.earlier)
+			slices.Sort(got)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("racedValues = %q, want %q", got, c.want)
 			}
 		})
 	}
@@ -268,10 +353,10 @@ func livePageCall(cookie string) *req {
 	return live("POST", "/v1/apps", `{"name":"a"}`, map[string]string{"Cookie": cookie})
 }
 
-// pagePairsGone reads past what is no earlier HTTP recording of the call (a
+// cookiePairsLearned reads past what is no earlier HTTP recording of the call (a
 // nil, another protocol's mock), and a recording whose answer keploy cannot
 // read back is one that may have set the pair.
-func TestPagePairsGoneReadsOnlyHTTPRecordings(t *testing.T) {
+func TestCookiePairsLearnedReadsOnlyHTTPRecordings(t *testing.T) {
 	m := learnRecorded("mock-9", -time.Hour+300*time.Millisecond, "POST", "/v1/apps", `{}`, map[string]string{"Cookie": "session=s1; sub=pro"}, `{}`)
 	without := pageCall("mock-1", -200*time.Millisecond, "session=s1", "")
 	other := &models.Mock{Name: "mock-2", Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: without.Spec.ReqTimestampMock}}
@@ -291,10 +376,10 @@ func TestPagePairsGoneReadsOnlyHTTPRecordings(t *testing.T) {
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						t.Fatalf("pagePairsGone panicked: %v", r)
+						t.Fatalf("cookiePairsLearned panicked: %v", r)
 					}
 				}()
-				got = pagePairsGone(m, "session=s1; sub=pro", "session=s1", c.earlier)
+				got, _ = cookiePairsLearned(m, "session=s1; sub=pro", "session=s1", c.earlier)
 			}()
 			if (len(got) == 1 && got[0].Recorded.Path == cookieSetByPage+"sub") != c.page || len(got) > 1 {
 				t.Fatalf("learned %+v, want the page's pair %v", got, c.page)
@@ -343,7 +428,6 @@ func TestLearnMatchLearnsAPairThePageSets(t *testing.T) {
 		{"a service set it", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "sub=pro; Path=/")}, "session=s1", whole},
 		{"a service of another host set it", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", ""), setElsewhere}, "session=s1", whole},
 		{"an earlier answer keploy cannot read", []*models.Mock{unread}, "session=s1", whole},
-		{"the session changed too", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "")}, "session=s2", whole},
 		{"a pair sent in this run only", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "")}, "session=s1; sub=pro; x=1", whole},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -356,6 +440,65 @@ func TestLearnMatchLearnsAPairThePageSets(t *testing.T) {
 			}
 			if _, page := got[cookieSetByPage+"sub"]; page || why == "" && !reflect.DeepEqual(got, map[string][]string{cookieLeaf: {}}) {
 				t.Fatalf("learned %v (refused: %q), want the whole header as noise or a refusal", got, why)
+			}
+		})
+	}
+}
+
+// A Cookie header is learned pair by pair: a pair the page set that the
+// call goes without, and a pair a race of the test's answers set to its
+// other value (both answers to requests that sent the same earlier value),
+// learn their keys; a race's values are kept as digests, never as values.
+// A pair that differs otherwise is learned or refused by the header's own
+// rule, read with those pairs excused where it learns them as noise (a
+// session with no source: the header as noise) or refuses them; anything
+// else learned of them (a value an answer sent) reads the header whole, as
+// before. A refusal names the pairs that differ.
+// A value no racing answer set, a pair one answer set, and a rotation are
+// no race.
+func TestLearnMatchLearnsCookiePairsOneByOne(t *testing.T) {
+	const rec = "session=s1; sub=pro"
+	without := pageCall("mock-1", -300*time.Millisecond, "session=s0", "")
+	a := pageCall("mock-2", -200*time.Millisecond, "session=s0", "session=s1; Path=/")
+	b := pageCall("mock-3", -150*time.Millisecond, "session=s0", "session=s2; Path=/")
+	rotated := pageCall("mock-3", -150*time.Millisecond, "session=s1", "session=s2; Path=/")
+	race := raced("session", "s1", "s2")
+	slices.Sort(race[cookieSetByRace+"session"])
+	page := map[string][]string{cookieSetByPage + "sub": {}}
+	for _, c := range []struct {
+		name    string
+		earlier []*models.Mock
+		live    string
+		want    map[string][]string
+		// refused names the pairs a refusal names, where want is nil.
+		refused string
+	}{
+		{"the race's other value", []*models.Mock{a, b}, "session=s2; sub=pro", race, ""},
+		{"the race's other value, the page's pair gone", []*models.Mock{without, a, b}, "session=s2", with(race, page), ""},
+		{"the page's pair gone, the session changed", []*models.Mock{without}, "session=s2", with(page, map[string][]string{cookieLeaf: {}}), ""},
+		{"the race's other value, a pair sent in this run only", []*models.Mock{a, b}, "session=s2; sub=pro; x=1", nil, "(pair session holds another value; pair x is sent in this run only)"},
+		{"a value no racing answer set", []*models.Mock{a, b}, "session=s9; sub=pro", nil, "(pair session holds another value)"},
+		{"one answer set the pair", []*models.Mock{b}, "session=s2; sub=pro", nil, "(pair session holds another value)"},
+		{"a rotation, not a race", []*models.Mock{a, rotated}, "session=s2; sub=pro", nil, "(pair session holds another value)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, why := learnPageCookie(t, c.earlier, rec, c.live)
+			if c.want != nil {
+				if why != "" || !reflect.DeepEqual(got, c.want) {
+					t.Fatalf("learned %v (refused: %q), want %v", got, why, c.want)
+				}
+				return
+			}
+			if why == "" {
+				t.Fatalf("learned %v, want a refusal naming %s", got, c.refused)
+			}
+			if !strings.Contains(why, c.refused) {
+				t.Fatalf("refusal %q does not name %s", why, c.refused)
+			}
+			for _, v := range []string{"s0", "s1", "s2", "s9", "pro"} {
+				if strings.Contains(why, "="+v) || strings.Contains(why, " "+v+" ") {
+					t.Fatalf("refusal %q holds the value %q", why, v)
+				}
 			}
 		})
 	}
@@ -386,6 +529,11 @@ func TestStrictServesACallWithoutAPairThePageSets(t *testing.T) {
 		{"the pairs in another order", nil, nil, "sub=pro; session=s1", false, "header.cookie (its pairs are sent in another order)"},
 		{"only the bytes between pairs differ", nil, nil, "session=s1;sub=pro", false, "header.cookie"},
 		{"another header holding pairs", map[string][]string{cookieSetByPage + "sub": {}}, nil, "x-jar:session=s1", false, "header.x-jar"},
+		{"the race's other value", raced("session", "s1", "s2"), nil, "session=s2; sub=pro", true, ""},
+		{"the race's other value, the page's pair gone", with(raced("session", "s1", "s2"), map[string][]string{cookieSetByPage + "sub": {}}), nil, "session=s2", true, ""},
+		{"a value the race did not set", raced("session", "s1", "s2"), nil, "session=s3; sub=pro", false, "header.cookie (pair session holds another value)"},
+		{"the race's value, another pair changed", raced("session", "s1", "s2"), nil, "session=s2; sub=free", false, "header.cookie (pair session holds another value; pair sub holds another value)"},
+		{"the race's value, keploy.yml's patterns guard the header", raced("session", "s1", "s2"), map[string][]string{"cookie": {"^z$"}}, "session=s2; sub=pro", false, "header.cookie (pair session holds another value)"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			name, live := "Cookie", c.live
@@ -405,7 +553,7 @@ func TestStrictServesACallWithoutAPairThePageSets(t *testing.T) {
 				t.Fatalf("differs %v does not name %s", differs(diag), c.field)
 			}
 			for _, d := range differs(diag) {
-				for _, v := range []string{"s1", "s2", "pro", "free"} {
+				for _, v := range []string{"s1", "s2", "s3", "pro", "free"} {
 					if strings.Contains(d, "="+v) || strings.Contains(d, " "+v) {
 						t.Fatalf("differs %v holds the value %q", differs(diag), v)
 					}
@@ -441,6 +589,15 @@ func TestExcusedPairOfAPairThePageSets(t *testing.T) {
 	if ok, _ := k.ExcusedPair(rec, gone, true, false); ok {
 		t.Fatal("a header the call did not send is excused")
 	}
+	racedLive, notRaced := rec, rec
+	racedLive.Value, notRaced.Value = "session=s2; sub=pro", "session=s3; sub=pro"
+	kr := httpKnown{n: n, learned: raced("session", "s1", "s2")}
+	if ok, _ := kr.ExcusedPair(rec, racedLive, true, true); !ok {
+		t.Fatal("the race's other value is not excused")
+	}
+	if ok, _ := kr.ExcusedPair(rec, notRaced, true, true); ok {
+		t.Fatal("a value the race did not set is excused")
+	}
 	jar, jarGone := rec, gone
 	jar.Path, jar.Noise, jarGone.Path, jarGone.Noise = "header.x-jar", "header.x-jar", "header.x-jar", "header.x-jar"
 	if ok, _ := k.ExcusedPair(jar, jarGone, true, true); ok {
@@ -449,5 +606,32 @@ func TestExcusedPairOfAPairThePageSets(t *testing.T) {
 	opts.NoiseConfig = map[string]map[string][]string{"header": {"cookie": {"^z$"}}}
 	if ok, _ := (httpKnown{n: h.newLearnNoise(opts, nil, nil), learned: learned}).ExcusedPair(rec, gone, true, true); ok {
 		t.Fatal("a header keploy.yml's patterns guard is excused")
+	}
+}
+
+// A Cookie header read with pairs excused keeps what was learned of it
+// only where its other pairs are noise or refused: a variable, an echo or
+// a read of the clock of the header holds of its whole text.
+func TestPairwiseKept(t *testing.T) {
+	cookie := learn.Leaf{Path: cookieLeaf}
+	other := learn.Leaf{Path: "header.x-trace"}
+	for _, c := range []struct {
+		name    string
+		learned []learn.Learned
+		want    bool
+	}{
+		{"nothing learned", nil, true},
+		{"the header as noise", []learn.Learned{{Kind: learn.KindNoise, Recorded: cookie}}, true},
+		{"the header refused", []learn.Learned{{Kind: learn.KindUnaccounted, Recorded: cookie}}, true},
+		{"the header a variable", []learn.Learned{{Kind: learn.KindNoise, Recorded: other}, {Kind: learn.KindVariable, Recorded: cookie}}, false},
+		{"the header an echo", []learn.Learned{{Kind: learn.KindEcho, Recorded: cookie}}, false},
+		{"the header a read of the clock", []learn.Learned{{Kind: learn.KindClockRead, Recorded: cookie}}, false},
+		{"another header a variable", []learn.Learned{{Kind: learn.KindVariable, Recorded: other}}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := pairwiseKept(c.learned); got != c.want {
+				t.Fatalf("pairwiseKept = %v, want %v", got, c.want)
+			}
+		})
 	}
 }

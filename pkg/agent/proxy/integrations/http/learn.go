@@ -562,9 +562,10 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 		return true, true
 	}
 	both := inRec && inLive
-	if !guarded && both && ref.Path == cookieLeaf && goneAsLearned(k.learned, rec.Value, live.Value) {
-		// Pairs the page sets while its test runs, gone from the header
-		// and otherwise as recorded (cookieSetByPage).
+	if !guarded && both && ref.Path == cookieLeaf && pairsAsLearned(k.learned, rec.Value, live.Value) {
+		// Pairs the page sets while its test runs gone from the header,
+		// pairs a race set at another of the race's values, and the
+		// others as recorded (cookieSetByPage, cookieSetByRace).
 		return true, true
 	}
 	switch {
@@ -1921,23 +1922,44 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				}
 				w = oc.Window(input.arrived)
 			}
-			// A Cookie header that lost only pairs the page itself sets
-			// while its test runs (pagePairsGone) learns those pairs'
-			// noise, and is no change of the header to classify. A leaf
-			// drifts only where both sides hold it (a header one side
-			// lacks differs in more than values).
+			// A Cookie header is read pair by pair (cookiePairsLearned): a
+			// pair the page itself set while its test ran that the call
+			// goes without, and one a race of the test's answers set to
+			// another value, learn their pairs' noise. The header is no
+			// change to classify where they are all that differs, and is
+			// classified as it reads with them excused (rest) where other
+			// pairs differ too. A leaf drifts only where both sides hold
+			// it (a header one side lacks differs in more than values).
 			var pagePairs []learn.Learned
+			recShape := c.Shape
 			if slices.Contains(drift, cookieLeaf) {
-				pagePairs = pagePairsGone(m, c.Shape.Leaves[cookieLeaf].Value, liveShape.Leaves[cookieLeaf].Value, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...))
-			}
-			if len(pagePairs) > 0 {
-				drift = slices.DeleteFunc(slices.Clone(drift), func(p string) bool { return p == cookieLeaf })
+				recCookie, liveCookie := c.Shape.Leaves[cookieLeaf], liveShape.Leaves[cookieLeaf].Value
+				var rest string
+				pagePairs, rest = cookiePairsLearned(m, recCookie.Value, liveCookie, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...))
+				switch {
+				case len(pagePairs) == 0:
+				case pairsAsLearned(learnedKeys(pagePairs), recCookie.Value, liveCookie):
+					drift = slices.DeleteFunc(slices.Clone(drift), func(p string) bool { return p == cookieLeaf })
+				default:
+					recShape.Leaves = maps.Clone(c.Shape.Leaves)
+					recCookie.Value = rest
+					recShape.Leaves[cookieLeaf] = recCookie
+				}
 			}
 			// A client test's request that reached the application before
 			// the call in both runs is a place of it (learn.ClassifyArrived),
 			// where its test case binds a value the call carries whole.
 			answer := classifiedAnswer(answered)
-			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
+			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, recShape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
+			if recShape.Leaves[cookieLeaf].Value != c.Shape.Leaves[cookieLeaf].Value && !pairwiseKept(learned) {
+				// A replay reads a Cookie header learned with pairs excused
+				// pair by pair only where its other pairs are noise, or
+				// the call is refused: anything else learned of it (a
+				// variable, a clock read) holds of the header's whole
+				// text, which has those pairs. It is read whole, as before.
+				pagePairs = nil
+				learned = learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
+			}
 			timeForm := integrations.TimeFormOf(mockDb)
 			// A time the offset rule refused that learning read as the
 			// clock since its test began stays refused under mock.times:
@@ -2632,7 +2654,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		}
 		switch l.Kind {
 		case learn.KindNoise:
-			p.noise[r.Path] = []string{}
+			p.noise[r.Path] = learnedNoise(r)
 
 		case learn.KindVariable:
 			from := l.From
