@@ -66,6 +66,11 @@ name: Linux CI scripts
 # generated file's statements and a block two binaries' data share do not
 # change the sum; a floor lowered since main fails, and so does a main the
 # checkout does not have.
+#
+# And fuzz-targets.tests.sh: fuzz-targets.sh, the list of Fuzz targets
+# fuzz-nightly.yml runs, read from `go test -list`. Each package's Fuzz names
+# become entries with its import path and directory, other names add
+# nothing, and a listing that fails or finds no target fails.
 
 on:
   push:
@@ -98,6 +103,8 @@ on:
       - '.github/workflows/test_workflow_scripts/hang_guard.sh'
       - '.github/workflows/test_workflow_scripts/coverage-floor.sh'
       - '.github/workflows/test_workflow_scripts/coverage-floor.tests.sh'
+      - '.github/workflows/test_workflow_scripts/fuzz-targets.sh'
+      - '.github/workflows/test_workflow_scripts/fuzz-targets.tests.sh'
       - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
@@ -128,6 +135,8 @@ on:
       - '.github/workflows/test_workflow_scripts/hang_guard.sh'
       - '.github/workflows/test_workflow_scripts/coverage-floor.sh'
       - '.github/workflows/test_workflow_scripts/coverage-floor.tests.sh'
+      - '.github/workflows/test_workflow_scripts/fuzz-targets.sh'
+      - '.github/workflows/test_workflow_scripts/fuzz-targets.tests.sh'
       - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
 
@@ -309,3 +318,13 @@ jobs:
 
       - name: Test coverage-floor.sh (a run below its floor less its tolerance fails; generated files and shared blocks leave the sum alone; a lowered floor fails)
         run: bash .github/workflows/test_workflow_scripts/coverage-floor.tests.sh
+
+  fuzz-targets:
+    # Five cases against a stub go; under a second.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test fuzz-targets.sh (each package's Fuzz names become matrix entries; a failed or empty listing fails)
+        run: bash .github/workflows/test_workflow_scripts/fuzz-targets.tests.sh
