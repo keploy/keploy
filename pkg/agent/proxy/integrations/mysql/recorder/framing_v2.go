@@ -249,7 +249,8 @@ func answered(command byte) bool {
 // upload ends with an empty packet; a command after that starts at 0 again.)
 // Each packet passed over is input consumed: its bytes armed the supervisor's
 // pending work, which a connection that then sits idle must not leave armed
-// (clearPending).
+// (clearPending). Each is told to walk (packetWalk.passed): the server's next
+// packet in the exchange is numbered on from the client's.
 //
 // Every packet is read from where Session.NextRequest finds it, as the command
 // loop reads every command: the chunk it starts in is numbered
@@ -264,7 +265,7 @@ func answered(command byte) bool {
 // NextRequest found and has not taken is whole). One that does not (in the
 // middle of a chunk) is not where the client's stream can be taken up again:
 // lost framing.
-func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) (cmdBuf []byte, respFirst byte, joined bool, first fakeconn.Chunk, err error) {
+func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, walk *packetWalk) (cmdBuf []byte, respFirst byte, joined bool, first fakeconn.Chunk, err error) {
 	// prevSeq and prevData: the last packet passed over ended at sequence id
 	// prevSeq, and carried data (one has been passed over: passed).
 	var prevSeq byte
@@ -292,6 +293,7 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 		}
 		if inExchange {
 			prevSeq, prevData, passed = lastSeq, len(buf) > 4, true
+			walk.passed(lastSeq)
 			clearPending(sess)
 			continue
 		}

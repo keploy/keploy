@@ -95,12 +95,21 @@ func TestRecordV2_AResponseItCannotFrameCostsItsExchangeAlone(t *testing.T) {
 		// whose response the recorder cannot frame.
 		traffic func(t *testing.T) ([]exchange, int)
 		queries int
+		// stops: bytes lost from the server's stream leave the packet walk
+		// in the middle of a packet at the cut (packetWalk), so the cut cannot
+		// be shown to start the next answer: the recording stops there,
+		// naming it, with no wrong mock. A capture that loses bytes ends the
+		// stream at the hole, so a stream that lost them unsaid is not one a
+		// capture hands the recorder; these are what a header misread
+		// looks like.
+		stops bool
 	}{
 		{
 			// The reader is at a packet boundary of the 8,209-row result, and
 			// the next bytes it gets are the middle of a later row's payload:
 			// "0000" read as a header claims a 3,158,064-byte packet.
-			name: "bytes lost inside the 8,209-row result",
+			name:  "bytes lost inside the 8,209-row result",
+			stops: true,
 			traffic: func(t *testing.T) ([]exchange, int) {
 				xs := kitTraffic(t, []int{300, 301}, true)
 				big := bytes.Join(xs[1].reply, nil)
@@ -142,7 +151,8 @@ func TestRecordV2_AResponseItCannotFrameCostsItsExchangeAlone(t *testing.T) {
 			// What keploy/enterprise#2754's recording stopped at: "the first
 			// packet of the COM_QUERY response has sequence id 0 where 1 comes
 			// next", a header read one byte before a row's.
-			name: "a header read out of row data where a response starts",
+			name:  "a header read out of row data where a response starts",
+			stops: true,
 			traffic: func(t *testing.T) ([]exchange, int) {
 				xs := append([]exchange{}, small...)
 				xs[2].reply = append([][]byte{{'5', 0x12, 0x02, 0x00}}, xs[2].reply...)
@@ -188,6 +198,13 @@ func TestRecordV2_AResponseItCannotFrameCostsItsExchangeAlone(t *testing.T) {
 				t.Parallel()
 				xs, bad := c.traffic(t)
 				rec := recordWire(t, xs, n, true, time.Minute)
+				if c.stops {
+					requireFramingLost(t, rec)
+					if !strings.Contains(rec.err.Error(), "do not show the response left out ended at the cut: it falls inside a packet") {
+						t.Fatalf("RecordV2 = %v, want the stop to name the cut inside a packet", rec.err)
+					}
+					return
+				}
 				requireRealigned(t, rec, commandAt(t, xs, n, bad), c.queries)
 			})
 		}
@@ -794,6 +811,105 @@ func TestRecordV2_TheEndOfTheServersStreamDoesNotConfirmTheAnswerTakenUp(t *test
 				return strings.Contains(r, "the client's stream ended with no command after it whose answer would confirm it")
 			}).Len(); n != 1 {
 				t.Fatalf("%d exchanges left out for the end of the client's stream, want the one taken up", n)
+			}
+		})
+	}
+}
+
+// A client that pipelines two deep into the tail of an answer the recorder
+// left out (it cannot be framed), though it had not pipelined before, has the
+// command after that answer (C2) and the one after it (C3) both captured
+// before the answer's tail. The re-align cuts the server's stream at C2 by
+// capture time: in the tail. Held until C3, a tail packet that frames as an
+// answer to C2 was confirmed by the tail's next bytes, captured after C3, and
+// C2 was recorded with the tail's bytes. The server's packet headers show
+// where the answer left out ended (packetWalk): the cut is taken only where
+// the packet before it is not one a packet at sequence id 1 is numbered on
+// from, and is a packet of the answer left out. Each case ends the recording
+// at C2, naming why, with no wrong mock and the 2 exchanges before the answer
+// left out recorded.
+func TestRecordV2_TwoDeepPipeliningIntoTheTailOfAnAnswerLeftOut(t *testing.T) {
+	t.Parallel()
+	xs := kitTraffic(t, []int{7, 8}, false) // 18 exchanges, the 3rd a SELECT
+	ok := frame([][]byte{{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}})[0]
+	at := func(p []byte, id byte) []byte {
+		p = append([]byte{}, p...)
+		p[3] = id
+		return p
+	}
+	// rows is the packets of an answer the recorder cannot frame (an empty
+	// packet where its column count should be), numbered from 1: through
+	// 255, 0, and an OK at 1, then on to 3.
+	var wrapped [][]byte
+	for id := 1; id <= 258; id++ {
+		switch {
+		case id == 1:
+			wrapped = append(wrapped, wrapPacket(nil, 1))
+		case id == 257:
+			wrapped = append(wrapped, at(ok, 1))
+		default:
+			wrapped = append(wrapped, wrapPacket([]byte("row"), byte(id)))
+		}
+	}
+	notWrapped := append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[2].reply...)
+	// split is notWrapped with its 14th packet in two chunks.
+	split := append(append(append([][]byte{}, notWrapped[:13]...), notWrapped[13][:6], notWrapped[13][6:]), notWrapped[14:]...)
+	fieldList := wrapPacket(append([]byte{0x04}, "sessions\x00"...), 0)
+	errAnswer := frame([][]byte{append([]byte{0xff, 0x7a, 0x04, '#'}, "42S02no such table"...)})
+	query, upload, uploadOK := loadDataUpload(t, 254, '9')
+	for _, c := range []struct {
+		name string
+		// command is the one whose answer the recorder leaves out, answer
+		// its packets (each a chunk), and client what the client sends
+		// inside that exchange; C2 is sent after answer[c2], C3 after
+		// answer[c3] (-1: before the first).
+		command []byte
+		answer  [][]byte
+		client  [][]byte
+		c2, c3  int
+		want    string
+	}{
+		{name: "the cut where the run wraps, an OK at 1 after it", command: xs[2].command, answer: wrapped,
+			c2: 255, c3: 256, want: "the last packet before it has sequence id 0, so a packet at 1"},
+		{name: "the cut in the run", command: xs[2].command, answer: notWrapped,
+			c2: 12, c3: 13, want: "where 1 comes next"},
+		{name: "the cut inside a packet", command: xs[2].command, answer: split,
+			c2: 13, c3: 14, want: "it falls inside a packet"},
+		{name: "the answer left out all after the cut", command: fieldList, answer: errAnswer,
+			c2: -1, c3: 0, want: "no packet of the response left out came before it"},
+		{name: "an upload whose last packet is at 0, the cut before the OK", command: query.command,
+			answer: append(append([][]byte{}, query.reply...), uploadOK), client: upload,
+			c2: 0, c3: 1, want: "the client sent a packet at sequence id 0"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			laid := append([]exchange{}, xs[:2]...)
+			laid = append(laid, exchange{command: c.command})
+			for _, p := range c.client {
+				laid = append(laid, exchange{command: p})
+			}
+			if c.c2 < 0 {
+				laid = append(laid, exchange{command: xs[3].command})
+			}
+			for j, p := range c.answer {
+				laid = append(laid, exchange{reply: [][]byte{p}})
+				switch j {
+				case c.c2:
+					laid = append(laid, exchange{command: xs[3].command})
+				case c.c3:
+					laid = append(laid, exchange{command: xs[4].command})
+				}
+			}
+			laid = append(laid, exchange{reply: [][]byte{bytes.Join(xs[3].reply, nil)}}, exchange{reply: [][]byte{bytes.Join(xs[4].reply, nil)}})
+			laid = append(laid, xs[5:]...)
+			client, server := onTheWire(laid, 1<<20)
+			rec := recordChunks(t, client, server, true, time.Minute)
+			requireFramingLost(t, rec)
+			if !strings.Contains(rec.err.Error(), c.want) {
+				t.Fatalf("RecordV2 = %v, want the stop to name %q", rec.err, c.want)
+			}
+			if got := queryMocks(rec.mocks); got != 2 {
+				t.Fatalf("%d query mocks, want the 2 before the answer left out", got)
 			}
 		})
 	}

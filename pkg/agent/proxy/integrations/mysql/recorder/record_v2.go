@@ -1507,6 +1507,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// taken is the exchange taken up after a response left out, held until
 	// the capture's order confirms its answer (takenUp).
 	var taken *takenUp
+	// walk follows the server stream's packet headers, through every byte that
+	// leaves it, to prove a re-align's cut (packetWalk). The stream is at a
+	// packet boundary where the loop starts when the handshake read it.
+	walk := &packetWalk{}
+	sess.DestStream.Tap(walk.feed)
+	defer sess.DestStream.Tap(nil)
+	atBoundary := sess.DestStream.Consumed() > 0
 	defer func() {
 		if taken != nil && taken.read {
 			// Its answer was read; the recording ended before anything
@@ -1534,6 +1541,10 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		held = nil
 		first, err := h.settle(ctx, logger, sess, decodeCtx, cmd, respFirst)
 		carry = first
+		if err == nil && first == nil {
+			// The PREPARE's EOF: the answer starts after it.
+			walk.mark()
+		}
 		return err
 	}
 	// lastEnd is when the last exchange handled ended (its command or its
@@ -1635,10 +1646,15 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// sent before that command was captured is the rest of the response left
 	// out (fakeconn.FakeConn.SkipThrough). A stream that cannot be cut there
 	// stops the recording, as lost framing does.
-	realignAnswer := func(reqTs time.Time, cmdFirst uint32) error {
+	realignAnswer := func(reqTs time.Time, cmdFirst uint32, respFirst byte) error {
 		n, _, err := sess.DestStream.SkipThrough(reqTs)
 		if err == nil {
 			err = answerStartsAfter(sess, cmdFirst, sess.ClientStream.LastReadConnSeq())
+		}
+		if err == nil {
+			if why := walk.cut(respFirst); why != "" {
+				err = fmt.Errorf("the server's packets do not show the response left out ended at the cut: %s", why)
+			}
 		}
 		if err != nil {
 			if streamEnded(err) {
@@ -1665,6 +1681,12 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	for {
 		if !serverRealign {
 			lastAnswerSeq = sess.DestStream.LastReadConnSeq()
+			// Every server byte read so far was read in whole packets, and
+			// the last exchange's without a fault.
+			if atBoundary {
+				walk.anchor()
+			}
+			atBoundary = true
 		}
 		if taken != nil && !taken.read {
 			// The exchange taken up was handled (recorded and held, or left
@@ -1690,7 +1712,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			joined = continues(cmdBuf)
 		} else if clientRealign {
 			clientRealign = false
-			cmdBuf, respFirst, joined, first, err = nextCommandAfterFault(ctx, logger, sess)
+			cmdBuf, respFirst, joined, first, err = nextCommandAfterFault(ctx, logger, sess, walk)
 			if err != nil {
 				if errors.Is(err, ErrFramingLost) {
 					warnFramingLost(logger, sess, "V2: mysql client stream cannot be taken up after a response left out; the connection is no longer recorded", err)
@@ -1792,10 +1814,14 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			t.release()
 		}
 		if serverRealign && len(cmdBuf) > 4 && answered(cmdBuf[4]) {
-			if err := realignAnswer(reqTs, first.ConnSeq); err != nil {
+			if err := realignAnswer(reqTs, first.ConnSeq, respFirst); err != nil {
 				return err
 			}
 			taken = &takenUp{reqTs: reqTs, consumed: sess.DestStream.Consumed()}
+		}
+		if !serverRealign && len(cmdBuf) > 4 && answered(cmdBuf[4]) {
+			// The server's next bytes start its answer.
+			walk.mark()
 		}
 
 		cmdPkt, err := wire.DecodePayload(ctx, logger, cmdBuf, clientKey, decodeCtx)

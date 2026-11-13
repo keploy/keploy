@@ -68,8 +68,12 @@ func TestRecordV2_PostTLS_AnAnswerCapturedBeforeTheFirstCommandIsNotItsAnswer(t 
 // first byte of the response left out, captured after that command, so the
 // answer in flight is reported as it is when the recorder reads up to it:
 // once, with its own cause, over a span of its own bytes alone. The exchange
-// left out is reported too, by the recorder, and SELECT 1 is recorded with its
-// OK.
+// left out is reported too, by the recorder. The stream joined mid-connection
+// was never read at a packet boundary the recorder knows (it knows one once it
+// has read a response whole), so the server's packets cannot show where the
+// response left out ended (packetWalk): the recording stops at SELECT 1,
+// naming it, and leaves that exchange out too, rather than take its answer on
+// the capture's order alone.
 // Before, the skip took the answer in flight with nothing to say so, and the
 // test case it belonged to was saved without its mock. With no answer in
 // flight, the skip takes the response left out alone, captured after the
@@ -89,8 +93,8 @@ func TestRecordV2_PostTLS_AnAnswerInFlightIsReportedWhenTheFirstResponseCannotBe
 		// COM_FIELD_LIST's, and the answer in flight.
 		mocks, leftOut int
 	}{
-		{"an answer in flight, then a command whose response it cannot frame", true, true, 2, 2},
-		{"no answer in flight, then a command whose response it cannot frame", false, true, 2, 1},
+		{"an answer in flight, then a command whose response it cannot frame", true, true, 0, 3},
+		{"no answer in flight, then a command whose response it cannot frame", false, true, 0, 2},
 		{"an answer in flight, then a query", true, false, 2, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -131,10 +135,14 @@ func TestRecordV2_PostTLS_AnAnswerInFlightIsReportedWhenTheFirstResponseCannotBe
 				j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{cannedOK(t, 1, j.caps)})
 			}
 			mocks, err := j.run(t)
-			if err != nil {
+			if c.unframable {
+				if err == nil || !strings.Contains(err.Error(), "the server's packets were not followed from a packet boundary to it") {
+					t.Fatalf("RecordV2 = %v, want the stop at SELECT 1 to name the packets not followed", err)
+				}
+			} else if err != nil {
 				t.Fatalf("RecordV2 = %v", err)
 			}
-			if len(mocks) != c.mocks || describe(mocks[len(mocks)-1]) != "a OK" {
+			if len(mocks) != c.mocks || c.mocks > 0 && describe(mocks[len(mocks)-1]) != "a OK" {
 				t.Fatalf("%d mocks, want %d, the last a query with its OK", len(mocks), c.mocks)
 			}
 			if !c.unframable && describe(mocks[0]) != "a result of 1 rows" {
