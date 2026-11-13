@@ -283,16 +283,25 @@ func (f *follows) idPiece(v *valueDrift, t string) (others map[string]bool, ok b
 }
 
 // holds says whether a place holds a word, in any reading, as either run
-// gave it there.
-type holds func(w string) bool
+// gave it there; where glued, inside a longer word of it too (a long word
+// of an id the place holds glued to another: mintedID, which fails closed
+// there, as movedFrom does).
+type holds func(w string, glued bool) bool
 
 // tokHolds is holds of a place whose words are toks (one set per reading).
 func tokHolds(toks ...[]map[string]bool) holds {
-	return func(w string) bool {
+	return func(w string, glued bool) bool {
 		for _, by := range toks {
 			for _, tok := range by {
 				if tok[w] {
 					return true
+				}
+				if glued {
+					for k := range tok {
+						if len(k) > len(w) && strings.Contains(k, w) {
+							return true
+						}
+					}
 				}
 			}
 		}
@@ -319,10 +328,18 @@ func (f *follows) rawHolds(x Raw) holds {
 // givenHolds is holds of g's answer, as the recording and F gave it
 // (inAnswer: its words, its stamps' words and its view's).
 func givenHolds(g givenWords) holds {
-	return func(w string) bool {
+	return func(w string, glued bool) bool {
 		for i := range max(len(g.words), len(g.gave)) {
 			if g.inAnswer(i, w) != "" {
 				return true
+			}
+			if !glued {
+				continue
+			}
+			for _, l := range [][][]string{g.words, g.stamped, g.gave} {
+				if i < len(l) && slices.ContainsFunc(l[i], func(k string) bool { return len(k) > len(w) && strings.Contains(k, w) }) {
+					return true
+				}
 			}
 		}
 		return false
@@ -335,7 +352,9 @@ func givenHolds(g givenWords) holds {
 // any place the word rule reads, in what either run gave there (a leaf of
 // an exchange F served earlier in the call's own test or in an earlier
 // test; a payload recorded before the call; an answer F gave the
-// application elsewhere before the call; stamps too). Read once.
+// application elsewhere before the call; stamps too), not even inside a
+// longer word there (glued: a value may be cut from an id the place holds,
+// and keploy fails closed on it, as movedFrom does). Read once.
 func (f *follows) mintedID(v *valueDrift) bool {
 	if f.longRead {
 		return !f.longShown
@@ -354,7 +373,7 @@ func (f *follows) mintedID(v *valueDrift) bool {
 			}
 		}
 	}
-	shows := func(h holds) bool { return slices.ContainsFunc(long, func(w string) bool { return h(w) }) }
+	shows := func(h holds) bool { return slices.ContainsFunc(long, func(w string) bool { return h(w, true) }) }
 	shown := func() bool {
 		for _, e := range f.served {
 			for _, s := range e.Seen {
@@ -412,7 +431,7 @@ func (f *follows) pieceAt(v *valueDrift, t string, at holds) bool {
 		return false
 	}
 	for o := range others {
-		if at(o) {
+		if at(o, false) {
 			return false
 		}
 	}
