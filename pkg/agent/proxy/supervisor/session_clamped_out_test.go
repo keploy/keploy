@@ -40,8 +40,14 @@ func clampedOutRun(t *testing.T, hook PostRecordHook, mocks ...*models.Mock) []o
 	if got := len(ch); got != len(mocks) {
 		t.Fatalf("%d mocks recorded; want all %d", got, len(mocks))
 	}
+	// What the supervisor said as the parser returned, before anything else
+	// asks: the WARN is the supervisor's to say.
+	warns := logs.FilterLevelExact(zapcore.WarnLevel).All()
 	sess.ReportClampedOut() // said once: a second call says nothing more
-	return logs.FilterLevelExact(zapcore.WarnLevel).All()
+	if n := logs.FilterLevelExact(zapcore.WarnLevel).Len(); n != len(warns) {
+		t.Errorf("%d WARNs after a second report; want the %d said as the parser returned", n, len(warns))
+	}
+	return warns
 }
 
 // zkAt is a ZooKeeper mock asked at ms and answered at ms+1 (milliseconds past

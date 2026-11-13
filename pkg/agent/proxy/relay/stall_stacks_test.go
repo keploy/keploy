@@ -347,6 +347,38 @@ func TestTee_AStallFirstSeenAtTheCloseWritesTheStacksAsItAbandons(t *testing.T) 
 	}
 }
 
+// A drain that first waits on a full channel after its connection closed arms
+// no look of its own: the stall bound's meter is the one timer it waits on.
+// The drain asks for every timer of its wait as it enters the wait, so once
+// the meter's is armed the parser may take a chunk, and the drain hands on the
+// last and ends, having asked for that one alone.
+func TestTee_ADrainThatFirstWaitsAfterTheCloseArmsNoLook(t *testing.T) {
+	freshStacks(t)
+	clk := &stall.ManualClock{}
+	tt := newTee(fakeconn.FromClient, 1<<30, 1, testStallGrace, (&dropRecorder{}).record, zap.NewNop())
+	tt.clock = clk
+	took := &atomic.Int64{}
+	tt.consumed = took.Load
+	tt.push(mkChunk("x"))
+	tt.push(mkChunk("y"))
+	tt.close()
+	tt.start(make(chan struct{}))
+	deadline := time.Now().Add(10 * time.Second)
+	for clk.Pending() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the drain never waited on its full channel")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	take(t, tt, took)
+	tt.waitDone()
+	if clk.Waits != 1 {
+		t.Fatalf("the drain asked for %d timers after the close; want 1, the stall bound's own", clk.Waits)
+	}
+	for range tt.readCh() {
+	}
+}
+
 // Stacks that could not be written are said with why, naming no file.
 func TestTee_StacksThatCouldNotBeWrittenAreSaidWithWhy(t *testing.T) {
 	freshStacks(t)
