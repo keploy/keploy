@@ -42,6 +42,24 @@ func copyCA(t *testing.T, path string) []byte {
 	return ca
 }
 
+// runUntilCleanup sets up a native run that ends with the test: its removal
+// renames the run's directory, so the test waits for it before t.TempDir's
+// cleanup lists the temp directory, or that cleanup finds a name it did not
+// list and fails with "directory not empty".
+func runUntilCleanup(t *testing.T, logger *zap.Logger) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := SetupCaCertEnv(ctx, logger, testCACertPEM()); err != nil {
+		t.Fatal(err)
+	}
+	run := liveRunOf(t, filepath.Dir(os.Getenv("NODE_EXTRA_CA_CERTS")))
+	t.Cleanup(func() {
+		cancel()
+		waitRunGone(t, run)
+	})
+}
+
 // A native run points kubectl and helm (KUBECONFIG) at a copy of the user's
 // kubeconfig that trusts keploy's CA beside the cluster's own, readable by its
 // owner alone (it holds the user's client key), in the run's directory. The
@@ -141,11 +159,7 @@ func TestSetupCaCertEnv_ACopyItsOwnerCannotReadIsNotUsed(t *testing.T) {
 	chownCopy = func(string, string) error { return os.ErrPermission }
 	t.Cleanup(func() { chownCopy = orig })
 	core, logs := observer.New(zap.WarnLevel)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := SetupCaCertEnv(ctx, zap.New(core), testCACertPEM()); err != nil {
-		t.Fatal(err)
-	}
+	runUntilCleanup(t, zap.New(core))
 	if got := os.Getenv(kubeconfig.EnvVar); got != user {
 		t.Fatalf("KUBECONFIG=%q; want the user's %q", got, user)
 	}
@@ -163,11 +177,7 @@ func TestSetupCaCertEnv_NoKubeconfigLeavesKUBECONFIGAlone(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(kubeconfig.EnvVar, "")
 	os.Unsetenv(kubeconfig.EnvVar)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := SetupCaCertEnv(ctx, zap.NewNop(), testCACertPEM()); err != nil {
-		t.Fatal(err)
-	}
+	runUntilCleanup(t, zap.NewNop())
 	if v, ok := os.LookupEnv(kubeconfig.EnvVar); ok {
 		t.Fatalf("KUBECONFIG=%q with no kubeconfig; want it unset", v)
 	}
