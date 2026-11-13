@@ -154,6 +154,53 @@ func TestRecordV2_AStaleAnswerAfterAResponseLeftOutIsDroppedOnce(t *testing.T) {
 	}
 }
 
+// The server's stream ends where the re-align looks for the answer to the
+// command after a response left out: the cut by time stops at a stale answer
+// numbered before that command and stamped after it, the floor drops it, and
+// nothing follows it. That is the connection's end, with nothing more from the
+// server: the recording ends there, with no error and no stop stamped, as any
+// connection that ends does. Taken for lost framing, the end was reported as
+// a stop of a connection that had nothing more to record.
+func TestRecordV2_TheServersStreamEndingWhereTheAnswerTakenUpStartsEndsTheConnection(t *testing.T) {
+	t.Parallel()
+	stale := frame([][]byte{{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}})
+	for _, n := range []int{512, 16384} {
+		t.Run(fmt.Sprintf("reads of %d", n), func(t *testing.T) {
+			t.Parallel()
+			xs := kitTraffic(t, []int{7, 8}, false)
+			// An empty packet where the column count should be: a response
+			// the recorder cannot frame.
+			xs[2].reply = append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[2].reply...)
+			// Then the stale answer, and the next command, which the server's
+			// stream ends before answering.
+			xs = append(xs[:3:3], exchange{reply: stale}, exchange{command: xs[3].command})
+			client, server := onTheWire(xs, n)
+			at := len(server) - 1
+			if !bytes.Equal(server[at].Bytes, stale[0]) {
+				t.Fatal("fixture: the stale answer is not the server's last chunk")
+			}
+			if !server[at].CapturedBefore(client[len(client)-1].ConnSeq) {
+				t.Fatal("fixture: the stale answer is not numbered before the command after the response left out")
+			}
+			server[at].ReadAt = commandAt(t, xs, n, 4).Add(500 * time.Nanosecond)
+
+			rec := recordChunks(t, client, server, true, time.Minute)
+			if w := wrongMocks(t, rec.mocks); len(w) > 0 {
+				t.Fatalf("%d wrong mock(s) recorded; the first: %s", len(w), w[0])
+			}
+			if !rec.returned || rec.err != nil {
+				t.Fatalf("RecordV2 returned=%v err=%v, want nil at the end of the connection: the server's stream ended", rec.returned, rec.err)
+			}
+			if rec.stops != 0 {
+				t.Fatalf("the connection's stop was stamped %d times, want never: the connection ended", rec.stops)
+			}
+			if got := queryMocks(rec.mocks); got != 2 {
+				t.Fatalf("%d query mocks, want the 2 before the response left out", got)
+			}
+		})
+	}
+}
+
 // Two responses in a row that the recorder cannot frame cost their two
 // exchanges, and the connection's recording goes on. The second is for a
 // command it cannot size the response of (COM_FIELD_LIST), found before it
