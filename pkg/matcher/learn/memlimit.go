@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // memoryLimit is the agent's memory limit in bytes, 0 where none is known:
@@ -22,6 +23,48 @@ import (
 // only throttles, and readers past it share its CPU time, never more.
 func memoryLimit() int64 {
 	return memoryLimitAt(debug.SetMemoryLimit(-1), "/proc/self/cgroup", "/sys/fs/cgroup", "/proc/meminfo")
+}
+
+// holdMu makes holdHeap's read of the runtime's limit and its setting one.
+var holdMu sync.Mutex
+
+// holdHeap holds the agent's Go heap under half of its memory limit, where
+// nothing set it a limit, as a set starts (setBudget). The agent shares
+// that limit with what it serves: a native run's app, browser and
+// databases sit in its cgroup. Without a limit the Go heap grows to twice
+// what it keeps before it collects (GOGC 100), the whole agent's and not
+// only a set's: on enterprise-ui's atg-features replay, a set of 4 GiB (a
+// quarter of a 20 GiB container, at the 4 GiB cap) and 1.1 GB more of the
+// agent's own grew a heap of 10 GB (13.2 GB resident), and in the lane's
+// 12 GiB container the kernel killed the run. The hold is a Go limit like
+// any other, so the set's budget is a quarter of it (budgetOf). A limit is
+// a soft one: a heap that keeps more grows past it, the collector's share
+// of the CPU capped (runtime/debug.SetMemoryLimit), never stopped.
+func holdHeap() {
+	holdHeapWith(os.Getenv("GOMEMLIMIT"), memoryLimit)
+}
+
+// holdHeapWith is holdHeap with GOMEMLIMIT's text env and the agent's
+// memory limit read by limit, for the rows. Once it is set the runtime has
+// a limit, so a later set holds nothing more; a limit set after it (the
+// memory guard's) replaces it.
+func holdHeapWith(env string, limit func() int64) {
+	holdMu.Lock()
+	defer holdMu.Unlock()
+	if h := heapHoldFor(env, debug.SetMemoryLimit(-1), limit()); h > 0 {
+		debug.SetMemoryLimit(h)
+	}
+}
+
+// heapHoldFor is the hold holdHeap sets, 0 for none: half of limit (the
+// agent's memory limit, 0 where none is known, so none), where GOMEMLIMIT's
+// text env is empty and the runtime's limit cur is none (math.MaxInt64). A
+// limit the user or the memory guard set is theirs, and stays.
+func heapHoldFor(env string, cur, limit int64) int64 {
+	if env != "" || cur != math.MaxInt64 {
+		return 0
+	}
+	return limit / 2
 }
 
 // memoryLimitAt is memoryLimit with the Go runtime's limit goLimit

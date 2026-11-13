@@ -466,19 +466,25 @@ func readOnce[P, V any](s *setDerived, t *tier[P], k readingKey, ch chan struct{
 // maxSetBudget and at least minSetBudget, and minSetBudget where no limit
 // is known. Each set reads it when it starts, so a limit the agent sets
 // after it started (its memory guard's GOMEMLIMIT) holds from its next set.
+// As it starts, the agent's heap is held under half of its limit where
+// nothing else limits it (holdHeap), and the budget is a quarter of that.
 func setBudget() int64 {
 	if learnBudget > 0 {
 		return learnBudget
 	}
+	holdHeap()
 	return budgetOf(memoryLimit())
 }
 
 // budgetOf is setBudget of an agent whose memory limit is limit bytes (0:
 // none known). A quarter, because the Go heap grows to about twice what it
-// keeps before it collects (GOGC 100): a set's data at a quarter of the
-// limit takes about half of it at its peak, and leaves the other half to
-// the rest of the agent (on api-server's lane, 12 GiB: 3 GiB kept, against
-// a peak of 2.7 GB for the whole agent with the old tiers' 224 MiB).
+// keeps before it collects (GOGC 100) unless its limit stops it: a set's
+// data at a quarter of the agent's Go limit takes about half of it at its
+// peak, and leaves the other half to the rest of the agent. Where no one
+// set a Go limit, the agent's hold is that limit (holdHeap: half of its
+// cgroup's or the machine's), so the agent's heap leaves the other half of
+// its memory to the app it serves (on api-server's 12 GiB lane: a hold of
+// 6 GiB, a budget of 1.5 GiB, and its sets keep about 1.2 GB).
 func budgetOf(limit int64) int64 {
 	b := limit / 4
 	if b > maxSetBudget {
