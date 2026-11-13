@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || windows
 
 package proxy
 
@@ -16,7 +16,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// canaryCounter is a darwin hooks' count of the proxy's connections: the
+// canaryCounter is a shim's hooks' count of the proxy's connections (macOS's
+// and Windows' hooks pair by the source port the shim pinned): the
 // listener is marked and each accepted connection numbered, or the numbering
 // fails with err.
 type canaryCounter struct {
@@ -59,10 +60,10 @@ func startCanaryProxy(t *testing.T, c agent.ListenerCounter) *Proxy {
 	return p
 }
 
-// On macOS the proxy proves its count before it says it is ready, as on
-// Linux: it dials its own listener, and the hooks number that connection, so
-// the count reads 1 at the start.
-func TestOnMacOSTheCanaryIsCountedBeforeTheProxyIsReady(t *testing.T) {
+// On macOS and Windows the proxy proves its count before it says it is
+// ready, as on Linux: it dials its own listener, and the hooks number that
+// connection, so the count reads 1 at the start.
+func TestWithAShimsCountTheCanaryIsCountedBeforeTheProxyIsReady(t *testing.T) {
 	c := &canaryCounter{}
 	p := startCanaryProxy(t, c)
 	if n, err := p.Accepted(); err != nil || n != 1 {
@@ -74,8 +75,9 @@ func TestOnMacOSTheCanaryIsCountedBeforeTheProxyIsReady(t *testing.T) {
 }
 
 // A count the hooks cannot give (the canary's connection has no number) is
-// unknown from the start on macOS too, never a settled count of none.
-func TestOnMacOSABrokenCountIsUnknownFromTheStart(t *testing.T) {
+// unknown from the start on macOS and Windows too, never a settled count of
+// none.
+func TestWithAShimsCountABrokenCountIsUnknownFromTheStart(t *testing.T) {
 	c := &canaryCounter{err: errors.New("an accepted connection has no sequence number")}
 	p := startCanaryProxy(t, c)
 	if n, err := p.Accepted(); !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "no sequence number") {
