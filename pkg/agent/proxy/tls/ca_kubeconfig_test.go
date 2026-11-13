@@ -510,9 +510,10 @@ func dieWithoutCleanup(run *runTrustDir) {
 // the ended run's directory, as the run's own end would have: merged onto a
 // file changed since elsewhere, refused when changed in the same entry; each
 // line names the ended run's pid and start. A run that ends as it should, or
-// whose test changed nothing, leaves the next run nothing to write; a live
-// run's directory is left alone; a record keploy cannot read keeps the
-// directory, whose copy holds the test's changes, and says so.
+// whose test changed nothing, leaves the next run nothing to write, as does a
+// record it was still writing when killed; a live run's directory is left
+// alone; a record keploy cannot read keeps the directory, whose copy holds
+// the test's changes, and says so.
 func TestReapEndedRunDirs_WritesADeadRunsKubeconfigChangesBack(t *testing.T) {
 	isolateCertEnv(t)
 	tmp := useTempDir(t)
@@ -598,6 +599,11 @@ func TestReapEndedRunDirs_WritesADeadRunsKubeconfigChangesBack(t *testing.T) {
 				t.Errorf("own end: namespace %v; want web", ns)
 			}
 		}},
+		{name: "killed while it wrote a record", do: func(t *testing.T, cp string) {
+			if err := os.WriteFile(filepath.Join(filepath.Dir(cp), recordTemp(filepath.Base(cp))), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
 		{name: "a record keploy cannot read", do: func(t *testing.T, cp string) {
 			namespace("web")(t, cp)
 			if err := os.WriteFile(cp+recordSuffix, []byte("{"), 0o600); err != nil {
@@ -614,6 +620,7 @@ func TestReapEndedRunDirs_WritesADeadRunsKubeconfigChangesBack(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		runLog, _ := observer.New(zap.InfoLevel)
+		t0 := time.Now()
 		if err := SetupCaCertEnv(ctx, zap.New(runLog), testCACertPEM()); err != nil {
 			cancel()
 			t.Fatal(err)
@@ -621,6 +628,9 @@ func TestReapEndedRunDirs_WritesADeadRunsKubeconfigChangesBack(t *testing.T) {
 		runDir := filepath.Dir(os.Getenv("NODE_EXTRA_CA_CERTS"))
 		live := liveRunOf(t, runDir)
 		started := live.started
+		if started.Before(t0) || started.After(time.Now()) {
+			t.Errorf("%s: the run started at %v; want between %v and now", r.name, started, t0)
+		}
 		cp := os.Getenv(kubeconfig.EnvVar)
 		if r.do != nil {
 			r.do(t, cp)

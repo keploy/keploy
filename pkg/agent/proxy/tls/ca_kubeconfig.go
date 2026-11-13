@@ -36,14 +36,19 @@ type kubeconfigRecord struct {
 	Started time.Time `json:"started"` // when the run started
 }
 
+// recordTemp is the name a copy's record is written under before it is
+// renamed into place: one the next run does not read (writeBackEndedRun), so
+// a run killed as it wrote it leaves no part of a record.
+func recordTemp(copyName string) string { return copyName + recordSuffix + ".tmp" }
+
 // keepRecord writes rec beside its copy in run's directory: whole or not at
-// all, as a file renamed into place.
+// all, as a file renamed into place (recordTemp).
 func keepRecord(run *runTrustDir, rec kubeconfigRecord) error {
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	tmp, err := run.writePrivate("."+rec.Copy+recordSuffix, data)
+	tmp, err := run.writePrivate(recordTemp(rec.Copy), data)
 	if err != nil {
 		return err
 	}
@@ -118,9 +123,8 @@ func pointKubeconfig(logger *zap.Logger, run *runTrustDir, trust kubeconfig.Trus
 func writeKubeconfigsBack(logger *zap.Logger, dir string, recs []kubeconfigRecord) {
 	for _, rec := range recs {
 		writeKubeconfigBack(logger, dir, rec)
-		if err := os.Remove(filepath.Join(dir, rec.Copy+recordSuffix)); err != nil {
-			logger.Debug("could not remove the record of a kubeconfig copy written back", zap.String("dir", dir), zap.Error(err))
-		}
+		// One that cannot be removed is in a directory that cannot be either.
+		_ = os.Remove(filepath.Join(dir, rec.Copy+recordSuffix))
 	}
 }
 
