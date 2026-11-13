@@ -562,6 +562,11 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 		return true, true
 	}
 	both := inRec && inLive
+	if !guarded && both && ref.Path == cookieLeaf && goneAsLearned(k.learned, rec.Value, live.Value) {
+		// Pairs the page sets while its test runs, gone from the header
+		// and otherwise as recorded (cookieSetByPage).
+		return true, true
+	}
 	switch {
 	case strings.HasPrefix(ref.Noise, "body."):
 		path := strings.TrimPrefix(ref.Noise, "body.")
@@ -1916,6 +1921,20 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				}
 				w = oc.Window(input.arrived)
 			}
+			// A Cookie header that lost only pairs the page itself sets
+			// while its test runs (pagePairsGone) learns those pairs'
+			// noise, and is no change of the header to classify.
+			var pagePairs []learn.Learned
+			if slices.Contains(drift, cookieLeaf) {
+				r, inRec := c.Shape.Leaves[cookieLeaf]
+				l, inLive := liveShape.Leaves[cookieLeaf]
+				if inRec && inLive {
+					pagePairs = pagePairsGone(m, r.Value, l.Value, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...))
+				}
+			}
+			if len(pagePairs) > 0 {
+				drift = slices.DeleteFunc(slices.Clone(drift), func(p string) bool { return p == cookieLeaf })
+			}
 			// A client test's request that reached the application before
 			// the call in both runs is a place of it (learn.ClassifyArrived),
 			// where its test case binds a value the call carries whole.
@@ -1929,7 +1948,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				learned[i] = learn.OffsetReadUnder(l, timeForm)
 			}
 			learned = declaredClocksOf(learned, n.sources, m, w, timeForm, tracker.DriftsOf(ctx), answer)
-			return boundTimesOf(learned, n.sources, m, w, timeForm), answered, earlier, ""
+			return append(boundTimesOf(learned, n.sources, m, w, timeForm), pagePairs...), answered, earlier, ""
 		}
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {

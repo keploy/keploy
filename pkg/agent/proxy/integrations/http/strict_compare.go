@@ -1211,6 +1211,12 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
+		// A Cookie header without pairs the page sets while its test runs,
+		// otherwise as recorded, is the recorded one (cookieSetByPage);
+		// keploy.yml's patterns still decide a header they guard.
+		if name == "cookie" && !guarded && goneAsLearned(k.learned, rv, lv) {
+			continue
+		}
 		out = append(out, patternField(field(valueDiff(path, rv, lv))))
 	}
 	return out

@@ -1,8 +1,11 @@
 package http
 
 import (
+	"context"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -155,4 +158,208 @@ func TestLearnPlanNamesCookiePairs(t *testing.T) {
 			t.Fatalf("header.cookie is not learned as noise: %v", p.noise)
 		}
 	})
+}
+
+// pairsGone is the pairs a Cookie header lost and nothing else: every other
+// pair sent once, in the recorded order, with its recorded value, and no
+// pair more.
+func TestPairsGone(t *testing.T) {
+	for _, c := range []struct {
+		name, rec, live string
+		gone            []string
+	}{
+		{"one pair gone", "session=s1; sub=pro", "session=s1", []string{"sub"}},
+		{"a middle pair gone", "a=1; b=2; c=3", "a=1; c=3", []string{"b"}},
+		{"every pair gone", "a=1; b=2", "", []string{"a", "b"}},
+		{"blanks between pairs", "a=1;b=2", "a=1", []string{"b"}},
+		{"a name sent twice kept whole", "a=1; a=2; b=2", "a=1; a=2", []string{"b"}},
+		{"none gone", "session=s1; sub=pro", "session=s1; sub=pro", nil},
+		{"none gone, another order", "a=1; b=2", "b=2; a=1", nil},
+		{"the rest in another order", "a=1; b=2; c=3", "c=3; a=1", nil},
+		{"another pair's value changed", "a=1; b=2", "a=2", nil},
+		{"a pair sent in this run only", "a=1; b=2", "a=1; x=9", nil},
+		{"the gone pair named twice", "a=1; b=2; b=3", "a=1", nil},
+		{"a name sent twice lost a value", "a=1; a=2; b=2", "a=1", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			gone, ok := pairsGone(c.rec, c.live)
+			if ok != (c.gone != nil) || !reflect.DeepEqual(gone, c.gone) {
+				t.Fatalf("pairsGone(%q, %q) = %v, %v; want %v", c.rec, c.live, gone, ok, c.gone)
+			}
+		})
+	}
+}
+
+// A Cookie header without pairs learned as the page's is as recorded, and
+// only where every pair gone was learned so.
+func TestGoneAsLearned(t *testing.T) {
+	sub := map[string][]string{cookieSetByPage + "sub": {}}
+	for _, c := range []struct {
+		name      string
+		learned   map[string][]string
+		rec, live string
+		want      bool
+	}{
+		{"the page's pair gone", sub, "session=s1; sub=pro", "session=s1", true},
+		{"another pair gone", sub, "session=s1; sub=pro", "sub=pro", false},
+		{"two gone, one learned", sub, "session=s1; sub=pro; a=1", "session=s1", false},
+		{"none gone", sub, "session=s1; sub=pro", "session=s1; sub=pro", false},
+		{"the whole header learned", map[string][]string{cookieLeaf: {}}, "session=s1; sub=pro", "session=s1", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := goneAsLearned(c.learned, c.rec, c.live); got != c.want {
+				t.Fatalf("goneAsLearned = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// pageCall is a GET /v1/plan the test recorded at an offset from the
+// learned call, sent with the Cookie header cookie (none where "") and
+// answered with the Set-Cookie header set (none where "").
+func pageCall(name string, at time.Duration, cookie, set string) *models.Mock {
+	h := map[string]string{}
+	if cookie != "" {
+		h["Cookie"] = cookie
+	}
+	m := learnRecorded(name, -time.Hour+300*time.Millisecond+at, "GET", "/v1/plan", "", h, `{"plan":"pro"}`)
+	if set != "" {
+		m.Spec.HTTPResp.Header["Set-Cookie"] = set
+	}
+	return m
+}
+
+// learnPageCookie runs the learn step on a POST /v1/apps recorded with the
+// Cookie header rec after the test's earlier calls, sent in this run with
+// live: what it learned onto the mock, or why it refused the call.
+func learnPageCookie(t *testing.T, earlier []*models.Mock, rec, live string) (map[string][]string, string) {
+	t.Helper()
+	h, n, opts := learnOn(t)
+	m := learnRecorded("mock-9", -time.Hour+300*time.Millisecond, "POST", "/v1/apps", `{"name":"a"}`, map[string]string{"Cookie": rec}, `{"id":7}`)
+	db := &learnDb{perTest: append(append([]*models.Mock(nil), earlier...), m)}
+	served, miss, err := h.learnMatch(context.Background(), livePageCall(live), db, n, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miss != nil {
+		return nil, miss.res.Why
+	}
+	if served == nil || len(db.consumed) != 1 {
+		t.Fatalf("served %v, consumed %d", served, len(db.consumed))
+	}
+	return db.consumed[0].Spec.ReqBodyNoise, ""
+}
+
+func livePageCall(cookie string) *req {
+	return live("POST", "/v1/apps", `{"name":"a"}`, map[string]string{"Cookie": cookie})
+}
+
+// A call that goes without a Cookie pair the page set while its test ran
+// (the test began without it: an earlier call to the same host went
+// without it; and no answer before the call set it) learns that pair as
+// the page's (cookieSetByPage), not the whole header as noise. A pair the
+// test began with, one a service set, or a header that changed otherwise is
+// learned as before (nil: the whole header as noise, or the call refused
+// naming the pairs that differ), never as the page's.
+func TestLearnMatchLearnsAPairThePageSets(t *testing.T) {
+	const rec = "session=s1; sub=pro"
+	page := map[string][]string{cookieSetByPage + "sub": {}}
+	var whole map[string][]string
+	other := pageCall("mock-1", -200*time.Millisecond, "session=s1", "")
+	other.Spec.HTTPReq.URL = "http://other.test/v1/plan"
+	other.Spec.HTTPReq.Header["Host"] = "other.test"
+	unread := pageCall("mock-1", -200*time.Millisecond, "session=s1", "")
+	unread.Spec.HTTPResp = nil
+	setElsewhere := pageCall("mock-2", -100*time.Millisecond, "", "sub=pro; Path=/")
+	setElsewhere.Spec.HTTPReq.URL = "http://other.test/v1/plan"
+	setElsewhere.Spec.HTTPReq.Header["Host"] = "other.test"
+	for _, c := range []struct {
+		name    string
+		earlier []*models.Mock
+		live    string
+		want    map[string][]string
+	}{
+		{"set by the page", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "")}, "session=s1", page},
+		{"set by the page, the first call sent no Cookie", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "", "")}, "session=s1", page},
+		{"no earlier call", nil, "session=s1", whole},
+		{"the test began with it", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, rec, "")}, "session=s1", whole},
+		{"only a call to another host went without it", []*models.Mock{other}, "session=s1", whole},
+		{"the call without it was recorded later", []*models.Mock{pageCall("mock-1", 200*time.Millisecond, "session=s1", "")}, "session=s1", whole},
+		{"a service set it", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "sub=pro; Path=/")}, "session=s1", whole},
+		{"a service of another host set it", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", ""), setElsewhere}, "session=s1", whole},
+		{"an earlier answer keploy cannot read", []*models.Mock{unread}, "session=s1", whole},
+		{"the session changed too", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "")}, "session=s2", whole},
+		{"a pair sent in this run only", []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "")}, "session=s1; sub=pro; x=1", whole},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, why := learnPageCookie(t, c.earlier, rec, c.live)
+			if c.want != nil {
+				if why != "" || !reflect.DeepEqual(got, c.want) {
+					t.Fatalf("learned %v (refused: %q), want %v", got, why, c.want)
+				}
+				return
+			}
+			if _, page := got[cookieSetByPage+"sub"]; page || why != "" && !strings.Contains(why, "header.cookie (pair") || why == "" && !reflect.DeepEqual(got, map[string][]string{cookieLeaf: {}}) {
+				t.Fatalf("learned %v (refused: %q), want the whole header as noise or a refusal naming its pairs", got, why)
+			}
+		})
+	}
+}
+
+// A replay serves a call that goes without a pair its mock learned as the
+// page's, and compares every other pair, the page's own value where it is
+// sent, and a header keploy.yml's patterns guard as before.
+func TestStrictServesACallWithoutAPairThePageSets(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		learned map[string][]string
+		noise   map[string][]string
+		live    string
+		served  bool
+	}{
+		{"the page's pair gone", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s1", true},
+		{"as recorded", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s1; sub=pro", true},
+		{"the page's pair with another value", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s1; sub=free", false},
+		{"the session gone", map[string][]string{cookieSetByPage + "sub": {}}, nil, "sub=pro", false},
+		{"the session changed", map[string][]string{cookieSetByPage + "sub": {}}, nil, "session=s2", false},
+		{"nothing learned", nil, nil, "session=s1", false},
+		{"keploy.yml's patterns guard the header", map[string][]string{cookieSetByPage + "sub": {}}, map[string][]string{"cookie": {"^z$"}}, "session=s1", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rec := recorded("m", "/v1/apps", map[string]string{"Cookie": "session=s1; sub=pro"}, "")
+			rec.Spec.ReqBodyNoise = c.learned
+			got, diag := strictMatch(t, sent("/v1/apps", map[string]string{"Cookie": c.live}, ""), c.noise, nil, nil, rec)
+			if (got != nil) != c.served {
+				t.Fatalf("served %v, want %v (differs %v)", got != nil, c.served, differs(diag))
+			}
+			if !c.served && !hasField(differs(diag), "header.cookie") {
+				t.Fatalf("differs %v does not name header.cookie", differs(diag))
+			}
+		})
+	}
+}
+
+// The learn step's pairing excuses a Cookie header without pairs the mock
+// learned as the page's, where both sides send the header and keploy.yml's
+// patterns do not guard it.
+func TestExcusedPairOfAPairThePageSets(t *testing.T) {
+	h, n, opts := learnOn(t)
+	learned := map[string][]string{cookieSetByPage + "sub": {}}
+	rec := learn.Leaf{Path: cookieLeaf, Noise: cookieLeaf, Type: learn.String, Value: "session=s1; sub=pro"}
+	gone, changed := rec, rec
+	gone.Value, changed.Value = "session=s1", "session=s2"
+	k := httpKnown{n: n, learned: learned}
+	if ok, _ := k.ExcusedPair(rec, gone, true, true); !ok {
+		t.Fatal("the page's pair gone is not excused")
+	}
+	if ok, _ := k.ExcusedPair(rec, changed, true, true); ok {
+		t.Fatal("a changed session is excused")
+	}
+	if ok, _ := k.ExcusedPair(rec, gone, true, false); ok {
+		t.Fatal("a header the call did not send is excused")
+	}
+	opts.NoiseConfig = map[string]map[string][]string{"header": {"cookie": {"^z$"}}}
+	if ok, _ := (httpKnown{n: h.newLearnNoise(opts, nil, nil), learned: learned}).ExcusedPair(rec, gone, true, true); ok {
+		t.Fatal("a header keploy.yml's patterns guard is excused")
+	}
 }
