@@ -14,14 +14,15 @@ import (
 // it ends: noteGivenUpInFlightLocked). A window opens before its request
 // reaches the app (OpenWindow), so a request that can have made the call has
 // opened one by the time the mock is here, however late the mock's parser
-// hands it over. A request that opens none cannot be recorded, so no test owns
+// hands it over; where it may open after (SetWindowsOpenLate), nothing is
+// marked. A request that opens none cannot be recorded, so no test owns
 // what it calls.
 //
 // It marks nothing unless a window has ended here, so an agent whose ingress
 // opens none says nothing. Nor a call missing either of its times, which the
 // checks below cannot place. Caller holds mu.
 func (m *SyncMockManager) stampOutsideRequestsLocked(mock *models.Mock) {
-	if mock == nil || m.lastWindowEnd.IsZero() || m.givenUpInFlight > 0 {
+	if mock == nil || m.windowsOpenLate || m.lastWindowEnd.IsZero() || m.givenUpInFlight > 0 {
 		return
 	}
 	req, res := mock.Spec.ReqTimestampMock, mock.Spec.ResTimestampMock
@@ -32,6 +33,23 @@ func (m *SyncMockManager) stampOutsideRequestsLocked(mock *models.Mock) {
 		return
 	}
 	mock.OutsideRequests = true
+}
+
+// SetWindowsOpenLate says an ingress may open its windows on m only after the
+// app has read their requests: one that watches the traffic instead of carrying
+// it, such as a capture of the app's own reads that its parser takes in behind
+// them. The mock of a call such a request made can then reach m before that
+// request's window opens, so from now on m marks no mock outside the requests
+// (stampOutsideRequestsLocked): that ingress tells them itself, from how far its
+// capture has got. Call it before the ingress can open a window on m, so that no
+// window of its has ended here first. It cannot be undone.
+func (m *SyncMockManager) SetWindowsOpenLate() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.windowsOpenLate = true
+	m.mu.Unlock()
 }
 
 // noteGivenUpInFlightLocked notes that w has just left the open windows given

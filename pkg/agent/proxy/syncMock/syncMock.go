@@ -284,9 +284,11 @@ type SyncMockManager struct {
 	// lastWindowEnd is when the latest window ended, and givenUpInFlight
 	// how many windows were given up while their requests are still in
 	// flight (noteGivenUpInFlightLocked; stampOutsideRequestsLocked).
-	// Guarded by mu.
+	// windowsOpenLate says an ingress may open its windows here after the
+	// app read their requests (SetWindowsOpenLate). Guarded by mu.
 	lastWindowEnd   time.Time
 	givenUpInFlight int
+	windowsOpenLate bool
 	// stopFound is the windows of the requests in flight that began by the
 	// instant a recording stops at (NoteStop), less those that ended since:
 	// the requests its stop found in flight. They stay the stopping
@@ -3806,7 +3808,9 @@ func (c LossCause) String() string {
 // (EndStoppedRecording): it is no request of the next one (LostToStop).
 //
 // The incoming proxy's ingress opens one per HTTP/1 request it may capture and
-// one per gRPC call, each before the app can read the request.
+// one per gRPC call, each before the app can read the request. An ingress that
+// can open one only after the app read its request says so on m before it opens
+// any (SetWindowsOpenLate).
 func (m *SyncMockManager) OpenWindow(start time.Time, lost func(LossCause) (takeBack func())) *Window {
 	if m == nil || start.IsZero() {
 		return nil
