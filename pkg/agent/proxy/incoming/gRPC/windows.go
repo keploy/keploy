@@ -19,6 +19,14 @@ import (
 // connection's end, or a parser that gives up on it, ends what is left (stop).
 type callWindows struct {
 	mgr *syncMock.SyncMockManager
+	// synchronous: the recording is --sync's. Its manager holds the mocks
+	// the app makes for its calls' windows only once it has seen the
+	// recording's first request (SetFirstRequestSignaled); before, each goes
+	// out at once, owned by no test. A call that may be recorded signals it
+	// as its window opens, before the app can read it, as the HTTP/1
+	// ingress's request does: else a recording of gRPC calls alone maps no
+	// mock to any of its test cases.
+	synchronous bool
 	// starts follows the client's frames; only its forwarder's goroutine
 	// touches it (started).
 	starts startScanner
@@ -29,13 +37,16 @@ type callWindows struct {
 	stopped bool
 }
 
-func newCallWindows(mgr *syncMock.SyncMockManager) *callWindows {
-	return &callWindows{mgr: mgr, open: make(map[uint32]*syncMock.Window)}
+func newCallWindows(mgr *syncMock.SyncMockManager, synchronous bool) *callWindows {
+	return &callWindows{mgr: mgr, synchronous: synchronous, open: make(map[uint32]*syncMock.Window)}
 }
 
 // started opens, at, the window of each call whose request b, the client's
 // next bytes, opens: at is b's stamp, taken before b is written to the app.
-func (c *callWindows) started(b []byte, at time.Time) {
+// With --sync, a call read while the memory guard had not paused recording
+// (paused false), which may be recorded, signals the recording's first
+// request (synchronous).
+func (c *callWindows) started(b []byte, at time.Time, paused bool) {
 	for _, id := range c.starts.scan(b) {
 		w := c.mgr.OpenWindow(at, nil)
 		c.mu.Lock()
@@ -46,6 +57,9 @@ func (c *callWindows) started(b []byte, at time.Time) {
 		}
 		c.open[id] = w
 		c.mu.Unlock()
+		if c.synchronous && !paused {
+			c.mgr.SetFirstRequestSignaled()
+		}
 	}
 }
 

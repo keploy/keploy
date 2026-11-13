@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -59,10 +60,10 @@ func stubShiftedClock(t *testing.T, shift time.Duration) {
 
 // A call's window opens before the app can read its request, and holds every
 // mock the app makes for it while it is in flight: another request's verdict
-// past the stale horizon drops none of them. With --sync (a recording that
-// buffers once an HTTP request has signalled its first) the call's test case
-// gets its mock, mapped to its name; before, the cutoff dropped it and the
-// test case was left out. Without --sync nothing is buffered; the window ends
+// past the stale horizon drops none of them. With --sync (the call signals
+// the recording's first request, so its mocks are buffered) the call's test
+// case gets its mock, mapped to its name; before, the cutoff dropped it and
+// the test case was left out. Without --sync nothing is buffered; the window ends
 // once the capture has decided it. A mock made after it, while no call is in
 // flight, is outside the requests; one made during the call is not.
 func TestRecordIncoming_ACallsWindowHoldsItsMocksPastTheStaleHorizon(t *testing.T) {
@@ -77,9 +78,6 @@ func TestRecordIncoming_ACallsWindowHoldsItsMocksPastTheStaleHorizon(t *testing.
 			mctx, mcancel := context.WithCancel(context.Background())
 			defer mcancel()
 			m.SetMappingChannel(mctx, maps)
-			if sync {
-				m.SetFirstRequestSignaled()
-			}
 			old := time.Now().Add(-time.Hour)
 			for i := 0; i < models.StartupMockTestCaseWindow; i++ {
 				m.ResolveRange(old, old, "", true, false)
@@ -204,11 +202,11 @@ func parse(sm *pkg.DefaultStreamManager, calls *callWindows, outgoing bool, chun
 // capture's: a reset after it ends nothing.
 func TestParseFramesFromChan_AResetEndsOnlyAnIncompleteCallsWindow(t *testing.T) {
 	m := syncMock.New(zap.NewNop())
-	calls := newCallWindows(m)
+	calls := newCallWindows(m, false)
 	req1, resp1 := pingCallOn(t, 1, true)
 	req3 := headersFrameBytes(t, 3, reqFields, false)
 	req5 := headersFrameBytes(t, 5, reqFields, false)
-	calls.started(append(append(append([]byte{}, req1...), req3...), req5...), time.Now())
+	calls.started(append(append(append([]byte{}, req1...), req3...), req5...), time.Now(), false)
 	if n := m.OpenWindows(); n != 3 {
 		t.Fatalf("%d windows open, want the three calls'", n)
 	}
@@ -244,17 +242,137 @@ func TestParseFramesFromChan_AParserThatGivesUpEndsTheConnectionsWindows(t *test
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := syncMock.New(zap.NewNop())
-			calls := newCallWindows(m)
+			calls := newCallWindows(m, false)
 			req, _ := pingCallOn(t, 1, true)
-			calls.started(req, time.Now())
+			calls.started(req, time.Now(), false)
 			parse(pkg.NewStreamManager(zap.NewNop()), calls, c.outgoing, c.bytes)
 			if n := m.OpenWindows(); n != 0 {
 				t.Fatalf("%d windows open after the parser gave up", n)
 			}
-			calls.started(headersFrameBytes(t, 3, reqFields, false), time.Now())
+			calls.started(headersFrameBytes(t, 3, reqFields, false), time.Now(), false)
 			if n := m.OpenWindows(); n != 0 {
 				t.Fatalf("a call opened a window after the parser gave up (%d open)", n)
 			}
 		})
 	}
+}
+
+// A recording of gRPC calls alone with --sync maps each call's mocks to its
+// own test case: the call signals the recording's first request as its window
+// opens, before the app reads it, so the mocks the app makes for it are held
+// for its window. Before, nothing signalled it: every mock went out at once,
+// owned by no test, and no test case had a mapping.
+func TestRecordIncoming_AGRPCOnlySyncRecordingMapsEachCallsMocksToItsTestCase(t *testing.T) {
+	m := syncMock.New(zap.NewNop())
+	out := make(chan *models.Mock, 64)
+	m.SetOutputChannel(out)
+	maps := make(chan models.TestMockMapping, 16)
+	mctx, mcancel := context.WithCancel(context.Background())
+	defer mcancel()
+	m.SetMappingChannel(mctx, maps)
+	old := time.Now().Add(-time.Hour)
+	for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+		m.ResolveRange(old, old, "", true, false)
+	}
+	remove := m.AddWatermark(caughtUp{})
+	defer remove()
+	tcCh := make(chan *models.TestCase, 4)
+	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), m))
+	defer cancel()
+	cliApp, cliProxy := net.Pipe()
+	appProxy, appApp := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", true, true)
+	}()
+	defer func() {
+		cancel()
+		_ = cliApp.Close()
+		_ = appApp.Close()
+		<-done
+	}()
+	want := map[string]string{}
+	for i, id := range []uint32{1, 3} {
+		req, resp := pingCallOn(t, id, i == 0)
+		go func() { _, _ = cliApp.Write(req) }()
+		if _, err := io.ReadFull(appApp, make([]byte, len(req))); err != nil {
+			t.Fatal(err)
+		}
+		mk := perTestMockAt(time.Now())
+		mk.Name = fmt.Sprint("mock-", id)
+		m.AddMock(mk)
+		go func() { _, _ = appApp.Write(resp) }()
+		if _, err := io.ReadFull(cliApp, make([]byte, len(resp))); err != nil {
+			t.Fatal(err)
+		}
+		var tc *models.TestCase
+		select {
+		case tc = <-tcCh:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("call %d's test case was not handed on", id)
+		}
+		start, end := models.TestCaseWindow(tc)
+		if !m.SendingTestCase(tc.Name, start, end) {
+			t.Fatalf("%s is left out", tc.Name)
+		}
+		want[tc.Name] = mk.Name
+	}
+	got := map[string][]string{}
+	deadline := time.After(10 * time.Second)
+	for len(got) < len(want) {
+		select {
+		case mp := <-maps:
+			if _, ok := want[mp.TestName]; ok {
+				got[mp.TestName] = append(got[mp.TestName], mp.MockIDs...)
+			}
+		case <-deadline:
+			t.Fatalf("mapped %v, want %v", got, want)
+		}
+	}
+	for name, mock := range want {
+		if ids := got[name]; len(ids) != 1 || ids[0] != mock {
+			t.Errorf("mapped %v to %s, want [%s]", ids, name, mock)
+		}
+	}
+}
+
+// A call signals the recording's first request only with --sync, and only
+// when it may be recorded: not one read while the memory guard had paused
+// recording, nor one on a connection whose calls are all handled (no window
+// opens).
+func TestCallWindowsSignalTheFirstRequestOnlyForARecordableSyncCall(t *testing.T) {
+	req, _ := pingCallOn(t, 1, true)
+	later := headersFrameBytes(t, 3, reqFields, false)
+	t.Run("sync", func(t *testing.T) {
+		m := syncMock.New(zap.NewNop())
+		c := newCallWindows(m, true)
+		defer c.stop()
+		c.started(req, time.Now(), true)
+		if m.GetFirstReqSeen() {
+			t.Fatal("a call read during a pause signalled the first request")
+		}
+		c.started(later, time.Now(), false)
+		if !m.GetFirstReqSeen() {
+			t.Fatal("a call that may be recorded did not signal the first request")
+		}
+	})
+	t.Run("async", func(t *testing.T) {
+		m := syncMock.New(zap.NewNop())
+		c := newCallWindows(m, false)
+		defer c.stop()
+		c.started(req, time.Now(), false)
+		if m.GetFirstReqSeen() {
+			t.Fatal("a call without --sync signalled the first request")
+		}
+	})
+	t.Run("stopped", func(t *testing.T) {
+		m := syncMock.New(zap.NewNop())
+		c := newCallWindows(m, true)
+		c.stop()
+		c.started(req, time.Now(), false)
+		if m.GetFirstReqSeen() || m.OpenWindows() != 0 {
+			t.Fatal("a call on a connection whose calls are all handled opened a window or signalled the first request")
+		}
+	})
 }

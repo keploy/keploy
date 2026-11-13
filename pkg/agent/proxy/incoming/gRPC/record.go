@@ -32,7 +32,7 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// before the app can read its request until its capture decides it
 	// (callWindows). Whatever is left open when the connection's calls are
 	// all handled ends then: a call with no answer, or cut off.
-	calls := newCallWindows(syncMock.FromContextOrGlobal(ctx))
+	calls := newCallWindows(syncMock.FromContextOrGlobal(ctx), synchronous)
 	defer calls.stop()
 
 	// Close connections on ctx cancellation to unblock all goroutines.
@@ -299,7 +299,7 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 			switch {
 			case !toClient:
 				built, at := noteAndStamp(false)
-				calls.started(b, at)
+				calls.started(b, at, paused)
 				if !write(b, built) {
 					return
 				}

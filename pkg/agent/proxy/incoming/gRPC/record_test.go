@@ -47,7 +47,7 @@ func TestParseFramesFromChanUsesChunkTimestamps(t *testing.T) {
 		timestamp: requestAt,
 	}
 	close(clientCh)
-	parseFramesFromChan(logger, clientCh, sm, false, func([]func()) {}, newCallWindows(nil))
+	parseFramesFromChan(logger, clientCh, sm, false, func([]func()) {}, newCallWindows(nil, false))
 
 	destCh := make(chan frameChunk, 1)
 	destCh <- frameChunk{
@@ -67,7 +67,7 @@ func TestParseFramesFromChanUsesChunkTimestamps(t *testing.T) {
 		timestamp: responseAt,
 	}
 	close(destCh)
-	parseFramesFromChan(logger, destCh, sm, true, func([]func()) {}, newCallWindows(nil))
+	parseFramesFromChan(logger, destCh, sm, true, func([]func()) {}, newCallWindows(nil, false))
 
 	streams := sm.GetCompleteStreams()
 	require.Len(t, streams, 1)
@@ -106,7 +106,7 @@ func TestParseFramesFromChanPutsACallInAPauseByItsChunksReadFlag(t *testing.T) {
 	parserDone := make(chan struct{})
 	go func() {
 		defer close(parserDone)
-		parseFramesFromChan(logger, clientCh, sm, false, func([]func()) { chunkParsed <- struct{}{} }, newCallWindows(nil))
+		parseFramesFromChan(logger, clientCh, sm, false, func([]func()) { chunkParsed <- struct{}{} }, newCallWindows(nil, false))
 	}()
 	// Call 1: read while paused; parsed with the pause over.
 	clientCh <- frameChunk{data: append([]byte(http2.ClientPreface), request(1)...), timestamp: time.Unix(200, 0), paused: true}
@@ -122,7 +122,7 @@ func TestParseFramesFromChanPutsACallInAPauseByItsChunksReadFlag(t *testing.T) {
 	destCh := make(chan frameChunk, 1)
 	destCh <- frameChunk{data: append(response(1), response(3)...), timestamp: time.Unix(202, 0)}
 	close(destCh)
-	parseFramesFromChan(logger, destCh, sm, true, func([]func()) {}, newCallWindows(nil))
+	parseFramesFromChan(logger, destCh, sm, true, func([]func()) {}, newCallWindows(nil, false))
 
 	got := map[uint32]bool{}
 	for _, s := range sm.GetCompleteStreams() {
@@ -514,7 +514,7 @@ func TestParseFramesFromChan_ReleasesEachChunkOnce(t *testing.T) {
 				d()
 			}
 			viaEmitter = false
-		}, newCallWindows(nil))
+		}, newCallWindows(nil, false))
 		return got
 	}
 
@@ -568,7 +568,7 @@ func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 					for _, d := range done {
 						d()
 					}
-				}, newCallWindows(nil))
+				}, newCallWindows(nil, false))
 			}()
 			for i := range tc.chunks {
 				c := tc.chunks[i]
@@ -688,7 +688,7 @@ func TestForwardAndTeeTeesThroughAPause(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "client→app", false, building, nil, newCallWindows(nil))
+				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "client→app", false, building, nil, newCallWindows(nil, false))
 			}()
 			forward := func(b string) {
 				t.Helper()
@@ -749,7 +749,7 @@ func TestForwardAndTeeNotesEachChunkFromBeforeItsStamp(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building, nil, newCallWindows(nil))
+				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building, nil, newCallWindows(nil, false))
 			}()
 
 			go func() { _, _ = srcWrite.Write(tc.payload) }()
@@ -1385,7 +1385,7 @@ func TestForwardAndTeeHoldsOnlyAStreamsEndForAStopsInstant(t *testing.T) {
 		ch := make(chan frameChunk, 1)
 		awaitTickStart(windowsTick)
 		asked := clockNow() // this tick
-		go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building, func() time.Time { return asked }, newCallWindows(nil))
+		go forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "test", tc.toClient, building, func() time.Time { return asked }, newCallWindows(nil, false))
 		go func() { _, _ = srcWrite.Write(tc.b) }()
 		_, err := io.ReadFull(dstRead, make([]byte, len(tc.b)))
 		require.NoError(t, err)
