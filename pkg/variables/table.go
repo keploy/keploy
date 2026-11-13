@@ -1449,6 +1449,22 @@ func (t *Table) Snapshot() []Binding {
 	return sorted(t.all(from))
 }
 
+// Given is each binding of the open scope that its test gave (Binding.Given:
+// Give, and Start's given), in no set order: nil, with nothing allocated,
+// when it holds none, as the serve of every call asks it (http's
+// givenAnswers). A given is the scope's alone: the run's holds none.
+func (t *Table) Given() []Binding {
+	from := t.lock()
+	defer t.unlock(from)
+	var out []Binding
+	for _, b := range t.vals {
+		if b.Given {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 // sorted is the bindings of in, by name.
 func sorted(in map[string]Binding) []Binding {
 	out := make([]Binding, 0, len(in))

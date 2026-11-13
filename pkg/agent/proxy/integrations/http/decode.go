@@ -802,6 +802,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
+			// An answer that holds a value the test gave is answered with
+			// the value it gave in this run (givenAnswers).
+			stub = h.givenAnswers(stub, mockDb)
+
 			// A once series' first recording begins its chain on this
 			// connection, and the recording the chain named carries it on
 			// (integrations.OnceChainOnConn); any other answer, and a call
