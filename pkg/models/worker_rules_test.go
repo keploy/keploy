@@ -553,7 +553,9 @@ func TestACallKeployCannotNameIsItsOwn(t *testing.T) {
 			t.Fatalf("%s: one key %q", name, WorkerMockCallKey(p[0]))
 		}
 	}
-	if WorkerMockCallKey(body(`{"scope":"a"}`)) != WorkerMockCallKey(body(`{"scope":"a"}`)) {
+	// Two mocks of one POST, built apart: one key.
+	first, again := body(`{"scope":"a"}`), body(`{"scope":"a"}`)
+	if WorkerMockCallKey(first) != WorkerMockCallKey(again) {
 		t.Fatal("one POST, two keys")
 	}
 }
