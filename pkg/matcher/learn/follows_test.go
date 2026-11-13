@@ -256,9 +256,12 @@ func jobsServed(id, n string, live Raw) []Raw {
 // the value took a word of what F gave there (a copy), or the place
 // gained nothing, or F's view of it is missing, lacks the field, or holds
 // the value F saw, it stays where the value came from (a variable), or the
-// word is refused: fail closed. ClassifyGiven, the rule's absence, never
-// learns it. Where the call's answer echoes the value, each value learned
-// as noise here is learned as that echo instead, naming the same place.
+// word is refused: fail closed. ClassifyGiven, the rule's absence, learns
+// it only where its search found the value by a short part at a payload the
+// rule sets aside (follows.short: the four characters "48d1"), as the rule
+// does; a leaf's, never. Where the call's answer echoes the value, each value
+// learned as noise here is learned as that echo instead, naming the same
+// place.
 func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt(t *testing.T) {
 	const (
 		moved   = "where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source"
@@ -338,8 +341,8 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		}
 		path := "bind.$8"
 		given := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, tc.earlier, tc.raw, nil, nil, nil)
-		if given[0].Kind == KindNoise {
-			t.Errorf("FALSE GREEN? ClassifyGiven, %s: noise (%q), want it never learned (the rule is ClassifyFollowing's)", tc.name, given[0].Why)
+		if short := tc.earlier == nil; (given[0].Kind == KindNoise) != short || short && !strings.Contains(given[0].Why, tc.why) {
+			t.Errorf("FALSE GREEN? ClassifyGiven, %s: %s (%q), want noise naming %q only for a short part of a payload (the rule is ClassifyFollowing's)", tc.name, given[0].Kind, given[0].Why, tc.why)
 		}
 		// The same value echoed by the call's answer: the echo stands
 		// beside the place set aside, and names it as the noise does
@@ -1277,5 +1280,113 @@ func TestAWholeCopyInALaterPayloadOutranksAStartUpsPart(t *testing.T) {
 				t.Errorf("FALSE GREEN? %s, %s: %s from %q (%s); want refused, naming mock-hs-81's application_name", c.what, rule, got.Kind, got.From.Mock, got.Why)
 			}
 		}
+	}
+}
+
+// A call read without the rule a copy follows its source (ClassifyGiven,
+// HTTP's reading) reads a short part of the value under the rule where the
+// search found the value by that part at a place the rule sets aside
+// (follows.short). Stripe.js posts a telemetry event whose
+// connection_downlink is the browser's network estimate: "10" at record,
+// "1.45" in record's full round. An earlier call of the test, which F sent
+// and gave the application as recorded, carries the browser's User-Agent,
+// whose "Windows NT 10.0" holds the word "10" by chance. Read once, that
+// part named mock-1658 the place of the value, set aside as one F gave
+// unchanged while the value moved, and the call was refused: keploy could
+// not name the value's source. Read under the rule for its short parts,
+// the part is no source, and the changed word is learned as varying,
+// naming where it stood.
+//
+// The controls keep every source the rule cannot set aside: a part of 16
+// bytes or more (minChancePart) set aside so, and the value whole there, stay
+// refused as before (no payload holds such a part by chance, and a whole
+// value is no part); a short id copied from an earlier answer, which F gave
+// the application changed and the value moved with, stays a variable of
+// that answer; and where the rule refuses too (F gave the two candidate
+// answers in another order than the recording did, so an application that
+// copies the last answer took a's word in one run and b's in the other),
+// the first reading's reason stands.
+func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
+	const (
+		path    = "body.events"
+		ua      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.7922.34 Safari/537.36"
+		unnamed = "keploy cannot name where the value the call carries now came from"
+		varying = "and keploy learns it as varying"
+	)
+	events := func(downlink string) string {
+		return `[{"event_name":"elements.controller.load","connection_rtt":"50","connection_downlink":"` + downlink + `","deploy_status":"ok"}]`
+	}
+	headed := func(name, header, value string) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://js.stripe.com/v3/", Header: map[string]string{header: value}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `ok`},
+			ReqTimestampMock: eRecAt.Add(-2 * time.Second), ResTimestampMock: eRecAt.Add(-2*time.Second + time.Millisecond),
+		}}, false)
+	}
+	classify := func(recorded, live string, raw ...Raw) Learned {
+		t.Helper()
+		rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, nil, raw, nil, nil, func() ([]GivenPlaces, error) { return nil, nil })
+		if len(got) != 1 {
+			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
+		}
+		return got[0]
+	}
+	uaRaw := headed("mock-1658", "User-Agent", ua).ServedAs(1).ServedAsRecorded()
+
+	got := classify(events("10"), events("1.45"), uaRaw)
+	if got.Kind != KindNoise || !strings.Contains(got.Why, "stands in mock-1658 at spec.req.header.User-Agent") || !strings.Contains(got.Why, varying) || got.Refuted == "" {
+		t.Errorf("the downlink's 10 beside a User-Agent's 10: %s from %q (%q); want noise naming mock-1658's User-Agent", got.Kind, got.From.Mock, got.Why)
+	}
+	// Record's full round reads the same (ClassifyFollowing).
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: events("10")}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: events("1.45")}}}
+	if f := ClassifyFollowing(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, []Raw{uaRaw}, nil, nil, nil); len(f) != 1 || f[0].Kind != KindNoise || f[0].Why != got.Why {
+		t.Errorf("ClassifyFollowing: %+v; want the same noise", f)
+	}
+
+	// A part of 16 bytes or more, set aside: still refused, the place named.
+	const build = "k9Xq2Lm7Pw4Rt8Vz"
+	got = classify(events(build), events("Zz1Yy2Xx3Ww4Vv5U"), headed("mock-7", "X-Build", build).ServedAs(1).ServedAsRecorded())
+	if got.Kind != KindVariable || got.From.Mock != "mock-7" || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
+		t.Errorf("a 16-byte part set aside: %s from %q set aside %v (%q); want a variable of mock-7 set aside, refused", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
+	}
+	// One byte under: a short part, read under the rule.
+	got = classify(events(build[:15]), events("Zz1Yy2Xx3Ww4Vv5"), headed("mock-7", "X-Build", build[:15]).ServedAs(1).ServedAsRecorded())
+	if got.Kind != KindNoise || !strings.Contains(got.Why, "stands in mock-7 at spec.req.header.X-Build") {
+		t.Errorf("a 15-byte part set aside: %s from %q (%q); want noise naming mock-7", got.Kind, got.From.Mock, got.Why)
+	}
+
+	// The value whole in the earlier payload: no part, still refused.
+	got = classify("10", "53", uaRaw)
+	if got.Kind != KindVariable || got.From.Mock != "mock-1658" || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
+		t.Errorf("a whole value of 10 beside a User-Agent's 10: %s from %q set aside %v (%q); want a variable of mock-1658 set aside, refused", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
+	}
+	// Nor where F saw the value whole there.
+	got = classify(events("10"), events("1.45"), headed("mock-1658", "User-Agent", ua).ServedAs(1).ServedLive(headed("mock-1658", "User-Agent", "Mozilla/5.0 (Windows NT 1.45)")))
+	if got.Kind == KindNoise {
+		t.Errorf("FALSE GREEN? F gave the value's 1.45 at mock-1658: %s (%q); want refused", got.Kind, got.Why)
+	}
+
+	// A short id copied from an earlier answer, which F gave changed and
+	// the value moved with: a variable of that answer, as before.
+	order := func(id string) Raw { return eAnswer("mock-o", 300*time.Millisecond, id) }
+	got = classify("order 42", "order 57", order("42").ServedAs(1).ServedLive(order("57")))
+	if got.Kind != KindVariable || got.From.Mock != "mock-o" || got.From.SetAside {
+		t.Errorf("a short id copied from an answer F gave changed: %s from %q set aside %v (%q); want a variable of mock-o", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
+	}
+
+	// The rule refuses too: F gave b, then a; the recording a, then b.
+	a := eAnswer("mock-a", 300*time.Millisecond, "7").ServedAs(2).ServedAsRecorded()
+	b := eAnswer("mock-b", 200*time.Millisecond, "82").ServedAs(1).ServedAsRecorded()
+	got = classify("slot 82", "slot 7", a, b)
+	if got.Kind != KindVariable || got.From.Mock != "mock-b" || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
+		t.Errorf("FALSE GREEN? the answers in another order in F: %s from %q set aside %v (%q); want the first reading's refusal, set aside at mock-b", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
+	}
+	// In the recording's order, the rule learns it as varying.
+	got = classify("slot 82", "slot 7", a.ServedAs(1), b.ServedAs(2))
+	if got.Kind != KindNoise {
+		t.Errorf("the answers in the recording's order: %s (%q); want noise", got.Kind, got.Why)
 	}
 }

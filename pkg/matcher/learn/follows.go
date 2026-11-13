@@ -133,10 +133,26 @@ import (
 // and F both gave the application the word at its place before the call and
 // the two values do not both hold it; otherwise it is refused, saying why
 // (refused).
+//
+// A call read without the rule (ClassifyGiven: HTTP, Mongo) reads under it
+// a short part of the value alone (short, reads): a word or part shorter
+// than minChancePart bytes that is neither value whole. A run of a few
+// digits or letters stands in many payloads by chance (the "10" of
+// "Windows NT 10.0" in a browser's User-Agent, the "1" of an HTTP version),
+// and a value the application computes fresh (a browser's network estimate
+// in a telemetry event) holds one: where F gave the application that payload
+// as recorded before the call and the value moved, the part is no source,
+// on every term of the rule (the order of the places, a word the other value
+// took elsewhere, a place of an older test). Every other match reads as nil
+// reads it: a value found whole, or by a part of minChancePart bytes or
+// more, stays where it was found, and the word rule refuses such a word.
 type follows struct {
 	dc *DriftCache
 	// rec is the recorded value, live the value F saw.
 	rec, live string
+	// short reads a short part of the value alone under the rule (reads),
+	// for a call read without it.
+	short bool
 	// first is the word rule's reason at the first match let go: what the
 	// reason of a refusal for the order names.
 	first   string
@@ -211,6 +227,24 @@ type follows struct {
 	tookRead [2]bool
 }
 
+// minChancePart is the length, in bytes, of the shortest part of a drifted
+// value that a call read without the rule a copy follows its source takes
+// as standing at an earlier place other than by chance (follows.reads): the
+// length the learn step reads as a value no payload holds by chance
+// (minLateRun).
+const minChancePart = minLateRun
+
+// reads reports whether f reads t, a word or part of the drifted value v
+// found at an earlier place, under the rule: f is not nil and, where it
+// reads short parts alone (short), t is shorter than minChancePart bytes and
+// neither value whole (as recorded or as F saw it, or either decoded).
+func (f *follows) reads(t string, v *valueDrift) bool {
+	if f == nil {
+		return false
+	}
+	return !f.short || len(t) < minChancePart && t != v.rec && t != v.live && t != v.decRec && t != v.decLive
+}
+
 // source notes mock as a candidate source of the value, found holding its
 // word w there (follows.sources, follows.words).
 func (f *follows) source(mock, w string) {
@@ -242,7 +276,7 @@ func (f *follows) source(mock, w string) {
 // the words of (liveAt, movedAway), and no text F gave there holds the
 // value F saw: the value did not move with what F gave in its place.
 func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Place) bool {
-	if f == nil {
+	if !f.reads(p.Held, v) {
 		return false
 	}
 	gave := ", which record's full round sent and gave the application as recorded, while the value changed"
@@ -421,7 +455,7 @@ const maxRefutedNamed = 8
 // answered at the call's own instant, is ordered all the same: a value
 // learned as noise is then refused, naming it (followed).
 func (f *follows) refuteSeen(e Earlier, s Seen, whole bool, v *valueDrift) bool {
-	if f == nil || !whole || s.Leaf.Type == Instant || s.Live == v.live {
+	if f == nil || f.short || !whole || s.Leaf.Type == Instant || s.Live == v.live {
 		return false
 	}
 	if f.aside == "" {
@@ -746,7 +780,7 @@ func (dc *DriftCache) liveAt(x Raw, text string, keep bool, v *valueDrift, in fu
 // terms of a recording of another test too (olderTook), as a Raw is
 // (excusedRaw): the order alone never lets a word of it go.
 func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at time.Time, why, path string) bool {
-	if f == nil {
+	if !f.reads(t, v) {
 		return false
 	}
 	before, untimed := e.Given, ""
@@ -787,7 +821,7 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 // F gave the application only in an older test of the set is named where it
 // lets a word go (noteOlder): a value left noise past it is refused.
 func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time, why, place string) bool {
-	if f == nil {
+	if !f.reads(t, v) {
 		return false
 	}
 	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
@@ -835,7 +869,7 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 // in an older test of the set is named where it lets a word go (noteOlder):
 // a value left noise past it is refused.
 func (f *follows) excusedLive(x Raw, v *valueDrift, i int, t string, at time.Time, why, place string) bool {
-	if f == nil {
+	if !f.reads(t, v) {
 		return false
 	}
 	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
@@ -1018,7 +1052,7 @@ func movedFrom(ed, v *valueDrift) string {
 // answered at or after the call, or whose times keploy cannot read, shows
 // nothing, and the word stays refused, naming why.
 func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at time.Time, why string) bool {
-	if f == nil {
+	if !f.reads(t, v) {
 		return false
 	}
 	gat := g.at

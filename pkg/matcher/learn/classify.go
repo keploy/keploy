@@ -1777,11 +1777,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// The call's reading: every recording before it.
 	callReading := readingOf(all)
 	out := make([]Learned, 0, len(drift))
-	// leafIn classifies one changed leaf, r as recorded and l as F saw it,
-	// as a value of the call whose window is w, against the recordings of
-	// rd, without the rules skip names (skipRule), every other rule as it
-	// stands.
-	leafIn := func(rd *reading, r, l Leaf, w *Window, skip skipRule) Learned {
+	// leafRead classifies one changed leaf, r as recorded and l as F saw
+	// it, as a value of the call whose window is w, against the recordings
+	// of rd, without the rules skip names (skipRule), every other rule as
+	// it stands; where short is set (a call read without the rule a copy
+	// follows its source), with the rule reading its short parts alone
+	// (follows.short).
+	leafRead := func(rd *reading, r, l Leaf, w *Window, skip skipRule, short bool) Learned {
 		raw, all, places, eh := rd.raw, rd.all, rd.places, &rd.eh
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
@@ -1792,8 +1794,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
-		if follow {
-			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
+		if follow || short {
+			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places, short: short}
 		}
 		if r.Value != "" {
 			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, placed, raw, fol, eh); ok && skip&skipSource == 0 {
@@ -2096,6 +2098,32 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		ln = fol.olderRefused(ln)
 		if ln.Kind == KindNoise || ln.Kind == KindClockRead {
 			ln.Refuted = fol.refutedAll()
+		}
+		return ln
+	}
+	// leafIn is leafRead of the leaf. Read without the rule a copy follows
+	// its source (follow unset: ClassifyGiven), a value the search found
+	// by a short part of it (follows.reads) at a place the rule sets aside
+	// (Place.SetAside: F gave the application that place as recorded, or
+	// a view the value did not move with, and keploy cannot name the
+	// value's source, notFromWhy) is read again with the rule reading its
+	// short parts alone (follows.short): a run of a few digits or letters
+	// an earlier payload holds by chance (the "10" of "Windows NT 10.0" in
+	// a browser's User-Agent, beside a browser's downlink estimate of 10)
+	// is no source, on every term of the rule (the order of the places, a
+	// word the other value took elsewhere, a place of an older test), and
+	// the value is learned as that reading learns it. Where that reading
+	// refuses the value too, the first reading's reason stands. A value
+	// found whole or by a longer part, a place the rule does not set
+	// aside, a late call (notFromWhy), and every value of a call read
+	// under the rule are read once, as before.
+	leafIn := func(rd *reading, r, l Leaf, w *Window, skip skipRule) Learned {
+		ln := leafRead(rd, r, l, w, skip, false)
+		if follow || ln.Kind != KindVariable || !ln.From.SetAside || !(&follows{short: true}).reads(ln.From.Held, dc.ofIn(r.Value, l.Value, w, at)) {
+			return ln
+		}
+		if again := leafRead(rd, r, l, w, skip, true); again.Kind != KindUnaccounted {
+			return again
 		}
 		return ln
 	}
@@ -4296,7 +4324,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 					p.sentBefore = x.at
 				}
 				rf := fol
-				if rf == nil {
+				if rf == nil || rf.short {
 					// A step that reads no word under the rule (ClassifyGiven)
 					// reads a whole clock read under it all the same: it
 					// needs only x and what F gave there.

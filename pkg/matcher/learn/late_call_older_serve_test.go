@@ -64,27 +64,29 @@ func TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise(t *testing.T) {
 		kind           Kind
 		why            []string
 		not            string
+		// givenNoise: ClassifyGiven learns it as noise too.
+		givenNoise bool
 	}{
-		{"a served as recorded in an older test", "slot 82", "slot 7", older(asRecorded), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept},
-		{"a served as recorded in an older test, marked so alone", "slot 82", "slot 7", asRecorded.ServedInAnOlderTest(), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept},
-		{"a served changed in an older test, F's view gave 7", "slot 82", "slot 7", older(viewed), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept},
-		{"a served changed in an older test, F's view kept 7 where the recording gave it", "slot 82", "slot 7", older(heldView), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept},
-		{"a served as recorded before the test, in no older test", "slot 82", "slot 7", before(asRecorded), KindUnaccounted, []string{"stands in mock-b", kept, noShow}, late},
-		{"a served changed before the test, in no older test, F's view gave 7", "slot 82", "slot 7", before(viewed), KindUnaccounted, []string{"stands in mock-b", kept, noShow}, late},
-		{"a served changed before the test, in no older test, F's view kept 7 where the recording gave it", "slot 82", "slot 7", before(heldView), KindUnaccounted, []string{"stands in mock-b", kept, noShow}, late},
-		{"the recording's call late: a served as recorded in an older test", "slot 7", "slot 82", older(asRecorded), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept},
-		{"the recording's call late: a served changed in an older test, F's view gave 5", "slot 7", "slot 82", older(movedView), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept},
-		{"the recording's call late: a served as recorded before the test", "slot 7", "slot 82", before(asRecorded), KindUnaccounted, []string{"stands in mock-b", kept, noShow}, late},
-		{"the recording's call late: a served changed before the test, F's view gave 5", "slot 7", "slot 82", before(movedView), KindUnaccounted, []string{"stands in mock-b", kept, noShow}, late},
-		{"a served as recorded in the call's own test", "slot 82", "slot 7", asRecorded, KindNoise, nil, ""},
-		{"a served changed in the call's own test, F's view gave 7", "slot 82", "slot 7", viewed, KindNoise, nil, ""},
-		{"a served changed in the call's own test, F's view kept 7 where the recording gave it", "slot 82", "slot 7", heldView, KindNoise, nil, ""},
-		{"the recording's call took a's word: a served as recorded in the call's own test", "slot 7", "slot 82", asRecorded, KindNoise, nil, ""},
-		{"the recording's call took a's word: a served changed in the call's own test, F's view gave 5", "slot 7", "slot 82", movedView, KindNoise, nil, ""},
-		{"a served as recorded in an older test, the recorded value took no word", "slot 83", "slot 7", older(asRecorded), KindUnaccounted, []string{"in mock-a at", "record's full round gave the application mock-a " + olderSetAside}, late},
-		{"a served changed in an older test, the recorded value took no word", "slot 83", "slot 7", older(viewed), KindUnaccounted, []string{"in mock-a at", "record's full round gave the application mock-a " + olderSetAside}, late},
-		{"a served as recorded before the test, the recorded value took no word", "slot 83", "slot 7", before(asRecorded), KindNoise, nil, ""},
-		{"a served changed before the test, the recorded value took no word", "slot 83", "slot 7", before(viewed), KindNoise, nil, ""},
+		{"a served as recorded in an older test", "slot 82", "slot 7", older(asRecorded), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept, false},
+		{"a served as recorded in an older test, marked so alone", "slot 82", "slot 7", asRecorded.ServedInAnOlderTest(), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept, false},
+		{"a served changed in an older test, F's view gave 7", "slot 82", "slot 7", older(viewed), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept, false},
+		{"a served changed in an older test, F's view kept 7 where the recording gave it", "slot 82", "slot 7", older(heldView), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept, false},
+		{"a served as recorded before the test, in no older test", "slot 82", "slot 7", before(asRecorded), KindUnaccounted, []string{"stands in mock-b", kept, noShow}, late, false},
+		{"a served changed before the test, in no older test, F's view gave 7", "slot 82", "slot 7", before(viewed), KindUnaccounted, []string{"stands in mock-b", kept, noShow}, late, false},
+		{"a served changed before the test, in no older test, F's view kept 7 where the recording gave it", "slot 82", "slot 7", before(heldView), KindUnaccounted, []string{"stands in mock-b", kept, noShow}, late, false},
+		{"the recording's call late: a served as recorded in an older test", "slot 7", "slot 82", older(asRecorded), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept, false},
+		{"the recording's call late: a served changed in an older test, F's view gave 5", "slot 7", "slot 82", older(movedView), KindUnaccounted, []string{"stands in mock-b", late, noShow}, kept, false},
+		{"the recording's call late: a served as recorded before the test", "slot 7", "slot 82", before(asRecorded), KindUnaccounted, []string{"stands in mock-b", kept, noShow}, late, false},
+		{"the recording's call late: a served changed before the test, F's view gave 5", "slot 7", "slot 82", before(movedView), KindUnaccounted, []string{"stands in mock-b", kept, noShow}, late, false},
+		{"a served as recorded in the call's own test", "slot 82", "slot 7", asRecorded, KindNoise, nil, "", true},
+		{"a served changed in the call's own test, F's view gave 7", "slot 82", "slot 7", viewed, KindNoise, nil, "", true},
+		{"a served changed in the call's own test, F's view kept 7 where the recording gave it", "slot 82", "slot 7", heldView, KindNoise, nil, "", true},
+		{"the recording's call took a's word: a served as recorded in the call's own test", "slot 7", "slot 82", asRecorded, KindNoise, nil, "", true},
+		{"the recording's call took a's word: a served changed in the call's own test, F's view gave 5", "slot 7", "slot 82", movedView, KindNoise, nil, "", true},
+		{"a served as recorded in an older test, the recorded value took no word", "slot 83", "slot 7", older(asRecorded), KindUnaccounted, []string{"in mock-a at", "record's full round gave the application mock-a " + olderSetAside}, late, false},
+		{"a served changed in an older test, the recorded value took no word", "slot 83", "slot 7", older(viewed), KindUnaccounted, []string{"in mock-a at", "record's full round gave the application mock-a " + olderSetAside}, late, false},
+		{"a served as recorded before the test, the recorded value took no word", "slot 83", "slot 7", before(asRecorded), KindNoise, nil, "", false},
+		{"a served changed before the test, the recorded value took no word", "slot 83", "slot 7", before(viewed), KindNoise, nil, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := classifyF(t, tc.recorded, tc.live, nil, []Raw{tc.a, b}, nil)
@@ -100,12 +102,17 @@ func TestALateCallsValueAnOlderServeGaveIsNeverLearnedAsNoise(t *testing.T) {
 				t.Errorf("why %q says %q", got.Why, tc.not)
 			}
 			// The rule's absence (ClassifyGiven) refuses every one of
-			// them: the older serve is a place of the value.
+			// them the rule refuses: the older serve is a place of the
+			// value. Where the search finds the value by a short part (82,
+			// 7) at a place the rule sets aside, ClassifyGiven reads the
+			// short parts under the rule (follows.short) and learns what
+			// the rule learns: noise, in the call's own test. A value it
+			// does not find so (83, no word of a place) stays refused.
 			path := "bind.$8"
 			rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}
 			live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}
-			if g := ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, []Raw{tc.a, b}, nil, nil, nil); len(g) != 1 || g[0].Kind == KindNoise {
-				t.Errorf("ClassifyGiven: %+v, want refused", g)
+			if g := ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, []Raw{tc.a, b}, nil, nil, nil); len(g) != 1 || (g[0].Kind == KindNoise) != tc.givenNoise || g[0].Kind != KindNoise && g[0].Kind != KindUnaccounted && !g[0].From.SetAside {
+				t.Errorf("ClassifyGiven: %+v, want noise %v (else refused)", g, tc.givenNoise)
 			}
 		})
 	}
