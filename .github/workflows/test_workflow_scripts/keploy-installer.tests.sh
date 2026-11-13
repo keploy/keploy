@@ -10,7 +10,8 @@
 #
 # KEEP_TMP=1 keeps each case's directories, output and stub log.
 #
-# No network and no root. Each case gets its own HOME and TMPDIR, the TMPDIR
+# No network, and no root needed (run as root, it also checks that root's
+# extraction leaves keploy root's own). Each case gets its own HOME and TMPDIR, the TMPDIR
 # already holding files of someone else's named like the ones in a release
 # tarball, and a PATH that starts with stubs:
 #   - curl: a download of ent/install.sh writes a stand-in installer (it logs
@@ -27,8 +28,9 @@
 #     `sudo mkdir` and `sudo mv` run as the caller, through those fenced
 #     commands, with /usr/local/bin mapped into the case's directory, and
 #     `sudo mount` is logged. In the root cases (FAKE_UID=0) root's own mkdir
-#     and mv are mapped the same way, and its mount is logged; anyone else's
-#     mount is fenced. So a keploy.sh that reaches for fixed /tmp paths, as
+#     and mv are mapped the same way, its mount is logged, and so is a tar
+#     extraction that would keep the archive's owner; anyone else's mount is
+#     fenced. So a keploy.sh that reaches for fixed /tmp paths, as
 #     the --oss route once did, fails here without touching the host's /tmp.
 #   - uname reports FAKE_UNAME_S / FAKE_UNAME_M when they are set; id -u says
 #     1000, or 0 in the root cases, whoever runs the suite; mountpoint says
@@ -68,7 +70,8 @@
 #     release, which the uname stub drives on any Linux.
 #   - --oss as root does on Linux what a user with sudo does, but itself,
 #     with no sudo, whether the machine has sudo or not, and gives v2 no
-#     alias that runs keploy with sudo.
+#     alias that runs keploy with sudo; the keploy it extracts is root's own,
+#     never left owned by the uid the release's archive names.
 #   - --oss by a user with no sudo is refused before anything is mounted or
 #     downloaded, with a hint to use -noRoot; with -noRoot it installs in
 #     ~/.keploy/bin.
@@ -176,6 +179,15 @@ if [ "${FAKE_UID:-}" = 0 ] && [ -n "${FAKE_ROOT_DIR:-}" ]; then
     shift
   done
   [ -z "$mapped" ] || echo "root-mapped: $name $*" >> "$STUB_LOG"
+  # Root's tar keeps the owner the archive names (a release's is uid 1001)
+  # unless told --no-same-owner; this suite's runner is seldom root, so the
+  # stub says when root's extraction would have kept it.
+  if [ "$name" = tar ]; then
+    case " $* " in
+      *" --no-same-owner "*) ;;
+      *) echo "root-tar: keeps the archive's owner: tar $*" >> "$STUB_LOG" ;;
+    esac
+  fi
 fi
 for a in "$@"; do
   case "$a" in
@@ -289,7 +301,12 @@ echo "the release's keploy ran: $*" >> "$STUB_LOG"
 EOF
 chmod +x "$release/keploy"
 for f in LICENSE README.md READMEes-Es.md; do echo "the release's $f" > "$release/$f"; done
-tar czf "$tmp/release.tar.gz" -C "$release" keploy LICENSE README.md READMEes-Es.md
+# Its files belong to another uid, as a release's belong to the uid that
+# built it, where tar can say so (GNU tar): a suite run by root then sees
+# whether root's extraction kept that owner.
+foreign_owner=()
+if tar --version 2> /dev/null | grep -q 'GNU tar'; then foreign_owner=(--owner=4242 --group=4242); fi
+tar czf "$tmp/release.tar.gz" ${foreign_owner[@]+"${foreign_owner[@]}"} -C "$release" keploy LICENSE README.md READMEes-Es.md
 echo "not a tarball" > "$tmp/corrupt.tar.gz"
 tar czf "$tmp/no-keploy.tar.gz" -C "$release" LICENSE README.md READMEes-Es.md
 
@@ -449,7 +466,13 @@ used_private_dir_and_cleaned_up() { # <stub log key> <file>
 # (but for the root cases' mapped mkdir and mv).
 stayed_inside() { ! grep -qE '^(fenced|sudo):' "$log"; }
 installed() { cmp -s "$release/keploy" "$dir_home/.keploy/bin/keploy"; }
-installed_as_root() { cmp -s "$release/keploy" "$root_dir/usr/local/bin/keploy"; }
+# The release's keploy is in the case's /usr/local/bin; when this suite runs
+# as root, which then extracts for real, it is root's, not the archive's
+# owner's.
+installed_as_root() {
+  cmp -s "$release/keploy" "$root_dir/usr/local/bin/keploy" &&
+    { [ "$(id -u)" != 0 ] || [ "$(stat -c %u "$root_dir/usr/local/bin/keploy")" = 0 ]; }
+}
 nothing_installed() { [ ! -e "$dir_home/.keploy/bin/keploy" ] && [ ! -e "$root_dir/usr/local/bin/keploy" ]; }
 nothing_downloaded() { ! grep -q '^release-download-to ' "$log"; }
 error_page_not_sourced() { ! grep -qF "the error page was sourced" "$log"; }
@@ -478,8 +501,12 @@ ent_ran_with() { grep -qF "ent-installer ran from $work with: $1" "$log"; }
 ent_did_not_run() { ! grep -q '^ent-installer ' "$log"; }
 callers_install_not_run() { ! grep -qF "the caller's own install.sh ran" "$log"; }
 said() { grep -qF -- "$1" "$out"; }
-# Root put keploy in /usr/local/bin itself: its own mkdir and mv ran there.
-root_moved_it() { grep -q '^root-mapped: mkdir ' "$log" && grep -q '^root-mapped: mv ' "$log"; }
+# Root put keploy in /usr/local/bin itself: its own mkdir and mv ran there,
+# and extracted the release as its own, not keeping the archive's owner.
+root_moved_it() {
+  grep -q '^root-mapped: mkdir ' "$log" && grep -q '^root-mapped: mv ' "$log" &&
+    ! grep -q '^root-tar: ' "$log"
+}
 # debugfs was mounted by root itself (root) or through sudo (sudo); none: no
 # mount was tried at all.
 debugfs_mounted_by() {
@@ -612,7 +639,7 @@ suite() {
   [ "$rc" -eq 0 ] || show_output
   check "the install succeeds" test "$rc" -eq 0
   check "the release's keploy is put in /usr/local/bin" installed_as_root
-  check "root puts it there itself, and reaches for no sudo" eval 'root_moved_it && no_command_missing'
+  check "root puts it there itself, as its own file, and reaches for no sudo" eval 'root_moved_it && no_command_missing'
   check "keploy example runs the installed keploy" release_keploy_ran
   check "the download and extraction used a private temp directory, removed afterwards; the other files there are kept unchanged" used_private_dir_and_cleaned_up release-download-to keploy.tar.gz
   check "nothing outside its own directories is touched" stayed_inside
@@ -626,7 +653,7 @@ suite() {
   install oss-root-nosudo-dev --oss -v v2.1.0 -platform bash
   [ "$rc" -eq 0 ] || show_output
   check "the install succeeds" test "$rc" -eq 0
-  check "the release's keploy is put in /usr/local/bin by root itself" eval 'installed_as_root && root_moved_it'
+  check "the release's keploy is put in /usr/local/bin by root itself, as its own file" eval 'installed_as_root && root_moved_it'
   check "root mounts debugfs itself" debugfs_mounted_by root
   check "it reaches for no sudo" no_command_missing
   check "root gets no alias that runs keploy with sudo, and keploy example runs the installed keploy" eval 'no_alias && release_keploy_ran'
@@ -639,7 +666,7 @@ suite() {
   install oss-root-dev --oss -v v2.1.0 -platform bash
   [ "$rc" -eq 0 ] || show_output
   check "the install succeeds" test "$rc" -eq 0
-  check "the release's keploy is put in /usr/local/bin by root itself" eval 'installed_as_root && root_moved_it'
+  check "the release's keploy is put in /usr/local/bin by root itself, as its own file" eval 'installed_as_root && root_moved_it'
   check "root mounts debugfs itself" debugfs_mounted_by root
   check "root gets no alias that runs keploy with sudo, and keploy example runs the installed keploy" eval 'no_alias && release_keploy_ran'
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside

@@ -273,8 +273,13 @@ installKeploy (){
     # It is extracted into $keploy_tmp_dir, which only this run uses and which
     # is removed afterwards, so nothing of anyone else's is overwritten or
     # deleted and there is no stale binary left over from an earlier run.
+    # --no-same-owner: the release's files belong to the uid that built it
+    # (1001), and tar run as root keeps that owner by default, which left
+    # root's /usr/local/bin/keploy owned and writable by whoever has uid 1001
+    # on this machine. With it, root's extraction is root's; anyone else's
+    # tar already ignores the archive's owner.
     extract_keploy_tarball() {
-        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf \"\$keploy_tmp_dir/keploy.tar.gz\" -C \"\$keploy_tmp_dir\" && rm -f \"\$keploy_tmp_dir/keploy.tar.gz\""
+        run_with_loader "Extracting binary..." "Extracted binary" "tar --no-same-owner -xzf \"\$keploy_tmp_dir/keploy.tar.gz\" -C \"\$keploy_tmp_dir\" && rm -f \"\$keploy_tmp_dir/keploy.tar.gz\""
     }
 
 
