@@ -139,3 +139,26 @@ func TestEmitV2_MocksHandedOverAfterTheStopAreRecorded(t *testing.T) {
 		t.Fatalf("recorded %d of the %d mocks handed over after the stop, %d left out (%q); want every one recorded", got, n, left, why)
 	}
 }
+
+// While the recording lasts, straight to the session's channel, emitV2 says a
+// mock the session took was not lost, and one the session left out (its
+// capture marked incomplete) was: its caller gives a recordOne mark back
+// only for a mock lost.
+func TestEmitV2_WhileTheRecordingLastsSaysWhichMockWasLost(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	mgr := syncMock.New(nil)
+	out := make(chan *models.Mock, 2)
+	core, logs := observer.New(zapcore.DebugLevel)
+	sess := &supervisor.Session{Ctx: ctx, Mgr: mgr, Mocks: out, Orphans: &spanLog{}, Logger: zap.New(core)}
+	if emitV2(sess, zaptest.NewLogger(t), emitAtStopMock("taken")) {
+		t.Fatal("emitV2 said a mock the session took, while the recording lasts, was lost")
+	}
+	sess.MarkMockIncomplete("a chunk of its exchange was dropped")
+	if !emitV2(sess, zaptest.NewLogger(t), emitAtStopMock("incomplete")) {
+		t.Fatal("emitV2 said a mock the session left out, while the recording lasts, was not lost")
+	}
+	if got, left, why := len(out), mgr.MocksLeftOut(), leftOutReasons(logs); got != 1 || left != 1 || len(why) != 1 {
+		t.Fatalf("recorded %d, left out %d (%q); want the mock taken recorded and the incomplete one left out once", got, left, why)
+	}
+}
