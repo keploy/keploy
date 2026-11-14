@@ -11,9 +11,9 @@
 # KEEP_TMP=1 keeps each case's directories, output and stub log.
 #
 # No network, and no root needed (run as root, it also checks that root's
-# extraction leaves keploy root's own). Each case gets its own HOME and TMPDIR, the TMPDIR
-# already holding files of someone else's named like the ones in a release
-# tarball, and a PATH that starts with stubs:
+# extraction leaves keploy root's own). Each case gets its own HOME and
+# TMPDIR, the TMPDIR already holding files of someone else's named like the
+# ones in a release tarball, and a PATH that starts with stubs:
 #   - curl: a download of ent/install.sh writes a stand-in installer (it logs
 #     that it ran, from where and with what arguments, and returns
 #     FAKE_ENT_STATUS) wherever curl was told to write it, `-o FILE` or, like
@@ -24,15 +24,20 @@
 #   - rm, mv, tar, mkdir and chown run the real command only when every
 #     absolute path they are given is inside this test's own directory, and
 #     curl writes only there; anything else is logged as "fenced:" and fails.
-#     sudo fails and is logged, except in the cases of a user with sudo
-#     (FAKE_SUDO_ROOT), where `sudo mkdir` and `sudo mv` run as the caller,
-#     through those fenced commands, with /usr/local/bin mapped into the
-#     case's directory, and `sudo mount` and `sudo chown` are logged. In the
-#     root cases (FAKE_UID=0) root's own mkdir and mv are mapped the same way,
-#     its mount and chown are logged, and so is a tar extraction that would
-#     keep the archive's owner; anyone else's mount is fenced. FAKE_CHOWN_FAIL
-#     makes the chown of a user with sudo, or of root, fail. So a keploy.sh that reaches for fixed /tmp paths, as
-#     the --oss route once did, fails here without touching the host's /tmp.
+#     So a keploy.sh that reaches for fixed /tmp paths, as the --oss route
+#     once did, fails here without touching the host's /tmp.
+#   - sudo fails and is logged as "sudo:", except in the cases of a user with
+#     sudo (FAKE_SUDO_ROOT), where `sudo mkdir` and `sudo mv` run as the
+#     caller, through those fenced commands, with /usr/local/bin mapped into
+#     the case's directory, `sudo mount` is logged, and so is
+#     `sudo chown 0:0 /usr/local/bin/keploy`, the one chown sudo may run.
+#   - in the root cases (FAKE_UID=0) root's own mkdir and mv are mapped the
+#     same way, its mount is logged, and so is a tar extraction that would
+#     keep the archive's owner; anyone else's mount is fenced. Root's chown is
+#     logged, not done, only when every absolute path it is given is in
+#     /usr/local/bin; any other goes through the fence.
+#   - FAKE_CHOWN_FAIL makes that one logged chown, through sudo or root's
+#     own, fail.
 #   - uname reports FAKE_UNAME_S / FAKE_UNAME_M when they are set; id -u says
 #     1000, or 0 in the root cases, whoever runs the suite; mountpoint says
 #     debugfs is mounted unless FAKE_NO_DEBUGFS is set.
@@ -89,8 +94,8 @@
 #   - job control is as it was: on in an interactive shell, off in a CI step.
 #   - keploy.sh leaves no status variable set in the caller's shell.
 #   - no case touches a path outside its own directories, or runs sudo for
-#     anything but the mkdir, mv, chown and mount of a user with sudo, and
-#     v2's alias.
+#     anything but the mkdir, mv and mount of a user with sudo, the chown of
+#     the keploy it installed, and v2's alias.
 
 set -u
 
@@ -177,15 +182,20 @@ name=$(basename "$0")
 # /usr/local/bin is mapped into the case's directory, as the sudo stub maps it.
 if [ "${FAKE_UID:-}" = 0 ] && [ -n "${FAKE_ROOT_DIR:-}" ]; then
   mapped=""
+  unmapped=""
   for a in "$@"; do
-    case "$a" in /usr/local/bin | /usr/local/bin/*) a="$FAKE_ROOT_DIR$a" mapped=1 ;; esac
+    case "$a" in
+      /usr/local/bin | /usr/local/bin/*) a="$FAKE_ROOT_DIR$a" mapped=1 ;;
+      /*) unmapped=1 ;;
+    esac
     set -- "$@" "$a"
     shift
   done
   [ -z "$mapped" ] || echo "root-mapped: $name $*" >> "$STUB_LOG"
-  # Root's chown of the keploy it installed is logged, not done: this
-  # suite's runner is seldom root.
-  if [ "$name" = chown ]; then
+  # Root's chown in /usr/local/bin (of the keploy it installed) is logged,
+  # not done: this suite's runner is seldom root. A chown of any other
+  # absolute path goes through the fence below.
+  if [ "$name" = chown ] && [ -n "$mapped" ] && [ -z "$unmapped" ]; then
     [ -z "${FAKE_CHOWN_FAIL:-}" ]
     exit
   fi
@@ -234,10 +244,13 @@ if [ -n "${FAKE_SUDO_ROOT:-}" ]; then
       exit 0
       ;;
     chown)
-      # Logged, not done: the runner seldom is root.
-      echo "sudo-mapped: $*" >> "$STUB_LOG"
-      [ -z "${FAKE_CHOWN_FAIL:-}" ]
-      exit
+      # Only the installed keploy's chown to root, and it is logged, not done:
+      # the runner seldom is root. Any other chown is refused below.
+      if [ "$*" = "chown 0:0 /usr/local/bin/keploy" ]; then
+        echo "sudo-mapped: $*" >> "$STUB_LOG"
+        [ -z "${FAKE_CHOWN_FAIL:-}" ]
+        exit
+      fi
       ;;
     -E)
       # v2's alias: sudo -E env PATH="$PATH" keploy ...
@@ -484,8 +497,8 @@ used_private_dir_and_cleaned_up() { # <stub log key> <file>
   case "${to#"$scratch"/}" in */*/*) return 1 ;; esac
   tmp_left_as_it_was
 }
-# Nothing outside the case's directories was touched, and sudo never ran
-# (but for the root cases' mapped mkdir and mv).
+# Nothing outside the case's directories was touched, and sudo ran nothing
+# but what its stub maps for a user with sudo.
 stayed_inside() { ! grep -qE '^(fenced|sudo):' "$log"; }
 installed() { cmp -s "$release/keploy" "$dir_home/.keploy/bin/keploy"; }
 # The release's keploy is in the case's /usr/local/bin; when this suite runs
@@ -672,7 +685,7 @@ suite() {
   check "the install succeeds" test "$rc" -eq 0
   check "the release's keploy is put in /usr/local/bin with sudo, and then made root's with sudo" eval 'installed_as_root && made_roots_after_move sudo'
   check "debugfs is mounted with sudo" debugfs_mounted_by sudo
-  check "~/.bashrc gets v2's alias, which runs keploy with sudo" has_sudo_alias
+  check "the user's .bashrc gets v2's alias, which runs keploy with sudo" has_sudo_alias
   check "keploy example runs the installed keploy" release_keploy_ran
   check "nothing outside its own directories is touched, and sudo runs only mkdir, mv, chown and mount" stayed_inside
 
@@ -716,6 +729,16 @@ suite() {
   check "the download and extraction used a private temp directory, removed afterwards; the other files there are kept unchanged" used_private_dir_and_cleaned_up release-download-to keploy.tar.gz
   check "nothing outside its own directories is touched" stayed_inside
   check "the repo's install.sh and keploy-enterprise.sh are kept unchanged, and nothing is added" callers_dir_untouched callers
+
+  echo "== --oss as root with no sudo (-isCI), and its own chown to root fails"
+  case_root=1
+  case_no_sudo=1
+  case_env=(FAKE_CHOWN_FAIL=1)
+  install oss-root-chown-fails --oss -isCI
+  check "the install fails" test "$rc" -ne 0
+  check "it says so" said "Failed to make /usr/local/bin/keploy owned by root"
+  check "no keploy runs" release_keploy_did_not_run
+  check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
 
   echo "== --oss v2 as root with no sudo, outside CI, debugfs not mounted"
   case_root=1
