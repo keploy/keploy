@@ -3106,15 +3106,20 @@ func TestRecordV2_PostTLS_AHeldPreparesSettleFaultReadsTheClientWithNoWaitOnTheS
 // 3 before SELECT 2's): with the ERR taken for that answer, SELECT 2 was paired
 // with the command's answer. With no ERR (MariaDB), a client that waits for each
 // answer has both queries recorded with their own, and one that does not stops
-// at the cut.
+// at the cut; so too when the command's own answer is an ERR of another code.
 func TestRecordV2_PostTLS_AnERR1835AfterAHeldPreparesSettleFaultIsNoProofOfTheCut(t *testing.T) {
 	t.Parallel()
 	q := func(k int) []byte { return cannedCOMQuery(t, 0, fmt.Sprintf("SELECT %d", k)) }
 	ok := func(k int) []byte { return okResponseWithAffectedRows(1, byte(k)) }
-	for _, answered := range []bool{true, false} {
+	for _, first := range []string{"the CLOSE's ERR 1835", "no ERR to the CLOSE", "no ERR to the CLOSE, the command's own ERR"} {
 		for _, pipelined := range []bool{false, true} {
-			t.Run(fmt.Sprintf("the CLOSE answered %v, the queries sent early %v", answered, pipelined), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s, the queries sent early %v", first, pipelined), func(t *testing.T) {
 				t.Parallel()
+				answered := first == "the CLOSE's ERR 1835"
+				answer := wrapPacket([]byte{0xfe, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, 1)
+				if first == "no ERR to the CLOSE, the command's own ERR" {
+					answer = errReply(1, 1105, "unknown")
+				}
 				j := newJoinedMidStream(t)
 				j.exchange(q(1), [][]byte{ok(1)})
 				prep, resp := prepare255(t, false)
@@ -3127,12 +3132,12 @@ func TestRecordV2_PostTLS_AnERR1835AfterAHeldPreparesSettleFaultIsNoProofOfTheCu
 				}
 				if pipelined {
 					j.h.pushClient(q(2), j.at())
-					j.h.pushDest(wrapPacket([]byte{0xfe, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, 1), j.at())
+					j.h.pushDest(answer, j.at())
 					j.h.pushClient(q(3), j.at())
 					j.h.pushDest(ok(2), j.at())
 					j.h.pushDest(ok(3), j.at())
 				} else {
-					j.h.pushDest(wrapPacket([]byte{0xfe, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}, 1), j.at())
+					j.h.pushDest(answer, j.at())
 					j.exchange(q(2), [][]byte{ok(2)})
 					j.exchange(q(3), [][]byte{ok(3)})
 				}
