@@ -1541,6 +1541,22 @@ func TestAPlaceHoldingTheValueWholeInOneFormIsASource(t *testing.T) {
 	// The value as recorded, escape and all, stands whole in a header as
 	// written, not as decoded ("x/42A" runs on).
 	refused("the recorded x%2F42 whole in a header as written only", classify("x%2F42", "y%2F57", nil, none, headed("mock-9", "see x%2F42%41 now")), "mock-9")
+	// The value as recorded stands whole only in the answer's Date header,
+	// a stamp every search reads blanked: the payload as written holds it,
+	// so the 24 its X-Ref holds is a word of it, never a part by chance.
+	dated := func(ref string) Raw {
+		x := RawOf(&models.Mock{Name: "mock-9", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://js.stripe.com/v3/", Header: map[string]string{"X-Ref": ref}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `ok`, Header: map[string]string{"Date": "Sat, 24 Oct 2026 09:55:51 GMT"}},
+			ReqTimestampMock: eRecAt.Add(-2 * time.Second), ResTimestampMock: eRecAt.Add(-2*time.Second + time.Millisecond),
+		}}, false).ServedAs(1).ServedAsRecorded()
+		if dc := clockedDrifts(); strings.Contains(dc.searched(x, false)[0], "24 Oct") || !strings.Contains(dc.searched(x, true)[0], "24 Oct") {
+			t.Fatalf("the Date header is no stamp the search blanks: %q", dc.searched(x, false)[0])
+		}
+		return x
+	}
+	refused("the recorded 24 Oct whole in an answer's Date header as written only", classify("24 Oct", "31 Oct", nil, none, dated("slot 24")), "mock-9")
 
 	// A leaf of the test's own earlier exchange that holds the value whole
 	// only as recorded there, or only as F gave it there: the value F saw,
