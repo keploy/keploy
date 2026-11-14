@@ -244,6 +244,20 @@ func TestWriteBackWritesWhatTheTestChangedToTheUsersKubeconfig(t *testing.T) {
 				cfg["users"] = append(cfg["users"].([]any), map[string]any{"name": "kind-b", "user": map[string]any{"client-key-data": "b3RoZXI="}})
 				cfg["current-context"] = "kind-b"
 			}},
+		{name: "a cluster the test added with keploy's CA beside its own (a cluster copied from the copy): keploy's is taken out", changes: "added=[cluster kind-c]",
+			test: kubectl(func(cfg map[string]any) {
+				cfg["clusters"] = append(cfg["clusters"].([]any), map[string]any{"name": "kind-c", "cluster": map[string]any{"server": "https://127.0.0.1:40002", "certificate-authority-data": b64(withPEM(kindB.pem, keploy.pem))}})
+			}),
+			want: func(cfg map[string]any) {
+				cfg["clusters"] = append(cfg["clusters"].([]any), map[string]any{"name": "kind-c", "cluster": map[string]any{"server": "https://127.0.0.1:40002", "certificate-authority-data": b64(kindB.pem)}})
+			}},
+		{name: "a cluster the test added whose CA is keploy's alone: it is added with no CA data", changes: "added=[cluster kind-c]",
+			test: kubectl(func(cfg map[string]any) {
+				cfg["clusters"] = append(cfg["clusters"].([]any), map[string]any{"name": "kind-c", "cluster": map[string]any{"server": "https://127.0.0.1:40002", "certificate-authority-data": b64(keploy.pem)}})
+			}),
+			want: func(cfg map[string]any) {
+				cfg["clusters"] = append(cfg["clusters"].([]any), map[string]any{"name": "kind-c", "cluster": map[string]any{"server": "https://127.0.0.1:40002"}})
+			}},
 		{name: "the context the test removed, changed outside: nothing written, nothing to keep", changes: "removed=[context kind-a]",
 			test:    kubectl(func(cfg map[string]any) { without(cfg, "contexts", "kind-a") }),
 			outside: setNS("ops"), conflict: []string{"context kind-a"}},
@@ -588,10 +602,22 @@ func TestWriteBackMakesWhatTheUsersFileLacks(t *testing.T) {
 	const head = "apiVersion: v1\nkind: Config\n"
 	for _, r := range []struct {
 		name, orig string
-		test       func(t *testing.T, wrote []byte) []byte
-		want       string // the user's file after, as kubectl reads it
-		check      func(t *testing.T, after string)
+		// cur is the user's file as the run ends, written during it outside
+		// the test; "": orig.
+		cur   string
+		test  func(t *testing.T, wrote []byte) []byte
+		want  string // the user's file after, as kubectl reads it
+		check func(t *testing.T, after string)
 	}{
+		{name: "an unnamed context that holds nothing, filled by the test and removed outside: the test's is added",
+			orig: head + "contexts:\n- {}\n- name: c\n  context:\n    cluster: x\n",
+			cur:  head + "contexts:\n- name: c\n  context:\n    cluster: x\n",
+			test: func(t *testing.T, wrote []byte) []byte {
+				return kubectlEdit(t, wrote, func(cfg map[string]any) {
+					cfg["contexts"].([]any)[0] = map[string]any{"context": map[string]any{"namespace": "web"}}
+				})
+			},
+			want: head + "contexts:\n- name: c\n  context:\n    cluster: x\n- context:\n    namespace: web\n"},
 		{name: "clusters null, contexts []: the test adds one of each",
 			orig: head + "clusters: null\ncontexts: []\n",
 			test: func(t *testing.T, wrote []byte) []byte {
@@ -738,6 +764,11 @@ func TestWriteBackMakesWhatTheUsersFileLacks(t *testing.T) {
 			wrote, _, err := Rewrite(file, []byte(r.orig), Trust{CA: keploy.pem})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if r.cur != "" {
+				if err := os.WriteFile(file, []byte(r.cur), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if _, err := WriteBack(file, "/k/copy", []byte(r.orig), wrote, r.test(t, wrote), keploy.pem, WriteOptions{Now: stamp}); err != nil {
 				t.Fatal(err)

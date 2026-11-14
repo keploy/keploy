@@ -347,8 +347,20 @@ func TestSetupCaCertEnv_WritesWhatTheTestWroteToItsKubeconfigBack(t *testing.T) 
 				t.Errorf("set-context: the cluster's CA is now\n%s\nwant the user's own alone", ca)
 			}
 		}},
+		{"kubectl config set-cluster --server: the cluster keploy's copy trusts keploy's CA for", edit(func(cfg map[string]any) {
+			cfg["clusters"].([]any)[0].(map[string]any)["cluster"].(map[string]any)["server"] = "https://127.0.0.1:36206"
+		}), nil, []logLine{{wroteBack, "changed=[cluster kind-a]"}}, func(cfg map[string]any) {
+			body := cfg["clusters"].([]any)[0].(map[string]any)["cluster"].(map[string]any)
+			ca, _ := base64.StdEncoding.DecodeString(body["certificate-authority-data"].(string))
+			if body["server"] != "https://127.0.0.1:36206" || !bytes.Equal(ca, clusterCA) {
+				t.Errorf("set-cluster: the cluster is %v; want the new server and the user's own CA alone", body)
+			}
+		}},
 		{"the context changed outside the test too", namespace("web"), namespace("ops"), []logLine{
 			{"the kubeconfig was changed during the run, outside the test, in entries the test changed too", "changed=[context kind-a] conflict=[context kind-a] test_changes"},
+		}, nil},
+		{"the context the test removed, changed outside: no test_changes to name", edit(func(cfg map[string]any) { cfg["contexts"] = []any{} }), namespace("ops"), []logLine{
+			{"the kubeconfig was changed during the run, outside the test, in entries the test changed too", "removed=[context kind-a] conflict=[context kind-a]"},
 		}, nil},
 		{"removed", func(t *testing.T, cp string) {
 			if err := os.Remove(cp); err != nil {
@@ -711,5 +723,22 @@ func TestReapEndedRunDirs_WritesADeadRunsKubeconfigChangesBack(t *testing.T) {
 			t.Fatal(err)
 		}
 		r.written(cfg)
+	}
+}
+
+// A record keploy cannot write is an error that names it, and leaves no
+// record in place for the next run to read.
+func TestKeepRecordNamesARecordItCannotWrite(t *testing.T) {
+	dir := t.TempDir()
+	// What stands at the record's temporary name is a directory.
+	if err := os.Mkdir(filepath.Join(dir, recordTemp("kubeconfig-0")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := keepRecord(&runTrustDir{dir: dir, started: time.Now()}, kubeconfigRecord{File: "/u/config", Copy: "kubeconfig-0"})
+	if err == nil || !strings.Contains(err.Error(), recordTemp("kubeconfig-0")) {
+		t.Errorf("keepRecord: %v; want an error naming %s", err, recordTemp("kubeconfig-0"))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "kubeconfig-0"+recordSuffix)); !os.IsNotExist(err) {
+		t.Errorf("a record is in place (%v); want none", err)
 	}
 }
