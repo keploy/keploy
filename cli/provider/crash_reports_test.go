@@ -28,6 +28,14 @@ func TestTheCrashClientStartsOnlyOnceTelemetryResolvesOn(t *testing.T) {
 	prev := pinProvenSwitch
 	pinProvenSwitch = func(bool) {}
 	t.Cleanup(func() { pinProvenSwitch = prev })
+	// record's cases run no command, which resolves to native, and
+	// ValidateFlags refuses native on a platform with no interception
+	// backend (macOS, Windows) before it reaches the -c check this test
+	// expects. Pin the gate open, as cmd_test.go does: the platform policy
+	// has its own coverage in hooks_test.go.
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return true })
 	reset := func() {
 		sentry.CurrentHub().BindClient(nil)
 		utils.ArmCrashReports("")

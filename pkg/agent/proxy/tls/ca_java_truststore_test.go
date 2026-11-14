@@ -71,6 +71,13 @@ func TestJavaTrustsServerViaTrustStore(t *testing.T) {
 	if err != nil {
 		t.Skip("java not available")
 	}
+	// Every Mac has a /usr/bin/javac and /usr/bin/java: stubs that run an
+	// installed JDK's, and fail when there is none (a JRE has no javac).
+	if runtime.GOOS == "darwin" {
+		if err := exec.Command(javac, "-version").Run(); err != nil {
+			t.Skip("no JDK: macOS's /usr/bin/javac is a stub")
+		}
+	}
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

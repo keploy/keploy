@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,9 +54,18 @@ func TestMemoryPressureKeepsCalmCapturedMocksDropsPressureRequestMocks(t *testin
 		t.Fatalf("expected late calm-request mock to be kept during pressure, got %d", len(mgr.buffer))
 	}
 
-	// After recovery, mocks buffer normally again.
+	// After recovery, mocks buffer normally again. A pause's span includes
+	// its end, and on macOS the wall clock moves in whole microseconds, so a
+	// time.Now() read right after SetMemoryPressure(false) is often the very
+	// instant the span ended at, which is during the pause. The request is
+	// stamped once the wall clock has passed that instant.
 	mgr.SetMemoryPressure(false)
-	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	ended := time.Now().Round(0)
+	after := time.Now()
+	for !after.Round(0).After(ended) {
+		after = time.Now()
+	}
+	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: after}})
 	if len(mgr.buffer) != 4 {
 		t.Fatalf("expected buffer to accept mocks after recovery, got %d", len(mgr.buffer))
 	}
@@ -2260,7 +2270,11 @@ func TestAddMockStampsTheAddressItsConnectionReached(t *testing.T) {
 // instance (a test worker's) its connection was stamped with, read while
 // that connection is still open; without the switch it carries none.
 func TestAddMockStampsItsConnectionsWorkerInstance(t *testing.T) {
-	const conn = "add-mock-instance"
+	// starts.Default outlives the test: the connection stays known after its
+	// ForgetOrigin (among the last closed), and InstanceEnded marks it ended.
+	// A later run (go test -count=2) noting the same connection again would
+	// find it ended and stamp no instance, so each run notes its own.
+	conn := "add-mock-instance-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	starts.Default.InstanceBegan(3)
 	starts.Default.NoteOriginIn(conn, 4242, 3)
 	t.Cleanup(func() { starts.Default.ForgetOrigin(conn); starts.Default.InstanceEnded(3) })
