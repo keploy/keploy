@@ -135,15 +135,23 @@ func recheckRun(t *testing.T, logger *zap.Logger, opts models.OutgoingOptions, m
 	mm := NewMockManager(nil, nil, logger)
 	t.Cleanup(mm.Close)
 	mm.SetMocksWithWindow(nil, mapping, models.BaseTime, time.Now().Add(time.Hour))
-	mm.ServeExactPool("k", nil)
-	// A recording named x-... is staged but another test's: t's mapping
-	// leaves it out.
+	// A recording named x-... is staged but another test's, and one named
+	// w-... the worker scope's (the app's own background calls, which t's
+	// per-test reads show after its own): t's mapping leaves both out.
 	var own []*models.Mock
+	var worker []string
 	for _, m := range mapping {
-		if !strings.HasPrefix(m.Name, "x-") {
+		switch {
+		case strings.HasPrefix(m.Name, "w-"):
+			worker = append(worker, m.Name)
+		case !strings.HasPrefix(m.Name, "x-"):
 			own = append(own, m)
 		}
 	}
+	if worker != nil {
+		mm.ServeExactWorker(worker)
+	}
+	mm.ServeExactPool("k", nil)
 	mm.ServeExactTest("t", own)
 	var tracker *learn.Tracker
 	if opts.Learn {
@@ -221,6 +229,11 @@ func TestACacheRecheckOfAnAnswerTheTestGotIsServedAndNeverCounted(t *testing.T) 
 				[]string{hensonA1, hensonA1, "304"}},
 			// another test's conditional fetch of the path is not this test's data
 			{"another test's conditional fetch recorded", []*models.Mock{hensonMock("h-1", t0, hensonPath, hensonA1, hensonTag, hensonMod), conditionalMock("x-c-1", t0.Add(time.Second), hensonPath, hensonTag)},
+				[]string{hensonGet(hensonPath), recheck(hensonPath, hensonTag, hensonMod)},
+				[]string{hensonA1, hensonA1}},
+			// nor is the worker scope's, which the test's per-test read
+			// shows: the app's background re-check, not the test's
+			{"the worker scope's conditional fetch recorded", []*models.Mock{hensonMock("h-1", t0, hensonPath, hensonA1, hensonTag, hensonMod), conditionalMock("w-c-1", t0.Add(time.Second), hensonPath, hensonTag)},
 				[]string{hensonGet(hensonPath), recheck(hensonPath, hensonTag, hensonMod)},
 				[]string{hensonA1, hensonA1}},
 			// the recorded re-check answers the first re-check; the next one,
