@@ -22,10 +22,35 @@ const hrNotSupported = 0x80070032
 // The Windows store, certutil and the process token, as installWindowsCA
 // reaches them (ca_winstore_windows.go); rows swap them.
 var (
-	userRootHoldsFn = userRootHolds
-	certutilAddFn   = certutilAdd
-	tokenElevatedFn = tokenElevated
+	userRootHoldsFn    = userRootHolds
+	machineRootHoldsFn = machineRootHolds
+	certutilAddFn      = certutilAdd
+	tokenElevatedFn    = tokenElevated
 )
+
+// trustedWindowsStore names the Windows ROOT store that already holds
+// keploy's CA der, "" when none does: the current user's, or the machine's
+// (LocalMachine\Root, where an administrator or a company's group policy puts
+// a CA every user of the machine trusts). A client that reads the Windows
+// store (Go, .NET) trusts a CA in either, so keploy's setup adds it to
+// neither again and warns of nothing. The user's view of ROOT takes in the
+// machine's on the Windows tested (11, 26200); the machine's own store is
+// read as well, so the outcome does not rest on that view. Reading either
+// needs no administrator. A store that cannot be read counts as not holding
+// the CA: the setup then adds it to the user's, as it would to an empty one.
+func trustedWindowsStore(logger *zap.Logger, der []byte) string {
+	inUser, userErr := userRootHoldsFn(der)
+	if userErr == nil && inUser {
+		return "the current user's Windows ROOT store"
+	}
+	inMachine, machineErr := machineRootHoldsFn(der)
+	if machineErr == nil && inMachine {
+		return `the machine's Windows ROOT store (LocalMachine\Root)`
+	}
+	logger.Debug("no Windows ROOT store holds keploy's CA, or one could not be read; adding it to the current user's",
+		zap.NamedError("user_store_error", userErr), zap.NamedError("machine_store_error", machineErr))
+	return ""
+}
 
 // certutilAdd adds the certificate at certPath to the ROOT store, the current
 // user's when user is set, else the machine's, and returns certutil's output.
