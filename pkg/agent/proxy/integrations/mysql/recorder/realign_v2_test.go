@@ -2460,7 +2460,7 @@ func TestRecordV2_APrepareTakenUpWhoseEOFCannotBeToldIsLeftOutAlone(t *testing.T
 // A PREPARE held for its framing, whose client frames with EOFs, with 255
 // parameters: its EOF is at sequence id 1, where the answer to a
 // COM_FIELD_LIST after it starts, and that answer may start with an EOF, so
-// settle cannot tell the packet (untoldEOF) and leaves the PREPARE out. The
+// settle cannot tell the packet and leaves the PREPARE out. The
 // COM_FIELD_LIST's answer is left out, and the packet is no proof of where it
 // starts. Before that command: nothing, an ERR the server sent unasked, or
 // the ERR 1835s a MySQL 5.7+ server sends to a COM_STMT_CLOSE and a
@@ -2542,6 +2542,152 @@ func TestRecordV2_PostTLS_AnEOFAHeldPrepareCannotTellIsNoPacketOfTheAnswerLeftOu
 				}
 				if !errors.Is(err, ErrFramingLost) {
 					t.Fatalf("RecordV2 = %v, want the stop at the query: its answer cannot be told from the answer left out", err)
+				}
+				if want := "SELECT 1 -> OK 1"; got != want {
+					t.Fatalf("mocks %q, want %q: no query with another's answer", got, want)
+				}
+			})
+		}
+	}
+}
+
+// A PREPARE held for its framing, whose client frames with EOFs, with one
+// parameter, whose server's next packet at the EOF's sequence id is no EOF: a
+// definition more than its count (refused at its header, too long for an
+// EOF), a short packet, with the EOF after it or not. No MySQL server sends
+// that; a stream that lost or garbled bytes with no hole reported does.
+// settle's fault leaves the PREPARE out and SELECT 2 out alone, and nothing it
+// read proves where SELECT 2's answer starts, so what the server sent before
+// SELECT 2 was captured is taken off the stream (the floor) and the walk
+// starts after it. A client that waited for SELECT 2's answer has SELECT 3
+// and 4 recorded with their own, as main records them. One that sent SELECT 3
+// before that answer, or SELECT 2 before the rest of the PREPARE's response,
+// stops at the cut, naming it, where main records SELECT 3 with SELECT 2's
+// answer. Cut off with SELECT 2's answer, the rest of the PREPARE's response
+// stopped every such connection, the waiting client's too; taken for proof
+// of the cut, it had SELECT 3 recorded with SELECT 2's answer.
+func TestRecordV2_PostTLS_APacketAfterAHeldPreparesDefinitionsThatIsNoEOFIsNoPacketOfTheAnswerLeftOut(t *testing.T) {
+	t.Parallel()
+	def := columnPayload(t, undecodableColumns[0])
+	q := func(t *testing.T, k int) []byte { return cannedCOMQuery(t, 0, fmt.Sprintf("SELECT %d", k)) }
+	ok := func(k int) []byte { return okResponseWithAffectedRows(1, byte(k)) }
+	for _, fault := range []string{"a definition more than its count", "a short packet, then the EOF", "a short packet alone"} {
+		for _, shape := range []string{"waits", "pipelined", "behind the PREPARE's tail"} {
+			t.Run(fmt.Sprintf("%s, the client %s", fault, shape), func(t *testing.T) {
+				t.Parallel()
+				var resp [][]byte
+				switch fault {
+				case "a definition more than its count":
+					resp = prepareOK(false, [][]byte{def, def}, nil)
+					resp[0][4+7] = 1 // the PREPARE_OK's parameter count
+				case "a short packet, then the EOF":
+					resp = prepareOK(false, [][]byte{def}, nil)
+					resp = append(resp[:2], wrapPacket([]byte{0x01, 0x02}, 3), wrapPacket(eofPayload, 4))
+				case "a short packet alone":
+					resp = prepareOK(false, [][]byte{def}, nil)
+					resp = append(resp[:2], wrapPacket([]byte{0x01, 0x02}, 3))
+				}
+				j := newJoinedMidStream(t)
+				j.exchange(q(t, 1), [][]byte{ok(1)})
+				prepare := wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO t VALUES (?)"...), 0)
+				if shape == "behind the PREPARE's tail" {
+					j.exchange(prepare, [][]byte{bytes.Join(resp[:2], nil)})
+					j.h.pushClient(q(t, 2), j.at())
+					j.h.pushDest(bytes.Join(resp[2:], nil), j.at())
+				} else {
+					j.exchange(prepare, [][]byte{bytes.Join(resp, nil)})
+					j.h.pushClient(q(t, 2), j.at())
+				}
+				if shape == "waits" {
+					j.h.pushDest(ok(2), j.at())
+					j.exchange(q(t, 3), [][]byte{ok(3)})
+					j.exchange(q(t, 4), [][]byte{ok(4)})
+				} else {
+					j.h.pushClient(q(t, 3), j.at())
+					j.h.pushDest(ok(2), j.at())
+					j.h.pushClient(q(t, 4), j.at())
+					j.h.pushDest(ok(3), j.at())
+					j.h.pushDest(ok(4), j.at())
+				}
+				mocks, err := j.run(t)
+				got := strings.Join(prepareOKPairing(mocks), "; ")
+				if shape == "waits" {
+					if want := "SELECT 1 -> OK 1; SELECT 3 -> OK 3; SELECT 4 -> OK 4"; err != nil || got != want {
+						t.Fatalf("RecordV2 = %v, mocks %q; want no stop and %q, as main records them", err, got, want)
+					}
+					return
+				}
+				if !errors.Is(err, ErrFramingLost) || !strings.Contains(err.Error(), "do not show the response left out ended at the cut") {
+					t.Fatalf("RecordV2 = %v, want the stop at the cut: SELECT 3's answer cannot be told from SELECT 2's", err)
+				}
+				if want := "SELECT 1 -> OK 1"; got != want {
+					t.Fatalf("mocks %q, want %q: no query with another's answer", got, want)
+				}
+			})
+		}
+	}
+}
+
+// A PREPARE held for its framing whose settle faults (an EOF it cannot tell,
+// with 255 parameters, or a short packet at the EOF's sequence id), then a
+// COM_STMT_CLOSE a byte short that the server answers with an ERR 1835 and a
+// COM_STMT_SEND_LONG_DATA a byte short it does not answer (no server mixes
+// the two; a stream that lost the second ERR does), then a COM_FIELD_LIST
+// whose first packet after it is off its sequence (at 5): reading it is a
+// fault of the take. The walk starts after that packet, not at the ERR 1835
+// before it, which is the CLOSE's answer. A client that waited for the
+// COM_FIELD_LIST's answer has SELECT 2 and 3 recorded with their own; one
+// that sent SELECT 2 before it stops at the cut, naming it. With the walk
+// started before the ERR 1835, taken for the start of the answer left out, it
+// passed the cut, and SELECT 2 was recorded with the COM_FIELD_LIST's answer,
+// as main records it.
+func TestRecordV2_PostTLS_AFaultAfterAShortCommandsERR1835IsNoPacketOfTheAnswerLeftOut(t *testing.T) {
+	t.Parallel()
+	def := columnPayload(t, undecodableColumns[0])
+	defs := make([][]byte, 255)
+	for d := range defs {
+		defs[d] = def
+	}
+	q := func(t *testing.T, k int) []byte { return cannedCOMQuery(t, 0, fmt.Sprintf("SELECT %d", k)) }
+	ok := func(k int) []byte { return okResponseWithAffectedRows(1, byte(k)) }
+	for _, fault := range []string{"an EOF settle cannot tell", "a short packet at the EOF's id"} {
+		for _, pipelined := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, SELECT 2 sent before the COM_FIELD_LIST's answer: %v", fault, pipelined), func(t *testing.T) {
+				t.Parallel()
+				resp := prepareOK(false, defs, nil)
+				if fault == "a short packet at the EOF's id" {
+					resp = prepareOK(false, [][]byte{def}, nil)
+					resp = append(resp[:2], wrapPacket([]byte{0x01, 0x02}, 3))
+				}
+				j := newJoinedMidStream(t)
+				j.exchange(q(t, 1), [][]byte{ok(1)})
+				j.exchange(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO t VALUES (?)"...), 0), [][]byte{bytes.Join(resp, nil)})
+				j.exchange(malformedClose, [][]byte{malformedERR})
+				j.exchange(malformedLongData, nil)
+				j.h.pushClient(wrapPacket([]byte{mysql.COM_FIELD_LIST, 't', 0}, 0), j.at())
+				j.h.pushDest(wrapPacket([]byte{0x05, 0x06, 0x07}, 5), j.at())
+				fieldListAnswer := ok(9)
+				if pipelined {
+					j.h.pushClient(q(t, 2), j.at())
+					j.h.pushDest(fieldListAnswer, j.at())
+					j.h.pushClient(q(t, 3), j.at())
+					j.h.pushDest(ok(2), j.at())
+					j.h.pushDest(ok(3), j.at())
+				} else {
+					j.h.pushDest(fieldListAnswer, j.at())
+					j.exchange(q(t, 2), [][]byte{ok(2)})
+					j.exchange(q(t, 3), [][]byte{ok(3)})
+				}
+				mocks, err := j.run(t)
+				got := strings.Join(prepareOKPairing(mocks), "; ")
+				if !pipelined {
+					if want := "SELECT 1 -> OK 1; SELECT 2 -> OK 2; SELECT 3 -> OK 3"; err != nil || got != want {
+						t.Fatalf("RecordV2 = %v, mocks %q; want no stop and %q", err, got, want)
+					}
+					return
+				}
+				if !errors.Is(err, ErrFramingLost) || !strings.Contains(err.Error(), "do not show the response left out ended at the cut") {
+					t.Fatalf("RecordV2 = %v, want the stop at the cut: SELECT 2's answer cannot be told from the COM_FIELD_LIST's", err)
 				}
 				if want := "SELECT 1 -> OK 1"; got != want {
 					t.Fatalf("mocks %q, want %q: no query with another's answer", got, want)

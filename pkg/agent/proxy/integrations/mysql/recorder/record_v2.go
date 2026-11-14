@@ -1548,12 +1548,10 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		held = nil
 		first, err := h.settle(ctx, logger, sess, decodeCtx, cmd, respFirst)
 		carry = first
-		var untold untoldEOF
-		if err == nil && first == nil || errors.As(err, &untold) {
-			// The PREPARE's EOF: the answer starts after it. An EOF that may
-			// be the PREPARE's or the answer's first packet is not walked as
-			// the answer's either: a re-align's cut after the answer, which is
-			// left out, is proven only by what follows it (packetWalk.cut).
+		if err == nil && first == nil {
+			// The PREPARE's EOF: the answer starts after it. After a fault,
+			// the walk is marked again where the answer may start (the
+			// command loop's settle fault).
 			walk.mark(respFirst)
 		}
 		return err
@@ -1925,32 +1923,35 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					}
 					t.release()
 				}
-				// After an EOF settle could not tell (untoldEOF), the ERRs a
-				// server sent to the commands without an answer before this one
-				// that did not decode, and any packet it sent unasked before
-				// this command was captured, come next, before this command's
-				// answer, and are no packets of it: walked as its, they had the
-				// re-align's cut pass where none of that answer had come, and a
-				// client that sent its next command before that answer had the
-				// command recorded with it. So they are taken off the stream as
-				// at every command the server answers (takeMalformedAnswers,
-				// which sets the floor at this command), and the walk starts the
-				// answer after them. After any other fault, what settle read is
-				// off where the answer starts; the re-align (fail) cuts such an
-				// ERR off with the rest of that response.
-				var untold untoldEOF
-				if errors.As(err, &untold) {
+				// After settle's framing fault (an EOF it could not tell, or a
+				// packet that is neither the PREPARE's EOF nor this answer's
+				// first), the ERRs a server sent to the commands
+				// without an answer before this one that did not decode, and
+				// any packet it sent before this command was captured (the rest
+				// of the PREPARE's response among them), come next, before this
+				// command's answer, and are no packets of it: walked as its,
+				// they had the re-align's cut pass where none of that answer
+				// had come, and a client that sent its next command before that
+				// answer had the command recorded with it; cut off with that
+				// answer, they stopped a client that waited for it, which main
+				// records. So they are taken off the stream as at every command
+				// the server answers (takeMalformedAnswers, which sets the
+				// floor at this command), and the walk starts the answer after
+				// them, or after the packet a fault of that read stopped at:
+				// what it read before is no packet of the answer either.
+				if errors.Is(err, ErrFramingLost) {
 					_, why, merr := takeMalformedAnswers(ctx, logger, sess, malformed, first.ConnSeq, respFirst, mysql.CommandStatusToString(commandByte(cmdBuf)), fakeconn.Chunk{}, &carry)
 					malformed = nil
 					if why != "" {
 						return stopIn(nil, reqTs, found("V2: mysql ERR to a command without an answer cannot be told from the next answer", framingLost("%s", why)))
 					}
-					switch {
-					case merr != nil:
+					if merr != nil {
+						// Nothing is handed on (carry) after a fault.
 						err = merr
-					case carry != nil:
+					}
+					if carry != nil {
 						walk.markAt(carry[3])
-					default:
+					} else {
 						_, _ = sess.DestStream.Peek()
 						walk.mark(respFirst)
 					}

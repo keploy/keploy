@@ -1113,7 +1113,7 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 		if h.eofSeq == respFirst && !answerNeverAnEOF[cmd] {
 			err := framingLostAt(logger, sess, "the packet after the definitions of the %s response is an EOF that may be its own or the answer to the next command", h.what)
 			h.leaveOut(sess, decodeCtx, err)
-			return nil, untoldEOF{err}
+			return nil, err
 		}
 		h.release(decodeCtx, buf, sess.DestStream.LastReadTime())
 		return nil, nil
@@ -1131,17 +1131,6 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 		return nil, err
 	}
 }
-
-// untoldEOF is the lost framing heldPrepare.settle returns for an EOF it
-// cannot tell to be the PREPARE's own or the first packet of the next answer.
-// Either way the packet is no proof of where that answer starts, so the
-// packet walk does not count it as one of the answer's (handleCommandsV2's
-// settleHeld): read as the start of that answer, which is left out, it had a
-// re-align's cut pass where none of that answer had come, and a client that
-// sent its next command before that answer had the command recorded with it.
-type untoldEOF struct{ error }
-
-func (e untoldEOF) Unwrap() error { return e.error }
 
 // end settles the framing once the client's stream ended with the PREPARE
 // still held: no command with a response followed it, so all the server sent
