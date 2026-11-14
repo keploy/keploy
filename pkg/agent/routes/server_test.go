@@ -22,16 +22,21 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// grabPort binds an ephemeral port and returns the listener (still holding the
-// port), the numeric port, and the ":port" address StartAgentServer would use.
+// grabPort binds an ephemeral port on the address the agent binds outside
+// docker (agentBindAddr: loopback) and returns the listener (still holding the
+// port), the numeric port, and that address. The hold is on that same address
+// because on macOS a listener on every interface does not stop another from
+// binding one address of its port (BSD's SO_REUSEADDR, which Go sets): a hold
+// on ":0" left the agent's start there free to bind, and the row that waits on
+// a held port to give up waited forever.
 func grabPort(t *testing.T) (net.Listener, int, string) {
 	t.Helper()
-	ln, err := net.Listen("tcp", ":0")
+	ln, err := net.Listen("tcp", agentBindAddr(0, false))
 	if err != nil {
 		t.Fatalf("listen ephemeral: %v", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	return ln, port, fmt.Sprintf(":%d", port)
+	return ln, port, agentBindAddr(port, false)
 }
 
 // TestListenWithRetry_RecoversWhenPortFrees reproduces the couchbase-node flake:
@@ -272,7 +277,9 @@ func TestABindThatFailsForGoodFailsTheStart(t *testing.T) {
 // the start's report is the process's.
 func TestABindToAPortStillHeldDoesNotFailTheStart(t *testing.T) {
 	if os.Getenv("KEPLOY_TEST_BOOT_CHILD") != "1" {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestABindToAPortStillHeldDoesNotFailTheStart$", "-test.count=1", "-test.v")
+		// Its own timeout: a start that bound the port after all serves
+		// forever, and must fail this row, not the package's whole run.
+		cmd := exec.Command(os.Args[0], "-test.run=^TestABindToAPortStillHeldDoesNotFailTheStart$", "-test.count=1", "-test.v", "-test.timeout=2m")
 		cmd.Env = append(os.Environ(), "KEPLOY_TEST_BOOT_CHILD=1")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("%v\n%s", err, out)
