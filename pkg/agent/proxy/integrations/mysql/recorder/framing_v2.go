@@ -242,6 +242,26 @@ func answered(command byte) bool {
 	return command != mysql.COM_QUIT && command != mysql.COM_STMT_CLOSE && command != mysql.COM_STMT_SEND_LONG_DATA
 }
 
+// answers reports whether the server answers the command packet cmd (its
+// header included): one answered names, or an empty one, which the server
+// takes for COM_SLEEP and answers with an ERR (MySQL and MariaDB alike).
+func answers(cmd []byte) bool {
+	return len(cmd) <= 4 || answered(cmd[4])
+}
+
+// comSleep is COM_SLEEP, the command the server takes an empty command packet
+// for (answers).
+const comSleep = 0x00
+
+// commandByte is the command packet cmd's command: its first payload byte, or
+// COM_SLEEP for an empty one, as the server takes it (answers).
+func commandByte(cmd []byte) byte {
+	if len(cmd) <= 4 {
+		return comSleep
+	}
+	return cmd[4]
+}
+
 // nextCommandAfterFault reads the client's next command after a response left
 // out (realign), and returns it as the command loop reads one: its packet, the
 // sequence id its answer starts at, and whether it continued over several

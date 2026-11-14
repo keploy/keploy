@@ -1603,20 +1603,14 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			return err
 		}
 		realign := errors.Is(err, ErrFramingLost) && !pipelined
+		// The fault is a command's the server answers (one it does not answer
+		// is left out where it is read), so the exchange taken up, if any, is
+		// this one: the next command the server answers confirms the one
+		// before it or stops the recording first. A PREPARE held for its
+		// framing was settled at this command, before its answer was touched.
 		if t := taken; t != nil {
 			taken = nil
-			switch {
-			case t.read:
-				// The fault is a command's after it, one the server does not
-				// answer (the next it answers confirms the exchange taken up,
-				// or stops the recording): nothing confirms it now. It is
-				// left out, counted, and the mocks queued behind it, of
-				// commands without an answer, are recorded.
-				if t.emit != nil {
-					leaveOut(sess, t.reqTs, t.resTs, notRecorded("the answer taken up after a response left out is not confirmed: a command after it was left out before the server's next answer"))
-				}
-				t.flush()
-			case walk.startedOff(t.first):
+			if walk.startedOff(t.first) {
 				// The first packet read where the answer to the command taken
 				// up should start is not at the sequence id that answer starts
 				// at: what the re-align took for its start is not proven to
@@ -1635,13 +1629,6 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		if !realign {
 			reportFault(logger, sess, err, false)
 			return leaveOutInFlight(sess, reqTs, err)
-		}
-		if held != nil {
-			// What the server sent after the PREPARE's definitions is skipped
-			// with the rest of this exchange: nothing settles its framing.
-			h := held
-			held = nil
-			h.leaveOut(sess, decodeCtx, notRecorded("the response after the %s response was not framed, so nothing settles its framing", h.what))
 		}
 		carry = nil
 		decodeCtx.LastOp.Store(clientKey, wire.RESET)
@@ -1797,7 +1784,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		// prefetch read in the handshake, or the read just above), so at least
 		// one chunk has been consumed and LastReadTime is set.
 		reqTs := sess.ClientStream.LastReadTime()
-		if taken != nil && len(cmdBuf) > 4 && answered(cmdBuf[4]) {
+		if taken != nil && answers(cmdBuf) {
 			// The next answer the server sends: the exchange taken up is
 			// confirmed here, or the recording stops (takenUp).
 			t := taken
@@ -1822,16 +1809,29 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			}
 			t.release()
 		}
-		if serverRealign && len(cmdBuf) > 4 && answered(cmdBuf[4]) {
+		if serverRealign && answers(cmdBuf) {
 			if err := realignAnswer(reqTs, first.ConnSeq, respFirst); err != nil {
 				return err
 			}
 			taken = &takenUp{reqTs: reqTs, first: respFirst}
 		}
-		if len(cmdBuf) > 4 && answered(cmdBuf[4]) {
+		if answers(cmdBuf) {
 			// The server's next bytes start its answer (the stream was cut
-			// to it above when it was taken up).
+			// to it above when it was taken up), after the EOF of a PREPARE
+			// held for its framing if the server sent one. So a held PREPARE
+			// is settled here, before the answer is read or left out
+			// (settleHeld marks the walk again after its EOF): the walk
+			// takes the bytes after the mark for the answer's, and a fault
+			// that left the exchange out with the PREPARE unsettled had it
+			// take the EOF for a packet of the answer left out, and pass a
+			// re-align's cut where that answer had not begun.
 			walk.mark()
+			if err := settleHeld(commandByte(cmdBuf), respFirst); err != nil {
+				if err := fail(reqTs, err); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 
 		cmdPkt, err := wire.DecodePayload(ctx, logger, cmdBuf, clientKey, decodeCtx)
@@ -1841,14 +1841,24 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// response describes itself (OK, ERR, or a result set with its own
 			// column definitions), so it is framed and the exchange left out;
 			// any other's cannot be, and the recording stops.
+			if !answers(cmdBuf) {
+				// A command its client expects no answer to: it is left out
+				// alone, and both streams are read on from where they are,
+				// as its client reads them. The client takes the server's
+				// next answer for its next command's, and so does the
+				// recorder: a server that answers a command of this kind that
+				// does not parse (MySQL 5.7 and later send an ERR, a malformed
+				// packet; MariaDB sends nothing) has that ERR recorded for the
+				// next command, as its client read it. Re-aligning here cut
+				// the server's stream at the next command where no response
+				// was left out, and a walk with no answer read since the
+				// handshake stopped the connection at that cut.
+				lastEnd = reqTs
+				leaveOut(sess, reqTs, reqTs, fmt.Errorf("a %s that does not decode: %w", mysql.CommandStatusToString(cmdBuf[4]), err))
+				continue
+			}
 			if len(cmdBuf) > 4 && (cmdBuf[4] == mysql.COM_QUERY || cmdBuf[4] == mysql.COM_STMT_EXECUTE) {
 				op := cmdBuf[4]
-				if err := settleHeld(op, respFirst); err != nil {
-					if err := fail(reqTs, err); err != nil {
-						return err
-					}
-					continue
-				}
 				decodeCtx.LastOp.Store(clientKey, op)
 				seq := responseSeq(mysql.CommandStatusToString(op), respFirst)
 				_, resTs, rerr := collectResponseV2(ctx, logger, sess, decodeCtx, clientKey, op, &seq, &carry)
@@ -1907,12 +1917,6 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// left out, and so is a cursor's COM_STMT_FETCH, whose reply
 			// frames itself; any other's reply cannot be framed.
 			if cmdBuf[4] == comStmtFetch {
-				if err := settleHeld(comStmtFetch, respFirst); err != nil {
-					if err := fail(reqTs, err); err != nil {
-						return err
-					}
-					continue
-				}
 				seq := responseSeq("COM_STMT_FETCH", respFirst)
 				if err := frameFetchReply(ctx, logger, sess, decodeCtx, &seq, &carry); err != nil {
 					if err := fail(reqTs, err); err != nil {
@@ -1929,12 +1933,6 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			shape, known := singlePacketReply[cmdBuf[4]]
 			if !known {
 				err := found("V2: unsupported mysql command", framingLost("command %s, whose response it cannot frame", cmdPkt.Header.Type))
-				if err := fail(reqTs, err); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := settleHeld(cmdBuf[4], respFirst); err != nil {
 				if err := fail(reqTs, err); err != nil {
 					return err
 				}
@@ -1959,13 +1957,6 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			resTs := sess.DestStream.LastReadTime()
 			lastEnd = later(reqTs, resTs)
 			leaveOut(sess, reqTs, resTs, fmt.Errorf("command %s has no decoder", cmdPkt.Header.Type))
-			continue
-		}
-
-		if err := settleHeld(cmdBuf[4], respFirst); err != nil {
-			if err := fail(reqTs, err); err != nil {
-				return err
-			}
 			continue
 		}
 
