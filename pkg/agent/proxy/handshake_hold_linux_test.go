@@ -118,6 +118,31 @@ func TestDecideHandshakeStopsWhenTheApplicationGivesUp(t *testing.T) {
 	}
 }
 
+// A mock record whose application gives up connecting to a dependency that
+// never answers notes the dependency unreached, with no answer.
+func TestAGivenUpConnectToADependencyOfAMockRecordIsNotedUnreached(t *testing.T) {
+	prev := handshakeRecheck
+	handshakeRecheck = 50 * time.Millisecond
+	t.Cleanup(func() { handshakeRecheck = prev })
+	t.Setenv("KEPLOY_PROVEN", "1")
+
+	p := &Proxy{logger: zap.NewNop(), mockMode: true}
+	p.setSession(&agent.Session{Mode: models.MODE_RECORD})
+	s := &unreachedSink{}
+	p.SetTopologySink(s)
+	silent := unansweredAddr(t)
+	dest := ipv4Dest(t, silent)
+	dest.Instance = 5
+	d := p.decideHandshake(&goneAfterFirstLookup{fakeHandshakeDest: fakeHandshakeDest{dest: dest}})(context.Background(), appEnd, proxyEnd)
+	if d.Outcome != synhold.Drop {
+		t.Fatalf("decision %+v, want drop", d)
+	}
+	want := models.UnreachedRow{Addr: silent, Answer: models.UnreachedNoAnswer, Instance: 5}
+	if got := s.got(); len(got) != 1 || got[0] != want {
+		t.Fatalf("noted %+v; want [%+v]", got, want)
+	}
+}
+
 // An application that gives up connecting to a mock.real destination fails
 // that connect as it would without keploy: with two test workers' tests open,
 // the failure is in the REAL row of the worker whose instance the kernel

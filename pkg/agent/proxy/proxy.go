@@ -3248,6 +3248,7 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 		}
 	}
 	if err != nil {
+		p.noteDialFailed(dstAddr, err, destInfo.Instance)
 		switch {
 		case refusedLocally(err):
 			p.logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstAddr))
@@ -3303,6 +3304,7 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 			if dstConn == nil {
 				dstConn, err = util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
 				if err != nil {
+					p.noteDialFailed(dstAddr, err, destInfo.Instance)
 					utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
 					return err
 				}
@@ -3924,6 +3926,7 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 					probeDial(p.logger, "synchronous-tls", clientConnID, addrLog, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				}
 				if err != nil {
+					p.noteDialFailed(addr, err, destInfo.Instance)
 					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addrLog), zap.String("next_step", util.NextStepDialDestination))
 					return err
 				}
@@ -3947,6 +3950,7 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 			err = models.HostsInError(parserCtx, err, dstAddr)
 			probeDial(p.logger, "plain-tcp", clientConnID, dstLog(), time.Since(dialStart).Nanoseconds(), zap.Error(err))
 			if err != nil {
+				p.noteDialFailed(dstAddr, err, destInfo.Instance)
 				if refusedLocally(err) {
 					logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstLog()))
 					return err
@@ -7283,6 +7287,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 			return false, nil, nil
 		}
 		p.logger.Debug("nothing listens at the local destination yet; closing the call as the connect would have been refused", zap.String("destination", dstAddr))
+		p.noteUnreached(dstAddr, models.UnreachedRefused, dest.Instance)
 		return true, nil, nil
 	}
 	// Under the proven switch the run's process tree is the membership

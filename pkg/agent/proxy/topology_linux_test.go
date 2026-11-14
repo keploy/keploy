@@ -57,6 +57,8 @@ func (s *rowSink) NoteMocked(r models.MockedRow) {
 	s.mu.Unlock()
 }
 
+func (*rowSink) NoteUnreached(models.UnreachedRow) {}
+
 func (s *rowSink) rows() ([]models.LiveRow, []models.MockedRow) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -834,14 +836,93 @@ func TestOffTheSwitchNoRowIsTold(t *testing.T) {
 	}
 }
 
-// chanSink is a TopologySink that hands each mocked row to a channel.
-type chanSink struct{ mocked chan models.MockedRow }
+// chanSink is a TopologySink that hands each mocked row to a channel, and
+// each unreached row to another when it has one.
+type chanSink struct {
+	mocked    chan models.MockedRow
+	unreached chan models.UnreachedRow
+}
 
 func (chanSink) NoteLive(models.LiveRow) {}
 func (s chanSink) NoteMocked(r models.MockedRow) {
 	select {
 	case s.mocked <- r:
 	default:
+	}
+}
+func (s chanSink) NoteUnreached(r models.UnreachedRow) {
+	select {
+	case s.unreached <- r:
+	default:
+	}
+}
+
+// A mock record whose connection keploy accepted (no handshake held: macOS,
+// Windows, or a hold that is not running) notes a dependency that refuses it
+// unreached, with the worker's instance: one keploy's own dial finds refusing
+// (no process tree known), and a loopback port nothing listens at, which a
+// run with a tree closes as the connect would have been refused. A replay
+// notes nothing.
+func TestHandleConnectionNotesARefusingDependencyOfAMockRecord(t *testing.T) {
+	for _, tc := range []struct {
+		mode models.Mode
+		tree bool
+	}{
+		{models.MODE_RECORD, false}, {models.MODE_RECORD, true}, {models.MODE_TEST, false}, {models.MODE_TEST, true},
+	} {
+		mode := tc.mode
+		t.Run(fmt.Sprintf("%s/tree=%v", mode, tc.tree), func(t *testing.T) {
+			recorded.forget()
+			t.Cleanup(recorded.forget)
+			t.Setenv("KEPLOY_PROVEN", "1")
+			refused := testnet.RefusedAddr(t, "tcp")
+			saved := containerkey.Default
+			t.Cleanup(func() { containerkey.Default = saved })
+			containerkey.Default = containerkey.NewKeyer(containerAt{})
+			cfg := config.New()
+			cfg.Agent.Mode = mode
+			cfg.Agent.MockMode = true
+			if tc.tree {
+				cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
+			}
+			dest := ipv4Dest(t, refused)
+			dest.Instance = 4
+			p := New(zap.NewNop(), fakeDestInfo{dest: dest}, cfg)
+			p.nsswitchData = []byte("preseeded-by-test") // see testProxy
+			sink := chanSink{mocked: make(chan models.MockedRow, 1), unreached: make(chan models.UnreachedRow, 1)}
+			p.SetTopologySink(sink)
+			if mode == models.MODE_RECORD {
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			} else if err := p.Mock(context.Background(), models.OutgoingOptions{Mocking: true}); err != nil {
+				t.Fatal(err)
+			}
+			app, src := acceptedConn(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(ctx, src) }()
+			if _, err := app.Write([]byte("ping\n")); err != nil {
+				t.Fatal(err)
+			}
+			if mode == models.MODE_TEST {
+				cancel()
+				<-done
+				select {
+				case r := <-sink.unreached:
+					t.Fatalf("a replay noted %+v unreached", r)
+				default:
+				}
+				return
+			}
+			r := awaitEvent(t, sink.unreached, "the refusing dependency being noted")
+			if want := (models.UnreachedRow{Addr: refused, Answer: models.UnreachedRefused, Instance: 4}); r != want {
+				t.Fatalf("want the row %+v, got %+v", want, r)
+			}
+			<-done
+		})
 	}
 }
 

@@ -1,21 +1,27 @@
 package proxy
 
 import (
+	"errors"
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // TopologySink is told, under the proven switch, where the run's calls to
 // local listeners went (models.LiveRow, models.MockedRow; design v14 §3.1):
 // the agent's wire, which knows the test open at the moment and names it on
-// the row. Both are called on a connection's own goroutine, LIVE once for each
+// the row. Each is called on a connection's own goroutine, LIVE once for each
 // read that brings the caller's bytes, so they must return at once and must
-// not call back into the proxy.
+// not call back into the proxy. In a keploy mock record it is also told of
+// each dependency that did not accept a connection of the run
+// (models.UnreachedRow).
 type TopologySink interface {
 	NoteLive(row models.LiveRow)
 	NoteMocked(row models.MockedRow)
+	NoteUnreached(row models.UnreachedRow)
 }
 
 // topologyBox holds a TopologySink in an atomic.Pointer.
@@ -36,6 +42,52 @@ func (p *Proxy) topologySink() TopologySink {
 		return b.sink
 	}
 	return nil
+}
+
+// unreachedAnswer is how a destination answered the proxy's dial of it that
+// failed with err (models.UnreachedRow.Answer): refused, unreachable, or no
+// answer. ok is false for an error that is no answer of the destination's
+// (the proxy stopping, its own limits, a cancelled dial).
+func unreachedAnswer(err error) (answer string, ok bool) {
+	var t interface{ Timeout() bool }
+	switch {
+	case err == nil:
+		return "", false
+	case neterr.IsConnRefused(err):
+		return models.UnreachedRefused, true
+	case neterr.IsUnreachable(err):
+		return models.UnreachedUnreachable, true
+	case errors.As(err, &t) && t.Timeout():
+		return models.UnreachedNoAnswer, true
+	}
+	return "", false
+}
+
+// noteUnreached tells the sink, in a keploy mock record under the proven
+// switch, that the dependency at addr did not accept a connection of the
+// run, answering as answer says (models.UnreachedRow): nothing of that
+// connection is recorded. inst is the instance of the test worker whose
+// process made the connection (DestInfo.Instance). A destination mock.real
+// lists is not a dependency the record records: the open test's REAL row
+// counts its failed dial instead (realDialFailed).
+func (p *Proxy) noteUnreached(addr, answer string, inst uint32) {
+	s := p.topologySink()
+	if s == nil || !p.mockMode || !provenswitch.On() {
+		return
+	}
+	if rule := p.getSession(); rule == nil || rule.Mode != models.MODE_RECORD {
+		return
+	}
+	s.NoteUnreached(models.UnreachedRow{Addr: addr, Answer: answer, Instance: inst})
+}
+
+// noteDialFailed is noteUnreached for the proxy's own dial of a connection's
+// destination, which failed with err. An error that is no answer of the
+// destination's is not noted (unreachedAnswer).
+func (p *Proxy) noteDialFailed(addr string, err error, inst uint32) {
+	if answer, ok := unreachedAnswer(err); ok {
+		p.noteUnreached(addr, answer, inst)
+	}
 }
 
 // localListener is the mocked-local row of a call to an address of this

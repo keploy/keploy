@@ -11,4 +11,5 @@ var (
 	connAbortedErrnos []syscall.Errno
 	brokenPipeErrnos  []syscall.Errno
 	connRefusedErrnos []syscall.Errno
+	unreachableErrnos []syscall.Errno
 )

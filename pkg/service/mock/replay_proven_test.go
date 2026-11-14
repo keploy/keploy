@@ -1066,7 +1066,8 @@ func TestTheRunsWindowsAreSplitOnEveryPath(t *testing.T) {
 	refused := models.RunRefusal{Code: models.ScopeErrOneTestProcess, Message: "a second test process"}
 	live := models.LiveRow{Test: "o::TestA", Exe: "/usr/bin/node", Port: 3000}
 	mocked := models.MockedRow{Test: "o::TestA", Addr: "127.0.0.1:5432", Port: 5432}
-	all := []models.ScopeWindow{claim, {Name: "o::TestA", Outcome: models.ScopeOutcomePassed}, {Refused: &refused}, {Live: &live}, {Mocked: &mocked}}
+	unreached := models.UnreachedRow{Test: "o::TestA", Addr: "127.0.0.1:6379", Answer: models.UnreachedRefused}
+	all := []models.ScopeWindow{claim, {Name: "o::TestA", Outcome: models.ScopeOutcomePassed}, {Refused: &refused}, {Live: &live}, {Mocked: &mocked}, {Unreached: &unreached}}
 	check := func(t *testing.T, m *mockService, got []models.ScopeWindow) {
 		t.Helper()
 		require.Equal(t, []models.ScopeWindow{{Name: "o::TestA", Outcome: models.ScopeOutcomePassed}}, got, "only the test's window is a test's")
@@ -1074,6 +1075,7 @@ func TestTheRunsWindowsAreSplitOnEveryPath(t *testing.T) {
 		require.Equal(t, []models.RunRefusal{refused}, m.refusals)
 		require.Equal(t, []models.LiveRow{live}, m.live)
 		require.Equal(t, []models.MockedRow{mocked}, m.mocked)
+		require.Equal(t, []models.UnreachedRow{unreached}, m.unreached)
 	}
 	t.Run("compose", func(t *testing.T) {
 		instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})

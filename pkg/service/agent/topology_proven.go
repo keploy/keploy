@@ -22,14 +22,17 @@ var _ proxyPkg.TopologySink = (*Agent)(nil)
 // (proxy.TopologySink), which names the test open at that moment on each row.
 // The rows reach the CLI with the run's windows, each as a window of its own
 // (models.ScopeWindow.Live, .Mocked), and its receipts carry them to keploy's
-// summary.
+// summary. In a keploy mock record the proxy also tells the wire of each
+// dependency that did not accept a connection of the run (Unreached), which
+// the record's receipt carries the same way.
 
 // topologyRows are a session's rows, each once, in the order they were
 // first seen. Guarded by Agent.provenMu, as part of provenWire.
 type topologyRows struct {
-	live    map[models.LiveRow]struct{}
-	mocked  map[models.MockedRow]struct{}
-	windows []models.ScopeWindow
+	live      map[models.LiveRow]struct{}
+	mocked    map[models.MockedRow]struct{}
+	unreached map[models.UnreachedRow]struct{}
+	windows   []models.ScopeWindow
 }
 
 // NoteLive records a LIVE call for the test open now (proxy.TopologySink).
@@ -80,4 +83,31 @@ func (a *Agent) NoteMocked(row models.MockedRow) {
 	t.mocked[row] = struct{}{}
 	now := time.Now()
 	t.windows = append(t.windows, models.ScopeWindow{Start: now, End: now, Mocked: &row})
+}
+
+// NoteUnreached records, in a keploy mock record, a dependency that did not
+// accept a connection of the run, for the test open now
+// (proxy.TopologySink): the record holds nothing of that connection. A
+// destination seen again with the same answer for the same test is listed
+// once.
+func (a *Agent) NoteUnreached(row models.UnreachedRow) {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	if a.proven.closed {
+		return
+	}
+	// The test open in the instance whose process made the connection: in a
+	// run of more than one worker, a connection from no worker (instance 0)
+	// is no test's.
+	row.Test, row.Instance = a.proven.openOf(row.Instance), 0
+	t := &a.proven.topology
+	if _, seen := t.unreached[row]; seen {
+		return
+	}
+	if t.unreached == nil {
+		t.unreached = map[models.UnreachedRow]struct{}{}
+	}
+	t.unreached[row] = struct{}{}
+	now := time.Now()
+	t.windows = append(t.windows, models.ScopeWindow{Start: now, End: now, Unreached: &row})
 }

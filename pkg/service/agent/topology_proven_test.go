@@ -102,6 +102,72 @@ func TestRowsResetWithTheSession(t *testing.T) {
 	require.Empty(t, mocked)
 }
 
+// unreachedOf is the unreached rows among a run's final windows, each a
+// window of its own, which names no test and no claim.
+func unreachedOf(t *testing.T, a *Agent) []models.UnreachedRow {
+	t.Helper()
+	ws, err := a.FinalScopeWindows(context.Background())
+	require.NoError(t, err)
+	var rows []models.UnreachedRow
+	for _, w := range ws {
+		if w.Unreached == nil {
+			continue
+		}
+		require.Empty(t, w.Name, "a row's window is no test's")
+		require.Empty(t, w.Claim, "a row's window is no claim")
+		require.Nil(t, w.Mocked, "a row's window carries one row")
+		require.Nil(t, w.Live, "a row's window carries one row")
+		rows = append(rows, *w.Unreached)
+	}
+	return rows
+}
+
+// An unreached dependency names the test open when its connection was made,
+// or none outside every test; the same destination and answer seen again
+// for the same test is listed once, and again for another test or with
+// another answer. None is kept after the final read, nor across a session.
+func TestAnUnreachedRowNamesTheTestOpenWhenTheConnectionWasMade(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	ctx := context.Background()
+	db := models.UnreachedRow{Addr: "127.0.0.1:5432", Answer: models.UnreachedRefused}
+
+	a.NoteUnreached(db) // before any claim: outside every test
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	for range 3 {
+		a.NoteUnreached(db)
+	}
+	slow := db
+	slow.Answer = models.UnreachedNoAnswer
+	a.NoteUnreached(slow)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: models.ScopeOutcomeFailed})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	a.NoteUnreached(db)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", Outcome: models.ScopeOutcomeFailed})
+	require.Nil(t, serr)
+
+	require.Equal(t, []models.UnreachedRow{
+		{Addr: "127.0.0.1:5432", Answer: models.UnreachedRefused},
+		{Test: "o::TestA", Addr: "127.0.0.1:5432", Answer: models.UnreachedRefused},
+		{Test: "o::TestA", Addr: "127.0.0.1:5432", Answer: models.UnreachedNoAnswer},
+		{Test: "o::TestB", Addr: "127.0.0.1:5432", Answer: models.UnreachedRefused},
+	}, unreachedOf(t, a))
+
+	a.NoteUnreached(models.UnreachedRow{Addr: "127.0.0.1:6379", Answer: models.UnreachedRefused})
+	a.provenMu.Lock()
+	n := len(a.proven.topology.windows)
+	a.provenMu.Unlock()
+	require.Equal(t, 4, n, "a row after the final read is not kept")
+
+	b, _ := wireAgent(t, models.MODE_RECORD)
+	b.NoteUnreached(db)
+	require.NoError(t, b.resetSession(ctx))
+	require.Empty(t, unreachedOf(t, b), "the rows belong to the session that saw them")
+}
+
 // sinkProxy is a proxy that takes a topology sink.
 type sinkProxy struct {
 	coreAgent.Proxy
