@@ -1642,6 +1642,25 @@ func (m *MockManager) GiveExactTest(test string, b models.VariableBinding) error
 	return nil
 }
 
+// GiveBetweenTests binds b, a value the manager's test worker gave while
+// none of its tests was open, as a given in force for the calls it makes
+// until its next test's scope begins (variables.Table.GiveBetween): a test
+// file's setup that mints a name and sends it on itself. b's name must not
+// be given between tests yet.
+func (m *MockManager) GiveBetweenTests(b models.VariableBinding) error {
+	if have, ok := m.vars.GiveBetween(b); !ok {
+		return fmt.Errorf("variable %s is given between tests already, to %q", b.Name, have.Value)
+	}
+	return nil
+}
+
+// EndBetweenTests ends, for the calls the manager's test worker makes until
+// its next test's scope begins, every given in force there
+// (variables.Table.EndBetween): the worker moved on to another test file.
+func (m *MockManager) EndBetweenTests() {
+	m.vars.EndBetween()
+}
+
 // NoteExactTest notes, in the open test's scope, why its variable name is
 // not bound (variables.Table.Note): test must be the test the view serves.
 func (m *MockManager) NoteExactTest(test, name, why string) error {

@@ -1087,6 +1087,17 @@ type ExactTestGiver interface {
 	GiveExactTest(test string, b models.VariableBinding) error
 }
 
+// ExactBetweenGiver is an optional ExactServer capability of a proxy that
+// keeps the test variables a replay binds: GiveBetweenTests binds a value a
+// test worker gave while none of its tests was open as a given in force for
+// the calls it makes until its next test begins (the gap's, a test file's
+// setup's), and EndBetweenTests ends every given in force there, the ended
+// test's too (the worker moved on to another test file).
+type ExactBetweenGiver interface {
+	GiveBetweenTests(b models.VariableBinding) error
+	EndBetweenTests() error
+}
+
 // ExactTestAnswerer is an optional ExactServer capability of a proxy that
 // keeps the test variables a replay binds: AnswerAsRecordedAtOpen names, for
 // the scope of test's variables to begin with as test opens next, the run's

@@ -5065,6 +5065,39 @@ func (p *Proxy) GiveExactTest(test string, b models.VariableBinding) error {
 	return p.giveExactOn(p.getMockManager(), test, b)
 }
 
+// GiveBetweenTests implements agent.ExactBetweenGiver
+// (MockManager.GiveBetweenTests) on the run's manager.
+func (p *Proxy) GiveBetweenTests(b models.VariableBinding) error {
+	return giveBetweenOn(p.getMockManager(), b)
+}
+
+// EndBetweenTests implements agent.ExactBetweenGiver
+// (MockManager.EndBetweenTests) on the run's manager.
+func (p *Proxy) EndBetweenTests() error {
+	return endBetweenOn(p.getMockManager())
+}
+
+var _ agent.ExactBetweenGiver = (*Proxy)(nil)
+
+// giveBetweenOn is GiveBetweenTests on manager m: the run's, or a test
+// worker's (instanceExact).
+func giveBetweenOn(m *MockManager, b models.VariableBinding) error {
+	if m == nil {
+		return errNoMockManager
+	}
+	return m.GiveBetweenTests(b)
+}
+
+// endBetweenOn is EndBetweenTests on manager m: the run's, or a test
+// worker's (instanceExact).
+func endBetweenOn(m *MockManager) error {
+	if m == nil {
+		return errNoMockManager
+	}
+	m.EndBetweenTests()
+	return nil
+}
+
 // giveExactOn is GiveExactTest on manager m: the run's, or a test worker's
 // (instanceExact).
 func (p *Proxy) giveExactOn(m *MockManager, test string, b models.VariableBinding) error {

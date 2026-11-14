@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -132,5 +133,49 @@ func TestTheProxyHandsTheLearnStepTheGivensATestOpensWith(t *testing.T) {
 	p = open(t, given)
 	if g := gave(p); len(g) != 0 {
 		t.Fatalf("with the switch off a given is a place: %+v", g)
+	}
+}
+
+// A value a test worker gave outside its tests is kept for the calls it
+// makes in the gap on its own manager, the run's or a worker's: a second of
+// one name is refused, an end ends it, and a proxy with no manager, or a
+// worker it does not serve, refuses both.
+func TestTheProxyKeepsAWorkersGivensForItsCallsOutsideTests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	b := models.VariableBinding{Name: "given:suite", Value: "s-2", Recorded: "s-1", Mock: "test worker 0", Place: "a.spec.ts:9", Given: true}
+	run, worker := stagedManager(t, nil, nil), stagedManager(t, nil, nil)
+	p := &Proxy{mockManager: run, learnTracker: learn.NewTracker()}
+	p.instances.mgrs = map[uint32]*MockManager{7: worker}
+	for _, c := range []struct {
+		name string
+		mm   *MockManager
+		g    agent.ExactBetweenGiver
+	}{{"the run's", run, p}, {"worker 7's", worker, instanceExact{p: p, inst: 7}}} {
+		if err := c.g.GiveBetweenTests(b); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got, ok := c.mm.vars.Lookup("given:suite"); !ok || got.Value != "s-2" {
+			t.Fatalf("%s manager reads %+v, %v", c.name, got, ok)
+		}
+		if err := c.g.GiveBetweenTests(b); err == nil || !strings.Contains(err.Error(), "variable given:suite is given between tests already") {
+			t.Fatalf("%s: a second given of one name: %v", c.name, err)
+		}
+		if err := c.g.EndBetweenTests(); err != nil {
+			t.Fatalf("%s: end: %v", c.name, err)
+		}
+		if got, ok := c.mm.vars.Lookup("given:suite"); ok {
+			t.Fatalf("%s manager reads %+v after the end", c.name, got)
+		}
+	}
+	for _, c := range []struct {
+		name string
+		g    agent.ExactBetweenGiver
+	}{{"no manager", &Proxy{}}, {"a worker not served", instanceExact{p: p, inst: 8}}} {
+		if err := c.g.GiveBetweenTests(b); err == nil {
+			t.Fatalf("%s kept the given", c.name)
+		}
+		if err := c.g.EndBetweenTests(); err == nil {
+			t.Fatalf("%s took the end", c.name)
+		}
 	}
 }

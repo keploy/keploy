@@ -128,3 +128,40 @@ func TestVariables_AGivensMissNamesTheGivenInItsEvidence(t *testing.T) {
 		t.Fatalf("a learned variable's miss: given %q, evidence %+v", rep.Given, ev)
 	}
 }
+
+// A setup's own call (outside every test) that uses the value the setup
+// gave is answered with the value its setup gives in this run
+// (variables.Table.GiveBetween); a file's end ends it (EndBetween), so the
+// next file's setup does not pass it on, and a value the next file's setup
+// gives, recorded with another value, makes the call no call of its.
+func TestVariables_ASetupsOwnCallFollowsItsFilesValueOnly(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &varDb{perTest: []*models.Mock{givenAppMock()}}
+	if _, ok := db.table.GiveBetween(variables.Binding{Name: "given:app", Value: "app-9", Recorded: "app-1", Mock: "test worker 0", Place: "a.spec.ts:9"}); !ok {
+		t.Fatal("the setup's given did not bind")
+	}
+	ok, _, diag := matchVar(t, h, db, liveReq("POST", "/apps", `{"name":"app-8"}`))
+	wantProblem(t, ok, diag, `the test gave given:app = "app-9" (a.spec.ts:9)`)
+	once := &varDb{perTest: []*models.Mock{givenAppMock()}}
+	once.table.GiveBetween(variables.Binding{Name: "given:app", Value: "app-9", Recorded: "app-1", Mock: "test worker 0", Place: "a.spec.ts:9"})
+	ok, stub, diag := matchVar(t, h, once, liveReq("POST", "/apps", `{"name":"app-9"}`))
+	if !ok || stub == nil {
+		t.Fatalf("the setup's call carrying its value was refused: %+v", diag)
+	}
+
+	db.table.EndBetween()
+	ok, _, diag = matchVar(t, h, db, liveReq("POST", "/apps", `{"name":"app-9"}`))
+	wantProblem(t, ok, diag, "this run's test did not give it before this call")
+
+	if _, ok := db.table.GiveBetween(variables.Binding{Name: "given:app", Value: "app-9", Recorded: "app-2", Mock: "test worker 0", Place: "b.spec.ts:9"}); !ok {
+		t.Fatal("the next file's given did not bind")
+	}
+	ok, _, diag = matchVar(t, h, db, liveReq("POST", "/apps", `{"name":"app-9"}`))
+	if ok {
+		t.Fatal("the next file's setup was answered by the first file's recording")
+	}
+	if diag != nil && diag.variable != nil {
+		t.Fatalf("another file's call was refused with a declaration problem: %+v", diag.variable)
+	}
+}

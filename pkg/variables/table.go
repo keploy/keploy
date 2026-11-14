@@ -93,6 +93,16 @@ type Table struct {
 	// mock replay process, one run, so it holds at most one entry per call
 	// of the run that made an id.
 	minted map[string]Binding
+	// between are the values a test worker gave while none of its tests
+	// was open (GiveBetween), by name: givens in force for the calls of
+	// the gap (or the start-up) beside the scope in force, over its own,
+	// until the next scope begins or EndBetween. Never the scope's own
+	// (EndedOf) nor the run's.
+	between map[string]Binding
+	// givensOver: EndBetween ended the givens of the scope in force, so
+	// no call of the gap after it reads them (hidden), until the next
+	// scope begins.
+	givensOver bool
 }
 
 // endedScope is an ended scope's own bindings (Own as it ended), by name,
@@ -135,10 +145,14 @@ func (t *Table) unlock(from *Table) {
 	}
 }
 
-// lookup is the binding of name in force: the scope's, else the run's. t is
+// lookup is the binding of name in force: the gap's given (GiveBetween),
+// else the scope's (but a given EndBetween ended), else the run's. t is
 // locked (lock), with from, the table whose run's it reads.
 func (t *Table) lookup(from *Table, name string) (Binding, bool) {
-	if b, ok := t.vals[name]; ok {
+	if b, ok := t.between[name]; ok {
+		return b, true
+	}
+	if b, ok := t.vals[name]; ok && !t.hidden(name) {
 		return b, true
 	}
 	if b, ok := t.run[name]; ok {
@@ -172,21 +186,70 @@ func (t *Table) runInForce(from *Table) map[string]Binding {
 	return out
 }
 
-// all is every binding in force, the scope's over the run's. t is locked
-// (lock).
+// all is every binding in force, the gap's givens over the scope's over the
+// run's (lookup). t is locked (lock).
 func (t *Table) all(from *Table) map[string]Binding {
 	run := t.runInForce(from)
-	if len(run) == 0 {
+	if len(run) == 0 && len(t.between) == 0 && !t.givensOver {
 		return t.vals
 	}
-	out := make(map[string]Binding, len(t.vals)+len(run))
+	out := make(map[string]Binding, len(t.vals)+len(run)+len(t.between))
 	for n, b := range run {
 		out[n] = b
 	}
 	for n, b := range t.vals {
+		if !t.hidden(n) {
+			out[n] = b
+		}
+	}
+	for n, b := range t.between {
 		out[n] = b
 	}
 	return out
+}
+
+// hidden reports whether the scope's binding of name is a given that
+// EndBetween ended for the gap's calls. t.mu is held.
+func (t *Table) hidden(name string) bool {
+	return t.givensOver && models.IsGivenVariable(name)
+}
+
+// GiveBetween binds b, a value a test worker gave while none of its tests
+// was open (models.GivenReq outside every test: a test file's setup), as a
+// given in force for the calls of the gap from now: the gap after the scope
+// in force (the ended test's), or the start-up before the first scope,
+// until the next scope begins, which the worker's next test carries in
+// itself (the agent's workerBindings). It binds beside the scope, never in
+// it (the ended test's bindings stay its own, EndedOf) nor in the run's
+// (which hold no given), and over a given of the scope of the same name:
+// the gap's calls from now are the new value's. It refuses, binding
+// nothing, when b's name is given between already, and returns that
+// binding.
+func (t *Table) GiveBetween(b Binding) (Binding, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if have, ok := t.between[b.Name]; ok {
+		return have, false
+	}
+	b.Given = true
+	if t.between == nil {
+		t.between = make(map[string]Binding)
+	}
+	t.between[b.Name] = b
+	return b, true
+}
+
+// EndBetween ends, for the calls of the gap from now, the givens in force
+// there: what GiveBetween bound, and the values the scope in force (the
+// ended test's) was given (models.IsGivenVariable), until the next scope
+// begins. A test file's end sends it: no call of the next file's setup
+// reads a value of this one's. The scope's other bindings stay in force
+// (the gap rule), and the ended test keeps its givens as its own (EndedOf,
+// LookupOf).
+func (t *Table) EndBetween() {
+	t.mu.Lock()
+	t.between, t.givensOver = nil, true
+	t.mu.Unlock()
 }
 
 // readersScopes is, while t binds the run's (put), every binding of the
@@ -985,6 +1048,7 @@ func (t *Table) start(test string, given, carried []Binding) {
 	t.test = test
 	t.gen++
 	t.vals, t.notes, t.asRecorded = nil, nil, nil
+	t.between, t.givensOver = nil, false
 	t.began = true
 	if len(given)+len(carried) == 0 {
 		return
@@ -1108,6 +1172,7 @@ func (t *Table) Reset() {
 	t.end()
 	t.test = ""
 	t.vals, t.notes, t.asRecorded = nil, nil, nil
+	t.between, t.givensOver = nil, false
 	t.began = true
 	t.gen++
 	t.mu.Unlock()
@@ -1124,6 +1189,7 @@ func (t *Table) NewSet() {
 // newSet is NewSet's step. t.mu is held.
 func (t *Table) newSet() {
 	t.vals, t.run, t.ended, t.notes, t.asRecorded = nil, nil, nil, nil, nil
+	t.between, t.givensOver = nil, false
 	t.began, t.test = false, ""
 	t.gen++
 	t.scope++
@@ -1303,7 +1369,8 @@ func endedIn(ended []endedScope, scope uint64) []Binding {
 func (t *Table) Clone() *Table {
 	from := t.lock()
 	defer t.unlock(from)
-	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun, notes: maps.Clone(t.notes), asRecorded: maps.Clone(t.asRecorded)}
+	c := &Table{gen: t.gen, began: t.began, keepRun: t.keepRun, notes: maps.Clone(t.notes), asRecorded: maps.Clone(t.asRecorded),
+		between: maps.Clone(t.between), givensOver: t.givensOver}
 	if t.vals != nil {
 		c.vals = make(map[string]Binding, len(t.vals))
 		for k, v := range t.vals {
@@ -1452,15 +1519,20 @@ func (t *Table) Snapshot() []Binding {
 // Given is each binding of the open scope that its test gave (Binding.Given:
 // Give, and Start's given), in no set order: nil, with nothing allocated,
 // when it holds none, as the serve of every call asks it (http's
-// givenAnswers). A given is the scope's alone: the run's holds none.
+// givenAnswers). A given is the scope's alone: the run's holds none. In the
+// gap, the givens in force there (lookup): the worker's (GiveBetween) over
+// the ended test's, none of those EndBetween ended.
 func (t *Table) Given() []Binding {
 	from := t.lock()
 	defer t.unlock(from)
 	var out []Binding
 	for _, b := range t.vals {
-		if b.Given {
+		if _, over := t.between[b.Name]; b.Given && !over && !t.hidden(b.Name) {
 			out = append(out, b)
 		}
+	}
+	for _, b := range t.between {
+		out = append(out, b)
 	}
 	return out
 }

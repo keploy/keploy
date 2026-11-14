@@ -132,3 +132,25 @@ func TestLearnMatchAGivenLeavesTheApplicationsClockRead(t *testing.T) {
 		}
 	}
 }
+
+// A value a test file's setup gave outside every test (variables.Table.
+// GiveBetween) is followed into the calls the setup makes itself, as a
+// test's own given is into its calls: a suite the setup names with its own
+// clock and creates (Playwright's beforeAll, then page.request.post) is
+// learned as a use of the given in record's full round.
+func TestLearnMatchASetupsOwnCallUsesTheValueItGave(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const rec, full = "suite-1761609600123", "suite-1761700000001"
+	db := &givenDb{learnDb: &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/suites", `{"name":"`+rec+`"}`, nil, `{"name":"`+rec+`","version":1}`)}}}
+	if _, ok := db.table.GiveBetween(variables.Binding{Name: "given:suite", Value: full, Recorded: rec, Mock: "test worker 0", Place: "suite.spec.ts:12"}); !ok {
+		t.Fatal("the setup's given did not bind")
+	}
+	served, miss, _ := h.learnMatch(context.Background(), live("POST", "/v1/suites", `{"name":"`+full+`"}`, nil), db, n, opts)
+	if served == nil || miss != nil || served.Spec.HTTPResp.Body != `{"name":"`+full+`","version":1}` {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	want := models.MockVariables{"given:suite": {Recorded: rec, Use: []string{"body.name"}, Answer: []string{"body.name"}, Why: learn.GivenWhy("given:suite", "suite.spec.ts:12", rec, full)}}
+	if got := db.consumed[0].Spec.Learned(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("variables %+v, want %+v", got, want)
+	}
+}

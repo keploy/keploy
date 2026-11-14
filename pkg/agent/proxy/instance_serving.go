@@ -276,6 +276,22 @@ func (s instanceExact) GiveExactTest(test string, b models.VariableBinding) erro
 	return s.p.giveExactOn(m, test, b)
 }
 
+func (s instanceExact) GiveBetweenTests(b models.VariableBinding) error {
+	m, err := s.mgr()
+	if err != nil {
+		return err
+	}
+	return giveBetweenOn(m, b)
+}
+
+func (s instanceExact) EndBetweenTests() error {
+	m, err := s.mgr()
+	if err != nil {
+		return err
+	}
+	return endBetweenOn(m)
+}
+
 func (s instanceExact) ServeExactPool(key string, names []string) error {
 	m, err := s.mgr()
 	if err != nil {
@@ -338,6 +354,7 @@ func (s instanceExact) ExactTestSkippedReads() (string, []string) {
 
 var _ agent.ExactSkippedReadsReader = instanceExact{}
 var _ agent.ExactTestAnswerer = instanceExact{}
+var _ agent.ExactBetweenGiver = instanceExact{}
 
 var (
 	_ agent.ExactServer           = instanceExact{}

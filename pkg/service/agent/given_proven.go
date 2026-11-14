@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -185,11 +186,20 @@ func (a *Agent) ProvenGive(ctx context.Context, req models.GivenReq) (models.Giv
 // test: no test of it would carry the value (givenNotOpen).
 
 // giveOutsideTest is ProvenGive for a value worker gave while none of its
-// tests was open: held for the tests worker begins from now on. With the
-// wire held.
+// tests was open: held for the tests worker begins from now on, and, in a
+// replay (record's full round among them), bound for the calls worker makes
+// until its next test begins (coreAgent.ExactBetweenGiver): the setup that minted it
+// sends it on itself. With the wire held.
 func (a *Agent) giveOutsideTest(worker uint32, req models.GivenReq) (models.GivenResp, *models.ScopeError) {
 	if !a.holdsRun(worker) {
 		return models.GivenResp{}, givenNotOpen(req)
+	}
+	var g coreAgent.ExactBetweenGiver
+	if a.replaying() {
+		var serr *models.ScopeError
+		if g, serr = a.betweenGiver(worker, models.GivenVariable(req.Name, 1)); serr != nil {
+			return models.GivenResp{}, serr
+		}
 	}
 	a.scopeMu.Lock()
 	defer a.scopeMu.Unlock()
@@ -201,7 +211,14 @@ func (a *Agent) giveOutsideTest(worker uint32, req models.GivenReq) (models.Give
 	}
 	variable := models.GivenVariable(req.Name, givenCount(held, req.Name)+1)
 	v := models.GivenValue{Name: variable, Value: req.Value, Source: req.Source}
-	if !a.replaying() {
+	if g != nil {
+		// The proxy's table takes its own lock alone: binding under scopeMu
+		// keeps the value and the worker's list one step.
+		b := models.VariableBinding{Name: variable, Value: req.Value, Recorded: a.recordedOutside(variable, req.Source), Mock: "test worker " + coreAgent.InstanceLabel(worker), Place: req.Source, Given: true}
+		if err := g.GiveBetweenTests(b); err != nil {
+			return models.GivenResp{}, betweenErr(worker, variable, err)
+		}
+	} else {
 		if a.givenBytes+givenSize(v) > MaxGivenBytesPerRecord {
 			return models.GivenResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
 				fmt.Sprintf("the tests of this record gave more than %d MiB of values: keploy holds each test's until the next record session begins", MaxGivenBytesPerRecord>>20),
@@ -216,12 +233,65 @@ func (a *Agent) giveOutsideTest(worker uint32, req models.GivenReq) (models.Give
 	return models.GivenResp{V: models.ScopeProtocolVersion, Status: "ok", Variable: variable}, nil
 }
 
+// recordedOutside is, in a replay, the value the recording gave under
+// variable outside its tests at source (file:line): what each test the
+// recording's worker began after it holds under variable from source
+// (seedWorkerGivens). "" when source is empty, when no test holds one, and
+// when two hold two values (the setup gave it twice, or two setups at one
+// line): the binding then checks nothing, and a call recorded carrying the
+// value is no call of this run's setup (its recorded value differs), so it
+// misses as a plain call. scopeMu is held.
+func (a *Agent) recordedOutside(variable, source string) string {
+	if source == "" {
+		return ""
+	}
+	found := ""
+	for _, vs := range a.testGiven {
+		for _, g := range vs {
+			if g.Name != variable || g.Source != source {
+				continue
+			}
+			if found != "" && found != g.Value {
+				return ""
+			}
+			found = g.Value
+		}
+	}
+	return found
+}
+
+// betweenGiver is the proxy of worker as the keeper of the givens in force
+// for the calls worker makes until its next test begins
+// (coreAgent.ExactBetweenGiver); what (a variable's name, or the end) is
+// said in its errors.
+func (a *Agent) betweenGiver(worker uint32, what string) (coreAgent.ExactBetweenGiver, *models.ScopeError) {
+	es, err := a.exactServerOf(worker)
+	if err != nil {
+		return nil, betweenErr(worker, what, err)
+	}
+	g, ok := es.(coreAgent.ExactBetweenGiver)
+	if !ok {
+		return nil, betweenErr(worker, what, errors.New("this keploy agent's proxy keeps no test variables"))
+	}
+	return g, nil
+}
+
+// betweenErr is the internal error of a proxy that could not follow what
+// into the calls worker makes outside its tests.
+func betweenErr(worker uint32, what string, err error) *models.ScopeError {
+	return scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+		"keploy cannot follow "+what+" into the calls test worker "+coreAgent.InstanceLabel(worker)+" makes outside its tests: "+err.Error(),
+		"run the keploy agent of this keploy version, and check the agent's log")
+}
+
 // endOutsideGivens is ProvenGive for an end (models.GivenReq.End): the
-// values worker gave outside its tests are over, and no test it begins from
-// now on carries them. An end names no value (bad_request), comes while
-// none of worker's tests is open (bad_request: the open test holds them
-// already, and the next would carry them), and only from a process that
-// holds the run (not_open).
+// values worker gave outside its tests are over, no test it begins from now
+// on carries them, and, in a replay, no call it makes until its next test
+// begins follows them, nor the givens of the test it ended last
+// (coreAgent.ExactBetweenGiver). An end names no value (bad_request), comes while one
+// of worker's tests is open (bad_request: the open test holds them already,
+// and the next would carry them), and only from a process that holds the run
+// (not_open).
 func (a *Agent) endOutsideGivens(ctx context.Context, req models.GivenReq) (models.GivenResp, *models.ScopeError) {
 	if req.Name != "" || req.Value != "" || req.Source != "" {
 		return models.GivenResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
@@ -251,6 +321,15 @@ func (a *Agent) endOutsideGivens(ctx context.Context, req models.GivenReq) (mode
 		return models.GivenResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotOpen,
 			"the values given outside tests were ended while no test process held the run: no process holds any",
 			"end them from the test process that gave them, once it claimed the run")
+	}
+	if a.replaying() {
+		g, serr := a.betweenGiver(worker, "the end of the values given outside tests")
+		if serr != nil {
+			return models.GivenResp{}, serr
+		}
+		if err := g.EndBetweenTests(); err != nil {
+			return models.GivenResp{}, betweenErr(worker, "the end of the values given outside tests", err)
+		}
 	}
 	a.dropWorkerGivens(worker)
 	return models.GivenResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil

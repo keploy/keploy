@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -24,6 +25,11 @@ type givingProxy struct {
 	*wireProxy
 	gave    []models.VariableBinding
 	giveErr error
+	// between are the bindings and ends (Name "end") of the givens in
+	// force for a worker's calls outside its tests, in order
+	// (GiveBetweenTests, EndBetweenTests); betweenErr fails both.
+	between    []models.VariableBinding
+	betweenErr error
 }
 
 func (p *givingProxy) GiveExactTest(test string, b models.VariableBinding) error {
@@ -827,4 +833,122 @@ func TestTheReRecordSentenceGoesWithTheMissesRead(t *testing.T) {
 			require.Equal(t, 1, strings.Count(w.Evidence.Reason, "re-record the test"), w.Evidence.Reason)
 		})
 	}
+}
+
+// GiveBetweenTests and EndBetweenTests make the giving proxy keep the
+// givens in force for a worker's calls outside its tests, as keploy's own
+// proxy does (coreAgent.ExactBetweenGiver): it records each binding and
+// each end, in order.
+func (p *givingProxy) GiveBetweenTests(b models.VariableBinding) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.betweenErr != nil {
+		return p.betweenErr
+	}
+	p.between = append(p.between, b)
+	return nil
+}
+
+func (p *givingProxy) EndBetweenTests() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.betweenErr != nil {
+		return p.betweenErr
+	}
+	p.between = append(p.between, models.VariableBinding{Name: "end"})
+	return nil
+}
+
+// In a replay a value a test file's setup gives is bound too for the calls
+// the setup makes itself, outside every test (the proxy's gap), with the
+// value the recording's setup gave at the same place; a file's end ends
+// them, so the next file's setup calls follow only its own value. A record
+// binds nothing: it keeps the value in each later test's window.
+func TestASetupsOwnCallsFollowItsValuePerFile(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	o := &givingOpener{givingProxy: &givingProxy{wireProxy: p}}
+	a.Proxy = o
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeGiven(ctx, map[string][]models.GivenValue{
+		"o::TestA1": {{Name: "given:suite", Value: "rec-a", Source: "a.spec.ts:9"}},
+		"o::TestA2": {{Name: "given:suite", Value: "rec-a", Source: "a.spec.ts:9"}},
+		"o::TestB":  {{Name: "given:suite", Value: "rec-b", Source: "b.spec.ts:9"}},
+	}))
+	claimSelf(t, a)
+	for _, f := range []struct {
+		value, source string
+		tests         []string
+	}{{"new-a", "a.spec.ts:9", []string{"TestA1", "TestA2"}}, {"new-b", "b.spec.ts:9", []string{"TestB"}}} {
+		resp, serr := a.ProvenGive(ctx, give("suite", f.value, f.source))
+		require.Nil(t, serr)
+		require.Equal(t, "given:suite", resp.Variable)
+		for _, name := range f.tests {
+			_, serr = a.ProvenBegin(ctx, begin(name))
+			require.Nil(t, serr)
+			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+			require.Nil(t, serr)
+		}
+		_, serr = a.ProvenGive(ctx, models.GivenReq{End: true})
+		require.Nil(t, serr)
+	}
+	require.Equal(t, []models.VariableBinding{
+		{Name: "given:suite", Value: "new-a", Recorded: "rec-a", Mock: "test worker " + coreAgent.InstanceLabel(0), Place: "a.spec.ts:9", Given: true},
+		{Name: "end"},
+		{Name: "given:suite", Value: "new-b", Recorded: "rec-b", Mock: "test worker " + coreAgent.InstanceLabel(0), Place: "b.spec.ts:9", Given: true},
+		{Name: "end"},
+	}, o.between)
+
+	r, rp := wireAgent(t, models.MODE_RECORD)
+	ro := &givingOpener{givingProxy: &givingProxy{wireProxy: rp}}
+	r.Proxy = ro
+	claimSelf(t, r)
+	_, serr := r.ProvenGive(ctx, give("suite", "rec-a", "a.spec.ts:9"))
+	require.Nil(t, serr)
+	_, serr = r.ProvenGive(ctx, models.GivenReq{End: true})
+	require.Nil(t, serr)
+	require.Empty(t, ro.between, "a record binds no variable")
+}
+
+// The value the recording's setup gave is read from the tests begun after
+// it, by variable and place; none when the place is unknown, when no test
+// holds it, or when two hold two values there: the binding then checks
+// nothing. A proxy that cannot keep the givens of a worker's own calls, or
+// fails to, refuses the value, which no later test then carries.
+func TestASetupsValueIsReadFromItsPlaceOrRefused(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	a.testGiven = map[string][]models.GivenValue{
+		"o::A": {{Name: "given:suite", Value: "rec-a", Source: "a.spec.ts:9"}, {Name: "given:suite#2", Value: "own", Source: "a.spec.ts:9"}},
+		"o::B": {{Name: "given:suite", Value: "rec-a", Source: "a.spec.ts:9"}, {Name: "given:suite", Value: "rec-c", Source: "c.spec.ts:9"}},
+		"o::C": {{Name: "given:twice", Value: "t-1", Source: "t.spec.ts:3"}},
+		"o::D": {{Name: "given:twice", Value: "t-2", Source: "t.spec.ts:3"}},
+		"o::E": {{Name: "given:suite", Value: "rec-e"}},
+	}
+	require.Equal(t, "rec-a", a.recordedOutside("given:suite", "a.spec.ts:9"))
+	require.Equal(t, "rec-c", a.recordedOutside("given:suite", "c.spec.ts:9"))
+	require.Equal(t, "own", a.recordedOutside("given:suite#2", "a.spec.ts:9"))
+	require.Empty(t, a.recordedOutside("given:suite", ""), "no place")
+	require.Empty(t, a.recordedOutside("given:suite", "z.spec.ts:9"), "no test holds it")
+	require.Empty(t, a.recordedOutside("given:twice", "t.spec.ts:3"), "two values at one place")
+
+	claimSelf(t, a)
+	ctx := context.Background()
+	_, serr := a.ProvenGive(ctx, give("suite", "new-a", "a.spec.ts:9"))
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrInternal, serr.Code)
+	require.Contains(t, serr.Message, "this keploy agent's proxy keeps no test variables")
+	_, serr = a.ProvenGive(ctx, models.GivenReq{End: true})
+	require.NotNil(t, serr)
+	require.Contains(t, serr.Message, "the end of the values given outside tests")
+
+	failing := &givingProxy{wireProxy: p, betweenErr: errors.New("table gone")}
+	a.Proxy = failing
+	_, serr = a.ProvenGive(ctx, give("suite", "new-a", "a.spec.ts:9"))
+	require.NotNil(t, serr)
+	require.Contains(t, serr.Message, "table gone")
+	_, serr = a.ProvenGive(ctx, models.GivenReq{End: true})
+	require.NotNil(t, serr)
+	require.Contains(t, serr.Message, "table gone")
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	require.Empty(t, a.workerGiven, "a value the proxy did not bind is held for no test")
 }
