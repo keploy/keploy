@@ -158,8 +158,11 @@ jobs:
       # against PowerShell's list, and a name only they answer (a private
       # address's PTR) recorded with their answer rather than a public
       # resolver's. A name one adapter's server denies is asked on the next
-      # adapter, as Windows asks it: the row gives a second adapter a DNS
-      # server of its own and compares the recording with Resolve-DnsName.
+      # adapter, as Windows asks it, and a server's failure (SERVFAIL) on the
+      # next server: the row adds an adapter of its own (an internal Hyper-V
+      # switch's; it skips and says why where Hyper-V is not running), gives
+      # only it two DNS servers, compares the recording with Resolve-DnsName
+      # and removes the adapter. The machine's own adapters are not changed.
       - name: Test the machine's DNS resolvers (amd64)
         run: go test -count=1 -v -run "TestOnWindowsARecordingAsksEachAdapterAsWindowsDoes|TestOnWindowsTheRecordingAsksTheMachinesResolvers|TestOnWindowsTheAdaptersAreReadWhateverTheFirstBufferSize|TestOnWindowsAFailedAdapterReadIsAnError|TestOnWindowsEachAdapterAndServerOfTheListIsRead" ./pkg/agent/proxy/
         shell: cmd
