@@ -1,9 +1,7 @@
 package proxy
 
 import (
-	"errors"
 	"fmt"
-	"syscall"
 
 	"go.keploy.io/server/v3/utils"
 )
@@ -13,7 +11,8 @@ import (
 // ports the proxy and its DNS server then listen on, at each move, before
 // StartProxy returns: the agent tells its hooks there
 // (agent.ProxyPortsSetter). Unset, a taken port fails the start, naming what
-// holds it.
+// holds it, as one the CLI starts again on ports it picks again
+// (utils.ErrPortTaken).
 //
 // The CLI that starts a Linux agent hands it the configured ports unchecked
 // (AgentClient.proxyPorts): a check there could not keep them free until the
@@ -44,12 +43,15 @@ func (p *Proxy) bindOrMove(server string, port *uint32, bind func(port uint32) e
 	if err == nil {
 		return nil
 	}
-	if !errors.Is(err, syscall.EADDRINUSE) {
+	if !utils.IsAddrInUse(err) {
 		return err
 	}
 	taken := fmt.Sprintf("the %s's %s", server, utils.PortTaken(*port))
 	if p.portMover == nil {
-		return fmt.Errorf("%s: %w", taken, err)
+		// The CLI found it free and handed it over (a native agent off
+		// Linux), or it is the configured one: either way the CLI starts the
+		// agent again, at once, on ports it checks again (utils.ErrPortTaken).
+		return utils.PortTakenError(fmt.Errorf("%s: %w", taken, err))
 	}
 	moved, err := utils.BindFreePort(bind, p.agentPort, p.Port, p.DNSPort)
 	if err != nil {
