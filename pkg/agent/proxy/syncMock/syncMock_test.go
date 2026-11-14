@@ -53,9 +53,14 @@ func TestMemoryPressureKeepsCalmCapturedMocksDropsPressureRequestMocks(t *testin
 		t.Fatalf("expected late calm-request mock to be kept during pressure, got %d", len(mgr.buffer))
 	}
 
-	// After recovery, mocks buffer normally again.
+	// After recovery, mocks buffer normally again. A pause's span ends, on the
+	// wall clock, when it closes, and that instant is still the pause (the
+	// test case of a request made then is suppressed too). macOS reads the
+	// wall clock in microseconds, so a read right after SetMemoryPressure(false)
+	// often falls in the closing microsecond; a request made a millisecond
+	// later is after the pause on every OS.
 	mgr.SetMemoryPressure(false)
-	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now().Add(time.Millisecond)}})
 	if len(mgr.buffer) != 4 {
 		t.Fatalf("expected buffer to accept mocks after recovery, got %d", len(mgr.buffer))
 	}

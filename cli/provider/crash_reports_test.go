@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/getsentry/sentry-go"
@@ -82,9 +83,10 @@ func TestTheCrashClientStartsOnlyOnceTelemetryResolvesOn(t *testing.T) {
 				if sentry.CurrentHub().Client() != nil {
 					t.Fatal("a crash-report client runs before ValidateFlags resolved telemetry")
 				}
-				// record refuses later on for want of -c; telemetry is
-				// resolved by then.
-				if err := c.ValidateFlags(context.Background(), cmd); err != nil && (name == "agent" || !errors.Is(err, errNoCommand)) {
+				// record refuses later on: for want of -c, or, where this
+				// build runs no app natively (on macOS and Windows), for
+				// that first. Telemetry is resolved by then either way.
+				if err := c.ValidateFlags(context.Background(), cmd); err != nil && (name == "agent" || !recordRefusedLater(err)) {
 					t.Fatalf("ValidateFlags: %v", err)
 				}
 				if on := sentry.CurrentHub().Client() != nil; on != tc.wantOn {
@@ -129,4 +131,15 @@ func TestTheCrashClientStartsOnlyOnceTelemetryResolvesOn(t *testing.T) {
 			}
 		})
 	}
+}
+
+// recordRefusedLater reports whether err is how ValidateFlags refuses a
+// `keploy record` given no command once telemetry is resolved: for want of
+// -c, or, on a platform where this build runs no app natively, with that
+// refusal, which comes first there.
+func recordRefusedLater(err error) bool {
+	if errors.Is(err, errNoCommand) {
+		return true
+	}
+	return !nativeCommandSupportedHere() && err.Error() == nativeUnsupportedError(runtime.GOOS, runtime.GOARCH).Error()
 }
