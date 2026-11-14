@@ -97,3 +97,14 @@ jobs:
         run: |
           bash .github/scripts/macos/go-test-darwin-rows.sh pkg/client/app pkg/client/app/*_darwin_test.go
           go test -count=1 ./pkg/platform/http/
+
+      # Rows whose answer on macOS is not Linux's. macOS reads the wall clock
+      # in microseconds, so in pkg/agent/proxy/syncMock two reads in a row can
+      # be the same instant, as a request read in the microsecond a memory
+      # pause closes is still in the pause. Where this build runs no app
+      # natively (macOS), cli/provider refuses `keploy record` for that before
+      # it asks for -c. Linux runners run both packages too, but there the
+      # clock reads in nanoseconds and record asks for -c first, so only this
+      # job checks what these rows do on macOS.
+      - name: Test the rows that read macOS's clock and refusals on darwin
+        run: go test -count=1 ./cli/provider/ ./pkg/agent/proxy/syncMock/
