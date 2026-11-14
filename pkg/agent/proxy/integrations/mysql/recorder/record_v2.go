@@ -1817,9 +1817,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// one the server answers, or the recording stops (takenUp).
 			t := taken
 			taken = nil
-			// next is where the server's next bytes start, before a held
-			// PREPARE's EOF is read: the answer after the one taken up, or the
-			// ERR to a command before this one that did not decode.
+			// next is where the server's next bytes start: the answer after the
+			// one taken up, or the ERR to a command before this one that did not
+			// decode. It is peeked before a held PREPARE is settled, so it is
+			// where the packet settle hands on (carry), if any, starts, and
+			// peeked again when no packet is handed on: past what settle read,
+			// if anything. A second peek with nothing read since finds the same
+			// bytes.
 			var next fakeconn.Chunk
 			var nextErr error
 			if serverRealign {
@@ -1833,12 +1837,8 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			} else if err := func() error {
 				// settled: a PREPARE held for its framing is settled here.
 				settled := held != nil
-				if t != nil || len(malformed) > 0 || settled {
-					// An end of the stream is read again by what reads on.
-					// Before a held PREPARE is settled, next is where the
-					// packet settle hands on (carry), if any, starts.
-					next, nextErr = sess.DestStream.Peek()
-				}
+				// An end of the stream is read again by what reads on.
+				next, nextErr = sess.DestStream.Peek()
 				if t != nil && held != nil {
 					// The PREPARE taken up, held for its framing: what settles
 					// it is read before the exchange is confirmed, and the mock
@@ -1885,9 +1885,10 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					}
 					sess.FloorAt(first.ConnSeq)
 				}
-				if carry == nil && (t != nil || len(malformed) > 0) {
-					// Past the PREPARE's EOF, if settle read one: where the
-					// packet settle hands on (carry) starts otherwise.
+				if carry == nil {
+					// No packet is handed on: the server's next bytes start
+					// past what settle read, if anything (the PREPARE's EOF,
+					// or a packet dropped above).
 					next, nextErr = sess.DestStream.Peek()
 				}
 				return nil
