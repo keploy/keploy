@@ -183,14 +183,27 @@ type decider struct {
 	texts                               map[int]*placeTexts
 	clients                             map[string]bool
 	opened, decoded, clientMaps, inText int
+	// unreadFrom is the count of unread texts x held as this decider began:
+	// a Reader's index serves several Decides, and each refuses only for a
+	// recording it asked about itself (unreadHere).
+	unreadFrom int
 }
+
+// unreadHere reports whether this decider asked about a recording keploy
+// could not read (readerIndex.unread, counted since it began).
+func (dc *decider) unreadHere() bool { return dc.x.unreadTexts > dc.unreadFrom }
 
 // decideWords decides every changed word of in, and the field each
 // decision is of; allScope reads every earlier place of the run as the
 // call's scope (Mode Elsewhere).
 func decideWords(in Input, allScope bool) ([]Decision, []string) {
-	x := newReaderIndex(in.Drifts)
-	defer x.release() // what the index keeps goes back to the set's budget
+	// The call's Reader where its caller gives one (it lets it go), so
+	// the call's Decides read each text into its views once.
+	x := in.Reader.index(in.Drifts)
+	if x == nil {
+		x = newReaderIndex(in.Drifts)
+		defer x.release() // what the index keeps goes back to the set's budget
+	}
 	return newDecider(in, allScope, x).decide()
 }
 
@@ -199,7 +212,8 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 func newDecider(in Input, allScope bool, x *readerIndex) *decider {
 	ps, unread, byWords := placesOf(in)
 	set, setNotRead := setUnread(in)
-	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead), byWords: byWords}
+	dc := &decider{in: in, unreadFrom: x.unreadTexts, x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead), byWords: byWords}
+	dc.ps = withTexts(x, ps)
 	dc.noPayload.mock, dc.noPayload.why = payloadless(in)
 	if dc.dr == nil {
 		dc.dr = NewDriftCache()
@@ -238,7 +252,7 @@ func (dc *decider) decide() ([]Decision, []string) {
 	}
 	out, fields = dc.mintedUses(out, fields)
 	dc.oneValue(out, fields)
-	if dc.x.unread() {
+	if dc.unreadHere() {
 		// A recording keploy could not read again: every change of the
 		// call is refused.
 		for i, d := range out {

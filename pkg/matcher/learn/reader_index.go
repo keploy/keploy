@@ -68,6 +68,9 @@ type readerIndex struct {
 	// momentAsks counts the instants holdsMoment asks byMoment of: what
 	// keeps a call's work near linear in the instants it decides.
 	momentAsks int
+	// views counts the field views fieldsWith began to build: one a text
+	// for the index's life where it fits (a Reader's: the call's).
+	views int
 	// filters are the set's filters of its recordings' words (filtersOf);
 	// nil where the call is no set's.
 	filters *setFilters
@@ -1122,6 +1125,7 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 	x := t.x
 	fw, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[fieldWords] { return &e.fields },
 		func(s string, fields []rawField, room int64) (fieldWords, bool) {
+			x.views++
 			fw, n, fits, own := fieldWords{of: map[string][]int32{}}, fieldFirstBytes, room >= 0, t.e.own(s)
 			eachField(s, fields, func(f fieldAt, text string) {
 				if !fits {
@@ -1635,3 +1639,41 @@ func coarserReach(m moment) int64 {
 // read (Raw.Read): what the budget does not keep is read again, never
 // unread.
 func (x *readerIndex) unread() bool { return x.unreadTexts > 0 }
+
+// Reader is one call's index of the texts its decisions read, for a caller
+// that decides one call several times over one read of its earlier places
+// (Input.Reader): integrations' learn step judges a call tied with many
+// alike recordings against each in turn, each a Decide over the same
+// places. Without one, each Decide builds its own index and lets it go, so
+// each read every place's texts into their views again: api-server's
+// app_config_audits find, tied with its test's alike finds, spent 6.6 min
+// so before it missed, while its test's end waited for it. With one, each
+// text's view is built once for the call and every Decide asks it, within
+// the one index's cap (readerBudgetBytes) as before. Each Decide still
+// counts as unread only the recordings it asked about itself (decider.
+// unreadFrom). A Reader is one goroutine's, and reads through the cache it
+// was made for: a Decide given another cache's builds its own index. The
+// caller lets it go once the call is decided (Release).
+type Reader struct{ x *readerIndex }
+
+// NewReader is a Reader for one call, reading through dc's caches.
+func NewReader(dc *DriftCache) *Reader { return &Reader{x: newReaderIndex(dc)} }
+
+// Release gives the set's budget back what r keeps (readerIndex.release);
+// a Decide given r after builds its own index. A nil r is a no-op.
+func (r *Reader) Release() {
+	if r == nil || r.x == nil {
+		return
+	}
+	r.x.release()
+	r.x = nil
+}
+
+// index is r's index for a Decide reading through dc: nil where r is nil,
+// let go, or made for another cache (decideWords builds one then).
+func (r *Reader) index(dc *DriftCache) *readerIndex {
+	if r == nil || r.x == nil || r.x.dc != dc {
+		return nil
+	}
+	return r.x
+}

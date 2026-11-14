@@ -224,6 +224,12 @@ type Input struct {
 	// echo): keploy.yml's strict times setting, and every caller that sets
 	// nothing.
 	TimeForm bool
+	// Reader is the call's index of the texts its decisions read, where
+	// the caller decides one call several times over one read of its
+	// earlier places (NewReader; the caller releases it): each Decide
+	// reads each text into its views once for the call, not once a Decide.
+	// nil: each Decide builds its own index and lets it go.
+	Reader *Reader
 }
 
 // Trail is the test a call trails: keploy record marked the call's
