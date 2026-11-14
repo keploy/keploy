@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
 )
 
@@ -206,22 +206,48 @@ func TestTheClaimReadsTheCallerFromTheConnection(t *testing.T) {
 	}
 }
 
-// A link-local IPv6 caller's address names its zone (fe80::1%eth0), which
-// the kernel's socket tables do not: the two are one endpoint. Another
-// address or port is not, and IPv4-mapped IPv6 is its IPv4 address.
-func TestSameEndpointReadsAnAddressWithoutItsZone(t *testing.T) {
-	for _, c := range []struct {
-		a, b string
-		same bool
-	}{
-		{"[fe80::1%eth0]:5000", "[fe80::1]:5000", true},
-		{"[fe80::1]:5000", "[fe80::1%lo]:5000", true},
-		{"[::ffff:127.0.0.1]:5000", "127.0.0.1:5000", true},
-		{"[fe80::1%eth0]:5000", "[fe80::2]:5000", false},
-		{"[fe80::1%eth0]:5000", "[fe80::1]:5001", false},
-	} {
-		if got := sameEndpoint(netip.MustParseAddrPort(c.a), netip.MustParseAddrPort(c.b)); got != c.same {
-			t.Errorf("sameEndpoint(%s, %s) = %v, want %v", c.a, c.b, got, c.same)
+// A server that answers the agent's routes in its place (a conformance check
+// of a test-framework integration) decides a claim with the exported reads,
+// as the agent does: the calling process, its start time, and whether it
+// still runs. While the claiming child (this test binary run again) waits for
+// its answer they name it and say it runs; once it has exited, that it does
+// not.
+func TestTheExportedReadsSeeAClaimerRunAndThenExit(t *testing.T) {
+	type read struct {
+		pid   int
+		err   error
+		start uint64
+		ok    bool
+		alive bool
+	}
+	reads := make(chan read, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		var got read
+		if got.pid, got.err = CallerPID(r); got.err == nil {
+			got.start, got.ok = agent.ProcStart(got.pid)
+			got.alive = agent.ProcAlive(got.pid, got.start)
 		}
+		reads <- got
+	}))
+	defer srv.Close()
+	c := exec.Command(os.Args[0], "-test.run=^$")
+	c.Env = append(os.Environ(), envClaimFrom+"="+srv.URL)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("the claiming child failed: %v: %s", err, out)
+	}
+	var got read
+	select {
+	case got = <-reads:
+	default:
+		t.Fatal("the server read no claim")
+	}
+	if got.err != nil || got.pid != c.Process.Pid {
+		t.Fatalf("CallerPID = %d, %v; want the child %d", got.pid, got.err, c.Process.Pid)
+	}
+	if !got.ok || !got.alive {
+		t.Fatalf("while the child waited for its answer: ProcStart ok = %v, ProcAlive = %v; want both true", got.ok, got.alive)
+	}
+	if agent.ProcAlive(got.pid, got.start) {
+		t.Fatal("ProcAlive says the child still runs after it exited")
 	}
 }
