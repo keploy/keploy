@@ -8,13 +8,16 @@ package agent
 //
 // It is false when the process has exited or does not exist, and also when
 // this reader cannot see it (a process in another PID namespace, /proc
-// mounted with hidepid, no /proc at all) and on platforms other than Linux
-// and macOS: false alone never proves the process exited. A pid that
+// mounted with hidepid, no /proc at all; on Windows a process this reader
+// may not open) and on platforms other than Linux, macOS and Windows: false
+// alone never proves the process exited. A pid that
 // routes.CallerPID read in the same process is one this reader saw (CallerPID
-// read its /proc entry), so for such a pid false means it exited.
+// read its /proc entry, or on Windows its kernel's TCP table), so for such a
+// pid false means it exited.
 //
-// An exited process is one with no thread left running. On macOS that is a
-// zombie. On Linux a process whose stat reads Z while another of its threads
+// An exited process is one with no thread left running. On Windows that is
+// one whose handle is signaled, even while another handle keeps its object.
+// On macOS that is a zombie. On Linux a process whose stat reads Z while another of its threads
 // still runs (its main thread exited first, as in a Go program that execs
 // from another thread) is alive, and so is a zombie whose threads cannot be
 // read: the read fails toward alive.
@@ -29,7 +32,7 @@ func ProcStart(pid int) (uint64, bool) {
 // process; a server that answers the agent's routes in its place (such as a
 // conformance check of a test-framework integration) decides the same way.
 // It is false wherever ProcStart is: also for a process this reader cannot
-// see, and on platforms other than Linux and macOS.
+// see, and on platforms other than Linux, macOS and Windows.
 func ProcAlive(pid int, start uint64) bool {
 	return procAlive(pid, start)
 }
