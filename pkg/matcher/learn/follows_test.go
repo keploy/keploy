@@ -1542,8 +1542,9 @@ func TestAPlaceHoldingTheValueWholeInOneFormIsASource(t *testing.T) {
 	// written, not as decoded ("x/42A" runs on).
 	refused("the recorded x%2F42 whole in a header as written only", classify("x%2F42", "y%2F57", nil, none, headed("mock-9", "see x%2F42%41 now")), "mock-9")
 
-	// A leaf of the test's own earlier exchange that holds the value F saw
-	// whole only as recorded there, or only as F gave it there.
+	// A leaf of the test's own earlier exchange that holds the value whole
+	// only as recorded there, or only as F gave it there: the value F saw,
+	// or the recorded value F gave the application there.
 	leaf := func(recorded, live string) Earlier {
 		at := eRecAt.Add(-300 * time.Millisecond)
 		payload := RawOf(&models.Mock{Name: "mock-8", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
@@ -1553,6 +1554,7 @@ func TestAPlaceHoldingTheValueWholeInOneFormIsASource(t *testing.T) {
 	}
 	refused("F's 7 whole at a leaf as recorded there only", classify("pos 82", "7", []Earlier{leaf("7 82", "3")}, none, b), "mock-b")
 	refused("F's 7 whole at a leaf as F gave it there only", classify("pos 82", "7", []Earlier{leaf("3", "7")}, none, b), "mock-b")
+	refused("the recorded pos 82 whole at a leaf as F gave it there only", classify("pos 82", "7", []Earlier{leaf("82 x", "pos 82")}, none, b), "mock-b")
 
 	// A recording F gave the application earlier in the set, whose words
 	// alone keploy keeps: every word of the value, as F saw it or as
