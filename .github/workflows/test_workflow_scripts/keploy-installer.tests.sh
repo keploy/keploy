@@ -39,6 +39,8 @@
 #     the chown to root fail on any logged chown but the installed keploy's.
 #   - FAKE_CHOWN_FAIL makes that one logged chown, through sudo or root's
 #     own, fail.
+#   - sysctl -n hw.optional.arm64 says FAKE_ARM64 when it is set, and fails
+#     (the key is absent, as on an Intel Mac) when it is not.
 #   - uname reports FAKE_UNAME_S / FAKE_UNAME_M when they are set; id -u says
 #     1000, or 0 in the root cases, whoever runs the suite; mountpoint says
 #     debugfs is mounted unless FAKE_NO_DEBUGFS is set.
@@ -307,7 +309,16 @@ PATH=/usr/bin:/bin
 export PATH
 exec uname "$@"
 EOF
-chmod +x "$stubs/curl" "$stubs/fence" "$stubs/sudo" "$stubs/uname" "$stubs/id" "$stubs/mountpoint" "$stubs/mount"
+
+# keploy.sh asks only `sysctl -n hw.optional.arm64`, on macOS: it says 1 on
+# Apple silicon (FAKE_ARM64=1) and is absent on an Intel Mac, so the cases
+# hold whatever machine runs the suite.
+cat > "$stubs/sysctl" << 'EOF'
+#!/bin/sh
+[ -n "${FAKE_ARM64:-}" ] || exit 1
+echo "$FAKE_ARM64"
+EOF
+chmod +x "$stubs/curl" "$stubs/fence" "$stubs/sudo" "$stubs/uname" "$stubs/sysctl" "$stubs/id" "$stubs/mountpoint" "$stubs/mount"
 
 # A PATH with no sudo on it, for the cases of a machine that has none (a
 # debian or ubuntu container's root, a CI runner's user): the stubs and the
@@ -902,6 +913,23 @@ suite() {
   check "the install fails" test "$rc" -ne 0
   check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
   check "no keploy runs" release_keploy_did_not_run
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
+  echo "== --oss on an Apple silicon Mac in a Rosetta (x86_64) shell"
+  case_env=(FAKE_UNAME_S=Darwin FAKE_UNAME_M=x86_64 FAKE_ARM64=1)
+  install oss-macos-rosetta --oss
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds: the hardware is Apple silicon" test "$rc" -eq 0
+  check "it downloads the macOS arm64 release" fetched keploy_darwin_arm64.tar.gz
+
+  echo "== --oss on an Intel Mac"
+  case_env=(FAKE_UNAME_S=Darwin FAKE_UNAME_M=x86_64)
+  install oss-macos-intel --oss
+  check "the install fails" test "$rc" -ne 0
+  check "it says keploy does not support Intel Macs, in one line with the docs page" said "Keploy does not support Intel Macs; it runs on Apple silicon Macs only. See https://keploy.io/docs/installation/macos-installation/"
+  check "it offers no route: neither Lima nor Docker" eval '! said Lima && ! said Docker'
+  check "nothing is downloaded or installed, and no keploy runs" eval 'nothing_downloaded && nothing_installed && release_keploy_did_not_run'
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
 
