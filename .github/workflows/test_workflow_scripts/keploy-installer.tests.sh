@@ -35,7 +35,8 @@
 #     same way, its mount is logged, and so is a tar extraction that would
 #     keep the archive's owner; anyone else's mount is fenced. Root's chown is
 #     logged, not done, only when every absolute path it is given is in
-#     /usr/local/bin; any other goes through the fence.
+#     /usr/local/bin; any other goes through the fence. The cases that check
+#     the chown to root fail on any logged chown but the installed keploy's.
 #   - FAKE_CHOWN_FAIL makes that one logged chown, through sudo or root's
 #     own, fail.
 #   - uname reports FAKE_UNAME_S / FAKE_UNAME_M when they are set; id -u says
@@ -192,9 +193,9 @@ if [ "${FAKE_UID:-}" = 0 ] && [ -n "${FAKE_ROOT_DIR:-}" ]; then
     shift
   done
   [ -z "$mapped" ] || echo "root-mapped: $name $*" >> "$STUB_LOG"
-  # Root's chown in /usr/local/bin (of the keploy it installed) is logged,
-  # not done: this suite's runner is seldom root. A chown of any other
-  # absolute path goes through the fence below.
+  # Root's chown in /usr/local/bin is logged, not done: this suite's runner
+  # is seldom root. made_roots_after_move fails on any but the installed
+  # keploy's. A chown of any other absolute path goes through the fence below.
   if [ "$name" = chown ] && [ -n "$mapped" ] && [ -z "$unmapped" ]; then
     [ -z "${FAKE_CHOWN_FAIL:-}" ]
     exit
@@ -543,7 +544,9 @@ root_moved_it() {
     ! grep -q '^root-tar: ' "$log"
 }
 # keploy, once moved into /usr/local/bin, was made root's (chown 0:0, which is
-# root:root) after the move, through sudo (sudo) or by root itself (root).
+# root:root) after the move, through sudo (sudo) or by root itself (root),
+# and no other chown was mapped: root's chown of anything else in
+# /usr/local/bin fails here, even with its failure ignored.
 made_roots_after_move() {
   local key path mv_at chown_at
   case $1 in
@@ -552,7 +555,8 @@ made_roots_after_move() {
   esac
   mv_at=$(grep -nE "^$key: mv .* $path\$" "$log" | tail -n 1 | cut -d: -f1)
   chown_at=$(grep -nxF "$key: chown 0:0 $path" "$log" | tail -n 1 | cut -d: -f1)
-  [ -n "$mv_at" ] && [ -n "$chown_at" ] && [ "$chown_at" -gt "$mv_at" ]
+  [ -n "$mv_at" ] && [ -n "$chown_at" ] && [ "$chown_at" -gt "$mv_at" ] &&
+    ! grep -E '^(sudo|root)-mapped: chown ' "$log" | grep -qvxF "$key: chown 0:0 $path"
 }
 # What the shell keploy.sh was sourced into does afterwards: puts one more
 # directory on PATH, then types keploy, with aliases on, as they are in an
@@ -739,6 +743,8 @@ suite() {
   check "it says so" said "Failed to make /usr/local/bin/keploy owned by root"
   check "no keploy runs" release_keploy_did_not_run
   check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
+  check "nothing outside its own directories is touched" stayed_inside
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
 
   echo "== --oss v2 as root with no sudo, outside CI, debugfs not mounted"
   case_root=1
