@@ -786,6 +786,70 @@ type SyncMockManager struct {
 	// noRequestTime counts, by kind, the test's mocks handed over with no
 	// request time (warnNoRequestTime): models.Kind to *atomic.Uint64.
 	noRequestTime sync.Map
+
+	// pruneDiag sums the DeleteMocksStrictlyBefore transitions not yet
+	// logged; pruneDiagLogged: this recording has logged one. Guarded by mu.
+	pruneDiag       pruneDiag
+	pruneDiagLogged bool
+}
+
+// pruneDiagEvery bounds how many DeleteMocksStrictlyBefore calls one of its
+// "buffer transition" lines sums. The prune runs once per static-dedup
+// duplicate, so a line per call was a line per request: 427 lines for 565
+// requests of a DaemonSet recording with debug on, 35% of the agent's log
+// bytes. A call adds its transition to the manager's pruneDiag instead, and
+// the sum is logged by the recording's first prune that changed the buffer,
+// by the call that brings it to pruneDiagEvery calls, at once by a call that
+// gave a window up (a kept request may then be left out), and by each
+// FlushOwnedWindows (the proxy's periodic flush and the stop's drain).
+const pruneDiagEvery = 256
+
+// pruneDiag is the sum of the DeleteMocksStrictlyBefore transitions one line
+// reports: how many calls, what they flushed, dropped and held, and the last
+// call's horizon and buffer lengths.
+type pruneDiag struct {
+	prunes, mocksFlushed      int
+	tally                     dropTally
+	horizon                   time.Time
+	bufferBefore, bufferAfter int
+}
+
+func (p *pruneDiag) add(t dropTally, flushed int, horizon time.Time, before, after int) {
+	p.prunes++
+	p.mocksFlushed += flushed
+	p.tally.duplicateLeftovers += t.duplicateLeftovers
+	p.tally.outsideAnyWindow += t.outsideAnyWindow
+	p.tally.held += t.held
+	p.tally.windowsGivenUp += t.windowsGivenUp
+	p.tally.givenUpDrops += t.givenUpDrops
+	p.horizon, p.bufferBefore, p.bufferAfter = horizon, before, after
+}
+
+// takePruneDiagLocked takes the unlogged sum; false when it holds no call.
+// Caller holds mu.
+func (m *SyncMockManager) takePruneDiagLocked() (pruneDiag, bool) {
+	d := m.pruneDiag
+	m.pruneDiag = pruneDiag{}
+	if d.prunes == 0 {
+		return d, false
+	}
+	m.pruneDiagLogged = true
+	return d, true
+}
+
+// logPruneDiag writes one sum of prunes: held_now is what they moved to the
+// hold together, and held_total and the other hold fields are the hold now.
+func (m *SyncMockManager) logPruneDiag(d pruneDiag, hold holdState) {
+	if ce := m.dropLogger().Check(zap.DebugLevel, "diag/DeleteMocksStrictlyBefore: buffer transition"); ce != nil {
+		fields := append([]zap.Field{
+			zap.Int("prunes", d.prunes),
+			zap.Time("horizon", d.horizon),
+			zap.Int("buffer_len_before", d.bufferBefore),
+			zap.Int("buffer_len_after", d.bufferAfter),
+			zap.Int("mocks_flushed", d.mocksFlushed),
+		}, d.tally.fields()...)
+		ce.Write(append(fields, hold.fields()...)...)
+	}
 }
 
 // pressureRange is one closed [start, end] span of a Spans.
@@ -3584,6 +3648,7 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 	mappingChan := m.mappingChan
 	mocksToSend, lateMappings, gaveUp := m.flushLocked(outChanBound, &tally)
 	hold := m.holdStateLocked()
+	prunes, logPrunes := m.takePruneDiagLocked()
 	m.noteTaken(mocksToSend)
 	// Owed before the mocks go: a stop asked between the two sends waits for
 	// the mappings too (mappings_owed.go).
@@ -3591,6 +3656,9 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 	m.mu.Unlock()
 	m.reportGivenUp(gaveUp, LostToHoldBound)
 	m.settlePool()
+	if logPrunes {
+		m.logPruneDiag(prunes, hold)
+	}
 	if tally.changed() {
 		// Check first, here and in the other reapers' diagnostics: the fields
 		// are built only for a logger that writes them. A reaper runs per
@@ -4849,6 +4917,7 @@ func (m *SyncMockManager) StartRecordSession() {
 	m.resolvedTestCount = 0
 	m.destTCs = nil
 	m.recordingFrom.Store(time.Now().UnixNano())
+	m.pruneDiagLogged = false
 	m.mu.Unlock()
 	m.EndStoppedRecording()
 }
@@ -6435,23 +6504,23 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	m.noteTaken(mocksToSend)
 	// Owed before the mocks go (mappings_owed.go).
 	paidLate := m.oweLateMappingsLocked(mappingChan != nil, lateMappings, mocksToSend)
+	// What this prune did, by reason (see ResolveRange's buffer transition):
+	// its drops were silent before, and a loss scan could not tell a
+	// duplicate's debris from a mock of a request still in flight. Summed
+	// over calls (pruneDiagEvery).
+	var diag pruneDiag
+	logDiag := false
+	if tally.changed() {
+		m.pruneDiag.add(tally, len(mocksToSend), timestamp, bufferLenBefore, bufferLenAfter)
+		if !m.pruneDiagLogged || m.pruneDiag.prunes >= pruneDiagEvery || tally.windowsGivenUp > 0 {
+			diag, logDiag = m.takePruneDiagLocked()
+		}
+	}
 	m.mu.Unlock()
 	m.reportGivenUp(gaveUp, LostToHoldBound)
 	m.settlePool()
-
-	// What this prune did, by reason (see ResolveRange's buffer transition):
-	// its drops were silent before, and a loss scan could not tell a
-	// duplicate's debris from a mock of a request still in flight.
-	if tally.changed() {
-		if ce := m.dropLogger().Check(zap.DebugLevel, "diag/DeleteMocksStrictlyBefore: buffer transition"); ce != nil {
-			fields := append([]zap.Field{
-				zap.Time("horizon", timestamp),
-				zap.Int("buffer_len_before", bufferLenBefore),
-				zap.Int("buffer_len_after", bufferLenAfter),
-				zap.Int("mocks_flushed", len(mocksToSend)),
-			}, tally.fields()...)
-			ce.Write(append(fields, hold.fields()...)...)
-		}
+	if logDiag {
+		m.logPruneDiag(diag, hold)
 	}
 
 	// Send AFTER releasing m.mu — the send takes outChanMu and the out

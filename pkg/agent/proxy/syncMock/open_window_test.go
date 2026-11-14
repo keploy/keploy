@@ -1043,6 +1043,86 @@ func TestPruneAndFlushDiagnosticsSplitDropsByReason(t *testing.T) {
 	}
 }
 
+// A duplicate's prune runs once per request, so its diagnostic is a sum: the
+// recording's first prune logs, then every pruneDiagEvery prunes and each
+// periodic flush, and the lines together still count every drop.
+func TestPruneDiagnosticSumsDuplicatePrunes(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 1024)
+	maps := make(chan models.TestMockMapping, 1024)
+	mgr := openWindowManager(out, maps)
+	core, logs := observer.New(zap.DebugLevel)
+	mgr.SetLogger(zap.New(core))
+
+	base := time.Now().Add(-time.Hour)
+	duplicate := func(d time.Time, i int) {
+		mgr.ResolveRange(d, d.Add(10*time.Millisecond), fmt.Sprintf("test-%d", i), false, true)
+		mgr.AddMock(httpMockAt(d.Add(time.Millisecond))) // its late debris
+		mgr.DeleteMocksStrictlyBefore(d.Add(15 * time.Millisecond))
+	}
+	mgr.DeleteMocksStrictlyBefore(base) // nothing to prune: no line, and no call summed
+	const n = pruneDiagEvery + 2
+	for i := 0; i < n; i++ {
+		duplicate(base.Add(time.Duration(i)*20*time.Millisecond), i)
+	}
+	mgr.FlushOwnedWindows()
+	mgr.FlushOwnedWindows() // no prune since the last line: no line
+	// The next recording's first prune logs at once again.
+	mgr.StartRecordSession()
+	mgr.SetFirstRequestSignaled()
+	mgr.resolvedTestCount = models.StartupMockTestCaseWindow // past its startup window, as lateMockTestManager starts
+	duplicate(time.Now(), n)
+
+	var prunes []int64
+	var dropped int64
+	for _, e := range logs.FilterMessage("diag/DeleteMocksStrictlyBefore: buffer transition").All() {
+		f := e.ContextMap()
+		p, _ := f["prunes"].(int64)
+		d, _ := f["dropped"].(int64)
+		prunes = append(prunes, p)
+		dropped += d
+	}
+	if got, want := fmt.Sprint(prunes), fmt.Sprint([]int64{1, pruneDiagEvery, 1, 1}); got != want {
+		t.Fatalf("prunes per line = %s, want %s", got, want)
+	}
+	if dropped != n+1 {
+		t.Fatalf("the lines count %d drops, want %d", dropped, n+1)
+	}
+}
+
+// A prune that gives a window up logs at once, not with the next sum: a kept
+// request may be left out for it.
+func TestPruneDiagnosticLogsAGiveUpAtOnce(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 1024)
+	maps := make(chan models.TestMockMapping, 1024)
+	mgr := openWindowManager(out, maps)
+	core, logs := observer.New(zap.DebugLevel)
+	mgr.SetLogger(zap.New(core))
+
+	d0 := time.Now().Add(-time.Hour)
+	mgr.ResolveRange(d0, d0.Add(10*time.Millisecond), "test-0", false, true)
+	mgr.AddMock(httpMockAt(d0.Add(time.Millisecond)))
+	mgr.DeleteMocksStrictlyBefore(d0.Add(15 * time.Millisecond)) // the recording's first: logged
+
+	start := time.Now().Add(-30 * time.Second)
+	stream := mgr.OpenWindow(start, nil)
+	defer stream.Close()
+	d := start.Add(time.Second)
+	for i := 0; i < maxHeldMocks+5; i++ {
+		mgr.AddMock(boundMockAt(d.Add(time.Duration(i) * time.Microsecond)))
+	}
+	mgr.DeleteMocksStrictlyBefore(time.Now())
+
+	entries := logs.FilterMessage("diag/DeleteMocksStrictlyBefore: buffer transition").All()
+	if len(entries) != 2 {
+		t.Fatalf("%d lines, want 2: the first prune's and the give-up's", len(entries))
+	}
+	if f := entries[1].ContextMap(); f["windows_given_up"] != int64(1) || f["prunes"] != int64(1) {
+		t.Fatalf("give-up line fields %v, want windows_given_up 1 and prunes 1", f)
+	}
+}
+
 // Randomised sequences of open / claim / close / resolve / prune / flush /
 // pressure against a model: checks the heap's index bookkeeping, the hold's
 // order and its floor, that no mock is both sent and still held/buffered, and
