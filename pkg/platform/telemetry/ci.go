@@ -3,7 +3,6 @@ package telemetry
 import (
 	"context"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -37,22 +36,35 @@ var ciProviders = []struct {
 	{"GO_PIPELINE_LABEL", "gocd"},
 }
 
-// CI-specific env vars that hold the repository slug (owner/repo).
+// ciRepoVars are the variables in which a CI provider names the repository
+// its run builds, in the order enterprise's CLI reads them (its
+// pkg/analytics/ci.go), so that an event's git_repo reads the same from either.
 var ciRepoVars = []string{
-	"GITHUB_REPOSITORY",                   // github-actions: "owner/repo"
-	"CI_PROJECT_PATH",                     // gitlab-ci:      "group/project"
-	"TRAVIS_REPO_SLUG",                    // travis-ci:      "owner/repo"
-	"CIRCLE_PROJECT_REPONAME",             // circleci:       "repo" (no owner)
-	"BUILDKITE_REPO",                      // buildkite:      git URL
-	"BITBUCKET_REPO_FULL_NAME",            // bitbucket:      "owner/repo"
-	"BUILD_REPOSITORY_NAME",               // azure-pipelines
-	"DRONE_REPO",                          // drone:          "owner/repo"
-	"CI_REPO",                             // woodpecker:     "owner/repo"
-	"SEMAPHORE_GIT_REPO_SLUG",             // semaphore:      "owner/repo"
+	"GITHUB_REPOSITORY",                   // github-actions: owner/repo
+	"CI_PROJECT_PATH",                     // gitlab-ci: group/subgroup/project
+	"TRAVIS_REPO_SLUG",                    // travis-ci: owner/repo
+	"CIRCLE_REPOSITORY_URL",               // circleci: the git URL
+	"BUILDKITE_REPO",                      // buildkite: the git URL
+	"BITBUCKET_REPO_FULL_NAME",            // bitbucket: owner/repo
+	"BUILD_REPOSITORY_NAME",               // azure-pipelines: owner/repo of a GitHub repo, a bare name in Azure Repos
+	"BUILD_REPOSITORY_URI",                // azure-pipelines: the git URL
+	"DRONE_REPO",                          // drone: owner/repo
+	"CI_REPO",                             // woodpecker: owner/repo
+	"SEMAPHORE_GIT_REPO_SLUG",             // semaphore: owner/repo
 	"HARNESS_REPO",                        // harness
-	"APPVEYOR_REPO_NAME",                  // appveyor:       "owner/repo"
-	"bamboo_planRepository_repositoryUrl", // bamboo: git URL
+	"APPVEYOR_REPO_NAME",                  // appveyor: owner/repo
+	"bamboo_planRepository_repositoryUrl", // bamboo: the git URL
+	"GIT_URL",                             // jenkins (its git plugin): the git URL
+	"CODEBUILD_SOURCE_REPO_URL",           // aws-codebuild: the git URL
 	// gocd names no repository in its variables.
+}
+
+// ciRepoURLVars are the ciRepoVars that hold a git URL. Only theirs may be a
+// URL without its scheme, host/owner/repo; every other holds a slug, whose
+// dotted first group is a GitLab group (acme.io/backend/api), not a host.
+var ciRepoURLVars = map[string]bool{
+	"CIRCLE_REPOSITORY_URL": true, "BUILDKITE_REPO": true, "BUILD_REPOSITORY_URI": true,
+	"bamboo_planRepository_repositoryUrl": true, "GIT_URL": true, "CODEBUILD_SOURCE_REPO_URL": true,
 }
 
 // detectCI returns whether the process is running inside a CI environment
@@ -80,15 +92,17 @@ var gitRepoOnce struct {
 	repo string
 }
 
-// detectGitRepo returns the normalized git repository slug (e.g. "keploy/keploy").
-// It first checks CI-specific env vars, then falls back to parsing the local
-// .git remote origin URL. Returns "" if nothing is found.
-// This function never panics or blocks for more than 2 seconds.
+// detectGitRepo returns the slug of the repository being worked on (e.g.
+// "keploy/keploy"; a GitLab project keeps its groups). In CI it is the first
+// of ciRepoVars whose value names one: a variable that names none (Azure
+// Repos' bare BUILD_REPOSITORY_NAME) is read past, to the URL beside it.
+// Otherwise it is read from the checkout's remote.origin.url. Returns "" if
+// nothing names one. It never panics or blocks for more than 2 seconds.
 func detectGitRepo() string {
-	// 1. Try CI env vars first (fast, always available in CI)
-	for _, v := range ciRepoVars {
-		if val := os.Getenv(v); val != "" {
-			return normalizeRepo(val)
+	// 1. CI variables first (fast, always available in CI)
+	for _, name := range ciRepoVars {
+		if s := normalizeRepo(os.Getenv(name), ciRepoURLVars[name]); s != "" {
+			return s
 		}
 	}
 
@@ -100,60 +114,46 @@ func detectGitRepo() string {
 		cmd.Stderr = io.Discard
 		out, err := cmd.Output()
 		if err == nil {
-			gitRepoOnce.repo = normalizeRepo(strings.TrimSpace(string(out)))
+			gitRepoOnce.repo = remoteRepo(string(out))
 		}
 	})
 	return gitRepoOnce.repo
 }
 
-// normalizeRepo extracts "owner/repo" from various remote URL formats:
-//   - "git@github.com:owner/repo.git"       (SCP-like)
-//   - "ssh://git@github.com/owner/repo.git" (SSH URL)
-//   - "git://github.com/owner/repo.git"     (git protocol)
-//   - "https://github.com/owner/repo.git"   (HTTPS)
-//   - "owner/repo"                          (already normalized)
-func normalizeRepo(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+// remoteRepo is the slug a checkout's remote.origin.url names. Only a URL
+// with a scheme or an scp-like [user@]host:owner/repo (no slash before the
+// colon, and a user or a dotted host, so that a drive letter's C:/src is
+// not one) names one: git reads any other value as a local path
+// (/srv/git/shop, ../shop), which names none.
+func remoteRepo(raw string) string {
+	s := strings.TrimSpace(raw)
+	if host, _, _ := strings.Cut(s, ":"); !strings.Contains(s, "://") &&
+		(strings.Contains(host, "/") || !strings.ContainsAny(host, "@.")) {
 		return ""
 	}
-	raw = strings.TrimSuffix(raw, ".git")
+	return normalizeRepo(s, true)
+}
 
-	// SCP-like: git@host:owner/repo (no scheme, has ":" after user@host)
-	// Must check before URL parsing because net/url misparses this form.
-	if !strings.Contains(raw, "://") {
-		if idx := strings.Index(raw, ":"); idx > 0 && strings.Contains(raw[:idx], "@") {
-			path := strings.TrimPrefix(raw[idx+1:], "/")
-			if strings.Contains(path, "/") {
-				return path
-			}
-			return ""
-		}
+// normalizeRepo reads owner/repo from a slug ("owner/repo", a GitLab path
+// "group/sub/project"), a URL ("https://host/owner/repo.git",
+// "ssh://git@host/owner/repo"), an scp-like remote ("git@host:owner/repo.git",
+// or "host:owner/repo" with no user) and, when url says the value is a git
+// URL, one without its scheme ("github.com/owner/repo": exactly a dotted host,
+// an owner and a repo). A slug keeps a dotted first group: a GitLab group may
+// hold a dot (acme.io/backend/api), and x.y/keploy/z is not keploy's. A value
+// with no owner, or with a space, an @ or a colon left in it, is "".
+func normalizeRepo(raw string, url bool) string {
+	s := strings.TrimSuffix(strings.TrimSpace(raw), ".git")
+	if _, rest, ok := strings.Cut(s, "://"); ok {
+		_, s, _ = strings.Cut(rest, "/") // the path after the host
+	} else if host, rest, ok := strings.Cut(s, ":"); ok && !strings.Contains(host, "/") {
+		s = rest // [user@]host:owner/repo
+	} else if host, rest, ok := strings.Cut(s, "/"); ok && url && strings.Contains(host, ".") && strings.Count(rest, "/") == 1 {
+		s = rest // host/owner/repo
 	}
-
-	// URL with scheme: ssh://, git://, http://, https://
-	if strings.Contains(raw, "://") {
-		u, err := url.Parse(raw)
-		if err != nil {
-			return ""
-		}
-		path := strings.TrimPrefix(u.Path, "/")
-		if strings.Contains(path, "/") {
-			return path
-		}
+	s = strings.Trim(s, "/")
+	if !strings.Contains(s, "/") || strings.ContainsAny(s, " \t@:") {
 		return ""
 	}
-
-	// Already "owner/repo" — only accept if it looks like a clean slug
-	if strings.Count(raw, "/") == 1 && !strings.ContainsAny(raw, " @:.") {
-		return raw
-	}
-	// host/owner/repo (e.g. "github.com/owner/repo") — strip the host
-	if strings.Contains(raw, "/") {
-		parts := strings.SplitN(raw, "/", 2)
-		if len(parts) == 2 && strings.Contains(parts[0], ".") && strings.Contains(parts[1], "/") {
-			return parts[1]
-		}
-	}
-	return ""
+	return s
 }
