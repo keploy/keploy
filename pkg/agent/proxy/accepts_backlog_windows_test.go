@@ -3,9 +3,13 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -43,13 +47,116 @@ func rawListener(t *testing.T, backlog int) (windows.Handle, string) {
 	return h, fmt.Sprintf("127.0.0.1:%d", in4.Port)
 }
 
-// On Windows a full backlog loses no connection the client saw complete,
-// which is why listenerDrops is 0 there (accepts_windows.go): connects to a
-// listener of backlog 1 that no one accepts on, many at once, until some
-// fail; then every connect that completed at the client is accepted. A
-// connection the stack completed and then dropped from the backlog would be
-// one the application had written to and the proxy never saw.
-func TestOnWindowsAFullBacklogLosesNoConnectionTheClientCompleted(t *testing.T) {
+// accepted is one accept on a raw listener: the client's port, 0 when the
+// accepted socket had no peer left to read (the client reset it first).
+type accepted struct {
+	port int
+	err  error
+}
+
+// acceptOne accepts one connection on ln, reads its client's port and
+// closes it.
+func acceptOne(ln windows.Handle) accepted {
+	r, _, err := wsAccept.Call(uintptr(ln), 0, 0)
+	h := windows.Handle(r)
+	if h == windows.InvalidHandle {
+		return accepted{err: fmt.Errorf("accept: %w", err)}
+	}
+	defer func() { _ = windows.Closesocket(h) }()
+	sa, err := windows.Getpeername(h)
+	if in4, ok := sa.(*windows.SockaddrInet4); err == nil && ok {
+		return accepted{port: in4.Port}
+	}
+	return accepted{}
+}
+
+// acceptedPorts accepts on ln until no connection comes for idle, and
+// returns the client's port of each one accepted, and how many were accepted
+// with no peer left to read. The accept loop runs until the test's cleanup
+// closes ln.
+func acceptedPorts(t *testing.T, ln windows.Handle, idle time.Duration) (map[int]bool, int) {
+	t.Helper()
+	got := make(chan accepted)
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	go func() {
+		for {
+			a := acceptOne(ln)
+			select {
+			case got <- a:
+			case <-done:
+				return
+			}
+			if a.err != nil {
+				return
+			}
+		}
+	}()
+	ports, noPeer := map[int]bool{}, 0
+	for {
+		select {
+		case a := <-got:
+			switch {
+			case a.err != nil:
+				t.Fatalf("after %d accepts: %v", len(ports)+noPeer, a.err)
+			case a.port == 0:
+				noPeer++
+			default:
+				ports[a.port] = true
+			}
+		case <-time.After(idle):
+			return ports, noPeer
+		}
+	}
+}
+
+// How the client sees a connection it completed that the listener never
+// gave to accept, once it has written to it and read from it.
+const (
+	seenReset  = "reset"
+	seenClosed = "closed"
+	seenOpen   = "still open"
+)
+
+// clientSees writes a byte on c and reads, and says how the connection ended
+// at the client: reset by the listener's side, closed, or neither by the
+// deadline (still open).
+func clientSees(c net.Conn) (string, error) {
+	if err := c.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return "", err
+	}
+	_, werr := c.Write([]byte{0})
+	_, rerr := c.Read(make([]byte, 1))
+	for _, err := range []error{werr, rerr} {
+		switch {
+		case err == nil:
+		case errors.Is(err, syscall.WSAECONNRESET), errors.Is(err, syscall.WSAECONNABORTED):
+			return seenReset, nil
+		case errors.Is(err, io.EOF):
+			return seenClosed, nil
+		case errors.Is(err, os.ErrDeadlineExceeded):
+			return seenOpen, nil
+		default:
+			return "", err
+		}
+	}
+	return "", errors.New("the listener's side answered a connection no one accepted")
+}
+
+// On Windows a full backlog can drop a connection the client saw complete:
+// on Windows 11 (10.0.26200) 7 of 300 connects at once to a listener of
+// backlog 1 that accepts nothing completed at the client and only 5 reached
+// accept. So the proxy's accepts alone cannot tell keploy that every
+// connection the application completed reached the proxy; listenerDrops' 0
+// rests on the application's side instead (accepts_windows.go): a connection
+// the hooks numbered is settled only once it is paired with the proxy's side
+// of it, or lost (agent.ProxyConnsReporter's AppConnsSettled). This row
+// checks what such a drop leaves the application: every connect that
+// completed at the client is either accepted, or reset by the time the client
+// has written to it and read from it, so the application learns of it as its
+// own error and the connection is gone, a loss the hooks can see. None stays
+// open with no one to accept it.
+func TestOnWindowsAFullBacklogResetsAConnectionItDropsAfterTheClientCompletedIt(t *testing.T) {
 	ln, addr := rawListener(t, 1)
 
 	// More than any backlog Windows keeps (SOMAXCONN is 200), so it fills
@@ -94,28 +201,28 @@ func TestOnWindowsAFullBacklogLosesNoConnectionTheClientCompleted(t *testing.T) 
 	if len(connected) == 0 {
 		t.Fatalf("none of %d connects completed (the first failed with %v): the listener took none, so this shows nothing", attempts, firstErr)
 	}
-	t.Logf("%d of %d connects completed, %d failed (the first with %v)", len(connected), attempts, failed, firstErr)
 
-	// Each accept is waited for on its own: one the client completed that is
-	// not in the backlog blocks for good, and the cleanup's close ends it.
-	accepted := make(chan error, 1)
-	for i := range connected {
-		go func() {
-			r, _, err := wsAccept.Call(uintptr(ln), 0, 0)
-			if windows.Handle(r) == windows.InvalidHandle {
-				accepted <- fmt.Errorf("accept: %w", err)
-				return
-			}
-			_ = windows.Closesocket(windows.Handle(r))
-			accepted <- nil
-		}()
-		select {
-		case err := <-accepted:
-			if err != nil {
-				t.Fatalf("accept %d of the %d connections the client completed: %v", i+1, len(connected), err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("the client completed %d connections, and the listener holds only %d of them: Windows dropped one the client saw complete, so listenerDrops' 0 is wrong there", len(connected), i)
+	ports, noPeer := acceptedPorts(t, ln, 3*time.Second)
+	if n := len(ports) + noPeer; n > len(connected) {
+		t.Fatalf("%d accepted, more than the %d connects that completed at the client", n, len(connected))
+	}
+	dropped := map[string][]int{}
+	for _, c := range connected {
+		port := c.LocalAddr().(*net.TCPAddr).Port
+		if ports[port] {
+			continue
+		}
+		seen, err := clientSees(c)
+		if err != nil {
+			t.Fatalf("the connection from port %d completed at the client and was never accepted, and writing and reading on it gave: %v", port, err)
+		}
+		dropped[seen] = append(dropped[seen], port)
+	}
+	t.Logf("%d of %d connects completed, %d failed (the first with %v); %d accepted, %d of them with no peer left; the rest, by how the client saw them: %v",
+		len(connected), attempts, failed, firstErr, len(ports)+noPeer, noPeer, dropped)
+	for _, seen := range []string{seenClosed, seenOpen} {
+		if ports := dropped[seen]; len(ports) > 0 {
+			t.Errorf("the connections from ports %v completed at the client and were never accepted, and the client saw them %s, not reset", ports, seen)
 		}
 	}
 }

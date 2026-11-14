@@ -8,21 +8,22 @@ import (
 	"syscall"
 )
 
-// listenerDrops is 0 on Windows, and 0 is what a drop at the listener costs
-// there, as on macOS (accepts_darwin.go). Windows has no count of a
-// listener's drops a process can read, but a drop at its listener loses no
-// connection a test could miss: with the backlog full, the stack does not
-// complete the client's connect (Winsock's listen documents that the client
-// is refused, WSAECONNREFUSED), so it fails, or completes once the listener
-// has room and lands in the backlog the proxy accepts from. A connect that
-// fails is the application's own error, and keploy's shim never numbers it
-// (enterprise's connpair: an attempt that never completes is never
-// numbered). No connection completes at the client without reaching accept:
-// TestOnWindowsAFullBacklogLosesNoConnectionTheClientCompleted
-// (accepts_backlog_windows_test.go) floods a listener of backlog 1 that no
-// one accepts on and checks that every connect the client saw complete is
-// accepted. On Linux, a rise of the listener's count is charged as a capture
-// loss to the open test.
+// listenerDrops is 0 on Windows: Windows has no count of a listener's drops
+// a process can read, and a drop there is charged from the application's
+// side of the connection instead. With the backlog full, the stack refuses
+// most connects (WSAECONNREFUSED, the application's own error, which keploy's
+// shim never numbers), but it can also drop one the client saw complete and
+// reset it (TestOnWindowsAFullBacklogResetsAConnectionItDropsAfterTheClientCompletedIt,
+// accepts_backlog_windows_test.go: on Windows 11, 7 connects completed at the
+// client and 5 reached accept). Such a connection is in the hooks' count of
+// the application's connections (agent.ProxyConnsReporter: the shim numbers a
+// connect once it completes), and a test settles only once each of those is
+// paired with the proxy's side of it or lost (AppConnsSettled): one the
+// listener dropped is never paired, so the test's settle waits until the
+// hooks find it gone and charge it as a capture loss, or gives up and leaves
+// the test not judged. Hooks with no such count leave the counts unknown
+// (models.ErrProxyConnsUnsupported). On Linux, a rise of the listener's count
+// is also charged as a capture loss to the open test.
 func listenerDrops(syscall.RawConn) (uint64, error) { return 0, nil }
 
 // netListenDrops is not read on Windows: it has no network namespace, and
