@@ -54,12 +54,15 @@ const leftOutUnanswered = leftOutUnansweredCause + ": they were captured before 
 // answerUnread says the parser goes on to this request with an earlier answer
 // still to read: the server's bytes after what it has read of that answer are
 // still that answer's, though they were captured before this request, so the
-// floor stays where it is. MySQL's held PREPARE is the one parser that passes
-// true, while it holds one: the EOF after its definitions, when the server
-// sends one, comes before the client's next command, and which it is, EOF or
-// the next command's answer, is told only by the next packet the server sends,
-// after a command with an answer. It returns the client stream's errors as
-// they are: io.EOF when the stream ends.
+// floor stays where it is. The MySQL recorder is the one parser that passes
+// true: while it holds a PREPARE, the EOF after its definitions, when the
+// server sends one, comes before the client's next command, and which it is,
+// EOF or the next command's answer, is told only by the next packet the server
+// sends, after a command with an answer; and while the server may still answer
+// a command without an answer that did not parse. A parser that has read that
+// answer while the request is still its next sets the floor there (FloorAt).
+// It returns the client stream's errors as they are: io.EOF when the stream
+// ends.
 func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chunk, error) {
 	c, err := s.ClientStream.Peek()
 	if err != nil {
@@ -77,6 +80,16 @@ func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chu
 		s.DestStream.DropBefore(c.ConnSeq, s.exchanges.report)
 	}
 	return c, nil
+}
+
+// FloorAt sets the server stream's floor at the request NextRequest returned
+// with answerUnread, whose first chunk is numbered first, once the parser has
+// read the earlier answer it kept the floor below for: the rule holds for that
+// request from then, and the server bytes captured before it that are still
+// unread are dropped and reported as NextRequest's floor drops them (dropped).
+// It is called after that NextRequest, never before a parser's first one.
+func (s *Session) FloorAt(first uint32) {
+	s.DestStream.DropBefore(first, s.exchanges.report)
 }
 
 // dropped is told of each run of server bytes the floor drops (NextRequest),

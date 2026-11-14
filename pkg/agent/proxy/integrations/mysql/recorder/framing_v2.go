@@ -291,15 +291,20 @@ func isMalformedPacketErr(buf []byte) bool {
 // without an answer before it that did not decode (pending: the chunks they
 // began in, in the order sent; answeredIfMalformed). A server answers each of
 // those with an ERR 1835 or none of them, so its next packet is the first
-// one's ERR or the command's own answer, read as the first packet of an answer
-// is (firstResponsePacket). An ERR 1835 is the answer to the first of them
-// still unanswered only where the capture's order proves it: it was captured
-// after that command and before the client's command at cmdFirst, so it was
-// sent before that command, and answers nothing sent since. It is read, and
-// the packet after it tells for the next. Any other packet is the command's
-// answer: the server answered none of those left, and it is handed on as the
-// response's first packet (carry), as heldPrepare.settle hands one on. took is
-// how many were answered.
+// one's ERR or the command's own answer. The capture's order is judged before
+// a packet is read. A packet that starts in a chunk captured before the
+// client's command at cmdFirst was sent before that command, so it is no
+// answer to it (Session.NextRequest's rule): it is read whole, and an ERR 1835
+// is the answer to the first of them still unanswered where it was captured
+// after that command, and answers nothing sent since. The packet after it
+// tells for the next. Any other packet there answers no command sent after it
+// (an ERR a server sends unasked, at shutdown or wait_timeout): the server
+// answered none of those left, and the packet is dropped. Then the floor is set
+// at cmdFirst (Session.FloorAt), which drops what else the server sent before
+// that command. While one is still unanswered, the server's next packet,
+// captured after that command, is read as the first packet of an answer is
+// (firstResponsePacket) and handed on as the response's (carry), as
+// heldPrepare.settle hands one on. took is how many were answered.
 //
 // An ERR 1835 captured after the client's command at cmdFirst cannot be told
 // apart from that command's own answer, which may be one too, and one
@@ -308,25 +313,45 @@ func isMalformedPacketErr(buf []byte) bool {
 // another's answer. at is the chunk the packet in carry, if any, began in;
 // err is a fault of the stream's bytes, or its end, as read.
 func takeMalformedAnswers(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, pending []uint32, cmdFirst uint32, respFirst byte, what string, at fakeconn.Chunk, carry *[]byte) (took int, why string, err error) {
+	const notBetween = "the server sent an ERR 1835 (a malformed packet) that was not captured between a command without an answer that does not decode and the client's next command the server answers, so it cannot be told to answer the one or the other"
 	for ; took < len(pending); took++ {
 		if *carry == nil {
 			if at, err = sess.DestStream.Peek(); err != nil {
 				return took, "", err
 			}
 		}
-		seq := responseSeq(what, respFirst)
-		buf, err := firstResponsePacket(ctx, logger, sess, &seq, carry)
-		if err != nil {
-			return took, "", err
+		if !at.CapturedBefore(cmdFirst) {
+			break
+		}
+		buf := *carry
+		*carry = nil
+		if buf == nil {
+			if buf, err = readPacketChecked(logger, sess.DestStream, nil); err != nil {
+				return took, "", err
+			}
 		}
 		if !isMalformedPacketErr(buf) {
-			*carry = buf
-			return took, "", nil
+			logger.Debug("V2: dropped a server packet captured before the client's next command, after a command without an answer that does not decode: it answers no command sent after it",
+				zap.String("connID", sess.ClientConnID), zap.Uint32("firstConnSeq", at.ConnSeq), zap.Int("bytes", len(buf)))
+			break
 		}
-		if at.CapturedBefore(pending[took]) || !at.CapturedBefore(cmdFirst) {
-			return took, fmt.Sprintf("the server sent an ERR %d (a malformed packet) that was not captured between a command without an answer that does not decode and the client's next command the server answers, so it cannot be told to answer the one or the other", errMalformedPacket), nil
+		if at.CapturedBefore(pending[took]) {
+			return took, notBetween, nil
 		}
 	}
+	sess.FloorAt(cmdFirst)
+	if took == len(pending) {
+		return took, "", nil
+	}
+	seq := responseSeq(what, respFirst)
+	buf, err := firstResponsePacket(ctx, logger, sess, &seq, carry)
+	if err != nil {
+		return took, "", err
+	}
+	if isMalformedPacketErr(buf) {
+		return took, notBetween, nil
+	}
+	*carry = buf
 	return took, "", nil
 }
 

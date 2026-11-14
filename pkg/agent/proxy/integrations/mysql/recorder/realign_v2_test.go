@@ -1857,6 +1857,60 @@ func TestRecordV2_ACommandWithoutAnAnswerThatAServerLeavesUnansweredLeavesTheNex
 	}
 }
 
+// Server bytes captured after a command without an answer that does not decode
+// and before the client's next command, that are no ERR 1835 to it (an ERR the
+// server sends unasked, at shutdown or wait_timeout, at sequence id 0 as a
+// server sends it or at 1), answer no command sent after them: the floor's
+// rule (Session.NextRequest), which holds while the floor is kept below for
+// that command's ERR, and once the ERR 1835 to it (or to each of two in a row)
+// is read. Read as the next
+// command's answer, SELECT 2 was recorded with the shutdown ERR, a packet
+// captured before SELECT 2 was sent. A server that sent such a packet and then
+// an ERR 1835 after SELECT 2 has the recording stop there: that ERR cannot be
+// told to answer the CLOSE or SELECT 2.
+func TestRecordV2_ServerBytesBeforeTheNextCommandThatAnswerNoCommandAreNotItsAnswer(t *testing.T) {
+	t.Parallel()
+	shutdown := errReply(1, 1053, "Server shutdown in progress")
+	all := "SELECT 1 -> OK 1; SELECT 2 -> OK 2; SELECT 3 -> OK 3"
+	for name, c := range map[string]struct {
+		commands [][]byte
+		before   [][]byte
+		answer   []byte
+		want     string
+	}{
+		"an ERR at sequence id 1":            {[][]byte{malformedClose}, [][]byte{shutdown}, okResponseWithAffectedRows(1, 2), all},
+		"the server's own ERR":               {[][]byte{malformedClose}, [][]byte{errReply(0, 4031, "The client was disconnected by the server")}, okResponseWithAffectedRows(1, 2), all},
+		"after the ERR 1835 to the CLOSE":    {[][]byte{malformedClose}, [][]byte{malformedERR, shutdown}, okResponseWithAffectedRows(1, 2), all},
+		"after the ERR 1835s to two such":    {[][]byte{malformedClose, malformedLongData}, [][]byte{malformedERR, malformedERR, shutdown}, okResponseWithAffectedRows(1, 2), all},
+		"then an ERR 1835 after the command": {[][]byte{malformedClose}, [][]byte{shutdown}, malformedERR, "SELECT 1 -> OK 1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			j := newJoinedMidStream(t)
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+			for _, cmd := range c.commands {
+				j.h.pushClient(cmd, j.at())
+			}
+			for _, p := range c.before {
+				j.h.pushDest(p, j.at())
+			}
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{c.answer})
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 3"), [][]byte{okResponseWithAffectedRows(1, 3)})
+			mocks, err := j.run(t)
+			if got := strings.Join(pairings(mocks), "; "); got != c.want {
+				t.Fatalf("mocks %q, want %q: no command recorded with server bytes captured before it (RecordV2 = %v)", got, c.want, err)
+			}
+			stops := c.answer[4] == 0xff
+			if stops && (!errors.Is(err, ErrFramingLost) || !strings.Contains(err.Error(), "ERR 1835")) {
+				t.Fatalf("RecordV2 = %v, want the stop at the ERR 1835 that cannot be told to answer the CLOSE or SELECT 2", err)
+			}
+			if !stops && err != nil {
+				t.Fatalf("RecordV2 = %v, want no stop", err)
+			}
+		})
+	}
+}
+
 // An ERR 1835 captured after the client's next command may answer the command
 // without an answer that did not parse (MySQL 5.7 and later, a client that did
 // not wait) or that next command (a server that answers nothing to the first,
@@ -1925,7 +1979,8 @@ func TestRecordV2_AnERRThatCannotBeToldToAnswerACommandWithoutAnAnswerStops(t *t
 }
 
 // Once the ERR to a command without an answer that does not decode is taken,
-// the next command's answer is its own, an ERR 1835 too: a query's (its
+// or the ERR to each of two in a row, the next command's answer is its own, an
+// ERR 1835 too: a query's (its
 // attributes did not parse) is recorded with it, and an execute's that does not
 // decode is framed and left out. Neither stops the recording. Dropped as server
 // bytes captured before the command, the first ERR left the second to be told
@@ -1935,17 +1990,22 @@ func TestRecordV2_AnERRToACommandWithoutAnAnswerLeavesTheNextCommandsOwnERRToIt(
 	execute := wrapPacket([]byte{mysql.COM_STMT_EXECUTE, 9, 0, 0, 0, 0, 1, 0, 0, 0}, 0)
 	for name, c := range map[string]struct {
 		command []byte
+		two     bool
 		want    string
 		leftOut int64
 	}{
-		"a query":    {cannedCOMQuery(t, 0, "SELECT 2"), "SELECT 1 -> OK 1; SELECT 2 -> ERR 1835; SELECT 3 -> OK 3", 1},
-		"an execute": {execute, "SELECT 1 -> OK 1; SELECT 3 -> OK 3", 2},
+		"a query":           {cannedCOMQuery(t, 0, "SELECT 2"), false, "SELECT 1 -> OK 1; SELECT 2 -> ERR 1835; SELECT 3 -> OK 3", 1},
+		"a query after two": {cannedCOMQuery(t, 0, "SELECT 2"), true, "SELECT 1 -> OK 1; SELECT 2 -> ERR 1835; SELECT 3 -> OK 3", 2},
+		"an execute":        {execute, false, "SELECT 1 -> OK 1; SELECT 3 -> OK 3", 2},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			j := newJoinedMidStream(t)
 			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
 			j.exchange(malformedClose, [][]byte{malformedERR})
+			if c.two {
+				j.exchange(malformedLongData, [][]byte{malformedERR})
+			}
 			j.exchange(c.command, [][]byte{malformedERR})
 			j.exchange(cannedCOMQuery(t, 0, "SELECT 3"), [][]byte{okResponseWithAffectedRows(1, 3)})
 			mocks, leftOut, err := j.runCounted(t)
