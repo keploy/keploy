@@ -1853,12 +1853,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				// packet, not the server's next bytes after the exchange
 				// taken up: judged as those, it stopped a client that framed
 				// with EOFs at every PREPARE taken up.
-				hadHeld := held != nil
 				walk.mark()
 				if err := settleHeld(commandByte(cmdBuf), respFirst); err != nil {
 					return err
 				}
-				if hadHeld && carry == nil && (t != nil || len(malformed) > 0) {
+				if carry == nil && (t != nil || len(malformed) > 0) {
+					// Past the PREPARE's EOF, if settle read one: where the
+					// packet settle hands on (carry) starts otherwise.
 					next, nextErr = sess.DestStream.Peek()
 				}
 				return nil
@@ -1876,8 +1877,10 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					}
 					t.release()
 				}
-				// The commands without an answer that did not decode stay
-				// unanswered: the next command the server answers tells.
+				// A server's ERR to a command without an answer that did not
+				// decode came before what settle read: the re-align (fail)
+				// cuts it off with the rest of that response.
+				malformed = nil
 				if err := fail(reqTs, err); err != nil {
 					return err
 				}
@@ -1887,13 +1890,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// this one that did not decode (answeredIfMalformed).
 			confirmAt := first.ConnSeq
 			if len(malformed) > 0 {
-				took, why, err := takeMalformedAnswers(logger, sess, malformed, first.ConnSeq, respFirst, next, &carry)
+				took, why, err := takeMalformedAnswers(ctx, logger, sess, malformed, first.ConnSeq, respFirst, mysql.CommandStatusToString(commandByte(cmdBuf)), next, &carry)
 				if took > 0 {
 					// The ERR, captured after the first of them, was its
 					// answer: the server answered after it.
 					confirmAt = malformed[0]
 				}
-				malformed = malformed[took:]
+				malformed = nil
 				if why != "" {
 					stop := found("V2: mysql ERR to a command without an answer cannot be told from the next answer", framingLost("%s", why))
 					return stopIn(t, reqTs, stop)
@@ -1910,9 +1913,6 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					}
 					continue
 				}
-				// The rest were not answered: the server's next packet is
-				// this command's answer.
-				malformed = nil
 			}
 			if t != nil {
 				if why := t.confirm(confirmAt, pipelined, next, nextErr); why != "" {

@@ -280,22 +280,23 @@ const errMalformedPacket = 1835
 
 // isMalformedPacketErr reports whether the packet buf (its header included)
 // is the ERR a server answers a command with that it could not parse: an ERR
-// with errMalformedPacket, starting an answer (sequence id 1).
+// with errMalformedPacket.
 func isMalformedPacketErr(buf []byte) bool {
-	return len(buf) >= 7 && buf[3] == 1 && buf[4] == 0xff && binary.LittleEndian.Uint16(buf[5:7]) == errMalformedPacket
+	return len(buf) >= 7 && buf[4] == 0xff && binary.LittleEndian.Uint16(buf[5:7]) == errMalformedPacket
 }
 
 // takeMalformedAnswers reads, at the client's next command the server answers
-// (it began in the chunk numbered cmdFirst, and its answer starts at sequence
-// id respFirst), the ERRs the server sent to the commands without an answer
-// before it that did not decode (pending: the chunks they began in, in the
-// order sent; answeredIfMalformed). A server answers each of those with an
-// ERR 1835 or none of them, so its next packet is the first one's ERR or the
-// command's own answer. An ERR 1835 is the answer to the first of them still
-// unanswered only where the capture's order proves it: it was captured after
-// that command and before the client's command at cmdFirst, so it was sent
-// before that command, and answers nothing sent since. It is read, and the
-// packet after it tells for the next. Any other packet is the command's
+// (what: that command; it began in the chunk numbered cmdFirst, and its answer
+// starts at sequence id respFirst), the ERRs the server sent to the commands
+// without an answer before it that did not decode (pending: the chunks they
+// began in, in the order sent; answeredIfMalformed). A server answers each of
+// those with an ERR 1835 or none of them, so its next packet is the first
+// one's ERR or the command's own answer, read as the first packet of an answer
+// is (firstResponsePacket). An ERR 1835 is the answer to the first of them
+// still unanswered only where the capture's order proves it: it was captured
+// after that command and before the client's command at cmdFirst, so it was
+// sent before that command, and answers nothing sent since. It is read, and
+// the packet after it tells for the next. Any other packet is the command's
 // answer: the server answered none of those left, and it is handed on as the
 // response's first packet (carry), as heldPrepare.settle hands one on. took is
 // how many were answered.
@@ -306,38 +307,17 @@ func isMalformedPacketErr(buf []byte) bool {
 // so, and the recording stops there (fail closed), with no command paired with
 // another's answer. at is the chunk the packet in carry, if any, began in;
 // err is a fault of the stream's bytes, or its end, as read.
-func takeMalformedAnswers(logger *zap.Logger, sess *supervisor.Session, pending []uint32, cmdFirst uint32, respFirst byte, at fakeconn.Chunk, carry *[]byte) (took int, why string, err error) {
-	for took < len(pending) {
-		buf := *carry
-		*carry = nil
-		if buf == nil {
+func takeMalformedAnswers(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, pending []uint32, cmdFirst uint32, respFirst byte, what string, at fakeconn.Chunk, carry *[]byte) (took int, why string, err error) {
+	for ; took < len(pending); took++ {
+		if *carry == nil {
 			if at, err = sess.DestStream.Peek(); err != nil {
 				return took, "", err
 			}
-			ownErr := false
-			buf, err = readPacketChecked(logger, sess.DestStream, func(header []byte) error {
-				switch {
-				case header[3] == 1 || header[3] == respFirst:
-				case respFirst != 0 && mayBeServersOwnErr(header):
-					ownErr = true
-				default:
-					return framingLost("the first packet of the server's next answer has sequence id %d, neither 1 (an ERR to a command without an answer that does not decode) nor %d (the next answer)", header[3], respFirst)
-				}
-				return nil
-			})
-			if err != nil {
-				if errors.Is(err, ErrFramingLost) {
-					err = found("V2: mysql response packet out of sequence", err)
-				}
-				return took, "", err
-			}
-			if ownErr {
-				// As firstResponsePacket reads one.
-				if !isServersOwnErr(buf) {
-					return took, "", framingLostAt(logger, sess, "the first packet of the server's next answer has sequence id 0 and is not an ERR")
-				}
-				return took, "", errServerDropped
-			}
+		}
+		seq := responseSeq(what, respFirst)
+		buf, err := firstResponsePacket(ctx, logger, sess, &seq, carry)
+		if err != nil {
+			return took, "", err
 		}
 		if !isMalformedPacketErr(buf) {
 			*carry = buf
@@ -346,7 +326,6 @@ func takeMalformedAnswers(logger *zap.Logger, sess *supervisor.Session, pending 
 		if at.CapturedBefore(pending[took]) || !at.CapturedBefore(cmdFirst) {
 			return took, fmt.Sprintf("the server sent an ERR %d (a malformed packet) that was not captured between a command without an answer that does not decode and the client's next command the server answers, so it cannot be told to answer the one or the other", errMalformedPacket), nil
 		}
-		took++
 	}
 	return took, "", nil
 }
