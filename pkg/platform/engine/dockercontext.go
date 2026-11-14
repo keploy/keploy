@@ -30,8 +30,17 @@ const (
 // ContextEnv names the docker context keploy took DOCKER_HOST from
 // (UseDockerContext), so that a message about the endpoint can say where it
 // came from rather than blame a DOCKER_HOST the user never set. It goes
-// through the sudo re-exec with DOCKER_HOST.
+// through the sudo re-exec with DOCKER_HOST. Read it with DockerHostContext,
+// which says it only while DOCKER_HOST is still the one keploy took from
+// that context.
 const ContextEnv = "KEPLOY_DOCKER_CONTEXT"
+
+// ContextHostEnv is the DOCKER_HOST keploy set with ContextEnv; a test that
+// stands for keploy sets both. A ContextEnv is keploy's only while
+// DOCKER_HOST is still this one: one exported in the user's shell, or
+// inherited from a keploy that ran under another DOCKER_HOST, would otherwise
+// say a DOCKER_HOST the user set came from a context.
+const ContextHostEnv = "KEPLOY_DOCKER_CONTEXT_HOST"
 
 // defaultContextName is the docker CLI's built-in context: DOCKER_HOST, else
 // the platform's default socket, which is what client.FromEnv reaches too.
@@ -135,6 +144,7 @@ func (c DockerContext) Environment() (map[string]string, error) {
 		envDockerCertPath:  "",
 		envDockerTLSVerify: "",
 		ContextEnv:         c.Name,
+		ContextHostEnv:     c.Host,
 	}
 	switch {
 	case len(missing) == 0:
@@ -169,7 +179,12 @@ func (c DockerContext) Environment() (map[string]string, error) {
 // Call it once at startup, before the sudo re-exec: the re-executed keploy
 // runs as root, whose docker configuration does not name the user's context.
 // A context that the variables cannot express changes nothing, and is said.
+//
+// A ContextEnv that does not go with this DOCKER_HOST is cleared first
+// (clearStaleContextEnv), so that after this call ContextEnv is set only
+// while DOCKER_HOST is keploy's.
 func UseDockerContext(logger *zap.Logger) {
+	clearStaleContextEnv(logger)
 	c, ok, err := CurrentDockerContext()
 	if err != nil {
 		logger.Warn("keploy could not read the docker CLI's current context, so it reaches the docker daemon through DOCKER_HOST, else the default socket",
@@ -188,8 +203,10 @@ func UseDockerContext(logger *zap.Logger) {
 			zap.String("next_step", "set DOCKER_HOST (and DOCKER_CERT_PATH, DOCKER_TLS_VERIFY for TLS) to a daemon keploy can reach"))
 		return
 	}
-	for k, v := range env {
-		if v == "" {
+	// The markers go last: a write that fails part-way leaves no marker
+	// for a DOCKER_HOST that is not the context's.
+	for _, k := range []string{envDockerHost, envDockerCertPath, envDockerTLSVerify, ContextHostEnv, ContextEnv} {
+		if v := env[k]; v == "" {
 			err = os.Unsetenv(k)
 		} else {
 			err = os.Setenv(k, v)
@@ -202,6 +219,42 @@ func UseDockerContext(logger *zap.Logger) {
 	}
 	logger.Debug("reaching the docker daemon of the docker CLI's current context",
 		zap.String("context", c.Name), zap.String("endpoint", c.Host))
+}
+
+// DockerHostContext is the docker context keploy took DOCKER_HOST from
+// (UseDockerContext), "" when DOCKER_HOST is not keploy's from a context:
+// the user set it, an engine keploy prepared set it (Prepare), or there is
+// none. It reads ContextEnv only while DOCKER_HOST is still the endpoint
+// keploy set with it, whatever changed the environment since.
+func DockerHostContext() string {
+	name, host := os.Getenv(ContextEnv), os.Getenv(ContextHostEnv)
+	if name == "" || host == "" || host != os.Getenv(envDockerHost) {
+		return ""
+	}
+	return name
+}
+
+// clearStaleContextEnv unsets ContextEnv and ContextHostEnv unless they go
+// with DOCKER_HOST (DockerHostContext): keploy set the pair with it, in this
+// process or, for the keploy the sudo re-exec starts, in the one that ran it
+// (the re-exec keeps the whole environment). A pair that does not go with
+// it would say to the processes keploy starts that the user's DOCKER_HOST
+// came from a context.
+func clearStaleContextEnv(logger *zap.Logger) {
+	if DockerHostContext() != "" {
+		return
+	}
+	clearContextEnv(logger)
+}
+
+// clearContextEnv unsets ContextEnv and ContextHostEnv.
+func clearContextEnv(logger *zap.Logger) {
+	for _, k := range []string{ContextEnv, ContextHostEnv} {
+		if err := os.Unsetenv(k); err != nil {
+			logger.Debug("keploy could not clear a docker context marker",
+				zap.String("variable", k), zap.Error(err))
+		}
+	}
 }
 
 // dockerConfigDir is the docker CLI's configuration directory (config.Dir in

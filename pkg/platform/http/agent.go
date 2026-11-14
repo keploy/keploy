@@ -47,6 +47,7 @@ import (
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -639,7 +640,7 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 				select {
 				case <-ctx.Done():
 					return true
-				case tcChan <- &tc:
+				case tcChan <- capturedByAgent(&tc):
 					pendingTestCase = nil
 				}
 			}
@@ -697,12 +698,26 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			select {
 			case <-ctx.Done():
 				return true
-			case tcChan <- pendingTestCase:
+			case tcChan <- capturedByAgent(pendingTestCase):
 				pendingTestCase = nil
 			}
 		}
 	}
 	return false
+}
+
+// capturedByAgent marks the paths of tc's file parts, a test case this client
+// read from its agent, as the files they were captured in: this client's own
+// copy of a part it received, or the agent's on this host
+// (FormData.Captured). The test store copies a part only from there. A path
+// in a test case read any other way (a set's file, the cloud) is never one.
+// Called on each test case as it is handed on, once its parts are in.
+func capturedByAgent(tc *models.TestCase) *models.TestCase {
+	for i := range tc.HTTPReq.Form {
+		f := &tc.HTTPReq.Form[i]
+		f.Captured = slices.Clone(f.Paths)
+	}
+	return tc
 }
 
 // readIncomingJSON reads a legacy JSON incoming stream; see readIncoming.
@@ -724,7 +739,7 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 		case <-ctx.Done():
 			// If the context is done, exit the loop
 			return true
-		case tcChan <- &testCase:
+		case tcChan <- capturedByAgent(&testCase):
 			// Send the decoded test case to the channel
 		}
 	}
@@ -5049,16 +5064,21 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 	if destDir == "" {
 		return errors.New("destDir is required")
 	}
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	// destDir is a test set's folder: it and the files in it are made only
+	// inside the recording, the folder it is in, and that from the project
+	// (yaml.MkdirAllInRecording), so a link on the way that leads out is
+	// refused, with why, and nothing is written where it leads.
+	recording := filepath.Dir(destDir)
+	if err := yaml.MkdirAllInRecording(recording, destDir, 0o755); err != nil {
 		return fmt.Errorf("create dest dir %s: %w", destDir, err)
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return a.streamPcapArtifact(gctx, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644, false)
+		return a.streamPcapArtifact(gctx, recording, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644, false)
 	})
 	g.Go(func() error {
-		return a.streamPcapArtifact(gctx, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644, true)
+		return a.streamPcapArtifact(gctx, recording, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644, true)
 	})
 	return g.Wait()
 }
@@ -5069,7 +5089,7 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 // stays a no-op for non-capture sessions. Other non-200s surface as
 // errors. Context cancellation returns nil so callers don't see
 // spurious errors at recording stop.
-func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile string, mode os.FileMode, appendable bool) error {
+func (a *AgentClient) streamPcapArtifact(ctx context.Context, recording, urlPath, dstFile string, mode os.FileMode, appendable bool) error {
 	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, urlPath)
 	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -5097,7 +5117,7 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 			ext := filepath.Ext(dstFile)
 			path = fmt.Sprintf("%s.%d%s", strings.TrimSuffix(dstFile, ext), n, ext)
 		}
-		copyErr, err := a.copyPcapStream(resp, pkg.ShownAgentURI(url), path, flags, mode)
+		copyErr, err := a.copyPcapStream(resp, pkg.ShownAgentURI(url), recording, path, flags, mode)
 		if errors.Is(err, errNoPcapStream) {
 			return nil
 		}
@@ -5117,11 +5137,12 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 // errNoPcapStream is an agent with no pcap stream to serve: capture is off.
 var errNoPcapStream = errors.New("the agent serves no pcap stream")
 
-// copyPcapStream writes one pcap stream response to path, shownURL being the
-// stream's URL as keploy says it (pkg.ShownAgentURI). It returns how the copy
-// ended, and an error when there was nothing to copy into a file
-// (errNoPcapStream when capture is off).
-func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, path string, flags int, mode os.FileMode) (copyErr, err error) {
+// copyPcapStream writes one pcap stream response to path, a file opened only
+// inside recording (yaml.OpenFileInRecording), shownURL being the stream's URL
+// as keploy says it (pkg.ShownAgentURI). It returns how the copy ended, and an
+// error when there was nothing to copy into a file (errNoPcapStream when
+// capture is off).
+func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, recording, path string, flags int, mode os.FileMode) (copyErr, err error) {
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil && !errors.Is(cerr, context.Canceled) {
 			a.logger.Debug("failed to close pcap stream body", zap.String("url", shownURL), zap.Error(cerr))
@@ -5140,7 +5161,7 @@ func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, path string,
 		return nil, fmt.Errorf("stream %s: status %d: %s", shownURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	out, err := os.OpenFile(path, flags, mode)
+	out, err := yaml.OpenFileInRecording(recording, path, flags, mode)
 	if err != nil {
 		return nil, fmt.Errorf("create %s: %w", path, err)
 	}

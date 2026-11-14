@@ -546,6 +546,18 @@ func generateUniqueID() string {
 	return hex.EncodeToString(b) + "-" + time.Now().Format("20060102150405")
 }
 
+// oneFolderName refuses name, what, as the name of a folder a download writes
+// under ./Download, unless it names exactly one folder there: not empty, not
+// "." or "..", and with no path separator. It comes from a repository's file
+// (keploy.yml, or another service's serviceMappings.yaml), which could
+// otherwise steer the download's writes to any folder the user can write.
+func oneFolderName(what, name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("%s is %q, and must name one folder (no path separator, and not \".\" or \"..\"): the download writes under ./Download/<name>", what, name)
+	}
+	return nil
+}
+
 func checkConfigFile(servicesMapping map[string][]string) error {
 	// Check if the size of servicesMapping is less than 1
 	if len(servicesMapping) < 1 {
@@ -554,7 +566,11 @@ func checkConfigFile(servicesMapping map[string][]string) error {
 	return nil
 }
 
-func saveServiceMappings(servicesMapping config.Mappings, filePath string) error {
+// saveServiceMappings writes serviceMappings.yaml into folder, a folder of the
+// recording at recording, inside the recording (yaml.WriteRecordingFileF): a
+// schema folder that links out of it is refused with why, and nothing is
+// written there.
+func saveServiceMappings(servicesMapping config.Mappings, recording, folder string) error {
 	// Marshal the services mapping to YAML
 	servicesMappingYAML, err := yamlLib.Marshal(servicesMapping)
 	if err != nil {
@@ -562,7 +578,7 @@ func saveServiceMappings(servicesMapping config.Mappings, filePath string) error
 	}
 
 	// Write the services mapping to the specified file path
-	err = yaml.WriteFile(context.Background(), zap.NewNop(), filePath, "serviceMappings", servicesMappingYAML, false)
+	err = yaml.WriteRecordingFileF(context.Background(), zap.NewNop(), recording, folder, "serviceMappings", servicesMappingYAML, false, yaml.FormatYAML)
 	if err != nil {
 		return fmt.Errorf("failed to write services mapping to file: %w", err)
 	}

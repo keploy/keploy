@@ -136,14 +136,24 @@ func TestATestCasesFileIsReadOnlyInsideItsRecording(t *testing.T) {
 	refused := []struct {
 		name, root, path, why string
 	}{
-		{"up and out", root, "../outside.txt", "path escapes"},
-		{"absolute, outside", root, outside, "path escapes"},
-		{"absolute, inside", root, filepath.Join(root, "test-set-0/assets/test-1/body.txt"), "path escapes"},
+		// A path that leads out by its own name is said plainly too: where
+		// it leads, or that it is absolute, and what to name instead.
+		{"up and out", root, "../outside.txt", fmt.Sprintf("%s %q: it names %q, a place outside it; name a place inside it", inside, root, filepath.Join(filepath.Dir(root), "outside.txt"))},
+		{"absolute, outside", root, outside, fmt.Sprintf("%s %q: it names %q, a place outside it; name a place inside it", inside, root, outside)},
+		{"absolute, inside", root, filepath.Join(root, "test-set-0/assets/test-1/body.txt"), fmt.Sprintf("%s %q: it names %q by an absolute path, which keploy does not open; name it relative to %q", inside, root, filepath.Join(root, "test-set-0/assets/test-1/body.txt"), root)},
 		{"no recording directory", "", "body.txt", noRoot},
 		{"a recording directory that is not there", filepath.Join(root, "gone"), "body.txt", "open the recording directory"},
 	}
 	if hasLink(root) {
-		refused = append(refused, struct{ name, root, path, why string }{"a link out", root, link, "path escapes"})
+		// A link out is said as one, after what any refusal of the file says.
+		refused = append(refused, struct{ name, root, path, why string }{"a link out", root, link, inside + fmt.Sprintf(" %q: it is a link that leads out of it", root)})
+	}
+	// A folder on the way that links out is named as the test case names
+	// its files, with slashes, on every OS; where it leads is a path on disk.
+	folder := "test-set-0/assets/test-2"
+	if os.Symlink(filepath.Dir(outside), filepath.Join(root, filepath.FromSlash(folder))) == nil {
+		refused = append(refused, struct{ name, root, path, why string }{"a folder link out", root, folder + "/outside.txt",
+			inside + fmt.Sprintf(" %q: it leads through %q, a link that leads out of it, to %q", root, folder, filepath.Dir(outside))})
 	}
 
 	t.Run("body", func(t *testing.T) {
@@ -164,8 +174,8 @@ func TestATestCasesFileIsReadOnlyInsideItsRecording(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), c.why) || !strings.Contains(err.Error(), fmt.Sprintf("%q", c.path)) {
 					t.Fatalf("SimulateHTTP: %v; want it refused, naming %q, with %q", err, c.path, c.why)
 				}
-				if c.why == "path escapes" && !strings.Contains(err.Error(), inside) {
-					t.Fatalf("SimulateHTTP: %v; want %q", err, inside)
+				if strings.Contains(err.Error(), "escapes from parent") {
+					t.Fatalf("SimulateHTTP: %v; want it said without os.Root's words", err)
 				}
 				if n, _, _ := app.sent(); n != 0 {
 					t.Fatalf("the app was sent %d requests; want none", n)
@@ -225,6 +235,29 @@ func TestATestCasesFileIsReadOnlyInsideItsRecording(t *testing.T) {
 			})
 		}
 	})
+}
+
+// A name that passes by ".." and stays inside the recording, as a test case
+// may name its file (test-set-0/assets/deep/../body.txt), reads as before:
+// os.Root walks it, and nothing is refused.
+func TestANameThatPassesByDotDotInsideItsRecordingReads(t *testing.T) {
+	root, _ := recordingDirs(t)
+	writeRecordingFile(t, root, "test-set-0/assets/body.txt", "kept beside")
+	if err := os.MkdirAll(filepath.Join(root, "test-set-0", "assets", "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	name := "test-set-0/assets/deep/../body.txt"
+	if b, err := ReadRecordingFile(root, name); err != nil || string(b) != "kept beside" {
+		t.Fatalf("ReadRecordingFile(%q) = %q, %v; want the file", name, b, err)
+	}
+	f, err := OpenRecordingFile(root, name)
+	if err != nil {
+		t.Fatalf("OpenRecordingFile(%q): %v", name, err)
+	}
+	defer func() { _ = f.Close() }()
+	if b, err := io.ReadAll(f); err != nil || string(b) != "kept beside" {
+		t.Fatalf("OpenRecordingFile(%q) read %q, %v; want the file", name, b, err)
+	}
 }
 
 // Reading a test case's file leaves no file open: neither the recording's
@@ -288,6 +321,61 @@ func TestARecordingDirectoryThatCannotBeOpenedIsSaid(t *testing.T) {
 		}()
 		if err == nil || !strings.Contains(err.Error(), "open the recording directory") || !strings.Contains(err.Error(), "body.txt") {
 			t.Fatalf("read in a directory that is not there: %v; want it said", err)
+		}
+	}
+}
+
+// The recording's directory is opened from the project: a keploy folder a
+// cloned repository carries as a link out of the project, by ".." or to an
+// absolute path, is refused with why, and no file a test case names is read
+// from where it leads. A keploy folder that links inside the project is read.
+func TestAKeployFolderThatLinksOutOfTheProjectIsNotReadFrom(t *testing.T) {
+	const rel = "test-set-0/assets/test-1/body.txt"
+	for _, how := range []string{"up", "absolute", "inside"} {
+		base := t.TempDir()
+		target := filepath.Join(base, "outside")
+		if how == "inside" {
+			target = filepath.Join(base, "project", "recordings")
+		}
+		writeAt := filepath.Join(target, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(writeAt), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(writeAt, []byte("SECRET-"+how), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(base, "project"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		keploy := filepath.Join(base, "project", "keploy")
+		to := target
+		switch how {
+		case "up":
+			to = filepath.Join("..", "outside")
+		case "inside":
+			to = "recordings"
+		}
+		if err := os.Symlink(to, keploy); err != nil {
+			t.Skipf("cannot make a symbolic link here: %v", err)
+		}
+		b, rerr := ReadRecordingFile(keploy, rel)
+		f, oerr := OpenRecordingFile(keploy, rel)
+		if f != nil {
+			_ = f.Close()
+		}
+		if how == "inside" {
+			if rerr != nil || oerr != nil || string(b) != "SECRET-inside" {
+				t.Fatalf("a keploy folder linking inside the project: %q, %v, %v; want it read", b, rerr, oerr)
+			}
+			continue
+		}
+		for _, err := range []error{rerr, oerr} {
+			if err == nil || !strings.Contains(err.Error(), "open the recording directory") || !strings.Contains(err.Error(), "only inside") {
+				t.Fatalf("%s: a keploy folder that links out of the project: %v; want it refused with why", how, err)
+			}
+		}
+		if len(b) != 0 {
+			t.Fatalf("%s: read %q from outside the project", how, b)
 		}
 	}
 }

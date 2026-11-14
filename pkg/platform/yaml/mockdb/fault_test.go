@@ -249,7 +249,7 @@ func TestAGobFileHoldsAFaultMockAsHttpFault(t *testing.T) {
 		t.Fatalf("the file holds the fault mock as kind %q (%v), want HttpFault", first.Kind, err)
 	}
 	var kinds []models.Kind
-	if _, err := forEachGobMockCut(path, func(r *models.Mock) error { kinds = append(kinds, r.Kind); return nil }); err != nil {
+	if _, err := forEachGobMockCut(filepath.Dir(path), path, func(r *models.Mock) error { kinds = append(kinds, r.Kind); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if len(kinds) != 3 || kinds[0] != models.HTTP || kinds[1] != models.HTTP || kinds[2] != models.HTTPFault {

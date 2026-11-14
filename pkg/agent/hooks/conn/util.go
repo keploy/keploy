@@ -645,7 +645,10 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 // process than this one: the DaemonSet agent streams its test cases to
 // k8s-proxy's control plane, which cannot read this pod's temp files. Each temp
 // file is removed once read and its path cleared, so the persister writes the
-// asset from the bytes. A file that cannot be read keeps its path.
+// asset from the bytes. A file that cannot be read loses its path too: the path
+// names a file of this process only, which the persister cannot read, and a test
+// store refuses an absolute path it was given no contents for. So the part goes
+// with neither, and the persister keeps the test case without that part's file.
 func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 	for i := range tc.HTTPReq.Form {
 		form := &tc.HTTPReq.Form[i]
@@ -655,7 +658,8 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 			}
 			content, err := os.ReadFile(path)
 			if err != nil {
-				utils.LogError(logger, err, "Error reading multipart temp file", zap.String("path", path))
+				utils.LogError(logger, err, "Error reading multipart temp file: the part goes without its file", zap.String("path", path))
+				form.Paths[j] = ""
 				continue
 			}
 			if len(form.FileContents) < len(form.Paths) {

@@ -37,6 +37,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/linkout"
 	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
@@ -1726,13 +1727,26 @@ type PermissionError struct {
 	IsRead   bool // true if it's a read permission issue, false if write
 }
 
-// AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
+// AddToGitIgnore adds ignoreString to path's .gitignore, if it is not there
+// yet. The file is opened inside path, and path from the project
+// (OpenRecordingDir): keploy/.gitignore comes with a cloned repository, so
+// one that links out of path, or a path that links out of the project, is
+// refused, with why, and what it leads to is not written. A link that stays
+// inside is followed.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
-	gitignorePath := path + "/.gitignore"
-
-	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
+	root, err := OpenRecordingDir(path)
 	if err != nil {
-		return fmt.Errorf("error opening or creating .gitignore file: %v", err)
+		return fmt.Errorf("error opening the folder of the .gitignore file: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	file, err := root.OpenFile(".gitignore", os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		refused := fmt.Sprintf("the .gitignore file is written only inside %q", path)
+		if out := linkout.Explain(root, path, ".gitignore", refused, err); out != nil {
+			return out
+		}
+		return fmt.Errorf("%s: %w", refused, err)
 	}
 
 	defer func() {
