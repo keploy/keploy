@@ -341,15 +341,20 @@ func (c *clientTLS) process() Process { return Process{Pid: c.nsPid, KernelPid: 
 // lossText is what a handshake c lost is charged as: its destination, and
 // what a build's gate knows of why its process failed it (OnClientTLS's
 // Why), so the test's reason names the process and the cause, not only the
-// call; and the host it names (a CONNECT target's name), where it stands,
-// with its tag in the connection's session (c.ctx), as the connection's
-// lines name it. None for an address.
+// call; on Windows when this session could not put keploy's CA in the
+// user's trust store, that and the step that does (pTls.UntrustedStoreWhy);
+// and the host it names (a CONNECT target's name), where it stands, with
+// its tag in the connection's session (c.ctx), as the connection's lines
+// name it. None for an address.
 func (c *clientTLS) lossText() (string, models.LossHosts) {
 	what := models.NewLossText(c.ctx).Say("to ").Host(c.dst)
 	if g := OnClientTLS; g != nil && c.tgid != 0 {
 		if why := g.Why(c.process()); why != "" {
 			what.Say(": " + why)
 		}
+	}
+	if why := pTls.UntrustedStoreWhy(); why != "" {
+		what.Say(": " + why)
 	}
 	return what.String(), what.Hosts()
 }
