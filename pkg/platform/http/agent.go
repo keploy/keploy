@@ -3197,11 +3197,6 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 // same bare failure -- and before this wait watched the process at all, with
 // a readiness timeout five and a half minutes later.
 func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) error {
-	if errors.Is(exitErr, utils.ErrPortTaken) {
-		// The engine could not publish the agent's port (publishRefused): a
-		// start the caller makes again, at once, on a port drawn again.
-		return fmt.Errorf("the keploy agent could not start: %w", exitErr)
-	}
 	var cause error
 	// An *exec.ExitError for an agent keploy started itself, an
 	// *agentContainerExit for one compose started.
