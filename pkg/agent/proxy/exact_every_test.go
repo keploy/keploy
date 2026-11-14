@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"errors"
 	"slices"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 )
 
 // everyTouch is onceTouch's series with every on it (SetPoolEvery between
@@ -86,7 +89,8 @@ func TestAnEverySeriesRoundOpensNoSoonerThanTheLead(t *testing.T) {
 
 // SetPoolEvery marks only once series, with a positive interval; a table
 // with none leaves none, and a series it does not mark answers once in the
-// run however long it runs.
+// run however long it runs. A proxy hands the set to its mock manager, and
+// refuses it with none.
 func TestSetPoolEveryMarksOnlyOnceSeries(t *testing.T) {
 	mm := onceTouch(t, false)
 	mm.SetPoolEvery(map[string]time.Duration{onceID: time.Minute, "": time.Minute, "zero": 0})
@@ -107,6 +111,19 @@ func TestSetPoolEveryMarksOnlyOnceSeries(t *testing.T) {
 	after(time.Hour)
 	if got := callURL(t, mm, onceByID, false); got != "a miss" {
 		t.Fatalf("with the every set emptied the first call again an hour later was answered %q, want a miss", got)
+	}
+
+	// A proxy hands the set to its mock manager (none: errNoMockManager).
+	p := &Proxy{learnTracker: learn.NewTracker()}
+	if err := p.SetPoolEvery(map[string]time.Duration{onceID: time.Minute}); !errors.Is(err, errNoMockManager) {
+		t.Fatalf("SetPoolEvery with no replay gave %v, want errNoMockManager", err)
+	}
+	p.mockManager = mm
+	if err := p.SetPoolEvery(map[string]time.Duration{onceID: 2 * time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	if set := *mm.exact.poolEvery.Load(); len(set) != 1 || set[onceID] != 2*time.Minute {
+		t.Fatalf("the proxy's every set is %v on its mock manager, want only %s at 2m", set, onceID)
 	}
 }
 

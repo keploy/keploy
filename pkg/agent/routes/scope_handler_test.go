@@ -896,3 +896,67 @@ func TestScopeTableCarriesTheOnceSeriesAndAcksThem(t *testing.T) {
 		t.Fatalf("an agent without once series answered %d, %s to a table without any; want 200 not naming once", rec.Code, rec.Body.String())
 	}
 }
+
+// everySvc is onceSvc that also serves a once series again after an
+// interval (scopeEverySetter).
+type everySvc struct {
+	onceSvc
+	every *map[string]string
+	err   error
+}
+
+func (s everySvc) SetScopeEvery(_ context.Context, every map[string]string) error {
+	if s.err != nil {
+		return s.err
+	}
+	*s.every = every
+	s.order = append(s.order, "every")
+	return nil
+}
+
+// Under the switch the scope table carries, by once series, the interval
+// after which it answers again, installed after the once series, before the
+// pool slices, and the answer names it served, an empty table's too. An
+// agent that refuses the intervals (one is not a positive duration) answers
+// 400 before the pool. An agent that cannot serve them refuses a table that
+// has some (it would answer such a series once in the run), and takes one
+// without, naming them not served.
+func TestScopeTableCarriesTheIntervalsAndAcksThem(t *testing.T) {
+	post := func(svc agent.Service, body string) (*httptest.ResponseRecorder, models.ScopeTableResp) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		var ack models.ScopeTableResp
+		_ = json.Unmarshal(rec.Body.Bytes(), &ack)
+		return rec, ack
+	}
+	withEvery := `{"mappings":{"o::TestA":[]},"pool":{"o":["mock-1"]},"worker":{"o":["mock-1"]},"series":{"pat/-/1":["mock-1"]},"once":["pat/-/1"],"every":{"pat/-/1":"5m"}}`
+	t.Setenv(provenswitch.Env, "1")
+	series, once := map[string][]string{}, []string(nil)
+	svc := func(ps *poolSvc, every *map[string]string, err error) everySvc {
+		return everySvc{onceSvc{seriesSvc{workerSvc{ps}, &series, nil}, &once, nil}, every, err}
+	}
+	ps, every := &poolSvc{}, map[string]string(nil)
+	rec, ack := post(svc(ps, &every, nil), withEvery)
+	if rec.Code != http.StatusOK || !slices.Equal(ack.Served, []string{"series", "once", "every"}) {
+		t.Fatalf("status %d, answer %s; want 200 naming series, once and every served", rec.Code, rec.Body.String())
+	}
+	if every["pat/-/1"] != "5m" || len(every) != 1 || !slices.Equal(ps.order, []string{"windows", "worker", "series", "once", "every", "pool"}) {
+		t.Fatalf("every %v, installed %v; want it installed after the once series, before the pool", every, ps.order)
+	}
+	ps, every = &poolSvc{}, map[string]string{"stale": "1m"}
+	if rec, ack := post(svc(ps, &every, nil), `{"mappings":{},"pool":{}}`); rec.Code != http.StatusOK || len(every) != 0 || !slices.Contains(ack.Served, "every") {
+		t.Fatalf("a table without intervals: status %d, every %v, answer %s; want none installed, every served", rec.Code, every, rec.Body.String())
+	}
+	ps = &poolSvc{}
+	if rec, _ := post(svc(ps, &every, errors.New("not a positive Go duration")), withEvery); rec.Code != http.StatusBadRequest || slices.Contains(ps.order, "pool") {
+		t.Fatalf("an agent that refused the intervals answered %d and installed %v; want 400 before the pool", rec.Code, ps.order)
+	}
+	ps = &poolSvc{}
+	if rec, _ := post(onceSvc{seriesSvc{workerSvc{ps}, &series, nil}, &once, nil}, withEvery); rec.Code != http.StatusNotImplemented || slices.Contains(ps.order, "pool") {
+		t.Fatalf("an agent without intervals answered %d to a table with some (installed %v); want 501 before the pool", rec.Code, ps.order)
+	}
+	if rec, ack := post(onceSvc{seriesSvc{workerSvc{&poolSvc{}}, &series, nil}, &once, nil}, `{"mappings":{},"pool":{}}`); rec.Code != http.StatusOK || slices.Contains(ack.Served, "every") || !slices.Contains(ack.Served, "once") {
+		t.Fatalf("an agent without intervals answered %d, %s to a table without any; want 200 naming once, not every", rec.Code, rec.Body.String())
+	}
+}

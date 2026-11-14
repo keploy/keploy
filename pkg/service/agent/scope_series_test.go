@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
@@ -178,4 +179,78 @@ func TestTheScopeOnceSeriesReachTheProxyBeforeTheSeries(t *testing.T) {
 	storeMocks(b, httpMock("mock-2", "GET", "http://h/b"))
 	b.scopeTable = map[string][]string{"o::TestA": {}}
 	require.Error(t, b.SetScopePool(ctx, map[string][]string{models.PoolKeyNone: {"mock-2"}}), "and the pool refuses them too")
+}
+
+// everyProxy is onceProxy that also serves a once series again after an
+// interval (coreAgent.PoolEverySetter), noting the order the pool hands it.
+type everyProxy struct {
+	*onceProxy
+	every map[string]time.Duration
+	err   error
+}
+
+var _ coreAgent.PoolEverySetter = (*everyProxy)(nil)
+
+func (p *everyProxy) SetPoolEvery(every map[string]time.Duration) error {
+	if p.err != nil {
+		return p.err
+	}
+	p.every, p.order = every, append(p.order, "every")
+	return nil
+}
+
+// The table's intervals reach the proxy with the pool (SetScopePool), after
+// the once series and before the series, parsed as the CLI sent them; a
+// table with none clears the previous set's. An interval that is not a
+// positive Go duration, or a series id that is empty, refuses the table and
+// leaves the set as it was. A proxy that cannot serve them refuses
+// intervals, at the table and at the pool, and takes a table without any;
+// one that fails to install them fails the pool.
+func TestTheScopeIntervalsReachTheProxyAfterTheOnceSeries(t *testing.T) {
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &everyProxy{onceProxy: &onceProxy{seriesProxy: &seriesProxy{wireProxy: wp}}}
+	a.Proxy = p
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"), httpMock("mock-2", "GET", "http://h/b"))
+	ctx := context.Background()
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+	pool := map[string][]string{models.PoolKeyNone: {"mock-2"}}
+	require.NoError(t, a.SetScopeSeries(ctx, map[string][]string{"pat/-/1": {"mock-2"}}))
+	require.NoError(t, a.SetScopeOnce(ctx, []string{"pat/-/1"}))
+	sent := map[string]string{"pat/-/1": "5m"}
+	require.NoError(t, a.SetScopeEvery(ctx, sent))
+	sent["pat/-/1"] = "1s" // the caller's map is its own
+	require.Empty(t, p.order, "the intervals go to the proxy with the pool, not before")
+	require.NoError(t, a.SetScopePool(ctx, pool))
+	require.Equal(t, map[string]time.Duration{"pat/-/1": 5 * time.Minute}, p.every)
+	require.Equal(t, []string{"once", "every", "series"}, p.order)
+
+	for _, bad := range []map[string]string{
+		{"pat/-/1": "5"},    // no unit
+		{"pat/-/1": "soon"}, // not a duration
+		{"pat/-/1": "0s"},   // not positive
+		{"pat/-/1": "-5m"},  // negative
+		{"": "5m"},          // no series
+		{"pat/-/1": "", "x": "1m"},
+	} {
+		require.Error(t, a.SetScopeEvery(ctx, bad), "the table's every %v is refused", bad)
+	}
+	p.order = nil
+	require.NoError(t, a.SetScopePool(ctx, pool))
+	require.Equal(t, map[string]time.Duration{"pat/-/1": 5 * time.Minute}, p.every, "a refused table leaves the set as it was")
+
+	require.NoError(t, a.SetScopeEvery(ctx, nil))
+	require.NoError(t, a.SetScopePool(ctx, pool))
+	require.Empty(t, p.every, "a table with no intervals leaves the set none")
+	p.err = errors.New("no mock manager")
+	require.Error(t, a.SetScopePool(ctx, pool), "a proxy that refuses the intervals fails the pool")
+	p.err = nil
+
+	b, bp := wireAgent(t, models.MODE_TEST)
+	b.Proxy = &onceProxy{seriesProxy: &seriesProxy{wireProxy: bp}}
+	require.Error(t, b.SetScopeEvery(ctx, map[string]string{"pat/-/1": "5m"}), "a proxy that cannot serve intervals refuses them")
+	require.NoError(t, b.SetScopeEvery(ctx, nil), "and takes a table with none")
+	b.proven.every = map[string]time.Duration{"pat/-/1": 5 * time.Minute} // as if the proxy changed under the table
+	storeMocks(b, httpMock("mock-2", "GET", "http://h/b"))
+	b.scopeTable = map[string][]string{"o::TestA": {}}
+	require.Error(t, b.SetScopePool(ctx, pool), "and the pool refuses them too")
 }
