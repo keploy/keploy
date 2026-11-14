@@ -26,15 +26,21 @@ func TestOnWindowsAStandardUserWithNoDesktopSetsUpTheCAWithNoAdministrator(t *te
 	if os.Getenv("KEPLOY_ROW_NO_DESKTOP_STANDARD_USER") != "1" {
 		t.Skip("runs on the Windows lane as a standard user with no desktop (KEPLOY_ROW_NO_DESKTOP_STANDARD_USER=1)")
 	}
-	if windows.GetCurrentProcessToken().IsElevated() {
-		t.Fatal("this row must run as a standard user: an elevated setup may change the machine's trust")
+	// The Administrators group, not TokenElevation, which a token restricted
+	// from an elevated one still reports.
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin, err := windows.Token(0).IsMember(admins); err != nil || admin {
+		t.Fatalf("this row must run as a standard user (Administrators usable: %v, %v): an administrator's setup may change the machine's trust", admin, err)
 	}
 	local := t.TempDir()
 	t.Setenv("LOCALAPPDATA", local)
 	ResetCAReadyForTest()
 	t.Cleanup(ResetCAReadyForTest)
 	logger := zaptest.NewLogger(t)
-	err := SetupCA(context.Background(), logger, false)
+	err = SetupCA(context.Background(), logger, false)
 	t.Cleanup(func() { TeardownNativeCA(logger) })
 	if err != nil {
 		t.Fatalf("SetupCA as a standard user with no desktop = %v, want nil", err)
