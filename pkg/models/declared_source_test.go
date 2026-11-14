@@ -24,6 +24,14 @@ func TestDeclaredSourceCheck(t *testing.T) {
 	}
 	withForm := clock(-sec, 0, sec)
 	withForm.Minted = form
+	// A period (PeriodMark) rides on a minted source alone, and its value
+	// keeps the source's form, as every recorded value there does.
+	period := func(s DeclaredSource, v string, repeat bool) DeclaredSource {
+		s.Period = &PeriodMark{Value: v, Repeat: repeat}
+		return s
+	}
+	lease := mintedAs(MintedForm{Prefix: "ui-app-data-reconcile:", MinLen: 28, MaxLen: 28})
+	hour := "ui-app-data-reconcile:497545"
 	// A source that is good in every other way, so the missing name alone
 	// refuses it.
 	noRule, noField := minted, clock(-sec, 0, sec)
@@ -58,6 +66,12 @@ func TestDeclaredSourceCheck(t *testing.T) {
 		"a minted prefix of a space":                    {mintedAs(MintedForm{Prefix: "a _", MinLen: 50, MaxLen: 50}), false},
 		"a minted prefix of a tab":                      {mintedAs(MintedForm{Prefix: "a\t_", MinLen: 50, MaxLen: 50}), false},
 		"a clock read with a minted form":               {withForm, false},
+		"a period's first claim":                        {period(lease, hour, false), true},
+		"a later claim of a period":                     {period(lease, hour, true), true},
+		"a period of another prefix":                    {period(lease, "ui-app-data-sweep:29852700", false), false},
+		"a period of another length":                    {period(lease, hour+"0", true), false},
+		"a period of no value":                          {period(lease, "", false), false},
+		"a clock read with a period":                    {period(clock(-sec, 0, sec), hour, false), false},
 	} {
 		if err := c.s.Check(); (err == nil) != c.ok {
 			t.Errorf("%s: Check() = %v, want ok %v", name, err, c.ok)
