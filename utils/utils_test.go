@@ -96,7 +96,7 @@ func TestGetAvailablePortSkipsPortsAlreadyHeld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hold a port: %v", err)
 	}
-	defer ln.Close()
+	t.Cleanup(func() { _ = ln.Close() })
 	held := uint32(ln.Addr().(*net.TCPAddr).Port)
 
 	if free, err := probePort(held); free || err != nil {
