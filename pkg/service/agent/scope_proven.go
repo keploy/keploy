@@ -208,6 +208,9 @@ type provenWire struct {
 	// closed: the run's windows were read at its end; nothing more is
 	// claimed or begun until the next session resets the wire.
 	closed bool
+	// watches is how many watches for an open test's process exiting run
+	// (watchGoneLocked): one at most.
+	watches int
 	// topology is where the run's calls to local listeners went (LIVE and
 	// mocked-local rows, NoteLive and NoteMocked).
 	topology topologyRows
@@ -428,7 +431,9 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	left = boundOwnedLeft(left)
 	a.provenMu.Lock()
 	workers := a.workerIDs()
-	a.proven = provenWire{losses: losses, ownedLeft: left}
+	// A watch that runs (watchGoneLocked) watches the new session's tests:
+	// it ends once none is open.
+	a.proven = provenWire{losses: losses, ownedLeft: left, watches: a.proven.watches}
 	a.provenMu.Unlock()
 	// The previous session's workers are no workers of this one.
 	a.endInstances(workers)
@@ -1580,6 +1585,9 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		a.proven.open = map[uint32]scopeTest{}
 	}
 	a.proven.open[worker] = scopeTest{id: id, start: boundaryTime(at)} // its window's start (BeginScopeAt)
+	// Failed as soon as its process is seen gone, not at the next claim or
+	// the run's final read (reapGone).
+	a.watchGoneLocked()
 	if from != nil {
 		if a.proven.openFrom == nil {
 			a.proven.openFrom = map[string]models.CaptureLosses{}

@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -63,7 +64,9 @@ var seriesWake = func(context.Context) (func() <-chan time.Time, func()) {
 // m.seriesRead, which the run's end reads with the rest (reportOutcome): a
 // read hands back only what was consumed since the read before. A read that
 // fails ends the wait; the run's end reads again, and judges on its read.
-// The tests that ran are those of the run's windows as the agent has them.
+// The tests that ran are those of the run's windows as the agent has them;
+// a series trailing one of them holds the wait only if that test passed
+// (seriesDue.holdsWait).
 func (m *mockService) awaitRequiredSeries(ctx context.Context, running func() bool) {
 	if len(m.series) == 0 {
 		return
@@ -77,13 +80,16 @@ func (m *mockService) awaitRequiredSeries(ctx context.Context, running func() bo
 		m.logger.Debug("keploy could not read which tests ran to wait for the series they owe; the run's end judges them as they are", zap.Error(err))
 		return
 	}
-	ran := map[string]bool{}
+	ran, passed := map[string]bool{}, map[string]bool{}
 	for _, w := range testWindows(windows) {
 		if ranOutcome(w.Outcome) {
 			ran[w.Name] = true
 		}
+		if w.Outcome == models.ScopeOutcomePassed {
+			passed[w.Name] = true
+		}
 	}
-	owed := m.readOwedSeries(ctx, ran)
+	owed := m.readOwedSeries(ctx, ran, passed)
 	if len(owed) == 0 {
 		return
 	}
@@ -101,7 +107,7 @@ func (m *mockService) awaitRequiredSeries(ctx context.Context, running func() bo
 		if !running() {
 			return
 		}
-		now := m.readOwedSeries(ctx, ran)
+		now := m.readOwedSeries(ctx, ran, passed)
 		if len(now) == 0 {
 			return
 		}
@@ -118,16 +124,31 @@ func (m *mockService) awaitRequiredSeries(ctx context.Context, running func() bo
 }
 
 // readOwedSeries reads what the agent consumed since its last read into
-// m.seriesRead and returns the series still owed by ran: none when the read
-// failed, which ends the wait as none owed does.
-func (m *mockService) readOwedSeries(ctx context.Context, ran map[string]bool) []string {
+// m.seriesRead and returns the series still owed by ran that hold the wait
+// (seriesDue.holdsWait, by the tests that passed): none when the read failed,
+// which ends the wait as none owed does.
+func (m *mockService) readOwedSeries(ctx context.Context, ran, passed map[string]bool) []string {
 	read, err := m.instrumentation.GetConsumedMocks(ctx)
 	if err != nil {
 		m.logger.Debug("keploy could not read the recordings consumed while it waited for the series the run owes; the run's end reads them again", zap.Error(err))
 		return nil
 	}
 	m.seriesRead = append(m.seriesRead, read...)
-	return owedSeries(m.series, ran, usedNames(m.seriesRead))
+	return slices.DeleteFunc(owedSeries(m.series, ran, usedNames(m.seriesRead)), func(id string) bool {
+		return !m.series[id].holdsWait(passed)
+	})
+}
+
+// holdsWait is whether s, owed, holds the wait for the series the run owes,
+// by the tests that passed: a background series always does, as it is due
+// wherever the run reached its place; a trailing one only when the test it
+// trails passed. One trailing a test that failed is still owed, and the
+// run's end names it not made if it is, but waiting for it changes no
+// verdict: its test fails whether the application makes it later or not.
+// Held, a run whose test command died by its own timeout waited out the
+// whole stall for the series of the tests it left failed.
+func (s seriesDue) holdsWait(passed map[string]bool) bool {
+	return s.Trails == "" || passed[s.Trails]
 }
 
 // withSeriesRead is consumed, the run's end's read, after what the wait for

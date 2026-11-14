@@ -126,6 +126,34 @@ func stopsAfter(n int32) func() bool {
 	return func() bool { return asked.Add(1) <= n }
 }
 
+// A failed test's trailing series holds no wait: the test fails whether the
+// application makes it later or not, so waiting for it changes no verdict
+// and only holds the run (a test command killed by its own -timeout left a
+// run waiting the whole stall for the series of the tests that failed). With
+// the background series made, the wait reads once and ends; the series is
+// still named not made, and its line says the test failed. Where TestA
+// passed, the same reads hold the wait (TestASeriesMadeAfterTheCommandExitedIsWaitedFor).
+func TestAFailedTestsTrailingSeriesHoldsNoWait(t *testing.T) {
+	_, r, tr, logs, instr := seriesWaitRun(t, seriesWindows(models.ScopeOutcomeFailed, models.ScopeOutcomePassed),
+		[][]models.MockState{{{Name: "mock-1"}, {Name: "mock-6"}}, nil, {{Name: "mock-5"}}}, nil, runsOnForGood, 3)
+	require.Equal(t, models.ScopeOutcomeFailed, testLine(t, tr, "o::TestA").Outcome)
+	require.Equal(t, []RequiredNotMade{{Series: "cleanup/o::TestA/1", Rule: "cleanup@3f2a91c0", Trails: "o::TestA", Names: []string{"mock-3", "mock-5"}, TrailsFailed: true}}, r.RequiredNotMade)
+	require.Equal(t, []string{`RULE NOT MADE cleanup@3f2a91c0: o::TestA failed, and its trailing series 1 (mock-3, mock-5) answered no call by the run's end, which may follow from that failure: keploy waits for a trailing series only after a test that passed; fix o::TestA's failure first, then this series if a run where o::TestA passes does not make it. rule={"event":"not-made","id":"cleanup","series":"cleanup/o::TestA/1","trails":"o::TestA"}`}, ruleNotMadeLines(logs))
+	require.Zero(t, logs.FilterMessageSnippet("waiting for the series of declared rules the run owes").Len())
+	require.Equal(t, 2, instr.consumedReadCount, "the wait's one read and the run's end")
+}
+
+// A background series is due when the run reached its place, whether the
+// test there passed or failed: one placed after a failed test still holds
+// the wait, and is waited for.
+func TestABackgroundSeriesPlacedAfterAFailedTestIsWaitedFor(t *testing.T) {
+	_, r, _, logs, instr := seriesWaitRun(t, seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomeFailed),
+		[][]models.MockState{{{Name: "mock-0"}, {Name: "mock-3"}}, nil, {{Name: "mock-7"}}}, nil, runsOnForGood, 3)
+	require.Empty(t, r.RequiredNotMade)
+	require.Equal(t, 1, logs.FilterMessageSnippet("waiting for the series of declared rules the run owes").Len())
+	require.Equal(t, 4, instr.consumedReadCount, "the wait's first read, two wake-ups, and the run's end")
+}
+
 // Only a due series holds the wait: a background series placed after a test
 // that was skipped is not due, and with the trailing one already made the
 // wait reads once and ends.

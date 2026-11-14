@@ -192,7 +192,35 @@ func TestReplayOutcomeReporting(t *testing.T) {
 			wantExit:      1,
 			wantErr:       true,
 			wantLogs:      []string{"incomplete", "could not be proven"},
-			wantFields:    map[string]any{"consumed": int64(2), "missed": "unknown"},
+			// The read itself failed: the agent's stop is what to look into.
+			wantFields: map[string]any{"consumed": int64(2), "missed": "unknown", "next_step": "check the agent logs for why it stopped before the run ended"},
+		},
+		{
+			// The miss list is short, but the consumed read failed too: the
+			// agent's stop is still what to look into, not the list.
+			name:        "the consumed read fails and the miss list is short: the stop is named",
+			consumedErr: errors.New("connection refused"),
+			mockErrors:  oneMiss,
+			errorsErr:   fmt.Errorf("%w: a miss was dropped: the test's list of misses was full (512)", models.ErrUnmatchedCallsUnread),
+			wantExit:    1,
+			wantErr:     true,
+			wantLogs:    []string{"incomplete", "could not be proven"},
+			wantFields:  map[string]any{"consumed": "unknown", "missed": "unknown", "next_step": "check the agent logs for why it stopped before the run ended"},
+		},
+		{
+			// The agent answered, but said its list of misses is short, and
+			// why (a test's list filled up). The summary names
+			// that cause and what to do, not a stop the agent never made;
+			// the misses it did read are still listed, and --strict refuses.
+			name:          "the agent's miss list is short: its reason is named, not a stop",
+			consumedMocks: twoConsumed,
+			mockErrors:    oneMiss,
+			errorsErr:     fmt.Errorf("%w: a miss was dropped: the test's list of misses was full (512)", models.ErrUnmatchedCallsUnread),
+			wantExit:      1,
+			wantErr:       true,
+			wantLogs:      []string{"incomplete", "could not be proven"},
+			wantFields: map[string]any{"consumed": int64(2), "missed": "unknown", "next_step": missListShortNext,
+				"reason": models.ErrUnmatchedCallsUnread.Error() + ": a miss was dropped: the test's list of misses was full (512)"},
 		},
 		{
 			// A miss that WAS read still fails the run, whatever else went

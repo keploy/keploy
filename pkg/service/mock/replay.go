@@ -2781,6 +2781,12 @@ func (m *mockService) settleRun(ctx context.Context) error {
 	return nil
 }
 
+// missListShortNext is the summary's next step where the agent answered
+// both reads but said its list of the calls no mock answered is incomplete
+// (models.ErrUnmatchedCallsUnread), and why: the reason it gave is what to
+// look into, not a stop it never made.
+const missListShortNext = "keploy's agent answered, but its list of the calls no mock answered is incomplete, for the reason given, so the run is not judged on it; the misses it did read are listed below: fix what the reason names, and those misses, then run again"
+
 // composeUnsettled is why a proven replay under docker compose is not judged
 // when the agent's account (models.MockOutcome) does not say it finished its
 // end of the run as it stopped: why, its own word for its failure, or "" for
@@ -2929,6 +2935,13 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			// stops, and what needs explaining is why this one did not.
 			summary = append(summary, zap.NamedError("reason", consumedErr))
 			next = "the keploy-agent container writes what it served and missed as compose stops it; check its logs above for why this one did not, and that its image is the one this keploy version runs"
+		} else if consumedErr == nil && errors.Is(missesErr, models.ErrUnmatchedCallsUnread) {
+			// The agent answered both reads; what is short is its list of
+			// the calls no mock answered, and it said why. That is what to
+			// look into, not a stop the agent never made; the cause was
+			// named only at debug level before.
+			summary = append(summary, zap.NamedError("reason", missesErr))
+			next = missListShortNext
 		}
 		m.logger.Warn("mock replay summary (incomplete: the agent did not report the whole outcome)",
 			append(summary, zap.String("next_step", next))...)
