@@ -343,3 +343,44 @@ func TestASkippedEndOfAGatedTestIsNotWarned(t *testing.T) {
 	require.NoError(t, a.EndScope(ctx, "t2", 3))
 	require.Equal(t, 1, logs.FilterMessageSnippet("told to skip").FilterLevelExact(zapcore.WarnLevel).Len(), "t2 ran")
 }
+
+// Only a test keploy told to skip has a gated end: the end of a test that
+// never began and was never gated is neither warned nor taken for a
+// confirmed skip, whatever outcome it says, though another test of the
+// session was gated.
+func TestAnEndOfATestNeverGatedIsNoGatedEnd(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	core, logs := observer.New(zapcore.DebugLevel)
+	a := newReplayAgent()
+	a.logger = zap.New(core)
+	ctx := context.Background()
+	a.NoteScopeGated("t1", 3, time.Time{})
+	a.NoteScopeOutcome("t2", 3, models.ScopeOutcomePassed)
+	require.NoError(t, a.EndScope(ctx, "t2", 3))
+	a.NoteScopeOutcome("t3", 3, models.ScopeOutcomeSkipped)
+	require.NoError(t, a.EndScope(ctx, "t3", 3))
+	require.NoError(t, a.EndScope(ctx, "t4", 3))
+	require.Zero(t, logs.FilterMessageSnippet("told to skip").Len())
+	require.Zero(t, logs.FilterMessageSnippet("confirmed a skip").Len())
+}
+
+// A gated test that begins later in the session (its name met again, with
+// the gate lifted) is open: its end closes it as any test's does, neither
+// warned nor taken for a confirmed skip.
+func TestAnOpenTestIsNoGatedEnd(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	core, logs := observer.New(zapcore.DebugLevel)
+	a := newReplayAgent()
+	a.logger = zap.New(core)
+	ctx := context.Background()
+	a.NoteScopeGated("t1", 3, time.Time{})
+	a.NoteScopeGated("t2", 3, time.Time{})
+	require.NoError(t, a.BeginScope(ctx, "t1", 3))
+	a.NoteScopeOutcome("t1", 3, models.ScopeOutcomePassed)
+	require.NoError(t, a.EndScope(ctx, "t1", 3))
+	require.NoError(t, a.BeginScope(ctx, "t2", 3))
+	a.NoteScopeOutcome("t2", 3, models.ScopeOutcomeSkipped)
+	require.NoError(t, a.EndScope(ctx, "t2", 3))
+	require.Zero(t, logs.FilterMessageSnippet("told to skip").Len())
+	require.Zero(t, logs.FilterMessageSnippet("confirmed a skip").Len())
+}
