@@ -4286,7 +4286,8 @@ func runEngine(ctx context.Context, c *exec.Cmd, unsignalled <-chan struct{}, ou
 
 // engineCLI runs the container engine's CLI for one stop of an agent's
 // container: as root or in the docker group without sudo, or -- on Linux,
-// when that is refused -- with sudo -n (non-interactive). Which of the two is
+// when the engine's daemon refuses the user who runs keploy
+// (engineDeniesUser) -- with sudo -n (non-interactive). Which of the two is
 // decided by the first command that succeeds and kept for the rest of the
 // stop, so a later command that fails for reasons of its own (a `cp` of a file
 // the agent has not written yet) does not try sudo again.
@@ -4304,7 +4305,14 @@ const (
 func newEngineCLI(logger *zap.Logger) *engineCLI { return &engineCLI{logger: logger} }
 
 // run runs the engine's CLI with args under ctx (containerEngineCommand,
-// runEngine), and returns what output takes from it.
+// runEngine), and returns what output takes from it. A failure is the
+// engine's own answer, which callers read (engineSaysGone): sudo is tried
+// only when the daemon refused keploy's user, never after an answer of the
+// daemon (no such container, a conflict), which a sudo that asks for a
+// password would otherwise replace with its refusal. When sudo fails too, the
+// engine's failure is returned with what sudo said joined to its error: sudo's
+// refusal, or, when sudo ran the command, the engine's answer to it as root,
+// which callers read as well.
 func (e *engineCLI) run(ctx context.Context, output func(*exec.Cmd) ([]byte, error), args ...string) ([]byte, error) {
 	cli := engine.Active().CLI
 	direct := func() ([]byte, error) {
@@ -4326,16 +4334,36 @@ func (e *engineCLI) run(ctx context.Context, output func(*exec.Cmd) ([]byte, err
 		e.mode.CompareAndSwap(engineUndecided, engineDirect)
 		return out, nil
 	}
-	if ctx.Err() != nil || runtime.GOOS != "linux" {
+	if ctx.Err() != nil || runtime.GOOS != "linux" || !engineDeniesUser(out, err) {
 		return out, err
 	}
-	e.logger.Debug("container engine command without sudo failed, trying with sudo -n",
+	e.logger.Debug("the container engine's daemon refused keploy's user, trying with sudo -n",
 		zap.Strings("args", args), zap.Error(err))
-	out, err = sudo()
-	if err == nil {
+	sudoOut, sudoErr := sudo()
+	if sudoErr == nil {
 		e.mode.CompareAndSwap(engineUndecided, engineSudo)
+		return sudoOut, nil
 	}
-	return out, err
+	said := string(sudoOut)
+	var exit *exec.ExitError
+	if errors.As(sudoErr, &exit) {
+		said += "\n" + string(exit.Stderr)
+	}
+	return out, fmt.Errorf("%w; through sudo -n: %w, saying %q", err, sudoErr, strings.TrimSpace(said))
+}
+
+// engineDeniesUser reports whether the engine's CLI failed (out, err, as
+// engineSaid reads them) because the engine's daemon refused the user who
+// runs keploy: its socket's permission denied, in the docker CLI's words
+// ("permission denied while trying to connect to the docker API at", as
+// Docker 29 says it; "... to the Docker daemon socket at" before) or in those
+// of the dial ("connect: permission denied", which older docker CLIs and
+// podman's remote client carry). That is the one failure sudo can change. Any
+// other is the daemon's own answer, or one that sudo would meet as well.
+func engineDeniesUser(out []byte, err error) bool {
+	said := engineSaid(out, err)
+	return strings.Contains(said, "permission denied while trying to connect to the") ||
+		strings.Contains(said, "connect: permission denied")
 }
 
 // combined runs args and returns their output, stderr included.
