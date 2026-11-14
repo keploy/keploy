@@ -1848,8 +1848,10 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 //
 // The machine store is kept as a fallback only for an elevated run (an
 // administrator past UAC, or a service account with no loaded profile), which
-// is what preserves the previous behaviour there. A standard user never asks
-// it: it can only refuse them, and keploy needs no administrator.
+// is what preserves the previous behaviour there, a session with no desktop
+// among them; a CA it puts there is said in one INFO line, since every user
+// of the machine then trusts it. A standard user never asks it: it can only
+// refuse them, and keploy needs no administrator.
 //
 // A session that has no desktop to show Windows' trust prompt in (a CI
 // runner's service, an OpenSSH session, a scheduled task) makes certutil fail
@@ -1894,8 +1896,8 @@ func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string, 
 			zap.String("next_step", trustStep(keptAt)+". Without the CA installed, the application's HTTPS calls fail certificate verification."))
 		return machineErr
 	}
-	logger.Debug("installed the keploy CA in the machine-wide Windows ROOT store",
-		zap.String("output", string(machineOut)))
+	logger.Info("keploy's CA is in the machine's Windows ROOT store (LocalMachine\\Root), which every user of this machine trusts: this run is elevated and the current user's store did not take it",
+		zap.String("user_store_output", string(userOut)), zap.String("output", string(machineOut)))
 	return nil
 }
 
