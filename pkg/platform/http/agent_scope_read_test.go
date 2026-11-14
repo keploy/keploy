@@ -193,6 +193,53 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	}
 }
 
+// A restarted agent is given the table's declared rules again as they were
+// pushed: its series, declared sources, once series and each every series'
+// interval. Without the intervals the restarted agent would answer an every
+// series once in the run, so its next round would miss; without the others
+// it would serve as if no rule declared them.
+func TestAgentClient_PushProvenTableIsReappliedWithItsRules(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/scope/table" {
+			http.NotFound(w, r)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		_ = json.NewEncoder(w).Encode(models.ScopeTableResp{Status: "ok", Served: []string{models.ScopeTableServedSeries, models.ScopeTableServedSources, models.ScopeTableServedOnce, models.ScopeTableServedEvery}})
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { sessions.Delete(srv.URL) })
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	a.session().configure(true)
+	series := map[string][]string{"pat-last-use-touch": {"mock-1", "mock-2"}}
+	sources := map[string][]models.DeclaredSource{"mock-1": {{Rule: "lease", Kind: "minted", Field: "_id"}}}
+	once := []string{"pat-last-use-touch"}
+	every := map[string]string{"pat-last-use-touch": "5m"}
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, sources, once, every, false); err != nil {
+		t.Fatal(err)
+	}
+	series["pat-last-use-touch"] = nil // the caller's maps are its own
+	sources["mock-1"] = nil
+	once[0] = "other"
+	every["pat-last-use-touch"] = "1h"
+	if err := a.session().reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 2 || bodies[0] != bodies[1] {
+		t.Fatalf("posted %q; want the same table twice", bodies)
+	}
+	var got models.ScopeTableReq
+	if err := json.Unmarshal([]byte(bodies[1]), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Every["pat-last-use-touch"] != "5m" || !slices.Equal(got.Once, []string{"pat-last-use-touch"}) ||
+		!slices.Equal(got.Series["pat-last-use-touch"], []string{"mock-1", "mock-2"}) || len(got.Sources["mock-1"]) != 1 {
+		t.Fatalf("the restarted agent was given %s; want the series, its source, the once series and its 5m interval as pushed", bodies[1])
+	}
+}
+
 // A table with series is refused by an agent whose answer does not
 // acknowledge them: an older agent answers 200 with no body or with no
 // served field, and would serve each recording of a series once. The CLI
