@@ -328,6 +328,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
+			// A conditional GET re-checking an answer the open test already
+			// got is a browser cache step (cache_recheck.go): it is decided as
+			// the fetch it re-checks, without its validators, and answered
+			// again with that answer where the test is owed no fetch of it.
+			input, recheck := cacheRecheckOf(input, mockDb, func(stripped *req, m *models.Mock) bool {
+				return h.answeredMatch(reqCtx, stripped, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)([]*models.Mock{m})
+			})
+
 			var (
 				ok    bool
 				stub  *models.Mock
@@ -543,6 +551,20 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if extra < 0 {
 					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				}
+				// A cache re-check the test is owed no fetch of is answered
+				// again with the answer it re-checks, as often as it comes:
+				// never a call more than recorded, never a repeated read's
+				// once more.
+				if again := recheck.servedBy(extraMatched); again != nil {
+					h.Logger.Info("served a cache re-check from the test's earlier answer: the browser re-checked a copy keploy served this test (its validators are that answer's), so it is answered again with that answer, never counted as a call more than recorded and never required",
+						zap.String("call", request.Method+" "+utils.URLPathShape(input.url)), zap.Strings("validators", recheck.validators), zap.String("mock", again.Name))
+					stub, ok, diag, lmiss, repeat = again, true, nil, nil, true
+				}
+			} else if recheck.earlier != nil {
+				h.Logger.Info("matched a cache re-check as the fetch it re-checks: the browser re-checked a copy keploy served this test (its validators are that answer's), and the test recorded a fetch of it still owed, which answers it",
+					zap.String("call", request.Method+" "+utils.URLPathShape(input.url)), zap.Strings("validators", recheck.validators), zap.String("re-checked", mockNameOf(recheck.earlier)), zap.String("mock", mockNameOf(stub)))
+			}
+			if !ok {
 				if again, yes := integrations.AnswerRepeatRead(db, extraMatched); yes {
 					// One line per read a replay answers once more, as it
 					// answers it: the test, the read as the replay named
