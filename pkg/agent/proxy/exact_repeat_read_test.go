@@ -64,6 +64,8 @@ type repeatCase struct {
 	edit func(i int, mk *models.Mock)
 	// sent, when set, is the body of each send (by index) in place of body.
 	sent []string
+	// once marks read a read recorded once (models.RepeatReadMark.Once).
+	once bool
 }
 
 // repeatRun records every case into one set, one test each, serves the set
@@ -88,7 +90,7 @@ func repeatRunLogged(t *testing.T, logger *zap.Logger, cases []repeatCase) {
 		// marks them (models.MarkRepeatReads).
 		var read *models.RepeatReadMark
 		if c.read != "" {
-			read = &models.RepeatReadMark{Name: c.read, At: 1}
+			read = &models.RepeatReadMark{Name: c.read, At: 1, Once: c.once}
 		}
 		for i := 0; i < c.recorded; i++ {
 			answer := c.answers[0]

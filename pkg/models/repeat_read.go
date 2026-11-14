@@ -10,6 +10,8 @@ package models
 type RepeatReadMark struct {
 	Name string
 	At   int
+	// Once is the read's RepeatRead.Once: the test recorded it once.
+	Once bool
 }
 
 // Marked reports whether m marks a read: nil marks none.
@@ -38,7 +40,7 @@ func MarkRepeatReads(owned []*Mock, reads []RepeatRead) []*Mock {
 	}
 	read := map[string]*RepeatReadMark{}
 	for k, r := range reads {
-		mark := &RepeatReadMark{Name: r.Name, At: k + 1}
+		mark := &RepeatReadMark{Name: r.Name, At: k + 1, Once: r.Once}
 		for _, n := range r.Mocks {
 			read[n] = mark
 		}

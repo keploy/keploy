@@ -61,7 +61,8 @@ func RegisterRepeatReadNamer(n RepeatReadNamer) (unregister func()) {
 // namedRepeatReads is the repeated reads the registered namer names for set's
 // tests (table: each test's own recordings the agent holds, by name), under
 // noise, each
-// keeping only reads of at least two of its test's own recordings; nil when
+// keeping only reads of at least two of its test's own recordings, or of
+// exactly one for a read recorded once (readSize); nil when
 // no namer is registered or it names none.
 func namedRepeatReads(set string, noise httpint.RepeatReadNoise, table map[string][]string, loaded []*models.Mock) map[string][]models.RepeatRead {
 	repeatReadNamer.mu.RLock()
@@ -91,16 +92,26 @@ func namedRepeatReads(set string, noise httpint.RepeatReadNoise, table map[strin
 			own[mk.Name] = true
 		}
 		for _, r := range reads {
-			if r.Name == "" || len(r.Mocks) < 2 || !allOwn(r.Mocks, own) {
+			if r.Name == "" || !readSize(r) || !allOwn(r.Mocks, own) {
 				continue
 			}
 			if out == nil {
 				out = map[string][]models.RepeatRead{}
 			}
-			out[test] = append(out[test], models.RepeatRead{Name: r.Name, Mocks: append([]string(nil), r.Mocks...)})
+			out[test] = append(out[test], models.RepeatRead{Name: r.Name, Mocks: append([]string(nil), r.Mocks...), Once: r.Once})
 		}
 	}
 	return out
+}
+
+// readSize reports whether r names as many recordings as its kind of read
+// holds: one for a read recorded once (RepeatRead.Once), at least two for
+// every other.
+func readSize(r models.RepeatRead) bool {
+	if r.Once {
+		return len(r.Mocks) == 1
+	}
+	return len(r.Mocks) >= 2
 }
 
 // allOwn reports whether every name is one own holds.

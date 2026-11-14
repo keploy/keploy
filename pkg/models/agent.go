@@ -564,6 +564,13 @@ type ScopeTableReq struct {
 type RepeatRead struct {
 	Name  string   `json:"name"`
 	Mocks []string `json:"mocks"`
+	// Once marks a read the test recorded once (Mocks names one
+	// recording), which the namer knows reads by its request alone, not by
+	// recordings that repeat. Exact serving answers it once more at most
+	// and charges it when the test leaves it unmade. Absent from an older
+	// CLI: its single recording then keeps its exact count, as an older
+	// agent keeps it when this CLI sends one.
+	Once bool `json:"once,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy

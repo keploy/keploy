@@ -42,6 +42,20 @@ func TestRepeatedReadsMarkCopiesOfTheTestsRecordingsOneMarkPerRead(t *testing.T)
 	}
 }
 
+// A read recorded once marks its one recording Once; a read recorded twice
+// marks its recordings without it.
+func TestAReadRecordedOnceMarksItsOneRecordingOnce(t *testing.T) {
+	m1, m2, m3 := &Mock{Name: "mock-1"}, &Mock{Name: "mock-2"}, &Mock{Name: "mock-3"}
+	got := MarkRepeatReads([]*Mock{m1, m2, m3}, []RepeatRead{
+		{Name: "list", Mocks: []string{"mock-1", "mock-2"}},
+		{Name: "jobs", Mocks: []string{"mock-3"}, Once: true},
+	})
+	read := func(i int) RepeatReadMark { return got[i].TestModeInfo.ReadMark() }
+	if read(0) != (RepeatReadMark{Name: "list", At: 1}) || read(1) != read(0) || read(2) != (RepeatReadMark{Name: "jobs", At: 2, Once: true}) {
+		t.Fatalf("marks %+v %+v %+v", read(0), read(1), read(2))
+	}
+}
+
 // A recording no read names carries no mark and reads as the zero mark,
 // which marks no read. The recordings of one read share its one mark, so
 // a Mock carries a read at the cost of a pointer.

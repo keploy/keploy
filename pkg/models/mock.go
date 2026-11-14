@@ -378,7 +378,9 @@ type TestModeInfo struct {
 	// (ScopeTableReq.RepeatReads, MarkRepeatReads): the test recorded that
 	// read at least twice, every time with one answer. Exact serving
 	// answers such a read once more than recorded, and does not charge one
-	// of its recordings left unmade (one fewer). Two reads the replay names
+	// of its recordings left unmade (one fewer). A read the replay names
+	// from one recording (RepeatReadMark.Once) is answered once more and
+	// never excused one fewer. Two reads the replay names
 	// alike are two reads (RepeatReadMark.At). nil, no read, on every other
 	// recording (ReadMark). The recordings of one read share one mark: set
 	// it whole, never edit one in place, as ShallowCopy shares it.

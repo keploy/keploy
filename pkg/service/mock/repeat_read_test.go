@@ -49,6 +49,12 @@ func TestARegisteredNamerNamesEachTestsRepeatedReads(t *testing.T) {
 				{Name: "", Mocks: []string{"mock-1", "mock-2"}},
 				{Name: "not-held", Mocks: []string{"mock-1", "mock-4"}},
 				{Name: "another-tests", Mocks: []string{"mock-1", "mock-3"}},
+				// a read recorded once goes with its one recording, and
+				// only so marked
+				{Name: "read-once", Mocks: []string{"mock-2"}, Once: true},
+				{Name: "once-on-two", Mocks: []string{"mock-1", "mock-2"}, Once: true},
+				{Name: "once-none", Mocks: nil, Once: true},
+				{Name: "once-not-held", Mocks: []string{"mock-4"}, Once: true},
 			},
 			"o::TestB": {{Name: "list", Mocks: []string{"mock-3", "mock-5"}}},
 		}
@@ -59,7 +65,7 @@ func TestARegisteredNamerNamesEachTestsRepeatedReads(t *testing.T) {
 		t.Fatalf("the namer was handed %q %v", gotSet, gotOwned)
 	}
 	want := map[string][]models.RepeatRead{
-		"o::TestA": {{Name: "onboarding", Mocks: []string{"mock-1", "mock-2"}}},
+		"o::TestA": {{Name: "onboarding", Mocks: []string{"mock-1", "mock-2"}}, {Name: "read-once", Mocks: []string{"mock-2"}, Once: true}},
 		"o::TestB": {{Name: "list", Mocks: []string{"mock-3", "mock-5"}}},
 	}
 	if !reflect.DeepEqual(got, want) {

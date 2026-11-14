@@ -24,6 +24,15 @@ import (
 //   - one of its recordings left unmade is not charged to the test
 //     (oneFewerLocked); a second one is.
 //
+// A replay may also name a read the test recorded ONCE
+// (models.RepeatRead.Once), which its namer knows reads by the request
+// alone (keploy enterprise: an HTTP GET, HEAD or OPTIONS, or a GraphQL
+// query). Exact serving honours it only when it holds exactly one of the
+// test's own recordings, one whose call and answer it can read
+// (httpint.RepeatReadOf): one call more is answered again with that
+// recording, a second call more misses, and the recording left unmade is
+// charged to the test as any other.
+//
 // The replay decides which recordings are one read: each read it names marks
 // its recordings with one mark (models.MarkRepeatReads), and two reads it
 // names alike carry two marks. Exact serving honours a
@@ -73,7 +82,7 @@ func (v *exactView) repeatReads(noise repeatReadNoise) map[models.RepeatReadMark
 		named[read] = append(named[read], i)
 	}
 	for read, at := range named {
-		if len(at) < 2 || !v.oneRead(at, noise) {
+		if !sized(read, at) || !v.oneRead(at, noise) {
 			delete(named, read)
 		}
 	}
@@ -81,6 +90,15 @@ func (v *exactView) repeatReads(noise repeatReadNoise) map[models.RepeatReadMark
 		return nil
 	}
 	return named
+}
+
+// sized reports whether a read holds as many recordings as its mark says:
+// exactly one for a read recorded once, at least two for every other.
+func sized(read models.RepeatReadMark, at []int) bool {
+	if read.Once {
+		return len(at) == 1
+	}
+	return len(at) >= 2
 }
 
 // oneRead reports whether the recordings at positions at are one read with
@@ -154,10 +172,14 @@ var _ integrations.RepeatReadAnswerer = (*MockManager)(nil)
 // (exactView.repeats), the one recording the test left unmade, when it made
 // all of the read's others (the last one: a test's own recordings answer in
 // recorded order). A read made two or more times fewer than recorded is
-// charged every recording it left unmade.
+// charged every recording it left unmade, and so is a read recorded once
+// (models.RepeatReadMark.Once).
 func (v *exactView) oneFewerLocked() map[int]bool {
 	var excused map[int]bool
-	for _, at := range v.repeats {
+	for read, at := range v.repeats {
+		if read.Once {
+			continue
+		}
 		var unmade []int
 		for _, i := range at {
 			if !v.consumed[i] {
