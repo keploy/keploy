@@ -140,15 +140,17 @@ jobs:
         run: go test -count=1 -run "TestTheClaimReadsTheCallerFromTheConnection|TestCallerPID|TestSameEndpoint|TestTCPOwnerOnWindows|TestTheWindowsTCP|TestWindowsProc|TestDescendsByCreation" ./pkg/agent/routes/ ./pkg/service/agent/
         shell: cmd
 
-      # The proxy's count of its accepts on Windows. listenerDrops is 0 here
-      # because a full backlog loses no connection the client saw complete:
-      # the backlog row floods a listener of backlog 1 that accepts nothing
-      # and checks that every connect the client completed is accepted. The
-      # canary rows check that the count is proved before the proxy says it is
-      # ready, or unknown from the start. Only these rows of ./pkg/agent/proxy
-      # run here (see the first test step for why).
+      # The proxy's count of its accepts on Windows. listenerDrops is 0 here:
+      # a full backlog can drop a connection the client saw complete, and the
+      # application's side of each connection is what charges it. The backlog
+      # row floods a listener of backlog 1 that accepts nothing and checks
+      # that every connect the client completed is accepted or reset at the
+      # client, never left open with no one to accept it. The canary rows
+      # check that the count is proved before the proxy says it is ready, or
+      # unknown from the start. Only these rows of ./pkg/agent/proxy run here
+      # (see the first test step for why).
       - name: Test the proxy's accept count (amd64)
-        run: go test -count=1 -run "TestOnWindowsAFullBacklogLosesNoConnectionTheClientCompleted|TestWithAShimsCount" ./pkg/agent/proxy/
+        run: go test -count=1 -run "TestOnWindowsAFullBacklogResetsAConnectionItDropsAfterTheClientCompletedIt|TestWithAShimsCount" ./pkg/agent/proxy/
         shell: cmd
 
       # The resolvers a recording asks on Windows: the DNS servers of the
