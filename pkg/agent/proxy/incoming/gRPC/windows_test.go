@@ -399,6 +399,32 @@ func TestRecordIncoming_ASyncCallReadDuringAPauseSignalsNoFirstRequest(t *testin
 	}
 }
 
+// A window its capture took leaves the connection's map: the map holds only
+// the calls in flight, not a window for every call the connection carried. A
+// gRPC client pools its connections for as long as it runs, so a map that kept
+// them would grow without bound.
+func TestCallWindowsLetGoOfAWindowItsCaptureTook(t *testing.T) {
+	m := syncMock.New(zap.NewNop())
+	c := newCallWindows(m, false)
+	defer c.stop()
+	req, _ := pingCall(t)
+	c.started(req, time.Now(), false)
+	w := c.take(1)
+	if w == nil {
+		t.Fatal("no window to take for the call")
+	}
+	w.Close()
+	c.mu.Lock()
+	n := len(c.open)
+	c.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d windows still in the connection's map after their capture took them", n)
+	}
+	if again := c.take(1); again != nil {
+		t.Fatal("a taken window was handed out again")
+	}
+}
+
 func TestCallWindowsSignalTheFirstRequestOnlyForARecordableSyncCall(t *testing.T) {
 	req, _ := pingCallOn(t, 1, true)
 	later := headersFrameBytes(t, 3, reqFields, false)
