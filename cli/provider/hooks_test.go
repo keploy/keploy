@@ -122,8 +122,9 @@ func TestNativeUnsupportedError(t *testing.T) {
 		notWant      []string
 	}{
 		{"darwin", "amd64",
-			[]string{"darwin/amd64", "only on Apple Silicon", "inside Lima", "#option-2-install-keploy-with-lima", "Docker"},
-			[]string{"install Keploy from", "eBPF"}},
+			[]string{"keploy does not support Intel Macs", "Apple silicon Macs only", "darwin/amd64 build", "See https://keploy.io/docs/installation/macos-installation/"},
+			// Not supported means no route: neither Lima nor Docker.
+			[]string{"install Keploy from", "eBPF", "Lima", "Docker"}},
 		{"windows", "arm64",
 			[]string{"windows/arm64", "only on x86-64", "inside WSL", "windows-wsl"},
 			// Docker is not offered: it is untested on Windows on ARM, and the

@@ -73,14 +73,14 @@ func nativeCommandSupportedHere() bool {
 func nativeUnsupportedError(goos, goarch string) error {
 	const docker = "  - Or run your application in Docker: keploy record -c \"docker run ...\""
 	switch {
-	// Docker is offered here, unlike in the installer's Intel-Mac refusal. The
-	// installer turns an Intel Mac away because its only macOS CLI is arm64;
-	// whoever sees THIS message is already running an amd64 CLI (a source
-	// build, such as homebrew-core's), which can drive the Docker route.
+	// Keploy does not support Intel Macs, so this offers no route at all,
+	// the same plain line the installers and `keploy update` print there.
+	// Whoever sees it runs an amd64 CLI (a source build, such as
+	// homebrew-core's); the build names itself, which also tells an Apple
+	// silicon Mac running that build under Rosetta what is wrong.
 	case goos == "darwin" && goarch != "arm64":
-		return fmt.Errorf("running an application directly on %s/%s is not supported: Keploy records apps running natively on a Mac only on Apple Silicon.\n\n"+
-			"  - On an Intel Mac, run Keploy inside Lima: https://keploy.io/docs/installation/macos-installation/#option-2-install-keploy-with-lima\n"+
-			docker, goos, goarch)
+		return fmt.Errorf("keploy does not support Intel Macs; it runs on Apple silicon Macs only (this is a %s/%s build). See https://keploy.io/docs/installation/macos-installation/",
+			goos, goarch)
 	case goos == "windows" && goarch != "amd64":
 		return fmt.Errorf("running an application directly on %s/%s is not supported: Keploy records apps running natively on Windows only on x86-64.\n\n"+
 			"  - On Windows on ARM, run Keploy inside WSL: https://keploy.io/docs/keploy-explained/windows-wsl/",

@@ -475,8 +475,7 @@ installKeploy (){
             install_keploy_darwin_arm64
             return
         fi
-        echo "Keploy's native macOS build is Apple Silicon (arm64) only; this Mac reports $ARCH." >&2
-        echo "On an Intel Mac, run Keploy inside Lima: https://keploy.io/docs/installation/macos-installation/#option-2-install-keploy-with-lima" >&2
+        echo "Keploy does not support Intel Macs; it runs on Apple silicon Macs only. See https://keploy.io/docs/installation/macos-installation/" >&2
         return 1
     }
 
