@@ -86,8 +86,8 @@ func closeBegunNotDoneOnDarwin(t *testing.T) (p *Proxy, pc *pairedConn, app *net
 	if w := pc.wroteAtClose.Load(); w == nil || w.want != 10 || w.fin {
 		t.Fatalf("the close's read of the application's socket: %+v, want the 10 bytes written before it", w)
 	}
-	if d := proxyPCBIn(t, pc, xnuTCPEstablished); d.irs != pc.wroteAtClose.Load().isn {
-		t.Fatalf("the proxy's socket began from %d, want the application's first sequence number %d", d.irs, pc.wroteAtClose.Load().isn)
+	if d := proxyPCBIn(t, pc, xnuTCPEstablished); d.irs != pc.wroteAtClose.Load().base.isn {
+		t.Fatalf("the proxy's socket began from %d, want the application's first sequence number %d", d.irs, pc.wroteAtClose.Load().base.isn)
 	}
 	return p, pc, app, at, let
 }
@@ -100,14 +100,14 @@ func closeBegunNotDoneOnDarwin(t *testing.T) (p *Proxy, pc *pairedConn, app *net
 // own, and what the application writes after closeBegunNotDoneOnDarwin came
 // after the close began.
 func wroteBeforeTheCloseOnDarwin(pc *pairedConn, at proxySide, n uint64, fin bool) {
-	pc.wroteAtClose.Store(&appWrote{want: at.received + n, fin: fin, appWroteOS: appWroteOS{isn: pc.wroteAtClose.Load().isn}})
+	pc.wroteAtClose.Store(&appWrote{want: at.received + n, fin: fin, base: pc.wroteAtClose.Load().base})
 }
 
 // closedTarget is a bytes wait's target on pc for want written, counted from
 // the application socket's first sequence number, the last of it a FIN with
 // fin.
 func closedTarget(pc *pairedConn, want uint64, fin bool) *pairTarget {
-	return &pairTarget{pc: pc, base: targetBase{isn: pc.wroteAtClose.Load().isn}, want: want, finCounted: fin}
+	return &pairTarget{pc: pc, base: pc.wroteAtClose.Load().base, want: want, finCounted: fin}
 }
 
 // proxyPCBIn returns the proxy's socket of pc from macOS's TCP table once it
@@ -294,7 +294,7 @@ func TestBytesTheApplicationWritesAfterTheProxysCloseBeganAreNoLossOnDarwin(t *t
 	t.Run("across the wrap", func(t *testing.T) {
 		p, pc, _, at, let := closeBegunNotDoneOnDarwin(t)
 		isn := at.rcvNxt + 1 // the side received 1<<32 - 2 from it
-		pc.wroteAtClose.Store(&appWrote{want: 1<<32 - 2, appWroteOS: appWroteOS{isn: isn}})
+		pc.wroteAtClose.Store(&appWrote{want: 1<<32 - 2, base: targetBase{isn: isn}})
 		target := &pairTarget{pc: pc, base: targetBase{isn: isn}, want: 1, finCounted: true} // 3 more, past the wrap
 		if reached, err := p.pairReached(target); err != nil || !reached {
 			t.Fatalf("pairReached = %v, %v, want settled: nothing written before the close was missed", reached, err)

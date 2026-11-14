@@ -296,14 +296,6 @@ func boundDevice(conn *net.TCPConn) uint32 {
 // connection's first byte.
 type targetBase struct{}
 
-// appWroteOS is nothing on Linux: an appWrote counts from the connection's
-// first byte, as tcpi_bytes_acked does.
-type appWroteOS struct{}
-
-// proxySideOS is nothing on Linux: a proxySide's received is always the
-// kernel's count (tcpi_bytes_received).
-type proxySideOS struct{}
-
 // received is how much the proxy's side ps received, its FIN counted.
 func (targetBase) received(ps proxySide) uint64 { return ps.received }
 
@@ -498,7 +490,7 @@ func readProxySide(conn *net.TCPConn) proxySide {
 	if gerr != nil {
 		return proxySide{err: gerr}
 	}
-	return proxySide{received: ti.Bytes_received, state: ti.State}
+	return proxySide{received: ti.Bytes_received, counted: true, state: ti.State}
 }
 
 // pairEnded is pairReached for a connection whose application socket was gone
@@ -526,7 +518,7 @@ func (p *Proxy) pairEnded(t *pairTarget, ps proxySide, closed bool) (bool, error
 		// bytes written after keploy's close, no capture loss (a TLS
 		// client's close_notify, or its own reset as it closes with
 		// keploy's close_notify unread).
-		if w := pc.wroteAtClose.Load(); w != nil && ps.received >= w.want {
+		if w := pc.wroteAtClose.Load(); w != nil && w.base.received(ps) >= w.want {
 			return true, nil
 		}
 		if _, took, _ := orphanTookFIN(pc); took {
