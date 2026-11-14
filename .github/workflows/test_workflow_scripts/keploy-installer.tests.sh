@@ -714,8 +714,10 @@ suite() {
   install oss-sudo-chown-fails --oss -isCI
   check "the install fails" test "$rc" -ne 0
   check "it says so" said "Failed to make /usr/local/bin/keploy owned by root"
+  check "it tried to make it root's with sudo, after the move, and chowned nothing else" made_roots_after_move sudo
   check "no keploy runs" release_keploy_did_not_run
   check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
+  check "nothing outside its own directories is touched, and sudo runs only mkdir, mv and chown" stayed_inside
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
 
   # A debian or ubuntu container's root has no sudo, and Keploy's own CI
@@ -741,6 +743,7 @@ suite() {
   install oss-root-chown-fails --oss -isCI
   check "the install fails" test "$rc" -ne 0
   check "it says so" said "Failed to make /usr/local/bin/keploy owned by root"
+  check "root tried to make it its own, after the move, and chowned nothing else" made_roots_after_move root
   check "no keploy runs" release_keploy_did_not_run
   check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
   check "nothing outside its own directories is touched" stayed_inside
