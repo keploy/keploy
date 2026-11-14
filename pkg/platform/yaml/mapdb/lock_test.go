@@ -131,6 +131,10 @@ var mapWriters = []mapWriter{
 		_, err := db.MoveToWorker(ctx, lockedSetID, []models.MockEntry{{Name: "m-a"}})
 		return err
 	}, wrote: func(m *models.Mapping) bool { return listed(m.Worker, "m-a") && !hasTestMock("a", "m-a")(m) }},
+	{name: "MoveToWorkerFromStartup", write: func(ctx context.Context, db *MappingDb) error {
+		_, err := db.MoveToWorkerFromStartup(ctx, lockedSetID, []models.MockEntry{{Name: "st-1"}})
+		return err
+	}, wrote: func(m *models.Mapping) bool { return listed(m.Worker, "st-1") && !listed(m.Startup, "st-1") }},
 	{name: "MarkRecordedWith", write: func(ctx context.Context, db *MappingDb) error {
 		return db.MarkRecordedWith(ctx, lockedSetID, "feature-x")
 	}, wrote: func(m *models.Mapping) bool { return m.WasRecordedWith("feature-x") }},
@@ -164,12 +168,16 @@ var mapWriters = []mapWriter{
 var lockedSource = models.DeclaredSource{Rule: "id@44aa55bb", Kind: models.DeclaredSourceMinted, Field: "body.docs.msgs.0._id", Minted: &models.MintedForm{MinLen: 36, MaxLen: 36}}
 
 // seedSet writes the set every pair starts from: test a with its mock m-a,
+// a start-up call st-1 no test lists, which MoveToWorkerFromStartup moves,
 // and a call s-1 shared in group g1, which ApplyShares pins to a.
 func seedSet(t *testing.T, dir string) {
 	t.Helper()
 	ctx := context.Background()
 	db := New(zap.NewNop(), dir, "mappings")
 	if err := db.UpsertBatch(ctx, lockedSetID, map[string][]models.MockEntry{"a": {{Name: "m-a", Kind: "Http"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertCases(ctx, lockedSetID, nil, []models.MockEntry{{Name: "st-1", Kind: "Http"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.UpsertConcurrency(ctx, lockedSetID, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}}}, []models.MockEntry{{Name: "s-1", Kind: "Http", Group: "g1"}}); err != nil {
