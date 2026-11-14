@@ -224,6 +224,12 @@ type Input struct {
 	// echo): keploy.yml's strict times setting, and every caller that sets
 	// nothing.
 	TimeForm bool
+	// Reader is the call's index of the texts its decisions read, where
+	// the caller decides one call several times over one read of its
+	// earlier places (NewReader; the caller releases it): each Decide
+	// reads each text into its views once for the call, not once a Decide.
+	// nil: each Decide builds its own index and lets it go.
+	Reader *Reader
 }
 
 // Trail is the test a call trails: keploy record marked the call's
@@ -308,6 +314,15 @@ type Decision struct {
 	// moment in another form, and a variable holds one text); nil
 	// otherwise, and where the time default is off (Input.TimeForm).
 	ByForm *models.ClockOffset
+	// EitherOrder, of a Value, says From is the request of another call of
+	// the test that sent the value too, which the recording sent before
+	// this call and round F not before it (sentInTurn): two sends of one
+	// value the application held, made in another order in each run. An
+	// adapter binds the variable at both calls, so a replay binds it at
+	// whichever comes first and checks the other holds it; one that cannot
+	// refuses the word, as a use there would miss whenever the calls
+	// change places again.
+	EitherOrder bool
 }
 
 // Decide is every changed word of in, decided (see above).

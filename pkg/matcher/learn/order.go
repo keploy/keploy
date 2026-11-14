@@ -184,14 +184,27 @@ type decider struct {
 	texts                               map[int]*placeTexts
 	clients                             map[string]bool
 	opened, decoded, clientMaps, inText int
+	// unreadFrom is the count of unread texts x held as this decider began:
+	// a Reader's index serves several Decides, and each refuses only for a
+	// recording it asked about itself (unreadHere).
+	unreadFrom int
 }
+
+// unreadHere reports whether this decider asked about a recording keploy
+// could not read (readerIndex.unread, counted since it began).
+func (dc *decider) unreadHere() bool { return dc.x.unreadTexts > dc.unreadFrom }
 
 // decideWords decides every changed word of in, and the field each
 // decision is of; allScope reads every earlier place of the run as the
 // call's scope (Mode Elsewhere).
 func decideWords(in Input, allScope bool) ([]Decision, []string) {
-	x := newReaderIndex(in.Drifts)
-	defer x.release() // what the index keeps goes back to the set's budget
+	// The call's Reader where its caller gives one (it lets it go), so
+	// the call's Decides read each text into its views once.
+	x := in.Reader.index(in.Drifts)
+	if x == nil {
+		x = newReaderIndex(in.Drifts)
+		defer x.release() // what the index keeps goes back to the set's budget
+	}
 	return newDecider(in, allScope, x).decide()
 }
 
@@ -200,7 +213,8 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 func newDecider(in Input, allScope bool, x *readerIndex) *decider {
 	ps, unread, byWords := placesOf(in)
 	set, setNotRead := setUnread(in)
-	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead), byWords: byWords}
+	dc := &decider{in: in, unreadFrom: x.unreadTexts, x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead), byWords: byWords}
+	dc.ps = withTexts(x, ps)
 	dc.noPayload.mock, dc.noPayload.why = payloadless(in)
 	if dc.dr == nil {
 		dc.dr = NewDriftCache()
@@ -239,7 +253,7 @@ func (dc *decider) decide() ([]Decision, []string) {
 	}
 	out, fields = dc.mintedUses(out, fields)
 	dc.oneValue(out, fields)
-	if dc.x.unread() {
+	if dc.unreadHere() {
 		// A recording keploy could not read again: every change of the
 		// call is refused.
 		for i, d := range out {
@@ -1466,7 +1480,9 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// holds its own piece (oneRun), named on a fresh word's line.
 	// cut: why oneRun found no place holds the piece as chance would, set
 	// where a place it left took it.
-	var src, outside, conflict, unknown, aside, unserved, chance []evPlace
+	// inTurn: requests of another call of the test that sent the value
+	// too, in the other order in each run (sentInTurn).
+	var src, outside, conflict, unknown, aside, unserved, chance, inTurn []evPlace
 	cut := ""
 	lateHeld := map[string][2]int{}
 	for k, i32 := range asked {
@@ -1536,6 +1552,10 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 				aside = append(aside, p)
 			}
 		case evUnknown:
+			if dc.sentInTurn(p, w, rec, live) {
+				inTurn = append(inTurn, p)
+				break
+			}
 			if idChance(i) {
 				why := oneRun()
 				if why == "" {
@@ -1625,6 +1645,14 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalAnotherScope,
 			"the value "+p.name+" sent in "+scopeName(p)+"; keploy binds only within a test and the start-up", names(outside),
 			Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.fieldNoise(path))
+	case len(inTurn) > 0:
+		echo, no := dc.answered(path, bare, w, rec, live, false)
+		if no != nil {
+			return *no
+		}
+		d := dc.bound(path, at, n, changedInstant{r: w.Rec, l: w.Live, valueEcho: echo, rec: rec}, inTurn, sentInTurnRule)
+		d.EitherOrder = true
+		return d
 	}
 	if why, p := dc.encoded(); p != nil {
 		if p.otherTest && !dc.allScope {
@@ -3326,6 +3354,50 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 	d.FromAt = fromAt
 	d.Echo = c.valueEcho
 	return d
+}
+
+// sentInTurnRule is the rule of a Value bound at another call's request
+// sent in the other order in each run (sentInTurn, Decision.EitherOrder).
+const sentInTurnRule = ", another call of the test that sent the value too: the recording sent it before this call, round F not before it, so the two are sends of one value the application held, in either order; bound at whichever comes first and checked at the other"
+
+// sentInTurn reports whether p, a place that leaves the word w unknown, is
+// the request of another call of the call's own test that sent the call's
+// whole value too (rec, live: the call's leaf in each run): a recording the
+// recorded application sent before the call, at a time keploy reads, that
+// round F had given the application none of before the call: served only
+// after the call reached keploy (Raw.servedAfter), or not served by the
+// call's read at all (a sibling still in its own learn step, or one round F
+// sends later). The two are one state: whether a sibling's serve lands
+// before the call's read or after it hangs on how long each waited for its
+// learn step, which grows with load (Order.ArrivedAt), so the rule reads
+// them alike. A request gives the application nothing, so neither call is
+// the other's source, and round F gave nothing there before the call: the
+// two are sends of one value the application held, which the runs made in
+// another order (Decision.EitherOrder). Only a recording whose request
+// alone holds the recorded word (its answer gave the application none of
+// it) and the recorded value whole, as recorded or, served, with a view
+// whose request alone holds round F's word and value whole, in the call's
+// own test as its scope names it (Input.ScopeOf: not the start-up, another
+// test, a test the call trails, or a recording of a scope keploy was not
+// told): any other place stays unknown (fail closed), and so does one round
+// F served before the call reached keploy, which shows what it gave there.
+// A recording the scope names the call's own test is neither the start-up's
+// nor another test's (inScope), so the scope alone rules those out; a
+// recording of the test the call trails can still be of that scope, so it
+// is ruled out by name.
+func (dc *decider) sentInTurn(p evPlace, w readWord, rec, live string) bool {
+	if p.raw == 0 || p.trailed || dc.in.ScopeOf(p.mock) != ScopeTest(dc.in.Test) {
+		return false
+	}
+	r := dc.in.Raw[p.raw-1]
+	if r.noTime || !r.at.Before(dc.in.At) || r.served && !r.servedAfter {
+		return false
+	}
+	sentOnly := func(t *readerText, word, whole string) bool {
+		at, ok := t.fieldsWith(word)
+		return ok && len(at) > 0 && !slices.ContainsFunc(at, func(f fieldAt) bool { return !requestPath(f.path) }) && holdsWhole(t, whole)
+	}
+	return sentOnly(p.t.rec, w.Rec, rec) && (p.same() || sentOnly(p.t.live, w.Live, live))
 }
 
 // earliest is the first of src to happen, src's first of those at one time.
