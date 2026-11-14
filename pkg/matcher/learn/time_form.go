@@ -204,8 +204,9 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 // nothing else. text keeps it only where every other changed word of the
 // text is a Value or Fresh word (allPutBack): put back, the text around the
 // read is the recording's, which the replay compares by its hashes. nil
-// where the adapter does not, at a key, or where the two runs write no one
-// form of an instant (timeFormOf).
+// where the adapter does not, where the read has no word in the recorded
+// text (c.around zero: that text is the read whole), at a key, or where the
+// two runs write no one form of an instant (timeFormOf).
 func (dc *decider) amongBinds(path string, at variables.Address, n int, c changedInstant, d Decision, declared bool) *Decision {
 	if !dc.in.Caps.ClockAmongBinds || c.around.IsZero() || atKey(path, declared) {
 		return nil

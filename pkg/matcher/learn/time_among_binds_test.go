@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // amongBindsCase is the prompt of a run's ids and its time (aPrompt), read
@@ -123,4 +124,76 @@ func TestATimeAmongBoundWordsStaysRefusedOtherwise(t *testing.T) {
 		t.Fatalf("fixture: the second time decided %d times; want once", second)
 	}
 	refused("beside another read of the clock ("+rTime+")", d)
+}
+
+// The check by form stands at a word of the recorded text, and never at a
+// key (amongBinds): a read with no word there (no around word: the recorded
+// text is the read whole, while round F's has more around it) gets no
+// check, nor does one at a key no clock rule names (atKey: a URL path
+// segment, a leaf under _id), nor one the two runs write in no one form of
+// an instant (timeFormOf: here an epoch number two years from its call);
+// each stays refused cannot-check. The controls: the same read at its
+// recorded word is checked by its form there, at a key too where a clock
+// rule names it.
+func TestATimeAmongBoundWordsNeedsItsRecordedWord(t *testing.T) {
+	rAt, fAt := oAt, oAt.Add(73*time.Minute)
+	word := models.ClockWordOf("sent 1793437199", len("sent "), len("sent 1793437199"))
+	for _, c := range []struct {
+		name, path string
+		around     models.ClockWord
+		declared   bool
+		ago        time.Duration
+		checked    bool
+	}{
+		{"control: the read at its recorded word", "body.note", word, false, 0, true},
+		{"a read with no word in the recorded text", "body.note", models.ClockWord{}, false, 0, false},
+		{"a read at a key (a leaf under _id)", "body.filter._id", word, false, 0, false},
+		{"a read at a URL path segment", "url.path.2", word, false, 0, false},
+		{"control: a read at a key a clock rule names", "body.filter._id", word, true, 0, true},
+		{"an epoch number two years from its call (no form)", "body.note", word, false, 2 * 366 * 24 * time.Hour, false},
+	} {
+		r, f := rAt.Add(-time.Second-c.ago), fAt.Add(-time.Second-c.ago)
+		rs, fs := fmt.Sprint(r.Unix()), fmt.Sprint(f.Unix())
+		rec := "sent " + rs
+		rm := moment{key: instantKey{at: r.UnixNano()}, res: time.Second, zoned: true}
+		lm := moment{key: instantKey{at: f.UnixNano()}, res: time.Second, zoned: true}
+		in := oInput(c.path, rec, "sent "+fs, nil, nil)
+		in.Window = iWin(rAt, fAt, 5*time.Second)
+		in.Caps, in.TimeForm = amongCaps, true
+		dc := &decider{in: in}
+		ci := changedInstant{r: rs, l: fs, rm: &rm, lm: &lm, text: true, noWord: noWordAround, around: c.around}
+		d := dc.cannotCheck(c.path, variables.Address{}, 1, rs, fs, noWordAround)
+		got := dc.amongBinds(c.path, variables.Address{}, 1, ci, d, c.declared)
+		switch {
+		case c.checked && (got == nil || got.Clock == nil || got.Clock.Form == "" || got.Clock.Word != c.around):
+			t.Errorf("%s gave %+v; want a Clock checked by its form at its word", c.name, got)
+		case !c.checked && got != nil:
+			t.Errorf("%s gave %s; want no check (it stays refused cannot-check)", c.name, oDescribe([]Decision{*got}))
+		}
+	}
+}
+
+// aroundWordOf names the word a read stands at in its recorded text only
+// where that text changed around it (noWordAround) and text stands on a
+// side of it: a read that is the recorded text whole, or one refused for
+// another reason (a part of the text keploy opened), has none, so
+// amongBinds checks neither by its form.
+func TestAroundWordOfNamesOnlyAWordOfAChangedText(t *testing.T) {
+	rec := "sent 1793437199 by job 7"
+	at := [2]int{len("sent "), len("sent 1793437199")}
+	opened := "it stands in a part of the text keploy opened, where a replay reads no clock yet"
+	for _, c := range []struct {
+		name, rec, noWord string
+		at                [2]int
+		want              models.ClockWord
+	}{
+		{"a word of a text that changed around it", rec, noWordAround, at, models.ClockWordOf(rec, at[0], at[1])},
+		{"the recorded text whole", "1793437199", noWordAround, [2]int{0, len("1793437199")}, models.ClockWord{}},
+		{"a word of a part of the text keploy opened", rec, opened, at, models.ClockWord{}},
+		{"a word whose text is the same around it", rec, "", at, models.ClockWord{}},
+	} {
+		if got := aroundWordOf(c.rec, &instantWord{RecAt: c.at}, c.noWord); got != c.want {
+			t.Errorf("%s: the around word %+v; want %+v", c.name, got, c.want)
+		}
+	}
 }
