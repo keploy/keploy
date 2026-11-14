@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // The worker scope (models.Mapping.Worker) is written whole by UpsertWorker,
@@ -189,6 +191,137 @@ func TestAddToWorkerAddsWithoutTakingFromTheTests(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(dir, "test-set-1")); !os.IsNotExist(err) {
 				t.Fatalf("a set with no mapping file got one (stat: %v)", err)
+			}
+		})
+	}
+}
+
+// MoveToWorkerFromStartup takes a mock the start-up list holds and no test
+// lists (a timer's first call, recorded before the first test began) into
+// the worker scope at the move's place, with every mark the move names,
+// its recorded times and its own claim key, and no owner (no test's window
+// recorded it); the start-up list keeps its other entries. A mock a test
+// lists still moves as MoveToWorker moves it. MoveToWorker leaves the same
+// start-up mock where it is, as every other caller expects. Both hold with
+// the proven switch on and off.
+func TestMoveToWorkerFromStartupTakesAStartupCallARuleNames(t *testing.T) {
+	at := func(s int) string { return models.FormatMockTimestamp(time.Unix(1000+int64(s), 0)) }
+	mapping := func() *models.Mapping {
+		return &models.Mapping{
+			Version:   string(models.V1Beta1),
+			Kind:      models.MappingKind,
+			TestSetID: "test-set-0",
+			TestCases: []models.MappedTestCase{
+				{ID: "test-1", Key: "k-test", Mocks: []models.MockEntry{{Name: "own-1", Kind: "Mongo", ReqTimestampMock: at(3)}, {Name: "touch-1", Kind: "Http", ReqTimestampMock: at(4)}}},
+			},
+			Startup: []models.MockEntry{
+				{Name: "boot-read", Kind: "Mongo", ReqTimestampMock: at(0)},
+				{Name: "lease", Kind: "Mongo", Key: "k-boot", ReqTimestampMock: at(1)},
+				{Name: "boot-ping", Kind: "Mongo", ReqTimestampMock: at(2)},
+			},
+			Worker: []models.MockEntry{{Name: "w-gap", Kind: "Http", Place: "test-1", ReqTimestampMock: at(5)}},
+		}
+	}
+	moves := []models.MockEntry{
+		{Name: "lease", Rule: "lease@5e6f7a8b", Series: "lease/-/1", Once: true, Due: "10s", Unchanged: true, Reason: "background by rule lease"},
+		{Name: "touch-1", Place: "test-1", Rule: "touch@01020304", Series: "touch/-/1", Once: true},
+	}
+	for _, sw := range []string{"1", ""} {
+		t.Run("switch="+sw, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, sw)
+			ctx := context.Background()
+			db := New(zap.NewNop(), t.TempDir(), "mappings")
+			if err := db.Insert(ctx, mapping()); err != nil {
+				t.Fatal(err)
+			}
+			moved, err := db.MoveToWorkerFromStartup(ctx, "test-set-0", moves)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := []string{"lease", "touch-1"}; !reflect.DeepEqual(moved, want) {
+				t.Fatalf("moved %v; want %v", moved, want)
+			}
+			m, err := db.GetMapping(ctx, "test-set-0")
+			if err != nil || m == nil {
+				t.Fatalf("GetMapping = %v, %v", m, err)
+			}
+			if got, want := entryNames(m.Startup), []string{"boot-read", "boot-ping"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("start-up %v; want %v: the moved call leaves it, the others stay", got, want)
+			}
+			if got, want := entryNames(m.Worker), []string{"lease", "touch-1", "w-gap"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("worker %v; want %v, in recorded order", got, want)
+			}
+			l := m.Worker[0]
+			if l.Place != "" || l.Rule != "lease@5e6f7a8b" || l.Series != "lease/-/1" || !l.Once || l.Due != "10s" || !l.Unchanged || l.Reason != "background by rule lease" {
+				t.Fatalf("the start-up call's entry %+v; want it at the set's start with the move's marks", l)
+			}
+			if l.Kind != "Mongo" || l.ReqTimestampMock != at(1) || l.Key != "k-boot" || l.Owner != "" {
+				t.Fatalf("the start-up call's entry %+v; want its kind, recorded time and own key k-boot, and no owner", l)
+			}
+			tc := m.Worker[1]
+			if tc.Key != "k-test" || tc.Place != "test-1" {
+				t.Fatalf("the test's call %+v; want it moved as MoveToWorker moves it: key k-test, place test-1", tc)
+			}
+			if got := entryNames(m.TestCases[0].Mocks); !reflect.DeepEqual(got, []string{"own-1"}) {
+				t.Fatalf("test-1 lists %v; want [own-1]", got)
+			}
+
+			// MoveToWorker leaves a start-up call alone.
+			db2 := New(zap.NewNop(), t.TempDir(), "mappings")
+			if err := db2.Insert(ctx, mapping()); err != nil {
+				t.Fatal(err)
+			}
+			moved, err = db2.MoveToWorker(ctx, "test-set-0", moves)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := []string{"touch-1"}; !reflect.DeepEqual(moved, want) {
+				t.Fatalf("MoveToWorker moved %v; want %v: it leaves a start-up call alone", moved, want)
+			}
+			m2, err := db2.GetMapping(ctx, "test-set-0")
+			if err != nil || m2 == nil {
+				t.Fatalf("GetMapping = %v, %v", m2, err)
+			}
+			if got, want := entryNames(m2.Startup), []string{"boot-read", "lease", "boot-ping"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("MoveToWorker left start-up %v; want %v", got, want)
+			}
+
+			// A start-up call with a key of the move's takes the move's key.
+			db3 := New(zap.NewNop(), t.TempDir(), "mappings")
+			if err := db3.Insert(ctx, mapping()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db3.MoveToWorkerFromStartup(ctx, "test-set-0", []models.MockEntry{{Name: "lease", Key: "k-move", Owner: "test-1"}}); err != nil {
+				t.Fatal(err)
+			}
+			m3, err := db3.GetMapping(ctx, "test-set-0")
+			if err != nil || m3 == nil {
+				t.Fatalf("GetMapping = %v, %v", m3, err)
+			}
+			if i := slices.IndexFunc(m3.Worker, func(e models.MockEntry) bool { return e.Name == "lease" }); i < 0 || m3.Worker[i].Key != "k-move" || m3.Worker[i].Owner != "test-1" {
+				t.Fatalf("worker %+v; want lease with the move's key k-move and owner test-1", m3.Worker)
+			}
+
+			// A mock a test lists moves from that list even when a hand
+			// edit lists it in start-up too, which keeps its entry there.
+			both := mapping()
+			both.Startup = append(both.Startup, models.MockEntry{Name: "touch-1", Kind: "Http", Key: "k-boot", ReqTimestampMock: at(4)})
+			db4 := New(zap.NewNop(), t.TempDir(), "mappings")
+			if err := db4.Insert(ctx, both); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db4.MoveToWorkerFromStartup(ctx, "test-set-0", []models.MockEntry{{Name: "touch-1", Place: "test-1"}}); err != nil {
+				t.Fatal(err)
+			}
+			m4, err := db4.GetMapping(ctx, "test-set-0")
+			if err != nil || m4 == nil {
+				t.Fatalf("GetMapping = %v, %v", m4, err)
+			}
+			if got, want := entryNames(m4.Startup), []string{"boot-read", "lease", "boot-ping", "touch-1"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("start-up %v; want %v: a mock a test lists moves from the test's list", got, want)
+			}
+			if i := slices.IndexFunc(m4.Worker, func(e models.MockEntry) bool { return e.Name == "touch-1" }); i < 0 || m4.Worker[i].Key != "k-test" {
+				t.Fatalf("worker %+v; want touch-1 with its test's key k-test", m4.Worker)
 			}
 		})
 	}

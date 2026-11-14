@@ -586,6 +586,26 @@ func (db *MappingDb) AddToWorker(ctx context.Context, testSetID string, entries 
 // a call made under another claim, or before any test process claimed the
 // run, names that key on the move (models.PoolKeyNone for none).
 func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves []models.MockEntry) ([]string, error) {
+	return db.moveToWorker(ctx, testSetID, moves, false)
+}
+
+// MoveToWorkerFromStartup is MoveToWorker that also takes a mock the set's
+// start-up list (models.Mapping.Startup) holds and no test lists: a call
+// keploy record recorded before the first test's window opened, which a
+// rule the user declared in keploy.yml says the application makes on its
+// own (a timer's first tick), so a replay may see it in any window. The
+// entry leaves startup: for the worker scope at the move's place, with its
+// recorded times and every mark the move names, as a moved test entry
+// does. It keeps its own claim key (the claim active when record wrote it)
+// unless the move names one, and takes no owner unless the move names one:
+// no test's window recorded it. MoveToWorker leaves such a mock alone, as
+// every other caller expects.
+func (db *MappingDb) MoveToWorkerFromStartup(ctx context.Context, testSetID string, moves []models.MockEntry) ([]string, error) {
+	return db.moveToWorker(ctx, testSetID, moves, true)
+}
+
+// moveToWorker is MoveToWorker, and with fromStartup MoveToWorkerFromStartup.
+func (db *MappingDb) moveToWorker(ctx context.Context, testSetID string, moves []models.MockEntry, fromStartup bool) ([]string, error) {
 	if len(moves) == 0 {
 		return nil, nil
 	}
@@ -613,7 +633,7 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	}
 	var moved []string
 	for _, mv := range moves {
-		if placeWorker(mapping, mv) {
+		if placeWorker(mapping, mv, fromStartup) {
 			moved = append(moved, mv.Name)
 		}
 	}
@@ -636,7 +656,9 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 // placeWorker applies one of MoveToWorker's moves to mapping, reporting
 // whether it found the mock. A mock several test cases list leaves every one
 // of their lists: listed by one, it would still be that test's at replay.
-func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
+// With fromStartup (MoveToWorkerFromStartup) a mock no test lists is taken
+// from the start-up list when that holds it.
+func placeWorker(mapping *models.Mapping, mv models.MockEntry, fromStartup bool) bool {
 	for i := range mapping.Worker {
 		if mapping.Worker[i].Name == mv.Name {
 			mapping.Worker[i].Place = mv.Place
@@ -672,6 +694,13 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 		}
 		if len(kept) != len(mapping.TestCases[i].Mocks) {
 			mapping.TestCases[i].Mocks = kept
+		}
+	}
+	if entry == nil && fromStartup {
+		if i := slices.IndexFunc(mapping.Startup, func(e models.MockEntry) bool { return e.Name == mv.Name }); i >= 0 {
+			e := mapping.Startup[i]
+			entry = &e
+			mapping.Startup = slices.Delete(mapping.Startup, i, i+1)
 		}
 	}
 	if entry == nil {
