@@ -26,6 +26,12 @@
 #     curl writes only there; anything else is logged as "fenced:" and fails.
 #     So a keploy.sh that reaches for fixed /tmp paths, as the --oss route
 #     once did, fails here without touching the host's /tmp.
+#   - mktemp makes its directory only inside this test's own directory; any
+#     other absolute template is logged as "fenced:" and fails. In the cases
+#     of a shell with no TMPDIR, /tmp is mapped to the case's temp directory,
+#     as sudo's /usr/local/bin is mapped: a template under /tmp is made there,
+#     and so is a directory asked for with no template, which Linux's mktemp
+#     makes in /tmp.
 #   - sudo fails and is logged as "sudo:", except in the cases of a user with
 #     sudo (FAKE_SUDO_ROOT), where `sudo mkdir` and `sudo mv` run as the
 #     caller, through those fenced commands, with /usr/local/bin mapped into
@@ -63,6 +69,8 @@
 #     the other installer over it.
 #   - the other installer is downloaded into a private temp directory under
 #     $TMPDIR that is removed afterwards, and gets the caller's arguments.
+#   - with no TMPDIR set, as in most Linux shells, both routes download into
+#     a private temp directory under /tmp, removed afterwards.
 #   - a failed download fails the install, and never sources an install.sh
 #     that happens to be in the caller's directory instead.
 #   - the other installer's status is keploy.sh's status.
@@ -232,6 +240,37 @@ exec "$name" "$@"
 EOF
 for cmd in rm mv tar mkdir chown; do ln -s fence "$stubs/$cmd"; done
 
+# mktemp: a template under /tmp is mapped to FAKE_SYS_TMP, the case's temp
+# directory, when the case has no TMPDIR (case_no_tmpdir), and so is a
+# directory asked for with no template; then any absolute path outside this
+# test's own directory is fenced.
+cat > "$stubs/mktemp" << 'EOF'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    /tmp/*) [ -z "${FAKE_SYS_TMP:-}" ] || a="$FAKE_SYS_TMP/${a#/tmp/}" ;;
+  esac
+  set -- "$@" "$a"
+  shift
+done
+for a in "$@"; do
+  case "$a" in
+    "$FENCE"/*) ;;
+    /*)
+      echo "fenced: mktemp $*" >> "$STUB_LOG"
+      exit 1
+      ;;
+  esac
+done
+if [ -n "${FAKE_SYS_TMP:-}" ]; then
+  TMPDIR=$FAKE_SYS_TMP
+  export TMPDIR
+fi
+PATH=/usr/bin:/bin
+export PATH
+exec mktemp "$@"
+EOF
+
 cat > "$stubs/sudo" << 'EOF'
 #!/bin/sh
 if [ -n "${FAKE_SUDO_ROOT:-}" ]; then
@@ -327,7 +366,7 @@ cat > "$stubs/sysctl" << 'EOF'
 [ -n "${FAKE_ARM64:-}" ] || exit 1
 echo "$FAKE_ARM64"
 EOF
-chmod +x "$stubs/curl" "$stubs/fence" "$stubs/sudo" "$stubs/uname" "$stubs/sysctl" "$stubs/id" "$stubs/mountpoint" "$stubs/mount"
+chmod +x "$stubs/curl" "$stubs/fence" "$stubs/mktemp" "$stubs/sudo" "$stubs/uname" "$stubs/sysctl" "$stubs/id" "$stubs/mountpoint" "$stubs/mount"
 
 # A PATH with no sudo on it, for the cases of a machine that has none (a
 # debian or ubuntu container's root, a CI runner's user): the stubs and the
@@ -401,6 +440,8 @@ CALLERS_ENT="the caller's own keploy-enterprise.sh"
 # so nothing can be put in ~/.keploy/bin; case_pty sources keploy.sh from an
 # interactive shell on a terminal; case_errexit sources it under
 # `set -eo pipefail`, the shell of a GitHub Actions `shell: bash` step;
+# case_no_tmpdir gives it no TMPDIR, as most Linux shells have none, its
+# temp directory standing in for /tmp (FAKE_SYS_TMP, the mktemp stub);
 # case_after is run in the shell keploy.sh was sourced into, after it. Leaves
 # $work, $out, $log, $scratch, $dir_home, $root_dir and $rc.
 install() {
@@ -433,7 +474,8 @@ install() {
   else
     cp "$installer" "$work/install.sh"
   fi
-  local runner body=$BODY
+  local runner body=$BODY tmp_var=TMPDIR
+  [ -z "$case_no_tmpdir" ] || tmp_var=FAKE_SYS_TMP
   [ -z "$case_errexit" ] || body="set -eo pipefail; $BODY"
   # The body's last command, `exit $st`, as text: case_after goes before it.
   # shellcheck disable=SC2016
@@ -455,7 +497,7 @@ install() {
   fi
   (
     cd "$work" || exit 1
-    env -i HOME="$dir/home" PATH="$path" TMPDIR="$scratch" TERM=dumb \
+    env -i HOME="$dir/home" PATH="$path" "$tmp_var=$scratch" TERM=dumb \
       STUB_LOG="$log" FENCE="$tmp" FAKE_ENT_INSTALLER="$tmp/fake-ent-install.sh" \
       FAKE_RELEASE_TARBALL="$tmp/release.tar.gz" ${case_env[@]+"${case_env[@]}"} \
       "${runner[@]}" < /dev/null
@@ -470,6 +512,7 @@ install() {
   case_home_blocked=""
   case_pty=""
   case_errexit=""
+  case_no_tmpdir=""
   case_after=""
 }
 # What the inner shell runs: it sources keploy.sh the way users do, then logs
@@ -488,6 +531,7 @@ case_bashrc=""
 case_home_blocked=""
 case_pty=""
 case_errexit=""
+case_no_tmpdir=""
 case_after=""
 # Files of someone else's in each case's TMPDIR, named like the ones the --oss
 # route downloads and extracts.
@@ -638,6 +682,15 @@ suite() {
   check "the other installer runs, with the caller's arguments" ent_run_with_args
   check "the install.sh the caller downloaded is left as it was, next to their keploy-enterprise.sh" callers_dir_untouched downloaded
   check "the download used a private temp directory, removed afterwards" used_private_dir_and_cleaned_up download-to install.sh
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
+  echo "== no TMPDIR set, as in most Linux shells"
+  case_no_tmpdir=1
+  install no-tmpdir -noRoot
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the other installer runs, with the caller's arguments" ent_run_with_args
+  check "the download used a private temp directory under /tmp, removed afterwards" used_private_dir_and_cleaned_up download-to install.sh
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
 
   echo "== the download fails, from a repo root"
@@ -828,6 +881,15 @@ suite() {
   check "the install succeeds" test "$rc" -eq 0
   check "the release's keploy is installed in ~/.keploy/bin, and keploy example runs it" eval 'installed && release_keploy_ran'
   check "it reaches for no sudo" no_command_missing
+  check "nothing outside its own directories is touched" stayed_inside
+
+  echo "== --oss -noRoot, no TMPDIR set, as in most Linux shells"
+  case_no_tmpdir=1
+  install oss-no-tmpdir --oss -isCI -noRoot
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the release's keploy is installed in ~/.keploy/bin, and keploy example runs it" eval 'installed && release_keploy_ran'
+  check "the download and extraction used a private temp directory under /tmp, removed afterwards; the other files there are kept unchanged" used_private_dir_and_cleaned_up release-download-to keploy.tar.gz
   check "nothing outside its own directories is touched" stayed_inside
 
   echo "== --oss by a user (-isCI), from a repo root, and sudo refuses"

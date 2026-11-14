@@ -239,7 +239,7 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh
 
   installer:
-    # Forty-four cases, under bash and under zsh; a few seconds. The one on a
+    # Forty-eight cases, under bash and under zsh; a few seconds. The one on a
     # terminal (script(1), in bsdutils on ubuntu) bounds itself at 120 s per
     # shell, so both hanging still leave the log time to show.
     timeout-minutes: 8
