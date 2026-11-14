@@ -1090,6 +1090,29 @@ func TestPruneDiagnosticSumsDuplicatePrunes(t *testing.T) {
 	}
 }
 
+// The sum adds every count of each call, and keeps the last call's horizon and
+// buffer lengths. Today's prune drops nothing outside any window (its drops are
+// a duplicate's leftovers, or let go with a given-up window), so only this row
+// shows that count summed, as the line's field promises.
+func TestPruneDiagAddSumsEveryCount(t *testing.T) {
+	t.Parallel()
+	h1, h2 := time.Unix(100, 0), time.Unix(200, 0)
+	var p pruneDiag
+	p.add(dropTally{duplicateLeftovers: 1, outsideAnyWindow: 2, held: 3, windowsGivenUp: 4, givenUpDrops: 5}, 6, h1, 7, 8)
+	p.add(dropTally{duplicateLeftovers: 10, outsideAnyWindow: 20, held: 30, windowsGivenUp: 40, givenUpDrops: 50}, 60, h2, 70, 80)
+	want := pruneDiag{
+		prunes:       2,
+		mocksFlushed: 66,
+		tally:        dropTally{duplicateLeftovers: 11, outsideAnyWindow: 22, held: 33, windowsGivenUp: 44, givenUpDrops: 55},
+		horizon:      h2,
+		bufferBefore: 70,
+		bufferAfter:  80,
+	}
+	if p != want {
+		t.Fatalf("sum = %+v, want %+v", p, want)
+	}
+}
+
 // A prune that gives a window up logs at once, not with the next sum: a kept
 // request may be left out for it.
 func TestPruneDiagnosticLogsAGiveUpAtOnce(t *testing.T) {
