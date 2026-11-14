@@ -36,6 +36,15 @@ type heldAtTheStop struct {
 
 func newHeldAtTheStop(t *testing.T, tls bool) *heldAtTheStop {
 	t.Helper()
+	c := newHeldAtTheStopStreamsOpen(t, tls)
+	c.h.closeStreams()
+	return c
+}
+
+// newHeldAtTheStopStreamsOpen is newHeldAtTheStop with both streams left
+// open: the relay's teardown has not ended them yet.
+func newHeldAtTheStopStreamsOpen(t *testing.T, tls bool) *heldAtTheStop {
+	t.Helper()
 	resetWarnLimiters()
 	core, logs := observer.New(zapcore.DebugLevel)
 	h := newV2Harness(t)
@@ -53,7 +62,6 @@ func newHeldAtTheStop(t *testing.T, tls bool) *heldAtTheStop {
 	} else {
 		h.pushClient(cannedHandshakeResponse41(t, 1, false), base.Add(time.Millisecond))
 	}
-	h.closeStreams()
 	return &heldAtTheStop{h: h, mgr: mgr, logs: logs, ctx: stoppedRecording(context.Background(), h.sess)}
 }
 
@@ -169,6 +177,44 @@ func TestRecordV2_AtTheStopAFailedTLSUpgradeLeavesAHeldHandshakeSilent(t *testin
 		}
 	}()
 	err := recordV2NoPanic(t, c.ctx, c.h.logger, c.h.sess)
+	if err != nil {
+		t.Fatalf("RecordV2 = %v; want the failed upgrade at the stop to end the capture silently", err)
+	}
+	c.nothingLost(t, err)
+}
+
+// The same failed upgrade before the relay's teardown has ended the streams:
+// the capture ends at the SSLRequest then and there. What the client stream
+// holds past it is a ClientHello, a TLS record, which no recorder reads (its
+// header frames a MySQL packet of 66326 bytes), so the parser neither reads it
+// as MySQL nor waits for the streams' end to return.
+func TestRecordV2_AtTheStopAFailedTLSUpgradeEndsTheCaptureAtTheSSLRequest(t *testing.T) {
+	c := newHeldAtTheStopStreamsOpen(t, true)
+	go func() {
+		select {
+		case d := <-c.h.dirs:
+			c.h.acks <- directive.Ack{Kind: d.Kind, OK: false, Err: errFakeTLSFail}
+		case <-time.After(5 * time.Second):
+		}
+	}()
+	var err error
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		err = recordV2NoPanic(t, c.ctx, c.h.logger, c.h.sess)
+	}()
+	// The streams end only once the row has its answer, as the relay's
+	// teardown would end them, so a parser still reading them returns too.
+	t.Cleanup(func() {
+		c.h.closeStreams()
+		<-returned
+	})
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("RecordV2 still reads the client stream 10 s after the relay failed the upgrade at the stop; " +
+			"want the capture ended at the SSLRequest: past it the stream holds TLS records only")
+	}
 	if err != nil {
 		t.Fatalf("RecordV2 = %v; want the failed upgrade at the stop to end the capture silently", err)
 	}
