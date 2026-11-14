@@ -2730,6 +2730,46 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	// stands at an answer whose state in round F keploy cannot tell; (ii)
 	// the recorded moment stands in the test case's request by a cut rule
 	// that gives no moment F saw in it as sent. Never at a given.
+	//
+	// A place that holds round F's moment and not the recorded one only
+	// because it reads back what a send of the scope wrote before it, a send
+	// its own call learned as its read of the application's clock (clock),
+	// is no pick (i) where the value is cut coarser than a millisecond and
+	// the call's own window holds the read, or a client test's window since
+	// its begin does (windowRead): the place holds the send's text as
+	// recorded and as round F sent it, so the moment there is the
+	// application's own earlier read of the clock, which met the call's in
+	// one cut in round F alone (a record stamped at 09:38:01 when recorded,
+	// read back before a call of 09:38:02; both at 09:39:04 in round F). A
+	// replay reads the place back from the send's own read, as fresh as the
+	// call's, so whichever the call took, the later steps decide the value
+	// (a read of the clock its window holds, checked at replay), as with no
+	// such place, and step 3's rule (an answer that only reads back a coarse
+	// clock send is no source) reads the same place alike. A place that
+	// shows the same text in both runs, a send learned as a plain value or
+	// after the place, one of another test, a cut of a millisecond or finer
+	// (two reads do not meet in one as the runs' timing falls), and a value
+	// no such window holds stay picks.
+	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
+	windowRead := func() bool {
+		return c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	}
+	// Asked last of case (i), where the place does not show the recorded
+	// moment unless it is unchanged (same), which reads back no new send.
+	readsBack := func(p evPlace) bool {
+		// windowRead holds only where both moments are known.
+		if p.same() || !windowRead() || max(c.rm.res, c.lm.res) <= time.Millisecond {
+			return false
+		}
+		return slices.ContainsFunc(dc.ps, func(s evPlace) bool {
+			if !s.clock || !inScope(s) || !s.at.Before(p.at) {
+				return false
+			}
+			inR, _, _ := dc.holds(p, p.t.rec, s.rec, nil, false)
+			inF, _, _ := dc.holds(p, p.t.live, s.live, nil, false)
+			return inR && inF
+		})
+	}
 	for _, h := range hs {
 		p := h.p
 		if p.gave || p.side != Response && !request(p) {
@@ -2752,7 +2792,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			return c.lm != nil && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && dc.namedFiner(p.t.live, p.t.rec, *c.lm, finer)
 		}
 		switch {
-		case before(p) && h.hl && (!h.hr || p.same()) && !cut():
+		case before(p) && h.hl && (!h.hr || p.same()) && !cut() && !readsBack(p):
 			why := "round F's moment stands unchanged in " + p.name
 			if !p.same() {
 				why = "round F's moment stands in " + p.name + ", which does not show it"
@@ -2811,10 +2851,6 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	// the value is that read (5, 7), as an answer's is at step 3 and as main
 	// reads it; with no such read it stays a slot, which the adapter that
 	// cannot bind another form refuses.
-	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
-	windowRead := func() bool {
-		return c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
-	}
 	cutSlot := func(p evPlace) bool {
 		return c.rm != nil && c.lm != nil && dc.clientCase(p.mock) && dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm) && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && windowRead()
 	}
