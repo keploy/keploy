@@ -1168,8 +1168,14 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		// at teardown.
 		recordNativeInstall(&nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey(), caDER: caDER})
 
-		// Install certificate using certutil
-		if err = installWindowsCA(ctx, logger, tempCertPath); err != nil {
+		// Install certificate using certutil. A session that cannot show
+		// Windows' trust prompt leaves it out of the store, and the app is
+		// given keploy's CA where its runtime reads one instead.
+		keptAt := ""
+		if fs, ok := store.(*fileStore); ok {
+			keptAt = filepath.Join(fs.dir, caCertFileName)
+		}
+		if err = trustOnWindows(ctx, logger, tempCertPath, caDER, keptAt); err != nil {
 			utils.LogError(logger, err, "Failed to install CA certificate on Windows")
 			return err
 		}
@@ -1836,33 +1842,56 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 // only trust store that has to contain the CA — and installing there does not
 // alter machine-wide trust for every other user and service on the host.
 //
-// The machine store is kept as a fallback for setups where the per-user store
-// is unavailable (a service account with no loaded profile, say), which is also
-// what preserves the previous behaviour for an elevated run.
-func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) error {
-	userCmd := exec.CommandContext(ctx, "certutil", "-user", "-addstore", "-f", "ROOT", certPath)
+// A CA the user's store already holds (keploy keeps its Windows CA across
+// runs, castore.go) is not added again, so Windows asks at most once, and a
+// later run in a session with no desktop reuses what the user trusted.
+//
+// The machine store is kept as a fallback only for an elevated run (an
+// administrator past UAC, or a service account with no loaded profile), which
+// is what preserves the previous behaviour there. A standard user never asks
+// it: it can only refuse them, and keploy needs no administrator.
+//
+// A session that has no desktop to show Windows' trust prompt in (a CI
+// runner's service, an OpenSSH session, a scheduled task) makes certutil fail
+// the user-store add with ERROR_NOT_SUPPORTED: that is errNoTrustPrompt.
+func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string, der []byte, keptAt string) error {
+	if held, err := userRootHoldsFn(der); err != nil {
+		logger.Debug("could not read the current user's Windows ROOT store; adding keploy's CA to it", zap.Error(err))
+	} else if held {
+		logger.Debug("keploy's CA is already in the current user's Windows ROOT store; not adding it again")
+		return nil
+	}
 	// Windows asks the user, in a dialog, whether to trust a certificate added
 	// to their ROOT store, and certutil waits for the answer: the agent's
 	// start waits for the user (utils.BeginBootPrompt), however long they take.
 	answered := utils.BeginBootPrompt("Windows' prompt to trust keploy's CA")
-	userOut, userErr := userCmd.CombinedOutput()
+	userOut, userErr := certutilAddFn(ctx, true, certPath)
 	answered()
 	if userErr == nil {
 		logger.Debug("installed the keploy CA in the current user's Windows ROOT store",
 			zap.String("output", string(userOut)))
 		return nil
 	}
-	logger.Debug("could not install the keploy CA in the per-user Windows ROOT store; trying the machine store",
+	if !tokenElevatedFn() {
+		if noTrustPrompt(userOut, userErr) {
+			logger.Debug("this session cannot show Windows' prompt to trust keploy's CA", zap.String("output", string(userOut)))
+			return errNoTrustPrompt
+		}
+		utils.LogError(logger, userErr, "Failed to install keploy's CA in the current user's Windows ROOT store",
+			zap.String("output", string(userOut)),
+			zap.String("next_step", trustStep(keptAt)+". Without it the application's HTTPS calls fail certificate verification."))
+		return userErr
+	}
+	logger.Debug("could not install the keploy CA in the per-user Windows ROOT store; this run is elevated, so trying the machine store",
 		zap.Error(userErr), zap.String("output", string(userOut)))
 
-	machineCmd := exec.CommandContext(ctx, "certutil", "-addstore", "-f", "ROOT", certPath)
-	machineOut, machineErr := machineCmd.CombinedOutput()
+	machineOut, machineErr := certutilAddFn(ctx, false, certPath)
 	utils.BootStep("certutil -addstore is over")
 	if machineErr != nil {
 		utils.LogError(logger, machineErr, "Failed to install CA certificate using certutil",
 			zap.String("user_store_output", string(userOut)),
 			zap.String("machine_store_output", string(machineOut)),
-			zap.String("next_step", "the machine-wide certificate store needs Administrator; re-run in an elevated terminal, or import "+certPath+" into your user's Trusted Root store manually. Without the CA installed, the application's HTTPS calls will fail certificate verification."))
+			zap.String("next_step", trustStep(keptAt)+". Without the CA installed, the application's HTTPS calls fail certificate verification."))
 		return machineErr
 	}
 	logger.Debug("installed the keploy CA in the machine-wide Windows ROOT store",

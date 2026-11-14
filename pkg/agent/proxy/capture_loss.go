@@ -330,16 +330,20 @@ func (c *clientTLS) hungUp(how string) {
 // process is the client's process, as a build's gate is told it.
 func (c *clientTLS) process() Process { return Process{Pid: c.nsPid, KernelPid: c.tgid} }
 
-// lossWhat is what a handshake c lost is charged as: its destination, and
-// what a build's gate knows of why its process failed it (OnClientTLS's
-// Why), so the test's reason names the process and the cause, not only the
-// call.
+// lossWhat is what a handshake c lost is charged as: its destination, what a
+// build's gate knows of why its process failed it (OnClientTLS's Why), so the
+// test's reason names the process and the cause, not only the call, and, on
+// Windows when this session could not put keploy's CA in the user's trust
+// store, that and the step that does (pTls.UntrustedStoreWhy).
 func (c *clientTLS) lossWhat() string {
 	what := "to " + c.dst
 	if g := OnClientTLS; g != nil && c.tgid != 0 {
 		if why := g.Why(c.process()); why != "" {
 			what += ": " + why
 		}
+	}
+	if why := pTls.UntrustedStoreWhy(); why != "" {
+		what += ": " + why
 	}
 	return what
 }
