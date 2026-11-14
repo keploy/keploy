@@ -584,10 +584,12 @@ func TestOutcomeAPieceEachRunHoldsAtAnotherPlaceIsNoChance(t *testing.T) {
 // recording's view, is fresh, its line naming both places. keploy test reads
 // the same shapes as before (refused, as in
 // TestOutcomeAPieceEachRunHoldsAtAnotherPlaceIsNoChance). Refused in keploy
-// mock too: the recorded id's 32-bit word glued inside a longer word of a
-// third place, and round F's glued inside a longer word of a set
-// recording's answer. The places are read for the id's long words once per
-// call, however many of its pieces are asked.
+// mock too: either run's long word glued inside a longer word of a third
+// place's text (the recording's, round F's), of a set recording's answer,
+// of round F's view of one, or of one of the views that differ round F
+// served of a recording (of the call's scope, or of the set). The places
+// are read for the id's long words once per call, however many of its
+// pieces are asked.
 func TestOutcomeAPieceOfAMintedIdEachRunHoldsIsChanceInKeployMock(t *testing.T) {
 	const (
 		path           = "body.docs.msgs.0.appId"
@@ -637,6 +639,47 @@ func TestOutcomeAPieceOfAMintedIdEachRunHoldsIsChanceInKeployMock(t *testing.T) 
 		decide(oClientDrifts(), both, set("tok"+live[24:]+"z", noneF)), RefusalUnknown, "mock-231", "mock-232")
 	oRefused(t, "keploy mock: round F's 48-bit word glued inside a longer word of round F's view of a set recording",
 		decide(oClientDrifts(), both, set(noneR, "tok"+live[24:]+"z")), RefusalUnknown, "mock-231", "mock-232")
+	oRefused(t, "keploy mock: the recorded id's 32-bit word glued inside a longer word of a set recording's answer",
+		decide(oClientDrifts(), both, set("tok"+rec[:8]+"z", noneF)), RefusalUnknown, "mock-231", "mock-232")
+	fGlued := append(slices.Clone(both), at("mock-233", "key none", "key x"+live[24:]+"y")...)
+	oRefused(t, "keploy mock: round F's 48-bit word glued inside a longer word of round F's text at a third place",
+		decide(oClientDrifts(), fGlued, nil), RefusalUnknown, "mock-231", "mock-232")
+	// Round F served a recording of the call's scope, or one of the set,
+	// with views that differ (ServedChanged): a view holding round F's
+	// 48-bit word glued inside a longer word refuses; the same views
+	// holding nothing of the id leave the piece chance.
+	viewed := func(inSet bool, views ...string) Raw {
+		mock := func(id string) *models.Mock {
+			m := receiveOf("mock-35", id, oAt.Add(-time.Minute))
+			if inSet {
+				m.Spec.ResTimestampMock = time.Time{}
+			}
+			return m
+		}
+		drifts := clockedDrifts()
+		vs := make([]Raw, len(views))
+		for i, v := range views {
+			vs[i] = drifts.RawOf(mock(v), true)
+		}
+		return drifts.RawOf(mock(noneR), true).ServedAs(3).ServedChanged(vs...)
+	}
+	withRaw := func(x Raw) Decision {
+		in := oInput(path, rec, live, both, []Raw{x})
+		in.Drifts = oClientDrifts()
+		return oWord(t, Decide(in), r, f)
+	}
+	costFresh(t, "keploy mock: a recording of the call's scope round F served with two views holding nothing of the id",
+		withRaw(viewed(false, noneF, "c1ae4c69-0000-4c00-b2c3-d4e5f6071829")))
+	oRefused(t, "keploy mock: round F's 48-bit word glued inside a longer word of a view round F served of a recording of the call's scope",
+		withRaw(viewed(false, noneF, "tok"+live[24:]+"z")), RefusalUnknown, "mock-231", "mock-232")
+	setViewed := func(views ...string) func() ([]GivenPlaces, error) {
+		x := viewed(true, views...)
+		return func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
+	}
+	costFresh(t, "keploy mock: a set recording round F served with two views holding nothing of the id",
+		decide(oClientDrifts(), both, setViewed(noneF, "c1ae4c69-0000-4c00-b2c3-d4e5f6071829")))
+	oRefused(t, "keploy mock: round F's 48-bit word glued inside a longer word of a view round F served of a set recording",
+		decide(oClientDrifts(), both, setViewed(noneF, "tok"+live[24:]+"z")), RefusalUnknown, "mock-231", "mock-232")
 	// The id whole in a recording of the set made a minute after the call
 	// (the application's later calls with the app it made) is no long
 	// word glued: the piece is chance still.

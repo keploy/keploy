@@ -289,7 +289,7 @@ func TestScopeTableWithoutSourcesAckIsRefused(t *testing.T) {
 // series' request again and again. An agent that names once is taken, and
 // the table posted carries them; a table with none takes an answer that
 // does not name once. A table with once series and no other rule field is
-// checked all the same.
+// checked all the same, as is one whose only rule field is every.
 func TestScopeTableWithoutOnceAckIsRefused(t *testing.T) {
 	var answer string
 	var posted models.ScopeTableReq
@@ -344,5 +344,10 @@ func TestScopeTableWithoutOnceAckIsRefused(t *testing.T) {
 	}
 	if !reflect.DeepEqual(posted.Every, every) {
 		t.Fatalf("the posted table's every %v, want %v", posted.Every, every)
+	}
+	// A table whose only rule field is every is checked all the same.
+	answer = `{"status":"ok","served":["series","once"]}`
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, every, false); !errors.Is(err, ErrAgentIgnoresRules) {
+		t.Fatalf("a table with every series and no other rule field was taken by an agent that does not name every: got %v, want ErrAgentIgnoresRules", err)
 	}
 }
