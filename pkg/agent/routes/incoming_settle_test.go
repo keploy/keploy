@@ -1031,7 +1031,10 @@ func TestHandleIncoming_LeavesOutATestCaseOfARecordingThatEnded(t *testing.T) {
 	// and holes other rows record on the real clock (loseMockToPressure's
 	// pause ran about a second before this row on a loaded runner) reach none
 	// of its test cases, which a span over them leaves out whatever else this
-	// row checks.
+	// row checks. Its windows stay in that stretch too, so none reaches another
+	// row's time. Only the stop is at the real now: a stop no later than the
+	// last ended one is not noted (NoteStop), and the stop does not read when
+	// a request's response came.
 	inFlightSince := newStretch()
 	if over, n := mgr.WasPressureActiveInWindow(inFlightSince, inFlightSince.Add(2*time.Millisecond)); over {
 		t.Fatalf("%d pauses recorded before this row already cover its test cases", n)
@@ -1048,7 +1051,11 @@ func TestHandleIncoming_LeavesOutATestCaseOfARecordingThatEnded(t *testing.T) {
 		t.Fatal("fixture: the window was given up")
 	}
 	r.Keep()
-	mgr.ResolveKept(r, resolvedSince, time.Now(), "", false) // its response came after the stop
+	// Its window ends in the stretch: one resolved to the real now would be a
+	// kept window of an ended recording over the past-the-cap row's spans and
+	// every late stretch, and a later row's late mock there would be let go as
+	// that recording's.
+	mgr.ResolveKept(r, resolvedSince, inFlightSince.Add(2*time.Millisecond), "", false)
 	r.Close()
 	mgr.EndStoppedRecording() // that recording's stream has ended
 
