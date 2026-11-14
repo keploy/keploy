@@ -1443,8 +1443,9 @@ func GetAvailableContainerPort() (uint32, error) {
 
 // availablePortAbove is GetAvailablePort with the host's ephemeral range read
 // by ephemeral (ephemeralPortRange's signature), whose candidates are above
-// floor too.
-func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32) (uint32, error) {
+// floor too, and never one of exclude: the search skips those, it does not
+// draw again after it returns one.
+func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32, exclude ...uint32) (uint32, error) {
 	top := floor
 	if _, ephemeralHi, known := ephemeral(); known && ephemeralHi < 65535 && ephemeralHi > top {
 		top = ephemeralHi
@@ -1466,6 +1467,9 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 			if !ok {
 				break
 			}
+			if slices.Contains(exclude, lo+off) {
+				continue
+			}
 			free, err := portProbe(lo + off)
 			if err != nil {
 				return 0, err
@@ -1480,6 +1484,9 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 		}
 		for i := uint32(0); i < span; i++ {
 			port := lo + ((start - lo + i) % span)
+			if slices.Contains(exclude, port) {
+				continue
+			}
 			free, err := portProbe(port)
 			if err != nil {
 				return 0, err
@@ -1496,14 +1503,31 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 	// is strictly better than no port at all, and this is the historical
 	// behaviour. A container's port that then meets one of the resolver's
 	// fails the agent's start at its bind, as no port at all would.
-	listener, err := plaintcp.Listen(context.Background(), "tcp", ":0")
-	if err != nil {
-		return 0, fmt.Errorf("failed to find available port: %w", err)
-	}
-	defer listener.Close()
+	return osAssignedPort(exclude)
+}
 
-	addr := listener.Addr().(*net.TCPAddr)
-	return uint32(addr.Port), nil
+// osAssignedPort is a port the OS assigns (a listener on ":0", let go before
+// it returns) other than exclude. A pick in exclude stays held while the OS
+// is asked again, so the OS cannot hand it back, and len(exclude)+1 asks
+// always reach a port outside it.
+func osAssignedPort(exclude []uint32) (uint32, error) {
+	var held []net.Listener
+	defer func() {
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+	}()
+	for i := 0; i <= len(exclude); i++ {
+		ln, err := portListen(context.Background(), "tcp", ":0")
+		if err != nil {
+			return 0, fmt.Errorf("failed to find available port: %w", err)
+		}
+		held = append(held, ln)
+		if port := uint32(ln.Addr().(*net.TCPAddr).Port); !slices.Contains(exclude, port) {
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("failed to find a port other than %v", exclude)
 }
 
 // randomProbes is how many candidates availablePortAbove draws at random
@@ -1514,6 +1538,11 @@ const randomProbes = 32
 // portOffset draws availablePortAbove's candidates (randomOffset) and
 // portProbe checks each (probePort).
 var portOffset, portProbe = randomOffset, probePort
+
+// portListen opens probePort's and osAssignedPort's listeners: plain TCP,
+// never Go's default MPTCP, which for as long as it is open listens on every
+// interface.
+var portListen = plaintcp.Listen
 
 // randomOffset is a random offset in [0, span), and false where no random
 // number could be read.
@@ -1530,7 +1559,7 @@ func randomOffset(span uint32) (uint32, bool) {
 // for its lifetime, so the candidate is unusable AND leaked: that is an
 // error, not a candidate passed over, which would leak one fd per candidate.
 func probePort(port uint32) (bool, error) {
-	ln, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
+	ln, err := portListen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return false, nil
 	}
@@ -1562,31 +1591,21 @@ func isPortAvailable(port uint32) bool {
 // it. Narrowing allocation to above the ephemeral range makes the pool smaller
 // and that coincidence correspondingly more likely, so the exclusion is not
 // optional bookkeeping.
+//
+// The search for another port skips them (availablePortAbove). It used to
+// draw GetAvailablePort's port again while that was an excluded one, 16 times
+// at most: in a band whose free ports were an excluded one and one other, the
+// draws kept returning the excluded port and the search failed with a port
+// free.
 func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
-	taken := make(map[uint32]struct{}, len(exclude))
-	for _, p := range exclude {
-		taken[p] = struct{}{}
-	}
-	if _, clash := taken[port]; !clash && isPortAvailable(port) {
+	if !slices.Contains(exclude, port) && isPortAvailable(port) {
 		return port, nil
 	}
-	var newPort uint32
-	var err error
-	// Bounded: a handful of draws is plenty to miss a set this small, and a
-	// bound means an exhausted pool surfaces as an error rather than a hang.
-	for i := 0; i < 16; i++ {
-		newPort, err = GetAvailablePort()
-		if err != nil {
-			break
-		}
-		if _, clash := taken[newPort]; !clash {
-			return newPort, nil
-		}
+	newPort, err := availablePortAbove(hostEphemeralRange, 0, exclude...)
+	if err != nil {
+		return 0, fmt.Errorf("failed to allocate new port: %w", err)
 	}
-	if err == nil {
-		return 0, fmt.Errorf("failed to allocate a port distinct from %v", exclude)
-	}
-	return 0, fmt.Errorf("failed to allocate new port: %w", err)
+	return newPort, nil
 }
 
 func EnsureRmBeforeName(cmd string) string {

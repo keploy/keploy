@@ -3659,8 +3659,15 @@ func (a *AgentClient) proxyPorts(docker bool, agentPort uint32) (proxyPort, dnsP
 		return proxyPort, dnsPort, nil
 	}
 	// Exclude the ports already handed out in this setup: none of them is
-	// bound yet, so a later draw could otherwise return one of them.
-	if proxyPort, err = a.portOrMove("proxy", proxyPort, agentPort); err != nil {
+	// bound yet, so a later draw could otherwise return one of them. The
+	// proxy's draw skips the configured DNS server's port too: a free one is
+	// the DNS server's, and a proxy moved onto it moved the DNS server off it,
+	// with a line saying that a port nothing held was taken.
+	proxyExclude := []uint32{agentPort}
+	if dnsPort != proxyPort {
+		proxyExclude = append(proxyExclude, dnsPort)
+	}
+	if proxyPort, err = a.portOrMove("proxy", proxyPort, proxyExclude...); err != nil {
 		return 0, 0, err
 	}
 	if dnsPort, err = a.portOrMove("DNS server", dnsPort, agentPort, proxyPort); err != nil {

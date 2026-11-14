@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -216,6 +217,35 @@ func TestANativeAgentOffLinuxIsMovedOffATakenPortAndTheMoveSaid(t *testing.T) {
 			t.Fatalf("proxyPorts = %d, %d, %v; want the proxy on %d and the DNS server elsewhere", gotProxy, gotDNS, err, proxy)
 		}
 	})
+	// A moved proxy is never handed the configured DNS server's port: a free
+	// one is the DNS server's. Here the search's only free ports are the DNS
+	// server's and one other, as utils.EnsureAvailablePorts finds them. The
+	// proxy used to take the DNS server's, which then moved with a line saying
+	// that a port nothing held was taken.
+	t.Run("a moved proxy is not handed the DNS server's port", func(t *testing.T) {
+		const taken, dns, spare, agentPort uint32 = 61000, 64000, 65000, 40000
+		was := availablePort
+		t.Cleanup(func() { availablePort = was })
+		availablePort = func(port uint32, exclude ...uint32) (uint32, error) {
+			if port != taken && !slices.Contains(exclude, port) {
+				return port, nil
+			}
+			for _, p := range []uint32{dns, spare} {
+				if !slices.Contains(exclude, p) {
+					return p, nil
+				}
+			}
+			return 0, errors.New("no port")
+		}
+		a, logs := portsClient(taken, dns)
+		gotProxy, gotDNS, err := a.proxyPorts(false, agentPort)
+		if err != nil || gotProxy != spare || gotDNS != dns {
+			t.Fatalf("proxyPorts = %d, %d, %v; want the proxy moved to %d and the DNS server kept on its %d", gotProxy, gotDNS, err, spare, dns)
+		}
+		if logs.Len() != 1 || !strings.HasPrefix(logs.All()[0].Message, "the proxy's ") {
+			t.Fatalf("said %v; want the proxy's move alone", logs.All())
+		}
+	})
 	// The agent's port is free when proxyPorts runs, as it is before the agent
 	// starts: free, it must still not be the proxy's too.
 	t.Run("the proxy's port is the agent's", func(t *testing.T) {
@@ -233,7 +263,7 @@ func TestANativeAgentOffLinuxIsMovedOffATakenPortAndTheMoveSaid(t *testing.T) {
 			t.Cleanup(func() { availablePort = was })
 			exhausted := errors.New("no port")
 			availablePort = func(port uint32, exclude ...uint32) (uint32, error) {
-				if (server == "proxy") == (len(exclude) == 1) {
+				if (server == "proxy") == (port == 16789) {
 					return 0, exhausted
 				}
 				return port, nil
