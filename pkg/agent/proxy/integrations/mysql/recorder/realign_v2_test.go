@@ -1788,3 +1788,37 @@ func TestRecordV2_AnEmptyCommandIsAnsweredAndItsAnswerLeftOut(t *testing.T) {
 		})
 	}
 }
+
+// A PREPARE held for its framing (post-TLS, parameters only) with 255
+// parameters has its EOF at sequence id 1, the id the next answer starts at.
+// An empty command packet is answered with an ERR, which never starts like an
+// EOF, so an EOF there is the PREPARE's: the PREPARE is recorded with it, and
+// only the empty command's exchange is left out. Settled as a command whose
+// answer may be an EOF, the PREPARE was left out too.
+func TestRecordV2_PostTLS_AnEOFBeforeAnEmptyCommandsAnswerIsTheHeldPreparesOwn(t *testing.T) {
+	t.Parallel()
+	def := columnPayload(t, &mysql.ColumnDefinition41{Catalog: "def", Name: "?", OrgName: "?", FixedLength: 0x0c, CharacterSet: 0x3f, ColumnLength: 20, Type: byte(mysql.FieldTypeLongLong)})
+	defs := make([][]byte, 255)
+	for i := range defs {
+		defs[i] = def
+	}
+	j := newJoinedMidStream(t)
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+	// One chunk: the harness's channels hold fewer packets than 255.
+	j.exchange(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO t VALUES (?)"...), 0),
+		[][]byte{bytes.Join(prepareOK(false, defs, nil), nil)})
+	j.afterLeftOut(t, wrapPacket(nil, 0), errReply(1, 1047, "Unknown command"), false)
+	mocks, err := j.run(t)
+	if err != nil {
+		t.Fatalf("RecordV2 = %v, want no stop", err)
+	}
+	got := strings.Join(pairings(mocks), "; ")
+	want := "SELECT 1 -> OK 1; COM_STMT_PREPARE -> COM_STMT_PREPARE_OK; SELECT 2 -> OK 7; SELECT 3 -> OK 8; SELECT 4 -> OK 9"
+	if got != want {
+		t.Fatalf("mocks %q, want %q", got, want)
+	}
+	sp, ok := mocks[1].Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket)
+	if !ok || len(sp.ParamDefs) != 255 || sp.EOFAfterParamDefs == nil {
+		t.Fatal("the PREPARE was not recorded with its 255 parameters and the EOF its server sent after them")
+	}
+}

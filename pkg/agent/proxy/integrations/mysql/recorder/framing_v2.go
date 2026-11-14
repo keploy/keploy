@@ -858,11 +858,13 @@ const maxEOFPayload = 5
 // answerNeverAnEOF holds the commands whose answer never starts with a packet
 // shaped like an EOF (0xFE, a payload of 5 bytes or 1): it is an OK, an ERR, a
 // result's column count (one that starts 0xFE is 9 bytes), a PREPARE's OK, or
-// a LOCAL INFILE request (0xFB). Any other command's answer may: COM_SET_OPTION
-// and COM_DEBUG are answered with an EOF, a cursor's COM_STMT_FETCH with one
-// once its rows ran out, COM_FIELD_LIST with one alone when no column
-// matches, and COM_CHANGE_USER with an auth switch that, in its old form, is
-// one 0xFE byte.
+// a LOCAL INFILE request (0xFB). An empty command packet, which the server
+// takes for COM_SLEEP (commandByte), is answered with an ERR: MySQL's and
+// MariaDB's unknown-command error. Any other command's answer may:
+// COM_SET_OPTION and COM_DEBUG are answered with an EOF, a cursor's
+// COM_STMT_FETCH with one once its rows ran out, COM_FIELD_LIST with one alone
+// when no column matches, and COM_CHANGE_USER with an auth switch that, in its
+// old form, is one 0xFE byte.
 var answerNeverAnEOF = map[byte]bool{
 	mysql.COM_QUERY:            true,
 	mysql.COM_STMT_EXECUTE:     true,
@@ -875,6 +877,7 @@ var answerNeverAnEOF = map[byte]bool{
 	0x06:                       true, // COM_DROP_DB: OK or ERR
 	0x07:                       true, // COM_REFRESH: OK or ERR
 	0x0c:                       true, // COM_PROCESS_KILL: OK or ERR
+	comSleep:                   true, // an empty command packet: ERR
 }
 
 // heldPrepare is a PREPARE read whole on a framing that is only assumed (a
