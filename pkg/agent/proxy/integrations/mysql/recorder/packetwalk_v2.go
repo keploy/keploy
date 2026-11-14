@@ -1,6 +1,7 @@
 package recorder
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
@@ -50,6 +51,14 @@ type packetWalk struct {
 	// from.
 	client     bool
 	clientLast byte
+	// unjudged: the answer the stream is at (mark) may start with an ERR 1835
+	// to a command without an answer that did not decode, sent before the
+	// command it answers, which cannot be told from that command's own answer
+	// (markUnjudged). head holds the first headN payload bytes of the first
+	// packet walked since the mark; headLeft more of them are still to come.
+	unjudged        bool
+	head            [3]byte
+	headN, headLeft int
 }
 
 // feed is the stream's tap: b are the stream's next bytes.
@@ -57,6 +66,11 @@ func (w *packetWalk) feed(b []byte) {
 	for w.on && len(b) > 0 {
 		if w.rest > 0 {
 			n := min(w.rest, len(b))
+			if w.headLeft > 0 {
+				k := min(w.headLeft, n)
+				w.headN += copy(w.head[w.headN:], b[:k])
+				w.headLeft -= k
+			}
 			w.rest -= n
 			b = b[n:]
 			continue
@@ -71,6 +85,7 @@ func (w *packetWalk) feed(b []byte) {
 		w.rest = int(mysqlUtils.GetPayloadLength(w.hdr[:3]))
 		if !w.seen {
 			w.first = w.hdr[3]
+			w.headN, w.headLeft = 0, min(len(w.head), w.rest)
 		}
 		w.seen, w.last = true, w.hdr[3]
 	}
@@ -85,7 +100,24 @@ func (w *packetWalk) anchor() {
 // mark says the server's next bytes start the answer to a command the client
 // sent, which starts at sequence id start: a new exchange.
 func (w *packetWalk) mark(start byte) {
-	w.start, w.seen, w.client = start, false, false
+	w.start, w.seen, w.client, w.unjudged, w.headLeft = start, false, false, false, 0
+}
+
+// markUnjudged marks the answer's start as mark does where its first packet
+// may be the ERR 1835 to a command without an answer that did not decode, sent
+// before the command it answers (takeMalformedAnswers could not judge it): an
+// ERR 1835 walked first since then answers the one command or the other, so it
+// shows nothing of where that answer ended (cut).
+func (w *packetWalk) markUnjudged(start byte) {
+	w.mark(start)
+	w.unjudged = true
+}
+
+// firstIsMalformedErr reports whether the first packet walked since the mark
+// is an ERR 1835 (isMalformedPacketErr): its payload starts with 0xff and that
+// error code.
+func (w *packetWalk) firstIsMalformedErr() bool {
+	return w.seen && w.headN == len(w.head) && w.head[0] == 0xff && binary.LittleEndian.Uint16(w.head[1:]) == errMalformedPacket
 }
 
 // markAt says the answer to a command the client sent started with the packet
@@ -126,6 +158,15 @@ func (w *packetWalk) cut(first byte, unproven bool) string {
 		return "it falls inside a packet of the server's"
 	case !w.seen:
 		return "no packet of the response left out came before it"
+	case w.unjudged && w.firstIsMalformedErr():
+		// The server answers in order, so an ERR 1835 to a command without an
+		// answer sent before the response left out comes before that
+		// response, and it was captured after the response's command (the
+		// mark is where nothing captured before it is left), where it cannot
+		// be told from the response's own answer, which may be one too: taken
+		// for that, it shows nothing of where the response ended, and the
+		// response may not have begun at the cut.
+		return "the first packet walked since the response left out began is an ERR 1835 (a malformed packet), which may answer a command without an answer that did not decode, sent before it, as well as its own command"
 	case unproven && w.first != w.start:
 		// The first packet walked since the mark is not where the response
 		// left out starts: it may be the tail of a response before it, which

@@ -1955,8 +1955,40 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				// where this command's answer starts, and the packet a fault
 				// of that read stopped at is no proof either: the walk starts
 				// after it.
+				//
+				// Where settle read into what the server sent after this command
+				// was captured (the chunk it read last was), every byte captured
+				// before the command has left the server's stream, which holds a
+				// direction's chunks in the order they were captured: the floor
+				// has nothing to drop, and no ERR 1835 captured before the
+				// command is left to take, so nothing proves the cut. And the
+				// packet settle read may have been the whole of this command's
+				// answer (an EOF it could not tell, from a server that sent one
+				// to a client that negotiated CLIENT_DEPRECATE_EOF), so the
+				// server's next bytes may come only after the client's next
+				// command the server answers. Waited for here, they stalled the
+				// parser with the client's bytes unread (a command without an
+				// answer among them, which the client sends and then idles), and
+				// a connection that sat idle so was retired as hung, its whole
+				// recording lost. So nothing is read there, and the walk starts
+				// the answer where the stream is. While a command without an
+				// answer that did not decode is unanswered, the server's next
+				// packet may be the ERR 1835 to it, captured after this command,
+				// which cannot be told from this command's own answer
+				// (takeMalformedAnswers): the walk is told (markUnjudged), and the
+				// next cut is refused when the first packet it walked is one.
+				// Where settle read nothing captured after the command, none of
+				// its answer was read, and the reads below wait for it, as at
+				// every command the server answers.
 				proven := false
-				if errors.Is(err, ErrFramingLost) {
+				if last := sess.DestStream.LastReadConnSeq(); errors.Is(err, ErrFramingLost) && (last == 0 || !(fakeconn.Chunk{ConnSeq: last}).CapturedBefore(first.ConnSeq)) {
+					sess.FloorAt(first.ConnSeq)
+					if len(malformed) > 0 {
+						walk.markUnjudged(respFirst)
+					} else {
+						walk.mark(respFirst)
+					}
+				} else if errors.Is(err, ErrFramingLost) {
 					took, why, merr := takeMalformedAnswers(ctx, logger, sess, malformed, first.ConnSeq, respFirst, mysql.CommandStatusToString(commandByte(cmdBuf)), fakeconn.Chunk{}, &carry)
 					malformed = nil
 					if why != "" {
