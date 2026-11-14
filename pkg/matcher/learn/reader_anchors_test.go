@@ -214,9 +214,15 @@ func TestAnchorsAreWordsEachRunHoldsOnceInOneOrder(t *testing.T) {
 		{"two words swapped", "a b c d", "a c b d", [][2]int{{0, 0}, {3, 3}}},
 		{"a word one run holds twice", "a b c", "a b b c", [][2]int{{0, 0}, {2, 3}}},
 		{"a word the recording holds twice", "a b b c", "a b c", [][2]int{{0, 0}, {3, 2}}},
+		// Only its second place can follow a and b, so a chain would take
+		// it: it is still no anchor, since the other place could be its pair.
+		{"a word the recording holds twice, one place in order", "x a b x", "a b x", [][2]int{{1, 0}, {2, 1}}},
 		{"a word one run lacks", "a b c", "a c", [][2]int{{0, 0}, {2, 1}}},
 		{"two chains as long", "a b c d e", "a d e b c", [][2]int{{0, 0}}},
 		{"one chain longer", "a b c d e f", "a d b c e f", [][2]int{{0, 0}, {1, 2}, {2, 3}, {4, 4}, {5, 5}}},
+		// The recording's last word stands first in the replay: its chain
+		// is the shortest, and the longest is the one before it.
+		{"the last word moved to the front", "b c d a", "a b c d", [][2]int{{0, 1}, {1, 2}, {2, 3}}},
 		{"no word once in each", "a a b b", "b b a a", nil},
 		{"the last pair alone", "x y z", "z", [][2]int{{2, 0}}},
 	} {
