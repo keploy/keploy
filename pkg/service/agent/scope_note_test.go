@@ -42,6 +42,13 @@ func TestATestsNoteIsKeptAtItsRecordAndAnsweredAtItsReplay(t *testing.T) {
 		require.Equal(t, http.StatusBadRequest, serr.Status)
 		require.Equal(t, models.ScopeErrBadRequest, serr.Code)
 		require.Contains(t, serr.Error(), "the end of TestTwo sent a note of 16385 bytes, over keploy's bound of 16384")
+		// The bound is in bytes: a note of two-byte characters one byte over
+		// it (8193 characters) is refused too.
+		multi := strings.Repeat("é", models.MaxScopeNote/2) + "n"
+		_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: "passed", Note: multi})
+		require.NotNil(t, serr, "a multi-byte note over the bound in bytes is refused")
+		require.Equal(t, http.StatusBadRequest, serr.Status)
+		require.Contains(t, serr.Error(), "the end of TestTwo sent a note of 16385 bytes, over keploy's bound of 16384")
 		_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: "passed", Note: strings.Repeat("n", models.MaxScopeNote)})
 		require.Nil(t, serr, "the refused end left the test open; a note at the bound is kept")
 		require.Equal(t, note, windowOf(t, a, "a::TestOne").Note, "byte for byte")
