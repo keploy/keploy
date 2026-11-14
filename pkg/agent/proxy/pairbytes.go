@@ -120,21 +120,22 @@ func (pc *pairedConn) lostBy(low, top uint64) (owners []string, open bool) {
 // a plaintext close does not wait for the FIN alone (finAloneOnItsWay), and
 // one byte short of a count that holds the FIN is that FIN. false says only
 // that the count may not hold it. On darwin the count is a distance between
-// sequence numbers, from the one after the application socket's first (isn),
-// as a bytes wait's is (pairTarget).
+// sequence numbers, from the one after the application socket's first
+// (appWroteOS), as a bytes wait's is (pairTarget).
 type appWrote struct {
 	want uint64
 	fin  bool
-	isn  uint32 // darwin
+	appWroteOS
 }
 
 // proxySide is what the wait reads of the proxy's side of a connection.
 type proxySide struct {
 	// received is tcpi_bytes_received on Linux. On darwin it is filled in
 	// at the close once the close has read what the application had
-	// written (readSide, noteWroteAtClose), counted as that is (counted).
+	// written (readSide, noteWroteAtClose), counted as that is
+	// (proxySideOS).
 	received uint64
-	counted  bool // darwin
+	proxySideOS
 	// rcvNxt is, on darwin, the next sequence number the socket expects
 	// (tcpi_rcv_nxt): XNU's received count (tcpi_rxbytes) also counts
 	// payload that arrived twice, so the wait compares sequence numbers.

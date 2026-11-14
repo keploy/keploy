@@ -109,6 +109,14 @@ func (p *Proxy) pairTarget(table []xnuPCB, pc *pairedConn) (*pairTarget, error) 
 // number (the proxy's side's irs). want and seen count from the one after it.
 type targetBase struct{ isn uint32 }
 
+// appWroteOS is, on darwin, the application socket's initial sequence
+// number, from the one after which an appWrote counts.
+type appWroteOS struct{ isn uint32 }
+
+// proxySideOS says, on darwin, whether a proxySide's received is counted:
+// only a close's read of the side counts it (readSide).
+type proxySideOS struct{ counted bool }
+
 // received is how much the proxy's side ps received since b, its FIN
 // counted: a distance between sequence numbers, which wrap at 2^32.
 func (b targetBase) received(ps proxySide) uint32 { return ps.rcvNxt - b.isn - 1 }
@@ -383,7 +391,7 @@ func noteWroteAtClose(pc *pairedConn) {
 	if pr, ok := findXNUPCB(table, pc.proxy, pc.app); !ok || pr.irs != app.iss {
 		return
 	}
-	pc.wroteAtClose.Store(&appWrote{want: uint64(app.writeSeq() - app.iss - 1), fin: app.finPending(), isn: app.iss})
+	pc.wroteAtClose.Store(&appWrote{want: uint64(app.writeSeq() - app.iss - 1), fin: app.finPending(), appWroteOS: appWroteOS{isn: app.iss}})
 }
 
 // readSide is pc's proxy side as its close reads it (closing, pairClosing):

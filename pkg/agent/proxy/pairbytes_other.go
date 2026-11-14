@@ -23,6 +23,12 @@ func (p *Proxy) PairedBytesErr() error {
 
 func (p *Proxy) checkPairedBytes(net.Conn, net.Conn) {}
 
+// appWroteOS and proxySideOS hold nothing here: no count is read.
+type (
+	appWroteOS  struct{}
+	proxySideOS struct{}
+)
+
 func (p *Proxy) proveAppVisible(*net.TCPConn) {}
 
 // pairClosing notes a paired connection's close; none is paired here.
