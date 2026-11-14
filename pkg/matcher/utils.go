@@ -1225,7 +1225,7 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 		return nil, nil
 	}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object", zap.String("json", s))
+		utils.LogError(log, err, "cannot convert json string into json object", zap.Int("json_bytes", len(s)))
 		return nil, err
 	}
 	return result, nil

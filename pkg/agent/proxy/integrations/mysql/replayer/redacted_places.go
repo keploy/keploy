@@ -884,22 +884,16 @@ func (w *windowPlaces) released(db integrations.MockMemDb, gen uint64, start tim
 }
 
 // everyPlace redacts a live command whole: its statement, every bound
-// value and every streamed chunk. A log line and a miss report read it when
-// the pool's places cannot be read.
+// value and every streamed chunk. A miss report reads it when the pool's
+// places cannot be read.
 var everyPlace = redactedPlaces{statement: true, whole: true, everyParam: true, data: true}
 
-// logPlaces reads the places a log line shows the live statement by
-// (poolPlaces), once per command, and shows each text of the statement by
-// them once too. A command's lines show its statement for each candidate
-// they compare it with, as written or as its identity (sqlStatementIdentity),
-// and a statement the caches do not keep (memoKeeps) would be read again for
-// each line. The texts a command's lines show are its own: a few at most.
+// logPlaces reads the places a miss's report shows the live command by
+// (poolPlaces), once per command.
 type logPlaces struct {
 	read func() redactedPlaces
 	// held are the places read, once read.
 	held *redactedPlaces
-	// shown is each text live showed, by the text.
-	shown map[string]string
 }
 
 // places are the places r reads, read once; every place when there is no
@@ -913,24 +907,4 @@ func (r *logPlaces) places() redactedPlaces {
 		r.held = &p
 	}
 	return *r.held
-}
-
-// live is the live statement sql as a log line shows it: by the places r
-// reads, or whole redacted when there is no r. No statement reads none.
-func (r *logPlaces) live(sql string) string {
-	if sql == "" {
-		return sql
-	}
-	if r == nil {
-		return everyPlace.liveStatement(sql)
-	}
-	shown, ok := r.shown[sql]
-	if !ok {
-		shown = r.places().liveStatement(sql)
-		if r.shown == nil {
-			r.shown = map[string]string{}
-		}
-		r.shown[sql] = shown
-	}
-	return shown
 }

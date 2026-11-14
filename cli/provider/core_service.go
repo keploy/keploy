@@ -134,7 +134,7 @@ func resolveDockerNames(logger *zap.Logger, c *config.Config, cont, net string, 
 
 	switch {
 	case c.ContainerName == "":
-		utils.LogError(logger, err, "failed to resolve the app container from the docker command", zap.String("cmd", c.Command))
+		utils.LogError(logger, err, "failed to resolve the app container from the docker command", zap.String("cmd", utils.RedactCommandLine(c.Command)))
 	case cont == "":
 		logger.Warn("could not read a container name out of the docker command; using the one that was provided",
 			zap.String("containerName", c.ContainerName), zap.Error(err))
@@ -176,7 +176,7 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 			}
 		} else if utils.CmdType(c.CommandType) != utils.DockerCompose {
 			cont, net, err := docker.ParseDockerCmd(c.Command, utils.CmdType(c.CommandType), client)
-			logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", c.Command))
+			logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", utils.RedactCommandLine(c.Command)))
 			resolveDockerNames(logger, c, cont, net, err)
 
 			logger.Debug("Using container and network", zap.String("container", c.ContainerName), zap.String("network", c.NetworkName))

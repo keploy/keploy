@@ -159,8 +159,14 @@ func keptVariableName(name string) bool {
 var learnedName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*(#[1-9][0-9]*)?$`)
 
 // shapedNextStep is m's own next step with every field path it names in its
-// shape (SanitizedNextStep).
-func (m UnmatchedCall) shapedNextStep() string { return m.shapedText(m.NextSteps) }
+// shape, every quoted value {} and a refused word's line without its values
+// (adviceShape, as a log line has it: SanitizedNextStep).
+func (m UnmatchedCall) shapedNextStep() string {
+	if m.NextSteps == "" {
+		return ""
+	}
+	return adviceShape(m.NextSteps, m.FieldDiffs)
+}
 
 // shapedText is text, a matcher's or a parser's own words about m, with
 // every field path it names in its shape: each of m's field diffs' paths

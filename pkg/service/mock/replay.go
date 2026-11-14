@@ -179,7 +179,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	m.logger.Info("Replaying mocks for your test command",
 		zap.String("mock-set", name),
-		zap.String("command", m.userCommand),
+		zap.String("command", utils.RedactCommandLine(m.userCommand)),
 		zap.String("on-miss", string(policy)))
 
 	errGrp, ctx := errgroup.WithContext(ctx)
@@ -345,7 +345,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if loaded == 0 {
 		m.logger.Warn("the mock set is empty; the runner will hit a miss on every dependency call",
 			zap.String("mock-set", name),
-			zap.String("next_step", fmt.Sprintf("record it first with: keploy mock record -c %q --name %s", m.userCommand, name)))
+			zap.String("next_step", fmt.Sprintf("record it first with: keploy mock record -c %q --name %s", utils.RedactCommandLine(m.userCommand), name)))
 	}
 	if err := m.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
 		utils.LogError(m.logger, err, "failed to store mocks on the agent")
@@ -2818,7 +2818,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
 				if reader, ok := m.instrumentation.(idPairReader); ok {
 					if pairs, err := reader.GetIDPairs(outcomeCtx); err == nil {
-						m.logger.Debug("ids this run made in place of recorded ones", zap.Any("pairs", pairs))
+						// How many, never the ids: they are the app's values.
+						m.logger.Debug("ids this run made in place of recorded ones", zap.Int("pairs", len(pairs)))
 						m.ids = ids.New(pairs)
 					} else {
 						m.logger.Debug("failed to read the ids this run made", zap.Error(err))
@@ -3010,9 +3011,12 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	if miss.MatchPhase == models.MatchPhaseNoRequest {
 		msg = "a connection ended with nothing sent: if its client was waiting for its server to speak first, no recorded mock answered it"
 	}
+	// The call by its shape and keploy's words with their paths shaped
+	// (models.UnmatchedCallLogShape, UnmatchedCallLogText): the call's
+	// summary holds what it sent (a path's token, a statement's literal).
 	fields := []zap.Field{
 		zap.String("protocol", miss.Protocol),
-		zap.String("call", miss.Named()),
+		zap.String("call", models.UnmatchedCallLogShape(miss)),
 		zap.String("destination", miss.Destination),
 	}
 	if miss.Reason != "" {
@@ -3021,9 +3025,9 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 		// (models.MissViewReplaced) it ends with the line that says which
 		// test ended or began, or that another view was served between
 		// tests.
-		fields = append(fields, zap.String("reason", miss.Reason))
+		fields = append(fields, zap.String("reason", models.UnmatchedCallLogText(miss, miss.Reason)))
 	}
-	logger.Warn(msg, append(fields, zap.String("next_step", next))...)
+	logger.Warn(msg, append(fields, zap.String("next_step", models.UnmatchedCallLogText(miss, next)))...)
 }
 
 // provenCount is n under the proven switch, and nothing with it off, so a

@@ -2,11 +2,14 @@ package http
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg"
 	matcher "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -16,7 +19,10 @@ import (
 // Returns: bool, *models.AbsResult
 func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, bool, bool, *models.AbsResult) {
 	if tcs1 == nil || tcs2 == nil {
-		logger.Error("test case is nil", zap.Any("tcs1", tcs1), zap.Any("tcs2", tcs2))
+		// Which is nil, never the other test case: it holds the recorded
+		// headers and bodies, credentials among them. So below: the lines
+		// name what differs and its size, never a value.
+		logger.Error("test case is nil", zap.Bool("tcs1_nil", tcs1 == nil), zap.Bool("tcs2_nil", tcs2 == nil))
 		return false, false, false, nil
 	}
 
@@ -65,14 +71,14 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 	//compare http req
 	reqPass, reqCompare := CompareHTTPReq(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
 	if !reqPass {
-		logger.Info("test case http req is not equal", zap.Any("tcs1HttpReq", tcs1.HTTPReq), zap.Any("tcs2HttpReq", tcs2.HTTPReq))
+		logger.Info("test case http req is not equal", zap.Any("tcs1HttpReq", utils.URLLogMeta(string(tcs1.HTTPReq.Method), tcs1.HTTPReq.URL)), zap.Any("tcs2HttpReq", utils.URLLogMeta(string(tcs2.HTTPReq.Method), tcs2.HTTPReq.URL)))
 		pass = false
 	}
 
 	//compare http resp
 	respPass, respCompare := CompareHTTPResp(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
 	if !respPass {
-		logger.Info("test case http resp is not equal", zap.Any("tcs1HttpResp", tcs1.HTTPResp), zap.Any("tcs2HttpResp", tcs2.HTTPResp))
+		logger.Info("test case http resp is not equal", zap.Int("tcs1HttpRespStatusCode", tcs1.HTTPResp.StatusCode), zap.Int("tcs2HttpRespStatusCode", tcs2.HTTPResp.StatusCode))
 		pass = false
 	}
 
@@ -127,7 +133,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 
 	if tcs1.HTTPReq.URL != tcs2.HTTPReq.URL {
 		reqCompare.URLResult.Normal = false
-		logger.Debug("test case http req url is not equal", zap.String("tcs1HttpReqURL", tcs1.HTTPReq.URL), zap.String("tcs2HttpReqURL", tcs2.HTTPReq.URL))
+		logger.Debug("test case http req url is not equal", zap.Any("tcs1HttpReqURL", utils.URLLogMeta(string(tcs1.HTTPReq.Method), tcs1.HTTPReq.URL)), zap.Any("tcs2HttpReqURL", utils.URLLogMeta(string(tcs2.HTTPReq.Method), tcs2.HTTPReq.URL)))
 		pass = false
 	}
 
@@ -149,11 +155,11 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	if len(urlParams1) == len(urlParams2) {
 		ok := CompareURLParams(urlParams1, urlParams2, &reqCompare.URLParamsResult)
 		if !ok {
-			logger.Debug("test case http req url params are not equal", zap.Any("tcs1HttpReqURLParams", tcs1.HTTPReq.URLParams), zap.Any("tcs2HttpReqURLParams", tcs2.HTTPReq.URLParams))
+			logger.Debug("test case http req url params are not equal", zap.Strings("tcs1HttpReqURLParams", models.FieldShapes(slices.Sorted(maps.Keys(tcs1.HTTPReq.URLParams)))), zap.Strings("tcs2HttpReqURLParams", models.FieldShapes(slices.Sorted(maps.Keys(tcs2.HTTPReq.URLParams)))))
 			pass = false
 		}
 	} else {
-		logger.Debug("test case http req url params are not equal", zap.Any("tcs1HttpReqURLParams", tcs1.HTTPReq.URLParams), zap.Any("tcs2HttpReqURLParams", tcs2.HTTPReq.URLParams))
+		logger.Debug("test case http req url params are not equal", zap.Strings("tcs1HttpReqURLParams", models.FieldShapes(slices.Sorted(maps.Keys(tcs1.HTTPReq.URLParams)))), zap.Strings("tcs2HttpReqURLParams", models.FieldShapes(slices.Sorted(maps.Keys(tcs2.HTTPReq.URLParams)))))
 		pass = false
 	}
 
@@ -166,7 +172,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	// compare http req headers
 	ok := matcher.CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPReq.Header), pkg.ToHTTPHeader(tcs2.HTTPReq.Header), &reqCompare.HeaderResult, reqHeaderNoise)
 	if !ok {
-		logger.Debug("test case http req headers are not equal", zap.Any("tcs1HttpReqHeaders", tcs1.HTTPReq.Header), zap.Any("tcs2HttpReqHeaders", tcs2.HTTPReq.Header))
+		logger.Debug("test case http req headers are not equal", zap.Strings("tcs1HttpReqHeaders", slices.Sorted(maps.Keys(tcs1.HTTPReq.Header))), zap.Strings("tcs2HttpReqHeaders", slices.Sorted(maps.Keys(tcs2.HTTPReq.Header))))
 		pass = false
 	}
 
@@ -221,8 +227,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 		}
 
 		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
-		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
+		logger.Debug("compared bodies", zap.Int("expected_bytes", len(cleanExp)), zap.Int("actual_bytes", len(cleanAct)))
 	} else {
 		if tcs1.HTTPReq.Body != tcs2.HTTPReq.Body {
 			pass = false
@@ -265,12 +270,12 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 		if !tcs1.HTTPResp.BodySkipped {
 			logger.Debug("tcs1 response body (other side was skipped)",
 				zap.String("testcase", tcs1.Name),
-				zap.String("body", tcs1.HTTPResp.Body))
+				zap.Int("body_bytes", len(tcs1.HTTPResp.Body)))
 		}
 		if !tcs2.HTTPResp.BodySkipped {
 			logger.Debug("tcs2 response body (other side was skipped)",
 				zap.String("testcase", tcs2.Name),
-				zap.String("body", tcs2.HTTPResp.Body))
+				zap.Int("body_bytes", len(tcs2.HTTPResp.Body)))
 		}
 
 		bodySizeResult = models.IntResult{
@@ -341,7 +346,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	// compare http resp headers
 	ok = matcher.CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPResp.Header), pkg.ToHTTPHeader(tcs2.HTTPResp.Header), &respCompare.HeadersResult, headerNoise)
 	if !ok {
-		logger.Debug("test case http resp headers are not equal", zap.Any("tcs1HttpRespHeaders", tcs1.HTTPResp.Header), zap.Any("tcs2HttpRespHeaders", tcs2.HTTPResp.Header))
+		logger.Debug("test case http resp headers are not equal", zap.Strings("tcs1HttpRespHeaders", slices.Sorted(maps.Keys(tcs1.HTTPResp.Header))), zap.Strings("tcs2HttpRespHeaders", slices.Sorted(maps.Keys(tcs2.HTTPResp.Header))))
 		pass = false
 	}
 
@@ -394,8 +399,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 		}
 
 		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
-		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
+		logger.Debug("compared bodies", zap.Int("expected_bytes", len(cleanExp)), zap.Int("actual_bytes", len(cleanAct)))
 	} else {
 		if !skipBody && tcs1.HTTPResp.Body != tcs2.HTTPResp.Body {
 			pass = false
@@ -485,7 +489,7 @@ func CompareCurl(curl1, curl2 string, logger *zap.Logger) bool {
 	hres := []models.HeaderResult{}
 	ok := matcher.CompareHeaders(pkg.ToHTTPHeader(headers1), pkg.ToHTTPHeader(headers2), &hres, curlHeaderNoise)
 	if !ok {
-		logger.Debug("test case curl headers are not equal", zap.Any("curlHeaderResult", hres))
+		logger.Debug("test case curl headers are not equal", zap.Strings("differing", differingHeaders(hres)))
 		return false
 	}
 	return true
@@ -510,4 +514,16 @@ func parseCurlString(curlString string) (method, url string, headers map[string]
 		}
 	}
 	return
+}
+
+// differingHeaders are the names of the headers hres found different, never
+// their values: a header holds a session's cookie, a token.
+func differingHeaders(hres []models.HeaderResult) []string {
+	var out []string
+	for _, h := range hres {
+		if !h.Normal {
+			out = append(out, h.Expected.Key)
+		}
+	}
+	return out
 }

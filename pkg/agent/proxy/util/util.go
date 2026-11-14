@@ -17,7 +17,6 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"golang.org/x/net/http2"
 	"golang.org/x/sync/errgroup"
@@ -383,9 +382,9 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
-					if logger.Core().Enabled(zap.DebugLevel) {
-						logger.Debug("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
-					}
+					// Its size, never its bytes: they are the application's
+					// traffic, of any protocol, credentials included.
+					logger.Debug("Failed to read buffer", zap.Int("bytes", len(buffer)))
 				}
 				// The bytes that came with the error are the peer's last
 				// ones (a TLS peer's last record read together with its
@@ -443,7 +442,9 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 
 	// Check if the initial buffer already contains complete headers
 	if HasCompleteHTTPHeaders(initialBuf) {
-		logger.Debug("received complete HTTP headers in initial buffer", zap.Any("size", len(initialBuf)), zap.Any("headers", string(initialBuf)))
+		// Its size, never the headers: they carry the request's credentials
+		// (Authorization, Cookie, API keys).
+		logger.Debug("received complete HTTP headers in initial buffer", zap.Int("size", len(initialBuf)))
 		return initialBuf, nil
 	}
 
@@ -477,7 +478,7 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 
 			// Check if we reached the end of headers
 			if HasCompleteHTTPHeaders(buffer) {
-				logger.Debug("received complete HTTP headers", zap.Any("size", len(buffer)), zap.Any("headers", string(buffer)))
+				logger.Debug("received complete HTTP headers", zap.Int("size", len(buffer)))
 				return buffer, nil
 			}
 		}

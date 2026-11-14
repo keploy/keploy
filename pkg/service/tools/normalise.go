@@ -194,11 +194,14 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 		if testCaseResult.FailureInfo.Risk == models.High && !t.config.Normalize.AllowHighRisk {
 			if len(testCaseResult.TemplateFailures) > 0 {
 				// A template variable's place the answer did not hold: what
-				// to write is the user's call, never this run's value.
+				// to write is the user's call, never this run's value. The
+				// why quotes what the answer held and what the variable
+				// needed, and a place is the answer's keys: each by its
+				// shape, as the replay logs them (the report keeps them).
 				for _, f := range testCaseResult.TemplateFailures {
 					t.logger.Info("not normalizing a test case that failed on a template variable",
 						zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID),
-						zap.String("where", f.Where), zap.String("placeholder", f.Placeholder), zap.String("why", f.Why),
+						zap.String("where", models.AdviceLogText(f.Where)), zap.String("placeholder", f.Placeholder), zap.String("why", models.AdviceLogText(f.Why)),
 						zap.String("next_step", "if the app issues this value anew each run, make the place that issues it a {{capture ...}}; if the value changed on purpose, edit the expected value or re-record the test case. --allow-high-risk writes this run's value over the placeholder, and the next run fails on it"))
 				}
 				continue
@@ -221,10 +224,13 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 			// response put back where the run resolved it to exactly what
 			// the app answered. A test case with no placeholder gets the
 			// answer as it is.
+			// Each drop names its place and the size of what the app
+			// now answers there (templates.Run.Keep), its body places
+			// by their shape.
 			accepted, dropped := tmplRun.Keep(testCase.HTTPResp, resolvedExpected(testCaseResult.Result), testCaseResult.Res)
 			for _, d := range dropped {
 				t.logger.Warn("keploy normalize wrote the app's answer where a placeholder was: the run resolved it to another value than the app answered",
-					zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID), zap.String("placeholder", d),
+					zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID), zap.String("where", models.AdviceLogText(d)),
 					zap.String("next_step", "if the value should still follow a template key, put the placeholder back in the test case by hand"))
 			}
 			testCase.HTTPResp = accepted

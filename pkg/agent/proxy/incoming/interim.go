@@ -12,6 +12,7 @@ import (
 	"time"
 
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/net/http/httpguts"
 )
@@ -253,6 +254,6 @@ func lingerClose(c net.Conn) {
 // the user expects is otherwise missing with no trace.
 func warnNotRecorded(logger *zap.Logger, req *http.Request, resp *http.Response, err error) {
 	logger.Warn("Not recording this request as a test case: the app answered it before the whole request body reached the app, so the request the app answered is not the one the client sent. The client still got the app's answer. To record it, send the request without the \"Expect: 100-continue\" header (curl: -H 'Expect:').",
-		zap.String("method", req.Method), zap.String("url", req.URL.String()),
+		zap.Any("metadata", utils.GetReqMeta(req)),
 		zap.Int("status_code", resp.StatusCode), zap.Error(err))
 }

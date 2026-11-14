@@ -39,6 +39,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -605,6 +606,11 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
+	// appConsole is where the application's own lines keploy took (its
+	// container's last log lines) are shown: the console alone, never
+	// keploy's log, whose file a recovered panic sends to Sentry. nil,
+	// keploy's console (log.PrimarySink); a test reads its own.
+	appConsole io.Writer
 	// drainClock is the clock the teardown's drains measure a stall on
 	// (teardownDrain): nil, keploy's own runnable time; a test drives its
 	// own.
@@ -2112,14 +2118,15 @@ func (r *Replayer) applyBasePath(testCase *models.TestCase) error {
 		return fmt.Errorf("cannot send the test to the base path %q: %w", r.config.Test.BasePath, err)
 	}
 	testCase.HTTPReq.URL = newURL
-	r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.String("TestCaseURL", testCase.HTTPReq.URL), zap.String("basePath", r.config.Test.BasePath))
+	r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.Any("TestCaseURL", utils.URLLogMeta(string(testCase.HTTPReq.Method), testCase.HTTPReq.URL)), zap.String("basePath", r.config.Test.BasePath))
 	return nil
 }
 
 // failUnsentTest reports a test that was not sent to the app as failed, with
 // why, and returns the error of writing that down.
 func (r *Replayer) failUnsentTest(ctx context.Context, testRunID, testSetID string, testCase *models.TestCase, why error) error {
-	utils.LogError(r.logger, why, "failed the test without sending it",
+	// The reason by its shape: it can quote the test's URL.
+	utils.LogError(r.logger, pkg.LoggableAnswerErr(why), "failed the test without sending it",
 		zap.String("testcase", testCase.Name),
 		zap.String("next_step", "write the test case's request URL with its scheme and host, as in http://localhost:8080/orders: they are what the base path replaces"))
 	result := r.CreateFailedTestResult(testCase, testSetID, time.Now().UTC(), why)
@@ -8529,7 +8536,8 @@ func (r *Replayer) appContainerExit(ctx context.Context) error {
 // compose stops every service the moment the app's container exits. The agent
 // that does not answer is then not a replaced one, and "replaced" sends
 // whoever reads it after the wrong thing: what failed is the app, and its own
-// output says why, so its recent logs are logged with the failure.
+// output says why, so its recent log lines are shown after the failure's
+// line, on the console alone (showAppLogs): never in keploy's log.
 func (r *Replayer) appExitFailure(ctx context.Context, testSetID string, agentErr error) error {
 	exit := r.appContainerExit(ctx)
 	if exit == nil {
@@ -8537,9 +8545,30 @@ func (r *Replayer) appExitFailure(ctx context.Context, testSetID string, agentEr
 	}
 	r.logger.Error("the application's container is no longer running, and keploy-agent could not be set up for this test set during the docker compose bring-up; no test of this set was run",
 		zap.String("testSetID", testSetID), zap.Error(exit),
-		zap.String("appLogs", r.instrumentation.GetRecentAppLogs(ctx)),
-		zap.String("next_step", "fix why the application exited: its last log lines are in appLogs"))
+		zap.String("next_step", "fix why the application exited: its last log lines follow this line on the console"))
+	r.showAppLogs(r.instrumentation.GetRecentAppLogs(ctx))
 	return fmt.Errorf("%w during the docker compose bring-up, before test set %q ran any test; setting keploy-agent up for it failed as well: %w", exit, testSetID, agentErr)
+}
+
+// showAppLogs shows the application's last log lines keploy took on the
+// console (appConsole), between two lines that say whose they are, as the
+// app's own output reaches it: cut by the active redactor's child-output
+// rules (log.ChildOutputWriter), and never through keploy's logger. The
+// logger writes every line to this run's log file as well, and a recovered
+// panic sends that file's tail to Sentry: the app's lines carry its traffic
+// and its secrets.
+func (r *Replayer) showAppLogs(appLogs string) {
+	appLogs = strings.TrimRight(appLogs, "\r\n")
+	if appLogs == "" {
+		return
+	}
+	console := r.appConsole
+	if console == nil {
+		console = keployLog.PrimarySink()
+	}
+	w := keployLog.NewChildOutputWriter(console)
+	_, _ = io.WriteString(w, "--- the application's last log lines ---\n"+appLogs+"\n--- end of the application's log lines ---\n")
+	_ = w.Flush()
 }
 
 func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {
@@ -8759,7 +8788,7 @@ func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actua
 	}
 	if assessment != nil {
 		if len(assessment.AddedFields) > 0 {
-			fields = append(fields, zap.Strings("added_fields", assessment.AddedFields))
+			fields = append(fields, zap.Strings("added_fields", models.FieldShapes(assessment.AddedFields)))
 		}
 		if len(assessment.Reasons) > 0 {
 			fields = append(fields, zap.Strings("assessment_reasons", assessment.Reasons))
@@ -9481,15 +9510,15 @@ func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, log
 	case models.HTTP:
 		testCase.HTTPReq.URL, err = utils.ReplaceHost(testCase.HTTPReq.URL, newHost)
 		if err != nil {
-			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
+			utils.LogError(r.logger, utils.WithholdInput(err), fmt.Sprintf("failed to replace host to %s", logContext))
 			return err
 		}
-		r.logger.Debug("", zap.String(fmt.Sprintf("replaced %s", logContext), testCase.HTTPReq.URL))
+		r.logger.Debug("", zap.Any(fmt.Sprintf("replaced %s", logContext), utils.URLLogMeta(string(testCase.HTTPReq.Method), testCase.HTTPReq.URL)))
 
 	case models.GRPC_EXPORT:
 		testCase.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcHost(testCase.GrpcReq.Headers.PseudoHeaders[":authority"], newHost)
 		if err != nil {
-			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
+			utils.LogError(r.logger, utils.WithholdInput(err), fmt.Sprintf("failed to replace host to %s", logContext))
 			return err
 		}
 		r.logger.Debug("", zap.String(fmt.Sprintf("replaced %s", logContext), testCase.GrpcReq.Headers.PseudoHeaders[":authority"]))

@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/utils"
 )
 
 // watchClient watches the client of an exchange for its end (its FIN or a
@@ -173,5 +174,5 @@ func tellUnwatched(logger *zap.Logger, conn net.Conn) {
 // sent may still have read the whole answer.
 func tellClientLeft(logger *zap.Logger, req *http.Request) {
 	logger.Info("Not recording this request as a test case: its client closed its side of the connection before the app's answer ended. Keploy told the app, as the client's going would have told it without keploy, so what the app sent after that may answer the client's going rather than the request. A client that half-closes once its request is sent may still have read the whole answer: to record such a request, keep the client's side open until the answer ends.",
-		zap.String("method", req.Method), zap.String("url", req.URL.String()))
+		zap.Any("metadata", utils.GetReqMeta(req)))
 }

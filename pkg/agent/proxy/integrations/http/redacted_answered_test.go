@@ -137,9 +137,9 @@ func TestAMissIsRedactedByTheRecordingsThatAnsweredBefore(t *testing.T) {
 }
 
 // The debug line of the schema pass for a recording at another path names
-// the call's path with the segments the set's answered recordings redacted
-// redacted too, and redacted whole when the store did not keep them all.
-func TestTheSchemaPassLogsThePathRedactedByTheRecordingsThatAnsweredBefore(t *testing.T) {
+// the call's path by its shape, every segment {}, whatever the set's
+// answered recordings redacted and whether the store kept them all.
+func TestTheSchemaPassLogsThePathByItsShape(t *testing.T) {
 	for _, complete := range []bool{true, false} {
 		name := map[bool]string{true: "every answered kept", false: "not every answered kept"}[complete]
 		t.Run(name, func(t *testing.T) {
@@ -169,8 +169,8 @@ func TestTheSchemaPassLogsThePathRedactedByTheRecordingsThatAnsweredBefore(t *te
 				if strings.Contains(got, pathSecret) {
 					t.Errorf("the line names the path %q", got)
 				}
-				if complete && !strings.HasPrefix(got, "/x/") {
-					t.Errorf("the line names the path %q; want /x/ and the redacted segment", got)
+				if got != "/{}/{}" {
+					t.Errorf("the line names the path %q; want its shape", got)
 				}
 			}
 		})

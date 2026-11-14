@@ -152,8 +152,7 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 		if field, ok := firstNonUTF8Body(tc); !ok {
 			err := fmt.Errorf("%w: testdb: %s is not valid UTF-8 and the json format cannot store it losslessly; record with storageFormat yaml to keep binary bodies", models.ErrTestCaseEncode, field)
 			utils.LogError(logger, err, "refusing to write a binary body as JSON",
-				zap.String("method", string(tc.HTTPReq.Method)),
-				zap.String("url", tc.HTTPReq.URL),
+				zap.Any("metadata", utils.URLLogMeta(string(tc.HTTPReq.Method), tc.HTTPReq.URL)),
 				zap.String("next_step", "set storageFormat to yaml; the yaml encoder stores binary bodies as !!binary without loss"))
 			return nil, err
 		}
@@ -221,8 +220,10 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		grpcSpec := buildGrpcSpec(tc)
 
 		logger.Debug("gRPC schema created",
-			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
-			zap.Any("response_headers", grpcSpec.GrpcResp.Headers),
+			// How many headers, never their values: gRPC metadata carries
+			// the call's credentials (authorization).
+			zap.Int("request_headers", len(grpcSpec.GrpcReq.Headers.PseudoHeaders)+len(grpcSpec.GrpcReq.Headers.OrdinaryHeaders)),
+			zap.Int("response_headers", len(grpcSpec.GrpcResp.Headers.PseudoHeaders)+len(grpcSpec.GrpcResp.Headers.OrdinaryHeaders)),
 			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),
 			zap.Int("response_body_length", len(grpcSpec.GrpcResp.Body.DecodedData)))
 

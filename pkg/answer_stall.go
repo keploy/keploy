@@ -7,11 +7,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/stall"
 )
 
@@ -172,6 +175,56 @@ func streamCut(err error, came, recorded int, unit string) error {
 		return st.asStream(fmt.Sprintf("every recorded %s came, and the stream did not end", unit))
 	}
 	return st.asStream(fmt.Sprintf("%d of the %d recorded %ss came", came, recorded, unit))
+}
+
+// ForLog is e as a log line names it: its target (the test's request, which
+// the test report keeps whole) by its method and its path's shape, a path or
+// a query being where a test's token rides. A gRPC method is a name, kept.
+func (e *AnswerStallError) ForLog() *AnswerStallError {
+	c := *e
+	if method, target, ok := strings.Cut(c.Target, " "); ok {
+		if u, err := models.ParseRequestURL(target); err == nil {
+			c.Target = method + " " + utils.URLPathShape(u)
+		} else {
+			c.Target = method
+		}
+	}
+	return &c
+}
+
+// LoggableAnswerErr is err as a log line carries it: its text is
+// LoggableAnswerError's, and errors.Is and errors.As still see err (a
+// cancelled test's line is still known as one: utils.LogError).
+func LoggableAnswerErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return loggableAnswer{err: err, text: LoggableAnswerError(err)}
+}
+
+type loggableAnswer struct {
+	err  error
+	text string
+}
+
+func (l loggableAnswer) Error() string { return l.text }
+func (l loggableAnswer) Unwrap() error { return l.err }
+
+// LoggableAnswerError is err's text as a log line carries it: the text of an
+// AnswerStallError in it names its target by shape (ForLog), and a URL or a
+// path any other error quotes is written by its shape
+// (utils.ShapeQuotedURLs: a client's error quotes the request's URL);
+// keploy's own quoted words stay.
+func LoggableAnswerError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := utils.ShapeQuotedURLs(err.Error())
+	var se *AnswerStallError
+	if errors.As(err, &se) && se != nil {
+		text = strings.Replace(text, se.Error(), se.ForLog().Error(), 1)
+	}
+	return text
 }
 
 // keptOpenWithNothing is the error of a stream the app's keepalives ended

@@ -93,6 +93,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			//Parse the request buffer
 			request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf)))
 			if err != nil {
+				// The parser's error quotes the request (its request line,
+				// a header line): withheld, here and where it is returned.
+				err = utils.WithholdInput(err)
 				utils.LogError(h.Logger, err, "failed to parse the http request message")
 				errCh <- err
 				return
@@ -548,7 +551,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// answers it: the test, the read as the replay named
 					// it, and how many times the test recorded it.
 					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
-						zap.String("test", again.Test), zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.Mock.TestModeInfo.ReadMark().Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
+						zap.String("test", again.Test), zap.String("call", shapeSummary(request)), zap.String("read", again.Mock.TestModeInfo.ReadMark().Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
 					stub, ok, diag, lmiss, repeat = again.Mock, true, nil, nil, true
 				}
 			}
@@ -719,15 +722,18 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// agnostic mock-mismatch WARN is emitted once in
 					// proxy.sendMockNotFoundErrorFrom (where every parser's miss
 					// funnels), so this stays Debug to avoid double-logging.
+					// The call by its shape and the fields it differs in,
+					// never the summary or the diff: they hold what the call
+					// sent, for the user's own report.
 					h.Logger.Debug("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),
 						zap.String("destination", report.Destination),
-						zap.String("actual", models.WithHTTPOperation(report.ActualSummary, report.Operation)),
+						zap.String("call", shapeSummary(request)),
 						zap.String("match_phase", report.MatchPhase),
 						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
-						zap.String("diff", report.Diff),
-						zap.String("next_step", report.NextSteps))
+						zap.Strings("differs", models.MissLogDiffers(report)),
+						zap.String("next_step", models.MissLogNextStep(report)))
 				}
 
 				// On-miss policy (keploy mock replay --on-miss): passthrough or
@@ -763,8 +769,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
-				// The error names the call without its secret (missedCall).
-				baseErr := fmt.Errorf("%w for %s", ErrMockNotMatched, missedCall(request, report))
+				// The error names the call by its path's shape
+				// (shapeSummary), whatever its report says: the proxy and
+				// the parser log the error, and a segment of any look can
+				// hold what the call sent (a token, a user's name). The
+				// report keeps its summary for the user's own view.
+				baseErr := fmt.Errorf("%w for %s", ErrMockNotMatched, shapeSummary(request))
 				missErr := models.NewMockMismatchError(baseErr, report)
 				// The miss is queued for the test that made it before the app
 				// sees the 502. The replay reads a test's misses once the app
@@ -1211,7 +1221,7 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 	for {
 		resp, err := http.ReadResponse(br, &http.Request{Method: method})
 		if err != nil {
-			return false, fmt.Errorf("read the answer of %s: %w", dstCfg.Addr, err)
+			return false, fmt.Errorf("read the answer of %s: %w", dstCfg.Addr, utils.WithholdInput(err))
 		}
 		switch {
 		case resp.StatusCode == http.StatusSwitchingProtocols:
@@ -1245,16 +1255,4 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 		// the close, which resp.Write tells the client as Connection: close.
 		return resp.Close, nil
 	}
-}
-
-// missedCall names a missed call in its error as its report does, with the
-// segments a recording of the pool redacted written redacted, or by its
-// path's shape with no recording at hand or no report (shapeSummary): the
-// proxy logs the error at ERROR, and the call may have sent its secret in
-// its path.
-func missedCall(request *http.Request, report *models.MockMismatchReport) string {
-	if report != nil {
-		return report.ActualSummary
-	}
-	return shapeSummary(request)
 }

@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"go.keploy.io/server/v3/utils"
 )
 
 // maxHead bounds an HTTP/1 request head, and maxLine a chunk-size line, the
@@ -226,7 +228,7 @@ func (r *Relay) forwardHTTP(w io.Writer) error {
 		// (RFC 9112 §2.2); forwarded with them, byte for byte.
 		req, perr := http.ReadRequest(bufio.NewReader(bytes.NewReader(bytes.TrimLeft(head, "\r\n"))))
 		if perr != nil {
-			return r.refuse("its bytes stopped being HTTP/1 request heads keploy can check: " + perr.Error())
+			return r.refuse("its bytes stopped being HTTP/1 request heads keploy can check: " + utils.WithholdInput(perr).Error())
 		}
 		raw := false
 		if req.Method == http.MethodConnect {

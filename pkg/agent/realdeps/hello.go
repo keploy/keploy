@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v3/utils"
 )
 
 // ReaderSize is the size of the buffered reader a connection's first bytes
@@ -241,7 +243,7 @@ func readRequestHead(br *bufio.Reader) (Name, error) {
 	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(head)))
 	if err != nil {
-		return Name{}, unreadable("its HTTP/1 request head does not parse: %v", err)
+		return Name{}, unreadable("its HTTP/1 request head does not parse: %v", utils.WithholdInput(err))
 	}
 	if req.Method == http.MethodConnect {
 		host, port, ok := splitTarget(req.RequestURI)

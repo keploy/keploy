@@ -3734,7 +3734,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 
 		var origCmd = cmd
-		a.logger.Debug("Application command provided :", zap.String("cmd", cmd))
+		a.logger.Debug("Application command provided :", zap.String("cmd", utils.RedactCommandLine(cmd)))
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, kdocker.AgentContainerPrefix)
 		a.conf.KeployContainer = opts.KeployContainer
@@ -3818,7 +3818,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		if origCmd != cmd {
 			a.logger.Info(
 				"Updated user command to allow Keploy to serve traffic before the app",
-				zap.String("cmd", cmd),
+				zap.String("cmd", utils.RedactCommandLine(cmd)),
 			)
 		}
 	}
