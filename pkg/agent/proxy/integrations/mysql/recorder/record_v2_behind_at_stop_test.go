@@ -584,10 +584,12 @@ func netDialTimeout(ctx context.Context, addr string) (net.Conn, error) {
 
 // A fetch that times out dialling at the stop is a failed fetch like any
 // other: the connection is left out, counted, named. Its error is a
-// context.DeadlineExceeded (the namespace dialer's bound, and the plain
-// dialer's "i/o timeout"), which is not the parser's end: that is its
-// retirement, not a context error inside a failure. Before, the stop branch
-// took either for the end and left the connection out without a word.
+// context.DeadlineExceeded (the namespace dialer's bound, and a dialer's
+// "i/o timeout"), which is not the parser's end: that is its retirement, not
+// a context error inside a failure. Before, the stop branch took either for
+// the end and left the connection out without a word. A dialer that fails
+// with its own context's cancel is a failed fetch too: a context.Canceled
+// inside the error is not the parser's end either.
 func TestRecordV2_PostTLS_AtTheStopAGreetingDialTimeoutLeavesTheConnectionOutNamed(t *testing.T) {
 	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "100")
 	t.Run("the namespace dialer's bound", func(t *testing.T) {
@@ -597,12 +599,20 @@ func TestRecordV2_PostTLS_AtTheStopAGreetingDialTimeoutLeavesTheConnectionOutNam
 			return nil, ctx.Err()
 		}).leftOutOnce(t, addr)
 	})
-	t.Run("the plain dialer's i/o timeout", func(t *testing.T) {
+	t.Run("a dialer's i/o timeout", func(t *testing.T) {
 		const addr = "10.0.0.2:3306"
 		if _, err := netDialTimeout(context.Background(), addr); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("the dialer's timeout is %v; want a context.DeadlineExceeded, the error this row is about", err)
 		}
 		fetchGreetingAtTheStop(t, models.NewTLSHandshakeStore(), addr, netDialTimeout).leftOutOnce(t, addr)
+	})
+	t.Run("a dialer's own cancel", func(t *testing.T) {
+		const addr = "10.0.0.4:3306"
+		fetchGreetingAtTheStop(t, models.NewTLSHandshakeStore(), addr, func(context.Context, string) (net.Conn, error) {
+			own, cancel := context.WithCancel(context.Background())
+			cancel()
+			return nil, fmt.Errorf("dial tcp %s: %w", addr, own.Err())
+		}).leftOutOnce(t, addr)
 	})
 }
 

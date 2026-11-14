@@ -130,7 +130,8 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 			}
 			// The recording's stop. The handshake was captured before it and
 			// read on after it (a TLS connection's greeting is fetched then
-			// too: untilParserEnds). Only two ends leave the connection out
+			// too, and the relay's answer to a directive waited for:
+			// untilParserEnds). Only two ends leave the connection out
 			// with nothing said here: its streams' (returned above) and the
 			// parser's own (parserEnded: its retirement, whose loss the
 			// supervisor tells). Every other failure leaves it out: counted,
@@ -170,6 +171,14 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 		return nil
 	}
 
+	// The relay did not upgrade the connection, and that loses nothing
+	// captured (performTLSUpgradeV2): what the stream holds past the
+	// SSLRequest is TLS records no recorder reads, so the capture ends here.
+	if handshake.notUpgraded {
+		logger.Debug("V2: the relay did not upgrade the connection to TLS; its capture ends at the SSLRequest")
+		return nil
+	}
+
 	if err := handleCommandsV2(ctx, logger, sess, decodeCtx, clientKeyNetConn, handshake.firstCmd, handshake.firstCmdRespSeq, handshake.resTimestamp); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 			return nil
@@ -199,6 +208,11 @@ type v2HandshakeResult struct {
 	// stop after the handshake: the remaining bytes on THIS raw stream
 	// are opaque TLS records, not decodable MySQL command traffic.
 	preTLSStored bool
+	// notUpgraded is set when the relay did not upgrade the connection to
+	// TLS and that loses nothing captured (performTLSUpgradeV2). The caller
+	// must stop after the handshake, recording nothing: past the SSLRequest
+	// the capture holds TLS records only.
+	notUpgraded bool
 	// firstCmd carries a command-phase packet that the post-TLS handshake
 	// (handlePostTLSHandshakeV2) had to read off ClientStream to distinguish a
 	// fresh connection (HandshakeResponse41, seq>=1) from a pre-warmed pool
@@ -327,12 +341,18 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		if sess.ClientWritesHeld {
 			clientFlush = len(clientFirst)
 		}
-		if err := performTLSUpgradeV2(ctx, logger, sess, clientFlush); err != nil {
+		upgraded, err := performTLSUpgradeV2(ctx, logger, sess, clientFlush)
+		if err != nil {
 			// No mark on the incomplete-mock flag: the recorder returns,
 			// and no mock is emitted after it to take one. The supervisor
 			// falls through on the error and leaves out the rest of the
 			// connection.
 			return res, err
+		}
+		if !upgraded {
+			res.skipConfigMock = true
+			res.notUpgraded = true
+			return res, nil
 		}
 
 		// After TLS upgrade, the relay is writing plaintext into our
@@ -1075,9 +1095,10 @@ func parserEnded(ctx context.Context, sess *supervisor.Session) bool {
 	}
 }
 
-// untilParserEnds is ctx, with its values, for what the parser fetches from
-// outside its capture (the server's greeting): it ends when the parser does
-// (parserEnded), not at the recording's stop. The caller calls the returned
+// untilParserEnds is ctx, with its values, for what the parser waits on from
+// outside its capture (the server's greeting it fetches, the relay's answer to
+// a handshake directive): it ends when the parser does (parserEnded), not at
+// the recording's stop. The caller calls the returned
 // func once it is done with it. A parser that has ended already gets a ctx
 // that has ended: the end ctx had is not left to a goroutine to pass on while
 // the fetch dials.
@@ -1437,19 +1458,29 @@ func storePreTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *super
 // the connection was never blocked in the first place. Treating that
 // refusal as fatal would make the parser's correctness depend on how
 // the relay beneath it was configured.
+//
+// The recording's stop does not end the wait for the relay, only the
+// parser's end does (untilParserEnds): a handshake read at the stop was
+// captured before it, under the hold, so the server has seen nothing of
+// it, and the relay's answer, or its end, decides, then the streams' end.
+// A relay that ends unanswered has ended both streams and flushed the
+// hold first (relay.Run), so the handshake reads on to its streams' end.
 func releaseClientHoldV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) error {
+	wait, done := untilParserEnds(ctx, sess)
+	defer done()
 	select {
-	case <-ctx.Done():
+	case <-wait.Done():
 		return ctx.Err()
 	case sess.Directives <- directive.ReleaseClient("mysql plaintext handshake"):
 	}
 
 	select {
-	case <-ctx.Done():
+	case <-wait.Done():
 		return ctx.Err()
 	case ack, ok := <-sess.Acks:
 		if !ok {
-			return errors.New("directive channel closed before client-hold release ack")
+			logger.Debug("V2: the relay ended before it acked the client-hold release; reading on to the streams' end")
+			return nil
 		}
 		if !ack.OK {
 			logger.Debug("V2: relay declined the client-hold release; assuming no hold was armed",
@@ -1461,9 +1492,19 @@ func releaseClientHoldV2(ctx context.Context, logger *zap.Logger, sess *supervis
 
 // performTLSUpgradeV2 builds TLS configs from the session options and
 // sends a KindUpgradeTLS directive on sess.Directives, blocking on the
-// ack. Returns nil on OK, an error on failure. Failure cases MUST call
-// sess.MarkMockIncomplete at the call site.
-func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, clientFlushBytes int) error {
+// ack. It reports whether the relay upgraded the connection. An upgrade
+// that did not happen is an error when it loses what the connection
+// carries next: the relay failed it while the recording runs. It is false
+// with no error when it loses nothing captured: past the SSLRequest the
+// capture holds TLS records only, which no recorder reads, and nothing
+// the connection carries next is recorded, because the relay has ended
+// (it ends both streams, then closes Acks: relay.Run) or because the
+// recording has stopped (Session.RecordingStopping) when the relay fails
+// it.
+//
+// The recording's stop does not end the wait for the relay, only the
+// parser's end does (untilParserEnds), as for releaseClientHoldV2.
+func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, clientFlushBytes int) (bool, error) {
 	destCfg := buildDestTLSConfigV2(sess)
 	clientCfg := buildClientTLSConfigV2(sess)
 
@@ -1475,26 +1516,33 @@ func performTLSUpgradeV2(ctx context.Context, logger *zap.Logger, sess *supervis
 	d := directive.UpgradeTLS(destCfg, clientCfg, "mysql client_ssl")
 	d.TLS.ClientFlushBytes = clientFlushBytes
 
+	wait, done := untilParserEnds(ctx, sess)
+	defer done()
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-wait.Done():
+		return false, ctx.Err()
 	case sess.Directives <- d:
 	}
 
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-wait.Done():
+		return false, ctx.Err()
 	case ack, ok := <-sess.Acks:
 		if !ok {
-			return fmt.Errorf("directive channel closed before TLS upgrade ack")
+			logger.Debug("V2: the relay ended before it acked the TLS upgrade")
+			return false, nil
 		}
 		if !ack.OK {
-			if ack.Err != nil {
-				return fmt.Errorf("tls upgrade: %w", ack.Err)
+			if sess.RecordingStopping() {
+				logger.Debug("V2: the relay failed the TLS upgrade at the recording's stop", zap.Error(ack.Err))
+				return false, nil
 			}
-			return errors.New("tls upgrade rejected by relay")
+			if ack.Err != nil {
+				return false, fmt.Errorf("tls upgrade: %w", ack.Err)
+			}
+			return false, errors.New("tls upgrade rejected by relay")
 		}
-		return nil
+		return true, nil
 	}
 }
 
