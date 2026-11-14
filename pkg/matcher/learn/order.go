@@ -133,6 +133,9 @@ type decider struct {
 	// places' words (places), built at its first ask.
 	oh *outsideHeld
 	pi *placeIndex
+	// mintedIDs: by an id's long words (mintedKey), mintedAnew's answer, read
+	// once for every piece of the id the call decides.
+	mintedIDs map[string]bool
 	// readClock: the refusal instantLearned last gave is one where learning
 	// read the value as the application's clock (heldRead), which the time
 	// default settles on any field (timeDefault).
@@ -1093,6 +1096,125 @@ func (dc *decider) oneRun(ps *wordPlaces, w readWord, asked []int32, held []evHe
 	}
 }
 
+// cutUnlessMinted is oneRun, asked only where keploy mock's minted default
+// does not read the piece as chance (mintedAnew): where it does, no place
+// is where the application cut the piece from, whichever run's piece
+// stands where, so "".
+func (dc *decider) cutUnlessMinted(long []readWord, oneRun func() string) func() string {
+	return func() string {
+		if dc.mintedAnew(long) {
+			return ""
+		}
+		return oneRun()
+	}
+}
+
+// mintedAnew reports, for the long words of an id the call minted (long:
+// mintedLong, each learned fresh: no place before the call shows it as a
+// word), whether a short piece of the id is chance at every place idChance
+// or idOutside leaves to oneRun: the founder's minted default (2026-11-11,
+// read for a piece on 2026-11-14), a rule of keploy mock's learn step alone
+// (DriftCache.ClientTests). A piece shorter than the 16-byte bound of an
+// id-shaped value is no source where none of the value's long words (32
+// bits or more), as recorded or as round F saw it, stands anywhere either
+// run gave the application before the call, not even glued inside a longer
+// word there (longGlued): each run then minted its id whole, so a place
+// holding its piece holds it by chance, wherever the other run's piece
+// stands. That loosens oneRun's both-runs refusal (bothRunsWhy) and its
+// one-run refusals for such pieces alone; keploy test reads the piece as
+// before. Asked once per id for the call (mintedIDs).
+func (dc *decider) mintedAnew(long []readWord) bool {
+	if len(long) == 0 || !dc.dr.ClientTests() {
+		return false
+	}
+	key := mintedKey(long)
+	if v, ok := dc.mintedIDs[key]; ok {
+		return v
+	}
+	v := !dc.longGlued(long)
+	if dc.mintedIDs == nil {
+		dc.mintedIDs = map[string]bool{}
+	}
+	dc.mintedIDs[key] = v
+	return v
+}
+
+// mintedKey names an id's long words, each run's, for mintedAnew's cache.
+func mintedKey(long []readWord) string {
+	var b strings.Builder
+	for _, o := range long {
+		b.WriteString(o.Rec)
+		b.WriteByte(0)
+		b.WriteString(o.Live)
+		b.WriteByte(0)
+	}
+	return b.String()
+}
+
+// longGlued reports whether one of an id's long words (long), as recorded or
+// as round F saw it, stands where mintedAnew reads it: in the text of a
+// place of the call, or a view round F's serves gave there, anywhere in it
+// (inside a longer word too), as the place's evidence of a word reads that
+// (evidenceOf: the recording's text where it was given before the call,
+// round F's at any time), or a text keploy could not read (fail closed); or
+// either run's word inside a longer word of a recording of the set, in any
+// of its lists, at any time (setGlued: fail closed, as mintedID reads a set
+// recording). Each long word was learned fresh, so a place holding it as a
+// whole word gave it nowhere (mintedLong): what this finds is the word
+// glued, where the application may have cut the id from (fail closed, as
+// movedFrom does).
+func (dc *decider) longGlued(long []readWord) bool {
+	mintedAsks.Add(1)
+	for i := range dc.ps {
+		for _, o := range long {
+			p := placedFor(dc.ps[i], o.Rec)
+			hr, okR := p.t.rec.contains(o.Rec)
+			hf, okF := p.t.live.contains(o.Live)
+			if ev, read := evidenceOf(p, evHeld{hr: hr, hf: hf, read: okR && okF}, o.Rec, o.Live, false); !read || ev != evNone {
+				return true
+			}
+			if slices.ContainsFunc(p.t.views, func(v *readerText) bool { h, ok := v.contains(o.Live); return h || !ok }) {
+				return true
+			}
+		}
+	}
+	gs := dc.outside().words
+	for j := range gs {
+		for _, o := range long {
+			if setGlued(gs[j], o.Rec) || setGlued(gs[j], o.Live) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mintedAsks counts the times longGlued reads a call's places for an id's
+// long words, for the rows that bound a call's work: once per id.
+var mintedAsks atomic.Int64
+
+// setGlued reports whether a list of g (its answer's, F's view of it, a
+// view F's serves gave) holds t inside a longer word of a word reading
+// (isWord, wordByte), stamps read as any text. The id reading is not read:
+// an id token holds its own long words whole.
+func setGlued(g givenWords, t string) bool {
+	return listsGlued(g.answerLists, t) || listsGlued(g.view, t) || slices.ContainsFunc(g.views, func(l answerLists) bool { return listsGlued(l, t) })
+}
+
+// listsGlued reports whether l holds t inside a longer word of a word
+// reading (setGlued).
+func listsGlued(l answerLists, t string) bool {
+	id := len(readings) - 1
+	for _, by := range [][][]string{l.words, l.stamped} {
+		for i := 0; i < len(by) && i < id; i++ {
+			if slices.ContainsFunc(by[i], func(k string) bool { return len(k) > len(t) && strings.Contains(k, t) }) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Why round F's application was not given a place the recording's piece
 // of an id stands at (oneRun), as its line says it: round F served it only
 // after the call reached keploy, or not at all (fNotBefore), or served it
@@ -1312,7 +1434,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// state leaves them unknown, show anything of it (outsideHeld).
 	gs, oh := dc.outside().words, dc.held()
 	inR, inF := oh.holding(w.Rec), oh.holding(w.Live)
-	idChance, oneRun := dc.idChance(ps, w, long), dc.oneRun(ps, w, asked, held, inR, inF)
+	idChance, oneRun := dc.idChance(ps, w, long), dc.cutUnlessMinted(long, dc.oneRun(ps, w, asked, held, inR, inF))
 	for k, i32 := range asked {
 		i := int(i32)
 		p := *ps.at(i)

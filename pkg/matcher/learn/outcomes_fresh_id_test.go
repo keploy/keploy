@@ -575,6 +575,91 @@ func TestOutcomeAPieceEachRunHoldsAtAnotherPlaceIsNoChance(t *testing.T) {
 	}
 }
 
+// In keploy mock's learn step (DriftCache.ClientTests) the founder's minted
+// default reads a short piece of an id whose long words stand nowhere either
+// run gave the application as chance, wherever each run's own piece stands
+// (mintedAnew): an app_name_reservations insert's appId, a UUID minted with
+// the app, whose recorded 4-hex group stands inside another test's UUID at
+// one place and round F's inside another UUID at another place, or in a set
+// recording's view, is fresh, its line naming both places. keploy test reads
+// the same shapes as before (refused, as in
+// TestOutcomeAPieceEachRunHoldsAtAnotherPlaceIsNoChance). Refused in keploy
+// mock too: the recorded id's 32-bit word glued inside a longer word of a
+// third place, and round F's glued inside a longer word of a set
+// recording's answer. The places are read for the id's long words once per
+// call, however many of its pieces are asked.
+func TestOutcomeAPieceOfAMintedIdEachRunHoldsIsChanceInKeployMock(t *testing.T) {
+	const (
+		path           = "body.docs.msgs.0.appId"
+		rec, live      = "ed35a78f-905c-48d1-bc3d-a07311678c73", "3f0c9a12-7e6d-4b8a-9e21-5c6d7e8f9a0b"
+		r, f           = "48d1", "4b8a"
+		field          = "body.cursor.firstBatch.0._id"
+		holdsR, holdsF = "b0fd3b58-3ff5-48d1-a1b2-c3d4e5f60718", "9e9e9e9e-77aa-4b8a-b2c3-d4e5f6071829"
+		noneR, noneF   = "aaaa1111-2222-4c00-8333-444455556666", "c1ae4c69-77aa-4c00-b2c3-d4e5f6071829"
+	)
+	at := func(mock, recText, liveText string) []Earlier {
+		return oServed(mock, true, false, Response, oText(field, recText), liveText, 0)
+	}
+	set := func(held, viewed string) func() ([]GivenPlaces, error) {
+		m := receiveOf("mock-31", held, oAt.Add(-time.Minute))
+		m.Spec.ResTimestampMock = time.Time{}
+		v := receiveOf("mock-31", viewed, oAt.Add(-time.Minute))
+		v.Spec.ResTimestampMock = time.Time{}
+		x := clockedDrifts().RawOf(m, true).ServedAs(3).ServedLive(clockedDrifts().RawOf(v, true))
+		return func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
+	}
+	decide := func(drifts *DriftCache, e []Earlier, given func() ([]GivenPlaces, error)) Decision {
+		in := oInput(path, rec, live, e, nil)
+		in.Drifts, in.Given = drifts, given
+		return oWord(t, Decide(in), r, f)
+	}
+	both := append(at("mock-231", holdsR, noneF), at("mock-232", noneR, holdsF)...)
+	d := decide(oClientDrifts(), both, nil)
+	costFresh(t, "keploy mock: the recorded group at one place, round F's at another", d)
+	if !strings.Contains(d.Line, "mock-231") || !strings.Contains(d.Line, "mock-232") || !strings.Contains(d.Line, "piece of an id") {
+		t.Errorf("the line must name both places the group is chance at, and why: %q", d.Line)
+	}
+	d = decide(oDrifts(), both, nil)
+	oRefused(t, "keploy test: the recorded group at one place, round F's at another", d, RefusalUnknown, "mock-231", "mock-232")
+	oNoChanceLine(t, d, "mock-231 body.cursor.firstBatch.0._id")
+
+	inView := set(noneR, holdsF)
+	costFresh(t, "keploy mock: the recorded group at a place, round F's in a set recording's view",
+		decide(oClientDrifts(), at("mock-231", holdsR, noneF), inView))
+	oRefused(t, "keploy test: the recorded group at a place, round F's in a set recording's view",
+		decide(oDrifts(), at("mock-231", holdsR, noneF), inView), RefusalUnknown, "mock-231", "mock-31")
+
+	glued := append(slices.Clone(both), at("mock-233", "key x"+rec[:8]+"y", "key none")...)
+	d = decide(oClientDrifts(), glued, nil)
+	oRefused(t, "keploy mock: the recorded id's 32-bit word glued inside a longer word at a third place", d, RefusalUnknown, "mock-231", "mock-232")
+	oNoChanceLine(t, d, "mock-231 body.cursor.firstBatch.0._id")
+	oRefused(t, "keploy mock: round F's 48-bit word glued inside a longer word of a set recording's answer",
+		decide(oClientDrifts(), both, set("tok"+live[24:]+"z", noneF)), RefusalUnknown, "mock-231", "mock-232")
+	oRefused(t, "keploy mock: round F's 48-bit word glued inside a longer word of round F's view of a set recording",
+		decide(oClientDrifts(), both, set(noneR, "tok"+live[24:]+"z")), RefusalUnknown, "mock-231", "mock-232")
+	// The id whole in a recording of the set made a minute after the call
+	// (the application's later calls with the app it made) is no long
+	// word glued: the piece is chance still.
+	later := func() ([]GivenPlaces, error) {
+		x := clockedDrifts().RawOf(receiveOf("mock-34", rec, oAt.Add(time.Minute)), true).ServedAs(3).ServedAsRecorded()
+		return []GivenPlaces{PlacesOf(x)}, nil
+	}
+	costFresh(t, "keploy mock: the recorded id whole in a set recording made after the call", decide(oClientDrifts(), both, later))
+
+	// Two pieces of the id asked, each held at a place in each run: the
+	// places are read for its long words once.
+	two := append(at("mock-231", "b0fd3b58-905c-48d1-a1b2-c3d4e5f60718", noneF), at("mock-232", noneR, "9e9e9e9e-7e6d-4b8a-b2c3-d4e5f6071829")...)
+	before := mintedAsks.Load()
+	in := oInput(path, rec, live, two, nil)
+	in.Drifts = oClientDrifts()
+	ds := Decide(in)
+	costFresh(t, "keploy mock: two groups of the id, each at a place in each run", oWord(t, ds, r, f))
+	costFresh(t, "keploy mock: the id's second group", oWord(t, ds, "905c", "7e6d"))
+	if n := mintedAsks.Load() - before; n != 1 {
+		t.Errorf("the places were read for the id's long words %d times; want once per call", n)
+	}
+}
+
 // Each run's holders of its own piece count by that run's rule, beside the
 // other run's piece at an earlier test's place, and then no place is
 // chance: the piece is refused as unknown (fail closed). The recording's
