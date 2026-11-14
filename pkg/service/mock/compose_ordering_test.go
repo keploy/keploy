@@ -106,6 +106,7 @@ type composeInstr struct {
 	// sent, and beginsErr what it fails with.
 	begins    map[string]time.Time
 	seeds     map[string]string
+	notes     map[string]string
 	beginsErr error
 	// windows is what the agent answers the windows read with.
 	windows []models.ScopeWindow
@@ -286,8 +287,8 @@ func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker ma
 
 // PushTestBegins takes the tests' recorded begins (TestBeginsPusher), or
 // fails with beginsErr.
-func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string, seeds map[string]string, _ map[string][]models.ClientCase) error {
-	f.begins, f.seeds = begins, seeds
+func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string, seeds, notes map[string]string, _ map[string][]models.ClientCase) error {
+	f.begins, f.seeds, f.notes = begins, seeds, notes
 	return f.beginsErr
 }
 

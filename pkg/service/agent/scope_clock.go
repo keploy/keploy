@@ -118,6 +118,27 @@ func (a *Agent) SetTestBegins(_ context.Context, begins map[string]time.Time, re
 	return nil
 }
 
+// SetTestNotes installs, by test name, the note each test's harness sent with
+// its end in its recording (models.TestBeginsReq.Notes): a replayed test's
+// begin is answered it as it was sent (ProvenBegin). A longer note than
+// models.MaxScopeNote, which no record keeps, is not installed. The CLI
+// installs them with the tests' begins; a new session clears them
+// (resetScopeState).
+func (a *Agent) SetTestNotes(_ context.Context, notes map[string]string) {
+	a.scopeMu.Lock()
+	a.testNotes = nil
+	for test, note := range notes {
+		if note == "" || len(note) > models.MaxScopeNote {
+			continue
+		}
+		if a.testNotes == nil {
+			a.testNotes = map[string]string{}
+		}
+		a.testNotes[test] = note
+	}
+	a.scopeMu.Unlock()
+}
+
 // SetTestSeeds installs, by test name, the seed each test's recording kept
 // for its browser's random numbers (models.TestBeginsReq.Seeds): a replayed
 // test's begin that asks for a seed is answered its recording's

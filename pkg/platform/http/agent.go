@@ -5374,22 +5374,23 @@ var ErrAgentIgnoresRules = errors.New("this keploy agent does not acknowledge th
 
 // PushTestBegins hands the agent when each test of the replayed recording
 // began, so it moves the run's clock per test, and the seed each test's
-// recording kept for its browser (models.TestBeginsReq). They are given again
+// recording kept for its browser, and the note its harness sent with its end
+// (models.TestBeginsReq). They are given again
 // to a restarted agent, like the scope table. An agent that cannot take them
 // is an error: the tests would run on another clock, or their browsers on
 // other numbers, than their recording's. The requests each client test sent
 // in its recording (cases) go with them; an agent that does not read them
 // learns as it did before it could.
-func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string, cases map[string][]models.ClientCase) (retErr error) {
+func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds, notes map[string]string, cases map[string][]models.ClientCase) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded, recordedReal, recordedSeeds, recordedCases := maps.Clone(begins), maps.Clone(real), maps.Clone(seeds), maps.Clone(cases)
+			recorded, recordedReal, recordedSeeds, recordedNotes, recordedCases := maps.Clone(begins), maps.Clone(real), maps.Clone(seeds), maps.Clone(notes), maps.Clone(cases)
 			a.session().record(stepTestBegins, func(c context.Context) error {
-				return a.PushTestBegins(c, recorded, recordedReal, recordedSeeds, recordedCases)
+				return a.PushTestBegins(c, recorded, recordedReal, recordedSeeds, recordedNotes, recordedCases)
 			})
 		}
 	}()
-	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real, Seeds: seeds, Cases: cases})
+	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real, Seeds: seeds, Notes: notes, Cases: cases})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests' recorded begins: %w", err)
 	}

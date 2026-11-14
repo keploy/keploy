@@ -70,12 +70,13 @@ type beginsPusher struct {
 	begins map[string]time.Time
 	real   map[string][]string
 	seeds  map[string]string
+	notes  map[string]string
 	cases  map[string][]models.ClientCase
 	calls  int
 }
 
-func (p *beginsPusher) PushTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string, cases map[string][]models.ClientCase) error {
-	p.begins, p.real, p.seeds, p.cases = begins, real, seeds, cases
+func (p *beginsPusher) PushTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string, seeds, notes map[string]string, cases map[string][]models.ClientCase) error {
+	p.begins, p.real, p.seeds, p.notes, p.cases = begins, real, seeds, notes, cases
 	p.calls++
 	return nil
 }
@@ -109,6 +110,58 @@ func TestPushTestBeginsSendsTheRecordingsBegins(t *testing.T) {
 	}
 	if p.calls != 1 || len(p.begins) != 0 {
 		t.Fatalf("pushed begins %v (%d calls)", p.begins, p.calls)
+	}
+}
+
+// Replay hands the agent the note each test's harness sent with its end in
+// the recording, as the mapping holds it; a test with none is not named, and
+// a recording with no note sends none.
+func TestPushTestBeginsSendsEachTestsNote(t *testing.T) {
+	t0 := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	note := "frames /a:2\n\tdraws 7 \"x\": #y\x00\u2028"
+	p := &beginsPusher{}
+	m := &mockService{logger: zap.NewNop(), instrumentation: p, mappingDB: setTableDB{mapping: &models.Mapping{
+		TestCases: []models.MappedTestCase{
+			{ID: "ui::TestA", At: t0, Note: note},
+			{ID: "ui::TestB", At: t0},
+		},
+	}}}
+	if err := m.pushTestBegins(context.Background(), "rec"); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.notes) != 1 || p.notes["ui::TestA"] != note {
+		t.Fatalf("pushed notes %q", p.notes)
+	}
+	p = &beginsPusher{}
+	m = &mockService{logger: zap.NewNop(), instrumentation: p, mappingDB: setTableDB{mapping: &models.Mapping{
+		TestCases: []models.MappedTestCase{{ID: "ui::TestB", At: t0}},
+	}}}
+	if err := m.pushTestBegins(context.Background(), "rec"); err != nil {
+		t.Fatal(err)
+	}
+	if p.notes != nil {
+		t.Fatalf("a recording with no note pushed %q", p.notes)
+	}
+}
+
+// A test's mapping keeps the note its harness sent with its end in the
+// recording: of a test run twice (a retry) the latest window's with one; a
+// window with none gives none, and leaves the entry's other fields.
+func TestStampNotesKeepsTheLatestNoteOfEachTest(t *testing.T) {
+	t0 := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	byCase := map[string]models.MappedTestCase{"ui::tr": {Dir: "tests"}}
+	stampNotes(byCase, []models.ScopeWindow{
+		{Name: "ui::tr", Start: t0, Note: "first"},
+		{Name: "ui::tr", Start: t0.Add(2 * time.Minute)},
+		{Name: "ui::tr", Start: t0.Add(time.Minute), Note: "retry"},
+		{Name: "ui::tr", Start: t0.Add(-time.Minute), Note: "earlier"},
+		{Name: "ui::history", Start: t0},
+	})
+	if got := byCase["ui::tr"]; got.Note != "retry" || got.Dir != "tests" {
+		t.Fatalf("ui::tr: %+v", got)
+	}
+	if got, ok := byCase["ui::history"]; ok {
+		t.Fatalf("a window with no note stamped %+v", got)
 	}
 }
 

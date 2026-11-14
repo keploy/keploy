@@ -42,7 +42,7 @@ func TestEachWriterKeepsEachTestsFieldsWithoutTheSwitch(t *testing.T) {
 				t.Setenv(provenswitch.Env, "1")
 				must(t, db.Insert(ctx, &models.Mapping{TestSetID: "s",
 					TestCases: []models.MappedTestCase{
-						{ID: "o::TestA", Key: "pkg/a", At: at, Real: []string{"db:5432"}, Given: []models.GivenValue{{Name: "given:a", Value: "v"}}, Seed: "0123456789abcdef",
+						{ID: "o::TestA", Key: "pkg/a", At: at, Real: []string{"db:5432"}, Given: []models.GivenValue{{Name: "given:a", Value: "v"}}, Seed: "0123456789abcdef", Note: "draws 7\n",
 							Dir: "o", Cases: []string{"test-1"}, CaseMocks: map[string][]string{"test-1": {"mock-0"}}, CaseSteps: map[string]string{"test-1": "step"}, Starts: 2,
 							Mocks: []models.MockEntry{{Name: "mock-0", Kind: "Http"}}},
 						{ID: "o::TestB", Key: "pkg/b", Mocks: []models.MockEntry{{Name: "mock-1", Kind: "Http"}}},
@@ -69,6 +69,7 @@ func TestEachWriterKeepsEachTestsFieldsWithoutTheSwitch(t *testing.T) {
 					{field: "real", was: b.Real, is: a.Real},
 					{field: "given", was: b.Given, is: a.Given},
 					{field: "seed", was: b.Seed, is: a.Seed},
+					{field: "note", was: b.Note, is: a.Note},
 					{field: "dir", was: b.Dir, is: a.Dir},
 					{field: "cases", was: b.Cases, is: a.Cases},
 					{field: "case_mocks", was: b.CaseMocks, is: a.CaseMocks},

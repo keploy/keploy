@@ -143,7 +143,7 @@ type ScopeGatePusher interface {
 // test's recording kept for its browser's random numbers, and the requests
 // each client test sent the application in its recording.
 type TestBeginsPusher interface {
-	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds map[string]string, cases map[string][]models.ClientCase) error
+	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string, seeds, notes map[string]string, cases map[string][]models.ClientCase) error
 }
 
 type SetPusher interface {

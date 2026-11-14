@@ -24,6 +24,12 @@ type testSeedsSetter interface {
 	SetTestSeeds(ctx context.Context, seeds map[string]string)
 }
 
+// testNotesSetter takes, by test, the note its harness sent with its end in
+// its recording (models.TestBeginsReq.Notes).
+type testNotesSetter interface {
+	SetTestNotes(ctx context.Context, notes map[string]string)
+}
+
 // testCasesSetter takes, by test, the requests its client test sent in its
 // recording (models.TestBeginsReq.Cases). A service without it learns as it
 // did before it could: no request of a client test is a place of its calls.
@@ -68,6 +74,13 @@ func (a *Agent) HandleTestBegins(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this keploy agent cannot give a test's browser the seed its recording kept", http.StatusNotImplemented)
 		return
 	}
+	// So do the notes: a harness that compares its replay with its
+	// recording would be answered none.
+	ns, _ := s.(testNotesSetter)
+	if ns == nil && len(req.Notes) > 0 {
+		http.Error(w, "this keploy agent cannot give a test's harness the note its recording kept", http.StatusNotImplemented)
+		return
+	}
 	if err := s.SetTestBegins(r.Context(), req.Begins, req.Real); err != nil {
 		code := http.StatusInternalServerError
 		if errors.Is(err, agent.ErrNoTestClock) || errors.Is(err, agent.ErrNoRealTestClock) {
@@ -78,6 +91,9 @@ func (a *Agent) HandleTestBegins(w http.ResponseWriter, r *http.Request) {
 	}
 	if ss != nil {
 		ss.SetTestSeeds(r.Context(), req.Seeds)
+	}
+	if ns != nil {
+		ns.SetTestNotes(r.Context(), req.Notes)
 	}
 	if cs, ok := s.(testCasesSetter); ok {
 		cs.SetTestCases(r.Context(), req.Cases)

@@ -271,6 +271,9 @@ func entryOver(o, w models.MappedTestCase) models.MappedTestCase {
 	if w.Seed != "" {
 		o.Seed = w.Seed
 	}
+	if w.Note != "" {
+		o.Note = w.Note
+	}
 	return o
 }
 
@@ -924,6 +927,9 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 			// The seed its browser drew from in this record, none included
 			// (seeding off): the calls it pairs with were drawn from it.
 			tc.Seed = in.Seed
+			// The note its harness sent at its end in this record, none
+			// included: it is of the run whose calls the entry now holds.
+			tc.Note = in.Note
 		}
 		// What record's full round learned a client test's request binds
 		// (proven switch only), beside what it learned before in the round:

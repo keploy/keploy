@@ -937,6 +937,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				stampReal(byCase, windows)
 				stampGiven(byCase, windows)
 				stampSeeds(byCase, windows)
+				stampNotes(byCase, windows)
 				stampKeys(byCase, windows, m.claims)
 			}
 			if len(starts) > 0 {
@@ -1692,6 +1693,26 @@ func stampSeeds(byCase map[string]models.MappedTestCase, windows []models.ScopeW
 		first[w.Name] = w.Start
 		tc := byCase[w.Name]
 		tc.Seed = w.Seed
+		byCase[w.Name] = tc
+	}
+}
+
+// stampNotes writes into each test's mapping the note its harness sent with
+// its end in this recording (models.ScopeWindow.Note): each replay's begin is
+// answered it. Of a name with more than one window the latest's with a note
+// is kept: the harness's last word on the test.
+func stampNotes(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	last := map[string]time.Time{}
+	for _, w := range windows {
+		if w.Note == "" {
+			continue
+		}
+		if at, ok := last[w.Name]; ok && w.Start.Before(at) {
+			continue
+		}
+		last[w.Name] = w.Start
+		tc := byCase[w.Name]
+		tc.Note = w.Note
 		byCase[w.Name] = tc
 	}
 }

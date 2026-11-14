@@ -164,6 +164,14 @@ type ScopeReq struct {
 	// seed to draw from (ScopeBeginResp.Seed): a record keeps the begin's,
 	// and a replay answers the one the test's recording kept instead.
 	Seed string `json:"seed,omitempty"`
+	// Note, sent with /agent/scope/end, is the harness's own note of the
+	// test, which keploy keeps and hands back but never reads: a record
+	// writes the end's into the test's mapping (MappedTestCase.Note), and
+	// each replay's begin is answered it as it was sent (ScopeBeginResp.Note),
+	// so the harness can compare its replay with its recording. At most
+	// MaxScopeNote bytes: an end with a longer one is refused
+	// (ScopeErrBadRequest). A begin's is not read.
+	Note string `json:"note,omitempty"`
 }
 
 // How a test's browser drew its random numbers (ScopeReq.Random):
@@ -180,6 +188,10 @@ const (
 // maxScopeSeed bounds a seed's length: a seed is a number, which a harness
 // sends as hex, and a longer one is no seed keploy keeps.
 const maxScopeSeed = 64
+
+// MaxScopeNote bounds a test's note (ScopeReq.Note), in bytes: keploy writes
+// it into the test's mapping entry and hands it back at each replay's begin.
+const MaxScopeNote = 16 << 10
 
 // NormalizeScopeSeed is a begin's seed in lower case when it is 8 to
 // maxScopeSeed hex digits, and "" for anything else: keploy keeps and
@@ -269,6 +281,10 @@ type ScopeBeginResp struct {
 	// recorded with seeding off or before keploy kept seeds, and its
 	// browser draws its own.
 	Seed string `json:"seed,omitempty"`
+	// Note is, in a replay, the note the test's harness sent with its end in
+	// the test's recording (MappedTestCase.Note), as it was sent. "" in a
+	// record, and when the recording kept none.
+	Note string `json:"note,omitempty"`
 }
 
 // ScopeActionSkip is the ScopeBeginResp.Action telling a harness to skip.
@@ -367,6 +383,9 @@ type ScopeWindow struct {
 	// (ScopeBeginResp.Seed); "" when it answered none. A record writes it
 	// into the test's mapping (MappedTestCase.Seed).
 	Seed string `json:"seed,omitempty"`
+	// Note is the note the test's end sent (ScopeReq.Note); "" when it sent
+	// none. A record writes it into the test's mapping (MappedTestCase.Note).
+	Note string `json:"note,omitempty"`
 	// Evidence is, under the proven wire, what keploy saw that failed the
 	// test at its end in a replay; nil when nothing did.
 	Evidence *ScopeEvidence `json:"evidence,omitempty"`
@@ -582,6 +601,10 @@ type TestBeginsReq struct {
 	// random numbers (MappedTestCase.Seed): a begin that asks for one is
 	// answered it (ScopeBeginResp.Seed). Absent when no test kept one.
 	Seeds map[string]string `json:"seeds,omitempty"`
+	// Notes is, by test, the note its harness sent with its end in its
+	// recording (MappedTestCase.Note): the test's begin is answered it
+	// (ScopeBeginResp.Note). Absent when no test kept one.
+	Notes map[string]string `json:"notes,omitempty"`
 	// Cases is, by test, the requests its client test sent the application
 	// in its recording, in the order it sent them (MappedTestCase.Cases, each
 	// read from its test case): under the proven switch the agent pairs each

@@ -98,16 +98,19 @@ func TestARecordKeepsTheGivensAndItsReplayPushesThem(t *testing.T) {
 }
 
 // A record writes into each test's mapping the seed its browser drew from
-// (Record -> stampSeeds), and a replay of the set hands the agent those
-// seeds, by test, with the tests' begins (pushTestBegins): without either,
+// (Record -> stampSeeds) and the note its harness sent with its end
+// (stampNotes), and a replay of the set hands the agent those seeds and
+// notes, by test, with the tests' begins (pushTestBegins): without either,
 // every replayed test's browser would draw other numbers than its
-// recording's.
+// recording's, and its harness could not compare its replay with it.
 func TestARecordKeepsEachTestsSeedAndItsReplayPushesIt(t *testing.T) {
 	provenOn(t)
 	const seed = "0123456789abcdef0123456789abcdef"
 	dir := t.TempDir()
 	w := mark("ui::tr", 0, 10*time.Millisecond)
 	w.Outcome, w.Dir, w.Random, w.Seed = models.ScopeOutcomePassed, "tests", models.ScopeRandomSeeded, seed
+	const note = "frames /a:2\ndraws 7"
+	w.Note = note
 	other := mark("ui::history", 20*time.Millisecond, 30*time.Millisecond)
 	other.Outcome, other.Dir, other.Random = models.ScopeOutcomePassed, "tests", models.ScopeRandomOwn
 	instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}),
@@ -128,6 +131,8 @@ func TestARecordKeepsEachTestsSeedAndItsReplayPushesIt(t *testing.T) {
 	}
 	require.Equal(t, seed, byID["ui::tr"].Seed, "the mapping keeps the seed the test's browser drew from")
 	require.Empty(t, byID["ui::history"].Seed)
+	require.Equal(t, note, byID["ui::tr"].Note, "the mapping keeps the note the test's harness sent")
+	require.Empty(t, byID["ui::history"].Note)
 
 	// The replay of that recording pushes it with the begins.
 	rinstr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
@@ -135,4 +140,5 @@ func TestARecordKeepsEachTestsSeedAndItsReplayPushesIt(t *testing.T) {
 	rcfg.Path, rcfg.Mock.OnMiss = dir, "fail"
 	require.NoError(t, New(zap.NewNop(), rinstr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, rcfg).Replay(context.Background()))
 	require.Equal(t, map[string]string{"ui::tr": seed}, rinstr.seeds, "the replay pushes each test's recorded seed")
+	require.Equal(t, map[string]string{"ui::tr": note}, rinstr.notes, "and each test's recorded note")
 }

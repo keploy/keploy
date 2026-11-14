@@ -406,7 +406,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if a.replaying() {
 			meta.given = nil
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Evidence: ev, Real: meta.real, Given: meta.given, SkippedReads: meta.skippedReads, Instance: meta.instance})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Random: meta.random, Seed: meta.seed, Note: meta.note, Evidence: ev, Real: meta.real, Given: meta.given, SkippedReads: meta.skippedReads, Instance: meta.instance})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -594,7 +594,9 @@ type scopeMeta struct {
 	random string
 	// seed is the seed keploy answered the test's begin with
 	// (ScopeWindow.Seed).
-	seed     string
+	seed string
+	// note is the note the test's end sent (ScopeWindow.Note).
+	note     string
 	evidence *models.ScopeEvidence
 	// real are the mock.real destinations the test used while open.
 	real []models.RealUse
@@ -645,6 +647,27 @@ func (a *Agent) noteScopeRandom(name string, pid int, random, seed string) {
 		a.scopeMeta = make(map[scopeKey]scopeMeta)
 	}
 	meta.random, meta.seed = random, seed
+	a.scopeMeta[k] = meta
+}
+
+// noteScopeNoteDone records the note an ending test's harness sent
+// (ScopeWindow.Note). An end that sends none notes nothing, and an end of a
+// test that is not open notes nothing.
+func (a *Agent) noteScopeNoteDone(name string, pid int, note string) {
+	if name == "" || note == "" {
+		return
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	k := scopeKey{pid: uint32(pid), name: name}
+	if _, open := a.workerOpen[k]; !open {
+		return
+	}
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	meta := a.scopeMeta[k]
+	meta.note = note
 	a.scopeMeta[k] = meta
 }
 

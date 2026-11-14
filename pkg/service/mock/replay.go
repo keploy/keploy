@@ -2072,8 +2072,9 @@ func (m *mockService) pushTestBegins(ctx context.Context, name string) error {
 	begins := testBegins(mapping)
 	real := testReal(mapping)
 	seeds := testSeeds(mapping)
+	notes := testNotes(mapping)
 	cases := m.testClientCases(ctx, name, mapping)
-	if err := pusher.PushTestBegins(ctx, begins, real, seeds, cases); err != nil {
+	if err := pusher.PushTestBegins(ctx, begins, real, seeds, notes, cases); err != nil {
 		return err
 	}
 	m.realListed = real
@@ -2182,6 +2183,25 @@ func testSeeds(mapping *models.Mapping) map[string]string {
 			out = map[string]string{}
 		}
 		out[tc.ID] = tc.Seed
+	}
+	return out
+}
+
+// testNotes is, by test ID, the note each test's harness sent with its end
+// in its recording (models.MappedTestCase.Note); nil when none kept one.
+func testNotes(mapping *models.Mapping) map[string]string {
+	if mapping == nil {
+		return nil
+	}
+	var out map[string]string
+	for _, tc := range mapping.TestCases {
+		if tc.Note == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[tc.ID] = tc.Note
 	}
 	return out
 }

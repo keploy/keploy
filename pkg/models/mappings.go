@@ -653,6 +653,14 @@ type MappedTestCase struct {
 	// off, and for a test whose harness drives no browser. Read and kept by
 	// each rewrite, whatever the switch, as Key.
 	Seed string `json:"seed,omitempty" yaml:"seed,omitempty" bson:"seed,omitempty"`
+	// Note is the note the test's harness sent with its end in its
+	// recording (models.ScopeWindow.Note), opaque to keploy: each replay's
+	// begin is answered it as it was written. Written under the proven
+	// switch only; empty when the harness sent none. Read and kept by each
+	// rewrite, whatever the switch, as Key. Its key is harness_note, not
+	// note: a note: a hand edit wrote on a test entry, as hand edits write
+	// on mock entries, stays the hand edit's (mapdb keeps it as written).
+	Note string `json:"harness_note,omitempty" yaml:"harness_note,omitempty" bson:"harness_note,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -678,6 +686,7 @@ type writtenTestFormat struct {
 	Variables           MockVariables `json:"variables,omitempty" yaml:"variables,omitempty"`
 	Key                 string        `json:"key,omitempty" yaml:"key,omitempty"`
 	Seed                string        `json:"seed,omitempty" yaml:"seed,omitempty"`
+	Note                string        `json:"harness_note,omitempty" yaml:"harness_note,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -692,11 +701,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, End: tc.End, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, End: tc.End, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed, Note: tc.Note}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, End: tc.End, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, End: tc.End, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed, Note: tc.Note})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -937,6 +946,39 @@ func recordedSeedYAML(node *yaml.Node) (string, error) {
 	return k.Seed, nil
 }
 
+// errRecordedNote is a test entry whose harness_note: is not a string.
+const errRecordedNote = "a test's harness note (harness_note) is not a string: %w"
+
+// recordedNoteYAML is a test entry's harness_note:, whatever the proven switch, as
+// recordedSeedYAML: one that is not a string is an error, never a reason to
+// read the entry without it.
+func recordedNoteYAML(node *yaml.Node) (string, error) {
+	if !nodeHasField(node, "harness_note") {
+		return "", nil
+	}
+	var k struct {
+		Note string `yaml:"harness_note"`
+	}
+	if err := node.Decode(&k); err != nil {
+		return "", fmt.Errorf(errRecordedNote, err)
+	}
+	return k.Note, nil
+}
+
+// recordedNoteJSON is recordedNoteYAML for a JSON entry.
+func recordedNoteJSON(data []byte) (string, error) {
+	if !jsonContainsField(data, "harness_note") {
+		return "", nil
+	}
+	var k struct {
+		Note string `json:"harness_note"`
+	}
+	if err := json.Unmarshal(data, &k); err != nil {
+		return "", fmt.Errorf(errRecordedNote, err)
+	}
+	return k.Note, nil
+}
+
 // recordedSeedJSON is recordedSeedYAML for a JSON entry.
 func recordedSeedJSON(data []byte) (string, error) {
 	if !jsonContainsField(data, "seed") {
@@ -1012,10 +1054,14 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	note, err := recordedNoteYAML(node)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.End, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, end, rl, gv, vars, key, seed
+	tc.At, tc.End, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed, tc.Note = at, end, rl, gv, vars, key, seed, note
 	return nil
 }
 
@@ -1119,10 +1165,14 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	note, err := recordedNoteJSON(data)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.End, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, end, rl, gv, vars, key, seed
+	tc.At, tc.End, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed, tc.Note = at, end, rl, gv, vars, key, seed, note
 	return nil
 }
 

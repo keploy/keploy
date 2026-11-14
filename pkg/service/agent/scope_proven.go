@@ -1563,7 +1563,19 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			a.logger.Info(answeredAsRecordedLine(id, n))
 		}
 	}
-	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Seed: seed}, nil
+	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Seed: seed, Note: a.beginNote(id)}, nil
+}
+
+// beginNote is, in a replay, the note test id's harness sent with its end in
+// the test's recording (SetTestNotes), answered to its begin
+// (ScopeBeginResp.Note); "" in a record, and when the recording kept none.
+func (a *Agent) beginNote(id string) string {
+	if !a.replaying() {
+		return ""
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	return a.testNotes[id]
 }
 
 // beginSeed is the seed a beginning test's browser draws its random numbers
@@ -1655,6 +1667,11 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	if req.Name == "" {
 		return models.ScopeEndResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest, "an end names its test", "send the name its begin sent")
 	}
+	if len(req.Note) > models.MaxScopeNote {
+		return models.ScopeEndResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
+			fmt.Sprintf("the end of %s sent a note of %d bytes, over keploy's bound of %d (models.MaxScopeNote)", req.Name, len(req.Note), models.MaxScopeNote),
+			"send a shorter note: keep only what the harness compares at replay")
+	}
 	worker, serr := a.callerWorker(ctx, "end", req.Name)
 	if serr != nil {
 		return models.ScopeEndResp{}, serr
@@ -1715,6 +1732,8 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	// How the test's browser drew its random numbers, as its harness saw
 	// it: it replaces what the begin meant to do.
 	a.noteScopeRandomDone(id, 0, models.NormalizeScopeRandom(req.Random))
+	// The harness's own note of the test, kept as it was sent.
+	a.noteScopeNoteDone(id, 0, req.Note)
 	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, "")
 	if err != nil {
 		// A test keploy could not read is unread on its window (its

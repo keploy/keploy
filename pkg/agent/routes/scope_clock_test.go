@@ -113,6 +113,44 @@ func TestHandleTestBeginsHandsTheServiceEachTestsSeed(t *testing.T) {
 	}
 }
 
+// notesSvc keeps the tests' begins, their seeds and their notes.
+type notesSvc struct {
+	seedsSvc
+	notes map[string]string
+}
+
+func (s *notesSvc) SetTestNotes(_ context.Context, notes map[string]string) { s.notes = notes }
+
+// /agent/replay/clock hands the service the note each test's harness sent
+// with its end in its recording, as sent; a service that keeps begins and
+// seeds but no notes, given some, takes nothing and answers 501: its tests'
+// harnesses would be answered none.
+func TestHandleTestBeginsHandsTheServiceEachTestsNote(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	send := func(a *Agent, body string) int {
+		rec := httptest.NewRecorder()
+		a.HandleTestBegins(rec, httptest.NewRequest(http.MethodPost, "/agent/replay/clock", strings.NewReader(body)))
+		return rec.Code
+	}
+	svc := &notesSvc{}
+	if code := send(&Agent{logger: zap.NewNop(), svc: svc}, `{"begins":{"ui::tr":"2026-10-06T09:01:00Z"},"notes":{"ui::tr":"draws 7\n\u0000 \"x\""}}`); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if svc.notes["ui::tr"] != "draws 7\n\x00 \"x\"" || svc.begins["ui::tr"].IsZero() {
+		t.Fatalf("the service got notes %q and begins %v", svc.notes, svc.begins)
+	}
+	if code := send(&Agent{logger: zap.NewNop(), svc: svc}, `{"begins":{}}`); code != http.StatusOK || svc.notes != nil {
+		t.Fatalf("none given clears them: status %d, notes %q", code, svc.notes)
+	}
+	old := &seedsSvc{}
+	if code := send(&Agent{logger: zap.NewNop(), svc: old}, `{"begins":{"ui::tr":"2026-10-06T09:01:00Z"},"seeds":{"ui::tr":"0123456789abcdef"},"notes":{"ui::tr":"n"}}`); code != http.StatusNotImplemented || old.begins != nil || old.seeds != nil {
+		t.Fatalf("a service without notes, given some: status %d, begins %v, seeds %v", code, old.begins, old.seeds)
+	}
+	if code := send(&Agent{logger: zap.NewNop(), svc: old}, `{"begins":{"ui::tr":"2026-10-06T09:01:00Z"}}`); code != http.StatusOK {
+		t.Fatalf("a service without notes, given none: status %d", code)
+	}
+}
+
 // casesSvc keeps begins and the requests each client test sent.
 type casesSvc struct {
 	beginsSvc
