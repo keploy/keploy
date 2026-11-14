@@ -101,3 +101,85 @@ func TestAnImportedTestIsWrittenOnlyInsideTheRecording(t *testing.T) {
 		t.Fatalf("the import left %v (%v) outside the recording", entries, err)
 	}
 }
+
+func TestProcessFormdataBody_HandlesFileAndText(t *testing.T) {
+	input := []map[string]interface{}{
+		{
+			"key":   "username",
+			"value": "aditya",
+			"type":  "text",
+		},
+		{
+			"key":   "role",
+			"value": "admin",
+			// type omitted on purpose
+		},
+		{
+			"key":  "avatar",
+			"type": "file",
+			"src":  "/path/to/avatar.png",
+		},
+		{
+			"key":  "document",
+			"type": "file",
+			// src omitted on purpose
+		},
+	}
+
+	got := processFormdataBody(input)
+
+	if len(got) != 4 {
+		t.Fatalf("expected 4 form entries, got %d", len(got))
+	}
+
+	// 1. Text field
+	if got[0].Key != "username" || len(got[0].Values) != 1 || got[0].Values[0] != "aditya" {
+		t.Errorf("entry 0: expected Key=username, Values=[aditya]; got %+v", got[0])
+	}
+
+	// 2. Text field (omitted type)
+	if got[1].Key != "role" || len(got[1].Values) != 1 || got[1].Values[0] != "admin" {
+		t.Errorf("entry 1: expected Key=role, Values=[admin]; got %+v", got[1])
+	}
+
+	// 3. File field with src
+	if got[2].Key != "avatar" || len(got[2].Paths) != 1 || got[2].Paths[0] != "/path/to/avatar.png" {
+		t.Errorf("entry 2: expected Key=avatar, Paths=[/path/to/avatar.png]; got %+v", got[2])
+	}
+
+	// 4. File field without src
+	if got[3].Key != "document" {
+		t.Errorf("entry 3: expected Key=document; got %+v", got[3])
+	}
+}
+
+func TestProcessFormdataBody_ConcurrentAndRace(t *testing.T) {
+	t.Parallel()
+
+	input := []map[string]interface{}{
+		{"key": "username", "value": "aditya", "type": "text"},
+		{"key": "role", "value": "admin"},
+		{"key": "avatar", "type": "file", "src": "/path/to/avatar.png"},
+		{"key": "document", "type": "file"},
+	}
+
+	const goroutines = 50
+	done := make(chan bool, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			got := processFormdataBody(input)
+			if len(got) != 4 {
+				t.Errorf("expected 4 entries, got %d", len(got))
+			}
+			if got[2].Key != "avatar" || len(got[2].Paths) != 1 || got[2].Paths[0] != "/path/to/avatar.png" {
+				t.Errorf("file path mismatch: %+v", got[2])
+			}
+			done <- true
+		}()
+	}
+
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+}
