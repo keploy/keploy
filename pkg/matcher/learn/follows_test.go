@@ -1685,6 +1685,106 @@ func mockDrifts() *DriftCache {
 	return dc
 }
 
+// What a value learned past a chance piece of a minted id names. The step id
+// UUID whose recorded 16-bit group stands inside another UUID: in a payload
+// recorded before the call that F gave as recorded, the search for the
+// value's source went past it (follows.refute), and the noise names that
+// place, as any value set aside so, never the piece; where the value is
+// echoed in the call's own answer, the echo learned past the piece names it
+// and says it is learned as an echo, never as varying, at an earlier test's
+// exchange and at another test's answer alike. keploy test refuses the echo,
+// as before.
+func TestAValueLearnedPastAChancePieceNamesWhatItWentPast(t *testing.T) {
+	const (
+		path   = "header.x-keploy-test-step-id"
+		rec    = "3f2a9c1e-4b7d-4e2a-9f3c-1a2b3c4d5e6f"
+		live   = "8e1d2c3b-a0f9-4c8b-b7a6-5f4e3d2c1b0a"
+		other  = "c0ffee11-4b7d-4a1b-8c2d-0123456789ab"
+		piece  = "beside no other word of the value's id, and the value is an id minted in each run"
+		goneBy = "stands in mock-1290 at spec.req.header.X-Job, which record's full round sent and gave the application as recorded, while the value changed: a copy moves with its source"
+	)
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: v}}}
+	}
+	at := eRecAt.Add(-2 * time.Second)
+	headed := RawOf(&models.Mock{Name: "mock-1290", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+		HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://example.invalid/", Header: map[string]string{"X-Job": other}},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `ok`},
+		ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+	}}, false).ServedAs(1).ServedAsRecorded()
+	exchange := func() Earlier {
+		at := eRecAt.Add(-5 * time.Second)
+		m := RawOf(&models.Mock{Name: "mock-1215", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
+		return Earlier{Mock: "mock-1215", At: at, Run: true, Payload: m.ServedAs(1).ServedAsRecorded(), Seen: []Seen{{Side: Request,
+			Leaf: Leaf{Path: "body.docs.msgs.{}._id", Type: String, Value: other}, Live: other, Place: "body.docs.msgs.{}._id"}}}
+	}
+	answer := RawOf(&models.Mock{Name: "mock-1300", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+		HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://example.invalid/jobs"},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `{"_id":"` + other + `"}`},
+		ReqTimestampMock: eRecAt.Add(-3 * time.Second), ResTimestampMock: eRecAt.Add(-3*time.Second + time.Millisecond),
+	}}, true).ServedAs(1).ServedAsRecorded().OfAnotherTest()
+	classify := func(dc *DriftCache, ee []Earlier, raw []Raw, resp []Leaf, places ...Raw) Learned {
+		t.Helper()
+		given := func() ([]GivenPlaces, error) {
+			var gp []GivenPlaces
+			for _, x := range places {
+				gp = append(gp, PlacesOf(x))
+			}
+			return gp, nil
+		}
+		got := ClassifyGiven(dc, []string{path}, shape(live), shape(rec), eRecAt, ee, raw, resp, nil, given)
+		if len(got) != 1 {
+			t.Fatalf("%+v", got)
+		}
+		return got[0]
+	}
+
+	// The search went past the payload: that place is named, not the piece.
+	got := classify(mockDrifts(), nil, []Raw{headed}, nil)
+	if got.Kind != KindNoise || got.Refuted == "" || !strings.Contains(got.Why, goneBy) || strings.Contains(got.Why, piece) || !strings.HasSuffix(got.Why, ", and keploy learns it as varying") {
+		t.Errorf("the recorded group in a payload F gave as recorded: %s refuted %q (%q); want noise naming mock-1290 as gone past, not the piece", got.Kind, got.Refuted, got.Why)
+	}
+
+	// Echoed in the call's own answer: an echo naming the piece.
+	echoed := []Leaf{{Path: "body.id", Type: String, Value: rec}}
+	for name, c := range map[string]struct {
+		ee     []Earlier
+		places []Raw
+	}{
+		"at an earlier test's exchange": {ee: []Earlier{exchange()}},
+		"in another test's answer":      {places: []Raw{answer}},
+	} {
+		got := classify(mockDrifts(), c.ee, nil, echoed, c.places...)
+		if got.Kind != KindEcho || !strings.Contains(got.Why, piece) || !strings.HasSuffix(got.Why, echoLearned) || strings.Contains(got.Why, "varying") {
+			t.Errorf("an echo past the recorded group %s: %s (%q); want an echo naming the piece, learned as an echo", name, got.Kind, got.Why)
+		}
+		if got := classify(clockedDrifts(), c.ee, nil, echoed, c.places...); got.Kind != KindUnaccounted || strings.Contains(got.Why, piece) {
+			t.Errorf("an echo past the recorded group %s, keploy test: %s (%q); want it refused as before", name, got.Kind, got.Why)
+		}
+	}
+
+	// Each run's group at its own place: the first let go is named, the
+	// recorded group's (the word rule reads what the value lost first).
+	fGroup := exchange()
+	fGroup.Mock, fGroup.Seen[0].Leaf.Value, fGroup.Seen[0].Live = "mock-1400", "deadbeef-a0f9-4c11-9d2d-ba9876543210", "deadbeef-a0f9-4c11-9d2d-ba9876543210"
+	if got := classify(mockDrifts(), []Earlier{exchange(), fGroup}, nil, nil); got.Kind != KindNoise || !strings.Contains(got.Why, "stands in mock-1215") || strings.Contains(got.Why, "mock-1400") {
+		t.Errorf("each run's group at its own place: %s (%q); want noise naming the first, mock-1215", got.Kind, got.Why)
+	}
+
+	// A value no place holds names nothing let go, in record's full round
+	// (ClassifyFollowing) as in a call read without the rule: noise, and an
+	// echo, read alike by both.
+	for name, resp := range map[string][]Leaf{"noise": nil, "an echo": echoed} {
+		given := classify(mockDrifts(), nil, nil, resp)
+		f := ClassifyFollowing(mockDrifts(), []string{path}, shape(live), shape(rec), eRecAt, nil, nil, resp, nil, nil)
+		if len(f) != 1 || f[0].Kind != given.Kind || f[0].Why != given.Why || strings.HasPrefix(f[0].Why, ", and") {
+			t.Errorf("%s no place holds: ClassifyFollowing %+v; want it read as ClassifyGiven reads it: %s (%q)", name, f, given.Kind, given.Why)
+		}
+	}
+}
+
 // The word rule's re-read of a value it refused (follows.idOnly) lets a
 // short part go only as a chance piece of a minted id: at a payload F gave
 // as recorded, at a payload F gave changed and at another test's answer, a

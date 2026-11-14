@@ -1993,9 +1993,17 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			}
 		}
 		// Only chance pieces of a minted id let go (follows.chancePiece):
-		// no source to order, and noise named so.
-		if fol != nil && fol.piece != "" && fol.first == "" && fol.refuted == "" && ln.Kind == KindNoise {
-			ln.Why = fol.piece + ", and keploy learns it as varying"
+		// no source to order, and noise named so; an echo learned past them
+		// names the first too, as an echo learned past any place set aside
+		// does (follows.echoed), never as varying. Where the search went past
+		// a place (refuted), that place is named, as above.
+		if fol != nil && fol.piece != "" && fol.first == "" && fol.refuted == "" {
+			switch ln.Kind {
+			case KindNoise:
+				ln.Why = fol.piece + ", and keploy learns it as varying"
+			case KindEcho:
+				ln.Why = fol.piece + ", and keploy learns it as an echo of the call's answer"
+			}
 		}
 		// A leaf set aside as no source (follows.refuteSeen), and nothing
 		// else: an echo beside it stands as beside any source set aside
