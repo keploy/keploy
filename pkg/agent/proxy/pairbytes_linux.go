@@ -296,6 +296,14 @@ func boundDevice(conn *net.TCPConn) uint32 {
 // connection's first byte.
 type targetBase struct{}
 
+// appWroteOS is nothing on Linux: an appWrote counts from the connection's
+// first byte, as tcpi_bytes_acked does.
+type appWroteOS struct{}
+
+// proxySideOS is nothing on Linux: a proxySide's received is always the
+// kernel's count (tcpi_bytes_received).
+type proxySideOS struct{}
+
 // received is how much the proxy's side ps received, its FIN counted.
 func (targetBase) received(ps proxySide) uint64 { return ps.received }
 

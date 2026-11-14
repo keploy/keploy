@@ -301,13 +301,13 @@ func TestDataReceivedLeavesOutTheFINOnDarwin(t *testing.T) {
 		want uint64
 	}{
 		{proxySide{received: 11}, math.MaxUint64},
-		{proxySide{received: 11, counted: true, state: xnuTCPEstablished}, 11},
-		{proxySide{received: 11, counted: true, state: xnuTCPFinWait1}, 11},
-		{proxySide{received: 11, counted: true, state: xnuTCPCloseWait}, 10},
-		{proxySide{received: 11, counted: true, state: xnuTCPLastAck}, 10},
-		{proxySide{received: 11, counted: true, state: xnuTCPClosing}, 10},
-		{proxySide{received: 11, counted: true, state: xnuTCPTimeWait}, 10},
-		{proxySide{received: 0, counted: true, state: xnuTCPCloseWait}, 0},
+		{proxySide{received: 11, proxySideOS: proxySideOS{counted: true}, state: xnuTCPEstablished}, 11},
+		{proxySide{received: 11, proxySideOS: proxySideOS{counted: true}, state: xnuTCPFinWait1}, 11},
+		{proxySide{received: 11, proxySideOS: proxySideOS{counted: true}, state: xnuTCPCloseWait}, 10},
+		{proxySide{received: 11, proxySideOS: proxySideOS{counted: true}, state: xnuTCPLastAck}, 10},
+		{proxySide{received: 11, proxySideOS: proxySideOS{counted: true}, state: xnuTCPClosing}, 10},
+		{proxySide{received: 11, proxySideOS: proxySideOS{counted: true}, state: xnuTCPTimeWait}, 10},
+		{proxySide{received: 0, proxySideOS: proxySideOS{counted: true}, state: xnuTCPCloseWait}, 0},
 	} {
 		if got := dataReceived(tc.ps); got != tc.want {
 			t.Errorf("dataReceived(%+v) = %d, want %d", tc.ps, got, tc.want)
@@ -332,7 +332,7 @@ func TestTheClosesCountHoldsAcrossTheSequenceWrapOnDarwin(t *testing.T) {
 		// of it by more than its count, nothing counts as received.
 		{isn: 7, rcvNxt: 6, want: 3, got: 0},
 	} {
-		w := appWrote{want: tc.want, isn: tc.isn}
+		w := appWrote{want: tc.want, appWroteOS: appWroteOS{isn: tc.isn}}
 		if got := w.received(tc.rcvNxt); got != tc.got {
 			t.Errorf("received(%d) from isn %d with %d written = %d, want %d", tc.rcvNxt, tc.isn, tc.want, got, tc.got)
 		}
