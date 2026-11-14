@@ -53,7 +53,18 @@ func rootStoreHolds(location uint32, der []byte) (bool, error) {
 	}
 }
 
-// tokenElevated says whether this process runs with an elevated token (an
-// administrator past UAC, or LocalSystem): only such a run may change the
-// machine's trust.
-func tokenElevated() bool { return windows.GetCurrentProcessToken().IsElevated() }
+// tokenElevated says whether this process's token can use the Administrators
+// group (an administrator past UAC, or LocalSystem): only such a run may
+// change the machine's trust. It reads the group, as CheckTokenMembership
+// does, not TokenElevation: a token restricted from an elevated one, with
+// Administrators deny-only, still reports TokenElevation (seen on Windows 11
+// 26200), yet cannot write the machine's store. A check that cannot be made
+// answers false, which never asks the machine's store.
+func tokenElevated() bool {
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return false
+	}
+	member, err := windows.Token(0).IsMember(admins)
+	return err == nil && member
+}
