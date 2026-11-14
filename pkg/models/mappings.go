@@ -194,6 +194,19 @@ type MockEntry struct {
 	// duration says none, and the series answers once in the run. Empty,
 	// the default. Kept as Series is.
 	Every string `json:"every,omitempty" yaml:"every,omitempty" bson:"every,omitempty"`
+	// CoveredBy is, on a worker: entry of a series that answers again after
+	// an interval (Every), the name of the entry of the same series whose
+	// recording answers its calls: keploy's judging sets it on a later
+	// round's recording that asked and answered as round one's did, so round
+	// one's recording answers each round. Under the proven switch keploy
+	// mock replay never hands the agent an entry that has it, so the agent
+	// never serves it, and never requires it: its series is required, or
+	// served, by its other entries. The entry it names must be another
+	// worker: entry of the same series and key that says Once and a positive
+	// Every and is not covered itself; otherwise the replay refuses the
+	// set's mappings. With the switch off it is not read. Empty, the
+	// default. Kept as Series is.
+	CoveredBy string `json:"coveredBy,omitempty" yaml:"coveredBy,omitempty" bson:"covered_by,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy's
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's

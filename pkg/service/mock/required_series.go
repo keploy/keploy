@@ -94,14 +94,19 @@ func requiredSeries(mp *models.Mapping, table map[string][]string) map[string]se
 // placedSeries is, by series, every series of mp's worker scope
 // (models.MockEntry.Series) that requiredSeries reads, the ones it leaves
 // out as served, not required, among them (write false): what the run's
-// RULE USED lines count. nil when no entry has a series.
+// RULE USED lines count. An entry keploy's judging marked covered
+// (models.MockEntry.CoveredBy) is in none: the agent is never handed it
+// (leaveCoveredOut), and the entry it names stands for it. nil when no
+// entry has a series.
 func placedSeries(mp *models.Mapping, table map[string][]string) map[string]seriesDue {
 	if mp == nil {
 		return nil
 	}
 	var out map[string]seriesDue
 	for _, e := range mp.Worker {
-		if e.Series == "" {
+		// A covered entry (models.MockEntry.CoveredBy) is never served: the
+		// entry it names answers its calls and stands for it.
+		if e.Series == "" || e.CoveredBy != "" {
 			continue
 		}
 		if _, ok := table[e.Trails]; e.Trails != "" && !ok {

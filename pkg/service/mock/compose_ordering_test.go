@@ -99,6 +99,9 @@ type composeInstr struct {
 	sources map[string][]models.DeclaredSource
 	// once is the once series the last PushProvenTable carried.
 	once []string
+	// every is the intervals of the once series the last PushProvenTable
+	// carried.
+	every map[string]string
 	// timeForm is whether the last PushProvenTable turned the time
 	// default on.
 	timeForm bool
@@ -280,7 +283,7 @@ func (f *composeInstr) PushScopeTable(_ context.Context, _ map[string][]string, 
 // (ProvenTablePusher), and keeps them.
 func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, timeForm bool) error {
 	f.table, f.pool, f.worker, f.skippedReads, f.trails, f.recordedWindows, f.given, f.repeats, f.notRequired, f.background = table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background
-	f.series, f.sources, f.once, f.timeForm = series, sources, once, timeForm
+	f.series, f.sources, f.once, f.every, f.timeForm = series, sources, once, every, timeForm
 	return nil
 }
 

@@ -338,6 +338,15 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// window is derived from (recordedTestWindows).
 	decoded := append(append([]*models.Mock(nil), filtered...), unfiltered...)
 	filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
+	// Under the proven switch, less the recordings the set's mappings mark
+	// covered (models.MockEntry.CoveredBy): the recording each names
+	// answers its calls in each round of its series.
+	if provenswitch.On() {
+		if filtered, unfiltered, err = m.leaveCoveredOut(ctx, name, filtered, unfiltered); err != nil {
+			utils.LogError(m.logger, err, "refusing to replay", zap.String("mock-set", name))
+			return err
+		}
+	}
 	loaded := len(filtered) + len(unfiltered)
 	// The recording this run replays, for the receipt: read after Pull, so in
 	// enterprise it is the registry's copy that was actually served.
