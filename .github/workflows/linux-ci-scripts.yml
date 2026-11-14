@@ -63,6 +63,24 @@ name: Linux CI scripts
 # exit, the failed test sets and tests of the test run it wrote, and the
 # command's log; under `bash -e` the lane ended at that command with none of
 # them, and an echo-sql record, its exit taken as tee's, did not stop it.
+#
+# And coverage-floor.tests.sh: coverage-floor.sh, the check of keploy's own
+# coverage against .github/coverage-floor.yaml and of that file against main.
+# A run below its floor less its tolerance fails and one at it passes; a
+# generated file's statements and a block two binaries' data share do not
+# change the sum; a floor lowered or removed since main fails, and so does a
+# tolerance raised further than its floor, and a main the checkout does not
+# have.
+#
+# And fuzz-targets.tests.sh: fuzz-targets.sh, the list of Fuzz targets
+# fuzz-nightly.yml runs, read from `go test -list`. Each package's Fuzz names
+# become entries with its import path and directory, other names add
+# nothing, and a listing that fails or finds no target fails.
+#
+# And covdata-assert.tests.sh: covdata-assert.sh, the check that a lane of
+# coverage-nightly.yml has the agent's coverage data, not only the CLI's: a
+# function only the agent runs must have run. At 0% or absent it fails, and
+# so does a directory with no data.
 
 on:
   push:
@@ -93,6 +111,12 @@ on:
       - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
       - '.github/workflows/test_workflow_scripts/sudo_env.sh'
       - '.github/workflows/test_workflow_scripts/hang_guard.sh'
+      - '.github/workflows/test_workflow_scripts/coverage-floor.sh'
+      - '.github/workflows/test_workflow_scripts/coverage-floor.tests.sh'
+      - '.github/workflows/test_workflow_scripts/fuzz-targets.sh'
+      - '.github/workflows/test_workflow_scripts/fuzz-targets.tests.sh'
+      - '.github/workflows/test_workflow_scripts/covdata-assert.sh'
+      - '.github/workflows/test_workflow_scripts/covdata-assert.tests.sh'
       - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
@@ -121,6 +145,12 @@ on:
       - '.github/workflows/test_workflow_scripts/json-pass-helpers.sh'
       - '.github/workflows/test_workflow_scripts/sudo_env.sh'
       - '.github/workflows/test_workflow_scripts/hang_guard.sh'
+      - '.github/workflows/test_workflow_scripts/coverage-floor.sh'
+      - '.github/workflows/test_workflow_scripts/coverage-floor.tests.sh'
+      - '.github/workflows/test_workflow_scripts/fuzz-targets.sh'
+      - '.github/workflows/test_workflow_scripts/fuzz-targets.tests.sh'
+      - '.github/workflows/test_workflow_scripts/covdata-assert.sh'
+      - '.github/workflows/test_workflow_scripts/covdata-assert.tests.sh'
       - '.github/workflows/golang_docker.yml'
       - '.github/workflows/linux-ci-scripts.yml'
 
@@ -291,3 +321,34 @@ jobs:
         # Runs even when the gin_mongo step failed, so one run reports both.
         if: ${{ !cancelled() }}
         run: bash .github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh
+
+  coverage-floor:
+    # Thirteen cases against a stub go and throwaway git repositories; a
+    # second or two.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test coverage-floor.sh (a run below its floor less its tolerance fails; generated files and shared blocks leave the sum alone; a lowered floor or a raised tolerance fails)
+        run: bash .github/workflows/test_workflow_scripts/coverage-floor.tests.sh
+
+  fuzz-targets:
+    # Five cases against a stub go; under a second.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test fuzz-targets.sh (each package's Fuzz names become matrix entries; a failed or empty listing fails)
+        run: bash .github/workflows/test_workflow_scripts/fuzz-targets.tests.sh
+
+  covdata-assert:
+    # Four cases against a stub go; under a second.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test covdata-assert.sh (a lane passes only when a function only the agent runs has run)
+        run: bash .github/workflows/test_workflow_scripts/covdata-assert.tests.sh

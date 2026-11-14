@@ -1467,6 +1467,82 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\windows\cleanup-git-isolation.ps1"
 
   # -------------------------------------------------------------------
+  # Unit coverage
+  # -------------------------------------------------------------------
+
+  # keploy's own unit coverage, held at the floor in
+  # .github/coverage-floor.yaml (coverage-floor.sh says how it is counted).
+  # A job of its own, not a flag on go-test.yaml's run: those tests are tuned
+  # for timing, and instrumenting them slows them. It feeds gate, the one
+  # required check, so a drop blocks the merge.
+  #
+  # No private parsers and none of the lane-only KEPLOY_TEST_* variables or
+  # services: a fork's PR and an internal one measure the same code with the
+  # same tests, so the number never moves by who opened the PR. The rows
+  # that need a real MySQL server, Docker or user namespaces skip here and
+  # still run in go-test.yaml. A package with no test file is not in this
+  # number (go test writes no data for it); the nightly merged number has it.
+  unit_coverage:
+    # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
+    # The longest healthy job in this repo runs ~32 min, so this is ~2x
+    # headroom and cannot trip a job that is merely slow.
+    timeout-minutes: 60
+    name: Unit coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The ratchet compares the floor file with the base branch's.
+      - name: Fetch the base branch
+        env:
+          BASE: ${{ github.base_ref || 'main' }}
+        run: git fetch --no-tags --depth=1 origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The same C toolchain and headers go-test.yaml installs: some packages
+      # build with cgo against them.
+      - name: Install build essentials and gcc
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" build-essential gcc libc-dev \
+            pkg-config \
+            libgl1-mesa-dev          \
+            libxi-dev libxcursor-dev \
+            libxrandr-dev libxinerama-dev \
+            libxxf86vm-dev libx11-dev libx11-xcb-dev
+
+      # go test cannot be wrapped in go_retry, so the modules it loads are
+      # fetched first, as go-test.yaml does.
+      - name: Download modules
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry list -deps -test ./... > /dev/null
+
+      - name: Run the unit tests with coverage
+        run: |
+          mkdir -p "$RUNNER_TEMP/covdata-unit"
+          go test -cover -covermode=set ./... -args -test.gocoverdir="$RUNNER_TEMP/covdata-unit"
+
+      - name: Check the unit floor, and that no floor went down
+        env:
+          BASE: ${{ github.base_ref || 'main' }}
+        run: |
+          bash .github/workflows/test_workflow_scripts/coverage-floor.sh check unit "$RUNNER_TEMP/covdata-unit"
+          bash .github/workflows/test_workflow_scripts/coverage-floor.sh ratchet "origin/$BASE"
+
+      # Per-package numbers for whoever looks into a drop:
+      # go tool covdata percent -i=DIR
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: covdata-unit
+          path: ${{ runner.temp }}/covdata-unit
+          retention-days: 7
+
+  # -------------------------------------------------------------------
   # Per-platform gates. Names preserved for branch protection so the
   # required-check set does not need to change on merge.
   # -------------------------------------------------------------------
@@ -1507,6 +1583,7 @@ jobs:
       - run_schema_match_linux
       - run_sample_tls_pcap
       - run_ebpf_objects
+      - unit_coverage
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
@@ -1540,6 +1617,7 @@ jobs:
             "${{ needs.run_schema_match_linux.result }}" \
             "${{ needs.run_sample_tls_pcap.result }}" \
             "${{ needs.run_ebpf_objects.result }}" \
+            "${{ needs.unit_coverage.result }}" \
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then

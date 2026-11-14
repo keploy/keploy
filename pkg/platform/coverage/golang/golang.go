@@ -135,10 +135,17 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	for filename, lines := range coveragePerFileTmp {
 		totalLines += lines[0]
 		totalCoveredLines += lines[1]
-		covPercentage := float64(lines[1]*100) / float64(lines[0])
-		testCov.FileCov[filename] = strconv.FormatFloat(float64(covPercentage), 'f', 2, 64) + "%"
+		covPercentage := 0.0
+		if lines[0] > 0 {
+			covPercentage = float64(lines[1]*100) / float64(lines[0])
+		}
+		testCov.FileCov[filename] = strconv.FormatFloat(covPercentage, 'f', 2, 64) + "%"
 	}
-	testCov.TotalCov = strconv.FormatFloat(float64(totalCoveredLines*100)/float64(totalLines), 'f', 2, 64) + "%"
+	totalCovPercentage := 0.0
+	if totalLines > 0 {
+		totalCovPercentage = float64(totalCoveredLines*100) / float64(totalLines)
+	}
+	testCov.TotalCov = strconv.FormatFloat(totalCovPercentage, 'f', 2, 64) + "%"
 	testCov.Loc = models.Loc{
 		Total:   totalLines,
 		Covered: totalCoveredLines,

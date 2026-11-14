@@ -19,12 +19,18 @@ func DecodeEOF(_ context.Context, data []byte, capabilities uint32) (*mysql.EOFP
 	if len(data) > 5 {
 		return nil, fmt.Errorf("EOF packet too long for EOF")
 	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("EOF packet is empty")
+	}
 
 	packet := &mysql.EOFPacket{
 		Header: data[0],
 	}
 
 	if capabilities&uint32(mysql.CLIENT_PROTOCOL_41) > 0 {
+		if len(data) < 5 {
+			return nil, fmt.Errorf("EOF packet too short for warnings and status flags")
+		}
 		packet.Warnings = binary.LittleEndian.Uint16(data[1:3])
 		packet.StatusFlags = binary.LittleEndian.Uint16(data[3:5])
 	}
@@ -137,16 +143,28 @@ func DecodeOk(_ context.Context, data []byte, capabilities uint32) (*mysql.OKPac
 	var pos = 1
 
 	packet.AffectedRows, _, n = utils.ReadLengthEncodedInteger(data[pos:])
+	if n == 0 {
+		return nil, fmt.Errorf("OK packet too short for affected rows")
+	}
 	pos += n
 	packet.LastInsertID, _, n = utils.ReadLengthEncodedInteger(data[pos:])
+	if n == 0 {
+		return nil, fmt.Errorf("OK packet too short for last insert ID")
+	}
 	pos += n
 
 	if capabilities&uint32(mysql.CLIENT_PROTOCOL_41) > 0 {
+		if len(data) < pos+4 {
+			return nil, fmt.Errorf("OK packet too short for status flags and warnings")
+		}
 		packet.StatusFlags = binary.LittleEndian.Uint16(data[pos:])
 		pos += 2
 		packet.Warnings = binary.LittleEndian.Uint16(data[pos:])
 		pos += 2
 	} else if capabilities&uint32(mysql.CLIENT_TRANSACTIONS) > 0 {
+		if len(data) < pos+2 {
+			return nil, fmt.Errorf("OK packet too short for status flags")
+		}
 		packet.StatusFlags = binary.LittleEndian.Uint16(data[pos:])
 		pos += 2
 	}

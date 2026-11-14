@@ -1,0 +1,52 @@
+name: report-nightly-failure
+description: "Open a GitHub issue for a failed scheduled check, or comment on the open one with the same title"
+
+# A scheduled run's failure email goes only to whoever last edited its cron
+# line, so a fuzz crash or a coverage drop found at night would otherwise go
+# unseen. One issue per failing check: a check that fails again comments on
+# its open issue instead of opening another, and closing the issue starts
+# the count again.
+#
+# The calling job needs `permissions: issues: write`. On pull_request runs
+# (a PR testing its own nightly workflow) this does nothing, so a PR never
+# files an issue.
+
+inputs:
+  title:
+    required: true
+    description: "Issue title; the same check must always pass the same title"
+  body:
+    required: true
+    description: "Markdown body: what failed and a link to the run"
+  label:
+    required: false
+    default: nightly-failure
+    description: "Label the issue carries; open issues are matched by it and by title"
+
+runs:
+  using: composite
+  steps:
+    - name: Open or update the issue
+      if: github.event_name != 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        TITLE: ${{ inputs.title }}
+        BODY: ${{ inputs.body }}
+        LABEL: ${{ inputs.label }}
+      run: |
+        set -euo pipefail
+        # Listed through the issues API, not search, whose index can lag a
+        # just-opened issue.
+        number=$(gh issue list --state open --label "$LABEL" --limit 500 \
+          --json number,title --jq '.[] | select(.title == env.TITLE) | .number' | head -n 1)
+        if [ -n "$number" ]; then
+          gh issue comment "$number" --body "$BODY"
+          echo "commented on #$number"
+          exit 0
+        fi
+        # The label has to exist before an issue can carry it; it usually does.
+        gh label create "$LABEL" --color B60205 \
+          --description "A scheduled check failed" 2>/dev/null || true
+        gh issue create --title "$TITLE" --body "$BODY" --label "$LABEL"

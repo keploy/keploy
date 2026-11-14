@@ -1,0 +1,34 @@
+version: api.keploy.io/v1beta1
+kind: Http
+name: test-1
+spec:
+    metadata: {}
+    req:
+        method: POST
+        proto_major: 1
+        proto_minor: 1
+        url: http://localhost:8080/api/users?source=web
+        url_params:
+            source: web
+        header:
+            Accept: '*/*'
+            Content-Type: application/json
+        body: '{"name":"alice"}'
+        timestamp: 2026-01-01T10:00:00Z
+    resp:
+        status_code: 201
+        header:
+            Content-Type: application/json
+        body: '{"id":1,"name":"alice"}'
+        status_message: Created
+        proto_major: 0
+        proto_minor: 0
+        timestamp: 2026-01-01T10:00:00.1Z
+    objects: []
+    created: 1767261600
+curl: |
+    curl --request POST \
+      --url http://localhost:8080/api/users?source=web \
+      --header 'Accept: */*' \
+      --header 'Content-Type: application/json' \
+      --data '{"name":"alice"}'

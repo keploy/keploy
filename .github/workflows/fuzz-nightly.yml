@@ -1,0 +1,182 @@
+# Runs every Go fuzz target in the repository for a time budget each night.
+# go-test.yaml's `go test ./...` runs a fuzz target's seed inputs only, so
+# without this the fuzzer never searches, and the parsers that read bytes off
+# the wire (HTTP framing, the MySQL query decoder) are where it finds bugs.
+#
+# fuzz-targets.sh lists the targets with `go test -list`, so a new Fuzz
+# function joins the next night with no edit here. Each target fuzzes in a
+# job of its own for FUZZTIME (10m; a workflow_dispatch input sets another)
+# under a 25-minute job limit, which leaves room for setup, the corpus
+# restore and Go's minimizing of a crashing input.
+#
+# The corpus the fuzzer grows lives under $(go env GOCACHE)/fuzz/PKG/NAME and
+# is kept between nights in the Actions cache. A cache entry cannot be
+# overwritten, so each run saves under a key with its run ID and the next
+# restores the newest one by prefix.
+#
+# A failure (a crashing input, a failing seed, a build error) fails the job,
+# uploads the crashing input go test wrote to DIR/testdata/fuzz/NAME/, and
+# opens or updates an issue through report-nightly-failure; a listing that
+# fails, which runs no fuzz job at all, is reported the same way. To keep the
+# input as a regression test, put it in that directory and run
+# `go test -run 'NAME/FILE' ./DIR`; once committed, every PR's go test runs
+# it. testdata is in .gitignore, so re-include the directory there, as the
+# other checked-in fixtures are.
+#
+# The crashing input is as public as this repository: an artifact anyone can
+# download, and an issue that points to it. A parser crash stops the keploy
+# session that read the input, which comes from the user's own app and its
+# dependencies. If the maintainers decide such a crash is a vulnerability to
+# report privately (SECURITY.md), the proxy parsers' inputs must not be
+# uploaded here.
+#
+# A PR that changes this workflow, its script or the reporter runs it in
+# short: one target for 30 seconds, no cache saved and no issue.
+name: Nightly fuzzing
+
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "How long each target fuzzes (a go test -fuzztime value)"
+        required: false
+        default: "10m"
+  pull_request:
+    paths:
+      - ".github/workflows/fuzz-nightly.yml"
+      - ".github/workflows/test_workflow_scripts/fuzz-targets.sh"
+      - ".github/actions/report-nightly-failure/action.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    # A fork inherits the schedule, not the reason to run it.
+    if: github.event_name != 'schedule' || github.repository == 'keploy/keploy'
+    # go test -list builds every package's test binary.
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # go test cannot be wrapped in go_retry, so the modules the listing
+      # loads are fetched first, as go-test.yaml does.
+      - name: Download modules
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry list -deps -test ./... > /dev/null
+
+      - name: List the fuzz targets
+        id: list
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          targets=$(bash .github/workflows/test_workflow_scripts/fuzz-targets.sh)
+          if [ "$EVENT" = pull_request ]; then
+            targets=$(jq -c '.[:1]' <<<"$targets")
+          fi
+          jq -r '.[] | "\(.pkg) \(.name)"' <<<"$targets"
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    needs: discover
+    name: ${{ matrix.target.name }}
+    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.discover.outputs.targets) }}
+    env:
+      FUZZTIME: ${{ github.event_name == 'pull_request' && '30s' || inputs.fuzztime || '10m' }}
+      PKG: ${{ matrix.target.pkg }}
+      NAME: ${{ matrix.target.name }}
+      CORPUS_KEY_PREFIX: fuzz-corpus-${{ matrix.target.pkg }}-${{ matrix.target.name }}-
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Download modules
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry list -deps -test "$PKG" > /dev/null
+
+      - name: Find the corpus directory
+        id: corpus
+        run: echo "dir=$(go env GOCACHE)/fuzz/$PKG/$NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.corpus.outputs.dir }}
+          key: ${{ env.CORPUS_KEY_PREFIX }}${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ env.CORPUS_KEY_PREFIX }}
+
+      - name: Fuzz for ${{ env.FUZZTIME }}
+        id: fuzz
+        run: go test -run '^$' -fuzz "^${NAME}\$" -fuzztime "$FUZZTIME" "$PKG"
+
+      # Saved after a crash too: the corpus grown up to it is still progress.
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        with:
+          path: ${{ steps.corpus.outputs.dir }}
+          key: ${{ env.CORPUS_KEY_PREFIX }}${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload the crashing input
+        if: failure() && steps.fuzz.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          # The job index keeps two packages' same-named targets apart.
+          name: fuzz-crasher-${{ strategy.job-index }}-${{ matrix.target.name }}
+          path: ${{ matrix.target.dir }}/testdata/fuzz/${{ matrix.target.name }}/
+          if-no-files-found: warn
+
+      - name: Report the failure
+        if: failure()
+        uses: ./.github/actions/report-nightly-failure
+        with:
+          title: "Nightly fuzzing: ${{ matrix.target.name }} in ${{ matrix.target.dir }} failed"
+          body: |
+            `${{ matrix.target.name }}` in `${{ matrix.target.pkg }}` failed in the nightly fuzz run: a crashing input, a failing seed input, or a build error. The job log has the error.
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            A crashing input is in the run's artifact `fuzz-crasher-${{ strategy.job-index }}-${{ matrix.target.name }}`. To reproduce, put its file in `${{ matrix.target.dir }}/testdata/fuzz/${{ matrix.target.name }}/` and run `go test -run '${{ matrix.target.name }}/<file>' ./${{ matrix.target.dir }}`.
+
+  # A failed listing skips every fuzz job, and with them the report each one
+  # makes, so the listing's failure is reported here.
+  report-discovery:
+    needs: discover
+    if: failure() && needs.discover.result == 'failure'
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the failure
+        uses: ./.github/actions/report-nightly-failure
+        with:
+          title: "Nightly fuzzing: listing the fuzz targets failed"
+          body: |
+            The nightly fuzz run could not list its targets, so it fuzzed nothing: a package that does not build, a listing with no Fuzz target, or a module download that failed. The discover job's log says which.
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

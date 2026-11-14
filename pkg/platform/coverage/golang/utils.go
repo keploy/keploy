@@ -14,6 +14,9 @@ import (
 // TODO: use native approach till https://github.com/golang/go/issues/67366 gets resolved
 func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 	cmdFields := strings.Fields(cmd)
+	if len(cmdFields) == 0 {
+		return false
+	}
 	i := 0
 	var part string
 	for i, part = range cmdFields {

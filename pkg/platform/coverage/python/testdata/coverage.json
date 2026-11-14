@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "format": 3,
+    "version": "7.6.1",
+    "timestamp": "2026-11-13T10:00:00.000000",
+    "branch_coverage": false,
+    "show_contexts": false
+  },
+  "files": {
+    "app.py": {
+      "executed_lines": [1, 2, 4, 5, 7, 8],
+      "summary": {
+        "covered_lines": 6,
+        "num_statements": 8,
+        "percent_covered": 75.0,
+        "percent_covered_display": "75",
+        "missing_lines": 2,
+        "excluded_lines": 0
+      },
+      "missing_lines": [10, 11],
+      "excluded_lines": []
+    },
+    "models/user.py": {
+      "executed_lines": [1],
+      "summary": {
+        "covered_lines": 1,
+        "num_statements": 3,
+        "percent_covered": 33.333333333333336,
+        "percent_covered_display": "33",
+        "missing_lines": 2,
+        "excluded_lines": 0
+      },
+      "missing_lines": [3, 4],
+      "excluded_lines": []
+    }
+  },
+  "totals": {
+    "covered_lines": 7,
+    "num_statements": 11,
+    "percent_covered": 63.63636363636363,
+    "percent_covered_display": "64",
+    "missing_lines": 4,
+    "excluded_lines": 0
+  }
+}

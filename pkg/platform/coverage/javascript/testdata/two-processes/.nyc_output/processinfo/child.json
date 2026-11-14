@@ -1,0 +1,1 @@
+{"parent":"parent","pid":102,"argv":["/usr/local/bin/node","/app/server.js"],"execArgv":[],"cwd":"/app","time":1763028000500,"ppid":101,"coverageFilename":".nyc_output/child.json","externalId":"","uuid":"child","files":["/app/server.js"]}

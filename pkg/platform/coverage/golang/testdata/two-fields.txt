@@ -1,0 +1,3 @@
+mode: set
+example.com/app/full.go:3.13,5.2 2 1
+example.com/app/full.go:7.13,9.2 1

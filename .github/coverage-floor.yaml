@@ -1,0 +1,23 @@
+# The lowest test coverage of keploy's own code that CI accepts, in percent of
+# statements, generated files left out. Read by
+# .github/workflows/test_workflow_scripts/coverage-floor.sh.
+#
+# unit: `go test ./...` with coverage on, checked on every PR by the
+# unit-coverage job of prepare_and_run.yml. A package with no test file is
+# not in it: go test writes no coverage data for one.
+# merged: those unit tests plus the native-Linux record/replay lanes, run by
+# a keploy built with -cover -coverpkg=./..., checked each night by
+# coverage-nightly.yml. Every package linked into keploy is in it, tested or
+# not, so it counts more statements than unit and can come out lower.
+#
+# A floor can only go up: the PR job fails when a value here is lower than on
+# main. When a run prints headroom you want to keep, raise the floor to the
+# measured value, rounded down to one decimal, in the same PR.
+#
+# A tolerance is how far a run may fall below its floor and still pass: the
+# unit number moves a little with tests that skip or branch on timing, and
+# the e2e paths move more.
+unit: 80.0
+unit_tolerance: 0.2
+merged: 0
+merged_tolerance: 1.0

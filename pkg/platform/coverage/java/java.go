@@ -42,22 +42,16 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 	if j.jacocoAgentPath != "" {
 		jacocoAgentPath = j.jacocoAgentPath
 	}
-	var err error
-	jacocoAgentPath, err = utils.ExpandPath(jacocoAgentPath)
-	if err == nil {
-		isFileExist, err := utils.FileExists(jacocoAgentPath)
-		if err == nil && isFileExist {
-			j.cmd = strings.Replace(
-				j.cmd,
-				j.executable,
-				fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", j.executable, jacocoAgentPath), 1,
-			)
-		}
-	}
+	jacocoAgentPath, err := findJacocoAgent(jacocoAgentPath)
 	if err != nil {
 		j.logger.Info("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
 		return j.cmd, err
 	}
+	j.cmd = strings.Replace(
+		j.cmd,
+		j.executable,
+		fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", j.executable, jacocoAgentPath), 1,
+	)
 	// downlaod jacoco cli
 	jacocoPath := filepath.Join(os.TempDir(), "jacoco")
 	err = os.MkdirAll(jacocoPath, 0777)
@@ -71,6 +65,23 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 		return j.cmd, err
 	}
 	return j.cmd, nil
+}
+
+// findJacocoAgent returns path with ~ expanded, or an error when no agent
+// jar is there.
+func findJacocoAgent(path string) (string, error) {
+	path, err := utils.ExpandPath(path)
+	if err != nil {
+		return "", err
+	}
+	exists, err := utils.FileExists(path)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", fmt.Errorf("jacoco agent not found at %s", path)
+	}
+	return path, nil
 }
 
 func (j *Java) GetCoverage() (models.TestCoverage, error) {
