@@ -1831,8 +1831,12 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				taken = &takenUp{reqTs: reqTs, first: respFirst}
 				walk.mark()
 			} else if err := func() error {
-				if t != nil || len(malformed) > 0 {
+				// settled: a PREPARE held for its framing is settled here.
+				settled := held != nil
+				if t != nil || len(malformed) > 0 || settled {
 					// An end of the stream is read again by what reads on.
+					// Before a held PREPARE is settled, next is where the
+					// packet settle hands on (carry), if any, starts.
 					next, nextErr = sess.DestStream.Peek()
 				}
 				if t != nil && held != nil {
@@ -1856,6 +1860,30 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				walk.mark()
 				if err := settleHeld(commandByte(cmdBuf), respFirst); err != nil {
 					return err
+				}
+				if settled && t == nil && len(malformed) == 0 {
+					// The PREPARE is settled, and nothing else keeps the floor
+					// below this command (Session.NextRequest's answerUnread):
+					// what the server sent before it was captured answers no
+					// command sent after it, as the floor rules for every
+					// command, so the floor is set here (Session.FloorAt). A
+					// packet settle hands on that was captured before this
+					// command is such a packet: no EOF came before it, so the
+					// PREPARE's framing is settled all the same, and it is
+					// dropped with the rest. Read as this command's answer, an
+					// ERR the server sent unasked at sequence id 1 recorded it
+					// with that ERR. While an exchange taken up is held, the
+					// server's next bytes are judged first (takenUp.confirm)
+					// and stop the recording when they were captured before
+					// this command; while the server may still answer a
+					// command without an answer that did not decode,
+					// takeMalformedAnswers judges them and sets the floor.
+					if carry != nil && next.CapturedBefore(first.ConnSeq) {
+						logger.Debug("V2: dropped a server packet captured before the client's next command, after a PREPARE held for its framing: it answers no command sent after it",
+							zap.String("connID", sess.ClientConnID), zap.Uint32("firstConnSeq", next.ConnSeq), zap.Int("bytes", len(carry)))
+						carry = nil
+					}
+					sess.FloorAt(first.ConnSeq)
 				}
 				if carry == nil && (t != nil || len(malformed) > 0) {
 					// Past the PREPARE's EOF, if settle read one: where the
@@ -1919,6 +1947,25 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					return stopUnconfirmed(t, reqTs, why)
 				}
 				t.release()
+			}
+			// The server's stream is at this command's answer: what settle,
+			// the ERRs to commands without an answer and the floor took off it
+			// before that answer are no part of it, so the walk starts the
+			// answer here. The floor drops what it drops as the next chunk is
+			// waited for (Peek; an end of the stream is read again by what
+			// reads on), so the walk is marked once that is done, or at the
+			// answer's first packet when it was read (carry). Walked as the
+			// answer's, a packet the server sent unasked at sequence id 1,
+			// captured before this command, had the cut after an answer the
+			// recorder cannot frame, none of it captured before the client's
+			// next command, pass as though a packet of that answer came before
+			// it (packetWalk.cut), and that next command was recorded with
+			// this one's answer.
+			if carry != nil {
+				walk.markAt(carry[3])
+			} else {
+				_, _ = sess.DestStream.Peek()
+				walk.mark()
 			}
 		}
 

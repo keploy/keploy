@@ -88,6 +88,14 @@ func (w *packetWalk) mark() {
 	w.seen, w.client = false, false
 }
 
+// markAt says the answer to a command the client sent started with the packet
+// the walk last walked whole, whose sequence id is first: what it walked
+// before that packet is no part of the answer.
+func (w *packetWalk) markAt(first byte) {
+	w.mark()
+	w.seen, w.first, w.last = true, first, first
+}
+
 // passed says the client sent a packet inside the exchange, numbered seq.
 func (w *packetWalk) passed(seq byte) {
 	w.client, w.clientLast = true, seq
