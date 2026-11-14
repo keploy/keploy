@@ -471,6 +471,10 @@ func appFINAcknowledged(pc *pairedConn) bool {
 // (lookupTCPOrderedOn); a test replaces it to make the read fail.
 var lookupOrphan = lookupTCPOrderedOn
 
+// readSide is pc's proxy side as its close reads it (closing, pairClosing):
+// on Linux its own count (tcpi_bytes_received) is the one the close compares.
+func (pc *pairedConn) readSide() proxySide { return readProxySide(pc.conn) }
+
 // readProxySide reads the proxy's side of a connection from its own socket,
 // in whatever state it is (a reset one too, which sock_diag no longer finds).
 func readProxySide(conn *net.TCPConn) proxySide {

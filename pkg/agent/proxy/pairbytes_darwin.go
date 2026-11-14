@@ -317,23 +317,89 @@ func readProxySide(conn *net.TCPConn) proxySide {
 	return ps
 }
 
-// noteWroteAtClose records nothing on darwin: nothing here reads the
-// application's socket, so what it had written as the proxy began closing a
-// connection is not known (pairedConn.wroteAtClose stays nil). A close then
-// finds no bytes on their way (onItsWayAtClose), and a loss at it runs to any
-// byte the application wrote (lostTop).
-func noteWroteAtClose(*pairedConn) {}
+// noteWroteAtClose reads, as the proxy begins closing pc, what the application
+// had written to it (pairedConn.wroteAtClose), from macOS's TCP table as a
+// bytes wait reads it as it begins (pairTarget): the application socket's
+// sequence number after the last thing it wrote, its FIN counted once it
+// closed (fin: one table read holds both), as a distance from its first. It
+// is read before the proxy's side, so a byte it counts that the side has not
+// received was written before the close and is still on its way: held in the
+// application's send buffer, or queued on loopback's input thread. The close
+// then waits for those bytes and charges any data among them (pairClosing),
+// as on Linux, rather than dropping a connection with bytes unaccounted.
+// What the application writes after it is no capture loss (Linux's
+// noteWroteAtClose says why).
+//
+// It is read even when the proxy's side has taken the application's FIN,
+// though nothing is on its way then: unlike Linux's, the side's own count
+// (its sequence number) says nothing of where the connection began, and the
+// record does, so a loss of bytes the close tosses unread is placed among the
+// ends cut short on the connection (pairedConn.lostBy). No record is made
+// from counts in a layout the proof did not find (xnuTableReadable: every
+// wait is unknown then), from a table that cannot be read, or for an
+// application socket the table no longer lists with the first sequence number
+// the proxy's side began from (gone: reset, its reset the last it sent), as
+// Linux makes none for a socket it cannot read: the close then finds nothing
+// on its way.
+func noteWroteAtClose(pc *pairedConn) {
+	if xnuTableReadable() != nil {
+		return
+	}
+	table, err := readXNUTable()
+	if err != nil {
+		return
+	}
+	app, ok := findXNUPCB(table, pc.app, pc.proxy)
+	if !ok {
+		return
+	}
+	if pr, ok := findXNUPCB(table, pc.proxy, pc.app); !ok || pr.irs != app.iss {
+		return
+	}
+	pc.wroteAtClose.Store(&appWrote{want: uint64(app.writeSeq() - app.iss - 1), fin: app.finPending(), isn: app.iss})
+}
+
+// readSide is pc's proxy side as its close reads it (closing, pairClosing):
+// once the close has read what the application had written (noteWroteAtClose),
+// what the side received is counted as that is (appWrote.received), so the
+// close compares the two; before, or without it, it is not known (counted
+// false).
+func (pc *pairedConn) readSide() proxySide {
+	ps := readProxySide(pc.conn)
+	if w := pc.wroteAtClose.Load(); w != nil && ps.err == nil {
+		ps.received, ps.counted = w.received(ps.rcvNxt), true
+	}
+	return ps
+}
+
+// received is how much a proxy's side whose next expected sequence number is
+// rcvNxt received, its FIN counted, in w's count (from the one after isn).
+// Sequence numbers wrap at 2^32, and w.want with them, so it is w.want less
+// how far rcvNxt is short of the sequence number after what was written, a
+// distance, as a wait compares them (pairReached); never below 0.
+func (w appWrote) received(rcvNxt uint32) uint64 {
+	short := int64(int32(uint32(w.want) - (rcvNxt - w.isn - 1)))
+	return uint64(max(int64(w.want)-short, 0))
+}
 
 // peerEnded says whether the proxy's side of a connection, in XNU TCP state
 // state, has taken the application's FIN or its reset (xnuClientGone).
 func peerEnded(state uint8) bool { return xnuClientGone(state) }
 
-// dataReceived is what a proxy's side received of the application's data. On
-// macOS that side is read by sequence number (proxySide.rcvNxt), and nothing
-// at a close knows the number the connection's first byte had, so the count
-// is not known: it answers the most it could be. A loss at a close then runs
+// dataReceived is what a proxy's side received of the application's data: its
+// count (readSide), but for the application's FIN once it took it. Without a
+// count (the close read no record of what the application had written) it is
+// not known, and it answers the most it could be: a loss at a close then runs
 // to any byte the application wrote (lostTop), so the test open as it is
 // counted is always charged (pairLost): an earlier test whose end was cut
 // short on the connection may go uncharged its share, and that test is not
 // verified already.
-func dataReceived(proxySide) uint64 { return math.MaxUint64 }
+func dataReceived(ps proxySide) uint64 {
+	if !ps.counted {
+		return math.MaxUint64
+	}
+	if ps.received > 0 && (ps.state == xnuTCPCloseWait || ps.state == xnuTCPLastAck || ps.state == xnuTCPClosing || ps.state == xnuTCPTimeWait) {
+		return ps.received - 1
+	}
+	return ps.received
+}

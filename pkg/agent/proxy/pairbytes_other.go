@@ -37,3 +37,5 @@ func readUnread(*net.TCPConn) (int, error) {
 func readProxySide(*net.TCPConn) proxySide {
 	return proxySide{err: fmt.Errorf("%w: the proxy's sockets are read on Linux only", models.ErrProxyConnsUnsupported)}
 }
+
+func (pc *pairedConn) readSide() proxySide { return readProxySide(pc.conn) }

@@ -87,7 +87,7 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 		// written by then.
 		low, top := dataReceived(*pc.atClose.Load())+1, lostTop(pc)
 		data, err := plainOnItsWay(ctx, pc.conn)
-		ps := readProxySide(pc.conn)
+		ps := pc.readSide()
 		pc.atClose.Store(&ps)
 		switch {
 		case ctx.Err() != nil:
@@ -110,7 +110,7 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 		data, err := tlsUnreadData(ctx, pc.conn, tc.tlsLayer.Load())
 		// Its side as the read left it: the application's FIN, if the read
 		// waited for it, is in, which the wait counts (pairReached).
-		ps := readProxySide(pc.conn)
+		ps := pc.readSide()
 		pc.atClose.Store(&ps)
 		switch {
 		case ctx.Err() != nil:
