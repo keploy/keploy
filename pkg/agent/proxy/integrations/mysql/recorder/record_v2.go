@@ -1514,6 +1514,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// nothing shows where a packet starts, and bytes the floor dropped
 	// (Session.NextRequest) are not read.
 	walk := &packetWalk{}
+	// cutUnproven: nothing proved where the answer to the exchange the last
+	// re-align left out starts (it was taken up at a cut, fail, or a held
+	// PREPARE's settle faulted at it), so the next cut is proven only by a
+	// walk that starts at that answer's own start.
+	var cutUnproven bool
 	sess.DestStream.Tap(walk.feed)
 	defer sess.DestStream.Tap(nil)
 	defer func() {
@@ -1636,6 +1641,14 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		// this one: the next command the server answers confirms the one
 		// before it or stops the recording first. A PREPARE held for its
 		// framing was settled at this command, before its answer was touched.
+		//
+		// The next cut checks where the walk since this exchange's mark
+		// starts only when this exchange was taken up at a cut: with none of
+		// its answer read, nothing proved that cut, and the tail of the
+		// response left out before it may come next (packetWalk.cut).
+		// Otherwise the answer before was read whole, and what comes next is
+		// this exchange's own.
+		cutUnproven = taken != nil
 		if t := taken; t != nil {
 			taken = nil
 			if walk.startedOff(t.first) {
@@ -1675,7 +1688,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		before := sess.DestStream.Consumed()
 		err := answerStartsAfter(sess, cmdFirst, sess.ClientStream.LastReadConnSeq())
 		if err == nil {
-			if why := walk.cut(respFirst); why != "" {
+			if why := walk.cut(respFirst, cutUnproven); why != "" {
 				err = fmt.Errorf("the server's packets do not show the response left out ended at the cut: %s", why)
 			}
 		}
@@ -1914,18 +1927,19 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				}
 				// After an EOF settle could not tell (untoldEOF), the ERRs a
 				// server sent to the commands without an answer before this one
-				// that did not decode come next, before this command's answer,
-				// and are no packets of it: walked as its, they had the
+				// that did not decode, and any packet it sent unasked before
+				// this command was captured, come next, before this command's
+				// answer, and are no packets of it: walked as its, they had the
 				// re-align's cut pass where none of that answer had come, and a
 				// client that sent its next command before that answer had the
 				// command recorded with it. So they are taken off the stream as
-				// at every command the server answers (takeMalformedAnswers),
-				// and the walk starts the answer after them. After any other
-				// fault, what settle read is off where the answer starts, and
-				// the walk shows it (packetWalk.cut); the re-align (fail) cuts
-				// such an ERR off with the rest of that response.
+				// at every command the server answers (takeMalformedAnswers,
+				// which sets the floor at this command), and the walk starts the
+				// answer after them. After any other fault, what settle read is
+				// off where the answer starts; the re-align (fail) cuts such an
+				// ERR off with the rest of that response.
 				var untold untoldEOF
-				if len(malformed) > 0 && errors.As(err, &untold) {
+				if errors.As(err, &untold) {
 					_, why, merr := takeMalformedAnswers(ctx, logger, sess, malformed, first.ConnSeq, respFirst, mysql.CommandStatusToString(commandByte(cmdBuf)), fakeconn.Chunk{}, &carry)
 					malformed = nil
 					if why != "" {
@@ -1945,6 +1959,12 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				if err := fail(reqTs, err); err != nil {
 					return err
 				}
+				// Nothing proves where this command's answer starts: settle
+				// read a packet that is neither the held PREPARE's EOF nor that
+				// answer's first, or one that may be either. So the next cut is
+				// proven only by a walk that starts at that answer's own start
+				// (packetWalk.cut).
+				cutUnproven = true
 				continue
 			}
 			// The ERRs a server sent to the commands without an answer before

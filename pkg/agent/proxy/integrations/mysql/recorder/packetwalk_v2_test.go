@@ -46,6 +46,9 @@ func TestPacketWalkTakesACutOnlyWhereTheResponseLeftOutEnded(t *testing.T) {
 		// start is the sequence id the response left out starts at (1 when
 		// zero).
 		start byte
+		// unproven: the exchange left out was taken up at a cut nothing
+		// proved (packetWalk.cut).
+		unproven bool
 		// stream is what left the server's stream since the answer began,
 		// split at the offsets in split.
 		stream []byte
@@ -65,10 +68,16 @@ func TestPacketWalkTakesACutOnlyWhereTheResponseLeftOutEnded(t *testing.T) {
 		{name: "a run that wrapped and went on", stream: wrapped(0, 1), first: 1},
 		{name: "an answer that starts past 1", stream: run(1, 2), first: 3, want: "sequence id 2, so a packet at 3"},
 		// The tail of a response before the one left out, captured after the
-		// command whose answer was left out: what it ends at says nothing of
-		// where the response left out ended.
-		{name: "a first packet off the response's start", stream: run(3), first: 1, want: "first packet walked since the response left out began has sequence id 3, not 1"},
-		{name: "a response left out that starts past 1", start: 3, stream: run(3, 4), first: 1},
+		// command whose answer was left out, which was taken up at a cut
+		// nothing proved: what it ends at says nothing of where the response
+		// left out ended.
+		{name: "a first packet off the response's start", unproven: true, stream: run(3), first: 1, want: "first packet walked since the response left out began has sequence id 3, not 1"},
+		{name: "a response left out that starts past 1", unproven: true, start: 3, stream: run(3, 4), first: 1},
+		// After an answer read whole, nothing of a response before it is
+		// left: the first packet is the response's own, off its sequence, and
+		// what follows shows where it ended.
+		{name: "a first packet off its start after an answer read whole", stream: run(3), first: 1},
+		{name: "a run off its start after an answer read whole that ends at 0", stream: run(3, 0), first: 1, want: "sequence id 0, so a packet at 1"},
 		{name: "the client's upload ended at 0", stream: run(1), client: []byte{254, 255, 0}, first: 1, want: "client sent a packet at sequence id 0"},
 		{name: "the client's upload ended past 0", stream: run(1), client: []byte{255, 0, 1}, first: 1},
 	} {
@@ -90,7 +99,7 @@ func TestPacketWalkTakesACutOnlyWhereTheResponseLeftOutEnded(t *testing.T) {
 			for _, id := range c.client {
 				w.passed(id)
 			}
-			got := w.cut(c.first)
+			got := w.cut(c.first, c.unproven)
 			if c.want == "" && got != "" || !strings.Contains(got, c.want) {
 				t.Fatalf("cut(%d) = %q, want %q", c.first, got, c.want)
 			}
@@ -106,12 +115,12 @@ func TestPacketWalkAnchorsAtAPacketBoundary(t *testing.T) {
 	w.anchor()
 	w.mark(1)
 	w.feed(wrapPacket([]byte("row"), 1)[:6])
-	if got := w.cut(1); !strings.Contains(got, "inside a packet") {
+	if got := w.cut(1, false); !strings.Contains(got, "inside a packet") {
 		t.Fatalf("cut(1) = %q in a packet", got)
 	}
 	w.anchor()
 	w.feed(wrapPacket([]byte("row"), 7))
-	if got := w.cut(1); got != "" {
+	if got := w.cut(1, false); got != "" {
 		t.Fatalf("cut(1) = %q after the anchor and a packet at 7", got)
 	}
 }

@@ -112,8 +112,12 @@ func (w *packetWalk) startedOff(first byte) bool {
 // cut says why the server's next bytes, after a re-align's cut, cannot be
 // taken for the start of the answer to the command taken up, which starts at
 // sequence id first; empty when they can. The answer's first packet is checked
-// to be at first as it is read (packetSeq).
-func (w *packetWalk) cut(first byte) string {
+// to be at first as it is read (packetSeq). unproven says nothing showed the
+// stream was at the start of the answer left out when it was marked: that
+// exchange was itself taken up at a re-align's cut and none of its answer was
+// read, or a held PREPARE's settle read a packet at it that is neither the
+// PREPARE's EOF nor that answer's first, or may be either.
+func (w *packetWalk) cut(first byte, unproven bool) string {
 	prev := first - 1
 	switch {
 	case !w.on:
@@ -122,13 +126,19 @@ func (w *packetWalk) cut(first byte) string {
 		return "it falls inside a packet of the server's"
 	case !w.seen:
 		return "no packet of the response left out came before it"
-	case w.first != w.start:
+	case unproven && w.first != w.start:
 		// The first packet walked since the mark is not where the response
 		// left out starts: it may be the tail of a response before it, which
 		// a command taken up whose answer was never read (its fault was the
 		// command's own) left unproven, captured after that command. Then
 		// nothing walked is of the response left out, and the walk shows
-		// nothing of where it ended.
+		// nothing of where it ended; or the rest of a held PREPARE's response.
+		// Otherwise no byte of a response before it is left after the mark
+		// (the answer before was read whole, or its first packet proved the
+		// cut it was taken up at), so the first packet
+		// walked is the response's own, off its sequence, and what follows
+		// shows where it ended as for any response left out: refused there,
+		// the recording stopped where main re-aligns and records the rest.
 		return fmt.Sprintf("the first packet walked since the response left out began has sequence id %d, not %d where it starts", w.first, w.start)
 	case w.last == prev:
 		return fmt.Sprintf("the last packet before it has sequence id %d, so a packet at %d after it may be more of the response left out", prev, first)
