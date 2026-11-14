@@ -86,48 +86,34 @@ func TestGetAvailablePortAvoidsTheEphemeralRange(t *testing.T) {
 //
 // Asserting "the returned port is bindable" is not enough: on an idle box
 // almost any port above the ephemeral range binds, so that assertion holds by
-// luck even if the bindability probe is deleted entirely. Instead, hold a block
-// of candidates and require the function to return something outside it.
+// luck even if the bindability probe is deleted entirely. Instead, hold a port
+// with a real listener, put it at the bottom of the band, draw it, and require
+// the function to pass over it. One port, the kernel's pick: not a block of
+// ports above the range, which every process on the host draws from (another
+// test binary's draws met at the first free port past such a block).
 func TestGetAvailablePortSkipsPortsAlreadyHeld(t *testing.T) {
-	if _, _, known := ephemeralPortRange(); !known {
-		t.Skip("platform range unknown; GetAvailablePort falls back to :0 here")
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("hold a port: %v", err)
 	}
-	_, hi, _ := ephemeralPortRange()
-	if hi >= 65535 {
-		t.Skip("no space above the ephemeral range on this host")
+	defer ln.Close()
+	held := uint32(ln.Addr().(*net.TCPAddr).Port)
+
+	if free, err := probePort(held); free || err != nil {
+		t.Fatalf("probePort(%d) = %v, %v while this test listens on it; want false, nil", held, free, err)
 	}
 
-	// Occupy a contiguous block so a probe-less implementation, which returns
-	// whatever candidate it lands on, has a high chance of returning a held one.
-	held := map[uint32]bool{}
-	var lns []net.Listener
-	for p := hi + 1; p <= 65535 && len(lns) < 2000; p++ {
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
-		if err != nil {
-			continue
-		}
-		lns = append(lns, ln)
-		held[p] = true
+	defer func(r func() (uint32, uint32, bool)) { hostEphemeralRange = r }(hostEphemeralRange)
+	hostEphemeralRange = func() (uint32, uint32, bool) { return 1024, held - 1, true }
+	probed := drawsAndProbes(t, []uint32{0}, probePort) // the draw lands on held, as does the scan's start
+	port, err := GetAvailablePort()
+	if err != nil {
+		t.Fatalf("GetAvailablePort: %v", err)
 	}
-	defer func() {
-		for _, ln := range lns {
-			_ = ln.Close()
-		}
-	}()
-	if len(held) < 100 {
-		t.Skipf("could only hold %d ports; too few to discriminate", len(held))
-	}
-
-	for i := 0; i < 200; i++ {
-		port, err := GetAvailablePort()
-		if err != nil {
-			t.Fatalf("GetAvailablePort: %v", err)
-		}
-		if held[port] {
-			t.Fatalf("GetAvailablePort returned %d, a port THIS TEST is holding: the "+
-				"candidate was never verified bindable, so callers are handed ports "+
-				"that are already in use", port)
-		}
+	if port == held || len(*probed) < 2 || (*probed)[0] != held || (*probed)[1] != held {
+		t.Fatalf("GetAvailablePort returned %d after probing %v; want a port other than %d, "+
+			"which THIS TEST holds and which the draw and the scan probed first: a "+
+			"candidate not verified bindable hands callers ports already in use", port, *probed, held)
 	}
 }
 

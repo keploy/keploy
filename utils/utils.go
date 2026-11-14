@@ -1459,8 +1459,8 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 		// identical number, each having verified it free; whichever binds
 		// second loses. Nor a scan from a random start alone: every start
 		// inside a run of held ports leads it to the first free port after
-		// the run, so beside such a run (one of utils' rows holds 2000 above
-		// the range) the draws of processes started together met there.
+		// the run, so beside such a run (a process holding a block of ports
+		// above the range) the draws of processes started together met there.
 		for i := 0; i < randomProbes; i++ {
 			off, ok := portOffset(span)
 			if !ok {
