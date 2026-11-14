@@ -1,11 +1,17 @@
 package utils
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"go.keploy.io/server/v3/utils/plaintcp/plaintcptest"
 )
 
 // A container's port published as itself is above the container's own
@@ -158,6 +164,117 @@ func TestAPortIsDrawnAgainPastARunOfHeldPorts(t *testing.T) {
 		})
 		if p, err := availablePortAbove(ephemeral, 0); !errors.Is(err, broken) {
 			t.Fatalf("draws %v: got port %d, err %v; want the probe's error at %d", c.offsets, p, err, c.failing)
+		}
+	}
+}
+
+// EnsureAvailablePorts's search for another port skips the excluded ports:
+// in a band whose free ports are an excluded one and one other, it returns
+// the other, whether every draw returns the excluded port or no random
+// number is read. It drew again while it got an excluded port, 16 times, and
+// then failed, the other port free all along.
+func TestEnsureAvailablePortsFindsTheFreePortBesideAnExcludedOne(t *testing.T) {
+	defer func(r func() (uint32, uint32, bool)) { hostEphemeralRange = r }(hostEphemeralRange)
+	hostEphemeralRange = func() (uint32, uint32, bool) { return 32768, 65530, true } // the band: 65531-65535
+	const excluded, other uint32 = 65532, 65534
+	free := func(port uint32) (bool, error) { return port == excluded || port == other, nil }
+	everyDrawExcluded := make([]uint32, randomProbes+1)
+	for i := range everyDrawExcluded {
+		everyDrawExcluded[i] = excluded - 65531
+	}
+	for _, offsets := range [][]uint32{everyDrawExcluded, nil} {
+		probed := drawsAndProbes(t, offsets, free)
+		got, err := EnsureAvailablePorts(excluded, 65531, excluded)
+		if err != nil || got != other {
+			t.Fatalf("draws %v: EnsureAvailablePorts = %d, %v; want %d, the free port that is not excluded", offsets, got, err, other)
+		}
+		if slices.Contains(*probed, excluded) {
+			t.Fatalf("draws %v: probed the excluded %d (%v); the search skips it", offsets, excluded, *probed)
+		}
+	}
+}
+
+// pickListener is a listener the OS's pick (portListen on ":0") returned in
+// a row, on port, and whether it was let go.
+type pickListener struct {
+	port   int
+	closed bool
+}
+
+func (l *pickListener) Accept() (net.Conn, error) { return nil, errors.New("not accepting") }
+func (l *pickListener) Close() error              { l.closed = true; return nil }
+func (l *pickListener) Addr() net.Addr            { return &net.TCPAddr{Port: l.port} }
+
+// osPicks has portListen return listeners on ports, in turn, and records them.
+// A pick asked for while the one before it was let go fails the row: an
+// excluded pick is held so the OS cannot hand it back.
+func osPicks(t *testing.T, ports ...int) *[]*pickListener {
+	t.Helper()
+	was := portListen
+	t.Cleanup(func() { portListen = was })
+	picks := &[]*pickListener{}
+	portListen = func(_ context.Context, network, address string) (net.Listener, error) {
+		if network != "tcp" || address != ":0" || len(ports) == 0 {
+			return nil, fmt.Errorf("unexpected listen on %s %s", network, address)
+		}
+		if n := len(*picks); n > 0 && (*picks)[n-1].closed {
+			t.Errorf("the OS was asked again after the excluded pick %d was let go", (*picks)[n-1].port)
+		}
+		l := &pickListener{port: ports[0]}
+		ports = ports[1:]
+		*picks = append(*picks, l)
+		return l, nil
+	}
+	return picks
+}
+
+// Where no port above the range is left, or the range is unknown, the OS's
+// pick stands in: one that is excluded is held while the OS is asked again,
+// and every pick is let go before the port is returned. Where every pick is
+// excluded, as the OS never does with them held, it is an error after one ask
+// more than there are excluded ports, not a hang.
+func TestTheOSsPickIsNeverAnExcludedPort(t *testing.T) {
+	unknown := func() (uint32, uint32, bool) { return 0, 0, false }
+	picks := osPicks(t, 40001, 40002)
+	if got, err := availablePortAbove(unknown, 0, 40001); err != nil || got != 40002 || len(*picks) != 2 {
+		t.Fatalf("got port %d, err %v, after %d picks; want 40002, the second pick, the excluded 40001 passed over", got, err, len(*picks))
+	}
+	for _, l := range *picks {
+		if !l.closed {
+			t.Fatalf("the pick on %d was not let go", l.port)
+		}
+	}
+
+	picks = osPicks(t, 40001, 40001, 40001, 40001)
+	if got, err := availablePortAbove(unknown, 0, 40001, 40003); err == nil || len(*picks) != 3 {
+		t.Fatalf("got port %d, err %v, after %d picks; want an error after 3 picks, each the excluded 40001", got, err, len(*picks))
+	}
+}
+
+// The probes and the OS's pick are plain TCP listeners, never Go's default
+// MPTCP: for as long as one is open it listens on every interface.
+func TestPortProbesArePlainTCP(t *testing.T) {
+	was := portListen
+	t.Cleanup(func() { portListen = was })
+	opened := 0
+	portListen = func(ctx context.Context, network, address string) (net.Listener, error) {
+		ln, err := was(ctx, network, address)
+		if err == nil {
+			opened++
+			plaintcptest.RequirePlainTCP(t, ln)
+		}
+		return ln, err
+	}
+	for _, c := range []struct {
+		name  string
+		known bool
+	}{{"a probe above the range", true}, {"the OS's pick", false}} {
+		opened = 0
+		if _, err := availablePortAbove(func() (uint32, uint32, bool) { return 32768, 60999, c.known }, 0); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if opened == 0 {
+			t.Fatalf("%s: no listener through portListen", c.name)
 		}
 	}
 }
