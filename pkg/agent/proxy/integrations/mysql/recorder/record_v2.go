@@ -130,12 +130,18 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 			}
 			// The recording's stop. The handshake was captured before it and
 			// read on after it (a TLS connection's greeting is fetched then
-			// too: untilParserEnds), so a failure that is not the end of a
-			// stream or of the parser leaves the connection out: counted,
+			// too: untilParserEnds). Only two ends leave the connection out
+			// with nothing said here: its streams' (returned above) and the
+			// parser's own (parserEnded: its retirement, whose loss the
+			// supervisor tells). Every other failure leaves it out: counted,
 			// named, and spanned from its first client packet where that is
-			// known (leaveOutInFlight), as the exchange a lost frame is in.
-			// Before, the stop made it silent.
-			_ = leaveOutInFlight(sess, handshake.firstCmdAt, err)
+			// known (Session.ReportStoppedOn), as the exchange a lost frame
+			// is in. A context's end inside err decides nothing: a fetch that
+			// hit its own dial bound carries one, and is a failed fetch.
+			// Before, the stop made those silent.
+			if !parserEnded(ctx, sess) {
+				sess.ReportStoppedOn(models.MySQL, handshake.firstCmdAt, leftOutReason(err))
+			}
 			return ctx.Err()
 		}
 		if errors.Is(err, ErrFramingLost) {
@@ -1082,6 +1088,10 @@ func untilParserEnds(ctx context.Context, sess *supervisor.Session) (context.Con
 		return fetch, cancel
 	}
 	stop := context.AfterFunc(ctx, func() {
+		// Only the stop waits for the retirement. A teardown while the
+		// recording runs is the parser's end itself, and a session no
+		// supervisor runs has no retirement to wait for (Retired is nil):
+		// both end the fetch at once.
 		if sess.RecordingStopping() {
 			select {
 			case <-sess.Retired():

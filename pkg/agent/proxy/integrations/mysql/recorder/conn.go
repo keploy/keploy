@@ -191,7 +191,7 @@ func fetchServerGreeting(ctx context.Context, logger *zap.Logger, opts models.Ou
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("read greeting header: %w", err)
+		return nil, fmt.Errorf("read greeting header from %s: %w", addr, hungUpBeforeGreeting(err))
 	}
 	payloadLen := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
 	payload := make([]byte, payloadLen)
@@ -199,13 +199,25 @@ func fetchServerGreeting(ctx context.Context, logger *zap.Logger, opts models.Ou
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("read greeting payload: %w", err)
+		return nil, fmt.Errorf("read greeting payload from %s: %w", addr, hungUpBeforeGreeting(err))
 	}
 
 	buf := make([]byte, 4+payloadLen)
 	copy(buf, header)
 	copy(buf[4:], payload)
 	return buf, nil
+}
+
+// hungUpBeforeGreeting is err, a read of the greeting's failure, with a server
+// that hung up before sending any of it said as io.ErrUnexpectedEOF, never
+// io.EOF. To the recorder io.EOF is the end of a stream it captured, which
+// ends a connection with nothing said (RecordV2); the end of the fetch's own
+// connection is a failed fetch.
+func hungUpBeforeGreeting(err error) error {
+	if errors.Is(err, io.EOF) {
+		return fmt.Errorf("the server hung up before its greeting: %w", io.ErrUnexpectedEOF)
+	}
+	return err
 }
 
 // greetingFetches coalesces concurrent direct greeting fetches for the same

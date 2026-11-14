@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -419,6 +421,24 @@ func TestRecordV2_PostTLS_AConnectionCapturedBeforeTheStopIsRecordedWithItsGreet
 // and none is remembered. The recording has stopped (ctx).
 func freshTLSConnectionAtTheStop(t *testing.T, h *v2Harness, addr string) (context.Context, time.Time) {
 	t.Helper()
+	return freshTLSConnectionAtTheStopIn(t, h, addr, models.NewTLSHandshakeStore())
+}
+
+// freshTLSConnectionAtTheStopIn is freshTLSConnectionAtTheStop with the store
+// the connection's greeting is looked up in, and a fetch's outcome remembered
+// for: connections sharing it share what their server is known by.
+func freshTLSConnectionAtTheStopIn(t *testing.T, h *v2Harness, addr string, store *models.TLSHandshakeStore) (context.Context, time.Time) {
+	t.Helper()
+	firstAt := captureFreshTLSConnection(t, h, addr)
+	h.closeStreams()
+	return stoppedRecording(postTLSCtxWithStore(store), h.sess), firstAt
+}
+
+// captureFreshTLSConnection pushes freshTLSConnectionAtTheStop's capture onto
+// h's streams, ending neither, points the session at addr, and returns when
+// the first client packet was captured.
+func captureFreshTLSConnection(t *testing.T, h *v2Harness, addr string) time.Time {
+	t.Helper()
 	base := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 	greeting, err := connphase.DecodeHandshakeV10(context.Background(), zap.NewNop(), cannedHandshakeV10(t)[4:])
 	if err != nil {
@@ -428,9 +448,8 @@ func freshTLSConnectionAtTheStop(t *testing.T, h *v2Harness, addr string) (conte
 	h.pushDest(cannedOK(t, 3, greeting.CapabilityFlags), base.Add(10*time.Millisecond))
 	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), base.Add(20*time.Millisecond))
 	h.pushDest(cannedOK(t, 1, greeting.CapabilityFlags), base.Add(25*time.Millisecond))
-	h.closeStreams()
 	h.sess.Opts.DstCfg = &models.ConditionalDstCfg{Addr: addr, Port: 3306}
-	return stoppedRecording(postTLSCtxWithStore(models.NewTLSHandshakeStore()), h.sess), base.Add(5 * time.Millisecond)
+	return base.Add(5 * time.Millisecond)
 }
 
 // A fresh TLS connection captured before the stop whose raw-leg greeting never
@@ -497,6 +516,204 @@ func TestRecordV2_PostTLS_AtTheStopAFailedGreetingFetchLeavesTheConnectionOutNam
 	}
 	if start := spans.windows[0][0]; !start.Equal(firstAt) {
 		t.Fatalf("the span starts at %v; want the first client packet's %v", start, firstAt)
+	}
+}
+
+// greetingFetchAtTheStop is what RecordV2 left of a fresh TLS connection
+// captured before the stop (freshTLSConnectionAtTheStopIn) whose greeting
+// fetch failed: the mocks it recorded, its left-out WARNs, the count and the
+// spans.
+type greetingFetchAtTheStop struct {
+	mocks   int
+	warns   []observer.LoggedEntry
+	mgr     *syncMock.SyncMockManager
+	spans   *orphanSpans
+	firstAt time.Time
+}
+
+// fetchGreetingAtTheStop runs RecordV2 on a fresh TLS connection to addr
+// captured before the stop, whose greeting is looked up in store and fetched
+// with dial (nil: the plain dialer).
+func fetchGreetingAtTheStop(t *testing.T, store *models.TLSHandshakeStore, addr string, dial models.DstDialer) greetingFetchAtTheStop {
+	t.Helper()
+	resetWarnLimiters()
+	core, logs := observer.New(zapcore.DebugLevel)
+	h := newV2Harness(t)
+	h.logger = zap.New(core)
+	h.sess.Logger = h.logger
+	r := greetingFetchAtTheStop{mgr: syncMock.New(nil), spans: &orphanSpans{}}
+	h.sess.Mgr = r.mgr
+	h.sess.Orphans = r.spans
+	ctx, firstAt := freshTLSConnectionAtTheStopIn(t, h, addr, store)
+	if dial != nil {
+		ctx = context.WithValue(ctx, models.DstDialerKey, dial)
+	}
+	_ = recordV2NoPanic(t, ctx, h.logger, h.sess)
+	r.mocks, r.warns, r.firstAt = len(h.mocks), leftOutWarnings(logs), firstAt
+	return r
+}
+
+// leftOutOnce fails t unless the connection was left out once, as every
+// failed fetch leaves it: one left-out WARN that names the failed fetch from
+// addr, counted, spanned from its first client packet.
+func (r greetingFetchAtTheStop) leftOutOnce(t *testing.T, addr string) {
+	t.Helper()
+	if r.mocks != 0 {
+		t.Fatalf("%d mock(s) recorded with no greeting", r.mocks)
+	}
+	if len(r.warns) != 1 || r.mgr.MocksLeftOut() != 1 || r.spans.count() != 1 {
+		t.Fatalf("%d left-out WARN(s), %d counted, %d span(s); want the connection left out once: a failed fetch is a capture loss, never silent",
+			len(r.warns), r.mgr.MocksLeftOut(), r.spans.count())
+	}
+	if reason, _ := r.warns[0].ContextMap()["reason"].(string); !strings.Contains(reason, "direct fetch failed") || !strings.Contains(reason, addr) {
+		t.Fatalf("left out for %q; want the failed fetch from %s named", reason, addr)
+	}
+	if start := r.spans.windows[0][0]; !start.Equal(r.firstAt) {
+		t.Fatalf("the span starts at %v; want the first client packet's %v", start, r.firstAt)
+	}
+}
+
+// netDialTimeout fails as the plain dialer does on its own bound, "dial tcp
+// ADDR: i/o timeout", whose error is a context.DeadlineExceeded, at once.
+func netDialTimeout(ctx context.Context, addr string) (net.Conn, error) {
+	dctx, cancel := context.WithDeadline(ctx, time.Now())
+	defer cancel()
+	var d net.Dialer
+	return d.DialContext(dctx, "tcp", addr)
+}
+
+// A fetch that times out dialling at the stop is a failed fetch like any
+// other: the connection is left out, counted, named. Its error is a
+// context.DeadlineExceeded (the namespace dialer's bound, and the plain
+// dialer's "i/o timeout"), which is not the parser's end: that is its
+// retirement, not a context error inside a failure. Before, the stop branch
+// took either for the end and left the connection out without a word.
+func TestRecordV2_PostTLS_AtTheStopAGreetingDialTimeoutLeavesTheConnectionOutNamed(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "100")
+	t.Run("the namespace dialer's bound", func(t *testing.T) {
+		const addr = "10.0.0.1:3306"
+		fetchGreetingAtTheStop(t, models.NewTLSHandshakeStore(), addr, func(ctx context.Context, _ string) (net.Conn, error) {
+			<-ctx.Done() // the fetch's own dial bound
+			return nil, ctx.Err()
+		}).leftOutOnce(t, addr)
+	})
+	t.Run("the plain dialer's i/o timeout", func(t *testing.T) {
+		const addr = "10.0.0.2:3306"
+		if _, err := netDialTimeout(context.Background(), addr); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the dialer's timeout is %v; want a context.DeadlineExceeded, the error this row is about", err)
+		}
+		fetchGreetingAtTheStop(t, models.NewTLSHandshakeStore(), addr, netDialTimeout).leftOutOnce(t, addr)
+	})
+}
+
+// A fetch's failure is remembered for its server (greetingFetchFailures), and
+// a second connection to it at the stop is answered by that memory: it is left
+// out, counted and named too, never silently.
+func TestRecordV2_PostTLS_AtTheStopARememberedGreetingFetchFailureLeavesTheNextConnectionOutNamed(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "100")
+	const addr = "10.0.0.3:3306"
+	var dials atomic.Int32
+	dial := func(ctx context.Context, a string) (net.Conn, error) {
+		dials.Add(1)
+		return netDialTimeout(ctx, a)
+	}
+	store := models.NewTLSHandshakeStore()
+	fetchGreetingAtTheStop(t, store, addr, dial).leftOutOnce(t, addr)
+	second := fetchGreetingAtTheStop(t, store, addr, dial)
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("the server was dialled %d times; want once: the second connection is answered by the failure remembered for it", n)
+	}
+	second.leftOutOnce(t, addr)
+}
+
+// A server that hangs up on the fetch before its greeting fails the fetch:
+// the end of the fetch's own connection is not the end of the connection
+// captured, and the captured connection is left out, counted, named. Before,
+// that io.EOF ended RecordV2 as its stream's end, without a word.
+func TestRecordV2_PostTLS_AtTheStopAServerThatHangsUpBeforeItsGreetingLeavesTheConnectionOutNamed(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "100")
+	srv := startFakeMySQLGreeter(t, nil, 0)
+	fetchGreetingAtTheStop(t, models.NewTLSHandshakeStore(), srv.addr, nil).leftOutOnce(t, srv.addr)
+}
+
+// fetchWatchers counts the goroutines untilParserEnds has waiting on a
+// parser's end.
+func fetchWatchers() int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Count(string(buf[:n]), "recorder.untilParserEnds.func1(")
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// A parser that fetched its greeting at the stop and then returned cleanly
+// leaves nothing of the fetch behind. The supervisor does not retire a parser
+// that returns cleanly (Session.Retired stays open), so ending what waits on
+// the parser's end is the recorder's own to do once the fetch is over. The
+// server's stream is left unended here, so the parser's return, not its
+// streams' end, is what the supervisor sees.
+func TestRecordV2_PostTLS_AFetchAtTheStopLeavesNothingWaitingAfterACleanReturn(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "100")
+	srv := startFakeMySQLGreeter(t, cannedHandshakeV10(t), 0)
+	h := newV2Harness(t)
+	before := fetchWatchers()
+	captureFreshTLSConnection(t, h, srv.addr)
+	close(h.clientCh)
+	t.Cleanup(func() { close(h.destCh) })
+	ctx := stoppedRecording(postTLSCtxWithStore(models.NewTLSHandshakeStore()), h.sess)
+	s := supervisor.New(supervisor.Config{Logger: zap.NewNop(), HangBudget: time.Hour})
+	res := s.Run(ctx, func(pctx context.Context, sess *supervisor.Session) error {
+		return recordV2NoPanic(t, pctx, h.logger, sess)
+	}, h.sess)
+	if res.Err != nil {
+		t.Fatalf("Run = %+v; want the parser's clean return", res)
+	}
+	select {
+	case <-h.sess.Retired():
+		t.Fatal("the supervisor retired the parser; this row is about one that returned cleanly")
+	default:
+	}
+	if got := takeMocks(h, 2); len(got) != 2 {
+		t.Fatalf("%d mock(s); want the config mock and the query's", len(got))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for fetchWatchers() > before {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutine(s) still wait on the parser's end 2 s after it returned; want none", fetchWatchers()-before)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// While the recording runs, a parser torn down mid-fetch (its ctx ends: a
+// hang, the memory cap) ends the fetch at once: only at the stop does the
+// fetch wait for the parser's retirement, and a session no supervisor runs has
+// none to wait for (Session.Retired is nil).
+func TestRecordV2_PostTLS_ATeardownWhileRecordingEndsTheGreetingFetchAtOnce(t *testing.T) {
+	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "100")
+	gate := make(chan struct{}) // the server never answers
+	srv := startGatedFakeMySQLGreeter(t, cannedHandshakeV10(t), 0, gate)
+	t.Cleanup(func() { close(gate) })
+	h := newV2Harness(t)
+	captureFreshTLSConnection(t, h, srv.addr)
+	h.closeStreams()
+	h.sess.RecordingDone = make(chan struct{}) // the recording runs
+	ctx, cancel := context.WithCancel(postTLSCtxWithStore(models.NewTLSHandshakeStore()))
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() { returned <- recordV2NoPanic(t, ctx, h.logger, h.sess) }()
+	waitAccepted(t, srv, 1) // the fetch has dialled, and waits for the greeting
+	cancel()
+	select {
+	case err := <-returned:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RecordV2 = %v; want the teardown's context.Canceled", err)
+		}
+	case <-time.After(fetchGreetingDialTimeout - time.Second):
+		t.Fatal("RecordV2 still fetches 2 s after its teardown; want at once, never at the fetch's 3 s read bound")
 	}
 }
 
