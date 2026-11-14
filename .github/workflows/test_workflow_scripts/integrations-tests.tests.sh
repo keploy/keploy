@@ -26,8 +26,10 @@
 #   replace and the parser packages setup-private-parsers imports, in an
 #   extraparsers.go that imports the same ones; that the request-time row runs
 #   once, with KEPLOY_PROVEN unset and no GOFLAGS, and names each parser whose
-#   row failed; that a row not run, a build that does not link a parser
-#   package, a failed tidy and a replace not in effect each fail it.
+#   row failed, with or without a step summary; that a row not run, a go test
+#   that fails after the row passed, a build that does not link a parser
+#   package, a GOFLAGS in go's env file, a missing tree and a failed go mod
+#   edit, go list or tidy each fail it, all but the go test before it runs.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,7 +79,7 @@ case "$1 $2" in
   if [ -f "$s/deps.out" ]; then cat "$s/deps.out"; else printf '%s\n' go.keploy.io/server/v3/pkg/models \
     github.com/keploy/integrations/pkg/parsers github.com/keploy/integrations/pkg/postgres/v2/types \
     github.com/keploy/integrations/pkg/postgres/v3 go.keploy.io/server/v3/pkg/agent/proxy; fi
-  exit 0
+  exit "$(cat "$s/deps.rc" 2>/dev/null || echo 0)"
   ;;
 "mod tidy")
   exit "$(cat "$s/tidy.rc" 2>/dev/null || echo 0)"
@@ -519,11 +521,18 @@ parsers_case() {
   [ -z "${TIDY_RC:-}" ] || echo "$TIDY_RC" >"$s/tidy.rc"
   [ -z "${LIST_OUT+x}" ] || printf '%s\n' "$LIST_OUT" >"$s/list.out"
   [ -z "${DEPS_OUT+x}" ] || printf '%s\n' "$DEPS_OUT" >"$s/deps.out"
+  [ -z "${DEPS_RC:-}" ] || echo "$DEPS_RC" >"$s/deps.rc"
+  [ -z "${EDIT_RC:-}" ] || echo "$EDIT_RC" >"$s/edit.rc"
+  [ -z "${GOENV_FLAGS:-}" ] || printf '%s' "$GOENV_FLAGS" >"$s/goenv.flags"
   : >"$work/summary"
-  env GITHUB_STEP_SUMMARY="$work/summary" STUB_STATE="$s" INTEGRATIONS_DESC="keploy/integrations main at abc1234" \
+  local summary=(GITHUB_STEP_SUMMARY="$work/summary")
+  [ -z "${NO_SUMMARY:-}" ] || summary=(-u GITHUB_STEP_SUMMARY)
+  env "${summary[@]}" STUB_STATE="$s" INTEGRATIONS_DESC="keploy/integrations main at abc1234" \
     bash "$script" parsers "$work/k-$cases" "$work/i-$cases" >"$work/out" 2>&1
   rc=$?
 }
+# no_go_test: the case ended before go test ran.
+no_go_test() { ! grep -q '^go test ' "$work/state-$cases/calls" || fail "go test ran: $1"; }
 
 export KEPLOY_PROVEN=1 GOFLAGS='-run=^$'
 parsers_case "the row passes with the integrations parsers" 0 "$row_pass"
@@ -552,8 +561,26 @@ parsers_case "a parser's failing row is named" 1 "$row_fail"
 expect_rc 1
 expect_line "FAIL: keploy/integrations main at abc1234's parsers: $row/postgres_v3/KEPLOY_PROVEN=1"
 expect_line "FAIL: keploy/integrations main at abc1234's parsers: $row/postgres_v3"
+# Only parsers' rows are named, not the row over all of them.
+! grep -qxF "FAIL: keploy/integrations main at abc1234's parsers: $row" "$work/out" || fail "the row over every parser is named as a parser"
 expect_has "::error title=a recorder emits a mock with no request time::keploy/integrations main at abc1234's parsers: $row/postgres_v3"
 grep -qF -- "FAIL $row/postgres_v3" "$work/summary" || fail "summary lacks the failure"
+
+NO_SUMMARY=1 parsers_case "a parser's failing row is named outside GitHub Actions" 1 "$row_fail"
+expect_rc 1
+expect_line "FAIL: keploy/integrations main at abc1234's parsers: $row/postgres_v3"
+expect_has "Each row named above records one exchange"
+[ ! -s "$work/summary" ] || fail "a run with no step summary wrote one"
+
+NO_SUMMARY=1 parsers_case "the row passes outside GitHub Actions" 0 "$row_pass"
+expect_rc 0
+expect_has "PASS: $row with keploy/integrations main at abc1234's parsers"
+[ ! -s "$work/summary" ] || fail "a run with no step summary wrote one"
+
+parsers_case "the row passes but go test fails after it" 1 "$row_pass"$'\nFAIL\tgo.keploy.io/server/v3/pkg/agent/proxy\t9.3s'
+expect_rc 1
+expect_has "go test exited 1 with no failing row of a parser"
+expect_lacks "PASS: $row with"
 
 parsers_case "a failing go test with no failing row still fails" 2 "go: updates to go.mod needed"
 expect_rc 1
@@ -578,6 +605,39 @@ LIST_OUT="/somewhere/else" parsers_case "a replace by another tree fails" 0 "$ro
 expect_rc 1
 expect_has "does not take github.com/keploy/integrations from keploy/integrations main at abc1234 (its replace reads \"/somewhere/else\")"
 ! grep -q '^go test ' "$work/state-$cases/calls" || fail "go test ran with the replace not in effect"
+
+GOENV_FLAGS='-run=^$' parsers_case "go's env file setting GOFLAGS fails before the row" 0 "$row_pass"
+expect_rc 1
+expect_has "go's env file sets GOFLAGS \"-run=^\$\""
+no_go_test "with GOFLAGS set in go's env file"
+
+EDIT_RC=1 parsers_case "a failed go mod edit fails before the row" 0 "$row_pass"
+expect_rc 1
+expect_has "cannot require github.com/keploy/integrations from keploy/integrations main at abc1234 in keploy's go.mod"
+no_go_test "after a failed go mod edit"
+
+DEPS_RC=1 parsers_case "a failed go list -deps fails before the row" 0 "$row_pass"
+expect_rc 1
+expect_has "go list -deps ./pkg/agent/proxy/ failed"
+no_go_test "after a failed go list -deps"
+
+case_name="parsers with no keploy tree"
+cases=$((cases + 1))
+mkdir -p "$work/i-$cases"
+env STUB_STATE="$work/state-$cases" bash "$script" parsers "$work/k-$cases" "$work/i-$cases" >"$work/out" 2>&1
+rc=$?
+expect_rc 1
+expect_has "no keploy tree at $work/k-$cases"
+no_go_test "with no keploy tree"
+
+case_name="parsers with no integrations tree"
+cases=$((cases + 1))
+mkdir -p "$work/k-$cases"
+env STUB_STATE="$work/state-$cases" bash "$script" parsers "$work/k-$cases" "$work/i-$cases" >"$work/out" 2>&1
+rc=$?
+expect_rc 1
+expect_has "no keploy/integrations tree at $work/i-$cases"
+no_go_test "with no integrations tree"
 
 # ---- usage -----------------------------------------------------------------
 case_name="no command"
