@@ -326,54 +326,77 @@ func idleRowMock(name string, req time.Time, idle bool) *models.Mock {
 // replay whose worker sent it after test_job's end failed test_job on an
 // unconsumed mock. A recording that is not idle stays the test's, and an idle
 // one recorded before every test is startup:'s.
+//
+// Each row runs on two shapes of the same run: calls and windows with no
+// process or worker stamp, and the shape a claimed run records (the
+// redis-worker fixture's): the runner claims a keploy instance, its worker
+// thread's pop comes from the runner's own process, so the capture carries
+// that process's pid (Mock.SourcePID) and the claimed instance
+// (Mock.Instance), as do the runner's windows, and each set entry carries the
+// claim's key.
 func TestIdleAnswerIsTheSetsOnEitherSideOfAWindowEdge(t *testing.T) {
 	t.Cleanup(models.RegisterIdleAnswer(idleRowKind, func(m *models.Mock) bool { return m.Spec.Metadata["answer"] == "none" }))
 	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
-	windows := []models.ScopeWindow{
-		{Name: "test_ping", Start: at(0), End: at(100)},
-		{Name: "test_job", Start: at(150), End: at(300)},
-		{Name: "test_after", Start: at(350), End: at(400)},
-	}
 	kind := string(idleRowKind)
-	for _, tc := range []struct {
-		name  string
-		popAt int
+	for _, sh := range []struct {
+		name          string
+		pid, instance uint32
+		key           string
 	}{
-		{"inside test_job, at its end", 300},
-		{"in the gap after test_job", 301},
-		{"inside test_after", 360},
+		{"unstamped", 0, 0, ""},
+		{"stamped with the claimed worker's pid and instance", 4242, 3, "."},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(provenswitch.Env, "1")
-			mocks := []capturedMock{
-				capturedOf(idleRowMock("mock-push", at(200), false)),
-				capturedOf(idleRowMock("mock-pop", at(tc.popAt), true)),
+		t.Run(sh.name, func(t *testing.T) {
+			windows := []models.ScopeWindow{
+				{Name: "test_ping", Start: at(0), End: at(100), PID: sh.pid, Instance: sh.instance},
+				{Name: "test_job", Start: at(150), End: at(300), PID: sh.pid, Instance: sh.instance},
+				{Name: "test_after", Start: at(350), End: at(400), PID: sh.pid, Instance: sh.instance},
 			}
-			require.Equal(t, map[string][]models.MockEntry{"test_job": {{Name: "mock-push", Kind: kind}}}, correlateScopes(windows, mocks))
-			startup, worker := setScopeMocks(windows, mocks, nil)
-			require.Empty(t, startup)
-			require.Equal(t, []models.MockEntry{{Name: "mock-pop", Kind: kind}}, worker)
+			var claims []models.ScopeWindow
+			if sh.instance != 0 {
+				claims = []models.ScopeWindow{{Claim: sh.key, Start: at(-50), Worker: sh.instance}}
+			}
+			// mock is captured under the switch its sub-row sets.
+			mock := func(name string, ms int, idle bool) capturedMock {
+				m := idleRowMock(name, at(ms), idle)
+				m.SourcePID, m.Instance = sh.pid, sh.instance
+				return capturedOf(m)
+			}
+			for _, tc := range []struct {
+				name  string
+				popAt int
+			}{
+				{"inside test_job, at its end", 300},
+				{"in the gap after test_job", 301},
+				{"inside test_after", 360},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Setenv(provenswitch.Env, "1")
+					mocks := []capturedMock{mock("mock-push", 200, false), mock("mock-pop", tc.popAt, true)}
+					require.Equal(t, map[string][]models.MockEntry{"test_job": {{Name: "mock-push", Kind: kind}}}, correlateScopes(windows, mocks))
+					startup, worker := setScopeMocks(windows, mocks, claims)
+					require.Empty(t, startup)
+					require.Equal(t, []models.MockEntry{{Name: "mock-pop", Kind: kind, Key: sh.key}}, worker)
+				})
+			}
+			t.Run("an idle answer before every test is startup's", func(t *testing.T) {
+				t.Setenv(provenswitch.Env, "1")
+				mocks := []capturedMock{mock("mock-pop", -5, true)}
+				require.Empty(t, correlateScopes(windows, mocks))
+				startup, worker := setScopeMocks(windows, mocks, claims)
+				require.Equal(t, []models.MockEntry{{Name: "mock-pop", Kind: kind, Key: sh.key}}, startup)
+				require.Empty(t, worker)
+			})
+			// Off the switch an idle answer is placed as any call, as keploy
+			// record's derivation also maps one to worker: only under the switch.
+			t.Run("switch off: the test's whose window holds it", func(t *testing.T) {
+				t.Setenv(provenswitch.Env, "")
+				mocks := []capturedMock{mock("mock-push", 200, false), mock("mock-pop", 300, true)}
+				require.Equal(t, map[string][]models.MockEntry{"test_job": {{Name: "mock-push", Kind: kind}, {Name: "mock-pop", Kind: kind}}}, correlateScopes(windows, mocks))
+				require.Empty(t, startupMocks(windows, mocks, claims))
+			})
 		})
 	}
-	t.Run("an idle answer before every test is startup's", func(t *testing.T) {
-		t.Setenv(provenswitch.Env, "1")
-		mocks := []capturedMock{capturedOf(idleRowMock("mock-pop", at(-5), true))}
-		require.Empty(t, correlateScopes(windows, mocks))
-		startup, worker := setScopeMocks(windows, mocks, nil)
-		require.Equal(t, []models.MockEntry{{Name: "mock-pop", Kind: kind}}, startup)
-		require.Empty(t, worker)
-	})
-	// Off the switch an idle answer is placed as any call, as keploy
-	// record's derivation also maps one to worker: only under the switch.
-	t.Run("switch off: the test's whose window holds it", func(t *testing.T) {
-		t.Setenv(provenswitch.Env, "")
-		mocks := []capturedMock{
-			capturedOf(idleRowMock("mock-push", at(200), false)),
-			capturedOf(idleRowMock("mock-pop", at(300), true)),
-		}
-		require.Equal(t, map[string][]models.MockEntry{"test_job": {{Name: "mock-push", Kind: kind}, {Name: "mock-pop", Kind: kind}}}, correlateScopes(windows, mocks))
-		require.Empty(t, startupMocks(windows, mocks, nil))
-	})
 }
 
 // Under the proven switch keploy mock record writes the whole contract into
