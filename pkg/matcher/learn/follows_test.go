@@ -1557,6 +1557,12 @@ func TestAPlaceHoldingTheValueWholeInOneFormIsASource(t *testing.T) {
 		return x
 	}
 	refused("the recorded 24 Oct whole in an answer's Date header as written only", classify("24 Oct", "31 Oct", nil, none, dated("slot 24")), "mock-9")
+	// Nor where a later answer, which F gave changed to 31, holds the 24
+	// too: the place holding the value whole stays the place the search
+	// found first, and its refusal stands. Read as a part held by chance,
+	// it would be passed over, and the value bound to the later answer.
+	later := func(word string) Raw { return eAnswer("mock-o", 300*time.Millisecond, word) }
+	refused("the recorded 24 Oct whole in a Date header, a later answer F gave 31 at holding the 24", classify("24 Oct", "31 Oct", nil, none, dated("slot 24"), later("24").ServedAs(2).ServedLive(later("31"))), "mock-9")
 
 	// A leaf of the test's own earlier exchange that holds the value whole
 	// only as recorded there, or only as F gave it there: the value F saw,
