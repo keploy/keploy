@@ -109,6 +109,68 @@ func TestAWordGluedInsideAnUnservedRecordingsWord(t *testing.T) {
 	}
 }
 
+// A value keploy test learns as varying for a reason of its own (a chance
+// word of another test's answer that both runs gave the application,
+// follows.chance) and whose long word stands glued inside an unserved
+// recording's word names both: the glued place first, then that reason.
+// keploy mock refuses it, naming the glued place.
+func TestAGluedWordKeepsTheNoisesOtherReason(t *testing.T) {
+	const (
+		p         = "body.appId"
+		srcID     = "bb7ed9ee-670e-48d1-982f-b54b2b73982f" // another test's random message id
+		chance    = "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812" // the call's random appId: "48d1" by chance
+		other     = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5" // the call's appId in the other run
+		chanceWhy = ") stands in mock-31, which the recording and record's full round both gave the application at the same fields before the call"
+		gluedAt   = "glued inside mock-1290 at spec.req.header.X-Job"
+	)
+	before := r1Insert.Add(-time.Minute)
+	src := receiveOf("mock-31", srcID, before)
+	src.Spec.ResTimestampMock = before.Add(time.Second)
+	at := r1Insert.Add(-2 * time.Second)
+	unserved := RawOf(&models.Mock{Name: "mock-1290", Kind: models.HTTP, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+		HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://example.invalid/", Header: map[string]string{"X-Job": "job x" + chance[:8]}},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `ok`},
+		ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+	}}, false)
+	for _, tc := range []struct {
+		name     string
+		glued    bool
+		classify func(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned
+		dc       func() *DriftCache
+	}{
+		{"keploy test, no glued place", false, ClassifyFollowing, clockedDrifts},
+		{"keploy test", true, ClassifyFollowing, clockedDrifts},
+		{"keploy mock", true, ClassifyGiven, mockDrifts},
+	} {
+		dc := tc.dc()
+		raw := []Raw{dc.RawOf(src, true).ServedAs(3).ServedAsRecorded().OfAnotherTest()}
+		if tc.glued {
+			raw = append(raw, unserved)
+		}
+		got := tc.classify(dc, []string{p}, strLeaf(p, other), strLeaf(p, chance), r1Insert, nil, raw, nil, nil, nil)
+		if len(got) != 1 {
+			t.Fatalf("%s: learned %d leaves, want 1: %+v", tc.name, len(got), got)
+		}
+		ln := got[0]
+		switch {
+		case tc.name == "keploy mock":
+			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands glued inside a longer word of an earlier recording, in mock-1290 at spec.req.header.X-Job") {
+				t.Errorf("FALSE GREEN? %s: %s (%q), want refused naming mock-1290", tc.name, ln.Kind, ln.Why)
+			}
+		case !tc.glued:
+			if ln.Kind != KindNoise || !strings.Contains(ln.Why, chanceWhy) || strings.Contains(ln.Why, "glued inside") {
+				t.Errorf("%s: %s (%q), want noise naming the chance word alone", tc.name, ln.Kind, ln.Why)
+			}
+		default:
+			g, c := strings.Index(ln.Why, gluedAt), strings.Index(ln.Why, chanceWhy)
+			if ln.Kind != KindNoise || g < 0 || c < g || !strings.HasSuffix(ln.Why, ", and keploy learns it as varying") {
+				t.Errorf("SILENT? %s: %s (%q), want noise naming the glued place, then the chance word", tc.name, ln.Kind, ln.Why)
+			}
+		}
+	}
+}
+
 // The glued words of an unserved recording are read once per value and
 // recording, and only where the value changed a word of 32 bits or more.
 func TestGluedWordsAreReadOncePerUnservedRecording(t *testing.T) {
