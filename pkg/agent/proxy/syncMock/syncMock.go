@@ -782,6 +782,10 @@ type SyncMockManager struct {
 	// on the (sampled, cold) Error path, so contention is negligible.
 	loggerMu sync.RWMutex
 	logger   *zap.Logger
+
+	// noRequestTime counts, by kind, the test's mocks handed over with no
+	// request time (warnNoRequestTime): models.Kind to *atomic.Uint64.
+	noRequestTime sync.Map
 }
 
 // pressureRange is one closed [start, end] span of a Spans.
@@ -3217,6 +3221,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) MockDrop {
 	// downstream code to call DeriveLifetime defensively.
 	if mock != nil {
 		mock.DeriveLifetime()
+		m.warnNoRequestTime(mock)
 		// The proven model's container key of the connection the mock came
 		// from (containerkey). Stamped here, as the parser hands the mock
 		// over, while its connection is still open.
