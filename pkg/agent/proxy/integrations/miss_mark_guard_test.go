@@ -158,13 +158,20 @@ func missUnstamped(body *ast.BlockStmt, models, integ string) []string {
 	// cover another site's report in the same function.
 	built, stamped := map[string]bool{}, map[string]bool{}
 	// The references to ErrNoMockMatched that only test an error for it
-	// (errors.Is): no error is made of them.
+	// (errors.Is, or an operand of a comparison: an error is the operand of
+	// no other binary operator): no error is made of them.
 	tests := map[ast.Expr]bool{}
 	// noReport: a ParserError built with no report; inline: a report built
 	// inline at a miss or an answer, which no stamp can reach.
 	noReport, inline := false, false
 	ast.Inspect(body, func(n ast.Node) bool {
-		if lit, ok := n.(*ast.CompositeLit); ok && refers(lit.Type, models, "ParserError") {
+		if cmp, ok := n.(*ast.BinaryExpr); ok {
+			tests[cmp.X], tests[cmp.Y] = true, true
+			return true
+		}
+		// An empty literal is the zero ParserError, no miss (its type is
+		// none), as a var of the type declares it: neither builds one.
+		if lit, ok := n.(*ast.CompositeLit); ok && refers(lit.Type, models, "ParserError") && len(lit.Elts) > 0 {
 			r := fieldOf(lit, "MismatchReport")
 			switch r := r.(type) {
 			case nil:
@@ -430,12 +437,20 @@ func TestTheMissMarkGuardReadsEveryShape(t *testing.T) {
 		{"a nil report", "return models.NewMockMismatchError(err, nil)", ruleNilReport},
 		{"a ParserError with a nil report", "return &models.ParserError{Err: err, MismatchReport: nil}", ruleNilReport},
 		{"a ParserError with no report", "return models.ParserError{Err: err}", ruleNoReport},
+		{"a ParserError with only its miss type", "return models.ParserError{ParserErrorType: models.ErrMockNotFound}", ruleNoReport},
+		{"the zero ParserError, returned for no miss", "return models.ParserError{}, false", ""},
+		{"the zero ParserError beside one with no report", "if ok {\n\treturn models.ParserError{}\n}\nreturn &models.ParserError{Err: err}", ruleNoReport},
 		{"a stamp in an else", "report := build()\nif ok {\n\tlog()\n} else {\n\tintegrations.StampMark(report, mark)\n}\nreturn models.NewMockMismatchError(err, report)", ruleCondition},
 		{"a stamp in a switch case", "report := build()\nswitch {\ncase ok:\n\tintegrations.StampMark(report, mark)\n}\nreturn models.NewMockMismatchError(err, report)", ruleCondition},
 		{"a stamp under the if that builds the report", "if report := build(); report != nil {\n\tintegrations.StampMark(report, mark)\n\treturn models.NewMockMismatchError(err, report)\n}", ""},
 		{"a stamp in a function literal under an if", "if ok {\n\tgo func() {\n\t\treport := build()\n\t\tintegrations.StampMark(report, mark)\n\t\tsend(models.NewMockMismatchError(err, report))\n\t}()\n}", ""},
 		{"an ErrNoMockMatched error with no report", "return fmt.Errorf(\"%w: x\", models.ErrNoMockMatched)", ruleNoMatched},
 		{"an error only tested for ErrNoMockMatched", "if errors.Is(err, models.ErrNoMockMatched) {\n\treturn nil\n}", ""},
+		{"an error compared with ErrNoMockMatched", "return target == models.ErrNoMockMatched", ""},
+		{"an error compared unequal with ErrNoMockMatched", "if models.ErrNoMockMatched != err {\n\treturn nil\n}", ""},
+		{"an error compared with one made of ErrNoMockMatched", "return err == fmt.Errorf(\"%w: x\", models.ErrNoMockMatched)", ruleNoMatched},
+		{"a miss with a nil report built inside a comparison", "return models.NewMockMismatchError(err, nil) != nil", ruleNilReport},
+		{"a compared ErrNoMockMatched beside one made of it", "if err == models.ErrNoMockMatched {\n\treturn fmt.Errorf(\"%w: x\", models.ErrNoMockMatched)\n}", ruleNoMatched},
 		{"no miss", "return nil", ""},
 	} {
 		f, err := parser.ParseFile(token.NewFileSet(), "shape.go", "package p\n\nfunc f() {\n"+c.body+"\n}\n", parser.SkipObjectResolution)
