@@ -187,6 +187,25 @@ func perTestMockAt(at time.Time) *models.Mock {
 		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
 }
 
+// clockPast waits until the clock reads later than at, in both its readings
+// (Before and After compare the monotonic one, the mock manager the wall one),
+// as waitPast does for the forwarder: at once on Linux, the rest of a timer
+// tick at most on Windows. A clock that does not get there in a second was set
+// back, and the row cannot order its calls by time.
+func clockPast(t *testing.T, at time.Time) {
+	t.Helper()
+	if at.IsZero() {
+		return
+	}
+	deadline := time.Now().Add(time.Second)
+	for n := time.Now(); !n.After(at) || n.UnixNano() <= at.UnixNano(); n = time.Now() {
+		if n.After(deadline) {
+			t.Fatalf("the clock did not pass %v in a second", at)
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+}
+
 // parse runs parseFramesFromChan over chunks, one direction, to their end.
 func parse(sm *pkg.DefaultStreamManager, calls *callWindows, outgoing bool, chunks ...[]byte) {
 	ch := make(chan frameChunk, len(chunks))
@@ -294,7 +313,14 @@ func TestRecordIncoming_AGRPCOnlySyncRecordingMapsEachCallsMocksToItsTestCase(t 
 		<-done
 	}()
 	want := map[string]*models.Mock{}
+	var last time.Time
 	for i, id := range []uint32{1, 3} {
+		// Each call starts once the clock reads past everything the call
+		// before stamped (its test case's end, its mock's request): on
+		// Windows the clock moves only at the timer tick, and two calls
+		// inside one tick would tie, so a mock could read as the other
+		// call's.
+		clockPast(t, last)
 		req, resp := pingCallOn(t, id, i == 0)
 		go func() { _, _ = cliApp.Write(req) }()
 		if _, err := io.ReadFull(appApp, make([]byte, len(req))); err != nil {
@@ -318,6 +344,10 @@ func TestRecordIncoming_AGRPCOnlySyncRecordingMapsEachCallsMocksToItsTestCase(t 
 			t.Fatalf("%s is left out", tc.Name)
 		}
 		want[tc.Name] = mk
+		last = end
+		if at := mk.Spec.ReqTimestampMock; at.After(last) {
+			last = at
+		}
 	}
 	// The manager names each mock afresh as it hands it on to its test case,
 	// and the mapping carries that name: read it from the mock as it comes out,
