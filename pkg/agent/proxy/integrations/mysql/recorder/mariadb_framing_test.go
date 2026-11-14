@@ -194,6 +194,10 @@ func TestRecordV2_AMariaDBResultSetWithoutItsDefinitionsIsLeftOut(t *testing.T) 
 	}
 	h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), at())
 	h.pushDest(cannedOK(t, 1, mariaDBLoginCaps), at())
+	// The query after SELECT 1 confirms it, taken up after the EXECUTE left
+	// out (takenUp): the end of the connection would not.
+	h.pushClient(cannedCOMQuery(t, 0, "SELECT 2"), at())
+	h.pushDest(cannedOK(t, 1, mariaDBLoginCaps), at())
 	got := recordAll(t, h)
 	if n := len(mocksOf(got, "COM_STMT_EXECUTE")); n != 0 {
 		t.Errorf("recorded %d EXECUTEs, want the one without its definitions left out", n)
@@ -208,8 +212,8 @@ func TestRecordV2_AMariaDBResultSetWithoutItsDefinitionsIsLeftOut(t *testing.T) 
 	}).Len(); n != 1 {
 		t.Errorf("%d exchanges left out for leaving out their definitions, want the EXECUTE", n)
 	}
-	if n := len(mocksOf(got, "COM_QUERY")); n != 1 {
-		t.Errorf("recorded %d COM_QUERYs after it, want 1", n)
+	if n := len(mocksOf(got, "COM_QUERY")); n != 2 {
+		t.Errorf("recorded %d COM_QUERYs after it, want 2", n)
 	}
 }
 
@@ -265,6 +269,11 @@ func TestRecordV2_AMariaDBResponseOfSeveralResultsIsLeftOutForWhatItIs(t *testin
 			}
 			h.pushClient(cannedCOMQuery(t, 0, "SELECT 3"), at())
 			h.pushDest(cannedOK(t, 1, mariaDBLoginCaps), at())
+			// The query after SELECT 3 confirms it where it is taken up
+			// after the response left out (takenUp): the end of the
+			// connection would not.
+			h.pushClient(cannedCOMQuery(t, 0, "SELECT 4"), at())
+			h.pushDest(cannedOK(t, 1, mariaDBLoginCaps), at())
 			got := recordAll(t, h)
 			if n := leftOut.count(); n != 1 {
 				t.Errorf("%d exchanges left out, want the multi-statement query's", n)
@@ -283,8 +292,8 @@ func TestRecordV2_AMariaDBResponseOfSeveralResultsIsLeftOutForWhatItIs(t *testin
 					}
 				}
 			}
-			if n := len(mocksOf(got, "COM_QUERY")); n != 1 {
-				t.Errorf("recorded %d COM_QUERYs, want the one after the multi-statement query", n)
+			if n := len(mocksOf(got, "COM_QUERY")); n != 2 {
+				t.Errorf("recorded %d COM_QUERYs, want the two after the multi-statement query", n)
 			}
 		})
 	}

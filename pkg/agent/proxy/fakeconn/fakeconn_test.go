@@ -1060,3 +1060,33 @@ func TestReadToEndClosesAsTheReaderReadsTheStreamsEnd(t *testing.T) {
 		})
 	}
 }
+
+// LastReadConnSeq names the chunk the reader was last handed bytes of: not
+// one only peeked at, and not changed by a chunk with no number, which says
+// nothing of where the stream is in the capture's order.
+func TestLastReadConnSeqNamesTheLastNumberedChunkRead(t *testing.T) {
+	t.Parallel()
+	ch := make(chan Chunk, 4)
+	f := New(ch, nil, nil)
+	if got := f.LastReadConnSeq(); got != 0 {
+		t.Fatalf("LastReadConnSeq = %d before any read, want 0", got)
+	}
+	ch <- Chunk{Dir: FromDest, ConnSeq: 7, Bytes: []byte("ab")}
+	ch <- Chunk{Dir: FromDest, Bytes: []byte("cd")}
+	ch <- Chunk{Dir: FromDest, ConnSeq: 9, Bytes: []byte("ef")}
+	if _, err := f.Peek(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.LastReadConnSeq(); got != 0 {
+		t.Fatalf("LastReadConnSeq = %d after a peek, want 0: nothing was read", got)
+	}
+	buf := make([]byte, 1)
+	for i, want := range []uint32{7, 7, 7, 7, 9} {
+		if _, err := f.Read(buf); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.LastReadConnSeq(); got != want {
+			t.Fatalf("LastReadConnSeq = %d after byte %d, want %d", got, i, want)
+		}
+	}
+}
