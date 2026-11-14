@@ -44,9 +44,10 @@ var readDNSAdapters = machineDNSAdapters
 //
 // On Windows it gives the adapter each server is asked on (its index in the
 // list GetAdaptersAddresses gives): a name one adapter's server denies is
-// still asked on the others (adapterSearch), as Windows asks them. resolv.conf's
-// servers are on no adapter: they are one list, and the first answer is the
-// answer, as Linux's resolver takes it.
+// still asked on the others (upstreamSearch), as Windows asks them.
+// resolv.conf's servers are on no adapter: they are one list, and the first
+// answer that is not a failure or a refusal to answer is the answer, as
+// Linux's resolver takes it.
 //
 // A row that points resolvConfPath at its own file reads that file on every
 // GOOS, so the parsing rows run on Windows as well.
