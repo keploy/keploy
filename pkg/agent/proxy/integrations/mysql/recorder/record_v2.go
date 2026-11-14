@@ -1543,9 +1543,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		held = nil
 		first, err := h.settle(ctx, logger, sess, decodeCtx, cmd, respFirst)
 		carry = first
-		if err == nil && first == nil {
-			// The PREPARE's EOF: the answer starts after it.
-			walk.mark()
+		var untold untoldEOF
+		if err == nil && first == nil || errors.As(err, &untold) {
+			// The PREPARE's EOF: the answer starts after it. An EOF that may
+			// be the PREPARE's or the answer's first packet is not walked as
+			// the answer's either: a re-align's cut after the answer, which is
+			// left out, is proven only by what follows it (packetWalk.cut).
+			walk.mark(respFirst)
 		}
 		return err
 	}
@@ -1780,10 +1784,12 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				}
 				if held != nil && ctx.Err() == nil && (errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed)) {
 					// The client's stream ended with a PREPARE held: what the
-					// server sent after it is all on its stream.
+					// server sent after it is all on its stream, and an ERR
+					// 1835 to a command without an answer that did not decode
+					// after it is that command's answer.
 					h := held
 					held = nil
-					if endErr := h.end(ctx, logger, sess, decodeCtx); endErr != nil {
+					if endErr := h.end(ctx, logger, sess, decodeCtx, malformed); endErr != nil {
 						reportFault(logger, sess, endErr, false)
 						return endErr
 					}
@@ -1833,7 +1839,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					return err
 				}
 				taken = &takenUp{reqTs: reqTs, first: respFirst}
-				walk.mark()
+				walk.mark(respFirst)
 			} else if err := func() error {
 				// settled: a PREPARE held for its framing is settled here.
 				settled := held != nil
@@ -1857,7 +1863,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				// packet, not the server's next bytes after the exchange
 				// taken up: judged as those, it stopped a client that framed
 				// with EOFs at every PREPARE taken up.
-				walk.mark()
+				walk.mark(respFirst)
 				if err := settleHeld(commandByte(cmdBuf), respFirst); err != nil {
 					return err
 				}
@@ -1906,9 +1912,35 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 					}
 					t.release()
 				}
-				// A server's ERR to a command without an answer that did not
-				// decode came before what settle read: the re-align (fail)
-				// cuts it off with the rest of that response.
+				// After an EOF settle could not tell (untoldEOF), the ERRs a
+				// server sent to the commands without an answer before this one
+				// that did not decode come next, before this command's answer,
+				// and are no packets of it: walked as its, they had the
+				// re-align's cut pass where none of that answer had come, and a
+				// client that sent its next command before that answer had the
+				// command recorded with it. So they are taken off the stream as
+				// at every command the server answers (takeMalformedAnswers),
+				// and the walk starts the answer after them. After any other
+				// fault, what settle read is off where the answer starts, and
+				// the walk shows it (packetWalk.cut); the re-align (fail) cuts
+				// such an ERR off with the rest of that response.
+				var untold untoldEOF
+				if len(malformed) > 0 && errors.As(err, &untold) {
+					_, why, merr := takeMalformedAnswers(ctx, logger, sess, malformed, first.ConnSeq, respFirst, mysql.CommandStatusToString(commandByte(cmdBuf)), fakeconn.Chunk{}, &carry)
+					malformed = nil
+					if why != "" {
+						return stopIn(nil, reqTs, found("V2: mysql ERR to a command without an answer cannot be told from the next answer", framingLost("%s", why)))
+					}
+					switch {
+					case merr != nil:
+						err = merr
+					case carry != nil:
+						walk.markAt(carry[3])
+					default:
+						_, _ = sess.DestStream.Peek()
+						walk.mark(respFirst)
+					}
+				}
 				malformed = nil
 				if err := fail(reqTs, err); err != nil {
 					return err
@@ -1966,7 +1998,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				walk.markAt(carry[3])
 			} else {
 				_, _ = sess.DestStream.Peek()
-				walk.mark()
+				walk.mark(respFirst)
 			}
 		}
 

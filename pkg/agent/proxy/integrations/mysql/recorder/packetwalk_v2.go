@@ -36,11 +36,11 @@ type packetWalk struct {
 	hdrN int
 	hdr  [4]byte
 	rest int
-	// Since the answer the stream is at began (mark): seen is set once a
-	// header was walked, first is the sequence id of the first one, and last
-	// of the last one.
-	seen        bool
-	first, last byte
+	// Since the answer the stream is at began (mark), which starts at
+	// sequence id start: seen is set once a header was walked, first is the
+	// sequence id of the first one, and last of the last one.
+	seen               bool
+	start, first, last byte
 	// client: the client sent packets inside that exchange
 	// (nextCommandAfterFault passes them over: a LOCAL INFILE upload, an auth
 	// switch response), the last one numbered clientLast. The exchange takes
@@ -83,16 +83,16 @@ func (w *packetWalk) anchor() {
 }
 
 // mark says the server's next bytes start the answer to a command the client
-// sent: a new exchange.
-func (w *packetWalk) mark() {
-	w.seen, w.client = false, false
+// sent, which starts at sequence id start: a new exchange.
+func (w *packetWalk) mark(start byte) {
+	w.start, w.seen, w.client = start, false, false
 }
 
 // markAt says the answer to a command the client sent started with the packet
-// the walk last walked whole, whose sequence id is first: what it walked
-// before that packet is no part of the answer.
+// the walk last walked whole, whose sequence id is first, the one it starts
+// at: what it walked before that packet is no part of the answer.
 func (w *packetWalk) markAt(first byte) {
-	w.mark()
+	w.mark(first)
 	w.seen, w.first, w.last = true, first, first
 }
 
@@ -122,6 +122,14 @@ func (w *packetWalk) cut(first byte) string {
 		return "it falls inside a packet of the server's"
 	case !w.seen:
 		return "no packet of the response left out came before it"
+	case w.first != w.start:
+		// The first packet walked since the mark is not where the response
+		// left out starts: it may be the tail of a response before it, which
+		// a command taken up whose answer was never read (its fault was the
+		// command's own) left unproven, captured after that command. Then
+		// nothing walked is of the response left out, and the walk shows
+		// nothing of where it ended.
+		return fmt.Sprintf("the first packet walked since the response left out began has sequence id %d, not %d where it starts", w.first, w.start)
 	case w.last == prev:
 		return fmt.Sprintf("the last packet before it has sequence id %d, so a packet at %d after it may be more of the response left out", prev, first)
 	case w.client && w.clientLast == prev:

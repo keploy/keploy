@@ -1113,7 +1113,7 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 		if h.eofSeq == respFirst && !answerNeverAnEOF[cmd] {
 			err := framingLostAt(logger, sess, "the packet after the definitions of the %s response is an EOF that may be its own or the answer to the next command", h.what)
 			h.leaveOut(sess, decodeCtx, err)
-			return nil, err
+			return nil, untoldEOF{err}
 		}
 		h.release(decodeCtx, buf, sess.DestStream.LastReadTime())
 		return nil, nil
@@ -1132,16 +1132,36 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 	}
 }
 
+// untoldEOF is the lost framing heldPrepare.settle returns for an EOF it
+// cannot tell to be the PREPARE's own or the first packet of the next answer.
+// Either way the packet is no proof of where that answer starts, so the
+// packet walk does not count it as one of the answer's (handleCommandsV2's
+// settleHeld): read as the start of that answer, which is left out, it had a
+// re-align's cut pass where none of that answer had come, and a client that
+// sent its next command before that answer had the command recorded with it.
+type untoldEOF struct{ error }
+
+func (e untoldEOF) Unwrap() error { return e.error }
+
 // end settles the framing once the client's stream ended with the PREPARE
 // still held: no command with a response followed it, so all the server sent
 // after the definitions is on its stream. An EOF that continues the
 // PREPARE's sequence is its EOF; the server's own ERR means none came. A
 // stream that ends with nothing more leaves the PREPARE out: no EOF arrived,
 // but a capture that lost one cannot be told from a client that was never
-// sent one. Any other packet is lost framing, which it returns.
-func (h *heldPrepare) end(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext) error {
+// sent one. While commands without an answer that did not decode are
+// unanswered (malformed: the chunks they began in, in the order sent), an
+// ERR 1835 at sequence id 1 captured after the first of them is that one's
+// answer (takeMalformedAnswers), so no EOF came before it either. Any other
+// packet is lost framing, which it returns.
+func (h *heldPrepare) end(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, decodeCtx *wire.DecodeContext, malformed []uint32) error {
+	var at fakeconn.Chunk
+	if len(malformed) > 0 {
+		// An end of the stream is read again below.
+		at, _ = sess.DestStream.Peek()
+	}
 	buf, err := readPacketChecked(logger, sess.DestStream, func(header []byte) error {
-		if header[3] == h.eofSeq && mysqlUtils.GetPayloadLength(header[:3]) <= maxEOFPayload || mayBeServersOwnErr(header) {
+		if header[3] == h.eofSeq && mysqlUtils.GetPayloadLength(header[:3]) <= maxEOFPayload || mayBeServersOwnErr(header) || len(malformed) > 0 && header[3] == 1 {
 			return nil
 		}
 		return framingLost("the packet after the definitions of the %s response has sequence id %d, neither %d (its EOF) nor 0 (an ERR of the server's own)", h.what, header[3], h.eofSeq)
@@ -1158,6 +1178,11 @@ func (h *heldPrepare) end(ctx context.Context, logger *zap.Logger, sess *supervi
 		h.release(decodeCtx, buf, sess.DestStream.LastReadTime())
 		return nil
 	case buf[3] == 0 && isServersOwnErr(buf):
+		h.release(decodeCtx, nil, time.Time{})
+		return nil
+	case len(malformed) > 0 && buf[3] == 1 && isMalformedPacketErr(buf) && !at.CapturedBefore(malformed[0]):
+		logger.Debug("V2: the server answered a command without an answer that did not decode after a PREPARE held for its framing; the PREPARE's client framed without EOFs",
+			zap.String("connID", sess.ClientConnID), zap.Uint32("firstConnSeq", at.ConnSeq))
 		h.release(decodeCtx, nil, time.Time{})
 		return nil
 	default:
