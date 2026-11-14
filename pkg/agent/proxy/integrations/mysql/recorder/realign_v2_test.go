@@ -3164,6 +3164,54 @@ func TestRecordV2_PostTLS_AnERR1835AfterAHeldPreparesSettleFaultIsNoProofOfTheCu
 	}
 }
 
+// After the same settle fault with no command without an answer unanswered
+// before the command, an ERR 1835 the server sent first after it is the
+// command's own answer (MySQL 5.7 and later answer a COM_SET_OPTION a byte
+// short with one), so the next cut judges it as any answer left out: a client
+// that waits for each answer has both queries recorded with their own, as
+// with an ERR of another code, and one that does not stops at the cut.
+func TestRecordV2_PostTLS_ACommandsOwnERR1835AfterAHeldPreparesSettleFaultIsJudgedAsItsAnswer(t *testing.T) {
+	t.Parallel()
+	q := func(k int) []byte { return cannedCOMQuery(t, 0, fmt.Sprintf("SELECT %d", k)) }
+	ok := func(k int) []byte { return okResponseWithAffectedRows(1, byte(k)) }
+	for _, pipelined := range []bool{false, true} {
+		t.Run(fmt.Sprintf("the queries sent early %v", pipelined), func(t *testing.T) {
+			t.Parallel()
+			j := newJoinedMidStream(t)
+			j.exchange(q(1), [][]byte{ok(1)})
+			prep, resp := prepare255(t, false)
+			j.exchange(prep, [][]byte{bytes.Join(resp[:len(resp)-1], nil)})
+			j.h.pushClient(wrapPacket([]byte{comSetOptionCmd, 0x00}, 0), j.at())
+			j.h.pushDest(resp[len(resp)-1], j.at())
+			if pipelined {
+				j.h.pushClient(q(2), j.at())
+				j.h.pushDest(malformedERR, j.at())
+				j.h.pushClient(q(3), j.at())
+				j.h.pushDest(ok(2), j.at())
+				j.h.pushDest(ok(3), j.at())
+			} else {
+				j.h.pushDest(malformedERR, j.at())
+				j.exchange(q(2), [][]byte{ok(2)})
+				j.exchange(q(3), [][]byte{ok(3)})
+			}
+			mocks, err := j.run(t)
+			got := strings.Join(prepareOKPairing(mocks), "; ")
+			if !pipelined {
+				if want := "SELECT 1 -> OK 1; SELECT 2 -> OK 2; SELECT 3 -> OK 3"; err != nil || got != want {
+					t.Fatalf("RecordV2 = %v, mocks %q; want no stop and %q", err, got, want)
+				}
+				return
+			}
+			if stop := "no packet of the response left out came before it"; !errors.Is(err, ErrFramingLost) || !strings.Contains(err.Error(), stop) {
+				t.Fatalf("RecordV2 = %v, want the stop at SELECT 2's cut naming %q", err, stop)
+			}
+			if want := "SELECT 1 -> OK 1"; got != want {
+				t.Fatalf("mocks %q, want %q: no query with another's answer", got, want)
+			}
+		})
+	}
+}
+
 // A PREPARE held for its framing, whose client frames without EOFs, then two
 // commands without an answer a byte short, the first one's ERR 1835 captured
 // between them, the second's after it or none, then the client's end. The ERR,

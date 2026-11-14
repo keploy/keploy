@@ -124,3 +124,60 @@ func TestPacketWalkAnchorsAtAPacketBoundary(t *testing.T) {
 		t.Fatalf("cut(1) = %q after the anchor and a packet at 7", got)
 	}
 }
+
+// Where the answer the stream is at may start with an ERR 1835 to a command
+// without an answer that did not decode, sent before its own command
+// (markUnjudged), a first packet that is one shows nothing of where the
+// response left out ended, and the cut is refused. Any other first packet, an
+// ERR 1835 after it, and an ERR 1835 after a plain mark (the next exchange's
+// among them) are judged as at any cut. The walk judges the first packet since
+// the mark by its own first payload bytes, however the capture split them,
+// and never by what it kept of a packet before the mark.
+func TestPacketWalkRefusesACutAtAnUnjudgedERR1835(t *testing.T) {
+	t.Parallel()
+	const refused = "is an ERR 1835"
+	for _, c := range []struct {
+		name string
+		// unjudged: the answer was marked with markUnjudged; remarked: the
+		// walk was then marked again, plainly, for the next exchange.
+		unjudged, remarked bool
+		stream             []byte
+		split              []int
+		want               string
+	}{
+		{name: "an ERR 1835 first", unjudged: true, stream: malformedERR, want: refused},
+		{name: "an ERR 1835 first, split in its header and its code", unjudged: true, stream: malformedERR, split: []int{2, 5, 6}, want: refused},
+		{name: "an ERR 1835 after a plain mark", stream: malformedERR},
+		{name: "an ERR 1835 after the next exchange's plain mark", unjudged: true, remarked: true, stream: malformedERR},
+		{name: "an ERR of another code first", unjudged: true, stream: errReply(1, 1105, "unknown")},
+		{name: "an OK first", unjudged: true, stream: okResponseWithAffectedRows(1, 1)},
+		{name: "an ERR 1835 after an OK", unjudged: true, stream: append(okResponseWithAffectedRows(1, 1), errReply(2, 1835, "Malformed communication packet")...)},
+		{name: "an ERR 1835's code bytes after another first byte", unjudged: true, stream: wrapPacket([]byte{0x00, 0x2b, 0x07}, 1)},
+		{name: "a first packet shorter than an ERR's code", unjudged: true, stream: wrapPacket([]byte{0xff, 0x2b}, 1)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			var w packetWalk
+			w.anchor()
+			// An ERR 1835 before the answer: the first packet the walk saw
+			// before the mark, whose bytes it kept.
+			w.feed(malformedERR)
+			if c.unjudged {
+				w.markUnjudged(1)
+			} else {
+				w.mark(1)
+			}
+			if c.remarked {
+				w.mark(1)
+			}
+			if w.firstIsMalformedErr() {
+				t.Fatal("firstIsMalformedErr() with no packet walked since the mark")
+			}
+			walked(&w, c.stream, c.split...)
+			got := w.cut(1, false)
+			if c.want == "" && got != "" || !strings.Contains(got, c.want) {
+				t.Fatalf("cut(1) = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
