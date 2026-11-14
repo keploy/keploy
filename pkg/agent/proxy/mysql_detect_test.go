@@ -2,13 +2,11 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -817,12 +815,12 @@ func predialProbeServer(t *testing.T, serve func(c net.Conn)) (addr string, conn
 // connection dialled while the application's handshake was held, it is the
 // application's own connection, not a probe's. A negative verdict hands it
 // back — with any greeting it read — for generic dispatch's dial, so the
-// destination sees one connection; and a destination that closed it while
-// the application was still silent closes the application's end too.
+// destination sees one connection. A destination that closes it while the
+// application is still silent is
+// TestProbeClosesTheSilentApplicationsEndTheDestinationClosed's (Linux).
 func TestProbeHandsTheApplicationsOwnUpstreamBack(t *testing.T) {
 	type outcome struct {
-		greeting     string // what the next dial reads first
-		appEndClosed bool
+		greeting string // what the next dial reads first
 	}
 	for _, tc := range []struct {
 		name      string
@@ -840,9 +838,6 @@ func TestProbeHandsTheApplicationsOwnUpstreamBack(t *testing.T) {
 			_, _ = c.Write([]byte("220 smtp.example.com ESMTP\r\n"))
 			_, _ = io.Copy(io.Discard, c)
 		}, "", outcome{greeting: "220 smtp.example.com ESMTP\r\n"}},
-		{"upstream closes first", func(c net.Conn) {
-			_ = c.Close()
-		}, "", outcome{appEndClosed: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			addr, conns := predialProbeServer(t, tc.serve)
@@ -875,14 +870,6 @@ func TestProbeHandsTheApplicationsOwnUpstreamBack(t *testing.T) {
 			}
 			if probe.IsMySQL {
 				t.Fatal("classified as MySQL")
-			}
-
-			if tc.want.appEndClosed {
-				_ = app.SetReadDeadline(time.Now().Add(2 * time.Second))
-				if _, err := app.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
-					t.Fatalf("read %v; the destination closed the application's connection while it was silent, and its end must close too", err)
-				}
-				return
 			}
 
 			next, err := util.DialRaw(context.Background(), nil, "tcp", addr, pre)
