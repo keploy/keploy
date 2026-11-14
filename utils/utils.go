@@ -1452,27 +1452,41 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 	if top > 0 {
 		lo := top + 1
 		span := 65536 - lo // inclusive of 65535
-		// A random start, not a scan from the bottom. Scanning upward returns
-		// the LOWEST free port every time, so two keploy processes started
-		// moments apart — the ordinary CI pattern — are handed an identical
-		// number, each having verified it free; whichever binds second loses.
+		// Candidates drawn at random, each on its own (randomProbes of them),
+		// then every port from a random start. Not a scan from the bottom:
+		// it returns the LOWEST free port every time, so two keploy processes
+		// started moments apart — the ordinary CI pattern — are handed an
+		// identical number, each having verified it free; whichever binds
+		// second loses. Nor a scan from a random start alone: every start
+		// inside a run of held ports leads it to the first free port after
+		// the run, so beside such a run (one of utils' rows holds 2000 above
+		// the range) the draws of processes started together met there.
+		for i := 0; i < randomProbes; i++ {
+			off, ok := portOffset(span)
+			if !ok {
+				break
+			}
+			free, err := portProbe(lo + off)
+			if err != nil {
+				return 0, err
+			}
+			if free {
+				return lo + off, nil
+			}
+		}
 		start := lo
-		if n, err := rand.Int(rand.Reader, big.NewInt(int64(span))); err == nil {
-			start = lo + uint32(n.Int64())
+		if off, ok := portOffset(span); ok {
+			start = lo + off
 		}
 		for i := uint32(0); i < span; i++ {
 			port := lo + ((start - lo + i) % span)
-			ln, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
+			free, err := portProbe(port)
 			if err != nil {
-				continue
+				return 0, err
 			}
-			// A failed Close leaves this process holding the port for its
-			// lifetime, so the candidate is unusable AND leaked — return the
-			// error rather than continuing and leaking one fd per candidate.
-			if err := ln.Close(); err != nil {
-				return 0, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+			if free {
+				return port, nil
 			}
-			return port, nil
 		}
 	}
 
@@ -1490,6 +1504,40 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 
 	addr := listener.Addr().(*net.TCPAddr)
 	return uint32(addr.Port), nil
+}
+
+// randomProbes is how many candidates availablePortAbove draws at random
+// before it scans: with half the ports held, all 32 miss about once in four
+// billion tries.
+const randomProbes = 32
+
+// portOffset draws availablePortAbove's candidates (randomOffset) and
+// portProbe checks each (probePort).
+var portOffset, portProbe = randomOffset, probePort
+
+// randomOffset is a random offset in [0, span), and false where no random
+// number could be read.
+func randomOffset(span uint32) (uint32, bool) {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(span)))
+	if err != nil {
+		return 0, false
+	}
+	return uint32(n.Int64()), true
+}
+
+// probePort says whether port is free: whether a plain TCP listener binds it,
+// which it then lets go. A failed Close leaves this process holding the port
+// for its lifetime, so the candidate is unusable AND leaked: that is an
+// error, not a candidate passed over, which would leak one fd per candidate.
+func probePort(port uint32) (bool, error) {
+	ln, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false, nil
+	}
+	if err := ln.Close(); err != nil {
+		return false, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+	}
+	return true, nil
 }
 
 // isPortAvailable checks if a specific port is available on the system, with
