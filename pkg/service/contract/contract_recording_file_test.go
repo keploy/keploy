@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/openapidb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -203,15 +205,20 @@ func TestTheContractReadsNoRequestBodyOutsideItsRecording(t *testing.T) {
 			if !strings.Contains(contract, "/users") {
 				t.Fatalf("the contract left out the test case:\n%.2000s", contract)
 			}
-			// The warning names the test set and the test case, and os.Root
-			// says why: the path escapes the recording's directory.
+			// The warning names the test set and the test case, and says
+			// why, plainly: for a path that leads out by its name, where it
+			// leads, and, for a link, the link out and where it leads.
+			why := ", a place outside it; name a place inside it"
+			if strings.Contains(c.name, "link") {
+				why = "a link that leads out of it, to "
+			}
 			said := false
 			for _, e := range logs.All() {
 				fields := e.ContextMap()
 				msg, _ := fields["error"].(string)
 				if e.Level >= zapcore.WarnLevel && fields["testSetID"] == "test-set-0" && fields["testCase"] == "test-1" &&
 					strings.Contains(msg, path) && strings.Contains(msg, "is read only inside its recording") &&
-					strings.Contains(msg, "path escapes from parent") {
+					strings.Contains(msg, why) && !strings.Contains(msg, "escapes from parent") {
 					said = true
 				}
 			}
@@ -219,5 +226,94 @@ func TestTheContractReadsNoRequestBodyOutsideItsRecording(t *testing.T) {
 				t.Fatalf("no warning named test-1 of test-set-0 and said %q was refused as escaping the recording; logged:\n%v", path, logs.All())
 			}
 		})
+	}
+}
+
+// The contract is written only inside the recording: a keploy/contract.yaml
+// that links out is refused, with why, and what it leads to is kept.
+func TestTheContractIsWrittenOnlyInsideTheRecording(t *testing.T) {
+	db, tmp := recordLargeBody(t)
+	out := filepath.Join(tmp, "outside.txt")
+	if err := os.WriteFile(out, []byte("KEEP ME\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "outside.txt"), filepath.Join(tmp, "keploy", "contract.yaml")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	s := &contract{logger: zap.NewNop(), testDB: db, config: &config.Config{Path: filepath.Join(tmp, "keploy")}}
+	err := s.GenerateFromTests(context.Background())
+	// Said plainly: the link, where it leads, what to do.
+	if want := fmt.Sprintf("the contract %q is written only inside its recording %q: it is a link that leads out of it, to %q; replace the link with what it leads to", "contract.yaml", filepath.Join(tmp, "keploy"), out); err == nil || err.Error() != want {
+		t.Fatalf("GenerateFromTests: %v, want it refused as outside the recording: %q", err, want)
+	}
+	if got, err := os.ReadFile(out); err != nil || string(got) != "KEEP ME\n" {
+		t.Fatalf("the file outside holds %q (%v)", got, err)
+	}
+}
+
+// A generated schema is written only inside the recording: a keploy/schema
+// folder that links out is refused, with why, and gets nothing.
+func TestAGeneratedSchemaIsWrittenOnlyInsideTheRecording(t *testing.T) {
+	db, tmp := recordLargeBody(t)
+	root := filepath.Join(tmp, "keploy")
+	out := filepath.Join(tmp, "outside-schema")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "outside-schema"), filepath.Join(root, "schema")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	s := &contract{logger: zap.NewNop(), testDB: db, openAPIDB: openapidb.New(zap.NewNop(), filepath.Join(root, "schema")), config: &config.Config{Path: root}}
+	err := s.GenerateTestsSchemas(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "only inside its recording") {
+		t.Fatalf("GenerateTestsSchemas: %v, want it refused as outside the recording", err)
+	}
+	if entries, err := os.ReadDir(out); err != nil || len(entries) != 0 {
+		t.Fatalf("the schema left %v (%v) outside the recording", entries, err)
+	}
+}
+
+// pinnedPathDB is a testdb that keeps reading its own recording when the
+// contract points it at another path.
+type pinnedPathDB struct{ *testdb.TestYaml }
+
+func (pinnedPathDB) ChangePath(string) {}
+
+// The contract's keploy folder is made from the project, one folder at a
+// time: a path named from the working directory that is a link out of it is
+// refused, and no keploy folder is made where the link leads.
+func TestTheContractMakesNoFolderOutsideTheProject(t *testing.T) {
+	db, _ := recordLargeBody(t)
+	project := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(project, "app")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	t.Chdir(project)
+	s := &contract{logger: zap.NewNop(), testDB: pinnedPathDB{db}, config: &config.Config{Path: "app"}}
+	err := s.GenerateFromTests(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("GenerateFromTests: %v, want it refused", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where the link leads", len(entries))
+	}
+}
+
+// A project with no keploy folder yet gets one: the contract's keploy folder
+// is made, from the project, and the contract is written in it.
+func TestAFirstContractMakesItsKeployFolder(t *testing.T) {
+	db, _ := recordLargeBody(t)
+	project := t.TempDir()
+	s := &contract{logger: zap.NewNop(), testDB: pinnedPathDB{db}, config: &config.Config{Path: project}}
+	if err := s.GenerateFromTests(context.Background()); err != nil {
+		t.Fatalf("GenerateFromTests: %v", err)
+	}
+	out, err := os.ReadFile(filepath.Join(project, "keploy", "contract.yaml"))
+	if err != nil {
+		t.Fatalf("read the contract: %v", err)
+	}
+	if !strings.Contains(string(out), "/users") {
+		t.Fatalf("the contract names no /users path:\n%s", out)
 	}
 }

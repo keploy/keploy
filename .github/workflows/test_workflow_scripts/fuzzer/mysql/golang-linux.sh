@@ -118,7 +118,9 @@ check_test_report() {
 wait_for_mysql() {
   section "Waiting for MySQL to become ready..."
   for i in {1..90}; do
-    if docker exec mysql-container mysql -uroot -ppassword -e "SELECT 1;" >/dev/null 2>&1; then
+    # Over TCP, as the fuzzer and keploy reach it: the image's first,
+    # socket-only server answers the socket alone, and exits.
+    if docker exec mysql-container mysql -h127.0.0.1 -uroot -ppassword -e "SELECT 1;" >/dev/null 2>&1; then
       echo "✅ MySQL is ready."
       endsec
       return 0

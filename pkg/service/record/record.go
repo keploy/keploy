@@ -28,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -451,7 +452,7 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // This form has no mock stream beside it: every mock's outcome is already
 // published, so an entry whose mock is unknown counts as uncorrelated at once.
 func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map) error {
-	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil)
+	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil, nil)
 }
 
 // consumeMappingsFor is consumeMappings beside a live mock stream, and telling
@@ -466,7 +467,7 @@ func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappin
 // Nothing here is bounded by a clock: on a loaded host a mock is saved long
 // after the mapping that names it, and giving up on a clock is what left such
 // a mock out of its test's mapping while it sat in the mocks file.
-func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry)) error {
+func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry), marks *workerMarks) error {
 	persistCtx := context.WithoutCancel(ctx)
 
 	// pending batches mappings so the file is rewritten once per batch instead of
@@ -498,6 +499,10 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 				zap.Strings("tests", names),
 				zap.Error(err),
 				zap.String("next_step", "these tests' mocks will be missing from mappings.yaml and replay will report no_mocks for them; re-record the test set"))
+		} else {
+			// The marks of the worker-mock rules go in right after a write of
+			// the file, never beside one: each rewrites it whole.
+			marks.flush(persistCtx, r.mappingDb, testSetID, false)
 		}
 		clear(pending)
 	}
@@ -1707,6 +1712,14 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
 	windowMaps := r.newWindowMappings()
+	// The marks of the user's worker-mock rules (config record.workerMocks),
+	// written to the set's worker scope as the recording goes; nil without
+	// rules.
+	var workerRules []models.WorkerMockRule
+	if r.config != nil {
+		workerRules = r.config.Record.WorkerMocks
+	}
+	marks := newWorkerMarks(workerRules, r.mappingDb, r.logger)
 	// The moment the recording is stopped (a stop signal, the record timer,
 	// a caller's cancel each end ctx first) is when the application's
 	// shutdown begins: what it records from then on is the shutdown's
@@ -1953,6 +1966,23 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			}
 		}
 
+		// The worker-mock rules' marks not written yet (a mock recorded after
+		// the last batch of mappings), once the mapping stream's consumer has
+		// joined (its writes and this one each rewrite the whole mapping
+		// file) and only when the mock store wrote every mock (a worker entry
+		// must name a mock that is on disk). Before the end-of-recording hook,
+		// so a pass it runs over the mappings reads them.
+		if recordingStarted && newTestSetID != "" {
+			switch {
+			case !recordDrainedCleanly:
+				marks.lost(newTestSetID, "the record drain timed out, so the mapping file may still be being written")
+			case !storeWrote:
+				marks.lost(newTestSetID, "the mock store could not write every mock")
+			default:
+				marks.flush(persistCtx, r.mappingDb, newTestSetID, true)
+			}
+		}
+
 		// End-of-recording hook (issue #1867 Basic-Auth re-key): every test case
 		// and mock is now drained to disk, so a cross-artifact pass can correlate
 		// them. Best-effort — a failure never invalidates the recording.
@@ -2189,6 +2219,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				zap.String("next_step", "the lines above say why (the agent made no progress, went away before it said it had handed everything over, a second interrupt stopped the saving, or the mock store could not write every mock); re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
+		// Test cases stored without a form part's file: every insert is
+		// over (the drains above), so the list is whole.
+		r.sayFormPartsLeftOut(newTestSetID)
 		// Under the proven switch: test cases recorded while the agent could
 		// not capture every call, or that could not be checked, and
 		// connections to a mock.real destination neither captured nor
@@ -2586,8 +2619,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// (recording stop) or when the agent's HTTP server closes the
 	// response. Any error is logged but never fails the recording.
 	if r.config.Record.CapturePackets {
-		destDir := filepath.Join(r.config.Path, newTestSetID)
-		if err := os.MkdirAll(destDir, 0o755); err != nil {
+		destDir, err := pcapDir(r.config.Path, newTestSetID)
+		if err != nil {
 			r.logger.Warn("failed to create test-set dir for pcap stream; continuing without pcap",
 				zap.String("destDir", destDir), zap.Error(err))
 		} else {
@@ -2934,6 +2967,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					mappingHolds.arrived(tempID)
 				}
 				windowMaps.addMock(mock)
+				marks.add(mock)
 				mockCountMapMu.Lock()
 				mockCountMap[mock.GetKind()]++
 				mockCountMapMu.Unlock()
@@ -2953,7 +2987,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				revokedNames[testName] = struct{}{}
 				revokedMu.Unlock()
 				mappingHolds.revoke([]string{testName})
-			}, &shortPoolByTest, capWatch.mapped)
+			}, &shortPoolByTest, capWatch.mapped, marks)
 	})
 
 	// Every frame channel now has a reader, so the shutdown hand-over can no
@@ -3860,4 +3894,57 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string
 			testSetID,
 		))
 	}
+}
+
+// pcapDir makes the folder a record's packet capture is streamed to, the test
+// set's, <keploy folder>/<set>, and returns it. The keploy folder is made and
+// opened from the project (utils.MkdirOpenRecordingDir), and the set's folder
+// only inside it: a keploy folder or set that is a link out is refused with
+// why, and no folder is made where it leads. The keploy folder is the root,
+// not the set's folder, so a set's name, even keploy, never decides where the
+// project is.
+func pcapDir(keployDir, set string) (string, error) {
+	destDir := filepath.Join(keployDir, set)
+	r, err := utils.MkdirOpenRecordingDir(keployDir, 0o755)
+	if err != nil {
+		return destDir, err
+	}
+	defer func() { _ = r.Close() }()
+	if err := r.MkdirAll(set, 0o755); err != nil {
+		refused := fmt.Sprintf("the test set's folder %q is made only inside %q", set, keployDir)
+		if out := linkout.Explain(r, keployDir, set, refused, err); out != nil {
+			return destDir, out
+		}
+		return destDir, fmt.Errorf("%s: %w", refused, err)
+	}
+	return destDir, nil
+}
+
+// sayFormPartsLeftOut says once, where the recording ends, each form file
+// part a test case of this recording was stored without, by test case, part
+// and the path the part named: such a test case replays without that file.
+// The test store keeps the list (testdb.TestYaml); one that keeps none has
+// nothing to say here.
+func (r *Recorder) sayFormPartsLeftOut(testSetID string) {
+	td, ok := r.testDB.(interface {
+		TakeFormPartsLeftOut() ([]models.FormPartLeftOut, int)
+	})
+	if !ok {
+		return
+	}
+	parts, more := td.TakeFormPartsLeftOut()
+	if len(parts) == 0 && more == 0 {
+		return
+	}
+	said := make([]string, 0, len(parts))
+	for _, p := range parts {
+		said = append(said, p.String())
+	}
+	r.logger.Error("recording summary: test cases were stored without a form part's file, and replay without it",
+		zap.String("testSetID", testSetID),
+		zap.Int("parts", len(parts)+more),
+		zap.Strings("stored_without", said),
+		zap.Int("not_listed", more),
+		zap.String("why", "each part named no file a capture of this run left, carried no contents, and its path names no file in the recording"),
+		zap.String("next_step", "re-record these test cases with the parts' files sent"))
 }

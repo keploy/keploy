@@ -40,8 +40,9 @@ import (
 //
 // A replay may run only some tests (see SetScopeGate). The begin of a test it
 // gated out is answered {"status":"ok","action":"skip","reason":"..."}; the
-// harness then skips the test and sends no end for it. Only a harness that
-// says it can skip is told to:
+// harness then skips the test and sends no end for it, or an end whose
+// outcome is skipped, which is answered ok. Only a harness that says it can
+// skip is told to:
 //
 //	POST {url}/agent/scope/begin  {"name":"<test>","canSkip":true}
 //
@@ -427,7 +428,7 @@ func (a *Agent) EndScopeAt(ctx context.Context, name string, pid int, at time.Ti
 		return nil
 	}
 	if a.config != nil && a.config.Agent.Mode == models.MODE_TEST {
-		a.noteEndOfGated(name, pid)
+		a.noteEndOfGated(name, pid, a.takeGatedOutcome(name, pid))
 		// The test worker whose pool the end serves again, read before
 		// the window that names it closes.
 		worker := a.scopeInstance(name)
@@ -706,6 +707,11 @@ func (a *Agent) NoteScopeOutcome(name string, pid int, outcome string) {
 	defer a.scopeMu.Unlock()
 	k := scopeKey{pid: uint32(pid), name: name}
 	if _, open := a.workerOpen[k]; !open {
+		// The end of a scope its harness was told to skip says what the
+		// harness did with it (takeGatedOutcome).
+		if _, gated := a.gatedScopes[k]; gated {
+			a.gatedScopes[k] = outcome
+		}
 		return
 	}
 	if a.scopeMeta == nil {
@@ -733,9 +739,9 @@ func (a *Agent) noteScopeNotRun(name string, pid int, at time.Time, outcome stri
 	a.scopeMu.Lock()
 	a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: outcome})
 	if a.gatedScopes == nil {
-		a.gatedScopes = make(map[scopeKey]struct{})
+		a.gatedScopes = make(map[scopeKey]string)
 	}
-	a.gatedScopes[scopeKey{pid: uint32(pid), name: name}] = struct{}{}
+	a.gatedScopes[scopeKey{pid: uint32(pid), name: name}] = ""
 	a.scopeMu.Unlock()
 }
 
@@ -756,24 +762,48 @@ func (a *Agent) noteScopeFailed(name string, pid int, at time.Time, refused erro
 	a.scopeMu.Unlock()
 }
 
-// noteEndOfGated warns, once per session, when a harness ends a scope it was
-// told to skip and never began: the harness said it can skip, then ran the
-// test anyway. The test is recorded as gated; what it did is not counted.
-func (a *Agent) noteEndOfGated(name string, pid int) {
+// noteEndOfGated reads an end of a scope its harness was told to skip and
+// never began, with outcome, the verdict the end sends (normalized). An end
+// that says skipped confirms the skip: it reports true, at Debug, however
+// often it is sent, so a harness that ends every test it meets runs on. Any
+// other end of it is warned, once per session: the harness said it can skip,
+// then ran the test anyway. Either way the test is recorded as gated; what it
+// did is not counted.
+func (a *Agent) noteEndOfGated(name string, pid int, outcome string) (confirmed bool) {
 	k := scopeKey{pid: uint32(pid), name: name}
 	a.scopeMu.Lock()
 	_, gated := a.gatedScopes[k]
 	_, open := a.workerOpen[k]
-	warn := gated && !open && !a.gatedEndWarned
+	gated = gated && !open
+	confirmed = gated && outcome == models.ScopeOutcomeSkipped
+	warn := gated && !confirmed && !a.gatedEndWarned
 	if warn {
 		a.gatedEndWarned = true
 	}
 	a.scopeMu.Unlock()
+	if confirmed {
+		a.logger.Debug("the test runner's harness confirmed a skip keploy asked for", zap.String("test", name))
+	}
 	if warn {
 		a.logger.Warn("the test runner's harness ended a test it was told to skip; it is recorded as not run, and what it did is not counted",
 			zap.String("test", name),
 			zap.String("next_step", `make the harness skip a test whose /agent/scope/begin answer says "action":"skip"`))
 	}
+	return confirmed
+}
+
+// takeGatedOutcome is the outcome the scope end route noted
+// (NoteScopeOutcome) for this end of a scope its harness was told to skip,
+// "" for none. Each end notes its own, so it is cleared as it is read.
+func (a *Agent) takeGatedOutcome(name string, pid int) string {
+	k := scopeKey{pid: uint32(pid), name: name}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	outcome, gated := a.gatedScopes[k]
+	if gated {
+		a.gatedScopes[k] = ""
+	}
+	return outcome
 }
 
 // NoteUngatable warns, once per session, that the replay gates which tests

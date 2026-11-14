@@ -17,7 +17,9 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
+	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -484,7 +486,7 @@ func writeTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt) {
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return
 	}
-	writeTestsFile(logger, dir, TestsReceiptFile, "# Written by `keploy mock replay`: what each test did in the last replay of this set.\n", "this replay", r)
+	writeTestsFile(logger, keployDir, dir, TestsReceiptFile, "# Written by `keploy mock replay`: what each test did in the last replay of this set.\n", "this replay", r)
 }
 
 // RecordTestsReceiptFile holds what each test did in the last record of a set:
@@ -513,14 +515,14 @@ func writeRecordTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceip
 	}
 	dir := filepath.Join(keployDir, set)
 	if !r.empty() {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := setfile.MkdirAllInRecording(keployDir, dir, 0o755); err != nil {
 			logger.Warn("could not write what each test did in this record", zap.String("dir", dir), zap.Error(err))
 			return
 		}
 	} else if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return
 	}
-	writeTestsFile(logger, dir, RecordTestsReceiptFile, "# Written by `keploy mock record`: what each test did against real infra in the last record of this set.\n", "this record", r)
+	writeTestsFile(logger, keployDir, dir, RecordTestsReceiptFile, "# Written by `keploy mock record`: what each test did against real infra in the last record of this set.\n", "this record", r)
 	if err := utils.AddToGitIgnore(logger, keployDir, "/*/"+RecordTestsReceiptFile); err != nil {
 		logger.Debug("failed to git-ignore the record's per-test results", zap.Error(err))
 	}
@@ -532,21 +534,23 @@ func ReadRecordTestsReceipt(keployDir, set string) (*TestsReceipt, error) {
 	return readTestsFile(keployDir, set, RecordTestsReceiptFile, "a record's")
 }
 
-// writeTestsFile writes a per-test results file into dir, or removes a stale
-// one when the run named no tests: it would describe an earlier run.
-func writeTestsFile(logger *zap.Logger, dir, file, head, run string, r TestsReceipt) {
+// writeTestsFile writes a per-test results file into dir, a set's folder of
+// the recording at keployDir, or removes a stale one when the run named no
+// tests: it would describe an earlier run. Both stay inside the recording
+// (writeLocalFile).
+func writeTestsFile(logger *zap.Logger, keployDir, dir, file, head, run string, r TestsReceipt) {
 	path := filepath.Join(dir, file)
 	if r.empty() {
-		_ = os.Remove(path)
+		_ = setfile.RemoveInRecording(keployDir, path)
 		return
 	}
 	body, err := yaml.Marshal(persistedTests(r))
 	if err == nil {
 		// The receipt's temporary prefix covers this file's too.
-		err = writeLocalFile(logger, dir, file, receiptTempPrefix+"tests-", append([]byte(head), body...))
+		err = writeLocalFile(logger, keployDir, dir, file, receiptTempPrefix+"tests-", append([]byte(head), body...))
 	}
 	if err != nil {
-		_ = os.Remove(path)
+		_ = setfile.RemoveInRecording(keployDir, path)
 		logger.Warn("could not write what each test did in "+run, zap.String("dir", dir), zap.Error(err),
 			zap.String("next_step", "check that "+dir+" is writable by the user running keploy"))
 	}
@@ -587,12 +591,12 @@ func ReadTestsReceipt(keployDir, set string) (*TestsReceipt, error) {
 }
 
 func readTestsFile(keployDir, set, file, whose string) (*TestsReceipt, error) {
-	raw, err := safeyaml.ReadFile(filepath.Join(keployDir, set, file), TestsReceiptBytes)
+	raw, err := readInRecording(keployDir, filepath.Join(set, file), TestsReceiptBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", filepath.Join(set, file), safeyaml.StripPath(err))
+		return nil, receiptError(filepath.Join(set, file), err)
 	}
 	var r TestsReceipt
 	if err := yaml.Unmarshal(raw, &r); err != nil {
@@ -606,6 +610,41 @@ func readTestsFile(keployDir, set, file, whose string) (*TestsReceipt, error) {
 	return &r, nil
 }
 
+// readInRecording reads name, a receipt of the recording at keployDir, as a
+// regular file of at most limit bytes (safeyaml), and only inside the
+// recording: keployDir is opened from the project (utils.OpenRecordingDir),
+// and name within it. A receipt, a set folder or a keploy folder that links
+// out is refused with why, as the recording's other files are: a cloned
+// repository could otherwise have a receipt read from anywhere.
+//
+// A link out, or a name that leads out, is said plainly (linkout.Error),
+// and receiptError keeps that whole.
+func readInRecording(keployDir, name string, limit int64) ([]byte, error) {
+	r, err := utils.OpenRecordingDir(keployDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	b, err := safeyaml.ReadFileIn(r, name, limit)
+	refused := fmt.Sprintf("the recording's file %q is read only inside its recording %q", name, keployDir)
+	if out := linkout.Explain(r, keployDir, name, refused, err); out != nil {
+		return nil, out
+	}
+	return b, err
+}
+
+// receiptError says why name, a receipt readInRecording read, could not be
+// read: a link out of the recording as linkout.Error says it, whole,
+// since it names the receipt and where the link leads; anything else after
+// the receipt's name, without the path safeyaml's error repeats.
+func receiptError(name string, err error) error {
+	var out *linkout.Error
+	if errors.As(err, &out) {
+		return out
+	}
+	return fmt.Errorf("%s: %w", name, safeyaml.StripPath(err))
+}
+
 // ReceiptBytes bounds a receipt read. A receipt is a handful of scalar fields
 // and a coverage summary; the largest keploy writes is well under a kilobyte.
 const ReceiptBytes = 1 << 20
@@ -616,14 +655,15 @@ const ReceiptBytes = 1 << 20
 // The set directory comes from the repository keploy runs in, so the receipt
 // can be a symlink to /dev/zero or a FIFO in a cloned repo. It is read through
 // safeyaml, which refuses anything but a regular file of at most ReceiptBytes,
-// rather than reading to EOF as it once did.
+// rather than reading to EOF as it once did, and only inside the recording
+// (readInRecording).
 func ReadReceipt(keployDir, set string) (*Receipt, error) {
-	raw, err := safeyaml.ReadFile(filepath.Join(keployDir, set, ReceiptFile), ReceiptBytes)
+	raw, err := readInRecording(keployDir, filepath.Join(set, ReceiptFile), ReceiptBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", filepath.Join(set, ReceiptFile), safeyaml.StripPath(err))
+		return nil, receiptError(filepath.Join(set, ReceiptFile), err)
 	}
 	var r Receipt
 	if err := yaml.Unmarshal(raw, &r); err != nil {
@@ -650,13 +690,15 @@ func MocksFile(keployDir, set string) string {
 	return ""
 }
 
-// MocksDigest is the sha256 of the set's mocks file, "" when it has none.
+// MocksDigest is the sha256 of the set's mocks file, "" when it has none or
+// it cannot be read inside the recording: a digest of a file a link out leads
+// to would name something the recording does not hold.
 func MocksDigest(keployDir, set string) string {
 	p := MocksFile(keployDir, set)
 	if p == "" {
 		return ""
 	}
-	f, err := os.Open(p)
+	f, err := setfile.OpenInRecording(keployDir, p)
 	if err != nil {
 		return ""
 	}
@@ -705,14 +747,14 @@ func writeReceipt(logger *zap.Logger, keployDir string, r Receipt) {
 		// which is usually why the write failed -- so when the old receipt is
 		// still there, say so: it is green, isolated, and about a run that has
 		// just been superseded by one whose result nobody can see.
-		_ = os.Remove(path)
+		_ = setfile.RemoveInRecording(keployDir, path)
 		if _, err := os.Lstat(path); err == nil {
 			logger.Warn("the last replay receipt on disk is older than this run and no longer describes it",
 				zap.String("path", path),
 				zap.String("next_step", "delete it, or make its directory writable so keploy can keep it current"))
 		}
 	}
-	if err := writeLocalFile(logger, dir, ReceiptFile, receiptTempPrefix, append(head, body...)); err != nil {
+	if err := writeLocalFile(logger, keployDir, dir, ReceiptFile, receiptTempPrefix, append(head, body...)); err != nil {
 		fail(err)
 		return
 	}
@@ -722,15 +764,19 @@ func writeReceipt(logger *zap.Logger, keployDir string, r Receipt) {
 // writeLocalFile writes data to dir/name through a temporary file renamed into
 // place, so a kill halfway leaves the previous file or none, never half of
 // one. Under sudo the file belongs to the developer who ran keploy, not root.
-func writeLocalFile(logger *zap.Logger, dir, name, tempPrefix string, data []byte) error {
-	tmp, err := os.CreateTemp(dir, tempPrefix+"*.tmp")
+// dir is a folder of the recording at keployDir, and every step stays inside
+// the recording (setfile's ...InRecording): a set or keploy folder that links
+// out, or a link out at dir/name, is refused with why, and nothing is
+// written there.
+func writeLocalFile(logger *zap.Logger, keployDir, dir, name, tempPrefix string, data []byte) error {
+	tmp, err := setfile.CreateTempInRecording(keployDir, dir, tempPrefix+"*.tmp", 0o600)
 	if err != nil {
 		return err
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			_ = os.Remove(tmp.Name())
+			_ = setfile.RemoveInRecording(keployDir, tmp.Name())
 		}
 	}()
 	_, werr := tmp.Write(data)
@@ -743,13 +789,25 @@ func writeLocalFile(logger *zap.Logger, dir, name, tempPrefix string, data []byt
 		werr = cerr
 	}
 	if werr == nil {
-		werr = os.Rename(tmp.Name(), filepath.Join(dir, name))
+		werr = setfile.RenameInRecording(keployDir, tmp.Name(), filepath.Join(dir, name))
 	}
 	if werr != nil {
 		return werr
 	}
 	committed = true
 	return nil
+}
+
+// readGitIgnore is keploy/.gitignore, read inside the recording (a link out
+// is read as no file: AddToGitIgnore then refuses it, and says why).
+func readGitIgnore(keployDir string) []byte {
+	f, err := setfile.OpenInRecording(keployDir, filepath.Join(keployDir, ".gitignore"))
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+	b, _ := io.ReadAll(io.LimitReader(f, 1<<20))
+	return b
 }
 
 // ignoreReceipts adds the receipt entries to keploy/.gitignore, and reads the
@@ -759,7 +817,7 @@ func writeLocalFile(logger *zap.Logger, dir, name, tempPrefix string, data []byt
 // in one repository can both decide to append. Reading first makes that a
 // first-run-only race instead of one on every replay.
 func ignoreReceipts(logger *zap.Logger, keployDir string) {
-	existing, _ := os.ReadFile(filepath.Join(keployDir, ".gitignore"))
+	existing := readGitIgnore(keployDir)
 	lines := map[string]bool{}
 	for _, l := range strings.Split(string(existing), "\n") {
 		lines[strings.TrimSpace(l)] = true

@@ -333,17 +333,17 @@ func TestInsertMock_TheFilePutInTheSetsPlaceHoldsItsMocks(t *testing.T) {
 	closeOK(t, rec)
 
 	var atReplace []string
-	defer func(r func(*zap.Logger, string, string) error) { replaceFile = r }(replaceFile)
+	defer func(r func(*zap.Logger, string, string, string) error) { replaceFile = r }(replaceFile)
 	saved := replaceFile
-	replaceFile = func(l *zap.Logger, src, dst string) error {
-		ms, _, err := readGobMocksCut(src)
+	replaceFile = func(l *zap.Logger, root, src, dst string) error {
+		ms, _, err := readGobMocksCut(filepath.Dir(src), src)
 		if err != nil {
 			t.Errorf("the file put in the set's place does not read: %v", err)
 		}
 		for _, m := range ms {
 			atReplace = append(atReplace, m.Spec.HTTPReq.URL)
 		}
-		return saved(l, src, dst)
+		return saved(l, root, src, dst)
 	}
 	add := New(zap.NewNop(), dir, "mocks")
 	add.SetCounterID(3)
@@ -372,8 +372,8 @@ func TestInsertMock_AReplaceThatFailsLeavesTheSetAsItWas(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	defer func(r func(*zap.Logger, string, string) error) { replaceFile = r }(replaceFile)
-	replaceFile = func(*zap.Logger, string, string) error { return errors.New("the file is held open") }
+	defer func(r func(*zap.Logger, string, string, string) error) { replaceFile = r }(replaceFile)
+	replaceFile = func(*zap.Logger, string, string, string) error { return errors.New("the file is held open") }
 	add := New(zap.NewNop(), dir, "mocks")
 	add.SetCounterID(3)
 	insertURLs(t, add, "set-0", "http://d")

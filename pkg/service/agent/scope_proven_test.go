@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -725,6 +726,86 @@ func TestAReplayedListedTestIsSkippedWithItsReason(t *testing.T) {
 	require.Nil(t, serr)
 	require.Empty(t, b.Action)
 	require.Equal(t, models.ScopeOutcomeGated, windowOf(t, a, "orders::TestToken").Outcome)
+}
+
+// A harness that ends a test it was told to skip with the outcome skipped
+// confirms the skip: the end is answered ok, as often as it is sent, at
+// Debug, and nothing else changes. A harness that crashes on an error answer
+// (urllib raises on 409) would otherwise exit before its next test. Ending it
+// with any other outcome is still refused: the harness ran a test keploy
+// told it to skip.
+func TestASkippedEndOfAGatedTestIsAccepted(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	core, logs := observer.New(zapcore.DebugLevel)
+	a.logger = zap.New(core)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
+	require.Nil(t, serr)
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{
+		"orders::TestToken": "flaky: replay_only",
+		"orders::TestRan":   "flaky: replay_only",
+	}, nil))
+	b, serr := a.ProvenBegin(ctx, begin("TestToken"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+
+	for i := 0; i < 2; i++ {
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestToken", Outcome: "skipped"})
+		require.Nil(t, serr, "end %d of a skipped test, said skipped", i+1)
+		require.Equal(t, models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, e)
+	}
+	// A runner's own spelling of skipped is skipped.
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestToken", Outcome: "skip"})
+	require.Nil(t, serr)
+	require.Zero(t, logs.FilterLevelExact(zapcore.WarnLevel).Len(), "the harness did as it was told")
+	require.Equal(t, 3, logs.FilterMessageSnippet("confirmed a skip").FilterLevelExact(zapcore.DebugLevel).Len())
+	require.Empty(t, refusalCodes(a))
+
+	// Every test that comes after runs as before.
+	b, serr = a.ProvenBegin(ctx, begin("TestOther"))
+	require.Nil(t, serr)
+	require.Empty(t, b.Action)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestOther", Outcome: "passed"})
+	require.Nil(t, serr)
+
+	// Ran anyway: refused and warned, as before.
+	b, serr = a.ProvenBegin(ctx, begin("TestRan"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+	for _, outcome := range []string{"passed", "failed", ""} {
+		_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestRan", Outcome: outcome})
+		require.NotNil(t, serr, "outcome %q", outcome)
+		require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+	}
+	require.Equal(t, 1, logs.FilterMessageSnippet("told to skip").FilterLevelExact(zapcore.WarnLevel).Len())
+
+	// Said skipped, for a test keploy never told to skip: refused, as before.
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestNever", Outcome: "skipped"})
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+	require.Equal(t, models.ScopeOutcomeGated, windowOf(t, a, "orders::TestToken").Outcome, "still recorded not run")
+}
+
+// A skipped end of a gated test is the skip's confirmation while another
+// test of the same worker is open: that test stays open, and its end judges
+// it as usual.
+func TestASkippedEndOfAGatedTestLeavesTheOpenTestOpen(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
+	require.Nil(t, serr)
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, nil))
+	b, serr := a.ProvenBegin(ctx, begin("TestToken"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+	_, serr = a.ProvenBegin(ctx, begin("TestOther"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestToken", Outcome: "skipped"})
+	require.Nil(t, serr)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestOther", Outcome: "passed"})
+	require.Nil(t, serr, "TestOther was still open")
+	require.Equal(t, models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, e)
+	require.Equal(t, models.ScopeOutcomePassed, windowOf(t, a, "orders::TestOther").Outcome)
 }
 
 // A test whose call holds a value an earlier test's call sends runs only

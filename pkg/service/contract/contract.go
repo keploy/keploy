@@ -4,7 +4,6 @@ package contract
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 
@@ -16,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/contract/consumer"
 	"go.keploy.io/server/v3/pkg/service/contract/provider"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -222,6 +222,12 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 }
 
 // GenerateMocksSchemas generates mock schemas based on the provided services and mappings.
+// writeSchema writes a schema file in dir, a folder of keploy's schema folder,
+// inside the recording (s.config.Path).
+func (s *contract) writeSchema(ctx context.Context, dir, name string, openapi models.OpenAPI, isAppend bool) error {
+	return s.openAPIDB.WriteSchema(ctx, s.logger, s.config.Path, filepath.Join(s.config.Path, "schema", dir), name, openapi, isAppend)
+}
+
 func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, mappings map[string][]string) error {
 
 	// Retrieve all test set IDs from the test database.
@@ -294,7 +300,7 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 						}
 
 						// Write the OpenAPI document to the specified directory.
-						err = s.openAPIDB.WriteSchema(ctx, s.logger, filepath.Join(s.config.Path, "schema", "mocks", service, testSetID), "mocks", openapi, isAppend)
+						err = s.writeSchema(ctx, filepath.Join("mocks", service, testSetID), "mocks", openapi, isAppend)
 						if err != nil {
 							utils.LogError(s.logger, err, "failed to write the OpenAPI schema")
 							return err
@@ -353,7 +359,7 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 				return err
 			}
 			// Save it using the OpenAPIDB
-			err = s.openAPIDB.WriteSchema(ctx, s.logger, filepath.Join(s.config.Path, "schema", "tests", testSetID), tc.Name, openapi, false)
+			err = s.writeSchema(ctx, filepath.Join("tests", testSetID), tc.Name, openapi, false)
 			if err != nil {
 				utils.LogError(s.logger, err, "failed to write the OpenAPI schema")
 				return err
@@ -387,7 +393,7 @@ func (s *contract) Generate(ctx context.Context, checkConfig bool) error {
 		utils.LogError(s.logger, err, "failed to generate mocks schemas")
 		return err
 	}
-	if err := saveServiceMappings(s.config.Contract.Mappings, filepath.Join(s.config.Path, "schema")); err != nil {
+	if err := saveServiceMappings(s.config.Contract.Mappings, s.config.Path, filepath.Join(s.config.Path, "schema")); err != nil {
 		utils.LogError(s.logger, err, "failed to save service mappings")
 		return err
 	}
@@ -478,13 +484,25 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 		return err
 	}
 
-	if err := os.MkdirAll(keployPath, 0o755); err != nil {
+	// The keploy folder is made, if it is not there, and opened from the
+	// project in one pass, and the contract is written in the folder that was
+	// checked: a link on the way, or a contract.yaml, that leads out of the
+	// recording is refused, and nothing is made or written where it leads.
+	root, err := utils.MkdirOpenRecordingDir(keployPath, 0o755)
+	if err != nil {
 		utils.LogError(s.logger, err, "failed to create keploy directory", zap.String("path", keployPath))
 		return err
 	}
+	defer func() { _ = root.Close() }()
 
 	outputPath := filepath.Join(keployPath, "contract.yaml")
-	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+	if err := root.WriteFile("contract.yaml", data, 0o644); err != nil {
+		refused := fmt.Sprintf("the contract %q is written only inside its recording %q", "contract.yaml", keployPath)
+		if out := linkout.Explain(root, keployPath, "contract.yaml", refused, err); out != nil {
+			err = out
+		} else {
+			err = fmt.Errorf("%s: %w", refused, err)
+		}
 		utils.LogError(s.logger, err, "failed to write inferred OpenAPI schema", zap.String("path", outputPath))
 		return err
 	}
@@ -509,11 +527,17 @@ func (s *contract) DownloadTests(_ string) error {
 
 	// Loop through the services in the mappings in the config file
 	for service := range s.config.Contract.Mappings.ServicesMapping {
-		// Fetch the tests of those services from virtual cpr
-		testsPath := filepath.Join(cprFolder, service, "keploy", "schema", "tests")
+		if err := oneFolderName("a service in the contract's mappings", service); err != nil {
+			utils.LogError(s.logger, err, "failed to download the service's tests")
+			return err
+		}
+		// Fetch the tests of those services from virtual cpr. Everything is
+		// read inside the service's checkout (yaml.CopyDir).
+		checkout := filepath.Join(cprFolder, service)
+		testsPath := filepath.Join(checkout, "keploy", "schema", "tests")
 		// Copy this dir to the target path
 		serviceFolder := filepath.Join(targetPath, service)
-		if err := yaml.CopyDir(testsPath, serviceFolder, false, s.logger); err != nil {
+		if err := yaml.CopyDir(checkout, testsPath, targetPath, serviceFolder, false, s.logger); err != nil {
 			utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", testsPath))
 			return err
 		}
@@ -528,7 +552,7 @@ func (s *contract) DownloadTests(_ string) error {
 		}
 		for _, testSetID := range testSetIDs {
 			// Copy the directory to the target path
-			if err := yaml.CopyDir(filepath.Join(keployTestsPath, testSetID, "tests"), filepath.Join(serviceFolder, "schema", testSetID), false, s.logger); err != nil {
+			if err := yaml.CopyDir(checkout, filepath.Join(keployTestsPath, testSetID, "tests"), targetPath, filepath.Join(serviceFolder, "schema", testSetID), false, s.logger); err != nil {
 				utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", filepath.Join(keployTestsPath, testSetID, "tests")))
 				return err
 			}
@@ -573,11 +597,18 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 		var self = s.config.Contract.Mappings.Self
 		var schemaConfigMappings config.Mappings
 
-		// Construct the path to the schema configuration file for the current service
-		configFilePath := filepath.Join(cprFolder, entry, "keploy", "schema")
+		// Construct the path to the schema configuration file for the
+		// current service. Everything from the service's checkout is read
+		// inside it.
+		checkout := filepath.Join(cprFolder, entry)
+		configFilePath := filepath.Join(checkout, "keploy", "schema")
 
 		// Read the schema configuration YAML schemaConfigMappings
-		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "serviceMappings", &schemaConfigMappings, true); err != nil {
+		data, err := yaml.ReadRecordingFileF(ctx, s.logger, checkout, configFilePath, "serviceMappings", yaml.FormatYAML)
+		if err == nil {
+			err = yamlLib.Unmarshal(data, &schemaConfigMappings)
+		}
+		if err != nil {
 			utils.LogError(s.logger, err, "failed to read the schema configuration file", zap.String("file", "serviceMappings"))
 			return err
 		}
@@ -593,7 +624,13 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 			continue
 		}
 
-		// Create a directory for the current service inside the target path
+		// Create a directory for the current service inside the target path.
+		// Its name comes from the other service's serviceMappings.yaml, a
+		// file of its repository: it names one folder, or nothing is written.
+		if err := oneFolderName(fmt.Sprintf("self in %s's serviceMappings.yaml", entry), schemaConfigMappings.Self); err != nil {
+			utils.LogError(s.logger, err, "failed to download the service's mocks")
+			return err
+		}
 		serviceFolder := filepath.Join(targetPath, schemaConfigMappings.Self)
 		if err := yaml.CreateDir(serviceFolder, s.logger); err != nil {
 			utils.LogError(s.logger, err, "failed to create directory", zap.String("directory", serviceFolder))
@@ -610,7 +647,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 		fmt.Println(serviceColor("=========================================="))
 
 		// Copy the mock files from the source directory to the target directory
-		if err := yaml.CopyDir(mocksSourcePath, serviceFolder, true, s.logger); err != nil {
+		if err := yaml.CopyDir(checkout, mocksSourcePath, targetPath, serviceFolder, true, s.logger); err != nil {
 			utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", mocksSourcePath))
 			return err
 		}
@@ -621,7 +658,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 		// Move the Keploy version-specific mocks: the test sets in the
 		// service's "keploy" folder, each a folder, or a link to one, named
 		// like a test set (setDirs).
-		serviceKeploy := filepath.Join(cprFolder, entry, "keploy")
+		serviceKeploy := filepath.Join(checkout, "keploy")
 		mocksFolders, err := setDirs(serviceKeploy, namedLikeATestSet)
 		if err != nil {
 			utils.LogError(s.logger, err, "failed to list directory", zap.String("directory", serviceKeploy))

@@ -57,12 +57,16 @@ var ErrReplaceInterrupted = errors.New("an interrupted write left its files behi
 // replaced, and only the copies remain to delete. The steps happen in that
 // order on stable storage too: each file is flushed before it is renamed,
 // and each directory before the next step.
-func ReplaceFiles(logger *zap.Logger, files []File) error {
-	return ReplaceFilesWith(logger, ReplaceHooks{}, files)
+//
+// The files are files of the recording at root: a target, or a link at one,
+// that leads out of root is refused as a file that cannot be written, so it
+// is neither changed nor copied beside itself (see recording.go).
+func ReplaceFiles(logger *zap.Logger, root string, files []File) error {
+	return ReplaceFilesWith(logger, root, ReplaceHooks{}, files)
 }
 
 // ReplaceHooks are the platform a ReplaceFilesWith call works through, for a
-// test. Rename makes every rename (os.Rename when nil), so a test can make
+// test. Rename makes every rename (RenameInRecording when nil), so a test can make
 // the platform refuse one and check what the group leaves. Step, when not
 // nil, is called after each change the call makes on disk (a file created, a
 // file written whole, a rename, a removal), so a test can stop the call there
@@ -73,10 +77,10 @@ type ReplaceHooks struct {
 }
 
 // ReplaceFilesWith is ReplaceFiles through hooks.
-func ReplaceFilesWith(logger *zap.Logger, hooks ReplaceHooks, files []File) error {
-	r := replacer{logger: logger, rename: hooks.Rename, step: hooks.Step}
+func ReplaceFilesWith(logger *zap.Logger, root string, hooks ReplaceHooks, files []File) error {
+	r := replacer{logger: logger, root: root, rename: hooks.Rename, step: hooks.Step}
 	if r.rename == nil {
-		r.rename = os.Rename
+		r.rename = func(src, dst string) error { return RenameInRecording(root, src, dst) }
 	}
 	if r.step == nil {
 		r.step = func() {}
@@ -87,6 +91,7 @@ func ReplaceFilesWith(logger *zap.Logger, hooks ReplaceHooks, files []File) erro
 // replacer is one ReplaceFiles call's platform (ReplaceHooks).
 type replacer struct {
 	logger *zap.Logger
+	root   string
 	rename func(src, dst string) error
 	step   func()
 }
@@ -113,14 +118,14 @@ func (r replacer) replace(files []File) error {
 		for _, s := range group {
 			for _, p := range []string{s.part, s.old, s.absent} {
 				if p != "" {
-					removeQuietly(r.logger, p)
+					r.removeQuietly(p)
 					r.step()
 				}
 			}
 		}
 		for _, s := range group {
 			if s.fresh != "" {
-				removeQuietly(r.logger, s.fresh)
+				r.removeQuietly(s.fresh)
 				r.step()
 			}
 		}
@@ -160,7 +165,7 @@ func (r replacer) replace(files []File) error {
 	for _, s := range group {
 		for _, p := range []string{s.old, s.absent} {
 			if p != "" {
-				removeQuietly(r.logger, p)
+				r.removeQuietly(p)
 				r.step()
 			}
 		}
@@ -177,13 +182,13 @@ func (r replacer) replace(files []File) error {
 func (r replacer) stage(f File) (staged, error) {
 	s := staged{dst: f.Path}
 	mode := os.FileMode(0o644)
-	current, err := os.ReadFile(f.Path)
+	current, err := inRecording(r.root, f.Path, (*os.Root).ReadFile)
 	existed := err == nil
 	if !existed && !errors.Is(err, fs.ErrNotExist) {
 		return s, err
 	}
 	if existed {
-		if info, statErr := os.Stat(f.Path); statErr == nil {
+		if info, statErr := StatInRecording(r.root, f.Path); statErr == nil {
 			mode = info.Mode().Perm()
 		}
 	}
@@ -212,7 +217,7 @@ func (r replacer) stage(f File) (staged, error) {
 		return s, err
 	}
 	old := f.Path + ReplaceOldSuffix
-	if _, err := os.Lstat(old); err == nil {
+	if _, err := inRecording(r.root, old, (*os.Root).Lstat); err == nil {
 		return s, &os.PathError{Op: "create", Path: old, Err: fs.ErrExist}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return s, err
@@ -229,7 +234,7 @@ func (r replacer) stage(f File) (staged, error) {
 // stable storage, so the rename that puts it in place moves a whole file.
 // created says the file is this call's, whether or not it was written whole.
 func (r replacer) writeNew(path string, data []byte, mode os.FileMode) (created bool, err error) {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	file, err := OpenFileInRecording(r.root, path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return false, err
 	}
@@ -280,7 +285,7 @@ func (r replacer) inPlace(s staged) bool {
 	if s.old == "" {
 		return true
 	}
-	if _, err := os.Stat(s.dst); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := StatInRecording(r.root, s.dst); !errors.Is(err, fs.ErrNotExist) {
 		return true
 	}
 	return r.rename(s.old, s.dst) == nil
@@ -296,7 +301,7 @@ func (r replacer) putBack(done []staged) []string {
 		var err error
 		if s.old != "" {
 			err = ReplaceFileWith(r.logger, r.rename, s.old, s.dst)
-		} else if err = os.Remove(s.dst); errors.Is(err, fs.ErrNotExist) {
+		} else if err = RemoveInRecording(r.root, s.dst); errors.Is(err, fs.ErrNotExist) {
 			err = nil
 		}
 		if err != nil {
@@ -309,12 +314,12 @@ func (r replacer) putBack(done []staged) []string {
 	return kept
 }
 
-func removeQuietly(logger *zap.Logger, path string) {
+func (r replacer) removeQuietly(path string) {
 	if path == "" {
 		return
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		logger.Warn("could not remove a file written beside the one it replaced; delete it", zap.String("file", path), zap.Error(err))
+	if err := RemoveInRecording(r.root, path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		r.logger.Warn("could not remove a file written beside the one it replaced; delete it", zap.String("file", path), zap.Error(err))
 	}
 }
 

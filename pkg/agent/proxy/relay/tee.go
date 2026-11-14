@@ -467,6 +467,12 @@ func isDesyncingDrop(reason string) bool {
 	return reason == DropPerConnCap
 }
 
+// capturesCut counts the tees whose first hole cost the recording something
+// (Config.OnCaptureDesync), process-wide: each is one direction of one
+// connection, counted once. The hole's WARN carries it, so dozens of
+// connections cut for one cause read as dozens, not as one line.
+var capturesCut atomic.Uint64
+
 // firstHole reports whether a drop for reason is this tee's hole: its first
 // desyncing drop. It stores the reason (holeReason) when it is.
 func (t *tee) firstHole(reason string) bool {
@@ -520,6 +526,10 @@ func (t *tee) drop(reason string) {
 		// the owner's recording stops is the end of the connection, and the
 		// WARN would say that every test case recorded from then on is left
 		// out when none is.
+		var cut uint64
+		if costs {
+			cut = capturesCut.Add(1)
+		}
 		if costs && t.logger != nil {
 			// Say what the owner actually does: onDesync starts suppression
 			// that follows the connection's ACTIVITY
@@ -537,7 +547,8 @@ func (t *tee) drop(reason string) {
 			t.logger.Warn(msg,
 				zap.String("dir", t.dir.String()),
 				zap.String("reason", reason),
-				zap.String("next_step", next),
+				zap.Uint64("capturesCut", cut),
+				zap.String("next_step", next+". capturesCut counts the connection directions a capture hole has cut so far in this process"),
 			)
 		}
 		// Wake a drain parked on an empty queue: a stream ended at its hole

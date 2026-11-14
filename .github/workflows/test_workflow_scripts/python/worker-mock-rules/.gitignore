@@ -1,0 +1,8 @@
+# What a run of python-linux.sh leaves here.
+__pycache__/
+*_logs*.txt
+keploy.yml
+jwks/
+mysql/
+jwks-control/
+mysql-control/
