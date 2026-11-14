@@ -238,6 +238,16 @@ func teeTo(dst io.Writer, tee func() io.Writer) io.Writer {
 	return teeWriter{dst: dst, tee: t}
 }
 
+// TeeWriter is dst that also writes each write to tee (nil: dst alone), a
+// failing one dropped without keeping it from the other, as a ChildConsole's
+// tee is.
+func TeeWriter(dst, tee io.Writer) io.Writer {
+	if tee == nil {
+		return dst
+	}
+	return teeWriter{dst: dst, tee: tee}
+}
+
 type teeWriter struct{ dst, tee io.Writer }
 
 func (w teeWriter) Write(p []byte) (int, error) {
