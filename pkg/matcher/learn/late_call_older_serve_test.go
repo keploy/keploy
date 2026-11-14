@@ -294,3 +294,41 @@ func TestALateCallsValueAServeLeftUnmarkedGaveIsRefusedByTheOrder(t *testing.T) 
 		})
 	}
 }
+
+// In keploy mock's client tests (mockDrifts) the word rule's re-read lets a
+// chance piece of a minted id go (follows.idOnly), and a late call is read
+// once. The late call's UUIDs, minted in each run: the recorded id's 16-bit
+// group stands by chance in mock-60, a recording of the call's own test that
+// F gave as recorded (inside another UUID), and the id the call carries now
+// an older test's serve gave the application whole (mock-22, test 2). The
+// call is refused as a late call of that test, never learned as a minted id:
+// F's id stands whole where F gave it. The control, where the older serve
+// gave another id: no late call.
+func TestALateCallOfAMintedIDStaysRefusedInKeployMock(t *testing.T) {
+	const (
+		path  = "body.Key.Id.S"
+		late  = "late call of mock-22's test"
+		piece = "the value is an id minted in each run"
+	)
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: lateRecID}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: lateLiveID}}}
+	asRecorded := func(x Raw) Raw { return x.ServedAsRecorded() }
+	window := lateMsg("mock-60", 200*time.Millisecond, "c0ffee11-5d1e-4a1b-8c2d-0123456789ab").ServedAs(9).ServedAsRecorded()
+	given := func(older string) Learned {
+		t.Helper()
+		set := []GivenPlaces{lateSet("mock-22", 2, older, asRecorded)}
+		got := ClassifyGiven(mockDrifts(), []string{path}, live, rec, eRecAt, nil, append(eStartup(), window), nil, nil, func() ([]GivenPlaces, error) { return set, nil })
+		if len(got) != 1 {
+			t.Fatalf("%+v", got)
+		}
+		return got[0]
+	}
+	if got := given(lateLiveID); got.Kind != KindUnaccounted || !strings.Contains(got.Why, late) || strings.Contains(got.Why, piece) {
+		t.Errorf("FALSE GREEN? F's id whole in an older test's serve: %s from %q (%q); want refused as a late call of mock-22's test", got.Kind, got.From.Mock, got.Why)
+	}
+	if got := given(lateOtherID); strings.Contains(got.Why, late) {
+		t.Errorf("the older serve gave another id: %s from %q (%q); want no late call", got.Kind, got.From.Mock, got.Why)
+	} else {
+		t.Logf("control: %s (%q)", got.Kind, got.Why)
+	}
+}
