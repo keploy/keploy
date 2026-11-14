@@ -71,18 +71,23 @@ jobs:
       # from the kernel's process table (claimer_darwin.go), the caller read
       # from the process socket tables (caller_darwin.go), and the proxy's
       # byte and connection counts from the TCP table (pairbytes_darwin.go,
-      # inflight_darwin.go, accepts_darwin.go). A Linux runner builds the
-      # other implementation of each, so only this job runs these rows.
+      # inflight_darwin.go, accepts_darwin.go), and a worker's process chain,
+      # each process's parent from the kernel's process table
+      # (starts/proc_darwin.go), which the proxy's per-worker mock views walk
+      # (scoped_mockdb.go). A Linux runner builds the other implementation of
+      # each (it reads /proc), so only this job runs these rows.
       #
-      # pkg/service/agent runs whole. pkg/agent/proxy and pkg/agent/routes run
-      # the rows of their macOS test files only: each holds a test that does
-      # not end on macOS (proxy's DNS server that cannot bind, routes' bind to
-      # a port still held), so a whole run of either is not a check. The
-      # script fails unless every row it reads from those files passed.
+      # pkg/service/agent and pkg/agent/starts run whole. pkg/agent/proxy and
+      # pkg/agent/routes run the rows of their macOS test files only: each
+      # holds a test that does not end on macOS (proxy's DNS server that
+      # cannot bind, routes' bind to a port still held), so a whole run of
+      # either is not a check. proxy's also runs the rows of the worker views'
+      # test files, which build everywhere. The script fails unless every row
+      # it reads from those files passed.
       - name: Test the proven flow on darwin
         run: |
-          go test -count=1 ./pkg/service/agent/
-          bash .github/scripts/macos/go-test-darwin-rows.sh pkg/agent/proxy pkg/agent/proxy/*_darwin_test.go
+          go test -count=1 ./pkg/service/agent/ ./pkg/agent/starts/
+          bash .github/scripts/macos/go-test-darwin-rows.sh pkg/agent/proxy pkg/agent/proxy/*_darwin_test.go pkg/agent/proxy/scoped_mockdb_test.go pkg/agent/proxy/scoped_refused_test.go
           bash .github/scripts/macos/go-test-darwin-rows.sh pkg/agent/routes pkg/agent/routes/*_darwin_test.go pkg/agent/routes/caller_claim_test.go
 
       # A native app's command can exit and leave processes running in its
