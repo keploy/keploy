@@ -715,9 +715,10 @@ func TestRecordV2_ACoarseClockDoesNotStopTheReAlign(t *testing.T) {
 
 // Two exchanges in a row whose responses the recorder cannot frame, from a
 // client that waits for each answer: two LOAD DATA LOCAL INFILE (the server's
-// request for the file, the client's upload, the server's OK), and two SELECTs
-// whose column count is an empty packet. The second is the command taken up
-// after the first is left out, and its answer's first packet is at sequence
+// request for the file, the client's upload, the server's OK), two SELECTs
+// whose column count is an empty packet, and such a SELECT followed by one whose
+// second packet is off its sequence. The second is the command taken
+// up after the first is left out, and its answer's first packet is at sequence
 // id 1, where its answer starts: the packet walk proved the cut, and the fault
 // after that packet is that answer's own framing. Each is left out alone, and
 // the recording goes on, with no wrong mock. Stopped at the second, the
@@ -735,6 +736,16 @@ func TestRecordV2_TwoResponsesItCannotFrameInARowAreEachLeftOutAlone(t *testing.
 		{"two SELECTs with an empty column count", func(t *testing.T) []exchange {
 			xs := unframableThird(t)
 			xs[3].reply = append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[3].reply...)
+			return xs
+		}, 18 - 2},
+		// The second's first packet passes, and its next is off its sequence:
+		// the fault is in a later packet, past the one that proved the cut.
+		{"a SELECT with an empty column count, then one whose second packet is off its sequence", func(t *testing.T) []exchange {
+			xs := unframableThird(t)
+			reply := append([][]byte(nil), xs[3].reply...)
+			reply[1] = append([]byte(nil), reply[1]...)
+			reply[1][3] = 9
+			xs[3].reply = reply
 			return xs
 		}, 18 - 2},
 	} {
@@ -759,6 +770,44 @@ func TestRecordV2_TwoResponsesItCannotFrameInARowAreEachLeftOutAlone(t *testing.
 				}
 			})
 		}
+	}
+}
+
+// A response the recorder cannot frame because its first packet is off its
+// sequence (an empty packet at sequence id 2), then a command it has no
+// decoder for (COM_FIELD_LIST), taken up after it. That command's fault is
+// found before a byte of its answer is read, so no packet of that answer was
+// walked, and nothing says where it starts: the left-out response's first
+// packet, at 2, is not that answer's. Each is left out alone, and the
+// recording goes on, with no wrong mock. Judged by the left-out response's
+// first packet, the command taken up stopped the connection's recording.
+func TestRecordV2_ACommandTakenUpWithNoAnswerReadAfterAResponseStartedOffItsSequenceIsLeftOutAlone(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{7, 16384} {
+		t.Run(fmt.Sprintf("reads of %d", n), func(t *testing.T) {
+			t.Parallel()
+			xs := kitTraffic(t, []int{7, 8}, false) // 18 exchanges
+			xs[2].reply = append([][]byte{{0x00, 0x00, 0x00, 0x02}}, xs[2].reply...)
+			fieldList := exchange{command: wrapPacket(append([]byte{0x04}, "sessions\x00"...), 0),
+				reply: frame(append(sessionColumns(t, "payload"), eofPayload))}
+			xs = insert(xs, 3, fieldList)
+			rec := recordWire(t, xs, n, true, time.Minute)
+			if w := wrongMocks(t, rec.mocks); len(w) > 0 {
+				t.Fatalf("%d wrong mock(s) recorded; the first: %s", len(w), w[0])
+			}
+			if !rec.returned || rec.err != nil {
+				t.Fatalf("RecordV2 returned=%v err=%v: the command taken up with no answer read must cost its own exchange, not the rest of the connection's recording", rec.returned, rec.err)
+			}
+			if got := queryMocks(rec.mocks); got != 18-1 {
+				t.Fatalf("%d query mocks, want 17: every exchange but the two left out", got)
+			}
+			if spans, counted := rec.leftOut.count(), rec.mgr.MocksLeftOut(); spans != 2 || counted != 2 {
+				t.Fatalf("%d exchanges left out, %d counted; want the 2 it could not frame, each once", spans, counted)
+			}
+			if rec.stops != 0 {
+				t.Fatalf("the connection's stop was stamped %d times, want never: its recording went on", rec.stops)
+			}
+		})
 	}
 }
 
@@ -1387,6 +1436,41 @@ func TestRecordV2_ACommandPipelinedIntoTheAnswerTakenUpStops(t *testing.T) {
 	client, server := onTheWire(laid, 1<<20)
 	rec := recordChunks(t, client, server, true, time.Minute)
 	requireUnconfirmedStop(t, rec, "the client sent its next command before the answer taken up ended")
+}
+
+// A client that sent its next command before the first byte of the response
+// left out reached the capture, and the command after that before the next
+// answer: it pipelines from the cut. The response's first packet, the one the
+// recorder cannot frame, is a chunk of its own, and the rest of the response
+// starts at sequence id 1, as an answer does. Bytes the recorder read of that
+// response were captured after the command, so that command's answer is not
+// the server's first bytes captured after it, whatever the packets after them
+// look like: the recording stops at the command, naming why, with the 2
+// queries before the response recorded and no wrong mock. Taking the next
+// chunk for its answer recorded the command with the rows of the response
+// left out.
+func TestRecordV2_ACommandSentBeforeTheBytesReadOfTheResponseLeftOutStops(t *testing.T) {
+	t.Parallel()
+	xs := unframableThird(t)
+	laid := append([]exchange{}, xs[:2]...)
+	laid = append(laid,
+		exchange{command: xs[2].command},
+		exchange{command: xs[3].command},
+		exchange{reply: xs[2].reply[:1]},
+		exchange{reply: [][]byte{bytes.Join(xs[2].reply[1:], nil)}},
+		exchange{command: xs[4].command},
+		exchange{reply: [][]byte{bytes.Join(xs[3].reply, nil)}},
+		exchange{reply: [][]byte{bytes.Join(xs[4].reply, nil)}})
+	laid = append(laid, xs[5:]...)
+	client, server := onTheWire(laid, 1<<20)
+	rec := recordChunks(t, client, server, true, time.Minute)
+	requireFramingLost(t, rec)
+	if !strings.Contains(rec.err.Error(), "the server's bytes read before the answer to the command taken up after a response left out were not all captured before that command") {
+		t.Fatalf("RecordV2 = %v, want the stop to name the bytes read that were captured after the command", rec.err)
+	}
+	if got := queryMocks(rec.mocks); got != 2 {
+		t.Fatalf("%d query mocks, want the 2 before the response left out", got)
+	}
 }
 
 // The server's stream after the answer taken up that cannot be read (a chunk
