@@ -736,6 +736,9 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	// (SupportsDroppedRevoke=false, the default) never receives a RevokedTests
 	// control frame it can't divert.
 	syncMock.Get().SetRevokeCapable(opts.SupportsDroppedRevoke)
+	// And whether it finds a revoked test case sent with no name (the async
+	// capture names none) by its request time.
+	syncMock.Get().SetRevokeByRequest(opts.SupportsRevokeByRequest)
 
 	return m, nil
 }

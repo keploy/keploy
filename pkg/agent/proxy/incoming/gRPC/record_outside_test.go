@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -11,11 +12,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// A gRPC call opens no window, so the windows no longer cover the requests once
-// one has come, and the calls it makes must not read as made outside them. That
-// holds from before its first byte reaches the app: a call it makes can never
-// be ahead of it.
-func TestRecordIncomingStopsCallsBeingMarkedOutsideRequests(t *testing.T) {
+// A gRPC call's window opens before the app can read its request, so a call the
+// app makes for it never reads as made outside the requests, however late its
+// mock comes; one made after the latest window ended, with none open, does.
+func TestRecordIncomingKeepsACallsMocksFromBeingMarkedOutsideRequests(t *testing.T) {
 	mgr := syncMock.New(zap.NewNop())
 	mgr.OpenWindow(time.Now(), nil).Close()
 	call := func() *models.Mock {
@@ -44,11 +44,10 @@ func TestRecordIncomingStopsCallsBeingMarkedOutsideRequests(t *testing.T) {
 		defer close(done)
 		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", false, false)
 	}()
-	if _, err := cliApp.Write([]byte("P")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := appApp.Read(make([]byte, 1)); err != nil {
-		t.Fatalf("the preface never reached the app: %v", err)
+	req, _ := pingCall(t)
+	go func() { _, _ = cliApp.Write(req) }()
+	if _, err := io.ReadFull(appApp, make([]byte, len(req))); err != nil {
+		t.Fatalf("the request never reached the app: %v", err)
 	}
 	if call().OutsideRequests {
 		t.Fatal("a call made once a gRPC request had reached the app is marked outside the requests")

@@ -52,8 +52,8 @@ func givenUpWindow(t *testing.T) (*syncMock.SyncMockManager, *syncMock.Window) {
 // test case out: mocks it may own were let go, and it must not be recorded
 // without them. Its verdict prunes nothing: the request ran for long (that is
 // why it was given up), and a prune over its whole span would drop the mocks
-// of every request that ran beside it and is not decided yet, such as a gRPC
-// call, which opens no window. What nothing claims goes at the stale cutoff,
+// of every request that ran beside it and is not decided yet, such as one
+// whose window was given up. What nothing claims goes at the stale cutoff,
 // as ever. The loss is told as the capture finds it (Window.LeftOut, as
 // Keep tells it): counted (KeptRequestsLeftOut, which warns of it) and on the
 // session's tally (tcs_left_out_in_flight), never left out without a word.

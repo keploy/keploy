@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1100,6 +1101,51 @@ func (r *Recorder) RegisterCleanup(fn func() error) {
 	r.cleanupMu.Unlock()
 }
 
+// testCaseDeleter is what deletes a saved test case of a set: the store's
+// DeleteTests, which the record TestDB interface leaves out (enterprise
+// implements that interface).
+type testCaseDeleter interface {
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+}
+
+// deleteRevoked deletes the revoked test cases names from the test set
+// setID in td, and returns those it deleted. It asks for them all in one
+// call, as a shared loss can revoke thousands and a store may make each call
+// a round trip; when that call fails, it deletes them one by one, so one
+// that cannot be deleted leaves the others deleted. A store's batch may stop
+// part way, so a name it reports gone (fs.ErrNotExist) on the retry counts
+// as deleted: it is not in the set. One that fails is left in the set, said
+// at WARN, and not returned.
+func deleteRevoked(ctx context.Context, logger *zap.Logger, td testCaseDeleter, setID string, names []string) map[string]struct{} {
+	deleted := make(map[string]struct{}, len(names))
+	err := td.DeleteTests(ctx, setID, names)
+	if err == nil {
+		for _, n := range names {
+			deleted[n] = struct{}{}
+		}
+		return deleted
+	}
+	logger.Debug("deferred-orphan revoke: deleting the revoked test cases at once failed; deleting them one by one",
+		zap.String("testSetID", setID), zap.Int("count", len(names)), zap.Error(err))
+	for _, n := range names {
+		if err := td.DeleteTests(ctx, setID, []string{n}); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			logger.Warn("deferred-orphan revoke: failed to delete a capacity-orphaned test case; leaving it in the set",
+				zap.String("testSetID", setID), zap.String("testCase", n), zap.Error(err))
+			continue
+		}
+		deleted[n] = struct{}{}
+	}
+	return deleted
+}
+
+// savedTestCaseDeleter is the recording's store as a testCaseDeleter, reached
+// by assertion; ok is false for a store that cannot delete a test case it
+// saved, so a revoke from the agent cannot be applied to it.
+func (r *Recorder) savedTestCaseDeleter() (testCaseDeleter, bool) {
+	td, ok := r.testDB.(testCaseDeleter)
+	return td, ok
+}
+
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, hooks RecordHooks, config *config.Config) Service {
 	if hooks == nil {
 		hooks = BaseRecordHooks{}
@@ -1706,6 +1752,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	revokedNames := map[string]struct{}{}
 	var revokedMu sync.Mutex
 	insertedNames := map[string]struct{}{}
+	// The names of the TCs that persisted, by the request time their window
+	// starts at (models.TestCaseWindow): a revoke names a TC the agent sent
+	// with no name, which this client named as it saved it, by that time
+	// (models.RevokeNameByRequest).
+	insertedByRequest := map[int64][]string{}
 	var insertedMu sync.Mutex
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
@@ -2032,32 +2083,17 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// only a genuinely deleted one may be excluded from the totals below.
 		deletedSet := map[string]struct{}{}
 
-		var toDelete []string
 		insertedMu.Lock()
-		for _, n := range revokedSnap {
-			if _, ok := insertedNames[n]; ok {
-				toDelete = append(toDelete, n)
-			}
-		}
+		toDelete := revokedToDelete(revokedSnap, insertedNames, insertedByRequest)
 		insertedMu.Unlock()
 		if len(toDelete) > 0 {
 			// DeleteTests is on the concrete *testdb.TestYaml but NOT on the record
 			// TestDB interface (enterprise implements that interface; don't break it).
-			// Reach it by runtime assertion; degrade to a warning if unavailable.
-			if td, ok := r.testDB.(interface {
-				DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
-			}); ok {
-				deleted := 0
-				for _, n := range toDelete {
-					if err := td.DeleteTests(ctx, newTestSetID, []string{n}); err != nil {
-						r.logger.Warn("deferred-orphan revoke: failed to delete a capacity-orphaned test case; leaving it in the set",
-							zap.String("testSetID", newTestSetID), zap.String("testCase", n), zap.Error(err))
-						continue
-					}
-					deletedSet[n] = struct{}{}
-					deleted++
-				}
-				if deleted > 0 {
+			// Reach it by runtime assertion (savedTestCaseDeleter); degrade to a
+			// warning if unavailable.
+			if td, ok := r.savedTestCaseDeleter(); ok {
+				deletedSet = deleteRevoked(ctx, r.logger, td, newTestSetID, toDelete)
+				if deleted := len(deletedSet); deleted > 0 {
 					// Guard under insertedMu so this decrement can't race the
 					// (possibly still-live, on the drain-timeout path) testCount++
 					// in the TC-insert loop, which now runs under the same lock.
@@ -2756,6 +2792,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				insertedMu.Lock()
 				testCount++
 				insertedNames[testCase.Name] = struct{}{}
+				req, _ := models.TestCaseWindow(testCase)
+				insertedByRequest[req.UnixNano()] = append(insertedByRequest[req.UnixNano()], testCase.Name)
 				insertedMu.Unlock()
 				windowMaps.addTest(testCase)
 				capWatch.afterTestCase(ctx, testCase.Name)
@@ -3276,6 +3314,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		return FrameChan{}, fmt.Errorf("failed to hand keploy's agent mock.real: %w", err)
 	}
 
+	_, canDelete := r.savedTestCaseDeleter()
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 		Rules:                     r.config.BypassRules,
 		MongoPassword:             r.config.Test.MongoPassword,
@@ -3297,7 +3336,16 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// control frame: it diverts such a frame into a revoke set and deletes
 		// those deferred-orphan test cases at finalize instead of persisting it
 		// as a mock. The agent emits revoke frames ONLY when this is true.
-		SupportsDroppedRevoke: true,
+		// Only a store that can delete a test case it saved can apply one
+		// (savedTestCaseDeleter): with any other, a revoked test case stays
+		// in the set, so the agent is told the client cannot delete, and
+		// says that the test cases it sent stay instead of that they were
+		// revoked.
+		SupportsDroppedRevoke: canDelete,
+		// And that it finds a revoked test case the agent sent with no name
+		// (the async capture names none; this client names it as it saves
+		// it) by its request time (revokedToDelete).
+		SupportsRevokeByRequest: canDelete,
 	})
 	if err != nil {
 
@@ -3789,4 +3837,32 @@ func (r *Recorder) sayFormPartsLeftOut(testSetID string) {
 		zap.Int("not_listed", more),
 		zap.String("why", "each part named no file a capture of this run left, carried no contents, and its path names no file in the recording"),
 		zap.String("next_step", "re-record these test cases with the parts' files sent"))
+}
+
+// revokedToDelete is the saved test cases the revoked names name, each once:
+// a name the recording saved (inserted), or the name a revoke gives a test
+// case the agent sent with no name (models.RevokeNameByRequest), which names
+// every saved test case whose window starts at that request time (byRequest).
+// A revoke that names none it saved deletes nothing.
+func revokedToDelete(revoked []string, inserted map[string]struct{}, byRequest map[int64][]string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	add := func(n string) {
+		if _, dup := seen[n]; !dup {
+			seen[n] = struct{}{}
+			out = append(out, n)
+		}
+	}
+	for _, n := range revoked {
+		if _, ok := inserted[n]; ok {
+			add(n)
+			continue
+		}
+		if req, ok := models.RequestOfRevokeName(n); ok {
+			for _, saved := range byRequest[req] {
+				add(saved)
+			}
+		}
+	}
+	return out
 }

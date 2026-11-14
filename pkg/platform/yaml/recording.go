@@ -360,11 +360,16 @@ func CreateTempInRecording(root, dir, pattern string, perm fs.FileMode) (*os.Fil
 }
 
 // DeleteRecordingFileF is DeleteFileF for a file of the recording at root,
-// inside it (see above).
+// inside it (see above). A file that is not there is returned as
+// fs.ErrNotExist with no ERROR said: the caller judges it.
 func DeleteRecordingFileF(logger *zap.Logger, root, path, name string, format Format) error {
 	filePath := filepath.Join(path, name+"."+format.FileExtension())
 	if err := RemoveInRecording(root, filePath); err != nil {
-		utils.LogError(logger, err, "failed to delete the file", zap.String("file", filePath))
+		// A file that is not there is the caller's to judge (a delete may
+		// count it as done): it says so through fs.ErrNotExist, not an ERROR.
+		if !errors.Is(err, fs.ErrNotExist) {
+			utils.LogError(logger, err, "failed to delete the file", zap.String("file", filePath))
+		}
 		return fmt.Errorf("failed to delete the file: %w", err)
 	}
 	return nil

@@ -1411,6 +1411,22 @@ type StreamEndSummary struct {
 	// NotRecordedUnderPressure: requests not recorded because the memory
 	// guard had paused recording when they came.
 	NotRecordedUnderPressure PressureSkipSummary `json:"not_recorded_under_pressure,omitzero"`
+	// MocksDropped: mocks the agent dropped as their parsers handed them over
+	// or after, which the recording does not hold.
+	MocksDropped MockDropSummary `json:"mocks_dropped,omitzero"`
+}
+
+// MocksDroppedSaid is what the agent's summary and its client say of the mocks
+// a session dropped (MockDropSummary).
+const MocksDroppedSaid = "the keploy agent dropped some mocks after capturing them: the recording does not hold them, and a test case that needs one may fail at replay"
+
+// MockDropSummary is how many mocks a recording's agent dropped, for memory
+// pressure and for its mock output (closed, full, or its consumer stalled),
+// and the first of them, each named with why (StreamEndSummary).
+type MockDropSummary struct {
+	ByPressure int64    `json:"by_memory_pressure"`
+	Capacity   uint64   `json:"for_the_output"`
+	Named      []string `json:"first_dropped,omitempty"`
 }
 
 // PressureSkipSummary is how many requests a recording did not record

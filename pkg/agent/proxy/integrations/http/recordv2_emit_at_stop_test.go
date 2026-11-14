@@ -35,8 +35,21 @@ func TestEmitV2_AMockRefusedAsTheStopComesIsLeftOut(t *testing.T) {
 		return &models.Mock{Kind: models.HTTP, Name: name, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}
 	}
 	logger := zaptest.NewLogger(t)
-	emitV2(sess, logger, mock("refused"))
-	emitV2(sess, logger, mock("after the stop"))
+	// Each says whether it was lost (a recordOne mark is given back for one
+	// that was): the refused one was, the one after the stop was taken.
+	if !emitV2(sess, logger, mock("refused")) {
+		t.Fatal("emitV2 said the refused mock was not lost")
+	}
+	if emitV2(sess, logger, mock("after the stop")) {
+		t.Fatal("emitV2 said the mock handed over after the stop was lost")
+	}
+	// And one the manager drops after the stop is lost: the output closed.
+	defer func() {
+		mgr.CloseOutChan()
+		if !emitV2(sess, logger, mock("dropped after the stop")) {
+			t.Error("emitV2 said a mock the manager dropped after the stop was not lost")
+		}
+	}()
 	if n, s := mgr.MocksLeftOut(), len(spans.all()); n != 1 || s != 1 {
 		t.Fatalf("%d mock(s) left out, %d span(s); want the refused mock left out once, with its span", n, s)
 	}

@@ -300,15 +300,32 @@ func newRecordedDNSMocksCache() *dnsRecordDedupe {
 // holding it when so, with the key it is held under. Non-atomic Get-then-Add:
 // two concurrent first answers can both record, as before.
 func (d *dnsRecordDedupe) firstAnswer(question dns.Question, rank int) (string, bool) {
-	tracker, key := d.resolved, generateDNSDedupeKey(question)
-	if rank != dnsRankResolved {
-		tracker, key = d.negative, key+dnsDedupeSuffix[rank]
-	}
+	tracker, key := d.trackerFor(question, rank)
 	if _, held := tracker.Get(key); held {
 		return key, false
 	}
 	tracker.Add(key, true)
 	return key, true
+}
+
+// giveBack lets go of question's answer of kind rank, held by firstAnswer for
+// a mock the recording lost as it was handed over (the manager dropped it):
+// held, it would skip the question's next answer of that kind as a duplicate
+// of an answer no recording holds, for recordedDNSMocksTTL. Its next answer
+// is recorded in its place.
+func (d *dnsRecordDedupe) giveBack(question dns.Question, rank int) {
+	tracker, key := d.trackerFor(question, rank)
+	tracker.Remove(key)
+}
+
+// trackerFor is the tracker and key question's answer of kind rank is held
+// under.
+func (d *dnsRecordDedupe) trackerFor(question dns.Question, rank int) (*expirable.LRU[string, bool], string) {
+	key := generateDNSDedupeKey(question)
+	if rank != dnsRankResolved {
+		return d.negative, key + dnsDedupeSuffix[rank]
+	}
+	return d.resolved, key
 }
 
 // Purge empties both trackers in place (see ResetRecordedDNSMocks).
@@ -1288,7 +1305,8 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// not resolve at first (a service not up yet) and did later keeps its
 	// later answer, which a replay serves before the earlier one
 	// (getMockedDNSResponse).
-	dedupeKey, first := p.recordedDNSMocks.firstAnswer(question, dnsAnswerRank(in))
+	rank := dnsAnswerRank(in)
+	dedupeKey, first := p.recordedDNSMocks.firstAnswer(question, rank)
 	if !first {
 		return resp, nil
 	}
@@ -1358,12 +1376,19 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// needs to be able to bind the channel the first time a query
 	// arrives, which may precede the first TCP connection that
 	// otherwise triggers proxy.buildRecordSession's SetOutputChannel.
+	//
+	// A mock the manager drops (counted and said there) gives its question
+	// back (giveBack), so its next answer is recorded.
 	if mgr := syncMock.Get(); mgr != nil {
 		mgr.SetOutputChannel(session.MC)
+		var drop syncMock.MockDrop
 		if session.Synchronous {
-			mgr.AddMock(mock)
+			drop = mgr.AddMock(mock)
 		} else {
-			mgr.SendConfigMock(mock)
+			drop = mgr.SendConfigMock(mock)
+		}
+		if drop.Dropped() {
+			p.recordedDNSMocks.giveBack(question, rank)
 		}
 	}
 	return resp, nil

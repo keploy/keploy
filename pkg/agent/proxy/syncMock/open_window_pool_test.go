@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1151,5 +1152,34 @@ func BenchmarkPoolChoosesAmong32Apps(b *testing.B) {
 		if v, _ := p.oldestOverShare(nil, 0, 0, nil); v == nil {
 			b.Fatal("no app over its share")
 		}
+	}
+}
+
+// TestAHoldGivenUpForThePoolIsToldAtOnce: an app whose request the pool gives
+// up, on another app's call, lets go of the mocks it held at the stale cutoff;
+// they are told (and leave out the test cases of requests with no window that
+// hold them) as the settle reports the give-up, not at that app's next call.
+func TestAHoldGivenUpForThePoolIsToldAtOnce(t *testing.T) {
+	t.Parallel()
+	p := newHoldPool(30 * boundUnit) // a share of 15 for each of two apps
+	older, busy := pooledManager(p), pooledManager(p)
+	var told atomic.Int64
+	older.OnDrop(func(*models.Mock) { told.Add(1) })
+	now := time.Now()
+	olderWin := older.OpenWindow(now.Add(-60*time.Second), nil)
+	busyWin := busy.OpenWindow(now.Add(-30*time.Second), nil)
+	defer olderWin.Close()
+	defer busyWin.Close()
+	holdOld(older, olderWin.Start(), 16)
+	holdOld(busy, busyWin.Start(), 12)
+	if givenUp(olderWin) || told.Load() != 0 {
+		t.Fatal("a request was given up, or a held mock told, within the budget")
+	}
+	holdOld(busy, busyWin.Start().Add(time.Second), 4) // 32: over
+	if !givenUp(olderWin) {
+		t.Fatal("the oldest request of the apps over their share was not given up")
+	}
+	if got := told.Load(); got != 16 {
+		t.Fatalf("OnDrop told %d of the 16 mocks the given-up request's app let go of", got)
 	}
 }

@@ -508,6 +508,24 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 	return completed
 }
 
+// ResetStream forgets a stream that either side reset (RST_STREAM) before it
+// was complete: no call is built of it, and what it held goes. It reports
+// whether the stream ended so, which a stream it holds nothing of did too. A
+// complete stream is its capture's (GetCompleteStreams, CleanupStream): it
+// stays, and ResetStream reports false. A frame of the stream handled after
+// the reset is the other side's (one side sends nothing after its own reset,
+// and what it sent before is handled before it): it starts the stream again
+// with that side's frames only, so it never completes.
+func (sm *DefaultStreamManager) ResetStream(streamID uint32) bool {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	if s := sm.streams[streamID]; s != nil && s.isComplete {
+		return false
+	}
+	delete(sm.streams, streamID)
+	return true
+}
+
 // CleanupStream removes a stream from the manager
 func (sm *DefaultStreamManager) CleanupStream(streamID uint32) {
 	sm.mutex.Lock()
