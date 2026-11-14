@@ -67,7 +67,7 @@ import (
 func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn) {
 	pc, unread, err := p.paired.closing(conn, func(pc *pairedConn) {
 		if ctx.Err() == nil && !pc.noSession.Load() {
-			noteWroteAtClose(pc)
+			p.noteWroteAtClose(pc)
 		}
 	})
 	tlsLayer := tc != nil && tc.tlsLayer.Load() != nil

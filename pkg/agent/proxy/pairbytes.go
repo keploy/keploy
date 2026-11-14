@@ -72,6 +72,11 @@ type pairedConn struct {
 	// its own, never the test open when the loss is counted (lostBy).
 	cutMu sync.Mutex
 	cuts  []cutEnd
+	// wroteCount is, on darwin, what the reads of the application's socket
+	// found it had written, as one count from the connection's first byte
+	// (wroteCount.count): its sequence numbers wrap at 2^32, and the wants
+	// a cut end and a close compare (lostBy) must not. Nothing elsewhere.
+	wroteCount
 }
 
 // cutEnd is a test's end cut short on a connection: what the application had
@@ -188,8 +193,11 @@ type pairedConns struct {
 	// changed is closed, and replaced, at every removal or failure.
 	changed chan struct{}
 	// visible: an application socket has been seen from the proxy's
-	// network namespace (proveAppVisible, pairTarget): one that is not is
-	// gone, not hidden.
+	// network namespace (proveAppVisible, pairTarget), or, on darwin, in
+	// macOS's TCP table as the agent reads it (noteWroteAtClose too): one
+	// that is not is gone, not hidden. Until one is, an application socket
+	// not found may be one hidden from the agent, and what it wrote is not
+	// known.
 	visible atomic.Bool
 	// progress counts what the bytes waits saw move: a waited-for
 	// connection that received more, whose orphan changed state, or that

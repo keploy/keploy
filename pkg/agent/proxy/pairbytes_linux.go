@@ -296,6 +296,9 @@ func boundDevice(conn *net.TCPConn) uint32 {
 // connection's first byte.
 type targetBase struct{}
 
+// wroteCount is darwin's (pairedConn): Linux's counts do not wrap.
+type wroteCount struct{}
+
 // received is how much the proxy's side ps received, its FIN counted.
 func (targetBase) received(ps proxySide) uint64 { return ps.received }
 
@@ -573,7 +576,7 @@ func (p *Proxy) proveAppVisible(conn *net.TCPConn) {
 // gave back (diagFree) rather than open one. One from the list that fails is
 // dropped and the read made on a new one, as a close that found none free
 // makes it, so a socket kept between closes cannot change an answer.
-func noteWroteAtClose(pc *pairedConn) {
+func (*Proxy) noteWroteAtClose(pc *pairedConn) {
 	if ps := readProxySide(pc.conn); ps.err == nil && peerEnded(ps.state) {
 		return
 	}

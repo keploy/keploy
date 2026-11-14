@@ -101,7 +101,36 @@ func (p *Proxy) pairTarget(table []xnuPCB, pc *pairedConn) (*pairTarget, error) 
 		// everything it wrote.
 		return nil, nil
 	}
-	return &pairTarget{pc: pc, base: targetBase{isn: app.iss}, want: uint64(app.writeSeq() - app.iss - 1), finCounted: app.finPending()}, nil
+	return &pairTarget{pc: pc, base: targetBase{isn: app.iss}, want: pc.count(app.writeSeq() - app.iss - 1), finCounted: app.finPending()}, nil
+}
+
+// wroteCount extends darwin's counts of what the application had written to a
+// connection, distances from its first sequence number that wrap at 2^32, to
+// one count from its first byte (pairedConn): a cut end's want and a close's
+// bytes lost (lostBy) are compared as counts, and past 4 GiB a distance would
+// place a loss among the ends cut short before the wrap. Each read of the
+// application's socket counts from the last any read found: a step of less
+// than 2^31 back is a read made before that one (a wait's and a close's, run
+// at once); any other step is ahead, as the application only writes on. So
+// the counts hold while the application writes less than 2 GiB between two
+// reads of its socket, a wait's or a close's.
+type wroteCount struct {
+	mu   sync.Mutex
+	last uint64
+}
+
+// count is d, a distance from the application socket's first sequence number
+// (to the one after the last thing it wrote), as a count from the
+// connection's first byte. A step back past the first byte is none: it is
+// ahead, past the wrap.
+func (c *wroteCount) count(d uint32) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if back := uint32(c.last) - d; back < 1<<31 && uint64(back) <= c.last {
+		return c.last - uint64(back)
+	}
+	c.last += uint64(d - uint32(c.last))
+	return c.last
 }
 
 // targetBase is where, on darwin, the proxy's side's count of what it
@@ -200,7 +229,7 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		if finCounted {
 			top--
 		}
-		p.pairLost(pc, uint64(got)+1, top, "bytes the application wrote to a connection keploy's proxy holds never reached the proxy: the connection was reset, or closed, first, so what they carried was neither recorded nor mocked")
+		p.pairLost(pc, want-uint64(short)+1, top, "bytes the application wrote to a connection keploy's proxy holds never reached the proxy: the connection was reset, or closed, first, so what they carried was neither recorded nor mocked")
 		return true, nil
 	}
 	return false, nil
@@ -246,13 +275,20 @@ func (p *Proxy) pairEnded(t *pairTarget, ps proxySide, closed bool) (bool, error
 			}
 		}
 		return false, fmt.Errorf("%w: the application's end of a connection to the proxy, %s, went after the proxy closed its side, and whether bytes it wrote before that close were refused cannot be told", models.ErrProxyConnsUnsupported, pc.app)
+	case p.paired.visible.Load():
+		// The application's sockets are listed to the agent, so this one
+		// is gone with its FIN or reset on its way (loopback's input
+		// thread): its arrival ends the handler's read, and the wait looks
+		// again.
+		return false, nil
+	default:
+		return false, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a live connection to the proxy, %s, and has listed none of the application's sockets to keploy's agent: %s", models.ErrProxyConnsUnsupported, pc.app, xnuHidden)
 	}
-	// macOS has one network stack for every process, and its table lists
-	// every TCP socket of the host: an application socket gone from it is
-	// one whose FIN or reset is on its way (loopback's input thread), and
-	// its arrival ends the handler's read.
-	return false, nil
 }
+
+// xnuHidden says why an application socket the table does not list may be
+// one hidden from the agent, not one gone.
+const xnuHidden = "macOS lists to a process only its own sockets in some cases (macOS 27, for a process keploy's CLI starts without root), so what the application wrote cannot be counted"
 
 // tcpStateName names the TCP states a bytes wait reports.
 func tcpStateName(s uint8) string {
@@ -304,11 +340,29 @@ func xnuCountsProven(proof func() error) func() error {
 // ready (decideCounted). The canary itself runs as on Linux (accepts.go).
 func (p *Proxy) checkPairedBytes(net.Conn, net.Conn) {}
 
-// proveAppVisible on Linux uses sock_diag to confirm the app's sockets are
-// visible from the proxy's network namespace. On darwin the app and proxy
-// share one namespace (no containers), so visibility is always true; there is
-// nothing to prove.
-func (p *Proxy) proveAppVisible(*net.TCPConn) {}
+// proveAppVisible notes, until it has once, that macOS's TCP table lists the
+// application's sockets to the agent, as Linux's notes they are seen from the
+// proxy's network namespace: the accepted connection's application end, just
+// paired, is in the table. macOS has one network stack for every process, but
+// it does not list every socket to every process (xnuHidden): one the table
+// does not list is gone only once one of the application's has been listed.
+func (p *Proxy) proveAppVisible(conn *net.TCPConn) {
+	if p.paired.visible.Load() || xnuTableReadable() != nil {
+		return
+	}
+	app, ok1 := addrPortOf(conn.RemoteAddr())
+	pr, ok2 := addrPortOf(conn.LocalAddr())
+	if !ok1 || !ok2 {
+		return
+	}
+	table, err := readXNUTable()
+	if err != nil {
+		return
+	}
+	if _, ok := findXNUPCB(table, app, pr); ok {
+		p.paired.visible.Store(true)
+	}
+}
 
 // readUnread returns the number of bytes in conn's receive buffer that the
 // application wrote but the proxy has not yet read. On macOS, SO_NREAD
@@ -367,8 +421,12 @@ func readProxySide(conn *net.TCPConn) proxySide {
 // application socket the table no longer lists with the first sequence number
 // the proxy's side began from (gone: reset, its reset the last it sent), as
 // Linux makes none for a socket it cannot read: the close then finds nothing
-// on its way.
-func noteWroteAtClose(pc *pairedConn) {
+// on its way. An application socket not listed is gone only once one of the
+// application's has been (paired.visible): before, it may be hidden from the
+// agent (xnuHidden), and unless the proxy's side shows it took the
+// application's FIN or reset, after which nothing it wrote is on its way,
+// what was on its way cannot be told, and every wait is unknown from then on.
+func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	if xnuTableReadable() != nil {
 		return
 	}
@@ -378,12 +436,17 @@ func noteWroteAtClose(pc *pairedConn) {
 	}
 	app, ok := findXNUPCB(table, pc.app, pc.proxy)
 	if !ok {
+		pr, listed := findXNUPCB(table, pc.proxy, pc.app)
+		if !p.paired.visible.Load() && !(listed && peerEnded(pr.state)) {
+			p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, and has listed none of the application's sockets to keploy's agent: %s", models.ErrProxyConnsUnsupported, pc.app, xnuHidden))
+		}
 		return
 	}
+	p.paired.visible.Store(true)
 	if pr, ok := findXNUPCB(table, pc.proxy, pc.app); !ok || pr.irs != app.iss {
 		return
 	}
-	pc.wroteAtClose.Store(&appWrote{want: uint64(app.writeSeq() - app.iss - 1), fin: app.finPending(), base: targetBase{isn: app.iss}})
+	pc.wroteAtClose.Store(&appWrote{want: pc.count(app.writeSeq() - app.iss - 1), fin: app.finPending(), base: targetBase{isn: app.iss}})
 }
 
 // readSide is pc's proxy side as its close reads it (closing, pairClosing):

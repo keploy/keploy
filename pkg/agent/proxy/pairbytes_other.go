@@ -26,6 +26,9 @@ func (p *Proxy) checkPairedBytes(net.Conn, net.Conn) {}
 // targetBase is nothing here: no count is read.
 type targetBase struct{}
 
+// wroteCount is darwin's (pairedConn).
+type wroteCount struct{}
+
 func (p *Proxy) proveAppVisible(*net.TCPConn) {}
 
 // pairClosing notes a paired connection's close; none is paired here.
