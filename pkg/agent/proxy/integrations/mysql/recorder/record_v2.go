@@ -975,6 +975,20 @@ const mysqlPostTLSStashPrimaryDefault = 8 * time.Second
 // delay the success path.
 const mysqlPostTLSStashPollSlice = 500 * time.Millisecond
 
+// postTLSStashWaitHookKey is the context key of a func() that
+// resolvePreTLSGreeting calls each time it is about to wait on the port's
+// queue: every take with a non-zero wait, never one that only looks. Only
+// this package's tests set it (the key is unexported). A test counts its calls
+// to prove an event, not a duration: that a joined connection never waited,
+// that a cache fallback past the primary bound waited at most the one slice
+// that bound cuts short, or that a cancel ended the wait within its slice. A
+// test can also act from the hook: push the raw leg, or cancel, once the
+// recorder is waiting, so what it injects is ordered after the wait began, not
+// timed from when the test began. Carried by the context, it
+// reaches only the recording that test drives, never one another test left
+// running.
+type postTLSStashWaitHookKey struct{}
+
 func mysqlPostTLSStashWait() time.Duration {
 	if v := os.Getenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS"); v != "" {
 		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
@@ -1179,6 +1193,11 @@ func resolvePreTLSGreeting(ctx context.Context, hsStore *models.TLSHandshakeStor
 	// take pops, within wait, this connection's own entry or (unless ownOnly)
 	// one it may take, and classifies it.
 	take := func(ownOnly bool, wait time.Duration) (models.TLSHandshakeEntry, models.HandshakeOwner, preTLSGreetingSource) {
+		if wait > 0 {
+			if hook, ok := ctx.Value(postTLSStashWaitHookKey{}).(func()); ok {
+				hook()
+			}
+		}
 		entry, taker, ok := hsStore.PopWaitFor(portKey, owner, ownOnly, wait)
 		switch {
 		case !ok:
