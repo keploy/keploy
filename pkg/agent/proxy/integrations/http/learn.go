@@ -302,13 +302,23 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		s.Fixed["body"] = "multipart"
 	default:
 		v, ok := learn.DecodeJSON(p.body)
-		if !ok {
-			s.Fixed["body"] = "text " + string(p.body)
+		if ok {
+			s.Fixed["body"] = "json"
+			s.Body = v
+			learn.JSONLeaves("body", v, s.Leaves)
 			break
 		}
-		s.Fixed["body"] = "json"
-		s.Body = v
-		learn.JSONLeaves("body", v, s.Leaves)
+		// JSON under a whole-body encoding (body_chain.go): its fields are
+		// leaves under the chain's root, and the chain is a fixed part, so a
+		// recording read by another chain, or compared whole, is no
+		// candidate ("body differs"). No variable binds there (VarPlace
+		// reads a JSON body's paths alone), as in a form's fields.
+		if chain, doc, ok := decodedBody(p.body); ok {
+			s.Fixed["body"] = chain
+			decodedLeaves(chain, doc, s.Leaves)
+			break
+		}
+		s.Fixed["body"] = "text " + string(p.body)
 	}
 	if n.hold != nil {
 		for path, l := range s.Leaves {

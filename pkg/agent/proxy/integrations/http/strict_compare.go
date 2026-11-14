@@ -1334,6 +1334,19 @@ func (k strictKnown) bodyDiffs(r *models.HTTPReq, input *req) []strictField {
 		k.jsonDiffs(rv, lv, "body", "", "body", false, &out)
 		return out
 	}
+	// JSON under a whole-body encoding, read as the learn step reads it
+	// (body_chain.go, which reads no body that is JSON as it is): field by
+	// field where both sides are so read by one chain. A side that is JSON
+	// as it is, or read by another chain, or compared whole, differs as a
+	// whole: the body's structure changed.
+	rc, rd, rcok := decodedBody(rec)
+	lc, ld, lcok := decodedBody(live)
+	if rcok && lcok && rc == lc {
+		var out []strictField
+		root := bodyChainRoot(rc)
+		k.jsonDiffs(rd, ld, root, "", root, false, &out)
+		return out
+	}
 	return []strictField{bodyChanged()}
 }
 
@@ -1561,13 +1574,16 @@ func decodeJSONDoc(b []byte) (interface{}, bool) {
 // scalar by value. learned: a container the mock learned holds this value, so
 // only its type is compared.
 func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, learned bool, out *[]strictField) {
-	name := "body"
+	// A body read through a chain (body_chain.go) names its fields under
+	// the chain's root, as the learn step does; keploy.yml's noise reads
+	// them by risk, as a JSON body's.
+	name := bodyRootOf(shape)
 	// why is, where keploy.yml's noise guards this field with patterns
 	// one side's value is outside of, the reason it is compared.
 	var why string
 	guarded, liveOK := false, false
 	if risk != "" {
-		name = "body." + risk
+		name += "." + risk
 		var recOK bool
 		recOK, liveOK = k.n.body.Covers(risk, scalarText(r), isScalar(r)), k.n.body.Covers(risk, scalarText(l), isScalar(l))
 		if recOK && liveOK {
@@ -1656,7 +1672,7 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 // other holding held: with the reason, where keploy.yml's noise guards it
 // with patterns, that a pattern excuses no absent value.
 func (k strictKnown) oneSided(risk, shape string, kind models.MockFieldDiffKind, absent string, held interface{}) strictField {
-	f := shaped("body."+risk, shape, kind, "", "")
+	f := shaped(bodyRootOf(shape)+"."+risk, shape, kind, "", "")
 	// Reached only when no entry with no patterns names the field.
 	if pats, ok := k.n.body.Patterns(risk); ok {
 		f.why = matcher.PatternWhy(shape, pats, absent, valueShape(held, false))
