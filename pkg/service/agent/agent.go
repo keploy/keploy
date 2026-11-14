@@ -216,9 +216,10 @@ type Agent struct {
 	gateRun    map[string]struct{}
 	gateReason string
 	gateWarned bool // NoteUngatable said so this session
-	// replay: the scopes the gate told a harness to skip, and whether
-	// noteEndOfGated said so this session.
-	gatedScopes    map[scopeKey]struct{}
+	// replay: the scopes the gate told a harness to skip, each with the
+	// outcome the route noted for an end of it not yet read
+	// (takeGatedOutcome), and whether noteEndOfGated warned this session.
+	gatedScopes    map[scopeKey]string
 	gatedEndWarned bool
 
 	// provenMu guards proven, the single-worker integration wire's state

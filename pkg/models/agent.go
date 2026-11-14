@@ -251,7 +251,8 @@ func NormalizeScopeOutcome(s string) string {
 // ScopeBeginResp answers POST /agent/scope/begin. A test the replay gated out
 // (see ScopeGateReq), begun by a harness that can skip (ScopeReq.CanSkip),
 // gets Action ScopeActionSkip and the Reason; its harness skips it and sends
-// no end for it. Every other answer is exactly
+// no end for it, or an end whose Outcome is ScopeOutcomeSkipped, which is
+// answered ok. Every other answer is exactly
 // {"status":"ok"}, as before, so a harness that predates gating — or decodes
 // the answer as strings — is unaffected, and a missing action means "run".
 type ScopeBeginResp struct {

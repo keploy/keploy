@@ -313,3 +313,33 @@ func TestEndOfAGatedTestWarnsOnce(t *testing.T) {
 	require.NoError(t, a.EndScope(ctx, "t3", 3))
 	require.Equal(t, 1, logs.FilterMessageSnippet("told to skip").Len(), "an ordinary test's end is not a gated one")
 }
+
+// An end that says skipped, of a test the harness was told to skip, confirms
+// the skip: no warning, at Debug, however often it is sent, and a later end
+// of a gated test that says it ran still warns. The calls are the scope end
+// route's: the outcome (NoteScopeOutcome), then the end.
+func TestASkippedEndOfAGatedTestIsNotWarned(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	core, logs := observer.New(zapcore.DebugLevel)
+	a := newReplayAgent()
+	a.logger = zap.New(core)
+	ctx := context.Background()
+	a.NoteScopeGated("t1", 3, time.Time{})
+	a.NoteScopeGated("t2", 3, time.Time{})
+	for i := 0; i < 2; i++ {
+		a.NoteScopeOutcome("t1", 3, models.ScopeOutcomeSkipped)
+		require.NoError(t, a.EndScope(ctx, "t1", 3))
+	}
+	require.Zero(t, logs.FilterLevelExact(zapcore.WarnLevel).Len())
+	require.Equal(t, 2, logs.FilterMessageSnippet("confirmed a skip").FilterLevelExact(zapcore.DebugLevel).Len())
+
+	// The outcome is each end's own: an end that says none, after one that
+	// said skipped, ran the test.
+	a.NoteScopeOutcome("t1", 3, models.ScopeOutcomeSkipped)
+	require.Equal(t, models.ScopeOutcomeSkipped, a.takeGatedOutcome("t1", 3))
+	require.Empty(t, a.takeGatedOutcome("t1", 3), "read once")
+
+	a.NoteScopeOutcome("t2", 3, models.ScopeOutcomePassed)
+	require.NoError(t, a.EndScope(ctx, "t2", 3))
+	require.Equal(t, 1, logs.FilterMessageSnippet("told to skip").FilterLevelExact(zapcore.WarnLevel).Len(), "t2 ran")
+}
