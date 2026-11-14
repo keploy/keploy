@@ -27,6 +27,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -802,5 +803,96 @@ func TestASyncGRPCTestCaseIsNamedAsItsMocksMapping(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second): // only turns a hang into a failure
 		t.Fatal("the call's mocks were not mapped on its context's manager")
+	}
+}
+
+// ExtractFormData reads a recorded request's multipart/form-data body into the
+// test case's form. A body that stops parsing (cut before its closing boundary,
+// or a part whose header line does not parse) ends the read with the parts read
+// before it and one line for it: multipart.Reader gives an error again on every
+// call after one, and a read that went on past it logged an Error line on each,
+// for good, in a capture goroutine that never returned. The boundary is the
+// content type's parameter, quoted or followed by another one: cut from the raw
+// text it kept its quotes or that parameter, matched no line of the body, and
+// the read went on for good too. A boundary the media-type grammar refuses
+// unquoted ("=" in it, as mail libraries write them) is still cut from the raw
+// text, as before. No line quotes the body: a header line is the app's content.
+func TestExtractFormDataEndsWhereTheBodyStopsParsing(t *testing.T) {
+	const planted = "PLANTEDheaderline0123"
+	part := func(boundary, name, value string) string {
+		return "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n"
+	}
+	whole := func(boundary string) string {
+		return part(boundary, "first", "kept") + part(boundary, "second", "also kept") + "--" + boundary + "--\r\n"
+	}
+	const (
+		badType  = "Invalid multipart/form-data content type"
+		badPart  = "failed to read the next part of a multipart/form-data request body; the parts before it are kept"
+		badValue = "Error reading part value"
+		// what each line's error says, after its message
+		cut      = " | the body ends before its closing boundary"
+		unparsed = " | a part's header, or the line where a boundary was due, does not parse"
+	)
+	for _, tc := range []struct {
+		name, contentType, body string
+		form                    []string // key=values of each part read, in order
+		logged                  []string // each Error line's message and error, in order
+	}{
+		{name: "a whole body", contentType: "multipart/form-data; boundary=b0und4ry", body: whole("b0und4ry"),
+			form: []string{"first=kept", "second=also kept"}},
+		{name: "cut before its closing boundary", contentType: "multipart/form-data; boundary=b0und4ry",
+			body: part("b0und4ry", "first", "kept") + "--b0und4ry\r\nContent-Disposition: form-data; name=\"second\"\r\n\r\npart of the sec",
+			form: []string{"first=kept"}, logged: []string{badValue + " | unexpected EOF", badPart + cut}},
+		{name: "a part's header line does not parse", contentType: "multipart/form-data; boundary=b0und4ry",
+			body: part("b0und4ry", "first", "kept") + "--b0und4ry\r\n" + planted + "\r\n\r\nvalue\r\n--b0und4ry--\r\n",
+			form: []string{"first=kept"}, logged: []string{badPart + unparsed}},
+		{name: "a quoted boundary", contentType: `multipart/form-data; boundary="b0und4ry"`, body: whole("b0und4ry"),
+			form: []string{"first=kept", "second=also kept"}},
+		{name: "a parameter after the boundary", contentType: "multipart/form-data; boundary=b0und4ry; charset=utf-8", body: whole("b0und4ry"),
+			form: []string{"first=kept", "second=also kept"}},
+		{name: "a capitalised parameter name", contentType: "multipart/form-data; Boundary=b0und4ry", body: whole("b0und4ry"),
+			form: []string{"first=kept", "second=also kept"}},
+		{name: "an unquoted boundary holding =", contentType: "multipart/form-data; boundary=----=_Part_0_1", body: whole("----=_Part_0_1"),
+			form: []string{"first=kept", "second=also kept"}},
+		{name: "an empty boundary", contentType: "multipart/form-data; boundary=", body: whole("b0und4ry"),
+			logged: []string{badType}},
+		{name: "no boundary", contentType: "multipart/form-data", body: whole("b0und4ry"),
+			logged: []string{badType}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.ErrorLevel)
+			// Sampled to each message's first lines: a read that logs for
+			// good fills no memory before the wait below gives up on it.
+			logger := zap.New(zapcore.NewSamplerWithOptions(core, time.Hour, 8, 0))
+			done := make(chan []models.FormData, 1)
+			go func() { done <- ExtractFormData(logger, []byte(tc.body), tc.contentType) }()
+			var form []models.FormData
+			select {
+			case form = <-done:
+			case <-time.After(10 * time.Second): // only turns a hang into a failure
+				t.Fatalf("ExtractFormData did not return; it logged %+v", logs.All())
+			}
+			var got []string
+			for _, f := range form {
+				got = append(got, f.Key+"="+strings.Join(f.Values, ","))
+			}
+			if !slices.Equal(got, tc.form) {
+				t.Errorf("form = %q, want %q", got, tc.form)
+			}
+			var said []string
+			for _, e := range logs.All() {
+				line := e.Message
+				if why, ok := e.ContextMap()["error"]; ok {
+					line += fmt.Sprint(" | ", why)
+				}
+				said = append(said, line)
+				if full := fmt.Sprint(e.Message, e.ContextMap()); strings.Contains(full, planted) {
+					t.Errorf("logged %q, which quotes the body", full)
+				}
+			}
+			if !slices.Equal(said, tc.logged) {
+				t.Errorf("logged %q, want %q", said, tc.logged)
+			}
+		})
 	}
 }

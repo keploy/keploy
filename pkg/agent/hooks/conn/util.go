@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -559,15 +560,10 @@ func RemoveFormFiles(logger *zap.Logger, forms []models.FormData) {
 }
 
 func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []models.FormData {
-	boundary := ""
-	if strings.HasPrefix(contentType, "multipart/form-data") {
-		parts := strings.Split(contentType, "boundary=")
-		if len(parts) > 1 {
-			boundary = strings.TrimSpace(parts[1])
-		} else {
-			utils.LogError(logger, nil, "Invalid multipart/form-data content type")
-			return nil
-		}
+	boundary := formBoundary(contentType)
+	if boundary == "" {
+		utils.LogError(logger, nil, "Invalid multipart/form-data content type")
+		return nil
 	}
 	reader := multipart.NewReader(bytes.NewReader(body), boundary)
 	var formData []models.FormData
@@ -578,8 +574,12 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 			break
 		}
 		if err != nil {
-			utils.LogError(logger, err, "Error reading part")
-			continue
+			// multipart.Reader gives an error again on every call after one
+			// (a body cut before its closing boundary: "NextPart: EOF" for
+			// good), so the parts read before it are all the body gives.
+			utils.LogError(logger, formPartError(err), "failed to read the next part of a multipart/form-data request body; the parts before it are kept",
+				zap.Int("body size", len(body)))
+			break
 		}
 		key := part.FormName()
 		if key == "" {
@@ -638,6 +638,34 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 	}
 
 	return formData
+}
+
+// formBoundary is contentType's boundary parameter, read as net/http's
+// Request.MultipartReader reads it: quoted or not, among other parameters in
+// any order. A boundary the media-type grammar refuses unquoted (one holding
+// "=", as mail libraries write them) is what follows "boundary=" in the raw
+// text, as before: a client sends it so, and an app may read it. "" when
+// there is none.
+func formBoundary(contentType string) string {
+	if _, params, err := mime.ParseMediaType(contentType); err == nil {
+		return params["boundary"]
+	}
+	if _, raw, ok := strings.Cut(contentType, "boundary="); ok {
+		return strings.TrimSpace(raw)
+	}
+	return ""
+}
+
+// formPartError is what a log says of multipart.Reader.NextPart's err: that the
+// body ends before its closing boundary, or that a part's header or the line
+// where a boundary was due does not parse. Never err's own text, which quotes
+// the line it could not read: a header line or a line of a part's value, the
+// app's content.
+func formPartError(err error) error {
+	if errors.Is(err, io.EOF) {
+		return errors.New("the body ends before its closing boundary")
+	}
+	return errors.New("a part's header, or the line where a boundary was due, does not parse")
 }
 
 // InlineFormFiles moves the file parts ExtractFormData left in local temp files
