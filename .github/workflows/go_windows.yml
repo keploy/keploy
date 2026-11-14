@@ -135,9 +135,11 @@ jobs:
       # the chain rule are also tested on every system (caller_tcptable_test,
       # claimer_chain_test); only here do the system's own tables and
       # processes feed them. The claim row has a child claim over HTTP and
-      # checks that the agent names the child.
+      # checks that the agent names the child; the exported-reads row reads
+      # a claiming child as a conformance check of an integration does
+      # (CallerPID, ProcStart, ProcAlive), while it runs and once it exited.
       - name: Test the claim's process reads (amd64)
-        run: go test -count=1 -run "TestTheClaimReadsTheCallerFromTheConnection|TestCallerPID|TestSameEndpoint|TestTCPOwnerOnWindows|TestTheWindowsTCP|TestWindowsProc|TestDescendsByCreation" ./pkg/agent/routes/ ./pkg/service/agent/
+        run: go test -count=1 -run "TestTheClaimReadsTheCallerFromTheConnection|TestTheExportedReads|TestCallerPID|TestSameEndpoint|TestTCPOwnerOnWindows|TestTheWindowsTCP|TestWindowsProc|TestDescendsByCreation" ./pkg/agent/routes/ ./pkg/service/agent/
         shell: cmd
 
       # The proxy's count of its accepts on Windows. listenerDrops is 0 here:
