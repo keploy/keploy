@@ -44,7 +44,7 @@ var readDNSAdapters = machineDNSAdapters
 //
 // On Windows it gives the adapter each server is asked on (its index in the
 // list GetAdaptersAddresses gives): a name one adapter's server denies is
-// still asked on the others (forwardDNS), as Windows asks them. resolv.conf's
+// still asked on the others (adapterSearch), as Windows asks them. resolv.conf's
 // servers are on no adapter: they are one list, and the first answer is the
 // answer, as Linux's resolver takes it.
 //

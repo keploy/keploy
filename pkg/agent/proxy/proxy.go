@@ -493,12 +493,13 @@ type Proxy struct {
 	// synthetic response in that case.
 	dnsUpstreamServers []string
 	// dnsUpstreamAdapter is, on Windows, the network adapter each of the
-	// dnsUpstreamServers is asked on (upstreamConfig): forwardDNS
-	// asks the other adapters' servers a name one adapter's server says does
-	// not exist, as Windows does. Nil from resolv.conf.
+	// dnsUpstreamServers is asked on (upstreamConfig): a recording and a
+	// forward ask the other adapters' servers a name one adapter's server
+	// says does not exist, as Windows does (adapterSearch). Nil from
+	// resolv.conf.
 	dnsUpstreamAdapter map[string]int
 	// dnsExchange asks one server; nil is (*dns.Client).Exchange. A row
-	// hands forwardDNS servers of its own through it.
+	// hands recordDNSMock and forwardDNS servers of its own through it.
 	dnsExchange dnsExchanger
 	// dnsUpstreamPort is the port read alongside dnsUpstreamServers.
 	// Defaults to "53" when resolv.conf does not specify one.

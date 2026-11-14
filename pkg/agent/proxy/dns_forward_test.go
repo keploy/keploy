@@ -1072,57 +1072,80 @@ func windowsUpstream(t *testing.T) *Proxy {
 	return p
 }
 
-// On Windows a name one adapter's server says does not exist, or has no
-// record of the type asked, is asked on the next adapter, as Windows asks it:
-// a VPN's or a LAN's own name is recorded with the answer its resolver gives
-// the application, not the preferred adapter's NXDOMAIN. The adapter that
-// answered negatively is not asked again, through its other server.
+// upstreamAskers are the two ways keploy asks the upstream servers: a
+// recording's question (recordDNSMock, with no session, so nothing is
+// recorded) and a replay miss's forward (forwardDNSUpstream). Both ask the
+// servers in the order adapterSearch says.
+var upstreamAskers = []struct {
+	name string
+	ask  func(p *Proxy, q dns.Question) (*dns.Msg, error)
+}{
+	{"recording", func(p *Proxy, q dns.Question) (*dns.Msg, error) {
+		e, err := p.recordDNSMock(q, time.Now(), nil)
+		return e.Msg, err
+	}},
+	{"forward", func(p *Proxy, q dns.Question) (*dns.Msg, error) { return p.forwardDNSUpstream(q) }},
+}
+
+// On Windows a name one adapter's server says does not exist is asked on the
+// next adapter, as Windows asks it: a VPN's or a LAN's own name is recorded
+// with the answer its resolver gives the application, not the preferred
+// adapter's NXDOMAIN. The adapter that denied the name is not asked again,
+// through its other server.
 func TestOnWindowsANameOneAdapterDeniesIsAskedOnTheNext(t *testing.T) {
 	q := dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	for _, negative := range []string{"NXDOMAIN", "NODATA"} {
+	for _, a := range upstreamAskers {
 		p := windowsUpstream(t)
-		asked := byServers(p, map[string]string{"10.0.0.1": negative, "10.0.0.2": "192.0.2.2", "10.8.0.1": "10.8.0.9"})
-		resp, err := p.forwardDNSUpstream(q)
+		asked := byServers(p, map[string]string{"10.0.0.1": "NXDOMAIN", "10.0.0.2": "192.0.2.2", "10.8.0.1": "10.8.0.9"})
+		resp, err := a.ask(p, q)
 		if err != nil {
-			t.Fatalf("%s from the preferred adapter: %v", negative, err)
+			t.Fatalf("%s: NXDOMAIN from the preferred adapter: %v", a.name, err)
 		}
 		if got := answeredBy(resp); got != "NOERROR 10.8.0.9 from 10.8.0.1" {
-			t.Errorf("%s from the preferred adapter: answered %q, want the VPN adapter's NOERROR 10.8.0.9 from 10.8.0.1", negative, got)
+			t.Errorf("%s: NXDOMAIN from the preferred adapter: answered %q, want the VPN adapter's NOERROR 10.8.0.9 from 10.8.0.1", a.name, got)
 		}
 		if !slices.Equal(*asked, []string{"10.0.0.1", "10.8.0.1"}) {
-			t.Errorf("%s from the preferred adapter: asked %v, want [10.0.0.1 10.8.0.1]", negative, *asked)
+			t.Errorf("%s: NXDOMAIN from the preferred adapter: asked %v, want [10.0.0.1 10.8.0.1]", a.name, *asked)
 		}
 	}
 }
 
-// When every adapter answers negatively, the answer is the preferred
-// adapter's, the first negative answer, after each adapter was asked once.
+// When every adapter says the name does not exist, the answer is the
+// preferred adapter's NXDOMAIN, the first, after each adapter was asked once.
+// An adapter's NODATA (the name exists, with no record of the type) is the
+// answer, as Windows takes it: the preferred adapter's ends the search, and
+// a later adapter's is the answer over the NXDOMAIN before it.
 func TestOnWindowsANameEveryAdapterDeniesGetsThePreferredAdaptersAnswer(t *testing.T) {
 	q := dns.Question{Name: "nowhere.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	for _, c := range []struct{ preferred, vpn, want string }{
-		{"NXDOMAIN", "NXDOMAIN", "NXDOMAIN from 10.0.0.1"},
-		{"NODATA", "NXDOMAIN", "NOERROR from 10.0.0.1"},
-		{"NXDOMAIN", "NODATA", "NXDOMAIN from 10.0.0.1"},
+	for _, c := range []struct {
+		preferred, vpn, want string
+		asked                []string
+	}{
+		{"NXDOMAIN", "NXDOMAIN", "NXDOMAIN from 10.0.0.1", []string{"10.0.0.1", "10.8.0.1"}},
+		{"NODATA", "NXDOMAIN", "NOERROR from 10.0.0.1", []string{"10.0.0.1"}},
+		{"NXDOMAIN", "NODATA", "NOERROR from 10.8.0.1", []string{"10.0.0.1", "10.8.0.1"}},
 	} {
-		p := windowsUpstream(t)
-		asked := byServers(p, map[string]string{"10.0.0.1": c.preferred, "10.0.0.2": "192.0.2.2", "10.8.0.1": c.vpn})
-		resp, err := p.forwardDNSUpstream(q)
-		if err != nil {
-			t.Fatalf("%s then %s: %v", c.preferred, c.vpn, err)
-		}
-		if got := answeredBy(resp); got != c.want {
-			t.Errorf("%s then %s: answered %q, want %q", c.preferred, c.vpn, got, c.want)
-		}
-		if !slices.Equal(*asked, []string{"10.0.0.1", "10.8.0.1"}) {
-			t.Errorf("%s then %s: asked %v, want each adapter once [10.0.0.1 10.8.0.1]", c.preferred, c.vpn, *asked)
+		for _, a := range upstreamAskers {
+			p := windowsUpstream(t)
+			asked := byServers(p, map[string]string{"10.0.0.1": c.preferred, "10.0.0.2": "192.0.2.2", "10.8.0.1": c.vpn})
+			resp, err := a.ask(p, q)
+			if err != nil {
+				t.Fatalf("%s: %s then %s: %v", a.name, c.preferred, c.vpn, err)
+			}
+			if got := answeredBy(resp); got != c.want {
+				t.Errorf("%s: %s then %s: answered %q, want %q", a.name, c.preferred, c.vpn, got, c.want)
+			}
+			if !slices.Equal(*asked, c.asked) {
+				t.Errorf("%s: %s then %s: asked %v, want %v", a.name, c.preferred, c.vpn, *asked, c.asked)
+			}
 		}
 	}
 }
 
 // On Windows the preferred adapter's answer ends the search; a server that
-// does not answer passes the query to its adapter's next server; and a
-// negative answer is still the answer when the adapter that would answer
-// otherwise does not answer at all.
+// does not answer passes the query to its adapter's next server; and the
+// preferred adapter's NXDOMAIN is still the answer when the adapter that
+// would answer otherwise does not answer at all.
 func TestOnWindowsAnAnswerEndsTheSearchAndASilentServerPassesItOn(t *testing.T) {
 	q := dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	for _, c := range []struct {
@@ -1135,17 +1158,19 @@ func TestOnWindowsAnAnswerEndsTheSearchAndASilentServerPassesItOn(t *testing.T) 
 		{"a silent server", map[string]string{"10.0.0.2": "192.0.2.2", "10.8.0.1": "10.8.0.9"}, "NOERROR 192.0.2.2 from 10.0.0.2", []string{"10.0.0.1", "10.0.0.2"}},
 		{"a silent VPN", map[string]string{"10.0.0.1": "NXDOMAIN"}, "NXDOMAIN from 10.0.0.1", []string{"10.0.0.1", "10.8.0.1"}},
 	} {
-		p := windowsUpstream(t)
-		asked := byServers(p, c.answers)
-		resp, err := p.forwardDNSUpstream(q)
-		if err != nil {
-			t.Fatalf("%s: %v", c.name, err)
-		}
-		if got := answeredBy(resp); got != c.want {
-			t.Errorf("%s: answered %q, want %q", c.name, got, c.want)
-		}
-		if !slices.Equal(*asked, c.asked) {
-			t.Errorf("%s: asked %v, want %v", c.name, *asked, c.asked)
+		for _, a := range upstreamAskers {
+			p := windowsUpstream(t)
+			asked := byServers(p, c.answers)
+			resp, err := a.ask(p, q)
+			if err != nil {
+				t.Fatalf("%s: %s: %v", a.name, c.name, err)
+			}
+			if got := answeredBy(resp); got != c.want {
+				t.Errorf("%s: %s: answered %q, want %q", a.name, c.name, got, c.want)
+			}
+			if !slices.Equal(*asked, c.asked) {
+				t.Errorf("%s: %s: asked %v, want %v", a.name, c.name, *asked, c.asked)
+			}
 		}
 	}
 }
@@ -1162,58 +1187,72 @@ func TestResolvConfsFirstAnswerIsTheAnswerANegativeOneToo(t *testing.T) {
 	t.Cleanup(func() { resolvConfPath = orig })
 	q := dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	for _, negative := range []string{"NXDOMAIN", "NODATA"} {
-		p := &Proxy{logger: zap.NewNop(), DNSPort: 26789, dnsForwardTimeout: 2 * time.Second}
-		p.captureDNSUpstream()
-		asked := byServers(p, map[string]string{"10.0.0.1": negative, "10.8.0.1": "10.8.0.9"})
-		resp, err := p.forwardDNSUpstream(q)
-		if err != nil {
-			t.Fatalf("%s: %v", negative, err)
-		}
-		if got, want := answeredBy(resp), dns.RcodeToString[resp.Rcode]+" from 10.0.0.1"; got != want || !slices.Equal(*asked, []string{"10.0.0.1"}) {
-			t.Errorf("%s from resolv.conf's first server: answered %q after asking %v, want %q after asking [10.0.0.1]", negative, got, *asked, want)
+		for _, a := range upstreamAskers {
+			p := &Proxy{logger: zap.NewNop(), DNSPort: 26789, dnsForwardTimeout: 2 * time.Second}
+			p.captureDNSUpstream()
+			asked := byServers(p, map[string]string{"10.0.0.1": negative, "10.8.0.1": "10.8.0.9"})
+			resp, err := a.ask(p, q)
+			if err != nil {
+				t.Fatalf("%s: %s: %v", a.name, negative, err)
+			}
+			if got, want := answeredBy(resp), dns.RcodeToString[resp.Rcode]+" from 10.0.0.1"; got != want || !slices.Equal(*asked, []string{"10.0.0.1"}) {
+				t.Errorf("%s: %s from resolv.conf's first server: answered %q after asking %v, want %q after asking [10.0.0.1]", a.name, negative, got, *asked, want)
+			}
 		}
 	}
 }
 
-// A negative answer (RFC 2308) says the name does not exist or has no record
-// of the type asked; an answer with records, and a failure, are not one.
-func TestANegativeAnswerIsNXDOMAINOrNODATA(t *testing.T) {
+// Only an NXDOMAIN rules an adapter out. An answer with records, NODATA, a
+// failure and a refusal end the search; so does an NXDOMAIN from a server on
+// no adapter.
+func TestOnlyAnAdaptersNXDOMAINRulesItOut(t *testing.T) {
 	a := &dns.A{Hdr: dns.RR_Header{Name: "x.", Rrtype: dns.TypeA, Class: dns.ClassINET}, A: net.ParseIP("192.0.2.1")}
 	for _, c := range []struct {
-		rcode   int
-		answer  []dns.RR
-		negates bool
+		server string
+		rcode  int
+		answer []dns.RR
+		ends   bool
 	}{
-		{dns.RcodeNameError, nil, true},
-		{dns.RcodeSuccess, nil, true},
-		{dns.RcodeSuccess, []dns.RR{a}, false},
-		{dns.RcodeServerFailure, nil, false},
-		{dns.RcodeRefused, nil, false},
+		{"10.0.0.1", dns.RcodeNameError, nil, false},
+		{"10.0.0.1", dns.RcodeSuccess, nil, true},
+		{"10.0.0.1", dns.RcodeSuccess, []dns.RR{a}, true},
+		{"10.0.0.1", dns.RcodeServerFailure, nil, true},
+		{"10.0.0.1", dns.RcodeRefused, nil, true},
+		{"10.9.9.9", dns.RcodeNameError, nil, true},
 	} {
+		s := newAdapterSearch(map[string]int{"10.0.0.1": 0, "10.0.0.2": 0, "10.8.0.1": 1})
 		m := &dns.Msg{Answer: c.answer}
 		m.Rcode = c.rcode
-		if got := isNegativeAnswer(m); got != c.negates {
-			t.Errorf("%s with %d record(s): negative %v, want %v", dns.RcodeToString[c.rcode], len(c.answer), got, c.negates)
+		if got := s.ends(c.server, m); got != c.ends {
+			t.Errorf("%s with %d record(s) from %s: ends the search %v, want %v", dns.RcodeToString[c.rcode], len(c.answer), c.server, got, c.ends)
+		}
+		if got, want := s.passes("10.0.0.2"), c.server == "10.0.0.1" && !c.ends; got != want {
+			t.Errorf("%s with %d record(s) from %s: 10.0.0.1's adapter's other server passed over %v, want %v", dns.RcodeToString[c.rcode], len(c.answer), c.server, got, want)
+		}
+		if s.passes("10.8.0.1") || s.passes("10.9.9.9") {
+			t.Errorf("%s with %d record(s) from %s: another adapter's server, or one on no adapter, is passed over", dns.RcodeToString[c.rcode], len(c.answer), c.server)
 		}
 	}
 }
 
-// A server on no adapter is not ruled out by an adapter's negative answer:
-// only the servers of the adapter that answered are passed over.
+// A server on no adapter is not ruled out by an adapter's NXDOMAIN: only the
+// servers of the adapter that denied the name are passed over.
 func TestAServerOnNoAdapterIsAskedAfterAnAdapterDenies(t *testing.T) {
-	p := &Proxy{
-		logger:             zap.NewNop(),
-		dnsUpstreamServers: []string{"10.0.0.1", "10.0.0.2"},
-		dnsUpstreamAdapter: map[string]int{"10.0.0.1": 0},
-		dnsUpstreamPort:    "53",
-		dnsForwardTimeout:  2 * time.Second,
-	}
-	asked := byServers(p, map[string]string{"10.0.0.1": "NXDOMAIN", "10.0.0.2": "192.0.2.2"})
-	resp, err := p.forwardDNSUpstream(dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := answeredBy(resp); got != "NOERROR 192.0.2.2 from 10.0.0.2" || !slices.Equal(*asked, []string{"10.0.0.1", "10.0.0.2"}) {
-		t.Fatalf("answered %q after asking %v, want NOERROR 192.0.2.2 from 10.0.0.2 after asking [10.0.0.1 10.0.0.2]", got, *asked)
+	for _, a := range upstreamAskers {
+		p := &Proxy{
+			logger:             zap.NewNop(),
+			dnsUpstreamServers: []string{"10.0.0.1", "10.0.0.2"},
+			dnsUpstreamAdapter: map[string]int{"10.0.0.1": 0},
+			dnsUpstreamPort:    "53",
+			dnsForwardTimeout:  2 * time.Second,
+		}
+		asked := byServers(p, map[string]string{"10.0.0.1": "NXDOMAIN", "10.0.0.2": "192.0.2.2"})
+		resp, err := a.ask(p, dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET})
+		if err != nil {
+			t.Fatalf("%s: %v", a.name, err)
+		}
+		if got := answeredBy(resp); got != "NOERROR 192.0.2.2 from 10.0.0.2" || !slices.Equal(*asked, []string{"10.0.0.1", "10.0.0.2"}) {
+			t.Errorf("%s: answered %q after asking %v, want NOERROR 192.0.2.2 from 10.0.0.2 after asking [10.0.0.1 10.0.0.2]", a.name, got, *asked)
+		}
 	}
 }

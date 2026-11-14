@@ -81,12 +81,14 @@ func windowsAnswer(t *testing.T, q dns.Question) string {
 }
 
 // On Windows the resolvers are those of the machine's adapters, and Windows
-// asks a name on every adapter until one answers it: a name the preferred
-// adapter's server says does not exist (or has no record of the type asked)
-// is answered by the next adapter's server, as a VPN's or a LAN's own name is.
+// asks a name on the next adapter when one adapter's server says it does not
+// exist: a VPN's or a LAN's own name is answered by its adapter's server.
 // The row gives a second adapter a DNS server of its own, which answers two
-// questions the preferred adapter's server answers negatively, asks Windows
-// and a recording each, and wants the recording to answer as Windows does.
+// questions the preferred adapter's server answers negatively (a name it
+// says does not exist, and a type it has no record of), asks Windows and a
+// recording each, and wants the recording to answer as Windows does: the
+// second adapter's address for the first, and the preferred adapter's
+// NODATA for the second, as Windows 11 (10.0.26200) answers them.
 // It changes the machine's DNS configuration, so it runs only as an
 // administrator and puts the adapter back as it was (no DNS server of its
 // own) when it ends, and first undoes what a run killed before its cleanup

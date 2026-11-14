@@ -424,27 +424,56 @@ func (p *Proxy) exchange(c *dns.Client, m *dns.Msg, addr string) (*dns.Msg, time
 	return c.Exchange(m, addr)
 }
 
-// isNegativeAnswer reports whether resp says the name does not exist
-// (NXDOMAIN) or has no record of the type asked (NODATA, RFC 2308): an
-// answer Windows takes from one adapter's server as that adapter's, while it
-// still asks the other adapters.
-func isNegativeAnswer(resp *dns.Msg) bool {
-	return resp.Rcode == dns.RcodeNameError || (resp.Rcode == dns.RcodeSuccess && len(resp.Answer) == 0)
+// adapterSearch asks the machine's adapters a name in the order Windows does
+// (p.dnsUpstreamAdapter): an NXDOMAIN from one adapter's server rules that
+// adapter out, its other servers are not asked, and the next adapter's
+// servers are; any other answer, NODATA (NOERROR with no record of the type)
+// too, is the answer. A name only a VPN's or a LAN's own resolver knows is
+// then recorded with the answer the application gets, not the NXDOMAIN of
+// the adapter Windows prefers. When every adapter says the name does not
+// exist, the preferred adapter's NXDOMAIN, the first, is the answer. That is
+// what Windows answers: with a name the preferred adapter's server denies
+// and another adapter's server resolves, Windows 11 (10.0.26200) gives the
+// application the other adapter's address; with a type the preferred
+// adapter's server has no record of and the other's has, it gives the
+// preferred adapter's NODATA (TestOnWindowsARecordingAsksEachAdapterAsWindowsDoes).
+// A server on no adapter (all of resolv.conf's) ends the search with
+// whatever it answers, as Linux's resolver does.
+type adapterSearch struct {
+	adapter  map[string]int
+	ruledOut map[int]bool
+	// denied is the first adapter's NXDOMAIN, kept while another adapter
+	// may still answer.
+	denied *dns.Msg
+}
+
+func newAdapterSearch(adapter map[string]int) *adapterSearch {
+	return &adapterSearch{adapter: adapter, ruledOut: map[int]bool{}}
+}
+
+// passes reports whether server is on an adapter that already denied the
+// name, so it is not asked.
+func (s *adapterSearch) passes(server string) bool {
+	adapter, onAdapter := s.adapter[server]
+	return onAdapter && s.ruledOut[adapter]
+}
+
+// ends takes server's answer and reports whether it is the answer. An
+// adapter's NXDOMAIN is not: it rules the adapter out and is kept (denied).
+func (s *adapterSearch) ends(server string, resp *dns.Msg) bool {
+	adapter, onAdapter := s.adapter[server]
+	if !onAdapter || resp.Rcode != dns.RcodeNameError {
+		return true
+	}
+	s.ruledOut[adapter] = true
+	if s.denied == nil {
+		s.denied = resp
+	}
+	return false
 }
 
 // forwardDNS is forwardDNSUpstream against the given subset of the upstream
-// servers (replayMissServers).
-//
-// On Windows the servers are those of the machine's adapters
-// (p.dnsUpstreamAdapter), and Windows asks every adapter a name until one
-// answers it: a negative answer (isNegativeAnswer) from one adapter's server
-// rules that adapter out, its other servers are not asked, and the next
-// adapter's servers are. A name only a VPN's or a LAN's own resolver knows
-// is recorded with the answer the application gets, not the NXDOMAIN of the
-// adapter Windows prefers. When every adapter answers negatively, the
-// preferred adapter's answer is the answer. A server on no adapter (all of
-// resolv.conf's) ends the search with whatever it answers, as Linux's
-// resolver does.
+// servers (replayMissServers), asked in the order adapterSearch says.
 func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, error) {
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("no upstream DNS resolver this replay may forward to")
@@ -481,14 +510,9 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 	m.RecursionDesired = true
 
 	var lastErr error
-	// negative is the first negative answer of an adapter, kept while
-	// another adapter may still answer; ruledOut are the adapters that
-	// answered negatively.
-	var negative *dns.Msg
-	ruledOut := map[int]bool{}
+	search := newAdapterSearch(p.dnsUpstreamAdapter)
 	for _, server := range servers {
-		adapter, onAdapter := p.dnsUpstreamAdapter[server]
-		if onAdapter && ruledOut[adapter] {
+		if search.passes(server) {
 			continue
 		}
 		remaining := time.Until(deadline)
@@ -534,22 +558,17 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 		if resp == nil {
 			continue
 		}
-		if onAdapter && isNegativeAnswer(resp) {
-			p.logger.Debug("upstream DNS server answered negatively; asking the other adapters' servers",
+		if !search.ends(server, resp) {
+			p.logger.Debug("upstream DNS server says the name does not exist; asking the other adapters' servers",
 				zap.String("server", addr),
-				zap.String("question", question.Name),
-				zap.String("rcode", dns.RcodeToString[resp.Rcode]))
-			ruledOut[adapter] = true
-			if negative == nil {
-				negative = resp
-			}
+				zap.String("question", question.Name))
 			continue
 		}
 		return resp, nil
 	}
 
-	if negative != nil {
-		return negative, nil
+	if search.denied != nil {
+		return search.denied, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no upstream DNS server returned a response for %s", question.Name)
