@@ -259,6 +259,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.Req)))
 	if err != nil {
+		err = utils.WithholdInput(err)
 		utils.LogError(h.Logger, err, "failed to parse the http request message")
 		return err
 	}
@@ -298,6 +299,9 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	// never an interim 1xx (parseFinalResponse, as the V2 recorder parses it)
 	respParsed, _, err := parseFinalResponse(mock, req)
 	if err != nil {
+		// The parser's error quotes the status line it refused: on a
+		// connection read mid-stream, a body's line.
+		err = utils.WithholdInput(err)
 		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(req)))
 		return err
 	}
@@ -323,7 +327,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			}
 		}
 
-		h.Logger.Debug("This is the response body: " + string(respBody))
+		h.Logger.Debug("read the response body", zap.Int("bytes", len(respBody)))
 		//Set the content length to the headers, except on a response with no
 		//body by rule (to a HEAD, a 1xx, 204 or 304), which keeps its own (as
 		//buildHTTPMock does).

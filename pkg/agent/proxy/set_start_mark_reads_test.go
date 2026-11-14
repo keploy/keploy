@@ -65,19 +65,19 @@ func TestACallMarkedThroughTheRoundSnapshotIsKeptOnlyBeforeItsSetsLastRead(t *te
 	mark("POST /pool-before-last-read", snap("between test-1 and test-2", false, false))
 	// test-2 begun, its view not installed: the pool's call.
 	p.ContinueTestErrorCapture()
-	mark("POST /ahead-before-last-read", snap("test-2 begun", true, false))
+	mark("POST /ahead/before-last-read", snap("test-2 begun", true, false))
 	read("set A's last read")
 	p.EndTestErrorCapture()
-	mark("POST /pool-after-last-read", snap("after set A's last read", false, false))
+	mark("PUT /pool-after-last-read", snap("after set A's last read", false, false))
 	p.ContinueTestErrorCapture()
-	mark("POST /ahead-after-last-read", snap("a test begun after set A's last read", true, false))
+	mark("PATCH /ahead-after-last-read", snap("a test begun after set A's last read", true, false))
 	p.WithdrawTestErrorCapture()
 	p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
-	mark("POST /unstaged-snapshot-mark", snap("set B begun, not staged", false, true))
+	mark("DELETE /unstaged-snapshot-mark", snap("set B begun, not staged", false, true))
 	if c := mm.MarkCallRound(); !c.Staging() {
 		t.Fatalf("precondition: the store's mark in set B, not staged, is no staging's")
 	}
-	mark("POST /unstaged-store-mark", mm.MarkCallRound())
+	mark("POST /unstaged/store/mark", mm.MarkCallRound())
 	p.missCutPending.Store(true)
 	if err := p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestACallMarkedThroughTheRoundSnapshotIsKeptOnlyBeforeItsSetsLastRead(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	kept := map[string]bool{"POST /pool-before-last-read": true, "POST /ahead-before-last-read": true}
+	kept := map[string]bool{"POST /pool-before-last-read": true, "POST /ahead/before-last-read": true}
 	if len(got) != len(kept) {
 		t.Fatalf("set B's first read %+v; want only set A's calls marked before its last read", got)
 	}
@@ -101,9 +101,20 @@ func TestACallMarkedThroughTheRoundSnapshotIsKeptOnlyBeforeItsSetsLastRead(t *te
 		}
 		delete(kept, c.ActualSummary)
 	}
-	for _, c := range []string{"POST /pool-after-last-read", "POST /ahead-after-last-read", "POST /unstaged-snapshot-mark", "POST /unstaged-store-mark"} {
+	// The cut line names a call by its shape (models.MissLogShape): the six
+	// calls have shapes of their own, so each cut is told apart, and a kept
+	// call is never said cut.
+	for _, c := range []string{"HTTP PUT /{}", "HTTP PATCH /{}", "HTTP DELETE /{}", "HTTP POST /{}/{}/{}"} {
 		if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{c})).Len(); n != 1 {
 			t.Fatalf("%s, marked after set A's last read, was said cut %d times; want once", c, n)
+		}
+	}
+	for _, e := range logs.FilterMessage(missesCutAtSetStart).All() {
+		calls, _ := e.ContextMap()["calls"].([]interface{})
+		for _, c := range calls {
+			if c == "HTTP POST /{}" || c == "HTTP POST /{}/{}" {
+				t.Fatalf("a call marked before set A's last read was said cut (%s)", c)
+			}
 		}
 	}
 }

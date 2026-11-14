@@ -3,6 +3,7 @@ package replayer
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -313,8 +314,9 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	// at request index 0 and 1 to be tolerant to recording layout.
 
 	// Not the packet: its auth response is the cleartext password under
-	// mysql_clear_password (PAM, LDAP, IAM tokens).
-	logger.Debug("matching handshake response", zap.String("user", hr41.Username), zap.String("database", printable(hr41.Database)), zap.String("auth_plugin", hr41.AuthPluginName))
+	// mysql_clear_password (PAM, LDAP, IAM tokens). Nor the user: half of
+	// the login.
+	logger.Debug("matching handshake response", zap.String("database", printable(hr41.Database)), zap.String("auth_plugin", hr41.AuthPluginName))
 
 	// compared counts the candidates whose recorded HandshakeResponse41 was
 	// compared. closest is why the closest of them did not match, for the
@@ -405,13 +407,22 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		if closestForDest != "" {
 			closest = closestForDest
 		}
-		if closest != "" {
-			why += " (closest candidate: " + closest + ")"
-		}
 		// compared is at least 1: candidates is mocks, which holds the
 		// greeting's handshake mock, or a non-empty sslMatchedMocks, which
 		// holds only handshake mocks.
-		return res, newConnectionMiss(dst, stepHandshakeResponse, why, models.MatchPhaseExhausted, compared)
+		miss := newConnectionMiss(dst, stepHandshakeResponse, why, models.MatchPhaseExhausted, compared)
+		// The closest candidate in the report's diff only: why it did not
+		// match can name the recorded and the live user (a login's half),
+		// and the error's text is logged.
+		var reported interface {
+			MismatchReport() *models.MockMismatchReport
+		}
+		if closest != "" && errors.As(miss, &reported) {
+			if r := reported.MismatchReport(); r != nil {
+				r.Diff += " (closest candidate: " + closest + ")"
+			}
+		}
+		return res, miss
 	}
 
 	// NEW: We have a strict HR41 match at candidates[selectedIdx], request index hrIdx.

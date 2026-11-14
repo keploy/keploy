@@ -1824,7 +1824,7 @@ func TestRunTestSet_ACreatesLocationIsAssertedAsTheCapturedID(t *testing.T) {
 					m := e.ContextMap()
 					next := fmt.Sprint(m["next_step"])
 					if m["testcase"] == "test-1" && m["where"] == "header Location" && m["placeholder"] == "{{string .id}}" &&
-						strings.Contains(fmt.Sprint(m["why"]), "id's value") &&
+						m["why"] == nil && m["why_bytes"] != nil &&
 						strings.Contains(next, "this run's value of id is what test-1/response body.id captured from this same answer") &&
 						strings.Contains(next, "re-record") && !strings.Contains(next, "normalize") {
 						warned++
@@ -1832,6 +1832,14 @@ func TestRunTestSet_ACreatesLocationIsAssertedAsTheCapturedID(t *testing.T) {
 				}
 				if warned != 1 {
 					t.Errorf("the Location's failure was logged %d time(s) with its place, why and next step; want once", warned)
+				}
+				// The why the line leaves out is the report's.
+				said := false
+				for _, f := range r.TemplateFailures {
+					said = said || f.Where == "header Location" && strings.Contains(f.Why, "id's value")
+				}
+				if !said {
+					t.Errorf("the report's template failures %+v do not say why with id's value", r.TemplateFailures)
 				}
 			}
 		})
@@ -2457,9 +2465,12 @@ func TestRunTestSet_AnOlderSetsProducerIsNamedWithItsEdit(t *testing.T) {
 	if len(warned) == 1 {
 		next = fmt.Sprint(warned[0].ContextMap()["next_step"])
 	}
+	// The recorded value is config.yaml's, and the line is logged: it is
+	// written {} there (models.AdviceLogText).
 	if !strings.Contains(next, "if the app issues this value anew each run: change {{string .id}} at test-1/response body.id to {{capture string .id}}") ||
-		!strings.Contains(next, `if it is a constant or what the request sent: write its recorded value "usr_1" in place of every placeholder of id`) {
-		t.Errorf("the uncaptured key was named %d times: %+v; want once, with both edits at test-1's body.id", len(warned), warned)
+		!strings.Contains(next, `if it is a constant or what the request sent: write its recorded value "{}" in place of every placeholder of id`) ||
+		strings.Contains(next, "usr_1") {
+		t.Errorf("the uncaptured key was named %d times: %+v; want once, with both edits at test-1's body.id, and not its recorded value", len(warned), warned)
 	}
 }
 
@@ -2706,7 +2717,8 @@ func TestRunTestSet_EveryTemplateFailureIsSavedWithItsNextStep(t *testing.T) {
 			// of its own, and the capture edit is offered (P7), under a key
 			// of its own, and the same key's capture only for a place that
 			// replaces the value from then on.
-			if !strings.Contains(next, `change {{string .id}} at test-3/response body.newest to {{capture string .id2}}, give id2 its recorded value "usr_REC0001"`) ||
+			// The recorded value is written {} in the logged line.
+			if !strings.Contains(next, `change {{string .id}} at test-3/response body.newest to {{capture string .id2}}, give id2 its recorded value "{}"`) || strings.Contains(next, "usr_REC0001") ||
 				!strings.Contains(next, "change {{string .id}} there to {{capture string .id}} instead, which points every later use of id at this answer") {
 				t.Errorf("test-3's next step %q does not offer both capture edits", next)
 			}

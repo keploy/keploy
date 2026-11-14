@@ -786,7 +786,9 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
 	if err != nil {
-		utils.LogError(logger, err, "failed to create a http request from the yaml document")
+		// Its error quotes the test's URL: withheld in the line, kept for
+		// the test's report.
+		utils.LogError(logger, utils.WithholdInput(err), "failed to create a http request from the yaml document")
 		return nil, err
 	}
 	req.Header = ToWireHTTPHeader(tc.HTTPReq.Header, tc.HTTPReq.HeaderLineLengths)
@@ -1222,10 +1224,10 @@ func waitToReSend(ctx context.Context, logger *zap.Logger, what, addr string, re
 		w.began = time.Now()
 		if probe {
 			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; waiting for it to accept a connection, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped", what, addr),
-				zap.Error(refusal))
+				zap.Error(utils.WithholdInput(refusal)))
 		} else {
 			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; sending it again every %s until it is accepted (probing the application's address is disabled by configuration). The wait ends when it is, when the application exits, or when keploy is stopped", what, addr, acceptPollInterval),
-				zap.Error(refusal))
+				zap.Error(utils.WithholdInput(refusal)))
 		}
 		w.still = sayStillWaiting(ctx, logger, "accept a connection", addr, w.began, &w.gate)
 	} else {
@@ -1477,7 +1479,7 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 			continue
 		}
 		logger.Warn("test request refused by app (app not yet accepting connections); re-sending — the request was never processed, so this is not a retry of an assertion",
-			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(err))
+			zap.Int("attempt", attempt+1), zap.Int("maxRetries", maxConnRefusedRetries), zap.Error(utils.WithholdInput(err)))
 		select {
 		case <-ctx.Done():
 			return nil, err
@@ -1551,7 +1553,9 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
-	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
+	// The request's shape and size, never the request: its headers carry
+	// the test's credentials (Authorization, cookies), its URL a token.
+	logger.Debug("Sending request to user app", zap.Any("metadata", utils.GetReqMeta(prepared.Request)), zap.Int64("content_length", prepared.Request.ContentLength))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
@@ -1560,7 +1564,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		if cfg.answer.didStall() {
 			return nil, cfg.answer.err()
 		}
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		// The line withholds what the client's error quotes (the request's
+		// URL, query and all); the error returned keeps it for the test's
+		// report, which shows the request anyway.
+		utils.LogError(logger, utils.WithholdInput(errHTTPReq), "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
 	endAtHeaders(httpResp)
@@ -1662,7 +1669,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
-	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
+	logger.Debug("Sending streaming request to user app", zap.Any("metadata", utils.GetReqMeta(prepared.Request)), zap.Int64("content_length", prepared.Request.ContentLength))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
@@ -1671,7 +1678,10 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		if cfg.answer.didStall() {
 			return nil, cfg.answer.err()
 		}
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		// The line withholds what the client's error quotes (the request's
+		// URL, query and all); the error returned keeps it for the test's
+		// report, which shows the request anyway.
+		utils.LogError(logger, utils.WithholdInput(errHTTPReq), "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
 	endAtHeaders(httpResp)
@@ -2159,11 +2169,13 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 		expectedFrame := expectedQueue[nextExpected]
 		match, reason := compareSSEFields(expectedFrame.fields, parseSSEFrame(frame), jsonNoiseKeys, logger)
 		if !match {
+			// The frames' sizes, never the frames: they are the app's
+			// answers, a token's or a user's data among them.
 			logger.Debug("SSE frame mismatch",
 				zap.Int("frame_index", nextExpected),
 				zap.String("reason", reason),
-				zap.String("expected_frame", expectedFrame.raw),
-				zap.String("actual_frame", frame))
+				zap.Int("expected_frame_bytes", len(expectedFrame.raw)),
+				zap.Int("actual_frame_bytes", len(frame)))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expectedFrame.raw,
@@ -2287,8 +2299,8 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 			logger.Debug("NDJSON stream mismatch",
 				zap.Int("frame_index", nextExpected),
 				zap.String("reason", reason),
-				zap.String("expected_frame", expected),
-				zap.String("actual_frame", line))
+				zap.Int("expected_frame_bytes", len(expected)),
+				zap.Int("actual_frame_bytes", len(line)))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expected,
@@ -2363,8 +2375,8 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 		if line != expected {
 			logger.Debug("plain-text stream mismatch",
 				zap.Int("frame_index", nextExpected),
-				zap.String("expected", expected),
-				zap.String("actual", line))
+				zap.Int("expected_bytes", len(expected)),
+				zap.Int("actual_bytes", len(line)))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expected,
@@ -3253,7 +3265,8 @@ func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
 	if err != nil {
-		return nil, err
+		// Its error quotes the request: withheld, as callers log it.
+		return nil, utils.WithholdInput(err)
 	}
 	request.Header.Set("Host", request.Host)
 
@@ -3265,7 +3278,7 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 	reader := bufio.NewReader(buffer)
 	response, err := http.ReadResponse(reader, request)
 	if err != nil {
-		return nil, err
+		return nil, utils.WithholdInput(err)
 	}
 	return response, nil
 }
@@ -5450,6 +5463,14 @@ func urlReplacement(target string, urlReplacements map[string]string) (substr, r
 //  3. replaceWith URL replacements – if replacement has explicit port, skip steps 1-2.
 //  4. replaceWith port mappings – always applied last, overrides everything.
 func ResolveTestTarget(originalTarget string, urlReplacements map[string]string, portMappings map[uint32]uint32, configHost string, appPort uint16, configPort uint32, isHTTP bool, logger *zap.Logger) (string, error) {
+	// An HTTP target by its shape (utils.URLLogMeta): it is the test's URL,
+	// whose path or query can hold its token. A gRPC target is an authority.
+	targetLog := func(target string) any {
+		if isHTTP {
+			return utils.URLLogMeta("", target)
+		}
+		return target
+	}
 	finalTarget := originalTarget
 	replacementHasPort := false
 	replacementMatched := false
@@ -5463,7 +5484,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		logger.Debug("Applied replaceWith substitution",
 			zap.String("find", substr),
 			zap.String("replace", replacement),
-			zap.String("result_target", finalTarget),
+			zap.Any("result_target", targetLog(finalTarget)),
 			zap.Bool("replacement_has_port", replacementHasPort))
 	}
 
@@ -5481,10 +5502,11 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 			finalTarget, err = utils.ReplaceGrpcHost(finalTarget, configHost)
 		}
 		if err != nil {
-			utils.LogError(logger, err, "failed to replace host with config host")
+			// Its error quotes the test's URL.
+			utils.LogError(logger, utils.WithholdInput(err), "failed to replace host with config host")
 			return "", err
 		}
-		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.String("target", finalTarget))
+		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.Any("target", targetLog(finalTarget)))
 	}
 
 	// Parse host and port from finalTarget
@@ -5495,7 +5517,8 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 	if isHTTP {
 		parsedURL, parseErr := url.Parse(finalTarget)
 		if parseErr != nil {
-			utils.LogError(logger, parseErr, "failed to parse test case URL")
+			// The parser's error quotes the test's URL, query and all.
+			utils.LogError(logger, utils.WithholdInput(parseErr), "failed to parse test case URL")
 			return "", parseErr
 		}
 		host = parsedURL.Hostname()
@@ -5508,7 +5531,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 				port = "80"
 			}
 			logger.Debug("URL has no explicit port, using scheme default",
-				zap.String("target", finalTarget), zap.String("default_port", port))
+				zap.Any("target", targetLog(finalTarget)), zap.String("default_port", port))
 		}
 	} else {
 		host = finalTarget
@@ -5521,7 +5544,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		}
 		if port == "" {
 			logger.Debug("Authority has no explicit port, using gRPC default",
-				zap.String("target", finalTarget), zap.String("default_port", "443"))
+				zap.Any("target", targetLog(finalTarget)), zap.String("default_port", "443"))
 			port = "443"
 		}
 	}
@@ -5566,7 +5589,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		finalTarget = net.JoinHostPort(host, port)
 	}
 
-	logger.Debug("Final resolved target", zap.String("target", finalTarget))
+	logger.Debug("Final resolved target", zap.Any("target", targetLog(finalTarget)))
 	return finalTarget, nil
 }
 

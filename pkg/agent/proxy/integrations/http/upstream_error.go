@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/utils"
 )
 
 // UpstreamErrorMarker is a response header the recorder adds when it
@@ -128,10 +129,12 @@ func upstreamErrorClass(err error) string {
 	return "other"
 }
 
-// upstreamRequestURL extracts a best-effort URL string from a raw HTTP
-// request buffer. Falls back to the dest-socket address if the request
-// cannot be parsed (e.g. truncated / non-HTTP bytes). The returned string
-// is log-only; callers must not depend on its format.
+// upstreamRequestURL is a best-effort shape of the URL a raw HTTP request
+// buffer asks for: its host, its path's shape and the names of its query
+// parameters (utils.GetReqMeta), never a path segment or a query value, as a
+// token rides in either. Falls back to the dest-socket address if the
+// request cannot be parsed (e.g. truncated / non-HTTP bytes). The returned
+// string is log-only; callers must not depend on its format.
 func upstreamRequestURL(rawReq []byte, destAddr net.Addr) string {
 	if len(rawReq) > 0 {
 		req, err := nhttp.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
@@ -140,9 +143,13 @@ func upstreamRequestURL(rawReq []byte, destAddr net.Addr) string {
 			if host == "" && destAddr != nil {
 				host = destAddr.String()
 			}
-			path := "/"
-			if req.URL != nil && req.URL.RequestURI() != "" {
-				path = req.URL.RequestURI()
+			meta := utils.GetReqMeta(req)
+			path := meta["path"]
+			if path == "" {
+				path = "/"
+			}
+			if keys := meta["query keys"]; keys != "" {
+				path += "?{" + keys + "}"
 			}
 			scheme := "http"
 			return fmt.Sprintf("%s://%s%s", scheme, host, path)

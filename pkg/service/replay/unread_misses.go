@@ -258,13 +258,15 @@ func markAnswerStalled(result *models.TestResult, err error) {
 // was waited for, not an ordinary failure; else what as says, with the
 // error.
 func sayNoAnswer(logger *zap.Logger, test string, err error, as string) {
+	// The line names the request by its shape (pkg.LoggableAnswerError);
+	// the test report keeps it whole.
 	if errors.Is(err, pkg.ErrAnswerStalled) {
-		logger.Error("not judged: "+err.Error(),
+		logger.Error("not judged: "+pkg.LoggableAnswerError(err),
 			zap.String("testcase", test),
 			zap.String("next_step", stalledAnswerRemedy(err)))
 		return
 	}
-	utils.LogError(logger, err, as)
+	utils.LogError(logger, pkg.LoggableAnswerErr(err), as)
 }
 
 // sayStartJudged is the console's line for a test whose answer began and then
@@ -272,7 +274,7 @@ func sayNoAnswer(logger *zap.Logger, test string, err error, as string) {
 // failed on its start, and that its body never came. The start's diff is
 // printed with it.
 func sayStartJudged(logger *zap.Logger, test string, err error) {
-	logger.Error("failed on its answer's start, which differs from the recording; nothing whole of its body came: "+err.Error(),
+	logger.Error("failed on its answer's start, which differs from the recording; nothing whole of its body came: "+pkg.LoggableAnswerError(err),
 		zap.String("testcase", test))
 }
 

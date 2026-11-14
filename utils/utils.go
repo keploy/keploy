@@ -226,7 +226,9 @@ func queryKeys(rawQuery string) []string {
 		if u, err := url.QueryUnescape(k); err == nil {
 			k = u
 		}
-		keys = append(keys, k)
+		// A name that does not read as one may be a value the app sent (a
+		// token passed as a parameter's name): {} (models.KeyShape).
+		keys = append(keys, models.KeyShape(k))
 	}
 	slices.Sort(keys)
 	return slices.Compact(keys)
@@ -1083,7 +1085,9 @@ function Get-ChildProcesses($parentId) {
         Get-ChildProcesses $child.ProcessId
     }
 }
-Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-List`, ppid))
+Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Format-List`, ppid))
+		// Ids and names only, as the listing after the kill: a process's
+		// command line can carry a credential (an inline -e TOKEN=...).
 		if output, err := listAllCmd.CombinedOutput(); err == nil {
 			logger.Debug("ALL descendant processes before kill", zap.Int("parent_pid", ppid), zap.String("output", string(output)))
 		} else {

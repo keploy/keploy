@@ -75,12 +75,10 @@ func TestMySQLRestagedOrUnheldMissLogsRedactTheStatementWhole(t *testing.T) {
 	}
 }
 
-// A PREPARE the replay answers itself is logged at INFO with its statement,
-// redacted by the pool's places: whole when the replay staged a test set
-// again under its mark, or its store could not hold it to the mark, as the
-// pool cannot be read then. A held, readable store redacts the literal the
-// recording redacted alone.
-func TestMySQLSynthesizedPrepareLogRedactsByAPoolItCanRead(t *testing.T) {
+// A PREPARE the replay answers itself is logged at INFO with its
+// statement's shape, whatever its store: held and readable, restaged under
+// its mark, or unable to hold it to the mark.
+func TestMySQLSynthesizedPrepareLogShowsTheShape(t *testing.T) {
 	const placeholder = "xq7Lm2Pw9Rt4Zk"
 	const secret = "sk9LIVEsecret77"
 	recorded := "SELECT v FROM kv WHERE api_key = '" + placeholder + "'"
@@ -115,9 +113,7 @@ func TestMySQLSynthesizedPrepareLogRedactsByAPoolItCanRead(t *testing.T) {
 			if strings.Contains(lt, secret) {
 				t.Errorf("LEAK: an INFO log of the %s PREPARE shows the live secret", tc)
 			}
-			// A pool it can read redacts the literal alone, in the
-			// client's own text.
-			if want := "SELECT v, w FROM kv WHERE api_key = '(redacted)' AND id = ?"; tc == "held, readable (control)" && !strings.Contains(lt, want) {
+			if want := "SELECT v, w FROM kv WHERE api_key = ? AND id = ?"; !strings.Contains(lt, want) {
 				t.Errorf("the INFO log of the %s PREPARE does not show %q:\n%s", tc, want, lt)
 			}
 		})

@@ -919,8 +919,10 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			// mock. Stop draining and record it below, rather than discarding
 			// a partial stream and the reason it ended.
 			drainErr = err
+			// Its code, never its message: the app's server writes that
+			// (an echo of what it refused); the mock records it.
 			logger.Debug("gRPC response stream ended with an error; recording what arrived",
-				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.Error(err))
+				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.String("code", status.Code(err).String()))
 			break
 		}
 		respMsgs = append(respMsgs, createLengthPrefixedMessage(responseMsg.data))

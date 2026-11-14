@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"sync"
 	"testing"
 	"time"
 
@@ -151,8 +150,7 @@ func TestEncodeGeneric_DrainsTheSurvivorInBothDirections(t *testing.T) {
 // still works.
 func TestCaptureTeeWriterCountsWhatItDelivered(t *testing.T) {
 	var sink bytes.Buffer
-	ch := make(chan []byte, 8)
-	tee := &captureTeeWriter{dest: &sink, ch: ch, closeOnce: &sync.Once{}}
+	tee := &captureTeeWriter{dest: &sink, stream: newCaptureStream(8, 1), fromClient: true}
 
 	if got := tee.delivered(); got != 0 {
 		t.Fatalf("a fresh tee reports %d bytes delivered, want 0", got)

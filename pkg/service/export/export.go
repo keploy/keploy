@@ -32,7 +32,7 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 
 	parsedURL, err := url.Parse(extractedURL)
 	if err != nil || parsedURL.Hostname() == "" {
-		utils.LogError(logger, err, "error parsing URL")
+		utils.LogError(logger, utils.WithholdInput(err), "error parsing URL")
 		return nil
 	}
 

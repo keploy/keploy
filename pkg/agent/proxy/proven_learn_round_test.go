@@ -2163,7 +2163,7 @@ func TestAMissMarkedBeforeASetsStagingIsCountedTheSameEitherWay(t *testing.T) {
 			if len(got) != 1 || got[0].ActualSummary != "insert on events" || !got[0].BeforeSet {
 				t.Fatalf("the set's first test read %+v; want only the miss marked after its staging, as the set's", got)
 			}
-			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /between-sets"})).Len(); n != 1 {
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"HTTP POST /{}"})).Len(); n != 1 {
 				t.Fatalf("the cut of the miss marked before the staging was said %d times; want once: %+v", n, logs.All())
 			}
 		})
@@ -2247,7 +2247,7 @@ func TestASetsLastTestsLateCallIsKeptAtTheNextSetsStart(t *testing.T) {
 				if len(wire) != 1 || wire[0].BeforeSet || wire[0].EarlierSetTest != "test-1" {
 					t.Fatalf("on the wire the next set's first test read %s; want test-1's call naming test-1, not made before the set", b)
 				}
-				if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /between-sets"})).Len(); n != 1 {
+				if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"HTTP POST /{}"})).Len(); n != 1 {
 					t.Fatalf("the cut of the pool view's miss was said %d times; want once: %+v", n, logs.All())
 				}
 				if n := logs.FilterMessage(missesCutAtSetStart).Len(); n != 1 {
@@ -2977,7 +2977,9 @@ func TestASetsCallOfNoTestBeforeItsEndReadIsKeptAtTheNextSetsStart(t *testing.T)
 			if got, err := p.GetMockErrors(ctx); err != nil || len(got) != 0 {
 				t.Fatalf("precondition: set A's end read %v %+v", err, got)
 			}
-			after := mockMiss("POST /after-the-end-read")
+			// A method of its own: the cut line names a call by its
+			// shape (models.MissLogShape), which gap's shares.
+			after := mockMiss("PUT /after-the-end-read")
 			integrations.StampMark(after.MismatchReport, mm.MarkCallRound())
 			send := func() {
 				p.SendError(gap)
@@ -3022,10 +3024,10 @@ func TestASetsCallOfNoTestBeforeItsEndReadIsKeptAtTheNextSetsStart(t *testing.T)
 			if len(wire) != 1 || wire[0].BeforeSet || wire[0].EarlierSet != back {
 				t.Fatalf("on the wire the next set's first read %s; want set A's call, %d set(s) back", b, back)
 			}
-			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /after-the-end-read"})).Len(); n != 1 {
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"HTTP PUT /{}"})).Len(); n != 1 {
 				t.Fatalf("the cut of the call marked after set A's end read was said %d times; want once: %+v", n, logs.All())
 			}
-			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /after-test-1"})).Len(); n != 0 {
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"HTTP POST /{}"})).Len(); n != 0 {
 				t.Fatalf("the call marked before set A's end read was said cut %d times: %+v", n, logs.All())
 			}
 		})

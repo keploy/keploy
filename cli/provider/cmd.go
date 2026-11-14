@@ -1323,6 +1323,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	// command says so and goes on.
 	if problems := models.ValidateWorkerMockRules(c.cfg.Record.WorkerMocks); len(problems) > 0 {
 		const fix = "fix the rules (each needs a kind keploy records and at least one match key that kind reads) or remove them"
+		// Each problem by the rule's number and what is wrong, its quoted
+		// parts by their size: an id or a pattern can hold a path or a
+		// value, and both the refusal and the warning are logged.
+		for i, p := range problems {
+			problems[i] = utils.WithholdQuoted(p)
+		}
 		if isKeployRecord(cmd) {
 			return fmt.Errorf("record.workerMocks in keploy.yaml: %s; %s", strings.Join(problems, "; "), fix)
 		}
@@ -1505,19 +1511,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	}
 
-	// Redact the DB password before dumping the whole config at Debug — it would
-	// otherwise leak test.mongoPassword into any -debug capture.
+	// The config as a -debug capture needs it, with what can carry a
+	// credential redacted: the app's command line (an inline -e TOKEN=...),
+	// test.mongoPassword, the health URL (a token in its query), and
+	// record.workerMocks' rules (their patterns name paths, statements and
+	// keys, which can hold a value), counted. An in-memory compose file is
+	// never dumped (json:"-"; its size here). redactedCfg is a shallow copy:
+	// the live config is untouched.
 	redactedCfg := *c.cfg
+	redactedCfg.Command = utils.RedactCommandLine(redactedCfg.Command)
 	if redactedCfg.Test.MongoPassword != "" {
 		redactedCfg.Test.MongoPassword = "****"
 	}
-	// InMemoryCompose can carry docker-compose YAML with embedded secrets/tokens;
-	// never dump its contents. redactedCfg is a shallow copy, so reassigning the
-	// slice header here leaves the live config untouched.
-	if len(redactedCfg.InMemoryCompose) > 0 {
-		redactedCfg.InMemoryCompose = []byte(fmt.Sprintf("**** (%d bytes redacted)", len(redactedCfg.InMemoryCompose)))
+	if redactedCfg.Test.HealthURL != "" {
+		redactedCfg.Test.HealthURL = utils.RedactCommandLine(redactedCfg.Test.HealthURL)
 	}
-	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", redactedCfg))
+	workerMockRules := len(redactedCfg.Record.WorkerMocks)
+	redactedCfg.Record.WorkerMocks = nil
+	c.logger.Debug("config has been initialised", zap.String("for cmd", cmd.Name()), zap.Any("config", redactedCfg), zap.Int("in-memory compose bytes", len(redactedCfg.InMemoryCompose)), zap.Int("worker-mock rules", workerMockRules))
 
 	// `keploy mock record` / `keploy mock replay` validation runs on its own
 	// path (see addMockFlags) — the subcommands are named "record"/"replay".

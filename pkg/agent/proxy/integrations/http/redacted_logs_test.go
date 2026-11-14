@@ -19,25 +19,18 @@ import (
 type untoldStore struct{ integrations.MockMemDb }
 
 // The request matcher's error line for a call body that is JSON but no
-// object (bodyMatch) names the body redacted by every recording of the
-// pool, as the call's miss is: the candidate compared redacted nothing,
-// while another recording of the pool, or one that answered a call before
-// and is only on the store's answered list, redacted the key the call sends
-// its secret under. The rest of the body still shows. A store that does not
-// tell its answered recordings has the body redacted whole, and so does the
-// exported PerformBodyMatch, whose caller hands no pool.
-func TestTheBodyErrorLineIsRedactedByThePool(t *testing.T) {
+// object (bodyMatch) names the body by its size alone, whatever any
+// recording of the pool redacted: a field no recording redacted is the
+// application's data too. So for every store: a pool, one whose recording
+// that redacted the key answered a call before, one that does not tell its
+// answered recordings, and the exported PerformBodyMatch, whose caller hands
+// no pool.
+func TestTheBodyErrorLineNamesTheBodyBySizeOnly(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	jsonHdr := map[string]string{"Content-Type": "application/json"}
 	body := `[{"assertion":"` + liveSecret + `","note":"kept1"}]`
-	for _, c := range []struct {
-		name  string
-		whole bool
-	}{
-		{"pool", false},
-		{"answered-before", false},
-		{"a-store-that-does-not-tell", true},
-		{"exported", true},
+	for _, c := range []struct{ name string }{
+		{"pool"}, {"answered-before"}, {"a-store-that-does-not-tell"}, {"exported"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			core, logs := observer.New(zap.DebugLevel)
@@ -66,14 +59,13 @@ func TestTheBodyErrorLineIsRedactedByThePool(t *testing.T) {
 			if len(lines) != 1 {
 				t.Fatalf("logged %d lines for the body that is no object, want 1", len(lines))
 			}
-			got, _ := lines[0].ContextMap()["Req"].(string)
-			switch {
-			case c.whole && got != valueRedacted:
-				t.Errorf("the line names the body %q, want it redacted whole", got)
-			case !c.whole && !strings.Contains(got, "kept1"):
-				t.Errorf("the line names the body %q, want the field no recording redacted shown", got)
+			if got := lines[0].ContextMap()["body_bytes"]; got != int64(len(body)) {
+				t.Errorf("the line names the body's size as %v, want %d", got, len(body))
 			}
-			loggedNone(t, logs, liveSecret)
+			if _, ok := lines[0].ContextMap()["Req"]; ok {
+				t.Error("the line names the body itself")
+			}
+			loggedNone(t, logs, liveSecret, "kept1")
 		})
 	}
 }
@@ -110,17 +102,30 @@ func TestTheVariableBoundLineIsRedactedByThePool(t *testing.T) {
 	}
 }
 
-// wantBound checks the values the "variable bound" lines wrote.
+// wantBound checks what the "variable bound" lines wrote of each variable:
+// whether its place is one a recording of the pool redacted (want's value
+// valueRedacted) or not (any other want value), and never the value itself,
+// redacted or not: its size alone.
 func wantBound(t *testing.T, logs *observer.ObservedLogs, want map[string]string) {
 	t.Helper()
-	got := map[string]string{}
+	redacted := map[string]bool{}
 	for _, e := range logs.FilterMessage("variable bound").All() {
-		v, _ := e.ContextMap()["variable"].(string)
-		got[v], _ = e.ContextMap()["value"].(string)
+		fields := e.ContextMap()
+		v, _ := fields["variable"].(string)
+		redacted[v], _ = fields["at_redacted_place"].(bool)
+		if _, ok := fields["value"]; ok {
+			t.Errorf("the line of %s logs the bound value", v)
+		}
+		if _, ok := fields["recorded"]; ok {
+			t.Errorf("the line of %s logs the recorded value", v)
+		}
+		if w, ok := want[v]; ok && w != valueRedacted && fields["value_bytes"] != int64(len(w)) {
+			t.Errorf("the line of %s names the value's size as %v, want %d", v, fields["value_bytes"], len(w))
+		}
 	}
 	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("logged the bound values as %v, want %v", got, want)
+		if got, ok := redacted[k]; !ok || got != (v == valueRedacted) {
+			t.Errorf("logged the bound places as redacted %v, want %v", redacted, want)
 			return
 		}
 	}

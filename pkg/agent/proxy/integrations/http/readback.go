@@ -99,7 +99,7 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		}
 		sort.Strings(paths)
 		h.Logger.Info("keploy answers fields of a read with their recorded values, not with what this run wrote, because of a write it cannot follow",
-			zap.String("mock", answered.Name), zap.Int("fields", len(paths)), zap.String("first", paths[0]), zap.String("why", access.Unread[paths[0]]))
+			zap.String("mock", answered.Name), zap.Int("fields", len(paths)), zap.String("first", models.FieldShape(paths[0])), zap.String("why", access.Unread[paths[0]]))
 	}
 	if len(access.Read) == 0 || !storedAny(access.Written) {
 		// No call stored a leaf: learn.ReadBack reads back none.
@@ -134,7 +134,7 @@ func (h *HTTP) readBackPlan(tracker *learn.Tracker, test uint64, answered *model
 		}
 		sort.Strings(paths)
 		h.Logger.Info("keploy answers fields of a read with their recorded values, not with what this run's PUT stored, because a later call to another URL of the store may have written them",
-			zap.String("mock", answered.Name), zap.Int("fields", len(paths)), zap.String("first", paths[0]), zap.String("call", held[paths[0]]))
+			zap.String("mock", answered.Name), zap.Int("fields", len(paths)), zap.String("first", models.FieldShape(paths[0])), zap.String("call", held[paths[0]]))
 	}()
 	for _, a := range respLeaves(answered.Spec.HTTPResp) {
 		record, ok := access.Read[a.Path]

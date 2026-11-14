@@ -71,8 +71,8 @@ func TestJSONStoreRefusesABodyThatIsNotUTF8(t *testing.T) {
 			require.Equal(t, []string{before.Name + ".json", after.Name + ".json"}, storedTests(t, dir))
 			said := logs.FilterMessage("refusing to write a binary body as JSON").All()
 			require.Len(t, said, 1)
-			require.Equal(t, "POST", said[0].ContextMap()["method"])
-			require.Equal(t, "http://app/bin", said[0].ContextMap()["url"])
+			// The call by its shape (utils.URLLogMeta), never its URL.
+			require.Equal(t, map[string]string{"method": "POST", "host": "app", "path": "/{}", "scheme": "http"}, said[0].ContextMap()["metadata"])
 			for _, f := range storedTests(t, dir) {
 				b, err := os.ReadFile(filepath.Join(dir, "test-set-0", "tests", f))
 				require.NoError(t, err)

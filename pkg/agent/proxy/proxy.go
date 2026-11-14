@@ -6289,7 +6289,10 @@ func (p *Proxy) sayLearnWaits() {
 	})
 }
 
-// missSummaries names, for a log line, the calls of up to the first 10 misses.
+// missSummaries names, for a log line, the calls of up to the first 10
+// misses: each by its shape (models.MissLogShape), or by its error's type
+// when it carries no report. Never the summary or the error's text: they
+// hold what the call sent.
 func missSummaries(errs []error) []string {
 	out := make([]string, 0, min(len(errs), 10))
 	for _, err := range errs {
@@ -6297,11 +6300,13 @@ func missSummaries(errs []error) []string {
 			break
 		}
 		var pe models.ParserError
-		if errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.ActualSummary != "" {
-			out = append(out, pe.MismatchReport.ActualSummary)
-			continue
+		if errors.As(err, &pe) && pe.MismatchReport != nil {
+			if shape := models.MissLogShape(pe.MismatchReport); shape != "" {
+				out = append(out, pe.MismatchReport.Protocol+" "+shape)
+				continue
+			}
 		}
-		out = append(out, err.Error())
+		out = append(out, fmt.Sprintf("%T", err))
 	}
 	return out
 }
@@ -6586,7 +6591,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					Instance:      parserErr.Instance,
 					Protocol:      "unknown",
 					ActualSummary: parserErr.Err.Error(),
-					NextSteps:     withStagingNote(parserErr, "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details."),
+					NextSteps:     withStagingNote(parserErr, "This protocol's matcher does not emit structured mismatch reports yet; the parser's own error, above, says what it could not match (the agent's log names only its kind)."),
 					Kind:          parserErr.MissKind,
 				})
 			}
@@ -6870,14 +6875,18 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 			zap.Bool("drift", r.Drift),
 			zap.Bool("reused", r.Reused))
 	} else if r != nil {
+		// The call by its shape (models.MissLogShape), never its summary:
+		// the summary holds what the call sent (a path's token, a
+		// statement's literal) for the user's own report, and this line
+		// reaches the agent's log store.
 		fields := []zap.Field{
 			zap.String("protocol", r.Protocol),
 			zap.String("destination", r.Destination),
-			zap.String("actual", models.WithHTTPOperation(r.ActualSummary, r.Operation)),
+			zap.String("call", models.MissLogShape(r)),
 			zap.String("match_phase", r.MatchPhase),
 			zap.Int("candidates", r.CandidateCount),
 			zap.String("closest", r.ClosestMock),
-			zap.String("next_step", r.NextSteps),
+			zap.String("next_step", models.MissLogNextStep(r)),
 		}
 		// destination_scope is greppable in a node-wide agent log:
 		// "not_in_compared_set" is the one value that says "nothing this miss
@@ -6900,7 +6909,10 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		}
 		p.mismatchLog()("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {
-		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
+		// The error's kind and size, never its text: a parser that built
+		// no report may have written the call into it, quoted or not.
+		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)",
+			zap.String("error_type", fmt.Sprintf("%T", err)), zap.Int("error_bytes", len(err.Error())), zap.Bool("no_mock_matched", errors.Is(err, models.ErrNoMockMatched)))
 	}
 	p.SendError(proxyErr)
 }

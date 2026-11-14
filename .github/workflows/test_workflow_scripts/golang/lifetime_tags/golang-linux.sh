@@ -383,9 +383,16 @@ expect_pass() {
         grep -nE 'no matching mock|ERROR' "$2" | head -20
     fi
 }
-# expect_miss <step> <test id> <status> <log> <pattern> [hint]: the test got
-# status, and its log reports the call that got no recorded answer (pattern),
-# and, when hint is set, names the keploy.yaml rule that declares it.
+# miss_fields <protocol> <destination> <shape>: the fields keploy's miss line
+# names a missed call by, as its log writes them. The shape never holds what
+# the call sent: an HTTP call is its method and its path with each segment
+# {}, a statement is its text with each literal ?.
+miss_fields() { printf '"protocol": "%s", "destination": "%s", "call": "%s"' "$1" "$2" "$3"; }
+# expect_miss <step> <test id> <status> <log> <miss> <call> [hint]: the test
+# got status; its log reports the call that got no recorded answer on keploy's
+# miss line, by its fields (miss, miss_fields); the test's report names that
+# call whole as its unmatched call (call), as the user reads it; and, when
+# hint is set, the log names the keploy.yaml rule that declares it.
 expect_miss() {
     if [ "$(test_status "$2")" != "$3" ]; then
         fail "$1: $2 must be $3 (exit $RC, status $(test_status "$2"))"
@@ -393,8 +400,11 @@ expect_miss() {
     if [ "$3" = FAILED ] && [ "$RC" -eq 0 ]; then
         fail "$1: keploy test exited 0 with $2 FAILED"
     fi
-    grep -qE "$5" "$4" || fail "$1: the log reports no miss matching '$5'"
-    if [ -n "${6:-}" ]; then
+    sed 's/\x1b\[[0-9;]*m//g' "$4" | grep -F 'no matching mock for outgoing call' | grep -qF "$5" ||
+        fail "$1: the log reports no miss naming $5"
+    T="$2" S="$6" yq -e '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]?.actual_summary] | any_c(. == strenv(S))' "$(REPORT)" >/dev/null ||
+        fail "$1: the report names no unmatched call of $2 '$6' ($(T="$2" yq -N -o=json -I=0 '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]?.actual_summary]' "$(REPORT)" 2>/dev/null))"
+    if [ -n "${7:-}" ]; then
         grep -q 'sessionCalls' "$4" || fail "$1: the miss does not name keploy.yaml's sessionCalls"
     fi
 }
@@ -449,8 +459,13 @@ if is_build "$RECORD_BIN"; then
     stated MySQL COM_STMT_CLOSE '.*' connection
 fi
 
-TOKEN_MISS='no matching mock for outgoing call.*POST /oauth/token'
-RATE_MISS="no matching mock for outgoing call.*SELECT v FROM settings WHERE k = 'tax_rate'"
+# The token call and the rate read: the miss line names each by its shape,
+# the only POST of two segments to the auth service and the only statement
+# of that shape; the report names it whole.
+TOKEN_MISS=$(miss_fields HTTP "127.0.0.1:$UP" 'POST /{}/{}')
+TOKEN_CALL='POST /oauth/token'
+RATE_MISS=$(miss_fields MySQL 127.0.0.1:3306 'COM_QUERY SELECT v FROM settings WHERE k = ?')
+RATE_CALL="COM_QUERY SELECT v FROM settings WHERE k = 'tax_rate'"
 judged=true
 is_build "$REPLAY_BIN" || judged=false
 
@@ -464,7 +479,7 @@ if replay only-profile fresh get-profile-1; then
     if [ "$judged" = false ]; then
         echo "get-profile-1 alone, replayed by a release: exit $RC, status $(set_status) (not judged)"
     elif [ "$states" = true ]; then
-        expect_miss "get-profile-1 alone" get-profile-1 FAILED only-profile.log "$TOKEN_MISS" hint
+        expect_miss "get-profile-1 alone" get-profile-1 FAILED only-profile.log "$TOKEN_MISS" "$TOKEN_CALL" hint
     else
         expect_pass "get-profile-1 alone, on a recording made before" only-profile.log
     fi
@@ -474,7 +489,7 @@ if replay only-quote fresh get-quote-1; then
     if [ "$judged" = false ]; then
         echo "get-quote-1 alone, replayed by a release: exit $RC, status $(set_status) (not judged)"
     elif [ "$states" = true ]; then
-        expect_miss "get-quote-1 alone" get-quote-1 FAILED only-quote.log "$RATE_MISS"
+        expect_miss "get-quote-1 alone" get-quote-1 FAILED only-quote.log "$RATE_MISS" "$RATE_CALL"
     else
         expect_pass "get-quote-1 alone, on a recording made before" only-quote.log
     fi
@@ -491,9 +506,9 @@ if replay mapped-profile mapped get-profile-1; then
     if [ "$judged" = false ]; then
         echo "get-profile-1 alone by its mapping, replayed by a release: exit $RC, status $(set_status) (not judged)"
     elif [ "$states" = true ]; then
-        expect_miss "get-profile-1 alone by its mapping" get-profile-1 FAILED mapped-profile.log "$TOKEN_MISS" hint
+        expect_miss "get-profile-1 alone by its mapping" get-profile-1 FAILED mapped-profile.log "$TOKEN_MISS" "$TOKEN_CALL" hint
     else
-        expect_miss "get-profile-1 alone by its mapping, on a recording made before" get-profile-1 FAILED mapped-profile.log "$TOKEN_MISS"
+        expect_miss "get-profile-1 alone by its mapping, on a recording made before" get-profile-1 FAILED mapped-profile.log "$TOKEN_MISS" "$TOKEN_CALL"
     fi
 fi
 # 7. By its mapping, the token call declared shared.

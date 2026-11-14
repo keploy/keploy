@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/internal/logleak"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
@@ -79,7 +80,8 @@ func TestAFormFilePathATestCaseNamesIsNeitherCopiedNorRemoved(t *testing.T) {
 			requireNothingHolds(t, root, "SECRET-OUTSIDE")
 		}
 		// stored says whether the write stored the test case, as c says it
-		// must: refused, with the part and the path named.
+		// must: refused, with the part named, its file name by its size and
+		// the path by its folder (the file name is the app's).
 		stored := func(t *testing.T, err error, victim string) bool {
 			t.Helper()
 			if !c.refused {
@@ -91,7 +93,7 @@ func TestAFormFilePathATestCaseNamesIsNeitherCopiedNorRemoved(t *testing.T) {
 			if err == nil {
 				t.Fatal("the test case was stored without its part's file; want it refused")
 			}
-			for _, want := range []string{`form part "file"`, `"id_rsa"`, victim} {
+			for _, want := range []string{`form part "file"`, "(file name withheld, 6 bytes)", shapedFormPath(victim)} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the refusal %q does not name %s", err, want)
 				}
@@ -316,8 +318,8 @@ func TestARelativeFormFilePathWithNoFileIsLeftOutAndNamed(t *testing.T) {
 				t.Fatalf("insert = %v, want the test case stored without the part", err)
 			}
 			said := logs.FilterMessageSnippet("stored without a form part's file").All()
-			if len(said) != 1 || said[0].ContextMap()["path"] != named || said[0].ContextMap()["key"] != "file" || said[0].ContextMap()["fileName"] != "a.txt" || said[0].ContextMap()["testCase"] != "test-1" {
-				t.Errorf("the store said %v, want one ERROR line naming the test case, the part, its file and the path", logs.All())
+			if len(said) != 1 || said[0].ContextMap()["path"] != shapedFormPath(named) || said[0].ContextMap()["key"] != "file" || said[0].ContextMap()["fileName"] != "(file name withheld, 5 bytes)" || said[0].ContextMap()["testCase"] != "test-1" {
+				t.Errorf("the store said %v, want one ERROR line naming the test case, the part, its file's size and the path's folder", logs.All())
 			}
 			if files, _ := filepath.Glob(filepath.Join(root, "set", "tests", "*")); len(files) != 1 {
 				t.Fatalf("stored %q, want the test case", files)
@@ -334,8 +336,8 @@ func TestARelativeFormFilePathWithNoFileIsLeftOutAndNamed(t *testing.T) {
 			if len(parts) != 1 || parts[0] != want || more != 0 {
 				t.Fatalf("left out = %+v (and %d more), want only %+v", parts, more, want)
 			}
-			if s := parts[0].String(); !strings.Contains(s, "set/test-1") || !strings.Contains(s, `form part "file"`) || !strings.Contains(s, `"a.txt"`) || !strings.Contains(s, "path "+strconv.Quote(named)) {
-				t.Errorf("the summary's line %q does not name the test case, the part, its file and the path", s)
+			if s := parts[0].String(); !strings.Contains(s, "set/test-1") || !strings.Contains(s, `form part "file"`) || !strings.Contains(s, "(file name withheld, 5 bytes)") || !strings.Contains(s, "path "+strconv.Quote(shapedFormPath(named))) {
+				t.Errorf("the summary's line %q does not name the test case, the part, its file's size and the path's folder", s)
 			}
 			if parts, more := ts.TakeFormPartsLeftOut(); len(parts) != 0 || more != 0 {
 				t.Errorf("a second take = %+v (and %d more), want each part handed over once", parts, more)
@@ -408,4 +410,53 @@ func TestTheLeftOutListIsBounded(t *testing.T) {
 	if parts, more := ts.TakeFormPartsLeftOut(); len(parts) != 0 || more != 0 {
 		t.Errorf("a second take = %d parts and %d more, want the count handed over once", len(parts), more)
 	}
+}
+
+// shapedFormPath is a form part's file path as the store's lines name it:
+// its folder, and its file name by its size.
+func shapedFormPath(p string) string {
+	dir, base := filepath.Split(p)
+	return dir + "(file name withheld, " + strconv.Itoa(len(base)) + " bytes)"
+}
+
+// A form part's file name is the app's (multipart's filename=), and so is a
+// path that ends in it: the store's ERROR line, the recording summary's
+// line, the refusal's error and a failed write's line and error name the
+// part by its key, its file name by its size and a path by its folder.
+func TestAFormPartsFileNameIsNamedByItsSize(t *testing.T) {
+	const s = logleak.Canary
+	name := "cv-" + s + ".pdf"
+	root := filepath.Join(t.TempDir(), "keploy")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logger, logs := logleak.Observe()
+	ts := NewWithFormat(logger, root, yaml.FormatJSON)
+	ctx := context.Background()
+
+	// Left out: a relative path that names no file in the recording.
+	named := filepath.Join("set", "assets", "test-1", "file", name)
+	if err := ts.InsertTestCase(ctx, formCase("test-1", models.FormData{Key: "file", FileNames: []string{name}, Paths: []string{named}}), "set", false); err != nil {
+		t.Fatalf("insert = %v, want the test case stored without the part", err)
+	}
+	parts, _ := ts.TakeFormPartsLeftOut()
+	if len(parts) != 1 || logleak.Holds(parts[0].String(), s) || !strings.Contains(parts[0].String(), `form part "file"`) {
+		t.Errorf("the summary's lines %q hold the file's name, or do not name the part", parts)
+	}
+	// Refused: an absolute path no capture of this run left.
+	if runtime.GOOS != "windows" {
+		err := ts.InsertTestCase(ctx, formCase("test-2", models.FormData{Key: "file", FileNames: []string{name}, Paths: []string{"/tmp/up/" + name}}), "set", false)
+		if err == nil || logleak.Holds(err.Error(), s) || !strings.Contains(err.Error(), `form part "file"`) || !strings.Contains(err.Error(), shapedFormPath("/tmp/up/"+name)) {
+			t.Errorf("insert = %v, want the refusal to name the part and the path's folder, not the file's name", err)
+		}
+	}
+	// A write that fails: a folder stands where the part's file goes.
+	if err := os.MkdirAll(filepath.Join(root, "set", "assets", "test-3", "file", name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := ts.InsertTestCase(ctx, formCase("test-3", models.FormData{Key: "file", FileNames: []string{name}, FileContents: [][]byte{[]byte("x")}}), "set", false)
+	if err == nil || logleak.Holds(err.Error(), s) {
+		t.Errorf("insert = %v, want the write's failure without the file's name", err)
+	}
+	logleak.Check(t, logs, s, "the test store's form part lines")
 }

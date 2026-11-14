@@ -82,7 +82,7 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 
 	opts := composeUpSemantics(a.cmd)
 	a.logger.Info("Starting Application :",
-		zap.String("executing_cmd", a.cmd),
+		zap.String("executing_cmd", utils.RedactCommandLine(a.cmd)),
 		zap.String("composeProject", runner.ProjectName()),
 		zap.String("exitCodeFrom", opts.ExitCodeFrom),
 		zap.String("onExit", opts.OnExit.String()))

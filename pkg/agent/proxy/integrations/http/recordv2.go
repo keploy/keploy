@@ -119,6 +119,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				logger.Debug("V2 HTTP record: client stream closed mid-request", zap.Error(err))
 				return nil
 			}
+			// The error can quote what the application sent (a parser's
+			// does): withheld wherever it goes.
+			err = utils.WithholdInput(err)
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: request read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to read full request")
 			return err
@@ -192,6 +195,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				logger.Debug("V2 HTTP record: dest stream ended before response", zap.Error(err))
 				return nil
 			}
+			// The error can quote what the application sent (a parser's
+			// does): withheld wherever it goes.
+			err = utils.WithholdInput(err)
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: initial response read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: initial response read failed")
 			return err
@@ -238,6 +244,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 					resTs = gotLastWritten
 				}
 			} else {
+				// The error can quote what the application sent (a parser's
+				// does): withheld wherever it goes.
+				err = utils.WithholdInput(err)
 				sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: response read failed: "+err.Error())
 				utils.LogError(logger, err, "V2 HTTP record: failed to read full response")
 				return err
@@ -316,6 +325,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			Fault:            fault,
 		}, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
+			// The error can quote what the application sent (a parser's
+			// does): withheld wherever it goes.
+			err = utils.WithholdInput(err)
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to build mock")
 			return err
@@ -488,6 +500,9 @@ func partAnswerFault(sess *supervisor.Session) *models.Fault {
 func (h *HTTP) recordFault(ctx context.Context, sess *supervisor.Session, logger *zap.Logger, m *FinalHTTP, destPort uint, reqTs time.Time) error {
 	mock, err := h.buildHTTPMock(m, destPort, sess.ClientConnID, sess.Opts)
 	if err != nil {
+		// The error can quote what the application sent (a parser's
+		// does): withheld wherever it goes.
+		err = utils.WithholdInput(err)
 		sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
 		utils.LogError(logger, err, "V2 HTTP record: failed to build the mock of a call that ended in a fault")
 		return err
@@ -1026,7 +1041,9 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
-		return nil, fmt.Errorf("parse request: %w", err)
+		// The parser's error quotes the request: withheld, as the error
+		// is logged and reported.
+		return nil, fmt.Errorf("parse request: %w", utils.WithholdInput(err))
 	}
 	req.Header.Set("Host", req.Host)
 

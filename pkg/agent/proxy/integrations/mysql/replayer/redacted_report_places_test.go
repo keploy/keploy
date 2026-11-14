@@ -312,10 +312,11 @@ func TestMySQLStrictLongDataMissKeepsAChunkNoRecordingRedacted(t *testing.T) {
 	}
 }
 
-// The pool's places are read once for a command whose lines or report show
-// its statement, and never for one whose lines and report show none: a
-// COM_PING, debug lines on, or a COM_QUERY answered with them off.
-func TestMySQLReadsThePoolsPlacesOnlyForACommandThatShowsItsStatement(t *testing.T) {
+// The pool's places are read once for a command whose report shows its
+// statement (a miss), and never for one whose report shows none: a
+// COM_PING, or a COM_QUERY answered, debug lines on or off. Its lines show
+// the statement by its shape, which reads no places.
+func TestMySQLReadsThePoolsPlacesOnlyForAMiss(t *testing.T) {
 	ping := mysql.Request{PacketBundle: mysql.PacketBundle{
 		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 1}, Type: "COM_PING"},
 		Message: &mysql.PingPacket{Command: mysql.COM_PING},
@@ -345,7 +346,7 @@ func TestMySQLReadsThePoolsPlacesOnlyForACommandThatShowsItsStatement(t *testing
 	}{
 		{"a COM_PING, debug on", ping, true, true, 0},
 		{"a COM_QUERY answered, debug off", query(recorded), false, true, 0},
-		{"a COM_QUERY answered, debug on", query(recorded), true, true, 1},
+		{"a COM_QUERY answered, debug on", query(recorded), true, true, 0},
 		{"a COM_QUERY missed, debug off", query("SELECT name FROM users WHERE api_key = '" + liveSecret + "' AND id = 1"), false, false, 1},
 		{"a COM_QUERY missed, debug on", query("SELECT name FROM users WHERE api_key = '" + liveSecret + "' AND id = 1"), true, false, 1},
 	} {
@@ -365,11 +366,14 @@ func TestMySQLReadsThePoolsPlacesOnlyForACommandThatShowsItsStatement(t *testing
 			if reads != tc.reads {
 				t.Errorf("the command read the pool's places %d time(s); want %d", reads, tc.reads)
 			}
-			// A store that marks no round is read as it is: the lines
-			// show the statement by the pool's places, not whole redacted.
-			const shown = "SELECT name FROM users WHERE api_key = '(redacted)' AND id = '(redacted)'"
-			if lt := logText(logs.All()); tc.debug && !tc.answered && !strings.Contains(lt, shown) {
+			// The lines show the statement's shape, no literal of it.
+			const shown = "SELECT name FROM users WHERE api_key = ? AND id = ?"
+			lt := logText(logs.All())
+			if tc.debug && !tc.answered && !strings.Contains(lt, shown) {
 				t.Errorf("the miss's lines do not show %q:\n%s", shown, lt)
+			}
+			if strings.Contains(lt, liveSecret) {
+				t.Errorf("the lines show the live value:\n%s", lt)
 			}
 		})
 	}
