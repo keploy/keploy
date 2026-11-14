@@ -25,8 +25,9 @@ import (
 // branch counted every such connection as a mock left out, with a WARN.
 
 // heldAtTheStop is a held connection whose capture ends at the client's
-// response to the greeting (tls: an SSLRequest), read at the recording's stop.
-// The relay answers through relay, run with the harness.
+// response to the greeting (tls: an SSLRequest), read at the recording's stop
+// (newHeldWhileRecording: while the recording runs). The relay answers
+// through the harness's directive and ack channels.
 type heldAtTheStop struct {
 	h    *v2Harness
 	mgr  *syncMock.SyncMockManager
@@ -45,6 +46,21 @@ func newHeldAtTheStop(t *testing.T, tls bool) *heldAtTheStop {
 // open: the relay's teardown has not ended them yet.
 func newHeldAtTheStopStreamsOpen(t *testing.T, tls bool) *heldAtTheStop {
 	t.Helper()
+	c := newHeldStreamsOpen(t, tls)
+	c.ctx = stoppedRecording(context.Background(), c.h.sess)
+	return c
+}
+
+// newHeldWhileRecording is newHeldAtTheStop with the recording still running.
+func newHeldWhileRecording(t *testing.T, tls bool) *heldAtTheStop {
+	t.Helper()
+	c := newHeldStreamsOpen(t, tls)
+	c.h.closeStreams()
+	return c
+}
+
+func newHeldStreamsOpen(t *testing.T, tls bool) *heldAtTheStop {
+	t.Helper()
 	resetWarnLimiters()
 	core, logs := observer.New(zapcore.DebugLevel)
 	h := newV2Harness(t)
@@ -62,7 +78,7 @@ func newHeldAtTheStopStreamsOpen(t *testing.T, tls bool) *heldAtTheStop {
 	} else {
 		h.pushClient(cannedHandshakeResponse41(t, 1, false), base.Add(time.Millisecond))
 	}
-	return &heldAtTheStop{h: h, mgr: mgr, logs: logs, ctx: stoppedRecording(context.Background(), h.sess)}
+	return &heldAtTheStop{h: h, mgr: mgr, logs: logs, ctx: context.Background()}
 }
 
 // nothingLost asserts the connection was neither counted nor said left out,
@@ -153,6 +169,38 @@ func TestRecordV2_AtTheStopARelayThatEndsUnansweredLeavesAHeldHandshakeSilent(t 
 			}
 		}()
 		err := recordV2NoPanic(t, c.ctx, c.h.logger, c.h.sess)
+		if err != nil {
+			t.Fatalf("RecordV2 = %v; want the relay's end taken for its streams' end, silently", err)
+		}
+		c.nothingLost(t, err)
+	})
+}
+
+// The same relay end while the recording runs: the relay ends both streams
+// before it closes the ack channel (relay.Run), so nothing more was captured,
+// and the handshake reads on to its streams' end, silently. Before, the parser
+// returned an error ("directive channel closed before ... ack") for a capture
+// that had lost nothing.
+func TestRecordV2_WhileRecordingARelayThatEndsUnansweredLeavesAHeldHandshakeSilent(t *testing.T) {
+	heldCases(t, func(t *testing.T, tls bool) {
+		c := newHeldWhileRecording(t, tls)
+		taken := make(chan directive.Kind, 1)
+		go func() {
+			select {
+			case d := <-c.h.dirs:
+				taken <- d.Kind
+				close(c.h.acks)
+			case <-time.After(5 * time.Second):
+				close(taken)
+			}
+		}()
+		err := recordV2NoPanic(t, c.ctx, c.h.logger, c.h.sess)
+		if k, ok := <-taken; !ok || k != heldKind(tls) {
+			t.Fatalf("the relay took %v (taken: %v); want %v", k, ok, heldKind(tls))
+		}
+		if c.h.sess.RecordingStopping() {
+			t.Fatal("the recording has stopped; this row is for one that runs")
+		}
 		if err != nil {
 			t.Fatalf("RecordV2 = %v; want the relay's end taken for its streams' end, silently", err)
 		}

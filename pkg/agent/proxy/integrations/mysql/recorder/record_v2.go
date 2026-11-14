@@ -55,11 +55,18 @@ import (
 //   - Records the pre-TLS prelude mock.
 //   - Sends directive.UpgradeTLS on sess.Directives with dest and client
 //     TLS configs derived from sess.Opts.
-//   - Blocks on sess.Acks. On OK==true, subsequent chunks from
-//     ClientStream/DestStream are plaintext; reads the re-sent
-//     HandshakeResponse41 and continues.
-//   - On OK==false, calls sess.MarkMockIncomplete and returns the err;
-//     the supervisor falls through to raw passthrough.
+//   - Blocks on sess.Acks until the relay answers, the relay ends, or the
+//     parser ends (untilParserEnds: not the recording's stop). On
+//     OK==true, subsequent chunks from ClientStream/DestStream are
+//     plaintext; reads the re-sent HandshakeResponse41 and continues.
+//   - On OK==false while the recording runs, returns the err without a
+//     mark on the incomplete-mock flag (no mock is emitted after it to
+//     take one); the supervisor leaves out the rest of the connection.
+//   - An upgrade the relay fails at the recording's stop, or never
+//     answers because it ended (it closes Acks), ends the capture at the
+//     SSLRequest: RecordV2 returns nil and nothing is said or counted.
+//     Past the SSLRequest the capture holds TLS records only, which no
+//     recorder reads, so nothing captured is lost.
 //
 // Each command starts where Session.NextRequest finds it, and RecordV2 ends
 // with Session.EndExchanges, however it ends: server bytes captured before the
@@ -1110,9 +1117,12 @@ func untilParserEnds(ctx context.Context, sess *supervisor.Session) (context.Con
 	}
 	stop := context.AfterFunc(ctx, func() {
 		// Only the stop waits for the retirement. A teardown while the
-		// recording runs is the parser's end itself, and a session no
-		// supervisor runs has no retirement to wait for (Retired is nil):
-		// both end the fetch at once.
+		// recording runs is the parser's end itself and ends the wait at
+		// once. At the stop the wait lasts until the retirement or done():
+		// a session no supervisor runs has no retirement (Retired is nil),
+		// so its wait lasts until done(). No recording session is one:
+		// only proxy_v2.go sets RecordingDone, always for a session
+		// Supervisor.Run runs.
 		if sess.RecordingStopping() {
 			select {
 			case <-sess.Retired():
