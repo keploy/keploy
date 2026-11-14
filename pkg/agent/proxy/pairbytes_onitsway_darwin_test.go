@@ -210,6 +210,90 @@ func TestPlaintextOnItsWayAtTheProxysCloseIsReadThroughOnDarwin(t *testing.T) {
 			t.Fatalf("the close counted %+v from another connection's socket", *w)
 		}
 	})
+	t.Run("its socket missing from the table", func(t *testing.T) {
+		// The table no longer lists the application's socket (reset, or
+		// closed and its timewait over): nothing is counted, and the close
+		// does not wait, even when the proxy's side began from sequence
+		// number 0, a first sequence number like any other. The counts
+		// are proven first, as at keploy's start.
+		if err := xnuTableReadable(); err != nil {
+			t.Fatal(err)
+		}
+		p, app, proxySide, reader := darwinPair(t)
+		a, _ := addrPortOf(app.LocalAddr())
+		r, _ := addrPortOf(proxySide.LocalAddr())
+		was := readXNUTable
+		readXNUTable = func() ([]xnuPCB, error) {
+			table, err := was()
+			kept := table[:0]
+			for _, b := range table {
+				if sameEnd(b.local, a) {
+					continue
+				}
+				if sameEnd(b.local, r) && sameEnd(b.remote, a) {
+					b.irs = 0
+				}
+				kept = append(kept, b)
+			}
+			return kept, err
+		}
+		t.Cleanup(func() { readXNUTable = was })
+		closed := make(chan struct{})
+		go func() {
+			defer close(closed)
+			_ = reader.Close()
+		}()
+		select {
+		case <-closed:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the close waited on a count read with the application's socket missing")
+		}
+		readXNUTable = was
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+			t.Fatalf("app_bytes_lost = %d, want 0", l)
+		}
+		if w := pairedConnOf(t, p, 1).wroteAtClose.Load(); w != nil {
+			t.Fatalf("the close counted %+v with the application's socket missing from the table", *w)
+		}
+	})
+	t.Run("a table read that failed", func(t *testing.T) {
+		// A read of the table that failed counts nothing, not even from
+		// the sockets it did return, and the close does not wait. The
+		// counts are proven first, as at keploy's start.
+		if err := xnuTableReadable(); err != nil {
+			t.Fatal(err)
+		}
+		p, app, _, reader := darwinPair(t)
+		if _, err := app.Write([]byte("publish 1\n")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+			t.Fatal(err)
+		}
+		was := readXNUTable
+		readXNUTable = func() ([]xnuPCB, error) {
+			table, _ := was()
+			return table, errors.New("the table changed while it was read")
+		}
+		t.Cleanup(func() { readXNUTable = was })
+		closed := make(chan struct{})
+		go func() {
+			defer close(closed)
+			_ = reader.Close()
+		}()
+		select {
+		case <-closed:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the close waited on a count from a table read that failed")
+		}
+		readXNUTable = was
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+			t.Fatalf("app_bytes_lost = %d, want 0", l)
+		}
+		if w := pairedConnOf(t, p, 1).wroteAtClose.Load(); w != nil {
+			t.Fatalf("the close counted %+v from a table read that failed", *w)
+		}
+	})
 }
 
 // Bytes the close tosses unread beside the application's FIN are placed among
