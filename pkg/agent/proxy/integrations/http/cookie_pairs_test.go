@@ -50,8 +50,20 @@ func TestCookiePairsDiffer(t *testing.T) {
 		{"no Cookie header in this run",
 			"a=1; b=2", "",
 			"pair a is not sent in this run; pair b is not sent in this run"},
-		{"a part with no '=' is no pair",
+		{"a part with no name not sent in this run",
 			"a=1; flag", "a=1",
+			"its parts with no name differ"},
+		{"a part with no name as recorded, a pair changed",
+			"a=1; flag", "a=2; flag",
+			"pair a holds another value"},
+		{"parts with no name in another order",
+			"x; y; a=1", "y; x; a=1",
+			"its parts with no name differ"},
+		{"more parts that differ than a refusal names, a part with no name among them",
+			"a=1; b=1; c=1; d=1; e=1; f=1; x", "",
+			"pair a is not sent in this run; pair b is not sent in this run; pair c is not sent in this run; pair d is not sent in this run; pair e is not sent in this run; 2 more pairs differ"},
+		{"a part of blanks alone is no part",
+			"a=1; ; b=2", "a=1; b=2",
 			""},
 		{"a name keploy quotes",
 			`x"y=1`, "",
@@ -957,5 +969,71 @@ func TestVariables_AGivenPairBesideAPagePairIsPassedOnOrTheCallIsRefused(t *test
 	ok, diag = match("session=" + givenTokFull + "; sub=free")
 	if ok || diag == nil || diag.variable != nil {
 		t.Fatalf("the page's pair with another value: answered %v, miss %+v; want a miss of the header, not of the given", ok, diag)
+	}
+}
+
+// A part of a Cookie header with no '=' (a cookie the page set with no
+// name, sent as its value alone) is no pair, so no pair rule excuses it: a
+// header read pair by pair is as learned only where those parts are as
+// recorded, in order. The learn step then reads a changed one by the
+// header's own rule (a word with no source: the header as noise), and a
+// replay compares it as recorded, its miss naming those parts, never their
+// value.
+func TestAPartWithNoNameIsComparedAsRecorded(t *testing.T) {
+	const rec = "session=s1; sub=pro; zq7w"
+	page := map[string][]string{cookieSetByPage + "sub": {}}
+	race := raced("session", "s1", "s2")
+	for _, c := range []struct {
+		name      string
+		learned   map[string][]string
+		rec, live string
+		want      bool
+	}{
+		{"the page's pair gone, the part as recorded", page, rec, "session=s1; zq7w", true},
+		{"the page's pair gone, the part changed", page, rec, "session=s1; yv3x", false},
+		{"the page's pair gone, the part gone", page, rec, "session=s1", false},
+		{"the page's pair gone, a part sent in this run only", page, rec, "session=s1; zq7w; yv3x", false},
+		{"the page's pair gone, a trailing ';'", page, "session=s1; sub=pro", "session=s1;", true},
+		{"the race's other value, the part as recorded", race, "session=s1; zq7w", "session=s2; zq7w", true},
+		{"the race's other value, the part changed", race, "session=s1; zq7w", "session=s2; yv3x", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := pairsAsLearned(c.learned, c.rec, c.live); got != c.want {
+				t.Fatalf("pairsAsLearned(%v, %q, %q) = %v, want %v", c.learned, c.rec, c.live, got, c.want)
+			}
+		})
+	}
+	t.Run("the learn step reads a changed part by the header's own rule", func(t *testing.T) {
+		got, why := learnPageCookie(t, []*models.Mock{pageCall("mock-1", -200*time.Millisecond, "session=s1", "")}, rec, "session=s1; yv3x")
+		if want := with(page, map[string][]string{cookieLeaf: {}}); why != "" || !reflect.DeepEqual(got, want) {
+			t.Fatalf("learned %v (refused: %q), want %v", got, why, want)
+		}
+	})
+	for _, c := range []struct {
+		name, live string
+		served     bool
+	}{
+		{"a replay serves the part as recorded", "session=s1; zq7w", true},
+		{"a replay compares a changed part", "session=s1; yv3x", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := recorded("m", "/v1/apps", map[string]string{"Cookie": rec}, "")
+			m.Spec.ReqBodyNoise = page
+			got, diag := strictMatch(t, sent("/v1/apps", map[string]string{"Cookie": c.live}, ""), nil, nil, nil, m)
+			if (got != nil) != c.served {
+				t.Fatalf("served %v, want %v (differs %v)", got != nil, c.served, differs(diag))
+			}
+			if c.served {
+				return
+			}
+			if !hasField(differs(diag), "header.cookie (pair sub is not sent in this run; its parts with no name differ)") {
+				t.Fatalf("differs %v does not name the parts with no name", differs(diag))
+			}
+			for _, d := range differs(diag) {
+				if strings.Contains(d, "zq7w") || strings.Contains(d, "yv3x") {
+					t.Fatalf("differs %v holds a part's value", differs(diag))
+				}
+			}
+		})
 	}
 }

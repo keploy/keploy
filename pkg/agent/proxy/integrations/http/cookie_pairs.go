@@ -47,8 +47,10 @@ func withCookiePairs(why string, rec, live learn.Leaf) string {
 // text in this run, differ from those of rec, its recorded text: a pair not
 // sent in this run, one that holds another value (a name sent more than
 // once differs where its values, in order, do), one sent in this run only,
-// in the recorded order and then the live one; or that the same pairs come
-// in another order. "" where the pairs are the same, in the same order.
+// in the recorded order and then the live one; that its parts with no name
+// differ (unnamedParts: no value is said); or that the same pairs come in
+// another order. "" where the pairs and those parts are the same, in the
+// same order.
 func cookiePairsDiffer(rec, live string) string {
 	rn, rv := cookieJar(rec)
 	ln, lv := cookieJar(live)
@@ -73,6 +75,12 @@ func cookiePairsDiffer(rec, live string) string {
 			say(name, "is sent in this run only")
 		}
 	}
+	if !slices.Equal(unnamedParts(rec), unnamedParts(live)) {
+		n++
+		if len(parts) < maxNamedPairs {
+			parts = append(parts, "its parts with no name differ")
+		}
+	}
 	if n == 0 {
 		if strings.Join(rn, ";") != strings.Join(ln, ";") {
 			return "its pairs are sent in another order"
@@ -88,7 +96,7 @@ func cookiePairsDiffer(rec, live string) string {
 // cookieJar is the pairs of a Cookie header's text, as variables' cookie
 // step reads them (split at ';', the name trimmed, the value up to its
 // trailing blanks): each name once, in the order it first stands, and each
-// name's values in order. A part with no '=' is no pair.
+// name's values in order. A part with no '=' is no pair (unnamedParts).
 func cookieJar(text string) ([]string, map[string][]string) {
 	var names []string
 	values := map[string][]string{}
@@ -104,6 +112,21 @@ func cookieJar(text string) ([]string, map[string][]string) {
 		values[name] = append(values[name], strings.TrimRight(v, " \t"))
 	}
 	return names, values
+}
+
+// unnamedParts is the parts of a Cookie header's text with no '=', each
+// trimmed, in order: a cookie set with no name, which a browser sends as its
+// value alone. They are no pair (cookieJar), so no pair rule excuses them:
+// they are compared as recorded. A part of blanks alone is the bytes between
+// pairs, not a part.
+func unnamedParts(text string) []string {
+	var out []string
+	for _, part := range strings.Split(text, ";") {
+		if p := strings.TrimSpace(part); p != "" && !strings.Contains(p, "=") {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // pairName is a cookie's name as a refusal writes it: as sent where every
@@ -152,8 +175,12 @@ func cookieDigest(v string) string {
 // gone, named once in rec; a pair a race set (cookieSetByRace) sent once with
 // a value whose digest the key holds, sent once in rec. Every other pair is
 // sent with its recorded values, in the recorded order, and live sends no
-// pair rec lacks. false where no pair is excused.
+// pair rec lacks; its parts with no name (unnamedParts) are rec's, in order.
+// false where no pair is excused.
 func pairsAsLearned(learned map[string][]string, rec, live string) bool {
+	if !slices.Equal(unnamedParts(rec), unnamedParts(live)) {
+		return false
+	}
 	rn, rv := cookieJar(rec)
 	ln, lv := cookieJar(live)
 	var kept []string
