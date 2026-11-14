@@ -75,9 +75,13 @@ func itemOf(cfg map[string]any, list, name string) map[string]any {
 	return nil
 }
 
+// bodyOf is the body (cluster, context or user) of cfg's item named name, or
+// nil when cfg has no such item: a row reading it then fails on its own
+// comparison, naming what it got, instead of panicking.
 func bodyOf(cfg map[string]any, list, name string) map[string]any {
 	field := strings.TrimSuffix(list, "s")
-	return itemOf(cfg, list, name)[field].(map[string]any)
+	body, _ := itemOf(cfg, list, name)[field].(map[string]any)
+	return body
 }
 
 func without(cfg map[string]any, list, name string) {
