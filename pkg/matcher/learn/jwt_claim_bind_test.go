@@ -3,6 +3,7 @@ package learn
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -456,6 +457,38 @@ func TestACallListedBeforeTheClientCaseNeverHidesItsClaim(t *testing.T) {
 				t.Errorf("ClassifyArrived: %s (%s) from %s (client %v, claim %q); want a variable of the test case bound at its %s", ln.Kind, ln.Why, ln.From.Mock, ln.From.Client, ln.From.Claim, claim)
 			}
 		})
+	}
+}
+
+// TestAStampAClaimBindsStaysTheClaimsUnderTheTimeRule: a client test's
+// call sends, at body.iat, the iat claim of the token the test case sent in
+// its Authorization header: a read of the clock in epoch seconds that the
+// call's window holds in both runs. The claim binds it (Place.BindAt: a
+// client test's word, inside the header's longer value), so the T2 time rule
+// (ofTimePart) leaves it the claim's variable, as it leaves a value a place
+// sent whole. With no token sent before it, the same stamp is the call's own
+// read of the clock in that window: the window holds it, and only the bind
+// keeps the variable.
+func TestAStampAClaimBindsStaysTheClaimsUnderTheTimeRule(t *testing.T) {
+	rReq := time.Date(2026, 11, 11, 14, 24, 31, 630_000_000, time.UTC)
+	fReq := rReq.Add(67 * time.Second)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	token := func(id string, iat int64, sig string) string {
+		return claimToken(t, map[string]any{"cid": "e2e-free-company", "cluster_id": id, "role": "ADMIN", "iat": iat, "exp": iat + 3600}, sig)
+	}
+	rTok, fTok := token("6af47add8a9351dfdb7c457a", rReq.Unix(), "recorded-signature-bytes-0001"), token("6af47add8a9351dfdb7c457a", fReq.Unix(), "round-f-signature-bytes-00002")
+	const p, claim = "body.iat", "header.Authorization|jwt.iat#0"
+	rIat, fIat := strconv.FormatInt(rReq.Unix(), 10), strconv.FormatInt(fReq.Unix(), 10)
+	w := &Window{Rec: Span{From: rReq, To: rCall}, F: Span{From: fReq, To: fCall}}
+	sh := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+	}
+	earlier := clientPlaced(t, "post-cluster-status-3", heartbeatCase(rTok, rReq), heartbeatCase(fTok, fReq), fReq)
+	if ln := ClassifyArrived(oClientDrifts(), []string{p}, sh(fIat), sh(rIat), rCall, fCall, earlier, nil, nil, w, nil)[0]; ln.Kind != KindVariable || !ln.From.Client || ln.From.Claim != claim {
+		t.Errorf("the stamp the token's iat claim carries: %s (%s) from %s (client %v, claim %q); want a variable of the test case bound at its %s", ln.Kind, ln.Why, ln.From.Mock, ln.From.Client, ln.From.Claim, claim)
+	}
+	if ln := ClassifyArrived(oClientDrifts(), []string{p}, sh(fIat), sh(rIat), rCall, fCall, nil, nil, nil, w, nil)[0]; ln.Kind != KindClockRead || ln.Read == nil {
+		t.Errorf("the stamp with no token sent before it: %s (%s); want the call's own read of the clock in its window", ln.Kind, ln.Why)
 	}
 }
 
