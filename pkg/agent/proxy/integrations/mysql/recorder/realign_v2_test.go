@@ -1919,6 +1919,35 @@ func TestRecordV2_AnERRThatCannotBeToldToAnswerACommandWithoutAnAnswerStops(t *t
 	}
 }
 
+// A command without an answer that does not decode is an exchange handled: the
+// client bytes lost after it were sent after it, so the exchange the recording
+// stops in at that loss is spanned from it (leaveOutInFlight from lastEnd), not
+// from the answer before it. Spanned from that answer, a test case that ended
+// between the two was left out with the stop, though every mock it used was
+// recorded.
+func TestRecordV2_AStopAfterACommandWithoutAnAnswerThatDoesNotDecodeIsSpannedFromIt(t *testing.T) {
+	t.Parallel()
+	j := newJoinedMidStream(t)
+	leftOut := &orphanSpans{}
+	j.h.sess.Orphans = leftOut
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+	closeAt := j.at()
+	j.h.pushClient(malformedClose, closeAt)
+	// Client bytes lost: a packet with sequence id 3 where a command starts.
+	j.h.pushClient(cannedCOMQuery(t, 3, "SELECT 2"), j.at())
+	mocks, err := j.run(t)
+	if !errors.Is(err, ErrFramingLost) || !strings.Contains(err.Error(), "sequence id 3") {
+		t.Fatalf("RecordV2 = %v, want the stop at the client's packet out of sequence", err)
+	}
+	if got := strings.Join(pairings(mocks), "; "); got != "SELECT 1 -> OK 1" {
+		t.Fatalf("mocks %q, want SELECT 1's alone", got)
+	}
+	w, ok := leftOut.last()
+	if leftOut.count() != 2 || !ok || !w[0].Equal(closeAt) {
+		t.Fatalf("%d spans left out, the last %v; want the CLOSE's, then the stop's from the CLOSE (%v)", leftOut.count(), w, closeAt)
+	}
+}
+
 // An empty command packet is answered: the server takes it for COM_SLEEP and
 // sends an ERR. It does not decode, so its exchange is left out and the
 // recording re-aligns at the next command; the walk is marked at it as at any
