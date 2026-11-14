@@ -18,8 +18,12 @@ import (
 // time (the row over every registered parser in the proxy's tests), so one
 // that arrives without it is a recorder's bug: said here, as it is handed
 // over, so the leave-outs it costs are traced to their parser. A mock any
-// test may be served (a session's or a connection's, attributedReusable) needs
-// no request time, and an answer the client never read serves no test.
+// test may be served needs no request time, and an answer the client never
+// read serves no test: the rule the loss reads (attributedReusable). That is
+// a session's or a connection's mock, but not one reusable only by its
+// recorder's statement (a MySQL SET, BEGIN or COMMIT), nor, under the proven
+// switch, one outside its protocol's phase (IsProtocolPhase), a test's mock
+// there: those are said.
 //
 // The first of each kind and every 1024th after it are said at WARN, the rest
 // at Debug. It runs before AddMock takes mu.
