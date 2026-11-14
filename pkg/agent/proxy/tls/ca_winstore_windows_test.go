@@ -89,6 +89,20 @@ func TestOnWindowsCertutilsNotSupportedExitIsANoTrustPrompt(t *testing.T) {
 	}
 }
 
+// On the Windows lane, run once as the agent's elevated administrator
+// (KEPLOY_ROW_TOKEN_ELEVATED=1) and once as a standard user (=0):
+// tokenElevated, which alone lets a run change the machine's trust, reads the
+// token the run has.
+func TestOnWindowsTokenElevatedReadsTheRunsToken(t *testing.T) {
+	want, ok := map[string]bool{"1": true, "0": false}[os.Getenv("KEPLOY_ROW_TOKEN_ELEVATED")]
+	if !ok {
+		t.Skip("runs on the Windows lane with KEPLOY_ROW_TOKEN_ELEVATED=1 as an elevated administrator or =0 as a standard user")
+	}
+	if got := tokenElevated(); got != want {
+		t.Fatalf("tokenElevated() = %v in a run whose token is elevated: %v", got, want)
+	}
+}
+
 // On the Windows lane, as a standard user in a session with no desktop (the
 // agent's service): keploy's CA setup asks only the user's store, which cannot
 // ask, and names the step for the CA it keeps.
