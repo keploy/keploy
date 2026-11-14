@@ -1027,7 +1027,18 @@ func TestHandleIncoming_LeavesOutATestCaseOfARecordingThatEnded(t *testing.T) {
 		mgr.SetOutputChannel(make(chan *models.Mock))
 		mgr.SetOutputChannel(nil)
 	})
-	inFlightSince := time.Now().Add(-time.Second)
+	// In a stretch of its own, not a second before the real now: the pauses
+	// and holes other rows record on the real clock (loseMockToPressure's
+	// pause ran about a second before this row on a loaded runner) reach none
+	// of its test cases, which a span over them leaves out whatever else this
+	// row checks.
+	inFlightSince := newStretch()
+	if over, n := mgr.WasPressureActiveInWindow(inFlightSince, inFlightSince.Add(2*time.Millisecond)); over {
+		t.Fatalf("%d pauses recorded before this row already cover its test cases", n)
+	}
+	if over, n := mgr.WasMockOrphanedInWindow(inFlightSince, inFlightSince.Add(2*time.Millisecond)); over {
+		t.Fatalf("%d holes recorded before this row already cover its test cases", n)
+	}
 	w := mgr.OpenWindow(inFlightSince, nil) // in flight across the stop
 	t.Cleanup(w.Close)
 	resolvedSince := inFlightSince.Add(time.Microsecond)
