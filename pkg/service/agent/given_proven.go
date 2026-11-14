@@ -62,8 +62,12 @@ func (a *Agent) SetScopeGiven(_ context.Context, given map[string][]models.Given
 // n). One given while none of the worker's tests is open is the worker's,
 // for the tests it begins from then on (giveOutsideTest); it is refused when
 // no process holds the run (not_open), and when the name or the value is not
-// one keploy can hold (bad_request).
+// one keploy can hold (bad_request). An end (models.GivenReq.End) drops the
+// worker's values instead (endOutsideGivens).
 func (a *Agent) ProvenGive(ctx context.Context, req models.GivenReq) (models.GivenResp, *models.ScopeError) {
+	if req.End {
+		return a.endOutsideGivens(ctx, req)
+	}
 	if !models.ValidGivenName(req.Name) {
 		return models.GivenResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
 			fmt.Sprintf("a given's name is 1 to %d letters, digits, '_' or '-', not %q", models.MaxGivenName, req.Name),
@@ -172,7 +176,10 @@ func (a *Agent) ProvenGive(ctx context.Context, req models.GivenReq) (models.Giv
 // keeps it with each such test's window, and a replay binds it in each such
 // test's scope with the value that test's recording gave under it, as its
 // view opens (workerBindings), so no call the test makes comes before it. A
-// test's own givens are numbered after the worker's. A new claim of the run
+// test's own givens are numbered after the worker's. They last until the
+// process ends them (endOutsideGivens: a test file's afterAll, so each file's
+// setup gives its own and numbers them from the first, however a run spreads
+// its files over workers) or its instance ends. A new claim of the run
 // (another test process), a worker taken back and a new session start with
 // none. A process that holds no claim of the run gives nothing outside a
 // test: no test of it would carry the value (givenNotOpen).
@@ -181,11 +188,7 @@ func (a *Agent) ProvenGive(ctx context.Context, req models.GivenReq) (models.Giv
 // tests was open: held for the tests worker begins from now on. With the
 // wire held.
 func (a *Agent) giveOutsideTest(worker uint32, req models.GivenReq) (models.GivenResp, *models.ScopeError) {
-	a.provenMu.Lock()
-	_, isWorker := a.proven.workers[worker]
-	c := a.proven.claim
-	a.provenMu.Unlock()
-	if !isWorker && (worker != 0 || c.pid == 0 || !procAlive(c.pid, c.start)) {
+	if !a.holdsRun(worker) {
 		return models.GivenResp{}, givenNotOpen(req)
 	}
 	a.scopeMu.Lock()
@@ -213,6 +216,56 @@ func (a *Agent) giveOutsideTest(worker uint32, req models.GivenReq) (models.Give
 	return models.GivenResp{V: models.ScopeProtocolVersion, Status: "ok", Variable: variable}, nil
 }
 
+// endOutsideGivens is ProvenGive for an end (models.GivenReq.End): the
+// values worker gave outside its tests are over, and no test it begins from
+// now on carries them. An end names no value (bad_request), comes while
+// none of worker's tests is open (bad_request: the open test holds them
+// already, and the next would carry them), and only from a process that
+// holds the run (not_open).
+func (a *Agent) endOutsideGivens(ctx context.Context, req models.GivenReq) (models.GivenResp, *models.ScopeError) {
+	if req.Name != "" || req.Value != "" || req.Source != "" {
+		return models.GivenResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
+			"an end of the values given outside tests carries no name, value or source, but this one does",
+			`send {"end": true} alone, and each value in a given of its own`)
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return models.GivenResp{}, abandoned(err)
+	}
+	defer a.wire.unlock()
+	worker, serr := a.callerWorker(ctx, "end of the values given outside tests", "a test file")
+	if serr != nil {
+		return models.GivenResp{}, serr
+	}
+	a.provenMu.Lock()
+	closed, id := a.proven.closed, a.proven.openOf(worker)
+	a.provenMu.Unlock()
+	if closed {
+		return models.GivenResp{}, errClosed()
+	}
+	if id != "" {
+		return models.GivenResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
+			"the values given outside tests were ended while "+id+" was open: they end between tests, before the next one begins",
+			"end them after the last test of the file that gave them, in its afterAll")
+	}
+	if !a.holdsRun(worker) {
+		return models.GivenResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotOpen,
+			"the values given outside tests were ended while no test process held the run: no process holds any",
+			"end them from the test process that gave them, once it claimed the run")
+	}
+	a.dropWorkerGivens(worker)
+	return models.GivenResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
+}
+
+// holdsRun reports whether worker is a live claim of the run: a worker of a
+// run of several, or (0) the run's claim while its process lives.
+func (a *Agent) holdsRun(worker uint32) bool {
+	a.provenMu.Lock()
+	_, isWorker := a.proven.workers[worker]
+	c := a.proven.claim
+	a.provenMu.Unlock()
+	return isWorker || (worker == 0 && c.pid != 0 && procAlive(c.pid, c.start))
+}
+
 // seedWorkerGivens gives the test id, which worker has just begun, the
 // values worker gave outside its tests so far, first: its window keeps them
 // (a record), and its own givens are numbered after them.
@@ -233,7 +286,7 @@ func (a *Agent) seedWorkerGivens(worker uint32, id string) {
 }
 
 // dropWorkerGivens forgets what worker gave outside its tests: its claim
-// is over.
+// is over, or it ended them (endOutsideGivens).
 func (a *Agent) dropWorkerGivens(worker uint32) {
 	a.scopeMu.Lock()
 	delete(a.workerGiven, worker)

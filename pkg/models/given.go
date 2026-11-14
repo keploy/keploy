@@ -42,10 +42,17 @@ const (
 // GivenReq is the body of POST /agent/scope/given: a value the open test
 // gave the application. Source is where the test gave it (file:line,
 // relative to the project), used only in wording.
+//
+// End, sent alone (no name, value or source) while none of the test
+// process's tests is open, ends the values it gave outside its tests (a
+// test file's afterAll; Playwright runs a worker's files one after
+// another): keploy drops them, so no test the process begins from then on
+// carries them, and the next file's setup numbers its own from the first.
 type GivenReq struct {
 	Name   string `json:"name"`
 	Value  string `json:"value"`
 	Source string `json:"source,omitempty"`
+	End    bool   `json:"end,omitempty"`
 }
 
 // GivenResp answers a given: the variable keploy holds it as.

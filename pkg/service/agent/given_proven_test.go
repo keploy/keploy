@@ -328,6 +328,132 @@ func TestAWorkersOutsideValuesEndWithItsInstance(t *testing.T) {
 	require.Empty(t, held(), "a claim taken back takes its worker's values with it")
 }
 
+// A test file's afterAll ends what its setup gave outside the tests (an
+// end, models.GivenReq.End): no test the process begins after it carries
+// those values, and the next file's setup numbers its own from the first,
+// as it would in a worker of its own. An end names no value, comes only
+// between tests, and only from a process that holds the run.
+func TestAnEndOfAFilesValuesKeepsThemFromTheNextFile(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	ctx := context.Background()
+	end := models.GivenReq{End: true}
+
+	_, serr := a.ProvenGive(ctx, end)
+	require.NotNil(t, serr, "no process holds the run")
+	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+	require.Equal(t, http.StatusUnprocessableEntity, serr.Status)
+	require.Contains(t, serr.Message, "while no test process held the run")
+	claimSelf(t, a)
+
+	for _, bad := range []models.GivenReq{{End: true, Name: "uniq"}, {End: true, Value: "a-1"}, {End: true, Source: "a.spec.ts:9"}} {
+		_, serr := a.ProvenGive(ctx, bad)
+		require.NotNil(t, serr, "%+v", bad)
+		require.Equal(t, models.ScopeErrBadRequest, serr.Code, "%+v", bad)
+		require.Contains(t, serr.Message, "carries no name, value or source", "%+v", bad)
+	}
+
+	// File a: its setup's value, its tests, its end.
+	resp, serr := a.ProvenGive(ctx, give("uniq", "a-1", "a.spec.ts:9"))
+	require.Nil(t, serr)
+	require.Equal(t, "given:uniq", resp.Variable)
+	_, serr = a.ProvenBegin(ctx, begin("TestA1"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenGive(ctx, end)
+	require.NotNil(t, serr, "an end while a test is open")
+	require.Equal(t, models.ScopeErrBadRequest, serr.Code)
+	require.Contains(t, serr.Message, "were ended while o::TestA1 was open")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA1", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestA2"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA2", Outcome: "passed"})
+	require.Nil(t, serr)
+	resp, serr = a.ProvenGive(ctx, end)
+	require.Nil(t, serr)
+	require.Equal(t, models.GivenResp{V: models.ScopeProtocolVersion, Status: "ok"}, resp)
+
+	// File b gives the same name: numbered from the first again.
+	resp, serr = a.ProvenGive(ctx, give("uniq", "b-1", "b.spec.ts:9"))
+	require.Nil(t, serr)
+	require.Equal(t, "given:uniq", resp.Variable)
+	_, serr = a.ProvenBegin(ctx, begin("TestB1"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB1", Outcome: "passed"})
+	require.Nil(t, serr)
+	// File c has no setup: its tests carry nothing of b's.
+	_, serr = a.ProvenGive(ctx, end)
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestC1"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestC1", Outcome: "passed"})
+	require.Nil(t, serr)
+
+	for _, id := range []string{"TestA1", "TestA2"} {
+		require.Equal(t, []models.GivenValue{{Name: "given:uniq", Value: "a-1", Source: "a.spec.ts:9"}}, windowOf(t, a, "o::"+id).Given, id)
+	}
+	require.Equal(t, []models.GivenValue{{Name: "given:uniq", Value: "b-1", Source: "b.spec.ts:9"}}, windowOf(t, a, "o::TestB1").Given,
+		"a value from file a is not given to file b's tests")
+	require.Empty(t, windowOf(t, a, "o::TestC1").Given)
+
+	a.provenMu.Lock()
+	a.proven.closed = true
+	a.provenMu.Unlock()
+	_, serr = a.ProvenGive(ctx, end)
+	require.NotNil(t, serr, "the run's results were read")
+	require.Equal(t, models.ScopeErrNotInRun, serr.Code)
+}
+
+// Two files recorded in two workers each gave the same name once; replayed
+// one after the other in one worker, with the first file's end between
+// them, each file's test binds its own file's value with what its own
+// recording gave under that variable, and both stay green.
+func TestTwoFilesGivingOneNameReplayInOneWorker(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	o := &givingOpener{givingProxy: &givingProxy{wireProxy: p}}
+	a.Proxy = o
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeGiven(ctx, map[string][]models.GivenValue{
+		"o::TestA": {{Name: "given:uniq", Value: "rec-a", Source: "a.spec.ts:9"}},
+		"o::TestB": {{Name: "given:uniq", Value: "rec-b", Source: "b.spec.ts:9"}},
+	}))
+	claimSelf(t, a)
+	for _, f := range []struct{ test, value, source string }{{"TestA", "new-a", "a.spec.ts:9"}, {"TestB", "new-b", "b.spec.ts:9"}} {
+		resp, serr := a.ProvenGive(ctx, give("uniq", f.value, f.source))
+		require.Nil(t, serr)
+		require.Equal(t, "given:uniq", resp.Variable, f.test)
+		_, serr = a.ProvenBegin(ctx, begin(f.test))
+		require.Nil(t, serr)
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: f.test, Outcome: "passed"})
+		require.Nil(t, serr)
+		require.Empty(t, e.Action, "%s: %s", f.test, e.Reason)
+		_, serr = a.ProvenGive(ctx, models.GivenReq{End: true})
+		require.Nil(t, serr)
+	}
+	require.Equal(t, map[string][]models.VariableBinding{
+		"o::TestA": {{Name: "given:uniq", Value: "new-a", Recorded: "rec-a", Mock: "test o::TestA", Place: "a.spec.ts:9", Given: true}},
+		"o::TestB": {{Name: "given:uniq", Value: "new-b", Recorded: "rec-b", Mock: "test o::TestB", Place: "b.spec.ts:9", Given: true}},
+	}, o.opened)
+}
+
+// In a run of several workers an end drops only the values of the worker
+// whose process sent it.
+func TestAnEndDropsOnlyItsOwnWorkersValues(t *testing.T) {
+	a, _ := workerAgent(t, models.MODE_RECORD, 4)
+	ends, stays := child(t), child(t)
+	claimWorker(t, a, ends.Process.Pid, "a", 2)
+	claimWorker(t, a, stays.Process.Pid, "b", 2)
+	_, serr := a.ProvenGive(as(ends.Process.Pid), give("uniq", "u-ends", ""))
+	require.Nil(t, serr)
+	_, serr = a.ProvenGive(as(stays.Process.Pid), give("uniq", "u-stays", ""))
+	require.Nil(t, serr)
+	resp, serr := a.ProvenGive(as(ends.Process.Pid), models.GivenReq{End: true})
+	require.Nil(t, serr)
+	require.Equal(t, "ok", resp.Status)
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	require.Equal(t, map[uint32][]models.GivenValue{2: {{Name: "given:uniq", Value: "u-stays"}}}, a.workerGiven)
+}
+
 // What a test process gives outside its tests is held only under a live
 // claim of the run, and within the bounds a test's givens have: at most
 // MaxGivensPerTest values, and in a record MaxGivenBytesPerRecord with the
