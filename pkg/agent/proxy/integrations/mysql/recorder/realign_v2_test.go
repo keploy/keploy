@@ -1891,6 +1891,11 @@ func TestRecordV2_AnERRThatCannotBeToldToAnswerACommandWithoutAnAnswerStops(t *t
 			j.exchange(prepare, prepareOK(true, [][]byte{columnPayload(t, undecodableColumns[0])}, nil))
 			j.h.pushDest(malformedERR, j.at())
 		},
+		// The first of two answered before the query: the second's ERR is
+		// judged as the first's was, not taken for having one before it.
+		"the second of two": func(t *testing.T, j *joinedMidStream) {
+			j.exchange(malformedLongData, [][]byte{malformedERR})
+		},
 	}
 	for name, build := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -1916,6 +1921,64 @@ func TestRecordV2_AnERRThatCannotBeToldToAnswerACommandWithoutAnAnswerStops(t *t
 				t.Fatalf("RecordV2 = %v, want the stop at the ERR that cannot be told to answer one command or the other", err)
 			}
 		})
+	}
+}
+
+// Once the ERR to a command without an answer that does not decode is taken,
+// the next command's answer is its own, an ERR 1835 too: a query's (its
+// attributes did not parse) is recorded with it, and an execute's that does not
+// decode is framed and left out. Neither stops the recording. Dropped as server
+// bytes captured before the command, the first ERR left the second to be told
+// from it, and the recording stopped there.
+func TestRecordV2_AnERRToACommandWithoutAnAnswerLeavesTheNextCommandsOwnERRToIt(t *testing.T) {
+	t.Parallel()
+	execute := wrapPacket([]byte{mysql.COM_STMT_EXECUTE, 9, 0, 0, 0, 0, 1, 0, 0, 0}, 0)
+	for name, c := range map[string]struct {
+		command []byte
+		want    string
+		leftOut int64
+	}{
+		"a query":    {cannedCOMQuery(t, 0, "SELECT 2"), "SELECT 1 -> OK 1; SELECT 2 -> ERR 1835; SELECT 3 -> OK 3", 1},
+		"an execute": {execute, "SELECT 1 -> OK 1; SELECT 3 -> OK 3", 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			j := newJoinedMidStream(t)
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+			j.exchange(malformedClose, [][]byte{malformedERR})
+			j.exchange(c.command, [][]byte{malformedERR})
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 3"), [][]byte{okResponseWithAffectedRows(1, 3)})
+			mocks, leftOut, err := j.runCounted(t)
+			if err != nil {
+				t.Fatalf("RecordV2 = %v, want no stop", err)
+			}
+			if got := strings.Join(pairings(mocks), "; "); got != c.want || leftOut != c.leftOut {
+				t.Fatalf("mocks %q with %d left out, want %q with %d", got, leftOut, c.want, c.leftOut)
+			}
+		})
+	}
+}
+
+// A command without an answer sent after a PREPARE taken up after a response
+// left out, the PREPARE held for its framing: its mock is recorded behind the
+// PREPARE's, in the order sent, once the exchange taken up is confirmed. Left
+// behind the PREPARE that the exchange's hold took over (takenUp.holdPrepare),
+// it was recorded as the PREPARE was settled, before the PREPARE's own mock.
+func TestRecordV2_ACommandWithoutAnAnswerAfterAPrepareTakenUpIsRecordedBehindIt(t *testing.T) {
+	t.Parallel()
+	j := newJoinedMidStream(t)
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+	j.exchange(cannedCOMQuery(t, 0, "SELECT u"), [][]byte{wrapPacket(nil, 1), wrapPacket([]byte{0x01, 0x02}, 2), wrapPacket([]byte{0x03}, 3)})
+	j.exchange(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO t VALUES (?)"...), 0), prepareOK(false, [][]byte{columnPayload(t, undecodableColumns[0])}, nil))
+	j.exchange(stmtCloseCommand(0, 7), nil)
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{okResponseWithAffectedRows(1, 2)})
+	mocks, err := j.run(t)
+	if err != nil {
+		t.Fatalf("RecordV2 = %v, want no stop", err)
+	}
+	want := "SELECT 1 -> OK 1; PREPARE -> PREPARE_OK eof=true; COM_STMT_CLOSE -> NO Response Packet; SELECT 2 -> OK 2"
+	if got := strings.Join(prepareOKPairing(mocks), "; "); got != want {
+		t.Fatalf("mocks %q, want %q: the CLOSE behind the PREPARE", got, want)
 	}
 }
 
