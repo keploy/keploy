@@ -129,8 +129,12 @@ func TestRemoteRepo(t *testing.T) {
 			t.Errorf("normalizeRepo(%q, %v) = %q, want %q", tc.raw, tc.url, got, tc.want)
 		}
 	}
-	// Each URL variable may hold a URL without its scheme.
-	for name := range ciRepoURLVars {
+	// Each URL variable may hold a URL without its scheme. Named here, not
+	// read from ciRepoURLVars: a name dropped from it must fail a row.
+	for _, name := range []string{
+		"CIRCLE_REPOSITORY_URL", "BUILDKITE_REPO", "BUILD_REPOSITORY_URI",
+		"bamboo_planRepository_repositoryUrl", "GIT_URL", "CODEBUILD_SOURCE_REPO_URL",
+	} {
 		for _, k := range ciRepoVars {
 			t.Setenv(k, "")
 		}
