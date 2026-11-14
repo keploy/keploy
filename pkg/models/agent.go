@@ -430,6 +430,10 @@ const ScopeTableServedSources = "sources"
 // ScopeTableReq.Once.
 const ScopeTableServedOnce = "once"
 
+// ScopeTableServedEvery is ScopeTableResp.Served's name for
+// ScopeTableReq.Every.
+const ScopeTableServedEvery = "every"
+
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
@@ -497,6 +501,18 @@ type ScopeTableReq struct {
 	// it serves it; the CLI refuses an agent that does not: an older agent
 	// would answer the request again and again.
 	Once []string `json:"once,omitempty"`
+	// Every is, under the proven switch, by series of Once, the interval
+	// after which its recordings answer again (MockEntry.Every), as a Go
+	// duration ("5m"): the series answers in rounds, each recording once in
+	// a round, and a call of one that already answered in its round opens
+	// the next round only when it comes at least the interval after the
+	// round opened; a sooner call misses. Only ids Once holds, each with a
+	// positive duration. Absent when no once series has one. The agent's
+	// answer to the table names it (ScopeTableResp.Served) when it serves
+	// it; the CLI refuses an agent that does not: an older agent would
+	// answer such a series once in the run, and its next round's calls
+	// would miss.
+	Every map[string]string `json:"every,omitempty"`
 	// Sources is, under the proven switch, by recording name, the sources
 	// rules the user declared in keploy.yml give fields of the recording's
 	// request (MockEntry.Sources): only names the agent holds. The learn

@@ -5109,6 +5109,19 @@ func (p *Proxy) SetPoolTrails(trails map[string]string) error {
 
 var _ agent.PoolSeriesSetter = (*Proxy)(nil)
 var _ agent.PoolOnceSetter = (*Proxy)(nil)
+var _ agent.PoolEverySetter = (*Proxy)(nil)
+
+// SetPoolEvery implements agent.PoolEverySetter: by once series, the
+// interval after which its recordings answer again, on the mock manager
+// (MockManager.SetPoolEvery).
+func (p *Proxy) SetPoolEvery(every map[string]time.Duration) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolEvery(every)
+	return nil
+}
 
 // SetPoolOnce implements agent.PoolOnceSetter: the series whose recordings
 // each answer once in a run, on the mock manager (MockManager.SetPoolOnce).

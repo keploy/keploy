@@ -126,6 +126,9 @@ type provenWire struct {
 	// models.ScopeTableReq.Once), which SetScopePool hands the proxy before
 	// the series. nil when the table had none.
 	once []string
+	// every is, by once series, the interval after which its recordings
+	// answer again (models.ScopeTableReq.Every, SetScopeEvery).
+	every map[string]time.Duration
 	// sources is, in a replay, by recording name, the sources rules
 	// declared in keploy.yml give fields of its request (the CLI's scope
 	// table, models.ScopeTableReq.Sources), which SetScopePool hands the
@@ -660,6 +663,7 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	trails := maps.Clone(a.proven.trails)
 	series := maps.Clone(a.proven.series)
 	once := slices.Clone(a.proven.once)
+	every := maps.Clone(a.proven.every)
 	sources := maps.Clone(a.proven.sources)
 	timeForm := a.proven.timeForm
 	a.provenMu.Unlock()
@@ -676,6 +680,14 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 		}
 	} else if len(once) > 0 {
 		return errors.New("this keploy agent's proxy cannot serve a series of recordings once in a run")
+	}
+	// So do their intervals (MockManager.SetPoolEvery).
+	if es, ok := a.Proxy.(coreAgent.PoolEverySetter); ok {
+		if err := es.SetPoolEvery(every); err != nil {
+			return err
+		}
+	} else if len(every) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a once series again after an interval")
 	}
 	if ss, ok := a.Proxy.(coreAgent.PoolSeriesSetter); ok {
 		if err := ss.SetPoolSeries(series); err != nil {
@@ -823,6 +835,35 @@ func (a *Agent) SetScopeOnce(ctx context.Context, once []string) error {
 	defer a.wire.unlock()
 	a.provenMu.Lock()
 	a.proven.once = slices.Clone(once)
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeEvery installs, by once series of a replay, the interval after
+// which its recordings answer again (models.ScopeTableReq.Every), which
+// the pool slices sent next hand the proxy (SetScopePool). An interval
+// that does not parse as a positive Go duration is refused, as is an id
+// that is empty. None leaves the set none, never the previous set's. A
+// proxy that cannot serve them refuses some: the CLI refuses an agent
+// that does not acknowledge them.
+func (a *Agent) SetScopeEvery(ctx context.Context, every map[string]string) error {
+	if _, ok := a.Proxy.(coreAgent.PoolEverySetter); !ok && len(every) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a once series again after an interval")
+	}
+	parsed := make(map[string]time.Duration, len(every))
+	for id, s := range every {
+		d, err := time.ParseDuration(s)
+		if id == "" || err != nil || d <= 0 {
+			return fmt.Errorf("the scope table's every for series %q is %q, not a positive Go duration such as 5m", id, s)
+		}
+		parsed[id] = d
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.every = parsed
 	a.provenMu.Unlock()
 	return nil
 }

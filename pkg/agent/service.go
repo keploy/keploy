@@ -1169,6 +1169,15 @@ type PoolOnceSetter interface {
 	SetPoolOnce(once []string) error
 }
 
+// PoolEverySetter is implemented by a proxy that serves a once series of
+// worker-scope recordings again after an interval: SetPoolEvery
+// installs, of keploy mock replay's scope table under the proven switch,
+// by once series, the interval after which its recordings answer again,
+// each once in a round of the series (models.ScopeTableReq.Every).
+type PoolEverySetter interface {
+	SetPoolEvery(every map[string]time.Duration) error
+}
+
 // PoolSourcesSetter is implemented by a proxy whose learn step decides a
 // field by the source a rule declared in keploy.yml gives it
 // (integrations.DeclaredSourcesOf): SetPoolSources installs, of keploy mock

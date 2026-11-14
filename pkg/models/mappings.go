@@ -181,6 +181,19 @@ type MockEntry struct {
 	// once its place is reached. A series' bound is the longest one its
 	// entries say. Kept as Series is.
 	Due string `json:"due,omitempty" yaml:"due,omitempty" bson:"due,omitempty"`
+	// Every is, on an entry of a once Series, the interval after which the
+	// series answers again (keploy.yml mock.rules every on a background rule
+	// with once: true), as a Go duration ("5m"): the application makes the
+	// series' calls at most once per Every in a process, a throttle's
+	// interval. keploy mock replay serves such a series in rounds
+	// (models.ScopeTableReq.Every): each entry once in a round, and a call
+	// of one that already answered in its round opens the next round only
+	// when it comes at least Every after the round opened; a sooner call
+	// misses, as a once series' second call does. A series' interval is the
+	// longest one its entries say; one that does not parse as a positive
+	// duration says none, and the series answers once in the run. Empty,
+	// the default. Kept as Series is.
+	Every string `json:"every,omitempty" yaml:"every,omitempty" bson:"every,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy's
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's

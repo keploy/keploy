@@ -163,10 +163,12 @@ type SetPusher interface {
 // test's list keploy's judging marked served, not required
 // (models.ScopeTableReq.NotRequired), and the names of the set's background
 // recordings, its worker: and startup: mocks (models.ScopeTableReq.Background),
-// and whether the learn step checks a changed time by its form alone
+// the interval of each once series that answers again after it
+// (models.ScopeTableReq.Every), and whether the learn step checks a
+// changed time by its form alone
 // (models.ScopeTableReq.TimeForm, config.MockCmd.TimeForm).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm bool) error
+	PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, timeForm bool) error
 }
 
 type MappingReader interface {

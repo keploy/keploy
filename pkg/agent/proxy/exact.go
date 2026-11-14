@@ -406,6 +406,11 @@ type exactState struct {
 	// once on the index it builds (seriesMember.once). nil until a replay
 	// sent one.
 	poolOnce atomic.Pointer[map[string]bool]
+	// poolEvery is, of the same scope table, the interval of each once
+	// series whose recordings answer again after it (SetPoolEvery): what
+	// SetPoolSeries marks on the index it builds (seriesMember.every). nil
+	// until a replay sent one.
+	poolEvery atomic.Pointer[map[string]time.Duration]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
 	// cached for one staging generation of the trees (StagingGeneration: an
 	// exact serve does not move it), one scope table, one recording's times
@@ -725,6 +730,10 @@ type outsideAnswers struct {
 	// under swapMu, never the other way round.
 	mu  sync.Mutex
 	cur atomic.Pointer[outsideState]
+	// now is the clock an every series' rounds are read on (everyRound);
+	// nil is time.Now, the agent's own clock, whose readings Sub takes on
+	// the monotonic clock. A test sets it.
+	now func() time.Time
 	// onPrepared is a test seam, nil outside tests: it runs as a named read
 	// (MockManager.servedAsNamed) has prepared the outside answers and is
 	// about to read them. A test lands a staging between the two with it.
@@ -769,8 +778,13 @@ type outsideState struct {
 	// such a trailing write answers once per staging, so a second call of
 	// it, wherever it lands, is not answered from it, and neither inTests
 	// nor between gives it again. A trailing write in a series answers by
-	// its series instead (seriesIndex.againIn).
+	// its series instead (seriesIndex.againIn). A recording of an every
+	// series (seriesMember.every) holds the round it last answered in (an
+	// int64), and answers once in each round of its series (everyRound).
 	trailUsed sync.Map
+	// rounds holds, by every series (seriesMember.every), its round now: a
+	// *seriesRound.
+	rounds sync.Map
 	// seriesRepeats counts, by series (poolSeries), the calls in the
 	// windows its last-placed recording answered again once every recording
 	// of the series had answered there (seriesIndex.againIn): each a
@@ -792,16 +806,15 @@ func (o *outsideAnswers) hidden(name string, epoch uint64) bool {
 	return spent
 }
 
-// trailUsed reports whether name, one of the worker scope's recordings a
-// trail move put there, answered a call in the staging epoch is
-// (outsideState.trailUsed).
-func (o *outsideAnswers) trailUsed(name string, epoch uint64) bool {
+// trailUsed reports whether name, a recording that answers once in the
+// staging (answersOnce), would not answer a call now in the staging epoch
+// is (outsideState.trailUsed, onceSpent).
+func (o *outsideAnswers) trailUsed(series *seriesIndex, name string, epoch uint64) bool {
 	st := o.cur.Load()
 	if st == nil || st.epoch != epoch {
 		return false
 	}
-	_, used := st.trailUsed.Load(name)
-	return used
+	return st.onceSpent(series, name, o.clock())
 }
 
 // isTrail reports whether name is, in trails (the manager's poolTrails), a
@@ -878,10 +891,16 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 	// never shown and taken both.
 	m.lockRound()
 	if st := m.exact.outside.cur.Load(); st != nil {
+		series := m.exact.poolSeries.Load()
 		for _, n := range names {
 			st.spent.Delete(n)
 			st.inTests.Delete(n)
 			st.trailUsed.Delete(n)
+			// An every series of key's starts its rounds afresh too: the
+			// process that makes its calls started again.
+			if mem := series.member(n); mem.every > 0 {
+				st.rounds.Delete(mem.id)
+			}
 			if _, was := st.between.LoadAndDelete(n); was {
 				st.betweenN.Add(-1)
 			}
@@ -936,12 +955,17 @@ func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict 
 	// (seriesIndex.answersOnce).
 	series := m.exact.poolSeries.Load()
 	if answersOnce(&m.exact.poolTrails, series, mk.Name) {
-		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
+		if !m.takeOnce(st, series, mk.Name) {
 			return exactRefused
 		}
 	}
 	if inTest {
 		if _, taken := st.inTests.LoadOrStore(mk.Name, true); taken {
+			if series.member(mk.Name).every > 0 {
+				// It answered in the windows in an earlier round of its
+				// every series: this round's answer is takeOnce's.
+				return exactServed
+			}
 			if series.againIn(st, mk.Name) {
 				st.countRepeat(series.of[mk.Name].id)
 				return exactServed
@@ -982,8 +1006,8 @@ func (m *MockManager) consumeBetween(mk *models.Mock) (verdict exactVerdict, fir
 	// answers again here, as the rest of the worker scope does, but for a
 	// once series' recording, which answers once in the staging wherever
 	// its call lands (seriesIndex.answersOnce).
-	if answersOnce(&m.exact.poolTrails, m.exact.poolSeries.Load(), mk.Name) {
-		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
+	if series := m.exact.poolSeries.Load(); answersOnce(&m.exact.poolTrails, series, mk.Name) {
+		if !m.takeOnce(st, series, mk.Name) {
 			return exactRefused, false
 		}
 	}
@@ -2098,6 +2122,11 @@ type seriesMember struct {
 	// answer-once check refuses a second consume, and hides the recording
 	// from the reads, before againIn is asked.
 	once bool
+	// every is, on a member of a once series, the interval after which its
+	// series answers again (SetPoolEvery): each recording once in each of
+	// the series' rounds (everyRound). Zero, the series answers once in the
+	// run.
+	every time.Duration
 }
 
 // SetPoolSeries installs, of the replay's scope table, the series the
@@ -2117,6 +2146,10 @@ func (m *MockManager) SetPoolSeries(series map[string][]string) {
 	if p := m.exact.poolOnce.Load(); p != nil {
 		once = *p
 	}
+	var every map[string]time.Duration
+	if p := m.exact.poolEvery.Load(); p != nil {
+		every = *p
+	}
 	ids := make([]string, 0, len(series))
 	for id := range series {
 		ids = append(ids, id)
@@ -2128,13 +2161,13 @@ func (m *MockManager) SetPoolSeries(series map[string][]string) {
 			if _, dup := idx.of[n]; n == "" || dup {
 				continue
 			}
-			idx.of[n] = seriesMember{id: id, once: once[id]}
+			idx.of[n] = seriesMember{id: id, once: once[id], every: everyOf(once, every, id)}
 			names = append(names, n)
 		}
 		if len(names) == 0 {
 			continue
 		}
-		idx.of[names[len(names)-1]] = seriesMember{id: id, last: true, once: once[id]}
+		idx.of[names[len(names)-1]] = seriesMember{id: id, last: true, once: once[id], every: everyOf(once, every, id)}
 		idx.members[id] = names
 	}
 	m.exact.poolSeries.Store(idx)
@@ -2155,6 +2188,153 @@ func (m *MockManager) SetPoolOnce(once []string) {
 		}
 	}
 	m.exact.poolOnce.Store(&set)
+}
+
+// SetPoolEvery installs, of the replay's scope table, the interval of each
+// once series whose recordings answer again after it
+// (models.ScopeTableReq.Every): the next SetPoolSeries marks their members
+// (seriesMember.every), so the agent sends these before the series, after
+// the once series. Such a series answers in rounds (everyRound): each
+// recording once in a round, and a call of one that already answered in
+// the round opens the next round only when it comes at least the interval
+// after the round opened; a sooner call misses, as a once series' second
+// call does. An id SetPoolOnce did not name, an empty one, and an interval
+// that is not positive mark nothing. None leaves the set none, never the
+// previous set's.
+func (m *MockManager) SetPoolEvery(every map[string]time.Duration) {
+	set := make(map[string]time.Duration, len(every))
+	for id, d := range every {
+		if id != "" && d > 0 {
+			set[id] = d
+		}
+	}
+	m.exact.poolEvery.Store(&set)
+}
+
+// everyOf is the interval SetPoolEvery gave series id, for a once series
+// alone: a series not once answers by its series, never in rounds.
+func everyOf(once map[string]bool, every map[string]time.Duration, id string) time.Duration {
+	if !once[id] {
+		return 0
+	}
+	return every[id]
+}
+
+// everyLead is how much sooner than its series' interval a call may come
+// and still open the series' next round (everyRound). An application reads
+// its clock before it makes the call its interval allows, and the agent
+// reads its own once the call arrives: the gap the agent reads between two
+// rounds' calls is shorter than the application's own by the time the
+// first round's call took from that clock read to the agent, which the
+// agent cannot see. A call the application makes per request, the change
+// a once series exists to show, comes far sooner and still misses.
+const everyLead = time.Second
+
+// seriesRound is an every series' round now, in one staging
+// (outsideState.rounds).
+type seriesRound struct {
+	mu sync.Mutex
+	// n is the round, 1 the first; 0 before any recording of the series
+	// answered.
+	n int64
+	// at is when the round opened: its first answer.
+	at time.Time
+}
+
+// clock is the clock an every series' rounds are read on
+// (outsideAnswers.now).
+func (o *outsideAnswers) clock() time.Time {
+	if o.now != nil {
+		return o.now()
+	}
+	return time.Now()
+}
+
+// round is series id's round in st, a new one (n 0) when none answered.
+func (st *outsideState) round(id string) *seriesRound {
+	r, _ := st.rounds.LoadOrStore(id, &seriesRound{})
+	return r.(*seriesRound)
+}
+
+// everyRound settles, under r's lock, whether name, a recording of an
+// every series whose round is r, answers a call now, and marks it answered
+// in its round when take is set. A recording answers once in each round:
+// the series' first answer opens round 1, a recording not yet answered in
+// the round answers in it, and a call of one that already answered in the
+// round opens the next round when it comes at least every (less everyLead)
+// after the round opened, and misses otherwise. used is the round name last
+// answered in (outsideState.trailUsed), ok whether it answered at all.
+func everyRound(r *seriesRound, used int64, ok bool, every time.Duration, now time.Time) (answers bool, round int64, at time.Time) {
+	switch {
+	case r.n == 0:
+		return true, 1, now
+	case !ok || used < r.n:
+		return true, r.n, r.at
+	case now.Sub(r.at) >= every-everyLead:
+		return true, r.n + 1, now
+	}
+	return false, r.n, r.at
+}
+
+// takeOnce is the answer-once check of a consume of name, a recording that
+// answers once in the staging (answersOnce): true when it answers, marking
+// it answered (outsideState.trailUsed). A recording of an every series
+// answers once in each of its series' rounds (everyRound); any other once
+// in the staging.
+func (m *MockManager) takeOnce(st *outsideState, series *seriesIndex, name string) bool {
+	mem := series.member(name)
+	if mem.every <= 0 {
+		_, taken := st.trailUsed.LoadOrStore(name, true)
+		return !taken
+	}
+	r := st.round(mem.id)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	used, ok := st.usedRound(name)
+	answers, n, at := everyRound(r, used, ok, mem.every, m.exact.outside.clock())
+	if answers {
+		r.n, r.at = n, at
+		st.trailUsed.Store(name, n)
+	}
+	return answers
+}
+
+// onceSpent reports whether name, a recording that answers once in the
+// staging (answersOnce), would not answer a call now in st: it answered,
+// and for a recording of an every series, in its series' round, which a
+// call now does not renew (everyRound).
+func (st *outsideState) onceSpent(series *seriesIndex, name string, now time.Time) bool {
+	mem := series.member(name)
+	if mem.every <= 0 {
+		_, used := st.trailUsed.Load(name)
+		return used
+	}
+	r := st.round(mem.id)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	used, ok := st.usedRound(name)
+	answers, _, _ := everyRound(r, used, ok, mem.every, now)
+	return !answers
+}
+
+// usedRound is the round name, a recording of an every series, last
+// answered in (outsideState.trailUsed), and whether it answered at all.
+func (st *outsideState) usedRound(name string) (int64, bool) {
+	v, ok := st.trailUsed.Load(name)
+	if !ok {
+		return 0, false
+	}
+	n, _ := v.(int64)
+	return n, true
+}
+
+// member is name's series membership in s; the zero member for a name of
+// no series, or a nil s.
+func (s *seriesIndex) member(name string) seriesMember {
+	if s == nil {
+		return seriesMember{}
+	}
+	return s.of[name]
 }
 
 // answersOnce reports whether name answers one call in the staging,
@@ -3184,9 +3364,9 @@ func (v *exactView) spentOutsideIn(name string, windowed bool) bool {
 	if answersOnce(v.trails, series, name) {
 		// A trailing write with no series, or a once series' recording,
 		// that answered once is spent for the staging, in every window and
-		// between tests
-		// (outsideState.trailUsed).
-		return v.outside.trailUsed(name, e)
+		// between tests, and an every series' recording until its series'
+		// next round (outsideState.trailUsed, everyRound).
+		return v.outside.trailUsed(series, name, e)
 	}
 	if windowed && v.isWorker(name) {
 		// A series' last-placed recording shows again once its series

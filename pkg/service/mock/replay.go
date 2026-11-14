@@ -1473,7 +1473,8 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker), declaredSources(served, loaded), onceSeries(served, worker), m.config.Mock.TimeForm); err != nil {
+	once := onceSeries(served, worker)
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker), declaredSources(served, loaded), once, everySeries(served, worker, once), m.config.Mock.TimeForm); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -1968,6 +1969,41 @@ func onceSeries(mp *models.Mapping, worker map[string][]string) []string {
 		}
 	}
 	slices.Sort(out)
+	return out
+}
+
+// everySeries is, of once (onceSeries(mp, worker)), the interval after
+// which each series answers again (models.MockEntry.Every), as a Go
+// duration: the longest one a served entry of the series says, the
+// stricter serving, as Due's is. An entry whose Every does not parse as a
+// positive duration says none, and a series none of whose entries says one
+// answers once in the run. nil when none.
+func everySeries(mp *models.Mapping, worker map[string][]string, once []string) map[string]string {
+	if mp == nil || len(once) == 0 {
+		return nil
+	}
+	served := map[string]bool{}
+	for _, names := range workerSeries(mp, worker) {
+		for _, n := range names {
+			served[n] = true
+		}
+	}
+	longest := map[string]time.Duration{}
+	for _, e := range mp.Worker {
+		if e.Every == "" || !served[e.Name] || !slices.Contains(once, e.Series) {
+			continue
+		}
+		if d, err := time.ParseDuration(e.Every); err == nil && d > longest[e.Series] {
+			longest[e.Series] = d
+		}
+	}
+	var out map[string]string
+	for id, d := range longest {
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[id] = d.String()
+	}
 	return out
 }
 
