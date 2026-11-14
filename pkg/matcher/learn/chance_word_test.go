@@ -53,13 +53,15 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 		t.Fatal("the view did not change")
 	}
 	// keploy mock's client tests learn these as a chance piece of a minted
-	// id (checkMinted): "48d1" stands in mock-31 beside no other word of
-	// the value's id, and no long word of either run's id stands anywhere.
-	// Two groups of the id in one answer is a piece beside another word of
-	// its id; a view giving another id there holds other's 8-hex word glued
-	// in its last group; served changed with no view, F's view of the place
-	// cannot be read: each stays refused there as keploy test refuses it.
+	// id (checkMinted): "48d1" stands in mock-31, and no long word of either
+	// run's id stands anywhere. Two 16-bit groups of the id in one answer
+	// are chance as one is: a large answer of UUIDs holds a second group of
+	// a fresh UUID by chance. A view giving another id there holds other's
+	// 8-hex word glued in its last group; served changed with no view, F's
+	// view of the place cannot be read: each stays refused there as keploy
+	// test refuses it.
 	minted := map[string]bool{
+		"two groups of the id in one answer, served as recorded":                                               true,
 		"the recorded id's group, served as recorded":                                                          true,
 		"the id's group F saw, served as recorded":                                                             true,
 		"served changed, its view giving the word at the same field":                                           true,
@@ -155,7 +157,7 @@ func refusedAtMock31(ln Learned) bool {
 
 // mintedPiece is what a value keploy mock's client tests learn as a chance
 // piece of a minted id names (follows.chancePiece).
-const mintedPiece = "beside no other word of the value's id, and the value is an id minted in each run"
+const mintedPiece = "and the value is an id minted in each run (no word of 32 bits or more of it"
 
 // checkMinted checks a row of keploy test's rows read in keploy mock's
 // client tests (mockDrifts), where the founder's minted default reads a
@@ -276,8 +278,7 @@ func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAnotherWordOfThatPayl
 	const recorded, gave = "stands in mock-31's answer as the recording gave it", "stands in mock-31's answer as record's full round gave it"
 	// keploy mock's client tests learn these as a chance piece of a minted
 	// id (checkMinted): chance's "48d1" stands in mock-31's answer, inside
-	// idA, beside no other word of chance's id, and no long word of either
-	// run's id stands anywhere. The rows of two ids hold a whole id there:
+	// idA, and no long word of either run's id stands anywhere. The rows of two ids hold a whole id there:
 	// refused.
 	minted := map[string]bool{
 		"the recorded value's word stands only in the recording's stamp":   true,

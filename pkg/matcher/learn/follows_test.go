@@ -1489,8 +1489,10 @@ func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
 // recording. The controls: a whole-id copy from an earlier answer is still
 // followed; a long word of either run's UUID standing elsewhere (in an
 // exchange the recording or F gave, a payload recorded before the call, or
-// another test's answer) keeps the refusal; so does a place that holds the
-// group beside another word of its UUID; a value with no long word is no
+// another test's answer) keeps the refusal, beside the group at its place
+// too; a group beside another 16-bit group of its UUID at one place is
+// chance as one alone is (a large answer of UUIDs holds a second group of a
+// fresh UUID by chance); a value with no long word is no
 // minted id, and its short part stays refused on this reading; and a call
 // read under the rule a copy follows its source (ClassifyFollowing) reads
 // as before. A part of 16 bytes or more is no piece on the took term. A long
@@ -1503,7 +1505,7 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 		path  = "header.x-keploy-test-step-id"
 		rec   = "3f2a9c1e-4b7d-4e2a-9f3c-1a2b3c4d5e6f"
 		live  = "8e1d2c3b-a0f9-4c8b-b7a6-5f4e3d2c1b0a"
-		piece = "beside no other word of the value's id, and the value is an id minted in each run"
+		piece = "and the value is an id minted in each run (no word of 32 bits or more of it"
 	)
 	shape := func(v string) Shape {
 		return Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: v}}}
@@ -1570,6 +1572,10 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 		"F's group where F gave a payload changed": {raw: []Raw{viewed("mock-1290", "job 0000", "deadbeef-a0f9-4c11-9d2d-ba9876543210")}},
 		"the whole id in a payload recorded after": {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{headedAt("mock-1400", rec, eRecAt.Add(2*time.Second))}},
 		"F's whole id in a payload recorded after": {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{headedAt("mock-1400", live, eRecAt.Add(2*time.Second))}},
+		// Beside another short group of its id: a second 16-bit group of a
+		// fresh UUID stands in a large answer by chance too.
+		"the recorded group beside another 16-bit group of its id":        {ee: []Earlier{same("mock-1215", "c0ffee11-4b7d-4e2a-8c2d-0123456789ab", Request, 1)}},
+		"F's group beside another 16-bit group, in another test's answer": {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"_id":"deadbeef-a0f9-4c8b-9d2d-ba9876543210"}`)}},
 	} {
 		places = c.places
 		if got := given(c.ee, c.raw...); got.Kind != KindNoise || !strings.Contains(got.Why, piece) || !strings.Contains(got.Why, "learns it as varying") {
@@ -1591,14 +1597,19 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 		ee          []Earlier
 		raw, places []Raw
 	}{
-		"F's 8-hex word where the recording gave it":         {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job 8e1d2c3b", "job 11112222", Request, 2)}},
-		"the recorded 48-bit word where F gave it":           {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job 11112222", "job 1a2b3c4d5e6f", Request, 2)}},
-		"F's 8-hex word in a payload recorded before":        {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{headed("mock-1290", "job 8e1d2c3b")}},
-		"F's 8-hex word where F gave a payload changed":      {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{viewed("mock-1290", "job 11112222", "job 8e1d2c3b")}},
-		"F's 8-hex word in another test's answer":            {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"job":"8e1d2c3b"}`)}},
-		"the recorded group beside another of its words":     {ee: []Earlier{same("mock-1215", "c0ffee11-4b7d-4e2a-8c2d-0123456789ab", Request, 1)}},
-		"the recorded group beside another, in a payload":    {raw: []Raw{headed("mock-1290", "c0ffee11-4b7d-4e2a-8c2d-0123456789ab")}},
-		"F's group beside another, in another test's answer": {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"_id":"deadbeef-a0f9-4c8b-9d2d-ba9876543210"}`)}},
+		"F's 8-hex word where the recording gave it":    {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job 8e1d2c3b", "job 11112222", Request, 2)}},
+		"the recorded 48-bit word where F gave it":      {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job 11112222", "job 1a2b3c4d5e6f", Request, 2)}},
+		"F's 8-hex word in a payload recorded before":   {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{headed("mock-1290", "job 8e1d2c3b")}},
+		"F's 8-hex word where F gave a payload changed": {ee: []Earlier{same("mock-1215", other, Request, 1)}, raw: []Raw{viewed("mock-1290", "job 11112222", "job 8e1d2c3b")}},
+		"F's 8-hex word in another test's answer":       {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"job":"8e1d2c3b"}`)}},
+		// A second long word of the id at the place where its group stands.
+		"the recorded group beside the id's 48-bit word":               {ee: []Earlier{same("mock-1215", "c0ffee11-4b7d-4a1b-8c2d-1a2b3c4d5e6f", Request, 1)}},
+		"the recorded group beside the id's 48-bit word, in a payload": {raw: []Raw{headed("mock-1290", "c0ffee11-4b7d-4a1b-8c2d-1a2b3c4d5e6f")}},
+		"F's group beside F's 8-hex word, in another test's answer":    {ee: []Earlier{same("mock-1215", other, Request, 1)}, places: []Raw{answered("mock-1290", `{"_id":"8e1d2c3b-a0f9-4c11-9d2d-ba9876543210"}`)}},
+		"the recorded group beside the id's 48-bit word glued":         {ee: []Earlier{same("mock-1215", "c0ffee11-4b7d-4a1b-8c2d-x1a2b3c4d5e6f", Request, 1)}},
+		// A payload F never served holding the group beside another 16-bit
+		// group: followed from there, as a part of the value, not a piece.
+		"the recorded group beside another 16-bit group, in a payload F never served": {raw: []Raw{headed("mock-1290", "c0ffee11-4b7d-4e2a-8c2d-0123456789ab")}},
 		// Glued: a long word inside a longer word of the place.
 		"F's 8-hex word glued, where the recording gave it":     {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job q8e1d2c3bq", "job 11112222", Request, 2)}},
 		"F's 8-hex word glued, where F gave it":                 {ee: []Earlier{same("mock-1215", other, Request, 1), earlier("mock-1300", "job 11112222", "job q8e1d2c3bq", Request, 2)}},
@@ -1700,7 +1711,7 @@ func TestAValueLearnedPastAChancePieceNamesWhatItWentPast(t *testing.T) {
 		rec    = "3f2a9c1e-4b7d-4e2a-9f3c-1a2b3c4d5e6f"
 		live   = "8e1d2c3b-a0f9-4c8b-b7a6-5f4e3d2c1b0a"
 		other  = "c0ffee11-4b7d-4a1b-8c2d-0123456789ab"
-		piece  = "beside no other word of the value's id, and the value is an id minted in each run"
+		piece  = "and the value is an id minted in each run (no word of 32 bits or more of it"
 		goneBy = "stands in mock-1290 at spec.req.header.X-Job, which record's full round sent and gave the application as recorded, while the value changed: a copy moves with its source"
 	)
 	shape := func(v string) Shape {
