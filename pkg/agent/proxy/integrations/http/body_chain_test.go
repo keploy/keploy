@@ -11,11 +11,13 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// uriComponent is s escaped as encodeURIComponent escapes it.
+// uriComponent is s escaped as encodeURIComponent escapes it: every byte
+// but an ASCII letter, a digit and - _ . ! ~ * ' ( ) (ECMA-262's
+// uriUnreserved), written here apart from the code it tests.
 func uriComponent(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
-		if c := s[i]; uriComponentKept(c) {
+		if c := s[i]; c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("-_.!~*'()", c) >= 0 {
 			b.WriteByte(c)
 		} else {
 			b.WriteString("%" + strings.ToUpper(hexByte(c)))
@@ -65,6 +67,9 @@ func TestABodyOfJSONUnderAWholeBodyEncodingIsReadAsThatJSON(t *testing.T) {
 		{"base64 of percent escapes", base64.StdEncoding.EncodeToString([]byte(uriComponent(doc))), "base64>percent>json"},
 		{"base64", base64.StdEncoding.EncodeToString([]byte(doc)), "base64>json"},
 		{"percent escapes", uriComponent(doc), "percent>json"},
+		// As a browser's encodeURIComponent wrote {"q":"a b!*'()~"}: the
+		// five marks it keeps beside - _ . ~ stay as they are.
+		{"percent escapes keeping ! * ' ( )", `%7B%22q%22%3A%22a%20b!*'()~%22%7D`, "percent>json"},
 		{"an array", base64.StdEncoding.EncodeToString([]byte(`[{"id":"x1"}]`)), "base64>json"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,6 +135,11 @@ func TestABodyNoLayerReadsWholeStaysWhole(t *testing.T) {
 		{"base64 of invalid UTF-8 in JSON", base64.StdEncoding.EncodeToString([]byte("{\"id\":\"\xff\"}"))},
 		{"percent in lower-case hex", strings.ToLower(pct[:3]) + pct[3:]},
 		{"percent escaping a byte kept as it is", strings.Replace(pct, "x1", "%781", 1)},
+		{"percent escaping a ! encodeURIComponent keeps", `%7B%22q%22%3A%22a%20b%21%22%7D`},
+		{"percent escaping a * encodeURIComponent keeps", `%7B%22q%22%3A%22a%20b%2A%22%7D`},
+		{"percent escaping a ' encodeURIComponent keeps", `%7B%22q%22%3A%22a%20b%27%22%7D`},
+		{"percent escaping a ( encodeURIComponent keeps", `%7B%22q%22%3A%22a%20b%28%22%7D`},
+		{"percent escaping a ) encodeURIComponent keeps", `%7B%22q%22%3A%22a%20b%29%22%7D`},
 		{"percent with a byte left unescaped", strings.Replace(pct, "%20", " ", 1)},
 		{"percent with a plus for a space", strings.Replace(pct, "%20", "+", 1)},
 		{"percent cut inside an escape", pct[:len(pct)-1]},
