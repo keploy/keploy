@@ -45,6 +45,19 @@ func kubectlEdit(t *testing.T, data []byte, f func(cfg map[string]any)) []byte {
 
 func got(t *testing.T, data []byte) map[string]any { return asConfig(t, data) }
 
+// realTempDir is a t.TempDir() with its symlinks resolved, as WriteBack
+// resolves the user's file to write and name the file it names (Written's
+// File, Backup and Kept are beside that file): on macOS the temp dir is under
+// /var, a symlink to /private/var.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func mustB64(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := base64.StdEncoding.DecodeString(s)
@@ -267,7 +280,7 @@ func TestWriteBackWritesWhatTheTestChangedToTheUsersKubeconfig(t *testing.T) {
 			outside: setNS("ops"), conflict: []string{"context kind-a"}},
 	}
 	for _, r := range rows {
-		dir := t.TempDir()
+		dir := realTempDir(t)
 		file := filepath.Join(dir, "config")
 		if err := os.MkdirAll(filepath.Join(dir, "ca"), 0o700); err != nil {
 			t.Fatal(err)
@@ -491,7 +504,7 @@ func TestWriteBackRefusesAndKeepsWhatItCannotWrite(t *testing.T) {
 		}},
 	} {
 		t.Run(r.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := realTempDir(t)
 			file := filepath.Join(dir, "config")
 			if err := os.WriteFile(file, orig, 0o600); err != nil {
 				t.Fatal(err)
