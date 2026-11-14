@@ -9,11 +9,13 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +102,81 @@ func TestOnWindowsTokenElevatedReadsTheRunsToken(t *testing.T) {
 	}
 	if got := tokenElevated(); got != want {
 		t.Fatalf("tokenElevated() = %v in a run whose token is elevated: %v", got, want)
+	}
+}
+
+// On the Windows lane, as the agent's elevated administrator
+// (KEPLOY_ROW_TOKEN_ELEVATED=1): a token restricted from that one with
+// Administrators deny-only, and without the UAC limited (LUA) flag, still
+// reports TokenElevation, yet cannot use the group. tokenElevated, read on a
+// thread impersonating it, must say it may not change the machine's trust:
+// TokenElevation would say it may.
+func TestOnWindowsATokenWithAdministratorsDenyOnlyIsNotElevated(t *testing.T) {
+	if os.Getenv("KEPLOY_ROW_TOKEN_ELEVATED") != "1" {
+		t.Skip("runs on the Windows lane as an elevated administrator (KEPLOY_ROW_TOKEN_ELEVATED=1): it restricts that token")
+	}
+	if !tokenElevated() {
+		t.Fatal("this row must run as an elevated administrator: it restricts that token")
+	}
+	var self windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ASSIGN_PRIMARY, &self); err != nil {
+		t.Fatalf("OpenProcessToken: %v", err)
+	}
+	defer func() { _ = self.Close() }()
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatalf("CreateWellKnownSid(Administrators): %v", err)
+	}
+	// DISABLE_MAX_PRIVILEGE (0x1) alone: with LUA_TOKEN (0x4) Windows would
+	// report the token as not elevated, and the row could not tell the group
+	// from TokenElevation.
+	const disableMaxPrivilege = 0x1
+	deny := windows.SIDAndAttributes{Sid: admins}
+	var restricted windows.Token
+	r, _, e := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken").Call(
+		uintptr(self), disableMaxPrivilege, 1, uintptr(unsafe.Pointer(&deny)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&restricted)))
+	if r == 0 {
+		t.Fatalf("CreateRestrictedToken(Administrators deny-only): %v", e)
+	}
+	defer func() { _ = restricted.Close() }()
+	var imp windows.Token
+	if err := windows.DuplicateTokenEx(restricted, windows.TOKEN_IMPERSONATE|windows.TOKEN_QUERY, nil, windows.SecurityImpersonation, windows.TokenImpersonation, &imp); err != nil {
+		t.Fatalf("DuplicateTokenEx: %v", err)
+	}
+	defer func() { _ = imp.Close() }()
+	if !imp.IsElevated() {
+		t.Fatal("the restricted token reports TokenElevation false here: this row needs one that reports it with Administrators deny-only")
+	}
+	if member, err := imp.IsMember(admins); err != nil || member {
+		t.Fatalf("the restricted token's Administrators membership = %v, %v; want false, nil (deny-only)", member, err)
+	}
+
+	type answer struct {
+		elevated bool
+		err      error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		// Never unlocked: Go ends a locked thread with its goroutine, so an
+		// impersonation RevertToSelf failed to undo reaches no other code.
+		runtime.LockOSThread()
+		if err := windows.SetThreadToken(nil, imp); err != nil {
+			done <- answer{err: fmt.Errorf("SetThreadToken: %w", err)}
+			return
+		}
+		elevated := tokenElevated()
+		if err := windows.RevertToSelf(); err != nil {
+			done <- answer{elevated, fmt.Errorf("RevertToSelf: %w", err)}
+			return
+		}
+		done <- answer{elevated: elevated}
+	}()
+	got := <-done
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.elevated {
+		t.Fatal("tokenElevated() = true on a thread whose token has Administrators deny-only (TokenElevation true); want false: such a token cannot write the machine's store")
 	}
 }
 
