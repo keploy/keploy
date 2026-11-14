@@ -14,7 +14,7 @@ func init() {
 	Register("record", Record)
 }
 
-func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Record(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "record",
 		Short:   "record the keploy testcases from the API calls",
@@ -27,6 +27,12 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			// failure is already logged, and a returned error would have cobra
 			// print usage on top of it. `return nil` alone exited 0, so a
 			// recording that never started read as a clean one to CI (#4772).
+			release, locked := acquireRunLock(logger, conf)
+			if !locked {
+				return nil
+			}
+			defer release()
+
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
