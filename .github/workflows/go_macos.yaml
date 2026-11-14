@@ -108,3 +108,15 @@ jobs:
       # job checks what these rows do on macOS.
       - name: Test the rows that read macOS's clock and refusals on darwin
         run: go test -count=1 ./cli/provider/ ./pkg/agent/proxy/syncMock/
+
+      # keploy.sh, served as https://keploy.io/install.sh, is what macOS users
+      # source, from zsh or the system's bash 3.2: this runs its test there
+      # (linux-ci-scripts runs it on Linux), under /bin/bash, not a newer bash
+      # on PATH. macOS's mktemp, its temp directory under a link (/var), and
+      # its BSD script(1) are not Linux's. REQUIRE_ZSH and REQUIRE_PTY make a
+      # missing zsh or script(1) fail the step rather than skip a half.
+      - name: Test the installer macOS users source (keploy.sh) on darwin
+        env:
+          REQUIRE_ZSH: '1'
+          REQUIRE_PTY: '1'
+        run: /bin/bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh
