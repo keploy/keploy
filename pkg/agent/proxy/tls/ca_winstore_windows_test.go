@@ -45,9 +45,16 @@ func freshCertDER(t *testing.T) []byte {
 // ROOT store, read here apart from userRootHolds.
 func userRootEnds(t *testing.T) (first, last []byte) {
 	t.Helper()
+	return rootEnds(t, windows.CERT_SYSTEM_STORE_CURRENT_USER)
+}
+
+// rootEnds is the first and the last certificate of location's ROOT store,
+// read here apart from rootStoreHolds.
+func rootEnds(t *testing.T, location uint32) (first, last []byte) {
+	t.Helper()
 	name, _ := windows.UTF16PtrFromString("ROOT")
 	store, err := windows.CertOpenStore(windows.CERT_STORE_PROV_SYSTEM, 0, 0,
-		windows.CERT_SYSTEM_STORE_CURRENT_USER|windows.CERT_STORE_READONLY_FLAG, uintptr(unsafe.Pointer(name)))
+		location|windows.CERT_STORE_READONLY_FLAG, uintptr(unsafe.Pointer(name)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,16 +66,22 @@ func userRootEnds(t *testing.T) (first, last []byte) {
 		}
 	}
 	if first == nil {
-		t.Fatal("the current user's ROOT store holds no certificate")
+		t.Fatalf("the ROOT store of location %#x holds no certificate", location)
 	}
 	return first, last
 }
 
-func TestOnWindowsTheUserStoreIsReadForTheCAItHolds(t *testing.T) {
+func TestOnWindowsTheRootStoresAreReadForTheCAsTheyHold(t *testing.T) {
 	first, last := userRootEnds(t)
 	for name, der := range map[string][]byte{"first": first, "last": last} {
 		if held, err := userRootHolds(der); err != nil || !held {
 			t.Errorf("userRootHolds(the store's %s certificate) = %v, %v; want true", name, held, err)
+		}
+	}
+	first, last = rootEnds(t, windows.CERT_SYSTEM_STORE_LOCAL_MACHINE)
+	for name, der := range map[string][]byte{"first": first, "last": last} {
+		if held, err := machineRootHolds(der); err != nil || !held {
+			t.Errorf("machineRootHolds(the machine store's %s certificate) = %v, %v; want true", name, held, err)
 		}
 	}
 	fresh := freshCertDER(t)
