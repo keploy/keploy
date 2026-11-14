@@ -141,14 +141,23 @@ func TestRecordIncoming_ACallsWindowHoldsItsMocksPastTheStaleHorizon(t *testing.
 			if during.OutsideRequests || !after.OutsideRequests {
 				t.Fatalf("outside the requests: the mock made during the call %v, the one made after it %v", during.OutsideRequests, after.OutsideRequests)
 			}
+			// The capture's resolve ends the call's window under the manager's
+			// lock and hands its mocks on after it (ResolveKept), on the
+			// recorder's goroutine: the window's end does not say the mock is
+			// out yet. Wait for it, and read its name as it comes out (with
+			// --sync the manager names it as it hands it on to its test case).
+			var duringName string
 			emitted := false
-			for len(out) > 0 {
-				if <-out == during {
-					emitted = true
+			deadline = time.Now().Add(10 * time.Second)
+			for !emitted {
+				select {
+				case mk := <-out:
+					if mk == during {
+						emitted, duringName = true, mk.Name
+					}
+				case <-time.After(time.Until(deadline)):
+					t.Fatal("the call's mock was dropped while the call was in flight: it did not come out")
 				}
-			}
-			if !emitted {
-				t.Fatal("the call's mock was dropped while the call was in flight")
 			}
 			if !sync {
 				return
@@ -157,14 +166,28 @@ func TestRecordIncoming_ACallsWindowHoldsItsMocksPastTheStaleHorizon(t *testing.
 			if !m.SendingTestCase(tc.Name, start, end) {
 				t.Fatalf("%s is left out", tc.Name)
 			}
+			// Its mapping is sent after its mock, on the same goroutine.
 			var mapped []string
+			got := false
+			deadline = time.Now().Add(10 * time.Second)
+			for !got {
+				select {
+				case mp := <-maps:
+					if mp.TestName == tc.Name {
+						mapped = append(mapped, mp.MockIDs...)
+						got = true
+					}
+				case <-time.After(time.Until(deadline)):
+					t.Fatalf("no mapping came for %s", tc.Name)
+				}
+			}
 			for len(maps) > 0 {
 				if mp := <-maps; mp.TestName == tc.Name {
 					mapped = append(mapped, mp.MockIDs...)
 				}
 			}
-			if len(mapped) != 1 {
-				t.Fatalf("mapped %v to %s, want the call's mock", mapped, tc.Name)
+			if len(mapped) != 1 || mapped[0] != duringName {
+				t.Fatalf("mapped %v to %s, want [%s], the call's mock", mapped, tc.Name, duringName)
 			}
 		})
 	}
