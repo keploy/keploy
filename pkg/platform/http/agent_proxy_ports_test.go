@@ -257,6 +257,16 @@ func TestANativeAgentOffLinuxIsMovedOffATakenPortAndTheMoveSaid(t *testing.T) {
 			t.Fatalf("proxyPorts = %d, %v; want the proxy off the agent's %d", gotProxy, err, agentPort)
 		}
 	})
+	// Nor the DNS server's, free as it is before the agent starts.
+	t.Run("the DNS server's port is the agent's", func(t *testing.T) {
+		free := freeAtProbe(t)
+		agentPort := free()
+		a, _ := portsClient(free(), agentPort)
+		_, gotDNS, err := a.proxyPorts(false, agentPort)
+		if err != nil || gotDNS == agentPort {
+			t.Fatalf("proxyPorts: DNS server on %d, %v; want it off the agent's %d", gotDNS, err, agentPort)
+		}
+	})
 	for _, server := range []string{"proxy", "DNS server"} {
 		t.Run("no port for the "+server, func(t *testing.T) {
 			was := availablePort
