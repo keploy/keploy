@@ -2925,9 +2925,76 @@ func pieces(recorded, live string) []run {
 	return out
 }
 
-// maxMovedCells bounds the table movedWords compares two word lists in;
-// beyond it every word between their common start and end has moved.
+// maxMovedCells bounds the table movedWords compares two word lists in.
+// Beyond it the lists are first cut at their anchors (anchorsOf), and each
+// stretch between two anchors is compared alone, within the same bound;
+// every word of a stretch still beyond it has moved.
 const maxMovedCells = 1 << 18
+
+// anchorsOf are the pairs (i, j) of r's and l's words, in order, that each
+// list holds exactly once and that both hold, where every longest chain of
+// such pairs in order in both lists holds that pair (a patience diff's
+// anchors). A pair one longest chain holds and another skips has moved, as
+// a word the two longest common subsequences pair apart has (movedWords),
+// so of two such words that swapped neither is an anchor. Its work grows
+// with the lists' length times its logarithm, never with their product.
+func anchorsOf(r, l []string) [][2]int {
+	inR, inL, at := make(map[string]int, len(r)), make(map[string]int, len(l)), make(map[string]int, len(l))
+	for _, w := range r {
+		inR[w]++
+	}
+	for j, w := range l {
+		inL[w]++
+		at[w] = j
+	}
+	var pairs [][2]int
+	for i, w := range r {
+		if inR[w] == 1 && inL[w] == 1 {
+			pairs = append(pairs, [2]int{i, at[w]})
+		}
+	}
+	// ends[k] is the longest chain of pairs that ends at pairs[k], starts[k]
+	// the longest that starts there: the longest rising run of j, each way.
+	chainLens := func(js []int) []int {
+		out, tails := make([]int, len(js)), []int{}
+		for k, j := range js {
+			n, _ := slices.BinarySearch(tails, j)
+			if n == len(tails) {
+				tails = append(tails, j)
+			} else {
+				tails[n] = j
+			}
+			out[k] = n + 1
+		}
+		return out
+	}
+	js, back := make([]int, len(pairs)), make([]int, len(pairs))
+	for k, pr := range pairs {
+		js[k], back[len(pairs)-1-k] = pr[1], -pr[1]
+	}
+	ends, starts := chainLens(js), chainLens(back)
+	longest := 0
+	for _, n := range ends {
+		longest = max(longest, n)
+	}
+	// A pair lies on a longest chain where the chain ending at it and the
+	// one starting at it make one; it is on every longest chain where no
+	// other pair on one stands at its place in the chain.
+	onOne := func(k int) bool { return ends[k]+starts[len(pairs)-1-k]-1 == longest }
+	onPlace := make([]int, longest+1)
+	for k := range pairs {
+		if onOne(k) {
+			onPlace[ends[k]]++
+		}
+	}
+	var anchors [][2]int
+	for k, pr := range pairs {
+		if onOne(k) && onPlace[ends[k]] == 1 {
+			anchors = append(anchors, pr)
+		}
+	}
+	return anchors
+}
 
 // movedWords are the words of rec and of live (a value's words, recorded and
 // live, in order) that are no part of a longest common subsequence of the
@@ -2935,7 +3002,17 @@ const maxMovedCells = 1 << 18
 // in another order. Words that kept their order stay, however much changed
 // around them. Two longest subsequences are taken, ties broken each way, and
 // a word outside either has moved, so of two words that swapped both have.
+// Beyond maxMovedCells, each stretch between two anchors (anchorsOf) is read
+// so alone, and the anchors stay.
 func movedWords(rec, live []string) (movedRec, movedLive []string) {
+	movedRec, movedLive, _ = movedWordsIn(rec, live, true)
+	return movedRec, movedLive
+}
+
+// movedWordsIn is movedWords, cutting at anchors beyond maxMovedCells only
+// where anchor is set (a stretch between two anchors is not cut again), and
+// the cells of the tables it compared in.
+func movedWordsIn(rec, live []string, anchor bool) (movedRec, movedLive []string, cells int) {
 	p := 0
 	for p < len(rec) && p < len(live) && rec[p] == live[p] {
 		p++
@@ -2945,12 +3022,22 @@ func movedWords(rec, live []string) (movedRec, movedLive []string) {
 		q++
 	}
 	r, l := rec[p:len(rec)-q], live[p:len(live)-q]
-	if len(r) == 0 || len(l) == 0 || len(r)*len(l) > maxMovedCells {
-		return r, l
+	if len(r)*len(l) > maxMovedCells {
+		if !anchor {
+			return r, l, 0
+		}
+		from := [2]int{}
+		for _, a := range append(anchorsOf(r, l), [2]int{len(r), len(l)}) {
+			mr, ml, n := movedWordsIn(r[from[0]:a[0]], l[from[1]:a[1]], false)
+			movedRec, movedLive, cells = append(movedRec, mr...), append(movedLive, ml...), cells+n
+			from = [2]int{a[0] + 1, a[1] + 1}
+		}
+		return movedRec, movedLive, cells
 	}
 	// lcs[i][j] is the length of a longest common subsequence of r[i:] and
 	// l[j:].
 	w := len(l) + 1
+	cells = len(r) * len(l)
 	lcs := make([]int32, (len(r)+1)*w)
 	for i := len(r) - 1; i >= 0; i-- {
 		for j := len(l) - 1; j >= 0; j-- {
@@ -2990,7 +3077,7 @@ func movedWords(rec, live []string) (movedRec, movedLive []string) {
 			movedLive = append(movedLive, l[j])
 		}
 	}
-	return movedRec, movedLive
+	return movedRec, movedLive, cells
 }
 
 // isClock reports whether a piece whose changed words are changed

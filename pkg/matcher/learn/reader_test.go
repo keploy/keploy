@@ -599,35 +599,68 @@ func TestReaderCutsABase64TokenAsItFindsOne(t *testing.T) {
 	}
 }
 
-// Past maxMovedCells, keptWords compares no table (main's movedWords'
-// guard): every word between the common start and end has moved. Two
-// drifted 498 KB answers hold about 60k words each, and their table would
-// be (60k)² int32, gigabytes; here 600 words a side, past the cap, keep
-// only the common start and end, and allocate far less than the table.
+// Past maxMovedCells, keptWords compares no table of the whole (main's
+// movedWords' guard). Two drifted 498 KB answers hold about 60k words
+// each, and their table would be (60k)² int32, gigabytes; here 2000 words a
+// side, past the cap, allocate far less than the table. Where no word
+// stands once in each run (every word twice), there is no anchor to cut at
+// (anchorsOf), and every word between the common start and end has moved:
+// only those two stay. Where each word stands once, the anchors keep every
+// word the shift moved along, as the table would within the cap.
 func TestReaderKeptWordsPastTheCapComparesNoTable(t *testing.T) {
-	const n = 600
+	const n = 2000
 	if n*n <= maxMovedCells {
 		t.Fatalf("fixture: %d x %d words are within the cap %d", n, n, maxMovedCells)
 	}
-	rec, live := []string{"a"}, []string{"a", "new"}
-	for i := 0; i < n; i++ {
-		rec = append(rec, fmt.Sprintf("x%d", i))
-		if i < n-1 {
-			live = append(live, fmt.Sprintf("x%d", i))
+	for _, twice := range []bool{true, false} {
+		rec, live := []string{"a"}, []string{"a", "new"}
+		for i := 0; i < n; i++ {
+			w := fmt.Sprintf("x%d", i)
+			if twice {
+				w = fmt.Sprintf("x%d", i/2)
+			}
+			rec = append(rec, w)
+			if i < n-1 {
+				live = append(live, w)
+			}
+		}
+		rec, live = append(rec, "z"), append(live, "z")
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		kept, cells := keptWordsIn(rec, live, true)
+		runtime.ReadMemStats(&after)
+		// The common end is "x999 z" where each word stands twice.
+		want := [][2]int{{0, 0}, {n, n}, {n + 1, n + 1}}
+		if !twice {
+			want = [][2]int{{0, 0}}
+			for i := 1; i < n; i++ {
+				want = append(want, [2]int{i, i + 1})
+			}
+			want = append(want, [2]int{n + 1, n + 1})
+		}
+		if fmt.Sprint(kept) != fmt.Sprint(want) {
+			t.Errorf("each word twice %v: kept %d pairs (%v...); want %d (%v...)", twice, len(kept), kept[:min(len(kept), 4)], len(want), want[:min(len(want), 4)])
+		}
+		if got, table := after.TotalAlloc-before.TotalAlloc, uint64((n+1)*(n+1)*4); got >= table/8 || cells > 2*n {
+			t.Errorf("each word twice %v: keptWords allocated %d bytes and compared %d cells; the table it must not build is %d bytes", twice, got, cells, table)
+		}
+		// movedWords lines them up alike: every word between the common
+		// start and end moved, or, cut at the anchors, the one word each
+		// run alone holds.
+		mr, ml, mc := movedWordsIn(rec, live, true)
+		wantRec, wantLive := rec[1:n], live[1:n]
+		if !twice {
+			wantRec, wantLive = rec[n:n+1], live[1:2]
+		}
+		if fmt.Sprint(mr, ml) != fmt.Sprint(wantRec, wantLive) || mc > 2*n {
+			t.Errorf("each word twice %v: moved %d and %d words (%v, %v), %d cells; want %d and %d", twice, len(mr), len(ml), mr[:min(len(mr), 3)], ml[:min(len(ml), 3)], mc, len(wantRec), len(wantLive))
 		}
 	}
-	rec, live = append(rec, "z"), append(live, "z")
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	kept := keptWords(rec, live)
-	runtime.ReadMemStats(&after)
-	if want := [][2]int{{0, 0}, {n + 1, n + 1}}; fmt.Sprint(kept) != fmt.Sprint(want) {
-		t.Errorf("kept %d pairs (%v...); want only the common start and end %v", len(kept), kept[:min(len(kept), 4)], want)
-	}
-	if got, table := after.TotalAlloc-before.TotalAlloc, uint64((n+1)*(n+1)*4); got >= table/8 {
-		t.Errorf("keptWords allocated %d bytes; the table it must not build is %d", got, table)
-	}
 	// Within the cap, the same shift keeps the words that moved along.
+	rec := []string{"a"}
+	for i := 0; i < 60; i++ {
+		rec = append(rec, fmt.Sprintf("x%d", i/2))
+	}
 	if kept := keptWords(rec[:60], append([]string{"a", "new"}, rec[1:59]...)); len(kept) != 59 {
 		t.Errorf("within the cap: kept %d pairs; want the 59 shared words", len(kept))
 	}

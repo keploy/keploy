@@ -18,8 +18,9 @@ import (
 //     '-', '_', '+', '/', '=' and '.' always split, so the "17" of
 //     "order-17", "uploads/17/a.png" and "Order+17" is a word.
 //   - The words of R and F are lined up as movedWords lines them up
-//     (classify.go): a longest common subsequence, ties broken each way.
-//     The reader keeps a word only where both ways pair it with the same
+//     (classify.go): a longest common subsequence, ties broken each way;
+//     past its bound, one in each stretch between two anchors, words each
+//     run holds once and in the same order (anchorsOf). The reader keeps a word only where both ways pair it with the same
 //     word of the other run (keptWords), so every kept word has one
 //     partner and the words between two kept words are one stretch.
 //   - A stretch of equal counts pairs its words by position. One of unequal
@@ -132,10 +133,19 @@ func textsOf(s string, spans [][2]int) []string {
 // (classify.go: a longest common subsequence, ties broken each way) that
 // both ways pair with the same partner. A word one way pairs with one
 // partner and the other way with another has moved, as one either way
-// skips has. Beyond maxMovedCells every word between the common start and
-// end has moved, as there. In order.
+// skips has. Beyond maxMovedCells the words between the common start and
+// end are cut at their anchors (anchorsOf), which stay, and each stretch
+// between two anchors is read so alone; every word of a stretch still
+// beyond the bound has moved, as there. In order.
 func keptWords(rec, live []string) [][2]int {
-	var kept [][2]int
+	kept, _ := keptWordsIn(rec, live, true)
+	return kept
+}
+
+// keptWordsIn is keptWords, cutting at anchors beyond maxMovedCells only
+// where anchor is set (a stretch between two anchors is not cut again), and
+// the cells of the tables it compared in.
+func keptWordsIn(rec, live []string, anchor bool) (kept [][2]int, cells int) {
 	p := 0
 	for p < len(rec) && p < len(live) && rec[p] == live[p] {
 		kept = append(kept, [2]int{p, p})
@@ -146,8 +156,25 @@ func keptWords(rec, live []string) [][2]int {
 		q++
 	}
 	r, l := rec[p:len(rec)-q], live[p:len(live)-q]
-	if len(r) > 0 && len(l) > 0 && len(r)*len(l) <= maxMovedCells {
+	switch {
+	case len(r)*len(l) > maxMovedCells:
+		if !anchor {
+			break
+		}
+		from := [2]int{}
+		for _, a := range append(anchorsOf(r, l), [2]int{len(r), len(l)}) {
+			in, n := keptWordsIn(r[from[0]:a[0]], l[from[1]:a[1]], false)
+			for _, k := range in {
+				kept = append(kept, [2]int{p + from[0] + k[0], p + from[1] + k[1]})
+			}
+			if cells += n; a[0] < len(r) {
+				kept = append(kept, [2]int{p + a[0], p + a[1]})
+			}
+			from = [2]int{a[0] + 1, a[1] + 1}
+		}
+	default:
 		w := len(l) + 1
+		cells = len(r) * len(l)
 		lcs := make([]int32, (len(r)+1)*w)
 		for i := len(r) - 1; i >= 0; i-- {
 			for j := len(l) - 1; j >= 0; j-- {
@@ -184,7 +211,7 @@ func keptWords(rec, live []string) [][2]int {
 	for k := q; k > 0; k-- {
 		kept = append(kept, [2]int{len(rec) - k, len(live) - k})
 	}
-	return kept
+	return kept, cells
 }
 
 // textCut is one cut of a text's word diff (alignedCuts): R's word r and
