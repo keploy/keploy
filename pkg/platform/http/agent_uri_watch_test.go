@@ -589,7 +589,8 @@ func TestThePcapStreamNeverSaysTheURIsPassword(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			core, logs := observer.New(zapcore.DebugLevel)
 			a := New(zap.New(core), nil, &config.Config{Agent: config.Agent{AgentURI: "http://:s3aled-t0ken@" + tc.addr + "/agent"}})
-			err := a.streamPcapArtifact(context.Background(), tc.path, filepath.Join(t.TempDir(), "out"), 0o600, false)
+			dir := t.TempDir()
+			err := a.streamPcapArtifact(context.Background(), dir, tc.path, filepath.Join(dir, "out"), 0o600, false)
 			switch {
 			case tc.want == "" && err != nil,
 				tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):

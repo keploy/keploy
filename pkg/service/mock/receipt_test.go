@@ -368,9 +368,10 @@ func TestReceiptRefusesASymlink(t *testing.T) {
 	if b, _ := os.ReadFile(outside); string(b) != "untouched" {
 		t.Fatalf("the receipt was written through a symlink: %q", b)
 	}
-	// The link is replaced by the receipt, not followed.
-	if info, err := os.Lstat(filepath.Join(keployDir, "set", ReceiptFile)); err != nil || !info.Mode().IsRegular() {
-		t.Fatalf("the receipt path is not a regular file after the write: %v", err)
+	// The link leads out of the recording, so the write is refused, and the
+	// link, as a stale receipt, is taken away with it: no link out is left.
+	if info, err := os.Lstat(filepath.Join(keployDir, "set", ReceiptFile)); err == nil && !info.Mode().IsRegular() {
+		t.Fatalf("a link out is left at the receipt's path: %v", info.Mode())
 	}
 
 	// A set directory that is itself a link is not written through either.
@@ -605,7 +606,13 @@ func TestReadReceiptRefusesNonRegular(t *testing.T) {
 			}()
 			select {
 			case err := <-done:
-				if !errors.Is(err, safeyaml.ErrNotRegular) {
+				// A link to /dev/zero is a link out of the recording, refused
+				// before anything is opened; a FIFO in it is no regular file.
+				want := fmt.Sprintf("the recording's file %q is read only inside its recording %q: it is a link that leads out of it, to %q; replace the link with what it leads to", filepath.Join("set", ReceiptFile), keployDir, "/dev/zero")
+				if name == "devzero" && (err == nil || err.Error() != want) {
+					t.Fatalf("ReadReceipt on a %s receipt = %v, want it refused as outside the recording: %q", name, err, want)
+				}
+				if name != "devzero" && !errors.Is(err, safeyaml.ErrNotRegular) {
 					t.Fatalf("ReadReceipt on a %s receipt = %v, want ErrNotRegular", name, err)
 				}
 				if !strings.Contains(err.Error(), ReceiptFile) {
@@ -1114,4 +1121,182 @@ func TestBypassListWritesAnIPv6HostInBrackets(t *testing.T) {
 		{Path: "/health"},
 	})
 	require.Equal(t, []string{"[::1]:27017", "[::1]:5432", "localhost:8200", ":6379", "api.internal/v1", "10.0.0.1", "/health"}, got)
+}
+
+// A set's digest names what the recording holds: a mocks file that links out
+// of it has none, and one that links inside it has that file's.
+func TestMocksDigestStaysInsideTheRecording(t *testing.T) {
+	base := t.TempDir()
+	keployDir := filepath.Join(base, "keploy")
+	for _, set := range []string{"out", "in", "real"} {
+		if err := os.MkdirAll(filepath.Join(keployDir, set), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(base, "outside.yaml"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keployDir, "real", "mocks.yaml"), []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "..", "outside.yaml"), filepath.Join(keployDir, "out", "mocks.yaml")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..", "real", "mocks.yaml"), filepath.Join(keployDir, "in", "mocks.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if got := MocksDigest(keployDir, "out"); got != "" {
+		t.Fatalf("a mocks file that links out has the digest %q", got)
+	}
+	if got, want := MocksDigest(keployDir, "in"), MocksDigest(keployDir, "real"); got == "" || got != want {
+		t.Fatalf("a link inside the recording has the digest %q, want %q", got, want)
+	}
+}
+
+// A receipt is a file of the recording: it is read and written only inside
+// it. A receipt, a set folder or a keploy folder that a cloned repository
+// carries as a link out is refused, with why, by the read; and no write, a
+// replay's or a record's, puts a receipt, or a temp file, where it leads.
+func TestReceiptsStayInsideTheRecording(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links need privileges on Windows")
+	}
+	const planted = "set: set\nonMiss: fail\n"
+	// layout makes base/outside/set holding planted receipts, and
+	// base/project/keploy, and returns them.
+	layout := func(t *testing.T) (outside, keployDir string) {
+		t.Helper()
+		base := t.TempDir()
+		outside = filepath.Join(base, "outside")
+		if err := os.MkdirAll(filepath.Join(outside, "set"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{ReceiptFile, TestsReceiptFile, RecordTestsReceiptFile} {
+			if err := os.WriteFile(filepath.Join(outside, "set", f), []byte(planted), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return outside, filepath.Join(base, "project", "keploy")
+	}
+	symlink := func(t *testing.T, target, at string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// untouched requires outside to hold the planted receipts and nothing
+	// else.
+	untouched := func(t *testing.T, outside string) {
+		t.Helper()
+		if sets, err := os.ReadDir(outside); err != nil || len(sets) != 1 || sets[0].Name() != "set" {
+			t.Fatalf("outside holds %v (%v), want only the planted set", sets, err)
+		}
+		entries, err := os.ReadDir(filepath.Join(outside, "set"))
+		if err != nil || len(entries) != 3 {
+			t.Fatalf("outside holds %v (%v), want only the three planted receipts", entries, err)
+		}
+		for _, e := range entries {
+			if b, err := os.ReadFile(filepath.Join(outside, "set", e.Name())); err != nil || string(b) != planted {
+				t.Fatalf("%s outside holds %q (%v)", e.Name(), b, err)
+			}
+		}
+	}
+	refused := func(t *testing.T, what string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "only inside") || !strings.Contains(err.Error(), "a link that leads out of it") || strings.Contains(err.Error(), "escapes from parent") {
+			t.Fatalf("%s: %v, want it refused as outside the recording", what, err)
+		}
+	}
+	read := func(t *testing.T, keployDir string) {
+		t.Helper()
+		r, err := ReadReceipt(keployDir, "set")
+		refused(t, fmt.Sprintf("ReadReceipt (read %+v)", r), err)
+		tr, err := ReadTestsReceipt(keployDir, "set")
+		refused(t, fmt.Sprintf("ReadTestsReceipt (read %+v)", tr), err)
+		tr, err = ReadRecordTestsReceipt(keployDir, "set")
+		refused(t, fmt.Sprintf("ReadRecordTestsReceipt (read %+v)", tr), err)
+	}
+	// readSays requires each reader's refusal to say exactly which receipt
+	// was refused, then what says(file) gives: the link, and where it leads
+	// from the recording, for a relative link out too.
+	readSays := func(t *testing.T, keployDir string, says func(file string) string) {
+		t.Helper()
+		for file, read := range map[string]func() error{
+			ReceiptFile:            func() error { _, err := ReadReceipt(keployDir, "set"); return err },
+			TestsReceiptFile:       func() error { _, err := ReadTestsReceipt(keployDir, "set"); return err },
+			RecordTestsReceiptFile: func() error { _, err := ReadRecordTestsReceipt(keployDir, "set"); return err },
+		} {
+			name := filepath.Join("set", file)
+			want := fmt.Sprintf("the recording's file %q is read only inside its recording %q: %s", name, keployDir, says(file))
+			if err := read(); err == nil || err.Error() != want {
+				t.Errorf("reading %s: %v, want %q", name, err, want)
+			}
+		}
+	}
+	write := func(keployDir string) {
+		writeReceipt(zap.NewNop(), keployDir, Receipt{Set: "set", OnMiss: "fail"})
+		writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Tests: []TestReceipt{{Name: "t1"}}})
+		writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set"}, []models.ScopeWindow{{Name: "t1"}})
+		// A run that named no tests removes the set's stale file, and a
+		// record's results for a new set make its folder.
+		writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set"})
+		writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set"}, nil)
+		writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set2"}, []models.ScopeWindow{{Name: "t1"}})
+	}
+
+	t.Run("a receipt that links out", func(t *testing.T) {
+		outside, keployDir := layout(t)
+		for _, f := range []string{ReceiptFile, TestsReceiptFile, RecordTestsReceiptFile} {
+			symlink(t, filepath.Join("..", "..", "..", "outside", "set", f), filepath.Join(keployDir, "set", f))
+		}
+		read(t, keployDir)
+		readSays(t, keployDir, func(file string) string {
+			return fmt.Sprintf("it is a link that leads out of it, to %q; replace the link with what it leads to", filepath.Join(outside, "set", file))
+		})
+		write(keployDir)
+		untouched(t, outside)
+	})
+	t.Run("a set folder that links out", func(t *testing.T) {
+		outside, keployDir := layout(t)
+		symlink(t, filepath.Join("..", "..", "outside", "set"), filepath.Join(keployDir, "set"))
+		read(t, keployDir)
+		readSays(t, keployDir, func(string) string {
+			return fmt.Sprintf("it leads through %q, a link that leads out of it, to %q; replace the link with what it leads to", "set", filepath.Join(outside, "set"))
+		})
+		write(keployDir)
+		untouched(t, outside)
+	})
+	t.Run("a keploy folder that links out of the project", func(t *testing.T) {
+		outside, keployDir := layout(t)
+		symlink(t, filepath.Join("..", "outside"), keployDir)
+		read(t, keployDir)
+		write(keployDir)
+		untouched(t, outside)
+	})
+	// keploy/.gitignore that links out is not read as the recording's: the
+	// receipts' entries are then added to it, which is refused with why.
+	t.Run("a .gitignore that links out", func(t *testing.T) {
+		outside, keployDir := layout(t)
+		gi := filepath.Join(outside, "gitignore")
+		all := strings.Join(receiptIgnore, "\n") + "\n"
+		if err := os.WriteFile(gi, []byte(all), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		symlink(t, filepath.Join("..", "..", "outside", "gitignore"), filepath.Join(keployDir, ".gitignore"))
+		core, logs := observer.New(zapcore.DebugLevel)
+		ignoreReceipts(zap.New(core), keployDir)
+		said := logs.FilterMessage("failed to git-ignore the replay receipt").All()
+		if len(said) != len(receiptIgnore) {
+			t.Fatalf("said %d times that an entry could not be added, want %d: %v", len(said), len(receiptIgnore), logs.All())
+		}
+		if why := fmt.Sprint(said[0].ContextMap()["error"]); !strings.Contains(why, "only inside") || !strings.Contains(why, "a link that leads out of it") || strings.Contains(why, "escapes from parent") {
+			t.Fatalf("said %q, want it refused as outside the recording", why)
+		}
+		if b, err := os.ReadFile(gi); err != nil || string(b) != all {
+			t.Fatalf("the file the link leads to holds %q (%v)", b, err)
+		}
+	})
 }

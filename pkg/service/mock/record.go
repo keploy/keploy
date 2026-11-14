@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -1117,7 +1119,7 @@ func (m *mockService) existsOnly(name string) (func(keep bool), bool, error) {
 	if m.config.Path == "" {
 		return func(bool) {}, true, nil
 	}
-	_, err := os.Stat(filepath.Join(m.config.Path, name))
+	_, err := yaml.StatInRecording(m.config.Path, filepath.Join(m.config.Path, name))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, true, err
 	}
@@ -1131,39 +1133,101 @@ func (m *mockService) existsOnly(name string) (func(keep bool), bool, error) {
 // caller is about to delete the live set's mappings and test cases — doing that
 // without a restorable copy is unrecoverable data loss. The caller must abort
 // on a non-nil error before any destructive step.
+//
+// The set, its backup and the folders and files of both are read, made,
+// removed and moved only inside the recording, opened from the project
+// (yaml.*InRecording), so a keploy folder, set or backup that links out of
+// it is refused with why, and nothing is copied, removed or moved where it
+// leads. A link in the set is copied as the link it is, never read through.
 func (m *mockService) saveSet(name string) (func(keep bool), bool, error) {
 	if m.config.Path == "" {
 		return func(bool) {}, true, nil
 	}
-	set := filepath.Join(m.config.Path, name)
-	saved := filepath.Join(m.config.Path, "."+name+".previous")
-	_ = os.RemoveAll(saved)
-	if _, err := os.Stat(set); errors.Is(err, fs.ErrNotExist) {
+	root := m.config.Path
+	set := filepath.Join(root, name)
+	saved := filepath.Join(root, "."+name+".previous")
+	_ = yaml.RemoveAllInRecording(root, saved)
+	if _, err := yaml.StatInRecording(root, set); errors.Is(err, fs.ErrNotExist) {
 		// Nothing to lose: a fresh set. On a refused run, drop whatever the
 		// aborted recording left behind.
 		return func(keep bool) {
 			if !keep {
-				_ = os.RemoveAll(set)
+				_ = yaml.RemoveAllInRecording(root, set)
 			}
 		}, false, nil
 	}
-	if err := os.CopyFS(saved, os.DirFS(set)); err != nil {
-		_ = os.RemoveAll(saved)
+	// Any other error, a link out among them, is backUpSet's to refuse.
+	if err := backUpSet(root, name, filepath.Base(saved)); err != nil {
+		_ = yaml.RemoveAllInRecording(root, saved)
 		return nil, true, fmt.Errorf("back up mock set %q before re-recording: %w", name, err)
 	}
 	return func(keep bool) {
 		if keep {
-			_ = os.RemoveAll(saved)
+			_ = yaml.RemoveAllInRecording(root, saved)
 			return
 		}
-		if rmErr := os.RemoveAll(set); rmErr != nil {
+		if rmErr := yaml.RemoveAllInRecording(root, set); rmErr != nil {
 			m.logger.Warn("could not put the previous recording back", zap.String("mock-set", name), zap.Error(rmErr))
 			return
 		}
-		if mvErr := os.Rename(saved, set); mvErr != nil {
+		if mvErr := yaml.RenameInRecording(root, saved, set); mvErr != nil {
 			m.logger.Warn("could not put the previous recording back; it is kept at "+saved, zap.String("mock-set", name), zap.Error(mvErr))
 		}
 	}, true, nil
+}
+
+// backUpSet copies the set folder name of the recording at root to backup, a
+// folder it makes beside it, as os.CopyFS copies a folder: folders are made
+// 0777 and files 0666 with the set's execute bits, less the umask, and a link
+// is copied as the link it is. Both are opened from the project, and every
+// folder and file is read and made only inside the recording, so a set or a
+// folder in it that links out is refused with why, and nothing where it
+// leads is read. A link out is said plainly (linkout.Error).
+func backUpSet(root, name, backup string) error {
+	r, err := utils.OpenRecordingDir(root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Close() }()
+	fsys := r.FS()
+	return fs.WalkDir(fsys, name, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			refused := fmt.Sprintf("the recording's file %q is read only inside its recording %q", p, root)
+			if out := linkout.Explain(r, root, p, refused, err); out != nil {
+				return out
+			}
+			return err
+		}
+		to := backup + strings.TrimPrefix(p, name)
+		switch {
+		case d.Type()&fs.ModeSymlink != 0:
+			target, err := fs.ReadLink(fsys, p)
+			if err != nil {
+				return err
+			}
+			return r.Symlink(target, to)
+		case d.IsDir():
+			return r.Mkdir(to, 0o777)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		from, err := r.Open(p)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = from.Close() }()
+		dst, err := r.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666|info.Mode()&0o111)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(dst, from); err != nil {
+			_ = dst.Close()
+			return err
+		}
+		return dst.Close()
+	})
 }
 
 // caseNames lists the test cases the set holds before a re-record.

@@ -22,18 +22,24 @@ import (
 )
 
 // fullDiskInstrumentation is stuckFileInstrumentation's runner, recorded
-// into a mock file (its fifo path) on a disk that is full: the file is
-// /dev/full, which fails every write with ENOSPC.
+// into a mock file (its fifo path) on a disk that is full: onFullDisk has the
+// store open /dev/full for that file. A link to /dev/full would be a link out
+// of the recording, which the store refuses before it writes anything.
 type fullDiskInstrumentation struct{ stuckFileInstrumentation }
 
 func (f *fullDiskInstrumentation) GetOutgoing(ctx context.Context, o models.OutgoingOptions) (<-chan *models.Mock, error) {
-	if err := os.MkdirAll(filepath.Dir(f.fifo), 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.Symlink("/dev/full", f.fifo); err != nil {
-		return nil, err
-	}
 	return f.trickleInstrumentation.GetOutgoing(ctx, o)
+}
+
+// onFullDisk has db open /dev/full, which fails every write with ENOSPC, for
+// the mock file at file.
+func onFullDisk(db *mockdb.MockYaml, file string) {
+	db.OpenMockFile = func(root, path string, flag int, perm os.FileMode) (*os.File, error) {
+		if path == file {
+			return os.OpenFile("/dev/full", os.O_WRONLY, 0)
+		}
+		return yaml.OpenFileInRecording(root, path, flag, perm)
+	}
 }
 
 // keploy mock record with a real mock store on a disk that is full: the run
@@ -86,6 +92,7 @@ func TestRecord_AMockFileOnAFullDiskEndsAsARecordingNotSaved(t *testing.T) {
 			cfg.Path = dir
 			core, logs := observer.New(zapcore.InfoLevel)
 			db := mockdb.New(zap.New(core), dir, "mocks")
+			onFullDisk(db, inst.fifo)
 			returned := make(chan error, 1)
 			go func() {
 				returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(ctx)
@@ -149,6 +156,7 @@ func TestRecord_AFailedTestCommandsExitCodeIsKeptWhenTheStoreFailed(t *testing.T
 			cfg.Path = dir
 			core, _ := observer.New(zapcore.InfoLevel)
 			db := mockdb.New(zap.New(core), dir, "mocks")
+			onFullDisk(db, inst.fifo)
 			returned := make(chan error, 1)
 			go func() {
 				returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background())
@@ -193,6 +201,7 @@ func TestRecord_AStoppedRecordingWhoseStoreRefusedMocksExits1WithTheSignalKnown(
 	cfg.Path = dir
 	core, _ := observer.New(zapcore.InfoLevel)
 	db := mockdb.New(zap.New(core), dir, "mocks")
+	onFullDisk(db, inst.fifo)
 	returned := make(chan error, 1)
 	go func() {
 		returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(ctx)
@@ -247,6 +256,7 @@ func TestRecord_AStoppedRunWhoseTestCommandExited130AndWhoseStoreRefusedExits1(t
 	cfg.Mock.Name = name
 	cfg.Path = dir
 	db := mockdb.New(zap.NewNop(), dir, "mocks")
+	onFullDisk(db, inst.fifo)
 	returned := make(chan error, 1)
 	go func() {
 		returned <- New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(ctx)

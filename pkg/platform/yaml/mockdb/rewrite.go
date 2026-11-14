@@ -286,6 +286,7 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 // commit.
 type mockFileRewriter struct {
 	logger     *zap.Logger
+	root       string
 	dir        string
 	fileName   string
 	format     yaml.Format
@@ -302,9 +303,10 @@ type mockFileRewriter struct {
 	incomplete []byte
 }
 
-func newMockFileRewriter(logger *zap.Logger, dir, fileName string, format yaml.Format) *mockFileRewriter {
+func newMockFileRewriter(logger *zap.Logger, root, dir, fileName string, format yaml.Format) *mockFileRewriter {
 	return &mockFileRewriter{
 		logger:     logger,
+		root:       root,
 		dir:        dir,
 		fileName:   fileName,
 		format:     format,
@@ -315,10 +317,10 @@ func newMockFileRewriter(logger *zap.Logger, dir, fileName string, format yaml.F
 // open creates the temp file on the first write, so a rewrite that keeps
 // nothing never creates one.
 func (rw *mockFileRewriter) open() error {
-	if err := os.MkdirAll(rw.dir, 0o777); err != nil {
+	if err := yaml.MkdirAllInRecording(rw.root, rw.dir, 0o777); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(rw.dir, rw.fileName+".*.tmp")
+	tmp, err := yaml.CreateTempInRecording(rw.root, rw.dir, rw.fileName+".*.tmp", 0o600)
 	if err != nil {
 		return err
 	}
@@ -448,14 +450,14 @@ func (rw *mockFileRewriter) commit() error {
 	var aside string
 	if rw.incomplete != nil {
 		aside = fmt.Sprintf("%s.incomplete-%d", rw.targetPath, time.Now().UnixNano())
-		if err := writeAsideFile(aside, rw.incomplete, 0o644); err != nil {
-			_ = os.Remove(aside)
+		if err := writeAsideFile(rw.root, aside, rw.incomplete, 0o644); err != nil {
+			_ = yaml.RemoveInRecording(rw.root, aside)
 			return fmt.Errorf("failed to move the incomplete last mock of %s aside: %w", rw.targetPath, err)
 		}
 	}
 	if err := rw.replace(); err != nil {
 		if aside != "" {
-			_ = os.Remove(aside)
+			_ = yaml.RemoveInRecording(rw.root, aside)
 		}
 		return err
 	}
@@ -472,16 +474,16 @@ func (rw *mockFileRewriter) commit() error {
 	return nil
 }
 
-// writeAsideFile is os.WriteFile, replaceable by tests (a copy that cannot be
+// writeAsideFile is yaml.WriteFileInRecording, replaceable by tests (a copy that cannot be
 // written whole: the disk is full).
-var writeAsideFile = os.WriteFile
+var writeAsideFile = yaml.WriteFileInRecording
 
 // replace puts the rewritten file in place of the original, or removes the
 // original when the rewrite kept nothing.
 func (rw *mockFileRewriter) replace() error {
 	if rw.tmp == nil {
 		rw.done = true
-		if err := os.Remove(rw.targetPath); err != nil && !os.IsNotExist(err) {
+		if err := yaml.RemoveInRecording(rw.root, rw.targetPath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
@@ -497,14 +499,14 @@ func (rw *mockFileRewriter) replace() error {
 	if err != nil {
 		return err
 	}
-	fileMode, err := resolveMockFileMode(rw.targetPath)
+	fileMode, err := resolveMockFileMode(rw.root, rw.targetPath)
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(rw.tmpPath, fileMode); err != nil {
+	if err := yaml.ChmodInRecording(rw.root, rw.tmpPath, fileMode); err != nil {
 		return err
 	}
-	if err := replaceFile(rw.logger, rw.tmpPath, rw.targetPath); err != nil {
+	if err := replaceFile(rw.logger, rw.root, rw.tmpPath, rw.targetPath); err != nil {
 		return err
 	}
 	rw.done = true
@@ -522,7 +524,7 @@ func (rw *mockFileRewriter) discard() {
 		_ = rw.tmp.Close()
 	}
 	if rw.tmpPath != "" {
-		_ = os.Remove(rw.tmpPath)
+		_ = yaml.RemoveInRecording(rw.root, rw.tmpPath)
 	}
 }
 
@@ -537,16 +539,19 @@ func (rw *mockFileRewriter) discard() {
 // usefully append to an existing mocks.gob from a fresh encoder — the new
 // encoder's type table will conflict. Readers that need to merge multiple
 // sessions must read each file independently.
-func forEachGobMock(path string, fn func(*models.Mock) error) error {
-	_, err := forEachGobMockCut(path, fn)
+//
+// path is a file of the recording at root, and is opened only inside it
+// (yaml.OpenInRecording).
+func forEachGobMock(root, path string, fn func(*models.Mock) error) error {
+	_, err := forEachGobMockCut(root, path, fn)
 	return err
 }
 
 // forEachGobMockCut is forEachGobMock that also says whether the stream ended
 // part-way through a mock (cut): the file was cut, as an interrupted write
 // leaves it, and that last mock was not read.
-func forEachGobMockCut(path string, fn func(*models.Mock) error) (cut bool, err error) {
-	f, err := os.Open(path)
+func forEachGobMockCut(root, path string, fn func(*models.Mock) error) (cut bool, err error) {
+	f, err := yaml.OpenInRecording(root, path)
 	if err != nil {
 		return false, err
 	}
@@ -595,6 +600,7 @@ func forEachGobMockCut(path string, fn func(*models.Mock) error) (cut bool, err 
 // header, since gob does not support append — and renames it over the
 // original on commit. Nothing touches the original until then.
 type gobFileRewriter struct {
+	root    string
 	gobPath string
 	tmp     *os.File
 	tmpPath string
@@ -610,20 +616,20 @@ type gobFileRewriter struct {
 // any other user/process on the box. Stat before CreateTemp: if the source
 // file is gone, fall back to the same mode the gob writer uses when it opens
 // mocks.gob fresh (0644) so we do not introduce a new mode-inheritance path.
-func newGobFileRewriter(gobPath string) (*gobFileRewriter, error) {
+func newGobFileRewriter(root, gobPath string) (*gobFileRewriter, error) {
 	dir := filepath.Dir(gobPath)
 	base := filepath.Base(gobPath)
 	var originalMode os.FileMode = 0644
-	if info, statErr := os.Stat(gobPath); statErr == nil {
+	if info, statErr := yaml.StatInRecording(root, gobPath); statErr == nil {
 		originalMode = info.Mode().Perm()
 	}
-	tmp, err := os.CreateTemp(dir, base+".rewrite.*.tmp")
+	tmp, err := yaml.CreateTempInRecording(root, dir, base+".rewrite.*.tmp", 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("create gob rewrite tmp: %w", err)
 	}
-	rw := &gobFileRewriter{gobPath: gobPath, tmp: tmp, tmpPath: tmp.Name()}
+	rw := &gobFileRewriter{root: root, gobPath: gobPath, tmp: tmp, tmpPath: tmp.Name()}
 	// Must happen before any concurrent reader observes the renamed file.
-	if err := os.Chmod(rw.tmpPath, originalMode); err != nil {
+	if err := yaml.ChmodInRecording(root, rw.tmpPath, originalMode); err != nil {
 		rw.discard()
 		return nil, fmt.Errorf("chmod gob rewrite tmp to %o: %w", originalMode, err)
 	}
@@ -661,7 +667,7 @@ func (rw *gobFileRewriter) commit() error {
 	if err != nil {
 		return fmt.Errorf("close gob rewrite tmp: %w", err)
 	}
-	if err := os.Rename(rw.tmpPath, rw.gobPath); err != nil {
+	if err := yaml.RenameInRecording(rw.root, rw.tmpPath, rw.gobPath); err != nil {
 		return fmt.Errorf("rename gob rewrite tmp over %s: %w", rw.gobPath, err)
 	}
 	rw.done = true
@@ -677,7 +683,7 @@ func (rw *gobFileRewriter) discard() {
 	if rw.tmp != nil {
 		_ = rw.tmp.Close()
 	}
-	_ = os.Remove(rw.tmpPath)
+	_ = yaml.RemoveInRecording(rw.root, rw.tmpPath)
 }
 
 // errStopScan ends a decode-only pass early once it has its answer.

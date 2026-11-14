@@ -65,7 +65,7 @@ func (db *Db[T]) ReadForUpdate(ctx context.Context, testSetID string) (T, error)
 	filePath := filepath.Join(db.path, testSetID)
 
 	var config T
-	data, detected, err := yaml.ReadFileAny(ctx, db.logger, filePath, "config", db.Format)
+	data, detected, err := yaml.ReadRecordingFileAny(ctx, db.logger, db.path, filePath, "config", db.Format)
 	if err != nil {
 		// ONLY A MISSING FILE IS "NOTHING TO READ".
 		//
@@ -119,7 +119,14 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 
 	// Auto-detect format so a testset config recorded in the other format
 	// remains readable after a StorageFormat switch.
-	data, detected, err := yaml.ReadFileAny(ctx, db.logger, filePath, "config", db.Format)
+	data, detected, err := yaml.ReadRecordingFileAny(ctx, db.logger, db.path, filePath, "config", db.Format)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// A file that is there and could not be read, or a link out of the
+		// recording, which is refused: running the set on a default config
+		// would hide why.
+		utils.LogError(db.logger, err, "failed to read the test-set configuration file", zap.String("testSet", testSetID), zap.String("filePath", filePath))
+		return config, err
+	}
 	if err != nil {
 		db.logger.Debug("Config file not found, using default config", zap.String("testSet", testSetID), zap.String("filePath", filePath), zap.Error(err))
 		config = newValue[T]()
@@ -141,7 +148,8 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	// Always try to load secrets, regardless of whether config.yaml existed
 	secretValues, err := db.ReadSecret(ctx, testSetID)
 	if err != nil {
-		db.logger.Debug("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
+		db.logger.Warn("could not read the test set's secret values, so the run goes on without them", zap.String("testSet", testSetID), zap.Error(err),
+			zap.String("next_step", "if secret.yaml is a link that leads out of the recording, replace the link with the file itself"))
 		// Don't return error here - missing secrets shouldn't fail the config loading
 		return config, nil
 	}
@@ -328,7 +336,7 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 	if err != nil {
 		return err
 	}
-	err = yaml.WriteFileF(ctx, db.logger, filePath, "config", data, false, db.Format)
+	err = yaml.WriteRecordingFileF(ctx, db.logger, db.path, filePath, "config", data, false, db.Format)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to write test-set configuration file", zap.String("testSet", testSetID))
 		return err
@@ -346,7 +354,7 @@ func (db *Db[T]) ReadSecret(ctx context.Context, testSetID string) (map[string]i
 		return make(map[string]interface{}), nil
 	}
 
-	data, err := yaml.ReadFile(ctx, db.logger, filePath, "secret")
+	data, err := yaml.ReadRecordingFileF(ctx, db.logger, db.path, filePath, "secret", yaml.FormatYAML)
 	if err != nil {
 		return nil, err
 	}

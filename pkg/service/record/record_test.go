@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -2730,6 +2732,184 @@ func TestStart_ABacklogTheAgentNeverHandsOverFailsTheRun(t *testing.T) {
 	}
 	if logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessageSnippet("the recording may be incomplete").Len() == 0 {
 		t.Fatalf("the run did not say it was incomplete at ERROR: %v", logs.All())
+	}
+}
+
+// leftOutTestDB is a test store that stored test cases without form parts'
+// files, as testdb.TestYaml keeps them for the recording's summary.
+type leftOutTestDB struct {
+	*recTestDB
+	mu    sync.Mutex
+	parts []models.FormPartLeftOut
+	more  int
+}
+
+func (d *leftOutTestDB) TakeFormPartsLeftOut() ([]models.FormPartLeftOut, int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	parts, more := d.parts, d.more
+	d.parts, d.more = nil, 0
+	return parts, more
+}
+
+// A recording whose test store kept a test case without a form part's file
+// says so once where it ends, at ERROR, naming the test case, the part and
+// the path the part named, and how many it does not list. One that left no
+// part out says nothing.
+func TestStart_FormPartsLeftOutAreNamedInTheSummary(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		db   *leftOutTestDB
+	}{
+		{"none", &leftOutTestDB{recTestDB: &recTestDB{}}},
+		{"parts left out, and more past the list", &leftOutTestDB{recTestDB: &recTestDB{}, more: 2, parts: []models.FormPartLeftOut{
+			{TestSet: "test-set-0", TestCase: "test-1", Key: "file", FileName: "a.txt", Path: "../outside.txt"},
+			{TestSet: "test-set-0", TestCase: "test-1", Key: "doc", FileName: "b.txt"},
+		}}},
+		{"parts left out, all listed", &leftOutTestDB{recTestDB: &recTestDB{}, parts: []models.FormPartLeftOut{
+			{TestSet: "test-set-0", TestCase: "test-1", Key: "file", FileName: "a.txt", Path: "../outside.txt"},
+			{TestSet: "test-set-0", TestCase: "test-1", Key: "doc", FileName: "b.txt"},
+		}}},
+	} {
+		db := row.db
+		wantMore := db.more
+		t.Run(row.name, func(t *testing.T) {
+			saved := utils.ErrCode
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = saved })
+
+			wantLine := len(db.parts) > 0
+			f := &fakeInstr{
+				mappings: make(chan models.TestMockMapping),
+				incoming: make(chan *models.TestCase),
+				outgoing: make(chan *models.Mock),
+			}
+			core, logs := observer.New(zapcore.ErrorLevel)
+			r := &Recorder{
+				logger:          zap.New(core),
+				testDB:          db,
+				mockDB:          &recMockDB{unencodable: map[string]bool{}},
+				mappingDb:       &recMappingDB{},
+				telemetry:       &recTelemetry{},
+				instrumentation: f,
+				testSetConf:     recTestSetConf{},
+				hooks:           BaseRecordHooks{},
+				config:          &config.Config{},
+				frameQuiet:      5 * time.Millisecond,
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- r.Start(ctx) }()
+			select {
+			case f.incoming <- &models.TestCase{Name: "test-1", Kind: models.HTTP}:
+			case <-time.After(10 * time.Second):
+				t.Fatal("recorder never consumed the test case")
+			}
+			waitForPersistedTestCase(t, db.recTestDB, "test-1")
+			cancel()
+			close(f.mappings)
+			close(f.incoming)
+			close(f.outgoing)
+			select {
+			case <-done:
+			case <-time.After(90 * time.Second):
+				t.Fatal("Start did not return")
+			}
+			said := logs.FilterMessageSnippet("stored without a form part's file").All()
+			if !wantLine {
+				if len(said) != 0 {
+					t.Fatalf("a recording that left no part out said %v", said)
+				}
+				return
+			}
+			if len(said) != 1 || said[0].Level != zapcore.ErrorLevel {
+				t.Fatalf("the summary said %v, want one ERROR line", logs.All())
+			}
+			fields := said[0].ContextMap()
+			list, _ := fields["stored_without"].([]interface{})
+			if len(list) != 2 {
+				t.Fatalf("the summary lists %v, want both parts", fields["stored_without"])
+			}
+			first, _ := list[0].(string)
+			second, _ := list[1].(string)
+			if !strings.Contains(first, "test-set-0/test-1") || !strings.Contains(first, `form part "file"`) || !strings.Contains(first, `path "../outside.txt"`) {
+				t.Errorf("the summary's first line %q does not name the test case, the part and the path", first)
+			}
+			if !strings.Contains(second, `form part "doc"`) || !strings.Contains(second, "no path") {
+				t.Errorf("the summary's second line %q does not name the part with no path", second)
+			}
+			if fields["parts"] != int64(2+wantMore) || fields["not_listed"] != int64(wantMore) {
+				t.Errorf("the summary counts parts=%v not_listed=%v, want %d and %d", fields["parts"], fields["not_listed"], 2+wantMore, wantMore)
+			}
+			if fields["testSetID"] != "test-set-0" {
+				t.Errorf("the summary names test set %v, want this recording's test-set-0", fields["testSetID"])
+			}
+			if why, _ := fields["why"].(string); !strings.Contains(why, "carried no contents") || !strings.Contains(why, "names no file in the recording") {
+				t.Errorf("the summary's why %q does not say the part came with no contents and no file in the recording", why)
+			}
+			if next, _ := fields["next_step"].(string); !strings.Contains(next, "re-record") {
+				t.Errorf("the summary's next_step %q does not say to re-record", next)
+			}
+		})
+	}
+}
+
+// Saying the parts left out fails no run: the harness above ends its run with
+// an exit code of its own, set before the summary, so the exit code is checked
+// here, on a run that has none yet.
+func TestSayingFormPartsLeftOutSetsNoExitCode(t *testing.T) {
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+
+	core, logs := observer.New(zapcore.ErrorLevel)
+	r := &Recorder{logger: zap.New(core), testDB: &leftOutTestDB{recTestDB: &recTestDB{}, parts: []models.FormPartLeftOut{
+		{TestSet: "test-set-0", TestCase: "test-1", Key: "file", FileName: "a.txt", Path: "../outside.txt"},
+	}}}
+	r.sayFormPartsLeftOut("test-set-0")
+	if logs.FilterMessageSnippet("stored without a form part's file").Len() != 1 {
+		t.Fatalf("the summary said %v, want its one line", logs.All())
+	}
+	if utils.ErrCode != 0 {
+		t.Errorf("exit code %d, want 0: the recording is kept, a part left out does not fail the run", utils.ErrCode)
+	}
+}
+
+// The summary reads the parts from the store keploy records with, not only
+// from a test double: a test case the real test store keeps without a form
+// part's file is named by the recorder's summary, with the test set the
+// recorder was given.
+func TestTheRealTestStoresFormPartsLeftOutReachTheSummary(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "keploy")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ts := testdb.New(zap.NewNop(), root)
+	tc := &models.TestCase{Version: models.GetVersion(), Name: "test-1", Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{Method: "POST", URL: "http://x/u",
+			Header: map[string]string{"Content-Type": "multipart/form-data; boundary=b"},
+			Form:   []models.FormData{{Key: "file", FileNames: []string{"a.txt"}, Paths: []string{"../outside.txt"}}}}}
+	if err := ts.InsertTestCase(context.Background(), tc, "set", false); err != nil {
+		t.Fatalf("the test case was not stored: %v", err)
+	}
+	core, logs := observer.New(zapcore.ErrorLevel)
+	r := &Recorder{logger: zap.New(core), testDB: ts}
+	r.sayFormPartsLeftOut("set")
+	said := logs.FilterMessageSnippet("stored without a form part's file").All()
+	if len(said) != 1 {
+		t.Fatalf("the summary said %d lines, want 1: the real store's parts did not reach it", len(said))
+	}
+	fields := said[0].ContextMap()
+	list, _ := fields["stored_without"].([]interface{})
+	if len(list) != 1 {
+		t.Fatalf("the summary lists %v, want the one part", fields["stored_without"])
+	}
+	line, _ := list[0].(string)
+	if !strings.Contains(line, "set/test-1") || !strings.Contains(line, `form part "file"`) || !strings.Contains(line, `path "../outside.txt"`) {
+		t.Errorf("the summary's line %q does not name the test case, the part and the path", line)
+	}
+	if fields["testSetID"] != "set" {
+		t.Errorf("the summary names test set %v, want the one the recorder was given", fields["testSetID"])
 	}
 }
 

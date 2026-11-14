@@ -68,6 +68,22 @@ func ReadFile(p string, limit int64) ([]byte, error) {
 	return readAll(f, info.Size())
 }
 
+// ReadFileIn is ReadFile for name, a path inside root, read only inside it
+// (os.Root): a name, or a link, that leads out of root is refused with why. It
+// is for a file of a recording, whose folder a cloned repository fills: its
+// receipts are read this way.
+func ReadFileIn(root *os.Root, name string, limit int64) ([]byte, error) {
+	f, info, err := openWith(root.Stat, root.OpenFile, name, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	if info.Size() > limit {
+		return nil, RefusedError{fmt.Sprintf("larger than the %s keploy reads", byteSize(limit))}
+	}
+	return readAll(f, info.Size())
+}
+
 // readAll reads f, which reported size bytes when it was opened, requiring it
 // to hold exactly that: no more (a growing or procfs file) and no less (a
 // truncated one).
@@ -102,27 +118,33 @@ func OpenDir(p string) (*os.File, error) {
 // both before and after the open so that keploy never opens anything else even
 // for an instant.
 func open(p string, dir bool) (*os.File, fs.FileInfo, error) {
+	return openWith(os.Stat, os.OpenFile, p, dir)
+}
+
+// openWith is open with stat and openFile as the os calls: os.Stat and
+// os.OpenFile, or an os.Root's.
+func openWith(stat func(string) (fs.FileInfo, error), openFile func(string, int, fs.FileMode) (*os.File, error), p string, dir bool) (*os.File, fs.FileInfo, error) {
 	// Checked before the open too, so that keploy never opens anything else:
 	// opening a device can act -- a serial port resets the board behind it --
 	// whatever is read afterwards. The check that decides is openChecked's,
 	// on the open descriptor, because the path can change under us.
-	info, err := os.Stat(p)
+	info, err := stat(p)
 	if err != nil {
 		return nil, nil, err
 	}
 	if err := checkKind(info.Mode(), dir); err != nil {
 		return nil, nil, err
 	}
-	return openChecked(p, dir)
+	return openChecked(openFile, p, dir)
 }
 
 // openChecked opens p without blocking, and checks what the OPEN file is.
-func openChecked(p string, dir bool) (*os.File, fs.FileInfo, error) {
+func openChecked(openFile func(string, int, fs.FileMode) (*os.File, error), p string, dir bool) (*os.File, fs.FileInfo, error) {
 	// O_NONBLOCK: open blocks on a FIFO until something writes to it, and the
 	// path can become one after any check of it. It changes nothing for a
 	// regular file or a directory. O_NOCTTY: a terminal never becomes keploy's
 	// controlling terminal. Windows ignores both.
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
+	f, err := openFile(p, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
 	if err != nil {
 		return nil, nil, err
 	}
