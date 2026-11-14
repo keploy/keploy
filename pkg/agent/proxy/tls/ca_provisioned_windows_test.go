@@ -9,10 +9,8 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"net"
 	"os"
-	"os/user"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -20,36 +18,42 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // On the Windows lane, as a standard user in a session with no desktop (the
 // agent's service, as a CI runner, an OpenSSH session or a scheduled task
-// runs keploy), on an agent provisioned once with keploy's kept CA trusted in
-// that user's own ROOT store: keploy's CA setup reuses that CA with no
-// certutil at all, so it never asks the machine's store, and a Go client,
-// which reads only the Windows store, trusts a leaf keploy mints from it.
+// runs keploy), on an agent whose administrator put keploy's kept CA in the
+// machine's ROOT store (LocalMachine\Root, where a company's group policy
+// rolls a CA out to every user): keploy's CA setup reuses that CA with no
+// certutil at all, so it never asks the machine's store, warns of nothing and
+// leaves no hint, and a Go client, which reads only the Windows store, trusts
+// a leaf keploy mints from it.
 //
-// The provisioning is the lane's one-time setup, never part of a run: a
-// person signed in to the agent's desktop as the agent's user runs
-// 'certutil -user -addstore ROOT' on the kept CA and accepts Windows' prompt,
-// with no administrator. Until then the row skips, naming that step, after
-// checking that the setup asked only the user's store. Its first run on an
-// agent makes the kept CA that step trusts, as any keploy run there would. A
-// kept CA in the machine's store (where an elevated run with no desktop puts
-// it) is not the provisioned agent either: the row skips then too, naming the
-// administrator's removal of that copy before the user's step. It never
-// passes unless the user's own store alone holds the kept CA.
-func TestOnWindowsAStandardUserWithNoDesktopReusesTheCAProvisionedInTheirStore(t *testing.T) {
+// The lane provisions the machine's store around this row only (ca-rows.sh,
+// as the agent's administrator: 'certutil -addstore Root' on the kept CA,
+// removed again after it on every path) and says so with
+// KEPLOY_ROW_CA_IN_MACHINE_STORE=1: the row then fails unless the machine's
+// store holds the kept CA. Without that variable a kept CA no store holds
+// skips the row, naming that step, after checking that the setup asked only
+// the user's store and named the step that trusts it there. The row's first
+// run on an agent makes the kept CA, as any keploy run there would.
+func TestOnWindowsAStandardUserWithNoDesktopReusesTheCAProvisionedInTheMachineStore(t *testing.T) {
 	if os.Getenv("KEPLOY_ROW_NO_DESKTOP_STANDARD_USER") != "1" {
 		t.Skip("runs on the Windows lane as a standard user with no desktop (KEPLOY_ROW_NO_DESKTOP_STANDARD_USER=1)")
 	}
 	if tokenElevated() {
 		t.Fatal("this row must run as a standard user: an elevated setup may change the machine's trust")
 	}
-	logger := zaptest.NewLogger(t)
+	provisioned := os.Getenv("KEPLOY_ROW_CA_IN_MACHINE_STORE") == "1"
+	warned, warnings := observer.New(zapcore.WarnLevel)
+	logger := zaptest.NewLogger(t, zaptest.WrapOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
+		return zapcore.NewTee(c, warned)
+	})))
 	// The user's own LOCALAPPDATA, not a temporary one: the kept CA is the
-	// one the agent's provisioning trusted.
+	// one the lane puts in the machine's store.
 	dir := windowsCAKeyDir(logger)
 	if dir == "" {
 		t.Fatal("no per-user directory for keploy's kept CA (LOCALAPPDATA is not set)")
@@ -64,6 +68,7 @@ func TestOnWindowsAStandardUserWithNoDesktopReusesTheCAProvisionedInTheirStore(t
 		return orig(ctx, toUser, path)
 	}
 	t.Cleanup(func() { certutilAddFn = orig; noteUntrustedStore("") })
+	noteUntrustedStore("a hint from an earlier setup")
 	if err := SetupCA(context.Background(), logger, false); err != nil {
 		t.Fatalf("SetupCA = %v, want nil", err)
 	}
@@ -85,41 +90,38 @@ func TestOnWindowsAStandardUserWithNoDesktopReusesTheCAProvisionedInTheirStore(t
 	if err != nil {
 		t.Fatalf("the kept CA %s: %v", kept, err)
 	}
-	account := "the agent's user"
-	if u, err := user.Current(); err == nil {
-		account = u.Username
-	}
-	trust := fmt.Sprintf("sign in to its desktop as %s, run 'certutil -user -addstore ROOT %s' and accept Windows' prompt (no administrator)", account, kept)
-	// The user's view of ROOT takes in the machine's: a CA in the machine's
-	// store would pass every check below with the user's own store empty, so
-	// that is not the provisioned agent either. An elevated run with no
-	// desktop puts the kept CA there (installWindowsCA's fallback).
 	machine, err := machineRootHolds(der)
 	if err != nil {
 		t.Fatalf("reading the machine's ROOT store: %v", err)
 	}
-	if machine {
-		t.Skipf("keploy's kept CA %s (serial %s, made %s) is in the machine's ROOT store, which the user's view takes in, so this row cannot show that the user's own store holds it. Provision this agent once (its setup, never a run): an administrator removes it there with 'certutil -delstore ROOT %s', then %s",
-			kept, cert.SerialNumber.Text(16), cert.NotBefore.UTC().Format(time.RFC3339), cert.SerialNumber.Text(16), trust)
+	if provisioned && !machine {
+		t.Fatalf("KEPLOY_ROW_CA_IN_MACHINE_STORE=1 says the lane put keploy's kept CA %s (serial %s) in the machine's ROOT store, and that store does not hold it", kept, cert.SerialNumber.Text(16))
 	}
-	held, err := userRootHolds(der)
-	if err != nil {
-		t.Fatalf("reading the user's ROOT store: %v", err)
+	trusted := machine
+	if !machine {
+		if trusted, err = userRootHolds(der); err != nil {
+			t.Fatalf("reading the user's ROOT store: %v", err)
+		}
 	}
-	if !held {
+	if !trusted {
 		if !reflect.DeepEqual(asked, []bool{true}) {
 			t.Fatalf("certutil adds asked = %v (true: the user store), want the user store's only", asked)
 		}
 		if why := UntrustedStoreWhy(); !strings.Contains(why, kept) {
 			t.Fatalf("UntrustedStoreWhy = %q, want the step for the kept CA %s", why, kept)
 		}
-		t.Skipf("keploy's kept CA %s is not in %s's ROOT store yet. Provision this agent once (its setup, never a run): %s", kept, account, trust)
+		t.Skipf("no ROOT store holds keploy's kept CA %s (serial %s, made %s). Provision this agent's machine store around this row (ca-rows.sh with CA_PROVISIONED=1 does it): as an administrator, 'certutil -addstore Root %s', then 'certutil -delstore Root %s' after it",
+			kept, cert.SerialNumber.Text(16), cert.NotBefore.UTC().Format(time.RFC3339), kept, cert.SerialNumber.Text(16))
 	}
+	t.Logf("keploy's kept CA %s (serial %s) is trusted: in the machine's ROOT store %v", kept, cert.SerialNumber.Text(16), machine)
 	if len(asked) != 0 {
-		t.Fatalf("certutil adds asked = %v (true: the user store), want none: the user's store holds the kept CA", asked)
+		t.Fatalf("certutil adds asked = %v (true: the user store), want none: a ROOT store holds the kept CA", asked)
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("warnings = %v, want none: a ROOT store holds the kept CA", warnings.All())
 	}
 	if why := UntrustedStoreWhy(); why != "" {
-		t.Fatalf("UntrustedStoreWhy = %q, want \"\": the user's store holds the kept CA", why)
+		t.Fatalf("UntrustedStoreWhy = %q, want \"\": a ROOT store holds the kept CA", why)
 	}
 
 	// A Go client with no roots of its own verifies against the Windows store.

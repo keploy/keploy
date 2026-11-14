@@ -31,18 +31,23 @@ func (c *certutilAdds) add(_ context.Context, user bool, _ string) ([]byte, erro
 	return c.machineOut, c.machineErr
 }
 
-// swapWindowsStore has installWindowsCA read the store through holds, run
-// certutil through c and see the token as elevated, for the row.
+// swapWindowsStore has installWindowsCA read the user's store through holds
+// and find the machine's empty, run certutil through c and see the token as
+// elevated, for the row; swapMachineStore then changes the machine's.
 func swapWindowsStore(t *testing.T, holds func([]byte) (bool, error), c *certutilAdds, elevated bool) {
 	t.Helper()
-	h, a, e := userRootHoldsFn, certutilAddFn, tokenElevatedFn
+	h, m, a, e := userRootHoldsFn, machineRootHoldsFn, certutilAddFn, tokenElevatedFn
 	t.Cleanup(func() {
-		userRootHoldsFn, certutilAddFn, tokenElevatedFn = h, a, e
+		userRootHoldsFn, machineRootHoldsFn, certutilAddFn, tokenElevatedFn = h, m, a, e
 		noteUntrustedStore("")
 	})
-	userRootHoldsFn, certutilAddFn = holds, c.add
+	userRootHoldsFn, machineRootHoldsFn, certutilAddFn = holds, notHeld, c.add
 	tokenElevatedFn = func() bool { return elevated }
 }
+
+// swapMachineStore has installWindowsCA read the machine's store through
+// holds; swapWindowsStore restores it.
+func swapMachineStore(holds func([]byte) (bool, error)) { machineRootHoldsFn = holds }
 
 func notHeld([]byte) (bool, error) { return false, nil }
 
@@ -133,26 +138,66 @@ func TestAnElevatedRunThatCannotUseTheUserStoreFallsBackToTheMachineStore(t *tes
 	}
 }
 
-func TestACAThatTheUserStoreHoldsIsReusedWithNoCertutil(t *testing.T) {
-	var asked []byte
-	c := &certutilAdds{userErr: errors.New("not asked")}
-	swapWindowsStore(t, func(der []byte) (bool, error) { asked = der; return true, nil }, c, false)
-	if err := installWindowsCA(context.Background(), zap.NewNop(), "x.crt", []byte("the CA"), keptCA); err != nil {
-		t.Fatalf("installWindowsCA = %v, want nil: the store holds the CA", err)
-	}
-	if string(asked) != "the CA" || len(c.calls) != 0 {
-		t.Fatalf("store asked for %q, certutil adds %v; want the CA asked for and no add", asked, c.calls)
+// A CA either Windows ROOT store holds, the user's or the machine's (where an
+// administrator or a company's group policy puts it for every user), is
+// trusted: for a standard user in a session with no desktop, whose
+// certutil add would fail for want of the trust prompt, keploy's setup asks
+// certutil nothing, warns of nothing and leaves no hint.
+func TestACAThatEitherWindowsRootStoreHoldsIsReusedWithNoCertutilWarningOrHint(t *testing.T) {
+	held := func([]byte) (bool, error) { return true, nil }
+	unread := func([]byte) (bool, error) { return false, errors.New("store unread") }
+	for _, tc := range []struct {
+		name          string
+		user, machine func([]byte) (bool, error)
+	}{
+		{"the user's store", held, notHeld},
+		{"the machine's store, not the user's", notHeld, held},
+		{"the machine's store, the user's unread", unread, held},
+		{"both stores", held, held},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &certutilAdds{userOut: []byte(notSupportedOut), userErr: exitErr(t)}
+			var askedUser, askedMachine []byte
+			swapWindowsStore(t, func(der []byte) (bool, error) { askedUser = der; return tc.user(der) }, c, false)
+			swapMachineStore(func(der []byte) (bool, error) { askedMachine = der; return tc.machine(der) })
+			noteUntrustedStore("a hint from an earlier setup")
+			core, logs := observer.New(zapcore.WarnLevel)
+			if err := trustOnWindows(context.Background(), zap.New(core), "x.crt", []byte("the CA"), keptCA); err != nil {
+				t.Fatalf("trustOnWindows = %v, want nil: a store holds the CA", err)
+			}
+			if len(c.calls) != 0 {
+				t.Fatalf("certutil adds asked = %v, want none: a store holds the CA", c.calls)
+			}
+			if string(askedUser) != "the CA" || (askedMachine != nil && string(askedMachine) != "the CA") {
+				t.Fatalf("stores asked for %q (user) and %q (machine), want the CA", askedUser, askedMachine)
+			}
+			if logs.Len() != 0 {
+				t.Fatalf("warnings = %v, want none: a store holds the CA", logs.All())
+			}
+			if why := UntrustedStoreWhy(); why != "" {
+				t.Fatalf("UntrustedStoreWhy = %q, want \"\": a store holds the CA", why)
+			}
+		})
 	}
 }
 
-func TestAUserStoreThatCannotBeReadOrDoesNotHoldTheCAIsAddedTo(t *testing.T) {
-	for name, holds := range map[string]func([]byte) (bool, error){
-		"unread":   func([]byte) (bool, error) { return true, errors.New("store unread") },
-		"not held": notHeld,
+// A store that cannot be read counts as not holding the CA: unless the other
+// holds it, the setup adds it to the user's store, as to an empty one.
+func TestACAThatNoReadableWindowsRootStoreHoldsIsAddedToTheUsers(t *testing.T) {
+	unread := func([]byte) (bool, error) { return true, errors.New("store unread") }
+	for _, tc := range []struct {
+		name          string
+		user, machine func([]byte) (bool, error)
+	}{
+		{"neither store holds it", notHeld, notHeld},
+		{"the user's unread, the machine's not holding it", unread, notHeld},
+		{"the user's not holding it, the machine's unread", notHeld, unread},
+		{"neither store read", unread, unread},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			c := &certutilAdds{}
-			swapWindowsStore(t, holds, c, false)
+			swapWindowsStore(t, tc.user, c, false)
+			swapMachineStore(tc.machine)
 			if err := installWindowsCA(context.Background(), zap.NewNop(), "x.crt", []byte("der"), keptCA); err != nil {
 				t.Fatalf("installWindowsCA = %v, want nil", err)
 			}

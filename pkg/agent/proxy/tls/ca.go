@@ -1842,9 +1842,12 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 // only trust store that has to contain the CA — and installing there does not
 // alter machine-wide trust for every other user and service on the host.
 //
-// A CA the user's store already holds (keploy keeps its Windows CA across
-// runs, castore.go) is not added again, so Windows asks at most once, and a
-// later run in a session with no desktop reuses what the user trusted.
+// A CA the user's store or the machine's already holds (keploy keeps its
+// Windows CA across runs, castore.go) is not added again, and nothing is said
+// about it beyond a debug line: Windows asks the user at most once, a later
+// run in a session with no desktop reuses what the user trusted, and a CA an
+// administrator or a company's group policy put in LocalMachine\Root for
+// every user is trust as well (trustedWindowsStore).
 //
 // The machine store is kept as a fallback only for an elevated run (an
 // administrator past UAC, or a service account with no loaded profile), which
@@ -1857,10 +1860,8 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 // runner's service, an OpenSSH session, a scheduled task) makes certutil fail
 // the user-store add with ERROR_NOT_SUPPORTED: that is errNoTrustPrompt.
 func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string, der []byte, keptAt string) error {
-	if held, err := userRootHoldsFn(der); err != nil {
-		logger.Debug("could not read the current user's Windows ROOT store; adding keploy's CA to it", zap.Error(err))
-	} else if held {
-		logger.Debug("keploy's CA is already in the current user's Windows ROOT store; not adding it again")
+	if store := trustedWindowsStore(logger, der); store != "" {
+		logger.Debug("keploy's CA is already in "+store+"; not adding it again", zap.String("store", store))
 		return nil
 	}
 	// Windows asks the user, in a dialog, whether to trust a certificate added
