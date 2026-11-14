@@ -11,11 +11,9 @@ import (
 // every clock it may run on: at once on the system clock, which has moved on
 // already; at the next tick on a clock as coarse as Windows'.
 func TestWaitPastReturnsOnceTheClockReadsLaterThanTheStamp(t *testing.T) {
-	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
-		t.Run(clockName(tick), func(t *testing.T) {
-			if tick != 0 {
-				stubQuantizedClock(t, tick)
-			}
+	for _, c := range []testClock{systemClock, {tick: windowsTick}, {tick: time.Millisecond}, windowsClock} {
+		t.Run(c.String(), func(t *testing.T) {
+			tick := c.stub(t)
 			awaitTickStart(tick)
 			at := clockNow()
 			waitPast(at)
