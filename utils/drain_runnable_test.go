@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -165,43 +166,63 @@ func waitArmedNotReturned(t *testing.T, clk *stall.ManualClock, res <-chan bool,
 // verdict that came just after the stop ended, on a stall begun before it,
 // gave up at once on a group whose last goroutine was on its way out (seen on
 // a loaded macOS runner, where the process clock crawled while the stop held
-// the drain).
+// the drain). Each stop that holds the drains gives it: an agent's, the
+// daemons' and the application's.
 func TestAStopsEndGivesTheRestOfTheGroupTheBoundAgain(t *testing.T) {
-	for _, status := range []bool{false, true} {
-		const bound = 100 * time.Millisecond
-		clk := &stall.ManualClock{}
-		end := BeginAgentStop()
-		t.Cleanup(end) // a failed row leaves no stop in progress to hold later ones
-		var g errgroup.Group
-		block := make(chan struct{})
-		t.Cleanup(func() { close(block) })
-		g.Go(func() error { <-block; return nil }) // the rest of the group, wedged
-		progress := func() uint64 { return 7 }     // a drain whose group moves no more
-		if status {
-			progress = noProgress // DrainErrGroupStatus's
+	stops := []struct {
+		name  string
+		begin func() func()
+	}{
+		{"an agent's stop", BeginAgentStop},
+		{"the daemons' stop", BeginDaemonStop},
+		{"the application's stop", BeginAppStop},
+	}
+	for _, stop := range stops {
+		for _, status := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, status=%v", stop.name, status), func(t *testing.T) {
+				stopsEndGivesTheBoundAgain(t, stop.begin, status)
+			})
 		}
-		res := make(chan bool, 1)
-		go func() {
-			_, timedOut := drainErrGroupProgress(clk, zap.NewNop(), "t", &g, bound, progress, nil)
-			res <- timedOut
-		}()
-		waitArmed(t, clk)
-		clk.Advance(bound - time.Millisecond) // most of a stall, the stop in progress
-		waitArmedNotReturned(t, clk, res, "gave up before the bound")
-		end()
-		clk.Advance(time.Millisecond) // the stall begun before the stop's end is due now
-		waitArmedNotReturned(t, clk, res, "charged the stall run while the stop was in progress to the rest of the group")
-		clk.Advance(bound - time.Millisecond)
-		waitArmedNotReturned(t, clk, res, "gave the rest of the group less than a whole bound from the first verdict after the stop's end")
-		clk.Advance(time.Millisecond)
-		select {
-		case timedOut := <-res:
-			if !timedOut {
-				t.Fatalf("status=%v: a wedged group was said to have joined", status)
-			}
-		case <-time.After(time.Minute): // only turns a hang into a failure
-			t.Fatalf("status=%v: the bound from the stop's end passed with no progress and the drain did not give up", status)
+	}
+}
+
+// stopsEndGivesTheBoundAgain is one row of
+// TestAStopsEndGivesTheRestOfTheGroupTheBoundAgain: the stop begin begins,
+// with DrainErrGroupStatus's progress (status) or a group that moves no more.
+func stopsEndGivesTheBoundAgain(t *testing.T, begin func() func(), status bool) {
+	const bound = 100 * time.Millisecond
+	clk := &stall.ManualClock{}
+	end := begin()
+	t.Cleanup(end) // a failed row leaves no stop in progress to hold later ones
+	var g errgroup.Group
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	g.Go(func() error { <-block; return nil }) // the rest of the group, wedged
+	progress := func() uint64 { return 7 }     // a drain whose group moves no more
+	if status {
+		progress = noProgress // DrainErrGroupStatus's
+	}
+	res := make(chan bool, 1)
+	go func() {
+		_, timedOut := drainErrGroupProgress(clk, zap.NewNop(), "t", &g, bound, progress, nil)
+		res <- timedOut
+	}()
+	waitArmed(t, clk)
+	clk.Advance(bound - time.Millisecond) // most of a stall, the stop in progress
+	waitArmedNotReturned(t, clk, res, "gave up before the bound")
+	end()
+	clk.Advance(time.Millisecond) // the stall begun before the stop's end is due now
+	waitArmedNotReturned(t, clk, res, "charged the stall run while the stop was in progress to the rest of the group")
+	clk.Advance(bound - time.Millisecond)
+	waitArmedNotReturned(t, clk, res, "gave the rest of the group less than a whole bound from the first verdict after the stop's end")
+	clk.Advance(time.Millisecond)
+	select {
+	case timedOut := <-res:
+		if !timedOut {
+			t.Fatalf("status=%v: a wedged group was said to have joined", status)
 		}
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatalf("status=%v: the bound from the stop's end passed with no progress and the drain did not give up", status)
 	}
 }
 
