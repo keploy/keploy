@@ -68,6 +68,21 @@ func TestWindowsProcStartReadsALiveProcess(t *testing.T) {
 	}
 }
 
+// Windows process IDs are 32 bits wide: a pid wider than that names no
+// process, not the one its low 32 bits name (this process, here).
+func TestWindowsProcStartTakesAPidWiderThan32BitsForNone(t *testing.T) {
+	wide := int64(os.Getpid()) + 1<<32
+	if int64(int(wide)) != wide {
+		t.Skip("int is 32 bits wide here: no pid is wider")
+	}
+	if _, ok := procStart(os.Getpid()); !ok {
+		t.Fatal("this process is not alive")
+	}
+	if start, ok := procStart(int(wide)); ok {
+		t.Fatalf("procStart(%d) = %d, true: read as this process %d", wide, start, os.Getpid())
+	}
+}
+
 // A process that has exited is not alive, even while a handle another
 // process holds keeps its object, and so its pid and creation time, readable.
 func TestWindowsProcStartTakesAnExitedProcessForGone(t *testing.T) {
