@@ -1618,6 +1618,32 @@ func TestAShortPieceOfAMintedIDIsNoSource(t *testing.T) {
 	if len(short) != 1 || short[0].Kind != KindUnaccounted {
 		t.Errorf("a value with no long word: %+v; want refused", short)
 	}
+	// Nor where the value holds a second id, a UUID minted in each run: a
+	// piece is a chance piece only where its own id holds a long word. The
+	// short id beside the UUID holds none, so its piece stays refused,
+	// though the UUID's long words stand nowhere. Where that id holds a
+	// long word, shown nowhere too, its piece is a chance piece.
+	const (
+		uuidRec  = "3f2a9c1e-5a6b-4e2a-9f3c-1a2b3c4d5e6f"
+		uuidLive = "8e1d2c3b-a0f9-4c8b-b7a6-5f4e3d2c1b0a"
+	)
+	for _, c := range []struct {
+		name, rec, live string
+		minted          bool
+	}{
+		{"a short id beside a minted UUID", "ef56-4b7d " + uuidRec, "ab12-cd34 " + uuidLive, false},
+		{"an id with a long word beside a minted UUID", "ef56a0b1-4b7d " + uuidRec, "ab12c0d3-cd34 " + uuidLive, true},
+	} {
+		got := ClassifyGiven(mockDrifts(), []string{path}, shape(c.live), shape(c.rec), eRecAt, []Earlier{same("mock-1215", other, Request, 1)}, nil, nil, nil, nil)
+		switch {
+		case len(got) != 1:
+			t.Errorf("%s: %+v", c.name, got)
+		case c.minted && (got[0].Kind != KindNoise || !strings.Contains(got[0].Why, piece)):
+			t.Errorf("%s: %s from %q (%q); want noise naming the minted id", c.name, got[0].Kind, got[0].From.Mock, got[0].Why)
+		case !c.minted && (got[0].Kind != KindUnaccounted || strings.Contains(got[0].Why, piece) || !strings.Contains(got[0].Why, "mock-1215")):
+			t.Errorf("%s: %s from %q (%q); want refused, naming mock-1215", c.name, got[0].Kind, got[0].From.Mock, got[0].Why)
+		}
+	}
 	// Under the rule a copy follows its source, as before: where each
 	// run's group stands at its own place, each value may be a copy of a
 	// word its run picked, and it is refused.
