@@ -508,7 +508,9 @@ unset INTEGRATION_REF_PS1
 row=TestEveryRegisteredParsersRecorderStampsEachMocksRequestTime
 row_pass=$'=== RUN   '"$row"$'\n    parser_request_time_test.go:53: registered parsers: [generic grpc http http2 mongo_v2 mysql postgres_v3]\n--- PASS: '"$row"$' (9.10s)\n    --- PASS: '"$row"$'/http (2.01s)\nPASS\nok  \tgo.keploy.io/server/v3/pkg/agent/proxy\t9.2s'
 row_fail=$'=== RUN   '"$row"$'\n            --- FAIL: '"$row"$'/postgres_v3/KEPLOY_PROVEN=1 (0.50s)\n        --- FAIL: '"$row"$'/postgres_v3 (1.00s)\n--- FAIL: '"$row"$' (9.10s)\nFAIL\nFAIL\tgo.keploy.io/server/v3/pkg/agent/proxy\t9.2s\nFAIL'
-row_none=$'ok  \tgo.keploy.io/server/v3/pkg/agent/proxy\t0.02s [no tests to run]'
+# What go test -v prints when -run matches no test: its warning, a bare PASS
+# and an ok line.
+row_none=$'testing: warning: no tests to run\nPASS\nok  \tgo.keploy.io/server/v3/pkg/agent/proxy\t0.02s [no tests to run]'
 
 # parsers_case NAME ROW_RC ROW_OUT: runs `parsers` with go test answering those.
 parsers_case() {
@@ -533,6 +535,8 @@ parsers_case() {
 }
 # no_go_test: the case ended before go test ran.
 no_go_test() { ! grep -q '^go test ' "$work/state-$cases/calls" || fail "go test ran: $1"; }
+# no_go_call: the case ended before any go command ran.
+no_go_call() { [ ! -e "$work/state-$cases/calls" ] || fail "go ran $1: $(cat "$work/state-$cases/calls")"; }
 
 export KEPLOY_PROVEN=1 GOFLAGS='-run=^$'
 parsers_case "the row passes with the integrations parsers" 0 "$row_pass"
@@ -621,23 +625,25 @@ expect_rc 1
 expect_has "go list -deps ./pkg/agent/proxy/ failed"
 no_go_test "after a failed go list -deps"
 
+# The stand-in go records its calls in the state directory, so it is made
+# here as parsers_case makes it; a missing tree fails before any go call.
 case_name="parsers with no keploy tree"
 cases=$((cases + 1))
-mkdir -p "$work/i-$cases"
+mkdir -p "$work/state-$cases" "$work/i-$cases"
 env STUB_STATE="$work/state-$cases" bash "$script" parsers "$work/k-$cases" "$work/i-$cases" >"$work/out" 2>&1
 rc=$?
 expect_rc 1
 expect_has "no keploy tree at $work/k-$cases"
-no_go_test "with no keploy tree"
+no_go_call "with no keploy tree"
 
 case_name="parsers with no integrations tree"
 cases=$((cases + 1))
-mkdir -p "$work/k-$cases"
+mkdir -p "$work/state-$cases" "$work/k-$cases"
 env STUB_STATE="$work/state-$cases" bash "$script" parsers "$work/k-$cases" "$work/i-$cases" >"$work/out" 2>&1
 rc=$?
 expect_rc 1
 expect_has "no keploy/integrations tree at $work/i-$cases"
-no_go_test "with no integrations tree"
+no_go_call "with no integrations tree"
 
 # ---- usage -----------------------------------------------------------------
 case_name="no command"

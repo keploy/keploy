@@ -2,7 +2,8 @@
 # Checks of integrations-tests.yml and of release.yml's gate on it: which runs
 # the job runs on, that a run with no key to keploy/integrations fails, that
 # nothing lets the job pass without running the tests (continue-on-error, an
-# if: or a changed command on the steps that matter), which runs a new push
+# if: or a changed command on the steps that matter, or a step that runs go
+# before go and its module cache are set up), which runs a new push
 # cancels, which runs save the cache, that release.yml's publishing jobs wait
 # for the job and do not run after it failed, and that setup-private-parsers'
 # build lanes read the PR body from the event. Needs bash and a POSIX awk. Run
@@ -570,6 +571,21 @@ if [ -n "$i_co" ] && [ -n "$i_ref" ] && [ -n "$i_run" ] && [ -n "$i_tests" ] && 
     problem "the request-time row (step $i_row) runs before resolve (step $i_ref) or the self-tests (steps $i_tests and $i_wf)"
 else
   problem "a step the checks above need is missing (integrations checkout: '${i_co}')"
+fi
+# Both steps that run go come after actions/setup-go and the module cache's
+# restore: before setup-go, go would be the runner's preinstalled one, and
+# before the restore, every module would be fetched again.
+i_go=''
+for k in $(children "$job" jobs.integrations-tests.steps); do
+  case "$(get "$job" "jobs.integrations-tests.steps.$k.uses")" in actions/setup-go@*) i_go="$k" ;; esac
+done
+i_restore="$(step "$job" integrations-tests "Restore the Go module cache")" || i_restore=''
+i_restore="${i_restore##*.}"
+if [ -z "$i_go" ] || [ -z "$i_restore" ]; then
+  problem "no actions/setup-go step ('${i_go}') or no step named 'Restore the Go module cache' ('${i_restore}')"
+elif [ -n "$i_run" ] && [ -n "$i_row" ]; then
+  [ "$i_go" -lt "$i_restore" ] && [ "$i_restore" -lt "$i_run" ] && [ "$i_restore" -lt "$i_row" ] ||
+    problem "steps: setup-go $i_go, the module cache's restore $i_restore, tests $i_run, the request-time row $i_row; want go and its cache set up before either step runs go"
 fi
 # The keploy checkout takes the tree the run is for: a PR merged onto main, or
 # the pushed commit. A ref: (main, the PR's base) or a repository: there would
