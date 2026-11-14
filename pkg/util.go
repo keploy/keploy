@@ -3524,26 +3524,43 @@ func WatchAgentStart(ctx context.Context, inst any) <-chan error {
 // delay to the overwhelmingly common first-try success.
 const agentSetupAttempts = 3
 
+// agentSetupBackoff is the wait before a stalled bring-up is retried; tests
+// lengthen it.
+var agentSetupBackoff = 3 * time.Second
+
 // RetryAgentSetup runs an agent Setup and retries it, up to agentSetupAttempts,
-// ONLY when it fails with ErrAgentNotReady. Each retry is a full fresh bring-up
-// (Setup re-draws ports and regenerates the agent container), which is what
-// clears a nondeterministic container-runtime stall. Deterministic failures
-// (missing privileges, bad config) do not match the sentinel and return at
-// once, and a cancelled context stops the loop immediately. The test assertions
-// downstream still run exactly once, against a healthy agent — this retries the
-// agent infrastructure, never a test.
+// ONLY when it fails with ErrAgentNotReady or utils.ErrPortTaken. Each retry is
+// a full fresh bring-up (Setup re-draws ports and regenerates the agent
+// container), which is what clears a nondeterministic container-runtime stall,
+// and a port another process took between the CLI's check and the agent's
+// bind: that one is retried at once, with no wait, since the ports are picked
+// again. Deterministic failures (missing privileges, bad config) match neither
+// and return at once, and a cancelled context stops the loop immediately. The
+// last attempt's error is returned as it is: for a taken port, it names the
+// port and, where it can, its holder. The test assertions downstream still run
+// exactly once, against a healthy agent — this retries the agent
+// infrastructure, never a test.
 func RetryAgentSetup(ctx context.Context, logger *zap.Logger, setup func(ctx context.Context, attempt int) error) error {
 	var err error
 	for attempt := 1; attempt <= agentSetupAttempts; attempt++ {
 		err = setup(ctx, attempt)
-		if err == nil || ctx.Err() != nil || !errors.Is(err, ErrAgentNotReady) {
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		taken := errors.Is(err, utils.ErrPortTaken)
+		if !taken && !errors.Is(err, ErrAgentNotReady) {
 			return err
 		}
 		if attempt < agentSetupAttempts {
+			if taken {
+				logger.Warn("a port keploy picked for the keploy agent was taken before the agent bound it; starting a fresh agent at once, on ports picked again",
+					zap.Int("attempt", attempt), zap.Int("of", agentSetupAttempts), zap.Error(err))
+				continue
+			}
 			logger.Warn("keploy-agent bring-up stalled; retrying with a fresh agent",
 				zap.Int("attempt", attempt), zap.Int("of", agentSetupAttempts), zap.Error(err))
 			select {
-			case <-time.After(3 * time.Second):
+			case <-time.After(agentSetupBackoff):
 			case <-ctx.Done():
 				return ctx.Err()
 			}

@@ -6,6 +6,7 @@ package utils
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -51,9 +52,19 @@ type PTYHandle struct {
 
 // StartCommandWithPTY on Windows falls back to regular command execution since PTY is not supported.
 func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) {
+	return StartCommandWithPTYTee(cmd, logger, nil)
+}
+
+// StartCommandWithPTYTee is StartCommandWithPTY that also writes what the
+// command prints, as keploy's console gets it, to tee (nil: none).
+func StartCommandWithPTYTee(cmd *exec.Cmd, logger *zap.Logger, tee io.Writer) (*PTYHandle, error) {
 	// Its output reaches keploy's console cut of the values the log redactor
 	// holds, when it holds any (ChildConsole).
-	console, err := keployutils.SetChildConsole(cmd)
+	var teeTo func() io.Writer
+	if tee != nil {
+		teeTo = func() io.Writer { return tee }
+	}
+	console, err := keployutils.SetChildConsoleTee(cmd, teeTo)
 	if err != nil {
 		return nil, err
 	}

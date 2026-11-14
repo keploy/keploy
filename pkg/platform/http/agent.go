@@ -194,6 +194,12 @@ type agentRun struct {
 	bootReport string
 	bootPrompt bool
 	sudoPid    atomic.Int64
+	// portTaken is the failure a native agent's last report said its start
+	// failed with, where that was a port another socket took
+	// (utils.BootProgress.PortTaken): read as it exits (noteBootEnd), before
+	// its report is removed, since the exit can reach waitForAgent before the
+	// watch has read the report.
+	portTaken atomic.Pointer[string]
 	// agentComm is the agent's process name as the kernel keeps it (its
 	// binary's, cut to 15 bytes), which sudoRanAgent looks for.
 	agentComm string
@@ -211,6 +217,15 @@ func (r *agentRun) watchBoot(progress string, prompts bool, bin string) {
 	r.agentComm = filepath.Base(bin)
 	if len(r.agentComm) > 15 { // TASK_COMM_LEN less its NUL
 		r.agentComm = r.agentComm[:15]
+	}
+}
+
+// noteBootEnd reads the native agent's last report of its start (bootReport)
+// as it exits, before the report is removed: a start that failed on a taken
+// port (utils.BootProgress.PortTaken) is kept as r.portTaken.
+func (r *agentRun) noteBootEnd() {
+	if p, ok := readBootFile(r.bootReport)(context.Background()); ok && p.Failed && p.PortTaken {
+		r.portTaken.Store(&p.Failure)
 	}
 }
 
@@ -2691,6 +2706,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		err := cmd.Wait()
 		console.Exited()
 		run.exited()
+		run.noteBootEnd()
 		removeProgress()
 		// Reported BEFORE the group goroutine below can return it: returning
 		// it cancels the group, and the readiness wait must find the exit
@@ -2826,6 +2842,7 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 		defer utils.Recover(a.logger)
 		err := ptyHandle.Wait()
 		run.exited()
+		run.noteBootEnd()
 		removeProgress()
 		// Before the group goroutine returns it, as in startNativeAgent.
 		exited <- err
@@ -3180,6 +3197,11 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 // same bare failure -- and before this wait watched the process at all, with
 // a readiness timeout five and a half minutes later.
 func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) error {
+	if errors.Is(exitErr, utils.ErrPortTaken) {
+		// The engine could not publish the agent's port (publishRefused): a
+		// start the caller makes again, at once, on a port drawn again.
+		return fmt.Errorf("the keploy agent could not start: %w", exitErr)
+	}
 	var cause error
 	// An *exec.ExitError for an agent keploy started itself, an
 	// *agentContainerExit for one compose started.
@@ -3197,13 +3219,18 @@ func (a *AgentClient) agentStoppedBeforeReady(exitErr error, isDockerCmd bool) e
 	return fmt.Errorf("%w: the keploy agent could not start (%v)", cause, exitErr)
 }
 
-// agentReportedStartFailure is Setup's error for an agent that reported its
-// start failed (utils.FailBoot) with failure, and with code, the code it exits
-// with for it: what its exit would say (agentStoppedBeforeReady), at once, and
-// also of an agent that lives on after the failure (its server's hooks, or its
-// server, failed). The specific code is armed, as for its exit.
-func (a *AgentClient) agentReportedStartFailure(code int, failure string, isDockerCmd bool) error {
-	cause := agentExitCause(code)
+// agentReportedStartFailure is Setup's error for an agent whose report p says
+// its start failed (utils.FailBoot) with failure, and with p.ExitCode, the code
+// it exits with for it: what its exit would say (agentStoppedBeforeReady), at
+// once, and also of an agent that lives on after the failure (its server's
+// hooks, or its server, failed). The specific code is armed, as for its exit.
+// A start that failed on a port another socket took (p.PortTaken) is
+// utils.ErrPortTaken, which the caller starts again at once.
+func (a *AgentClient) agentReportedStartFailure(p utils.BootProgress, failure string, isDockerCmd bool) error {
+	if p.PortTaken {
+		return utils.PortTakenError(fmt.Errorf("the keploy agent could not start: %s", failure))
+	}
+	cause := agentExitCause(p.ExitCode)
 	if cause == nil {
 		return fmt.Errorf("the keploy agent could not start: %s", failure)
 	}
@@ -3318,7 +3345,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	for {
 		select {
 		case exitErr := <-exited:
-			return a.agentStoppedBeforeReady(exitErr, isDockerCmd)
+			return a.agentExited(run, exitErr, isDockerCmd)
 		case answer := <-answers:
 			if answer == nil {
 				// The ticker ended with ctx, which the case below decides.
@@ -3352,7 +3379,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 			// keploy failing from the user stopping it.
 			select {
 			case exitErr := <-exited:
-				return a.agentStoppedBeforeReady(exitErr, isDockerCmd)
+				return a.agentExited(run, exitErr, isDockerCmd)
 			default:
 			}
 			return context.Cause(ctx)
@@ -3372,7 +3399,7 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 					a.logAgentContainerDiagnostics(opts.KeployContainer)
 				}
 				a.stopAgent()
-				return a.agentReportedStartFailure(j.p.ExitCode, j.why, isDockerCmd)
+				return a.agentReportedStartFailure(j.p, j.why, isDockerCmd)
 			case bootStalled:
 				// Setup's cleanup defer is not in scope yet, so without this
 				// the wedged agent and its goroutine leak, and any retry
@@ -4157,13 +4184,21 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
 
+	// What `docker run` printed last, kept for its end: an engine that
+	// could not publish the agent's port says so there (publishRefusedBy).
+	said := &outputTail{}
+
 	// Check if we need PTY for interactive input (e.g., sudo password on Linux)
 	if agentUtils.NeedsPTY() {
-		return a.startInDockerWithPTY(ctx, logger, cmd)
+		return a.startInDockerWithPTY(ctx, logger, cmd, said, opts.AgentPort)
 	}
 
-	// As the native agent's (startWithConsole).
-	console, err := startWithConsole(cmd, (*exec.Cmd).Start)
+	// As the native agent's (startWithConsole), its output kept too.
+	console, err := utils.SetChildConsoleTee(cmd, func() io.Writer { return said })
+	if err == nil {
+		err = cmd.Start()
+		console.Started()
+	}
 	if err == nil {
 		err = cmd.Wait()
 		console.Exited()
@@ -4177,6 +4212,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 			logger.Info("Keploy agent in docker stopped gracefully.")
 			return nil
 		}
+		err = publishRefusedBy(err, said.String(), opts.AgentPort)
 		utils.LogError(logger, err, "failed to run keploy agent in docker")
 		return err
 	}
@@ -4573,14 +4609,14 @@ func resendSIGTERM(ctx context.Context, reported <-chan struct{}, logger *zap.Lo
 }
 
 // startInDockerWithPTY starts the docker agent with PTY support for interactive input (e.g., sudo password)
-func (a *AgentClient) startInDockerWithPTY(ctx context.Context, logger *zap.Logger, cmd *exec.Cmd) error {
+func (a *AgentClient) startInDockerWithPTY(ctx context.Context, logger *zap.Logger, cmd *exec.Cmd, said *outputTail, agentPort uint32) error {
 	// Configure command for PTY execution (OS-specific)
 	agentUtils.ConfigureCommandForPTY(cmd)
 
 	logger.Debug("Starting docker agent with PTY for interactive input")
 
-	// Start with PTY
-	ptyHandle, err := agentUtils.StartCommandWithPTY(cmd, logger)
+	// Start with PTY, what it prints kept too (startInDocker)
+	ptyHandle, err := agentUtils.StartCommandWithPTYTee(cmd, logger, said)
 	if err != nil {
 		utils.LogError(logger, err, "failed to start keploy agent in docker with PTY")
 		return err
@@ -4609,6 +4645,7 @@ func (a *AgentClient) startInDockerWithPTY(ctx context.Context, logger *zap.Logg
 			logger.Info("Keploy agent in docker stopped gracefully.")
 			return nil
 		}
+		err = publishRefusedBy(err, said.String(), agentPort)
 		utils.LogError(logger, err, "failed to run keploy agent in docker with PTY")
 		return err
 	}

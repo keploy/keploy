@@ -1155,7 +1155,7 @@ func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) (errs <-ch
 			}
 			return fmt.Errorf("the keploy agent's container exited with code %d", j.p.ExitCode)
 		}
-		return a.agentReportedStartFailure(j.p.ExitCode, j.why, inContainer)
+		return a.agentReportedStartFailure(j.p, j.why, inContainer)
 	})
 }
 

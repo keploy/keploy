@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"sort"
 	"sync"
@@ -70,6 +71,10 @@ type BootProgress struct {
 	Failed   bool   `json:"failed,omitempty"`
 	ExitCode int    `json:"exitCode,omitempty"`
 	Failure  string `json:"failure,omitempty"`
+	// PortTaken says the start failed because another socket held a port the
+	// CLI handed the agent (ErrPortTaken): the CLI starts it again, at once,
+	// on ports it picks again.
+	PortTaken bool `json:"portTaken,omitempty"`
 	// Ready says the agent's control-plane server listens (MarkBootReady):
 	// its start is over, and its health check answers from now on.
 	Ready bool `json:"ready"`
@@ -127,8 +132,9 @@ var bootClock = stall.Process
 
 // bootFailure is a start's failure (FailBoot).
 type bootFailure struct {
-	code int
-	msg  string
+	code      int
+	msg       string
+	portTaken bool
 }
 
 var (
@@ -202,7 +208,7 @@ func FailBoot(err error) {
 		return
 	}
 	// Redacted as the log line that says it is: the report leaves the agent.
-	if bootFailed.CompareAndSwap(nil, &bootFailure{code: ExitCodeFor(err), msg: keployLog.RedactText(err.Error())}) {
+	if bootFailed.CompareAndSwap(nil, &bootFailure{code: ExitCodeFor(err), msg: keployLog.RedactText(err.Error()), portTaken: errors.Is(err, ErrPortTaken)}) {
 		endBoot()
 		kickBootReport()
 	}
@@ -326,7 +332,7 @@ func snapshotBoot(beat uint64, busy bool) BootProgress {
 		}
 	}
 	if f := bootFailed.Load(); f != nil {
-		p.Failed, p.ExitCode, p.Failure = true, f.code, f.msg
+		p.Failed, p.ExitCode, p.Failure, p.PortTaken = true, f.code, f.msg, f.portTaken
 	}
 	return p
 }
