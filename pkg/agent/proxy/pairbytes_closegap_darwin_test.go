@@ -54,6 +54,17 @@ func closeBegunNotDoneOnDarwin(t *testing.T) (p *Proxy, pc *pairedConn, app *net
 		defer close(closeDone)
 		_ = reader.Close()
 	}()
+	// Registered before anything here can fail, so a failure still lets the
+	// close finish: its cleanup, and the pair's, wait for it.
+	var once sync.Once
+	let = func() {
+		once.Do(func() {
+			close(release)
+			<-refDone
+			<-closeDone
+		})
+	}
+	t.Cleanup(let)
 	// The close marks the descriptor closing once it has read the
 	// application's socket: at once, with nothing of the application's on
 	// its way. A close that finds bytes on their way reads the socket for
@@ -68,15 +79,6 @@ func closeBegunNotDoneOnDarwin(t *testing.T) (p *Proxy, pc *pairedConn, app *net
 		}
 		runtime.Gosched()
 	}
-	var once sync.Once
-	let = func() {
-		once.Do(func() {
-			close(release)
-			<-refDone
-			<-closeDone
-		})
-	}
-	t.Cleanup(let)
 	at, closed := pc.side()
 	if !closed || at.state != xnuTCPEstablished || !at.counted || at.received != 10 {
 		t.Fatalf("the proxy's side as its close began: %+v closed %v, want the close's own count of an established socket, 10 bytes", at, closed)
