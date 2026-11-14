@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/pii"
 	"go.keploy.io/server/v3/pkg/service/realclient"
 
 	"go.keploy.io/server/v3/utils"
@@ -2661,6 +2663,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
 			r.frameProgress.Add(1)
+			if r.config.Record.DetectPII {
+				r.warnPIIDetections(testCase, newTestSetID)
+			}
+
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
@@ -3736,6 +3742,158 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+// piiSafeLabel names a test case in PII warnings without copying PII into the
+// log. The scan runs before the insert that names the test case, so a
+// recording usually has only the call to go by. The query string is left out
+// because it can hold the very values being reported, and a name or path that
+// itself holds PII is replaced by the method and host.
+func piiSafeLabel(testCase *models.TestCase) string {
+	if name := strings.TrimSpace(testCase.Name); name != "" && !holdsPII(name) {
+		return name
+	}
+	method := strings.TrimSpace(string(testCase.HTTPReq.Method))
+	target, _, _ := strings.Cut(testCase.HTTPReq.URL, "?")
+	if label := strings.TrimSpace(method + " " + target); label != "" && !holdsPII(label) {
+		return label
+	}
+	if u, err := url.Parse(target); err == nil && u.Host != "" {
+		return strings.TrimSpace(method + " " + u.Scheme + "://" + u.Host + " (path withheld: it contains PII)")
+	}
+	if method != "" {
+		return method + " request (path withheld: it contains PII)"
+	}
+	return "unknown-test-case"
+}
+
+// urlEncodedFormFields splits an application/x-www-form-urlencoded request
+// body into name and value pairs. Capture already unescapes a body whose
+// Content-Type is exactly application/x-www-form-urlencoded, so those pairs
+// are split as they stand; a body sent with parameters (a charset, say) is
+// still escaped and each name and value is unescaped here.
+func urlEncodedFormFields(header map[string]string, body string) [][2]string {
+	if body == "" {
+		return nil
+	}
+	contentType := ""
+	for name, value := range header {
+		if strings.EqualFold(name, "Content-Type") {
+			contentType = strings.TrimSpace(value)
+			break
+		}
+	}
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	if !strings.EqualFold(strings.TrimSpace(mediaType), "application/x-www-form-urlencoded") {
+		return nil
+	}
+	decoded := contentType == "application/x-www-form-urlencoded"
+
+	fields := make([][2]string, 0, 4)
+	for _, pair := range strings.Split(body, "&") {
+		if pair == "" {
+			continue
+		}
+		name, value, _ := strings.Cut(pair, "=")
+		if !decoded {
+			if n, err := url.QueryUnescape(name); err == nil {
+				name = n
+			}
+			if v, err := url.QueryUnescape(value); err == nil {
+				value = v
+			}
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		fields = append(fields, [2]string{name, value})
+	}
+	return fields
+}
+
+func holdsPII(value string) bool {
+	if len(pii.DetectValue("label", value)) > 0 {
+		return true
+	}
+	if decoded, err := url.PathUnescape(value); err == nil && decoded != value {
+		return len(pii.DetectValue("label", decoded)) > 0
+	}
+	return false
+}
+
+func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string) {
+	if testCase == nil {
+		return
+	}
+
+	label := piiSafeLabel(testCase)
+
+	detections := make([]pii.Detection, 0)
+	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.Header, "request.header")...)
+	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.URLParams, "request.url_param")...)
+	detections = append(detections, pii.DetectValue("request.url", testCase.HTTPReq.URL)...)
+	// The recorded URL keeps the path escaped as it arrived, so an email sent
+	// as user%40example.com is only visible once the path is decoded.
+	if u, err := url.Parse(testCase.HTTPReq.URL); err == nil && u.Path != u.EscapedPath() {
+		detections = append(detections, pii.DetectValue("request.url_path", u.Path)...)
+	}
+
+	// Bodies over 1 MB can't be scanned once they have left the test case, so
+	// say so instead of reporting nothing. A request body is only moved to an
+	// asset file at insert, so here it is normally still inline.
+	reqBody := testCase.HTTPReq.Body
+	if reqBody == "" && testCase.HTTPReq.BodyRef.Path != "" {
+		r.logger.Warn(fmt.Sprintf(
+			"The request body of %s was not scanned for PII because it was offloaded (over 1 MB). "+
+				"Review the asset file at %s manually.",
+			label, testCase.HTTPReq.BodyRef.Path,
+		))
+	}
+	detections = append(detections, pii.DetectBody(reqBody, "request.body")...)
+	// A URL-encoded form stays in Body as text, so the scan above sees only
+	// the name "request.body" and misses a field such as password. Scan each
+	// form field under its own name.
+	for _, field := range urlEncodedFormFields(testCase.HTTPReq.Header, reqBody) {
+		detections = append(detections, pii.DetectValue("request.form."+field[0], field[1])...)
+	}
+	// Capture moves multipart fields into Form and clears Body, so scan each
+	// form value under its field name as well.
+	for _, field := range testCase.HTTPReq.Form {
+		name := "request.form." + field.Key
+		if len(field.Values) == 0 {
+			detections = append(detections, pii.DetectValue(name, "")...)
+		}
+		for _, value := range field.Values {
+			detections = append(detections, pii.DetectValue(name, value)...)
+		}
+	}
+
+	detections = append(detections, pii.DetectHeaders(testCase.HTTPResp.Header, "response.header")...)
+	if testCase.HTTPResp.BodySkipped {
+		r.logger.Warn(fmt.Sprintf(
+			"The response body of %s (%d bytes) was not scanned for PII: bodies over 1 MB are not kept during recording.",
+			label, testCase.HTTPResp.BodySize,
+		))
+	}
+	detections = append(detections, pii.DetectBody(testCase.HTTPResp.Body, "response.body")...)
+
+	if len(detections) > 0 {
+		fields := make([]string, 0, len(detections))
+		for _, d := range detections {
+			fields = append(fields, fmt.Sprintf("%s (%s)", pii.RedactField(d.Field), d.PatternType))
+		}
+		r.logger.Warn(fmt.Sprintf(
+			"Potential PII detected in %s (%d field(s)): %s. "+
+				"Review test set %s before sharing it. `keploy sanitize -t %s` replaces values it detects as secrets, "+
+				"such as API keys and tokens; it does not detect emails, phone numbers, card numbers or SSNs, so remove those by hand.",
+			label,
+			len(detections),
+			strings.Join(fields, ", "),
+			testSetID,
+			testSetID,
+		))
+	}
 }
 
 // pcapDir makes the folder a record's packet capture is streamed to, the test

@@ -1,0 +1,347 @@
+package pii
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+const (
+	PatternEmail      = "email"
+	PatternPhone      = "phone"
+	PatternCreditCard = "credit_card"
+	PatternSSN        = "ssn"
+	PatternFieldName  = "field_name"
+)
+
+var (
+	emailRegex = regexp.MustCompile(`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`)
+	phoneRegex = regexp.MustCompile(`(?:\+?\d{1,3}[\s.\-]?)?(?:\(?\d{2,4}\)?[\s.\-]?)\d{3,4}[\s.\-]?\d{4}`)
+	ccRegex    = regexp.MustCompile(`(?:\d[ -]*?){13,19}`)
+	ssnRegex   = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
+)
+
+var piiFieldNames = map[string]struct{}{
+	"password":        {},
+	"secret":          {},
+	"token":           {},
+	"ssn":             {},
+	"credit_card":     {},
+	"social_security": {},
+	"date_of_birth":   {},
+	"passport":        {},
+}
+
+// maxPIIFieldNameWords is the longest entry in piiFieldNames, in words.
+const maxPIIFieldNameWords = 3
+
+type Detection struct {
+	Field       string
+	PatternType string
+}
+
+func DetectHeaders(headers map[string]string, source string) []Detection {
+	detections := make([]Detection, 0)
+	for key, value := range headers {
+		field := key
+		if source != "" {
+			field = source + "." + key
+		}
+		detections = append(detections, DetectValue(field, value)...)
+	}
+	return dedupeDetections(detections)
+}
+
+func DetectBody(body string, source string) []Detection {
+	if strings.TrimSpace(body) == "" {
+		return nil
+	}
+
+	// UseNumber keeps a JSON number's digits as sent. Decoded to a float64, a
+	// 16-digit card number prints as 4.111111111111111e+15 and no pattern
+	// matches it.
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+
+	var payload interface{}
+	if err := decoder.Decode(&payload); err != nil {
+		return DetectValue(source, body)
+	}
+	// Decode stops after the first value, so text after it means the body is
+	// not a JSON document.
+	if _, err := decoder.Token(); err != io.EOF {
+		return DetectValue(source, body)
+	}
+
+	detections := make([]Detection, 0)
+	detections = append(detections, detectJSON(payload, source)...)
+	return dedupeDetections(detections)
+}
+
+func DetectValue(field, value string) []Detection {
+	detections := make([]Detection, 0)
+	if isPIIFieldName(field) {
+		detections = append(detections, Detection{Field: field, PatternType: PatternFieldName})
+	}
+	detections = append(detections, detectValuePatterns(field, value)...)
+	return dedupeDetections(detections)
+}
+
+// detectValuePatterns reports the value patterns (email, phone, card, SSN)
+// found in value, under field. It skips the field-name check.
+func detectValuePatterns(field, value string) []Detection {
+	detections := make([]Detection, 0)
+	if emailRegex.FindString(value) != "" {
+		detections = append(detections, Detection{Field: field, PatternType: PatternEmail})
+	}
+
+	if hasPhone(value) {
+		detections = append(detections, Detection{Field: field, PatternType: PatternPhone})
+	}
+
+	if hasCreditCard(value) {
+		detections = append(detections, Detection{Field: field, PatternType: PatternCreditCard})
+	}
+
+	if ssnRegex.FindString(value) != "" {
+		detections = append(detections, Detection{Field: field, PatternType: PatternSSN})
+	}
+
+	return dedupeDetections(detections)
+}
+
+func detectJSON(value interface{}, path string) []Detection {
+	detections := make([]Detection, 0)
+	switch v := value.(type) {
+	case map[string]interface{}:
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			// PII can sit in a key, as in {"user@example.com": {...}}. Report
+			// it at the object holding the key, so the key itself stays out
+			// of the detection's field.
+			detections = append(detections, detectValuePatterns(path, key)...)
+			nextPath := key
+			if path != "" {
+				nextPath = path + "." + key
+			}
+			detections = append(detections, detectJSON(v[key], nextPath)...)
+		}
+	case []interface{}:
+		for i, item := range v {
+			nextPath := path + "[" + strconv.Itoa(i) + "]"
+			detections = append(detections, detectJSON(item, nextPath)...)
+		}
+	case string:
+		detections = append(detections, DetectValue(path, v)...)
+	default:
+		// Non-string JSON values (json.Number, booleans, etc.) are converted
+		// to strings so that regex-based patterns (phone, credit card, etc.)
+		// can still match their textual representation.
+		detections = append(detections, DetectValue(path, fmt.Sprint(v))...)
+	}
+	return dedupeDetections(detections)
+}
+
+// isPIIFieldName reports whether field, a dotted path such as
+// "request.body.user.creditCard", holds a word or run of adjacent words that
+// is listed in piiFieldNames.
+func isPIIFieldName(field string) bool {
+	parts := splitFieldName(field)
+	for i := range parts {
+		for n := 1; n <= maxPIIFieldNameWords && i+n <= len(parts); n++ {
+			if _, ok := piiFieldNames[strings.Join(parts[i:i+n], "_")]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// splitFieldName splits field into lowercase words at path and word
+// delimiters and at camelCase boundaries, keeping an acronym in one piece:
+// "userSSNValue" becomes "user", "ssn", "value".
+func splitFieldName(field string) []string {
+	isLower := func(r rune) bool { return r >= 'a' && r <= 'z' }
+	isUpper := func(r rune) bool { return r >= 'A' && r <= 'Z' }
+	isDigit := func(r rune) bool { return r >= '0' && r <= '9' }
+
+	runes := []rune(field)
+	parts := make([]string, 0, 4)
+	var word strings.Builder
+	flush := func() {
+		if word.Len() > 0 {
+			parts = append(parts, strings.ToLower(word.String()))
+			word.Reset()
+		}
+	}
+
+	for i, r := range runes {
+		switch r {
+		case '.', '_', '-', '[', ']':
+			flush()
+			continue
+		}
+		if word.Len() > 0 && isUpper(r) {
+			prev := runes[i-1]
+			nextIsLower := i+1 < len(runes) && isLower(runes[i+1])
+			if isLower(prev) || isDigit(prev) || (isUpper(prev) && nextIsLower) {
+				flush()
+			}
+		}
+		word.WriteRune(r)
+	}
+	flush()
+	return parts
+}
+
+// Redacted stands in for PII that RedactField removes from a field path.
+const Redacted = "[redacted]"
+
+// RedactField removes PII from a detection's field path. The path is built
+// from untrusted names (JSON keys, query parameter and form field names), so
+// a key such as "user@example.com" would otherwise reach the log as written.
+// The path is read as dot-separated segments, since a key can itself contain
+// dots: each run of segments that holds an email, SSN, Luhn-valid card number
+// or phone number becomes Redacted, and the rest of the path is kept so the
+// warning still says where the value was.
+func RedactField(field string) string {
+	segments := strings.Split(field, ".")
+	out := make([]string, 0, len(segments))
+	for i := 0; i < len(segments); {
+		end := -1
+		for j := i; j < len(segments) && j < i+maxRedactSegments; j++ {
+			if segmentsHoldPII(segments[i : j+1]) {
+				end = j
+				break
+			}
+		}
+		if end < 0 {
+			out = append(out, segments[i])
+			i++
+			continue
+		}
+		out = append(out, Redacted)
+		i = end + 1
+	}
+	return strings.Join(out, ".")
+}
+
+// maxRedactSegments bounds how many dot-separated segments one PII value in a
+// path may span, such as the three of "jane.doe@example.com".
+const maxRedactSegments = 6
+
+// segmentsHoldPII reports whether the joined segments are PII. One segment
+// counts when PII appears anywhere in it; a run of several counts only when
+// the whole run is one value, and an email must start in the first segment,
+// so "request.body.user@example.com" redacts "user@example.com" alone.
+func segmentsHoldPII(segments []string) bool {
+	text := strings.Join(segments, ".")
+	if len(segments) == 1 {
+		return emailRegex.MatchString(text) || ssnRegex.MatchString(text) ||
+			hasCreditCard(text) || hasPhone(text)
+	}
+	if strings.Contains(segments[0], "@") && emailWhole.MatchString(text) {
+		return true
+	}
+	return ssnWhole.MatchString(text) ||
+		(cardWhole.MatchString(text) && hasCreditCard(text)) ||
+		(phoneWhole.MatchString(text) && hasPhone(text))
+}
+
+var (
+	emailWhole = regexp.MustCompile(`(?i)^[a-z0-9_%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$`)
+	ssnWhole   = regexp.MustCompile(`^\d{3}-\d{2}-\d{4}$`)
+	cardWhole  = regexp.MustCompile(`^[\d -]+$`)
+	phoneWhole = regexp.MustCompile(`^` + phoneRegex.String() + `$`)
+)
+
+func hasPhone(value string) bool {
+	matches := phoneRegex.FindAllString(value, -1)
+	for _, match := range matches {
+		digits := onlyDigits(match)
+		if len(digits) < 10 || len(digits) > 15 {
+			continue
+		}
+		// Avoid plain numeric IDs and Unix timestamps in seconds or
+		// milliseconds as phone numbers.
+		if !strings.ContainsAny(match, "+-(). ") && (len(digits) == 10 || len(digits) == 13) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func hasCreditCard(value string) bool {
+	matches := ccRegex.FindAllString(value, -1)
+	for _, match := range matches {
+		digits := onlyDigits(match)
+		if len(digits) < 13 || len(digits) > 19 {
+			continue
+		}
+		if isLuhnValid(digits) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLuhnValid(number string) bool {
+	sum := 0
+	double := false
+	for i := len(number) - 1; i >= 0; i-- {
+		d := int(number[i] - '0')
+		if d < 0 || d > 9 {
+			return false
+		}
+		if double {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		double = !double
+	}
+	return sum > 0 && sum%10 == 0
+}
+
+func onlyDigits(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, ch := range value {
+		if ch >= '0' && ch <= '9' {
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
+}
+
+func dedupeDetections(detections []Detection) []Detection {
+	if len(detections) == 0 {
+		return nil
+	}
+	uniq := make(map[string]Detection, len(detections))
+	for _, d := range detections {
+		key := d.Field + "|" + d.PatternType
+		uniq[key] = d
+	}
+	keys := make([]string, 0, len(uniq))
+	for key := range uniq {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]Detection, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, uniq[key])
+	}
+	return out
+}
