@@ -57,7 +57,7 @@ func noTrustPrompt(out []byte, err error) bool {
 // (installWindowsCA). A session that cannot show Windows' trust prompt
 // (errNoTrustPrompt) is not a failed setup: the app keploy starts is given
 // keploy's CA where its runtime reads one (SetupCaCertEnv: Node, Python,
-// OpenSSL and curl, Cargo, Java), and a client that reads only the Windows
+// OpenSSL and curl, Cargo and Java), and a client that reads only the Windows
 // store (Go, .NET) rejects keploy's certificate, each such handshake charged
 // as a capture loss that names the one step, with no administrator, that
 // makes it trusted (UntrustedStoreWhy). keptAt is the certificate keploy keeps
@@ -69,7 +69,7 @@ func trustOnWindows(ctx context.Context, logger *zap.Logger, certPath string, de
 		return err
 	}
 	noteUntrustedStore("keploy's CA is not in this user's Windows trust store, the only one a Go or .NET client reads, because this session has no desktop for Windows' prompt to trust it: " + trustStep(keptAt))
-	logger.Warn("this session cannot show Windows' prompt to trust keploy's CA: the app is given keploy's CA where its runtime reads one (Node, Python, OpenSSL, Java), and a TLS call of a Go or .NET client, which reads only the Windows store, is refused as a capture loss",
+	logger.Warn("this session cannot show Windows' prompt to trust keploy's CA: the app is given keploy's CA where its runtime reads one (Node, Python, OpenSSL and curl, Cargo and Java), and a TLS call of a Go or .NET client, which reads only the Windows store, is refused as a capture loss",
 		zap.String("next_step", trustStep(keptAt)))
 	return nil
 }
