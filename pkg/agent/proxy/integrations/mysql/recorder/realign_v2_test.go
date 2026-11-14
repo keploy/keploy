@@ -1105,12 +1105,14 @@ func TestRecordV2_TwoDeepPipeliningIntoTheTailOfAnAnswerLeftOut(t *testing.T) {
 // The walk starts an answer where the server's stream is at it, after what
 // the floor drops before the command and what was read before the answer:
 // an ERR the server sent unasked, at sequence id 1 or at 0 as a server sends
-// its own, or the ERR 1835 to a COM_STMT_CLOSE that does not decode, all
-// captured before a COM_FIELD_LIST whose answer the recorder cannot frame. The
-// client sent its next command before any of that answer, so no packet of it
-// came before the re-align's cut, and the recording stops there. Walked as the
-// answer's, the packet at sequence id 1 had the cut pass, and the next command
-// was recorded with the COM_FIELD_LIST's ERR.
+// its own, or the ERR 1835 to a COM_STMT_CLOSE that does not decode, alone or
+// with an unasked ERR at sequence id 1 after it, all captured before a
+// COM_FIELD_LIST whose answer the recorder cannot frame. The client sent its
+// next command before any of that answer, so no packet of it came before the
+// re-align's cut, and the recording stops there. Walked as the answer's, the
+// packet at sequence id 1 had the cut pass, and the next command was recorded
+// with the COM_FIELD_LIST's ERR. After the ERR 1835, only the floor set once
+// it is read drops that packet, as the next chunk is waited for.
 func TestRecordV2_ServerBytesBeforeACommandAreNoPacketOfItsAnswerAtTheCut(t *testing.T) {
 	t.Parallel()
 	xs := kitTraffic(t, []int{7, 8}, false)
@@ -1120,6 +1122,9 @@ func TestRecordV2_ServerBytesBeforeACommandAreNoPacketOfItsAnswerAtTheCut(t *tes
 		"an ERR at sequence id 1":   {{reply: [][]byte{errReply(1, 1053, "Server shutdown in progress")}}},
 		"the server's own ERR":      {{reply: [][]byte{errReply(0, 4031, "The client was disconnected by the server")}}},
 		"the ERR 1835 to the CLOSE": {{command: malformedClose}, {reply: [][]byte{malformedERR}}},
+		"the ERR 1835 to the CLOSE, then an ERR at sequence id 1": {
+			{command: malformedClose}, {reply: [][]byte{malformedERR}}, {reply: [][]byte{errReply(1, 1053, "Server shutdown in progress")}},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
