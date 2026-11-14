@@ -302,6 +302,80 @@ func TestSetScopeMocksTwoKeys(t *testing.T) {
 	require.Equal(t, []models.MockEntry{{Name: "mock-2"}, {Name: "mock-3"}, {Name: "mock-6"}, {Name: "mock-7"}, {Name: "mock-8"}}, worker)
 }
 
+// idleRowKind is a kind whose recorded answer is idle when its metadata says
+// so (models.RegisterIdleAnswer), as enterprise Redis declares a blocking pop
+// the server never answered.
+const idleRowKind models.Kind = "IdleRowKind"
+
+// idleRowMock is a recording of idleRowKind made at req, idle or not.
+func idleRowMock(name string, req time.Time, idle bool) *models.Mock {
+	md := map[string]string{"type": "mocks"}
+	if idle {
+		md["answer"] = "none"
+	}
+	return &models.Mock{Name: name, Kind: idleRowKind, Spec: models.MockSpec{Metadata: md, ReqTimestampMock: req}}
+}
+
+// A queue worker sends its next blocking pop as it finishes a job, and the
+// server holds it until the recording ends: the recording has no answer, which
+// its parser declares idle. The test that pushed the job posts its end at the
+// same moment, so the pop is recorded just inside that test's window or just
+// after it by chance, and a replay can fall either way again. Under the proven
+// switch the mapping is the same on every side of the edge: worker:, required
+// of no test. Before, a pop recorded inside test_job was test_job's, and a
+// replay whose worker sent it after test_job's end failed test_job on an
+// unconsumed mock. A recording that is not idle stays the test's, and an idle
+// one recorded before every test is startup:'s.
+func TestIdleAnswerIsTheSetsOnEitherSideOfAWindowEdge(t *testing.T) {
+	t.Cleanup(models.RegisterIdleAnswer(idleRowKind, func(m *models.Mock) bool { return m.Spec.Metadata["answer"] == "none" }))
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{
+		{Name: "test_ping", Start: at(0), End: at(100)},
+		{Name: "test_job", Start: at(150), End: at(300)},
+		{Name: "test_after", Start: at(350), End: at(400)},
+	}
+	kind := string(idleRowKind)
+	for _, tc := range []struct {
+		name  string
+		popAt int
+	}{
+		{"inside test_job, at its end", 300},
+		{"in the gap after test_job", 301},
+		{"inside test_after", 360},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			mocks := []capturedMock{
+				capturedOf(idleRowMock("mock-push", at(200), false)),
+				capturedOf(idleRowMock("mock-pop", at(tc.popAt), true)),
+			}
+			require.Equal(t, map[string][]models.MockEntry{"test_job": {{Name: "mock-push", Kind: kind}}}, correlateScopes(windows, mocks))
+			startup, worker := setScopeMocks(windows, mocks, nil)
+			require.Empty(t, startup)
+			require.Equal(t, []models.MockEntry{{Name: "mock-pop", Kind: kind}}, worker)
+		})
+	}
+	t.Run("an idle answer before every test is startup's", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		mocks := []capturedMock{capturedOf(idleRowMock("mock-pop", at(-5), true))}
+		require.Empty(t, correlateScopes(windows, mocks))
+		startup, worker := setScopeMocks(windows, mocks, nil)
+		require.Equal(t, []models.MockEntry{{Name: "mock-pop", Kind: kind}}, startup)
+		require.Empty(t, worker)
+	})
+	// Off the switch an idle answer is placed as any call, as keploy
+	// record's derivation also maps one to worker: only under the switch.
+	t.Run("switch off: the test's whose window holds it", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		mocks := []capturedMock{
+			capturedOf(idleRowMock("mock-push", at(200), false)),
+			capturedOf(idleRowMock("mock-pop", at(300), true)),
+		}
+		require.Equal(t, map[string][]models.MockEntry{"test_job": {{Name: "mock-push", Kind: kind}, {Name: "mock-pop", Kind: kind}}}, correlateScopes(windows, mocks))
+		require.Empty(t, startupMocks(windows, mocks, nil))
+	})
+}
+
 // Under the proven switch keploy mock record writes the whole contract into
 // mappings.yaml: each test's own calls in its list, what came before the
 // first test in startup:, and what came between or after the tests in
