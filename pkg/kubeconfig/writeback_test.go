@@ -66,8 +66,9 @@ func asConfig(t *testing.T, data []byte) map[string]any {
 
 // itemOf is the item of cfg's list named name, as a mapping a row may edit.
 func itemOf(cfg map[string]any, list, name string) map[string]any {
-	for _, it := range cfg[list].([]any) {
-		if m := it.(map[string]any); m["name"] == name {
+	items, _ := cfg[list].([]any)
+	for _, it := range items {
+		if m, _ := it.(map[string]any); m["name"] == name {
 			return m
 		}
 	}
@@ -333,8 +334,11 @@ func TestWriteBackWritesWhatTheTestChangedToTheUsersKubeconfig(t *testing.T) {
 		if f := noneAdded(cur, after); f != "" {
 			t.Errorf("%s: the user's file gained a field that holds nothing (%q):\n%s", r.name, f, after)
 		}
-		for _, c := range got(t, after)["clusters"].([]any) {
-			if d, _ := c.(map[string]any)["cluster"].(map[string]any)["certificate-authority-data"].(string); strings.Contains(string(mustB64(t, d)), string(bytes.TrimSpace(keploy.pem))) {
+		clusters, _ := got(t, after)["clusters"].([]any)
+		for _, c := range clusters {
+			item, _ := c.(map[string]any)
+			body, _ := item["cluster"].(map[string]any)
+			if d, _ := body["certificate-authority-data"].(string); strings.Contains(string(mustB64(t, d)), string(bytes.TrimSpace(keploy.pem))) {
 				t.Errorf("%s: keploy's CA reached the user's file:\n%s", r.name, after)
 			}
 		}
@@ -351,8 +355,10 @@ func TestWriteBackWritesWhatTheTestChangedToTheUsersKubeconfig(t *testing.T) {
 			t.Errorf("%s: the backup does not hold the file as it was (%v)", r.name, err)
 		}
 		for _, p := range []string{file, w.Backup} {
-			if info, err := os.Stat(p); err != nil || (info.Mode().Perm() != 0o640 && os.PathSeparator == '/') {
-				t.Errorf("%s: %s has mode %v (%v); want the user's 0640", r.name, p, info.Mode().Perm(), err)
+			if info, err := os.Stat(p); err != nil {
+				t.Errorf("%s: %q: %v; want it there with the user's 0640", r.name, p, err)
+			} else if info.Mode().Perm() != 0o640 && os.PathSeparator == '/' {
+				t.Errorf("%s: %s has mode %v; want the user's 0640", r.name, p, info.Mode().Perm())
 			}
 		}
 		if len(names) != 3 || len(chowned) != 2 || chowned[0] != backupName {

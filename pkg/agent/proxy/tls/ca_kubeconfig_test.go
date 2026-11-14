@@ -129,9 +129,12 @@ func TestSetupCaCertEnv_KubectlGetsACopyThatTrustsKeploysCA(t *testing.T) {
 			t.Fatalf("run %d: the copy lost the user's client key, which kubectl sends its certificate with", run)
 		}
 		if runtime.GOOS != "windows" {
-			if st, err := os.Stat(cp); err != nil || st.Mode().Perm() != 0o600 {
+			if st, err := os.Stat(cp); err != nil {
 				cancel()
-				t.Fatalf("run %d: the copy's mode is %v (%v); want 0600: it holds the user's client key", run, st.Mode().Perm(), err)
+				t.Fatalf("run %d: the copy %q: %v; want it there with mode 0600", run, cp, err)
+			} else if st.Mode().Perm() != 0o600 {
+				cancel()
+				t.Fatalf("run %d: the copy's mode is %v; want 0600: it holds the user's client key", run, st.Mode().Perm())
 			}
 		}
 		cancel()
