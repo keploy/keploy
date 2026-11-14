@@ -1381,3 +1381,28 @@ func TestWhenEveryServerFailsOrRefusesTheFirstOnesAnswerIsTheAnswer(t *testing.T
 		}
 	}
 }
+
+// When no server answers at all, the recording and the forward fail with the
+// servers' transport error, so the agent's log says why the name did not
+// resolve (here a timeout), not only that no answer came back.
+func TestWhenNoServerAnswersTheErrorNamesTheTransportFailure(t *testing.T) {
+	q := dns.Question{Name: "db.corp.internal.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	for _, u := range upstreams {
+		t.Run(u.name, func(t *testing.T) {
+			for _, a := range upstreamAskers {
+				p := u.new(t)
+				asked := byServers(p, map[string]string{})
+				resp, err := a.ask(p, q)
+				if err == nil {
+					t.Fatalf("%s: answered %v with every server silent, want an error", a.name, resp)
+				}
+				if !strings.Contains(err.Error(), "i/o timeout") {
+					t.Errorf("%s: the error %q does not name the servers' timeout", a.name, err)
+				}
+				if !slices.Equal(*asked, p.dnsUpstreamServers) {
+					t.Errorf("%s: asked %v, want every server %v", a.name, *asked, p.dnsUpstreamServers)
+				}
+			}
+		})
+	}
+}
