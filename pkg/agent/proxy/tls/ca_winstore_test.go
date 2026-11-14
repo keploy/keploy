@@ -106,12 +106,28 @@ func TestAnElevatedRunThatCannotUseTheUserStoreFallsBackToTheMachineStore(t *tes
 		t.Run(tc.name, func(t *testing.T) {
 			c := &certutilAdds{userOut: []byte(notSupportedOut), userErr: exitErr(t), machineErr: tc.machineErr}
 			swapWindowsStore(t, notHeld, c, true)
-			err := installWindowsCA(context.Background(), zap.NewNop(), "x.crt", []byte("der"), keptCA)
+			core, logs := observer.New(zapcore.InfoLevel)
+			err := installWindowsCA(context.Background(), zap.New(core), "x.crt", []byte("der"), keptCA)
 			if err != tc.machineErr {
 				t.Fatalf("installWindowsCA = %v, want the machine store's answer %v", err, tc.machineErr)
 			}
 			if !reflect.DeepEqual(c.calls, []bool{true, false}) {
 				t.Fatalf("certutil adds asked = %v, want the user store's, then the machine store's", c.calls)
+			}
+			// A CA the machine store took is said in one INFO line naming
+			// that store; one it refused is not said to be there.
+			var named []observer.LoggedEntry
+			for _, e := range logs.All() {
+				if strings.Contains(e.Message, `LocalMachine\Root`) {
+					named = append(named, e)
+				}
+			}
+			want := 0
+			if tc.machineErr == nil {
+				want = 1
+			}
+			if len(named) != want || (want == 1 && named[0].Level != zapcore.InfoLevel) {
+				t.Fatalf("lines naming the machine store = %v, want %d at INFO", named, want)
 			}
 		})
 	}
