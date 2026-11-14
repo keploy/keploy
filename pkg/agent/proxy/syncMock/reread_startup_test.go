@@ -188,6 +188,34 @@ func TestOnlyTheEarliestStartUpLossOfTheRecordingIsReRead(t *testing.T) {
 	})
 }
 
+// A stale cutoff's drop that revokes the recording's first test case moves
+// the first past a start-up mock lost earlier as a test's, as a capacity drop
+// does: the loss is re-read as one any test may need, and that is said at
+// ERROR, once. Without the line the re-read would still leave out every later
+// test case, and nothing would say why.
+func TestACutDropThatMovesTheFirstSaysTheReRead(t *testing.T) {
+	t0 := time.Now().Add(-time.Hour)
+	m, logs := twoSent(t, t0)
+	m.dropOut(asyncAt("c1", t0.Add(2*time.Second)), "", m.revokeEpoch.Load(), string(MockDroppedOutputFull))
+	if n := len(rereadLines(logs)); n != 0 {
+		t.Fatalf("%d re-reads before the first moved", n)
+	}
+	// A test's call inside "a", the first test case, falls to the stale
+	// cutoff: "a" is revoked, and the first moves past the start-up read.
+	m.cutDropped([]*models.Mock{callAt("c2", t0.Add(500*time.Millisecond))}, m.revokeEpoch.Load(), true, "test-x", false)
+	revoked := map[string]bool{}
+	for _, name := range revokesQueued(m) {
+		revoked[name] = true
+	}
+	if !revoked["a"] {
+		t.Fatalf("revoked %v, want a, whose window holds the cut call's request", revokesQueued(m))
+	}
+	got := rereadLines(logs)
+	if len(got) != 1 || got[0]["left_out_from"] != t0.Add(2*time.Second).Format(time.RFC3339Nano) {
+		t.Fatalf("re-read %v once the cut drop moved the first past the start-up read, want one ERROR from its request", got)
+	}
+}
+
 // keptLines returns the lines, at level, that say a test's mock lost revoked
 // sent test cases a client that cannot delete them keeps.
 func keptLines(logs *observer.ObservedLogs, level zapcore.Level) []map[string]interface{} {

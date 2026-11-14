@@ -426,6 +426,35 @@ func TestAStaleCutoffsLeftOutTestCasesAreNamedAtWarnThenSampled(t *testing.T) {
 	}
 }
 
+// Each drop session names its own first dropNamesMax cut leave-outs at WARN:
+// the count starts again at StartDropSession, so a later recording's first
+// ones are not said at Debug because an earlier one left out more.
+func TestEachDropSessionNamesItsFirstCutLeaveOutsAtWarn(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	m := New(zap.New(core))
+	now := time.Now()
+	w := sendingWindow(now.Add(-time.Second), now)
+	m.StartDropSession()
+	for i := 0; i < dropNamesMax+4; i++ {
+		m.sayCutLeftOut("first-session", w)
+	}
+	m.StartDropSession()
+	m.sayCutLeftOut("second-session", w)
+	for _, e := range logs.All() {
+		if e.ContextMap()["test_case"] != "second-session" {
+			continue
+		}
+		if e.Level != zapcore.WarnLevel {
+			t.Fatalf("the second session's first cut leave-out was said at %v, want WARN", e.Level)
+		}
+		if n := e.ContextMap()["left_out_so_far"]; n != uint64(1) {
+			t.Fatalf("left_out_so_far %v in a new session, want 1", n)
+		}
+		return
+	}
+	t.Fatal("the second session's cut leave-out was not said")
+}
+
 // lockCheckCore is a zap core that counts the lines written while the
 // manager's mu is held: the writer holds it when TryLock fails, as the test
 // runs no other goroutine on the manager.
