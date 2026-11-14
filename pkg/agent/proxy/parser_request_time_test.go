@@ -19,6 +19,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -38,8 +39,11 @@ import (
 // build, OSS keploy's and any a build adds (the integrations parsers that
 // pkg/agent/proxy/extraparsers.go registers), through the recorder as
 // handleConnection dispatches it, over one exchange of its protocol between a
-// real or scripted client and server. A registered parser with no exchange
-// here fails the row, so a new parser cannot go unchecked.
+// real or scripted client and server, and over each of its other emit paths
+// listed here (stampPaths: HTTP's call that got no answer, recorded with its
+// fault), under either switch (the package's TestMain clears KEPLOY_PROVEN,
+// so each run sets it). A registered parser with no exchange here fails the
+// row, so a new parser cannot go unchecked.
 func TestEveryRegisteredParsersRecorderStampsEachMocksRequestTime(t *testing.T) {
 	kinds := make([]integrations.IntegrationType, 0, len(integrations.Registered))
 	for k := range integrations.Registered {
@@ -64,22 +68,49 @@ func TestEveryRegisteredParsersRecorderStampsEachMocksRequestTime(t *testing.T) 
 				}
 				rec = ex.recordedBy
 			}
-			mocks, warned := recordStampExchange(t, rec, ex)
-			if len(mocks) == 0 {
-				t.Fatalf("the %s parser's recorder emitted no mock for its exchange, so the row checked nothing", kind)
+			paths := stampPaths[kind]
+			names := make([]string, 0, len(paths))
+			for name := range paths {
+				names = append(names, name)
 			}
-			for _, mk := range mocks {
-				if mk.Spec.ReqTimestampMock.IsZero() {
-					t.Errorf("the %s parser's recorder emitted %s mock %q (lifetime %v) with no request time",
-						kind, mk.Kind, mk.Name, mk.TestModeInfo.Lifetime)
-				}
-			}
-			for _, e := range warned {
-				if strings.Contains(e.Message, "no request time") {
-					t.Errorf("the manager said for the %s parser: %s (%v)", kind, e.Message, e.ContextMap())
-				}
+			sort.Strings(names)
+			for _, on := range []string{"0", "1"} {
+				t.Run(provenswitch.Env+"="+on, func(t *testing.T) {
+					t.Setenv(provenswitch.Env, on)
+					checkStamped(t, kind, rec, ex)
+					for _, name := range names {
+						t.Run(name, func(t *testing.T) { checkStamped(t, kind, rec, paths[name]) })
+					}
+				})
 			}
 		})
+	}
+}
+
+// checkStamped records ex through rec, the parser that records kind's
+// connections, and fails unless it emitted a mock, every mock it emitted
+// carries its request time (and its fault, for an exchange of a fault path),
+// and the manager said no WARN of a mock with none.
+func checkStamped(t *testing.T, kind, rec integrations.IntegrationType, ex stampExchange) {
+	t.Helper()
+	mocks, warned := recordStampExchange(t, rec, ex)
+	if len(mocks) == 0 {
+		t.Fatalf("the %s parser's recorder emitted no mock for its exchange, so the row checked nothing", kind)
+	}
+	for _, mk := range mocks {
+		if mk.Spec.ReqTimestampMock.IsZero() {
+			t.Errorf("the %s parser's recorder emitted %s mock %q (lifetime %v) with no request time",
+				kind, mk.Kind, mk.Name, mk.TestModeInfo.Lifetime)
+		}
+		if ex.faulted && mk.Spec.Fault == nil {
+			t.Errorf("the %s parser's recorder emitted %s mock %q with no fault for an exchange of its fault path, "+
+				"so the row did not check that path", kind, mk.Kind, mk.Name)
+		}
+	}
+	for _, e := range warned {
+		if strings.Contains(e.Message, "no request time") {
+			t.Errorf("the manager said for the %s parser: %s (%v)", kind, e.Message, e.ContextMap())
+		}
 	}
 }
 
@@ -95,6 +126,9 @@ type stampExchange struct {
 	// claims its connections, so this one never records (it only replays).
 	// The row checks that it is registered above.
 	recordedBy integrations.IntegrationType
+	// faulted is set on an exchange of a recorder's fault path: each mock
+	// it emits must record its fault, or the row did not reach that path.
+	faulted bool
 }
 
 var stampExchanges = map[integrations.IntegrationType]stampExchange{
@@ -107,6 +141,15 @@ var stampExchanges = map[integrations.IntegrationType]stampExchange{
 	// http2 registers above grpc and claims every HTTP/2 connection, gRPC's
 	// too: grpc only replays.
 	integrations.GRPC: {serve: serveGRPC, call: callGRPC, recordedBy: integrations.HTTP2},
+}
+
+// stampPaths are exchanges over a recorder's other emit paths, by parser and
+// name. The runtime WARN (syncMock's warnNoRequestTime) names a recorder whose
+// path not listed here hands over a test's mock with no request time.
+var stampPaths = map[integrations.IntegrationType]map[string]stampExchange{
+	// A call the upstream closed its connection on with no answer, recorded
+	// with that fault (recordV2's noAnswerFault, recordFault).
+	integrations.HTTP: {"no-answer": {serve: serveConns(serveHTTPNoAnswer), call: callHTTPNoAnswer, faulted: true}},
 }
 
 // recordStampExchange records ex through kind's registered parser: one
@@ -276,6 +319,46 @@ func callHTTP(h2 bool) func(ctx context.Context, addr string) error {
 		tr.CloseIdleConnections()
 		return nil
 	}
+}
+
+// serveHTTPNoAnswer reads a request's head whole, then closes the connection
+// with no answer: nothing it was sent is left unread, so its close is a FIN.
+func serveHTTPNoAnswer(c net.Conn) error {
+	var got []byte
+	buf := make([]byte, 4096)
+	for !strings.Contains(string(got), "\r\n\r\n") {
+		n, err := c.Read(buf)
+		got = append(got, buf[:n]...)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// callHTTPNoAnswer sends one request on its own connection and reads until
+// the connection ends: it must end with no byte of an answer.
+func callHTTPNoAnswer(ctx context.Context, addr string) error {
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.Close() }()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = c.SetDeadline(dl)
+	}
+	if _, err := io.WriteString(c, "GET /stamp/no-answer HTTP/1.1\r\nHost: stamp.example\r\n\r\n"); err != nil {
+		return err
+	}
+	got, err := io.ReadAll(c)
+	if err != nil {
+		return err
+	}
+	if len(got) != 0 {
+		return fmt.Errorf("the call was answered %q; want its connection closed with no answer", got)
+	}
+	return nil
 }
 
 // serveGenericLines answers each line with "pong".

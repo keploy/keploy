@@ -22,6 +22,12 @@
 #   switch, after the other switch has run too; that a failing go test with no
 #   FAIL line, a passing one that tested no package, a failed tidy and a
 #   replace that is not in effect each fail it.
+# parsers: that keploy's tree gets the integrations module from the clone by a
+#   replace and the parser packages setup-private-parsers imports, in an
+#   extraparsers.go that imports the same ones; that the request-time row runs
+#   once, with KEPLOY_PROVEN unset and no GOFLAGS, and names each parser whose
+#   row failed; that a row not run, a build that does not link a parser
+#   package, a failed tidy and a replace not in effect each fail it.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,9 +68,16 @@ case "$1 $2" in
   exit 0
   ;;
 "mod edit")
-  r="${3#-replace=}"
-  printf '%s' "${r#*=}" >"$s/replace"
+  for a in "$@"; do
+    case "$a" in -replace=*) r="${a#-replace=}" && printf '%s' "${r#*=}" >"$s/replace" ;; esac
+  done
   exit "$(cat "$s/edit.rc" 2>/dev/null || echo 0)"
+  ;;
+"list -deps")
+  if [ -f "$s/deps.out" ]; then cat "$s/deps.out"; else printf '%s\n' go.keploy.io/server/v3/pkg/models \
+    github.com/keploy/integrations/pkg/parsers github.com/keploy/integrations/pkg/postgres/v2/types \
+    github.com/keploy/integrations/pkg/postgres/v3 go.keploy.io/server/v3/pkg/agent/proxy; fi
+  exit 0
   ;;
 "mod tidy")
   exit "$(cat "$s/tidy.rc" 2>/dev/null || echo 0)"
@@ -74,6 +87,10 @@ case "$1 $2" in
   exit "$(cat "$s/list.rc" 2>/dev/null || echo 0)"
   ;;
 "test -count=1")
+  if [ "${3:-}" = -v ]; then
+    cat "$s/row.out"
+    exit "$(cat "$s/row.rc")"
+  fi
   m=unset
   [ "${KEPLOY_PROVEN-}" = 1 ] && m=proven
   cat "$s/test-$m.out"
@@ -485,6 +502,83 @@ body_case "no ref line" $'Fixes it.\n' ""
 body_case "an empty body" "" ""
 unset INTEGRATION_REF_PS1
 
+# ---- parsers ---------------------------------------------------------------
+row=TestEveryRegisteredParsersRecorderStampsEachMocksRequestTime
+row_pass=$'=== RUN   '"$row"$'\n    parser_request_time_test.go:53: registered parsers: [generic grpc http http2 mongo_v2 mysql postgres_v3]\n--- PASS: '"$row"$' (9.10s)\n    --- PASS: '"$row"$'/http (2.01s)\nPASS\nok  \tgo.keploy.io/server/v3/pkg/agent/proxy\t9.2s'
+row_fail=$'=== RUN   '"$row"$'\n            --- FAIL: '"$row"$'/postgres_v3/KEPLOY_PROVEN=1 (0.50s)\n        --- FAIL: '"$row"$'/postgres_v3 (1.00s)\n--- FAIL: '"$row"$' (9.10s)\nFAIL\nFAIL\tgo.keploy.io/server/v3/pkg/agent/proxy\t9.2s\nFAIL'
+row_none=$'ok  \tgo.keploy.io/server/v3/pkg/agent/proxy\t0.02s [no tests to run]'
+
+# parsers_case NAME ROW_RC ROW_OUT: runs `parsers` with go test answering those.
+parsers_case() {
+  case_name="$1"
+  cases=$((cases + 1))
+  s="$work/state-$cases"
+  mkdir -p "$s" "$work/k-$cases/pkg/agent/proxy" "$work/i-$cases"
+  printf '%s\n' "$3" >"$s/row.out"
+  echo "$2" >"$s/row.rc"
+  [ -z "${TIDY_RC:-}" ] || echo "$TIDY_RC" >"$s/tidy.rc"
+  [ -z "${LIST_OUT+x}" ] || printf '%s\n' "$LIST_OUT" >"$s/list.out"
+  [ -z "${DEPS_OUT+x}" ] || printf '%s\n' "$DEPS_OUT" >"$s/deps.out"
+  : >"$work/summary"
+  env GITHUB_STEP_SUMMARY="$work/summary" STUB_STATE="$s" INTEGRATIONS_DESC="keploy/integrations main at abc1234" \
+    bash "$script" parsers "$work/k-$cases" "$work/i-$cases" >"$work/out" 2>&1
+  rc=$?
+}
+
+export KEPLOY_PROVEN=1 GOFLAGS='-run=^$'
+parsers_case "the row passes with the integrations parsers" 0 "$row_pass"
+unset KEPLOY_PROVEN GOFLAGS
+expect_rc 0
+expect_has "PASS: $row with keploy/integrations main at abc1234's parsers (registered parsers: [generic grpc http http2 mongo_v2 mysql postgres_v3])"
+expect_lacks "::error"
+grep -qF -- "- $row with keploy/integrations main at abc1234: pass" "$work/summary" || fail "summary lacks the pass"
+calls="$work/state-$cases/calls"
+[ "$(grep -c '^go test ' "$calls")" -eq 1 ] || fail "go test ran $(grep -c '^go test ' "$calls") times, want 1"
+grep -qxF "go test -count=1 -v -run ^$row\$ ./pkg/agent/proxy/ KEPLOY_PROVEN=<unset>" "$calls" ||
+  fail "no go test of the row with KEPLOY_PROVEN unset: $(cat "$calls")"
+[ "$(sort -u "$work/state-$cases/goflags" | grep -cv 'GOFLAGS=<unset>$')" -eq 0 ] || fail "go saw GOFLAGS: $(sort -u "$work/state-$cases/goflags")"
+idir="$(cd "$work/i-$cases" && pwd -P)"
+grep -qF "go mod edit -require=github.com/keploy/integrations@v0.0.0-00010101000000-000000000000 -replace=github.com/keploy/integrations=$idir KEPLOY_PROVEN=" "$calls" ||
+  fail "github.com/keploy/integrations is not required from the clone: $(cat "$calls")"
+# The parser packages are the ones setup-private-parsers' extraparsers.go
+# imports, on every OS it builds for.
+got_imports="$(grep -oE '_ "github.com/keploy/integrations/[^"]+"' "$work/k-$cases/pkg/agent/proxy/extraparsers.go" | sort | tr '\n' ' ')"
+action_imports="$(grep -oE '_ "github.com/keploy/integrations/[^"]+"' "$here/../../actions/setup-private-parsers/action.yaml" | sort -u | tr '\n' ' ')"
+[ -n "$got_imports" ] && [ "$got_imports" = "$action_imports" ] ||
+  fail "extraparsers.go imports '$got_imports', setup-private-parsers' '$action_imports'"
+head -n 1 "$work/k-$cases/pkg/agent/proxy/extraparsers.go" | grep -qxF "package proxy" || fail "extraparsers.go is not package proxy"
+
+parsers_case "a parser's failing row is named" 1 "$row_fail"
+expect_rc 1
+expect_line "FAIL: keploy/integrations main at abc1234's parsers: $row/postgres_v3/KEPLOY_PROVEN=1"
+expect_line "FAIL: keploy/integrations main at abc1234's parsers: $row/postgres_v3"
+expect_has "::error title=a recorder emits a mock with no request time::keploy/integrations main at abc1234's parsers: $row/postgres_v3"
+grep -qF -- "FAIL $row/postgres_v3" "$work/summary" || fail "summary lacks the failure"
+
+parsers_case "a failing go test with no failing row still fails" 2 "go: updates to go.mod needed"
+expect_rc 1
+expect_has "go test exited 2 with no failing row of a parser"
+
+parsers_case "a passing go test that ran no row fails" 0 "$row_none"
+expect_rc 1
+expect_has "go test exited 0 with no failing row of a parser"
+
+DEPS_OUT=$'github.com/keploy/integrations/pkg/parsers\ngithub.com/keploy/integrations/pkg/postgres/v2/types' \
+  parsers_case "a build that does not link a parser package fails before the row" 0 "$row_pass"
+expect_rc 1
+expect_has "pkg/agent/proxy does not link github.com/keploy/integrations/pkg/postgres/v3"
+! grep -q '^go test ' "$work/state-$cases/calls" || fail "go test ran with a parser package not linked"
+
+TIDY_RC=1 parsers_case "a failed tidy fails before the row" 0 "$row_pass"
+expect_rc 1
+expect_has "go mod tidy failed"
+! grep -q '^go test ' "$work/state-$cases/calls" || fail "go test ran after a failed tidy"
+
+LIST_OUT="/somewhere/else" parsers_case "a replace by another tree fails" 0 "$row_pass"
+expect_rc 1
+expect_has "does not take github.com/keploy/integrations from keploy/integrations main at abc1234 (its replace reads \"/somewhere/else\")"
+! grep -q '^go test ' "$work/state-$cases/calls" || fail "go test ran with the replace not in effect"
+
 # ---- usage -----------------------------------------------------------------
 case_name="no command"
 cases=$((cases + 1))
@@ -501,6 +595,12 @@ expect_has "usage:"
 case_name="test with one directory"
 cases=$((cases + 1))
 bash "$script" test "$work" >"$work/out" 2>&1
+rc=$?
+expect_rc 1
+expect_has "usage:"
+case_name="parsers with one directory"
+cases=$((cases + 1))
+bash "$script" parsers "$work" >"$work/out" 2>&1
 rc=$?
 expect_rc 1
 expect_has "usage:"

@@ -522,6 +522,7 @@ s_tests="Test integrations-tests.sh"
 s_wf="Check this workflow and release.yml's gate on it"
 s_ref="Pick the keploy/integrations ref"
 s_run="Run keploy/integrations' tests against this keploy tree"
+s_row="Run keploy's request-time row over the integrations parsers"
 scripts=keploy/.github/workflows/test_workflow_scripts
 # need_step VAR NAME RUN KEY...: sets VAR to the index of the step NAME, whose
 # run: must be exactly RUN and whose keys only name, run and the KEYs; to ""
@@ -548,19 +549,25 @@ need_step i_tests "$s_tests" "bash $scripts/integrations-tests.tests.sh"
 need_step i_wf "$s_wf" "bash $scripts/integrations-tests.workflows.tests.sh"
 need_step i_ref "$s_ref" "bash $scripts/integrations-tests.sh resolve integrations" id env
 need_step i_run "$s_run" "bash $scripts/integrations-tests.sh test keploy integrations" env
+need_step i_row "$s_row" "bash $scripts/integrations-tests.sh parsers keploy integrations" env
 only_keys "$job" "jobs.integrations-tests.steps.$i_ref.env" PR_NUMBER GH_TOKEN HEAD_REF INTEGRATION_REF
 only_keys "$job" "jobs.integrations-tests.steps.$i_run.env" INTEGRATIONS_DESC
+only_keys "$job" "jobs.integrations-tests.steps.$i_row.env" INTEGRATIONS_DESC
 # The integrations checkout leaves its default branch checked out; the tests
 # run on the ref resolve picked only when resolve runs between the two.
 i_co=''
 for k in $(children "$job" jobs.integrations-tests.steps); do
   [ "$(get "$job" "jobs.integrations-tests.steps.$k.with.repository")" = keploy/integrations ] && i_co="$k"
 done
-if [ -n "$i_co" ] && [ -n "$i_ref" ] && [ -n "$i_run" ] && [ -n "$i_tests" ] && [ -n "$i_wf" ]; then
+if [ -n "$i_co" ] && [ -n "$i_ref" ] && [ -n "$i_run" ] && [ -n "$i_tests" ] && [ -n "$i_wf" ] && [ -n "$i_row" ]; then
   [ "$i_co" -lt "$i_ref" ] && [ "$i_ref" -lt "$i_run" ] ||
     problem "steps: integrations checkout $i_co, resolve $i_ref, tests $i_run; want them in that order"
   [ "$i_tests" -lt "$i_run" ] && [ "$i_wf" -lt "$i_run" ] ||
     problem "the self-tests (steps $i_tests and $i_wf) do not run before the tests (step $i_run)"
+  # The row takes the integrations parsers from the clone at the ref resolve
+  # picked, and the self-tests cover the script it runs.
+  [ "$i_ref" -lt "$i_row" ] && [ "$i_tests" -lt "$i_row" ] && [ "$i_wf" -lt "$i_row" ] ||
+    problem "the request-time row (step $i_row) runs before resolve (step $i_ref) or the self-tests (steps $i_tests and $i_wf)"
 else
   problem "a step the checks above need is missing (integrations checkout: '${i_co}')"
 fi
