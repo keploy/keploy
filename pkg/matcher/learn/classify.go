@@ -2119,7 +2119,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// under the rule are read once, as before.
 	leafIn := func(rd *reading, r, l Leaf, w *Window, skip skipRule) Learned {
 		ln := leafRead(rd, r, l, w, skip, false)
-		if follow || ln.Kind != KindVariable || !ln.From.SetAside || !(&follows{short: true}).reads(ln.From.Held, dc.ofIn(r.Value, l.Value, w, at)) {
+		if follow || ln.Kind != KindVariable || !ln.From.SetAside {
+			return ln
+		}
+		if v := dc.ofIn(r.Value, l.Value, w, at); !(&follows{short: true}).reads(ln.From.Held, v, func() bool { return v.wholeIn(ln.From.Held) }) {
 			return ln
 		}
 		if again := leafRead(rd, r, l, w, skip, true); again.Kind != KindUnaccounted {

@@ -1413,6 +1413,18 @@ func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
 	if got.Kind != KindVariable || got.From.Mock != "mock-b" || !got.From.SetAside {
 		t.Errorf("FALSE GREEN? F saw a's answer whole: %s from %q set aside %v (%q); want the first reading's refusal, set aside at mock-b", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
 	}
+	// Nor where the value F saw is a's answer whole as a value of several
+	// words, which the search finds a word at a time: as written, escape
+	// and all ("x%2F7", whose escape splits it into words), of several
+	// words ("ab 7"), or as decoded where a's answer holds it plain ("x%2F7"
+	// is "x/7"). A place holding the value whole is no place of a part held
+	// by chance, whatever word the search found there.
+	for _, c := range [][2]string{{"x%2F7", "x%2F7"}, {"ab 7", "ab 7"}, {"x%2F7", "x/7"}} {
+		got = classify("pos 82", c[0], eAnswer("mock-a", 300*time.Millisecond, c[1]).ServedAs(1).ServedAsRecorded(), b.ServedAs(2))
+		if got.Kind != KindVariable || got.From.Mock != "mock-b" || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
+			t.Errorf("FALSE GREEN? F saw %q, a's answer %q whole: %s from %q set aside %v (%q); want the first reading's refusal, set aside at mock-b", c[0], c[1], got.Kind, got.From.Mock, got.From.SetAside, got.Why)
+		}
+	}
 	// A short part set aside, then a part of 16 bytes or more set aside at
 	// a later payload: read again, the short part is no source, and the
 	// long part's place is named, set aside, refused.
@@ -1465,15 +1477,16 @@ func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
 	// (placeRank: noPlaceRank), even where it holds the recorded value whole
 	// and F saw the application send another value there: the re-read sets
 	// no leaf aside for a short part (follows.refuteSeen), so its reason
-	// never names the leaf as a place the value is no copy of. F sent the
-	// leaf's 82 too, so the word rule lets that word go there, and the value
-	// is learned as varying, naming only the short part set aside.
+	// never names the leaf as a place the value is no copy of. The leaf
+	// holds the recorded value whole, so the word rule reads no word of it
+	// as a part held by chance there, and the first reading's refusal at
+	// the short part stands.
 	at9 := eRecAt.Add(-50 * time.Millisecond)
 	runLeaf := Earlier{Mock: "mock-9", At: at9, Own: true, Payload: RawOf(&models.Mock{Name: "mock-9", Spec: models.MockSpec{ReqTimestampMock: at9, ResTimestampMock: at9.Add(time.Millisecond)}}, true).ServedAs(3), Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.slot", Type: String, Value: "slot 82"}, Live: "slot 82 x", Name: models.RunVariablePrefix + "slot"},
 	}}
 	got = classifyAt("slot 82", "slot 7", []Earlier{runLeaf}, none, a.ServedAs(1), b.ServedAs(2))
-	if got.Kind != KindNoise || !strings.Contains(got.Why, "stands in mock-b") || strings.Contains(got.Why, "mock-9") {
-		t.Errorf("a leaf that uses the run's variable beside a short part set aside: %s from %q (%q); want noise naming mock-b and no mock-9", got.Kind, got.From.Mock, got.Why)
+	if got.Kind != KindVariable || got.From.Mock != "mock-b" || !got.From.SetAside || !strings.Contains(got.Why, "stands in mock-b") || strings.Contains(got.Why, "mock-9") {
+		t.Errorf("FALSE GREEN? a leaf that uses the run's variable, holding the recorded value whole, beside a short part set aside: %s from %q set aside %v (%q); want the first reading's refusal at mock-b, and no mock-9", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
 	}
 }

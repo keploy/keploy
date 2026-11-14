@@ -238,12 +238,73 @@ const minChancePart = minLateRun
 // reads reports whether f reads t, a word or part of the drifted value v
 // found at an earlier place, under the rule: f is not nil and, where it
 // reads short parts alone (short), t is shorter than minChancePart bytes and
-// neither value whole (as recorded or as F saw it, or either decoded).
-func (f *follows) reads(t string, v *valueDrift) bool {
+// the place does not hold the value whole (whole: wholeIn of the place's
+// texts, or wordsWhole where keploy keeps only its words).
+func (f *follows) reads(t string, v *valueDrift, whole func() bool) bool {
 	if f == nil {
 		return false
 	}
-	return !f.short || len(t) < minChancePart && t != v.rec && t != v.live && t != v.decRec && t != v.decLive
+	return !f.short || len(t) < minChancePart && !whole()
+}
+
+// wholeIn reports whether one of texts, a place's, holds v whole: the value
+// as recorded, as F saw it, or either decoded, as a token (ContainsToken). A
+// place holding the value whole is a source, never one holding a part of it
+// by chance, whatever the word or part the search found there: a value of
+// several words ("ab 7"), one an escape splits into words ("x%2F7"), and
+// a value as decoded ("x/7") where the place holds it plain.
+func (v *valueDrift) wholeIn(texts ...string) bool {
+	for _, s := range [4]string{v.rec, v.live, v.decRec, v.decLive} {
+		for _, text := range texts {
+			if ContainsToken(text, s) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// wordsWhole is wholeIn of a place keploy keeps only the words of (held:
+// whether it holds word w in reading i), a recording of another test
+// (givenWords): every word, in one reading, of the value as recorded, as F
+// saw it, or either decoded. A place that holds those words apart reads as
+// one holding the value whole: keploy cannot tell, and refuses on that side.
+func (v *valueDrift) wordsWhole(held func(i int, w string) bool) bool {
+	for i, word := range readings {
+		for _, s := range [4]string{v.rec, v.live, v.decRec, v.decLive} {
+			words := tokensBy(s, word)
+			all := len(words) > 0
+			for w := range words {
+				if !held(i, w) {
+					all = false
+					break
+				}
+			}
+			if all {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// payloadWhole is wholeIn of x's payload as every search reads it (searched:
+// its text and other forms, its answer's stamps blanked and as written),
+// and, of a payload F served changed and gave its view of (ServedLive), of
+// that view's too.
+func (f *follows) payloadWhole(x Raw, v *valueDrift) func() bool {
+	return func() bool {
+		var texts []string
+		ps := []Raw{x}
+		if x.Live() {
+			ps = append(ps, *x.live)
+		}
+		for _, p := range ps {
+			a, b := f.dc.searched(p, false), f.dc.searched(p, true)
+			texts = append(texts, a[0], a[1], b[0], b[1])
+		}
+		return v.wholeIn(texts...)
+	}
 }
 
 // source notes mock as a candidate source of the value, found holding its
@@ -277,7 +338,7 @@ func (f *follows) source(mock, w string) {
 // the words of (liveAt, movedAway), and no text F gave there holds the
 // value F saw: the value did not move with what F gave in its place.
 func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Place) bool {
-	if !f.reads(p.Held, v) {
+	if !f.reads(p.Held, v, f.payloadWhole(x, v)) {
 		return false
 	}
 	gave := ", which record's full round sent and gave the application as recorded, while the value changed"
@@ -781,7 +842,7 @@ func (dc *DriftCache) liveAt(x Raw, text string, keep bool, v *valueDrift, in fu
 // terms of a recording of another test too (olderTook), as a Raw is
 // (excusedRaw): the order alone never lets a word of it go.
 func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at time.Time, why, path string) bool {
-	if !f.reads(t, v) {
+	if !f.reads(t, v, func() bool { return v.wholeIn(ed.rec, ed.live, ed.decRec, ed.decLive) }) {
 		return false
 	}
 	before, untimed := e.Given, ""
@@ -822,7 +883,7 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 // F gave the application only in an older test of the set is named where it
 // lets a word go (noteOlder): a value left noise past it is refused.
 func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time, why, place string) bool {
-	if !f.reads(t, v) {
+	if !f.reads(t, v, f.payloadWhole(x, v)) {
 		return false
 	}
 	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
@@ -870,7 +931,7 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 // in an older test of the set is named where it lets a word go (noteOlder):
 // a value left noise past it is refused.
 func (f *follows) excusedLive(x Raw, v *valueDrift, i int, t string, at time.Time, why, place string) bool {
-	if !f.reads(t, v) {
+	if !f.reads(t, v, f.payloadWhole(x, v)) {
 		return false
 	}
 	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
@@ -1053,7 +1114,9 @@ func movedFrom(ed, v *valueDrift) string {
 // answered at or after the call, or whose times keploy cannot read, shows
 // nothing, and the word stays refused, naming why.
 func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at time.Time, why string) bool {
-	if !f.reads(t, v) {
+	if !f.reads(t, v, func() bool {
+		return v.wordsWhole(func(i int, w string) bool { return g.holds(i, w, true) || g.view.holds(i, w, true) })
+	}) {
 		return false
 	}
 	gat := g.at
