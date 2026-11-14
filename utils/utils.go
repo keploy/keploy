@@ -734,30 +734,41 @@ func extractFlagFromArgs(args []string, names ...string) string {
 	return found
 }
 
-// ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
-// Returns empty string if not found.
+// ExtractCommandFromArgs returns the value of -c/--command in raw argv, read
+// the way cobra reads it: the last occurrence wins, the shorthand takes its
+// value as the next argument or joined to it (-cVALUE, -c=VALUE), and nothing
+// after the "--" terminator is a flag. Returns "" when absent.
+//
+// ShouldReexecWithSudo decides from this value whether keploy needs root,
+// before cobra parses anything. Reading another value than the one cobra runs
+// (the first of two -c, or none for -cVALUE) re-executes a native command
+// under sudo, or starts a docker command unprivileged, which then fails
+// writing /proc/sys/kernel/perf_event_paranoid.
 func ExtractCommandFromArgs(args []string) string {
+	found := ""
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-
-		// Check for -c or --command
-		if arg == "-c" || arg == "--command" {
-			// Next argument is the command value
+		switch {
+		case arg == "--":
+			return found
+		case arg == "-c" || arg == "--command":
+			found = ""
 			if i+1 < len(args) {
-				return args[i+1]
+				i++
+				found = args[i]
 			}
-			return ""
-		}
-
-		// Check for -c=value or --command=value format
-		if len(arg) > 3 && arg[:3] == "-c=" {
-			return arg[3:]
-		}
-		if len(arg) > 10 && arg[:10] == "--command=" {
-			return arg[10:]
+		case strings.HasPrefix(arg, "--command="):
+			found = arg[len("--command="):]
+		case strings.HasPrefix(arg, "-c") && !strings.HasPrefix(arg, "--"):
+			// pflag drops the "=" of -c=VALUE only when a value follows it:
+			// a bare -c= is the shorthand with the value "=".
+			found = arg[len("-c"):]
+			if len(found) > 1 && found[0] == '=' {
+				found = found[1:]
+			}
 		}
 	}
-	return ""
+	return found
 }
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file.
