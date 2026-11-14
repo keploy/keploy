@@ -1414,7 +1414,16 @@ func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
 // Its probe listeners are plain TCP, never Go's default MPTCP: for as long as
 // one is open it listens on every interface.
 func GetAvailablePort() (uint32, error) {
-	return availablePortAbove(hostEphemeralRange, 0)
+	return GetAvailablePortExcept()
+}
+
+// GetAvailablePortExcept is GetAvailablePort never returning one of exclude,
+// ports handed out already that nothing binds yet: its search skips them. A
+// caller that drew GetAvailablePort again while it returned one of them could
+// fail with a port free, in a band whose free ports were an excluded one and
+// one other: most draws returned the excluded one.
+func GetAvailablePortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, 0, exclude...)
 }
 
 // hostEphemeralRange reads the host's ephemeral port range for
@@ -1438,7 +1447,13 @@ const containerEphemeralHi = defaultEphemeralHi
 // 60999, or reaches 65535, or is unknown (macOS, Windows), would otherwise
 // hand out ports inside it.
 func GetAvailableContainerPort() (uint32, error) {
-	return availablePortAbove(hostEphemeralRange, containerEphemeralHi)
+	return GetAvailableContainerPortExcept()
+}
+
+// GetAvailableContainerPortExcept is GetAvailableContainerPort never
+// returning one of exclude, as GetAvailablePortExcept.
+func GetAvailableContainerPortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, containerEphemeralHi, exclude...)
 }
 
 // availablePortAbove is GetAvailablePort with the host's ephemeral range read
@@ -1592,7 +1607,7 @@ func isPortAvailable(port uint32) bool {
 // and that coincidence correspondingly more likely, so the exclusion is not
 // optional bookkeeping.
 //
-// The search for another port skips them (availablePortAbove). It used to
+// The search for another port skips them (GetAvailablePortExcept). It used to
 // draw GetAvailablePort's port again while that was an excluded one, 16 times
 // at most: in a band whose free ports were an excluded one and one other, the
 // draws kept returning the excluded port and the search failed with a port
@@ -1601,7 +1616,7 @@ func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
 	if !slices.Contains(exclude, port) && isPortAvailable(port) {
 		return port, nil
 	}
-	newPort, err := availablePortAbove(hostEphemeralRange, 0, exclude...)
+	newPort, err := GetAvailablePortExcept(exclude...)
 	if err != nil {
 		return 0, fmt.Errorf("failed to allocate new port: %w", err)
 	}

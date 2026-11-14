@@ -3581,10 +3581,10 @@ func withAppRunSettings(opts models.SetupOptions, ports, networks, hosts []strin
 	return opts
 }
 
-// hostPort and containerPort pick a free port for a server on the host
-// (utils.GetAvailablePort) and in a container, published as itself
-// (utils.GetAvailableContainerPort).
-var hostPort, containerPort = utils.GetAvailablePort, utils.GetAvailableContainerPort
+// hostPort and containerPort pick a free port other than exclude for a server
+// on the host (utils.GetAvailablePortExcept) and in a container, published as
+// itself (utils.GetAvailableContainerPortExcept).
+var hostPort, containerPort = utils.GetAvailablePortExcept, utils.GetAvailableContainerPortExcept
 
 // agentPortFor picks the port a new agent's server listens on. A Docker
 // agent's is in its container's network namespace, which the app joins, and
@@ -3595,24 +3595,15 @@ var hostPort, containerPort = utils.GetAvailablePort, utils.GetAvailableContaine
 // publish, and the agent's start would fail.
 //
 // It is never one of keep, the ports the agent's proxy and DNS server are
-// handed: those are not bound yet, so a free one could be drawn.
+// handed: those are not bound yet, so a free one could be drawn. The search
+// skips them. It used to draw again while it got one of them, 16 times at
+// most, and then fail: in a band whose free ports were a kept one and one
+// other, most draws returned the kept one, the other free all along.
 func agentPortFor(docker bool, keep ...uint32) (uint32, error) {
-	pick := hostPort
 	if docker {
-		pick = containerPort
+		return containerPort(keep...)
 	}
-	// Bounded, as utils.EnsureAvailablePorts is: a few draws miss a set this
-	// small, and an exhausted pool is an error rather than a hang.
-	for i := 0; i < 16; i++ {
-		port, err := pick()
-		if err != nil {
-			return 0, err
-		}
-		if !slices.Contains(keep, port) {
-			return port, nil
-		}
-	}
-	return 0, fmt.Errorf("failed to find a port for the agent other than its proxy's and DNS server's %v", keep)
+	return hostPort(keep...)
 }
 
 // agentPorts picks the ports a new agent's server (agentPortFor), proxy and

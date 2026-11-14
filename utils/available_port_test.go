@@ -194,6 +194,37 @@ func TestEnsureAvailablePortsFindsTheFreePortBesideAnExcludedOne(t *testing.T) {
 	}
 }
 
+// GetAvailablePortExcept and GetAvailableContainerPortExcept, which draw a
+// new agent's port off its proxy's and DNS server's, skip the excluded ports
+// as EnsureAvailablePorts does: in a band whose free ports are an excluded one
+// and one other, each returns the other, whether every draw returns the
+// excluded port or no random number is read. The agent's port was drawn again
+// while it was an excluded one, 16 times, and then failed.
+func TestTheExceptPickersFindTheFreePortBesideAnExcludedOne(t *testing.T) {
+	defer func(r func() (uint32, uint32, bool)) { hostEphemeralRange = r }(hostEphemeralRange)
+	hostEphemeralRange = func() (uint32, uint32, bool) { return 32768, 65530, true } // the band: 65531-65535, a container's too
+	const excluded, other uint32 = 65532, 65534
+	free := func(port uint32) (bool, error) { return port == excluded || port == other, nil }
+	everyDrawExcluded := make([]uint32, randomProbes+1)
+	for i := range everyDrawExcluded {
+		everyDrawExcluded[i] = excluded - 65531
+	}
+	for _, pick := range []struct {
+		name string
+		f    func(...uint32) (uint32, error)
+	}{{"GetAvailablePortExcept", GetAvailablePortExcept}, {"GetAvailableContainerPortExcept", GetAvailableContainerPortExcept}} {
+		for _, offsets := range [][]uint32{everyDrawExcluded, nil} {
+			probed := drawsAndProbes(t, offsets, free)
+			if got, err := pick.f(26789, excluded); err != nil || got != other {
+				t.Fatalf("%s, draws %v: got %d, %v; want %d, the free port that is not excluded", pick.name, offsets, got, err, other)
+			}
+			if slices.Contains(*probed, excluded) {
+				t.Fatalf("%s, draws %v: probed the excluded %d (%v); the search skips it", pick.name, offsets, excluded, *probed)
+			}
+		}
+	}
+}
+
 // pickListener is a listener the OS's pick (portListen on ":0") returned in
 // a row, on port, and whether it was let go.
 type pickListener struct {

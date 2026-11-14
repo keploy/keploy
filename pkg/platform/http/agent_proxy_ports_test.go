@@ -291,26 +291,28 @@ func TestANativeAgentOffLinuxIsMovedOffATakenPortAndTheMoveSaid(t *testing.T) {
 // server's, and fails with what failed.
 func TestAgentPortsKeepTheConfiguredPortsForTheProxyAndTheDNSServer(t *testing.T) {
 	onLinux(t, true)
-	defer func(h func() (uint32, error)) { hostPort = h }(hostPort)
-	draws := []uint32{16789, 26789, 40000}
-	hostPort = func() (uint32, error) {
-		p := draws[0]
-		draws = draws[1:]
-		return p, nil
+	defer func(h func(...uint32) (uint32, error)) { hostPort = h }(hostPort)
+	var excluded []uint32
+	hostPort = func(exclude ...uint32) (uint32, error) {
+		excluded = exclude
+		return 40000, nil
 	}
 	a, _ := portsClient(16789, 26789)
 	if agentPort, proxy, dns, err := a.agentPorts(false); err != nil || agentPort != 40000 || proxy != 16789 || dns != 26789 {
-		t.Fatalf("agentPorts = %d, %d, %d, %v; want the agent on 40000, the first draw neither configured port", agentPort, proxy, dns, err)
+		t.Fatalf("agentPorts = %d, %d, %d, %v; want the agent on 40000, the picker's port, and the configured ones", agentPort, proxy, dns, err)
+	}
+	if !slices.Equal(excluded, []uint32{16789, 26789}) {
+		t.Fatalf("the agent's port was drawn excluding %v; want the configured proxy's and DNS server's, 16789 and 26789", excluded)
 	}
 
 	stop := errors.New("no port")
-	hostPort = func() (uint32, error) { return 0, stop }
+	hostPort = func(...uint32) (uint32, error) { return 0, stop }
 	if _, _, _, err := a.agentPorts(false); !errors.Is(err, stop) {
 		t.Fatalf("agentPorts: %v; want the agent's picker's error", err)
 	}
 
 	onLinux(t, false)
-	hostPort = func() (uint32, error) { return 40000, nil }
+	hostPort = func(...uint32) (uint32, error) { return 40000, nil }
 	was := availablePort
 	t.Cleanup(func() { availablePort = was })
 	availablePort = func(uint32, ...uint32) (uint32, error) { return 0, stop }
@@ -320,28 +322,31 @@ func TestAgentPortsKeepTheConfiguredPortsForTheProxyAndTheDNSServer(t *testing.T
 }
 
 // The agent's own port is never one its proxy or DNS server is handed: those
-// are not bound when it is drawn.
+// are not bound when it is drawn, so its picker's search skips them. In a band
+// whose free ports are the proxy's and one other, it is the other, for a
+// native agent and a Docker one. It drew again while it got a kept port, 16
+// times, and then failed, the other port free all along: in such a band most
+// draws return the kept one, and here every draw that may does.
 func TestAgentPortForSkipsTheProxysAndDNSServersPorts(t *testing.T) {
-	defer func(h, c func() (uint32, error)) { hostPort, containerPort = h, c }(hostPort, containerPort)
-	for _, docker := range []bool{false, true} {
-		draws := []uint32{16789, 26789, 40000}
-		pick := func() (uint32, error) {
-			p := draws[0]
-			draws = draws[1:]
-			return p, nil
+	defer func(h, c func(...uint32) (uint32, error)) { hostPort, containerPort = h, c }(hostPort, containerPort)
+	const proxy, dns, other uint32 = 65532, 26789, 65534
+	band := func(exclude ...uint32) (uint32, error) {
+		for _, port := range []uint32{proxy, other} {
+			if !slices.Contains(exclude, port) {
+				return port, nil
+			}
 		}
-		hostPort, containerPort = pick, pick
-		if got, err := agentPortFor(docker, 16789, 26789); err != nil || got != 40000 {
-			t.Fatalf("docker %v: agentPortFor = %d, %v; want 40000, the first draw that is neither kept port", docker, got, err)
-		}
+		return 0, errors.New("every free port of the band excluded")
 	}
-	hostPort = func() (uint32, error) { return 16789, nil }
-	if got, err := agentPortFor(false, 16789, 26789); err == nil {
-		t.Fatalf("agentPortFor = %d with every draw a kept port; want an error, not a hang", got)
+	for _, docker := range []bool{false, true} {
+		hostPort, containerPort = band, band
+		if got, err := agentPortFor(docker, proxy, dns); err != nil || got != other {
+			t.Fatalf("docker %v: agentPortFor = %d, %v; want %d, the band's free port that is not the proxy's", docker, got, err, other)
+		}
 	}
 	stop := errors.New("no port")
-	hostPort = func() (uint32, error) { return 0, stop }
-	if _, err := agentPortFor(false, 16789, 26789); !errors.Is(err, stop) {
+	hostPort = func(...uint32) (uint32, error) { return 0, stop }
+	if _, err := agentPortFor(false, proxy, dns); !errors.Is(err, stop) {
 		t.Fatalf("agentPortFor: %v; want the picker's error", err)
 	}
 }
