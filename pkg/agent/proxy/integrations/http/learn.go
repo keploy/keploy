@@ -2562,7 +2562,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	echoed := map[string]string{} // recorded value -> its echo variable
 	for _, l := range learned {
 		r := l.Recorded
-		if g, ok := givenFor(r, l.Live, given); ok {
+		if g, steps, ok := givenFor(r, l.Live, given); ok {
 			// The test case gave this value: a use of its key, no bind.
 			place, placeable := learn.VarPlace(r, jsonReq)
 			switch {
@@ -2571,9 +2571,21 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			case !own:
 				return p, r.Path + " carries " + learn.GivenNamed(g.Name) + ", and only a test's own calls carry its variables"
 			}
+			held := l
+			places := []string{place}
+			if len(steps) > 0 {
+				// The value of pairs of the Cookie header, or the token of
+				// "Bearer <token>": the use is at each such step, and its
+				// answers hold the given whole.
+				places = places[:0]
+				for _, st := range steps {
+					places = append(places, variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: strings.TrimPrefix(r.Path, "header.")}, Steps: []variables.Step{st}, Word: -1}.String())
+				}
+				held.Recorded.Value = g.Recorded
+			}
 			v := p.vars[g.Name]
-			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, place)
-			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, places...)
+			v.Answer = appendNew(v.Answer, answers(held, respLeavesOf(m))...)
 			if models.IsGivenVariable(g.Name) {
 				// A value the test gave says where, and how to undo it.
 				v.Why = learn.GivenWhy(g.Name, g.Place, g.Recorded, g.Value)
@@ -2838,14 +2850,85 @@ func givenSource(given []variables.Binding, name string) string {
 // givenFor is the given value the drifted leaf carries: the key's value
 // when recorded (r) and in this run (live). An equal recorded value alone is
 // not the key's (two counters both at 1 when recorded are two values).
-func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding, bool) {
+// steps is empty where the leaf is that value whole. A Cookie header holds a
+// value as pairs', beside the jar's other pairs (session=<token>;
+// theme=dark): where the given is the value of one or more pairs, each named
+// once, whole in both runs, and the header is otherwise as recorded, steps
+// are those pairs' steps in the header's order (givenCookies). An
+// Authorization header holds it as the token of "Bearer <token>": where the
+// given is that token whole in both runs, the scheme and its spaces as
+// recorded, steps is variables.StepBearer (givenAt). A given inside a pair's
+// value or a token, a jar whose other pairs changed too, or a scheme that
+// changed is no given's use: the call stays refused (learnPlan), as a value
+// made from a given is.
+func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding, []variables.Step, bool) {
 	number := r.Type == learn.Number
 	for _, g := range given {
 		if r.Value != "" && variables.SameValue(g.Recorded, r.Value, number) && variables.SameValue(g.Value, live.Value, number) {
-			return g, true
+			return g, nil, true
 		}
 	}
-	return variables.Binding{}, false
+	for _, g := range given {
+		switch r.Path {
+		case "header.cookie":
+			if steps, ok := givenCookies(r.Value, live.Value, g); ok {
+				return g, steps, true
+			}
+		case "header.authorization":
+			if givenAt([]variables.Step{variables.StepBearer}, r.Value, live.Value, g) {
+				return g, []variables.Step{variables.StepBearer}, true
+			}
+		}
+	}
+	return variables.Binding{}, nil, false
+}
+
+// givenCookies are the steps of the pairs of live, a Cookie header's text
+// in this run, whose value is g's value whole, where live with g's recorded
+// value written at each of them is rec, the header's text as recorded: rec
+// holds it at those pairs, and every other byte of the header is as
+// recorded. A pair named twice in a text holds no value there
+// (variables.Cookie). ok is false where no pair is so: with no step, live
+// would have to be rec, and a drifted leaf's texts differ.
+func givenCookies(rec, live string, g variables.Binding) ([]variables.Step, bool) {
+	if g.Recorded == "" {
+		return nil, false
+	}
+	var steps []variables.Step
+	for _, pair := range strings.Split(live, ";") {
+		name, _, _ := strings.Cut(pair, "=")
+		if name = strings.TrimSpace(name); name == "" {
+			continue
+		}
+		at := variables.Address{Steps: []variables.Step{variables.Cookie(name)}, Word: -1}
+		if v, ok := at.WordOf(live); ok && v == g.Value {
+			steps = append(steps, variables.Cookie(name))
+		}
+	}
+	if !givenAt(steps, rec, live, g) {
+		return nil, false
+	}
+	return steps, true
+}
+
+// givenAt reports whether the text each of steps opens in live is g's
+// value whole, and live with g's recorded value written at each of them is
+// rec: rec holds it there, and every other byte of the text is as recorded.
+// A recorded value a step cannot write there (an empty token) is no use,
+// whatever rec is.
+func givenAt(steps []variables.Step, rec, live string, g variables.Binding) bool {
+	back := live
+	for _, st := range steps {
+		at := variables.Address{Steps: []variables.Step{st}, Word: -1}
+		if v, _ := at.WordOf(back); v != g.Value {
+			return false
+		}
+		var ok bool
+		if back, ok = at.ReplaceWord(back, g.Recorded); !ok {
+			return false
+		}
+	}
+	return back == rec
 }
 
 // respLeavesOf are the leaves of m's recorded answer.
