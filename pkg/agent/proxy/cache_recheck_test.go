@@ -291,6 +291,16 @@ func TestWhatIsNoCacheRecheckOfAnAnswerTheTestGotKeepsItsMatch(t *testing.T) {
 			{"another precondition", []*models.Mock{h1()},
 				[]string{hensonGet(hensonPath), recheck(hensonPath, hensonTag, "", "If-Unmodified-Since: "+hensonMod)},
 				[]string{hensonA1, "miss"}, nil},
+			// The fetch was of a range too, answered whole: the request
+			// without its validators is that fetch, so only the range
+			// itself keeps it from reading as a re-check.
+			{"a range after a fetch of that range", []*models.Mock{func() *models.Mock {
+				m := h1()
+				m.Spec.HTTPReq.Header["Range"] = "bytes=0-3"
+				return m
+			}()},
+				[]string{hensonGet(hensonPath, "Range: bytes=0-3"), recheck(hensonPath, hensonTag, hensonMod, "Range: bytes=0-3")},
+				[]string{hensonA1, "miss"}, nil},
 			{"an unconditional fetch one more", []*models.Mock{h1()},
 				[]string{hensonGet(hensonPath), hensonGet(hensonPath)},
 				[]string{hensonA1, "miss"}, nil},
