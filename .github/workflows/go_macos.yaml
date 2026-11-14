@@ -74,27 +74,26 @@ jobs:
       # inflight_darwin.go, accepts_darwin.go). A Linux runner builds the
       # other implementation of each, so only this job runs these rows.
       #
-      # pkg/service/agent runs whole. pkg/agent/proxy and pkg/agent/routes run
-      # the rows of their macOS test files only: each holds a test that does
-      # not end on macOS (proxy's DNS server that cannot bind, routes' bind to
-      # a port still held), so a whole run of either is not a check. The
-      # script fails unless every row it reads from those files passed.
+      # pkg/service/agent and pkg/agent/routes run whole. pkg/agent/proxy runs
+      # the rows of its macOS test files only: a whole run of it on macOS still
+      # fails a row (a refused worker's child is served the whole mock pool,
+      # where its process tree cannot be walked without /proc), so it is not
+      # yet a check. The script fails unless every row it reads from those
+      # files passed.
       - name: Test the proven flow on darwin
         run: |
-          go test -count=1 ./pkg/service/agent/
+          go test -count=1 ./pkg/service/agent/ ./pkg/agent/routes/
           bash .github/scripts/macos/go-test-darwin-rows.sh pkg/agent/proxy pkg/agent/proxy/*_darwin_test.go
-          bash .github/scripts/macos/go-test-darwin-rows.sh pkg/agent/routes pkg/agent/routes/*_darwin_test.go pkg/agent/routes/caller_claim_test.go
 
       # A native app's command can exit and leave processes running in its
       # process group. On macOS keploy adopts no daemon, so a run waits on the
       # app before it stops it only while App.GroupRunsOn (pkg/client/app)
       # reads such a process, and pkg/platform/http hands that read to the
       # wait (appRunsOn, adopt_other.go). A Linux runner builds the adopted-
-      # daemon read instead, so only this job runs these rows. Each package
-      # runs the rows of its macOS test files only: pkg/platform/http holds a
-      # test that fails on macOS, and a whole pkg/client/app run takes about
-      # six minutes there.
+      # daemon read instead, so only this job runs these rows. pkg/platform/http
+      # runs whole; pkg/client/app runs the rows of its macOS test files only,
+      # as a whole run of it takes about six minutes there.
       - name: Test the wait on a native app's process group on darwin
         run: |
           bash .github/scripts/macos/go-test-darwin-rows.sh pkg/client/app pkg/client/app/*_darwin_test.go
-          bash .github/scripts/macos/go-test-darwin-rows.sh pkg/platform/http pkg/platform/http/*_darwin_test.go
+          go test -count=1 ./pkg/platform/http/
