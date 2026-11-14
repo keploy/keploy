@@ -137,13 +137,11 @@ type decider struct {
 	// read the value as the application's clock (heldRead), which the time
 	// default settles on any field (timeDefault).
 	readClock bool
-	// aroundRead: the refusal instantLearned last gave is clock's of a read
-	// its call's window holds, at a word of a text that changed around it
-	// (noWordAround); around: that read checked by its form at its recorded
-	// word under the time default (amongBinds), which text keeps only where
-	// every other changed word of the text is put back at replay.
-	aroundRead bool
-	around     *Decision
+	// around: the instant instantLearned last refused at a word of a text
+	// that changed around it, checked by its form at its recorded word under
+	// the time default (amongBinds), which text keeps only where every other
+	// changed word of the text is put back at replay.
+	around *Decision
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
@@ -2416,7 +2414,7 @@ func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool)
 // (7), a client test's own value (8); else refused. A field keploy.yml
 // declares a read of the clock is then decided by its rule (declaredClock).
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
-	dc.readClock, dc.aroundRead = false, false
+	dc.readClock = false
 	d := dc.instantLearned(path, at, n, c)
 	src, declared := dc.source(path)
 	declared = declared && src.Kind == SourceClock
@@ -3138,8 +3136,7 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 			return dc.cannotCheck(path, at, n, r, l, "its two runs write it in different layouts")
 		}
 		if c.noWord != "" {
-			dc.aroundRead = c.noWord == noWordAround
-			return dc.cannotCheck(path, at, n, r, l, "a replay checks a clock read inside a text only as one word of the text as recorded, and "+c.noWord)
+			return dc.heldRead(dc.cannotCheck(path, at, n, r, l, "a replay checks a clock read inside a text only as one word of the text as recorded, and "+c.noWord))
 		}
 		off.Layout, off.Word = lay, c.word
 	} else if off.Layout == "" {

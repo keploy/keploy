@@ -163,8 +163,12 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 		return dc.valueByForm(path, at, n, c, d, declared)
 	}
 	if d.Refusal == nil || c.text && c.noWord != "" {
-		// A replay reads a time inside a text only as one word of it.
-		if d.Refusal != nil && dc.aroundRead {
+		// A replay reads a time inside a text only as one word of it. One
+		// whose text changed around it gets, at its recorded word, the check
+		// by form the time default gives a word of a text the same around
+		// it (amongBinds; a text's word is no decoder-typed time), which
+		// text keeps only where every other changed word is put back.
+		if d.Refusal != nil && dc.settles(d.Refusal.Kind, false, declared) {
 			dc.around = dc.amongBinds(path, at, n, c, d, declared)
 		}
 		return d
@@ -172,12 +176,7 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	// A leaf typed Instant is decided here whole, never as a text's word,
 	// and only where both runs' values read as instants (leaf).
 	typed := dc.in.Rec.Leaves[path].Type == Instant
-	switch k := d.Refusal.Kind; {
-	case atKey(path, declared):
-		return d
-	case k == RefusalTwoSources && dc.readClock:
-	case timeSettles[k] && (typed || declared || dc.readClock):
-	default:
+	if atKey(path, declared) || !dc.settles(d.Refusal.Kind, typed, declared) {
 		return d
 	}
 	form, formF := dc.timeFormOf(path, c, nil)
@@ -195,8 +194,18 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	return nd
 }
 
-// amongBinds is d, the refusal of c, a read of the application's clock its
-// call's window holds at a word of a text that changed around it
+// settles reports whether the time default settles a refusal of kind k of
+// the instant instantLearned last decided, at a decoder-typed leaf (typed)
+// or one a clock rule names (declared): on a time field, a refusal of which
+// read, or which scope, a moment is (timeSettles), and a two-sources refusal
+// only where both sources are reads of the clock (readClock: see above).
+func (dc *decider) settles(k RefusalKind, typed, declared bool) bool {
+	return k == RefusalTwoSources && dc.readClock || timeSettles[k] && (typed || declared || dc.readClock)
+}
+
+// amongBinds is d, the refusal of c, a time the time default settles
+// (settles: a read of the application's clock learning refused, or one a
+// clock rule names) at a word of a text that changed around it
 // (noWordAround), as the time default checks it where the adapter puts the
 // text's other bound words back first (Caps.ClockAmongBinds): a Clock
 // checked by its form alone (TimeForm: the epoch's unit, or the layout) at

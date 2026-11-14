@@ -16,9 +16,18 @@ import (
 // window holds, and every id group around it is learned fresh or bound.
 func amongBindsCase(t *testing.T, caps Caps, timeForm bool, edit func(text string, at time.Time) string) (rec, live, rTime, fTime string, tw Decision, ds []Decision) {
 	t.Helper()
+	return amongBindsAgo(t, caps, timeForm, 0, 0, edit)
+}
+
+// amongBindsAgo is amongBindsCase with the time rAgo earlier when recorded
+// and fAgo earlier in round F: past the call's window, no plain read of the
+// clock that window holds.
+func amongBindsAgo(t *testing.T, caps Caps, timeForm bool, rAgo, fAgo time.Duration, edit func(text string, at time.Time) string) (rec, live, rTime, fTime string, tw Decision, ds []Decision) {
+	t.Helper()
 	rAt, fAt := oAt, oAt.Add(73*time.Minute)
-	rTime, fTime = fmt.Sprint(rAt.Add(-time.Second).Unix()), fmt.Sprint(fAt.Add(-time.Second).Unix())
-	rec, live = aPrompt(0, rAt.Add(-time.Second), true, ""), aPrompt(1, fAt.Add(-time.Second), true, "")
+	rRead, fRead := rAt.Add(-time.Second-rAgo), fAt.Add(-time.Second-fAgo)
+	rTime, fTime = fmt.Sprint(rRead.Unix()), fmt.Sprint(fRead.Unix())
+	rec, live = aPrompt(0, rRead, true, ""), aPrompt(1, fRead, true, "")
 	if edit != nil {
 		rec, live = edit(rec, rAt), edit(live, fAt)
 	}
@@ -124,6 +133,96 @@ func TestATimeAmongBoundWordsStaysRefusedOtherwise(t *testing.T) {
 		t.Fatalf("fixture: the second time decided %d times; want once", second)
 	}
 	refused("beside another read of the clock ("+rTime+")", d)
+}
+
+// Among bound words the time default settles what it settles at a word of a
+// text the same around it (decider.settles), and nothing else. A look-back
+// (the clock an hour before each run's call, a read plus an offset this
+// replay does not compare) is refused cannot-check under strict times; under
+// the time default it is a Clock checked by its form alone at its word
+// (founder 11-11: a time learned as a clock read passes by type and format
+// in T2, those refused cannot-check included). A time learning read as no
+// clock read (an hour before its call when recorded, three in round F) is no
+// time field: it keeps its refusal (no-clock-read) under both.
+func TestATimeAmongBoundWordsIsSettledAsAWordOfAnUnchangedText(t *testing.T) {
+	learnedAround := func(name string, ds []Decision, rTime string) {
+		t.Helper()
+		for _, o := range ds {
+			if o.Recorded != rTime && (o.Refusal != nil || o.Outcome != OutcomeFresh && o.Outcome != OutcomeValue) {
+				t.Fatalf("fixture (%s): %s; want every id group learned", name, oDescribe([]Decision{o}))
+			}
+		}
+	}
+	rec, _, rTime, _, strict, _ := amongBindsAgo(t, amongCaps, false, time.Hour, time.Hour, nil)
+	if strict.Refusal == nil || strict.Refusal.Kind != RefusalCannotCheck || strict.Clock != nil {
+		t.Fatalf("fixture: the look-back under strict times %s; want refused cannot-check", oDescribe([]Decision{strict}))
+	}
+	_, _, _, _, d, ds := amongBindsAgo(t, amongCaps, true, time.Hour, time.Hour, nil)
+	learnedAround("the look-back", ds, rTime)
+	i := strings.Index(rec, rTime)
+	if d.Outcome != OutcomeClock || d.Refusal != nil || d.Clock == nil || d.Clock.Form == "" || d.Clock.Min != 0 || d.Clock.Max != 0 ||
+		d.Clock.Word != models.ClockWordOf(rec, i, i+len(rTime)) {
+		t.Errorf("the look-back: %s; want a Clock checked by its form alone at its word", oDescribe([]Decision{d}))
+	}
+	for _, timeForm := range []bool{false, true} {
+		_, _, rTime, _, d, ds := amongBindsAgo(t, amongCaps, timeForm, time.Hour, 3*time.Hour, nil)
+		learnedAround("no clock read", ds, rTime)
+		if d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalNoClockRead || d.Clock != nil {
+			t.Errorf("a time learning read as no clock read (time default %v): %s; want refused no-clock-read, never a Clock by its form", timeForm, oDescribe([]Decision{d}))
+		}
+	}
+}
+
+// The refusals the time default settles among bound words (settles, typed
+// never: a text's word is no decoder-typed time): one where learning read
+// the value as the clock (readClock: clock's own refusal of a read at a word
+// of a text that changed around it, a look-back, an echoed read) of the
+// kinds timeSettles names, any of those where a clock rule names the field,
+// and two sources that are both reads of the clock. A refusal learning gave
+// of a value it read as no clock read (a pick, a conflict, no clock read)
+// gets no check by its form, nor does any where the time default is off.
+func TestATimeAmongBoundWordsSettlesAsTheTimeDefault(t *testing.T) {
+	rAt, fAt := oAt, oAt.Add(73*time.Minute)
+	r, f := rAt.Add(-time.Second), fAt.Add(-time.Second)
+	rs, fs := fmt.Sprint(r.Unix()), fmt.Sprint(f.Unix())
+	rec := "sent " + rs + " by job 7"
+	word := models.ClockWordOf(rec, len("sent "), len("sent "+rs))
+	rm := moment{key: instantKey{at: r.UnixNano()}, res: time.Second, zoned: true}
+	lm := moment{key: instantKey{at: f.UnixNano()}, res: time.Second, zoned: true}
+	for _, c := range []struct {
+		name              string
+		kind              RefusalKind
+		readClock, decl   bool
+		timeForm, settled bool
+	}{
+		{"control: clock's refusal of a read at its word", RefusalCannotCheck, true, false, true, true},
+		{"the same under strict times", RefusalCannotCheck, true, false, false, false},
+		{"cannot-check of a value read as no clock read", RefusalCannotCheck, false, false, true, false},
+		{"no-clock-read of a value read as no clock read", RefusalNoClockRead, false, false, true, false},
+		{"no-clock-read where a clock rule names the field", RefusalNoClockRead, false, true, true, true},
+		{"another scope's read of the clock", RefusalAnotherScope, true, false, true, true},
+		{"two sources, each a read of the clock", RefusalTwoSources, true, false, true, true},
+		{"two sources that are no reads", RefusalTwoSources, false, false, true, false},
+		{"a pick, though read as the clock", RefusalPick, true, false, true, false},
+		{"a conflict where a clock rule names the field", RefusalConflict, false, true, true, false},
+	} {
+		in := oInput("body.note", rec, "sent "+fs+" by job 8", nil, nil)
+		in.Window = iWin(rAt, fAt, 5*time.Second)
+		in.Caps, in.TimeForm = amongCaps, c.timeForm
+		dc := &decider{in: in, readClock: c.readClock}
+		ci := changedInstant{r: rs, l: fs, rm: &rm, lm: &lm, text: true, noWord: noWordAround, around: word}
+		d := dc.refuse("body.note", variables.Address{}, 1, rs, fs, c.kind, "as learned", nil)
+		got := dc.timeDefault("body.note", variables.Address{}, 1, ci, d, c.decl)
+		if got.Refusal == nil || got.Refusal.Kind != c.kind || got.Clock != nil {
+			t.Errorf("%s: the decision %s; want the refusal kept, its check by form held apart (around)", c.name, oDescribe([]Decision{got}))
+		}
+		switch {
+		case c.settled && (dc.around == nil || dc.around.Clock == nil || dc.around.Clock.Form == "" || dc.around.Clock.Word != word):
+			t.Errorf("%s: around %+v; want a Clock checked by its form at its word", c.name, dc.around)
+		case !c.settled && dc.around != nil:
+			t.Errorf("%s: around %s; want none (it stays refused)", c.name, oDescribe([]Decision{*dc.around}))
+		}
+	}
 }
 
 // The check by form stands at a word of the recorded text, and never at a
