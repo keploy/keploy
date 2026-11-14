@@ -23,6 +23,10 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 )
 
+// eventsMeta is how a not-recorded line names the stream these tests ask for
+// (GET /client/v1/jobs/j/events on host api): by its shape, never its URL.
+var eventsMeta = zap.Any("metadata", map[string]string{"method": http.MethodGet, "host": "api", "path": "/{}/{}/{}/{}/{}"})
+
 // An exchange whose client hung up before the answer's end is not recorded,
 // in either loop: the client did not take the answer, and the app's end of it
 // is its being told the client went (watchClient). Its capture, were one
@@ -106,7 +110,7 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 				return
 			}
 			told := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed its side").
-				FilterField(zap.String("url", "/client/v1/jobs/j/events")).Len()
+				FilterField(eventsMeta).Len()
 			if told != 1 {
 				t.Fatalf("the half-closed client's exchange not recorded was told %d times at Info, want once", told)
 			}
@@ -610,7 +614,7 @@ func TestAnAnswerCutShortByItsClientsGoingIsToldAsNotRecorded(t *testing.T) {
 			hangUpAfterTheFirstEvent(t, client, bufio.NewReader(client))
 			<-served
 			if n := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed").
-				FilterField(zap.String("url", "/client/v1/jobs/j/events")).Len(); n != 1 {
+				FilterField(eventsMeta).Len(); n != 1 {
 				t.Fatalf("the exchange its client left was told %d times at Info, want once; logs: %v", n, logs.All())
 			}
 			if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
