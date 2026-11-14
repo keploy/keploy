@@ -5016,9 +5016,31 @@ func (p *Proxy) ServeExactTest(test string, owned []*models.Mock) error {
 
 // OpenExactTest implements agent.ExactTestOpener: ServeExactTest, with the
 // test's variables begun with given bound in the same step
-// (MockManager.OpenExactTest).
+// (MockManager.OpenExactTest). The values the test was given keploy among
+// them (trackGiven) are the learn step's too.
 func (p *Proxy) OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error {
-	return p.openExact(func(m *MockManager) { m.OpenExactTest(test, owned, given) })
+	if err := p.openExact(func(m *MockManager) { m.OpenExactTest(test, owned, given) }); err != nil {
+		return err
+	}
+	p.trackGiven(given)
+	return nil
+}
+
+// trackGiven makes, under the proven switch, each value among given that a
+// test was given keploy (a models.GivenPrefix variable: one its worker gave
+// outside its tests, bound as the test opened) an earlier place of the
+// test's calls in the learn step, as GiveExactTest does for one the test
+// gives while it is open: a value made from it is refused naming the given,
+// never learned as noise. A template key's binding is no such value.
+func (p *Proxy) trackGiven(given []models.VariableBinding) {
+	if !provenswitch.On() {
+		return
+	}
+	for _, b := range given {
+		if b.Given && models.IsGivenVariable(b.Name) {
+			p.learnTracker.GiveValue(learn.TestGiven(b.Mock, b.Name, b.Recorded, b.Value))
+		}
+	}
 }
 
 // AnswerAsRecordedAtOpen implements agent.ExactTestAnswerer
@@ -5337,7 +5359,11 @@ func (p *Proxy) ServeExactTestConcurrent(test string, owned, cands []*models.Moc
 // ServeExactTestConcurrent, with the test's variables begun with given bound
 // in the same step (MockManager.OpenExactTestConcurrent).
 func (p *Proxy) OpenExactTestConcurrent(test string, owned, cands []*models.Mock, given []models.VariableBinding) error {
-	return p.openExact(func(m *MockManager) { m.OpenExactTestConcurrent(test, owned, cands, given) })
+	if err := p.openExact(func(m *MockManager) { m.OpenExactTestConcurrent(test, owned, cands, given) }); err != nil {
+		return err
+	}
+	p.trackGiven(given)
+	return nil
 }
 
 var _ agent.ExactConcurrentServer = (*Proxy)(nil)

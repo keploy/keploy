@@ -59,8 +59,10 @@ func (a *Agent) SetScopeGiven(_ context.Context, given map[string][]models.Given
 
 // ProvenGive takes a value the open test gave (models.GivenReq): the n-th
 // value a test gives under one name is variable models.GivenVariable(name,
-// n). It is refused when no test is open (not_open), and when the name or
-// the value is not one keploy can hold (bad_request).
+// n). One given while none of the worker's tests is open is the worker's,
+// for the tests it begins from then on (giveOutsideTest); it is refused when
+// no process holds the run (not_open), and when the name or the value is not
+// one keploy can hold (bad_request).
 func (a *Agent) ProvenGive(ctx context.Context, req models.GivenReq) (models.GivenResp, *models.ScopeError) {
 	if !models.ValidGivenName(req.Name) {
 		return models.GivenResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
@@ -95,7 +97,7 @@ func (a *Agent) ProvenGive(ctx context.Context, req models.GivenReq) (models.Giv
 		return models.GivenResp{}, errClosed()
 	}
 	if id == "" {
-		return models.GivenResp{}, givenNotOpen(req)
+		return a.giveOutsideTest(worker, req)
 	}
 	k := scopeKey{pid: 0, name: id}
 	a.scopeMu.Lock()
@@ -160,6 +162,109 @@ func (a *Agent) ProvenGive(ctx context.Context, req models.GivenReq) (models.Giv
 	return models.GivenResp{V: models.ScopeProtocolVersion, Status: "ok", Variable: variable}, nil
 }
 
+// A VALUE GIVEN OUTSIDE EVERY TEST (a test file's beforeAll, a TestMain).
+//
+// A test process that claimed the run may give a value while none of its
+// tests is open: a name a test file's setup mints once for the tests that
+// follow. It is the worker's (by its instance; 0: the run's claim), and each
+// test the worker begins from then on gives it first, under the same
+// variable, as if the test gave it at its begin (seedWorkerGivens): a record
+// keeps it with each such test's window, and a replay binds it in each such
+// test's scope with the value that test's recording gave under it, as its
+// view opens (workerBindings), so no call the test makes comes before it. A
+// test's own givens are numbered after the worker's. A new claim of the run
+// (another test process), a worker taken back and a new session start with
+// none. A process that holds no claim of the run gives nothing outside a
+// test: no test of it would carry the value (givenNotOpen).
+
+// giveOutsideTest is ProvenGive for a value worker gave while none of its
+// tests was open: held for the tests worker begins from now on. With the
+// wire held.
+func (a *Agent) giveOutsideTest(worker uint32, req models.GivenReq) (models.GivenResp, *models.ScopeError) {
+	a.provenMu.Lock()
+	_, isWorker := a.proven.workers[worker]
+	c := a.proven.claim
+	a.provenMu.Unlock()
+	if !isWorker && (worker != 0 || c.pid == 0 || !procAlive(c.pid, c.start)) {
+		return models.GivenResp{}, givenNotOpen(req)
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	held := a.workerGiven[worker]
+	if len(held) >= MaxGivensPerTest {
+		return models.GivenResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
+			fmt.Sprintf("test worker %s gave more than %d values outside its tests", coreAgent.InstanceLabel(worker), MaxGivensPerTest),
+			"give only the values the test hands the application and expects it to send on")
+	}
+	variable := models.GivenVariable(req.Name, givenCount(held, req.Name)+1)
+	v := models.GivenValue{Name: variable, Value: req.Value, Source: req.Source}
+	if !a.replaying() {
+		if a.givenBytes+givenSize(v) > MaxGivenBytesPerRecord {
+			return models.GivenResp{}, scopeErr(http.StatusBadRequest, models.ScopeErrBadRequest,
+				fmt.Sprintf("the tests of this record gave more than %d MiB of values: keploy holds each test's until the next record session begins", MaxGivenBytesPerRecord>>20),
+				"give only the values the test hands the application and expects it to send on, or record fewer tests in one run")
+		}
+		a.givenBytes += givenSize(v)
+	}
+	if a.workerGiven == nil {
+		a.workerGiven = make(map[uint32][]models.GivenValue)
+	}
+	a.workerGiven[worker] = append(held, v)
+	return models.GivenResp{V: models.ScopeProtocolVersion, Status: "ok", Variable: variable}, nil
+}
+
+// seedWorkerGivens gives the test id, which worker has just begun, the
+// values worker gave outside its tests so far, first: its window keeps them
+// (a record), and its own givens are numbered after them.
+func (a *Agent) seedWorkerGivens(worker uint32, id string) {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	held := a.workerGiven[worker]
+	k := scopeKey{pid: 0, name: id}
+	if _, open := a.workerOpen[k]; !open || len(held) == 0 {
+		return
+	}
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	meta := a.scopeMeta[k]
+	meta.given = append(slices.Clone(held), meta.given...)
+	a.scopeMeta[k] = meta
+}
+
+// dropWorkerGivens forgets what worker gave outside its tests: its claim
+// is over.
+func (a *Agent) dropWorkerGivens(worker uint32) {
+	a.scopeMu.Lock()
+	delete(a.workerGiven, worker)
+	a.scopeMu.Unlock()
+}
+
+// workerBindings is, in a replay, the bindings of the values worker gave
+// outside its tests for the scope of its test id, each with the value id's
+// recording gave under the same variable ("" when it gave none: the
+// binding checks nothing, and the test's end names it, givensNotRecorded).
+func (a *Agent) workerBindings(worker uint32, id string) []models.VariableBinding {
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	held := a.workerGiven[worker]
+	if len(held) == 0 {
+		return nil
+	}
+	bs := make([]models.VariableBinding, 0, len(held))
+	for _, g := range held {
+		recorded := ""
+		for _, r := range a.testGiven[id] {
+			if r.Name == g.Name {
+				recorded = r.Value
+				break
+			}
+		}
+		bs = append(bs, models.VariableBinding{Name: g.Name, Value: g.Value, Recorded: recorded, Mock: "test " + id, Place: g.Source, Given: true})
+	}
+	return bs
+}
+
 // givensNotRecorded is, in a replay, the reason's sentence for the values
 // the open test id gave under a variable its recording does not hold: it
 // was recorded before the test gave them, so each binds with no recorded
@@ -216,6 +321,6 @@ func givenNotOpen(req models.GivenReq) *models.ScopeError {
 		where = " (" + req.Source + ")"
 	}
 	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotOpen,
-		"a value was given as "+req.Name+where+" while no test was open: keploy holds a given value for the test that gave it",
-		"give it inside a test, after its keploytest line; a value a fixture makes is given by the test that sends it")
+		"a value was given as "+req.Name+where+" while no test was open and no test process held the run: keploy holds a given value for the test that gave it, or for the tests its test process begins after it",
+		"give it inside a test, after its keploytest line, or from the test process once it claimed the run (in a test file's beforeAll, after the run's claim); a value a fixture makes is given by the test that sends it")
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -55,13 +56,15 @@ func TestARecordedTestsGivensAreKeptWithItsWindow(t *testing.T) {
 	a, p := wireAgent(t, models.MODE_RECORD)
 	g := giving(a, p)
 	ctx := context.Background()
-	claimSelf(t, a)
 
+	// No process holds the run: no test would carry the value.
 	_, serr := a.ProvenGive(ctx, give("app", "app-1", "a_test.go:9"))
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
 	require.Equal(t, http.StatusUnprocessableEntity, serr.Status)
-	require.Contains(t, serr.Message, "app (a_test.go:9) while no test was open")
+	require.Contains(t, serr.Message, "app (a_test.go:9) while no test was open and no test process held the run")
+	require.Contains(t, serr.Remedy, "in a test file's beforeAll, after the run's claim")
+	claimSelf(t, a)
 
 	_, serr = a.ProvenBegin(ctx, begin("TestA"))
 	require.Nil(t, serr)
@@ -83,11 +86,8 @@ func TestARecordedTestsGivensAreKeptWithItsWindow(t *testing.T) {
 	require.Nil(t, serr)
 	require.Empty(t, g.gave, "a record binds no variable")
 
-	_, serr = a.ProvenGive(ctx, give("app", "app-3", ""))
-	require.NotNil(t, serr)
-	require.Equal(t, models.ScopeErrNotOpen, serr.Code, "a test's givens end with it")
-
-	// The next test numbers its own from the first.
+	// The next test numbers its own from the first: a test's givens end
+	// with it.
 	_, serr = a.ProvenBegin(ctx, begin("TestB"))
 	require.Nil(t, serr)
 	resp, serr := a.ProvenGive(ctx, give("app", "app-4", ""))
@@ -143,6 +143,197 @@ func TestAReplayedGivenBindsWithItsRecordedValue(t *testing.T) {
 	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
 	require.Nil(t, serr)
 	require.Empty(t, windowOf(t, a, "orders::TestA").Given, "a replay holds a test's givens only while it is open")
+}
+
+// A value the test process gives while none of its tests is open (a test
+// file's beforeAll) is given to each test it begins from then on, first,
+// under the same variable: a record keeps it in each such test's window,
+// and a test's own givens are numbered after it. A test that began before
+// it does not carry it.
+func TestARecordGivesAWorkerValueToEachLaterTest(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_RECORD)
+	g := giving(a, p)
+	ctx := context.Background()
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestEarly"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestEarly", Outcome: "passed"})
+	require.Nil(t, serr)
+
+	resp, serr := a.ProvenGive(ctx, give("uniq", "1761609600123-ab12", "s.spec.ts:24"))
+	require.Nil(t, serr)
+	require.Equal(t, "ok", resp.Status)
+	require.Equal(t, "given:uniq", resp.Variable)
+	for _, name := range []string{"TestA", "TestB"} {
+		_, serr = a.ProvenBegin(ctx, begin(name))
+		require.Nil(t, serr)
+		resp, serr = a.ProvenGive(ctx, give("uniq", "own-"+name, "s.spec.ts:40"))
+		require.Nil(t, serr)
+		require.Equal(t, "given:uniq#2", resp.Variable, "a test's own givens come after its worker's")
+		_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+		require.Nil(t, serr)
+	}
+	// A second setup's value joins the first for the tests after it.
+	resp, serr = a.ProvenGive(ctx, give("uniq", "1761609600999-cd34", "s.spec.ts:60"))
+	require.Nil(t, serr)
+	require.Equal(t, "given:uniq#2", resp.Variable)
+	_, serr = a.ProvenBegin(ctx, begin("TestC"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestC", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Empty(t, g.gave, "a record binds no variable")
+
+	require.Empty(t, windowOf(t, a, "o::TestEarly").Given, "a test begun before the value does not carry it")
+	for _, name := range []string{"TestA", "TestB"} {
+		require.Equal(t, []models.GivenValue{
+			{Name: "given:uniq", Value: "1761609600123-ab12", Source: "s.spec.ts:24"},
+			{Name: "given:uniq#2", Value: "own-" + name, Source: "s.spec.ts:40"},
+		}, windowOf(t, a, "o::"+name).Given)
+	}
+	require.Equal(t, []models.GivenValue{
+		{Name: "given:uniq", Value: "1761609600123-ab12", Source: "s.spec.ts:24"},
+		{Name: "given:uniq#2", Value: "1761609600999-cd34", Source: "s.spec.ts:60"},
+	}, windowOf(t, a, "o::TestC").Given)
+}
+
+// givingOpener is a giving proxy that opens a test's view with its variables
+// begun, as keploy's own proxy does (coreAgent.ExactTestOpener): it records
+// the bindings each test opened with.
+type givingOpener struct {
+	*givingProxy
+	opened map[string][]models.VariableBinding
+}
+
+func (p *givingOpener) OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error {
+	if err := p.ServeExactTest(test, owned); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.opened == nil {
+		p.opened = map[string][]models.VariableBinding{}
+	}
+	p.opened[test] = append(p.opened[test], given...)
+	return nil
+}
+
+// In a replay a value the test process gives outside its tests binds in
+// each test it begins from then on, as the test's view opens, with the
+// value that test's recording gave under the same variable: a setup-minted
+// name used by two tests is followed in both. A test whose recording lacks
+// it binds it with none, and its end names it.
+func TestAReplayBindsAWorkerValueInEachLaterTest(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	o := &givingOpener{givingProxy: &givingProxy{wireProxy: p}}
+	a.Proxy = o
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeGiven(ctx, map[string][]models.GivenValue{
+		"o::TestA": {{Name: "given:uniq", Value: "rec-1", Source: "s.spec.ts:24"}},
+		"o::TestB": {{Name: "given:uniq", Value: "rec-1", Source: "s.spec.ts:24"}, {Name: "given:uniq#2", Value: "rec-own"}},
+	}))
+	claimSelf(t, a)
+	resp, serr := a.ProvenGive(ctx, give("uniq", "new-9", "s.spec.ts:24"))
+	require.Nil(t, serr)
+	require.Equal(t, "given:uniq", resp.Variable)
+	require.Empty(t, o.gave, "no test is open to bind it in")
+
+	var last models.ScopeEndResp
+	for _, name := range []string{"TestA", "TestB", "TestC"} {
+		_, serr = a.ProvenBegin(ctx, begin(name))
+		require.Nil(t, serr)
+		if name == "TestB" {
+			resp, serr = a.ProvenGive(ctx, give("uniq", "new-own", ""))
+			require.Nil(t, serr)
+			require.Equal(t, "given:uniq#2", resp.Variable)
+		}
+		if name == "TestC" {
+			p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /query", Destination: "127.0.0.1:8083"}}
+		}
+		last, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+		require.Nil(t, serr)
+	}
+	require.Equal(t, map[string][]models.VariableBinding{
+		"o::TestA": {{Name: "given:uniq", Value: "new-9", Recorded: "rec-1", Mock: "test o::TestA", Place: "s.spec.ts:24", Given: true}},
+		"o::TestB": {{Name: "given:uniq", Value: "new-9", Recorded: "rec-1", Mock: "test o::TestB", Place: "s.spec.ts:24", Given: true}},
+		"o::TestC": {{Name: "given:uniq", Value: "new-9", Mock: "test o::TestC", Place: "s.spec.ts:24", Given: true}},
+	}, o.opened)
+	require.Equal(t, []models.VariableBinding{
+		{Name: "given:uniq#2", Value: "new-own", Recorded: "rec-own", Mock: "test o::TestB", Given: true},
+	}, o.gave, "a test's own given is bound after its worker's, numbered after it")
+	require.Equal(t, models.ScopeActionFail, last.Action)
+	require.True(t, strings.HasPrefix(last.Reason, "keploy: the test gave given:uniq, which its recording does not hold (recorded before the test gave it): re-record the test. POST /query"), last.Reason)
+}
+
+// What a test process gave outside its tests is its own: another process's
+// claim of the run starts with none, and a new session forgets them.
+func TestAWorkerValueEndsWithItsClaim(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	ctx := context.Background()
+	gone := exec.Command("sleep", "60")
+	require.NoError(t, gone.Start())
+	t.Cleanup(func() { _ = gone.Process.Kill(); _ = gone.Wait() })
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "o"}, gone.Process.Pid)
+	require.Nil(t, serr)
+	_, serr = a.ProvenGive(ctx, give("uniq", "u-1", ""))
+	require.Nil(t, serr)
+	require.NoError(t, gone.Process.Kill())
+	_ = gone.Wait()
+
+	claimSelf(t, a)
+	resp, serr := a.ProvenGive(ctx, give("uniq", "u-2", ""))
+	require.Nil(t, serr)
+	require.Equal(t, "given:uniq", resp.Variable, "the gone process's value is not counted")
+	_, serr = a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, []models.GivenValue{{Name: "given:uniq", Value: "u-2"}}, windowOf(t, a, "o::TestA").Given)
+
+	a.resetScopeState()
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	require.Empty(t, a.workerGiven, "a new session starts with none")
+}
+
+// What a test process gives outside its tests is held only under a live
+// claim of the run, and within the bounds a test's givens have: at most
+// MaxGivensPerTest values, and in a record MaxGivenBytesPerRecord with the
+// tests' own.
+func TestAWorkerValueIsHeldOnlyUnderALiveClaimAndBounded(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	ctx := context.Background()
+	gone := exec.Command("sleep", "60")
+	require.NoError(t, gone.Start())
+	t.Cleanup(func() { _ = gone.Process.Kill(); _ = gone.Wait() })
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "o"}, gone.Process.Pid)
+	require.Nil(t, serr)
+	require.NoError(t, gone.Process.Kill())
+	_ = gone.Wait()
+	_, serr = a.ProvenGive(ctx, give("uniq", "u-1", ""))
+	require.NotNil(t, serr, "the claim's process exited")
+	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+
+	claimSelf(t, a)
+	for i := 0; i < MaxGivensPerTest; i++ {
+		_, serr := a.ProvenGive(ctx, give("n", "v", ""))
+		require.Nil(t, serr)
+	}
+	_, serr = a.ProvenGive(ctx, give("n", "v", ""))
+	require.NotNil(t, serr)
+	require.Equal(t, models.ScopeErrBadRequest, serr.Code)
+	require.Contains(t, serr.Message, fmt.Sprintf("gave more than %d values outside its tests", MaxGivensPerTest))
+
+	b, _ := wireAgent(t, models.MODE_RECORD)
+	claimSelf(t, b)
+	v := models.GivenValue{Name: "given:n", Value: "v"}
+	b.scopeMu.Lock()
+	b.givenBytes = MaxGivenBytesPerRecord - givenSize(v)
+	b.scopeMu.Unlock()
+	_, serr = b.ProvenGive(ctx, give("n", "v", ""))
+	require.Nil(t, serr, "exactly at the bound")
+	_, serr = b.ProvenGive(ctx, give("m", "v", ""))
+	require.NotNil(t, serr)
+	require.Contains(t, serr.Message, "more than 64 MiB of values")
 }
 
 // A test holds at most MaxGivensPerTest values until its end.

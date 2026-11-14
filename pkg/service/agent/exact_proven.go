@@ -389,8 +389,10 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	// the view the test opens on already shows it.
 	//
 	// A test is the scope of the variables keploy mock replay binds: it
-	// begins with none bound, as it opens.
-	if err := a.openExactTest(es, id, owned, nil); err != nil {
+	// begins with none bound, as it opens, but the values its worker gave
+	// outside its tests (workerBindings): no call the test makes comes
+	// before them.
+	if err := a.openExactTest(es, id, owned, a.workerBindings(worker, id)); err != nil {
 		return err
 	}
 	// When the test began being served, and the round its view was

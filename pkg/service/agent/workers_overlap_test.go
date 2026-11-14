@@ -280,7 +280,8 @@ func TestOverlappingWorkersTestsEachHoldTheirOwnWorkersRealUses(t *testing.T) {
 }
 
 // A given is the open test's of the worker whose process gave it, while
-// another worker's test is open too.
+// another worker's test is open too; one a worker gives with none of its
+// tests open is that worker's, for its later tests only.
 func TestAGivenIsItsOwnWorkersOpenTests(t *testing.T) {
 	a, _ := workerAgent(t, models.MODE_RECORD, 4)
 	w1, w2 := child(t), child(t)
@@ -298,13 +299,23 @@ func TestAGivenIsItsOwnWorkersOpenTests(t *testing.T) {
 	require.Equal(t, "given:app", resp.Variable, "each test numbers its own givens")
 	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: "passed"})
 	require.Nil(t, serr)
-	_, serr = a.ProvenGive(as(w2.Process.Pid), give("app", "app-3", ""))
-	require.NotNil(t, serr, "its worker has no test open")
-	require.Equal(t, models.ScopeErrNotOpen, serr.Code)
+	resp, serr = a.ProvenGive(as(w2.Process.Pid), give("app", "app-3", "b_test.go:3"))
+	require.Nil(t, serr, "its worker has no test open: the worker's")
+	require.Equal(t, "given:app", resp.Variable)
 	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w1.Process.Pid), begin("TestFour"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestFour", Outcome: "passed"})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(as(w2.Process.Pid), begin("TestFive"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestFive", Outcome: "passed"})
 	require.Nil(t, serr)
 	require.Equal(t, []models.GivenValue{{Name: "given:app", Value: "app-1", Source: "a_test.go:7"}}, windowOf(t, a, "a::TestOne").Given)
 	require.Equal(t, []models.GivenValue{{Name: "given:app", Value: "app-2", Source: "b_test.go:7"}}, windowOf(t, a, "b::TestTwo").Given)
+	require.Empty(t, windowOf(t, a, "a::TestFour").Given, "another worker's value")
+	require.Equal(t, []models.GivenValue{{Name: "given:app", Value: "app-3", Source: "b_test.go:3"}}, windowOf(t, a, "b::TestFive").Given)
 }
 
 // raise raises the proxy listener's drops by listener and its network

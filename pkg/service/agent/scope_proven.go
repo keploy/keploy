@@ -587,6 +587,10 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	}
 	a.proven.key, a.proven.dir = key, req.Dir
 	a.provenMu.Unlock()
+	if prev != me {
+		// Another process's values are no test's of this one.
+		a.dropWorkerGivens(0)
+	}
 	if newClaim {
 		// The instance is a scope of its own outside its tests: two
 		// containers configured the same are told apart only within one
@@ -1529,6 +1533,9 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy's agent could not open "+id+": "+err.Error(), "check the agent's log")
 	}
+	// The values its worker gave outside its tests are the test's first
+	// givens (a replay bound them as its view opened: workerBindings).
+	a.seedWorkerGivens(worker, id)
 	if t := a.realTracker(); t != nil {
 		// The mock.real destinations its worker's connections send bytes
 		// to from here are this test's.

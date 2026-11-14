@@ -240,7 +240,11 @@ func (s instanceExact) ServeExactTest(test string, owned []*models.Mock) error {
 }
 
 func (s instanceExact) OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error {
-	return s.open(func(m *MockManager) { m.OpenExactTest(test, owned, given) })
+	if err := s.open(func(m *MockManager) { m.OpenExactTest(test, owned, given) }); err != nil {
+		return err
+	}
+	s.p.trackGiven(given)
+	return nil
 }
 
 func (s instanceExact) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
@@ -248,7 +252,11 @@ func (s instanceExact) ServeExactTestConcurrent(test string, owned, cands []*mod
 }
 
 func (s instanceExact) OpenExactTestConcurrent(test string, owned, cands []*models.Mock, given []models.VariableBinding) error {
-	return s.open(func(m *MockManager) { m.OpenExactTestConcurrent(test, owned, cands, given) })
+	if err := s.open(func(m *MockManager) { m.OpenExactTestConcurrent(test, owned, cands, given) }); err != nil {
+		return err
+	}
+	s.p.trackGiven(given)
+	return nil
 }
 
 func (s instanceExact) AnswerAsRecordedAtOpen(test string, names []string) error {

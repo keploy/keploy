@@ -281,6 +281,8 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 	}
 	a.proven.workers[id] = workerClaim{claimant: me, key: req.Key, dir: req.Dir, declared: declared, es: es}
 	a.provenMu.Unlock()
+	// An instance a gone worker held gives the new one nothing.
+	a.dropWorkerGivens(id)
 	if es != nil {
 		// Calls the worker makes from now while none of its tests is open
 		// are its key's.
@@ -327,6 +329,7 @@ func (a *Agent) dropWorker(id uint32) {
 	a.provenMu.Lock()
 	delete(a.proven.workers, id)
 	a.provenMu.Unlock()
+	a.dropWorkerGivens(id)
 	a.endInstances([]uint32{id})
 }
 

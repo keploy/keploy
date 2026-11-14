@@ -87,3 +87,50 @@ func TestTheProxyHandsTheLearnStepTheTestsGivens(t *testing.T) {
 		t.Fatalf("with the switch off (%v) a given is a place: %+v", err, gave(p))
 	}
 }
+
+// A value the test's worker gave outside its tests is bound as the test's
+// view opens (OpenExactTest's given): the proxy hands the learn step it too,
+// as an earlier place of the test's calls, under the proven switch only. A
+// template key's binding opened the same way is no value the test gave, and
+// no such place.
+func TestTheProxyHandsTheLearnStepTheGivensATestOpensWith(t *testing.T) {
+	given := models.VariableBinding{Name: "given:uniq", Value: "u-2", Recorded: "u-1", Mock: "test test-1", Place: "s.spec.ts:24", Given: true}
+	key := models.VariableBinding{Name: "order_id", Value: "o-2", Recorded: "o-1", Mock: "test case test-1", Place: "request", Given: true}
+	gave := func(p *Proxy) []learn.Earlier {
+		var out []learn.Earlier
+		for _, e := range p.learnTracker.Placed().Earlier {
+			if e.Gave {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	open := func(t *testing.T, bound ...models.VariableBinding) *Proxy {
+		own := varMockOf("own-1", "/apps", "u-1", true, models.LifetimePerTest)
+		own.Spec.Variables = models.MockVariables{"given:uniq": own.Spec.Variables["key"]}
+		mm := stagedManager(t, []*models.Mock{own}, nil)
+		mm.NewVariableSet()
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		p := &Proxy{mockManager: mm, learnTracker: learn.NewTracker()}
+		p.learnTracker.Begin()
+		if err := p.OpenExactTest("test-1", []*models.Mock{own}, bound); err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		return p
+	}
+
+	t.Setenv(provenswitch.Env, "1")
+	p := open(t, given, key)
+	if g := gave(p); len(g) != 1 || g[0].Mock != "test test-1" || g[0].Seen[0].Leaf.Path != "given:uniq" || g[0].Seen[0].Leaf.Value != "u-1" || g[0].Seen[0].Live != "u-2" {
+		t.Fatalf("the places the open gave: %+v", g)
+	}
+	if got := postKey(t, p.mockManager, "/apps", "u-2"); !strings.HasPrefix(got, "200 ") {
+		t.Fatalf("the call carrying the worker's given value was answered %s", got)
+	}
+
+	t.Setenv(provenswitch.Env, "0")
+	p = open(t, given)
+	if g := gave(p); len(g) != 0 {
+		t.Fatalf("with the switch off a given is a place: %+v", g)
+	}
+}

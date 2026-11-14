@@ -201,6 +201,7 @@ type Agent struct {
 	testSeeds    map[string]string              // replay: test name -> the seed its recording kept for its browser (SetTestSeeds)
 	testCases    map[string][]models.ClientCase // replay: test name -> the requests its client test sent in its recording (SetTestCases)
 	testGiven    map[string][]models.GivenValue // replay, proven switch: test ID -> the values it gave when recorded; replaced with the scope table (SetScopeGiven)
+	workerGiven  map[uint32][]models.GivenValue // proven switch: test worker's instance (0: the run's claim) -> the values its process gave while none of its tests was open (giveOutsideTest)
 	testRepeats  map[string][]models.RepeatRead // replay, proven switch: test ID -> its repeated reads; replaced with the scope table (SetScopeRepeatReads)
 	testPool     []string                       // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
 	testWorker   []models.MockEntry             // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
@@ -693,6 +694,7 @@ func (a *Agent) resetScopeState() {
 	a.scopeWindows = nil
 	a.scopeMeta = nil
 	a.givenBytes = 0
+	a.workerGiven = nil
 	// A gate belongs to the replay that installed it; the CLI installs this
 	// session's after the reset.
 	a.gateRun, a.gateReason, a.gateWarned = nil, "", false
