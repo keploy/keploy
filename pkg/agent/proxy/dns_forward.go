@@ -387,14 +387,14 @@ func (p *Proxy) hasDNSUpstream() bool {
 }
 
 // forwardDNSUpstream performs a single DNS Exchange against each
-// snapshotted upstream server in turn, returning the first non-nil
-// response regardless of rcode (NOERROR, NXDOMAIN, SERVFAIL, …) — the
-// caller discriminates on Rcode/Answer count (a valid answer vs NODATA
-// vs a genuinely negative rcode). On Windows a negative answer from one
-// adapter's server passes the query to the next adapter (forwardDNS),
-// as Windows passes it. On timeout or transport error we
-// advance to the next server; if all fail we return an error so the
-// caller can fall through to the legacy default response.
+// snapshotted upstream server in turn, returning the answer upstreamSearch
+// says is the application's: the first that is not a server's failure or
+// refusal to answer, nor, on Windows, an adapter's NXDOMAIN; failing that,
+// the preferred adapter's NXDOMAIN or the first failure. The caller
+// discriminates on Rcode/Answer count (a valid answer vs NODATA vs a
+// genuinely negative rcode). On timeout or transport error we advance to
+// the next server; if no server answers we return an error so the caller
+// can fall through to the legacy default response.
 //
 // Transport rules:
 //   - Start on UDP (cheapest).
@@ -424,56 +424,91 @@ func (p *Proxy) exchange(c *dns.Client, m *dns.Msg, addr string) (*dns.Msg, time
 	return c.Exchange(m, addr)
 }
 
-// adapterSearch asks the machine's adapters a name in the order Windows does
-// (p.dnsUpstreamAdapter): an NXDOMAIN from one adapter's server rules that
-// adapter out, its other servers are not asked, and the next adapter's
-// servers are; any other answer, NODATA (NOERROR with no record of the type)
-// too, is the answer. A name only a VPN's or a LAN's own resolver knows is
-// then recorded with the answer the application gets, not the NXDOMAIN of
-// the adapter Windows prefers. When every adapter says the name does not
-// exist, the preferred adapter's NXDOMAIN, the first, is the answer. That is
-// what Windows answers: with a name the preferred adapter's server denies
-// and another adapter's server resolves, Windows 11 (10.0.26200) gives the
-// application the other adapter's address; with a type the preferred
-// adapter's server has no record of and the other's has, it gives the
-// preferred adapter's NODATA (TestOnWindowsARecordingAsksEachAdapterAsWindowsDoes).
-// A server on no adapter (all of resolv.conf's) ends the search with
-// whatever it answers, as Linux's resolver does.
-type adapterSearch struct {
+// upstreamSearch asks the upstream servers a name as the application's own
+// resolver asks them, so a recording holds the answer the application gets:
+//
+//   - A server that fails or refuses to answer (SERVFAIL, REFUSED, NOTIMP)
+//     passes the question to the next server, on every OS: glibc's resolver
+//     (res_send) asks the next server on each of the three, musl's
+//     (res_msend) ignores them and waits for another server's answer, and
+//     Windows asks the next server. Its adapter is not ruled out.
+//   - On Windows the servers are asked adapter by adapter, in the order
+//     Windows asks them (p.dnsUpstreamAdapter): an NXDOMAIN from one
+//     adapter's server rules that adapter out, its other servers are not
+//     asked, and the next adapter's servers are. A name only a VPN's or a
+//     LAN's own resolver knows is then recorded with the answer the
+//     application gets, not the NXDOMAIN of the adapter Windows prefers.
+//     That is what Windows answers: with a name the preferred adapter's
+//     server denies and another adapter's server resolves, Windows 11
+//     (10.0.26200) gives the application the other adapter's address; with a
+//     type the preferred adapter's server has no record of and the other's
+//     has, it gives the preferred adapter's NODATA
+//     (TestOnWindowsARecordingAsksEachAdapterAsWindowsDoes).
+//   - Any other answer is the answer: one with records, NODATA (NOERROR with
+//     no record of the type), and an NXDOMAIN from a server on no adapter
+//     (all of resolv.conf's), as Linux's resolver takes it.
+//
+// When no answer is the answer, the preferred adapter's NXDOMAIN, the first,
+// is (every adapter that answered denied the name); failing that, the first
+// server's failure or refusal (no server answered otherwise), which the
+// application's resolver takes as a failure to resolve.
+type upstreamSearch struct {
 	adapter  map[string]int
 	ruledOut map[int]bool
 	// denied is the first adapter's NXDOMAIN, kept while another adapter
 	// may still answer.
 	denied *dns.Msg
+	// failed is the first server's failure or refusal to answer, kept while
+	// another server may still answer.
+	failed *dns.Msg
 }
 
-func newAdapterSearch(adapter map[string]int) *adapterSearch {
-	return &adapterSearch{adapter: adapter, ruledOut: map[int]bool{}}
+func newUpstreamSearch(adapter map[string]int) *upstreamSearch {
+	return &upstreamSearch{adapter: adapter, ruledOut: map[int]bool{}}
 }
 
 // passes reports whether server is on an adapter that already denied the
 // name, so it is not asked.
-func (s *adapterSearch) passes(server string) bool {
+func (s *upstreamSearch) passes(server string) bool {
 	adapter, onAdapter := s.adapter[server]
 	return onAdapter && s.ruledOut[adapter]
 }
 
-// ends takes server's answer and reports whether it is the answer. An
-// adapter's NXDOMAIN is not: it rules the adapter out and is kept (denied).
-func (s *adapterSearch) ends(server string, resp *dns.Msg) bool {
-	adapter, onAdapter := s.adapter[server]
-	if !onAdapter || resp.Rcode != dns.RcodeNameError {
-		return true
+// ends takes server's answer and reports whether it is the answer. A failure
+// or a refusal to answer is not, and is kept (failed); nor is an adapter's
+// NXDOMAIN: it rules the adapter out and is kept (denied).
+func (s *upstreamSearch) ends(server string, resp *dns.Msg) bool {
+	switch resp.Rcode {
+	case dns.RcodeServerFailure, dns.RcodeRefused, dns.RcodeNotImplemented:
+		if s.failed == nil {
+			s.failed = resp
+		}
+		return false
+	case dns.RcodeNameError:
+		adapter, onAdapter := s.adapter[server]
+		if !onAdapter {
+			return true
+		}
+		s.ruledOut[adapter] = true
+		if s.denied == nil {
+			s.denied = resp
+		}
+		return false
 	}
-	s.ruledOut[adapter] = true
-	if s.denied == nil {
-		s.denied = resp
+	return true
+}
+
+// answer is the answer when no server's answer ended the search: the
+// preferred adapter's NXDOMAIN, else the first failure or refusal, else none.
+func (s *upstreamSearch) answer() *dns.Msg {
+	if s.denied != nil {
+		return s.denied
 	}
-	return false
+	return s.failed
 }
 
 // forwardDNS is forwardDNSUpstream against the given subset of the upstream
-// servers (replayMissServers), asked in the order adapterSearch says.
+// servers (replayMissServers), asked in the order upstreamSearch says.
 func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, error) {
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("no upstream DNS resolver this replay may forward to")
@@ -510,7 +545,7 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 	m.RecursionDesired = true
 
 	var lastErr error
-	search := newAdapterSearch(p.dnsUpstreamAdapter)
+	search := newUpstreamSearch(p.dnsUpstreamAdapter)
 	for _, server := range servers {
 		if search.passes(server) {
 			continue
@@ -559,16 +594,17 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 			continue
 		}
 		if !search.ends(server, resp) {
-			p.logger.Debug("upstream DNS server says the name does not exist; asking the other adapters' servers",
+			p.logger.Debug("upstream DNS server did not answer the name (a failure, a refusal, or its adapter denies it); asking the next server",
 				zap.String("server", addr),
-				zap.String("question", question.Name))
+				zap.String("question", question.Name),
+				zap.String("rcode", dns.RcodeToString[resp.Rcode]))
 			continue
 		}
 		return resp, nil
 	}
 
-	if search.denied != nil {
-		return search.denied, nil
+	if answer := search.answer(); answer != nil {
+		return answer, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no upstream DNS server returned a response for %s", question.Name)

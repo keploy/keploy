@@ -1222,9 +1222,11 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		resolveErr error
 	)
 
-	// On Windows the servers are the adapters', asked as Windows asks them
-	// (adapterSearch), so a recording holds the answer the application gets.
-	search := newAdapterSearch(p.dnsUpstreamAdapter)
+	// The servers are asked as the application's resolver asks them
+	// (upstreamSearch): past a server's failure or refusal on every OS, and
+	// on Windows adapter by adapter, so a recording holds the answer the
+	// application gets.
+	search := newUpstreamSearch(p.dnsUpstreamAdapter)
 	for _, server := range servers {
 		if search.passes(server) {
 			continue
@@ -1269,8 +1271,11 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 		if resp != nil {
 			if !search.ends(server, resp) {
-				p.logger.Debug("upstream DNS server says the name does not exist; asking the other adapters' servers",
-					append(dnsQuestionFields(question), zap.String("upstream_addr", addr))...,
+				p.logger.Debug("upstream DNS server did not answer the name (a failure, a refusal, or its adapter denies it); asking the next server",
+					append(dnsQuestionFields(question),
+						zap.String("upstream_addr", addr),
+						zap.String("rcode", dns.RcodeToString[resp.Rcode]),
+					)...,
 				)
 				continue
 			}
@@ -1279,11 +1284,14 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 			break
 		}
 	}
-	// Every adapter that answered said the name does not exist: the
-	// preferred adapter's NXDOMAIN is the answer, whatever a later server's
-	// failure was.
-	if in == nil && search.denied != nil {
-		in, resolveErr = search.denied, nil
+	// No server's answer was the answer: every adapter that answered said
+	// the name does not exist (the preferred adapter's NXDOMAIN is the
+	// answer), or every server that answered failed or refused (the first
+	// failure is), whatever a later server's transport error was.
+	if in == nil {
+		if answer := search.answer(); answer != nil {
+			in, resolveErr = answer, nil
+		}
 	}
 
 	if resolveErr != nil {
