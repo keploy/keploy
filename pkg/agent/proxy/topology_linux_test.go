@@ -860,18 +860,22 @@ func (s chanSink) NoteUnreached(r models.UnreachedRow) {
 // A mock record whose connection keploy accepted (no handshake held: macOS,
 // Windows, or a hold that is not running) notes a dependency that refuses it
 // unreached, with the worker's instance: one keploy's own dial finds refusing
-// (no process tree known), and a loopback port nothing listens at, which a
-// run with a tree closes as the connect would have been refused. A replay
-// notes nothing.
+// (no process tree known), whichever dial it is (the plain one, the MySQL
+// probe's, a listed MySQL port's, or a TLS call's), and a loopback port
+// nothing listens at, which a run with a tree closes as the connect would
+// have been refused. A replay notes nothing.
 func TestHandleConnectionNotesARefusingDependencyOfAMockRecord(t *testing.T) {
+	const plain, probe, mysqlPort, overTLS = "", "the MySQL probe", "a listed MySQL port", "TLS"
 	for _, tc := range []struct {
 		mode models.Mode
 		tree bool
+		via  string
 	}{
-		{models.MODE_RECORD, false}, {models.MODE_RECORD, true}, {models.MODE_TEST, false}, {models.MODE_TEST, true},
+		{models.MODE_RECORD, false, plain}, {models.MODE_RECORD, true, plain}, {models.MODE_TEST, false, plain}, {models.MODE_TEST, true, plain},
+		{models.MODE_RECORD, false, probe}, {models.MODE_RECORD, false, mysqlPort}, {models.MODE_RECORD, false, overTLS},
 	} {
 		mode := tc.mode
-		t.Run(fmt.Sprintf("%s/tree=%v", mode, tc.tree), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/tree=%v/%s", mode, tc.tree, tc.via), func(t *testing.T) {
 			recorded.forget()
 			t.Cleanup(recorded.forget)
 			t.Setenv("KEPLOY_PROVEN", "1")
@@ -892,7 +896,11 @@ func TestHandleConnectionNotesARefusingDependencyOfAMockRecord(t *testing.T) {
 			sink := chanSink{mocked: make(chan models.MockedRow, 1), unreached: make(chan models.UnreachedRow, 1)}
 			p.SetTopologySink(sink)
 			if mode == models.MODE_RECORD {
-				if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true}); err != nil {
+				opts := models.OutgoingOptions{DisableMysqlAutoDetect: tc.via != probe}
+				if tc.via == mysqlPort {
+					opts.MysqlPorts = []uint32{dest.Port}
+				}
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
@@ -904,8 +912,22 @@ func TestHandleConnectionNotesARefusingDependencyOfAMockRecord(t *testing.T) {
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { done <- p.handleConnection(ctx, src) }()
-			if _, err := app.Write([]byte("ping\n")); err != nil {
-				t.Fatal(err)
+			switch tc.via {
+			case overTLS:
+				// keploy answers the handshake, then dials the destination
+				// for the call's first bytes.
+				go func() {
+					c := tls.Client(app, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // the client of a handshake the test only makes
+					if c.Handshake() == nil {
+						_, _ = c.Write([]byte("ping\n"))
+					}
+				}()
+			case mysqlPort:
+				// A MySQL client waits for the server's greeting.
+			default:
+				if _, err := app.Write([]byte("ping\n")); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if mode == models.MODE_TEST {
 				cancel()
