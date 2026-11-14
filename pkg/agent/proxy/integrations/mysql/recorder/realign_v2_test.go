@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -1729,26 +1730,179 @@ func TestRecordV2_ACommandWithoutAnAnswerThatDoesNotDecodeFirstIsLeftOutAlone(t 
 	}
 }
 
-// MySQL 5.7 and later answer a command without an answer that does not parse
-// with an ERR (malformed packet); its client, which expects no answer to it,
-// sent its next command without waiting and reads that ERR as that command's
-// answer, and the next command's answer as the one after's. The recorder pairs
-// them as the client read them, which is what a replay must serve that client.
-func TestRecordV2_AnERRToACommandWithoutAnAnswerIsRecordedAsItsClientReadIt(t *testing.T) {
-	t.Parallel()
-	j := newJoinedMidStream(t)
-	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
-	j.h.pushClient(wrapPacket([]byte{mysql.COM_STMT_CLOSE, 2, 0, 0}, 0), j.at())
-	j.h.pushClient(cannedCOMQuery(t, 0, "SELECT 2"), j.at())
-	j.h.pushDest(errReply(1, 1835, "Malformed communication packet"), j.at())
-	j.h.pushClient(cannedCOMQuery(t, 0, "SELECT 3"), j.at())
-	j.h.pushDest(okResponseWithAffectedRows(1, 7), j.at())
+// malformedClose is a COM_STMT_CLOSE one byte short, and malformedLongData a
+// COM_STMT_SEND_LONG_DATA without its parameter id: commands without an answer
+// that do not parse. MySQL 5.7 and later answer each with malformedERR;
+// MariaDB and MySQL 5.6 send nothing.
+var (
+	malformedClose    = wrapPacket([]byte{mysql.COM_STMT_CLOSE, 2, 0, 0}, 0)
+	malformedLongData = wrapPacket([]byte{mysql.COM_STMT_SEND_LONG_DATA, 2, 0, 0, 0}, 0)
+	malformedERR      = errReply(1, 1835, "Malformed communication packet")
+)
+
+// runCounted runs j with a mock manager that counts the exchanges left out.
+func (j *joinedMidStream) runCounted(t *testing.T) ([]*models.Mock, int64, error) {
+	t.Helper()
+	mgr := syncMock.New(nil)
+	j.h.sess.Mgr = mgr
 	mocks, err := j.run(t)
-	if err != nil {
-		t.Fatalf("RecordV2 = %v, want no stop", err)
+	return mocks, mgr.MocksLeftOut(), err
+}
+
+// A server that answers a command without an answer that does not parse (MySQL
+// 5.7 and later: an ERR 1835, malformed packet) sent that ERR before the
+// client's next command was captured: it is that command's answer, proven by
+// the capture's order, and is left out with it. Every later command is
+// recorded with its own answer. Recorded as its client read it, as before,
+// SELECT 2 had the ERR and every command after it its predecessor's answer,
+// for the rest of the connection. Two in a row are answered in order; a
+// command taken up after a response left out is confirmed by the ERR to the
+// next one, sent after its answer.
+func TestRecordV2_AnERRToACommandWithoutAnAnswerIsThatCommandsAnswer(t *testing.T) {
+	t.Parallel()
+	unframable := [][]byte{wrapPacket(nil, 1), wrapPacket([]byte{0x01, 0x02}, 2), wrapPacket([]byte{0x03}, 3)}
+	cases := []struct {
+		name    string
+		build   func(t *testing.T, j *joinedMidStream)
+		want    string
+		leftOut int64
+	}{
+		{"one", func(t *testing.T, j *joinedMidStream) {
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+			j.exchange(malformedClose, [][]byte{malformedERR})
+		}, "SELECT 1 -> OK 1; SELECT 2 -> OK 2; SELECT 3 -> OK 3", 1},
+		{"two in a row", func(t *testing.T, j *joinedMidStream) {
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+			j.h.pushClient(malformedClose, j.at())
+			j.h.pushClient(malformedLongData, j.at())
+			j.h.pushDest(malformedERR, j.at())
+			j.h.pushDest(malformedERR, j.at())
+		}, "SELECT 1 -> OK 1; SELECT 2 -> OK 2; SELECT 3 -> OK 3", 2},
+		{"after an exchange taken up", func(t *testing.T, j *joinedMidStream) {
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+			j.exchange(cannedCOMQuery(t, 0, "SELECT u"), unframable)
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 9"), [][]byte{okResponseWithAffectedRows(1, 9)})
+			j.exchange(malformedClose, [][]byte{malformedERR})
+		}, "SELECT 1 -> OK 1; SELECT 9 -> OK 9; SELECT 2 -> OK 2; SELECT 3 -> OK 3", 2},
+		{"with a response left out before it", func(t *testing.T, j *joinedMidStream) {
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+			j.exchange(cannedCOMQuery(t, 0, "SELECT u"), unframable)
+			j.exchange(malformedClose, [][]byte{malformedERR})
+		}, "SELECT 1 -> OK 1; SELECT 2 -> OK 2; SELECT 3 -> OK 3", 2},
 	}
-	if got, want := strings.Join(pairings(mocks), "; "), "SELECT 1 -> OK 1; SELECT 2 -> ERR 1835; SELECT 3 -> OK 7"; got != want {
-		t.Fatalf("mocks %q, want %q: each command with the answer its client read", got, want)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			j := newJoinedMidStream(t)
+			c.build(t, j)
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{okResponseWithAffectedRows(1, 2)})
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 3"), [][]byte{okResponseWithAffectedRows(1, 3)})
+			mocks, leftOut, err := j.runCounted(t)
+			if err != nil {
+				t.Fatalf("RecordV2 = %v, want no stop", err)
+			}
+			if got := strings.Join(pairings(mocks), "; "); got != c.want {
+				t.Fatalf("mocks %q, want %q: each command with its own answer", got, c.want)
+			}
+			if leftOut != c.leftOut {
+				t.Fatalf("%d exchanges left out, want %d: each command that does not decode, with its ERR, and the response left out", leftOut, c.leftOut)
+			}
+		})
+	}
+}
+
+// A server that answers nothing to a command without an answer that does not
+// parse (MariaDB, MySQL 5.6): the server's next packet is the next command's
+// answer, an OK whose first bytes after its header would read as an ERR 1835's
+// code (43 rows, last insert id 7) or an ERR of another code, and is recorded
+// as that command's.
+func TestRecordV2_ACommandWithoutAnAnswerThatAServerLeavesUnansweredLeavesTheNextAnswerAlone(t *testing.T) {
+	t.Parallel()
+	for name, answer := range map[string][]byte{
+		"an OK":       wrapPacket([]byte{0x00, 0x2b, 0x07, 0x02, 0x00, 0x00, 0x00}, 1),
+		"an ERR 1064": errReply(1, 1064, "You have an error in your SQL syntax"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			j := newJoinedMidStream(t)
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+			j.h.pushClient(malformedClose, j.at())
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{answer})
+			want := "SELECT 1 -> OK 1; SELECT 2 -> OK 43; SELECT 3 -> OK 3"
+			if answer[4] == 0xff {
+				want = "SELECT 1 -> OK 1; SELECT 2 -> ERR 1064; SELECT 3 -> OK 3"
+			}
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 3"), [][]byte{okResponseWithAffectedRows(1, 3)})
+			mocks, err := j.run(t)
+			if err != nil {
+				t.Fatalf("RecordV2 = %v, want no stop", err)
+			}
+			if got := strings.Join(pairings(mocks), "; "); got != want {
+				t.Fatalf("mocks %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// An ERR 1835 captured after the client's next command may answer the command
+// without an answer that did not parse (MySQL 5.7 and later, a client that did
+// not wait) or that next command (a server that answers nothing to the first,
+// and the next did not parse either): nothing tells which, so the recording
+// stops there, the stop named, with no command recorded with another's answer.
+// One captured before the command it would answer is no answer to it: the
+// recording stops too. The states the recorder can be in at it: a command
+// taken up after a response left out, a re-align pending, a PREPARE held for
+// its framing with and without its EOF, and none.
+func TestRecordV2_AnERRThatCannotBeToldToAnswerACommandWithoutAnAnswerStops(t *testing.T) {
+	t.Parallel()
+	unframable := [][]byte{wrapPacket(nil, 1), wrapPacket([]byte{0x01, 0x02}, 2), wrapPacket([]byte{0x03}, 3)}
+	prepare := wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO t VALUES (?)"...), 0)
+	q := func(t *testing.T, k int) []byte { return cannedCOMQuery(t, 0, fmt.Sprintf("SELECT %d", k)) }
+	ok := func(k int) []byte { return okResponseWithAffectedRows(1, byte(k)) }
+	cases := map[string]func(t *testing.T, j *joinedMidStream){
+		"none": func(t *testing.T, j *joinedMidStream) {},
+		"taken up": func(t *testing.T, j *joinedMidStream) {
+			j.exchange(cannedCOMQuery(t, 0, "SELECT u"), unframable)
+			j.exchange(q(t, 2), [][]byte{ok(2)})
+		},
+		"re-align pending": func(t *testing.T, j *joinedMidStream) {
+			j.exchange(cannedCOMQuery(t, 0, "SELECT u"), unframable)
+		},
+		"PREPARE held, its EOF sent": func(t *testing.T, j *joinedMidStream) {
+			j.exchange(prepare, prepareOK(false, [][]byte{columnPayload(t, undecodableColumns[0])}, nil))
+		},
+		"PREPARE held, no EOF": func(t *testing.T, j *joinedMidStream) {
+			j.exchange(prepare, prepareOK(true, [][]byte{columnPayload(t, undecodableColumns[0])}, nil))
+		},
+		"captured before the command": func(t *testing.T, j *joinedMidStream) {
+			j.exchange(prepare, prepareOK(true, [][]byte{columnPayload(t, undecodableColumns[0])}, nil))
+			j.h.pushDest(malformedERR, j.at())
+		},
+	}
+	for name, build := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			j := newJoinedMidStream(t)
+			j.exchange(q(t, 1), [][]byte{ok(1)})
+			build(t, j)
+			j.h.pushClient(malformedClose, j.at())
+			j.h.pushClient(q(t, 3), j.at())
+			if name != "captured before the command" {
+				j.h.pushDest(malformedERR, j.at())
+			}
+			j.h.pushDest(ok(3), j.at())
+			j.exchange(q(t, 4), [][]byte{ok(4)})
+			mocks, err := j.run(t)
+			for _, p := range pairings(mocks) {
+				var k, r int
+				if n, _ := fmt.Sscanf(p, "SELECT %d -> OK %d", &k, &r); n == 2 && k != r || strings.Contains(p, "ERR") {
+					t.Fatalf("mock %q: a command recorded with another's answer (all: %q)", p, pairings(mocks))
+				}
+			}
+			if !errors.Is(err, ErrFramingLost) || !strings.Contains(err.Error(), "ERR 1835") {
+				t.Fatalf("RecordV2 = %v, want the stop at the ERR that cannot be told to answer one command or the other", err)
+			}
+		})
 	}
 }
 
@@ -1798,6 +1952,8 @@ func TestRecordV2_AnEmptyCommandIsAnsweredAndItsAnswerLeftOut(t *testing.T) {
 func TestRecordV2_PostTLS_AnEOFBeforeAnEmptyCommandsAnswerIsTheHeldPreparesOwn(t *testing.T) {
 	t.Parallel()
 	def := columnPayload(t, &mysql.ColumnDefinition41{Catalog: "def", Name: "?", OrgName: "?", FixedLength: 0x0c, CharacterSet: 0x3f, ColumnLength: 20, Type: byte(mysql.FieldTypeLongLong)})
+	// The reply in one chunk: the harness holds a few chunks before the
+	// recorder runs.
 	defs := make([][]byte, 255)
 	for i := range defs {
 		defs[i] = def
@@ -1881,5 +2037,97 @@ func TestRecordV2_AnEmptyCommandAfterAResponseLeftOutIsHandledAsAnswered(t *test
 				t.Fatalf("RecordV2 = %v, want no stop: SELECT 2 was sent after the empty command's answer", err)
 			}
 		})
+	}
+}
+
+// prepareOKPairing is pairings' line, with a PREPARE's OK shown with whether
+// it was recorded with the EOF after its definitions.
+func prepareOKPairing(mocks []*models.Mock) []string {
+	out := pairings(mocks)
+	for i, m := range mocks {
+		if len(m.Spec.MySQLResponses) == 1 {
+			if sp, ok := m.Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket); ok {
+				out[i] = fmt.Sprintf("PREPARE -> PREPARE_OK eof=%v", sp.EOFAfterParamDefs != nil || sp.EOFAfterColumnDefs != nil)
+			}
+		}
+	}
+	return out
+}
+
+// A PREPARE taken up after a response left out, on a stream joined
+// mid-connection whose client frames with EOFs, is held for its framing; its
+// server sends the EOF after its definitions before the client's next command.
+// That EOF is the PREPARE's own answer's last packet: the exchange is confirmed
+// by what the server sends after it. Judged as the server's next bytes after
+// the answer taken up, it stopped the connection at every such PREPARE, which
+// main records. The PREPARE's mock waits for the confirm: when the server's
+// bytes after the EOF were captured before the client's next command too, the
+// recording stops with the PREPARE left out.
+func TestRecordV2_APrepareTakenUpIsConfirmedAfterItsEOF(t *testing.T) {
+	t.Parallel()
+	one := [][]byte{columnPayload(t, undecodableColumns[0])}
+	for _, defs := range []string{"params", "columns"} {
+		for _, more := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, more before the next command %v", defs, more), func(t *testing.T) {
+				t.Parallel()
+				j := newJoinedMidStream(t)
+				j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+				j.exchange(cannedCOMQuery(t, 0, "SELECT u"), [][]byte{wrapPacket(nil, 1), wrapPacket([]byte{0x01, 0x02}, 2), wrapPacket([]byte{0x03}, 3)})
+				reply := prepareOK(false, one, nil)
+				if defs == "columns" {
+					reply = prepareOK(false, nil, one)
+				}
+				j.exchange(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO t VALUES (?)"...), 0), reply)
+				if more {
+					j.h.pushDest(okResponseWithAffectedRows(1, 9), j.at())
+				}
+				j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{okResponseWithAffectedRows(1, 2)})
+				j.exchange(cannedCOMQuery(t, 0, "SELECT 3"), [][]byte{okResponseWithAffectedRows(1, 3)})
+				mocks, err := j.run(t)
+				got := strings.Join(prepareOKPairing(mocks), "; ")
+				if more {
+					if !errors.Is(err, ErrFramingLost) || !strings.Contains(err.Error(), "captured before the client's next command") || got != "SELECT 1 -> OK 1" {
+						t.Fatalf("RecordV2 = %v with mocks %q, want the stop at SELECT 2 with the PREPARE left out", err, got)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("RecordV2 = %v, want no stop: the client waited for each answer", err)
+				}
+				if want := "SELECT 1 -> OK 1; PREPARE -> PREPARE_OK eof=true; SELECT 2 -> OK 2; SELECT 3 -> OK 3"; got != want {
+					t.Fatalf("mocks %q, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
+// A PREPARE of 255 parameters taken up after a response left out, its client
+// framing with EOFs: the EOF after its definitions is at sequence id 1, as the
+// next answer's first packet is, and the next command (COM_FIELD_LIST) may be
+// answered with an EOF, so the packet cannot be told to be either, and the
+// PREPARE is left out (heldPrepare.settle). Nothing of the exchange taken up
+// is recorded, so nothing waits to be confirmed: the recording re-aligns at
+// the next command, as main does. Judging the packet as the server's next
+// bytes after the PREPARE stopped the connection.
+func TestRecordV2_APrepareTakenUpWhoseEOFCannotBeToldIsLeftOutAlone(t *testing.T) {
+	t.Parallel()
+	defs := make([][]byte, 255)
+	for d := range defs {
+		defs[d] = columnPayload(t, undecodableColumns[0])
+	}
+	j := newJoinedMidStream(t)
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+	j.exchange(cannedCOMQuery(t, 0, "SELECT u"), [][]byte{wrapPacket(nil, 1), wrapPacket([]byte{0x01, 0x02}, 2), wrapPacket([]byte{0x03}, 3)})
+	j.exchange(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO t VALUES (?)"...), 0), [][]byte{bytes.Join(prepareOK(false, defs, nil), nil)})
+	j.exchange(wrapPacket([]byte{mysql.COM_FIELD_LIST, 't', 0}, 0), [][]byte{errReply(1, 1146, "Table 't' doesn't exist")})
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{okResponseWithAffectedRows(1, 2)})
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 3"), [][]byte{okResponseWithAffectedRows(1, 3)})
+	mocks, err := j.run(t)
+	if err != nil {
+		t.Fatalf("RecordV2 = %v, want no stop", err)
+	}
+	if got, want := strings.Join(prepareOKPairing(mocks), "; "), "SELECT 1 -> OK 1; SELECT 2 -> OK 2; SELECT 3 -> OK 3"; got != want {
+		t.Fatalf("mocks %q, want %q", got, want)
 	}
 }
