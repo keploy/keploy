@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -1782,21 +1783,32 @@ func nonASCIIRuns(s string) []string {
 // place holds the moment it was recorded with (else it is a variable of that
 // place, appearedIn), is refused before any lead or window excuses its words:
 // what F saw came from what F served, whatever moved it.
-func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows, eh *earlierHeld) string {
+//
+// A word of what changed of chanceBits or more that an earlier recording
+// record's full round never served holds glued inside a longer word
+// (wordsIn.glued: "1a2b3c4d5e6f" in "x1a2b3c4d5e6f") is where the
+// application may have cut it from, and F gave it nothing there to show it
+// did not. In keploy mock's client tests (DriftCache.ClientTests) it is
+// refused, fail closed, as the minted default reads an id's long word glued
+// (longGlued). keploy test learns the value as before, as a changed natural
+// word glued inside an earlier word ("running" of "runningJobs") would go
+// red there, but never silently: glued says where the word stands, for the
+// noise the value is learned as to name (gluedNoise).
+func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows, eh *earlierHeld) (why, glued string) {
 	if v.unparsed != "" {
-		return v.unparsed
+		return v.unparsed, ""
 	}
 	if echoed := dc.echoedIn(v, at, served, raw, eh); len(echoed) > 0 {
 		where := dc.heldAt(echoed, at, served, raw)
 		if where == "" {
 			where = "earlier in the test"
 		}
-		return pickUnaccounted(where)
+		return pickUnaccounted(where), ""
 	}
 	keep := dc.stampsEchoed(v, served, raw)
 	word := v.wordOf
 	held := dc.wordsHeld(v, keep, raw)
-	return v.eachChanged(func(i int, t string, recorded bool) string {
+	why = v.eachChanged(func(i int, t string, recorded bool) string {
 		for _, e := range served {
 			// The run's exchange (Earlier.Run) is an earlier place of every
 			// test of the set: the set's start-up's, or an earlier test's
@@ -1859,6 +1871,19 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				}
 				return why
 			}
+			if held.of(j).glued[changedWord{i, t}] {
+				place := x.mock + "'s payload"
+				if f := gluedField(x, dc.searched(x, keep), t); f != "" {
+					place = x.mock + " at " + f
+				}
+				place += x.atNote(at)
+				if dc.clientTests {
+					return word(t, recorded) + " stands glued inside a longer word of an earlier recording, in " + place + ", which record's full round never served before this call: the application may have cut it from there, and keploy cannot tell; " + notClock(v) + ". " + correction(x.mock, true)
+				}
+				if glued == "" {
+					glued = word(t, recorded) + " stands glued inside " + place + "'s word, an earlier recording record's full round never served before this call: keploy test reads a word glued inside a longer word as no source"
+				}
+			}
 			// A word the value holds now that stands in what F gave the
 			// application in a payload it served changed (ServedLive), and
 			// not in what the recording gave there: F gave it, the
@@ -1897,6 +1922,51 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		}
 		return ""
 	})
+	if why != "" {
+		return why, ""
+	}
+	return "", glued
+}
+
+// gluedNoise is the reason noise learned past a word glued inside an
+// earlier recording's longer word (unaccounted's glued, keploy test alone)
+// says: where the word stands, before any other reason it has.
+func gluedNoise(glued, why string) string {
+	if why == "" {
+		return glued + ", and keploy learns it as varying"
+	}
+	return glued + "; " + why
+}
+
+// gluedField is the field of x's payload whose text (texts[0], searched)
+// holds t anywhere, inside a longer word too, "" where none does.
+func gluedField(x Raw, texts [2]string, t string) string {
+	for _, f := range x.payload().fields {
+		if f.end > len(texts[0]) {
+			break
+		}
+		if strings.Contains(texts[0][f.start:f.end], t) {
+			return f.describe()
+		}
+	}
+	return ""
+}
+
+// gluedWord reports whether s holds t inside a longer word of a reading
+// (word): at a place where a byte of that reading stands beside it.
+func gluedWord(s, t string, word func(byte) bool) bool {
+	for i := 0; t != "" && i+len(t) <= len(s); {
+		k := strings.Index(s[i:], t)
+		if k < 0 {
+			return false
+		}
+		at := i + k
+		if at > 0 && word(s[at-1]) || at+len(t) < len(s) && word(s[at+len(t)]) {
+			return true
+		}
+		i = at + 1
+	}
+	return false
 }
 
 // unseenWhy says where a word t the value holds now (named), which F may
@@ -2057,8 +2127,14 @@ type heldWords struct {
 
 // wordsIn are the changed words a payload holds, as recorded (raw), as F
 // gave it (live: its ServedLive view), and as any of the views F's serves
-// of it gave where they differ (unseen: its ServedChanged views).
-type wordsIn struct{ raw, live, unseen map[changedWord]bool }
+// of it gave where they differ (unseen: its ServedChanged views); and, of a
+// payload F never served, the changed words of chanceBits or more its text
+// holds glued inside a longer word of their reading (glued: gluedWord).
+type wordsIn struct{ raw, live, unseen, glued map[changedWord]bool }
+
+// gluedReads counts the payloads wordsHeld reads for glued words, for the
+// rows that bound a call's work: once per value and payload.
+var gluedReads atomic.Int64
 
 // wordsHeld are which of v's changed words each of raw holds, searched as
 // keep says (stampsEchoed). Each payload's words are read once for the
@@ -2091,8 +2167,12 @@ func (dc *DriftCache) wordsHeld(v *valueDrift, keep bool, raw []Raw) heldWords {
 	// each call read every earlier recording's words anew, holding them
 	// while it read.
 	runs := make([][]string, len(words))
+	var long []changedWord
 	for k, w := range words {
 		runs[k] = wordsBy(w.t, isWord)
+		if wordBits(w.t) >= chanceBits {
+			long = append(long, w)
+		}
 	}
 	read := make([]*wordsIn, len(raw))
 	return heldWords{of: func(j int) wordsIn {
@@ -2110,6 +2190,18 @@ func (dc *DriftCache) wordsHeld(v *valueDrift, keep bool, raw []Raw) heldWords {
 				for _, view := range x.views {
 					for w := range in(dc.searchedTokens(*view, keep)) {
 						h.unseen[w] = true
+					}
+				}
+			}
+			if !x.served && len(long) > 0 {
+				gluedReads.Add(1)
+				texts := dc.searched(x, keep)
+				for _, w := range long {
+					if gluedWord(texts[0], w.t, readings[w.i]) || gluedWord(texts[1], w.t, readings[w.i]) {
+						if h.glued == nil {
+							h.glued = map[changedWord]bool{}
+						}
+						h.glued[w] = true
 					}
 				}
 			}

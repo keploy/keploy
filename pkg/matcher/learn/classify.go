@@ -1840,6 +1840,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// pick from it by the clock whose pick in F the request does not
 		// list); and only where its readings account for all it changed. An
 		// echo is answered, never asserted against a source.
+		//
+		// glued is where a word of what changed stands glued inside a longer
+		// word of an earlier recording F never served, in keploy test
+		// (unaccounted): a value left noise names it (gluedNoise).
+		glued := ""
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			v := dc.ofIn(r.Value, l.Value, w, at)
 			why, sourced, offWhy, unreadWhy := "", false, "", ""
@@ -1862,7 +1867,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
 				offWhy = why
-			} else if why = unaccounted(dc, v, at, served, raw, fol, eh); why != "" {
+			} else if why, glued = unaccounted(dc, v, at, served, raw, fol, eh); why != "" {
 				sourced = true
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -2004,6 +2009,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			case KindEcho:
 				ln.Why = fol.piece + ", and keploy learns it as an echo of the call's answer"
 			}
+		}
+		if glued != "" && ln.Kind == KindNoise {
+			ln.Why = gluedNoise(glued, ln.Why)
 		}
 		// A leaf set aside as no source (follows.refuteSeen), and nothing
 		// else: an echo beside it stands as beside any source set aside
