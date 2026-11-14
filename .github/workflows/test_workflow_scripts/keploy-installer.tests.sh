@@ -41,14 +41,16 @@
 #     own, fail.
 #   - sysctl -n hw.optional.arm64 says FAKE_ARM64 when it is set, and fails
 #     (the key is absent, as on an Intel Mac) when it is not.
-#   - uname reports FAKE_UNAME_S / FAKE_UNAME_M when they are set; id -u says
-#     1000, or 0 in the root cases, whoever runs the suite; mountpoint says
-#     debugfs is mounted unless FAKE_NO_DEBUGFS is set.
+#   - uname reports FAKE_UNAME_S / FAKE_UNAME_M when they are set, and
+#     Linux / x86_64 when they are not, whatever machine runs the suite (a Mac
+#     too); id -u says 1000, or 0 in the root cases, whoever runs the suite;
+#     mountpoint says debugfs is mounted unless FAKE_NO_DEBUGFS is set.
 #   - the cases of a machine with no sudo (a debian or ubuntu container's
 #     root) run with no sudo on PATH at all.
 # keploy.sh itself runs unmodified, SOURCED the way users run it, under bash
 # and under zsh when it is installed; one case sources it from an interactive
-# shell on a terminal (util-linux script(1)). After the source, the shell logs
+# shell on a terminal (script(1): util-linux's, or the BSD one a Mac has).
+# After the source, the shell logs
 # that it lived on, job control before and after, and the status variables
 # keploy.sh left set.
 #
@@ -78,7 +80,7 @@
 #     shell it was sourced into, where typing keploy runs it; when sudo
 #     refuses, or the chown fails, the install fails.
 #   - the same holds for the Linux arm64 and the macOS (Apple Silicon)
-#     release, which the uname stub drives on any Linux.
+#     release, which the uname stub drives on any machine.
 #   - --oss as root does on Linux what a user with sudo does, but itself,
 #     with no sudo, whether the machine has sudo or not, and gives v2 no
 #     alias that runs keploy with sudo; the keploy it extracts and chowns is
@@ -104,7 +106,10 @@ set -u
 
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
 installer="$repo/keploy.sh"
-tmp=$(mktemp -d)
+# Its real path: a case's shell starts with no PWD (env -i), so it names its
+# directory as the system resolves it, and on macOS the temp directory is
+# under /var, a link to /private/var.
+tmp=$(mktemp -d) && tmp=$(cd "$tmp" && pwd -P) || exit 1
 trap '[ -n "${KEEP_TMP:-}" ] || rm -rf "$tmp"' EXIT
 
 failures=0
@@ -299,11 +304,15 @@ echo "fenced: mount $*" >> "$STUB_LOG"
 exit 1
 EOF
 
+# A case runs on Linux amd64 unless it names another OS or machine: the
+# cases that name neither are the Linux ones, and one that names only the
+# machine (aarch64, riscv64) is a Linux one too, so on a Mac the suite still
+# drives keploy.sh's Linux route there, and not the Mac's own.
 cat > "$stubs/uname" << 'EOF'
 #!/bin/sh
 case "$*" in
-  -s | "") [ -z "${FAKE_UNAME_S:-}" ] || { echo "$FAKE_UNAME_S"; exit 0; } ;;
-  -m) [ -z "${FAKE_UNAME_M:-}" ] || { echo "$FAKE_UNAME_M"; exit 0; } ;;
+  -s | "") echo "${FAKE_UNAME_S:-Linux}"; exit 0 ;;
+  -m) echo "${FAKE_UNAME_M:-x86_64}"; exit 0 ;;
 esac
 PATH=/usr/bin:/bin
 export PATH
@@ -432,8 +441,15 @@ install() {
   if [ -n "$case_pty" ]; then
     local cmd flags=(-f)
     [ "$run_shell" = bash ] && flags=(--norc --noprofile)
-    printf -v cmd '%q ' "$run_shell" "${flags[@]}" -i -c "$body" install "$src" "$@"
-    runner=(bash "$repo/.github/workflows/test_workflow_scripts/hang_guard.sh" 120 script -qec "$cmd" /dev/null)
+    if [ "$have_pty" = util-linux ]; then
+      printf -v cmd '%q ' "$run_shell" "${flags[@]}" -i -c "$body" install "$src" "$@"
+      runner=(bash "$repo/.github/workflows/test_workflow_scripts/hang_guard.sh" 120 script -qec "$cmd" /dev/null)
+    else
+      # The BSD script(1) takes the command as its arguments. hang_guard.sh
+      # reads /proc, which a Mac does not have, so the same 120 s bound is
+      # kept by mac_bounded instead.
+      runner=(/bin/bash -c "$MAC_BOUNDED" mac_bounded 120 script -q /dev/null "$run_shell" "${flags[@]}" -i -c "$body" install "$src" "$@")
+    fi
   else
     runner=("$run_shell" -c "$body" install "$src" "$@")
   fi
@@ -676,7 +692,7 @@ suite() {
     check "the release's keploy is installed in ~/.keploy/bin" installed
     check "job control is still on afterwards" job_control on
   else
-    echo "     skipped: no util-linux script(1) here to give the shell a terminal"
+    echo "     skipped: no script(1) here to give the shell a terminal"
   fi
 
   echo "== --oss by a user with sudo (-isCI), from a repo root"
@@ -998,12 +1014,38 @@ suite() {
 }
 ent_run_with_args() { ent_ran_with "-noRoot"; }
 
+# mac_bounded SECONDS CMD...: runs CMD and returns its status; if it still
+# runs after SECONDS, says so on stderr, as hang_guard.sh does, and sends it
+# TERM (the BSD script(1) then hangs up its terminal, which ends the shell
+# on it). Plain bash 3.2, the one a Mac has, with no /proc.
+# shellcheck disable=SC2016
+MAC_BOUNDED='secs=$1; shift
+"$@" &
+pid=$!
+( n=0
+  while kill -0 "$pid" 2> /dev/null; do
+    if [ "$n" -ge "$secs" ]; then
+      echo "hang guard: still running after ${secs}s: $*" >&2
+      kill -TERM "$pid" 2> /dev/null
+      exit 0
+    fi
+    sleep 1
+    n=$((n + 1))
+  done ) &
+wd=$!
+wait "$pid"
+st=$?
+wait "$wd"
+exit "$st"'
+
 have_pty=""
 if script -qec true /dev/null < /dev/null > /dev/null 2>&1; then
-  have_pty=1
+  have_pty=util-linux
+elif [ "$(uname -s)" = Darwin ] && script -q /dev/null true < /dev/null > /dev/null 2>&1; then
+  have_pty=bsd
 elif [ -n "${REQUIRE_PTY:-}" ]; then
   # CI sets this: the interactive case is the only one that sees job control on.
-  fail "util-linux script(1) is required (REQUIRE_PTY is set) but is missing or does not work"
+  fail "script(1) is required (REQUIRE_PTY is set) but is missing or does not work"
 fi
 
 run_shell=bash
