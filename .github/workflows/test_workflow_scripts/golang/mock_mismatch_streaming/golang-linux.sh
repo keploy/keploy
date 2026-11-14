@@ -17,11 +17,14 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 # no window and carried no unmatched_calls. Success here is INVERTED: we assert the
 # streaming mismatch is reported, not that every test passes.
 #
-# A keploy built from this tree records no streaming answer as a test case
-# (models.IsHTTPStreamResponse): with it as the recorder the set holds the
+# keploy records no streaming answer as a test case from 3.7.2 on
+# (models.IsHTTPStreamResponse, #5236): with such a recorder the set holds the
 # text/plain test and no stream, the record log says so for each stream, and
-# the forced miss is asserted on the text/plain test alone. A released
-# recorder records the streams, and the streaming path must report it on them.
+# the forced miss is asserted on the text/plain test alone. A recorder before
+# 3.7.2 records the streams, and the streaming path must report it on them.
+# Which one recorded is read from its version (streams_recorded, below), not
+# from where its binary is: the released keploy ("latest") is one or the
+# other depending on the release.
 
 echo "$RECORD_BIN"
 echo "$REPLAY_BIN"
@@ -42,6 +45,28 @@ case "${REPLAY_BIN:-}" in
         exit 0
         ;;
 esac
+
+# streams_recorded: the recorder records streaming answers as test cases,
+# read from what its --version says on stdout ("Keploy <version>"; its banner
+# goes to stderr), not from where its binary is. A release before 3.7.2
+# records them; 3.7.2 and later (#5236) do not, and neither does a build of
+# this tree, which says 3-dev (utils.DevVersion) or a commit hash. Anything
+# else cannot be placed, and fails the lane before anything is set up.
+recorder_version=$("$RECORD_BIN" --version 2>/dev/null | awk '$1 == "Keploy" && v == "" {v = $NF} END {print v}')
+release=${recorder_version#v}
+if [[ "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [ "$(printf '%s\n%s\n' "$release" 3.7.2 | sort -V | sed -n 1p)" != 3.7.2 ]; then
+        streams_recorded=true
+    else
+        streams_recorded=false
+    fi
+elif [ "$recorder_version" = 3-dev ] || [[ "$recorder_version" =~ ^[0-9a-f]{7,40}$ ]]; then
+    streams_recorded=false
+else
+    echo "::error::the recorder ($RECORD_BIN) says its version is '$recorder_version': neither a release (x.y.z) nor a build of this tree (3-dev, a commit), so whether it records streams cannot be known"
+    exit 1
+fi
+echo "recorder: keploy $recorder_version; records streams as test cases: $streams_recorded"
 
 if [ -f "./keploy.yml" ]; then
     rm ./keploy.yml
@@ -116,14 +141,10 @@ stream_tests() {
         esac
     done
 }
-case "$RECORD_BIN" in
-    */build/keploy|*/build-no-race/keploy) streams_recorded=false ;;
-    *) streams_recorded=true ;;
-esac
 if [ "$streams_recorded" = false ]; then
     stream_count=$(stream_tests | grep -c . || true)
     if [ "$stream_count" -ne 0 ]; then
-        echo "::error::this tree's keploy recorded $stream_count streaming answers as test cases; want none"
+        echo "::error::the recorder (keploy $recorder_version) recorded $stream_count streaming answers as test cases; want none"
         stream_tests
         docker compose down 2>/dev/null || true
         exit 1

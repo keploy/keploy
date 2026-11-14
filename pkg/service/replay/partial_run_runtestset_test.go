@@ -351,10 +351,13 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 		return models.AppError{
 			AppErrorType: errType,
 			ExitCode:     1,
-			AppLogs:      "panic: runtime error: out of memory\n",
+			AppLogs:      prExitLogs,
 		}
 	}
 }
+
+// prExitLogs is the last lines the stand-in application logged as it exited.
+const prExitLogs = "panic: runtime error: out of memory\n"
 
 // runCalls is how many times the application was started.
 func (f *prInstr) runCalls() int {
