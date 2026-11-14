@@ -281,8 +281,6 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 	}
 	a.proven.workers[id] = workerClaim{claimant: me, key: req.Key, dir: req.Dir, declared: declared, es: es}
 	a.provenMu.Unlock()
-	// An instance a gone worker held gives the new one nothing.
-	a.dropWorkerGivens(id)
 	if es != nil {
 		// Calls the worker makes from now while none of its tests is open
 		// are its key's.
@@ -329,7 +327,6 @@ func (a *Agent) dropWorker(id uint32) {
 	a.provenMu.Lock()
 	delete(a.proven.workers, id)
 	a.provenMu.Unlock()
-	a.dropWorkerGivens(id)
 	a.endInstances([]uint32{id})
 }
 
@@ -379,6 +376,12 @@ func (a *Agent) endInstances(ids []uint32) {
 	// worker from here on, whatever the proxy and hooks do next.
 	for _, id := range ids {
 		starts.Default.InstanceEnded(id)
+	}
+	// What each worker gave outside its tests ends with it. No later claim
+	// is given its value (InstanceValue gives each one once), so nothing
+	// else would ever drop them.
+	for _, id := range ids {
+		a.dropWorkerGivens(id)
 	}
 	if is, ok := a.Proxy.(coreAgent.InstanceServer); ok && a.replaying() {
 		for _, id := range ids {

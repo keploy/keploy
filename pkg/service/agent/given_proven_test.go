@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -293,6 +294,38 @@ func TestAWorkerValueEndsWithItsClaim(t *testing.T) {
 	a.scopeMu.Lock()
 	defer a.scopeMu.Unlock()
 	require.Empty(t, a.workerGiven, "a new session starts with none")
+}
+
+// What a test worker of a run of several gave outside its tests ends with
+// its instance, when its process exits or its claim is taken back: no later
+// claim is given that instance's value, so nothing else would drop them.
+func TestAWorkersOutsideValuesEndWithItsInstance(t *testing.T) {
+	a, h := workerAgent(t, models.MODE_RECORD, 4)
+	ctx := context.Background()
+	gone, stays := child(t), child(t)
+	claimWorker(t, a, gone.Process.Pid, "a", 2)
+	claimWorker(t, a, stays.Process.Pid, "b", 2)
+	_, serr := a.ProvenGive(as(gone.Process.Pid), give("uniq", "u-gone", ""))
+	require.Nil(t, serr)
+	_, serr = a.ProvenGive(as(stays.Process.Pid), give("uniq", "u-stays", ""))
+	require.Nil(t, serr)
+	held := func() map[uint32][]models.GivenValue {
+		a.scopeMu.Lock()
+		defer a.scopeMu.Unlock()
+		return maps.Clone(a.workerGiven)
+	}
+	require.Len(t, held(), 2)
+
+	kill(t, gone)
+	require.NoError(t, a.wire.lock(ctx))
+	a.endGoneWorkers(ctx)
+	a.wire.unlock()
+	require.Equal(t, []uint32{1}, h.endedIDs())
+	require.Equal(t, map[uint32][]models.GivenValue{2: {{Name: "given:uniq", Value: "u-stays"}}}, held(),
+		"the gone worker's value went with its instance; the live one's stays")
+
+	a.dropWorker(2)
+	require.Empty(t, held(), "a claim taken back takes its worker's values with it")
 }
 
 // What a test process gives outside its tests is held only under a live
