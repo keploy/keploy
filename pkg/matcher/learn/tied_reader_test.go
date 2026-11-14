@@ -131,3 +131,36 @@ func TestATiedCallsDecideIsRefusedUnreadOnlyForARecordingItAsked(t *testing.T) {
 	unread := unreadPayload(sentInTurnMock("mock-1790", sentInTurnRec, oAt.Add(-time.Millisecond), oAt.Add(-900*time.Microsecond)))
 	oRefused(t, "a Decide of the call whose places hold an unread recording", oWord(t, Decide(tiedInput(r, dc, place, unread)), "95ad0386", "4fbd76ad"), RefusalUnread, "mock-1790")
 }
+
+// No Reader, and a Reader let go, are no index: Release of either does
+// nothing, and a Decide given either builds its own index and decides as
+// with none. Each is asked under recover, so a guard that let one through
+// fails here by its line, never by a panic.
+func TestANilOrReleasedReaderIsNoIndex(t *testing.T) {
+	dc := oDrifts()
+	place := RawOf(tiedBigMock("mock-1784", sentInTurnRec, oAt.Add(-8*time.Microsecond), oAt.Add(220*time.Microsecond)), false)
+	noPanic := func(what string, f func()) {
+		t.Helper()
+		defer func() {
+			if p := recover(); p != nil {
+				t.Errorf("%s panicked: %v; want nothing done, or an index of its own", what, p)
+			}
+		}()
+		f()
+	}
+	decided := func(what string, r *Reader) {
+		t.Helper()
+		noPanic(what, func() {
+			if d := oWord(t, Decide(tiedInput(r, dc, place)), "95ad0386", "4fbd76ad"); d.Outcome != OutcomeValue || d.From.Mock != "mock-1784" || !d.EitherOrder {
+				t.Errorf("%s: %s (either order %v); want bound to mock-1784 in either order, as with an index of its own", what, oDescribe([]Decision{d}), d.EitherOrder)
+			}
+		})
+	}
+	var none *Reader
+	noPanic("Release of no Reader", none.Release)
+	decided("a Decide given no Reader", none)
+	r := NewReader(dc)
+	r.Release()
+	noPanic("a second Release of a Reader", r.Release)
+	decided("a Decide given a released Reader", r)
+}
