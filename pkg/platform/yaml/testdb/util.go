@@ -190,11 +190,12 @@ func firstNonUTF8Body(tc models.TestCase) (string, bool) {
 	return "", true
 }
 
+// EncodeTestcase writes no debug line for a test case it encodes: it runs for
+// every recorded test case, and the recorder already logs each one it saves.
+// The lines it wrote said that an encoding began and ended, two or three for
+// each test case, and a gRPC case's line held its metadata's values, which
+// carry the caller's credentials (authorization, cookies, api keys).
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
-	logger.Debug("Starting test case encoding",
-		zap.String("kind", string(tc.Kind)),
-		zap.String("name", tc.Name))
-
 	doc := &yaml.NetworkTrafficDoc{
 		Version:     tc.Version,
 		Kind:        tc.Kind,
@@ -206,7 +207,6 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 	switch tc.Kind {
 	case models.HTTP:
-		logger.Debug("Encoding HTTP test case")
 		doc.Curl = tc.Curl
 
 		httpSchema := buildHTTPSchema(tc, logger)
@@ -216,15 +216,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			return nil, err
 		}
 	case models.GRPC_EXPORT:
-		logger.Debug("Encoding gRPC test case")
-
 		grpcSpec := buildGrpcSpec(tc)
-
-		logger.Debug("gRPC schema created",
-			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
-			zap.Any("response_headers", grpcSpec.GrpcResp.Headers),
-			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),
-			zap.Int("response_body_length", len(grpcSpec.GrpcResp.Body.DecodedData)))
 
 		// Create a new YAML node and encode the gRPC schema
 		var node yamlLib.Node
@@ -236,7 +228,6 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 		// Set the node as the spec
 		doc.Spec = node
-		logger.Debug("Successfully encoded gRPC test case")
 	default:
 		utils.LogError(logger, nil, "failed to marshal the testcase into yaml due to invalid kind of testcase")
 		return nil, errors.New("type of testcases is invalid")

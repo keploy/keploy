@@ -3,6 +3,7 @@ package testdb
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"reflect"
 	"testing"
@@ -13,6 +14,8 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
@@ -36,6 +39,37 @@ func grpcTestCase() models.TestCase {
 		Kind:    models.GRPC_EXPORT,
 		Name:    "test-1",
 		Noise:   map[string][]string{},
+	}
+}
+
+// EncodeTestcase runs for every test case a recording saves, and a recording
+// agent may run with debug on: it writes no line at debug, for an HTTP or a
+// gRPC test case (whose metadata carries the caller's credentials), and a
+// debug logger costs it no allocation a no-op logger does not.
+func TestEncodeTestcaseWritesNoDebugLine(t *testing.T) {
+	const planted = "Bearer planted-credential"
+	grpcCase := grpcTestCase()
+	grpcCase.GrpcReq.Headers = models.GrpcHeaders{
+		PseudoHeaders:   map[string]string{":method": "POST", ":path": "/svc.Users/Get"},
+		OrdinaryHeaders: map[string]string{"authorization": planted, "content-type": "application/grpc"},
+	}
+	grpcCase.GrpcResp.Headers = models.GrpcHeaders{OrdinaryHeaders: map[string]string{"set-cookie": planted}}
+	httpCase := httpTestCase()
+	httpCase.HTTPReq.Header = map[string]string{"Authorization": planted}
+	debugJSON := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(io.Discard), zap.DebugLevel))
+	for _, tc := range []models.TestCase{httpCase, grpcCase} {
+		core, logs := observer.New(zap.DebugLevel)
+		if _, err := EncodeTestcase(tc, zap.New(core)); err != nil {
+			t.Fatalf("%s: EncodeTestcase: %v", tc.Kind, err)
+		}
+		if logs.Len() != 0 {
+			t.Errorf("%s: EncodeTestcase wrote %d lines at debug; want none: %+v", tc.Kind, logs.Len(), logs.All())
+		}
+		nop := testing.AllocsPerRun(20, func() { _, _ = EncodeTestcase(tc, zap.NewNop()) })
+		debug := testing.AllocsPerRun(20, func() { _, _ = EncodeTestcase(tc, debugJSON) })
+		if debug > nop {
+			t.Errorf("%s: EncodeTestcase allocates %.0f times with a debug logger and %.0f with a no-op one; debug must add none", tc.Kind, debug, nop)
+		}
 	}
 }
 
