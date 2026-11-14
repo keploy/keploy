@@ -893,6 +893,12 @@ func TestHandleConnectionNotesARefusingDependencyOfAMockRecord(t *testing.T) {
 			dest.Instance = 4
 			p := New(zap.NewNop(), fakeDestInfo{dest: dest}, cfg)
 			p.nsswitchData = []byte("preseeded-by-test") // see testProxy
+			if tc.via == probe {
+				// The probe dials the destination to read its greeting with
+				// the MySQL parser's matcher; with no parser it dials nothing
+				// and the connection's own dial is the one that fails.
+				p.Integrations[integrations.MYSQL] = mysql.New(zap.NewNop())
+			}
 			sink := chanSink{mocked: make(chan models.MockedRow, 1), unreached: make(chan models.UnreachedRow, 1)}
 			p.SetTopologySink(sink)
 			if mode == models.MODE_RECORD {
