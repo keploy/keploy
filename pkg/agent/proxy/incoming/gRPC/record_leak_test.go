@@ -91,6 +91,13 @@ func TestRecordIncomingEndsAnUnansweredCallsWindowAtTheConnectionsEnd(t *testing
 			defer cancel()
 			cliApp, cliProxy := net.Pipe()
 			appProxy, appApp := net.Pipe()
+			// Both pipes close however the row ends: a t.Fatal before the
+			// connection's end leaves no RecordIncoming reading them.
+			t.Cleanup(func() {
+				for _, c := range []net.Conn{cliApp, cliProxy, appProxy, appApp} {
+					_ = c.Close()
+				}
+			})
 			tcCh := make(chan *models.TestCase, 4)
 			done := make(chan struct{})
 			go func() {
