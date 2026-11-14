@@ -54,7 +54,18 @@ func closeBegunNotDoneOnDarwin(t *testing.T) (p *Proxy, pc *pairedConn, app *net
 		defer close(closeDone)
 		_ = reader.Close()
 	}()
+	// The close marks the descriptor closing once it has read the
+	// application's socket: at once, with nothing of the application's on
+	// its way. A close that finds bytes on their way reads the socket for
+	// them first (plainOnItsWay), until data, a FIN or a reset comes, and
+	// none comes here: fail, and close the application's socket so its FIN
+	// ends that read and the close (let) can finish.
+	deadline := time.Now().Add(10 * time.Second)
 	for !errors.Is(readProxySide(proxySide).err, net.ErrClosed) {
+		if time.Now().After(deadline) {
+			_ = app.Close()
+			t.Fatalf("the proxy's close did not mark its descriptor closing in 10s: it waited for bytes on their way, and the application wrote none after the 10 it read (the close's read of the application's socket: %+v)", pc.wroteAtClose.Load())
+		}
 		runtime.Gosched()
 	}
 	var once sync.Once
