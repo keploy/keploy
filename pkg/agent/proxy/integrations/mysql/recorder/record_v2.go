@@ -1937,10 +1937,27 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				// records. So they are taken off the stream as at every command
 				// the server answers (takeMalformedAnswers, which sets the
 				// floor at this command), and the walk starts the answer after
-				// them, or after the packet a fault of that read stopped at:
-				// what it read before is no packet of the answer either.
+				// them.
+				//
+				// proven: an ERR 1835 the server sent to one of those commands
+				// was captured before this command. The server answers in
+				// order, so the whole of the PREPARE's response, sent before
+				// that ERR, was captured before this command too, and the
+				// floor at this command leaves only this command's answer on
+				// the stream: the first packet read there is its first, even
+				// one off its sequence, a packet of the answer left out as at
+				// any command, and the next cut is proven as at any response
+				// left out. Walked from after that packet, a client that
+				// waited for an answer of that one packet was stopped at the
+				// cut, where main records the rest. With none taken, the
+				// PREPARE's response may go on past this command (a client
+				// that sent it before that response ended), so nothing proves
+				// where this command's answer starts, and the packet a fault
+				// of that read stopped at is no proof either: the walk starts
+				// after it.
+				proven := false
 				if errors.Is(err, ErrFramingLost) {
-					_, why, merr := takeMalformedAnswers(ctx, logger, sess, malformed, first.ConnSeq, respFirst, mysql.CommandStatusToString(commandByte(cmdBuf)), fakeconn.Chunk{}, &carry)
+					took, why, merr := takeMalformedAnswers(ctx, logger, sess, malformed, first.ConnSeq, respFirst, mysql.CommandStatusToString(commandByte(cmdBuf)), fakeconn.Chunk{}, &carry)
 					malformed = nil
 					if why != "" {
 						return stopIn(nil, reqTs, found("V2: mysql ERR to a command without an answer cannot be told from the next answer", framingLost("%s", why)))
@@ -1949,9 +1966,20 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 						// Nothing is handed on (carry) after a fault.
 						err = merr
 					}
-					if carry != nil {
+					// The walk is marked again where the answer starts: at the
+					// packet handed on, which is its first, or before the next
+					// packet, which will be. Where reading that first packet
+					// faulted, it was walked, and is a packet of the answer
+					// left out when proven: the walk keeps it after the mark
+					// it had, and a proven cut asks only where the walk since
+					// that mark ended (packetWalk.cut). Unproven, the walk
+					// starts after it.
+					proven = took > 0
+					switch {
+					case proven && merr != nil:
+					case carry != nil:
 						walk.markAt(carry[3])
-					} else {
+					default:
 						_, _ = sess.DestStream.Peek()
 						walk.mark(respFirst)
 					}
@@ -1960,12 +1988,12 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				if err := fail(reqTs, err); err != nil {
 					return err
 				}
-				// Nothing proves where this command's answer starts: settle
-				// read a packet that is neither the held PREPARE's EOF nor that
-				// answer's first, or one that may be either. So the next cut is
-				// proven only by a walk that starts at that answer's own start
-				// (packetWalk.cut).
-				cutUnproven = true
+				// Unless proven, nothing proves where this command's answer
+				// starts: settle read a packet that is neither the held
+				// PREPARE's EOF nor that answer's first, or one that may be
+				// either. So the next cut is proven only by a walk that starts
+				// at that answer's own start (packetWalk.cut).
+				cutUnproven = !proven
 				continue
 			}
 			// The ERRs a server sent to the commands without an answer before
