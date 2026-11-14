@@ -1,6 +1,7 @@
 package mock
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -96,5 +97,51 @@ func TestTestAtUsesTheOnlyOpenTestWhenTheCallerHasNone(t *testing.T) {
 	tests = append(tests, models.ScopeWindow{Name: "other", Start: at.Add(-time.Second), End: at.Add(time.Second), PID: 31})
 	if got := testAt(tests, 10, 0, at); got != "" {
 		t.Fatalf("two workers with open tests must be ambiguous, got %q", got)
+	}
+}
+
+// With app starts too, an idle answer (capturedMock.idle: a worker's pop the
+// server never answered) is no test's: recorded inside a test's window, it
+// goes where a call made outside every window does, to its app start's
+// mocks, or to its runner's for a call of no start. A call that is not idle
+// stays the test's. So with the calls and the test stamped with the keploy
+// instance the runner claimed, as a claimed run records them.
+func TestClassifyPutsAnIdleAnswerWhereNoTestOwnsIt(t *testing.T) {
+	ms := func(n int) time.Time {
+		return time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC).Add(time.Duration(n) * time.Millisecond)
+	}
+	names := func(es []models.MockEntry) []string {
+		var out []string
+		for _, e := range es {
+			out = append(out, e.Name)
+		}
+		return out
+	}
+	for _, instance := range []uint32{0, 3} {
+		t.Run(fmt.Sprintf("instance %d", instance), func(t *testing.T) {
+			suites := []models.SuiteSpan{{Dir: "/r", Start: ms(0), End: ms(500)}}
+			tests := []models.ScopeWindow{{Name: "TestJob", Start: ms(100), End: ms(200), PID: 10, Instance: instance}}
+			starts := []models.ScopeWindow{{App: true, Ref: "s1", Name: "worker#1", Dir: "/r", Program: "worker", N: 1, Ready: ms(50), Worker: 10}}
+			mocks := []capturedMock{
+				{name: "push", ts: ms(150), pid: 10, instance: instance},
+				{name: "app-get", ts: ms(160), ref: "s1", instance: instance},
+				{name: "app-pop", ts: ms(190), ref: "s1", instance: instance, idle: true},
+				{name: "runner-pop", ts: ms(195), pid: 10, instance: instance, idle: true},
+			}
+			p := classify(tests, starts, suites, mocks)
+			if got := names(p.tests["TestJob"]); len(got) != 2 || got[0] != "push" || got[1] != "app-get" {
+				t.Fatalf("TestJob's mocks = %v, want [push app-get]", got)
+			}
+			boot := map[string][]string{}
+			for _, b := range p.boots {
+				boot[b.Dir+"|"+b.Key] = names(b.Mocks)
+			}
+			if got := boot["/r|worker#1"]; len(got) != 1 || got[0] != "app-pop" {
+				t.Fatalf("the app start's mocks = %v, want [app-pop]; all %v", got, boot)
+			}
+			if got := boot["/r|"]; len(got) != 1 || got[0] != "runner-pop" {
+				t.Fatalf("the runner's mocks = %v, want [runner-pop]; all %v", got, boot)
+			}
+		})
 	}
 }

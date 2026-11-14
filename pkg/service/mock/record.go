@@ -844,6 +844,8 @@ func (m *mockService) Record(ctx context.Context) error {
 	// (models.CaptureLossUnattributed), which leaves it without a verdict, so
 	// judging keeps its previous recording. A build that does not judge the
 	// record would keep their recordings short of the call, so it keeps none.
+	// An idle answer (capturedMock.idle) charges no test: it is the set's
+	// wherever it was recorded (setScopeMocks), in no test's recording.
 	if calls := chargeUnattributed(windows, dataPlane(recorded)); len(calls) > 0 {
 		judging := provenswitch.On() && recordsJudged.Load()
 		for _, c := range calls {
@@ -1345,8 +1347,16 @@ type capturedMock struct {
 	// unread: an answer the client never read (models.Mock.IsUndelivered),
 	// so, under either switch, among no case's mocks either (correlateCases).
 	unread bool
-	start  string
-	ref    string
+	// idle: under the proven switch, an answer its parser declares idle
+	// (models.IsIdleAnswer: a worker's poll that found nothing, a blocking
+	// pop the server never answered). Whether a run's worker makes that
+	// call before or after a test's end is a matter of timing, not of what
+	// the test does, so no window holds it: it is the set's (setScopeMocks),
+	// worker:'s when recorded once a test had begun, as keploy record maps
+	// it (models.DeriveWindowMappings).
+	idle  bool
+	start string
+	ref   string
 	// instance is the keploy instance (a test worker's) the call's
 	// connection was stamped with (models.Mock.Instance): only a window of
 	// that worker's (ScopeWindow.Instance) holds it. 0 for none.
@@ -1366,7 +1376,8 @@ func capturedOf(mk *models.Mock) capturedMock {
 	// makes the call it recorded.
 	unread := mk.IsUndelivered()
 	protocol := provenswitch.On() && mk.IsProtocolPhase() || unread
-	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, unread: unread, start: mk.Start, ref: mk.StartRef}
+	idle := provenswitch.On() && models.IsIdleAnswer(mk)
+	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, unread: unread, idle: idle, start: mk.Start, ref: mk.StartRef}
 }
 
 // stagingSetID returns the staging set name record captures into while recording
@@ -1381,7 +1392,8 @@ func stagingSetID(name string) string { return name + yaml.MockStagingSuffix }
 // place (capturedMock.ts) falls within, producing the mappings.yaml structure. A mock
 // that matches no window (e.g. a boot-time handshake before the first scope)
 // is left out of every test's mapping — it stays reusable/session-tier at
-// replay, exactly as the timestamp-based fallback would treat it.
+// replay, exactly as the timestamp-based fallback would treat it. So is an
+// idle answer (capturedMock.idle), wherever it was recorded.
 //
 // When a mock carries a source PID it is attributed to the SAME worker's window,
 // so another worker's overlapping window does not take it; two windows open at
@@ -1434,6 +1446,10 @@ func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bo
 		return best
 	}
 	for _, mk := range mocks {
+		if mk.idle {
+			// No test's, wherever it was recorded (capturedMock.idle).
+			continue
+		}
 		best := -1
 		if mk.pid != 0 {
 			// Attribute to the same worker's window: exact for a call the
@@ -1458,7 +1474,9 @@ func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bo
 // unattributedCall is a call from a process in no test worker's keploy
 // instance (instance 0), or in an ended worker's (capturedMock.ended), made
 // while test workers' tests were open and no test of a run of one worker
-// was: no test's window holds it (correlateScopes).
+// was: no test's window holds it (correlateScopes). An idle answer
+// (capturedMock.idle) is none: it is the set's wherever it was recorded
+// (setScopeMocks), so no test's recording is short of it.
 type unattributedCall struct {
 	mock  string
 	pid   uint32
@@ -1468,13 +1486,15 @@ type unattributedCall struct {
 // chargeUnattributed charges each test open at an unattributed call with it
 // (models.CaptureLossUnattributed, What naming its latest such call and the
 // ended worker it came from, if any), on a copy of the test's evidence, and
-// returns the calls in the order of mocks.
+// returns the calls in the order of mocks. An idle answer (capturedMock.idle)
+// charges no test: it is the set's wherever it was recorded (setScopeMocks),
+// so no test's recording is short of it.
 func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []unattributedCall {
 	var out []unattributedCall
 	charged := map[int]models.CaptureLoss{}
 	latest := map[int]time.Time{}
 	for _, mk := range mocks {
-		if mk.instance != 0 {
+		if mk.instance != 0 || mk.idle {
 			continue
 		}
 		var open []int
@@ -1782,12 +1802,18 @@ func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []m
 }
 
 // held reports whether a test's window holds mk, so no set scope lists it.
+// No window holds an idle answer (capturedMock.idle).
 // A test worker's call is held only by its own worker's windows, as
 // correlate keeps it: one made outside them is the set's, though another
 // worker's test was open. Any other call is held by any window open at its
 // time: inside a worker's test, a call from no worker is charged to it
 // (chargeUnattributed).
 func held(windows []models.ScopeWindow, mk capturedMock) bool {
+	if mk.idle {
+		// An idle answer is the set's wherever it was recorded
+		// (capturedMock.idle).
+		return false
+	}
 	if mk.instance == 0 {
 		return containing(windows, mk.ts) != ""
 	}
