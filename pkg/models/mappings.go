@@ -951,7 +951,9 @@ const errRecordedNote = "a test's harness note (harness_note) is not a string: %
 
 // recordedNoteYAML is a test entry's harness_note:, whatever the proven switch, as
 // recordedSeedYAML: one that is not a string is an error, never a reason to
-// read the entry without it.
+// read the entry without it. Only the entry's own key counts, the one keploy
+// writes: a harness_note a merge key (<<) brings is no note (JSON: a key that
+// differs in case only is none).
 func recordedNoteYAML(node *yaml.Node) (string, error) {
 	if !nodeHasField(node, "harness_note") {
 		return "", nil

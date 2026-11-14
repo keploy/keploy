@@ -85,3 +85,26 @@ func TestMappedTestCaseLeavesAHandWrittenNoteAlone(t *testing.T) {
 		}
 	}
 }
+
+// The note is read only from the entry's own harness_note key, the one keploy
+// writes: a JSON key that differs in case only, or a harness_note a YAML merge
+// key brings, of any shape, is no note and no error.
+func TestMappedTestCaseReadsOnlyItsOwnHarnessNoteKey(t *testing.T) {
+	for _, y := range []string{
+		"base: &b\n  harness_note: from the anchor\ntc:\n  <<: *b\n  id: ui::t\n",
+		"base: &b\n  harness_note: [a, b]\ntc:\n  <<: *b\n  id: ui::t\n",
+	} {
+		var doc struct {
+			TC MappedTestCase `yaml:"tc"`
+		}
+		if err := yaml.Unmarshal([]byte(y), &doc); err != nil || doc.TC.ID != "ui::t" || doc.TC.Note != "" {
+			t.Fatalf("YAML %q: %+v, %v", y, doc.TC, err)
+		}
+	}
+	for _, j := range []string{`{"id":"ui::t","HARNESS_NOTE":"upper"}`, `{"id":"ui::t","Harness_Note":[1]}`} {
+		var tc MappedTestCase
+		if err := json.Unmarshal([]byte(j), &tc); err != nil || tc.ID != "ui::t" || tc.Note != "" {
+			t.Fatalf("JSON %q: %+v, %v", j, tc, err)
+		}
+	}
+}
