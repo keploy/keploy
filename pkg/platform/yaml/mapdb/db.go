@@ -205,7 +205,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 // keepEntries gives each test entry Insert rebuilt from the tests' mocks
 // alone the rest of its entry (models.MappedTestCase): what the caller wrote
 // for it, else what the file held for it, so a write of a test's mocks keeps
-// its cases, dir, starts, at, real, given, variables, key and seed. The mocks stay the
+// its cases, dir, starts, at, end, real, given, variables, key and seed. The mocks stay the
 // rebuild's.
 func keepEntries(rebuilt *models.Mapping, onDisk, written []models.MappedTestCase) {
 	before := make(map[string]models.MappedTestCase, len(onDisk))
@@ -252,7 +252,9 @@ func entryOver(o, w models.MappedTestCase) models.MappedTestCase {
 		o.Starts = w.Starts
 	}
 	if !w.At.IsZero() {
-		o.At = w.At
+		// The end pairs with the begin of the record that wrote it: a
+		// write with another begin takes its end too, none included.
+		o.At, o.End = w.At, w.End
 	}
 	if len(w.Real) > 0 {
 		o.Real = w.Real
@@ -906,7 +908,10 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 			tc.Starts = in.Starts
 		}
 		if !in.At.IsZero() {
-			tc.At = in.At
+			// The end of this record's run of the test, none included (its
+			// scope never ended): an earlier record's end would pair with
+			// another begin (MappedTestCase.End).
+			tc.At, tc.End = in.At, in.End
 			// The values the test gave in this record's run of it (proven
 			// switch only, where every test that ran has its begin): they
 			// replace what an earlier record wrote, none included, as they

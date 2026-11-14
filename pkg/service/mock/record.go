@@ -931,6 +931,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			}
 			if provenswitch.On() {
 				stampBegins(byCase, windows)
+				stampEnds(byCase, windows)
 				stampReal(byCase, windows)
 				stampGiven(byCase, windows)
 				stampSeeds(byCase, windows)
@@ -1598,6 +1599,21 @@ func stampBegins(byCase map[string]models.MappedTestCase, windows []models.Scope
 		if tc.At.IsZero() || w.Start.Before(tc.At) {
 			tc.At = w.Start
 		}
+		byCase[w.Name] = tc
+	}
+}
+
+// stampEnds keeps, for each test, when it ended in this recording: the latest
+// end of its windows that began (stampBegins keeps their earliest begin), so
+// End - At spans every window of the name. A window still open has no end
+// and gives none. Nothing in a replay reads it (models.MappedTestCase.End).
+func stampEnds(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	for _, w := range windows {
+		if w.Start.IsZero() || !w.End.After(byCase[w.Name].End) {
+			continue
+		}
+		tc := byCase[w.Name]
+		tc.End = w.End
 		byCase[w.Name] = tc
 	}
 }
