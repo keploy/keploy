@@ -580,10 +580,13 @@ set -- "${forwarded_args[@]}"
 # there, and `rm -rf keploy.sh install.sh` afterwards. Downloads go to a
 # mktemp directory of the installer's own, removed when it is done. (The
 # installer the default route hands off to deleted ./install.sh and
-# ./keploy-enterprise.sh too, until the release that stopped it.)
+# ./keploy-enterprise.sh too, until the release that stopped it.) A template
+# under ${TMPDIR:-/tmp}, not a bare `mktemp -d`: macOS's mktemp ignores
+# TMPDIR without one (it takes the per-user directory confstr names), so the
+# caller's TMPDIR held only on Linux.
 if [ "$USE_OSS" = false ]; then
     echo "Installing Keploy"
-    keploy_installer_dir=$(mktemp -d) || {
+    keploy_installer_dir=$(mktemp -d "${TMPDIR:-/tmp}/keploy.XXXXXX") || {
         echo "Error: could not create a temporary directory to download the installer into." >&2
         return 1 2>/dev/null || exit 1
     }
@@ -617,8 +620,9 @@ fi
 # /tmp/LICENSE and /tmp/README.md, then removed /tmp/LICENSE, /tmp/README.md
 # and /tmp/READMEes-Es.md with sudo, whoever they belonged to; and when a download
 # or extraction failed, a /tmp/keploy already there (an earlier download,
-# another user's file) was what got moved into /usr/local/bin.
-keploy_tmp_dir=$(mktemp -d) || {
+# another user's file) was what got moved into /usr/local/bin. Under
+# ${TMPDIR:-/tmp} on every OS, as the installer's directory above.
+keploy_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/keploy.XXXXXX") || {
     echo "Error: could not create a temporary directory to download Keploy into." >&2
     return 1 2>/dev/null || exit 1
 }
