@@ -16,7 +16,6 @@ import (
 	"time"
 	"unsafe"
 
-	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -26,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/lru"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
@@ -70,7 +70,7 @@ var stmtIdentityCache = newStmtIdentityCache()
 // candidate while scanning the pool, so under plain-LRU
 // recency a pool holding more distinct texts than the cap would evict it between
 // candidates and re-scan it N times per command.
-func newStmtIdentityCache() *lru.TwoQueueCache[string, string] {
+func newStmtIdentityCache() *lru.TwoQueue[string, string] {
 	c, err := lru.New2Q[string, string](stmtIdentityCacheSize)
 	if err != nil {
 		// New2Q only errors on a non-positive size and the const is > 0, so this
@@ -107,7 +107,7 @@ var querySigCache = newQuerySigCache()
 // strictly worse than the unbounded map this replaces. 2Q keeps the
 // repeatedly-touched live query in its frequent list while the once-touched
 // candidates churn through the smaller recent list.
-func newQuerySigCache() *lru.TwoQueueCache[string, string] {
+func newQuerySigCache() *lru.TwoQueue[string, string] {
 	c, err := lru.New2Q[string, string](querySigCacheSize)
 	if err != nil {
 		// New2Q only errors on a non-positive size and querySigCacheSize is a
