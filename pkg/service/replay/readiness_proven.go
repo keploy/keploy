@@ -1174,7 +1174,7 @@ func (r *Replayer) appReady(ctx context.Context, testCases []*models.TestCase, t
 		if !started {
 			return true, ""
 		}
-		return waitForAppReady(ctx, r.logger, r.config, resolveTestSetProbeTarget(ctx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation), publishedPortsOf(r.logger, r.instrumentation).of(testSetID))), ""
+		return waitForAppReady(ctx, r.logger, r.config, probeTargetForSet(ctx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation), publishedPortsOf(r.logger, r.instrumentation).of(testSetID))), ""
 	}
 	p := provenReadiness{logger: r.logger, cfg: r.config, docker: utils.IsDockerCmd(utils.CmdType(r.config.CommandType))}
 	scheme, host, port, ok := firstDialTarget(ctx, r.config.Test, testCases, testSetID, r.logger, publishedPortsOf(r.logger, r.instrumentation).of(testSetID))

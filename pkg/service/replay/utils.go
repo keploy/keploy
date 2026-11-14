@@ -610,7 +610,7 @@ func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Confi
 		httpCeiling = time.Until(deadline)
 	}
 
-	if !probe.ok || httpCeiling <= 0 {
+	if !probe.ok || probe.tcpOnly || httpCeiling <= 0 {
 		return true
 	}
 
@@ -698,6 +698,10 @@ type httpProbeTarget struct {
 	// to; 0 when not known.
 	appPort uint16
 	ok      bool
+	// tcpOnly marks an address the set's tests dial whose kind has no
+	// HTTP round-trip to gate on (a gRPC test set): the TCP-accept stage
+	// is the whole gate.
+	tcpOnly bool
 	// src, when set, is where the target came from: the gate asks it again
 	// while probing, and takes the set's next target from it when the host
 	// turns out unable to reach this one.
@@ -743,6 +747,41 @@ func resolveTestSetProbeTarget(ctx context.Context, testCfg config.Test, testCas
 		reach: reach, published: published, seen: map[string]bool{},
 	}
 	return src.nextTarget(ctx)
+}
+
+// probeTargetForSet is the readiness gate's target for a test set: the
+// round-trip probe an HTTP set's resolved target allows, or, for a set whose
+// tests are not HTTP, the address those tests dial, which is gated on its
+// accepting a connection.
+//
+// A gRPC test set has no HTTP round-trip to gate on, so resolveTestSetProbeTarget
+// answers ok=false for it and the first test would otherwise fire when --delay
+// expires, ready or not: a loaded runner answers its first tests with
+// "connection refused", which reads as a failure rather than as an app that was
+// not up. A gRPC server has no health URL to point --health-url at, so the
+// address the test itself dials is the only evidence available.
+func probeTargetForSet(ctx context.Context, testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger, reach pkg.AppPortReachability, published func(context.Context, string, uint16) uint16) httpProbeTarget {
+	probe := resolveTestSetProbeTarget(ctx, testCfg, testCases, testSetID, logger, reach, published)
+	if probe.ok || setHasHTTPTest(testCases) {
+		return probe
+	}
+	_, host, port, ok := firstDialTarget(ctx, testCfg, testCases, testSetID, logger, published)
+	if !ok {
+		return probe
+	}
+	return httpProbeTarget{host: host, port: port, ok: true, tcpOnly: true}
+}
+
+// setHasHTTPTest reports whether any of a set's cases is an HTTP test, whose
+// resolved target the round-trip probe uses. A set with none is gated on the
+// address its cases dial accepting a connection.
+func setHasHTTPTest(testCases []*models.TestCase) bool {
+	for _, tc := range testCases {
+		if tc != nil && tc.Kind == models.HTTP {
+			return true
+		}
+	}
+	return false
 }
 
 // probeTargetSource walks a test set's HTTP tests, in order, for readiness-gate
