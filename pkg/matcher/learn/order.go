@@ -137,6 +137,13 @@ type decider struct {
 	// read the value as the application's clock (heldRead), which the time
 	// default settles on any field (timeDefault).
 	readClock bool
+	// aroundRead: the refusal instantLearned last gave is clock's of a read
+	// its call's window holds, at a word of a text that changed around it
+	// (noWordAround); around: that read checked by its form at its recorded
+	// word under the time default (amongBinds), which text keeps only where
+	// every other changed word of the text is put back at replay.
+	aroundRead bool
+	around     *Decision
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
 	encoded func() (string, *evPlace)
@@ -420,6 +427,13 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 		return []Decision{dc.refuse(path, bare, -1, rec, live, RefusalChangedShape, why, nil, dc.fieldNoise(path))}, true
 	}
 	var out []Decision
+	// arounds: the reads in out (by index) refused because the text changed
+	// around them, each with its check by form (dc.around).
+	type aroundAt struct {
+		at int
+		d  Decision
+	}
+	var arounds []aroundAt
 	done := map[*instantWord]bool{}
 	// A piece of one id is decided after the other words, since it asks the
 	// verdicts of the id's long words (mintedLong); it keeps its place in
@@ -439,7 +453,12 @@ words:
 				continue
 			}
 			done[w.Instant] = true
+			dc.around = nil
 			out = append(out, dc.textInstant(path, bare, rec, live, rd, w))
+			if dc.around != nil {
+				arounds = append(arounds, aroundAt{at: len(out) - 1, d: *dc.around})
+				dc.around = nil
+			}
 		case w.RecIdx < 0 || w.LiveIdx < 0:
 			d := dc.unpaired(path, bare, rec, live, rd)
 			whole = &d
@@ -462,7 +481,26 @@ words:
 	if whole != nil {
 		return append(out, *whole), true
 	}
+	for _, a := range arounds {
+		if allPutBack(out, a.at) {
+			out[a.at] = a.d
+		}
+	}
 	return out, false
+}
+
+// allPutBack reports whether every decision of out, a text's changed words,
+// but the one at skip is a word the replay puts its recorded value back at
+// (Caps.ClockAmongBinds): a Value or a Fresh value a variable binds there.
+// A read of the clock, a refusal, or any other word is not put back, so the
+// text around the read at skip would not compare as recorded.
+func allPutBack(out []Decision, skip int) bool {
+	for i, d := range out {
+		if i != skip && (d.Refusal != nil || d.Outcome != OutcomeValue && d.Outcome != OutcomeFresh) {
+			return false
+		}
+	}
+	return true
 }
 
 // mintedLong is long (idLongWords, indexes into rd.Words) as words where
@@ -1713,6 +1751,7 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 		return dc.cannotCheck(path, w.At, w.At.Word, c.r, c.l, "one run's value here is no instant")
 	}
 	c.word, c.noWord = clockWordOf(rec, live, rd, iw)
+	c.around = aroundWordOf(rec, iw, c.noWord)
 	c.claim = claimWhole(rd, iw)
 	if iw.Rec != nil && iw.Live != nil && !iw.ByText {
 		c.rm, c.lm = iw.Rec, iw.Live
@@ -1798,6 +1837,9 @@ type changedInstant struct {
 	byText, text bool
 	word         models.ClockWord
 	noWord       string
+	// around: where the text changed around the instant (noWordAround),
+	// the word it stands at in the recorded text (aroundWordOf).
+	around models.ClockWord
 	// claim is the JWT claim whose value whole the instant is, where the
 	// text is one claim of a token keploy opened (claimWhole); "" otherwise.
 	claim string
@@ -1838,9 +1880,25 @@ func clockWordOf(rec, live string, rd textReading, iw *instantWord) (word models
 	case rs == 0 && re == len(rec) && ls == 0 && le == len(live):
 		return word, ""
 	case rec[:rs] != live[:ls] || rec[re:] != live[le:]:
-		return word, "the text around it changed too"
+		return word, noWordAround
 	}
 	return models.ClockWordOf(rec, rs, re), ""
+}
+
+// noWordAround is clockWordOf's noWord for a read whose text changed on a
+// side of it.
+const noWordAround = "the text around it changed too"
+
+// aroundWordOf is the word iw, an instant rd reads, stands at in rec, its
+// leaf's recorded text as written, where noWord says the text changed
+// around it (noWordAround) and text stands on a side of it: the word a
+// replay that puts the text's other words back reads it at (amongBinds).
+// Zero otherwise.
+func aroundWordOf(rec string, iw *instantWord, noWord string) models.ClockWord {
+	if rs, re := iw.RecAt[0], iw.RecAt[1]; noWord == noWordAround && (rs > 0 || re < len(rec)) {
+		return models.ClockWordOf(rec, rs, re)
+	}
+	return models.ClockWord{}
 }
 
 // claimWhole is the claim of a JWT that rd, a reading of a leaf's text,
@@ -2358,7 +2416,7 @@ func (dc *decider) namedIn(spans []instant, m moment, by func(h, m moment) bool)
 // (7), a client test's own value (8); else refused. A field keploy.yml
 // declares a read of the clock is then decided by its rule (declaredClock).
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
-	dc.readClock = false
+	dc.readClock, dc.aroundRead = false, false
 	d := dc.instantLearned(path, at, n, c)
 	src, declared := dc.source(path)
 	declared = declared && src.Kind == SourceClock
@@ -3080,6 +3138,7 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 			return dc.cannotCheck(path, at, n, r, l, "its two runs write it in different layouts")
 		}
 		if c.noWord != "" {
+			dc.aroundRead = c.noWord == noWordAround
 			return dc.cannotCheck(path, at, n, r, l, "a replay checks a clock read inside a text only as one word of the text as recorded, and "+c.noWord)
 		}
 		off.Layout, off.Word = lay, c.word

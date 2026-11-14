@@ -164,6 +164,9 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	}
 	if d.Refusal == nil || c.text && c.noWord != "" {
 		// A replay reads a time inside a text only as one word of it.
+		if d.Refusal != nil && dc.aroundRead {
+			dc.around = dc.amongBinds(path, at, n, c, d, declared)
+		}
 		return d
 	}
 	// A leaf typed Instant is decided here whole, never as a text's word,
@@ -190,6 +193,33 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	off.Why = nd.Line
 	nd.Clock = &off
 	return nd
+}
+
+// amongBinds is d, the refusal of c, a read of the application's clock its
+// call's window holds at a word of a text that changed around it
+// (noWordAround), as the time default checks it where the adapter puts the
+// text's other bound words back first (Caps.ClockAmongBinds): a Clock
+// checked by its form alone (TimeForm: the epoch's unit, or the layout) at
+// the word it stands at in the recorded text (changedInstant.around), and
+// nothing else. text keeps it only where every other changed word of the
+// text is a Value or Fresh word (allPutBack): put back, the text around the
+// read is the recording's, which the replay compares by its hashes. nil
+// where the adapter does not, at a key, or where the two runs write no one
+// form of an instant (timeFormOf).
+func (dc *decider) amongBinds(path string, at variables.Address, n int, c changedInstant, d Decision, declared bool) *Decision {
+	if !dc.in.Caps.ClockAmongBinds || c.around.IsZero() || atKey(path, declared) {
+		return nil
+	}
+	form, formF := dc.timeFormOf(path, c, nil)
+	if form == "" {
+		return nil
+	}
+	off := models.ClockOffset{Form: form, FormF: formF, Word: c.around}
+	rule := "a time, checked by its form alone (" + off.Forms() + ", keploy.yml's times setting at its default) at its word, every other changed word of the text put back at replay; the clock checks would refuse it " + string(d.Refusal.Kind) + ": " + d.Refusal.Why
+	nd := dc.learned(path, at, n, c.r, c.l, OutcomeClock, rule, nil)
+	off.Why = nd.Line
+	nd.Clock = &off
+	return &nd
 }
 
 // valueByForm is d, a Value (the changed instant c at path, bound to an

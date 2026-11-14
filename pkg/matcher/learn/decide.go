@@ -119,7 +119,14 @@ const (
 // and check a time in a claim of a JWT by its form (ClaimByForm:
 // learn.HoldsClaimByForm at a models.ClockOffset.Claim place). An adapter
 // that does not set ClaimByForm gets such a time refused, as before.
-type Caps struct{ BindAtWord, AnswerAtWord, FViewStated, ClaimByForm bool }
+// ClockAmongBinds: before it checks a read of the clock at one word of a
+// text (models.ClockOffset.Word), the replay puts the recorded value back
+// at every other word of that text a variable binds or uses, so the text
+// around the read compares as recorded; under the time default
+// (Input.TimeForm), a read in a text whose other changed words are all
+// such words is then checked by its form there (amongBinds). An adapter
+// that does not set it gets such a read refused, as before.
+type Caps struct{ BindAtWord, AnswerAtWord, FViewStated, ClaimByForm, ClockAmongBinds bool }
 
 // Scope is where mappings.yaml names a mock, as models.Mapping.MockPlaces
 // writes it: "test <name>" for a test's own list, "startup:", "worker:", or
