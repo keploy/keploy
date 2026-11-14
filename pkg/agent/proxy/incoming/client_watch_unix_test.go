@@ -106,7 +106,7 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 				return
 			}
 			told := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed its side").
-				FilterField(zap.String("url", "/client/v1/jobs/j/events")).Len()
+				Filter(namesThePath("/{}/{}/{}/{}/{}")).Len()
 			if told != 1 {
 				t.Fatalf("the half-closed client's exchange not recorded was told %d times at Info, want once", told)
 			}
@@ -610,7 +610,7 @@ func TestAnAnswerCutShortByItsClientsGoingIsToldAsNotRecorded(t *testing.T) {
 			hangUpAfterTheFirstEvent(t, client, bufio.NewReader(client))
 			<-served
 			if n := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed").
-				FilterField(zap.String("url", "/client/v1/jobs/j/events")).Len(); n != 1 {
+				Filter(namesThePath("/{}/{}/{}/{}/{}")).Len(); n != 1 {
 				t.Fatalf("the exchange its client left was told %d times at Info, want once; logs: %v", n, logs.All())
 			}
 			if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
@@ -1300,4 +1300,13 @@ func (c *closeHeldOnceClosed) Close() error {
 		}
 	}
 	return c.TCPConn.Close()
+}
+
+// namesThePath is whether a line names its request by the path's shape
+// (utils.GetReqMeta's "path"): a line never names the URL as sent.
+func namesThePath(shape string) func(observer.LoggedEntry) bool {
+	return func(e observer.LoggedEntry) bool {
+		m, _ := e.ContextMap()["metadata"].(map[string]string)
+		return m["path"] == shape
+	}
 }

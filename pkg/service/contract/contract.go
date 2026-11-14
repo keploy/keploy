@@ -469,7 +469,7 @@ func (s *contract) GenerateFromTests(ctx context.Context) error {
 
 	inferred, err := InferSchema(testCases)
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to infer OpenAPI schema from test cases")
+		utils.LogError(s.logger, utils.WithholdInput(err), "failed to infer OpenAPI schema from test cases")
 		return err
 	}
 
@@ -692,7 +692,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 				// Marshal the mock data to YAML format
 				mockYAML, err := yamlLib.Marshal(mock)
 				if err != nil {
-					utils.LogError(s.logger, err, "failed to marshal mock data", zap.Any("mock", mock))
+					utils.LogError(s.logger, err, "failed to marshal mock data", zap.String("mock", mock.Name))
 					return err
 				}
 

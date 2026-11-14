@@ -731,10 +731,12 @@ func compareGrpcMessage(
 	var jsonComparisonResult matcher.JSONComparisonResult
 
 	if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
+		// Their sizes, never the messages: they are the recorded and the
+		// app's answers.
 		logger.Debug("Both gRPC decoded data are valid JSON, using JSON comparison",
 			zap.Int("message_index", msgIdx),
-			zap.String("expectedDecodedData", expectedDecodedData),
-			zap.String("actualDecodedData", actualDecodedData))
+			zap.Int("expected_bytes", len(expectedDecodedData)),
+			zap.Int("actual_bytes", len(actualDecodedData)))
 
 		expectedDecodedData = matcher.NormalizeNestedJSONForNoise(expectedDecodedData, bodyNoise, logger)
 		actualDecodedData = matcher.NormalizeNestedJSONForNoise(actualDecodedData, bodyNoise, logger)

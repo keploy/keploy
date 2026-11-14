@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
 	"net"
 	"net/http"
@@ -483,11 +484,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		shortListed := schemaMatched
 		// Schema match for JSON bodies
 		if pkg.IsJSON(input.body) {
-			// A call body that does not read as a JSON object is logged
-			// redacted by every recording of the pool, as its miss is.
-			bodyMatched, err := h.performBodyMatch(ctx, schemaMatched, input.body, func(compared *models.Mock) redactedPlaces {
-				return heldPlaces(mockDb, compared, comparedPool, input.url.EscapedPath())
-			})
+			bodyMatched, err := h.PerformBodyMatch(ctx, schemaMatched, input.body)
 			if err != nil {
 				return false, nil, nil, err
 			}
@@ -946,9 +943,10 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDyna
 		return false
 	}
 	if ce := h.Logger.Check(zap.DebugLevel, "parsed URL"); ce != nil {
-		// The call's path in its shape: the mock's patterns, which say
-		// which segment holds a secret, are not at hand here.
-		ce.Write(zap.Any("parsed URL", mockPath), zap.Any("req path", utils.URLPathShape(&url.URL{Path: reqPath})))
+		// Both paths in their shape: a segment of either can hold a token
+		// (a reset link's, a signed URL's), the recording's as much as the
+		// call's.
+		ce.Write(zap.Any("parsed URL", utils.URLPathShape(&url.URL{Path: mockPath})), zap.Any("req path", utils.URLPathShape(&url.URL{Path: reqPath})))
 	}
 	if mockPath == reqPath {
 		return true
@@ -1357,7 +1355,7 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 				// The param's name and the class only: its values are
 				// the application's content (a rotating token, most often).
 				if ce := h.Logger.Check(zap.DebugLevel, "http query: value treated as auto-detected dynamic"); ce != nil {
-					ce.Write(zap.String("param", key), zap.String("type class", c))
+					ce.Write(zap.String("param", models.KeyShape(key)), zap.String("type class", c))
 				}
 				continue
 			}
@@ -1397,11 +1395,6 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 	// this call's method and path. Under url noise or auto-dynamic matching
 	// the path check is MatchURLPath's full compare, mock by mock, as before.
 	method := models.Method(input.method)
-	// The places of every recording of the pool (poolPlaces), read once
-	// and only for a debug line that names the call's path (so a call
-	// served with debug off allocates nothing for it): it is redacted by
-	// each, as a miss report is.
-	var logPlaces *redactedPlaces
 	for _, mock := range unfilteredMocks {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -1418,16 +1411,12 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
 			if ce := h.Logger.Check(zap.DebugLevel, "The url path of mock and request aren't the same"); ce != nil {
-				// The call's path with the segments a recording of the
-				// pool redacted written valueRedacted: the call sent its
-				// secret there.
+				// Both paths in their shape: a segment of either can hold
+				// a token, whatever a recording redacted.
 				mockPath, _ := recordedURLPath(mock.Spec.HTTPReq.URL)
-				if logPlaces == nil {
-					p := heldPlaces(storeOf(ctx), nil, unfilteredMocks, input.url.EscapedPath())
-					logPlaces = &p
-				}
-				livePath := logPlaces.decodedPath(input.url.EscapedPath())
-				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", livePath), zap.String("mock path", mockPath))
+				recorded := &url.URL{Path: mockPath}
+				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", utils.URLPathShape(input.url)), zap.String("mock path", utils.URLPathShape(recorded)),
+					zap.Int("differs at segment", pathDiffersAt(recorded.EscapedPath(), input.url.EscapedPath())))
 			}
 			continue
 		}
@@ -1619,23 +1608,21 @@ func (h *HTTP) exactBodyMatch(body []byte, schemaMatched []*models.Mock, held fu
 }
 
 // bodyMatch reports whether the call's body reqBody has every top-level key
-// of mock's recorded body. A reqBody that does not read as a JSON object is
-// logged redacted by logPlaces(mock).
-func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte, logPlaces func(*models.Mock) redactedPlaces) (bool, error) {
+// of mock's recorded body. A body that does not read as a JSON object is
+// logged by its size alone.
+func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte) (bool, error) {
 	mockBody := []byte(mock.Spec.HTTPReq.Body)
 	var mockData map[string]any
 	var reqData map[string]any
 	err := json.Unmarshal(mockBody, &mockData)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.String("Req", string(mockBody)))
+		// Sizes only, here and below: a body is the application's data.
+		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.Int("body_bytes", len(mockBody)))
 		return false, err
 	}
 	err = json.Unmarshal(reqBody, &reqData)
 	if err != nil {
-		// The call's body with the values at the places a recording of
-		// the pool redacted redacted, or whole: the call sent its secret
-		// there.
-		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.String("Req", redactBody(string(reqBody), "", logPlaces(mock))))
+		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.Int("body_bytes", len(reqBody)))
 		return false, err
 	}
 
@@ -1648,17 +1635,9 @@ func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte, logPlaces func(*mode
 	return true, nil
 }
 
-// PerformBodyMatch Perform body match for JSON data. The caller hands no
-// pool, so a reqBody that does not read as a JSON object is logged redacted
-// whole (unreadPlaces): any of its values may be one a recording redacted.
+// PerformBodyMatch Perform body match for JSON data. A reqBody that does
+// not read as a JSON object is logged by its size alone.
 func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Mock, reqBody []byte) ([]*models.Mock, error) {
-	return h.performBodyMatch(ctx, schemaMatched, reqBody, func(*models.Mock) redactedPlaces { return unreadPlaces() })
-}
-
-// performBodyMatch is PerformBodyMatch, a reqBody that does not read as a
-// JSON object logged redacted by logPlaces of the recording it was compared
-// with.
-func (h *HTTP) performBodyMatch(ctx context.Context, schemaMatched []*models.Mock, reqBody []byte, logPlaces func(compared *models.Mock) redactedPlaces) ([]*models.Mock, error) {
 	h.Logger.Debug("Performing schema match for body")
 
 	// Log all mock names in a single line for better readability
@@ -1672,7 +1651,7 @@ func (h *HTTP) performBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 			return nil, ctx.Err()
 		}
 
-		ok, err := h.bodyMatch(mock, reqBody, logPlaces)
+		ok, err := h.bodyMatch(mock, reqBody)
 		if err != nil {
 			h.Logger.Error("failed to do schema matching on request body", zap.Error(err))
 			break
@@ -2055,7 +2034,9 @@ func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*m
 			continue
 		}
 		if ce := h.Logger.Check(zap.DebugLevel, "strict req-body match rejected mock: non-noise field drift"); ce != nil {
-			ce.Write(zap.String("mock name", m.Name), zap.Any("drift", drift))
+			// The drifted fields by their shape: a body's keys can be
+			// values (a session id); never the patterns or values.
+			ce.Write(zap.String("mock name", m.Name), zap.Strings("drift", models.FieldShapes(slices.Sorted(maps.Keys(drift)))))
 		}
 	}
 	return kept

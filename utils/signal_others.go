@@ -109,7 +109,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 		return CmdError{Type: Init, Err: err}
 	}
 
-	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
+	logger.Info("Starting Application :", zap.String("executing_cmd", RedactCmdArgs(cmd.Args)))
 	err = cmd.Start()
 	console.Started()
 	if err != nil {
@@ -144,7 +144,7 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd, tee fu
 		return CmdError{Type: Init, Err: err}
 	}
 
-	logger.Info("Starting Application:", zap.String("executing_cmd", cmd.String()))
+	logger.Info("Starting Application:", zap.String("executing_cmd", RedactCmdArgs(cmd.Args)))
 
 	// Handle terminal resize - propagate size changes from real terminal to PTY
 	resizeCh := make(chan os.Signal, 1)

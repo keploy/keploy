@@ -4,8 +4,10 @@ package http
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -124,10 +126,11 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				zap.Bool("size_match", bodySizeMatch))
 		}
 
-		// Log actual response body as debug before clearing
+		// Its size, never the body: it is the app's answer, a token or a
+		// user's data among it.
 		logger.Debug("actual response body (skipped during recording)",
 			zap.String("testcase", tc.Name),
-			zap.String("body", actualResponse.Body))
+			zap.Int("body_bytes", len(actualResponse.Body)))
 
 		bodySizeResult = models.IntResult{
 			Normal:   bodySizeMatch,
@@ -237,8 +240,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
-		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
+		// Their sizes, never the bodies: they are the recorded and the
+		// app's answers.
+		logger.Debug("compared bodies", zap.Int("expected_bytes", len(cleanExp)), zap.Int("actual_bytes", len(cleanAct)))
 	} else {
 		// Skip the comparison of a non-JSON body of the recorded kind, with
 		// the switch off and no --compare-all (compareNonJSON above).
@@ -820,10 +824,14 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				act, ok := actualResponse.Header[header]
 				if !ok || act != exp {
 					pass = false
+					// The header's name and the values' sizes, never the
+					// values: a header holds a session's cookie, a token.
+					// The test report says how the answer differs.
 					logger.Error("header_equal assertion failed",
 						zap.String("header", header),
-						zap.String("expected", exp),
-						zap.String("actual", act),
+						zap.Int("expected_bytes", len(exp)),
+						zap.Bool("present", ok),
+						zap.Int("actual_bytes", len(act)),
 					)
 				}
 			}
@@ -841,8 +849,9 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					pass = false
 					logger.Error("header_contains assertion failed",
 						zap.String("header", header),
-						zap.String("expected_substr", exp),
-						zap.String("actual", act),
+						zap.Int("expected_substr_bytes", len(exp)),
+						zap.Bool("present", ok),
+						zap.Int("actual_bytes", len(act)),
 					)
 				}
 			}
@@ -880,7 +889,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 			default:
 				pass = false
-				logger.Error("header_exists: unsupported format, expected slice or map", zap.Any("value", value))
+				logger.Error("header_exists: unsupported format, expected slice or map", zap.String("value_type", fmt.Sprintf("%T", value)))
 			}
 
 		case models.HeaderMatches:
@@ -900,11 +909,15 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				}
 				if matched, err := regexp.MatchString(pattern, act); err != nil || !matched {
 					pass = false
+					// The pattern's size too: an assertion's pattern can
+					// be a literal value (^session=...$), as an expected
+					// header can.
 					logger.Error("header_matches assertion failed",
 						zap.String("header", header),
-						zap.String("pattern", pattern),
-						zap.String("actual", act),
-						zap.Error(err),
+						zap.Int("pattern_bytes", len(pattern)),
+						zap.Int("actual_bytes", len(act)),
+						// Not the compile error: it quotes the pattern.
+						zap.Bool("pattern_compiles", err == nil),
 					)
 				}
 			}
@@ -922,7 +935,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			actJSON := actualResponse.Body
 			if expJSON != actJSON {
 				pass = false
-				logger.Error("json_equal assertion failed", zap.String("expected", expJSON), zap.String("actual", actJSON))
+				logger.Error("json_equal assertion failed", zap.Int("expected_bytes", len(expJSON)), zap.Int("actual_bytes", len(actJSON)))
 			}
 
 		case models.JsonContains:
@@ -934,7 +947,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 			if ok, _ := matcherUtils.JsonContains(actualResponse.Body, expectedMap); !ok {
 				pass = false
-				logger.Error("json_contains assertion failed", zap.Any("expected", expectedMap))
+				logger.Error("json_contains assertion failed", zap.Strings("expected_keys", models.FieldShapes(slices.Sorted(maps.Keys(expectedMap)))))
 			}
 
 		case models.NoiseAssertion:
@@ -976,7 +989,7 @@ var testSuiteAssertions = map[string]bool{
 // logUnreadableAssertion says that an assertion's value is not of the shape it
 // takes, so it fails the test case rather than judge against nothing.
 func logUnreadableAssertion(logger *zap.Logger, name models.AssertionType, value interface{}, want string) {
-	logger.Error(string(name)+" assertion cannot be read, so it fails the test case: its value is not "+want, zap.Any("value", value))
+	logger.Error(string(name)+" assertion cannot be read, so it fails the test case: its value is not "+want, zap.String("value_type", fmt.Sprintf("%T", value)))
 }
 
 func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error) {

@@ -192,7 +192,7 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 	all, taken := learn.RunTakesPlaces(all, func(mock string) string { return owner[mock] })
 	for _, t := range taken {
 		m.logger.Info("keploy follows a test's own variable as the test set's: a later test sends the value it sent",
-			zap.String("test", t.Test), zap.String("variable", t.Own), zap.String("setVariable", t.Run), zap.String("mock", t.Mock), zap.String("field", t.Place))
+			zap.String("test", t.Test), zap.String("variable", t.Own), zap.String("setVariable", t.Run), zap.String("mock", t.Mock), zap.String("field", models.FieldShape(t.Place)))
 	}
 	states := make(map[string]models.MockState, len(written))
 	caseVars := map[string]models.MockVariables{}
@@ -239,7 +239,7 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 		}
 		if len(fields) > 0 {
 			byTest[f.Flow] = fields
-			m.logger.Info("learned fields that changed between record and replay", zap.String("test", f.Flow), zap.Strings("fields", fields))
+			m.logger.Info("learned fields that changed between record and replay", zap.String("test", f.Flow), zap.Strings("fields", models.FieldPathsInTextShaped(fields)))
 		}
 	}
 	var rest []string
@@ -253,7 +253,7 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 	}
 	if len(rest) > 0 {
 		sort.Strings(rest)
-		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", rest))
+		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", models.FieldPathsInTextShaped(rest)))
 	}
 	voided = slices.DeleteFunc(voided, func(v models.MockState) bool { return !m.learnsOnto(owner[v.Name]) })
 	// keploy mock record serves a worker: entry as the pool's (unknownBesideTests).

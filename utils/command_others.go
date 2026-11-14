@@ -52,12 +52,12 @@ func CommandContext(ctx context.Context, cmdStr string) (*exec.Cmd, error) {
 	if i := strings.IndexAny(cmdStr, shellOperators); i >= 0 {
 		return nil, fmt.Errorf(
 			"command needs a shell to interpret %q but no /bin/sh is present in this image: %s",
-			string(cmdStr[i]), cmdStr)
+			string(cmdStr[i]), RedactCommandLine(cmdStr))
 	}
 
 	args, err := shlex.Split(cmdStr)
 	if err != nil {
-		return nil, fmt.Errorf("could not parse command without a shell: %q: %w", cmdStr, err)
+		return nil, fmt.Errorf("could not parse command without a shell: %q: %w", RedactCommandLine(cmdStr), err)
 	}
 	if len(args) == 0 {
 		return nil, fmt.Errorf("empty command")

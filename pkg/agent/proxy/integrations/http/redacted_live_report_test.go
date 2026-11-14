@@ -789,8 +789,10 @@ func TestMissErrorAndLogsNameTheCallRedacted(t *testing.T) {
 						t.Errorf("the report names the call %q, want %q", reported.ActualSummary, want)
 					}
 					// With the switch on the miss is reported, not returned.
-					if !on && (err == nil || !strings.Contains(err.Error(), "for "+want)) {
-						t.Errorf("decodeHTTP = %v, want the miss's error naming the call %q", err, want)
+					// The error, which is logged, names the call by its
+					// path's shape; the report names it for the user.
+					if !on && (err == nil || !strings.Contains(err.Error(), "for POST /{}/{}/{}")) {
+						t.Errorf("decodeHTTP = %v, want the miss's error naming the call by its shape", err)
 					}
 					if err != nil && (strings.Contains(err.Error(), "zq9Plm") || strings.Contains(err.Error(), "3Xw7Rt")) {
 						t.Errorf("the miss's error carries the secret: %v", err)
@@ -805,11 +807,11 @@ func TestMissErrorAndLogsNameTheCallRedacted(t *testing.T) {
 	}
 }
 
-// The "variable bound" debug line shows a value bound at a place the
-// recording redacted redacted, and one bound elsewhere as it is. A place
-// whose name ends in #<digits> ("body.ref#2") is read as the check read it,
-// the whole name where the recording holds it, not a word of "body.ref".
-func TestVariableBoundLogRedactsAValueAtARedactedPlace(t *testing.T) {
+// The "variable bound" debug line says whether a value was bound at a place
+// the recording redacted, and logs no value, redacted or not. A place whose
+// name ends in #<digits> ("body.ref#2") is read as the check read it, the
+// whole name where the recording holds it, not a word of "body.ref".
+func TestVariableBoundLogNamesARedactedPlace(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const rec, recRef, liveRef = "REDACTED_abc", "REDACTED_def", "Rf7Lq2Zx9Wn"
 	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"`+rec+`","item":"pen","ref#2":"`+recRef+`"}`, 201, `{}`,
@@ -822,15 +824,8 @@ func TestVariableBoundLogRedactsAValueAtARedactedPlace(t *testing.T) {
 	if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"`+liveBound+`","item":"pencil","ref#2":"`+liveRef+`"}`)); !ok {
 		t.Fatal("the binding call should match")
 	}
-	values := map[string]string{}
-	for _, e := range logs.FilterMessage("variable bound").All() {
-		v, _ := e.ContextMap()["variable"].(string)
-		values[v], _ = e.ContextMap()["value"].(string)
-	}
-	if values["orderId"] != valueRedacted || values["ref"] != valueRedacted || values["item"] != "pencil" {
-		t.Errorf("logged the bound values as %v, want orderId and ref redacted and item as it is", values)
-	}
-	loggedNone(t, logs, liveBound, liveRef)
+	wantBound(t, logs, map[string]string{"orderId": valueRedacted, "ref": valueRedacted, "item": "pencil"})
+	loggedNone(t, logs, liveBound, liveRef, "pencil")
 }
 
 // A variable used at a path segment the recording redacted, after a
@@ -1061,8 +1056,7 @@ func (reusableReadFails) GetSessionMocks() ([]*models.Mock, error) {
 }
 
 // A miss whose pool cannot be read names the call's path by its shape only,
-// in its summary and in the error the proxy logs at ERROR (missedCall):
-// keploy cannot tell there which segment holds a secret. A miss with no
+// in its summary: keploy cannot tell there which segment holds a secret. A miss with no
 // closest recording is named redacted by the places of every recording of
 // its pool: a variable's recording that left the pool, and under the proven
 // switch a test variable's route place (withRoutePlaces).
@@ -1080,9 +1074,6 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 		all := persisted(t, r)
 		if r.ActualSummary != summary || strings.Contains(all, liveSecret) {
 			t.Errorf("summary %q, want %q, and no secret in the report: %s", r.ActualSummary, summary, all)
-		}
-		if got := missedCall(request, r); got != summary {
-			t.Errorf("the error names %q, want %q", got, summary)
 		}
 	}
 	// The recording of the pool that redacted the call's segment 1.

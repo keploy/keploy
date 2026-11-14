@@ -426,7 +426,7 @@ func firstResponsePacket(ctx context.Context, logger *zap.Logger, sess *supervis
 			return nil, framingLostAt(logger, sess, "the first packet of the %s response has sequence id 0 and is not an ERR", seq.what)
 		}
 		logger.Debug("V2: the server dropped the connection with an error of its own; its recording ends here",
-			zap.String("connID", sess.ClientConnID), zap.ByteString("err", buf[4:]))
+			zap.String("connID", sess.ClientConnID), zap.Uint16("code", errCode(buf)), zap.ByteString("sql_state", buf[4+4:4+errSQLStateEnd]))
 		return nil, errServerDropped
 	}
 	return buf, nil
@@ -468,6 +468,14 @@ func isServersOwnErr(buf []byte) bool {
 // errSQLStateEnd is where an ERR payload's SQL state ends: after 0xFF (1), the
 // code (2), '#' (1) and the state itself (5).
 const errSQLStateEnd = 9
+
+// errCode is the error code of the ERR packet buf (isServersOwnErr). A log
+// line names an ERR by its code and SQL state, never by its message: the
+// server's message quotes what it refused (a duplicate key's value, the
+// statement near a syntax error, a user's name).
+func errCode(buf []byte) uint16 {
+	return uint16(buf[5]) | uint16(buf[6])<<8
+}
 
 // rowIsAnError reports whether a packet where a row may come is an ERR. No row
 // starts with 0xFF (a text row's first column is a length-encoded string, which
@@ -849,7 +857,7 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 	case buf[3] == 0 && isServersOwnErr(buf):
 		h.release(decodeCtx, nil, time.Time{})
 		logger.Debug("V2: the server dropped the connection with an error of its own; its recording ends here",
-			zap.String("connID", sess.ClientConnID), zap.ByteString("err", buf[4:]))
+			zap.String("connID", sess.ClientConnID), zap.Uint16("code", errCode(buf)), zap.ByteString("sql_state", buf[4+4:4+errSQLStateEnd]))
 		return nil, errServerDropped
 	default:
 		err := framingLostAt(logger, sess, "the packet after the definitions of the %s response has sequence id %d and is neither its EOF, the next answer nor an ERR of the server's own", h.what, buf[3])

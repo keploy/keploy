@@ -3,6 +3,8 @@ package models
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -131,13 +133,33 @@ type FormPartLeftOut struct {
 	Path     string
 }
 
-// String says the part as a recording's summary lists it.
+// String says the part as a recording's summary lists it, a log line: its
+// file name by its size and its path by FormFilePathLogText.
 func (p FormPartLeftOut) String() string {
 	path := "no path"
 	if p.Path != "" {
-		path = fmt.Sprintf("path %q", p.Path)
+		path = fmt.Sprintf("path %q", FormFilePathLogText(p.Path))
 	}
-	return fmt.Sprintf("%s/%s: form part %q (file %q, %s)", p.TestSet, p.TestCase, p.Key, p.FileName, path)
+	return fmt.Sprintf("%s/%s: form part %q (file %s, %s)", p.TestSet, p.TestCase, p.Key, FormFileNameLogText(p.FileName), path)
+}
+
+// FormFileNameLogText is a form part's file name as a log line or an error
+// names it: by its size. The name is the app's (multipart's filename=), and
+// keploy's log lines never carry the app's traffic.
+func FormFileNameLogText(name string) string {
+	return "(file name withheld, " + strconv.Itoa(len(name)) + " bytes)"
+}
+
+// FormFilePathLogText is a path that ends in a form part's file as a log line
+// or an error names it: its folder (the recording's assets folder, or the
+// capture's), and its file name, which the app's request named, by
+// FormFileNameLogText. "" for "".
+func FormFilePathLogText(path string) string {
+	if path == "" {
+		return ""
+	}
+	dir, base := filepath.Split(path)
+	return dir + FormFileNameLogText(base)
 }
 
 // HTTPResp is an HTTP response. StreamBody is a streamed body's frames, as a

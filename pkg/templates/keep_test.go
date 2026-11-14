@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/internal/logleak"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -88,7 +89,42 @@ func TestKeep_AnObjectKeyPlaceholderIsDroppedAndSaid(t *testing.T) {
 	onDisk := models.HTTPResp{Body: `{"{{string .id}}":true,"n":"{{int .n}}"}`}
 	got, dropped := NewRun(nil, nil, nil).Keep(onDisk, models.HTTPResp{Body: `{"usr_1":true,"n":7}`}, models.HTTPResp{Body: `{"usr_1":true,"n":7}`})
 	assert.Equal(t, `{"usr_1":true,"n":"{{int .n}}"}`, got.Body)
-	assert.Equal(t, []string{"body key {{string .id}}: \"{{string .id}}\" (the answer's keys are written)"}, dropped)
+	assert.Equal(t, []string{"a key of body: the answer's keys are written"}, dropped)
+}
+
+// keploy normalize logs each placeholder Keep drops, at WARN: a drop names
+// the place and the size of what the app now answers there, never the
+// answer's value (a token the app issues anew each run, a session cookie)
+// nor the test case's text around the placeholder.
+func TestKeep_ADropNamesThePlaceAndTheLiveValuesSizeOnly(t *testing.T) {
+	const s = logleak.Canary
+	onDisk := models.HTTPResp{
+		Header: map[string]string{"X-Session": "rec-{{string .session}}", "Set-Cookie": "sid={{string .sid}}; Path=/"},
+		Body:   `{"accessToken":"rec-{{string .token}}","id":"{{string .id}}","gone":"{{string .gone}}"}`,
+	}
+	resolved := models.HTTPResp{
+		Header: map[string]string{"X-Session": "rec-old", "Set-Cookie": "sid=old; Path=/"},
+		Body:   `{"accessToken":"rec-old","id":"1","gone":"x"}`,
+	}
+	answer := models.HTTPResp{
+		Header: map[string]string{"X-Session": "s-" + s, "Set-Cookie": "sid=c-" + s + "; Path=/"},
+		Body:   `{"accessToken":"b-` + s + `","id":"1"}`,
+	}
+	_, dropped := NewRun(nil, nil, nil).Keep(onDisk, resolved, answer)
+	n := len(s) + 2
+	assert.Equal(t, []string{
+		fmt.Sprintf("body.accessToken: the app now answers %d bytes", n),
+		"body.gone: the app now answers nothing",
+		fmt.Sprintf("header Set-Cookie.sid: the app now answers %d bytes", n),
+		fmt.Sprintf("header X-Session: the app now answers %d bytes", n),
+	}, dropped)
+	for _, d := range dropped {
+		assert.False(t, logleak.Holds(d, s), "a drop holds the app's answer: %q", d)
+		assert.NotContains(t, d, "rec-", "a drop holds the test case's text: %q", d)
+	}
+	// A JSON body the app no longer sends: each place, by its path.
+	_, dropped = NewRun(nil, nil, nil).Keep(models.HTTPResp{Body: `{"token":"rec-{{string .t}}"}`}, models.HTTPResp{Body: `{"token":"rec-x"}`}, models.HTTPResp{Body: "b-" + s})
+	assert.Equal(t, []string{"body.token: the app's body is no longer JSON"}, dropped)
 }
 
 // THE DIGEST INVARIANT. A digest header on disk is a digest of the body with

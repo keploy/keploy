@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -434,7 +435,7 @@ func (o *origins) logProcess(pid uint32, n procName, line string) {
 		l.Debug("a recorded call came from this process",
 			zap.String("pid", strconv.FormatUint(uint64(pid), 10)),
 			zap.String("comm", n.comm),
-			zap.String("cmdline", line))
+			zap.String("cmdline", utils.RedactCommandLine(line)))
 	}
 }
 

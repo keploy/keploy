@@ -254,7 +254,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			"input header keys":    []interface{}{"Authorization", "Content-Length", "Content-Type", "Cookie", "Host"},
 		})
 		wantOnce(t, logs, "The url path of mock and request aren't the same", map[string]interface{}{
-			"mock name": "mock-path", "input path": "/u", "mock path": "/v",
+			"mock name": "mock-path", "input path": "/{}", "mock path": "/{}", "differs at segment": int64(0),
 		})
 		wantOnce(t, logs, "after matching the http request", map[string]interface{}{"isMatched": true, "mock name": "mock-live"})
 		noValueLogged(t, logs, append(append(shapeValues("live"), shapeValues("rec2")...), shapeValues("rec3")...))

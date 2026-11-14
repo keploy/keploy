@@ -30,10 +30,11 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 			zap.Int64("actual_size", actualBodySize),
 			zap.Bool("size_match", bodySizeMatch))
 
-		// Log actual response body as debug before clearing
+		// Its size, never the body: it is the app's answer, a token or a
+		// user's data among it.
 		logger.Debug("actual response body (skipped during recording)",
 			zap.String("testcase", tc.Name),
-			zap.String("body", actualResponse.Body))
+			zap.Int("body_bytes", len(actualResponse.Body)))
 
 		bodySizeResult = models.IntResult{
 			Normal:   bodySizeMatch,

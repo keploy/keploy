@@ -15,7 +15,10 @@ import (
 // that place equals what the app answered there: the placeholder still says
 // what the test case means, and the next run passes with it. A placeholder
 // whose place the app now answers differently is dropped for the answer, and
-// dropped says which and why.
+// dropped says which and why: its place, and the size of what the app now
+// answers there. keploy normalize logs dropped, so it never holds the app's
+// answer (the token the placeholder stood for) nor the test case's text at
+// the place.
 //
 // A digest header on disk is a digest of the body as recorded: the body with
 // each placeholder at its config.yaml value, the body every run's digest
@@ -52,7 +55,11 @@ func (r *Run) Keep(onDisk, resolved, answer models.HTTPResp) (models.HTTPResp, [
 			continue
 		}
 		if !inAnswer || !inResolved || want != live {
-			dropped = append(dropped, fmt.Sprintf("header %s: %s (the app now answers %q)", name, v, live))
+			now := "no such header"
+			if inAnswer {
+				now = liveSize(live)
+			}
+			dropped = append(dropped, fmt.Sprintf("header %s: the app now answers %s", name, now))
 			continue
 		}
 		for k := range out.Header {
@@ -99,7 +106,7 @@ func keepBody(onDisk, resolved, answer string) (string, []string) {
 	if !okAnswer || !okResolved {
 		for _, l := range disk {
 			if Contains(l.Raw(onDisk)) {
-				dropped = append(dropped, fmt.Sprintf("%s: %s (the app's body is no longer JSON)", l.Under("body"), l.Raw(onDisk)))
+				dropped = append(dropped, l.Under("body")+": the app's body is no longer JSON")
 			}
 		}
 		return answer, dropped
@@ -108,7 +115,13 @@ func keepBody(onDisk, resolved, answer string) (string, []string) {
 	// written.
 	for _, k := range diskDoc.keys {
 		if Contains(k.Raw(onDisk)) {
-			dropped = append(dropped, fmt.Sprintf("body key %s: %s (the answer's keys are written)", k.DisplayPath(), k.Raw(onDisk)))
+			// Named by the object that holds the key: the key's own text
+			// is the placeholder and the recording's text around it.
+			parent := k.Path
+			if len(parent) > 0 {
+				parent = parent[:len(parent)-1]
+			}
+			dropped = append(dropped, "a key of "+Leaf{Path: parent}.Under("body")+": the answer's keys are written")
 		}
 	}
 	ansIdx, resIdx := leafIndex(ans), leafIndex(res)
@@ -123,9 +136,9 @@ func keepBody(onDisk, resolved, answer string) (string, []string) {
 		if !inAnswer || !inResolved || !jsonValueEqual(w.Raw(resolved), a.Raw(answer)) {
 			now := "nothing"
 			if inAnswer {
-				now = a.Raw(answer)
+				now = liveSize(a.Value(answer))
 			}
-			dropped = append(dropped, fmt.Sprintf("%s: %s (the app now answers %s)", l.Under("body"), raw, now))
+			dropped = append(dropped, fmt.Sprintf("%s: the app now answers %s", l.Under("body"), now))
 			continue
 		}
 		for i, al := range ans {
@@ -165,15 +178,15 @@ func (r *Run) keepSetCookie(name, onDisk, resolved, live string) (string, []stri
 		if !whole || !inAnswer || !inResolved || resolved[rc.ValueStart:rc.ValueEnd] != live[lc.ValueStart:lc.ValueEnd] {
 			now := "no such cookie"
 			if inAnswer {
-				now = fmt.Sprintf("%q", live[lc.ValueStart:lc.ValueEnd])
+				now = liveSize(live[lc.ValueStart:lc.ValueEnd])
 			}
-			dropped = append(dropped, fmt.Sprintf("header %s.%s: %s (the app now answers %s)", name, c.Name, onDisk[c.Start:c.End], now))
+			dropped = append(dropped, fmt.Sprintf("header %s.%s: the app now answers %s", name, c.Name, now))
 			continue
 		}
 		es = append(es, edit{start: lc.ValueStart, end: lc.ValueEnd, text: value})
 		for _, a := range c.Attrs {
 			if a.HasValue && Contains(onDisk[a.ValueStart:a.ValueEnd]) {
-				dropped = append(dropped, fmt.Sprintf("header %s.%s: %s (the app's %s is written)", name, c.Name, onDisk[a.ValueStart:a.ValueEnd], a.Name))
+				dropped = append(dropped, fmt.Sprintf("header %s.%s: the app's %s is written", name, c.Name, a.Name))
 			}
 		}
 	}
@@ -187,4 +200,10 @@ func (r *Run) keepSetCookie(name, onDisk, resolved, live string) (string, []stri
 	}
 	b.WriteString(live[last:])
 	return b.String(), dropped
+}
+
+// liveSize is what the app now answers at a place, as a drop says it: its
+// size.
+func liveSize(v string) string {
+	return fmt.Sprintf("%d bytes", len(v))
 }

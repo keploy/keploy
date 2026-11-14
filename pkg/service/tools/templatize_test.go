@@ -885,8 +885,8 @@ func TestProcessTestCasesV2_ACrowdedLocationBesideItsOwnCaptureIsNamedWithTheUse
 	assert.Equal(t, "http://h/users/{{string .id}}", written["test-2"].HTTPReq.URL)
 	crowded := logs.FilterMessageSnippet("holds more than one value").All()
 	require.Len(t, crowded, 1)
-	assert.Contains(t, crowded[0].Message, `(Location.path.0 "users", Location.path.1 "usr_REC01")`)
-	assert.Contains(t, fmt.Sprint(crowded[0].ContextMap()["next_step"]), `if the value is one its response issues anew each run, write {{string .id}} in place of "usr_REC01": the header then asserts it names the value its response captures`)
+	assert.Contains(t, crowded[0].Message, `(Location.path.0 (5 bytes), Location.path.1 (9 bytes))`)
+	assert.Contains(t, fmt.Sprint(crowded[0].ContextMap()["next_step"]), `if the value is one its response issues anew each run, write {{string .id}} in place of the value at Location.path.1: the header then asserts it names the value its response captures`)
 	assert.Contains(t, fmt.Sprint(crowded[0].ContextMap()["next_step"]), "if it is the same every run, nothing to do")
 
 	// The edit applied: Check accepts it, and templatize writes nothing more.
@@ -1214,42 +1214,42 @@ func TestProcessTestCasesV2_ACrowdedLocationCapturesNone(t *testing.T) {
 		{"D1 a signup answering /users/<id>", []*models.TestCase{
 			tcase("test-1", "POST", "http://h/signup", nil, `{"u":"alice"}`, 201, map[string]string{"Location": "/users/usr_REC01"}, ""),
 			tcase("test-2", "GET", "http://h/users/usr_REC01", nil, "", 200, nil, `{"ok":true}`),
-		}, nil, `Location.path.0 "users", Location.path.1 "usr_REC01"`, []string{`{{capture string .location}} in place of "users" (and {{string .location}} where later requests send it)`, `{{capture string .users}} in place of "usr_REC01" (and {{string .users}} where`, "if its key is new (location, users), give it the value it replaced"}, "/accounts/usr_REC01"},
+		}, nil, `Location.path.0 (5 bytes), Location.path.1 (9 bytes)`, []string{`{{capture string .location}} in place of the value at Location.path.0 (and {{string .location}} where later requests send it)`, `{{capture string .users}} in place of the value at Location.path.1 (and {{string .users}} where`, "if its key is new (location, users), give it the value it replaced"}, "/accounts/usr_REC01"},
 		{"G1b the id is never sent again, the collection is", []*models.TestCase{
 			tcase("test-1", "POST", "http://h/signup", nil, `{}`, 201, map[string]string{"Location": "/users/usr_REC1"}, ""),
 			tcase("test-2", "GET", "http://h/users?page=2", nil, "", 200, nil, `{"ok":true}`),
-		}, nil, `Location.path.0 "users", Location.path.1 "usr_REC1"`, []string{`{{capture string .users}} in place of "usr_REC1"`}, "/accounts/usr_REC1"},
+		}, nil, `Location.path.0 (5 bytes), Location.path.1 (8 bytes)`, []string{`{{capture string .users}} in place of the value at Location.path.1`}, "/accounts/usr_REC1"},
 		{"G2 the id is sent again only as a JSON number", []*models.TestCase{
 			tcase("test-1", "POST", "http://h/reports", nil, `{}`, 201, map[string]string{"Location": "/jobs/7654321"}, `{"id":7654321}`),
 			tcase("test-2", "POST", "http://h/cancel", jsonType, `{"jobId":7654321}`, 200, nil, `{"ok":true}`),
 			tcase("test-3", "GET", "http://h/jobs?state=queued", nil, "", 200, nil, `{"ok":true}`),
-		}, nil, `Location.path.0 "jobs", Location.path.1 "7654321"`, []string{`write {{string .id}} in place of "7654321": the header then asserts it names the value its response captures`}, "/tasks/7654321"},
+		}, nil, `Location.path.0 (4 bytes), Location.path.1 (7 bytes)`, []string{`write {{string .id}} in place of the value at Location.path.1: the header then asserts it names the value its response captures`}, "/tasks/7654321"},
 		{"G3 the id is sent again only inside a longer string", []*models.TestCase{
 			tcase("test-1", "POST", "http://h/reports", nil, `{}`, 201, map[string]string{"Location": "/jobs/j_REC1"}, ""),
 			tcase("test-2", "POST", "http://h/notify", jsonType, `{"url":"/jobs/j_REC1"}`, 200, nil, `{"ok":true}`),
 			tcase("test-3", "GET", "http://h/jobs", nil, "", 200, nil, `{"ok":true}`),
-		}, nil, `Location.path.0 "jobs", Location.path.1 "j_REC1"`, []string{`{{capture string .jobs}} in place of "j_REC1"`}, "/tasks/j_REC1"},
+		}, nil, `Location.path.0 (4 bytes), Location.path.1 (6 bytes)`, []string{`{{capture string .jobs}} in place of the value at Location.path.1`}, "/tasks/j_REC1"},
 		{"G4 a nested create whose child id is never sent again", []*models.TestCase{
 			tcase("test-1", "POST", "http://h/orgs", nil, `{}`, 201, nil, `{"id":"org_REC1"}`),
 			tcase("test-2", "POST", "http://h/orgs/org_REC1/members", nil, `{}`, 201, map[string]string{"Location": "/orgs/org_REC1/users/usr_REC2"}, ""),
 			tcase("test-3", "GET", "http://h/orgs/org_REC1/users", nil, "", 200, nil, `{"ok":true}`),
-		}, nil, `Location.path.2 "users", Location.path.3 "usr_REC2"`, []string{`{{capture string .location}} in place of "users"`, `{{capture string .users}} in place of "usr_REC2"`}, "/orgs/org_REC1/groups/usr_REC2"},
+		}, nil, `Location.path.2 (5 bytes), Location.path.3 (8 bytes)`, []string{`{{capture string .location}} in place of the value at Location.path.2`, `{{capture string .users}} in place of the value at Location.path.3`}, "/orgs/org_REC1/groups/usr_REC2"},
 		{"a versioned API path", []*models.TestCase{
 			tcase("test-1", "POST", "http://h/signup", nil, `{}`, 201, map[string]string{"Location": "/api/v1/users/usr_REC01"}, ""),
 			tcase("test-2", "GET", "http://h/api/v1/users/usr_REC01", nil, "", 200, nil, `{"ok":true}`),
-		}, nil, `Location.path.0 "api", Location.path.1 "v1", Location.path.2 "users", Location.path.3 "usr_REC01"`, []string{`{{capture string .users}} in place of "usr_REC01"`}, "/api/v2/users/usr_REC01"},
+		}, nil, `Location.path.0 (3 bytes), Location.path.1 (2 bytes), Location.path.2 (5 bytes), Location.path.3 (9 bytes)`, []string{`{{capture string .users}} in place of the value at Location.path.3`}, "/api/v2/users/usr_REC01"},
 		{"a network-path reference: its host is no segment", []*models.TestCase{
 			tcase("test-1", "POST", "http://h/upload", nil, `{}`, 201, map[string]string{"Location": "//cdn.h/files/f_REC01"}, ""),
 			tcase("test-2", "GET", "http://cdn.h/files/f_REC01", nil, "", 200, nil, `{"ok":true}`),
-		}, nil, `Location.path.0 "files", Location.path.1 "f_REC01"`, []string{`{{capture string .files}} in place of "f_REC01"`}, "//cdn.h/blobs/f_REC01"},
+		}, nil, `Location.path.0 (5 bytes), Location.path.1 (7 bytes)`, []string{`{{capture string .files}} in place of the value at Location.path.1`}, "//cdn.h/blobs/f_REC01"},
 		{"R7d an id after an id the header gives first keeps the segment's name (a limit)", []*models.TestCase{
 			tcase("test-1", "POST", "http://h/signup", nil, `{}`, 201, map[string]string{"Location": "/accounts/acc_REC1/users/usr_REC2"}, ""),
 			tcase("test-2", "GET", "http://h/accounts/acc_REC1/users/usr_REC2", nil, "", 200, nil, `{"ok":true}`),
-		}, nil, `Location.path.0 "accounts", Location.path.1 "acc_REC1", Location.path.2 "users", Location.path.3 "usr_REC2"`, []string{`{{capture string .users}} in place of "usr_REC2"`}, "/accounts/acc_REC1/groups/usr_REC2"},
+		}, nil, `Location.path.0 (8 bytes), Location.path.1 (8 bytes), Location.path.2 (5 bytes), Location.path.3 (8 bytes)`, []string{`{{capture string .users}} in place of the value at Location.path.3`}, "/accounts/acc_REC1/groups/usr_REC2"},
 		{"a value config.yaml names already keeps its key", []*models.TestCase{
 			tcase("test-1", "POST", "http://h/signup", nil, `{}`, 201, map[string]string{"Location": "/users/usr_REC01"}, ""),
 			tcase("test-2", "GET", "http://h/users/usr_REC01", nil, "", 200, nil, `{"ok":true}`),
-		}, map[string]interface{}{"user": "usr_REC01", "location": "x"}, `Location.path.0 "users", Location.path.1 "usr_REC01"`, []string{`{{capture string .location1}} in place of "users"`, `{{capture string .user}} in place of "usr_REC01"`, "if its key is new (location1), give it"}, "/accounts/usr_REC01"},
+		}, map[string]interface{}{"user": "usr_REC01", "location": "x"}, `Location.path.0 (5 bytes), Location.path.1 (9 bytes)`, []string{`{{capture string .location1}} in place of the value at Location.path.0`, `{{capture string .user}} in place of the value at Location.path.1`, "if its key is new (location1), give it"}, "/accounts/usr_REC01"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			written, template, logs := templatizeConf(t, c.cases, c.template)
@@ -1329,7 +1329,7 @@ func TestProcessTestCasesV2_ACrowdedLocationCapturesNone(t *testing.T) {
 		tcase("test-2", "GET", "http://h/users?page=2", nil, "", 200, jsonType, `{"n":1}`),
 		tcase("test-3", "POST", "http://h/cancel", jsonType, `{"userId":7654321}`, 200, jsonType, `{"ok":true}`),
 	}
-	const useAdvice = `write {{string .id}} in place of "7654321": the header then asserts it names the value its response captures`
+	const useAdvice = `write {{string .id}} in place of the value at Location.path.1: the header then asserts it names the value its response captures`
 	adviceOf := func(logs *observer.ObservedLogs) string {
 		t.Helper()
 		lines := logs.FilterMessageSnippet("holds more than one value its response gives first").All()
@@ -1385,19 +1385,19 @@ func TestProcessTestCasesV2_OnlyTheLocationOfA201Captures(t *testing.T) {
 		edits             []string
 	}{
 		{"T1 a login redirecting home", "POST", "http://h/login", 302, map[string]string{"Location": "/home"}, "http://h/home",
-			`response header Location of a 302 response holds Location.path.0 "home", which a later request sends`, []string{`{{capture string .location}} in place of "home"`}},
+			`response header Location of a 302 response holds Location.path.0 (4 bytes), which a later request sends`, []string{`{{capture string .location}} in place of the value at Location.path.0`}},
 		{"T2 Django's profile redirect", "POST", "http://h/accounts/login/", 302, map[string]string{"Location": "/accounts/profile/"}, "http://h/accounts/profile/",
-			`Location.path.1 "profile"`, []string{`{{capture string .accounts}} in place of "profile"`}},
+			`Location.path.1 (7 bytes)`, []string{`{{capture string .accounts}} in place of the value at Location.path.1`}},
 		{"an OAuth redirect to its callback", "GET", "http://h/authorize", 302, map[string]string{"Location": "http://h/callback?code=code_REC123&state=st_REC9"}, "http://h/callback?code=code_REC123&state=st_REC9",
-			`Location.path.0 "callback", Location.query.code "code_REC123", Location.query.state "st_REC9"`, []string{`{{capture string .code}} in place of "code_REC123"`}},
+			`Location.path.0 (8 bytes), Location.query.code (11 bytes), Location.query.state (7 bytes)`, []string{`{{capture string .code}} in place of the value at Location.query.code`}},
 		{"G1 a 202's job monitor", "POST", "http://h/reports", 202, map[string]string{"Location": "/jobs/j_REC1"}, "http://h/jobs",
-			`of a 202 response holds Location.path.0 "jobs", which a later request sends`, []string{`{{capture string .location}} in place of "jobs"`}},
+			`of a 202 response holds Location.path.0 (4 bytes), which a later request sends`, []string{`{{capture string .location}} in place of the value at Location.path.0`}},
 		{"a 200's Location", "POST", "http://h/reports", 200, map[string]string{"Location": "/jobs/j_REC1"}, "http://h/jobs",
-			`of a 200 response holds Location.path.0 "jobs", which a later request sends`, []string{`{{capture string .location}} in place of "jobs"`}},
+			`of a 200 response holds Location.path.0 (4 bytes), which a later request sends`, []string{`{{capture string .location}} in place of the value at Location.path.0`}},
 		{"a Content-Location of a 201", "POST", "http://h/signup", 201, map[string]string{"Content-Location": "/me"}, "http://h/me",
-			`response header Content-Location of a 201 response holds Content-Location.path.0 "me"`, []string{`{{capture string .location}} in place of "me"`}},
+			`response header Content-Location of a 201 response holds Content-Location.path.0 (2 bytes)`, []string{`{{capture string .location}} in place of the value at Content-Location.path.0`}},
 		{"a Content-Location of a 302", "POST", "http://h/views", 302, map[string]string{"Content-Location": "/views/v_REC9"}, "http://h/views/v_REC9",
-			`response header Content-Location of a 302 response holds Content-Location.path.1 "v_REC9"`, []string{`{{capture string .views}} in place of "v_REC9"`}},
+			`response header Content-Location of a 302 response holds Content-Location.path.1 (6 bytes)`, []string{`{{capture string .views}} in place of the value at Content-Location.path.1`}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cases := []*models.TestCase{
@@ -1443,7 +1443,7 @@ func TestProcessTestCasesV2_OnlyTheLocationOfA201Captures(t *testing.T) {
 	assert.Empty(t, logs.FilterMessageSnippet("stays compared as recorded").All(), "a value the body gives first is captured there")
 	// Its line names the edit for an id the app issues anew (R7e, Q17), and a
 	// second run, over a set that now holds placeholders, writes nothing.
-	assert.Equal(t, `if the app issues the value anew each run, write {{string .id}} in place of "ord_REC1" there: that place then asserts it holds what this same answer gives at the capture of id, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
+	assert.Equal(t, `if the app issues the value anew each run, write {{string .id}} in place of the value there (8 bytes): that place then asserts it holds what this same answer gives at the capture of id, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
 		fmt.Sprint(repeat[0].ContextMap()["next_step"]))
 	t1, t2 := written["test-1"], written["test-2"]
 	again, _, logs := templatizeAll(t, []*models.TestCase{&t1, &t2}, template, nil)
@@ -1485,8 +1485,8 @@ func TestProcessTestCasesV2_ALocationValueWithADelimiterIsNotRead(t *testing.T) 
 	for _, c := range []struct {
 		name, loc, crowded string
 	}{
-		{"a path segment that decodes to a '/'", "/files/dir%2Freport", `Location.path.0 "files", Location.path.1 "dir/report"`},
-		{"a query value that decodes to a '&' and a '='", "/cb?code=a%26b%3Dc", `Location.path.0 "cb", Location.query.code "a&b=c"`},
+		{"a path segment that decodes to a '/'", "/files/dir%2Freport", `Location.path.0 (5 bytes), Location.path.1 (10 bytes)`},
+		{"a query value that decodes to a '&' and a '='", "/cb?code=a%26b%3Dc", `Location.path.0 (2 bytes), Location.query.code (5 bytes)`},
 		{"alone in its header", "/dir%2Freport", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -1510,8 +1510,8 @@ func TestProcessTestCasesV2_ALocationValueWithADelimiterIsNotRead(t *testing.T) 
 			// refused.
 			next := fmt.Sprint(crowded[0].ContextMap()["next_step"])
 			assert.Contains(t, next, "holds a delimiter of its part and cannot be captured here; if a response also gives it whole (a JSON value), capture it there")
-			assert.NotContains(t, next, "in place of \"dir/report\"")
-			assert.NotContains(t, next, "in place of \"a&b=c\"")
+			assert.NotContains(t, next, "in place of the value at Location.path.1")
+			assert.NotContains(t, next, "in place of the value at Location.query.code")
 		})
 	}
 
@@ -1586,11 +1586,11 @@ func TestProcessTestCasesV2_ALocationCountsEveryValueItsResponseIssues(t *testin
 		{"T21 the body issues the id as a JSON number", nil, []*models.TestCase{
 			tcase("test-1", "POST", "http://h/reports", nil, `{}`, 201, map[string]string{"Location": "/jobs/7654321"}, `{"id":7654321}`),
 			tcase("test-2", "GET", "http://h/jobs/7654321", nil, "", 200, nil, `{"state":"done"}`),
-		}, `Location.path.0 "jobs", Location.path.1 "7654321"`, "/tasks/7654321"},
+		}, `Location.path.0 (4 bytes), Location.path.1 (7 bytes)`, "/tasks/7654321"},
 		{"T21b the body issues the id inside an array under ignoreOrdering", &config.Config{Test: config.Test{IgnoreOrdering: true}}, []*models.TestCase{
 			tcase("test-1", "POST", "http://h/signup", nil, `{}`, 201, map[string]string{"Location": "/users/usr_REC1"}, `{"items":[{"id":"usr_REC1"}]}`),
 			tcase("test-2", "GET", "http://h/users/usr_REC1", nil, "", 200, nil, `{"ok":true}`),
-		}, `Location.path.0 "users", Location.path.1 "usr_REC1"`, "/accounts/usr_REC1"},
+		}, `Location.path.0 (5 bytes), Location.path.1 (8 bytes)`, "/accounts/usr_REC1"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			core, logs := observer.New(zap.InfoLevel)
@@ -1843,8 +1843,8 @@ func TestProcessTestCasesV2_TheProducerIsTheFirstPlaceThatMayCapture(t *testing.
 		assert.Equal(t, "sid={{string .sid}}", written["test-2"].HTTPReq.Header["Cookie"])
 		said := logs.FilterMessageSnippet("stays compared as recorded").All()
 		require.Len(t, said, 1, name)
-		assert.Contains(t, said[0].Message, `test-set-0/test-1 response header `+name+` of a 302 response holds `+name+`.query.sid "s_REC1"`)
-		assert.Equal(t, `if the value is one its response issues anew each run, write {{string .sid}} in place of "s_REC1": the header then asserts it names the value its response captures, and every other value of it stays as recorded (a header value that holds a use of a key its response captures holds no capture); if it is the same every run (a redirect's target), nothing to do`,
+		assert.Contains(t, said[0].Message, `test-set-0/test-1 response header `+name+` of a 302 response holds `+name+`.query.sid (6 bytes)`)
+		assert.Equal(t, `if the value is one its response issues anew each run, write {{string .sid}} in place of the value at `+name+`.query.sid: the header then asserts it names the value its response captures, and every other value of it stays as recorded (a header value that holds a use of a key its response captures holds no capture); if it is the same every run (a redirect's target), nothing to do`,
 			fmt.Sprint(said[0].ContextMap()["next_step"]), name)
 		w := written["test-1"]
 		w.HTTPResp.Header = map[string]string{"Location": w.HTTPResp.Header[name], "Set-Cookie": w.HTTPResp.Header["Set-Cookie"]}
@@ -1879,8 +1879,8 @@ func TestProcessTestCasesV2_TheProducerIsTheFirstPlaceThatMayCapture(t *testing.
 		assert.Len(t, logs.FilterMessageSnippet("test-set-0/test-1 Content-Location holds the value users captures and stays as recorded").All(), 1)
 		said := logs.FilterMessageSnippet("stays compared as recorded").All()
 		require.Len(t, said, 1)
-		assert.Contains(t, said[0].Message, `test-set-0/test-1 response header Content-Location of a 201 response holds Content-Location.path.1 "u_REC1"`)
-		assert.Contains(t, fmt.Sprint(said[0].ContextMap()["next_step"]), `if the value is one its response issues anew each run, write {{string .users}} in place of "u_REC1"`)
+		assert.Contains(t, said[0].Message, `test-set-0/test-1 response header Content-Location of a 201 response holds Content-Location.path.1 (6 bytes)`)
+		assert.Contains(t, fmt.Sprint(said[0].ContextMap()["next_step"]), `if the value is one its response issues anew each run, write {{string .users}} in place of the value at Content-Location.path.1`)
 	}
 
 	// A 201 Location part that holds a delimiter of its part (a%2Fb) is
@@ -2013,7 +2013,7 @@ func TestProcessTestCasesV2_ATargetBesideACaptureStaysComparedAsWritten(t *testi
 	written, template, logs := templatizeConf(t, r8d, nil)
 	crowded := logs.FilterMessageSnippet("holds more than one value").All()
 	require.Len(t, crowded, 1)
-	assert.Contains(t, crowded[0].Message, `(Location.path.0 "users", Location.path.1 "u_REC1", Location.query.sid "s_REC1")`)
+	assert.Contains(t, crowded[0].Message, `(Location.path.0 (5 bytes), Location.path.1 (6 bytes), Location.query.sid (6 bytes))`)
 	t1, t2 := written["test-1"], written["test-2"]
 	again, _, logs := templatizeAll(t, []*models.TestCase{&t1, &t2}, template, nil)
 	assert.Empty(t, again)
@@ -2037,7 +2037,7 @@ func TestProcessTestCasesV2_TheProducerIsInTheResponseThatGivesTheValueFirst(t *
 	assert.Empty(t, written, "nothing is captured in a later response")
 	said := logs.FilterMessageSnippet("stays compared as recorded").All()
 	require.Len(t, said, 1)
-	assert.Contains(t, said[0].Message, `test-set-0/test-1 response header Location of a 302 response holds Location.query.sid "s_REC1"`)
+	assert.Contains(t, said[0].Message, `test-set-0/test-1 response header Location of a 302 response holds Location.query.sid (6 bytes)`)
 }
 
 // EACH LINE ABOUT A VALUE TEMPLATIZE LEAVES NAMES ITS TEST SET, TEST CASE AND
@@ -2076,8 +2076,8 @@ func TestProcessTestCasesV2_APlaceLeftWrittenOutIsSaidWithItsEdit(t *testing.T) 
 	for _, e := range logs.FilterMessageSnippet("holds the value id captures and stays as recorded").All() {
 		next[strings.Fields(e.Message)[1]] = fmt.Sprint(e.ContextMap()["next_step"])
 	}
-	assert.Contains(t, next["body.copy"], `write "{{int .id}}" in place of "7654321" there`)
-	assert.Contains(t, next["body.ref"], `write {{string .id}} in place of "7654321" there`)
+	assert.Contains(t, next["body.copy"], `write "{{int .id}}" in place of the value there (7 bytes)`)
+	assert.Contains(t, next["body.ref"], `write {{string .id}} in place of the value there (7 bytes)`)
 	// Applied, both pass keploy test's set check and a fresh number.
 	t1, t2 := written["test-1"], written["test-2"]
 	t1.HTTPResp.Body = `{"id":"{{capture int .id}}","copy":"{{int .id}}","ref":"o-{{string .id}}"}`
@@ -2122,7 +2122,7 @@ func TestProcessTestCasesV2_APlaceLeftWrittenOutIsSaidWithItsEdit(t *testing.T) 
 		require.Len(t, left, 1, c.name)
 		next := fmt.Sprint(left[0].ContextMap()["next_step"])
 		if c.offer {
-			assert.Contains(t, next, `write {{string .id}} in place of "u_REC1" there`, c.name)
+			assert.Contains(t, next, `write {{string .id}} in place of the value there (6 bytes)`, c.name)
 			continue
 		}
 		assert.Equal(t, "no use can stand there (it is inside an array and test.ignoreOrdering is on and the noise entry body.items.id (globalNoise) covers it, so nothing would tie a use there to its element and keploy test would refuse it): it stays as recorded", next, c.name)
@@ -2140,7 +2140,7 @@ func TestProcessTestCasesV2_APlaceLeftWrittenOutIsSaidWithItsEdit(t *testing.T) 
 		cfg  *config.Config
 		want string
 	}{
-		{"no noise", &config.Config{Test: config.Test{IgnoreOrdering: true}}, `if the app issues the value anew each run, write {{string .id}} in place of "u_REC1" there`},
+		{"no noise", &config.Config{Test: config.Test{IgnoreOrdering: true}}, `if the app issues the value anew each run, write {{string .id}} in place of the value there (6 bytes)`},
 		{"noise over the array", &config.Config{Test: config.Test{IgnoreOrdering: true, GlobalNoise: config.Globalnoise{Global: config.GlobalNoise{"body": {"items": {}}}}}}, "no use can stand there (it is inside an array and test.ignoreOrdering is on and the noise entry body.items (globalNoise) covers it"},
 	} {
 		_, logs := templatizeLogsWith(t, keyed(), nil, c.cfg)
@@ -2170,10 +2170,10 @@ func TestProcessTestCasesV2_APlaceLeftWrittenOutIsSaidWithItsEdit(t *testing.T) 
 		steps[strings.Fields(e.Message)[1]] = fmt.Sprint(e.ContextMap()["next_step"])
 	}
 	assert.Equal(t, map[string]string{
-		"body.was":         `if the app issues the value anew each run, write "{{float .price}}" in place of "19.99" there: that place then asserts it holds what this same answer gives at the capture of price, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
+		"body.was":         `if the app issues the value anew each run, write "{{float .price}}" in place of the value there (5 bytes): that place then asserts it holds what this same answer gives at the capture of price, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
 		"body.v":           "no use can stand there (the value is part of a JSON number there, which a use cannot stand inside): it stays as recorded",
-		"Content-Location": `if the app issues the value anew each run, write {{string .id}} in place of "m_REC2" there: that place then asserts it holds what this same answer gives at the capture of id, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
-		"Set-Cookie.last":  `if the app issues the value anew each run, write {{string .id}} in place of "m_REC2" there: that place then asserts it holds what this same answer gives at the capture of id, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
+		"Content-Location": `if the app issues the value anew each run, write {{string .id}} in place of the value there (6 bytes): that place then asserts it holds what this same answer gives at the capture of id, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
+		"Set-Cookie.last":  `if the app issues the value anew each run, write {{string .id}} in place of the value there (6 bytes): that place then asserts it holds what this same answer gives at the capture of id, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
 	}, steps)
 }
 
@@ -2243,7 +2243,7 @@ func TestProcessTestCasesV2_APlaceLeftWrittenOutIsReadAsTheReplayReadsIt(t *test
 	written, logs := templatizeLogs(t, html, nil)
 	assert.Equal(t, "sid={{capture string .sid}}; Path=/", written["test-1"].HTTPResp.Header["Set-Cookie"])
 	assert.Equal(t, map[string]string{
-		"body": `if the app issues the value anew each run, write {{string .sid}} in place of "s_REC1abc" there: that place then asserts it holds what this same answer gives at the capture of sid, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
+		"body": `if the app issues the value anew each run, write {{string .sid}} in place of the value there (9 bytes): that place then asserts it holds what this same answer gives at the capture of sid, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
 	}, said(logs))
 
 	encoded := []*models.TestCase{
@@ -2254,7 +2254,7 @@ func TestProcessTestCasesV2_APlaceLeftWrittenOutIsReadAsTheReplayReadsIt(t *test
 	assert.Equal(t, `{"name":"{{capture string .name}}"}`, written["test-1"].HTTPResp.Body)
 	assert.Equal(t, "/files/a%20b_REC1", written["test-1"].HTTPResp.Header["X-Res"])
 	assert.Equal(t, map[string]string{
-		"X-Res": `if the app issues the value anew each run, write {{string .name}} in place of "a b_REC1" there: that place then asserts it holds what this same answer gives at the capture of name, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
+		"X-Res": `if the app issues the value anew each run, write {{string .name}} in place of the value there (8 bytes): that place then asserts it holds what this same answer gives at the capture of name, whatever that is (a constant's regression in both places included); if it is the same every run, nothing to do`,
 	}, said(logs))
 
 	replaced := []*models.TestCase{

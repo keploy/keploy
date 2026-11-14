@@ -785,3 +785,32 @@ func TestHeadersOnlyMakesUpNoStart(t *testing.T) {
 		t.Fatalf("headersOnly(nil) = %+v; want none", got)
 	}
 }
+
+// A log line names the stalled request by its method and its path's shape;
+// the error, which the test report keeps, names it whole.
+func TestAStallIsLoggedWithTheRequestsShape(t *testing.T) {
+	const s = "kpLogCanary7Qx3vZ9mW2"
+	err := wrapErr("test-1", &AnswerStallError{Target: "GET /v1/reset/" + s + "?access_token=" + s, Waited: time.Second})
+	if !strings.Contains(err.Error(), s) {
+		t.Fatal("precondition: the error keeps the request whole for the report")
+	}
+	got := LoggableAnswerError(err)
+	if strings.Contains(got, s[:8]) || !strings.Contains(got, "for GET /{}/{}/{}") || !strings.HasPrefix(got, "test-1: ") {
+		t.Fatalf("LoggableAnswerError = %q, want the request's shape", got)
+	}
+	grpc := &AnswerStallError{Target: "/orders.Orders/Get", Keepalives: true}
+	if got := LoggableAnswerError(grpc); got != grpc.Error() {
+		t.Fatalf("a gRPC method is a name, kept: %q", got)
+	}
+}
+
+// wrapErr is err wrapped with prefix, as a caller wraps it.
+func wrapErr(prefix string, err error) error { return &prefixed{prefix: prefix, err: err} }
+
+type prefixed struct {
+	prefix string
+	err    error
+}
+
+func (p *prefixed) Error() string { return p.prefix + ": " + p.err.Error() }
+func (p *prefixed) Unwrap() error { return p.err }

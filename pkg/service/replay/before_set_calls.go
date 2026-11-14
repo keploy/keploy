@@ -123,9 +123,9 @@ func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 		r.logger.Error(msg,
 			zap.String("test-set", testSetID),
 			zap.String("protocol", c.Protocol),
-			zap.String("call", c.Named()),
+			zap.String("call", models.UnmatchedCallLogShape(c)),
 			zap.String("destination", c.Destination),
-			zap.String("diff", c.Diff),
+			zap.Strings("differs", models.FieldShapes(c.Differs)),
 			zap.String("next_step", next))
 	}
 }

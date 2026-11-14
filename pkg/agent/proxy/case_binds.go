@@ -176,5 +176,5 @@ func (p *Proxy) warnCaseBind(test, testCase string, b models.ClientCaseBind, why
 		return
 	}
 	p.logger.Warn("keploy could not bind a variable of the test at its test case's request, so each call that uses it misses",
-		zap.String("test", test), zap.String("testCase", testCase), zap.String("variable", b.Name), zap.String("place", b.Place), zap.String("why", why))
+		zap.String("test", test), zap.String("testCase", testCase), zap.String("variable", b.Name), zap.String("place", models.FieldShape(b.Place)), zap.String("why", why))
 }

@@ -204,13 +204,19 @@ func FieldShapes(fields []string) []string {
 // key that is an ID, an email address, a token) is {}. By that rule any key
 // that does not read as a name is {} too (line1, $set, iOS, café), and an
 // API version (v1) is kept. A header's name is kept whole: it names the
-// field (header.Authorization). A raw dotted key is shaped part by part
+// field (header.Authorization), when it is a header's name at all (a
+// token: headerName), else {}. A raw dotted key is shaped part by part
 // (alice.smith@example.com keeps "alice"), so a producer shapes its keys
 // first (KeyShape), as the strict comparison does. An SQL call's place name
 // is kept whole too (sqlPlace: bind.$1, literal.3): a position keploy counts
 // in the statement, not a value the app sent.
 func FieldShape(f string) string {
 	if name, ok := strings.CutPrefix(f, "header."); ok && name != "" && !strings.Contains(name, ".") {
+		if !headerName.MatchString(name) {
+			// No header's name (a space, a quote): a value written
+			// where a name goes.
+			return "header." + pathHole
+		}
 		return f
 	}
 	if sqlPlace.MatchString(f) {
@@ -277,13 +283,50 @@ func mongoShape(summary string) string {
 	out := KeyShape(f[0])
 	i := 1
 	if i+1 < len(f) && f[i] == "on" {
-		out += " on " + mongoNameShape(f[i+1])
+		if ns := mongoCommandNamespace(f[0], f[i+1]); ns != "" {
+			out += " on " + mongoNameShape(ns)
+		}
 		i += 2
 	}
 	if i+1 < len(f) && f[i] == "filter" {
 		out += " filter " + strings.Join(mongoKeysShape(strings.Split(f[i+1], ",")), ",")
 	}
 	return out
+}
+
+// mongoCollectionCommands are the MongoDB commands whose value names the
+// collection they run on (find: "users"), in lower case. Any other
+// command's value names something else (createUser's user, a role), which a
+// shape never names as a collection.
+var mongoCollectionCommands = map[string]bool{
+	"find": true, "insert": true, "update": true, "delete": true, "aggregate": true, "count": true,
+	"distinct": true, "findandmodify": true, "mapreduce": true, "getmore": true, "killcursors": true,
+	"createindexes": true, "dropindexes": true, "listindexes": true, "create": true, "drop": true,
+	"collstats": true, "explain": true, "collmod": true, "validate": true, "compact": true,
+}
+
+// mongoNamesCollection reports whether command's value names a collection.
+func mongoNamesCollection(command string) bool {
+	return mongoCollectionCommands[strings.ToLower(command)]
+}
+
+// mongoCommandNamespace is the namespace a summary names for command
+// ("<db>.<collection>"): whole for a command that runs on a collection; for
+// any other, its database alone, or its legacy command pseudo-collection
+// ($cmd), or "" where it names no database: what follows is the command's
+// value (createUser's user).
+func mongoCommandNamespace(command, ns string) string {
+	if mongoNamesCollection(command) || ns == "$cmd" {
+		return ns
+	}
+	db, rest, ok := strings.Cut(ns, ".")
+	switch {
+	case !ok:
+		return ""
+	case rest == "$cmd":
+		return ns
+	}
+	return db
 }
 
 // mongoMissShape is a MongoDB miss's shape (mongoShape) naming, when the
@@ -309,7 +352,9 @@ func mongoMissShape(m UnmatchedCall) string {
 	}
 	var command, coll, db string
 	command = f[0]
-	if json.Unmarshal(body.Cmd[command], &coll) != nil || coll == "" {
+	if !mongoNamesCollection(command) || json.Unmarshal(body.Cmd[command], &coll) != nil || coll == "" {
+		// A command that runs on no collection names its user, its role,
+		// its database there: never a collection.
 		return shape
 	}
 	_ = json.Unmarshal(body.Cmd["$db"], &db)

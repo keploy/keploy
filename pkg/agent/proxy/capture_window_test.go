@@ -147,7 +147,8 @@ func TestCaptureWindow_ContinueCarriesTheGapsMisses(t *testing.T) {
 }
 
 // What a set's first test discards — misses made before it, with no window
-// open — is logged, with the calls, so no miss is dropped without a word.
+// open — is logged, with the calls by their shape (models.MissLogShape), so
+// no miss is dropped without a word.
 func TestCaptureWindow_BeginLogsWhatItDiscards(t *testing.T) {
 	// With the proven switch off; on, the first test reads them as the set's
 	// (TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets).
@@ -162,7 +163,7 @@ func TestCaptureWindow_BeginLogsWhatItDiscards(t *testing.T) {
 	if len(e) != 1 || e[0].ContextMap()["count"] != int64(1) {
 		t.Fatalf("want one Warn naming the discarded miss, got %+v", logs.All())
 	}
-	if calls, _ := e[0].ContextMap()["calls"].([]interface{}); len(calls) != 1 || calls[0] != "GET /background" {
+	if calls, _ := e[0].ContextMap()["calls"].([]interface{}); len(calls) != 1 || calls[0] != "HTTP GET /{}" {
 		t.Fatalf("the Warn does not name the call: %+v", e[0].ContextMap())
 	}
 
@@ -340,7 +341,7 @@ func TestUnderTheSwitchAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) 
 		t.Fatalf("the cut was said %d times; want once: %+v", len(e), logs.All())
 	}
 	calls, _ := e[0].ContextMap()["calls"].([]interface{})
-	if len(calls) != 2 || calls[0] != "POST /stopped" || calls[1] != "GET /health" {
+	if len(calls) != 2 || calls[0] != "HTTP POST /{}" || calls[1] != "HTTP GET /{}" {
 		t.Fatalf("the warning names %v; want the call after the last read and the one before the staging", calls)
 	}
 

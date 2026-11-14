@@ -628,7 +628,7 @@ func markRecordedIn(results []models.TestResult, owners map[string][]string) []s
 		for j := range r.FailureInfo.UnmatchedCalls {
 			c := &r.FailureInfo.UnmatchedCalls[j]
 			if c.NameRecordedIn(r.TestCaseID, owners) {
-				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, c.Named(), c.ClosestMock, c.RecordedIn))
+				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, models.UnmatchedCallLogShape(*c), c.ClosestMock, c.RecordedIn))
 			}
 			// As keploy mock replay's receipt does (withRecordedIn).
 			c.NameEarlierIn(r.TestCaseID, owners)

@@ -111,9 +111,9 @@ func (r *Replayer) takeEarlierSetCalls(read []models.UnmatchedCall) []models.Unm
 			zap.String("made-in-test-set", c.set),
 			zap.String("read-in-test-set", r.earlierSetCalls.reading()),
 			zap.String("protocol", c.call.Protocol),
-			zap.String("call", c.call.Named()),
+			zap.String("call", models.UnmatchedCallLogShape(c.call)),
 			zap.String("destination", c.call.Destination),
-			zap.String("diff", c.call.Diff),
+			zap.Strings("differs", models.FieldShapes(c.call.Differs)),
 			zap.String("next_step", "the call is that set's (and that test's, where one is named), not the set whose read returned it: it changed or is new since the recording; fix the application, or re-record that test if the change is intended"))
 	}
 	return rest

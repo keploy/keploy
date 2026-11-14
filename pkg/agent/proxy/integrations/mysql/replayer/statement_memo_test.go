@@ -214,31 +214,17 @@ func TestStmtIdentityCacheKeepsAStatementByItsSize(t *testing.T) {
 	}
 }
 
-// A command's log lines show its statement for each candidate they compare
-// it with, as written and as its identity: each text is shown once
-// (logPlaces), and the places read once, so a statement the caches do not
-// keep is not read again for each line. No logPlaces shows every place.
-func TestLogPlacesShowsEachTextOnce(t *testing.T) {
+// The places a miss's report shows its command by are read once, however
+// often they are asked for (logPlaces). No logPlaces reads every place.
+func TestLogPlacesReadsThePlacesOnce(t *testing.T) {
 	byKey := queryRecorded("by-key", "SELECT name FROM users WHERE api_key = 'xq7Lm2Pw9Rt4Zk' AND org = 'acme'", redactedNoise)
-	pad := strings.Repeat(" ", memoMaxBytes)
-	identity := "SELECT name FROM users WHERE api_key = 'live' AND org = 'globex'" + pad
-	written := "/* traceparent=00-ab */ " + identity
-	want := map[string]string{
-		identity: "SELECT name FROM users WHERE api_key = '(redacted)' AND org = 'globex'" + pad,
-		written:  "/* traceparent=00-ab */ SELECT name FROM users WHERE api_key = '(redacted)' AND org = 'globex'" + pad,
-	}
+	want := poolPlaces([]*models.Mock{byKey})
 	read := 0
 	r := &logPlaces{read: func() redactedPlaces { read++; return poolPlaces([]*models.Mock{byKey}) }}
-	first := map[string]string{}
-	for i, sql := range []string{written, identity, written, identity} {
-		got := r.live(sql)
-		if got != want[sql] {
-			t.Fatalf("line %d shown as %.100q, want %.100q", i, got, want[sql])
+	for i := 0; i < 3; i++ {
+		if got := r.places(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("read %d: %+v, want %+v", i, got, want)
 		}
-		if f, seen := first[sql]; seen && unsafe.StringData(f) != unsafe.StringData(got) {
-			t.Errorf("line %d read its text again, want it read once", i)
-		}
-		first[sql] = got
 	}
 	if read != 1 {
 		t.Errorf("the places were read %d times, want once", read)
