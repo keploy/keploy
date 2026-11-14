@@ -146,20 +146,48 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		// (pairbytes_linux.go's pairReached).
 		return true, nil
 	case closed:
-		// Short of what was written, and the proxy closed it: as on Linux,
-		// an orphan that took the application's FIN refused nothing; one
-		// FIN short with the orphan still waiting for that FIN is looked
-		// at again; anything else is a loss.
+		// Short of what was written, and the proxy closed it: as on Linux
+		// (pairbytes_linux.go's pairReached says why), an orphan that took
+		// the application's FIN refused nothing; one FIN short with the
+		// orphan still waiting for that FIN is looked at again; anything
+		// else is a loss.
+		//
+		// The close may not have reached the kernel yet (the descriptor is
+		// marked closing, which is what side reads as closed, before its
+		// last reference goes), and the socket is then no orphan. One FIN
+		// short, a socket in CLOSE_WAIT took that FIN in sequence, after
+		// every byte counted as the close began: nothing was refused. One
+		// still ESTABLISHED waits for it as an orphan does. More short than
+		// that, the bytes went with the close.
+		//
+		// What was written is counted up to what the application had
+		// written as the close began (noteWroteAtClose), when that is less:
+		// bytes it wrote after keploy's close are no capture loss, and are
+		// not waited for. Less, it wrote on after that read, so the read
+		// held no FIN of its: one short of it is a byte, never the FIN.
+		// Both count from the application socket's first sequence number
+		// (each read checks it against the proxy's side), so they are
+		// compared as a distance, as what was received is.
+		want, finCounted := t.want, t.finCounted
+		if w := pc.wroteAtClose.Load(); w != nil && int32(uint32(w.want)-uint32(want)) < 0 {
+			want, finCounted = w.want, false
+		}
+		short = int32(uint32(want) - got)
+		if short <= 0 {
+			return true, nil
+		}
 		d, took, err := orphanTookFIN(pc, t.base.isn)
-		oneShort := t.finCounted && short == 1
+		oneShort := finCounted && short == 1
 		switch {
 		case took:
+			return true, nil
+		case err == nil && oneShort && d.state == xnuTCPCloseWait:
 			return true, nil
 		case errors.Is(err, errNoXNUPCB) && oneShort:
 			return false, fmt.Errorf("%w: the proxy closed its side of a connection from %s one FIN short of what the application wrote, and its orphaned socket is gone: whether it took that FIN or refused a byte cannot be told", models.ErrProxyConnsUnsupported, pc.app)
 		case err != nil && oneShort:
 			return false, fmt.Errorf("%w: the proxy closed its side of a connection from %s one FIN short of what the application wrote, and its orphaned socket, which tells that FIN from a byte it refused, cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, err)
-		case err == nil && oneShort && (d.state == xnuTCPFinWait1 || d.state == xnuTCPFinWait2):
+		case err == nil && oneShort && (d.state == xnuTCPEstablished || d.state == xnuTCPFinWait1 || d.state == xnuTCPFinWait2):
 			if t.orphan != d.state {
 				t.orphan = d.state
 				p.paired.progress.Add(1)
@@ -168,8 +196,8 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		}
 		// The bytes lost run from the first its side did not receive to
 		// the last the application wrote before its FIN.
-		top := t.want
-		if t.finCounted {
+		top := want
+		if finCounted {
 			top--
 		}
 		p.pairLost(pc, uint64(got)+1, top, "bytes the application wrote to a connection keploy's proxy holds never reached the proxy: the connection was reset, or closed, first, so what they carried was neither recorded nor mocked")
@@ -178,10 +206,9 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 	return false, nil
 }
 
-// orphanEstablished is XNU's ESTABLISHED, for the wait's report of an orphan
-// (orphansUnmoved). The wait here never waits on a closed connection's socket
-// in it: one FIN short with its socket still ESTABLISHED (the proxy's close
-// not yet in the kernel) is counted a loss (pairReached), which fails closed.
+// orphanEstablished is XNU's ESTABLISHED, the state a bytes wait finds a
+// closed connection's socket in while the proxy's close has not reached the
+// kernel (pairReached, orphansUnmoved).
 const orphanEstablished = xnuTCPEstablished
 
 // errNoXNUPCB: the table lists no such socket.
