@@ -5,6 +5,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -5688,6 +5689,12 @@ type testErrorAccumulator struct {
 	// it could not close (the degenerate path): what is filed into it after
 	// that was made after its test's misses were taken, between two tests.
 	read bool
+	// folds holds what was folded into the misses held or spilled once their
+	// room was full (addBounded, foldAlike); nil until a miss first folds.
+	folds *missFolds
+	// spill keeps, on the agent's disk, the misses past their room alike to
+	// none held or spilled (keepPast); nil until one is first kept there.
+	spill *missSpill
 }
 
 func (a *testErrorAccumulator) add(err error) {
@@ -5699,12 +5706,30 @@ func (a *testErrorAccumulator) add(err error) {
 	a.mu.Unlock()
 }
 
-func (a *testErrorAccumulator) drain() []error {
+// drain takes what the accumulator holds, the misses its spill kept read
+// back after those in memory, each miss carrying the times of the misses
+// folded into it (MockMismatchReport.AlikeAt), and empties it, removing its
+// spill. lost is why misses its spill kept could not be read back, empty
+// when every one was: what it returns is then short of them.
+func (a *testErrorAccumulator) drain() (errs []error, lost string) {
 	a.mu.Lock()
-	e := a.errs
-	a.errs, a.answers = nil, 0
+	e, folds, spill := a.errs, a.folds, a.spill
+	a.errs, a.answers, a.folds, a.spill = nil, 0, nil, nil
 	a.mu.Unlock()
-	return e
+	spilled, lost := spill.readBack()
+	folds.applyTo(e, spilled)
+	return append(e, spilled...), lost
+}
+
+// lostWhy is why a miss past the accumulator's room was not kept
+// (missSpill.full), for its loss's cause; empty while none was refused.
+func (a *testErrorAccumulator) lostWhy() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.spill == nil {
+		return ""
+	}
+	return a.spill.full
 }
 
 // maxPendingMockErrors bounds the retained mock-not-found errors (and the
@@ -5717,7 +5742,11 @@ const maxPendingMockErrors = 512
 // of its class: misses (and every other error) and answered calls' reports
 // (models.ReportAnswer) each have room for max, so a background writer
 // answered by its kind, as often as it writes, never takes a miss's room.
-// Returns false when the entry was dropped.
+// A miss past its room is kept (keepPast): folded into a miss it is alike
+// to (missAlikeKey), as a time, so a flood of one call, however long, takes
+// no room, or else kept on the agent's disk (missSpill), up to its bound.
+// Returns false when the entry was dropped: an answer past its room, or a
+// miss past its room its spill did not keep (lostWhy says why).
 func (a *testErrorAccumulator) addBounded(err error, max int) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -5727,7 +5756,7 @@ func (a *testErrorAccumulator) addBounded(err error, max int) bool {
 		held = a.answers
 	}
 	if held >= max {
-		return false
+		return !answer && a.keepPast(err)
 	}
 	a.errs = append(a.errs, err)
 	if answer {
@@ -5738,9 +5767,9 @@ func (a *testErrorAccumulator) addBounded(err error, max int) bool {
 
 // The causes a read of the misses is incomplete for (missLoss).
 var (
-	missLostListFull        = fmt.Sprintf("a miss was dropped: the test's list of misses was full (%d)", maxPendingMockErrors)
-	missLostBetweenFull     = fmt.Sprintf("a miss made between two tests was dropped: the list of misses waiting for the next test was full (%d)", maxPendingMockErrors)
-	missLostBeforeSetFull   = fmt.Sprintf("a miss made before the test set's first test was dropped: the list of misses waiting for it was full (%d)", maxPendingMockErrors)
+	missLostListFull        = fmt.Sprintf("a miss was dropped: the test's list of misses was full (%d in the agent's memory, then what it could keep on its disk)", maxPendingMockErrors)
+	missLostBetweenFull     = fmt.Sprintf("a miss made between two tests was dropped: the list of misses waiting for the next test was full (%d in the agent's memory, then what it could keep on its disk)", maxPendingMockErrors)
+	missLostBeforeSetFull   = fmt.Sprintf("a miss made before the test set's first test was dropped: the list of misses waiting for it was full (%d in the agent's memory, then what it could keep on its disk)", maxPendingMockErrors)
 	missLostDrainStopped    = "a miss could not be queued for its test: keploy's error drain had stopped"
 	missLostNoDrainChanFull = "a miss could not be queued for its test: keploy's error channel was full and no error drain was running"
 	missUnfiledNoDrain      = "no error drain was running to file each miss under the test worker that made it, so this worker's misses could not be told from the others'"
@@ -5805,15 +5834,21 @@ func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
 	for _, o := range windows {
 		w := o.w
 		var all []error
+		unspilled := ""
 		if acc := w.activeTestErrors.Swap(nil); acc != nil {
-			all = acc.drain()
+			all, unspilled = acc.drain()
 		}
-		all = append(all, w.pendingMockErrors.drain()...)
+		pending, pendingUnspilled := w.pendingMockErrors.drain()
+		all = append(all, pending...)
 		lost = lost || w.pendingLost
 		w.pendingLost = false
 		// A loss since the previous set's last read was of its tail: no read
 		// of this set is short of it.
 		w.missLoss.Store(nil)
+		// But misses kept on the agent's disk that could not be read back
+		// may be ones this set's next read would take (keptAsEarlierSet):
+		// that read is short of them.
+		p.spillLost(w, cmp.Or(unspilled, pendingUnspilled))
 		for _, err := range all {
 			if !w.keptAsEarlierSet(err) {
 				tail = append(tail, err)
@@ -5950,13 +5985,16 @@ func (b beforeSetMiss) Unwrap() error { return b.error }
 // no miss. One answered by kind (AnswerByKind) changes no verdict: only the
 // count of background writes a report says were answered unchecked is short
 // of it, which is said (noteAnswerDropped), and the read stays complete.
-func (p *Proxy) noteMissLost(err error, cause string) {
+//
+// It returns whether this loss is the first since its window's last read:
+// the one the read names.
+func (p *Proxy) noteMissLost(err error, cause string) bool {
 	if !isMockNotFoundErr(err) {
-		return
+		return false
 	}
 	if isByKindAnswer(err) {
 		p.noteAnswerDropped(err)
-		return
+		return false
 	}
 	if missCounts(err) {
 		if isAnswerReport(err) {
@@ -5965,9 +6003,10 @@ func (p *Proxy) noteMissLost(err error, cause string) {
 			cause = "an answered call's report (no miss) was lost: " + cause
 		}
 		if w := p.missWindowOf(missInstance(err)); w != nil {
-			w.missLoss.CompareAndSwap(nil, &cause)
+			return w.missLoss.CompareAndSwap(nil, &cause)
 		}
 	}
+	return false
 }
 
 // isAnswerReport reports whether err is an answered call's report
@@ -6005,9 +6044,55 @@ func (p *Proxy) noteAnswerDropped(err error) {
 		zap.Int("kept", maxPendingMockErrors))
 }
 
-// missDroppedForRoom notes that a miss was dropped because its test's list is
-// full (maxPendingMockErrors).
-func (p *Proxy) missDroppedForRoom(err error) { p.noteMissLost(err, missLostListFull) }
+// missDroppedForRoom notes that a miss was dropped because its test's list,
+// acc, is full: its room in memory (maxPendingMockErrors) and its spill
+// (missSpill).
+func (p *Proxy) missDroppedForRoom(err error, acc *testErrorAccumulator) {
+	p.roomLost(err, withLostWhy(missLostListFull, acc))
+}
+
+// roomLost notes that a miss was lost for its list's room (noteMissLost),
+// and says the first loss of a read at Warn, with what to do: the read is
+// incomplete for it.
+func (p *Proxy) roomLost(err error, cause string) {
+	if p.noteMissLost(err, cause) && p.logger != nil {
+		p.logger.Warn("a miss was lost: the read of its test's misses is incomplete, so its test set is not judged",
+			zap.String("cause", cause), zap.String("next_step", missLostNextStep))
+	}
+}
+
+// withLostWhy is cause, a miss's loss for its list acc's room, with why
+// acc's spill did not keep it (testErrorAccumulator.lostWhy).
+func withLostWhy(cause string, acc *testErrorAccumulator) string {
+	if why := acc.lostWhy(); why != "" {
+		return cause + ": " + why
+	}
+	return cause
+}
+
+// missLostNextStep is what a loss of misses for room says to do
+// (noteMissLost, pendingDroppedForRoom).
+const missLostNextStep = "the application made more calls that no recording answers, each unlike the others, than keploy keeps for one test; fix the first misses the test lists (a re-record, or the change that made them), then run it again. If the agent's disk was short, free its temp folder (TMPDIR)."
+
+// spillLost says that misses a list kept on the agent's disk (missSpill)
+// could not be read back, and why (lost; nothing when empty): at Warn, and
+// as w's next read's loss, which is short of them.
+func (p *Proxy) spillLost(w *missWindow, lost string) {
+	if lost == "" {
+		return
+	}
+	p.warnSpillLost(lost)
+	w.missLoss.CompareAndSwap(nil, &lost)
+}
+
+// warnSpillLost says at Warn that misses kept on the agent's disk could not
+// be read back, and why (lost).
+func (p *Proxy) warnSpillLost(lost string) {
+	if p.logger != nil {
+		p.logger.Warn("misses keploy kept on the agent's disk could not be read back: the read of the test's misses is incomplete, so its test set is not judged",
+			zap.String("cause", lost), zap.String("next_step", "check the agent's temp folder (TMPDIR) for space and errors, then run the test set again"))
+	}
+}
 
 // pendingDroppedForRoom notes, under captureMu, that a miss made with no window
 // open was dropped because w's pendingMockErrors is full; w's next window
@@ -6021,6 +6106,10 @@ func (p *Proxy) pendingDroppedForRoom(w *missWindow, err error) {
 		return
 	}
 	if missCounts(err) {
+		if !w.pendingLost && p.logger != nil {
+			p.logger.Warn("a miss made while no test's window was open was lost: the list of misses waiting for the next test was full",
+				zap.String("cause", withLostWhy(missLostBetweenFull, &w.pendingMockErrors)), zap.String("next_step", missLostNextStep))
+		}
 		w.pendingLost = true
 	}
 }
@@ -6124,7 +6213,7 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 					acc := w.activeTestErrors.Load()
 					if acc != nil {
 						if !acc.addBounded(err, maxPendingMockErrors) {
-							p.missDroppedForRoom(err)
+							p.missDroppedForRoom(err, acc)
 						}
 						p.captureMu.Unlock()
 						continue
@@ -6213,14 +6302,23 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 	var between []error
 	old := w.activeTestErrors.Swap(acc)
 	p.testWindows.Add(1)
+	unspilled := ""
 	if old != nil {
+		var lost string
 		if old.read {
-			between = old.drain()
+			between, unspilled = old.drain()
 		} else {
-			unread = old.drain()
+			// Dropped below, as no test's: what of it could not be read
+			// back is said with the rest.
+			unread, lost = old.drain()
+			if lost != "" && p.logger != nil {
+				p.logger.Warn("misses keploy kept on the agent's disk for a test whose window was never read could not be read back; they are dropped with the rest of its misses", zap.String("cause", lost))
+			}
 		}
 	}
-	between = append(between, w.pendingMockErrors.drain()...)
+	pending, pendingUnspilled := w.pendingMockErrors.drain()
+	between = append(between, pending...)
+	unspilled = cmp.Or(unspilled, pendingUnspilled)
 	pendingLost := w.pendingLost
 	w.pendingLost = false
 	// Under the proven switch a set's first test carries what was missed
@@ -6230,9 +6328,11 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 	case carry:
 		for _, err := range between {
 			if !acc.addBounded(err, maxPendingMockErrors) {
-				p.missDroppedForRoom(err)
+				p.missDroppedForRoom(err, acc)
 			}
 		}
+		// They were this test's: its read is short of any not read back.
+		p.spillLost(w, unspilled)
 		if pendingLost {
 			// They were this test's: its read is short of them.
 			w.missLoss.CompareAndSwap(nil, &missLostBetweenFull)
@@ -6240,9 +6340,12 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 	case beforeSet:
 		for _, err := range between {
 			if !acc.addBounded(asBeforeSet(err), maxPendingMockErrors) {
-				p.noteMissLost(err, missLostBeforeSetFull)
+				p.roomLost(err, withLostWhy(missLostBeforeSetFull, acc))
 			}
 		}
+		// They were the set's: the read that carries them is short of any
+		// not read back.
+		p.spillLost(w, unspilled)
 		if pendingLost {
 			// They were the set's: the read that carries them is short of them.
 			w.missLoss.CompareAndSwap(nil, &missLostBeforeSetFull)
@@ -6251,6 +6354,10 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 	p.captureMu.Unlock()
 	if !carry && !beforeSet {
 		p.logDroppedMisses("mock mismatches made while no test's capture window was open are not attributed to a test", between)
+		if unspilled != "" {
+			// No test's either: said, and no read is short of them.
+			p.logger.Warn("misses keploy kept on the agent's disk while no test's capture window was open could not be read back; they are not attributed to a test either", zap.String("cause", unspilled))
+		}
 		if pendingLost {
 			// They were no test's either: said, and no read is short of them.
 			p.logger.Warn("more mock mismatches were made while no test's capture window was open than keploy keeps; the rest were dropped, and they are not attributed to a test either",
@@ -6354,7 +6461,10 @@ func (p *Proxy) EndTestErrorCapture() []error {
 	acc := p.activeTestErrors.Swap(nil)
 	p.testWindows.Add(1)
 	if acc != nil {
-		return acc.drain()
+		errs, lost := acc.drain()
+		// The next read is short of what could not be read back.
+		p.spillLost(&p.missWindow, lost)
+		return errs
 	}
 	return nil
 }
@@ -6443,7 +6553,13 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 	// Pre-window stragglers (retained before the first capture window — e.g.
 	// startup traffic). Oldest first. A read that takes them is short of any
 	// that were dropped for room.
-	rawErrs := w.pendingMockErrors.drain()
+	rawErrs, unspilled := w.pendingMockErrors.drain()
+	// take adds what acc holds to the read, and why any of it kept on the
+	// agent's disk could not be read back.
+	take := func(acc *testErrorAccumulator) {
+		errs, lost := acc.drain()
+		rawErrs, unspilled = append(rawErrs, errs...), cmp.Or(unspilled, lost)
+	}
 	if w.pendingLost {
 		w.pendingLost = false
 		if unreadCause == "" {
@@ -6480,7 +6596,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 		// goroutine stops appending — otherwise the last test's window would
 		// stay installed and grow for the rest of the process.
 		if acc := w.activeTestErrors.Swap(nil); acc != nil {
-			rawErrs = append(rawErrs, acc.drain()...)
+			take(acc)
 		}
 		p.testWindows.Add(1)
 		if provenswitch.On() && w == &p.missWindow {
@@ -6497,12 +6613,18 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 		// miss made between tests (ContinueTestErrorCapture), or a set's
 		// first discards it. Degenerate path.
 		if acc := w.activeTestErrors.Load(); acc != nil {
-			rawErrs = append(rawErrs, acc.drain()...)
+			take(acc)
 			acc.read = true
 		}
 		p.testWindows.Add(1)
 	}
 	p.captureMu.Unlock()
+	if unspilled != "" {
+		// Misses kept on the agent's disk that could not be read back: this
+		// read is short of them.
+		p.warnSpillLost(unspilled)
+		unreadCause = cmp.Or(unreadCause, unspilled)
+	}
 
 	var errs []models.UnmatchedCall
 	for _, err := range rawErrs {
@@ -6584,7 +6706,11 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					// Where its parser marked the call: a test's end places
 					// the miss by it, not by when it was filed.
 					Marked: missMark(parserErr.MismatchReport),
+					Folded: parserErr.MismatchReport.Folded,
 				})
+				// The calls folded into it past its list's room, each a
+				// miss of its own at its own time.
+				errs = appendFolded(errs, parserErr.MismatchReport.AlikeAt)
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach
 				// the user's report — silently dropping it here is how whole

@@ -702,11 +702,22 @@ func TestAnswersAndMissesHaveRoomOfTheirOwn(t *testing.T) {
 			t.Fatalf("miss %d was dropped before its room was full", i+1)
 		}
 	}
-	if acc.addBounded(miss, maxPendingMockErrors) {
-		t.Fatal("a miss past its room was kept")
+	// Past its room a miss alike to none held is kept on the agent's disk
+	// (missSpill), and one alike to a held miss is folded into it
+	// (foldAlike): the list in memory grows no longer.
+	other := models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: errors.New("no match"),
+		MismatchReport: &models.MockMismatchReport{Protocol: "Mongo", ClosestMock: "mock-other"}}
+	if !acc.addBounded(other, maxPendingMockErrors) {
+		t.Fatal("a miss past its room, alike to none held, was not kept on the disk")
 	}
-	if got := len(acc.drain()); got != 2*maxPendingMockErrors {
-		t.Fatalf("the window held %d reports; want %d answers and %d misses", got, maxPendingMockErrors, maxPendingMockErrors)
+	if !acc.addBounded(miss, maxPendingMockErrors) {
+		t.Fatal("a miss past its room, alike to one held, was not folded into it")
+	}
+	if len(acc.errs) != 2*maxPendingMockErrors {
+		t.Fatalf("the list in memory grew to %d past its rooms", len(acc.errs))
+	}
+	if got := len(drained(t, acc)); got != 2*maxPendingMockErrors+1 {
+		t.Fatalf("the window held %d reports; want %d answers, %d misses and the one kept on the disk", got, maxPendingMockErrors, maxPendingMockErrors)
 	}
 	if !acc.addBounded(answer, maxPendingMockErrors) || acc.answers != 1 {
 		t.Fatalf("after a drain an answer's room is not empty: %d", acc.answers)

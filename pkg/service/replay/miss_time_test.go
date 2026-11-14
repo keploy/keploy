@@ -120,6 +120,7 @@ var notFromTheMiss = map[string]string{
 	"MarkRound":    "part of the parser's round mark (Mark), never on the wire",
 	"MarkReads":    "part of the parser's round mark (Mark), never on the wire",
 	"MarkedTest":   "part of the parser's round mark (Mark), never on the wire",
+	"AlikeAt":      "the agent's times of the calls folded into a miss, never on the wire (json:\"-\"): the agent's read lists each as a miss of its own (UnmatchedCall.Folded)",
 }
 
 // A call a parser held past its window for a later test's recording, which

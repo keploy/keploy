@@ -104,6 +104,14 @@ type Receipt struct {
 	// proven model's verdict fails on. -1 when the misses were not read;
 	// absent with the switch off.
 	MissedData *int `yaml:"missedData,omitempty" json:"missedData,omitempty"`
+	// MissedWhy is, when Missed is -1 because keploy asked the agent for the
+	// calls no recorded mock answered and could not read them all, why: the
+	// reason the agent gave for its incomplete list (a test's misses past
+	// what its memory and its disk keep, its error drain stopped), or why
+	// the read failed. That is what to fix before the run can be judged on
+	// its misses. Empty when the misses were read, and when keploy never
+	// asked for them (a run keploy failed first: FailedBy says so).
+	MissedWhy string `yaml:"missedWhy,omitempty" json:"missedWhy,omitempty"`
 	// Bypass lists the destinations configured to skip keploy (bypassRules,
 	// --pass-through-ports): calls to them reach the real service.
 	Bypass []string `yaml:"bypass,omitempty" json:"bypass,omitempty"`

@@ -41,8 +41,9 @@ func TestAMissCarriesEveryFieldOfItsReport(t *testing.T) {
 		p.BeginTestErrorCapture()
 		p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, &report))
 		got, err := p.GetMockErrors(context.Background())
-		if err != nil || len(got) != 1 {
-			t.Fatalf("stamped=%v: want the one miss, got %+v (%v)", stamped, got, err)
+		// The time folded into it (AlikeAt) is listed as a call of its own.
+		if err != nil || len(got) != 2 || !got[1].Folded || !got[1].At.Equal(report.AlikeAt[0]) {
+			t.Fatalf("stamped=%v: want the miss and the call folded into it, got %+v (%v)", stamped, got, err)
 		}
 		from, to := reflect.ValueOf(report), reflect.ValueOf(got[0])
 		for i := 0; i < from.NumField(); i++ {
@@ -78,7 +79,10 @@ func fillEveryField(v reflect.Value) {
 			f.SetFloat(float64(i) + 0.5)
 		case f.Kind() == reflect.Slice:
 			s := reflect.MakeSlice(f.Type(), 1, 1)
-			if s.Index(0).Kind() == reflect.Struct {
+			switch {
+			case s.Index(0).Type() == reflect.TypeOf(time.Time{}):
+				s.Index(0).Set(reflect.ValueOf(time.Date(2026, 10, 7, 9, 30, i, 0, time.UTC)))
+			case s.Index(0).Kind() == reflect.Struct:
 				fillEveryField(s.Index(0))
 			}
 			f.Set(s)

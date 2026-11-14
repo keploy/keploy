@@ -335,6 +335,8 @@ func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
 // open test's list or with none open, never in both, so the set start re-files
 // no more than a window keeps.
 func TestAWorkersLateCallsLostForRoomAtTheSetsStartAreItsNextReadsLoss(t *testing.T) {
+	// Past the room in memory and on the disk (missSpill).
+	noSpillRoom(t)
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50101"))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -342,7 +344,7 @@ func TestAWorkersLateCallsLostForRoomAtTheSetsStartAreItsNextReadsLoss(t *testin
 	p.StartErrorDrain(ctx)
 	w := servedWorker(t, p, 1)
 	named := func(i int) error {
-		r := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: fmt.Sprintf("POST /late/%d", i), MarkedTest: "o::TestX", MarkedInTest: true, Mark: models.RoundMarkedSettled, MarkEpoch: 1}
+		r := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "POST /late/" + shapeName(i), MarkedTest: "o::TestX", MarkedInTest: true, Mark: models.RoundMarkedSettled, MarkEpoch: 1}
 		return models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: models.ErrNoMockMatched, Instance: 1, MismatchReport: r, MissKind: models.MissInTest, At: time.Now()}
 	}
 	// Worker 1's last test's window, read, and its tail: one more of its
@@ -400,6 +402,8 @@ func TestAWorkersReadWithNoErrorDrainIsIncompleteAndTakesNoMiss(t *testing.T) {
 // cause: not the run's, and one of a worker keploy does not serve is no
 // read's.
 func TestAWorkersLostMissMakesOnlyItsOwnReadIncomplete(t *testing.T) {
+	// Past the room in memory and on the disk (missSpill).
+	noSpillRoom(t)
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50085"))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -409,7 +413,7 @@ func TestAWorkersLostMissMakesOnlyItsOwnReadIncomplete(t *testing.T) {
 	w.ContinueTestErrorCapture()
 	p.ContinueTestErrorCapture()
 	for i := 0; i <= maxPendingMockErrors; i++ {
-		workerMiss(p, fmt.Sprintf("GET /%d", i), 1)
+		workerMiss(p, "GET /"+shapeName(i), 1)
 	}
 	if _, err := w.GetMockErrors(ctx); !errors.Is(err, models.ErrUnmatchedCallsUnread) || !strings.Contains(err.Error(), missLostListFull) {
 		t.Fatalf("worker 1's read, its list overfull, returned %v; want it incomplete: %s", err, missLostListFull)
@@ -438,6 +442,8 @@ func TestAWorkersLostMissMakesOnlyItsOwnReadIncomplete(t *testing.T) {
 // A test worker's tail lost for room is said at the next set's start, as
 // the run's is.
 func TestAWorkersTailLostForRoomIsSaidAtTheSetsStart(t *testing.T) {
+	// Past the room in memory and on the disk (missSpill).
+	noSpillRoom(t)
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p, _ := storeProxy(t, ipv4Dest(t, "127.0.0.1:50087"))
 	core, logs := observer.New(zap.WarnLevel)
@@ -447,7 +453,7 @@ func TestAWorkersTailLostForRoomIsSaidAtTheSetsStart(t *testing.T) {
 	p.StartErrorDrain(ctx)
 	servedWorker(t, p, 1)
 	for i := 0; i <= maxPendingMockErrors; i++ {
-		workerMiss(p, fmt.Sprintf("GET /%d", i), 1)
+		workerMiss(p, "GET /"+shapeName(i), 1)
 	}
 	flushDrain(p)
 	p.cutMissesAtSetStart(ctx)
