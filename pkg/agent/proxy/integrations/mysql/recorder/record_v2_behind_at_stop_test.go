@@ -629,11 +629,41 @@ func TestRecordV2_PostTLS_AtTheStopARememberedGreetingFetchFailureLeavesTheNextC
 // A server that hangs up on the fetch before its greeting fails the fetch:
 // the end of the fetch's own connection is not the end of the connection
 // captured, and the captured connection is left out, counted, named. Before,
-// that io.EOF ended RecordV2 as its stream's end, without a word.
+// that io.EOF ended RecordV2 as its stream's end, without a word. The hang-up
+// is the same failure whether it comes before the greeting's packet header or
+// between that header and its payload.
 func TestRecordV2_PostTLS_AtTheStopAServerThatHangsUpBeforeItsGreetingLeavesTheConnectionOutNamed(t *testing.T) {
 	t.Setenv("KEPLOY_MYSQL_POSTTLS_STASH_WAIT_MS", "100")
-	srv := startFakeMySQLGreeter(t, nil, 0)
-	fetchGreetingAtTheStop(t, models.NewTLSHandshakeStore(), srv.addr, nil).leftOutOnce(t, srv.addr)
+	t.Run("before its header", func(t *testing.T) {
+		srv := startFakeMySQLGreeter(t, nil, 0)
+		fetchGreetingAtTheStop(t, models.NewTLSHandshakeStore(), srv.addr, nil).leftOutOnce(t, srv.addr)
+	})
+	t.Run("after its header", func(t *testing.T) {
+		addr := startHeaderThenHangUp(t, cannedHandshakeV10(t)[:4])
+		fetchGreetingAtTheStop(t, models.NewTLSHandshakeStore(), addr, nil).leftOutOnce(t, addr)
+	})
+}
+
+// startHeaderThenHangUp is a server that writes header, a greeting's 4-byte
+// packet header, to each connection and hangs up before its payload.
+func startHeaderThenHangUp(t *testing.T, header []byte) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			_, _ = c.Write(header)
+			_ = c.Close()
+		}
+	}()
+	return ln.Addr().String()
 }
 
 // fetchWatchers counts the goroutines untilParserEnds has waiting on a
