@@ -67,7 +67,9 @@ func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old
 // line alone or that has none; a warning names each hand edit it could not
 // keep. A JSON file holds the fields keploy writes, each field a person
 // added named in a warning. A writer outside this package that rewrites an
-// existing file (enterprise's judged mark) writes it with this.
+// existing file (enterprise's judged mark) writes it with this. Such a writer
+// takes no set write lock, so it must not run beside a MappingDb write of the
+// same set.
 func EncodeOverF(logger *zap.Logger, mapping *models.Mapping, format yaml.Format, old []byte, testSetID string) ([]byte, error) {
 	return encodeOver(logger, mapping, format, old, nil, headerNever, testSetID)
 }

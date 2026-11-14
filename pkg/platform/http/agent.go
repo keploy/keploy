@@ -47,6 +47,7 @@ import (
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -586,6 +587,11 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 		a.logger.Warn("the keploy agent did not record some requests: it was short of memory when they came, and its memory guard had paused recording; each connection's requests after the pause are recorded",
 			zap.Uint64("requests", p.Requests), zap.Int("connections", p.Connections))
 	}
+	if d := s.MocksDropped; d.ByPressure > 0 || d.Capacity > 0 {
+		a.logger.Warn(models.MocksDroppedSaid,
+			zap.Int64("by_memory_pressure", d.ByPressure), zap.Uint64("for_the_output", d.Capacity),
+			zap.Strings("first_dropped", d.Named))
+	}
 	if s.MassSuppressed {
 		a.logger.Warn("the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
 			zap.Int("suppressed", s.TestCasesSuppressed), zap.Int("recorded", s.TestCasesSent))
@@ -639,7 +645,7 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 				select {
 				case <-ctx.Done():
 					return true
-				case tcChan <- &tc:
+				case tcChan <- capturedByAgent(&tc):
 					pendingTestCase = nil
 				}
 			}
@@ -697,12 +703,26 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			select {
 			case <-ctx.Done():
 				return true
-			case tcChan <- pendingTestCase:
+			case tcChan <- capturedByAgent(pendingTestCase):
 				pendingTestCase = nil
 			}
 		}
 	}
 	return false
+}
+
+// capturedByAgent marks the paths of tc's file parts, a test case this client
+// read from its agent, as the files they were captured in: this client's own
+// copy of a part it received, or the agent's on this host
+// (FormData.Captured). The test store copies a part only from there. A path
+// in a test case read any other way (a set's file, the cloud) is never one.
+// Called on each test case as it is handed on, once its parts are in.
+func capturedByAgent(tc *models.TestCase) *models.TestCase {
+	for i := range tc.HTTPReq.Form {
+		f := &tc.HTTPReq.Form[i]
+		f.Captured = slices.Clone(f.Paths)
+	}
+	return tc
 }
 
 // readIncomingJSON reads a legacy JSON incoming stream; see readIncoming.
@@ -724,7 +744,7 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 		case <-ctx.Done():
 			// If the context is done, exit the loop
 			return true
-		case tcChan <- &testCase:
+		case tcChan <- capturedByAgent(&testCase):
 			// Send the decoded test case to the channel
 		}
 	}
@@ -4271,7 +4291,8 @@ func runEngine(ctx context.Context, c *exec.Cmd, unsignalled <-chan struct{}, ou
 
 // engineCLI runs the container engine's CLI for one stop of an agent's
 // container: as root or in the docker group without sudo, or -- on Linux,
-// when that is refused -- with sudo -n (non-interactive). Which of the two is
+// when the engine's daemon refuses the user who runs keploy
+// (engineDeniesUser) -- with sudo -n (non-interactive). Which of the two is
 // decided by the first command that succeeds and kept for the rest of the
 // stop, so a later command that fails for reasons of its own (a `cp` of a file
 // the agent has not written yet) does not try sudo again.
@@ -4289,7 +4310,14 @@ const (
 func newEngineCLI(logger *zap.Logger) *engineCLI { return &engineCLI{logger: logger} }
 
 // run runs the engine's CLI with args under ctx (containerEngineCommand,
-// runEngine), and returns what output takes from it.
+// runEngine), and returns what output takes from it. A failure is the
+// engine's own answer, which callers read (engineSaysGone): sudo is tried
+// only when the daemon refused keploy's user, never after an answer of the
+// daemon (no such container, a conflict), which a sudo that asks for a
+// password would otherwise replace with its refusal. When sudo fails too, the
+// engine's failure is returned with what sudo said joined to its error: sudo's
+// refusal, or, when sudo ran the command, the engine's answer to it as root,
+// which callers read as well.
 func (e *engineCLI) run(ctx context.Context, output func(*exec.Cmd) ([]byte, error), args ...string) ([]byte, error) {
 	cli := engine.Active().CLI
 	direct := func() ([]byte, error) {
@@ -4311,16 +4339,36 @@ func (e *engineCLI) run(ctx context.Context, output func(*exec.Cmd) ([]byte, err
 		e.mode.CompareAndSwap(engineUndecided, engineDirect)
 		return out, nil
 	}
-	if ctx.Err() != nil || runtime.GOOS != "linux" {
+	if ctx.Err() != nil || runtime.GOOS != "linux" || !engineDeniesUser(out, err) {
 		return out, err
 	}
-	e.logger.Debug("container engine command without sudo failed, trying with sudo -n",
+	e.logger.Debug("the container engine's daemon refused keploy's user, trying with sudo -n",
 		zap.Strings("args", args), zap.Error(err))
-	out, err = sudo()
-	if err == nil {
+	sudoOut, sudoErr := sudo()
+	if sudoErr == nil {
 		e.mode.CompareAndSwap(engineUndecided, engineSudo)
+		return sudoOut, nil
 	}
-	return out, err
+	said := string(sudoOut)
+	var exit *exec.ExitError
+	if errors.As(sudoErr, &exit) {
+		said += "\n" + string(exit.Stderr)
+	}
+	return out, fmt.Errorf("%w; through sudo -n: %w, saying %q", err, sudoErr, strings.TrimSpace(said))
+}
+
+// engineDeniesUser reports whether the engine's CLI failed (out, err, as
+// engineSaid reads them) because the engine's daemon refused the user who
+// runs keploy: its socket's permission denied, in the docker CLI's words
+// ("permission denied while trying to connect to the docker API at", as
+// Docker 29 says it; "... to the Docker daemon socket at" before) or in those
+// of the dial ("connect: permission denied", which older docker CLIs and
+// podman's remote client carry). That is the one failure sudo can change. Any
+// other is the daemon's own answer, or one that sudo would meet as well.
+func engineDeniesUser(out []byte, err error) bool {
+	said := engineSaid(out, err)
+	return strings.Contains(said, "permission denied while trying to connect to the") ||
+		strings.Contains(said, "connect: permission denied")
 }
 
 // combined runs args and returns their output, stderr included.
@@ -5049,16 +5097,21 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 	if destDir == "" {
 		return errors.New("destDir is required")
 	}
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	// destDir is a test set's folder: it and the files in it are made only
+	// inside the recording, the folder it is in, and that from the project
+	// (yaml.MkdirAllInRecording), so a link on the way that leads out is
+	// refused, with why, and nothing is written where it leads.
+	recording := filepath.Dir(destDir)
+	if err := yaml.MkdirAllInRecording(recording, destDir, 0o755); err != nil {
 		return fmt.Errorf("create dest dir %s: %w", destDir, err)
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return a.streamPcapArtifact(gctx, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644, false)
+		return a.streamPcapArtifact(gctx, recording, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644, false)
 	})
 	g.Go(func() error {
-		return a.streamPcapArtifact(gctx, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644, true)
+		return a.streamPcapArtifact(gctx, recording, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644, true)
 	})
 	return g.Wait()
 }
@@ -5069,7 +5122,7 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 // stays a no-op for non-capture sessions. Other non-200s surface as
 // errors. Context cancellation returns nil so callers don't see
 // spurious errors at recording stop.
-func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile string, mode os.FileMode, appendable bool) error {
+func (a *AgentClient) streamPcapArtifact(ctx context.Context, recording, urlPath, dstFile string, mode os.FileMode, appendable bool) error {
 	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, urlPath)
 	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -5097,7 +5150,7 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 			ext := filepath.Ext(dstFile)
 			path = fmt.Sprintf("%s.%d%s", strings.TrimSuffix(dstFile, ext), n, ext)
 		}
-		copyErr, err := a.copyPcapStream(resp, pkg.ShownAgentURI(url), path, flags, mode)
+		copyErr, err := a.copyPcapStream(resp, pkg.ShownAgentURI(url), recording, path, flags, mode)
 		if errors.Is(err, errNoPcapStream) {
 			return nil
 		}
@@ -5117,11 +5170,12 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 // errNoPcapStream is an agent with no pcap stream to serve: capture is off.
 var errNoPcapStream = errors.New("the agent serves no pcap stream")
 
-// copyPcapStream writes one pcap stream response to path, shownURL being the
-// stream's URL as keploy says it (pkg.ShownAgentURI). It returns how the copy
-// ended, and an error when there was nothing to copy into a file
-// (errNoPcapStream when capture is off).
-func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, path string, flags int, mode os.FileMode) (copyErr, err error) {
+// copyPcapStream writes one pcap stream response to path, a file opened only
+// inside recording (yaml.OpenFileInRecording), shownURL being the stream's URL
+// as keploy says it (pkg.ShownAgentURI). It returns how the copy ended, and an
+// error when there was nothing to copy into a file (errNoPcapStream when
+// capture is off).
+func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, recording, path string, flags int, mode os.FileMode) (copyErr, err error) {
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil && !errors.Is(cerr, context.Canceled) {
 			a.logger.Debug("failed to close pcap stream body", zap.String("url", shownURL), zap.Error(cerr))
@@ -5140,7 +5194,7 @@ func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, path string,
 		return nil, fmt.Errorf("stream %s: status %d: %s", shownURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	out, err := os.OpenFile(path, flags, mode)
+	out, err := yaml.OpenFileInRecording(recording, path, flags, mode)
 	if err != nil {
 		return nil, fmt.Errorf("create %s: %w", path, err)
 	}

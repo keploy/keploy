@@ -145,18 +145,19 @@ func symlink(t *testing.T, target, link string) {
 	}
 }
 
-// A test set, mock set or service folder that is a symbolic link to a
-// folder is read through the link, as the sets beside it are. keploy used to
-// pass over every link without a word, and validate checked nothing against
-// the set behind it. A regular file beside the sets, or a link to one, is
-// still no set.
+// A test set or mock set that is a symbolic link to a folder inside the
+// folder of schemas is read through the link, as the sets beside it are, and
+// so is a service folder under Download/Mocks that is a link to a folder
+// there, which is the folder its sets are read in. keploy used to pass over every link without a word, and validate
+// checked nothing against the set behind it. A regular file beside the sets,
+// or a link to one, is still no set.
 func TestGetAllSchemas_ASymlinkedSetIsRead(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	tests := filepath.Join(root, "keploy", "schema", "tests")
 	writeSchema(t, filepath.Join(tests, "test-set-0"), "test-1", "test-1")
-	writeSchema(t, filepath.Join(root, "shared", "tests-set"), "test-2", "test-2")
-	symlink(t, filepath.Join(root, "shared", "tests-set"), filepath.Join(tests, "test-set-1"))
+	writeSchema(t, filepath.Join(tests, "real-set"), "test-2", "test-2")
+	symlink(t, "real-set", filepath.Join(tests, "test-set-1"))
 	if err := os.WriteFile(filepath.Join(tests, "README.md"), []byte("not a set\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -164,10 +165,9 @@ func TestGetAllSchemas_ASymlinkedSetIsRead(t *testing.T) {
 	symlink(t, filepath.Join(tests, "README.md"), filepath.Join(tests, "notes-link"))
 	mocks := filepath.Join(root, "Download", "Mocks")
 	writeSchema(t, filepath.Join(mocks, "svc", "test-set-0"), "schema", "svc-0")
-	writeSchema(t, filepath.Join(root, "shared", "mock-set"), "schema", "svc-1")
-	symlink(t, filepath.Join(root, "shared", "mock-set"), filepath.Join(mocks, "svc", "test-set-1"))
-	writeSchema(t, filepath.Join(root, "shared", "service", "test-set-0"), "schema", "linked-0")
-	symlink(t, filepath.Join(root, "shared", "service"), filepath.Join(mocks, "linked-svc"))
+	writeSchema(t, filepath.Join(mocks, "svc", "real-set"), "schema", "svc-1")
+	symlink(t, "real-set", filepath.Join(mocks, "svc", "test-set-1"))
+	symlink(t, "svc", filepath.Join(mocks, "linked-svc"))
 	if err := os.WriteFile(filepath.Join(mocks, "svc", "notes.txt"), []byte("not a set\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -177,8 +177,8 @@ func TestGetAllSchemas_ASymlinkedSetIsRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got["test-set-0"]["test-1"] == nil || got["test-set-1"]["test-2"] == nil {
-		t.Fatalf("GetAllTestsSchema = %v; want test-set-0 (test-1) and the linked test-set-1 (test-2)", got)
+	if len(got) != 3 || got["test-set-0"]["test-1"] == nil || got["test-set-1"]["test-2"] == nil || got["real-set"]["test-2"] == nil {
+		t.Fatalf("GetAllTestsSchema = %v; want test-set-0 (test-1), real-set (test-2) and the linked test-set-1 (test-2)", got)
 	}
 	mapping, err := s.GetAllDownloadedMocksSchemas(context.Background())
 	if err != nil {
@@ -192,10 +192,40 @@ func TestGetAllSchemas_ASymlinkedSetIsRead(t *testing.T) {
 		}
 		sets = append(sets, m.Service+"/"+m.TestSetID+"="+title)
 	}
-	want := "linked-svc/test-set-0=linked-0 svc/test-set-0=svc-0 svc/test-set-1=svc-1"
+	want := "linked-svc/real-set=svc-1 linked-svc/test-set-0=svc-0 linked-svc/test-set-1=svc-1 svc/real-set=svc-1 svc/test-set-0=svc-0 svc/test-set-1=svc-1"
 	if strings.Join(sets, " ") != want {
 		t.Fatalf("GetAllDownloadedMocksSchemas read %v; want %s", sets, want)
 	}
+}
+
+// A test set or mock set that links out of the folder of schemas is neither
+// read nor passed over: the command fails and says why, so validate never
+// checks nothing against it without a word, and a cloned repository's link
+// cannot have keploy read a file from elsewhere as a schema. These links have
+// absolute targets, which are refused even when they name a folder inside.
+func TestGetAllSchemas_ASetThatLinksOutIsRefused(t *testing.T) {
+	refused := func(t *testing.T, what string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "only inside its recording") {
+			t.Fatalf("%s: %v, want it refused as outside the folder of schemas", what, err)
+		}
+	}
+	root := t.TempDir()
+	t.Chdir(root)
+	tests := filepath.Join(root, "keploy", "schema", "tests")
+	writeSchema(t, filepath.Join(tests, "test-set-0"), "test-1", "test-1")
+	writeSchema(t, filepath.Join(root, "shared", "tests-set"), "test-2", "test-2")
+	symlink(t, filepath.Join(root, "shared", "tests-set"), filepath.Join(tests, "test-set-1"))
+	mocks := filepath.Join(root, "Download", "Mocks")
+	writeSchema(t, filepath.Join(mocks, "svc", "test-set-0"), "schema", "svc-0")
+	writeSchema(t, filepath.Join(root, "shared", "mock-set"), "schema", "svc-1")
+	symlink(t, filepath.Join(root, "shared", "mock-set"), filepath.Join(mocks, "svc", "test-set-1"))
+
+	s := &contract{logger: zap.NewNop(), openAPIDB: openapidb.New(zap.NewNop(), filepath.Join(root, "keploy", "schema"))}
+	_, err := s.GetAllTestsSchema(context.Background())
+	refused(t, "GetAllTestsSchema", err)
+	_, err = s.GetAllDownloadedMocksSchemas(context.Background())
+	refused(t, "GetAllDownloadedMocksSchemas", err)
 }
 
 // A symbolic link among the sets that cannot be followed (its target is

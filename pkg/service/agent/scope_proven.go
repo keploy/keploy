@@ -1722,14 +1722,20 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 		return models.ScopeEndResp{}, serr
 	}
 	if open != id {
-		// A harness that ends a test it was told to skip is warned.
-		a.noteEndOfGated(id, 0)
+		// An end that says skipped, of a test keploy told its harness to
+		// skip, confirms the skip: nothing to end, answered ok however often
+		// it is sent, and the open test, if any, is not touched. A harness
+		// that ends a test it was told to skip with any other outcome ran
+		// it: warned, and refused below.
+		if a.noteEndOfGated(id, 0, models.NormalizeScopeOutcome(req.Outcome)) {
+			return models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
+		}
 		msg := fmt.Sprintf("%s ended, but no test is open", id)
 		if open != "" {
 			msg = fmt.Sprintf("%s ended while %s was the open test", id, open)
 		}
 		serr := scopeErr(http.StatusConflict, models.ScopeErrNotOpen, msg,
-			"end a test once, with the name its begin sent, and only when its begin was not answered skip")
+			"end a test once, with the name its begin sent; a test whose begin was answered skip is ended only with the outcome skipped, or not at all")
 		// With another test open, the harness ended a test it did not
 		// begin: the open test is failed and closed with keploy's reason
 		// (left open, every later begin would be refused as two tests at

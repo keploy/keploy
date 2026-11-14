@@ -341,7 +341,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// A left-out request's verdict prunes nothing. It is not a duplicate:
 		// it ran for long, and a keep=false resolve over its whole span would
 		// drop the mocks of every call that ran beside it and is not decided
-		// yet (a gRPC call opens no window to hold them). What is left of its
+		// yet (one whose window was given up holds none). What is left of its
 		// window is claimed by whoever's it is, or goes at the stale cutoff.
 		//
 		// The window is on the manager its ingress opened it on, the one the
@@ -645,7 +645,10 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 // process than this one: the DaemonSet agent streams its test cases to
 // k8s-proxy's control plane, which cannot read this pod's temp files. Each temp
 // file is removed once read and its path cleared, so the persister writes the
-// asset from the bytes. A file that cannot be read keeps its path.
+// asset from the bytes. A file that cannot be read loses its path too: the path
+// names a file of this process only, which the persister cannot read, and a test
+// store refuses an absolute path it was given no contents for. So the part goes
+// with neither, and the persister keeps the test case without that part's file.
 func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 	for i := range tc.HTTPReq.Form {
 		form := &tc.HTTPReq.Form[i]
@@ -655,7 +658,8 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 			}
 			content, err := os.ReadFile(path)
 			if err != nil {
-				utils.LogError(logger, err, "Error reading multipart temp file", zap.String("path", path))
+				utils.LogError(logger, err, "Error reading multipart temp file: the part goes without its file", zap.String("path", path))
+				form.Paths[j] = ""
 				continue
 			}
 			if len(form.FileContents) < len(form.Paths) {
@@ -671,16 +675,26 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 }
 
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel.
-// Mirrors NewCapture (HTTP) exactly:
-//   - GRPCCaptureHook is invoked unconditionally before ResolveRange, so
-//     ResolveRange always runs — even for duplicates (with keep=false to flush
-//     their mocks cleanly).
-//   - Counter is always incremented so concurrent duplicate streams each get a
-//     unique window name; keep=false discards their mocks without saving the TC.
-//   - Duplicate streams return after ResolveRange, before the test case is sent.
-//
-// A call a pause of the memory guard costs (SkipGRPCUnderPressure) is left out
-// and counted before any of that.
+// It decides the call's window, which ctx carries (syncMock.WindowFromContext:
+// the gRPC ingress opened it before the app could read the call's request), as
+// Capture decides an HTTP request's; its ingress ends the window once it has
+// returned, on every path:
+//   - a call a pause of the memory guard costs (SkipGRPCUnderPressure) is left
+//     out and counted before any of the rest;
+//   - GRPCCaptureHook is invoked before any resolve. With --sync every call,
+//     duplicate or not, takes a name of the manager's (test-N): concurrent
+//     duplicates would otherwise share one in the manager's window map;
+//   - a duplicate ends its window BEFORE its prune (a keep=false resolve,
+//     with --sync), so the window does not hold its own debris, and is not
+//     handed on;
+//   - a call over the 5 MB cap is not recorded, and nothing is resolved to it;
+//   - with --sync a window given up while the call was in flight (the hold's
+//     bound, memory pressure, its recording's stop) leaves it out; else its
+//     test case is handed on with the window still unclaimed, then claimed
+//     (Keep): given up meanwhile, the test case is revoked; kept, ResolveKept
+//     takes what was held and ends the window;
+//   - without --sync a call in flight across its recording's stop is left
+//     out, and a test case handed on notes its span (Window.Tested).
 func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool) {
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
@@ -696,6 +710,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		return
 	}
 
+	reqTime, resTime := http2Stream.GRPCReq.Timestamp, http2Stream.GRPCResp.Timestamp
 	testName := http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"]
 	var isDuplicate bool
 	var schemaKey string
@@ -703,32 +718,22 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		isDuplicate, schemaKey = GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
 	}
 
-	// Bin buffered outgoing mocks into this stream's window before any early
-	// return. For non-duplicates keep=true attributes the mocks; for duplicates
-	// keep=false releases them from the buffer so they don't accumulate as
-	// orphans. Must run before the isDuplicate early-return below.
+	// The call's manager: the one its context carries, as Capture's, so an
+	// HTTP request's and a gRPC call's names never share one, and the call's
+	// mocks resolve on the manager its window is on.
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	win := syncMock.WindowFromContext(ctx)
 	if synchronous {
-		// Every stream, duplicate or not, takes a name of its own: concurrent
-		// duplicates would otherwise share one and collide in the manager's
-		// window map. It is the name its mocks are mapped to and its test
-		// case's (below), as an HTTP request's is (Capture): the recording
-		// joins a mapping to its test case by it. It comes off the manager
-		// the call's context carries, as Capture's does, so an HTTP
-		// request's and a gRPC call's names never share one, and the call's
-		// mocks resolve on that manager.
-		if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
-			testName = fmt.Sprintf("test-%d", mgr.NextTestID())
-			mgr.ResolveRange(
-				http2Stream.GRPCReq.Timestamp,
-				http2Stream.GRPCResp.Timestamp,
-				testName,
-				!isDuplicate,
-				mapping,
-			)
-		}
+		// The name its mocks are mapped to and its test case's (below), as an
+		// HTTP request's is (Capture): the recording joins a mapping to its
+		// test case by it.
+		testName = fmt.Sprintf("test-%d", mgr.NextTestID())
 	}
-
 	if isDuplicate {
+		win.Close()
+		if synchronous {
+			mgr.ResolveRange(reqTime, resTime, testName, false, mapping)
+		}
 		return
 	}
 
@@ -758,14 +763,33 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// The clock its window start is on (proven switch).
 	StampOrigin(ctx, testCase)
 
-	// With --sync the call's mocks were resolved to it above, before it is
-	// handed on, unlike an HTTP request's (Capture): a gRPC call opens no
-	// window to hold its mocks while its test case waits for the queue, so
-	// resolved after the wait they could be gone at the stale cutoff. One
-	// HandOn cannot hand on (counted) leaves those mocks, and their mapping,
-	// to a test case the recording never gets: replay serves none of them.
-	if HandOn(ctx, t, testCase) {
-		logger.Debug("Captured gRPC test case",
-			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+	if synchronous {
+		// As Capture: the window is claimed only once the test case is in
+		// the recording's queue, as a claimed window pins the hold.
+		if win.LeftOut() {
+			logger.Debug("gRPC test case left out: its call's window was given up while it was in flight",
+				zap.Time("in_flight_since", reqTime))
+			return
+		}
+		if !HandOn(ctx, t, testCase) {
+			return
+		}
+		if !win.Keep() {
+			mgr.RevokeTestCase(testName)
+			logger.Debug("gRPC test case left out: its call's window was given up while its test case waited for the recording's queue",
+				zap.Time("in_flight_since", reqTime))
+			return
+		}
+		mgr.ResolveKept(win, reqTime, resTime, testName, mapping)
+		return
 	}
+	if win.LeftAtStop() {
+		logger.Debug("gRPC test case left out: its call was in flight across its recording's stop",
+			zap.Time("in_flight_since", reqTime))
+		return
+	}
+	if !HandOn(ctx, t, testCase) {
+		return
+	}
+	win.Tested(reqTime, resTime)
 }

@@ -92,6 +92,11 @@ func oneMock(t *testing.T, mocks []*models.Mock, err error) *models.Mock {
 	if len(mocks) != 1 {
 		t.Fatalf("recorded %d mocks, want 1: the faulted call is recorded", len(mocks))
 	}
+	// A test's mock with no request time is read as needed by every test
+	// case of its recording (syncMock's warnNoRequestTime).
+	if mocks[0].Spec.ReqTimestampMock.IsZero() {
+		t.Fatalf("the faulted call's mock has no request time; want its request's first byte's")
+	}
 	return mocks[0]
 }
 

@@ -350,7 +350,7 @@ func TestStreamHandlersNoteAFrameTheyCarried(t *testing.T) {
 		name string
 		send func(streamsSvc)
 	}{
-		{"incoming", func(svc streamsSvc) { svc.tc <- &models.TestCase{Name: "test-1", Kind: models.HTTP} }},
+		{"incoming", func(svc streamsSvc) { svc.tc <- windowedNow("test-1") }},
 		{"outgoing", func(svc streamsSvc) { svc.mocks <- &models.Mock{Name: "mock-1", Kind: models.HTTP} }},
 	} {
 		t.Run(s.name, func(t *testing.T) {

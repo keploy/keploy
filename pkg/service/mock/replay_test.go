@@ -127,3 +127,28 @@ func TestAReplayTriesAStalledStartAgain(t *testing.T) {
 		})
 	}
 }
+
+// workerMappingReader reads one mapping, or fails.
+type workerMappingReader struct {
+	m   *models.Mapping
+	err error
+}
+
+func (r workerMappingReader) GetMapping(context.Context, string) (*models.Mapping, error) {
+	return r.m, r.err
+}
+
+// keploy mock replay reads a set's worker scope without the worker-rule
+// entries, which keploy test alone serves to every test: each is a copy
+// of a mock its test still lists, and the proven tables read it as recorded.
+func TestMockSetMappingLeavesOutTheWorkerRuleEntries(t *testing.T) {
+	m, err := mockSetMapping(context.Background(), workerMappingReader{m: &models.Mapping{Worker: []models.MockEntry{
+		{Name: "poll-1"}, {Name: "jwks-1", Reason: models.WorkerRuleReason("jwks")},
+	}}}, "set")
+	if err != nil || len(m.Worker) != 1 || m.Worker[0].Name != "poll-1" {
+		t.Fatalf("worker scope %+v, %v; want only poll-1", m, err)
+	}
+	if m, err := mockSetMapping(context.Background(), workerMappingReader{}, "set"); err != nil || m != nil {
+		t.Fatalf("no mapping: %+v, %v", m, err)
+	}
+}

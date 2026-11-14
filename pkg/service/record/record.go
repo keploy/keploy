@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,6 +27,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -449,7 +451,7 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // This form has no mock stream beside it: every mock's outcome is already
 // published, so an entry whose mock is unknown counts as uncorrelated at once.
 func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map) error {
-	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil)
+	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil, nil)
 }
 
 // consumeMappingsFor is consumeMappings beside a live mock stream, and telling
@@ -464,7 +466,7 @@ func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappin
 // Nothing here is bounded by a clock: on a loaded host a mock is saved long
 // after the mapping that names it, and giving up on a clock is what left such
 // a mock out of its test's mapping while it sat in the mocks file.
-func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry)) error {
+func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry), marks *workerMarks) error {
 	persistCtx := context.WithoutCancel(ctx)
 
 	// pending batches mappings so the file is rewritten once per batch instead of
@@ -496,6 +498,10 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 				zap.Strings("tests", names),
 				zap.Error(err),
 				zap.String("next_step", "these tests' mocks will be missing from mappings.yaml and replay will report no_mocks for them; re-record the test set"))
+		} else {
+			// The marks of the worker-mock rules go in right after a write of
+			// the file, never beside one: each rewrites it whole.
+			marks.flush(persistCtx, r.mappingDb, testSetID, false)
 		}
 		clear(pending)
 	}
@@ -1093,6 +1099,51 @@ func (r *Recorder) RegisterCleanup(fn func() error) {
 	r.cleanupMu.Lock()
 	r.cleanups = append(r.cleanups, fn)
 	r.cleanupMu.Unlock()
+}
+
+// testCaseDeleter is what deletes a saved test case of a set: the store's
+// DeleteTests, which the record TestDB interface leaves out (enterprise
+// implements that interface).
+type testCaseDeleter interface {
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+}
+
+// deleteRevoked deletes the revoked test cases names from the test set
+// setID in td, and returns those it deleted. It asks for them all in one
+// call, as a shared loss can revoke thousands and a store may make each call
+// a round trip; when that call fails, it deletes them one by one, so one
+// that cannot be deleted leaves the others deleted. A store's batch may stop
+// part way, so a name it reports gone (fs.ErrNotExist) on the retry counts
+// as deleted: it is not in the set. One that fails is left in the set, said
+// at WARN, and not returned.
+func deleteRevoked(ctx context.Context, logger *zap.Logger, td testCaseDeleter, setID string, names []string) map[string]struct{} {
+	deleted := make(map[string]struct{}, len(names))
+	err := td.DeleteTests(ctx, setID, names)
+	if err == nil {
+		for _, n := range names {
+			deleted[n] = struct{}{}
+		}
+		return deleted
+	}
+	logger.Debug("deferred-orphan revoke: deleting the revoked test cases at once failed; deleting them one by one",
+		zap.String("testSetID", setID), zap.Int("count", len(names)), zap.Error(err))
+	for _, n := range names {
+		if err := td.DeleteTests(ctx, setID, []string{n}); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			logger.Warn("deferred-orphan revoke: failed to delete a capacity-orphaned test case; leaving it in the set",
+				zap.String("testSetID", setID), zap.String("testCase", n), zap.Error(err))
+			continue
+		}
+		deleted[n] = struct{}{}
+	}
+	return deleted
+}
+
+// savedTestCaseDeleter is the recording's store as a testCaseDeleter, reached
+// by assertion; ok is false for a store that cannot delete a test case it
+// saved, so a revoke from the agent cannot be applied to it.
+func (r *Recorder) savedTestCaseDeleter() (testCaseDeleter, bool) {
+	td, ok := r.testDB.(testCaseDeleter)
+	return td, ok
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, hooks RecordHooks, config *config.Config) Service {
@@ -1701,10 +1752,23 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	revokedNames := map[string]struct{}{}
 	var revokedMu sync.Mutex
 	insertedNames := map[string]struct{}{}
+	// The names of the TCs that persisted, by the request time their window
+	// starts at (models.TestCaseWindow): a revoke names a TC the agent sent
+	// with no name, which this client named as it saved it, by that time
+	// (models.RevokeNameByRequest).
+	insertedByRequest := map[int64][]string{}
 	var insertedMu sync.Mutex
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
 	windowMaps := r.newWindowMappings()
+	// The marks of the user's worker-mock rules (config record.workerMocks),
+	// written to the set's worker scope as the recording goes; nil without
+	// rules.
+	var workerRules []models.WorkerMockRule
+	if r.config != nil {
+		workerRules = r.config.Record.WorkerMocks
+	}
+	marks := newWorkerMarks(workerRules, r.mappingDb, r.logger)
 	// The moment the recording is stopped (a stop signal, the record timer,
 	// a caller's cancel each end ctx first) is when the application's
 	// shutdown begins: what it records from then on is the shutdown's
@@ -1951,6 +2015,23 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			}
 		}
 
+		// The worker-mock rules' marks not written yet (a mock recorded after
+		// the last batch of mappings), once the mapping stream's consumer has
+		// joined (its writes and this one each rewrite the whole mapping
+		// file) and only when the mock store wrote every mock (a worker entry
+		// must name a mock that is on disk). Before the end-of-recording hook,
+		// so a pass it runs over the mappings reads them.
+		if recordingStarted && newTestSetID != "" {
+			switch {
+			case !recordDrainedCleanly:
+				marks.lost(newTestSetID, "the record drain timed out, so the mapping file may still be being written")
+			case !storeWrote:
+				marks.lost(newTestSetID, "the mock store could not write every mock")
+			default:
+				marks.flush(persistCtx, r.mappingDb, newTestSetID, true)
+			}
+		}
+
 		// End-of-recording hook (issue #1867 Basic-Auth re-key): every test case
 		// and mock is now drained to disk, so a cross-artifact pass can correlate
 		// them. Best-effort — a failure never invalidates the recording.
@@ -2002,32 +2083,17 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// only a genuinely deleted one may be excluded from the totals below.
 		deletedSet := map[string]struct{}{}
 
-		var toDelete []string
 		insertedMu.Lock()
-		for _, n := range revokedSnap {
-			if _, ok := insertedNames[n]; ok {
-				toDelete = append(toDelete, n)
-			}
-		}
+		toDelete := revokedToDelete(revokedSnap, insertedNames, insertedByRequest)
 		insertedMu.Unlock()
 		if len(toDelete) > 0 {
 			// DeleteTests is on the concrete *testdb.TestYaml but NOT on the record
 			// TestDB interface (enterprise implements that interface; don't break it).
-			// Reach it by runtime assertion; degrade to a warning if unavailable.
-			if td, ok := r.testDB.(interface {
-				DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
-			}); ok {
-				deleted := 0
-				for _, n := range toDelete {
-					if err := td.DeleteTests(ctx, newTestSetID, []string{n}); err != nil {
-						r.logger.Warn("deferred-orphan revoke: failed to delete a capacity-orphaned test case; leaving it in the set",
-							zap.String("testSetID", newTestSetID), zap.String("testCase", n), zap.Error(err))
-						continue
-					}
-					deletedSet[n] = struct{}{}
-					deleted++
-				}
-				if deleted > 0 {
+			// Reach it by runtime assertion (savedTestCaseDeleter); degrade to a
+			// warning if unavailable.
+			if td, ok := r.savedTestCaseDeleter(); ok {
+				deletedSet = deleteRevoked(ctx, r.logger, td, newTestSetID, toDelete)
+				if deleted := len(deletedSet); deleted > 0 {
 					// Guard under insertedMu so this decrement can't race the
 					// (possibly still-live, on the drain-timeout path) testCount++
 					// in the TC-insert loop, which now runs under the same lock.
@@ -2187,6 +2253,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				zap.String("next_step", "the lines above say why (the agent made no progress, went away before it said it had handed everything over, a second interrupt stopped the saving, or the mock store could not write every mock); re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
+		// Test cases stored without a form part's file: every insert is
+		// over (the drains above), so the list is whole.
+		r.sayFormPartsLeftOut(newTestSetID)
 		// Under the proven switch: test cases recorded while the agent could
 		// not capture every call, or that could not be checked, and
 		// connections to a mock.real destination neither captured nor
@@ -2584,8 +2653,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// (recording stop) or when the agent's HTTP server closes the
 	// response. Any error is logged but never fails the recording.
 	if r.config.Record.CapturePackets {
-		destDir := filepath.Join(r.config.Path, newTestSetID)
-		if err := os.MkdirAll(destDir, 0o755); err != nil {
+		destDir, err := pcapDir(r.config.Path, newTestSetID)
+		if err != nil {
 			r.logger.Warn("failed to create test-set dir for pcap stream; continuing without pcap",
 				zap.String("destDir", destDir), zap.Error(err))
 		} else {
@@ -2723,6 +2792,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				insertedMu.Lock()
 				testCount++
 				insertedNames[testCase.Name] = struct{}{}
+				req, _ := models.TestCaseWindow(testCase)
+				insertedByRequest[req.UnixNano()] = append(insertedByRequest[req.UnixNano()], testCase.Name)
 				insertedMu.Unlock()
 				windowMaps.addTest(testCase)
 				capWatch.afterTestCase(ctx, testCase.Name)
@@ -2928,6 +2999,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					mappingHolds.arrived(tempID)
 				}
 				windowMaps.addMock(mock)
+				marks.add(mock)
 				mockCountMapMu.Lock()
 				mockCountMap[mock.GetKind()]++
 				mockCountMapMu.Unlock()
@@ -2947,7 +3019,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				revokedNames[testName] = struct{}{}
 				revokedMu.Unlock()
 				mappingHolds.revoke([]string{testName})
-			}, &shortPoolByTest, capWatch.mapped)
+			}, &shortPoolByTest, capWatch.mapped, marks)
 	})
 
 	// Every frame channel now has a reader, so the shutdown hand-over can no
@@ -3242,6 +3314,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		return FrameChan{}, fmt.Errorf("failed to hand keploy's agent mock.real: %w", err)
 	}
 
+	_, canDelete := r.savedTestCaseDeleter()
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 		Rules:                     r.config.BypassRules,
 		MongoPassword:             r.config.Test.MongoPassword,
@@ -3263,7 +3336,16 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// control frame: it diverts such a frame into a revoke set and deletes
 		// those deferred-orphan test cases at finalize instead of persisting it
 		// as a mock. The agent emits revoke frames ONLY when this is true.
-		SupportsDroppedRevoke: true,
+		// Only a store that can delete a test case it saved can apply one
+		// (savedTestCaseDeleter): with any other, a revoked test case stays
+		// in the set, so the agent is told the client cannot delete, and
+		// says that the test cases it sent stay instead of that they were
+		// revoked.
+		SupportsDroppedRevoke: canDelete,
+		// And that it finds a revoked test case the agent sent with no name
+		// (the async capture names none; this client names it as it saves
+		// it) by its request time (revokedToDelete).
+		SupportsRevokeByRequest: canDelete,
 	})
 	if err != nil {
 
@@ -3702,4 +3784,85 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+// pcapDir makes the folder a record's packet capture is streamed to, the test
+// set's, <keploy folder>/<set>, and returns it. The keploy folder is made and
+// opened from the project (utils.MkdirOpenRecordingDir), and the set's folder
+// only inside it: a keploy folder or set that is a link out is refused with
+// why, and no folder is made where it leads. The keploy folder is the root,
+// not the set's folder, so a set's name, even keploy, never decides where the
+// project is.
+func pcapDir(keployDir, set string) (string, error) {
+	destDir := filepath.Join(keployDir, set)
+	r, err := utils.MkdirOpenRecordingDir(keployDir, 0o755)
+	if err != nil {
+		return destDir, err
+	}
+	defer func() { _ = r.Close() }()
+	if err := r.MkdirAll(set, 0o755); err != nil {
+		refused := fmt.Sprintf("the test set's folder %q is made only inside %q", set, keployDir)
+		if out := linkout.Explain(r, keployDir, set, refused, err); out != nil {
+			return destDir, out
+		}
+		return destDir, fmt.Errorf("%s: %w", refused, err)
+	}
+	return destDir, nil
+}
+
+// sayFormPartsLeftOut says once, where the recording ends, each form file
+// part a test case of this recording was stored without, by test case, part
+// and the path the part named: such a test case replays without that file.
+// The test store keeps the list (testdb.TestYaml); one that keeps none has
+// nothing to say here.
+func (r *Recorder) sayFormPartsLeftOut(testSetID string) {
+	td, ok := r.testDB.(interface {
+		TakeFormPartsLeftOut() ([]models.FormPartLeftOut, int)
+	})
+	if !ok {
+		return
+	}
+	parts, more := td.TakeFormPartsLeftOut()
+	if len(parts) == 0 && more == 0 {
+		return
+	}
+	said := make([]string, 0, len(parts))
+	for _, p := range parts {
+		said = append(said, p.String())
+	}
+	r.logger.Error("recording summary: test cases were stored without a form part's file, and replay without it",
+		zap.String("testSetID", testSetID),
+		zap.Int("parts", len(parts)+more),
+		zap.Strings("stored_without", said),
+		zap.Int("not_listed", more),
+		zap.String("why", "each part named no file a capture of this run left, carried no contents, and its path names no file in the recording"),
+		zap.String("next_step", "re-record these test cases with the parts' files sent"))
+}
+
+// revokedToDelete is the saved test cases the revoked names name, each once:
+// a name the recording saved (inserted), or the name a revoke gives a test
+// case the agent sent with no name (models.RevokeNameByRequest), which names
+// every saved test case whose window starts at that request time (byRequest).
+// A revoke that names none it saved deletes nothing.
+func revokedToDelete(revoked []string, inserted map[string]struct{}, byRequest map[int64][]string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	add := func(n string) {
+		if _, dup := seen[n]; !dup {
+			seen[n] = struct{}{}
+			out = append(out, n)
+		}
+	}
+	for _, n := range revoked {
+		if _, ok := inserted[n]; ok {
+			add(n)
+			continue
+		}
+		if req, ok := models.RequestOfRevokeName(n); ok {
+			for _, saved := range byRequest[req] {
+				add(saved)
+			}
+		}
+	}
+	return out
 }

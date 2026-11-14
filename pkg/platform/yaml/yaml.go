@@ -8,11 +8,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -244,11 +242,21 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 	return WriteFileF(ctx, logger, path, fileName, docData, isAppend, FormatYAML)
 }
 
+// WriteFileF writes for a caller that names no recording: path, the folder it
+// writes in, is the root, so a file there that links out of it is refused as
+// WriteRecordingFileF refuses one.
 func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, docData []byte, isAppend bool, format Format) error {
+	return WriteRecordingFileF(ctx, logger, path, path, fileName, docData, isAppend, format)
+}
+
+// WriteRecordingFileF writes a file of the recording at root, inside it: path
+// is a directory under root (filepath.Join(root, ...)). A path or a link that
+// leads out of root is refused, with why, and writes nothing (see recording.go).
+func WriteRecordingFileF(ctx context.Context, logger *zap.Logger, root, path, fileName string, docData []byte, isAppend bool, format Format) error {
 	filePath := filepath.Join(path, fileName+"."+format.FileExtension())
 
 	if isAppend {
-		isFileEmpty, err := CreateFileF(ctx, logger, path, fileName, format)
+		isFileEmpty, err := CreateRecordingFileF(ctx, logger, root, path, fileName, format)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create file", zap.String("path directory", path), zap.String("file", fileName))
 			return err
@@ -262,7 +270,7 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 			}
 		}
 		docData = append(sep, docData...)
-		file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, fs.ModePerm)
+		file, err := OpenFileInRecording(root, filePath, os.O_WRONLY|os.O_APPEND, fs.ModePerm)
 		if err != nil {
 			utils.LogError(logger, err, "failed to open file for writing", zap.String("file", filePath))
 			return err
@@ -294,12 +302,12 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 	// same way. The destination is never created ahead of the rename (only
 	// its directory, fileDirF): a new file comes into being whole, with no
 	// empty file before it for a reader to find.
-	_, exists, err := fileDirF(ctx, logger, path, fileName, format)
+	_, exists, err := fileDirF(ctx, logger, root, path, fileName, format)
 	if err != nil {
 		utils.LogError(logger, err, "failed to create file", zap.String("path directory", path), zap.String("file", fileName))
 		return err
 	}
-	tmpFile, err := newReplaceTemp(path, fileName, replaceTempPerm(exists))
+	tmpFile, err := newReplaceTemp(root, path, fileName, replaceTempPerm(exists))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create temp file for atomic write", zap.String("path directory", path), zap.String("file", fileName))
 		return err
@@ -308,7 +316,7 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpPath)
+			_ = RemoveInRecording(root, tmpPath)
 		}
 	}()
 
@@ -333,12 +341,12 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 	// The replaced file's mode is kept (replaceTempPerm). A new file keeps
 	// the temp file's, which was created as the file itself would have been
 	// (0o644 less the umask).
-	if info, statErr := os.Stat(filePath); statErr == nil {
-		if err = os.Chmod(tmpPath, info.Mode().Perm()); err != nil {
+	if info, statErr := StatInRecording(root, filePath); statErr == nil {
+		if err = ChmodInRecording(root, tmpPath, info.Mode().Perm()); err != nil {
 			return err
 		}
 	}
-	if err = ReplaceFile(logger, tmpPath, filePath); err != nil {
+	if err = ReplaceFileInRecording(logger, root, tmpPath, filePath); err != nil {
 		utils.LogError(logger, err, "failed to atomically replace the file", zap.String("file", filePath))
 		return err
 	}
@@ -362,26 +370,13 @@ func replaceTempPerm(exists bool) os.FileMode {
 // so a test can see the file it creates.
 var newReplaceTemp = createTempFile
 
-// createTempFile creates a new file in dir for WriteFileF to write and rename
-// over fileName: os.CreateTemp's name (fileName, a random number, ".tmp"),
-// with perm as os.OpenFile takes it, so the umask applies as it would to the
-// file itself. os.CreateTemp's 0o600 would otherwise become the mode of a
-// file that is new. Like os.CreateTemp it refuses a fileName holding a path
-// separator; unlike it, an empty dir is the working directory, where the file
-// it replaces is, not os.TempDir().
-func createTempFile(dir, fileName string, perm os.FileMode) (*os.File, error) {
-	if strings.ContainsAny(fileName, "/"+string(os.PathSeparator)) {
-		return nil, &fs.PathError{Op: "createtemp", Path: fileName, Err: errors.New("pattern contains path separator")}
-	}
-	for try := 0; try < 10000; try++ {
-		name := filepath.Join(dir, fileName+"."+strconv.FormatUint(uint64(rand.Uint32()), 10)+".tmp")
-		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
-		if errors.Is(err, fs.ErrExist) {
-			continue
-		}
-		return f, err
-	}
-	return nil, &fs.PathError{Op: "createtemp", Path: filepath.Join(dir, fileName+".*.tmp"), Err: fs.ErrExist}
+// createTempFile creates a new file in dir, inside root, for WriteFileF to
+// write and rename over fileName: os.CreateTemp's name (fileName, a random
+// number, ".tmp"), with perm as os.OpenFile takes it, so the umask applies as
+// it would to the file itself. os.CreateTemp's 0o600 would otherwise become
+// the mode of a file that is new.
+func createTempFile(root, dir, fileName string, perm os.FileMode) (*os.File, error) {
+	return CreateTempInRecording(root, dir, fileName+".*.tmp", perm)
 }
 
 // ReplaceFile puts src in place of dst. A rename atomically replaces an
@@ -470,7 +465,12 @@ func ReadFileF(ctx context.Context, logger *zap.Logger, path, name string, forma
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the file: %v", err)
 	}
+	return readOpenFile(ctx, logger, file, filePath)
+}
 
+// readOpenFile reads file, opened at filePath, to its end or until ctx is
+// done, and closes it.
+func readOpenFile(ctx context.Context, logger *zap.Logger, file *os.File, filePath string) ([]byte, error) {
 	defer func() {
 		if err := file.Close(); err != nil {
 			utils.LogError(logger, err, "failed to close file", zap.String("file", filePath))
@@ -550,12 +550,21 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	return CreateFileF(ctx, Logger, path, fileName, FormatYAML)
 }
 
+// CreateFileF creates for a caller that names no recording: path, the folder
+// it creates in, is the root (see WriteFileF).
 func CreateFileF(ctx context.Context, Logger *zap.Logger, path string, fileName string, format Format) (bool, error) {
-	filePath, exists, err := fileDirF(ctx, Logger, path, fileName, format)
+	return CreateRecordingFileF(ctx, Logger, path, path, fileName, format)
+}
+
+// CreateRecordingFileF creates a file of the recording at root, inside it:
+// path is a directory under root. A link there, even one that leads to
+// nothing, is not created through when it leads out of root (see recording.go).
+func CreateRecordingFileF(ctx context.Context, Logger *zap.Logger, root, path string, fileName string, format Format) (bool, error) {
+	filePath, exists, err := fileDirF(ctx, Logger, root, path, fileName, format)
 	if err != nil || exists {
 		return false, err
 	}
-	file, err := os.OpenFile(filePath, os.O_CREATE, 0o644)
+	file, err := OpenFileInRecording(root, filePath, os.O_CREATE, 0o644)
 	if err != nil {
 		utils.LogError(Logger, err, "failed to create the file", zap.String("path directory", path), zap.String("file", fileName))
 		return false, err
@@ -570,14 +579,14 @@ func CreateFileF(ctx context.Context, Logger *zap.Logger, path string, fileName 
 // fileDirF is CreateFileF short of creating the file: it validates the file's
 // path and, when the file does not exist, makes its directory. exists reports
 // whether the file was there.
-func fileDirF(ctx context.Context, Logger *zap.Logger, path string, fileName string, format Format) (filePath string, exists bool, err error) {
+func fileDirF(ctx context.Context, Logger *zap.Logger, root, path string, fileName string, format Format) (filePath string, exists bool, err error) {
 	filePath, err = ValidatePath(filepath.Join(path, fileName+"."+format.FileExtension()))
 	if err != nil {
 		utils.LogError(Logger, err, "failed to validate the file path", zap.String("path directory", path), zap.String("file", fileName))
 		return "", false, err
 	}
 
-	if _, err := os.Stat(filePath); err != nil {
+	if _, err := StatInRecording(root, filePath); err != nil {
 		if !os.IsNotExist(err) {
 			utils.LogError(Logger, err,
 				"failed to stat file — check filesystem permissions and that the configured keploy path is readable/writable by this process",
@@ -598,7 +607,7 @@ func fileDirF(ctx context.Context, Logger *zap.Logger, path string, fileName str
 		// 0o755/0o644 rather than the historical 0o777 — nothing
 		// in the keploy tree needs world-writable perms and the
 		// stricter modes match the rest of the new testdb code.
-		if err := os.MkdirAll(filepath.Join(path), 0o755); err != nil {
+		if err := MkdirAllInRecording(root, filepath.Join(path), 0o755); err != nil {
 			utils.LogError(Logger, err, "failed to create a directory for the file", zap.String("path directory", path), zap.String("file", fileName))
 			return "", false, err
 		}

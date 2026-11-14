@@ -11,6 +11,10 @@ name: Integrations Tests
 # KEPLOY_PROVEN=1 (test_workflow_scripts/integrations-tests.sh), on every PR,
 # on main, and from release.yml, whose publishing jobs wait for it. It names
 # each failing integrations package and test, and the switch it failed under.
+# Then it runs keploy's row that every registered parser's recorder stamps each
+# mock it emits with its request time, in this tree with the integrations
+# parsers added as setup-private-parsers adds them to a build: go-test.yaml's
+# go test runs that row over the OSS parsers alone.
 #
 # The integrations ref it tests, first hit wins: an `Integration-Ref: <branch,
 # tag or commit>` line in the PR body (it must exist), an integrations ref
@@ -127,6 +131,14 @@ jobs:
         env:
           INTEGRATIONS_DESC: keploy/integrations ${{ steps.ref.outputs.ref }} (${{ steps.ref.outputs.sha }})
         run: bash keploy/.github/workflows/test_workflow_scripts/integrations-tests.sh test keploy integrations
+
+      # The integrations parsers come from the clone the steps above checked
+      # out at the ref they tested. It needs the key the first step checks, so
+      # a PR from a fork fails there, as that step says, and runs this nowhere.
+      - name: Run keploy's request-time row over the integrations parsers
+        env:
+          INTEGRATIONS_DESC: keploy/integrations ${{ steps.ref.outputs.ref }} (${{ steps.ref.outputs.sha }})
+        run: bash keploy/.github/workflows/test_workflow_scripts/integrations-tests.sh parsers keploy integrations
 
       - name: Save the Go module cache
         if: ${{ !cancelled() && steps.cache.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main' }}

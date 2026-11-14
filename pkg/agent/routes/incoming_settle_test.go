@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -65,6 +66,23 @@ var stretchesEnd = time.Unix(90_000, 0)
 // before every span recorded so far.
 func newStretch() time.Time {
 	return stretchesEnd.Add(-time.Duration(stretchesTaken.Add(1)) * stretchLen)
+}
+
+// lateStretchesTaken counts the late stretches taken (newLateStretch).
+var lateStretchesTaken atomic.Int64
+
+// lateStretchesEnd is where the first late stretch ends: far after the
+// spans the past-the-cap row records from stretchesEnd on.
+var lateStretchesEnd = stretchesEnd.Add(1000 * time.Hour)
+
+// newLateStretch returns the start of a late stretch no other test or run
+// has taken, before every late one taken so far, for a test whose span
+// reaches to the real now: a recording that lost a mock any test may need
+// leaves its test cases out from that mock's request until it ends, at the
+// real now. Such a span covers only the late stretches taken before it,
+// whose tests are done, and no stretch nor the past-the-cap row's spans.
+func newLateStretch() time.Time {
+	return lateStretchesEnd.Add(-time.Duration(lateStretchesTaken.Add(1)) * stretchLen)
 }
 
 // streamWait bounds how long a test waits for the next test case of a
@@ -345,6 +363,104 @@ func TestHandleIncoming_EachLossIsInTheSummaryOfItsSessionOnce(t *testing.T) {
 	}
 }
 
+// loseMockEachWay has the default manager drop one mock for its output and one
+// for memory pressure, each of a connection named from prefix, and lose a test
+// case by name.
+func loseMockEachWay(t *testing.T, prefix string) {
+	t.Helper()
+	loseMockForOutput(prefix)
+	syncmgr.Get().RevokeTestCase(prefix + "-test")
+	loseMockToPressure(t, prefix)
+}
+
+// loseMockForOutput has the default manager drop a mock for its output: none
+// is set.
+func loseMockForOutput(prefix string) {
+	syncmgr.Get().SetOutputChannel(nil)
+	syncmgr.Get().SendConfigMock(&models.Mock{Kind: models.Kind("Kafka"), ConnectionID: prefix + "-output"})
+}
+
+// loseMockToPressure has the default manager drop a per-test mock of a pause.
+func loseMockToPressure(t *testing.T, prefix string) {
+	t.Helper()
+	mgr := syncmgr.Get()
+	mgr.SetMemoryPressure(true)
+	defer mgr.SetMemoryPressure(false)
+	m := &models.Mock{Kind: models.Kind("Kafka"), ConnectionID: prefix + "-pressure"}
+	m.Spec.ReqTimestampMock = time.Now()
+	m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(time.Millisecond)
+	if got := mgr.AddMock(m); got != syncmgr.MockDroppedUnderPressure {
+		t.Fatalf("a per-test mock of the pause: %q", got)
+	}
+}
+
+// The summary reports what a session dropped, under its own count, and names
+// each mock with why, once: the manager outlives a session, so what it dropped
+// before the session's stream opened is not the session's, and the next
+// session, which loses nothing, reports none of it again.
+func TestHandleIncoming_EachDropIsInTheSummaryOfItsSessionOnce(t *testing.T) {
+	loseMockEachWay(t, "before") // not this session's
+	logs := incomingSessionLogs(t, func() {
+		loseMockEachWay(t, "during")
+		// And one kept: of the three handed over, only it reports as added.
+		kept := make(chan *models.Mock, 1)
+		syncmgr.Get().SetOutputChannel(kept)
+		syncmgr.Get().SendConfigMock(&models.Mock{Kind: models.Kind("Kafka"), ConnectionID: "during-kept"})
+		syncmgr.Get().SetOutputChannel(nil)
+	}, false)
+	summary := logs.FilterMessage("agent: recording complete").All()[0].ContextMap()
+	if summary["mocks_dropped_capacity"] != uint64(1) || summary["mocks_dropped_by_pressure"] != int64(1) ||
+		summary["tcs_dropped_capacity"] != int64(1) || summary["mocks_added_successfully"] != int64(1) {
+		t.Fatalf("summary mocks_dropped_capacity = %v, mocks_dropped_by_pressure = %v, tcs_dropped_capacity = %v, mocks_added_successfully = %v, want 1 each",
+			summary["mocks_dropped_capacity"], summary["mocks_dropped_by_pressure"], summary["tcs_dropped_capacity"], summary["mocks_added_successfully"])
+	}
+	named := fmt.Sprint(summary["mocks_dropped_named"])
+	for _, want := range []string{"during-output", string(syncmgr.MockDroppedOutputClosed), "during-pressure", string(syncmgr.MockDroppedUnderPressure)} {
+		if !strings.Contains(named, want) {
+			t.Fatalf("the summary names %q, want it to say %q", named, want)
+		}
+	}
+	// The summary is at Info: what a session lost is said at WARN as well.
+	warned := logs.FilterMessage(models.MocksDroppedSaid).All()
+	if len(warned) != 1 || warned[0].Level != zapcore.WarnLevel ||
+		warned[0].ContextMap()["by_memory_pressure"] != int64(1) || warned[0].ContextMap()["for_the_output"] != uint64(1) ||
+		!strings.Contains(fmt.Sprint(warned[0].ContextMap()["first_dropped"]), "during-pressure") {
+		t.Fatalf("the session's drops were warned of %v, want once, counting and naming them", warned)
+	}
+	if strings.Contains(named, "before-") {
+		t.Fatalf("the summary names a mock dropped before its session: %q", named)
+	}
+
+	logs = incomingSessionLogs(t, func() {}, false)
+	summary = logs.FilterMessage("agent: recording complete").All()[0].ContextMap()
+	if summary["mocks_dropped_capacity"] != uint64(0) || summary["mocks_dropped_by_pressure"] != int64(0) ||
+		summary["tcs_dropped_capacity"] != int64(0) || summary["mocks_added_successfully"] != int64(0) {
+		t.Fatalf("the next session's summary mocks_dropped_capacity = %v, mocks_dropped_by_pressure = %v, tcs_dropped_capacity = %v, mocks_added_successfully = %v, want 0 each",
+			summary["mocks_dropped_capacity"], summary["mocks_dropped_by_pressure"], summary["tcs_dropped_capacity"], summary["mocks_added_successfully"])
+	}
+	if named := fmt.Sprint(summary["mocks_dropped_named"]); strings.Contains(named, "during-") {
+		t.Fatalf("the next session's summary names an earlier session's drops: %q", named)
+	}
+	if n := logs.FilterMessage(models.MocksDroppedSaid).Len(); n != 0 {
+		t.Fatalf("a session that dropped nothing warned of drops %d times", n)
+	}
+}
+
+// A session that dropped mocks of one kind alone is warned of as one that
+// dropped both is.
+func TestHandleIncoming_WarnsOfEitherKindOfDropAlone(t *testing.T) {
+	for name, lose := range map[string]func(){
+		"for the output":  func() { loseMockForOutput("alone") },
+		"memory pressure": func() { loseMockToPressure(t, "alone") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if n := incomingSessionLogs(t, lose, false).FilterMessage(models.MocksDroppedSaid).Len(); n != 1 {
+				t.Fatalf("a session that dropped a mock was warned of it %d times, want once", n)
+			}
+		})
+	}
+}
+
 // A recording's CLI ends the session by closing its stream once its stop's
 // drain is done; the ingress never closes its test-case channel. The session's
 // summary, and the warnings of what it lost, come at that end too, not only
@@ -391,6 +507,9 @@ func TestHandleIncoming_ATestCaseLetGoUnsettledIsWarnedWhenTheClientEndsTheStrea
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Before srv.Close, which waits for the handler: a row that fails
+	// before it ends the stream would hang there instead.
+	defer func() { _ = resp.Body.Close() }()
 	names := streamOf(t, resp)
 
 	start := newStretch().Add(time.Second)
@@ -423,7 +542,9 @@ func TestHandleIncoming_ATestCaseLetGoUnsettledIsWarnedWhenTheClientEndsTheStrea
 // not a warning that the stream broke at the end of a recording that went as
 // it should.
 func TestHandleIncoming_AClientEndingTheStreamUnderTrafficIsAnOrdinaryEnd(t *testing.T) {
-	core, logs := observer.New(zapcore.DebugLevel)
+	// INFO and up, all the row reads: under steady traffic, a DEBUG entry
+	// per test case would be kept without bound.
+	core, logs := observer.New(zapcore.InfoLevel)
 	tcs := make(chan *models.TestCase) // the ingress's: never closed
 	a := &Agent{logger: zap.New(core), svc: incomingSvc{tc: tcs}}
 	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
@@ -433,6 +554,9 @@ func TestHandleIncoming_AClientEndingTheStreamUnderTrafficIsAnOrdinaryEnd(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Before srv.Close, which waits for the handler: a row that fails
+	// before it ends the stream would hang there instead.
+	defer func() { _ = resp.Body.Close() }()
 	names := streamOf(t, resp)
 
 	// Steady traffic after the stop.
@@ -648,6 +772,15 @@ func incomingSummary(t *testing.T, during func()) (summary map[string]interface{
 // its stop's drain is done, or by the capture closing the test-case channel.
 func incomingSessionSummary(t *testing.T, during func(), clientCloses bool) (summary map[string]interface{}, leftOutWarns []observer.LoggedEntry) {
 	t.Helper()
+	logs := incomingSessionLogs(t, during, clientCloses)
+	return logs.FilterMessage("agent: recording complete").All()[0].ContextMap(),
+		logs.FilterLevelExact(zap.WarnLevel).FilterMessageSnippet("left out of the recording").All()
+}
+
+// incomingSessionLogs runs a session as incomingSessionSummary does, and
+// returns all it logged, its summary among it.
+func incomingSessionLogs(t *testing.T, during func(), clientCloses bool) *observer.ObservedLogs {
+	t.Helper()
 	core, logs := observer.New(zap.DebugLevel)
 	release := make(chan struct{})
 	released := false
@@ -685,8 +818,7 @@ func incomingSessionSummary(t *testing.T, during func(), clientCloses bool) (sum
 		}
 		time.Sleep(time.Millisecond)
 	}
-	return logs.FilterMessage("agent: recording complete").All()[0].ContextMap(),
-		logs.FilterLevelExact(zap.WarnLevel).FilterMessageSnippet("left out of the recording").All()
+	return logs
 }
 
 // A kept request the mock manager left out of the recording — it stayed in

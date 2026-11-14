@@ -53,6 +53,12 @@ type TestYaml struct {
 	// Only used by the sequential naming path; descriptive mode keys
 	// per-slug indices off NextIndexForPrefix instead.
 	lastIndex sync.Map // map[string]*atomic.Int64
+	// leftOut is the form file parts test cases were stored without, until
+	// TakeFormPartsLeftOut takes them; leftOutMore counts those past
+	// formPartsLeftOutMax.
+	leftOutMu   sync.Mutex
+	leftOut     []models.FormPartLeftOut
+	leftOutMore int
 	// slugIndex is the descriptive-naming twin of lastIndex: one
 	// monotonically-increasing counter per (tests-dir, slug), so a test
 	// case name can never be re-minted after auto-replay deletes the
@@ -249,7 +255,7 @@ func (ts *TestYaml) nextSlugIndex(tcsPath, slug string) (int, error) {
 
 // replaceFile puts a written test case in place of its file
 // (yaml.ReplaceFile); tests swap it to make the replace fail.
-var replaceFile = yaml.ReplaceFile
+var replaceFile = yaml.ReplaceFileInRecording
 
 type tcsInfo struct {
 	name string
@@ -316,7 +322,7 @@ func (ts *TestYaml) GetTestCase(ctx context.Context, testSetID string, testCaseN
 	}
 	// Auto-detect format on read so replay works even when StorageFormat
 	// differs from the format the testcase was originally recorded in.
-	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, testPath, testCaseName, ts.Format)
+	data, detected, err := yaml.ReadRecordingFileAny(ctx, ts.logger, ts.TcsPath, testPath, testCaseName, ts.Format)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read test case %q: %w", testCaseName, err)
 	}
@@ -459,7 +465,7 @@ func (ts *TestYaml) TestCaseFiles(ctx context.Context, testSetID string) ([]yaml
 	})
 	out := make([]yaml.File, 0, len(refs))
 	for _, ref := range refs {
-		data, err := yaml.ReadFileF(ctx, ts.logger, dir, ref.name, ref.format)
+		data, err := yaml.ReadRecordingFileF(ctx, ts.logger, ts.TcsPath, dir, ref.name, ref.format)
 		if err != nil {
 			return nil, err
 		}
@@ -560,7 +566,7 @@ func (ts *TestYaml) ReplaceFiles(ctx context.Context, files []yaml.File) error {
 	// The recordings the group replaces, named before it is stored, for
 	// the re-key rule (rekey.go).
 	rks := ts.beginRekeys(files)
-	if err := replaceFiles(ts.logger, files); err != nil {
+	if err := replaceFiles(ts.logger, ts.TcsPath, files); err != nil {
 		return err
 	}
 	for _, k := range rks {
@@ -581,7 +587,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 	for _, ref := range refs {
 		name, fileFormat := ref.name, ref.format
 
-		data, err := yaml.ReadFileF(ctx, ts.logger, TestPath, name, fileFormat)
+		data, err := yaml.ReadRecordingFileF(ctx, ts.logger, ts.TcsPath, TestPath, name, fileFormat)
 		if err != nil {
 			utils.LogError(ts.logger, err, "failed to read the testcase")
 			return nil, err
@@ -734,7 +740,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	defer func() {
 		if reservedPlaceholder && !writeSucceeded {
 			placeholder := filepath.Join(tcsPath, tcsName+"."+ts.Format.FileExtension())
-			if rmErr := os.Remove(placeholder); rmErr != nil && !os.IsNotExist(rmErr) {
+			if rmErr := yaml.RemoveInRecording(ts.TcsPath, placeholder); rmErr != nil && !os.IsNotExist(rmErr) {
 				// This is a secondary failure during error handling —
 				// the primary upsert error is already returned to the
 				// caller. Surface the cleanup miss at Debug so it
@@ -777,11 +783,11 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("invalid testcase path: %w", err)
 	}
 
-	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
+	if err := yaml.MkdirAllInRecording(ts.TcsPath, tcsPath, 0o755); err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create tests directory: %w", err)
 	}
 
-	tmpFile, err := os.CreateTemp(tcsPath, tcsName+"*"+ext+".tmp")
+	tmpFile, err := yaml.CreateTempInRecording(ts.TcsPath, tcsPath, tcsName+"*"+ext+".tmp", 0o600)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -790,7 +796,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	defer func() {
 		if cleanup {
 			tmpFile.Close()
-			os.Remove(tmpPath)
+			_ = yaml.RemoveInRecording(ts.TcsPath, tmpPath)
 		}
 	}()
 
@@ -837,8 +843,8 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	//
 	// outPath carries the configured ts.Format extension (yaml or
 	// json), so this works equally for both storage formats.
-	if err := replaceFile(ts.logger, tmpPath, outPath); err != nil {
-		os.Remove(tmpPath)
+	if err := replaceFile(ts.logger, ts.TcsPath, tmpPath, outPath); err != nil {
+		_ = yaml.RemoveInRecording(ts.TcsPath, tmpPath)
 		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to replace the testcase file with its temp file: %w", err)
 	}
 
@@ -979,7 +985,7 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 		return "", fmt.Errorf("validate testcase directory: %w", err)
 	}
 	tcsPath = validatedPath
-	if err := os.MkdirAll(tcsPath, 0o755); err != nil {
+	if err := yaml.MkdirAllInRecording(ts.TcsPath, tcsPath, 0o755); err != nil {
 		return "", fmt.Errorf("create testcase directory: %w", err)
 	}
 	var lastName string
@@ -997,7 +1003,7 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 		// correct outcome — the placeholder is bound to a particular
 		// {name, format} pair.
 		target := filepath.Join(tcsPath, name+"."+ts.Format.FileExtension())
-		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		f, err := yaml.OpenFileInRecording(ts.TcsPath, target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err == nil {
 			// Surface any Close error to the caller — on networked
 			// filesystems (NFS, SMB) Close is when some writes are
@@ -1005,7 +1011,7 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 			// proceed. Remove the half-reserved file first so a
 			// retry picks a fresh name rather than EEXIST-looping.
 			if closeErr := f.Close(); closeErr != nil {
-				_ = os.Remove(target)
+				_ = yaml.RemoveInRecording(ts.TcsPath, target)
 				return "", fmt.Errorf("close reserved testcase file %q: %w", name, closeErr)
 			}
 			return name, nil
@@ -1022,10 +1028,18 @@ func (ts *TestYaml) claimName(tcsPath string, tc *models.TestCase) (string, erro
 	return "", fmt.Errorf("failed to allocate a unique testcase name after %d attempts (last candidate %q)", maxNameClaimAttempts, lastName)
 }
 
+// DeleteTests deletes the test cases testCaseIDs from the test set testSetID.
+// A test case whose file is already gone is deleted (the set does not hold
+// it), so asking again for one a call deleted before it failed part way is
+// not an error. It stops at the first test case it cannot delete.
 func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 	for _, testCaseID := range testCaseIDs {
-		err := yaml.DeleteFileF(ctx, ts.logger, path, testCaseID, ts.Format)
+		err := yaml.DeleteRecordingFileF(ts.logger, ts.TcsPath, path, testCaseID, ts.Format)
+		if errors.Is(err, fs.ErrNotExist) {
+			ts.logger.Debug("the testcase to delete is already gone", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
+			continue
+		}
 		if err != nil {
 			ts.logger.Error("failed to delete the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
 			return err
@@ -1036,7 +1050,7 @@ func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseI
 
 func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
 	path := filepath.Join(ts.TcsPath, testSetID)
-	err := yaml.DeleteDir(ctx, ts.logger, path)
+	err := yaml.DeleteRecordingDir(ts.logger, ts.TcsPath, path)
 	if err != nil {
 		ts.logger.Error("failed to delete the testset", zap.String("testset id", testSetID))
 		return err
@@ -1070,7 +1084,7 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	// Read whichever format the testcase was recorded in.
-	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, tcsPath, testCaseID, ts.Format)
+	data, detected, err := yaml.ReadRecordingFileAny(ctx, ts.logger, ts.TcsPath, tcsPath, testCaseID, ts.Format)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to read the testcase")
 		return err
@@ -1131,7 +1145,7 @@ func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, tes
 			return err
 		}
 		out = append(out, '\n')
-		if err := yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, out, false, detected); err != nil {
+		if err := yaml.WriteRecordingFileF(ctx, ts.logger, ts.TcsPath, tcsPath, testCaseID, out, false, detected); err != nil {
 			utils.LogError(ts.logger, err, "failed to write testcase file")
 			return err
 		}
@@ -1149,7 +1163,7 @@ func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, tes
 		utils.LogError(ts.logger, err, "failed to marshal the testcase")
 		return err
 	}
-	err = yaml.WriteFileF(ctx, ts.logger, tcsPath, testCaseID, data, false, detected)
+	err = yaml.WriteRecordingFileF(ctx, ts.logger, ts.TcsPath, tcsPath, testCaseID, data, false, detected)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to write testcase file")
 		return err
@@ -1180,17 +1194,77 @@ func extractTestNumber(name string) int {
 // are offloaded to the assets directory and response bodies are stored as hashes.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
+// keptAsset says whether paths[j], a form file part's path in a test case
+// read back, names a regular file already kept inside the recording, as the
+// replay reads it (relative to the keploy folder, only inside it), and where.
+// A path that is absolute, leads out of the recording or names no file there
+// is not one: the part is persisted from what else the test case carries, and
+// that path is neither read nor removed.
+func (ts *TestYaml) keptAsset(paths []string, j int) (string, bool) {
+	if j >= len(paths) || filepath.IsAbs(paths[j]) {
+		return "", false
+	}
+	p := filepath.Join(ts.TcsPath, paths[j])
+	info, err := yaml.StatInRecording(ts.TcsPath, p)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	return p, true
+}
+
+// formPartsLeftOutMax bounds the parts kept for TakeFormPartsLeftOut: a
+// caller that never takes them (a replay, a normalize) holds no more.
+const formPartsLeftOutMax = 64
+
+// pathAt is paths[j], or "" when the part names no path.
+func pathAt(paths []string, j int) string {
+	if j < len(paths) {
+		return paths[j]
+	}
+	return ""
+}
+
+// leaveOutFormPart says, at ERROR, that a test case is stored without a form
+// part's file, naming the part and the path it named, and keeps the part for
+// TakeFormPartsLeftOut.
+func (ts *TestYaml) leaveOutFormPart(p models.FormPartLeftOut) {
+	utils.LogError(ts.logger, fmt.Errorf("nothing to keep the form part's file from"), "the test case is stored without a form part's file: the part named no file a capture of this run left, carried no contents, and its path names no file in the recording",
+		zap.String("testSet", p.TestSet),
+		zap.String("testCase", p.TestCase),
+		zap.String("key", p.Key),
+		zap.String("fileName", p.FileName),
+		zap.String("path", p.Path))
+	ts.leftOutMu.Lock()
+	defer ts.leftOutMu.Unlock()
+	if len(ts.leftOut) >= formPartsLeftOutMax {
+		ts.leftOutMore++
+		return
+	}
+	ts.leftOut = append(ts.leftOut, p)
+}
+
+// TakeFormPartsLeftOut returns the form file parts test cases were stored
+// without since the last call, oldest first, and how many more there were
+// past the first formPartsLeftOutMax. A recording says them in its summary.
+func (ts *TestYaml) TakeFormPartsLeftOut() (parts []models.FormPartLeftOut, more int) {
+	ts.leftOutMu.Lock()
+	defer ts.leftOutMu.Unlock()
+	parts, more = ts.leftOut, ts.leftOutMore
+	ts.leftOut, ts.leftOutMore = nil, 0
+	return parts, more
+}
+
 func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName string) error {
 	// 1. Offload large request body (>1MB) to assets directory
 	if len(tc.HTTPReq.Body) > LargeBodyThreshold {
 		assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName)
-		if err := os.MkdirAll(assetDir, 0o755); err != nil {
+		if err := yaml.MkdirAllInRecording(ts.TcsPath, assetDir, 0o755); err != nil {
 			utils.LogError(ts.logger, err, "failed to create assets directory for body", zap.String("path", assetDir))
 			return err
 		}
 		bodyPath := filepath.Join(assetDir, "body.txt")
 		bodyBytes := []byte(tc.HTTPReq.Body)
-		if err := os.WriteFile(bodyPath, bodyBytes, 0o644); err != nil {
+		if err := yaml.WriteFileInRecording(ts.TcsPath, bodyPath, bodyBytes, 0o644); err != nil {
 			utils.LogError(ts.logger, err, "failed to write request body asset", zap.String("path", bodyPath))
 			return err
 		}
@@ -1251,13 +1325,13 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 							formKey = "form"
 						}
 						assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName, formKey)
-						if err := os.MkdirAll(assetDir, 0o755); err != nil {
+						if err := yaml.MkdirAllInRecording(ts.TcsPath, assetDir, 0o755); err != nil {
 							utils.LogError(ts.logger, err, "failed to create assets directory for form value", zap.String("path", assetDir))
 							return err
 						}
 						fileName := fmt.Sprintf("value_%d.txt", j)
 						destPath := filepath.Join(assetDir, fileName)
-						if err := os.WriteFile(destPath, []byte(value), 0o644); err != nil {
+						if err := yaml.WriteFileInRecording(ts.TcsPath, destPath, []byte(value), 0o644); err != nil {
 							utils.LogError(ts.logger, err, "failed to write large form value asset", zap.String("path", destPath))
 							return err
 						}
@@ -1287,7 +1361,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				formKey = "form"
 			}
 			assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName, formKey)
-			if err := os.MkdirAll(assetDir, 0o755); err != nil {
+			if err := yaml.MkdirAllInRecording(ts.TcsPath, assetDir, 0o755); err != nil {
 				utils.LogError(ts.logger, err, "failed to create assets directory", zap.String("path", assetDir))
 				return err
 			}
@@ -1307,9 +1381,11 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				destPath := filepath.Join(assetDir, safeFileName)
 				wroteFile := false
 
-				// Case 1: File is in Paths (downloaded to local temp)
-				if j < len(form.Paths) && form.Paths[j] != "" {
-					srcPath := form.Paths[j]
+				// Case 1: the file the capture left the part in (Captured),
+				// never a path the test case names: one read back from a
+				// set's file or the cloud names no file to copy or remove.
+				if j < len(form.Captured) && form.Captured[j] != "" {
+					srcPath := form.Captured[j]
 					// Check if srcPath exists
 					if _, err := os.Stat(srcPath); err == nil {
 						input, err := os.Open(srcPath)
@@ -1317,7 +1393,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 							utils.LogError(ts.logger, err, "failed to open temp asset file", zap.String("path", srcPath))
 							return err
 						}
-						output, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+						output, err := yaml.OpenFileInRecording(ts.TcsPath, destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 						if err != nil {
 							input.Close()
 							utils.LogError(ts.logger, err, "failed to create asset file", zap.String("path", destPath))
@@ -1344,10 +1420,15 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					} else {
 						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", srcPath), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", srcPath))
 					}
+				} else if kept, ok := ts.keptAsset(form.Paths, j); ok {
+					// Case 1a: a test case read back already keeps the part
+					// beside it: kept as it is.
+					destPath = kept
+					wroteFile = true
 				} else if j < len(form.FileContents) && form.FileContents[j] != nil {
 					// Case 1b: File content travelled with the test case (captured
 					// in another process, e.g. the DaemonSet agent)
-					if err := os.WriteFile(destPath, form.FileContents[j], 0o644); err != nil {
+					if err := yaml.WriteFileInRecording(ts.TcsPath, destPath, form.FileContents[j], 0o644); err != nil {
 						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
 						return err
 					}
@@ -1355,11 +1436,19 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				} else if j < len(form.Values) {
 					// Case 2: File content is in Values (legacy/text fallback)
 					content := []byte(form.Values[j])
-					if err := os.WriteFile(destPath, content, 0o644); err != nil {
+					if err := yaml.WriteFileInRecording(ts.TcsPath, destPath, content, 0o644); err != nil {
 						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
 						return err
 					}
 					wroteFile = true
+				} else if j < len(form.Paths) && filepath.IsAbs(form.Paths[j]) {
+					// An absolute path is where a capture leaves a part, but
+					// this one is no file a capture of this run left
+					// (Captured), and the test case carries no contents for
+					// it: stored, the test case would lose the part's file
+					// with nothing said to its caller. Refused instead; the
+					// file the path names is neither read nor removed.
+					return fmt.Errorf("the test case's form part %q (file %q) names %q, no file a capture of this run left, and carries no contents for it: keploy keeps a part's file only from the capture that made it, from contents the test case carries, or from a file in the recording it names by a relative path, and does not store a test case without its part's file", form.Key, fileName, form.Paths[j])
 				}
 
 				if wroteFile {
@@ -1373,15 +1462,18 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					allFilesPersisted = false
 					// Do not append non-existent paths to newPaths — they would
 					// cause replay failures when the system tries to read them.
-					utils.LogError(ts.logger, fmt.Errorf("file entry could not be persisted"), "skipping file entry - check that the source file exists and is accessible",
-						zap.String("fileName", form.FileNames[j]),
-						zap.String("key", form.Key))
+					// The test case is stored without the part's file: said
+					// here, and kept for the caller's summary.
+					ts.leaveOutFormPart(models.FormPartLeftOut{TestSet: testSetID, TestCase: tcsName, Key: form.Key, FileName: fileName, Path: pathAt(form.Paths, j)})
 				}
 			}
 
 			tc.HTTPReq.Form[i].Paths = newPaths
 			// Written to the assets above; never stored in the test case.
+			// The captured files are gone (copied and removed): a later save
+			// of this test case keeps the part where it now is (Case 1a).
 			tc.HTTPReq.Form[i].FileContents = nil
+			tc.HTTPReq.Form[i].Captured = nil
 			if allFilesPersisted {
 				tc.HTTPReq.Form[i].Values = nil
 			}

@@ -43,25 +43,26 @@ const leftOutUnanswered = leftOutUnansweredCause + ": they were captured before 
 // parser that reads on through client chunks that start no request (the MySQL
 // recorder, through the client's packets inside an exchange it left out) calls
 // this for each, and the one in force is its next request's. That recorder
-// cuts the rest of a response it could not frame off by capture time
-// (fakeconn.FakeConn.SkipThrough), which takes the stream before the floor:
-// the floor then drops only what that cut left. The first floor this sets is
-// the first request's (fakeconn.FakeConn.DropBefore): what was captured
-// before it is the server stream's start, which is reported (dropped) however it
-// leaves the stream, the floor's read or that cut, and nothing captured after
-// it is in the start's run, whatever floor is in force then. A parser that
+// cuts the rest of a response it could not frame off with that floor, by
+// capture number. The first floor this sets is the first request's
+// (fakeconn.FakeConn.DropBefore): what was captured before it is the server
+// stream's start, which is reported (dropped), and nothing captured after it
+// is in the start's run, whatever floor is in force then. A parser that
 // returns without reading the server's stream past its start has
 // EndExchanges read it on.
 //
 // answerUnread says the parser goes on to this request with an earlier answer
 // still to read: the server's bytes after what it has read of that answer are
 // still that answer's, though they were captured before this request, so the
-// floor stays where it is. MySQL's held PREPARE is the one parser that passes
-// true, while it holds one: the EOF after its definitions, when the server
-// sends one, comes before the client's next command, and which it is, EOF or
-// the next command's answer, is told only by the next packet the server sends,
-// after a command with an answer. It returns the client stream's errors as
-// they are: io.EOF when the stream ends.
+// floor stays where it is. The MySQL recorder is the one parser that passes
+// true: while it holds a PREPARE, the EOF after its definitions, when the
+// server sends one, comes before the client's next command, and which it is,
+// EOF or the next command's answer, is told only by the next packet the server
+// sends, after a command with an answer; and while the server may still answer
+// a command without an answer that did not parse. A parser that has read that
+// answer while the request is still its next sets the floor there (FloorAt).
+// It returns the client stream's errors as they are: io.EOF when the stream
+// ends.
 func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chunk, error) {
 	c, err := s.ClientStream.Peek()
 	if err != nil {
@@ -79,6 +80,16 @@ func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chu
 		s.DestStream.DropBefore(c.ConnSeq, s.exchanges.report)
 	}
 	return c, nil
+}
+
+// FloorAt sets the server stream's floor at the request NextRequest returned
+// with answerUnread, whose first chunk is numbered first, once the parser has
+// read the earlier answer it kept the floor below for: the rule holds for that
+// request from then, and the server bytes captured before it that are still
+// unread are dropped and reported as NextRequest's floor drops them (dropped).
+// It is called after that NextRequest, never before a parser's first one.
+func (s *Session) FloorAt(first uint32) {
+	s.DestStream.DropBefore(first, s.exchanges.report)
 }
 
 // dropped is told of each run of server bytes the floor drops (NextRequest),
@@ -104,16 +115,14 @@ func (s *Session) NextRequest(kind models.Kind, answerUnread bool) (fakeconn.Chu
 // one that returns nil on a cancelled context without doing so leaves that
 // exchange in no span. Or it is what is left of an answer its parser
 // stopped reading and left out, which the parser reported itself as it did
-// (the MySQL recorder, for a response it cannot frame: it skips the rest of
-// that response by capture time before the floor applies, so the floor drops
-// only what of it the capture numbered before the next command and stamped
-// after it). The start's run holds nothing captured after the first request,
-// whichever way it leaves the stream (fakeconn.Dropped.AtStart): when that
+// (the MySQL recorder, for a response it cannot frame: the floor at its next
+// command drops the rest of that response). The start's run holds nothing
+// captured after the first request (fakeconn.Dropped.AtStart): when that
 // recorder finds the first command's response unframable before it reads a
-// byte of the server's stream, its skip takes the answer in flight and that
-// response together, and the run ends at the response's first chunk, so the
-// answer in flight is reported over its own bytes, as when the floor drops it,
-// and the response is the exchange the recorder leaves out itself.
+// byte of the server's stream, the floor at its next command drops the answer
+// in flight and that response together, and the start's run ends at the
+// response's first chunk, so the answer in flight is reported over its own
+// bytes, and the response is the exchange the recorder leaves out itself.
 func (s *Session) dropped(d fakeconn.Dropped) {
 	if !s.JoinedMidConnection || !d.AtStart {
 		s.peerEnds.Or(spokeUnaskedBit)

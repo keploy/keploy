@@ -499,6 +499,49 @@ func streamWriteFailed(logger *zap.Logger, r *http.Request, msg string, err erro
 	logger.Error(msg, zap.Error(err))
 }
 
+// spanWindow is the window HandleIncoming checks a test case over against the
+// memory guard's pauses and the holes in a connection's capture
+// (WasPressureActiveInWindow, WasMockOrphanedInWindow), on which a zero bound
+// makes no claim. A test case with no response time is read as ending now, the
+// latest it can have ended. One with no request time to trust (none, or one
+// after its end) is read as holding every request of its recording made before
+// its end, any of which may be its own (fail closed), as SendingTestCase reads
+// it: from from, the earliest one can have come (requestsFrom); with from
+// unknown (zero) or after its end, whatever recording it is of, as holding
+// every request made before its end.
+func spanWindow(req, resp, from time.Time) (time.Time, time.Time) {
+	if resp.IsZero() {
+		resp = time.Now()
+	}
+	if !req.IsZero() && !req.After(resp) {
+		return req, resp
+	}
+	if from.IsZero() || from.After(resp) {
+		from = time.Unix(0, 0)
+	}
+	return from, resp
+}
+
+// requestsFrom is the earliest a request of a test case an incoming stream
+// checks can have come: the start of its recording (recording,
+// StartRecordSession), of the stream itself (stream, before its ingress
+// started), or a request the stop of a recording that has ended found in
+// flight (leftovers, by Unix nanoseconds), whose test case can come to this
+// stream. Zero, unknown, when no recording has started (a zero recording):
+// no time is before it.
+func requestsFrom(recording, stream time.Time, leftovers map[int64]struct{}) time.Time {
+	from := recording
+	if stream.Before(from) {
+		from = stream
+	}
+	for at := range leftovers {
+		if l := time.Unix(0, at); l.Before(from) {
+			from = l
+		}
+	}
+	return from
+}
+
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// A recording's client that drains this stream after its stop holds it
 	// open until it has: a stop signal waits for that (holdForDrain).
@@ -544,6 +587,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		k.KeepRealUses(true)
 		defer k.KeepRealUses(false)
 	}
+	// Before the ingress starts: no request of this stream's own comes
+	// before it (requestsFrom).
+	streamFrom := time.Now()
 	tc, err := a.svc.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"
@@ -584,6 +630,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// life. None is ever taken back, so this session's are what that count
 	// grows by from here.
 	mocksLeftOutBefore := syncmgr.Get().MocksLeftOut()
+	// The manager's drop counts are of its life too, and it outlives a
+	// session: what they grow by from here is this session's.
+	dropMark := syncmgr.Get().StartDropSession()
 	// The requests the ingress did not record because the memory guard had
 	// paused recording (NoteNotRecordedUnderPressure), counted the same way.
 	notRecordedBefore := syncmgr.Get().NotRecordedUnderPressure()
@@ -606,20 +655,23 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	tlsRelayedBefore := syncmgr.Get().StartTLSRelayedSession()
 	// sessionLost reads, once, what this session lost to its ingress stopping
 	// (NoteNotHandedOn), to callers the agent could not name
-	// (NoteUnnamedCallerConn) and to TLS connections relayed unread
-	// (NoteTLSRelayedConn): the end marker, the summary and its warnings say
+	// (NoteUnnamedCallerConn), to TLS connections relayed unread
+	// (NoteTLSRelayedConn) and to mocks dropped as their parsers handed them
+	// over or after (DropsSince): the end marker, the summary and its warnings say
 	// the same counts, whichever of them reads first. The handler's own
 	// goroutine calls it (the marker, and the summary it defers).
 	var lostRead bool
 	var notHandedOnLost, unnamedLost, tlsRelayedLost uint64
-	sessionLost := func() (notHandedOn, unnamed, tlsRelayed uint64) {
+	var mocksDropped syncmgr.SessionDrops
+	sessionLost := func() (notHandedOn, unnamed, tlsRelayed uint64, drops syncmgr.SessionDrops) {
 		if !lostRead {
 			lostRead = true
 			notHandedOnLost = syncmgr.Get().NotHandedOn() - notHandedOnBefore
 			unnamedLost = syncmgr.Get().UnnamedCallerConns() - unnamedBefore
 			tlsRelayedLost = syncmgr.Get().TLSRelayedConns() - tlsRelayedBefore
+			mocksDropped = syncmgr.Get().DropsSince(dropMark)
 		}
-		return notHandedOnLost, unnamedLost, tlsRelayedLost
+		return notHandedOnLost, unnamedLost, tlsRelayedLost, mocksDropped
 	}
 	// The ingress requests that come during the memory guard's pauses, from
 	// here: counted by the order of events (the request count read at each
@@ -666,13 +718,18 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Time("request_time", tcReqTime))
 			return true
 		}
+		// The window the span checks below read (spanWindow): a zero bound
+		// makes no claim there, so a test case with no request or response
+		// time was streamed over any pause or hole.
+		spanFrom, spanTo := spanWindow(tcReqTime, tcRespTime,
+			requestsFrom(syncmgr.Get().RecordingFrom(), streamFrom, leftovers))
 		// Skip this test case if memory pressure overlapped its window
 		// [request, response]: under pressure the paired mock may have been
 		// dropped, so sending the TC would orphan it at replay. We check the
 		// TC window against recorded pressure ranges (not individual mock
 		// drops) because that check is race-free regardless of when the
 		// mock's goroutine runs relative to this handler.
-		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(tcReqTime, tcRespTime)
+		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(spanFrom, spanTo)
 		// An exchange a connection carried but did not record as a mock
 		// strands its TC mock-less, whether or not a pressure range covers
 		// it: a parser's hole (a mongo/v2 reassembly resync), an exchange a
@@ -685,7 +742,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// only the TCs checked after it: without a watermark (the hold
 		// below), a TC streamed before it is saved without the mock, as the
 		// WARN that reports the exchange says.
-		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(tcReqTime, tcRespTime)
+		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(spanFrom, spanTo)
 		// A capacity drop (outChan overflow / already-closed channel)
 		// feeds nothing into pressureRanges, so the pressure-overlap check
 		// above cannot catch it. Suppress by EXACT owning test name so a
@@ -700,9 +757,26 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.String("tc_name", t.Name),
 				zap.Int64("tc_req_ms", tcReqTime.UnixMilli()),
 				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
+				zap.Int64("checked_from_ms", spanFrom.UnixMilli()),
+				zap.Int64("checked_to_ms", spanTo.UnixMilli()),
 				zap.Int("pressure_overlaps", pressureOverlaps),
 				zap.Int("orphan_overlaps", orphanOverlaps),
 				zap.Bool("capacity_drop", mockDropped),
+				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
+			)
+			return true
+		}
+		// Asked last, as it notes the test case sent: a mock any test may
+		// need, lost from now on and requested before its window ended, or a
+		// mock no test owns lost and requested inside its window, revokes it
+		// by name, and one
+		// lost since the checks above leaves it out here
+		// (SyncMockManager.SendingTestCase).
+		if !syncmgr.Get().SendingTestCase(t.Name, tcReqTime, tcRespTime) {
+			tcsSuppressedSoFar++
+			a.logger.Debug("agent: TC suppressed — a mock it may need was lost: one any test of the recording may need, requested before its window ended, or one no test owns requested inside its window; not sent to CLI",
+				zap.String("tc_name", t.Name),
+				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 			)
 			return true
@@ -861,7 +935,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// end left unsent.
 	endedBy := "client"
 	summarize := func() {
-		_, finalDropped, finalAdded, _ := syncmgr.Get().GetDropStats()
 		orphanRecorded, orphanClosed, orphanOpen := syncmgr.Get().OrphanRangeCount()
 		pressureRecorded, pressureSpans := syncmgr.Get().PressureRangeCount()
 		// Suppression protects replay from test cases whose mocks
@@ -905,7 +978,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		}
 		// Read once (sessionLost): the warnings, the summary and the end
 		// marker say the same.
-		notHandedOn, unnamedConns, tlsRelayedConns := sessionLost()
+		notHandedOn, unnamedConns, tlsRelayedConns, drops := sessionLost()
+		if drops.Pressure > 0 || drops.Capacity > 0 {
+			// The manager says the first of each kind and every 1024th as
+			// they come; this is the session's count, and which they were.
+			a.logger.Warn(models.MocksDroppedSaid,
+				zap.Int64("by_memory_pressure", drops.Pressure),
+				zap.Uint64("for_the_output", drops.Capacity),
+				zap.Strings("first_dropped", drops.Named))
+		}
 		if notHandedOn > 0 {
 			// The app served each, and the ingress stopped before its test
 			// case reached this stream: the manager warns of the first and
@@ -952,7 +1033,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			zap.Int("orphan_ranges_total", orphanRecorded),
 			zap.Int("orphan_spans_closed", orphanClosed),
 			zap.Int("orphan_ranges_still_open", orphanOpen),
-			zap.Int64("mocks_dropped_by_pressure", finalDropped),
+			zap.Int64("mocks_dropped_by_pressure", drops.Pressure),
 			// Requests the ingress did not record because the memory guard
 			// had paused recording when they came (the WARN above names
 			// their connections).
@@ -994,9 +1075,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// recording stopped is in the orphan spans above, not
 			// here: it was never parsed into mocks to count.
 			zap.Int64("mocks_left_out", syncmgr.Get().MocksLeftOut()-mocksLeftOutBefore),
-			zap.Int64("mocks_added_successfully", finalAdded),
-			zap.Uint64("mocks_dropped_capacity", syncmgr.Get().DropCount()),
-			zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
+			zap.Int64("mocks_added_successfully", drops.Added),
+			zap.Uint64("mocks_dropped_capacity", drops.Capacity),
+			// Which mocks those two dropped, and why: the session's first
+			// few. Each count has them all.
+			zap.Strings("mocks_dropped_named", drops.Named),
+			zap.Int64("tcs_dropped_capacity", drops.TestCases),
 			zap.Int("tcs_released_unsettled", tcsUnsettled),
 			zap.Uint64("tcs_left_out_in_flight", leftOutInFlight),
 			// Served by the app and never handed to this stream: the
@@ -1071,7 +1155,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return
 			}
-			notHandedOn, unnamedConns, tlsRelayedConns := sessionLost()
+			notHandedOn, unnamedConns, tlsRelayedConns, drops := sessionLost()
 			if err := json.NewEncoder(part).Encode(models.StreamEndSummary{
 				TestCasesSent:       tcsSentSoFar,
 				TestCasesSuppressed: tcsSuppressedSoFar,
@@ -1085,6 +1169,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				TLSRelayedConns:    tlsRelayedConns,
 				Unsettled:          tcsUnsettled,
 				MassSuppressed:     massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
+				MocksDropped: models.MockDropSummary{
+					ByPressure: drops.Pressure,
+					Capacity:   drops.Capacity,
+					Named:      drops.Named,
+				},
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return

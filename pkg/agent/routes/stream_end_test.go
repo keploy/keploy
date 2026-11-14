@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,7 +121,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// summary, which the handler defers, reads them: the handler logs
 		// the marker's flush on its own goroutine, and this hook runs there.
 		// The summary must say what the marker said (the counts are read
-		// once), not these too.
+		// once), not these too: a mock dropped then among them.
 		var markerSeen int
 		core = zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
 			if e.Message == streamEndMarkerSent {
@@ -128,6 +129,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 				syncmgr.Get().NoteNotHandedOn()
 				syncmgr.Get().NoteUnnamedCallerConn()
 				syncmgr.Get().NoteTLSRelayedConn(8443)
+				loseMockForOutput("after-marker")
 			}
 			return nil
 		})
@@ -150,7 +152,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
 		defer done()
 		for _, n := range []string{"test-1", "test-2"} {
-			svc.tc <- &models.TestCase{Name: n}
+			svc.tc <- windowedNow(n)
 		}
 		// Requests a pause of the memory guard cost this session, three on
 		// two connections, noted once its stream is open: what the session
@@ -170,6 +172,8 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// TLS unread.
 		syncmgr.Get().NoteTLSRelayedConn(8443)
 		syncmgr.Get().NoteTLSRelayedConn(8443)
+		// Mocks this session dropped after their parsers handed them over.
+		loseMockEachWay(t, "marker")
 		// The ingress requests of this session: one before its pause, two
 		// during it, one after.
 		memoryguard.IngressRequest()
@@ -216,6 +220,12 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		if want := (models.PressureSkipSummary{Requests: 3, Connections: 2}); sum.NotRecordedUnderPressure != want {
 			t.Fatalf("the marker says a pause cost %+v, want %+v", sum.NotRecordedUnderPressure, want)
 		}
+		// Its client says this when the agent's own log may not reach the
+		// user: so the mocks are named here, not only counted.
+		if d := sum.MocksDropped; d.ByPressure != 1 || d.Capacity != 1 || len(d.Named) != 2 ||
+			!strings.Contains(d.Named[0], "marker-output") {
+			t.Fatalf("the marker says %+v of the mocks dropped, want this session's, named", d)
+		}
 		if sum.NotHandedOn != 2 {
 			t.Fatalf("the marker says %d test cases were not handed on, want this session's 2", sum.NotHandedOn)
 		}
@@ -251,10 +261,17 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 			"tcs_not_handed_on":                2,
 			"connections_from_unnamed_callers": 2,
 			"connections_relayed_tls":          2,
+			"mocks_dropped_capacity":           1,
 		} {
 			if got := sumLine[name]; got != want {
 				t.Errorf("the summary says %s=%v, want %d", name, got, want)
 			}
+		}
+		if named := fmt.Sprint(sumLine["mocks_dropped_named"]); strings.Contains(named, "after-marker") || !strings.Contains(named, "marker-output") {
+			t.Errorf("the summary names %s, want the mocks the marker named and not one dropped after it", named)
+		}
+		if got := fields(models.MocksDroppedSaid)["for_the_output"]; got != uint64(1) {
+			t.Errorf("the warning of mocks dropped says %v for the output, want the marker's 1", got)
 		}
 		warn := fields("agent: some requests were not recorded: the agent was short of memory when they came, and the memory guard had paused recording; each connection's requests after the pause are recorded")
 		if got := fmt.Sprint(warn["requests"], " ", warn["requests_during_pauses"], " ", warn["connections"]); got != "3 2 2" {
@@ -291,7 +308,7 @@ func TestEachRecordingSessionSaysItsOwnTLSConnectionsRelayedUnread(t *testing.T)
 		a := &Agent{logger: zap.New(core), svc: svc}
 		tok := rand.Text() // its own each run: a token ended stays ended
 		resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
-		svc.tc <- &models.TestCase{Name: "test-1"}
+		svc.tc <- windowedNow("test-1")
 		for i := 0; i < relayed; i++ {
 			if first := syncmgr.Get().NoteTLSRelayedConn(8443); first != (i == 0) {
 				t.Fatalf("session %d's TLS connection %d to 8443: first=%v, want %v (the session's first is said at WARN as it comes)", session+1, i+1, first, i == 0)
@@ -450,4 +467,14 @@ func TestTheAgentKeepsABoundedRecordOfRecordingsStreams(t *testing.T) {
 	default:
 		t.Fatal("a stream reopened by the latest recording ended is not ended at once")
 	}
+}
+
+// windowedNow is an HTTP test case named name whose request came and response
+// went now: one with no request time is read over every request of its
+// recording (spanWindow), and left out over a pause or a hole an earlier test
+// recorded.
+func windowedNow(name string) *models.TestCase {
+	now := time.Now()
+	return &models.TestCase{Name: name, Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{Timestamp: now}, HTTPResp: models.HTTPResp{Timestamp: now}}
 }

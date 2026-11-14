@@ -34,6 +34,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/pkg/templates"
@@ -200,10 +201,7 @@ const runCompletedReason = "replay completed successfully"
 // error setErr wraps), else the set's status and its error. Never "replay
 // completed successfully".
 func haltedRunReason(testSet string, status models.TestSetStatus, exit models.AppError, setErr error) string {
-	if exit == (models.AppError{}) {
-		// errors.As leaves exit as it is when setErr wraps no exit.
-		_ = errors.As(setErr, &exit)
-	}
+	exit = haltedExit(exit, setErr)
 	if exit == (models.AppError{}) {
 		if setErr != nil {
 			return fmt.Sprintf("test-set %s ended %s: %v", testSet, status, setErr)
@@ -215,6 +213,16 @@ func haltedRunReason(testSet string, status models.TestSetStatus, exit models.Ap
 		code = fmt.Sprintf(" with exit code %d", exit.ExitCode)
 	}
 	return fmt.Sprintf("the application exited during test-set %s%s: %v", testSet, code, exit)
+}
+
+// haltedExit is the application's exit haltedRunReason names: exit when
+// keploy saw one, else the exit the set's error setErr wraps, if any.
+func haltedExit(exit models.AppError, setErr error) models.AppError {
+	if exit == (models.AppError{}) {
+		// errors.As leaves exit as it is when setErr wraps no exit.
+		_ = errors.As(setErr, &exit)
+	}
+	return exit
 }
 
 // internalErrRunReason is the reason a set testSet that ended INTERNAL_ERR,
@@ -1277,6 +1285,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// run's stop names them (runStopReason), each set once (noteSetStop).
 	var setStops []string
 	setStopAt := map[string]int{}
+	// setStopLogs is, by set, the application's last log lines keploy took
+	// at the exit its entry of setStops names (haltedExit), noted with it:
+	// none for an internal error's.
+	setStopLogs := map[string]string{}
 	r.afterTestRunCalled = false
 	var flakyTestSets []string
 	// haltFlakyTestSets are the sets flaky for a halt: their application
@@ -1410,6 +1422,16 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 					// errgroup ended ctx (the exit of the application
 					// --keep-app-alive keeps), and the reason names it.
 					stopReason = cancelledRunReason(testSet, err, context.Cause(ctx))
+					// The application's exit is what ended ctx: the set
+					// halted (before its application accepted a
+					// connection, or as its tests ran), and its hooks are
+					// told so, and why, as those of a set that ends the
+					// run on its status are. A user's stop is no halt.
+					if exit := keptAppExit(ctx); exit != (models.AppError{}) {
+						if hookErr := r.hookImpl.AfterTestSetRun(WithSetHaltAppLogs(WithSetHalt(ctx, stopReason), exit.AppLogs), testSet, false); hookErr != nil {
+							utils.LogError(r.logger, hookErr, "failed to execute after test set run hook", zap.String("testSet", testSet))
+						}
+					}
 					return err
 				}
 				// DockerCompose: when the user-app container exits,
@@ -1431,6 +1453,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 						zap.String("test-set", testSet),
 						zap.String("status", string(testSetStatus)))
 					setStops = noteSetStop(setStops, setStopAt, testSet, haltedRunReason(testSet, testSetStatus, r.setAppExit, err))
+					setStopLogs[testSet] = haltedExit(r.setAppExit, err).AppLogs
 					testSetResult = false
 					testRunResult = false
 					break
@@ -1453,6 +1476,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType) || keptAppExit(ctx) != (models.AppError{})
 				halted = setAttempt{n: attempt, status: testSetStatus, why: haltedRunReason(testSet, testSetStatus, r.setAppExit, nil)}
 				setStops = noteSetStop(setStops, setStopAt, testSet, halted.why)
+				setStopLogs[testSet] = r.setAppExit.AppLogs
 				halt = halt.orFirst(halted)
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
@@ -1461,6 +1485,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				// set only not judged does not stop it: its report says why.
 				if abortTestRun {
 					setStops = noteSetStop(setStops, setStopAt, testSet, internalErrRunReason(testSet, r.setInternalErr, r.setAppExit))
+					delete(setStopLogs, testSet)
 				}
 			case models.TestSetStatusUserAbort:
 				// A Ctrl+C does not un-fail the tests that already ran, nor
@@ -1626,11 +1651,26 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			attempt = 0
 		}
 
+		// A set the run's stop names (setStops: its application exited, or
+		// its internal error stopped the run) has its hooks told it halted,
+		// and why (SetHalt), whether the run ends with it or goes on past it
+		// (docker compose, a stack per set): a hook that reports each set
+		// reports this one as halted for that reason, not as nothing, nor as
+		// a difference in the app's answers.
+		setEndCtx := ctx
+		if at, ok := setStopAt[testSet]; ok {
+			setEndCtx = WithSetHaltAppLogs(WithSetHalt(ctx, setStops[at]), setStopLogs[testSet])
+		}
 		if abortTestRun {
+			// The set ended the run, and no set runs after it. Its hooks are
+			// still told it ended.
+			if err := r.hookImpl.AfterTestSetRun(setEndCtx, testSet, false); err != nil {
+				utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
+			}
 			break
 		}
 
-		err = r.hookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
+		err = r.hookImpl.AfterTestSetRun(setEndCtx, testSet, testSetResult)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
 		}
@@ -2634,7 +2674,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if _, ok := r.hookImpl.(wholeSetMockMutator); ok {
 			return nil, nil, errWholeSetMockMutator
 		}
-		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		// The mocks the set's worker-mock rules marked, read once: the
+		// mapping-based loader names them for every test, and every path
+		// serves them as session mocks (models.ServeAsSession).
+		workerMocks := r.defaultWorkerScope(ctx, testSetID)
+		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategyWith(ctx, testSetID, isMappingEnabled, workerMocks)
 		// fromWindows: under the proven switch, a set with no mappings.yaml,
 		// whose test windows say what each test case owns once its mocks are
 		// read (windowOwnership).
@@ -2735,6 +2779,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return nil, nil, err
 		}
+		filtered, unfiltered = models.ServeAsSession(filtered, unfiltered, workerMocks)
 		if fromWindows {
 			expectedTestMockMappings, workerScope, conc = r.windowOwnershipOf(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
@@ -7227,6 +7272,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				passingTotalConsumedMocks[name] = models.MockState{Name: name}
 			}
 		}
+		// And the mocks its worker-mock rules marked: a run answers every
+		// cold worker process with whichever copy it reaches first, so the
+		// others go unconsumed, yet the next run's cold workers need them.
+		for _, name := range r.workerRuleMockNames(runTestSetCtx, testSetID) {
+			if _, exists := passingTotalConsumedMocks[name]; !exists {
+				passingTotalConsumedMocks[name] = models.MockState{Name: name}
+			}
+		}
 
 		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
 		if len(noisyTestCases) > 0 {
@@ -8111,7 +8164,7 @@ func (r *Replayer) backgroundMockNames(ctx context.Context, testSetID string) []
 			return nil
 		}
 		if m != nil {
-			worker, startup = m.Worker, m.Startup
+			worker, startup = models.WithoutWorkerRuleEntries(m.Worker), m.Startup
 		}
 	} else {
 		var err error
@@ -8125,6 +8178,21 @@ func (r *Replayer) backgroundMockNames(ctx context.Context, testSetID string) []
 		worker = r.exact.worker
 	}
 	return (&models.Mapping{Worker: worker, Startup: startup}).BackgroundMockNames()
+}
+
+// workerRuleMockNames is the names of the mocks testSetID's worker-mock rules
+// marked (models.Mapping.WorkerRuleMockNames): nil with no mapping store, no file, or a
+// file that cannot be read.
+func (r *Replayer) workerRuleMockNames(ctx context.Context, testSetID string) []string {
+	mr, ok := r.mappingDB.(mappingReader)
+	if !ok {
+		return nil
+	}
+	m, err := mr.GetMapping(ctx, testSetID)
+	if err != nil || m == nil {
+		return nil
+	}
+	return m.WorkerRuleMockNames()
 }
 
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of
@@ -9565,14 +9633,14 @@ func (r *Replayer) createBackup(testSetID string) error {
 		return fmt.Errorf("source directory for backup does not exist: %s", srcPath)
 	}
 
-	if err := os.MkdirAll(backupDestPath, 0755); err != nil {
+	if err := yaml.MkdirAllInRecording(r.config.Path, backupDestPath, 0755); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
 
 	err := r.copyDirContents(srcPath, backupDestPath)
 	if err != nil {
 		// Clean up the failed backup attempt
-		_ = os.RemoveAll(backupDestPath)
+		_ = yaml.RemoveAllInRecording(r.config.Path, backupDestPath)
 		return fmt.Errorf("failed to copy contents for backup: %w", err)
 	}
 
@@ -9580,7 +9648,10 @@ func (r *Replayer) createBackup(testSetID string) error {
 	return nil
 }
 
-// copyDirContents recursively copies contents from src to dst, excluding the .backup directory.
+// copyDirContents recursively copies contents from src to dst, excluding the
+// .backup directory. Both are in the recording, and each file is read and
+// written inside it: a file or a folder that links out of it is refused, not
+// copied into the backup.
 func (r *Replayer) copyDirContents(src, dst string) error {
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -9596,13 +9667,13 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 			continue
 		}
 
-		fileInfo, err := os.Stat(srcPath)
+		fileInfo, err := yaml.StatInRecording(r.config.Path, srcPath)
 		if err != nil {
 			return err
 		}
 
 		if fileInfo.IsDir() {
-			if err := os.MkdirAll(dstPath, fileInfo.Mode()); err != nil {
+			if err := yaml.MkdirAllInRecording(r.config.Path, dstPath, fileInfo.Mode().Perm()); err != nil {
 				return err
 			}
 			if err := r.copyDirContents(srcPath, dstPath); err != nil {
@@ -9610,13 +9681,13 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 			}
 		} else {
 			// It's a file, copy it.
-			srcFile, err := os.Open(srcPath)
+			srcFile, err := yaml.OpenInRecording(r.config.Path, srcPath)
 			if err != nil {
 				return err
 			}
 			defer srcFile.Close()
 
-			dstFile, err := os.Create(dstPath)
+			dstFile, err := yaml.OpenFileInRecording(r.config.Path, dstPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 			if err != nil {
 				return err
 			}
@@ -9626,7 +9697,7 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 				return err
 			}
 
-			if err := os.Chmod(dstPath, fileInfo.Mode()); err != nil {
+			if err := dstFile.Chmod(fileInfo.Mode()); err != nil {
 				return err
 			}
 		}
@@ -10100,8 +10171,60 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 	}
 }
 
+// defaultWorkerScope is the names of the mocks the set's worker-mock rules
+// marked, when this run serves them on the default rules: the worker-scope
+// entries (models.Mapping.Worker) whose reason is a rule's
+// (models.WorkerRuleReason), calls the user said the application makes on
+// its own, typically once in each worker process (a JWKS fetch, a table's
+// column list). Which test makes one at replay depends on which process is
+// cold, not on the test's request, so each is served to every test.
+//
+// Every other worker entry is left to the proven switch's rules
+// (provenMappings, newExactPlan), which serve a repeated call in its order: on
+// the default rules two such entries answering one request differently would
+// be served in no order. Under the switch, with mapping disabled, for a store
+// that cannot read the whole mapping (mappingReader), and for a read that
+// fails (which costs those mocks, not the run) it is nil. Unnamed entries are
+// dropped, and a name is given once.
+func (r *Replayer) defaultWorkerScope(ctx context.Context, testSetID string) []string {
+	if r.mappingDB == nil || r.exactServing() || (r.config != nil && r.config.DisableMapping) {
+		return nil
+	}
+	mr, ok := r.mappingDB.(mappingReader)
+	if !ok {
+		return nil
+	}
+	m, err := mr.GetMapping(ctx, testSetID)
+	if err != nil {
+		r.logger.Debug("Failed to read the worker scope from mappings; continuing without it",
+			zap.String("testSetID", testSetID),
+			zap.Error(err))
+		return nil
+	}
+	return m.WorkerRuleMockNames()
+}
+
+// withNames is names with more appended, less those names holds already.
+func withNames(names, more []string) []string {
+	if len(more) == 0 {
+		return names
+	}
+	seen := make(map[string]bool, len(names)+len(more))
+	for _, n := range names {
+		seen[n] = true
+	}
+	for _, n := range more {
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
 // The third return is the test-set's startup mock names — boot traffic that
-// belongs to no test case. On the mapping-based path the agent loads strictly
+// belongs to no test case — and, without the proven switch, its worker scope
+// (defaultWorkerScope). On the mapping-based path the agent loads strictly
 // by name (Agent.loadPerTestMocks -> disk.LoadByNames), so these must be merged
 // into every per-test name list or the app's boot mocks are absent from the
 // pool. The timestamp path does not need them: it reloads the same mocks via
@@ -10111,6 +10234,12 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 // back to timestamp filtering still sees them; harmless there, since that path
 // ignores names entirely.
 func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID string, isMappingEnabled bool) (bool, map[string][]models.MockEntry, []string) {
+	return r.determineMockingStrategyWith(ctx, testSetID, isMappingEnabled, r.defaultWorkerScope(ctx, testSetID))
+}
+
+// determineMockingStrategyWith is determineMockingStrategy with the mocks the
+// set's worker-mock rules marked (defaultWorkerScope) read already.
+func (r *Replayer) determineMockingStrategyWith(ctx context.Context, testSetID string, isMappingEnabled bool, workerMocks []string) (bool, map[string][]models.MockEntry, []string) {
 	// Default to timestamp-based strategy with empty mappings.
 	defaultMappings := make(map[string][]models.MockEntry)
 
@@ -10135,6 +10264,7 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 	} else {
 		startupNames = (&models.Mapping{Startup: startup}).StartupMockNames()
 	}
+	startupNames = withNames(startupNames, workerMocks)
 
 	// Try to get mappings from the database.
 	expectedTestMockMappings, hasMeaningfulMappings, err := r.mappingDB.Get(ctx, testSetID)
@@ -10145,6 +10275,9 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 		return false, defaultMappings, startupNames
 	}
 
+	// A set's worker mocks alone do not make it mapped: they are session mocks
+	// on either path (models.ServeAsSession), and a set whose tests list
+	// nothing keeps the timestamp path, which reads each test's own mocks.
 	if hasMeaningfulMappings {
 		// Meaningful mappings were found, so use the mapping-based strategy.
 		r.logger.Debug("Using mapping-based mock filtering strategy",

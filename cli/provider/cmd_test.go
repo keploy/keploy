@@ -630,3 +630,52 @@ func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 		t.Errorf("cobra is left to print `keploy record`'s usage text under %q", err)
 	}
 }
+
+// keploy record refuses a worker-mock rule it cannot apply, read from
+// keploy.yml as written (a camel-case key such as pathRegex included); every
+// other command, keploy mock record among them, goes on.
+func TestWorkerMockRulesAreRefusedByKeployRecordOnly(t *testing.T) {
+	t.Cleanup(viper.Reset)
+	const bad = "record:\n  workerMocks:\n    - kind: http\n      match:\n        path: /x\n"
+	const good = "record:\n  workerMocks:\n    - id: jwks\n      kind: Http\n      match:\n        method: GET\n        pathRegex: \"^/jwks$\"\n"
+	run := func(t *testing.T, cmd *cobra.Command, cfg *config.Config, yml string) error {
+		t.Helper()
+		viper.Reset()
+		if err := cmd.ParseFlags([]string{"--config-path", writeKeployYML(t, yml)}); err != nil {
+			t.Fatal(err)
+		}
+		c := NewCmdConfigurator(zap.NewNop(), cfg)
+		if err := c.PreProcessFlags(cmd); err != nil {
+			t.Fatalf("PreProcessFlags: %v", err)
+		}
+		return c.ValidateFlags(context.Background(), cmd)
+	}
+	refused := func(err error) bool { return err != nil && strings.Contains(err.Error(), "workerMocks") }
+
+	cfg := config.New()
+	if err := run(t, newRecordCmdForTest(t, cfg), cfg, bad); !refused(err) {
+		t.Fatalf("keploy record with a misspelled kind: %v; want the record.workerMocks refusal", err)
+	}
+	cfg = config.New()
+	if err := run(t, newRecordCmdForTest(t, cfg), cfg, good); refused(err) {
+		t.Fatalf("keploy record refused a valid rule read from keploy.yml: %v", err)
+	}
+	if len(cfg.Record.WorkerMocks) != 1 || cfg.Record.WorkerMocks[0].ID != "jwks" {
+		t.Fatalf("rules read %+v", cfg.Record.WorkerMocks)
+	}
+	cfg = config.New()
+	if err := run(t, newTestCmdForTest(t, cfg), cfg, bad); refused(err) {
+		t.Fatalf("keploy test refused over a rule it does not apply: %v", err)
+	}
+	cfg = config.New()
+	root, mock := &cobra.Command{Use: "keploy"}, &cobra.Command{Use: "mock"}
+	mockRecord := newRecordCmdForTest(t, cfg)
+	root.AddCommand(mock)
+	mock.AddCommand(mockRecord)
+	if isKeployRecord(mockRecord) {
+		t.Fatal("keploy mock record taken for keploy record")
+	}
+	if err := run(t, mockRecord, cfg, bad); refused(err) {
+		t.Fatalf("keploy mock record refused over a rule it does not apply: %v", err)
+	}
+}

@@ -1,8 +1,14 @@
 package postmanimport
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 func TestItemsContainerUnmarshal_DoesNotTreatFoldersAsRequests(t *testing.T) {
@@ -65,5 +71,33 @@ func TestItemsContainerUnmarshal_KeepsRootRequests(t *testing.T) {
 	}
 	if got.TestDataItems[0].Name != "Health check" {
 		t.Fatalf("request name = %q, want Health check", got.TestDataItems[0].Name)
+	}
+}
+
+// An imported test case is written only inside the recording: a tests folder
+// that links out is refused, with why, and nothing is written there.
+func TestAnImportedTestIsWrittenOnlyInsideTheRecording(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "keploy")
+	out := filepath.Join(base, "outside")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testsPath := filepath.Join(root, "set", "tests")
+	if err := os.MkdirAll(filepath.Dir(testsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "..", "outside"), testsPath); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	pi := NewPostmanImporter(context.Background(), zap.NewNop())
+	item := TestData{Name: "x", Request: PostmanRequest{Method: "GET", URL: "http://127.0.0.1:9/x"}, Response: []PostmanResponse{{}}}
+	counter := 0
+	err := pi.writeTestData(item, root, testsPath, map[string]string{}, &counter)
+	if err == nil || !strings.Contains(err.Error(), "only inside its recording") {
+		t.Fatalf("writeTestData: %v, want it refused as outside the recording", err)
+	}
+	if entries, err := os.ReadDir(out); err != nil || len(entries) != 0 {
+		t.Fatalf("the import left %v (%v) outside the recording", entries, err)
 	}
 }

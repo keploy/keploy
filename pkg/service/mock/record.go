@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -842,6 +844,8 @@ func (m *mockService) Record(ctx context.Context) error {
 	// (models.CaptureLossUnattributed), which leaves it without a verdict, so
 	// judging keeps its previous recording. A build that does not judge the
 	// record would keep their recordings short of the call, so it keeps none.
+	// An idle answer (capturedMock.idle) charges no test: it is the set's
+	// wherever it was recorded (setScopeMocks), in no test's recording.
 	if calls := chargeUnattributed(windows, dataPlane(recorded)); len(calls) > 0 {
 		judging := provenswitch.On() && recordsJudged.Load()
 		for _, c := range calls {
@@ -929,6 +933,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			}
 			if provenswitch.On() {
 				stampBegins(byCase, windows)
+				stampEnds(byCase, windows)
 				stampReal(byCase, windows)
 				stampGiven(byCase, windows)
 				stampSeeds(byCase, windows)
@@ -1117,7 +1122,7 @@ func (m *mockService) existsOnly(name string) (func(keep bool), bool, error) {
 	if m.config.Path == "" {
 		return func(bool) {}, true, nil
 	}
-	_, err := os.Stat(filepath.Join(m.config.Path, name))
+	_, err := yaml.StatInRecording(m.config.Path, filepath.Join(m.config.Path, name))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, true, err
 	}
@@ -1131,39 +1136,101 @@ func (m *mockService) existsOnly(name string) (func(keep bool), bool, error) {
 // caller is about to delete the live set's mappings and test cases — doing that
 // without a restorable copy is unrecoverable data loss. The caller must abort
 // on a non-nil error before any destructive step.
+//
+// The set, its backup and the folders and files of both are read, made,
+// removed and moved only inside the recording, opened from the project
+// (yaml.*InRecording), so a keploy folder, set or backup that links out of
+// it is refused with why, and nothing is copied, removed or moved where it
+// leads. A link in the set is copied as the link it is, never read through.
 func (m *mockService) saveSet(name string) (func(keep bool), bool, error) {
 	if m.config.Path == "" {
 		return func(bool) {}, true, nil
 	}
-	set := filepath.Join(m.config.Path, name)
-	saved := filepath.Join(m.config.Path, "."+name+".previous")
-	_ = os.RemoveAll(saved)
-	if _, err := os.Stat(set); errors.Is(err, fs.ErrNotExist) {
+	root := m.config.Path
+	set := filepath.Join(root, name)
+	saved := filepath.Join(root, "."+name+".previous")
+	_ = yaml.RemoveAllInRecording(root, saved)
+	if _, err := yaml.StatInRecording(root, set); errors.Is(err, fs.ErrNotExist) {
 		// Nothing to lose: a fresh set. On a refused run, drop whatever the
 		// aborted recording left behind.
 		return func(keep bool) {
 			if !keep {
-				_ = os.RemoveAll(set)
+				_ = yaml.RemoveAllInRecording(root, set)
 			}
 		}, false, nil
 	}
-	if err := os.CopyFS(saved, os.DirFS(set)); err != nil {
-		_ = os.RemoveAll(saved)
+	// Any other error, a link out among them, is backUpSet's to refuse.
+	if err := backUpSet(root, name, filepath.Base(saved)); err != nil {
+		_ = yaml.RemoveAllInRecording(root, saved)
 		return nil, true, fmt.Errorf("back up mock set %q before re-recording: %w", name, err)
 	}
 	return func(keep bool) {
 		if keep {
-			_ = os.RemoveAll(saved)
+			_ = yaml.RemoveAllInRecording(root, saved)
 			return
 		}
-		if rmErr := os.RemoveAll(set); rmErr != nil {
+		if rmErr := yaml.RemoveAllInRecording(root, set); rmErr != nil {
 			m.logger.Warn("could not put the previous recording back", zap.String("mock-set", name), zap.Error(rmErr))
 			return
 		}
-		if mvErr := os.Rename(saved, set); mvErr != nil {
+		if mvErr := yaml.RenameInRecording(root, saved, set); mvErr != nil {
 			m.logger.Warn("could not put the previous recording back; it is kept at "+saved, zap.String("mock-set", name), zap.Error(mvErr))
 		}
 	}, true, nil
+}
+
+// backUpSet copies the set folder name of the recording at root to backup, a
+// folder it makes beside it, as os.CopyFS copies a folder: folders are made
+// 0777 and files 0666 with the set's execute bits, less the umask, and a link
+// is copied as the link it is. Both are opened from the project, and every
+// folder and file is read and made only inside the recording, so a set or a
+// folder in it that links out is refused with why, and nothing where it
+// leads is read. A link out is said plainly (linkout.Error).
+func backUpSet(root, name, backup string) error {
+	r, err := utils.OpenRecordingDir(root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Close() }()
+	fsys := r.FS()
+	return fs.WalkDir(fsys, name, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			refused := fmt.Sprintf("the recording's file %q is read only inside its recording %q", p, root)
+			if out := linkout.Explain(r, root, p, refused, err); out != nil {
+				return out
+			}
+			return err
+		}
+		to := backup + strings.TrimPrefix(p, name)
+		switch {
+		case d.Type()&fs.ModeSymlink != 0:
+			target, err := fs.ReadLink(fsys, p)
+			if err != nil {
+				return err
+			}
+			return r.Symlink(target, to)
+		case d.IsDir():
+			return r.Mkdir(to, 0o777)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		from, err := r.Open(p)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = from.Close() }()
+		dst, err := r.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666|info.Mode()&0o111)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(dst, from); err != nil {
+			_ = dst.Close()
+			return err
+		}
+		return dst.Close()
+	})
 }
 
 // caseNames lists the test cases the set holds before a re-record.
@@ -1280,8 +1347,16 @@ type capturedMock struct {
 	// unread: an answer the client never read (models.Mock.IsUndelivered),
 	// so, under either switch, among no case's mocks either (correlateCases).
 	unread bool
-	start  string
-	ref    string
+	// idle: under the proven switch, an answer its parser declares idle
+	// (models.IsIdleAnswer: a worker's poll that found nothing, a blocking
+	// pop the server never answered). Whether a run's worker makes that
+	// call before or after a test's end is a matter of timing, not of what
+	// the test does, so no window holds it: it is the set's (setScopeMocks),
+	// worker:'s when recorded once a test had begun, as keploy record maps
+	// it (models.DeriveWindowMappings).
+	idle  bool
+	start string
+	ref   string
 	// instance is the keploy instance (a test worker's) the call's
 	// connection was stamped with (models.Mock.Instance): only a window of
 	// that worker's (ScopeWindow.Instance) holds it. 0 for none.
@@ -1301,7 +1376,8 @@ func capturedOf(mk *models.Mock) capturedMock {
 	// makes the call it recorded.
 	unread := mk.IsUndelivered()
 	protocol := provenswitch.On() && mk.IsProtocolPhase() || unread
-	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, unread: unread, start: mk.Start, ref: mk.StartRef}
+	idle := provenswitch.On() && models.IsIdleAnswer(mk)
+	return capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, instance: mk.Instance, ended: mk.EndedInstance, boot: typ == "config" || typ == "connection", protocol: protocol, unread: unread, idle: idle, start: mk.Start, ref: mk.StartRef}
 }
 
 // stagingSetID returns the staging set name record captures into while recording
@@ -1316,7 +1392,8 @@ func stagingSetID(name string) string { return name + yaml.MockStagingSuffix }
 // place (capturedMock.ts) falls within, producing the mappings.yaml structure. A mock
 // that matches no window (e.g. a boot-time handshake before the first scope)
 // is left out of every test's mapping — it stays reusable/session-tier at
-// replay, exactly as the timestamp-based fallback would treat it.
+// replay, exactly as the timestamp-based fallback would treat it. So is an
+// idle answer (capturedMock.idle), wherever it was recorded.
 //
 // When a mock carries a source PID it is attributed to the SAME worker's window,
 // so another worker's overlapping window does not take it; two windows open at
@@ -1369,6 +1446,10 @@ func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bo
 		return best
 	}
 	for _, mk := range mocks {
+		if mk.idle {
+			// No test's, wherever it was recorded (capturedMock.idle).
+			continue
+		}
 		best := -1
 		if mk.pid != 0 {
 			// Attribute to the same worker's window: exact for a call the
@@ -1393,7 +1474,9 @@ func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bo
 // unattributedCall is a call from a process in no test worker's keploy
 // instance (instance 0), or in an ended worker's (capturedMock.ended), made
 // while test workers' tests were open and no test of a run of one worker
-// was: no test's window holds it (correlateScopes).
+// was: no test's window holds it (correlateScopes). An idle answer
+// (capturedMock.idle) is none: it is the set's wherever it was recorded
+// (setScopeMocks), so no test's recording is short of it.
 type unattributedCall struct {
 	mock  string
 	pid   uint32
@@ -1403,13 +1486,15 @@ type unattributedCall struct {
 // chargeUnattributed charges each test open at an unattributed call with it
 // (models.CaptureLossUnattributed, What naming its latest such call and the
 // ended worker it came from, if any), on a copy of the test's evidence, and
-// returns the calls in the order of mocks.
+// returns the calls in the order of mocks. An idle answer (capturedMock.idle)
+// charges no test: it is the set's wherever it was recorded (setScopeMocks),
+// so no test's recording is short of it.
 func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []unattributedCall {
 	var out []unattributedCall
 	charged := map[int]models.CaptureLoss{}
 	latest := map[int]time.Time{}
 	for _, mk := range mocks {
-		if mk.instance != 0 {
+		if mk.instance != 0 || mk.idle {
 			continue
 		}
 		var open []int
@@ -1534,6 +1619,21 @@ func stampBegins(byCase map[string]models.MappedTestCase, windows []models.Scope
 		if tc.At.IsZero() || w.Start.Before(tc.At) {
 			tc.At = w.Start
 		}
+		byCase[w.Name] = tc
+	}
+}
+
+// stampEnds keeps, for each test, when it ended in this recording: the latest
+// end of its windows that began (stampBegins keeps their earliest begin), so
+// End - At spans every window of the name. A window still open has no end
+// and gives none. Nothing in a replay reads it (models.MappedTestCase.End).
+func stampEnds(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow) {
+	for _, w := range windows {
+		if w.Start.IsZero() || !w.End.After(byCase[w.Name].End) {
+			continue
+		}
+		tc := byCase[w.Name]
+		tc.End = w.End
 		byCase[w.Name] = tc
 	}
 }
@@ -1702,12 +1802,18 @@ func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []m
 }
 
 // held reports whether a test's window holds mk, so no set scope lists it.
+// No window holds an idle answer (capturedMock.idle).
 // A test worker's call is held only by its own worker's windows, as
 // correlate keeps it: one made outside them is the set's, though another
 // worker's test was open. Any other call is held by any window open at its
 // time: inside a worker's test, a call from no worker is charged to it
 // (chargeUnattributed).
 func held(windows []models.ScopeWindow, mk capturedMock) bool {
+	if mk.idle {
+		// An idle answer is the set's wherever it was recorded
+		// (capturedMock.idle).
+		return false
+	}
 	if mk.instance == 0 {
 		return containing(windows, mk.ts) != ""
 	}

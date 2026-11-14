@@ -216,9 +216,10 @@ type Agent struct {
 	gateRun    map[string]struct{}
 	gateReason string
 	gateWarned bool // NoteUngatable said so this session
-	// replay: the scopes the gate told a harness to skip, and whether
-	// noteEndOfGated said so this session.
-	gatedScopes    map[scopeKey]struct{}
+	// replay: the scopes the gate told a harness to skip, each with the
+	// outcome the route noted for an end of it not yet read
+	// (takeGatedOutcome), and whether noteEndOfGated warned this session.
+	gatedScopes    map[scopeKey]string
 	gatedEndWarned bool
 
 	// provenMu guards proven, the single-worker integration wire's state
@@ -735,6 +736,9 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	// (SupportsDroppedRevoke=false, the default) never receives a RevokedTests
 	// control frame it can't divert.
 	syncMock.Get().SetRevokeCapable(opts.SupportsDroppedRevoke)
+	// And whether it finds a revoked test case sent with no name (the async
+	// capture names none) by its request time.
+	syncMock.Get().SetRevokeByRequest(opts.SupportsRevokeByRequest)
 
 	return m, nil
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	postmanimport "go.keploy.io/server/v3/pkg/service/import"
@@ -193,7 +194,9 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				}
 
 				filePath := filepath.Join(testsDir, testFile.Name())
-				data, err := os.ReadFile(filePath)
+				// Read inside the recording: what is exported is shared, and a
+				// test case that links out of it is refused, with why.
+				data, err := pkg.ReadRecordingFile(keployDir, filepath.Join(v.Name(), "tests", testFile.Name()))
 				if err != nil {
 					utils.LogError(logger, err, "failed to read test file", zap.String("path", filePath))
 					continue

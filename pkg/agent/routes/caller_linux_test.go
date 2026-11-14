@@ -86,6 +86,43 @@ func TestTCPOwnerMatchesBothEnds(t *testing.T) {
 	}
 }
 
+// A caller's socket is found in every state a process can still hold it in
+// (established, or closed by either side or both while it keeps it), and in
+// none that is no caller's: one not yet connected, one in TIME_WAIT or reset,
+// a listener, a server's half-open one, or one no process holds (inode 0).
+func TestTCPInodeFindsASocketInEveryHeldState(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "net"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := procRoot
+	procRoot = root
+	defer func() { procRoot = old }()
+	self := netip.MustParseAddrPort("127.0.0.1:50000")
+	peer := netip.MustParseAddrPort("127.0.0.1:16877")
+	for _, c := range []struct {
+		st, inode string
+		held      bool
+	}{
+		{"01", "7", true}, {"04", "7", true}, {"05", "7", true}, {"08", "7", true}, {"09", "7", true}, {"0B", "7", true},
+		{"02", "7", false}, {"03", "7", false}, {"06", "7", false}, {"07", "7", false}, {"0A", "7", false}, {"0C", "7", false},
+		{"01", "0", false}, {"05", "0", false},
+	} {
+		table := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+			"   0: 0100007F:C350 0100007F:41ED " + c.st + " 00000000:00000000 00:00000000 00000000  1000        0 " + c.inode + " 1\n"
+		if err := os.WriteFile(filepath.Join(root, "net", "tcp"), []byte(table), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		inode, err := tcpInode(self, peer)
+		if c.held && (err != nil || inode != c.inode) {
+			t.Errorf("state %s inode %s: tcpInode = %q, %v; want the socket", c.st, c.inode, inode, err)
+		}
+		if !c.held && err == nil {
+			t.Errorf("state %s inode %s: tcpInode = %q; want no caller's socket", c.st, c.inode, inode)
+		}
+	}
+}
+
 // A begin's caller, read while it is served (in a run of more than one test
 // worker), is the process that sent it: this test binary run again.
 func TestABeginsCallerIsReadFromItsConnection(t *testing.T) {

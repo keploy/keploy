@@ -240,7 +240,7 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 					return err
 				}
 
-				if err := pi.writeTestData(testItem, testsPath, globalVariables, &testCounter); err != nil {
+				if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &testCounter); err != nil {
 					return fmt.Errorf("failed to write test data: %w", err)
 				}
 			}
@@ -260,7 +260,7 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 				return err
 			}
 
-			if err := pi.writeTestData(testItem, testsPath, globalVariables, &testCounter); err != nil {
+			if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &testCounter); err != nil {
 				return fmt.Errorf("failed to write test data: %w", err)
 			}
 		}
@@ -358,7 +358,7 @@ func (pi *PostmanImporter) processEmptyResponse(testItem *TestData, globalVariab
 	return fmt.Errorf("URL is empty")
 }
 
-func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, globalVariables map[string]string, testCounter *int) error {
+func (pi *PostmanImporter) writeTestData(testItem TestData, root, testsPath string, globalVariables map[string]string, testCounter *int) error {
 	for _, response := range testItem.Response {
 		testName := fmt.Sprintf("test-%d", *testCounter+1)
 
@@ -389,7 +389,7 @@ func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, gl
 			return fmt.Errorf("failed to marshal test result: %w", err)
 		}
 
-		if err := yaml.WriteFileF(pi.ctx, pi.logger, testsPath, testName, testResultBytes, false, pi.Format); err != nil {
+		if err := yaml.WriteRecordingFileF(pi.ctx, pi.logger, root, testsPath, testName, testResultBytes, false, pi.Format); err != nil {
 			return fmt.Errorf("failed to write test result: %w", err)
 		}
 

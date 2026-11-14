@@ -250,6 +250,14 @@ type Record struct {
 	// Azure App Insights host) are merged in unless overridden. See models.PassThroughRule.
 	PassThroughPorts []models.PassThroughRule `json:"passThroughPorts,omitempty" yaml:"passThroughPorts,omitempty" mapstructure:"passThroughPorts"`
 	PassThroughHosts []models.PassThroughRule `json:"passThroughHosts,omitempty" yaml:"passThroughHosts,omitempty" mapstructure:"passThroughHosts"`
+	// WorkerMocks are the user's worker-mock rules (models.WorkerMockRule):
+	// calls the application makes on its own rather than for one test,
+	// typically once in each of its worker processes (a JWKS fetch, an ORM's
+	// schema read). keploy record adds each mock a rule matches to the set's
+	// worker scope, and keploy test serves those to every test, so a test
+	// that reaches a cold worker process is answered whichever test recorded
+	// the call. Validated when the config is read.
+	WorkerMocks []models.WorkerMockRule `json:"workerMocks,omitempty" yaml:"workerMocks,omitempty" mapstructure:"workerMocks"`
 }
 
 // UpstreamTLS configures the upstream (destination-side) leg of keploy's TLS
