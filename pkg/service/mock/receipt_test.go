@@ -1107,6 +1107,33 @@ func TestARunWithRowsAndNoTestLeavesNoPerTestFile(t *testing.T) {
 	require.Equal(t, withRefusal.Live, gotRec.Live, "the rows ride with the refusal")
 }
 
+// A record's file carries the dependencies that did not accept a connection
+// of the run with its tests, each naming its test; rows alone write none, as
+// every other row.
+func TestARecordsFileCarriesItsUnreachedDependencies(t *testing.T) {
+	keployDir := t.TempDir()
+	unreached := []models.UnreachedRow{
+		{Addr: "127.0.0.1:5432", Answer: models.UnreachedRefused},
+		{Test: "o::TestA", Addr: "db.internal:5432", Answer: models.UnreachedNoAnswer},
+	}
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "alone", Unreached: unreached}, nil)
+	got, err := ReadRecordTestsReceipt(keployDir, "alone")
+	require.NoError(t, err)
+	require.Nil(t, got, "rows alone left a record's per-test file")
+
+	windows := []models.ScopeWindow{{Name: "o::TestA", Outcome: models.ScopeOutcomeFailed}}
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Unreached: unreached}, windows)
+	got, err = ReadRecordTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Len(t, got.Tests, 1)
+	require.Equal(t, unreached, got.Unreached)
+	raw, err := os.ReadFile(filepath.Join(keployDir, "set", RecordTestsReceiptFile))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "unreached:\n", "the file names them unreached")
+	require.Contains(t, string(raw), "answer: no_answer", "each with its answer")
+}
+
 // last-replay.yaml writes a bypassed destination as every other file of the
 // set writes one: an IPv6 host in brackets, so ::1 on 27017 is [::1]:27017,
 // not ::1:27017, which no reader can split into host and port.

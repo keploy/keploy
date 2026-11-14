@@ -402,6 +402,10 @@ type ScopeWindow struct {
 	// (LiveRow, MockedRow), first seen at Start.
 	Live   *LiveRow   `json:"live,omitempty"`
 	Mocked *MockedRow `json:"mocked,omitempty"`
+	// Unreached, under the proven wire in a keploy mock record, makes this
+	// no test's window but one dependency that did not accept a connection
+	// of the run (UnreachedRow), first seen at Start.
+	Unreached *UnreachedRow `json:"unreached,omitempty"`
 }
 
 // PoolKeyNone is the pool slice of calls made before any test process

@@ -62,6 +62,11 @@ type mockService struct {
 	// receipts carry them to keploy's summary.
 	live   []models.LiveRow
 	mocked []models.MockedRow
+	// unreached is, in a record under the proven switch, each dependency
+	// that did not accept a connection of the run (windows with Unreached
+	// set), which readWindows takes out too: the record's receipt carries
+	// them.
+	unreached []models.UnreachedRow
 	// realListed is, under the proven switch, the mock.real destinations
 	// each test's recording lists (mappings.yaml real:), by test ID, read
 	// as a replay pushes the tests' clocks: the replay's receipt carries

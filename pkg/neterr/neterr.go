@@ -86,3 +86,14 @@ func IsConnRefused(err error) bool {
 	}
 	return errors.Is(err, syscall.ECONNREFUSED) || isAny(err, connRefusedErrnos)
 }
+
+// IsUnreachable reports whether a connect attempt found no route to its
+// target: its host or its network unreachable, or down.
+func IsUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.EHOSTDOWN) ||
+		errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.ENETDOWN) ||
+		isAny(err, unreachableErrnos)
+}

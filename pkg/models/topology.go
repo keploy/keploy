@@ -86,3 +86,39 @@ func (r *MockedRow) UnmarshalYAML(n *yaml.Node) error {
 	}
 	return nil
 }
+
+// Answers a dependency gave a record's connection it did not accept
+// (UnreachedRow.Answer).
+const (
+	// UnreachedRefused: the destination refused the connection (nothing
+	// listens there).
+	UnreachedRefused = "refused"
+	// UnreachedUnreachable: no route reached the destination's host or
+	// network.
+	UnreachedUnreachable = "unreachable"
+	// UnreachedNoAnswer: the destination never answered (the connect timed
+	// out, or the application gave up waiting).
+	UnreachedNoAnswer = "no_answer"
+)
+
+// UnreachedRow is, in a keploy mock record under the proven switch, a
+// dependency that did not accept a connection of the run: keploy dials the
+// destination for the application, which then fails the way the destination
+// failed it, so nothing of that connection is recorded. A recording made
+// while a dependency was down holds none of its calls, and whatever reads
+// the record (keploy's summary, an editor, an agent) names the destination
+// to start before recording again.
+type UnreachedRow struct {
+	// Test is the ID of the test open when the connection was made; ""
+	// when none was.
+	Test string `json:"test,omitempty" yaml:"test,omitempty"`
+	// Addr is the destination the connection was made to, host:port.
+	Addr string `json:"addr" yaml:"addr"`
+	// Answer is how the destination answered: UnreachedRefused,
+	// UnreachedUnreachable or UnreachedNoAnswer.
+	Answer string `json:"answer" yaml:"answer"`
+	// Instance is the keploy instance of the test worker whose process
+	// made the connection (0: no worker's, or the run's one test process):
+	// the instance whose open test is Test. Never written.
+	Instance uint32 `json:"-" yaml:"-"`
+}

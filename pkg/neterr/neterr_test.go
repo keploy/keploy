@@ -128,6 +128,7 @@ func TestNilAndUnrelatedErrors(t *testing.T) {
 		{"IsConnAborted", IsConnAborted},
 		{"IsBrokenPipe", IsBrokenPipe},
 		{"IsConnRefused", IsConnRefused},
+		{"IsUnreachable", IsUnreachable},
 	} {
 		if fn.f(nil) {
 			t.Errorf("%s(nil) = true, want false", fn.name)
@@ -154,5 +155,31 @@ func TestPortableConstantsStillMatch(t *testing.T) {
 	}
 	if !strings.Contains(wrapped.Error(), "read") {
 		t.Fatalf("unexpected error rendering: %v", wrapped)
+	}
+}
+
+// A connect with no route to its target is unreachable, and only that: a
+// refused one, a timed-out one and a reset are not, and an unreachable one is
+// no refusal.
+func TestIsUnreachablePortable(t *testing.T) {
+	for _, c := range []struct {
+		errno syscall.Errno
+		want  bool
+	}{
+		{syscall.EHOSTUNREACH, true},
+		{syscall.EHOSTDOWN, true},
+		{syscall.ENETUNREACH, true},
+		{syscall.ENETDOWN, true},
+		{syscall.ECONNREFUSED, false},
+		{syscall.ETIMEDOUT, false},
+		{syscall.ECONNRESET, false},
+	} {
+		err := &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", c.errno)}
+		if got := IsUnreachable(err); got != c.want {
+			t.Errorf("IsUnreachable(%v) = %v, want %v", err, got, c.want)
+		}
+		if c.want && IsConnRefused(err) {
+			t.Errorf("IsConnRefused(%v) = true for an unreachable target; the classes must not overlap", err)
+		}
 	}
 }

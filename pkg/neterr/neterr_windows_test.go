@@ -20,21 +20,28 @@ func TestWindowsErrnoTable(t *testing.T) {
 		name                                   string
 		errno                                  syscall.Errno
 		reset, aborted, brokenPipe, connRefuse bool
+		unreach                                bool
 	}{
-		{"WSAECONNRESET", windows.WSAECONNRESET, true, false, false, false},
-		{"WSAENETRESET", windows.WSAENETRESET, true, false, false, false},
-		{"WSAESHUTDOWN", windows.WSAESHUTDOWN, false, false, true, false},
-		{"WSAECONNREFUSED", windows.WSAECONNREFUSED, false, false, false, true},
+		{"WSAECONNRESET", windows.WSAECONNRESET, true, false, false, false, false},
+		{"WSAENETRESET", windows.WSAENETRESET, true, false, false, false, false},
+		{"WSAESHUTDOWN", windows.WSAESHUTDOWN, false, false, true, false, false},
+		{"WSAECONNREFUSED", windows.WSAECONNREFUSED, false, false, false, true, false},
 
 		// Ambiguous on Windows (genuine abort OR data-transmission timeout),
 		// so it maps to nothing. See the comment in neterr_windows.go: every
 		// caller excludes timeouts deliberately, and this is the only code
 		// that would smuggle one back in.
-		{"WSAECONNABORTED", windows.WSAECONNABORTED, false, false, false, false},
+		{"WSAECONNABORTED", windows.WSAECONNABORTED, false, false, false, false, false},
 
 		// Timeouts and unrelated Winsock failures must classify as nothing.
-		{"WSAETIMEDOUT", windows.WSAETIMEDOUT, false, false, false, false},
-		{"WSAEHOSTUNREACH", windows.WSAEHOSTUNREACH, false, false, false, false},
+		{"WSAETIMEDOUT", windows.WSAETIMEDOUT, false, false, false, false, false},
+
+		// A connect with no route to its target: the host or the network
+		// unreachable, or down.
+		{"WSAEHOSTUNREACH", windows.WSAEHOSTUNREACH, false, false, false, false, true},
+		{"WSAEHOSTDOWN", windows.WSAEHOSTDOWN, false, false, false, false, true},
+		{"WSAENETUNREACH", windows.WSAENETUNREACH, false, false, false, false, true},
+		{"WSAENETDOWN", windows.WSAENETDOWN, false, false, false, false, true},
 	}
 
 	for _, c := range cases {
@@ -52,6 +59,9 @@ func TestWindowsErrnoTable(t *testing.T) {
 		}
 		if got := IsConnRefused(err); got != c.connRefuse {
 			t.Errorf("IsConnRefused(%s/%d) = %v, want %v", c.name, uintptr(c.errno), got, c.connRefuse)
+		}
+		if got := IsUnreachable(err); got != c.unreach {
+			t.Errorf("IsUnreachable(%s/%d) = %v, want %v", c.name, uintptr(c.errno), got, c.unreach)
 		}
 	}
 }

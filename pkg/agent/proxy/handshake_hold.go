@@ -227,13 +227,18 @@ func (p *Proxy) decideHandshake(lookup agent.HandshakeDestInfo) synhold.Decide {
 // handshake the way the destination answered, keeping the connection for
 // handleConnection. label is the mock.real destination dest is, "" for a
 // dependency: a REAL destination that does not accept counts as a failed
-// connection of the open test's REAL row, as the app sees it fail.
+// connection of the open test's REAL row, as the app sees it fail, and a
+// dependency that does not accept is, in a keploy mock record, one the record
+// could not record (noteUnreached).
 func (p *Proxy) dialHeld(ctx context.Context, lookup agent.HandshakeDestInfo, client, proxy netip.AddrPort, dest *agent.NetworkAddress, label string) synhold.Decision {
 	addr := destAddr(dest)
 	conn, err := p.dialWhileHeld(ctx, lookup, client, proxy, addr)
 	if errors.Is(err, errHandshakeAbandoned) {
-		// The app's connect to its real destination failed.
-		_, _ = p.realDialFailed(addr, label, realOrigin(dest))
+		// The app's connect to its real destination failed. A dependency's
+		// (no mock.real destination) is one the record could not record.
+		if real, telling := p.realDialFailed(addr, label, realOrigin(dest)); real == "" && !telling {
+			p.noteUnreached(addr, models.UnreachedNoAnswer, dest.Instance)
+		}
 		if p.failedDests.first("gave up "+addr, time.Now()) {
 			p.logger.Info("the application gave up connecting to a dependency before the dependency's answer "+
 				"reached it (its connect timed out or was cancelled), as it would without keploy; nothing is recorded for it",
@@ -253,6 +258,12 @@ func (p *Proxy) dialHeld(ctx context.Context, lookup agent.HandshakeDestInfo, cl
 		telling := false
 		if out != synhold.Accept {
 			label, telling = p.realDialFailed(addr, label, realOrigin(dest))
+			if label == "" && !telling {
+				// A dependency the record could not record. One Docker is
+				// still starting a container at (telling) is told as mock.real
+				// or not once keploy can tell; only a REAL one is counted.
+				p.noteDialFailed(addr, err, dest.Instance)
+			}
 		}
 		if out != synhold.Accept && p.failedDests.first("refused "+addr, time.Now()) {
 			what, recorded := "a dependency", "nothing is recorded for that attempt"

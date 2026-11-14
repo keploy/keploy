@@ -327,6 +327,12 @@ type TestsReceipt struct {
 	// mocked (models.MockedRow). keploy's summary lists them.
 	Live   []models.LiveRow   `yaml:"live,omitempty" json:"live,omitempty"`
 	Mocked []models.MockedRow `yaml:"mocked,omitempty" json:"mocked,omitempty"`
+	// Unreached is, in a record's file under the proven switch, each
+	// dependency that did not accept a connection of the run, naming the
+	// test open then (models.UnreachedRow): the recording holds nothing of
+	// those connections, so whatever reads the record names the
+	// destination to start before recording again.
+	Unreached []models.UnreachedRow `yaml:"unreached,omitempty" json:"unreached,omitempty"`
 	// Real is, under the proven switch, what the run saw of mock.real beyond
 	// its tests (design v14 §4, §8.2 rule 4): the destinations it reached,
 	// those it first reached outside a test, and the capture_incomplete

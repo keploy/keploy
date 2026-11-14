@@ -38,4 +38,11 @@ var (
 	connRefusedErrnos = []syscall.Errno{
 		windows.WSAECONNREFUSED, // 10061 - "connectex: ... actively refused it"
 	}
+
+	unreachableErrnos = []syscall.Errno{
+		windows.WSAEHOSTUNREACH, // 10065 - no route to the host
+		windows.WSAEHOSTDOWN,    // 10064 - the host is down
+		windows.WSAENETUNREACH,  // 10051 - no route to the network
+		windows.WSAENETDOWN,     // 10050 - the network is down
+	}
 )

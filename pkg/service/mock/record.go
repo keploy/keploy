@@ -229,7 +229,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// record's restore just removed.
 		if recordJudged && provenswitch.On() && recordsJudged.Load() && m.config.Path != "" {
 			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
-				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Workers: claimedWorkers(m.claims), Live: m.live, Mocked: m.mocked, Real: recordReal,
+				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Workers: claimedWorkers(m.claims), Live: m.live, Mocked: m.mocked, Unreached: m.unreached, Real: recordReal,
 				CannotCapture: recordNotJudged, CaptureLosses: recordLosses, CaptureLossesUnread: recordLossesUnread,
 			}, recordTests)
 		}
@@ -1043,11 +1043,12 @@ func (m *mockService) readWindows(ctx context.Context) ([]models.ScopeWindow, er
 
 // takeRunWindows returns the windows of the run's tests, and keeps the
 // windows that are no test's apart: the claims (m.claims), the refusals
-// (m.refusals) and where the run's calls to local listeners went (m.live,
-// m.mocked). Every reader of a run's windows goes through it.
+// (m.refusals), where the run's calls to local listeners went (m.live,
+// m.mocked) and the dependencies a record could not reach (m.unreached).
+// Every reader of a run's windows goes through it.
 func (m *mockService) takeRunWindows(all []models.ScopeWindow) []models.ScopeWindow {
 	windows := all[:0:0]
-	m.claims, m.refusals, m.live, m.mocked = nil, nil, nil, nil
+	m.claims, m.refusals, m.live, m.mocked, m.unreached = nil, nil, nil, nil, nil
 	for _, w := range all {
 		switch {
 		case w.Refused != nil:
@@ -1058,6 +1059,8 @@ func (m *mockService) takeRunWindows(all []models.ScopeWindow) []models.ScopeWin
 			m.live = append(m.live, *w.Live)
 		case w.Mocked != nil:
 			m.mocked = append(m.mocked, *w.Mocked)
+		case w.Unreached != nil:
+			m.unreached = append(m.unreached, *w.Unreached)
 		default:
 			windows = append(windows, w)
 		}
