@@ -495,7 +495,7 @@ type Proxy struct {
 	// dnsUpstreamAdapter is, on Windows, the network adapter each of the
 	// dnsUpstreamServers is asked on (upstreamConfig): a recording and a
 	// forward ask the other adapters' servers a name one adapter's server
-	// says does not exist, as Windows does (adapterSearch). Nil from
+	// says does not exist, as Windows does (upstreamSearch). Nil from
 	// resolv.conf.
 	dnsUpstreamAdapter map[string]int
 	// dnsExchange asks one server; nil is (*dns.Client).Exchange. A row
