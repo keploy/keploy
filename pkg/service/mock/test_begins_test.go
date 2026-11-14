@@ -114,8 +114,8 @@ func TestPushTestBeginsSendsTheRecordingsBegins(t *testing.T) {
 }
 
 // Replay hands the agent the note each test's harness sent with its end in
-// the recording, as the mapping holds it; a test with none is not named, and
-// a recording with no note sends none.
+// the recording, as the mapping holds it, every test's beside the others'; a
+// test with none is not named, and a recording with no note sends none.
 func TestPushTestBeginsSendsEachTestsNote(t *testing.T) {
 	t0 := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
 	note := "frames /a:2\n\tdraws 7 \"x\": #y\x00\u2028"
@@ -124,12 +124,13 @@ func TestPushTestBeginsSendsEachTestsNote(t *testing.T) {
 		TestCases: []models.MappedTestCase{
 			{ID: "ui::TestA", At: t0, Note: note},
 			{ID: "ui::TestB", At: t0},
+			{ID: "ui::TestC", At: t0, Note: "draws 3"},
 		},
 	}}}
 	if err := m.pushTestBegins(context.Background(), "rec"); err != nil {
 		t.Fatal(err)
 	}
-	if len(p.notes) != 1 || p.notes["ui::TestA"] != note {
+	if len(p.notes) != 2 || p.notes["ui::TestA"] != note || p.notes["ui::TestC"] != "draws 3" {
 		t.Fatalf("pushed notes %q", p.notes)
 	}
 	p = &beginsPusher{}
