@@ -1481,13 +1481,15 @@ type unattributedCall struct {
 // chargeUnattributed charges each test open at an unattributed call with it
 // (models.CaptureLossUnattributed, What naming its latest such call and the
 // ended worker it came from, if any), on a copy of the test's evidence, and
-// returns the calls in the order of mocks.
+// returns the calls in the order of mocks. An idle answer (capturedMock.idle)
+// charges no test: it is the set's wherever it was recorded (setScopeMocks),
+// so no test's recording is short of it.
 func chargeUnattributed(windows []models.ScopeWindow, mocks []capturedMock) []unattributedCall {
 	var out []unattributedCall
 	charged := map[int]models.CaptureLoss{}
 	latest := map[int]time.Time{}
 	for _, mk := range mocks {
-		if mk.instance != 0 {
+		if mk.instance != 0 || mk.idle {
 			continue
 		}
 		var open []int

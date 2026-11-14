@@ -399,6 +399,60 @@ func TestIdleAnswerIsTheSetsOnEitherSideOfAWindowEdge(t *testing.T) {
 	}
 }
 
+// In a run of more than one test worker, a call from a process in no
+// worker's keploy instance made while workers' tests were open is in none of
+// their recordings, so each of those tests is charged with it and not judged
+// (chargeUnattributed), and a build that does not judge keeps no recording.
+// Under the proven switch an idle answer is in no test's recording on
+// purpose: it is worker:'s wherever it was recorded, so it charges no test,
+// and the record is kept. A call from no worker that is not idle is still
+// charged, and off the switch an idle answer is charged as any call.
+func TestAnIdleAnswerFromNoWorkerChargesNoOpenTest(t *testing.T) {
+	t.Cleanup(models.RegisterIdleAnswer(idleRowKind, func(m *models.Mock) bool { return m.Spec.Metadata["answer"] == "none" }))
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	kind := string(idleRowKind)
+	windows := func() []models.ScopeWindow {
+		return []models.ScopeWindow{
+			{Name: "a/TestA", Start: at(0), End: at(100), Instance: 1},
+			{Name: "b/TestB", Start: at(10), End: at(110), Instance: 2},
+		}
+	}
+	// mock is a call from process 99, in no worker's instance, made while
+	// both workers' tests were open, captured under the switch its sub-row
+	// sets.
+	mock := func(name string, idle bool) capturedMock {
+		m := idleRowMock(name, at(50), idle)
+		m.SourcePID = 99
+		return capturedOf(m)
+	}
+	t.Run("an idle answer charges no test and is worker:'s", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		ws, mocks := windows(), []capturedMock{mock("mock-pop", true)}
+		require.Empty(t, chargeUnattributed(ws, mocks))
+		for _, w := range ws {
+			require.Nil(t, w.Evidence, "%s was charged with an idle answer", w.Name)
+		}
+		require.Empty(t, correlateScopes(ws, mocks))
+		startup, worker := setScopeMocks(ws, mocks, nil)
+		require.Empty(t, startup)
+		require.Equal(t, []models.MockEntry{{Name: "mock-pop", Kind: kind}}, worker)
+	})
+	t.Run("a call that is not idle is charged", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		ws := windows()
+		require.Equal(t, []unattributedCall{{mock: "mock-get", pid: 99, tests: []string{"a/TestA", "b/TestB"}}},
+			chargeUnattributed(ws, []capturedMock{mock("mock-get", false), mock("mock-pop", true)}))
+		for _, w := range ws {
+			require.NotNil(t, w.Evidence, "%s was not charged", w.Name)
+		}
+	})
+	t.Run("switch off: an idle answer is charged as any call", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		require.Equal(t, []unattributedCall{{mock: "mock-pop", pid: 99, tests: []string{"a/TestA", "b/TestB"}}},
+			chargeUnattributed(windows(), []capturedMock{mock("mock-pop", true)}))
+	})
+}
+
 // Under the proven switch keploy mock record writes the whole contract into
 // mappings.yaml: each test's own calls in its list, what came before the
 // first test in startup:, and what came between or after the tests in
