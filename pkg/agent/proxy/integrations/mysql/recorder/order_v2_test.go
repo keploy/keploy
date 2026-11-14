@@ -443,6 +443,28 @@ func TestRecordV2_ACommandWithNoCaptureNumberIsRefused(t *testing.T) {
 	}
 }
 
+// The first command of a stream joined mid-connection is read by the post-TLS
+// handshake, whose Session.NextRequest sets the floor at it, and the floor
+// holds through that command's answer: a server chunk its producer did not
+// number is refused there (fakeconn.ErrUnnumbered), as it is after every later
+// command. Setting the floor again at a command with no chunk of its own
+// (Session.FloorAt with ConnSeq 0) lifted it, and the chunk was recorded as
+// the answer.
+func TestRecordV2_PostTLS_AnAnswerWithNoCaptureNumberToTheFirstCommandIsRefused(t *testing.T) {
+	t.Parallel()
+	j := newJoinedMidStream(t)
+	j.h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), j.at())
+	sent := j.at()
+	j.h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: cannedOK(t, 1, j.caps), ReadAt: sent, WrittenAt: sent}
+	mocks, err := j.run(t)
+	if !errors.Is(err, fakeconn.ErrUnnumbered) {
+		t.Fatalf("RecordV2 = %v, want fakeconn.ErrUnnumbered", err)
+	}
+	if len(mocks) != 0 {
+		t.Fatalf("%d mocks recorded, want none: the answer has no capture number", len(mocks))
+	}
+}
+
 // On a stream joined mid-connection, the server's packets are followed from
 // the end of the first response the recorder read whole (packetWalk): a
 // response it cannot frame after that is left out alone, and the recording
