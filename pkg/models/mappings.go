@@ -593,6 +593,16 @@ type MappedTestCase struct {
 	// made without the switch. Read and kept by each rewrite of
 	// mappings.yaml, whatever the switch, as Key.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty" bson:"at,omitempty"`
+	// End is when the test ended in its recording: the latest end of its
+	// scope (POST /agent/scope/end) of the record that wrote At, so End - At
+	// is the test's recorded duration. keploy mock record writes it beside
+	// At, under the proven switch only, and every write that sets At sets
+	// End with it, so an entry never pairs one record's begin with another's
+	// end. Nothing in a replay acts on it: it is for readers that show the
+	// recording. Zero where At is, and for a test whose scope never ended.
+	// Read and kept by each rewrite of mappings.yaml, whatever the switch, as
+	// Key.
+	End time.Time `json:"end,omitzero" yaml:"end,omitempty" bson:"end,omitempty"`
 	// Real is the mock.real destinations the test used while it was open in
 	// its recording (design v14 §4): its replay runs on the real clock, and
 	// the verdict fails when CI never reaches one. Written, and acted on by
@@ -660,6 +670,7 @@ type persistedTestFormat struct {
 type writtenTestFormat struct {
 	persistedTestFormat `yaml:",inline"`
 	At                  time.Time     `json:"at,omitzero" yaml:"at,omitempty"`
+	End                 time.Time     `json:"end,omitzero" yaml:"end,omitempty"`
 	Real                []string      `json:"real,omitempty" yaml:"real,omitempty"`
 	Given               []GivenValue  `json:"given,omitempty" yaml:"given,omitempty"`
 	Variables           MockVariables `json:"variables,omitempty" yaml:"variables,omitempty"`
@@ -679,11 +690,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, End: tc.End, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, End: tc.End, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -704,6 +715,39 @@ func recordedBeginYAML(node *yaml.Node) (time.Time, error) {
 		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
 	}
 	return at.At, nil
+}
+
+// errRecordedEnd is a test entry whose end: is not a time.
+const errRecordedEnd = "a test's recorded end (end) is not a time: %w"
+
+// recordedEndYAML is a test entry's end:, whatever the proven switch, as
+// recordedBeginYAML. One that is not a time is an error, never a reason to
+// read the entry in another shape and lose its mocks.
+func recordedEndYAML(node *yaml.Node) (time.Time, error) {
+	if !nodeHasField(node, "end") {
+		return time.Time{}, nil
+	}
+	var end struct {
+		End time.Time `yaml:"end"`
+	}
+	if err := node.Decode(&end); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedEnd, err)
+	}
+	return end.End, nil
+}
+
+// recordedEndJSON is recordedEndYAML for a JSON entry.
+func recordedEndJSON(data []byte) (time.Time, error) {
+	if !jsonContainsField(data, "end") {
+		return time.Time{}, nil
+	}
+	var end struct {
+		End time.Time `json:"end"`
+	}
+	if err := json.Unmarshal(data, &end); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedEnd, err)
+	}
+	return end.End, nil
 }
 
 // errRecordedReal is a test entry whose real: is not a list of destinations.
@@ -942,6 +986,10 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	end, err := recordedEndYAML(node)
+	if err != nil {
+		return err
+	}
 	rl, err := recordedRealYAML(node)
 	if err != nil {
 		return err
@@ -965,7 +1013,7 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, rl, gv, vars, key, seed
+	tc.At, tc.End, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, end, rl, gv, vars, key, seed
 	return nil
 }
 
@@ -1045,6 +1093,10 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	end, err := recordedEndJSON(data)
+	if err != nil {
+		return err
+	}
 	rl, err := recordedRealJSON(data)
 	if err != nil {
 		return err
@@ -1068,7 +1120,7 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, rl, gv, vars, key, seed
+	tc.At, tc.End, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, end, rl, gv, vars, key, seed
 	return nil
 }
 
