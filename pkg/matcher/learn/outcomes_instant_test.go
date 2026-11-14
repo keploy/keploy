@@ -2430,8 +2430,11 @@ func sentAtMock(name, sent, returned string, req, res time.Time) *models.Mock {
 // call's own instant, every form is the call's own read of the clock; asked
 // after it, none is a source. What round F gave in a recording's answer
 // keeps the answer's time: an answer that returns round F's moment, given
-// before the call but answered after it or at no time keploy can read, is
-// still refused as a pick.
+// before the call but answered after it, is a pick, unless it reads back a
+// send of the scope that holds the moment by the same text at a fine cut
+// (its own request, or another recording's insert): then the call followed
+// the send, a copy bound there. One answered at no time keploy can read
+// stays refused.
 func TestOutcomeAMomentARecordingsRequestHoldsIsASend(t *testing.T) {
 	const p = "body.at"
 	ms := time.Millisecond
@@ -2500,19 +2503,64 @@ func TestOutcomeAMomentARecordingsRequestHoldsIsASend(t *testing.T) {
 	}
 	rec, live := iMicro(rAt.Add(-time.Second)), iMicro(fAt.Add(-time.Second))
 	asked := rAt.Add(-time.Second)
-	for _, c := range []struct {
-		what     string
-		answered time.Time
-		why      string
-	}{
-		{"answered two seconds after the call", rAt.Add(2 * time.Second), "recorded after it"},
-		{"with no answer time", time.Time{}, noAnswerAt},
-	} {
-		raw := RawOf(sentAtMock("mock-5", rec, rec, asked, c.answered), true).ServedAs(1).
-			ServedLive(RawOf(sentAtMock("mock-5", live, live, asked, c.answered), true))
-		d := oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{raw})), rec, live)
-		oRefused(t, "round F's answer returns round F's moment, "+c.what, d, RefusalPick, "mock-5", c.why)
+	served := func(name, sent, returned, liveSent, liveReturned string, req, res time.Time) Raw {
+		return RawOf(sentAtMock(name, sent, returned, req, res), true).ServedAs(1).
+			ServedLive(RawOf(sentAtMock(name, liveSent, liveReturned, req, res), true))
 	}
+	// Its own request sent the moment a second before the call in both
+	// runs, at a fine cut: answered two seconds after the call, the answer
+	// reads back that send, so the moment is a copy bound at the send.
+	// With no answer time keploy cannot tell its state: refused.
+	d := oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{served("mock-5", rec, rec, live, live, asked, rAt.Add(2*time.Second))})), rec, live)
+	iValue(t, "round F's answer returns round F's moment, answered two seconds after the call", d, "mock-5")
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{served("mock-5", rec, rec, live, live, asked, time.Time{})})), rec, live)
+	oRefused(t, "round F's answer returns round F's moment, with no answer time", d, RefusalPick, "mock-5", noAnswerAt)
+
+	// The same shape across two recordings, as a job runner's find of the
+	// row a request's insert wrote: the insert (mock-6) sent the moment a
+	// second before the call in both runs; the find (mock-5), asked and
+	// answered just after the call, was given before it in round F, its
+	// answer returning round F's moment. The find reads back the insert:
+	// a copy bound at mock-6.
+	after := rAt.Add(3 * ms)
+	insert := served("mock-6", rec, "", live, "", asked, asked.Add(ms))
+	find := served("mock-5", "none", rec, "none", live, after, after.Add(ms))
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{insert, find})), rec, live)
+	iValue(t, "a find given early in round F reads back an insert of the scope", d, "mock-6")
+	// Beside an answer of the scope given before the call in both runs
+	// (mock-7, a read of the row after the insert), the find is no second
+	// source: the insert, sent before that answer, binds it.
+	read := served("mock-7", "none", rec, "none", live, rAt.Add(-500*ms), rAt.Add(-499*ms))
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{insert, read, find})), rec, live)
+	iValue(t, "a find given early in round F, beside an answer of the scope, reads back an insert", d, "mock-6")
+	// With no send of the moment, the find given early in round F is the
+	// only place round F's moment stands: a pick.
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{find})), rec, live)
+	oRefused(t, "a find given early in round F, with no send of the moment", d, RefusalPick, "mock-5", "recorded after it")
+	// The find returns round F's moment in another layout than the insert
+	// sent: no read-back of the send's text, still a pick from it.
+	other := func(at time.Time) string { return at.UTC().Format("2006-01-02 15:04:05.000000") }
+	reformed := served("mock-5", "none", other(rAt.Add(-time.Second)), "none", other(fAt.Add(-time.Second)), after, after.Add(ms))
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{insert, reformed})), rec, live)
+	oRefused(t, "a find given early in round F returns the moment in another layout than the insert sent", d, RefusalPick, "mock-5", "recorded after it")
+	// Only round F's find returns it in another layout (the recorded one
+	// returned the insert's text): round F's answer is what F's application
+	// could pick from, so it is still a pick.
+	fOther := served("mock-5", "none", rec, "none", other(fAt.Add(-time.Second)), after, after.Add(ms))
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{insert, fOther})), rec, live)
+	oRefused(t, "a find given early in round F returns, in round F alone, another layout", d, RefusalPick, "mock-5", "recorded after it")
+	// A send at a cut of a second is no copy (two reads of one second): the
+	// find given early in round F holding round F's second is still a pick.
+	sec := func(at time.Time) string { return at.UTC().Format(time.RFC3339) }
+	rs, ls := sec(rAt.Add(-time.Second)), sec(fAt.Add(-time.Second))
+	coarse := served("mock-6", rs, "", ls, "", asked, asked.Add(ms))
+	coarseFind := served("mock-5", "none", rs, "none", ls, after, after.Add(ms))
+	d = oWord(t, Decide(iCall(p, String, rs, ls, rAt, fAt, w, nil, []Raw{coarse, coarseFind})), rs, ls)
+	oRefused(t, "a find given early in round F beside an insert of the second", d, RefusalPick, "mock-5", "recorded after it")
+	// A typed instant (a decoder's, held by its moment, never by its text):
+	// the find returning that moment in another layout reads back the insert.
+	d = oWord(t, Decide(iCall(p, Instant, rec, live, rAt, fAt, w, nil, []Raw{insert, reformed})), rec, live)
+	iValue(t, "a typed instant: a find given early in round F returns the moment in another layout", d, "mock-6")
 }
 
 // A recording whose request and answer both hold the recorded moment (an

@@ -2658,6 +2658,19 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			strconv.Quote(r)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, l)+" there and the value did not follow", names(conflict),
 			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: givenName(path)})
 	}
+	// readsCopy: an answer that holds round F's moment by the copy's text
+	// where a send of the scope shows that moment in both runs at a fine cut
+	// (a copy, 4). The answer reads back what the application had sent (a
+	// find of the row an insert of the scope wrote, an UPDATE that returns
+	// the time it set), so the call followed the send, as at step 0: round F
+	// giving such an answer before the call, though it was recorded after
+	// it, makes it no pick and no second source. The bind at the send is
+	// checked at replay, so a call whose moment is not the send's fails
+	// closed there. Held by another text of a text's moment, or with no such
+	// send, the answer stays a pick.
+	readsCopy := func(h instantHold) bool {
+		return copied && (!c.text || asText(h.p.t.live, l))
+	}
 
 	// 1. Pick: (i) round F's moment stands at an answer or the test case's
 	// request as sent, which does not show it; (iii) the recorded moment
@@ -2695,8 +2708,9 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 		// An answer recorded after the call that round F gave before it:
 		// in round F the value may be a pick from it, as main reads it.
 		// The recorded application never read it, so R's moment standing
-		// there too (by another cut) says nothing.
-		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut():
+		// there too (by another cut) says nothing. One that reads back a
+		// copy's send (readsCopy) is no pick.
+		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut() && !readsCopy(h):
 			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.fieldNoise(path))
 		case p.side == Response && p.state == stateUnknown && (h.hr || h.hl):
 			return untold(p.why)
@@ -2810,7 +2824,8 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	if len(answers) > 0 && !ownRead {
 		// An answer recorded after the call that round F gave the
 		// application before it, holding F's moment, is a second source:
-		// the bind would be a guess between the two.
+		// the bind would be a guess between the two; one that reads back a
+		// copy's send (readsCopy) is none.
 		// So is another test's answer given before the call whose view in
 		// round F keploy cannot tell, holding R's moment apart from F's.
 		late, why := dc.setSecondSource(c)
@@ -2818,7 +2833,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			p := h.p
 			switch {
 			case late != "" || p.side != Response || p.given:
-			case p.fGave && p.state == stateNotBefore && h.hl:
+			case p.fGave && p.state == stateNotBefore && h.hl && !readsCopy(h):
 				late, why = p.name, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it"
 			case !inScope(p) && p.state == stateBefore && p.fUnstated && h.hr && !h.hl:
 				late, why = p.name, "the recorded moment stands in "+p.name+", another test's answer given before the call, whose view in round F keploy cannot tell"
