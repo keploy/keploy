@@ -1490,3 +1490,93 @@ func TestAShortPartAnEarlierPayloadHoldsByChanceIsNoSource(t *testing.T) {
 		t.Errorf("FALSE GREEN? a leaf that uses the run's variable, holding the recorded value whole, beside a short part set aside: %s from %q set aside %v (%q); want the first reading's refusal at mock-b, and no mock-9", got.Kind, got.From.Mock, got.From.SetAside, got.Why)
 	}
 }
+
+// A place holds a drifted value whole in each of the forms keploy searches
+// on its own: the value as recorded or as F saw it, as written or decoded,
+// and the place's text as written or in its other forms. Where only one of
+// them holds the value whole, a short word of the value found there is a
+// source all the same, never a part held by chance: the first reading's
+// refusal stands. Where a place holds only some of the value's words, or F
+// saw no word at all, the rule reads the short word found there as a part
+// held by chance.
+func TestAPlaceHoldingTheValueWholeInOneFormIsASource(t *testing.T) {
+	const unnamed = "keploy cannot name where the value the call carries now came from"
+	none := func() ([]GivenPlaces, error) { return nil, nil }
+	classify := func(recorded, live string, earlier []Earlier, given GivenEarlier, raw ...Raw) Learned {
+		t.Helper()
+		const path = "body.events"
+		rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, earlier, raw, nil, nil, given)
+		if len(got) != 1 {
+			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
+		}
+		return got[0]
+	}
+	headed := func(name, value string) Raw {
+		return RawOf(&models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "https://js.stripe.com/v3/", Header: map[string]string{"X-Ref": value}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `ok`},
+			ReqTimestampMock: eRecAt.Add(-2 * time.Second), ResTimestampMock: eRecAt.Add(-2*time.Second + time.Millisecond),
+		}}, false).ServedAs(1).ServedAsRecorded()
+	}
+	refused := func(name string, got Learned, mock string) {
+		t.Helper()
+		if got.Kind != KindVariable || got.From.Mock != mock || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
+			t.Errorf("FALSE GREEN? %s: %s from %q set aside %v held %q (%q); want a variable of %s set aside, refused", name, got.Kind, got.From.Mock, got.From.SetAside, got.From.Held, got.Why, mock)
+		}
+	}
+	b := eAnswer("mock-b", 200*time.Millisecond, "82").ServedAs(1).ServedAsRecorded().ServedAs(2)
+	a := func(answer string) Raw {
+		return eAnswer("mock-a", 300*time.Millisecond, answer).ServedAs(1).ServedAsRecorded()
+	}
+
+	// The value as F saw it, escape and all, stands whole in a's answer as
+	// written ("x%2F7" before "%41"), not as decoded ("x/7A" runs on).
+	refused("F's x%2F7 whole in an answer as written only", classify("pos 82", "x%2F7", nil, none, a("x%2F7%41"), b), "mock-b")
+	// The value as F saw it decoded stands whole only in the answer's other
+	// forms: decoded ("x%2F7" is "x/7"), or folded ("AB 7" is "ab 7").
+	refused("F's x/7 whole in an answer's decoded form only", classify("pos 82", "x/7", nil, none, a("x%2F7"), b), "mock-b")
+	refused("F's ab 7 whole in an answer's folded form only", classify("pos 82", "ab 7", nil, none, a("AB 7"), b), "mock-b")
+	// The value as recorded, escape and all, stands whole in a header as
+	// written, not as decoded ("x/42A" runs on).
+	refused("the recorded x%2F42 whole in a header as written only", classify("x%2F42", "y%2F57", nil, none, headed("mock-9", "see x%2F42%41 now")), "mock-9")
+
+	// A leaf of the test's own earlier exchange that holds the value F saw
+	// whole only as recorded there, or only as F gave it there.
+	leaf := func(recorded, live string) Earlier {
+		at := eRecAt.Add(-300 * time.Millisecond)
+		payload := RawOf(&models.Mock{Name: "mock-8", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
+		return Earlier{Mock: "mock-8", At: at, Own: true, Payload: payload.ServedAs(1), Seen: []Seen{
+			{Side: Response, Leaf: Leaf{Path: "body.slot", Type: String, Value: recorded}, Live: live},
+		}}
+	}
+	refused("F's 7 whole at a leaf as recorded there only", classify("pos 82", "7", []Earlier{leaf("7 82", "3")}, none, b), "mock-b")
+	refused("F's 7 whole at a leaf as F gave it there only", classify("pos 82", "7", []Earlier{leaf("3", "7")}, none, b), "mock-b")
+
+	// A recording F gave the application earlier in the set, whose words
+	// alone keploy keeps: every word of the value, as F saw it or as
+	// recorded, stands there, so it holds the value whole, and the refusal
+	// stands.
+	given := func(answer string) GivenEarlier {
+		g := eAnswer("mock-g", 250*time.Millisecond, answer).ServedAs(1).ServedAsRecorded()
+		return func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(g)}, nil }
+	}
+	refused("F's ab 7, each word in a recording F gave earlier in the set", classify("pos 82", "ab 7", nil, given("ab 7"), b), "mock-b")
+	refused("F's 7 and the recorded 82 in a recording F gave earlier in the set", classify("pos 82", "7", nil, given("82 7"), b), "mock-b")
+	refused("the recorded pos 82, each word in a recording F gave earlier in the set", classify("pos 82", "7", nil, given("pos 82"), b), "mock-b")
+	// Only some of the value's words there, or F saw no word at all: the 82
+	// there is a part held by chance, and the value is learned as varying.
+	for _, c := range [][3]string{{"pos 82", "7", "82"}, {"pos 82", "~", "82"}} {
+		if got := classify(c[0], c[1], nil, given(c[2]), b); got.Kind != KindNoise {
+			t.Errorf("%q recorded, %q in F, %q alone in a recording F gave earlier in the set: %s from %q (%q); want noise", c[0], c[1], c[2], got.Kind, got.From.Mock, got.Why)
+		}
+	}
+
+	// A payload served as recorded that holds the recorded value whole is a
+	// source the re-read keeps, never one it reads as a copy the value moved
+	// away from.
+	if got := classify("pos 82", "7", nil, none, headed("mock-9", "see pos 82 now"), b); got.Kind != KindVariable || !got.From.SetAside || !strings.Contains(got.Why, unnamed) {
+		t.Errorf("FALSE GREEN? the recorded pos 82 whole in a header: %s from %q set aside %v held %q (%q); want a variable set aside, refused", got.Kind, got.From.Mock, got.From.SetAside, got.From.Held, got.Why)
+	}
+}
