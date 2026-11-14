@@ -25,10 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cloudflare/cfssl/csr"
-	cfsslLog "github.com/cloudflare/cfssl/log"
-	"github.com/cloudflare/cfssl/signer"
-	"github.com/cloudflare/cfssl/signer/local"
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -1916,8 +1912,6 @@ func ReleaseSrcPortIfOwner(port int, token int64) bool {
 	return false
 }
 
-var setLogLevelOnce sync.Once
-
 // certCache caches generated TLS certificates by hostname to avoid regenerating
 // a certificate for every connection to the same host. Without this cache,
 // N concurrent CONNECT tunnels to the same host cause N parallel cert generations,
@@ -1986,24 +1980,6 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 // another client on the same port (a pod of the same node, or a connection
 // whose port was reused) had its host put on this client's leaf.
 func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, connectTarget string, dstIP net.IP) (*tls.Certificate, error) {
-	// Ensure log level is set only once
-
-	/*
-	* Since multiple goroutines can call this function concurrently, we need to ensure that the log level is set only once.
-	 */
-	setLogLevelOnce.Do(func() {
-		// * Set the log level to error to avoid unnecessary logs. like below...
-
-		// 2025/03/18 20:54:25 [INFO] received CSR
-		// 2025/03/18 20:54:25 [INFO] generating key: ecdsa-256
-		// 2025/03/18 20:54:25 [INFO] received CSR
-		// 2025/03/18 20:54:25 [INFO] generating key: ecdsa-256
-		// 2025/03/18 20:54:25 [INFO] encoded CSR
-		// 2025/03/18 20:54:25 [INFO] encoded CSR
-		// 2025/03/18 20:54:25 [INFO] signed certificate with serial number 435398774381835435678674951099961010543769077102
-		cfsslLog.Level = cfsslLog.LevelError
-	})
-
 	// Generate a new server certificate and private key for the given hostname.
 	// When the client omits SNI (common after CONNECT tunnel setup where the
 	// client already knows the target from the CONNECT request), fall back to
@@ -2028,7 +2004,7 @@ func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 
 	// The name the leaf is minted for. With no SNI and no CONNECT target the
 	// client dialled an IP literal, and it verifies the leaf against an IP SAN,
-	// which cfssl makes of an IP host.
+	// which mintLeaf makes of an IP host.
 	certHost := dstURL
 	if certHost == "" && dstIP != nil {
 		certHost = dstIP.String()
@@ -2058,25 +2034,9 @@ func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		probeCert(logger, "mint-done", dstURL, time.Since(mintStart).Nanoseconds())
 	}()
 
-	serverReq := &csr.CertificateRequest{
-		CN: certHost,
-		Hosts: []string{
-			certHost,
-		},
-		KeyRequest: csr.NewKeyRequest(),
-	}
-
-	serverCsr, serverKey, err := csr.ParseRequest(serverReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create server CSR: %v", err)
-	}
 	cryptoSigner, ok := caPrivKey.(crypto.Signer)
 	if !ok {
 		return nil, fmt.Errorf("failed to typecast the caPrivKey")
-	}
-	signerd, err := local.NewSigner(cryptoSigner, caCertParsed, signer.DefaultSigAlgo(cryptoSigner), nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create signer: %v", err)
 	}
 
 	if backdate.IsZero() {
@@ -2092,49 +2052,25 @@ func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	//
 	// Note: If you have recorded test cases before April 20, 2024 (http://www.sslchecker.com/certdecoder?su=269725513dfeb137f6f29b8488f17ca9)
 	// and are using time freezing, please reach out to us if you get tls handshake error.
-	signReq := signer.SignRequest{
-		Hosts:     serverReq.Hosts,
-		Request:   string(serverCsr),
-		Profile:   "web",
-		NotBefore: backdate.AddDate(-1, 0, 0),
-		NotAfter:  time.Now().AddDate(1, 0, 0),
-	}
+	notBefore := backdate.AddDate(-1, 0, 0)
+	notAfter := time.Now().AddDate(1, 0, 0)
 
-	serverCert, err := signerd.Sign(signReq)
+	serverTLSCert, err := mintLeaf(certHost, cryptoSigner, caCertParsed, notBefore, notAfter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign server certificate: %v", err)
+		return nil, err
 	}
 
-	logger.Debug("signed the certificate for a duration of 2 years", zap.String("notBefore", signReq.NotBefore.String()), zap.String("notAfter", signReq.NotAfter.String()))
-
-	// Load the server certificate and private key
-	serverTLSCert, err := tls.X509KeyPair(serverCert, serverKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
-	}
-
-	// Pre-populate Leaf to avoid a data race: crypto/tls lazily parses
-	// Certificate.Leaf on first use, which is not goroutine-safe. Parsing
-	// it here, before caching, ensures all concurrent consumers see a
-	// fully-initialized certificate.
-	if serverTLSCert.Leaf == nil {
-		leaf, parseErr := x509.ParseCertificate(serverTLSCert.Certificate[0])
-		if parseErr != nil {
-			logger.Debug("failed to pre-parse certificate leaf, skipping cache", zap.Error(parseErr))
-			return &serverTLSCert, nil
-		}
-		serverTLSCert.Leaf = leaf
-	}
+	logger.Debug("signed the certificate for a duration of 2 years", zap.String("notBefore", notBefore.String()), zap.String("notAfter", notAfter.String()))
 
 	// Cache the generated certificate for reuse by subsequent connections to the
 	// same host, under the composite key (host + backdate bucket + CA identity)
 	// computed above — so a frozen-time replay and a live run never share a leaf.
 	if certHost != "" {
-		getCertCache().Add(cacheKey, &serverTLSCert)
+		getCertCache().Add(cacheKey, serverTLSCert)
 	}
 
-	publishMITM(sourcePort, &serverTLSCert)
-	return &serverTLSCert, nil
+	publishMITM(sourcePort, serverTLSCert)
+	return serverTLSCert, nil
 }
 
 // certCacheKey composes the cert-cache key from the target host, the backdate
