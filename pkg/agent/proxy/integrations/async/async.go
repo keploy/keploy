@@ -3,7 +3,12 @@
 // injects the shared Engine into opted-in parsers via AsyncAware.
 package async
 
-import "go.keploy.io/server/v3/pkg/models"
+import (
+	"slices"
+	"sort"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
 
 // AsyncParser is the capability interface a protocol parser implements to
 // participate in async egress. The engine holds only *models.Mock and
@@ -48,4 +53,83 @@ type AsyncParser interface {
 // mirroring the IntegrationsV2 capability idiom).
 type AsyncAware interface {
 	SetAsyncEngine(e *Engine)
+}
+
+// LaneTyper is an optional interface of an AsyncParser that serves lanes of
+// types other than the integration type it is registered under. A lane names
+// an endpoint, not a wire protocol: an "http" lane's endpoint is reached over
+// HTTP/1.1 or HTTP/2 as the client and the server negotiate (ALPN), so the
+// HTTP/2 parser serves "http" lanes too, beside the HTTP/1 parser registered
+// as "http". A parser declares it with no import of this package, by the
+// method alone.
+type LaneTyper interface {
+	LaneTypes() []string
+}
+
+// LaneParsers is every parser of byType (keyed by the integration type each
+// is registered under) that serves lanes of type base (a lane's BaseType):
+// byType[base] first, then each other parser whose LaneTypes name base, in
+// key order. Each serves only the calls of its own protocol (its
+// MatchesLane), so a lane's call is the lane's when any of them takes it.
+func LaneParsers(base string, byType map[string]AsyncParser) []AsyncParser {
+	var out []AsyncParser
+	if p := byType[base]; p != nil {
+		out = append(out, p)
+	}
+	keys := make([]string, 0, len(byType))
+	for k := range byType {
+		if k != base {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if lt, ok := byType[k].(LaneTyper); ok && slices.Contains(lt.LaneTypes(), base) {
+			out = append(out, byType[k])
+		}
+	}
+	return out
+}
+
+// Union is one AsyncParser over the parsers of a lane type (LaneParsers), for
+// a caller that asks about one mock at a time (the recorder): a mock is the
+// lane's when any of them takes it, and every other question about a mock
+// goes to the one that takes it. EmptyResponse, which names no mock, is the
+// first's: the parser registered under the lane's own type.
+func Union(ps ...AsyncParser) AsyncParser {
+	if len(ps) == 1 {
+		return ps[0]
+	}
+	return union(ps)
+}
+
+type union []AsyncParser
+
+// pick is the parser that takes m for lane, else the first.
+func (u union) pick(m *models.Mock, lane models.AsyncLane) AsyncParser {
+	for _, p := range u {
+		if p.MatchesLane(m, lane) {
+			return p
+		}
+	}
+	return u[0]
+}
+
+func (u union) MatchesLane(m *models.Mock, lane models.AsyncLane) bool {
+	for _, p := range u {
+		if p.MatchesLane(m, lane) {
+			return true
+		}
+	}
+	return false
+}
+
+func (u union) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncLane) (bool, string) {
+	return u.pick(live, lane).MatchRequestShape(live, recorded, lane)
+}
+
+func (u union) EmptyResponse(lane models.AsyncLane) ([]byte, error) { return u[0].EmptyResponse(lane) }
+
+func (u union) ResponseValueKey(m *models.Mock, lane models.AsyncLane) string {
+	return u.pick(m, lane).ResponseValueKey(m, lane)
 }

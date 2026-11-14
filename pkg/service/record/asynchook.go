@@ -140,27 +140,52 @@ func (r *AsyncRecorder) anchorLocked(ts int64) (string, int) {
 }
 
 // ResolveAsyncParsers builds stateless parser instances from the global
-// registry, keyed by lane.BaseType(). Parsers must implement async.AsyncParser.
+// registry, keyed by lane.BaseType(): for each lane type, every registered
+// parser that serves it (async.LaneParsers) as one (async.Union) — the
+// integration of the lane's own type, and each other that declares the type
+// (async.LaneTyper), as the HTTP/2 parser does "http" lanes, so a lane's call
+// is stamped whichever of their protocols it was recorded over. Parsers must
+// implement async.AsyncParser.
 func ResolveAsyncParsers(logger *zap.Logger, lanes []models.AsyncLane) map[string]async.AsyncParser {
 	out := map[string]async.AsyncParser{}
+	var byType map[string]async.AsyncParser // every registered AsyncParser, built once lanes need it
 	for _, lane := range lanes {
 		base := lane.BaseType()
 		if _, done := out[base]; done {
 			continue
 		}
-		reg := integrations.Registered[integrations.IntegrationType(base)]
-		if reg == nil {
+		if integrations.Registered[integrations.IntegrationType(base)] == nil {
 			logger.Error("async lane type not registered; its mocks will not be stamped async — "+
 				"set async.lanes[].type to a registered integration name",
 				zap.String("type", base))
 			continue
 		}
-		if ap, ok := reg.Initializer(logger).(async.AsyncParser); ok {
-			out[base] = ap
-		} else {
+		if byType == nil {
+			byType = registeredAsyncParsers(logger)
+		}
+		ps := async.LaneParsers(base, byType)
+		if len(ps) == 0 {
 			logger.Error("async lane integration does not implement async.AsyncParser; its mocks will not be stamped async — "+
 				"pick a lane type whose integration supports async (currently: http), or add AsyncParser to it",
 				zap.String("type", base))
+			continue
+		}
+		out[base] = async.Union(ps...)
+	}
+	return out
+}
+
+// registeredAsyncParsers is a stateless instance of every registered
+// integration that implements async.AsyncParser, keyed by its type, as the
+// proxy builds them at InitIntegrations.
+func registeredAsyncParsers(logger *zap.Logger) map[string]async.AsyncParser {
+	out := map[string]async.AsyncParser{}
+	for t, reg := range integrations.Registered {
+		if reg == nil || reg.Initializer == nil {
+			continue
+		}
+		if ap, ok := reg.Initializer(logger).(async.AsyncParser); ok {
+			out[string(t)] = ap
 		}
 	}
 	return out
