@@ -246,6 +246,8 @@ func TestSetCookieValues(t *testing.T) {
 		{"set twice", "session=s1, session=s2", []string{"s1", "s2"}},
 		{"a value to the end", "session=s3", []string{"s3"}},
 		{"an empty value", "session=; Max-Age=0", []string{""}},
+		// RFC 6265 §5.2 step 5: the blanks around a value are not part of it.
+		{"blanks around the value", "session= s4 ; Path=/,session=s5 ", []string{"s4", "s5"}},
 		{"a name it ends", "xsession=s1; Path=/", nil},
 		{"an attribute named like it", "a=1; session=s1", nil},
 		{"none", "", nil},
