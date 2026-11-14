@@ -51,8 +51,6 @@ func (p *Proxy) topologySink() TopologySink {
 func unreachedAnswer(err error) (answer string, ok bool) {
 	var t interface{ Timeout() bool }
 	switch {
-	case err == nil:
-		return "", false
 	case neterr.IsConnRefused(err):
 		return models.UnreachedRefused, true
 	case neterr.IsUnreachable(err):

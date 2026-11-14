@@ -668,7 +668,8 @@ func TestKeepRealDepsKeepsTheRunsBookkeeping(t *testing.T) {
 // connect is answered at once, never held for the placing; the placing is
 // waited for off that path, and the open test's REAL row counts the failure
 // once it ends. One whose placing does not end is capture_incomplete: never a
-// silent miss.
+// silent miss. In a keploy mock record it is no unreached dependency either:
+// whether it is mock.real is not known at the handshake.
 func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing.T) {
 	liveInstances(t, 4)
 	refused := testnet.RefusedAddr(t, "tcp")
@@ -677,6 +678,9 @@ func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing
 	for _, placed := range []bool{true, false} {
 		p := realProxy(t, []string{"container:redis"}, nil)
 		p.setSession(&agent.Session{Mode: models.MODE_RECORD})
+		p.mockMode = true
+		sink := &unreachedSink{}
+		p.SetTopologySink(sink)
 		f := placingContainer{addr: refused, c: containerkey.Container{ID: "r", Image: "redis:7", Port: 6379},
 			placed: make(chan struct{}), awaiting: make(chan struct{}, 1)}
 		k := containerkey.NewKeyer(f)
@@ -704,6 +708,7 @@ func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing
 		}
 		<-resolved
 		end()
+		require.Empty(t, sink.got(), "placed=%v: noted unreached", placed)
 		other := p.realTracker.EndTestOf(9)
 		require.Empty(t, other.Uses, "placed=%v: worker 9's", placed)
 		require.Empty(t, other.Incomplete, "placed=%v: worker 9's", placed)

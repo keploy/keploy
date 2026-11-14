@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -140,6 +141,53 @@ func TestAGivenUpConnectToADependencyOfAMockRecordIsNotedUnreached(t *testing.T)
 	want := models.UnreachedRow{Addr: silent, Answer: models.UnreachedNoAnswer, Instance: 5}
 	if got := s.got(); len(got) != 1 || got[0] != want {
 		t.Fatalf("noted %+v; want [%+v]", got, want)
+	}
+}
+
+// A mock record whose application gives up connecting to a container the
+// index is still placing notes no unreached dependency: whether it is a
+// mock.real destination is not known at the handshake, and once it is
+// placed as one the failure is its test's REAL row's.
+func TestAGivenUpConnectToAContainerStillBeingPlacedIsNoUnreachedDependency(t *testing.T) {
+	prev := handshakeRecheck
+	handshakeRecheck = 50 * time.Millisecond
+	t.Cleanup(func() { handshakeRecheck = prev })
+	liveInstances(t, 4)
+	silent := unansweredAddr(t)
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+
+	p := realProxy(t, []string{"container:redis"}, nil)
+	p.setSession(&agent.Session{Mode: models.MODE_RECORD})
+	p.mockMode = true
+	sink := &unreachedSink{}
+	p.SetTopologySink(sink)
+	f := placingContainer{addr: silent, c: containerkey.Container{ID: "r", Image: "redis:7", Port: 6379},
+		placed: make(chan struct{}), awaiting: make(chan struct{}, 1)}
+	k := containerkey.NewKeyer(f)
+	session, end := context.WithCancel(context.Background())
+	t.Cleanup(end)
+	k.Bind(session)
+	k.Watch(session, zap.NewNop())
+	containerkey.Default = k
+	resolved := make(chan struct{}, 1)
+	p.realDialResolved = func() { resolved <- struct{}{} }
+	p.realTracker.BeginTestOf(4)
+	dest := ipv4Dest(t, silent)
+	dest.Instance = 4
+
+	d := p.decideHandshake(&goneAfterFirstLookup{fakeHandshakeDest: fakeHandshakeDest{dest: dest}})(context.Background(), appEnd, proxyEnd)
+	if d.Outcome != synhold.Drop {
+		t.Fatalf("decision %+v, want drop", d)
+	}
+	awaitEvent(t, f.awaiting, "the placing being waited for")
+	close(f.placed)
+	awaitEvent(t, resolved, "the placing ending")
+	if got := sink.got(); len(got) != 0 {
+		t.Fatalf("noted %+v unreached", got)
+	}
+	if got, want := p.realTracker.EndTestOf(4).Uses, (models.RealUse{Dest: "container:redis", Failed: 1}); len(got) != 1 || got[0] != want {
+		t.Fatalf("the test's REAL row: %+v, want [%+v]", got, want)
 	}
 }
 
