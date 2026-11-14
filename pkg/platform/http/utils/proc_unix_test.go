@@ -3,32 +3,12 @@
 package utils
 
 import (
-	"bytes"
 	"os/exec"
 	"strings"
-	"sync"
 	"testing"
 
 	"go.uber.org/zap"
 )
-
-// teeBuffer is a buffer a PTY's output copy writes to while a row reads it.
-type teeBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (t *teeBuffer) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.b.Write(p)
-}
-
-func (t *teeBuffer) String() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.b.String()
-}
 
 // What a command started under a PTY prints reaches its tee, all of it by the
 // time Wait returns, as well as keploy's console: a Docker agent's start reads
