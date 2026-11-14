@@ -2697,11 +2697,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// an owner this run runs (returnStaleMoves).
 		var s12Background bool
 		var returnedMoves map[string]string
+		var rawMapping *models.Mapping
 		if r.exactServing() {
 			// Under the proven switch the mapping decides what each test
 			// case owns, and a mapping that cannot be read refuses the set.
 			var recordedWith []string
-			if expectedTestMockMappings, workerScope, conc, recordedWith, windowsWhy, err = r.provenMappingsOf(ctx, testSetID); err != nil {
+			if expectedTestMockMappings, workerScope, conc, recordedWith, windowsWhy, rawMapping, err = r.provenMappingsOf(ctx, testSetID); err != nil {
 				return nil, nil, err
 			}
 			s12Background = r.s12Serves(testSetID, recordedWith)
@@ -2789,6 +2790,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		addSkippedKinds(skipped.kinds)
 		if filtered == nil && unfiltered == nil {
 			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
+		}
+		if r.exactServing() && !fromWindows && rawMapping != nil {
+			if err := r.refuseUnknownMappingMocks(ctx, testSetID, rawMapping, workerScope, filtered, unfiltered, mockLookup, skipped); err != nil {
+				return nil, nil, err
+			}
 		}
 		filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
 		if err := r.mutatePayloads(ctx, payloads, filtered, unfiltered); err != nil {
