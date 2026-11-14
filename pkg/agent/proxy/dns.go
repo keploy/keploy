@@ -1333,17 +1333,26 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// stuck. Those servers are keploy's pick, not the app's, so a
 	// failure to reach them is not marked errNoUpstreamAnswered, and it
 	// stays an ERROR.
-	var addrs []string
+	type upstreamTarget struct {
+		server string
+		addr   string
+	}
+	var targets []upstreamTarget
 	appUpstream := p.hasDNSUpstream()
 	if appUpstream {
 		for _, server := range p.dnsUpstreamServers {
-			addrs = append(addrs, net.JoinHostPort(server, p.dnsUpstreamPort))
+			targets = append(targets, upstreamTarget{
+				server: server,
+				addr:   net.JoinHostPort(server, p.dnsUpstreamPort),
+			})
 		}
 	} else {
 		// captureDNSUpstream already logs once at startup if it cannot
 		// snapshot a real resolver, so we don't re-log per-query here
 		// (that path runs on every cache miss and would burst the log).
-		addrs = recordDNSFallback
+		for _, addr := range recordDNSFallback {
+			targets = append(targets, upstreamTarget{server: addr, addr: addr})
+		}
 	}
 
 	c := new(dns.Client)
@@ -1358,12 +1367,19 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		resolveErr error
 	)
 
-	for _, addr := range addrs {
+	// On Windows the servers are the adapters', asked as Windows asks them
+	// (adapterSearch), so a recording holds the answer the application gets.
+	search := newAdapterSearch(p.dnsUpstreamAdapter)
+	for _, target := range targets {
+		server, addr := target.server, target.addr
+		if search.passes(server) {
+			continue
+		}
 		// Per-server-attempt logs fire on every cache miss (worst case, multiple
 		// servers per miss) so we keep only the diagnostic ones — silent success
 		// path, log the rare failure / truncation / TCP-retry transitions.
 		c.Net = "udp"
-		resp, _, err := c.Exchange(m, addr)
+		resp, _, err := p.exchange(c, m, addr)
 		if err != nil {
 			resolveErr = err
 			p.logger.Debug("upstream DNS exchange failed",
@@ -1381,7 +1397,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 				append(p.dnsQuestionFields(question), zap.String("upstream_addr", addr))...,
 			)
 			c.Net = "tcp"
-			resp, _, err = c.Exchange(m, addr)
+			resp, _, err = p.exchange(c, m, addr)
 			if err != nil {
 				resolveErr = err
 				p.logger.Debug("upstream DNS TCP retry failed",
@@ -1396,10 +1412,22 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		}
 
 		if resp != nil {
+			if !search.ends(server, resp) {
+				p.logger.Debug("upstream DNS server says the name does not exist; asking the other adapters' servers",
+					append(p.dnsQuestionFields(question), zap.String("upstream_addr", addr))...,
+				)
+				continue
+			}
 			in = resp
 			resolveErr = nil
 			break
 		}
+	}
+	// Every adapter that answered said the name does not exist: the
+	// preferred adapter's NXDOMAIN is the answer, whatever a later server's
+	// failure was.
+	if in == nil && search.denied != nil {
+		in, resolveErr = search.denied, nil
 	}
 
 	if resolveErr != nil {
