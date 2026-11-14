@@ -136,6 +136,11 @@ type decider struct {
 	// mintedIDs: by an id's long words (mintedKey), mintedAnew's answer, read
 	// once for every piece of the id the call decides.
 	mintedIDs map[string]bool
+	// longInTurn: by a word's recorded and round F text, the recording a word
+	// the call made was bound at as a value sent in either order
+	// (Decision.EitherOrder): mintedLong reads such a word as made anew, and
+	// longGlued reads nothing of it at that recording's own place.
+	longInTurn map[string]string
 	// readClock: the refusal instantLearned last gave is one where learning
 	// read the value as the application's clock (heldRead), which the time
 	// default settles on any field (timeDefault).
@@ -486,6 +491,17 @@ words:
 			}
 			d := dc.word(path, bare, rec, live, rd.Rec, w, pieceOfAnId(rd, w), nil)
 			fresh[k] = d.Outcome == OutcomeFresh
+			if d.EitherOrder {
+				// Made at the call too, and sent at another call in the
+				// other order in each run: that call's request is where the
+				// word was bound (a Value: wordBy sets the flag on nothing
+				// else), and it gave the application nothing.
+				fresh[k] = true
+				if dc.longInTurn == nil {
+					dc.longInTurn = map[string]string{}
+				}
+				dc.longInTurn[w.Rec+"\x00"+w.Live] = d.From.Mock
+			}
 			out = append(out, d)
 		}
 	}
@@ -520,7 +536,11 @@ func allPutBack(out []Decision, skip int) bool {
 
 // mintedLong is long (idLongWords, indexes into rd.Words) as words where
 // this call made every one of them anew: each was learned fresh (fresh),
-// no place before the call showing it. Only then is the id one the call
+// no place before the call showing it, or bound only at another call that
+// sent it too, in the other order in each run (Decision.EitherOrder, read
+// as fresh: that call's request gave the application nothing, and the
+// either-order rule refuses where any other place decides the word, so no
+// place before the call showed it either). Only then is the id one the call
 // minted, so a place that shows none of its long words may hold its piece
 // by chance (idChance, oneRun). nil where one is bound at a source, refused, or not
 // decided (it stands past a word one run lacks, which refuses the field
@@ -1176,12 +1196,17 @@ func mintedKey(long []readWord) string {
 // recording). Each long word was learned fresh, so a place holding it as a
 // whole word gave it nowhere (mintedLong): what this finds is the word
 // glued, where the application may have cut the id from (fail closed, as
-// movedFrom does).
+// movedFrom does). A word bound in either order (longInTurn) is not read at
+// the place of the call it was bound at: that request holds it whole in the
+// recording by the rule's own check, and gave the application nothing.
 func (dc *decider) longGlued(long []readWord) bool {
 	mintedAsks.Add(1)
 	for i := range dc.ps {
 		for _, o := range long {
 			p := placedFor(dc.ps[i], o.Rec)
+			if m := dc.longInTurn[o.Rec+"\x00"+o.Live]; m != "" && p.mock == m {
+				continue
+			}
 			hr, okR := p.t.rec.contains(o.Rec)
 			hf, okF := p.t.live.contains(o.Live)
 			if ev, read := evidenceOf(p, evHeld{hr: hr, hf: hf, read: okR && okF}, o.Rec, o.Live, false); !read || ev != evNone {
