@@ -1757,10 +1757,13 @@ func (j *joinedMidStream) runCounted(t *testing.T) ([]*models.Mock, int64, error
 // SELECT 2 had the ERR and every command after it its predecessor's answer,
 // for the rest of the connection. Two in a row are answered in order; a
 // command taken up after a response left out is confirmed by the ERR to the
-// next one, sent after its answer.
+// next one, sent after its answer; a PREPARE held for its framing is settled
+// before the ERR is read.
 func TestRecordV2_AnERRToACommandWithoutAnAnswerIsThatCommandsAnswer(t *testing.T) {
 	t.Parallel()
 	unframable := [][]byte{wrapPacket(nil, 1), wrapPacket([]byte{0x01, 0x02}, 2), wrapPacket([]byte{0x03}, 3)}
+	prepare := wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO t VALUES (?)"...), 0)
+	one := [][]byte{columnPayload(t, undecodableColumns[0])}
 	cases := []struct {
 		name    string
 		build   func(t *testing.T, j *joinedMidStream)
@@ -1789,6 +1792,16 @@ func TestRecordV2_AnERRToACommandWithoutAnAnswerIsThatCommandsAnswer(t *testing.
 			j.exchange(cannedCOMQuery(t, 0, "SELECT u"), unframable)
 			j.exchange(malformedClose, [][]byte{malformedERR})
 		}, "SELECT 1 -> OK 1; SELECT 2 -> OK 2; SELECT 3 -> OK 3", 2},
+		{"after a PREPARE held, its EOF sent", func(t *testing.T, j *joinedMidStream) {
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+			j.exchange(prepare, prepareOK(false, one, nil))
+			j.exchange(malformedClose, [][]byte{malformedERR})
+		}, "SELECT 1 -> OK 1; PREPARE -> PREPARE_OK eof=true; SELECT 2 -> OK 2; SELECT 3 -> OK 3", 1},
+		{"after a PREPARE held, no EOF", func(t *testing.T, j *joinedMidStream) {
+			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{okResponseWithAffectedRows(1, 1)})
+			j.exchange(prepare, prepareOK(true, one, nil))
+			j.exchange(malformedClose, [][]byte{malformedERR})
+		}, "SELECT 1 -> OK 1; PREPARE -> PREPARE_OK eof=false; SELECT 2 -> OK 2; SELECT 3 -> OK 3", 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1801,7 +1814,7 @@ func TestRecordV2_AnERRToACommandWithoutAnAnswerIsThatCommandsAnswer(t *testing.
 			if err != nil {
 				t.Fatalf("RecordV2 = %v, want no stop", err)
 			}
-			if got := strings.Join(pairings(mocks), "; "); got != c.want {
+			if got := strings.Join(prepareOKPairing(mocks), "; "); got != c.want {
 				t.Fatalf("mocks %q, want %q: each command with its own answer", got, c.want)
 			}
 			if leftOut != c.leftOut {
