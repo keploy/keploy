@@ -405,7 +405,8 @@ func TestIdleAnswerIsTheSetsOnEitherSideOfAWindowEdge(t *testing.T) {
 // (chargeUnattributed), and a build that does not judge keeps no recording.
 // Under the proven switch an idle answer is in no test's recording on
 // purpose: it is worker:'s wherever it was recorded, so it charges no test,
-// and the record is kept. A call from no worker that is not idle is still
+// and the record is kept, from no worker or from an ended one (whose claim
+// key its entry keeps). A call from no worker that is not idle is still
 // charged, and off the switch an idle answer is charged as any call.
 func TestAnIdleAnswerFromNoWorkerChargesNoOpenTest(t *testing.T) {
 	t.Cleanup(models.RegisterIdleAnswer(idleRowKind, func(m *models.Mock) bool { return m.Spec.Metadata["answer"] == "none" }))
@@ -436,6 +437,32 @@ func TestAnIdleAnswerFromNoWorkerChargesNoOpenTest(t *testing.T) {
 		startup, worker := setScopeMocks(ws, mocks, nil)
 		require.Empty(t, startup)
 		require.Equal(t, []models.MockEntry{{Name: "mock-pop", Kind: kind}}, worker)
+	})
+	t.Run("an idle answer from an ended worker charges no test and is worker:'s", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		// Worker 3 ran its test first and ended. A process of its that
+		// outlived it, its connection stamped with that worker
+		// (Mock.EndedInstance), polls on while workers 1 and 2's tests are
+		// open: the call is in no live worker's instance.
+		ws := append([]models.ScopeWindow{{Name: "e/TestE", Start: at(-40), End: at(-30), Instance: 3}}, windows()...)
+		claims := []models.ScopeWindow{{Claim: "e", Start: at(-50), Worker: 3}, {Claim: "a", Start: at(-5), Worker: 1}, {Claim: "b", Start: at(5), Worker: 2}}
+		ended := func(name string, idle bool) capturedMock {
+			m := idleRowMock(name, at(50), idle)
+			m.SourcePID, m.EndedInstance = 99, 3
+			return capturedOf(m)
+		}
+		mocks := []capturedMock{ended("mock-pop", true)}
+		require.Empty(t, chargeUnattributed(ws, mocks))
+		for _, w := range ws {
+			require.Nil(t, w.Evidence, "%s was charged with an ended worker's idle answer", w.Name)
+		}
+		require.Empty(t, correlateScopes(ws, mocks))
+		startup, worker := setScopeMocks(ws, mocks, claims)
+		require.Empty(t, startup)
+		require.Equal(t, []models.MockEntry{{Name: "mock-pop", Kind: kind, Key: "e"}}, worker, "worker:'s, under the ended worker's key")
+		// The same call, not idle, is charged to the two tests open at it.
+		require.Equal(t, []unattributedCall{{mock: "mock-get", pid: 99, tests: []string{"a/TestA", "b/TestB"}}},
+			chargeUnattributed(ws, []capturedMock{ended("mock-get", false)}))
 	})
 	t.Run("a call that is not idle is charged", func(t *testing.T) {
 		t.Setenv(provenswitch.Env, "1")

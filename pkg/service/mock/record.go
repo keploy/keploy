@@ -844,6 +844,8 @@ func (m *mockService) Record(ctx context.Context) error {
 	// (models.CaptureLossUnattributed), which leaves it without a verdict, so
 	// judging keeps its previous recording. A build that does not judge the
 	// record would keep their recordings short of the call, so it keeps none.
+	// An idle answer (capturedMock.idle) charges no test: it is the set's
+	// wherever it was recorded (setScopeMocks), in no test's recording.
 	if calls := chargeUnattributed(windows, dataPlane(recorded)); len(calls) > 0 {
 		judging := provenswitch.On() && recordsJudged.Load()
 		for _, c := range calls {
@@ -1471,7 +1473,9 @@ func correlate(windows []models.ScopeWindow, mocks []capturedMock, byInstance bo
 // unattributedCall is a call from a process in no test worker's keploy
 // instance (instance 0), or in an ended worker's (capturedMock.ended), made
 // while test workers' tests were open and no test of a run of one worker
-// was: no test's window holds it (correlateScopes).
+// was: no test's window holds it (correlateScopes). An idle answer
+// (capturedMock.idle) is none: it is the set's wherever it was recorded
+// (setScopeMocks), so no test's recording is short of it.
 type unattributedCall struct {
 	mock  string
 	pid   uint32
