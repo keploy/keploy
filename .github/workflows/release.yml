@@ -28,8 +28,9 @@ env:
 #     issue.
 #   - windows: cross-compiling CGo to windows from linux via mingw-w64
 #     hits pg_query_go issue #138 (libpg_query does not upstream a
-#     reliable mingw-w64 build path). Native windows-latest + MinGW that
-#     ships with the hosted runner is the supported path.
+#     reliable mingw-w64 build path). Native windows-latest, with the
+#     pinned llvm-mingw (not the runner's MinGW gcc), is the supported
+#     path.
 #
 # Job graph:
 #   build-linux   (matrix amd64/arm64, native linux; cgo linked fully
@@ -38,7 +39,9 @@ env:
 #   build-darwin  (macos-latest, Apple-silicon runner; native clang
 #                  builds the single darwin/arm64 binary, gon signs
 #                  and notarizes it before archiving)
-#   build-windows (windows-latest, native cgo via MinGW on PATH)
+#   build-windows (windows-latest, native cgo linked -static by the
+#                  pinned llvm-mingw, checked to import only Windows'
+#                  own DLLs and to start with only those on the PATH)
 #   release       (ubuntu-latest, downloads all per-platform archives
 #                  and creates the GitHub release via `gh release create`)
 #   build-docker / build-docker-manifest / mark-latest (unchanged;
@@ -307,10 +310,12 @@ jobs:
   # ---------------------------------------------------------------
   # Windows native CGo build.
   #
-  # windows-latest ships MinGW-w64 (gcc.exe) via the pre-installed
-  # msys2/mingw64 toolchain on PATH, which satisfies pg_query_go's
-  # cgo link. Running native here avoids the linux → windows cross
-  # path that pg_query_go #138 documents as unreliable.
+  # Linked by the pinned llvm-mingw (clang and lld with the mingw-w64
+  # runtime and LLVM's compiler-rt), -static, not by the MinGW gcc on
+  # the runner's PATH: the binary imports only DLLs that are part of
+  # Windows, and carries no gcc runtime. Running native here avoids the
+  # linux → windows cross path that pg_query_go #138 documents as
+  # unreliable.
   # ---------------------------------------------------------------
   build-windows:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
@@ -336,55 +341,48 @@ jobs:
         shell: bash
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Ensure MinGW gcc on PATH
-        # windows-latest ships MinGW-w64 under
-        # C:\ProgramData\mingw64\mingw64\bin (hosted runner image).
-        # Append defensively — if a future image moves it, the job
-        # fails fast at gcc --version rather than later at `go build`
-        # with a cryptic 'cannot find -lpg_query' link error.
-        shell: pwsh
-        run: |
-          $candidates = @(
-            'C:\ProgramData\mingw64\mingw64\bin',
-            'C:\msys64\mingw64\bin',
-            'C:\mingw64\bin'
-          )
-          foreach ($c in $candidates) {
-            if (Test-Path (Join-Path $c 'gcc.exe')) {
-              Add-Content -Path $env:GITHUB_PATH -Value $c
-              Write-Host "Using MinGW at $c"
-            }
-          }
-          # Verify once PATH is rewritten for the next step.
+      # The pinned llvm-mingw (clang and lld with the mingw-w64 runtime) the
+      # windows binary links with, cached on its pin.
+      - name: Cache llvm-mingw
+        uses: actions/cache@v4
+        with:
+          path: .llvm-mingw
+          key: llvm-mingw-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/windows/llvm-mingw-toolchain.sh') }}
 
-      - name: Verify gcc
+      - name: Stage llvm-mingw
         shell: bash
-        run: gcc --version
+        run: |
+          sh .github/scripts/windows/llvm-mingw-toolchain.sh "$GITHUB_WORKSPACE/.llvm-mingw"
+          echo "KEPLOY_LLVM_MINGW=$GITHUB_WORKSPACE/.llvm-mingw/llvm-mingw" >> "$GITHUB_ENV"
 
       - name: Build keploy.exe
         shell: bash
         env:
-          # The interception backend is pure Go, but the Postgres integration
-          # pulls pg_query_go, which is cgo.
-          CGO_ENABLED: "1"
-          GOOS: windows
-          GOARCH: amd64
+          # Built with llvm-mingw, -static, so it imports only DLLs that are
+          # part of Windows: linked by the MinGW gcc on the runner's PATH,
+          # v3.6.216 imported libwinpthread-1.dll and did not start on a
+          # machine without MinGW. build-windows-release.sh is the recipe
+          # (and checks the binary).
+          VERSION: ${{ steps.ver.outputs.version }}
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
           SERVER_URL: https://api.keploy.io
           GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
         run: |
           set -euxo pipefail
-          version="${{ steps.ver.outputs.version }}"
           mkdir -p out
-          go build \
-            -tags=viper_bind_struct \
-            -ldflags="-s -w \
-              -X main.dsn=${SENTRY_DSN_BINARY} \
-              -X main.version=${version} \
-              -X main.apiServerURI=${SERVER_URL} \
-              -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
-            -o out/keploy_windows_amd64.exe \
-            ./main.go
+          sh .github/scripts/windows/build-windows-release.sh binary amd64 out/keploy_windows_amd64.exe "${SENTRY_DSN_BINARY}"
+
+      # Started with only Windows' own directories on the PATH, so it is
+      # proven to start on a machine without MinGW (this runner has MinGW),
+      # and the Postgres parser, the C code, passes its tests linked the
+      # same way.
+      - name: Start keploy.exe with only Windows' own DLLs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sh .github/scripts/windows/build-windows-release.sh pgtest amd64 out/pgparse.test.exe
+          sh .github/scripts/windows/build-windows-release.sh probe amd64 out/probe.exe
+          pwsh -NoLogo -NoProfile -File .github/scripts/windows/check-windows-release-start.ps1 -Binary out/keploy_windows_amd64.exe -PgTest out/pgparse.test.exe -Probe out/probe.exe
 
       # Windows ships as a bare binary (goreleaser format_overrides:
       # goos=windows → format=binary). Keep the same naming without

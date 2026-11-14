@@ -164,13 +164,21 @@ builds:
       - -s -w -X main.version={{.Version}}
       - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
       - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
+      - -linkmode=external -extldflags '-static -Wl,--stack,2097152'
     # Still cgo, but no longer for the interception backend — that is pure Go
     # now. The Postgres integration pulls pg_query_go, which embeds the
-    # Postgres parser in C, so the mingw cross-toolchain stays.
+    # Postgres parser in C. Linked by llvm-mingw's clang, -static, as
+    # release.yml's build-windows links it
+    # (.github/scripts/windows/build-windows-release.sh; KEPLOY_LLVM_MINGW
+    # names the toolchain, .github/scripts/windows/llvm-mingw-toolchain.sh
+    # stages the pinned one): linked by MinGW gcc, v3.6.216 imported
+    # libwinpthread-1.dll, which Windows does not ship, and carried gcc's
+    # runtime. The 2 MiB stack reserve is gcc's linker's, pinned (lld's is
+    # 1 MiB); the Postgres parser's C code recurses on the thread's stack.
     env:
       - CGO_ENABLED=1
-      - CC=x86_64-w64-mingw32-gcc
-      - CXX=x86_64-w64-mingw32-g++
+      - CC={{ envOrDefault "KEPLOY_LLVM_MINGW" "/llvm-mingw" }}/bin/x86_64-w64-mingw32-clang
+      - CXX={{ envOrDefault "KEPLOY_LLVM_MINGW" "/llvm-mingw" }}/bin/x86_64-w64-mingw32-clang++
     goos:
       - windows
     goarch:
