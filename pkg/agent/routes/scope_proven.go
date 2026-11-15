@@ -108,8 +108,8 @@ func scopeBodyErr(what string, err error) *models.ScopeError {
 }
 
 // HandleInstance claims the run for the calling test process
-// (models.InstanceReq). The caller is read from the connection, never from
-// the body.
+// (models.InstanceReq), or for the running child the caller names that it
+// started. The caller is read from the connection, never from the body.
 func (a *Agent) HandleInstance(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.proven()
 	if !ok {
