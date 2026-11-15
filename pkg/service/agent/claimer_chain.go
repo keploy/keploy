@@ -32,3 +32,28 @@ func descendsByCreation(pid, ancestor int, parent func(pid int) (int, bool), cre
 	}
 	return false
 }
+
+// directChild is child's creation time when it is a live process whose
+// parent is parent, itself a live process created no later than it; false
+// otherwise. parent and created are read as descendsByCreation reads them.
+// The child's time is read first, so a child that exits while it is checked
+// is answered with its own time, which the pid's next process does not have:
+// the claim it makes is of a process that has exited. On Windows a process
+// keeps the pid of a parent that has exited, and a later process can take
+// that pid, but it was created after the child, so it is never taken for the
+// child's parent.
+func directChild(child, parent int, parentOf func(pid int) (int, bool), created func(pid int) (uint64, bool)) (uint64, bool) {
+	born, alive := created(child)
+	if !alive {
+		return 0, false
+	}
+	ppid, found := parentOf(child)
+	if !found || ppid != parent {
+		return 0, false
+	}
+	pborn, alive := created(parent)
+	if !alive || pborn > born {
+		return 0, false
+	}
+	return born, true
+}

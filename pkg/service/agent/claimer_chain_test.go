@@ -148,3 +148,76 @@ func TestDescendsByCreationEndsAtNoPIDAndOnALoop(t *testing.T) {
 		t.Error("a process descends from pid -1")
 	}
 }
+
+// kin is a process of a made-up process table for directChild: its parent
+// (unanswered when noParent), its creation time, and whether it is alive.
+// What an unanswered read comes with is kept, so a check that used it anyway
+// would take it.
+type kin struct {
+	ppid     int
+	created  uint64
+	dead     bool
+	noParent bool
+}
+
+func directChildIn(table map[int]kin, child, parent int) (uint64, bool) {
+	return directChild(child, parent,
+		func(p int) (int, bool) {
+			e, ok := table[p]
+			return e.ppid, ok && !e.noParent
+		},
+		func(p int) (uint64, bool) {
+			e, ok := table[p]
+			return e.created, ok && !e.dead
+		})
+}
+
+// A claim for another process is taken only for a running child of the
+// caller, created no earlier than it, and answers the child's own creation
+// time: never a grandchild, a process of another parent, the caller itself,
+// an ended child, a child whose parent pid a later process took, or a child
+// or parent the kernel does not answer for.
+func TestDirectChildTakesOnlyARunningChildOfTheCaller(t *testing.T) {
+	table := map[int]kin{
+		50:  {ppid: 4, created: 100},
+		100: {ppid: 50, created: 200},                  // the launcher
+		140: {ppid: 100, created: 300},                 // the test binary it started
+		141: {ppid: 100, created: 200},                 // started at the launcher's own tick
+		160: {ppid: 140, created: 400},                 // the test binary's child
+		170: {ppid: 50, created: 260},                  // another program
+		180: {ppid: 100, created: 350, dead: true},     // a child that ended
+		190: {ppid: 120, created: 250},                 // a child of an earlier holder of pid 120
+		120: {ppid: 50, created: 500},                  // a later process that took pid 120
+		210: {ppid: 220, created: 300},                 // a child whose parent is unanswered
+		230: {ppid: 240, created: 300},                 // a child of an ended process
+		240: {ppid: 50, created: 100, dead: true},      // that ended process
+		250: {ppid: 100, created: 300, noParent: true}, // a child whose parent read fails
+	}
+	for _, tc := range []struct {
+		name          string
+		child, parent int
+		want          bool
+	}{
+		{"the launcher's child", 140, 100, true},
+		{"a child created at the launcher's tick", 141, 100, true},
+		{"the launcher's grandchild", 160, 100, false},
+		{"another program", 170, 100, false},
+		{"the launcher itself", 100, 100, false},
+		{"the launcher's parent", 50, 100, false},
+		{"a child that ended", 180, 100, false},
+		{"a child of a pid a later process took", 190, 120, false},
+		{"a child whose parent is unanswered", 210, 220, false},
+		{"a child of an ended process", 230, 240, false},
+		{"a child whose parent read fails", 250, 100, false},
+		{"a pid no process has", 999, 100, false},
+	} {
+		got, ok := directChildIn(table, tc.child, tc.parent)
+		if ok != tc.want {
+			t.Errorf("%s: directChild(%d, %d) = %d, %v, want %v", tc.name, tc.child, tc.parent, got, ok, tc.want)
+			continue
+		}
+		if want := map[bool]uint64{true: table[tc.child].created}[ok]; got != want {
+			t.Errorf("%s: directChild(%d, %d) answered time %d, want %d", tc.name, tc.child, tc.parent, got, want)
+		}
+	}
+}

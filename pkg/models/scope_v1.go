@@ -26,7 +26,7 @@ const TestPIDEnv = "KEPLOY_TEST_PID"
 // pool slice the instance consumes outside tests, and the path its tests' IDs
 // carry: for Go, the test binary's package directory relative to the project
 // directory. The caller's process is read from the connection, never from
-// the body.
+// the body; Child names, at most, a running process the caller started.
 type InstanceReq struct {
 	Key string `json:"key"`
 	// Dir is the test process's working directory, absolute: where its tests
@@ -42,6 +42,14 @@ type InstanceReq struct {
 	// a live worker's (ScopeErrWorkersMismatch), so whether a run is taken
 	// never depends on how its workers happen to overlap.
 	Workers int `json:"workers,omitempty"`
+	// Child, when set, claims for a test process the caller started and
+	// runs as its child, before it runs (keploy's Go launcher on Windows,
+	// which has no exec that keeps the launcher's pid). The agent takes the
+	// claim as the child's only when the kernel names the caller as the
+	// child's parent, the child runs, and the caller was created no later
+	// than it (a pid another process took is not the child's parent);
+	// otherwise it refuses it (ScopeErrNotInRun). 0 claims for the caller.
+	Child int `json:"child,omitempty"`
 }
 
 // InstanceResp answers POST /agent/instance. With one test process per run
