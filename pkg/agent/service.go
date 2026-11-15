@@ -403,6 +403,25 @@ type CallerSocketReporter interface {
 	CallerSocketWhy(pid int, client, server netip.AddrPort) string
 }
 
+// AppSendCounter is the optional extension implemented by hooks that count,
+// from inside the application's process, what it hands to each connection it
+// made to the proxy: Windows's shim, where no table the agent may read as a
+// standard user says how much an application socket has written. The proxy
+// asks it for the bytes a test's end waits for (PairedBytesWaiter); with
+// hooks that do not implement it, a proxy that needs it cannot count them.
+type AppSendCounter interface {
+	// AppSent is what the application had handed to its connection from
+	// app to the proxy when it is read: done, every byte a send call
+	// completed with (in the kernel's hands, on its way to the proxy);
+	// started, every byte handed to a send call, never below what the
+	// proxy's side can have received; pending, the send calls whose
+	// outcome is not known yet (done counts none of them). It fails when
+	// the counts cannot be told: no count is kept for the connection, its
+	// process cannot be read, or another process may send on it. It never
+	// waits.
+	AppSent(app netip.AddrPort) (done, started uint64, pending uint32, err error)
+}
+
 // ListenerCountTaker is the optional extension implemented by proxies that can
 // have their listener counted by the hooks. The agent hands it the hooks
 // (ListenerCounter) whenever they can count, switch or not, before

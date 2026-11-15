@@ -332,6 +332,12 @@ func (targetBase) received(ps proxySide) uint64 { return ps.received }
 // exactly, and the events the wait waits on mark every change (orphanLooks).
 func (targetBase) looks() bool { return false }
 
+// looksUnmoved is never asked on Linux: no wait looks at a target on its own
+// (looks), only at orphans.
+func looksUnmoved(apps string) string {
+	return "keploy looked again at the connections to the proxy from " + apps + " and the proxy's side received no more"
+}
+
 // pairReached says whether t needs no more waiting: the proxy's side received
 // what the application had written, or it never will (a capture loss).
 func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
@@ -790,3 +796,8 @@ func (p *Proxy) pairedBytesUnsupported(err error) {
 		zap.Error(err),
 		zap.String("next_step", "the kernel needs sock_diag for TCP (inet_diag and tcp_diag) in the agent's network namespace"))
 }
+
+// resetAfterSent says whether err, a read's, is the application's reset,
+// which the kernel takes only at the sequence number it expects next (RFC
+// 5961): every byte the application had sent had arrived (readPlainOnItsWay).
+func resetAfterSent(err error) bool { return errors.Is(err, unix.ECONNRESET) }

@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package proxy
 
@@ -15,14 +15,13 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
 // The close of a paired connection, on every platform whose proxy pairs them
-// (Linux and macOS): the unread count (readUnread), the proxy's side
+// (Linux, macOS and Windows): the unread count (readUnread), the proxy's side
 // (readProxySide), what the application had written as the close began
 // (noteWroteAtClose), whether the proxy's side had taken the application's FIN
 // or reset (peerEnded) and the data its count holds (dataReceived) are each
@@ -197,7 +196,7 @@ var plainOnItsWay = readPlainOnItsWay
 // sent, or dropped by such an abort: the read ends on an event, not a clock.
 func readPlainOnItsWay(ctx context.Context, conn *net.TCPConn) (data bool, err error) {
 	data, err = unreadData(ctx, conn, conn)
-	if errors.Is(err, unix.ECONNRESET) {
+	if resetAfterSent(err) {
 		return false, nil
 	}
 	return data, err
