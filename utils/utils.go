@@ -2157,54 +2157,6 @@ func isValidGRPCIdentifier(name string) bool {
 	return true
 }
 
-func GetContainerIPv4() (string, error) {
-	// Get all network interfaces
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-
-	// Iterate over the interfaces
-	for _, i := range interfaces {
-		// Skip down or loopback interfaces
-		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		// Get the addresses for the current interface
-		addrs, err := i.Addrs()
-		if err != nil {
-			continue
-		}
-
-		// Iterate over the addresses
-		for _, addr := range addrs {
-			var ip net.IP
-			// The address can be of type *net.IPNet or *net.IPAddr
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				// Check if it's an IPv4 address
-				if ipnet.IP.To4() != nil {
-					ip = ipnet.IP
-				}
-			}
-
-			if ip != nil {
-				// Found a valid IPv4 address, return it
-				return ip.String(), nil
-			}
-		}
-	}
-
-	// Tagged, so the agent that cannot start without it says so in its exit
-	// status: a container with no IPv4 address but loopback's (docker
-	// --network none, an IPv6-only network) is the environment to change, not
-	// a privilege to grant. Only an agent started with --is-docker asks (its
-	// hooks, as they load): they send the connections of the applications it
-	// serves to this address. A native one is reached over loopback and needs
-	// no address of its own.
-	return "", fmt.Errorf("%w: could not find a non-loopback IP for the container", ErrEnvironmentUnsupported)
-}
-
 // GetFullCommandUsed is the command line keploy was run with, as a test
 // report records it (cmdUsed): os.Args, its secrets redacted by RedactArgv,
 // the redactor of every line that names a command whole (the command given

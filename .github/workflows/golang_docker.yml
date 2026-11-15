@@ -153,6 +153,67 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # A keploy agent records and replays an application on a single-stack IPv6
+  # Kubernetes cluster (kind, ipFamily ipv6), as the application Pod's native
+  # sidecar (`agent --is-docker`, the image's entrypoint). The agent looked
+  # only for an IPv4 address of its container to have the kernel send the
+  # application's connections to, found none in an IPv6-only Pod, and exited
+  # at start: nothing was recorded or replayed there. A driver Pod plays
+  # keploy's client over the agent's API at the Pod's IPv6 address: it records
+  # the application's test cases and its call to a dependency, deletes the
+  # dependency, and replays them against a replaying agent. Once with the
+  # proven switch unset and once with it on (KEPLOY_PROVEN=1, the agents'
+  # exact view in verify mode): the proven model tracks every connection
+  # between the application and the agent's proxy, and here each one is
+  # native IPv6. Only the PR's image: the published one is what this guards
+  # against.
+  agent_ipv6_only_kind:
+    # A healthy run takes a few minutes, most of it the cluster's start.
+    timeout-minutes: 30
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        proven: ['', '1']
+    name: agent on an IPv6-only kind cluster (image_build${{ matrix.proven == '1' && ', KEPLOY_PROVEN' || '' }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - name: Install kind and kubectl
+        uses: helm/kind-action@v1.12.0
+        with:
+          install_only: true
+          version: v0.27.0
+          kubectl_version: v1.32.2
+
+      - name: Record and replay on an IPv6-only cluster
+        env:
+          KEPLOY_IMAGE: ghcr.io/keploy/keploy:v3-dev
+          KEPLOY_PROVEN: ${{ matrix.proven }}
+          KEPLOY_EXACT_VIEW_VERIFY: '1'
+          ARTIFACTS: ${{ runner.temp }}/ipv6-only-kind
+        run: bash tests/e2e/ipv6-only-kind/run.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-ipv6-only-kind-logs${{ matrix.proven == '1' && '-proven' || '' }}
+          path: ${{ runner.temp }}/ipv6-only-kind/
+          if-no-files-found: warn
+          retention-days: 7
+
   # keploy record --disable-tele looks no telemetry host up in Docker: the
   # agent container, a keploy process of its own that pings telemetry at its
   # start, never got the CLI's --disable-tele (its alias was built from a

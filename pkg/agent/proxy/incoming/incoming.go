@@ -24,6 +24,7 @@ import (
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -392,9 +393,10 @@ type goTCPIngressHook struct {
 }
 
 type tcpForwarderState struct {
-	listener net.Listener
-	cancel   context.CancelFunc
-	done     chan struct{} // closed when the accept loop exits
+	listener  net.Listener // at 0.0.0.0, the port's IPv4 calls
+	listener6 net.Listener // at [::], the port's IPv6 calls; nil with the hold (listenIngressIPv6)
+	cancel    context.CancelFunc
+	done      chan struct{} // closed when the accept loops exit
 }
 
 // ingressTargetPollInterval is how often a call that waits for the app to
@@ -421,36 +423,40 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	// it only delayed the forwarder, a loaded host timed those tries out
 	// against an app that listened and logged a false WARN, and each start
 	// opened and closed a connection to the app.) When nothing holds the
-	// port until this bind (no hold: a kernel without sk_lookup), a call is
-	// refused only before it. When keploy holds the port from inside the
-	// app's bind (BPF sk_lookup), its park serves the port until this
-	// forwarder is registered below; the bind finds at once a port another
-	// listener holds already (not keploy's), and the hold yields it to that
-	// listener.
+	// port until this bind (no hold: a kernel without sk_lookup, and the
+	// macOS and Windows agents), a call is refused only before it. When
+	// keploy holds the port from inside the app's bind (BPF sk_lookup), its
+	// park serves the port until this forwarder is registered below; the
+	// bind finds at once a port another listener holds already (not
+	// keploy's), and the hold yields it to that listener.
 	held := h.pm.ingressHeld()
-	listener, err := h.bindIngress(ctx, origAppAddr)
+	listener, err := h.bindIngress(ctx, "tcp4", origAppAddr)
 	if err != nil {
-		if held && errors.Is(err, syscall.EADDRINUSE) {
+		if held && neterr.IsAddrInUse(err) {
 			return h.yieldIngressPort(origPort, newPort, "IPv4", err)
 		}
 		return err
 	}
-	// The forwarder listens on IPv4 only, so its bind does not find a
-	// listener that holds the port on IPv6 alone ([::1]:P, or [::]:P with
-	// IPV6_V6ONLY). The hold takes the port's IPv6 calls for the whole run
-	// where the app's sockets take IPv6 (an IPv6 socket on :: or on an IPv6
-	// address; not one on a v4-mapped address, which takes IPv4 only), so
-	// check each of those addresses as the app's own bind did: without
-	// keploy, that bind would have failed there.
+	// With the hold, the forwarder listens on IPv4 only, so its bind does
+	// not find a listener that holds the port on IPv6 alone ([::1]:P, or
+	// [::]:P with IPV6_V6ONLY). The hold takes the port's IPv6 calls for the
+	// whole run where the app's sockets take IPv6 (an IPv6 socket on :: or on
+	// an IPv6 address; not one on a v4-mapped address, which takes IPv4
+	// only), so check each of those addresses as the app's own bind did:
+	// without keploy, that bind would have failed there.
 	if held {
 		for _, addr := range h.pm.appIPv6Binds(origPort) {
-			if perr := ingressIPv6Probe(addr, origPort); errors.Is(perr, syscall.EADDRINUSE) {
+			if perr := ingressIPv6Probe(addr, origPort); neterr.IsAddrInUse(perr) {
 				_ = listener.Close()
 				return h.yieldIngressPort(origPort, newPort, "IPv6", fmt.Errorf("bind [%s]:%d: %w", addr, origPort, perr))
 			} else if perr != nil {
 				logger.Debug("could not check the application's port for an IPv6 listener; holding it", zap.Uint16("port", origPort), zap.Stringer("address", addr), zap.Error(perr))
 			}
 		}
+	}
+	var listener6 net.Listener
+	if !held {
+		listener6 = h.listenIngressIPv6(ctx, origPort, newPort)
 	}
 
 	// If the agent is shutting down (the context was canceled as it bound),
@@ -462,66 +468,92 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	// canceled context means no ingress traffic will be served anyway.
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		_ = listener.Close()
+		if listener6 != nil {
+			_ = listener6.Close()
+		}
 		logger.Debug("Skipping ingress forwarder start; agent context canceled (shutting down)",
 			zap.String("target", newAppAddr), zap.Error(ctxErr))
 		return ctxErr
 	}
-	tcpListener := listener.(*net.TCPListener)
 
 	// Steer the moved port's connections to this forwarder, now that it
 	// listens, instead of to the park (a no-op when nothing is held). The
 	// park stops seeing the port the moment this returns.
 	h.pm.registerIngressForwarder(origPort, listener)
 
-	logger.Debug("Started Ingress forwarder", zap.String("listening_on", origAppAddr), zap.String("forwarding_to", newAppAddr))
+	listeningOn := []string{origAppAddr}
+	if listener6 != nil {
+		listeningOn = append(listeningOn, listener6.Addr().String())
+	}
+	logger.Debug("Started Ingress forwarder", zap.Strings("listening_on", listeningOn), zap.String("forwarding_to", newAppAddr))
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		// Release the listener (and its bound port) whenever the accept loop exits,
-		// even if StopIngress is never called for this forwarder (e.g. it raced with
-		// shutdown and missed StopAll's snapshot). Close is idempotent — StopIngress
-		// may also close it — and this runs before close(done) so a StopIngress
-		// waiter observes the port freed. Prevents the port from lingering post-exit.
-		defer func() { _ = listener.Close() }()
-		// Shared with the park's calls to this port (portSem).
-		sem := h.pm.portSem(origPort)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			err = tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
-			if err != nil {
-				logger.Error("Failed to set deadline on ingress listener", zap.Error(err))
-				return
-			}
-			clientConn, err := listener.Accept()
-			if err != nil {
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					continue
-				}
-				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
-				return
-			}
-
-			go func(cc net.Conn) {
-				h.pm.handleConnection(ctx, cc, newAppAddr, logger, h.pm.tcChan, sem, origPort)
-			}(clientConn)
+	// Shared with the park's calls to this port (portSem).
+	sem := h.pm.portSem(origPort)
+	var loops sync.WaitGroup
+	for _, l := range []net.Listener{listener, listener6} {
+		if l != nil {
+			loops.Add(1)
+			go func() {
+				defer loops.Done()
+				h.acceptIngress(ctx, l, newAppAddr, sem, origPort)
+			}()
 		}
+	}
+	go func() {
+		loops.Wait()
+		close(done)
 	}()
 
 	h.mu.Lock()
 	h.forwarders[origPort] = &tcpForwarderState{
-		listener: listener,
-		cancel:   cancel,
-		done:     done,
+		listener:  listener,
+		listener6: listener6,
+		cancel:    cancel,
+		done:      done,
 	}
 	h.mu.Unlock()
 
 	return nil
+}
+
+// acceptIngress is the accept loop of one of a forwarder's listeners: each
+// call it accepts is forwarded to the app at newAppAddr, until ctx ends or
+// the listener is closed.
+func (h *goTCPIngressHook) acceptIngress(ctx context.Context, listener net.Listener, newAppAddr string, sem chan struct{}, origPort uint16) {
+	logger := h.pm.logger
+	tcpListener := listener.(*net.TCPListener)
+	// Release the listener (and its bound port) whenever the accept loop exits,
+	// even if StopIngress is never called for this forwarder (e.g. it raced with
+	// shutdown and missed StopAll's snapshot). Close is idempotent — StopIngress
+	// may also close it — and this runs before the forwarder's done is closed
+	// so a StopIngress waiter observes the port freed. Prevents the port from
+	// lingering post-exit.
+	defer func() { _ = listener.Close() }()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		err := tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+		if err != nil {
+			logger.Error("Failed to set deadline on ingress listener", zap.Error(err))
+			return
+		}
+		clientConn, err := listener.Accept()
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			logger.Debug("Stopping ingress accept loop.", zap.Error(err))
+			return
+		}
+
+		go func(cc net.Conn) {
+			h.pm.handleConnection(ctx, cc, newAppAddr, logger, h.pm.tcChan, sem, origPort)
+		}(clientConn)
+	}
 }
 
 // errIngressPortYielded is StartIngress's error for a port another listener
@@ -578,7 +610,55 @@ func (h *goTCPIngressHook) StopIngress(origPort uint16) error {
 	h.pm.unregisterIngressForwarder(origPort)
 	st.cancel()
 	_ = st.listener.Close()
+	if st.listener6 != nil {
+		_ = st.listener6.Close()
+	}
 	<-st.done
+	return nil
+}
+
+// listenIngressIPv6 is, without the hold, the forwarder's listener for the
+// port's IPv6 calls: at [::]:P, IPv6 only (Go sets IPV6_V6ONLY for "tcp6"),
+// beside its IPv4 one at 0.0.0.0:P. With the hold there is none: the hold
+// takes the port's IPv6 calls, from the application's bind on, for the
+// whole run (its lookup can hand an IPv6 call only to an IPv6 socket, the
+// park's). Without it (a kernel without sk_lookup, and the macOS and Windows
+// agents) nothing else would take them: the application's bind on :: was
+// moved off the port, so its IPv6 calls were refused for the whole run, and
+// on a network with no IPv4 (a single-stack IPv6 Pod) every call is one. So
+// the forwarder takes them, whichever family the application listens on:
+// one that listens on IPv4 alone is reached over IPv6 too while keploy
+// records.
+//
+// Two listeners, not one on both families: the IPv4 one is the forwarder's
+// listener as it always was, so which other sockets can bind the port's
+// IPv4 beside it, and which the forwarder can bind beside, are unchanged on
+// every platform. A socket on both families does not keep others off the
+// port's IPv4 everywhere: on Windows a later bind of 0.0.0.0:P succeeds
+// beside one, and takes the port's IPv4 calls; on macOS one binds beside a
+// listener at 0.0.0.0:P.
+//
+// When another listener holds the port's IPv6 (at [::]:P, IPv6 only; on
+// Linux also at one IPv6 address), it keeps the port's IPv6 calls, as it did
+// before this change; when the bind fails for another reason (no IPv6
+// here), nothing takes them, as before. Either way the forwarder takes the
+// port's IPv4 calls alone, as it always did, and says why at debug level:
+// nothing is lost compared with before, as with the hold for an
+// application bound on IPv4 alone. nil in both cases.
+func (h *goTCPIngressHook) listenIngressIPv6(ctx context.Context, origPort, newPort uint16) net.Listener {
+	ln, err := h.bindIngress(ctx, "tcp6", net.JoinHostPort("::", strconv.Itoa(int(origPort))))
+	switch {
+	case err == nil:
+		return ln
+	case neterr.IsAddrInUse(err):
+		// On Windows the bind fails with WSAEADDRINUSE, which
+		// syscall.EADDRINUSE does not match.
+		h.pm.logger.Debug("another listener holds the application's port on IPv6, so keploy leaves the port's IPv6 calls to it and takes only the port's IPv4 calls",
+			zap.Uint16("port", origPort), zap.String("family", "IPv6"), zap.Uint16("application_listens_on", newPort), zap.Error(err))
+	default:
+		h.pm.logger.Debug("keploy cannot listen on the application's port over IPv6, so it takes only the port's IPv4 calls",
+			zap.Uint16("port", origPort), zap.Error(err))
+	}
 	return nil
 }
 
@@ -586,11 +666,11 @@ func (h *goTCPIngressHook) StopIngress(origPort uint16) error {
 // listener is MPTCP by default on a kernel with MPTCP, and the lookup's
 // sockhash cannot take an MPTCP socket), aborting if the context was canceled
 // while it bound so a late bind does not leave the port held.
-func (h *goTCPIngressHook) bindIngress(ctx context.Context, addr string) (net.Listener, error) {
+func (h *goTCPIngressHook) bindIngress(ctx context.Context, network, addr string) (net.Listener, error) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
-	listener, err := plaintcp.Listen(ctx, "tcp4", addr)
+	listener, err := plaintcp.Listen(ctx, network, addr)
 	if err != nil {
 		return nil, fmt.Errorf("ingress proxy failed to listen on %s: %w", addr, err)
 	}
