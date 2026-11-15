@@ -194,3 +194,14 @@ jobs:
       - name: Test the machine's DNS resolvers (amd64)
         run: go test -count=1 -v -run "TestOnWindowsARecordingAsksEachAdapterAsWindowsDoes|TestOnWindowsTheRecordingAsksTheMachinesResolvers|TestOnWindowsTheAdaptersAreReadWhateverTheFirstBufferSize|TestOnWindowsAFailedAdapterReadIsAnError|TestOnWindowsEachAdapterAndServerOfTheListIsRead" ./pkg/agent/proxy/
         shell: cmd
+
+      # The native agent's watch of the keploy client that started it
+      # (cli/watch_parent_windows.go): the agent command runs with
+      # --client-pid naming a stand-in client and must end once that client
+      # is killed, and not before; a reused pid, a pid no process has, a
+      # client it may not open and a failed wait are each handled as the
+      # rows say. Only these rows of ./cli run here: on Windows the package's
+      # config tests fail on a file mode and one waits on a prompt.
+      - name: Test the agent's watch of its client (amd64)
+        run: go test -count=1 -v -run "TestAnAgentEndsWhenTheClientThatStartedItIsKilled|TestOnWindows" ./cli/
+        shell: cmd
