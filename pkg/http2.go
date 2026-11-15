@@ -734,7 +734,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// Determine which port to use for test execution.
 	var err error
 	recorded := authority
-	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
+	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger.With(zap.String("testcase", tc.Name)))
 	if err != nil {
 		return nil, err
 	}
@@ -772,7 +772,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// the exchange (pingWatch tells it which: never a keepalive) cuts it.
 	var dialed net.Conn = conn
 	var pings *pingWatch
-	answer := newAnswerWatch(cfg)
+	answer := newAnswerWatch(ctx, cfg)
 	defer answer.stop()
 	defer answer.waiting()()
 	answer.closeOnCut(conn)
@@ -937,8 +937,10 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			// mock. Stop draining and record it below, rather than discarding
 			// a partial stream and the reason it ended.
 			drainErr = err
+			// Its code, never its message: the app's server writes that
+			// (an echo of what it refused); the mock records it.
 			logger.Debug("gRPC response stream ended with an error; recording what arrived",
-				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.Error(err))
+				zap.String("method", path), zap.Int("messages", len(respMsgs)), zap.String("code", status.Code(err).String()))
 			break
 		}
 		respMsgs = append(respMsgs, createLengthPrefixedMessage(responseMsg.data))

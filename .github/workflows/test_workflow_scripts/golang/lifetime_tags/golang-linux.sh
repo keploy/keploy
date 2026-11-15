@@ -383,9 +383,40 @@ expect_pass() {
         grep -nE 'no matching mock|ERROR' "$2" | head -20
     fi
 }
-# expect_miss <step> <test id> <status> <log> <pattern> [hint]: the test got
-# status, and its log reports the call that got no recorded answer (pattern),
-# and, when hint is set, names the keploy.yaml rule that declares it.
+# miss_raw <log>: each of keploy's miss lines in log, whole (its time, level,
+# message and every field), its colours taken out.
+miss_raw() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -aF $'\tmock mismatch: no matching mock for outgoing call\t'; }
+# miss_lines <log> [field]: each of keploy's miss lines in log, read from the
+# JSON its tail holds, by its fields, never by their order: the compact
+# object of its protocol, destination, call (the call's shape: an HTTP call
+# is its method and its path with each segment {}, a statement is its text
+# with each literal ?) and path_tag (an HTTP call's; null for another), one
+# per line; or, with field, that field of each, as its text.
+miss_lines() {
+    local line
+    miss_raw "$1" |
+        while IFS= read -r line; do
+            if [ -n "${2:-}" ]; then
+                printf '%s\n' "${line##*$'\t'}" | yq -p json -oy -r ".$2"
+            else
+                printf '%s\n' "${line##*$'\t'}" | yq -p json -o json -I=0 '{"protocol": .protocol, "destination": .destination, "call": .call, "path_tag": .path_tag}'
+            fi
+        done
+}
+# unmatched <test id>: the test's whole list of unmatched calls in the newest
+# report, each by its summary and its path tag, as compact JSON.
+unmatched() { T="$1" yq -o=json -I=0 '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]? | {"call": .actual_summary, "path_tag": .path_tag}]' "$(REPORT)" 2>/dev/null; }
+# expect_miss <step> <test id> <status> <log> <protocol> <destination> <shape>
+# <call> [hint]: the test got status; the test's report names the call that
+# got no recorded answer whole (call) as its only unmatched call, and, for an
+# HTTP call, beside a path tag; keploy's miss line names it by its protocol,
+# destination, shape and that tag, and no part of a miss line (its message,
+# its next step, its closest mock, any field) names its path (a statement's
+# text), nor any literal the statement quotes, alone. An HTTP call's
+# console heading names it whole beside the same tag. When hint is set, the
+# miss line's advice names keploy.yaml's sessionCalls and points to the
+# console's Hint for the path by the tag, and that Hint, under the call's
+# heading, quotes the path whole, as the log no longer does.
 expect_miss() {
     if [ "$(test_status "$2")" != "$3" ]; then
         fail "$1: $2 must be $3 (exit $RC, status $(test_status "$2"))"
@@ -393,9 +424,49 @@ expect_miss() {
     if [ "$3" = FAILED ] && [ "$RC" -eq 0 ]; then
         fail "$1: keploy test exited 0 with $2 FAILED"
     fi
-    grep -qE "$5" "$4" || fail "$1: the log reports no miss matching '$5'"
-    if [ -n "${6:-}" ]; then
-        grep -q 'sessionCalls' "$4" || fail "$1: the miss does not name keploy.yaml's sessionCalls"
+    local list tag want line heading path
+    list=$(unmatched "$2")
+    tag=$(printf '%s' "$list" | yq -p json -o json -I=0 '.[0].path_tag')
+    tag=${tag//\"/}
+    if [ "$5" = HTTP ]; then
+        [[ "$tag" =~ ^#[0-9a-f]{12}$ ]] || fail "$1: the report gives $2's unmatched call no path tag: $list"
+        want=$(C="$8" G="$tag" yq -n -o=json -I=0 '[{"call": strenv(C), "path_tag": strenv(G)}]')
+        line=$(P="$5" D="$6" S="$7" G="$tag" yq -n -o=json -I=0 '{"protocol": strenv(P), "destination": strenv(D), "call": strenv(S), "path_tag": strenv(G)}')
+    else
+        want=$(C="$8" yq -n -o=json -I=0 '[{"call": strenv(C), "path_tag": null}]')
+        line=$(P="$5" D="$6" S="$7" yq -n -o=json -I=0 '{"protocol": strenv(P), "destination": strenv(D), "call": strenv(S), "path_tag": null}')
+    fi
+    [ "$list" = "$want" ] || fail "$1: the report's unmatched calls of $2 are $list, want $want"
+    miss_lines "$4" | grep -xF "$line" >/dev/null ||
+        fail "$1: the log reports no miss naming $line (its miss lines: $(miss_lines "$4" | tr '\n' ' '))"
+    path=${8#* }
+    path=${path%%\?*}
+    [ -n "$(miss_raw "$4")" ] || fail "$1: the log has no miss line"
+    if miss_raw "$4" | grep -F "$path" >/dev/null; then
+        fail "$1: a miss line names the call's path $path: $(miss_raw "$4" | grep -F "$path" | cut -c1-600)"
+    fi
+    # Each literal the call's statement quotes ('tax_rate'), alone, by its
+    # text: a line that names a value without the rest of the statement
+    # leaks it too.
+    local lit
+    while IFS= read -r lit; do
+        lit=${lit#\'}
+        lit=${lit%\'}
+        [ -n "$lit" ] || continue
+        if miss_raw "$4" | grep -F "$lit" >/dev/null; then
+            fail "$1: a miss line names the statement's literal $lit: $(miss_raw "$4" | grep -F "$lit" | cut -c1-600)"
+        fi
+    done < <(printf '%s\n' "$8" | grep -oE "'[^']+'")
+    [ "$5" = HTTP ] || return 0
+    heading="  Mock mismatch: [HTTP] $8 [path tag $tag]  →  $6"
+    sed 's/\x1b\[[0-9;]*m//g' "$4" | grep -F "$heading" >/dev/null ||
+        fail "$1: the console names no miss as '$heading'"
+    if [ -n "${9:-}" ]; then
+        miss_lines "$4" next_step | grep -F "sessionCalls: [{host: \"$6\", method: \"${8%% *}\", pathPrefix: <the path keploy's console Hint and report name for [path tag $tag]>}]" >/dev/null ||
+            fail "$1: the miss line's advice does not name keploy.yaml's sessionCalls with the path by its tag $tag: $(miss_lines "$4" next_step | cut -c1-600)"
+        sed 's/\x1b\[[0-9;]*m//g' "$4" | H="$heading" awk 'index($0, ENVIRON["H"]) == 1 { on = 1; next } /^  Mock mismatch: / { on = 0 } on && /^  Hint: / { print; on = 0 }' |
+            grep -F "pathPrefix: \"$path\"" >/dev/null ||
+            fail "$1: the console's Hint for the call does not quote pathPrefix: \"$path\""
     fi
 }
 
@@ -449,8 +520,13 @@ if is_build "$RECORD_BIN"; then
     stated MySQL COM_STMT_CLOSE '.*' connection
 fi
 
-TOKEN_MISS='no matching mock for outgoing call.*POST /oauth/token'
-RATE_MISS="no matching mock for outgoing call.*SELECT v FROM settings WHERE k = 'tax_rate'"
+# The token call and the rate read: the miss line names each by its protocol,
+# destination and shape (the token call also by its path tag), and the
+# report names it whole.
+TOKEN_MISS=(HTTP "127.0.0.1:$UP" 'POST /{}/{}')
+TOKEN_CALL='POST /oauth/token'
+RATE_MISS=(MySQL 127.0.0.1:3306 'COM_QUERY SELECT v FROM settings WHERE k = ?')
+RATE_CALL="COM_QUERY SELECT v FROM settings WHERE k = 'tax_rate'"
 judged=true
 is_build "$REPLAY_BIN" || judged=false
 
@@ -464,7 +540,7 @@ if replay only-profile fresh get-profile-1; then
     if [ "$judged" = false ]; then
         echo "get-profile-1 alone, replayed by a release: exit $RC, status $(set_status) (not judged)"
     elif [ "$states" = true ]; then
-        expect_miss "get-profile-1 alone" get-profile-1 FAILED only-profile.log "$TOKEN_MISS" hint
+        expect_miss "get-profile-1 alone" get-profile-1 FAILED only-profile.log "${TOKEN_MISS[@]}" "$TOKEN_CALL" hint
     else
         expect_pass "get-profile-1 alone, on a recording made before" only-profile.log
     fi
@@ -474,7 +550,7 @@ if replay only-quote fresh get-quote-1; then
     if [ "$judged" = false ]; then
         echo "get-quote-1 alone, replayed by a release: exit $RC, status $(set_status) (not judged)"
     elif [ "$states" = true ]; then
-        expect_miss "get-quote-1 alone" get-quote-1 FAILED only-quote.log "$RATE_MISS"
+        expect_miss "get-quote-1 alone" get-quote-1 FAILED only-quote.log "${RATE_MISS[@]}" "$RATE_CALL"
     else
         expect_pass "get-quote-1 alone, on a recording made before" only-quote.log
     fi
@@ -491,9 +567,9 @@ if replay mapped-profile mapped get-profile-1; then
     if [ "$judged" = false ]; then
         echo "get-profile-1 alone by its mapping, replayed by a release: exit $RC, status $(set_status) (not judged)"
     elif [ "$states" = true ]; then
-        expect_miss "get-profile-1 alone by its mapping" get-profile-1 FAILED mapped-profile.log "$TOKEN_MISS" hint
+        expect_miss "get-profile-1 alone by its mapping" get-profile-1 FAILED mapped-profile.log "${TOKEN_MISS[@]}" "$TOKEN_CALL" hint
     else
-        expect_miss "get-profile-1 alone by its mapping, on a recording made before" get-profile-1 FAILED mapped-profile.log "$TOKEN_MISS"
+        expect_miss "get-profile-1 alone by its mapping, on a recording made before" get-profile-1 FAILED mapped-profile.log "${TOKEN_MISS[@]}" "$TOKEN_CALL"
     fi
 fi
 # 7. By its mapping, the token call declared shared.

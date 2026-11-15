@@ -201,7 +201,10 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			return resp, err
 		}
 
-		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
+		// The test case by its name and its request's shape, never the
+		// test case: it holds the recorded headers, bodies and metadata,
+		// the app's credentials among them.
+		h.logger.Debug("Simulating HTTP request", zap.String("testcase", tc.Name), zap.Any("metadata", utils.URLLogMeta(string(tc.HTTPReq.Method), tc.HTTPReq.URL)))
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
 		if err := h.instrumentation.AfterSimulate(hookCtx, tc.Name, testSetID); err != nil {
@@ -215,7 +218,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			return nil, err
 		}
 
-		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
+		h.logger.Debug("Simulating gRPC request", zap.String("testcase", tc.Name), zap.String("method", tc.GrpcReq.Headers.PseudoHeaders[":path"]))
 		hostToUse := h.cfg.Test.Host
 		if hostToUse == "" {
 			hostToUse = "localhost"
@@ -297,7 +300,10 @@ func (h *Hooks) noteWhereSent(target *url.URL, host, recordedHost string) {
 	if recordedHost != "" && recordedHost != host {
 		h.recordedHostUnsent.Do(func() {
 			h.logger.Info("the tests ask for the app under the address they are sent to, not under the Host header they were recorded with",
-				zap.String("host", host), zap.String("recordedHost", recordedHost),
+				// The recorded Host header by its labels' shape: the app's
+				// traffic named it (models.HostShape); the base path's is
+				// the user's.
+				zap.String("host", host), zap.String("recordedHost", models.HostShape(recordedHost)),
 				zap.String("next_step", "if the app answers by the name it is asked for, give --base-path a name that reaches it and that it answers to"))
 		})
 	}

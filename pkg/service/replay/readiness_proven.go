@@ -897,7 +897,7 @@ func firstDialTarget(ctx context.Context, testCfg config.Test, testCases []*mode
 				port = ps.Port
 			}
 			urlReplacements, portMappings := mergeReplaceWith(testCfg, testSetID)
-			target, err := pkg.ResolveTestTarget(authority, urlReplacements, portMappings, h, tc.AppPort, port, false, logger)
+			target, err := pkg.ResolveTestTarget(authority, urlReplacements, portMappings, h, tc.AppPort, port, false, logger.With(zap.String("testcase", tc.Name)))
 			if err != nil {
 				continue
 			}

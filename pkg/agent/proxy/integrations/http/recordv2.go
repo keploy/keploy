@@ -119,6 +119,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				logger.Debug("V2 HTTP record: client stream closed mid-request", zap.Error(err))
 				return nil
 			}
+			// The error can quote what the application sent (a parser's
+			// does): withheld wherever it goes.
+			err = utils.WithholdInput(err)
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: request read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to read full request")
 			return err
@@ -192,6 +195,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				logger.Debug("V2 HTTP record: dest stream ended before response", zap.Error(err))
 				return nil
 			}
+			// The error can quote what the application sent (a parser's
+			// does): withheld wherever it goes.
+			err = utils.WithholdInput(err)
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: initial response read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: initial response read failed")
 			return err
@@ -238,6 +244,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 					resTs = gotLastWritten
 				}
 			} else {
+				// The error can quote what the application sent (a parser's
+				// does): withheld wherever it goes.
+				err = utils.WithholdInput(err)
 				sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: response read failed: "+err.Error())
 				utils.LogError(logger, err, "V2 HTTP record: failed to read full response")
 				return err
@@ -315,8 +324,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			RespWrites:       respWrites,
 			Fault:            fault,
 		}
-		mock, err := h.buildHTTPMock(final, destPort, sess.ClientConnID, sess.Opts)
+		mock, err := h.buildHTTPMock(ctx, final, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
+			// The error can quote what the application sent (a parser's
+			// does): withheld wherever it goes.
+			err = utils.WithholdInput(err)
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to build mock")
 			return err
@@ -489,8 +501,11 @@ func partAnswerFault(sess *supervisor.Session) *models.Fault {
 // fault it ended in, and ends the connection's recording: its stream has
 // ended.
 func (h *HTTP) recordFault(ctx context.Context, sess *supervisor.Session, logger *zap.Logger, m *FinalHTTP, destPort uint, reqTs time.Time) error {
-	mock, err := h.buildHTTPMock(m, destPort, sess.ClientConnID, sess.Opts)
+	mock, err := h.buildHTTPMock(ctx, m, destPort, sess.ClientConnID, sess.Opts)
 	if err != nil {
+		// The error can quote what the application sent (a parser's
+		// does): withheld wherever it goes.
+		err = utils.WithholdInput(err)
 		sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
 		utils.LogError(logger, err, "V2 HTTP record: failed to build the mock of a call that ended in a fault")
 		return err
@@ -1026,7 +1041,7 @@ func decompressReadInPart(encoding string, data []byte, limit int64) ([]byte, er
 // recordv2_test.go asserts field-by-field equivalence on identical
 // input bytes (modulo timestamps, which are allowed to differ because
 // legacy uses time.Now() and V2 uses chunk timestamps).
-func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
+func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
 	// Prefer the resolved destination port. The V2 recorder derives destPort from
 	// the DestStream FakeConn, which in proxyless (observe-only) capture has no
 	// real remote port (0) — breaking port-keyed telemetry-passthrough matching.
@@ -1037,7 +1052,9 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
-		return nil, fmt.Errorf("parse request: %w", err)
+		// The parser's error quotes the request: withheld, as the error
+		// is logged and reported.
+		return nil, fmt.Errorf("parse request: %w", utils.WithholdInput(err))
 	}
 	req.Header.Set("Host", req.Host)
 
@@ -1083,7 +1100,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		// undecoded, so replay sends the same bytes and then the fault.
 		if m.Fault != nil && (errors.Is(err, io.ErrUnexpectedEOF) ||
 			err == nil && m.Fault.Kind != models.FaultTruncate && closeDelimited(respParsed, req.Method)) {
-			return h.buildFaultAfterHead(m, req, respParsed, destPort, connID, opts)
+			return h.buildFaultAfterHead(ctx, m, req, respParsed, destPort, connID, opts)
 		}
 		// A body its client read in part is recorded as far as it read it:
 		// ReadAll returns what it read before the cut. Replay serves it with
@@ -1138,7 +1155,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	}
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
 		h.Logger.Debug("V2: request is a passThrough, skipping mock emit",
-			zap.Any("metadata", utils.GetReqMeta(req)))
+			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 		return nil, nil
 	}
 
@@ -1157,7 +1174,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
 			if rule.Mode == models.PassThroughSkip {
-				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
+				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return nil, nil
 			}
 			// recordOne: defer the dedup decision to emit time (below) so a later
@@ -1251,7 +1268,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	// mock as it is handed over.
 	if ptRecordOne && h.ptRecorder != nil {
 		if m.recordOne = h.ptRecorder.take(ptKey, respParsed.StatusCode); m.recordOne == nil {
-			h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+			h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 			return nil, nil
 		}
 	}
@@ -1266,7 +1283,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 // fault. It is buildHTTPMock again with no answer to read, so the mock is
 // what buildHTTPMock makes of the call (or nothing, for a passthrough), with
 // the cut-short answer put on it.
-func (h *HTTP) buildFaultAfterHead(m *FinalHTTP, req *http.Request, resp *http.Response, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
+func (h *HTTP) buildFaultAfterHead(ctx context.Context, m *FinalHTTP, req *http.Request, resp *http.Response, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
 	_, bodyStart, _, ok := messageHead(m.Resp, true)
 	if !ok {
 		return nil, fmt.Errorf("parse response: the head of an answer cut short did not arrive whole: %w", io.ErrUnexpectedEOF)
@@ -1281,7 +1298,7 @@ func (h *HTTP) buildFaultAfterHead(m *FinalHTTP, req *http.Request, resp *http.R
 		ReqClock:         m.ReqClock,
 		Fault:            &models.Fault{Kind: models.FaultEOF},
 	}
-	mock, err := h.buildHTTPMock(noAnswer, destPort, connID, opts)
+	mock, err := h.buildHTTPMock(ctx, noAnswer, destPort, connID, opts)
 	m.recordOne = noAnswer.recordOne
 	if mock == nil || err != nil {
 		return mock, err

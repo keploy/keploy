@@ -71,8 +71,12 @@ func TestJSONStoreRefusesABodyThatIsNotUTF8(t *testing.T) {
 			require.Equal(t, []string{before.Name + ".json", after.Name + ".json"}, storedTests(t, dir))
 			said := logs.FilterMessage("refusing to write a binary body as JSON").All()
 			require.Len(t, said, 1)
-			require.Equal(t, "POST", said[0].ContextMap()["method"])
-			require.Equal(t, "http://app/bin", said[0].ContextMap()["url"])
+			// The call by its shape (utils.URLLogMeta), never its URL, and
+			// no path tag: no console or report line prints one of it.
+			require.Equal(t, map[string]string{"method": "POST", "host": "{}", "path": "/{}", "scheme": "http"}, said[0].ContextMap()["metadata"])
+			// A new test case refused before it was given a name names none:
+			// the next one takes the name it would have had.
+			require.NotContains(t, said[0].ContextMap(), "testcase")
 			for _, f := range storedTests(t, dir) {
 				b, err := os.ReadFile(filepath.Join(dir, "test-set-0", "tests", f))
 				require.NoError(t, err)
@@ -122,7 +126,8 @@ func TestJSONStoreStoresALargeBinaryBodyOutsideTheDocument(t *testing.T) {
 // file already there is left as it was.
 func TestJSONStoreRefusesOnEveryWrite(t *testing.T) {
 	dir := t.TempDir()
-	ts := NewWithFormat(zap.NewNop(), dir, yaml.FormatJSON)
+	core, logs := observer.New(zap.ErrorLevel)
+	ts := NewWithFormat(zap.New(core), dir, yaml.FormatJSON)
 	ctx := context.Background()
 	stored := bodyCase("text", "ok")
 	require.NoError(t, ts.InsertTestCase(ctx, stored, "test-set-0", false))
@@ -133,6 +138,11 @@ func TestJSONStoreRefusesOnEveryWrite(t *testing.T) {
 	binary := bodyCase(binaryReqBody, "ok")
 	binary.Name = stored.Name
 	require.ErrorIs(t, ts.UpdateTestCase(ctx, binary, "test-set-0", false), models.ErrTestCaseEncode)
+	// A stored test case's refusal names it, which its request is kept
+	// whole under; the request by its shape.
+	said := logs.FilterMessage("refusing to write a binary body as JSON").All()
+	require.Len(t, said, 1)
+	require.Equal(t, stored.Name, said[0].ContextMap()["testcase"])
 	_, err = ts.TestCaseFile(ctx, binary, "test-set-0")
 	require.ErrorIs(t, err, models.ErrTestCaseEncode)
 

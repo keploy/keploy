@@ -34,7 +34,7 @@ func TestAFailedClientSideUpgradeGoesToTheClientHandshakeHook(t *testing.T) {
 			fn, _ := recordingUpgrader(&mu, &order, tc.failSide)
 			var starttls int
 			var got error
-			cfg := Config{TLSUpgradeFn: fn, OnCaptureLoss: func(k models.CaptureLossKind, _ string) {
+			cfg := Config{TLSUpgradeFn: fn, OnCaptureLoss: func(k models.CaptureLossKind, _ string, _ ...models.LossHost) {
 				mu.Lock()
 				defer mu.Unlock()
 				if k == models.CaptureLossSTARTTLS {

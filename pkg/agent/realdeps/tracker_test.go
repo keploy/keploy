@@ -404,7 +404,7 @@ func TestARealUseFromNoWorkerIsChargedToEveryOpenTestAsUnattributed(t *testing.T
 		end := tr.EndTestOf(inst)
 		require.Empty(t, end.Uses, "never a row of a test it guessed")
 		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 3,
-			What: "the latest: a connection to mock.real destination app:8080, from process 79"}}, end.Unattributed)
+			What: "the latest: a connection to mock.real destination app:8080, from process 79", HostsListed: true}}, end.Unattributed)
 		require.Len(t, end.Incomplete, 1, "its evidence is each open test's")
 	}
 	require.Empty(t, tr.Run().Incomplete)
@@ -472,7 +472,7 @@ func TestAFailedConnectStillUndecidedIsItsOwnWorkersTests(t *testing.T) {
 	two := tr.EndTestOf(2)
 	require.Equal(t, []models.RealUse{{Dest: "container:redis", Failed: 1}}, two.Uses)
 	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1,
-		What: "the latest: a connection to mock.real destination container:redis, from process 9"}}, two.Unattributed)
+		What: "the latest: a connection to mock.real destination container:redis, from process 9", HostsListed: true}}, two.Unattributed)
 	require.Len(t, two.Incomplete, 1, "told unresolved while it was open")
 	require.Contains(t, two.Incomplete[0].Why, "could not place")
 	again := tr.EndTestOf(1)
@@ -547,12 +547,12 @@ func TestARealUseFromAnEndedWorkerIsChargedToEveryOpenTestAndNamed(t *testing.T)
 		end := tr.EndTestOf(inst)
 		require.Empty(t, end.Uses, "never the later claim's row")
 		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1,
-			What: "the latest: a connection to mock.real destination db:5432, from process 7 of ended test worker 1"}}, end.Unattributed)
+			What: "the latest: a connection to mock.real destination db:5432, from process 7 of ended test worker 1", HostsListed: true}}, end.Unattributed)
 	}
 	tr.BeginTestOf(next)
 	tr.Dialed(Origin{Pid: 8, Ended: "1 (claim 2 of that id)"}, 2, "auth:443", false)
 	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1,
-		What: "the latest: a connection to mock.real destination auth:443, from process 8 of ended test worker 1 (claim 2 of that id)"}}, tr.EndTestOf(next).Unattributed)
+		What: "the latest: a connection to mock.real destination auth:443, from process 8 of ended test worker 1 (claim 2 of that id)", HostsListed: true}}, tr.EndTestOf(next).Unattributed)
 
 	// A failed connect told REAL only later (FailedUndecided) names it too.
 	tr.BeginTestOf(next)
@@ -560,7 +560,7 @@ func TestARealUseFromAnEndedWorkerIsChargedToEveryOpenTestAndNamed(t *testing.T)
 	tr.FailedUndecided(Origin{Pid: 9, Ended: "3"}, "10.0.0.9:443")("cache:6379", false)
 	for _, inst := range []uint32{next, other} {
 		require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1,
-			What: "the latest: a connection to mock.real destination cache:6379, from process 9 of ended test worker 3"}}, tr.EndTestOf(inst).Unattributed)
+			What: "the latest: a connection to mock.real destination cache:6379, from process 9 of ended test worker 3", HostsListed: true}}, tr.EndTestOf(inst).Unattributed)
 	}
 }
 

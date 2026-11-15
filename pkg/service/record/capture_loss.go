@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"sync"
@@ -106,7 +107,27 @@ type captureWatch struct {
 	// crashed sidecar) counts from nothing, and what the one before held went
 	// with it. nil when the instrumentation cannot tell.
 	agent models.AgentInstanceWatch
+	// console is keploy's console (Recorder.SetConsole): each line below
+	// whose reason names a host by its shape and tag is followed there by
+	// the reason whole, each host beside its tag (sayWhole). nil prints
+	// nothing.
+	console io.Writer
 }
+
+// setConsole makes console w's, and its switch-off watch's (caRejectWatch).
+func (w *captureWatch) setConsole(console io.Writer) {
+	if w == nil {
+		return
+	}
+	w.console = console
+	if w.ca != nil {
+		w.ca.console = console
+	}
+}
+
+// sayWhole is utils.SayWhole: the reason a line names by host tags, whole on
+// the console.
+var sayWhole = utils.SayWhole
 
 // agentInstanceWatcher is an Instrumentation that can tell which agent
 // process answers it (models.AgentInstanceWatch): the keploy agent client.
@@ -404,8 +425,9 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call while these test cases were recorded, so their calls may be missing from the mocks ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.tainted),
-			zap.String("reason", w.lost.Text()),
+			zap.String("reason", w.lost.LogText()),
 			zap.String("next_step", "fix what the reason names, then re-record these test cases"))
+		sayWhole(w.console, "test set "+testSetID+", the recording is incomplete", w.lost.LogText(), w.lost.Text())
 	}
 	if len(w.uncapturable) > 0 {
 		notJudged := w.notJudged.Plus(w.unreadLost)
@@ -416,8 +438,9 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		w.logger.Warn("these test cases' calls may be missing from the mocks, or not be their container's: each was recorded during or after what the reason names, one of a call the application made that keploy cannot capture, a TLS client that abandoned its handshake, a container the Docker daemon did not answer keploy's read of, or a process keploy could not classify ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.uncapturable),
-			zap.String("reason", notJudged.NotJudgedText()),
+			zap.String("reason", notJudged.NotJudgedLogText()),
 			zap.String("next_step", notJudged.NotJudgedRemedy()+", then re-record these test cases"))
+		sayWhole(w.console, "test set "+testSetID+", test cases whose calls may be missing", notJudged.NotJudgedLogText(), notJudged.NotJudgedText())
 	}
 	if len(w.evidenced) > 0 {
 		// Evidence only (the kernel's recursion_misses, 5.12+): a kernel
@@ -425,8 +448,9 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		w.logger.Warn("the kernel skipped runs of keploy's capture programs while these test cases were recorded: evidence, not a verdict; a call of theirs may be missing from the mocks, which their replay shows ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", w.evidenced),
-			zap.String("reason", w.evidence.EvidenceText()),
+			zap.String("reason", w.evidence.EvidenceLogText()),
 			zap.String("next_step", models.KernelSkipRemedy))
+		sayWhole(w.console, "test set "+testSetID+", the kernel's skips", w.evidence.EvidenceLogText(), w.evidence.EvidenceText())
 	}
 	var unmapped models.CaptureLosses
 	for name, what := range w.unreadMocks {
@@ -439,8 +463,9 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		// background calls): no test case is charged, and nothing fails.
 		w.logger.Warn("keploy could not name the container of mocks no test case holds, because the Docker daemon did not answer keploy's read of it: they are kept without its key ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", unmapped.NotJudgedText()),
+			zap.String("reason", unmapped.NotJudgedLogText()),
 			zap.String("next_step", unmapped.NotJudgedRemedy()+", then re-record"))
+		sayWhole(w.console, "test set "+testSetID+", mocks kept without their container's key", unmapped.NotJudgedLogText(), unmapped.NotJudgedText())
 	}
 	// A handshake abandoned after the last test case was checked, or data
 	// sent over a server-first protocol keploy relays: charged to no test
@@ -457,14 +482,16 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 	if skippedLate := w.finalEvidence.Since(w.chargedEvidence); len(skippedLate) > 0 {
 		w.logger.Warn("the kernel skipped runs of keploy's capture programs after the last test case was recorded: evidence, not a verdict; no test case holds what they may have missed ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", skippedLate.EvidenceText()),
+			zap.String("reason", skippedLate.EvidenceLogText()),
 			zap.String("next_step", models.KernelSkipRemedy))
+		sayWhole(w.console, "test set "+testSetID+", the kernel's skips after the last test case", skippedLate.EvidenceLogText(), skippedLate.EvidenceText())
 	}
 	if len(relayedLate) > 0 {
 		w.logger.Warn("the application sent data on connections keploy passes through (a server-first protocol, or a destination's refusal), after the last test case was recorded: no test case holds those calls ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", relayedLate.NotJudgedText()),
+			zap.String("reason", relayedLate.NotJudgedLogText()),
 			zap.String("next_step", relayedLate.NotJudgedRemedy()+", then re-record"))
+		sayWhole(w.console, "test set "+testSetID+", calls passed through after the last test case", relayedLate.NotJudgedLogText(), relayedLate.NotJudgedText())
 	}
 	if len(abandonedLate) > 0 {
 		// Most often a connection the application dialled, never used and
@@ -473,15 +500,17 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		// against it.
 		w.logger.Warn("a TLS client abandoned its handshake with keploy's proxy after the last test case was recorded: a client that does not trust keploy's CA rejects its certificate so, and so does a connection the application dialled, never used and closed at its stop (Go's http.Transport keeps such a spare), which lost nothing; no test case holds it ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", abandonedLate.NotJudgedText()),
+			zap.String("reason", abandonedLate.NotJudgedLogText()),
 			zap.String("next_step", "if the client does not trust keploy's CA: "+abandonedLate.NotJudgedRemedy()+", then re-record"))
+		sayWhole(w.console, "test set "+testSetID+", a TLS handshake abandoned after the last test case", abandonedLate.NotJudgedLogText(), abandonedLate.NotJudgedText())
 	}
 	if afterLast := w.final.Since(w.charged); len(afterLast) > 0 && judge == nil {
 		failed = true
 		w.logger.Error("the recording is incomplete: keploy's agent could not capture every call after the last test case was recorded, and no test case holds what those calls carried ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
-			zap.String("reason", afterLast.Text()),
+			zap.String("reason", afterLast.LogText()),
 			zap.String("next_step", "fix what the reason names, then re-record"))
+		sayWhole(w.console, "test set "+testSetID+", calls lost after the last test case", afterLast.LogText(), afterLast.Text())
 	}
 	if w.finalErr != nil && judge == nil {
 		failed = true
@@ -530,8 +559,9 @@ func (w *captureWatch) finishWith(testSetID string, realUncaptured bool, realUnr
 		w.logger.Warn("keploy's agent could not capture every call, or could not be checked, while this test set was recorded: the recording is kept, and the auto-replay that follows judges each of its test cases ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.Strings("testCases", l.FailingTestCases()),
-			zap.String("reason", l.Text()),
+			zap.String("reason", l.LogText()),
 			zap.String("next_step", "the auto-replay's lines say which test cases replay and are kept; for one that is not, fix what the reason names (the agent's log says why a count could not be read), then re-record it"))
+		sayWhole(w.console, "test set "+testSetID+", what the auto-replay judges", l.LogText(), l.Text())
 	}
 	(*judge)(l)
 	return false, l.Failing()
@@ -636,16 +666,27 @@ func (l RecordedLosses) Lost() models.CaptureLosses {
 }
 
 // Text is l in a sentence: what was lost, and what could not be read.
-func (l RecordedLosses) Text() string {
+func (l RecordedLosses) Text() string { return l.text(false) }
+
+// LogText is Text as a log line carries it: each loss's What with the hosts
+// it names by their shape (models.CaptureLosses.LogText).
+func (l RecordedLosses) LogText() string { return l.text(true) }
+
+// text is Text, or LogText for forLog.
+func (l RecordedLosses) text(forLog bool) string {
 	var parts []string
 	judged, notJudged := l.Lost().Split()
-	if t := judged.Text(); t != "" {
+	judgedText, notJudgedText, evidenceText := judged.Text(), notJudged.NotJudgedText(), l.Lost().EvidenceText()
+	if forLog {
+		judgedText, notJudgedText, evidenceText = judged.LogText(), notJudged.NotJudgedLogText(), l.Lost().EvidenceLogText()
+	}
+	if t := judgedText; t != "" {
 		parts = append(parts, t)
 	}
-	if t := notJudged.NotJudgedText(); t != "" {
+	if t := notJudgedText; t != "" {
 		parts = append(parts, t)
 	}
-	if t := l.Lost().EvidenceText(); t != "" {
+	if t := evidenceText; t != "" {
 		parts = append(parts, t)
 	}
 	if len(l.Unverified) > 0 {

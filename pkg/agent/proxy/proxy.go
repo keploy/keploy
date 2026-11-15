@@ -929,7 +929,7 @@ func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.
 			return nil, fmt.Errorf("postgres SSL upstream: TLS handshake after 'S' failed: %w", err)
 		}
 		logger.Debug("Postgres SSLRequest accepted by upstream; TLS established",
-			zap.String("addr", addr),
+			zap.String("addr", models.HostLogName(ctx, addr)),
 			zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol))
 
 		// Publish the real upstream cert to the cbshim rendezvous.
@@ -1381,7 +1381,7 @@ func (p *Proxy) recordMySQLOutgoing(
 	}
 
 	if err := mysqlParser.RecordOutgoing(parserCtx, mysqlSession); err != nil {
-		p.countParserPanic(err, integrations.MYSQL, dstConn.RemoteAddr())
+		p.countParserPanic(parserCtx, err, integrations.MYSQL, dstConn.RemoteAddr())
 		// A decline is not a failure: relay rather than letting the caller's
 		// deferred close drop a connection keploy merely chose not to parse.
 		if errors.Is(err, integrations.ErrParserDeclined) {
@@ -1435,10 +1435,10 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	// the application reads the error, as every other parser's replay
 	// reports through the reporter handleConnection installs.
 	reportCtx = models.WithMockMismatchReporter(reportCtx, func(err error) {
-		p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
+		p.sendMockNotFoundErrorFrom(parserCtx, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
 	})
 	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, mysqlDst, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
-	p.countParserPanic(err, integrations.MYSQL, dstAddr)
+	p.countParserPanic(parserCtx, err, integrations.MYSQL, dstAddr)
 	if errors.Is(err, util.ErrParserPanicked) {
 		// Counted as a capture loss just above; no miss (mockFailedFrom).
 		utils.LogError(p.logger, err, "failed to mock the outgoing message")
@@ -1449,7 +1449,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 		// A miss the replayer reported before it ended the connection is
 		// queued already; queued again it would count twice.
 		if !models.IsMismatchReported(err) {
-			p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
+			p.sendMockNotFoundErrorFrom(parserCtx, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
 		}
 		if provenswitch.On() && isMockMiss(err) {
 			return reportedMiss{err}
@@ -2783,7 +2783,45 @@ func (p *Proxy) handleRecovered(ctx context.Context, conn net.Conn) error {
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
+//
+// Its error, which the accept loop logs, names each host name the connection
+// named (its CONNECT target, the TLS server it asked for) by its labels'
+// shape beside its tag in the connection's session (connHosts): a parser's
+// or a dial's error quotes the name whole.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
+	var hosts connHosts
+	return hosts.inError(p.serveConnection(ctx, srcConn, &hosts))
+}
+
+// connHosts is the host names a connection named (a CONNECT target, a TLS
+// server name), as serveConnection learns them, and the session it is served
+// in: what handleConnection writes its error's text by.
+type connHosts struct {
+	keys  *models.LogKeySession
+	names []string
+}
+
+// add notes names (each "" skipped) as the connection's.
+func (h *connHosts) add(names ...string) {
+	for _, n := range names {
+		if n != "" {
+			h.names = append(h.names, n)
+		}
+	}
+}
+
+// inError is err with each of h's names written as the session's lines
+// write them (models.HostsInError).
+func (h *connHosts) inError(err error) error {
+	if err == nil || len(h.names) == 0 {
+		return err
+	}
+	return models.HostsInError(models.WithLogKeySession(context.Background(), h.keys), err, h.names...)
+}
+
+// serveConnection is handleConnection, noting in hosts each host name the
+// connection names, and its session.
+func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *connHosts) error {
 	// tracked is the connection as the accept kept it (inflight.go:
 	// keepsConnections): srcConn is wrapped again below (a peek's reader, a
 	// prefix, TLS), and what a test's end reads of it goes to this one.
@@ -2997,6 +3035,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
+	// The session's key for the path tags its lines name the connection's
+	// calls by (models.LogKeySession), which the agent drew as the session
+	// began (Record, Mock): one key per recording or replay, never one of
+	// another session's, however long the agent lives.
+	parserCtx = models.WithLogKeySession(parserCtx, rule.LogKeys)
+	hosts.keys = rule.LogKeys
 	// Under the proven switch, or settleReads, the accept kept the connection
 	// (inflight.go): a parser that reads ahead says through it which requests
 	// it holds (integrations.HoldRequest).
@@ -3034,6 +3078,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// server's identity verifies the leaf against an IP SAN.
 	parserCtx = withDstIPOf(parserCtx, dstAddr)
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
+	// dstLog is dstAddr as this connection's lines name it: an address
+	// whole, and, once a CONNECT request named the target (below), its host
+	// by its labels' shape beside its tag in the connection's session
+	// (models.HostLogName). The app chose that name.
+	dstLog := func() string { return models.HostLogName(parserCtx, dstAddr) }
 
 	// Capture the initial srcConn before it gets reassigned (TLS upgrade, wrapping).
 	initialSrcConn := srcConn
@@ -3295,7 +3344,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		m, merr := p.connManager(destInfo.Instance)
 		if merr != nil {
-			return p.refuseUnserved(destInfo, dstAddr, merr)
+			return p.refuseUnserved(parserCtx, destInfo, dstAddr, merr)
 		}
 		if m == nil {
 			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
@@ -3429,7 +3478,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// asked for until its ClientHello names something (SNI), so what the
 	// MITM leaf is named for and keploy dials when it sends no SNI.
 	var connectTargetHost string
-	if isConnectRequest(testBuffer) {
+	if connectRequestAhead(reader, testBuffer) {
 		p.logger.Debug("Detected HTTP CONNECT request, handling tunnel",
 			zap.Int("sourcePort", sourcePort),
 			zap.String("dstAddr", dstAddr),
@@ -3454,7 +3503,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstConn = proxyConn
 		}
 
-		connectResult, err = handleConnectTunnel(p.logger, srcConn, proxyConn, isTestMode)
+		connectResult, err = handleConnectTunnel(parserCtx, p.logger, srcConn, proxyConn, isTestMode)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle CONNECT tunnel; check HTTP_PROXY/HTTPS_PROXY settings, proxy authentication (407), DNS/network reachability to the proxy, and egress firewall rules")
 			return err
@@ -3478,6 +3527,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// Also update dstAddr and destInfo to reflect the real target
 		// (e.g., api.example.com:443) instead of the corporate proxy.
 		dstAddr = connectResult.TargetAddr
+		hosts.add(connectResult.TargetAddr, connectResult.TargetHost)
 		destInfo.Port = 443 // CONNECT targets are almost always TLS on 443
 		if connectResult.TargetPort != "" {
 			if portNum, err := strconv.ParseUint(connectResult.TargetPort, 10, 16); err == nil && portNum >= 1 && portNum <= 65535 {
@@ -3512,7 +3562,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		p.logger.Debug("CONNECT tunnel established, proceeding with inner connection",
-			zap.String("target", connectResult.TargetAddr),
+			zap.String("target", models.HostLogName(parserCtx, connectResult.TargetAddr)),
 			zap.Bool("innerTLS", pTls.IsTLSHandshake(testBuffer)),
 		)
 	}
@@ -3544,9 +3594,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if name == "" {
 			name = connectTargetHost
 		}
+		hosts.add(name)
 		if bypassRule, ok := bypassByServerName(p.logger, outgoingOpts.Rules, name, uint(destInfo.Port)); ok && helloErr == nil {
 			p.logger.Debug("a bypassRule names the TLS server the client asks for; passing the connection through before keploy's TLS",
-				zap.String("serverName", name), zap.String("ruleHost", bypassRule.Host), zap.Uint("rulePort", bypassRule.Port))
+				zap.String("serverName", models.HostLogName(parserCtx, name)), zap.String("ruleHost", bypassRule.Host), zap.Uint("rulePort", bypassRule.Port))
 			return p.passBypassRulesUndecided(parserCtx, p.logger, srcConn, &dstConn, func() (net.Conn, error) {
 				return util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
 			}, nil, dstAddr, name)
@@ -3557,7 +3608,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		probeProxy(p.logger, "tls-handshake-start", clientConnID,
 			zap.Int("srcPort", sourcePort),
 			zap.Uint32("dstPort", destInfo.Port),
-			zap.String("dstAddr", dstAddr),
+			zap.String("dstAddr", dstLog()),
 		)
 		tlsStart := time.Now()
 		// On replay, decide the MITM's ALPN offer PER-CONNECTION. If THIS
@@ -3584,7 +3635,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// request named, else the IP it dialled — a client that dialled an IP
 		// literal sends no SNI and checks the leaf's IP SAN. Both go to the
 		// MITM on hsCtx, so nothing another connection left can name it.
-		hsCtx := withDstIPOf(pTls.WithConnectTarget(ctx, connectTargetHost), dstAddr)
+		//
+		// hsCtx carries the connection's session (models.LogKeySession), so
+		// the lines of the handshake (the leaf it mints or reuses) name the
+		// server's name under the session's key, as the connection's other
+		// lines do. Its life stays ctx's.
+		hsCtx := withDstIPOf(pTls.WithConnectTarget(models.WithLogKeySession(ctx, models.LogKeys(parserCtx)), connectTargetHost), dstAddr)
 		if rule.Mode == models.MODE_TEST {
 			connectHost, _ := hostPortFromAuthority(connectTargetHost, "")
 			port, preferAll := destInfo.Port, rule.PreferH2
@@ -3597,8 +3653,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					return false
 				}
 				p.logger.Debug("replay: offering h2 in the TLS ALPN",
-					zap.Bool("preferH2Option", preferAll), zap.String("connectHost", connectHost),
-					zap.String("serverName", serverName), zap.Uint32("dstPort", port))
+					zap.Bool("preferH2Option", preferAll), zap.String("connectHost", models.HostLogName(parserCtx, connectHost)),
+					zap.String("serverName", models.HostLogName(parserCtx, serverName)), zap.Uint32("dstPort", port))
 				return true
 			})
 		}
@@ -3623,6 +3679,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		srcConn = tlsSrcConn
 		clientSNI = util.ClientServerName(tlsSrcConn)
+		hosts.add(clientSNI)
 
 		if isMTLS {
 			if tlsConn, ok := srcConn.(*tls.Conn); ok {
@@ -3646,7 +3703,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
+	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination Address", dstLog()), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
 
 	var initialBuf []byte
 	// attempt to read conn until buffer is either filled or conn is closed
@@ -3802,6 +3859,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			addr = net.JoinHostPort(dstURL, fmt.Sprint(destInfo.Port))
 			predialed.Alias(addr) // the connection dialled while the handshake was held, if it was
 		}
+		// addr as this connection's lines name it: the server's name (the
+		// client's SNI, or its CONNECT target) by its labels' shape beside
+		// its tag in the connection's session; an address whole. A dial's
+		// or a handshake's error names the name whole too, and the
+		// certificate's names beside it: written so as well
+		// (models.HostsInError) before it is logged or returned.
+		addrLog := models.HostLogName(parserCtx, addr)
+		hosts.add(addr, serverName, dstURL)
+		upstreamErr := func(err error) error { return models.HostsInError(parserCtx, err, addr, serverName, dstURL) }
 
 		if rule.Mode != models.MODE_TEST {
 			if connectResult != nil && dstConn != nil {
@@ -3810,14 +3876,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				// reader holds past its 200 (above).
 				tlsConn := tls.Client(dstConn, cfg)
 				if err := tlsConn.Handshake(); err != nil {
+					err = upstreamErr(err)
 					utils.LogError(logger, err, "failed TLS handshake over CONNECT tunnel; verify the corporate proxy allows CONNECT to this target, check proxy auth/egress rules, and confirm the target hostname is reachable",
-						zap.String("target", addr))
+						zap.String("target", addrLog))
 					return err
 				}
 				dstConn = tlsConn
 				logger.Debug("TLS over CONNECT tunnel established",
 					zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol),
-					zap.String("target", addr))
+					zap.String("target", addrLog))
 			} else {
 				// When InterceptPostgresSSLRequest is on AND the
 				// destination is a Postgres service (port 5432 is
@@ -3830,10 +3897,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				// while the upstream connection fails, leaving the
 				// replayed client staring at a broken stream.
 				if agent.InterceptPostgresSSLRequest && destInfo.Port == 5432 {
-					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "pg-ssl"), zap.String("addr", addr))
+					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "pg-ssl"), zap.String("addr", addrLog))
 					dialStart := time.Now()
-					dstConn, err = dialPostgresSSLUpstream(ctx, strconv.Itoa(sourcePort), addr, cfg, p.logger, p.cbshim, predialed)
-					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
+					dstConn, err = dialPostgresSSLUpstream(models.WithLogKeySession(ctx, models.LogKeys(parserCtx)), strconv.Itoa(sourcePort), addr, cfg, p.logger, p.cbshim, predialed)
+					err = upstreamErr(err)
+					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addrLog, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 					// Release cbshim's per-connection rendezvous state
 					// at connection exit. dialPostgresSSLUpstream may
 					// have already called RegisterReal; if the matching
@@ -3850,13 +3918,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 						defer cb.CleanupConnection(connID)
 					}
 				} else {
-					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "synchronous"), zap.String("addr", addr))
+					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "synchronous"), zap.String("addr", addrLog))
 					dialStart := time.Now()
 					dstConn, err = util.DialDestinationTLS(ctx, p.logger, "tcp", util.DialTarget{Addr: addr, Predialed: predialed}, cfg)
-					probeDial(p.logger, "synchronous-tls", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
+					err = upstreamErr(err)
+					probeDial(p.logger, "synchronous-tls", clientConnID, addrLog, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				}
 				if err != nil {
-					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr), zap.String("next_step", util.NextStepDialDestination))
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addrLog), zap.String("next_step", util.NextStepDialDestination))
 					return err
 				}
 
@@ -3872,16 +3941,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	} else {
 		// Only dial if dstConn not already set (e.g., from PostgreSQL SSL handling)
 		if rule.Mode != models.MODE_TEST && dstConn == nil {
-			probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "plain-tcp"), zap.String("addr", dstAddr))
+			probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "plain-tcp"), zap.String("addr", dstLog()))
 			dialStart := time.Now()
 			dstConn, err = util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
-			probeDial(p.logger, "plain-tcp", clientConnID, dstAddr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
+			// A CONNECT target's dial names its host: written by its shape.
+			err = models.HostsInError(parserCtx, err, dstAddr)
+			probeDial(p.logger, "plain-tcp", clientConnID, dstLog(), time.Since(dialStart).Nanoseconds(), zap.Error(err))
 			if err != nil {
 				if refusedLocally(err) {
-					logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstAddr))
+					logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstLog()))
 					return err
 				}
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstLog()), zap.String("next_step", util.NextStepDialDestination))
 				return err
 			}
 		}
@@ -3897,7 +3968,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// workers, the manager of the worker whose process made the connection
 	m, merr := p.connManager(destInfo.Instance)
 	if merr != nil {
-		return p.refuseUnserved(destInfo, dstAddr, merr)
+		return p.refuseUnserved(parserCtx, destInfo, dstAddr, merr)
 	}
 	if m == nil {
 		utils.LogError(logger, err, "failed to fetch the mock manager")
@@ -4049,7 +4120,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
-			p.countParserPanic(err, parserType, dstAddr)
+			p.countParserPanic(parserCtx, err, parserType, dstAddr)
 			if errors.Is(err, integrations.ErrParserDeclined) {
 				return p.relayDeclinedConn(parserCtx, err, logger, parserType, session)
 			}
@@ -4073,7 +4144,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// The reporter names the process the connection came from on
 			// each miss and answer it takes (UnmatchedCall.Source).
 			srcPid, srcInst := outgoingOpts.SrcPid, outgoingOpts.SrcInstance
-			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(err, srcPid, srcInst, dstCfg) })
+			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(parserCtx, err, srcPid, srcInst, dstCfg) })
 			// A replayer that makes the client's TLS handshake itself, in
 			// band (Postgres's, on an SSLRequest), has it charged as the
 			// proxy's own client handshakes are, and a build's client TLS
@@ -4087,10 +4158,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			testCtx = withNoiseEngine(testCtx, matchedParser, outgoingOpts)
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
-			p.countParserPanic(err, parserType, dstAddr)
+			p.countParserPanic(testCtx, err, parserType, dstAddr)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				// Send specific error type to error channel for external monitoring
-				return p.mockFailedFrom(logger, err, srcPid, srcInst, dstCfg)
+				return p.mockFailedFrom(parserCtx, logger, err, srcPid, srcInst, dstCfg)
 			}
 		}
 	}
@@ -4162,7 +4233,7 @@ func (p *Proxy) recordGenericOutgoing(
 
 	genericSession := p.buildRecordSession(srcConn, dstConn, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
 	err := genericParser.RecordOutgoing(parserCtx, genericSession)
-	p.countParserPanic(err, integrations.GENERIC, dstConn.RemoteAddr())
+	p.countParserPanic(parserCtx, err, integrations.GENERIC, dstConn.RemoteAddr())
 	if errors.Is(err, integrations.ErrParserDeclined) {
 		return p.relayDeclinedConn(parserCtx, err, logger, integrations.GENERIC, genericSession)
 	}
@@ -4195,13 +4266,13 @@ func (p *Proxy) mockGenericOutgoing(
 		// mode-gated), so report rather than relay — which is what the MySQL
 		// replay site does too.
 		err := errors.New("no generic parser is registered to mock this connection")
-		return p.mockFailedFrom(logger, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, dstCfg)
+		return p.mockFailedFrom(parserCtx, logger, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, dstCfg)
 	}
 	err := genericParser.MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
-	p.countParserPanic(err, integrations.GENERIC, dstCfg.Addr)
+	p.countParserPanic(parserCtx, err, integrations.GENERIC, dstCfg.Addr)
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		// Send specific error type to error channel for external monitoring
-		return p.mockFailedFrom(logger, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, dstCfg)
+		return p.mockFailedFrom(parserCtx, logger, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, dstCfg)
 	}
 	return nil
 }
@@ -4484,6 +4555,9 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
 		OutgoingOptions: opts,
+		// The recording's key, which its client's route drew as it began
+		// (models.LogKeySession; none: the process's).
+		LogKeys: models.LogKeys(ctx),
 	}
 	// Start holding handshakes before the session takes effect. (A
 	// connection that arrives while the rules install is accepted at once,
@@ -4585,6 +4659,9 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	rule := &agent.Session{
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
+		// The replay session's key, which its client's route drew as it
+		// began (models.LogKeySession; none: the process's).
+		LogKeys: models.LogKeys(ctx),
 	}
 	p.ensureHandshakeHold(rule)
 	// What a connection under the session needs is set up before the
@@ -6384,7 +6461,8 @@ func (p *Proxy) logDroppedMisses(msg string, errs []error) {
 			break
 		}
 	}
-	p.logger.Log(level, msg, zap.Int("count", len(errs)), zap.Strings("calls", missSummaries(errs)))
+	calls, tags := missSummaries(errs)
+	p.logger.Log(level, msg, zap.Int("count", len(errs)), zap.Strings("calls", calls), zap.Strings("path_tags", tags))
 }
 
 // sayLearnWaits has the learn step's tracker say in the agent's log as a call
@@ -6409,21 +6487,30 @@ func (p *Proxy) sayLearnWaits() {
 	})
 }
 
-// missSummaries names, for a log line, the calls of up to the first 10 misses.
-func missSummaries(errs []error) []string {
-	out := make([]string, 0, min(len(errs), 10))
+// missSummaries names, for a log line, the calls of up to the first 10
+// misses: each by its shape (models.MissLogShape), or by its error's type
+// when it carries no report, and, in tags, each one's path tag, the i-th
+// call's at i ("" for one with none: not an HTTP call). Never the summary
+// or the error's text: they hold what the call sent.
+func missSummaries(errs []error) (calls, tags []string) {
+	calls = make([]string, 0, min(len(errs), 10))
+	tags = make([]string, 0, min(len(errs), 10))
 	for _, err := range errs {
-		if len(out) == 10 {
+		if len(calls) == 10 {
 			break
 		}
 		var pe models.ParserError
-		if errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.ActualSummary != "" {
-			out = append(out, pe.MismatchReport.ActualSummary)
-			continue
+		if errors.As(err, &pe) && pe.MismatchReport != nil {
+			if shape := models.MissLogShape(pe.MismatchReport); shape != "" {
+				calls = append(calls, pe.MismatchReport.Protocol+" "+shape)
+				tags = append(tags, pe.MismatchReport.LogPathTag())
+				continue
+			}
 		}
-		out = append(out, err.Error())
+		calls = append(calls, fmt.Sprintf("%T", err))
+		tags = append(tags, "")
 	}
-	return out
+	return calls, tags
 }
 
 // WithdrawTestErrorCapture takes back the window the latest Begin or
@@ -6707,6 +6794,11 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					// the miss by it, not by when it was filed.
 					Marked: missMark(parserErr.MismatchReport),
 					Folded: parserErr.MismatchReport.Folded,
+					// The tag the agent's miss line names the call by,
+					// for the console and the report to print beside it.
+					PathTag: parserErr.MismatchReport.PathTag,
+					// And the tag it names the destination's host by.
+					HostTag: parserErr.MismatchReport.HostTag,
 				})
 				// The calls folded into it past its list's room, each a
 				// miss of its own at its own time.
@@ -6725,7 +6817,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					Instance:      parserErr.Instance,
 					Protocol:      "unknown",
 					ActualSummary: parserErr.Err.Error(),
-					NextSteps:     withStagingNote(parserErr, "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details."),
+					NextSteps:     withStagingNote(parserErr, "This protocol's matcher does not emit structured mismatch reports yet; the parser's own error, above, says what it could not match (the agent's log names only its kind)."),
 					Kind:          parserErr.MissKind,
 				})
 			}
@@ -6864,7 +6956,7 @@ func isMockMiss(err error) bool {
 // names when its parser named no destination (sendMockNotFoundErrorFrom).
 // There is no form without the worker: a miss filed under none would land
 // in the run's window, which no worker's test reads.
-func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid, inst uint32, dst *models.ConditionalDstCfg) error {
+func (p *Proxy) mockFailedFrom(ctx context.Context, logger *zap.Logger, err error, pid, inst uint32, dst *models.ConditionalDstCfg) error {
 	if errors.Is(err, util.ErrParserPanicked) {
 		// keploy's failure, counted as a capture loss where the parser
 		// returned it (countParserPanic): no miss, so neither the mismatch
@@ -6882,7 +6974,7 @@ func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid, inst uint32, 
 	// queued for its test already; queued again it would count twice, the
 	// second time possibly against the next test.
 	if !models.IsMismatchReported(err) {
-		p.sendMockNotFoundErrorFrom(err, pid, inst, dst)
+		p.sendMockNotFoundErrorFrom(ctx, err, pid, inst, dst)
 	}
 	if quiet {
 		return reportedMiss{err}
@@ -6919,7 +7011,10 @@ func (p *Proxy) mismatchLog() func(string, ...zap.Field) {
 // authority of its own, and its miss said nothing of where the call went. A
 // fabricated address (models.ConditionalDstCfg.AddrFabricated) names no
 // server, so it is not named either.
-func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *models.ConditionalDstCfg) {
+//
+// ctx is the connection's (handleConnection's parserCtx): an HTTP miss's path
+// tag, when its parser made none, is made under the session it carries.
+func (p *Proxy) sendMockNotFoundErrorFrom(ctx context.Context, err error, pid, inst uint32, dst *models.ConditionalDstCfg) {
 	proxyErr := models.ParserError{
 		ParserErrorType: models.ErrMockNotFound,
 		Err:             err,
@@ -6941,6 +7036,17 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		stamped.At = proxyErr.At
 		proxyErr.MismatchReport = &stamped
 	}
+	// Every HTTP miss carries its path tag (models.PathTag), made here, in
+	// the session of ctx, the connection's, whose line below names the call
+	// by it, when its parser made none: the console and the report print the
+	// tag the report carries beside the call. A copy, as above.
+	if r := proxyErr.MismatchReport; r != nil && r.PathTag == "" {
+		if tag := models.CallPathTag(ctx, r.Protocol, r.ActualSummary); tag != "" {
+			tagged := *r
+			tagged.PathTag = tag
+			proxyErr.MismatchReport = &tagged
+		}
+	}
 	// The address the call was dialled at, when its parser named none. A
 	// copy, as above; the report's destination scope was settled by its
 	// parser, on what the parser saw.
@@ -6948,6 +7054,17 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		stamped := *r
 		stamped.Destination = dst.Addr
 		proxyErr.MismatchReport = &stamped
+	}
+	// The tag of the destination's host name (models.HostTag), in the
+	// session of ctx, whose line below names the destination by its shape
+	// beside it, when its parser made none: the console, the report and the
+	// misses file print it beside the destination whole. A copy, as above.
+	if r := proxyErr.MismatchReport; r != nil && r.HostTag == "" {
+		if tag := models.HostTag(ctx, r.Destination); tag != "" {
+			tagged := *r
+			tagged.HostTag = tag
+			proxyErr.MismatchReport = &tagged
+		}
 	}
 	// The process that made the call (proven switch): its comm and argv[0],
 	// and, only to travel to keploy's receipt, its pid and whole command
@@ -6990,7 +7107,8 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		// is open to read it, and any test open now may have made the
 		// call, as at record: it is counted as a call keploy cannot
 		// attribute, naming the ended worker.
-		p.losses.Add(models.CaptureLossUnattributed, stoppedWorkerMissWhat(proxyErr.MismatchReport, dst, pid, inst))
+		what, hosts := stoppedWorkerMissWhat(ctx, proxyErr.MismatchReport, dst, pid, inst)
+		p.losses.Add(models.CaptureLossUnattributed, what, hosts...)
 	}
 	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing
 	// miss funnels through here, so this one line covers HTTP, generic, MySQL,
@@ -7002,21 +7120,30 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		p.logger.Debug("an answered call, reported for judging",
 			zap.String("answer", r.Answer),
 			zap.String("protocol", r.Protocol),
-			zap.String("destination", r.Destination),
+			zap.String("destination", models.HostLogName(ctx, r.Destination)),
 			zap.String("write_kind", r.WriteKind),
 			zap.String("recorded", r.ClosestMock),
 			zap.String("recorded_in", r.RecordedIn),
 			zap.Bool("drift", r.Drift),
 			zap.Bool("reused", r.Reused))
 	} else if r != nil {
+		// The call by its shape (models.MissLogShape), never its summary:
+		// the summary holds what the call sent (a path's token, a
+		// statement's literal) for the user's own report, and this line
+		// reaches the agent's log store.
 		fields := []zap.Field{
 			zap.String("protocol", r.Protocol),
-			zap.String("destination", r.Destination),
-			zap.String("actual", models.WithHTTPOperation(r.ActualSummary, r.Operation)),
+			// A destination's name by its labels' shape and tag
+			// (models.HostLogName): the app chose it; an address whole.
+			zap.String("destination", models.HostLogName(ctx, r.Destination)),
+			zap.String("call", models.MissLogShape(r)),
+			// The tag the console and the report print beside the call
+			// whole (r.PathTag, made above).
+			utils.PathTagField(r.PathTag),
 			zap.String("match_phase", r.MatchPhase),
 			zap.Int("candidates", r.CandidateCount),
 			zap.String("closest", r.ClosestMock),
-			zap.String("next_step", r.NextSteps),
+			zap.String("next_step", models.MissLogNextStep(r)),
 		}
 		// destination_scope is greppable in a node-wide agent log:
 		// "not_in_compared_set" is the one value that says "nothing this miss
@@ -7039,7 +7166,10 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		}
 		p.mismatchLog()("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {
-		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
+		// The error's kind and size, never its text: a parser that built
+		// no report may have written the call into it, quoted or not.
+		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)",
+			zap.String("error_type", fmt.Sprintf("%T", err)), zap.Int("error_bytes", len(err.Error())), zap.Bool("no_mock_matched", errors.Is(err, models.ErrNoMockMatched)))
 	}
 	p.SendError(proxyErr)
 }

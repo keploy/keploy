@@ -653,6 +653,19 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// still open starts them again, so one may be said at WARN twice, never
 	// at Debug alone).
 	tlsRelayedBefore := syncmgr.Get().StartTLSRelayedSession()
+	// The requests the ingress serves and does not record as test cases
+	// (syncMock NoteNotRecorded), each told to this stream's client as it
+	// comes (tellNotRecorded), from here: the agent's line names each by
+	// its shape and path tag, and the client's console prints its path
+	// beside the same tag. Opened before the headers go out, as the tallies
+	// above.
+	notRecorded, closeNotRecorded := syncmgr.Get().OpenNotRecordedFeed()
+	defer func() {
+		if n := closeNotRecorded(); n > 0 {
+			a.logger.Warn("the agent did not tell the recording's client of some requests it did not record as test cases: they came faster than the client took them",
+				zap.Uint64("requests", n))
+		}
+	}()
 	// sessionLost reads, once, what this session lost to its ingress stopping
 	// (NoteNotHandedOn), to callers the agent could not name
 	// (NoteUnnamedCallerConn), to TLS connections relayed unread
@@ -846,7 +859,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 						return false
 					}
 					f.Close()
-					a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
+					// The file's name is the app's client's (filename=):
+					// named by its size.
+					a.logger.Debug("Successfully streamed file part", zap.String("file", models.FormFileNameLogText(fileName)))
 				}
 			}
 		}
@@ -863,6 +878,33 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		}
 
 		flusher.Flush() // Immediately send data to the client
+		return true
+	}
+
+	// tellNotRecorded tells the client of c, a request the ingress did not
+	// record as a test case (models.NotRecordedPart), then a delimiter, so
+	// the client reads the part whole at once (as send's), and flushes. It
+	// reports false once the stream is broken.
+	tellNotRecorded := func(c models.NotRecordedCall) bool {
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Disposition", `form-data; name="`+models.NotRecordedPart+`"`)
+		header.Set("Content-Type", "application/json")
+		part, err := mw.CreatePart(header)
+		if err != nil {
+			streamWriteFailed(a.logger, r, "failed to create a not-recorded part", err)
+			return false
+		}
+		if err := json.NewEncoder(part).Encode(c); err != nil {
+			streamWriteFailed(a.logger, r, "failed to encode a not-recorded part", err)
+			return false
+		}
+		delimiterHeader := textproto.MIMEHeader{}
+		delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
+		if _, err := mw.CreatePart(delimiterHeader); err != nil {
+			streamWriteFailed(a.logger, r, "failed to create delimiter part", err)
+			return false
+		}
+		flusher.Flush()
 		return true
 	}
 
@@ -1137,6 +1179,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					if !take(t) {
 						return
 					}
+				case c := <-notRecorded:
+					if !tellNotRecorded(c) {
+						return
+					}
 				default:
 					break drain
 				}
@@ -1188,6 +1234,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-tickC:
 			if !release() {
+				return
+			}
+		case c := <-notRecorded:
+			if !tellNotRecorded(c) {
 				return
 			}
 		case t, ok := <-tc:

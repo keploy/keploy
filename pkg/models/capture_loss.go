@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // CaptureLossKind names one way a run's capture can be incomplete: a call the
@@ -377,11 +378,18 @@ func (l CaptureLosses) Evidence() CaptureLosses {
 
 // EvidenceText is keploy's sentence for l's evidence (Evidence), "" for
 // none: what the kernel skipped during the recording, which judges nothing.
-func (l CaptureLosses) EvidenceText() string {
+func (l CaptureLosses) EvidenceText() string { return l.evidenceText(captureReportWhat) }
+
+// EvidenceLogText is EvidenceText as a log line carries it: each What with
+// the hosts it names by their shape and tag (captureLogWhat).
+func (l CaptureLosses) EvidenceLogText() string { return l.evidenceText(captureLogWhat(true)) }
+
+// evidenceText is EvidenceText with each loss's What written by what.
+func (l CaptureLosses) evidenceText(what func(CaptureLoss) string) string {
 	var parts []string
 	for _, c := range l.Evidence() {
 		s := captureLossText(c)
-		if w := captureWhatShape(c.What); w != "" {
+		if w := what(c); w != "" {
 			s += " (" + w + ")"
 		}
 		parts = append(parts, s)
@@ -446,14 +454,24 @@ func (l CaptureLosses) SinceWithin(b LossBases) CaptureLosses {
 // verdict (Split's notJudged): what keploy cannot capture, and that it
 // therefore cannot prove the test's calls were all captured.
 func (l CaptureLosses) NotJudgedText() string {
+	return l.notJudgedText(func(c CaptureLoss) string { return c.reportWhat(false) })
+}
+
+// NotJudgedLogText is NotJudgedText as a log line carries it: each What with
+// the hosts it names by their shape and tag (captureLogWhat). The report's
+// and the console's text keeps them whole, each beside its tag.
+func (l CaptureLosses) NotJudgedLogText() string { return l.notJudgedText(captureLogWhat(false)) }
+
+// notJudgedText is NotJudgedText with each loss's What written by what.
+func (l CaptureLosses) notJudgedText(what func(CaptureLoss) string) string {
 	var parts []string
 	for _, c := range l {
 		if c.Kind.Evidence() {
 			continue // no verdict: EvidenceText says it
 		}
 		s := captureLossText(c)
-		if c.What != "" {
-			s += " (" + c.What + ")"
+		if w := what(c); w != "" {
+			s += " (" + w + ")"
 		}
 		parts = append(parts, s)
 	}
@@ -590,6 +608,58 @@ type CaptureLoss struct {
 	// loss, never out of What; 0 when the agent did not say (an older
 	// agent), and on every other kind.
 	Err int32 `json:"err,omitempty" yaml:"err,omitempty"`
+	// Hosts are the host names What names whole (a connection's host, a
+	// DNS question's name, a call's Host header, a mock.real connection's
+	// other name), each where the agent wrote it, with the tag the
+	// agent's own lines name it by (LossHost): a log line writes each by
+	// its shape beside that tag (LogText), the report and the console
+	// whole beside it (Text), there alone. Nothing else in What is read
+	// as a host, the same word elsewhere included.
+	Hosts LossHosts `json:"hosts,omitempty" yaml:"hosts,omitempty"`
+	// HostsListed says Hosts lists every host name What names (none, for a
+	// What that names none): every loss an agent that lists them counts
+	// (captureloss.Counter), and each loss of a kind that may name a host
+	// (not namesNoHost) keploy builds itself. A loss of an agent that
+	// predates Hosts has neither, and a log line writes its What by its
+	// size alone (UnlistedLogText), but for a kind whose What names no host
+	// (namesNoHost).
+	HostsListed bool `json:"hosts_listed,omitempty" yaml:"hosts_listed,omitempty"`
+}
+
+// SetWhatOf makes o's What c's, with the hosts it names (Hosts,
+// HostsListed): a count that takes the What of the latest loss.
+func (c *CaptureLoss) SetWhatOf(o CaptureLoss) {
+	c.What, c.Hosts, c.HostsListed = o.What, o.Hosts, o.HostsListed
+}
+
+// JoinWhat adds o's What to c's after "; " (o's alone when c has none),
+// with the hosts each names, o's at their places after c's What: c's are
+// then listed only where both were. An o with no What changes nothing.
+func (c *CaptureLoss) JoinWhat(o CaptureLoss) {
+	switch {
+	case o.What == "":
+	case c.What == "":
+		c.SetWhatOf(o)
+	default:
+		c.Hosts = c.Hosts.With(o.Hosts.Shifted(len(c.What) + len("; ")))
+		c.What += "; " + o.What
+		c.HostsListed = c.HostsListed && o.HostsListed
+	}
+}
+
+// Untagged is l with no host tag (LossHosts.Untagged): the losses a test's
+// harness and the receipts are given, which outlive the session a tag names
+// a host in. Each host's name, and whether they are listed, is kept.
+func (l CaptureLosses) Untagged() CaptureLosses {
+	if l == nil {
+		return nil
+	}
+	out := make(CaptureLosses, len(l))
+	for i, c := range l {
+		c.Hosts = c.Hosts.Untagged()
+		out[i] = c
+	}
+	return out
 }
 
 // OwnedCaptureLoss is a capture loss of bytes a test wrote to a connection,
@@ -746,7 +816,8 @@ func (l CaptureLosses) Max(o CaptureLosses) CaptureLosses {
 }
 
 // Plus is l and o added kind by kind (each with the What of the later of
-// the two, o's, when it has one, and its Err likewise). Sorted by kind.
+// the two, o's, when it has one, with the hosts it names, and its Err
+// likewise). Sorted by kind.
 func (l CaptureLosses) Plus(o CaptureLosses) CaptureLosses {
 	at := make(map[CaptureLossKind]int, len(l)+len(o))
 	var out CaptureLosses
@@ -754,7 +825,7 @@ func (l CaptureLosses) Plus(o CaptureLosses) CaptureLosses {
 		if i, ok := at[c.Kind]; ok {
 			out[i].Count += c.Count
 			if c.What != "" {
-				out[i].What = c.What
+				out[i].SetWhatOf(c)
 			}
 			if c.Err != 0 {
 				out[i].Err = c.Err
@@ -770,15 +841,27 @@ func (l CaptureLosses) Plus(o CaptureLosses) CaptureLosses {
 
 // Text is keploy's sentence for the losses, for a test's reason: what was
 // not captured, and that the test's verdict therefore rests on calls keploy
-// never saw.
-func (l CaptureLosses) Text() string {
+// never saw. Each host a What names (Hosts) is whole, beside its tag
+// (LossHosts.ReportText).
+func (l CaptureLosses) Text() string { return l.text(captureReportWhat) }
+
+// LogText is Text as a log line, or an error a caller logs, carries it: each
+// What with the hosts it names by their shape and tag (captureLogWhat). A
+// What names a destination whole (a connection's host and port, a DNS
+// question's name, a mock.real connection's other name) for the report and
+// the console, where the user reads it beside its tag; a host is traffic,
+// and the CLI's log reaches log stores.
+func (l CaptureLosses) LogText() string { return l.text(captureLogWhat(true)) }
+
+// text is Text with each loss's What written by what.
+func (l CaptureLosses) text(what func(CaptureLoss) string) string {
 	if len(l) == 0 {
 		return ""
 	}
 	var parts []string
 	for _, c := range l {
 		s := captureLossText(c)
-		if w := captureWhatShape(c.What); w != "" {
+		if w := what(c); w != "" {
 			s += " (" + w + ")"
 		}
 		parts = append(parts, s)
@@ -794,14 +877,140 @@ func (l CaptureLosses) Text() string {
 // (hostPort), an absolute URL keeps only its path's shape, credentials and
 // the host they precede are {}, query values are {}, and path segments are
 // shaped by PathShape, which keeps a segment that reads as a name.
-func captureWhatShape(what string) string {
-	words := strings.Fields(what)
-	for i, w := range words {
-		if strings.ContainsAny(w, "/?#@=") {
-			words[i] = targetShape(w)
+func captureWhatShape(what string) string { return shapeWords(what, nil, nil) }
+
+// shapeWords is text as captureWhatShape writes it, its words (runs of what
+// is not white space) joined by one space, with each of places (in text's
+// order, each within one word) written host(h), and the rest of its word
+// on either side shaped as a word is (shapeWord).
+func shapeWords(text string, places LossHosts, host func(LossHost) string) string {
+	var words []string
+	next := 0
+	word := func(start, end int) {
+		var b strings.Builder
+		from := start
+		for next < len(places) && places[next].At < end {
+			h := places[next]
+			b.WriteString(shapeWord(text[from:h.At]))
+			b.WriteString(host(h))
+			from = h.At + len(h.Name)
+			next++
+		}
+		b.WriteString(shapeWord(text[from:end]))
+		words = append(words, b.String())
+	}
+	start := -1
+	for i, r := range text {
+		switch {
+		case unicode.IsSpace(r):
+			if start >= 0 {
+				word(start, i)
+				start = -1
+			}
+		case start < 0:
+			start = i
 		}
 	}
+	if start >= 0 {
+		word(start, len(text))
+	}
 	return strings.Join(words, " ")
+}
+
+// shapeWord is w, a word of a capture loss's text or a part of one beside a
+// host, as captureWhatShape writes it: by targetShape when it carries one of
+// / ? # @ =, else as it is.
+func shapeWord(w string) string {
+	if strings.ContainsAny(w, "/?#@=") {
+		return targetShape(w)
+	}
+	return w
+}
+
+// captureReportWhat is c's What as the report names it (captureWhatShape),
+// each host it names beside its tag at its place (LossHost); with no tag
+// where the agent did not list them, or listed them at places What does not
+// hold.
+func captureReportWhat(c CaptureLoss) string { return c.reportWhat(true) }
+
+// reportWhat is c's What as the report names it, shaped as captureWhatShape
+// shapes it with shape, else as it is.
+func (c CaptureLoss) reportWhat(shape bool) string {
+	if c.HostsListed {
+		if out, ok := c.Hosts.write(c.What, shape, reportHost); ok {
+			return out
+		}
+	}
+	if shape {
+		return captureWhatShape(c.What)
+	}
+	return c.What
+}
+
+// LogWhat is c's What as a log line carries it, alone (LogText carries it in
+// its sentence): as the report writes it, each host it names by its shape and
+// tag (logWhat). "" for none.
+func (c CaptureLoss) LogWhat() string { return c.logWhat(true) }
+
+// ReportWhat is c's What as the report and the console name it, alone (Text
+// names it in its sentence): each host it names whole beside its tag
+// (captureReportWhat). "" for none.
+func (c CaptureLoss) ReportWhat() string { return captureReportWhat(c) }
+
+// captureLogWhat is a loss's What as a log line names it, shaped as
+// captureWhatShape shapes it with shape (logWhat).
+func captureLogWhat(shape bool) func(CaptureLoss) string {
+	return func(c CaptureLoss) string { return c.logWhat(shape) }
+}
+
+// logWhat is c's What as a log line carries it, its words as the report
+// writes them (shaped by captureWhatShape with shape): each host the agent
+// listed (Hosts) by its shape and tag at the place the agent wrote it, and
+// nothing else read as a host. A What whose hosts were not listed
+// (HostsListed: an agent that predates Hosts) is written by its size alone
+// (UnlistedLogText), never whole: nothing tells its hosts from keploy's
+// words; so is one listed at places it does not hold. A kind whose What
+// never names a host (namesNoHost) is kept as the report writes it either
+// way.
+func (c CaptureLoss) logWhat(shape bool) string {
+	if c.What == "" {
+		return ""
+	}
+	w := c.What
+	if shape {
+		w = captureWhatShape(w)
+	}
+	switch {
+	case c.HostsListed:
+		if out, ok := c.Hosts.write(c.What, shape, logHost); ok {
+			return out
+		}
+		return misplacedLogText(w)
+	case c.Kind.namesNoHost():
+		return w
+	}
+	return UnlistedLogText(w)
+}
+
+// namesNoHost reports whether a loss of kind k has a What that names no host
+// name in any keploy agent, an older one included (logWhat): keploy's own
+// facts or the machine's (a container's name and image, the kernel's
+// programs, a PID map, a process or its program, a Unix socket's path, the
+// agent's processes, the proxy listener's count, a TLS upgrade a parser
+// asked for), or the kernel's addresses and ports alone (a connection that
+// never reached the proxy whole, one keploy could not pair, bytes the
+// application lost, a UDP answer, a connection's queue keploy dropped). A
+// kind not listed here, a new one among them, may name one.
+func (k CaptureLossKind) namesNoHost() bool {
+	switch k {
+	case CaptureLossContainerUnread, CaptureLossKernelSkip, CaptureLossKernelSkipCall, CaptureLossPIDMap, CaptureLossPIDMapExcluded,
+		CaptureLossUnclassified, CaptureLossAppSubtreeUntracked, CaptureLossProcessUnshimmed, CaptureLossAgentStartedAgain,
+		CaptureLossUnixSocket, CaptureLossUnixUnseen, CaptureLossListenerDropped,
+		CaptureLossAppConnLost, CaptureLossUnpairedConn, CaptureLossAppBytesLost, CaptureLossUDPReply, CaptureLossSTARTTLS,
+		CaptureLossParserStall, CaptureLossDropped:
+		return true
+	}
+	return false
 }
 
 // listenerDropWhere is where a listener_dropped loss is charged: where a call

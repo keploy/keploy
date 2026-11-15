@@ -252,6 +252,19 @@ type MockMismatchReport struct {
 	Diff          string    // Human-readable diff (protocol-specific)
 	NextSteps     string    // Actionable suggestion for the user
 	MatchPhase    string    // how far the match cascade got (MatchPhase* constants)
+	// PathTag is an HTTP call's path tag (models.PathTag), made in the
+	// session that logs the miss, the agent's (CallPathTag of its context),
+	// and carried here so the console and the report print beside the call
+	// the tag the agent's log line names it by. "" for a call of another
+	// protocol.
+	PathTag string `json:"path_tag,omitempty" yaml:"path_tag,omitempty"`
+	// HostTag is the tag of Destination's host name (models.HostTag), made
+	// in the session that logs the miss, the agent's, and carried here so
+	// the console, the report and keploy mock replay's misses file print it
+	// beside the destination whole: the agent's line names the destination
+	// by its shape beside this tag ({}.{}.{}:443 #3fa2c1d0e9b8). "" for an
+	// IP address, or no destination.
+	HostTag string `json:"host_tag,omitempty" yaml:"host_tag,omitempty"`
 	// Operation is the label of the operation an HTTP call carries, as the
 	// registered reader names it (HTTPOperationLabel): "query GetAppLabels".
 	// "" when it carries none. ActualSummary never holds it.

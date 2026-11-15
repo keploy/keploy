@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/stretchr/testify/require"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -86,6 +87,8 @@ type replayCase struct {
 	insertErr error
 	// windows: what each test did, as the agent tells it.
 	windows []models.ScopeWindow
+	// console: the service's console (SetConsole); nil leaves none.
+	console io.Writer
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -171,6 +174,9 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 		store = named("mock-0")
 	}
 	svc := New(zap.New(core), run, store, mapDB, nil, nil, cfg)
+	if c.console != nil {
+		svc.(ConsoleSetter).SetConsole(c.console)
+	}
 	// What a native macOS build does between constructing the service and
 	// running it: prefix the launch line with the interception shim.
 	if c.rewriteLaunch {

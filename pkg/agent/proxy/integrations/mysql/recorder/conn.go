@@ -298,12 +298,12 @@ func fetchServerGreetingShared(ctx context.Context, logger *zap.Logger, hsStore 
 	// raw leg recorded since the last failure) beats a remembered failure.
 	if g, ok := hsStore.ServerGreeting(key); ok {
 		logger.Debug("post-TLS MySQL: using the greeting remembered for this server; not dialling",
-			zap.String("serverKey", key))
+			zap.String("serverKey", models.HostsInText(ctx, key, dstAddrOf(opts))))
 		return g, nil
 	}
 	if err := recentGreetingFetchFailure(flight); err != nil {
 		logger.Debug("post-TLS MySQL: not dialling the server for its greeting again; a fetch failed moments ago",
-			zap.String("serverKey", key), zap.Error(err))
+			zap.String("serverKey", models.HostsInText(ctx, key, dstAddrOf(opts))), zap.Error(models.HostsInError(ctx, err, dstAddrOf(opts))))
 		return nil, err
 	}
 	dialLogger := logger
@@ -361,7 +361,7 @@ func fetchServerGreetingShared(ctx context.Context, logger *zap.Logger, hsStore 
 			if r.Err != nil {
 				if !led && attempt == 0 && errors.Is(r.Err, models.ErrDstDialerUnavailable) {
 					logger.Debug("post-TLS MySQL: the shared greeting fetch could not dial from its own connection's namespace; trying with this connection's",
-						zap.String("serverKey", key), zap.Error(r.Err))
+						zap.String("serverKey", models.HostsInText(ctx, key, dstAddrOf(opts))), zap.Error(models.HostsInError(ctx, r.Err, dstAddrOf(opts))))
 					continue
 				}
 				return nil, r.Err
@@ -370,13 +370,13 @@ func fetchServerGreetingShared(ctx context.Context, logger *zap.Logger, hsStore 
 			switch {
 			case res.fromCache:
 				logger.Debug("post-TLS MySQL: greeting was remembered by an earlier connection; not dialling",
-					zap.String("serverKey", key))
+					zap.String("serverKey", models.HostsInText(ctx, key, dstAddrOf(opts))))
 			case r.Shared:
 				logger.Debug("post-TLS MySQL: shared another connection's greeting fetch instead of dialling",
-					zap.String("serverKey", key))
+					zap.String("serverKey", models.HostsInText(ctx, key, dstAddrOf(opts))))
 			case res.remembered:
 				logger.Debug("post-TLS MySQL: remembered a directly fetched greeting for later connections to this server",
-					zap.String("serverKey", key))
+					zap.String("serverKey", models.HostsInText(ctx, key, dstAddrOf(opts))))
 			}
 			return res.buf, nil
 		case <-ctx.Done():
@@ -483,4 +483,15 @@ func validateGreeting(buf []byte) error {
 		return fmt.Errorf("undecodable HandshakeV10 greeting: %w", err)
 	}
 	return nil
+}
+
+// dstAddrOf is the address opts' connection was dialled at, "" for none: a
+// CONNECT target's host:port through an HTTP proxy, which a server key
+// (greetingMemoKey) and an error name whole, and a line by its host's shape
+// beside its tag (models.HostsInText).
+func dstAddrOf(opts models.OutgoingOptions) string {
+	if opts.DstCfg == nil {
+		return ""
+	}
+	return opts.DstCfg.Addr
 }

@@ -705,7 +705,7 @@ func TestUnderTheSwitchACaptureLossFailsTheTestRunningAndEveryLaterOne(t *testin
 		if r.Status != models.TestStatusFailed {
 			t.Fatalf("%s: %s, want FAILED: the loss taints the test running and every later one", id, r.Status)
 		}
-		if len(r.FailureInfo.CaptureIncomplete) != 1 || r.FailureInfo.CaptureIncomplete[0] != tls[0] {
+		if len(r.FailureInfo.CaptureIncomplete) != 1 || !reflect.DeepEqual(r.FailureInfo.CaptureIncomplete[0], tls[0]) {
 			t.Fatalf("%s: capture evidence %+v, want %+v", id, r.FailureInfo.CaptureIncomplete, tls)
 		}
 		found := false
@@ -750,7 +750,7 @@ func TestUnderTheSwitchATLSRejectionFailsOnlyTheTestItHappenedIn(t *testing.T) {
 		}
 	}
 	r := byID["test-2"]
-	if r.Status != models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 1 || r.FailureInfo.CaptureIncomplete[0] != tls[0] {
+	if r.Status != models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 1 || !reflect.DeepEqual(r.FailureInfo.CaptureIncomplete[0], tls[0]) {
 		t.Fatalf("test-2: %s %+v, want FAILED with %+v", r.Status, r.FailureInfo.CaptureIncomplete, tls)
 	}
 	if cv := h.report.report.CaptureVerification; cv != nil {

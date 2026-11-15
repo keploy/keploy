@@ -521,7 +521,19 @@ func FieldReasonShapes(rs []FieldReason) []FieldReason {
 type UnmatchedCall struct {
 	Protocol      string `json:"protocol" yaml:"protocol"`
 	ActualSummary string `json:"actual_summary,omitempty" yaml:"actual_summary,omitempty"` // e.g. "POST /comments"
-	Destination   string `json:"destination,omitempty" yaml:"destination,omitempty"`       // outgoing call's destination/domain (HTTP Host, or host:port) — which upstream missed
+	// PathTag mirrors MockMismatchReport.PathTag: the tag of an HTTP call's
+	// method and path that the agent's log line names it by, beside its
+	// shape (models.PathTag). The report and the console print it beside the
+	// summary, so a reader of the log finds the call here. "" for a call of
+	// another protocol, or one an agent that tags none reported.
+	PathTag     string `json:"path_tag,omitempty" yaml:"path_tag,omitempty"`
+	Destination string `json:"destination,omitempty" yaml:"destination,omitempty"` // outgoing call's destination/domain (HTTP Host, or host:port) — which upstream missed
+	// HostTag mirrors MockMismatchReport.HostTag: the tag of Destination's
+	// host name that the agent's log line names it by, beside its shape
+	// (models.HostTag). The report, the console and the misses file print it
+	// beside the destination. "" for an IP address, or one an agent that tags
+	// no host reported. Like PathTag, never in a receipt (Sanitized).
+	HostTag string `json:"host_tag,omitempty" yaml:"host_tag,omitempty"`
 	// Operation mirrors MockMismatchReport.Operation: the label of the
 	// operation an HTTP call carries ("query GetAppLabels"), "" when none. It
 	// names no value (HTTPOperationOf drops a label that could), so a

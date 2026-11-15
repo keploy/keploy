@@ -1458,5 +1458,10 @@ type Session struct {
 	Mode models.Mode
 	TC   chan<- *models.TestCase
 	MC   chan<- *models.Mock
+	// LogKeys is the session's key for the path tags the lines about its
+	// connections name their calls by (models.LogKeySession): the one the
+	// context Record or Mock was given carries, drawn as the session began.
+	// nil: the process's key.
+	LogKeys *models.LogKeySession
 	models.OutgoingOptions
 }

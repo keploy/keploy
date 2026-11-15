@@ -341,7 +341,7 @@ func (e *Engine) Decide(ctx context.Context, lane models.AsyncLane, live *models
 	if cur == nil {
 		return e.keepAlive(p, lane)
 	}
-	return e.decideServe(p, lane, cur.mock, live)
+	return e.decideServe(ctx, p, lane, cur.mock, live)
 }
 
 // holdThrottle blocks up to d, or until an AdvanceWindow/OnTestComplete
@@ -393,7 +393,7 @@ func (e *Engine) keepAlive(p AsyncParser, lane models.AsyncLane) (*models.Mock, 
 // or been woken early — and is about to be served. It takes no ctx: the match
 // itself is synchronous and unlocked except for the pass/flag tally update, so
 // it never serializes unrelated lanes' Load/Report/advance.
-func (e *Engine) decideServe(p AsyncParser, lane models.AsyncLane, recorded, live *models.Mock) (*models.Mock, []byte, error) {
+func (e *Engine) decideServe(ctx context.Context, p AsyncParser, lane models.AsyncLane, recorded, live *models.Mock) (*models.Mock, []byte, error) {
 	if p == nil {
 		if e.logger != nil {
 			e.logger.Debug("async: no parser registered for lane type; serving recorded mock unverified — "+
@@ -403,7 +403,7 @@ func (e *Engine) decideServe(p AsyncParser, lane models.AsyncLane, recorded, liv
 		return recorded, nil, nil // serve recorded even without a shape verdict
 	}
 
-	ok, detail := p.MatchRequestShape(live, recorded, lane) // unlocked — may parse/compare
+	ok, detail := p.MatchRequestShape(ctx, live, recorded, lane) // unlocked — may parse/compare
 	e.mu.Lock()
 	if ok {
 		e.pass++

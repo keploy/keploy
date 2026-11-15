@@ -130,6 +130,11 @@ type IngressProxyManager struct {
 	// different filtering get the new behavior immediately on the
 	// next captured request.
 	startOnce sync.Once
+
+	// logKeys is the session the ingress serves now (SetLogKeySession):
+	// each connection it takes names its calls' path tags under its key
+	// (handleConnection). nil: the process's key.
+	logKeys atomic.Pointer[models.LogKeySession]
 }
 
 func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
@@ -201,6 +206,25 @@ func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOp
 		}
 	})
 	return pm.tcChan
+}
+
+// SetLogKeySession makes s the session the ingress serves from now: every
+// connection it takes from here names its calls by path tags under s's key
+// (models.LogKeySession), unless its context carries a session of its own.
+// The agent sets it as each session it serves begins (a recording, a
+// replay's session); a connection taken before keeps the session it was taken
+// in, as its calls are that session's.
+func (pm *IngressProxyManager) SetLogKeySession(s *models.LogKeySession) {
+	pm.logKeys.Store(s)
+}
+
+// withLogKeys is ctx carrying the session the ingress serves now
+// (SetLogKeySession), unless ctx carries one already.
+func (pm *IngressProxyManager) withLogKeys(ctx context.Context) context.Context {
+	if models.LogKeys(ctx) != nil {
+		return ctx
+	}
+	return models.WithLogKeySession(ctx, pm.logKeys.Load())
 }
 
 // TCChan returns the test case channel for direct use by external consumers
@@ -577,6 +601,9 @@ const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
 	defer clientConn.Close()
+	// The connection's calls are the session's the ingress serves as it is
+	// taken: its lines tag their paths under that session's key.
+	ctx = pm.withLogKeys(ctx)
 
 	preface, err := util.ReadRequiredBytes(ctx, logger, clientConn, len(clientPreface))
 	if err == io.EOF && len(preface) == 0 {

@@ -14,6 +14,7 @@ package mock
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -244,6 +245,13 @@ type TestDB interface {
 // TestDBSetter is how the CLI hands the mock service a test-case store when --record-requests is set.
 type TestDBSetter interface {
 	SetTestDB(db TestDB)
+}
+
+// ConsoleSetter is the service's console (where a replay names each call no
+// mock answered whole, never in its log): keploy's CLI sets os.Stdout; a
+// service whose console is not set says nothing there.
+type ConsoleSetter interface {
+	SetConsole(w io.Writer)
 }
 
 // MappingDeleter is an optional MappingDB extension: Record drops the set's old mappings through it before a re-record.

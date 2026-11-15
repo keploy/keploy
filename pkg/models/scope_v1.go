@@ -268,12 +268,14 @@ func (e *ScopeEvidence) ChargeNotJudged(l CaptureLosses) {
 				continue
 			}
 			// Plus keeps the What charged last: each What charged is named,
-			// once.
+			// once, with the hosts it names. A What c's already holds is
+			// named there, and c's own list (each host where c's What
+			// holds it) names its hosts.
+			joined := c
 			if !strings.Contains(c.What, sum[i].What) {
-				sum[i].What = c.What + "; " + sum[i].What
-			} else {
-				sum[i].What = c.What
+				joined.JoinWhat(sum[i])
 			}
+			sum[i].SetWhatOf(joined)
 		}
 	}
 	e.CannotCapture = sum

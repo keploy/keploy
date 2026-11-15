@@ -307,7 +307,7 @@ func TestRecordV2_LegacyParity(t *testing.T) {
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
 	reqTs := time.Unix(1_700_002_000, 0)
 	resTs := reqTs.Add(5 * time.Millisecond)
-	v2Mock, err := h.buildHTTPMock(&FinalHTTP{
+	v2Mock, err := h.buildHTTPMock(context.Background(), &FinalHTTP{
 		Req:              canonicalRequest,
 		Resp:             canonicalResponse,
 		ReqTimestampMock: reqTs,
