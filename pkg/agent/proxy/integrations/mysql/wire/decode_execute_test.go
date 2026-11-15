@@ -217,3 +217,104 @@ func TestDecodePayload_AnOlderKeploysReadingIsKeptAtReplayOnly(t *testing.T) {
 		_ = peer.Close()
 	}
 }
+
+func sendLongDataPacket(stmtID uint32, paramID uint16, data []byte) []byte {
+	p := []byte{mysql.COM_STMT_SEND_LONG_DATA}
+	p = binary.LittleEndian.AppendUint32(p, stmtID)
+	p = binary.LittleEndian.AppendUint16(p, paramID)
+	p = append(p, data...)
+	return append([]byte{byte(len(p)), byte(len(p) >> 8), byte(len(p) >> 16), 0}, p...)
+}
+
+func executeLongDataFirst(stmtID uint32, s string) []byte {
+	p := []byte{mysql.COM_STMT_EXECUTE}
+	p = binary.LittleEndian.AppendUint32(p, stmtID)
+	p = append(p, 0x00)
+	p = binary.LittleEndian.AppendUint32(p, 1)
+	p = append(p, 0x00)
+	p = append(p, 0x01, byte(mysql.FieldTypeBLOB), 0x00, byte(mysql.FieldTypeVarString), 0x00)
+	p = append(append(p, byte(len(s))), s...)
+	return append([]byte{byte(len(p)), byte(len(p) >> 8), byte(len(p) >> 16), 0}, p...)
+}
+
+func executeBlobString(stmtID uint32, bound bool, blob, s string) []byte {
+	p := []byte{mysql.COM_STMT_EXECUTE}
+	p = binary.LittleEndian.AppendUint32(p, stmtID)
+	p = append(p, 0x00)
+	p = binary.LittleEndian.AppendUint32(p, 1)
+	p = append(p, 0x00)
+	if bound {
+		p = append(p, 0x01, byte(mysql.FieldTypeBLOB), 0x00, byte(mysql.FieldTypeVarString), 0x00)
+	} else {
+		p = append(p, 0x00)
+	}
+	p = append(append(p, byte(len(blob))), blob...)
+	p = append(append(p, byte(len(s))), s...)
+	return append([]byte{byte(len(p)), byte(len(p) >> 8), byte(len(p) >> 16), 0}, p...)
+}
+
+func TestDecodePayload_LongDataClearedAfterExecuteAndClose(t *testing.T) {
+	client, peer := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = peer.Close() })
+	decodeCtx := &DecodeContext{
+		Mode: models.MODE_RECORD, LastOp: NewLastOpMap(), ServerGreetings: NewGreetings(),
+		PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{7: {StatementID: 7, NumParams: 2}},
+	}
+	decodeCtx.ServerGreetings.Store(client, &mysql.HandshakeV10Packet{CapabilityFlags: mysql.CLIENT_PROTOCOL_41})
+	decode := func(packet []byte) (*mysql.PacketBundle, error) {
+		decodeCtx.LastOp.Store(client, RESET)
+		return DecodePayload(context.Background(), zap.NewNop(), packet, client, decodeCtx)
+	}
+
+	// 1. Send long data for parameter 0
+	if _, err := decode(sendLongDataPacket(7, 0, []byte("streamed-blob"))); err != nil {
+		t.Fatalf("sendLongDataPacket failed: %v", err)
+	}
+	if !decodeCtx.LongDataParams[7][0] {
+		t.Fatalf("expected LongDataParams[7][0] to be true after COM_STMT_SEND_LONG_DATA")
+	}
+
+	// 2. First execute consumes long data for parameter 0
+	b1, err := decode(executeLongDataFirst(7, "item-1"))
+	if err != nil {
+		t.Fatalf("first execute failed: %v", err)
+	}
+	pkt1 := b1.Message.(*mysql.StmtExecutePacket)
+	if pkt1.Parameters[0].Value != nil {
+		t.Fatalf("expected param 0 value to be nil on long data execute, got %v", pkt1.Parameters[0].Value)
+	}
+	if pkt1.Parameters[1].Value != "item-1" {
+		t.Fatalf("expected param 1 value to be item-1, got %v", pkt1.Parameters[1].Value)
+	}
+	if _, exists := decodeCtx.LongDataParams[7]; exists {
+		t.Fatalf("expected LongDataParams[7] to be cleared after COM_STMT_EXECUTE, but was %+v", decodeCtx.LongDataParams[7])
+	}
+
+	// 3. Second execute with inline parameter 0 (without rebinding types)
+	b2, err := decode(executeBlobString(7, false, "inline-blob", "item-2"))
+	if err != nil {
+		t.Fatalf("second execute failed: %v", err)
+	}
+	pkt2 := b2.Message.(*mysql.StmtExecutePacket)
+	if pkt2.Parameters[0].Value != "inline-blob" {
+		t.Fatalf("expected param 0 value to be inline-blob, got %v", pkt2.Parameters[0].Value)
+	}
+	if pkt2.Parameters[1].Value != "item-2" {
+		t.Fatalf("expected param 1 value to be item-2, got %v", pkt2.Parameters[1].Value)
+	}
+
+	// 4. Send long data and close statement: LongDataParams must be cleared on close
+	if _, err := decode(sendLongDataPacket(7, 0, []byte("streamed-blob-2"))); err != nil {
+		t.Fatalf("sendLongDataPacket before close failed: %v", err)
+	}
+	if !decodeCtx.LongDataParams[7][0] {
+		t.Fatalf("expected LongDataParams[7][0] to be true before close")
+	}
+	if _, err := decode(closePacket(7)); err != nil {
+		t.Fatalf("closePacket failed: %v", err)
+	}
+	if _, exists := decodeCtx.LongDataParams[7]; exists {
+		t.Fatalf("expected LongDataParams[7] to be cleared after COM_STMT_CLOSE, but was %+v", decodeCtx.LongDataParams[7])
+	}
+}
+

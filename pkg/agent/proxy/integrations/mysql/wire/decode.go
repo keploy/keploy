@@ -367,6 +367,11 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_EXECUTE packet: %w", err)
 		}
+		// A COM_STMT_EXECUTE consumes any long data buffered for this
+		// execution on the server, so drop our record of it too — otherwise
+		// a subsequent EXECUTE would skip an inline parameter whose value
+		// is in the payload.
+		delete(decodeCtx.LongDataParams, stmtID)
 		if pkt.NewParamsBindFlag == 1 {
 			decodeCtx.rememberParamTypes(stmtID, pkt.Parameters)
 		}
@@ -385,6 +390,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		}
 		// The statement is gone, and its ID may name another one later.
 		delete(decodeCtx.StmtParamTypes, pkt.StatementID)
+		delete(decodeCtx.LongDataParams, pkt.StatementID)
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_CLOSE), clientConn, mysql.COM_STMT_CLOSE, decodeCtx)
 
