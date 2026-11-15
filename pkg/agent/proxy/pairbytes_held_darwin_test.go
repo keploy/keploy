@@ -488,6 +488,9 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		pcs, _ := p.paired.upTo(1)
 		untilSendBufferEmpty(t, pcs[0])
 		hideFromTable(t, proxySide.LocalAddr())
+		p.settleReads = true
+		core, logs := observer.New(zapcore.WarnLevel)
+		p.logger = zap.New(core)
 		_ = reader.Close()
 		if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 			t.Fatalf("PairedBytesErr = %v, want unknown: the table lists neither end", err)
@@ -495,7 +498,84 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		if w := pcs[0].wroteAtClose.Load(); w != nil {
 			t.Fatalf("the close's record = %+v, want none with no proxy's side listed to count from", w)
 		}
+		// The line says what the close read: the table lists neither
+		// end, and the proxy's side was not reset. It does not say no
+		// process holds the application's socket: this one has a holder.
+		wantOneCloseUnknownLine(t, logs, "lists neither end of a connection to the proxy")
+		wantOneCloseUnknownLine(t, logs, "the proxy's side was not reset")
 	})
+	t.Run("neither end listed, the proxy's side cannot be read", func(t *testing.T) {
+		// Whether the side was reset cannot be told: unknown, said with
+		// the read's error.
+		p, _, proxySide, reader := heldPair(t)
+		p.settleReads = true
+		core, logs := observer.New(zapcore.WarnLevel)
+		p.logger = zap.New(core)
+		hideFromTable(t, proxySide.LocalAddr())
+		failHeldProxySide(t)
+		_ = reader.Close()
+		if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+			t.Fatalf("PairedBytesErr = %v, want unknown: the proxy's side cannot be read", err)
+		}
+		wantOneCloseUnknownLine(t, logs, "the proxy's side of it cannot be read: bad file descriptor")
+	})
+	for _, reset := range []string{"SO_LINGER 0", "an answer left unread"} {
+		for _, readBefore := range []bool{false, true} {
+			name := "the application reset it, by " + reset
+			if readBefore {
+				name += ", once one was read"
+			}
+			t.Run(name, func(t *testing.T) {
+				// macOS's table drops a reset socket's entry, the
+				// proxy's side's too: the table lists neither end.
+				// The side's own socket shows the reset, taken after
+				// everything the application wrote, so nothing is on
+				// its way: gone, not unknown. Before, such a close
+				// made every later wait of the run unknown. Go's
+				// Transport resets a connection whose response body
+				// it closes before the end with bytes still unread.
+				p, app, proxySide, reader := heldPair(t)
+				p.settleReads = true
+				core, logs := observer.New(zapcore.WarnLevel)
+				p.logger = zap.New(core)
+				p.paired.held.Store(readBefore)
+				if _, err := app.Write([]byte("hello")); err != nil {
+					t.Fatal(err)
+				}
+				untilUnread(t, proxySide, 5)
+				if _, err := io.ReadFull(reader, make([]byte, 5)); err != nil {
+					t.Fatal(err)
+				}
+				pcs, _ := p.paired.upTo(1)
+				if reset == "SO_LINGER 0" {
+					if err := app.SetLinger(0); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if _, err := proxySide.Write([]byte("an answer the application never reads")); err != nil {
+						t.Fatal(err)
+					}
+					untilUnread(t, app, 37)
+				}
+				if err := app.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if s := untilStateLeaves(t, proxySide, xnuTCPEstablished); s != xnuTCPClosed {
+					t.Fatalf("the proxy's side is in TCP state %d once the application closed, want CLOSED: a reset", s)
+				}
+				_ = reader.Close()
+				if err := p.PairedBytesErr(); err != nil {
+					t.Fatalf("PairedBytesErr = %v after a close of a connection the application reset, want nil", err)
+				}
+				if lines := logs.FilterMessageSnippet("keploy cannot tell what the application had written").All(); len(lines) != 0 {
+					t.Fatalf("%d lines say the close cannot tell what was written, want none: %+v", len(lines), lines)
+				}
+				if w := pcs[0].wroteAtClose.Load(); w != nil {
+					t.Fatalf("the close's record = %+v, want none for a reset connection", w)
+				}
+			})
+		}
+	}
 	t.Run("the processes cannot be read", func(t *testing.T) {
 		p, _, _, reader := heldPair(t)
 		p.settleReads = true

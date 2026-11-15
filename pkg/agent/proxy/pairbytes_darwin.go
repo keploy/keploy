@@ -511,8 +511,9 @@ func readProxySide(conn *net.TCPConn) proxySide {
 	return ps
 }
 
-// readHeldProxySide is how heldTarget and noteHeldAtClose read the proxy's
-// side (readProxySide); a test replaces it to make the read fail.
+// readHeldProxySide is how heldTarget, noteHeldAtClose and noteUnlistedAtClose
+// read the proxy's side (readProxySide); a test replaces it to make the read
+// fail.
 var readHeldProxySide = readProxySide
 
 // heldUncounted says why bytes in the send buffer of an application socket
@@ -552,8 +553,10 @@ const heldUncounted = "macOS's TCP table does not list this socket to keploy's a
 // reset, after which nothing it wrote is on its way: a socket whose holder
 // closed it lives on in the kernel until its bytes and its FIN are
 // acknowledged (FIN_WAIT_1, CLOSING, LAST_ACK), and no holder's read finds
-// it. Otherwise what was on its way cannot be told, and every wait is unknown
-// from then on.
+// it. The table shows a FIN taken in the proxy's side's entry; a reset it
+// shows by dropping that entry, which the side's own socket then tells
+// (noteUnlistedAtClose). Otherwise what was on its way cannot be told, and
+// every wait is unknown from then on.
 func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	if xnuTableReadable() != nil {
 		return
@@ -570,8 +573,10 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 		case p.paired.visible.Load():
 		case listed && p.noteHeldAtClose(pc, pr):
 		case listed && peerEnded(pr.state):
-		default:
+		case listed:
 			p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side has not taken its FIN or reset: bytes it wrote may still be on their way, as a socket its holder closed lives on until they are acknowledged (%s)", models.ErrProxyConnsUnsupported, pc.app, xnuHidden))
+		default:
+			p.noteUnlistedAtClose(pc)
 		}
 		return
 	}
@@ -580,6 +585,29 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 		return
 	}
 	pc.wroteAtClose.Store(&appWrote{want: pc.count(app.writeSeq() - app.iss - 1), fin: app.finPending(), base: targetBase{isn: app.iss}})
+}
+
+// noteUnlistedAtClose is noteWroteAtClose for a connection the table lists
+// neither end of, with none of the application's sockets proven listed.
+// macOS's table drops a reset socket's entry, the proxy's side's among them:
+// an application that reset its connection (SO_LINGER 0, or a close with
+// bytes unread in its receive buffer, as Go's Transport closes a response
+// body read short) leaves no entry for either end. A proxy's side whose own
+// socket shows that reset (CLOSED) took it after everything the application
+// wrote, as it takes a FIN, so nothing is on its way, and no record is made,
+// as for a reset socket its holder shows (noteHeldAtClose). Any other side is
+// unknown: the table lists the proxy's own sockets to keploy's agent, so one
+// missing in another state is not what a reset leaves, and with no entry
+// there is no first sequence number to count a holder's read from. So is one
+// whose own socket cannot be read, said with the read's error.
+func (p *Proxy) noteUnlistedAtClose(pc *pairedConn) {
+	ps := readHeldProxySide(pc.conn)
+	switch {
+	case ps.err != nil:
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table lists neither end of a connection to the proxy, %s, as the proxy closes it, and the proxy's side of it cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err))
+	case ps.state != xnuTCPClosed:
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table lists neither end of a connection to the proxy, %s, as the proxy closes it, and the proxy's side was not reset (TCP state %d): bytes the application wrote may still be on their way, and there is no entry for the proxy's side to count them from (%s)", models.ErrProxyConnsUnsupported, pc.app, ps.state, xnuHidden))
+	}
 }
 
 // noteHeldAtClose is noteWroteAtClose for an application socket the table
