@@ -9917,7 +9917,9 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 		return
 	}
 
-	host, port, ok := dockerPublishedHostPort(r.config.Command)
+	// A mapping it cannot read names no address to wait on, and the test is
+	// sent again at once, as with no mapping.
+	host, port, ok, _ := dockerPublishedHostPort(r.config.Command)
 	if !ok {
 		return
 	}

@@ -3396,18 +3396,23 @@ var (
 	}
 )
 
-// ExtractPort extracts the port from a given URL string, defaulting to 80 if no port is specified.
+// ExtractPort is the port rawURL names, or its scheme's default (443 for
+// https, 80 otherwise) when it names none.
+//
+// The host is split by net.SplitHostPort, never on its colons: an IPv6 host
+// has colons of its own, and a base path of http://[fd00::1]/ named port
+// "1]", which stopped keploy at its start.
 func ExtractPort(rawURL string) (uint32, error) {
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
 		return 0, err
 	}
 
-	host := parsedURL.Host
-	if strings.Contains(host, ":") {
-		// Split the host by ":" and return the port part
-		parts := strings.Split(host, ":")
-		port, err := strconv.ParseUint(parts[len(parts)-1], 10, 32)
+	// For http and https url.Parse has checked the host (it refuses
+	// "http://fd00::1:8080/"): one SplitHostPort cannot split names no port
+	// ("example.com", "[fd00::1]").
+	if _, p, err := net.SplitHostPort(parsedURL.Host); err == nil {
+		port, err := strconv.ParseUint(p, 10, 32)
 		if err != nil {
 			return 0, fmt.Errorf("invalid port in URL: %s", rawURL)
 		}
@@ -3480,7 +3485,7 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 			}
 		case <-timer.C:
 			msg := "Please add delay if your application takes more time to start"
-			return fmt.Errorf("timeout after %v waiting for port %s:%s, %s", timeout, host, port, msg)
+			return fmt.Errorf("timeout after %v waiting for port %s, %s", timeout, addr, msg)
 		}
 	}
 }
@@ -5511,7 +5516,9 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 				zap.String("target", finalTarget), zap.String("default_port", port))
 		}
 	} else {
-		host = finalTarget
+		// An authority with no port may still be a bracketed IPv6 host,
+		// which JoinHostPort below would bracket again.
+		host = utils.UnbracketHost(finalTarget)
 		if colonIdx := strings.LastIndex(finalTarget, ":"); colonIdx != -1 {
 			h, p, err := net.SplitHostPort(finalTarget)
 			if err == nil {

@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -67,6 +68,25 @@ func IsShutdownError(err error) bool {
 		strings.Contains(errStr, "use of closed network connection")
 }
 
+// UnbracketHost is host without the one pair of brackets an IPv6 literal
+// comes in when it is written next to a port ("[fd00::1]"). "fd00::1" and
+// "[fd00::1]" are one host, and the helpers here bracket an IPv6 host
+// themselves wherever the form they build needs it (net.JoinHostPort, a URL's
+// host), so one passed in bracketed would come out bracketed twice.
+func UnbracketHost(host string) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+	return host
+}
+
+// ReplaceHost replaces currentURL's host with ipAddress, keeping its port.
+//
+// ipAddress may be IPv6, bare ("fd00::1", as a Kubernetes Pod IP is) or
+// bracketed. An IPv6 host has to be bracketed in a URL: "http://fd00::1:8080/"
+// is no URL, and url.Parse refuses it (invalid port "::1:8080" after host).
+// A zone ("fe80::1%eth0") is kept and written as a URL writes it (%25).
+// Any other host (a name, an IPv4 address) is put in as given.
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
@@ -80,26 +100,69 @@ func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
 	}
 
-	// Replace hostname with the IP address
-	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
-	// Return the modified URL
+	host := ipAddress
+	if bare := UnbracketHost(ipAddress); isIPv6Literal(bare) {
+		host = "[" + bare + "]"
+	}
+	if port := parsedURL.Port(); port != "" {
+		host += ":" + port
+	}
+	parsedURL.Host = host
 	return parsedURL.String(), nil
 }
 
+// isIPv6Literal says host is an IPv6 address, with or without a zone, an
+// IPv4-mapped one ("::ffff:127.0.0.1") included: every one has colons, so
+// each needs the brackets.
+func isIPv6Literal(host string) bool {
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Is6()
+}
+
+// ReplaceGrpcHost replaces authority's host with ipAddress, keeping its port.
+//
+// An authority may have no port ("my-svc", "10.0.0.5", "[fd00::1]"): then
+// ipAddress alone comes back, an IPv6 one bracketed as an authority writes
+// it, and ResolveTestTarget gives it its port (app_port, grpcPort or 443).
+// ipAddress may be IPv6, bare or bracketed. One with a zone ("fe80::1%eth0")
+// is put in too, but grpc-go refuses a target with a zone.
 func ReplaceGrpcHost(authority string, ipAddress string) (string, error) {
 	// Check if ipAddress is empty
 	if ipAddress == "" {
 		return authority, fmt.Errorf("failed to replace authority in case of docker env: empty IP address")
 	}
 
-	// Use net.SplitHostPort to properly handle IPv6 addresses
-	_, port, err := net.SplitHostPort(authority)
+	port, hasPort, err := authorityPort(authority)
 	if err != nil {
 		return authority, fmt.Errorf("invalid authority format: %v", err)
 	}
+	host := UnbracketHost(ipAddress)
+	if !hasPort {
+		if isIPv6Literal(host) {
+			return "[" + host + "]", nil
+		}
+		return host, nil
+	}
+	// Replace the host part with ipAddress, keeping the port. JoinHostPort
+	// brackets an IPv6 host, so a bracketed one is given to it bare.
+	return net.JoinHostPort(host, port), nil
+}
 
-	// Replace the host part with ipAddress, keeping the port
-	return net.JoinHostPort(ipAddress, port), nil
+// authorityPort is the port of a host:port authority, and hasPort false for
+// one with no port: one with no colon (a name, an IPv4 address), one in
+// brackets ("[fd00::1]"), or a bare IPv6 address, whose colons are the
+// address's. The host itself is not checked, as ReplaceGrpcHost replaces it
+// whole. Anything else net.SplitHostPort cannot split ("a:b:c", "[fd00::1")
+// is an error.
+func authorityPort(authority string) (port string, hasPort bool, err error) {
+	_, port, err = net.SplitHostPort(authority)
+	if err == nil {
+		return port, true, nil
+	}
+	if !strings.Contains(authority, ":") || UnbracketHost(authority) != authority || isIPv6Literal(authority) {
+		return "", false, nil
+	}
+	return "", false, err
 }
 
 func ReplaceGrpcPort(authority string, port string) (string, error) {
@@ -111,8 +174,9 @@ func ReplaceGrpcPort(authority string, port string) (string, error) {
 	// Use net.SplitHostPort to properly handle IPv6 addresses
 	host, _, err := net.SplitHostPort(authority)
 	if err != nil {
-		// If splitting fails, assume it's just a host without port
-		return net.JoinHostPort(authority, port), nil
+		// If splitting fails, assume it's just a host without port: "[fd00::1]"
+		// or "fd00::1" as much as "localhost", which JoinHostPort brackets.
+		return net.JoinHostPort(UnbracketHost(authority), port), nil
 	}
 
 	// Replace the port part, keeping the host
@@ -158,12 +222,11 @@ func ReplacePort(currentURL string, port string) (string, error) {
 		return currentURL, err
 	}
 
-	if parsedURL.Port() == "" {
-		parsedURL.Host = parsedURL.Host + ":" + port
-	} else {
-		parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Port(), port, 1)
-	}
-
+	// Rebuilt from the hostname, never edited as text: replacing the port's
+	// digits in Host replaced their first occurrence, which can be in the host
+	// ("10.0.0.80:80" became "10.0.0.9000:80", "[fd00::8080]:8080" a
+	// different host). JoinHostPort brackets an IPv6 hostname.
+	parsedURL.Host = net.JoinHostPort(parsedURL.Hostname(), port)
 	return parsedURL.String(), nil
 }
 
