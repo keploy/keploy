@@ -499,10 +499,11 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 			t.Fatalf("the close's record = %+v, want none with no proxy's side listed to count from", w)
 		}
 		// The line says what the close read: the table lists neither
-		// end, and the proxy's side was not reset. It does not say no
-		// process holds the application's socket: this one has a holder.
+		// end, and the proxy's side was not reset, with its state by name.
+		// It does not say no process holds the application's socket: this
+		// one has a holder.
 		wantOneCloseUnknownLine(t, logs, "lists neither end of a connection to the proxy")
-		wantOneCloseUnknownLine(t, logs, "the proxy's side was not reset")
+		wantOneCloseUnknownLine(t, logs, "the proxy's side was not reset (it is in ESTABLISHED)")
 	})
 	t.Run("neither end listed, the proxy's side cannot be read", func(t *testing.T) {
 		// Whether the side was reset cannot be told: unknown, said with

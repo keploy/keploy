@@ -401,16 +401,9 @@ func (p *Proxy) pairEnded(t *pairTarget, ps proxySide, closed bool) (bool, error
 // one hidden from the agent, not one gone.
 const xnuHidden = "macOS lists to a process only its own sockets in some cases (macOS 27, for a process keploy's CLI starts without root), so what the application wrote cannot be counted"
 
-// tcpStateName names the TCP states a bytes wait reports.
-func tcpStateName(s uint8) string {
-	switch s {
-	case xnuTCPFinWait1:
-		return "FIN_WAIT_1"
-	case xnuTCPFinWait2:
-		return "FIN_WAIT_2"
-	}
-	return fmt.Sprintf("TCP state %d", s)
-}
+// tcpStateName names the TCP states a bytes wait or a close reports, by
+// XNU's names.
+func tcpStateName(s uint8) string { return xnuTCPStateName(s) }
 
 // PairedBytesErr is why the bytes on the proxy's paired connections cannot be
 // counted, nil while they can: macOS's TCP table cannot be read in the layout
@@ -606,7 +599,7 @@ func (p *Proxy) noteUnlistedAtClose(pc *pairedConn) {
 	case ps.err != nil:
 		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table lists neither end of a connection to the proxy, %s, as the proxy closes it, and the proxy's side of it cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err))
 	case ps.state != xnuTCPClosed:
-		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table lists neither end of a connection to the proxy, %s, as the proxy closes it, and the proxy's side was not reset (TCP state %d): bytes the application wrote may still be on their way, and there is no entry for the proxy's side to count them from (%s)", models.ErrProxyConnsUnsupported, pc.app, ps.state, xnuHidden))
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table lists neither end of a connection to the proxy, %s, as the proxy closes it, and the proxy's side was not reset (it is in %s): bytes the application wrote may still be on their way, and there is no entry for the proxy's side to count them from (%s)", models.ErrProxyConnsUnsupported, pc.app, tcpStateName(ps.state), xnuHidden))
 	}
 }
 
