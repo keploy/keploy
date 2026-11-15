@@ -355,9 +355,11 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 			t.Fatalf("PairedBytesErr = %v after a close with bytes in the application's send buffer, want unknown", err)
 		}
-		lines := logs.All()
+		// The close also charges the bytes it tosses unread (pairLost's
+		// own warning): the line is the one that says why nothing counts.
+		lines := logs.FilterMessageSnippet("keploy cannot count what the application had written").All()
 		if len(lines) != 1 {
-			t.Fatalf("%d warnings, want one: %+v", len(lines), lines)
+			t.Fatalf("%d such warnings, want one: %+v", len(lines), logs.All())
 		}
 		f := lines[0].ContextMap()
 		if want := app.LocalAddr().String() + " -> " + proxySide.LocalAddr().String(); f["connection"] != want {
