@@ -393,6 +393,22 @@ type ShimReporter interface {
 	ShimClaimedBy(pid int)
 }
 
+// RunMemberReporter is the optional extension implemented by hooks that hold
+// the run's processes themselves: Windows's, whose job object every process
+// the run's command starts joins, with no breakaway. A claim is the run's when
+// its process descends from keploy's client. On Linux the client, as the
+// run's child subreaper, adopts a process whose parent exited, so its chain
+// stays whole; on Windows that process keeps its exited parent's number,
+// which names no process or a later one, and descends from no one. The agent
+// then asks these hooks: a process they hold is the run's, wherever its chain
+// was cut. With hooks that do not implement it, nothing is asked.
+type RunMemberReporter interface {
+	// HoldsInRun reports whether process pid, created at start (its
+	// creation time as the agent read it for the claim: on Windows, FILETIME
+	// ticks), is one of the run's processes now. It never waits.
+	HoldsInRun(pid int, start uint64) bool
+}
+
 // ListenerCountTaker is the optional extension implemented by proxies that can
 // have their listener counted by the hooks. The agent hands it the hooks
 // (ListenerCounter) whenever they can count, switch or not, before
