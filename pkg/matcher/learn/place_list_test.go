@@ -130,3 +130,40 @@ func TestACallBuildsOnlyThePlacesItReads(t *testing.T) {
 		t.Errorf("reading %d places twice in order and by index built %d of %d leaves' places (read %d); want each built once", ps.len(), got, ps.leaves, n)
 	}
 }
+
+// The recording each place of a call is of, as mocks() names it without
+// building a place (orderUnknown marks a source's places by it), is the
+// one its built place names: a leaf's is its own exchange's, never a
+// neighbour's, and a recording's place is its recording.
+func TestPlaceListNamesEachPlacesRecordingAsItsBuiltPlaceDoes(t *testing.T) {
+	in := bookShape(40, 3, 5, true)
+	ps, _, _ := placesOf(in)
+	ps.x = newReaderIndex(in.Drifts)
+	defer ps.x.release()
+	b := placesBuilt.Load()
+	var named []string
+	for i, m := range ps.mocks() {
+		if i != len(named) {
+			t.Fatalf("mocks() named place %d after %d places; want each place in order", i, len(named))
+		}
+		named = append(named, m)
+	}
+	if got := placesBuilt.Load() - b; got != 0 {
+		t.Errorf("naming the places' recordings built %d places; want none", got)
+	}
+	if len(named) != ps.len() || ps.leaves != 40*4 {
+		t.Fatalf("mocks() named %d places of %d (%d leaves); want every place", len(named), ps.len(), ps.leaves)
+	}
+	exchanges := map[string]bool{}
+	for i, m := range named {
+		if p := ps.at(i); p.mock != m {
+			t.Fatalf("place %d (%s) is of %s as built and of %s as mocks() names it; want its own recording", i, p.name, p.mock, m)
+		}
+		if i < ps.leaves {
+			exchanges[m] = true
+		}
+	}
+	if len(exchanges) != 40 {
+		t.Errorf("the leaves name %d exchanges; want each of the 40 its own", len(exchanges))
+	}
+}
