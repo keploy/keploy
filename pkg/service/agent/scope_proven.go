@@ -2861,7 +2861,7 @@ func evidenceReasonIn(id string, ev *models.ScopeEvidence, mocks map[string]*mod
 	if slices.Contains(compared, true) {
 		head += " " + comparedText
 	}
-	if !whole && results != "" {
+	if !whole {
 		head += " " + missesListedWhole(results)
 	}
 	if whys := missWhys(ev.Misses, before, most); len(whys) > 0 {

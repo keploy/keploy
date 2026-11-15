@@ -109,6 +109,11 @@ func TestAFailedTestsReasonNamesTheClosestRecordingAndWhereEveryFieldIs(t *testi
 	for _, m := range []models.UnmatchedCall{early, late} {
 		r := evidenceReason("api::TestJobs", &models.ScopeEvidence{Misses: []models.UnmatchedCall{m}}, nil, began, nil)
 		require.Contains(t, r, "(closest recording "+m.ClosestMock+": body.a, body.b, body.c and 1 more differ). "+comparedText+" "+whole)
+		// Three fields are each named: no file.
+		m.Differs = m.Differs[:3]
+		r = evidenceReason("api::TestJobs", &models.ScopeEvidence{Misses: []models.UnmatchedCall{m}}, nil, began, nil)
+		require.Contains(t, r, "(closest recording "+m.ClosestMock+": body.a, body.b and body.c differ). "+comparedText)
+		require.NotContains(t, r, whole)
 	}
 
 	// A record's reason names the record's file, a replay's the replay's.
