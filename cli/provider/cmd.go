@@ -1892,7 +1892,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// treated as native here and prompt for sudo it does not need.
 		cmdType := utils.CmdType(c.cfg.CommandType)
 		if !utils.IsDockerCmd(cmdType) {
-			// Native mode: fix permissions immediately (this caches sudo credentials)
+			// Native mode: fix permissions immediately (on Linux this also caches sudo credentials; on macOS it never runs sudo)
 			if err := utils.EnsureKeployFolderPermissions(cmd.Context(), c.logger, c.cfg.Path); err != nil {
 				utils.LogError(c.logger, err, "failed to ensure keploy folder permissions")
 				return err
@@ -2983,7 +2983,7 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return err
 	}
 
-	// Fix folder permissions (and cache sudo creds) for native runs.
+	// Fix folder permissions for native runs (on Linux this also caches sudo credentials; on macOS it never runs sudo).
 	if !utils.IsDockerCmd(utils.CmdType(c.cfg.CommandType)) {
 		if err := utils.EnsureKeployFolderPermissions(cmd.Context(), c.logger, c.cfg.Path); err != nil {
 			utils.LogError(c.logger, err, "failed to ensure keploy folder permissions")

@@ -236,7 +236,7 @@ func refuseKeployFolderPermissions(logger *zap.Logger, keployPath string, permEr
 func shellWord(s string) string {
 	safe := s != ""
 	for _, r := range s {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+@%:,=", r)) {
+		if !shellSafeRune(r) {
 			safe = false
 			break
 		}
@@ -245,6 +245,12 @@ func shellWord(s string) string {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// shellSafeRune reports whether r is a letter, a digit or punctuation a POSIX
+// shell leaves alone in an unquoted word.
+func shellSafeRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+@%:,=", r)
 }
 
 // AreSudoCredentialsCached checks if sudo credentials are currently cached.
