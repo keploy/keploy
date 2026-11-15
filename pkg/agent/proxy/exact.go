@@ -1651,13 +1651,15 @@ func (m *MockManager) OpenExactTest(test string, owned []*models.Mock, given []m
 }
 
 // GiveExactTest binds b, a value the open test gave, as a given variable of
-// its scope (variables.Table.Give): test must be the test the view serves,
+// its scope (variables.Table.GiveTest): test must be the test the view
+// serves, the scope of variables in force must be test's (a view served
+// again with no variables begun keeps the scope before it, another test's),
 // and b's name not bound yet.
 func (m *MockManager) GiveExactTest(test string, b models.VariableBinding) error {
 	if v := m.exactView(); v == nil || v.test != test || test == "" {
 		return fmt.Errorf("%s is not the test keploy serves now", test)
 	}
-	if have, ok := m.vars.Give(b); !ok {
+	if have, ok := m.vars.GiveTest(test, b); !ok {
 		if have.Name == "" {
 			return fmt.Errorf("no scope of %s's variables has begun", test)
 		}
@@ -1670,12 +1672,13 @@ func (m *MockManager) GiveExactTest(test string, b models.VariableBinding) error
 }
 
 // NoteExactTest notes, in the open test's scope, why its variable name is
-// not bound (variables.Table.Note): test must be the test the view serves.
+// not bound (variables.Table.NoteTest): test must be the test the view
+// serves, and the scope of variables in force test's.
 func (m *MockManager) NoteExactTest(test, name, why string) error {
 	if v := m.exactView(); v == nil || v.test != test || test == "" {
 		return fmt.Errorf("%s is not the test keploy serves now", test)
 	}
-	if !m.vars.Note(name, why) {
+	if !m.vars.NoteTest(test, name, why) {
 		return fmt.Errorf("no scope of %s's variables has begun", test)
 	}
 	return nil

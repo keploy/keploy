@@ -1017,6 +1017,28 @@ func (t *Table) Give(b Binding) (Binding, bool) {
 	if !t.began {
 		return Binding{}, false
 	}
+	return t.give(from, b)
+}
+
+// GiveTest is Give in the scope of the test named test alone: it refuses,
+// binding nothing, unless the scope in force was begun for test
+// (StartOpeningTest). So a value one test gave is never bound in another
+// test's scope, whose bindings are that test's once it ends (EndedOf) and
+// are read as that test's by the calls that trail it (LookupOf), nor in a
+// scope begun with no test named. A refusal for the scope returns a binding
+// with no name; one for b's name, the binding in force of it.
+func (t *Table) GiveTest(test string, b Binding) (Binding, bool) {
+	from := t.lock()
+	defer t.unlock(from)
+	if test == "" || t.test != test {
+		return Binding{}, false
+	}
+	return t.give(from, b)
+}
+
+// give is Give's step once the scope may take b. t is locked (lock), with
+// from, the table whose run's it reads.
+func (t *Table) give(from *Table, b Binding) (Binding, bool) {
 	if have, ok := t.lookup(from, b.Name); ok {
 		return have, false
 	}
@@ -1040,11 +1062,29 @@ func (t *Table) Note(name, why string) bool {
 	if !t.began {
 		return false
 	}
+	t.note(name, why)
+	return true
+}
+
+// NoteTest is Note in the scope of the test named test alone, as GiveTest
+// binds: it refuses, noting nothing, unless the scope in force was begun
+// for test, so another test's miss never names this test's reason.
+func (t *Table) NoteTest(test, name, why string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if test == "" || t.test != test {
+		return false
+	}
+	t.note(name, why)
+	return true
+}
+
+// note is Note's step once the scope may take it. t.mu is held.
+func (t *Table) note(name, why string) {
 	if t.notes == nil {
 		t.notes = make(map[string]string)
 	}
 	t.notes[name] = why
-	return true
 }
 
 // Unbound is the scope's note on name (Note) while name is not bound: ""
