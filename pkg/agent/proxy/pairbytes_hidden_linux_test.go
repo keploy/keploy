@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,6 +138,45 @@ func TestAHiddenApplicationSocketIsUnknownNotGone(t *testing.T) {
 				t.Fatalf("unknown = %v (%v), want %v", got, err, tc.unknown)
 			}
 		})
+	}
+}
+
+// A close whose sock_diag socket, kept from an earlier close (diagFree), does
+// not find the application's socket keeps that socket and looks no more: a
+// socket not found is an answer, not a failed read, and a new socket would
+// find no more. Only a lookup that fails drops a kept socket for a new one.
+func TestACloseThatMissesTheApplicationsSocketKeepsItsListedSocket(t *testing.T) {
+	p, app, _, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+	p.paired.visible.Store(true)
+	hideAppSockets(t, app.LocalAddr())
+	emptyDiagFree(t)
+	ds, err := openDiag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagFree <- ds
+	var lookups atomic.Int32
+	hidden := lookupWritten
+	lookupWritten = func(d *diagSock, pc *pairedConn, atClose bool) (diagTCP, error) {
+		lookups.Add(1)
+		return hidden(d, pc, atClose)
+	}
+	t.Cleanup(func() { lookupWritten = hidden })
+	_ = reader.Close()
+	if n := lookups.Load(); n != 1 {
+		t.Fatalf("the close looked the hidden application socket up %d times, want once", n)
+	}
+	select {
+	case got := <-diagFree:
+		diagFree <- got
+		if got != ds {
+			t.Fatal("the close dropped its kept sock_diag socket for a socket it did not find")
+		}
+	default:
+		t.Fatal("the close did not give its kept sock_diag socket back")
+	}
+	if err := p.PairedBytesErr(); err != nil {
+		t.Fatalf("PairedBytesErr = %v, want nil once an application socket has been seen", err)
 	}
 }
 
