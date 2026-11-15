@@ -483,8 +483,9 @@ func bypassList(rules []models.BypassRule) []string {
 // recorded mock answered: whole, as the user's own record of the run, as a
 // test run's report holds its calls, beside the path tag keploy's log named
 // it by (models.UnmatchedCall.PathTag), with how many times the replay made
-// it and keploy's next step. The console names the first of them
-// (sayMisses) and points here, by path, for the rest, so the call behind
+// it and each next step keploy gave it (missedCall.OtherNextSteps). The
+// console names the first of the calls, each with its first next step
+// (sayMisses), and points here, by path, for the rest, so the call behind
 // each tag the run's log names is found here. Each replay writes it anew,
 // over the last one's, and a replay that fails before it judged its calls
 // removes the last one's (it would name an earlier run's calls). It is
