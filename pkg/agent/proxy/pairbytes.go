@@ -77,6 +77,9 @@ type pairedConn struct {
 	// (wroteCount.count): its sequence numbers wrap at 2^32, and the wants
 	// a cut end and a close compare (lostBy) must not. Nothing elsewhere.
 	wroteCount
+	// appHolder is, on darwin, the process holding the application's end,
+	// for a macOS whose TCP table does not list it (pairedConn.appSocket).
+	appHolder
 }
 
 // cutEnd is a test's end cut short on a connection: what the application had
@@ -199,6 +202,10 @@ type pairedConns struct {
 	// not found may be one hidden from the agent, and what it wrote is not
 	// known.
 	visible atomic.Bool
+	// held, on darwin: an application socket the table did not list was
+	// read from its holder's descriptor table (pairedConn.appSocket), so
+	// one no process the agent may read holds is gone, not hidden.
+	held atomic.Bool
 	// progress counts what the bytes waits saw move: a waited-for
 	// connection that received more, whose orphan changed state, or that
 	// was resolved (PairedBytesProgress).

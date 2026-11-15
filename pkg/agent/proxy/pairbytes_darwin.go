@@ -65,8 +65,9 @@ func (p *Proxy) pairTargets(n uint64) ([]*pairTarget, error) {
 		return nil, fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err)
 	}
 	var pending []*pairTarget
+	var held heldSockets
 	for _, pc := range pcs {
-		t, err := p.pairTarget(table, pc)
+		t, err := p.pairTarget(table, pc, &held)
 		if err != nil {
 			return nil, err
 		}
@@ -78,12 +79,19 @@ func (p *Proxy) pairTargets(n uint64) ([]*pairTarget, error) {
 }
 
 // pairTarget reads, from the application's socket in table, how much it had
-// written to pc: nil when there is nothing to wait for.
-func (p *Proxy) pairTarget(table []xnuPCB, pc *pairedConn) (*pairTarget, error) {
+// written to pc: nil when there is nothing to wait for. One the table does not
+// list, while it has listed none of the application's sockets, is read from
+// its holder's descriptor table (h, heldTarget).
+func (p *Proxy) pairTarget(table []xnuPCB, pc *pairedConn, h *heldSockets) (*pairTarget, error) {
 	if pc.noSession.Load() {
 		return nil, nil
 	}
 	app, ok := findXNUPCB(table, pc.app, pc.proxy)
+	if !ok && !p.paired.visible.Load() {
+		if t, held, err := p.heldTarget(table, pc, h); held || err != nil {
+			return t, err
+		}
+	}
 	if !ok {
 		// Gone: closed and its timewait over, or reset. Its FIN, after
 		// everything it wrote, or its reset, is what the proxy's side
@@ -102,6 +110,63 @@ func (p *Proxy) pairTarget(table []xnuPCB, pc *pairedConn) (*pairTarget, error) 
 		return nil, nil
 	}
 	return &pairTarget{pc: pc, base: targetBase{isn: app.iss}, want: pc.count(app.writeSeq() - app.iss - 1), finCounted: app.finPending()}, nil
+}
+
+// heldTarget is pairTarget for an application socket the table does not list,
+// read from its holder's descriptor table (pairedConn.appSocket): held is
+// false when no process the agent may read holds it, or the table lists no
+// proxy's side of it to count from (both gone: closed). What it had written is
+// at most what the proxy's side had received by the read after it, plus what
+// its send buffer held, plus its FIN when that is not yet acknowledged and the
+// side has not taken it: the wait's want, which it needs no more than, and
+// reaches sooner once a read of the socket finds its send buffer empty
+// (heldSettled).
+func (p *Proxy) heldTarget(table []xnuPCB, pc *pairedConn, h *heldSockets) (t *pairTarget, held bool, err error) {
+	pr, listed := findXNUPCB(table, pc.proxy, pc.app)
+	if !listed {
+		return nil, false, nil
+	}
+	s, found, err := pc.appSocket(h)
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, and the processes holding the application's sockets cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, err)
+	}
+	if !found {
+		return nil, false, nil
+	}
+	p.paired.held.Store(true)
+	if s.State == xnuTCPTimeWait || s.State == xnuTCPFinWait2 {
+		// Closed, and its FIN acknowledged (pairTarget).
+		return nil, true, nil
+	}
+	ps := readProxySide(pc.conn)
+	if ps.err != nil {
+		return nil, false, fmt.Errorf("%w: read the proxy's socket from %s: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err)
+	}
+	fin := heldFINPending(s)
+	d := ps.rcvNxt - pr.irs - 1 + s.SndCC
+	if fin && !peerEnded(ps.state) {
+		d++
+	}
+	return &pairTarget{pc: pc, base: targetBase{isn: pr.irs, held: true}, want: pc.count(d), finCounted: fin}, true, nil
+}
+
+// heldSettled says, of a wait's target read from its holder's descriptor
+// table (heldTarget), whether a read of the application's socket now finds
+// everything it wrote received: its send buffer empty, and its FIN, if it
+// sent one, taken by the proxy's side (ps, read before). A reset socket's
+// buffer is emptied unsent, so it settles nothing. One its holder closed is
+// gone from then on: its FIN, or reset, after everything it wrote, is what
+// the proxy's side waits for (pairEnded).
+func heldSettled(t *pairTarget, ps proxySide) (bool, error) {
+	s, found, err := t.pc.appSocket(&heldSockets{})
+	switch {
+	case err != nil:
+		return false, fmt.Errorf("%w: read the process holding the application's end of a connection to the proxy, %s: %v", models.ErrProxyConnsUnsupported, t.pc.app, err)
+	case !found:
+		t.gone, t.base.held = true, false
+		return false, nil
+	}
+	return s.State != xnuTCPClosed && s.SndCC == 0 && (!heldFINPending(s) || peerEnded(ps.state)), nil
 }
 
 // wroteCount extends darwin's counts of what the application had written to a
@@ -136,7 +201,18 @@ func (c *wroteCount) count(d uint32) uint64 {
 // targetBase is where, on darwin, the proxy's side's count of what it
 // received of a connection begins: the application socket's initial sequence
 // number (the proxy's side's irs). want and seen count from the one after it.
-type targetBase struct{ isn uint32 }
+// held: want was read from the application socket's holder (heldTarget), the
+// most it could have written, so each look reads that socket again
+// (heldSettled), and the wait looks on its own while it waits (looks).
+type targetBase struct {
+	isn  uint32
+	held bool
+}
+
+// looks says whether a wait on a target that begins from b looks at it on its
+// own (orphanLooks): nothing else marks the moment its holder's send buffer
+// empties.
+func (b targetBase) looks() bool { return b.held }
 
 // received is how much the proxy's side ps received since b, its FIN
 // counted: a distance between sequence numbers, which wrap at 2^32.
@@ -165,6 +241,14 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		p.paired.progress.Add(1)
 	}
 	short := int32(uint32(t.want) - got)
+	if short > 0 && t.base.held {
+		if settled, err := heldSettled(t, ps); err != nil || settled {
+			return settled, err
+		}
+		if t.gone {
+			return p.pairEnded(t, ps, closed)
+		}
+	}
 	switch {
 	case short <= 0:
 		return true, nil
@@ -275,11 +359,11 @@ func (p *Proxy) pairEnded(t *pairTarget, ps proxySide, closed bool) (bool, error
 			}
 		}
 		return false, fmt.Errorf("%w: the application's end of a connection to the proxy, %s, went after the proxy closed its side, and whether bytes it wrote before that close were refused cannot be told", models.ErrProxyConnsUnsupported, pc.app)
-	case p.paired.visible.Load():
-		// The application's sockets are listed to the agent, so this one
-		// is gone with its FIN or reset on its way (loopback's input
-		// thread): its arrival ends the handler's read, and the wait looks
-		// again.
+	case p.paired.visible.Load() || p.paired.held.Load():
+		// The application's sockets are listed to the agent, or read from
+		// their holders' descriptor tables, so this one is gone with its
+		// FIN or reset on its way (loopback's input thread): its arrival
+		// ends the handler's read, and the wait looks again.
 		return false, nil
 	default:
 		return false, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a live connection to the proxy, %s, and has listed none of the application's sockets to keploy's agent: %s", models.ErrProxyConnsUnsupported, pc.app, xnuHidden)
@@ -437,7 +521,10 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	app, ok := findXNUPCB(table, pc.app, pc.proxy)
 	if !ok {
 		pr, listed := findXNUPCB(table, pc.proxy, pc.app)
-		if !p.paired.visible.Load() && !(listed && peerEnded(pr.state)) {
+		if !p.paired.visible.Load() && listed && p.noteHeldAtClose(pc, pr) {
+			return
+		}
+		if !p.paired.visible.Load() && !p.paired.held.Load() && !(listed && peerEnded(pr.state)) {
 			p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, and has listed none of the application's sockets to keploy's agent: %s", models.ErrProxyConnsUnsupported, pc.app, xnuHidden))
 		}
 		return
@@ -447,6 +534,43 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 		return
 	}
 	pc.wroteAtClose.Store(&appWrote{want: pc.count(app.writeSeq() - app.iss - 1), fin: app.finPending(), base: targetBase{isn: app.iss}})
+}
+
+// noteHeldAtClose is noteWroteAtClose for an application socket the table
+// does not list, read from its holder's descriptor table (pairedConn.appSocket)
+// before the proxy's side (pr, the side's entry in the table; ps, its count):
+// done is false when no process the agent may read holds it. Its send buffer
+// empty, everything it had written was received by then, which the side's
+// count after it holds, its FIN counted as on its way while the side has not
+// taken it: the record (exact, as the table's). A reset socket's buffer is
+// emptied unsent: it is gone, and no record is made. Bytes in that buffer the
+// side had not acknowledged, its FIN not taken, may be data on its way or
+// bytes received: which cannot be told, and every wait is unknown from then on.
+func (p *Proxy) noteHeldAtClose(pc *pairedConn, pr xnuPCB) (done bool) {
+	s, found, err := pc.appSocket(&heldSockets{})
+	switch {
+	case err != nil:
+		p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, and the processes holding the application's sockets cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, err))
+		return true
+	case !found:
+		return false
+	}
+	p.paired.held.Store(true)
+	ps := readProxySide(pc.conn)
+	switch {
+	case ps.err != nil, s.State == xnuTCPClosed:
+		return true
+	case s.SndCC != 0 && !peerEnded(ps.state):
+		p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, and its process's send buffer held %d bytes the proxy's side had not acknowledged as the proxy closed it: whether bytes were on their way cannot be told", models.ErrProxyConnsUnsupported, pc.app, s.SndCC))
+		return true
+	}
+	fin := heldFINPending(s)
+	d := ps.rcvNxt - pr.irs - 1
+	if fin && !peerEnded(ps.state) {
+		d++
+	}
+	pc.wroteAtClose.Store(&appWrote{want: pc.count(d), fin: fin, base: targetBase{isn: pr.irs}})
+	return true
 }
 
 // readSide is pc's proxy side as its close reads it (closing, pairClosing):

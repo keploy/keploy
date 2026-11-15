@@ -299,8 +299,15 @@ type targetBase struct{}
 // wroteCount is darwin's (pairedConn): Linux's counts do not wrap.
 type wroteCount struct{}
 
+// appHolder is darwin's (pairedConn): sock_diag lists every socket.
+type appHolder struct{}
+
 // received is how much the proxy's side ps received, its FIN counted.
 func (targetBase) received(ps proxySide) uint64 { return ps.received }
+
+// looks is false on Linux: sock_diag gives what the application had written
+// exactly, and the events the wait waits on mark every change (orphanLooks).
+func (targetBase) looks() bool { return false }
 
 // pairReached says whether t needs no more waiting: the proxy's side received
 // what the application had written, or it never will (a capture loss).

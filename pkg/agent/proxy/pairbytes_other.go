@@ -29,6 +29,9 @@ type targetBase struct{}
 // wroteCount is darwin's (pairedConn).
 type wroteCount struct{}
 
+// appHolder is darwin's (pairedConn).
+type appHolder struct{}
+
 func (p *Proxy) proveAppVisible(*net.TCPConn) {}
 
 // pairClosing notes a paired connection's close; none is paired here.

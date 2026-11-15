@@ -6,17 +6,18 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// hideSockets makes macOS's TCP table, as keploy reads it, list none of the
+// hideFromTable makes macOS's TCP table, as keploy reads it, list none of the
 // sockets whose local end is one of ends: what a process that macOS lists
 // only its own sockets reads (on macOS 27, an agent keploy's CLI starts
 // without root), the application's ends not among them.
-func hideSockets(t *testing.T, ends ...net.Addr) {
+func hideFromTable(t *testing.T, ends ...net.Addr) {
 	t.Helper()
 	was := readXNUTable
 	readXNUTable = func() ([]xnuPCB, error) {
@@ -34,6 +35,28 @@ func hideSockets(t *testing.T, ends ...net.Addr) {
 		return kept, err
 	}
 	t.Cleanup(func() { readXNUTable = was })
+}
+
+// hideSockets hides the sockets whose local end is one of ends from the
+// table (hideFromTable) and from the descriptor tables of the processes that
+// hold them (heldSocketsRead): what the agent reads of an application process
+// of another user, whose descriptors it may not read.
+func hideSockets(t *testing.T, ends ...net.Addr) {
+	t.Helper()
+	hideFromTable(t, ends...)
+	was := heldSocketsRead
+	heldSocketsRead = func() (map[[2]netip.AddrPort]heldSocket, error) {
+		by, err := was()
+		for k := range by {
+			for _, e := range ends {
+				if a, _ := addrPortOf(e); k[0] == unmapped(a) {
+					delete(by, k)
+				}
+			}
+		}
+		return by, err
+	}
+	t.Cleanup(func() { heldSocketsRead = was })
 }
 
 // On macOS 27 a process keploy's CLI starts without root is listed only its
@@ -169,7 +192,7 @@ func TestTheCountsOfWhatWasWrittenHoldPastTheWrapOnDarwin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tg, err := p.pairTarget(table, pc)
+	tg, err := p.pairTarget(table, pc, &heldSockets{})
 	if err != nil || tg == nil || tg.want != 1<<32-10 {
 		t.Fatalf("pairTarget = %+v, %v, want a target of %d", tg, err, uint64(1<<32-10))
 	}
