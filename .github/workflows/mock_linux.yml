@@ -878,7 +878,7 @@ jobs:
   # agent's wait (what a test's end waits on). And a port the bind hooks
   # moved is held by keploy's park listener from the app's bind (BPF
   # sk_lookup) until its forwarder listens. And a keploy command that runs
-  # the agent's own file (the compose healthcheck's, in the agent's
+  # the agent's own file (a verb run with `docker exec` in the agent's
   # container) takes no place in the PID maps. Root-only, so they are
   # behind the pidmap_integration and proxyconns_integration tags (two
   # binaries) and never in `go test ./...`. amd64 and arm64: each runs its
