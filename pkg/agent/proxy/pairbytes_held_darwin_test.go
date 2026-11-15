@@ -68,6 +68,30 @@ func fillSendBuffer(t *testing.T, p *Proxy, app *net.TCPConn, n int) {
 	}
 }
 
+// untilHeldState waits until the application's socket, read from this process
+// (its holder), is in state.
+func untilHeldState(t *testing.T, p *Proxy, state uint8) {
+	t.Helper()
+	pcs, err := p.paired.upTo(1)
+	if err != nil || len(pcs) != 1 {
+		t.Fatalf("paired connections: %v, %v", pcs, err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		s, found, err := pcs[0].appSocket(&heldSockets{})
+		if err != nil || !found {
+			t.Fatalf("the application's socket read from this process: found %v, %v", found, err)
+		}
+		if s.State == state {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the application's socket is in state %d, want %d", s.State, state)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // wantOneCloseUnknownLine checks that logs hold one line saying a close cannot
 // tell what the application had written (closeUnknown), its error saying has.
 func wantOneCloseUnknownLine(t *testing.T, logs *observer.ObservedLogs, has string) {
@@ -152,6 +176,36 @@ func TestAWaitReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *test
 		}
 		if err := waitHeld(p, 10*time.Second); err != nil {
 			t.Fatalf("the wait ended with %v after the proxy's side took the application's FIN, want nil", err)
+		}
+	})
+	// Closed, and its FIN acknowledged: the proxy's side received everything
+	// it wrote, so the wait has nothing to wait for and reads nothing of that
+	// side, which here could not be read.
+	t.Run("its FIN acknowledged, in FIN_WAIT_2, the proxy's side unreadable", func(t *testing.T) {
+		p, app, proxySide, _ := heldPair(t)
+		if _, err := app.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		untilUnread(t, proxySide, 5)
+		if err := app.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		untilHeldState(t, p, xnuTCPFinWait2)
+		failHeldProxySide(t)
+		if err := waitHeld(p, 2*time.Second); err != nil {
+			t.Fatalf("the wait ended with %v, want nil: the application's FIN was acknowledged, after everything it wrote", err)
+		}
+	})
+	t.Run("its FIN acknowledged, in TIME_WAIT, the proxy's side unreadable", func(t *testing.T) {
+		p, app, proxySide, _ := heldPair(t)
+		if _, err := app.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		untilUnread(t, proxySide, 5)
+		alterHeld(t, p, func(s *procsock.TCP) { s.State = xnuTCPTimeWait })
+		failHeldProxySide(t)
+		if err := waitHeld(p, 2*time.Second); err != nil {
+			t.Fatalf("the wait ended with %v, want nil: the application's FIN was acknowledged, after everything it wrote", err)
 		}
 	})
 	t.Run("a socket no process holds, once one was read", func(t *testing.T) {
