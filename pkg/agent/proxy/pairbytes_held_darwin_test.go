@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/pkg/agent/procsock"
 	"go.keploy.io/server/v3/pkg/models"
@@ -66,6 +68,16 @@ func fillSendBuffer(t *testing.T, p *Proxy, app *net.TCPConn, n int) {
 	}
 }
 
+// failHeldProxySide makes every read of the proxy's side a held socket's wait
+// or close makes (readHeldProxySide) fail, as one of a descriptor closed under
+// it would.
+func failHeldProxySide(t *testing.T) {
+	t.Helper()
+	was := readHeldProxySide
+	readHeldProxySide = func(*net.TCPConn) proxySide { return proxySide{err: errors.New("bad file descriptor")} }
+	t.Cleanup(func() { readHeldProxySide = was })
+}
+
 func waitHeld(p *Proxy, d time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
@@ -84,6 +96,17 @@ func TestAWaitReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *test
 		}
 		if !p.paired.held.Load() {
 			t.Fatal("held is false once a wait read the application's socket from its holder")
+		}
+	})
+	t.Run("the proxy's side cannot be read", func(t *testing.T) {
+		p, app, proxySide, _ := heldPair(t)
+		if _, err := app.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		untilUnread(t, proxySide, 5)
+		failHeldProxySide(t)
+		if err := waitHeld(p, 2*time.Second); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+			t.Fatalf("the wait ended with %v, want unknown: what the proxy's side received cannot be read", err)
 		}
 	})
 	t.Run("bytes in the application's send buffer", func(t *testing.T) {
@@ -322,11 +345,49 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		}
 	})
 	t.Run("bytes in the application's send buffer", func(t *testing.T) {
-		p, app, _, reader := heldPair(t)
+		// Unknown, and said in one line naming the connection, the bytes
+		// and why they cannot be counted.
+		p, app, proxySide, reader := heldPair(t)
+		core, logs := observer.New(zapcore.WarnLevel)
+		p.logger = zap.New(core)
 		fillSendBuffer(t, p, app, 8<<20)
 		_ = reader.Close()
 		if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 			t.Fatalf("PairedBytesErr = %v after a close with bytes in the application's send buffer, want unknown", err)
+		}
+		lines := logs.All()
+		if len(lines) != 1 {
+			t.Fatalf("%d warnings, want one: %+v", len(lines), lines)
+		}
+		f := lines[0].ContextMap()
+		if want := app.LocalAddr().String() + " -> " + proxySide.LocalAddr().String(); f["connection"] != want {
+			t.Errorf("the line names the connection %v, want %s", f["connection"], want)
+		}
+		if n, _ := f["unacknowledged_bytes"].(uint32); n == 0 {
+			t.Errorf("the line counts %v bytes in the send buffer, want them", f["unacknowledged_bytes"])
+		}
+		if why, _ := f["why"].(string); !strings.Contains(why, "no sequence numbers") {
+			t.Errorf("the line says why %q, want that the read of the socket has no sequence numbers", why)
+		}
+	})
+	t.Run("the proxy's side cannot be read", func(t *testing.T) {
+		p, app, proxySide, reader := heldPair(t)
+		if _, err := app.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		untilUnread(t, proxySide, 5)
+		if _, err := io.ReadFull(reader, make([]byte, 5)); err != nil {
+			t.Fatal(err)
+		}
+		pcs, _ := p.paired.upTo(1)
+		untilSendBufferEmpty(t, pcs[0])
+		failHeldProxySide(t)
+		_ = reader.Close()
+		if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+			t.Fatalf("PairedBytesErr = %v, want unknown: what the proxy's side received cannot be read", err)
+		}
+		if w := pcs[0].wroteAtClose.Load(); w != nil {
+			t.Fatalf("the close's record = %+v, want none from a side not read", w)
 		}
 	})
 	t.Run("the processes cannot be read", func(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"net"
 	"sync"
 
+	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -138,7 +139,7 @@ func (p *Proxy) heldTarget(table []xnuPCB, pc *pairedConn, h *heldSockets) (t *p
 		// Closed, and its FIN acknowledged (pairTarget).
 		return nil, true, nil
 	}
-	ps := readProxySide(pc.conn)
+	ps := readHeldProxySide(pc.conn)
 	if ps.err != nil {
 		return nil, false, fmt.Errorf("%w: read the proxy's socket from %s: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err)
 	}
@@ -482,6 +483,14 @@ func readProxySide(conn *net.TCPConn) proxySide {
 	return ps
 }
 
+// readHeldProxySide is how heldTarget and noteHeldAtClose read the proxy's
+// side (readProxySide); a test replaces it to make the read fail.
+var readHeldProxySide = readProxySide
+
+// heldUncounted says why bytes in the send buffer of an application socket
+// read from its holder (procsock) cannot be counted.
+const heldUncounted = "macOS's TCP table does not list this socket to keploy's agent (macOS 27, for an agent keploy's CLI starts without root), and the read of it from the process holding it gives the bytes its send buffer holds but no sequence numbers: bytes the proxy's side received and had not yet acknowledged cannot be told from bytes still on their way"
+
 // noteWroteAtClose reads, as the proxy begins closing pc, what the application
 // had written to it (pairedConn.wroteAtClose), from macOS's TCP table as a
 // bytes wait reads it as it begins (pairTarget): the application socket's
@@ -545,7 +554,9 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 // taken it: the record (exact, as the table's). A reset socket's buffer is
 // emptied unsent: it is gone, and no record is made. Bytes in that buffer the
 // side had not acknowledged, its FIN not taken, may be data on its way or
-// bytes received: which cannot be told, and every wait is unknown from then on.
+// bytes received: which cannot be told (heldUncounted), and every wait is
+// unknown from then on, said in one log line naming the connection and the
+// bytes. So is every wait when the proxy's side cannot be read.
 func (p *Proxy) noteHeldAtClose(pc *pairedConn, pr xnuPCB) (done bool) {
 	s, found, err := pc.appSocket(&heldSockets{})
 	switch {
@@ -556,12 +567,19 @@ func (p *Proxy) noteHeldAtClose(pc *pairedConn, pr xnuPCB) (done bool) {
 		return false
 	}
 	p.paired.held.Store(true)
-	ps := readProxySide(pc.conn)
+	ps := readHeldProxySide(pc.conn)
 	switch {
-	case ps.err != nil, s.State == xnuTCPClosed:
+	case s.State == xnuTCPClosed:
+		return true
+	case ps.err != nil:
+		p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, and the proxy's side of it cannot be read as the proxy closes it: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err))
 		return true
 	case s.SndCC != 0 && !peerEnded(ps.state):
-		p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, and its process's send buffer held %d bytes the proxy's side had not acknowledged as the proxy closed it: whether bytes were on their way cannot be told", models.ErrProxyConnsUnsupported, pc.app, s.SndCC))
+		p.logger.Warn("keploy cannot count what the application had written to a connection its proxy closed: from now on it cannot vouch that every call of a test is in its hands",
+			zap.String("connection", fmt.Sprintf("%s -> %s", pc.app, pc.proxy)),
+			zap.Uint32("unacknowledged_bytes", s.SndCC),
+			zap.String("why", heldUncounted))
+		p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, and its process's send buffer held %d bytes the proxy's side had not acknowledged as the proxy closed it: %s", models.ErrProxyConnsUnsupported, pc.app, s.SndCC, heldUncounted))
 		return true
 	}
 	fin := heldFINPending(s)
