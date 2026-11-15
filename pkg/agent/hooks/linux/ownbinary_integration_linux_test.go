@@ -26,7 +26,11 @@ import (
 // the agent: it takes no place in target_namespace_pids or excluded_pids, so
 // its calls (its telemetry among them) reach their real destinations instead
 // of the agent's proxy. An application runs a file of its own and is a
-// target, as before.
+// target, as before. The rule holds in every mode, and only keploy itself
+// runs that exact file (the same inode on the same filesystem device): a
+// keploy build under test runs another file, and every process that runs
+// any other file, a keploy command's children among them, still counts as
+// the application.
 func TestKeploysOwnCommandInTheAgentsContainerTakesNoPlace(t *testing.T) {
 	if !inOwnPIDNamespace(t) {
 		return
