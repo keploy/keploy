@@ -75,16 +75,18 @@ jobs:
       # each process's parent from the kernel's process table
       # (starts/proc_darwin.go), which the proxy's per-worker mock views walk
       # (scoped_mockdb.go). A Linux runner builds the other implementation of
-      # each (it reads /proc), so only this job runs these rows.
-      #
-      # pkg/service/agent, pkg/agent/starts and pkg/agent/routes run whole.
-      # pkg/agent/proxy runs the rows of its macOS test files and of the
-      # worker views' test files, which build everywhere. The script fails
-      # unless every row it reads from those files passed.
+      # each (it reads /proc), so only this job runs these rows. Each package
+      # runs whole.
       - name: Test the proven flow on darwin
-        run: |
-          go test -count=1 ./pkg/service/agent/ ./pkg/agent/starts/ ./pkg/agent/routes/
-          bash .github/scripts/macos/go-test-darwin-rows.sh pkg/agent/proxy pkg/agent/proxy/*_darwin_test.go pkg/agent/proxy/scoped_mockdb_test.go pkg/agent/proxy/scoped_refused_test.go
+        run: go test -count=1 ./pkg/service/agent/ ./pkg/agent/starts/ ./pkg/agent/routes/ ./pkg/agent/proxy/
+
+      # A native Java app gets keploy's CA through a truststore keploy builds
+      # with keytool (pkg/agent/proxy/tls). macOS ships java, javac and keytool
+      # in /usr/bin as stubs that run an installed Java's and otherwise only
+      # say there is none: these rows skip on a Mac with no Java and run where
+      # one is installed.
+      - name: Test the Java truststore on darwin
+        run: go test -count=1 ./pkg/agent/proxy/tls/
 
       # A native app's command can exit and leave processes running in its
       # process group. On macOS keploy adopts no daemon, so a run waits on the
