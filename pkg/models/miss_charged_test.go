@@ -95,3 +95,11 @@ func TestAChargedMissNamesItsOwnFieldsWhole(t *testing.T) {
 		t.Errorf("the charged miss's whole call is %+v", c.Whole)
 	}
 }
+
+// A repeat note with no hint keeps none.
+func TestARepeatNoteWithNoHintKeepsNone(t *testing.T) {
+	m := UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /x", Repeat: &RepeatNote{Mock: "mock-0"}}
+	if got := m.Sanitized().Repeat; got == nil || got.Hint != "" || got.Mock != "mock-0" {
+		t.Errorf("the note is %+v, want mock-0's with no hint", got)
+	}
+}
