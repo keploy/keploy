@@ -871,9 +871,10 @@ func TestTheReplayPushesTheTestEachWorkerRecordingTrails(t *testing.T) {
 
 // Under the switch the replay hands the agent, with the worker scope, the
 // series of the recordings a rule declared in keploy.yml placed there
-// (mappings' worker: series:), in worker:'s order; an entry with none is in
-// no series. A series an entry of which says once (worker: once:) is pushed
-// as answering once in a run.
+// (mappings' worker: series:), in the order their recordings were made, a
+// tie (here: no recording carries a time) in worker:'s order; an entry with
+// none is in no series. A series an entry of which says once (worker:
+// once:) is pushed as answering once in a run.
 func TestTheReplayPushesTheSeriesOfTheRecordingsARulePlaced(t *testing.T) {
 	provenOn(t)
 	repo := t.TempDir()
@@ -891,6 +892,41 @@ func TestTheReplayPushesTheSeriesOfTheRecordingsARulePlaced(t *testing.T) {
 	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-2", "mock-3", "mock-4"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	require.Equal(t, map[string][]string{"sweep/o::TestA/1": {"mock-3", "mock-2"}}, instr.series)
 	require.Equal(t, []string{"sweep/o::TestA/1"}, instr.once, "mock-2 says its series answers once in a run")
+}
+
+// The replay hands the agent each series in the order its recordings were
+// made, not in the order worker: lists it: the agent answers a series'
+// repeats with its last name, and a parser's walk of the call saturates on
+// its latest recording, so the last name must be the latest recording.
+// worker: lists mock-10 (recorded last) before mock-9 (recorded first), the
+// order a move by name leaves; mock-4 is in no series.
+func TestTheReplayPushesEachSeriesInRecordOrder(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\nworker:\n    - name: mock-10\n      rule: liveness@0123abcd\n      series: liveness/-/0\n    - name: mock-4\n    - name: mock-9\n      rule: liveness@0123abcd\n      series: liveness/-/0\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	db := named("mock-0", "mock-4", "mock-9", "mock-10")
+	at := time.Date(2026, 11, 15, 17, 0, 0, 0, time.UTC)
+	for _, mk := range db.mocks {
+		switch mk.Name {
+		case "mock-9":
+			mk.Spec.ReqTimestampMock = at
+		case "mock-10":
+			mk.Spec.ReqTimestampMock = at.Add(4 * time.Minute)
+		}
+	}
+	require.NoError(t, New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, map[string][]string{"liveness/-/0": {"mock-9", "mock-10"}}, instr.series,
+		"mock-10 was recorded last, so it is the series' last name, though worker: lists it first")
 }
 
 // workerTrails reads a trail only off an entry that names one: a set whose

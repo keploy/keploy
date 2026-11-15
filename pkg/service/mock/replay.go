@@ -1509,7 +1509,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
 	once := onceSeries(served, worker)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), workerSeries(served, worker), declaredSources(served, loaded), once, everySeries(served, worker, once), m.config.Mock.TimeForm); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), inRecordOrder(workerSeries(served, worker), decoded), declaredSources(served, loaded), once, everySeries(served, worker, once), m.config.Mock.TimeForm); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -1956,9 +1956,10 @@ func workerTrails(mp *models.Mapping, worker map[string][]string, table map[stri
 
 // workerSeries is, by series (models.MockEntry.Series), the names of the
 // recordings of mp's worker scope a declared rule placed, in the order
-// worker: lists them, which is the order they were placed in: only a name
-// worker serves (a name the agent does not hold answers nothing). nil when
-// no served entry has a series.
+// worker: lists them: only a name worker serves (a name the agent does not
+// hold answers nothing). nil when no served entry has a series. That order
+// is the one the entries were moved there in, not the one they were
+// recorded in (inRecordOrder).
 func workerSeries(mp *models.Mapping, worker map[string][]string) map[string][]string {
 	if mp == nil {
 		return nil
@@ -1980,6 +1981,32 @@ func workerSeries(mp *models.Mapping, worker map[string][]string) map[string][]s
 		out[e.Series] = append(out[e.Series], e.Name)
 	}
 	return out
+}
+
+// inRecordOrder is series with each series' names in the order their
+// recordings were made: by the request time (ReqTimestampMock) of decoded's
+// recording of each name, a tie keeping the listed order, a name decoded
+// holds no recording of sorting as the zero time. The agent answers a
+// series' repeats with its last name (MockManager.SetPoolSeries), and a
+// parser's walk of the series' call saturates on its latest recording (the
+// HTTP parser's servedWalk): the two name one recording only in this order.
+// worker: lists a series in the order its entries were moved there, which
+// is not the recorded one when the entries carry no recorded time (the
+// move's sort by it then keeps the judge's order, by name, where
+// "mock-10007" sorts before "mock-9861"): the agent then offered the
+// earlier recording again while the walk held out for the latest, and the
+// repeats missed.
+func inRecordOrder(series map[string][]string, decoded []*models.Mock) map[string][]string {
+	at := make(map[string]time.Time, len(decoded))
+	for _, mk := range decoded {
+		if mk != nil {
+			at[mk.Name] = mk.Spec.ReqTimestampMock
+		}
+	}
+	for _, names := range series {
+		slices.SortStableFunc(names, func(a, b string) int { return at[a].Compare(at[b]) })
+	}
+	return series
 }
 
 // onceSeries is, of workerSeries(mp, worker), the series one entry of
