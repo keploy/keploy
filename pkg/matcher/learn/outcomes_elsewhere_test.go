@@ -115,11 +115,24 @@ func TestOutcomeElsewhereLearnsNothingBesideAValueAnEarlierPlaceSent(t *testing.
 	echo := eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968291", nil)
 	echo.Resp = []Leaf{oText("reply.lease", "pat-janitor:968290")}
 	eNothing(t, "a bucket its recorded answer echoes", Decide(echo), "reply.lease")
-	// Another test's request held the recorded id whole, and round F moved
-	// it while the call sent another: a conflict at an earlier place.
+	// Another test's request held the recorded bucket whole, and round F
+	// moved it while the call sent another: the value did not follow it, so
+	// the bucket's short word (968290, under 32 bits) is chance, a value made
+	// anew; nothing is learned all the same. The same place holding a word
+	// of 32 bits is a conflict there, named.
 	held := []Earlier{{Mock: "mock-15", At: eRAt.Add(-time.Second), Run: true,
 		Seen: []Seen{{Side: Request, Leaf: oText("body.lease", "pat-janitor:968290"), Live: "pat-janitor:968292"}}}}
-	eNothing(t, "a bucket another test held whole, F moved", Decide(eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968291", held)), "mock-15")
+	eNothing(t, "a bucket another test held whole, F moved", Decide(eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968291", held)), "body.documents[0]._id word 2 is a value made anew")
+	held = []Earlier{{Mock: "mock-15", At: eRAt.Add(-time.Second), Run: true,
+		Seen: []Seen{{Side: Request, Leaf: oText("body.lease", "pat-janitor:9682904417"), Live: "pat-janitor:9682924417"}}}}
+	eNothing(t, "a 32-bit bucket another test held whole, F moved", Decide(eLease(eRAt, eFAt, "pat-janitor:9682904417", "pat-janitor:9682914417", held)), "mock-15")
+	// Mode Elsewhere counts every earlier place, so another test's place
+	// that round F moved but that kept the bucket's short whole token
+	// ("j-4829", under 32 bits) in both runs is a conflict there, named, as
+	// in the call's own test.
+	held = []Earlier{{Mock: "mock-15", At: eRAt.Add(-time.Second), Run: true,
+		Seen: []Seen{{Side: Request, Leaf: oText("body.lease", "pat-janitor:j-4829 first"), Live: "pat-janitor:j-4829 second"}}}}
+	eNothing(t, "a bucket's whole token another test kept, F moved", Decide(eLease(eRAt, eFAt, "pat-janitor:j-4829", "pat-janitor:j-4830", held)), `"j-4829" stood whole at mock-15 body.lease in both runs`)
 }
 
 // A janitor-like insert tied with another flow's recording; its word

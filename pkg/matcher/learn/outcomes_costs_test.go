@@ -527,10 +527,10 @@ func TestOutcomeCostThePlacesKeepNoRecordingsText(t *testing.T) {
 // which round F moved to a word that shares nothing with F's new one, is
 // chance: the place shows the value did not follow it, so the word is made
 // anew each run, fresh (http learn_test.go:2829, :2853 on main refuse it;
-// a changed place disproves it). A word of 32 bits or
-// more there is a conflict, and so is the start-up's place that held the
-// value's whole recorded token; an earlier test's is out of the call's
-// scope, so that one is chance too.
+// a changed place disproves it). A word of 32 bits or more there is a
+// conflict. A place that held the value's whole recorded token ("k-1"),
+// the start-up's or an earlier test's, which round F moved to "k-2" while
+// the value went to "k-3", is chance too: the value did not follow it.
 func TestOutcomeCostAShortWordAtAMovedEarlierPlaceIsChance(t *testing.T) {
 	const long, longF = "A7K29QXMtq", "Zq81Lm0Xwe"
 	for _, c := range []struct {
@@ -543,7 +543,7 @@ func TestOutcomeCostAShortWordAtAMovedEarlierPlaceIsChance(t *testing.T) {
 		{"k-1 to k-3 beside an earlier test's n-1, n-2 in F (http learn_test.go:2853)", false, "k-1", "k-3", "n-1", "n-2", nil},
 		{"a ten-letter word beside the start-up's", true, "k-" + long, "k-" + longF, "n-" + long, "n-Pp00Kk11Jj", costConflict},
 		{"a ten-letter word beside an earlier test's", false, "k-" + long, "k-" + longF, "n-" + long, "n-Pp00Kk11Jj", costConflict},
-		{"k-1 to k-3, the start-up sent k-1 whole, k-2 in F", true, "k-1", "k-3", "k-1", "k-2", costConflict},
+		{"k-1 to k-3, the start-up sent k-1 whole, k-2 in F", true, "k-1", "k-3", "k-1", "k-2", nil},
 		{"k-1 to k-3, an earlier test sent k-1 whole, k-2 in F", false, "k-1", "k-3", "k-1", "k-2", nil},
 	} {
 		in := oInput("body.key", c.rec, c.live, oServed("pool-1", true, c.startUp, Request, oText("body.node", c.sent), c.inF, time.Millisecond), nil)

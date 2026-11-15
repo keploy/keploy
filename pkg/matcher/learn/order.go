@@ -490,7 +490,7 @@ words:
 				out = append(out, Decision{})
 				continue
 			}
-			d := dc.word(path, bare, rec, live, rd.Rec, w, pieceOfAnId(rd, w), nil)
+			d := dc.word(path, bare, rec, live, w, pieceOfAnId(rd, w), nil)
 			fresh[k] = d.Outcome == OutcomeFresh
 			if d.EitherOrder {
 				// Made at the call too, and sent at another call in the
@@ -508,7 +508,7 @@ words:
 	}
 	for _, p := range pieces {
 		w := rd.Words[p.k]
-		out[p.at] = dc.word(path, bare, rec, live, rd.Rec, w, pieceOfAnId(rd, w), mintedLong(rd, fresh, p.long))
+		out[p.at] = dc.word(path, bare, rec, live, w, pieceOfAnId(rd, w), mintedLong(rd, fresh, p.long))
 	}
 	if whole != nil {
 		return append(out, *whole), true
@@ -642,7 +642,7 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 	if !shown && held(chanceBits) {
 		return Decision{}, false
 	}
-	d := dc.word(path, bare, rec, live, rec, whole, false, nil)
+	d := dc.word(path, bare, rec, live, whole, false, nil)
 	if d.Outcome == OutcomeFresh {
 		// The reader's words and runs see no earlier place of it (a standard
 		// key behind escapes, "%2B" and "%2F" for its '+' and '/'), but a
@@ -817,7 +817,7 @@ func (dc *decider) signature(path string, bare variables.Address, rec, live stri
 			"its JWT's signature changed form (keploy checks a signature by its form: base64url of one length)", nil, dc.fieldNoise(path))}, true
 	}
 	whole := readWord{At: rd.At, Rec: rd.Rec, Live: rd.Live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rd.Rec, Live: rd.Live}}}
-	return []Decision{dc.word(path, bare, rec, live, rd.Rec, whole, false, nil)}, false
+	return []Decision{dc.word(path, bare, rec, live, whole, false, nil)}, false
 }
 
 // randomToken reports whether rec and live are one value of one generator:
@@ -1364,12 +1364,12 @@ func (dc *decider) neverServed(mock string) bool {
 }
 
 // word decides one changed word that is no instant (any other word), at
-// its address (w.At) in text, the text the leaf at bare opens to, and
+// its address (w.At) in the text the leaf at bare opens to, and
 // lists the recordings it set aside as answered after the call. piece:
 // pieceOfAnId; under unreadFloorBits it is floor. long: mintedLong, the
 // words that judge a place for a piece of one id token the call minted.
-func (dc *decider) word(path string, bare variables.Address, rec, live, text string, w readWord, piece bool, long []readWord) Decision {
-	d := dc.wordAt(path, bare, rec, live, text, w, piece, long)
+func (dc *decider) word(path string, bare variables.Address, rec, live string, w readWord, piece bool, long []readWord) Decision {
+	d := dc.wordAt(path, bare, rec, live, w, piece, long)
 	d.AnsweredAfter = dc.answeredAfter(w.Rec)
 	return d
 }
@@ -1431,11 +1431,11 @@ var wordPasses atomic.Int64
 // instead. A conflict wins over an unknown place (wordBy), so it can come
 // only from a place the order marked. Any other verdict there keeps the
 // order's refusal: the second decision names a refusal, never loosens one.
-func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text string, w readWord, piece bool, long []readWord) Decision {
+func (dc *decider) wordAt(path string, bare variables.Address, rec, live string, w readWord, piece bool, long []readWord) Decision {
 	ordered := false
-	d := dc.wordBy(path, bare, rec, live, text, w, piece, long, &ordered)
+	d := dc.wordBy(path, bare, rec, live, w, piece, long, &ordered)
 	if ordered && d.Refusal != nil && d.Refusal.Kind == RefusalUnknown {
-		if c := dc.wordBy(path, bare, rec, live, text, w, piece, long, nil); c.Refusal != nil && c.Refusal.Kind == RefusalConflict {
+		if c := dc.wordBy(path, bare, rec, live, w, piece, long, nil); c.Refusal != nil && c.Refusal.Kind == RefusalConflict {
 			return c
 		}
 	}
@@ -1444,7 +1444,7 @@ func (dc *decider) wordAt(path string, bare variables.Address, rec, live, text s
 
 // wordBy is word's verdict, serve order asked where ordered is not nil
 // (set where the order made a place unknown), and not asked where it is.
-func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text string, w readWord, piece bool, long []readWord, ordered *bool) Decision {
+func (dc *decider) wordBy(path string, bare variables.Address, rec, live string, w readWord, piece bool, long []readWord, ordered *bool) Decision {
 	wordPasses.Add(1)
 	at, n := w.At, w.At.Word
 	ps := newWordPlaces(dc.ps, w.Rec)
@@ -1552,15 +1552,19 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 			}
 		case evDisproven:
 			// tok: R's whole token around w that p kept in both runs, at
-			// any earlier place of the run, an older test's too: main
-			// refuses a word of an earlier test that did not drift with it,
-			// and a whole token there is no chance of a short word.
-			took, tok := "", sameTokenAround(p, w)
+			// any earlier place of the run an unchanged one, an older
+			// test's too: main refuses a word of an earlier test that did
+			// not drift with it, and a whole token there is no chance of a
+			// short word. A place F moved counts only in the call's scope
+			// or the start-up. A short word such a place held alone, or in
+			// a token F's text there dropped, is chance: the value did not
+			// follow the place's new text.
+			took, tok := "", sameTokenAround(p, w, dc.allScope || !p.otherTest)
 			if p.lateCall != "" && !piece {
 				took = dc.lateCallTook(ps, i, w, lateHeld)
 			}
 			switch {
-			case p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, text):
+			case p.gave || countsByText(p, w):
 				conflict = append(conflict, p)
 			case tok != "":
 				p.why = strconv.Quote(tok) + " stood whole at " + p.name + " in both runs, and the value did not follow it: keploy cannot tell whether the value came from there"

@@ -226,7 +226,7 @@ func oRefusedShape(ds []Decision, why string) bool {
 // their signature and keploy opens none of their claims (one that changed
 // is a list, or is missing from a run), the token is read as it is, whole:
 // one reading of the field's own texts at the field, as for any text, so
-// a place that gave the token whole holds it whole (heldWhole), and a
+// a place that gave the token whole holds it whole, and a
 // clock read in it is one of the field's words as written (clockWordOf);
 // never a reading cut at the signature, which nothing opened.
 func TestAJWTWhoseSignatureStayedIsReadAsItIs(t *testing.T) {

@@ -16,9 +16,10 @@ import (
 
 // A refused change in a url path names a keploy.yml entry, and that entry,
 // written as the line says, lets the HTTP matcher serve the call. The test
-// sent {"order":"o-1"} (round F: o-9) and a later call asks for
-// /v1/orders/o-1 (round F: /v1/orders/o-5): the place held the value and
-// round F moved it, so the change is refused. Its line names
+// sent {"order":"o-1"} in both runs and a later call asks for
+// /v1/orders/o-1 (round F: /v1/orders/o-5): the place held the value's
+// whole token in both runs and the value moved off it, so the change is
+// refused. Its line names
 // test.globalNoise's url bucket and asks for a regex of the part that
 // changes, under global or the test set. The person writes that regex; keploy
 // test and keploy mock build the mock matchers' noise from keploy.yml
@@ -48,7 +49,7 @@ func TestOutcomeAURLRefusalsNoiseEntryLetsTheHTTPMatcherServeTheCall(t *testing.
 		At:   at, Arrived: at,
 		Earlier: []learn.Earlier{{Mock: "mock-0", At: at.Add(-2 * time.Second), Own: true,
 			Payload: learn.RawOf(sent, true).ServedAs(3),
-			Seen:    []learn.Seen{{Side: learn.Request, Leaf: text("body.order", "o-1"), Live: "o-9"}}}},
+			Seen:    []learn.Seen{{Side: learn.Request, Leaf: text("body.order", "o-1"), Live: "o-1"}}}},
 		Test: "test-2", Mock: "mock-300",
 		Caps: learn.Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
 	})
@@ -59,7 +60,7 @@ func TestOutcomeAURLRefusalsNoiseEntryLetsTheHTTPMatcherServeTheCall(t *testing.
 		}
 	}
 	if d == nil || d.Outcome != learn.OutcomeRefused {
-		t.Fatalf("FALSE GREEN? o-1 sent, round F moved it to o-9, the call asked for o-5: %+v; want refused", ds)
+		t.Fatalf("FALSE GREEN? o-1 sent in both runs, the call asked for o-5: %+v; want refused", ds)
 	}
 	r, ok := learn.ParseRefusal(d.Line)
 	if !ok {
