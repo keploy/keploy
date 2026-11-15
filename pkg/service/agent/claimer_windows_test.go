@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -120,5 +121,60 @@ func TestWindowsProcDescendsForAChild(t *testing.T) {
 	}
 	if procDescends(os.Getpid(), child.Process.Pid) {
 		t.Fatalf("procDescends(this process %d, its child %d) = true", os.Getpid(), child.Process.Pid)
+	}
+}
+
+// A running child of this process is its direct child, at its own creation
+// time; this process is not its child's child, and the child is not this
+// process's once it has exited, even while a handle keeps its pid.
+func TestWindowsProcChildStartTakesOnlyARunningChild(t *testing.T) {
+	child := startHolder(t)
+	pid := child.Process.Pid
+	want, ok := procStart(pid)
+	if !ok {
+		t.Fatal("the running child is not alive")
+	}
+	if got, ok := procChildStart(pid, os.Getpid()); !ok || got != want {
+		t.Fatalf("procChildStart(child %d, this process) = %d, %v, want %d, true", pid, got, ok, want)
+	}
+	if got, ok := procChildStart(os.Getpid(), pid); ok {
+		t.Fatalf("procChildStart(this process, its child %d) = %d, true", pid, got)
+	}
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		t.Fatalf("open the child: %v", err)
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	if err := child.Process.Kill(); err != nil {
+		t.Fatalf("kill the child: %v", err)
+	}
+	if ev, err := windows.WaitForSingleObject(h, 10_000); err != nil || ev != windows.WAIT_OBJECT_0 {
+		t.Fatalf("the child did not exit: %d, %v", ev, err)
+	}
+	if got, ok := procChildStart(pid, os.Getpid()); ok {
+		t.Fatalf("procChildStart(exited child %d, this process) = %d, true", pid, got)
+	}
+}
+
+// A child created suspended, as keploy's Go launcher starts the test binary
+// before it claims for it, is a running child: the claim is taken before the
+// child runs a line of its own.
+func TestWindowsProcChildStartTakesASuspendedChild(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWindowsClaimerChildHoldsUntilStdinCloses$")
+	cmd.Env = append(os.Environ(), envClaimerHold+"=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the child suspended: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	want, ok := procStart(cmd.Process.Pid)
+	if !ok {
+		t.Fatal("the suspended child is not alive")
+	}
+	if got, ok := procChildStart(cmd.Process.Pid, os.Getpid()); !ok || got != want {
+		t.Fatalf("procChildStart(suspended child %d, this process) = %d, %v, want %d, true", cmd.Process.Pid, got, ok, want)
 	}
 }

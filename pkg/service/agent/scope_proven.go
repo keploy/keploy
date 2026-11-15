@@ -522,9 +522,12 @@ func (a *Agent) resetSession(ctx context.Context) error {
 }
 
 // ClaimInstance claims the run for caller (a process ID in the agent's PID
-// namespace, read from the connection). A caller outside the run's own
-// processes is refused: keploy does not intercept it, so its tests' calls
-// would reach real infrastructure. A run another live process claimed is
+// namespace, read from the connection), or for the child it names
+// (req.Child): a running process the caller started, its parent read from
+// the kernel with both creation times, so a pid another process took is
+// never taken for it. A caller outside the run's own processes is refused:
+// keploy does not intercept it, so its tests' calls would reach real
+// infrastructure. So is a child that is not the caller's running child. A run another live process claimed is
 // refused (the first release runs one test process at a time), and so is a
 // second claim of the claimer while its test is open. A claim whose process
 // exited is ended first: its open test, if any, fails.
@@ -575,6 +578,18 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
 			fmt.Sprintf("process %d is not part of this keploy run, so keploy cannot capture or mock its calls", caller),
 			`run the test command through keploy, to record: keploy mock record -c "<command>"; to replay: keploy mock replay -c "<command>"`)
+	}
+	if req.Child != 0 {
+		// A launcher that runs the test process as its child (Windows has
+		// no exec that keeps the launcher's pid) claims for it before it
+		// runs: from here the claim is the child's, as if it had made it.
+		childStart, ok := procChildStart(req.Child, caller)
+		if !ok {
+			return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
+				fmt.Sprintf("process %d claimed this keploy run for process %d, which is not a running process it started", caller, req.Child),
+				"claim for the test process while it runs, from the process that started it, or let the test process claim for itself")
+		}
+		caller, start = req.Child, childStart
 	}
 	declared, serr := declaredWorkers(req.Workers, caller)
 	if serr != nil {

@@ -155,3 +155,29 @@ func TestAZombieIsNotAlive(t *testing.T) {
 		t.Fatalf("child %d still found after it was reaped", pid)
 	}
 }
+
+// A running child of this process is its direct child, at its own start
+// time; this process is not its child's child, and the child is not this
+// process's once it has exited.
+func TestProcChildStartTakesOnlyARunningChild(t *testing.T) {
+	cmd := exec.Command("sleep", "10")
+	startInOwnGroup(t, cmd)
+	pid := cmd.Process.Pid
+	want, ok := procStart(pid)
+	if !ok {
+		t.Fatal("the running child is not alive")
+	}
+	if got, ok := procChildStart(pid, os.Getpid()); !ok || got != want {
+		t.Fatalf("procChildStart(child %d, this process) = %d, %v, want %d, true", pid, got, ok, want)
+	}
+	if got, ok := procChildStart(os.Getpid(), pid); ok {
+		t.Fatalf("procChildStart(this process, its child %d) = %d, true", pid, got)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill the child: %v", err)
+	}
+	waitExitedUnreaped(t, pid)
+	if got, ok := procChildStart(pid, os.Getpid()); ok {
+		t.Fatalf("procChildStart(exited child %d, this process) = %d, true", pid, got)
+	}
+}

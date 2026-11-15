@@ -66,3 +66,12 @@ func procDescends(pid, ancestor int) bool {
 	}
 	return pid == ancestor
 }
+
+// procChildStart is process child's start time when it is a running child of
+// process parent (directChild), read through sysctl.
+func procChildStart(child, parent int) (uint64, bool) {
+	return directChild(child, parent, func(pid int) (int, bool) {
+		ppid, _, _, ok := getProc(pid)
+		return ppid, ok
+	}, procStart)
+}
