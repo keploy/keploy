@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -296,11 +297,33 @@ func boundDevice(conn *net.TCPConn) uint32 {
 // connection's first byte.
 type targetBase struct{}
 
-// wroteCount is darwin's (pairedConn): Linux's counts do not wrap.
-type wroteCount struct{}
+// pairedConnOS is what Linux alone reads of a paired connection: the devices
+// its sockets are bound to. Its counts do not wrap (darwin's wroteCount), and
+// sock_diag lists every socket of the proxy's network namespace (darwin's
+// appHolder).
+type pairedConnOS struct {
+	// appDev is the index of the device the application's socket is bound
+	// to (0 for none), as the first lookup of the connection to find it
+	// read it (lookupApp): nil before one has.
+	appDev atomic.Pointer[uint32]
+	// proxyDev is the index of the device the proxy's socket is bound to (0
+	// for none), read as the proxy began closing it (noteWroteAtClose), for
+	// a wait's later reads of its orphan (orphanTookFIN): after the close,
+	// nothing reads it from the socket. A close whose side had taken the
+	// application's FIN or reset leaves it 0: no wait reads that orphan.
+	proxyDev atomic.Uint32
+}
 
-// appHolder is darwin's (pairedConn): sock_diag lists every socket.
-type appHolder struct{}
+// pairedConnsOS is what proves, on Linux, an application socket not found
+// gone, not hidden.
+type pairedConnsOS struct {
+	// visible: an application socket has been seen from the proxy's
+	// network namespace (proveAppVisible, pairTarget, noteWroteAtClose):
+	// one that is not is gone, not hidden. Until one is, an application
+	// socket not found may be one hidden from the agent (in another network
+	// namespace), and what it wrote is not known.
+	visible atomic.Bool
+}
 
 // received is how much the proxy's side ps received, its FIN counted.
 func (targetBase) received(ps proxySide) uint64 { return ps.received }

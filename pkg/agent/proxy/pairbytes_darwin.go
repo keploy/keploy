@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -168,6 +169,31 @@ func heldSettled(t *pairTarget, ps proxySide) (bool, error) {
 		return false, nil
 	}
 	return s.State != xnuTCPClosed && s.SndCC == 0 && (!heldFINPending(s) || peerEnded(ps.state)), nil
+}
+
+// pairedConnOS is what darwin alone reads of a paired connection: one count of
+// what the application wrote (wroteCount), and the process holding the
+// application's end for a macOS whose TCP table does not list it (appHolder).
+// macOS's table gives no device a socket is bound to (Linux's appDev and
+// proxyDev).
+type pairedConnOS struct {
+	wroteCount
+	appHolder
+}
+
+// pairedConnsOS is what proves, on darwin, an application socket not found
+// gone, not hidden.
+type pairedConnsOS struct {
+	// visible: an application socket has been listed in macOS's TCP table
+	// as the agent reads it (proveAppVisible, pairTarget,
+	// noteWroteAtClose): one the table does not list is gone, not hidden.
+	// Until one is, an application socket not listed may be one hidden
+	// from the agent, and what it wrote is not known.
+	visible atomic.Bool
+	// held: an application socket the table did not list was read from its
+	// holder's descriptor table (pairedConn.appSocket), so one no process
+	// the agent may read holds is gone, not hidden.
+	held atomic.Bool
 }
 
 // wroteCount extends darwin's counts of what the application had written to a

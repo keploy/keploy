@@ -55,16 +55,6 @@ type pairedConn struct {
 	// nothing on it by design, so nothing the application wrote to it is a
 	// capture loss, and no bytes wait holds it.
 	noSession atomic.Bool
-	// appDev is the index of the device the application's socket is bound
-	// to (0 for none), as the first lookup of the connection to find it
-	// read it (lookupApp): nil before one has.
-	appDev atomic.Pointer[uint32]
-	// proxyDev is the index of the device the proxy's socket is bound to (0
-	// for none), read as the proxy began closing it (noteWroteAtClose), for
-	// a wait's later reads of its orphan (orphanTookFIN): after the close,
-	// nothing reads it from the socket. A close whose side had taken the
-	// application's FIN or reset leaves it 0: no wait reads that orphan.
-	proxyDev atomic.Uint32
 	// cuts are the ends cut short on the connection, oldest first: each a
 	// test whose bytes wait ended before the proxy's side had received what
 	// the application had written when the wait began (cutShort). Bytes up
@@ -72,14 +62,10 @@ type pairedConn struct {
 	// its own, never the test open when the loss is counted (lostBy).
 	cutMu sync.Mutex
 	cuts  []cutEnd
-	// wroteCount is, on darwin, what the reads of the application's socket
-	// found it had written, as one count from the connection's first byte
-	// (wroteCount.count): its sequence numbers wrap at 2^32, and the wants
-	// a cut end and a close compare (lostBy) must not. Nothing elsewhere.
-	wroteCount
-	// appHolder is, on darwin, the process holding the application's end,
-	// for a macOS whose TCP table does not list it (pairedConn.appSocket).
-	appHolder
+	// pairedConnOS is what one OS alone reads of the connection: on Linux
+	// the devices its sockets are bound to, on darwin one count of what the
+	// application wrote and the process holding the application's end.
+	pairedConnOS
 }
 
 // cutEnd is a test's end cut short on a connection: what the application had
@@ -195,17 +181,9 @@ type pairedConns struct {
 	err error
 	// changed is closed, and replaced, at every removal or failure.
 	changed chan struct{}
-	// visible: an application socket has been seen from the proxy's
-	// network namespace (proveAppVisible, pairTarget), or, on darwin, in
-	// macOS's TCP table as the agent reads it (noteWroteAtClose too): one
-	// that is not is gone, not hidden. Until one is, an application socket
-	// not found may be one hidden from the agent, and what it wrote is not
-	// known.
-	visible atomic.Bool
-	// held, on darwin: an application socket the table did not list was
-	// read from its holder's descriptor table (pairedConn.appSocket), so
-	// one no process the agent may read holds is gone, not hidden.
-	held atomic.Bool
+	// pairedConnsOS is what proves, on one OS, an application socket not
+	// found gone, not hidden from the agent (visible, and on darwin held).
+	pairedConnsOS
 	// progress counts what the bytes waits saw move: a waited-for
 	// connection that received more, whose orphan changed state, or that
 	// was resolved (PairedBytesProgress).
