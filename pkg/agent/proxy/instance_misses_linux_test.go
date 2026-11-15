@@ -39,7 +39,7 @@ func servedWorker(t *testing.T, p *Proxy, inst uint32) workerWindow {
 // parser's report reaches the proxy.
 func workerMiss(p *Proxy, call string, inst uint32) {
 	report := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: call}
-	p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
+	p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
 }
 
 // readCalls reads r's misses as "call@instance", failing the test on an
@@ -132,7 +132,7 @@ func TestAWorkersMarkedMissIsNotCutByTheRunsSetStaging(t *testing.T) {
 	p.setStaged.Store(5)
 	marked := func(call string, inst uint32) {
 		report := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: call, Mark: models.RoundMarkedSettled, MarkEpoch: 1}
-		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
+		p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
 	}
 	w.ContinueTestErrorCapture()
 	p.ContinueTestErrorCapture()
@@ -195,14 +195,17 @@ func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T)
 			late := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "POST /late"}
 			integrations.StampMark(late, call)
 			send := func(r *models.MockMismatchReport) {
-				p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
+				p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
 				flushDrain(p)
 			}
 			if got := readCalls(t, "worker 1's o::TestX end", w); len(got) != 0 {
 				t.Fatalf("precondition: o::TestX's end read %v", got)
 			}
 			m1.ServeExactPool(models.PoolKeyNone, nil)
-			after := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /worker-after-end"}
+			// A method of its own: the cut line names a call by its shape
+			// (models.MissLogShape), which the pool view's call shares
+			// with any GET of one segment.
+			after := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "PUT /worker-after-end"}
 			integrations.StampMark(after, m1.MarkCallRound())
 			if when == "before the staging" {
 				send(late)
@@ -233,10 +236,10 @@ func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T)
 			if got[1].ActualSummary != "GET /worker-pool" || got[1].Instance != 1 || got[1].EarlierSetTest != "" || got[1].EarlierSet != 1 || got[1].BeforeSet || got[1].Kind != models.MissOutsideTest {
 				t.Fatalf("worker 1's next-set first read %+v; want its pool view call marked before o::TestX's end read next, as the earlier set's call of no test, outside every test", got)
 			}
-			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"GET /worker-after-end"})).Len(); n != 1 {
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"HTTP PUT /{}"})).Len(); n != 1 {
 				t.Fatalf("the cut of worker 1's pool view miss marked after its end read was said %d times; want once: %+v", n, logs.All())
 			}
-			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"GET /worker-pool"})).Len(); n != 0 {
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"HTTP GET /{}"})).Len(); n != 0 {
 				t.Fatalf("worker 1's pool view miss marked before its end read was said cut %d times: %+v", n, logs.All())
 			}
 		})
@@ -302,7 +305,7 @@ func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
 		t.Fatalf("precondition: worker 1's call after the staging is marked %v at staging %d, want marked at %d", after.Mark, after.MarkEpoch, m1.StagingEpoch())
 	}
 	for _, r := range []*models.MockMismatchReport{kept, before, after} {
-		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
+		p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
 		flushDrain(p)
 	}
 	p.ContinueTestErrorCapture()
@@ -323,7 +326,7 @@ func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
 	if c := got[1]; c.ActualSummary != "GET /worker-after" || c.Instance != 1 || c.EarlierSet != 0 || c.EarlierSetTest != "" {
 		t.Fatalf("worker 1's next-set read %+v; want next its call made after the staging, as this set's", got)
 	}
-	if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"GET /worker-before"})).Len(); n != 1 {
+	if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"HTTP GET /{}"})).Len(); n != 1 {
 		t.Fatalf("the cut of worker 1's call made before the staging was said %d times; want once: %+v", n, logs.All())
 	}
 }
@@ -572,7 +575,7 @@ func TestAStoppedWorkersMissIsCountedACallKeployCannotAttribute(t *testing.T) {
 		if report == nil {
 			err = models.ErrNoMockMatched
 		}
-		p.sendMockNotFoundErrorFrom(err, 4242, inst, dst)
+		p.sendMockNotFoundErrorFrom(context.Background(), err, 4242, inst, dst)
 	}
 	miss(7, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /none"}, nil)
 	if n, _ := unattributed(); n != 0 {

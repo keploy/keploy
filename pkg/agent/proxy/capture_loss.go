@@ -33,7 +33,7 @@ import (
 // the order of events, not by a timer.
 func (p *Proxy) CaptureLosses() models.CaptureLosses {
 	for _, h := range p.caTrust.settle() {
-		p.losses.Add(models.CaptureLossTLSAbandoned, h.what)
+		p.losses.Add(models.CaptureLossTLSAbandoned, h.what, h.hosts...)
 	}
 	return p.losses.Snapshot()
 }
@@ -222,13 +222,18 @@ type caTrust struct {
 
 // heldHangUp is a hang-up caTrust holds: by the process tgid, in the scope
 // its handshake began and ended in, on a connection to dst; what is the loss
-// it is charged as if no call cancels it (clientTLS.lossWhat, read as it hung
+// it is charged as if no call cancels it (clientTLS.lossText, read as it hung
 // up: the destination, and a build's gate's why for the process).
 type heldHangUp struct {
 	tgid  uint32
 	scope testScope
-	dst   string
-	what  string
+	// dstLog is the destination as a line names it: its host by its shape
+	// and tag (models.HostLogName), an address whole.
+	dstLog string
+	what   string
+	// hosts is the host what names, where it stands, with that tag
+	// (clientTLS.lossText).
+	hosts models.LossHosts
 }
 
 // hangUpVerdict is what caTrust.hangUp makes of a hang-up.
@@ -251,7 +256,7 @@ const (
 // the counts charges it (settle). It is charged now when the process is
 // unknown (0: no process, which no call makes trusted), and without the
 // switch, as before, whatever the process sent.
-func (t *caTrust) hangUp(tgid uint32, scope testScope, dst, what string) hangUpVerdict {
+func (t *caTrust) hangUp(tgid uint32, scope testScope, dstLog, what string, hosts models.LossHosts) hangUpVerdict {
 	if tgid == 0 || !provenswitch.On() {
 		return hangUpCharged
 	}
@@ -260,7 +265,7 @@ func (t *caTrust) hangUp(tgid uint32, scope testScope, dst, what string) hangUpV
 	if _, ok := t.trusted[tgid]; ok {
 		return hangUpCancelled
 	}
-	t.held = append(t.held, heldHangUp{tgid: tgid, scope: scope, dst: dst, what: what})
+	t.held = append(t.held, heldHangUp{tgid: tgid, scope: scope, dstLog: dstLog, what: what, hosts: hosts})
 	return hangUpHeld
 }
 
@@ -304,7 +309,7 @@ func (t *caTrust) settle() []heldHangUp {
 func (p *Proxy) noteTLSCall(tgid uint32) {
 	for _, h := range p.caTrust.noteCall(tgid, p.testScopeNow()) {
 		p.logger.Debug("a client process sent a call through keploy's certificate after hanging up in the same test: that hang-up is a cancel, not a capture loss",
-			zap.Uint32("tgid", h.tgid), zap.String("destination", h.dst))
+			zap.Uint32("tgid", h.tgid), zap.String("destination", h.dstLog))
 	}
 }
 
@@ -314,34 +319,39 @@ func (c *clientTLS) hungUp(how string) {
 	c.mu.Lock()
 	began := c.began
 	c.mu.Unlock()
-	what := c.lossWhat()
-	switch c.p.caTrust.hangUp(c.tgid, began, c.dst, what) {
+	what, hosts := c.lossText()
+	// The destination as a line names it: a CONNECT target's host by its
+	// shape and tag, in the connection's session (c.ctx carries it).
+	dstLog := models.HostLogName(c.ctx, c.dst)
+	switch c.p.caTrust.hangUp(c.tgid, began, dstLog, what, hosts) {
 	case hangUpCancelled:
 		c.p.logger.Debug("a client process that sent a call through keploy's certificate in this run "+how+": a cancel, not a capture loss",
-			zap.Uint32("tgid", c.tgid), zap.String("destination", c.dst))
+			zap.Uint32("tgid", c.tgid), zap.String("destination", dstLog))
 	case hangUpHeld:
 		c.p.logger.Debug("a client process that has not sent a call through keploy's certificate yet "+how+": a cancel if it sends one in this test, a capture loss otherwise",
-			zap.Uint32("tgid", c.tgid), zap.String("destination", c.dst))
+			zap.Uint32("tgid", c.tgid), zap.String("destination", dstLog))
 	default:
-		c.p.losses.Add(models.CaptureLossTLSAbandoned, what)
+		c.p.losses.Add(models.CaptureLossTLSAbandoned, what, hosts...)
 	}
 }
 
 // process is the client's process, as a build's gate is told it.
 func (c *clientTLS) process() Process { return Process{Pid: c.nsPid, KernelPid: c.tgid} }
 
-// lossWhat is what a handshake c lost is charged as: its destination, and
+// lossText is what a handshake c lost is charged as: its destination, and
 // what a build's gate knows of why its process failed it (OnClientTLS's
 // Why), so the test's reason names the process and the cause, not only the
-// call.
-func (c *clientTLS) lossWhat() string {
-	what := "to " + c.dst
+// call; and the host it names (a CONNECT target's name), where it stands,
+// with its tag in the connection's session (c.ctx), as the connection's
+// lines name it. None for an address.
+func (c *clientTLS) lossText() (string, models.LossHosts) {
+	what := models.NewLossText(c.ctx).Say("to ").Host(c.dst)
 	if g := OnClientTLS; g != nil && c.tgid != 0 {
 		if why := g.Why(c.process()); why != "" {
-			what += ": " + why
+			what.Say(": " + why)
 		}
 	}
-	return what
+	return what.String(), what.Hosts()
 }
 
 // HandshakeBegin waits, before keploy's proxy answers the client, for a
@@ -365,7 +375,8 @@ func (c *clientTLS) HandshakeFailed(err error) {
 	case errors.Is(err, net.ErrClosed):
 		// keploy closed its own end: the client gave nothing up.
 	case !pTls.IsClientGiveUp(err):
-		c.p.losses.Add(models.CaptureLossTLSAbort, c.lossWhat())
+		what, hosts := c.lossText()
+		c.p.losses.Add(models.CaptureLossTLSAbort, what, hosts...)
 	case pTls.CertificateSent(err) && c.inScope():
 		c.hungUp("gave a TLS handshake up")
 	}
@@ -425,9 +436,11 @@ func remoteOf(c net.Conn) string {
 // call was never answered could pass.
 //
 // dst is the destination's address, as a string or a net.Addr, read only for
-// a panic.
-func (p *Proxy) countParserPanic(err error, parser integrations.IntegrationType, dst any) {
+// a panic; a name it holds (a CONNECT target's, an upstream's) is listed
+// with its tag in ctx's session, the connection's.
+func (p *Proxy) countParserPanic(ctx context.Context, err error, parser integrations.IntegrationType, dst any) {
 	if errors.Is(err, util.ErrParserPanicked) {
-		p.losses.Add(models.CaptureLossParserPanic, "the "+string(parser)+" parser, on a connection to "+fmt.Sprint(dst))
+		what := models.NewLossText(ctx).Say("the " + string(parser) + " parser, on a connection to ").Host(fmt.Sprint(dst))
+		p.losses.Add(models.CaptureLossParserPanic, what.String(), what.Hosts()...)
 	}
 }

@@ -317,11 +317,12 @@ func loggedAt(entries []observer.LoggedEntry, msg, key string) []string {
 	return out
 }
 
-// The replay's logs show the live statement by every place any recording
-// of the pool redacted, whichever recording a line compares it with: a
+// The replay's logs show the live statement by its shape alone, whichever
+// recording a line compares it with and whatever any recording redacted: a
 // line of its comparison with a recording that redacted nothing, the
-// parser's error on it, an answer the replay made up for it.
-func TestMySQLLogsRedactTheLiveValueAtAPlaceAnyRecordingRedacted(t *testing.T) {
+// parser's failure on it, an answer the replay made up for it. The parser's
+// error, which quotes the statement, is not logged.
+func TestMySQLLogsShowTheLiveStatementByItsShape(t *testing.T) {
 	keyed := func(key, org string) string {
 		return "SELECT name FROM users WHERE api_key = '" + key + "' AND org = '" + org + "'"
 	}
@@ -334,8 +335,9 @@ func TestMySQLLogsRedactTheLiveValueAtAPlaceAnyRecordingRedacted(t *testing.T) {
 		pool   []*models.Mock
 		send   func(c mysqlClient)
 		strict bool
-		// lines are log lines of the live value: message, then key.
-		lines [][2]string
+		// lines are log lines of the live value: message, key, and the
+		// statement's shape the line must show.
+		lines [][3]string
 	}{{
 		name: "its comparison with a recording that redacted nothing",
 		pool: []*models.Mock{
@@ -346,7 +348,7 @@ func TestMySQLLogsRedactTheLiveValueAtAPlaceAnyRecordingRedacted(t *testing.T) {
 			c.send(0, append([]byte{mysql.COM_QUERY}, keyed(liveSecret, "globex")...))
 		},
 		strict: true,
-		lines:  [][2]string{{"query matched with drifted inline literals", "actual query"}},
+		lines:  [][3]string{{"query matched with drifted inline literals", "actual query", "SELECT name FROM users WHERE api_key = ? AND org = ?"}},
 	}, {
 		name: "the parser's error on it",
 		pool: []*models.Mock{
@@ -356,8 +358,8 @@ func TestMySQLLogsRedactTheLiveValueAtAPlaceAnyRecordingRedacted(t *testing.T) {
 		send: func(c mysqlClient) {
 			c.send(0, append([]byte{mysql.COM_QUERY}, "UPDATE users SET api_key = 1 '"+liveSecret+"'"...))
 		},
-		lines: [][2]string{{"failed to get actual query structure", "error"}, {"failed to get actual query structure", "actual Query"},
-			{"actual query is dml but expected is not", "actual query"}},
+		lines: [][3]string{{"failed to get actual query structure", "actual Query", "UPDATE users SET api_key = ? ?"},
+			{"actual query is dml but expected is not", "actual query", "UPDATE users SET api_key = ? ?"}},
 	}, {
 		name: "an answer the replay made up for it",
 		pool: []*models.Mock{queryRecorded("mock-users", keyed(redactedPlaceholder, "acme"), redactedNoise)},
@@ -368,7 +370,7 @@ func TestMySQLLogsRedactTheLiveValueAtAPlaceAnyRecordingRedacted(t *testing.T) {
 			}
 			c.send(0, append([]byte{mysql.COM_QUERY}, "SELECT 1 FROM missing"...))
 		},
-		lines: [][2]string{{"Returning synthetic OK for unmocked control/DDL", "query"}},
+		lines: [][3]string{{"Returning synthetic OK for unmocked control/DDL", "query", "CREATE TABLE tokens (k VARCHAR(?) DEFAULT ?)"}},
 	}, {
 		name: "a prepared statement the replay answered",
 		pool: []*models.Mock{redacting(preparedMock("mock-prepare", "0", 1, keyed(redactedPlaceholder, "acme")+" AND id = ?", stmtT0))},
@@ -379,7 +381,7 @@ func TestMySQLLogsRedactTheLiveValueAtAPlaceAnyRecordingRedacted(t *testing.T) {
 			}
 			c.send(0, append([]byte{mysql.COM_QUERY}, "SELECT 1 FROM missing"...))
 		},
-		lines: [][2]string{{"Recorded runtime PREP mapping with new statement ID", "query"}},
+		lines: [][3]string{{"Recorded runtime PREP mapping with new statement ID", "query", "SELECT name FROM users WHERE api_key = ? AND org = ? AND id = ?"}},
 	}, {
 		name: "a value streamed to a statement, and the EXECUTE that binds one",
 		pool: []*models.Mock{preparedMock("mock-prepare", "0", 1, "SELECT name FROM users WHERE id = ? AND api_key = ?", stmtT0),
@@ -410,8 +412,19 @@ func TestMySQLLogsRedactTheLiveValueAtAPlaceAnyRecordingRedacted(t *testing.T) {
 				t.Errorf("the replay logged the live value at a place a recording redacted:\n%s", logged)
 			}
 			for _, l := range tc.lines {
-				if got := loggedAt(logs, l[0], l[1]); len(got) == 0 || !strings.Contains(strings.Join(got, " "), valueRedacted) {
-					t.Errorf("the line %q shows %s %q; want the live value redacted", l[0], l[1], got)
+				got := loggedAt(logs, l[0], l[1])
+				if len(got) == 0 {
+					t.Errorf("the line %q was not logged", l[0])
+				}
+				for _, g := range got {
+					if g != l[2] {
+						t.Errorf("the line %q shows %s %q; want the statement's shape %q", l[0], l[1], g, l[2])
+					}
+				}
+			}
+			for _, got := range loggedAt(logs, "failed to get actual query structure", "error") {
+				if got != "<nil>" {
+					t.Errorf("the parser's error is logged: %q", got)
 				}
 			}
 		})
@@ -419,8 +432,9 @@ func TestMySQLLogsRedactTheLiveValueAtAPlaceAnyRecordingRedacted(t *testing.T) {
 }
 
 // Where no recording of the pool redacted a place, the logs show the live
-// statement as it is.
-func TestMySQLLogsKeepTheLiveValueNoRecordingRedacted(t *testing.T) {
+// statement by its shape all the same: a literal no recording redacted is
+// the application's data too.
+func TestMySQLLogsShowNoLiveValueNoRecordingRedacted(t *testing.T) {
 	db := &fakeMockDb{session: []*models.Mock{nativeHandshake(),
 		queryRecorded("mock-users", "SELECT name FROM users WHERE api_key = 'k1'", nil),
 		queryRecorded("mock-update", "UPDATE users SET name = 'n' WHERE id = 1", nil)}}
@@ -430,12 +444,14 @@ func TestMySQLLogsKeepTheLiveValueNoRecordingRedacted(t *testing.T) {
 	for _, l := range []struct{ line, key string }{
 		{"actual query is dml but expected is not", "actual query"},
 		{"failed to get actual query structure", "actual Query"},
-		{"failed to get actual query structure", "error"},
 		{"mock miss", "actual_query"},
 	} {
-		if got := loggedAt(logs, l.line, l.key); len(got) == 0 || !strings.Contains(strings.Join(got, " "), liveSecret) {
-			t.Errorf("the line %q shows %s %q; want the live value, which no recording redacted", l.line, l.key, got)
+		if got := loggedAt(logs, l.line, l.key); len(got) == 0 || got[0] != "UPDATE users SET api_key = ? ?" {
+			t.Errorf("the line %q shows %s %q; want the statement's shape", l.line, l.key, got)
 		}
+	}
+	if logged := logText(logs); strings.Contains(logged, liveSecret) {
+		t.Errorf("the replay logged the live value:\n%s", logged)
 	}
 }
 
@@ -474,9 +490,9 @@ func (sessionUnreadable) GetSessionMocks() ([]*models.Mock, error) {
 	return nil, errors.New("the session tier is gone")
 }
 
-// A command whose pool cannot be read whole is logged with its statement
-// redacted whole: no recording's places can be read, so none is shown.
-func TestMySQLLogsRedactTheWholeStatementWhenThePoolCannotBeRead(t *testing.T) {
+// A command whose pool cannot be read whole is logged with its statement's
+// shape, as every command is: the log reads no recording's places.
+func TestMySQLLogsTheShapeWhenThePoolCannotBeRead(t *testing.T) {
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
 	keyed := func(key, org string) string {
 		return "SELECT name FROM users WHERE api_key = '" + key + "' AND org = '" + org + "'"
@@ -493,29 +509,28 @@ func TestMySQLLogsRedactTheWholeStatementWhenThePoolCannotBeRead(t *testing.T) {
 	if logged := logText(logs.All()); strings.Contains(logged, liveSecret) {
 		t.Errorf("the replay logged the live statement of a pool it could not read:\n%s", logged)
 	}
-	if got := loggedAt(logs.All(), "query matched with drifted inline literals", "actual query"); len(got) == 0 || got[0] != valueRedacted {
-		t.Errorf("the drift line shows %q; want the statement redacted whole:\n%s", got, logText(logs.All()))
+	if got := loggedAt(logs.All(), "query matched with drifted inline literals", "actual query"); len(got) == 0 || got[0] != "SELECT name FROM users WHERE api_key = ? AND org = ?" {
+		t.Errorf("the drift line shows %q; want the statement's shape:\n%s", got, logText(logs.All()))
 	}
 }
 
 // An EXECUTE answered on its bound values alone (no recorded PREPARE) is
-// logged with its statement by the pool's places.
-func TestMySQLLogsAnExecuteMatchedOnItsValuesAloneByThePoolsPlaces(t *testing.T) {
+// logged with its statement's shape: no literal of it, whether or not a
+// recording redacted it.
+func TestMySQLLogsAnExecuteMatchedOnItsValuesAloneByItsShape(t *testing.T) {
 	keyed := func(key, org string) string {
 		return "SELECT name FROM users WHERE api_key = '" + key + "' AND org = '" + org + "' AND id = ?"
 	}
-	pool := []*models.Mock{queryRecorded("mock-users", keyed(redactedPlaceholder, "acme"), redactedNoise)}
 	core, logs := observer.New(zapcore.DebugLevel)
 	id := mysql.Parameter{Type: uint16(mysql.FieldTypeLong), Value: int32(7)}
 	ok, _, _ := matchStmtExecuteLive(zap.New(core), executeOf(executePacket(1, id)), executeOf(executePacket(1, id)), "",
-		newLiveExecStatement(keyed(liveSecret, "globex")), 1, "mock-execute", util.NewNoiseChecker(nil),
-		&logPlaces{read: func() redactedPlaces { return poolPlaces(pool) }})
+		newLiveExecStatement(keyed(liveSecret, "globex")), 1, "mock-execute", util.NewNoiseChecker(nil))
 	if !ok {
 		t.Fatal("the EXECUTE was not matched on its values alone")
 	}
 	got := strings.Join(loggedAt(logs.All(), "EXECUTE matched on params alone (mock has no recorded PREPARE)", "actual_query"), " ")
-	if strings.Contains(got, liveSecret) || !strings.Contains(got, valueRedacted) || !strings.Contains(got, "globex") {
-		t.Errorf("the line shows %q; want the redacted literal redacted and the other shown", got)
+	if want := "SELECT name FROM users WHERE api_key = ? AND org = ? AND id = ?"; got != want {
+		t.Errorf("the line shows %q; want the statement's shape %q", got, want)
 	}
 }
 

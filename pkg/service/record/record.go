@@ -651,6 +651,13 @@ type Recorder struct {
 	config          *config.Config
 	hooks           RecordHooks
 
+	// console is where the recording names whole what its log names by a
+	// host's shape and tag (a capture loss's destination, a mock.real
+	// connection's other name), beside that tag: keploy's CLI sets its
+	// stdout (SetConsole). nil, as New leaves it, prints nothing: a program
+	// that embeds the recorder, whose stdout may be a log, sets its own.
+	console io.Writer
+
 	// cleanups is run in LIFO order from Start's defer. Downstream
 	// builds and internal subsystems register shutdown work here
 	// rather than each one type-asserting its own io.Closer into the
@@ -1163,6 +1170,10 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, 
 	}
 }
 
+// SetConsole makes w the recording's console (Recorder.console): keploy's
+// CLI sets its stdout. nil prints nothing.
+func (r *Recorder) SetConsole(w io.Writer) { r.console = w }
+
 // afterRecordingComplete invokes the end-of-recording hook (issue #1867). It is
 // best-effort: the recording is already saved, so neither an error NOR a panic
 // from the hook may propagate — a panic here would otherwise unwind the teardown
@@ -1507,6 +1518,10 @@ func recordExitCode(err error) int {
 func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+	// A recording is a session of its own: what its log names by a path tag
+	// it names under a key drawn now, carried in ctx (models.LogKeySession),
+	// unless ctx carries one its embedder began for it.
+	ctx = models.EnsureLogKeySession(ctx)
 	// The recording's own teardown scope (Recorder.teardown).
 	ctx, teardown := utils.NewTeardownScope(ctx)
 	r.teardown.Store(teardown)
@@ -2567,6 +2582,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// What the agent could not capture is counted from here: the agent is
 	// capturing, and a native app has not started.
 	capWatch = watchCaptureLosses(ctx, r.logger, r.instrumentation)
+	capWatch.setConsole(r.console)
 	if agentStopping != nil {
 		// Compose is stopping the agent (the app exited on its own, or a
 		// container of its project did), and the agent waits for this drain

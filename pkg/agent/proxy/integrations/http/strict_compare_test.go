@@ -418,7 +418,7 @@ func TestStrictMissReportNamesWhatDiffers(t *testing.T) {
 	if got != nil {
 		t.Fatal("served")
 	}
-	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/charge"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: "POST", URL: &url.URL{Path: "/charge"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
 	if r.ClosestMock != "charge" || r.MatchPhase != models.MatchPhaseStrict {
 		t.Fatalf("report closest %q phase %q", r.ClosestMock, r.MatchPhase)
 	}
@@ -629,7 +629,7 @@ func TestStrictDiffersNamesOnlyWhatDiffers(t *testing.T) {
 	if got != nil {
 		t.Fatal("served")
 	}
-	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/v1/charge"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: "POST", URL: &url.URL{Path: "/v1/charge"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
 	if strings.Join(r.Differs, ",") != "header.x-tenant" {
 		t.Fatalf("Differs = %v, want only the header", r.Differs)
 	}
@@ -642,7 +642,7 @@ func TestStrictDiffersNamesOnlyWhatDiffers(t *testing.T) {
 	if got != nil {
 		t.Fatal("served")
 	}
-	r = newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/upload"}, Host: "api.example", Header: liveUp.header}, liveUp.body, &mockMemDb{mocks: []*models.Mock{up}}, nil, nil, nil, diag)
+	r = newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: "POST", URL: &url.URL{Path: "/upload"}, Host: "api.example", Header: liveUp.header}, liveUp.body, &mockMemDb{mocks: []*models.Mock{up}}, nil, nil, nil, diag)
 	if strings.Join(r.Differs, ",") != "header.x-tenant" {
 		t.Fatalf("Differs = %v, want only the header", r.Differs)
 	}
@@ -1038,7 +1038,7 @@ func TestARefusedClockReadNamesItsFieldAndWhyInTheMissReport(t *testing.T) {
 	if got != nil {
 		t.Fatal("served a call whose reads of the clock moved thirty days")
 	}
-	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/v1/usage"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), &http.Request{Method: "POST", URL: &url.URL{Path: "/v1/usage"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
 	for _, f := range []string{"body.q", "body.since", "body.users.{}.since"} {
 		if !hasField(r.Differs, f) {
 			t.Fatalf("Differs = %v; want %s named", r.Differs, f)

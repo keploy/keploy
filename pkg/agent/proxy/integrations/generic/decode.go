@@ -172,7 +172,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					zap.Int("firstRequestBytes", len(genericRequests[0])),
 					zap.String("closest", report.ClosestMock),
 					zap.String("diff", report.Diff),
-					zap.String("next_step", report.NextSteps))
+					zap.String("next_step", models.MissLogNextStep(report)))
 				errCh <- models.NewMockMismatchError(fmt.Errorf("generic: %w", models.ErrNoMockMatched), report)
 				return
 			}

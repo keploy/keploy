@@ -516,6 +516,9 @@ type shareCharge struct {
 
 // settlement is the work of settleShares.
 type settlement struct {
+	// keys is the run's session (models.LogKeys of its context): a call the
+	// settlement charges is tagged under its key.
+	keys    *models.LogKeySession
 	p       *exactPlan
 	sp      *sharePlan
 	lookup  map[string]mockDisplayInfo
@@ -582,6 +585,9 @@ func (s *settlement) call(mock, reason string, note *models.ConcurrentNote, why 
 		Reason:        reason,
 		Concurrent:    note,
 		NextSteps:     why + "; record these tests one request at a time",
+		// Made here, in the run whose lines and report name the call: no
+		// agent's line names it.
+		PathTag: s.keys.CallPathTag(protocol, summary),
 	}
 }
 
@@ -639,7 +645,7 @@ func (s *settlement) move(name, test, marker string) {
 // mock lookup. It returns the tests it charged, sorted, and keeps what it
 // settled for the set's end hook (SetSharesHook). A no-op with the switch
 // off, and for a plan that does not share.
-func (p *exactPlan) settleShares(results []models.TestResult, consumers map[string][]string, complete bool, lookup map[string]mockDisplayInfo) []string {
+func (p *exactPlan) settleShares(keys *models.LogKeySession, results []models.TestResult, consumers map[string][]string, complete bool, lookup map[string]mockDisplayInfo) []string {
 	if !provenswitch.On() || p == nil || p.share == nil || !p.share.sharing {
 		return nil
 	}
@@ -658,7 +664,7 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 			return nil
 		}
 	}
-	s := &settlement{p: p, sp: sp, lookup: lookup, ran: map[string]bool{}, charges: map[string]*shareCharge{},
+	s := &settlement{keys: keys, p: p, sp: sp, lookup: lookup, ran: map[string]bool{}, charges: map[string]*shareCharge{},
 		shares: models.SetShares{State: models.SharesComplete}, resolved: map[string]bool{}, ambiguous: map[string]bool{}}
 	for _, r := range results {
 		if r.Status != models.TestStatusIgnored {
@@ -1093,7 +1099,7 @@ func (p *exactPlan) consumerOf() map[string]string {
 // replay can admit it. It returns the tests it charged so. The recordings
 // settleShares charged as matched by no call of the tests it shared them
 // between say so already, and are left as they are.
-func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[string]mockDisplayInfo) []string {
+func (p *exactPlan) annotateConcurrent(keys *models.LogKeySession, results []models.TestResult, lookup map[string]mockDisplayInfo) []string {
 	if !provenswitch.On() || p == nil || p.share == nil {
 		return nil
 	}
@@ -1158,7 +1164,7 @@ func (p *exactPlan) annotateConcurrent(results []models.TestResult, lookup map[s
 			if e.listedBy != test || e.entry.Unresolved != models.MockEntryUnresolvedAmbiguous {
 				continue
 			}
-			s := &settlement{sp: sp, lookup: lookup}
+			s := &settlement{keys: keys, sp: sp, lookup: lookup}
 			note := s.note(test, name)
 			note.Case = models.ConcurrentCaseUnresolved
 			r.FailureInfo.UnmatchedCalls = append(r.FailureInfo.UnmatchedCalls, s.call(name, models.MissConcurrentAmbiguous, note,

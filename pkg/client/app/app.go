@@ -200,7 +200,7 @@ func (a *App) SetupDocker(ctx context.Context) error {
 		}
 	}
 
-	a.logger.Debug("inside setup docker", zap.String("cmd", a.cmd))
+	a.logger.Debug("inside setup docker", zap.String("cmd", utils.RedactCommandLine(a.cmd)))
 
 	if HookImpl != nil {
 		newCmd, err := HookImpl.BeforeDockerSetup(ctx, a.cmd)
@@ -211,7 +211,7 @@ func (a *App) SetupDocker(ctx context.Context) error {
 		a.cmd = newCmd
 	}
 
-	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd))
+	a.logger.Debug("after before docker setup hook", zap.String("cmd", utils.RedactCommandLine(a.cmd)))
 
 	// attaching the init container's PID namespace to the app container
 	err := a.modifyDockerRun(ctx)
@@ -282,7 +282,7 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 			// PID and network namespaces were settled when it was created.
 			return engine.StartUnsupported(engine.Detect(a.cmd))
 		}
-		return fmt.Errorf("invalid command structure: no `run` subcommand to add keploy's flags to: %s", a.cmd)
+		return fmt.Errorf("invalid command structure: no `run` subcommand to add keploy's flags to: %s", utils.RedactCommandLine(a.cmd))
 	}
 
 	// The flags go right after the engine's run subcommand, wherever it is:
@@ -290,7 +290,7 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	// word, and docker takes nothing in front of `run` but its own flags.
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
 	a.cmd = fmt.Sprintf("%s %s %s", a.cmd[:at], injection, strings.TrimLeft(a.cmd[at:], " "))
-	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", a.cmd))
+	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", utils.RedactCommandLine(a.cmd)))
 	return nil
 }
 
@@ -298,7 +298,7 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 // the before-setup hook does its work under it.
 func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	if a.container == "" {
-		utils.LogError(a.logger, nil, "container name not found", zap.String("AppCmd", a.cmd))
+		utils.LogError(a.logger, nil, "container name not found", zap.String("AppCmd", utils.RedactCommandLine(a.cmd)))
 		return errors.New("container name not found")
 	}
 
@@ -368,7 +368,7 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 		a.cmd = newCmd
 		a.logger.Info(
 			"Running application using a temporary Keploy-generated Docker Compose file (will be cleaned up automatically)",
-			zap.String("cmd", a.cmd),
+			zap.String("cmd", utils.RedactCommandLine(a.cmd)),
 			zap.String("composePath", newPath),
 		)
 		return nil
@@ -395,13 +395,13 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	a.logger.Info(
 		"Running application through your command with COMPOSE_FILE pointed at a temporary "+
 			"Keploy-generated Docker Compose file (will be cleaned up automatically)",
-		zap.String("cmd", a.cmd),
+		zap.String("cmd", utils.RedactCommandLine(a.cmd)),
 		zap.String("composePath", composeFileEnv),
 	)
 	// Stated up front because each one otherwise fails a long way from its cause.
 	a.logger.Warn(
 		"the command is not a literal docker compose invocation, so keploy cannot modify it directly",
-		zap.String("cmd", a.cmd),
+		zap.String("cmd", utils.RedactCommandLine(a.cmd)),
 		zap.String("if it passes its own -f", "COMPOSE_FILE is ignored and keploy's agent will not be injected"),
 		zap.String("if it runs compose detached (up -d)", "the command returns immediately and keploy stops, treating it as the app exiting"),
 		zap.String("if it sets its own project name", "keploy's teardown may not reach every container it started"),
@@ -459,7 +459,7 @@ func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) erro
 	a.cmd = ensureInMemoryComposeFlags(a.cmd, a.composeService, preferFailureAbort)
 
 	a.logger.Info("Running application using in-memory Keploy-generated Docker Compose (no file written to disk)",
-		zap.String("cmd", a.cmd))
+		zap.String("cmd", utils.RedactCommandLine(a.cmd)))
 
 	return nil
 }
@@ -501,7 +501,7 @@ func dependsOnRequiresCompletion(dependsOn *yaml.Node) bool {
 }
 
 func (a *App) SetAppCommand(appCommand string) {
-	a.logger.Debug("Setting App Command", zap.String("cmd", appCommand))
+	a.logger.Debug("Setting App Command", zap.String("cmd", utils.RedactCommandLine(appCommand)))
 	a.cmd = appCommand
 }
 

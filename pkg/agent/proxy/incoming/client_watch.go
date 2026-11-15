@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -170,8 +171,14 @@ func tellUnwatched(logger *zap.Logger, conn net.Conn) {
 // client ended its side before the app's answer ended (watchClient), as
 // warnNotRecorded tells of another: a test the user expects is otherwise
 // missing with no trace. A client that only half-closed once its request was
-// sent may still have read the whole answer.
-func tellClientLeft(logger *zap.Logger, req *http.Request) {
+// sent may still have read the whole answer. The line names the request by
+// its shape and its path tag, and the recording's console by its path beside
+// the same tag (notRecordedMeta).
+func tellClientLeft(ctx context.Context, logger *zap.Logger, req *http.Request) {
 	logger.Info("Not recording this request as a test case: its client closed its side of the connection before the app's answer ended. Keploy told the app, as the client's going would have told it without keploy, so what the app sent after that may answer the client's going rather than the request. A client that half-closes once its request is sent may still have read the whole answer: to record such a request, keep the client's side open until the answer ends.",
-		zap.String("method", req.Method), zap.String("url", req.URL.String()))
+		zap.Any("metadata", notRecordedMeta(ctx, req, clientLeftWhy)))
 }
+
+// clientLeftWhy is why the console says a request whose client went before
+// its answer ended is not recorded (tellClientLeft).
+const clientLeftWhy = "its client closed its side of the connection before the app's answer ended"

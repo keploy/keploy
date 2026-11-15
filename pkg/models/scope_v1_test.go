@@ -1,6 +1,7 @@
 package models
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -104,7 +105,7 @@ func TestChargeNotJudgedWritesOneSentenceWithTheSummedCount(t *testing.T) {
 	ev.ChargeNotJudged(unattributed(2, real))
 	ev.ChargeNotJudged(unattributed(3, mock))
 	want := unattributed(5, real+"; "+mock)
-	if len(ev.CannotCapture) != 1 || ev.CannotCapture[0] != want[0] {
+	if len(ev.CannotCapture) != 1 || !reflect.DeepEqual(ev.CannotCapture[0], want[0]) {
 		t.Fatalf("CannotCapture = %+v, want %+v", ev.CannotCapture, want)
 	}
 	if wantReason := "keploy: " + want.NotJudgedText() + "."; ev.Reason != wantReason {

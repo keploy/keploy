@@ -132,7 +132,9 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 		// Extract and validate variable value
 		value, ok := variable["value"].(string)
 		if !ok {
-			pi.logger.Error("Global variable value is not a string", zap.Any("value", variable["value"]))
+			// Its type, never the value: a collection's variables hold its
+			// tokens and keys.
+			pi.logger.Error("Global variable value is not a string", zap.String("type", fmt.Sprintf("%T", variable["value"])))
 			continue
 		}
 
@@ -153,14 +155,14 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 	if basePath != "" {
 		req.URL, err = utils.ReplaceBaseURL(req.URL, basePath)
 		if err != nil {
-			pi.logger.Error("failed to replace hostname", zap.Error(err))
+			pi.logger.Error("failed to replace hostname", zap.Error(utils.WithholdInput(err)))
 			return models.HTTPResp{}, err
 		}
 	}
 
 	httpReq, err := http.NewRequest(string(req.Method), req.URL, strings.NewReader(req.Body))
 	if err != nil {
-		pi.logger.Error("failed to create HTTP request", zap.Error(err))
+		pi.logger.Error("failed to create HTTP request", zap.Error(utils.WithholdInput(err)))
 		return models.HTTPResp{}, err
 	}
 
@@ -180,7 +182,7 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		pi.logger.Error("failed to send HTTP request", zap.Error(err))
+		pi.logger.Error("failed to send HTTP request", zap.Error(utils.WithholdInput(err)))
 		return models.HTTPResp{}, err
 	}
 
@@ -207,7 +209,7 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 		response.Header[key] = strings.Join(value, ",")
 	}
 	// Use the response.Body field to avoid unused write error
-	pi.logger.Info("Response Body", zap.String("body", response.Body))
+	pi.logger.Info("Response Body", zap.Int("bytes", len(response.Body)))
 
 	return response, nil
 }

@@ -1216,6 +1216,23 @@ func (ts *TestYaml) keptAsset(paths []string, j int) (string, bool) {
 // caller that never takes them (a replay, a normalize) holds no more.
 const formPartsLeftOutMax = 64
 
+// formFileError is err, a failed write (or copy) of a form part's file at
+// paths (the asset's, and a copy's source), with each path in its text in its
+// log form (models.FormFilePathsInError): the file's name is the app's
+// (multipart's filename=). The os package names the whole path, and the
+// recording's file helpers the path within the recording, plain or quoted.
+// errors.Is and errors.As still see err.
+func (ts *TestYaml) formFileError(err error, paths ...string) error {
+	var all []string
+	for _, path := range paths {
+		all = append(all, path)
+		if rel, relErr := filepath.Rel(ts.TcsPath, path); relErr == nil && rel != path {
+			all = append(all, rel)
+		}
+	}
+	return models.FormFilePathsInError(err, all...)
+}
+
 // pathAt is paths[j], or "" when the part names no path.
 func pathAt(paths []string, j int) string {
 	if j < len(paths) {
@@ -1225,15 +1242,16 @@ func pathAt(paths []string, j int) string {
 }
 
 // leaveOutFormPart says, at ERROR, that a test case is stored without a form
-// part's file, naming the part and the path it named, and keeps the part for
-// TakeFormPartsLeftOut.
+// part's file, naming the part, its file name's size and the path it named
+// (models.FormFilePathLogText: the file name is the app's), and keeps the
+// part for TakeFormPartsLeftOut.
 func (ts *TestYaml) leaveOutFormPart(p models.FormPartLeftOut) {
 	utils.LogError(ts.logger, fmt.Errorf("nothing to keep the form part's file from"), "the test case is stored without a form part's file: the part named no file a capture of this run left, carried no contents, and its path names no file in the recording",
 		zap.String("testSet", p.TestSet),
 		zap.String("testCase", p.TestCase),
 		zap.String("key", p.Key),
-		zap.String("fileName", p.FileName),
-		zap.String("path", p.Path))
+		zap.String("fileName", models.FormFileNameLogText(p.FileName)),
+		zap.String("path", models.FormFilePathLogText(p.Path)))
 	ts.leftOutMu.Lock()
 	defer ts.leftOutMu.Unlock()
 	if len(ts.leftOut) >= formPartsLeftOutMax {
@@ -1390,35 +1408,42 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					if _, err := os.Stat(srcPath); err == nil {
 						input, err := os.Open(srcPath)
 						if err != nil {
-							utils.LogError(ts.logger, err, "failed to open temp asset file", zap.String("path", srcPath))
+							utils.LogError(ts.logger, models.FormFilePathsInError(err, srcPath), "failed to open temp asset file", zap.String("path", models.FormFilePathLogText(srcPath)))
 							return err
 						}
 						output, err := yaml.OpenFileInRecording(ts.TcsPath, destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 						if err != nil {
 							input.Close()
-							utils.LogError(ts.logger, err, "failed to create asset file", zap.String("path", destPath))
+							err = ts.formFileError(err, destPath)
+							utils.LogError(ts.logger, err, "failed to create asset file", zap.String("path", models.FormFilePathLogText(destPath)))
 							return err
 						}
 						if _, err := io.Copy(output, input); err != nil {
 							output.Close()
 							input.Close()
-							utils.LogError(ts.logger, err, "failed to copy asset file", zap.String("path", destPath))
+							// Its read side names the source, its write side
+							// the asset.
+							err = ts.formFileError(err, destPath, srcPath)
+							utils.LogError(ts.logger, err, "failed to copy asset file", zap.String("path", models.FormFilePathLogText(destPath)))
 							return err
 						}
 						if err := output.Close(); err != nil {
 							input.Close()
-							utils.LogError(ts.logger, err, "failed to close asset file", zap.String("path", destPath))
+							err = ts.formFileError(err, destPath)
+							utils.LogError(ts.logger, err, "failed to close asset file", zap.String("path", models.FormFilePathLogText(destPath)))
 							return err
 						}
 						if err := input.Close(); err != nil {
-							utils.LogError(ts.logger, err, "failed to close temp asset file", zap.String("path", srcPath))
+							utils.LogError(ts.logger, models.FormFilePathsInError(err, srcPath), "failed to close temp asset file", zap.String("path", models.FormFilePathLogText(srcPath)))
 							return err
 						}
 						wroteFile = true
 						// Cleanup temp
 						os.Remove(srcPath)
 					} else {
-						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", srcPath), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", srcPath))
+						// The capture's copy is named after the part's file
+						// (the app's filename=): named by its folder alone.
+						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", models.FormFilePathLogText(srcPath)), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", models.FormFilePathLogText(srcPath)))
 					}
 				} else if kept, ok := ts.keptAsset(form.Paths, j); ok {
 					// Case 1a: a test case read back already keeps the part
@@ -1429,7 +1454,8 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					// Case 1b: File content travelled with the test case (captured
 					// in another process, e.g. the DaemonSet agent)
 					if err := yaml.WriteFileInRecording(ts.TcsPath, destPath, form.FileContents[j], 0o644); err != nil {
-						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
+						err = ts.formFileError(err, destPath)
+						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", models.FormFilePathLogText(destPath)))
 						return err
 					}
 					wroteFile = true
@@ -1437,7 +1463,8 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					// Case 2: File content is in Values (legacy/text fallback)
 					content := []byte(form.Values[j])
 					if err := yaml.WriteFileInRecording(ts.TcsPath, destPath, content, 0o644); err != nil {
-						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
+						err = ts.formFileError(err, destPath)
+						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", models.FormFilePathLogText(destPath)))
 						return err
 					}
 					wroteFile = true
@@ -1448,7 +1475,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					// it: stored, the test case would lose the part's file
 					// with nothing said to its caller. Refused instead; the
 					// file the path names is neither read nor removed.
-					return fmt.Errorf("the test case's form part %q (file %q) names %q, no file a capture of this run left, and carries no contents for it: keploy keeps a part's file only from the capture that made it, from contents the test case carries, or from a file in the recording it names by a relative path, and does not store a test case without its part's file", form.Key, fileName, form.Paths[j])
+					return fmt.Errorf("the test case's form part %q (file %s) names %q, no file a capture of this run left, and carries no contents for it: keploy keeps a part's file only from the capture that made it, from contents the test case carries, or from a file in the recording it names by a relative path, and does not store a test case without its part's file", form.Key, models.FormFileNameLogText(fileName), models.FormFilePathLogText(form.Paths[j]))
 				}
 
 				if wroteFile {

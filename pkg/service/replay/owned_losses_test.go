@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -69,7 +70,7 @@ func TestKeployTestReadsTheLossesACutShortEndOwned(t *testing.T) {
 		t.Fatalf("the set's: %v, want %v", set, want)
 	}
 	for i := range want {
-		if set[i] != want[i] {
+		if !reflect.DeepEqual(set[i], want[i]) {
 			t.Fatalf("the set's: %v, want %v", set, want)
 		}
 	}
@@ -205,7 +206,7 @@ func TestOwnedLossesASetLeftUnappliedNameNoLaterSetsTestCase(t *testing.T) {
 	// The next set's own test-2 failed.
 	next := []models.TestResult{{TestCaseID: "test-1", Status: models.TestStatusPassed}, {TestCaseID: "test-2", Status: models.TestStatusFailed}}
 	set, err := h.replayer.applyOwnedLosses(next)
-	if err != nil || len(set) != 1 || set[0] != loss {
+	if err != nil || len(set) != 1 || !reflect.DeepEqual(set[0], loss) {
 		t.Fatalf("the next set's end: %v, %v; want the set's, %v", set, err, loss)
 	}
 	if got := next[1].FailureInfo.CaptureIncomplete; len(got) != 0 {

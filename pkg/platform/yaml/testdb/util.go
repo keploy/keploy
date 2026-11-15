@@ -151,9 +151,15 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 		// no longer here.
 		if field, ok := firstNonUTF8Body(tc); !ok {
 			err := fmt.Errorf("%w: testdb: %s is not valid UTF-8 and the json format cannot store it losslessly; record with storageFormat yaml to keep binary bodies", models.ErrTestCaseEncode, field)
-			utils.LogError(logger, err, "refusing to write a binary body as JSON",
-				zap.String("method", string(tc.HTTPReq.Method)),
-				zap.String("url", tc.HTTPReq.URL),
+			// The call by its shape, and the test case by its name where it
+			// has one (one being updated): a new one refused here is never
+			// given its name, and the next one takes it.
+			named := zap.Skip()
+			if tc.Name != "" {
+				named = zap.String("testcase", tc.Name)
+			}
+			utils.LogError(logger, err, "refusing to write a binary body as JSON", named,
+				zap.Any("metadata", utils.URLLogMeta(string(tc.HTTPReq.Method), tc.HTTPReq.URL)),
 				zap.String("next_step", "set storageFormat to yaml; the yaml encoder stores binary bodies as !!binary without loss"))
 			return nil, err
 		}
@@ -221,8 +227,10 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		grpcSpec := buildGrpcSpec(tc)
 
 		logger.Debug("gRPC schema created",
-			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
-			zap.Any("response_headers", grpcSpec.GrpcResp.Headers),
+			// How many headers, never their values: gRPC metadata carries
+			// the call's credentials (authorization).
+			zap.Int("request_headers", len(grpcSpec.GrpcReq.Headers.PseudoHeaders)+len(grpcSpec.GrpcReq.Headers.OrdinaryHeaders)),
+			zap.Int("response_headers", len(grpcSpec.GrpcResp.Headers.PseudoHeaders)+len(grpcSpec.GrpcResp.Headers.OrdinaryHeaders)),
 			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),
 			zap.Int("response_body_length", len(grpcSpec.GrpcResp.Body.DecodedData)))
 
@@ -336,9 +344,11 @@ func Flatten(j interface{}) map[string][]string {
 				}
 			}
 		}
-	default:
-		fmt.Println(utils.Emoji, "found invalid value in json", j, x.Kind())
 	}
+	// A value of another kind (none that encoding/json decodes into an
+	// interface{}: AddHTTPBodyToMap's) adds no key, as matcher.Flatten's
+	// does, and is never printed: it is the application's, and an embedded
+	// Replayer's stdout may be a log.
 	return o
 }
 

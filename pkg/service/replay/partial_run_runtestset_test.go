@@ -302,6 +302,16 @@ type prInstr struct {
 	// read of the calls no mock answered during the test that just ran. The
 	// replayer reads them once per test, in test order.
 	mockErrorsFor func() ([]models.UnmatchedCall, error)
+	// readCtx is the context of the latest GetMockErrors call: the run's,
+	// whose session (models.LogKeys) its tags are made under.
+	readCtx context.Context
+}
+
+// readContext is the context of the latest GetMockErrors call.
+func (f *prInstr) readContext() context.Context {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.readCtx
 }
 
 func (f *prInstr) AgentServesBackground() string {
@@ -365,8 +375,13 @@ func (f *prInstr) runCalls() int {
 	defer f.mu.Unlock()
 	return f.runs
 }
-func (f *prInstr) GetErrorChannel() <-chan error                                 { return make(chan error) }
-func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) { return f.errs() }
+func (f *prInstr) GetErrorChannel() <-chan error { return make(chan error) }
+func (f *prInstr) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	f.mu.Lock()
+	f.readCtx = ctx
+	f.mu.Unlock()
+	return f.errs()
+}
 
 // TestVariables answers as an agent that bound no test variable does: the
 // stand-in agent serves no mock with variables.
@@ -664,6 +679,9 @@ func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
 		failedTCsBySetID:     make(map[string][]string),
 		mockMismatchFailures: NewTestFailureStore(),
 		consumedMockNames:    make(map[string]struct{}),
+		// The console keploy's CLI gives a run (cli/provider: os.Stdout),
+		// so the tests that read what a run prints read it at stdout.
+		console: stdoutConsole{},
 	}
 	return &prRun{replayer: r, report: reportDB, instr: instr, mocks: mocks, mappings: mappings, cases: cases}
 }

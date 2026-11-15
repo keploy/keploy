@@ -47,7 +47,7 @@ func missIn(t *testing.T, on, noAuto bool, cfg map[string]map[string][]string, r
 		request.Header.Set(k, v)
 	}
 	request.Header.Set("Host", request.Host) // as decode sets it
-	r := newHTTP().buildHTTPMismatchReport(request, []byte(liveBody), &mockMemDb{mocks: recs}, nil, noise.Header, noise.Body, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(liveBody), &mockMemDb{mocks: recs}, nil, noise.Header, noise.Body, diag)
 	if r == nil {
 		t.Fatal("no miss report")
 	}
@@ -285,7 +285,7 @@ func TestUnderTheSwitchTheMissNamesNoSchemaTypeRefusal(t *testing.T) {
 	request, _ := http.NewRequest("POST", "http://api.example/x", strings.NewReader(`<a>1</a>`))
 	request.Header.Set("Content-Type", "text/plain")
 	diag := &matchDiag{phase: models.MatchPhaseSchema, candidates: 1, pool: []*models.Mock{rec}}
-	r := newHTTP().buildHTTPMismatchReport(request, []byte(`<a>1</a>`), &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(`<a>1</a>`), &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
 	for _, d := range r.FieldDiffs {
 		if d.Path == "header.Content-Type" || d.Path == "body" {
 			t.Errorf("field diffs %+v name a schema-phase refusal under the switch", r.FieldDiffs)
@@ -304,7 +304,7 @@ func TestUnderTheSwitchThePoolsClosestOffersNoSigV4Noise(t *testing.T) {
 	request.Header.Set("Authorization", sigV4)
 	request.Header.Set("Host", request.Host) // as decode sets it
 	diag := &matchDiag{phase: models.MatchPhaseSchema, candidates: 1, pool: []*models.Mock{rec}}
-	r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"a":1}`), &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(`{"a":1}`), &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
 	if !slices.ContainsFunc(r.FieldDiffs, func(d models.MockFieldDiff) bool {
 		return d.Path == "header.Authorization" && d.Kind == models.DiffKindMissingInMock
 	}) {

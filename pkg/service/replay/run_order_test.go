@@ -302,7 +302,7 @@ func TestRunTestSetRetryPassingWritesATestsRowsCycleByCycle(t *testing.T) {
 			}
 			plan := &exactPlan{returned: map[string]string{"mock-given-back": "test-1"}}
 			back := plan.returnedMissed(rep.Tests)
-			if wantBack := []string{"test-3: GET /gone (mock-given-back, given back to test-1)"}; !slices.Equal(back, wantBack) {
+			if wantBack := []string{"test-3: GET /{} (mock-given-back, given back to test-1)"}; !slices.Equal(back, wantBack) {
 				t.Fatalf("returnedMissed = %q, want cycle 2's miss %q", back, wantBack)
 			}
 			if rep.Success != 2 || rep.Failure != 2 || rep.Total != 4 {

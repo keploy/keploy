@@ -266,7 +266,9 @@ func (t *Tracker) EndTestOf(instance uint32) TestEnd {
 		if o.latest.ended != "" {
 			what += " of ended test worker " + o.latest.ended
 		}
-		end.Unattributed = models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: uint64(n), What: what}}
+		// It names mock.real's own entry (the user's configuration), no
+		// host of the app's: none to list.
+		end.Unattributed = models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: uint64(n), What: what, HostsListed: true}}
 	}
 	delete(t.open, instance)
 	if len(end.Uses) == 0 {
@@ -297,7 +299,7 @@ func (t *Tracker) undecidedLocked(when string, ending *uint32) []models.CaptureI
 		}
 		p.reported = true
 		out = append(out, models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: p.dst, At: t.stamp(),
-			Why: UnreadableWhy(p.dst, p.candidates, "its client had sent no name when "+when)})
+			Why: UnreadableWhy(p.dst, p.candidates, "its client had sent no name when "+when), HostsListed: true})
 	}
 	return out
 }
@@ -376,17 +378,22 @@ func (t *Tracker) Pending(from Origin, id int64, dst string, candidates []string
 		if unnamed == "" || (len(t.testsOfLocked(at)) == 0 && p != nil && p.reported) {
 			return
 		}
-		t.incompleteLocked(at, models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: dst, Why: unnamed, At: t.stamp()})
+		t.incompleteLocked(at, models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: dst, Why: unnamed, At: t.stamp(), HostsListed: true})
 	}
 }
 
 // Incomplete adds capture_incomplete evidence (class e) for a connection
 // from from to dst, with why: the open test's its origin's (testsOfLocked),
 // during which keploy ended the connection, or, with none open, the run's.
-func (t *Tracker) Incomplete(from Origin, dst, why string) {
+// hosts are the host names why names whole (the client's other name), each
+// where why writes it, with the tag the agent's line names it by
+// (models.CaptureIncomplete.Hosts): every one, as a log line reads no other
+// place of why as a host.
+func (t *Tracker) Incomplete(from Origin, dst, why string, hosts ...models.LossHost) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.incompleteLocked(from, models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: dst, Why: why, At: t.stamp()})
+	t.incompleteLocked(from, models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: dst, Why: why, At: t.stamp(),
+		Hosts: append(models.LossHosts(nil), hosts...), HostsListed: true})
 }
 
 func (t *Tracker) incompleteLocked(from Origin, c models.CaptureIncomplete) {
@@ -643,7 +650,7 @@ func (t *Tracker) FailedUndecided(from Origin, dst string) (resolve func(label s
 }
 
 func (f *failedConn) incomplete(why string) models.CaptureIncomplete {
-	return models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: f.dst, At: f.at,
+	return models.CaptureIncomplete{Class: models.CaptureIncompleteRealName, Destination: f.dst, At: f.at, HostsListed: true,
 		Why: "keploy could not tell whether a connection to " + f.dst + " that failed to connect was to a container mock.real lists: " +
 			why + "; list the dependency by address"}
 }

@@ -1846,7 +1846,10 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		if ev == nil {
 			ev = &models.ScopeEvidence{}
 		}
-		ev.Incomplete = append(ev.Incomplete, incomplete...)
+		// Evidence the test's harness and the receipts keep past this
+		// session: each name whole, no tag (a tag names a host only in its
+		// session).
+		ev.Incomplete = append(ev.Incomplete, models.UntaggedIncomplete(incomplete)...)
 	}
 	switch {
 	case readErr != nil:
@@ -2046,7 +2049,9 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	// A call keploy cannot capture at all (decision 20: over a Unix socket)
 	// leaves the test without a verdict, never failed: it is on the window,
 	// and in the reason, but the outcome stands.
-	judged, notJudged := lost.Split()
+	// Evidence the test's harness and the receipts keep past this session:
+	// each host whole, no tag (a tag names a host only in its session).
+	judged, notJudged := lost.Untagged().Split()
 	ev.CannotCapture = notJudged
 	if len(judged) == 0 {
 		if ev.Reason == "" {

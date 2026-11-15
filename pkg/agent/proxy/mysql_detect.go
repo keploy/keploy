@@ -1190,7 +1190,7 @@ func (p *Proxy) replayUnrecordedPort(
 		return &mysqlProbe{SrcConn: replayConn(srcConn, read, logger), Reason: "client-spoke-first"}, nil
 	case err != nil && !isTimeout(err):
 		// It waited to be greeted and gave up: a call no mock answered.
-		p.sendMockNotFoundErrorFrom(unlistedEndpointMiss(dstAddr, recorded, p.unlistedNextStep(dstAddr, host, port), arrived), opts.SrcPid, opts.SrcInstance, nil)
+		p.sendMockNotFoundErrorFrom(ctx, unlistedEndpointMiss(dstAddr, recorded, p.unlistedNextStep(dstAddr, host, port), arrived), opts.SrcPid, opts.SrcInstance, nil)
 		p.hintUnlistedEndpoint(logger, dstAddr, host, port, recorded, "its client closed it without sending anything")
 		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
 	case cancelled:
