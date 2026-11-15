@@ -136,10 +136,6 @@ type targetBase struct {
 // pending send call's outcome.
 func (b targetBase) looks() bool { return b.sending }
 
-// received is what ps, the proxy's side, received of the connection, counted
-// from its first byte, as want is.
-func (targetBase) received(ps proxySide) uint64 { return ps.received }
-
 // looksUnmoved says what a wait that looked on its own waited for (apps, the
 // connections' application ends), for its unknown answer.
 func looksUnmoved(apps string) string {
@@ -348,11 +344,12 @@ func (p *Proxy) checkPairedBytes(net.Conn, net.Conn) {}
 // sockets is read.
 func (p *Proxy) proveAppVisible(*net.TCPConn) {}
 
-// pairedConnOS is nothing on Windows: the counts are the shim's.
-type pairedConnOS struct{}
+// pairedConnOS is nothing on Windows: the counts are the shim's. pairedConn
+// embeds it on every OS, so it stays, holding nothing here.
+type pairedConnOS struct{} //nolint:unused // embedded by pairedConn on every OS; Windows reads nothing of its own
 
-// pairedConnsOS is nothing on Windows.
-type pairedConnsOS struct{}
+// pairedConnsOS is nothing on Windows: no application socket is read.
+type pairedConnsOS struct{} //nolint:unused // embedded by pairedConns on every OS; Windows reads nothing of its own
 
 // resetAfterSent is false on Windows: its side is not known to take a reset
 // only after every byte sent before it (peerEnded), so a close's read of
