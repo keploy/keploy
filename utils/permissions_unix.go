@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -152,22 +153,7 @@ func FixKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployP
 		return fmt.Errorf("failed to get current user: %w", err)
 	}
 
-	// Log the files with permission issues
-	fmt.Println()
-	logger.Info("The keploy folder contains files not accessible by current user (likely from running an older version with sudo).")
-
-	// Show the problematic files (up to 5, then "and X more...")
-	if len(permErrors) > 0 {
-		logger.Info("Files with permission issues:")
-		maxShow := 5
-		for i, pe := range permErrors {
-			if i >= maxShow {
-				logger.Info(fmt.Sprintf("  ... and %d more", len(permErrors)-maxShow))
-				break
-			}
-			logger.Info(fmt.Sprintf("  - %s (owner UID: %d)", pe.Path, pe.OwnerUID))
-		}
-	}
+	logPermissionErrors(logger, permErrors)
 
 	fmt.Println()
 	logger.Info("To fix this, we need to change ownership of the keploy folder to your user.")
@@ -209,6 +195,56 @@ func FixKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployP
 
 	logger.Info("Successfully fixed keploy folder permissions")
 	return nil
+}
+
+// logPermissionErrors says which files the current user cannot reach: up to
+// five, then how many more.
+func logPermissionErrors(logger *zap.Logger, permErrors []PermissionError) {
+	fmt.Println()
+	logger.Info("The keploy folder contains files not accessible by current user (likely from running an older version with sudo).")
+	if len(permErrors) == 0 {
+		return
+	}
+	logger.Info("Files with permission issues:")
+	maxShow := 5
+	for i, pe := range permErrors {
+		if i >= maxShow {
+			logger.Info(fmt.Sprintf("  ... and %d more", len(permErrors)-maxShow))
+			break
+		}
+		logger.Info(fmt.Sprintf("  - %s (owner UID: %d)", pe.Path, pe.OwnerUID))
+	}
+}
+
+// refuseKeployFolderPermissions is macOS's answer to a keploy folder holding
+// files the signed-in user cannot read or write. keploy runs as that user on
+// macOS and never asks for an administrator password, so it names the files
+// and the command that gives them back, for the person to run in their own
+// terminal, and stops.
+func refuseKeployFolderPermissions(logger *zap.Logger, keployPath string, permErrors []PermissionError) error {
+	username := "$USER"
+	if currentUser, err := user.Current(); err == nil {
+		username = shellWord(currentUser.Username)
+	}
+	logPermissionErrors(logger, permErrors)
+	return fmt.Errorf("%d path(s) in the keploy folder %s cannot be read or written by your user, and keploy does not ask for an administrator password on macOS. Give them back to your user in your own terminal, then run keploy again: sudo chown -R %s %s",
+		len(permErrors), keployPath, username, shellWord(keployPath))
+}
+
+// shellWord quotes s for a POSIX shell when it holds anything but letters,
+// digits and the punctuation a path or user name is safe with unquoted.
+func shellWord(s string) string {
+	safe := s != ""
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+@%:,=", r)) {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // AreSudoCredentialsCached checks if sudo credentials are currently cached.
@@ -328,7 +364,16 @@ func FixFilePermission(ctx context.Context, logger *zap.Logger, filePath string)
 // This should be called once at startup before any file operations to ensure all files
 // are accessible by the current user. This prevents permission errors during test execution.
 // This function is only called for native mode - Docker commands use sudo re-exec instead.
+// On Linux it asks for sudo to give the files back (a native run there needs
+// sudo anyway); on macOS, where every step runs as the signed-in user, it
+// refuses with the files and the command for the person to run instead.
 func EnsureKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployPath string) error {
+	return ensureKeployFolderPermissions(ctx, logger, keployPath, runtime.GOOS)
+}
+
+// ensureKeployFolderPermissions is EnsureKeployFolderPermissions for the
+// platform goos names, so a row on Linux drives the macOS answer too.
+func ensureKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployPath, goos string) error {
 	// Check if keploy folder exists
 	if _, err := os.Stat(keployPath); os.IsNotExist(err) {
 		// Folder doesn't exist yet - no permission issues to fix
@@ -347,6 +392,10 @@ func EnsureKeployFolderPermissions(ctx context.Context, logger *zap.Logger, kepl
 
 	// Log the problematic paths at debug level
 	logger.Debug("Found files/directories with permission issues in keploy folder", zap.Int("count", len(permErrors)))
+
+	if goos == "darwin" {
+		return refuseKeployFolderPermissions(logger, keployPath, permErrors)
+	}
 
 	// Fix permissions on the entire keploy folder
 	// sudo -v will cache credentials, which will be used by subsequent sudo -n commands
