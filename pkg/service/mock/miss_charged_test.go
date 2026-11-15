@@ -151,3 +151,68 @@ func TestAChargedMissIsNamedWholeWithItsValuesAndItsOperationOnce(t *testing.T) 
 		t.Errorf("the console names %+v, want the call whole, its operation once, its next step whole", calls)
 	}
 }
+
+// A call two tests make, each charged its miss, whose next steps differ only
+// by how long after the start-up recording's answer each came (the lane's
+// msc-prefix and msc-none sections: rates::TestReload and TestReload2), is
+// one call on the console, with the first next step, and in the misses file
+// with every next step it was given, whole, each once: a reader that names a
+// miss's next step whole from the file finds each miss's there.
+func TestACallMadeAgainKeepsEachWholeNextStepInTheMissesFile(t *testing.T) {
+	const wholePath = `pathPrefix: "/echo/rates"`
+	for _, tc := range []struct{ name, hint string }{
+		{"msc-prefix", mscPrefixHint},
+		{"msc-none", mscNoneHint},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			after := func(gap, test string) (string, models.UnmatchedCall) {
+				whole, _ := chargedSessionCallMiss(tc.hint)
+				whole.NextSteps = "This request is identical to mock-0, a recording made outside every test (in TestMain or at start-up), which already answered a call at this replay. At replay this call came " +
+					gap + " after that one, and this test's recording has no such call.\n" + tc.hint
+				charged := whole.Charged()
+				charged.ChargedTo = test
+				return strings.ReplaceAll(whole.NextSteps, "\n", " "), charged
+			}
+			first, reload := after("0.01s", "rates::TestReload")
+			second, reload2 := after("0.02s", "rates::TestReload2")
+			_, again := after("0.01s", "rates::TestReload3")
+			_, again2 := after("0.02s", "rates::TestReload4")
+			misses := []models.UnmatchedCall{reload, reload2, again, again2}
+			keployDir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(keployDir, "go-msc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			file := writeMissesFile(zap.NewNop(), keployDir, "go-msc", misses)
+			if file == "" {
+				t.Fatal("no misses file was written")
+			}
+			b, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got missesReport
+			if err := yaml.Unmarshal(b, &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Misses) != 1 {
+				t.Fatalf("the misses file names %d calls, want the one call once:\n%s", len(got.Misses), b)
+			}
+			c := got.Misses[0]
+			if c.Call != "GET /echo/rates" || c.Count != 4 || c.NextStep != first || len(c.OtherNextSteps) != 1 || c.OtherNextSteps[0] != second {
+				t.Errorf("the misses file holds %+v, want the call made 4 times, its first next step, and the other one once:\n%s", c, b)
+			}
+			for _, next := range append([]string{c.NextStep}, c.OtherNextSteps...) {
+				if !strings.Contains(next, wholePath) || strings.Contains(next, "{}") || strings.Contains(next, "\n") {
+					t.Errorf("a next step in the misses file is not whole on one line: %q", next)
+				}
+			}
+
+			var console bytes.Buffer
+			sayMisses(&console, misses, file)
+			want := "  Mock mismatch: [HTTP] GET /echo/rates [path tag #1f2e3d4c5b6a]  →  127.0.0.1:18094   (4 calls)\n  Hint: " + first + "\n"
+			if console.String() != want {
+				t.Errorf("the console said\n%q, want\n%q", console.String(), want)
+			}
+		})
+	}
+}

@@ -3090,6 +3090,17 @@ type missedCall struct {
 	HostTag     string `yaml:"host_tag,omitempty"`
 	Count       int    `yaml:"count"`
 	NextStep    string `yaml:"next_step"`
+	// OtherNextSteps is every other next step keploy gave the call in this
+	// replay, whole, each once, in the order first given: a call made again
+	// can be told another (one that quotes how long after a recording's
+	// answer it came, say). MissesFile names each, so every miss's next
+	// step is there whole; the console names NextStep alone.
+	OtherNextSteps []string `yaml:"other_next_steps,omitempty"`
+}
+
+// missedCallKey is what makes two misses one call (missedCalls).
+type missedCallKey struct {
+	Protocol, Call, PathTag, Destination, HostTag string
 }
 
 // missedCalls is misses, each call once, in the order the replay first made
@@ -3099,21 +3110,25 @@ type missedCall struct {
 // so.
 func missedCalls(misses []models.UnmatchedCall) []missedCall {
 	var out []missedCall
-	at := map[missedCall]int{}
+	at := map[missedCallKey]int{}
 	for _, miss := range misses {
 		if miss.MatchPhase == models.MatchPhaseNoRequest {
 			continue
 		}
 		call, next := wholeCall(miss)
-		key := missedCall{Protocol: miss.Protocol, Call: call, PathTag: miss.PathTag, Destination: miss.Destination, HostTag: miss.HostTag}
+		next = strings.ReplaceAll(next, "\n", " ")
+		key := missedCallKey{Protocol: miss.Protocol, Call: call, PathTag: miss.PathTag, Destination: miss.Destination, HostTag: miss.HostTag}
 		if i, ok := at[key]; ok {
-			out[i].Count++
+			c := &out[i]
+			c.Count++
+			if next != c.NextStep && !slices.Contains(c.OtherNextSteps, next) {
+				c.OtherNextSteps = append(c.OtherNextSteps, next)
+			}
 			continue
 		}
 		at[key] = len(out)
-		c := key
-		c.Count, c.NextStep = 1, strings.ReplaceAll(next, "\n", " ")
-		out = append(out, c)
+		out = append(out, missedCall{Protocol: key.Protocol, Call: key.Call, PathTag: key.PathTag, Destination: key.Destination, HostTag: key.HostTag,
+			Count: 1, NextStep: next})
 	}
 	return out
 }
