@@ -1730,10 +1730,18 @@ func (oh *outsideHeld) asked(state bool, in ...map[int32]heldRoles) []int32 {
 // thousands of recordings round F had not served was copied and asked for
 // every word of every call, most of the learn step's work on api-server's
 // round F.
+//
+// The booked leaves of the run's place book (placeBook) are found through
+// the book's inverse (inv), by their number there (at), not put in the
+// call's own maps (rec, live): those are for the places the book does not
+// index (recordings, a leaf no tracker booked, a second place of one entry,
+// one numbered past the book's leaves when the call's index was built).
 type placeIndex struct {
 	rec, live map[int32][]int32
 	always    []int32
 	fs        *setFilters
+	inv       *bookInv
+	at        []bookAt
 }
 
 // places is the call's placeIndex, built at its first ask: each place's
@@ -1756,6 +1764,24 @@ func (dc *decider) places() *placeIndex {
 			pi.always = append(pi.always, int32(i))
 			continue
 		}
+		// A booked leaf is indexed by its number in the run's book: its
+		// slot keeps the place and the ids the call read for it, so the
+		// inverse names it only by those (bookInv.marked). A second place
+		// of an entry, or one numbered past the book's leaves when the
+		// slots were made, goes in the call's maps.
+		if e := p.post; e != nil && e.book != nil {
+			if pi.inv == nil {
+				pi.inv = e.book.invFor(dc.x.filters)
+				pi.at = make([]bookAt, e.book.n.Load())
+			}
+			if int(e.seq) < len(pi.at) && pi.at[e.seq].i == 0 {
+				pi.at[e.seq] = bookAt{i: int32(i) + 1, r: r, l: l}
+				pi.inv.list(e, r, l)
+				bookIndexed.Add(1)
+				continue
+			}
+		}
+		placeMapped.Add(1)
 		pi.rec[r] = append(pi.rec[r], int32(i))
 		pi.live[l] = append(pi.live[l], int32(i))
 	}
@@ -1782,7 +1808,7 @@ func (p evPlace) showsUntold() bool {
 // so a base64 run cut at one's bound ends a run of letters and digits
 // there too).
 func (pi *placeIndex) asked(w readWord) (at []int32, all bool) {
-	if !pi.mark(&at, pi.rec, runsOf(w.Rec)) || !pi.mark(&at, pi.live, runsOf(w.Live)) {
+	if !pi.mark(&at, false, runsOf(w.Rec)) || !pi.mark(&at, true, runsOf(w.Live)) {
 		return nil, true
 	}
 	return pi.ascending(at), false
@@ -1795,7 +1821,7 @@ func (pi *placeIndex) asked(w readWord) (at []int32, all bool) {
 // reading reads a letter or digit as a word byte, so none stands right
 // before or after r.
 func (pi *placeIndex) recAsked(r string) (at []int32, all bool) {
-	if !pi.mark(&at, pi.rec, runsOf(r)) {
+	if !pi.mark(&at, false, runsOf(r)) {
 		return nil, true
 	}
 	return pi.ascending(at), false
@@ -1824,13 +1850,22 @@ func askedPlaces(at []int32, all bool, n int) []int32 {
 	return at
 }
 
-// mark adds to ask the places whose text on side (rec or live) the set's
-// postings say may hold every run of runs; false where runs is empty, which
-// every text may hold.
-func (pi *placeIndex) mark(ask *[]int32, side map[int32][]int32, runs []string) bool {
+// mark adds to ask the places whose text on one side (live: round F's,
+// else the recorded one) the set's postings say may hold every run of
+// runs, those of the call's maps and the booked leaves the book's inverse
+// lists (bookInv.marked); false where runs is empty, which every text may
+// hold.
+func (pi *placeIndex) mark(ask *[]int32, live bool, runs []string) bool {
+	side := pi.rec
+	if live {
+		side = pi.live
+	}
 	ids, ok := pi.fs.holdingRuns(runs)
 	for _, id := range ids {
 		*ask = append(*ask, side[id]...)
+		if pi.inv != nil {
+			*ask = pi.inv.marked(*ask, id, live, pi.at)
+		}
 	}
 	return ok
 }

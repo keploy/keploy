@@ -13,6 +13,7 @@ import (
 // their place-book entries, as the tracker does where it keeps them.
 func bookShape(e, l, r int, booked bool) Input {
 	var earlier []Earlier
+	bk := &placeBook{}
 	for i := range e {
 		at := oAt.Add(-time.Duration(e-i) * time.Millisecond)
 		x := Earlier{Mock: fmt.Sprintf("mock-e%d", i), At: at, Own: true, Payload: oPayload(fmt.Sprintf("mock-e%d", i), at)}
@@ -22,7 +23,7 @@ func bookShape(e, l, r int, booked bool) Input {
 			x.Seen = append(x.Seen, Seen{Side: Response, Leaf: oText(p, fmt.Sprintf("val-%d-%d-rAHcEraS7Qx%d", i, j, i)), Live: fmt.Sprintf("val-%d-%d-Zq81Lm0XpV%d", i, j, i), Place: p})
 		}
 		if booked {
-			x.Seen = bookLeaves(x.Seen)
+			x.Seen = bookLeaves(bk, x.Seen)
 		}
 		earlier = append(earlier, x)
 	}
@@ -232,10 +233,21 @@ func TestPlaceBookOncePerExchange(t *testing.T) {
 		}
 		byPost[p] = k
 	}
-	if b := bookLeaves(nil); b != nil {
-		t.Fatalf("bookLeaves(nil) = %v; want nil", b)
+	// Each entry is in the tracker's book, numbered apart in it.
+	seqs := map[int32]string{}
+	for k, p := range first {
+		if p.book != &tr.book {
+			t.Fatalf("%s's entry is in book %p; want the tracker's (%p)", k, p.book, &tr.book)
+		}
+		if o, dup := seqs[p.seq]; dup || p.seq < 0 || p.seq >= tr.book.n.Load() {
+			t.Fatalf("%s's entry is number %d (%s has it too: %v) of the book's %d; want each its own", k, p.seq, o, dup, tr.book.n.Load())
+		}
+		seqs[p.seq] = k
 	}
-	if kept := bookLeaves([]Seen{{post: first["mock-1 body.v"]}}); kept[0].post != first["mock-1 body.v"] {
+	if b := bookLeaves(&tr.book, nil); b != nil {
+		t.Fatalf("bookLeaves of no leaves = %v; want nil", b)
+	}
+	if kept := bookLeaves(&tr.book, []Seen{{post: first["mock-1 body.v"]}}); kept[0].post != first["mock-1 body.v"] {
 		t.Fatal("a leaf's entry was replaced: a leaf keeps the entry it has")
 	}
 }

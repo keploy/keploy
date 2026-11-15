@@ -21,6 +21,8 @@ import (
 type Tracker struct {
 	mu    sync.Mutex
 	epoch uint64
+	// book is the run's place book of the leaves it keeps (bookLeaves).
+	book placeBook
 	// setEpoch is the test number the running set began at (NewSet): its
 	// start-up's. A request of a lower number is of an earlier set.
 	setEpoch uint64
@@ -693,7 +695,7 @@ func (t *Tracker) GiveRequest(req *models.TestRequest) {
 // t.mu that releases the calls awaiting e (closeAwaiting).
 func (t *Tracker) give(e Earlier, recBegan time.Time) {
 	e.Given = true
-	e.Seen = bookLeaves(e.Seen)
+	e.Seen = bookLeaves(&t.book, e.Seen)
 	t.mu.Lock()
 	if t.open && !recBegan.IsZero() && t.recBegan.IsZero() {
 		t.recBegan = recBegan
@@ -722,7 +724,7 @@ func (t *Tracker) GiveValue(e Earlier) {
 		return
 	}
 	e.Given, e.Gave = true, true
-	e.Seen = bookLeaves(e.Seen)
+	e.Seen = bookLeaves(&t.book, e.Seen)
 	t.mu.Lock()
 	if t.open {
 		t.gave = append(t.gave, e)
@@ -1722,7 +1724,7 @@ func (t *Tracker) Served(n uint64, e Earlier) {
 		return
 	}
 	// Its leaves' place-book entries, once for the exchange (bookLeaves).
-	e.Seen = bookLeaves(e.Seen)
+	e.Seen = bookLeaves(&t.book, e.Seen)
 	t.mu.Lock()
 	switch {
 	case n < t.setEpoch:
