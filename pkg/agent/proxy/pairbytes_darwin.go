@@ -457,6 +457,8 @@ func (p *Proxy) checkPairedBytes(net.Conn, net.Conn) {}
 // paired, is in the table. macOS has one network stack for every process, but
 // it does not list every socket to every process (xnuHidden): one the table
 // does not list is gone only once one of the application's has been listed.
+// Where macOS lists the agent only its own sockets (macOS 27) none ever is,
+// so every accept reads the table.
 func (p *Proxy) proveAppVisible(conn *net.TCPConn) {
 	if p.paired.visible.Load() || xnuTableReadable() != nil {
 		return

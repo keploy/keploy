@@ -401,7 +401,15 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		pcs, _ := p.paired.upTo(1)
 		untilSendBufferEmpty(t, pcs[0])
 		failHeldProxySide(t)
-		_ = reader.Close()
+		// The close ends at once: a count from a side not read would
+		// have it wait for bytes that never come.
+		closed := make(chan struct{})
+		go func() { _ = reader.Close(); close(closed) }()
+		select {
+		case <-closed:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the close of a connection whose proxy's side cannot be read did not end")
+		}
 		if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 			t.Fatalf("PairedBytesErr = %v, want unknown: what the proxy's side received cannot be read", err)
 		}
@@ -409,6 +417,30 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 			t.Fatalf("the close's record = %+v, want none from a side not read", w)
 		}
 		wantOneCloseUnknownLine(t, logs, "bad file descriptor")
+	})
+	t.Run("neither end listed, the application's socket held", func(t *testing.T) {
+		// The holder's read counts from the first sequence number the
+		// table lists for the proxy's side: with that side not listed
+		// there is nothing to count from, and the close is unknown, not a
+		// record from no base.
+		p, app, proxySide, reader := heldPair(t)
+		if _, err := app.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		untilUnread(t, proxySide, 5)
+		if _, err := io.ReadFull(reader, make([]byte, 5)); err != nil {
+			t.Fatal(err)
+		}
+		pcs, _ := p.paired.upTo(1)
+		untilSendBufferEmpty(t, pcs[0])
+		hideFromTable(t, proxySide.LocalAddr())
+		_ = reader.Close()
+		if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+			t.Fatalf("PairedBytesErr = %v, want unknown: the table lists neither end", err)
+		}
+		if w := pcs[0].wroteAtClose.Load(); w != nil {
+			t.Fatalf("the close's record = %+v, want none with no proxy's side listed to count from", w)
+		}
 	})
 	t.Run("the processes cannot be read", func(t *testing.T) {
 		p, _, _, reader := heldPair(t)
