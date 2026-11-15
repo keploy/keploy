@@ -352,3 +352,58 @@ func TestAMockReplayMissNamesItsDestinationBesideItsHostTag(t *testing.T) {
 		t.Errorf("the misses file holds %+v, want the destination whole beside its host tag", got.Misses)
 	}
 }
+
+// The misses file, and the temporary file a write of it goes through (a kill
+// before its rename leaves one), hold the calls whole: HoldsCallsWhole names
+// both, for anything that sends the keploy folder away to leave them out.
+// The receipts beside them, which name calls by their shape, and the set's
+// recorded files are not named.
+func TestHoldsCallsWholeNamesTheMissesFileAndItsTemporaryFile(t *testing.T) {
+	keployDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(keployDir, "set"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /v1/reset/t0k3n", PathTag: "#000000000001"}
+	file := writeMissesFile(zap.NewNop(), keployDir, "set", []models.UnmatchedCall{miss})
+	if file == "" {
+		t.Fatal("the misses file was not written")
+	}
+	writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Tests: []TestReceipt{{Name: "TestReset"}}})
+	whole := 0
+	err := filepath.WalkDir(keployDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		holds := strings.Contains(string(b), "/v1/reset/t0k3n")
+		if holds {
+			whole++
+		}
+		if HoldsCallsWhole(d.Name()) != holds {
+			t.Errorf("HoldsCallsWhole(%q) = %v, but the file holds the call whole: %v", d.Name(), !holds, holds)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whole != 1 {
+		t.Fatalf("%d files hold the call whole, want the misses file alone", whole)
+	}
+	// os.CreateTemp's name for the write's temporary file, and the receipts'.
+	for name, want := range map[string]bool{
+		".last-replay-misses-2716057188.tmp": true,
+		".last-replay-2716057188.tmp":        false,
+		ReceiptFile:                          false,
+		TestsReceiptFile:                     false,
+		RecordTestsReceiptFile:               false,
+		"mocks.yaml":                         false,
+	} {
+		if got := HoldsCallsWhole(name); got != want {
+			t.Errorf("HoldsCallsWhole(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
