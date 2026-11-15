@@ -846,7 +846,7 @@ func TestAnEarlierTestsCallIsAPlaceOfTheRun(t *testing.T) {
 	for _, e := range []Earlier{ranCall("mock-a", t0, "o-1", "o-9"), ranCall("mock-late", t0.Add(time.Second), "o-2", "o-8")} {
 		want = append(want, Earlier{Mock: e.Mock, At: e.At, Run: true, Seen: e.Seen[:1]})
 	}
-	if !reflect.DeepEqual(earlier, want) {
+	if !reflect.DeepEqual(unbooked(earlier), want) {
 		t.Fatalf("test B's earlier places are %+v, want test A's own calls that drifted, as the run's", earlier)
 	}
 	p, ok := appeared(clockedDrifts(), "o-1", "o-9", t0.Add(time.Minute), earlier, nil)
@@ -1303,7 +1303,7 @@ func TestAnEarlierTestsCallToldAfterTheNextBeganIsAPlaceOfTheRun(t *testing.T) {
 	_, earlier, _, _ := tr.Test()
 	want := ranCall("mock-a", t0, "o-1", "o-9")
 	want = Earlier{Mock: want.Mock, At: want.At, Run: true, Seen: want.Seen[:1]}
-	if !reflect.DeepEqual(earlier, []Earlier{want}) {
+	if !reflect.DeepEqual(unbooked(earlier), []Earlier{want}) {
 		t.Fatalf("test B's earlier places are %+v, want test A's own call told after B began, as the run's", earlier)
 	}
 	p, ok := appeared(clockedDrifts(), "o-1", "o-9", t0.Add(time.Minute), earlier, nil)

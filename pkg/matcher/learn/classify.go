@@ -54,6 +54,10 @@ type Seen struct {
 	// in: AnswerStamp, instants.go rule 3), which no value came from. Its
 	// words are searched for nothing; the echo reads it as it stands.
 	Stamp bool
+	// post is the leaf's entry in its test's place book (leafPost), given
+	// once per exchange where the tracker keeps it (bookLeaves) and shared by
+	// every copy of the leaf; nil for a leaf no tracker kept.
+	post *leafPost
 	// Clock: the learn step learned the leaf, a request's, as a plain read
 	// of the application's clock (a zero offset, models.ClockOffset.Plain,
 	// as MockSpec.Clocks holds it: Named). A later test's call that carries

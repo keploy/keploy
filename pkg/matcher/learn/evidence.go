@@ -66,6 +66,9 @@ type evPlace struct {
 	// raw is the index in Input.Raw plus one of a recording's place; 0 for
 	// any other.
 	raw int
+	// post: an earlier exchange's leaf's place-book entry (Seen.post), nil
+	// for any other place.
+	post *leafPost
 	// otherTest: an earlier test's place, or one served between tests:
 	// outside the call's scope (Mode Own reads it only to name the edit).
 	// scope names that scope for a line where mappings.yaml names it
@@ -272,7 +275,7 @@ func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 			path := cmp.Or(s.Leaf.Path, s.Place)
 			ps = append(ps, evPlace{
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
-				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
+				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf, post: s.post,
 				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, offset: s.Offset, startUp: startUp, otherTest: other, trailed: trailed, scope: scope,
 				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: outsideTest, lateCall: lateCall,
 				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
@@ -1747,7 +1750,7 @@ func (dc *decider) places() *placeIndex {
 	for i, p := range dc.ps {
 		r, l := int32(-1), int32(-1)
 		if !p.showsUntold() {
-			r, l = p.t.rec.postID(), p.t.live.postID()
+			r, l = p.postIDs(dc.x.filters)
 		}
 		if r < 0 || l < 0 {
 			pi.always = append(pi.always, int32(i))
