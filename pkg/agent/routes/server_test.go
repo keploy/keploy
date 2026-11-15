@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -237,10 +236,8 @@ func TestNewAgentHTTPServer_BoundsIdleClientsWithoutCuttingStreams(t *testing.T)
 // agent lives on without its server, and nothing else would say so. Run in a
 // process of its own: the start's report is the process's.
 func TestABindThatFailsForGoodFailsTheStart(t *testing.T) {
-	if os.Getenv("KEPLOY_TEST_BOOT_CHILD") != "1" {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestABindThatFailsForGoodFailsTheStart$", "-test.count=1", "-test.v")
-		cmd.Env = append(os.Environ(), "KEPLOY_TEST_BOOT_CHILD=1")
-		if out, err := cmd.CombinedOutput(); err != nil {
+	if os.Getenv(bootChildEnv) != "1" {
+		if out, err := runTestChild(t, "TestABindThatFailsForGoodFailsTheStart", []string{bootChildEnv + "=1"}); err != nil {
 			t.Fatalf("%v\n%s", err, out)
 		}
 		return
@@ -276,12 +273,11 @@ func TestABindThatFailsForGoodFailsTheStart(t *testing.T) {
 // CLI to give up on as stalled, which retries. Run in a process of its own:
 // the start's report is the process's.
 func TestABindToAPortStillHeldDoesNotFailTheStart(t *testing.T) {
-	if os.Getenv("KEPLOY_TEST_BOOT_CHILD") != "1" {
+	if os.Getenv(bootChildEnv) != "1" {
 		// Its own timeout: a start that bound the port after all serves
-		// forever, and must fail this row, not the package's whole run.
-		cmd := exec.Command(os.Args[0], "-test.run=^TestABindToAPortStillHeldDoesNotFailTheStart$", "-test.count=1", "-test.v", "-test.timeout=2m")
-		cmd.Env = append(os.Environ(), "KEPLOY_TEST_BOOT_CHILD=1")
-		if out, err := cmd.CombinedOutput(); err != nil {
+		// forever, and must fail this row, not the package's whole run. The
+		// child ends with this test however the test ends (startTestChild).
+		if out, err := runTestChild(t, "TestABindToAPortStillHeldDoesNotFailTheStart", []string{bootChildEnv + "=1"}, "-test.timeout=2m"); err != nil {
 			t.Fatalf("%v\n%s", err, out)
 		}
 		return
