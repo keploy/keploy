@@ -2415,8 +2415,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 				// waiting on it. When the app is kept alive on the outer replay
 				// errgroup (compose + mocking), that teardown runs under
 				// a drain's 30s bound (utils.DrainErrGroupProgress), so the overrun trips a spurious
-				// "teardown drain timed out … a goroutine is ignoring context
-				// cancellation" error and fails an otherwise-green run.
+				// "teardown drain made no progress … a goroutine is ignoring
+				// context cancellation" error and fails an otherwise-green run.
 				//
 				// So for compose: give the app a short grace to flush coverage during
 				// the graceful stop, then bring the WHOLE project down fast via

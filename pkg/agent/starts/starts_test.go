@@ -1,6 +1,9 @@
 package starts
 
 import (
+	"os"
+	"os/exec"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -424,5 +427,31 @@ func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
 	f.spawn(7, 1, at(5), "/tmp/other")
 	if got := r.Live(); !slices.Equal(got, []string{"b"}) {
 		t.Fatalf("a new process with the dead runner's pid holds its set: %v", got)
+	}
+}
+
+// ParentOf reads this host's process table: on Linux and on macOS (which has
+// no /proc) a process this test starts has this test for its parent, this
+// test has its own parent, and a pid no process holds has none.
+func TestParentOfReadsTheHostsProcessTable(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("a process's parent is read on linux and darwin only")
+	}
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	if ppid, ok := ParentOf(uint32(cmd.Process.Pid)); !ok || ppid != uint32(os.Getpid()) {
+		t.Fatalf("the parent of a process this test started is %d (%v), want this test's %d", ppid, ok, os.Getpid())
+	}
+	if ppid, ok := ParentOf(uint32(os.Getpid())); !ok || ppid != uint32(os.Getppid()) {
+		t.Fatalf("this test's parent is %d (%v), want %d", ppid, ok, os.Getppid())
+	}
+	if ppid, ok := ParentOf(4000000000); ok {
+		t.Fatalf("a pid no process holds has the parent %d", ppid)
 	}
 }
