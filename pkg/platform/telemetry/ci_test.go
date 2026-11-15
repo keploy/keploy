@@ -7,11 +7,13 @@ import "testing"
 // path follows the "]:". Taken from the first colon, which is the address's,
 // the repository came out as ":1]:owner/repo". Both readers take it so: a
 // checkout's remote (remoteRepo) and a CI variable holding a git URL
-// (normalizeRepo with url), which also reads a host with no user
-// ("[fd00::1]:owner/repo") and a bare slug, two values remoteRepo leaves to
-// git as local paths. A bracketed host is the remote's host whole, so a
-// dotted one ("[::ffff:10.0.0.1]", an IPv4 address mapped) passes
-// remoteRepo's user-or-dotted-host rule.
+// (normalizeRepo with url). The CI variable's reader also takes a remote
+// with neither a user nor a dotted host ("[fd00::1]:owner/repo") and one
+// with no host (":owner/repo"). git reads both as ssh remotes (a colon
+// before any slash), and remoteRepo reads none from either by design: an
+// scp-like remote names a repository only with a user or a dotted host. A
+// bracketed host is the remote's host whole, so a dotted one
+// ("[::ffff:10.0.0.1]", an IPv4 address mapped) passes that rule.
 func TestNormalizeRepoTakesAnIPv6Host(t *testing.T) {
 	for _, c := range []struct{ raw, remote, ci string }{
 		{"git@[fd00::1]:owner/repo.git", "owner/repo", "owner/repo"},

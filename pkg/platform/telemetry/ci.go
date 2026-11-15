@@ -123,8 +123,10 @@ func detectGitRepo() string {
 // remoteRepo is the slug a checkout's remote.origin.url names. Only a URL
 // with a scheme or an scp-like [user@]host:owner/repo (no slash before the
 // colon, and a user or a dotted host, so that a drive letter's C:/src is
-// not one) names one: git reads any other value as a local path
-// (/srv/git/shop, ../shop), which names none.
+// not one) names one. Any other value names none: a local path
+// (/srv/git/shop, ../shop) and, by design, an scp-like remote with neither
+// a user nor a dotted host (buildhost:owner/repo, [fd00::1]:owner/repo),
+// which git reads as an ssh remote.
 func remoteRepo(raw string) string {
 	s := strings.TrimSpace(raw)
 	host := s
