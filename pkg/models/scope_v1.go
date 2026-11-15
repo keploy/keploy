@@ -161,6 +161,17 @@ const ScopeUpgradeRemedy = "use an integration that speaks keploy's scope protoc
 	"keploy has none for other frameworks, whose test process makes the calls by hand: it claims the run (POST /agent/instance with its package folder, relative to the project, as key) before its first test, " +
 	"then sends each test's begin with canSkip true, skips the test when the begin answers action skip, and sends its end, never with pid, at, dir or suite"
 
+// ReplayTestsFile and RecordTestsFile are the files, in a set's folder,
+// that hold what each test did in the set's last keploy mock replay and
+// last keploy mock record, its evidence (ScopeEvidence) included in full:
+// every miss with the recording it is closest to and each field it differs
+// from that recording in. A failed test's reason names them where it lists
+// less than that.
+const (
+	ReplayTestsFile = "last-replay-tests.yaml"
+	RecordTestsFile = "last-record-tests.yaml"
+)
+
 // ScopeEvidence is what keploy saw of one replayed test that fails it: the
 // calls no recorded answer matched while it was open (a miss outside every
 // test, and one that repeats a spent recording of the set's background, is

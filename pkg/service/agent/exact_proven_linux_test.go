@@ -341,7 +341,9 @@ func TestAMissAfterItsRecordingAnsweredNamesWhatDiffers(t *testing.T) {
 	require.Equal(t, "200 3", got[0])
 	require.True(t, strings.HasPrefix(got[1], "502"), "the changed call has no recorded answer: %s", got[1])
 	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "GET /reserve/book to 127.0.0.1:18093 had no recorded answer (path differs)")
+	// It names the recording the call was compared with, and that the field
+	// was compared with its recorded value: nothing learned excuses it.
+	require.Contains(t, e.Reason, "GET /reserve/book to 127.0.0.1:18093 had no recorded answer (closest recording mock-1: path differs). "+comparedText)
 	ev := windowOf(t, a, "o::TestMiss").Evidence
 	require.NotNil(t, ev)
 	require.Len(t, ev.Misses, 1)

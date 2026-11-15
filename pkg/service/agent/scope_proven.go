@@ -945,9 +945,9 @@ func (a *Agent) SetScopeBackground(ctx context.Context, names []string) error {
 // test of each read the replay's gate skips; in a record, neither.
 func (a *Agent) evidenceText(id string, ev *models.ScopeEvidence, beganAt time.Time) string {
 	if !a.replaying() {
-		return evidenceReason(id, ev, nil, beganAt, nil)
+		return evidenceReasonIn(id, ev, nil, beganAt, nil, models.RecordTestsFile)
 	}
-	return evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.skippedReadTests())
+	return evidenceReasonIn(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.skippedReadTests(), models.ReplayTestsFile)
 }
 
 // skippedReadTests is a copy of the skipped test of each read the replay's
@@ -2753,9 +2753,27 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 // the replay's gate skips (SetScopeSkippedReads): an extra call's line names
 // the test of each that answered the call (extraCallText).
 func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string) string {
+	return evidenceReasonIn(id, ev, mocks, beganAt, skippedOf, models.ReplayTestsFile)
+}
+
+// evidenceReasonIn is evidenceReason for a run whose per-test results go to
+// results (models.ReplayTestsFile, models.RecordTestsFile): the evidence
+// there is whole, and the reason says so where it lists less of it
+// (missesListedWhole). A miss's line names the recording it is closest to
+// (missDiffersText); where a line names a field no reason of its own
+// excuses, the reason says once that such a field was compared with its
+// recorded value (comparedText).
+func evidenceReasonIn(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, skippedOf map[string]string, results string) string {
 	var what []string
+	// compared is, by line of what, whether the line names a field of a
+	// call that was compared with its recorded value (comparedField).
+	var compared []bool
+	add := func(line string, m *models.UnmatchedCall) {
+		what = append(what, line)
+		compared = append(compared, m != nil && comparedField(*m))
+	}
 	for _, c := range ev.Incomplete {
-		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
+		add("keploy could not capture a connection to "+c.Destination+" ("+c.Why+")", nil)
 	}
 	// A miss whose call was made before the test began being served is no
 	// call of the test's, whatever kind it was filed with: one another test
@@ -2781,34 +2799,40 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 			}
 		}
 	}
+	// whole is whether the lines name every field of every call that
+	// missed: a line names at most differsMost of a call's fields.
+	whole := true
 	for _, m := range ev.Misses {
 		if before(m) {
 			// Where it was made is not known: a miss is filed by the view
 			// served when it is filed, which may be after its own test.
-			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missWhyText(m, skippedOf))
+			add(missText(m)+", made before this one began, had no recorded answer"+missWhyText(m, skippedOf), &m)
+			whole = whole && len(models.FieldShapes(m.Differs)) <= differsMost
 			continue
 		}
 		switch m.Kind {
 		case models.MissExtraCall:
 			call := missText(m)
 			if n, ok := extra[call]; ok {
-				what = append(what, extraCallText(call, m.Recorded, n, skippedBy[call], skippedOf))
+				add(extraCallText(call, m.Recorded, n, skippedBy[call], skippedOf), nil)
 				delete(extra, call)
 			}
+			continue
 		case models.MissOutsideTest:
 			if !beganAt.IsZero() && !m.At.IsZero() {
-				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missWhyText(m, skippedOf))
-				continue
+				add(missText(m)+", made as this test ended, had no recorded answer"+missWhyText(m, skippedOf), &m)
+				break
 			}
-			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missWhyText(m, skippedOf))
+			add(missText(m)+", made outside every test before this one began, had no recorded answer"+missWhyText(m, skippedOf), &m)
 		default:
-			what = append(what, missText(m)+" had no recorded answer"+missWhyText(m, skippedOf))
+			add(missText(m)+" had no recorded answer"+missWhyText(m, skippedOf), &m)
 		}
+		whole = whole && len(models.FieldShapes(m.Differs)) <= differsMost
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
 	sort.Strings(unmade)
 	for _, n := range unmade {
-		what = append(what, "recorded call "+mockText(n, mocks[n])+" was never made")
+		add("recorded call "+mockText(n, mocks[n])+" was never made", nil)
 	}
 	if t := ev.CaptureIncomplete.Text(); t != "" {
 		if len(what) == 0 {
@@ -2820,10 +2844,13 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		}
 		// First: it says why the rest of the evidence may be short.
 		what = append([]string{t}, what...)
+		compared = append([]bool{false}, compared...)
 	}
 	const most = 5
 	if len(what) > most {
 		what = append(what[:most], fmt.Sprintf("and %d more", len(what)-most))
+		compared = compared[:most]
+		whole = false
 	}
 	if len(ev.Misses) == 0 && len(ev.Unconsumed) == 0 {
 		// Only connections keploy could not capture: each says what to
@@ -2831,6 +2858,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		return "keploy: " + strings.Join(what, "; ") + "."
 	}
 	head := "keploy: " + strings.Join(what, "; ") + "."
+	if slices.Contains(compared, true) {
+		head += " " + comparedText
+	}
+	if !whole && results != "" {
+		head += " " + missesListedWhole(results)
+	}
 	if whys := missWhys(ev.Misses, before, most); len(whys) > 0 {
 		// The full round's reasons, one line each, before what to do: they
 		// are what tells an intended change from a flaky one.
@@ -2979,6 +3012,10 @@ func missWhyText(m models.UnmatchedCall, skippedOf map[string]string) string {
 // its own (models.UnmatchedCall.FieldReasons: a learned read of the
 // application's clock the call does not carry): " (body.since differs:
 // body.since was learned as ...)". Neither names a value.
+//
+// It begins with the recording the fields were compared with, where the
+// miss names one (models.UnmatchedCall.ClosestMock, a recording's name in
+// the set's mock file): " (closest recording mock-12: body.since differs)".
 func missDiffersText(m models.UnmatchedCall) string {
 	t := differsText(models.FieldShapes(m.Differs))
 	var whys []string
@@ -2987,28 +3024,66 @@ func missDiffersText(m models.UnmatchedCall) string {
 	}
 	switch {
 	case len(whys) == 0:
-		return t
 	case t == "":
-		return " (" + strings.Join(whys, "; ") + ")"
+		t = " (" + strings.Join(whys, "; ") + ")"
+	default:
+		t = strings.TrimSuffix(t, ")") + ": " + strings.Join(whys, "; ") + ")"
 	}
-	return strings.TrimSuffix(t, ")") + ": " + strings.Join(whys, "; ") + ")"
+	if t == "" || m.ClosestMock == "" {
+		return t
+	}
+	return " (closest recording " + m.ClosestMock + ": " + strings.TrimPrefix(t, " (")
 }
+
+// differsMost is how many of a miss's differing fields its line names by
+// name (differsText); the rest it counts.
+const differsMost = 3
 
 // differsText names, for a miss's reason, the fields in which the call
 // differed from its closest recording: " (body.amount differs)", " (host and
 // header.accept differ)", " (a, b, c and 2 more differ)"; "" for none.
 func differsText(fields []string) string {
-	const most = 3
 	switch n := len(fields); {
 	case n == 0:
 		return ""
 	case n == 1:
 		return " (" + fields[0] + " differs)"
-	case n <= most:
+	case n <= differsMost:
 		return " (" + strings.Join(fields[:n-1], ", ") + " and " + fields[n-1] + " differ)"
 	default:
-		return fmt.Sprintf(" (%s and %d more differ)", strings.Join(fields[:most], ", "), n-most)
+		return fmt.Sprintf(" (%s and %d more differ)", strings.Join(fields[:differsMost], ", "), n-differsMost)
 	}
+}
+
+// comparedText is what a failed test's reason says, once, when a line of it
+// names a field of a call that was compared with its recorded value
+// (comparedField).
+const comparedText = "Each field said to differ with no reason after it was compared with its recorded value: nothing keploy learned or keploy.yml declares excuses a change there."
+
+// comparedField reports whether m differs from its closest recording in a
+// field the replay gave no reason of its own for (models.FieldReason, as
+// missDiffersText names them): a field it compared with its recorded value.
+// A miss record's full round gave a reason for (models.UnmatchedCall.Reason)
+// is said by that reason, below the calls (missWhys), not by comparedText.
+func comparedField(m models.UnmatchedCall) bool {
+	if m.Reason != "" {
+		return false
+	}
+	reasons := models.FieldReasonShapes(m.FieldReasons)
+	for _, f := range models.FieldShapes(m.Differs) {
+		if !slices.ContainsFunc(reasons, func(r models.FieldReason) bool { return r.Field == f }) {
+			return true
+		}
+	}
+	return false
+}
+
+// missesListedWhole is what a failed test's reason says when it lists less
+// than every call that missed or every field one differs in: where the
+// evidence is whole (results: models.ReplayTestsFile, models.RecordTestsFile).
+// It names a file, never a value.
+func missesListedWhole(results string) string {
+	return "Every call that missed, its closest recording and each field it differs in are under this test's evidence.misses in the set's " + results + "."
 }
 
 func mockText(name string, m *models.Mock) string {

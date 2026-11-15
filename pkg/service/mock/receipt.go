@@ -310,7 +310,7 @@ func countTests(tests []TestReceipt, gateReason string) *TestCounts {
 // next to its ReceiptFile and local and git-ignored like it. It is kept apart
 // because it grows with the suite, and the receipt is read whole by every
 // status check.
-const TestsReceiptFile = "last-replay-tests.yaml"
+const TestsReceiptFile = models.ReplayTestsFile
 
 // TestsReceipt is the content of TestsReceiptFile.
 type TestsReceipt struct {
@@ -500,7 +500,7 @@ func writeTestsReceipt(logger *zap.Logger, keployDir string, r TestsReceipt) {
 // RecordTestsReceiptFile holds what each test did in the last record of a set:
 // its verdict against real infra, which judging the recording reads (design
 // v14 §7.4, the R0 round). Local and git-ignored like the replay's.
-const RecordTestsReceiptFile = "last-record-tests.yaml"
+const RecordTestsReceiptFile = models.RecordTestsFile
 
 // writeRecordTestsReceipt writes RecordTestsReceiptFile: the verdict each
 // top-level test of the record reported as it ended, with the evidence the
