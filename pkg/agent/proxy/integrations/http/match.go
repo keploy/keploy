@@ -1616,8 +1616,17 @@ func (h *HTTP) exactBodyMatch(body []byte, schemaMatched []*models.Mock, held fu
 // bodyMatch reports whether the call's body reqBody has every top-level key
 // of mock's recorded body. A body that does not read as a JSON object is
 // logged by its size alone.
+//
+// A recorded body that is a JSON array is read at its elements instead
+// (arrayBodyMatch): a batch call, a JSON-RPC batch and a JSON Patch all send
+// an array, and a value changing in one of them is what the fuzzy comparison
+// after this step weighs, so the shape step reads it rather than refusing the
+// call (#5037).
 func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte) (bool, error) {
 	mockBody := []byte(mock.Spec.HTTPReq.Body)
+	if strings.HasPrefix(strings.TrimSpace(string(mockBody)), "[") {
+		return h.arrayBodyMatch(mock, mockBody, reqBody)
+	}
 	var mockData map[string]any
 	var reqData map[string]any
 	err := json.Unmarshal(mockBody, &mockData)
@@ -1639,6 +1648,66 @@ func (h *HTTP) bodyMatch(mock *models.Mock, reqBody []byte) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// arrayBodyMatch is bodyMatch for a recorded body that is a JSON array: the
+// request has to be an array at least as long, and each recorded element has
+// to hold at its index. A request of another shape does not match.
+func (h *HTTP) arrayBodyMatch(mock *models.Mock, mockBody, reqBody []byte) (bool, error) {
+	var mockArray []any
+	if err := json.Unmarshal(mockBody, &mockArray); err != nil {
+		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.Int("body_bytes", len(mockBody)))
+		return false, err
+	}
+
+	var reqArray []any
+	if err := json.Unmarshal(reqBody, &reqArray); err != nil {
+		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.Int("body_bytes", len(reqBody)))
+		return false, nil
+	}
+
+	if len(reqArray) < len(mockArray) {
+		return false, nil
+	}
+	for i, element := range mockArray {
+		if !bodyShapeHolds(element, reqArray[i]) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// bodyShapeHolds says whether req carries every key mock states, at the place
+// mock states it: an object's keys are each in req, as this step has always
+// read them, and an array's elements are in req at the same index with the
+// request at least as long. A value that is neither states no key, so it asks
+// nothing of req.
+func bodyShapeHolds(mock, req any) bool {
+	switch m := mock.(type) {
+	case map[string]any:
+		r, ok := req.(map[string]any)
+		if !ok {
+			return false
+		}
+		for key := range m {
+			if _, exists := r[key]; !exists {
+				return false
+			}
+		}
+		return true
+	case []any:
+		r, ok := req.([]any)
+		if !ok || len(r) < len(m) {
+			return false
+		}
+		for i, element := range m {
+			if !bodyShapeHolds(element, r[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return true
 }
 
 // PerformBodyMatch Perform body match for JSON data. A reqBody that does
