@@ -219,38 +219,15 @@ func logPermissionErrors(logger *zap.Logger, permErrors []PermissionError) {
 // refuseKeployFolderPermissions is macOS's answer to a keploy folder holding
 // files the signed-in user cannot read or write. keploy runs as that user on
 // macOS and never asks for an administrator password, so it names the files
-// and the command that gives them back, for the person to run in their own
-// terminal, and stops.
+// and refuses with the command that gives them back, for the person to run in
+// their own terminal (FolderOutOfReachError).
 func refuseKeployFolderPermissions(logger *zap.Logger, keployPath string, permErrors []PermissionError) error {
-	username := "$USER"
+	refusal := &FolderOutOfReachError{Folder: keployPath, Paths: len(permErrors)}
 	if currentUser, err := user.Current(); err == nil {
-		username = shellWord(currentUser.Username)
+		refusal.User = currentUser.Username
 	}
 	logPermissionErrors(logger, permErrors)
-	return fmt.Errorf("%d path(s) in the keploy folder %s cannot be read or written by your user, and keploy does not ask for an administrator password on macOS. Give them back to your user in your own terminal, then run keploy again: sudo chown -R %s %s",
-		len(permErrors), keployPath, username, shellWord(keployPath))
-}
-
-// shellWord quotes s for a POSIX shell when it holds anything but letters,
-// digits and the punctuation a path or user name is safe with unquoted.
-func shellWord(s string) string {
-	safe := s != ""
-	for _, r := range s {
-		if !shellSafeRune(r) {
-			safe = false
-			break
-		}
-	}
-	if safe {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// shellSafeRune reports whether r is a letter, a digit or punctuation a POSIX
-// shell leaves alone in an unquoted word.
-func shellSafeRune(r rune) bool {
-	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+@%:,=", r)
+	return refusal
 }
 
 // AreSudoCredentialsCached checks if sudo credentials are currently cached.

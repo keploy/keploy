@@ -4,6 +4,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -81,7 +82,17 @@ func TestAKeployFolderOutOfReachOnMacOSIsRefusedWithTheCommandNotASudoPrompt(t *
 	if calls := sudoCalls(t, sudoLog); calls != "" {
 		t.Fatalf("keploy ran sudo on macOS, where it must never ask for an administrator password:\n%s", calls)
 	}
+	var refusal *FolderOutOfReachError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("the refusal is not a FolderOutOfReachError, so a caller cannot tell it apart: %T %v", err, err)
+	}
+	if refusal.Folder != keployPath || refusal.User != currentUsername(t) || refusal.Paths != 1 {
+		t.Fatalf("the refusal carries folder %q, user %q, %d path(s); want %q, %q, 1", refusal.Folder, refusal.User, refusal.Paths, keployPath, currentUsername(t))
+	}
 	want := "sudo chown -R " + shellWord(currentUsername(t)) + " '" + keployPath + "'"
+	if refusal.FixCommand() != want {
+		t.Fatalf("the refusal's command is %q, want %q", refusal.FixCommand(), want)
+	}
 	if !strings.HasSuffix(err.Error(), "then run keploy again: "+want) {
 		t.Fatalf("the refusal does not end with the command for the person to run, %q:\n%v", want, err)
 	}
@@ -137,22 +148,6 @@ func TestAKeployFolderInReachAsksNothingOnAnyPlatform(t *testing.T) {
 	}
 	if calls := sudoCalls(t, sudoLog); calls != "" {
 		t.Fatalf("sudo was run for a folder the user owns:\n%s", calls)
-	}
-}
-
-func TestShellWordQuotesOnlyWhatAShellWouldSplitOrExpand(t *testing.T) {
-	for in, want := range map[string]string{
-		"/Users/ana/app/keploy":      "/Users/ana/app/keploy",
-		"ana.lee@corp":               "ana.lee@corp",
-		"/Users/ana/my app/keploy":   "'/Users/ana/my app/keploy'",
-		"/Users/ana/it's/keploy":     `'/Users/ana/it'\''s/keploy'`,
-		"/tmp/$(touch x)":            "'/tmp/$(touch x)'",
-		"":                           "''",
-		"/Users/ana/a+b%c:d,e=f_g-h": "/Users/ana/a+b%c:d,e=f_g-h",
-	} {
-		if got := shellWord(in); got != want {
-			t.Errorf("shellWord(%q) = %s, want %s", in, got, want)
-		}
 	}
 }
 
