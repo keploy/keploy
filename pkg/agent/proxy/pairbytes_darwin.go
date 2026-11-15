@@ -247,6 +247,12 @@ type targetBase struct {
 // empties.
 func (b targetBase) looks() bool { return b.held }
 
+// looksUnmoved says what a wait that looked on its own waited for (apps, the
+// connections' application ends), for its unknown answer (orphansUnmoved).
+func looksUnmoved(apps string) string {
+	return fmt.Sprintf("macOS's TCP table does not list the application's end of the connections to the proxy from %s to keploy's agent, so keploy read each from the descriptor table of the process holding it, and the proxy's side received no more while the application's send buffer kept bytes it had not acknowledged", apps)
+}
+
 // received is how much the proxy's side ps received since b, its FIN
 // counted: a distance between sequence numbers, which wrap at 2^32.
 func (b targetBase) received(ps proxySide) uint32 { return ps.rcvNxt - b.isn - 1 }
@@ -788,3 +794,8 @@ func dataReceived(ps proxySide) uint64 {
 	}
 	return ps.received
 }
+
+// resetAfterSent says whether err, a read's, is the application's reset,
+// which the kernel takes only at the sequence number it expects next (RFC
+// 5961): every byte the application had sent had arrived (readPlainOnItsWay).
+func resetAfterSent(err error) bool { return errors.Is(err, unix.ECONNRESET) }
