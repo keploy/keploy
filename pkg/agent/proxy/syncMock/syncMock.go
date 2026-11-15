@@ -40,7 +40,10 @@ const defaultMockBufferCapacity = 100
 // tick (~1 s) — retro-bin fires on the NEXT ResolveRange or that periodic tick,
 // not at test end — so at the ~143 windows/s peak, 8192 (≈57 s of history) is a
 // ~50x margin. It matches maxPressureRanges, which guards the SAME consumer-lag
-// class of bug, and stays O(1) memory (~64 B/window).
+// class of bug, and stays O(1) memory (about 150 B a window with its index
+// entry, windowIndex). A pass over the buffer asks the ring's index, not the
+// ring, which windows may own a mock, so the bound costs a search of the
+// index, not a walk of 8192 windows for each buffered mock.
 const maxRecentWindows = 8192
 
 // maxPressureRanges bounds the spans a Spans keeps (the memory-pressure spans,
@@ -90,6 +93,18 @@ type resolvedWindow struct {
 	// resolved (SyncMockManager.recording): a mock or a mapping that goes
 	// back to it once its recording has ended is let go.
 	recording uint32
+	// seq is the window's place in the ring, counted from the first window
+	// the manager resolved: how the ring's index names it (windowIndex). Not
+	// part of what the window is: two records of a window compare without it
+	// (sameWindow).
+	seq uint64
+}
+
+// sameWindow reports whether a and b record the same window, whatever their
+// places in the ring.
+func sameWindow(a, b resolvedWindow) bool {
+	a.seq, b.seq = 0, 0
+	return a == b
 }
 
 // unixNanoOrZero is t in Unix nanoseconds, 0 for the zero time.
@@ -142,33 +157,50 @@ func (m *SyncMockManager) ownerWindowLocked(t time.Time) (resolvedWindow, bool) 
 // the late path that finds it holds it at once, with a record of that window
 // (holdForClaimLocked, heldMock.owner). It allocates nothing. Caller holds
 // m.mu.
+//
+// It looks only at the windows the ring's index finds may hold t
+// (windowIndex.holding), not at the whole ring: of each kind it takes the one
+// earliest in the ring, as a walk of the ring in its order does (a kept window
+// that held t while its request was alone in flight, else a kept window over
+// t past its yield, and a duplicate's).
 func (m *SyncMockManager) ownerOrSharedLocked(t time.Time) (owner resolvedWindow, ok bool, shared resolvedWindow, behind bool) {
-	var sharedOwner resolvedWindow
-	found, foundShared := false, false
-	for _, w := range m.recentWindows {
+	alone, after, dup := -1, -1, -1
+	for _, i := range m.windowsLocked().holding(t) {
+		w := &m.recentWindows[i]
 		if t.Before(w.start) || t.After(w.end) {
 			continue
 		}
-		if w.keep {
-			if !t.After(w.exclusiveEnd()) {
-				return w, true, resolvedWindow{}, false
-			}
-			if !foundShared {
-				sharedOwner, foundShared = w, true
-			}
-			continue
-		}
-		if !found {
-			owner, found = w, true
+		switch at := int(i); {
+		case w.keep && !t.After(w.exclusiveEnd()):
+			alone = earliest(alone, at)
+		case w.keep:
+			after = earliest(after, at)
+		default:
+			dup = earliest(dup, at)
 		}
 	}
-	if foundShared {
+	if alone >= 0 {
+		return m.recentWindows[alone], true, resolvedWindow{}, false
+	}
+	found := dup >= 0
+	if found {
+		owner = m.recentWindows[dup]
+	}
+	if after >= 0 {
 		if !m.openClaimLocked(t, nil) {
-			return sharedOwner, true, resolvedWindow{}, false
+			return m.recentWindows[after], true, resolvedWindow{}, false
 		}
-		return owner, found, sharedOwner, true
+		return owner, found, m.recentWindows[after], true
 	}
 	return owner, found, resolvedWindow{}, false
+}
+
+// earliest is the earlier of the ring places a and b, -1 being none.
+func earliest(a, b int) int {
+	if a < 0 || b < a {
+		return b
+	}
+	return a
 }
 
 // nopLogger is the fallback when no logger has been installed via
@@ -260,6 +292,16 @@ type SyncMockManager struct {
 	// TestResolveRangeRecordsLateMockInOldWindowButDropsOrphan); the count
 	// cap bounds memory instead.
 	recentWindows []resolvedWindow
+	// windows is the ring's index: what the passes over the buffer ask which
+	// windows may own a mock (windowIndex). Guarded by mu.
+	windows windowIndex
+	// settled is what the last pass over the buffer left of it that only a
+	// window resolved over a mock's request, or the stale cutoff, can move
+	// (settledPrefix): the next pass decides only the rest. decided counts
+	// the buffered mocks the passes decided, for the rows that bound a pass's
+	// work. Guarded by mu.
+	settled settledPrefix
+	decided uint64
 
 	// sentClaimed is the startup mocks the rescues sent with no owner while a
 	// request still in flight may take them (startupClaimedLocked), in request
@@ -3629,12 +3671,17 @@ func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mock
 	openFrom, open := m.openFromLocked()
 	var refs ownerRefs
 
-	keepIdx := 0
-	for i := 0; i < len(m.buffer); i++ {
+	// A settled mock (settledPrefix) is one the flush keeps (flushKeep): the
+	// prefix stays where it is, and the walk starts after it.
+	settled := m.settledLocked()
+	at := m.settledTimes(settled)
+	keepIdx := settled
+	for i := settled; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
 		if mock == nil {
 			continue
 		}
+		m.decided++
 		take, w, shared, behind := m.flushTakeLocked(mock)
 		switch take {
 		case flushGone:
@@ -3693,12 +3740,15 @@ func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mock
 		// Not attributable yet — a future (possibly out-of-order) request
 		// may still claim it. Keep it buffered in place.
 		m.buffer[keepIdx] = mock
+		at = keepAt(at, keepIdx, mock.Spec.ReqTimestampMock)
 		keepIdx++
 	}
 	for i := keepIdx; i < len(m.buffer); i++ {
 		m.buffer[i] = nil
 	}
 	m.buffer = m.buffer[:keepIdx]
+	// Every mock the flush kept, it kept as flushKeep: settled.
+	m.keepSettledLocked(keepIdx, at)
 	m.pruneSentClaimedLocked(&lateMappings)
 	gaveUp = m.fitHoldLocked(tally)
 	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
@@ -4369,8 +4419,10 @@ func (c claims) covers(t time.Time) bool {
 // paths decide (ownerOrSharedLocked): what its resolve left to a request that
 // claimed it goes back to it, not to a window decided after it. A resolved
 // duplicate claims nothing: a kept window may take a duplicate's leftovers, as
-// everywhere else. One pass over the open windows and the resolved ones, for
-// the kept resolve of a window that yielded. Caller holds mu.
+// everywhere else. One pass over the open windows, and over the resolved ones
+// the ring's index finds reaching into (after, end] (windowIndex.reaching),
+// in the ring's order, for the kept resolve of a window that yielded. Caller
+// holds mu.
 func (m *SyncMockManager) claimsLocked(self *Window, after, end time.Time) claims {
 	var c claims
 	for _, o := range m.open {
@@ -4383,7 +4435,8 @@ func (m *SyncMockManager) claimsLocked(self *Window, after, end time.Time) claim
 		}
 		c = append(c, claim{from: o.start, to: to})
 	}
-	for _, r := range m.recentWindows {
+	for _, i := range inRingOrder(m.windowsLocked().reaching(after, end)) {
+		r := m.recentWindows[i]
 		if !r.keep || r.start.After(end) || !r.end.After(after) {
 			continue
 		}
@@ -4527,7 +4580,7 @@ func (r *ownerRefs) of(w resolvedWindow, ok bool) *resolvedWindow {
 	if !ok {
 		return nil
 	}
-	if r.last == nil || *r.last != w {
+	if r.last == nil || !sameWindow(*r.last, w) {
 		c := w
 		r.last = &c
 	}
@@ -5318,7 +5371,10 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 		// Unknown timestamp → keep (safe default). In-place filter, nil the tail.
 		before := len(m.buffer)
 		keep := m.buffer[:0]
-		for _, mk := range m.buffer {
+		// A settled mock (settledPrefix) the wipe keeps stays settled.
+		settled, stillSettled := m.settledLocked(), 0
+		at := m.settledTimes(settled)
+		for i, mk := range m.buffer {
 			if mk == nil {
 				continue
 			}
@@ -5327,6 +5383,10 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 				continue
 			}
 			if !m.lostToPressureLocked(mk) {
+				if i < settled {
+					at[stillSettled] = at[i]
+					stillSettled++
+				}
 				keep = append(keep, mk)
 				continue
 			}
@@ -5336,6 +5396,7 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 			m.buffer[i] = nil
 		}
 		m.buffer = keep
+		m.keepSettledLocked(stillSettled, at)
 		clearedFromBuffer = before - len(keep)
 		// Let go of the hold too, whatever its size and the room the budget
 		// has left: the agent is short of memory. The requests that may own
@@ -5765,6 +5826,8 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	}
 
 	m.mu.Lock()
+	// How long this resolve holds mu, said in its buffer transition below.
+	lockedAt := time.Now()
 	// Snapshot the outChan wiring status under outChanMu (NOT m.mu)
 	// so we don't race SetOutputChannel / CloseOutChan. Only the
 	// bound boolean is needed — the actual send later goes through
@@ -5875,10 +5938,27 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// (8192, was 256) is what stops a burst from evicting a window while its test's
 	// late aggregate mock is still decoding — the go-memory-load-mongo no_mocks bug.
 	keepIdx := 0
+	// The buffer's first mocks the last pass left settled (settledPrefix):
+	// one whose request this window does not hold and that is not past the
+	// cutoff, the walk below would keep, unchanged, so it is stepped over.
+	// Their request times are read from beside the buffer (settledPrefix.at),
+	// which the walk compacts in step with it.
+	settled := m.settledLocked()
+	at := m.settledTimes(settled)
+	decided := 0
 
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
+		if i < settled {
+			if t := at[i]; (t.Before(start) || t.After(end)) && !t.Before(cutoffTime) {
+				m.buffer[keepIdx] = mock
+				at[keepIdx] = t
+				keepIdx++
+				continue
+			}
+		}
 		mockTime := mock.Spec.ReqTimestampMock
+		decided++
 
 		// LIFETIME CARVE-OUT: session- and connection-scoped mocks
 		// are reusable across every test window and never need
@@ -6132,6 +6212,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		// didn't match this specific window. It might be matched
 		// by a future out-of-order request.
 		m.buffer[keepIdx] = mock
+		at = keepAt(at, keepIdx, mockTime)
 		keepIdx++
 	}
 
@@ -6200,8 +6281,8 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// AFTER the match loop, so the current window's own mocks went through
 	// the direct [start,end] path above, never the ring. Skipped for the
 	// no-keep / unbound cases is unnecessary — an empty-but-recorded
-	// window is harmless and aged out by the count cap below.
-	m.recentWindows = append(m.recentWindows, resolvedWindow{
+	// window is harmless and aged out by the count cap (addRecentWindowLocked).
+	m.addRecentWindowLocked(resolvedWindow{
 		start:      start,
 		end:        end,
 		testName:   testName,
@@ -6210,13 +6291,16 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		sharedFrom: unixNanoOrZero(sharedFrom),
 		recording:  m.recording,
 	})
-
-	if len(m.recentWindows) > maxRecentWindows {
-		// Drop the oldest entries; copy down so the big backing array
-		// isn't retained by the reslice.
-		n := copy(m.recentWindows, m.recentWindows[len(m.recentWindows)-maxRecentWindows:])
-		m.recentWindows = m.recentWindows[:n]
+	// With the output bound, every mock the walk left in the buffer it kept
+	// at the retention (or stepped over as settled): settled, whatever this
+	// window held. Unbound, it kept some for the output, which the next pass
+	// decides again.
+	if outChanBound {
+		m.keepSettledLocked(keepIdx, at)
+	} else {
+		m.keepSettledLocked(0, at)
 	}
+	m.decided += uint64(decided)
 
 	bufferLenAfter := len(m.buffer)
 	mocksToSendLen := len(mocksToSend)
@@ -6230,6 +6314,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	}
 	paidLate := m.oweLateMappingsLocked(mappingChan != nil, lateMappings, mocksToSend)
 
+	held := time.Since(lockedAt)
 	m.mu.Unlock()
 	m.cutDropped(cut, cutEpoch, outChanBound, testName, false)
 	m.reportGivenUp(gaveUp, LostToHoldBound)
@@ -6238,16 +6323,19 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// Per-resolve diagnostic: surface buffer-state transitions per
 	// test-window resolve so a CI log can show when a per-test cohort
 	// flushed zero mocks or when stale-buffer cutoff started reaping.
-	// Sampled via dropLogger which is the standard observability sink
-	// for buffer-flow events on this manager. Only logged when there
-	// was actual state change to avoid log noise on idle resolves.
+	// Written to dropLogger, the observability sink for buffer-flow
+	// events on this manager, and not sampled. Logged when the resolve
+	// changed something, and whenever it passed over a buffer, changed or
+	// not: how long it held mu for that (mu_held) and how many buffered
+	// mocks it decided are said of every resolve that held mu over one. An
+	// idle resolve over an empty buffer logs nothing.
 	// Every count is THIS call's. dropped splits by reason, and both reasons
 	// are cleanup: duplicate leftovers, and mocks outside any window, which no
 	// resolved window owns and no request still in flight may. Loss is not
 	// counted here: windows_given_up are requests in flight the hold had to
 	// give up, and one costs its test case only if it is then kept — Window.Keep
 	// warns of that ("left a kept request out") and counts it.
-	if ce := m.dropLogger().Check(zap.DebugLevel, "diag/ResolveRange: buffer transition"); ce != nil && (bufferLenBefore != bufferLenAfter || mocksToSendLen > 0 || tally.changed()) {
+	if ce := m.dropLogger().Check(zap.DebugLevel, "diag/ResolveRange: buffer transition"); ce != nil && (bufferLenBefore > 0 || bufferLenBefore != bufferLenAfter || mocksToSendLen > 0 || tally.changed()) {
 		fields := []zap.Field{
 			zap.String("test_name", testName),
 			zap.Time("window_start", start),
@@ -6257,6 +6345,10 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 			zap.Int("mocks_flushed", mocksToSendLen),
 			zap.Int("late_binned", lateBinned),
 			zap.Int("held_taken", heldTaken),
+			// The buffered mocks this pass decided (the rest it stepped
+			// over as settled), and how long it held the manager's lock.
+			zap.Int("decided", decided),
+			zap.Duration("mu_held", held),
 		}
 		fields = append(fields, tally.fields()...)
 		fields = append(fields, hold.fields()...)
@@ -6336,6 +6428,12 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	var refs ownerRefs
 
 	keepIdx := 0
+	// A settled mock (settledPrefix) this prune keeps stays settled: it keeps
+	// one only at or after the horizon, as it was. One before it, it holds or
+	// drops (it owns no window, and is neither a startup mock nor one any
+	// test may reuse).
+	settled, stillSettled := m.settledLocked(), 0
+	at := m.settledTimes(settled)
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
 		if mock == nil {
@@ -6345,6 +6443,10 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 		// At/after the cleanup horizon: belongs to the current or a future
 		// request, not the duplicate being skipped — always retain.
 		if !mock.Spec.ReqTimestampMock.Before(timestamp) {
+			if i < settled {
+				at[stillSettled] = at[i]
+				stillSettled++
+			}
 			m.buffer[keepIdx] = mock
 			keepIdx++
 			continue
@@ -6429,6 +6531,7 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	}
 	// Reslice the buffer
 	m.buffer = m.buffer[:keepIdx]
+	m.keepSettledLocked(stillSettled, at)
 	gaveUp := m.fitHoldLocked(&tally)
 	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
 	bufferLenAfter, hold := len(m.buffer), m.holdStateLocked()
