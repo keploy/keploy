@@ -599,8 +599,10 @@ var lookupAccepted = lookupTCP
 // connection under it, as a server's close would (the application writing on
 // meets the same reset). A TLS client's close_notify, sent once it has read
 // the answer keploy closed after (a 502 with Connection: close), is such a
-// write. A socket that cannot be read leaves it unset, and the wait judges the
-// connection by what was written when it began.
+// write. A socket not found leaves it unset, and the wait judges the
+// connection by what was written when it began. A read that fails (no
+// sock_diag socket, or a lookup's error) tells nothing: every wait is unknown
+// from then on (closeUnknown), as on darwin.
 //
 // A close that finds the application's socket proves the application's
 // sockets seen from here (paired.visible), as the accept's read does. One that
@@ -626,12 +628,14 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	pc.proxyDev.Store(boundDevice(pc.conn))
 	ds, listed, err := takeDiag()
 	if err != nil {
+		p.closeUnknown(pc, fmt.Errorf("%w: the application's end of a connection to the proxy, %s, cannot be read as the proxy closes it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
 		return
 	}
 	w, ok, err := wroteNow(ds, pc)
 	if err != nil && !errors.Is(err, errNoSocket) && listed {
 		ds.close()
 		if ds, err = openDiag(); err != nil {
+			p.closeUnknown(pc, fmt.Errorf("%w: the application's end of a connection to the proxy, %s, cannot be read as the proxy closes it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
 			return
 		}
 		w, ok, err = wroteNow(ds, pc)
@@ -643,6 +647,7 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	giveDiag(ds, err)
 	switch {
 	case err != nil:
+		p.closeUnknown(pc, fmt.Errorf("%w: sock_diag's read of the application's end of a connection to the proxy, %s, failed as the proxy closes it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
 	case !missed:
 		p.paired.visible.Store(true)
 	case !p.paired.visible.Load():

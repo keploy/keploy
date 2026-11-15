@@ -105,8 +105,10 @@ func readHeldSockets() (map[[2]netip.AddrPort]heldSocket, error) {
 // process holding it: from the holder found before, while it still holds it,
 // else from h's read of every process (a copy a child inherited is found
 // there once its parent's is closed). found is false once no process the
-// agent may read holds it, which no later read changes: a socket every
-// holder closed is gone.
+// agent may read holds it, which no later read changes. That proves nothing
+// on its way: a socket every holder closed lives on in the kernel until its
+// bytes and its FIN are acknowledged, so it is gone only once the proxy's
+// side has taken that FIN or a reset (noteWroteAtClose, pairEnded).
 func (pc *pairedConn) appSocket(h *heldSockets) (procsock.TCP, bool, error) {
 	if o := pc.holder.Load(); o != nil {
 		if o.pid == 0 {

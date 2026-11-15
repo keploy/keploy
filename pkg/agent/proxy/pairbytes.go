@@ -269,14 +269,16 @@ func (s *pairedConns) remove(conn net.Conn) {
 }
 
 // fail makes every wait, now and from then on, end with err. The first call
-// wins.
-func (s *pairedConns) fail(err error) {
+// wins, and says so (first).
+func (s *pairedConns) fail(err error) (first bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.err == nil {
+	first = s.err == nil
+	if first {
 		s.err = err
 	}
 	s.wakeLocked()
+	return first
 }
 
 func (s *pairedConns) wakeLocked() {

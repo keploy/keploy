@@ -68,6 +68,19 @@ func fillSendBuffer(t *testing.T, p *Proxy, app *net.TCPConn, n int) {
 	}
 }
 
+// wantOneCloseUnknownLine checks that logs hold one line saying a close cannot
+// tell what the application had written (closeUnknown), its error saying has.
+func wantOneCloseUnknownLine(t *testing.T, logs *observer.ObservedLogs, has string) {
+	t.Helper()
+	lines := logs.FilterMessageSnippet("keploy cannot tell what the application had written").All()
+	if len(lines) != 1 {
+		t.Fatalf("%d lines say the close cannot tell what was written, want one: %+v", len(lines), logs.All())
+	}
+	if e, _ := lines[0].ContextMap()["error"].(string); !strings.Contains(e, has) {
+		t.Errorf("the line's error is %q, want it to say %q", e, has)
+	}
+}
+
 // failHeldProxySide makes every read of the proxy's side a held socket's wait
 // or close makes (readHeldProxySide) fail, as one of a descriptor closed under
 // it would.
@@ -348,6 +361,7 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		// Unknown, and said in one line naming the connection, the bytes
 		// and why they cannot be counted.
 		p, app, proxySide, reader := heldPair(t)
+		p.settleReads = true
 		core, logs := observer.New(zapcore.WarnLevel)
 		p.logger = zap.New(core)
 		fillSendBuffer(t, p, app, 8<<20)
@@ -357,7 +371,7 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		}
 		// The close also charges the bytes it tosses unread (pairLost's
 		// own warning): the line is the one that says why nothing counts.
-		lines := logs.FilterMessageSnippet("keploy cannot count what the application had written").All()
+		lines := logs.FilterMessageSnippet("keploy cannot tell what the application had written").All()
 		if len(lines) != 1 {
 			t.Fatalf("%d such warnings, want one: %+v", len(lines), logs.All())
 		}
@@ -374,6 +388,9 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 	})
 	t.Run("the proxy's side cannot be read", func(t *testing.T) {
 		p, app, proxySide, reader := heldPair(t)
+		p.settleReads = true
+		core, logs := observer.New(zapcore.WarnLevel)
+		p.logger = zap.New(core)
 		if _, err := app.Write([]byte("hello")); err != nil {
 			t.Fatal(err)
 		}
@@ -391,9 +408,13 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		if w := pcs[0].wroteAtClose.Load(); w != nil {
 			t.Fatalf("the close's record = %+v, want none from a side not read", w)
 		}
+		wantOneCloseUnknownLine(t, logs, "bad file descriptor")
 	})
 	t.Run("the processes cannot be read", func(t *testing.T) {
 		p, _, _, reader := heldPair(t)
+		p.settleReads = true
+		core, logs := observer.New(zapcore.WarnLevel)
+		p.logger = zap.New(core)
 		was := heldSocketsRead
 		heldSocketsRead = func() (map[[2]netip.AddrPort]heldSocket, error) { return nil, errors.New("no processes") }
 		t.Cleanup(func() { heldSocketsRead = was })
@@ -401,9 +422,65 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 			t.Fatalf("PairedBytesErr = %v, want unknown", err)
 		}
+		wantOneCloseUnknownLine(t, logs, "no processes")
 	})
-	t.Run("a socket no process holds, once one was read", func(t *testing.T) {
+	for _, fin := range []bool{false, true} {
+		name := "a socket no process holds, once one was read, its FIN not taken"
+		if fin {
+			name = "a socket no process holds, once one was read, its FIN taken"
+		}
+		t.Run(name, func(t *testing.T) {
+			// One no process the agent may read holds (another user's)
+			// is gone only once the proxy's side took its FIN or reset:
+			// until then bytes it wrote may still be on their way, and
+			// the close is unknown, not silent.
+			p, app, proxySide, reader := heldPair(t)
+			p.settleReads = true
+			core, logs := observer.New(zapcore.WarnLevel)
+			p.logger = zap.New(core)
+			if _, err := app.Write([]byte("hello")); err != nil {
+				t.Fatal(err)
+			}
+			untilUnread(t, proxySide, 5)
+			if err := waitHeld(p, 10*time.Second); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadFull(reader, make([]byte, 5)); err != nil {
+				t.Fatal(err)
+			}
+			pcs, _ := p.paired.upTo(1)
+			pcs[0].holder.Store(nil)
+			hideSockets(t, app.LocalAddr())
+			if fin {
+				if err := app.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				untilStateLeaves(t, proxySide, xnuTCPEstablished)
+			}
+			_ = reader.Close()
+			err := p.PairedBytesErr()
+			if got := errors.Is(err, models.ErrProxyConnsUnsupported); got == fin {
+				t.Fatalf("PairedBytesErr = %v, want unknown %v: a socket no process holds is gone only once the proxy's side took its FIN", err, !fin)
+			}
+			if w := pcs[0].wroteAtClose.Load(); w != nil {
+				t.Fatalf("the close's record = %+v, want none for a socket no process holds", w)
+			}
+			if !fin {
+				wantOneCloseUnknownLine(t, logs, "no process keploy's agent may read holds it")
+			}
+		})
+	}
+	t.Run("a socket its holder closed with bytes on their way", func(t *testing.T) {
+		// Closed with bytes queued, it lives on in the kernel (FIN_WAIT_1)
+		// until they and its FIN are acknowledged, and no process holds
+		// it: the close is unknown, said in one line. Before, once one
+		// socket had been read from its holder, the close made no record
+		// and answered nothing while megabytes were still on their way.
+		listed := readXNUTable
 		p, app, proxySide, reader := heldPair(t)
+		p.settleReads = true
+		core, logs := observer.New(zapcore.WarnLevel)
+		p.logger = zap.New(core)
 		if _, err := app.Write([]byte("hello")); err != nil {
 			t.Fatal(err)
 		}
@@ -414,12 +491,62 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		if _, err := io.ReadFull(reader, make([]byte, 5)); err != nil {
 			t.Fatal(err)
 		}
+		_ = proxySide.SetReadBuffer(8 << 10)
+		if err := app.SetWriteBuffer(6 << 20); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { _, err := app.Write(make([]byte, 4<<20)); done <- err }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatal("the write did not fit the application's send buffer")
+		}
+		if err := app.Close(); err != nil {
+			t.Fatal(err)
+		}
+		a, _ := addrPortOf(app.LocalAddr())
+		r, _ := addrPortOf(app.RemoteAddr())
+		table, err := listed()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e, ok := findXNUPCB(table, a, r); !ok || !e.finPending() || e.sndCC == 0 {
+			t.Fatalf("the application's socket, closed by its holder, is %+v (listed %v), want it with its FIN and bytes still unacknowledged", e, ok)
+		}
+		_ = reader.Close()
+		if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+			t.Fatalf("PairedBytesErr = %v after a close with bytes on their way from a socket its holder closed, want unknown", err)
+		}
+		wantOneCloseUnknownLine(t, logs, "may still be on their way")
+	})
+	t.Run("bytes in the send buffer once the proxy's side took the FIN", func(t *testing.T) {
+		// Taken, not yet seen acknowledged by the holder: the FIN came
+		// after every one of them, so the side's count holds them all,
+		// and the close records it, not unknown.
+		p, app, proxySide, reader := heldPair(t)
+		if _, err := app.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		untilUnread(t, proxySide, 5)
+		if _, err := io.ReadFull(reader, make([]byte, 5)); err != nil {
+			t.Fatal(err)
+		}
 		pcs, _ := p.paired.upTo(1)
-		pcs[0].holder.Store(nil)
-		hideSockets(t, app.LocalAddr())
+		if err := app.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		untilStateLeaves(t, proxySide, xnuTCPEstablished)
+		alterHeld(t, p, func(s *procsock.TCP) { s.SndCC = 5 })
 		_ = reader.Close()
 		if err := p.PairedBytesErr(); err != nil {
-			t.Fatalf("PairedBytesErr = %v, want nil: a socket no process holds is gone once one was read from its holder", err)
+			t.Fatalf("PairedBytesErr = %v, want nil: the proxy's side took the FIN after every byte", err)
+		}
+		if w := pcs[0].wroteAtClose.Load(); w == nil || w.want != 6 {
+			t.Fatalf("the close's record = %+v, want 5 bytes and the FIN received", w)
 		}
 	})
 	t.Run("a reset socket", func(t *testing.T) {

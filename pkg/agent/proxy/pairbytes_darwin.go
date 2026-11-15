@@ -536,31 +536,40 @@ const heldUncounted = "macOS's TCP table does not list this socket to keploy's a
 // record does, so a loss of bytes the close tosses unread is placed among the
 // ends cut short on the connection (pairedConn.lostBy). No record is made
 // from counts in a layout the proof did not find (xnuTableReadable: every
-// wait is unknown then), from a table that cannot be read, or for an
-// application socket the table no longer lists with the first sequence number
-// the proxy's side began from (gone: reset, its reset the last it sent), as
-// Linux makes none for a socket it cannot read: the close then finds nothing
-// on its way. An application socket not listed is gone only once one of the
-// application's has been (paired.visible): before, it may be hidden from the
-// agent (xnuHidden), and unless the proxy's side shows it took the
-// application's FIN or reset, after which nothing it wrote is on its way,
-// what was on its way cannot be told, and every wait is unknown from then on.
+// wait is unknown then), or for an application socket the table no longer
+// lists with the first sequence number the proxy's side began from (gone:
+// reset, its reset the last it sent), as Linux makes none for a socket it
+// cannot read: the close then finds nothing on its way. A table that cannot
+// be read tells nothing: every wait is unknown from then on (closeUnknown).
+//
+// An application socket not listed is gone only once one of the
+// application's has been (paired.visible). Before, it may be hidden from the
+// agent (xnuHidden), and is read from its holder (noteHeldAtClose). One no
+// process the agent may read holds, another user's or one its holder closed,
+// is gone only once the proxy's side shows it took the application's FIN or
+// reset, after which nothing it wrote is on its way: a socket whose holder
+// closed it lives on in the kernel until its bytes and its FIN are
+// acknowledged (FIN_WAIT_1, CLOSING, LAST_ACK), and no holder's read finds
+// it. Otherwise what was on its way cannot be told, and every wait is unknown
+// from then on.
 func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	if xnuTableReadable() != nil {
 		return
 	}
 	table, err := readXNUTable()
 	if err != nil {
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table cannot be read as the proxy closes a connection from %s: %v", models.ErrProxyConnsUnsupported, pc.app, err))
 		return
 	}
 	app, ok := findXNUPCB(table, pc.app, pc.proxy)
 	if !ok {
 		pr, listed := findXNUPCB(table, pc.proxy, pc.app)
-		if !p.paired.visible.Load() && listed && p.noteHeldAtClose(pc, pr) {
-			return
-		}
-		if !p.paired.visible.Load() && !p.paired.held.Load() && !(listed && peerEnded(pr.state)) {
-			p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, and has listed none of the application's sockets to keploy's agent: %s", models.ErrProxyConnsUnsupported, pc.app, xnuHidden))
+		switch {
+		case p.paired.visible.Load():
+		case listed && p.noteHeldAtClose(pc, pr):
+		case listed && peerEnded(pr.state):
+		default:
+			p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side has not taken its FIN or reset: bytes it wrote may still be on their way, as a socket its holder closed lives on until they are acknowledged (%s)", models.ErrProxyConnsUnsupported, pc.app, xnuHidden))
 		}
 		return
 	}
@@ -582,12 +591,17 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 // side had not acknowledged, its FIN not taken, may be data on its way or
 // bytes received: which cannot be told (heldUncounted), and every wait is
 // unknown from then on, said in one log line naming the connection and the
-// bytes. So is every wait when the proxy's side cannot be read.
+// bytes (closeUnknown). So is every wait when the processes or the proxy's
+// side cannot be read.
+//
+// With the holder not yet known (pairedConn.holder) the read is of every
+// process the agent may read, as a wait's is (heldSockets): on macOS 27 a
+// close pays that scan too.
 func (p *Proxy) noteHeldAtClose(pc *pairedConn, pr xnuPCB) (done bool) {
 	s, found, err := pc.appSocket(&heldSockets{})
 	switch {
 	case err != nil:
-		p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, and the processes holding the application's sockets cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, err))
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, and the processes holding the application's sockets cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, err))
 		return true
 	case !found:
 		return false
@@ -598,14 +612,12 @@ func (p *Proxy) noteHeldAtClose(pc *pairedConn, pr xnuPCB) (done bool) {
 	case s.State == xnuTCPClosed:
 		return true
 	case ps.err != nil:
-		p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, and the proxy's side of it cannot be read as the proxy closes it: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err))
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, and the proxy's side of it cannot be read as the proxy closes it: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err))
 		return true
 	case s.SndCC != 0 && !peerEnded(ps.state):
-		p.logger.Warn("keploy cannot count what the application had written to a connection its proxy closed: from now on it cannot vouch that every call of a test is in its hands",
-			zap.String("connection", fmt.Sprintf("%s -> %s", pc.app, pc.proxy)),
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, and its process's send buffer held %d bytes the proxy's side had not acknowledged as the proxy closed it: %s", models.ErrProxyConnsUnsupported, pc.app, s.SndCC, heldUncounted),
 			zap.Uint32("unacknowledged_bytes", s.SndCC),
 			zap.String("why", heldUncounted))
-		p.paired.fail(fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, and its process's send buffer held %d bytes the proxy's side had not acknowledged as the proxy closed it: %s", models.ErrProxyConnsUnsupported, pc.app, s.SndCC, heldUncounted))
 		return true
 	}
 	fin := heldFINPending(s)
