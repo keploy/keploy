@@ -73,8 +73,8 @@ func TestAReadOfARefusedWorkerIsRefusedUntilItsTestEnds(t *testing.T) {
 
 // A call of a process a refused worker started (its app, or a program its
 // test runs) is refused, as the worker's own calls are: the proxy finds the
-// worker among the process's parents (parentOf). On macOS, which has no
-// /proc, it found none, and such a call was served the whole pool.
+// worker among the process's parents (starts.ParentOf). On macOS, which has
+// no /proc, it found none, and such a call was served the whole pool.
 func TestACallOfAProcessARefusedWorkerStartedIsRefused(t *testing.T) {
 	skipUnlessParentsRead(t)
 	starts.Default.Reset()
