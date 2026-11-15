@@ -766,6 +766,22 @@ type UnmatchedCall struct {
 	// pairing answered (Answer) carries it by a NotOwned miss's rule. nil
 	// otherwise.
 	Repeat *RepeatNote `json:"repeat_of,omitempty" yaml:"repeat_of,omitempty"`
+	// Whole is, on a miss keploy's agent kept as evidence keeps one for the
+	// run's end read (Charged), the call and its next step whole, for
+	// keploy's console and the misses file, which name each call whole; nil
+	// on every other miss, which holds them whole in its own fields. A type
+	// of its own: no YAML file holds it, and Sanitized, which makes every
+	// miss a receipt or a test's evidence holds, never copies it.
+	Whole *WholeCall `json:"whole,omitempty" yaml:"-"`
+}
+
+// WholeCall is a call no mock answered as keploy's console and the misses
+// file name it (UnmatchedCall.Whole): its summary with its operation's label
+// (UnmatchedCall.Named) and the matcher's next step, as the call made them,
+// every path and value in them whole. Never written to a receipt or a log.
+type WholeCall struct {
+	Call     string `json:"call,omitempty"`
+	NextStep string `json:"next_step,omitempty"`
 }
 
 // ConcurrentNote is what keploy knows of a call made by a test that was

@@ -3065,6 +3065,17 @@ func missNextStep(miss models.UnmatchedCall) string {
 	return miss.NextSteps
 }
 
+// wholeCall is miss's call and next step as the console and MissesFile name
+// them: whole. A miss the agent charged to a test holds them in its Whole
+// (models.UnmatchedCall.Charged), its own fields shaped as evidence keeps
+// them; every other miss, read from the proxy, holds them in its own.
+func wholeCall(miss models.UnmatchedCall) (call, next string) {
+	if w := miss.Whole; w != nil {
+		miss.ActualSummary, miss.Operation, miss.NextSteps = w.Call, "", w.NextStep
+	}
+	return miss.Named(), missNextStep(miss)
+}
+
 // missConsoleMax is how many calls no mock answered keploy mock replay's
 // console names (sayMisses); MissesFile names every one.
 const missConsoleMax = 20
@@ -3093,14 +3104,15 @@ func missedCalls(misses []models.UnmatchedCall) []missedCall {
 		if miss.MatchPhase == models.MatchPhaseNoRequest {
 			continue
 		}
-		key := missedCall{Protocol: miss.Protocol, Call: miss.Named(), PathTag: miss.PathTag, Destination: miss.Destination, HostTag: miss.HostTag}
+		call, next := wholeCall(miss)
+		key := missedCall{Protocol: miss.Protocol, Call: call, PathTag: miss.PathTag, Destination: miss.Destination, HostTag: miss.HostTag}
 		if i, ok := at[key]; ok {
 			out[i].Count++
 			continue
 		}
 		at[key] = len(out)
 		c := key
-		c.Count, c.NextStep = 1, strings.ReplaceAll(missNextStep(miss), "\n", " ")
+		c.Count, c.NextStep = 1, strings.ReplaceAll(next, "\n", " ")
 		out = append(out, c)
 	}
 	return out
