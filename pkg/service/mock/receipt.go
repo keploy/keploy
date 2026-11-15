@@ -492,13 +492,27 @@ func bypassList(rules []models.BypassRule) []string {
 // written only where it is git-ignored (missesIgnored: keploy/.gitignore's
 // "/*/last-replay-misses.yaml" and the temporary file's entry, added before
 // anything is written, and, where git can say, git itself ignoring both), as
-// the receipts are: it holds the calls whole.
+// the receipts are: it holds the calls whole. For the same reason nothing
+// that sends the keploy folder away carries it (HoldsCallsWhole).
 const MissesFile = "last-replay-misses.yaml"
 
+// missesTempPrefix begins the name of the temporary file a MissesFile write
+// goes through (missesTempPrefix + "*.tmp"): it holds the calls whole until
+// it is renamed into place, and a kill before that leaves it behind.
+const missesTempPrefix = receiptTempPrefix + "misses-"
+
 // missesTempProbe is a name the temporary file a MissesFile write goes
-// through takes (receiptTempPrefix + "misses-*.tmp"), for git to say whether
-// it ignores such a file.
-const missesTempProbe = receiptTempPrefix + "misses-0.tmp"
+// through takes, for git to say whether it ignores such a file.
+const missesTempProbe = missesTempPrefix + "0.tmp"
+
+// HoldsCallsWhole says whether name, a file's base name, is one keploy writes
+// the calls a replay missed into whole: MissesFile, or the temporary file a
+// write of it goes through. Such a file is the user's own, local and
+// git-ignored, and anything that sends the keploy folder away (a bundle, an
+// upload) leaves it out.
+func HoldsCallsWhole(name string) bool {
+	return name == MissesFile || strings.HasPrefix(name, missesTempPrefix)
+}
 
 // missesReport is MissesFile's content.
 type missesReport struct {
@@ -533,7 +547,7 @@ func writeMissesFile(logger *zap.Logger, keployDir, set string, misses []models.
 		var body []byte
 		body, err = yaml.Marshal(missesReport{Set: set, At: time.Now().UTC().Truncate(time.Second), Misses: calls})
 		if err == nil {
-			err = writeLocalFile(logger, keployDir, dir, MissesFile, receiptTempPrefix+"misses-",
+			err = writeLocalFile(logger, keployDir, dir, MissesFile, missesTempPrefix,
 				append([]byte("# Written by `keploy mock replay`: each call no recorded mock answered in the last replay of this set, whole, beside the path tag keploy's log names it by. Local and git-ignored.\n"), body...))
 		}
 	}
