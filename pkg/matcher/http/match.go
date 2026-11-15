@@ -4,6 +4,7 @@ package http
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"regexp"
@@ -43,6 +44,27 @@ type matchOptions struct {
 	// recordedBody is the body the expected response's digest headers were
 	// computed over, when that is not tc.HTTPResp.Body (see WithRecordedBody).
 	recordedBody *string
+	// console is where the comparison's lines go (WithConsole); nil, the
+	// default, prints nothing.
+	console io.Writer
+}
+
+// out is o's console, io.Discard for none.
+func (o matchOptions) out() io.Writer {
+	if o.console == nil {
+		return io.Discard
+	}
+	return o.console
+}
+
+// WithConsole makes w the console the comparison writes its lines to: the
+// "Testrun passed" and "Testrun failed" lines, and a failure's diff, which
+// names the test case's expected and actual header values and bodies whole.
+// With none, or a nil w, it prints nothing: a program that embeds keploy (a
+// k8s proxy, whose stdout is its pod's log) must never have an answer's body
+// written to a log. keploy's CLI gives its run's console (os.Stdout).
+func WithConsole(w io.Writer) MatchOption {
+	return func(o *matchOptions) { o.console = w }
 }
 
 // WithAutoHeaderNoise forgives a VALUE difference on response headers the server
@@ -76,6 +98,7 @@ func PrintPassLine(tc *models.TestCase, logger *zap.Logger, opts ...MatchOption)
 		return
 	}
 	newLogger := ppNew234()
+	newLogger.SetOutput(mo.out())
 	newLogger.WithLineInfo = false
 	newLogger.SetColorScheme(models.GetPassingColorScheme())
 	var log2 = ""
@@ -447,8 +470,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		isHeaderMismatch := false
 		isBodyMismatch := false
 
-		logDiffs := matcherUtils.NewDiffsPrinter(tc.Name)
+		logDiffs := matcherUtils.NewDiffsPrinterOut(mo.console, tc.Name)
 		newLogger := ppNew234()
+		newLogger.SetOutput(mo.out())
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetFailingColorScheme())
 		var logs = ""
@@ -667,7 +691,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			if pass {
 				PrintPassLine(tc, logger, opts...)
 			} else {
-				printFailLine(tc, logger)
+				printFailLine(tc, logger, mo.out())
 				AssertionMatch(tc, judged, logger)
 			}
 		}
@@ -684,10 +708,11 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	return pass, res
 }
 
-// printFailLine prints the "Testrun failed" line for tc, as Match prints it
-// above a comparison's diff, for a test case its assertions fail.
-func printFailLine(tc *models.TestCase, logger *zap.Logger) {
+// printFailLine prints the "Testrun failed" line for tc on out, as Match
+// prints it above a comparison's diff, for a test case its assertions fail.
+func printFailLine(tc *models.TestCase, logger *zap.Logger, out io.Writer) {
 	newLogger := ppNew234()
+	newLogger.SetOutput(out)
 	newLogger.WithLineInfo = false
 	newLogger.SetColorScheme(models.GetFailingColorScheme())
 	if _, err := newLogger.Printf(newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)); err != nil {

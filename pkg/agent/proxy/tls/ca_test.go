@@ -1023,7 +1023,7 @@ func TestCertForClient_NoSNINamesDestinationIP(t *testing.T) {
 	leafFor := func(sni, connectTarget string, dstIP net.IP) *x509.Certificate {
 		t.Helper()
 		hello.ServerName = sni
-		cert, err := certForClient(logger, hello, caKey, caCert, time.Time{}, connectTarget, dstIP)
+		cert, err := certForClient(context.Background(), logger, hello, caKey, caCert, time.Time{}, connectTarget, dstIP)
 		if err != nil {
 			t.Fatalf("certForClient(%q, %q, %v): %v", sni, connectTarget, dstIP, err)
 		}

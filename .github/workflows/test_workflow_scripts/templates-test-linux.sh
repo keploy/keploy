@@ -328,8 +328,7 @@ grep -Eqi "cookie: '?page=\{\{string \.page\}\}" "$T7" || fail "the call to the 
 # templatize says why, naming the test case, the place and the size of the
 # value there, never the value (one a later request sends back can be a
 # token): the logout's 302, at Location.path.0, the 3 bytes of "bye".
-LEFT=bye
-grep -qF "test-set-0/$(name_of "$T6") response header Location of a 302 response holds Location.path.0 (${#LEFT} bytes), which a later request sends: templatize captures nothing there" templatize.log \
+grep -qF "test-set-0/$(name_of "$T6") response header Location of a 302 response holds Location.path.0 (3 bytes), which a later request sends: templatize captures nothing there" templatize.log \
   || fail "templatize did not say why it left the logout's redirect target as recorded: $(grep -m1 '302' templatize.log)"
 TEMPLATED="$(digest)"
 CONFIG_BEFORE="$(sha256sum keploy/test-set-0/config.yaml | cut -d' ' -f1)"

@@ -69,7 +69,7 @@ func answeredMiss(t *testing.T, mode string, store integrations.MockMemDb, pool 
 		}
 		diag = d
 	}
-	r := newHTTP().buildHTTPMismatchReport(request, []byte(body), store, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(body), store, nil, nil, nil, diag)
 	if r == nil {
 		t.Fatal("no report")
 	}

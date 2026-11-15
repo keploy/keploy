@@ -186,7 +186,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 		return bufio.NewReader(app), ended
 	}
 	reqMeta := func(path string) map[string]interface{} {
-		return map[string]interface{}{"method": "POST", "host": "api.example", "path": path, "query keys": "token"}
+		return map[string]interface{}{"method": "POST", "host": "{}.{} " + models.HostTag(context.Background(), "api.example"), "path": path, "path_tag": models.PathTag(context.Background(), "POST", "/u"), "query keys": "token"}
 	}
 	metadataOf := func(e observer.LoggedEntry) interface{} {
 		m, _ := e.ContextMap()["metadata"].(map[string]string)
@@ -215,6 +215,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 		wantOnce(t, logs, "decodeHTTP debug logs for input", map[string]interface{}{
 			"method":       "POST",
 			"path":         "/{}",
+			"path_tag":     models.PathTag(context.Background(), "POST", "/u"),
 			"header names": []interface{}{"Authorization", "Content-Length", "Content-Type", "Cookie", "Host"},
 			"body bytes":   bodyLen,
 		})
@@ -255,6 +256,9 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 		})
 		wantOnce(t, logs, "The url path of mock and request aren't the same", map[string]interface{}{
 			"mock name": "mock-path", "input path": "/{}", "mock path": "/{}", "differs at segment": int64(0),
+			// The call's tag, which the console prints where it misses; the
+			// recording's path by its shape alone.
+			"path_tag": models.PathTag(context.Background(), "POST", "/u"),
 		})
 		wantOnce(t, logs, "after matching the http request", map[string]interface{}{"isMatched": true, "mock name": "mock-live"})
 		noValueLogged(t, logs, append(append(shapeValues("live"), shapeValues("rec2")...), shapeValues("rec3")...))
@@ -322,7 +326,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			// Every field, so one added beside these (a header of the
 			// answer, a value's first characters) fails the row too.
 			wantOnce(t, logs, msg, map[string]interface{}{
-				"metadata": map[string]string{"method": "POST", "host": "api.example", "path": "/{}", "query keys": "token"},
+				"metadata": map[string]string{"method": "POST", "host": "{}.{} " + models.HostTag(context.Background(), "api.example"), "path": "/{}", "path_tag": models.PathTag(context.Background(), "POST", "/u"), "query keys": "token"},
 				"policy":   string(policy),
 			})
 			noValueLogged(t, logs, append(shapeValues("live"), "dep-an5wer", "dep-c00k1e"))
@@ -419,7 +423,7 @@ func noValueLogged(t *testing.T, logs *observer.ObservedLogs, values []string) {
 // serves it, again and again.
 func serveHTTPMock(t *testing.T, h *HTTP, req, resp string) *mockMemDb {
 	t.Helper()
-	m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(req), Resp: []byte(resp), ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+	m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(req), Resp: []byte(resp), ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
 		80, "test-conn", models.OutgoingOptions{})
 	if err != nil || m == nil {
 		t.Fatalf("buildHTTPMock = (%v, %v)", m, err)

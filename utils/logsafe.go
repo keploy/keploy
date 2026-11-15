@@ -3,6 +3,8 @@ package utils
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/textproto"
 	"net/url"
@@ -11,11 +13,14 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // URLLogMeta is what a log line says about a request to rawURL: what
-// GetReqMeta says of a request (its method, its host, its path's shape and
-// the names of its query parameters), and its scheme. Never a path segment, a
+// GetReqShape says of a request (its method, its host, its path's shape and
+// the names of its query parameters, no path tag: keploy's CLI names a test
+// case's URL so, and no console or report line prints a tag of it), and its
+// scheme. Never a path segment, a
 // query value or userinfo: a token rides in any of them (?access_token=, an
 // OAuth code=, a reset link's path, user:password@), and keploy's log lines
 // reach log stores. It is read as keploy reads a recorded request's URL
@@ -27,11 +32,32 @@ func URLLogMeta(method, rawURL string) map[string]string {
 	if err != nil {
 		return map[string]string{"method": method, "url": "unparsable", "bytes": strconv.Itoa(len(rawURL))}
 	}
-	meta := GetReqMeta(&http.Request{Method: method, Host: u.Host, URL: u})
+	meta := GetReqShape(&http.Request{Method: method, Host: u.Host, URL: u})
 	if u.Scheme != "" {
 		meta["scheme"] = u.Scheme
 	}
 	return meta
+}
+
+// PathTagField is the path_tag field of a log line that names an HTTP call
+// by its shape: tag (models.PathTag), which the console and the report print
+// beside the call whole. No field for "" (a call of another protocol).
+func PathTagField(tag string) zap.Field {
+	if tag == "" {
+		return zap.Skip()
+	}
+	return zap.String("path_tag", tag)
+}
+
+// HostTagField is a host tag (models.HostTag) as a line of keploy's CLI
+// names the tag the agent made for a destination it logs by its shape: a
+// "host_tag" field, which the console, the report and the misses file print
+// beside the destination whole. No field for "".
+func HostTagField(tag string) zap.Field {
+	if tag == "" {
+		return zap.Skip()
+	}
+	return zap.String("host_tag", tag)
 }
 
 // quotedInput is a Go-quoted string (strconv.Quote, %q) in an error's text.
@@ -87,6 +113,9 @@ func WithholdQuoted(text string) string {
 // quotes the request's: Post "http://..."), and every quoted path, written
 // by its shape (urlLogText: scheme, host, path's shape, query's names). The
 // rest of what text quotes stays: keploy's own words ("Content-Encoding").
+// No path tag: the report keeps the error as it came, with no tag beside its
+// URL, so a tag here is one no reader could find; the line that logs the
+// error names its test, which the report names it under.
 func ShapeQuotedURLs(text string) string {
 	return quotedInput.ReplaceAllStringFunc(text, func(q string) string {
 		u, err := strconv.Unquote(q)
@@ -95,7 +124,7 @@ func ShapeQuotedURLs(text string) string {
 		}
 		switch {
 		case strings.Contains(u, "://"):
-			return strconv.Quote(urlLogText(u))
+			return strconv.Quote(urlLogTextOf(u, true))
 		case strings.HasPrefix(u, "/"):
 			if p, err := models.ParseRequestURL(u); err == nil {
 				shape := URLPathShape(p)
@@ -409,7 +438,7 @@ func valueLogText(w string) string {
 		kind := strings.SplitN(w, ":", 3)
 		return "jdbc:" + kind[1] + ":" + RedactedValue
 	}
-	return urlLogText(w)
+	return urlLogTextOf(w, false)
 }
 
 // isJDBC reports whether w is a JDBC URL: jdbc:<subprotocol>:....
@@ -442,7 +471,7 @@ func programName(w string) string {
 	return strings.TrimSuffix(b, ".exe")
 }
 
-// urlLogText is w, or, when w is a URL, its scheme, host and path's shape
+// urlLogTextOf is w, or, when w is a URL, its scheme, host and path's shape
 // (URLPathShape) and its query's names: a URL in a command line carries a
 // token in its userinfo, a path segment or a query value. A URL inside a
 // scheme (jdbc:mysql://db/shop?password=...) is written by its inner URL's
@@ -452,7 +481,12 @@ func programName(w string) string {
 // in a host, so SQL Server's jdbc:sqlserver://db;user=sa;password=... and
 // Connector/J's jdbc:mysql://(host=db,password=...)/shop parse with the
 // password in the host.
-func urlLogText(w string) string {
+//
+// trafficHost: w is a URL of the application's traffic (a client's error
+// quotes the request's), whose host names are written by their labels'
+// shape (models.HostShape), as a name the app chose; a URL of keploy's or
+// the user's own command line keeps its hosts.
+func urlLogTextOf(w string, trafficHost bool) string {
 	if !strings.Contains(w, "://") {
 		return w
 	}
@@ -466,7 +500,7 @@ func urlLogText(w string) string {
 		if u.RawQuery != "" {
 			inner += "?" + u.RawQuery
 		}
-		return u.Scheme + ":" + urlLogText(inner)
+		return u.Scheme + ":" + urlLogTextOf(inner, trafficHost)
 	}
 	if u.Host == "" {
 		bare, _, _ := strings.Cut(w, "#")
@@ -478,8 +512,15 @@ func urlLogText(w string) string {
 		return out
 	}
 	host := u.Host
-	if !isHostList(host) {
+	switch {
+	case !isHostList(host):
 		host = "(host withheld, " + strconv.Itoa(len(host)) + " bytes)"
+	case trafficHost:
+		hosts := strings.Split(host, ",")
+		for i, h := range hosts {
+			hosts[i] = models.HostShape(h)
+		}
+		host = strings.Join(hosts, ",")
 	}
 	out := u.Scheme + "://" + host + URLPathShape(u)
 	if keys := queryKeys(u.RawQuery); len(keys) > 0 {
@@ -611,4 +652,44 @@ func splitCommandLine(cmd string) []string {
 // -c argument is redacted as the command line it is.
 func RedactCmdArgs(args []string) string {
 	return joinCommandLine(RedactArgv(args))
+}
+
+// SayWhole writes to console, beside a line of keploy's log that named a
+// reason by logText (each host by its shape and tag, models.LossHosts.LogText,
+// or by its size an older agent's text, models.UnlistedLogText, and a text
+// whose hosts were listed at places it does not hold), the reason whole,
+// each host beside its tag (models.LossHosts.ReportText), under what it is:
+// where a reader finds the host a log line's tag names, or the text it
+// withheld. It says which the log did, and why it withheld one. Nothing when the two are one (the
+// reason named no host), or for a nil console (an embedder's, which may be a
+// log).
+func SayWhole(console io.Writer, what, logText, whole string) {
+	if console == nil || whole == "" || logText == whole {
+		return
+	}
+	tagged := strings.Contains(whole, "[host tag ")
+	// A listed host with no tag is an IP address with a zone or a port that
+	// is no number, which the log writes by its shape (10.0.0.1:{}).
+	how := "by its hosts' shapes"
+	if tagged {
+		how = "by its host tags"
+	}
+	// A text the log withheld: the agent listed none of its hosts (an older
+	// agent), or listed them at places the text does not hold.
+	unlisted, misplaced := strings.Contains(logText, models.UnlistedLogNote), strings.Contains(logText, models.MisplacedLogNote)
+	switch {
+	case unlisted && misplaced && tagged:
+		how = "by its host tags, and where the agent did not list them, or listed them at places its text does not hold, by its size"
+	case unlisted && misplaced:
+		how = "by its size, as the agent did not list its host names, or listed them at places the text does not hold"
+	case unlisted && tagged:
+		how = "by its host tags, and where the agent did not list them by its size"
+	case unlisted:
+		how = "by its size, as the agent did not list its host names"
+	case misplaced && tagged:
+		how = "by its host tags, and where the agent listed them at places its text does not hold, by its size"
+	case misplaced:
+		how = "by its size, as the agent listed its host names at places the text does not hold"
+	}
+	_, _ = fmt.Fprintf(console, "%s %s, which keploy's log names %s: %s\n", Emoji, what, how, whole)
 }

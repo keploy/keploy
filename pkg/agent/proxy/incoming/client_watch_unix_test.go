@@ -21,6 +21,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // An exchange whose client hung up before the answer's end is not recorded,
@@ -63,6 +64,10 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 			cfg.Agent.Synchronous = synchronous
 			core, logs := observer.New(zapcore.InfoLevel)
 			pm := New(zap.New(core), nil, cfg)
+			// The session the ingress serves, whose key the line tags the
+			// request under (SetLogKeySession).
+			keys := models.NewLogKeySession()
+			pm.SetLogKeySession(keys)
 
 			client, proxied := tcpPairForWatch(t)
 			served := make(chan struct{})
@@ -106,9 +111,12 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 				return
 			}
 			told := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed its side").
-				Filter(namesThePath("/{}/{}/{}/{}/{}")).Len()
-			if told != 1 {
-				t.Fatalf("the half-closed client's exchange not recorded was told %d times at Info, want once", told)
+				Filter(namesThePath("/{}/{}/{}/{}/{}")).All()
+			if len(told) != 1 {
+				t.Fatalf("the half-closed client's exchange not recorded was told %d times at Info, want once", len(told))
+			}
+			if m, _ := told[0].ContextMap()["metadata"].(map[string]string); m["path_tag"] != keys.PathTag("GET", "/client/v1/jobs/j/events") {
+				t.Fatalf("the line tags the request %q, want its tag under the session the ingress serves, %s", m["path_tag"], keys.PathTag("GET", "/client/v1/jobs/j/events"))
 			}
 		})
 	}

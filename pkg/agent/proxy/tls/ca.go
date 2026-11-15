@@ -32,6 +32,7 @@ import (
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	nssbundle "golang.org/x/crypto/x509roots/fallback/bundle"
@@ -1971,8 +1972,12 @@ func getCertCache() *expirable.LRU[string, *tls.Certificate] {
 	return certCache
 }
 
+// CertForClient is the leaf for clientHello's server name, minted by the CA
+// (caPrivKey, caCertParsed) or reused from the cache. Its lines name the
+// server's name under the session clientHello's context carries (the
+// handshake's, HandshakeContext), the process's key when it carries none.
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
-	return certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, "", nil)
+	return certForClient(clientHello.Context(), logger, clientHello, caPrivKey, caCertParsed, backdate, "", nil)
 }
 
 // certForClient is CertForClient with what the connection itself says of its
@@ -1985,7 +1990,14 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 // the client's source port (SrcPortToDstURL), and a port is not a connection:
 // another client on the same port (a pod of the same node, or a connection
 // whose port was reused) had its host put on this client's leaf.
-func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, connectTarget string, dstIP net.IP) (*tls.Certificate, error) {
+//
+// Its lines name the server's name by its labels' shape beside its tag under
+// the session ctx carries (models.HostLogName): the connection's, which
+// HandleTLSConnection is given. clientHello.Context() is the handshake's,
+// context.Background() for a Handshake made with none, so its tags were the
+// process's, one host's the same across every recording and replay of a
+// long-lived agent.
+func certForClient(ctx context.Context, logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, connectTarget string, dstIP net.IP) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
 	/*
@@ -2046,16 +2058,16 @@ func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// Check the cert cache before generating a new certificate.
 	if certHost != "" {
 		if cached, ok := getCertCache().Get(cacheKey); ok {
-			probeCert(logger, "cache-hit", dstURL, 0)
-			logger.Debug("reusing cached certificate", zap.String("hostname", certHost))
+			probeCert(logger, "cache-hit", models.HostLogName(ctx, dstURL), 0)
+			logger.Debug("reusing cached certificate", zap.String("hostname", models.HostLogName(ctx, certHost)))
 			publishMITM(sourcePort, cached)
 			return cached, nil
 		}
 	}
-	probeCert(logger, "mint-start", dstURL, 0)
+	probeCert(logger, "mint-start", models.HostLogName(ctx, dstURL), 0)
 	mintStart := time.Now()
 	defer func() {
-		probeCert(logger, "mint-done", dstURL, time.Since(mintStart).Nanoseconds())
+		probeCert(logger, "mint-done", models.HostLogName(ctx, dstURL), time.Since(mintStart).Nanoseconds())
 	}()
 
 	serverReq := &csr.CertificateRequest{

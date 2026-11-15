@@ -134,7 +134,11 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 
 	// Logging similar to Match() in match.go
 	if !pass {
-		printer := matcher.NewSchemaDiffPrinter(tc.Name)
+		var mo matchOptions
+		for _, o := range opts {
+			o(&mo)
+		}
+		printer := matcher.NewSchemaDiffPrinterOut(mo.console, tc.Name)
 		for _, err := range schemaErrors {
 			printer.PushError(err.Reason, err.Expected, err.Actual)
 		}

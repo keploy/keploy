@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -28,6 +29,12 @@ func TestTheMissLineLogsNoneOfTheCall(t *testing.T) {
 			Diff: "body.token: " + s, ReceivedReq: "Authorization: Bearer " + s, ClosestMock: "mock-0",
 			NextSteps: `declare it (sessionCalls: [{host: "api.example.com", method: "GET", pathPrefix: "/v1/reset/` + s + `"}])`,
 		})},
+		// A host name is the app's (a tenant's subdomain): the line names
+		// the destination, and its advice the host, by their labels' shape.
+		{"an HTTP miss to a tenant's host", models.NewMockMismatchError(models.ErrNoMockMatched, &models.MockMismatchReport{
+			Protocol: "HTTP", Destination: s + ".tenant.example:8443", ActualSummary: "GET /v1/me",
+			NextSteps: `declare it (sessionCalls: [{host: "` + s + `.tenant.example:8443", method: "GET", pathPrefix: "/v1/me"}])`,
+		})},
 		{"a MySQL miss", models.NewMockMismatchError(models.ErrNoMockMatched, &models.MockMismatchReport{
 			Protocol: "MySQL", ActualSummary: "COM_QUERY SELECT name FROM users WHERE token = '" + s + "'", Diff: "actual: " + s,
 		})},
@@ -42,7 +49,7 @@ func TestTheMissLineLogsNoneOfTheCall(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, logs := logleak.Observe()
 			p := &Proxy{logger: logger, errChannel: make(chan error, 1)}
-			p.sendMockNotFoundErrorFrom(tc.err, 0, 0, &models.ConditionalDstCfg{Addr: "10.0.0.5:80"})
+			p.sendMockNotFoundErrorFrom(context.Background(), tc.err, 0, 0, &models.ConditionalDstCfg{Addr: "10.0.0.5:80"})
 			if logs.Len() == 0 {
 				t.Fatal("precondition: the miss was not logged")
 			}

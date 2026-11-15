@@ -294,7 +294,7 @@ func TestUnderTheSwitchAStreamHeldOpenPastItsRecordingIsNotJudged(t *testing.T) 
 		// The console says the stream is not judged and why, not that its
 		// read failed: the request by its shape, which the report keeps
 		// whole.
-		if n := logs.FilterMessage("not judged: the app sent its answer's headers and nothing of its body but keepalives, for GET /{}").Len(); n != 1 {
+		if n := logs.FilterMessage("not judged: the app sent its answer's headers and nothing of its body but keepalives, for GET /{} " + models.PathTagLabel(models.PathTag(context.Background(), "GET", "/stream"))).Len(); n != 1 {
 			t.Fatalf("the console said %d times that test-1 is not judged, want once", n)
 		}
 		if n := logs.FilterMessage("failed to read streaming response").Len(); n != 0 {
@@ -368,7 +368,8 @@ func TestUnderTheSwitchATestTheAppNeverAnswersIsNotJudged(t *testing.T) {
 	if r.Status != models.TestStatusFailed {
 		t.Fatalf("the row is %s; a reader of the status alone must see no pass", r.Status)
 	}
-	want := "the app never answered; waited 300ms of keploy's runnable time for GET /test-2"
+	// The request whole, beside the path tag the not-judged line names it by.
+	want := "the app never answered; waited 300ms of keploy's runnable time for GET /test-2 " + models.PathTagLabel(run.keys.PathTag("GET", "/test-2"))
 	if r.FailureInfo.AnswerStalled != want {
 		t.Fatalf("AnswerStalled %q, want %q", r.FailureInfo.AnswerStalled, want)
 	}
@@ -444,14 +445,20 @@ func TestUnderTheSwitchAnAnswerThatBeganIsJudgedOnItsStart(t *testing.T) {
 			if _, err := run.start(t); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
+			// Followed by the request's path tag, of the run's session's key,
+			// which its context carries into Start.
+			stalled := c.stalled
+			if stalled != "" {
+				stalled += " " + models.PathTagLabel(run.keys.PathTag("GET", "/test-2"))
+			}
 			r := run.resultOf(t, "test-2")
-			if r.Status != models.TestStatusFailed || r.FailureInfo.AnswerStalled != c.stalled || (len(r.VerdictUnknown()) == 0) != c.judged {
-				t.Fatalf("test-2: %s, AnswerStalled %q, VerdictUnknown %v; want FAILED, %q, judged %v", r.Status, r.FailureInfo.AnswerStalled, r.VerdictUnknown(), c.stalled, c.judged)
+			if r.Status != models.TestStatusFailed || r.FailureInfo.AnswerStalled != stalled || (len(r.VerdictUnknown()) == 0) != c.judged {
+				t.Fatalf("test-2: %s, AnswerStalled %q, VerdictUnknown %v; want FAILED, %q, judged %v", r.Status, r.FailureInfo.AnswerStalled, r.VerdictUnknown(), stalled, c.judged)
 			}
 			if c.judged && r.Result.StatusCode.Normal {
 				t.Fatalf("test-2's status compared normal: %+v; want the 500 judged against the recorded 200", r.Result.StatusCode)
 			}
-			if said := run.said(zapcore.ErrorLevel, "failed on its answer's start, which differs from the recording; nothing whole of its body came: the app's answer stopped part-way, after 5 bytes of its body; waited 300ms of keploy's runnable time for GET /{}"); (len(said) == 1) != c.judged {
+			if said := run.said(zapcore.ErrorLevel, "failed on its answer's start, which differs from the recording; nothing whole of its body came: the app's answer stopped part-way, after 5 bytes of its body; waited 300ms of keploy's runnable time for GET /{} "+models.PathTagLabel(run.keys.PathTag("GET", "/test-2"))); (len(said) == 1) != c.judged {
 				t.Fatalf("the console said %d time(s) that test-2 failed on its start", len(said))
 			}
 			if rep := run.report.report; rep == nil || rep.Status != string(c.set) {

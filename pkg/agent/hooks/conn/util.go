@@ -165,7 +165,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		if err != nil {
 			// Its size, never its bytes: a request body holds what the
 			// application was sent (a login's password, a token).
-			logger.Debug("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)), zap.Int64("of size", int64(len(reqBody))), zap.Error(err))
+			logger.Debug("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, req)), zap.Int64("of size", int64(len(reqBody))), zap.Error(err))
 		}
 
 		if req.Header.Get("Content-Encoding") != "" {
@@ -181,10 +181,10 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 					// decompression MaxTestCaseSize check further down, hit
 					// earlier — log it the same way, not as a decode failure.
 					logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
-						zap.Any("metadata", utils.GetReqMeta(req)))
+						zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 					return
 				}
-				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return
 			}
 		}
@@ -237,7 +237,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			}
 			if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 				logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
-					zap.Any("metadata", utils.GetReqMeta(req)))
+					zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return
 			}
 			utils.LogError(logger, err, "failed to decompress the response body")
@@ -252,7 +252,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.Int("totalSize", totalSize),
 			zap.Int("reqBodySize", len(reqBody)),
 			zap.Int("respBodySize", len(respBody)),
-			zap.Any("metadata", utils.GetReqMeta(req)))
+			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 		return
 	}
 
@@ -264,7 +264,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		respBodySize = int64(len(respBody))
 		logger.Debug("response body exceeds 1MB during recording, storing only body size",
 			zap.Int64("body_size_bytes", respBodySize),
-			zap.Any("metadata", utils.GetReqMeta(req)))
+			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 		respBody = []byte{} // clear the body — only size is stored
 	}
 

@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/replay"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -132,7 +133,7 @@ func TestACaptureLossReadNamesTheAgentThatAnsweredIt(t *testing.T) {
 	want := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 41"}}
 	t.Setenv(provenswitch.Env, "1")
 	got, agent, err := newClient(t, agentWith(t, lossAgentSvc{losses: want})).GetCaptureLossesAndAgent(context.Background())
-	if err != nil || len(got) != 1 || got[0] != want[0] || agent == "" {
+	if err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], want[0]) || agent == "" {
 		t.Fatalf("read %+v from agent %q, %v; want %+v from a named agent process", got, agent, err, want)
 	}
 	again, other, err := newClient(t, agentWith(t, lossAgentSvc{losses: want})).GetCaptureLossesAndAgent(context.Background())
@@ -151,7 +152,7 @@ func TestACaptureLossReadNamesTheAgentThatAnsweredIt(t *testing.T) {
 func TestGetCaptureLossesReadsWhatTheAgentCounted(t *testing.T) {
 	want := models.CaptureLosses{{Kind: models.CaptureLossSTARTTLS, Count: 1, What: "a TLS upgrade the parser asked for"}}
 	got, err := newClient(t, agentWith(t, lossAgentSvc{losses: want})).GetCaptureLosses(context.Background())
-	if err != nil || len(got) != 1 || got[0] != want[0] {
+	if err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], want[0]) {
 		t.Fatalf("read %+v, %v; want %+v", got, err, want)
 	}
 	if got, err := newClient(t, agentWith(t, lossAgentSvc{})).GetCaptureLosses(context.Background()); err != nil || got == nil || len(got) != 0 {

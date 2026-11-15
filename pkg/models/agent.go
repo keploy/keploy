@@ -1377,6 +1377,35 @@ const StreamEndKind Kind = "KeployStreamEnd"
 // test-case stream (StreamEndPath). Its body is the session's StreamEndSummary.
 const StreamEndPart = "stream-end"
 
+// NotRecordedPart is the form name of a multipart part of an agent's
+// test-case stream that tells its client of a request the agent's ingress
+// served and did not record as a test case (its client went before the
+// app's answer ended, the app answered before the whole body came, the
+// answer is a stream). Its body is a NotRecordedCall. A client that predates
+// it skips it, as it skips every part it does not know.
+const NotRecordedPart = "not-recorded"
+
+// NotRecordedCall is a request the agent's ingress did not record as a test
+// case (NotRecordedPart), as its client's console names it: the agent's log
+// names the request by its shape (each path segment {}) and its path tag
+// (PathTag), and the client prints the request's method and path beside the
+// same tag, so the user can tell which request the log line is about. The
+// path, never the query's values: a streamed answer's URL often carries its
+// token in the query (an EventSource can send no header).
+type NotRecordedCall struct {
+	Method string `json:"method"`
+	// Path is the request's path, escaped as its request line carried it.
+	Path string `json:"path"`
+	// QueryKeys are the names of its query's parameters, as the log names
+	// them (utils.GetReqMeta's "query keys").
+	QueryKeys string `json:"query_keys,omitempty"`
+	// PathTag is the tag the agent's line names the request by
+	// (models.PathTag), made by the agent.
+	PathTag string `json:"path_tag"`
+	// Why is why the request is not a test case, in keploy's words.
+	Why string `json:"why"`
+}
+
 // StreamEndSummary is the body of the test-case stream's end marker
 // (StreamEndPart): what the agent's summary of the session says it lost, for
 // its client to say in its own log. An agent docker compose runs logs through

@@ -240,6 +240,8 @@ func newTmplHarness(t *testing.T, conf *tmplConf, cases []*models.TestCase, tune
 		failedTCsBySetID:     make(map[string][]string),
 		mockMismatchFailures: NewTestFailureStore(),
 		consumedMockNames:    make(map[string]struct{}),
+		// keploy's CLI's console (stdoutConsole).
+		console: stdoutConsole{},
 	}
 	return &tmplHarness{r: r, report: report}
 }

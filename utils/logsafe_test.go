@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/internal/logleak"
+	"go.keploy.io/server/v3/pkg/models"
 	"gopkg.in/yaml.v3"
 )
 
@@ -63,13 +65,13 @@ func TestWithholdInputLeavesNoneOfTheInput(t *testing.T) {
 	}
 }
 
-// A URL is named by its shape: its method, host, scheme, its path's
-// segments counted and its query's names, never a value, a segment or
-// userinfo.
+// A URL is named by its shape: its method, its host's labels' shape (a name
+// is the app's), its scheme, its path's segments counted and its query's
+// names, never a value, a segment, a name or userinfo.
 func TestURLLogMetaNamesTheShapeOnly(t *testing.T) {
 	const s = logleak.Canary
-	meta := URLLogMeta("GET", "https://app:"+s+"@api.example.com/v1/reset/"+s+"?access_token="+s+"&lang=en")
-	want := map[string]string{"method": "GET", "host": "api.example.com", "scheme": "https", "path": "/{}/{}/{}", "query keys": "access_token,lang"}
+	meta := URLLogMeta("GET", "https://app:"+s+"@"+s+".example.com/v1/reset/"+s+"?access_token="+s+"&lang=en")
+	want := map[string]string{"method": "GET", "host": "{}.{}.{}", "scheme": "https", "path": "/{}/{}/{}", "query keys": "access_token,lang"}
 	for k, v := range want {
 		if meta[k] != v {
 			t.Errorf("%s = %q, want %q", k, meta[k], v)
@@ -86,6 +88,21 @@ func TestURLLogMetaNamesTheShapeOnly(t *testing.T) {
 	}
 	if bad := URLLogMeta("GET", "http://h/%zz"+s); bad["url"] != "unparsable" || strings.Contains(bad["bytes"], s[:8]) {
 		t.Errorf("an unparsable URL is named %v, want its size only", bad)
+	}
+	// No path tag, of a method or of none (a test's target as keploy
+	// resolves it): keploy's CLI names a test case's URL so, and no console
+	// or report line prints a tag of it. GetReqMeta, for the agent's lines,
+	// names the tag the console prints beside the call.
+	for _, method := range []string{"GET", ""} {
+		if meta := URLLogMeta(method, "http://app:8080/v1/reset/"+s); meta["path"] != "/{}/{}/{}" {
+			t.Errorf("a URL of method %q is named %v, want its shape", method, meta)
+		} else if tag, ok := meta["path_tag"]; ok {
+			t.Errorf("a URL of method %q has path tag %q, want none", method, tag)
+		}
+	}
+	req, _ := http.NewRequest("GET", "http://app:8080/v1/reset/"+s, nil)
+	if shape, meta := GetReqShape(req), GetReqMeta(context.Background(), req); shape["path_tag"] != "" || meta["path_tag"] != models.PathTag(context.Background(), "GET", "/v1/reset/"+s) {
+		t.Errorf("GetReqShape = %v, GetReqMeta = %v; want the tag in GetReqMeta's alone", shape, meta)
 	}
 }
 
@@ -204,18 +221,23 @@ func TestRedactCommandLineLeavesNoCredential(t *testing.T) {
 	}
 }
 
-// A quoted URL or path is written by its shape; keploy's own quoted words
-// stay.
+// A quoted URL or path is written by its shape, its host's name by its
+// labels' shape (an address whole); keploy's own quoted words stay.
 func TestShapeQuotedURLsKeepsKeploysWords(t *testing.T) {
 	const s = logleak.Canary
-	got := ShapeQuotedURLs(`Post "http://app:8080/v1/reset/` + s + `?token=` + s + `": EOF; header "Content-Encoding" is "gzip"; path "/v1/me/` + s + `"`)
+	got := ShapeQuotedURLs(`Post "http://app:8080/v1/reset/` + s + `?token=` + s + `": EOF; header "Content-Encoding" is "gzip"; path "/v1/me/` + s + `"; dial "https://` + s + `.example.com:443/x": refused; "http://127.0.0.1:9/p"`)
 	if logleak.Holds(got, s) {
 		t.Fatalf("ShapeQuotedURLs left the secret in %d bytes", len(got))
 	}
-	for _, want := range []string{`"http://app:8080/{}/{}/{}?{token}"`, `"Content-Encoding"`, `"gzip"`, `"/{}/{}/{}"`} {
+	for _, want := range []string{`"http://{}:8080/{}/{}/{}?{token}"`, `"Content-Encoding"`, `"gzip"`, `"/{}/{}/{}"`, `"https://{}.{}.{}:443/{}"`, `"http://127.0.0.1:9/{}"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("ShapeQuotedURLs = %q, want it to hold %s", got, want)
 		}
+	}
+	// No path tag: the report keeps a client's error with no tag beside its
+	// URL, so no reader could find one.
+	if strings.Contains(got, "path tag") {
+		t.Errorf("ShapeQuotedURLs = %q, want no path tag", got)
 	}
 }
 
@@ -266,4 +288,57 @@ func TestRedactArgvWithholdsAHostThatIsNoHostList(t *testing.T) {
 			t.Errorf("ShapeQuotedURLs = %q, want the host withheld", got)
 		}
 	}
+}
+
+// SayWhole names a reason whole on a console only where its log line named
+// it otherwise (a host by its shape and tag): never twice, never to a nil
+// console.
+func TestSayWholeNamesWhatTheLogShapedOnly(t *testing.T) {
+	var console strings.Builder
+	SayWhole(&console, "test set s", "to {}:443 #3fa2c1d0e9b8", "to orders-svc:443 [host tag #3fa2c1d0e9b8]")
+	if want := "test set s, which keploy's log names by its host tags: to orders-svc:443 [host tag #3fa2c1d0e9b8]\n"; !strings.HasSuffix(console.String(), want) {
+		t.Fatalf("console = %q, want it to end %q", console.String(), want)
+	}
+	// An older agent's text, which the log names by its size, is said so.
+	console.Reset()
+	SayWhole(&console, "test set s", "(withheld, 17 bytes: "+models.UnlistedLogNote+")", "to orders-svc:443")
+	if want := "test set s, which keploy's log names by its size, as the agent did not list its host names: to orders-svc:443\n"; !strings.HasSuffix(console.String(), want) {
+		t.Fatalf("console = %q, want it to end %q", console.String(), want)
+	}
+	console.Reset()
+	SayWhole(&console, "test set s", "to {}:443 #3fa2c1d0e9b8; (withheld, 17 bytes: "+models.UnlistedLogNote+")", "to orders-svc:443 [host tag #3fa2c1d0e9b8]; to pay-svc:443")
+	if want := "test set s, which keploy's log names by its host tags, and where the agent did not list them by its size: "; !strings.Contains(console.String(), want) {
+		t.Fatalf("console = %q, want it to say %q", console.String(), want)
+	}
+	// A text whose hosts the agent listed, at places it does not hold, is
+	// said so: the agent did list them.
+	console.Reset()
+	SayWhole(&console, "test set s", "(withheld, 17 bytes: "+models.MisplacedLogNote+")", "to orders-svc:443")
+	if want := "test set s, which keploy's log names by its size, as the agent listed its host names at places the text does not hold: to orders-svc:443\n"; !strings.HasSuffix(console.String(), want) {
+		t.Fatalf("console = %q, want it to end %q", console.String(), want)
+	}
+	console.Reset()
+	SayWhole(&console, "test set s", "to {}:443 #3fa2c1d0e9b8; (withheld, 17 bytes: "+models.MisplacedLogNote+")", "to orders-svc:443 [host tag #3fa2c1d0e9b8]; to pay-svc:443")
+	if want := "test set s, which keploy's log names by its host tags, and where the agent listed them at places its text does not hold, by its size: "; !strings.Contains(console.String(), want) {
+		t.Fatalf("console = %q, want it to say %q", console.String(), want)
+	}
+	console.Reset()
+	SayWhole(&console, "test set s", "to {}:443 #3fa2c1d0e9b8; (withheld, 17 bytes: "+models.UnlistedLogNote+"); (withheld, 9 bytes: "+models.MisplacedLogNote+")", "to orders-svc:443 [host tag #3fa2c1d0e9b8]; to pay-svc:443; to db")
+	if want := "test set s, which keploy's log names by its host tags, and where the agent did not list them, or listed them at places its text does not hold, by its size: "; !strings.Contains(console.String(), want) {
+		t.Fatalf("console = %q, want it to say %q", console.String(), want)
+	}
+	// An IP address whose port is no number has no tag: the log names it
+	// by its shape.
+	console.Reset()
+	SayWhole(&console, "test set s", "a call to 10.0.0.1:{}", "a call to 10.0.0.1:s3cr3t")
+	if want := "test set s, which keploy's log names by its hosts' shapes: a call to 10.0.0.1:s3cr3t\n"; !strings.HasSuffix(console.String(), want) {
+		t.Fatalf("console = %q, want it to end %q", console.String(), want)
+	}
+	console.Reset()
+	SayWhole(&console, "test set s", "to 10.0.0.1:443", "to 10.0.0.1:443")
+	SayWhole(&console, "test set s", "", "")
+	if console.Len() != 0 {
+		t.Fatalf("a reason its log named whole was said again: %q", console.String())
+	}
+	SayWhole(nil, "test set s", "a", "b") // no console: nothing, and no panic
 }

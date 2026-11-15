@@ -734,7 +734,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// Determine which port to use for test execution.
 	var err error
 	recorded := authority
-	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
+	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger.With(zap.String("testcase", tc.Name)))
 	if err != nil {
 		return nil, err
 	}
@@ -772,7 +772,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// the exchange (pingWatch tells it which: never a keepalive) cuts it.
 	var dialed net.Conn = conn
 	var pings *pingWatch
-	answer := newAnswerWatch(cfg)
+	answer := newAnswerWatch(ctx, cfg)
 	defer answer.stop()
 	defer answer.waiting()()
 	answer.closeOnCut(conn)

@@ -30,9 +30,12 @@ import (
 // a reset link's token, a session id), without its query; any other protocol
 // by its CallShape (a gRPC method, a SQL statement with its literals written
 // ?, a Mongo command and its namespace's shape), or by the command its
-// parser read (CommandName). The report keeps the call's summary for the
-// user's own view of the miss; a log line reaches a log store. "" for a nil
-// r, or a call it can name none of.
+// parser read (CommandName). A line that names an HTTP call so names its path
+// tag beside it (r.LogPathTag: a path_tag field, or WithPathTag in a
+// sentence), which the console and the report print beside the call's
+// summary. The report keeps the call's summary for the user's own view of the
+// miss; a log line reaches a log store. "" for a nil r, or a call it can name
+// none of.
 func MissLogShape(r *MockMismatchReport) string {
 	if r == nil {
 		return ""
@@ -48,11 +51,26 @@ func MissLogShape(r *MockMismatchReport) string {
 	return CommandName(r.Command)
 }
 
+// LogPathTag is the path tag a log line names r's call by: the one r
+// carries (PathTag), made in the session that logged the miss (the agent's
+// parser, or the proxy as the miss reaches it: CallPathTag of the session's
+// context), so the console and the report print the tag the agent's line
+// names. No line makes one of its own here: one made outside the session's
+// context would be under another key. "" for a call with none (not an HTTP
+// call).
+func (r *MockMismatchReport) LogPathTag() string {
+	if r == nil {
+		return ""
+	}
+	return r.PathTag
+}
+
 // MissLogNextStep is r's next step as a log line carries it: keploy's own
 // advice, with every field path it names in its shape (the rule of
 // UnmatchedCall.SanitizedNextStep: a map's key can be a value, a session id
 // or an email), and every string it quotes in its shape (quotedLogShape): a
-// URL path with each segment {}, a field path, a method and a sessionCalls
+// URL path written as where the console and the report name it, by the
+// call's path tag (advicePaths), a field path, a method and a sessionCalls
 // host kept, anything else {}. A refused word's line (learn.RefusalLine,
 // which a learn round's miss carries) quotes the recorded value and round
 // F's, and its why can quote one: the line is logged by its where, its kind,
@@ -65,16 +83,64 @@ func MissLogNextStep(r *MockMismatchReport) string {
 	if r == nil || r.NextSteps == "" {
 		return ""
 	}
-	return adviceShape(r.NextSteps, r.FieldDiffs)
+	return adviceShape(r.NextSteps, r.FieldDiffs, logPaths(r.LogPathTag()))
+}
+
+// advicePaths is how advice's shaping writes a URL path it quotes. Evidence
+// (zero: evidence) writes its shape, each segment {}. A log line
+// (logPaths) about a call with a path tag writes it as keploy's console and
+// report name it: the shape alone helps no reader (a sessionCalls entry's
+// pathPrefix of "/{}/{}" declares nothing), while the console's Hint and the
+// report's next step quote the path whole, beside the call's path tag.
+// Advice about no call (AdviceLogText), or about a call with no tag (not an
+// HTTP call), writes the path's shape: a tag of a path alone is one no console
+// or report line prints (PathTag), and the line names the test or the call
+// the report keeps the advice whole for.
+type advicePaths struct {
+	log  bool   // a log line's advice, not evidence's
+	call string // the path tag of the call the advice is about; "" for none
+}
+
+// evidencePaths is how evidence writes advice's URL paths: by their shapes,
+// with no tag (a tag is the run's, and evidence outlives it).
+var evidencePaths = advicePaths{}
+
+// logPaths is how a log line writes the URL paths of advice about the call
+// whose path tag is call ("" for no call, or one with no tag).
+func logPaths(call string) advicePaths { return advicePaths{log: true, call: call} }
+
+// quoted is p, a URL path advice quotes, as a writes it: in a log line about
+// a call with a path tag, where the console and the report name it for that
+// call, by the tag; else its shape, quoted.
+func (a advicePaths) quoted(p string) string {
+	if a.log && a.call != "" {
+		return "<the path keploy's console Hint and report name for " + PathTagLabel(a.call) + ">"
+	}
+	return strconv.Quote(urlPathLogShape(p))
+}
+
+// host is h, the host a sessionCalls entry names (quoted as q), as a writes
+// it: an IP address, which is no name the app chose, whole (q); a name, in a
+// log line about a call with a path tag, by where the console's Hint and the
+// report name it for that call, by the tag; else its shape (HostShape).
+func (a advicePaths) host(q, h string) string {
+	if name, _ := splitHostPort(h); isIPHost(name) {
+		return q
+	}
+	if a.log && a.call != "" {
+		return "<the host keploy's console Hint and report name for " + PathTagLabel(a.call) + ">"
+	}
+	return strconv.Quote(HostShape(h))
 }
 
 // adviceShape is text, keploy's advice about a call whose fields diffs are,
-// with no value of the call: MissLogNextStep's shaping, which evidence's next
-// step (UnmatchedCall.SanitizedNextStep) shares.
-func adviceShape(text string, diffs []MockFieldDiff) string {
+// with no value of the call, its URL paths written as paths says:
+// MissLogNextStep's shaping, which evidence's next step
+// (UnmatchedCall.SanitizedNextStep) shares.
+func adviceShape(text string, diffs []MockFieldDiff, paths advicePaths) string {
 	next := refusedWordsInLogForm(text)
 	next = UnmatchedCall{NextSteps: next, FieldDiffs: diffs}.shapedText(next)
-	shaped, ok := quotedInLogForm(next)
+	shaped, ok := quotedInLogForm(next, paths)
 	if !ok || strings.ContainsRune(next, '`') {
 		return fmt.Sprintf("(a next step of %d bytes, withheld: its quotes do not pair, or it holds a backquote; the miss report has it)", len(text))
 	}
@@ -85,10 +151,14 @@ func adviceShape(text string, diffs []MockFieldDiff) string {
 // step, a why) as a log line carries them, shaped as MissLogNextStep shapes
 // a miss's next step: every field path and quoted URL path in its shape,
 // every quoted value {}, a refused word's line without its values, and the
-// whole withheld where its quotes do not pair. The report keeps the words
-// whole for the user's own view.
+// whole withheld where its quotes do not pair. A quoted URL path is about no
+// call here: it is written by its shape alone (advicePaths). The report keeps
+// the words whole for the user's own view.
 func AdviceLogText(text string) string {
-	return MissLogNextStep(&MockMismatchReport{NextSteps: text})
+	if text == "" {
+		return ""
+	}
+	return adviceShape(text, nil, logPaths(""))
 }
 
 // refusedValues begin a refused word's line after its where: its two
@@ -226,7 +296,7 @@ var refusalKindWord = regexp.MustCompile(`^[a-z][a-z-]{0,39}$`)
 // no string that closes, or a string that does not stand as a word (each
 // quote beside a space, a bracket or a separator), so that what is taken
 // as quoted may not be, and a value may stand outside.
-func quotedInLogForm(text string) (string, bool) {
+func quotedInLogForm(text string, paths advicePaths) (string, bool) {
 	var b strings.Builder
 	for i := 0; ; {
 		j := strings.IndexByte(text[i:], '"')
@@ -240,7 +310,7 @@ func quotedInLogForm(text string) (string, bool) {
 		if err != nil || !quoteEdge(text, j-1) || !quoteEdge(text, j+len(q)) {
 			return "", false
 		}
-		b.WriteString(quotedLogShape(q, text[:j]))
+		b.WriteString(quotedLogShape(q, text[:j], paths))
 		i = j + len(q)
 	}
 }
@@ -253,18 +323,19 @@ func quoteEdge(text string, i int) bool {
 }
 
 // quotedLogShape is a quoted string of advice as a log line writes it, by
-// the text before it: a URL path with each segment {}, a field path in its
-// shape (FieldShape), an HTTP method, keploy's placeholder <regex>, a
+// the text before it: a URL path as paths writes it (advicePaths.quoted), a
+// field path in its shape (FieldShape), an HTTP method, keploy's placeholder <regex>, a
 // template placeholder ("{{capture string .id}}"), a header
 // named as one (header "Content-Encoding"), or the host a sessionCalls entry
-// names ({host: "api.example.com"}); anything else, a value a line may
-// quote, {}.
-func quotedLogShape(q, before string) string {
+// names ({host: "api.example.com"}) as paths writes it (advicePaths.host: an
+// IP address whole, a name by the tag or its shape); anything else, a value
+// a line may quote, {}.
+func quotedLogShape(q, before string, paths advicePaths) string {
 	u, err := strconv.Unquote(q)
 	switch {
 	case err != nil:
 	case strings.HasPrefix(u, "/"):
-		return strconv.Quote(urlPathLogShape(u))
+		return paths.quoted(u)
 	case fieldRoot.MatchString(u):
 		return strconv.Quote(FieldShape(u))
 	case httpMethods[u] || u == "<regex>" || placeholderText.MatchString(u):
@@ -272,7 +343,7 @@ func quotedLogShape(q, before string) string {
 	case strings.HasSuffix(before, "header ") && headerName.MatchString(u):
 		return q
 	case strings.HasSuffix(before, "{host: ") && hostName.MatchString(u):
-		return q
+		return paths.host(q, u)
 	}
 	return `"` + pathHole + `"`
 }
@@ -355,9 +426,12 @@ func urlPathLogShape(raw string) string {
 }
 
 // UnmatchedCallLogShape is MissLogShape of the call m: how a log line names a
-// call no mock answered. Never "", as a sentence names it: a call whose shape
-// it cannot tell is "a <protocol> call", or "a call" where its protocol is
-// not a name either.
+// call no mock answered, beside the path tag m carries (PathTag, the
+// agent's: a path_tag field), never one this process makes, as the console
+// and the report print m's own; a sentence names it with its tag
+// (UnmatchedCallLogName). Never "", as a sentence names it: a call whose
+// shape it cannot tell is "a <protocol> call", or "a call" where its protocol
+// is not a name either.
 func UnmatchedCallLogShape(m UnmatchedCall) string {
 	if s := MissLogShape(&MockMismatchReport{Protocol: m.Protocol, ActualSummary: m.ActualSummary, Command: m.Command, Operation: m.Operation}); s != "" {
 		return s
@@ -368,11 +442,22 @@ func UnmatchedCallLogShape(m UnmatchedCall) string {
 	return "a call"
 }
 
+// UnmatchedCallLogName is how a sentence of a log line names the call m: its
+// shape (UnmatchedCallLogShape) followed by the path tag m carries
+// (WithPathTag): "POST /{}/{} [path tag #1f2e3d4c5b6a]".
+func UnmatchedCallLogName(m UnmatchedCall) string {
+	return WithPathTag(UnmatchedCallLogShape(m), m.PathTag)
+}
+
 // UnmatchedCallLogText is text, keploy's own words about the call m (its
 // next step, its reason), as a log line carries it: MissLogNextStep's
-// shaping, by m's field diffs.
+// shaping, by m's field diffs, a URL path it quotes named by the path tag m
+// carries (UnmatchedCallLogShape).
 func UnmatchedCallLogText(m UnmatchedCall, text string) string {
-	return MissLogNextStep(&MockMismatchReport{NextSteps: text, FieldDiffs: m.FieldDiffs})
+	if text == "" {
+		return ""
+	}
+	return adviceShape(text, m.FieldDiffs, logPaths(m.PathTag))
 }
 
 // FieldPathsInTextShaped is each of texts, keploy's words naming fields

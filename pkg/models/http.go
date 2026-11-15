@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -161,6 +162,57 @@ func FormFilePathLogText(path string) string {
 	dir, base := filepath.Split(path)
 	return dir + FormFileNameLogText(base)
 }
+
+// FormFilePathsInError is err, an error about a file that ends in a form
+// part's file name, with each of paths written in its text as
+// FormFilePathLogText writes it: the os package names the whole path in its
+// errors, and keploy's recording-file helpers the path within the recording,
+// plain or quoted. errors.Is and errors.As still see err. err itself when its
+// text names none of paths; nil for nil.
+func FormFilePathsInError(err error, paths ...string) error {
+	if err == nil {
+		return nil
+	}
+	text := err.Error()
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		shaped := FormFilePathLogText(p)
+		text = strings.ReplaceAll(text, strconv.Quote(p), strconv.Quote(shaped))
+		text = strings.ReplaceAll(text, p, shaped)
+	}
+	if text == err.Error() {
+		return err
+	}
+	return formFileErr{err: err, text: text}
+}
+
+// FormFileError is Err, an error about a file that ends in a form part's file
+// name (each of Paths), as a caller hands it on: its text whole, for the
+// user's own view (a test's report names the file the test case names), and
+// LogText for a log line. A caller that logs an error it is handed finds it
+// with errors.As (pkg.LoggableAnswerError).
+type FormFileError struct {
+	Err   error
+	Paths []string
+}
+
+func (e FormFileError) Error() string { return e.Err.Error() }
+func (e FormFileError) Unwrap() error { return e.Err }
+
+// LogText is e's text as a log line carries it: each of e.Paths by
+// FormFilePathLogText (FormFilePathsInError).
+func (e FormFileError) LogText() string { return FormFilePathsInError(e.Err, e.Paths...).Error() }
+
+// formFileErr is an error whose text FormFilePathsInError shaped.
+type formFileErr struct {
+	err  error
+	text string
+}
+
+func (e formFileErr) Error() string { return e.text }
+func (e formFileErr) Unwrap() error { return e.err }
 
 // HTTPResp is an HTTP response. StreamBody is a streamed body's frames, as a
 // recording keeps them in YAML (MarshalYAML). JSON carries the body alone, one

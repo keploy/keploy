@@ -19,7 +19,8 @@ import (
 )
 
 // The ingress logs a call it does not record by facts about it (its method,
-// host, path's shape and query's names), never its URL as sent: a streamed
+// host's shape and tag, path's shape and query's names), never its URL as
+// sent, nor its host's name (a tenant's): a streamed
 // answer's URL often carries its token in the query (an EventSource can send
 // no header), and a path a reset link's. A request it cannot parse is logged
 // with the parser's error withheld: it quotes the request line or a header
@@ -42,6 +43,28 @@ func TestTheIngressLogsNoneOfTheCall(t *testing.T) {
 			app: func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = w.Write([]byte("data: " + s + "\n\n"))
+			},
+		},
+		{
+			// A host name is the app's (a tenant's subdomain): named by its
+			// labels' shape and tag.
+			name: "a Host header that names a tenant",
+			line: "Not recording a streaming response as a test case",
+			send: "GET /v1/events HTTP/1.1\r\nHost: " + s + ".tenant.example:8080\r\nConnection: close\r\n\r\n",
+			app: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("data: x\n\n"))
+			},
+		},
+		{
+			// A Content-Type's parameters are the app's: the line names
+			// its media type alone.
+			name: "a streamed answer's Content-Type parameters",
+			line: "Not recording a streaming response as a test case",
+			send: "GET /v1/events HTTP/1.1\r\nHost: app.local\r\nConnection: close\r\n\r\n",
+			app: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream; session="+s)
+				_, _ = w.Write([]byte("data: x\n\n"))
 			},
 		},
 		{
@@ -127,8 +150,8 @@ func TestTheNotRecordedLinesNameTheCallByItsShape(t *testing.T) {
 	const s = logleak.Canary
 	req := httptest.NewRequest(http.MethodPost, "/v1/reset/"+s+"?token="+s, nil)
 	logger, logs := logleak.Observe()
-	tellClientLeft(logger, req)
-	warnNotRecorded(logger, req, &http.Response{StatusCode: http.StatusOK}, errors.New("the app answered early"))
+	tellClientLeft(context.Background(), logger, req)
+	warnNotRecorded(context.Background(), logger, req, &http.Response{StatusCode: http.StatusOK}, errors.New("the app answered early"))
 	if len(logs.All()) != 2 {
 		t.Fatalf("logged %d lines, want 2", len(logs.All()))
 	}

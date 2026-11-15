@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -46,7 +47,7 @@ func TestMatchRequestShapeVolatileParamIgnored(t *testing.T) {
 	h := newHTTP()
 	recorded := httpMock("rec", "GET", "http://notify.internal.svc/v1/poll?cursor=1")
 	live := httpMock("live", "GET", "http://notify.internal.svc/v1/poll?cursor=999")
-	ok, detail := h.MatchRequestShape(live, recorded, laneNotify())
+	ok, detail := h.MatchRequestShape(context.Background(), live, recorded, laneNotify())
 	if !ok {
 		t.Fatalf("volatile cursor difference must not fail shape: %s", detail)
 	}
@@ -56,7 +57,7 @@ func TestMatchRequestShapePathDriftFlags(t *testing.T) {
 	h := newHTTP()
 	recorded := httpMock("rec", "GET", "http://notify.internal.svc/v1/poll?cursor=1")
 	live := httpMock("live", "GET", "http://notify.internal.svc/v1/DIFFERENT?cursor=1")
-	ok, _ := h.MatchRequestShape(live, recorded, laneNotify())
+	ok, _ := h.MatchRequestShape(context.Background(), live, recorded, laneNotify())
 	if ok {
 		t.Fatal("path drift must report shape mismatch")
 	}
@@ -96,7 +97,7 @@ func TestMatchRequestShapeStripsRecordedURLParams(t *testing.T) {
 	// Live mock differs only in the volatile cursor's value/presence.
 	live := httpMock("live", "GET", "http://notify.internal.svc/v1/poll?cursor=999&page=2")
 
-	ok, detail := h.MatchRequestShape(live, recorded, laneNotify())
+	ok, detail := h.MatchRequestShape(context.Background(), live, recorded, laneNotify())
 	if !ok {
 		t.Fatalf("expected recorded-side URLParams volatile strip to allow shape match: %s", detail)
 	}
@@ -133,7 +134,7 @@ func TestMatchRequestShapeRecordedURLParamsKeyDrift(t *testing.T) {
 	// "page" replaced by "other" — a non-volatile key drift.
 	live := httpMock("live", "GET", "http://notify.internal.svc/v1/poll?cursor=999&other=3")
 
-	ok, _ := h.MatchRequestShape(live, recorded, laneNotify())
+	ok, _ := h.MatchRequestShape(context.Background(), live, recorded, laneNotify())
 	if ok {
 		t.Fatal("non-volatile query key drift (page vs other) must report shape mismatch")
 	}
@@ -222,17 +223,17 @@ func TestMatchRequestShapeStrictUnderTheSwitch(t *testing.T) {
 
 	t.Setenv("KEPLOY_PROVEN", "")
 	for _, live := range []*models.Mock{otherHost, otherID, same} {
-		if ok, detail := h.MatchRequestShape(live, recorded, laneNotify()); !ok {
+		if ok, detail := h.MatchRequestShape(context.Background(), live, recorded, laneNotify()); !ok {
 			t.Fatalf("without the switch %s flagged: %s", live.Spec.HTTPReq.URL, detail)
 		}
 	}
 	t.Setenv("KEPLOY_PROVEN", "1")
 	for _, live := range []*models.Mock{otherHost, otherID} {
-		if ok, _ := h.MatchRequestShape(live, recorded, laneNotify()); ok {
+		if ok, _ := h.MatchRequestShape(context.Background(), live, recorded, laneNotify()); ok {
 			t.Fatalf("under the switch %s was not flagged", live.Spec.HTTPReq.URL)
 		}
 	}
-	if ok, detail := h.MatchRequestShape(same, recorded, laneNotify()); !ok {
+	if ok, detail := h.MatchRequestShape(context.Background(), same, recorded, laneNotify()); !ok {
 		t.Fatalf("under the switch the volatile cursor flagged: %s", detail)
 	}
 }

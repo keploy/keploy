@@ -458,5 +458,28 @@ func TestAFormPartsFileNameIsNamedByItsSize(t *testing.T) {
 	if err == nil || logleak.Holds(err.Error(), s) {
 		t.Errorf("insert = %v, want the write's failure without the file's name", err)
 	}
+	// Gone: the capture's copy of the part (the client's, named after the
+	// part's file) is no longer there.
+	gone := filepath.Join(t.TempDir(), "keploy_1_"+name)
+	if err := ts.InsertTestCase(ctx, formCase("test-4", models.FormData{Key: "file", FileNames: []string{name}, Paths: []string{gone}, Captured: []string{gone}}), "set", false); err != nil {
+		t.Fatalf("insert = %v, want the test case stored without the part", err)
+	}
+	if logs.FilterMessage("failed to persist form file - ensure the temp file exists before saving").Len() != 1 {
+		t.Fatal("precondition: the gone copy was not said")
+	}
+	// A copy whose read fails: the capture's copy is a folder (read <it>: is
+	// a directory), its read side naming the copy, which ends in the part's
+	// file name.
+	folder := filepath.Join(t.TempDir(), "keploy_2_"+name)
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err = ts.InsertTestCase(ctx, formCase("test-5", models.FormData{Key: "file", FileNames: []string{name}, Paths: []string{folder}, Captured: []string{folder}}), "set", false)
+	if logs.FilterMessage("failed to copy asset file").Len() != 1 {
+		t.Fatalf("precondition: the copy's failed read was not said (insert = %v)", err)
+	}
+	if err == nil || logleak.Holds(err.Error(), s) {
+		t.Errorf("insert = %v, want the copy's failure without the file's name", err)
+	}
 	logleak.Check(t, logs, s, "the test store's form part lines")
 }

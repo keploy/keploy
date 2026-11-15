@@ -67,7 +67,7 @@ func jsonAnswer(status int, body string) string {
 func recordedAs(t *testing.T, h *HTTP, name string, seq int, req, resp string, vars models.MockVariables) *models.Mock {
 	t.Helper()
 	at := learnAt.Add(time.Duration(seq) * time.Second)
-	m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(req), Resp: []byte(resp), ReqTimestampMock: at, ResTimestampMock: at},
+	m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(req), Resp: []byte(resp), ReqTimestampMock: at, ResTimestampMock: at},
 		80, "test-conn", models.OutgoingOptions{})
 	if err != nil || m == nil {
 		t.Fatalf("buildHTTPMock = (%v, %v)", m, err)

@@ -39,7 +39,7 @@ func servedWorker(t *testing.T, p *Proxy, inst uint32) workerWindow {
 // parser's report reaches the proxy.
 func workerMiss(p *Proxy, call string, inst uint32) {
 	report := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: call}
-	p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
+	p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
 }
 
 // readCalls reads r's misses as "call@instance", failing the test on an
@@ -132,7 +132,7 @@ func TestAWorkersMarkedMissIsNotCutByTheRunsSetStaging(t *testing.T) {
 	p.setStaged.Store(5)
 	marked := func(call string, inst uint32) {
 		report := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: call, Mark: models.RoundMarkedSettled, MarkEpoch: 1}
-		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
+		p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
 	}
 	w.ContinueTestErrorCapture()
 	p.ContinueTestErrorCapture()
@@ -195,7 +195,7 @@ func TestAWorkersLateCallIsKeptForItsOwnNextReadAtTheNextSetsStart(t *testing.T)
 			late := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "POST /late"}
 			integrations.StampMark(late, call)
 			send := func(r *models.MockMismatchReport) {
-				p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
+				p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
 				flushDrain(p)
 			}
 			if got := readCalls(t, "worker 1's o::TestX end", w); len(got) != 0 {
@@ -305,7 +305,7 @@ func TestAWorkersMarksAreComparedWithItsOwnManagersStagings(t *testing.T) {
 		t.Fatalf("precondition: worker 1's call after the staging is marked %v at staging %d, want marked at %d", after.Mark, after.MarkEpoch, m1.StagingEpoch())
 	}
 	for _, r := range []*models.MockMismatchReport{kept, before, after} {
-		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
+		p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, r), 0, 1, nil)
 		flushDrain(p)
 	}
 	p.ContinueTestErrorCapture()
@@ -575,7 +575,7 @@ func TestAStoppedWorkersMissIsCountedACallKeployCannotAttribute(t *testing.T) {
 		if report == nil {
 			err = models.ErrNoMockMatched
 		}
-		p.sendMockNotFoundErrorFrom(err, 4242, inst, dst)
+		p.sendMockNotFoundErrorFrom(context.Background(), err, 4242, inst, dst)
 	}
 	miss(7, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /none"}, nil)
 	if n, _ := unattributed(); n != 0 {

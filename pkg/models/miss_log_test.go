@@ -82,7 +82,9 @@ func TestMissLogNextStepWithholdsARefusedWordsValues(t *testing.T) {
 	if strings.Contains(got, s[:8]) {
 		t.Fatalf("MissLogNextStep holds a value the call sent: %q", got)
 	}
-	want := `Refused: mock-3 body.filter.{} word 2: refused (conflict), its recorded and round F values withheld. Places: mock-1 body.token, mock-2 body.sessions.{}.user. Edits: fix-app; or give. Or declare it (sessionCalls: [{host: "api.example.com", method: "GET", pathPrefix: "/{}/{}"}]).`
+	// The quoted path and host are about no HTTP call here (a Mongo miss's
+	// advice, which carries no path tag): their shapes alone.
+	want := `Refused: mock-3 body.filter.{} word 2: refused (conflict), its recorded and round F values withheld. Places: mock-1 body.token, mock-2 body.sessions.{}.user. Edits: fix-app; or give. Or declare it (sessionCalls: [{host: "{}.{}.{}", method: "GET", pathPrefix: "/{}/{}"}]).`
 	if got != want {
 		t.Errorf("MissLogNextStep =\n%q, want\n%q", got, want)
 	}
@@ -94,9 +96,12 @@ func TestMissLogNextStepWithholdsARefusedWordsValues(t *testing.T) {
 		`set it to "` + s + `"`:    `set it to "{}"`,
 		`method: "ABCDEFGHJKLMNP"`: `method: "{}"`,
 		`{"header.X-Token": []}`:   `{"header.X-Token": []}`,
-		// A host is kept only where a sessionCalls entry names it.
+		// A host is named only where a sessionCalls entry names it: a
+		// name by its shape (a name is traffic), an address whole.
 		`the test gave given.host: "` + s + `"`: `the test gave given.host: "{}"`,
-		`{host: "api.example.com"}`:             `{host: "api.example.com"}`,
+		`{host: "api.example.com"}`:             `{host: "{}.{}.{}"}`,
+		`{host: "api.example.com:8443"}`:        `{host: "{}.{}.{}:8443"}`,
+		`{host: "127.0.0.1:9096"}`:              `{host: "127.0.0.1:9096"}`,
 		// A header's name is kept only where it is one.
 		`"header.Bearer ` + s + `"`:                        `"header.{}"`,
 		`the answer's header "Content-Encoding" is "gzip"`: `the answer's header "Content-Encoding" is "{}"`,

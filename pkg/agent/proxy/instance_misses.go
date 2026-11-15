@@ -3,7 +3,6 @@ package proxy
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -183,16 +182,21 @@ func (p *Proxy) stoppedWorker(inst uint32) bool {
 
 // stoppedWorkerMissWhat names a miss of stopped test worker inst, made by
 // process pid, as a call keploy cannot attribute (stoppedWorker): where it
-// went, as its parser or its dial named it, and the ended worker.
-func stoppedWorkerMissWhat(r *models.MockMismatchReport, dst *models.ConditionalDstCfg, pid, inst uint32) string {
-	to := ""
+// went, as its parser or its dial named it, and the ended worker; and the
+// host it names, with the tag the miss's line names it by (the report's
+// HostTag, else its tag in ctx's session, the connection's).
+func stoppedWorkerMissWhat(ctx context.Context, r *models.MockMismatchReport, dst *models.ConditionalDstCfg, pid, inst uint32) (string, models.LossHosts) {
+	what := models.NewLossText(ctx).Say("the latest: a call")
 	switch {
+	case r != nil && r.Destination != "" && r.HostTag != "":
+		what.Say(" to ").HostTagged(r.Destination, r.HostTag)
 	case r != nil && r.Destination != "":
-		to = " to " + r.Destination
+		what.Say(" to ").Host(r.Destination)
 	case dst != nil && dst.Addr != "" && !dst.AddrFabricated:
-		to = " to " + dst.Addr
+		what.Say(" to ").Host(dst.Addr)
 	}
-	return fmt.Sprintf("the latest: a call%s, from process %d of ended test worker %s, on a connection it made before keploy stopped serving that worker", to, pid, agent.InstanceLabel(inst))
+	what.Sayf(", from process %d of ended test worker %s, on a connection it made before keploy stopped serving that worker", pid, agent.InstanceLabel(inst))
+	return what.String(), what.Hosts()
 }
 
 // workersServed reports whether test workers are served: from the first
@@ -211,10 +215,19 @@ func (p *Proxy) workersServed() bool {
 // call keploy cannot attribute (models.CaptureLossUnattributed), which leaves
 // each test open then without a verdict. Filed in the run's window, which no
 // worker's test reads, it would fail no test. Before any worker is served it
-// is the run's test's miss, as before.
-func (p *Proxy) sendDNSMiss(miss error, question dns.Question) {
+// is the run's test's miss, as before. The loss lists the question's name
+// with the tag the miss's lines name it by (its report's HostTag).
+func (p *Proxy) sendDNSMiss(miss models.ParserError, question dns.Question) {
 	if p.workersServed() {
-		p.losses.Add(models.CaptureLossUnattributed, fmt.Sprintf("the latest: a DNS question for %s (%s) that no DNS mock answers, asked while test workers are served: a DNS question carries no stamp of the test worker that asked it", question.Name, dns.TypeToString[question.Qtype]))
+		var tag string
+		if miss.MismatchReport != nil {
+			tag = miss.MismatchReport.HostTag
+		}
+		// The question's name with the tag the miss's lines name it by,
+		// whatever the session (HostTagged).
+		what := models.NewLossText(context.Background()).Say("the latest: a DNS question for ").HostTagged(question.Name, tag).
+			Sayf(" (%s) that no DNS mock answers, asked while test workers are served: a DNS question carries no stamp of the test worker that asked it", dns.TypeToString[question.Qtype])
+		p.losses.Add(models.CaptureLossUnattributed, what.String(), what.Hosts()...)
 		return
 	}
 	p.SendError(miss)

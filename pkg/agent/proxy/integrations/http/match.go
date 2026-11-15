@@ -945,7 +945,8 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDyna
 	if ce := h.Logger.Check(zap.DebugLevel, "parsed URL"); ce != nil {
 		// Both paths in their shape: a segment of either can hold a token
 		// (a reset link's, a signed URL's), the recording's as much as the
-		// call's.
+		// call's. No path tag: no method is at hand, and a tag of a path
+		// alone is one no console or report line prints (models.PathTag).
 		ce.Write(zap.Any("parsed URL", utils.URLPathShape(&url.URL{Path: mockPath})), zap.Any("req path", utils.URLPathShape(&url.URL{Path: reqPath})))
 	}
 	if mockPath == reqPath {
@@ -1415,7 +1416,12 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 				// a token, whatever a recording redacted.
 				mockPath, _ := recordedURLPath(mock.Spec.HTTPReq.URL)
 				recorded := &url.URL{Path: mockPath}
-				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", utils.URLPathShape(input.url)), zap.String("mock path", utils.URLPathShape(recorded)),
+				// The call by its path tag, which the console and the report
+				// print beside it where it misses; the recording's path by
+				// its shape alone: no console or report line prints a
+				// recording's path beside a tag.
+				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", utils.URLPathShape(input.url)), utils.PathTagField(models.URLPathTag(ctx, input.method, input.url)),
+					zap.String("mock path", utils.URLPathShape(recorded)),
 					zap.Int("differs at segment", pathDiffersAt(recorded.EscapedPath(), input.url.EscapedPath())))
 			}
 			continue
@@ -2318,8 +2324,8 @@ func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // computed against a candidate the matcher actually considered close — not
 // just the lowest-Levenshtein path. If httpMocks is nil, it fetches from
 // mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
-func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
-	r, hint := h.buildHTTPMismatchReportHinted(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+func (h *HTTP) buildHTTPMismatchReport(ctx context.Context, request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) *models.MockMismatchReport {
+	r, hint := h.buildHTTPMismatchReportHinted(ctx, request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
 	if hint != "" {
 		r.NextSteps = strings.TrimSpace(r.NextSteps + " " + hint)
 	}
@@ -2331,8 +2337,15 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 // steps: "" when the recording does not state its HTTP mocks' lifetimes. A
 // repeat note keeps it (markRepeat), so the hint outlives the note's own
 // next step.
-func (h *HTTP) buildHTTPMismatchReportHinted(request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (*models.MockMismatchReport, string) {
+func (h *HTTP) buildHTTPMismatchReportHinted(ctx context.Context, request *http.Request, liveBody []byte, mockDb integrations.MockMemDb, httpMocks []*models.Mock, headerNoise, userBodyNoise map[string][]string, diag *matchDiag) (*models.MockMismatchReport, string) {
 	r, places := h.buildHTTPMismatchReportOf(request, liveBody, mockDb, httpMocks, headerNoise, userBodyNoise, diag)
+	if r != nil && request != nil {
+		// The call's path tag, of its method and the path it sent, in the
+		// session of ctx, the connection's: the summary may write a segment
+		// a recording redacted {}, and the agent's other lines about the
+		// request (utils.GetReqMeta) tag the path it sent.
+		r.PathTag = models.URLPathTag(ctx, request.Method, request.URL)
+	}
 	if r == nil || !statesHTTPLifetimes(mockDb, httpMocks) {
 		return r, ""
 	}

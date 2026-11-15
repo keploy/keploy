@@ -117,9 +117,10 @@ type Config struct {
 
 	// OnCaptureLoss, when set, is told of each call the relay could not
 	// capture: today a TLS upgrade (STARTTLS, Postgres SSLRequest) it could
-	// not make, after which the connection is not parsed. kind and what are
-	// as for models.CaptureLoss. Nil is safe.
-	OnCaptureLoss func(kind models.CaptureLossKind, what string)
+	// not make, after which the connection is not parsed. kind, what and the
+	// hosts what names are as for models.CaptureLoss (captureloss.Counter's
+	// Add). Nil is safe.
+	OnCaptureLoss func(kind models.CaptureLossKind, what string, hosts ...models.LossHost)
 
 	// OnClientHandshakeFailed, when set, is handed the error of a
 	// client-side TLS upgrade that failed in its handshake (TLSUpgradeFn

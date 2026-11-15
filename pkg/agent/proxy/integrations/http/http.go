@@ -286,14 +286,14 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
-			utils.LogError(h.Logger, err, "failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+			utils.LogError(h.Logger, err, "failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 			return err
 		}
 
 		if req.Header.Get("Content-Encoding") != "" {
 			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody, pkg.MaxDecompressedSize)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+				utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return err
 			}
 		}
@@ -306,7 +306,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		// The parser's error quotes the status line it refused: on a
 		// connection read mid-stream, a body's line.
 		err = utils.WithholdInput(err)
-		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(req)))
+		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 		return err
 	}
 
@@ -318,7 +318,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	if respParsed.Body != nil { // Read
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
+			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 			return err
 		}
 		wire = respBody
@@ -326,7 +326,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		if respParsed.Header.Get("Content-Encoding") != "" {
 			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody, pkg.MaxDecompressedSize)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to decode the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
+				utils.LogError(h.Logger, err, "failed to decode the http response body", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return err
 			}
 		}
@@ -349,7 +349,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	}
 	// Check if the request is a passThrough request
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
-		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(req)))
+		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 		return nil
 	}
 
@@ -368,7 +368,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		}
 		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
 			if rule.Mode == models.PassThroughSkip {
-				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
+				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return nil
 			}
 			// recordOne: defer the dedup decision to emit time (below). Marking here
@@ -455,7 +455,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	var recordOne *ptMark
 	if ptRecordOne && h.ptRecorder != nil {
 		if recordOne = h.ptRecorder.take(ptKey, respParsed.StatusCode); recordOne == nil {
-			h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+			h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 			return nil
 		}
 	}

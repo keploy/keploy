@@ -436,7 +436,7 @@ func resolveProbeTarget(ctx context.Context, testCfg config.Test, tc *models.Tes
 	}
 	configPort := effectiveHTTPConfigPort(tc, testCfg)
 
-	target, err := pkg.ResolveTestTarget(tc.HTTPReq.URL, urlReplacements, portMappings, hostToUse, tc.AppPort, configPort, true, logger)
+	target, err := pkg.ResolveTestTarget(tc.HTTPReq.URL, urlReplacements, portMappings, hostToUse, tc.AppPort, configPort, true, logger.With(zap.String("testcase", tc.Name)))
 	if err != nil {
 		return "", "", "", false
 	}
@@ -1813,6 +1813,8 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			At:            call.At,
 			Protocol:      call.Protocol,
 			ActualSummary: call.ActualSummary,
+			PathTag:       call.PathTag,
+			HostTag:       call.HostTag,
 			Operation:     call.Operation,
 			Command:       call.Command,
 			Destination:   call.Destination,
@@ -1929,19 +1931,24 @@ func CompareMockSlices(expected, actual []string) []MockDifference {
 	return differences
 }
 
-// PrintFailuresTable prints all failures, one block per failed test case: a
-// "Mock mismatch" heading for each unmatched outgoing call followed by the
-// same Expect/Actual diff used for HTTP test-case mismatches, and the hint.
-func (tfs *TestFailureStore) PrintFailuresTable() {
+// PrintFailuresTable prints all failures on w, keploy's console, one block
+// per failed test case: a "Mock mismatch" heading for each unmatched outgoing
+// call followed by the same Expect/Actual diff used for HTTP test-case
+// mismatches, and the hint. The console only, never a log: it names each call
+// whole (Replayer.console). Nothing for a nil w.
+func (tfs *TestFailureStore) PrintFailuresTable(w io.Writer) {
+	if w == nil {
+		return
+	}
 	tfs.mu.Lock()
 	defer tfs.mu.Unlock()
 
 	if len(tfs.failures) == 0 {
-		fmt.Println("No test failures recorded.")
+		_, _ = fmt.Fprintln(w, "No test failures recorded.")
 		return
 	}
 
-	fmt.Println("\n=========================== MOCK MISMATCH ===========================")
+	_, _ = fmt.Fprintln(w, "\n=========================== MOCK MISMATCH ===========================")
 
 	testSetGroups := make(map[string][]TestFailure)
 	for _, failure := range tfs.failures {
@@ -1965,13 +1972,13 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 		sort.Strings(testIDs)
 
 		for _, testID := range testIDs {
-			fmt.Printf("\nTest: %s / %s\n", testSetID, testID)
+			_, _ = fmt.Fprintf(w, "\nTest: %s / %s\n", testSetID, testID)
 
 			var mappingNotes []string
 			var anyOutOfScope bool
 			for _, failure := range testIDGroups[testID] {
 				if failure.FailureReason == models.ErrMockNotFound {
-					printMismatchReport(failure.MismatchReport)
+					printMismatchReport(w, failure.MismatchReport)
 					if failure.MismatchReport != nil &&
 						failure.MismatchReport.DestinationScope == models.DestinationScopeNotInComparedSet {
 						anyOutOfScope = true
@@ -1997,7 +2004,7 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 				}
 			}
 			for _, note := range mappingNotes {
-				fmt.Printf("  %s\n", note)
+				_, _ = fmt.Fprintf(w, "  %s\n", note)
 			}
 			// ONCE PER TEST, not once per missed call. The likely causes are
 			// static text that is identical for every out-of-scope miss, and
@@ -2005,20 +2012,20 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 			// it makes — inlining them in each call's hint put the same ~1 KB
 			// paragraph on screen dozens of times per test.
 			if anyOutOfScope {
-				fmt.Println(models.RenderOutOfScopeDestinationCauses("  "))
+				_, _ = fmt.Fprintln(w, models.RenderOutOfScopeDestinationCauses("  "))
 			}
 		}
 	}
-	fmt.Println()
+	_, _ = fmt.Fprintln(w)
 }
 
-// printMismatchReport renders one unmatched outgoing call: a heading, then the
-// best available view — a side-by-side whole-request diff when the parser
-// rendered both requests, else the structured FIELD | EXPECTED | RECEIVED
-// table, else the one-line Diff — followed by the hint.
-func printMismatchReport(r *models.MockMismatchReport) {
+// printMismatchReport renders one unmatched outgoing call on w: a heading,
+// then the best available view — a side-by-side whole-request diff when the
+// parser rendered both requests, else the structured FIELD | EXPECTED |
+// RECEIVED table, else the one-line Diff — followed by the hint.
+func printMismatchReport(w io.Writer, r *models.MockMismatchReport) {
 	if r == nil {
-		fmt.Println("  Outgoing call mock was not matched")
+		_, _ = fmt.Fprintln(w, "  Outgoing call mock was not matched")
 		return
 	}
 	// When nothing in the compared set targets this destination there is no
@@ -2032,10 +2039,12 @@ func printMismatchReport(r *models.MockMismatchReport) {
 	// only this human rendering suppresses it.
 	outOfScope := r.DestinationScope == models.DestinationScopeNotInComparedSet
 
-	heading := fmt.Sprintf("  Mock mismatch: [%s] %s", r.Protocol, models.WithHTTPOperation(r.ActualSummary, r.Operation))
-	if r.Destination != "" {
-		heading += fmt.Sprintf("  →  %s", r.Destination)
-	}
+	// The call whole, beside the path tag the agent's miss line names it
+	// by (r.PathTag): the line names it by its shape, every path segment {}.
+	heading := fmt.Sprintf("  Mock mismatch: [%s] %s", r.Protocol, models.WithPathTag(models.WithHTTPOperation(r.ActualSummary, r.Operation), r.PathTag))
+	// The destination whole, beside the host tag the agent's miss line
+	// names it by (r.HostTag): the line names it by its labels' shape.
+	heading += models.DestinationNamed(r.Destination, r.HostTag)
 	if r.ClosestMock != "" && !outOfScope {
 		heading += fmt.Sprintf("   (closest mock: %s)", r.ClosestMock)
 	}
@@ -2046,7 +2055,7 @@ func printMismatchReport(r *models.MockMismatchReport) {
 		}
 		heading += "]"
 	}
-	fmt.Println(heading)
+	_, _ = fmt.Fprintln(w, heading)
 
 	switch {
 	case outOfScope:
@@ -2056,23 +2065,23 @@ func printMismatchReport(r *models.MockMismatchReport) {
 		// recorded <protocol> mock in the compared set targets <host>." and a
 		// full second copy of that sentence, once per missed call, was pure
 		// duplication.
-		fmt.Println("  (closest-mock diff omitted — see hint)")
+		_, _ = fmt.Fprintln(w, "  (closest-mock diff omitted — see hint)")
 	case r.MatchPhase == models.MatchPhaseVariable && r.Diff != "":
 		// A test variable did not hold: the recording is not what the call
 		// should have sent (it holds the recorded value, not this run's), so
 		// a request diff against it would mislead. The diff names the
 		// variable, the value it has in this test and the one the call sent.
-		fmt.Printf("  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
+		_, _ = fmt.Fprintf(w, "  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
 	case r.ClosestMockReq != "" && r.ReceivedReq != "":
-		printRequestDiff(r.ClosestMock, r.ClosestMockReq, r.ReceivedReq)
+		printRequestDiff(w, r.ClosestMock, r.ClosestMockReq, r.ReceivedReq)
 	case len(r.FieldDiffs) > 0:
-		printFieldDiffTable(r.FieldDiffs)
+		printFieldDiffTable(w, r.FieldDiffs)
 	case r.Diff != "":
-		fmt.Printf("  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
+		_, _ = fmt.Fprintf(w, "  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
 	}
 
 	if r.NextSteps != "" {
-		fmt.Printf("  Hint: %s\n", strings.ReplaceAll(r.NextSteps, "\n", " "))
+		_, _ = fmt.Fprintf(w, "  Hint: %s\n", strings.ReplaceAll(r.NextSteps, "\n", " "))
 	}
 }
 
@@ -2082,13 +2091,13 @@ func printMismatchReport(r *models.MockMismatchReport) {
 // headers and body, produced by the shared matcher.DiffsPrinter. expected and
 // received are the whole rendered requests (request line + headers + body) the
 // parser emitted; the body therefore diffs field-by-field (changed fields
-// only), exactly like a response-body mismatch.
-func printRequestDiff(mockName, expected, received string) {
+// only), exactly like a response-body mismatch. On w.
+func printRequestDiff(w io.Writer, mockName, expected, received string) {
 	title := mockName
 	if title == "" {
 		title = "closest mock"
 	}
-	dp := matcherUtils.NewDiffsPrinter(title)
+	dp := matcherUtils.NewDiffsPrinterOut(w, title)
 
 	mockLine, mockHeaders, mockBody := parseRenderedRequest(expected)
 	liveLine, liveHeaders, liveBody := parseRenderedRequest(received)
@@ -2158,10 +2167,10 @@ func splitRequestLine(line string) (method, target string) {
 
 // printFieldDiffTable renders the compact FIELD | EXPECTED | RECEIVED table —
 // the fallback when whole-request renders aren't available. Reads the
-// noise-vocabulary MockFieldDiff (Path/Kind/Expected/Actual).
-func printFieldDiffTable(fieldDiffs []models.MockFieldDiff) {
+// noise-vocabulary MockFieldDiff (Path/Kind/Expected/Actual). On w.
+func printFieldDiffTable(w io.Writer, fieldDiffs []models.MockFieldDiff) {
 	colWidths := tw.NewMapper[int, int]().Set(0, 24).Set(1, 40).Set(2, 40)
-	table := tablewriter.NewTable(os.Stdout,
+	table := tablewriter.NewTable(w,
 		tablewriter.WithRendition(tw.Rendition{
 			Settings: tw.Settings{Separators: tw.Separators{BetweenRows: tw.On}},
 		}),

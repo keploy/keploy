@@ -3,6 +3,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -651,13 +652,13 @@ func TestRecordV2_FaultOnARequestThatDoesNotDecodeIsAnError(t *testing.T) {
 func TestBuildHTTPMock_FaultOnlyOnAnUnfinishedAnswer(t *testing.T) {
 	h := &HTTP{Logger: zap.NewNop()}
 	whole := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
-	m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(faultReq), Resp: []byte(whole),
+	m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(faultReq), Resp: []byte(whole),
 		Fault: &models.Fault{Kind: models.FaultReset, AfterHead: true}}, 80, "c", models.OutgoingOptions{})
 	if err != nil || m == nil || m.Spec.Fault != nil || m.Spec.HTTPResp.Body != "ok" {
 		t.Errorf("a whole answer with a reset after it: %v, %v; want the answer, no fault", m, err)
 	}
 	empty := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-	m, err = h.buildHTTPMock(&FinalHTTP{Req: []byte(faultReq), Resp: []byte(empty),
+	m, err = h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(faultReq), Resp: []byte(empty),
 		Fault: &models.Fault{Kind: models.FaultReset, AfterHead: true}}, 80, "c", models.OutgoingOptions{})
 	if err != nil || m == nil || m.Spec.Fault != nil || m.Spec.HTTPResp.StatusCode != 200 {
 		t.Errorf("a whole answer with no body (Content-Length: 0) and a reset after it: %v, %v; want the answer, no fault", m, err)
@@ -665,7 +666,7 @@ func TestBuildHTTPMock_FaultOnlyOnAnUnfinishedAnswer(t *testing.T) {
 	// A head whose lines end at a bare LF ends where net/http's reader ends
 	// it (messageHead), so the body's bytes are known as a CRLF head's are.
 	bareLF := "HTTP/1.1 200 OK\nContent-Length: 20\n\n0123456789"
-	m, err = h.buildHTTPMock(&FinalHTTP{Req: []byte(faultReq), Resp: []byte(bareLF),
+	m, err = h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(faultReq), Resp: []byte(bareLF),
 		Fault: &models.Fault{Kind: models.FaultTruncate}}, 80, "c", models.OutgoingOptions{})
 	if err != nil || m == nil || m.Spec.Fault == nil || m.Spec.HTTPResp.StatusCode != 200 || m.Spec.HTTPResp.Body != "0123456789" {
 		t.Errorf("a cut-short answer whose head has bare LFs: %v, %v; want its 10 body bytes and the fault", m, err)

@@ -616,6 +616,10 @@ type SyncMockManager struct {
 	// guards it, and orders each count against a session's start.
 	tlsRelayedMu   sync.Mutex
 	tlsRelayedSaid map[uint16]struct{}
+	// notRecordedCalls is the open recording session's feed of the requests its
+	// ingress did not record as test cases (not_recorded.go), for its
+	// stream to tell its client.
+	notRecordedCalls notRecordedFeed
 
 	// outChanClosedDrops and overflowDrops split dropCount by cause, for what
 	// is said of a drop (sayDrop): the mocks dropped for an output closed or

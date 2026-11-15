@@ -71,8 +71,17 @@ func TestTheMatcherLogsNoneOfTheAnswers(t *testing.T) {
 			other.HTTPReq.URL = "http://api.example.com/v1/me?access_token=y" + s
 			other.HTTPReq.Header = map[string]string{"Authorization": "Bearer y" + s}
 			other.HTTPResp = *live
+			other.Name = "test-2"
 			AbsMatch(tc(nil), other, nil, false, logger)
 			logleak.Check(t, logs, s, "AbsMatch")
+			// Each line about the requests names them by their shape and
+			// the test cases, which the report names them whole under.
+			for _, line := range []string{"test case http req is not equal", "test case http req url is not equal"} {
+				said := logs.FilterMessage(line).All()
+				if len(said) != 1 || said[0].ContextMap()["tcs1Name"] != "test-1" || said[0].ContextMap()["tcs2Name"] != "test-2" {
+					t.Errorf("%q was said %+v, want once naming test-1 and test-2", line, said)
+				}
+			}
 			return logs.Len()
 		}},
 	} {

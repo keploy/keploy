@@ -1216,36 +1216,22 @@ func (ts *TestYaml) keptAsset(paths []string, j int) (string, bool) {
 // caller that never takes them (a replay, a normalize) holds no more.
 const formPartsLeftOutMax = 64
 
-// formFileError is err, a failed write of a form part's file at path, with
-// that path in its text in its log form (models.FormFilePathLogText): the
-// file's name is the app's (multipart's filename=). The os package names the
-// whole path, and the recording's file helpers the path within the
-// recording, plain or quoted. errors.Is and errors.As still see err.
-func (ts *TestYaml) formFileError(err error, path string) error {
-	text := err.Error()
-	paths := []string{path}
-	if rel, relErr := filepath.Rel(ts.TcsPath, path); relErr == nil && rel != path {
-		paths = append(paths, rel)
+// formFileError is err, a failed write (or copy) of a form part's file at
+// paths (the asset's, and a copy's source), with each path in its text in its
+// log form (models.FormFilePathsInError): the file's name is the app's
+// (multipart's filename=). The os package names the whole path, and the
+// recording's file helpers the path within the recording, plain or quoted.
+// errors.Is and errors.As still see err.
+func (ts *TestYaml) formFileError(err error, paths ...string) error {
+	var all []string
+	for _, path := range paths {
+		all = append(all, path)
+		if rel, relErr := filepath.Rel(ts.TcsPath, path); relErr == nil && rel != path {
+			all = append(all, rel)
+		}
 	}
-	for _, p := range paths {
-		shaped := models.FormFilePathLogText(p)
-		text = strings.ReplaceAll(text, strconv.Quote(p), strconv.Quote(shaped))
-		text = strings.ReplaceAll(text, p, shaped)
-	}
-	if text == err.Error() {
-		return err
-	}
-	return formFileErr{err: err, text: text}
+	return models.FormFilePathsInError(err, all...)
 }
-
-// formFileErr is an error whose text formFileError shaped.
-type formFileErr struct {
-	err  error
-	text string
-}
-
-func (e formFileErr) Error() string { return e.text }
-func (e formFileErr) Unwrap() error { return e.err }
 
 // pathAt is paths[j], or "" when the part names no path.
 func pathAt(paths []string, j int) string {
@@ -1422,7 +1408,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					if _, err := os.Stat(srcPath); err == nil {
 						input, err := os.Open(srcPath)
 						if err != nil {
-							utils.LogError(ts.logger, err, "failed to open temp asset file", zap.String("path", srcPath))
+							utils.LogError(ts.logger, models.FormFilePathsInError(err, srcPath), "failed to open temp asset file", zap.String("path", models.FormFilePathLogText(srcPath)))
 							return err
 						}
 						output, err := yaml.OpenFileInRecording(ts.TcsPath, destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
@@ -1435,7 +1421,9 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 						if _, err := io.Copy(output, input); err != nil {
 							output.Close()
 							input.Close()
-							err = ts.formFileError(err, destPath)
+							// Its read side names the source, its write side
+							// the asset.
+							err = ts.formFileError(err, destPath, srcPath)
 							utils.LogError(ts.logger, err, "failed to copy asset file", zap.String("path", models.FormFilePathLogText(destPath)))
 							return err
 						}
@@ -1446,14 +1434,16 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 							return err
 						}
 						if err := input.Close(); err != nil {
-							utils.LogError(ts.logger, err, "failed to close temp asset file", zap.String("path", srcPath))
+							utils.LogError(ts.logger, models.FormFilePathsInError(err, srcPath), "failed to close temp asset file", zap.String("path", models.FormFilePathLogText(srcPath)))
 							return err
 						}
 						wroteFile = true
 						// Cleanup temp
 						os.Remove(srcPath)
 					} else {
-						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", srcPath), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", srcPath))
+						// The capture's copy is named after the part's file
+						// (the app's filename=): named by its folder alone.
+						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", models.FormFilePathLogText(srcPath)), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", models.FormFilePathLogText(srcPath)))
 					}
 				} else if kept, ok := ts.keptAsset(form.Paths, j); ok {
 					// Case 1a: a test case read back already keeps the part

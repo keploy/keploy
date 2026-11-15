@@ -2,11 +2,13 @@ package replay
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -99,20 +101,24 @@ func (e *earlierSetCalls) take(read []models.UnmatchedCall) (rest []models.Unmat
 // (earlierSetCalls.take), which the run keeps to fail with. It says each one
 // that fails the run, at ERROR, as it takes it, naming the set it was made in
 // and its test (none for a call made while no test's view named one), and the
-// set whose read returned it.
+// set whose read returned it. The line names the call by its shape and the
+// path tag it carries (the agent's); the console names it whole beside that
+// tag (sayEarlierSetCall), as no report does: no set's report holds it.
 func (r *Replayer) takeEarlierSetCalls(read []models.UnmatchedCall) []models.UnmatchedCall {
 	rest, taken := r.earlierSetCalls.take(read)
 	for _, c := range taken {
 		if !c.call.CountsAgainstTest() {
 			continue
 		}
+		sayEarlierSetCall(r.console, c)
 		r.logger.Error("test run failed: an earlier test set made a call that no mock answered, which keploy decided only after that set had ended ("+provenswitch.Env+"=1)",
 			zap.String("made-in-test", c.call.EarlierSetTest),
 			zap.String("made-in-test-set", c.set),
 			zap.String("read-in-test-set", r.earlierSetCalls.reading()),
 			zap.String("protocol", c.call.Protocol),
 			zap.String("call", models.UnmatchedCallLogShape(c.call)),
-			zap.String("destination", c.call.Destination),
+			utils.PathTagField(c.call.PathTag),
+			zap.String("destination", models.HostShape(c.call.Destination)), utils.HostTagField(c.call.HostTag),
 			zap.Strings("differs", models.FieldShapes(c.call.Differs)),
 			zap.String("next_step", "the call is that set's (and that test's, where one is named), not the set whose read returned it: it changed or is new since the recording; fix the application, or re-record that test if the change is intended"))
 	}
@@ -148,24 +154,49 @@ func (e *earlierSetCalls) reset() {
 	e.mu.Unlock()
 }
 
-// earlierSetCallsWhy says why the calls fail the run, naming each call, the
-// set it was made in and the test, where it names one, or that it was made in
-// no test (between two of the set's tests, or after its last).
+// madeWhere is where c was made, as a line says it: "test-2 of test-set-a",
+// or that it was made in no test (between two of the set's tests, or after
+// its last).
+func (c earlierSetCall) madeWhere() string {
+	set := c.set
+	if set == "" {
+		set = "an earlier test set"
+	}
+	test := c.call.EarlierSetTest
+	if test == "" {
+		test = "no test (between two of its tests, or after its last)"
+	}
+	return test + " of " + set
+}
+
+// earlierSetCallsWhy says why the calls fail the run, as the run's log line
+// says it: naming each call by its shape and the path tag it carries
+// (describeUnclaimedForLog), never its summary, and the set it was made in and
+// the test, where it names one, or that it was made in no test. The console
+// names each call whole beside its tag (sayEarlierSetCall).
 func earlierSetCallsWhy(calls []earlierSetCall) string {
 	var named []string
 	for _, c := range calls {
-		set := c.set
-		if set == "" {
-			set = "an earlier test set"
-		}
-		test := c.call.EarlierSetTest
-		if test == "" {
-			test = "no test (between two of its tests, or after its last)"
-		}
-		named = append(named, fmt.Sprintf("%s (made in %s of %s)", describeUnclaimed(c.call), test, set))
+		named = append(named, fmt.Sprintf("%s (made in %s)", describeUnclaimedForLog(c.call), c.madeWhere()))
 	}
 	return fmt.Sprintf("the application made %d call(s) in an earlier test set that no mock answered, which keploy decided only after that set had ended: %s",
 		len(calls), strings.Join(named, "; "))
+}
+
+// sayEarlierSetCall writes, on keploy's console (w), c, a call of an earlier
+// set that fails the run: whole, beside the path tag the lines that log it
+// name it by, its destination and where it was made. The console only, never
+// the log: the summary holds what the call sent (a path's token, a
+// statement's literal). It is the one place the run names the call whole: no
+// set's report holds it. Written as printMismatchReport writes a test's
+// misses. Nothing with no console (a nil w).
+func sayEarlierSetCall(w io.Writer, c earlierSetCall) {
+	if w == nil {
+		return
+	}
+	line := fmt.Sprintf("  Mock mismatch of an earlier test set: [%s] %s", c.call.Protocol, models.WithPathTag(c.call.Named(), c.call.PathTag))
+	line += models.DestinationNamed(c.call.Destination, c.call.HostTag)
+	_, _ = fmt.Fprintf(w, "%s   (made in %s)\n", line, c.madeWhere())
 }
 
 // passesEarlierSetCalls is the run's verdict pass, false where a call an

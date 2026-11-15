@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -692,7 +694,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		// A stream is no test case, and that is known at its headers
 		// (notRecordedStream): its body is not captured.
-		if captureEligible && pm.notRecordedStream(logger, req, resp, &win) {
+		if captureEligible && pm.notRecordedStream(ctx, logger, req, resp, &win) {
 			captureEnabled = false
 		}
 
@@ -705,7 +707,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if err := relay.finish(); err != nil {
 			requestCut = true
 			if captureEligible && captureEnabled {
-				warnNotRecorded(logger, req, resp, err)
+				warnNotRecorded(ctx, logger, req, resp, err)
 			}
 			captureEnabled = false
 		} else if relay != nil {
@@ -835,7 +837,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				// the handler returns (countPause): a capture cut before
 				// the client went is told and counted, both true.
 				if captureEligible && captureEnabled {
-					tellClientLeft(logger, req)
+					tellClientLeft(ctx, logger, req)
 				}
 				return
 			}
@@ -845,7 +847,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 					// The client went before the answer's end had
 					// arrived, unseen by the watch (or not watched): the
 					// app is told as its connection is closed.
-					tellClientLeft(logger, req)
+					tellClientLeft(ctx, logger, req)
 				case pressureCloseMode && isIngressExpectedCloseErr(err):
 					logger.Debug("HTTP/1 ingress client connection closed while finishing close-under-pressure path", zap.Error(err))
 				default:
@@ -875,7 +877,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				// for one that could have been recorded, and what the pause
 				// cost it counted as the handler returns, as above.
 				if captureEligible && captureEnabled {
-					tellClientLeft(logger, req)
+					tellClientLeft(ctx, logger, req)
 				}
 				return
 			}
@@ -951,9 +953,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Bool("streaming_exchange", streamingExchange),
 				zap.Bool("chunked_transfer", chunkedTransfer),
-				zap.Any("metadata", utils.GetReqMeta(req)),
+				zap.Any("metadata", utils.GetReqMeta(ctx, req)),
 				zap.Int("status_code", resp.StatusCode),
-				zap.String("response_content_type", resp.Header.Get("Content-Type")),
+				zap.String("response_content_type", mediaType(resp.Header.Get("Content-Type"))),
 			)
 			shouldCapture = false
 		}
@@ -1018,7 +1020,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 					zap.Int("captured_exchange_bytes", exchangeCaptureSize),
 					zap.Int64("request_bytes_seen", reqBytesTotal),
 					zap.Int64("response_bytes_seen", respBytesTotal),
-					zap.Any("metadata", utils.GetReqMeta(capturedReq)),
+					zap.Any("metadata", utils.GetReqMeta(ctx, capturedReq)),
 					zap.Int("status_code", capturedResp.StatusCode),
 				)
 				return
@@ -1079,13 +1081,19 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	}
 }
 
+// streamWhy is why the console says a request whose answer is a stream is
+// not recorded (notRecordedStream).
+const streamWhy = "its answer is a stream, which keploy does not record as a test case"
+
 // notRecordedStream reports whether resp, the app's answer to req, is a stream
 // (models.IsHTTPStreamResponse): keploy does not support a stream as a test
 // case, so it records none. It is known at the answer's headers, so the
 // exchange's window, *win, ends here, and the mock manager holds nothing for
 // the stream however long it lasts. It is told at Info, unless the
-// recording's filters leave the request out anyway.
-func (pm *IngressProxyManager) notRecordedStream(logger *zap.Logger, req *http.Request, resp *http.Response, win **syncMock.Window) bool {
+// recording's filters leave the request out anyway, by the request's shape
+// and path tag, and on the recording's console by its path beside the same
+// tag (notRecordedMeta).
+func (pm *IngressProxyManager) notRecordedStream(ctx context.Context, logger *zap.Logger, req *http.Request, resp *http.Response, win **syncMock.Window) bool {
 	if !models.IsHTTPStreamResponse(resp) {
 		return false
 	}
@@ -1096,8 +1104,8 @@ func (pm *IngressProxyManager) notRecordedStream(logger *zap.Logger, req *http.R
 		// URL often carries its token in the query (an EventSource can
 		// send no header).
 		logger.Info("Not recording a streaming response as a test case: keploy does not support streaming test cases",
-			zap.Any("metadata", utils.GetReqMeta(req)),
-			zap.String("content_type", resp.Header.Get("Content-Type")))
+			zap.Any("metadata", notRecordedMeta(ctx, req, streamWhy)),
+			zap.String("content_type", mediaType(resp.Header.Get("Content-Type"))))
 	}
 	return true
 }
@@ -1825,7 +1833,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 
 		// A stream is no test case, and that is known at its headers
 		// (notRecordedStream): its body is not captured.
-		if captureEnabled && pm.notRecordedStream(logger, req, resp, &win) {
+		if captureEnabled && pm.notRecordedStream(ctx, logger, req, resp, &win) {
 			captureEnabled = false
 		}
 
@@ -1839,7 +1847,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if rerr := relay.finish(); rerr != nil {
 			requestWhole = false
 			if captureEnabled {
-				warnNotRecorded(logger, req, resp, rerr)
+				warnNotRecorded(ctx, logger, req, resp, rerr)
 			}
 		} else if relay != nil {
 			// The body that waited for the 100 is all read: the app holds
@@ -1941,7 +1949,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				// began later and cut a body's capture is counted as the
 				// handler returns (countCut): told and counted, both true.
 				if captureEnabled {
-					tellClientLeft(logger, req)
+					tellClientLeft(ctx, logger, req)
 				}
 				return
 			}
@@ -1950,7 +1958,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					// The client went before the answer's end had
 					// arrived, unseen by the watch (or not watched): the
 					// app is told as its connection is closed.
-					tellClientLeft(logger, req)
+					tellClientLeft(ctx, logger, req)
 				} else {
 					logger.Debug("Failed to forward response to client", zap.Error(err))
 				}
@@ -1972,7 +1980,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				// for one that could have been recorded, and a cut capture
 				// counted as the handler returns, as above.
 				if captureEnabled {
-					tellClientLeft(logger, req)
+					tellClientLeft(ctx, logger, req)
 				}
 				return
 			}
@@ -2184,4 +2192,20 @@ func isIngressExpectedCloseErr(err error) bool {
 // egress call the app makes for it is stamped no earlier on that same clock.
 func proxyWindowClock(ctx context.Context) context.Context {
 	return hooksUtils.WithWindowClock(ctx, fakeconn.NameProxyClock())
+}
+
+// mediaType is a Content-Type header's value as a log line names it: its
+// media type (type/subtype, lower case), never its parameters, which the
+// application writes (a boundary, a charset, a profile, any of its own).
+// "" for none; its size for a value that does not parse.
+func mediaType(ct string) string {
+	if ct == "" {
+		return ""
+	}
+	// A value whose parameters do not parse still names its media type
+	// (mime.ErrInvalidMediaParameter).
+	if mt, _, _ := mime.ParseMediaType(ct); mt != "" {
+		return mt
+	}
+	return "unparsable, " + strconv.Itoa(len(ct)) + " bytes"
 }

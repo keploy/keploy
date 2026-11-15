@@ -234,7 +234,7 @@ func TestNotJudgedLossesAreSplitAndCountedFromTheRun(t *testing.T) {
 	}
 	tls := CaptureLoss{Kind: CaptureLossTLSAbort, Count: 2}
 	judged, notJudged := CaptureLosses{tls, unixAt(1)}.Split()
-	if len(judged) != 1 || judged[0] != tls || len(notJudged) != 1 || notJudged[0] != unixAt(1) {
+	if len(judged) != 1 || !reflect.DeepEqual(judged[0], tls) || len(notJudged) != 1 || !reflect.DeepEqual(notJudged[0], unixAt(1)) {
 		t.Fatalf("Split = %+v, %+v", judged, notJudged)
 	}
 	if !CaptureLossUnixSocket.NotJudged() || CaptureLossTLSAbort.NotJudged() || CaptureLossPIDMap.NotJudged() {
@@ -270,7 +270,7 @@ func TestUnixSocketsKeployCannotSeeAreAStandingNotJudgedLoss(t *testing.T) {
 		t.Fatal("unix_unseen fails tests; want it to leave them not judged")
 	}
 	now := CaptureLosses{unseen}
-	if got := now.Since(now); len(got) != 1 || got[0] != unseen {
+	if got := now.Since(now); len(got) != 1 || !reflect.DeepEqual(got[0], unseen) {
 		t.Fatalf("Since(itself) = %+v, want unix_unseen kept: a state, no mark takes it away", got)
 	}
 	if got := now.SinceWithin(SameBases(now)); len(got) != 1 || got[0].Kind != CaptureLossUnixUnseen {

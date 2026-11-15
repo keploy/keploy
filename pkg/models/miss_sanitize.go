@@ -165,7 +165,7 @@ func (m UnmatchedCall) shapedNextStep() string {
 	if m.NextSteps == "" {
 		return ""
 	}
-	return adviceShape(m.NextSteps, m.FieldDiffs)
+	return adviceShape(m.NextSteps, m.FieldDiffs, evidencePaths)
 }
 
 // shapedText is text, a matcher's or a parser's own words about m, with

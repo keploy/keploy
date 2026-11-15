@@ -8,11 +8,14 @@ import (
 
 	"go.keploy.io/server/v3/internal/logleak"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // The console's line for a test with no answer names a stalled request by
 // its shape, keeps a cancelled test quiet as before (utils.LogError reads
-// the error's chain), and withholds what another error quotes.
+// the error's chain), and withholds what another error quotes. Each names
+// the test, which the report names the request under.
 func TestSayNoAnswerLogsTheRequestsShapeAndKeepsACancelQuiet(t *testing.T) {
 	const s = logleak.Canary
 	for _, tc := range []struct {
@@ -21,7 +24,7 @@ func TestSayNoAnswerLogsTheRequestsShapeAndKeepsACancelQuiet(t *testing.T) {
 		want string // a line's message, or "" for none
 	}{
 		{"a cancelled test", fmt.Errorf("failed to send: %w", context.Canceled), ""},
-		{"a stalled request", &pkg.AnswerStallError{Target: "GET /v1/reset/" + s + "?token=" + s}, "not judged: the app never answered; waited 0s of keploy's runnable time for GET /{}/{}/{}"},
+		{"a stalled request", &pkg.AnswerStallError{Target: "GET /v1/reset/" + s + "?token=" + s}, "not judged: the app never answered; waited 0s of keploy's runnable time for GET /{}/{}/{} " + models.PathTagLabel(models.PathTag(context.Background(), "GET", "/v1/reset/"+s))},
 		{"a client's error", fmt.Errorf("Post %q: %w", "http://app/v1/reset/"+s, errors.New("EOF")), "failed to simulate request"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -33,8 +36,8 @@ func TestSayNoAnswerLogsTheRequestsShapeAndKeepsACancelQuiet(t *testing.T) {
 				}
 				return
 			}
-			if logs.FilterMessage(tc.want).Len() != 1 {
-				t.Fatalf("did not log %q (%d lines logged)", tc.want, logs.Len())
+			if logs.FilterMessage(tc.want).FilterField(zap.String("testcase", "test-1")).Len() != 1 {
+				t.Fatalf("did not log %q naming test-1 (%v)", tc.want, logs.All())
 			}
 			logleak.Check(t, logs, s, "the no-answer line")
 		})

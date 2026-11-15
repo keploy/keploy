@@ -230,20 +230,53 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta is what a log says about req: its method, its host, its path's
-// shape (URLPathShape) and the names of its query parameters. Never a path
-// segment, a query value, a header or the body: those are the application's
-// content (a segment may be a token the recording redacted), and
-// logs get pasted into issues. A query part with no "=" is not named either,
-// since it may be a bare token; a bare token that holds "=" (padded base64,
-// ?dG9rZW4=) is named by what comes before its first "=" (dG9rZW4).
-func GetReqMeta(req *http.Request) map[string]string {
+// GetReqMeta is what a log line logged under ctx says about req: its
+// method, its host (a name by its shape and tag, models.HostLogName), its
+// path's shape (URLPathShape), its path tag (path_tag,
+// models.URLPathTag under the session ctx carries: what the console and the
+// report print beside the request where they name it whole; none for a
+// request that names no method) and the names of its query parameters
+// (GetReqShape). For the agent's lines about a call, which the console and
+// the report name by that tag. ctx is the context of the work the line is
+// logged in (a connection's, a request's): a line under a context with no
+// session tags under the process's key (models.LogKeySession).
+func GetReqMeta(ctx context.Context, req *http.Request) map[string]string {
+	reqMeta := GetReqShape(req)
+	if req != nil && req.Host != "" {
+		// The host's name by its shape beside its tag under the session
+		// (models.HostLogName), so the session's lines about one host match
+		// up; an IP address whole.
+		reqMeta["host"] = models.HostLogName(ctx, req.Host)
+	}
+	if req != nil && req.URL != nil {
+		if tag := models.URLPathTag(ctx, req.Method, req.URL); tag != "" {
+			reqMeta["path_tag"] = tag
+		}
+	}
+	return reqMeta
+}
+
+// GetReqShape is what a log says about req with no path tag: its method, its
+// host (a name by its labels' shape, models.HostShape, with no tag), its
+// path's shape (URLPathShape) and the names of its query
+// parameters. For a line of keploy's CLI about a test case's request (one it
+// sends, stores or compares): no console or report line prints such a tag,
+// so the line names the request by its shape, and the test case where it has
+// one. Never a path segment, a query value, a header or the body: those are
+// the application's content (a segment may be a token the recording
+// redacted), and logs get pasted into issues. A query part with no "=" is not
+// named either, since it may be a bare token; a bare token that holds "="
+// (padded base64, ?dG9rZW4=) is named by what comes before its first "="
+// (dG9rZW4).
+func GetReqShape(req *http.Request) map[string]string {
 	reqMeta := map[string]string{}
 	if req == nil {
 		return reqMeta
 	}
 	reqMeta["method"] = req.Method
-	reqMeta["host"] = req.Host
+	// The host by its labels' shape (models.HostShape): a name is the
+	// app's, as a path is; an IP address whole.
+	reqMeta["host"] = models.HostShape(req.Host)
 	if req.URL != nil {
 		reqMeta["path"] = URLPathShape(req.URL)
 		if keys := queryKeys(req.URL.RawQuery); len(keys) > 0 {
@@ -297,6 +330,10 @@ func queryKeys(rawQuery string) []string {
 	return slices.Compact(keys)
 }
 
+// IsPassThrough reports whether one of opts' bypass rules names req, to
+// destPort. A rule whose regex does not compile is said, with req by its
+// shape alone (GetReqShape): the line is about keploy.yml's rule, and no
+// console or report line names the call a rule was tried on beside a tag.
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
 	passThrough := false
 
@@ -304,7 +341,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Host != "" {
 			regex, err := regexp.Compile(bypass.Host)
 			if err != nil {
-				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
+				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqShape(req)))
 				continue
 			}
 			passThrough = regex.MatchString(req.Host)
@@ -315,7 +352,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Path != "" {
 			regex, err := regexp.Compile(bypass.Path)
 			if err != nil {
-				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
+				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqShape(req)))
 				// The rule's host may have matched; a path that does not
 				// compile matches no call.
 				passThrough = false
@@ -1838,6 +1875,37 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 	}
 
 	return nil
+}
+
+// GitIgnores reports whether git ignores path, a path inside dir (relative
+// to dir, or absolute), as `git add` would read it: by every .gitignore that
+// applies, a later entry that un-ignores it (a "!*.yaml") included, the
+// repository's info/exclude, and the global excludes of the HOME keploy runs
+// with. known is false when git cannot say (it is not installed, dir is in no
+// git work tree, or git refused or took too long), and then ignored says
+// nothing. A path git tracks already is not ignored. Under sudo git runs as
+// the user sudo ran keploy for (asInvokingUser): git refuses, as root, a work
+// tree another user owns. sudo usually keeps root's HOME, so that user's own
+// global excludes are then not read: they can only ignore more, never
+// un-ignore a path, so the answer errs only toward not ignored.
+func GitIgnores(dir, path string) (ignored, known bool) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, git, "-C", dir, "check-ignore", "-q", "--", path)
+	cmd.SysProcAttr = asInvokingUser()
+	err = cmd.Run()
+	if err == nil {
+		return true, true
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, true
+	}
+	return false, false
 }
 
 func Hash(data []byte) string {

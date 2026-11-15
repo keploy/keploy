@@ -641,8 +641,13 @@ echo "== 9. under the proven switch, a client that hangs up on a quiet answer en
 # test_stream.py: test_events_hang_up and test_poll_hang_up each read what the
 # app sent, hang up, and signal the app; test_app_stops stops it, which ends
 # the deaf app's call. Each test's end must pass with no give-up, the app must
-# have been told of both hang-ups, and each exchange is told at Info as not
-# recorded.
+# have been told of both hang-ups, and each exchange is told as not recorded:
+# keploy's log names the request by its shape (GET /{} for both, never a
+# path) and its path tag, and keploy's console by its path beside the same
+# tag. Each request carries a query parameter of its own (/events?stream=on,
+# /poll?wait=on), whose name the log line and the console both give: it ties
+# each console line's tag to its own log line, so a tag the log gave the
+# other request fails the check.
 STREAM_PORT=18996
 cat > streamapp.py <<'PY'
 import http.server, json, os, select, signal, socket, socketserver, sys, threading
@@ -688,13 +693,14 @@ def event(w, n):
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def do_GET(self):
+        path = self.path.split("?", 1)[0]
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
         with lock:
-            streams[self.connection] = self.path
-        if self.path == "/events":
+            streams[self.connection] = path
+        if path == "/events":
             event(self.wfile, 1)
             sig = more[signal.SIGUSR1]
             while True:
@@ -759,11 +765,11 @@ def hang_up(app, path, until, sig):
     return data
 
 def test_events_hang_up(app):
-    data = hang_up(app, "/events", b'{"seq": 1}\n\r\n', signal.SIGUSR1)
+    data = hang_up(app, "/events?stream=on", b'{"seq": 1}\n\r\n', signal.SIGUSR1)
     assert data.startswith(b"HTTP/1.1 200"), data
 
 def test_poll_hang_up(app):
-    data = hang_up(app, "/poll", b"\r\n\r\n", signal.SIGUSR2)
+    data = hang_up(app, "/poll?wait=on", b"\r\n\r\n", signal.SIGUSR2)
     assert data.startswith(b"HTTP/1.1 200"), data
 
 def test_app_stops(app):
@@ -788,9 +794,53 @@ echo "the app's log:"; cat streamapp.log
 for P in /events /poll; do
   grep -qx "told $P" streamapp.log ||
     { echo "FAIL: the app was never told its $P client went: keploy did not pass on the client's hang-up"; FAIL=1; }
-  grep -q "Not recording this request as a test case: its client closed.*\"url\": \"$P\"" rec-stream.log ||
-    { echo "FAIL: keploy did not say it left $P's exchange unrecorded because its client closed"; FAIL=1; }
 done
+# Each request's tag is read where keploy's console names its path (and its
+# query's parameter name), and the log's client-closed line for it must
+# carry that tag and that name, with the path's shape alone: two such lines,
+# one for each, and no path in either.
+python3 -I - rec-stream.log <<'PY' || FAIL=1
+import json, re, sys
+text = re.sub(r"\x1b\[[0-9;]*m", "", open(sys.argv[1], encoding="utf-8", errors="replace").read())
+lines = text.splitlines()
+why = "its client closed its side of the connection before the app's answer ended"
+console = re.compile(r"^🐰 Keploy: not recorded as a test case: GET (/\w+)\?\{(\w+)\} \[path tag (#[0-9a-f]{12})\]: (.*)$")
+said = {}
+for l in lines:
+    m = console.match(l)
+    if m and m.group(4) == why:
+        said.setdefault(m.group(1), []).append((m.group(2), m.group(3)))
+logged = []
+for l in lines:
+    if "Not recording this request as a test case: its client closed" in l:
+        try:
+            logged.append((l, json.loads(l.rsplit("\t", 1)[1])["metadata"]))
+        except (IndexError, ValueError, KeyError) as e:
+            print("FAIL: keploy's client-closed line has no metadata to read (%s): %s" % (e, l[:300]))
+            sys.exit(1)
+bad = []
+for path, key in (("/events", "stream"), ("/poll", "wait")):
+    got = said.get(path, [])
+    if len(got) != 1 or got[0][0] != key:
+        bad.append("keploy's console did not say once that it left %s?{%s}'s exchange unrecorded because its client closed, beside its path tag: %s" % (path, key, got))
+        continue
+    tag = got[0][1]
+    # The host by its labels' shape and its tag (a name is traffic), never
+    # the name.
+    want = {"method": "GET", "path": "/{}", "path_tag": tag, "query keys": key}
+    mine = [dict(meta) for _, meta in logged if meta.get("path_tag") == tag]
+    hosts = [m.pop("host", "") for m in mine]
+    if mine != [want] or not all(re.fullmatch(r"\{\} #[0-9a-f]{12}", h) for h in hosts):
+        bad.append("keploy's log did not say it left %s's exchange unrecorded because its client closed, by its shape and its console's tag %s, its host by its shape and tag: the lines with that tag name %s (hosts %s); want %s and a host {} #<tag>" % (path, tag, mine, hosts, want))
+if len(logged) != 2:
+    bad.append("keploy's log has %d client-closed lines, want 2 (/events's and /poll's): %s" % (len(logged), [meta for _, meta in logged]))
+for l, _ in logged:
+    if "/events" in l or "/poll" in l or "stream=on" in l or "wait=on" in l or '"localhost' in l:
+        bad.append("keploy's client-closed line names the request's path or query: %s" % l[:300])
+for b in bad:
+    print("FAIL: " + b)
+sys.exit(1 if bad else 0)
+PY
 fi
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK E2E: PASSED"; else echo "MOCK E2E: FAILED"; fi

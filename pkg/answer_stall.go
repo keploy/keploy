@@ -78,6 +78,33 @@ type AnswerStallError struct {
 	// blank line), not frames beside it (a gRPC PING).
 	Keepalives       bool
 	KeepalivesInBody bool
+	// shaped: Target is the request's shape and path tag already (ForLog).
+	shaped bool
+	// keys is the session the exchange ran in (models.LogKeys of its
+	// context), whose key the request's path tag is made under, so the
+	// report's text and the log line name it by the tag of that session.
+	// nil: the process's key.
+	keys *models.LogKeySession
+}
+
+// target is e's target as its text names it: an HTTP request's beside its
+// path tag (models.URLPathTag, under the session the exchange ran in: keys),
+// which the log line that names it by its shape carries too (ForLog), so the
+// report's text and that line name it by one tag. A gRPC method is a name,
+// alone.
+func (e *AnswerStallError) target() string {
+	if e.shaped {
+		return e.Target
+	}
+	method, rest, ok := strings.Cut(e.Target, " ")
+	if !ok {
+		return e.Target
+	}
+	u, err := models.ParseRequestURL(rest)
+	if err != nil {
+		return e.Target
+	}
+	return models.WithPathTag(e.Target, e.keys.URLPathTag(method, u))
 }
 
 func (e *AnswerStallError) Error() string {
@@ -118,13 +145,13 @@ func (e *AnswerStallError) Error() string {
 			what += ", and sent only keepalives"
 		}
 		if e.Target != "" {
-			what += ", for " + e.Target
+			what += ", for " + e.target()
 		}
 		return what
 	}
 	waited := fmt.Sprintf("waited %s of keploy's runnable time", e.Waited)
 	if e.Target != "" {
-		waited += " for " + e.Target
+		waited += " for " + e.target()
 	}
 	return what + "; " + waited
 }
@@ -179,15 +206,18 @@ func streamCut(err error, came, recorded int, unit string) error {
 
 // ForLog is e as a log line names it: its target (the test's request, which
 // the test report keeps whole) by its method and its path's shape, a path or
-// a query being where a test's token rides. A gRPC method is a name, kept.
+// a query being where a test's token rides, followed by its path tag, which
+// the report's text prints beside the request whole (target). A gRPC method
+// is a name, kept.
 func (e *AnswerStallError) ForLog() *AnswerStallError {
 	c := *e
 	if method, target, ok := strings.Cut(c.Target, " "); ok {
 		if u, err := models.ParseRequestURL(target); err == nil {
-			c.Target = method + " " + utils.URLPathShape(u)
+			c.Target = models.WithPathTag(method+" "+utils.URLPathShape(u), c.keys.URLPathTag(method, u))
 		} else {
 			c.Target = method
 		}
+		c.shaped = true
 	}
 	return &c
 }
@@ -211,15 +241,21 @@ func (l loggableAnswer) Error() string { return l.text }
 func (l loggableAnswer) Unwrap() error { return l.err }
 
 // LoggableAnswerError is err's text as a log line carries it: the text of an
-// AnswerStallError in it names its target by shape (ForLog), and a URL or a
-// path any other error quotes is written by its shape
+// AnswerStallError in it names its target by shape (ForLog), that of a
+// models.FormFileError a multipart part's file by its folder (LogText), and a
+// URL or a path any other error quotes is written by its shape
 // (utils.ShapeQuotedURLs: a client's error quotes the request's URL);
 // keploy's own quoted words stay.
 func LoggableAnswerError(err error) string {
 	if err == nil {
 		return ""
 	}
-	text := utils.ShapeQuotedURLs(err.Error())
+	raw := err.Error()
+	var fe models.FormFileError
+	if errors.As(err, &fe) {
+		raw = strings.Replace(raw, fe.Error(), fe.LogText(), 1)
+	}
+	text := utils.ShapeQuotedURLs(raw)
 	var se *AnswerStallError
 	if errors.As(err, &se) && se != nil {
 		text = strings.Replace(text, se.Error(), se.ForLog().Error(), 1)
@@ -260,6 +296,8 @@ func keptOpenWithKeepalivesOnly() *AnswerStallError {
 // bound of the user's: nothing is watched.
 type answerWatch struct {
 	meter *stall.Meter
+	// keys is the session the exchange runs in (AnswerStallError.keys).
+	keys *models.LogKeySession
 
 	mu      sync.Mutex
 	cuts    []func()
@@ -292,9 +330,10 @@ type answerWatch struct {
 }
 
 // newAnswerWatch starts the stall rule on an exchange with the app (describe
-// names it). nil when the switch is off or the user's own bound applies
-// (cfg.Unbounded false).
-func newAnswerWatch(cfg SimulationConfig) *answerWatch {
+// names it), made under ctx, whose session the error it gives names the
+// request's path tag under. nil when the switch is off or the user's own
+// bound applies (cfg.Unbounded false).
+func newAnswerWatch(ctx context.Context, cfg SimulationConfig) *answerWatch {
 	if !cfg.Unbounded || !provenswitch.On() {
 		return nil
 	}
@@ -302,7 +341,7 @@ func newAnswerWatch(cfg SimulationConfig) *answerWatch {
 	if grace <= 0 {
 		grace = AnswerStallGrace
 	}
-	w := &answerWatch{meter: stall.NewMeter(cfg.StallClock, grace), release: func() {}, done: make(chan struct{})}
+	w := &answerWatch{meter: stall.NewMeter(cfg.StallClock, grace), release: func() {}, done: make(chan struct{}), keys: models.LogKeys(ctx)}
 	go w.run()
 	return w
 }
@@ -502,6 +541,7 @@ func (w *answerWatch) err() *AnswerStallError {
 	target, request, sent, untaken := w.target, w.request, w.cutSent, w.cutUntaken
 	w.mu.Unlock()
 	return &AnswerStallError{
+		keys:     w.keys,
 		Target:   target,
 		Waited:   w.meter.Grace(),
 		Sent:     sent,

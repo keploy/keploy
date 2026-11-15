@@ -230,7 +230,7 @@ func readRequestHead(br *bufio.Reader) (Name, error) {
 			case bytes.HasPrefix(first, []byte("PRI * HTTP/2.0")):
 				return Name{H2: true}, fmt.Errorf("%w: %w", ErrNoName, ErrH2C)
 			case looseRequestLine.Match(first):
-				return Name{}, unreadable("its request line is HTTP keploy does not read: %q", bytes.TrimRight(first, "\r\n"))
+				return Name{}, unreadable("its request line is HTTP keploy does not read (%s)", requestLineForm(bytes.TrimRight(first, "\r\n")))
 			default:
 				return Name{}, fmt.Errorf("%w: it is neither TLS nor HTTP/1", ErrNoName)
 			}
@@ -257,6 +257,109 @@ func readRequestHead(br *bufio.Reader) (Name, error) {
 		return Name{}, fmt.Errorf("%w: its HTTP/1 request has no Host", ErrNoName)
 	}
 	return Name{Host: host, Via: "host"}, nil
+}
+
+// requestLineForm describes line, a request line keploy does not read
+// (looseRequestLine takes it, requestLine does not), by its form alone: its
+// size and its words; its method's length and the kinds of character it is
+// made of, in order; its target's form and size; whether its version is one
+// keploy reads; and its spacing. Never a byte of it: the target holds the
+// request's path and query, and an absolute one its host, and the error
+// this goes in is a capture_incomplete's why, which the agent's WARN and
+// keploy's log carry ("57 bytes in 3 words: a method of 15 characters,
+// upper-case letters, a dash and upper-case letters; an origin-form target
+// of 33 bytes; a version keploy reads; single spaces").
+func requestLineForm(line []byte) string {
+	var words [][]byte
+	for _, w := range bytes.Split(line, []byte(" ")) {
+		if len(w) > 0 {
+			words = append(words, w)
+		}
+	}
+	if len(words) < 3 {
+		// looseRequestLine takes no such line; said by its size alone.
+		return fmt.Sprintf("%d bytes in %d words", len(line), len(words))
+	}
+	method, target, version := words[0], words[1], words[2]
+	parts := []string{fmt.Sprintf("%d bytes in %d words: a method of %d characters, %s", len(line), len(words), len(method), characterKinds(method))}
+	form := "a target"
+	switch {
+	case bytes.Equal(target, []byte("*")):
+		form = "an asterisk-form target"
+	case target[0] == '/':
+		form = "an origin-form target"
+	case bytes.Contains(target, []byte("://")):
+		form = "an absolute-form target"
+	}
+	parts = append(parts, fmt.Sprintf("%s of %d bytes", form, len(target)))
+	if string(version) == "HTTP/1.0" || string(version) == "HTTP/1.1" {
+		parts = append(parts, "a version keploy reads")
+	} else {
+		parts = append(parts, fmt.Sprintf("a version of %d characters keploy does not read (it reads HTTP 1.0 and 1.1, in upper case)", len(version)))
+	}
+	if n := len(words) - 3; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d more words after the version", n))
+	}
+	if bytes.Contains(line, []byte("  ")) || line[0] == ' ' || line[len(line)-1] == ' ' {
+		parts = append(parts, "spaced other than by single spaces")
+	} else {
+		parts = append(parts, "single spaces")
+	}
+	return strings.Join(parts, "; ")
+}
+
+// characterKinds names the kinds of character token is made of, in order, a
+// run of one kind once ("upper-case letters, a dash and upper-case
+// letters"): letters by their case, digits, and each other character of a
+// token by its name, never the token. At most six runs are named.
+func characterKinds(token []byte) string {
+	const most = 6
+	var runs []string
+	last := ""
+	for _, c := range token {
+		kind := ""
+		switch {
+		case c >= 'A' && c <= 'Z':
+			kind = "upper-case letters"
+		case c >= 'a' && c <= 'z':
+			kind = "lower-case letters"
+		case c >= '0' && c <= '9':
+			kind = "digits"
+		default:
+			kind = tokenCharNames[c]
+			if kind == "" {
+				kind = "another character"
+			}
+		}
+		if kind == last && !strings.HasPrefix(kind, "a ") && !strings.HasPrefix(kind, "an ") {
+			continue
+		}
+		last = kind
+		runs = append(runs, kind)
+	}
+	more := ""
+	if len(runs) > most {
+		more = fmt.Sprintf(" and %d more", len(runs)-most)
+		runs = runs[:most]
+	}
+	switch len(runs) {
+	case 0:
+		return "none"
+	case 1:
+		return runs[0] + more
+	}
+	if more != "" {
+		return strings.Join(runs, ", ") + more
+	}
+	return strings.Join(runs[:len(runs)-1], ", ") + " and " + runs[len(runs)-1]
+}
+
+// tokenCharNames are the names of the characters other than letters and
+// digits an RFC 9110 token may hold (isTokenChar).
+var tokenCharNames = map[byte]string{
+	'!': "an exclamation mark", '#': "a number sign", '$': "a dollar sign", '%': "a percent sign", '&': "an ampersand",
+	'\'': "an apostrophe", '*': "an asterisk", '+': "a plus sign", '-': "a dash", '.': "a dot", '^': "a caret",
+	'_': "an underscore", '`': "a backquote", '|': "a vertical bar", '~': "a tilde",
 }
 
 // looksLikeRequestLine reports whether b, a line not yet ended, can still

@@ -76,7 +76,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		if isHandshakeMock(m) && forDest(m) {
 			initialHandshakeMock = m
 			logger.Debug("Selected initial handshake mock by destAddr",
-				zap.String("destAddr", dialled),
+				zap.String("destAddr", models.HostLogName(ctx, dialled)),
 				zap.String("conn_id", m.Spec.Metadata["connID"]))
 			break
 		}

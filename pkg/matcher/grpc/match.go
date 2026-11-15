@@ -4,6 +4,7 @@ package grpc
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,25 @@ type MatchOption func(*matchOptions)
 
 type matchOptions struct {
 	noPassLine bool
+	// console is where the comparison's lines go (WithConsole); nil, the
+	// default, prints nothing.
+	console io.Writer
+}
+
+// out is o's console, io.Discard for none.
+func (o matchOptions) out() io.Writer {
+	if o.console == nil {
+		return io.Discard
+	}
+	return o.console
+}
+
+// WithConsole makes w the console the comparison writes its lines to: the
+// "Testrun passed" and "Testrun failed" lines and a failure's diff, which
+// names the expected and actual messages whole. With none, or a nil w, it
+// prints nothing, as the HTTP matcher's WithConsole.
+func WithConsole(w io.Writer) MatchOption {
+	return func(o *matchOptions) { o.console = w }
 }
 
 // WithoutPassLine says the caller has already failed the test case on its
@@ -333,8 +353,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 
 	if !matched {
 		// Display differences to the user, similar to HTTP matcher
-		logDiffs := matcher.NewDiffsPrinter(tc.Name)
+		logDiffs := matcher.NewDiffsPrinterOut(mo.console, tc.Name)
 		newLogger := pp.New()
+		newLogger.SetOutput(mo.out())
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetFailingColorScheme())
 		var logs = ""
@@ -401,6 +422,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	} else if !mo.noPassLine {
 		// Display success message
 		newLogger := pp.New()
+		newLogger.SetOutput(mo.out())
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetPassingColorScheme())
 		var log2 = ""

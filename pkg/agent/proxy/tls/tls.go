@@ -345,7 +345,8 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 			return &tls.Config{
 				NextProtos: nextProtos,
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					cert, err := certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, connectTarget, dstIP)
+					// Under ctx's session: the connection's (certForClient).
+					cert, err := certForClient(ctx, logger, clientHello, caPrivKey, caCertParsed, backdate, connectTarget, dstIP)
 					if err == nil {
 						// crypto/tls sends it next, in the server's
 						// first flight.

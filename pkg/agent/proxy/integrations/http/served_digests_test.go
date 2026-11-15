@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/md5" //nolint:gosec // a digest a server sent, not security
 	"crypto/sha256"
 	"encoding/base64"
@@ -52,7 +53,7 @@ func sdCRC32Dec(b []byte) string { return strconv.FormatUint(uint64(crc32.Checks
 func recordAndServe(t *testing.T, req, resp []byte, rewrite func(string) string) map[string]*http.Response {
 	t.Helper()
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
-	v2, err := h.buildHTTPMock(&FinalHTTP{Req: req, Resp: resp, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+	v2, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: req, Resp: resp, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
 		80, "test-conn", models.OutgoingOptions{})
 	if err != nil || v2 == nil {
 		t.Fatalf("buildHTTPMock = (%v, %v)", v2, err)
@@ -252,7 +253,7 @@ func TestABodyReadInPartNotesNoDigest(t *testing.T) {
 	req := []byte("GET /items HTTP/1.1\r\nHost: api\r\n\r\n")
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
 	for _, inPart := range []bool{false, true} {
-		m, err := h.buildHTTPMock(&FinalHTTP{Req: req, Resp: resp, RespReadInPart: inPart, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+		m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: req, Resp: resp, RespReadInPart: inPart, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
 			80, "test-conn", models.OutgoingOptions{})
 		if err != nil || m == nil {
 			t.Fatalf("buildHTTPMock = (%v, %v)", m, err)

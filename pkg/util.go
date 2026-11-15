@@ -70,6 +70,10 @@ type HTTPStreamConfig struct {
 	// that ended with nothing of its answer to compare says
 	// (AnswerStallError). Set only under the proven switch.
 	Target string
+	// logKeys is the session the request was sent in (models.LogKeys of its
+	// context): the path tag of Target, in what such a stream says, is made
+	// under its key. Set with Target.
+	logKeys *models.LogKeySession
 }
 
 // StreamMismatchInfo holds details about a streaming frame mismatch for reporting.
@@ -688,10 +692,17 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			)
 			for _, path := range field.Paths {
 				// Read from the recording, and only inside it (OpenRecordingFile).
-				logger.Debug("multipart file path", zap.String("path", path), zap.String("field", field.Key))
+				// The path ends in the part's file name, the app's client's
+				// (filename=): each line names it by its folder
+				// (models.FormFilePathLogText). An error about it is returned
+				// whole, for the test's report, as a models.FormFileError, so
+				// the replay's line for the test names the path by its folder
+				// too (LoggableAnswerError).
+				logger.Debug("multipart file path", zap.String("path", models.FormFilePathLogText(path)), zap.String("field", field.Key))
 				file, ferr := OpenRecordingFile(cfg.KeployPath, path)
 				if ferr != nil {
-					utils.LogError(logger, ferr, "failed to open the multipart file kept beside the test case", zap.String("field", field.Key))
+					ferr := models.FormFileError{Err: ferr, Paths: []string{path}}
+					utils.LogError(logger, models.FormFilePathsInError(ferr.Err, path), "failed to open the multipart file kept beside the test case", zap.String("field", field.Key))
 					return nil, ferr
 				}
 				part, perr := writer.CreateFormFile(field.Key, filepath.Base(path))
@@ -702,11 +713,16 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				}
 				if _, cerr := io.Copy(part, file); cerr != nil {
 					file.Close()
-					utils.LogError(logger, cerr, "failed to write multipart file part", zap.String("field", field.Key))
+					// A read of the file names it (read <path>: is a
+					// directory, for a part a hand-edited test points at a
+					// folder), by the path it was opened at.
+					cerr := models.FormFileError{Err: cerr, Paths: []string{path, file.Name()}}
+					utils.LogError(logger, models.FormFilePathsInError(cerr.Err, cerr.Paths...), "failed to write multipart file part", zap.String("field", field.Key), zap.String("path", models.FormFilePathLogText(path)))
 					return nil, cerr
 				}
 				if cerr := file.Close(); cerr != nil {
-					utils.LogError(logger, cerr, "failed to close multipart file", zap.String("path", path))
+					cerr := models.FormFileError{Err: cerr, Paths: []string{path}}
+					utils.LogError(logger, models.FormFilePathsInError(cerr.Err, path), "failed to close multipart file", zap.String("path", models.FormFilePathLogText(path)))
 					return nil, cerr
 				}
 			}
@@ -778,7 +794,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	if cfg.TargetFromURL {
 		appPort = 0
 	}
-	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, appPort, cfg.ConfigPort, true, logger)
+	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, appPort, cfg.ConfigPort, true, logger.With(zap.String("testcase", tc.Name)))
 	if err != nil {
 		return nil, err
 	}
@@ -809,7 +825,9 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		// client of https://staging asks for.
 		req.Host = HostHeaderOf(req.URL)
 	} else if hostHeader != "" {
-		logger.Debug("overriding host header", zap.String("host", hostHeader))
+		// The test's recorded Host header by its labels' shape: the app's
+		// traffic named it (models.HostShape); the report keeps the test.
+		logger.Debug("overriding host header", zap.String("testcase", tc.Name), zap.String("host", models.HostShape(hostHeader)))
 		req.Host = hostHeader
 	}
 	// A CONNECT in authority form (ConnectsToAuthority) names the host and
@@ -1542,7 +1560,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// With no clock on the app's answer, the stall rule (answerWatch) ends
 	// an exchange the app makes no progress on: the whole call waits on the
 	// app, and the cut cancels the request's context.
-	cfg.answer = newAnswerWatch(cfg)
+	cfg.answer = newAnswerWatch(ctx, cfg)
 	defer cfg.answer.stop()
 	defer cfg.answer.waiting()()
 	ctx = cfg.answer.bind(ctx)
@@ -1555,7 +1573,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	// The request's shape and size, never the request: its headers carry
 	// the test's credentials (Authorization, cookies), its URL a token.
-	logger.Debug("Sending request to user app", zap.Any("metadata", utils.GetReqMeta(prepared.Request)), zap.Int64("content_length", prepared.Request.ContentLength))
+	logger.Debug("Sending request to user app", zap.String("testcase", tc.Name), zap.Any("metadata", utils.GetReqShape(prepared.Request)), zap.Int64("content_length", prepared.Request.ContentLength))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
@@ -1651,7 +1669,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	// this call waits on the app, then each read of the returned Reader
 	// does, and its Close ends the watch. The cut cancels the request's
 	// context.
-	cfg.answer = newAnswerWatch(cfg)
+	cfg.answer = newAnswerWatch(ctx, cfg)
 	handedOff := false
 	defer func() {
 		if !handedOff {
@@ -1669,7 +1687,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
-	logger.Debug("Sending streaming request to user app", zap.Any("metadata", utils.GetReqMeta(prepared.Request)), zap.Int64("content_length", prepared.Request.ContentLength))
+	logger.Debug("Sending streaming request to user app", zap.String("testcase", tc.Name), zap.Any("metadata", utils.GetReqShape(prepared.Request)), zap.Int64("content_length", prepared.Request.ContentLength))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
@@ -1695,6 +1713,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
 	if provenswitch.On() {
 		streamCfg.Target = prepared.Request.Method + " " + prepared.Request.URL.RequestURI()
+		streamCfg.logKeys = models.LogKeys(ctx)
 	}
 
 	logger.Debug("detected HTTP streaming response",
@@ -1901,7 +1920,7 @@ func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPS
 	if errors.As(err, &st) && !st.Stream && st.Target == "" && cfg.Target != "" {
 		// A stream with nothing of its answer to compare names its request.
 		named := *st
-		named.Target = cfg.Target
+		named.Target, named.keys = cfg.Target, cfg.logKeys
 		err = &named
 	}
 	return ok, body, info, err
@@ -5460,7 +5479,10 @@ func urlReplacement(target string, urlReplacements map[string]string) (substr, r
 }
 
 // ResolveTestTarget determines the final target (URL for HTTP, Authority for gRPC)
-// by applying replacement logic and precedence rules.
+// by applying replacement logic and precedence rules. Its lines name the
+// target by its shape: a caller hands it a logger that names the test case
+// (keploy's own callers name it as "testcase"), which the report keeps the
+// target whole under.
 //
 // Priority logic (lowest → highest):
 //  1. AppPort (recorded port).

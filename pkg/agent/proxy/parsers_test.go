@@ -731,7 +731,7 @@ func replayCanary(t *testing.T, p integrations.Integrations, logger *zap.Logger,
 	defer cancel()
 	ctx = context.WithValue(ctx, models.ClientConnectionIDKey, "canary-1")
 	ctx = context.WithValue(ctx, models.DestConnectionIDKey, "canary-1-dst")
-	ctx = models.WithMockMismatchReporter(ctx, func(err error) { prx.sendMockNotFoundErrorFrom(err, 0, 0, dst) })
+	ctx = models.WithMockMismatchReporter(ctx, func(err error) { prx.sendMockNotFoundErrorFrom(context.Background(), err, 0, 0, dst) })
 	served := make(chan struct{})
 	var mockErr error
 	go func() {
@@ -745,7 +745,7 @@ func replayCanary(t *testing.T, p integrations.Integrations, logger *zap.Logger,
 		mockErr = p.MockOutgoing(ctx, agent, dst, mm, models.OutgoingOptions{DstCfg: dst, MockNoiseStrict: strict})
 		// As handleConnection does with what a parser returns.
 		if mockErr != nil && mockErr != io.EOF && !errors.Is(mockErr, context.Canceled) && !isNetworkClosedErr(mockErr) {
-			mockErr = prx.mockFailedFrom(logger, mockErr, 0, 0, dst)
+			mockErr = prx.mockFailedFrom(context.Background(), logger, mockErr, 0, 0, dst)
 		}
 	}()
 	got, grew, read := drain(app)

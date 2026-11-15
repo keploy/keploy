@@ -256,7 +256,7 @@ func markAnswerStalled(result *models.TestResult, err error) {
 // sayNoAnswer is the console's line for a test with no answer: for one the
 // stall rule or the app's keepalives ended, that it is not judged and what
 // was waited for, not an ordinary failure; else what as says, with the
-// error.
+// error. Each names the test, which the report names the request under.
 func sayNoAnswer(logger *zap.Logger, test string, err error, as string) {
 	// The line names the request by its shape (pkg.LoggableAnswerError);
 	// the test report keeps it whole.
@@ -266,7 +266,7 @@ func sayNoAnswer(logger *zap.Logger, test string, err error, as string) {
 			zap.String("next_step", stalledAnswerRemedy(err)))
 		return
 	}
-	utils.LogError(logger, pkg.LoggableAnswerErr(err), as)
+	utils.LogError(logger, pkg.LoggableAnswerErr(err), as, zap.String("testcase", test))
 }
 
 // sayStartJudged is the console's line for a test whose answer began and then

@@ -576,11 +576,18 @@ func warnLimited(logger *zap.Logger, sess *supervisor.Session, msg string, err e
 }
 
 // warnFields are the fields each of the recorder's own warnings carries: err,
-// and the connection it is on.
+// and the connection it is on. Its destination (a CONNECT target's host:port,
+// through an HTTP proxy) by its host's shape beside its tag in the
+// connection's session, an address whole (models.HostLogName), in the field
+// and in err.
 func warnFields(sess *supervisor.Session, err error) []zap.Field {
-	fields := []zap.Field{zap.Error(err), zap.String("connID", sess.ClientConnID)}
-	if sess.Opts.DstCfg != nil && sess.Opts.DstCfg.Addr != "" {
-		fields = append(fields, zap.String("dest", sess.Opts.DstCfg.Addr))
+	dest := ""
+	if sess.Opts.DstCfg != nil {
+		dest = sess.Opts.DstCfg.Addr
+	}
+	fields := []zap.Field{zap.Error(models.HostsInError(sess.Ctx, err, dest)), zap.String("connID", sess.ClientConnID)}
+	if dest != "" {
+		fields = append(fields, zap.String("dest", models.HostLogName(sess.Ctx, dest)))
 	}
 	return fields
 }

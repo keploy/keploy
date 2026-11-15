@@ -71,7 +71,7 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 	//compare http req
 	reqPass, reqCompare := CompareHTTPReq(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
 	if !reqPass {
-		logger.Info("test case http req is not equal", zap.Any("tcs1HttpReq", utils.URLLogMeta(string(tcs1.HTTPReq.Method), tcs1.HTTPReq.URL)), zap.Any("tcs2HttpReq", utils.URLLogMeta(string(tcs2.HTTPReq.Method), tcs2.HTTPReq.URL)))
+		logger.Info("test case http req is not equal", zap.String("tcs1Name", tcs1.Name), zap.String("tcs2Name", tcs2.Name), zap.Any("tcs1HttpReq", utils.URLLogMeta(string(tcs1.HTTPReq.Method), tcs1.HTTPReq.URL)), zap.Any("tcs2HttpReq", utils.URLLogMeta(string(tcs2.HTTPReq.Method), tcs2.HTTPReq.URL)))
 		pass = false
 	}
 
@@ -133,7 +133,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 
 	if tcs1.HTTPReq.URL != tcs2.HTTPReq.URL {
 		reqCompare.URLResult.Normal = false
-		logger.Debug("test case http req url is not equal", zap.Any("tcs1HttpReqURL", utils.URLLogMeta(string(tcs1.HTTPReq.Method), tcs1.HTTPReq.URL)), zap.Any("tcs2HttpReqURL", utils.URLLogMeta(string(tcs2.HTTPReq.Method), tcs2.HTTPReq.URL)))
+		logger.Debug("test case http req url is not equal", zap.String("tcs1Name", tcs1.Name), zap.String("tcs2Name", tcs2.Name), zap.Any("tcs1HttpReqURL", utils.URLLogMeta(string(tcs1.HTTPReq.Method), tcs1.HTTPReq.URL)), zap.Any("tcs2HttpReqURL", utils.URLLogMeta(string(tcs2.HTTPReq.Method), tcs2.HTTPReq.URL)))
 		pass = false
 	}
 
