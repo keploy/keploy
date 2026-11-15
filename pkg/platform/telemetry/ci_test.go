@@ -9,13 +9,17 @@ import "testing"
 // checkout's remote (remoteRepo) and a CI variable holding a git URL
 // (normalizeRepo with url), which also reads a host with no user
 // ("[fd00::1]:owner/repo") and a bare slug, two values remoteRepo leaves to
-// git as local paths.
+// git as local paths. A bracketed host is the remote's host whole, so a
+// dotted one ("[::ffff:10.0.0.1]", an IPv4 address mapped) passes
+// remoteRepo's user-or-dotted-host rule.
 func TestNormalizeRepoTakesAnIPv6Host(t *testing.T) {
 	for _, c := range []struct{ raw, remote, ci string }{
 		{"git@[fd00::1]:owner/repo.git", "owner/repo", "owner/repo"},
 		{"git@[::1]:owner/repo", "owner/repo", "owner/repo"},
 		{"[git@fd00::1]:owner/repo.git", "owner/repo", "owner/repo"},
 		{"[fd00::1]:owner/repo", "", "owner/repo"},
+		{"[::ffff:10.0.0.1]:owner/repo", "owner/repo", "owner/repo"},
+		{":owner/repo", "", "owner/repo"},
 		{"git@[fd00::1]:/owner/repo.git", "owner/repo", "owner/repo"},
 		{"git@[fd00::1]", "", ""},
 		{"git@[fd00::1]/owner/repo", "", ""},
