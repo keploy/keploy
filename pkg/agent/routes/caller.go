@@ -57,19 +57,58 @@ func CallerPID(r *http.Request) (int, error) {
 // so a caller that does not carry keploy's shim, such as a hardened binary,
 // is identified like any other.
 func callerPID(r *http.Request) (int, error) {
-	remote, err := netip.ParseAddrPort(r.RemoteAddr)
+	remote, local, err := callerEnds(r)
 	if err != nil {
-		return 0, fmt.Errorf("the connection's remote address %q: %w", r.RemoteAddr, err)
+		return 0, err
+	}
+	return tcpOwner(remote, local)
+}
+
+// callerEnds is the request's connection: the caller's end (the request's
+// remote address) and the server's own.
+func callerEnds(r *http.Request) (remote, local netip.AddrPort, err error) {
+	remote, err = netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return remote, local, fmt.Errorf("the connection's remote address %q: %w", r.RemoteAddr, err)
 	}
 	la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
 	if !ok || la == nil {
-		return 0, errors.New("the connection's local address is unknown")
+		return remote, local, errors.New("the connection's local address is unknown")
 	}
-	local, err := netip.ParseAddrPort(la.String())
+	local, err = netip.ParseAddrPort(la.String())
 	if err != nil {
-		return 0, fmt.Errorf("the connection's local address %q: %w", la.String(), err)
+		return remote, local, fmt.Errorf("the connection's local address %q: %w", la.String(), err)
 	}
-	return tcpOwner(remote, local)
+	return remote, local, nil
+}
+
+// callerSocketChecker is the agent service's reading of whether the process
+// the kernel's tables name for a connection sends on it (agent.Agent's
+// CallerSocketWhy, from coreAgent.CallerSocketReporter hooks).
+type callerSocketChecker interface {
+	CallerSocketWhy(pid int, client, server netip.AddrPort) string
+}
+
+// caller is the process that calls the agent over r's connection
+// (callerPID), refused when the agent's hooks say the process the kernel's
+// tables name may not be the one that sent on it.
+func (a *Agent) caller(r *http.Request) (int, error) {
+	pid, err := callerPID(r)
+	if err != nil {
+		return 0, err
+	}
+	c, ok := a.svc.(callerSocketChecker)
+	if !ok {
+		return pid, nil
+	}
+	remote, local, err := callerEnds(r)
+	if err != nil {
+		return 0, err
+	}
+	if why := c.CallerSocketWhy(pid, remote, local); why != "" {
+		return 0, errors.New(why)
+	}
+	return pid, nil
 }
 
 // sameEndpoint compares two endpoints with IPv4-mapped IPv6 read as IPv4 and
