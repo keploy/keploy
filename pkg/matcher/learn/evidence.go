@@ -857,6 +857,15 @@ func tokenIn(t *readerText, kind tokenKind, tok string) bool {
 	return h
 }
 
+// heldWhole reports whether p, a place F moved, held the recorded value's
+// whole token around w in R (rec: the text the leaf opens to whole; no
+// token around it: the word is a whole token of its own, no ID byte beside
+// it). wordBy counts it a conflict at a place of the call's own test only.
+func heldWhole(p evPlace, w readWord, rec string) bool {
+	return !p.same() && (tokenIn(p.t.rec, tokenID, rec) || len(w.Tokens) == 0 && tokenIn(p.t.rec, tokenID, w.Rec) ||
+		slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return tokenIn(p.t.rec, t.Kind, t.Rec) }))
+}
+
 // sameTokenAround is the recorded value's whole token around w, longer than
 // w, that p held in both runs ("blue-17" for "17" of "blue-17"), "" where it
 // held none: a place both runs gave alike that held it in R, or, where moved
@@ -865,11 +874,11 @@ func tokenIn(t *readerText, kind tokenKind, tok string) bool {
 // while the value moved off it: no chance of a short word, so keploy cannot
 // tell whether the value came from there (main refuses it as a word of an
 // earlier place that did not drift with it). A word under 32 bits a moved
-// place held only in R, alone or in a token round F's text there no longer
-// holds, is no such evidence: the value did not follow the place's new
-// text, so the run shows it did not flow from there, and it is chance
-// (countsByText still counts a word or token of 32 bits). p's texts are set
-// (withTexts).
+// start-up place held only in R, alone or in a token round F's text there
+// no longer holds, is no such evidence: the value did not follow the
+// place's new text, so the run shows it did not flow from there, and it is
+// chance (countsByText still counts a word or token of 32 bits; heldWhole
+// a place of the call's own test). p's texts are set (withTexts).
 func sameTokenAround(p evPlace, w readWord, moved bool) string {
 	same := p.same()
 	if !same && !moved {

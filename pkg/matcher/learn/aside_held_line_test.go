@@ -18,7 +18,11 @@ import (
 // round F's word in both runs read as a place round F had moved off the
 // recorded word: an insert's duration_ms "3" went to "1" while an earlier
 // aggregate held "8" in both runs, and the line said that aggregate held
-// "3". In keploy test and keploy mock alike.
+// "3". A place of the call's own test that held the recorded word whole and
+// that round F moved is no place set aside: it is a conflict (in its own
+// test a value that stopped following its source is an application bug),
+// so those rows use the start-up's place. In keploy test and keploy mock
+// alike.
 func TestOutcomeASetAsidePlaceIsNamedByTheWordItHeld(t *testing.T) {
 	const ms = time.Millisecond
 	own := func(mock string, run, startUp bool, path, rec, live string) []Earlier {
@@ -43,9 +47,12 @@ func TestOutcomeASetAsidePlaceIsNamedByTheWordItHeld(t *testing.T) {
 		says, not string
 	}
 	rows := []row{
-		{what: "the test's place held the recorded word and round F moved it",
-			earlier: own("mock-4", false, false, "body.n", "3", "2"), rec: "3", live: "8", word: [2]string{"3", "8"},
+		{what: "the start-up's place held the recorded word and round F moved it",
+			earlier: own("mock-4", true, true, "body.n", "3", "2"), rec: "3", live: "8", word: [2]string{"3", "8"},
 			says: `mock-4 body.n held "3" and round F gave "2" there: set aside`},
+		{what: "the test's own place held the recorded word and round F moved it: a conflict",
+			earlier: own("mock-4", false, false, "body.n", "3", "2"), rec: "3", live: "8", word: [2]string{"3", "8"},
+			refused: true, says: `"3" stood whole at mock-4 body.n; round F gave "2" there and the value did not follow`, not: `in both runs`},
 		{what: "the test's place held round F's word in both runs",
 			earlier: own("mock-4", false, false, "body.n", "8", "8"), rec: "3", live: "8", word: [2]string{"3", "8"},
 			says: `mock-4 body.n held "8" in both runs, while the value went to it from "3": set aside`, not: `held "3"`},
@@ -53,10 +60,10 @@ func TestOutcomeASetAsidePlaceIsNamedByTheWordItHeld(t *testing.T) {
 			earlier: own("mock-4", true, true, "body.n", "8 ready", "8 waiting"), rec: "3", live: "8", word: [2]string{"3", "8"},
 			says: `mock-4 body.n held "8" in both runs, while the value went to it from "3": set aside`, not: `held "3"`},
 		{what: "the first place set aside is the one named",
-			earlier: append(own("mock-4", false, false, "body.n", "3", "2"), later("mock-5", "body.m", "8", "8")...), rec: "3", live: "8", word: [2]string{"3", "8"},
+			earlier: append(own("mock-4", true, true, "body.n", "3", "2"), later("mock-5", "body.m", "8", "8")...), rec: "3", live: "8", word: [2]string{"3", "8"},
 			says: `mock-4 body.n held "3" and round F gave "2" there: set aside`, not: `mock-5 body.m held`},
-		{what: "the test's own place set aside comes before another test's recording",
-			earlier: own("mock-4", false, false, "body.n", "3", "2"), given: set(oAnswer("mock-31", 2*time.Second, "8").ServedAs(3).ServedAsRecorded().OfAnotherTest()), rec: "3", live: "8", word: [2]string{"3", "8"},
+		{what: "the start-up's place set aside comes before another test's recording",
+			earlier: own("mock-4", true, true, "body.n", "3", "2"), given: set(oAnswer("mock-31", 2*time.Second, "8").ServedAs(3).ServedAsRecorded().OfAnotherTest()), rec: "3", live: "8", word: [2]string{"3", "8"},
 			says: `mock-4 body.n held "3" and round F gave "2" there: set aside`, not: `mock-31 held`},
 		{what: "another test's recording, served as recorded, held round F's word",
 			given: set(oAnswer("mock-31", 2*time.Second, "8").ServedAs(3).ServedAsRecorded().OfAnotherTest()), rec: "3", live: "8", word: [2]string{"3", "8"},

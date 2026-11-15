@@ -116,13 +116,13 @@ func TestOutcomeElsewhereLearnsNothingBesideAValueAnEarlierPlaceSent(t *testing.
 	echo.Resp = []Leaf{oText("reply.lease", "pat-janitor:968290")}
 	eNothing(t, "a bucket its recorded answer echoes", Decide(echo), "reply.lease")
 	// Another test's request held the recorded bucket whole, and round F
-	// moved it while the call sent another: the value did not follow it, so
-	// the bucket's short word (968290, under 32 bits) is chance, a value made
-	// anew; nothing is learned all the same. The same place holding a word
-	// of 32 bits is a conflict there, named.
+	// moved it while the call sent another: Mode Elsewhere counts every
+	// earlier place as the call's scope, so it is a conflict at an earlier
+	// place, as in the call's own test, named. So is the same place holding
+	// a word of 32 bits.
 	held := []Earlier{{Mock: "mock-15", At: eRAt.Add(-time.Second), Run: true,
 		Seen: []Seen{{Side: Request, Leaf: oText("body.lease", "pat-janitor:968290"), Live: "pat-janitor:968292"}}}}
-	eNothing(t, "a bucket another test held whole, F moved", Decide(eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968291", held)), "body.documents[0]._id word 2 is a value made anew")
+	eNothing(t, "a bucket another test held whole, F moved", Decide(eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968291", held)), "mock-15")
 	held = []Earlier{{Mock: "mock-15", At: eRAt.Add(-time.Second), Run: true,
 		Seen: []Seen{{Side: Request, Leaf: oText("body.lease", "pat-janitor:9682904417"), Live: "pat-janitor:9682924417"}}}}
 	eNothing(t, "a 32-bit bucket another test held whole, F moved", Decide(eLease(eRAt, eFAt, "pat-janitor:9682904417", "pat-janitor:9682914417", held)), "mock-15")

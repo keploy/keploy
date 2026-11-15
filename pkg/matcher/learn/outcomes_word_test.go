@@ -288,25 +288,34 @@ func TestOutcomeAPlaceOfUnknownStateRefusesTheWord(t *testing.T) {
 	}
 }
 
-// The test's own short value that round F moved away from the call: the
-// test sent {"order":"o-1"} (F: o-9) and a later call sends /v1/orders/o-1
-// (F: o-5). The place held the value's whole recorded token, but F's call
-// did not follow F's new value there, so the run shows the call's value did
-// not flow from it: "o-1" (10 bits) standing there in the recording is
-// chance, and the word is made anew, its line naming the place set aside,
-// in the call's test and at the start-up alike. The same value sent as a
-// 32-bit id is a conflict, refused naming the place, as is "o-1" sent
-// unchanged in both runs (a whole token the place kept while the value
-// moved off it).
-func TestOutcomeTheTestsOwnShortValueRoundFMovedAwayFromIsChance(t *testing.T) {
+// The test's own short value that stopped following its source: the test
+// sent {"order":"o-1"} (F: o-9) and a later call sends /v1/orders/o-1 (F:
+// o-5). The place held the value's whole recorded token and F moved it: in
+// the call's own test that is a conflict at any length, refused naming the
+// place (TestLearnMatchFollowsAVariable's second half), as the application
+// read the new value and sent a stale one: a bug keploy must catch. At the
+// start-up, no step of the test, "o-1" (10 bits) standing there in the
+// recording is chance: F's call did not follow F's new value there, so the
+// run shows the call's value did not flow from it, and the word is made
+// anew, its line naming the place set aside. The same value sent as a
+// 32-bit id is a conflict at both, as is "o-1" sent unchanged in both runs
+// (a whole token the place kept while the value moved off it).
+func TestOutcomeTheTestsOwnValueThatStoppedFollowingItsSourceIsAConflict(t *testing.T) {
 	for _, s := range []struct {
 		what         string
 		run, startUp bool
 	}{{"own", false, false}, {"start-up", true, true}} {
 		sent := oServed("mock-0", s.run, s.startUp, Request, oText("body.order", "o-1"), "o-9", time.Millisecond)
 		d := oWord(t, Decide(oInput("url.path.2", "o-1", "o-5", sent, nil)), "1", "5")
-		if d.Outcome != OutcomeFresh || !strings.Contains(d.Line, "mock-0 body.order held") || !strings.Contains(d.Line, "set aside") {
-			t.Errorf("%s o-1 sent, F moved it to o-9, the call sent o-5: %s, line %q; want fresh, naming mock-0 set aside", s.what, oDescribe([]Decision{d}), d.Line)
+		if s.startUp {
+			if d.Outcome != OutcomeFresh || !strings.Contains(d.Line, "mock-0 body.order held") || !strings.Contains(d.Line, "set aside") {
+				t.Errorf("start-up o-1 sent, F moved it to o-9, the call sent o-5: %s, line %q; want fresh, naming mock-0 set aside", oDescribe([]Decision{d}), d.Line)
+			}
+		} else {
+			oRefused(t, "own o-1 sent, F moved it to o-9, the call sent o-5", d, "conflict", `"1" stood whole at mock-0 body.order; round F gave "o-9" there and the value did not follow`)
+			if !oEdits(d.Refusal, "fix-app") {
+				t.Errorf("a conflict's edits %+v; want fix the app or re-record first", d.Refusal)
+			}
 		}
 		sent = oServed("mock-0", s.run, s.startUp, Request, oText("body.order", "o-A7K29QXM"), "o-Zq81Lm0X", time.Millisecond)
 		d = oWord(t, Decide(oInput("url.path.2", "o-A7K29QXM", "o-B4N08ZRT", sent, nil)), "A7K29QXM", "B4N08ZRT")
@@ -797,40 +806,43 @@ func TestOutcomeAWordWhoseWholeTokenAnEarlierPlaceKeptInBothRunsIsRefused(t *tes
 	}
 }
 
-// A place whose token round F moved (a find gave "blue-17", then "green-9",
-// and the request went "blue-17" to "red-42") is no conflict, in an older
-// test and in the call's own test alike: the value did not follow the
-// place's new text, so the run itself shows the value did not flow from
-// there, and "blue-17" (31 bits) is no evidence by its text alone. Each word
-// is fresh, as main learns the field a variable.
-func TestOutcomeAWordWhoseTokenAnEarlierPlaceMovedIsFresh(t *testing.T) {
+// A place of an older test whose token round F moved (a find gave
+// "blue-17", then "green-9", and the request went "blue-17" to "red-42") is
+// no conflict: the value did not follow it, and a moved place counts only in
+// the call's scope or the start-up, so each word is fresh, as main learns
+// the field a variable. The same place in the call's own test is a conflict:
+// there a value that stopped following its source is an application bug.
+func TestOutcomeAWordWhoseTokenAnOlderTestsPlaceMovedIsFresh(t *testing.T) {
 	for _, s := range []struct {
 		what string
 		run  bool
-	}{{"an older test", true}, {"the call's test", false}} {
+		want WordOutcome
+	}{{"an older test", true, OutcomeFresh}, {"the call's test", false, OutcomeRefused}} {
 		find := oServed("mock-0", s.run, false, Response, oText("body.tag", "blue-17"), "green-9", time.Millisecond)
 		in := oInput("body.note", "blue-17", "red-42", find, nil)
 		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
 		ds := Decide(in)
 		for _, wd := range [][2]string{{"blue", "red"}, {"17", "42"}} {
-			if d := oWord(t, ds, wd[0], wd[1]); d.Outcome != OutcomeFresh {
-				t.Errorf("%s moved the token, %s: %s; want fresh", s.what, wd[0], oDescribe([]Decision{d}))
+			if d := oWord(t, ds, wd[0], wd[1]); d.Outcome != s.want {
+				t.Errorf("%s moved the token, %s: %s; want %v", s.what, wd[0], oDescribe([]Decision{d}), s.want)
 			}
 		}
 	}
 }
 
-// A short word that a place of the call's own test or of the start-up held
-// whole in the recording, where round F gave a value without round F's word,
-// is chance: the place moved and the value did not follow it, so the run
-// shows the value did not flow from there (an insert's duration_ms "3" went
-// to "131" while a start-up createIndexes answer had held "numIndexesAfter":
-// 3 and gave 2). It is set aside and learned fresh, as at another test's
-// place, by keploy test and keploy mock alike: one rule. What keeps today's
-// conflict at such a place, each its own row: a word of 32 bits or more; a
-// value the test gave; a whole token around the word the place kept in both
-// runs (an older test's moved place does not count it, as it counts no moved
-// place). A value that did follow the moved place is bound to it.
+// A short word that a place of the start-up held whole in the recording,
+// where round F gave a value without round F's word, is chance: the place
+// moved and the value did not follow it, so the run shows the value did not
+// flow from there (an insert's duration_ms "3" went to "131" while a
+// start-up createIndexes answer had held "numIndexesAfter": 3 and gave 2).
+// It is set aside and learned fresh, as at another test's place, by keploy
+// test and keploy mock alike: one rule. What keeps today's conflict at such
+// a place, each its own row: a place of the call's own test (there a value
+// that stopped following its source is an application bug keploy must
+// catch); a word of 32 bits or more; a value the test gave; a whole token
+// around the word the place kept in both runs (an older test's moved place
+// does not count it, as it counts no moved place). A value that did follow
+// the moved place is bound to it.
 func TestOutcomeAShortWordAMovedPlaceHeldWholeIsChance(t *testing.T) {
 	const ms = time.Millisecond
 	type row struct {
@@ -846,7 +858,7 @@ func TestOutcomeAShortWordAMovedPlaceHeldWholeIsChance(t *testing.T) {
 	}
 	rows := []row{
 		{"the start-up held the short word whole and moved", place(true, true, "body.numIndexesAfter", "3", "2"), "3", "131", OutcomeFresh, "set aside", [2]string{"3", "131"}},
-		{"the call's test held the short word whole and moved", place(false, false, "body.numIndexesAfter", "3", "2"), "3", "131", OutcomeFresh, "set aside", [2]string{"3", "131"}},
+		{"keep: the call's own test held the short word whole and moved", place(false, false, "body.numIndexesAfter", "3", "2"), "3", "131", OutcomeRefused, `"3" stood whole at mock-4 body.numIndexesAfter; round F gave "2" there and the value did not follow`, [2]string{"3", "131"}},
 		{"the start-up moved to a text without either word", place(true, true, "body.state", "ready 3", "waiting"), "3", "131", OutcomeFresh, "set aside", [2]string{"3", "131"}},
 		{"keep: a 32-bit word the start-up held whole, moved", place(true, true, "body.id", "A7K29QXM", "B4N08ZRT"), "A7K29QXM", "Q8M31WPN", OutcomeRefused, `"A7K29QXM" stood whole at mock-4 body.id`, [2]string{"A7K29QXM", "Q8M31WPN"}},
 		{"keep: a 32-bit word the call's test held whole, moved", place(false, false, "body.id", "A7K29QXM", "B4N08ZRT"), "A7K29QXM", "Q8M31WPN", OutcomeRefused, `"A7K29QXM" stood whole at mock-4 body.id`, [2]string{"A7K29QXM", "Q8M31WPN"}},
