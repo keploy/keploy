@@ -79,6 +79,10 @@ import (
 // strict, or a clock rule it declares at the field, decides the place's
 // variable as before (Learned.strictRefusal, Learned.placeRefused). A real
 // given that is no time is still followed whole, and a part of it refused.
+// A copy of a value an earlier test's call, or the set's start-up's, sent
+// where its learn step learned a plain read of the clock, which its own
+// call's window does not hold as a read, is a time all the same there:
+// checked by its form alone where keploy test refuses it (clockCopyByForm).
 //
 // A time learning bound to an earlier place that holds its value (a Value,
 // a variable bound whole) keeps that bind wherever the bind holds. Where it

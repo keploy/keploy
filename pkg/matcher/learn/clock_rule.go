@@ -124,9 +124,10 @@ func (dc *decider) clockOnly(path string, src Source, ds []Decision) []Decision 
 // (two layouts or zone forms, a value its call's answer holds, what keploy
 // could not read). A read the re-read since the test began learned in
 // place of the offset rule's refusal (Learned.offsetRefused), or the T2
-// time rule in place of a place no variable binds at (Learned.placeRefused),
-// is decided as that refusal, or that variable: the rule, not learning, says
-// how the field is checked.
+// time rule in place of a place no variable binds at or of a copy of an
+// earlier call's read of the clock (Learned.placeRefused), is decided as
+// that refusal, or that variable: the rule, not learning, says how the
+// field is checked.
 func DeclaredClockLearned(ln Learned, src Source, w *Window, timeForm bool) Learned {
 	switch {
 	case src.Kind != SourceClock:
@@ -135,8 +136,9 @@ func DeclaredClockLearned(ln Learned, src Source, w *Window, timeForm bool) Lear
 		// since the test began learned as a read (Learned.offsetRefused).
 		ln = *ln.offsetRefused
 	case ln.placeRefused != nil:
-		// And the variable of a place no variable binds at, which the T2
-		// time rule learned as a read (Learned.placeRefused).
+		// And the variable of a place no variable binds at, or the refusal
+		// of a copy of an earlier call's read of the clock, which the T2
+		// time rules learned as a read (Learned.placeRefused).
 		ln = *ln.placeRefused
 	}
 	settles := ln.Kind == KindVariable && ln.From.Echo || ln.Kind == KindNoise ||

@@ -1083,10 +1083,13 @@ type Learned struct {
 	offsetRefused *Learned
 	// placeRefused: the variable of a place no variable binds at (a value
 	// an earlier call of the test sent inside a longer value) that the T2
-	// time rule learned instead as this read (classifyRead's ofTimePart). A
-	// clock rule keploy.yml declares at the field decides that variable,
-	// never this read (DeclaredClockLearned), as it does the offset rule's
-	// refusal. nil for every other leaf.
+	// time rule learned instead as this read (classifyRead's ofTimePart),
+	// or the refusal of a copy of an earlier call's read of the clock that
+	// the T2 time default learned instead as a time checked by its form
+	// (clockCopyByForm). A clock rule keploy.yml declares at the field
+	// decides that variable, or that refusal, never this read
+	// (DeclaredClockLearned), as it does the offset rule's refusal. nil for
+	// every other leaf.
 	placeRefused *Learned
 	// unreadWhy: the refusal of a changed instant its call's window shows
 	// no read of the clock in, nor of the clock plus an offset
@@ -1103,10 +1106,12 @@ type Learned struct {
 	wordRefused bool
 	// strictRefusal: the refusal the HTTP learn step's re-read since the
 	// test began learned instead as this read (the offset rule's own,
-	// offsetRefused, or one of no clock read, unreadWhy), or the variable of
+	// offsetRefused, or one of no clock read, unreadWhy), the variable of
 	// a place no variable binds at that the T2 time rule learned instead as
-	// this read (classifyRead's ofTimePart), which mock.times: strict keeps
-	// (OffsetReadUnder). nil for every other leaf.
+	// this read (classifyRead's ofTimePart), or the refusal of a copy of an
+	// earlier call's read of the clock that the T2 time default learned
+	// instead as a time checked by its form (clockCopyByForm), which
+	// mock.times: strict keeps (OffsetReadUnder). nil for every other leaf.
 	strictRefusal *Learned
 	// Bindable, of a KindUnaccounted leaf of keploy mock's client test
 	// (DriftCache.ClientTests), says the value is one its test gave the
@@ -2273,7 +2278,15 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		return Learned{}, false
 	}
-	ofRun := func(ln Learned, r, l Leaf, w *Window) Learned {
+	//
+	// In keploy mock's client tests (T2: byForm, the leaf's own reading, not
+	// a word of a text the window learned as noise, which a refused word
+	// leaves noise), that refusal is learned instead as a time checked by its
+	// form alone (clockCopyByForm): the founder's T2 time default (2026-11-11)
+	// counts a place learning read as the clock, in any scope, as a time, and
+	// a time never sets a test aside there. keploy test (T1) refuses it as
+	// before.
+	ofRun := func(ln Learned, r, l Leaf, w *Window, byForm bool) Learned {
 		if ln.Kind != KindVariable || !ln.From.Run || !provenswitch.On() {
 			return ln
 		}
@@ -2281,8 +2294,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			return own
 		}
 		if ln.From.Clock {
-			ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, clockSourceWhy(ln.From)
+			from := ln.From
+			ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, clockSourceWhy(from)
 			ln.sourceWhy = ln.Why
+			if byForm {
+				return clockCopyByForm(ln, from, w)
+			}
 		}
 		return ln
 	}
@@ -2370,7 +2387,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// call's own read where a window of that call holds it so, and refused
 	// where none does and the earlier call's learn step read it from the
 	// clock, never left the noise of the text.
-	read := func(r, l Leaf, w *Window, skip skipRule) Learned { return ofRun(leaf(r, l, w, skip), r, l, w) }
+	read := func(r, l Leaf, w *Window, skip skipRule) Learned { return ofRun(leaf(r, l, w, skip), r, l, w, false) }
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := leaf(r, l, w, 0)
@@ -2487,7 +2504,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		// The run's variable, under the run's rule (ofRun); a start-up's
 		// same-second read, under its rule (ofSentBefore).
-		ln = ofSentBefore(ofRun(ln, r, l, w), r, l, w)
+		ln = ofSentBefore(ofRun(ln, r, l, w, dc.clientTests), r, l, w)
 		// A time a given or an earlier call's longer value holds by chance,
 		// under the T2 time rule (ofTimePart).
 		ln = ofTimePart(ln, r, l, w)
@@ -2596,6 +2613,42 @@ func clockSourceWhy(from Place) string {
 	return "its recorded value was sent in " + placeAt(from) + ", " + RunCallWhose(from) + ", where keploy learned it as a read of the application's clock, and this call does not hold it as its own read of the clock. keploy cannot tell a copy of that read from a read of the clock made in the same second where keploy does not see it (a token the test's client holds, minted at that second, or a value this call made that second, which its answer echoes), so it follows neither. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
+// clockCopyByForm is refused, the refusal of a value an earlier call of the
+// run sent at from where that call's learn step learned a plain read of the
+// application's clock (clockSourceWhy), in keploy mock's client tests (T2),
+// learned instead as a time checked by its form alone (models.ClockOffset
+// Form: the epoch's unit, or the text's layout), the time default's check:
+// the founder's T2 rule (2026-11-11) counts a place learning read as the
+// clock as a time in any scope, and checks a time by its type and form
+// alone. api-server's PAT last-use touch stamps lastUsedAt with its own
+// clock in the second an earlier test's insert stamped an app's createdAt,
+// outside the touch's window in round F: refused, the touch got no answer.
+// Nothing is bound at from: the earlier place keeps its own read. The
+// refusal stands where its value is no time to check by form: at a key
+// (keyPlace: it names what the call fetches or writes), and where a run
+// writes it in no form of a time (TimeForm: an instant, or a time of day,
+// which a read of the clock it copies may be), or as an epoch number no
+// moment near its call in a run (timeForms; a time-ordered UUID has no form
+// checked alone). It
+// is kept beside the read (Learned.strictRefusal): keploy.yml's times:
+// strict, which checks a time's provenance, refuses it as before
+// (OffsetReadUnder), and a clock rule keploy.yml declares at the field
+// decides it (Learned.placeRefused, DeclaredClockLearned).
+func clockCopyByForm(refused Learned, from Place, w *Window) Learned {
+	r, l := refused.Recorded, refused.Live
+	if keyPlace(r.Path) {
+		return refused
+	}
+	form, formF := timeForms(TimeForm(r), TimeForm(l), r, l, w, nil)
+	if form == "" {
+		return refused
+	}
+	off := models.ClockOffset{Form: form, FormF: formF}
+	off.Why = "a time, checked by its form alone (" + off.Forms() + ", keploy.yml's times setting at its default): its recorded value was sent in " + placeAt(from) + ", " + RunCallWhose(from) + ", where keploy learned it as a read of the application's clock, which makes it a time in any scope; with times: strict keploy refuses it, as it cannot tell a copy of that read from a read of the clock made in the same second"
+	kept := refused
+	return Learned{Kind: KindClockRead, Recorded: r, Live: l, Read: &off, Why: off.Why, Refuted: refused.Refuted, strictRefusal: &kept, placeRefused: &kept}
+}
+
 // RunCallWhose says whose call the run's place from (Place.Run) is: the
 // test set's start-up's, or an earlier test's, never the running test's.
 func RunCallWhose(from Place) string {
@@ -2624,8 +2677,10 @@ func sinceRereadWindow(w *Window, follow bool) *Window {
 // the time default; with it off (keploy.yml's mock.times: strict), a read
 // that the learn step learned in place of a refusal (Learned.strictRefusal:
 // the offset rule's own, or one of no clock read in its call's window, read
-// since its test began; or the variable of a place no variable binds at,
-// read in its call's window by the T2 time rule) is that refusal again, as
+// since its test began; the variable of a place no variable binds at,
+// read in its call's window by the T2 time rule; or a copy of an earlier
+// call's read of the clock, checked by its form: clockCopyByForm) is that
+// refusal again, as
 // before the default was: strict checks a time by its range and provenance,
 // and the read keeps the range alone. Every other leaf is ln.
 func OffsetReadUnder(ln Learned, timeForm bool) Learned {
