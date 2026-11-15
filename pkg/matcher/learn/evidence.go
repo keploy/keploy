@@ -229,6 +229,7 @@ func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 		n += len(e.Seen)
 	}
 	ps = make([]evPlace, 0, n)
+	trails := in.trailSet()
 	for _, e := range in.Earlier {
 		// An exchange keploy could not read (Earlier.Unread), or one F
 		// served with no leaf and no payload keploy read, is a place it
@@ -256,7 +257,7 @@ func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 		// the test before its clean-up ran, but the round ran it sooner):
 		// bound there, a value is the run's variable, so a replay binds it
 		// in whichever window the call lands.
-		trailed := in.trails(e.Mock) && !startUp && (other && e.ofEarlierTest() || !other && in.Test == in.Trails.Test)
+		trailed := trails[e.Mock] && !startUp && (other && e.ofEarlierTest() || !other && in.Test == in.Trails.Test)
 		if trailed {
 			other = false
 		}
@@ -323,7 +324,7 @@ func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 		// is the run's variable, so a replay binds it in whichever window
 		// the call lands. One mappings.yaml lists in another test than the
 		// trailed one stays that test's.
-		trailed := in.trails(r.Mock()) && !startUp && (scope == "" || scope == in.Trails.Test) && (r.InAnOlderTest() || !other && in.Test == in.Trails.Test)
+		trailed := trails[r.Mock()] && !startUp && (scope == "" || scope == in.Trails.Test) && (r.InAnOlderTest() || !other && in.Test == in.Trails.Test)
 		if trailed {
 			other = false
 		}
@@ -342,6 +343,29 @@ func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 	}
 	return ps, unread, byWords
 }
+
+// trailSet is the recordings of the test the call trails (Input.Trails),
+// read once for the call: nil where the call trails none (a Trail that
+// names no test, as the zero Trail). A call of a long test has thousands of
+// places, and the trailed test's list can hold thousands of recordings:
+// asking the list again at each place made placesOf's work their product.
+// trailReads counts the names it reads.
+func (in Input) trailSet() map[string]bool {
+	if in.Trails.Test == "" {
+		return nil
+	}
+	trailReads.Add(int64(len(in.Trails.Mocks)))
+	set := make(map[string]bool, len(in.Trails.Mocks))
+	for _, m := range in.Trails.Mocks {
+		set[m] = true
+	}
+	return set
+}
+
+// trailReads counts the names of Input.Trails that calls' places read
+// (trailSet): a call reads its trail's list once, however many places it
+// lists.
+var trailReads atomic.Int64
 
 // rawOutsideTest is evPlace.outsideTest of r: why F's serve of it says
 // nothing of a value where F gave it the application only in an older test

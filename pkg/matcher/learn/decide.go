@@ -248,12 +248,6 @@ type Trail struct {
 	Mocks []string
 }
 
-// trails reports whether mock is a recording of the test the call trails
-// (Input.Trails).
-func (in Input) trails(mock string) bool {
-	return in.Trails.Test != "" && slices.Contains(in.Trails.Mocks, mock)
-}
-
 // AddressOf is the address of l, a leaf of the call's request (answer
 // false) or of its answer, with word -1 (the whole leaf). in.PlaceOf names
 // the place where the adapter set it (a shape with no Body, as Mongo's): a
