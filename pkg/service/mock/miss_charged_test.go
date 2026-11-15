@@ -134,3 +134,20 @@ func TestAChargedMissIsWholeOnTheConsoleAndShapedInTheLogAndReceipts(t *testing.
 		})
 	}
 }
+
+// A charged miss whose path holds a value, which evidence writes {}, and
+// whose call carries an operation, is named on the console and in the misses
+// file whole, its operation's label once.
+func TestAChargedMissIsNamedWholeWithItsValuesAndItsOperationOnce(t *testing.T) {
+	const path = "/v1/users/3f2a1c4e-9b7d-4e6f-8a1b-2c3d4e5f6a7b"
+	whole := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST " + path, Operation: "createUser", Destination: "api:80",
+		PathTag: "#1f2e3d4c5b6a", NextSteps: `declare sessionCalls: [{host: "api:80", method: "POST", pathPrefix: "` + path + `"}]`}
+	charged := whole.Charged()
+	if charged.ActualSummary == whole.ActualSummary || charged.NextSteps == whole.NextSteps {
+		t.Fatalf("evidence keeps the value: %q, %q", charged.ActualSummary, charged.NextSteps)
+	}
+	calls := missedCalls([]models.UnmatchedCall{charged})
+	if len(calls) != 1 || calls[0].Call != "POST "+path+" {createUser}" || calls[0].NextStep != whole.NextSteps || calls[0].PathTag != "#1f2e3d4c5b6a" {
+		t.Errorf("the console names %+v, want the call whole, its operation once, its next step whole", calls)
+	}
+}
