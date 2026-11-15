@@ -92,3 +92,42 @@ func TestACopyOfAnEarlierCallsClockReadIsCheckedByItsFormInKeployMockAlone(t *te
 		t.Errorf("keploy mock, the copy inside a text: learned a time %+v (%s); want no check by form", ln.Read, ln.Why)
 	}
 }
+
+// A text whose one changed word is a copy of the start-up's read of the
+// clock made in the call's own second, which the call's window holds in both
+// runs, is learned as noise of that word, the rest of the text still
+// compared, where the call's own answer echoes the word, so the word's own
+// reading is the echo, no read of the call's (ownRead): the refused word of
+// the copy rule leaves the text noise in keploy mock (T2) as in keploy test
+// (T1), never a word checked by its form (clockCopyByForm takes a whole
+// value, not a word of a text the window learned as noise). Without the echo
+// the word is the call's own read, checked in its window, the form unread.
+func TestATextsWordCopyingTheStartUpsClockReadItsAnswerEchoesStaysNoiseInKeployMock(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	call := time.Date(2026, 10, 30, 12, 26, 2, 300_000_000, time.UTC)
+	boot := call.Add(-250 * time.Millisecond)
+	fCall := call.Add(FullRoundLead)
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	words := func(at time.Time) string { return "touched " + epoch(at) + " by ci" }
+	w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+	classify := func(dc *DriftCache, resp []Leaf) Learned {
+		tr := NewTracker()
+		tr.Served(0, Earlier{Mock: "mock-s", At: boot, Payload: payloadOf("mock-s", boot), Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.registeredAt", Type: String, Value: epoch(boot)}, Live: epoch(boot.Add(FullRoundLead)), Place: "body.registeredAt", Clock: true}}})
+		tr.Begin()
+		_, earlier, _, _ := tr.Test()
+		return ClassifyIn(dc, []string{"body.note"}, strLeaf("body.note", words(boot.Add(FullRoundLead))), strLeaf("body.note", words(boot)), call, earlier, nil, resp, w)[0]
+	}
+	echo := []Leaf{{Path: "body.at", Noise: "body.at", Type: String, Value: epoch(boot)}}
+	for _, m := range []struct {
+		name string
+		dc   func() *DriftCache
+	}{{"keploy test", clockedDrifts}, {"keploy mock", clientTestCache}} {
+		if ln := classify(m.dc(), echo); ln.Kind != KindNoise || ln.Read != nil {
+			t.Errorf("%s, the word echoed in the answer: learned %s, read %+v (%s); want noise of the word, no check by form", m.name, ln.Kind, ln.Read, ln.Why)
+		}
+	}
+	ln := classify(clientTestCache(), nil)
+	if o, ok := ln.Clock(); ln.Kind != KindClockRead || !ok || o.Word == (models.ClockWord{}) || o.Form != "" {
+		t.Errorf("keploy mock, no echo: learned %s, read %+v (%s); want the word read as the call's own read of the clock, its form unread", ln.Kind, o, ln.Why)
+	}
+}
