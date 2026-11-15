@@ -110,7 +110,7 @@ func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields [
 // decider is one call's state: its input, places, index and scope.
 type decider struct {
 	in       Input
-	ps       []evPlace
+	ps       *placeList
 	x        *readerIndex
 	allScope bool
 	// unread names what of the call keploy could not read, "" where none.
@@ -219,7 +219,8 @@ func newDecider(in Input, allScope bool, x *readerIndex) *decider {
 	ps, unread, byWords := placesOf(in)
 	set, setNotRead := setUnread(in)
 	dc := &decider{in: in, unreadFrom: x.unreadTexts, x: x, allScope: allScope, set: set, dr: in.Drifts, unread: cmp.Or(unread, setNotRead), byWords: byWords}
-	dc.ps = withTexts(x, ps)
+	ps.x, ps.rest = x, withTexts(x, ps.rest)
+	dc.ps = ps
 	dc.noPayload.mock, dc.noPayload.why = payloadless(in)
 	if dc.dr == nil {
 		dc.dr = NewDriftCache()
@@ -614,7 +615,7 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 		return Decision{}, false
 	}
 	whole := readWord{At: bare, Rec: rec, Live: live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rec, Live: live}}}
-	shown := slices.ContainsFunc(dc.ps, func(p evPlace) bool { return tokenShown(placedFor(p, rec), whole) })
+	shown := dc.ps.any(func(p evPlace) bool { return tokenShown(placedFor(p, rec), whole) })
 	// Shown only inside a longer text whose base64 runs hold it in no run of
 	// its own (a URL's path, an escaped query): it stands only where it
 	// binds whole there.
@@ -625,7 +626,7 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 	}
 	held := func(least float64) bool {
 		return slices.ContainsFunc(rd.Words, func(w readWord) bool {
-			return slices.ContainsFunc(dc.ps, func(p evPlace) bool {
+			return dc.ps.any(func(p evPlace) bool {
 				return wordBits(w.Rec) >= least && evHolds(p.t.rec, w.Rec) || wordBits(w.Live) >= least && evHolds(p.t.live, w.Live)
 			})
 		})
@@ -673,7 +674,7 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 // so: any other Value of it whole is no bind, and a paired token's other
 // verdicts leave it to its words.
 func (dc *decider) boundWhole(d Decision, rec, live string) bool {
-	return d.Outcome == OutcomeValue && slices.ContainsFunc(dc.ps, func(p evPlace) bool {
+	return d.Outcome == OutcomeValue && dc.ps.any(func(p evPlace) bool {
 		if p.mock != d.From.Mock || p.path != d.From.Path || p.side != d.From.Side {
 			return false
 		}
@@ -707,7 +708,7 @@ func readsWhole(a variables.Address, p evPlace, rec, live string) bool {
 func (dc *decider) shownInText(rec, live string) []evPlace {
 	rw, lw := longestWord(rec), longestWord(live)
 	var out []evPlace
-	for i, p := range dc.ps {
+	for i, p := range dc.ps.all() {
 		if p.raw > 0 || p.leaf.Path == "" {
 			continue
 		}
@@ -901,7 +902,7 @@ func (dc *decider) wholeCopy(path string, bare variables.Address, rec, live stri
 		return Decision{}, false
 	}
 	var src []evPlace
-	for _, p := range dc.ps {
+	for _, p := range dc.ps.all() {
 		if p.state == stateBefore && (dc.allScope || !p.otherTest) && p.rec == rec && p.live == live {
 			src = append(src, p)
 		}
@@ -916,11 +917,14 @@ func (dc *decider) wholeCopy(path string, bare variables.Address, rec, live stri
 // as unknown where a place keploy reads holds a word of what changed (it
 // may be a source of part of it), else as a changed shape.
 func (dc *decider) unpaired(path string, at variables.Address, rec, live string, rd textReading) Decision {
-	held := slices.DeleteFunc(slices.Clone(dc.ps), func(p evPlace) bool {
-		return !slices.ContainsFunc(rd.Words, func(w readWord) bool {
+	var held []evPlace
+	for _, p := range dc.ps.all() {
+		if slices.ContainsFunc(rd.Words, func(w readWord) bool {
 			return w.Rec != "" && evHolds(p.t.rec, w.Rec) || w.Live != "" && evHolds(p.t.live, w.Live)
-		})
-	})
+		}) {
+			held = append(held, p)
+		}
+	}
 	if len(held) == 0 {
 		return dc.refuse(path, at, -1, rec, live, RefusalChangedShape, "a word was added or dropped", nil, dc.fieldNoise(path))
 	}
@@ -1111,7 +1115,7 @@ func (dc *decider) oneRun(ps *wordPlaces, w readWord, asked []int32, held []evHe
 					}
 				}
 			}
-			if held[k].hf || slices.ContainsFunc(dc.ps[i32].t.views, func(v *readerText) bool { return evHolds(v, w.Live) }) {
+			if held[k].hf || slices.ContainsFunc(dc.ps.at(int(i32)).t.views, func(v *readerText) bool { return evHolds(v, w.Live) }) {
 				f = true
 				if fOut == "" && p.fGave && !p.rBefore {
 					fOut = p.name
@@ -1201,9 +1205,9 @@ func mintedKey(long []readWord) string {
 // recording by the rule's own check, and gave the application nothing.
 func (dc *decider) longGlued(long []readWord) bool {
 	mintedAsks.Add(1)
-	for i := range dc.ps {
+	for _, q := range dc.ps.all() {
 		for _, o := range long {
-			p := placedFor(dc.ps[i], o.Rec)
+			p := placedFor(q, o.Rec)
 			if m := dc.longInTurn[o.Rec+"\x00"+o.Live]; m != "" && p.mock == m {
 				continue
 			}
@@ -1387,8 +1391,8 @@ func (dc *decider) answeredAfter(r string) []Place {
 		}
 	}
 	at, all := dc.places().recAsked(r)
-	for _, i := range askedPlaces(at, all, len(dc.ps)) {
-		p := dc.ps[i]
+	for _, i := range askedPlaces(at, all, dc.ps.len()) {
+		p := *dc.ps.at(int(i))
 		answeredPlaced.Add(1)
 		if p = placedFor(p, r); !p.recAfter || p.at.After(dc.in.At) {
 			continue
@@ -1464,7 +1468,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// neither word nor a token around R's, and shows nothing (evNone), so
 	// both loops pass it.
 	asked, all := dc.places().asked(w)
-	asked = askedPlaces(asked, all, len(dc.ps))
+	asked = askedPlaces(asked, all, dc.ps.len())
 	held := make([]evHeld, len(asked))
 	for k, i32 := range asked {
 		held[k] = heldAt(*ps.at(int(i32)), w.Rec, w.Live)
@@ -1744,7 +1748,7 @@ func (dc *decider) lateCallTook(ps *wordPlaces, i int, w readWord, holders map[s
 	if !ok {
 		hs = [2]int{-1, -1}
 		at, all := dc.places().asked(readWord{Rec: lacks, Live: lacks})
-		at = askedPlaces(at, all, len(ps.base))
+		at = askedPlaces(at, all, ps.base.len())
 		for k, n := 0, 0; k < len(at) && n < 2; k++ {
 			j := int(at[k])
 			if q := ps.at(j); q.state != stateNotBefore && (evHolds(q.t.rec, lacks) || evHolds(q.t.live, lacks)) {
@@ -1754,10 +1758,10 @@ func (dc *decider) lateCallTook(ps *wordPlaces, i int, w readWord, holders map[s
 		holders[lacks] = hs
 	}
 	if j := hs[0]; j >= 0 && j != i {
-		return stands(ps.base[j].name)
+		return stands(ps.base.at(j).name)
 	}
 	if j := hs[1]; j >= 0 {
-		return stands(ps.base[j].name)
+		return stands(ps.base.at(j).name)
 	}
 	gs, oh := dc.outside().words, dc.held()
 	in := oh.holding(lacks)
@@ -1806,7 +1810,7 @@ func (dc *decider) inDecodedForm(rds []textReading) (string, *evPlace) {
 			}
 			for _, w := range ws {
 				held := func(t *readerText) bool { return evHolds(t, w) }
-				for _, p := range dc.ps {
+				for _, p := range dc.ps.all() {
 					if held(p.t.rec) || held(p.t.live) || slices.ContainsFunc(p.t.views, held) {
 						return p.name + " held " + strconv.Quote(w) + ", which only " + which + " carries, in a decoded form, where keploy binds no word: keploy cannot tell whether it came from there", &p
 					}
@@ -1862,7 +1866,7 @@ func (dc *decider) movedInAForm(rds []textReading) (string, *evPlace) {
 					if wordBits(t) < chanceBits || changed[t] {
 						continue
 					}
-					for _, p := range dc.ps {
+					for _, p := range dc.ps.all() {
 						text := p.t.live
 						if recorded {
 							text = p.t.rec
@@ -2621,7 +2625,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 		hl, _, _ := dc.holds(p, p.t.live, l, c.lm, c.byText)
 		return hr || hl
 	}
-	for i, q := range dc.ps {
+	for i, q := range dc.ps.all() {
 		// A moment a recording's request holds is what the application
 		// sent there: a send, placed by when it was sent and decided by the
 		// send rules (4, 5, 6), as an exchange's request leaf is, whenever
@@ -2761,7 +2765,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 		if p.same() || !windowRead() || max(c.rm.res, c.lm.res) <= time.Millisecond {
 			return false
 		}
-		return slices.ContainsFunc(dc.ps, func(s evPlace) bool {
+		return dc.ps.any(func(s evPlace) bool {
 			if !s.clock || !inScope(s) || !s.at.Before(p.at) {
 				return false
 			}
@@ -3671,7 +3675,7 @@ func (dc *decider) heldElsewhere(a, read moment, unit time.Duration, text string
 			return true
 		}
 	}
-	for i, p := range dc.ps {
+	for i, p := range dc.ps.all() {
 		if !dc.inScope(p) || p.gave {
 			continue
 		}
@@ -4458,7 +4462,7 @@ func (dc *decider) learned(path string, at variables.Address, n int, r, f string
 // the line names the place and its cause, never a budget it did not pass.
 func (dc *decider) unreadWhy() string {
 	var names []string
-	for _, p := range dc.ps {
+	for _, p := range dc.ps.all() {
 		for _, t := range append([]*readerText{p.t.rec, p.t.live}, p.t.views...) {
 			if n := unreadName(p.mock, Earlier{}); t.rawUnread && !slices.Contains(names, n) {
 				names = append(names, n)

@@ -159,18 +159,47 @@ func (inv *bookInv) marked(ask []int32, id int32, live bool, at []bookAt) []int3
 // both are posted (a call in no set posts neither: fs nil). A recording's
 // place has no entry: its ids are derived.
 func (p evPlace) postIDs(fs *setFilters) (r, l int32) {
-	if b := p.post; b != nil {
-		if k := b.kept.Load(); k != nil && k.fs == fs && k.rec == p.rec && k.live == p.live {
-			bookReads.Add(1)
-			return k.r, k.l
-		}
+	if k := p.post.keptFor(fs, p.rec, p.live); k != nil {
+		return k.r, k.l
 	}
 	r, l = p.t.rec.postID(), p.t.live.postID()
-	leafPosts.Add(1)
-	if p.post != nil && r >= 0 && l >= 0 {
-		p.post.kept.Store(&leafPosted{fs: fs, rec: p.rec, live: p.live, r: r, l: l})
-	}
+	p.post.keep(fs, p.rec, p.live, r, l)
 	return r, l
+}
+
+// leafPostIDs is postIDs of an earlier exchange's leaf whose entry is post
+// (nil where it has none) and whose texts are rec and live, read through
+// x, before (or without) its place is built: the place index lists every
+// leaf of the call, and builds none (placeList).
+func leafPostIDs(post *leafPost, x *readerIndex, rec, live string) (r, l int32) {
+	if k := post.keptFor(x.filters, rec, live); k != nil {
+		return k.r, k.l
+	}
+	r, l = x.text(rec).postID(), x.text(live).postID()
+	post.keep(x.filters, rec, live, r, l)
+	return r, l
+}
+
+// keptFor is what p keeps for the set's postings fs and the texts rec and
+// live, nil where it keeps none of them (p nil: a place with no entry).
+func (p *leafPost) keptFor(fs *setFilters, rec, live string) *leafPosted {
+	if p == nil {
+		return nil
+	}
+	if k := p.kept.Load(); k != nil && k.fs == fs && k.rec == rec && k.live == live {
+		bookReads.Add(1)
+		return k
+	}
+	return nil
+}
+
+// keep keeps in p the ids r and l derived for fs, rec and live, where both
+// are posted (p nil: nothing to keep in), and counts the derive.
+func (p *leafPost) keep(fs *setFilters, rec, live string, r, l int32) {
+	leafPosts.Add(1)
+	if p != nil && r >= 0 && l >= 0 {
+		p.kept.Store(&leafPosted{fs: fs, rec: rec, live: live, r: r, l: l})
+	}
 }
 
 // leafPosts counts the places whose ids a call's place index derived

@@ -377,7 +377,7 @@ func wordTexts(s string) []string {
 // closed).
 func (dc *decider) mintedHeld(r, f string) []string {
 	var out []string
-	for _, p := range dc.ps {
+	for _, p := range dc.ps.all() {
 		inR := !placedFor(p, r).recAfter && holdsWhole(p.t.rec, r)
 		inF := p.fGave && (p.fMay || holdsWhole(p.t.live, f) || slices.ContainsFunc(p.t.views, func(t *readerText) bool { return holdsWhole(t, f) }))
 		if inR || inF {

@@ -1243,7 +1243,7 @@ func TestOutcomeALongWordShownJudgesAPlaceAtTheQuestion(t *testing.T) {
 		{"the place holds the first of the id's two long words", []readWord{shown, none}, false},
 		{"the place holds nothing of the id's one long word", []readWord{none}, true},
 	} {
-		dc := &decider{ps: []evPlace{p}}
+		dc := &decider{ps: placesFrom([]evPlace{p})}
 		chance := dc.idChance(newWordPlaces(dc.ps, w.Rec), w, tc.long)
 		if got := chance(0); got != tc.chance {
 			t.Errorf("%s: the place holds the piece by chance: %v; want %v", tc.what, got, tc.chance)

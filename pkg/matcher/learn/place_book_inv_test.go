@@ -8,7 +8,7 @@ import (
 
 // bookCall is a call's decider over places ps, read through x: what a
 // row of the place index (decider.places) needs of a call.
-func bookCall(x *readerIndex, ps ...evPlace) *decider { return &decider{x: x, ps: ps} }
+func bookCall(x *readerIndex, ps ...evPlace) *decider { return &decider{x: x, ps: placesFrom(ps)} }
 
 // bookEntries is n leaves booked in b, their entries in order.
 func bookEntries(b *placeBook, n int) []*leafPost {
@@ -74,7 +74,7 @@ func TestPlaceBookInverseNamesTheCallsPlaces(t *testing.T) {
 		}
 		c.pi = nil
 		late := &leafPost{book: bk, seq: bk.n.Load() + 5}
-		c.ps = append(c.ps, bookPlace(x, "alpha-1 one", "beta-1 two", late))
+		c.ps.rest = append(c.ps.rest, bookPlace(x, "alpha-1 one", "beta-1 two", late))
 		if at, all := c.places().recAsked("alpha"); all || !slices.Equal(at, []int32{0, 1, 2}) {
 			t.Fatalf("a call with a leaf numbered past the book is asked at %v (all %v); want all three, the last from the call's maps", at, all)
 		}

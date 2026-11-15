@@ -44,15 +44,15 @@ func TestACallsPlacesReadTheTrailedTestsListOnce(t *testing.T) {
 	read := trailReads.Load()
 	ps, _, _ := placesOf(in)
 	read = trailReads.Load() - read
-	if len(ps) != exchanges+recordings {
-		t.Fatalf("placesOf listed %d places; want %d (an exchange's one leaf each, and each recording)", len(ps), exchanges+recordings)
+	if ps.len() != exchanges+recordings {
+		t.Fatalf("placesOf listed %d places; want %d (an exchange's one leaf each, and each recording)", ps.len(), exchanges+recordings)
 	}
-	t.Logf("%d places, a trail of %d recordings: %d names read", len(ps), len(trail), read)
+	t.Logf("%d places, a trail of %d recordings: %d names read", ps.len(), len(trail), read)
 	if read != int64(len(trail)) {
-		t.Errorf("a call's %d places read %d names of the trailed test's %d; want the list read once (%d)", len(ps), read, len(trail), len(trail))
+		t.Errorf("a call's %d places read %d names of the trailed test's %d; want the list read once (%d)", ps.len(), read, len(trail), len(trail))
 	}
 	trailed := 0
-	for _, p := range ps {
+	for _, p := range ps.all() {
 		if p.trailed != listed[p.mock] {
 			t.Errorf("%s: trailed %v; want %v (the trailed test's list names it: %v)", p.name, p.trailed, listed[p.mock], listed[p.mock])
 		}
@@ -72,7 +72,7 @@ func TestACallsPlacesReadTheTrailedTestsListOnce(t *testing.T) {
 	if read = trailReads.Load() - read; read != 0 {
 		t.Errorf("a trail that names no test read %d names; want none", read)
 	}
-	for _, p := range ps {
+	for _, p := range ps.all() {
 		if p.trailed {
 			t.Errorf("%s trailed by a trail that names no test", p.name)
 		}

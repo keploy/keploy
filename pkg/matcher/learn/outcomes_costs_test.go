@@ -508,8 +508,8 @@ func TestOutcomeCostThePlacesKeepNoRecordingsText(t *testing.T) {
 		return st.HeapAlloc
 	}
 	before := heap()
-	ps, unread, _ := placesOf(in)
-	ps = withTexts(newReaderIndex(dc), ps)
+	pl, unread, _ := placesOf(in)
+	ps := withTexts(newReaderIndex(dc), pl.rest)
 	grew := int64(heap()) - int64(before)
 	runtime.KeepAlive(ps)
 	if unread != "" || len(ps) != n {
@@ -3954,8 +3954,8 @@ func TestOutcomeCostAShortTextWhosePostingsDoNotFitIsReadForEveryWord(t *testing
 	in := call(dc)
 	d := newDecider(in, false, newReaderIndex(dc))
 	defer d.x.release()
-	if pi := d.places(); len(d.ps) != 1 || !slices.Equal(pi.always, []int32{0}) {
-		t.Errorf("the leaf whose words the set did not post is read always at %v of %d places; want [0], read for every word", pi.always, len(d.ps))
+	if pi := d.places(); d.ps.len() != 1 || !slices.Equal(pi.always, []int32{0}) {
+		t.Errorf("the leaf whose words the set did not post is read always at %v of %d places; want [0], read for every word", pi.always, d.ps.len())
 	}
 	if got := oDescribe(Decide(in)); got != want {
 		t.Errorf("beside a short text whose words the set did not post the call decides %q; want %q, as a call in no set", got, want)
@@ -4058,10 +4058,11 @@ func TestOutcomeCostACallsPlacesAreListedOnce(t *testing.T) {
 		ps, _, _ := placesOf(in)
 		d = payloadDecodes.Load() - d
 		runtime.ReadMemStats(&b)
+		defer runtime.KeepAlive(ps)
 		if d != 0 {
 			t.Errorf("a call's places of %d recordings the set has read decoded %d payloads; want none (the set's store keeps whether each was read)", of, d)
 		}
-		return len(ps), b.TotalAlloc - a.TotalAlloc
+		return ps.len(), b.TotalAlloc - a.TotalAlloc
 	}
 	size := uint64(unsafe.Sizeof(evPlace{}))
 	raws := make([]Raw, 3000)
@@ -4076,7 +4077,8 @@ func TestOutcomeCostACallsPlacesAreListedOnce(t *testing.T) {
 	// Each recording's handles (withTexts): one block of them for the
 	// call, and a recording's place reads its text through one handle of
 	// the recording, none of a handed text it does not hold.
-	ps, _, _ := placesOf(Input{At: eRecAt, Raw: raws})
+	pl, _, _ := placesOf(Input{At: eRecAt, Raw: raws})
+	ps := pl.rest
 	x := newReaderIndex(nil)
 	var a, b runtime.MemStats
 	runtime.GC()
@@ -4131,7 +4133,7 @@ func TestOutcomeCostAWordsCheckKeepsOnlyThePlacesItReads(t *testing.T) {
 		runtime.GC()
 		runtime.ReadMemStats(&a)
 		at, all := pi.asked(w)
-		at = askedPlaces(at, all, len(dc.ps))
+		at = askedPlaces(at, all, dc.ps.len())
 		ps := newWordPlaces(dc.ps, w.Rec)
 		held := make([]evHeld, len(at))
 		for j, i := range at {
@@ -4141,7 +4143,7 @@ func TestOutcomeCostAWordsCheckKeepsOnlyThePlacesItReads(t *testing.T) {
 		tr.End()
 		got[k] = b.TotalAlloc - a.TotalAlloc
 		t.Logf("%d recordings: the word is asked at %v, its check allocates %d bytes", n, at, got[k])
-		if all || len(at) != 1 || dc.ps[at[0]].mock != "mock-7" || len(ps.of) != 1 || !held[0].hf {
+		if all || len(at) != 1 || dc.ps.at(int(at[0])).mock != "mock-7" || len(ps.of) != 1 || !held[0].hf {
 			t.Errorf("%d recordings: the word is asked at %v (all %v), %d places copied, held %+v; want mock-7's place alone, copied once, holding F's word", n, at, all, len(ps.of), held)
 		}
 	}
@@ -4179,7 +4181,7 @@ func TestOutcomeCostAWordsCheckReadsEachPlaceOnceInTheCallsOrder(t *testing.T) {
 	at, all := dc.places().asked(readWord{Rec: "a1b2c3d4", Live: "f0e9d8c7"})
 	var mocks []string
 	for _, i := range at {
-		mocks = append(mocks, dc.ps[i].mock)
+		mocks = append(mocks, dc.ps.at(int(i)).mock)
 	}
 	if all || len(at) != 2 || at[0] >= at[1] || !slices.Equal(mocks, []string{"mock-3", "mock-7"}) {
 		t.Errorf("a word both texts of two places name is asked at %v (all %v), of %v; want mock-3's place and then mock-7's, each once", at, all, mocks)

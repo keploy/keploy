@@ -218,22 +218,17 @@ func payloadless(in Input) (mock, why string) {
 
 // placesOf lists in's places before the call and each one's state, and the
 // first place keploy could not read ("" where it read every one): every
-// change of the call is then refused.
+// change of the call is then refused. An earlier exchange's leaves are
+// listed, and their places built at the call's first read of one
+// (placeList); the recordings' places are built here, their texts given by
+// the call's index (newDecider).
 //
 // byWords are the client tests' requests keploy could not read that keep
 // their words (Earlier.unreadWords): each is unread for a value whose change
 // it may hold (mayHold), and no source of any other (decider.leaf).
-func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
-	// Sized once: a call of a long test has thousands of places, and grown
-	// by append the list was copied at each growth (a quarter more each
-	// time past 256), about five times its size allocated per call.
-	n := len(in.Raw)
-	for _, e := range in.Earlier {
-		n += len(e.Seen)
-	}
-	ps = make([]evPlace, 0, n)
-	trails := in.trailSet()
-	for _, e := range in.Earlier {
+func placesOf(in Input) (ps *placeList, unread string, byWords []Earlier) {
+	ps = &placeList{in: in, trails: in.trailSet()}
+	for j, e := range in.Earlier {
 		// An exchange keploy could not read (Earlier.Unread), or one F
 		// served with no leaf and no payload keploy read, is a place it
 		// cannot search, never one it drops.
@@ -252,45 +247,15 @@ func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 			unread = cmp.Or(unread, unreadName(e.Mock, e)+" ("+bad+")")
 			continue
 		}
-		st, why := earlierState(in, e)
-		startUp, other, scope := inScope(in, e.Mock, e.StartUp, e.ofEarlierTest())
-		// A place the test the call trails left the run is the call's own
-		// (Input.Trails), and so is one that test was served in its own
-		// window where the call lands in it too (the application answered
-		// the test before its clean-up ran, but the round ran it sooner):
-		// bound there, a value is the run's variable, so a replay binds it
-		// in whichever window the call lands.
-		trailed := trails[e.Mock] && !startUp && (other && e.ofEarlierTest() || !other && in.Test == in.Trails.Test)
-		if trailed {
-			other = false
-		}
-		// Of the exchange, not of a leaf: built once for its leaves.
-		outsideTest, lateCall := earlierOutsideTest(e), earlierLateCall(e)
-		// rBefore of its leaves: a request leaf by the request's time, an
-		// answer leaf by the answer's (none where keploy was given no
-		// payload: the zero time).
-		sentBefore := e.alwaysEarlier() || !e.noTime && e.At.Before(in.At)
-		answeredBefore := e.alwaysEarlier() || sentBefore && answeredBy(e.At, e.Payload.answered, in.At)
-		for _, s := range e.Seen {
-			path := cmp.Or(s.Leaf.Path, s.Place)
-			ps = append(ps, evPlace{
-				name: e.Mock + " " + path, mock: e.Mock, path: path,
-				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf, post: s.post,
-				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, offset: s.Offset, startUp: startUp, otherTest: other, trailed: trailed, scope: scope,
-				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter, outsideTest: outsideTest, lateCall: lateCall,
-				recAfter: !e.alwaysEarlier() && !e.noTime && e.At.After(in.At),
-				rBefore:  s.Side != Response && sentBefore || s.Side == Response && answeredBefore,
-			})
-			// What the application got in an answer it got at the answer's
-			// time (answerState), its request before or at the call's instant.
-			if s.Side == Response && (st == stateBefore || why == atCallWhy) && e.Payload.isRead() {
-				p := &ps[len(ps)-1]
-				if ast, awhy := answerState(e.At, e.Payload.answered, in.At); ast != stateBefore {
-					p.state, p.why, p.recAfter = ast, awhy, ast == stateNotBefore && !e.alwaysEarlier()
-				}
-			}
-		}
+		// Its leaves' places are built at the call's first read of one
+		// (placeList.build); one with no leaf lists none.
+		ps.ex = append(ps.ex, exPlaces{e: j, off: ps.leaves})
+		ps.leaves += len(e.Seen)
 	}
+	// Sized once: a call can hold thousands of recordings, and grown by
+	// append the list was copied at each growth.
+	rest := make([]evPlace, 0, len(in.Raw))
+	trails := ps.trails
 	for i, r := range in.Raw {
 		if !r.Read() {
 			unread = cmp.Or(unread, unreadName(r.Mock(), Earlier{})+" ("+cmp.Or(r.unreadWhy(), notFromMock)+")")
@@ -342,8 +307,9 @@ func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 		if rst, rwhy := rawRequestState(in, r); !r.noTime && (rst != st || rwhy != why) {
 			p.req = &reqPlace{state: rst, why: rwhy, after: r.at.After(in.At)}
 		}
-		ps = append(ps, p)
+		rest = append(rest, p)
 	}
+	ps.rest = rest
 	return ps, unread, byWords
 }
 
@@ -445,12 +411,12 @@ func placedFor(p evPlace, r string) evPlace {
 // made for every word, cost a call of thousands of places and hundreds of
 // words more than the few places each word reads.
 type wordPlaces struct {
-	base []evPlace
+	base *placeList
 	r    string
 	of   map[int]*evPlace
 }
 
-func newWordPlaces(base []evPlace, r string) *wordPlaces {
+func newWordPlaces(base *placeList, r string) *wordPlaces {
 	return &wordPlaces{base: base, r: r}
 }
 
@@ -461,7 +427,7 @@ func (ps *wordPlaces) at(i int) *evPlace {
 	}
 	placeCopies.Add(1)
 	p := new(evPlace)
-	*p = placedFor(ps.base[i], ps.r)
+	*p = placedFor(*ps.base.at(i), ps.r)
 	if ps.of == nil {
 		ps.of = map[int]*evPlace{}
 	}
@@ -714,8 +680,8 @@ func orderUnknown(in Input, ps *wordPlaces, cand map[string]bool) (marked bool) 
 	if why == "" {
 		return false
 	}
-	for i := range ps.base {
-		if !cand[ps.base[i].mock] {
+	for i, m := range ps.base.mocks() {
+		if !cand[m] {
 			continue
 		}
 		if p := ps.at(i); p.state == stateBefore {
@@ -1755,37 +1721,61 @@ func (dc *decider) places() *placeIndex {
 	pi := &placeIndex{rec: map[int32][]int32{}, live: map[int32][]int32{}, fs: cmp.Or(dc.x.filters, &setFilters{})}
 	dc.pi = pi
 	placeBuilds.Add(1)
-	for i, p := range dc.ps {
-		r, l := int32(-1), int32(-1)
+	// An exchange's leaves are listed from its Seen, what their places
+	// are built from (placeList.build), so that the call builds none it
+	// does not read: a leaf's texts are its recorded value and round F's,
+	// it shows a word its texts do not hold only where it is a body that
+	// declares no media type or a given, and round F's view of it is no
+	// view of its own.
+	l := dc.ps
+	for _, x := range l.ex {
+		e := &l.in.Earlier[x.e]
+		for n := range e.Seen {
+			s := &e.Seen[n]
+			r, lv := int32(-1), int32(-1)
+			if !s.Undeclared && !e.Gave {
+				r, lv = leafPostIDs(s.post, dc.x, s.Leaf.Value, s.Live)
+			}
+			pi.add(x.off+n, s.post, r, lv)
+		}
+	}
+	for n, p := range l.rest {
+		r, lv := int32(-1), int32(-1)
 		if !p.showsUntold() {
-			r, l = p.postIDs(dc.x.filters)
+			r, lv = p.postIDs(dc.x.filters)
 		}
-		if r < 0 || l < 0 {
-			pi.always = append(pi.always, int32(i))
-			continue
-		}
-		// A booked leaf is indexed by its number in the run's book: its
-		// slot keeps the place and the ids the call read for it, so the
-		// inverse names it only by those (bookInv.marked). A second place
-		// of an entry, or one numbered past the book's leaves when the
-		// slots were made, goes in the call's maps.
-		if e := p.post; e != nil && e.book != nil {
-			if pi.inv == nil {
-				pi.inv = e.book.invFor(dc.x.filters)
-				pi.at = make([]bookAt, e.book.n.Load())
-			}
-			if int(e.seq) < len(pi.at) && pi.at[e.seq].i == 0 {
-				pi.at[e.seq] = bookAt{i: int32(i) + 1, r: r, l: l}
-				pi.inv.list(e, r, l)
-				bookIndexed.Add(1)
-				continue
-			}
-		}
-		placeMapped.Add(1)
-		pi.rec[r] = append(pi.rec[r], int32(i))
-		pi.live[l] = append(pi.live[l], int32(i))
+		pi.add(l.leaves+n, p.post, r, lv)
 	}
 	return pi
+}
+
+// add indexes the call's i-th place, whose book entry is post (nil where
+// it has none) and whose texts' ids are r and l (-1: unposted; read
+// always). A booked leaf is indexed by its number in the run's book: its
+// slot keeps the place and the ids the call read for it, so the inverse
+// names it only by those (bookInv.marked). A second place of an entry, or
+// one numbered past the book's leaves when the slots were made, goes in
+// the call's maps.
+func (pi *placeIndex) add(i int, post *leafPost, r, l int32) {
+	if r < 0 || l < 0 {
+		pi.always = append(pi.always, int32(i))
+		return
+	}
+	if e := post; e != nil && e.book != nil {
+		if pi.inv == nil {
+			pi.inv = e.book.invFor(pi.fs)
+			pi.at = make([]bookAt, e.book.n.Load())
+		}
+		if int(e.seq) < len(pi.at) && pi.at[e.seq].i == 0 {
+			pi.at[e.seq] = bookAt{i: int32(i) + 1, r: r, l: l}
+			pi.inv.list(e, r, l)
+			bookIndexed.Add(1)
+			return
+		}
+	}
+	placeMapped.Add(1)
+	pi.rec[r] = append(pi.rec[r], int32(i))
+	pi.live[l] = append(pi.live[l], int32(i))
 }
 
 // showsUntold reports whether a word may show at p without either of its
