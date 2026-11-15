@@ -1511,8 +1511,10 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live string,
 	// where a place it left took it.
 	// inTurn: requests of another call of the test that sent the value
 	// too, in the other order in each run (sentInTurn).
+	// asideHeld: what aside's first place held of the word (heldLine), as
+	// its evidence read it.
 	var src, outside, conflict, unknown, aside, unserved, chance, inTurn []evPlace
-	cut := ""
+	cut, asideHeld := "", ""
 	lateHeld := map[string][2]int{}
 	for k, i32 := range asked {
 		i := int(i32)
@@ -1563,8 +1565,14 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live string,
 			if p.lateCall != "" && !piece {
 				took = dc.lateCallTook(ps, i, w, lateHeld)
 			}
+			// hr: R's text held R's word before the call, as evidenceOf
+			// read it; where it did not, the place held F's in both runs.
+			hr := held[k].recBefore(p)
 			switch {
 			case p.gave || countsByText(p, w):
+				if !hr {
+					p.why = strconv.Quote(w.Live) + " stood whole at " + p.name + " in both runs, while the value went to it from " + strconv.Quote(w.Rec)
+				}
 				conflict = append(conflict, p)
 			case tok != "":
 				p.why = strconv.Quote(tok) + " stood whole at " + p.name + " in both runs, and the value did not follow it: keploy cannot tell whether the value came from there"
@@ -1582,6 +1590,9 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live string,
 				p.why = took
 				unknown = append(unknown, p)
 			default:
+				if len(aside) == 0 {
+					asideHeld = heldLine(p, w, hr, held[k].hf)
+				}
 				aside = append(aside, p)
 			}
 		case evUnknown:
@@ -1634,9 +1645,16 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live string,
 			}
 			if wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 {
 				conflict = append(conflict, p)
-			} else {
-				aside = append(aside, p)
+				break
 			}
+			if len(aside) == 0 {
+				// R's word and F's, as setEvidence read them for a
+				// disproving place: one answered before the call (so
+				// given before it), and a view round F gave (changed)
+				// disproves only where R's stood and F's word is not in it.
+				asideHeld = heldLine(p, w, inR[j]&inOwn != 0, !changed && inF[j]&inOwn != 0)
+			}
+			aside = append(aside, p)
 		}
 	}
 	switch {
@@ -1714,8 +1732,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live string,
 	}
 	rule := "no place before the call shows it"
 	if len(aside) > 0 {
-		p := aside[0]
-		rule += " (" + p.name + " held " + strconv.Quote(w.Rec) + " and round F gave " + gaveAt(p, w.Live) + " there: set aside, as a copy moves with its source)"
+		rule += " (" + asideHeld + ": set aside, as a copy moves with its source)"
 	}
 	if len(unserved) > 0 {
 		rule += " (round F never served " + unserved[0].name + ", and a piece of a longer value under " + strconv.Itoa(unreadFloorBits) + " bits is no evidence at such a place)"
@@ -4542,6 +4559,25 @@ func names(ps []evPlace) []string {
 		out = append(out, p.name)
 	}
 	return out
+}
+
+// heldLine is what a place p set aside held of the changed word w (R to
+// F), in a fresh word's line, from what decided its evidence: R's word,
+// held before the call (hr), with what round F gave there, which F's word
+// did not follow; else F's, which it held in both runs while the value
+// went to it from R's (an unchanged place, or one round F changed only
+// elsewhere: evidenceOf); both where it held both in both runs (a piece of
+// an id). The line names only a word the place held: it said R's at every
+// place, so a place that held F's in both runs read as one R's had moved
+// off.
+func heldLine(p evPlace, w readWord, hr, hf bool) string {
+	switch {
+	case hr && hf:
+		return p.name + " held " + strconv.Quote(w.Rec) + " and " + strconv.Quote(w.Live) + " in both runs"
+	case hr:
+		return p.name + " held " + strconv.Quote(w.Rec) + " and round F gave " + gaveAt(p, w.Live) + " there"
+	}
+	return p.name + " held " + strconv.Quote(w.Live) + " in both runs, while the value went to it from " + strconv.Quote(w.Rec)
 }
 
 // gaveAt is what round F gave at p, in a line's words, its value quoted

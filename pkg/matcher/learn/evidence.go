@@ -751,6 +751,12 @@ func swapUnknown(in Input, ps *wordPlaces, w readWord, at []int32, held []evHeld
 // swapUnknown) changes only the place's state, which no text answers.
 type evHeld struct{ hr, hf, read bool }
 
+// recBefore reports whether p's recorded text held R's word before the
+// call: a recording answered after the call gave R's application nothing
+// before it, so R's word there decides nothing (F's still does), as
+// setEvidence reads a set entry.
+func (h evHeld) recBefore(p evPlace) bool { return h.hr && !p.recAfter }
+
 // heldAt asks p's texts for the changed word r (R) to f (F), once each.
 func heldAt(p evPlace, r, f string) evHeld {
 	placeAsks.Add(1)
@@ -767,11 +773,7 @@ func evidenceOf(p evPlace, h evHeld, r, f string, piece bool) (ev wordEvidence, 
 	if !h.read {
 		return evNone, false
 	}
-	hr, hf := h.hr, h.hf
-	// A recording answered after the call gave R's application nothing
-	// before it: R's word there decides nothing (F's still does), as
-	// setEvidence reads a set entry.
-	hr = hr && !p.recAfter
+	hr, hf := h.recBefore(p), h.hf
 	if p.fUnstated {
 		if hr || hf || p.fMay || slices.ContainsFunc(p.t.views, func(v *readerText) bool { return evHolds(v, f) }) {
 			return evUnknown, true
