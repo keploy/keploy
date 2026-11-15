@@ -79,6 +79,32 @@ func TestACloseWhoseReadFailsIsUnknown(t *testing.T) {
 		_ = reader.Close()
 		wantCloseUnknown(t, p, lines, app, proxySide, zapcore.WarnLevel, "sock_diag socket: too many open files")
 	})
+	t.Run("a kept socket's lookup that fails, and the new one's too", func(t *testing.T) {
+		// The close drops the kept socket for a new one, and the new
+		// one's lookup fails as well: unknown, not a pass on the error
+		// of the first.
+		p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+		p.settleReads = true
+		lines := closeUnknownLines(p)
+		emptyDiagFree(t)
+		ds, err := openDiag()
+		if err != nil {
+			t.Fatal(err)
+		}
+		diagFree <- ds
+		var looked []*diagSock
+		was := lookupWritten
+		lookupWritten = func(ds *diagSock, _ *pairedConn, _ bool) (diagTCP, error) {
+			looked = append(looked, ds)
+			return diagTCP{}, errors.New("netlink: no buffer space")
+		}
+		t.Cleanup(func() { lookupWritten = was })
+		_ = reader.Close()
+		if len(looked) != 2 || looked[0] == looked[1] {
+			t.Fatalf("the close looked up on %d sockets (%v), want the kept one and a new one", len(looked), looked)
+		}
+		wantCloseUnknown(t, p, lines, app, proxySide, zapcore.WarnLevel, "netlink: no buffer space")
+	})
 	t.Run("a lookup that fails", func(t *testing.T) {
 		p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
 		p.settleReads = true
@@ -111,6 +137,22 @@ func TestACloseThatCannotTellSaysSoOnce(t *testing.T) {
 			wantCloseUnknown(t, p, lines, app, proxySide, level, "netlink: no buffer space")
 		})
 	}
+}
+
+// The first close that cannot tell what was on its way is the answer: every
+// wait ends with its error, the one its line names, and a later close that
+// cannot tell for another reason changes neither.
+func TestTheFirstCloseThatCannotTellIsTheAnswer(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), settleReads: true}
+	app, proxySide, reader := heldPairOn(t, p, 1, "tcp4", "127.0.0.1:0")
+	_, _, reader2 := heldPairOn(t, p, 2, "tcp4", "127.0.0.1:0")
+	lines := closeUnknownLines(p)
+	emptyDiagFree(t)
+	failLookupWritten(t)
+	_ = reader.Close()
+	failOpenDiag(t)
+	_ = reader2.Close()
+	wantCloseUnknown(t, p, lines, app, proxySide, zapcore.WarnLevel, "netlink: no buffer space")
 }
 
 func failOpenDiag(t *testing.T) {

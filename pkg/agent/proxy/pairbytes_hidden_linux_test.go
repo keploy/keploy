@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap/zapcore"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -82,6 +84,8 @@ func untilPeerEnded(t *testing.T, proxySide *net.TCPConn) {
 // reset is on its way (the wait waits for it), and a close's bytes on their
 // way end with it. A close after the proxy's side took the application's FIN
 // or reset is known either way: nothing the application wrote is on its way.
+// A close that answers unknown says so in one line naming the connection, as
+// on darwin.
 func TestAHiddenApplicationSocketIsUnknownNotGone(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -120,9 +124,20 @@ func TestAHiddenApplicationSocketIsUnknownNotGone(t *testing.T) {
 				untilPeerEnded(t, proxySide)
 			}
 			var err error
+			lines := closeUnknownLines(p)
 			if tc.close {
 				_ = reader.Close()
 				err = p.PairedBytesErr()
+				switch {
+				case !tc.unknown:
+					if all := lines.FilterMessageSnippet("keploy cannot tell what the application had written").All(); len(all) != 0 {
+						t.Fatalf("%d lines say the close cannot tell what was written, want none: %+v", len(all), all)
+					}
+				case p.holdsPairedBytes():
+					wantCloseUnknown(t, p, lines, app, proxySide, zapcore.WarnLevel, "cannot be seen from the proxy's network namespace")
+				default:
+					wantCloseUnknown(t, p, lines, app, proxySide, zapcore.DebugLevel, "cannot be seen from the proxy's network namespace")
+				}
 			} else {
 				if _, werr := app.Write([]byte("x")); werr != nil {
 					t.Fatal(werr)

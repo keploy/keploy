@@ -610,7 +610,7 @@ var lookupAccepted = lookupTCP
 // sockets at all (another network namespace): unless the proxy's side shows it
 // took the application's FIN or reset, after which nothing it wrote is on its
 // way, what was on its way cannot be told, and every wait is unknown from then
-// on, as on darwin.
+// on, said in one line as on darwin (closeUnknown).
 //
 // It runs on every paired close, so it reads no more than an answer needs. A
 // proxy's side that has taken the application's FIN, or its reset, needs no
@@ -651,7 +651,7 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	case !missed:
 		p.paired.visible.Store(true)
 	case !p.paired.visible.Load():
-		p.paired.fail(fmt.Errorf("%w: the application's end of a connection to the proxy, %s, cannot be seen from the proxy's network namespace as the proxy closes it, and no application socket has been: whether bytes it wrote were on their way cannot be told", models.ErrProxyConnsUnsupported, pc.app))
+		p.closeUnknown(pc, fmt.Errorf("%w: the application's end of a connection to the proxy, %s, cannot be seen from the proxy's network namespace as the proxy closes it, and no application socket has been: whether bytes it wrote were on their way cannot be told", models.ErrProxyConnsUnsupported, pc.app))
 	}
 	if ok {
 		pc.wroteAtClose.Store(&w)
