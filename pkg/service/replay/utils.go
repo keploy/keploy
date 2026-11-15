@@ -21,6 +21,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/docker/go-connections/nat"
 	"github.com/olekukonko/tablewriter"
 	"github.com/olekukonko/tablewriter/tw"
 	"go.uber.org/zap"
@@ -129,38 +130,78 @@ func validateHealthURL(s string) (string, bool) {
 
 // dockerPublishedHostPort returns the first host (ip, port) that a docker
 // `-p/--publish` mapping in cmd exposes on the host, so a docker-run replay can
-// gate on the app actually listening before firing requests. It handles the
-// common `hostPort:containerPort` and `hostIP:hostPort:containerPort` forms
-// (with an optional `/tcp`|`/udp` suffix). It returns ok=false — keeping the
-// pure --delay behavior — for native apps (no -p), container-only publishes
-// (random host port), port ranges, or anything it cannot parse with
-// confidence, so it never guesses a wrong port to wait on.
-func dockerPublishedHostPort(cmd string) (host, port string, ok bool) {
+// gate on the app actually listening before firing requests. It reads each
+// mapping as the shell hands it to docker (shellWord), then as docker does
+// (publishedHostAddr): `hostPort:containerPort` and
+// `hostIP:hostPort:containerPort`, an IPv6 hostIP bracketed or not, with an
+// optional `/tcp` suffix. It returns ok=false — keeping the pure --delay
+// behavior — for native apps (no -p), container-only publishes (random host
+// port), port ranges and UDP or SCTP ports, so it never guesses a wrong port
+// to wait on. err is the first mapping it cannot read a host address from.
+func dockerPublishedHostPort(cmd string) (host, port string, ok bool, err error) {
 	fields := strings.Fields(cmd)
 	for i := 0; i+1 < len(fields); i++ {
 		if fields[i] != "-p" && fields[i] != "--publish" {
 			continue
 		}
-		spec := strings.SplitN(fields[i+1], "/", 2)[0] // drop /tcp,/udp
-		segs := strings.Split(spec, ":")
-		// host port is the second-to-last segment:
-		//   "hp:cp"     -> [hp, cp]
-		//   "ip:hp:cp"  -> [ip, hp, cp]
-		//   "cp"        -> [cp]  (random host port; not waitable -> skip)
-		if len(segs) < 2 {
-			continue
+		h, p, waitable, err := publishedHostAddr(shellWord(fields[i+1]))
+		if err != nil {
+			return "", "", false, fmt.Errorf("-p %s: %w", fields[i+1], err)
 		}
-		hp := segs[len(segs)-2]
-		h := "127.0.0.1"
-		if len(segs) >= 3 && segs[0] != "" {
-			h = segs[0]
+		if waitable {
+			return h, p, true, nil
 		}
-		if hp == "" || strings.ContainsAny(hp, "-") { // skip empty / ranges
-			continue
-		}
-		return h, hp, true
 	}
-	return "", "", false
+	return "", "", false, nil
+}
+
+// shellWord is a -p value as the shell keploy runs the command in (sh -c)
+// hands it to docker: one pair of quotes around it taken off, and its
+// variables ($PORT, ${PORT}, ${PORT:-8080}) expanded from keploy's own
+// environment, which the command runs with, unless the quotes are single.
+// An unset variable expands to nothing, as in the shell: "${PORT}:8080" is
+// ":8080", a random host port. A command that sets the variable itself
+// before docker runs (PORT=1; docker run -p $PORT:80) is read with keploy's
+// value; the wait then says every so often which address it waits on.
+func shellWord(w string) string {
+	if len(w) >= 2 && (w[0] == '"' || w[0] == '\'') && w[len(w)-1] == w[0] {
+		if w[0] == '\'' {
+			return w[1 : len(w)-1]
+		}
+		w = w[1 : len(w)-1]
+	}
+	return interpolate(w, os.LookupEnv)
+}
+
+// publishedHostAddr is the host address one port mapping in docker's short
+// syntax, [ip:][hostPort:]containerPort[/proto], publishes. It is read with
+// docker's own parser (nat.ParsePortSpec, which docker run and compose-go
+// use), never split on its colons: an IPv6 ip has colons of its own, and
+// "[::1]:8080:8080" read that way named host "[", where no wait for the
+// application ever ends. No ip is 127.0.0.1.
+//
+// waitable is false for a mapping that names no single TCP host port: a bare
+// container port, an empty or zero host port (docker picks one: "8080",
+// "[::1]::8080", "0:8080"), a range, or a UDP or SCTP port, which never
+// accepts a TCP connection. err is a mapping docker refuses: one with no IP
+// address where its ip goes, or no port number where its ports go.
+func publishedHostAddr(spec string) (host, port string, waitable bool, err error) {
+	mappings, err := nat.ParsePortSpec(strings.TrimSpace(spec))
+	if err != nil {
+		return "", "", false, err
+	}
+	if len(mappings) != 1 {
+		return "", "", false, nil // a range of container ports
+	}
+	m := mappings[0]
+	if m.Port.Proto() != "tcp" || m.Binding.HostPort == "" || m.Binding.HostPort == "0" || strings.Contains(m.Binding.HostPort, "-") {
+		return "", "", false, nil
+	}
+	host = m.Binding.HostIP
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return host, m.Binding.HostPort, true, nil
 }
 
 // composePublishedHostPort finds the host port the application's service
@@ -183,16 +224,20 @@ func dockerPublishedHostPort(cmd string) (host, port string, ok bool) {
 // mistaken for the app, falling back to a lone port-publishing service only
 // when the stack is unambiguous. Short and long port syntax are both read;
 // ranges and container-only publishes are skipped because neither names a host
-// port to wait on.
-func composePublishedHostPort(cmd, containerName string) (host, port string, ok bool) {
+// port to wait on. err is the app's service's first port entry it cannot read
+// a host address from.
+func composePublishedHostPort(cmd, containerName string) (host, port string, ok bool, err error) {
 	path, ok := composeFileFromCommand(cmd)
 	if !ok {
-		return "", "", false
+		return "", "", false, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", "", false
+		return "", "", false, nil
 	}
+	// The file's variables, as compose expands them: from the environment,
+	// then the project's .env.
+	env := composeEnv(cmd, []string{path})
 	var doc struct {
 		Services map[string]struct {
 			ContainerName string      `yaml:"container_name"`
@@ -200,32 +245,37 @@ func composePublishedHostPort(cmd, containerName string) (host, port string, ok 
 		} `yaml:"services"`
 	}
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return "", "", false
+		return "", "", false, nil
 	}
 
-	type candidate struct{ host, port string }
+	// A service whose port entry cannot be read publishes something all the
+	// same: it is a candidate, and its error is what it gives.
+	type candidate struct {
+		host, port string
+		err        error
+	}
 	var byName, only []candidate
 	published := 0
 	for _, svc := range doc.Services {
-		h, p, found := firstComposeHostPort(svc.Ports)
-		if !found {
+		h, p, found, err := firstComposeHostPort(svc.Ports, env)
+		if !found && err == nil {
 			continue
 		}
 		published++
-		only = append(only, candidate{h, p})
+		only = append(only, candidate{h, p, err})
 		if containerName != "" && svc.ContainerName == containerName {
-			byName = append(byName, candidate{h, p})
+			byName = append(byName, candidate{h, p, err})
 		}
 	}
 	if len(byName) == 1 {
-		return byName[0].host, byName[0].port, true
+		return byName[0].host, byName[0].port, byName[0].err == nil, byName[0].err
 	}
 	// No container_name match: only trust the stack when exactly one service
 	// publishes anything, so a db or cache port is never mistaken for the app.
 	if published == 1 {
-		return only[0].host, only[0].port, true
+		return only[0].host, only[0].port, only[0].err == nil, only[0].err
 	}
-	return "", "", false
+	return "", "", false, nil
 }
 
 // composeFileFromCommand returns the compose file the command operates on,
@@ -254,58 +304,64 @@ func composeFileFromCommand(cmd string) (string, bool) {
 }
 
 // firstComposeHostPort reads the first entry that names a host port, in either
-// the short form ("8080:80", "127.0.0.1:8080:80") or the long form
-// (published: 8080). Ranges and container-only publishes are skipped: neither
-// gives a single port that can be waited on.
-func firstComposeHostPort(ports []yaml.Node) (host, port string, ok bool) {
+// the short form ("8080:80", "127.0.0.1:8080:80", "[::1]:8080:80") or the
+// long form (published: 8080), with its variables expanded from env, and
+// either read as docker reads it (publishedHostAddr). Ranges, container-only
+// publishes, a host port of 0 or one a variable left empty (docker picks
+// one), and UDP or SCTP ports are skipped: none gives a single port that a
+// TCP connection can be waited on. err is an entry it cannot read a host
+// address from.
+func firstComposeHostPort(ports []yaml.Node, env envLookup) (host, port string, ok bool, err error) {
 	for i := range ports {
 		n := &ports[i]
+		entry, spec := n.Value, ""
 		switch n.Kind {
 		case yaml.ScalarNode:
-			if h, p, found := parseShortPortSpec(n.Value); found {
-				return h, p, true
-			}
+			spec = interpolate(n.Value, env)
 		case yaml.MappingNode:
 			var long struct {
 				Published interface{} `yaml:"published"`
+				Target    interface{} `yaml:"target"`
 				HostIP    string      `yaml:"host_ip"`
+				Protocol  string      `yaml:"protocol"`
 			}
-			if err := n.Decode(&long); err != nil || long.Published == nil {
-				continue
+			if err := n.Decode(&long); err != nil || long.Published == nil || long.Target == nil {
+				continue // no host port (docker picks one), or no target, which compose refuses
 			}
-			p := strings.TrimSpace(fmt.Sprintf("%v", long.Published))
-			if p == "" || strings.ContainsAny(p, "-") {
-				continue
-			}
-			h := long.HostIP
-			if h == "" {
-				h = "127.0.0.1"
-			}
-			return h, p, true
+			spec = longPortSpec(long.HostIP, long.Published, long.Target, long.Protocol, env)
+			entry = spec
+		default:
+			continue
+		}
+		h, p, waitable, err := publishedHostAddr(spec)
+		if err != nil {
+			return "", "", false, fmt.Errorf("ports entry %q: %w", entry, err)
+		}
+		if waitable {
+			return h, p, true, nil
 		}
 	}
-	return "", "", false
+	return "", "", false, nil
 }
 
-// parseShortPortSpec reads docker's short port syntax, sharing
-// dockerPublishedHostPort's rules: the host port is the second-to-last
-// colon-separated segment, and anything without one (a bare container port, so
-// a random host port) or with a range is refused.
-func parseShortPortSpec(spec string) (host, port string, ok bool) {
-	spec = strings.SplitN(strings.TrimSpace(spec), "/", 2)[0]
-	segs := strings.Split(spec, ":")
-	if len(segs) < 2 {
-		return "", "", false
+// longPortSpec is a compose long-form port entry, its variables expanded
+// from env, written in docker's short syntax ([host_ip:]published:target
+// [/protocol]) so that it is read by the same rules as a short one. An IPv6
+// host_ip is bracketed, so one given bracketed ("[::1]") reads as no IP
+// address, as docker takes it.
+func longPortSpec(hostIP string, published, target interface{}, protocol string, env envLookup) string {
+	field := func(s string) string { return strings.TrimSpace(interpolate(s, env)) }
+	spec := field(fmt.Sprint(published)) + ":" + field(fmt.Sprint(target))
+	if ip := field(hostIP); ip != "" {
+		if strings.Contains(ip, ":") {
+			ip = "[" + ip + "]"
+		}
+		spec = ip + ":" + spec
 	}
-	hp := segs[len(segs)-2]
-	if hp == "" || strings.ContainsAny(hp, "-") {
-		return "", "", false
+	if proto := field(protocol); proto != "" {
+		spec += "/" + proto
 	}
-	h := "127.0.0.1"
-	if len(segs) >= 3 && segs[0] != "" {
-		h = segs[0]
-	}
-	return h, hp, true
+	return spec
 }
 
 // keployReadinessProbePath is the path the reset-resend readiness probe requests.
@@ -1051,7 +1107,11 @@ func pollHealthURL(ctx context.Context, healthURL string, ceiling time.Duration)
 // exited, or the user stopped keploy).
 func gateOnAppAddresses(ctx context.Context, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget, healthURL string) bool {
 	gated := false
-	if host, port, ok := dockerPublishedHostPort(cfg.Command); ok {
+	host, port, ok, err := dockerPublishedHostPort(cfg.Command)
+	if err != nil {
+		unreadablePublish(logger, "docker-published-port", err)
+	}
+	if ok {
 		gated = true
 		if !gateOnAppAddress(ctx, logger, cfg, host, port, "docker-published-port", probe) {
 			return false
@@ -1061,7 +1121,11 @@ func gateOnAppAddresses(ctx context.Context, logger *zap.Logger, cfg *config.Con
 	// docker-compose apps: the same gate, with the host port read from the
 	// compose file instead of the command line. Identical contract to the
 	// -p gate above: it can only ever wait longer.
-	if host, port, ok := composePublishedHostPort(cfg.Command, cfg.ContainerName); ok {
+	host, port, ok, err = composePublishedHostPort(cfg.Command, cfg.ContainerName)
+	if err != nil {
+		unreadablePublish(logger, "compose-published-port", err)
+	}
+	if ok {
 		gated = true
 		if !gateOnAppAddress(ctx, logger, cfg, host, port, "compose-published-port", probe) {
 			return false
@@ -1115,6 +1179,16 @@ func gateOnAppAddresses(ctx context.Context, logger *zap.Logger, cfg *config.Con
 		}
 	}
 	return true
+}
+
+// unreadablePublish says, as an error, that the application's port mapping
+// names no host address keploy can read, so the first test does not wait for
+// the application there: the gates after it (the address the set's first test
+// dials, among others) still may. A wait on an address the mapping does not
+// name would end only when the application exits.
+func unreadablePublish(logger *zap.Logger, label string, err error) {
+	logger.Error("keploy could not read the host address of the application's published port, so the first test does not wait for the application to accept a connection there",
+		zap.String("gate", label), zap.Error(err))
 }
 
 // sayStillWaiting is pkg.SayStillWaiting, the line a wait with no time limit

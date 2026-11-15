@@ -829,6 +829,13 @@ jobs:
     uses: ./.github/workflows/upstream-refusal-linux.yml
     with:
       legs: extended
+  run_held_request_under_load_linux:
+    # Guard: under keploy record --sync, a request held past the 7 s stale
+    # cutoff beside a steady load is recorded with every mock it made, and so
+    # is every fast request beside it (resolves pass over the mocks buffered
+    # for it through the window index): every test passes keploy test.
+    needs: [build-and-upload]
+    uses: ./.github/workflows/held-request-under-load-linux.yml
   run_startup_mock_capture_linux:
     # Regression guard for a once-per-boot startup mock (e.g. an AWS
     # Secret Manager fetch at boot) being dropped from some recorded test
@@ -1497,6 +1504,7 @@ jobs:
       - run_upstream_refusal_linux
       - run_upstream_refusal_linux_extended
       - run_listener_drops_linux
+      - run_held_request_under_load_linux
       - run_startup_mock_capture_linux
       - run_repeated_headers_linux
       - run_interim_responses_linux
@@ -1530,6 +1538,7 @@ jobs:
             "${{ needs.run_upstream_refusal_linux.result }}" \
             "${{ needs.run_upstream_refusal_linux_extended.result }}" \
             "${{ needs.run_listener_drops_linux.result }}" \
+            "${{ needs.run_held_request_under_load_linux.result }}" \
             "${{ needs.run_startup_mock_capture_linux.result }}" \
             "${{ needs.run_repeated_headers_linux.result }}" \
             "${{ needs.run_interim_responses_linux.result }}" \
