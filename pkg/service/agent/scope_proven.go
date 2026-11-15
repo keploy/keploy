@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -413,6 +414,20 @@ func (a *Agent) clientRoot() (int, string) {
 func (a *Agent) hooksHoldInRun(pid int, start uint64) bool {
 	h, ok := a.Hooks.(coreAgent.RunMemberReporter)
 	return ok && h.HoldsInRun(pid, start)
+}
+
+// CallerSocketWhy is "" when process pid, which the kernel's tables name as
+// the owner of the client socket at client connected to the agent at server,
+// is the process that sends on it, as hooks that see sockets handed between
+// processes (coreAgent.CallerSocketReporter: Windows's shim) read it; why
+// keploy cannot tell which process called, otherwise. With any other hooks
+// it is "": Linux's and macOS's tables list every holder of a socket.
+func (a *Agent) CallerSocketWhy(pid int, client, server netip.AddrPort) string {
+	h, ok := a.Hooks.(coreAgent.CallerSocketReporter)
+	if !ok {
+		return ""
+	}
+	return h.CallerSocketWhy(pid, client, server)
 }
 
 // agentPID is this agent's process: a claim read as its own is refused.

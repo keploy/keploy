@@ -409,6 +409,21 @@ type RunMemberReporter interface {
 	HoldsInRun(pid int, start uint64) bool
 }
 
+// CallerSocketReporter is the optional extension implemented by hooks that
+// see, from inside each process, which process connected a socket and which
+// sockets a process hands to another: Windows's shim. Windows's TCP tables
+// name the process that created a socket, whichever process it was later
+// given to (a child that inherited it, one it was duplicated into), so the
+// process they name for a call to the agent is its sender only when these
+// hooks say so. With hooks that do not implement it, nothing is asked.
+type CallerSocketReporter interface {
+	// CallerSocketWhy is "" when process pid, which the kernel's tables name
+	// as the owner of the client socket at client connected to the agent at
+	// server, is the process that sends on it; otherwise why keploy cannot
+	// tell which process called. It never waits.
+	CallerSocketWhy(pid int, client, server netip.AddrPort) string
+}
+
 // ListenerCountTaker is the optional extension implemented by proxies that can
 // have their listener counted by the hooks. The agent hands it the hooks
 // (ListenerCounter) whenever they can count, switch or not, before
