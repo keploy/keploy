@@ -66,7 +66,11 @@ func winPair(t *testing.T) (app, side *net.TCPConn) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("close the pair's listener: %v", err)
+		}
+	}()
 	app, err = net.DialTCP("tcp4", nil, ln.Addr().(*net.TCPAddr))
 	if err != nil {
 		t.Fatal(err)
