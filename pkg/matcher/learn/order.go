@@ -1459,6 +1459,13 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	// By place, only where one shows it moved: most words have none.
 	var moved map[int]string
 	shown := false
+	// copyR, copyF: a candidate held R's word in R before the call, and one
+	// holds, or may hold, F's word in what round F gave there (mayHoldF).
+	// An application copying by position takes the word from what it was
+	// given at that position in each run, so another serve order makes the
+	// word a copy only where both ends exist; where either lacks, the order
+	// cannot matter, and orderUnknown is not asked.
+	copyR, copyF := false, false
 	// held: what each place's texts hold of the word, asked once here,
 	// before any place is judged (oneRun reads every asked place's), and
 	// read again below, where orderUnknown and swapUnknown may have changed
@@ -1486,6 +1493,8 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 			continue
 		}
 		cand[p.mock] = true
+		copyR = copyR || held[k].recBefore(p)
+		copyF = copyF || mayHoldF(p, held[k], w.Live)
 		if ev == evShown {
 			if why := movedField(p, w.Rec, w.Live); why != "" {
 				if moved == nil {
@@ -1497,7 +1506,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 			}
 		}
 	}
-	if !shown && ordered != nil {
+	if !shown && ordered != nil && copyR && copyF {
 		*ordered = orderUnknown(dc.in, ps, cand)
 	}
 	swapUnknown(dc.in, ps, w, asked, held)

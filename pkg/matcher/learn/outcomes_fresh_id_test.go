@@ -561,17 +561,18 @@ func TestOutcomeAPieceEachRunHoldsAtAnotherPlaceIsNoChance(t *testing.T) {
 		t.Errorf("the line must say the runs gave the places in another order: %q", d.Line)
 	}
 
-	// So is a place left unknown that is no chance of the piece at all,
-	// however few runs hold their own piece: mock-45 holds the recorded
+	// A place left unknown that is no chance of the piece at all, however
+	// few runs hold their own piece, is refused: mock-45 holds the recorded
 	// group as a whole token of its own, and round F nothing of its group
-	// anywhere. Given in another order than mock-50, it leaves mock-50
-	// unknown too, as on main.
+	// anywhere. Given in another order than mock-50, it leaves mock-50 as it
+	// was: no place holds round F's group in round F, so no copy by position
+	// gives it, and the order is not asked.
 	whole := both
 	whole.Seen = []Seen{{Side: Response, Leaf: oText("body.note", "owner 48d1"), Live: "owner none"}}
 	d = decide([]Earlier{aside, whole}, nil)
-	oRefused(t, "the recorded group whole at mock-45, round F's nowhere, given in another order than mock-50", d, RefusalUnknown, "mock-50", "mock-45")
-	if !strings.Contains(d.Line, "another order") {
-		t.Errorf("the line must say the runs gave the places in another order: %q", d.Line)
+	oRefused(t, "the recorded group whole at mock-45, round F's nowhere, given in another order than mock-50", d, RefusalUnknown, "mock-45")
+	if strings.Contains(d.Line, "another order") {
+		t.Errorf("no place holds round F's group, so no order counts: %q", d.Line)
 	}
 }
 
@@ -1125,7 +1126,10 @@ func TestOutcomeCostAnIdsLongWordsAreAskedOncePerCall(t *testing.T) {
 // while a place unknown for it that shows nothing of the id's long words is
 // no candidate, and its order counts for nothing. mock-50 holds the
 // recorded group whole and round F gave another word there, set aside; the
-// recording gave it before mock-45 (or mock-51) and round F after it. A
+// recording gave it before mock-45 (or mock-51) and round F after it. Where
+// no candidate holds round F's group in round F (mock-51 gave "zzzz"), no
+// copy by position gives it, so the order is not asked and the piece is
+// chance at both. A
 // value the test gave keploy that stands inside the piece in both runs, and
 // a body that declares no media type where the piece stands glued to the
 // bytes around it, are no chance either: the test made the one, and keploy
@@ -1146,10 +1150,7 @@ func TestOutcomeAPieceOfAnIdIsChanceOnlyAtAPlaceLeftUnknownForIt(t *testing.T) {
 
 	disproves := oCarried("mock-51", "body.note", "ref x-48d1-y", "ref x-zzzz-y", 900*time.Millisecond, 100*time.Millisecond, 1)
 	d = oWord(t, Decide(oInput(path, rec, live, []Earlier{aside, disproves}, nil)), r, f)
-	oRefused(t, "a place that disproves the piece inside another id, given in another order than mock-50", d, RefusalUnknown, "mock-50")
-	if !strings.Contains(d.Line, "another order: the 1st earlier answer was mock-50 in the recording and mock-51") {
-		t.Errorf("the line must say the runs gave the places in another order: %q", d.Line)
-	}
+	costFresh(t, "a place that disproves the piece inside another id, given in another order than mock-50, round F's group at neither", d)
 	inOrder := oCarried("mock-51", "body.note", "ref x-48d1-y", "ref x-zzzz-y", 900*time.Millisecond, 100*time.Millisecond, 3)
 	costFresh(t, "the same places, given in one order", oWord(t, Decide(oInput(path, rec, live, []Earlier{aside, inOrder}, nil)), r, f))
 
@@ -1523,8 +1524,9 @@ func TestOutcomeTheFirstPlacesOwnReasonLeadsTheLine(t *testing.T) {
 // the recorded group whole and round F gave another word there (set aside
 // alone), and mock-45 holds the recorded group inside another id at a
 // place round F served only after the call. The recording gave mock-50
-// first and round F mock-45 first, so keploy cannot tell which the
-// application took the word from: mock-50 is named unknown, not set aside.
+// first and round F mock-45 first, but neither holds round F's group in
+// round F, so no copy by position gives it: the order is not asked, and
+// the word is refused for mock-45's own reason, mock-50 set aside.
 func TestOutcomeAOneRunPlaceStaysAServeOrderCandidate(t *testing.T) {
 	const (
 		rec, live = "1111aaaa-2222-48d1-9444-444455556666", "9999cccc-7777-4a2e-8888-000011112222"
@@ -1535,9 +1537,9 @@ func TestOutcomeAOneRunPlaceStaysAServeOrderCandidate(t *testing.T) {
 	late := oCarried("mock-45", "body.note", "owner bb7ed9ee-670e-48d1-982f-b54b2b73982f", "owner 0c1d2e3f-4a5b-4c7d-8e9f-0b1c2d3e4f50", 900*time.Millisecond, 100*time.Millisecond, 1)
 	late.Payload.servedAfter = true
 	d := oWord(t, Decide(oInput(path, rec, live, []Earlier{aside, late}, nil)), r, f)
-	oRefused(t, "the recorded group at a place round F served only after the call, given in another order than mock-50", d, RefusalUnknown, "mock-50", "mock-45")
-	if d.Refusal == nil || !strings.HasPrefix(d.Refusal.Why, "keploy cannot tell what round F gave at mock-50 body.ref before this call (another order: the 1st earlier answer was mock-50 in the recording and mock-45") {
-		t.Errorf("the line must lead with mock-50, which the runs gave in another order than mock-45: %q", d.Line)
+	oRefused(t, "the recorded group at a place round F served only after the call, given in another order than mock-50", d, RefusalUnknown, "mock-45")
+	if strings.Contains(d.Line, "another order") {
+		t.Errorf("no place holds round F's group, so no order counts: %q", d.Line)
 	}
 	// Alone, mock-45 is refused for the per-run rule's reason.
 	alone := oWord(t, Decide(oInput(path, rec, live, []Earlier{late}, nil)), r, f)

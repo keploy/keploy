@@ -664,8 +664,10 @@ func untimedAnswer(req, answered time.Time) bool {
 // answer once, so an application copying by position may have taken
 // another serve of it in F. Two places are tied alike here never: an
 // order the recording cannot tell, or one that differs, marks them
-// unknown even where both hold the value's words at the same fields. It
-// reports whether it marked a place.
+// unknown even where both hold the value's words at the same fields. It is
+// asked only where a candidate held R's word in R and one may hold F's in
+// F (wordBy's copyR, copyF): a copy by position needs both. It reports
+// whether it marked a place.
 func orderUnknown(in Input, ps *wordPlaces, cand map[string]bool) (marked bool) {
 	if len(cand) == 0 || len(cand) == 1 && !servedAgain(in, cand) {
 		return false
@@ -765,6 +767,15 @@ func heldAt(p evPlace, r, f string) evHeld {
 	return evHeld{hr: hr, hf: hf, read: okR && okF}
 }
 
+// mayHoldF reports whether what round F gave the application at p holds,
+// or may hold, F's word f, its texts' holdings h (heldAt): its own text
+// does, or, where keploy does not know what F gave there (fUnstated), F
+// may have given a text that does (fMay) or a view F may have given holds
+// it, as evidenceOf reads such a place.
+func mayHoldF(p evPlace, h evHeld, f string) bool {
+	return h.hf || p.fUnstated && (p.fMay || slices.ContainsFunc(p.t.views, func(v *readerText) bool { return evHolds(v, f) }))
+}
+
 // evidenceOf is what p shows of the changed word r (R) to f (F), given
 // what its texts hold of it (h, heldAt): the evidence table, read through x,
 // at p's state as it stands now. read is false where p's text lay past the
@@ -775,7 +786,7 @@ func evidenceOf(p evPlace, h evHeld, r, f string, piece bool) (ev wordEvidence, 
 	}
 	hr, hf := h.recBefore(p), h.hf
 	if p.fUnstated {
-		if hr || hf || p.fMay || slices.ContainsFunc(p.t.views, func(v *readerText) bool { return evHolds(v, f) }) {
+		if hr || mayHoldF(p, h, f) {
 			return evUnknown, true
 		}
 		return evNone, true
