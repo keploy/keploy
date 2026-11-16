@@ -136,3 +136,27 @@ func TestAPairingsClaimLeavesTheRecordingUnserved(t *testing.T) {
 		t.Fatal("other, claimed by a pairing and answered by no call, was served")
 	}
 }
+
+// OnSettled(nil) removes the seam: a consume after it settles as a serve
+// and runs no seam, as with none ever set.
+func TestOnSettledNilRemovesTheSeam(t *testing.T) {
+	s := newRoundStore(t)
+	s.inTest()
+	ran := 0
+	s.mm.OnSettled(func(string) { ran++ })
+	s.mm.OnSettled(nil)
+	mk := shown(s.snapshot(t), "own")
+	if mk == nil {
+		t.Fatal("precondition: own is not shown")
+	}
+	served, panicked := func() (served bool, panicked any) {
+		defer func() { panicked = recover() }()
+		return s.mm.DeleteFilteredMock(*mk), nil
+	}()
+	if panicked != nil {
+		t.Fatalf("a consume after OnSettled(nil) panicked: %v", panicked)
+	}
+	if !served || ran != 0 {
+		t.Fatalf("a consume after OnSettled(nil): served %v, removed seam ran %d times", served, ran)
+	}
+}
