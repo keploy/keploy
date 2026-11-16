@@ -792,7 +792,10 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 		return err
 	}
 
-	appName, err := utils.GetLastDirectory()
+	// A run given no name (--app-name, keploy.yml's appName) is named after
+	// its git repository, or after its folder outside one; the name goes into
+	// the keploy.yml a first run writes, so later runs keep it.
+	appName, from, err := utils.DefaultAppName()
 	if err != nil {
 		// Said here, as every other refusal is: nothing else says it.
 		utils.LogError(c.logger, err, "failed to get the last directory for appName")
@@ -800,10 +803,10 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 	}
 
 	if c.cfg.AppName == "" {
-		c.logger.Debug("Using the last directory name as appName : " + appName)
+		c.logger.Info(fmt.Sprintf("Naming the app %q after %s; set appName in keploy.yml or pass --app-name to name it otherwise", appName, from))
 		c.cfg.AppName = appName
 	} else if c.cfg.AppName != appName {
-		c.logger.Info("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
+		c.logger.Debug(fmt.Sprintf("Using appName %q from the config; %s would name it %q", c.cfg.AppName, from, appName))
 	}
 
 	// The "create config file if missing" behavior is meaningful
