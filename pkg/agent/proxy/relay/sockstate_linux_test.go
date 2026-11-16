@@ -31,3 +31,15 @@ func ackedOf(fd uintptr) (uint64, bool) {
 
 // unreadOf is how many bytes the socket fd holds unread (SIOCINQ).
 func unreadOf(fd uintptr) (int, error) { return unix.IoctlGetInt(int(fd), unix.SIOCINQ) }
+
+// queuedOf is how many bytes the socket fd holds that its peer has not
+// acknowledged yet, sent or not (SIOCOUTQ).
+func queuedOf(fd uintptr) (int, error) { return unix.IoctlGetInt(int(fd), unix.SIOCOUTQ) }
+
+// windowClosedOf reports whether the peer of the socket fd has closed its
+// receive window: every byte sent is acknowledged (tcpi_unacked 0) and some
+// are not sent (tcpi_notsent_bytes); false when it cannot be asked.
+func windowClosedOf(fd uintptr) bool {
+	info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
+	return err == nil && info.Unacked == 0 && info.Notsent_bytes > 0
+}

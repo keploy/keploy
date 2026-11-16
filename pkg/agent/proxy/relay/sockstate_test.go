@@ -13,6 +13,13 @@ import (
 // yet (unreadOf).
 func awaitUnread(t *testing.T, c net.Conn) {
 	t.Helper()
+	awaitUnreadBytes(t, c, 1)
+}
+
+// awaitUnreadBytes waits until the socket c holds n bytes its reader has not
+// read yet (unreadOf).
+func awaitUnreadBytes(t *testing.T, c net.Conn, n int) {
+	t.Helper()
 	rc, err := c.(syscall.Conn).SyscallConn()
 	if err != nil {
 		t.Fatal(err)
@@ -29,9 +36,9 @@ func awaitUnread(t *testing.T, c net.Conn) {
 		}
 		return n
 	}
-	for limit := time.Now().Add(5 * time.Second); unread() == 0; {
+	for limit := time.Now().Add(5 * time.Second); unread() < n; {
 		if time.Now().After(limit) {
-			t.Fatal("the socket holds no unread byte after 5s")
+			t.Fatalf("the socket holds %d unread bytes after 5s, want %d", unread(), n)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
@@ -120,4 +127,24 @@ func bytesAcked(t *testing.T, c net.Conn) uint64 {
 		t.Fatal(err)
 	}
 	return acked
+}
+
+// receiveBufferOf is the receive buffer of the socket under c as it reads it
+// back (SO_RCVBUF): no fewer bytes than its peer may send it unread.
+func receiveBufferOf(t *testing.T, c net.Conn) int {
+	t.Helper()
+	rc, err := c.(syscall.Conn).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	if err := rc.Control(func(fd uintptr) {
+		var gerr error
+		if n, gerr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF); gerr != nil {
+			t.Error(gerr)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
