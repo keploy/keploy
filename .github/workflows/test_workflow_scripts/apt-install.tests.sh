@@ -94,17 +94,21 @@
 #   hosted images, which already use a mirror list of their own: in Azure,
 #   where every Ubuntu entry names it, and in AWS (ubuntu-26.04), where the
 #   -security entry names a host instead, and the same in the one-line format.
+#   The list is the machine's whatever its path, and whichever source file
+#   names it: one at another path, and one named only from a .list file in
+#   sources.list.d, leave the sources as they are too.
 #   A list counts only when an Ubuntu entry apt reads names it and its
-#   mirrors are all Ubuntu: the image's list named only in a comment or a
-#   disabled stanza, or a list with another host in it, leaves the fixture
+#   mirrors are all Ubuntu: the image's list named only in a comment (a line
+#   of its own, or a comment line inside a deb822 stanza that is read) or a
+#   disabled stanza, or a list with another host in it, leaves the sources
 #   rewritten; the list of the helper is never one of the machine, so a
-#   source added after a run is rewritten by the next. With no sources.list at all, the deb822 files are read and
-#   rewritten. A source file root cannot read (a container without
-#   CAP_DAC_OVERRIDE) stops the helper before it changes any file. The
-#   entries the update and the install are given are exactly the Ubuntu ones,
-#   on the fixture and on the hosted shapes, and the files with entries left
-#   out are named; CRLF line ends and disabled stanzas are read as apt reads
-#   them.
+#   source added after a run is rewritten by the next. With no sources.list
+#   at all, the deb822 files are read and rewritten. A source file root
+#   cannot read (a container without CAP_DAC_OVERRIDE) stops the helper
+#   before it changes any file. The entries the update and the install are
+#   given are exactly the Ubuntu ones, on the fixture and on the hosted
+#   shapes, and the files with entries left out are named; CRLF line ends
+#   and disabled stanzas are read as apt reads them.
 #   --all-sources and a self-hosted runner give apt no source options; with no
 #   Ubuntu entry at all the default run stops before apt.
 #   Then with a shim that outlasts its slice, which needs no mirror to be
@@ -1247,6 +1251,42 @@ bash /h/apt-install.sh hello | sed "s/^/one-line mix: /"
 snap >/tmp/after
 if diff /tmp/before /tmp/after; then echo "one-line mix: no change"; fi
 
+# A list of the machine at a path other than that of the hosted images: the
+# rule is any list of the machine, not the path GitHub gives it.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+printf "%s\tpriority:%s\n" http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ 1 \
+  https://archive.ubuntu.com/ubuntu/ 2 >/etc/apt/region-mirrors.txt
+cat >/etc/apt/sources.list <<"S"
+deb mirror+file:/etc/apt/region-mirrors.txt jammy main
+deb http://security.ubuntu.com/ubuntu jammy-security main
+S
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/other path: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "other path: no change"; fi
+
+# The list of the image named only from a .list file in sources.list.d, while
+# sources.list names a host.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+hosted_list
+printf "deb http://archive.ubuntu.com/ubuntu jammy main\n" >/etc/apt/sources.list
+printf "deb mirror+file:/etc/apt/apt-mirrors.txt jammy-updates main\n" >/etc/apt/sources.list.d/hosted.list
+snap >/tmp/before
+bash /h/apt-install.sh hello | sed "s/^/list.d: /"
+snap >/tmp/after
+if diff /tmp/before /tmp/after; then echo "list.d: no change"; fi
+
+# A deb822 stanza that apt reads, with a comment line in it that names the list
+# of the image: apt skips that line, so the stanza names only its host, and it
+# is rewritten.
+rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
+hosted_list
+: >/etc/apt/sources.list
+printf "%s\n" "Types: deb" "# URIs: mirror+file:/etc/apt/apt-mirrors.txt" "URIs: http://archive.ubuntu.com/ubuntu/" \
+  "Suites: noble" "Components: main" >/etc/apt/sources.list.d/ubuntu.sources
+bash /h/apt-install.sh hello | sed "s/^/stanza comment: /"
+sed "s/^/stanza comment: now /" /etc/apt/sources.list.d/ubuntu.sources
+
 # No sources.list at all, as on an image that keeps only deb822 files: the
 # helper reads the files there are, and rewrites them.
 rm -rf /tmp/parts-* /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/* /etc/apt/sources.list
@@ -1670,6 +1710,18 @@ for image in ubuntu:22.04 ubuntu:24.04 ubuntu:26.04; do
     '^aws: update reads: the install reads the same$'
   expect "$log" "$image: the same mix in the one-line format is left alone" '^one-line mix: no change$'
   expect "$log" "$image: and the helper says why" "^one-line mix: $own_list\$"
+  expect "$log" "$image: a list of the machine at another path is left alone too" '^other path: no change$'
+  expect "$log" "$image: and the helper names that list" \
+    '^other path: apt-install: this machine has a mirror list of its own for the Ubuntu archive \(/etc/apt/region-mirrors\.txt\), so its apt sources are left as they are$'
+  expect "$log" "$image: a list named only from a .list file in sources.list.d is left alone too" '^list\.d: no change$'
+  expect "$log" "$image: and the helper names that list" "^list\\.d: $own_list\$"
+  expect "$log" "$image: a list named in a comment line inside a read deb822 stanza does not count" \
+    '^stanza comment: apt-install: /etc/apt/sources\.list\.d/ubuntu\.sources now fetches the Ubuntu archive via mirror\+file:/etc/apt/ubuntu-mirrors\.txt$'
+  expect "$log" "$image: and the stanza's host entry is rewritten, its comment line kept" \
+    '^stanza comment: now URIs: mirror\+file:/etc/apt/ubuntu-mirrors\.txt$'
+  expect "$log" "$image: (the comment line itself)" '^stanza comment: now # URIs: mirror\+file:/etc/apt/apt-mirrors\.txt$'
+  absent "$log" "$image: the helper does not take that comment for a list of the machine" \
+    '^stanza comment: apt-install: this machine has a mirror list of its own'
   expect "$log" "$image: with no sources.list, the deb822 file is rewritten" \
     '^no sources\.list: apt-install: /etc/apt/sources\.list\.d/ubuntu\.sources now fetches the Ubuntu archive via mirror\+file:/etc/apt/ubuntu-mirrors\.txt$'
   expect "$log" "$image: and the run goes on to install" '^no sources\.list: exit 0$'
