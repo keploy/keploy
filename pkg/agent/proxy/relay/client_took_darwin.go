@@ -104,9 +104,10 @@ import (
 // it. The relay's own count is not taken when a TLS layer is between the
 // relay and the socket (the bytes the relay writes are not the bytes
 // appended: the count of sequence numbers answers alone there), and neither
-// count is when the socket cannot answer as it begins. A send buffer that holds more than could have been appended
-// through the count says a write went around it: the socket says nothing from
-// then on (clientUnknown), and every chunk is teed as it is written.
+// count is when the socket cannot answer as it begins. A send buffer that
+// holds more than could have been appended through the count says a write
+// went around it: the socket says nothing from then on (clientUnknown), and
+// every chunk is teed as it is written.
 //
 // The states (bsd/netinet/tcp_fsm.h) read as Linux's do (client_took_linux.go):
 // ESTABLISHED, open; CLOSE_WAIT and LAST_ACK, the client's FIN is in; CLOSED,
@@ -556,14 +557,14 @@ func (c *countedClient) CloseWrite() error { return c.tcp.CloseWrite() }
 // every layer above it (the proxy's tracking, TLS, a parser, the relay) to
 // write through: a count of every byte written to its socket, which the
 // relay's look at the client reads what the client acknowledged from
-// (countWrites). c itself when it is not a *net.TCPConn, or its socket
-// cannot answer as the count begins: the relay then counts its own writes
-// where it can. Call it once, as c is accepted, before anything is written
+// (countWrites). c itself when it is not a *net.TCPConn (a nil one among
+// them, whose SyscallConn would dereference it), or its socket cannot answer
+// as the count begins: the relay then counts its own writes where it can. Call it once, as c is accepted, before anything is written
 // to it. What keys or reads the accepted socket itself finds it under the
 // count (AcceptedConn, NetConn).
 func CountClientWrites(c net.Conn) net.Conn {
 	tc, ok := c.(*net.TCPConn)
-	if !ok {
+	if !ok || tc == nil {
 		return c
 	}
 	rc, err := tc.SyscallConn()

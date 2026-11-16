@@ -358,21 +358,26 @@ func TestTheCountFromTheAcceptIsTheRelaysUnderTLSToo(t *testing.T) {
 	if CountClientWrites(gone) != gone {
 		t.Error("a socket that cannot answer as it is accepted is counted")
 	}
-	if over := (&seenWrites{Conn: proxyClient}); CountClientWrites(over) != net.Conn(over) {
-		t.Error("a conn that is not the accepted socket is counted")
-	}
-	// A nil socket, whose SyscallConn fails, is not counted, and is never
-	// asked (a nil RawConn's Control panics).
-	func() {
-		defer func() {
-			if p := recover(); p != nil {
-				t.Errorf("counting a nil socket panicked: %v", p)
+	// A conn that is not the accepted socket, a nil socket (whose SyscallConn
+	// dereferences it) and a socket with no descriptor (whose SyscallConn
+	// fails) are not counted, and never asked: a nil RawConn's Control
+	// panics.
+	for what, c := range map[string]net.Conn{
+		"a conn that is not the accepted socket": &seenWrites{Conn: proxyClient},
+		"a nil socket":                           (*net.TCPConn)(nil),
+		"a socket with no descriptor":            &net.TCPConn{},
+	} {
+		func() {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Errorf("counting %s panicked: %v", what, p)
+				}
+			}()
+			if CountClientWrites(c) != c {
+				t.Errorf("%s is counted", what)
 			}
 		}()
-		if none := (*net.TCPConn)(nil); CountClientWrites(none) != net.Conn(none) {
-			t.Error("a nil socket is counted")
-		}
-	}()
+	}
 	// What the send buffer held as the count began is the count's start.
 	held := &countedClient{tcp: proxyClient.(*net.TCPConn), count: &writeCount{}, begin: darwinTCPInfo{sbbytes: 7}}
 	held.Conn = held.tcp

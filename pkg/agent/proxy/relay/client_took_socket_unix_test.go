@@ -571,14 +571,19 @@ func TestAClosedClientThatResetsBeforeTheRelayReadsItsFINHasTheAnswerRefused(t *
 	}
 }
 
+// smallWindow is the receive buffer dialSmallWindow asks for.
+const smallWindow = 2048
+
 // dialSmallWindow is a loopback client connection whose client end (app) has
 // a small receive buffer, so what the proxy's end writes to it fills it while
 // it does not read, and whose proxy's end (proxyClient) has a send buffer
 // that holds far more: the proxy's writes return while the client has
 // acknowledged little of them. Linux keeps the small buffer asked for before
-// connect (2048, read back as 4096); macOS grows it (read back as 326640 on
-// macOS 26), so a row sizes what it sends from what the client's socket
-// reads back (receiveBufferOf), never from the number asked for.
+// connect (smallWindow, read back as 4096); macOS raises it as it connects
+// (read back as 326640 on macOS 26) and may grow it after, while the row runs
+// (receiveBufferGrownOf), so a row sizes what it sends from the most the
+// client's socket can come to hold (receiveBufferBoundOf), never from the
+// number asked for.
 func dialSmallWindow(t *testing.T) (app, proxyClient net.Conn) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -590,7 +595,7 @@ func dialSmallWindow(t *testing.T) (app, proxyClient net.Conn) {
 	go func() { c, _ := ln.Accept(); accepted <- c }()
 	d := net.Dialer{Control: func(_, _ string, c syscall.RawConn) error {
 		var serr error
-		if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, 2048) }); err != nil {
+		if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, smallWindow) }); err != nil {
 			return err
 		}
 		return serr
@@ -694,7 +699,7 @@ func TestAfterTheClientHalfClosed_AClientNotReadingYetIsWaitedFor(t *testing.T) 
 	streams := make(chan string, 1)
 	go func() { go streamOf(t, r.ClientStream()); streams <- streamOf(t, r.DestStream()) }()
 
-	before := strings.Repeat("b", receiveBufferOf(t, app)+8<<10)
+	before := strings.Repeat("b", receiveBufferBoundOf(t, app)+8<<10)
 	if _, err := server.Write([]byte(before)); err != nil {
 		t.Fatal(err)
 	}
@@ -780,7 +785,7 @@ func TestWrittenCountsWhatTheClientHasNotAcknowledgedYet(t *testing.T) {
 	app, proxyClient := dialSmallWindow(t)
 	s := clientSocketOf(proxyClient, zap.NewNop())
 	client := countWrites(proxyClient, s)
-	n := uint64(receiveBufferOf(t, app) + 128<<10)
+	n := uint64(receiveBufferBoundOf(t, app) + 128<<10)
 	if _, err := client.Write(make([]byte, n)); err != nil {
 		t.Fatal(err)
 	}
@@ -889,7 +894,7 @@ func halfClose(t *testing.T, appEnd, app net.Conn) {
 
 func judgedFromItsOwnFirstByte(t *testing.T, by countedBy) {
 	app, proxyClient := dialSmallWindow(t)
-	first, second := strings.Repeat("1", receiveBufferOf(t, app)+128<<10), strings.Repeat("2", 1<<10)
+	first, second := strings.Repeat("1", receiveBufferBoundOf(t, app)+128<<10), strings.Repeat("2", 1<<10)
 	proxyServer, server := loopbackPair(t)
 	// The test counts what the relay writes to the client (plain), and what
 	// the client acknowledged of the bytes written to its socket (seen),
@@ -943,8 +948,10 @@ func judgedFromItsOwnFirstByte(t *testing.T, by countedBy) {
 	// much (tcp_output), and otherwise waits for the proxy's window probe,
 	// which xnu's persist timer sends no sooner than 5 s (TCPTV_PERSMIN); a
 	// 32K cap opened it by less on 1 run in 70. And it keeps the window short
-	// of the second answer, 128K behind what the client's receive buffer
-	// (receiveBufferOf) holds.
+	// of the second answer, 128K behind the most the client's receive buffer
+	// can come to hold (receiveBufferBoundOf): macOS grows it as the client
+	// reads, and a first answer sized from what it held as it connected was
+	// acknowledged whole on up to 20 runs in 1000.
 	const readCap = 64 << 10
 	_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 512)
@@ -999,7 +1006,7 @@ func TestWrittenCountsEveryByteUnderTLSFromTheSocketsAccept(t *testing.T) {
 	if c := countWrites(src, s); c != src {
 		t.Fatalf("the relay put its own count (%T) over a client counted from its accept", c)
 	}
-	n := receiveBufferOf(t, app) + 128<<10
+	n := receiveBufferBoundOf(t, app) + 128<<10
 	if _, err := src.Write(make([]byte, n)); err != nil {
 		t.Fatal(err)
 	}

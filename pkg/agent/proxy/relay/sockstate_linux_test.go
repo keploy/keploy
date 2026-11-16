@@ -43,3 +43,8 @@ func windowClosedOf(fd uintptr) bool {
 	info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
 	return err == nil && info.Unacked == 0 && info.Notsent_bytes > 0
 }
+
+// receiveBufferGrownOf is held, what the receive buffer of the socket holds
+// now: Linux keeps a buffer the application sized as it was set
+// (SOCK_RCVBUF_LOCK: tcp_rcv_space_adjust leaves it).
+func receiveBufferGrownOf(_ uintptr, held int) (int, error) { return held, nil }

@@ -70,3 +70,27 @@ func windowClosedOf(fd uintptr) bool {
 	le := binary.LittleEndian
 	return le.Uint64(buf[92:]) == 0 && le.Uint32(buf[64:]) > 0
 }
+
+// receiveBufferGrownOf is the most the receive buffer of the socket fd, which
+// holds held bytes now and was asked for smallWindow before it connected, can
+// come to hold. xnu grows even a buffer the application sized
+// (tcp_sbrcv_grow_rwin, bsd/netinet/tcp_subr.c:3655, xnu-12377.121.6): by
+// rcvbufinc, 16 of its segments (t_maxseg << 4, TCP_MAXSEG), each time the
+// room left in it is less than that while it holds no more than its ideal
+// size (sb_idealsize: the size asked for, which SO_RCVBUF sets in
+// sosetoptlock, bsd/kern/uipc_socket.c:4895) and one such step. It is that
+// small only once tcp_sbrcv_trim (bsd/netinet/tcp_input.c:1178), as the
+// application reads, took it back toward what it holds; the trim never takes
+// it below the ideal size, and nothing else grows a buffer sized so:
+// tcp_sbrcv_grow needs SB_AUTOSIZE, which SO_RCVBUF clears, and tcp_mss
+// (tcp_input.c:7304) sizes it only as it connects. So from now on it never
+// holds more than held, or the size asked for and two steps: on macOS 26 it
+// reads back 326640 as it connects and was seen at 522544 after a read of
+// 64K (2048 and two steps of 16 * 16332 are 524672).
+func receiveBufferGrownOf(fd uintptr, held int) (int, error) {
+	mss, err := unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG)
+	if err != nil {
+		return 0, err
+	}
+	return max(held, smallWindow+2*(mss<<4)), nil
+}
