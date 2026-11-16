@@ -1,6 +1,10 @@
 package relay
 
-import "testing"
+import (
+	"encoding/binary"
+	"os"
+	"testing"
+)
 
 // tcpsEstablished is xnu's ESTABLISHED (bsd/netinet/tcp_fsm.h).
 const tcpsEstablished = 4
@@ -147,5 +151,48 @@ func TestXNUASocketThatCannotAnswerSaysNothing(t *testing.T) {
 	}
 	if _, ok := s.written(); ok {
 		t.Fatal("written says a count, want it cannot say")
+	}
+}
+
+// A TCP_INFO answer is read at xnu's offsets, and one shorter than a look
+// needs is not read.
+func TestXNUReadsTCPInfoAtItsOffsets(t *testing.T) {
+	b := make([]byte, tcpInfoNeeded)
+	le := binary.LittleEndian
+	b[tcpiState] = tcpsLastAck
+	le.PutUint32(b[tcpiFlags:], tcpiLossRecovery|0x4)
+	le.PutUint32(b[tcpiSndNxt:], 0xfffffff0)
+	le.PutUint32(b[tcpiSndSbbytes:], 1234)
+	le.PutUint64(b[tcpiTxunacked:], 77)
+	var info darwinTCPInfo
+	if !readTCPInfo(b, &info) {
+		t.Fatal("readTCPInfo = false for an answer as long as a look needs")
+	}
+	want := darwinTCPInfo{state: tcpsLastAck, lossRecovery: true, sndNxt: 0xfffffff0, sbbytes: 1234, txunacked: 77}
+	if info != want {
+		t.Fatalf("readTCPInfo read %+v, want %+v", info, want)
+	}
+	le.PutUint32(b[tcpiFlags:], 0x4) // other flags only: not resending
+	if !readTCPInfo(b, &info) || info.lossRecovery {
+		t.Fatalf("readTCPInfo read %+v with TCPI_FLAG_LOSSRECOVERY clear, want not in loss recovery", info)
+	}
+	info = darwinTCPInfo{}
+	if readTCPInfo(b[:tcpInfoNeeded-1], &info) || info != (darwinTCPInfo{}) {
+		t.Fatalf("readTCPInfo read %+v from an answer one byte short, want nothing read", info)
+	}
+}
+
+// A file that is no TCP socket answers no TCP_INFO: tcpInfo says nothing,
+// whatever its buffer holds.
+func TestXNUAFileThatIsNoTCPSocketAnswersNoTCPInfo(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	var buf [tcpInfoBuf]byte
+	var info darwinTCPInfo
+	if tcpInfo(r.Fd(), &buf, &info) {
+		t.Fatalf("tcpInfo = true, read %+v, for a pipe; want false", info)
 	}
 }

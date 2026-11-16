@@ -105,6 +105,11 @@ type tcpClientSocket struct {
 	winfo   darwinTCPInfo
 	wrote   uint64
 	wroteOK bool
+	// ebuf and einfo are pendingError's (client_end_darwin.go), and
+	// resetGiven says it gave the reset it found.
+	ebuf       [tcpInfoBuf]byte
+	einfo      darwinTCPInfo
+	resetGiven bool
 
 	mu sync.Mutex
 	// seen: a look has been taken. lastNxt is snd_nxt as the last look found
@@ -131,15 +136,21 @@ func tcpInfo(fd uintptr, buf *[tcpInfoBuf]byte, info *darwinTCPInfo) bool {
 	size := uint32(len(buf))
 	_, _, errno := unix.Syscall6(unix.SYS_GETSOCKOPT, fd, unix.IPPROTO_TCP, tcpInfoOpt,
 		uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&size)), 0)
-	if errno != 0 || size < tcpInfoNeeded {
+	return errno == 0 && readTCPInfo(buf[:min(int(size), len(buf))], info)
+}
+
+// readTCPInfo reads b, the struct tcp_info a TCP_INFO answered, into info;
+// false when it is shorter than a look needs.
+func readTCPInfo(b []byte, info *darwinTCPInfo) bool {
+	if len(b) < tcpInfoNeeded {
 		return false
 	}
 	*info = darwinTCPInfo{
-		state:        buf[tcpiState],
-		lossRecovery: binary.LittleEndian.Uint32(buf[tcpiFlags:])&tcpiLossRecovery != 0,
-		sndNxt:       binary.LittleEndian.Uint32(buf[tcpiSndNxt:]),
-		sbbytes:      binary.LittleEndian.Uint32(buf[tcpiSndSbbytes:]),
-		txunacked:    binary.LittleEndian.Uint64(buf[tcpiTxunacked:]),
+		state:        b[tcpiState],
+		lossRecovery: binary.LittleEndian.Uint32(b[tcpiFlags:])&tcpiLossRecovery != 0,
+		sndNxt:       binary.LittleEndian.Uint32(b[tcpiSndNxt:]),
+		sbbytes:      binary.LittleEndian.Uint32(b[tcpiSndSbbytes:]),
+		txunacked:    binary.LittleEndian.Uint64(b[tcpiTxunacked:]),
 	}
 	return true
 }

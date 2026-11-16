@@ -23,7 +23,10 @@ import (
 // The reset is still there to read. The kernel keeps a reset's error on the
 // socket (sk_err) until a read or a write of the socket takes it, or
 // getsockopt(SO_ERROR) does: ECONNRESET, or EPIPE where the client's FIN had
-// come first (tcp_reset, for a socket in CLOSE_WAIT). So as the relay ends,
+// come first (tcp_reset, for a socket in CLOSE_WAIT). macOS keeps ECONNRESET,
+// but for a reset that comes once the proxy's own FIN is sent, which closes
+// the socket with bytes outstanding and no error: that one is read from the
+// socket's TCP_INFO (client_end_darwin.go). So as the relay ends,
 // once its forwarders are done reading the client's socket and writing to it,
 // it hands what the socket holds to its owner (Config.ClientEndError), with no
 // protocol's rule: the parser judges what a reset after the last write says of
