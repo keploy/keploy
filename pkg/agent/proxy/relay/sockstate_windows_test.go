@@ -14,10 +14,6 @@ const (
 	stateLastAck   uint8 = 9
 )
 
-// sioTCPInfo is SIO_TCP_INFO (mstcpip.h: _WSAIORW(IOC_VENDOR, 39)), which
-// fills a TCP_INFO_v0 for version 0 (Windows 10 1703 and later).
-const sioTCPInfo = 0xD8000027
-
 // fionread is FIONREAD (winsock2.h: _IOR('f', 127, u_long)).
 const fionread = 0x4004667F
 

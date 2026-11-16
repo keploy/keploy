@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -84,8 +85,10 @@ func (run *clientEndRun) ended(t *testing.T, want string, reset bool) {
 	switch {
 	case !reset && len(run.told) != 0:
 		t.Fatalf("ClientEndError was told %v, want nothing", run.told)
-	case reset && (len(run.told) != 1 || !errors.Is(run.told[0], syscall.EPIPE) && !errors.Is(run.told[0], syscall.ECONNRESET)):
-		t.Fatalf("ClientEndError was told %v, want once, the client's reset (EPIPE or ECONNRESET)", run.told)
+	case reset && (len(run.told) != 1 || !errors.Is(run.told[0], syscall.EPIPE) && !neterr.IsPeerReset(run.told[0])):
+		// A write's error is handed on as the OS gave it (Windows:
+		// WSAECONNABORTED), which the session keeps as a reset.
+		t.Fatalf("ClientEndError was told %v, want once, the client's reset (EPIPE or a reset)", run.told)
 	}
 }
 

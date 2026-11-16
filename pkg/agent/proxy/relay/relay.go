@@ -593,6 +593,9 @@ func (r *Relay) run(ctx context.Context) error {
 			r.nudgeDeadline(nudgeSide.Load())
 			return
 		}
+		if c := writeSide.Load(); writeSide == &r.src && c != nil {
+			r.noteClientFINSent(*c)
+		}
 		if log := r.cfg.Logger; log != nil {
 			log.Debug("relay: peer half-closed; forwarding FIN and draining the opposite direction",
 				zap.Duration("grace", r.cfg.HalfCloseGrace),

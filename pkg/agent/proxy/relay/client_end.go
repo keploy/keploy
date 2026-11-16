@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
@@ -54,8 +56,15 @@ import (
 // FIN with its own at once). The socket's TCP_INFO says it then
 // (client_end_darwin.go), and the relay hands it on as Linux's would be.
 //
-// Only a client connection that is a TCP socket on Linux or macOS can be asked
-// (clientSocketOf). Elsewhere only a failed write's error is handed on.
+// Windows keeps no error on the socket for a reset in any state, and its read
+// returns the reset where the client's FIN came first, as macOS's does. Its
+// TCP_INFO says the reset from the connection's state and counts instead
+// (wintcpinfo.go), which needs to know whether the proxy sent its own FIN:
+// the relay tells the socket when it does (noteClientFINSent).
+//
+// Only a client connection that is a TCP socket on Linux, macOS or Windows can
+// be asked (clientSocketOf). Elsewhere only a failed write's error is handed
+// on.
 
 // clientErrorSocket is a clientSocket that can say what error its connection
 // holds (SO_ERROR), taking it as it says it: nil when it holds none, or cannot
@@ -67,7 +76,7 @@ type clientErrorSocket interface {
 }
 
 // resetAfterFINSocket is a clientSocket that can say whether a reset its read
-// returned came after the client's FIN (macOS's).
+// returned came after the client's FIN (macOS's and Windows').
 type resetAfterFINSocket interface {
 	clientSocket
 	finBeforeReset() bool
@@ -80,6 +89,38 @@ type resetAfterFINSocket interface {
 func (r *Relay) clientFINBeforeReset() bool {
 	s, ok := r.client.(resetAfterFINSocket)
 	return ok && s.finBeforeReset()
+}
+
+// finSentSocket is a clientSocket the relay tells when it sends the client its
+// own TCP FIN (Windows': its socket cannot say whether that FIN went).
+type finSentSocket interface {
+	clientSocket
+	proxyFINSent()
+}
+
+// noteClientFINSent tells the client's socket that the relay half-closed the
+// client conn c, when that sent a TCP FIN: c is the TCP socket, or wraps it
+// (NetConn) with no TLS layer between, whose CloseWrite sends a close_notify
+// alert and no FIN.
+func (r *Relay) noteClientFINSent(c net.Conn) {
+	s, ok := r.client.(finSentSocket)
+	if !ok {
+		return
+	}
+	for i := 0; c != nil && i < 16; i++ { // bounded: a cycle must not hang
+		switch c.(type) {
+		case *net.TCPConn:
+			s.proxyFINSent()
+			return
+		case *tls.Conn:
+			return
+		}
+		u, ok := c.(interface{ NetConn() net.Conn })
+		if !ok {
+			return
+		}
+		c = u.NetConn()
+	}
 }
 
 // noteClientWriteFailed keeps err, the error a write to the client failed with
