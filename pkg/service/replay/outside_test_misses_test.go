@@ -93,15 +93,14 @@ func TestEachOutsideTestMissIsSaidWithItsNextStep(t *testing.T) {
 	}
 }
 
-// An application that resolves a name keploy test's recording holds no
-// answer for, at start-up only in the replay (its configuration names
-// another database host than the recording's), and connects to an IP no
-// mock answers: the set's report names both by their shape (it may be
-// uploaded), the set's misses file names both whole, local and git-ignored,
-// with the next step the report gives each, and says keploy test wrote it,
-// and the log points to that file by path. In both switch modes: neither
-// call counts against a test. A later run of the set with no such call
-// removes the file.
+// An application that resolves a name keploy test's recording holds no answer
+// for, at start-up only in the replay (its configuration names another host
+// than the recording's), and calls an IP no mock answers: the set's report
+// names both by their shape (it may be uploaded), the set's misses file names
+// both whole, local and git-ignored, with the next step the report gives
+// each, and says keploy test wrote it, and the log points to that file by
+// path. In both switch modes: neither call counts against a test. A later run
+// of the set with no such call removes the file.
 func TestAStartupLookupOnlyInTheReplayIsWholeInTheMissesFileAndShapedInTheReport(t *testing.T) {
 	for _, proven := range []bool{false, true} {
 		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
@@ -123,8 +122,8 @@ func TestAStartupLookupOnlyInTheReplayIsWholeInTheMissesFileAndShapedInTheReport
 			lookup := models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A orders-db.staging.internal.", HostTag: "#ab12", BeforeSet: true}
 			// A call the agent kept as evidence keeps one: shaped, whole in
 			// its Whole.
-			conn := models.UnmatchedCall{Protocol: "Postgres", ActualSummary: "startup user=orders", Destination: "10.20.30.40:5432",
-				Background: true, NextSteps: "the matcher's own next step"}.Charged()
+			conn := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /v1/tenants/acme/config", Destination: "10.20.30.40:8080",
+				PathTag: "#1f2e", Background: true, NextSteps: "the matcher's own next step"}.Charged()
 			conn.BeforeSet = true
 			if rest := r.setCalls.take([]models.UnmatchedCall{lookup, conn}); len(rest) != 0 {
 				t.Fatalf("the first test's read kept %+v as its own", rest)
@@ -135,11 +134,11 @@ func TestAStartupLookupOnlyInTheReplayIsWholeInTheMissesFileAndShapedInTheReport
 				t.Fatalf("the report names %+v, want the lookup and the connection", report)
 			}
 			for _, m := range report {
-				if strings.Contains(m.Call+m.Destination, "orders-db") || strings.Contains(m.Call, "user=orders") {
+				if strings.Contains(m.Call+m.Destination, "orders-db") || strings.Contains(m.Call, "acme") {
 					t.Errorf("the report names %+v whole, want its shape", m)
 				}
 			}
-			if report[1].Destination != "10.20.30.40:5432" {
+			if report[1].Destination != "10.20.30.40:8080" {
 				t.Errorf("the report names the connection's IP as %q, want it whole", report[1].Destination)
 			}
 
@@ -161,7 +160,7 @@ func TestAStartupLookupOnlyInTheReplayIsWholeInTheMissesFileAndShapedInTheReport
 			if c := got.Misses[0]; c.Call != "A orders-db.staging.internal." || c.NextStep != models.OutsideTestNextStep(lookup) || c.HostTag != "#ab12" {
 				t.Errorf("the misses file names the lookup as %+v, want it whole with its report's next step", c)
 			}
-			if c := got.Misses[1]; c.Call != "startup user=orders" || c.Destination != "10.20.30.40:5432" || c.NextStep != models.OutsideTestNextStep(conn) {
+			if c := got.Misses[1]; c.Call != "GET /v1/tenants/acme/config" || c.Destination != "10.20.30.40:8080" || c.PathTag != "#1f2e" || c.NextStep != models.OutsideTestNextStep(conn) {
 				t.Errorf("the misses file names the connection as %+v, want it whole with its report's next step", c)
 			}
 			for _, name := range []string{localfile.MissesFile, localfile.TempPrefixOf(localfile.MissesFile) + "0.tmp"} {
