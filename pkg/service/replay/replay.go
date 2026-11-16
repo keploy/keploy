@@ -673,11 +673,13 @@ type Replayer struct {
 	// the app's container of a compose stack kept across sets, which the
 	// next set starts again (P101-c).
 	composeAppStopped bool
-	// keepAliveStop, under the proven switch, stops the application
-	// --keep-app-alive started once for the run (natively, or with docker
-	// run), waits for it, and says why it had to kill it, "" when it did not
-	// (P101-c). The last set's final attempt calls it before its end's read.
-	// nil otherwise.
+	// keepAliveStop stops the application --keep-app-alive started once for
+	// the run (natively, or with docker run), waits for it, and says why it
+	// had to kill it, "" when it did not (P101-c). The last set's final
+	// attempt calls it before its end's read: under the proven switch the
+	// read that judges the set, with it off the read of the calls the app
+	// made after the run's last test, after the set's post-script
+	// (stopForSetEndRead). nil otherwise (docker compose).
 	keepAliveStop func() string
 
 	// exact is the set being replayed's exact serving, under the proven
@@ -2666,6 +2668,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// "" when it did not. nil when keploy started none here: a reused stack
 	// (serveTest), a base path, docker compose.
 	var stopAppBeforeSetEnd func() string
+	// stopAppBeforeReport, with the proven switch off, stops the application
+	// keploy started for this set (natively, or with docker run) as the set's
+	// teardown does, and waits for it to exit: the set's end calls it after
+	// the set's post-script, so the calls the application makes as it stops
+	// are read before the set's report is written (stopForSetEndRead). nil
+	// when keploy started none here, under docker compose, whose app's exit
+	// stops its stack, keploy's agent with it, and under the switch.
+	var stopAppBeforeReport func()
 	// composeRestart, set, starts this set's compose app again, which the
 	// last set's end stopped, once the set is staged on the agent.
 	var composeRestart composeAppStopper
@@ -3313,6 +3323,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							r.lossAppRunsOn = true // not known to have ended
 							r.lossAppRunsOnWhy = fmt.Sprintf("the stop of the application at test-set %s's end was not waited out (the test-set's run ended first)", testSetID)
 							return ""
+						}
+					}
+				} else {
+					// With the switch off the app runs under a context of
+					// its own too, so the set's end can stop it as its
+					// teardown does (a plain cancel: no set-end stop's rules),
+					// after the set's post-script, and wait for it, before it
+					// reads the calls the app made after its last test and
+					// writes the set's report (stopAppBeforeReport).
+					var stopApp context.CancelFunc
+					appCtx, stopApp = context.WithCancel(runTestSetCtx)
+					appExited = make(chan struct{})
+					stopAppBeforeReport = func() {
+						stopApp()
+						select {
+						case <-appExited:
+						case <-runTestSetCtx.Done():
 						}
 					}
 				}
@@ -6700,14 +6727,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 	// With the proven switch off nothing read either what the application
-	// missed after the set's last test: read now, for the set's report
+	// missed after the set's last test: it is read for the set's report
 	// alone (readAfterLastTest), since none of it fails the set; after the
 	// read above, at which the agent writes the answers held for the set's
-	// end, so this read takes the calls they make.
-	// Only once a test of it
-	// opened its window, as under the switch: before that, what the agent
-	// holds is the application's start-up, which no test's read took.
-	if !provenswitch.On() && captureOpened {
+	// end, so it takes the calls they make. Only once a test of it opened its
+	// window, as under the switch: before that, what the agent holds is the
+	// application's start-up, which no test's read took. An application
+	// keploy stops before the set's report (stopForSetEndRead) is stopped
+	// after the set's post-script, which runs with it up, and the read waits
+	// for that stop, so it takes the calls the application makes as it
+	// stops: it is made just before the report, below. One keploy stops only
+	// later (one --keep-app-alive keeps for a later set, one keploy did not
+	// start) is read here, with it running.
+	stopForRead := r.stopForSetEndRead(stopAppBeforeReport)
+	if !provenswitch.On() && captureOpened && stopForRead == nil {
 		readCtx, cancelRead := context.WithTimeout(ctx, setEndDrainBudget)
 		r.readAfterLastTest(readCtx, testSetID)
 		cancelRead()
@@ -7252,6 +7285,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// INTERNAL_ERR is noted past this point (a failed report write returns
 	// it).
 	r.setInternalErr = internalFailure
+	// With the switch off the application keploy stops before the set's
+	// report is stopped now, with its post-script run and its logs taken
+	// (above), and the calls it made after the set's last test, as it
+	// stopped among them, are read for the report (stopForSetEndRead). The
+	// status is final: neither the stop nor the read changes it.
+	if !provenswitch.On() && captureOpened && stopForRead != nil {
+		r.stopBeforeSetEndRead(stopForRead)
+		readCtx, cancelRead := context.WithTimeout(ctx, setEndDrainBudget)
+		r.readAfterLastTest(readCtx, testSetID)
+		cancelRead()
+	}
 	// The calls the set's application made outside every test that no mock
 	// answered and that fail nothing: named in its report, said, and
 	// written whole in its misses file, since nothing else names them

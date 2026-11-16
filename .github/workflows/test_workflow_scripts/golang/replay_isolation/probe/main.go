@@ -111,7 +111,7 @@ func app(args []string) {
 	imds := fs.String("imds", "", "the metadata address the sink owns (empty: the app makes no metadata call)")
 	peer := fs.String("peer", "", "a container name the network holds, resolved through it (empty: skip)")
 	unrecorded := fs.Bool("unrecorded", false, "also look up the names a recording must not hold (the replay's and the baselines' args; the recording's leave it off)")
-	stopLookup := fs.Bool("stop-lookup", false, "look a name up as the app stops (SIGINT or SIGTERM), after its last test and in no recording, then exit (the replay's args under the proven switch, which reads a set's end once its app has stopped)")
+	stopLookup := fs.Bool("stop-lookup", false, "look a name up as the app stops (SIGINT or SIGTERM), after its last test and in no recording, then exit (the replay's args: keploy test reads the calls made after a set's last test once its app has stopped)")
 	listen := fs.String("listen", ":8080", "")
 	_ = fs.Parse(args)
 	at := func(p int) string { return net.JoinHostPort(*sinkIP, strconv.Itoa(p)) }
@@ -195,11 +195,12 @@ func app(args []string) {
 		outcome("dns-startup-lookup", err)
 	}
 	// A name looked up as the app stops, so after its last test, which no
-	// recording holds (the recording's args leave -stop-lookup off). Under
-	// the proven switch keploy test stops the app before it reads the set's
-	// end, so that read takes it: the report names it as made after the last
-	// test by its shape, and the misses file names it whole (the after-last
-	// rows). Bounded, so the stop is prompt.
+	// recording holds (the recording's args leave -stop-lookup off). keploy
+	// test stops the app before it reads the calls made after the set's last
+	// test (with the switch off after the set's post-script, before its
+	// report), so that read takes it: the report names it as made after the
+	// last test by its shape, and the misses file names it whole (the
+	// after-last rows). Bounded, so the stop is prompt.
 	if *stopLookup {
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

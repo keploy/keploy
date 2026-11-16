@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 
@@ -101,10 +102,13 @@ func TestWhyAppNotStopped(t *testing.T) {
 	}
 }
 
-// The app --keep-app-alive keeps across sets runs, under the proven switch, on
-// a context of its own: its stop cancels it with the set-end cause and waits
-// until its run has ended, saying why that run's stop killed it. Off the
-// switch, and under docker compose, there is no such stop.
+// The app --keep-app-alive keeps across sets runs on a context of its own:
+// its stop cancels it, under the proven switch with the set-end cause, and
+// waits until its run has ended, saying why that run's stop killed it. Off
+// the switch the cancel is a plain one, the stop the run's end gives the
+// app, and the stop still waits for the run (the read of what the app made
+// after the run's last test comes after it). Under docker compose there is
+// no such stop.
 func TestTheKeptAppsStopWaitsForItsRun(t *testing.T) {
 	provenOn(t, true)
 	ctx := context.Background()
@@ -137,9 +141,36 @@ func TestTheKeptAppsStopWaitsForItsRun(t *testing.T) {
 		t.Fatal("docker compose: a stop of the app, which would stop keploy's agent")
 	}
 	provenOn(t, false)
-	if appCtx, stop, _ := keepAliveStopper(ctx, utils.Native); stop != nil || appCtx != ctx {
-		t.Fatal("switch off: a stop of the app")
+	if appCtx, stop, _ := keepAliveStopper(ctx, utils.DockerCompose); stop != nil || appCtx != ctx {
+		t.Fatal("docker compose, switch off: a stop of the app, which would stop keploy's agent")
 	}
+	appCtx, stop, ran = keepAliveStopper(ctx, utils.Native)
+	if stop == nil {
+		t.Fatal("switch off: no stop for an app kept across sets")
+	}
+	ranAt := make(chan struct{})
+	ended = make(chan struct{})
+	go func() {
+		<-appCtx.Done()
+		if cause := context.Cause(appCtx); cause != context.Canceled {
+			t.Errorf("switch off: the app's run was ended with %v, want a plain cancel", cause)
+		}
+		<-ranAt
+		ran(models.AppError{AppErrorType: models.ErrCtxCanceled})
+		close(ended)
+	}()
+	stopped := make(chan string, 1)
+	go func() { stopped <- stop() }()
+	select {
+	case why := <-stopped:
+		t.Fatalf("switch off: the stop returned (%q) before the app's run ended", why)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(ranAt)
+	if why := <-stopped; why != "" {
+		t.Fatalf("switch off: the stop said %q, want nothing", why)
+	}
+	<-ended
 }
 
 // A set's attempt is the last it can be given only on the last flaky check,

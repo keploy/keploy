@@ -45,22 +45,29 @@ func whyStopNotRead(cmdType utils.CmdType, serveTest, halted bool) string {
 }
 
 // keepAliveStopper gives the app --keep-app-alive keeps across a run's sets a
-// context of its own, under the proven switch, and the stop of it the last
-// set's end calls before its read (P101-c): stop cancels the app's context
-// with models.ErrAppStoppedForSetEnd and waits until ran has been told how
-// its run ended, then says why its stop had to kill it ("" when it did not,
-// or when the run's ctx ended first). Not under docker compose, where
-// stopping the app stops keploy's agent: stop is nil there, and with the
-// switch off, and appCtx is ctx.
+// context of its own, and the stop of it the last set's final attempt calls
+// before its end's read (P101-c): stop cancels the app's context and waits
+// until ran has been told how its run ended, then says why its stop had to
+// kill it ("" when it did not, or when the run's ctx ended first). Under the
+// proven switch the cancel's cause is models.ErrAppStoppedForSetEnd; with it
+// off it is a plain cancel, the stop the run's end gives the app, and the
+// read it comes before is of the calls the app made after the run's last
+// test, for the set's report alone (stopForSetEndRead). Not under docker
+// compose, where stopping the app stops keploy's agent: stop is nil there,
+// and appCtx is ctx.
 func keepAliveStopper(ctx context.Context, cmdType utils.CmdType) (appCtx context.Context, stop func() string, ran func(models.AppError)) {
-	if !provenswitch.On() || cmdType == utils.DockerCompose {
+	if cmdType == utils.DockerCompose {
 		return ctx, nil, func(models.AppError) {}
+	}
+	var cause error
+	if provenswitch.On() {
+		cause = models.ErrAppStoppedForSetEnd
 	}
 	appCtx, cancel := context.WithCancelCause(ctx)
 	exited := make(chan struct{})
 	var killed string
 	stop = func() string {
-		cancel(models.ErrAppStoppedForSetEnd)
+		cancel(cause)
 		select {
 		case <-exited:
 			return killed

@@ -444,3 +444,129 @@ func TestRunTestSet_ASetThatEndsBeforeItsReportLeavesNoEarlierRunsMissesFile(t *
 		})
 	}
 }
+
+// postScriptTouches is a set's config whose post-script makes a file, path.
+type postScriptTouches struct {
+	prTestSetConf
+	path string
+}
+
+func (c postScriptTouches) Read(context.Context, string) (*models.TestSet, error) {
+	return &models.TestSet{PostScript: "touch '" + c.path + "'"}, nil
+}
+
+// stopsAfterPost is a stand-in agent whose application, as it is stopped,
+// says whether the set's post-script had run (its file was there).
+type stopsAfterPost struct {
+	*readsAsAnAgentDoes
+	post     string
+	postRan  atomic.Bool
+	stoppedN atomic.Int32
+}
+
+func (f *stopsAfterPost) Run(ctx context.Context, opts models.RunOptions) models.AppError {
+	err := f.readsAsAnAgentDoes.Run(ctx, opts)
+	if ctx.Err() != nil {
+		_, statErr := os.Stat(f.post)
+		f.postRan.Store(statErr == nil)
+		f.stoppedN.Add(1)
+	}
+	return err
+}
+
+// stopLookup is the call the stand-in application makes only as it stops.
+var stopLookup = models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A shutdown-audit.staging.internal.", HostTag: "#ab12"}
+
+// With the switch off the set's end stops the application keploy started for
+// it after the set's post-script, which runs with it up, then reads the calls
+// it made after its last test, as it stopped among them, and then writes the
+// set's report: the report names the lookup the application made only as it
+// stopped as made after the last test, by its shape, the misses file names it
+// whole, and the set passes (it fails nothing).
+func TestRunTestSet_ACallTheAppMakesAsItStopsIsNamedWithTheSwitchOff(t *testing.T) {
+	provenOn(t, false)
+	h := newPartialRunHarness(t, 2, 0)
+	withSetDir(t, h)
+	h.instr.stopped = make(chan struct{})
+	agent := readAsAnAgentIs(h)
+	app := &stopsAfterPost{readsAsAnAgentDoes: agent, post: filepath.Join(t.TempDir(), "post-ran")}
+	h.replayer.instrumentation = app
+	h.replayer.testSetConf = postScriptTouches{path: app.post}
+	agent.atEnd = func() ([]models.UnmatchedCall, error) {
+		select {
+		case <-h.instr.stopped:
+			return []models.UnmatchedCall{stopLookup}, nil
+		default:
+			// Still running: it makes its stop's lookup only as it stops.
+			return nil, nil
+		}
+	}
+
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("status %s (reason %q); a lookup the application makes as it stops fails nothing", status, h.report.report.FailureReason)
+	}
+	if n := app.stoppedN.Load(); n != 1 {
+		t.Fatalf("the application was stopped %d times, want once", n)
+	}
+	if !app.postRan.Load() {
+		t.Fatal("the application was stopped before the set's post-script ran; the post-script runs with it up")
+	}
+	if ends := agent.ends.Load(); ends != 1 {
+		t.Fatalf("%d set-end reads, want one, after the application's stop", ends)
+	}
+	if got, want := calledShaped(h.report.report.OutsideTestMisses), "DNS A {}.{}.{}. @after_last_test;"; got != want {
+		t.Fatalf("the report names %s outside every test, want %s (the lookup made as the application stopped)", got, want)
+	}
+	if got, want := calledWhole(readTestMisses(t, h)), "DNS A shutdown-audit.staging.internal. ;"; got != want {
+		t.Fatalf("the misses file names %s, want %s", got, want)
+	}
+}
+
+// With the switch off the application --keep-app-alive keeps across the sets
+// is stopped before a set's end read only on the run's last set, on an
+// attempt no other follows: that read then takes the calls it made as it
+// stopped. On any other set it is read running, and not stopped.
+func TestRunTestSet_TheKeptAppIsStoppedBeforeTheReadOnlyAtTheRunsEnd(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		last, final bool
+		wantStop    bool
+	}{
+		{"the run's last set, final attempt", true, true, true},
+		{"an earlier set", false, true, false},
+		{"the last set, an attempt that others follow", true, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			provenOn(t, false)
+			h := newPartialRunHarness(t, 2, 0)
+			withSetDir(t, h)
+			agent := readAsAnAgentIs(h)
+			var stops atomic.Int32
+			h.replayer.keepAliveStop = func() string { stops.Add(1); return "" }
+			h.replayer.isLastTestSet, h.replayer.finalAttempt = c.last, c.final
+			agent.atEnd = func() ([]models.UnmatchedCall, error) {
+				if stops.Load() == 0 {
+					return nil, nil
+				}
+				return []models.UnmatchedCall{stopLookup}, nil
+			}
+
+			if status := h.runServing(t); status != models.TestSetStatusPassed {
+				t.Fatalf("status %s (reason %q)", status, h.report.report.FailureReason)
+			}
+			want, wantShaped := int32(0), ""
+			if c.wantStop {
+				want, wantShaped = 1, "DNS A {}.{}.{}. @after_last_test;"
+			}
+			if n := stops.Load(); n != want {
+				t.Fatalf("the kept application was stopped %d times, want %d", n, want)
+			}
+			if ends := agent.ends.Load(); ends != 1 {
+				t.Fatalf("%d set-end reads, want one", ends)
+			}
+			if got := calledShaped(h.report.report.OutsideTestMisses); got != wantShaped {
+				t.Fatalf("the report names %q outside every test, want %q", got, wantShaped)
+			}
+		})
+	}
+}

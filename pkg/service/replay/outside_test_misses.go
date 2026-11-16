@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -35,13 +36,17 @@ import (
 // for its report alone, which names each (outsideTestMisses), as made after
 // its last test. They were read by no one: cut at the next set's staging,
 // said only by their shape in a line that keeps no record of them, or, after
-// the run's last set, never read. The application is still running then: a
-// call it makes after this read (as it stops, among them) is cut at the next
-// set's staging, as before, or, after the run's last set, never read. The
-// set's verdict is what it would be without the read, whatever it returns. A
-// read that cannot vouch for every such call is said at WARN, but one the
-// run's user cut short by stopping the run is the stop's: the stop is the
-// set's status (USER_ABORT), so it is said at Debug, as under the switch.
+// the run's last set, never read. An application keploy stops before the
+// set's report is stopped first, after the set's post-script
+// (stopForSetEndRead), so the read takes the calls it makes as it stops.
+// One keploy stops only later (kept alive for a later set, or not started
+// by keploy) is read running: a call it makes after the read is cut at the
+// next set's staging, as before, or, after the run's last set, never read.
+// The set's verdict is what it would be without the read, whatever it
+// returns. A read that cannot vouch for every such call is said at WARN, but
+// one the run's user cut short by stopping the run is the stop's: the stop
+// is the set's status (USER_ABORT), so it is said at Debug, as under the
+// switch.
 func (r *Replayer) readAfterLastTest(ctx context.Context, testSetID string) {
 	_, _, err := r.unclaimedCalls(ctx)
 	switch {
@@ -53,6 +58,42 @@ func (r *Replayer) readAfterLastTest(ctx context.Context, testSetID string) {
 		r.logger.Warn("keploy could not read every call the application made after the test-set's last test that no mock answered: its report may not name each (outsideTestMisses); they fail nothing, so the test-set's verdict stands",
 			zap.String("test-set", testSetID), zap.Error(err))
 	}
+}
+
+// stopForSetEndRead is, with the proven switch off, the stop of the set's
+// application its end gives before it reads the calls the application made
+// after its last test (readAfterLastTest) and writes its report: the stop of
+// the application keploy started for the set (stopAppBeforeReport, which
+// stops it as the set's teardown does), or, on the run's last set, on an
+// attempt no other follows, the stop of the one --keep-app-alive kept across
+// the sets (keepAliveStop). nil under the switch, whose set's end stops the
+// application before it judges the set (stopAppBeforeSetEnd), and when
+// keploy stops the application only later: one kept alive for a later set
+// or attempt, one it did not start, one in a docker compose stack, whose
+// exit stops the stack, keploy's agent with it. keepAliveStop is set only
+// for a run whose sets are each served by the application kept alive.
+func (r *Replayer) stopForSetEndRead(stopAppBeforeReport func()) func() {
+	switch {
+	case provenswitch.On():
+		return nil
+	case stopAppBeforeReport != nil:
+		return stopAppBeforeReport
+	case r.isLastTestSet && r.finalAttempt && r.keepAliveStop != nil:
+		return func() { r.keepAliveStop() }
+	}
+	return nil
+}
+
+// stopBeforeSetEndRead stops the set's application with stop
+// (stopForSetEndRead), the agent told first, as the set's teardown tells it,
+// so it says the application's shutdown errors as such.
+func (r *Replayer) stopBeforeSetEndRead(stop func()) {
+	notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := r.instrumentation.NotifyGracefulShutdown(notifyCtx); err != nil {
+		r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+	}
+	notifyCancel()
+	stop()
 }
 
 // outsideLogMax is how many outside-test misses a set's log names, one line
