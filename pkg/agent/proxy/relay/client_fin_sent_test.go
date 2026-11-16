@@ -54,6 +54,28 @@ func TestTheClientsSocketIsToldOfTheProxysTCPFINAlone(t *testing.T) {
 	(&Relay{client: &scriptedSocket{}}).noteClientFINSent(tcp)
 }
 
+// selfWrapping is a wrapper that is its own NetConn: a cycle.
+type selfWrapping struct{ net.Conn }
+
+func (c *selfWrapping) NetConn() net.Conn { return c }
+
+// A walk to the client's TCP socket over wrappers that loop back on
+// themselves ends, and tells the socket nothing.
+func TestTheWalkToTheClientsSocketEndsOnACycleOfWrappers(t *testing.T) {
+	t.Parallel()
+	s := &finSentRecorder{}
+	done := make(chan struct{})
+	go func() { defer close(done); (&Relay{client: s}).noteClientFINSent(&selfWrapping{}) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the walk over a cycle of wrappers did not end")
+	}
+	if got := s.toldTimes(); got != 0 {
+		t.Fatalf("the socket was told of the proxy's FIN %d times over a cycle of wrappers, want 0", got)
+	}
+}
+
 // Through a relay: the client's FIN forwarded to the destination tells the
 // client's socket nothing; the destination's FIN forwarded to the client
 // tells it once.
