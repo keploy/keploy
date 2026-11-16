@@ -799,6 +799,8 @@ func (a *App) ComposeDown() {
 		return
 	}
 	defer utils.BeginAgentStop()()
+	// The down stops keploy's agent: its exit is keploy's own (composeAgentDied).
+	a.composeApp.agentStopping.Store(true)
 	project := a.composeDownProject(context.Background())
 	if project != "" {
 		a.composeProjectSeen.Store(&project)
@@ -2230,6 +2232,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 		// watch ends before the stack is taken down.
 		a.composeApp.halted.Store(nil)
 		a.composeApp.stopping.Store(false)
+		a.composeApp.agentStopping.Store(false)
+		a.composeApp.appKilledAt.Store(0)
 		a.composeApp.project.Store(nil)
 		halt := make(chan struct{})
 		composeHaltSeen = halt

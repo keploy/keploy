@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -15,6 +16,7 @@ import (
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -29,8 +31,10 @@ import (
 // So compose runs without the abort flags, the user's own too
 // (withoutComposeAbortFlags), and keploy watches the app's container itself
 // (watchComposeApp): an exit keploy did not ask for ends the run, as the
-// abort did, with the app's exit code (APP_HALTED); another container's exit
-// is compose's to show, and ends nothing. keploy stops the app
+// abort did, with the app's exit code (APP_HALTED); so does an exit of
+// keploy's agent's container after the app started, which names the agent
+// (composeAgentDied); another container's exit (a one-shot migration's, exit
+// 0 too) is compose's to show, and ends nothing. keploy stops the app
 // (StopComposeApp: an interrupt, then a wait for its exit on events, a kill
 // only when it made no progress on its way out, and the kill is said) and
 // starts it again (StartComposeApp), while the agent and the app's
@@ -61,6 +65,15 @@ type composeAppState struct {
 	// halted is how the app's container exited when keploy had not asked
 	// it to (watchComposeApp); nil while it has not.
 	halted atomic.Pointer[composeHalt]
+	// agentStopping: keploy has begun to stop the stack its agent runs in
+	// (a halt's stop of the project, a down), so the agent's exit is
+	// keploy's own, and no halt.
+	agentStopping atomic.Bool
+	// appKilledAt is when the daemon last logged a kill of the app's
+	// container (a `docker kill` or `docker stop`, keploy's own among them),
+	// on the daemon's clock, in Unix nanoseconds; 0: none since the run
+	// began.
+	appKilledAt atomic.Int64
 	// project is the app's compose project, kept once read
 	// (composeAppProject); nil while it has not been. Each run reads it
 	// afresh.
@@ -180,12 +193,27 @@ func (a *App) isComposeAppEvent(ctx context.Context, m events.Message) bool {
 	return attrs[composeProjectLabelKey] == project
 }
 
-// composeHalt is an exit of the app's container keploy did not ask for.
+// composeHalt is an exit of the app's container keploy did not ask for, or
+// of keploy's agent's after the app started.
 type composeHalt struct {
 	exitCode int
+	// agent is keploy's agent's container when the halt is its exit, not
+	// the app's: exitCode is then the agent's.
+	agent string
+	// oomKilled: the daemon says the app's container ran out of memory.
+	oomKilled bool
+	// startedAt is when the run of the app that exited began, on the
+	// daemon's clock, in Unix nanoseconds; 0: not said.
+	startedAt int64
 }
 
 func (h composeHalt) Error() string {
+	if h.agent != "" {
+		return fmt.Sprintf("keploy's agent container %q exited with code %d after the application started, and keploy had not stopped it: "+
+			"the application runs in the agent's network and process namespaces, so the run ends. "+
+			"Next step: find why the agent stopped (keploy's log above holds its last lines; 137 with no kill of yours is most often docker's memory limit), "+
+			"fix that and run keploy again; if the agent crashed, report it to keploy with that log", h.agent, h.exitCode)
+	}
 	return fmt.Sprintf("the application's container exited with code %d, and keploy had not stopped it", h.exitCode)
 }
 
@@ -193,9 +221,10 @@ func (h composeHalt) Error() string {
 func (h composeHalt) Is(target error) bool { return target == models.ErrAppExitedOnItsOwn }
 
 // appError is the run's end on the halt: the app's exit, as compose's abort
-// on it ended the run (APP_HALTED), with its exit code.
+// on it ended the run (APP_HALTED), with its exit code. The agent's exit is
+// never a clean stop of the app, whatever its code.
 func (h composeHalt) appError(appLogs string) models.AppError {
-	if h.exitCode != 0 {
+	if h.exitCode != 0 || h.agent != "" {
 		return models.AppError{AppErrorType: models.ErrUnExpected, Err: h, AppLogs: appLogs, ExitCode: h.exitCode}
 	}
 	return models.AppError{AppErrorType: models.ErrAppStopped, AppLogs: appLogs, ExitCode: 0}
@@ -204,7 +233,10 @@ func (h composeHalt) appError(appLogs string) models.AppError {
 // watchComposeApp watches the app's container for its exits until ctx ends,
 // or until the returned stop is called. An exit keploy did not ask for
 // (stopping unset), of a container that is not running again, is a halt: it
-// is kept (composeApp.halted) and end is called, once, to end the run. The
+// is kept (composeApp.halted) and end is called, once, to end the run. So is
+// an exit of keploy's agent's container after the app started
+// (composeAgentDied), on the same stream, so the two are read in the order
+// the daemon logged them. The
 // stream is the daemon's own events, from the moment the watch begins; a
 // stream that breaks is asked for again from the last event it gave, so no
 // exit is missed. It is of the containers of the app's service, as compose
@@ -238,7 +270,7 @@ func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 					if m.TimeNano > 0 {
 						since = time.Unix(0, m.TimeNano)
 					}
-					if a.composeAppDied(wctx, m) {
+					if a.composeDied(wctx, m) {
 						end()
 						return
 					}
@@ -264,20 +296,176 @@ func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 // bounds nothing: what keploy waits for is the daemon's answer.
 const composeDaemonAskPace = 200 * time.Millisecond
 
-// composeAppDieFilter is what the watch asks the daemon for: the die events
-// of the containers of the app's service, or, with no service known, of the
-// container keploy was given by name, as before.
+// composeAppDieFilter is what the watch asks the daemon for: the die and
+// kill events of the containers of the app's service, or, with no service
+// known, of the container keploy was given by name, as before. With keploy's
+// agent's container known, it is the containers' events with no label: the
+// daemon ANDs label filters, so one stream of the app's service and the
+// agent's container cannot be asked for by label, and two streams would lose
+// the order the daemon logged their events in. The watch tells them apart
+// (isComposeAgentEvent, isComposeAppEvent).
 func (a *App) composeAppDieFilter() filters.Args {
 	args := filters.NewArgs(
 		filters.Arg("type", string(events.ContainerEventType)),
 		filters.Arg("event", string(events.ActionDie)),
+		filters.Arg("event", string(events.ActionKill)),
 	)
-	if a.composeService != "" {
-		args.Add("label", composeServiceLabelKey+"="+a.composeService)
-	} else {
+	switch {
+	case a.composeService == "":
 		args.Add("container", a.container)
+		if a.keployContainer != "" {
+			args.Add("container", a.keployContainer)
+		}
+	case a.keployContainer == "":
+		args.Add("label", composeServiceLabelKey+"="+a.composeService)
 	}
 	return args
+}
+
+// composeDied is the watch's decision on m: an exit of keploy's agent's
+// container (composeAgentDied) or of the app's (composeAppDied) that ends the
+// run. A kill of the app's container is kept (appKilledAt) and ends nothing.
+func (a *App) composeDied(ctx context.Context, m events.Message) bool {
+	if a.isComposeAgentEvent(m) {
+		return m.Action == events.ActionDie && a.composeAgentDied(ctx, m)
+	}
+	if m.Action == events.ActionKill {
+		if a.isComposeAppEvent(ctx, m) {
+			at := m.TimeNano
+			if at <= 0 {
+				at = time.Now().UnixNano()
+			}
+			a.composeApp.appKilledAt.Store(at)
+		}
+		return false
+	}
+	return a.composeAppDied(ctx, m)
+}
+
+// isComposeAgentEvent reports whether m is of keploy's agent's container,
+// by the name keploy gave it, one per run (a prior phase's agent in the same
+// project has another).
+func (a *App) isComposeAgentEvent(m events.Message) bool {
+	return a.keployContainer != "" && (m.Actor.Attributes["name"] == a.keployContainer || m.Actor.ID == a.keployContainer)
+}
+
+// KEPLOY'S AGENT'S EXIT AFTER THE APP STARTED ENDS THE RUN, AND NAMES THE AGENT.
+//
+// The app runs in the agent's network and pid namespaces. With compose's
+// abort flags gone, nothing ended the run when the agent's container exited
+// with the app up: the app, killed with the namespace (137), was named as
+// the halt, and an agent that died while keploy had stopped the app between
+// sets was found only when the next set's start failed. So an exit of the
+// agent's container that keploy did not ask for (agentStopping unset), once
+// the app has started in this run, is a halt that names the agent, its exit
+// code and the next step. Before the app has started, compose's up decides:
+// it fails on the agent's health, and a retry may recreate the agent.
+//
+// The app's die comes before the agent's: the kernel ends the namespace's
+// other processes before its first one. So an app killed with SIGKILL, not
+// for its own memory, and with no kill of it in the daemon's log
+// (composeHaltKilledWithItsAgent), is read as the agent's end once the
+// agent's container is down (composeAgentNamesTheHalt).
+
+// composeAgentDied reports whether m, a die of keploy's agent's container,
+// ends the run, keeping its halt if so: keploy had not begun to stop the
+// agent, the container is not running again, the app has started in this
+// run, and no halt is kept yet (one of the app's own stands).
+func (a *App) composeAgentDied(ctx context.Context, m events.Message) bool {
+	a.composeApp.stopMu.Lock()
+	defer a.composeApp.stopMu.Unlock()
+	info, read := a.readComposeContainer(ctx, a.keployContainer, "keploy decides the agent's exit on the event")
+	if ctx.Err() != nil || a.composeApp.agentStopping.Load() || (read && info.State.Running) {
+		return false
+	}
+	if !a.composeAppStarted(ctx) {
+		a.logger.Debug("keploy's agent's container exited before the application started; docker compose up decides the run",
+			zap.String("agent", a.keployContainer))
+		return false
+	}
+	code := -1
+	if read {
+		code = info.State.ExitCode
+	} else if c, err := strconv.Atoi(m.Actor.Attributes["exitCode"]); err == nil {
+		code = c
+	}
+	if !a.composeApp.halted.CompareAndSwap(nil, &composeHalt{exitCode: code, agent: a.keployContainer}) {
+		return false
+	}
+	a.logger.Info("keploy's agent's container exited after the application started, and keploy had not stopped it: ending the run",
+		zap.String("agent", a.keployContainer), zap.Int("exitCode", code))
+	return true
+}
+
+// composeAppStarted reports whether the app's container has started in this
+// run: docker says when it last started. compose down removes the project's
+// containers at each run's end, so a start it says is this run's.
+func (a *App) composeAppStarted(ctx context.Context) bool {
+	id, err := a.composeAppContainer(ctx)
+	if err != nil {
+		return false
+	}
+	info, read := a.readComposeContainer(ctx, id, "keploy takes the application for one that never started")
+	return read && daemonNanos(info.State.StartedAt) != 0
+}
+
+// daemonNanos is a time the daemon gives (RFC 3339), in Unix nanoseconds; 0
+// when it gives none.
+func daemonNanos(s string) int64 {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil || t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
+}
+
+// composeHaltKilledWithItsAgent reports whether h is an exit of the app that
+// its pid namespace's end gives it: SIGKILL (137), not for its own memory,
+// and with no kill of this run of the app in the daemon's log (appKilledAt,
+// from h's start on; with no start known, any kill).
+func (a *App) composeHaltKilledWithItsAgent(h *composeHalt) bool {
+	if h == nil || h.agent != "" || h.oomKilled || h.exitCode != 128+int(syscall.SIGKILL) {
+		return false
+	}
+	killed := a.composeApp.appKilledAt.Load()
+	return killed == 0 || killed < h.startedAt
+}
+
+// composeAgentNamesTheHalt makes a halt of an app killed with its pid
+// namespace (composeHaltKilledWithItsAgent) the agent's, with the agent's
+// exit code, once docker says the agent's container is down: keploy reads it
+// again at a walking pace until docker says so, a kill of the app comes to
+// light in the daemon's log, ctx ends, or utils.StopStallBudget of keploy's
+// runnable time passes with the agent up. The app was then killed from
+// outside docker (a kill of its process on the host), and its halt stands.
+func (a *App) composeAgentNamesTheHalt(ctx context.Context) {
+	if a.keployContainer == "" {
+		return
+	}
+	meter := stall.NewMeter(nil, utils.StopStallBudget)
+	defer meter.Stop()
+	for a.composeHaltKilledWithItsAgent(a.composeApp.halted.Load()) {
+		info, read, gone := a.inspectContainer(ctx, a.keployContainer,
+			fmt.Sprintf("keploy's agent container %q (with no answer, the application's exit ends the run)", a.keployContainer))
+		if gone || (read && !info.State.Running) {
+			code := -1
+			if read {
+				code = info.State.ExitCode
+			}
+			a.composeApp.halted.Store(&composeHalt{exitCode: code, agent: a.keployContainer})
+			a.logger.Info("the application was killed with keploy's agent's container, which exited, and keploy had not stopped it: ending the run",
+				zap.String("agent", a.keployContainer), zap.Int("exitCode", code))
+			return
+		}
+		if meter.Expired() {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(composeDaemonAskPace):
+		}
+	}
 }
 
 // composeAppDied reports whether m, a die event of a container of the app's
@@ -331,7 +519,14 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 	} else if c, err := strconv.Atoi(m.Actor.Attributes["exitCode"]); err == nil {
 		code = c
 	}
-	a.composeApp.halted.Store(&composeHalt{exitCode: code})
+	h := &composeHalt{exitCode: code}
+	if read {
+		h.oomKilled, h.startedAt = info.State.OOMKilled, daemonNanos(info.State.StartedAt)
+	}
+	// A halt kept already (keploy's agent's) stands; its end is under way.
+	if !a.composeApp.halted.CompareAndSwap(nil, h) {
+		return false
+	}
 	a.logger.Info("the application's container exited, and keploy had not stopped it: ending the run",
 		zap.String("container", a.container), zap.String("id", m.Actor.ID), zap.Int("exitCode", code))
 	return true
@@ -411,8 +606,11 @@ func (a *App) composeHaltEnd(ctx context.Context, halt chan struct{}, composeDow
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			// Before the halt is said (close): the run reads it then.
+			a.composeAgentNamesTheHalt(ctx)
 			close(halt)
 			a.composeApp.stopping.Store(true)
+			a.composeApp.agentStopping.Store(true)
 			if !a.stopComposeProject(context.WithoutCancel(ctx)) {
 				composeDown()
 			}
@@ -513,7 +711,7 @@ func (a *App) composeAppExited(ctx context.Context) (composeHalt, bool) {
 	if st := info.State.Status; st != "exited" && st != "dead" {
 		return composeHalt{}, false
 	}
-	return composeHalt{exitCode: info.State.ExitCode}, true
+	return composeHalt{exitCode: info.State.ExitCode, oomKilled: info.State.OOMKilled, startedAt: daemonNanos(info.State.StartedAt)}, true
 }
 
 // stopComposeProject stops every container of the app's compose project that
