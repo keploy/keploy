@@ -228,7 +228,8 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	pc.wroteAtClose.Store(&w)
 }
 
-// Windows's TCPSTATE values (SIO_TCP_INFO's State).
+// Windows's TCPSTATE values (mstcpip.h; SIO_TCP_INFO's State), in the
+// enum's order: CLOSE_WAIT comes before CLOSING, LAST_ACK and TIME_WAIT.
 const (
 	winTCPClosed      = 0
 	winTCPListen      = 1
@@ -237,17 +238,17 @@ const (
 	winTCPEstablished = 4
 	winTCPFinWait1    = 5
 	winTCPFinWait2    = 6
-	winTCPClosing     = 7
-	winTCPTimeWait    = 8
-	winTCPCloseWait   = 9
-	winTCPLastAck     = 10
+	winTCPCloseWait   = 7
+	winTCPClosing     = 8
+	winTCPLastAck     = 9
+	winTCPTimeWait    = 10
 )
 
 // orphanEstablished is never a Windows wait's: it waits for no orphan.
 const orphanEstablished = winTCPEstablished
 
 func tcpStateName(s uint8) string {
-	names := [...]string{"CLOSED", "LISTEN", "SYN_SENT", "SYN_RCVD", "ESTABLISHED", "FIN_WAIT1", "FIN_WAIT2", "CLOSING", "TIME_WAIT", "CLOSE_WAIT", "LAST_ACK"}
+	names := [...]string{"CLOSED", "LISTEN", "SYN_SENT", "SYN_RCVD", "ESTABLISHED", "FIN_WAIT1", "FIN_WAIT2", "CLOSE_WAIT", "CLOSING", "LAST_ACK", "TIME_WAIT"}
 	if int(s) < len(names) {
 		return names[s]
 	}
@@ -297,7 +298,7 @@ func readProxySide(conn *net.TCPConn) proxySide {
 		return proxySide{err: fmt.Errorf("SIO_TCP_INFO: %w", ierr)}
 	}
 	state := binary.LittleEndian.Uint32(info[0:4])
-	if state > winTCPLastAck {
+	if state > winTCPTimeWait {
 		return proxySide{err: fmt.Errorf("SIO_TCP_INFO gave an unknown TCP state %d", state)}
 	}
 	return proxySide{received: binary.LittleEndian.Uint64(info[56:64]), counted: true, state: uint8(state)}

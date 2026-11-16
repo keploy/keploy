@@ -3,10 +3,13 @@
 package proxy
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
+	"runtime"
 	"sync"
 	"syscall"
 	"testing"
@@ -16,6 +19,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 )
 
 // fakeSends stands in for the shim's counts (agent.AppSendCounter) of every
@@ -117,11 +121,36 @@ func TestOnWindowsTheProxysSideCountsWhatArrivedAndNoFIN(t *testing.T) {
 		t.Fatalf("read %d, %v; want %d to the FIN", got, err, n)
 	}
 	ps = readProxySide(side)
-	if ps.err != nil || ps.received != n || !peerEnded(ps.state) || dataReceived(ps) != n {
+	if ps.err != nil || ps.received != n || ps.state != winTCPCloseWait || !peerEnded(ps.state) || dataReceived(ps) != n {
 		t.Fatalf("after the FIN: %+v (%s); want %d received, the FIN taken and not counted", ps, tcpStateName(ps.state), n)
 	}
 	if u, err := readUnread(side); err != nil || u != 0 {
 		t.Fatalf("unread after the read: %d, %v", u, err)
+	}
+}
+
+// TestOnWindowsASideInTimeWaitIsReadAndHasTakenTheFIN: a proxy's side that
+// sent its FIN first (CloseWrite) and then took the application's is in
+// TIME_WAIT, TCPSTATE's last value, with its socket still open: read, and
+// counted as having taken the FIN.
+func TestOnWindowsASideInTimeWaitIsReadAndHasTakenTheFIN(t *testing.T) {
+	app, side := winPair(t)
+	if _, err := app.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the bytes to arrive", func() bool { return readProxySide(side).received == 4 })
+	if err := side.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, app); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "TIME_WAIT", func() bool { ps := readProxySide(side); return ps.err != nil || ps.state == winTCPTimeWait })
+	if ps := readProxySide(side); ps.err != nil || ps.state != winTCPTimeWait || ps.received != 4 || !peerEnded(ps.state) {
+		t.Fatalf("in TIME_WAIT: %+v (%s); want read, 4 received, the FIN taken", ps, tcpStateName(ps.state))
 	}
 }
 
@@ -199,6 +228,159 @@ func TestOnWindowsACancelledSendIsWaitedForUpToWhatItCompletedWith(t *testing.T)
 	f.set(appSends{done: part, started: 1 << 20}, nil)
 	if reached, err := p.pairReached(targets[0]); !reached || err != nil || targets[0].want != part {
 		t.Fatalf("cancelled after %d: reached %v, %v, want %d", part, reached, err, targets[0].want)
+	}
+	if targets[0].base.sending || targets[0].base.looks() {
+		t.Fatal("the target still waits for send calls once the counts say none is pending")
+	}
+}
+
+// TestOnWindowsAWaitIsMovedByTheSendsTheShimSeesComplete: a wait on a
+// connection whose send call is pending looks on its own, and a send the shim
+// saw complete since the last look is progress, so the wait never answers
+// unknown while the counts move, however long it runs. It runs on a clock the
+// test moves (stall.ManualClock); each look is 3/4 of the wait's budget after
+// the last.
+func TestOnWindowsAWaitIsMovedByTheSendsTheShimSeesComplete(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), settleReads: true}
+	clk := &stall.ManualClock{}
+	p.paired.clk = clk
+	f := &fakeSends{}
+	p.listenerCounter = f
+	app, side := winPair(t)
+	p.paired.add(side, 1, 0)
+	const part = 10_000
+	if _, err := app.Write(make([]byte, part)); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the part at the proxy", func() bool { return readProxySide(side).received == part })
+	f.set(appSends{started: 1 << 20, pending: 1}, nil)
+	targets, err := p.pairTargets(f, 1)
+	if err != nil || len(targets) != 1 || !targets[0].base.looks() {
+		t.Fatalf("targets: %d, %v; want the connection's, looked at on its own", len(targets), err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.waitPairTargets(context.Background(), targets) }()
+	look := func(why string) {
+		t.Helper()
+		for clk.Pending() == 0 {
+			select {
+			case err := <-done:
+				t.Fatalf("the wait answered (%v) %s", err, why)
+			default:
+				runtime.Gosched()
+			}
+		}
+	}
+	look("at its first look")
+	for i := uint64(1); i <= 4; i++ {
+		f.set(appSends{done: i * 1000, started: 1 << 20, pending: 1}, nil)
+		clk.Advance(orphanFINBudget * 3 / 4)
+		look(fmt.Sprintf("with the shim's done count moved to %d since its last look", i*1000))
+	}
+	f.set(appSends{done: part, started: 1 << 20}, nil)
+	clk.Pass()
+	if err := <-done; err != nil {
+		t.Fatalf("the wait = %v; want settled: the call ended with %d, all at the proxy", err, part)
+	}
+}
+
+// TestOnWindowsAWaitWithNoSendPendingNeedsNoCounts: once no send call is
+// pending, the wait wants what the calls completed with and never asks the
+// counts again (a process that exited no longer has them); it is reached when
+// exactly that has arrived, or when the side took the application's FIN, which
+// comes after everything it wrote.
+func TestOnWindowsAWaitWithNoSendPendingNeedsNoCounts(t *testing.T) {
+	setup := func(t *testing.T) (*Proxy, *fakeSends, *pairTarget, *net.TCPConn, *net.TCPConn) {
+		p := &Proxy{logger: zap.NewNop(), settleReads: true}
+		f := &fakeSends{}
+		p.listenerCounter = f
+		app, side := winPair(t)
+		p.paired.add(side, 1, 0)
+		if _, err := app.Write(make([]byte, 18)); err != nil {
+			t.Fatal(err)
+		}
+		until(t, "the first call at the proxy", func() bool { return readProxySide(side).received == 18 })
+		f.set(appSends{done: 36, started: 36}, nil)
+		targets, err := p.pairTargets(f, 1)
+		if err != nil || len(targets) != 1 || targets[0].want != 36 || targets[0].base.sending {
+			t.Fatalf("targets: %d, %v; want the connection's, wanting 36, nothing pending", len(targets), err)
+		}
+		f.set(appSends{}, errors.New("the process exited"))
+		return p, f, targets[0], app, side
+	}
+	t.Run("short, then everything", func(t *testing.T) {
+		p, f, tg, app, side := setup(t)
+		asked := f.timesAsked()
+		if reached, err := p.pairReached(tg); reached || err != nil {
+			t.Fatalf("18 of 36 at the proxy: reached %v, %v; want waiting", reached, err)
+		}
+		if _, err := app.Write(make([]byte, 18)); err != nil {
+			t.Fatal(err)
+		}
+		until(t, "the second call at the proxy", func() bool { return readProxySide(side).received == 36 })
+		if reached, err := p.pairReached(tg); !reached || err != nil {
+			t.Fatalf("36 of 36 at the proxy: reached %v, %v; want reached", reached, err)
+		}
+		if n := f.timesAsked() - asked; n != 0 {
+			t.Fatalf("the counts were asked %d times with no call pending; want none", n)
+		}
+	})
+	t.Run("short, then the FIN", func(t *testing.T) {
+		p, f, tg, app, side := setup(t)
+		asked := f.timesAsked()
+		if err := app.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		until(t, "the FIN", func() bool { return peerEnded(readProxySide(side).state) })
+		if reached, err := p.pairReached(tg); !reached || err != nil {
+			t.Fatalf("the FIN after 18 of 36: reached %v, %v; want reached", reached, err)
+		}
+		if n := f.timesAsked() - asked; n != 0 {
+			t.Fatalf("the counts were asked %d times with no call pending; want none", n)
+		}
+	})
+}
+
+// TestOnWindowsAConnectionTheProxyClosedNeedsNoCountsAndItsCloseReadsThem: a
+// wait asks no counts of a connection the proxy closed (its close settled
+// it), and the close reads what the application had written as it began:
+// what its calls completed with, or every byte handed to one still pending.
+func TestOnWindowsAConnectionTheProxyClosedNeedsNoCountsAndItsCloseReadsThem(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), settleReads: true}
+	f := &fakeSends{}
+	p.listenerCounter = f
+	app, side := winPair(t)
+	p.paired.add(side, 1, 0)
+	if _, err := app.Write(make([]byte, 18)); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the call at the proxy", func() bool { return readProxySide(side).received == 18 })
+	pcs, err := p.paired.upTo(1)
+	if err != nil || len(pcs) != 1 {
+		t.Fatalf("paired: %d, %v", len(pcs), err)
+	}
+	pc := pcs[0]
+	for _, c := range []struct {
+		s    appSends
+		want uint64
+	}{{appSends{done: 18, started: 40}, 18}, {appSends{done: 18, started: 40, pending: 1}, 40}} {
+		pc.wroteAtClose.Store(nil)
+		f.set(c.s, nil)
+		p.noteWroteAtClose(pc)
+		if w := pc.wroteAtClose.Load(); w == nil || w.want != c.want {
+			t.Fatalf("the close read %+v from %+v; want %d", w, c.s, c.want)
+		}
+	}
+	ps := readProxySide(side)
+	pc.atClose.Store(&ps)
+	p.paired.remove(side)
+	f.set(appSends{}, errors.New("the process exited"))
+	asked := f.timesAsked()
+	if tg, err := pairTargetOf(f, pc); tg != nil || err != nil {
+		t.Fatalf("closed: target %v, %v; want none", tg, err)
+	}
+	if n := f.timesAsked() - asked; n != 0 {
+		t.Fatalf("the counts were asked %d times for a connection the proxy closed; want none", n)
 	}
 }
 
