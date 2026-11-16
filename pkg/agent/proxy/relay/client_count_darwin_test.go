@@ -311,3 +311,63 @@ func TestXNUCountsWhatIsCertainAcrossWritesThatRun(t *testing.T) {
 		})
 	}
 }
+
+// The proxy counts what is written to an accepted client's socket from its
+// accept (CountClientWrites): the relay counts from there, under a TLS layer
+// and a wrapper over it too, puts no count of its own over the conn, and the
+// socket is found under the count (AcceptedConn). Writes through the count
+// reach the socket and are counted, and it half-closes the socket. A socket
+// that cannot answer as it is accepted, and a conn that is not the accepted
+// socket, are not counted.
+func TestTheCountFromTheAcceptIsTheRelaysUnderTLSToo(t *testing.T) {
+	t.Parallel()
+	app, proxyClient := loopbackPair(t)
+	a, ok := CountClientWrites(proxyClient).(*countedClient)
+	if !ok || a.tcp != proxyClient || AcceptedConn(a) != proxyClient || AcceptedConn(proxyClient) != proxyClient {
+		t.Fatal("an accepted socket is not counted, or not found under its count")
+	}
+	tlsLayer := tls.Server(a, &tls.Config{MinVersion: tls.VersionTLS12})
+	for _, src := range []net.Conn{a, tlsLayer, &seenWrites{Conn: tlsLayer}} {
+		s, _ := clientSocketOf(src, zap.NewNop()).(*tcpClientSocket)
+		if s == nil {
+			t.Fatalf("the socket under %T is not asked", src)
+		}
+		if c := countWrites(src, s); c != src || s.writes != a.count || s.unsent0 != uint64(a.begin.sbbytes) || !s.seen {
+			t.Errorf("countWrites(%T) gave %T, counting from the accept: %v", src, c, s.writes == a.count)
+		}
+	}
+	if _, err := a.Write([]byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	if w := a.count.now(); w.said != 10 || w.maybe != 0 {
+		t.Fatalf("the count after a write of 10 bytes: %+v", w)
+	}
+	var c net.Conn = a
+	if !halfCloseWrite(&c) {
+		t.Fatal("the count did not half-close the socket")
+	}
+	_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if got, err := io.ReadAll(app); err != nil || string(got) != "0123456789" {
+		t.Fatalf("the client read %q, %v: want the bytes written, then the FIN", got, err)
+	}
+	if rc, err := a.SyscallConn(); err != nil || rc == nil {
+		t.Fatalf("the count does not give the socket's own SyscallConn: %v", err)
+	}
+	_, gone := loopbackPair(t)
+	_ = gone.Close()
+	if CountClientWrites(gone) != gone {
+		t.Error("a socket that cannot answer as it is accepted is counted")
+	}
+	if over := (&seenWrites{Conn: proxyClient}); CountClientWrites(over) != net.Conn(over) {
+		t.Error("a conn that is not the accepted socket is counted")
+	}
+	if none := (*net.TCPConn)(nil); CountClientWrites(none) != net.Conn(none) {
+		t.Error("a nil socket is counted")
+	}
+	// What the send buffer held as the count began is the count's start.
+	held := &countedClient{tcp: proxyClient.(*net.TCPConn), count: &writeCount{}, begin: darwinTCPInfo{sbbytes: 7}}
+	held.Conn = held.tcp
+	if s, _ := clientSocketOf(held, zap.NewNop()).(*tcpClientSocket); s == nil || countWrites(held, s) != net.Conn(held) || s.unsent0 != 7 {
+		t.Error("the count does not start from what the send buffer held as it began")
+	}
+}

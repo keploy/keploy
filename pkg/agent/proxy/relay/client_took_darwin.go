@@ -76,10 +76,14 @@ import (
 // acknowledged, at any instant, whatever snd_nxt does: a closed receive
 // window's probes and the pull-backs of snd_nxt after them, a resend, a reset.
 // xnu counts the bytes appended (so_tc_stats, uipc_socket2.c:839-853), but no
-// getsockopt answers that count, so the relay keeps its own: every byte it
-// writes to the client goes through a conn that counts it (writeCountingConn), from
-// what the send buffer held as the count began (in New, before the relay
-// writes). That count is exact while no Write is running and none failed. A
+// getsockopt answers that count, so keploy keeps its own: the proxy counts
+// every byte written to the client's socket from its accept (CountClientWrites),
+// under its tracking and any TLS, so whatever layer writes (a TLS handshake or
+// record, a parser, the relay) its bytes are counted as they are appended. A
+// client conn with no count from its accept has the relay count its own writes
+// (writeCountingConn), from what the send buffer held as that count began (in
+// New, before the relay writes). Either count is exact while no Write is
+// running and none failed. A
 // Write running as the socket answers may have appended any part of its
 // bytes; a Write that failed may have appended bytes it did not say it wrote:
 // sosend (bsd/kern/uipc_socket.c) appends in pieces, dropping the socket's
@@ -97,10 +101,10 @@ import (
 // chunk is refused only when the client did not acknowledge it, for certain.
 //
 // The count holds only while every byte appended to the socket went through
-// it. It is not taken when a TLS layer is between the relay and the socket
-// (the bytes the relay writes are not the bytes appended: the count of
-// sequence numbers answers alone there), nor when the socket cannot answer as
-// it begins. A send buffer that holds more than could have been appended
+// it. The relay's own count is not taken when a TLS layer is between the
+// relay and the socket (the bytes the relay writes are not the bytes
+// appended: the count of sequence numbers answers alone there), and neither
+// count is when the socket cannot answer as it begins. A send buffer that holds more than could have been appended
 // through the count says a write went around it: the socket says nothing from
 // then on (clientUnknown), and every chunk is teed as it is written.
 //
@@ -466,17 +470,20 @@ type writeCountingConn struct {
 	count *writeCount
 }
 
-func (c *writeCountingConn) Write(b []byte) (int, error) {
-	c.count.mu.Lock()
-	c.count.running += uint64(len(b))
-	c.count.mu.Unlock()
-	n, err := c.Conn.Write(b)
-	c.count.mu.Lock()
-	defer c.count.mu.Unlock()
+func (c *writeCountingConn) Write(b []byte) (int, error) { return c.count.write(c.Conn, b) }
+
+// write writes b to conn, counting it.
+func (c *writeCount) write(conn net.Conn, b []byte) (int, error) {
+	c.mu.Lock()
+	c.running += uint64(len(b))
+	c.mu.Unlock()
+	n, err := conn.Write(b)
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	// A Write returns no more than it was given (io.Writer).
-	c.count.running -= uint64(len(b))
-	c.count.said += uint64(n)
-	c.count.unsure += uint64(len(b) - n)
+	c.running -= uint64(len(b))
+	c.said += uint64(n)
+	c.unsure += uint64(len(b) - n)
 	return n, err
 }
 
@@ -499,12 +506,123 @@ func (c *writeCountingConn) CloseWrite() error {
 // with no TLS layer between them, and the socket answers as the count begins;
 // src as it is otherwise, and its socket answers by the count of sequence
 // numbers alone.
+//
+// A client conn the proxy counts from its accept (CountClientWrites, under
+// src) is counted from there instead, and src is returned as it is: every
+// layer's writes, the relay's among them, reach the socket through that
+// count.
 func countWrites(src net.Conn, c clientSocket) net.Conn {
 	s, ok := c.(*tcpClientSocket)
-	if !ok || tlsLayerUnder(src) || !s.beginCount() {
+	if !ok {
+		return src
+	}
+	if a := countedClientUnder(src); a != nil {
+		s.beginFrom(a)
+		return src
+	}
+	if tlsLayerUnder(src) || !s.beginCount() {
 		return src
 	}
 	return &writeCountingConn{Conn: src, count: s.writes}
+}
+
+// countedClient is a client's socket as the proxy accepted it (tcp), counting
+// every byte written to it (writeCount) from begin, its TCP_INFO as the count
+// began (CountClientWrites). It promotes only net.Conn's methods, so a
+// ReadFrom of the socket (sendfile) cannot write around the count, and gives
+// the socket to what reads its state (SyscallConn: the proxy's tracking, the
+// walks to the socket) or half-closes it (CloseWrite), and the socket itself
+// (NetConn, AcceptedConn).
+type countedClient struct {
+	net.Conn
+	tcp   *net.TCPConn
+	count *writeCount
+	begin darwinTCPInfo
+}
+
+func (c *countedClient) Write(b []byte) (int, error) { return c.count.write(c.tcp, b) }
+
+// NetConn is the socket under the count.
+func (c *countedClient) NetConn() net.Conn { return c.tcp }
+
+// SyscallConn is the socket's own: what reads the kernel's state of the
+// socket reads it through the count. Nothing writes through it.
+func (c *countedClient) SyscallConn() (syscall.RawConn, error) { return c.tcp.SyscallConn() }
+
+// CloseWrite half-closes the socket.
+func (c *countedClient) CloseWrite() error { return c.tcp.CloseWrite() }
+
+// CountClientWrites is the client connection c, as the proxy accepted it, for
+// every layer above it (the proxy's tracking, TLS, a parser, the relay) to
+// write through: a count of every byte written to its socket, which the
+// relay's look at the client reads what the client acknowledged from
+// (countWrites). c itself when it is not a *net.TCPConn, or its socket
+// cannot answer as the count begins: the relay then counts its own writes
+// where it can. Call it once, as c is accepted, before anything is written
+// to it. What keys or reads the accepted socket itself finds it under the
+// count (AcceptedConn, NetConn).
+func CountClientWrites(c net.Conn) net.Conn {
+	tc, ok := c.(*net.TCPConn)
+	if !ok {
+		return c
+	}
+	rc, err := tc.SyscallConn()
+	if err != nil {
+		return c
+	}
+	a := &countedClient{Conn: tc, tcp: tc, count: &writeCount{}}
+	var buf [tcpInfoBuf]byte
+	answered := false
+	// A failed call answers no byte, which reads as no answer; so does a
+	// socket Control cannot reach (closed), which asks nothing.
+	_ = rc.Control(func(fd uintptr) {
+		n, _ := getTCPInfo(fd, &buf)
+		answered = readTCPInfo(buf[:n], &a.begin)
+	})
+	if !answered {
+		return c
+	}
+	return a
+}
+
+// AcceptedConn is the conn the listener gave, under CountClientWrites' count;
+// c itself when c is not that count.
+func AcceptedConn(c net.Conn) net.Conn {
+	if a, ok := c.(*countedClient); ok {
+		return a.tcp
+	}
+	return c
+}
+
+// countedClientUnder is the count the proxy put on the client's socket at its
+// accept (countedClient) among c and the conns under it (NetConn), within the
+// bound clientSocketOf walks; nil when there is none. The walk stops at the
+// first *net.TCPConn, which has no conn under it, so the count it finds is
+// over the socket clientSocketOf found.
+func countedClientUnder(c net.Conn) *countedClient {
+	for i := 0; c != nil && i < 16; i++ { // bounded: a cycle must not hang
+		if a, ok := c.(*countedClient); ok {
+			return a
+		}
+		u, ok := c.(interface{ NetConn() net.Conn })
+		if !ok {
+			return nil
+		}
+		c = u.NetConn()
+	}
+	return nil
+}
+
+// beginFrom begins the count of writes from a, the count from the socket's
+// accept: what its send buffer held then, and the count of sequence numbers'
+// first look, from a's one answer, so both count from the client's first
+// unacknowledged byte at the accept. Between that answer and the relay's
+// next look the socket sends what the proxy wrote before the relay began (a
+// TLS handshake, a CONNECT's answer): far less than the 2^31 bytes a move of
+// snd_nxt between looks is counted within. Run in New, before any look.
+func (s *tcpClientSocket) beginFrom(a *countedClient) {
+	s.counted(&a.begin)
+	s.unsent0, s.writes = uint64(a.begin.sbbytes), a.count
 }
 
 // tlsLayerUnder reports whether a *tls.Conn is among c and the conns under it
