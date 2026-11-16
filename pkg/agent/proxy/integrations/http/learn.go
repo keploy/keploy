@@ -1015,9 +1015,11 @@ func (h *HTTP) learnRules(mockDb integrations.MockMemDb, tracker *learn.Tracker)
 	r.owner, _ = mockDb.(integrations.TestOwnership)
 	if integrations.ExactServing(mockDb) {
 		// Under exact serving the store alone says what the open test owns:
-		// what its per-test tier shows, as on the bare manager. A worker's
-		// view made before exact serving began passes straight through, and
-		// its allowlist is the scope it was made for, not the open test's.
+		// what its per-test tier shows, as on the bare manager, but for
+		// the background it shows there (scopeReads.inBackground). A
+		// worker's view made before exact serving began passes straight
+		// through, and its allowlist is the scope it was made for, not the
+		// open test's.
 		r.owner = nil
 	}
 	r.windows, _ = mockDb.(integrations.TestWindows)
@@ -1150,11 +1152,14 @@ func (r scopeReads) scope(live httpParts, liveShape learn.Shape, n learnNoise, p
 		}
 	}
 	// An own mock that answered and that the store let go since (a per-test
-	// mock is deleted when consumed) is still spent, and still competes.
+	// mock is deleted when consumed) is still spent, and still competes. A
+	// recording the view holds as the background's is no test's own
+	// (candidateOf): one the background answered is not spent as the
+	// test's.
 	if open {
 		var gone []*models.Mock
 		for _, m := range r.answeredMocks() {
-			if !inScope[m.Name] && m.Spec.HTTPReq != nil {
+			if !inScope[m.Name] && m.Spec.HTTPReq != nil && !r.inBackground(m.Name) {
 				gone = append(gone, m)
 			}
 		}
@@ -1180,15 +1185,27 @@ func (r scopeReads) scope(live httpParts, liveShape learn.Shape, n learnNoise, p
 	return sc
 }
 
+// inBackground reports whether the view holds the recording name as the
+// background's (integrations.BackgroundMember): the worker scope's or the
+// background pool's, and no test's own.
+func (r scopeReads) inBackground(name string) bool {
+	return r.background != nil && r.background(name)
+}
+
 // candidateOf is m's candidate in r's scope, its parts rp, its destination d
 // and its path masked as the learn step reads them, and whether it is the
 // open test's own; perTestTier says the per-test read holds it.
 func (r scopeReads) candidateOf(m *models.Mock, perTestTier bool, rp httpParts, d, masked string, n learnNoise, pool bool) (learn.Candidate, bool) {
 	own, poolsOwn := ownership(m, perTestTier, r.owner, r.windows, r.inFlight, r.pools)
+	bg := r.inBackground(m.Name)
 	// A protocol-phase mock (a handshake, a token fetch) is never a
 	// test's own: the pool's, answering any number of the test's
-	// requests (design §5.2), and never paired.
-	own = own && r.open && !m.IsProtocolPhase()
+	// requests (design §5.2), and never paired. Nor is a recording the
+	// view holds as the background's (r.inBackground), whatever tier shows
+	// it or window recorded it: the store serves it in any window and
+	// spends it as no test's, so it is never spent as one of the test's
+	// own (a declared series answers on its last again).
+	own = own && r.open && !m.IsProtocolPhase() && !bg
 	spent := own && r.answered(m.Name)
 	c := learn.Candidate{
 		Known:    n.known(m),
@@ -1196,7 +1213,7 @@ func (r scopeReads) candidateOf(m *models.Mock, perTestTier bool, rp httpParts, 
 		// The background's data-plane recordings (integrations.InBackground)
 		// never answer a call one more than the open test recorded
 		// (learn.Candidate.Background).
-		Background: !own && r.open && !m.IsProtocolPhase() && r.background != nil && r.background(m.Name),
+		Background: !own && r.open && !m.IsProtocolPhase() && bg,
 	}
 	if r.sieve.shapes(m, masked, spent) {
 		c.Shape = n.shape(rp, d)
