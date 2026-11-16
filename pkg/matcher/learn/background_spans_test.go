@@ -196,3 +196,55 @@ func TestABackgroundPollReadBetweenTwoMovesHoldsOnTheClockBetweenThem(t *testing
 		t.Fatalf("%s, the clock before the moves at an instant it had moved from, holds in %+v", v, spans)
 	}
 }
+
+// Every span of a background call is in the app's zone where the tracker
+// was told it (SetAppZone), and stays there where the agent read no zone
+// of the call's own process (a ProcZone with no Loc). A nil tracker tells
+// none and takes a shown clock without a panic.
+func TestBackgroundSpansKeepTheAppsZoneAndANilTrackerTellsNone(t *testing.T) {
+	base := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	move := runWrite{from: base.Add(2 * time.Second), to: base.Add(2*time.Second + 5*time.Millisecond), offset: 3 * time.Second}
+	clock := &runClock{writes: []runWrite{move}}
+	arrival := move.to.Add(15 * time.Millisecond)
+	ist := time.FixedZone("IST", 5*3600+1800)
+	tr := NewTracker()
+	tr.SetAppZone(ist)
+	tr.SetAppClock(clock.at)
+	tr.SetAppClockRun(clock.began)
+	tr.SetAppClockShown(clock.shown)
+	tr.ServedMockAt(&models.Mock{Name: "poll-1", Kind: models.Mongo}, base.Add(time.Second))
+	ctx := WithTracker(context.Background(), tr)
+	for name, c := range map[string]context.Context{"no process zone": ctx, "a process zone with no Loc": WithProcZone(ctx, ProcZone{Name: "unread"})} {
+		spans, ok := CallSpansOf(c, arrival)
+		if !ok || len(spans) != 3 {
+			t.Fatalf("%s: spans = %+v,%v; want three", name, spans, ok)
+		}
+		for _, s := range spans {
+			if s.Zone != ist || s.Own {
+				t.Fatalf("%s: span %+v is not in the app's zone", name, s)
+			}
+		}
+	}
+
+	var nilTracker *Tracker
+	noPanic := func(what string, f func()) {
+		t.Helper()
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("%s panicked: %v", what, r)
+			}
+		}()
+		f()
+	}
+	noPanic("SetAppClockShown", func() { nilTracker.SetAppClockShown(clock.shown) })
+	noPanic("BackgroundSpans", func() {
+		if spans, ok := nilTracker.BackgroundSpans(arrival); ok || spans != nil {
+			t.Fatalf("spans = %+v,%v of a nil tracker; want none", spans, ok)
+		}
+	})
+	noPanic("CallSpansOf", func() {
+		if spans, ok := CallSpansOf(context.Background(), arrival); ok || spans != nil {
+			t.Fatalf("spans = %+v,%v of a ctx with no tracker; want none", spans, ok)
+		}
+	})
+}

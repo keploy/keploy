@@ -2947,6 +2947,14 @@ func (h *shownClockHook) AppClockShown(from, to time.Time) ([]learn.Span, bool) 
 	return []learn.Span{{From: from.Add(h.offset), To: to.Add(h.offset)}}, true
 }
 
+// shownOnlyHooks tell what the app's clock showed but report no app clock
+// (no AppClockReader).
+type shownOnlyHooks struct{ otherHooks }
+
+func (h *shownOnlyHooks) AppClockShown(from, to time.Time) ([]learn.Span, bool) {
+	return []learn.Span{{From: from, To: to}}, true
+}
+
 // shownProxy is a wireProxy that takes what the app's clock showed
 // (coreAgent.AppClockShownSetter).
 type shownProxy struct {
@@ -2988,6 +2996,11 @@ func TestStoredMocksHandTheProxyWhatTheAppsClockShowed(t *testing.T) {
 	ActiveHooks = &otherHooks{}
 	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
 	require.Nil(t, p.shown, "hooks that report no app clock: none")
+
+	p.shown = (&shownClockHook{}).AppClockShown
+	ActiveHooks = &shownOnlyHooks{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.shown, "hooks that tell what the clock showed but report no app clock: none")
 
 	p.shown = (&shownClockHook{}).AppClockShown
 	ActiveHooks = &AgentHook{}
