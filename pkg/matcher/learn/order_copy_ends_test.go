@@ -95,3 +95,55 @@ func TestOutcomeAnUntoldOrderCountsOnlyWithBothEndsOfACopy(t *testing.T) {
 		}
 	}
 }
+
+// No candidate held the recorded word before the call: the recorded word
+// flowed from none of them, so no copy by position has a recorded end, and
+// the serve order is not asked. This is the no-pair case of the pairwise
+// rule. The word is judged by what each place shows alone (here an answer
+// that changed and holds round F's word in round F), whether one answer or
+// two given at one instant hold round F's word. One more start-up given at
+// that instant that held the recorded word is the recorded end: the untold
+// order is asked, and it refuses the word. keploy test and keploy mock
+// alike.
+func TestOutcomeNoCandidateHeldTheRecordedWordAsksNoOrder(t *testing.T) {
+	const path = "body.eventDetails.duration_ms"
+	// fOnly held r in the recording and round F's f in round F.
+	fOnly := func(name, r, f string, n int) Raw {
+		return oAnswer(name, 200*time.Millisecond, r).ServedAs(n).ServedLive(oAnswer(name, 200*time.Millisecond, f))
+	}
+	one := []Raw{fOnly("mock-72", "7", "51", 1)}
+	two := []Raw{fOnly("mock-72", "7", "51", 1), fOnly("mock-73", "8", "51", 2)}
+	recEnd := oAnswer("mock-29", 200*time.Millisecond, "4").ServedAs(3).ServedAsRecorded()
+	rows := []struct {
+		what   string
+		raw    []Raw
+		says   string
+		lacks  string
+		passes int64
+	}{
+		{"one answer holds round F's word, none held the recorded one", one, "keploy cannot tell what round F gave at mock-72 before this call", "at one instant", 1},
+		{"two given at one instant hold round F's word, none held the recorded one", two, "keploy cannot tell what round F gave at mock-72 before this call", "at one instant", 1},
+		{"control: one more start-up at that instant held the recorded word", append(two[:2:2], recEnd), "at one instant", "", 2},
+	}
+	for _, mode := range []struct {
+		what   string
+		drifts func() *DriftCache
+	}{{"keploy test", oDrifts}, {"keploy mock", oClientDrifts}} {
+		for _, r := range rows {
+			in := oInput(path, "4", "51", nil, r.raw)
+			in.Drifts = mode.drifts()
+			before := wordPasses.Load()
+			ds := Decide(in)
+			passes := wordPasses.Load() - before
+			d := oWord(t, ds, "4", "51")
+			what := mode.what + ", " + r.what
+			oRefused(t, what, d, RefusalUnknown, r.says)
+			if r.lacks != "" && d.Refusal != nil && strings.Contains(d.Refusal.Why, r.lacks) {
+				t.Errorf("%s: refused %q; want no %q (the order not asked)", what, d.Refusal.Why, r.lacks)
+			}
+			if passes != r.passes*int64(len(ds)) {
+				t.Errorf("%s: %d decisions of %d words; want %d each", what, passes, len(ds), r.passes)
+			}
+		}
+	}
+}
