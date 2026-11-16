@@ -672,8 +672,13 @@ func untimedAnswer(req, answered time.Time) bool {
 // asked only where a candidate held R's word in R and one may hold F's in
 // F (wordBy's copyR, copyF): a copy by position needs both. A given place,
 // first in both orders, is neither where every other candidate was given
-// before the call in both runs (wordBy's givenR, givenF). It reports
-// whether it marked a place.
+// before the call in both runs (wordBy's givenR, givenF). One candidate F
+// served more than once has no order to ask either where every serve of
+// it gave the application one view (servedAgain, Raw.oneView): whichever
+// serve an application copying by position took, it read the same text
+// there, so the word is decided by its places as for one serve (a word
+// that moved between two leaves of that view is refused as moved). It
+// reports whether it marked a place.
 func orderUnknown(in Input, ps *wordPlaces, cand map[string]bool) (marked bool) {
 	if len(cand) == 0 || len(cand) == 1 && !servedAgain(in, cand) {
 		return false
@@ -701,11 +706,23 @@ func orderUnknown(in Input, ps *wordPlaces, cand map[string]bool) (marked bool) 
 }
 
 // servedAgain reports whether round F served a candidate of cand at two
-// numbered serves (servedOrder's span).
+// numbered serves (servedOrder's span) that may have given the application
+// two views: an earlier exchange of the test, whose serves keep no view,
+// or a recording whose serves gave one view (oneView) not.
 func servedAgain(in Input, cand map[string]bool) bool {
 	return slices.ContainsFunc(in.Earlier, func(e Earlier) bool {
 		return cand[e.Mock] && (e.Payload.Read() || e.Payload.ordered) && e.Payload.last != e.Payload.first
-	}) || slices.ContainsFunc(in.Raw, func(x Raw) bool { return cand[x.mock] && x.served && x.last != x.first })
+	}) || slices.ContainsFunc(in.Raw, func(x Raw) bool { return cand[x.mock] && x.served && x.last != x.first && !x.oneView(in.Caps) })
+}
+
+// oneView reports whether every serve round F made of r gave the
+// application one view, which its adapter stated (Caps.FViewStated): F
+// served r either as recorded every time (ServedAsRecorded) or with the
+// one view its serves gave (ServedLive), never both, never views that
+// differ or one keploy could not read (ServedChanged), and never stated of
+// none of its serves (viewUnstated). A Raw F did not serve holds neither.
+func (r Raw) oneView(c Caps) bool {
+	return c.FViewStated && !r.unseen && r.asRecorded != (r.live != nil)
 }
 
 // Why a place's state in round F is unknown, as a refusal's line says it
