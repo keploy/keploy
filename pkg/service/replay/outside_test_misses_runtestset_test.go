@@ -462,6 +462,8 @@ type stopsAfterPost struct {
 	post     string
 	postRan  atomic.Bool
 	stoppedN atomic.Int32
+	// exited: the application has exited, a moment after its stop began.
+	exited atomic.Bool
 }
 
 func (f *stopsAfterPost) Run(ctx context.Context, opts models.RunOptions) models.AppError {
@@ -470,6 +472,10 @@ func (f *stopsAfterPost) Run(ctx context.Context, opts models.RunOptions) models
 		_, statErr := os.Stat(f.post)
 		f.postRan.Store(statErr == nil)
 		f.stoppedN.Add(1)
+		// Its shutdown takes a moment: a read that does not wait for its
+		// exit is made before it.
+		time.Sleep(100 * time.Millisecond)
+		f.exited.Store(true)
 	}
 	return err
 }
@@ -487,19 +493,16 @@ func TestRunTestSet_ACallTheAppMakesAsItStopsIsNamedWithTheSwitchOff(t *testing.
 	provenOn(t, false)
 	h := newPartialRunHarness(t, 2, 0)
 	withSetDir(t, h)
-	h.instr.stopped = make(chan struct{})
 	agent := readAsAnAgentIs(h)
 	app := &stopsAfterPost{readsAsAnAgentDoes: agent, post: filepath.Join(t.TempDir(), "post-ran")}
 	h.replayer.instrumentation = app
 	h.replayer.testSetConf = postScriptTouches{path: app.post}
 	agent.atEnd = func() ([]models.UnmatchedCall, error) {
-		select {
-		case <-h.instr.stopped:
-			return []models.UnmatchedCall{stopLookup}, nil
-		default:
-			// Still running: it makes its stop's lookup only as it stops.
+		if !app.exited.Load() {
+			// Still running: its stop's lookup is made only as it stops.
 			return nil, nil
 		}
+		return []models.UnmatchedCall{stopLookup}, nil
 	}
 
 	if status := h.run(t); status != models.TestSetStatusPassed {
@@ -524,17 +527,21 @@ func TestRunTestSet_ACallTheAppMakesAsItStopsIsNamedWithTheSwitchOff(t *testing.
 
 // With the switch off the application --keep-app-alive keeps across the sets
 // is stopped before a set's end read only on the run's last set, on an
-// attempt no other follows: that read then takes the calls it made as it
-// stopped. On any other set it is read running, and not stopped.
+// attempt no other follows: that read, after the set's post-script, then
+// takes the calls it made as it stopped. On any other set it is read
+// running, before the set's post-script, as before, and not stopped; so is
+// an application keploy does not stop at all (a docker compose stack's).
 func TestRunTestSet_TheKeptAppIsStoppedBeforeTheReadOnlyAtTheRunsEnd(t *testing.T) {
 	for _, c := range []struct {
 		name        string
 		last, final bool
+		noStop      bool
 		wantStop    bool
 	}{
-		{"the run's last set, final attempt", true, true, true},
-		{"an earlier set", false, true, false},
-		{"the last set, an attempt that others follow", true, false, false},
+		{"the run's last set, final attempt", true, true, false, true},
+		{"an earlier set", false, true, false, false},
+		{"the last set, an attempt that others follow", true, false, false, false},
+		{"the last set, final attempt, an app keploy does not stop", true, true, true, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			provenOn(t, false)
@@ -542,9 +549,16 @@ func TestRunTestSet_TheKeptAppIsStoppedBeforeTheReadOnlyAtTheRunsEnd(t *testing.
 			withSetDir(t, h)
 			agent := readAsAnAgentIs(h)
 			var stops atomic.Int32
-			h.replayer.keepAliveStop = func() string { stops.Add(1); return "" }
+			if !c.noStop {
+				h.replayer.keepAliveStop = func() string { stops.Add(1); return "" }
+			}
 			h.replayer.isLastTestSet, h.replayer.finalAttempt = c.last, c.final
+			post := filepath.Join(t.TempDir(), "post-ran")
+			h.replayer.testSetConf = postScriptTouches{path: post}
+			var postAtRead atomic.Bool
 			agent.atEnd = func() ([]models.UnmatchedCall, error) {
+				_, err := os.Stat(post)
+				postAtRead.Store(err == nil)
 				if stops.Load() == 0 {
 					return nil, nil
 				}
@@ -563,6 +577,12 @@ func TestRunTestSet_TheKeptAppIsStoppedBeforeTheReadOnlyAtTheRunsEnd(t *testing.
 			}
 			if ends := agent.ends.Load(); ends != 1 {
 				t.Fatalf("%d set-end reads, want one", ends)
+			}
+			if postAtRead.Load() != c.wantStop {
+				t.Fatalf("the set-end read came after the post-script: %v, want %v (after it only when the read waits for the application's stop)", postAtRead.Load(), c.wantStop)
+			}
+			if _, err := os.Stat(post); err != nil {
+				t.Fatalf("the set's post-script did not run: %v", err)
 			}
 			if got := calledShaped(h.report.report.OutsideTestMisses); got != wantShaped {
 				t.Fatalf("the report names %q outside every test, want %q", got, wantShaped)

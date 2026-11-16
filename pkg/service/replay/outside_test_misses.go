@@ -66,16 +66,15 @@ func (r *Replayer) readAfterLastTest(ctx context.Context, testSetID string) {
 // the application keploy started for the set (stopAppBeforeReport, which
 // stops it as the set's teardown does), or, on the run's last set, on an
 // attempt no other follows, the stop of the one --keep-app-alive kept across
-// the sets (keepAliveStop). nil under the switch, whose set's end stops the
-// application before it judges the set (stopAppBeforeSetEnd), and when
-// keploy stops the application only later: one kept alive for a later set
-// or attempt, one it did not start, one in a docker compose stack, whose
-// exit stops the stack, keploy's agent with it. keepAliveStop is set only
-// for a run whose sets are each served by the application kept alive.
+// the sets (keepAliveStop). nil when keploy stops the application only
+// later: one kept alive for a later set or attempt, one it did not start, one
+// in a docker compose stack, whose exit stops the stack, keploy's agent with
+// it; the read is then made before the set's post-script, with it running.
+// keepAliveStop is set only for a run whose sets are each served by the
+// application kept alive. Read only with the switch off, whose set's end
+// stops the application before it judges the set (stopAppBeforeSetEnd).
 func (r *Replayer) stopForSetEndRead(stopAppBeforeReport func()) func() {
 	switch {
-	case provenswitch.On():
-		return nil
 	case stopAppBeforeReport != nil:
 		return stopAppBeforeReport
 	case r.isLastTestSet && r.finalAttempt && r.keepAliveStop != nil:
