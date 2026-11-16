@@ -109,7 +109,7 @@ func resolveFrom(base, p string) string {
 // readGitPointer reads the one-line file git keeps a path in (.git's
 // "gitdir: <path>", or commondir's bare path), after prefix.
 func readGitPointer(path, prefix string) (string, bool) {
-	b, _ := readRegularFile(path, 4096)
+	b := readRegularFile(path, 4096)
 	line := strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
 	if !strings.HasPrefix(line, prefix) {
 		return "", false
@@ -119,19 +119,20 @@ func readGitPointer(path, prefix string) (string, bool) {
 }
 
 // readRegularFile reads at most limit bytes of path, and only of a regular
-// file: a FIFO named config would block the open for good.
-func readRegularFile(path string, limit int64) ([]byte, bool) {
+// file: a FIFO named config would block the open for good. It is nil for a
+// path that is not a regular file it can open.
+func readRegularFile(path string, limit int64) []byte {
 	fi, err := os.Stat(path)
 	if err != nil || !fi.Mode().IsRegular() {
-		return nil, false
+		return nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, false
+		return nil
 	}
 	defer func() { _ = f.Close() }()
-	b, err := io.ReadAll(io.LimitReader(f, limit))
-	return b, err == nil
+	b, _ := io.ReadAll(io.LimitReader(f, limit))
+	return b
 }
 
 // repoNameFromURL is the repository's name in a remote URL: its last path
@@ -150,7 +151,7 @@ func repoNameFromURL(u string) string {
 // one when it has several, as `git remote get-url origin` prints; "" when
 // there is none.
 func originURL(path string) string {
-	b, _ := readRegularFile(path, gitFileLimit)
+	b := readRegularFile(path, gitFileLimit)
 	inOrigin := false
 	sc := bufio.NewScanner(strings.NewReader(string(b)))
 	sc.Buffer(make([]byte, 0, 64*1024), gitFileLimit)
@@ -170,14 +171,16 @@ func originURL(path string) string {
 			inOrigin = isOriginSection(line[1:end])
 			line = strings.TrimSpace(line[end+1:])
 		}
-		// A value continues on the next line after a trailing backslash.
-		if strings.HasSuffix(line, `\`) && !strings.HasSuffix(line, `\\`) {
+		// A value continues on the next line after a backslash that ends the
+		// line unescaped: an odd number of them, as \\ is one backslash.
+		if trailingBackslashes(line)%2 == 1 {
 			pending = strings.TrimSuffix(line, `\`)
 			continue
 		}
-		if !inOrigin || line == "" {
+		if !inOrigin {
 			continue
 		}
+		// A line with no "=" (a blank one among them) sets no url.
 		key, value, hasValue := strings.Cut(line, "=")
 		if !hasValue || !strings.EqualFold(strings.TrimSpace(key), "url") {
 			continue
@@ -196,8 +199,14 @@ func isOriginSection(h string) bool {
 		sub, closed := strings.CutSuffix(sub, `"`)
 		return opened && closed && strings.EqualFold(h[:i], "remote") && sub == "origin"
 	}
-	name, sub, ok := strings.Cut(h, ".")
-	return ok && strings.EqualFold(name, "remote") && strings.EqualFold(sub, "origin")
+	// With no ".", sub is "" and names no remote.
+	name, sub, _ := strings.Cut(h, ".")
+	return strings.EqualFold(name, "remote") && strings.EqualFold(sub, "origin")
+}
+
+// trailingBackslashes counts the backslashes s ends with.
+func trailingBackslashes(s string) int {
+	return len(s) - len(strings.TrimRight(s, `\`))
 }
 
 // gitConfigValue is a config value as git reads it: quotes removed, a
@@ -205,13 +214,15 @@ func isOriginSection(h string) bool {
 // quotes starting a comment.
 func gitConfigValue(v string) string {
 	var b strings.Builder
-	quoted := false
+	quoted, escaped := false, false
 	for i := 0; i < len(v); i++ {
 		c := v[i]
 		switch {
-		case c == '\\' && i+1 < len(v):
-			i++
-			b.WriteByte(v[i])
+		case escaped:
+			b.WriteByte(c)
+			escaped = false
+		case c == '\\':
+			escaped = true
 		case c == '"':
 			quoted = !quoted
 		case !quoted && (c == '#' || c == ';'):
