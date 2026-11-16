@@ -58,7 +58,7 @@ func TestReplayAndLearnShareOneWordRule(t *testing.T) {
 // Clock, a Value or a fresh word.
 func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 	was := decideBy
-	decideBy = refuseAll
+	decideBy = guarded(refuseAll)
 	t.Cleanup(func() { decideBy = was })
 	leaves := func(kv ...string) map[string]Leaf {
 		m := map[string]Leaf{}
@@ -201,7 +201,7 @@ func TestInputNamesEachMocksScopeAndWhereTheCallLanded(t *testing.T) {
 // leaf as JSON only where the request's body is, and an answer leaf as JSON.
 func TestABodylessShapeNamesItsPlacesByTheAdapter(t *testing.T) {
 	was := decideBy
-	decideBy = refuseAll
+	decideBy = guarded(refuseAll)
 	t.Cleanup(func() { decideBy = was })
 	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	type got struct {

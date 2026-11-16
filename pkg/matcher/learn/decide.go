@@ -328,15 +328,11 @@ type Decision struct {
 	EitherOrder bool
 }
 
-// Decide is every changed word of in, decided (see above). Each word it
-// refuses is noted to the refusal sink, if one is set (SetRefusalSink),
-// once, as it returns: a refusal a later step of the decision settles is
-// never noted.
-func Decide(in Input) []Decision {
-	ds := decideBy(in)
-	noteRefused(in, ds)
-	return ds
-}
+// Decide is every changed word of in, decided (see above). It notes
+// nothing to the refusal sink: an adapter may decide one call more than
+// once and keep one outcome (tied candidates tried in turn), so it notes
+// the decision it keeps, once, with NoteDecided.
+func Decide(in Input) []Decision { return decideBy(in) }
 
 // The seams other parts of learning set from their own files: decideBy is
 // the order a changed word is decided in; clockInWindow is a Clock the

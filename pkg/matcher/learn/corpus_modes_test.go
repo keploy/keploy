@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 		}
 	}
 	everyCacheSet = os.Getenv("KEPLOY_LEARN_SET_EVERY_CACHE") == "1"
-	SetRefusalSink(&checkGuard)
+	decideBy = guarded(decideBy)
 	code := m.Run()
 	if checkGuard.failed() && code == 0 {
 		code = 1

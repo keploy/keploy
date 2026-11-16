@@ -12,10 +12,12 @@ import (
 	"unicode"
 )
 
-// RefusalSink takes a note of each word Decide refuses (SetRefusalSink).
-// Refused is called once per refused word, as Decide returns, on the
-// goroutine that called Decide; it must not block, and it may be called
-// from several goroutines at once.
+// RefusalSink takes a note of each refused word an adapter keeps
+// (SetRefusalSink): each word Decide refused in the decision the adapter
+// keeps (NoteDecided), and each word the adapter refuses on its own side
+// (NoteRefusal). Refused is called once per such word, on the goroutine
+// that noted it; it must not block, and it may be called from several
+// goroutines at once.
 type RefusalSink interface {
 	Refused(RefusalNote)
 }
@@ -60,8 +62,8 @@ type sinkBox struct{ s RefusalSink }
 
 var refusalSink atomic.Pointer[sinkBox]
 
-// SetRefusalSink makes s the sink Decide notes each refused word to; nil
-// sets none, as at start.
+// SetRefusalSink makes s the sink NoteDecided and NoteRefusal note each
+// refused word to; nil sets none, as at start.
 func SetRefusalSink(s RefusalSink) {
 	if s == nil {
 		refusalSink.Store(nil)
@@ -78,10 +80,16 @@ var refusalKey = sync.OnceValue(func() []byte {
 	return k
 })
 
-// noteRefused notes each word of ds Decide refused to the sink, if one is
-// set. A decision's Recorded and Full are the values themselves (only its
-// Refusal hides a secret's), so each hash is of the value as the run held it.
-func noteRefused(in Input, ds []Decision) {
+// NoteDecided notes to the refusal sink, if one is set, each word of ds
+// that Decide refused (ds is what Decide returned for an Input whose Rec
+// is rec). An adapter calls it once per call, for the decision whose
+// outcome it keeps, where that outcome is final: one that decides a call
+// more than once and keeps one outcome (tied candidates tried in turn)
+// notes only the one it keeps, so the sink counts refusals that stood and
+// none a try set aside. A decision's Recorded and Full are the values
+// themselves (only its Refusal hides a secret's), so each hash is of the
+// value as the run held it.
+func NoteDecided(rec Shape, ds []Decision) {
 	b := refusalSink.Load()
 	if b == nil {
 		return
@@ -90,21 +98,21 @@ func noteRefused(in Input, ds []Decision) {
 		// A decision carries a Refusal exactly where its word is refused:
 		// dc.learned, which makes every other outcome, sets none.
 		if d.Refusal != nil {
-			b.s.Refused(refusalNote(in.Rec, d, d.Refusal))
+			b.s.Refused(refusalNote(rec, d, d.Refusal))
 		}
 	}
 }
 
-// NoteRefusal notes rf to the refusal sink, if one is set, as Decide notes
-// each word it refuses itself: for an adapter that refuses on its own side
-// a word d that Decide decided otherwise (a word it cannot hold as Decide
-// read it), where Decide noted nothing. rec is the recorded shape the
-// adapter gave Decide (Input.Rec), whose leaf at rf.Field types the word.
-// The hashes are of d's Recorded and Full, the values as the run held them,
-// never of rf's, which may hide a secret's as "***". rf.Check names the
-// adapter's branch that refused the word, by a name that keeps across
-// releases. An adapter notes each word it refuses once, and only the
-// refusal it keeps.
+// NoteRefusal notes rf to the refusal sink, if one is set, as NoteDecided
+// notes each word Decide refused: for an adapter that refuses on its own
+// side a word d that Decide decided otherwise (a word it cannot hold as
+// Decide read it), where NoteDecided notes nothing. rec is the recorded
+// shape the adapter gave Decide (Input.Rec), whose leaf at rf.Field types
+// the word. The hashes are of d's Recorded and Full, the values as the run
+// held them, never of rf's, which may hide a secret's as "***". rf.Check
+// names the adapter's branch that refused the word, by a name that keeps
+// across releases. An adapter notes each word it refuses once, and only
+// the refusal it keeps.
 func NoteRefusal(rec Shape, d Decision, rf Refusal) {
 	b := refusalSink.Load()
 	if b == nil {
