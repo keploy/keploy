@@ -320,8 +320,12 @@ func TestAClientThatResetsWithNoFINIsReadAsAResetWhenReadLate(t *testing.T) {
 	awaitUnread(t, app)
 	_ = app.Close()
 	awaitTCPState(t, proxyClient, stateClosed, "the client closed with the answer unread")
+	// The destination stays open until the relay has ended: the client's
+	// reset, once read, ends it. A FIN from the destination now would race
+	// the late read, and a forwarder that finds the relay torn down by the
+	// other one's end returns without reading its own peer's (an end the
+	// relay makes is not told: Config.PeerEnded).
 	close(release)
-	_ = server.Close()
 	select {
 	case <-run.done:
 	case <-time.After(15 * time.Second):
