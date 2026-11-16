@@ -26,6 +26,19 @@ func awaitState(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// waitClockPast returns once the clock reads later than at, in its wall and
+// its monotonic reading both: what the ingress does (waitPastYield) before
+// anything that follows a window's end can happen. Linux's clock has passed it
+// already; Windows' moves on only at the system timer's tick (0.5 to 15.6 ms),
+// and a stamp read within that tick reads at itself.
+func waitClockPast(t *testing.T, at time.Time) {
+	t.Helper()
+	awaitState(t, "the clock to pass "+at.String(), func() bool {
+		n := time.Now()
+		return n.After(at) && n.UnixNano() > at.UnixNano()
+	})
+}
+
 // readChunk reads one chunk off a parser-facing stream, as a parser would.
 func readChunk(t *testing.T, fc *fakeconn.FakeConn) fakeconn.Chunk {
 	t.Helper()
