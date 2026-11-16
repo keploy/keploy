@@ -10,10 +10,11 @@ import (
 // HasUnservedRecording implements integrations.UnservedRecordingFinder: the
 // recordings of kind the trees hold (stagedOfKind), then those the agent
 // keeps on disk (SetRecordedOfKind), each once by name, until match accepts
-// one that has answered no request this session (servedCount, which every
-// consume door adds to, and the session's reset empties). A recording on
-// disk that answered is passed over undecoded; the others are decoded one at
-// a time, and kept by no one.
+// one that has answered no request this session (servedThisSession: what
+// every consume door counts, and under exact serving each take from the
+// step that settles it, before its count; the session's reset empties
+// both). A recording on disk that answered is passed over undecoded; the
+// others are decoded one at a time, and kept by no one.
 func (m *MockManager) HasUnservedRecording(kind models.Kind, match func(*models.Mock) bool) (bool, error) {
 	if match == nil {
 		return false, nil
@@ -58,11 +59,12 @@ func (m *MockManager) HasUnservedRecording(kind models.Kind, match func(*models.
 }
 
 // servedThisSession reports whether the mock named name answered a request
-// this session.
+// this session: counted (servedCount), or taken holding the round lock
+// (noteTakenLocked), which a take is before its count.
 func (m *MockManager) servedThisSession(name string) bool {
 	m.consumedMu.Lock()
 	defer m.consumedMu.Unlock()
-	return m.servedCount[name] > 0
+	return m.servedCount[name] > 0 || m.takenThisSession[name]
 }
 
 var _ integrations.UnservedRecordingFinder = (*MockManager)(nil)

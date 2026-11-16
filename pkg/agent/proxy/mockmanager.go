@@ -196,6 +196,14 @@ type MockManager struct {
 	// answer more than once keeps its first-use timestamp and its usage in
 	// consumedPersistent, so only a count tells that it answered again.
 	servedCount map[string]uint64
+	// takenThisSession names each mock a take settled holding the round
+	// lock answered this session (takeLocked: one of a view's own consumed,
+	// a staged recording spent), reset with servedCount, so the serve is
+	// one HasUnservedRecording reads in the step that takes it: servedCount
+	// moves only once the round lock is let go (flagMockAsUsed), or, for a
+	// pool view's ahead, as the next test opens, and a view installed
+	// before then no longer reports the take spent (MockSpent).
+	takenThisSession map[string]bool
 	// scopeConsumed names the per-test mocks served while a test of keploy
 	// mock replay begun without a worker pid was open (SetScopeMocks), in any
 	// way: consumed out of its per-test tier, or used where it stays. The
@@ -905,6 +913,7 @@ func (m *MockManager) ResetForReplaySession() {
 	if m.servedCount != nil {
 		m.servedCount = make(map[string]uint64)
 	}
+	m.takenThisSession = nil
 	if m.scopeConsumed != nil {
 		m.scopeConsumed = make(map[string]struct{})
 	}
