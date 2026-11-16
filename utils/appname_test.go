@@ -153,6 +153,14 @@ func TestOriginURL(t *testing.T) {
 		{"an unquoted subsection is not git's", "[remote origin]\n\turl = https://github.com/acme/a.git\n", ""},
 		{"escaped backslashes", "[remote \"origin\"]\n\turl = C:\\\\src\\\\orders-api\n", `C:\src\orders-api`},
 		{"an escaped backslash at the end", "[remote \"origin\"]\n\turl = /srv/orders-api\\\\\n\tfetch = x\n", `/srv/orders-api\`},
+		{"an escaped backslash, then a continuation", "[remote \"origin\"]\n\turl = /srv/orders-api\\\\\\\n-b\n", `/srv/orders-api\-b`},
+		{"a ; comment ending in a backslash", "; see C:\\\n[remote \"origin\"]\n\turl = https://github.com/acme/a.git\n", "https://github.com/acme/a.git"},
+		{"a header with no closing quote is not git's", "[remote \"origin]\n\turl = https://github.com/acme/a.git\n", ""},
+		{"a header with no opening quote is not git's", "[remote origin\"]\n\turl = https://github.com/acme/a.git\n", ""},
+		{"a section named origin that is not a remote", "[branch \"origin\"]\n\turl = https://github.com/acme/a.git\n", ""},
+		{"a dotted section named origin that is not a remote", "[branch.origin]\n\turl = https://github.com/acme/a.git\n", ""},
+		{"another remote in the dotted header", "[remote.upstream]\n\turl = https://github.com/acme/a.git\n", ""},
+		{"a section with no subsection", "[remote]\n\turl = https://github.com/acme/a.git\n", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config")
@@ -201,5 +209,33 @@ func TestDefaultAppNameIsTheWorkingDirectorysRepository(t *testing.T) {
 	name, from, err := DefaultAppName()
 	if err != nil || name != "orders-api" || from != AppNameFromRemote {
 		t.Fatalf("DefaultAppName() = %q, %s, %v, want orders-api from %s", name, from, err, AppNameFromRemote)
+	}
+}
+
+// DefaultAppName fails, as GetLastDirectory does, once the working directory
+// is gone, rather than name the app after a folder that is not there.
+func TestDefaultAppNameInARemovedDirectory(t *testing.T) {
+	removeWorkingDirectory(t)
+	name, _, err := DefaultAppName()
+	wantGone(t, err)
+	if name != "" {
+		t.Errorf("DefaultAppName() named the app %q in a removed directory", name)
+	}
+}
+
+// gitConfigValue drops a backslash that ends a value with nothing to escape;
+// originURL never passes one, as such a line continues on the next.
+func TestGitConfigValue(t *testing.T) {
+	for in, want := range map[string]string{
+		` https://github.com/acme/a.git `: "https://github.com/acme/a.git",
+		`"a b" c`:                         "a b c",
+		`a\"b`:                            `a"b`,
+		`a\\`:                             `a\`,
+		`a\`:                              "a",
+		`"a#b";c`:                         "a#b",
+	} {
+		if got := gitConfigValue(in); got != want {
+			t.Errorf("gitConfigValue(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
