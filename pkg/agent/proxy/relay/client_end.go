@@ -44,7 +44,7 @@ import (
 // HalfCloseGrace (the relay stops at the client's FIN) it is not waited
 // for.
 //
-// Only a client connection that is a TCP socket on Linux can be asked
+// Only a client connection that is a TCP socket on Linux or macOS can be asked
 // (clientSocketOf). Elsewhere only a failed write's error is handed on.
 
 // clientErrorSocket is a clientSocket that can say what error its connection

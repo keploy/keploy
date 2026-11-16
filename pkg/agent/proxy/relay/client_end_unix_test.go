@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package relay
 
@@ -16,7 +16,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
-	"golang.org/x/sys/unix"
 )
 
 // clientEndRun is a relay between a client and a destination over loopback
@@ -143,7 +142,7 @@ func TestAClientThatResetsAfterItsFINHasTheResetHandedOn(t *testing.T) {
 			}
 			_ = app.Close()
 			if !tc.read {
-				awaitTCPState(t, proxyClient, unix.BPF_TCP_CLOSE, "the client resets the answer it closed on unread")
+				awaitTCPState(t, proxyClient, stateClosed, "the client resets the answer it closed on unread")
 			}
 			if tc.after {
 				if _, err := server.Write([]byte("more")); err != nil {
@@ -172,7 +171,7 @@ func TestAClosedClientThatResetsTheAnswerItsFINRacedHasTheResetHandedOn(t *testi
 		c := &finInFlightConn{Conn: &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, release: release}
 		c.hook = func() {
 			_ = app.Close()
-			awaitTCPState(t, proxyClient, unix.BPF_TCP_CLOSE_WAIT, "the closed client's FIN is in")
+			awaitTCPState(t, proxyClient, stateCloseWait, "the closed client's FIN is in")
 		}
 		run := runClientEnd(t, c, proxyServer)
 		if _, err := app.Write([]byte("req")); err != nil {
