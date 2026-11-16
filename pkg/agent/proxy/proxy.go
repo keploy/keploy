@@ -2969,7 +2969,7 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 		// Nothing on the connection is captured, so its close is no loss
 		// (pairClosing).
 		if tracked != nil {
-			p.paired.servedWithoutSession(pairKey(tracked))
+			p.paired.servedWithoutSession(tracked)
 		}
 		return p.serveWithoutSession(ctx, srcConn, dstAddr, predialed)
 	}

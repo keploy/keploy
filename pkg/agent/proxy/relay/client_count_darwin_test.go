@@ -361,9 +361,18 @@ func TestTheCountFromTheAcceptIsTheRelaysUnderTLSToo(t *testing.T) {
 	if over := (&seenWrites{Conn: proxyClient}); CountClientWrites(over) != net.Conn(over) {
 		t.Error("a conn that is not the accepted socket is counted")
 	}
-	if none := (*net.TCPConn)(nil); CountClientWrites(none) != net.Conn(none) {
-		t.Error("a nil socket is counted")
-	}
+	// A nil socket, whose SyscallConn fails, is not counted, and is never
+	// asked (a nil RawConn's Control panics).
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Errorf("counting a nil socket panicked: %v", p)
+			}
+		}()
+		if none := (*net.TCPConn)(nil); CountClientWrites(none) != net.Conn(none) {
+			t.Error("a nil socket is counted")
+		}
+	}()
 	// What the send buffer held as the count began is the count's start.
 	held := &countedClient{tcp: proxyClient.(*net.TCPConn), count: &writeCount{}, begin: darwinTCPInfo{sbbytes: 7}}
 	held.Conn = held.tcp
