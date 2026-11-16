@@ -64,6 +64,13 @@ jobs:
       #                       and the macOS one can run it; upstream_test.go
       #                       checks the numbering by what was read. Neither
       #                       had run on Windows before this job.
+      #   .../proxy/supervisor  the session's record of how each end of a
+      #                       connection ended: a client socket's Winsock
+      #                       reset or broken pipe kept as syscall.ECONNRESET
+      #                       or syscall.EPIPE for the parsers
+      #                       (client_end_windows.go). Its Windows rows keep
+      #                       the errors real loopback sockets gave and run
+      #                       only here.
       #   ./internal/testnet  the ports ./pkg, ./pkg/neterr and
       #                       ./pkg/agent/proxy/incoming take for their
       #                       refused dials and their listeners. Their
@@ -100,7 +107,7 @@ jobs:
       # &&: under `shell: cmd` a multi-line block is a batch file that does not
       # stop on failure and reports only the last exit code.
       - name: Test amd64
-        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/... ./internal/testnet/
+        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/... ./pkg/agent/proxy/supervisor/ ./internal/testnet/
         shell: cmd
 
       # The Windows stop of a native app (utils.interruptProcessTree): one that
