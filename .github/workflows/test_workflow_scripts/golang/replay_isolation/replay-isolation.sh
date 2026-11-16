@@ -206,11 +206,42 @@ rows_recorded_nx() {
 	for p in "replay-$m" "replay-$m-dns"; do
 		rows_zero "$p" dns-recorded
 		row_log "$p serves the recorded NXDOMAIN" "$W/out/$p/keploy.log" 'probe dns-recorded-lookup: .*no such host'
-		row_nolog "$p does not report the recorded name as a miss" "$W/out/$p/keploy.log" "${KEPT}DNS recorded-nx"
+		row_not_kept_dns "$p does not report the recorded name as a miss" "$p" recorded-nx.invalid-replay-isolation.test.
 	done
 }
 # row_nolog NAME FILE REGEX: FILE has no line matching REGEX.
 row_nolog() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null || echo 1)" "no /$3/ in $(basename "$(dirname "$2")")"; }
+# A kept-inside line names a DNS name as keploy's lines name a host: by its
+# labels' shape beside its host tag ("DNS {}.{}.{}. #3fa2c1d0e9b8"), never
+# whole. The run's report names each DNS question no mock answered whole,
+# beside that tag, so the rows read which name a line names from it.
+# report_dns PHASE: "TAG NAME" for each DNS question PHASE's report names.
+report_dns() {
+	cat "$W/out/$1"/report/*.yaml 2>/dev/null | awk '
+		/^[[:space:]]*(- )?protocol:/ { dns = ($NF == "DNS"); name = ""; next }
+		dns && /^[[:space:]]*actual_summary:/ { name = $NF; next }
+		dns && name != "" && /^[[:space:]]*host_tag:/ { t = $NF; gsub(/[\047"]/, "", t); print t, name; name = "" }' | sort -u
+}
+# kept_dns_tags PHASE: the tag of each DNS name PHASE's kept-inside report names.
+kept_dns_tags() { grep -oE "${KEPT}DNS [^ ]+ #[0-9a-f]+" "$W/out/$1/keploy.log" 2>/dev/null | awk '{print $NF}' | sort -u; }
+# row_kept_dns NAME PHASE QNAME: PHASE's kept-inside report names the DNS
+# question QNAME (fully qualified), by the tag PHASE's report names it by.
+row_kept_dns() {
+	local tag
+	tag=$(report_dns "$2" | awk -v n="$3" '$2 == n { print $1; exit }')
+	row "$1" "$([ -n "$tag" ] && kept_dns_tags "$2" | grep -qxF -- "$tag" && echo 1)" "$3 is ${tag:-not in the report} in $2"
+}
+# row_not_kept_dns NAME PHASE QNAME: no kept-inside DNS line of PHASE names
+# QNAME: each names the tag of another name PHASE's report holds (a tag the
+# report does not hold could be QNAME's, so it fails the row).
+row_not_kept_dns() {
+	local t n bad=""
+	for t in $(kept_dns_tags "$2"); do
+		n=$(report_dns "$2" | awk -v t="$t" '$1 == t { print $2; exit }')
+		[ -n "$n" ] && [ "$n" != "$3" ] || bad="$bad $t=${n:-unknown}"
+	done
+	row "$1" "$([ -z "$bad" ] && echo 1)" "kept DNS tags in $2:${bad:- none names $3}"
+}
 
 # replay PHASE CMD...: one keploy test run in the current dir, its log and exit.
 replay() {
@@ -227,6 +258,10 @@ replay() {
 	echo "$phase exit $(cat "$W/out/$phase/exit")"
 	waitfor 15 grep -q 'probe fork-tcp' "$W/out/$phase/keploy.log"
 	grep -h 'status:' keploy/reports/test-run-*/*.yaml 2>/dev/null | sort | uniq -c
+	# This run's report, for the DNS rows (report_dns).
+	local run
+	run=$(ls -td keploy/reports/test-run-* 2>/dev/null | head -1)
+	[ -z "$run" ] || cp -r "$run" "$W/out/$phase/report"
 	kill $peerwatch 2>/dev/null; wait $peerwatch 2>/dev/null
 	docker rm -f riso-app >/dev/null 2>&1
 	[ ! -f docker-compose.yml ] || docker compose down --remove-orphans >/dev/null 2>&1
@@ -472,13 +507,13 @@ for mode in "${MODES[@]}"; do
 		row_nolog "replay-native opens no DNS egress" "$W/out/replay-native/keploy.log" "$EGRESS_DNS"
 		row_log "replay-native names the port-only bypass rule" "$W/out/replay-native/keploy.log" 'real egress opened by bypassRules.*7002'
 		row_log "replay-native reports the IMDS call it kept inside" "$W/out/replay-native/keploy.log" "${KEPT}HTTP 198\.18\.0\.11"
-		row_log "replay-native reports the DNS name it answered itself" "$W/out/replay-native/keploy.log" "${KEPT}DNS leak-probe\.invalid-replay-isolation\.test"
+		row_kept_dns "replay-native reports the DNS name it answered itself" replay-native leak-probe.invalid-replay-isolation.test.
 		# The opt-in: the same misses now reach the host's resolver.
 		row "replay-native-dns passes" "$([ "$(cat "$W/out/replay-native-dns/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-native-dns/exit" 2>/dev/null)"
 		c=$(( $(count replay-native-dns dns-udp) + $(count replay-native-dns dns-other) + $(count replay-native-dns dns-tcp) ))
 		row "replay-native-dns forwards to the host's resolver" "$([ "$c" -gt 0 ] && echo 1)" "$c DNS at the sink"
 		row_log "replay-native-dns names its opt-in" "$W/out/replay-native-dns/keploy.log" "$EGRESS_DNS"
-		row_nolog "replay-native-dns does not report the forwarded name as kept inside" "$W/out/replay-native-dns/keploy.log" "${KEPT}DNS leak-probe"
+		row_not_kept_dns "replay-native-dns does not report the forwarded name as kept inside" replay-native-dns leak-probe.invalid-replay-isolation.test.
 		rows_recorded_nx native
 		row "refuse-native fails" "$([ "$(cat "$W/out/refuse-native/exit" 2>/dev/null)" != 0 ] && echo 1)" "exit $(cat "$W/out/refuse-native/exit" 2>/dev/null)"
 		row_log "refuse-native says why" "$W/out/refuse-native/keploy.log" 'entry \\?"imds\\?" is not one keploy can open'
@@ -498,7 +533,7 @@ for mode in "${MODES[@]}"; do
 		# The peer's TXT, SRV and CNAME lookups, which docker's resolver
 		# recurses: keploy answers each itself, so none reaches its upstream.
 		rows_zero replay-docker dns-owned
-		row_log "replay-docker reports the DNS name it answered itself" "$W/out/replay-docker/keploy.log" "${KEPT}DNS leak-probe\.invalid-replay-isolation\.test"
+		row_kept_dns "replay-docker reports the DNS name it answered itself" replay-docker leak-probe.invalid-replay-isolation.test.
 		row_nolog "replay-docker opens no DNS egress" "$W/out/replay-docker/keploy.log" "$EGRESS_DNS"
 		row_log "replay-docker names the port-only bypass rule" "$W/out/replay-docker/keploy.log" 'real egress opened by bypassRules.*7002'
 		row_log "replay-docker reports the IMDS call it kept inside" "$W/out/replay-docker/keploy.log" "${KEPT}HTTP 198\.18\.0\.11"
@@ -524,7 +559,7 @@ for mode in "${MODES[@]}"; do
 		peer_row replay-compose
 		# keploy answers the peer's other types itself.
 		rows_zero replay-compose dns-owned
-		row_log "replay-compose reports the DNS name it answered itself" "$W/out/replay-compose/keploy.log" "${KEPT}DNS leak-probe\.invalid-replay-isolation\.test"
+		row_kept_dns "replay-compose reports the DNS name it answered itself" replay-compose leak-probe.invalid-replay-isolation.test.
 		row_nolog "replay-compose opens no DNS egress" "$W/out/replay-compose/keploy.log" "$EGRESS_DNS"
 		row_log "replay-compose names the port-only bypass rule" "$W/out/replay-compose/keploy.log" 'real egress opened by bypassRules.*7002'
 		row_log "replay-compose reports the IMDS call it kept inside" "$W/out/replay-compose/keploy.log" "${KEPT}HTTP 198\.18\.0\.11"
