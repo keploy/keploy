@@ -27,9 +27,11 @@ func errnoError(code uint32) error {
 
 // The Windows errors a socket gives, numbered as winerror.h numbers them
 // (their names in golang.org/x/sys/windows; syscall names the first four).
-// Their numbers do not fit the byte errnoCode keeps, and Go's own
-// syscall.ECONNRESET and syscall.EPIPE are invented ones on Windows (from
-// syscall.APPLICATION_ERROR up), which the socket never gives.
+// errnoCode would keep the three under 256 as themselves, errnos no parser
+// reads as a reset or a broken pipe, and none of the others; Go's own
+// syscall.ECONNRESET and syscall.EPIPE, which the parsers ask for, are
+// invented ones on Windows (from syscall.APPLICATION_ERROR up), which the
+// socket never gives.
 const (
 	winErrorNetnameDeleted    = syscall.Errno(64)    // ERROR_NETNAME_DELETED: a reset, as an overlapped read or write completes
 	winErrorBrokenPipe        = syscall.Errno(109)   // ERROR_BROKEN_PIPE

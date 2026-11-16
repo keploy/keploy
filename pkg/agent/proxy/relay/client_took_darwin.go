@@ -45,10 +45,15 @@ import (
 // client took (clientUnknown: the chunk is teed, as before); and written
 // cannot say how many bytes were written. A resend the socket does not flag
 // and no look sees start (one look before snd_max moved on, the next after a
-// timeout took snd_nxt back and an acknowledgement ended loss recovery) can
-// count fewer bytes written than were: a chunk judged from before its first
-// byte, teed as before the relay asked, if the client acknowledges what was
-// written before it.
+// timeout took snd_nxt back and an acknowledgement ended loss recovery)
+// counts snd_nxt short, and so both counts: fewer bytes written than were (a
+// chunk judged from before its first byte, teed as before the relay asked,
+// if the client acknowledges what was written before it), and fewer
+// acknowledged than were, at a look that finds the connection closed and
+// takes its count as exact (a chunk the client acknowledged in part,
+// refused). Either needs a segment lost on the loopback, a retransmission
+// timeout (xnu's is 100 ms or more), and no look while it ran; while a chunk
+// waits, resolve looks at least every lastLookAgain (5 ms).
 //
 // Sequence numbers are 32 bits and wrap. The counts start at snd_una as the
 // first look found it, and add each move of snd_nxt between looks (each less
