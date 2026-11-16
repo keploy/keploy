@@ -292,6 +292,20 @@ func readProxySide(conn *net.TCPConn) proxySide {
 	if err != nil {
 		return proxySide{err: err}
 	}
+	received, state, err := tcpInfo(rc)
+	if err != nil {
+		return proxySide{err: err}
+	}
+	if state == winTCPClosed && endedByFIN(rc) {
+		state = winTCPClosedByFIN
+	}
+	return proxySide{received: received, counted: true, state: state}
+}
+
+// tcpInfo reads rc's TCP_INFO_v0 (SIO_TCP_INFO): BytesIn (offset 56), the
+// application's data alone, and State (offset 0), a TCPSTATE, as the socket
+// reads it (a CLOSED one is not told apart: readProxySide does that).
+func tcpInfo(rc syscall.RawConn) (received uint64, state uint8, err error) {
 	var info [88]byte
 	var ierr error
 	if err := rc.Control(func(fd uintptr) {
@@ -303,19 +317,26 @@ func readProxySide(conn *net.TCPConn) proxySide {
 			ierr = fmt.Errorf("SIO_TCP_INFO gave %d bytes of TCP_INFO_v0's %d", n, len(info))
 		}
 	}); err != nil {
-		return proxySide{err: err}
+		return 0, 0, err
 	}
 	if ierr != nil {
-		return proxySide{err: fmt.Errorf("SIO_TCP_INFO: %w", ierr)}
+		return 0, 0, fmt.Errorf("SIO_TCP_INFO: %w", ierr)
 	}
-	state := binary.LittleEndian.Uint32(info[0:4])
-	if state > winTCPTimeWait {
-		return proxySide{err: fmt.Errorf("SIO_TCP_INFO gave an unknown TCP state %d", state)}
+	s := binary.LittleEndian.Uint32(info[0:4])
+	if s > winTCPTimeWait {
+		return 0, 0, fmt.Errorf("SIO_TCP_INFO gave an unknown TCP state %d", s)
 	}
-	if state == winTCPClosed && endedByFIN(rc) {
-		state = winTCPClosedByFIN
-	}
-	return proxySide{received: binary.LittleEndian.Uint64(info[56:64]), counted: true, state: uint8(state)}
+	return binary.LittleEndian.Uint64(info[56:64]), uint8(s), nil
+}
+
+// resetDropsUnread says whether at, the proxy's side as its close read it,
+// was reset by the application: Windows drops what such a socket held unread
+// (recv answers WSAECONNRESET, FIONREAD 0) while BytesIn still counts it, so
+// the bytes no read of the proxy's took are gone (resetDropped). Measured on
+// Windows 11 (10.0.26200): a reset in ESTABLISHED with 4 bytes unread reads
+// CLOSED, FIONREAD 0, and BytesIn 4.
+func resetDropsUnread(at proxySide) bool {
+	return at.err == nil && at.state == winTCPClosed
 }
 
 // msgPeek is MSG_PEEK.

@@ -167,6 +167,11 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 			p.noteWroteAtClose(ctx, pc)
 		}
 	})
+	if pc != nil && err == nil && tc != nil {
+		// Bytes a reset dropped before any read took them are tossed
+		// unread too, by the application's reset instead of the close.
+		unread = max(unread, resetDropped(ctx, *pc.atClose.Load(), tc))
+	}
 	tlsLayer := tc != nil && tc.tlsLayer.Load() != nil
 	switch {
 	case pc == nil, ctx.Err() != nil, pc.noSession.Load():
@@ -216,6 +221,35 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 			p.pairLost(pc, 1, lostTop(pc), "keploy's proxy closed a connection with bytes still unread that its TLS layer could not read: whether calls of the application's were among them cannot be told", zap.Error(err))
 		case data:
 			p.pairLost(pc, 1, lostTop(pc), unreadLost)
+		}
+	}
+}
+
+// resetDropped is how many bytes the application wrote that a reset dropped
+// from the proxy's socket before any read of tc took them, where a reset
+// drops what the socket held unread (resetDropsUnread: Windows; 0 elsewhere,
+// and for a side at, as the close read it, that was not reset). Its side
+// counts them received (BytesIn) and its unread count no longer holds them,
+// so they are what it received less what tc's reads returned. A read in
+// progress may have taken some from the socket and not returned them yet, so
+// it is read once no read is: on a reset socket every read ends at once (with
+// what it took, or the reset), so the wait ends on those events; keploy's
+// stop ends it too, which charges nothing (pairClosing).
+func resetDropped(ctx context.Context, at proxySide, tc *trackedConn) int {
+	if !resetDropsUnread(at) {
+		return 0
+	}
+	for {
+		changed := tc.t.Changed()
+		v := tc.view()
+		if v.reading == 0 {
+			received := dataReceived(at)
+			return int(min(received-min(v.delivered, received), math.MaxInt32))
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return 0
 		}
 	}
 }
