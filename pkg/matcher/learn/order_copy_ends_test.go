@@ -15,8 +15,14 @@ import (
 // anew (an insert's eventDetails.duration_ms "4" went to "51" while
 // start-up Mongo answers given together had held 4). Where one candidate
 // holds round F's word in round F, the order counts and the word is
-// refused as unknown, naming it; a 32-bit word at such places is a
-// conflict, decided once. keploy test and keploy mock alike.
+// refused as unknown, naming it, and so where that candidate is a serve
+// whose view round F did not state, which may hold the word; a 32-bit word
+// at such places is a conflict, decided once. A candidate answered after
+// the call is no recorded end, though it held the recorded word: it gave
+// the recording's application nothing before the call, so the order is
+// not asked, and an unchanged place holding round F's word in both runs,
+// given at a serve round F did not number, stays out of the refusal, which
+// names the late answer alone. keploy test and keploy mock alike.
 func TestOutcomeAnUntoldOrderCountsOnlyWithBothEndsOfACopy(t *testing.T) {
 	const path = "body.eventDetails.duration_ms"
 	type row struct {
@@ -43,11 +49,22 @@ func TestOutcomeAnUntoldOrderCountsOnlyWithBothEndsOfACopy(t *testing.T) {
 	fOnly := func(f string) Raw {
 		return oAnswer("mock-72", 200*time.Millisecond, "7").ServedAs(3).ServedLive(oAnswer("mock-72", 200*time.Millisecond, f))
 	}
+	// unstated: round F served it but stated no view of it, so it may hold
+	// round F's word.
+	unstated := func() Raw { return oAnswer("mock-72", 200*time.Millisecond, "7").ServedAs(3) }
+	// late: answered after the call, round F giving its word there; beside
+	// it an unchanged place holding round F's word, at an unnumbered serve.
+	late := []Raw{
+		oAnswer("mock-62", 300*time.Millisecond, "51").WithServed(true).ServedAsRecorded(),
+		oAnswer("mock-61", -100*time.Millisecond, "4").ServedAs(1).ServedLive(oAnswer("mock-61", -100*time.Millisecond, "51")),
+	}
 	rows := []row{
 		{"start-ups given at one instant, none holds round F's word", together("4"), "4", "51", OutcomeFresh, "set aside", 1},
 		{"start-ups, one serve not numbered, none holds round F's word", unnumbered("9"), "9", "268", OutcomeFresh, "set aside", 1},
 		{"control: given at one instant, one more holds round F's word in F", append(together("4"), fOnly("51")), "4", "51", OutcomeRefused, "at one instant", 0},
 		{"control: one serve not numbered, one more holds round F's word in F", append(unnumbered("9"), fOnly("268")), "9", "268", OutcomeRefused, "does not know where record's full round served mock-173", 0},
+		{"control: given at one instant, one more served with no view stated", append(together("4"), unstated()), "4", "51", OutcomeRefused, "at one instant", 0},
+		{"a candidate answered after the call, no recorded end", late, "4", "51", OutcomeRefused, "(answered after the call, it shows nothing of the recorded value; round F gave, or may have given, the new value there). Places: mock-61.", 0},
 		{"a 32-bit word at start-ups given at one instant", together("A7K29QXM"), "A7K29QXM", "Q8M31WPN", OutcomeRefused, `"A7K29QXM" stood whole at mock-29`, 1},
 	}
 	for _, mode := range []struct {

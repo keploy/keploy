@@ -306,7 +306,12 @@ func TestOutcomeAPlaceOfUnknownStateRefusesTheWord(t *testing.T) {
 // run shows the call's value did not flow from it, and the word is made
 // anew, its line naming the place set aside. The same value sent as a
 // 32-bit id is a conflict at both, as is "o-1" sent unchanged in both runs
-// (a whole token the place kept while the value moved off it).
+// (a whole token the place kept while the value moved off it). The place
+// holds the recorded value whole where it holds the token around the word
+// though the call's text is no one token ("note o-1"), and where it holds
+// the call's whole text as an id token though not as a base64 run of its
+// own ("ab" in "x+ab", round F's call sending "+cd"): a conflict in the
+// own test, chance at the start-up, alike.
 func TestOutcomeTheTestsOwnValueThatStoppedFollowingItsSourceIsAConflict(t *testing.T) {
 	for _, s := range []struct {
 		what         string
@@ -333,6 +338,26 @@ func TestOutcomeTheTestsOwnValueThatStoppedFollowingItsSourceIsAConflict(t *test
 		sent = oServed("mock-0", s.run, s.startUp, Request, oText("body.order", "o-1"), "o-1", time.Millisecond)
 		d = oWord(t, Decide(oInput("url.path.2", "o-1", "o-5", sent, nil)), "1", "5")
 		oRefused(t, s.what+" o-1 sent in both runs, the call sent o-5", d, "conflict", `"o-1" stood whole at mock-0 body.order in both runs`)
+		// The place held the value's token around the word ("o-1" of the
+		// call's "note o-1"), not the call's whole text; and the call's
+		// whole text, the word alone ("ab"), that the place held as an id
+		// token inside a longer base64 run ("x+ab"), round F's text holding
+		// its word only in such a run ("+cd").
+		for _, c := range []struct{ what, path, rec, live, held, moved, r, f string }{
+			{"the token around the word", "body.note", "note o-1", "note o-5", "o-1", "o-9", "1", "5"},
+			{"the call's whole text, an id token inside a base64 run there", "body.code", "ab", "+cd", "x+ab", "x+zz", "ab", "cd"},
+		} {
+			sent = oServed("mock-0", s.run, s.startUp, Request, oText("body.order", c.held), c.moved, time.Millisecond)
+			d = oWord(t, Decide(oInput(c.path, c.rec, c.live, sent, nil)), c.r, c.f)
+			what := s.what + " " + c.held + " sent, F moved it to " + c.moved + ", the call sent " + c.live + " (" + c.what + ")"
+			if s.startUp {
+				if d.Outcome != OutcomeFresh || !strings.Contains(d.Line, "mock-0 body.order held") || !strings.Contains(d.Line, "set aside") {
+					t.Errorf("%s: %s, line %q; want fresh, naming mock-0 set aside", what, oDescribe([]Decision{d}), d.Line)
+				}
+				continue
+			}
+			oRefused(t, what, d, "conflict", strconv.Quote(c.r)+` stood whole at mock-0 body.order; round F gave `+strconv.Quote(c.moved)+` there and the value did not follow`)
+		}
 	}
 }
 
