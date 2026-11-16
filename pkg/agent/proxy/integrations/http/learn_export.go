@@ -113,7 +113,7 @@ func (h *HTTP) LearnMatch(ctx context.Context, call VariableCall, noise RequestN
 	in.written = written
 	n := h.newLearnNoise(opts, noise.Body, noise.URL).withSources(mockDb)
 	n.hold = hold
-	served, lmiss, err := h.learnMatchIn(ctx, in, mockDb, n, opts, round, nil)
+	served, lmiss, err := h.learnMatchIn(ctx, in, mockDb, n, opts, round, nil, nil)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -1696,7 +1696,7 @@ func (h *HTTP) orderMiss(ctx context.Context, input *req, mockDb integrations.Mo
 // otherwise it is a miss with its reason. It returns the mock to serve, or
 // the miss.
 func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions) (*models.Mock, *learnMiss, error) {
-	return h.learnMatchIn(ctx, input, mockDb, n, opts, integrations.CallRound{}, nil)
+	return h.learnMatchIn(ctx, input, mockDb, n, opts, integrations.CallRound{}, nil, nil)
 }
 
 // learnMatchIn is learnMatch, telling call, when set, where the call's first
@@ -1714,7 +1714,12 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 // next test's recording, and what it differs in learned onto it as noise.
 // The zero CallRound (the HTTP parser's own call, whose first pass is its
 // mark, or a store that marks no round) holds the first pass to nothing.
-func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions, mark integrations.CallRound, call *integrations.CallRound) (*models.Mock, *learnMiss, error) {
+//
+// chain, when not nil, is the once chain in progress on the call's
+// connection (learnChain): its next recording answers the call when the
+// call is exactly it, ahead of every other recording of the call, as a
+// replay answers it (chainNext).
+func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions, mark integrations.CallRound, call *integrations.CallRound, chain *learnChain) (*models.Mock, *learnMiss, error) {
 	tracker := learn.TrackerFrom(ctx)
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
@@ -2014,6 +2019,18 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				res, pairShape = again, s
 			}
 		}
+		// On a connection whose once chain is in progress, carried on in the
+		// call's view, the chain's next recording answers the call when the
+		// call is exactly it, whatever Pair took: ahead of the open test's
+		// own identical recording, answered already or not, as a replay
+		// answers it (chainNext). The chain is the calls the application
+		// made just before a once-per-process write on that connection, in
+		// order, so the call is the chain's. The pass reads the call's
+		// view (a pass the replay moved under is the moved miss, above).
+		chained := false
+		if r, ok := chain.pick(ctx, h, input, read.call, sc); ok {
+			res, pairShape, chained = r, liveShape, true
+		}
 		switch res.Outcome {
 		case learn.Exact:
 			m := sc.mocks[res.Index]
@@ -2024,8 +2041,10 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// pool request recorded several times answers with each
 			// recorded answer in turn (cursorPick), among the pool's
 			// recordings it matches exactly, as outside the learn step.
+			// The chain's next is answered itself, never another
+			// recording of the request in turn.
 			picked, commit := m, func() {}
-			if !own {
+			if !own && !chained {
 				var c func()
 				var answered *answeredSequence
 				picked, c, answered = h.cursorPick(m, exactGroup(liveShape, sc, true), sc.owner(), mockDb, !opts.DisableStatefulMocks)

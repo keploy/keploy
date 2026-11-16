@@ -381,8 +381,25 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// (a retry cycle, integrations.LearnEnder) a request is
 				// served as a replay serves it, below: nothing is paired,
 				// nor learned.
-				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(mockDb), opts, integrations.CallRound{}, &call)
+				// On a connection whose once chain is in progress, the
+				// learn step answers the call with the chain's next
+				// recording when the call is exactly it, as a replay does
+				// (learnChain), and a line says so; a chain carried on in
+				// another view than the call's first read ends here, said.
+				names := chainCall{series: follow.Series, call: shapeSummary(request), tag: models.URLPathTag(ctx, request.Method, request.URL)}
+				lc := &learnChain{follow: follow, c: names, strict: h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(mockDb)}
+				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(mockDb), opts, integrations.CallRound{}, &call, lc)
 				ok = stub != nil
+				followed = follow.For(call)
+				if followed == "" {
+					h.chainEnded(follow, names)
+				}
+				if ok && lc.picked != "" {
+					// The learn step answers the recording the chain
+					// picked itself (learnChain.pick).
+					names.next = lc.picked
+					h.chainAnswered(names, h.ownCall(reqCtx, input, mockDb, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict()))
+				}
 				if !ok {
 					// The call's one hold: the variable pass, the
 					// pairing's own-repeat count and repeat note, and the
@@ -470,12 +487,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// ended since its last call) ends here, said: the call
 					// is answered as any call is, the open test's own first.
 					followed = follow.For(call)
-					if follow.Next != "" && followed == "" {
-						h.Logger.Info("a once series' chain ended: the replay's view moved since this connection's last call of the series (a test began or ended, or a test set was staged), so the series' next recording does not answer this call ahead of the open test's own; the call is answered as any call is",
-							zap.String("series", follow.Series), zap.String("next", follow.Next), zap.String("call", shapeSummary(request)), utils.PathTagField(models.URLPathTag(ctx, request.Method, request.URL)))
+					names := chainCall{series: follow.Series, call: shapeSummary(request), tag: models.URLPathTag(ctx, request.Method, request.URL)}
+					if followed == "" {
+						h.chainEnded(follow, names)
 					}
 					if followed != "" {
-						stub, err = h.chainNext(reqCtx, input, db, chainCall{next: followed, series: follow.Series, call: shapeSummary(request), tag: models.URLPathTag(ctx, request.Method, request.URL)},
+						names.next = followed
+						stub, err = h.chainNext(reqCtx, input, db, names,
 							h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), func() bool {
 								return h.ownCall(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
 							})

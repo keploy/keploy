@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -150,6 +152,47 @@ func dialParserWith(t *testing.T, mm *MockManager, lg *zap.Logger, opts models.O
 	return c
 }
 
+// learnRoundChain is patChain's set staged on a proxy whose learn tracker
+// reads it, with pairing on, as record's full round stages it (the learn
+// step decides every call), TestListApps open on the store and the tracker.
+// edit, when not nil, changes the recordings before they are staged, and
+// extra are staged beside them.
+func learnRoundChain(t *testing.T, lg *zap.Logger, edit func(byName map[string]*models.Mock), extra ...*models.Mock) (*Proxy, *MockManager) {
+	t.Helper()
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	mm := NewMockManager(nil, nil, lg)
+	t.Cleanup(mm.Close)
+	p.setMockManager(mm)
+	t.Cleanup(func() { p.setMockManager(nil) })
+	p.learnTracker.Begin()
+	stagePatChain(mm, true, edit, extra)
+	mm.SetPairing(true)
+	return p, mm
+}
+
+// dialLearnParser is dialParser in record's full round: the parser's
+// options say Learn, and the connection's context carries p's learn
+// tracker and miss reporter, as the proxy's does.
+func dialLearnParser(t *testing.T, p *Proxy, mm *MockManager, lg *zap.Logger) *appConn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), callDeadline)
+	ctx = models.WithMockMismatchReporter(ctx, p.sendMockNotFoundError)
+	ctx = learn.WithTracker(ctx, p.learnTracker)
+	app, agentEnd := net.Pipe()
+	c := &appConn{t: t, app: app, br: bufio.NewReader(app), done: make(chan struct{})}
+	go func() {
+		defer close(c.done)
+		_ = httpint.New(lg).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{Learn: true})
+		_ = agentEnd.Close()
+	}()
+	t.Cleanup(func() {
+		c.close()
+		cancel()
+	})
+	return c
+}
+
 func (c *appConn) close() {
 	c.once.Do(func() {
 		_ = c.app.Close()
@@ -235,6 +278,9 @@ func TestAOnceChainsNextAnswersAheadOfTheOpenTestsOwnOnItsConnection(t *testing.
 		if ended := endedLines(logs); len(ended) != 0 {
 			t.Fatalf("a line says the chain ended: %v", ended)
 		}
+		if declined := declinedLines(logs); len(declined) != 0 {
+			t.Fatalf("a line says the chain did not answer: %v", declined)
+		}
 	})
 	t.Run("the test's own read still to be answered", func(t *testing.T) {
 		mm := patChain(t, zap.NewNop(), true, nil)
@@ -246,21 +292,216 @@ func TestAOnceChainsNextAnswersAheadOfTheOpenTestsOwnOnItsConnection(t *testing.
 	})
 }
 
+// In record's full round, where the learn step decides every call, a once
+// chain is followed as in a replay: on the connection where the series'
+// first recording answered, the series' next recording answers the next
+// call that is exactly it, ahead of the open test's own identical
+// recording, and a line says so. So the touch reads version 1 and writes
+// cas 1, as recorded, and the open test's own read by name (version 2) is
+// left for the test's own call. Before, the full round never asked the
+// chain: the touch's read took the test's own version 2, its write (cas 2)
+// missed, and the test's own read then missed as one call more than it
+// recorded. A full round of the api-server's suite lost tests so.
+func TestInTheFullRoundAOnceChainsNextAnswersAheadOfTheOpenTestsOwn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.InfoLevel)
+	lg := zap.New(core)
+	p, mm := learnRoundChain(t, lg, nil)
+	c := dialLearnParser(t, p, mm, lg)
+	got := []string{c.send(chainGet(chainByID)), c.send(chainGet(chainRead)), c.send(chainPut(1))}
+	if want := []string{answerByID, answerV1, answerTouched}; !slices.Equal(got, want) {
+		calls, _ := p.GetMockErrors(context.Background())
+		t.Fatalf("the touch's connection was answered %v, want %v; declined %v; misses %+v", got, want, declinedLines(logs), calls)
+	}
+	if got, want := chainLines(logs), []string{"mock-218 owned=true", "mock-221 owned=false"}; !slices.Equal(got, want) {
+		t.Fatalf("the chain's lines are %v, want %v", got, want)
+	}
+	if declined := declinedLines(logs); len(declined) != 0 {
+		t.Fatalf("a line says the chain did not answer: %v", declined)
+	}
+	if ended := endedLines(logs); len(ended) != 0 {
+		t.Fatalf("a line says the chain ended: %v", ended)
+	}
+	own := dialLearnParser(t, p, mm, lg)
+	if got := own.send(chainGet(chainRead)); got != answerV2 {
+		t.Fatalf("the test's own read by name was answered %q, want its own %s", got, answerV2)
+	}
+	calls, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("reported %+v; want no miss", calls)
+	}
+}
+
+// In the full round, as in a replay, a chain's next recording that the
+// call is not exactly is left to the learn step, said
+// (chainNextDiffers): another call between on the connection is answered
+// as any call is, and the chain ends.
+func TestInTheFullRoundACallThatIsNotTheChainsNextIsSaid(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.InfoLevel)
+	lg := zap.New(core)
+	p, mm := learnRoundChain(t, lg, nil)
+	c := dialLearnParser(t, p, mm, lg)
+	got := []string{c.send(chainGet(chainByID)), c.send(chainGet(chainApps)), c.send(chainGet(chainRead))}
+	if want := []string{answerByID, answerApps, answerV2}; !slices.Equal(got, want) {
+		t.Fatalf("the connection was answered %v, want %v", got, want)
+	}
+	if got, want := declinedLines(logs), []string{"chainNextDiffers mock-218 differs=[path]"}; !slices.Equal(got, want) {
+		t.Fatalf("the lines that say the chain did not answer are %v, want %v", got, want)
+	}
+	if lines := chainLines(logs); len(lines) != 0 {
+		t.Fatalf("a chain line was written: %v", lines)
+	}
+}
+
+// In the full round, every way a chain leaves a call to the learn step is
+// said once, with its check, as in a replay, and the call is then decided
+// as any call is: the chain's next answered on another connection already
+// (chainNextNotHeld), one that declares variables
+// (chainNextDeclaresVariables), and a write whose compare-and-set value is
+// not the recorded one (chainNextDiffers, by the place, never the value).
+// A chain whose next answer cannot be loaded ends the call unanswered and
+// says no such line, nor that it answered; a chain carried on past its
+// test's window ends, said. Where the chain's next is a recording served
+// in turn among identical ones, the chain's own answers, never the one
+// whose turn it is.
+func TestInTheFullRoundEachWayAChainLeavesACallIsSaid(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	withReqID := func(byName map[string]*models.Mock) {
+		for _, n := range []string{"mock-218", "mock-308"} {
+			byName[n].Spec.HTTPReq.Header["X-Req-Id"] = "rec"
+		}
+		byName["mock-218"].Spec.Variables = models.MockVariables{"rid": {Recorded: "rec", Bind: "header.X-Req-Id"}}
+	}
+	readWithReqID := "GET " + chainRead + " HTTP/1.1\r\nHost: deps\r\nX-Req-Id: rec\r\n\r\n"
+	reusable := func(m *models.Mock) *models.Mock {
+		m.TestModeInfo.Lifetime = models.LifetimeSession
+		m.TestModeInfo.Consume = models.ConsumeCursorSaturate
+		return m
+	}
+	for _, tc := range []struct {
+		name  string
+		edit  func(byName map[string]*models.Mock)
+		extra []*models.Mock
+		// run makes the calls, on as many connections as it dials.
+		run      func(t *testing.T, p *Proxy, mm *MockManager, lg *zap.Logger) []string
+		want     []string
+		declined []string
+		ended    []string
+		// chain are the lines that say the chain answered (chainLines).
+		chain []string
+	}{
+		{
+			name: "answered on another connection already",
+			edit: func(byName map[string]*models.Mock) {
+				byName["mock-308"].Spec.HTTPReq.URL = "http://deps" + chainApps + "/owned"
+			},
+			run: func(t *testing.T, p *Proxy, mm *MockManager, lg *zap.Logger) []string {
+				a, b := dialLearnParser(t, p, mm, lg), dialLearnParser(t, p, mm, lg)
+				return []string{a.send(chainGet(chainByID)), b.send(chainGet(chainRead)), a.send(chainGet(chainRead))}
+			},
+			want:     []string{answerByID, answerV1, "a miss"},
+			declined: []string{"chainNextNotHeld mock-218"},
+		},
+		{
+			name: "declares variables",
+			edit: withReqID,
+			run: func(t *testing.T, p *Proxy, mm *MockManager, lg *zap.Logger) []string {
+				c := dialLearnParser(t, p, mm, lg)
+				return []string{c.send(chainGet(chainByID)), c.send(readWithReqID)}
+			},
+			want:     []string{answerByID, answerV2},
+			declined: []string{"chainNextDeclaresVariables mock-218"},
+		},
+		{
+			name: "a write of another version",
+			run: func(t *testing.T, p *Proxy, mm *MockManager, lg *zap.Logger) []string {
+				c := dialLearnParser(t, p, mm, lg)
+				return []string{c.send(chainGet(chainByID)), c.send(chainGet(chainRead)), c.send(chainPut(2))}
+			},
+			want:     []string{answerByID, answerV1, "a miss"},
+			declined: []string{"chainNextDiffers mock-221 differs=[body.options.cas]"},
+			chain:    []string{"mock-218 owned=true"},
+		},
+		{
+			name: "an answer that cannot be loaded",
+			edit: func(byName map[string]*models.Mock) {
+				byName["mock-218"].SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+					return nil, nil, errors.New("the spilled answer is gone")
+				})
+			},
+			run: func(t *testing.T, p *Proxy, mm *MockManager, lg *zap.Logger) []string {
+				c := dialLearnParser(t, p, mm, lg)
+				return []string{c.send(chainGet(chainByID)), c.send(chainGet(chainRead))}
+			},
+			want: []string{answerByID, "no answer"},
+		},
+		{
+			name: "past its test's window",
+			run: func(t *testing.T, p *Proxy, mm *MockManager, lg *zap.Logger) []string {
+				c := dialLearnParser(t, p, mm, lg)
+				got := []string{c.send(chainGet(chainByID))}
+				mm.ServeExactPool(models.PoolKeyNone, nil)
+				return append(got, c.send(chainGet(chainRead)))
+			},
+			want:  []string{answerByID, answerV1},
+			ended: []string{"mock-218"},
+		},
+		{
+			name: "served in turn among identical recordings",
+			edit: func(byName map[string]*models.Mock) {
+				reusable(byName["mock-218"])
+			},
+			extra: []*models.Mock{reusable(workerProbe("mock-217", 1500*time.Millisecond, chainRead, `{"version":0}`))},
+			run: func(t *testing.T, p *Proxy, mm *MockManager, lg *zap.Logger) []string {
+				c := dialLearnParser(t, p, mm, lg)
+				return []string{c.send(chainGet(chainByID)), c.send(chainGet(chainRead)), c.send(chainPut(1))}
+			},
+			want:  []string{answerByID, answerV1, answerTouched},
+			chain: []string{"mock-218 owned=true", "mock-221 owned=false"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.InfoLevel)
+			lg := zap.New(core)
+			p, mm := learnRoundChain(t, lg, tc.edit, tc.extra...)
+			if got := tc.run(t, p, mm, lg); !slices.Equal(got, tc.want) {
+				t.Fatalf("the calls were answered %v, want %v (declined %v)", got, tc.want, declinedLines(logs))
+			}
+			if got := declinedLines(logs); !slices.Equal(got, tc.declined) {
+				t.Fatalf("the lines that say the chain did not answer are %v, want %v", got, tc.declined)
+			}
+			if got := endedLines(logs); !slices.Equal(got, tc.ended) {
+				t.Fatalf("the lines that say the chain ended name %v, want %v", got, tc.ended)
+			}
+			if got := chainLines(logs); !slices.Equal(got, tc.chain) {
+				t.Fatalf("the lines that say the chain answered are %v, want %v", got, tc.chain)
+			}
+		})
+	}
+}
+
 // No chain in progress on the connection, the open test's own recording
 // answers as before: a connection that answered none of the series' first
 // recording, one where another call came between, and a series the scope
-// table does not mark once. No line says a chain answered.
+// table does not mark once. No line says a chain answered; the call that
+// came between is said to be not the chain's next (chainNextDiffers), by the
+// places it differs at, and no line is written where no chain was begun.
 func TestNoOnceChainInProgressLeavesTheOpenTestsOwnFirst(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
-		name  string
-		once  bool
-		calls []string
-		want  []string
+		name     string
+		once     bool
+		calls    []string
+		want     []string
+		declined []string
 	}{
-		{"no chain begun on the connection", true, []string{chainGet(chainRead), chainGet(chainRead)}, []string{answerV2, "a miss"}},
-		{"another call between ends the chain", true, []string{chainGet(chainByID), chainGet(chainApps), chainGet(chainRead)}, []string{answerByID, answerApps, answerV2}},
-		{"a series not marked once begins none", false, []string{chainGet(chainByID), chainGet(chainRead)}, []string{answerByID, answerV2}},
+		{"no chain begun on the connection", true, []string{chainGet(chainRead), chainGet(chainRead)}, []string{answerV2, "a miss"}, nil},
+		{"another call between ends the chain", true, []string{chainGet(chainByID), chainGet(chainApps), chainGet(chainRead)}, []string{answerByID, answerApps, answerV2}, []string{"chainNextDiffers mock-218 differs=[path]"}},
+		{"a series not marked once begins none", false, []string{chainGet(chainByID), chainGet(chainRead)}, []string{answerByID, answerV2}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			core, logs := observer.New(zap.InfoLevel)
@@ -277,8 +518,31 @@ func TestNoOnceChainInProgressLeavesTheOpenTestsOwnFirst(t *testing.T) {
 			if lines := chainLines(logs); len(lines) != 0 {
 				t.Fatalf("a chain line was written: %v", lines)
 			}
+			if got := declinedLines(logs); !slices.Equal(got, tc.declined) {
+				t.Fatalf("the lines that say the chain did not answer are %v, want %v", got, tc.declined)
+			}
 		})
 	}
+}
+
+// declinedLines are the lines that say a once chain did not answer a call
+// on its connection (the chain was in progress there): each one's check,
+// the recording it names next, and the places the call differs at where it
+// names them. A line of another series names it.
+func declinedLines(logs *observer.ObservedLogs) []string {
+	var out []string
+	for _, e := range logs.FilterMessageSnippet("a once series' chain did not answer a call on its connection").All() {
+		f := e.ContextMap()
+		line := f["check"].(string) + " " + f["next"].(string)
+		if series, _ := f["series"].(string); series != chainSeries {
+			line += " series=" + series
+		}
+		if d, ok := f["differs"]; ok {
+			line += " differs=" + fmt.Sprint(d)
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 // A chain is its connection's alone: while it is in progress on one
@@ -296,36 +560,74 @@ func TestAnotherConnectionGetsTheOpenTestsOwnWhileAChainIsInProgress(t *testing.
 
 // A chain's next recording that declares variables is the variable pass's,
 // which binds them: the chain does not answer it ahead, and the call is
-// answered as before, the open test's own first.
+// answered as before, the open test's own first. A line says so
+// (chainNextDeclaresVariables).
 func TestAOnceChainsNextThatDeclaresVariablesIsLeftToTheVariablePass(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	mm := patChain(t, zap.NewNop(), true, func(byName map[string]*models.Mock) {
+	core, logs := observer.New(zap.InfoLevel)
+	lg := zap.New(core)
+	mm := patChain(t, lg, true, func(byName map[string]*models.Mock) {
 		for _, n := range []string{"mock-218", "mock-308"} {
 			byName[n].Spec.HTTPReq.Header["X-Req-Id"] = "rec"
 		}
 		byName["mock-218"].Spec.Variables = models.MockVariables{"rid": {Recorded: "rec", Bind: "header.X-Req-Id"}}
 	})
-	c := dialParser(t, mm, zap.NewNop())
+	c := dialParser(t, mm, lg)
 	got := []string{c.send(chainGet(chainByID)), c.send("GET " + chainRead + " HTTP/1.1\r\nHost: deps\r\nX-Req-Id: rec\r\n\r\n")}
 	if want := []string{answerByID, answerV2}; !slices.Equal(got, want) {
 		t.Fatalf("the connection was answered %v, want %v", got, want)
+	}
+	if got, want := declinedLines(logs), []string{"chainNextDeclaresVariables mock-218"}; !slices.Equal(got, want) {
+		t.Fatalf("the lines that say the chain did not answer are %v, want %v", got, want)
+	}
+}
+
+// A chain's next recording another connection was answered with already is
+// not the chain's to answer again: the call goes on to the matchers, and a
+// line says the chain's next is not one the call's view holds unanswered
+// (chainNextNotHeld). The open test here recorded no read by name, so the
+// other connection's read is the series' version 1 (served wherever it
+// lands), and the chain's own read then misses.
+func TestAOnceChainsNextAnsweredElsewhereIsSaid(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.InfoLevel)
+	lg := zap.New(core)
+	mm := patChain(t, lg, true, func(byName map[string]*models.Mock) {
+		byName["mock-308"].Spec.HTTPReq.URL = "http://deps" + chainApps + "/owned"
+	})
+	a, b := dialParser(t, mm, lg), dialParser(t, mm, lg)
+	got := []string{a.send(chainGet(chainByID)), b.send(chainGet(chainRead)), a.send(chainGet(chainRead))}
+	if want := []string{answerByID, answerV1, "a miss"}; !slices.Equal(got, want) {
+		t.Fatalf("connections a, b, a were answered %v, want %v", got, want)
+	}
+	if got, want := declinedLines(logs), []string{"chainNextNotHeld mock-218"}; !slices.Equal(got, want) {
+		t.Fatalf("the lines that say the chain did not answer are %v, want %v", got, want)
+	}
+	if lines := chainLines(logs); len(lines) != 0 {
+		t.Fatalf("a chain line was written: %v", lines)
 	}
 }
 
 // A chain's next recording whose answer cannot be loaded ends the call
 // unanswered, as any answer that cannot be loaded does: the call is not
-// handed to the open test's own recording instead.
+// handed to the open test's own recording instead, and no line says the
+// chain left it to the matchers.
 func TestAOnceChainsNextWhoseAnswerCannotLoadEndsTheCall(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	mm := patChain(t, zap.NewNop(), true, func(byName map[string]*models.Mock) {
+	core, logs := observer.New(zap.InfoLevel)
+	lg := zap.New(core)
+	mm := patChain(t, lg, true, func(byName map[string]*models.Mock) {
 		byName["mock-218"].SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
 			return nil, nil, errors.New("the spilled answer is gone")
 		})
 	})
-	c := dialParser(t, mm, zap.NewNop())
+	c := dialParser(t, mm, lg)
 	got := []string{c.send(chainGet(chainByID)), c.send(chainGet(chainRead))}
 	if want := []string{answerByID, "no answer"}; !slices.Equal(got, want) {
 		t.Fatalf("the connection was answered %v, want %v", got, want)
+	}
+	if declined := declinedLines(logs); len(declined) != 0 {
+		t.Fatalf("a line says the chain did not answer: %v", declined)
 	}
 }
 
