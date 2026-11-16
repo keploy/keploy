@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/localfile"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -1325,14 +1326,12 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 // second keploy folder's file is said too.
 func TestAReceiptEntryKeployCannotGitIgnoreIsSaidAtWarn(t *testing.T) {
 	keployDir, otherDir := t.TempDir(), t.TempDir()
-	was := addGitIgnore
-	addGitIgnore = func(logger *zap.Logger, path, entry string) error {
+	t.Cleanup(localfile.SetAddGitIgnoreForTest(func(logger *zap.Logger, path, entry string) error {
 		if entry == "/*/"+ReceiptFile {
 			return fmt.Errorf("keploy/.gitignore is read-only")
 		}
-		return was(logger, path, entry)
-	}
-	t.Cleanup(func() { addGitIgnore = was })
+		return utils.AddToGitIgnore(logger, path, entry)
+	}))
 	core, logs := observer.New(zapcore.DebugLevel)
 	ignoreReceipts(zap.New(core), keployDir)
 	ignoreReceipts(zap.New(core), keployDir)

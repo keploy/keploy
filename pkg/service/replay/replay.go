@@ -36,6 +36,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/localfile"
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
@@ -3551,6 +3552,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// not this set's, nor are the tests whose request its agent did not read.
 	r.setCalls.reset()
 	r.requestsUnread.reset()
+	// Nor are the calls an earlier run of the set missed: a run that ends
+	// before its report is written leaves no misses file naming them as
+	// this run's (outsideTestMisses writes this run's).
+	localfile.RemoveMisses(r.config.Path, testSetID)
 	// var to store the error in the loop
 	var loopErr error
 	// Add secret files to .gitignore if they exist
@@ -7232,10 +7237,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// it).
 	r.setInternalErr = internalFailure
 	// The calls the set's application made outside every test that no mock
-	// answered and that fail nothing: named in its report and said, since
-	// nothing else names them (outside_test_misses.go).
-	outsideTest := models.OutsideTestMissesOf(r.setCalls.outside(provenswitch.On()))
-	r.logOutsideTestMisses(testSetID, outsideTest)
+	// answered and that fail nothing: named in its report, said, and
+	// written whole in its misses file, since nothing else names them
+	// (outside_test_misses.go).
+	outsideTest := r.outsideTestMisses(testSetID)
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,

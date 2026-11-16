@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/localfile"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/pkg/service/replay"
 	"go.keploy.io/server/v3/utils"
@@ -3056,82 +3057,21 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	logger.Warn(msg, append(fields, zap.String("next_step", models.UnmatchedCallLogText(miss, missNextStep(miss))))...)
 }
 
+// missDefaultNext is a miss's next step where its matcher gave none.
+const missDefaultNext = "record this call with --on-miss record, or re-record the set"
+
 // missNextStep is miss's next step, or, where its matcher gave none, to
 // record the call.
 func missNextStep(miss models.UnmatchedCall) string {
 	if miss.NextSteps == "" {
-		return "record this call with --on-miss record, or re-record the set"
+		return missDefaultNext
 	}
 	return miss.NextSteps
-}
-
-// wholeCall is miss's call and next step as the console and MissesFile name
-// them: whole. A miss the agent charged to a test holds them in its Whole
-// (models.UnmatchedCall.Charged), its own fields shaped as evidence keeps
-// them; every other miss, read from the proxy, holds them in its own.
-func wholeCall(miss models.UnmatchedCall) (call, next string) {
-	if w := miss.Whole; w != nil {
-		miss.ActualSummary, miss.Operation, miss.NextSteps = w.Call, "", w.NextStep
-	}
-	return miss.Named(), missNextStep(miss)
 }
 
 // missConsoleMax is how many calls no mock answered keploy mock replay's
 // console names (sayMisses); MissesFile names every one.
 const missConsoleMax = 20
-
-// missedCall is a call no mock answered, as the console and MissesFile name
-// it: once, however many times the replay made it (count).
-type missedCall struct {
-	Protocol    string `yaml:"protocol"`
-	Call        string `yaml:"call"`
-	PathTag     string `yaml:"path_tag,omitempty"`
-	Destination string `yaml:"destination,omitempty"`
-	HostTag     string `yaml:"host_tag,omitempty"`
-	Count       int    `yaml:"count"`
-	NextStep    string `yaml:"next_step"`
-	// OtherNextSteps is every other next step keploy gave the call in this
-	// replay, whole, each once, in the order first given: a call made again
-	// can be told another (one that quotes how long after a recording's
-	// answer it came, say). MissesFile names each, so every miss's next
-	// step is there whole; the console names NextStep alone.
-	OtherNextSteps []string `yaml:"other_next_steps,omitempty"`
-}
-
-// missedCallKey is what makes two misses one call (missedCalls).
-type missedCallKey struct {
-	Protocol, Call, PathTag, Destination, HostTag string
-}
-
-// missedCalls is misses, each call once, in the order the replay first made
-// it, with how many times it made it: a call of one protocol, summary, path
-// tag and destination is one call. A connection that ended with nothing sent
-// (models.MatchPhaseNoRequest) made no call, and is left out: its line says
-// so.
-func missedCalls(misses []models.UnmatchedCall) []missedCall {
-	var out []missedCall
-	at := map[missedCallKey]int{}
-	for _, miss := range misses {
-		if miss.MatchPhase == models.MatchPhaseNoRequest {
-			continue
-		}
-		call, next := wholeCall(miss)
-		next = strings.ReplaceAll(next, "\n", " ")
-		key := missedCallKey{Protocol: miss.Protocol, Call: call, PathTag: miss.PathTag, Destination: miss.Destination, HostTag: miss.HostTag}
-		if i, ok := at[key]; ok {
-			c := &out[i]
-			c.Count++
-			if next != c.NextStep && !slices.Contains(c.OtherNextSteps, next) {
-				c.OtherNextSteps = append(c.OtherNextSteps, next)
-			}
-			continue
-		}
-		at[key] = len(out)
-		out = append(out, missedCall{Protocol: key.Protocol, Call: key.Call, PathTag: key.PathTag, Destination: key.Destination, HostTag: key.HostTag,
-			Count: 1, NextStep: next})
-	}
-	return out
-}
 
 // sayMisses writes, on keploy's console, each call of misses whole, beside
 // the path tag the lines that log it name it by (models.UnmatchedCallLogShape:
@@ -3146,7 +3086,7 @@ func sayMisses(w io.Writer, misses []models.UnmatchedCall, file string) {
 	if w == nil {
 		return
 	}
-	calls := missedCalls(misses)
+	calls := localfile.MissedCalls(misses, missDefaultNext)
 	shown := len(calls)
 	if file != "" {
 		shown = min(shown, missConsoleMax)

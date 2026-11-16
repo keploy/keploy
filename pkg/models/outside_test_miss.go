@@ -79,9 +79,19 @@ func OutsideTestMissesOf(calls []UnmatchedCall) []OutsideTestMiss {
 	return out
 }
 
+// OutsideTestNextStep is what to do about c, a call the application made
+// outside every test that no mock answered and that fails nothing: the
+// set's report (OutsideTestMiss.NextStep) and its misses file name it.
+func OutsideTestNextStep(c UnmatchedCall) string {
+	if strings.EqualFold(c.Protocol, "DNS") {
+		return outsideNextDNS
+	}
+	return outsideNextCall
+}
+
 // outsideTestMissOf is c as OutsideTestMissesOf names it, with no count.
 func outsideTestMissOf(c UnmatchedCall) OutsideTestMiss {
-	m := OutsideTestMiss{Protocol: c.Protocol, When: OutsideAfterLastTest, NextStep: outsideNextCall}
+	m := OutsideTestMiss{Protocol: c.Protocol, When: OutsideAfterLastTest, NextStep: OutsideTestNextStep(c)}
 	switch {
 	case c.BeforeSet:
 		m.When = OutsideBeforeFirstTest
@@ -99,7 +109,6 @@ func outsideTestMissOf(c UnmatchedCall) OutsideTestMiss {
 		name = strings.TrimSpace(name)
 		m.Call = strings.TrimSpace(qtype + " " + HostShape(name))
 		m.Destination = TaggedHostLogName(name, c.HostTag)
-		m.NextStep = outsideNextDNS
 		return m
 	}
 	m.Call = UnmatchedCallLogShape(c)

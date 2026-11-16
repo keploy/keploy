@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
 	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/service/localfile"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
@@ -47,10 +48,10 @@ const ReceiptFile = "last-replay.yaml"
 // it.
 var receiptIgnore = []string{"/*/" + ReceiptFile, "/*/" + receiptTempPrefix + "*", "/*/" + TestsReceiptFile, "/*/" + MissesFile}
 
-// receiptTempPrefix names the temporary file. Deliberately NOT *.yaml: an
-// editor watching keploy/*/*.yaml would pick the transient file up as though
-// it were a receipt.
-const receiptTempPrefix = ".last-replay-"
+// receiptTempPrefix begins the temporary file's name (localfile.TempPrefix).
+// Deliberately NOT *.yaml: an editor watching keploy/*/*.yaml would pick the
+// transient file up as though it were a receipt.
+const receiptTempPrefix = localfile.TempPrefix
 
 // Why a replay failed, when it did.
 const (
@@ -483,130 +484,37 @@ func bypassList(rules []models.BypassRule) []string {
 }
 
 // MissesFile names, for the last keploy mock replay of a set, each call no
-// recorded mock answered: whole, as the user's own record of the run, as a
-// test run's report holds its calls, beside the path tag keploy's log named
-// it by (models.UnmatchedCall.PathTag), with how many times the replay made
-// it and each next step keploy gave it (missedCall.OtherNextSteps). The
-// console names the first of the calls, each with its first next step
-// (sayMisses), and points here, by path, for the rest, so the call behind
-// each tag the run's log names is found here. Each replay writes it anew,
-// over the last one's, and a replay that fails before it judged its calls
-// removes the last one's (it would name an earlier run's calls). It is
-// written only where it is git-ignored (missesIgnored: keploy/.gitignore's
-// "/*/last-replay-misses.yaml" and the temporary file's entry, added before
-// anything is written, and, where git can say, git itself ignoring both), as
-// the receipts are: it holds the calls whole. For the same reason nothing
-// that sends the keploy folder away carries it (HoldsCallsWhole).
-const MissesFile = "last-replay-misses.yaml"
-
-// missesTempPrefix begins the name of the temporary file a MissesFile write
-// goes through (tempPrefixOf): it holds the calls whole until it is renamed
-// into place, and a kill before that leaves it behind.
-const missesTempPrefix = receiptTempPrefix + "misses-"
-
-// tempPrefixOf begins the name of the temporary file a write of name, a file
-// keploy keeps local in a set's folder, goes through (writeLocalFile names
-// it tempPrefixOf(name) + "*.tmp"), and the one place that says which: the
-// writer, keploy/.gitignore's check (missesIgnored) and HoldsCallsWhole all
-// read it here. Each is under receiptTempPrefix, which keploy/.gitignore
-// ignores (receiptIgnore); MissesFile's is missesTempPrefix, for
-// HoldsCallsWhole to tell it from the receipts'.
-func tempPrefixOf(name string) string {
-	if name == MissesFile {
-		return missesTempPrefix
-	}
-	return receiptTempPrefix
-}
+// recorded mock answered, whole (localfile.MissesFile, which keploy test
+// writes too, for the calls a set's application made outside every test).
+// The console names the first of the calls, each with its first next step
+// (sayMisses), and points there, by path, for the rest.
+const MissesFile = localfile.MissesFile
 
 // HoldsCallsWhole says whether name, a file's base name, is one keploy writes
-// the calls a replay missed into whole: MissesFile, or the temporary file a
-// write of it goes through (tempPrefixOf), which a kill mid-write leaves
-// behind. Such a file is the user's own, local and git-ignored, and anything
+// the calls a run missed into whole (localfile.HoldsCallsWhole): anything
 // that sends the keploy folder away (a bundle, an upload) leaves it out.
-func HoldsCallsWhole(name string) bool {
-	return name == MissesFile || strings.HasPrefix(name, tempPrefixOf(MissesFile))
-}
+func HoldsCallsWhole(name string) bool { return localfile.HoldsCallsWhole(name) }
 
-// missesReport is MissesFile's content.
-type missesReport struct {
-	Set    string       `yaml:"set"`
-	At     time.Time    `yaml:"at"`
-	Misses []missedCall `yaml:"misses"`
+// missesWriter is keploy mock replay, as its MissesFile names it.
+var missesWriter = localfile.Writer{
+	Command:   "keploy mock replay",
+	Holds:     "each call no recorded mock answered in the last replay of this set",
+	NextStep:  missDefaultNext,
+	Unwritten: "could not write the calls no mock answered in this replay; the console names each",
 }
 
 // writeMissesFile writes MissesFile for a replay of set whose calls misses no
-// mock answered, in place of the last replay's, and returns its path, for
-// the console to point to; or removes a stale one when the replay missed no
-// call (it would describe an earlier run), and returns "". "" too when it
-// was not written, the console then naming every call: when it would not be
-// git-ignored (missesIgnored: it holds the calls whole, and must never be
-// committed), or the write failed.
+// mock answered (localfile.WriteMisses), and returns its path, for the
+// console to point to; "" when none was written, the console then naming
+// every call.
 func writeMissesFile(logger *zap.Logger, keployDir, set string, misses []models.UnmatchedCall) string {
-	dir := filepath.Join(keployDir, set)
-	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
-		return ""
-	}
-	calls := missedCalls(misses)
-	if len(calls) == 0 {
-		removeMissesFile(keployDir, set)
-		return ""
-	}
-	next := "check that " + dir + " and keploy/.gitignore are writable by the user running keploy"
-	unignored, err := missesIgnored(logger, keployDir, dir)
-	if unignored {
-		next = "remove the .gitignore line that un-ignores it (a later \"!\" line, such as \"!*.yaml\"), so keploy can keep the calls it names local"
-	}
-	if err == nil {
-		var body []byte
-		body, err = yaml.Marshal(missesReport{Set: set, At: time.Now().UTC().Truncate(time.Second), Misses: calls})
-		if err == nil {
-			err = writeLocalFile(logger, keployDir, dir, MissesFile,
-				append([]byte("# Written by `keploy mock replay`: each call no recorded mock answered in the last replay of this set, whole, beside the path tag keploy's log names it by. Local and git-ignored.\n"), body...))
-		}
-	}
-	if err != nil {
-		removeMissesFile(keployDir, set)
-		logger.Warn("could not write the calls no mock answered in this replay; the console names each", zap.String("dir", dir), zap.Error(err),
-			zap.String("next_step", next))
-		return ""
-	}
-	return filepath.Join(dir, MissesFile)
+	return localfile.WriteMisses(logger, keployDir, set, missesWriter, misses)
 }
 
 // removeMissesFile removes set's MissesFile, if there is one: it names the
-// calls of a replay before the one that is ending, which keploy did not
-// judge, or which missed none.
-func removeMissesFile(keployDir, set string) {
-	dir := filepath.Join(keployDir, set)
-	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
-		return
-	}
-	_ = setfile.RemoveInRecording(keployDir, filepath.Join(dir, MissesFile))
-}
-
-// missesIgnored makes keploy/.gitignore ignore every set's MissesFile and the
-// temporary file its write goes through, before anything is written
-// (ignoreReceipts), and says why either is not ignored, for the file not to be
-// written: both entries must be in keploy/.gitignore, and, where git can say
-// (utils.GitIgnores: git is installed and dir is in a work tree), git must
-// ignore both, so a later line of the user's that un-ignores one (a
-// "!*.yaml" after them) keeps the file from being written. unignored: git
-// said so, though keploy/.gitignore holds the entries.
-func missesIgnored(logger *zap.Logger, keployDir, dir string) (unignored bool, err error) {
-	failed := ignoreReceipts(logger, keployDir)
-	for _, entry := range []string{"/*/" + MissesFile, "/*/" + receiptTempPrefix + "*"} {
-		if failed[entry] != nil {
-			return false, fmt.Errorf("keploy/.gitignore could not be made to ignore %s: %w", entry, failed[entry])
-		}
-	}
-	// A name the temporary file a MissesFile write goes through takes.
-	for _, name := range []string{MissesFile, tempPrefixOf(MissesFile) + "0.tmp"} {
-		if ignored, known := utils.GitIgnores(dir, name); known && !ignored {
-			return true, fmt.Errorf("git does not ignore %s, though keploy/.gitignore lists it: a later .gitignore line un-ignores it", filepath.Join(dir, name))
-		}
-	}
-	return false, nil
-}
+// calls of a run before the replay that is ending, which keploy did not
+// judge.
+func removeMissesFile(keployDir, set string) { localfile.RemoveMisses(keployDir, set) }
 
 // writeTestsReceipt writes TestsReceiptFile for a replay, or removes a stale
 // one when this replay named no tests: it would describe an earlier run.
@@ -666,7 +574,7 @@ func ReadRecordTestsReceipt(keployDir, set string) (*TestsReceipt, error) {
 // writeTestsFile writes a per-test results file into dir, a set's folder of
 // the recording at keployDir, or removes a stale one when the run named no
 // tests: it would describe an earlier run. Both stay inside the recording
-// (writeLocalFile).
+// (localfile.Write).
 func writeTestsFile(logger *zap.Logger, keployDir, dir, file, head, run string, r TestsReceipt) {
 	path := filepath.Join(dir, file)
 	if r.empty() {
@@ -675,7 +583,7 @@ func writeTestsFile(logger *zap.Logger, keployDir, dir, file, head, run string, 
 	}
 	body, err := yaml.Marshal(persistedTests(r))
 	if err == nil {
-		err = writeLocalFile(logger, keployDir, dir, file, append([]byte(head), body...))
+		err = localfile.Write(logger, keployDir, dir, file, append([]byte(head), body...))
 	}
 	if err != nil {
 		_ = setfile.RemoveInRecording(keployDir, path)
@@ -887,111 +795,40 @@ func writeReceipt(logger *zap.Logger, keployDir string, r Receipt) {
 				zap.String("next_step", "delete it, or make its directory writable so keploy can keep it current"))
 		}
 	}
-	if err := writeLocalFile(logger, keployDir, dir, ReceiptFile, append(head, body...)); err != nil {
+	if err := localfile.Write(logger, keployDir, dir, ReceiptFile, append(head, body...)); err != nil {
 		fail(err)
 		return
 	}
 	ignoreReceipts(logger, keployDir)
 }
 
-// writeLocalFile writes data to dir/name through a temporary file renamed into
-// place (its name begins tempPrefixOf(name)), so a kill halfway leaves the
-// previous file or none, never half of one, and at most the temporary file
-// beside it. Under sudo the file belongs to the developer who ran keploy, not root.
-// dir is a folder of the recording at keployDir, and every step stays inside
-// the recording (setfile's ...InRecording): a set or keploy folder that links
-// out, or a link out at dir/name, is refused with why, and nothing is
-// written there.
-func writeLocalFile(logger *zap.Logger, keployDir, dir, name string, data []byte) error {
-	tmp, err := setfile.CreateTempInRecording(keployDir, dir, tempPrefixOf(name)+"*.tmp", 0o600)
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = setfile.RemoveInRecording(keployDir, tmp.Name())
-		}
-	}()
-	_, werr := tmp.Write(data)
-	if werr == nil {
-		werr = tmp.Chmod(0o644)
-	}
-	// Ownership on the open descriptor, before it can be renamed into place.
-	utils.RestoreFileOwnershipOf(logger, tmp, tmp.Name())
-	if cerr := tmp.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr == nil {
-		tempWritten(tmp.Name())
-		werr = setfile.RenameInRecording(keployDir, tmp.Name(), filepath.Join(dir, name))
-	}
-	if werr != nil {
-		return werr
-	}
-	committed = true
-	return nil
-}
-
-// tempWritten is called with the path of the temporary file a write goes
-// through once the data is in it and it is closed, just before it is renamed
-// into place: the file a kill there leaves behind. It does nothing; a test
-// sets it to see that file.
-var tempWritten = func(string) {}
-
-// readGitIgnore is keploy/.gitignore, read inside the recording (a link out
-// is read as no file: AddToGitIgnore then refuses it, and says why).
-func readGitIgnore(keployDir string) []byte {
-	f, err := setfile.OpenInRecording(keployDir, filepath.Join(keployDir, ".gitignore"))
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = f.Close() }()
-	b, _ := io.ReadAll(io.LimitReader(f, 1<<20))
-	return b
-}
-
-// ignoreReceipts adds the receipt entries to keploy/.gitignore, and reads the
-// file first so the common case -- they are already there -- writes nothing.
-// It returns why each entry it could not add is not there (nil when every
-// one is).
-//
-// The helper is an unlocked read-modify-write, so two replays starting at once
-// in one repository can both decide to append. Reading first makes that a
-// first-run-only race instead of one on every replay.
+// ignoreReceipts adds the receipt entries to keploy/.gitignore
+// (localfile.Ignore). It returns why each entry it could not add is not
+// there (nil when every one is).
 //
 // An entry it could not add is said at WARN, once a process for each
 // keploy/.gitignore, naming that file: the receipt holds the test command
 // whole, which a commit of a file git does not ignore would publish.
 func ignoreReceipts(logger *zap.Logger, keployDir string) (failed map[string]error) {
-	existing := readGitIgnore(keployDir)
-	lines := map[string]bool{}
-	for _, l := range strings.Split(string(existing), "\n") {
-		lines[strings.TrimSpace(l)] = true
+	failed = localfile.Ignore(logger, keployDir, receiptIgnore)
+	if failed == nil {
+		return nil
 	}
 	var entries []string
 	var first error
 	for _, entry := range receiptIgnore {
-		if lines[entry] {
-			continue
-		}
-		if err := addGitIgnore(logger, keployDir, entry); err != nil {
-			logger.Debug("failed to git-ignore the replay receipt", zap.String("entry", entry), zap.Error(err))
-			if failed == nil {
-				failed = map[string]error{}
+		if err, ok := failed[entry]; ok {
+			if first == nil {
 				first = err
 			}
-			failed[entry] = err
 			entries = append(entries, entry)
 		}
 	}
 	gitignore := filepath.Join(keployDir, ".gitignore")
-	if failed != nil {
-		if _, said := unignoredReceiptsSaid.LoadOrStore(gitignore, true); !said {
-			logger.Warn("keploy could not add the entries of its local receipts to this .gitignore, so git does not ignore them, and a receipt holds the test command whole",
-				zap.String("file", gitignore), zap.Strings("entries", entries), zap.Error(first),
-				zap.String("next_step", "make the file writable, or add the entries to it yourself, so that no receipt is committed"))
-		}
+	if _, said := unignoredReceiptsSaid.LoadOrStore(gitignore, true); !said {
+		logger.Warn("keploy could not add the entries of its local receipts to this .gitignore, so git does not ignore them, and a receipt holds the test command whole",
+			zap.String("file", gitignore), zap.Strings("entries", entries), zap.Error(first),
+			zap.String("next_step", "make the file writable, or add the entries to it yourself, so that no receipt is committed"))
 	}
 	return failed
 }
@@ -999,7 +836,3 @@ func ignoreReceipts(logger *zap.Logger, keployDir string) (failed map[string]err
 // unignoredReceiptsSaid are the keploy/.gitignore files ignoreReceipts said
 // it could not add an entry to, in this process.
 var unignoredReceiptsSaid sync.Map
-
-// addGitIgnore is utils.AddToGitIgnore; a variable so a test can make one
-// entry fail.
-var addGitIgnore = utils.AddToGitIgnore
