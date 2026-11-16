@@ -111,9 +111,34 @@ func fatal(format string, a ...any) {
 	os.Exit(2)
 }
 
+// queryN is the whole number a request's ?n= names. A request whose n is not
+// one is answered 400 with a fixed text, and false returned: the dependency
+// and the application answer with numbers they parsed, never the request's
+// own bytes.
+func queryN(w http.ResponseWriter, r *http.Request) (int, bool) {
+	n, err := strconv.Atoi(r.URL.Query().Get("n"))
+	if err != nil {
+		http.Error(w, "n must be a whole number", http.StatusBadRequest)
+		return 0, false
+	}
+	return n, true
+}
+
+// plainText marks w's answer as plain text that a browser never reads as
+// HTML, as http.Error does for an error's.
+func plainText(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
 func dep(addr, token string) {
 	http.HandleFunc("/name", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, token+"-"+r.URL.Query().Get("n"))
+		n, ok := queryN(w, r)
+		if !ok {
+			return
+		}
+		plainText(w)
+		_, _ = io.WriteString(w, token+"-"+strconv.Itoa(n))
 	})
 	fatal("dep: %v", http.ListenAndServe(addr, nil))
 }
@@ -123,7 +148,11 @@ func app(addr, depURL string) {
 	// redirect, record and replay.
 	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	http.HandleFunc("/greet", func(w http.ResponseWriter, r *http.Request) {
-		res, err := client.Get(depURL + "?n=" + url.QueryEscape(r.URL.Query().Get("n")))
+		n, ok := queryN(w, r)
+		if !ok {
+			return
+		}
+		res, err := client.Get(depURL + "?n=" + strconv.Itoa(n))
 		if err != nil {
 			http.Error(w, "the dependency did not answer: "+err.Error(), http.StatusBadGateway)
 			return
@@ -134,6 +163,7 @@ func app(addr, depURL string) {
 			http.Error(w, fmt.Sprintf("the dependency answered %d: %s %v", res.StatusCode, body, err), http.StatusBadGateway)
 			return
 		}
+		plainText(w)
 		_, _ = io.WriteString(w, "hello "+string(body))
 	})
 	fatal("app: %v", http.ListenAndServe(addr, nil))

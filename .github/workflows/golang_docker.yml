@@ -197,13 +197,20 @@ jobs:
           version: v0.27.0
           kubectl_version: v1.32.2
 
+      # The agent image is download-image's ghcr.io/keploy/keploy:v3-dev,
+      # run.sh's default. The proven switch is named on run.sh's command, not
+      # in env: (sudo_env.tests.sh): unset off the switch, 1 under it.
       - name: Record and replay on an IPv6-only cluster
         env:
-          KEPLOY_IMAGE: ghcr.io/keploy/keploy:v3-dev
-          KEPLOY_PROVEN: ${{ matrix.proven }}
+          PROVEN: ${{ matrix.proven }}
           KEPLOY_EXACT_VIEW_VERIFY: '1'
           ARTIFACTS: ${{ runner.temp }}/ipv6-only-kind
-        run: bash tests/e2e/ipv6-only-kind/run.sh
+        run: |
+          if [ "$PROVEN" = 1 ]; then
+            KEPLOY_PROVEN=1 bash tests/e2e/ipv6-only-kind/run.sh
+          else
+            env -u KEPLOY_PROVEN bash tests/e2e/ipv6-only-kind/run.sh
+          fi
 
       - name: Upload logs
         if: always()
