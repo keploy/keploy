@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/localfile"
@@ -66,6 +67,39 @@ func calledShaped(misses []models.OutsideTestMiss) string {
 	return out
 }
 
+// readsAsAnAgentDoes is the harness's stand-in agent, read as keploy's agent
+// client reads it: a read whose context is done reads nothing and returns the
+// context's error, as the client's request to the agent does, so a read made
+// with no time left (a set's end read given no budget) fails its row. atEnd,
+// when set, answers the set's end read (models.SetEndRead) in place of the
+// harness's answers, however many tests were read before it.
+type readsAsAnAgentDoes struct {
+	*prInstr
+	atEnd func() ([]models.UnmatchedCall, error)
+	ends  atomic.Int32
+}
+
+func (f *readsAsAnAgentDoes) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if models.SetEndRead(ctx) {
+		f.ends.Add(1)
+		if f.atEnd != nil {
+			return f.atEnd()
+		}
+	}
+	return f.prInstr.GetMockErrors(ctx)
+}
+
+// readAsAnAgentIs has the harness's replayer read its stand-in agent as
+// keploy's agent client reads it (readsAsAnAgentDoes).
+func readAsAnAgentIs(h *prRun) *readsAsAnAgentDoes {
+	a := &readsAsAnAgentDoes{prInstr: h.instr}
+	h.replayer.instrumentation = a
+	return a
+}
+
 // observeWarnings has the harness's replayer log to an observer, at WARN.
 func observeWarnings(h *prRun) *observer.ObservedLogs {
 	core, logs := observer.New(zapcore.WarnLevel)
@@ -103,12 +137,13 @@ func TestRunTestSet_CallsAfterTheLastTestAreNamedInEitherMode(t *testing.T) {
 			}
 			var reads atomic.Int32
 			h.instr.mockErrorsFor = counted(&reads, misses(nil, nil, func() ([]models.UnmatchedCall, error) { return setEnd, nil }))
+			agent := readAsAnAgentIs(h)
 
 			if status := h.run(t); status != models.TestSetStatusPassed {
 				t.Fatalf("status %s (reason %q); a call after the last test that counts against no test fails nothing", status, h.report.report.FailureReason)
 			}
-			if n := reads.Load(); n != 3 {
-				t.Fatalf("%d reads of the agent's misses, want one per test and the set's end", n)
+			if n, ends := reads.Load(), agent.ends.Load(); n != 3 || ends != 1 {
+				t.Fatalf("%d reads of the agent's misses, %d of them the set's end; want one per test and the set's end", n, ends)
 			}
 			rep := h.report.report
 			if len(rep.UnclaimedCalls) != 0 {
@@ -156,6 +191,143 @@ func TestRunTestSet_ASetEndReadThatFailsWithTheSwitchOffLeavesTheVerdict(t *test
 	}
 	if said := logs.FilterMessageSnippet(afterLastReadFailed).All(); len(said) != 1 || said[0].ContextMap()["test-set"] != "test-set-0" {
 		t.Fatalf("the failed read is said as %+v, want once, naming the set", said)
+	}
+}
+
+// With the switch off a set one of whose tests fails has its end read as a
+// set that passes has: it fails for that test alone, and the call its
+// application made after its last test that no mock answered is named as
+// made then, by its shape in its report and whole in keploy test's misses
+// file. It is no unclaimed call: with the switch off none fails a set.
+func TestRunTestSet_ACallAfterTheLastTestIsNamedOnASetThatFailedWithTheSwitchOff(t *testing.T) {
+	provenOn(t, false)
+	h := newPartialRunHarness(t, 2, 0)
+	withSetDir(t, h)
+	h.replayer.hookImpl = prHooks{wrongBody: map[string]bool{"test-1": true}} // test-1's answer differs
+	agent := readAsAnAgentIs(h)
+	agent.atEnd = func() ([]models.UnmatchedCall, error) {
+		return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /v1/flush", Destination: "10.20.30.42:9099"}}, nil
+	}
+
+	if status := h.run(t); status != models.TestSetStatusFailed {
+		t.Fatalf("status %s (reason %q), want FAILED for test-1", status, h.report.report.FailureReason)
+	}
+	rep := h.report.report
+	for _, r := range rep.Tests {
+		if want := models.TestStatusPassed; r.TestCaseID != "test-1" && r.Status != want {
+			t.Fatalf("test %s is %s, want %s: only test-1's answer differs", r.TestCaseID, r.Status, want)
+		} else if r.TestCaseID == "test-1" && r.Status != models.TestStatusFailed {
+			t.Fatalf("test-1 is %s, want FAILED: its answer differs", r.Status)
+		}
+	}
+	if len(rep.UnclaimedCalls) != 0 || strings.Contains(rep.FailureReason, "flush") {
+		t.Fatalf("unclaimed calls %+v, reason %q; with the switch off the call fails nothing", rep.UnclaimedCalls, rep.FailureReason)
+	}
+	if n := agent.ends.Load(); n != 1 {
+		t.Fatalf("%d reads of the set's end, want 1", n)
+	}
+	if got, want := calledShaped(rep.OutsideTestMisses), "HTTP POST /{}/{} @after_last_test;"; got != want {
+		t.Fatalf("the report names %s outside every test, want %s", got, want)
+	}
+	if got, want := calledWhole(readTestMisses(t, h)), "HTTP POST /v1/flush 10.20.30.42:9099;"; got != want {
+		t.Fatalf("the misses file names %s, want %s", got, want)
+	}
+}
+
+// With the switch off a set whose application exited on its own before the
+// set's end (APP_HALTED) has its end read too, as one that ran to its end
+// has: the agent still holds what the application missed before it exited,
+// and the set's report names it as made after its last test (it fails
+// nothing, and the set's status is its halt's).
+func TestRunTestSet_ASetWhoseAppHaltedHasItsEndReadWithTheSwitchOff(t *testing.T) {
+	provenOn(t, false)
+	h := newPartialRunHarness(t, 2, 0)
+	withSetDir(t, h)
+	h.instr.stopAppAfterNUpdates = 2
+	agent := readAsAnAgentIs(h)
+	agent.atEnd = func() ([]models.UnmatchedCall, error) {
+		return []models.UnmatchedCall{{Protocol: "DNS", ActualSummary: "A metrics.staging.internal.", HostTag: "#cd34"}}, nil
+	}
+
+	if status := h.run(t); status != models.TestSetStatusAppHalted {
+		t.Fatalf("status %s, want APP_HALTED: the case needs a set whose application exited before its end", status)
+	}
+	if n := agent.ends.Load(); n != 1 {
+		t.Fatalf("%d reads of the set's end, want 1: the agent holds what the application missed before it exited", n)
+	}
+	if got, want := calledShaped(h.report.report.OutsideTestMisses), "DNS A {}.{}.{}. @after_last_test;"; got != want {
+		t.Fatalf("the report names %s outside every test, want %s", got, want)
+	}
+	if got, want := calledWhole(readTestMisses(t, h)), "DNS A metrics.staging.internal. ;"; got != want {
+		t.Fatalf("the misses file names %s, want %s", got, want)
+	}
+}
+
+// With the switch off a set's end read that the run's user cut short, by
+// stopping the run as it was made, is the stop's, as under the switch
+// (TestRunTestSet_AStopThatCutsTheSetEndReadShortIsTheStops): the set is
+// USER_ABORT, it is not marked not judged, and the cut read is said at Debug,
+// never at WARN, since the stop is the set's status.
+func TestRunTestSet_AStopThatCutsTheSwitchOffSetEndReadIsTheStops(t *testing.T) {
+	provenOn(t, false)
+	h := newPartialRunHarness(t, 2, 0)
+	core, logs := observer.New(zapcore.DebugLevel)
+	h.replayer.logger = zap.New(core)
+	instr := &stopsAtSetEnd{prInstr: h.instr, at: 3} // a read per test, then the set's
+	instr.stop = func() { h.cancel() }
+	h.replayer.instrumentation = instr
+
+	status := h.run(t)
+	if n := instr.reads.Load(); n != 3 {
+		t.Fatalf("fixture: %d reads of the agent's misses, want 3", n)
+	}
+	if status != models.TestSetStatusUserAbort {
+		t.Fatalf("status %s, want USER_ABORT: the user stopped the run as the set's end was read", status)
+	}
+	if h.replayer.notJudged("test-set-0") {
+		t.Fatal("a set the user stopped is marked not judged")
+	}
+	if said := logs.FilterMessageSnippet(afterLastReadFailed).FilterLevelExact(zapcore.WarnLevel).Len(); said != 0 {
+		t.Fatalf("the read the user's stop cut short is said at WARN %d times, want none", said)
+	}
+	if said := logs.FilterMessageSnippet("cut short by the run's stop").FilterLevelExact(zapcore.DebugLevel).All(); len(said) != 1 || said[0].ContextMap()["test-set"] != "test-set-0" {
+		t.Fatalf("the read the user's stop cut short is said at Debug as %+v, want once, naming the set", said)
+	}
+}
+
+// blocksAtSetEnd is the stand-in agent whose read of the set's end answers
+// only once that read's context is done, with its error: an agent that does
+// not answer within the read's budget.
+type blocksAtSetEnd struct{ *prInstr }
+
+func (f *blocksAtSetEnd) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, error) {
+	if models.SetEndRead(ctx) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return f.prInstr.GetMockErrors(ctx)
+}
+
+// With the switch off a set-end read whose budget runs out is no user's stop:
+// it is said at WARN, naming the set, and the set's verdict stands.
+func TestRunTestSet_ASwitchOffSetEndReadWhoseBudgetRunsOutIsSaidAtWarn(t *testing.T) {
+	provenOn(t, false)
+	was := setEndDrainBudget
+	setEndDrainBudget = 100 * time.Millisecond
+	t.Cleanup(func() { setEndDrainBudget = was })
+	h := newPartialRunHarness(t, 2, 0)
+	core, logs := observer.New(zapcore.DebugLevel)
+	h.replayer.logger = zap.New(core)
+	h.replayer.instrumentation = &blocksAtSetEnd{h.instr}
+
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("status %s (reason %q); with the switch off a set's end read fails nothing", status, h.report.report.FailureReason)
+	}
+	if said := logs.FilterMessageSnippet(afterLastReadFailed).FilterLevelExact(zapcore.WarnLevel).All(); len(said) != 1 || said[0].ContextMap()["test-set"] != "test-set-0" {
+		t.Fatalf("the read whose budget ran out is said at WARN as %+v, want once, naming the set", said)
+	}
+	if said := logs.FilterMessageSnippet("cut short by the run's stop").Len(); said != 0 {
+		t.Fatalf("the read whose budget ran out is said %d times as cut short by the run's stop; no one stopped the run", said)
 	}
 }
 

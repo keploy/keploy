@@ -53,6 +53,8 @@
 # still ask docker's resolver, which now knows the peer.
 # With -unrecorded the probe also looks up startup-probe.* as it starts,
 # before it serves, so outside every test (the startup rows, rows_startup).
+# Under the proven switch (KEPLOY_PROVEN=1) it also looks up stop-probe.* as
+# it stops, after its last test (the after-last rows, rows_after_last).
 # "internal" (report only) runs the probe on an internal: true docker network.
 # Counts land in $W/out/<phase>/<path>.count. Each assertion prints one
 # "ROW <name>: PASS|FAIL" line and any FAIL fails the lane.
@@ -86,6 +88,14 @@ PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic ic
 # and the replay's report would not name the call.
 RECARGS="app -sink 198.18.0.10 -sink6 fd00::10 -peer riso-peer"
 APPARGS="$RECARGS -imds 198.18.0.11 -unrecorded"
+# Under the proven switch keploy test stops each set's application before it
+# reads the set's end, so a call the application makes as it stops is read
+# and named as made after its last test (rows_after_last). With the switch off
+# keploy test reads a set's end while its application still runs (the set's
+# post-script runs after that read, with the application up) and stops it
+# once the set's report is written, so such a call is never read; the probe
+# makes it only under the switch.
+[ "${KEPLOY_PROVEN:-}" != 1 ] || APPARGS="$APPARGS -stop-lookup"
 # Native runs: as root, in a mount namespace of their own whose resolv.conf
 # names the sink and whose nsswitch.conf asks files then DNS (a runner's image
 # may list systemd-resolved first, which answers from outside the namespace).
@@ -355,6 +365,25 @@ rows_startup() {
 	row_log "$p points to its misses file" "$W/out/$p/keploy.log" 'misses file names each call the application made outside every test whole.*last-test-misses[.]yaml'
 	row "git ignores $p's misses file" "$(git_ignores "$W/out/$p/keploy.gitignore" && echo 1)" "keploy/.gitignore $p left"
 	row "$p leaves mock replay's misses file as it was" "$([ -f "$W/out/$p/mock-misses-kept" ] && echo 1)" "last-replay-misses.yaml"
+}
+
+# The lookup after the last test (under the proven switch only, -stop-lookup):
+# the probe looks STOPNAME up as it stops, in no recording. keploy test
+# answers it itself and fails nothing for it; the run's report names it among
+# the set's outside-test misses as made after the last test, by its shape
+# beside its host tag, never whole, and keploy test's misses file names it
+# whole beside the same tag.
+STOPNAME=stop-probe.invalid-replay-isolation.test.
+# rows_after_last PHASE: PHASE's report and misses file name the lookup made
+# after the last test as above.
+rows_after_last() {
+	local p=$1 whole tag shaped
+	whole=$(yaml_list misses "$W/out/$p/last-test-misses.yaml" | grep -E "[|]call=(A|AAAA) ${STOPNAME//./[.]}[|]")
+	tag=$(printf '%s\n' "$whole" | grep -oE '[|]host_tag=#[0-9a-f]+[|]' | head -1 | sed 's/^|host_tag=//; s/|$//')
+	row "$p's misses file names the lookup made after the last test whole" "$([ -n "$tag" ] && echo 1)" "${whole:-none in last-test-misses.yaml}"
+	shaped=$(yaml_list outside_test_misses "$W/out/$p"/report/*.yaml | grep -F '|protocol=DNS|' | grep -F '|when=after_last_test|' | grep -F " $tag|")
+	row "$p's report names the lookup made after the last test by its shape" "$([ -n "$tag" ] && [ -n "$shaped" ] && ! printf '%s' "$shaped" | grep -qF stop-probe && echo 1)" "$(printf '%s' "${shaped:-no outside-test miss with tag ${tag:-unknown}}" | cut -c1-160)"
+	row "$p's report names the lookup made after the last test nowhere whole" "$(cat "$W/out/$p"/report/*.yaml 2>/dev/null | grep -qF stop-probe || echo 1)" "stop-probe in $p's report"
 }
 
 # replay PHASE CMD...: one keploy test run in the current dir, its log and exit.
@@ -637,8 +666,10 @@ for mode in "${MODES[@]}"; do
 	native)
 		rows_reach base-native tcp tfo imds-tcp dns-udp
 		row "replay-native passes" "$([ "$(cat "$W/out/replay-native/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-native/exit" 2>/dev/null)"
-		# The start-up lookup, outside every test (rows_startup).
+		# The start-up lookup, outside every test (rows_startup), and, under
+		# the proven switch, the one made after the last test (rows_after_last).
 		rows_startup replay-native
+		[ "${KEPLOY_PROVEN:-}" != 1 ] || rows_after_last replay-native
 		# A DNS miss is answered by keploy: native has no in-network resolver.
 		rows_zero replay-native tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp
 		row_log "replay-native names the resolvers it does not ask" "$W/out/replay-native/keploy.log" 'forwarded only to a resolver inside the replay.s own network.*not_asked.*198\.18\.0\.10'
@@ -662,8 +693,10 @@ for mode in "${MODES[@]}"; do
 		# dns-bare: it recurses an unrecorded single-label name there too.
 		rows_reach base-docker tcp fork-tcp tfo imds-tcp dns-udp dns-bare
 		row "replay-docker passes" "$([ "$(cat "$W/out/replay-docker/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-docker/exit" 2>/dev/null)"
-		# The start-up lookup, outside every test (rows_startup).
+		# The start-up lookup, outside every test (rows_startup), and, under
+		# the proven switch, the one made after the last test (rows_after_last).
 		rows_startup replay-docker
+		[ "${KEPLOY_PROVEN:-}" != 1 ] || rows_after_last replay-docker
 		# keploy answers that name itself: 127.0.0.11 gets only the network's
 		# own names, so the name never reaches its upstream. Nor does any
 		# other (dns-other): only 127.0.0.11 asks the sink here.
@@ -693,8 +726,10 @@ for mode in "${MODES[@]}"; do
 		rows_reach base-compose dns-owned
 		row_log "base-compose resolves the peer service" "$W/out/base-compose/app.log" 'probe dns-peer: [0-9]'
 		row "replay-compose passes" "$([ "$(cat "$W/out/replay-compose/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose/exit" 2>/dev/null)"
-		# The start-up lookup, outside every test (rows_startup).
+		# The start-up lookup, outside every test (rows_startup), and, under
+		# the proven switch, the one made after the last test (rows_after_last).
 		rows_startup replay-compose
+		[ "${KEPLOY_PROVEN:-}" != 1 ] || rows_after_last replay-compose
 		# keploy answers that name itself, so it never reaches 127.0.0.11's
 		# upstream, nor does any other name (dns-other).
 		rows_zero replay-compose tcp fork-tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp

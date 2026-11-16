@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -110,6 +111,7 @@ func app(args []string) {
 	imds := fs.String("imds", "", "the metadata address the sink owns (empty: the app makes no metadata call)")
 	peer := fs.String("peer", "", "a container name the network holds, resolved through it (empty: skip)")
 	unrecorded := fs.Bool("unrecorded", false, "also look up the names a recording must not hold (the replay's and the baselines' args; the recording's leave it off)")
+	stopLookup := fs.Bool("stop-lookup", false, "look a name up as the app stops (SIGINT or SIGTERM), after its last test and in no recording, then exit (the replay's args under the proven switch, which reads a set's end once its app has stopped)")
 	listen := fs.String("listen", ":8080", "")
 	_ = fs.Parse(args)
 	at := func(p int) string { return net.JoinHostPort(*sinkIP, strconv.Itoa(p)) }
@@ -191,6 +193,24 @@ func app(args []string) {
 	if *unrecorded {
 		_, err := net.DefaultResolver.LookupHost(context.Background(), "startup-probe.invalid-replay-isolation.test")
 		outcome("dns-startup-lookup", err)
+	}
+	// A name looked up as the app stops, so after its last test, which no
+	// recording holds (the recording's args leave -stop-lookup off). Under
+	// the proven switch keploy test stops the app before it reads the set's
+	// end, so that read takes it: the report names it as made after the last
+	// test by its shape, and the misses file names it whole (the after-last
+	// rows). Bounded, so the stop is prompt.
+	if *stopLookup {
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-stop
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_, err := net.DefaultResolver.LookupHost(ctx, "stop-probe.invalid-replay-isolation.test")
+			cancel()
+			outcome("dns-stop-lookup", err)
+			os.Exit(0)
+		}()
 	}
 	fmt.Fprintln(os.Stderr, http.ListenAndServe(*listen, nil))
 	os.Exit(1)

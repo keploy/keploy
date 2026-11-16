@@ -36,12 +36,20 @@ import (
 // its last test. They were read by no one: cut at the next set's staging,
 // said only by their shape in a line that keeps no record of them, or, after
 // the run's last set, never read. The application is still running then: a
-// call it makes after this read is cut at the next set's staging, as before.
-// A read that cannot vouch for every such call (one cut short by the run's
-// stop included) is said at WARN; the set's verdict is what it would be
-// without the read, whatever it returns.
+// call it makes after this read (as it stops, among them) is cut at the next
+// set's staging, as before, or, after the run's last set, never read. The
+// set's verdict is what it would be without the read, whatever it returns. A
+// read that cannot vouch for every such call is said at WARN, but one the
+// run's user cut short by stopping the run is the stop's: the stop is the
+// set's status (USER_ABORT), so it is said at Debug, as under the switch.
 func (r *Replayer) readAfterLastTest(ctx context.Context, testSetID string) {
-	if _, _, err := r.unclaimedCalls(ctx); err != nil {
+	_, _, err := r.unclaimedCalls(ctx)
+	switch {
+	case err == nil:
+	case stoppedByItsUser(ctx):
+		r.logger.Debug("the read of the calls the application made after the test-set's last test was cut short by the run's stop; the stop is the test-set's status",
+			zap.String("test-set", testSetID), zap.Error(err))
+	default:
 		r.logger.Warn("keploy could not read every call the application made after the test-set's last test that no mock answered: its report may not name each (outsideTestMisses); they fail nothing, so the test-set's verdict stands",
 			zap.String("test-set", testSetID), zap.Error(err))
 	}
