@@ -183,6 +183,15 @@ func app(args []string) {
 		_, _ = w.Write([]byte("fired\n"))
 	})
 	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
+	// A name looked up as the app starts, before it serves, so outside every
+	// test, and only with -unrecorded: a start-up lookup made only in a
+	// replay (a configuration that differs from the recording's), which no
+	// mock answers. keploy test answers it itself; its report names it by its
+	// shape and its misses file names it whole (the startup rows).
+	if *unrecorded {
+		_, err := net.DefaultResolver.LookupHost(context.Background(), "startup-probe.invalid-replay-isolation.test")
+		outcome("dns-startup-lookup", err)
+	}
 	fmt.Fprintln(os.Stderr, http.ListenAndServe(*listen, nil))
 	os.Exit(1)
 }

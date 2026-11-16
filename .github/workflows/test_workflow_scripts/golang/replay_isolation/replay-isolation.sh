@@ -51,6 +51,8 @@
 # no resolver asked even under the DNS opt-in; and the peer's name, before
 # the peer is up, so the recording holds that NXDOMAIN too and the replay must
 # still ask docker's resolver, which now knows the peer.
+# With -unrecorded the probe also looks up startup-probe.* as it starts,
+# before it serves, so outside every test (the startup rows, rows_startup).
 # "internal" (report only) runs the probe on an internal: true docker network.
 # Counts land in $W/out/<phase>/<path>.count. Each assertion prints one
 # "ROW <name>: PASS|FAIL" line and any FAIL fails the lane.
@@ -283,6 +285,65 @@ row_not_kept_dns() {
 	row "$1" "$([ -z "$bad" ] && echo 1)" "kept DNS tags in $2:${bad:- none names $3}"
 }
 
+# The start-up lookup: the probe looks STARTUP up as it starts, only with
+# -unrecorded (the replay's args, never the recording's), so outside every
+# test and in no recording. keploy test answers it itself and fails nothing
+# for it; the run's report names it among the set's outside-test misses by
+# its shape beside its host tag, never whole (a report may be uploaded), and
+# the log says its next step; keploy test's own misses file
+# (keploy/<set>/last-test-misses.yaml, by: keploy test) names it whole beside
+# the same tag, and git ignores that file. keploy mock replay's misses file
+# (last-replay-misses.yaml) is left as it was.
+STARTUP=startup-probe.invalid-replay-isolation.test.
+# mock_misses SET: keploy mock replay's misses file of SET, as the lane plants
+# it before each keploy test run.
+mock_misses() { printf '# Written by `keploy mock replay` (planted by the lane)\nset: %s\nby: keploy mock replay\n' "$1"; }
+# yaml_list KEY FILE...: each entry of the top-level list KEY in FILEs, one
+# line each, as "|key=value|key=value|", each value unquoted.
+yaml_list() {
+	local key=$1; shift
+	cat "$@" 2>/dev/null | awk -v key="$key" '
+		function flush() { if (e != "") print e; e = "" }
+		$0 ~ "^" key ":" { inl = 1; next }
+		inl && /^[^[:space:]#-]/ { flush(); inl = 0 }
+		!inl { next }
+		/^[[:space:]]*- / { flush(); e = "|" }
+		e != "" {
+			l = $0; sub(/^[[:space:]]*(- )?/, "", l)
+			k = l; sub(/:.*/, "", k)
+			v = l; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/^[\047"]|[\047"]$/, "", v)
+			e = e k "=" v "|"
+		}
+		END { flush() }'
+}
+# git_ignores GITIGNORE: git ignores a set's keploy test misses file in a
+# repository whose keploy/.gitignore is GITIGNORE (the lane's work dirs are
+# no repository, so it reads the file keploy wrote in one of its own).
+git_ignores() {
+	local g rc
+	g=$(mktemp -d) || return 1
+	mkdir -p "$g/keploy/test-set-0" && cp "$1" "$g/keploy/.gitignore" && : > "$g/keploy/test-set-0/last-test-misses.yaml" &&
+		git -C "$g" init -q && git -C "$g" check-ignore -q keploy/test-set-0/last-test-misses.yaml
+	rc=$?
+	rm -rf "$g"
+	return $rc
+}
+# rows_startup PHASE: PHASE's report, log and misses files name the start-up
+# lookup as above.
+rows_startup() {
+	local p=$1 whole tag shaped
+	whole=$(yaml_list misses "$W/out/$p/last-test-misses.yaml" | grep -E "[|]call=(A|AAAA) ${STARTUP//./[.]}[|]")
+	tag=$(printf '%s\n' "$whole" | grep -oE '[|]host_tag=#[0-9a-f]+[|]' | head -1 | sed 's/^|host_tag=//; s/|$//')
+	row "$p's misses file names the start-up lookup whole" "$([ -n "$tag" ] && grep -qx 'by: keploy test' "$W/out/$p/last-test-misses.yaml" && echo 1)" "${whole:-none in last-test-misses.yaml}"
+	shaped=$(yaml_list outside_test_misses "$W/out/$p"/report/*.yaml | grep -F '|protocol=DNS|' | grep -F '|when=before_first_test|' | grep -F " $tag|")
+	row "$p's report names the start-up lookup by its shape, before the first test" "$([ -n "$tag" ] && [ -n "$shaped" ] && ! printf '%s' "$shaped" | grep -qF startup-probe && echo 1)" "$(printf '%s' "${shaped:-no outside-test miss with tag ${tag:-unknown}}" | cut -c1-160)"
+	row "$p's report names the start-up lookup nowhere whole" "$(cat "$W/out/$p"/report/*.yaml 2>/dev/null | grep -qF startup-probe || echo 1)" "startup-probe in $p's report"
+	row_log "$p says the start-up lookup's next step" "$W/out/$p/keploy.log" 'made a call outside every test that no mock answered.*record the test set again'
+	row_log "$p points to its misses file" "$W/out/$p/keploy.log" 'misses file names each call the application made outside every test whole.*last-test-misses[.]yaml'
+	row "git ignores $p's misses file" "$(git_ignores "$W/out/$p/keploy.gitignore" && echo 1)" "keploy/.gitignore $p left"
+	row "$p leaves mock replay's misses file as it was" "$([ -f "$W/out/$p/mock-misses-kept" ] && echo 1)" "last-replay-misses.yaml"
+}
+
 # replay PHASE CMD...: one keploy test run in the current dir, its log and exit.
 replay() {
 	local phase=$1; shift
@@ -296,6 +357,12 @@ replay() {
 	# Under docker, the resolv.conf docker wrote for the app (for dns_why).
 	waitfor 300 docker_resolv "$phase" riso-app &
 	local resolvwatch=$!
+	# keploy mock replay's misses file of the set, as a last mock replay
+	# would leave it, for the startup rows: keploy test never writes or
+	# removes it.
+	local set
+	set=$(ls -d keploy/test-set-* 2>/dev/null | head -1)
+	[ -z "$set" ] || mock_misses "${set##*/}" | $S tee "$set/last-replay-misses.yaml" >/dev/null
 	"${RUNNER[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" test "$@" --apiTimeout 60 --disable-tele --disableANSI --generate-github-actions=false > "$W/out/$phase/keploy.log" 2>&1
 	echo $? > "$W/out/$phase/exit"
 	echo "$phase exit $(cat "$W/out/$phase/exit")"
@@ -305,6 +372,13 @@ replay() {
 	local run
 	run=$(ls -td keploy/reports/test-run-* 2>/dev/null | head -1)
 	[ -z "$run" ] || cp -r "$run" "$W/out/$phase/report"
+	# keploy test's own misses file and the keploy/.gitignore it was
+	# written under, and whether mock replay's file is as it was.
+	if [ -n "$set" ]; then
+		cp "$set/last-test-misses.yaml" "$W/out/$phase/" 2>/dev/null
+		if cmp -s "$set/last-replay-misses.yaml" <(mock_misses "${set##*/}"); then : > "$W/out/$phase/mock-misses-kept"; fi
+	fi
+	cp keploy/.gitignore "$W/out/$phase/keploy.gitignore" 2>/dev/null
 	kill $peerwatch $resolvwatch 2>/dev/null; wait $peerwatch $resolvwatch 2>/dev/null
 	docker rm -f riso-app >/dev/null 2>&1
 	[ ! -f docker-compose.yml ] || docker compose down --remove-orphans >/dev/null 2>&1
@@ -550,6 +624,8 @@ for mode in "${MODES[@]}"; do
 	native)
 		rows_reach base-native tcp tfo imds-tcp dns-udp
 		row "replay-native passes" "$([ "$(cat "$W/out/replay-native/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-native/exit" 2>/dev/null)"
+		# The start-up lookup, outside every test (rows_startup).
+		rows_startup replay-native
 		# A DNS miss is answered by keploy: native has no in-network resolver.
 		rows_zero replay-native tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp
 		row_log "replay-native names the resolvers it does not ask" "$W/out/replay-native/keploy.log" 'forwarded only to a resolver inside the replay.s own network.*not_asked.*198\.18\.0\.10'
@@ -573,6 +649,8 @@ for mode in "${MODES[@]}"; do
 		# dns-bare: it recurses an unrecorded single-label name there too.
 		rows_reach base-docker tcp fork-tcp tfo imds-tcp dns-udp dns-bare
 		row "replay-docker passes" "$([ "$(cat "$W/out/replay-docker/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-docker/exit" 2>/dev/null)"
+		# The start-up lookup, outside every test (rows_startup).
+		rows_startup replay-docker
 		# keploy answers that name itself: 127.0.0.11 gets only the network's
 		# own names, so the name never reaches its upstream. Nor does any
 		# other (dns-other): only 127.0.0.11 asks the sink here.
@@ -602,6 +680,8 @@ for mode in "${MODES[@]}"; do
 		rows_reach base-compose dns-owned
 		row_log "base-compose resolves the peer service" "$W/out/base-compose/app.log" 'probe dns-peer: [0-9]'
 		row "replay-compose passes" "$([ "$(cat "$W/out/replay-compose/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose/exit" 2>/dev/null)"
+		# The start-up lookup, outside every test (rows_startup).
+		rows_startup replay-compose
 		# keploy answers that name itself, so it never reaches 127.0.0.11's
 		# upstream, nor does any other name (dns-other).
 		rows_zero replay-compose tcp fork-tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp
