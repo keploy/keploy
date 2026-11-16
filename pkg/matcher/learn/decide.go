@@ -87,16 +87,24 @@ type Edit struct {
 // place, which state, which rule), at most three "mock-N <path>" places, and
 // the edits that would accept it, likeliest first.
 type Refusal struct {
-	Kind     RefusalKind `json:"kind"`
-	Test     string      `json:"test,omitempty"`
-	Mock     string      `json:"mock,omitempty"`
-	Field    string      `json:"field,omitempty"`
-	Word     int         `json:"word,omitempty"`
-	Recorded string      `json:"recorded,omitempty"`
-	Full     string      `json:"full,omitempty"`
-	Why      string      `json:"why,omitempty"`
-	Places   []string    `json:"places,omitempty"`
-	Edits    []Edit      `json:"edits,omitempty"`
+	Kind RefusalKind `json:"kind"`
+	// Check is the stable name of the check that refused the word: the
+	// branch of the learn step that decided it ("own-moved",
+	// "outside-test", "order-unknown", ...), a word refused for its
+	// first place taking that place's branch. It names code, never a
+	// value, and keeps its name across releases, so refusals can be
+	// counted by it (RefusalNote). "" only on a refusal made outside
+	// this package.
+	Check    string   `json:"check,omitempty"`
+	Test     string   `json:"test,omitempty"`
+	Mock     string   `json:"mock,omitempty"`
+	Field    string   `json:"field,omitempty"`
+	Word     int      `json:"word,omitempty"`
+	Recorded string   `json:"recorded,omitempty"`
+	Full     string   `json:"full,omitempty"`
+	Why      string   `json:"why,omitempty"`
+	Places   []string `json:"places,omitempty"`
+	Edits    []Edit   `json:"edits,omitempty"`
 	// Rule is the id of the keploy.yml rule that declares the field's
 	// source (Input.Source), "" where none does.
 	Rule string `json:"rule,omitempty"`
@@ -319,8 +327,15 @@ type Decision struct {
 	EitherOrder bool
 }
 
-// Decide is every changed word of in, decided (see above).
-func Decide(in Input) []Decision { return decideBy(in) }
+// Decide is every changed word of in, decided (see above). Each word it
+// refuses is noted to the refusal sink, if one is set (SetRefusalSink),
+// once, as it returns: a refusal a later step of the decision settles is
+// never noted.
+func Decide(in Input) []Decision {
+	ds := decideBy(in)
+	noteRefused(in, ds)
+	return ds
+}
 
 // The seams other parts of learning set from their own files: decideBy is
 // the order a changed word is decided in; clockInWindow is a Clock the
@@ -391,7 +406,7 @@ func cannotCheck(in Input, field string, at variables.Address, word int, r, f st
 	edit := Edit{Kind: EditNoiseAtField, Mock: in.Mock, Field: field, Word: -1}
 	return Decision{
 		At: at, Recorded: r, Full: f, Outcome: OutcomeRefused,
-		Refusal: &Refusal{Kind: RefusalCannotCheck, Test: in.Test, Mock: in.Mock, Field: field, Word: word, Recorded: r, Full: f, Why: why, Edits: []Edit{edit}},
+		Refusal: &Refusal{Kind: RefusalCannotCheck, Check: "cannot-check-all", Test: in.Test, Mock: in.Mock, Field: field, Word: word, Recorded: r, Full: f, Why: why, Edits: []Edit{edit}},
 		Line:    where + ": recorded " + strconv.Quote(r) + ", round F " + strconv.Quote(f) + ": " + why + ". Noise at the field until keploy can; this is keploy's limit",
 	}
 }

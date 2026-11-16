@@ -31,7 +31,12 @@ func TestMain(m *testing.M) {
 		}
 	}
 	everyCacheSet = os.Getenv("KEPLOY_LEARN_SET_EVERY_CACHE") == "1"
-	os.Exit(m.Run())
+	SetRefusalSink(&checkGuard)
+	code := m.Run()
+	if checkGuard.failed() && code == 0 {
+		code = 1
+	}
+	os.Exit(code)
 }
 
 // noSet is dc with no set cache, in every mode (everyCacheSet): a cache no

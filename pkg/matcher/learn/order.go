@@ -98,7 +98,7 @@ func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields [
 			hideSecrets(&rf)
 			ds[i] = Decision{At: d.At, Recorded: d.Recorded, Full: d.Full, Refusal: &rf, Line: RefusalLine(rf)}
 		default:
-			ds[i] = dc.refuse(fields[i], d.At, d.At.Word, d.Recorded, d.Full, RefusalUnknown,
+			ds[i] = dc.refuse(fields[i], d.At, d.At.Word, d.Recorded, d.Full, RefusalUnknown, "own-instant-both-ways",
 				"an exchange recorded at the call's own instant read as an earlier place of the test makes it "+names[d.Outcome]+
 					", read as a recording made after the call "+names[a.Outcome]+": keploy cannot tell which the application did",
 				nil, dc.fieldNoise(fields[i]))
@@ -263,7 +263,7 @@ func (dc *decider) decide() ([]Decision, []string) {
 		// A recording keploy could not read again: every change of the
 		// call is refused.
 		for i, d := range out {
-			out[i] = dc.refuse(fields[i], d.At, d.At.Word, d.Recorded, d.Full, RefusalUnread,
+			out[i] = dc.refuse(fields[i], d.At, d.At.Word, d.Recorded, d.Full, RefusalUnread, "unread-earlier",
 				dc.unreadWhy(), nil,
 				Edit{Kind: EditReRecord}, dc.fieldNoise(fields[i]))
 		}
@@ -311,7 +311,7 @@ func (dc *decider) oneValue(out []Decision, fields []string) {
 			for _, k := range []int{j, i} {
 				if out[k].Outcome == OutcomeFresh {
 					aa := out[k].AnsweredAfter
-					out[k] = dc.refuse(fields[k], out[k].At, out[k].At.Word, out[k].Recorded, out[k].Full, RefusalTwoSources, why,
+					out[k] = dc.refuse(fields[k], out[k].At, out[k].At.Word, out[k].Recorded, out[k].Full, RefusalTwoSources, "one-value-two-sources", why,
 						[]string{name(j), name(i)}, dc.fieldNoise(fields[k]))
 					out[k].AnsweredAfter = aa
 				}
@@ -351,7 +351,7 @@ func (dc *decider) leaf(path, unread string) []Decision {
 	}
 	switch {
 	case unread != "":
-		return []Decision{dc.refuse(path, at, -1, rec.Value, live.Value, RefusalUnread,
+		return []Decision{dc.refuse(path, at, -1, rec.Value, live.Value, RefusalUnread, "unread-before-call",
 			"keploy could not read "+unread+", which came before this call", nil,
 			Edit{Kind: EditReRecord}, dc.fieldNoise(path))}
 	case rec.Unnamed || live.Unnamed:
@@ -445,7 +445,7 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 		if slices.ContainsFunc(rd.Separators, func(sc sepChange) bool { return len(sc.Tokens) == 0 }) {
 			why = betweenWords(rd)
 		}
-		return []Decision{dc.refuse(path, bare, -1, rec, live, RefusalChangedShape, why, nil, dc.fieldNoise(path))}, true
+		return []Decision{dc.refuse(path, bare, -1, rec, live, RefusalChangedShape, "text-changed-shape", why, nil, dc.fieldNoise(path))}, true
 	}
 	var out []Decision
 	// arounds: the reads in out (by index) refused because the text changed
@@ -813,7 +813,7 @@ func longestWord(s string) string {
 // changed with it) are refused as a changed shape, the field whole.
 func (dc *decider) signature(path string, bare variables.Address, rec, live string, rd textReading) ([]Decision, bool) {
 	if !variables.SignatureForm(rd.Rec, rd.Live) {
-		return []Decision{dc.refuse(path, bare, -1, rec, live, RefusalChangedShape,
+		return []Decision{dc.refuse(path, bare, -1, rec, live, RefusalChangedShape, "signature-form",
 			"its JWT's signature changed form (keploy checks a signature by its form: base64url of one length)", nil, dc.fieldNoise(path))}, true
 	}
 	whole := readWord{At: rd.At, Rec: rd.Rec, Live: rd.Live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rd.Rec, Live: rd.Live}}}
@@ -926,9 +926,9 @@ func (dc *decider) unpaired(path string, at variables.Address, rec, live string,
 		}
 	}
 	if len(held) == 0 {
-		return dc.refuse(path, at, -1, rec, live, RefusalChangedShape, "a word was added or dropped", nil, dc.fieldNoise(path))
+		return dc.refuse(path, at, -1, rec, live, RefusalChangedShape, "word-added-or-dropped", "a word was added or dropped", nil, dc.fieldNoise(path))
 	}
-	return dc.refuse(path, at, -1, rec, live, RefusalUnknown,
+	return dc.refuse(path, at, -1, rec, live, RefusalUnknown, "unpaired-unknown",
 		"keploy cannot tell what round F gave at "+held[0].name+" before this call (a word was added or dropped beside one it holds)", names(held),
 		Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 }
@@ -1553,7 +1553,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 			continue
 		}
 		if !read {
-			unknown = append(unknown, evPlace{name: p.name, why: "past the call's budget"})
+			unknown = append(unknown, evPlace{name: p.name, why: "past the call's budget", check: "past-budget"})
 			continue
 		}
 		switch ev {
@@ -1561,16 +1561,16 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 			if tokenShown(p, w) {
 				ev = evShown
 			} else if ev == evNone && dc.gluedAt(p, w) {
-				ev, p.why = evUnknown, "glued to the bytes around it, in a body that declares no media type (no Content-Type): keploy cannot tell the words the application was given there from the bytes that frame them"
+				ev, p.why, p.check = evUnknown, "glued to the bytes around it, in a body that declares no media type (no Content-Type): keploy cannot tell the words the application was given there from the bytes that frame them", "glued"
 			} else if ev == evNone && p.gave && p.rec != p.live && p.rec != "" && p.live != "" && strings.Contains(w.Rec, p.rec) && strings.Contains(w.Live, p.live) {
 				// A given glued inside the word in both runs is a part of
 				// it (#5016), at any length: the test gave it, so the word
 				// changed with it, and keploy binds a given only whole.
-				ev, p.why = evUnknown, "the given stands inside the word in both runs, glued to the text around it: keploy binds a given only as a whole word"
+				ev, p.why, p.check = evUnknown, "the given stands inside the word in both runs, glued to the text around it: keploy binds a given only as a whole word", "given-glued"
 			}
 		case evShown:
 			if moved[i] != "" {
-				ev, p.why = evUnknown, moved[i]
+				ev, p.why, p.check = evUnknown, moved[i], "moved"
 			}
 		}
 		switch ev {
@@ -1603,14 +1603,17 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 			hr := held[k].recBefore(p)
 			switch {
 			case p.gave || countsByText(p, w):
+				p.check = "held-both-runs"
 				if !hr {
 					p.why = strconv.Quote(w.Live) + " stood whole at " + p.name + " in both runs, while the value went to it from " + strconv.Quote(w.Rec)
 				}
 				conflict = append(conflict, p)
 			case tok != "":
+				p.check = "same-token"
 				p.why = strconv.Quote(tok) + " stood whole at " + p.name + " in both runs, and the value did not follow it: keploy cannot tell whether the value came from there"
 				conflict = append(conflict, p)
 			case ownMoved:
+				p.check = "own-moved"
 				conflict = append(conflict, p)
 			case p.outsideTest != "" && !piece:
 				// F gave it only before the call's test began, in an older
@@ -1619,10 +1622,10 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 				// copy moved apart. A piece of a longer value (pieceOfAnId)
 				// is still set aside as chance: the ruling covers whole
 				// words.
-				p.why = p.outsideTest
+				p.why, p.check = p.outsideTest, "outside-test"
 				unknown = append(unknown, p)
 			case took != "":
-				p.why = took
+				p.why, p.check = took, "late-call"
 				unknown = append(unknown, p)
 			default:
 				if len(aside) == 0 {
@@ -1641,7 +1644,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 					chance = append(chance, p)
 					break
 				}
-				p.why, cut = why, why
+				p.why, p.check, cut = why, "one-run", why
 			}
 			unknown = append(unknown, p)
 		}
@@ -1669,9 +1672,9 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 					chance = append(chance, p)
 					break
 				}
-				p.why, cut = why, why
+				p.why, p.check, cut = why, "one-run", why
 			} else {
-				p.why = setUnknownWhy(g, dc.in.At)
+				p.why, p.check = setUnknownWhy(g, dc.in.At), "set-unknown"
 			}
 			unknown = append(unknown, p)
 		case evDisproven:
@@ -1679,6 +1682,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 				p.why = strconv.Quote(w.Live) + " stood whole at " + p.name + ", served as recorded, where " + strconv.Quote(w.Rec) + " never stood: the value did not follow"
 			}
 			if wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 {
+				p.check = "disproven"
 				conflict = append(conflict, p)
 				break
 			}
@@ -1701,7 +1705,7 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 		return dc.bound(path, at, n, changedInstant{r: w.Rec, l: w.Live, valueEcho: echo, rec: rec}, src, ", the earliest place before the call that shows it in both runs")
 	case len(conflict) > 0:
 		p := conflict[0]
-		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalConflict,
+		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalConflict, cmp.Or(p.check, "conflict"),
 			cmp.Or(p.why, strconv.Quote(w.Rec)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, w.Live)+" there and the value did not follow"), names(conflict),
 			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: givenName(path)})
 	case len(unknown) > 0:
@@ -1724,11 +1728,11 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 			// application nothing there before the call.
 			line = "keploy cannot tell what round F gave at " + p.name + " before this call: " + servedAfterWhy
 		}
-		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, line, names(unknown),
+		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, cmp.Or(p.check, "state-unknown"), line, names(unknown),
 			Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 	case len(outside) > 0:
 		p := outside[0]
-		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalAnotherScope,
+		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalAnotherScope, "another-scope",
 			"the value "+p.name+" sent in "+scopeName(p)+"; keploy binds only within a test and the start-up", names(outside),
 			Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.fieldNoise(path))
 	case len(inTurn) > 0:
@@ -1742,10 +1746,10 @@ func (dc *decider) wordBy(path string, bare variables.Address, rec, live, text s
 	}
 	if why, p := dc.encoded(); p != nil {
 		if p.otherTest && !dc.allScope {
-			return dc.refuse(path, at, n, w.Rec, w.Live, RefusalAnotherScope, why+", sent in "+scopeName(*p)+"; keploy binds only within a test and the start-up", []string{p.name},
+			return dc.refuse(path, at, n, w.Rec, w.Live, RefusalAnotherScope, "encoded-another-scope", why+", sent in "+scopeName(*p)+"; keploy binds only within a test and the start-up", []string{p.name},
 				Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.fieldNoise(path))
 		}
-		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, why, []string{p.name}, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
+		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, "encoded-unknown", why, []string{p.name}, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 	}
 	// What only a form main's readings check shows (its quoted-printable
 	// text, the text its base64 runs decode to, the value as written where
@@ -2699,7 +2703,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			hr, fr, okR := dc.holds(p, p.t.rec, r, c.rm, c.byText)
 			hl, fl, okL := dc.holds(p, p.t.live, l, c.lm, c.byText)
 			if !okR || !okL {
-				return dc.refuse(path, at, n, r, l, RefusalUnread, dc.unreadWhy(), nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
+				return dc.refuse(path, at, n, r, l, RefusalUnread, "instant-unread", dc.unreadWhy(), nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 			}
 			if hr || hl {
 				hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, coarseR: hr && c.rm != nil && dc.coarserOnly(p.t.rec, r, *c.rm),
@@ -2767,7 +2771,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	})
 	if len(conflict) > 0 {
 		p := conflict[0]
-		return dc.refuse(path, at, n, r, l, RefusalConflict,
+		return dc.refuse(path, at, n, r, l, RefusalConflict, "instant-conflict",
 			strconv.Quote(r)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, l)+" there and the value did not follow", names(conflict),
 			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: givenName(path)})
 	}
@@ -2836,7 +2840,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			continue
 		}
 		untold := func(note string) Decision {
-			return dc.refuse(path, at, n, r, l, RefusalPick,
+			return dc.refuse(path, at, n, r, l, RefusalPick, "instant-pick-state-unknown",
 				"the recorded moment stands in "+p.name+", whose state in round F keploy cannot tell ("+note+")", []string{p.name},
 				Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
@@ -2857,14 +2861,14 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			if !p.same() {
 				why = "round F's moment stands in " + p.name + ", which does not show it"
 			}
-			return dc.refuse(path, at, n, r, l, RefusalPick, why, []string{p.name}, dc.fieldNoise(path))
+			return dc.refuse(path, at, n, r, l, RefusalPick, "instant-pick", why, []string{p.name}, dc.fieldNoise(path))
 		// An answer recorded after the call that round F gave before it:
 		// in round F the value may be a pick from it, as main reads it.
 		// The recorded application never read it, so R's moment standing
 		// there too (by another cut) says nothing. One that reads back a
 		// copy's send (readsCopy) is no pick.
 		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut() && !readsCopy(h):
-			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.fieldNoise(path))
+			return dc.refuse(path, at, n, r, l, RefusalPick, "instant-pick-recorded-after", "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.fieldNoise(path))
 		case p.side == Response && p.state == stateUnknown && (h.hr || h.hl):
 			return untold(p.why)
 		case h.hr && dc.swappable(p, c):
@@ -2897,7 +2901,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			}
 		}
 		if where, _ := dc.dr.requestHolds([]moment{*c.rm}, []moment{*c.lm}, reqs); where != "" {
-			return dc.refuse(path, at, n, r, l, RefusalPick,
+			return dc.refuse(path, at, n, r, l, RefusalPick, "instant-pick-test-case",
 				"the recorded moment stands in the test case at "+where+", and no cut there gives round F's", []string{where}, dc.fieldNoise(path))
 		}
 	}
@@ -2926,7 +2930,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	case 1:
 		return dc.bound(path, at, n, c, slots, ": the test case's request holds it, templated, in both runs"+again)
 	default:
-		return dc.refuse(path, at, n, r, l, RefusalTwoSources,
+		return dc.refuse(path, at, n, r, l, RefusalTwoSources, "instant-two-reads",
 			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.fieldNoise(path))
 	}
 
@@ -2989,7 +2993,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			}
 		}
 		if late != "" {
-			return dc.refuse(path, at, n, r, l, RefusalUnknown, why+", beside "+answers[0].name+": two sources", []string{late, answers[0].name},
+			return dc.refuse(path, at, n, r, l, RefusalUnknown, "instant-late-two-sources", why+", beside "+answers[0].name+": two sources", []string{late, answers[0].name},
 				Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
 		// A send before every such answer, at a fine cut, showing the same
@@ -3026,9 +3030,9 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 		gaveOutside, fine = append(gaveOutside, mock), fine || fineCut(c.rm.res) || fineCut(c.lm.res)
 	}
 	if len(gaveOutside) > 0 {
-		d := dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment, or the recorded one, stands in an answer round F gave before the call outside its scope", nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
+		d := dc.refuse(path, at, n, r, l, RefusalPick, "instant-pick-outside-scope", "round F's moment, or the recorded one, stands in an answer round F gave before the call outside its scope", nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		if m := gaveOutside[0]; m != "" {
-			d = dc.refuse(path, at, n, r, l, RefusalAnotherScope,
+			d = dc.refuse(path, at, n, r, l, RefusalAnotherScope, "instant-another-scope",
 				"the moment stands in "+m+"'s answer, which round F gave before the call outside its scope: a copy or a pick from it, never a read of the clock; keploy binds only within a test and the start-up", []string{m},
 				Edit{Kind: EditMoveToMocks, Mock: m}, Edit{Kind: EditMoveToStartup, Mock: m}, dc.fieldNoise(path))
 		}
@@ -3044,7 +3048,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	// as the word rule reads the same place (evidenceOf).
 	if len(untold) > 0 {
 		p := untold[0]
-		return dc.refuse(path, at, n, r, l, RefusalUnknown,
+		return dc.refuse(path, at, n, r, l, RefusalUnknown, "instant-unknown",
 			"keploy cannot tell what round F gave at "+p.name+" before this call (round F's moment may stand there, and the recorded one does not)", names(untold),
 			Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 	}
@@ -3106,7 +3110,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 				if gaveRefusal != nil {
 					return *gaveRefusal
 				}
-				return dc.heldRead(dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path)))
+				return dc.heldRead(dc.refuse(path, at, n, r, l, RefusalCannotCheck, "instant-held-read", g, nil, dc.fieldNoise(path)))
 			case g != "":
 				off, cutWhy, guardWhy, inWindow = models.ClockOffset{}, "", g, false
 			}
@@ -3183,7 +3187,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			if ln, sok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &off}); sok && ln.Offset != nil {
 				switch g, uncompared := dc.offsetGuard(path, *ln.Offset, enc, wb); {
 				case uncompared:
-					return dc.heldRead(dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path)))
+					return dc.heldRead(dc.refuse(path, at, n, r, l, RefusalCannotCheck, "instant-held-read-given", g, nil, dc.fieldNoise(path)))
 				case g == "":
 					return dc.clock(path, at, n, c, *ln.Offset, "a read of the application's clock made since its test began in both runs, before its call's window", false)
 				}
@@ -3258,7 +3262,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	if len(inOtherForm) > 0 {
 		why += "; " + strings.Join(inOtherForm, ", ") + " held the moment only in another form, which no variable holds as this text"
 	}
-	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, append(append(outside, heldAt...), inOtherForm...), dc.fieldNoise(path), Edit{Kind: EditReRecord})
+	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, "no-clock-read", why, append(append(outside, heldAt...), inOtherForm...), dc.fieldNoise(path), Edit{Kind: EditReRecord})
 }
 
 // madeSinceBegin is why c, a changed instant of a client test's call that
@@ -3552,7 +3556,7 @@ func twoClockReads(src []evPlace) bool {
 func (dc *decider) copied(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
 	if i := slices.IndexFunc(src, func(p evPlace) bool { return p.clock && p.name != first.name }); i >= 0 {
-		d := dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
+		d := dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources, "copied-two-reads",
 			"the same moment was sent at "+first.name+" and "+src[i].name+", two separate reads", []string{first.name, src[i].name}, dc.fieldNoise(path))
 		if first.clock {
 			// Each source its own call's read of the clock: a copy of a read.
@@ -4530,9 +4534,9 @@ func (dc *decider) unreadWhy() string {
 }
 
 // refuse is a refused word and its line.
-func (dc *decider) refuse(path string, at variables.Address, n int, r, f string, kind RefusalKind, why string, places []string, edits ...Edit) Decision {
+func (dc *decider) refuse(path string, at variables.Address, n int, r, f string, kind RefusalKind, check, why string, places []string, edits ...Edit) Decision {
 	at.Word = n
-	rf := &Refusal{Kind: kind, Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f, Why: why, Places: places, Edits: onceEach(edits)}
+	rf := &Refusal{Kind: kind, Check: check, Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f, Why: why, Places: places, Edits: onceEach(edits)}
 	hideSecrets(rf)
 	return Decision{At: at, Recorded: r, Full: f, Outcome: OutcomeRefused, Refusal: rf, Line: RefusalLine(*rf)}
 }
@@ -4540,13 +4544,13 @@ func (dc *decider) refuse(path string, at variables.Address, n int, r, f string,
 // noPayloadRefusal refuses a value no place binds beside an exchange keploy
 // holds no payload of (payloadless), naming it, with main's reason.
 func (dc *decider) noPayloadRefusal(path string, at variables.Address, n int, r, f string) Decision {
-	return dc.refuse(path, at, n, r, f, RefusalUnread, dc.noPayload.why, []string{dc.noPayload.mock},
+	return dc.refuse(path, at, n, r, f, RefusalUnread, "no-payload", dc.noPayload.why, []string{dc.noPayload.mock},
 		Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 }
 
 // cannotCheck refuses a field keploy cannot decide yet: its limit.
 func (dc *decider) cannotCheck(path string, at variables.Address, n int, r, f, why string) Decision {
-	return dc.refuse(path, at, n, r, f, RefusalCannotCheck, why, nil, dc.fieldNoise(path))
+	return dc.refuse(path, at, n, r, f, RefusalCannotCheck, "cannot-check", why, nil, dc.fieldNoise(path))
 }
 
 func (dc *decider) fieldNoise(path string) Edit {

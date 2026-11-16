@@ -116,16 +116,16 @@ func (dc *decider) minted(path string, src Source, ds []Decision) []Decision {
 	r, f := rec.Value, live.Value
 	why := "keploy.yml's rule " + src.Rule + " declares it minted"
 	if rec.Type != live.Type || rec.Type != String && rec.Type != Number || len(at.Steps) > 0 {
-		return []Decision{dc.refuse(path, at, -1, r, f, RefusalNotMinted,
+		return []Decision{dc.refuse(path, at, -1, r, f, RefusalNotMinted, "minted-not-one-value",
 			why+", and keploy reads a minted value as one string or number in each run, as written: this one is not", nil, dc.fieldNoise(path))}
 	}
 	form := src.Minted.With(r, f)
 	if form.Check() != nil || !form.Keeps(r) || !form.Keeps(f) {
-		return []Decision{dc.refuse(path, at, -1, r, f, RefusalChangedShape,
+		return []Decision{dc.refuse(path, at, -1, r, f, RefusalChangedShape, "minted-form-changed",
 			why+", and a run's value does not keep the rule's form ("+form.Where()+"): minted value of another shape", nil, dc.fieldNoise(path))}
 	}
 	if held := dc.mintedHeld(r, f); len(held) > 0 {
-		return []Decision{dc.refuse(path, at, -1, r, f, RefusalNotMinted,
+		return []Decision{dc.refuse(path, at, -1, r, f, RefusalNotMinted, "minted-held-earlier",
 			why+", yet an earlier place holds its whole value in a run: the application copied it from there, so it is a variable's use, not a value made at this call", held, dc.fieldNoise(path))}
 	}
 	d := dc.learned(path, at, -1, r, f, OutcomeFresh, why+": no earlier place holds its whole value in either run; bound at its first call, and a replay checks it is new and keeps its shape", nil)
@@ -198,7 +198,7 @@ func (dc *decider) mintedUses(out []Decision, fields []string) ([]Decision, []st
 		if word >= 0 {
 			there = m.lw[word]
 		}
-		return ruledBy(dc.refuse(path, at, n, r, f, RefusalTwoSources,
+		return ruledBy(dc.refuse(path, at, n, r, f, RefusalTwoSources, "minted-two-places",
 			"the recorded value stands at "+name(m, word)+", which keploy.yml's rule "+m.rule+" declares minted, and here, and round F sent "+strconv.Quote(f)+" here and "+strconv.Quote(there)+" there: two values, and keploy cannot tell which one the recording's is",
 			[]string{name(m, word)}, dc.fieldNoise(path)), m.rule)
 	}

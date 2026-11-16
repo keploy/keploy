@@ -61,11 +61,11 @@ func (dc *decider) declaredClock(path string, at variables.Address, n int, c cha
 	w := dc.in.Window
 	switch {
 	case !ok:
-		return dc.refuse(path, at, n, c.r, c.l, RefusalNoClockRead, why+", a range keploy does not check (a resolution of none, or a max below its min)", nil, dc.fieldNoise(path))
+		return dc.refuse(path, at, n, c.r, c.l, RefusalNoClockRead, "declared-clock-range", why+", a range keploy does not check (a resolution of none, or a max below its min)", nil, dc.fieldNoise(path))
 	case w == nil:
-		return dc.refuse(path, at, n, c.r, c.l, RefusalNoClockRead, why+", and keploy knows no span of the call", nil, dc.fieldNoise(path))
+		return dc.refuse(path, at, n, c.r, c.l, RefusalNoClockRead, "declared-clock-no-span", why+", and keploy knows no span of the call", nil, dc.fieldNoise(path))
 	case c.rm == nil || c.lm == nil:
-		return dc.refuse(path, at, n, c.r, c.l, RefusalNoClockRead, why+", and keploy reads no moment in its value in a run (a number it matches by its text alone)", nil, dc.fieldNoise(path))
+		return dc.refuse(path, at, n, c.r, c.l, RefusalNoClockRead, "declared-clock-no-moment", why+", and keploy reads no moment in its value in a run (a number it matches by its text alone)", nil, dc.fieldNoise(path))
 	}
 	cd := dc.clock(path, at, n, c, off, why, false)
 	if cd.Outcome != OutcomeClock {
@@ -78,7 +78,7 @@ func (dc *decider) declaredClock(path string, at variables.Address, n int, c cha
 	}{{"the recorded value", dc.in.Rec.Leaves[path], w.Rec}, {"round F's value", dc.in.Live.Leaves[path], w.F}}
 	for _, r := range runs {
 		if held, no := CheckClockRead(path, *cd.Clock, r.leaf, r.span, true); !held {
-			return dc.refuse(path, at, n, c.r, c.l, RefusalNoClockRead, why+", yet "+r.name+" is no such read in its run: "+no, nil, dc.fieldNoise(path))
+			return dc.refuse(path, at, n, c.r, c.l, RefusalNoClockRead, "declared-clock-not-read", why+", yet "+r.name+" is no such read in its run: "+no, nil, dc.fieldNoise(path))
 		}
 	}
 	return cd
@@ -91,7 +91,7 @@ func (dc *decider) declaredClock(path string, at variables.Address, n int, c cha
 func (dc *decider) clockOnly(path string, src Source, ds []Decision) []Decision {
 	for i, d := range ds {
 		if d.Outcome == OutcomeFresh {
-			ds[i] = dc.refuse(path, d.At, d.At.Word, d.Recorded, d.Full, RefusalNoClockRead,
+			ds[i] = dc.refuse(path, d.At, d.At.Word, d.Recorded, d.Full, RefusalNoClockRead, "declared-clock-only",
 				"keploy.yml's rule "+src.Rule+" declares it a read of the clock, and keploy reads no instant in it in each run", nil, dc.fieldNoise(path))
 		}
 	}

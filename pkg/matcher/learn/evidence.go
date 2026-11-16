@@ -97,6 +97,10 @@ type evPlace struct {
 	at    time.Time
 	state placeState
 	why   string
+	// check is the stable name of the branch that set why, or that put
+	// the place in a refused word's list (Refusal.Check): a refused
+	// word whose first place it is takes it. "" where none named it.
+	check string
 	// fUnstated: the adapter does not state what round F's answer held
 	// here, so its F side shows and disproves nothing. fMay: round F served
 	// it before the call and no view of what it gave there is stated or
@@ -689,7 +693,7 @@ func orderUnknown(in Input, ps *wordPlaces, cand map[string]bool) (marked bool) 
 			continue
 		}
 		if p := ps.at(i); p.state == stateBefore {
-			p.state, p.why = stateUnknown, why
+			p.state, p.why, p.check = stateUnknown, why, "order-unknown"
 			marked = true
 		}
 	}
@@ -744,7 +748,7 @@ func swapUnknown(in Input, ps *wordPlaces, w readWord, at []int32, held []evHeld
 			continue
 		}
 		if r := in.Raw[p.raw-1]; r.startUp && r.swapHolds(r.payload().text, in.Raw, holds) {
-			p.state, p.why = stateUnknown, swapNote
+			p.state, p.why, p.check = stateUnknown, swapNote, "swap-unknown"
 		}
 	}
 }

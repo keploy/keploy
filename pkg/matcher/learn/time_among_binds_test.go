@@ -211,7 +211,7 @@ func TestATimeAmongBoundWordsSettlesAsTheTimeDefault(t *testing.T) {
 		in.Caps, in.TimeForm = amongCaps, c.timeForm
 		dc := &decider{in: in, readClock: c.readClock}
 		ci := changedInstant{r: rs, l: fs, rm: &rm, lm: &lm, text: true, noWord: noWordAround, around: word}
-		d := dc.refuse("body.note", variables.Address{}, 1, rs, fs, c.kind, "as learned", nil)
+		d := dc.refuse("body.note", variables.Address{}, 1, rs, fs, c.kind, "as-learned", "as learned", nil)
 		got := dc.timeDefault("body.note", variables.Address{}, 1, ci, d, c.decl)
 		if got.Refusal == nil || got.Refusal.Kind != c.kind || got.Clock != nil {
 			t.Errorf("%s: the decision %s; want the refusal kept, its check by form held apart (around)", c.name, oDescribe([]Decision{got}))

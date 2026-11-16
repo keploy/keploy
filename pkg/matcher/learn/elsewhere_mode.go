@@ -38,7 +38,7 @@ func elsewhere(in Input, ds []Decision, fields []string) []Decision {
 		if d.Refusal != nil {
 			kind, places = d.Refusal.Kind, d.Refusal.Places
 		}
-		rf := &Refusal{Kind: kind, Test: in.Test, Mock: in.Mock, Field: fields[i], Word: d.At.Word,
+		rf := &Refusal{Kind: kind, Check: "elsewhere-learned-nothing", Test: in.Test, Mock: in.Mock, Field: fields[i], Word: d.At.Word,
 			Recorded: d.Recorded, Full: d.Full, Why: "learned nothing: " + stop, Places: places, Edits: []Edit{edit}}
 		hideSecrets(rf)
 		out = append(out, Decision{At: d.At, Recorded: d.Recorded, Full: d.Full, Outcome: OutcomeRefused, Refusal: rf, Line: RefusalLine(*rf), AnsweredAfter: d.AnsweredAfter})
