@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"mime"
 	"net/http"
 	"os"
@@ -618,12 +619,11 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		}
 		return out, nil
 
-	case float64:
-		a, ok := actual.(float64)
-		if !ok {
+	case float64, json.Number:
+		if !isJSONNumber(actual) {
 			return out, errors.New("type not matched")
 		}
-		if e == a || ancestorNoisy || noisyForValues(ni, key, formatJSONNumber(e), formatJSONNumber(a)) {
+		if equalJSONNumbers(e, actual) || ancestorNoisy || noisyForValues(ni, key, jsonNumberToString(expected), jsonNumberToString(actual)) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -966,8 +966,88 @@ func jsonScalarToString(v interface{}) (string, bool) {
 		return strconv.FormatBool(t), true
 	case float64:
 		return formatJSONNumber(t), true
+	case json.Number:
+		return t.String(), true
 	}
 	return "", false
+}
+
+func isJSONNumber(v interface{}) bool {
+	switch v.(type) {
+	case float64, json.Number:
+		return true
+	default:
+		return false
+	}
+}
+
+func toBigRat(v interface{}) (*big.Rat, bool) {
+	switch x := v.(type) {
+	case json.Number:
+		r := new(big.Rat)
+		if _, ok := r.SetString(string(x)); ok {
+			return r, true
+		}
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return nil, false
+		}
+		r := new(big.Rat)
+		r.SetFloat64(x)
+		return r, true
+	case int:
+		r := new(big.Rat)
+		r.SetInt64(int64(x))
+		return r, true
+	case int64:
+		r := new(big.Rat)
+		r.SetInt64(x)
+		return r, true
+	case uint64:
+		r := new(big.Rat)
+		r.SetUint64(x)
+		return r, true
+	}
+	return nil, false
+}
+
+func equalJSONNumbers(e, a interface{}) bool {
+	r1, ok1 := toBigRat(e)
+	if !ok1 {
+		return false
+	}
+	r2, ok2 := toBigRat(a)
+	if !ok2 {
+		return false
+	}
+	return r1.Cmp(r2) == 0
+}
+
+func jsonNumberToString(v interface{}) string {
+	switch t := v.(type) {
+	case json.Number:
+		return t.String()
+	case float64:
+		return formatJSONNumber(t)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func areJSONTypesEqual(e, a interface{}) bool {
+	if e == nil && a == nil {
+		return true
+	}
+	if e == nil || a == nil {
+		return false
+	}
+	if reflect.TypeOf(e) == reflect.TypeOf(a) {
+		return true
+	}
+	if isJSONNumber(e) && isJSONNumber(a) {
+		return true
+	}
+	return false
 }
 
 // formatJSONNumber renders a JSON number exactly as encoding/json would, so a
@@ -1003,12 +1083,12 @@ func findAndClaimPrimitiveEqual(x interface{}, arr []interface{}, used []bool) (
 				return i, true
 			}
 		}
-	case float64:
+	case float64, json.Number:
 		for i, y := range arr {
 			if used[i] {
 				continue
 			}
-			if yf, ok := y.(float64); ok && yf == v {
+			if isJSONNumber(y) && equalJSONNumbers(v, y) {
 				return i, true
 			}
 		}
@@ -1200,7 +1280,7 @@ func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, e
 
 	validatedJSON.expected = expected
 	validatedJSON.actual = actual
-	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
+	if !areJSONTypesEqual(expected, actual) {
 		validatedJSON.isIdentical = false
 		return validatedJSON, nil
 	}
@@ -1224,8 +1304,22 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 	if s == "" {
 		return nil, nil
 	}
-	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object", zap.Int("json_bytes", len(s)))
+	d := json.NewDecoder(strings.NewReader(s))
+	d.UseNumber()
+	if err := d.Decode(&result); err != nil {
+		if log != nil {
+			utils.LogError(log, err, "cannot convert json string into json object", zap.Int("json_bytes", len(s)))
+		}
+		return nil, err
+	}
+	var trailing interface{}
+	if err := d.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = errors.New("invalid character after top-level value")
+		}
+		if log != nil {
+			utils.LogError(log, err, "cannot convert json string into json object", zap.Int("json_bytes", len(s)))
+		}
 		return nil, err
 	}
 	return result, nil
@@ -2181,6 +2275,8 @@ func InterfaceToString(val interface{}) string {
 	switch v := val.(type) {
 	case int:
 		return fmt.Sprintf("%d", v)
+	case json.Number:
+		return v.String()
 	case float64:
 		return fmt.Sprintf("%f", v)
 	case bool:
@@ -2193,8 +2289,7 @@ func InterfaceToString(val interface{}) string {
 }
 
 func JsonContains(actualJSON string, expectedJSON map[string]interface{}) (bool, error) {
-	var actual interface{}
-	err := json.Unmarshal([]byte(actualJSON), &actual)
+	actual, err := UnmarshallJSON(actualJSON, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to unmarshal actual JSON: %v", err)
 	}
@@ -2224,6 +2319,9 @@ func containsRecursive(actual interface{}, expected map[string]interface{}) bool
 				return false
 			}
 		default:
+			if equalJSONNumbers(actualValue, expectedValue) {
+				continue
+			}
 			if !reflect.DeepEqual(actualValue, expectedValue) {
 				return false
 			}

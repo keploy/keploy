@@ -82,11 +82,12 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 		return nil, nil
 	}
 
-	var exp, act interface{}
-	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+	exp, err := UnmarshallJSON(expJSON, nil)
+	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+	act, err := UnmarshallJSON(actJSON, nil)
+	if err != nil {
 		return nil, err
 	}
 
@@ -236,11 +237,12 @@ func ChangedJSONFieldPaths(expJSON, actJSON string, known map[string][]string, t
 		return nil
 	}
 
-	var exp, act interface{}
-	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+	exp, err := UnmarshallJSON(expJSON, nil)
+	if err != nil {
 		return nil
 	}
-	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+	act, err := UnmarshallJSON(actJSON, nil)
+	if err != nil {
 		return nil
 	}
 	return ChangedDecodedJSONFieldPaths(exp, act, known, typeStrict, valueChangesOnly, excludeRecordedValue)
@@ -339,11 +341,12 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 		return nil
 	}
 
-	var exp, act interface{}
-	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+	exp, err := UnmarshallJSON(expJSON, nil)
+	if err != nil {
 		return nil
 	}
-	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+	act, err := UnmarshallJSON(actJSON, nil)
+	if err != nil {
 		return nil
 	}
 
@@ -455,7 +458,7 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 		for _, e := range t {
 			collectJSON(e, p, ni, out)
 		}
-	case string, float64, bool, nil:
+	case string, float64, json.Number, bool, nil:
 		typ, val := scalarTypeValue(t)
 		out.types[path] = typ
 		if !typeStrict {
@@ -482,7 +485,7 @@ func eachJSONScalar(v interface{}, path string, fn func(path string, v interface
 		for _, e := range t {
 			eachJSONScalar(e, path+"[]", fn)
 		}
-	case string, float64, bool, nil:
+	case string, float64, json.Number, bool, nil:
 		fn(path, t)
 	}
 }
@@ -493,7 +496,15 @@ func scalarTypeValue(v interface{}) (typ, val string) {
 	switch t := v.(type) {
 	case string:
 		return "string", t
+	case json.Number:
+		if r, ok := toBigRat(t); ok {
+			return "number", r.RatString()
+		}
+		return "number", t.String()
 	case float64:
+		if r, ok := toBigRat(t); ok {
+			return "number", r.RatString()
+		}
 		return "number", fmt.Sprintf("%v", t)
 	case bool:
 		return "boolean", strconv.FormatBool(t)

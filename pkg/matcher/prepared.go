@@ -2,9 +2,9 @@ package matcher
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"hash/fnv"
 	"math"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,7 +27,7 @@ func NewValidatedJSON(expected, actual interface{}) ValidatedJSON {
 	return ValidatedJSON{
 		expected:    expected,
 		actual:      actual,
-		isIdentical: reflect.TypeOf(expected) == reflect.TypeOf(actual),
+		isIdentical: areJSONTypesEqual(expected, actual),
 	}
 }
 
@@ -108,12 +108,28 @@ func (k *matchKeyer) walk(v interface{}, p string) {
 		} else {
 			k.tag('f', 0)
 		}
+	case json.Number:
+		if r, ok := toBigRat(t); ok {
+			s := r.RatString()
+			k.tag('d', len(s))
+			_, _ = k.h.Write([]byte(s))
+			return
+		}
+		s := t.String()
+		k.tag('d', len(s))
+		_, _ = k.h.Write([]byte(s))
 	case float64:
 		if t == 0 {
 			t = 0 // -0 == 0 to the matcher
 		}
 		if math.IsNaN(t) {
 			k.tag('N', 0)
+			return
+		}
+		if r, ok := toBigRat(t); ok {
+			s := r.RatString()
+			k.tag('d', len(s))
+			_, _ = k.h.Write([]byte(s))
 			return
 		}
 		f := strconv.FormatFloat(t, 'g', -1, 64)
