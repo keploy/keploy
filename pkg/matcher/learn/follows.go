@@ -1306,9 +1306,9 @@ func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at 
 func recordedGave(req, answered, at time.Time, mock string) (before bool, untimed string) {
 	switch {
 	case req.IsZero():
-		return false, "keploy cannot read when the recording gave the application " + mock + " (its mock holds no recorded time)"
+		return false, "keploy cannot read when the recording gave the application " + mock + ": its mock holds no recorded time"
 	case answered.IsZero() || answered.Before(req):
-		return false, "keploy cannot read when the recording answered " + mock + " (its mock holds no answer time it can read)"
+		return false, "keploy cannot read when the recording answered " + mock + ": its mock holds no answer time it can read"
 	}
 	return answered.Before(at), ""
 }
@@ -1678,7 +1678,7 @@ func answeredBefore(q, p recPlace) string {
 	case q.at.Equal(p.at):
 		return "the recording gave the application " + q.mock + " and " + p.mock + " at one instant, so keploy cannot tell the order it gave them in"
 	}
-	return "the recording's requests for " + q.mock + " and " + p.mock + " were in flight together (" + p.mock + "'s was recorded before " + q.mock + " was answered), so keploy cannot tell which answer it gave the application first"
+	return "the recording's requests for " + q.mock + " and " + p.mock + " were in flight together, " + p.mock + "'s recorded before " + q.mock + " was answered, so keploy cannot tell which answer it gave the application first"
 }
 
 // servedOrder is the places record's full round gave the application before

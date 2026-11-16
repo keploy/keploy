@@ -666,7 +666,9 @@ func untimedAnswer(req, answered time.Time) bool {
 // order the recording cannot tell, or one that differs, marks them
 // unknown even where both hold the value's words at the same fields. It is
 // asked only where a candidate held R's word in R and one may hold F's in
-// F (wordBy's copyR, copyF): a copy by position needs both. It reports
+// F (wordBy's copyR, copyF): a copy by position needs both. A given place,
+// first in both orders, is neither where every other candidate was given
+// before the call in both runs (wordBy's givenR, givenF). It reports
 // whether it marked a place.
 func orderUnknown(in Input, ps *wordPlaces, cand map[string]bool) (marked bool) {
 	if len(cand) == 0 || len(cand) == 1 && !servedAgain(in, cand) {

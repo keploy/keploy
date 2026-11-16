@@ -132,7 +132,7 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 		noRec   = "the recording did not give the application that word there before the call"
 		noF     = "record's full round did not give the application that word there before the call"
 		both    = "the recorded value and the value record's full round saw both hold that word"
-		untimed = "keploy cannot read when the recording gave the application mock-1 (its mock holds no recorded time)"
+		untimed = "keploy cannot read when the recording gave the application mock-1: its mock holds no recorded time"
 	)
 	mock1 := func(at time.Time) Raw {
 		return RawOf(&models.Mock{Name: "mock-1", Kind: models.PostgresV3, Spec: models.MockSpec{
@@ -559,7 +559,7 @@ func TestTwoRequestsInFlightTogetherAreInAnOrderTheRecordingShowsOnlyOnOneConnec
 	a := eSpan("mock-a", 300*time.Millisecond, 100*time.Millisecond, "7")
 	b := eSpan("mock-b", 250*time.Millisecond, 200*time.Millisecond, "82")
 	const tail = ", so keploy cannot tell a copy from a varying value"
-	const inFlight = "the recording's requests for mock-a and mock-b were in flight together (mock-b's was recorded before mock-a was answered), so keploy cannot tell which answer it gave the application first" + tail
+	const inFlight = "the recording's requests for mock-a and mock-b were in flight together, mock-b's recorded before mock-a was answered, so keploy cannot tell which answer it gave the application first" + tail
 	for _, tc := range []struct {
 		name string
 		raw  []Raw
@@ -572,9 +572,9 @@ func TestTwoRequestsInFlightTogetherAreInAnOrderTheRecordingShowsOnlyOnOneConnec
 			"the recording carried mock-a and mock-b on one connection at positions that disagree with when their requests were recorded, so keploy cannot tell the order it gave them in" + tail},
 		{"on two connections at positions", []Raw{a.SentOn("0", 1).ServedAs(1).ServedAsRecorded(), b.SentOn("1", 2).ServedAs(2).ServedAsRecorded()}, inFlight},
 		{"a's mock holds no answer time", []Raw{ePgAnswered("mock-a", 300*time.Millisecond, time.Time{}, "SELECT next_slot FROM mock-a", []models.PostgresV3Cells{{{Value: "7"}}}, "SELECT 1").ServedAs(1).ServedAsRecorded(), eAnswer("mock-b", 200*time.Millisecond, "9").ServedAs(2).ServedAsRecorded()},
-			"keploy cannot read when the recording answered mock-a (its mock holds no answer time it can read), so the recording cannot show the value does not follow that word"},
+			"keploy cannot read when the recording answered mock-a: its mock holds no answer time it can read, so the recording cannot show the value does not follow that word"},
 		{"b's mock holds no answer time", []Raw{a.ServedAs(1).ServedAsRecorded(), ePgAnswered("mock-b", 200*time.Millisecond, time.Time{}, "SELECT next_slot FROM mock-b", []models.PostgresV3Cells{{{Value: "7"}}}, "SELECT 1").ServedAs(2).ServedAsRecorded()},
-			"keploy cannot read when the recording answered mock-b (its mock holds no answer time it can read), so the recording cannot show the value does not follow that word"},
+			"keploy cannot read when the recording answered mock-b: its mock holds no answer time it can read, so the recording cannot show the value does not follow that word"},
 		{"a in flight when the application made the call", []Raw{eSpan("mock-a", 300*time.Millisecond, -50*time.Millisecond, "7").ServedAs(1).ServedAsRecorded()},
 			"the recording did not give the application that word there before the call, so it cannot show the value does not follow it"},
 		{"a's answer recorded before its request", []Raw{eSpan("mock-a", 300*time.Millisecond, 400*time.Millisecond, "7").ServedAs(1).ServedAsRecorded(), eAnswer("mock-b", 200*time.Millisecond, "9").ServedAs(2).ServedAsRecorded()},
