@@ -3730,6 +3730,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// run, as consumedUnread is.
 	var variablesUnjudged []string
 	variablesWhy := map[string]string{}
+	// missedTests names the tests a call of which found no mock, scoped to a
+	// test's last run: a set whose recording's agent dropped mocks cannot
+	// vouch for them (record_mocks_dropped.go).
+	var missedTests []string
 	variablesWarned := false
 	// consumptionUnread names every test, in any cycle and with the switch on or
 	// off, for which a read of what it consumed failed: what it consumed is not
@@ -4521,6 +4525,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if provenswitch.On() {
 					missCategory(res)
 				}
+				missedTests = noteMissed(missedTests, testCase.Name, res)
 			}
 			// Under the proven switch a test keploy's agent lost a call of (or
 			// of a test before it) fails, as one with a miss does: read with
@@ -6581,6 +6586,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testSetStatus = models.TestSetStatusInternalErr
 			// Not judged, not broken: the round goes on (abortAfterTestSet).
 			r.markNotJudged(testSetID)
+		}
+		// The set's recording lacks mocks its agent dropped after capturing
+		// them: a call that found no mock may have needed one of them
+		// (record_mocks_dropped.go).
+		if d := conf.RecordMocksDropped; d != nil && d.Dropped() && (len(missedTests) > 0 || len(unclaimed) > 0) {
+			why := mocksDroppedWhy(d, missedTests, len(unclaimed))
+			if provenswitch.On() && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+				notJudged = alsoNotJudged(notJudged, "not judged: "+why)
+				r.logger.Error("test-set is not judged: "+why+"; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+					zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
+				testSetStatus = models.TestSetStatusInternalErr
+				r.markNotJudged(testSetID)
+			} else {
+				r.logger.Warn(why, zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
+			}
 		}
 		// The set's end had to kill the app it stopped (it had not exited
 		// when the stop's grace ran out): what the app would have done as
