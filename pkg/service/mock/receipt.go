@@ -484,9 +484,8 @@ func bypassList(rules []models.BypassRule) []string {
 }
 
 // MissesFile names, for the last keploy mock replay of a set, each call no
-// recorded mock answered, whole (localfile.MissesFile, which keploy test
-// writes too, for the calls a set's application made outside every test).
-// The console names the first of the calls, each with its first next step
+// recorded mock answered, whole (localfile.MissesFile; keploy test writes
+// its own, localfile.TestMissesFile, and never this one). The console names the first of the calls, each with its first next step
 // (sayMisses), and points there, by path, for the rest.
 const MissesFile = localfile.MissesFile
 
@@ -497,6 +496,7 @@ func HoldsCallsWhole(name string) bool { return localfile.HoldsCallsWhole(name) 
 
 // missesWriter is keploy mock replay, as its MissesFile names it.
 var missesWriter = localfile.Writer{
+	File:      MissesFile,
 	Command:   "keploy mock replay",
 	Holds:     "each call no recorded mock answered in the last replay of this set",
 	NextStep:  missDefaultNext,
@@ -514,7 +514,7 @@ func writeMissesFile(logger *zap.Logger, keployDir, set string, misses []models.
 // removeMissesFile removes set's MissesFile, if there is one: it names the
 // calls of a run before the replay that is ending, which keploy did not
 // judge.
-func removeMissesFile(keployDir, set string) { localfile.RemoveMisses(keployDir, set) }
+func removeMissesFile(keployDir, set string) { localfile.RemoveMisses(keployDir, set, MissesFile) }
 
 // writeTestsReceipt writes TestsReceiptFile for a replay, or removes a stale
 // one when this replay named no tests: it would describe an earlier run.

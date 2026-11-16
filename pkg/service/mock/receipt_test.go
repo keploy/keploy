@@ -1307,7 +1307,7 @@ func TestReceiptsStayInsideTheRecording(t *testing.T) {
 		symlink(t, filepath.Join("..", "..", "outside", "gitignore"), filepath.Join(keployDir, ".gitignore"))
 		core, logs := observer.New(zapcore.DebugLevel)
 		ignoreReceipts(zap.New(core), keployDir)
-		said := logs.FilterMessage("failed to git-ignore the replay receipt").All()
+		said := logs.FilterMessage("failed to git-ignore a file keploy keeps local").All()
 		if len(said) != len(receiptIgnore) {
 			t.Fatalf("said %d times that an entry could not be added, want %d: %v", len(said), len(receiptIgnore), logs.All())
 		}

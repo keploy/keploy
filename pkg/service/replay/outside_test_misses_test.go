@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,12 +29,13 @@ func TestTheSetsOutsideTestMissesFailNothingInEitherMode(t *testing.T) {
 	lateDNS := models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A late.example."}
 	lateCall := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /late"}
 	lateBackground := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /tick", Background: true}
+	lateAnswered := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /late-ok", Answer: "by_kind"}
 
 	var s setCalls
 	if rest := s.take([]models.UnmatchedCall{dns, call, answered}); len(rest) != 0 {
 		t.Fatalf("the first test's read kept %+v as its own", rest)
 	}
-	s.keepAfter([]models.UnmatchedCall{lateDNS, lateCall, lateBackground})
+	s.keepAfter([]models.UnmatchedCall{lateDNS, lateCall, lateBackground, lateAnswered})
 
 	names := func(calls []models.UnmatchedCall) string {
 		out := ""
@@ -80,7 +82,7 @@ func TestEachOutsideTestMissIsSaidWithItsNextStep(t *testing.T) {
 	for i := 0; i < outsideLogMax+3; i++ {
 		many = append(many, models.UnmatchedCall{Protocol: "HTTP", ActualSummary: fmt.Sprintf("GET /c%d", i), Destination: fmt.Sprintf("10.0.0.%d:80", i), BeforeSet: true})
 	}
-	const file = "keploy/test-set-0/last-replay-misses.yaml"
+	const file = "keploy/test-set-0/last-test-misses.yaml"
 	r.logOutsideTestMisses("test-set-0", models.OutsideTestMissesOf(many), file)
 	if n := logs.Len(); n != outsideLogMax+2 {
 		t.Fatalf("got %d lines for %d misses, want %d", n, len(many), outsideLogMax+2)
@@ -117,6 +119,19 @@ func TestAStartupLookupOnlyInTheReplayIsWholeInTheMissesFileAndShapedInTheReport
 			if err := os.MkdirAll(filepath.Join(keployDir, "test-set-0"), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			// keploy mock replay's misses file of the set, as its last run
+			// left it: a keploy test run never writes or removes it.
+			mockFile := filepath.Join(keployDir, "test-set-0", localfile.MissesFile)
+			mockWas := []byte("# Written by `keploy mock replay`: each call no recorded mock answered in the last replay of this set\nset: test-set-0\nby: keploy mock replay\n")
+			if err := os.WriteFile(mockFile, mockWas, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mockStays := func(when string) {
+				t.Helper()
+				if b, err := os.ReadFile(mockFile); err != nil || !bytes.Equal(b, mockWas) {
+					t.Errorf("%s, keploy mock replay's misses file holds %q (%v), want it byte for byte", when, b, err)
+				}
+			}
 			core, logs := observer.New(zap.InfoLevel)
 			r := &Replayer{logger: zap.New(core), config: &config.Config{Path: keployDir}}
 			lookup := models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A orders-db.staging.internal.", HostTag: "#ab12", BeforeSet: true}
@@ -142,7 +157,7 @@ func TestAStartupLookupOnlyInTheReplayIsWholeInTheMissesFileAndShapedInTheReport
 				t.Errorf("the report names the connection's IP as %q, want it whole", report[1].Destination)
 			}
 
-			file := filepath.Join(keployDir, "test-set-0", localfile.MissesFile)
+			file := filepath.Join(keployDir, "test-set-0", localfile.TestMissesFile)
 			raw, err := os.ReadFile(file)
 			if err != nil {
 				t.Fatalf("the set's misses file was not written: %v", err)
@@ -163,7 +178,7 @@ func TestAStartupLookupOnlyInTheReplayIsWholeInTheMissesFileAndShapedInTheReport
 			if c := got.Misses[1]; c.Call != "GET /v1/tenants/acme/config" || c.Destination != "10.20.30.40:8080" || c.PathTag != "#1f2e" || c.NextStep != models.OutsideTestNextStep(conn) {
 				t.Errorf("the misses file names the connection as %+v, want it whole with its report's next step", c)
 			}
-			for _, name := range []string{localfile.MissesFile, localfile.TempPrefixOf(localfile.MissesFile) + "0.tmp"} {
+			for _, name := range []string{localfile.TestMissesFile, localfile.TempPrefixOf(localfile.TestMissesFile) + "0.tmp"} {
 				out, err := exec.Command(git, "-C", filepath.Join(keployDir, "test-set-0"), "check-ignore", "-q", name).CombinedOutput()
 				if err != nil {
 					t.Errorf("git does not ignore %s: %v: %s", name, err, out)
@@ -173,6 +188,7 @@ func TestAStartupLookupOnlyInTheReplayIsWholeInTheMissesFileAndShapedInTheReport
 			if len(said) != 1 || said[0].ContextMap()["misses_file"] != file {
 				t.Errorf("the log points to %+v, want the misses file by path", said)
 			}
+			mockStays("after a keploy test run wrote its misses file")
 
 			r.setCalls.reset()
 			if r.outsideTestMisses("test-set-0") != nil {
@@ -180,6 +196,61 @@ func TestAStartupLookupOnlyInTheReplayIsWholeInTheMissesFileAndShapedInTheReport
 			}
 			if _, err := os.Lstat(file); !os.IsNotExist(err) {
 				t.Errorf("the last run's misses file stands after a run that missed no call outside every test: %v", err)
+			}
+			mockStays("after a keploy test run with no outside-test miss")
+		})
+	}
+}
+
+// A keploy test run of a set whose application looked a name up as it
+// started, which the recording holds no answer for, passes in either switch
+// mode (a call outside every test is served, not required), names the
+// lookup by its shape in the set's report, and writes it whole in keploy
+// test's own misses file, in place of its last run's. keploy mock replay's
+// misses file of the set is left byte for byte, by the removal at the set's
+// start and by the write at its end.
+func TestRunTestSet_AStartupLookupLeavesMockReplaysMissesFileAsItWas(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			provenOn(t, proven)
+			h := newPartialRunHarness(t, 2, 0)
+			dir := filepath.Join(h.replayer.config.Path, "test-set-0")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mockFile := filepath.Join(dir, localfile.MissesFile)
+			mockWas := []byte("set: test-set-0\nby: keploy mock replay\nmisses:\n    - protocol: HTTP\n      call: GET /v1/reset\n      count: 1\n")
+			if err := os.WriteFile(mockFile, mockWas, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			testFile := filepath.Join(dir, localfile.TestMissesFile)
+			if err := os.WriteFile(testFile, []byte("set: test-set-0\nby: keploy test\nmisses:\n    - protocol: DNS\n      call: A an-earlier-run.example.\n      count: 1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h.instr.mockErrorsFor = misses(func() ([]models.UnmatchedCall, error) {
+				return []models.UnmatchedCall{{Protocol: "DNS", ActualSummary: "A orders-db.staging.internal.", HostTag: "#ab12",
+					BeforeSet: true, Kind: models.MissOutsideTest}}, nil
+			})
+
+			if status := h.run(t); status != models.TestSetStatusPassed {
+				t.Fatalf("status %s; a start-up lookup outside every test fails nothing", status)
+			}
+			if got := h.report.report.OutsideTestMisses; len(got) != 1 || got[0].Call != "A {}.{}.{}." || got[0].When != models.OutsideBeforeFirstTest {
+				t.Fatalf("the report names %+v, want the lookup by its shape, made before the first test", got)
+			}
+			if b, err := os.ReadFile(mockFile); err != nil || !bytes.Equal(b, mockWas) {
+				t.Errorf("keploy mock replay's misses file holds %q (%v) after a keploy test run, want it byte for byte", b, err)
+			}
+			raw, err := os.ReadFile(testFile)
+			if err != nil {
+				t.Fatalf("keploy test's misses file was not written: %v", err)
+			}
+			var got localfile.MissesReport
+			if err := yaml.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.By != "keploy test" || len(got.Misses) != 1 || got.Misses[0].Call != "A orders-db.staging.internal." {
+				t.Errorf("keploy test's misses file holds %+v, want this run's lookup whole in place of the last run's", got)
 			}
 		})
 	}

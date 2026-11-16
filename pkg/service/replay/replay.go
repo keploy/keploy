@@ -3554,8 +3554,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	r.requestsUnread.reset()
 	// Nor are the calls an earlier run of the set missed: a run that ends
 	// before its report is written leaves no misses file naming them as
-	// this run's (outsideTestMisses writes this run's).
-	localfile.RemoveMisses(r.config.Path, testSetID)
+	// this run's (outsideTestMisses writes this run's). keploy mock replay's
+	// misses file is its own, and stays.
+	localfile.RemoveMisses(r.config.Path, testSetID, localfile.TestMissesFile)
 	// var to store the error in the loop
 	var loopErr error
 	// Add secret files to .gitignore if they exist

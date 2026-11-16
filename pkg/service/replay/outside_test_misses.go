@@ -19,9 +19,10 @@ import (
 // on, so a start-up lookup made only in a replay (a configuration that
 // differs from the recording's) could be neither seen nor corrected. The
 // set's report names each now (TestReport.OutsideTestMisses), by its shape,
-// the log says each with what to do, and the set's misses file
-// (localfile.MissesFile, local and git-ignored, which keploy mock replay
-// writes too) names each whole.
+// the log says each with what to do, and the set's keploy test misses file
+// (localfile.TestMissesFile, local and git-ignored) names each whole. It is
+// keploy test's own: keploy mock replay's (localfile.MissesFile) is never
+// written or removed by a keploy test run.
 
 // outsideLogMax is how many outside-test misses a set's log names, one line
 // each; the report names every one.
@@ -29,6 +30,7 @@ const outsideLogMax = 20
 
 // outsideWriter is keploy test, as a set's misses file names it.
 var outsideWriter = localfile.Writer{
+	File:      localfile.TestMissesFile,
 	Command:   "keploy test",
 	Holds:     "each call the application made outside every test in the last run of this set that no recorded mock answered and that failed nothing",
 	Unwritten: "could not write the calls the application made outside every test whole; the log names each by its shape",

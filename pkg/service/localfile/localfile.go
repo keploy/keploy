@@ -3,9 +3,9 @@
 // calls a run missed whole. Each is written through a temporary file renamed
 // into place, inside the recording only, and git-ignored by keploy/.gitignore.
 // keploy mock replay (pkg/service/mock) and keploy test (pkg/service/replay)
-// both write the misses file here, so one writer, one gitignore check and
-// one name for its temporary file (TempPrefixOf, HoldsCallsWhole) hold for
-// both.
+// each write their own misses file here (MissesFile, TestMissesFile), so one
+// writer, one gitignore check and one name for each one's temporary file
+// (TempPrefixOf, HoldsCallsWhole) hold for both.
 package localfile
 
 import (
@@ -31,11 +31,14 @@ const TempPrefix = ".last-replay-"
 // TempPrefixOf(name) + "*.tmp"), and the one place that says which: the
 // writer, keploy/.gitignore's check (missesIgnored) and HoldsCallsWhole all
 // read it here. Each is under TempPrefix, which keploy/.gitignore ignores;
-// MissesFile's is missesTempPrefix, for HoldsCallsWhole to tell it from the
-// receipts'.
+// MissesFile's is missesTempPrefix and TestMissesFile's testMissesTempPrefix,
+// for HoldsCallsWhole to tell them from the receipts'.
 func TempPrefixOf(name string) string {
-	if name == MissesFile {
+	switch name {
+	case MissesFile:
 		return missesTempPrefix
+	case TestMissesFile:
+		return testMissesTempPrefix
 	}
 	return TempPrefix
 }

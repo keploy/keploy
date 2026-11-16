@@ -15,46 +15,69 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// MissesFile names, for the last run of a set, each call no recorded mock
-// answered: whole, as the user's own record of the run, beside the path tag
-// keploy's log named it by (models.UnmatchedCall.PathTag), with how many
-// times the run made it and each next step keploy gave it
-// (MissedCall.OtherNextSteps). keploy mock replay writes every call its
-// replay missed, and keploy test each call a set's application made outside
-// every test (its report names those by their shape, as its log does); the
-// file says which wrote it (MissesReport.By). The log points here, by path,
-// so the call behind each tag it names is found here. Each run writes it
-// anew, over the last one's, and a run that missed no such call, or failed
-// before it judged its calls, removes the last one's (it would name an
-// earlier run's calls). It is written only where it is git-ignored
-// (missesIgnored: keploy/.gitignore's "/*/last-replay-misses.yaml" and the
-// temporary file's entry, added before anything is written, and, where git
-// can say, git itself ignoring both), as the receipts are: it holds the
-// calls whole. For the same reason nothing that sends the keploy folder away
-// carries it (HoldsCallsWhole).
-const MissesFile = "last-replay-misses.yaml"
+// MissesFile and TestMissesFile name, for the last run of a set, each call
+// no recorded mock answered: whole, as the user's own record of the run,
+// beside the path tag keploy's log named it by
+// (models.UnmatchedCall.PathTag), with how many times the run made it and
+// each next step keploy gave it (MissedCall.OtherNextSteps). MissesFile is
+// keploy mock replay's, every call its replay missed; TestMissesFile is
+// keploy test's, each call a set's application made outside every test (its
+// report names those by their shape, as its log does). Each command writes
+// and removes its own file alone, so a reader of one command's misses never
+// reads the other's, and a run of one never replaces or removes the other's
+// last run's; the file says which wrote it too (MissesReport.By). The log
+// points to it, by path, so the call behind each tag it names is found
+// there. Each run writes it anew, over its command's last run's, and a run
+// that missed no such call, or failed before it judged its calls, removes
+// the last one's (it would name an earlier run's calls). It is written only
+// where it is git-ignored (missesIgnored: keploy/.gitignore's "/*/<file>"
+// and the temporary file's entry, added before anything is written, and,
+// where git can say, git itself ignoring both), as the receipts are: it
+// holds the calls whole. For the same reason nothing that sends the keploy
+// folder away carries it (HoldsCallsWhole).
+const (
+	MissesFile     = "last-replay-misses.yaml"
+	TestMissesFile = "last-test-misses.yaml"
+)
 
-// missesTempPrefix begins the name of the temporary file a MissesFile write
-// goes through (TempPrefixOf): it holds the calls whole until it is renamed
-// into place, and a kill before that leaves it behind.
-const missesTempPrefix = TempPrefix + "misses-"
+// missesTempPrefix and testMissesTempPrefix begin the name of the temporary
+// file a MissesFile and a TestMissesFile write go through (TempPrefixOf): it
+// holds the calls whole until it is renamed into place, and a kill before
+// that leaves it behind.
+const (
+	missesTempPrefix     = TempPrefix + "misses-"
+	testMissesTempPrefix = TempPrefix + "test-misses-"
+)
 
-// missesIgnore are the keploy/.gitignore entries MissesFile is written only
-// under: its own, and its temporary file's (TempPrefix covers it). Set names
-// are single path segments, so /*/ reaches all.
-var missesIgnore = []string{"/*/" + MissesFile, "/*/" + TempPrefix + "*"}
+// missesFiles are the files keploy writes the calls a run missed into whole.
+var missesFiles = []string{MissesFile, TestMissesFile}
+
+// missesIgnore are the keploy/.gitignore entries file, a misses file, is
+// written only under: its own, and its temporary file's (TempPrefix covers
+// it). Set names are single path segments, so /*/ reaches all.
+func missesIgnore(file string) []string { return []string{"/*/" + file, "/*/" + TempPrefix + "*"} }
 
 // HoldsCallsWhole says whether name, a file's base name, is one keploy writes
-// the calls a run missed into whole: MissesFile, or the temporary file a
-// write of it goes through (TempPrefixOf), which a kill mid-write leaves
-// behind. Such a file is the user's own, local and git-ignored, and anything
-// that sends the keploy folder away (a bundle, an upload) leaves it out.
+// the calls a run missed into whole: MissesFile or TestMissesFile, or the
+// temporary file a write of either goes through (TempPrefixOf), which a kill
+// mid-write leaves behind. Such a file is the user's own, local and
+// git-ignored, and anything that sends the keploy folder away (a bundle, an
+// upload) leaves it out.
 func HoldsCallsWhole(name string) bool {
-	return name == MissesFile || strings.HasPrefix(name, TempPrefixOf(MissesFile))
+	for _, file := range missesFiles {
+		if name == file || strings.HasPrefix(name, TempPrefixOf(file)) {
+			return true
+		}
+	}
+	return false
 }
 
-// Writer is the command that writes a set's MissesFile, as the file names it.
+// Writer is the command that writes a set's misses file, as the file names it.
 type Writer struct {
+	// File is the file it writes in the set's folder, its command's own:
+	// MissesFile or TestMissesFile. WriteMisses writes no other name, so
+	// every file it writes is one HoldsCallsWhole names.
+	File string
 	// Command is the command, as the file's header and its by field
 	// (MissesReport.By) name it: "keploy test".
 	Command string
@@ -67,35 +90,42 @@ type Writer struct {
 	Unwritten string
 }
 
-// MissesReport is MissesFile's content.
+// MissesReport is a misses file's content (MissesFile, TestMissesFile).
 type MissesReport struct {
 	Set string `yaml:"set"`
-	// By is the command that wrote it (Writer.Command): keploy mock replay
-	// and keploy test write the same file, and a reader of one command's
-	// misses reads only that command's.
+	// By is the command that wrote it (Writer.Command), which each file's
+	// name says too: a reader of one command's misses can check it.
 	By     string       `yaml:"by"`
 	At     time.Time    `yaml:"at"`
 	Misses []MissedCall `yaml:"misses"`
 }
 
-// WriteMisses writes MissesFile for a run of set by w whose calls misses no
-// mock answered, in place of the last run's, and returns its path, for the
-// log or console to point to; or removes a stale one when the run missed no
-// call (it would describe an earlier run), and returns "". "" too when it was
-// not written: when it would not be git-ignored (missesIgnored: it holds the
-// calls whole, and must never be committed), or the write failed.
+// WriteMisses writes w.File for a run of set by w whose calls misses no mock
+// answered, in place of the last run's, and returns its path, for the log or
+// console to point to; or removes a stale one when the run missed no call (it
+// would describe an earlier run), and returns "". "" too when it was not
+// written: when it would not be git-ignored (missesIgnored: it holds the
+// calls whole, and must never be committed), or the write failed. A w.File
+// that is no misses file (missesFiles) is written nowhere, said at ERROR: a
+// file HoldsCallsWhole does not name would be sent away with the keploy
+// folder.
 func WriteMisses(logger *zap.Logger, keployDir, set string, w Writer, misses []models.UnmatchedCall) string {
+	if !slices.Contains(missesFiles, w.File) {
+		logger.Error("keploy did not write the calls it missed whole: the file named for them is not one keploy keeps local; this is a bug in keploy",
+			zap.String("command", w.Command), zap.String("file", w.File))
+		return ""
+	}
 	dir := filepath.Join(keployDir, set)
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return ""
 	}
 	calls := MissedCalls(misses, w.NextStep)
 	if len(calls) == 0 {
-		RemoveMisses(keployDir, set)
+		RemoveMisses(keployDir, set, w.File)
 		return ""
 	}
 	next := "check that " + dir + " and keploy/.gitignore are writable by the user running keploy"
-	unignored, err := missesIgnored(logger, keployDir, dir)
+	unignored, err := missesIgnored(logger, keployDir, dir, w.File)
 	if unignored {
 		next = "remove the .gitignore line that un-ignores it (a later \"!\" line, such as \"!*.yaml\"), so keploy can keep the calls it names local"
 	}
@@ -103,47 +133,49 @@ func WriteMisses(logger *zap.Logger, keployDir, set string, w Writer, misses []m
 		var body []byte
 		body, err = yaml.Marshal(MissesReport{Set: set, By: w.Command, At: time.Now().UTC().Truncate(time.Second), Misses: calls})
 		if err == nil {
-			err = Write(logger, keployDir, dir, MissesFile,
+			err = Write(logger, keployDir, dir, w.File,
 				append([]byte("# Written by `"+w.Command+"`: "+w.Holds+", whole, beside the path tag keploy's log names it by. Local and git-ignored.\n"), body...))
 		}
 	}
 	if err != nil {
-		RemoveMisses(keployDir, set)
+		RemoveMisses(keployDir, set, w.File)
 		logger.Warn(w.Unwritten, zap.String("dir", dir), zap.Error(err),
 			zap.String("next_step", next))
 		return ""
 	}
-	return filepath.Join(dir, MissesFile)
+	return filepath.Join(dir, w.File)
 }
 
-// RemoveMisses removes set's MissesFile, if there is one: it names the calls
-// of a run before the one that is ending, which keploy did not judge, or
-// which missed none.
-func RemoveMisses(keployDir, set string) {
+// RemoveMisses removes set's file, a misses file (MissesFile or
+// TestMissesFile, its command's own), if there is one: it names the calls of
+// a run before the one that is ending, which keploy did not judge, or which
+// missed none. The other command's file is left as it is.
+func RemoveMisses(keployDir, set, file string) {
 	dir := filepath.Join(keployDir, set)
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return
 	}
-	_ = setfile.RemoveInRecording(keployDir, filepath.Join(dir, MissesFile))
+	_ = setfile.RemoveInRecording(keployDir, filepath.Join(dir, file))
 }
 
-// missesIgnored makes keploy/.gitignore ignore every set's MissesFile and the
-// temporary file its write goes through, before anything is written
-// (Ignore), and says why either is not ignored, for the file not to be
-// written: both entries must be in keploy/.gitignore, and, where git can say
-// (utils.GitIgnores: git is installed and dir is in a work tree), git must
-// ignore both, so a later line of the user's that un-ignores one (a
+// missesIgnored makes keploy/.gitignore ignore file, a misses file, in every
+// set and the temporary file its write goes through, before anything is
+// written (Ignore), and says why either is not ignored, for the file not to
+// be written: both entries must be in keploy/.gitignore, and, where git can
+// say (utils.GitIgnores: git is installed and dir is in a work tree), git
+// must ignore both, so a later line of the user's that un-ignores one (a
 // "!*.yaml" after them) keeps the file from being written. unignored: git
 // said so, though keploy/.gitignore holds the entries.
-func missesIgnored(logger *zap.Logger, keployDir, dir string) (unignored bool, err error) {
-	failed := Ignore(logger, keployDir, missesIgnore)
-	for _, entry := range missesIgnore {
+func missesIgnored(logger *zap.Logger, keployDir, dir, file string) (unignored bool, err error) {
+	entries := missesIgnore(file)
+	failed := Ignore(logger, keployDir, entries)
+	for _, entry := range entries {
 		if failed[entry] != nil {
 			return false, fmt.Errorf("keploy/.gitignore could not be made to ignore %s: %w", entry, failed[entry])
 		}
 	}
-	// A name the temporary file a MissesFile write goes through takes.
-	for _, name := range []string{MissesFile, TempPrefixOf(MissesFile) + "0.tmp"} {
+	// A name the temporary file a write of file goes through takes.
+	for _, name := range []string{file, TempPrefixOf(file) + "0.tmp"} {
 		if ignored, known := utils.GitIgnores(dir, name); known && !ignored {
 			return true, fmt.Errorf("git does not ignore %s, though keploy/.gitignore lists it: a later .gitignore line un-ignores it", filepath.Join(dir, name))
 		}
@@ -151,8 +183,8 @@ func missesIgnored(logger *zap.Logger, keployDir, dir string) (unignored bool, e
 	return false, nil
 }
 
-// MissedCall is a call no mock answered, as a console and MissesFile name
-// it: once, however many times the run made it (Count).
+// MissedCall is a call no mock answered, as a console and a misses file
+// name it: once, however many times the run made it (Count).
 type MissedCall struct {
 	Protocol    string `yaml:"protocol"`
 	Call        string `yaml:"call"`
