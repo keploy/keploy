@@ -1003,6 +1003,9 @@ func TestWrittenCountsEveryByteUnderTLSFromTheSocketsAccept(t *testing.T) {
 	app, proxyClient := dialSmallWindow(t)
 	src, appEnd, sock := clientUnder(t, acceptCountsUnderTLS, app, proxyClient)
 	s := clientSocketOf(src, zap.NewNop())
+	if s == nil {
+		t.Fatal("the socket under the TLS layer and the count from its accept is not asked")
+	}
 	if c := countWrites(src, s); c != src {
 		t.Fatalf("the relay put its own count (%T) over a client counted from its accept", c)
 	}

@@ -1,14 +1,18 @@
 package relay
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.uber.org/zap"
 )
 
@@ -383,5 +387,100 @@ func TestTheCountFromTheAcceptIsTheRelaysUnderTLSToo(t *testing.T) {
 	held.Conn = held.tcp
 	if s, _ := clientSocketOf(held, zap.NewNop()).(*tcpClientSocket); s == nil || countWrites(held, s) != net.Conn(held) || s.unsent0 != 7 {
 		t.Error("the count does not start from what the send buffer held as it began")
+	}
+}
+
+// A client whose socket is resending as it resets: xnu flags the socket in
+// loss recovery (TCPI_FLAG_LOSSRECOVERY), as it did on the closed connections
+// a lost loopback segment left under load, so the count of sequence numbers
+// cannot say what the client acknowledged, and a look at it alone would have
+// the answer teed. The count of the bytes written to the socket still says
+// exactly, so through the relay the part of the answer the client never
+// acknowledged is refused, every byte of it, and the rest is in the
+// destination's stream. Here the flag is set on the socket's real answers
+// once the client's window has closed: the relay's count of its own writes,
+// and the count from the accept, over plain TCP and under TLS.
+func TestAResendingClientThatResetsHasWhatItNeverAcknowledgedRefused(t *testing.T) {
+	t.Parallel()
+	for name, by := range map[string]countedBy{
+		"the relay's count":              relayCounts,
+		"the count from the accept":      acceptCounts,
+		"the count from the accept, TLS": acceptCountsUnderTLS,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			resendingClientResets(t, by)
+		})
+	}
+}
+
+func resendingClientResets(t *testing.T, by countedBy) {
+	app, proxyClient := dialSmallWindow(t)
+	answer := strings.Repeat("a", receiveBufferBoundOf(t, app)+128<<10)
+	proxyServer, server := loopbackPair(t)
+	under, appEnd, _ := clientUnder(t, by, app, proxyClient)
+	plain := &seenWrites{Conn: under}
+	r := New(Config{Logger: zap.NewNop()}, plain, connseq.NewUpstream(proxyServer))
+	s, ok := r.client.(*tcpClientSocket)
+	if !ok {
+		t.Fatalf("the relay asks %T, want the client's TCP socket", r.client)
+	}
+	var resending atomic.Bool
+	ask := s.askInfo
+	s.askInfo = func(fd uintptr, buf *[tcpInfoBuf]byte, info *darwinTCPInfo) bool {
+		ok := ask(fd, buf, info)
+		if resending.Load() {
+			info.lossRecovery = true
+		}
+		return ok
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = r.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	streams := make(chan string, 1)
+	go func() { go streamOf(t, r.ClientStream()); streams <- streamOf(t, r.DestStream()) }()
+
+	if _, err := appEnd.Write([]byte("req")); err != nil {
+		t.Fatal(err)
+	}
+	halfClose(t, appEnd, app)
+	_ = server.SetReadDeadline(time.Now().Add(tcpSettle))
+	if got, err := io.ReadAll(server); err != nil || string(got) != "req" {
+		t.Fatalf("the destination read %q, %v; want the request and the FIN", got, err)
+	}
+	if _, err := server.Write([]byte(answer)); err != nil {
+		t.Fatal(err)
+	}
+	for limit := time.Now().Add(tcpSettle); plain.n.Load() != uint64(len(answer)); {
+		if time.Now().After(limit) {
+			t.Fatalf("the relay wrote %d bytes to the client in %v, want the %d sent", plain.n.Load(), tcpSettle, len(answer))
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+	for limit := time.Now().Add(tcpSettle); !windowClosed(t, proxyClient); {
+		if time.Now().After(limit) {
+			t.Fatalf("the client's receive window did not close in %v", tcpSettle)
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+	resending.Store(true)
+	// The client closes with the answer unread: a reset, with the rest of
+	// the answer never acknowledged.
+	_ = app.Close()
+	awaitTCPState(t, proxyClient, stateClosed, "the client closed with bytes unread")
+	_ = server.Close()
+	var got string
+	select {
+	case got = <-streams:
+		if got == "" || !strings.HasPrefix(answer, got) || len(got) == len(answer) {
+			t.Fatalf("the destination's stream carried %d bytes of the %d-byte answer, want the part the client acknowledged, short of the whole", len(got), len(answer))
+		}
+	case <-time.After(tcpSettle):
+		t.Fatal("the destination's stream did not end")
+	}
+	if chunks, bytes := r.NotTaken(); chunks == 0 || bytes != int64(len(answer)-len(got)) {
+		t.Fatalf("%d chunks (%d bytes) not taken, want every byte of the %d written not in the stream's %d",
+			chunks, bytes, len(answer), len(got))
 	}
 }
