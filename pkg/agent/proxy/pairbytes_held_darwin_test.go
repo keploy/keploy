@@ -42,30 +42,30 @@ func heldPair(t *testing.T) (p *Proxy, app, proxySide *net.TCPConn, reader *trac
 	return p, app, proxySide, reader
 }
 
-// fillSendBuffer writes n bytes to app from a goroutine, more than the
-// proxy's receive buffer takes while nothing reads it, and returns once the
-// application's send buffer holds some: bytes still on their way.
-func fillSendBuffer(t *testing.T, p *Proxy, app *net.TCPConn, n int) {
+// fillSendBuffer writes to app until the proxy's side advertises a zero
+// window with bytes still in app's send buffer (fill), checks that the
+// application's socket, read from this process (its holder), shows them, and
+// says how much it wrote: bytes still on their way, which only a read of the
+// proxy's side lets through. A send buffer found holding a byte once is no
+// such hold: while the proxy's receive buffer has room, loopback takes and
+// acknowledges what the application writes, so a wait begun then soon finds
+// everything written by its start received (the send buffer read empty, or
+// the proxy's side past what it held) and ends nil, rightly.
+func fillSendBuffer(t *testing.T, p *Proxy, app, proxySide *net.TCPConn) int {
 	t.Helper()
-	go func() { _, _ = app.Write(make([]byte, n)) }()
+	n := fill(t, app, proxySide)
 	pcs, err := p.paired.upTo(1)
 	if err != nil || len(pcs) != 1 {
 		t.Fatalf("paired connections: %v, %v", pcs, err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		s, found, err := pcs[0].appSocket(&heldSockets{})
-		if err != nil || !found {
-			t.Fatalf("the application's socket read from this process: found %v, %v", found, err)
-		}
-		if s.SndCC > 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the application's send buffer never held a byte")
-		}
-		time.Sleep(time.Millisecond)
+	s, found, err := pcs[0].appSocket(&heldSockets{})
+	if err != nil || !found {
+		t.Fatalf("the application's socket read from this process: found %v, %v", found, err)
 	}
+	if s.SndCC == 0 {
+		t.Fatal("the application's send buffer, read from this process, holds nothing behind the proxy's zero window")
+	}
+	return int(n)
 }
 
 // untilHeldState waits until the application's socket, read from this process
@@ -147,9 +147,8 @@ func TestAWaitReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *test
 		}
 	})
 	t.Run("bytes in the application's send buffer", func(t *testing.T) {
-		p, app, _, reader := heldPair(t)
-		const n = 8 << 20
-		fillSendBuffer(t, p, app, n)
+		p, app, proxySide, reader := heldPair(t)
+		n := fillSendBuffer(t, p, app, proxySide)
 		if err := waitHeld(p, time.Second); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("the wait ended with %v, want it to wait for the bytes in the application's send buffer", err)
 		}
@@ -418,7 +417,7 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		p.settleReads = true
 		core, logs := observer.New(zapcore.WarnLevel)
 		p.logger = zap.New(core)
-		fillSendBuffer(t, p, app, 8<<20)
+		fillSendBuffer(t, p, app, proxySide)
 		_ = reader.Close()
 		if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 			t.Fatalf("PairedBytesErr = %v after a close with bytes in the application's send buffer, want unknown", err)
