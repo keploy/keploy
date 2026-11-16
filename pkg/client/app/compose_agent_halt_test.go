@@ -27,6 +27,7 @@ type agentHaltDocker struct {
 	mu         sync.Mutex
 	app, agent container.State
 	agentReads int
+	appReads   int
 	downAfter  int
 	downCode   int
 	// agentGone: the daemon has no agent container.
@@ -46,6 +47,8 @@ func (d *agentHaltDocker) ContainerInspect(_ context.Context, ref string) (conta
 			d.agent = container.State{Status: "exited", ExitCode: d.downCode, StartedAt: d.agent.StartedAt}
 		}
 		st = d.agent
+	} else {
+		d.appReads++
 	}
 	return container.InspectResponse{
 		ContainerJSONBase: &container.ContainerJSONBase{ID: ref, State: &st},
@@ -57,6 +60,12 @@ func (d *agentHaltDocker) reads() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.agentReads
+}
+
+func (d *agentHaltDocker) appReadCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.appReads
 }
 
 func runningState(started time.Time) container.State {
@@ -119,10 +128,12 @@ func TestAnAgentThatExitsAfterTheAppStartedEndsTheRunNamingIt(t *testing.T) {
 // the stack (a halt's stop, a down), when the app has not started in this
 // run (compose's up decides: it fails on the agent's health, and a retry may
 // recreate the agent), when the container runs again, when a halt is kept
-// already (it stands, its project stop under way), when the watch has ended,
-// or when the event is the agent's kill, not its exit. One the daemon gives
-// by the agent's ID alone is the agent's too, and one of an agent the daemon
-// no longer has takes its exit code from the event.
+// already (it stands, its project stop under way), when the watch has ended
+// (keploy then asks the daemon nothing of the app: this daemon answers even
+// on an ended context, so the watch's end alone decides), or when the event
+// is the agent's kill, not its exit. One the daemon gives by the agent's ID
+// alone is the agent's too, and one of an agent the daemon no longer has
+// takes its exit code from the event.
 func TestAnAgentExitKeployAskedForOrBeforeTheAppStartedEndsNothing(t *testing.T) {
 	started := time.Now().Add(-time.Minute)
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -140,6 +151,8 @@ func TestAnAgentExitKeployAskedForOrBeforeTheAppStartedEndsNothing(t *testing.T)
 		msg        *events.Message
 		wantCode   int
 		ends       bool
+		// noAppRead: keploy reads nothing of the app's container.
+		noAppRead bool
 	}{
 		"keploy stops the stack":  {app: runningState(started), agent: exitedState(0, started), set: func(a *App) { a.composeApp.agentStopping.Store(true) }},
 		"the app never started":   {app: container.State{Status: "created", StartedAt: "0001-01-01T00:00:00Z"}, agent: exitedState(1, started)},
@@ -147,7 +160,7 @@ func TestAnAgentExitKeployAskedForOrBeforeTheAppStartedEndsNothing(t *testing.T)
 		"the agent runs again":    {app: runningState(started), agent: runningState(started)},
 		"the app's own halt kept": {app: exitedState(3, started), agent: exitedState(0, started), halt: &composeHalt{exitCode: 3}},
 		"another phase's agent":   {app: runningState(started), agent: exitedState(1, started), set: func(a *App) { a.keployContainer = "keploy-v3-next" }},
-		"the watch has ended":     {app: runningState(started), agent: exitedState(1, started), ctx: cancelled},
+		"the watch has ended":     {app: runningState(started), agent: exitedState(1, started), ctx: cancelled, noAppRead: true},
 		"the agent's kill":        {app: runningState(started), agent: exitedState(1, started), msg: &kill},
 		"by the agent's ID":       {app: runningState(started), agent: exitedState(4, started), msg: &byID, ends: true, wantCode: 4},
 		"the agent is gone":       {app: runningState(started), gone: true, msg: &byID, ends: true, wantCode: 1},
@@ -177,6 +190,9 @@ func TestAnAgentExitKeployAskedForOrBeforeTheAppStartedEndsNothing(t *testing.T)
 			}
 		} else if h != tc.halt {
 			t.Fatalf("%s: halt %+v, want %+v", name, h, tc.halt)
+		}
+		if n := d.appReadCount(); tc.noAppRead && n != 0 {
+			t.Fatalf("%s: keploy read the app's container %d times on an ended watch, want none", name, n)
 		}
 	}
 }
