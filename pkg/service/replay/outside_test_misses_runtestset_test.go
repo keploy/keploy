@@ -414,29 +414,40 @@ func TestRunTestSet_AStartupFetchIsNamedOutsideEveryTestOnlyWhereItFailsNothing(
 // A set none of whose tests opened its capture window (both are ignored) has
 // its end read in neither mode: what the agent holds then is the
 // application's start-up, which no test's read handed over as the set's, and
-// would be named as made after its last test.
+// would be named as made after its last test. So for an application keploy
+// stops before the set's report (one it started for the set) and for one it
+// reads running (one --keep-app-alive keeps for a later set).
 func TestRunTestSet_ASetNoTestOfWhichOpenedItsWindowReadsNoSetEnd(t *testing.T) {
 	for _, proven := range []bool{false, true} {
-		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
-			provenOn(t, proven)
-			h := newPartialRunHarness(t, 2, 0)
-			h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-1", "test-2"}}
-			var reads atomic.Int32
-			h.instr.mockErrorsFor = counted(&reads, func() ([]models.UnmatchedCall, error) {
-				return []models.UnmatchedCall{{Protocol: "DNS", ActualSummary: "A orders-db.staging.internal."}}, nil
-			})
+		for _, kept := range []bool{false, true} {
+			t.Run(fmt.Sprintf("proven=%v,kept=%v", proven, kept), func(t *testing.T) {
+				provenOn(t, proven)
+				h := newPartialRunHarness(t, 2, 0)
+				h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": {"test-1", "test-2"}}
+				var reads atomic.Int32
+				h.instr.mockErrorsFor = counted(&reads, func() ([]models.UnmatchedCall, error) {
+					return []models.UnmatchedCall{{Protocol: "DNS", ActualSummary: "A orders-db.staging.internal."}}, nil
+				})
 
-			h.run(t)
-			if rep := h.report.report; rep == nil || rep.Ignored != 2 {
-				t.Fatalf("the report %+v; the case needs both tests ignored", rep)
-			}
-			if n := reads.Load(); n != 0 {
-				t.Fatalf("%d reads of the agent's misses, want none: no test opened the set's window", n)
-			}
-			if got := h.report.report.OutsideTestMisses; len(got) != 0 {
-				t.Fatalf("the report names %+v outside every test, want none", got)
-			}
-		})
+				if kept {
+					// Kept for a later set: read running, not stopped.
+					h.replayer.keepAliveStop = func() string { return "" }
+					h.replayer.isLastTestSet, h.replayer.finalAttempt = false, true
+					h.runServing(t)
+				} else {
+					h.run(t)
+				}
+				if rep := h.report.report; rep == nil || rep.Ignored != 2 {
+					t.Fatalf("the report %+v; the case needs both tests ignored", rep)
+				}
+				if n := reads.Load(); n != 0 {
+					t.Fatalf("%d reads of the agent's misses, want none: no test opened the set's window", n)
+				}
+				if got := h.report.report.OutsideTestMisses; len(got) != 0 {
+					t.Fatalf("the report names %+v outside every test, want none", got)
+				}
+			})
+		}
 	}
 }
 

@@ -44,18 +44,48 @@ func whyStopNotRead(cmdType utils.CmdType, serveTest, halted bool) string {
 	return whyAppNotStopped(cmdType, serveTest)
 }
 
+// awaitAppExit waits for exited, closed once the application keploy stopped
+// has exited, as the drain named group waits for its goroutines
+// (teardownDrain): for as long as scope's teardown moves, and, said as that
+// drain's give-up, gives the application up once it has made no progress
+// for bound (that drain's) of keploy's runnable time, or once ctx ends. It
+// reports whether the application exited. A set's end that stops the
+// application before it reads its last calls thus waits for a stop that
+// moves, as long as it takes, but never for one wedged past what the set's
+// drain would give it: an application whose stop ignores its cancel, waited
+// for without a bound, held keploy test before the set's report for good.
+func (r *Replayer) awaitAppExit(ctx context.Context, exited <-chan struct{}, scope *utils.TeardownScope, group string, bound time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-exited:
+		case <-ctx.Done():
+		}
+	}()
+	utils.AwaitProgressOn(r.drainClock, r.logger, group, done, bound, scope.Moves)
+	select {
+	case <-exited:
+		return true
+	default:
+		return false
+	}
+}
+
 // keepAliveStopper gives the app --keep-app-alive keeps across a run's sets a
 // context of its own, and the stop of it the last set's final attempt calls
 // before its end's read (P101-c): stop cancels the app's context and waits
-// until ran has been told how its run ended, then says why its stop had to
-// kill it ("" when it did not, or when the run's ctx ended first). Under the
+// with await (awaitAppExit) until ran has been told how its run ended, then
+// says why its stop had to kill it ("" when it did not, or when await gave
+// the app up: the run's ctx ended first, or its stop made no progress for
+// its bound). Under the
 // proven switch the cancel's cause is models.ErrAppStoppedForSetEnd; with it
 // off it is a plain cancel, the stop the run's end gives the app, and the
 // read it comes before is of the calls the app made after the run's last
 // test, for the set's report alone (stopForSetEndRead). Not under docker
 // compose, where stopping the app stops keploy's agent: stop is nil there,
 // and appCtx is ctx.
-func keepAliveStopper(ctx context.Context, cmdType utils.CmdType) (appCtx context.Context, stop func() string, ran func(models.AppError)) {
+func keepAliveStopper(ctx context.Context, cmdType utils.CmdType, await func(ctx context.Context, exited <-chan struct{}) bool) (appCtx context.Context, stop func() string, ran func(models.AppError)) {
 	if cmdType == utils.DockerCompose {
 		return ctx, nil, func(models.AppError) {}
 	}
@@ -68,12 +98,10 @@ func keepAliveStopper(ctx context.Context, cmdType utils.CmdType) (appCtx contex
 	var killed string
 	stop = func() string {
 		cancel(cause)
-		select {
-		case <-exited:
+		if await(ctx, exited) {
 			return killed
-		case <-ctx.Done():
-			return ""
 		}
+		return ""
 	}
 	ran = func(appErr models.AppError) {
 		killed = appErr.StopKilled

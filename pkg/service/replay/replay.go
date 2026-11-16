@@ -1311,7 +1311,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		// Under the proven switch the app runs under a context of its own,
 		// so the last set's end can stop it, and wait for it, before its
 		// read (P101-c), as a set stops the app it started (P101-b).
-		kaCtx, stopKeepAlive, keepAliveRan := keepAliveStopper(ctx, cmdType)
+		kaCtx, stopKeepAlive, keepAliveRan := keepAliveStopper(ctx, cmdType, func(ctx context.Context, exited <-chan struct{}) bool {
+			return r.awaitAppExit(ctx, exited, teardown, "replay", teardownDrainStall)
+		})
 		r.keepAliveStop = stopKeepAlive
 		g.Go(func() error {
 			var appErr models.AppError
@@ -2406,6 +2408,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// close and the send unordered once the drain had given up, and a watcher
 	// that sent after the close would have panicked.
 	exitLoopChan := make(chan bool, 2)
+	// appStopGaveUp: the set's end gave the stop of the application it
+	// started up (awaitAppExit), its run still on: the stop made no
+	// progress for the set's drain bound.
+	appStopGaveUp := false
 	defer func() {
 		// Notify the agent before cancelling the app context so proxy logs shutdown errors as debug.
 		if r.instrument && !serveTest {
@@ -2418,7 +2424,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		runTestSetCtxCancel()
 		// Bounded drain so a wedged per-test-set goroutine can't hang
 		// teardown/SIGINT; by the set's teardown making no progress, not
-		// by a time (teardownDrain).
+		// by a time (teardownDrain). Not when the set's end already gave
+		// its application's stop up on that bound (awaitAppExit): the
+		// group cannot join without it, and a second wait of the bound
+		// would only say so again.
+		if appStopGaveUp {
+			return
+		}
 		if err := r.teardownDrain("replay-testset", runTestSetErrGrp, testSetDrainStall, setTeardown); err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
@@ -2670,8 +2682,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var stopAppBeforeSetEnd func() string
 	// stopAppBeforeReport, with the proven switch off, stops the application
 	// keploy started for this set (natively, or with docker run) as the set's
-	// teardown does, and waits for it to exit: the set's end calls it after
-	// the set's post-script, so the calls the application makes as it stops
+	// teardown does, and waits for it to exit, as the set's drain would
+	// (awaitAppExit: while its stop moves, given up once it makes no
+	// progress for that drain's bound): the set's end calls it after the
+	// set's post-script, so the calls the application makes as it stops
 	// are read before the set's report is written (stopForSetEndRead). nil
 	// when keploy started none here, under docker compose, whose app's exit
 	// stops its stack, keploy's agent with it, and under the switch.
@@ -3305,8 +3319,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					appExited = make(chan struct{})
 					stopAppBeforeSetEnd = func() string {
 						stopApp(models.ErrAppStoppedForSetEnd)
-						select {
-						case <-appExited:
+						if r.awaitAppExit(runTestSetCtx, appExited, setTeardown, "replay-testset", testSetDrainStall) {
 							// Ended, but for what its stop left running,
 							// which runs on with what it lost.
 							r.lossAppRunsOn = appLeftRunning != ""
@@ -3319,11 +3332,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 									zap.String("next_step", "make the application's daemons end when it is stopped (stop them in its own shutdown), or start them before keploy, where they are outside dependencies"))
 							}
 							return appStopKilled
-						case <-runTestSetCtx.Done():
-							r.lossAppRunsOn = true // not known to have ended
-							r.lossAppRunsOnWhy = fmt.Sprintf("the stop of the application at test-set %s's end was not waited out (the test-set's run ended first)", testSetID)
-							return ""
 						}
+						// Not known to have ended: the set's run ended
+						// first, or its stop made no progress for the
+						// set's drain bound.
+						r.lossAppRunsOn = true
+						r.lossAppRunsOnWhy = fmt.Sprintf("the stop of the application at test-set %s's end was not waited out (the test-set's run ended first)", testSetID)
+						if runTestSetCtx.Err() == nil {
+							appStopGaveUp = true
+							r.lossAppRunsOnWhy = fmt.Sprintf("the stop of the application at test-set %s's end was not waited out (it made no progress for %v)", testSetID, testSetDrainStall)
+						}
+						return ""
 					}
 				} else {
 					// With the switch off the app runs under a context of
@@ -3337,10 +3356,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					appExited = make(chan struct{})
 					stopAppBeforeReport = func() {
 						stopApp()
-						select {
-						case <-appExited:
-						case <-runTestSetCtx.Done():
-						}
+						appStopGaveUp = !r.awaitAppExit(runTestSetCtx, appExited, setTeardown, "replay-testset", testSetDrainStall) && runTestSetCtx.Err() == nil
 					}
 				}
 				// Under the proven switch: the listens the agent saw before

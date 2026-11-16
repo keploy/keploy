@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,6 +103,33 @@ func TestWhyAppNotStopped(t *testing.T) {
 	}
 }
 
+// untilExited is an await for keepAliveStopper that waits for the app's exit
+// or its run's end, with no bound of its own.
+func untilExited(ctx context.Context, exited <-chan struct{}) bool {
+	select {
+	case <-exited:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// The kept app's stop says why its run's stop killed it only once its await
+// saw it exit: one its await gave up (its stop made no progress for the run's
+// drain bound: awaitAppExit) says nothing, though its run may say later.
+func TestTheKeptAppsStopGivenUpSaysNothing(t *testing.T) {
+	for _, proven := range []bool{false, true} {
+		provenOn(t, proven)
+		var awaited atomic.Int32
+		gaveUp := func(context.Context, <-chan struct{}) bool { awaited.Add(1); return false }
+		_, stop, ran := keepAliveStopper(context.Background(), utils.Native, gaveUp)
+		go ran(models.AppError{AppErrorType: models.ErrCtxCanceled, StopKilled: "killed it"})
+		if why := stop(); why != "" || awaited.Load() != 1 {
+			t.Fatalf("proven=%v: the stop said %q after %d awaits; want nothing, after one that gave the app up", proven, why, awaited.Load())
+		}
+	}
+}
+
 // The app --keep-app-alive keeps across sets runs on a context of its own:
 // its stop cancels it, under the proven switch with the set-end cause, and
 // waits until its run has ended, saying why that run's stop killed it. Off
@@ -112,7 +140,7 @@ func TestWhyAppNotStopped(t *testing.T) {
 func TestTheKeptAppsStopWaitsForItsRun(t *testing.T) {
 	provenOn(t, true)
 	ctx := context.Background()
-	appCtx, stop, ran := keepAliveStopper(ctx, utils.Native)
+	appCtx, stop, ran := keepAliveStopper(ctx, utils.Native, untilExited)
 	if stop == nil {
 		t.Fatal("no stop for an app kept across sets, under the switch")
 	}
@@ -131,20 +159,20 @@ func TestTheKeptAppsStopWaitsForItsRun(t *testing.T) {
 	<-ended
 
 	runCtx, cancel := context.WithCancel(ctx)
-	_, stop, _ = keepAliveStopper(runCtx, utils.Native)
+	_, stop, _ = keepAliveStopper(runCtx, utils.Native, untilExited)
 	cancel()
 	if why := stop(); why != "" {
 		t.Fatalf("a run that ended first: the stop said %q", why)
 	}
 
-	if appCtx, stop, _ := keepAliveStopper(ctx, utils.DockerCompose); stop != nil || appCtx != ctx {
+	if appCtx, stop, _ := keepAliveStopper(ctx, utils.DockerCompose, untilExited); stop != nil || appCtx != ctx {
 		t.Fatal("docker compose: a stop of the app, which would stop keploy's agent")
 	}
 	provenOn(t, false)
-	if appCtx, stop, _ := keepAliveStopper(ctx, utils.DockerCompose); stop != nil || appCtx != ctx {
+	if appCtx, stop, _ := keepAliveStopper(ctx, utils.DockerCompose, untilExited); stop != nil || appCtx != ctx {
 		t.Fatal("docker compose, switch off: a stop of the app, which would stop keploy's agent")
 	}
-	appCtx, stop, ran = keepAliveStopper(ctx, utils.Native)
+	appCtx, stop, ran = keepAliveStopper(ctx, utils.Native, untilExited)
 	if stop == nil {
 		t.Fatal("switch off: no stop for an app kept across sets")
 	}
