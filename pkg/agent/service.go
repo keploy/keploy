@@ -1128,6 +1128,14 @@ type AppClockRunSetter interface {
 	SetAppClockRun(f func(real time.Time) (time.Time, bool))
 }
 
+// AppClockShownSetter is an optional proxy capability, beside
+// AppClockRunSetter: SetAppClockShown makes the background check read,
+// through f, what the app's clock showed between two real instants, as the
+// agent's hooks moved it (learn.Tracker.SetAppClockShown); nil for none.
+type AppClockShownSetter interface {
+	SetAppClockShown(f func(from, to time.Time) ([]learn.Span, bool))
+}
+
 // PoolNamesSetter is an optional ExactServer capability: SetPoolNames hands the
 // proxy the names the replay's scope table puts in a pool slice, of every key,
 // so that the parsers' learn steps can tell the pool's mocks from a test's

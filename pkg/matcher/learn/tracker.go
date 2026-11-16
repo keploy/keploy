@@ -164,6 +164,10 @@ type Tracker struct {
 	// appClockRun is the real instant from which the app's clock has run as
 	// one to a real instant (SetAppClockRun), nil where the hooks tell none.
 	appClockRun func(time.Time) (time.Time, bool)
+	// appClockShown is what the app's clock showed between two real
+	// instants, a span per run of it (SetAppClockShown), nil where the
+	// hooks tell none.
+	appClockShown func(from, to time.Time) ([]Span, bool)
 	// servedAt are the store's serves of the running set's data-plane mocks,
 	// in the order of the real instants it served them at (servedIn), each
 	// with the instant its call reached keploy. NewSet forgets them.
@@ -2155,6 +2159,24 @@ func (t *Tracker) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
 	t.mu.Unlock()
 }
 
+// SetAppClockShown makes the tracker read, through f, what the app's clock
+// showed between two real instants, as the hooks moved it: a span per run
+// of it, false where they cannot tell one (the enterprise run clock, beside
+// SetAppClockRun's). The background check alone reads it
+// (BackgroundSpans): a background poller's read of the clock is no read of
+// the open test's, made after the move the test's begin wrote, and the
+// application may have read its clock before the move and sent the call
+// after it. nil: none, and that check reads the run to arrival alone, as a
+// test's call is read.
+func (t *Tracker) SetAppClockShown(f func(from, to time.Time) ([]Span, bool)) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.appClockShown = f
+	t.mu.Unlock()
+}
+
 // PreviousCall finds, of the recordings it sees (See), the recording's
 // previous data-plane call before paired: the latest by request time, not
 // paired itself. A protocol-phase call (a handshake, a driver's heartbeat)
@@ -2480,6 +2502,7 @@ func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
 type liveClock struct {
 	clock            func(time.Time) (time.Time, bool)
 	run              func(time.Time) (time.Time, bool)
+	shown            func(from, to time.Time) ([]Span, bool)
 	prev, set, began time.Time
 	client, open     bool
 	zone             *time.Location
@@ -2509,7 +2532,7 @@ func (t *Tracker) liveClockAt(arrival time.Time, sibling Siblings) (liveClock, t
 func (t *Tracker) liveClockAtOf(arrival time.Time, own bool, sibling Siblings) (liveClock, time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, open: t.open, set: t.setBegan, began: t.beganAt, zone: t.appZone}
+	lc := liveClock{clock: t.appClock, run: t.appClockRun, shown: t.appClockShown, client: t.clientTests, open: t.open, set: t.setBegan, began: t.beganAt, zone: t.appZone}
 	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].at.Before(arrival) })
 	lc.prev = t.latestFromLocked(i, false, sibling)
 	if i > 0 && own && t.open && !t.beganAt.IsZero() {
@@ -2642,6 +2665,12 @@ func (t *Tracker) LiveSpanOfSiblings(arrival time.Time, rec *models.Mock, siblin
 		owner = (*f)(rec)
 	}
 	lc, _ := t.liveClockAtOf(arrival, owner == OwnerTest, sibling)
+	return lc.liveSpan(arrival, owner)
+}
+
+// liveSpan is lc's span to arrival of a call whose recording's owner is
+// owner (LiveSpanOfSiblings), in lc's zone.
+func (lc liveClock) liveSpan(arrival time.Time, owner ServeOwner) (Span, bool) {
 	s, ok := lc.span(arrival)
 	if ok {
 		s.Zone = lc.zone
@@ -2650,6 +2679,53 @@ func (t *Tracker) LiveSpanOfSiblings(arrival time.Time, rec *models.Mock, siblin
 		}
 	}
 	return s, ok
+}
+
+// BackgroundSpans is the spans on the app's clock of a call that reached
+// keploy at arrival, for the check that a call no recording answered is one
+// more run of the set's background work alone (CallSpansOf): LiveSpanOf's
+// of no recording, last, and before it what the app's clock showed from the
+// bound that span is read from to where the clock's run to arrival began,
+// where that run began after the bound (liveClock.before). A test's call
+// is read from the move its test's begin wrote, after which the test's
+// request reached the application (SetAppClockRun). A background poller's
+// read is bounded by no such move: the application may have read its
+// clock for the call before the move and sent the call after it, as a
+// timer's poll made as a test begins or ends is. false where LiveSpanOf's
+// is.
+func (t *Tracker) BackgroundSpans(arrival time.Time) ([]Span, bool) {
+	if t == nil {
+		return nil, false
+	}
+	lc, _ := t.liveClockAtOf(arrival, false, nil)
+	s, ok := lc.liveSpan(arrival, OwnerUnknown)
+	if !ok {
+		return nil, false
+	}
+	return append(lc.before(arrival), s), true
+}
+
+// ClockSpansOf is BackgroundSpans by the tracker on ctx, each span in the
+// zone of the process that made the call where the agent read it
+// (ClockSpanOf).
+func ClockSpansOf(ctx context.Context, arrival time.Time) ([]Span, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	t, _ := ctx.Value(trackerKey{}).(*Tracker)
+	spans, ok := t.BackgroundSpans(arrival)
+	for i := range spans {
+		inProcZone(ctx, &spans[i])
+	}
+	return spans, ok
+}
+
+// inProcZone puts s in the zone of the process that made the call where the
+// agent read it (WithProcZone), and leaves it as it is where it did not.
+func inProcZone(ctx context.Context, s *Span) {
+	if z, has := procZoneFrom(ctx); has && z.Loc != nil {
+		s.Zone, s.Own = z.Loc, true
+	}
 }
 
 // ClockSpanOf is ClockSpanFrom for a call checked against the recording rec
@@ -2667,8 +2743,8 @@ func ClockSpanOfSiblings(ctx context.Context, arrival time.Time, rec *models.Moc
 	}
 	t, _ := ctx.Value(trackerKey{}).(*Tracker)
 	s, ok := t.LiveSpanOfSiblings(arrival, rec, sibling)
-	if z, has := procZoneFrom(ctx); ok && has && z.Loc != nil {
-		s.Zone, s.Own = z.Loc, true
+	if ok {
+		inProcZone(ctx, &s)
 	}
 	return s, ok
 }
@@ -2699,6 +2775,36 @@ func (lc liveClock) span(arrival time.Time) (Span, bool) {
 		}
 	}
 	return f, ok
+}
+
+// before is what the app's clock showed, a span per run of it as the hooks
+// tell it (SetAppClockShown), from the bound a span to arrival is read from
+// (setBound) to where the clock's run to arrival began, where that run
+// began after the bound (runFrom then starts the span to arrival there):
+// the clock values the application may have read between the bound and
+// the move that began the run, each in lc's zone. nil where the run began
+// no later than the bound or the hooks cannot tell where it began, where
+// no bound is known (runFrom's bound itself then), where they tell no spans
+// shown, and where they cannot tell one of them: the span to arrival alone
+// is read then, as before.
+func (lc liveClock) before(arrival time.Time) []Span {
+	if lc.shown == nil {
+		return nil
+	}
+	bound := lc.setBound()
+	began := lc.runFrom(bound, arrival)
+	if !began.After(bound) {
+		return nil
+	}
+	shown, ok := lc.shown(bound, began)
+	if !ok {
+		return nil
+	}
+	spans := make([]Span, 0, len(shown))
+	for _, s := range shown {
+		spans = append(spans, Span{From: s.From, To: s.To, Zone: lc.zone})
+	}
+	return spans
 }
 
 // testFrom is where the running test began on the app's clock (Span.

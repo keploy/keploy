@@ -110,3 +110,25 @@ func CallSpanOf(ctx context.Context, arrival time.Time) (Span, bool) {
 	}
 	return ClockSpanOf(ctx, arrival, nil)
 }
+
+// CallSpansOf is the spans on the application's clock of a call that
+// reached keploy at arrival, for the same check alone: CallSpanOf's, last,
+// and, under the switch, before it what the clock showed from that span's
+// bound to the move that began its run, where the clock moved after the
+// bound (Tracker.BackgroundSpans): the call's read of the clock holds in
+// one of them (EpochOffset.HoldsIn). The serve clock's (the switch off)
+// is its one span: with the switch off the hooks tell a span only on a
+// clock nothing moves. false where neither tells one.
+func CallSpansOf(ctx context.Context, arrival time.Time) ([]Span, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	if c, ok := ctx.Value(serveClockKey{}).(*ServeClock); ok {
+		s, ok := c.SpanTo(arrival)
+		if !ok {
+			return nil, false
+		}
+		return []Span{s}, true
+	}
+	return ClockSpansOf(ctx, arrival)
+}

@@ -6,6 +6,7 @@ import (
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -52,6 +53,25 @@ type AppClockReader interface {
 // false there gives the call no span.
 type AppClockRunReader interface {
 	AppClockRunBegan(real time.Time) (time.Time, bool)
+}
+
+// AppClockShownReader is an optional AgentHooks capability, beside
+// AppClockRunReader: AppClockShown is what the app's clock showed between
+// the real instants from and to, as the hooks moved it: a span on the app's
+// clock per offset in force at some instant between them, in the order
+// written, each over the real stretch it was in force (a move counted in
+// both, from its write's begin to its end: a reader may read either offset
+// meanwhile); false where AppClock is false at some instant between them.
+// The agent hands it to the proxy (coreAgent.AppClockShownSetter): the
+// check that a call no recording answered is one more run of the set's
+// background work reads, beside the call's span from the move that began
+// its clock's run (AppClockRunReader), the clock the application may have
+// read before that move (learn.Tracker.SetAppClockShown). Hooks without it
+// leave that check the run to the call alone, which refuses a background
+// poll that read the clock before a test's begin moved it and reached
+// keploy after.
+type AppClockShownReader interface {
+	AppClockShown(from, to time.Time) ([]learn.Span, bool)
 }
 
 // BackgroundClockReader is an optional AgentHooks capability, for the
