@@ -50,8 +50,15 @@ func TestTheClientsSocketIsToldOfTheProxysTCPFINAlone(t *testing.T) {
 			t.Errorf("%s: the socket was told of the proxy's FIN %d times, want %d", row.name, got, row.told)
 		}
 	}
-	// A socket that does not ask to be told is not.
-	(&Relay{client: &scriptedSocket{}}).noteClientFINSent(tcp)
+	// A socket that does not ask to be told is not, and the relay goes on.
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Errorf("telling a socket that does not ask of the proxy's FIN panicked: %v", p)
+			}
+		}()
+		(&Relay{client: &scriptedSocket{}}).noteClientFINSent(tcp)
+	}()
 }
 
 // selfWrapping is a wrapper that is its own NetConn: a cycle.
