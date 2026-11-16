@@ -105,11 +105,6 @@ type tcpClientSocket struct {
 	winfo   darwinTCPInfo
 	wrote   uint64
 	wroteOK bool
-	// ebuf and einfo are pendingError's (client_end_darwin.go), and
-	// resetGiven says it gave the reset it found.
-	ebuf       [tcpInfoBuf]byte
-	einfo      darwinTCPInfo
-	resetGiven bool
 
 	mu sync.Mutex
 	// seen: a look has been taken. lastNxt is snd_nxt as the last look found
