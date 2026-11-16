@@ -183,6 +183,14 @@ jobs:
         run: go test -count=1 -run "TestOnWindowsAFullBacklogResetsAConnectionItDropsAfterTheClientCompletedIt|TestWithAShimsCount" ./pkg/agent/proxy/
         shell: cmd
 
+      # The bytes wait on paired connections on Windows: the proxy's side as
+      # SIO_TCP_INFO reads it (BytesIn, and its State by TCPSTATE's values),
+      # and the wait on the shim's send counts (done, started, pending), with
+      # a stand-in for the counts. Loopback only; no administrator.
+      - name: Test the proxy's bytes wait (amd64)
+        run: go test -count=1 -v -run "^TestOnWindows(TheProxysSideCountsWhatArrivedAndNoFIN|ASideInTimeWait|AWait|ACancelledSend|AConnection)|^TestSent" ./pkg/agent/proxy/
+        shell: cmd
+
       # The resolvers a recording asks on Windows: the DNS servers of the
       # adapters that are up, read with GetAdaptersAddresses and checked
       # against PowerShell's list, and a name only they answer (a private
