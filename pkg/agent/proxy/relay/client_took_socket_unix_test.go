@@ -80,7 +80,7 @@ func TestTheClientsAnswerIsWaitedForOffTheForwardingPath(t *testing.T) {
 	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = server.SetReadDeadline(time.Now().Add(tcpSettle))
 	if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
 		t.Fatalf("the destination read %d bytes, %v, before the FIN", len(rest), err)
 	}
@@ -89,7 +89,7 @@ func TestTheClientsAnswerIsWaitedForOffTheForwardingPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = server.Close()
-	_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 	if got, err := io.ReadAll(app); err != nil || string(got) != answer {
 		t.Fatalf("the client read %q (%v) while the relay waited for its answer, want the answer and its end", got, err)
 	}
@@ -102,7 +102,7 @@ func TestTheClientsAnswerIsWaitedForOffTheForwardingPath(t *testing.T) {
 		if s != answer {
 			t.Fatalf("the destination's stream carried %q, want the answer", s)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(tcpSettle):
 		t.Fatal("the destination's stream did not end once the client's socket said it read on")
 	}
 }
@@ -131,7 +131,7 @@ func TestAnAcknowledgementOfBytesWrittenBeforeAChunkTakesNoneOfIt(t *testing.T) 
 	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = server.SetReadDeadline(time.Now().Add(tcpSettle))
 	if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
 		t.Fatalf("the destination read %d bytes, %v, before the FIN", len(rest), err)
 	}
@@ -142,7 +142,7 @@ func TestAnAcknowledgementOfBytesWrittenBeforeAChunkTakesNoneOfIt(t *testing.T) 
 	if _, err := server.Write([]byte(answer)); err != nil {
 		t.Fatal(err)
 	}
-	for limit := time.Now().Add(10 * time.Second); r.teeD2C.awaitingLen() == 0; {
+	for limit := time.Now().Add(tcpSettle); r.teeD2C.awaitingLen() == 0; {
 		if time.Now().After(limit) {
 			t.Fatal("the answer was not set aside")
 		}
@@ -156,7 +156,7 @@ func TestAnAcknowledgementOfBytesWrittenBeforeAChunkTakesNoneOfIt(t *testing.T) 
 		if s != "" {
 			t.Fatalf("the destination's stream carried %q, want nothing: none of the answer was acknowledged", s)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(tcpSettle):
 		t.Fatal("the destination's stream did not end")
 	}
 	if chunks, bytes := r.NotTaken(); chunks != 1 || bytes != int64(len(answer)) {
@@ -208,20 +208,20 @@ func TestAChunkSetAsideCarriesItsWritesMarkOnceTeed(t *testing.T) {
 			if _, err := server.Write([]byte("first")); err != nil {
 				t.Fatal(err)
 			}
-			_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
+			_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 			readN(t, app, len("first"))
-			for limit := time.Now().Add(5 * time.Second); r.teeD2C.awaitingLen() != 1; {
+			for limit := time.Now().Add(tcpSettle); r.teeD2C.awaitingLen() != 1; {
 				if time.Now().After(limit) {
-					t.Fatal("the first chunk was not set aside in 5s")
+					t.Fatalf("the first chunk was not set aside in %v", tcpSettle)
 				}
 				time.Sleep(50 * time.Microsecond)
 			}
 			if _, err := server.Write([]byte("second")); err != nil {
 				t.Fatal(err)
 			}
-			for limit := time.Now().Add(5 * time.Second); r.teeD2C.awaitingLen() != 2; {
+			for limit := time.Now().Add(tcpSettle); r.teeD2C.awaitingLen() != 2; {
 				if time.Now().After(limit) {
-					t.Fatal("the second chunk, whose Write failed, was not set aside behind the first in 5s")
+					t.Fatalf("the second chunk, whose Write failed, was not set aside behind the first in %v", tcpSettle)
 				}
 				time.Sleep(50 * time.Microsecond)
 			}
@@ -243,12 +243,12 @@ func TestAChunkSetAsideCarriesItsWritesMarkOnceTeed(t *testing.T) {
 				if s != "firstsecond" {
 					t.Fatalf("the destination's stream carried %q, want both chunks", s)
 				}
-			case <-time.After(20 * time.Second):
+			case <-time.After(tcpSettle):
 				t.Fatal("the destination's stream did not end")
 			}
 			select {
 			case <-done:
-			case <-time.After(10 * time.Second):
+			case <-time.After(tcpSettle):
 				t.Fatal("the relay did not end")
 			}
 			mu.Lock()
@@ -279,7 +279,7 @@ func TestTheClientsSocketSaysWhatTheClientTook(t *testing.T) {
 	t.Parallel()
 	lookFor := func(t *testing.T, s clientSocket, want clientSaid, what string) clientLook {
 		t.Helper()
-		for limit := time.Now().Add(5 * time.Second); ; {
+		for limit := time.Now().Add(tcpSettle); ; {
 			l := s.look()
 			if l.said == want {
 				return l
@@ -314,7 +314,7 @@ func TestTheClientsSocketSaysWhatTheClientTook(t *testing.T) {
 			t.Fatal(err)
 		}
 		awaitUnreadBytes(t, app, 1124)
-		for limit := time.Now().Add(5 * time.Second); s.look().acked != 1124; {
+		for limit := time.Now().Add(tcpSettle); s.look().acked != 1124; {
 			if time.Now().After(limit) {
 				t.Fatalf("the half-closed client took the bytes; %d acknowledged, want 1124", s.look().acked)
 			}
@@ -390,15 +390,15 @@ func TestAClientThatNeverAnswersHasItsAnswerTeedBeforeTheRelayEnds(t *testing.T)
 	if _, err := server.Write([]byte(answer)); err != nil {
 		t.Fatal(err)
 	}
-	_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 	got := make([]byte, len(answer))
 	if _, err := io.ReadFull(app, got); err != nil || string(got) != answer {
 		t.Fatalf("the client read %q, %v", got, err)
 	}
 	// The forwarder sets the answer aside right after its Write returns.
-	for limit := time.Now().Add(5 * time.Second); r.teeD2C.awaitingLen() == 0; {
+	for limit := time.Now().Add(tcpSettle); r.teeD2C.awaitingLen() == 0; {
 		if time.Now().After(limit) {
-			t.Fatal("the answer was not set aside for the client's answer in 5s")
+			t.Fatalf("the answer was not set aside for the client's answer in %v", tcpSettle)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
@@ -408,7 +408,7 @@ func TestAClientThatNeverAnswersHasItsAnswerTeedBeforeTheRelayEnds(t *testing.T)
 	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = server.SetReadDeadline(time.Now().Add(tcpSettle))
 	if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
 		t.Fatalf("the destination read %d bytes, %v, before the FIN", len(rest), err)
 	}
@@ -418,12 +418,12 @@ func TestAClientThatNeverAnswersHasItsAnswerTeedBeforeTheRelayEnds(t *testing.T)
 		if s != answer {
 			t.Fatalf("the destination's stream carried %q, want the answer, teed as before at the relay's end", s)
 		}
-	case <-time.After(20 * time.Second):
+	case <-time.After(tcpSettle):
 		t.Fatal("the destination's stream did not end")
 	}
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(tcpSettle):
 		t.Fatal("the relay did not end")
 	}
 	if r.clientStopped.Load() {
@@ -459,22 +459,22 @@ func TestAHalfClosedClientThatReadsThenClosesHasWhatCameAfterRefused(t *testing.
 		if err := app.(*net.TCPConn).CloseWrite(); err != nil {
 			t.Fatal(err)
 		}
-		_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = server.SetReadDeadline(time.Now().Add(tcpSettle))
 		if got, err := io.ReadAll(server); err != nil || string(got) != "req" {
 			t.Fatalf("round %d: the destination read %q, %v; want the request and the FIN", round, got, err)
 		}
 		if _, err := server.Write([]byte(first)); err != nil {
 			t.Fatal(err)
 		}
-		_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 		got := make([]byte, len(first))
 		if _, err := io.ReadFull(app, got); err != nil || string(got) != first {
 			t.Fatalf("round %d: the half-closed client read %q, %v", round, got, err)
 		}
 		// The client's stack has acknowledged the first answer.
-		for limit := time.Now().Add(5 * time.Second); bytesAcked(t, proxyClient) < uint64(len(first)); {
+		for limit := time.Now().Add(tcpSettle); bytesAcked(t, proxyClient) < uint64(len(first)); {
 			if time.Now().After(limit) {
-				t.Fatalf("round %d: %d bytes acknowledged after 5s, want %d", round, bytesAcked(t, proxyClient), len(first))
+				t.Fatalf("round %d: %d bytes acknowledged after %v, want %d", round, bytesAcked(t, proxyClient), tcpSettle, len(first))
 			}
 			time.Sleep(20 * time.Microsecond)
 		}
@@ -489,7 +489,7 @@ func TestAHalfClosedClientThatReadsThenClosesHasWhatCameAfterRefused(t *testing.
 			if s != first {
 				t.Fatalf("round %d: the destination's stream carried %q, want only the first answer, which the client read", round, s)
 			}
-		case <-time.After(15 * time.Second):
+		case <-time.After(tcpSettle):
 			t.Fatalf("round %d: the destination's stream did not end", round)
 		}
 		if chunks, bytes := r.NotTaken(); chunks == 0 || bytes != int64(len(second)) {
@@ -518,7 +518,7 @@ func TestAClosedClientThatResetsBeforeTheRelayReadsItsFINHasTheAnswerRefused(t *
 		c := &finInFlightConn{Conn: &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, release: make(chan struct{})}
 		c.hook = func() {
 			_ = app.Close()
-			for limit := time.Now().Add(5 * time.Second); tcpState(t, proxyClient) != stateCloseWait && time.Now().Before(limit); {
+			for limit := time.Now().Add(tcpSettle); tcpState(t, proxyClient) != stateCloseWait && time.Now().Before(limit); {
 				time.Sleep(20 * time.Microsecond)
 			}
 		}
@@ -539,7 +539,7 @@ func TestAClosedClientThatResetsBeforeTheRelayReadsItsFINHasTheAnswerRefused(t *
 		if _, err := app.Write([]byte("req")); err != nil {
 			t.Fatal(err)
 		}
-		_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = server.SetReadDeadline(time.Now().Add(tcpSettle))
 		if got := make([]byte, 3); func() bool { _, err := io.ReadFull(server, got); return err != nil }() {
 			t.Fatalf("round %d: the destination did not read the request", round)
 		}
@@ -558,7 +558,7 @@ func TestAClosedClientThatResetsBeforeTheRelayReadsItsFINHasTheAnswerRefused(t *
 			if s != "inflight" {
 				t.Fatalf("round %d: the destination's stream carried %q, want only the chunk written as the FIN came in", round, s)
 			}
-		case <-time.After(15 * time.Second):
+		case <-time.After(tcpSettle):
 			t.Fatalf("round %d: the destination's stream did not end", round)
 		}
 		cancel()
@@ -707,24 +707,24 @@ func TestAfterTheClientHalfClosed_AClientNotReadingYetIsWaitedFor(t *testing.T) 
 	// may read it in more than one chunk, the first of which can fill the
 	// client's receive buffer alone, and a chunk written after the FIN is
 	// set aside, not teed.
-	for limit := time.Now().Add(5 * time.Second); seen.n.Load() != uint64(len(before)); {
+	for limit := time.Now().Add(tcpSettle); seen.n.Load() != uint64(len(before)); {
 		if time.Now().After(limit) {
-			t.Fatalf("the relay wrote %d bytes to the client in 5s, want the %d sent", seen.n.Load(), len(before))
+			t.Fatalf("the relay wrote %d bytes to the client in %v, want the %d sent", seen.n.Load(), tcpSettle, len(before))
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
 	// The client's window is closed: its stack has acknowledged all it can
 	// hold, and acknowledges no more until it reads.
-	for limit := time.Now().Add(5 * time.Second); !windowClosed(t, proxyClient); {
+	for limit := time.Now().Add(tcpSettle); !windowClosed(t, proxyClient); {
 		if time.Now().After(limit) {
-			t.Fatal("the client's receive window did not close in 5s")
+			t.Fatalf("the client's receive window did not close in %v", tcpSettle)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
 	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = server.SetReadDeadline(time.Now().Add(tcpSettle))
 	if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
 		t.Fatalf("the destination read %d bytes, %v, before the FIN", len(rest), err)
 	}
@@ -737,9 +737,9 @@ func TestAfterTheClientHalfClosed_AClientNotReadingYetIsWaitedFor(t *testing.T) 
 	// relay has forwarded the destination's FIN, which puts the proxy's
 	// socket in LAST_ACK (the client's FIN in, the proxy's own sent), and the
 	// relay has looked at it twice since.
-	for limit := time.Now().Add(5 * time.Second); tcpState(t, proxyClient) != stateLastAck; {
+	for limit := time.Now().Add(tcpSettle); tcpState(t, proxyClient) != stateLastAck; {
 		if time.Now().After(limit) {
-			t.Fatalf("the relay did not forward the destination's FIN in 5s (state %d)", tcpState(t, proxyClient))
+			t.Fatalf("the relay did not forward the destination's FIN in %v (state %d)", tcpSettle, tcpState(t, proxyClient))
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
@@ -755,7 +755,7 @@ func TestAfterTheClientHalfClosed_AClientNotReadingYetIsWaitedFor(t *testing.T) 
 	if n := r.Teed(fakeconn.FromDest); n != int64(len(before)) {
 		t.Fatalf("%d bytes teed while the client acknowledged nothing after its FIN, want the %d sent before it", n, len(before))
 	}
-	_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 	got, err := io.ReadAll(app)
 	if err != nil || string(got) != before+answer {
 		t.Fatalf("the client read %d bytes (%v), want the %d it was sent", len(got), err, len(before)+len(answer))
@@ -765,7 +765,7 @@ func TestAfterTheClientHalfClosed_AClientNotReadingYetIsWaitedFor(t *testing.T) 
 		if s != before+answer {
 			t.Fatalf("the destination's stream carried %d bytes, want the %d the client took", len(s), len(before)+len(answer))
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(tcpSettle):
 		t.Fatal("the destination's stream did not end")
 	}
 	if n := notTakenLogged(t, logs); n != 0 {
@@ -789,9 +789,9 @@ func TestWrittenCountsWhatTheClientHasNotAcknowledgedYet(t *testing.T) {
 	if _, err := client.Write(make([]byte, n)); err != nil {
 		t.Fatal(err)
 	}
-	for limit := time.Now().Add(5 * time.Second); !windowClosed(t, proxyClient); {
+	for limit := time.Now().Add(tcpSettle); !windowClosed(t, proxyClient); {
 		if time.Now().After(limit) {
-			t.Fatal("the client's receive window did not close in 5s")
+			t.Fatalf("the client's receive window did not close in %v", tcpSettle)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
@@ -801,13 +801,13 @@ func TestWrittenCountsWhatTheClientHasNotAcknowledgedYet(t *testing.T) {
 	if got, ok := s.written(); !ok || got != n {
 		t.Fatalf("written %d (ok %v), want the %d bytes written", got, ok, n)
 	}
-	_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 	if _, err := io.ReadFull(app, make([]byte, n)); err != nil {
 		t.Fatalf("the client read: %v", err)
 	}
-	for limit := time.Now().Add(5 * time.Second); s.look().acked != n; {
+	for limit := time.Now().Add(tcpSettle); s.look().acked != n; {
 		if time.Now().After(limit) {
-			t.Fatalf("the client read all %d bytes and its stack acknowledged %d after 5s", n, s.look().acked)
+			t.Fatalf("the client read all %d bytes and its stack acknowledged %d after %v", n, s.look().acked, tcpSettle)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
@@ -913,15 +913,15 @@ func judgedFromItsOwnFirstByte(t *testing.T, by countedBy) {
 		t.Fatal(err)
 	}
 	halfClose(t, appEnd, app)
-	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = server.SetReadDeadline(time.Now().Add(tcpSettle))
 	if got, err := io.ReadAll(server); err != nil || string(got) != "req" {
 		t.Fatalf("the destination read %q, %v; want the request and the FIN", got, err)
 	}
 	writtenAll := func(want uint64, what string) {
 		t.Helper()
-		for limit := time.Now().Add(5 * time.Second); plain.n.Load() != want; {
+		for limit := time.Now().Add(tcpSettle); plain.n.Load() != want; {
 			if time.Now().After(limit) {
-				t.Fatalf("%s: the relay wrote %d bytes to the client in 5s, want %d", what, plain.n.Load(), want)
+				t.Fatalf("%s: the relay wrote %d bytes to the client in %v, want %d", what, plain.n.Load(), tcpSettle, want)
 			}
 			time.Sleep(50 * time.Microsecond)
 		}
@@ -953,11 +953,11 @@ func judgedFromItsOwnFirstByte(t *testing.T, by countedBy) {
 	// reads, and a first answer sized from what it held as it connected was
 	// acknowledged whole on up to 20 runs in 1000.
 	const readCap = 64 << 10
-	_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 	buf := make([]byte, 512)
-	for read, limit := 0, time.Now().Add(5*time.Second); seen.acked(t) <= behind; {
+	for read, limit := 0, time.Now().Add(tcpSettle); seen.acked(t) <= behind; {
 		if time.Now().After(limit) {
-			t.Fatalf("the client read %d bytes and its stack acknowledged no more than %d in 5s", read, behind)
+			t.Fatalf("the client read %d bytes and its stack acknowledged no more than %d in %v", read, behind, tcpSettle)
 		}
 		if read >= readCap {
 			time.Sleep(50 * time.Microsecond)
@@ -983,7 +983,7 @@ func judgedFromItsOwnFirstByte(t *testing.T, by countedBy) {
 		if got == "" || !strings.HasPrefix(first, got) {
 			t.Fatalf("the destination's stream carried %d bytes (the second answer's in it: %v), want a part of the first answer, which the client was reading", len(got), strings.Contains(got, "2"))
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(tcpSettle):
 		t.Fatal("the destination's stream did not end")
 	}
 	// Every byte the relay wrote is either in the stream or refused, never
@@ -1010,9 +1010,9 @@ func TestWrittenCountsEveryByteUnderTLSFromTheSocketsAccept(t *testing.T) {
 	if _, err := src.Write(make([]byte, n)); err != nil {
 		t.Fatal(err)
 	}
-	for limit := time.Now().Add(5 * time.Second); !windowClosed(t, proxyClient); {
+	for limit := time.Now().Add(tcpSettle); !windowClosed(t, proxyClient); {
 		if time.Now().After(limit) {
-			t.Fatal("the client's receive window did not close in 5s")
+			t.Fatalf("the client's receive window did not close in %v", tcpSettle)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
@@ -1023,13 +1023,13 @@ func TestWrittenCountsEveryByteUnderTLSFromTheSocketsAccept(t *testing.T) {
 	if got, ok := s.written(); !ok || got != all {
 		t.Fatalf("written %d (ok %v), want the %d bytes written to the socket", got, ok, all)
 	}
-	_ = appEnd.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = appEnd.SetReadDeadline(time.Now().Add(tcpSettle))
 	if _, err := io.ReadFull(appEnd, make([]byte, n)); err != nil {
 		t.Fatalf("the client read: %v", err)
 	}
-	for limit := time.Now().Add(5 * time.Second); s.look().acked != all; {
+	for limit := time.Now().Add(tcpSettle); s.look().acked != all; {
 		if time.Now().After(limit) {
-			t.Fatalf("the client read the whole answer and its stack acknowledged %d of the %d bytes after 5s", s.look().acked, all)
+			t.Fatalf("the client read the whole answer and its stack acknowledged %d of the %d bytes after %v", s.look().acked, all, tcpSettle)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}

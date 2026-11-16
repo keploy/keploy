@@ -559,9 +559,10 @@ func (c *countedClient) CloseWrite() error { return c.tcp.CloseWrite() }
 // relay's look at the client reads what the client acknowledged from
 // (countWrites). c itself when it is not a *net.TCPConn (a nil one among
 // them, whose SyscallConn would dereference it), or its socket cannot answer
-// as the count begins: the relay then counts its own writes where it can. Call it once, as c is accepted, before anything is written
-// to it. What keys or reads the accepted socket itself finds it under the
-// count (AcceptedConn, NetConn).
+// as the count begins: the relay then counts its own writes where it can.
+// Call it once, as c is accepted, before anything is written to it. What
+// keys or reads the accepted socket itself finds it under the count
+// (AcceptedConn, NetConn).
 func CountClientWrites(c net.Conn) net.Conn {
 	tc, ok := c.(*net.TCPConn)
 	if !ok || tc == nil {

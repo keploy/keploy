@@ -9,6 +9,17 @@ import (
 	"time"
 )
 
+// tcpSettle is how long the rows on real sockets wait for the kernel's TCP to
+// reach a state: a window closed, bytes acknowledged or arrived, a FIN or a
+// reset handed on. Loopback can lose segments: on macOS 26 (8 CPUs), with
+// three copies of the closed-window rows at once, every wait that ran out at
+// 5 s had the sending socket in loss recovery (TCP_INFO's
+// TCPI_FLAG_LOSSRECOVERY), waiting on a retransmission timer of 1.1 to 3.6 s.
+// A lost last segment is resent only when that timer fires, and it doubles
+// with each loss, so the waits allow several in a row. A row ends as soon as
+// its state is reached; only one that never comes waits this long.
+const tcpSettle = 30 * time.Second
+
 // awaitUnread waits until the socket c holds a byte its reader has not read
 // yet (unreadOf).
 func awaitUnread(t *testing.T, c net.Conn) {
@@ -36,9 +47,9 @@ func awaitUnreadBytes(t *testing.T, c net.Conn, n int) {
 		}
 		return n
 	}
-	for limit := time.Now().Add(5 * time.Second); unread() < n; {
+	for limit := time.Now().Add(tcpSettle); unread() < n; {
 		if time.Now().After(limit) {
-			t.Fatalf("the socket holds %d unread bytes after 5s, want %d", unread(), n)
+			t.Fatalf("the socket holds %d unread bytes after %v, want %d", unread(), tcpSettle, n)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}

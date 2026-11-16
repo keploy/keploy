@@ -205,16 +205,16 @@ func TestTheCountOfWritesSaysWhatMayHaveBeenWritten(t *testing.T) {
 		n := 4 << 20 // more than both buffers hold
 		wrote := make(chan error, 1)
 		go func() { _, err := c.Write(make([]byte, n)); wrote <- err }()
-		for limit := time.Now().Add(5 * time.Second); !windowClosed(t, proxyClient); {
+		for limit := time.Now().Add(tcpSettle); !windowClosed(t, proxyClient); {
 			if time.Now().After(limit) {
-				t.Fatal("the client's receive window did not close in 5s")
+				t.Fatalf("the client's receive window did not close in %v", tcpSettle)
 			}
 			time.Sleep(50 * time.Microsecond)
 		}
 		if got := c.count.now(); got != (tally{maybe: uint64(n)}) {
 			t.Fatalf("count while the Write runs: %+v, want none said, all %d maybe", got, n)
 		}
-		_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
+		_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 		if _, err := io.ReadFull(app, make([]byte, n)); err != nil {
 			t.Fatalf("the client read: %v", err)
 		}
@@ -247,7 +247,7 @@ func TestTheCountOfWritesSaysWhatMayHaveBeenWritten(t *testing.T) {
 		if err := c.CloseWrite(); err != nil {
 			t.Fatalf("CloseWrite: %v", err)
 		}
-		_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 		if got, err := io.ReadAll(app); err != nil || len(got) != 0 {
 			t.Fatalf("the client read %d bytes, %v; want the FIN", len(got), err)
 		}
@@ -346,7 +346,7 @@ func TestTheCountFromTheAcceptIsTheRelaysUnderTLSToo(t *testing.T) {
 	if !halfCloseWrite(&c) {
 		t.Fatal("the count did not half-close the socket")
 	}
-	_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 	if got, err := io.ReadAll(app); err != nil || string(got) != "0123456789" {
 		t.Fatalf("the client read %q, %v: want the bytes written, then the FIN", got, err)
 	}
