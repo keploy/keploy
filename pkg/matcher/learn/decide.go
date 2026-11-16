@@ -93,8 +93,9 @@ type Refusal struct {
 	// "outside-test", "order-unknown", ...), a word refused for its
 	// first place taking that place's branch. It names code, never a
 	// value, and keeps its name across releases, so refusals can be
-	// counted by it (RefusalNote). "" only on a refusal made outside
-	// this package.
+	// counted by it (RefusalNote). An adapter that refuses a word on its
+	// own side names its own branch (NoteRefusal); "" only on a refusal
+	// made outside this package that names none.
 	Check    string   `json:"check,omitempty"`
 	Test     string   `json:"test,omitempty"`
 	Mock     string   `json:"mock,omitempty"`

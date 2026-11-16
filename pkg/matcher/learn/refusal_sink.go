@@ -90,14 +90,31 @@ func noteRefused(in Input, ds []Decision) {
 		// A decision carries a Refusal exactly where its word is refused:
 		// dc.learned, which makes every other outcome, sets none.
 		if d.Refusal != nil {
-			b.s.Refused(refusalNote(in, d))
+			b.s.Refused(refusalNote(in.Rec, d, d.Refusal))
 		}
 	}
 }
 
-func refusalNote(in Input, d Decision) RefusalNote {
-	rf := d.Refusal
-	typ := typeName(in.Rec.Leaves[rf.Field].Type)
+// NoteRefusal notes rf to the refusal sink, if one is set, as Decide notes
+// each word it refuses itself: for an adapter that refuses on its own side
+// a word d that Decide decided otherwise (a word it cannot hold as Decide
+// read it), where Decide noted nothing. rec is the recorded shape the
+// adapter gave Decide (Input.Rec), whose leaf at rf.Field types the word.
+// The hashes are of d's Recorded and Full, the values as the run held them,
+// never of rf's, which may hide a secret's as "***". rf.Check names the
+// adapter's branch that refused the word, by a name that keeps across
+// releases. An adapter notes each word it refuses once, and only the
+// refusal it keeps.
+func NoteRefusal(rec Shape, d Decision, rf Refusal) {
+	b := refusalSink.Load()
+	if b == nil {
+		return
+	}
+	b.s.Refused(refusalNote(rec, d, &rf))
+}
+
+func refusalNote(rec Shape, d Decision, rf *Refusal) RefusalNote {
+	typ := typeName(rec.Leaves[rf.Field].Type)
 	n := RefusalNote{
 		Kind: rf.Kind, Check: rf.Check, Test: rf.Test, Mock: rf.Mock, Field: pathShape(rf.Field), Word: rf.Word,
 		Recorded: shapeOf(typ, d.Recorded), Full: shapeOf(typ, d.Full),

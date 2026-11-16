@@ -180,6 +180,60 @@ func TestRefusalSinkNotesEachRefusedWordOnceByShape(t *testing.T) {
 	}
 }
 
+// An adapter that refuses on its own side a word Decide learned notes it
+// once (NoteRefusal), by the adapter's check and the word's shapes: the
+// leaf's type from the recorded shape, each value's length, classes and
+// keyed hash taken from the decision, as the run held it, never from the
+// refusal, which hides a secret's values as "***". The hash is the one
+// Decide's own note gives the value. With no sink set, nothing is noted.
+func TestNoteRefusalNotesAnAdaptersRefusalByShape(t *testing.T) {
+	const field = "body.items[3].token"
+	rec := Shape{Leaves: map[string]Leaf{field: oText(field, "A7K29QXM")}}
+	d := Decision{Recorded: "A7K29QXM", Full: "Q8M31WPN", Outcome: OutcomeValue}
+	rf := Refusal{Kind: RefusalCannotCheck, Check: "adapter-branch", Test: "sink-row-adapter", Mock: "mock-9", Field: field,
+		Recorded: "***", Full: "***", Why: `it holds "***"`, Places: []string{"mock-2 body.items[0].id"}}
+	var sink guardSink
+	SetRefusalSink(&sink)
+	defer SetRefusalSink(&checkGuard)
+	NoteRefusal(rec, d, rf)
+	ns := sink.of("sink-row-adapter")
+	if len(ns) != 1 {
+		t.Fatalf("noted %+v; want the adapter's refusal noted once", ns)
+	}
+	n := ns[0]
+	if n.Check != "adapter-branch" || n.Kind != RefusalCannotCheck || n.Mock != "mock-9" || n.Field != "body.items[].token" ||
+		!slices.Equal(n.Places, []string{"mock-2 body.items[].id"}) {
+		t.Errorf("note %+v; want the adapter's check and kind, its field and places by shape", n)
+	}
+	for _, c := range []struct {
+		got  ValueShape
+		want string
+	}{{n.Recorded, "A7K29QXM"}, {n.Full, "Q8M31WPN"}} {
+		if c.got != shapeOf("string", c.want) || c.got.Len != 8 || c.got.Classes != "digit+upper" {
+			t.Errorf("value shape %+v; want %+v, of the decision's value, not the refusal's ***", c.got, shapeOf("string", c.want))
+		}
+	}
+	js, _ := json.Marshal(n)
+	for _, v := range []string{"A7K29QXM", "Q8M31WPN", "***"} {
+		if strings.Contains(string(js), v) {
+			t.Errorf("the note holds %q: %s", v, js)
+		}
+	}
+	SetRefusalSink(nil)
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Errorf("with no sink set, NoteRefusal panicked: %v", p)
+			}
+		}()
+		NoteRefusal(rec, d, rf)
+	}()
+	SetRefusalSink(&sink)
+	if got := sink.of("sink-row-adapter"); len(got) != 1 {
+		t.Errorf("with no sink set, a note was taken: %+v", got)
+	}
+}
+
 // A value's classes are read rune by rune, in their one order.
 func TestRefusalValueShapeClasses(t *testing.T) {
 	for v, want := range map[string]string{
