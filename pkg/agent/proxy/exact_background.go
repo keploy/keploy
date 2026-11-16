@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"sort"
+	"strconv"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -489,18 +490,35 @@ var _ integrations.BackgroundCursor = (*MockManager)(nil)
 // It is under the key of the pool view installed last, as the calls between
 // tests are, so a test process claimed again (RestartExactKey) starts it
 // over and two keys' windows never share a sequence.
-type windowsCursor struct{ m *MockManager }
+//
+// It is the staging's: under the staging epoch the call's view was read in
+// (sequenceViewOf), the epoch whose outside answers (outsideState) hold what
+// the windows spent. A staging starts both afresh in one step, so a walk
+// never skips, as served, a recording the windows of the new staging have
+// not spent, whatever reset the cursors before the staging landed or did
+// not: an HTTP walk that kept the last staging's served marks offered a
+// series' last recording alone, which answered once and then hid until the
+// others answered again, which the walk never offered.
+type windowsCursor struct {
+	m     *MockManager
+	epoch uint64
+}
 
 // windowsCursorTag sets the windows' cursors apart from the calls between
 // tests' under one pool key; no request key begins with a NUL.
 const windowsCursorTag = "\x00windows\x00"
 
+// key is request key's slot in the windows' cursors of c's staging.
+func (c windowsCursor) key(key string) string {
+	return c.m.backgroundCursorKey(windowsCursorTag + strconv.FormatUint(c.epoch, 10) + "\x00" + key)
+}
+
 func (c windowsCursor) MockCursorIndex(key string, n int) int {
-	return c.m.cursorIndexAt(cursorSlot{key: c.m.backgroundCursorKey(windowsCursorTag + key)}, n)
+	return c.m.cursorIndexAt(cursorSlot{key: c.key(key)}, n)
 }
 
 func (c windowsCursor) AdvanceMockCursor(key string, servedIdx, n int) {
-	c.m.advanceCursorAt(cursorSlot{key: c.m.backgroundCursorKey(windowsCursorTag + key)}, servedIdx, n)
+	c.m.advanceCursorAt(cursorSlot{key: c.key(key)}, servedIdx, n)
 }
 
 // learns reports whether the running set's learn step is on: the session is

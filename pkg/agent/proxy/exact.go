@@ -1173,13 +1173,13 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// (integrations.RoundSnapshot.SetUnstaged): the call the staging
 		// note describes, outside every test, its miss naming none made
 		// elsewhere.
-		return v.inVariableScope(integrations.NewCallRound(at.Epoch, nil).HoldingEvery().ReadAt(at).InStaging(true).InView(false, v.bg != nil).WithSequence(m.sequenceViewOf(v)).AfterReads(reads))
+		return v.inVariableScope(integrations.NewCallRound(at.Epoch, nil).HoldingEvery().ReadAt(at).InStaging(true).InView(false, v.bg != nil).WithSequence(m.sequenceViewOf(v, at.Epoch)).AfterReads(reads))
 	}
 	held := v.holds
 	if ended != nil {
 		held = func(name string) bool { return v.holds(name) || ended.holds(name) }
 	}
-	c := v.inVariableScope(integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).WithSequence(m.sequenceViewOf(v)).AfterReads(reads))
+	c := v.inVariableScope(integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).WithSequence(m.sequenceViewOf(v, at.Epoch)).AfterReads(reads))
 	if ahead {
 		// The tracker began a test whose view the store has not
 		// installed (integrations.RoundSnapshot.TrackerAhead): nothing
@@ -4559,11 +4559,15 @@ func (m *MockManager) closeTestCursors(gen uint64) {
 // move that view's sequence whichever view is in force when the commit lands.
 // False with exact serving off.
 func (m *MockManager) SequenceView() (integrations.SequenceView, bool) {
-	v := m.exactView()
+	// The view and its staging, read together as MarkCallRound reads them.
+	r := &m.exact.round
+	r.mu.Lock()
+	v, epoch := m.exact.view.Load(), m.stagingEpoch.Load()
+	r.mu.Unlock()
 	if v == nil {
 		return integrations.SequenceView{}, false
 	}
-	return m.sequenceViewOf(v), true
+	return m.sequenceViewOf(v, epoch), true
 }
 
 // sequenceViewOf is the sequence view of v (SequenceView), the view in force
@@ -4574,11 +4578,14 @@ func (m *MockManager) SequenceView() (integrations.SequenceView, bool) {
 // to no test. The calls between tests walk their own cursor (the pool
 // view's), so a window's answers never depend on how many calls landed
 // between tests.
-func (m *MockManager) sequenceViewOf(v *exactView) integrations.SequenceView {
+//
+// epoch is the staging v was read in, which the windows' cursor belongs to
+// (windowsCursor): a peek and its commit move the sequence of one staging.
+func (m *MockManager) sequenceViewOf(v *exactView, epoch uint64) integrations.SequenceView {
 	sv := integrations.SequenceView{Cursor: viewCursor{m: m, v: v}, Test: v.test, Start: v.winStart, End: v.winEnd}
 	if v.test != "" && len(v.worker) > 0 {
 		sv.Worker = func(mk *models.Mock) bool { return mk != nil && !mk.IsProtocolPhase() && v.isWorker(mk.Name) }
-		sv.Between = windowsCursor{m: m}
+		sv.Between = windowsCursor{m: m, epoch: epoch}
 	}
 	return sv
 }
