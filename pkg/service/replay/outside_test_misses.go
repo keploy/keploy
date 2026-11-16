@@ -79,13 +79,14 @@ func cutReadStatus(status models.TestSetStatus) models.TestSetStatus {
 // stopForSetEndRead is, with the proven switch off, the stop of the set's
 // application its end gives before it reads the calls the application made
 // after its last test (readAfterLastTest) and writes its report: the stop of
-// the application keploy started for the set (stopAppBeforeReport, which
-// stops it as the set's teardown does), or, on the run's last set, on an
-// attempt no other follows, the stop of the one --keep-app-alive kept across
-// the sets (keepAliveStop). nil when keploy stops the application only
-// later: one kept alive for a later set or attempt, one it did not start, one
-// in a docker compose stack, whose exit stops the stack, keploy's agent with
-// it; the read is then made before the set's post-script, with it running.
+// the application keploy started for the set, or of the app's container of
+// its docker compose stack, the stack running on, when no later set or
+// attempt is served by it (stopAppBeforeReport, which stops it as the set's
+// teardown does), or, on the run's last set, on an attempt no other follows,
+// the stop of the one --keep-app-alive kept across the sets (keepAliveStop).
+// nil when keploy stops the application only later: one kept alive, or kept
+// in its compose stack, for a later set or attempt, or one it did not start;
+// the read is then made before the set's post-script, with it running.
 // keepAliveStop is set only for a run whose sets are each served by the
 // application kept alive. Read only with the switch off, whose set's end
 // stops the application before it judges the set (stopAppBeforeSetEnd).

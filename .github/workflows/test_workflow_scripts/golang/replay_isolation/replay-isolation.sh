@@ -98,9 +98,8 @@ APPARGS="$RECARGS -imds 198.18.0.11 -unrecorded"
 # after the set's last test (with the switch off after the set's
 # post-script, before its report), so a call the application makes as it
 # stops is read and named as made after its last test (rows_after_last).
-# Under docker compose with the switch off the application's exit stops its
-# stack, keploy's agent with it, so keploy stops it only after the report:
-# the compose rows run only under the switch.
+# Under docker compose too: keploy stops the application's container itself,
+# its stack, keploy's agent among it, running on.
 APPARGS="$APPARGS -stop-lookup"
 # Native runs: as root, in a mount namespace of their own whose resolv.conf
 # names the sink and whose nsswitch.conf asks files then DNS (a runner's image
@@ -116,7 +115,7 @@ cleanup() {
 	[ -n "$SINKPID" ] && $S kill "$SINKPID" 2>/dev/null
 	[ ! -f "$W/compose/docker-compose.yml" ] || (cd "$W/compose" && docker compose down --remove-orphans >/dev/null 2>&1)
 	[ ! -f "$W/compose-base/docker-compose.yml" ] || (cd "$W/compose-base" && docker compose down --remove-orphans >/dev/null 2>&1)
-	docker rm -f riso-app riso-base riso-int-c riso-peer >/dev/null 2>&1
+	docker rm -f riso-app riso-base riso-int-c riso-peer riso-oneshot >/dev/null 2>&1
 	docker network rm riso-int >/dev/null 2>&1
 	$S ip netns del riso-sink 2>/dev/null
 	$S ip link del riso-h 2>/dev/null
@@ -177,10 +176,11 @@ dns_why() {
 	esac
 }
 
-# compose_yml NAME HOSTPORT ARGS [peer]: a compose file whose service is the
-# probe run with ARGS, container NAME, its 8080 published on HOSTPORT, the
-# sink its DNS server; with "peer", also riso-peer, a container the probe
-# resolves by name.
+# compose_yml NAME HOSTPORT ARGS [peer] [oneshot]: a compose file whose
+# service is the probe run with ARGS, container NAME, its 8080 published on
+# HOSTPORT, the sink its DNS server; with "peer", also riso-peer, a container
+# the probe resolves by name; with "oneshot", also riso-oneshot, a container
+# that exits 0 as soon as it starts, as a stack's one-shot migration does.
 compose_yml() {
 	cat > docker-compose.yml <<YML
 services:
@@ -191,12 +191,20 @@ services:
     ports: ["$2:8080"]
     dns: ["198.18.0.10"]
 YML
-	[ "${4:-}" != peer ] || cat >> docker-compose.yml <<YML
+	case " ${*:4} " in *" peer "*) cat >> docker-compose.yml <<YML
   riso-peer:
     image: riso-probe:local
     container_name: riso-peer
     command: ["app"]
 YML
+	;; esac
+	case " ${*:4} " in *" oneshot "*) cat >> docker-compose.yml <<YML
+  riso-oneshot:
+    image: riso-probe:local
+    container_name: riso-oneshot
+    command: ["oneshot"]
+YML
+	;; esac
 }
 
 # A port-only bypass rule for 7002 (the sink's bypass port), in keploy.yml.
@@ -438,6 +446,8 @@ replay() {
 	fi
 	cp keploy/.gitignore "$W/out/$phase/keploy.gitignore" 2>/dev/null
 	kill $peerwatch $resolvwatch 2>/dev/null; wait $peerwatch $resolvwatch 2>/dev/null
+	# How the one-shot container ended, for the compose rows.
+	docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' riso-oneshot > "$W/out/$phase/oneshot" 2>/dev/null || rm -f "$W/out/$phase/oneshot"
 	docker rm -f riso-app >/dev/null 2>&1
 	[ ! -f docker-compose.yml ] || docker compose down --remove-orphans >/dev/null 2>&1
 	sink_stop
@@ -615,10 +625,29 @@ for mode in "${MODES[@]}"; do
 
 		# The peer service joins only now, after the recording, which holds
 		# only its NXDOMAIN (as in the docker phase).
-		compose_yml riso-app 8080 "$APPARGS" peer
+		# A one-shot container beside it exits 0 as the stack starts, and
+		# ends nothing.
+		compose_yml riso-app 8080 "$APPARGS" peer oneshot
 		RUNNER=($S)
 		replay replay-compose -c "docker compose up" --containerName riso-app --delay 10
 		replay replay-compose-dns -c "docker compose up" --containerName riso-app --delay 10 --allow-egress dns
+		# The application crashes during its test (exit 3): the run ends on
+		# it, the set APP_HALTED, naming the container's exit code.
+		compose_yml riso-app 8080 "$APPARGS -crash-on-fire 3"
+		replay replay-compose-crash -c "docker compose up" --containerName riso-app --delay 10
+		# keploy's agent's container is killed once the application runs,
+		# before the tests are sent: the run ends, naming the agent, its exit
+		# code and the next step, not the application.
+		compose_yml riso-app 8080 "$APPARGS"
+		mkdir -p "$W/out/replay-compose-agent"
+		(
+			waitfor 300 sh -c "docker inspect -f '{{.State.Running}}' riso-app 2>/dev/null | grep -qx true" || exit 0
+			agent=$(docker ps --filter name=^keploy-v3- --format '{{.Names}}' | head -1)
+			[ -z "$agent" ] || docker kill "$agent" > "$W/out/replay-compose-agent/killed" 2>&1
+		) &
+		killer=$!
+		replay replay-compose-agent -c "docker compose up" --containerName riso-app --delay 20
+		kill $killer 2>/dev/null; wait $killer 2>/dev/null
 		cd "$W" || die cd
 		;;
 	internal)
@@ -746,13 +775,23 @@ for mode in "${MODES[@]}"; do
 		rows_reach base-compose dns-owned
 		row_log "base-compose resolves the peer service" "$W/out/base-compose/app.log" 'probe dns-peer: [0-9]'
 		row "replay-compose passes" "$([ "$(cat "$W/out/replay-compose/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose/exit" 2>/dev/null)"
-		# The start-up lookup, outside every test (rows_startup), and, under
-		# the proven switch, the one made after the last test (rows_after_last;
-		# with it off keploy stops a compose application only after the
-		# report, above).
+		# The start-up lookup, outside every test (rows_startup), and the one
+		# made after the last test (rows_after_last), in either mode.
 		rows_startup replay-compose
 		rows_mode replay-compose
-		[ "${KEPLOY_PROVEN:-}" != 1 ] || rows_after_last replay-compose
+		rows_after_last replay-compose
+		row "replay-compose: the one-shot container exited 0 and ended nothing" "$([ "$(cat "$W/out/replay-compose/oneshot" 2>/dev/null)" = "exited 0" ] && echo 1)" "riso-oneshot $(cat "$W/out/replay-compose/oneshot" 2>/dev/null || echo 'not found')"
+		# The application's crash ends the run on it.
+		row "replay-compose-crash fails" "$([ "$(cat "$W/out/replay-compose-crash/exit" 2>/dev/null)" != 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-crash/exit" 2>/dev/null)"
+		row_log "replay-compose-crash: the application crashed" "$W/out/replay-compose-crash/keploy.log" 'probe crash: exit 3'
+		row_log "replay-compose-crash names the application's exit code" "$W/out/replay-compose-crash/keploy.log" "the application's container exited with code 3, and keploy had not stopped it"
+		row "replay-compose-crash: the set is APP_HALTED" "$(cat "$W/out/replay-compose-crash"/report/*.yaml 2>/dev/null | grep -q '^status: APP_HALTED$' && echo 1)" "$(cat "$W/out/replay-compose-crash"/report/*.yaml 2>/dev/null | grep -m1 '^status:' || echo 'no report')"
+		rows_mode replay-compose-crash
+		# keploy's agent's death ends the run on it, named.
+		row "replay-compose-agent: keploy's agent was killed" "$(grep -q . "$W/out/replay-compose-agent/killed" 2>/dev/null && echo 1)" "$(cat "$W/out/replay-compose-agent/killed" 2>/dev/null || echo 'no agent container found')"
+		row "replay-compose-agent fails" "$([ "$(cat "$W/out/replay-compose-agent/exit" 2>/dev/null)" != 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-agent/exit" 2>/dev/null)"
+		row_log "replay-compose-agent names keploy's agent, its exit code and the next step" "$W/out/replay-compose-agent/keploy.log" "keploy's agent container .keploy-v3-[^ ]* exited with code 137 after the application started.*Next step: find why the agent stopped"
+		row_nolog "replay-compose-agent does not name the application's own exit" "$W/out/replay-compose-agent/keploy.log" "the application's container exited with code [0-9]+, and keploy had not stopped it"
 		# keploy answers that name itself, so it never reaches 127.0.0.11's
 		# upstream, nor does any other name (dns-other).
 		rows_zero replay-compose tcp fork-tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp

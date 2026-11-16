@@ -52,7 +52,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|fork1|fork2 ...")
+		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|oneshot|fork1|fork2 ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -71,6 +71,8 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("answered rcode=%d\n", rcode)
+	case "oneshot": // exits 0 at once, as a compose stack's one-shot migration does
+		os.Exit(0)
 	case "fork1": // starts fork2 and exits at once, so fork2 is reparented
 		c := exec.Command("/proc/self/exe", "fork2", os.Args[2], os.Args[3])
 		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -112,11 +114,16 @@ func app(args []string) {
 	peer := fs.String("peer", "", "a container name the network holds, resolved through it (empty: skip)")
 	unrecorded := fs.Bool("unrecorded", false, "also look up the names a recording must not hold (the replay's and the baselines' args; the recording's leave it off)")
 	stopLookup := fs.Bool("stop-lookup", false, "look a name up as the app stops (SIGINT or SIGTERM), after its last test and in no recording, then exit (the replay's args: keploy test reads the calls made after a set's last test once its app has stopped)")
+	crashOnFire := fs.Int("crash-on-fire", 0, "exit with this code as /fire is asked, before it answers (0: never): a crash during a test")
 	listen := fs.String("listen", ":8080", "")
 	_ = fs.Parse(args)
 	at := func(p int) string { return net.JoinHostPort(*sinkIP, strconv.Itoa(p)) }
 
 	http.HandleFunc("/fire", func(w http.ResponseWriter, _ *http.Request) {
+		if *crashOnFire != 0 {
+			fmt.Fprintf(os.Stderr, "probe crash: exit %d\n", *crashOnFire)
+			os.Exit(*crashOnFire)
+		}
 		outcome("tcp", dialWrite("tcp", at(portTCP), "tcp"))
 		outcome("bypass-tcp", dialWrite("tcp", at(portBypass), "bypass"))
 		outcome("udp-connected", dialWrite("udp", at(portUDP), "udp-connected"))

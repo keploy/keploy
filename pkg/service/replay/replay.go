@@ -2684,18 +2684,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// keploy started for this set (natively, or with docker run) as the set's
 	// teardown does, and waits for it to exit, as the set's drain would
 	// (awaitAppExit: while its stop moves, given up once it makes no
-	// progress for that drain's bound): the set's end calls it after the
-	// set's post-script, so the calls the application makes as it stops
-	// are read before the set's report is written (stopForSetEndRead). nil
-	// when keploy started none here, under docker compose, whose app's exit
-	// stops its stack, keploy's agent with it, and under the switch.
+	// progress for that drain's bound), or the app's container of its docker
+	// compose stack, the stack running on (StopComposeApp): the set's end
+	// calls it after the set's post-script, so the calls the application
+	// makes as it stops are read before the set's report is written
+	// (stopForSetEndRead). nil when keploy started none here, when a later
+	// set or attempt is served by the compose app, and under the switch.
 	var stopAppBeforeReport func()
 	// composeRestart, set, starts this set's compose app again, which the
 	// last set's end stopped, once the set is staged on the agent.
 	var composeRestart composeAppStopper
 	// composeHalted: the set's end found its compose app exited on its own
-	// (models.ErrAppExitedOnItsOwn): the set is APP_HALTED, and its end is
-	// not read.
+	// (models.ErrAppExitedOnItsOwn), its exit taking keploy's agent down
+	// with the stack: its end is not read, and under the switch, which
+	// stops it before the set is judged, the set is APP_HALTED.
 	composeHalted := false
 	// appStopKilled is that why, as the app's run returned it; read once the
 	// run has returned. appLeftRunning is what of the app its stop left
@@ -2939,14 +2941,46 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// set's end from the live agent (P101-c), as P101-b does for an app
 		// it starts per set. A stack kept across sets has the app started
 		// again here, its pids marked afresh and its readiness waited for.
-		if stopper, ok := r.instrumentation.(composeAppStopper); ok && provenswitch.On() {
-			// The app is started again below, once this set is staged on
-			// the agent and its pids are marked (composeRestart), as compose
-			// starts the first set's app only once the agent is ready.
-			if serveTest && r.composeAppStopped {
-				composeRestart = stopper
-				r.pidMarked = false
+		//
+		// With the switch off keploy stops the app's container the same
+		// way, its stack running on, but after the set's post-script, which
+		// runs with the app up, and before the set's report: the read for
+		// the report then takes the calls the app made as it stopped
+		// (stopForSetEndRead). Only a set after which no other set or
+		// attempt is served by the app is stopped: one the stack brings up
+		// for itself, or the run's last set on an attempt no other follows,
+		// as --keep-app-alive's app is stopped.
+		stopper, ok := r.instrumentation.(composeAppStopper)
+		// The app is started again below, once this set is staged on the
+		// agent and its pids are marked (composeRestart), as compose starts
+		// the first set's app only once the agent is ready.
+		if ok && serveTest && r.composeAppStopped {
+			composeRestart = stopper
+			r.pidMarked = false
+		}
+		if ok && !provenswitch.On() && (!serveTest || r.isLastTestSet && r.finalAttempt) {
+			stopAppBeforeReport = func() {
+				_, err := stopper.StopComposeApp(context.WithoutCancel(runTestSetCtx))
+				r.composeAppStopped = true
+				switch {
+				case errors.Is(err, models.ErrAppExitedOnItsOwn):
+					// It exited on its own: the exit, which its watch
+					// ends the run on, takes the stack down, keploy's
+					// agent with it, so the set's end is not read. The
+					// set's status stands, as for an app keploy started
+					// itself that exits once its set is judged.
+					composeHalted = true
+					r.logger.Info("the application's container had exited on its own before keploy stopped it at the test-set's end: the calls it made after the set's last test are not read",
+						zap.String("test-set", testSetID), zap.String("exit", err.Error()))
+				case err != nil:
+					// Read all the same: the agent runs on in the stack,
+					// and the read says what it could not vouch for.
+					r.logger.Warn("keploy could not stop the application's container before reading the calls it made after the test-set's last test: a call it makes as it stops later is not read",
+						zap.String("test-set", testSetID), zap.Error(err))
+				}
 			}
+		}
+		if ok && provenswitch.On() {
 			stopAppBeforeSetEnd = func() string {
 				killed, err := stopper.StopComposeApp(context.WithoutCancel(runTestSetCtx))
 				r.composeAppStopped = true
@@ -7310,13 +7344,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// read the run's user cut short by stopping the run is the stop's, as a
 	// stop before this point is (runEnded): a judged set is USER_ABORT
 	// (cutReadStatus).
+	// A docker compose app that had exited on its own before the stop
+	// (composeHalted) took keploy's agent down with its stack: nothing is
+	// read.
 	if !provenswitch.On() && captureOpened && stopForRead != nil {
 		r.stopBeforeSetEndRead(stopForRead)
-		readCtx, cancelRead := context.WithTimeout(ctx, setEndDrainBudget)
-		if r.readAfterLastTest(readCtx, testSetID) {
-			testSetStatus = cutReadStatus(testSetStatus)
+		if !composeHalted {
+			readCtx, cancelRead := context.WithTimeout(ctx, setEndDrainBudget)
+			if r.readAfterLastTest(readCtx, testSetID) {
+				testSetStatus = cutReadStatus(testSetStatus)
+			}
+			cancelRead()
 		}
-		cancelRead()
 	}
 	// The calls the set's application made outside every test that no mock
 	// answered and that fail nothing: named in its report, said, and

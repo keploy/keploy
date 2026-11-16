@@ -92,7 +92,7 @@ func TestWhyAppNotStopped(t *testing.T) {
 	if got := whyAppNotStopped(utils.DockerCompose, true); !strings.Contains(got, "keeps the application's docker compose stack running across test-sets") {
 		t.Errorf("compose, kept: %q", got)
 	}
-	if got := whyAppNotStopped(utils.DockerCompose, false); strings.Contains(got, "across test-sets") || !strings.Contains(got, "takes keploy's agent down") {
+	if got := whyAppNotStopped(utils.DockerCompose, false); strings.Contains(got, "across test-sets") || !strings.Contains(got, "cannot stop apart from the stack") {
 		t.Errorf("compose, per set: %q", got)
 	}
 	if got := whyAppNotStopped(utils.Native, true); !strings.Contains(got, "--keep-app-alive") {
