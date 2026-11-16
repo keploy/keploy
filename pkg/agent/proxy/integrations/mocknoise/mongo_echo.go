@@ -18,10 +18,10 @@ import (
 const mongoSectionPlace = "section."
 
 // mongoMsgPrefix and mongoMsgSuffix frame a recorded OP_MSG body section:
-// "{ SectionSingle msg: <extended JSON> }".
+// "{ SectionSingle msg: <extended JSON> }" (models.MongoMsgSection).
 const (
-	mongoMsgPrefix = "{ SectionSingle msg: "
-	mongoMsgSuffix = " }"
+	mongoMsgPrefix = models.MongoMsgSectionPrefix
+	mongoMsgSuffix = models.MongoMsgSectionSuffix
 )
 
 // What the detector keeps of one mock is bounded. A place keeps its whole path,
@@ -60,11 +60,7 @@ func (k *mongoKeep) take(n int) bool {
 // is not read. The check copies the section's text once, and allocates
 // nothing else.
 func mongoMsgJSON(section string) (string, bool) {
-	body, ok := strings.CutPrefix(section, mongoMsgPrefix)
-	if !ok {
-		return "", false
-	}
-	body, ok = strings.CutSuffix(body, mongoMsgSuffix)
+	body, ok := models.MongoMsgSection(section)
 	if !ok {
 		return "", false
 	}

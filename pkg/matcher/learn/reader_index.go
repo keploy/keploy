@@ -17,6 +17,7 @@ import (
 	"unsafe"
 	"weak"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
@@ -1198,7 +1199,8 @@ func formsHeld(text string) ([]string, int64) {
 // eachField calls yield with each field of s, the text read now, and the
 // field's text: its recording's fields (fields, read with s), a value that
 // is wholly JSON (an HTTP body) by its own leaves below its path
-// (walkJSON), else s whole as one field. A value with no leaf (blank, a
+// (walkJSON), a recorded Mongo section by its document's leaves
+// (eachSectionLeaf), else the field's text whole as one field. A value with no leaf (blank, a
 // null) is one field too. Its field's name is never read as JSON. Each
 // stands in its recording's field (in) as no other place of s spells it:
 // textFields joins keys with dots, so a jsonb key "a.b" and key a's "b"
@@ -1237,13 +1239,56 @@ func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 			values = walkJSON(text, false, func(string, bool, string) { leaves++ })
 		}
 		if values == 0 || leaves == 0 {
-			yield(fieldAt{f.path, f.key, in}, text)
+			if f.key || !eachSectionLeaf(text, f.path, in, yield) {
+				yield(fieldAt{f.path, f.key, in}, text)
+			}
 			continue
 		}
 		walkJSON(text, values > 1, func(path string, key bool, leaf string) {
 			yield(fieldAt{strings.TrimSuffix(f.path+"."+path, "."), key, in}, leaf)
 		})
 	}
+}
+
+// eachSectionLeaf yields each leaf of text, a recorded Mongo OP_MSG
+// section, below the field's path, as walkJSON reads it: a body section's
+// document (models.MongoMsgSection) below "msg", and a document sequence's
+// (models.MongoSequenceSection) identifier at "identifier" and its
+// documents below "msgs", each at its index. A section's frame is the
+// recorder's, the same in every run, so a word moved between two leaves
+// of one message is at no one field, as in an HTTP body. It yields nothing
+// and reports false for a text of another form, or a document that is not
+// wholly one JSON value or has no leaf: that text is one field, as any
+// text that is not JSON is.
+func eachSectionLeaf(text, path, in string, yield func(fieldAt, string)) bool {
+	name, ident := "msg", ""
+	doc, ok := models.MongoMsgSection(text)
+	if !ok {
+		if ident, doc, ok = models.MongoSequenceSection(text); !ok {
+			return false
+		}
+		name = "msgs"
+	}
+	leaves := 0
+	if walkJSON(doc, false, func(string, bool, string) { leaves++ }) != 1 || leaves == 0 {
+		return false
+	}
+	base := path + "." + name
+	if name == "msgs" {
+		yield(fieldAt{path + ".identifier", false, in}, ident)
+	}
+	walkJSON(doc, false, func(p string, key bool, leaf string) {
+		switch {
+		case p == "":
+			p = base
+		case p[0] == '[':
+			p = base + p
+		default:
+			p = base + "." + p
+		}
+		yield(fieldAt{p, key, in}, leaf)
+	})
+	return true
 }
 
 // keysOf reports whether one of fields is a key (keyed), and one an oddKey
