@@ -247,4 +247,9 @@ func TestBackgroundSpansKeepTheAppsZoneAndANilTrackerTellsNone(t *testing.T) {
 			t.Fatalf("spans = %+v,%v of a ctx with no tracker; want none", spans, ok)
 		}
 	})
+	noPanic("ClockSpansOf of a nil ctx", func() {
+		if spans, ok := ClockSpansOf(nil, arrival); ok || spans != nil { //nolint:staticcheck // a nil ctx tells none
+			t.Fatalf("spans = %+v,%v of a nil ctx; want none", spans, ok)
+		}
+	})
 }
