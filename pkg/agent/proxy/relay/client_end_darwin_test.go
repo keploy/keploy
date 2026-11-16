@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"io"
+	"os"
 	"syscall"
 	"testing"
 	"time"
@@ -232,4 +233,89 @@ func TestXNUATCPInfoThatCannotBeReadTeesEveryChunk(t *testing.T) {
 			}
 		})
 	}
+}
+
+// On macOS a reset that comes once the proxy's FIN is sent after the client's
+// closes the connection with no error kept: the socket's TCP_INFO says it,
+// closed with bytes the client's stack never acknowledged, after the client's
+// FIN, and gives ECONNRESET once. Anything else gives none.
+func TestXNUAResetAfterTheProxysFINIsReadFromItsTCPInfo(t *testing.T) {
+	closedOwing := darwinTCPInfo{state: tcpsClosed, txunacked: 9}
+	for _, c := range []struct {
+		name    string
+		info    darwinTCPInfo
+		finRead bool
+		// finFound: a look found the client's FIN in first.
+		finFound bool
+		want     error
+	}{
+		{"the FIN read, closed with bytes outstanding: a reset", closedOwing, true, false, syscall.ECONNRESET},
+		{"the FIN found by a look, closed with bytes outstanding: a reset", closedOwing, false, true, syscall.ECONNRESET},
+		{"no FIN read or found: none", closedOwing, false, false, nil},
+		{"the FIN read, closed with every byte acknowledged: its FIN's acknowledgement", darwinTCPInfo{state: tcpsClosed}, true, false, nil},
+		{"the FIN read, last ack with bytes outstanding: not closed yet", darwinTCPInfo{state: tcpsLastAck, txunacked: 9}, true, false, nil},
+		{"the FIN read, closing with bytes outstanding: not closed yet", darwinTCPInfo{state: tcpsClosing, txunacked: 9}, true, false, nil},
+		{"the FIN read, open with bytes outstanding", darwinTCPInfo{state: tcpsEstablished, txunacked: 9}, true, false, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			x := &scriptedXNU{infos: []darwinTCPInfo{c.info}}
+			if c.finFound {
+				x.infos = []darwinTCPInfo{{state: tcpsCloseWait}, c.info}
+			}
+			s := x.socket()
+			if c.finFound {
+				if l := s.look(); l.said != clientFinned {
+					t.Fatalf("look = %+v, want the FIN in", l)
+				}
+			}
+			if got := errnoOf(s.unresetError(0, c.finRead)); got != c.want {
+				t.Fatalf("unresetError = %v, want %v", got, c.want)
+			}
+			// The kernel clears an error as it gives it: so does this one.
+			if got := s.unresetError(0, c.finRead); got != 0 {
+				t.Fatalf("unresetError asked again = %v, want none: it was given", syscall.Errno(got))
+			}
+		})
+	}
+}
+
+// A socket that cannot answer gives no reset, whatever its buffer holds.
+func TestXNUASocketThatCannotSayGivesNoReset(t *testing.T) {
+	s := &tcpClientSocket{askInfo: func(_ uintptr, _ *[tcpInfoBuf]byte, info *darwinTCPInfo) bool {
+		*info = darwinTCPInfo{state: tcpsClosed, txunacked: 9}
+		return false
+	}}
+	if got := s.unresetError(0, true); got != 0 {
+		t.Fatalf("unresetError = %v for a socket that could not say, want none", syscall.Errno(got))
+	}
+}
+
+// A socket whose SO_ERROR cannot be read (a file that is no socket) holds no
+// error: its TCP_INFO is not asked for a reset, whatever it would say.
+func TestXNUASocketWhoseErrorCannotBeReadGivesNoReset(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	rc, err := r.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := 0
+	s := &tcpClientSocket{rc: rc, askInfo: func(_ uintptr, _ *[tcpInfoBuf]byte, info *darwinTCPInfo) bool {
+		asked++
+		*info = darwinTCPInfo{state: tcpsClosed, txunacked: 9}
+		return true
+	}}
+	if err := s.pendingError(true); err != nil || asked != 0 {
+		t.Fatalf("pendingError = %v after %d TCP_INFO questions, for a pipe; want none, and no question", err, asked)
+	}
+}
+
+func errnoOf(n int) error {
+	if n == 0 {
+		return nil
+	}
+	return syscall.Errno(n)
 }

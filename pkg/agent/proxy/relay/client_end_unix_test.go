@@ -320,3 +320,50 @@ func TestADestinationsResetAfterTheClientsFINIsAReset(t *testing.T) {
 		t.Fatalf("PeerEnded was told of the destination's end %v, want once, a reset", destEnds)
 	}
 }
+
+// The socket under a closed client that the proxy writes a chunk to and then
+// half-closes holds the client's reset of that chunk, whether it came before
+// the proxy's FIN went (Linux and macOS keep its error) or after (Linux keeps
+// ECONNRESET; macOS keeps none, and its TCP_INFO says it): handed on once.
+// A client that took the chunk and acknowledged the proxy's FIN closes the
+// connection with nothing to hand on.
+func TestTheSocketHoldsTheResetOfAChunkAndAFINSentToAClosedClient(t *testing.T) {
+	t.Parallel()
+	for _, took := range []bool{false, true} {
+		app, proxyClient := loopbackPair(t)
+		if took {
+			if err := app.(*net.TCPConn).CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			_ = app.Close()
+		}
+		awaitTCPState(t, proxyClient, stateCloseWait, "the client's FIN is in")
+		if _, err := proxyClient.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		// Linux's loopback can have the reset in before this, the
+		// connection closed: the FIN cannot go then.
+		if err := proxyClient.(*net.TCPConn).CloseWrite(); err != nil && took {
+			t.Fatal(err)
+		}
+		if took {
+			_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if got, err := io.ReadAll(app); err != nil || string(got) != "x" {
+				t.Fatalf("the client read %q, %v, want the chunk and the proxy's FIN", got, err)
+			}
+		}
+		awaitTCPState(t, proxyClient, stateClosed, "the connection is closed")
+		s := clientSocketOf(proxyClient, zap.NewNop()).(*tcpClientSocket)
+		err := s.pendingError(true)
+		switch {
+		case took && err != nil:
+			t.Fatalf("pendingError = %v for a client that took every byte, want none", err)
+		case !took && !errors.Is(err, syscall.ECONNRESET) && !errors.Is(err, syscall.EPIPE):
+			t.Fatalf("pendingError = %v for a closed client sent a chunk and a FIN, want its reset", err)
+		}
+		if err := s.pendingError(true); err != nil {
+			t.Fatalf("pendingError asked again = %v, want none: it was given", err)
+		}
+	}
+}

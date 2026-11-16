@@ -47,17 +47,23 @@ import (
 // On macOS the reset can be what the client's forwarder reads instead of the
 // FIN that came before it (client_took_darwin.go): the relay reads that FIN
 // as the client's end, as on Linux, and hands the reset on as it ends, as the
-// one the socket held.
+// one the socket held. And macOS keeps no error for a reset that comes once
+// the proxy's own FIN is sent after the client's (LAST_ACK or CLOSING), where
+// Linux keeps ECONNRESET: the relay's FIN can go before the closed client's
+// reset of the last chunk comes back (the destination answers the client's
+// FIN with its own at once). The socket's TCP_INFO says it then
+// (client_end_darwin.go), and the relay hands it on as Linux's would be.
 //
 // Only a client connection that is a TCP socket on Linux or macOS can be asked
 // (clientSocketOf). Elsewhere only a failed write's error is handed on.
 
 // clientErrorSocket is a clientSocket that can say what error its connection
 // holds (SO_ERROR), taking it as it says it: nil when it holds none, or cannot
-// say.
+// say. finRead: the relay read the client's FIN (clientEOF), which a reset
+// macOS kept no error for comes after.
 type clientErrorSocket interface {
 	clientSocket
-	pendingError() error
+	pendingError(finRead bool) error
 }
 
 // resetAfterFINSocket is a clientSocket that can say whether a reset its read
@@ -107,10 +113,11 @@ func (r *Relay) clientEnd(ctx context.Context) {
 	if !ok {
 		return
 	}
-	if r.clientEOF.Load() {
+	finRead := r.clientEOF.Load()
+	if finRead {
 		r.clientAnswered(ctx)
 	}
-	if err := s.pendingError(); err != nil {
+	if err := s.pendingError(finRead); err != nil {
 		r.cfg.ClientEndError(err)
 	}
 }
