@@ -249,14 +249,27 @@ rows_recorded_nx() {
 row_nolog() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null || echo 1)" "no /$3/ in $(basename "$(dirname "$2")")"; }
 # A kept-inside line names a DNS name as keploy's lines name a host: by its
 # labels' shape beside its host tag ("DNS {}.{}.{}. #3fa2c1d0e9b8"), never
-# whole. The run's report names each DNS question no mock answered whole,
-# beside that tag, so the rows read which name a line names from it.
-# report_dns PHASE: "TAG NAME" for each DNS question PHASE's report names.
-report_dns() {
-	cat "$W/out/$1"/report/*.yaml 2>/dev/null | awk '
-		/^[[:space:]]*(- )?protocol:/ { dns = ($NF == "DNS"); name = ""; next }
-		dns && /^[[:space:]]*actual_summary:/ { name = $NF; next }
-		dns && name != "" && /^[[:space:]]*host_tag:/ { t = $NF; gsub(/[\047"]/, "", t); print t, name; name = "" }' | sort -u
+# whole. The run's report names each DNS question a test made that no mock
+# answered whole, beside that tag; keploy test's misses file names each one
+# made outside every test whole, beside the same tag (the report names those
+# by their shape). The rows read which name a line names from the two.
+# whole_dns PHASE: "TAG NAME" for each DNS question PHASE's report or misses
+# file names whole.
+whole_dns() {
+	{
+		cat "$W/out/$1"/report/*.yaml 2>/dev/null | awk '
+			/^[[:space:]]*(- )?protocol:/ { dns = ($NF == "DNS"); name = ""; next }
+			dns && /^[[:space:]]*actual_summary:/ { name = $NF; next }
+			dns && name != "" && /^[[:space:]]*host_tag:/ { t = $NF; gsub(/[\047"]/, "", t); print t, name; name = "" }'
+		yaml_list misses "$W/out/$1/last-test-misses.yaml" | awk -F'|' '{
+			p = c = t = ""
+			for (i = 2; i < NF; i++) {
+				k = $i; sub(/=.*/, "", k); v = substr($i, length(k) + 2)
+				if (k == "protocol") p = v; else if (k == "call") c = v; else if (k == "host_tag") t = v
+			}
+			if (p == "DNS" && t != "" && c != "") { n = split(c, w, " "); print t, w[n] }
+		}'
+	} | sort -u
 }
 # kept_dns_tags PHASE: the tag of each DNS name PHASE's kept-inside report
 # names, and "untagged" for a line that names one by its shape alone (keploy
@@ -270,16 +283,16 @@ kept_dns_tags() {
 # question QNAME (fully qualified), by the tag PHASE's report names it by.
 row_kept_dns() {
 	local tag
-	tag=$(report_dns "$2" | awk -v n="$3" '$2 == n { print $1; exit }')
+	tag=$(whole_dns "$2" | awk -v n="$3" '$2 == n { print $1; exit }')
 	row "$1" "$([ -n "$tag" ] && kept_dns_tags "$2" | grep -qxF -- "$tag" && echo 1)" "$3 is ${tag:-not in the report} in $2"
 }
 # row_not_kept_dns NAME PHASE QNAME: no kept-inside DNS line of PHASE names
-# QNAME: each names the tag of another name PHASE's report holds (a tag the
-# report does not hold could be QNAME's, so it fails the row).
+# QNAME: each names the tag of another name PHASE's report or misses file
+# holds whole (a tag neither holds could be QNAME's, so it fails the row).
 row_not_kept_dns() {
 	local t n bad=""
 	for t in $(kept_dns_tags "$2"); do
-		n=$(report_dns "$2" | awk -v t="$t" '$1 == t { print $2; exit }')
+		n=$(whole_dns "$2" | awk -v t="$t" '$1 == t { print $2; exit }')
 		[ -n "$n" ] && [ "$n" != "$3" ] || bad="$bad $t=${n:-unknown}"
 	done
 	row "$1" "$([ -z "$bad" ] && echo 1)" "kept DNS tags in $2:${bad:- none names $3}"
@@ -368,7 +381,7 @@ replay() {
 	echo "$phase exit $(cat "$W/out/$phase/exit")"
 	waitfor 15 grep -q 'probe fork-tcp' "$W/out/$phase/keploy.log"
 	grep -h 'status:' keploy/reports/test-run-*/*.yaml 2>/dev/null | sort | uniq -c
-	# This run's report, for the DNS rows (report_dns).
+	# This run's report, for the DNS rows (whole_dns).
 	local run
 	run=$(ls -td keploy/reports/test-run-* 2>/dev/null | head -1)
 	[ -z "$run" ] || cp -r "$run" "$W/out/$phase/report"
