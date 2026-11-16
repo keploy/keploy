@@ -353,14 +353,6 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
-	// diffMaps iterates Go maps, so bucket order is randomized per run; sort
-	// each bucket so reports, yaml output and the capped diff subset are
-	// stable across runs.
-	sort.Strings(added)
-	sort.Strings(removed)
-	sort.Strings(typeChanges)
-	sort.Strings(valueChanges)
-
 	trunc := func(s string) string {
 		if maxVal <= 0 || len(s) <= maxVal {
 			return s
@@ -509,6 +501,12 @@ func scalarTypeValue(v interface{}) (typ, val string) {
 	return "null", "null"
 }
 
+// diffMaps returns the paths added, removed, retyped and changed in value
+// between two path maps, each list sorted. It walks Go maps, whose order is
+// random on every run, so it sorts what it found: the same two documents give
+// the same lists, and the failure assessment's reasons, the reports, the yaml
+// output and the capped diff subset built from them read the same on every
+// run.
 func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []string) {
 	seen := map[string]struct{}{}
 
@@ -539,6 +537,10 @@ func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []st
 			added = append(added, k)
 		}
 	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(typeChanges)
+	sort.Strings(valueChanges)
 	return
 }
 
