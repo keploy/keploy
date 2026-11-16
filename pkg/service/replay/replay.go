@@ -7231,6 +7231,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// INTERNAL_ERR is noted past this point (a failed report write returns
 	// it).
 	r.setInternalErr = internalFailure
+	// The calls the set's application made outside every test that no mock
+	// answered and that fail nothing: named in its report and said, since
+	// nothing else names them (outside_test_misses.go).
+	outsideTest := models.OutsideTestMissesOf(r.setCalls.outside(provenswitch.On()))
+	r.logOutsideTestMisses(testSetID, outsideTest)
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,
@@ -7254,6 +7259,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		RealListed:          realListed,
 		RealFailure:         realWhy,
 		UnclaimedCalls:      unclaimed,
+		OutsideTestMisses:   outsideTest,
 		AppNotStopped:       appNotStopped,
 		Proven:              provenswitch.On(),
 		SetAnswers:          setAnswers,
