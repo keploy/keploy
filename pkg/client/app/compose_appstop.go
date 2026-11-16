@@ -14,27 +14,27 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-// UNDER THE PROVEN SWITCH KEPLOY STOPS A DOCKER COMPOSE APP ITSELF (P101-c).
+// KEPLOY STOPS A DOCKER COMPOSE APP ITSELF (P101-c), IN EVERY MODE.
 //
 // keploy runs its agent as a service of the app's compose stack, the app in
 // the agent's network and pid namespaces. With --abort-on-container-exit the
 // app's exit stopped the whole stack, keploy's agent with it, so a stop of the
-// app at a test set's end left that set's end nothing to read, and the stop
-// was left out: compose sets were read with the app still running, and a call
-// it made after the read was judged by no one.
+// app left nothing to read of what it did as it stopped, and an exit of any
+// other container (a one-shot migration's, exit 0 too) took the run down.
 //
-// Under the switch compose runs without the abort flags (composeAbortFlags),
-// and keploy watches the app's container itself (watchComposeApp): an exit
-// keploy did not ask for ends the run, as the abort did, with the app's exit
-// code (APP_HALTED). keploy stops the app (StopComposeApp: an interrupt, then a
-// wait for its exit on events, a kill only when it made no progress on its way
-// out, and the kill is said) and starts it again (StartComposeApp), while the
-// agent and the app's dependencies run on.
+// So compose runs without the abort flags, the user's own too
+// (withoutComposeAbortFlags), and keploy watches the app's container itself
+// (watchComposeApp): an exit keploy did not ask for ends the run, as the
+// abort did, with the app's exit code (APP_HALTED); another container's exit
+// is compose's to show, and ends nothing. keploy stops the app
+// (StopComposeApp: an interrupt, then a wait for its exit on events, a kill
+// only when it made no progress on its way out, and the kill is said) and
+// starts it again (StartComposeApp), while the agent and the app's
+// dependencies run on.
 //
 // The app's container is the one compose made for the app's service in the
 // project of keploy's agent (composeAppContainer), not the one a name reaches
@@ -199,12 +199,6 @@ func (h composeHalt) appError(appLogs string) models.AppError {
 		return models.AppError{AppErrorType: models.ErrUnExpected, Err: h, AppLogs: appLogs, ExitCode: h.exitCode}
 	}
 	return models.AppError{AppErrorType: models.ErrAppStopped, AppLogs: appLogs, ExitCode: 0}
-}
-
-// composeStopsTheApp reports whether keploy stops and watches a compose app
-// itself: under the proven switch.
-func composeStopsTheApp() bool {
-	return provenswitch.On()
 }
 
 // watchComposeApp watches the app's container for its exits until ctx ends,
@@ -448,8 +442,7 @@ const (
 // keploy's agent in it, while the recording was still draining what the agent
 // had captured, or before the replay had read the set's end from it.
 // Compose's own up, its abort flags dropped, keeps the project up only while
-// something attached to it runs; under the switch the project's end is
-// keploy's: the watch's on a halt, the teardown's otherwise.
+// something attached to it runs; the project's end is keploy's: the watch's on a halt, the teardown's otherwise.
 //
 // Such an up also returns on the app's own exit, at once, which the watch may
 // not have taken yet (its event, its inspect): the container says, as the
@@ -579,8 +572,8 @@ func (a *App) composeAppHalt() *composeHalt {
 	return a.composeApp.halted.Load()
 }
 
-// StopComposeApp stops the app's container of a compose stack, under the
-// proven switch, its stack running on (keploy's agent among it): an interrupt
+// StopComposeApp stops the app's container of a compose stack, its stack
+// running on (keploy's agent among it): an interrupt
 // the daemon takes for a stop (composeInterrupt: the container's own stop
 // signal, SIGINT when it declares none) to the container compose made for
 // the app's service (composeAppContainer), then a wait for it to stop on the
@@ -836,8 +829,8 @@ func (a *App) signalComposeApp(ctx context.Context, id, signal string) error {
 	return a.docker.ContainerKill(kctx, id, signal)
 }
 
-// StartComposeApp starts the app's container of a compose stack again, under
-// the proven switch, after StopComposeApp: its exits are watched as a halt
+// StartComposeApp starts the app's container of a compose stack again, after
+// StopComposeApp: its exits are watched as a halt
 // again from then on. start says what an inspect before it read of the
 // container: models.ComposeAppStartedAnew where it was not running (the app
 // is a new one, and what an earlier one's processes lost is not its);

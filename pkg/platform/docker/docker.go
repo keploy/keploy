@@ -86,18 +86,14 @@ const (
 // counts toward `retries` nor marks the container unhealthy, so a dependent app
 // (depends_on: service_healthy) simply keeps waiting.
 //
-// WHAT IT IS NOT. For a LITERAL `docker compose` command it is NOT the
-// mechanism that detects a dead agent: keploy rewrites such commands to inject
-// `--abort-on-container-exit` (ensureComposeExitOnAppFailure, called from
-// modifyDockerComposeCommand / ensureInMemoryComposeFlags in pkg/client/app),
-// so a crashed or OOM-killed agent container EXITS and aborts the whole run
-// immediately, independent of this budget. That covers the go-memory-load lanes
-// this fix targets (they run `-c "docker compose up"`). For a WRAPPER command
-// (make / npm / a shell script) keploy passes its compose file via COMPOSE_FILE
-// and cannot splice the flag in — it warns about exactly this at app.go:~288 —
-// so there this window genuinely IS the backstop, which is a further reason to
-// keep it generous. In both cases the window's job is the same: avoid
-// false-failing an agent that is ALIVE and still doing its one-time setup.
+// WHAT IT IS NOT. It is NOT the mechanism that detects a dead agent: a crashed
+// or OOM-killed agent container EXITS, and the app, which depends on its health
+// (depends_on: service_healthy), is then never started: compose's up fails on
+// that dependency at once, independent of this budget. keploy adds no
+// --abort-* flag to a compose command, and strips the user's
+// (withoutComposeAbortFlags in pkg/client/app): it watches the app's container
+// itself. The window's job is to avoid false-failing an agent that is ALIVE
+// and still doing its one-time setup.
 //
 // WHAT IT BOUNDS. The agent writes AgentReadyFile only after the CLI has read
 // and decoded the test-set's mock corpus (GetFilteredMocks) and streamed it to
@@ -115,8 +111,8 @@ const (
 // WHY GENEROUS IS THE RIGHT SHAPE, NOT A GUESS. The container flips healthy the
 // instant the ready file appears, so in the common case the app starts in
 // seconds no matter how large this window is — a generous value costs the fast
-// path nothing. For literal compose, agent death is caught by container-exit
-// (--abort-on-container-exit), not by this window. So this
+// path nothing. Agent death before the app starts is caught by the agent
+// container's exit, not by this window. So this
 // is a floor sized to "comfortably longer than any legitimate setup," not a
 // delicate estimate of load time; its exact value is not correctness-critical.
 // The only case it still bounds is an agent that is alive but wedged (never
@@ -1235,9 +1231,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "retries"},
 			{Kind: yaml.ScalarNode, Value: "60"},
 
-			// start_period — a generous, env-tunable readiness floor. For a
-			// literal `docker compose` command it is not the death detector (a
-			// dead agent exits and --abort-on-container-exit aborts the run); it
+			// start_period — a generous, env-tunable readiness floor. It is
+			// not the death detector (a dead agent exits, and compose's up
+			// fails on the app's dependency on its health); it
 			// only keeps a live, still-setting-up agent from being false-failed
 			// while the CLI decodes and streams the mock corpus. See
 			// agentHealthcheckStartPeriod for the full rationale.
@@ -1252,8 +1248,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	)
 
 	// stop_grace_period, for `keploy record`: compose stops the agent with
-	// the project, also when the app exits on its own
-	// (--abort-on-container-exit), and the agent then waits for the
+	// the project, also when the app exits on its own (keploy's watch of the
+	// app's container ends the run, and the stack goes down), and the agent
+	// then waits for the
 	// recording that holds its streams to save what it captured
 	// (models.DrainsOnAgentStopHeader): it goes once that drain is through,
 	// has stalled, or its client is gone, all of them events. Compose's
