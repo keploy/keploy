@@ -131,8 +131,10 @@ func TestOnWindowsTheProxysSideCountsWhatArrivedAndNoFIN(t *testing.T) {
 
 // TestOnWindowsASideInTimeWaitIsReadAndHasTakenTheFIN: a proxy's side that
 // sent its FIN first (CloseWrite) and then took the application's is in
-// TIME_WAIT, TCPSTATE's last value, with its socket still open: read, and
-// counted as having taken the FIN.
+// TIME_WAIT, which Windows 11 takes off the socket the proxy still holds: the
+// socket reads CLOSED, as after a reset. Read with its 4 bytes unread, it is
+// counted as having taken the FIN (winTCPClosedByFIN), with the 4 received.
+// A Windows that leaves TIME_WAIT on the socket passes the same way.
 func TestOnWindowsASideInTimeWaitIsReadAndHasTakenTheFIN(t *testing.T) {
 	app, side := winPair(t)
 	if _, err := app.Write([]byte("ping")); err != nil {
@@ -148,9 +150,85 @@ func TestOnWindowsASideInTimeWaitIsReadAndHasTakenTheFIN(t *testing.T) {
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
-	until(t, "TIME_WAIT", func() bool { ps := readProxySide(side); return ps.err != nil || ps.state == winTCPTimeWait })
-	if ps := readProxySide(side); ps.err != nil || ps.state != winTCPTimeWait || ps.received != 4 || !peerEnded(ps.state) {
-		t.Fatalf("in TIME_WAIT: %+v (%s); want read, 4 received, the FIN taken", ps, tcpStateName(ps.state))
+	ps := untilEnded(t, side)
+	if ps.err != nil || (ps.state != winTCPClosedByFIN && ps.state != winTCPTimeWait) || ps.received != 4 || !peerEnded(ps.state) {
+		t.Fatalf("after both FINs: %+v (%s); want read, 4 received, the FIN taken", ps, tcpStateName(ps.state))
+	}
+	t.Logf("the side reads %s", tcpStateName(ps.state))
+}
+
+// untilEnded waits for side's connection to leave the states it is in while
+// it is open (ESTABLISHED, the FIN_WAITs, CLOSE_WAIT, LAST_ACK) and returns
+// its read then.
+func untilEnded(t *testing.T, side *net.TCPConn) proxySide {
+	t.Helper()
+	var ps proxySide
+	until(t, "the connection's end", func() bool {
+		ps = readProxySide(side)
+		switch ps.state {
+		case winTCPEstablished, winTCPFinWait1, winTCPFinWait2, winTCPCloseWait, winTCPLastAck:
+			return ps.err != nil
+		}
+		return true
+	})
+	return ps
+}
+
+// TestOnWindowsASideThatTookTheFINFirstAndThenSentItsOwnHasTakenIt: the
+// application's FIN first (CLOSE_WAIT), every byte read to it, then the
+// side's own: the end of its LAST_ACK reads CLOSED too, with nothing unread,
+// and is counted as having taken the FIN.
+func TestOnWindowsASideThatTookTheFINFirstAndThenSentItsOwnHasTakenIt(t *testing.T) {
+	app, side := winPair(t)
+	if _, err := app.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := io.Copy(io.Discard, side); err != nil || got != 4 {
+		t.Fatalf("read %d, %v; want 4 to the FIN", got, err)
+	}
+	if err := side.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	ps := untilEnded(t, side)
+	if ps.err != nil || ps.state != winTCPClosedByFIN || ps.received != 4 || !peerEnded(ps.state) {
+		t.Fatalf("after both FINs: %+v (%s); want read, 4 received, the FIN taken", ps, tcpStateName(ps.state))
+	}
+	if u, err := readUnread(side); err != nil || u != 0 {
+		t.Fatalf("unread after the read: %d, %v", u, err)
+	}
+}
+
+// TestOnWindowsASideTheApplicationResetIsNotTakenAsAFIN: a reset reads CLOSED
+// as both FINs do, and is no FIN: in ESTABLISHED with bytes unread (the
+// reset drops them), and after the side's own FIN.
+func TestOnWindowsASideTheApplicationResetIsNotTakenAsAFIN(t *testing.T) {
+	for _, sideFINFirst := range []bool{false, true} {
+		app, side := winPair(t)
+		if _, err := app.Write([]byte("ping")); err != nil {
+			t.Fatal(err)
+		}
+		until(t, "the bytes to arrive", func() bool { return readProxySide(side).received == 4 })
+		if sideFINFirst {
+			if err := side.CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.Copy(io.Discard, app); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := app.SetLinger(0); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.Close(); err != nil {
+			t.Fatal(err)
+		}
+		ps := untilEnded(t, side)
+		if ps.err != nil || ps.state != winTCPClosed || peerEnded(ps.state) {
+			t.Fatalf("reset (the side's FIN first: %v): %+v (%s); want read, CLOSED, no FIN taken", sideFINFirst, ps, tcpStateName(ps.state))
+		}
 	}
 }
 
