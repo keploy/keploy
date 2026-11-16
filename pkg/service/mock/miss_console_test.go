@@ -194,6 +194,7 @@ func TestTheMissesFileIsNotWrittenWhereGitWouldTrackIt(t *testing.T) {
 		"with the entries alone":                "",
 		"un-ignoring every yaml file":           "!*.yaml\n",
 		"un-ignoring the temporary file":        "!.last-replay-*\n",
+		"un-ignoring its temporary file alone":  "!.last-replay-misses-*\n",
 		"un-ignoring the set's own misses file": "!/default/" + MissesFile + "\n",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -405,5 +406,66 @@ func TestHoldsCallsWholeNamesTheMissesFileAndItsTemporaryFile(t *testing.T) {
 		if got := HoldsCallsWhole(name); got != want {
 			t.Errorf("HoldsCallsWhole(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+// A kill between a local file's temporary write and its rename leaves the
+// temporary file behind. Each file the writes really made (tempWritten sees
+// them; the row puts back what a kill leaves) is git-ignored, so it is never
+// committed, and HoldsCallsWhole names exactly the ones that hold a call
+// whole, the misses file's: whatever sends the keploy folder away (a debug
+// bundle) leaves that one out, and the receipts' go as the receipts do.
+func TestAKillMidWriteLeavesATemporaryFileHoldsCallsWholeNames(t *testing.T) {
+	root := t.TempDir()
+	gitRepo(t, root)
+	keployDir := filepath.Join(root, "keploy")
+	dir := filepath.Join(keployDir, "set")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	left := map[string][]byte{}
+	var order []string
+	tempWritten = func(path string) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("read the temporary file %s: %v", path, err)
+		}
+		left[path] = b
+		order = append(order, path)
+	}
+	t.Cleanup(func() { tempWritten = func(string) {} })
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /v1/reset/t0k3n", PathTag: "#000000000001"}
+	if file := writeMissesFile(zap.NewNop(), keployDir, "set", []models.UnmatchedCall{miss}); file == "" {
+		t.Fatal("the misses file was not written")
+	}
+	writeTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "set", Tests: []TestReceipt{{Name: "TestReset"}}})
+	writeReceipt(zap.NewNop(), keployDir, Receipt{Set: "set", Command: "keploy mock replay"})
+	tempWritten = func(string) {}
+	if len(order) != 3 {
+		t.Fatalf("the misses file's, the tests receipt's and the receipt's writes went through %d temporary files %q, want three", len(order), order)
+	}
+	whole := 0
+	for _, path := range order {
+		// What a kill leaves: the temporary file, beside the last one written.
+		if err := os.WriteFile(path, left[path], 0o644); err != nil {
+			t.Fatal(err)
+		}
+		name := filepath.Base(path)
+		if filepath.Dir(path) != dir {
+			t.Errorf("the temporary file %s is not in the set's folder %s", path, dir)
+		}
+		holds := strings.Contains(string(left[path]), "/v1/reset/t0k3n")
+		if holds {
+			whole++
+		}
+		if got := HoldsCallsWhole(name); got != holds {
+			t.Errorf("HoldsCallsWhole(%q) = %v for a temporary file a kill leaves, but it holds the call whole: %v", name, got, holds)
+		}
+		if ignored, known := utils.GitIgnores(dir, name); !known || !ignored {
+			t.Errorf("git ignores %s: %v (git could say: %v), want it ignored", path, ignored, known)
+		}
+	}
+	if whole != 1 {
+		t.Fatalf("%d temporary files hold the call whole, want the misses file's alone", whole)
 	}
 }
