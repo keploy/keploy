@@ -44,6 +44,11 @@ import (
 // HalfCloseGrace (the relay stops at the client's FIN) it is not waited
 // for.
 //
+// On macOS the reset can be what the client's forwarder reads instead of the
+// FIN that came before it (client_took_darwin.go): the relay reads that FIN
+// as the client's end, as on Linux, and hands the reset on as it ends, as the
+// one the socket held.
+//
 // Only a client connection that is a TCP socket on Linux or macOS can be asked
 // (clientSocketOf). Elsewhere only a failed write's error is handed on.
 
@@ -53,6 +58,22 @@ import (
 type clientErrorSocket interface {
 	clientSocket
 	pendingError() error
+}
+
+// resetAfterFINSocket is a clientSocket that can say whether a reset its read
+// returned came after the client's FIN (macOS's).
+type resetAfterFINSocket interface {
+	clientSocket
+	finBeforeReset() bool
+}
+
+// clientFINBeforeReset reports whether the reset the client's forwarder read
+// came after the client's FIN, which it then reads as the client's end; false
+// where the socket cannot say (Linux returns the FIN first, so its sockets
+// are never asked).
+func (r *Relay) clientFINBeforeReset() bool {
+	s, ok := r.client.(resetAfterFINSocket)
+	return ok && s.finBeforeReset()
 }
 
 // noteClientWriteFailed keeps err, the error a write to the client failed with
@@ -74,6 +95,11 @@ func (r *Relay) clientEnd(ctx context.Context) {
 		return
 	}
 	if p := r.clientWriteErr.Load(); p != nil {
+		r.cfg.ClientEndError(*p)
+		return
+	}
+	if p := r.clientResetRead.Load(); p != nil {
+		// The read took the reset off the socket: it holds none now.
 		r.cfg.ClientEndError(*p)
 		return
 	}

@@ -400,7 +400,7 @@ func TestTheClientsSocketSaysWhatTheClientTook(t *testing.T) {
 	}
 	t.Run("half-closed", func(t *testing.T) {
 		app, proxyClient := loopbackPair(t)
-		s := clientSocketOf(proxyClient)
+		s := clientSocketOf(proxyClient, zap.NewNop())
 		if _, err := proxyClient.Write(make([]byte, 100)); err != nil {
 			t.Fatal(err)
 		}
@@ -435,7 +435,7 @@ func TestTheClientsSocketSaysWhatTheClientTook(t *testing.T) {
 	})
 	t.Run("closed", func(t *testing.T) {
 		app, proxyClient := loopbackPair(t)
-		s := clientSocketOf(proxyClient)
+		s := clientSocketOf(proxyClient, zap.NewNop())
 		if err := app.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -842,7 +842,7 @@ func writtenTo(t *testing.T, c net.Conn) uint64 {
 func TestWrittenCountsWhatTheClientHasNotAcknowledgedYet(t *testing.T) {
 	t.Parallel()
 	_, proxyClient := dialSmallWindow(t)
-	s := clientSocketOf(proxyClient)
+	s := clientSocketOf(proxyClient, zap.NewNop())
 	const n = 128 << 10
 	if _, err := proxyClient.Write(make([]byte, n)); err != nil {
 		t.Fatal(err)

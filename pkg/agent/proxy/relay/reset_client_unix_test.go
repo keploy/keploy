@@ -37,6 +37,37 @@ func tcpPair(t *testing.T) (app, proxy net.Conn) {
 	return app, proxy
 }
 
+// smallWindowPair is tcpPair with the app's receive buffer set to 4096 bytes
+// before it connects, so the window it offers stays that small: macOS sizes
+// the window scale at the SYN and tunes a receive buffer set later.
+func smallWindowPair(t *testing.T) (app, proxy net.Conn) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	got := make(chan net.Conn, 1)
+	go func() { c, _ := l.Accept(); got <- c }()
+	d := net.Dialer{Control: func(_, _ string, rc syscall.RawConn) error {
+		var serr error
+		if err := rc.Control(func(fd uintptr) {
+			serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4096)
+		}); err != nil {
+			return err
+		}
+		return serr
+	}}
+	if app, err = d.Dial("tcp", l.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	if proxy = <-got; proxy == nil {
+		t.Fatal("accept failed")
+	}
+	t.Cleanup(func() { _ = app.Close(); _ = proxy.Close() })
+	return app, proxy
+}
+
 func TestResetClientOnCloseResetsWhenTheClientHoldsEveryByte(t *testing.T) {
 	app, proxy := tcpPair(t)
 	if _, err := proxy.Write([]byte("head")); err != nil {
@@ -94,8 +125,7 @@ func TestResetClientOnCloseResetsUnderATLSLayerWithNoCloseNotify(t *testing.T) {
 }
 
 func TestResetClientOnCloseKeepsAFINWhileBytesAreOutstanding(t *testing.T) {
-	app, proxy := tcpPair(t)
-	_ = app.(*net.TCPConn).SetReadBuffer(4096)
+	app, proxy := smallWindowPair(t)
 	_ = proxy.(*net.TCPConn).SetWriteBuffer(4096)
 	// Fill the way to the client, which reads nothing yet: the deadline
 	// only stops the write once nothing more fits.
@@ -132,8 +162,7 @@ func TestResetClientOnCloseNotATCPSocket(t *testing.T) {
 // The recording's stop ends the wait for the client's acknowledgement at
 // once, however long the grace: the close stays a FIN.
 func TestResetClientOnCloseStopsWaitingAtTheRecordingsStop(t *testing.T) {
-	app, proxy := tcpPair(t)
-	_ = app.(*net.TCPConn).SetReadBuffer(4096)
+	_, proxy := smallWindowPair(t)
 	_ = proxy.(*net.TCPConn).SetWriteBuffer(4096)
 	chunk := make([]byte, 64<<10)
 	_ = proxy.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))

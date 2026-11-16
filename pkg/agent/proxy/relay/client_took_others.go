@@ -2,7 +2,11 @@
 
 package relay
 
-import "net"
+import (
+	"net"
+
+	"go.uber.org/zap"
+)
 
 // canAskClientSockets: off Linux and macOS (Windows, where keploy's
 // enterprise build records natively) no client socket is asked: every
@@ -10,4 +14,4 @@ import "net"
 // after the client's FIN carries fakeconn.Chunk.AfterClientClose.
 const canAskClientSockets = false
 
-func clientSocketOf(net.Conn) clientSocket { return nil }
+func clientSocketOf(net.Conn, *zap.Logger) clientSocket { return nil }

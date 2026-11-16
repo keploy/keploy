@@ -164,11 +164,16 @@ func TestXNUReadsTCPInfoAtItsOffsets(t *testing.T) {
 	le.PutUint32(b[tcpiSndNxt:], 0xfffffff0)
 	le.PutUint32(b[tcpiSndSbbytes:], 1234)
 	le.PutUint64(b[tcpiTxunacked:], 77)
+	le.PutUint32(b[tcpiRcvNxt:], 0xffffff00)
+	le.PutUint64(b[tcpiRxbytes:], 5000)
+	le.PutUint64(b[tcpiRxdupbytes:], 40)
+	le.PutUint64(b[tcpiRxooobytes:], 3)
 	var info darwinTCPInfo
 	if !readTCPInfo(b, &info) {
 		t.Fatal("readTCPInfo = false for an answer as long as a look needs")
 	}
-	want := darwinTCPInfo{state: tcpsLastAck, lossRecovery: true, sndNxt: 0xfffffff0, sbbytes: 1234, txunacked: 77}
+	want := darwinTCPInfo{state: tcpsLastAck, lossRecovery: true, sndNxt: 0xfffffff0, sbbytes: 1234, txunacked: 77,
+		received: received{rcvNxt: 0xffffff00, rxBytes: 5000, dup: 40, ooo: 3}}
 	if info != want {
 		t.Fatalf("readTCPInfo read %+v, want %+v", info, want)
 	}
@@ -182,8 +187,8 @@ func TestXNUReadsTCPInfoAtItsOffsets(t *testing.T) {
 	}
 }
 
-// A file that is no TCP socket answers no TCP_INFO: tcpInfo says nothing,
-// whatever its buffer holds.
+// A file that is no TCP socket answers no TCP_INFO: the call fails, and
+// tcpInfo says nothing, whatever its buffer holds.
 func TestXNUAFileThatIsNoTCPSocketAnswersNoTCPInfo(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -191,8 +196,12 @@ func TestXNUAFileThatIsNoTCPSocketAnswersNoTCPInfo(t *testing.T) {
 	}
 	defer func() { _ = r.Close(); _ = w.Close() }()
 	var buf [tcpInfoBuf]byte
+	if _, err := getTCPInfo(r.Fd(), &buf); err == nil {
+		t.Fatal("getTCPInfo answered for a pipe; want the call's error")
+	}
+	s := &tcpClientSocket{getInfo: getTCPInfo, fallback: &infoFallback{}}
 	var info darwinTCPInfo
-	if tcpInfo(r.Fd(), &buf, &info) {
+	if s.tcpInfo(r.Fd(), &buf, &info) {
 		t.Fatalf("tcpInfo = true, read %+v, for a pipe; want false", info)
 	}
 }

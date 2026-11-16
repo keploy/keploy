@@ -567,7 +567,7 @@ func TestClientSocketOfFindsTheSocketUnderTheProxysWrappers(t *testing.T) {
 	inner := &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}
 	tlsConn := tls.Server(inner, &tls.Config{})
 	wrapped.Conn, wrapped.Reader = tlsConn, tlsConn
-	s := clientSocketOf(wrapped)
+	s := clientSocketOf(wrapped, zap.NewNop())
 	if s == nil {
 		t.Fatal("no socket found under util.Conn > tls.Conn > util.Conn > TCPConn")
 	}
@@ -576,7 +576,7 @@ func TestClientSocketOfFindsTheSocketUnderTheProxysWrappers(t *testing.T) {
 	}
 	pipeA, pipeB := net.Pipe()
 	defer func() { _ = pipeA.Close(); _ = pipeB.Close() }()
-	if clientSocketOf(pipeA) != nil {
+	if clientSocketOf(pipeA, zap.NewNop()) != nil {
 		t.Fatal("a pipe is asked as a TCP socket")
 	}
 	_ = proxyClient.Close()

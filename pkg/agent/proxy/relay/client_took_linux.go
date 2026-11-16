@@ -6,6 +6,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
 
@@ -78,8 +79,9 @@ func unsentOf(fd uintptr, n *int32) bool {
 }
 
 // newTCPClientSocket is the client socket rc (clientSocketOf), with its
-// questions.
-func newTCPClientSocket(rc syscall.RawConn) *tcpClientSocket {
+// questions. Linux's TCP_INFO and SIOCOUTQ have no answer that a look must
+// say it cannot read: nothing is logged.
+func newTCPClientSocket(rc syscall.RawConn, _ *zap.Logger) *tcpClientSocket {
 	s := &tcpClientSocket{rc: rc, askInfo: tcpInfo, askUnsent: unsentOf}
 	s.ask, s.count = s.lookAt, s.countAt
 	return s
