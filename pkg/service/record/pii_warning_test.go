@@ -228,3 +228,41 @@ func TestPIIWarningRedactsPIIInFieldPaths(t *testing.T) {
 		t.Errorf("warning %q does not name the redacted path", got[0])
 	}
 }
+
+func TestPIIWarningScansGRPCCalls(t *testing.T) {
+	tc := &models.TestCase{Kind: models.GRPC_EXPORT}
+	tc.GrpcReq.Headers = models.GrpcHeaders{
+		PseudoHeaders:   map[string]string{":path": "/users.Users/Create"},
+		OrdinaryHeaders: map[string]string{"x-user": "user@example.com"},
+	}
+	tc.GrpcReq.SetMessages([]models.GrpcLengthPrefixedMessage{{DecodedData: `1: "123-45-6789"`}})
+	tc.GrpcResp.SetMessages([]models.GrpcLengthPrefixedMessage{
+		{DecodedData: `1: "ok"`},
+		{DecodedData: `2: "other@example.com"`},
+	})
+	tc.GrpcResp.Trailers = models.GrpcHeaders{OrdinaryHeaders: map[string]string{"x-contact": "trailer@example.com"}}
+
+	got := piiWarnings(t, tc)
+	if len(got) != 1 {
+		t.Fatalf("got %d warnings, want 1: %q", len(got), got)
+	}
+	for _, want := range []string{
+		"gRPC /users.Users/Create",
+		"request.header.x-user (email)",
+		"request.message (ssn)",
+		"response.message[1] (email)",
+		"response.trailer.x-contact (email)",
+	} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("warning %q does not say %q", got[0], want)
+		}
+	}
+}
+
+func TestPIIWarningQuietForACleanGRPCCall(t *testing.T) {
+	tc := &models.TestCase{Kind: models.GRPC_EXPORT}
+	tc.GrpcReq.Headers.PseudoHeaders = map[string]string{":path": "/grpc.health.v1.Health/Check"}
+	if got := piiWarnings(t, tc); len(got) != 0 {
+		t.Fatalf("got warnings for a clean gRPC call: %q", got)
+	}
+}

@@ -3753,6 +3753,13 @@ func piiSafeLabel(testCase *models.TestCase) string {
 	if name := strings.TrimSpace(testCase.Name); name != "" && !holdsPII(name) {
 		return name
 	}
+	if testCase.Kind == models.GRPC_EXPORT {
+		rpc := strings.TrimSpace(testCase.GrpcReq.Headers.PseudoHeaders[":path"])
+		if rpc != "" && !holdsPII(rpc) {
+			return "gRPC " + rpc
+		}
+		return "gRPC call (method withheld)"
+	}
 	method := strings.TrimSpace(string(testCase.HTTPReq.Method))
 	target, _, _ := strings.Cut(testCase.HTTPReq.URL, "?")
 	if label := strings.TrimSpace(method + " " + target); label != "" && !holdsPII(label) {
@@ -3828,6 +3835,10 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string
 	}
 
 	label := piiSafeLabel(testCase)
+	if testCase.Kind == models.GRPC_EXPORT {
+		r.reportPIIDetections(grpcPIIDetections(testCase), label, testSetID)
+		return
+	}
 
 	detections := make([]pii.Detection, 0)
 	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.Header, "request.header")...)
@@ -3878,6 +3889,40 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string
 	}
 	detections = append(detections, pii.DetectBody(testCase.HTTPResp.Body, "response.body")...)
 
+	r.reportPIIDetections(detections, label, testSetID)
+}
+
+// grpcPIIDetections scans a gRPC test case, which capture keeps in GrpcReq
+// and GrpcResp and leaves HTTPReq and HTTPResp empty: the request and
+// response metadata, the trailers and every decoded message of a stream.
+func grpcPIIDetections(testCase *models.TestCase) []pii.Detection {
+	detections := make([]pii.Detection, 0)
+	detections = append(detections, pii.DetectHeaders(testCase.GrpcReq.Headers.PseudoHeaders, "request.header")...)
+	detections = append(detections, pii.DetectHeaders(testCase.GrpcReq.Headers.OrdinaryHeaders, "request.header")...)
+	detections = append(detections, grpcMessageDetections(testCase.GrpcReq.AllMessages(), "request.message")...)
+	detections = append(detections, pii.DetectHeaders(testCase.GrpcResp.Headers.PseudoHeaders, "response.header")...)
+	detections = append(detections, pii.DetectHeaders(testCase.GrpcResp.Headers.OrdinaryHeaders, "response.header")...)
+	detections = append(detections, grpcMessageDetections(testCase.GrpcResp.AllMessages(), "response.message")...)
+	detections = append(detections, pii.DetectHeaders(testCase.GrpcResp.Trailers.PseudoHeaders, "response.trailer")...)
+	detections = append(detections, pii.DetectHeaders(testCase.GrpcResp.Trailers.OrdinaryHeaders, "response.trailer")...)
+	return detections
+}
+
+// grpcMessageDetections scans each message of one direction. A unary call's
+// one message is named source; a stream's are numbered source[i].
+func grpcMessageDetections(messages []models.GrpcLengthPrefixedMessage, source string) []pii.Detection {
+	detections := make([]pii.Detection, 0)
+	for i, message := range messages {
+		name := source
+		if len(messages) > 1 {
+			name = fmt.Sprintf("%s[%d]", source, i)
+		}
+		detections = append(detections, pii.DetectBody(message.DecodedData, name)...)
+	}
+	return detections
+}
+
+func (r *Recorder) reportPIIDetections(detections []pii.Detection, label, testSetID string) {
 	if len(detections) > 0 {
 		fields := make([]string, 0, len(detections))
 		for _, d := range detections {
