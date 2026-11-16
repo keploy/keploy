@@ -2937,6 +2937,64 @@ func TestStoredMocksHandTheProxyWhereTheAppsClocksRunBegan(t *testing.T) {
 	require.Nil(t, p.run, "the switch off: no run")
 }
 
+// shownClockHook is runClockHook that also tells what the app's clock
+// showed between two real instants (AppClockShownReader).
+type shownClockHook struct {
+	runClockHook
+}
+
+func (h *shownClockHook) AppClockShown(from, to time.Time) ([]learn.Span, bool) {
+	return []learn.Span{{From: from.Add(h.offset), To: to.Add(h.offset)}}, true
+}
+
+// shownProxy is a wireProxy that takes what the app's clock showed
+// (coreAgent.AppClockShownSetter).
+type shownProxy struct {
+	*wireProxy
+	set   bool
+	shown func(from, to time.Time) ([]learn.Span, bool)
+}
+
+func (p *shownProxy) SetAppClockShown(f func(from, to time.Time) ([]learn.Span, bool)) {
+	p.set, p.shown = true, f
+}
+
+// Once the mocks are stored, the proxy is handed what the app's clock
+// showed, from hooks that report the app's clock and tell it; hooks that do
+// not tell it, or report no app clock, hand it none, replacing any handed
+// before, and so do this build's own hooks, whose real clock never moved.
+func TestStoredMocksHandTheProxyWhatTheAppsClockShowed(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+
+	ActiveHooks = &shownClockHook{runClockHook{clockHook: clockHook{offset: time.Second}, began: at}}
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &shownProxy{wireProxy: wp}
+	a.Proxy = p
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, p.shown, "the hooks' shown clock")
+	got, ok := p.shown(at, at.Add(time.Minute))
+	require.True(t, ok)
+	require.Equal(t, []learn.Span{{From: at.Add(time.Second), To: at.Add(time.Minute + time.Second)}}, got)
+
+	ActiveHooks = &runClockHook{clockHook: clockHook{offset: time.Second}, began: at}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.True(t, p.set)
+	require.Nil(t, p.shown, "hooks that tell no shown clock: none, replacing the earlier")
+
+	p.shown = (&shownClockHook{}).AppClockShown
+	ActiveHooks = &otherHooks{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.shown, "hooks that report no app clock: none")
+
+	p.shown = (&shownClockHook{}).AppClockShown
+	ActiveHooks = &AgentHook{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.shown, "the real clock never moved: none")
+}
+
 // recBeginProxy is a wireProxy that takes a test's recorded begin
 // (coreAgent.RecordedBeginTaker), and says in which order it was given it and
 // opened the test's capture window.
