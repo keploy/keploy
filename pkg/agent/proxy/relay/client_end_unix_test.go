@@ -235,6 +235,61 @@ func TestAClosedClientWhoseFINAndResetAreBothInBeforeTheReadHasTheFINRead(t *tes
 	run.ended(t, "inflight", true)
 }
 
+// A half-closed client that took the answer (its stack acknowledged every
+// byte, unread) and then resets, all before the relay reads its FIN: Linux's
+// read returns the FIN and leaves the reset on the socket; macOS's returns the
+// reset and takes it off the socket, which holds nothing then that TCP_INFO
+// would say (every byte acknowledged): the relay keeps the reset its read
+// took, reads the FIN as the client's end, and hands that reset on as it ends.
+func TestAClientThatTookTheAnswerAndResetsBeforeTheReadHasTheResetItsReadTookHandedOn(t *testing.T) {
+	t.Parallel()
+	const answer = "the answer"
+	app, proxyClient := loopbackPair(t)
+	proxyServer, server := loopbackPair(t)
+	release := make(chan struct{})
+	c := &finInFlightConn{Conn: &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, release: release}
+	run := runClientEnd(t, c, proxyServer)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	if _, err := app.Write([]byte("req")); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(server, make([]byte, 3)); err != nil {
+		t.Fatalf("the destination did not read the request: %v", err)
+	}
+	awaitTCPState(t, proxyClient, stateCloseWait, "the client's FIN is in")
+	if _, err := server.Write([]byte(answer)); err != nil {
+		t.Fatal(err)
+	}
+	awaitUnread(t, app)
+	for limit := time.Now().Add(5 * time.Second); bytesAcked(t, proxyClient) < uint64(len(answer)); {
+		if time.Now().After(limit) {
+			t.Fatal("the client's stack did not acknowledge the answer in 5s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := app.(*net.TCPConn).SetLinger(0); err != nil {
+		t.Fatal(err)
+	}
+	_ = app.Close()
+	awaitTCPState(t, proxyClient, stateClosed, "the client's reset is in")
+	close(release)
+	if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
+		t.Fatalf("the destination read %d bytes, %v, want the forwarded FIN", len(rest), err)
+	}
+	_ = server.Close()
+	run.ended(t, answer, true)
+}
+
 // A client that resets with no FIN before (it closed with the answer unread)
 // is read as a reset, also when the relay reads its end only once the reset
 // is in, after a look found the connection open.
