@@ -559,9 +559,11 @@ func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, opts models.Outgo
 	// recorded consumed and nobody drained is the previous set's, which the
 	// set's staging drops (models.OutgoingOptions.StartsTestSet).
 	opts.StartsTestSet = true
-	// keploy test reads each set's end under the proven switch
-	// (unclaimedCalls): the agent's parsers may hold a call for a later
-	// test of the set only then (models.OutgoingOptions.ReadsSetEnds).
+	// keploy test judges what each set's end read files only under the
+	// proven switch (unclaimedCalls; with it off the read names what it
+	// returns and fails nothing, readAfterLastTest): the agent's parsers may
+	// hold a call for a later test of the set only then
+	// (models.OutgoingOptions.ReadsSetEnds).
 	opts.ReadsSetEnds = provenswitch.On()
 	if err := r.instrumentation.MockOutgoing(ctx, opts); err != nil {
 		return err
@@ -6697,6 +6699,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			carryAttr.mapDrained(actualTestMockMappings, late)
 		}
 	}
+	// With the proven switch off nothing read either what the application
+	// missed after the set's last test: read now, for the set's report
+	// alone (readAfterLastTest), since none of it fails the set; after the
+	// read above, at which the agent writes the answers held for the set's
+	// end, so this read takes the calls they make.
+	// Only once a test of it
+	// opened its window, as under the switch: before that, what the agent
+	// holds is the application's start-up, which no test's read took.
+	if !provenswitch.On() && captureOpened {
+		readCtx, cancelRead := context.WithTimeout(ctx, setEndDrainBudget)
+		r.readAfterLastTest(readCtx, testSetID)
+		cancelRead()
+	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
 		script := utils.NewAppCommand(conf.PostScript)
@@ -10160,8 +10175,10 @@ func (r *Replayer) openTestErrorCapture(ctx context.Context, plan *exactPlan, op
 // beginTestErrorCapture opens a per-test mock-error capture window on the agent
 // (via an optional capability — older agents / non-agent instrumentations skip
 // it and fall back to the legacy global queue) so a mock miss during this test
-// attributes to THIS test instead of whichever test drains GetMockErrors next,
-// discarding what was missed with no window open. It returns the agent's
+// attributes to THIS test instead of whichever test drains GetMockErrors next.
+// What was missed with no window open since the set's mocks were staged (the
+// application's start-up) the window carries as the set's, no test's
+// (models.UnmatchedCall.BeforeSet). It returns the agent's
 // error; openTestErrorCapture decides what a failure means.
 func (r *Replayer) beginTestErrorCapture(ctx context.Context) error {
 	if b, ok := r.instrumentation.(interface {

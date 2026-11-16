@@ -55,8 +55,10 @@ func (r *Replayer) unclaimedCalls(ctx context.Context) (calls, answered []models
 	// (the read was cut short) hands it over here: still the set's, as are
 	// the held calls the read filed (setsCall).
 	calls, answered = splitAnswers(r.setCalls.take(read))
-	// Those that count against no test (a DNS lookup, a background call)
-	// fail nothing: the set's report names them (TestReport.OutsideTestMisses).
+	// Kept for the set's report, which names those that fail nothing
+	// (TestReport.OutsideTestMisses): under the switch, those that count
+	// against no test (a DNS lookup, a background call); with it off
+	// (readAfterLastTest), every one.
 	r.setCalls.keepAfter(calls)
 	return dataPlaneCalls(calls), answered, err
 }

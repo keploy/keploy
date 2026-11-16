@@ -18,10 +18,10 @@ import (
 )
 
 // The set's outside-test misses (TestReport.OutsideTestMisses): with the
-// proven switch off each call made before the set's first test, which fails
-// nothing; with it on those that count against no test, since failing takes
-// the others, and the set's end read's that count against none, last. An
-// answered call is never one.
+// proven switch off each call made before the set's first test, and each its
+// end read returned, last: none fails anything; with it on, of both, those
+// that count against no test, since failing and the end read take the
+// others. An answered call is never one.
 func TestTheSetsOutsideTestMissesFailNothingInEitherMode(t *testing.T) {
 	dns := models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A db.example.", BeforeSet: true}
 	call := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /config", BeforeSet: true}
@@ -44,7 +44,7 @@ func TestTheSetsOutsideTestMissesFailNothingInEitherMode(t *testing.T) {
 		}
 		return out
 	}
-	if got, want := names(s.outside(false)), "A db.example.;GET /config;A late.example.;GET /tick;"; got != want {
+	if got, want := names(s.outside(false)), "A db.example.;GET /config;A late.example.;GET /late;GET /tick;"; got != want {
 		t.Errorf("switch off: outside = %s, want %s", got, want)
 	}
 	if got, want := names(s.outside(true)), "A db.example.;A late.example.;GET /tick;"; got != want {

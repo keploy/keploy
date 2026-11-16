@@ -14,7 +14,9 @@ import (
 
 // P101: a call the application makes after its set's last test that no mock
 // answered is a pool miss no later test takes. Under the proven switch it
-// fails the set, named; with the switch off the run is what it was.
+// fails the set, named; with the switch off the set's verdict is what it was,
+// and its report names the call among those that fail nothing
+// (TestReport.OutsideTestMisses).
 
 // counted counts the agent's GetMockErrors reads, and answers each as reads
 // does.
@@ -56,16 +58,22 @@ func TestRunTestSet_ACallAfterTheLastTestThatNoMockAnsweredFailsTheSet(t *testin
 					t.Fatalf("test %s is %s; the call after the last test is no test's", r.TestCaseID, r.Status)
 				}
 			}
+			if reads.Load() != 3 {
+				t.Fatalf("%d reads of the agent's misses; want one per test and one after the last", reads.Load())
+			}
 			if !on {
-				// Switch off: as before, no read after the last test, the set
-				// PASSED.
-				if status != models.TestSetStatusPassed || len(rep.UnclaimedCalls) != 0 || reads.Load() != 2 {
-					t.Fatalf("switch off: status %s, unclaimed %v, %d reads; want PASSED, none, 2 (one per test) as before", status, rep.UnclaimedCalls, reads.Load())
+				// Switch off: the set PASSED, as before, and its report
+				// names the publish as made after its last test.
+				if status != models.TestSetStatusPassed || len(rep.UnclaimedCalls) != 0 {
+					t.Fatalf("switch off: status %s, unclaimed %v; want PASSED and none, as before", status, rep.UnclaimedCalls)
+				}
+				if got := rep.OutsideTestMisses; len(got) != 1 || got[0].Call != "POST /{}" || got[0].When != models.OutsideAfterLastTest {
+					t.Fatalf("switch off: the report names %+v outside every test; want the publish, made after the last test", got)
 				}
 				return
 			}
-			if reads.Load() != 3 {
-				t.Fatalf("%d reads of the agent's misses; want one per test and one after the last", reads.Load())
+			if got := rep.OutsideTestMisses; len(got) != 0 {
+				t.Fatalf("the report names %+v among the calls that fail nothing; the publish fails the set", got)
 			}
 			if status != models.TestSetStatusFailed || rep.Status != string(models.TestSetStatusFailed) {
 				t.Fatalf("status %s (report %s); a call after the last test that no mock answered must fail the set", status, rep.Status)

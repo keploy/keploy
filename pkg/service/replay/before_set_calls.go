@@ -37,9 +37,8 @@ type setCalls struct {
 	mu    sync.Mutex
 	calls []models.UnmatchedCall
 	// after are the calls the set's end read returned, made after its last
-	// test, that no mock answered and that count against no test (proven
-	// switch: a DNS lookup, a background call), kept for its report
-	// (outside).
+	// test, that no mock answered, kept for its report (outside), with the
+	// proven switch on or off.
 	after []models.UnmatchedCall
 }
 
@@ -55,38 +54,37 @@ func (s *setCalls) reset() {
 	s.mu.Unlock()
 }
 
-// keepAfter keeps, of calls, the misses the set's end read returned as made
-// after its last test, those that count against no test
-// (models.UnmatchedCall.CountsAgainstTest): they fail nothing, and the set's
-// report names them (outside).
+// keepAfter keeps calls, those the set's end read returned as made after its
+// last test, for the set's report, which names those that are misses and
+// fail nothing (outside).
 func (s *setCalls) keepAfter(calls []models.UnmatchedCall) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, c := range calls {
-		if c.Answer == "" && !c.CountsAgainstTest() {
-			s.after = append(s.after, c)
-		}
-	}
+	s.after = append(s.after, calls...)
 }
 
 // outside is the set's calls that no mock answered and that fail nothing
 // (TestReport.OutsideTestMisses), in the order they were read, those made
-// after its last test last. With the proven switch off (proven false) none
-// fails the set, so each is one: the set's end reads none of them, and the
-// set's first test's read handed over those made as its application started
-// (models.UnmatchedCall.BeforeSet). With it on, those that count against no
-// test (failing takes the others), and those keepAfter kept.
+// after its last test (keepAfter) last. With the proven switch off (proven
+// false) none fails the set, so each is one: those the set's first test's
+// read handed over (made as its application started,
+// models.UnmatchedCall.BeforeSet), and those its end read returned. With it
+// on, only those that count against no test (a DNS lookup, a background
+// call): failing and the set's end read (unclaimedCalls) fail the set with
+// the others.
 func (s *setCalls) outside(proven bool) []models.UnmatchedCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []models.UnmatchedCall
-	for _, c := range s.calls {
-		if c.Answer != "" || (proven && c.CountsAgainstTest()) {
-			continue
+	for _, read := range [][]models.UnmatchedCall{s.calls, s.after} {
+		for _, c := range read {
+			if c.Answer != "" || (proven && c.CountsAgainstTest()) {
+				continue
+			}
+			out = append(out, c)
 		}
-		out = append(out, c)
 	}
-	return append(out, s.after...)
+	return out
 }
 
 // take keeps the calls of read that are the set's (setsCall), and returns the

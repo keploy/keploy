@@ -56,8 +56,9 @@ type TestReport struct {
 	// OutsideTestMisses are the calls the set's application made outside
 	// every test that no mock answered and that fail nothing, each once
 	// with how many times it was made, and what to do about it: with the
-	// proven switch off, every call made as it started, before the set's
-	// first test; with it on, those that count against no test (a DNS
+	// proven switch off, every one, made as it started, before the set's
+	// first test, or after its last (no parser holds a call for a later
+	// test then); with it on, those that count against no test (a DNS
 	// lookup, a background call), made before its first test, after its
 	// last, or held for a later test's recording. A call outside every test
 	// is served, not required: the set's verdict is what it would be

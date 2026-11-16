@@ -30,24 +30,22 @@ type missWindow struct {
 	missLoss atomic.Pointer[string]
 	// pendingLost is set, under captureMu, when a miss made with no test's
 	// window open was dropped because pendingMockErrors was full. The next
-	// window decides whose loss it is: a set's first discards those misses
-	// (they are no test's), so it only says so, but under the proven switch,
-	// where they are the set's (beforeSetMiss) and its read is incomplete
-	// (missLoss); the next test's carries them, so its read is incomplete.
+	// window decides whose loss it is: a set's first carries those misses as
+	// the set's (beforeSetMiss), so its read is incomplete (missLoss); the
+	// next test's carries them, so its read is incomplete.
 	pendingLost bool
 	// pendingMockErrors retains mock-not-found errors that arrive while no test
 	// capture window is active (activeTestErrors is nil) — e.g. between tests,
 	// or when the replayer/agent predates the BeginTestErrorCapture wiring.
 	// ContinueTestErrorCapture carries them into the next test's window;
-	// BeginTestErrorCapture (a set's first test) discards and logs them, but
-	// under the proven switch, where it carries them as the set's
-	// (beforeSetMiss);
+	// BeginTestErrorCapture (a set's first test) carries them as the set's
+	// (beforeSetMiss), with the proven switch on or off;
 	// GetMockErrors returns them where no window is opened at all. Only
 	// mock-not-found errors are retained (background noise — OTel, health
 	// checks — is still discarded), and the buffer is bounded so it can't grow
 	// unboundedly.
 	pendingMockErrors testErrorAccumulator
-	// setStaged is, under the proven switch, the staging
+	// setStaged is the staging
 	// (MockManager.StagingEpoch) of the running test set's first on the
 	// manager this window's calls are marked on (the run's, or the test
 	// worker's own), which cut what was missed until then
@@ -58,7 +56,7 @@ type missWindow struct {
 	// view (markedInATest), or one its set's reads of this window would have
 	// taken (keptAsEarlierSet).
 	setStaged atomic.Uint64
-	// starts are, under the proven switch, the test sets' starts this
+	// starts are the test sets' starts this
 	// window's calls were marked against, oldest first (noteSetStart): where
 	// each set's mocks were staged on the manager its calls are marked on, and
 	// how many reads of this window had begun by then. Read and written under

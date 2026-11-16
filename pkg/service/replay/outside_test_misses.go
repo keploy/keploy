@@ -1,6 +1,8 @@
 package replay
 
 import (
+	"context"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/localfile"
@@ -9,20 +11,41 @@ import (
 )
 
 // A call a test set's application makes outside every test (as it starts,
-// before the set's first test) that no mock answers is answered by keploy
-// itself: a DNS lookup gets keploy's synthetic answer, a connection is
-// refused or closed. A call outside every test is served, not required: it
-// fails nothing that passed without it (with the proven switch on, a call
-// that counts against a test still fails the set: before_set_calls.go,
-// unclaimed_calls.go). It was named nowhere: the agent dropped those made
-// before the set's first test with the switch off, and a DNS lookup's with it
-// on, so a start-up lookup made only in a replay (a configuration that
+// before the set's first test, or after its last) that no mock answers is
+// answered by keploy itself: a DNS lookup gets keploy's synthetic answer, a
+// connection is refused or closed. A call outside every test is served, not
+// required: it fails nothing that passed without it (with the proven switch
+// on, a call that counts against a test still fails the set:
+// before_set_calls.go, unclaimed_calls.go). It was named nowhere: the agent
+// dropped those made before the set's first test with the switch off, and a
+// DNS lookup's with it on, and with the switch off no one read those made
+// after the set's last test (readAfterLastTest), so a start-up lookup made
+// only in a replay (a configuration that
 // differs from the recording's) could be neither seen nor corrected. The
 // set's report names each now (TestReport.OutsideTestMisses), by its shape,
 // the log says each with what to do, and the set's keploy test misses file
 // (localfile.TestMissesFile, local and git-ignored) names each whole. It is
 // keploy test's own: keploy mock replay's (localfile.MissesFile) is never
 // written or removed by a keploy test run.
+
+// readAfterLastTest is, with the proven switch off, the set's end read of the
+// calls its application made after its last test that no mock answered
+// (unclaimedCalls, which makes it under the switch, marked as the set's end
+// read): with the switch off none of them fails the set, so they are read
+// for its report alone, which names each (outsideTestMisses), as made after
+// its last test. They were read by no one: cut at the next set's staging,
+// said only by their shape in a line that keeps no record of them, or, after
+// the run's last set, never read. The application is still running then: a
+// call it makes after this read is cut at the next set's staging, as before.
+// A read that cannot vouch for every such call (one cut short by the run's
+// stop included) is said at WARN; the set's verdict is what it would be
+// without the read, whatever it returns.
+func (r *Replayer) readAfterLastTest(ctx context.Context, testSetID string) {
+	if _, _, err := r.unclaimedCalls(ctx); err != nil {
+		r.logger.Warn("keploy could not read every call the application made after the test-set's last test that no mock answered: its report may not name each (outsideTestMisses); they fail nothing, so the test-set's verdict stands",
+			zap.String("test-set", testSetID), zap.Error(err))
+	}
+}
 
 // outsideLogMax is how many outside-test misses a set's log names, one line
 // each; the report names every one.

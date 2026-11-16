@@ -6243,9 +6243,10 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // was cut at the staging, and logged (cutMissesAtSetStart); the app's startup,
 // made since, is the set's, and the test's read hands it over marked as the
 // set's (beforeSetMiss), charging no test. A miss made after
-// a set's last test is not left for the next set's first window: under the
-// proven switch the replayer reads it at the set's end (GetMockErrors) and it
-// fails the set. One keploy decides after that read, whose call was marked in
+// a set's last test is not left for the next set's first window: the
+// replayer reads it at the set's end (GetMockErrors), where under the proven
+// switch it fails the set, and with the switch off it fails nothing and the
+// set's report names it. One keploy decides after that read, whose call was marked in
 // a test's view, is that test's, and one marked with no test's view named
 // before that read is the set's: the next set's first read returns either as
 // an earlier set's call (earlierSetMiss), which fails keploy test's run, not
