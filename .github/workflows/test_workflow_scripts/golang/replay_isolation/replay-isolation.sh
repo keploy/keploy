@@ -70,6 +70,12 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
 
 set -uo pipefail
+# The proven switch is not among them (sudo_env.tests.sh): each keploy
+# command here names KEPLOY_PROVEN itself, as this script has it (unset stays
+# unset), so keploy runs in the mode the rows expect. Each replay's report
+# then says that mode (the proven rows, rows_mode).
+PROVEN_ENV=()
+[ -z "${KEPLOY_PROVEN+x}" ] || PROVEN_ENV=("KEPLOY_PROVEN=$KEPLOY_PROVEN")
 HERE=$(cd "$(dirname "$0")" && pwd)
 KEPLOY_SRC=${KEPLOY_SRC:-$(cd "$HERE/../../../../.." && pwd)}
 IMAGE=${KEPLOY_IMAGE:-ghcr.io/keploy/keploy:v3-dev}
@@ -385,6 +391,16 @@ rows_after_last() {
 	row "$p's report names the lookup made after the last test by its shape" "$([ -n "$tag" ] && [ -n "$shaped" ] && ! printf '%s' "$shaped" | grep -qF stop-probe && echo 1)" "$(printf '%s' "${shaped:-no outside-test miss with tag ${tag:-unknown}}" | cut -c1-160)"
 	row "$p's report names the lookup made after the last test nowhere whole" "$(cat "$W/out/$p"/report/*.yaml 2>/dev/null | grep -qF stop-probe || echo 1)" "stop-probe in $p's report"
 }
+# rows_mode PHASE: PHASE's keploy test ran in this script's mode: its report
+# says it ran under the proven switch (proven: true) only when KEPLOY_PROVEN=1,
+# so a sudo line that drops the switch fails a row instead of running the
+# rows in the other mode.
+rows_mode() {
+	local p=$1 said want=0
+	said=$(grep -hc '^proven: true$' "$W/out/$p"/report/*.yaml 2>/dev/null | head -1)
+	[ "${KEPLOY_PROVEN:-}" != 1 ] || want=1
+	row "$p ran in this lane's mode (KEPLOY_PROVEN=${KEPLOY_PROVEN:-unset})" "$([ "${said:-0}" = "$want" ] && echo 1)" "proven: true in $p's report ${said:-0} time(s), want $want"
+}
 
 # replay PHASE CMD...: one keploy test run in the current dir, its log and exit.
 replay() {
@@ -405,7 +421,7 @@ replay() {
 	local set
 	set=$(ls -d keploy/test-set-* 2>/dev/null | head -1)
 	[ -z "$set" ] || mock_misses "${set##*/}" | $S tee "$set/last-replay-misses.yaml" >/dev/null
-	"${RUNNER[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" test "$@" --apiTimeout 60 --disable-tele --disableANSI --generate-github-actions=false > "$W/out/$phase/keploy.log" 2>&1
+	"${RUNNER[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" test "$@" --apiTimeout 60 --disable-tele --disableANSI --generate-github-actions=false > "$W/out/$phase/keploy.log" 2>&1
 	echo $? > "$W/out/$phase/exit"
 	echo "$phase exit $(cat "$W/out/$phase/exit")"
 	waitfor 15 grep -q 'probe fork-tcp' "$W/out/$phase/keploy.log"
@@ -502,7 +518,7 @@ for mode in "${MODES[@]}"; do
 		bypass_yml
 		log "record-native"
 		sink_start record-native
-		"${SINKDNS[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" record -c "$W/egressprobe $RECARGS" --disable-tele --disableANSI > "$W/out/record-native/keploy.log" 2>&1 &
+		"${SINKDNS[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" record -c "$W/egressprobe $RECARGS" --disable-tele --disableANSI > "$W/out/record-native/keploy.log" 2>&1 &
 		KP=$!
 		waitfor 180 curl -sf localhost:8080/health || echo "record app not up"
 		fire http://localhost:8080 "$W/out/record-native/keploy.log"
@@ -518,7 +534,7 @@ for mode in "${MODES[@]}"; do
 		# An entry keploy does not act on is refused before anything starts.
 		log "refuse-native"
 		mkdir -p "$W/out/refuse-native"
-		"${SINKDNS[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" test -c "$W/egressprobe $APPARGS" --allow-egress imds --disable-tele --disableANSI --generate-github-actions=false > "$W/out/refuse-native/keploy.log" 2>&1
+		"${SINKDNS[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" test -c "$W/egressprobe $APPARGS" --allow-egress imds --disable-tele --disableANSI --generate-github-actions=false > "$W/out/refuse-native/keploy.log" 2>&1
 		echo $? > "$W/out/refuse-native/exit"
 		cd "$W" || die cd
 		;;
@@ -540,7 +556,7 @@ for mode in "${MODES[@]}"; do
 		bypass_yml
 		log "record-docker"
 		sink_start record-docker
-		$S env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" record -c "$RECRUN" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-docker/keploy.log" 2>&1 &
+		$S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" record -c "$RECRUN" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-docker/keploy.log" 2>&1 &
 		KP=$!
 		waitfor 300 curl -sf localhost:8080/health || { echo "record app not up"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}'; }
 		docker_resolv record-docker riso-app
@@ -583,7 +599,7 @@ for mode in "${MODES[@]}"; do
 		bypass_yml
 		log "record-compose"
 		sink_start record-compose
-		$S env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" record -c "docker compose up" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose/keploy.log" 2>&1 &
+		$S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" record -c "docker compose up" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose/keploy.log" 2>&1 &
 		KP=$!
 		# A call before keploy's agent holds the published port is reset
 		# (record-bind-race), so the probe is fired once it does.
@@ -669,6 +685,7 @@ for mode in "${MODES[@]}"; do
 		# The start-up lookup, outside every test (rows_startup), and, under
 		# the proven switch, the one made after the last test (rows_after_last).
 		rows_startup replay-native
+		rows_mode replay-native
 		[ "${KEPLOY_PROVEN:-}" != 1 ] || rows_after_last replay-native
 		# A DNS miss is answered by keploy: native has no in-network resolver.
 		rows_zero replay-native tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp
@@ -696,6 +713,7 @@ for mode in "${MODES[@]}"; do
 		# The start-up lookup, outside every test (rows_startup), and, under
 		# the proven switch, the one made after the last test (rows_after_last).
 		rows_startup replay-docker
+		rows_mode replay-docker
 		[ "${KEPLOY_PROVEN:-}" != 1 ] || rows_after_last replay-docker
 		# keploy answers that name itself: 127.0.0.11 gets only the network's
 		# own names, so the name never reaches its upstream. Nor does any
@@ -729,6 +747,7 @@ for mode in "${MODES[@]}"; do
 		# The start-up lookup, outside every test (rows_startup), and, under
 		# the proven switch, the one made after the last test (rows_after_last).
 		rows_startup replay-compose
+		rows_mode replay-compose
 		[ "${KEPLOY_PROVEN:-}" != 1 ] || rows_after_last replay-compose
 		# keploy answers that name itself, so it never reaches 127.0.0.11's
 		# upstream, nor does any other name (dns-other).
