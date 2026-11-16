@@ -111,8 +111,8 @@ func (a *Agent) countsCaptureLosses(ctx context.Context) bool {
 // two sources may count one kind (the hooks' kernel_skipped and a downstream
 // build's, the proxy's capture_dropped and its ring's), and a mark is read
 // by kind (models.CaptureLosses.Since keeps one count per kind), so the
-// counts are added, which only grow as each does, the Whats joined, and the
-// first Err any of them said kept.
+// counts are added, which only grow as each does, the Whats joined (with the
+// hosts each names), and the first Err any of them said kept.
 func mergeKinds(l models.CaptureLosses) models.CaptureLosses {
 	at := make(map[models.CaptureLossKind]int, len(l))
 	var out models.CaptureLosses
@@ -127,11 +127,9 @@ func mergeKinds(l models.CaptureLosses) models.CaptureLosses {
 		if out[i].Err == 0 {
 			out[i].Err = c.Err
 		}
-		switch {
-		case out[i].What == "":
-			out[i].What = c.What
-		case c.What != "" && c.What != out[i].What:
-			out[i].What += "; " + c.What
+		// Each What with the hosts it names (CaptureLoss.Hosts).
+		if c.What != out[i].What {
+			out[i].JoinWhat(c)
 		}
 	}
 	return out

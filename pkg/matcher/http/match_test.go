@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/k0kubun/pp/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
@@ -790,13 +789,6 @@ func TestAssertionsUntieBody(t *testing.T) {
 // failure line from those that fail it.
 func TestMatchAssertionsHonourWithoutPassLine(t *testing.T) {
 	var out strings.Builder
-	saved := ppNew234
-	ppNew234 = func() *pp.PrettyPrinter {
-		p := pp.New()
-		p.SetOutput(&out)
-		return p
-	}
-	t.Cleanup(func() { ppNew234 = saved })
 	for _, asserted := range []int{500, 201} {
 		out.Reset()
 		tc := &models.TestCase{
@@ -804,7 +796,7 @@ func TestMatchAssertionsHonourWithoutPassLine(t *testing.T) {
 			HTTPResp:   models.HTTPResp{StatusCode: 200, Body: `{"ok":true}`},
 			Assertions: map[models.AssertionType]interface{}{models.StatusCode: asserted},
 		}
-		pass, _ := Match(tc, &models.HTTPResp{StatusCode: 500, Body: `{"ok":true}`}, nil, false, false, zap.NewNop(), true, WithoutPassLine())
+		pass, _ := Match(tc, &models.HTTPResp{StatusCode: 500, Body: `{"ok":true}`}, nil, false, false, zap.NewNop(), true, WithoutPassLine(), WithConsole(&out))
 		require.Equal(t, asserted == 500, pass, "the verdict is the assertions'")
 		require.NotContains(t, out.String(), "Testrun passed", "asserted %d", asserted)
 		if pass {
@@ -824,13 +816,6 @@ func TestMatchAssertionsHonourWithoutPassLine(t *testing.T) {
 // an assertion's failure included.
 func TestMatchConsoleSaysWhatTheAssertionsThatJudgeItSay(t *testing.T) {
 	var out strings.Builder
-	saved := ppNew234
-	ppNew234 = func() *pp.PrettyPrinter {
-		p := pp.New()
-		p.SetOutput(&out)
-		return p
-	}
-	t.Cleanup(func() { ppNew234 = saved })
 	for _, c := range []struct {
 		name     string
 		status   int
@@ -853,7 +838,7 @@ func TestMatchConsoleSaysWhatTheAssertionsThatJudgeItSay(t *testing.T) {
 				core, logs := observer.New(zap.ErrorLevel)
 				// The log lines go where the lines go, so their order shows.
 				console := zapcore.NewCore(zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig()), zapcore.AddSync(&out), zap.ErrorLevel)
-				pass, _ := Match(tc, actual(), nil, false, false, zap.New(zapcore.NewTee(core, console)), loud)
+				pass, _ := Match(tc, actual(), nil, false, false, zap.New(zapcore.NewTee(core, console)), loud, WithConsole(&out))
 				require.Equal(t, c.wantPass, pass, "the verdict is the assertions'")
 				printed := out.String()
 				if !loud {
@@ -948,13 +933,6 @@ func TestMatchJudgesASkippedBodyByItsAssertions(t *testing.T) {
 // Match says of them is what they found in the body as it came: an assertion
 // that body satisfies is not said to fail.
 func TestMatchSaysWhatTheAssertionsFoundInASkippedBody(t *testing.T) {
-	saved := ppNew234
-	ppNew234 = func() *pp.PrettyPrinter {
-		p := pp.New()
-		p.SetOutput(&strings.Builder{})
-		return p
-	}
-	t.Cleanup(func() { ppNew234 = saved })
 	tc := &models.TestCase{Name: "test-1", HTTPResp: models.HTTPResp{StatusCode: 200, BodySkipped: true, BodySize: 2 << 20}, Assertions: map[models.AssertionType]interface{}{
 		models.StatusCode:   201,
 		models.JsonContains: map[string]interface{}{"id": "abc"},
@@ -970,13 +948,6 @@ func TestMatchSaysWhatTheAssertionsFoundInASkippedBody(t *testing.T) {
 // emits its logs and the size is compared: never when compared quietly, nor
 // when assertions judge the answer in its place.
 func TestMatchSaysItComparesABodySizeOnlyWhenItDoes(t *testing.T) {
-	saved := ppNew234
-	ppNew234 = func() *pp.PrettyPrinter {
-		p := pp.New()
-		p.SetOutput(&strings.Builder{})
-		return p
-	}
-	t.Cleanup(func() { ppNew234 = saved })
 	for _, c := range []struct {
 		name       string
 		assertions map[models.AssertionType]interface{}

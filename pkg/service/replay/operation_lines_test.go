@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"io"
 	"strings"
 	"testing"
 
@@ -26,8 +27,8 @@ func TestTheMissLinesNameTheOperation(t *testing.T) {
 		"query GetAppLabels": "  Mock mismatch: [HTTP] POST /query {query GetAppLabels}  →  api:8080",
 		"":                   "  Mock mismatch: [HTTP] POST /query  →  api:8080",
 	} {
-		out := captureStdout(t, func() {
-			printMismatchReport(&models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "POST /query", Operation: op, Destination: "api:8080"})
+		out := printedTo(func(w io.Writer) {
+			printMismatchReport(w, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "POST /query", Operation: op, Destination: "api:8080"})
 		})
 		if first, _, _ := strings.Cut(out, "\n"); first != want {
 			t.Fatalf("heading %q; want %q", first, want)

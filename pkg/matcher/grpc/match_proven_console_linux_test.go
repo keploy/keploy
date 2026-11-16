@@ -16,12 +16,13 @@ import (
 
 // The console's failure diff for a protoscope reorder says what differs and
 // how to compare a map field as a map: the diff block the user reads, not a
-// log line. Captured at fd 1, where the diff printers write.
+// log line. Captured at fd 1, where the diff printers write on the console
+// keploy's CLI gives the matcher (os.Stdout, WithConsole).
 func TestMatch_ProvenSwitchPrintsTheProtoscopeReorderHint(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	tc, answer := protoscopeCase("1: {\"ord_A\"}\n1: {\"ord_B\"}")
 	console := consoleOf(t, func() {
-		_, _ = Match(tc, answer("1: {\"ord_B\"}\n1: {\"ord_A\"}"), map[string]map[string][]string{}, true, zap.NewNop(), true)
+		_, _ = Match(tc, answer("1: {\"ord_B\"}\n1: {\"ord_A\"}"), map[string]map[string][]string{}, true, zap.NewNop(), true, WithConsole(os.Stdout))
 	})
 	if !strings.Contains(console, "--proto-file") || !strings.Contains(console, "another order") {
 		t.Fatalf("the failure diff does not say the repeated field came back in another order, with the proto-files way out:\n%s", console)
@@ -45,11 +46,11 @@ func TestMatch_ProvenSwitchPrintsTheGrpcStatusDifference(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			tc := &models.TestCase{Name: "status", GrpcResp: *c.recorded}
 			t.Setenv(provenswitch.Env, "")
-			if off := consoleOf(t, func() { _, _ = Match(tc, c.live, nil, false, zap.NewNop(), true) }); strings.Contains(off, "grpc-status") {
+			if off := consoleOf(t, func() { _, _ = Match(tc, c.live, nil, false, zap.NewNop(), true, WithConsole(os.Stdout)) }); strings.Contains(off, "grpc-status") {
 				t.Fatalf("switch off: the diff changed:\n%s", off)
 			}
 			t.Setenv(provenswitch.Env, "1")
-			console := consoleOf(t, func() { _, _ = Match(tc, c.live, nil, false, zap.NewNop(), true) })
+			console := consoleOf(t, func() { _, _ = Match(tc, c.live, nil, false, zap.NewNop(), true, WithConsole(os.Stdout)) })
 			for _, want := range c.shown {
 				if !strings.Contains(console, want) {
 					t.Fatalf("KEPLOY_PROVEN=1: the failure diff does not show %q:\n%s", want, console)

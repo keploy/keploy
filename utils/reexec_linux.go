@@ -62,7 +62,7 @@ func ReexecWithSudo(logger *zap.Logger) error {
 	}
 
 	logger.Info("Re-executing with sudo for elevated privileges as Linux Docker/cloud replay path needs root-level eBPF privileges.")
-	logger.Debug("Re-exec command", zap.Strings("args", args))
+	logger.Debug("Re-exec command", zap.Strings("args", RedactArgv(args)))
 
 	// The run goes on in the process the exec starts, which creates a log of
 	// its own; this one's, a temp file, would be left with no run to remove

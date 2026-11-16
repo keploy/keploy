@@ -242,8 +242,10 @@ func (m *SyncMockManager) oldestUnclaimedLocked() int64 {
 // settlePool brings the pool m shares back within its budget, after a reaper
 // call of m's that may have taken it past: with the requests of the other
 // managers, which m's own lock could not take. Caller does not hold mu. One
-// atomic load while the pool is within its budget.
+// atomic load while the pool is within its budget. It first does what m's own
+// reaper call left for after its lock (settleLetGo).
 func (m *SyncMockManager) settlePool() {
+	m.settleLetGo()
 	if p := m.pool; p != nil && p.total.Load() > p.limit {
 		p.settle()
 	}
@@ -362,6 +364,7 @@ func (m *SyncMockManager) giveUpForPool(p *holdPool, at int64) (poolGiveUp, pool
 // lock of the pool's or of a manager's.
 func (g poolGiveUp) report(p *holdPool) {
 	m := g.w.m
+	m.settleLetGo()
 	m.reportGivenUp([]*Window{g.w}, LostToHoldBound)
 	if ce := m.dropLogger().Check(zap.DebugLevel, "diag/syncMock: the process's hold passed its budget: gave up the oldest request in flight of the apps holding more than their share"); ce != nil {
 		fields := append([]zap.Field{

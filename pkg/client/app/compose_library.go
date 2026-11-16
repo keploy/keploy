@@ -82,7 +82,7 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 
 	opts := composeUpSemantics(a.cmd)
 	a.logger.Info("Starting Application :",
-		zap.String("executing_cmd", a.cmd),
+		zap.String("executing_cmd", utils.RedactCommandLine(a.cmd)),
 		zap.String("composeProject", runner.ProjectName()),
 		zap.String("exitCodeFrom", opts.ExitCodeFrom),
 		zap.String("onExit", opts.OnExit.String()))
@@ -94,7 +94,7 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 	// service's full stop grace. That is precisely the teardown the shell-out
 	// path was written to avoid: the eBPF agent is slow to stop, and waiting on
 	// it overran utils.DrainErrGroup's 30s budget and failed otherwise-green
-	// runs with "teardown drain timed out".
+	// runs with "teardown drain made no progress".
 	//
 	// So keploy's own bounded teardown has to happen FIRST — short grace for the
 	// app's coverage flush, then a fast project-wide down — and only then is the

@@ -79,7 +79,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 		return CmdError{Type: Init, Err: err}
 	}
 
-	logger.Info("Starting Application (Windows):", zap.String("executing_cli", cmd.String()))
+	logger.Info("Starting Application (Windows):", zap.String("executing_cli", RedactCmdArgs(cmd.Args)))
 
 	// Start the command. On a native run this goes through the registered
 	// starter, which creates the process suspended, loads the interception shim

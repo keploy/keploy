@@ -2,7 +2,8 @@
 # Checks of integrations-tests.yml and of release.yml's gate on it: which runs
 # the job runs on, that a run with no key to keploy/integrations fails, that
 # nothing lets the job pass without running the tests (continue-on-error, an
-# if: or a changed command on the steps that matter), which runs a new push
+# if: or a changed command on the steps that matter, or a step that runs go
+# before go and its module cache are set up), which runs a new push
 # cancels, which runs save the cache, that release.yml's publishing jobs wait
 # for the job and do not run after it failed, and that setup-private-parsers'
 # build lanes read the PR body from the event. Needs bash and a POSIX awk. Run
@@ -522,6 +523,7 @@ s_tests="Test integrations-tests.sh"
 s_wf="Check this workflow and release.yml's gate on it"
 s_ref="Pick the keploy/integrations ref"
 s_run="Run keploy/integrations' tests against this keploy tree"
+s_row="Run keploy's request-time row over the integrations parsers"
 scripts=keploy/.github/workflows/test_workflow_scripts
 # need_step VAR NAME RUN KEY...: sets VAR to the index of the step NAME, whose
 # run: must be exactly RUN and whose keys only name, run and the KEYs; to ""
@@ -548,21 +550,42 @@ need_step i_tests "$s_tests" "bash $scripts/integrations-tests.tests.sh"
 need_step i_wf "$s_wf" "bash $scripts/integrations-tests.workflows.tests.sh"
 need_step i_ref "$s_ref" "bash $scripts/integrations-tests.sh resolve integrations" id env
 need_step i_run "$s_run" "bash $scripts/integrations-tests.sh test keploy integrations" env
+need_step i_row "$s_row" "bash $scripts/integrations-tests.sh parsers keploy integrations" env
 only_keys "$job" "jobs.integrations-tests.steps.$i_ref.env" PR_NUMBER GH_TOKEN HEAD_REF INTEGRATION_REF
 only_keys "$job" "jobs.integrations-tests.steps.$i_run.env" INTEGRATIONS_DESC
+only_keys "$job" "jobs.integrations-tests.steps.$i_row.env" INTEGRATIONS_DESC
 # The integrations checkout leaves its default branch checked out; the tests
 # run on the ref resolve picked only when resolve runs between the two.
 i_co=''
 for k in $(children "$job" jobs.integrations-tests.steps); do
   [ "$(get "$job" "jobs.integrations-tests.steps.$k.with.repository")" = keploy/integrations ] && i_co="$k"
 done
-if [ -n "$i_co" ] && [ -n "$i_ref" ] && [ -n "$i_run" ] && [ -n "$i_tests" ] && [ -n "$i_wf" ]; then
+if [ -n "$i_co" ] && [ -n "$i_ref" ] && [ -n "$i_run" ] && [ -n "$i_tests" ] && [ -n "$i_wf" ] && [ -n "$i_row" ]; then
   [ "$i_co" -lt "$i_ref" ] && [ "$i_ref" -lt "$i_run" ] ||
     problem "steps: integrations checkout $i_co, resolve $i_ref, tests $i_run; want them in that order"
   [ "$i_tests" -lt "$i_run" ] && [ "$i_wf" -lt "$i_run" ] ||
     problem "the self-tests (steps $i_tests and $i_wf) do not run before the tests (step $i_run)"
+  # The row takes the integrations parsers from the clone at the ref resolve
+  # picked, and the self-tests cover the script it runs.
+  [ "$i_ref" -lt "$i_row" ] && [ "$i_tests" -lt "$i_row" ] && [ "$i_wf" -lt "$i_row" ] ||
+    problem "the request-time row (step $i_row) runs before resolve (step $i_ref) or the self-tests (steps $i_tests and $i_wf)"
 else
   problem "a step the checks above need is missing (integrations checkout: '${i_co}')"
+fi
+# Both steps that run go come after actions/setup-go and the module cache's
+# restore: before setup-go, go would be the runner's preinstalled one, and
+# before the restore, every module would be fetched again.
+i_go=''
+for k in $(children "$job" jobs.integrations-tests.steps); do
+  case "$(get "$job" "jobs.integrations-tests.steps.$k.uses")" in actions/setup-go@*) i_go="$k" ;; esac
+done
+i_restore="$(step "$job" integrations-tests "Restore the Go module cache")" || i_restore=''
+i_restore="${i_restore##*.}"
+if [ -z "$i_go" ] || [ -z "$i_restore" ]; then
+  problem "no actions/setup-go step ('${i_go}') or no step named 'Restore the Go module cache' ('${i_restore}')"
+elif [ -n "$i_run" ] && [ -n "$i_row" ]; then
+  [ "$i_go" -lt "$i_restore" ] && [ "$i_restore" -lt "$i_run" ] && [ "$i_restore" -lt "$i_row" ] ||
+    problem "steps: setup-go $i_go, the module cache's restore $i_restore, tests $i_run, the request-time row $i_row; want go and its cache set up before either step runs go"
 fi
 # The keploy checkout takes the tree the run is for: a PR merged onto main, or
 # the pushed commit. A ref: (main, the PR's base) or a repository: there would

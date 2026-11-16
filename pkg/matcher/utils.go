@@ -1225,7 +1225,7 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 		return nil, nil
 	}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object", zap.String("json", s))
+		utils.LogError(log, err, "cannot convert json string into json object", zap.Int("json_bytes", len(s)))
 		return nil, err
 	}
 	return result, nil
@@ -1272,13 +1272,19 @@ func (d *DiffsPrinter) SetHasarrayIndexMismatch(has bool) {
 	d.hasarrayIndexMismatch = has
 }
 
+// NewDiffsPrinter is NewDiffsPrinterOut on os.Stdout: for a keploy command's
+// own output (keploy contract), never a run's console an embedder chose.
 func NewDiffsPrinter(testCase string) DiffsPrinter {
 	return NewDiffsPrinterOut(os.Stdout, testCase)
 }
 
+// NewDiffsPrinterOut is a printer of testCase's diff on out, which it names
+// whole (header values, bodies). A nil out prints nothing: the console of a
+// run whose embedder set none (a k8s proxy's replayer, whose stdout is its
+// pod's log), never os.Stdout.
 func NewDiffsPrinterOut(out io.Writer, testCase string) DiffsPrinter {
 	if out == nil {
-		out = os.Stdout
+		out = io.Discard
 	}
 	return DiffsPrinter{
 		out:       out,
@@ -1511,9 +1517,11 @@ func NewSchemaDiffPrinter(testCase string) SchemaDiffPrinter {
 	return NewSchemaDiffPrinterOut(os.Stdout, testCase)
 }
 
+// NewSchemaDiffPrinterOut is a printer of testCase's schema diff on out. A
+// nil out prints nothing, as NewDiffsPrinterOut's does.
 func NewSchemaDiffPrinterOut(out io.Writer, testCase string) SchemaDiffPrinter {
 	if out == nil {
-		out = os.Stdout
+		out = io.Discard
 	}
 	return SchemaDiffPrinter{
 		out:      out,

@@ -209,7 +209,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// (restaged): its matcher, held to its first read, read
 					// nothing, and the miss says so.
 					logger.Error("REPLAY-ORPHAN: TC failing — no data mock available for this query, so it was never recorded or was dropped at record time",
-						zap.String("sql_query", truncate(actualQuery, 300)),
+						zap.String("sql_query", liveCommandShape(req.Message, decodeCtx)),
 						zap.String("request_type", req.Header.Type),
 						zap.Int("commands_processed", commandCount),
 						zap.String("hint", "check mappings.yaml: this test set has no MySQL data mock for the command phase — either the query was never recorded, or its mock was dropped at record time (teardown lag or memory pressure)"),
@@ -241,8 +241,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				continue
 			}
 
+			// The answer's kind, never the answer: it holds the recorded rows.
 			if ce := logger.Check(zap.DebugLevel, "Matched the command with the mock"); ce != nil {
-				ce.Write(zap.Any("mock", resp))
+				ce.Write(zap.String("response_type", responseKind(resp)))
 			}
 
 			forgetClosedStatement(logger, commandPkt, decodeCtx)
@@ -262,7 +263,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			//Encode the matched resp
 			buf, err := wire.EncodeToBinary(ctx, logger, &resp.PacketBundle, clientConn, decodeCtx)
 			if err != nil {
-				utils.LogError(logger, err, "failed to encode the response", zap.Any("response", resp))
+				// The encoder's errors quote recorded values (a row's
+				// column it cannot write): withheld.
+				err = utils.WithholdInput(err)
+				utils.LogError(logger, err, "failed to encode the response", zap.String("response_type", responseKind(resp)))
 				return err
 			}
 

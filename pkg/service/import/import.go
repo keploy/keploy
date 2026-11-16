@@ -132,7 +132,9 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 		// Extract and validate variable value
 		value, ok := variable["value"].(string)
 		if !ok {
-			pi.logger.Error("Global variable value is not a string", zap.Any("value", variable["value"]))
+			// Its type, never the value: a collection's variables hold its
+			// tokens and keys.
+			pi.logger.Error("Global variable value is not a string", zap.String("type", fmt.Sprintf("%T", variable["value"])))
 			continue
 		}
 
@@ -153,14 +155,14 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 	if basePath != "" {
 		req.URL, err = utils.ReplaceBaseURL(req.URL, basePath)
 		if err != nil {
-			pi.logger.Error("failed to replace hostname", zap.Error(err))
+			pi.logger.Error("failed to replace hostname", zap.Error(utils.WithholdInput(err)))
 			return models.HTTPResp{}, err
 		}
 	}
 
 	httpReq, err := http.NewRequest(string(req.Method), req.URL, strings.NewReader(req.Body))
 	if err != nil {
-		pi.logger.Error("failed to create HTTP request", zap.Error(err))
+		pi.logger.Error("failed to create HTTP request", zap.Error(utils.WithholdInput(err)))
 		return models.HTTPResp{}, err
 	}
 
@@ -180,7 +182,7 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		pi.logger.Error("failed to send HTTP request", zap.Error(err))
+		pi.logger.Error("failed to send HTTP request", zap.Error(utils.WithholdInput(err)))
 		return models.HTTPResp{}, err
 	}
 
@@ -207,7 +209,7 @@ func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (mod
 		response.Header[key] = strings.Join(value, ",")
 	}
 	// Use the response.Body field to avoid unused write error
-	pi.logger.Info("Response Body", zap.String("body", response.Body))
+	pi.logger.Info("Response Body", zap.Int("bytes", len(response.Body)))
 
 	return response, nil
 }
@@ -240,7 +242,7 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 					return err
 				}
 
-				if err := pi.writeTestData(testItem, testsPath, globalVariables, &testCounter); err != nil {
+				if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &testCounter); err != nil {
 					return fmt.Errorf("failed to write test data: %w", err)
 				}
 			}
@@ -260,7 +262,7 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 				return err
 			}
 
-			if err := pi.writeTestData(testItem, testsPath, globalVariables, &testCounter); err != nil {
+			if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &testCounter); err != nil {
 				return fmt.Errorf("failed to write test data: %w", err)
 			}
 		}
@@ -358,7 +360,7 @@ func (pi *PostmanImporter) processEmptyResponse(testItem *TestData, globalVariab
 	return fmt.Errorf("URL is empty")
 }
 
-func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, globalVariables map[string]string, testCounter *int) error {
+func (pi *PostmanImporter) writeTestData(testItem TestData, root, testsPath string, globalVariables map[string]string, testCounter *int) error {
 	for _, response := range testItem.Response {
 		testName := fmt.Sprintf("test-%d", *testCounter+1)
 
@@ -389,7 +391,7 @@ func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, gl
 			return fmt.Errorf("failed to marshal test result: %w", err)
 		}
 
-		if err := yaml.WriteFileF(pi.ctx, pi.logger, testsPath, testName, testResultBytes, false, pi.Format); err != nil {
+		if err := yaml.WriteRecordingFileF(pi.ctx, pi.logger, root, testsPath, testName, testResultBytes, false, pi.Format); err != nil {
 			return fmt.Errorf("failed to write test result: %w", err)
 		}
 

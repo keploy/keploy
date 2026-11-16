@@ -270,7 +270,7 @@ func TestOverlappingWorkersTestsEachHoldTheirOwnWorkersRealUses(t *testing.T) {
 	require.Empty(t, three.Real)
 	require.Nil(t, two.Evidence, "the use from no worker came after it ended")
 	unattributed := models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1,
-		What: "the latest: a connection to mock.real destination auth:443, from process 4242"}}
+		What: "the latest: a connection to mock.real destination auth:443, from process 4242", HostsListed: true}}
 	for _, w := range []models.ScopeWindow{one, three} {
 		require.NotNil(t, w.Evidence, w.Name)
 		require.Equal(t, unattributed, w.Evidence.CannotCapture, w.Name)
@@ -350,7 +350,7 @@ func TestAnOverlappingBeginClosesATestsDropsWindow(t *testing.T) {
 	}
 	w := windowOf(t, a, "b::TestThree")
 	require.NotNil(t, w.Evidence)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, w.Evidence.CannotCapture)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}, w.Evidence.CannotCapture)
 }
 
 // An end that gives up on its test's calls while another worker's test is
@@ -384,5 +384,5 @@ func TestAGivenUpEndLeavesTheDropsWindowTheOpenTests(t *testing.T) {
 	require.Nil(t, serr)
 	w := windowOf(t, a, "a::TestOne")
 	require.NotNil(t, w.Evidence)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}, w.Evidence.CannotCapture)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1, HostsListed: true}}, w.Evidence.CannotCapture)
 }

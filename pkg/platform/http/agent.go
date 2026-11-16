@@ -47,6 +47,7 @@ import (
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -64,7 +65,13 @@ const (
 type AgentClient struct {
 	// streamEnds says, for each frame stream (models.FrameStream), whether
 	// the agent ended the latest one with its end marker (StreamEnded).
-	streamEnds   sync.Map
+	streamEnds sync.Map
+	// console is where the client says what is for the user's eyes only and
+	// never for its log (a request the agent did not record, named whole):
+	// keploy's console, which keploy's CLI sets (SetConsole). nil, as New
+	// leaves it, says nothing: a program that embeds the client (a k8s
+	// proxy) writes its own stdout to its log, and a path can hold a token.
+	console      io.Writer
 	logger       *zap.Logger
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	apps         sync.Map
@@ -398,6 +405,14 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 	}
 }
 
+// SetConsole makes w the client's console (AgentClient.console): keploy's CLI
+// sets os.Stdout. A program that embeds the client sets it only to a place
+// that is for the user's eyes alone (its UI), never to a stream its log is
+// written from. nil says nothing.
+func (a *AgentClient) SetConsole(w io.Writer) {
+	a.console = w
+}
+
 // markDrainsAfterStop says, on a frame stream's request, that its client
 // drains the stream after its stop and closes it before it stops the agent
 // (models.WithDrainsAfterStop): the agent holds a stop signal for it. Only
@@ -479,13 +494,18 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		return nil, fmt.Errorf("missing multipart boundary in content-type: %s", res.Header.Get("Content-Type"))
 	}
 
+	// What the console says of the requests the agent does not record, over
+	// the stream and the ones that resume it: each once, and how many more
+	// came as the stream ends. Nothing with no console.
+	said := newNotRecordedSaid(a.console)
 	go func() {
 		defer func() {
+			said.sayRepeats()
 			close(tcChan)
 			stream.close()
 		}()
 		for {
-			done := a.readIncoming(ctx, res, tcChan, ended)
+			done := a.readIncoming(ctx, res, tcChan, ended, said)
 			if res.Body != nil {
 				if err := res.Body.Close(); err != nil {
 					utils.LogError(a.logger, err, "failed to close response body for incoming request")
@@ -528,7 +548,9 @@ func (a *AgentClient) incomingRequest(body []byte) streamRequest {
 // cannot be read at all.
 //
 // A stream the agent ends with its end marker sets ended, and is done.
-func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcChan chan<- *models.TestCase, ended *atomic.Bool) (done bool) {
+// The requests the agent did not record are said on the console through
+// said.
+func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcChan chan<- *models.TestCase, ended *atomic.Bool, said *notRecordedSaid) (done bool) {
 	contentType := res.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -540,7 +562,7 @@ func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcCh
 			utils.LogError(a.logger, nil, "missing multipart boundary in content-type", zap.String("content-type", contentType))
 			return true
 		}
-		return a.readIncomingParts(ctx, res, boundary, tcChan, ended)
+		return a.readIncomingParts(ctx, res, boundary, tcChan, ended, said)
 	}
 	return a.readIncomingJSON(ctx, res, tcChan)
 }
@@ -586,14 +608,131 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 		a.logger.Warn("the keploy agent did not record some requests: it was short of memory when they came, and its memory guard had paused recording; each connection's requests after the pause are recorded",
 			zap.Uint64("requests", p.Requests), zap.Int("connections", p.Connections))
 	}
+	if d := s.MocksDropped; d.ByPressure > 0 || d.Capacity > 0 {
+		a.logger.Warn(models.MocksDroppedSaid,
+			zap.Int64("by_memory_pressure", d.ByPressure), zap.Uint64("for_the_output", d.Capacity),
+			zap.Strings("first_dropped", d.Named))
+	}
 	if s.MassSuppressed {
 		a.logger.Warn("the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
 			zap.Int("suppressed", s.TestCasesSuppressed), zap.Int("recorded", s.TestCasesSent))
 	}
 }
 
+// notRecordedSaid is what a recording's console says, over one test-case
+// stream (resumed ones included), of the requests the agent served and did
+// not record as test cases (models.NotRecordedPart): each request (its
+// method, path and path tag) once for each why, as it first comes (say); a
+// repeat only counted, and the counts said as the stream ends (sayRepeats).
+// A streaming endpoint a browser or a load generator calls over and over
+// would otherwise bury the recording's own lines, and the first line already
+// names the path behind the tag the agent's lines name it by.
+//
+// At most notRecordedSaidMax requests and whys are named and kept: one with
+// an id in its path is a request of its own each time, and would flood the
+// console and grow the stream's map for as long as the stream lasts. Past
+// them each is only counted (beyond), and the stream's end says how many: the
+// agent's log names each by its shape and path tag.
+type notRecordedSaid struct {
+	w      io.Writer
+	mu     sync.Mutex
+	order  []notRecordedKey
+	seen   map[notRecordedKey]*notRecordedSeen
+	beyond int
+}
+
+// notRecordedSaidMax is how many requests (by method, path, tag and why) a
+// stream's console names (notRecordedSaid).
+const notRecordedSaidMax = 50
+
+// notRecordedKey is one request and why, as notRecordedSaid counts them.
+type notRecordedKey struct{ method, path, tag, why string }
+
+// notRecordedSeen is the first notice of a notRecordedKey, and how many more
+// came.
+type notRecordedSeen struct {
+	first models.NotRecordedCall
+	more  int
+}
+
+// newNotRecordedSaid is a stream's notRecordedSaid, writing to w; nil, which
+// says and keeps nothing, for no w (no console).
+func newNotRecordedSaid(w io.Writer) *notRecordedSaid {
+	if w == nil {
+		return nil
+	}
+	return &notRecordedSaid{w: w, seen: map[notRecordedKey]*notRecordedSeen{}}
+}
+
+// say writes c on the console (sayNotRecorded) when it is the first of its
+// request and why on the stream, and counts it otherwise, and only counts it
+// once notRecordedSaidMax are named. Nil-safe.
+func (s *notRecordedSaid) say(c models.NotRecordedCall) {
+	if s == nil {
+		return
+	}
+	key := notRecordedKey{c.Method, c.Path, c.PathTag, c.Why}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if seen := s.seen[key]; seen != nil {
+		seen.more++
+		return
+	}
+	if len(s.order) >= notRecordedSaidMax {
+		s.beyond++
+		return
+	}
+	s.seen[key] = &notRecordedSeen{first: c}
+	s.order = append(s.order, key)
+	sayNotRecorded(s.w, c, 0)
+}
+
+// sayRepeats writes on the console, as the stream ends, each request said
+// once that came again, with how many more times, in the order each first
+// came, and how many came past the ones named (notRecordedSaidMax).
+// Nil-safe.
+func (s *notRecordedSaid) sayRepeats() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, key := range s.order {
+		if seen := s.seen[key]; seen.more > 0 {
+			sayNotRecorded(s.w, seen.first, seen.more)
+			seen.more = 0
+		}
+	}
+	if s.beyond > 0 {
+		_, _ = fmt.Fprintf(s.w, "🐰 Keploy: not recorded as test cases, %d more requests beyond the %d named above, which this console names no more of: the agent's log names each by its shape and path tag\n", s.beyond, notRecordedSaidMax)
+		s.beyond = 0
+	}
+}
+
+// sayNotRecorded writes, on keploy's console, c, a request the agent served
+// and did not record as a test case (models.NotRecordedPart): its method and
+// path (the names of its query's parameters, never their values: a streamed
+// answer's URL often carries its token in the query) beside its path tag,
+// and why; for more > 0, that so many more such requests came after the one
+// said. The agent's log names the request by its shape (each path segment
+// {}) and the same tag, so the user tells by the tag which request a line is
+// about: GET /{} names /events and /poll alike. The console only, never this
+// client's log: the path can hold a token, and a log reaches log stores.
+func sayNotRecorded(w io.Writer, c models.NotRecordedCall, more int) {
+	target := c.Path
+	if c.QueryKeys != "" {
+		target += "?{" + c.QueryKeys + "}"
+	}
+	what := "not recorded as a test case"
+	if more > 0 {
+		what = fmt.Sprintf("not recorded as test cases, %d more after the one said above", more)
+	}
+	_, _ = fmt.Fprintf(w, "🐰 Keploy: %s: %s: %s\n", what,
+		models.WithPathTag(c.Method+" "+target, c.PathTag), c.Why)
+}
+
 // readIncomingParts reads a multipart incoming stream; see readIncoming.
-func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase, ended *atomic.Bool) (done bool) {
+func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response, boundary string, tcChan chan<- *models.TestCase, ended *atomic.Bool, said *notRecordedSaid) (done bool) {
 	mr := multipart.NewReader(res.Body, boundary)
 	var pendingTestCase *models.TestCase
 
@@ -627,6 +766,15 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			ended.Store(true)
 			return true
 		}
+		if part.FormName() == models.NotRecordedPart {
+			// A request the agent served and did not record as a test
+			// case: said on this client's console, never in its log.
+			var c models.NotRecordedCall
+			if err := json.NewDecoder(part).Decode(&c); err == nil {
+				said.say(c)
+			}
+			continue
+		}
 		if part.FormName() == "metadata" {
 			var tc models.TestCase
 			if err := json.NewDecoder(part).Decode(&tc); err != nil {
@@ -639,7 +787,7 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 				select {
 				case <-ctx.Done():
 					return true
-				case tcChan <- &tc:
+				case tcChan <- capturedByAgent(&tc):
 					pendingTestCase = nil
 				}
 			}
@@ -653,22 +801,25 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			if sanitizedFileName == "." || sanitizedFileName == string(filepath.Separator) || sanitizedFileName == "" {
 				sanitizedFileName = "testcase_blob"
 			}
-			a.logger.Debug("Received binary file part", zap.String("file_name", fileName), zap.String("sanitized_name", sanitizedFileName))
+			// The file's name is the app's client's (filename=), and so is
+			// the end of the path it is kept at: each line names the name by
+			// its size and the path by its folder (models.FormFilePathLogText).
+			a.logger.Debug("Received binary file part", zap.String("file_name", models.FormFileNameLogText(fileName)), zap.String("sanitized_name", models.FormFileNameLogText(sanitizedFileName)))
 
 			savePath := filepath.Join(os.TempDir(), fmt.Sprintf("keploy_%d_%s", time.Now().UnixNano(), sanitizedFileName))
 			outFile, err := os.Create(savePath)
 			if err != nil {
-				utils.LogError(a.logger, err, "failed to create temp file for stream")
+				utils.LogError(a.logger, models.FormFilePathsInError(err, savePath), "failed to create temp file for stream")
 				continue
 			}
 
 			_, err = io.Copy(outFile, part)
 			outFile.Close()
 			if err != nil {
-				utils.LogError(a.logger, err, "failed to write file stream to disk")
+				utils.LogError(a.logger, models.FormFilePathsInError(err, savePath), "failed to write file stream to disk")
 				continue
 			}
-			a.logger.Debug("Successfully wrote binary file to temp storage", zap.String("path", savePath))
+			a.logger.Debug("Successfully wrote binary file to temp storage", zap.String("path", models.FormFilePathLogText(savePath)))
 			// Link matching file path logic
 			updated := false
 			for i := range pendingTestCase.HTTPReq.Form {
@@ -697,12 +848,26 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			select {
 			case <-ctx.Done():
 				return true
-			case tcChan <- pendingTestCase:
+			case tcChan <- capturedByAgent(pendingTestCase):
 				pendingTestCase = nil
 			}
 		}
 	}
 	return false
+}
+
+// capturedByAgent marks the paths of tc's file parts, a test case this client
+// read from its agent, as the files they were captured in: this client's own
+// copy of a part it received, or the agent's on this host
+// (FormData.Captured). The test store copies a part only from there. A path
+// in a test case read any other way (a set's file, the cloud) is never one.
+// Called on each test case as it is handed on, once its parts are in.
+func capturedByAgent(tc *models.TestCase) *models.TestCase {
+	for i := range tc.HTTPReq.Form {
+		f := &tc.HTTPReq.Form[i]
+		f.Captured = slices.Clone(f.Paths)
+	}
+	return tc
 }
 
 // readIncomingJSON reads a legacy JSON incoming stream; see readIncoming.
@@ -724,7 +889,7 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 		case <-ctx.Done():
 			// If the context is done, exit the loop
 			return true
-		case tcChan <- &testCase:
+		case tcChan <- capturedByAgent(&testCase):
 			// Send the decoded test case to the channel
 		}
 	}
@@ -3714,7 +3879,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 
 		var origCmd = cmd
-		a.logger.Debug("Application command provided :", zap.String("cmd", cmd))
+		a.logger.Debug("Application command provided :", zap.String("cmd", utils.RedactCommandLine(cmd)))
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, kdocker.AgentContainerPrefix)
 		a.conf.KeployContainer = opts.KeployContainer
@@ -3798,7 +3963,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		if origCmd != cmd {
 			a.logger.Info(
 				"Updated user command to allow Keploy to serve traffic before the app",
-				zap.String("cmd", cmd),
+				zap.String("cmd", utils.RedactCommandLine(cmd)),
 			)
 		}
 	}
@@ -4271,7 +4436,8 @@ func runEngine(ctx context.Context, c *exec.Cmd, unsignalled <-chan struct{}, ou
 
 // engineCLI runs the container engine's CLI for one stop of an agent's
 // container: as root or in the docker group without sudo, or -- on Linux,
-// when that is refused -- with sudo -n (non-interactive). Which of the two is
+// when the engine's daemon refuses the user who runs keploy
+// (engineDeniesUser) -- with sudo -n (non-interactive). Which of the two is
 // decided by the first command that succeeds and kept for the rest of the
 // stop, so a later command that fails for reasons of its own (a `cp` of a file
 // the agent has not written yet) does not try sudo again.
@@ -4289,7 +4455,14 @@ const (
 func newEngineCLI(logger *zap.Logger) *engineCLI { return &engineCLI{logger: logger} }
 
 // run runs the engine's CLI with args under ctx (containerEngineCommand,
-// runEngine), and returns what output takes from it.
+// runEngine), and returns what output takes from it. A failure is the
+// engine's own answer, which callers read (engineSaysGone): sudo is tried
+// only when the daemon refused keploy's user, never after an answer of the
+// daemon (no such container, a conflict), which a sudo that asks for a
+// password would otherwise replace with its refusal. When sudo fails too, the
+// engine's failure is returned with what sudo said joined to its error: sudo's
+// refusal, or, when sudo ran the command, the engine's answer to it as root,
+// which callers read as well.
 func (e *engineCLI) run(ctx context.Context, output func(*exec.Cmd) ([]byte, error), args ...string) ([]byte, error) {
 	cli := engine.Active().CLI
 	direct := func() ([]byte, error) {
@@ -4311,16 +4484,36 @@ func (e *engineCLI) run(ctx context.Context, output func(*exec.Cmd) ([]byte, err
 		e.mode.CompareAndSwap(engineUndecided, engineDirect)
 		return out, nil
 	}
-	if ctx.Err() != nil || runtime.GOOS != "linux" {
+	if ctx.Err() != nil || runtime.GOOS != "linux" || !engineDeniesUser(out, err) {
 		return out, err
 	}
-	e.logger.Debug("container engine command without sudo failed, trying with sudo -n",
+	e.logger.Debug("the container engine's daemon refused keploy's user, trying with sudo -n",
 		zap.Strings("args", args), zap.Error(err))
-	out, err = sudo()
-	if err == nil {
+	sudoOut, sudoErr := sudo()
+	if sudoErr == nil {
 		e.mode.CompareAndSwap(engineUndecided, engineSudo)
+		return sudoOut, nil
 	}
-	return out, err
+	said := string(sudoOut)
+	var exit *exec.ExitError
+	if errors.As(sudoErr, &exit) {
+		said += "\n" + string(exit.Stderr)
+	}
+	return out, fmt.Errorf("%w; through sudo -n: %w, saying %q", err, sudoErr, strings.TrimSpace(said))
+}
+
+// engineDeniesUser reports whether the engine's CLI failed (out, err, as
+// engineSaid reads them) because the engine's daemon refused the user who
+// runs keploy: its socket's permission denied, in the docker CLI's words
+// ("permission denied while trying to connect to the docker API at", as
+// Docker 29 says it; "... to the Docker daemon socket at" before) or in those
+// of the dial ("connect: permission denied", which older docker CLIs and
+// podman's remote client carry). That is the one failure sudo can change. Any
+// other is the daemon's own answer, or one that sudo would meet as well.
+func engineDeniesUser(out []byte, err error) bool {
+	said := engineSaid(out, err)
+	return strings.Contains(said, "permission denied while trying to connect to the") ||
+		strings.Contains(said, "connect: permission denied")
 }
 
 // combined runs args and returns their output, stderr included.
@@ -5049,16 +5242,21 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 	if destDir == "" {
 		return errors.New("destDir is required")
 	}
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	// destDir is a test set's folder: it and the files in it are made only
+	// inside the recording, the folder it is in, and that from the project
+	// (yaml.MkdirAllInRecording), so a link on the way that leads out is
+	// refused, with why, and nothing is written where it leads.
+	recording := filepath.Dir(destDir)
+	if err := yaml.MkdirAllInRecording(recording, destDir, 0o755); err != nil {
 		return fmt.Errorf("create dest dir %s: %w", destDir, err)
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return a.streamPcapArtifact(gctx, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644, false)
+		return a.streamPcapArtifact(gctx, recording, "/pcap/traffic", filepath.Join(destDir, "traffic.pcap"), 0o644, false)
 	})
 	g.Go(func() error {
-		return a.streamPcapArtifact(gctx, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644, true)
+		return a.streamPcapArtifact(gctx, recording, "/pcap/keylog", filepath.Join(destDir, "sslkeys.log"), 0o644, true)
 	})
 	return g.Wait()
 }
@@ -5069,7 +5267,7 @@ func (a *AgentClient) StreamPcapArtifacts(ctx context.Context, destDir string) e
 // stays a no-op for non-capture sessions. Other non-200s surface as
 // errors. Context cancellation returns nil so callers don't see
 // spurious errors at recording stop.
-func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile string, mode os.FileMode, appendable bool) error {
+func (a *AgentClient) streamPcapArtifact(ctx context.Context, recording, urlPath, dstFile string, mode os.FileMode, appendable bool) error {
 	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, urlPath)
 	req, err := newAgentRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -5097,7 +5295,7 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 			ext := filepath.Ext(dstFile)
 			path = fmt.Sprintf("%s.%d%s", strings.TrimSuffix(dstFile, ext), n, ext)
 		}
-		copyErr, err := a.copyPcapStream(resp, pkg.ShownAgentURI(url), path, flags, mode)
+		copyErr, err := a.copyPcapStream(resp, pkg.ShownAgentURI(url), recording, path, flags, mode)
 		if errors.Is(err, errNoPcapStream) {
 			return nil
 		}
@@ -5117,11 +5315,12 @@ func (a *AgentClient) streamPcapArtifact(ctx context.Context, urlPath, dstFile s
 // errNoPcapStream is an agent with no pcap stream to serve: capture is off.
 var errNoPcapStream = errors.New("the agent serves no pcap stream")
 
-// copyPcapStream writes one pcap stream response to path, shownURL being the
-// stream's URL as keploy says it (pkg.ShownAgentURI). It returns how the copy
-// ended, and an error when there was nothing to copy into a file
-// (errNoPcapStream when capture is off).
-func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, path string, flags int, mode os.FileMode) (copyErr, err error) {
+// copyPcapStream writes one pcap stream response to path, a file opened only
+// inside recording (yaml.OpenFileInRecording), shownURL being the stream's URL
+// as keploy says it (pkg.ShownAgentURI). It returns how the copy ended, and an
+// error when there was nothing to copy into a file (errNoPcapStream when
+// capture is off).
+func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, recording, path string, flags int, mode os.FileMode) (copyErr, err error) {
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil && !errors.Is(cerr, context.Canceled) {
 			a.logger.Debug("failed to close pcap stream body", zap.String("url", shownURL), zap.Error(cerr))
@@ -5140,7 +5339,7 @@ func (a *AgentClient) copyPcapStream(resp *http.Response, shownURL, path string,
 		return nil, fmt.Errorf("stream %s: status %d: %s", shownURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	out, err := os.OpenFile(path, flags, mode)
+	out, err := yaml.OpenFileInRecording(recording, path, flags, mode)
 	if err != nil {
 		return nil, fmt.Errorf("create %s: %w", path, err)
 	}

@@ -94,6 +94,23 @@ func detectGitRepo() string {
 	return gitRepoOnce.repo
 }
 
+// scpPathColon is the colon an SCP-like remote's path follows, -1 for none:
+// its first colon, or, where a "[" before it brackets the host as git writes
+// an IPv6 one (git@[fd00::1]:owner/repo, [git@fd00::1]:owner/repo), the colon
+// after the "]", the host's own colons being the address's.
+func scpPathColon(raw string) int {
+	colon := strings.IndexByte(raw, ':')
+	open := strings.IndexByte(raw, '[')
+	if colon < 0 || open < 0 || open > colon {
+		return colon
+	}
+	end := strings.Index(raw[open:], "]:")
+	if end < 0 {
+		return -1
+	}
+	return open + end + 1
+}
+
 // normalizeRepo extracts "owner/repo" from various remote URL formats:
 //   - "git@github.com:owner/repo.git"       (SCP-like)
 //   - "ssh://git@github.com/owner/repo.git" (SSH URL)
@@ -110,7 +127,7 @@ func normalizeRepo(raw string) string {
 	// SCP-like: git@host:owner/repo (no scheme, has ":" after user@host)
 	// Must check before URL parsing because net/url misparses this form.
 	if !strings.Contains(raw, "://") {
-		if idx := strings.Index(raw, ":"); idx > 0 && strings.Contains(raw[:idx], "@") {
+		if idx := scpPathColon(raw); idx > 0 && strings.Contains(raw[:idx], "@") {
 			path := strings.TrimPrefix(raw[idx+1:], "/")
 			if strings.Contains(path, "/") {
 				return path

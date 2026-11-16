@@ -3,6 +3,7 @@ package record
 import (
 	"context"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/utils"
@@ -37,10 +38,12 @@ func (r *Recorder) reportRealRun(ctx context.Context) {
 	type key struct{ dest, why string }
 	counts := map[key]int{}
 	var order []key
+	first := map[key]models.CaptureIncomplete{}
 	for _, c := range run.Incomplete {
 		k := key{c.Destination, c.Why}
 		if counts[k] == 0 {
 			order = append(order, k)
+			first[k] = c
 		}
 		counts[k]++
 	}
@@ -48,15 +51,22 @@ func (r *Recorder) reportRealRun(ctx context.Context) {
 		r.realUncaptured.Store(true)
 	}
 	for _, k := range order {
+		// The why names a connection's other name whole (the client's
+		// Host header, its SNI) for the report: the line names it by its
+		// shape and the agent's tag, and an older agent's why, which lists
+		// no names, by its size (CaptureIncomplete.LogWhy).
+		why := first[k].LogWhy()
 		if LossesJudgedLater() {
 			// The recording is kept: the pass that follows judges each of
 			// its test cases (finish hands it over).
 			r.logger.Warn("keploy could neither capture nor relay as real connections of it (capture_incomplete), and no test case holds what they carried: the recording is kept, and the auto-replay that follows judges each of its test cases",
-				zap.String("destination", k.dest), zap.Int("connections", counts[k]), zap.String("next_step", k.why+"; then re-record this test set to capture them"))
-			continue
+				zap.String("destination", models.HostShape(k.dest)), zap.Int("connections", counts[k]), zap.String("next_step", why+"; then re-record this test set to capture them"))
+		} else {
+			r.logger.Error("the recording is incomplete: keploy could neither capture nor relay as real connections of it (capture_incomplete), and no test case holds what they carried",
+				zap.String("destination", models.HostShape(k.dest)), zap.Int("connections", counts[k]), zap.String("next_step", why+"; then re-record this test set"))
 		}
-		r.logger.Error("the recording is incomplete: keploy could neither capture nor relay as real connections of it (capture_incomplete), and no test case holds what they carried",
-			zap.String("destination", k.dest), zap.Int("connections", counts[k]), zap.String("next_step", k.why+"; then re-record this test set"))
+		// The console names it whole, beside its tag: the name to list.
+		sayWhole(r.console, "a mock.real connection to "+k.dest+" keploy could neither capture nor relay as real", why, first[k].ReportWhy())
 	}
 }
 

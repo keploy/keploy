@@ -273,8 +273,8 @@ func TestReplaceFiles_ReplacesTheSetsFilesTogether(t *testing.T) {
 
 	prev := replaceFiles
 	t.Cleanup(func() { replaceFiles = prev })
-	replaceFiles = func(logger *zap.Logger, files []yamlLib.File) error {
-		return yamlLib.ReplaceFilesWith(logger, yamlLib.ReplaceHooks{Rename: func(from, to string) error {
+	replaceFiles = func(logger *zap.Logger, root string, files []yamlLib.File) error {
+		return yamlLib.ReplaceFilesWith(logger, root, yamlLib.ReplaceHooks{Rename: func(from, to string) error {
 			if strings.HasSuffix(from, "test-2.yaml"+yamlLib.ReplaceNewSuffix) {
 				return &os.LinkError{Op: "rename", Old: from, New: to, Err: errSharingViolation}
 			}

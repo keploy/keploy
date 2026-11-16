@@ -398,7 +398,7 @@ func (h *HTTP) contentLengthResponse(ctx context.Context, finalResp *[]byte, cli
 			}
 		}
 
-		h.Logger.Debug("This is a chunk of response[content-length]: " + string(resp))
+		h.Logger.Debug("read a chunk of the response's content-length body", zap.Int("bytes", len(resp)))
 		*finalResp = append(*finalResp, resp...)
 		contentLength -= len(resp)
 

@@ -121,6 +121,9 @@ func Prepare(ctx context.Context, logger *zap.Logger, name string) error {
 		if err := os.Setenv("DOCKER_HOST", rt.Host); err != nil {
 			return fmt.Errorf("failed to point the Engine API client at %s: %w", name, err)
 		}
+		// DOCKER_HOST is the engine's now, not a docker context's: the
+		// processes keploy starts must not be told it came from one.
+		clearContextEnv(logger)
 	}
 	mu.Lock()
 	active = rt

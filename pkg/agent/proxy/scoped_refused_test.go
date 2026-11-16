@@ -71,6 +71,34 @@ func TestAReadOfARefusedWorkerIsRefusedUntilItsTestEnds(t *testing.T) {
 	}
 }
 
+// A call of a process a refused worker started (its app, or a program its
+// test runs) is refused, as the worker's own calls are: the proxy finds the
+// worker among the process's parents (parentOf). On macOS, which has no
+// /proc, it found none, and such a call was served the whole pool.
+func TestACallOfAProcessARefusedWorkerStartedIsRefused(t *testing.T) {
+	skipUnlessParentsRead(t)
+	starts.Default.Reset()
+	t.Cleanup(starts.Default.Reset)
+	mgr := newCursorManager(t)
+	mgr.SetMocksWithWindow(nil, counterPool(time.Now().Add(-time.Hour), "a1", "a2"), models.BaseTime, time.Now())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1", "a2"})
+	// This process stands for the one the worker started; its parent, for
+	// the worker.
+	const why = "t1 began with the pid 42: keploy narrows a test by its pid only with the marks"
+	p.RefuseWorker(uint32(os.Getppid()), why)
+	conn := p.scopedFor(uint32(os.Getpid()), mgr)
+	if conn == integrations.MockMemDb(mgr) {
+		t.Fatal("a call of a process the refused worker started got the bare manager, which serves every test's mocks")
+	}
+	if err := errOfRead(conn.GetStartupMocks()); err == nil || !strings.Contains(err.Error(), why) {
+		t.Fatalf("a call of a process the refused worker started was read with %v, want the refusal", err)
+	}
+	if resp, body, _ := serveOne(t, httpint.New(zap.NewNop()), conn, "GET /counter HTTP/1.1\r\nHost: api\r\n\r\n"); resp != nil {
+		t.Fatalf("a call of a process the refused worker started was served %s", body)
+	}
+}
+
 // A refusal changes what a view of the worker made before it shows: its
 // reads, served before, are refused now. So the view reports a higher
 // revision (and staging generation), and a parser that caches its index by

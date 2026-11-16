@@ -150,7 +150,7 @@ func TestAMissIsDiffedAgainstItsOwnOperation(t *testing.T) {
 		t.Run("the report, "+tc.name, func(t *testing.T) {
 			h := newHTTP()
 			pool := []*models.Mock{sub, labels}
-			r := h.buildHTTPMismatchReport(request, body, &mockMemDb{mocks: pool}, pool, nil, nil, tc.diag)
+			r := h.buildHTTPMismatchReport(context.Background(), request, body, &mockMemDb{mocks: pool}, pool, nil, nil, tc.diag)
 			if r.ActualSummary != "POST /query" || r.Operation != "query GetAppLabels" || r.ClosestMock != "labels" {
 				t.Fatalf("summary %q operation %q closest %q", r.ActualSummary, r.Operation, r.ClosestMock)
 			}

@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -123,9 +124,10 @@ func (r *Replayer) logSetCalls(testSetID string, calls []models.UnmatchedCall) {
 		r.logger.Error(msg,
 			zap.String("test-set", testSetID),
 			zap.String("protocol", c.Protocol),
-			zap.String("call", c.Named()),
-			zap.String("destination", c.Destination),
-			zap.String("diff", c.Diff),
+			zap.String("call", models.UnmatchedCallLogShape(c)),
+			utils.PathTagField(c.PathTag),
+			zap.String("destination", models.HostShape(c.Destination)), utils.HostTagField(c.HostTag),
+			zap.Strings("differs", models.FieldShapes(c.Differs)),
 			zap.String("next_step", next))
 	}
 }

@@ -616,7 +616,7 @@ func TestMockOfAResponseAfterAnInterimResponse(t *testing.T) {
 	} {
 		resp := []byte(interim + "HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
 		h := &HTTP{Logger: zaptest.NewLogger(t)}
-		v2, err := h.buildHTTPMock(&FinalHTTP{Req: req, Resp: resp, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+		v2, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: req, Resp: resp, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
 			443, "test-conn", models.OutgoingOptions{})
 		if err != nil || v2 == nil {
 			t.Fatalf("%q: buildHTTPMock = (%v, %v)", interim, v2, err)

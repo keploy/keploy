@@ -49,7 +49,7 @@ func poolMiss(t *testing.T, h *HTTP, mode, path string, hdr map[string]string, b
 		}
 		diag = d
 	}
-	r := h.buildHTTPMismatchReport(request, []byte(body), &mockMemDb{mocks: pool}, nil, nil, nil, diag)
+	r := h.buildHTTPMismatchReport(context.Background(), request, []byte(body), &mockMemDb{mocks: pool}, nil, nil, nil, diag)
 	if r == nil {
 		t.Fatal("no report")
 	}
@@ -313,7 +313,7 @@ func TestMissesAtOnceLeaveTheClosestRecordingsOwnPlacesAsTheyWere(t *testing.T) 
 							t.Error(err)
 							return
 						}
-						r := newHTTP().buildHTTPMismatchReport(request, []byte(body), &mockMemDb{mocks: pool}, nil, nil, nil, diag)
+						r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(body), &mockMemDb{mocks: pool}, nil, nil, nil, diag)
 						if r == nil || r.ClosestMock != "orders" {
 							t.Error("the row is of reports at the closest recording orders")
 							return

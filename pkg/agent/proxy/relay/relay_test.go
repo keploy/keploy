@@ -1382,7 +1382,7 @@ func TestAFailedTLSUpgradeIsACaptureLoss(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	var kinds []models.CaptureLossKind
-	h := newHarness(t, Config{OnCaptureLoss: func(k models.CaptureLossKind, _ string) {
+	h := newHarness(t, Config{OnCaptureLoss: func(k models.CaptureLossKind, _ string, _ ...models.LossHost) {
 		mu.Lock()
 		kinds = append(kinds, k)
 		mu.Unlock()

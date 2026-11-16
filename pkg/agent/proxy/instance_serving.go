@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -348,12 +349,16 @@ var (
 // which process made it, and where it went. The refusal is counted as a
 // call keploy cannot attribute (models.CaptureLossUnattributed), which
 // leaves each test open as it was made without a verdict: the call went
-// unanswered, and any of them may have made it, or waited on it.
-func (p *Proxy) refuseUnserved(dest *agent.NetworkAddress, dst string, why error) error {
-	what := fmt.Sprintf("the latest: a connection to %s, from process %d, in no test worker's keploy instance", dst, dest.KernelPid)
+// unanswered, and any of them may have made it, or waited on it. The loss
+// lists dst's host (a CONNECT target's name) with its tag in ctx's session,
+// the connection's, as its lines name it.
+func (p *Proxy) refuseUnserved(ctx context.Context, dest *agent.NetworkAddress, dst string, why error) error {
+	what := models.NewLossText(ctx).Say("the latest: a connection to ").Host(dst)
 	if dest.Instance != 0 {
-		what = fmt.Sprintf("the latest: a connection to %s, from process %d of test worker instance %s, which keploy does not serve (the worker ended, or keploy never began serving it)", dst, dest.KernelPid, agent.InstanceLabel(dest.Instance))
+		what.Sayf(", from process %d of test worker instance %s, which keploy does not serve (the worker ended, or keploy never began serving it)", dest.KernelPid, agent.InstanceLabel(dest.Instance))
+	} else {
+		what.Sayf(", from process %d, in no test worker's keploy instance", dest.KernelPid)
 	}
-	p.losses.Add(models.CaptureLossUnattributed, what)
+	p.losses.Add(models.CaptureLossUnattributed, what.String(), what.Hosts()...)
 	return fmt.Errorf("keploy refused a call of process %d (test worker instance %s) to %s: %w", dest.KernelPid, agent.InstanceLabel(dest.Instance), dst, why)
 }

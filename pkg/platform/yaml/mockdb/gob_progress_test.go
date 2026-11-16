@@ -158,7 +158,7 @@ func wholeMocksIn(t *testing.T, b []byte) int {
 	if err := os.WriteFile(p, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := readGobMocksCut(p)
+	got, _, err := readGobMocksCut(filepath.Dir(p), p)
 	if err != nil {
 		t.Fatalf("reading the %d bytes the disk took: %v", len(b), err)
 	}

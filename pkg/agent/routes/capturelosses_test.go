@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -55,7 +56,7 @@ func TestHandleCaptureLossesAnswersTheCountOrWhyNot(t *testing.T) {
 				return
 			}
 			var got models.CaptureLosses
-			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got == nil || len(got) != len(tc.want) || (len(got) > 0 && got[0] != tc.want[0]) {
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got == nil || len(got) != len(tc.want) || (len(got) > 0 && !reflect.DeepEqual(got[0], tc.want[0])) {
 				t.Fatalf("body %s (%v), want %+v", rec.Body.String(), err, tc.want)
 			}
 		})
@@ -102,7 +103,7 @@ func TestHandleOwnedCaptureLossesAnswersTheTakeOrWhyNot(t *testing.T) {
 				return
 			}
 			var got []models.OwnedCaptureLoss
-			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got == nil || len(got) != len(tc.want) || (len(got) > 0 && got[0] != tc.want[0]) {
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got == nil || len(got) != len(tc.want) || (len(got) > 0 && !reflect.DeepEqual(got[0], tc.want[0])) {
 				t.Fatalf("body %s (%v), want %+v", rec.Body.String(), err, tc.want)
 			}
 		})

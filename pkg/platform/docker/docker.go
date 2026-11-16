@@ -898,10 +898,25 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// agent's debug-level log lands on the host. Skip when the host
 	// path is empty (e.g. very early bootstrap before Validate runs)
 	// or relative (Docker rejects relative bind-source paths).
+	//
+	// Docker follows a link at the bind source on the host, and the agent
+	// writes there as root. git keeps links, so the keploy folder may be a
+	// link a cloned repository carries: the folder is mounted only when it
+	// is made and opened from the project, as every recording folder is
+	// (utils.MkdirOpenRecordingDir), so a keploy folder that leads out of
+	// the project is refused with why, and nothing of the agent's is
+	// written where it leads. Made here, it is the user's, not a folder the
+	// daemon makes as root for a missing bind source.
 	const agentDebugMount = "/keploy-host"
 	if keployHostPath != "" && filepath.IsAbs(keployHostPath) {
-		volumes = append(volumes, fmt.Sprintf("%s:%s", keployHostPath, agentDebugMount))
-		envVars = append(envVars, fmt.Sprintf("KEPLOY_DEBUG_FILE=%s/agent-debug.log", agentDebugMount))
+		if r, err := utils.MkdirOpenRecordingDir(keployHostPath, 0o755); err != nil {
+			idc.logger.Warn("the keploy folder is not mounted into the agent container, so the agent's debug log is not kept",
+				zap.String("keployFolder", keployHostPath), zap.Error(err))
+		} else {
+			_ = r.Close()
+			volumes = append(volumes, fmt.Sprintf("%s:%s", keployHostPath, agentDebugMount))
+			envVars = append(envVars, fmt.Sprintf("KEPLOY_DEBUG_FILE=%s/agent-debug.log", agentDebugMount))
+		}
 	}
 
 	clientPid := int(os.Getpid())

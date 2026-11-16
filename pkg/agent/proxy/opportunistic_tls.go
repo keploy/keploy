@@ -466,7 +466,10 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	hsCtx, hsCancel := context.WithTimeout(ctx, opportunisticDialTimeout)
 	defer hsCancel()
 	if err := tlsUpstream.HandshakeContext(hsCtx); err != nil {
-		return fmt.Errorf("upstream handshake to %s: %w", dstAddr, err)
+		// Verifying, the handshake checks the application's SNI: its error
+		// names it, and the certificate's names, whole. Written by their
+		// shape and tag, as the caller logs it.
+		return models.HostsInError(ctx, fmt.Errorf("upstream handshake to %s: %w", dstAddr, err), serverName)
 	}
 	defer tlsUpstream.Close()
 

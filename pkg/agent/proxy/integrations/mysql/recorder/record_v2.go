@@ -1504,7 +1504,32 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// held is a PREPARE whose response left an assumed framing open, held
 	// until the next response settles it (heldPrepare).
 	var held *heldPrepare
+	// taken is the exchange taken up after a response left out, held until
+	// the capture's order confirms its answer (takenUp).
+	var taken *takenUp
+	// walk follows the server stream's packet headers, through every byte that
+	// leaves it, to prove a re-align's cut (packetWalk). It is anchored at the
+	// top of the loop once a server byte was read (the handshake's, or an
+	// answer read whole): until then, on a stream joined mid-connection,
+	// nothing shows where a packet starts, and bytes the floor dropped
+	// (Session.NextRequest) are not read.
+	walk := &packetWalk{}
+	// cutUnproven: nothing proved where the answer to the exchange the last
+	// re-align left out starts (it was taken up at a cut, fail, or a held
+	// PREPARE's settle faulted at it), so the next cut is proven only by a
+	// walk that starts at that answer's own start.
+	var cutUnproven bool
+	sess.DestStream.Tap(walk.feed)
+	defer sess.DestStream.Tap(nil)
 	defer func() {
+		if taken != nil && taken.read {
+			// Its answer was read; the recording ended before anything
+			// confirmed it.
+			if taken.emit != nil {
+				leaveOut(sess, taken.reqTs, taken.resTs, notRecorded("the recording ended before the next answer confirmed the answer taken up after a response left out"))
+			}
+			taken.flush()
+		}
 		if held != nil {
 			held.leaveOut(sess, decodeCtx, notRecorded("the recording stopped before a packet settled the %s response's framing", held.what))
 		}
@@ -1523,6 +1548,12 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		held = nil
 		first, err := h.settle(ctx, logger, sess, decodeCtx, cmd, respFirst)
 		carry = first
+		if err == nil && first == nil {
+			// The PREPARE's EOF: the answer starts after it. After a fault,
+			// the walk is marked again where the answer may start (the
+			// command loop's settle fault).
+			walk.mark(respFirst)
+		}
 		return err
 	}
 	// lastEnd is when the last exchange handled ended (its command or its
@@ -1538,30 +1569,55 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// parser behind its connection, and counts what the connection carries
 	// from there as not recorded.
 	//
-	// Two rules then meet on the server's stream at that command. realignAnswer
-	// cuts it by capture time (SkipThrough), and the floor every command sets,
-	// this one included (Session.NextRequest), drops what was captured before
-	// the command, by capture number. The cut by time comes first: SkipThrough
-	// takes the stream as it was captured, before the floor, so what it
-	// discards, and when it refuses, are what they are with no floor. The
-	// floor then drops only what that cut left that was numbered before the
-	// command: nothing, when the capture's times and numbers agree, since the
-	// cut has discarded it already. So no byte leaves the stream twice, and
-	// the floor takes nothing the capture numbered after the command. Where
-	// the server's stream starts, before the recorder has read a byte of it
-	// (a first command whose response it finds it cannot frame at once), what
-	// the cut discards of what was captured before the first command is
-	// counted in the floor's run there (SkipThrough), which ends at the first
-	// byte of that command's response: an answer in flight when the capture
-	// joined the connection is reported once all the same, over its own bytes
-	// (Session.NextRequest), and the response is the exchange left out here.
+	// The server's stream is cut at that command by capture number, by the
+	// floor every command sets, this one included (Session.NextRequest): it
+	// drops what was captured before the command, the rest of the response
+	// left out (answerStartsAfter), and never by capture time, so a clock too
+	// coarse to order the command and the answers around it cuts as a fine
+	// one does. Where the server's stream starts, before the recorder has
+	// read a byte of it (a first command whose response it finds it cannot
+	// frame at once), the floor's run there holds what was captured before
+	// the first command, and ends at the first byte captured after it: an
+	// answer in flight when the capture joined the connection is reported once
+	// all the same, over its own bytes (Session.NextRequest), and the response
+	// is the exchange left out here.
 	clientRealign, serverRealign := false, false
-	// lastAnswerEnd is when the last byte of the last answer read was
-	// captured. pipelined: the client once sent a command not after that, so
-	// its answers cannot be told to start after their commands, and a
-	// response of its that cannot be framed cannot be realigned.
-	var lastAnswerEnd time.Time
+	// lastAnswerSeq is the capture number (fakeconn.Chunk.ConnSeq) of the
+	// chunk the last byte of the last answer read came in. pipelined: the
+	// capture's order proved that the client once sent a command before that
+	// byte reached the capture (its first chunk was numbered before), so its
+	// answers cannot be told to start after their commands, and a response of
+	// its that cannot be framed cannot be realigned. Only the numbers prove
+	// it, never the capture times: a clock that stamps a command alike with
+	// the answer before it, or a chunk with no stamp, says nothing of which
+	// came first, and a client taken for pipelining on it lost the rest of its
+	// connection's recording at the first response it could not frame.
+	var lastAnswerSeq uint32
 	pipelined := false
+	// malformed holds the capture numbers of the chunks the commands without
+	// an answer that did not decode began in, since the last command the
+	// server answers, in the order sent: a server may answer each of them
+	// (answeredIfMalformed), and the next command it answers tells whether it
+	// did (takeMalformedAnswers).
+	var malformed []uint32
+	// stopIn stops the recording at the command read at reqTs, for err. The
+	// exchange taken up, t (nil when none), is left out: the exchange the
+	// recording stops in is t's when t has a mock, which spans this command
+	// too. The mocks queued behind t do not depend on its answer.
+	stopIn := func(t *takenUp, reqTs time.Time, err error) error {
+		stopTs := reqTs
+		if t != nil {
+			if t.emit != nil {
+				stopTs = t.reqTs
+			}
+			t.flush()
+		}
+		reportFault(logger, sess, err, false)
+		return leaveOutInFlight(sess, stopTs, err)
+	}
+	stopUnconfirmed := func(t *takenUp, reqTs time.Time, why string) error {
+		return stopIn(t, reqTs, found("V2: mysql answer taken up after a response left out is not confirmed", framingLost("the answer to the command taken up after a response left out is not confirmed: %s", why)))
+	}
 	// fail handles an exchange whose command was read at reqTs and whose
 	// response could not be handled (err). A stream or a recording that ended
 	// stops in no exchange (leaveOutInFlight). Lost framing leaves the
@@ -1577,16 +1633,41 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		if err == nil || streamEnded(err) {
 			return err
 		}
-		if !errors.Is(err, ErrFramingLost) || pipelined {
+		realign := errors.Is(err, ErrFramingLost) && !pipelined
+		// The fault is a command's the server answers (one it does not answer
+		// is left out where it is read), so the exchange taken up, if any, is
+		// this one: the next command the server answers confirms the one
+		// before it or stops the recording first. A PREPARE held for its
+		// framing was settled at this command, before its answer was touched.
+		//
+		// The next cut checks where the walk since this exchange's mark
+		// starts only when this exchange was taken up at a cut: with none of
+		// its answer read, nothing proved that cut, and the tail of the
+		// response left out before it may come next (packetWalk.cut).
+		// Otherwise the answer before was read whole, and what comes next is
+		// this exchange's own.
+		cutUnproven = taken != nil
+		if t := taken; t != nil {
+			taken = nil
+			if walk.startedOff(t.first) {
+				// The first packet read where the answer to the command taken
+				// up should start is not at the sequence id that answer starts
+				// at: what the re-align took for its start is not proven to
+				// be (takenUp). No second re-align.
+				realign = false
+				err = found("V2: mysql answer taken up after a response left out does not frame", framingLost("the answer to the command taken up after a response left out is not confirmed (%v)", err))
+			}
+			// Otherwise its first packet is where its answer starts, so the
+			// walk proved the cut, and the fault is that answer's own
+			// framing; or not a packet of it was read, and the fault is the
+			// command's (one whose answer the recorder cannot frame), which
+			// says nothing of where its answer starts. Either way it is left
+			// out alone as any such, and the command after it is taken up in
+			// its place.
+		}
+		if !realign {
 			reportFault(logger, sess, err, false)
 			return leaveOutInFlight(sess, reqTs, err)
-		}
-		if held != nil {
-			// What the server sent after the PREPARE's definitions is skipped
-			// with the rest of this exchange: nothing settles its framing.
-			h := held
-			held = nil
-			h.leaveOut(sess, decodeCtx, notRecorded("the response after the %s response was not framed, so nothing settles its framing", h.what))
 		}
 		carry = nil
 		decodeCtx.LastOp.Store(clientKey, wire.RESET)
@@ -1599,10 +1680,16 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// realignAnswer puts the server's stream at the start of the answer to the
 	// command read at reqTs, after a response left out (fail): what the server
 	// sent before that command was captured is the rest of the response left
-	// out (fakeconn.FakeConn.SkipThrough). A stream that cannot be cut there
-	// stops the recording, as lost framing does.
-	realignAnswer := func(reqTs time.Time) error {
-		n, last, err := sess.DestStream.SkipThrough(reqTs)
+	// out, which the command's floor drops (answerStartsAfter). A stream that
+	// cannot be cut there stops the recording, as lost framing does.
+	realignAnswer := func(reqTs time.Time, cmdFirst uint32, respFirst byte) error {
+		before := sess.DestStream.Consumed()
+		err := answerStartsAfter(sess, cmdFirst, sess.ClientStream.LastReadConnSeq())
+		if err == nil {
+			if why := walk.cut(respFirst, cutUnproven); why != "" {
+				err = fmt.Errorf("the server's packets do not show the response left out ended at the cut: %s", why)
+			}
+		}
 		if err != nil {
 			if streamEnded(err) {
 				return err
@@ -1612,11 +1699,8 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			return leaveOutInFlight(sess, reqTs, err)
 		}
 		serverRealign = false
-		if !last.IsZero() {
-			lastAnswerEnd = last
-		}
 		logger.Debug("V2: skipped the rest of a mysql response left out; the recording goes on from the next command",
-			zap.String("connID", sess.ClientConnID), zap.Int64("skippedBytes", n))
+			zap.String("connID", sess.ClientConnID), zap.Int64("skippedBytes", sess.DestStream.Consumed()-before))
 		return nil
 	}
 	// The loop does not end on the context's end: at the recording's stop a
@@ -1630,10 +1714,25 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// or reporting them.
 	for {
 		if !serverRealign {
-			lastAnswerEnd = sess.DestStream.LastReadTime()
+			lastAnswerSeq = sess.DestStream.LastReadConnSeq()
+			// Every server byte read so far was read in whole packets, and
+			// the last exchange's without a fault. None read yet (a stream
+			// joined mid-connection, its commands so far without an answer)
+			// shows no boundary.
+			if lastAnswerSeq != 0 {
+				walk.anchor()
+			}
+		}
+		if taken != nil && !taken.read {
+			// The exchange taken up was handled (recorded and held, or left
+			// out) without a fault: its answer ended at the last byte read.
+			taken.read = true
 		}
 		var cmdBuf []byte
 		var err error
+		// first is the chunk the command starts in (none for the command the
+		// handshake read).
+		var first fakeconn.Chunk
 		// The sequence id the response starts at: 1, or more after a command
 		// that continued over several packets.
 		var respFirst byte
@@ -1648,7 +1747,7 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			joined = continues(cmdBuf)
 		} else if clientRealign {
 			clientRealign = false
-			cmdBuf, respFirst, joined, err = nextCommandAfterFault(ctx, logger, sess)
+			cmdBuf, respFirst, joined, first, err = nextCommandAfterFault(ctx, logger, sess, walk)
 			if err != nil {
 				if errors.Is(err, ErrFramingLost) {
 					warnFramingLost(logger, sess, "V2: mysql client stream cannot be taken up after a response left out; the connection is no longer recorded", err)
@@ -1663,18 +1762,45 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		} else {
 			var cs commandSeq
 			// While a PREPARE is held, the server's bytes after its
-			// definitions are still its own (heldPrepare).
-			if _, err = sess.NextRequest(models.MySQL, held != nil); err == nil {
+			// definitions are still its own (heldPrepare), and while an
+			// exchange taken up is held, what the server sent next is what
+			// confirms it or not (takenUp.confirm), and while a command
+			// without an answer that did not decode is unanswered, an ERR
+			// the server sent to it is its own (takeMalformedAnswers): the
+			// floor stays below all three. A re-align's cut is the floor's
+			// (answerStartsAfter): it drops such an ERR with the rest of the
+			// response left out.
+			if first, err = sess.NextRequest(models.MySQL, held != nil || taken != nil || len(malformed) > 0 && !serverRealign); err == nil {
 				cmdBuf, err = readPacketChecked(logger, sess.ClientStream, cs.take)
 			}
 			respFirst, joined = cs.next, cs.joined
 			if err != nil {
+				if taken != nil && streamEnded(err) {
+					// The client's stream ended with the exchange taken up
+					// held: no command after it, so nothing confirms it
+					// (takenUp.confirm). It is left out, and a PREPARE held
+					// for its framing besides (heldPrepare.end does not
+					// confirm it).
+					t := taken
+					taken = nil
+					why := notRecorded("the answer taken up after a response left out is not confirmed: the client's stream ended with no command after it whose answer would confirm it")
+					if t.emit != nil {
+						leaveOut(sess, t.reqTs, t.resTs, why)
+					}
+					if h := held; h != nil {
+						held = nil
+						h.leaveOut(sess, decodeCtx, why)
+					}
+					t.flush()
+				}
 				if held != nil && ctx.Err() == nil && (errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed)) {
 					// The client's stream ended with a PREPARE held: what the
-					// server sent after it is all on its stream.
+					// server sent after it is all on its stream, and an ERR
+					// 1835 to a command without an answer that did not decode
+					// after it is that command's answer.
 					h := held
 					held = nil
-					if endErr := h.end(ctx, logger, sess, decodeCtx); endErr != nil {
+					if endErr := h.end(ctx, logger, sess, decodeCtx, malformed); endErr != nil {
 						reportFault(logger, sess, endErr, false)
 						return endErr
 					}
@@ -1689,19 +1815,271 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				}
 				return err
 			}
+			if !serverRealign && lastAnswerSeq != 0 && first.CapturedBefore(lastAnswerSeq) {
+				// Captured before the last byte of the answer before it:
+				// sent before the client could have read that answer whole.
+				// No answer read yet (lastAnswerSeq 0) is none to compare
+				// with. The command the handshake read is the first, and
+				// the one taken up after a response left out comes while
+				// the server's stream is realigned (serverRealign).
+				pipelined = true
+			}
 		}
 		// Chunk-derived timestamp: a ReadPacketBuffer has succeeded (either the
 		// prefetch read in the handshake, or the read just above), so at least
 		// one chunk has been consumed and LastReadTime is set.
 		reqTs := sess.ClientStream.LastReadTime()
-		if !serverRealign && !lastAnswerEnd.IsZero() && !reqTs.After(lastAnswerEnd) {
-			// Sent before the last answer was read, or not known to be after
-			// it (no capture time, or a clock that stamped the two alike).
-			pipelined = true
-		}
-		if serverRealign && len(cmdBuf) > 4 && answered(cmdBuf[4]) {
-			if err := realignAnswer(reqTs); err != nil {
-				return err
+		if answers(cmdBuf) {
+			// t is the exchange taken up, confirmed at this command, the next
+			// one the server answers, or the recording stops (takenUp).
+			t := taken
+			taken = nil
+			// next is where the server's next bytes start: the answer after the
+			// one taken up, or the ERR to a command before this one that did not
+			// decode. It is peeked before a held PREPARE is settled, so it is
+			// where the packet settle hands on (carry), if any, starts, and
+			// peeked again when no packet is handed on: past what settle read,
+			// if anything. A second peek with nothing read since finds the same
+			// bytes.
+			var next fakeconn.Chunk
+			var nextErr error
+			if serverRealign {
+				// t is nil: an exchange taken up is confirmed or left out
+				// before the next re-align.
+				if err := realignAnswer(reqTs, first.ConnSeq, respFirst); err != nil {
+					return err
+				}
+				taken = &takenUp{reqTs: reqTs, first: respFirst}
+				walk.mark(respFirst)
+			} else if err := func() error {
+				// settled: a PREPARE held for its framing is settled here.
+				settled := held != nil
+				// An end of the stream is read again by what reads on.
+				next, nextErr = sess.DestStream.Peek()
+				if t != nil && held != nil {
+					// The PREPARE taken up, held for its framing: what settles
+					// it is read before the exchange is confirmed, and the mock
+					// it records waits for that.
+					t.holdPrepare(held)
+				}
+				// The server's next bytes start its answer, after the EOF of
+				// a PREPARE held for its framing if the server sent one. So a
+				// held PREPARE is settled here, before the answer is read or
+				// left out (settleHeld marks the walk again after its EOF):
+				// the walk takes the bytes after the mark for the answer's,
+				// and a fault that left the exchange out with the PREPARE
+				// unsettled had it take the EOF for a packet of the answer
+				// left out, and pass a re-align's cut where that answer had
+				// not begun. The EOF is the PREPARE's own answer's last
+				// packet, not the server's next bytes after the exchange
+				// taken up: judged as those, it stopped a client that framed
+				// with EOFs at every PREPARE taken up.
+				walk.mark(respFirst)
+				if err := settleHeld(commandByte(cmdBuf), respFirst); err != nil {
+					return err
+				}
+				if settled && t == nil && len(malformed) == 0 {
+					// The PREPARE is settled, and nothing else keeps the floor
+					// below this command (Session.NextRequest's answerUnread):
+					// what the server sent before it was captured answers no
+					// command sent after it, as the floor rules for every
+					// command, so the floor is set here (Session.FloorAt). A
+					// packet settle hands on that was captured before this
+					// command is such a packet: no EOF came before it, so the
+					// PREPARE's framing is settled all the same, and it is
+					// dropped with the rest. Read as this command's answer, an
+					// ERR the server sent unasked at sequence id 1 recorded it
+					// with that ERR. While an exchange taken up is held, the
+					// server's next bytes are judged first (takenUp.confirm)
+					// and stop the recording when they were captured before
+					// this command; while the server may still answer a
+					// command without an answer that did not decode,
+					// takeMalformedAnswers judges them and sets the floor.
+					if carry != nil && next.CapturedBefore(first.ConnSeq) {
+						logger.Debug("V2: dropped a server packet captured before the client's next command, after a PREPARE held for its framing: it answers no command sent after it",
+							zap.String("connID", sess.ClientConnID), zap.Uint32("firstConnSeq", next.ConnSeq), zap.Int("bytes", len(carry)))
+						carry = nil
+					}
+					sess.FloorAt(first.ConnSeq)
+				}
+				if carry == nil {
+					// No packet is handed on: the server's next bytes start
+					// past what settle read, if anything (the PREPARE's EOF,
+					// or a packet dropped above).
+					next, nextErr = sess.DestStream.Peek()
+				}
+				return nil
+			}(); err != nil {
+				if t != nil {
+					// The PREPARE taken up is left out (heldPrepare.settle),
+					// or recorded as the server dropped the connection after
+					// it: only then is there a mock to confirm. The packet it
+					// read is no proof of either, and the re-align that the
+					// fault takes up next (fail) proves its own cut.
+					if t.emit != nil {
+						if why := t.confirm(first.ConnSeq, pipelined, next, nextErr); why != "" {
+							return stopUnconfirmed(t, reqTs, why)
+						}
+					}
+					t.release()
+				}
+				// After settle's framing fault (an EOF it could not tell, or a
+				// packet that is neither the PREPARE's EOF nor this answer's
+				// first), the ERRs a server sent to the commands
+				// without an answer before this one that did not decode, and
+				// any packet it sent before this command was captured (the rest
+				// of the PREPARE's response among them), come next, before this
+				// command's answer, and are no packets of it: walked as its,
+				// they had the re-align's cut pass where none of that answer
+				// had come, and a client that sent its next command before that
+				// answer had the command recorded with it; cut off with that
+				// answer, they stopped a client that waited for it, which main
+				// records. So they are taken off the stream as at every command
+				// the server answers (takeMalformedAnswers, which sets the
+				// floor at this command), and the walk starts the answer after
+				// them.
+				//
+				// proven: an ERR 1835 the server sent to one of those commands
+				// was captured before this command. The server answers in
+				// order, so the whole of the PREPARE's response, sent before
+				// that ERR, was captured before this command too, and the
+				// floor at this command leaves only this command's answer on
+				// the stream: the first packet read there is its first, even
+				// one off its sequence, a packet of the answer left out as at
+				// any command, and the next cut is proven as at any response
+				// left out. Walked from after that packet, a client that
+				// waited for an answer of that one packet was stopped at the
+				// cut, where main records the rest. With none taken, the
+				// PREPARE's response may go on past this command (a client
+				// that sent it before that response ended), so nothing proves
+				// where this command's answer starts, and the packet a fault
+				// of that read stopped at is no proof either: the walk starts
+				// after it.
+				//
+				// Where settle read into what the server sent after this command
+				// was captured (the chunk it read last was), every byte captured
+				// before the command has left the server's stream, which holds a
+				// direction's chunks in the order they were captured: the floor
+				// has nothing to drop, and no ERR 1835 captured before the
+				// command is left to take, so nothing proves the cut. And the
+				// packet settle read may have been the whole of this command's
+				// answer (an EOF it could not tell, from a server that sent one
+				// to a client that negotiated CLIENT_DEPRECATE_EOF), so the
+				// server's next bytes may come only after the client's next
+				// command the server answers. Waited for here, they stalled the
+				// parser with the client's bytes unread (a command without an
+				// answer among them, which the client sends and then idles), and
+				// a connection that sat idle so was retired as hung, its whole
+				// recording lost. So nothing is read there, and the walk starts
+				// the answer where the stream is. While a command without an
+				// answer that did not decode is unanswered, the server's next
+				// packet may be the ERR 1835 to it, captured after this command,
+				// which cannot be told from this command's own answer
+				// (takeMalformedAnswers): the walk is told (markUnjudged), and the
+				// next cut is refused when the first packet it walked is one.
+				// Where settle read nothing captured after the command, none of
+				// its answer was read, and the reads below wait for it, as at
+				// every command the server answers.
+				proven := false
+				if last := sess.DestStream.LastReadConnSeq(); errors.Is(err, ErrFramingLost) && (last == 0 || !(fakeconn.Chunk{ConnSeq: last}).CapturedBefore(first.ConnSeq)) {
+					sess.FloorAt(first.ConnSeq)
+					if len(malformed) > 0 {
+						walk.markUnjudged(respFirst)
+					} else {
+						walk.mark(respFirst)
+					}
+				} else if errors.Is(err, ErrFramingLost) {
+					took, why, merr := takeMalformedAnswers(ctx, logger, sess, malformed, first.ConnSeq, respFirst, mysql.CommandStatusToString(commandByte(cmdBuf)), fakeconn.Chunk{}, &carry)
+					malformed = nil
+					if why != "" {
+						return stopIn(nil, reqTs, found("V2: mysql ERR to a command without an answer cannot be told from the next answer", framingLost("%s", why)))
+					}
+					if merr != nil {
+						// Nothing is handed on (carry) after a fault.
+						err = merr
+					}
+					// The walk is marked again where the answer starts: at the
+					// packet handed on, which is its first, or before the next
+					// packet, which will be. Where reading that first packet
+					// faulted, it was walked, and is a packet of the answer
+					// left out when proven: the walk keeps it after the mark
+					// it had, and a proven cut asks only where the walk since
+					// that mark ended (packetWalk.cut). Unproven, the walk
+					// starts after it.
+					proven = took > 0
+					switch {
+					case proven && merr != nil:
+					case carry != nil:
+						walk.markAt(carry[3])
+					default:
+						_, _ = sess.DestStream.Peek()
+						walk.mark(respFirst)
+					}
+				}
+				malformed = nil
+				if err := fail(reqTs, err); err != nil {
+					return err
+				}
+				// Unless proven, nothing proves where this command's answer
+				// starts: settle read a packet that is neither the held
+				// PREPARE's EOF nor that answer's first, or one that may be
+				// either. So the next cut is proven only by a walk that starts
+				// at that answer's own start (packetWalk.cut).
+				cutUnproven = !proven
+				continue
+			}
+			// The ERRs a server sent to the commands without an answer before
+			// this one that did not decode (answeredIfMalformed).
+			confirmAt := first.ConnSeq
+			if len(malformed) > 0 {
+				took, why, err := takeMalformedAnswers(ctx, logger, sess, malformed, first.ConnSeq, respFirst, mysql.CommandStatusToString(commandByte(cmdBuf)), next, &carry)
+				if took > 0 {
+					// The ERR, captured after the first of them, was its
+					// answer: the server answered after it.
+					confirmAt = malformed[0]
+				}
+				malformed = nil
+				if why != "" {
+					stop := found("V2: mysql ERR to a command without an answer cannot be told from the next answer", framingLost("%s", why))
+					return stopIn(t, reqTs, stop)
+				}
+				if err != nil {
+					if t != nil {
+						if why := t.confirm(confirmAt, pipelined, next, nextErr); why != "" {
+							return stopUnconfirmed(t, reqTs, why)
+						}
+						t.release()
+					}
+					if err := fail(reqTs, err); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			if t != nil {
+				if why := t.confirm(confirmAt, pipelined, next, nextErr); why != "" {
+					return stopUnconfirmed(t, reqTs, why)
+				}
+				t.release()
+			}
+			// The server's stream is at this command's answer: what settle,
+			// the ERRs to commands without an answer and the floor took off it
+			// before that answer are no part of it, so the walk starts the
+			// answer here. The floor drops what it drops as the next chunk is
+			// waited for (Peek; an end of the stream is read again by what
+			// reads on), so the walk is marked once that is done, or at the
+			// answer's first packet when it was read (carry). Walked as the
+			// answer's, a packet the server sent unasked at sequence id 1,
+			// captured before this command, had the cut after an answer the
+			// recorder cannot frame, none of it captured before the client's
+			// next command, pass as though a packet of that answer came before
+			// it (packetWalk.cut), and that next command was recorded with
+			// this one's answer.
+			if carry != nil {
+				walk.markAt(carry[3])
+			} else {
+				_, _ = sess.DestStream.Peek()
+				walk.mark(respFirst)
 			}
 		}
 
@@ -1712,14 +2090,25 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// response describes itself (OK, ERR, or a result set with its own
 			// column definitions), so it is framed and the exchange left out;
 			// any other's cannot be, and the recording stops.
+			if !answers(cmdBuf) {
+				// A command its client expects no answer to: it is left out
+				// alone, and both streams are read on from where they are.
+				// Re-aligning here cut the server's stream at the next
+				// command where no response was left out, and a walk with no
+				// answer read since the handshake stopped the connection at
+				// that cut. A server may answer it all the same, for it does
+				// not parse (answeredIfMalformed): whether it did is told at
+				// the next command the server answers (takeMalformedAnswers),
+				// and until then the floor stays below what the server sent.
+				lastEnd = reqTs
+				leaveOut(sess, reqTs, reqTs, fmt.Errorf("a %s that does not decode: %w", mysql.CommandStatusToString(cmdBuf[4]), err))
+				if answeredIfMalformed(cmdBuf[4]) {
+					malformed = append(malformed, first.ConnSeq)
+				}
+				continue
+			}
 			if len(cmdBuf) > 4 && (cmdBuf[4] == mysql.COM_QUERY || cmdBuf[4] == mysql.COM_STMT_EXECUTE) {
 				op := cmdBuf[4]
-				if err := settleHeld(op, respFirst); err != nil {
-					if err := fail(reqTs, err); err != nil {
-						return err
-					}
-					continue
-				}
 				decodeCtx.LastOp.Store(clientKey, op)
 				seq := responseSeq(mysql.CommandStatusToString(op), respFirst)
 				_, resTs, rerr := collectResponseV2(ctx, logger, sess, decodeCtx, clientKey, op, &seq, &carry)
@@ -1762,6 +2151,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				held.queue(sess, emit)
 				continue
 			}
+			if taken != nil {
+				// Recorded behind the exchange taken up, in the order sent.
+				taken.queue(sess, emit)
+				continue
+			}
 			emit()
 			continue
 		}
@@ -1773,12 +2167,6 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// left out, and so is a cursor's COM_STMT_FETCH, whose reply
 			// frames itself; any other's reply cannot be framed.
 			if cmdBuf[4] == comStmtFetch {
-				if err := settleHeld(comStmtFetch, respFirst); err != nil {
-					if err := fail(reqTs, err); err != nil {
-						return err
-					}
-					continue
-				}
 				seq := responseSeq("COM_STMT_FETCH", respFirst)
 				if err := frameFetchReply(ctx, logger, sess, decodeCtx, &seq, &carry); err != nil {
 					if err := fail(reqTs, err); err != nil {
@@ -1795,12 +2183,6 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			shape, known := singlePacketReply[cmdBuf[4]]
 			if !known {
 				err := found("V2: unsupported mysql command", framingLost("command %s, whose response it cannot frame", cmdPkt.Header.Type))
-				if err := fail(reqTs, err); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := settleHeld(cmdBuf[4], respFirst); err != nil {
 				if err := fail(reqTs, err); err != nil {
 					return err
 				}
@@ -1825,13 +2207,6 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			resTs := sess.DestStream.LastReadTime()
 			lastEnd = later(reqTs, resTs)
 			leaveOut(sess, reqTs, resTs, fmt.Errorf("command %s has no decoder", cmdPkt.Header.Type))
-			continue
-		}
-
-		if err := settleHeld(cmdBuf[4], respFirst); err != nil {
-			if err := fail(reqTs, err); err != nil {
-				return err
-			}
 			continue
 		}
 
@@ -1888,6 +2263,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			// before the client's next command: the floor stays below it
 			// while the PREPARE is held (Session.NextRequest's answerUnread).
 			held = &heldPrepare{what: seq.what, sp: sp, eofSeq: seq.next, reqTs: reqTs, resTs: resTs, record: record}
+			clearPending(sess)
+			continue
+		}
+		if taken != nil {
+			// The exchange taken up after a response left out: held until the
+			// next answer confirms it (takenUp).
+			taken.emit, taken.resTs = func() { record(resTs) }, resTs
 			clearPending(sess)
 			continue
 		}

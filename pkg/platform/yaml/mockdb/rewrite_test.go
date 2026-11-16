@@ -988,14 +988,14 @@ func TestARewriteThatCannotMoveTheMockAsideChangesNothing(t *testing.T) {
 			t.Run(fail+"/"+rewrite, func(t *testing.T) {
 				switch fail {
 				case "the copy":
-					writeAsideFile = func(name string, data []byte, perm os.FileMode) error {
+					writeAsideFile = func(_, name string, data []byte, perm os.FileMode) error {
 						_ = os.WriteFile(name, data[:len(data)/2], perm)
 						return errors.New("no space left on device")
 					}
-					t.Cleanup(func() { writeAsideFile = os.WriteFile })
+					t.Cleanup(func() { writeAsideFile = yaml.WriteFileInRecording })
 				case "the replace":
-					defer func(r func(*zap.Logger, string, string) error) { replaceFile = r }(replaceFile)
-					replaceFile = func(*zap.Logger, string, string) error { return errors.New("the file is held open") }
+					defer func(r func(*zap.Logger, string, string, string) error) { replaceFile = r }(replaceFile)
+					replaceFile = func(*zap.Logger, string, string, string) error { return errors.New("the file is held open") }
 				}
 				dir := t.TempDir()
 				path := writePruneFixture(t, dir, "yaml", []*models.Mock{pruneHTTPMock(1), pruneHTTPMock(2)}, "")

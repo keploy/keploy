@@ -61,7 +61,8 @@ type MockEntry struct {
 	Unresolved string `json:"unresolved,omitempty" yaml:"unresolved,omitempty" bson:"unresolved,omitempty"`
 	// Reason says why keploy placed this entry where it is (a routing at
 	// record, a move by record's judging), in words with its undo; written
-	// under the proven switch only. Like every field of an
+	// under the proven switch, and, without it, on a worker-scope entry a
+	// user's worker-mock rule marked (WorkerRuleReason). Like every field of an
 	// entry, it is read and kept by each rewrite of mappings.yaml, whatever
 	// the switch.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty" bson:"reason,omitempty"`
@@ -333,16 +334,18 @@ type Mapping struct {
 	//
 	// keploy record writes it under the switch: a test mock recorded while no
 	// test's window was open (the gap's traffic, the app's start, what came
-	// after the last test) is the scope's, at the place its recording holds
-	// it (DeriveWindowMappings). Omitted when empty; a reader that predates it
-	// ignores the key.
+	// after the last test), and an answer its parser declares idle wherever
+	// it was recorded (IsIdleAnswer), is the scope's, at the place its
+	// recording holds it (DeriveWindowMappings). Omitted when empty; a reader
+	// that predates it ignores the key.
 	//
 	// keploy mock (record and replay) keeps it plainer: record lists here
-	// every call made outside every test's window after the first test began,
-	// with its claim's key and no place, and a reader may move a test's call
-	// here. Replay serves each from the set's start, in a test's window or
-	// between tests, at most once, and requires none of them
-	// (ScopeTableReq.Worker).
+	// every call made outside every test's window after the first test began
+	// and, under the switch, every idle answer recorded after it, inside a
+	// test's window or not, with its claim's key and no place, and a reader
+	// may move a test's call here. Replay serves each from the set's start,
+	// in a test's window or between tests, at most once, and requires none of
+	// them (ScopeTableReq.Worker).
 	Worker []MockEntry `json:"worker,omitempty" yaml:"worker,omitempty" bson:"worker,omitempty"`
 	// Source is the keploy command that wrote the file's test entries, when
 	// it is not keploy record: MappingSourceKeployTest. A writer that names
@@ -479,6 +482,100 @@ func (m *Mapping) BackgroundMockNames() []string {
 	return out
 }
 
+// WorkerRuleReasonPrefix starts the Reason of a worker-scope entry that a
+// user's worker-mock rule put there (WorkerRuleReason): a call the user said
+// the application makes on its own, not for one test, typically once in each
+// of its worker processes (a signing-key fetch, an ORM's table schema read).
+// Which test makes such a call at replay depends on which test first reaches a
+// cold process, so a replay without the proven switch serves the mocks of
+// entries carrying it to every test (ServeAsSession). A mock a test consumed
+// stays in that test's list as well, so a keploy that does not read the
+// marker replays the set as before. It is a stable token, the marker replays
+// read: it must never change, or sets marked with the old one are no longer
+// served so.
+const WorkerRuleReasonPrefix = "worker-rule:"
+
+// WorkerRuleReason is the Reason of a worker-scope entry the user's rule ruleID
+// marked.
+func WorkerRuleReason(ruleID string) string { return WorkerRuleReasonPrefix + ruleID }
+
+// IsWorkerRuleEntry reports whether e is a worker-scope entry a user's
+// worker-mock rule marked (WorkerRuleReasonPrefix).
+func IsWorkerRuleEntry(e MockEntry) bool { return strings.HasPrefix(e.Reason, WorkerRuleReasonPrefix) }
+
+// WorkerRuleMockNames is the names of m's worker-scope entries a user's rule
+// marked (IsWorkerRuleEntry), each once, in the scope's order; nil for none.
+func (m *Mapping) WorkerRuleMockNames() []string {
+	if m == nil {
+		return nil
+	}
+	var names []string
+	seen := map[string]bool{}
+	for _, e := range m.Worker {
+		if e.Name == "" || seen[e.Name] || !IsWorkerRuleEntry(e) {
+			continue
+		}
+		seen[e.Name] = true
+		names = append(names, e.Name)
+	}
+	return names
+}
+
+// ServeAsSession moves the mocks named in names out of filtered, the per-test
+// pool, into unfiltered, the session pool, as copies stated and derived
+// session lifetime (TestModeInfo.Lifetime, LifetimeDerived), so every test of
+// the run can be answered by them, again and again, and none is charged with
+// them; a loader that derives lifetimes again leaves them so. The stored
+// mocks are not written (models.Mock.ShallowCopy). With no names the pools
+// are handed back as they are.
+func ServeAsSession(filtered, unfiltered []*Mock, names []string) ([]*Mock, []*Mock) {
+	if len(names) == 0 {
+		return filtered, unfiltered
+	}
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	kept := make([]*Mock, 0, len(filtered))
+	for _, m := range filtered {
+		if m == nil || !want[m.Name] {
+			kept = append(kept, m)
+			continue
+		}
+		c := m.ShallowCopy()
+		c.TestModeInfo.Lifetime = LifetimeSession
+		c.TestModeInfo.LifetimeDerived = true
+		c.TestModeInfo.IsFiltered = false
+		unfiltered = append(unfiltered, c)
+	}
+	return kept, unfiltered
+}
+
+// WithoutWorkerRuleEntries is entries less those a user's worker-mock rule
+// marked (IsWorkerRuleEntry), which a replay without the proven switch alone
+// serves to every test. Every other reader of the worker scope (the proven
+// switch's serving, the background recordings a miss is told apart by) reads
+// the scope without them, as it was before rules marked any. It returns
+// entries itself when it holds none.
+func WithoutWorkerRuleEntries(entries []MockEntry) []MockEntry {
+	n := 0
+	for _, e := range entries {
+		if IsWorkerRuleEntry(e) {
+			n++
+		}
+	}
+	if n == 0 {
+		return entries
+	}
+	out := make([]MockEntry, 0, len(entries)-n)
+	for _, e := range entries {
+		if !IsWorkerRuleEntry(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 type MappedTestCase struct {
 	ID string `json:"id" yaml:"id" bson:"id"`
 	// Mocks is written and read as mock_entries (MarshalYAML, MarshalJSON);
@@ -498,6 +595,16 @@ type MappedTestCase struct {
 	// made without the switch. Read and kept by each rewrite of
 	// mappings.yaml, whatever the switch, as Key.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty" bson:"at,omitempty"`
+	// End is when the test ended in its recording: the latest end of its
+	// scope (POST /agent/scope/end) of the record that wrote At, so End - At
+	// is the test's recorded duration. keploy mock record writes it beside
+	// At, under the proven switch only, and every write that sets At sets
+	// End with it, so an entry never pairs one record's begin with another's
+	// end. Nothing in a replay acts on it: it is for readers that show the
+	// recording. Zero where At is, and for a test whose scope never ended.
+	// Read and kept by each rewrite of mappings.yaml, whatever the switch, as
+	// Key.
+	End time.Time `json:"end,omitzero" yaml:"end,omitempty" bson:"end,omitempty"`
 	// Real is the mock.real destinations the test used while it was open in
 	// its recording (design v14 §4): its replay runs on the real clock, and
 	// the verdict fails when CI never reaches one. Written, and acted on by
@@ -565,6 +672,7 @@ type persistedTestFormat struct {
 type writtenTestFormat struct {
 	persistedTestFormat `yaml:",inline"`
 	At                  time.Time     `json:"at,omitzero" yaml:"at,omitempty"`
+	End                 time.Time     `json:"end,omitzero" yaml:"end,omitempty"`
 	Real                []string      `json:"real,omitempty" yaml:"real,omitempty"`
 	Given               []GivenValue  `json:"given,omitempty" yaml:"given,omitempty"`
 	Variables           MockVariables `json:"variables,omitempty" yaml:"variables,omitempty"`
@@ -584,11 +692,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, End: tc.End, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, End: tc.End, Real: tc.Real, Given: tc.Given, Variables: tc.Variables, Key: tc.Key, Seed: tc.Seed})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -609,6 +717,39 @@ func recordedBeginYAML(node *yaml.Node) (time.Time, error) {
 		return time.Time{}, fmt.Errorf(errRecordedBegin, err)
 	}
 	return at.At, nil
+}
+
+// errRecordedEnd is a test entry whose end: is not a time.
+const errRecordedEnd = "a test's recorded end (end) is not a time: %w"
+
+// recordedEndYAML is a test entry's end:, whatever the proven switch, as
+// recordedBeginYAML. One that is not a time is an error, never a reason to
+// read the entry in another shape and lose its mocks.
+func recordedEndYAML(node *yaml.Node) (time.Time, error) {
+	if !nodeHasField(node, "end") {
+		return time.Time{}, nil
+	}
+	var end struct {
+		End time.Time `yaml:"end"`
+	}
+	if err := node.Decode(&end); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedEnd, err)
+	}
+	return end.End, nil
+}
+
+// recordedEndJSON is recordedEndYAML for a JSON entry.
+func recordedEndJSON(data []byte) (time.Time, error) {
+	if !jsonContainsField(data, "end") {
+		return time.Time{}, nil
+	}
+	var end struct {
+		End time.Time `json:"end"`
+	}
+	if err := json.Unmarshal(data, &end); err != nil {
+		return time.Time{}, fmt.Errorf(errRecordedEnd, err)
+	}
+	return end.End, nil
 }
 
 // errRecordedReal is a test entry whose real: is not a list of destinations.
@@ -847,6 +988,10 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	end, err := recordedEndYAML(node)
+	if err != nil {
+		return err
+	}
 	rl, err := recordedRealYAML(node)
 	if err != nil {
 		return err
@@ -870,7 +1015,7 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, rl, gv, vars, key, seed
+	tc.At, tc.End, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, end, rl, gv, vars, key, seed
 	return nil
 }
 
@@ -950,6 +1095,10 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	end, err := recordedEndJSON(data)
+	if err != nil {
+		return err
+	}
 	rl, err := recordedRealJSON(data)
 	if err != nil {
 		return err
@@ -973,7 +1122,7 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, rl, gv, vars, key, seed
+	tc.At, tc.End, tc.Real, tc.Given, tc.Variables, tc.Key, tc.Seed = at, end, rl, gv, vars, key, seed
 	return nil
 }
 

@@ -172,11 +172,19 @@ cases() {
   mkfifo "$WORK/${P}fifo-report/keploy/reports/test-run-0/test-set-0-report.yaml"
   ln -s /dev/zero "$WORK/${P}devzero-report/keploy/reports/test-run-0/test-set-0-report.yaml"
   mkfifo "$WORK/${P}fifo-reports-dir/keploy/reports"
+  # The report linked to /dev/zero is a link out of the recording: refused
+  # as any report keploy reads only inside the recording, saying it is a
+  # link and where it leads.
   for c in ${P}fifo-report ${P}devzero-report ${P}fifo-reports-dir; do
     run "$c"
-    m="not a regular file"
-    [ "$c" = "${P}fifo-reports-dir" ] && m="not a directory: it is a FIFO"
-    returned "$c" && says "$c" "$m"
+    case "$c" in
+    "${P}fifo-reports-dir") m="not a directory: it is a FIFO" ;;
+    "${P}devzero-report") m="test-set-0-report.yaml\\\" is read only inside its recording" ;;
+    *) m="not a regular file" ;;
+    esac
+    returned "$c" || continue
+    says "$c" "$m"
+    if [ "$c" = "${P}devzero-report" ]; then says "$c" "it is a link that leads out of it, to \\\"/dev/zero\\\""; fi
   done
 
   mkcase "${P}large-report"

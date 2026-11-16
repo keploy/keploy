@@ -3,6 +3,9 @@ package models
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -109,7 +112,107 @@ type FormData struct {
 	// JSON upload: the persister writes it to the test case's assets and
 	// clears it, and yaml/bson "-" keep it out of stored test cases.
 	FileContents [][]byte `json:"file_contents,omitempty" bson:"-" yaml:"-"`
+	// Captured names, index-aligned with FileNames, the file a part's bytes
+	// are in as this process received the test case from its agent (the
+	// agent client, platform/http): the test store copies a part into the
+	// test case's assets, and removes the file, only from here. It is never
+	// encoded, so a test case read back (a set's file, the cloud, the wire)
+	// never names a file for the store to read or remove: its Paths name
+	// files already kept beside it, opened only inside the recording.
+	Captured []string `json:"-" bson:"-" yaml:"-"`
 }
+
+// FormPartLeftOut names a form file part a test case was stored without:
+// the test store had nothing to keep the part's file from (no file a capture
+// left, no contents, and no file in the recording at the path it names).
+// Path is the path the part named, empty when it named none.
+type FormPartLeftOut struct {
+	TestSet  string
+	TestCase string
+	Key      string
+	FileName string
+	Path     string
+}
+
+// String says the part as a recording's summary lists it, a log line: its
+// file name by its size and its path by FormFilePathLogText.
+func (p FormPartLeftOut) String() string {
+	path := "no path"
+	if p.Path != "" {
+		path = fmt.Sprintf("path %q", FormFilePathLogText(p.Path))
+	}
+	return fmt.Sprintf("%s/%s: form part %q (file %s, %s)", p.TestSet, p.TestCase, p.Key, FormFileNameLogText(p.FileName), path)
+}
+
+// FormFileNameLogText is a form part's file name as a log line or an error
+// names it: by its size. The name is the app's (multipart's filename=), and
+// keploy's log lines never carry the app's traffic.
+func FormFileNameLogText(name string) string {
+	return "(file name withheld, " + strconv.Itoa(len(name)) + " bytes)"
+}
+
+// FormFilePathLogText is a path that ends in a form part's file as a log line
+// or an error names it: its folder (the recording's assets folder, or the
+// capture's), and its file name, which the app's request named, by
+// FormFileNameLogText. "" for "".
+func FormFilePathLogText(path string) string {
+	if path == "" {
+		return ""
+	}
+	dir, base := filepath.Split(path)
+	return dir + FormFileNameLogText(base)
+}
+
+// FormFilePathsInError is err, an error about a file that ends in a form
+// part's file name, with each of paths written in its text as
+// FormFilePathLogText writes it: the os package names the whole path in its
+// errors, and keploy's recording-file helpers the path within the recording,
+// plain or quoted. errors.Is and errors.As still see err. err itself when its
+// text names none of paths; nil for nil.
+func FormFilePathsInError(err error, paths ...string) error {
+	if err == nil {
+		return nil
+	}
+	text := err.Error()
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		shaped := FormFilePathLogText(p)
+		text = strings.ReplaceAll(text, strconv.Quote(p), strconv.Quote(shaped))
+		text = strings.ReplaceAll(text, p, shaped)
+	}
+	if text == err.Error() {
+		return err
+	}
+	return formFileErr{err: err, text: text}
+}
+
+// FormFileError is Err, an error about a file that ends in a form part's file
+// name (each of Paths), as a caller hands it on: its text whole, for the
+// user's own view (a test's report names the file the test case names), and
+// LogText for a log line. A caller that logs an error it is handed finds it
+// with errors.As (pkg.LoggableAnswerError).
+type FormFileError struct {
+	Err   error
+	Paths []string
+}
+
+func (e FormFileError) Error() string { return e.Err.Error() }
+func (e FormFileError) Unwrap() error { return e.Err }
+
+// LogText is e's text as a log line carries it: each of e.Paths by
+// FormFilePathLogText (FormFilePathsInError).
+func (e FormFileError) LogText() string { return FormFilePathsInError(e.Err, e.Paths...).Error() }
+
+// formFileErr is an error whose text FormFilePathsInError shaped.
+type formFileErr struct {
+	err  error
+	text string
+}
+
+func (e formFileErr) Error() string { return e.text }
+func (e formFileErr) Unwrap() error { return e.err }
 
 // HTTPResp is an HTTP response. StreamBody is a streamed body's frames, as a
 // recording keeps them in YAML (MarshalYAML). JSON carries the body alone, one

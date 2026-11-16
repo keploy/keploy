@@ -393,7 +393,9 @@ func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[
 			for _, tc := range m.TestCases {
 				mappings[tc.ID] = tc.Mocks
 			}
-			worker = m.Worker
+			// The entries worker-mock rules marked are no part of the
+			// scope the switch serves (models.WithoutWorkerRuleEntries).
+			worker = models.WithoutWorkerRuleEntries(m.Worker)
 			conc = concurrencyOf(m.Groups, mappings, m.Shared)
 			recordedWith = m.RecordedWith
 		}
@@ -586,7 +588,7 @@ func (p *exactPlan) returnedMissed(results []models.TestResult) []string {
 	for _, r := range lastResultOfEachTest(results) {
 		for _, c := range r.FailureInfo.UnmatchedCalls {
 			if owner, ok := p.returned[c.ClosestMock]; ok && owner != r.TestCaseID {
-				out = append(out, fmt.Sprintf("%s: %s (%s, given back to %s)", r.TestCaseID, c.Named(), c.ClosestMock, owner))
+				out = append(out, fmt.Sprintf("%s: %s (%s, given back to %s)", r.TestCaseID, models.UnmatchedCallLogName(c), c.ClosestMock, owner))
 			}
 		}
 	}

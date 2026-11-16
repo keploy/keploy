@@ -60,7 +60,7 @@ func startConsumerWith(t *testing.T, logger *zap.Logger) *consumerRun {
 				for _, e := range entries {
 					c.mapped <- tn + "/" + e.Name
 				}
-			})
+			}, nil)
 	}()
 	t.Cleanup(func() {
 		c.closeMappings()

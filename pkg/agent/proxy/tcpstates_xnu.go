@@ -1,5 +1,7 @@
 package proxy
 
+import "fmt"
+
 // XNU's TCP states (bsd/netinet/tcp_fsm.h), as TCP_CONNECTION_INFO's
 // tcpi_state gives them on macOS. They number differently from Linux's
 // (include/net/tcp_states.h: ESTABLISHED is 1 there, 4 here). They and the
@@ -18,6 +20,31 @@ const (
 	xnuTCPFinWait2    = 9
 	xnuTCPTimeWait    = 10
 )
+
+// xnuTCPStateNames are XNU's names for its TCP states, as tcp_fsm.h's
+// tcpstates and macOS's netstat print them.
+var xnuTCPStateNames = map[uint8]string{
+	xnuTCPClosed:      "CLOSED",
+	xnuTCPListen:      "LISTEN",
+	xnuTCPSynSent:     "SYN_SENT",
+	xnuTCPSynReceived: "SYN_RCVD",
+	xnuTCPEstablished: "ESTABLISHED",
+	xnuTCPCloseWait:   "CLOSE_WAIT",
+	xnuTCPFinWait1:    "FIN_WAIT_1",
+	xnuTCPClosing:     "CLOSING",
+	xnuTCPLastAck:     "LAST_ACK",
+	xnuTCPFinWait2:    "FIN_WAIT_2",
+	xnuTCPTimeWait:    "TIME_WAIT",
+}
+
+// xnuTCPStateName names XNU TCP state s for a log line: XNU's name for it,
+// or its number for a state XNU has no name for.
+func xnuTCPStateName(s uint8) string {
+	if name, ok := xnuTCPStateNames[s]; ok {
+		return name
+	}
+	return fmt.Sprintf("TCP state %d", s)
+}
 
 // xnuClientGone reports whether a socket in XNU TCP state state, which its
 // handler has not closed, has received its client's FIN or a reset:

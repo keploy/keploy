@@ -538,7 +538,7 @@ func TestEachTestWorkersMissesAreReadByItsOwnTestsAlone(t *testing.T) {
 	w1, w2 := s1.(workerMisses), s2.(workerMisses)
 	miss := func(call string, inst uint32) {
 		report := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: call}
-		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
+		p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
 	}
 	read := func(name string, r workerMisses) []string {
 		t.Helper()
