@@ -801,3 +801,7 @@ func (p *Proxy) pairedBytesUnsupported(err error) {
 // which the kernel takes only at the sequence number it expects next (RFC
 // 5961): every byte the application had sent had arrived (readPlainOnItsWay).
 func resetAfterSent(err error) bool { return errors.Is(err, unix.ECONNRESET) }
+
+// resetDropsUnread is false on Linux: a socket the application reset still
+// gives reads what it held unread, which FIONREAD counts (readUnread).
+func resetDropsUnread(proxySide) bool { return false }
