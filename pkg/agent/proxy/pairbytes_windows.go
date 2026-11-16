@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -244,11 +245,18 @@ const (
 	winTCPTimeWait    = 10
 )
 
+// winTCPClosedByFIN is no TCPSTATE: it is a proxy's side whose connection
+// ended with the application's FIN, which its socket reads as CLOSED. Windows
+// takes the TIME_WAIT that follows the side's own FIN, and the end of a
+// LAST_ACK, off the socket while the proxy still holds it, so an open socket
+// reads CLOSED after a FIN as after a reset (readProxySide tells them apart).
+const winTCPClosedByFIN = winTCPTimeWait + 1
+
 // orphanEstablished is never a Windows wait's: it waits for no orphan.
 const orphanEstablished = winTCPEstablished
 
 func tcpStateName(s uint8) string {
-	names := [...]string{"CLOSED", "LISTEN", "SYN_SENT", "SYN_RCVD", "ESTABLISHED", "FIN_WAIT1", "FIN_WAIT2", "CLOSE_WAIT", "CLOSING", "LAST_ACK", "TIME_WAIT"}
+	names := [...]string{"CLOSED", "LISTEN", "SYN_SENT", "SYN_RCVD", "ESTABLISHED", "FIN_WAIT1", "FIN_WAIT2", "CLOSE_WAIT", "CLOSING", "LAST_ACK", "TIME_WAIT", "CLOSED by the application's FIN"}
 	if int(s) < len(names) {
 		return names[s]
 	}
@@ -257,11 +265,12 @@ func tcpStateName(s uint8) string {
 
 // peerEnded says whether the proxy's side of a connection, in state, has taken
 // the application's FIN: CLOSE_WAIT, or LAST_ACK, CLOSING or TIME_WAIT after
-// a FIN of its own. A reset is not one: Windows's side is not known to take a
-// reset only after every byte sent before it, so a reset side short of what
-// was written is waited for, and unknown when nothing moves.
+// a FIN of its own, or CLOSED after either (winTCPClosedByFIN). A reset is not
+// one: Windows's side is not known to take a reset only after every byte sent
+// before it, so a reset side short of what was written is waited for, and
+// unknown when nothing moves.
 func peerEnded(state uint8) bool {
-	return state == winTCPCloseWait || state == winTCPLastAck || state == winTCPClosing || state == winTCPTimeWait
+	return state == winTCPCloseWait || state == winTCPLastAck || state == winTCPClosing || state == winTCPTimeWait || state == winTCPClosedByFIN
 }
 
 // dataReceived is what ps, a proxy's side, received of the application's
@@ -275,7 +284,9 @@ func (pc *pairedConn) readSide() proxySide { return readProxySide(pc.conn) }
 const sioTCPInfo = 0xD8000027
 
 // readProxySide reads the proxy's side of a connection from its own socket:
-// TCP_INFO_v0's State (offset 0) and BytesIn (offset 56).
+// TCP_INFO_v0's State (offset 0) and BytesIn (offset 56). A side that reads
+// CLOSED ended either with the application's FIN or with a reset, told apart
+// by endedByFIN; the FIN's is winTCPClosedByFIN.
 func readProxySide(conn *net.TCPConn) proxySide {
 	rc, err := conn.SyscallConn()
 	if err != nil {
@@ -301,7 +312,34 @@ func readProxySide(conn *net.TCPConn) proxySide {
 	if state > winTCPTimeWait {
 		return proxySide{err: fmt.Errorf("SIO_TCP_INFO gave an unknown TCP state %d", state)}
 	}
+	if state == winTCPClosed && endedByFIN(rc) {
+		state = winTCPClosedByFIN
+	}
 	return proxySide{received: binary.LittleEndian.Uint64(info[56:64]), counted: true, state: uint8(state)}
+}
+
+// msgPeek is MSG_PEEK.
+const msgPeek = 0x2
+
+// endedByFIN says whether rc, a socket that reads CLOSED, ended with the
+// application's FIN. A one-byte MSG_PEEK takes nothing, and on a CLOSED
+// socket it answers at once (nothing more can arrive): with the next unread
+// byte, or with 0 bytes, the FIN, after a FIN; with WSAECONNRESET after a
+// reset, which drops whatever was unread. Any other answer is not taken as
+// the FIN. Measured on Windows 11 (10.0.26200) for the side's FIN first
+// (TIME_WAIT), the application's first (LAST_ACK), and a reset in
+// ESTABLISHED and in FIN_WAIT_2, with bytes unread and without.
+func endedByFIN(rc syscall.RawConn) bool {
+	peeked := false
+	// A socket closed since is read as no FIN: Control runs nothing.
+	_ = rc.Control(func(fd uintptr) {
+		var b byte
+		buf := windows.WSABuf{Len: 1, Buf: &b}
+		var n uint32
+		flags := uint32(msgPeek)
+		peeked = windows.WSARecv(windows.Handle(fd), &buf, 1, &n, &flags, nil, nil) == nil
+	})
+	return peeked
 }
 
 // fionread is FIONREAD: _IOR('f', 127, u_long).
