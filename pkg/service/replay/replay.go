@@ -6589,16 +6589,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		// The set's recording lacks mocks its agent dropped after capturing
 		// them: a call that found no mock may have needed one of them
-		// (record_mocks_dropped.go).
+		// (record_mocks_dropped.go). A set not judged already names the drop
+		// in its reason too. A set that stopped otherwise (its app exited,
+		// its user stopped it) keeps that status, as a set whose stop drain
+		// failed does, so the run stops past an app that exited; a WARN names
+		// the drop. At the set's end a status other than PASSED or FAILED is
+		// such a stop (resolveTestSetStatus).
 		if d := conf.RecordMocksDropped; d != nil && d.Dropped() && (len(missedTests) > 0 || len(unclaimed) > 0) {
 			why := mocksDroppedWhy(d, missedTests, len(unclaimed))
-			if provenswitch.On() && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
+			_, stopped := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil)
+			switch {
+			case notJudged != "":
 				notJudged = alsoNotJudged(notJudged, "not judged: "+why)
+				r.logger.Warn(why, zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
+			case !stopped:
+				notJudged = "not judged: " + why
 				r.logger.Error("test-set is not judged: "+why+"; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
 				testSetStatus = models.TestSetStatusInternalErr
 				r.markNotJudged(testSetID)
-			} else {
+			default:
 				r.logger.Warn(why, zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
 			}
 		}
@@ -6634,6 +6644,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testSetStatus = models.TestSetStatusInternalErr
 			r.markNotJudged(testSetID)
 		}
+	} else if d := conf.RecordMocksDropped; d != nil && d.Dropped() && len(missedTests) > 0 {
+		// With the switch off the verdict is as before, and a WARN names the
+		// drop beside a test's miss: the set's end reads no other call.
+		r.logger.Warn(mocksDroppedWhy(d, missedTests, 0), zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
 	}
 	// With the proven switch off nothing else reads what the application
 	// consumed after the set's last read: the last test's publish made after

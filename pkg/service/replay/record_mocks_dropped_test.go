@@ -15,11 +15,12 @@ import (
 // mocks after capturing them (models.TestSet.RecordMocksDropped).
 type droppedRecordingConf struct {
 	prTestSetConf
-	d *models.MockDropSummary
+	d      *models.MockDropSummary
+	killed string // RecordStopKilled
 }
 
 func (c droppedRecordingConf) Read(context.Context, string) (*models.TestSet, error) {
-	return &models.TestSet{RecordMocksDropped: c.d}, nil
+	return &models.TestSet{RecordMocksDropped: c.d, RecordStopKilled: c.killed}, nil
 }
 
 func loginDropped() *models.MockDropSummary {
@@ -42,7 +43,7 @@ func TestRunTestSet_AMissInASetWhoseRecordingDroppedMocksIsNotJudged(t *testing.
 		reads func() ([]models.UnmatchedCall, error)
 		where string
 	}{
-		{"a test's own call", misses(nil, ownMiss), "1 test(s) (test-1)"},
+		{"a test's own call", misses(nil, ownMiss), "1 test(s) (test-2)"},
 		{"a call before the first test", misses(beforeFirst), "1 call(s) no test owns"},
 		{"a call after the last test", misses(nil, nil, afterLast), "1 call(s) no test owns"},
 	} {
@@ -114,12 +115,73 @@ func TestRunTestSet_AMissInASetWhoseRecordingDroppedMocksIsNamedWithTheSwitchOff
 	}
 	found := false
 	for _, e := range logs.FilterMessageSnippet("the recording's agent dropped mocks").All() {
-		if e.Level == zap.WarnLevel && strings.Contains(e.Message, "1 test(s) (test-1)") && e.ContextMap()["next_step"] == mocksDroppedNext {
+		if e.Level == zap.WarnLevel && strings.Contains(e.Message, "1 test(s) (test-2)") && e.ContextMap()["next_step"] == mocksDroppedNext {
 			found = true
 		}
 	}
 	if !found {
 		t.Fatalf("no WARN names the drop with its next step: %+v", logs.All())
+	}
+
+	// No miss, or a summary that counts no drop: no WARN names one.
+	for _, tc := range []struct {
+		name  string
+		d     *models.MockDropSummary
+		reads func() ([]models.UnmatchedCall, error)
+	}{
+		{"no miss", loginDropped(), misses()},
+		{"a zero summary", &models.MockDropSummary{}, misses(nil, ownMiss)},
+	} {
+		core, logs := observer.New(zap.WarnLevel)
+		h := newPartialRunHarness(t, 2, 0)
+		h.replayer.logger = zap.New(core)
+		h.replayer.testSetConf = droppedRecordingConf{d: tc.d}
+		h.instr.mockErrorsFor = tc.reads
+		h.run(t)
+		if got := logs.FilterMessageSnippet("dropped mocks").All(); len(got) != 0 {
+			t.Fatalf("%s: a WARN names a drop: %+v", tc.name, got)
+		}
+	}
+}
+
+// A set that stopped otherwise keeps that status: an app that exited after
+// the set's last test ends it APP_HALTED, never not judged, which would keep
+// the run going past an app that exited. A WARN names the drop.
+func TestRunTestSet_AMissInASetWhoseRecordingDroppedMocksKeepsItsAppsHalt(t *testing.T) {
+	provenOn(t, true)
+	core, logs := observer.New(zap.WarnLevel)
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.logger = zap.New(core)
+	h.replayer.testSetConf = droppedRecordingConf{d: loginDropped()}
+	h.instr.mockErrorsFor = misses(ownMiss)
+	h.replayer.instrumentation = &haltsAfterLastTest{prInstr: h.instr, at: 2} // the last test's read
+
+	if status := h.run(t); status != models.TestSetStatusAppHalted || h.replayer.notJudged("test-set-0") {
+		t.Fatalf("status %s, not judged %v; want APP_HALTED, judged: the app exited after the last test", status, h.replayer.notJudged("test-set-0"))
+	}
+	if n := len(logs.FilterMessageSnippet("the recording's agent dropped mocks").FilterMessageSnippet("1 test(s) (test-1)").All()); n != 1 {
+		t.Fatalf("%d WARNs name the drop; want 1: %+v", n, logs.All())
+	}
+}
+
+// A set not judged already (here a call after its last test, of a recording
+// whose stop had to kill the app) names the drop in its reason too.
+func TestRunTestSet_ASetNotJudgedAlreadyNamesItsRecordingsDroppedMocks(t *testing.T) {
+	provenOn(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.testSetConf = droppedRecordingConf{d: loginDropped(), killed: recordingKill}
+	h.instr.mockErrorsFor = misses(nil, nil, afterLast)
+
+	status := h.run(t)
+
+	reason := h.report.report.FailureReason
+	if status != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+		t.Fatalf("status %s, not judged %v; want INTERNAL_ERR, not judged", status, h.replayer.notJudged("test-set-0"))
+	}
+	for _, want := range []string{"the recording's stop had to kill the application", "the recording's agent dropped mocks", "1 call(s) no test owns"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("failure reason %q does not say %q", reason, want)
+		}
 	}
 }
 

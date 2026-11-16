@@ -22,9 +22,12 @@ import (
 // So when a call of such a set found no mock (a test's own, one made before
 // its first test or after its last, one a parser held), under the proven
 // switch the set is not judged: its reason names the drop and the calls'
-// tests, and says to record the set again. With the switch off its verdict is
-// as before, and a WARN names the drop beside the miss. A set none of whose
-// calls missed is judged as any other: what was dropped, it did not need.
+// tests, and says to record the set again. A set that stopped otherwise (its
+// app exited, its user stopped it) keeps that status, and one not judged
+// already names the drop in its reason too. With the switch off its verdict
+// is as before, and a WARN names the drop beside a test's miss. A set none of
+// whose calls missed is judged as any other: what was dropped, it did not
+// need.
 
 // mocksDroppedNext is what to do about a set whose recording's agent dropped
 // mocks.
