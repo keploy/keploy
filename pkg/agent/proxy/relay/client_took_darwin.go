@@ -3,7 +3,9 @@
 package relay
 
 import (
+	"crypto/tls"
 	"encoding/binary"
+	"net"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -60,6 +62,47 @@ import (
 // than 2^31: between two looks the socket sends at most one chunk and what
 // its send buffer held), so they are 64 bits, like Linux's, and agree with
 // each other: clientLook.acked and written count from the same byte.
+//
+// What the client acknowledged is counted, on a socket the relay is the only
+// writer of, from the bytes written to it instead (countWrites). xnu drops
+// from the send buffer exactly the bytes an acknowledgement covers (sbdrop in
+// tcp_input, bsd/netinet/tcp_input.c:3863, and :5734-5737 for the one that
+// acknowledges the proxy's FIN, which is no byte of it), and nothing else
+// takes bytes out of it while the socket is open, nor once it is reset:
+// tcp_close (bsd/netinet/tcp_subr.c:1782) and soisdisconnected
+// (bsd/kern/uipc_socket2.c:278) leave it as it is, and only sbrelease, as the
+// socket is torn down (uipc_socket2.c:831), empties it. So every byte
+// appended to it, less tcpi_snd_sbbytes, is every byte the client's stack
+// acknowledged, at any instant, whatever snd_nxt does: a closed receive
+// window's probes and the pull-backs of snd_nxt after them, a resend, a reset.
+// xnu counts the bytes appended (so_tc_stats, uipc_socket2.c:839-853), but no
+// getsockopt answers that count, so the relay keeps its own: every byte it
+// writes to the client goes through a conn that counts it (writeCountingConn), from
+// what the send buffer held as the count began (in New, before the relay
+// writes). That count is exact while no Write is running and none failed. A
+// Write running as the socket answers may have appended any part of its
+// bytes; a Write that failed may have appended bytes it did not say it wrote:
+// sosend (bsd/kern/uipc_socket.c) appends in pieces, dropping the socket's
+// lock to copy each (:2197) and checking the socket again before the next
+// (sosendcheck, :2142), so a reset that lands in that gap fails the call with
+// pieces already appended, and write(2) answers the error, not their count.
+// The count is then a range, from the bytes the Writes said they wrote (lo)
+// to those and every byte of the running and failed Writes (hi). A look that
+// finds the connection open counts lo, so a chunk is taken only once it was
+// acknowledged for certain. A look that finds it closed counts the least of
+// what is certain to be no less than what the client acknowledged: hi;
+// snd_nxt, which snd_una is never past (tcp_input sets snd_nxt to snd_una
+// when it was behind, :4233, :5039 and :5764); and, when the count of
+// sequence numbers above is exact, that count, but never less than lo. So a
+// chunk is refused only when the client did not acknowledge it, for certain.
+//
+// The count holds only while every byte appended to the socket went through
+// it. It is not taken when a TLS layer is between the relay and the socket
+// (the bytes the relay writes are not the bytes appended: the count of
+// sequence numbers answers alone there), nor when the socket cannot answer as
+// it begins. A send buffer that holds more than could have been appended
+// through the count says a write went around it: the socket says nothing from
+// then on (clientUnknown), and every chunk is teed as it is written.
 //
 // The states (bsd/netinet/tcp_fsm.h) read as Linux's do (client_took_linux.go):
 // ESTABLISHED, open; CLOSE_WAIT and LAST_ACK, the client's FIN is in; CLOSED,
@@ -164,6 +207,17 @@ type tcpClientSocket struct {
 	// received (hasBase: one did), for finBeforeReset.
 	finIn, hasBase bool
 	base           received
+
+	// writes counts the bytes the relay writes to the socket (countWrites),
+	// nil when they are not counted; unsent0 is what its send buffer held as
+	// the count began. ackedLo is the most acknowledged bytes a look has
+	// counted from them for certain; bypassed: a look found more bytes in the
+	// send buffer than could have been written through the count. Under mu,
+	// but for writes, which has its own.
+	writes   *writeCount
+	unsent0  uint64
+	ackedLo  uint64
+	bypassed bool
 }
 
 // newTCPClientSocket is the client socket rc (clientSocketOf), with its
@@ -295,10 +349,21 @@ func (s *tcpClientSocket) look() clientLook {
 }
 
 func (s *tcpClientSocket) lookAt(fd uintptr) {
+	// The count of writes, before and after the question: the socket
+	// answered between the two.
+	var before tally
+	if s.writes != nil {
+		before = s.writes.now()
+	}
 	if !s.askInfo(fd, &s.buf, &s.info) {
 		return
 	}
 	acked, exact := s.counted(&s.info)
+	if s.writes != nil {
+		if acked, exact = s.fromWrites(&s.info, before, s.writes.now(), acked, exact); !exact {
+			return
+		}
+	}
 	switch s.info.state {
 	case tcpsClosed, tcpsTimeWait:
 		if exact {
@@ -312,6 +377,12 @@ func (s *tcpClientSocket) lookAt(fd uintptr) {
 }
 
 func (s *tcpClientSocket) written() (uint64, bool) {
+	if s.writes != nil {
+		w := s.writes.now()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.unsent0 + w.said + w.maybe, !s.bypassed
+	}
 	s.wrote, s.wroteOK = 0, false
 	if err := s.rc.Control(s.count); err != nil {
 		return 0, false
@@ -329,6 +400,144 @@ func (s *tcpClientSocket) countAt(fd uintptr) {
 	if acked, exact := s.counted(&s.winfo); exact {
 		s.wrote, s.wroteOK = acked+uint64(s.winfo.sbbytes), true
 	}
+}
+
+// fromWrites is what a look counts acknowledged from the bytes written through
+// the count, before and after info was answered: for certain, while the
+// connection is open, and no less than the client's stack did once it is
+// closed; seqAcked is what the count of sequence numbers counted from the same
+// answer, exactly when seqExact. False once the send buffer has held more than
+// could have been written through the count: the socket cannot say.
+func (s *tcpClientSocket) fromWrites(info *darwinTCPInfo, before, after tally, seqAcked uint64, seqExact bool) (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	held := int64(info.sbbytes)
+	hi := int64(s.unsent0+after.said+after.maybe) - held
+	// The send buffer holds no more than every byte that may have been
+	// appended to it, less those acknowledged for certain: more says a
+	// write went around the count.
+	if hi < int64(s.ackedLo) {
+		s.bypassed = true
+	}
+	if s.bypassed {
+		return 0, false
+	}
+	// What a look counts for certain never goes back: the client's stack
+	// acknowledges on, and lo is less than it by the bytes a running Write
+	// had appended but not said yet.
+	s.ackedLo = max(s.ackedLo, uint64(max(int64(s.unsent0+before.said)-held, 0)))
+	if info.state != tcpsClosed && info.state != tcpsTimeWait || uint64(hi) == s.ackedLo {
+		return s.ackedLo, true
+	}
+	// s.nxt is never negative (snd_una is never past snd_nxt, and the count
+	// of sequence numbers starts at or before it), and a negative one
+	// would bound nothing here.
+	acked := min(uint64(hi), uint64(s.nxt))
+	if seqExact {
+		acked = min(acked, max(seqAcked, s.ackedLo))
+	}
+	return acked, true
+}
+
+// writeCount counts the bytes written to a client's socket through
+// writeCountingConn: said, those the Writes said they wrote; running, every
+// byte of the Writes still running; unsure, those failed Writes did not say
+// they wrote, which they may have.
+type writeCount struct {
+	mu                    sync.Mutex
+	said, running, unsure uint64
+}
+
+// tally is a writeCount at one instant: the bytes the Writes said they wrote,
+// and maybe, those that may have been written as well.
+type tally struct{ said, maybe uint64 }
+
+func (c *writeCount) now() tally {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return tally{said: c.said, maybe: c.running + c.unsure}
+}
+
+// writeCountingConn is the client conn the relay writes through on macOS, counting
+// each Write (writeCount). It promotes only net.Conn's methods: a ReadFrom of
+// the conn under it would write around the count.
+type writeCountingConn struct {
+	net.Conn
+	count *writeCount
+}
+
+func (c *writeCountingConn) Write(b []byte) (int, error) {
+	c.count.mu.Lock()
+	c.count.running += uint64(len(b))
+	c.count.mu.Unlock()
+	n, err := c.Conn.Write(b)
+	c.count.mu.Lock()
+	defer c.count.mu.Unlock()
+	// A Write returns no more than it was given (io.Writer).
+	c.count.running -= uint64(len(b))
+	c.count.said += uint64(n)
+	c.count.unsure += uint64(len(b) - n)
+	return n, err
+}
+
+// NetConn is the conn under the count, for the walks that look under the
+// relay's conns for the socket or a TLS layer.
+func (c *writeCountingConn) NetConn() net.Conn { return c.Conn }
+
+// CloseWrite half-closes the conn under the count (halfCloseWrite): an
+// embedded net.Conn does not promote it. halfCloseWrite's caller reads only
+// whether it did.
+func (c *writeCountingConn) CloseWrite() error {
+	if !halfCloseWrite(&c.Conn) {
+		return errNoCloseWrite
+	}
+	return nil
+}
+
+// countWrites is src as the relay writes to it: through a count of every byte
+// written (writeCountingConn) when c is the TCP socket under src (clientSocketOf)
+// with no TLS layer between them, and the socket answers as the count begins;
+// src as it is otherwise, and its socket answers by the count of sequence
+// numbers alone.
+func countWrites(src net.Conn, c clientSocket) net.Conn {
+	s, ok := c.(*tcpClientSocket)
+	if !ok || tlsLayerUnder(src) || !s.beginCount() {
+		return src
+	}
+	return &writeCountingConn{Conn: src, count: s.writes}
+}
+
+// tlsLayerUnder reports whether a *tls.Conn is among c and the conns under it
+// (NetConn), down to the socket clientSocketOf found within the same bound.
+func tlsLayerUnder(c net.Conn) bool {
+	for i := 0; c != nil && i < 16; i++ { // bounded: a cycle must not hang
+		if _, ok := c.(*tls.Conn); ok {
+			return true
+		}
+		u, ok := c.(interface{ NetConn() net.Conn })
+		if !ok {
+			return false
+		}
+		c = u.NetConn()
+	}
+	return false
+}
+
+// beginCount begins the count of writes: what the send buffer holds now, and
+// the count of sequence numbers' first look, from one answer, so both count
+// from the client's first unacknowledged byte; false when the socket cannot
+// answer. Run in New, before the relay writes, and before any look.
+func (s *tcpClientSocket) beginCount() bool {
+	// A socket Control cannot reach (closed) asks nothing, and ok stays
+	// false.
+	ok := false
+	_ = s.rc.Control(func(fd uintptr) { ok = s.askInfo(fd, &s.buf, &s.info) })
+	if !ok {
+		return false
+	}
+	s.counted(&s.info)
+	s.unsent0, s.writes = uint64(s.info.sbbytes), &writeCount{}
+	return true
 }
 
 // A reset after the client's FIN, read as the client's end.

@@ -17,6 +17,8 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 )
 
@@ -606,41 +608,6 @@ func dialSmallWindow(t *testing.T) (app, proxyClient net.Conn) {
 	return app, proxyClient
 }
 
-// writtenTo is how many bytes were written to the socket under c in all, as
-// the test asks it, apart from the relay's own count: the bytes its peer
-// acknowledged (ackedOf) and those it has not yet, sent or not (queuedOf), on
-// a try in which the acknowledgements did not move.
-func writtenTo(t *testing.T, c net.Conn) uint64 {
-	t.Helper()
-	rc, err := c.(syscall.Conn).SyscallConn()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var n uint64
-	if err := rc.Control(func(fd uintptr) {
-		for try := 0; ; try++ {
-			if try == 1000 {
-				t.Error("the acknowledgements moved on each of 1000 tries")
-				return
-			}
-			before, bok := ackedOf(fd)
-			queued, qerr := queuedOf(fd)
-			after, aok := ackedOf(fd)
-			if !bok || !aok || qerr != nil {
-				t.Errorf("the socket cannot say what its peer acknowledged (%v, %v), or what it holds: %v", bok, aok, qerr)
-				return
-			}
-			if before == after {
-				n = after + uint64(queued)
-				return
-			}
-		}
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return n
-}
-
 // On a real socket, written counts every byte written to it: those the
 // client's stack has acknowledged and those it has not yet, from one answer
 // on macOS. Here what the proxy wrote fits the client's window, so the count
@@ -658,5 +625,276 @@ func TestWrittenCountsEveryByteWrittenToARealSocket(t *testing.T) {
 	}
 	if got, ok := s.written(); !ok || got != n {
 		t.Fatalf("written %d (ok %v), want the %d bytes written", got, ok, n)
+	}
+}
+
+// seenWrites counts the bytes written through it to the socket under it (n),
+// as a test counts them, apart from the relay's own count.
+type seenWrites struct {
+	net.Conn
+	n atomic.Uint64
+}
+
+func (c *seenWrites) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	c.n.Add(uint64(n))
+	return n, err
+}
+
+func (c *seenWrites) NetConn() net.Conn { return c.Conn }
+
+// acked is how many of the bytes written through c the socket's peer has
+// acknowledged: those less the bytes the socket still holds (queuedOf), while
+// no Write runs.
+func (c *seenWrites) acked(t *testing.T) uint64 {
+	t.Helper()
+	rc, err := c.Conn.(syscall.Conn).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queued int
+	var qerr error
+	if err := rc.Control(func(fd uintptr) { queued, qerr = queuedOf(fd) }); err != nil || qerr != nil {
+		t.Fatalf("the socket cannot say what it holds: %v %v", err, qerr)
+	}
+	return c.n.Load() - uint64(queued)
+}
+
+// The rows below need the client's receive window closed: the client reads
+// nothing while the proxy has more to send. Linux counts what the client
+// acknowledged from tcpi_bytes_acked, and macOS from the bytes written to the
+// socket less those its send buffer holds (client_took_darwin.go), so both
+// counts are exact while the window is closed, and the rows run on both.
+
+// A client that half-closed and does not read for a while (its receive buffer
+// full, so its stack acknowledges nothing) has not answered for the answer the
+// destination sends after its FIN: the answer is set aside, not teed, while
+// the client reads nothing, and the destination's stream does not end. That
+// holds once the relay has forwarded the destination's FIN too, with the
+// proxy's socket in LAST_ACK, which reads as the client's FIN in and the
+// connection not closed. Once the client reads, its stack acknowledges, the
+// answer is teed, and the client gets the whole answer, the parser all of it.
+func TestAfterTheClientHalfClosed_AClientNotReadingYetIsWaitedFor(t *testing.T) {
+	t.Parallel()
+	// What the destination sends before its FIN is more than the client's
+	// receive buffer holds, so it fills it while the client does not read.
+	app, proxyClient := dialSmallWindow(t)
+	proxyServer, server := loopbackPair(t)
+	core, logs := observer.New(zapcore.DebugLevel)
+	r := New(Config{Logger: zap.New(core), HalfCloseGrace: time.Minute}, proxyClient, connseq.NewUpstream(proxyServer))
+	looks := &countedLooks{clientSocket: r.client}
+	r.client = looks
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = r.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	streams := make(chan string, 1)
+	go func() { go streamOf(t, r.ClientStream()); streams <- streamOf(t, r.DestStream()) }()
+
+	before := strings.Repeat("b", receiveBufferOf(t, app)+8<<10)
+	if _, err := server.Write([]byte(before)); err != nil {
+		t.Fatal(err)
+	}
+	// The client's window is closed: its stack has acknowledged all it can
+	// hold, and acknowledges no more until it reads.
+	for limit := time.Now().Add(5 * time.Second); !windowClosed(t, proxyClient); {
+		if time.Now().After(limit) {
+			t.Fatal("the client's receive window did not close in 5s")
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
+		t.Fatalf("the destination read %d bytes, %v, before the FIN", len(rest), err)
+	}
+	const answer = "the answer, after the client's FIN"
+	if _, err := server.Write([]byte(answer)); err != nil {
+		t.Fatal(err)
+	}
+	_ = server.Close()
+	// Set aside, not teed, while the client reads nothing: also once the
+	// relay has forwarded the destination's FIN, which puts the proxy's
+	// socket in LAST_ACK (the client's FIN in, the proxy's own sent), and the
+	// relay has looked at it twice since.
+	for limit := time.Now().Add(5 * time.Second); tcpState(t, proxyClient) != stateLastAck; {
+		if time.Now().After(limit) {
+			t.Fatalf("the relay did not forward the destination's FIN in 5s (state %d)", tcpState(t, proxyClient))
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+	for since := looks.n.Load(); looks.n.Load() < since+2; {
+		if r.teeD2C.awaitingLen() == 0 {
+			break
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+	if n := r.teeD2C.awaitingLen(); n == 0 {
+		t.Fatal("the answer written after the client's FIN was not set aside for the client's answer, once the relay had sent its FIN")
+	}
+	if n := r.Teed(fakeconn.FromDest); n != int64(len(before)) {
+		t.Fatalf("%d bytes teed while the client acknowledged nothing after its FIN, want the %d sent before it", n, len(before))
+	}
+	_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
+	got, err := io.ReadAll(app)
+	if err != nil || string(got) != before+answer {
+		t.Fatalf("the client read %d bytes (%v), want the %d it was sent", len(got), err, len(before)+len(answer))
+	}
+	select {
+	case s := <-streams:
+		if s != before+answer {
+			t.Fatalf("the destination's stream carried %d bytes, want the %d the client took", len(s), len(before)+len(answer))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the destination's stream did not end")
+	}
+	if n := notTakenLogged(t, logs); n != 0 {
+		t.Fatalf("the relay logged %d bytes the client did not take, want none", n)
+	}
+}
+
+// On a real socket, written counts the bytes the client's stack has not
+// acknowledged yet as well as those it has: here what the proxy wrote is
+// more than the client's receive buffer holds, and the rest waits in the
+// proxy's send queue while the client, its window full, reads nothing. Once
+// the client reads them all, its stack has acknowledged every one of them.
+// The bytes are written as the relay writes them: through countWrites (on
+// macOS the count the socket answers from).
+func TestWrittenCountsWhatTheClientHasNotAcknowledgedYet(t *testing.T) {
+	t.Parallel()
+	app, proxyClient := dialSmallWindow(t)
+	s := clientSocketOf(proxyClient, zap.NewNop())
+	client := countWrites(proxyClient, s)
+	n := uint64(receiveBufferOf(t, app) + 128<<10)
+	if _, err := client.Write(make([]byte, n)); err != nil {
+		t.Fatal(err)
+	}
+	for limit := time.Now().Add(5 * time.Second); !windowClosed(t, proxyClient); {
+		if time.Now().After(limit) {
+			t.Fatal("the client's receive window did not close in 5s")
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+	if l := s.look(); l.said != clientOpen || l.acked >= n {
+		t.Fatalf("look: %+v, want open with fewer than the %d bytes acknowledged: the client holds fewer and reads nothing", l, n)
+	}
+	if got, ok := s.written(); !ok || got != n {
+		t.Fatalf("written %d (ok %v), want the %d bytes written", got, ok, n)
+	}
+	_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadFull(app, make([]byte, n)); err != nil {
+		t.Fatalf("the client read: %v", err)
+	}
+	for limit := time.Now().Add(5 * time.Second); s.look().acked != n; {
+		if time.Now().After(limit) {
+			t.Fatalf("the client read all %d bytes and its stack acknowledged %d after 5s", n, s.look().acked)
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+}
+
+// A chunk written after the client's FIN, while the client has not yet
+// acknowledged all of the one before it, is judged from where it starts: after
+// every byte written before it, acknowledged or not. Here a half-closed client
+// with a small window reads part of a long answer and closes its socket with
+// the rest unread, and with a second answer behind it that it never read. The
+// client's acknowledgements of the first answer move on after the second is
+// written, and never reach the second. The part of the first answer the
+// client took is teed; the second answer is refused. A count of only the
+// acknowledged bytes judged the second answer from inside the first and, once
+// the client acknowledged more of the first, recorded the second.
+func TestAChunkBehindOneThatIsNotAcknowledgedYetIsJudgedFromItsOwnFirstByte(t *testing.T) {
+	t.Parallel()
+	app, proxyClient := dialSmallWindow(t)
+	first, second := strings.Repeat("1", receiveBufferOf(t, app)+128<<10), strings.Repeat("2", 1<<10)
+	proxyServer, server := loopbackPair(t)
+	// The test counts what the relay writes to the client, and what the
+	// client acknowledged from it, itself (seenWrites).
+	seen := &seenWrites{Conn: proxyClient}
+	r := New(Config{Logger: zap.NewNop()}, seen, connseq.NewUpstream(proxyServer))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = r.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	streams := make(chan string, 1)
+	go func() { go streamOf(t, r.ClientStream()); streams <- streamOf(t, r.DestStream()) }()
+
+	if _, err := app.Write([]byte("req")); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if got, err := io.ReadAll(server); err != nil || string(got) != "req" {
+		t.Fatalf("the destination read %q, %v; want the request and the FIN", got, err)
+	}
+	writtenAll := func(want uint64, what string) {
+		t.Helper()
+		for limit := time.Now().Add(5 * time.Second); seen.n.Load() != want; {
+			if time.Now().After(limit) {
+				t.Fatalf("%s: the relay wrote %d bytes to the client in 5s, want %d", what, seen.n.Load(), want)
+			}
+			time.Sleep(50 * time.Microsecond)
+		}
+	}
+	if _, err := server.Write([]byte(first)); err != nil {
+		t.Fatal(err)
+	}
+	writtenAll(uint64(len(first)), "the first answer")
+	if _, err := server.Write([]byte(second)); err != nil {
+		t.Fatal(err)
+	}
+	writtenAll(uint64(len(first)+len(second)), "the second answer")
+	// The client reads part of the first answer, until its stack has
+	// acknowledged more than it had once the second was written.
+	behind := seen.acked(t)
+	if behind >= uint64(len(first)) {
+		t.Fatalf("the client acknowledged %d bytes before it read any, want fewer than the first answer's %d", behind, len(first))
+	}
+	// The acknowledgement can come some time after the read that opened the
+	// client's window (macOS's loopback hands segments on through a queue),
+	// so once the client has read readCap bytes it reads no more and waits
+	// for it. readCap keeps the window it opens short of the second answer:
+	// macOS grows the client's receive buffer (receiveBufferOf), which could
+	// take the rest of the first answer and the second, were the client to
+	// read on.
+	const readCap = 32 << 10
+	_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 512)
+	for read, limit := 0, time.Now().Add(5*time.Second); seen.acked(t) <= behind; {
+		if time.Now().After(limit) {
+			t.Fatalf("the client read %d bytes and its stack acknowledged no more than %d in 5s", read, behind)
+		}
+		if read >= readCap {
+			time.Sleep(50 * time.Microsecond)
+			continue
+		}
+		n, err := app.Read(buf)
+		if err != nil {
+			t.Fatalf("the client read: %v", err)
+		}
+		read += n
+	}
+	// It closes with bytes unread: a reset, with the second answer never
+	// acknowledged.
+	_ = app.Close()
+	awaitTCPState(t, proxyClient, stateClosed, "the client closed with bytes unread")
+	if acked := seen.acked(t); acked >= uint64(len(first)) {
+		t.Fatalf("the client acknowledged %d bytes, want fewer than the first answer's %d", acked, len(first))
+	}
+	_ = server.Close()
+	select {
+	case got := <-streams:
+		if got == "" || !strings.HasPrefix(first, got) {
+			t.Fatalf("the destination's stream carried %d bytes (the second answer's in it: %v), want a part of the first answer, which the client was reading", len(got), strings.Contains(got, "2"))
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the destination's stream did not end")
+	}
+	if chunks, bytes := r.NotTaken(); chunks == 0 || bytes < int64(len(second)) {
+		t.Fatalf("%d chunks (%d bytes) not taken, want the second answer's %d bytes among them", chunks, bytes, len(second))
 	}
 }
