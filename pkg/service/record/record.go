@@ -1953,6 +1953,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		if why != nil && recordingStarted && newTestSetID != "" {
 			r.markStopKilled(context.WithoutCancel(ctx), newTestSetID, *why)
 		}
+		// The streams have drained: the incoming one's end marker, if the
+		// agent sent it, has been read.
+		if recordingStarted && newTestSetID != "" {
+			r.markMocksDropped(context.WithoutCancel(ctx), newTestSetID)
+		}
 
 		setupCtxCancel()
 		if err, _ := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record-setup", setupErrGrp, teardownDrainStall, r.drainProgress); err != nil {
