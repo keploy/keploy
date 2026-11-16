@@ -228,7 +228,9 @@ func RedactField(field string) string {
 			i++
 			continue
 		}
-		out = append(out, Redacted)
+		// Keep a trailing array index so the warning still says which element
+		// held the value: "user@example.com[0]" becomes "[redacted][0]".
+		out = append(out, Redacted+arrayIndexSuffix.FindString(segments[end]))
 		i = end + 1
 	}
 	return strings.Join(out, ".")
@@ -248,6 +250,9 @@ func segmentsHoldPII(segments []string) bool {
 		return emailRegex.MatchString(text) || ssnRegex.MatchString(text) ||
 			hasCreditCard(text) || hasPhone(text)
 	}
+	// A key that holds an array gets an index appended in the path, as in
+	// "user@example.com[0]"; the value itself ends before the index.
+	text = arrayIndexSuffix.ReplaceAllString(text, "")
 	if strings.Contains(segments[0], "@") && emailWhole.MatchString(text) {
 		return true
 	}
@@ -257,10 +262,11 @@ func segmentsHoldPII(segments []string) bool {
 }
 
 var (
-	emailWhole = regexp.MustCompile(`(?i)^[a-z0-9_%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$`)
-	ssnWhole   = regexp.MustCompile(`^\d{3}-\d{2}-\d{4}$`)
-	cardWhole  = regexp.MustCompile(`^[\d -]+$`)
-	phoneWhole = regexp.MustCompile(`^` + phoneRegex.String() + `$`)
+	arrayIndexSuffix = regexp.MustCompile(`(?:\[\d+\])+$`)
+	emailWhole       = regexp.MustCompile(`(?i)^[a-z0-9_%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$`)
+	ssnWhole         = regexp.MustCompile(`^\d{3}-\d{2}-\d{4}$`)
+	cardWhole        = regexp.MustCompile(`^[\d -]+$`)
+	phoneWhole       = regexp.MustCompile(`^` + phoneRegex.String() + `$`)
 )
 
 func hasPhone(value string) bool {
