@@ -55,10 +55,10 @@ var errComposeAbortUnreachable = errors.New("keploy's docker client could not co
 // a connection to the daemon (composeAbortCannotDial). It counts such an err
 // and returns nil while the count is under composeAbortUnreachableAsks; any
 // other failure starts the count again. On the
-// composeAbortUnreachableAsks-th, it says, once for the watch or the read that
-// lost the daemon, that keploy does not read the rest of the up, and returns
-// errComposeAbortUnreachable: its caller ends.
-func (a *App) composeAbortLost(unreached *int, err error) error {
+// composeAbortUnreachableAsks-th, it says, once for the read that lost the
+// daemon, that keploy does not read what (the read's own words) from it, and
+// returns errComposeAbortUnreachable: its caller ends.
+func (a *App) composeAbortLost(what string, unreached *int, err error) error {
 	if !composeAbortCannotDial(err) {
 		*unreached = 0
 		return nil
@@ -67,7 +67,7 @@ func (a *App) composeAbortLost(unreached *int, err error) error {
 	if *unreached < composeAbortUnreachableAsks {
 		return nil
 	}
-	a.logger.Warn("keploy cannot reach the docker daemon (its Engine API client uses DOCKER_HOST, else the default socket, which is not always the daemon docker compose uses), so it reads no more of this docker compose up from the daemon: neither compose stopping every container before it started the application, nor how the up ended",
+	a.logger.Warn("keploy cannot reach the docker daemon (its Engine API client uses DOCKER_HOST, else the default socket, which is not always the daemon docker compose uses), so it does not read "+what+" from it",
 		zap.String("service", a.composeService), zap.Int("asks", *unreached), zap.Error(err))
 	return fmt.Errorf("%w (%d asks in a row): %w", errComposeAbortUnreachable, *unreached, err)
 }
@@ -147,13 +147,13 @@ func (a *App) composeAbortRead(ctx context.Context, what string, read func(conte
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if lost := a.composeAbortLost(&unreached, err); lost != nil {
+		if lost := a.composeAbortLost(what, &unreached, err); lost != nil {
 			return lost
 		}
 		if capped {
 			budget *= 2
 		}
-		a.logger.Debug("keploy could not read "+what+" for the compose abort's decision; it reads it again",
+		a.logger.Debug("keploy could not read "+what+" from the docker daemon; it reads it again",
 			zap.Duration("cap", budget), zap.Error(err))
 		select {
 		case <-ctx.Done():

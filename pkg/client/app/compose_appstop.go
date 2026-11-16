@@ -237,18 +237,20 @@ func (h composeHalt) appError(appLogs string) models.AppError {
 // an exit of keploy's agent's container after the app started
 // (composeAgentDied), on the same stream, so the two are read in the order
 // the daemon logged them. The
-// stream is the daemon's own events, from the moment the watch begins; a
-// stream that breaks is asked for again from the last event it gave, so no
-// exit is missed. It is of the containers of the app's service, as compose
-// labels them (composeAppDieFilter): the app's container does not exist yet
-// when the watch begins, and its name is compose's; the app's is told among
-// them by their labels (isComposeAppEvent).
+// stream is the daemon's own events, from the moment the watch begins on the
+// daemon's clock (composeWatchSince), read before watchComposeApp returns and
+// so before compose's up starts; a stream that breaks is asked for again
+// from the last event it gave, so no exit is missed. It is of the containers
+// of the app's service, as compose labels them (composeAppDieFilter): the
+// app's container does not exist yet when the watch begins, and its name is
+// compose's; the app's is told among them by their labels
+// (isComposeAppEvent).
 func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 	wctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+	since := a.composeWatchSince(wctx)
 	go func() {
 		defer close(done)
-		since := time.Now()
 		for wctx.Err() == nil {
 			msgs, errs := a.docker.Events(wctx, events.ListOptions{
 				Since:   fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond()),
@@ -290,6 +292,78 @@ func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 		<-done
 	}
 }
+
+// composeWatchSince is the moment the app's watch reads the daemon's events
+// from, on the daemon's own clock. The daemon stamps each event by its own
+// clock; it sends a stream every event it logs once the stream is
+// subscribed, whatever its since, and replays to it those it logged before
+// that are stamped at or after its since (of the last 256 it logged, of any
+// container). The subscription is made after
+// the daemon has answered the ask, so the up's first events can come before
+// it, and a broken stream's are logged while it is asked for again: both
+// reach the watch only by that replay. On the daemon's clock, read before
+// the up starts, every event of this run is replayed and none of a run
+// before it. From keploy's clock, a daemon behind it dropped them (an app
+// that died at once was never seen, and compose's attached up, the agent
+// still up, never returned), and a daemon ahead of it replayed the exits of
+// the run before (their containers gone, each read as this run's halt).
+//
+// The up starts only once this read is done, so it never waits on a daemon
+// that will not say its time: one that refuses the read, gives no time,
+// fails it composeWatchSinceReads times, or cannot be reached
+// (composeAbortLost) leaves keploy's clock, said at Warn: it is as right as
+// the daemon's clock is close to keploy's.
+func (a *App) composeWatchSince(ctx context.Context) time.Time {
+	var since time.Time
+	var unsaid error
+	reads := 0
+	err := a.composeAbortRead(ctx, "the docker daemon's clock", func(rctx context.Context) error {
+		reads++
+		info, err := a.docker.Info(rctx)
+		switch {
+		case err == nil:
+			if since, err = time.Parse(time.RFC3339Nano, info.SystemTime); err != nil || since.IsZero() {
+				since, unsaid = time.Time{}, fmt.Errorf("the daemon gave the time %q", info.SystemTime)
+			}
+			return nil
+		case composeAbortDaemonRefuses(err):
+			unsaid = err
+			return nil
+		case composeAbortCannotDial(err):
+			// composeAbortRead reads it again, and ends on
+			// composeAbortUnreachableAsks of these in a row.
+			return err
+		}
+		// Bounded by a count, not a time: a daemon that keeps failing this
+		// one request (a 5xx, a read past its cap) must not hold the up's
+		// start.
+		if reads >= composeWatchSinceReads {
+			unsaid = err
+			return nil
+		}
+		return err
+	})
+	if !since.IsZero() {
+		return since
+	}
+	if unsaid == nil {
+		unsaid = err
+	}
+	if ctx.Err() == nil {
+		a.logger.Warn("keploy could not read the docker daemon's time; it reads the daemon's events for the exits of the application's container from keploy's clock instead, which is as right as the daemon's clock is close to keploy's",
+			zap.Int("reads", reads), zap.Error(unsaid))
+	}
+	return time.Now()
+}
+
+// composeWatchSinceReads is the count of reads of the daemon's time from
+// which a read that fails makes the watch take keploy's clock; one that
+// fails before it is read again. Every read counts, failed dials too, so a
+// failed dial, another, then a 500 take keploy's clock at the third read.
+// Two failures are apart from it: a refusal takes keploy's clock at any
+// read, and a failed dial is read again at any read, until
+// composeAbortUnreachableAsks of them in a row take keploy's clock.
+const composeWatchSinceReads = 3
 
 // composeDaemonAskPace is the pace at which keploy asks the daemon again for
 // a stream or a wait that it failed at once: a walking pace, not a spin. It
