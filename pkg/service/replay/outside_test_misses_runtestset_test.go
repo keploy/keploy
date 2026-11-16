@@ -266,32 +266,65 @@ func TestRunTestSet_ASetWhoseAppHaltedHasItsEndReadWithTheSwitchOff(t *testing.T
 // With the switch off a set's end read that the run's user cut short, by
 // stopping the run as it was made, is the stop's, as under the switch
 // (TestRunTestSet_AStopThatCutsTheSetEndReadShortIsTheStops): the set is
-// USER_ABORT, it is not marked not judged, and the cut read is said at Debug,
-// never at WARN, since the stop is the set's status.
+// USER_ABORT, whether its tests passed or one failed, it is not marked not
+// judged, and the cut read is said at Debug, never at WARN, since the stop is
+// the set's status. The read is made after the set's status is final, with
+// its application stopped (stopForSetEndRead), so it is the read that makes
+// the set the stop's (cutReadStatus).
 func TestRunTestSet_AStopThatCutsTheSwitchOffSetEndReadIsTheStops(t *testing.T) {
-	provenOn(t, false)
-	h := newPartialRunHarness(t, 2, 0)
-	core, logs := observer.New(zapcore.DebugLevel)
-	h.replayer.logger = zap.New(core)
-	instr := &stopsAtSetEnd{prInstr: h.instr, at: 3} // a read per test, then the set's
-	instr.stop = func() { h.cancel() }
-	h.replayer.instrumentation = instr
+	for _, failing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("test-1-fails=%v", failing), func(t *testing.T) {
+			provenOn(t, false)
+			h := newPartialRunHarness(t, 2, 0)
+			if failing {
+				h.replayer.hookImpl = prHooks{wrongBody: map[string]bool{"test-1": true}} // test-1's answer differs
+			}
+			core, logs := observer.New(zapcore.DebugLevel)
+			h.replayer.logger = zap.New(core)
+			instr := &stopsAtSetEnd{prInstr: h.instr, at: 3} // a read per test, then the set's
+			instr.stop = func() { h.cancel() }
+			h.replayer.instrumentation = instr
 
-	status := h.run(t)
-	if n := instr.reads.Load(); n != 3 {
-		t.Fatalf("fixture: %d reads of the agent's misses, want 3", n)
+			status := h.run(t)
+			if n := instr.reads.Load(); n != 3 {
+				t.Fatalf("fixture: %d reads of the agent's misses, want 3", n)
+			}
+			if status != models.TestSetStatusUserAbort {
+				t.Fatalf("status %s, want USER_ABORT: the user stopped the run as the set's end was read", status)
+			}
+			if got := h.report.report.Status; got != string(models.TestSetStatusUserAbort) {
+				t.Fatalf("the set's report says %s, want USER_ABORT", got)
+			}
+			if h.replayer.notJudged("test-set-0") {
+				t.Fatal("a set the user stopped is marked not judged")
+			}
+			if said := logs.FilterMessageSnippet(afterLastReadFailed).FilterLevelExact(zapcore.WarnLevel).Len(); said != 0 {
+				t.Fatalf("the read the user's stop cut short is said at WARN %d times, want none", said)
+			}
+			if said := logs.FilterMessageSnippet("cut short by the run's stop").FilterLevelExact(zapcore.DebugLevel).All(); len(said) != 1 || said[0].ContextMap()["test-set"] != "test-set-0" {
+				t.Fatalf("the read the user's stop cut short is said at Debug as %+v, want once, naming the set", said)
+			}
+		})
 	}
-	if status != models.TestSetStatusUserAbort {
-		t.Fatalf("status %s, want USER_ABORT: the user stopped the run as the set's end was read", status)
-	}
-	if h.replayer.notJudged("test-set-0") {
-		t.Fatal("a set the user stopped is marked not judged")
-	}
-	if said := logs.FilterMessageSnippet(afterLastReadFailed).FilterLevelExact(zapcore.WarnLevel).Len(); said != 0 {
-		t.Fatalf("the read the user's stop cut short is said at WARN %d times, want none", said)
-	}
-	if said := logs.FilterMessageSnippet("cut short by the run's stop").FilterLevelExact(zapcore.DebugLevel).All(); len(said) != 1 || said[0].ContextMap()["test-set"] != "test-set-0" {
-		t.Fatalf("the read the user's stop cut short is said at Debug as %+v, want once, naming the set", said)
+}
+
+// A set-end read the run's user cut short makes a judged set (PASSED or
+// FAILED) the stop's, USER_ABORT; any other status stands: a set not judged,
+// one an end of its own ended first, one whose every test was ignored.
+func TestACutSetEndReadMakesOnlyAJudgedSetTheStops(t *testing.T) {
+	for _, c := range []struct{ had, want models.TestSetStatus }{
+		{models.TestSetStatusPassed, models.TestSetStatusUserAbort},
+		{models.TestSetStatusFailed, models.TestSetStatusUserAbort},
+		{models.TestSetStatusAppHalted, models.TestSetStatusAppHalted},
+		{models.TestSetStatusFaultUserApp, models.TestSetStatusFaultUserApp},
+		{models.TestSetStatusInternalErr, models.TestSetStatusInternalErr},
+		{models.TestSetStatusFaultScript, models.TestSetStatusFaultScript},
+		{models.TestSetStatusIgnored, models.TestSetStatusIgnored},
+		{models.TestSetStatusUserAbort, models.TestSetStatusUserAbort},
+	} {
+		if got := cutReadStatus(c.had); got != c.want {
+			t.Errorf("a %s set whose end read the user's stop cut is %s, want %s", c.had, got, c.want)
+		}
 	}
 }
 

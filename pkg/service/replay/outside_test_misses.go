@@ -45,19 +45,35 @@ import (
 // The set's verdict is what it would be without the read, whatever it
 // returns. A read that cannot vouch for every such call is said at WARN, but
 // one the run's user cut short by stopping the run is the stop's: the stop
-// is the set's status (USER_ABORT), so it is said at Debug, as under the
-// switch.
-func (r *Replayer) readAfterLastTest(ctx context.Context, testSetID string) {
+// is the set's status (USER_ABORT, cutReadStatus), so it is said at Debug,
+// as under the switch. cut reports that stop.
+func (r *Replayer) readAfterLastTest(ctx context.Context, testSetID string) (cut bool) {
 	_, _, err := r.unclaimedCalls(ctx)
 	switch {
 	case err == nil:
 	case stoppedByItsUser(ctx):
 		r.logger.Debug("the read of the calls the application made after the test-set's last test was cut short by the run's stop; the stop is the test-set's status",
 			zap.String("test-set", testSetID), zap.Error(err))
+		return true
 	default:
 		r.logger.Warn("keploy could not read every call the application made after the test-set's last test that no mock answered: its report may not name each (outsideTestMisses); they fail nothing, so the test-set's verdict stands",
 			zap.String("test-set", testSetID), zap.Error(err))
 	}
+	return false
+}
+
+// cutReadStatus is the status of a set whose set-end read (readAfterLastTest)
+// its run's user cut short by stopping the run, from the status it had: a
+// judged set (PASSED or FAILED) is USER_ABORT, as runEnded makes a set its
+// user stopped before its status was final; the stop came while its
+// application's last calls were read, and it is the set's. Any other status
+// stands: the set was not judged, or an end of its own (its application's
+// exit, keploy's error) came first, or it is IGNORED.
+func cutReadStatus(status models.TestSetStatus) models.TestSetStatus {
+	if status == models.TestSetStatusPassed || status == models.TestSetStatusFailed {
+		return models.TestSetStatusUserAbort
+	}
+	return status
 }
 
 // stopForSetEndRead is, with the proven switch off, the stop of the set's

@@ -7281,19 +7281,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
 		}
 	}
-	// The status is final here, and no error of keploy's that leaves the set
-	// INTERNAL_ERR is noted past this point (a failed report write returns
-	// it).
+	// The status is final here, but for the run's user's stop cutting the
+	// set-end read below (cutReadStatus), and no error of keploy's that
+	// leaves the set INTERNAL_ERR is noted past this point (a failed report
+	// write returns it).
 	r.setInternalErr = internalFailure
 	// With the switch off the application keploy stops before the set's
 	// report is stopped now, with its post-script run and its logs taken
 	// (above), and the calls it made after the set's last test, as it
-	// stopped among them, are read for the report (stopForSetEndRead). The
-	// status is final: neither the stop nor the read changes it.
+	// stopped among them, are read for the report (stopForSetEndRead).
+	// Neither the stop nor what the read returns changes the status, but a
+	// read the run's user cut short by stopping the run is the stop's, as a
+	// stop before this point is (runEnded): a judged set is USER_ABORT
+	// (cutReadStatus).
 	if !provenswitch.On() && captureOpened && stopForRead != nil {
 		r.stopBeforeSetEndRead(stopForRead)
 		readCtx, cancelRead := context.WithTimeout(ctx, setEndDrainBudget)
-		r.readAfterLastTest(readCtx, testSetID)
+		if r.readAfterLastTest(readCtx, testSetID) {
+			testSetStatus = cutReadStatus(testSetStatus)
+		}
 		cancelRead()
 	}
 	// The calls the set's application made outside every test that no mock
