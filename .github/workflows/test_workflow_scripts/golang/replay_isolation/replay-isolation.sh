@@ -222,8 +222,14 @@ report_dns() {
 		dns && /^[[:space:]]*actual_summary:/ { name = $NF; next }
 		dns && name != "" && /^[[:space:]]*host_tag:/ { t = $NF; gsub(/[\047"]/, "", t); print t, name; name = "" }' | sort -u
 }
-# kept_dns_tags PHASE: the tag of each DNS name PHASE's kept-inside report names.
-kept_dns_tags() { grep -oE "${KEPT}DNS [^ ]+ #[0-9a-f]+" "$W/out/$1/keploy.log" 2>/dev/null | awk '{print $NF}' | sort -u; }
+# kept_dns_tags PHASE: the tag of each DNS name PHASE's kept-inside report
+# names, and "untagged" for a line that names one by its shape alone (keploy
+# writes that when no miss carried a tag): no report name is told from it, so
+# row_not_kept_dns counts it as one it cannot clear.
+kept_dns_tags() {
+	grep -oE "${KEPT}DNS [^[:space:]]+( #[0-9a-f]+)?" "$W/out/$1/keploy.log" 2>/dev/null |
+		awk '{ print ($NF ~ /^#[0-9a-f]+$/) ? $NF : "untagged" }' | sort -u
+}
 # row_kept_dns NAME PHASE QNAME: PHASE's kept-inside report names the DNS
 # question QNAME (fully qualified), by the tag PHASE's report names it by.
 row_kept_dns() {
