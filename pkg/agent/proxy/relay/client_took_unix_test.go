@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
-	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -37,19 +36,6 @@ func (g *gatedConn) Read(p []byte) (int, error) {
 		<-g.release
 	}
 	return g.Conn.Read(p)
-}
-
-// streamOf reads fc to its end and returns the bytes it carried.
-func streamOf(t *testing.T, fc *fakeconn.FakeConn) string {
-	t.Helper()
-	var got []byte
-	for {
-		c, err := fc.ReadChunk()
-		if err != nil {
-			return string(got)
-		}
-		got = append(got, c.Bytes...)
-	}
 }
 
 // notTakenLogged is how many bytes the relay said it did not capture because
@@ -262,17 +248,6 @@ func tcpSocket(t *testing.T, s clientSocket) *tcpClientSocket {
 		t.Fatalf("the client's socket is not asked: the look is %T", s)
 	}
 	return ts
-}
-
-// awaitTCPState waits until the TCP state of the socket under c is want.
-func awaitTCPState(t *testing.T, c net.Conn, want uint8, what string) {
-	t.Helper()
-	for limit := time.Now().Add(tcpSettle); tcpState(t, c) != want; {
-		if time.Now().After(limit) {
-			t.Fatalf("%s: the socket's state is %d after %v, want %d", what, tcpState(t, c), tcpSettle, want)
-		}
-		time.Sleep(50 * time.Microsecond)
-	}
 }
 
 // heldConn is the proxy's end of the client connection whose Reads wait for
@@ -619,42 +594,6 @@ func TestAClientConnWithNoSocketIsNamedByItsTypeAlone(t *testing.T) {
 	if c, want := got[0].ContextMap()["conn"], fmt.Sprintf("%T", pipeA); c != want {
 		t.Fatalf("the client conn is named %q, want its type %q", c, want)
 	}
-}
-
-// finInFlightConn is the proxy's end of the client connection whose first
-// Write first runs hook (after the relay's look before that Write), and whose
-// Reads after the first wait for release.
-type finInFlightConn struct {
-	*proxyutil.Conn
-	reads, writes atomic.Int32
-	release       chan struct{}
-	hook          func()
-}
-
-func (c *finInFlightConn) Read(p []byte) (int, error) {
-	if c.reads.Add(1) > 1 {
-		<-c.release
-	}
-	return c.Conn.Read(p)
-}
-
-func (c *finInFlightConn) Write(p []byte) (int, error) {
-	if c.writes.Add(1) == 1 && c.hook != nil {
-		c.hook()
-	}
-	return c.Conn.Write(p)
-}
-
-func (c *finInFlightConn) NetConn() net.Conn { return c.Conn }
-
-// writesThenFails is the proxy's end of the client connection whose Writes
-// after the first fail (a client that reset: write_error) or come up one
-// byte short (short_write). It has no NetConn, so the relay asks the scripted
-// socket the test gives it.
-type writesThenFails struct {
-	net.Conn
-	short  bool
-	writes atomic.Int32
 }
 
 func (c *writesThenFails) Write(p []byte) (int, error) {

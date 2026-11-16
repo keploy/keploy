@@ -10,12 +10,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -1124,7 +1124,9 @@ func (r *Relay) forward(
 			if errors.Is(err, io.EOF) {
 				return r.peerFINRead(dir)
 			}
-			if errors.Is(err, syscall.ECONNRESET) {
+			// A reset, as each OS's socket gives it (on Windows,
+			// Winsock's own errors: neterr.IsPeerReset).
+			if neterr.IsPeerReset(err) {
 				if dir == fakeconn.FromClient && r.clientFINBeforeReset() {
 					// macOS: the client's FIN came before the reset this
 					// read returned (client_took_darwin.go). Read as the
