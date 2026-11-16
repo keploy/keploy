@@ -242,6 +242,14 @@ func readTCPInfo(b []byte, info *darwinTCPInfo) bool {
 // n; false when the socket cannot say. resetClientOnClose's question.
 func unsentOf(fd uintptr, n *int32) bool {
 	v, err := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_NWRITE)
+	// xnu answers SO_NWRITE with so_snd.sb_cc (sogetoptlock in
+	// bsd/kern/uipc_socket.c, xnu-12377.121.6): a uint32_t copied out as an
+	// int, which the send buffer's limit (kern.ipc.maxsockbuf, 8 MiB by
+	// default) keeps far under 2^31. So no answer is negative today, and no
+	// real socket can give one to a row. A negative answer would be a count
+	// this reading does not know: the socket cannot say, and the close stays
+	// a FIN at once, where taking it as bytes not acknowledged would only
+	// look again until the grace ends, to the same FIN.
 	if err != nil || v < 0 {
 		return false
 	}
