@@ -164,7 +164,9 @@ func TestAnUnwrittenMissesFileIsSaidInTheWritersWords(t *testing.T) {
 // A .gitignore line of the user's that un-ignores a command's misses file,
 // after keploy's entries, keeps that file from being written: git would not
 // ignore the calls it holds whole. What to do names the line. Each command's
-// own file is checked, by its own name.
+// own file is checked, by its own name. The write that fails removes that
+// command's last run's file, which names an earlier run's calls, and leaves
+// the other command's file byte for byte.
 func TestAMissesFileGitDoesNotIgnoreIsNotWritten(t *testing.T) {
 	git, err := exec.LookPath("git")
 	if err != nil {
@@ -180,6 +182,16 @@ func TestAMissesFileGitDoesNotIgnoreIsNotWritten(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
+		other := MissesFile
+		if file == MissesFile {
+			other = TestMissesFile
+		}
+		otherWas := []byte("set: set\nby: the other command\n")
+		for name, body := range map[string][]byte{file: []byte("set: set\nby: this command's last run\n"), other: otherWas} {
+			if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 		gi := strings.Join(missesIgnore(file), "\n") + "\n!/*/" + file + "\n"
 		if err := os.WriteFile(filepath.Join(keployDir, ".gitignore"), []byte(gi), 0o644); err != nil {
 			t.Fatal(err)
@@ -193,8 +205,14 @@ func TestAMissesFileGitDoesNotIgnoreIsNotWritten(t *testing.T) {
 		if len(said) != 1 || !strings.Contains(fmt.Sprint(said[0].ContextMap()["next_step"]), "un-ignores it") || !strings.Contains(fmt.Sprint(said[0].ContextMap()["error"]), file) {
 			t.Errorf("%s: said %+v, want why, naming the file, and the line to remove", file, logs.All())
 		}
-		if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
-			t.Errorf("%s: the set's folder holds %v (%v), want nothing written", file, entries, err)
+		if _, err := os.Lstat(filepath.Join(dir, file)); !os.IsNotExist(err) {
+			t.Errorf("%s: the last run's file is still there (%v), want it removed: it names an earlier run's calls", file, err)
+		}
+		if b, err := os.ReadFile(filepath.Join(dir, other)); err != nil || !bytes.Equal(b, otherWas) {
+			t.Errorf("%s: the other command's file %s holds %q (%v), want it byte for byte", file, other, b, err)
+		}
+		if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
+			t.Errorf("%s: the set's folder holds %v (%v), want only the other command's file: nothing written", file, entries, err)
 		}
 	}
 }
