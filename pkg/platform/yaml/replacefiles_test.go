@@ -53,7 +53,7 @@ func mustEqual(t *testing.T, what string, got, want any) {
 // each file keeps its mode, and nothing is left beside them.
 func TestReplaceFiles_PutsEveryFileInPlace(t *testing.T) {
 	dir, files := groupFixture(t)
-	if err := ReplaceFiles(zap.NewNop(), files); err != nil {
+	if err := ReplaceFiles(zap.NewNop(), dir, files); err != nil {
 		t.Fatal(err)
 	}
 	mustEqual(t, "files", filesIn(t, dir), []string{"a.yaml", "b.yaml", "c.yaml"})
@@ -79,7 +79,7 @@ func TestReplaceFiles_AFileThatCannotBePutInPlaceLeavesEveryFileAsItWas(t *testi
 	for _, name := range []string{"a.yaml", "b.yaml", "c.yaml"} {
 		t.Run(name, func(t *testing.T) {
 			dir, files := groupFixture(t)
-			err := ReplaceFilesWith(zap.NewNop(), ReplaceHooks{Rename: refusing(name + ReplaceNewSuffix)}, files)
+			err := ReplaceFilesWith(zap.NewNop(), dir, ReplaceHooks{Rename: refusing(name + ReplaceNewSuffix)}, files)
 			if err == nil {
 				t.Fatal("no error")
 			}
@@ -102,7 +102,7 @@ func TestReplaceFiles_AFileTheGroupCreatedIsRemovedWithIt(t *testing.T) {
 	dir, files := groupFixture(t)
 	// c.yaml, which does not exist, first: it is in place when b.yaml refuses.
 	files = []File{files[2], files[0], files[1]}
-	if err := ReplaceFilesWith(zap.NewNop(), ReplaceHooks{Rename: refusing("b.yaml" + ReplaceNewSuffix)}, files); err == nil {
+	if err := ReplaceFilesWith(zap.NewNop(), dir, ReplaceHooks{Rename: refusing("b.yaml" + ReplaceNewSuffix)}, files); err == nil {
 		t.Fatal("no error")
 	}
 	mustEqual(t, "files", filesIn(t, dir), []string{"a.yaml", "b.yaml"})
@@ -122,7 +122,7 @@ func TestReplaceFiles_AFileThatCannotBeStagedTouchesNothing(t *testing.T) {
 				t.Fatal(err)
 			}
 			target := strings.SplitN(left, ".keploy-", 2)[0]
-			err := ReplaceFiles(zap.NewNop(), files)
+			err := ReplaceFiles(zap.NewNop(), dir, files)
 			if err == nil || !strings.Contains(err.Error(), "failed to write "+target+" beside the file it replaces, so no file was changed") {
 				t.Fatalf("error %v", err)
 			}
@@ -149,7 +149,7 @@ func TestReplaceFiles_ATargetThatCannotBeReadTouchesNothing(t *testing.T) {
 	if err := os.WriteFile(kept, []byte("kept"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := ReplaceFiles(zap.NewNop(), files)
+	err := ReplaceFiles(zap.NewNop(), dir, files)
 	if err == nil || !strings.Contains(err.Error(), "failed to write c.yaml beside the file it replaces, so no file was changed") {
 		t.Fatalf("error %v", err)
 	}
@@ -166,7 +166,7 @@ func TestReplaceFiles_AFileThatCannotBePutBackIsNamedAndKept(t *testing.T) {
 	dir, files := groupFixture(t)
 	// b.yaml's new bytes cannot be put in place, and a.yaml, replaced by
 	// then, cannot be put back.
-	err := ReplaceFilesWith(zap.NewNop(), ReplaceHooks{Rename: refusing("b.yaml"+ReplaceNewSuffix, "a.yaml"+ReplaceOldSuffix)}, files)
+	err := ReplaceFilesWith(zap.NewNop(), dir, ReplaceHooks{Rename: refusing("b.yaml"+ReplaceNewSuffix, "a.yaml"+ReplaceOldSuffix)}, files)
 	if err == nil {
 		t.Fatal("no error")
 	}
@@ -200,7 +200,7 @@ func TestReplaceFiles_ATargetLeftAsideIsPutBackAtItsName(t *testing.T) {
 	dir, files := groupFixture(t)
 	// b.yaml's new bytes are refused, and so is moving b.yaml back from where
 	// the fallback moved it.
-	err := ReplaceFilesWith(zap.NewNop(), ReplaceHooks{Rename: refusingAny("b.yaml"+ReplaceNewSuffix, ".replaced.")}, files)
+	err := ReplaceFilesWith(zap.NewNop(), dir, ReplaceHooks{Rename: refusingAny("b.yaml"+ReplaceNewSuffix, ".replaced.")}, files)
 	if err == nil || !strings.Contains(err.Error(), "failed to put b.yaml in place, so every file was put back as it was") {
 		t.Fatalf("error %v", err)
 	}
@@ -216,7 +216,7 @@ func TestReplaceFiles_ATargetLeftAsideIsPutBackAtItsName(t *testing.T) {
 	// And when the file as it was cannot be put there either, the error
 	// names the target, and the file as it was stays beside it.
 	dir, files = groupFixture(t)
-	err = ReplaceFilesWith(zap.NewNop(), ReplaceHooks{Rename: refusingAny("b.yaml"+ReplaceNewSuffix, ".replaced.", "b.yaml"+ReplaceOldSuffix)}, files)
+	err = ReplaceFilesWith(zap.NewNop(), dir, ReplaceHooks{Rename: refusingAny("b.yaml"+ReplaceNewSuffix, ".replaced.", "b.yaml"+ReplaceOldSuffix)}, files)
 	if err == nil || !strings.Contains(err.Error(), "could not put back b.yaml") {
 		t.Fatalf("error %v", err)
 	}
@@ -255,7 +255,7 @@ func replaceKilledAt(t *testing.T, files []File, n int) (stopped bool) {
 		}
 	}()
 	count := 0
-	err := ReplaceFilesWith(zap.NewNop(), ReplaceHooks{Step: func() {
+	err := ReplaceFilesWith(zap.NewNop(), filepath.Dir(files[0].Path), ReplaceHooks{Step: func() {
 		if count++; count == n {
 			panic(killed{})
 		}
@@ -394,7 +394,7 @@ func TestReplaceFiles_AFailedGroupKilledWhileItCleansUpIsPutBackByItsSteps(t *te
 							stopped = true
 						}
 					}()
-					return ReplaceFilesWith(zap.NewNop(), ReplaceHooks{Rename: refusing(last + ReplaceNewSuffix), Step: func() {
+					return ReplaceFilesWith(zap.NewNop(), dir, ReplaceHooks{Rename: refusing(last + ReplaceNewSuffix), Step: func() {
 						if count++; count == n {
 							panic(killed{})
 						}

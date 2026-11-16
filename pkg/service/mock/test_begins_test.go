@@ -38,6 +38,33 @@ func TestStampBeginsKeepsEachTestsFirstBegin(t *testing.T) {
 	}
 }
 
+// A test keeps the latest end of its windows, so its begin and end span every
+// window of the name; a window still open, and one that never began, give
+// none.
+func TestStampEndsKeepsEachTestsLastEnd(t *testing.T) {
+	t0 := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	byCase := map[string]models.MappedTestCase{"pkg::TestA": {Dir: "pkg"}}
+	stampEnds(byCase, []models.ScopeWindow{
+		{Name: "pkg::TestA", Start: t0.Add(time.Minute), End: t0.Add(2 * time.Minute)},
+		{Name: "pkg::TestA", Start: t0, End: t0.Add(time.Second)},
+		{Name: "pkg::TestB", Start: t0.Add(time.Hour), End: t0.Add(time.Hour + time.Second)},
+		{Name: "pkg::TestB", Start: t0.Add(2 * time.Hour)},
+		{Name: "pkg::TestC", Start: t0},
+		{Name: "pkg::TestD", End: t0},
+	})
+	if got := byCase["pkg::TestA"]; !got.End.Equal(t0.Add(2*time.Minute)) || got.Dir != "pkg" || !got.At.IsZero() {
+		t.Fatalf("pkg::TestA: %+v", got)
+	}
+	if got := byCase["pkg::TestB"]; !got.End.Equal(t0.Add(time.Hour + time.Second)) {
+		t.Fatalf("pkg::TestB: %+v", got)
+	}
+	for _, name := range []string{"pkg::TestC", "pkg::TestD"} {
+		if got, ok := byCase[name]; ok {
+			t.Fatalf("a window that never ended or never began gave %s %+v", name, got)
+		}
+	}
+}
+
 type beginsPusher struct {
 	Instrumentation
 	begins map[string]time.Time

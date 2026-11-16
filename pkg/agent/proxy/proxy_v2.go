@@ -728,7 +728,10 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 			}
 			tlsConn := tls.Client(conn, dialCfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				return nil, fmt.Errorf("dest TLS handshake failed: %w", err)
+				// The handshake's error names the server name it checked
+				// and the certificate's names whole: written by their
+				// shape and tag, as the relay logs it.
+				return nil, models.HostsInError(ctx, fmt.Errorf("dest TLS handshake failed: %w", err), dialCfg.ServerName)
 			}
 			return tlsConn, nil
 		}

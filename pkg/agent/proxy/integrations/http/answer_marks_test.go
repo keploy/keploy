@@ -395,7 +395,7 @@ func TestRecordMarksAWholeAnswerOnlyAsTheClientReadItAll(t *testing.T) {
 	build := func(m *FinalHTTP) *models.Mock {
 		t.Helper()
 		m.Req, m.ReqTimestampMock, m.ResTimestampMock = []byte(marksReq), markAt(0), markAt(2)
-		mock, err := h.buildHTTPMock(m, 80, "marks-conn", models.OutgoingOptions{})
+		mock, err := h.buildHTTPMock(context.Background(), m, 80, "marks-conn", models.OutgoingOptions{})
 		if err != nil || mock == nil {
 			t.Fatalf("buildHTTPMock = (%v, %v)", mock, err)
 		}
@@ -439,7 +439,7 @@ func TestRecordKeepsNoMarksForAFaultBeforeTheBodyEnded(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			c.m.Req, c.m.ReqTimestampMock, c.m.ResTimestampMock = []byte(marksReq), markAt(0), markAt(2)
-			mock, err := h.buildHTTPMock(c.m, 80, "marks-conn", models.OutgoingOptions{})
+			mock, err := h.buildHTTPMock(context.Background(), c.m, 80, "marks-conn", models.OutgoingOptions{})
 			if err != nil || mock == nil {
 				t.Fatalf("buildHTTPMock = (%v, %v)", mock, err)
 			}

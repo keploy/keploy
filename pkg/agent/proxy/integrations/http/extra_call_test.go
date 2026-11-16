@@ -72,7 +72,7 @@ func TestAMissIsDiagnosedAgainstTheTestsAnsweredMocks(t *testing.T) {
 		t.Fatalf("phase %q, %d candidates, pool %d; want %q, 1, 1", diag.phase, diag.candidates, len(diag.pool), models.MatchPhaseSchema)
 	}
 	request := &http.Request{Method: "GET", URL: &url.URL{Path: "/reserve/book"}, Host: answeredHost, Header: http.Header{"Accept": {"application/json"}}}
-	r := newHTTP().buildHTTPMismatchReport(request, nil, db, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), request, nil, db, nil, nil, nil, diag)
 	if r == nil || r.ClosestMock != "stock" || !reflect.DeepEqual(r.Differs, []string{"path"}) || r.MatchPhase != models.MatchPhaseSchema {
 		t.Fatalf("report %+v; want stock closest, its path differing, phase %q", r, models.MatchPhaseSchema)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -30,7 +31,7 @@ func TestGetUnchargedCaptureLossesReadsWhatNoTestWasChargedWith(t *testing.T) {
 	var _ mock.UnchargedLossReader = newClient(t, agentWith(t, unchargedAgentSvc{}))
 	want := models.CaptureLosses{{Kind: models.CaptureLossParserStall, Count: 2, What: "to db:3306"}}
 	got, err := newClient(t, agentWith(t, unchargedAgentSvc{uncharged: want})).GetUnchargedCaptureLosses(context.Background())
-	if err != nil || len(got) != 1 || got[0] != want[0] {
+	if err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], want[0]) {
 		t.Fatalf("read %+v, %v; want %+v", got, err, want)
 	}
 	if got, err := newClient(t, agentWith(t, unchargedAgentSvc{})).GetUnchargedCaptureLosses(context.Background()); err != nil || got == nil || len(got) != 0 {

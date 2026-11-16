@@ -29,6 +29,25 @@ import (
 // platform's own; what a close with bytes unread, or on their way, charges is
 // the same.
 
+// closeUnknown makes every wait unknown from now on (paired.fail) for err:
+// what the application had written to pc, as the proxy closes it, cannot be
+// told (noteWroteAtClose). It says so in one log line naming the connection
+// and why, the first time only: every wait is unknown from then on, and a
+// later close tells no more. A proxy whose reads do not wait for the paired
+// connections' bytes (holdsPairedBytes) vouches for none, and says it at debug
+// level, as pairedBytesUnsupported does.
+func (p *Proxy) closeUnknown(pc *pairedConn, err error, fields ...zap.Field) {
+	if !p.paired.fail(err) {
+		return
+	}
+	log := p.logger.Warn
+	if !p.holdsPairedBytes() {
+		log = p.logger.Debug
+	}
+	log("keploy cannot tell what the application had written to a connection its proxy closed: from now on it cannot vouch that every call of a test is in its hands",
+		append([]zap.Field{zap.String("connection", fmt.Sprintf("%s -> %s", pc.app, pc.proxy)), zap.Error(err)}, fields...)...)
+}
+
 // pairClosing is a paired connection's beforeClose: its side as the proxy
 // closes it (closing), and a capture loss when the close tosses bytes the
 // application wrote that the proxy never read. Its side counts those
@@ -67,7 +86,7 @@ import (
 func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn) {
 	pc, unread, err := p.paired.closing(conn, func(pc *pairedConn) {
 		if ctx.Err() == nil && !pc.noSession.Load() {
-			noteWroteAtClose(pc)
+			p.noteWroteAtClose(pc)
 		}
 	})
 	tlsLayer := tc != nil && tc.tlsLayer.Load() != nil
@@ -87,7 +106,7 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 		// written by then.
 		low, top := dataReceived(*pc.atClose.Load())+1, lostTop(pc)
 		data, err := plainOnItsWay(ctx, pc.conn)
-		ps := readProxySide(pc.conn)
+		ps := pc.readSide()
 		pc.atClose.Store(&ps)
 		switch {
 		case ctx.Err() != nil:
@@ -110,7 +129,7 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 		data, err := tlsUnreadData(ctx, pc.conn, tc.tlsLayer.Load())
 		// Its side as the read left it: the application's FIN, if the read
 		// waited for it, is in, which the wait counts (pairReached).
-		ps := readProxySide(pc.conn)
+		ps := pc.readSide()
 		pc.atClose.Store(&ps)
 		switch {
 		case ctx.Err() != nil:

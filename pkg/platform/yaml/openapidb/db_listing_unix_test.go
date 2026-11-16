@@ -66,8 +66,18 @@ func TestGetTestCasesSchema_AnUnreadableSetFolderIsAnError(t *testing.T) {
 // has them is read.
 func TestGetTestCasesSchema_AMissingSetFolderIsEmpty(t *testing.T) {
 	root := t.TempDir()
+	// A schema folder that is not there yet holds no schemas either.
+	missing := filepath.Join(root, "schema")
+	got, err := New(zap.NewNop(), missing).GetTestCasesSchema(context.Background(), "test-set-0", "")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("GetTestCasesSchema in a missing schema folder = %d schemas, %v; want none, nil", len(got), err)
+	}
+	got, err = New(zap.NewNop(), missing).GetMocksSchemas(context.Background(), "test-set-0", missing, "schema")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("GetMocksSchemas in a missing schema folder = %d schemas, %v; want none, nil", len(got), err)
+	}
 	db := New(zap.NewNop(), root)
-	got, err := db.GetTestCasesSchema(context.Background(), "test-set-0", "")
+	got, err = db.GetTestCasesSchema(context.Background(), "test-set-0", "")
 	if err != nil || len(got) != 0 {
 		t.Fatalf("GetTestCasesSchema of a missing set = %d schemas, %v; want none, nil", len(got), err)
 	}

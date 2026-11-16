@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,8 @@ import (
 
 	proxytls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -34,9 +37,34 @@ type connectTunnelResult struct {
 	DstReader *bufio.Reader
 }
 
-// isConnectRequest checks whether peeked bytes look like an HTTP CONNECT request.
+// connectRequestStart is how an HTTP CONNECT request begins: its method,
+// exactly, and the space after it.
+const connectRequestStart = "CONNECT "
+
+// isConnectRequest reports whether peeked, the first bytes a client sent
+// (at least 5), can begin an HTTP CONNECT request: each is the byte
+// connectRequestStart has there. With fewer than its 8 they only may begin
+// one (connectRequestAhead reads the rest); with 8 or more the method is
+// CONNECT exactly, not one that only begins "CONNE".
 func isConnectRequest(peeked []byte) bool {
-	return len(peeked) >= 5 && bytes.HasPrefix(peeked, []byte("CONNE"))
+	if len(peeked) < 5 {
+		return false
+	}
+	n := min(len(peeked), len(connectRequestStart))
+	return bytes.Equal(peeked[:n], []byte(connectRequestStart[:n]))
+}
+
+// connectRequestAhead reports whether r's next bytes begin an HTTP CONNECT
+// request (connectRequestStart), peeked being the first of them the proxy
+// has already peeked (5). Only where those may begin one does it peek the
+// rest, which a client that sent them sends with them: its request line.
+// A client that ends first sent no CONNECT.
+func connectRequestAhead(r *bufio.Reader, peeked []byte) bool {
+	if !isConnectRequest(peeked) {
+		return false
+	}
+	start, err := r.Peek(len(connectRequestStart))
+	return err == nil && isConnectRequest(start)
 }
 
 // handleConnectTunnel handles the HTTP CONNECT tunnel handshake.
@@ -51,6 +79,7 @@ func isConnectRequest(peeked []byte) bool {
 // After return, srcConn is positioned right after the CONNECT handshake — the
 // next bytes will be a TLS ClientHello (or plaintext for non-TLS targets).
 func handleConnectTunnel(
+	ctx context.Context,
 	logger *zap.Logger,
 	srcConn net.Conn,
 	dstConn net.Conn, // nil in test mode
@@ -64,12 +93,17 @@ func handleConnectTunnel(
 	reader := bufio.NewReader(srcConn)
 	req, err := http.ReadRequest(reader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse CONNECT request: %w", err)
+		// The parser's error quotes the head (a Proxy-Authorization
+		// line among it): withheld.
+		return nil, fmt.Errorf("failed to parse CONNECT request: %w", utils.WithholdInput(err))
 	}
 	defer req.Body.Close()
 
+	// The method is the client's text (ReadRequest takes any token): named
+	// by its size. The proxy sends here only a request that begins
+	// "CONNECT " (connectRequestAhead).
 	if req.Method != "CONNECT" {
-		return nil, fmt.Errorf("expected CONNECT method, got %s", req.Method)
+		return nil, fmt.Errorf("expected the CONNECT method, got a %d-byte method that is not CONNECT", len(req.Method))
 	}
 
 	// For CONNECT, Go's http.ReadRequest puts the authority in different
@@ -105,19 +139,23 @@ func handleConnectTunnel(
 	// host-less CONNECT — reject it the same way the empty port below is
 	// rejected.
 	if host == "" {
-		return nil, fmt.Errorf("empty host in CONNECT target %q", targetAddr)
+		return nil, fmt.Errorf("empty host in CONNECT target %s", models.HostLogName(ctx, targetAddr))
 	}
 	// Reject empty port (e.g., "example.com:"), non-numeric, out-of-range.
 	if port == "" {
-		return nil, fmt.Errorf("empty port in CONNECT target %q", targetAddr)
+		return nil, fmt.Errorf("empty port in CONNECT target %s", models.HostLogName(ctx, targetAddr))
 	}
+	// The port is not quoted: for an origin-form CONNECT (`CONNECT /x`)
+	// Go takes the authority from the Host header, whose port it never
+	// checks, so it is any text the client sent; the proxy logs this error
+	// at ERROR. The target's shape writes a port that is no number {}.
 	portNum, parseErr := strconv.ParseUint(port, 10, 16)
 	if parseErr != nil || portNum == 0 {
-		return nil, fmt.Errorf("invalid port %q in CONNECT target %q", port, targetAddr)
+		return nil, fmt.Errorf("invalid port in CONNECT target %s: a %d-byte value that is no port from 1 to 65535", models.HostLogName(ctx, targetAddr), len(port))
 	}
 
 	logger.Debug("CONNECT tunnel detected",
-		zap.String("target", targetAddr),
+		zap.String("target", models.HostLogName(ctx, targetAddr)),
 		zap.Bool("testMode", isTestMode),
 	)
 
@@ -194,7 +232,7 @@ func handleConnectTunnel(
 		proxytls.SrcPortToDstURL.Store(tcpAddr.Port, host)
 		logger.Debug("Stored CONNECT target in SrcPortToDstURL",
 			zap.Int("srcPort", tcpAddr.Port),
-			zap.String("host", host),
+			zap.String("host", models.HostLogName(ctx, host)),
 		)
 	}
 

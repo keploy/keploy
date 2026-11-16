@@ -95,6 +95,11 @@ type MockYaml struct {
 	// global — see useGobFormat.
 	MockFormat string
 
+	// OpenMockFile opens a set's mock file to write it, inside the
+	// recording: yaml.OpenFileInRecording when nil. A test stands a disk
+	// that fails behind it.
+	OpenMockFile func(root, path string, flag int, perm os.FileMode) (*os.File, error)
+
 	// Async gob writer: background goroutine drains gobQueue and
 	// encodes to a persistent *os.File + bufio + gob.Encoder. Parser
 	// goroutines never block on disk or gob encoding. Sync fallback
@@ -282,8 +287,16 @@ func getMockFileLock(lockKey string) *sync.RWMutex {
 	return &mockFileLockStripes[hasher.Sum32()%mockFileLockStripeCount]
 }
 
-func resolveMockFileMode(targetPath string) (os.FileMode, error) {
-	info, err := os.Stat(targetPath)
+// openMockFile opens path, a set's mock file, to write it (OpenMockFile).
+func (ys *MockYaml) openMockFile(path string, flag int, perm os.FileMode) (*os.File, error) {
+	if ys.OpenMockFile != nil {
+		return ys.OpenMockFile(ys.MockPath, path, flag, perm)
+	}
+	return yaml.OpenFileInRecording(ys.MockPath, path, flag, perm)
+}
+
+func resolveMockFileMode(root, targetPath string) (os.FileMode, error) {
+	info, err := yaml.StatInRecording(root, targetPath)
 	if err == nil {
 		return info.Mode().Perm(), nil
 	}
@@ -302,9 +315,9 @@ var (
 	mergeReqBodyNoise = learn.MergeReqBodyNoise
 )
 
-// replaceFile puts a rewritten mock file in place (yaml.ReplaceFile); tests
+// replaceFile puts a rewritten mock file in place (yaml.ReplaceFileInRecording); tests
 // swap it to make the replace fail.
-var replaceFile = yaml.ReplaceFile
+var replaceFile = yaml.ReplaceFileInRecording
 
 // UpdateMocks prunes unused mocks from the mock file and keeps required ones.
 //
@@ -424,14 +437,14 @@ func (st *pruneStats) recordPruned(mock *models.Mock, debugEnabled bool) {
 func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, format yaml.Format, verdict *pruneVerdict) (pruneStats, error) {
 	var st pruneStats
 	ext := "." + format.FileExtension()
-	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, format)
+	reader, err := yaml.NewRecordingMockReaderF(ctx, ys.Logger, ys.MockPath, path, mockFileName, format)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
 		return st, err
 	}
 	defer reader.Close()
 
-	rw := newMockFileRewriter(ys.Logger, path, mockFileName, format)
+	rw := newMockFileRewriter(ys.Logger, ys.MockPath, path, mockFileName, format)
 	defer rw.discard()
 
 	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
@@ -564,7 +577,7 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 // the pass is a first one to do again (pruneStats.again).
 func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *pruneVerdict) (pruneStats, error) {
 	var st pruneStats
-	rw, err := newGobFileRewriter(gobPath)
+	rw, err := newGobFileRewriter(ys.MockPath, gobPath)
 	if err != nil {
 		return st, err
 	}
@@ -574,7 +587,7 @@ func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *p
 	// the gob path is the one most likely to hit ~10^5-mock test sets, so
 	// skipping the allocation when the log is a no-op matters more here.
 	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
-	err = forEachGobMock(gobPath, func(mock *models.Mock) error {
+	err = forEachGobMock(ys.MockPath, gobPath, func(mock *models.Mock) error {
 		// The gob stream has no per-line reader watching ctx, so a very
 		// large set checks it every ctxCheckEvery mocks.
 		if err := ctxErrEvery(ctx, st.total); err != nil {
@@ -708,8 +721,13 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 			utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before noise persistence", zap.String("path", gobPath))
 			return nil, err
 		}
+		// eachGob streams the file's mocks to fn, read inside the recording,
+		// for both passes.
+		eachGob := func(fn func(mock *models.Mock) error) error {
+			return forEachGobMock(ys.MockPath, gobPath, fn)
+		}
 		scanned, changes := 0, false
-		err := forEachGobMock(gobPath, func(mock *models.Mock) error {
+		err := eachGob(func(mock *models.Mock) error {
 			if err := ctxErrEvery(ctx, scanned); err != nil {
 				return err
 			}
@@ -726,13 +744,13 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		if !changes {
 			return nil, nil
 		}
-		rw, err := newGobFileRewriter(gobPath)
+		rw, err := newGobFileRewriter(ys.MockPath, gobPath)
 		if err != nil {
 			return nil, err
 		}
 		defer rw.discard()
 		total := 0
-		err = forEachGobMock(gobPath, func(mock *models.Mock) error {
+		err = eachGob(func(mock *models.Mock) error {
 			if err := ctxErrEvery(ctx, total); err != nil {
 				return err
 			}
@@ -761,7 +779,7 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 	// eachDoc streams the file's documents to fn, closing the file before
 	// it returns.
 	eachDoc := func(fn func(doc fileDoc) error) error {
-		reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
+		reader, err := yaml.NewRecordingMockReaderF(ctx, ys.Logger, ys.MockPath, path, mockFileName, detectedFormat)
 		if err != nil {
 			return err
 		}
@@ -804,7 +822,7 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		return nil, nil
 	}
 
-	rw := newMockFileRewriter(ys.Logger, path, mockFileName, detectedFormat)
+	rw := newMockFileRewriter(ys.Logger, ys.MockPath, path, mockFileName, detectedFormat)
 	defer rw.discard()
 	total := 0
 	if err := eachDoc(func(doc fileDoc) error {
@@ -987,14 +1005,14 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 
 	// CreateFileF picks the right extension for `effFormat` so the json pass
 	// writes .json and the yaml pass writes .yaml.
-	isFileEmpty, err := yaml.CreateFileF(ctx, ys.Logger, mockPath, mockFileName, effFormat)
+	isFileEmpty, err := yaml.CreateRecordingFileF(ctx, ys.Logger, ys.MockPath, mockPath, mockFileName, effFormat)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to create file", zap.String("path directory", mockPath), zap.String("file", mockFileName))
 		return err
 	}
 
 	filePath := filepath.Join(mockPath, mockFileName+"."+effFormat.FileExtension())
-	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, os.ModePerm)
+	file, err := ys.openMockFile(filePath, os.O_WRONLY|os.O_APPEND, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("failed to open mock file for append: %w", err)
 	}
@@ -1346,7 +1364,7 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 		// counted as such (gobQueued less gobWritten).
 		ys.gobFinishFileLocked()
 	}
-	if err := os.MkdirAll(mockPath, 0o777); err != nil {
+	if err := yaml.MkdirAllInRecording(ys.MockPath, mockPath, 0o777); err != nil {
 		return fmt.Errorf("mkdir mock dir: %w", err)
 	}
 	filePath := filepath.Join(mockPath, mockFileName+".gob")
@@ -1363,19 +1381,19 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 	// (keploy mock replay --on-miss record) or comes back to a set it left
 	// (another test set's mocks in between, a Close in between) then wiped
 	// the mocks the set held: the recorded set was gone.
-	carry, err := gobFileHoldsData(filePath)
+	carry, err := gobFileHoldsData(ys.MockPath, filePath)
 	if err != nil {
 		return err
 	}
 	open := filePath
 	var f *os.File
 	if carry {
-		f, err = createTempBeside(filePath, ".append.*.tmp")
+		f, err = createTempBeside(ys.MockPath, filePath, ".append.*.tmp")
 		if err != nil {
 			return fmt.Errorf("start a gob stream beside %s to add to it: %w", filePath, err)
 		}
 		open = f.Name()
-	} else if f, err = os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666); err != nil {
+	} else if f, err = ys.openMockFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666); err != nil {
 		return fmt.Errorf("open gob mock file: %w", err)
 	}
 	ys.gobFile = f
@@ -1401,8 +1419,8 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 
 // gobFileHoldsData says whether path is a file with something in it, which
 // a writer opening it must keep. An absent or empty file holds nothing.
-func gobFileHoldsData(path string) (bool, error) {
-	info, err := os.Stat(path)
+func gobFileHoldsData(root, path string) (bool, error) {
+	info, err := yaml.StatInRecording(root, path)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
@@ -1415,18 +1433,18 @@ func gobFileHoldsData(path string) (bool, error) {
 // createTempBeside creates a temp file in path's directory, named after it
 // with pattern, with path's permissions (os.CreateTemp alone makes it 0600,
 // which would narrow the file it replaces).
-func createTempBeside(path, pattern string) (*os.File, error) {
+func createTempBeside(root, path, pattern string) (*os.File, error) {
 	mode := os.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
+	if info, err := yaml.StatInRecording(root, path); err == nil {
 		mode = info.Mode().Perm()
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+pattern)
+	f, err := yaml.CreateTempInRecording(root, filepath.Dir(path), filepath.Base(path)+pattern, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(f.Name(), mode); err != nil {
+	if err := f.Chmod(mode); err != nil {
 		_ = f.Close()
-		_ = os.Remove(f.Name())
+		_ = yaml.RemoveInRecording(root, f.Name())
 		return nil, err
 	}
 	return f, nil
@@ -1441,7 +1459,7 @@ func createTempBeside(path, pattern string) (*os.File, error) {
 // not carried, which is said. Any other read error keeps the file as it was.
 func (ys *MockYaml) gobCarryOverLocked(filePath, tmpPath string) error {
 	carried := 0
-	cut, err := forEachGobMockCut(filePath, func(m *models.Mock) error {
+	cut, err := forEachGobMockCut(ys.MockPath, filePath, func(m *models.Mock) error {
 		carried++
 		return ys.gobEnc.Encode(gobKinded(m))
 	})
@@ -1462,10 +1480,10 @@ func (ys *MockYaml) gobCarryOverLocked(filePath, tmpPath string) error {
 		return fmt.Errorf("close the carried mocks: %w", err)
 	}
 	ys.gobFile = nil
-	if err := replaceFile(ys.Logger, tmpPath, filePath); err != nil {
+	if err := replaceFile(ys.Logger, ys.MockPath, tmpPath, filePath); err != nil {
 		return fmt.Errorf("put the carried mocks in place: %w", err)
 	}
-	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, 0)
+	f, err := ys.openMockFile(filePath, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		// The file is whole, with every mock it held; the writer cannot add
 		// to it.
@@ -1488,7 +1506,7 @@ func (ys *MockYaml) gobAbandonLocked(path string, temp bool) {
 		_ = ys.gobFile.Close()
 	}
 	if temp {
-		_ = os.Remove(path)
+		_ = yaml.RemoveInRecording(ys.MockPath, path)
 	}
 	ys.gobFile = nil
 	ys.gobBufw = nil
@@ -1685,18 +1703,19 @@ func (ys *MockYaml) gobFilePathSnapshot() string {
 	return p
 }
 
-// readGobMocks decodes every mock in a mocks.gob file (see forEachGobMock).
+// readGobMocks decodes every mock in a mocks.gob file (see forEachGobMock),
+// read inside the file's own directory.
 // On a decode error it returns the mocks decoded before it with the error.
 func readGobMocks(path string) ([]*models.Mock, error) {
-	out, _, err := readGobMocksCut(path)
+	out, _, err := readGobMocksCut(filepath.Dir(path), path)
 	return out, err
 }
 
 // readGobMocksCut is readGobMocks that also says whether the file ended
 // part-way through a mock (see forEachGobMockCut).
-func readGobMocksCut(path string) ([]*models.Mock, bool, error) {
+func readGobMocksCut(root, path string) ([]*models.Mock, bool, error) {
 	var out []*models.Mock
-	cut, err := forEachGobMockCut(path, func(m *models.Mock) error {
+	cut, err := forEachGobMockCut(root, path, func(m *models.Mock) error {
 		out = append(out, m)
 		return nil
 	})
@@ -2021,7 +2040,7 @@ func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string,
 		connFailures := 0
 		var deps models.MockDepsCheck
 		// One mock at a time: a visiting read keeps none of them.
-		cut, err := forEachGobMockCut(gobPath, func(mock *models.Mock) error {
+		cut, err := forEachGobMockCut(ys.MockPath, gobPath, func(mock *models.Mock) error {
 			if mock.Kind == models.ConnectionFailure {
 				// gob has no per-kind decoder: a connection failure is
 				// validated here, as DecodeMocks and DecodeMocksJSON validate
@@ -2087,7 +2106,7 @@ func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string,
 	// Auto-detect the mocks file's format (may be yaml or json regardless
 	// of the currently-configured StorageFormat) so replay keeps working
 	// across format switches.
-	reader, err := yaml.NewMockReaderAny(ctx, ys.Logger, path, mockFileName, ys.Format)
+	reader, err := yaml.NewRecordingMockReaderAny(ctx, ys.Logger, ys.MockPath, path, mockFileName, ys.Format)
 	if err != nil {
 		if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
 			if visit != nil {
@@ -2377,7 +2396,7 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 			utils.LogError(ys.Logger, err, "failed to validate mock path for delete", zap.String("at_path", candidate))
 			return err
 		}
-		if err := os.Remove(validated); err != nil && !os.IsNotExist(err) {
+		if err := yaml.RemoveInRecording(ys.MockPath, validated); err != nil && !os.IsNotExist(err) {
 			utils.LogError(ys.Logger, err, "failed to delete stale mock file during refresh; check that the file is not read-only and that the current user owns the mocks output directory, ensure no other keploy process or editor has an open handle on it, then retry — missing files are tolerated, only permission/ownership errors surface here", zap.String("path", validated))
 			return err
 		}
@@ -2446,9 +2465,12 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 	wasStaged := make([]bool, len(stagingVariants))
 	anyStaged := false
 	for i, sv := range stagingVariants {
-		if _, err := os.Stat(sv); err == nil {
+		_, err := yaml.StatInRecording(ys.MockPath, sv)
+		if err == nil {
 			wasStaged[i] = true
 			anyStaged = true
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("not promoting staged set %q, so %q is left untouched: %w", stagingID, targetID, err)
 		}
 	}
 	// Guard: never wipe the target based on an empty staging set.
@@ -2456,7 +2478,7 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 		return fmt.Errorf("nothing staged to promote for %q; leaving %q untouched", stagingID, targetID)
 	}
 
-	if err := os.MkdirAll(targetDir, 0o777); err != nil {
+	if err := yaml.MkdirAllInRecording(ys.MockPath, targetDir, 0o777); err != nil {
 		return fmt.Errorf("creating target set dir %q: %w", targetDir, err)
 	}
 
@@ -2478,7 +2500,7 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 		if !wasStaged[i] {
 			continue
 		}
-		if err := os.Rename(stagingVariants[i], targetVariants[i]); err != nil {
+		if err := yaml.RenameInRecording(ys.MockPath, stagingVariants[i], targetVariants[i]); err != nil {
 			return fmt.Errorf("promoting staged mock file %q over %q: %w", stagingVariants[i], targetVariants[i], err)
 		}
 	}
@@ -2493,12 +2515,12 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 		if verr != nil {
 			return fmt.Errorf("validating stale target mock path %q: %w", targetVariants[i], verr)
 		}
-		if rmErr := os.Remove(validated); rmErr != nil && !os.IsNotExist(rmErr) {
+		if rmErr := yaml.RemoveInRecording(ys.MockPath, validated); rmErr != nil && !os.IsNotExist(rmErr) {
 			return fmt.Errorf("removing stale target mock file %q: %w", validated, rmErr)
 		}
 	}
 
-	if err := os.RemoveAll(stagingDir); err != nil {
+	if err := yaml.RemoveAllInRecording(ys.MockPath, stagingDir); err != nil {
 		ys.Logger.Warn("promoted the staged mock set but could not remove its staging directory; it is safe to delete",
 			zap.String("stagingDir", stagingDir), zap.Error(err))
 	}
@@ -2520,8 +2542,12 @@ func (ys *MockYaml) DiscardStagedSet(ctx context.Context, stagingID string) erro
 	if err := ys.CloseUnless(ctx.Done()); err != nil {
 		ys.Logger.Debug("discardStagedSet: closing the mock writer reported an error; removing the staging dir anyway", zap.Error(err))
 	}
+	// Removed only inside the recording: through a keploy folder that links
+	// out of the project, a folder of this name where it leads is kept, and
+	// the discard (so the record) is refused with why. No keploy folder yet
+	// is nothing to discard.
 	stagingDir := filepath.Join(ys.MockPath, stagingID)
-	if err := os.RemoveAll(stagingDir); err != nil {
+	if err := yaml.RemoveAllInRecording(ys.MockPath, stagingDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("discarding staged set %q: %w", stagingID, err)
 	}
 	return nil

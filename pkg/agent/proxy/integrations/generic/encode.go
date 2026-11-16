@@ -19,54 +19,99 @@ import (
 	"go.uber.org/zap"
 )
 
-// captureTeeWriter forwards data to dest (critical path) and non-blocking
-// tees a copy to a capture channel. If the channel is full or recording is
-// paused, capture is silently dropped — forwarding is never affected.
+// capturedChunk is a chunk one direction of the connection carried.
+type capturedChunk struct {
+	fromClient bool
+	buf        []byte
+}
+
+// captureStream is the connection's captured chunks, both directions on one
+// channel in the order the tees queued them. Each tee queues a chunk before
+// it forwards it (captureTeeWriter.Write), and an answer can only come after
+// what it answers was forwarded, so the stream holds a request before its
+// answer. Two channels, one per direction, did not: a tee that forwarded a
+// request and was then outrun by the answer's tee queued the request second,
+// and the mock maker, reading the answer first, dropped the exchange.
+//
+// A chunk that does not fit, or a recording that pauses, stops the capture
+// of both directions: an exchange missing a chunk of either is not one. The
+// channel is closed once, when capture stops or both directions have ended.
+type captureStream struct {
+	ch chan capturedChunk
+
+	mu      sync.Mutex
+	stopped bool // nothing more is queued; ch is closed
+	open    int  // directions not ended yet
+}
+
+func newCaptureStream(size, directions int) *captureStream {
+	return &captureStream{ch: make(chan capturedChunk, size), open: directions}
+}
+
+// add queues a copy of p, carried in the direction fromClient says, without
+// waiting: a full channel stops the capture.
+func (c *captureStream) add(fromClient bool, p []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return
+	}
+	if memoryguard.IsRecordingPaused() {
+		c.stopLocked()
+		return
+	}
+	buf := make([]byte, len(p))
+	copy(buf, p)
+	select {
+	case c.ch <- capturedChunk{fromClient: fromClient, buf: buf}:
+	default:
+		c.stopLocked()
+	}
+}
+
+// stopLocked ends the capture, c.mu held: the mock maker gets what was
+// queued, then the end.
+func (c *captureStream) stopLocked() {
+	if !c.stopped {
+		c.stopped = true
+		close(c.ch)
+	}
+}
+
+// ended notes that one direction has ended; the last to end ends the capture.
+func (c *captureStream) ended() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.open--; c.open <= 0 {
+		c.stopLocked()
+	}
+}
+
+// captureTeeWriter forwards data to dest (critical path) and tees a copy to
+// the connection's capture stream without waiting (captureStream.add).
 type captureTeeWriter struct {
-	dest      io.Writer
-	ch        chan []byte
-	stopped   bool
-	closeOnce *sync.Once // shared with the forwarding goroutine's defer close
+	dest       io.Writer
+	stream     *captureStream
+	fromClient bool
 
 	// n counts bytes that actually reached dest. The drain polls it from
 	// the caller's goroutine while this tee is still being written by its
-	// own copy goroutine, so it has to be atomic; stopped stays a plain
-	// bool because only the copy goroutine ever touches it.
+	// own copy goroutine, so it has to be atomic.
 	n atomic.Int64
 }
 
 // delivered reports how many bytes this direction has handed on.
 func (w *captureTeeWriter) delivered() int64 { return w.n.Load() }
 
-func (w *captureTeeWriter) stop() {
-	w.stopped = true
-	// Close the channel so the consumer goroutine can exit promptly
-	// instead of blocking until the connection ends.
-	w.closeOnce.Do(func() { close(w.ch) })
-}
-
 func (w *captureTeeWriter) Write(p []byte) (int, error) {
-	// Forward to destination first — this is the critical path.
+	// Queued before it is forwarded, so that its answer, which can only
+	// come once it is forwarded, is queued after it (captureStream). A chunk
+	// whose forwarding then fails is captured all the same: the exchange it
+	// begins has no answer, and no mock is made of it.
+	w.stream.add(w.fromClient, p)
 	n, err := w.dest.Write(p)
 	w.n.Add(int64(n))
-	if err != nil {
-		return n, err
-	}
-	// Non-blocking tee to capture channel.
-	if !w.stopped {
-		if memoryguard.IsRecordingPaused() {
-			w.stop()
-			return n, nil
-		}
-		buf := make([]byte, len(p))
-		copy(buf, p)
-		select {
-		case w.ch <- buf:
-		default:
-			w.stop()
-		}
-	}
-	return n, nil
+	return n, err
 }
 
 func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
@@ -91,25 +136,23 @@ func encodeGenericWithDrain(ctx context.Context, logger *zap.Logger, reqBuf []by
 		return forwardBidirectional(clientConn, destConn)
 	}
 
-	// Capture channels — background goroutine reads these to create mocks.
-	// Buffered to absorb brief processing delays without blocking forwarding.
-	clientCapChan := make(chan []byte, 256)
-	destCapChan := make(chan []byte, 256)
+	// The capture stream, both directions in order (captureStream); a
+	// background goroutine reads it to create mocks. Buffered to absorb
+	// brief processing delays without blocking forwarding.
+	stream := newCaptureStream(512, 2)
 
-	// Seed initial request buffer into capture.
-	initialBuf := make([]byte, len(reqBuf))
-	copy(initialBuf, reqBuf)
-	clientCapChan <- initialBuf
+	// The initial request buffer, forwarded above before either copy began,
+	// so before any answer to it was read: first on the stream.
+	stream.add(true, reqBuf)
 
 	// Start background mock creator.
-	go createGenericMocksAsync(ctx, logger, clientCapChan, destCapChan)
+	go createGenericMocksAsync(ctx, logger, stream.ch)
 
 	// Forward bidirectionally at wire speed with non-blocking capture tee.
-	// Each tee writer shares a closeOnce with the deferred close so the
-	// channel is closed exactly once (by whichever fires first: capture
-	// stop or connection end).
-	clientCloseOnce := &sync.Once{}
-	destCloseOnce := &sync.Once{}
+	// Each direction ends on the stream once, by whichever comes first: its
+	// copy's end, or the deferred end of a copy that panicked.
+	clientEnded := &sync.Once{}
+	destEnded := &sync.Once{}
 
 	// Buffered and error-carrying: a broken direction must not strand the
 	// other. The two directions do NOT necessarily fail together — these are
@@ -127,25 +170,25 @@ func encodeGenericWithDrain(ctx context.Context, logger *zap.Logger, reqBuf []by
 	// Built before either goroutine starts: the drain reads whichever tee
 	// belongs to the survivor.
 	tees := [2]*captureTeeWriter{
-		{dest: destConn, ch: clientCapChan, closeOnce: clientCloseOnce},
-		{dest: clientConn, ch: destCapChan, closeOnce: destCloseOnce},
+		{dest: destConn, stream: stream, fromClient: true},
+		{dest: clientConn, stream: stream},
 	}
 	go func() {
-		defer clientCloseOnce.Do(func() { close(clientCapChan) })
+		defer clientEnded.Do(stream.ended)
 		_, err := io.Copy(tees[0], clientConn)
-		// Close the capture channel BEFORE the FIN: forwardFIN can write
-		// a close_notify on a TLS conn, and SafeConn's write deadline is
-		// a no-op, so a stalled peer would otherwise hold
+		// End the direction on the stream BEFORE the FIN: forwardFIN can
+		// write a close_notify on a TLS conn, and SafeConn's write deadline
+		// is a no-op, so a stalled peer would otherwise hold
 		// createGenericMocksAsync open behind it. The deferred Do is a
-		// sync.Once, so this is the early half of the same close.
-		clientCloseOnce.Do(func() { close(clientCapChan) })
+		// sync.Once, so this is the early half of the same end.
+		clientEnded.Do(stream.ended)
 		forwardFIN(destConn, err)
 		done <- copyOutcome{idx: 0, err: err}
 	}()
 	go func() {
-		defer destCloseOnce.Do(func() { close(destCapChan) })
+		defer destEnded.Do(stream.ended)
 		_, err := io.Copy(tees[1], destConn)
-		destCloseOnce.Do(func() { close(destCapChan) })
+		destEnded.Do(stream.ended)
 		forwardFIN(clientConn, err)
 		done <- copyOutcome{idx: 1, err: err}
 	}()
@@ -238,7 +281,7 @@ func forwardBidirectional(clientConn, destConn net.Conn) error {
 // various binary RPC), responses are almost always a single write and
 // therefore one io.Copy chunk. A future protocol-aware parser should
 // supersede generic where framing matters.
-func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, destCh <-chan []byte) {
+func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, chunks <-chan capturedChunk) {
 	var genericRequests []models.Payload
 	var genericResponses []models.Payload
 	prevChunkWasReq := true // first chunk is always a request (initial reqBuf)
@@ -341,7 +384,60 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 		}
 	}
 
-	for clientCh != nil || destCh != nil {
+	// fromClient takes a chunk the client sent.
+	fromClient := func(buf []byte) {
+		// Back-stop for the rare case where the previous completed
+		// request/response exchange was not flushed when its first
+		// response chunk arrived. When the next client chunk shows
+		// up, flush that already-paired exchange before starting a
+		// new one. The common case is flushed below on the first
+		// response chunk, so this branch is normally a no-op.
+		if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
+			flushMock()
+		}
+		// Starting a brand-new exchange: drop any orphaned response
+		// chunks from a previous multi-chunk server reply whose
+		// head chunk was already flushed, and reset the request
+		// timestamp to this request's arrival time.
+		if len(genericRequests) == 0 {
+			genericResponses = nil
+			reqTimestampMock = models.CapturedReqTime(ctx)
+		}
+		genericRequests = append(genericRequests, encodePayload(buf, models.FromClient))
+		prevChunkWasReq = true
+		saw(models.CapturedReqTime(ctx))
+	}
+	// fromDest takes a chunk the destination sent.
+	fromDest := func(buf []byte) {
+		genericResponses = append(genericResponses, encodePayload(buf, models.FromServer))
+		resTimestampMock = models.CapturedRespTime(ctx)
+		saw(resTimestampMock)
+
+		// Flush the moment the first response chunk for an
+		// outstanding request arrives. This makes the mock visible
+		// to the syncMock buffer BEFORE the enterprise capture's
+		// ResolveRange call fires for the current test, which in
+		// static-dedup mode is what associates the mock with the
+		// right test window. Waiting any longer (for the next
+		// client chunk or an idle timer) misses the window on
+		// pooled connections where the next request is seconds
+		// away.
+		if prevChunkWasReq && len(genericRequests) > 0 {
+			flushMock()
+		}
+		prevChunkWasReq = false
+	}
+
+	// take takes the stream's next chunk.
+	take := func(c capturedChunk) {
+		if c.fromClient {
+			fromClient(c.buf)
+		} else {
+			fromDest(c.buf)
+		}
+	}
+
+	for chunks != nil {
 		var changes, stopping <-chan struct{}
 		if hold != nil {
 			changes, stopping = hold.changes(), hold.stopping
@@ -356,59 +452,24 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 			// The recording's stop has begun: decided with what is known.
 			release(hold.wholly())
 		case <-ctx.Done():
+			// The connection's context can end while chunks its copies
+			// captured are still queued here: a short connection whose
+			// caller returns, and cancels, as soon as both copies end.
+			// They are its last exchange, so they are taken first, in the
+			// stream's order. Taking only what is queued, it never waits
+			// on a copy still running.
+			drainBuffered(chunks, take)
 			flushMock()
 			if hold != nil {
 				release(hold.wholly())
 			}
 			return
-		case buf, ok := <-clientCh:
+		case c, ok := <-chunks:
 			if !ok {
-				clientCh = nil
+				chunks = nil
 				continue
 			}
-			// Back-stop for the rare case where the previous completed
-			// request/response exchange was not flushed when its first
-			// response chunk arrived. When the next client chunk shows
-			// up, flush that already-paired exchange before starting a
-			// new one. The common case is flushed below on the first
-			// response chunk, so this branch is normally a no-op.
-			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				flushMock()
-			}
-			// Starting a brand-new exchange: drop any orphaned response
-			// chunks from a previous multi-chunk server reply whose
-			// head chunk was already flushed, and reset the request
-			// timestamp to this request's arrival time.
-			if len(genericRequests) == 0 {
-				genericResponses = nil
-				reqTimestampMock = models.CapturedReqTime(ctx)
-			}
-			genericRequests = append(genericRequests, encodePayload(buf, models.FromClient))
-			prevChunkWasReq = true
-			saw(models.CapturedReqTime(ctx))
-
-		case buf, ok := <-destCh:
-			if !ok {
-				destCh = nil
-				continue
-			}
-			genericResponses = append(genericResponses, encodePayload(buf, models.FromServer))
-			resTimestampMock = models.CapturedRespTime(ctx)
-			saw(resTimestampMock)
-
-			// Flush the moment the first response chunk for an
-			// outstanding request arrives. This makes the mock visible
-			// to the syncMock buffer BEFORE the enterprise capture's
-			// ResolveRange call fires for the current test, which in
-			// static-dedup mode is what associates the mock with the
-			// right test window. Waiting any longer (for the next
-			// client chunk or an idle timer) misses the window on
-			// pooled connections where the next request is seconds
-			// away.
-			if prevChunkWasReq && len(genericRequests) > 0 {
-				flushMock()
-			}
-			prevChunkWasReq = false
+			take(c)
 		}
 	}
 	flushMock()
@@ -417,6 +478,22 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 	if hold != nil {
 		hold.settle(ctx)
 		release(hold.wholly())
+	}
+}
+
+// drainBuffered hands take every chunk ch holds now, without waiting for
+// more; a nil ch holds none.
+func drainBuffered(ch <-chan capturedChunk, take func(capturedChunk)) {
+	for {
+		select {
+		case buf, ok := <-ch:
+			if !ok {
+				return
+			}
+			take(buf)
+		default:
+			return
+		}
 	}
 }
 

@@ -110,15 +110,12 @@ func TestAnUnreadRecordedURLHasEveryPathAndQueryPlaceRedacted(t *testing.T) {
 	}
 }
 
-// The miss's error names the call as its report does, or, with no report,
-// by its path's shape.
-func TestMissedCallNamesTheCallWithoutItsSecret(t *testing.T) {
-	request, _ := http.NewRequest("GET", "http://store/x/"+liveSecret, nil)
-	if got := missedCall(request, nil); got != "GET /{}/{}" {
-		t.Errorf("with no report: %q", got)
-	}
-	if got := missedCall(request, &models.MockMismatchReport{ActualSummary: "GET /x/" + valueRedacted}); got != "GET /x/"+valueRedacted {
-		t.Errorf("with a report: %q", got)
+// The miss's error, which the proxy and the parser log, names the call by
+// its path's shape: every segment, whatever its look or its report says.
+func TestTheMissErrorNamesTheCallByItsShape(t *testing.T) {
+	request, _ := http.NewRequest("GET", "http://store/x/"+liveSecret+"?token="+liveSecret, nil)
+	if got := shapeSummary(request); got != "GET /{}/{}" {
+		t.Errorf("the error names %q, want its shape", got)
 	}
 }
 

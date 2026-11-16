@@ -2214,6 +2214,146 @@ func TestResolveTestTarget(t *testing.T) {
 			isHTTP:         false,
 			expectedTarget: "example.com:50053",
 		},
+
+		// An IPv6 test host: a Kubernetes Pod IP comes bare ("fd00::1"), a
+		// host written next to a port bracketed. Either way it is bracketed
+		// once in the target; an HTTP one was put in the URL bare, which no
+		// URL parse accepts, and a bracketed gRPC one bracketed twice.
+		{
+			name:           "HTTP_ConfigHost_IPv6",
+			originalTarget: "http://localhost:8080/api/items?id=1",
+			configHost:     "fd00::1",
+			isHTTP:         true,
+			expectedTarget: "http://[fd00::1]:8080/api/items?id=1",
+		},
+		{
+			name:           "HTTP_ConfigHost_IPv6Bracketed",
+			originalTarget: "http://localhost:8080/api/items?id=1",
+			configHost:     "[fd00::1]",
+			isHTTP:         true,
+			expectedTarget: "http://[fd00::1]:8080/api/items?id=1",
+		},
+		{
+			name:           "HTTP_ConfigHost_IPv6Loopback_ConfigPort",
+			originalTarget: "http://localhost:8080/api",
+			configHost:     "::1",
+			configPort:     9090,
+			isHTTP:         true,
+			expectedTarget: "http://[::1]:9090/api",
+		},
+		{
+			name:           "HTTP_ConfigHost_IPv4MappedIPv6",
+			originalTarget: "http://localhost:8080/api",
+			configHost:     "::ffff:127.0.0.1",
+			isHTTP:         true,
+			expectedTarget: "http://[::ffff:127.0.0.1]:8080/api",
+		},
+		{
+			name:           "HTTP_ConfigHost_IPv4_OnAnIPv6RecordedURL",
+			originalTarget: "http://[::1]:8080/api",
+			configHost:     "10.244.0.7",
+			isHTTP:         true,
+			expectedTarget: "http://10.244.0.7:8080/api",
+		},
+		{
+			name:           "GRPC_ConfigHost_IPv6",
+			originalTarget: "localhost:50051",
+			configHost:     "fd00::1",
+			isHTTP:         false,
+			expectedTarget: "[fd00::1]:50051",
+		},
+		{
+			name:           "GRPC_ConfigHost_IPv6Bracketed",
+			originalTarget: "localhost:50051",
+			configHost:     "[fd00::1]",
+			isHTTP:         false,
+			expectedTarget: "[fd00::1]:50051",
+		},
+		{
+			name:           "GRPC_ConfigHost_IPv6Loopback",
+			originalTarget: "localhost:50051",
+			configHost:     "::1",
+			isHTTP:         false,
+			expectedTarget: "[::1]:50051",
+		},
+
+		// A test recorded against an IPv6 address, replayed with the
+		// default test host (localhost) or a bracketed one: the brackets
+		// were kept around the new host ("http://[localhost]:8080/api",
+		// "http://[[fd00::1]]:8080/api"), which no URL parse accepts.
+		{
+			name:           "HTTP_DefaultTestHost_OnAnIPv6RecordedURL",
+			originalTarget: "http://[::1]:8080/api",
+			configHost:     "localhost",
+			isHTTP:         true,
+			expectedTarget: "http://localhost:8080/api",
+		},
+		{
+			name:           "HTTP_ConfigHost_IPv6Bracketed_OnAnIPv6RecordedURL",
+			originalTarget: "http://[::1]:8080/api",
+			configHost:     "[fd00::1]",
+			isHTTP:         true,
+			expectedTarget: "http://[fd00::1]:8080/api",
+		},
+
+		// A recorded authority with no port, replayed with a test host, as
+		// every replay is (localhost by default): the test host was refused
+		// ("missing port in address") for every address family. It takes
+		// the port as any authority without one does.
+		{
+			name:           "GRPC_AuthorityWithoutPort_DefaultTestHost",
+			originalTarget: "my-svc",
+			configHost:     "localhost",
+			appPort:        50051,
+			isHTTP:         false,
+			expectedTarget: "localhost:50051",
+		},
+		{
+			name:           "GRPC_DNSAuthorityWithoutPort_IPv4TestHost",
+			originalTarget: "example.com",
+			configHost:     "10.244.0.7",
+			isHTTP:         false,
+			expectedTarget: "10.244.0.7:443",
+		},
+		{
+			name:           "GRPC_IPv4AuthorityWithoutPort",
+			originalTarget: "10.0.0.5",
+			configHost:     "localhost",
+			configPort:     9090,
+			isHTTP:         false,
+			expectedTarget: "localhost:9090",
+		},
+		{
+			name:           "GRPC_AuthorityWithoutPort_IPv6TestHost",
+			originalTarget: "example.com",
+			configHost:     "[fd00::2]",
+			appPort:        50051,
+			isHTTP:         false,
+			expectedTarget: "[fd00::2]:50051",
+		},
+		{
+			name:           "GRPC_IPv6AuthorityWithoutPort",
+			originalTarget: "[fd00::1]",
+			configHost:     "fd00::2",
+			isHTTP:         false,
+			expectedTarget: "[fd00::2]:443",
+		},
+		{
+			name:           "GRPC_IPv6AuthorityWithoutPort_DefaultTestHost",
+			originalTarget: "[fd00::1]",
+			configHost:     "localhost",
+			isHTTP:         false,
+			expectedTarget: "localhost:443",
+		},
+		// replaceWith instead of a test host: the bracketed authority it
+		// leaves was bracketed again ("[[fd00::2]]:443").
+		{
+			name:            "GRPC_IPv6AuthorityWithoutPort_ReplaceWith",
+			originalTarget:  "[fd00::1]",
+			urlReplacements: map[string]string{"fd00::1": "fd00::2"},
+			isHTTP:          false,
+			expectedTarget:  "[fd00::2]:443",
+		},
 	}
 
 	for _, tt := range tests {
@@ -2240,6 +2380,110 @@ func TestResolveTestTarget_EdgeCases(t *testing.T) {
 	t.Run("GRPC_ConfigHost_ReplaceError", func(t *testing.T) {
 		// Mock logic or ensure specific error condition if possible, though ReplaceGrpcHost is robust
 	})
+}
+
+// A base path (--base-path) names the port keploy's tests go to, or its
+// scheme's default. Its host was split on its colons, so an IPv6 one with no
+// port named port "1]", and keploy stopped at its start ("failed to extract
+// port from base URL").
+func TestExtractPortTakesAnIPv6Host(t *testing.T) {
+	for _, c := range []struct {
+		url  string
+		want uint32
+	}{
+		{"http://[fd00::1]/", 80},
+		{"https://[fd00::1]/api", 443},
+		{"http://[::1]", 80},
+		{"https://[fe80::1%25eth0]/", 443},
+		{"http://[fd00::1]:8080/", 8080},
+		{"http://localhost:8080/", 8080},
+		{"http://10.0.0.1/", 80},
+		{"https://example.com/x", 443},
+		{"http://example.com:9000", 9000},
+	} {
+		got, err := ExtractPort(c.url)
+		if err != nil || got != c.want {
+			t.Errorf("ExtractPort(%q) = %d, %v; want %d", c.url, got, err, c.want)
+		}
+	}
+	// A colon with no port after it is no port, and still refused.
+	for _, u := range []string{"http://localhost:/", "http://[fd00::1]:/"} {
+		if got, err := ExtractPort(u); err == nil {
+			t.Errorf("ExtractPort(%q) = %d; want it refused", u, got)
+		}
+	}
+}
+
+// The wait for a port says which address it waited for as one is written,
+// an IPv6 host in brackets: "::1:8080" names no address.
+func TestWaitForPortNamesAnIPv6AddressInBrackets(t *testing.T) {
+	_, port, _ := net.SplitHostPort(testnet.RefusedAddr(t, "tcp"))
+	err := WaitForPort(context.Background(), "::1", port, 50*time.Millisecond)
+	if err == nil {
+		t.Fatalf("WaitForPort([::1]:%s) = nil, want a timeout", port)
+	}
+	if want := "[::1]:" + port; !strings.Contains(err.Error(), want) {
+		t.Errorf("WaitForPort's error %q does not name %s", err, want)
+	}
+}
+
+// listenAtAnIPv6Address listens where an app on an IPv6 address would be,
+// and returns that address as a test host is given it: bare.
+//
+// On [::1] where the host has an IPv6 loopback. A host with IPv6 off has
+// none, so there it listens on 127.0.0.1 and is addressed as
+// ::ffff:127.0.0.1, the same address written as IPv6, which needs the
+// brackets in a URL exactly as fd00::1 does.
+func listenAtAnIPv6Address(t *testing.T) (string, net.Listener) {
+	t.Helper()
+	ln, err := net.Listen("tcp6", "[::1]:0")
+	if err == nil {
+		return "::1", ln
+	}
+	t.Logf("no IPv6 loopback here (%v); addressing 127.0.0.1 as ::ffff:127.0.0.1", err)
+	ln, err = net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	return "::ffff:127.0.0.1", ln
+}
+
+// A TEST REPLAYED AGAINST AN APP ON AN IPv6 ADDRESS REACHES IT.
+//
+// The recorded URL's host is replaced by the test host (a cross-namespace
+// Kubernetes replay gives the replay Pod's IP, bare), and its port by the
+// app's. The target is then sent as is. Driven end to end: the target that
+// comes back is requested, and the app must see the recorded path and query.
+func TestResolveTestTargetReachesAnAppOnAnIPv6Address(t *testing.T) {
+	for _, form := range []string{"IPv6 loopback", "IPv4-mapped"} {
+		t.Run(form, func(t *testing.T) {
+			var ip string
+			var ln net.Listener
+			if form == "IPv6 loopback" {
+				ip, ln = listenAtAnIPv6Address(t)
+			} else {
+				var err error
+				ln, err = net.Listen("tcp4", "127.0.0.1:0")
+				require.NoError(t, err)
+				ip = "::ffff:127.0.0.1"
+			}
+			seen := make(chan string, 1)
+			srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen <- r.URL.RequestURI()
+				w.WriteHeader(http.StatusOK)
+			})}
+			go func() { _ = srv.Serve(ln) }()
+			t.Cleanup(func() { _ = srv.Close() })
+			port := uint32(ln.Addr().(*net.TCPAddr).Port)
+
+			target, err := ResolveTestTarget("http://localhost:8080/api/items?id=1", nil, nil, ip, 8080, port, true, zap.NewNop())
+			require.NoError(t, err, "the test target for an app at %s", ip)
+			client := &http.Client{Timeout: 10 * time.Second}
+			resp, err := client.Get(target)
+			require.NoError(t, err, "the test was not sent to %s", target)
+			_ = resp.Body.Close()
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Equal(t, "/api/items?id=1", <-seen)
+		})
+	}
 }
 
 // TestFilterByTimeStampThreeTier validates the Lifetime-elevated three-

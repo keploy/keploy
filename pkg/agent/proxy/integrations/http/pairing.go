@@ -280,6 +280,11 @@ func reportPairing(ctx context.Context, input *req, x *models.Mock, a integratio
 	r := mismatch.NewReport(mismatch.ProtocolHTTP, placesOf(x).summary(input.method, path)).WithDestination(dest).Build()
 	r.Operation = models.HTTPOperationLabel(liveRequest(nil, input))
 	r.Answer, r.ClosestMock, r.NotOwned = models.AnswerProvisional, x.Name, true
+	// The call's path tag, of its method and the path it sent, as the
+	// parser's other lines about the request tag it (decodeHTTP's): the
+	// summary writes a segment x redacted {}, so a tag of it (the proxy's,
+	// models.MockMismatchReport.LogPathTag) would differ from theirs.
+	r.PathTag = models.URLPathTag(ctx, input.method, input.url)
 	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)
 	if repeat {
 		r.Repeat = models.NewRepeatNote(a.Mock.Name, a.AnsweredAt, a.Mock.Spec.ReqTimestampMock, r.At)

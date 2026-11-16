@@ -1256,7 +1256,8 @@ func renderMissList(sb *strings.Builder, calls []models.UnmatchedCall) {
 	// models.OutOfScopeDestinationCauses.
 	var outOfScope bool
 	for _, uc := range calls {
-		fmt.Fprintf(sb, "  [%s] %s", uc.Protocol, uc.Named())
+		// Beside the path tag the agent's miss line names the call by.
+		fmt.Fprintf(sb, "  [%s] %s%s", uc.Protocol, models.WithPathTag(uc.Named(), uc.PathTag), models.DestinationNamed(uc.Destination, uc.HostTag))
 		if uc.MatchPhase != "" {
 			sb.WriteString(fmt.Sprintf(" (match stopped at: %s", uc.MatchPhase))
 			if uc.CandidateCount > 0 {

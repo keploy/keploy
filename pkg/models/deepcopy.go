@@ -43,8 +43,8 @@ func (r *HTTPResp) clone() *HTTPResp {
 	return &c
 }
 
-// cloneForm is form with each field's values, paths, file names and file
-// contents its own.
+// cloneForm is form with each field's values, paths, file names, captured
+// files and file contents its own.
 func cloneForm(form []FormData) []FormData {
 	if form == nil {
 		return nil
@@ -54,6 +54,7 @@ func cloneForm(form []FormData) []FormData {
 		f.Values = slices.Clone(f.Values)
 		f.Paths = slices.Clone(f.Paths)
 		f.FileNames = slices.Clone(f.FileNames)
+		f.Captured = slices.Clone(f.Captured)
 		if f.FileContents != nil {
 			contents := make([][]byte, len(f.FileContents))
 			for j, b := range f.FileContents {

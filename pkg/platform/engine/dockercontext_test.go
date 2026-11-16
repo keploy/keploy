@@ -16,7 +16,7 @@ func dockerConfig(t *testing.T, current string) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv(envDockerConfig, dir)
-	for _, k := range []string{envDockerHost, envDockerContext, envDockerCertPath, envDockerTLSVerify, ContextEnv} {
+	for _, k := range []string{envDockerHost, envDockerContext, envDockerCertPath, envDockerTLSVerify, ContextEnv, ContextHostEnv} {
 		t.Setenv(k, "")
 		_ = os.Unsetenv(k)
 	}
@@ -81,6 +81,7 @@ func TestTheCurrentContextIsTheCLIs(t *testing.T) {
 		envDockerCertPath:  "",
 		envDockerTLSVerify: "",
 		ContextEnv:         "rancher-desktop",
+		ContextHostEnv:     "unix:///home/u/.rd/docker.sock",
 	}
 	if len(env) != len(want) {
 		t.Fatalf("Environment() = %v, want %v", env, want)
@@ -231,6 +232,12 @@ func TestUseDockerContext(t *testing.T) {
 		if got := os.Getenv(ContextEnv); got != "rancher-desktop" {
 			t.Fatalf("%s = %q", ContextEnv, got)
 		}
+		if got := os.Getenv(ContextHostEnv); got != "unix:///home/u/.rd/docker.sock" {
+			t.Fatalf("%s = %q", ContextHostEnv, got)
+		}
+		if got := DockerHostContext(); got != "rancher-desktop" {
+			t.Fatalf("DockerHostContext() = %q, want rancher-desktop", got)
+		}
 		for _, k := range []string{envDockerCertPath, envDockerTLSVerify} {
 			if v, set := os.LookupEnv(k); set {
 				t.Fatalf("%s = %q, want it unset", k, v)
@@ -247,6 +254,87 @@ func TestUseDockerContext(t *testing.T) {
 		}
 		if got := os.Getenv(ContextEnv); got != "" {
 			t.Fatalf("%s = %q", ContextEnv, got)
+		}
+	})
+	// KEPLOY_DOCKER_CONTEXT says DOCKER_HOST is keploy's, taken from that
+	// context. One that does not go with this DOCKER_HOST (exported in the
+	// user's shell, or inherited, with its host, from a keploy that ran under
+	// another DOCKER_HOST) would say it of the user's own, and a message built
+	// on it would name a context for a DOCKER_HOST the user set. Both markers
+	// are cleared, and DOCKER_HOST is the user's as it was.
+	t.Run("one that does not go with DOCKER_HOST is cleared", func(t *testing.T) {
+		for _, c := range []struct{ name, current, dockerHost, markedHost string }{
+			{"the name alone, under the user's DOCKER_HOST", "rancher-desktop", "tcp://build-box:2376", ""},
+			{"the name alone, under no DOCKER_HOST and the default context", "", "", ""},
+			{"the name alone, under the context's own endpoint set by the user", "rancher-desktop", "unix:///home/u/.rd/docker.sock", ""},
+			{"a pair for another DOCKER_HOST, under the user's", "rancher-desktop", "tcp://build-box:2376", "unix:///home/u/.rd/docker.sock"},
+			{"a pair, under no DOCKER_HOST and the default context", "", "", "unix:///home/u/.rd/docker.sock"},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				dir := dockerConfig(t, c.current)
+				addContext(t, dir, "rancher-desktop", "unix:///home/u/.rd/docker.sock", false)
+				if c.dockerHost != "" {
+					t.Setenv(envDockerHost, c.dockerHost)
+				}
+				t.Setenv(ContextEnv, "rancher-desktop")
+				if c.markedHost != "" {
+					t.Setenv(ContextHostEnv, c.markedHost)
+				}
+				if got := DockerHostContext(); got != "" {
+					t.Fatalf("DockerHostContext() = %q before UseDockerContext, want \"\": DOCKER_HOST (%q) is not keploy's", got, c.dockerHost)
+				}
+				UseDockerContext(zap.NewNop())
+				for _, k := range []string{ContextEnv, ContextHostEnv} {
+					if v, set := os.LookupEnv(k); set {
+						t.Fatalf("%s = %q, want it unset: DOCKER_HOST (%q) is not keploy's", k, v, os.Getenv(envDockerHost))
+					}
+				}
+				if got := os.Getenv(envDockerHost); got != c.dockerHost {
+					t.Fatalf("DOCKER_HOST = %q, want %q", got, c.dockerHost)
+				}
+			})
+		}
+	})
+	// A pair left for another context, with no DOCKER_HOST: the current
+	// context sets DOCKER_HOST, and the pair names it.
+	t.Run("a stale pair under another current context is that context's", func(t *testing.T) {
+		dir := dockerConfig(t, "colima")
+		addContext(t, dir, "colima", "unix:///home/u/.colima/default/docker.sock", false)
+		t.Setenv(ContextEnv, "rancher-desktop")
+		t.Setenv(ContextHostEnv, "unix:///home/u/.rd/docker.sock")
+		UseDockerContext(zap.NewNop())
+		if got := os.Getenv(envDockerHost); got != "unix:///home/u/.colima/default/docker.sock" {
+			t.Fatalf("DOCKER_HOST = %q", got)
+		}
+		if got := DockerHostContext(); got != "colima" {
+			t.Fatalf("DockerHostContext() = %q, want colima", got)
+		}
+	})
+	// The keploy the sudo re-exec starts gets the whole environment keploy
+	// set (utils.ReexecWithSudo): DOCKER_HOST and the pair that goes with it.
+	// What keeps the pair is that DOCKER_HOST is still the one keploy set
+	// with it, and it says the context.
+	t.Run("the re-executed keploy keeps the pair keploy set", func(t *testing.T) {
+		dir := dockerConfig(t, "rancher-desktop")
+		addContext(t, dir, "rancher-desktop", "unix:///home/u/.rd/docker.sock", false)
+		UseDockerContext(zap.NewNop())
+		UseDockerContext(zap.NewNop())
+		if got := os.Getenv(envDockerHost); got != "unix:///home/u/.rd/docker.sock" {
+			t.Fatalf("DOCKER_HOST = %q", got)
+		}
+		if got := DockerHostContext(); got != "rancher-desktop" {
+			t.Fatalf("DockerHostContext() = %q, want rancher-desktop", got)
+		}
+	})
+	// The pair is read against DOCKER_HOST as it is now: one that changed
+	// since keploy set it (a user's, an engine's) is no context's.
+	t.Run("DockerHostContext says nothing once DOCKER_HOST changed", func(t *testing.T) {
+		dir := dockerConfig(t, "rancher-desktop")
+		addContext(t, dir, "rancher-desktop", "unix:///home/u/.rd/docker.sock", false)
+		UseDockerContext(zap.NewNop())
+		t.Setenv(envDockerHost, "tcp://build-box:2376")
+		if got := DockerHostContext(); got != "" {
+			t.Fatalf("DockerHostContext() = %q, want \"\"", got)
 		}
 	})
 	t.Run("one the variables cannot say is said and changes nothing", func(t *testing.T) {

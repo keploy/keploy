@@ -216,9 +216,10 @@ type Agent struct {
 	gateRun    map[string]struct{}
 	gateReason string
 	gateWarned bool // NoteUngatable said so this session
-	// replay: the scopes the gate told a harness to skip, and whether
-	// noteEndOfGated said so this session.
-	gatedScopes    map[scopeKey]struct{}
+	// replay: the scopes the gate told a harness to skip, each with the
+	// outcome the route noted for an end of it not yet read
+	// (takeGatedOutcome), and whether noteEndOfGated warned this session.
+	gatedScopes    map[scopeKey]string
 	gatedEndWarned bool
 
 	// provenMu guards proven, the single-worker integration wire's state
@@ -710,6 +711,23 @@ func (a *Agent) resetScopeState() {
 	a.scopeMu.Unlock()
 }
 
+// beginLogKeySession begins a session's key for the path tags the agent's
+// lines name its calls by (models.LogKeySession), as a recording or a
+// replay's session begins: the ingress takes each connection from now under
+// it (SetLogKeySession), and the returned ctx, which the proxy's Record or
+// Mock is given, carries it to the proxy's session, whose connections are
+// tagged under it. A session another program serves through this agent's
+// proxy at the same time keeps the key of its own.
+func (a *Agent) beginLogKeySession(ctx context.Context) context.Context {
+	keys := models.NewLogKeySession()
+	if s, ok := a.IncomingProxy.(interface {
+		SetLogKeySession(*models.LogKeySession)
+	}); ok {
+		s.SetLogKeySession(keys)
+	}
+	return models.WithLogKeySession(ctx, keys)
+}
+
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	// First, so a clock that cannot move back fails the session before
 	// anything of the previous one is reset (MockOutgoing).
@@ -718,6 +736,10 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	}
 	m := make(chan *models.Mock, outgoingMockChanCap)
 
+	// A recording is a session of its own: its log names each path by a tag
+	// under a key drawn now (beginLogKeySession), which no other session's
+	// tag agrees with.
+	ctx = a.beginLogKeySession(ctx)
 	starts.Default.Reset()
 	ids.Default.Reset()
 	if err := a.resetSession(ctx); err != nil {
@@ -735,6 +757,9 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	// (SupportsDroppedRevoke=false, the default) never receives a RevokedTests
 	// control frame it can't divert.
 	syncMock.Get().SetRevokeCapable(opts.SupportsDroppedRevoke)
+	// And whether it finds a revoked test case sent with no name (the async
+	// capture names none) by its request time.
+	syncMock.Get().SetRevokeByRequest(opts.SupportsRevokeByRequest)
 
 	return m, nil
 }
@@ -769,6 +794,11 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	// standalone) never drains one replay's captured-on-miss mocks into a later,
 	// unrelated set. Harmless when --on-miss is not "record" (buffer stays empty).
 	httpparser.ResetCaptured()
+	// So is a replay's session: its log names each path by a tag under a
+	// key drawn now (beginLogKeySession). A miss of the session before that
+	// the client reads after this keeps the tag its line named
+	// (models.UnmatchedCall.PathTag).
+	ctx = a.beginLogKeySession(ctx)
 	starts.Default.Reset()
 	ids.Default.Reset()
 	if err := a.resetSession(ctx); err != nil {

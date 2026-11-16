@@ -1,0 +1,141 @@
+//go:build darwin
+
+package proxy
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// darwinPairOn is darwinPair on p, paired as application connection appSeq,
+// with nothing proven listed by its accept.
+func darwinPairOn(t *testing.T, p *Proxy, appSeq uint64) (app, proxySide *net.TCPConn, reader *trackedConn) {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	c, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app = c.(*net.TCPConn)
+	t.Cleanup(func() { _ = app.Close() })
+	s, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxySide = s.(*net.TCPConn)
+	t.Cleanup(func() { _ = proxySide.Close() })
+	p.paired.add(proxySide, appSeq, 0)
+	reader = p.inflight.track(proxySide)
+	reader.beforeClose = func() { p.pairClosing(context.Background(), proxySide, reader) }
+	t.Cleanup(func() { p.inflight.forget(reader) })
+	return app, proxySide, reader
+}
+
+// A close whose read of macOS's TCP table fails cannot tell what was on its
+// way: before, it recorded nothing and answered nothing, and a wait judged
+// the connection by what was written when it began. It answers unknown now,
+// said in one line naming the connection, the read and its error.
+func TestACloseWhoseTableReadFailsIsUnknownOnDarwin(t *testing.T) {
+	p, app, proxySide, reader := darwinPair(t)
+	p.settleReads = true
+	core, logs := observer.New(zapcore.WarnLevel)
+	p.logger = zap.New(core)
+	was := readXNUTable
+	readXNUTable = func() ([]xnuPCB, error) {
+		return nil, errors.New("sysctl net.inet.tcp.pcblist64: operation not permitted")
+	}
+	t.Cleanup(func() { readXNUTable = was })
+	_ = reader.Close()
+	if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "operation not permitted") {
+		t.Fatalf("PairedBytesErr = %v, want unknown, saying why the table cannot be read", err)
+	}
+	lines := logs.FilterMessageSnippet("keploy cannot tell what the application had written").All()
+	if len(lines) != 1 {
+		t.Fatalf("%d lines say the close cannot tell what was written, want one: %+v", len(lines), logs.All())
+	}
+	f := lines[0].ContextMap()
+	if want := app.LocalAddr().String() + " -> " + proxySide.LocalAddr().String(); f["connection"] != want {
+		t.Errorf("the line names the connection %v, want %s", f["connection"], want)
+	}
+	if e, _ := f["error"].(string); !strings.Contains(e, "macOS's TCP table cannot be read") || !strings.Contains(e, "operation not permitted") {
+		t.Errorf("the line's error is %q, want it to name the table's read and its error", e)
+	}
+}
+
+// The first close that cannot tell what was on its way is the answer: every
+// wait ends with its error, the one its line names, and a later close that
+// cannot tell for another reason changes neither.
+func TestTheFirstCloseThatCannotTellIsTheAnswerOnDarwin(t *testing.T) {
+	p, app, proxySide, reader := darwinPair(t)
+	_, _, reader2 := darwinPairOn(t, p, 2)
+	p.settleReads = true
+	core, logs := observer.New(zapcore.WarnLevel)
+	p.logger = zap.New(core)
+	was := readXNUTable
+	t.Cleanup(func() { readXNUTable = was })
+	readXNUTable = func() ([]xnuPCB, error) { return nil, errors.New("sysctl: operation not permitted") }
+	_ = reader.Close()
+	readXNUTable = func() ([]xnuPCB, error) { return nil, errors.New("sysctl: cannot allocate memory") }
+	_ = reader2.Close()
+	if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "operation not permitted") {
+		t.Fatalf("PairedBytesErr = %v, want the first close's: operation not permitted", err)
+	}
+	lines := logs.FilterMessageSnippet("keploy cannot tell what the application had written").All()
+	if len(lines) != 1 {
+		t.Fatalf("%d lines say the close cannot tell what was written, want one: %+v", len(lines), logs.All())
+	}
+	f := lines[0].ContextMap()
+	if want := app.LocalAddr().String() + " -> " + proxySide.LocalAddr().String(); f["connection"] != want {
+		t.Errorf("the line names the connection %v, want the first close's, %s", f["connection"], want)
+	}
+	if e, _ := f["error"].(string); !strings.Contains(e, "operation not permitted") {
+		t.Errorf("the line's error is %q, want the first close's", e)
+	}
+}
+
+// A close that reads the application's socket from its holder is the first
+// such read as a wait's is: a later wait on a connection whose socket no
+// process the agent may read holds waits for its FIN or reset, as it does
+// once a wait read one, not unknown.
+func TestACloseReadFromTheHolderProvesTheHoldersReadOnDarwin(t *testing.T) {
+	// Connection 2 closes first; the wait is on connection 1 alone.
+	p, app, _, _ := heldPair(t)
+	app2, proxySide2, reader2 := darwinPairOn(t, p, 2)
+	hideFromTable(t, app2.LocalAddr())
+	if _, err := app2.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	untilUnread(t, proxySide2, 5)
+	if _, err := io.ReadFull(reader2, make([]byte, 5)); err != nil {
+		t.Fatal(err)
+	}
+	untilSendBufferEmpty(t, pairedConnOf(t, p, 2))
+	_ = reader2.Close()
+	if err := p.PairedBytesErr(); err != nil {
+		t.Fatalf("PairedBytesErr = %v after a close read from the holder with nothing on its way, want nil", err)
+	}
+	hideSockets(t, app.LocalAddr())
+	if _, err := app.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := p.WaitPairedBytes(ctx, 1); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the wait ended with %v, want it to wait for the FIN of a socket no process it may read holds", err)
+	}
+}

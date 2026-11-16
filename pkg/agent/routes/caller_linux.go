@@ -134,6 +134,21 @@ func tcpInode(self, peer netip.AddrPort) (string, error) {
 	return "", fmt.Errorf("no TCP socket %s -> %s in the kernel's tables", self, peer)
 }
 
+// heldState is the TCP states, as /proc/net/tcp{,6} writes them (the kernel's
+// tcp_states.h, %02X), in which a process can still hold a connected socket:
+// ESTABLISHED, FIN_WAIT1, FIN_WAIT2, CLOSE_WAIT, LAST_ACK and CLOSING.
+// SYN_SENT has sent no request yet, TIME_WAIT is no process's, CLOSE is a
+// connection reset or never made, and LISTEN and the SYN_RECV states are a
+// server's.
+var heldState = map[string]bool{
+	"01": true, // ESTABLISHED
+	"04": true, // FIN_WAIT1
+	"05": true, // FIN_WAIT2
+	"08": true, // CLOSE_WAIT
+	"09": true, // LAST_ACK
+	"0B": true, // CLOSING
+}
+
 func scanTCPTable(f *os.File, self, peer netip.AddrPort) (string, bool) {
 	sc := bufio.NewScanner(f)
 	sc.Scan() // header
@@ -142,9 +157,12 @@ func scanTCPTable(f *os.File, self, peer netip.AddrPort) (string, bool) {
 		if len(fields) < 10 {
 			continue
 		}
-		// Only an established connection with a socket (inode 0 is one in
-		// TIME_WAIT, owned by no process) is a caller.
-		if fields[3] != "01" || fields[9] == "0" {
+		// A caller's socket is one a process can still hold: established, or
+		// closed by one side or both while the caller keeps it (a caller that
+		// called CloseWrite after its request, as macOS's read names it too).
+		// Inode 0 is a socket no process holds any more (TIME_WAIT, or one
+		// its process closed).
+		if !heldState[fields[3]] || fields[9] == "0" {
 			continue
 		}
 		l, okL := procAddrPort(fields[1])

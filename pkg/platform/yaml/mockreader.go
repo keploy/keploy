@@ -48,7 +48,11 @@ func NewMockReaderF(ctx context.Context, logger *zap.Logger, path, name string, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to open mock file: %w", err)
 	}
+	return newMockReader(ctx, logger, file, filePath, format), nil
+}
 
+// newMockReader reads the mock file file, opened at filePath.
+func newMockReader(ctx context.Context, logger *zap.Logger, file *os.File, filePath string, format Format) *MockReader {
 	return &MockReader{
 		file:    file,
 		reader:  bufio.NewReader(file),
@@ -58,7 +62,7 @@ func NewMockReaderF(ctx context.Context, logger *zap.Logger, path, name string, 
 		lineNum: 0,
 		done:    false,
 		format:  format,
-	}, nil
+	}
 }
 
 // NewMockReaderAny opens a mock file, preferring `preferred`'s extension but

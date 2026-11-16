@@ -201,7 +201,10 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			return resp, err
 		}
 
-		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
+		// The test case by its name and its request's shape, never the
+		// test case: it holds the recorded headers, bodies and metadata,
+		// the app's credentials among them.
+		h.logger.Debug("Simulating HTTP request", zap.String("testcase", tc.Name), zap.Any("metadata", utils.URLLogMeta(string(tc.HTTPReq.Method), tc.HTTPReq.URL)))
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
 		if err := h.instrumentation.AfterSimulate(hookCtx, tc.Name, testSetID); err != nil {
@@ -215,7 +218,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			return nil, err
 		}
 
-		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
+		h.logger.Debug("Simulating gRPC request", zap.String("testcase", tc.Name), zap.String("method", tc.GrpcReq.Headers.PseudoHeaders[":path"]))
 		hostToUse := h.cfg.Test.Host
 		if hostToUse == "" {
 			hostToUse = "localhost"
@@ -297,7 +300,10 @@ func (h *Hooks) noteWhereSent(target *url.URL, host, recordedHost string) {
 	if recordedHost != "" && recordedHost != host {
 		h.recordedHostUnsent.Do(func() {
 			h.logger.Info("the tests ask for the app under the address they are sent to, not under the Host header they were recorded with",
-				zap.String("host", host), zap.String("recordedHost", recordedHost),
+				// The recorded Host header by its labels' shape: the app's
+				// traffic named it (models.HostShape); the base path's is
+				// the user's.
+				zap.String("host", host), zap.String("recordedHost", models.HostShape(recordedHost)),
 				zap.String("next_step", "if the app answers by the name it is asked for, give --base-path a name that reaches it and that it answers to"))
 		})
 	}
@@ -436,6 +442,62 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 
 func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	return nil
+}
+
+// setHaltKey marks the context AfterTestSetRun is called with for a set that
+// halted (WithSetHalt).
+type setHaltKey struct{}
+
+// WithSetHalt is ctx for AfterTestSetRun of a set that halted, for reason:
+// the run's stop names the set with it. The replayer calls it; a TestHooks
+// implementation's tests call it to build the context that end is told with.
+func WithSetHalt(ctx context.Context, reason string) context.Context {
+	return context.WithValue(ctx, setHaltKey{}, reason)
+}
+
+// SetHalt reports whether ctx, the context a TestHooks' AfterTestSetRun is
+// called with, says that set halted: its application exited (APP_HALTED,
+// APP_FAULT, or a docker compose stack that went down under it), or an
+// internal error of keploy's stopped the run in it (INTERNAL_ERR). reason is
+// what the run's stop names the set with, such as "the application exited
+// during test-set test-set-0 with exit code 4: ...", and the run fails for
+// it. Its tests that got no verdict got none because of this end, not for a
+// difference in the app's answers.
+//
+// Most such sets end the run: their status is false and no set runs after
+// them. Under docker compose, a stack per set, the run goes on past a set
+// whose application exited, to the next set on a stack of its own; and a set
+// whose application halted on one attempt and ran to a verdict on another (a
+// flaky check's) has the status of its last attempt, true where that one
+// passed. ctx may have ended already, with the application's exit as its
+// cause: a hook that still writes detaches from it.
+func SetHalt(ctx context.Context) (reason string, halted bool) {
+	reason, halted = ctx.Value(setHaltKey{}).(string)
+	return reason, halted
+}
+
+// setHaltAppLogsKey marks the application's last log lines in the context
+// AfterTestSetRun is called with for a set that halted (WithSetHaltAppLogs).
+type setHaltAppLogsKey struct{}
+
+// WithSetHaltAppLogs is ctx with appLogs, the application's last log lines
+// keploy took at the exit SetHalt(ctx) names. The replayer calls it; a
+// TestHooks implementation's tests call it to build the context that end is
+// told with.
+func WithSetHaltAppLogs(ctx context.Context, appLogs string) context.Context {
+	return context.WithValue(ctx, setHaltAppLogsKey{}, appLogs)
+}
+
+// SetHaltAppLogs is, for a set that halted because its application exited
+// (SetHalt), the application's last log lines keploy took when it saw that
+// exit: what the set's report keeps as its app_logs, the last lines that are
+// not blank, with no terminal escapes. It is "" when the set did not halt,
+// when its halt was an internal error of keploy's, or when keploy took no
+// lines. They are the application's own output, not redacted: a hook that
+// shows them anywhere but the set's own report redacts and bounds them first.
+func SetHaltAppLogs(ctx context.Context) string {
+	appLogs, _ := ctx.Value(setHaltAppLogsKey{}).(string)
+	return appLogs
 }
 
 // agentGoneKey marks a context whose run has no agent left to call

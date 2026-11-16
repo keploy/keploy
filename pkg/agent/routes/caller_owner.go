@@ -51,7 +51,9 @@ func descendsFrom(pid, ancestor int, parent func(pid int) (int, bool)) bool {
 	return false
 }
 
-// sameEndpoint compares two endpoints with IPv4-mapped IPv6 read as IPv4.
+// sameEndpoint compares two endpoints with IPv4-mapped IPv6 read as IPv4 and
+// with no IPv6 zone: a link-local caller's address carries one (fe80::1%eth0)
+// while the kernel's socket tables carry none.
 func sameEndpoint(a, b netip.AddrPort) bool {
-	return a.Port() == b.Port() && a.Addr().Unmap() == b.Addr().Unmap()
+	return a.Port() == b.Port() && a.Addr().Unmap().WithZone("") == b.Addr().Unmap().WithZone("")
 }

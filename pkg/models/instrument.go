@@ -308,6 +308,14 @@ type OutgoingOptions struct {
 	// older CLI that never sets it never receives one — the version-skew
 	// guard for the deferred-orphan revoke protocol. Record path only.
 	SupportsDroppedRevoke bool
+	// SupportsRevokeByRequest is a capability flag set by the CLI on the
+	// /outgoing request, beside SupportsDroppedRevoke: when true, the CLI
+	// finds a revoked test case the agent sent with no name by the name a
+	// RevokedTests frame gives it (RevokeNameByRequest), its window's request
+	// time. Without it, such a test case, sent before a mock it needed was
+	// lost, cannot be revoked, and the agent says it may stay recorded
+	// without the mock. Record path only.
+	SupportsRevokeByRequest bool
 	// ReadsSetEnds is a capability flag set by the CLI on the replay
 	// session's /mock request: when true, the CLI reads each of its test
 	// sets' end with a set's end read (WithSetEndRead), as keploy test does

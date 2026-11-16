@@ -242,9 +242,9 @@ func droppedOn(t *testing.T, path string, mock *models.Mock, owner string, wire 
 		wire(mgr)
 		mgr.SetOutputChannel(make(chan *models.Mock, 1))
 		mgr.CloseOutChan()
-		before := mgr.outChanClosedDrops.Load()
+		before := mgr.DropCount()
 		mgr.AddMock(mock)
-		if got := mgr.outChanClosedDrops.Load() - before; got != 1 {
+		if got := mgr.DropCount() - before; got != 1 {
 			t.Fatalf("%s: AddMock counted %d drops on the closed channel; want 1", path, got)
 		}
 	case "channel closed":

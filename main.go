@@ -366,7 +366,9 @@ func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink)
 	if path == "" {
 		return nil, nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	// Only inside the folder path is in: in the agent container that is the
+	// host's keploy folder, whose files come with the repository.
+	f, err := log.OpenDebugFile(path)
 	if err != nil {
 		logger.Warn("KEPLOY_DEBUG_FILE set but could not be opened; continuing without debug capture",
 			zap.String("path", path), zap.Error(err))
