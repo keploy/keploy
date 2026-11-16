@@ -1820,9 +1820,11 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// (keploy injects it), so taking the stack down takes the agent, and
 	// everything it has not handed over yet, with it: at 110 req/s for 30 s
 	// that was the mocks of 1,655 of 3,300 tests. So the agent is drained
-	// first, once (composeDrain): by the stop, before it takes the stack down
-	// (the app keeps running meanwhile, but what it serves after the stop is
-	// not recorded: forwardUntilDrained), or earlier, when the agent says
+	// first, once (composeDrain): by the stop, once keploy has stopped the
+	// app's container and before it takes the stack down (what the app does
+	// as it stops is recorded; one whose stop failed keeps running, but what
+	// it serves after the stop is not recorded: forwardUntilDrained), or
+	// earlier, when the agent says
 	// compose is stopping it (agentGoing: the app exited on its own, or a
 	// container of its project did, and compose stops the project). The agent
 	// then waits for the drain, and goes once its streams close: what it
@@ -1913,11 +1915,16 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// before the stack it is a service of is taken down.
 		composeAgent := r.config.CommandType == string(utils.DockerCompose)
 		if composeAgent {
-			// Under the switch the app's stop is keploy's own and leaves the
-			// agent up (P101-c): the app is stopped first, so what it does as
-			// it stops is recorded with the rest, and the drain then takes
-			// it. Its stop says, in the app's run, whether it had to kill.
-			if s, ok := r.instrumentation.(composeAppStopper); ok && provenswitch.On() {
+			// The app's stop is keploy's own and leaves the agent up, in
+			// every mode: the app is stopped first, so what it does as it
+			// stops is recorded with the rest, and the drain then takes it.
+			// keploy test reads the calls an app makes as it stops, in
+			// every mode, so a stop-time call the recording left out would
+			// be named a miss after the last test at every replay. A native
+			// or docker run app is stopped before its drain as well (the
+			// app's run below). Under the switch its stop says, in the
+			// app's run, whether it had to kill.
+			if s, ok := r.instrumentation.(composeAppStopper); ok {
 				// An app that exited on its own needs no stop.
 				if _, err := s.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
 					r.logger.Warn("keploy could not stop the application's container before saving what the agent captured", zap.Error(err))

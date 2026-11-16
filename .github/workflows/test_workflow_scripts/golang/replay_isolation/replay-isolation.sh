@@ -54,7 +54,10 @@
 # With -unrecorded the probe also looks up startup-probe.* as it starts,
 # before it serves, so outside every test (the startup rows, rows_startup).
 # It also looks up stop-probe.* as it stops, after its last test (the
-# after-last rows, rows_after_last).
+# after-last rows, rows_after_last). Recording and replay both look up
+# stop-recorded.* as the app stops (-stop-recorded): keploy record stops the
+# app before it saves what the agent captured, in every mode, so the
+# recording holds that NXDOMAIN and the replay serves it (rows_recorded_nx).
 # "internal" (report only) runs the probe on an internal: true docker network.
 # Counts land in $W/out/<phase>/<path>.count. Each assertion prints one
 # "ROW <name>: PASS|FAIL" line and any FAIL fails the lane.
@@ -92,7 +95,7 @@ PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic ic
 # closes without reading, and the sink closes as it accepts, so a recorded one
 # would be a fault mock (whichever close came first) that the replay serves,
 # and the replay's report would not name the call.
-RECARGS="app -sink 198.18.0.10 -sink6 fd00::10 -peer riso-peer"
+RECARGS="app -sink 198.18.0.10 -sink6 fd00::10 -peer riso-peer -stop-recorded"
 APPARGS="$RECARGS -imds 198.18.0.11 -unrecorded"
 # keploy test stops each set's application before it reads the calls made
 # after the set's last test (with the switch off after the set's
@@ -252,12 +255,15 @@ rows_reach() {
 # row_log NAME FILE REGEX: FILE has a line matching REGEX.
 row_log() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null && echo 1)" "/$3/ in $(basename "$(dirname "$2")")"; }
 # rows_recorded_nx MODE: the recording holds an NXDOMAIN for recorded-nx.*
-# (and, under docker, for the peer, which was not up yet); the replay serves
-# it, so the app's lookup fails as it did while recording, the name is not
-# reported as one keploy answered itself, and no resolver is asked, with the
-# DNS opt-in too.
+# (and, under docker, for the peer, which was not up yet), and for
+# stop-recorded.*, which the app looked up as keploy record stopped it, after
+# its last test; the replay serves each, so the app's lookup fails as it did
+# while recording, the name is not reported as one keploy answered itself nor
+# as a miss after the last test, and no resolver is asked, with the DNS opt-in
+# too.
+STOPREC=stop-recorded.invalid-replay-isolation.test.
 rows_recorded_nx() {
-	local m=$1 names=(recorded-nx.invalid-replay-isolation.test.) n p
+	local m=$1 names=(recorded-nx.invalid-replay-isolation.test. "$STOPREC") n p
 	[ "$m" = native ] || names+=(riso-peer.)
 	rows_reach "record-$m" dns-recorded
 	for n in "${names[@]}"; do
@@ -267,6 +273,9 @@ rows_recorded_nx() {
 		rows_zero "$p" dns-recorded
 		row_log "$p serves the recorded NXDOMAIN" "$W/out/$p/keploy.log" 'probe dns-recorded-lookup: .*no such host'
 		row_not_kept_dns "$p does not report the recorded name as a miss" "$p" recorded-nx.invalid-replay-isolation.test.
+		row_log "$p serves the NXDOMAIN recorded as the app stopped" "$W/out/$p/keploy.log" 'probe dns-stop-recorded-lookup: .*no such host'
+		row_not_kept_dns "$p does not report the name recorded as the app stopped as a miss" "$p" "$STOPREC"
+		row "$p's misses file does not name the lookup recorded as the app stopped" "$(grep -qF "${STOPREC%.}" "$W/out/$p/last-test-misses.yaml" 2>/dev/null || echo 1)" "${STOPREC%.} in $p's last-test-misses.yaml"
 	done
 }
 # row_nolog NAME FILE REGEX: FILE has no line matching REGEX.

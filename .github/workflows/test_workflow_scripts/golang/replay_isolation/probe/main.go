@@ -114,6 +114,7 @@ func app(args []string) {
 	peer := fs.String("peer", "", "a container name the network holds, resolved through it (empty: skip)")
 	unrecorded := fs.Bool("unrecorded", false, "also look up the names a recording must not hold (the replay's and the baselines' args; the recording's leave it off)")
 	stopLookup := fs.Bool("stop-lookup", false, "look a name up as the app stops (SIGINT or SIGTERM), after its last test and in no recording, then exit (the replay's args: keploy test reads the calls made after a set's last test once its app has stopped)")
+	stopRecorded := fs.Bool("stop-recorded", false, "look a name up as the app stops (SIGINT or SIGTERM), after its last test, at record and at replay, then exit (the recording's args too: keploy record stops the app before it saves what the agent captured, so the recording holds it and the replay serves it)")
 	crashOnFire := fs.Int("crash-on-fire", 0, "exit with this code as /fire is asked, before it answers (0: never): a crash during a test")
 	listen := fs.String("listen", ":8080", "")
 	_ = fs.Parse(args)
@@ -208,15 +209,28 @@ func app(args []string) {
 	// report), so that read takes it: the report names it as made after the
 	// last test by its shape, and the misses file names it whole (the
 	// after-last rows). Bounded, so the stop is prompt.
-	if *stopLookup {
+	// With -stop-recorded it first looks up a name the recording holds, made
+	// as the app stops at record too: keploy record stops the app before it
+	// saves what the agent captured, so the recording holds that NXDOMAIN, the
+	// replay serves it, and no report or misses file names it (the
+	// stop-recorded rows).
+	if *stopLookup || *stopRecorded {
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
 			<-stop
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_, err := net.DefaultResolver.LookupHost(ctx, "stop-probe.invalid-replay-isolation.test")
-			cancel()
-			outcome("dns-stop-lookup", err)
+			if *stopRecorded {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_, err := net.DefaultResolver.LookupHost(ctx, "stop-recorded.invalid-replay-isolation.test")
+				cancel()
+				outcome("dns-stop-recorded-lookup", err)
+			}
+			if *stopLookup {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_, err := net.DefaultResolver.LookupHost(ctx, "stop-probe.invalid-replay-isolation.test")
+				cancel()
+				outcome("dns-stop-lookup", err)
+			}
 			os.Exit(0)
 		}()
 	}
@@ -367,8 +381,9 @@ func sink(args []string) {
 					p = string(buf[:n]) // udp-connected, udp-sendto, udp6
 				}
 				if path == "dns-udp" {
-					// The probe's own dotted name counts as dns-udp, the one
-					// its recording holds as dns-recorded, its single-label one
+					// The probe's own dotted name counts as dns-udp, the ones
+					// its recording holds (recorded-nx.*, and stop-recorded.*,
+					// looked up as it stops) as dns-recorded, its single-label one
 					// as dns-bare; any other name
 					// (keploy's or the runtime's own lookups) as dns-other, so a
 					// count names who leaked. Every name goes to dns-names.txt.
@@ -394,7 +409,7 @@ func sink(args []string) {
 					switch {
 					case strings.HasPrefix(name, "sink-check."):
 						p = "dns-check"
-					case strings.HasPrefix(name, "recorded-nx."):
+					case strings.HasPrefix(name, "recorded-nx."), strings.HasPrefix(name, "stop-recorded."):
 						p = "dns-recorded"
 					case peer && qtype != 1 && qtype != 28 && qtype != 15:
 						p = "dns-owned"
