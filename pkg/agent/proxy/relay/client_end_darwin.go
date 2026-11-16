@@ -30,7 +30,7 @@ import "golang.org/x/sys/unix"
 // state that keeps its error, so the FIN is required too: a socket that cannot
 // say it came gives none.
 func (s *tcpClientSocket) unresetError(fd uintptr, finRead bool) int {
-	if s.resetGiven || !s.askInfo(fd, &s.ebuf, &s.einfo) {
+	if s.ended || !s.askInfo(fd, &s.ebuf, &s.einfo) {
 		return 0
 	}
 	if s.einfo.state != tcpsClosed || s.einfo.txunacked == 0 {
@@ -43,6 +43,17 @@ func (s *tcpClientSocket) unresetError(fd uintptr, finRead bool) int {
 		return 0
 	}
 	// The kernel clears an error as it gives it: so does this one.
-	s.resetGiven = true
+	s.ended = true
 	return int(unix.ECONNRESET)
 }
+
+// endGiven notes that SO_ERROR gave the connection's error. xnu keeps one on
+// a TCP socket only for what ends the connection (tcp_input's reset, or
+// tcp_drop's timeout or cause; a soft error such as an ICMP unreachable is
+// kept apart, in t_softerror, and never closes an ESTABLISHED connection).
+// Once given and cleared, the socket closed on it holds no error and, after
+// the client's FIN, bytes unacknowledged: what unresetError reads as a reset
+// it kept none for. That is the same end, given already, so unresetError
+// gives nothing more: a closed client's reset that came before the proxy's
+// FIN went (in CLOSE_WAIT, where xnu keeps ECONNRESET) is handed on once.
+func (s *tcpClientSocket) endGiven() { s.ended = true }

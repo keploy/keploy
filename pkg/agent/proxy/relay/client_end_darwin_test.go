@@ -2,7 +2,9 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"os"
 	"syscall"
 	"testing"
@@ -276,6 +278,35 @@ func TestXNUAResetAfterTheProxysFINIsReadFromItsTCPInfo(t *testing.T) {
 				t.Fatalf("unresetError asked again = %v, want none: it was given", syscall.Errno(got))
 			}
 		})
+	}
+}
+
+// A reset xnu kept (SO_ERROR) is the connection's end, given once. Once it is
+// given, the socket closed on it holds no error, and after the client's FIN
+// with bytes unacknowledged it says what a reset xnu kept none for says
+// (here its TCP_INFO is scripted to, as a closed client's reset of a chunk
+// that came in CLOSE_WAIT, before the proxy's FIN went, leaves it): nothing
+// more is handed on. The client resets at once (SO_LINGER 0), so the socket
+// keeps ECONNRESET on every run.
+func TestXNUAResetSOErrorGaveIsNotHandedOnAgain(t *testing.T) {
+	app, proxyClient := loopbackPair(t)
+	if err := app.(*net.TCPConn).SetLinger(0); err != nil {
+		t.Fatal(err)
+	}
+	_ = app.Close()
+	awaitTCPState(t, proxyClient, stateClosed, "the client's reset is in")
+	s := clientSocketOf(proxyClient, zap.NewNop()).(*tcpClientSocket)
+	asked := 0
+	s.askInfo = func(_ uintptr, _ *[tcpInfoBuf]byte, info *darwinTCPInfo) bool {
+		asked++
+		*info = darwinTCPInfo{state: tcpsClosed, txunacked: 9}
+		return true
+	}
+	if err := s.pendingError(true); !errors.Is(err, syscall.ECONNRESET) {
+		t.Fatalf("pendingError = %v, want the reset SO_ERROR holds", err)
+	}
+	if err := s.pendingError(true); err != nil {
+		t.Fatalf("pendingError asked again = %v (TCP_INFO asked %d times), want none: SO_ERROR gave the connection's end", err, asked)
 	}
 }
 

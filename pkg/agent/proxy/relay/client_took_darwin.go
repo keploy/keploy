@@ -138,11 +138,12 @@ type tcpClientSocket struct {
 	// rbuf and rinfo are finBeforeReset's, the client's forwarder's.
 	rbuf  [tcpInfoBuf]byte
 	rinfo darwinTCPInfo
-	// ebuf and einfo are unresetError's, clientEnd's; resetGiven: it gave
-	// its reset.
-	ebuf       [tcpInfoBuf]byte
-	einfo      darwinTCPInfo
-	resetGiven bool
+	// ebuf and einfo are unresetError's, clientEnd's; ended: the
+	// connection's end was given, by unresetError or by SO_ERROR
+	// (endGiven).
+	ebuf  [tcpInfoBuf]byte
+	einfo darwinTCPInfo
+	ended bool
 
 	mu sync.Mutex
 	// seen: a look has been taken. lastNxt is snd_nxt as the last look found
