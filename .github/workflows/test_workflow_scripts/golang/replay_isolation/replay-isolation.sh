@@ -446,8 +446,6 @@ replay() {
 	fi
 	cp keploy/.gitignore "$W/out/$phase/keploy.gitignore" 2>/dev/null
 	kill $peerwatch $resolvwatch 2>/dev/null; wait $peerwatch $resolvwatch 2>/dev/null
-	# How the one-shot container ended, for the compose rows.
-	docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' riso-oneshot > "$W/out/$phase/oneshot" 2>/dev/null || rm -f "$W/out/$phase/oneshot"
 	docker rm -f riso-app >/dev/null 2>&1
 	[ ! -f docker-compose.yml ] || docker compose down --remove-orphans >/dev/null 2>&1
 	sink_stop
@@ -780,7 +778,10 @@ for mode in "${MODES[@]}"; do
 		rows_startup replay-compose
 		rows_mode replay-compose
 		rows_after_last replay-compose
-		row "replay-compose: the one-shot container exited 0 and ended nothing" "$([ "$(cat "$W/out/replay-compose/oneshot" 2>/dev/null)" = "exited 0" ] && echo 1)" "riso-oneshot $(cat "$W/out/replay-compose/oneshot" 2>/dev/null || echo 'not found')"
+		# keploy takes the stack down as the run ends, the one-shot container
+		# with it, so its exit is read from compose's own line in the run's
+		# log: a test was sent after it, and the run passed (the row above).
+		row "replay-compose: the one-shot container exited 0 and ended nothing" "$(awk '/riso-oneshot exited with code 0/ { o = 1 } o && /starting test for/ { t = 1 } END { exit !t }' "$W/out/replay-compose/keploy.log" 2>/dev/null && echo 1)" "$(grep -aom1 'riso-oneshot exited with code [0-9]*' "$W/out/replay-compose/keploy.log" 2>/dev/null || echo 'no exit of riso-oneshot'), then a test sent after it"
 		# The application's crash ends the run on it.
 		row "replay-compose-crash fails" "$([ "$(cat "$W/out/replay-compose-crash/exit" 2>/dev/null)" != 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-crash/exit" 2>/dev/null)"
 		row_log "replay-compose-crash: the application crashed" "$W/out/replay-compose-crash/keploy.log" 'probe crash: exit 3'
@@ -790,7 +791,7 @@ for mode in "${MODES[@]}"; do
 		# keploy's agent's death ends the run on it, named.
 		row "replay-compose-agent: keploy's agent was killed" "$(grep -q . "$W/out/replay-compose-agent/killed" 2>/dev/null && echo 1)" "$(cat "$W/out/replay-compose-agent/killed" 2>/dev/null || echo 'no agent container found')"
 		row "replay-compose-agent fails" "$([ "$(cat "$W/out/replay-compose-agent/exit" 2>/dev/null)" != 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-agent/exit" 2>/dev/null)"
-		row_log "replay-compose-agent names keploy's agent, its exit code and the next step" "$W/out/replay-compose-agent/keploy.log" "keploy's agent container .keploy-v3-[^ ]* exited with code 137 after the application started.*Next step: find why the agent stopped"
+		row_log "replay-compose-agent names keploy's agent, its exit code and the next step" "$W/out/replay-compose-agent/keploy.log" "keploy's agent container [^ ]*keploy-v3-[^ ]* exited with code 137 after the application started.*Next step: find why the agent stopped"
 		row_nolog "replay-compose-agent does not name the application's own exit" "$W/out/replay-compose-agent/keploy.log" "the application's container exited with code [0-9]+, and keploy had not stopped it"
 		# keploy answers that name itself, so it never reaches 127.0.0.11's
 		# upstream, nor does any other name (dns-other).
