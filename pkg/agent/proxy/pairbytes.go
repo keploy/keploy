@@ -144,7 +144,7 @@ type proxySide struct {
 func (s *pairedConns) holds(conn net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.byConn[conn]
+	_, ok := s.byConn[pairKey(conn)]
 	return ok
 }
 
@@ -157,7 +157,7 @@ func (s *pairedConns) holds(conn net.Conn) bool {
 // side is read.
 func (s *pairedConns) closing(conn net.Conn, first func(*pairedConn)) (*pairedConn, int, error) {
 	s.mu.Lock()
-	pc := s.byConn[conn]
+	pc := s.byConn[pairKey(conn)]
 	s.mu.Unlock()
 	if pc == nil || pc.atClose.Load() != nil {
 		return nil, 0, nil
@@ -174,7 +174,11 @@ func (s *pairedConns) closing(conn net.Conn, first func(*pairedConn)) (*pairedCo
 // pairedConns are the paired connections the proxy holds, under the proven
 // switch, from their accept until the proxy is done with them.
 type pairedConns struct {
-	mu     sync.Mutex
+	mu sync.Mutex
+	// byConn is keyed by the accepted socket (add). Every lookup takes the
+	// socket from under what the proxy keeps over it (pairKey: the tracking,
+	// and on macOS the count of what is written to it), so a site handed
+	// any of them finds the same connection.
 	byConn map[net.Conn]*pairedConn
 	// err is why no wait on them can be answered: the listener closed, or
 	// this kernel's sock_diag cannot see the application's sockets.
@@ -259,6 +263,7 @@ func (s *pairedConns) add(conn *net.TCPConn, appSeq uint64, instance uint32) {
 func (s *pairedConns) remove(conn net.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	conn = pairKey(conn)
 	pc, ok := s.byConn[conn]
 	if !ok {
 		return
@@ -316,7 +321,7 @@ func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
 func (s *pairedConns) servedWithoutSession(conn net.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pc := s.byConn[conn]; pc != nil {
+	if pc := s.byConn[pairKey(conn)]; pc != nil {
 		pc.noSession.Store(true)
 		s.wakeLocked()
 	}

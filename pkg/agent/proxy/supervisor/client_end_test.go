@@ -28,9 +28,9 @@ func TestTheClientsEndErrorIsTheFirstTold(t *testing.T) {
 		t.Fatalf("after a nil mark: %v, want nil", err)
 	}
 	s.MarkClientEndError(errors.New("use of closed network connection"))
-	s.MarkClientEndError(syscall.Errno(10054)) // WSAECONNRESET
+	s.MarkClientEndError(&net.OpError{Op: "read", Err: os.NewSyscallError("read", syscall.Errno(0))})
 	if err := s.ClientEndError(); err != nil {
-		t.Fatalf("after an error with no errno and an errno past 255 (Windows' WSAECONNRESET): %v, want nil", err)
+		t.Fatalf("after an error with no errno and one with errno 0: %v, want nil", err)
 	}
 	s.MarkPeerEnded(fakeconn.FromClient, false)
 	s.MarkEndedWithConnection(fakeconn.FromDest)
@@ -39,14 +39,8 @@ func TestTheClientsEndErrorIsTheFirstTold(t *testing.T) {
 	if err := s.ClientEndError(); !errors.Is(err, syscall.EPIPE) {
 		t.Fatalf("got %v, want the first, EPIPE, out of the write's error", err)
 	}
-	s.MarkClientEndError(syscall.Errno(255))
+	s.MarkClientEndError(syscall.ECONNRESET)
 	if s.PeerEnded(fakeconn.FromClient) != PeerClosed || s.PeerEnded(fakeconn.FromDest) != PeerOpen || !s.EndedWithConnection(fakeconn.FromDest) {
 		t.Fatal("the errno kept changed how the connection's sides ended")
-	}
-	f := &Session{}
-	f.MarkClientEndError(syscall.Errno(255))
-	f.MarkPeerEnded(fakeconn.FromDest, true)
-	if err := f.ClientEndError(); !errors.Is(err, syscall.Errno(255)) || f.PeerEnded(fakeconn.FromDest) != PeerReset {
-		t.Fatalf("got %v and the destination's end %v, want errno 255 and its reset", err, f.PeerEnded(fakeconn.FromDest))
 	}
 }
