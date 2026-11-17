@@ -30,6 +30,9 @@ type abortDocker struct {
 	// unreadable is a container the daemon lists but whose inspect says
 	// it has no such container (removed in between).
 	unreadable string
+	// notFoundFor is, by container ID, how many inspects of it say it has
+	// no such container before the daemon answers for it.
+	notFoundFor map[string]int
 }
 
 type abortSvcContainer struct {
@@ -71,6 +74,10 @@ func (d *abortDocker) ContainerInspect(_ context.Context, ref string) (container
 	defer d.mu.Unlock()
 	id, c := d.find(ref)
 	if c == nil || (id != "" && id == d.unreadable) {
+		return container.InspectResponse{}, errdefs.NotFound(errors.New("no such container"))
+	}
+	if n := d.notFoundFor[id]; n > 0 {
+		d.notFoundFor[id] = n - 1
 		return container.InspectResponse{}, errdefs.NotFound(errors.New("no such container"))
 	}
 	st := c.state
@@ -317,6 +324,13 @@ func TestAnExitTheUsersFlagsDoNotEndTheRunOnEndsNothing(t *testing.T) {
 		}, die)
 		nothing("an exit of no project when the agent's cannot be read", exit, func(d *abortDocker, _ *App) {
 			delete(d.containers, "agent-id")
+		}, serviceDie("worker-id", "worker", "0", map[string]string{composeProjectLabelKey: ""}))
+		// The agent's project unread at the exit and read later (by the
+		// check that the app has started): the exit of a container of no
+		// project is still not the app's project's.
+		nothing("an exit of no project when the agent's is read only later", exit, func(d *abortDocker, _ *App) {
+			d.notFoundFor = map[string]int{"agent-id": 1}
+			delete(d.containers["worker-id"].labels, composeProjectLabelKey)
 		}, serviceDie("worker-id", "worker", "0", map[string]string{composeProjectLabelKey: ""}))
 		nothing("an exit the watch reads as its context ends", exit, func(_ *abortDocker, a *App) {
 			p := "proj"
