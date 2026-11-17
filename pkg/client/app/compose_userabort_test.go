@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +36,10 @@ type abortDocker struct {
 	// notFoundFor is, by container ID, how many inspects of it say it has
 	// no such container before the daemon answers for it.
 	notFoundFor map[string]int
+	// listFails is a service whose containers the daemon will not list
+	// (the NotFound stands for any failure askDaemon gives up on, without
+	// its wait).
+	listFails string
 }
 
 type abortSvcContainer struct {
@@ -92,6 +97,9 @@ func (d *abortDocker) ContainerInspect(_ context.Context, ref string) (container
 func (d *abortDocker) ContainerList(_ context.Context, opts container.ListOptions) ([]container.Summary, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.listFails != "" && slices.Contains(opts.Filters.Get("label"), composeServiceLabelKey+"="+d.listFails) {
+		return nil, errdefs.NotFound(errors.New("the daemon will not list them"))
+	}
 	var out []container.Summary
 	for id, c := range d.containers {
 		match := true
@@ -459,6 +467,22 @@ func TestTheRunsCodeIsTheExitCodeFromServicesOnceTheStackIsStopped(t *testing.T)
 			t.Fatalf("%s=%q: halt %+v; want the worker's code 1, a running runner's read as none", provenswitch.Env, proven, h)
 		}
 
+		// A runner the daemon holds dead (its exit's cleanup failed) ran and
+		// is down: its code is the run's, as an exited runner's is.
+		d = newAbortDocker(started)
+		dead := exitedAt(9, started)
+		dead.Status, dead.Dead = "dead", true
+		d.add("runner-id", "runner", dead)
+		d.add("worker-id", "worker", exitedAt(1, started))
+		a = newAbortApp(d, "docker compose up --exit-code-from runner", nil)
+		if !a.composeDied(ctx, serviceDie("worker-id", "worker", "1", nil)) {
+			t.Fatalf("%s=%q: the worker's exit did not end the run beside a dead runner", provenswitch.Env, proven)
+		}
+		a.composeHaltEnd(ctx, make(chan struct{}), func() {})()
+		if h := a.composeAppHalt(); h == nil || h.service != "worker" || h.exitCode != 9 || h.codeFrom != "runner" {
+			t.Fatalf("%s=%q: halt %+v; want the dead runner's code 9", provenswitch.Env, proven, h)
+		}
+
 		// A service's SIGKILL (137) with keploy's agent's container down is
 		// the service's halt, not the app's killed with its agent's
 		// namespace.
@@ -618,8 +642,11 @@ func TestTheSetupSaysItDoesWhatTheAbortFlagsSay(t *testing.T) {
 // service not started yet: the exit ends nothing then (a 0 is the
 // dependency's completion, a failure fails the up, which keploy's retry
 // reads), and keploy says so at INFO. A dependent that has started, one with
-// no container (not the up's), a started one-off of it, and a depends_on
-// that waits on no more than the start leave the exit to end the run.
+// no container of the up's (none, or only a one-off of it), and a depends_on
+// that waits on no more than the start (the list form, service_started, no
+// condition) leave the exit to end the run. A one-off of a dependent counts
+// neither way, and a dependent's container the daemon does not read or list
+// is taken for one that has not started.
 func TestAnExitBeforeTheAppStartedEndsTheRunUnlessComposesUpWaitsOnIt(t *testing.T) {
 	doc := `
 services:
@@ -640,6 +667,11 @@ services:
   side:
     image: side
     depends_on: [early]
+  worker:
+    image: worker
+    depends_on:
+      early:
+        restart: true
   ghost:
     image: ghost
     profiles: [off]
@@ -677,9 +709,31 @@ services:
 						d.add("api-id", "api", container.State{Status: "created"})
 						d.add("api-run-id", "api", runningState(started)).labels[composeOneOffLabelKey] = "True"
 					}},
+				{name: "a cache whose dependent has started beside a one-off of it only made crashes", cmd: exit, service: "cache", code: 2,
+					setup: func(d *abortDocker, started time.Time) {
+						d.add("api-id", "api", runningState(started))
+						d.add("api-run-id", "api", container.State{Status: "created"}).labels[composeOneOffLabelKey] = "True"
+					}},
+				{name: "a cache whose dependent has only a one-off of it crashes", cmd: exit, service: "cache", code: 2,
+					setup: func(d *abortDocker, _ time.Time) {
+						d.add("api-run-id", "api", container.State{Status: "created"}).labels[composeOneOffLabelKey] = "True"
+					}},
+				{name: "a cache whose dependent's container the daemon cannot read crashes", cmd: exit, service: "cache", code: 2, waiting: "api",
+					setup: func(d *abortDocker, started time.Time) {
+						d.add("api-id", "api", runningState(started))
+						d.unreadable = "api-id"
+					}},
+				{name: "a cache whose dependent's containers the daemon cannot list crashes", cmd: exit, service: "cache", code: 2, waiting: "api",
+					setup: func(d *abortDocker, started time.Time) {
+						d.add("api-id", "api", runningState(started))
+						d.listFails = "api"
+					}},
 				{name: "a one-shot whose dependent is not the up's exits 0", cmd: exit, service: "lone", code: 0},
 				{name: "a service that others depend on to start only exits 3", cmd: exit, service: "early", code: 3,
-					setup: func(d *abortDocker, _ time.Time) { d.add("side-id", "side", container.State{Status: "created"}) }},
+					setup: func(d *abortDocker, _ time.Time) {
+						d.add("side-id", "side", container.State{Status: "created"})
+						d.add("worker-id", "worker", container.State{Status: "created"})
+					}},
 			} {
 				what := fmt.Sprintf("%s=%q %s: %s", provenswitch.Env, proven, mode, c.name)
 				started := time.Now().Add(-time.Minute)
