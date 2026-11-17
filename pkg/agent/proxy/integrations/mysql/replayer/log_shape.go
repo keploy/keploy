@@ -3,6 +3,7 @@ package replayer
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -77,13 +78,19 @@ func sqlLogShape(sql string) string {
 			}
 			i = j
 		default:
-			b.WriteByte(c)
-			i++
+			// A name can hold non-ASCII characters; each is written
+			// whole, so the shape never stops inside one.
+			n := 1
+			if c >= utf8.RuneSelf {
+				_, n = utf8.DecodeRuneInString(sql[i:])
+			}
+			b.WriteString(sql[i : i+n])
+			i += n
 		}
 	}
 	out := b.String()
 	if len(out) > maxLoggedSQL {
-		out = out[:maxLoggedSQL]
+		out = cutAtRuneStart(out, maxLoggedSQL)
 	}
 	if b.Len() >= maxLoggedSQL {
 		out += "..."
