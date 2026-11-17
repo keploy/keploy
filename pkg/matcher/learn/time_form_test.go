@@ -208,6 +208,22 @@ func TestTheTimeDefaultKeepsAMomentOfTwoClockReads(t *testing.T) {
 	}
 }
 
+// A moment sent first at a read of the clock plus an offset its call was
+// checked by (a clock rule's range: a last-use touch keploy.yml declares,
+// its second cut, Seen.Offset; no plain read, Seen.Clock unset), then at a
+// later call's plain read: a copy of a read too, checked by form under the
+// default. The same first place with no read stays a carried value.
+func TestTheTimeDefaultKeepsAMomentOfAnOffsetReadAndAPlainRead(t *testing.T) {
+	declared := func(off *models.ClockOffset) Input {
+		in := tTwoReads(false)
+		in.Earlier[0].Seen[0].Offset = off
+		return in
+	}
+	tStrictThenDefault(t, "a declared read, then a plain read", declared(&models.ClockOffset{Min: -time.Second, Res: time.Second}), RefusalTwoSources, true, "text 9999-99-99a99:99:99a")
+	tStrictThenDefault(t, "a read an hour ahead, then a plain read", declared(&models.ClockOffset{Min: time.Hour, Max: time.Hour + time.Second, Res: time.Second}), RefusalTwoSources, true, "text 9999-99-99a99:99:99a")
+	tStrictThenDefault(t, "no read, then a plain read", declared(nil), RefusalTwoSources, false, "")
+}
+
 func TestTheTimeDefaultLeavesWhatIsNoTime(t *testing.T) {
 	declare := func(in Input) Input {
 		in.Source = cClock(cPath, models.ClockOffset{Min: -3 * time.Second, Max: -time.Second, Res: time.Microsecond})

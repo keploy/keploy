@@ -3552,13 +3552,16 @@ func twoClockReads(src []evPlace) bool {
 
 // copied is a Value bound at the earliest of src, a copy's sources; a later
 // one its own call learned as a read of the clock is a second, separate
-// read, and the word is refused naming both.
+// read, and the word is refused naming both. Where the earliest is a read
+// of the clock too, plain (evPlace.clock) or plus an offset its call was
+// checked by (evPlace.offset: a clock rule keploy.yml declares, its range
+// a cut to the second), the refusal is of a copy of a read (heldRead).
 func (dc *decider) copied(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
 	if i := slices.IndexFunc(src, func(p evPlace) bool { return p.clock && p.name != first.name }); i >= 0 {
 		d := dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources, "copied-two-reads",
 			"the same moment was sent at "+first.name+" and "+src[i].name+", two separate reads", []string{first.name, src[i].name}, dc.fieldNoise(path))
-		if first.clock {
+		if first.clock || first.offset != nil {
 			// Each source its own call's read of the clock: a copy of a read.
 			d = dc.heldRead(d)
 		}
