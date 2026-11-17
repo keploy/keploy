@@ -130,7 +130,10 @@ type prepEntry struct { // minimal, enough for lookup
 // when it cuts. It never cuts inside a UTF-8 character: a cut that would land
 // inside one moves back to its first byte, so a statement with non-English
 // text or an emoji at the cut point still reads as valid text in the call
-// summary, the report and the dashboard.
+// summary, the report and the dashboard. What a reader sees as one character
+// can be several UTF-8 characters (a letter and its vowel sign, an emoji and
+// its skin tone); the cut can fall between those, and what it keeps is still
+// valid text.
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
@@ -142,9 +145,12 @@ func truncate(s string, maxLen int) string {
 }
 
 // cutAtRuneStart returns s[:n], moved back to the start of the character byte
-// n falls in, so no character is split. It needs 0 <= n < len(s).
+// n falls in, so no character is split. A character is at most utf8.UTFMax
+// bytes, so the cut moves back at most utf8.UTFMax-1 of them: bytes that are
+// not UTF-8 text (a binary or latin1 value) are cut near n as before, not
+// shortened further. It needs 0 <= n < len(s).
 func cutAtRuneStart(s string, n int) string {
-	for n > 0 && !utf8.RuneStart(s[n]) {
+	for back := 0; back < utf8.UTFMax-1 && n > 0 && !utf8.RuneStart(s[n]); back++ {
 		n--
 	}
 	return s[:n]

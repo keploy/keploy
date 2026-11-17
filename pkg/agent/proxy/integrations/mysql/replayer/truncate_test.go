@@ -1,6 +1,7 @@
 package replayer
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -46,6 +47,20 @@ func TestTruncate_NeverSplitsACharacter(t *testing.T) {
 	}
 }
 
+// Bytes that are not UTF-8 text are cut near the budget, never shortened
+// further. In latin1, © and ° are 0xA9 and 0xB0, which UTF-8 reads as the
+// continuation bytes of a character, so an unbounded walk back to a
+// character's first byte would drop the whole run.
+func TestTruncate_BytesThatAreNotTextAreCutNearTheBudget(t *testing.T) {
+	s := "INSERT INTO notes (body) VALUES ('" + strings.Repeat("\xa9\xb0", 60) + "')"
+	for maxLen := 4; maxLen < len(s); maxLen++ {
+		got := truncate(s, maxLen)
+		require.LessOrEqualf(t, len(got), maxLen, "maxLen %d: %q is over the budget", maxLen, got)
+		require.GreaterOrEqualf(t, len(got), maxLen-3, "maxLen %d: %q was cut shorter than needed", maxLen, got)
+		require.Truef(t, strings.HasPrefix(s, strings.TrimSuffix(got, "...")), "maxLen %d: %q is not the start of the statement", maxLen, got)
+	}
+}
+
 // The cuts an ASCII statement gets are unchanged, and a multi-byte character
 // at the cut point is dropped whole, never split.
 func TestTruncate_Cases(t *testing.T) {
@@ -80,26 +95,26 @@ func TestTruncate_Cases(t *testing.T) {
 // (emoji) character.
 func TestMySQLMissSummaryNeverSplitsACharacter(t *testing.T) {
 	const prefix = "SELECT id FROM reviews WHERE product_id = 42 AND body = '"
+	const cutAt = 160 - len("...")
 	for name, text := range map[string]string{
 		"hindi": strings.Repeat("कैमरा बहुत अच्छा है ", 8),
 		"emoji": strings.Repeat("😍", 40),
 	} {
 		for back := 1; back <= 4; back++ {
-			live := prefix + strings.Repeat("x", 157-back-len(prefix)) + text + "' LIMIT 1"
-			db := &fakeMockDb{session: []*models.Mock{nativeHandshake(),
-				queryRecorded("mock-users", "SELECT name FROM users WHERE api_key = 'k1'", nil)}}
-			rep, _ := missOf(t, db, models.OutgoingOptions{}, func(c mysqlClient) {
-				c.send(0, append([]byte{mysql.COM_QUERY}, live...))
+			t.Run(fmt.Sprintf("%s, %d bytes back", name, back), func(t *testing.T) {
+				pad := cutAt - back - len(prefix)
+				require.Positive(t, pad, "the prefix leaves no room to place the text before the cut")
+				live := prefix + strings.Repeat("x", pad) + text + "' LIMIT 1"
+				db := &fakeMockDb{session: []*models.Mock{nativeHandshake(),
+					queryRecorded("mock-users", "SELECT name FROM users WHERE api_key = 'k1'", nil)}}
+				rep, _ := missOf(t, db, models.OutgoingOptions{}, func(c mysqlClient) {
+					c.send(0, append([]byte{mysql.COM_QUERY}, live...))
+				})
+				assert.Truef(t, utf8.ValidString(rep.ActualSummary), "the summary splits a character: %q", rep.ActualSummary)
+				assert.Truef(t, strings.HasSuffix(rep.ActualSummary, "...") && strings.Contains(rep.ActualSummary, prefix),
+					"the summary is not the cut statement: %q", rep.ActualSummary)
+				assert.Truef(t, utf8.ValidString(reportText(rep)), "the report carries invalid UTF-8: %q", reportText(rep))
 			})
-			if !utf8.ValidString(rep.ActualSummary) {
-				t.Errorf("%s, %d bytes back: the summary splits a character: %q", name, back, rep.ActualSummary)
-			}
-			if !strings.HasSuffix(rep.ActualSummary, "...") || !strings.Contains(rep.ActualSummary, prefix) {
-				t.Errorf("%s, %d bytes back: the summary is not the cut statement: %q", name, back, rep.ActualSummary)
-			}
-			if !utf8.ValidString(reportText(rep)) {
-				t.Errorf("%s, %d bytes back: the report carries invalid UTF-8: %q", name, back, reportText(rep))
-			}
 		}
 	}
 }
