@@ -555,8 +555,9 @@ func TestOnWindowsAConnectionClosedShortIsSettledOnlyByWhatItsCloseRead(t *testi
 // TestOnWindowsACloseWhoseCountsCannotBeReadChargesThatConnectionAlone: a
 // proxy-first close while the counts cannot be read (a process of the run
 // had not said what it holds) charges that connection's loss to the test
-// open then; once the counts can be read again (that process exited), a
-// later wait on another connection is judged, not unknown.
+// open then, never a test whose bytes had all arrived before it; once the
+// counts can be read again (that process exited), a later wait on another
+// connection is judged, not unknown.
 func TestOnWindowsACloseWhoseCountsCannotBeReadChargesThatConnectionAlone(t *testing.T) {
 	p := &Proxy{logger: zap.NewNop(), settleReads: true}
 	f := &fakeSends{}
@@ -571,6 +572,9 @@ func TestOnWindowsACloseWhoseCountsCannotBeReadChargesThatConnectionAlone(t *tes
 	if err != nil || len(pcs) != 1 {
 		t.Fatalf("paired: %d, %v", len(pcs), err)
 	}
+	// test-1's end was cut short with all 18 bytes it wrote arrived: none of
+	// what the close may have lost is test-1's.
+	pcs[0].cutShort("test-1", 18)
 	f.set(appSends{}, errors.New("process 4242 of the run has not said HELLO"))
 	p.noteWroteAtClose(pcs[0])
 	if !pcs[0].lost.Load() || pcs[0].wroteAtClose.Load() != nil {
@@ -579,6 +583,9 @@ func TestOnWindowsACloseWhoseCountsCannotBeReadChargesThatConnectionAlone(t *tes
 	}
 	if l := p.losses.Snapshot(); len(l) != 1 || l[0].Kind != models.CaptureLossAppBytesLost {
 		t.Fatalf("losses %+v; want the closed connection's one", l)
+	}
+	if got := ownersOf(p); len(got) != 0 {
+		t.Fatalf("the loss is owned by %q; want the open test's alone (test-1's bytes had all arrived)", got)
 	}
 	if err := p.paired.failure(); err != nil {
 		t.Fatalf("every wait is unknown after one close: %v", err)
