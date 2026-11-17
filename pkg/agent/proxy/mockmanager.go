@@ -5390,7 +5390,7 @@ func (m *MockManager) SetServeClock(c *learn.ServeClock) {
 // files no protocol phase's serve.
 func (m *MockManager) noteServe(mock *models.Mock) {
 	if c := m.serveClock.Load(); c != nil && !mock.IsProtocolPhase() {
-		c.Served()
+		c.ServedMock(mock.Name)
 	}
 }
 
@@ -5405,7 +5405,7 @@ func (m *MockManager) observeServedCopy(mock models.Mock, in *learn.Flight) {
 	// when it is set: reading the door's mock would move it to the heap.
 	if c := m.serveClock.Load(); c != nil {
 		if cp := mock; !cp.IsProtocolPhase() {
-			c.Served()
+			c.ServedMock(cp.Name)
 		}
 	}
 	if in != nil {

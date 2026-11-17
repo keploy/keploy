@@ -35,7 +35,11 @@ type ServeClock struct {
 	// where the next one is written. A slot not yet written holds the zero
 	// instant, which starts no span.
 	served [serveClockKept]time.Time
-	next   int
+	// names are the names of the recordings served, by slot of served
+	// ("" where Served noted one of no name): a background call's span
+	// starts at its own group's serve (SpansOf).
+	names [serveClockKept]string
+	next  int
 }
 
 // serveNow is the clock a ServeClock notes a serve by.
@@ -53,13 +57,19 @@ func (c *ServeClock) SetClock(f func(real time.Time) (time.Time, bool)) {
 	c.mu.Unlock()
 }
 
-// Served notes a serve made now: a later call's span starts no earlier.
-func (c *ServeClock) Served() {
+// Served notes a serve made now, of a recording of no name: a later call's
+// span starts no earlier (SpanTo).
+func (c *ServeClock) Served() { c.ServedMock("") }
+
+// ServedMock notes a serve made now of the recording named name: a later
+// call's span starts no earlier (SpanTo), and a later background call of
+// that recording's group may start its spans there (SpansOf).
+func (c *ServeClock) ServedMock(name string) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
-	c.served[c.next] = serveNow()
+	c.served[c.next], c.names[c.next] = serveNow(), name
 	c.next = (c.next + 1) % serveClockKept
 	c.mu.Unlock()
 }
@@ -87,6 +97,57 @@ func (c *ServeClock) SpanTo(arrival time.Time) (Span, bool) {
 	return lc.span(arrival)
 }
 
+// SpansOf is the spans on the application's clock of a background call
+// that reached keploy at arrival, whose own background group's recordings
+// ofGroup names (CallSpansOf): the span from the latest serve kept before
+// arrival of a recording of the group (the poller's previous run, which
+// it read its clock after), else from the earliest serve kept before
+// arrival, to arrival, where the application's clock ran as one between
+// them, never from another flow's serve alone: a poller's read is ordered
+// with no other flow's call, which may be served between the read and the
+// arrival. Where the clock did not run as one from that bound (it moved
+// since), SpanTo's span, from the latest serve of any flow: with the
+// switch off nothing tells what the clock showed before a move. false
+// where neither is told, and for a nil ofGroup (no group named).
+func (c *ServeClock) SpansOf(arrival time.Time, ofGroup func(name string) bool) ([]Span, bool) {
+	if c == nil || ofGroup == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	lc := liveClock{clock: c.clock}
+	var latest time.Time
+	// Walked from the latest serve back, to the first of the group's before
+	// arrival or the first slot not yet written (its zero instant): every
+	// serve noted is after the one before it (Served).
+	for k := 1; k <= serveClockKept; k++ {
+		j := (c.next - k + serveClockKept) % serveClockKept
+		at := c.served[j]
+		if at.IsZero() {
+			break
+		}
+		if !at.Before(arrival) {
+			continue
+		}
+		if latest.IsZero() {
+			latest = at
+		}
+		lc.prev = at
+		if ofGroup(c.names[j]) {
+			break
+		}
+	}
+	c.mu.Unlock()
+	if s, ok := lc.span(arrival); ok {
+		return []Span{s}, true
+	}
+	lc.prev = latest
+	s, ok := lc.span(arrival)
+	if !ok {
+		return nil, false
+	}
+	return []Span{s}, true
+}
+
 type serveClockKey struct{}
 
 // WithServeClock puts c on ctx, for the parsers of a connection with the
@@ -112,23 +173,23 @@ func CallSpanOf(ctx context.Context, arrival time.Time) (Span, bool) {
 }
 
 // CallSpansOf is the spans on the application's clock of a call that
-// reached keploy at arrival, for the same check alone: CallSpanOf's, last,
-// and, under the switch, before it what the clock showed from that span's
-// bound to the move that began its run, where the clock moved after the
-// bound (Tracker.BackgroundSpans): the call's read of the clock holds in
-// one of them (EpochOffset.HoldsIn). The serve clock's (the switch off)
-// is its one span: with the switch off the hooks tell a span only on a
-// clock nothing moves. false where neither tells one.
-func CallSpansOf(ctx context.Context, arrival time.Time) ([]Span, bool) {
+// reached keploy at arrival, for the same check alone, of a call whose own
+// background group's recordings ofGroup names by name (the recordings it
+// is one more run of but for its reads of the clock): its read of the
+// clock holds in one of them (EpochOffset.HoldsIn). Each is bounded by the
+// group's latest serve before arrival, never by another flow's alone
+// (Tracker.BackgroundSpans under the switch, ServeClock.SpansOf with it
+// off); under the switch, where the clock moved after the bound, they hold
+// what it showed from the bound to the move that began the run to arrival.
+// The serve clock's is one span: with the switch off the hooks tell a span
+// only on a clock nothing moves. false where neither tells one, and for a
+// nil ofGroup.
+func CallSpansOf(ctx context.Context, arrival time.Time, ofGroup func(name string) bool) ([]Span, bool) {
 	if ctx == nil {
 		return nil, false
 	}
 	if c, ok := ctx.Value(serveClockKey{}).(*ServeClock); ok {
-		s, ok := c.SpanTo(arrival)
-		if !ok {
-			return nil, false
-		}
-		return []Span{s}, true
+		return c.SpansOf(arrival, ofGroup)
 	}
-	return ClockSpansOf(ctx, arrival)
+	return ClockSpansOf(ctx, arrival, ofGroup)
 }
