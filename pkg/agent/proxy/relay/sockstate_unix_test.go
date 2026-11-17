@@ -2,47 +2,31 @@
 
 package relay
 
-import (
-	"net"
-	"syscall"
-	"testing"
-)
+import "golang.org/x/sys/unix"
 
-// receiveBufferBoundOf is the most bytes the receive buffer of the socket
-// under c, asked for smallWindow bytes before it connected (dialSmallWindow),
-// can come to hold from now on, however its kernel sizes it as the row runs
-// (receiveBufferGrownOf): no fewer than its peer may send it unread.
-func receiveBufferBoundOf(t *testing.T, c net.Conn) int {
-	t.Helper()
-	held := receiveBufferOf(t, c)
-	rc, err := c.(syscall.Conn).SyscallConn()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bound := 0
-	var gerr error
-	if err := rc.Control(func(fd uintptr) { bound, gerr = receiveBufferGrownOf(fd, held) }); err != nil || gerr != nil {
-		t.Fatalf("the socket cannot say how far its receive buffer grows: %v %v", err, gerr)
-	}
-	return bound
+// setReceiveBuffer sets the receive buffer of the socket fd to n bytes
+// (SO_RCVBUF).
+func setReceiveBuffer(fd uintptr, n int) error {
+	return unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, n)
 }
 
-// receiveBufferOf is the receive buffer of the socket under c as it reads it
-// back (SO_RCVBUF): no fewer bytes than its peer may send it unread now.
-func receiveBufferOf(t *testing.T, c net.Conn) int {
-	t.Helper()
-	rc, err := c.(syscall.Conn).SyscallConn()
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := 0
-	if err := rc.Control(func(fd uintptr) {
-		var gerr error
-		if n, gerr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF); gerr != nil {
-			t.Error(gerr)
-		}
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return n
+// receiveBufferSizeOf is the receive buffer of the socket fd as it reads it
+// back (SO_RCVBUF).
+func receiveBufferSizeOf(fd uintptr) (int, error) {
+	return unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF)
 }
+
+// ackedThrough is how many of the written bytes written to the socket fd its
+// peer has acknowledged: those less the bytes the socket still holds
+// (queuedOf).
+func ackedThrough(fd uintptr, written uint64) (uint64, error) {
+	queued, err := queuedOf(fd)
+	if err != nil {
+		return 0, err
+	}
+	return written - uint64(queued), nil
+}
+
+// probeResentOf is (false, false): Linux's and macOS's rows do not ask
+// whether a window probe was sent again; their counts do not take one in.
+func probeResentOf(uintptr) (resent, known bool) { return false, false }

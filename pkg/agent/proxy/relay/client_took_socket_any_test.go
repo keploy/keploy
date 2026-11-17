@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 
 // The rows here drive a real client socket on Linux, macOS and Windows alike,
 // and need no closed receive window: the client reads all it is sent, or
-// closes. Those that do are in client_took_socket_unix_test.go.
+// closes. Those that do are in client_took_window_test.go.
 
 // The client's answer for what it is written after its FIN is waited for off
 // the forwarding path: the destination's forwarder goes on forwarding, so a
@@ -469,5 +470,76 @@ func TestAHalfClosedClientThatReadsThenClosesHasWhatCameAfterRefused(t *testing.
 		}
 		cancel()
 		<-done
+	}
+}
+
+// A closed client whose FIN reaches the proxy's socket between the relay's
+// look and its Write of a destination chunk: that chunk is teed, as before
+// (the relay could learn of the FIN only once it had handed the chunk on).
+// The client resets on it, before the relay has read the FIN, so the look as
+// the relay reads the FIN finds the connection closed, not the FIN. The FIN
+// came in order (the relay read io.EOF, not a reset), and a chunk written to a
+// closed connection reaches no one: the destination's answer to the forwarded
+// FIN is refused, the stream ends where the client stopped, and no mock is
+// marked incomplete for the answer's failed Write.
+func TestAClosedClientThatResetsBeforeTheRelayReadsItsFINHasTheAnswerRefused(t *testing.T) {
+	t.Parallel()
+	answer := strings.Repeat("A", 64)
+	for round := 0; round < 20; round++ {
+		app, proxyClient := loopbackPair(t)
+		proxyServer, server := loopbackPair(t)
+		c := &finInFlightConn{Conn: &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, release: make(chan struct{})}
+		c.hook = func() {
+			_ = app.Close()
+			for limit := time.Now().Add(tcpSettle); tcpState(t, proxyClient) != stateCloseWait && time.Now().Before(limit); {
+				time.Sleep(20 * time.Microsecond)
+			}
+		}
+		var mu sync.Mutex
+		var marks []string
+		var stops atomic.Int32
+		r := New(Config{
+			Logger:               zap.NewNop(),
+			OnMarkMockIncomplete: func(m string) { mu.Lock(); marks = append(marks, m); mu.Unlock() },
+			ClientStopped:        func(func() []byte) { stops.Add(1) },
+		}, c, connseq.NewUpstream(proxyServer))
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { defer close(done); _ = r.Run(ctx) }()
+		streams := make(chan string, 1)
+		go func() { go streamOf(t, r.ClientStream()); streams <- streamOf(t, r.DestStream()) }()
+
+		if _, err := app.Write([]byte("req")); err != nil {
+			t.Fatal(err)
+		}
+		_ = server.SetReadDeadline(time.Now().Add(tcpSettle))
+		if got := make([]byte, 3); func() bool { _, err := io.ReadFull(server, got); return err != nil }() {
+			t.Fatalf("round %d: the destination did not read the request", round)
+		}
+		if _, err := server.Write([]byte("inflight")); err != nil {
+			t.Fatal(err)
+		}
+		awaitTCPState(t, proxyClient, stateClosed, "the closed client resets the chunk written as its FIN came in")
+		close(c.release)
+		if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
+			t.Fatalf("round %d: the destination read %d bytes, %v, want the forwarded FIN", round, len(rest), err)
+		}
+		_, _ = server.Write([]byte(answer))
+		_ = server.Close()
+		select {
+		case s := <-streams:
+			if s != "inflight" {
+				t.Fatalf("round %d: the destination's stream carried %q, want only the chunk written as the FIN came in", round, s)
+			}
+		case <-time.After(tcpSettle):
+			t.Fatalf("round %d: the destination's stream did not end", round)
+		}
+		cancel()
+		<-done
+		mu.Lock()
+		if len(marks) != 0 || stops.Load() != 1 {
+			t.Fatalf("round %d: marked %q, the relay said the client stopped %d times; want no mark, once", round, marks, stops.Load())
+		}
+		mu.Unlock()
 	}
 }

@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/binary"
+	"errors"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -56,4 +57,55 @@ func unreadOf(fd uintptr) (int, error) {
 	err := windows.WSAIoctl(windows.Handle(fd), fionread, nil, 0,
 		(*byte)(unsafe.Pointer(&n)), uint32(unsafe.Sizeof(n)), &got, nil, 0)
 	return int(n), err
+}
+
+// setReceiveBuffer sets the receive buffer of the socket fd to n bytes
+// (SO_RCVBUF).
+func setReceiveBuffer(fd uintptr, n int) error {
+	return windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, windows.SO_RCVBUF, n)
+}
+
+// receiveBufferSizeOf is the receive buffer of the socket fd as it reads it
+// back (SO_RCVBUF).
+func receiveBufferSizeOf(fd uintptr) (int, error) {
+	return windows.GetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, windows.SO_RCVBUF)
+}
+
+// receiveBufferGrownOf is the most the socket fd, whose receive buffer reads
+// back held bytes, can come to hold unread. Windows' socket holds more unread
+// than its receive buffer: measured on Windows 11 over loopback, with the
+// window closed, a client whose buffer was set to 4096 before it connected
+// held 12288 bytes unread, and one set to 65536 held 131072. So the bound is
+// four times held and 64K more.
+func receiveBufferGrownOf(_ uintptr, held int) (int, error) { return 4*held + 64<<10, nil }
+
+// windowClosedOf reports whether the peer of the socket fd has closed its
+// receive window, from its TCP_INFO_v0: the window the peer last offered
+// (SndWnd) is 0, and no more than the one byte of the proxy's window probe is
+// in flight (wintcpinfo.go's counted). Windows does not count what its send
+// buffer still holds, so a row that waits for this writes more than the
+// client's socket can come to hold (receiveBufferBoundOf). False when it
+// cannot be asked.
+func windowClosedOf(fd uintptr) bool {
+	buf, ok := tcpInfoV0(fd)
+	return ok && binary.LittleEndian.Uint32(buf[36:40]) == 0 && binary.LittleEndian.Uint32(buf[28:32]) <= 1
+}
+
+// ackedThrough is how many of the bytes written to the socket fd its peer has
+// acknowledged, from its TCP_INFO_v0 (ackedOf), on a connection that has sent
+// no FIN: Windows does not count what its send buffer still holds, so the
+// bytes written are not needed.
+func ackedThrough(fd uintptr, _ uint64) (uint64, error) {
+	acked, ok := ackedOf(fd)
+	if !ok {
+		return 0, errors.New("the socket's TCP_INFO_v0 cannot be asked, or sent fewer bytes than it resent and has in flight")
+	}
+	return acked, nil
+}
+
+// probeResentOf reports whether the socket fd has sent a byte again
+// (TCP_INFO_v0's BytesRetrans); known is false when it cannot be asked.
+func probeResentOf(fd uintptr) (resent, known bool) {
+	buf, ok := tcpInfoV0(fd)
+	return ok && binary.LittleEndian.Uint32(buf[68:72]) > 0, ok
 }
