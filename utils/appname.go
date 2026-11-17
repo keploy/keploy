@@ -242,8 +242,8 @@ func originURL(path string) string {
 			line = strings.TrimSpace(line[end+1:])
 		}
 		// A value continues on the next line after a backslash that ends the
-		// line unescaped: an odd number of them, as \\ is one backslash.
-		if trailingBackslashes(line)%2 == 1 {
+		// line and escapes nothing, outside a comment.
+		if continues(line) {
 			pending = strings.TrimSuffix(line, `\`)
 			continue
 		}
@@ -274,32 +274,78 @@ func isOriginSection(h string) bool {
 	return strings.EqualFold(name, "remote") && strings.EqualFold(sub, "origin")
 }
 
-// trailingBackslashes counts the backslashes s ends with.
-func trailingBackslashes(s string) int {
-	return len(s) - len(strings.TrimRight(s, `\`))
-}
-
-// gitConfigValue is a config value as git reads it: quotes removed, a
-// backslash taking the character after it as it is, and a # or ; outside
-// quotes starting a comment.
-func gitConfigValue(v string) string {
-	var b strings.Builder
-	quoted, escaped := false, false
-	for i := 0; i < len(v); i++ {
-		c := v[i]
-		switch {
-		case escaped:
-			b.WriteByte(c)
-			escaped = false
+// continues says whether a config line goes on to the next one, as git reads
+// it: the line ends with a backslash that escapes nothing (\\ is one
+// backslash), outside a comment. A # or ; outside quotes starts a comment,
+// which git ends at the line's end whatever it holds, a backslash among them.
+func continues(line string) bool {
+	quoted := false
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
 		case c == '\\':
-			escaped = true
+			if i == len(line)-1 {
+				return true
+			}
+			i++
 		case c == '"':
 			quoted = !quoted
 		case !quoted && (c == '#' || c == ';'):
-			return strings.TrimSpace(b.String())
+			return false
+		}
+	}
+	return false
+}
+
+// gitConfigValue is a config value as git reads it (config.c parse_value):
+//   - quotes removed;
+//   - \n, \t and \b read as a newline, a tab and a backspace, and a backslash
+//     taking any other character after it as it is (git refuses a value with
+//     one of those; a URL holds none);
+//   - outside quotes, the spaces it starts and ends with dropped, and each
+//     space or tab within it kept as a space;
+//   - a # or ; outside quotes starting a comment.
+func gitConfigValue(v string) string {
+	var b strings.Builder
+	quoted := false
+	// spaces counts the unquoted spaces read since the last character kept:
+	// written before the next one, dropped at the value's end.
+	spaces := 0
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if !quoted && (c == ' ' || c == '\t' || c == '\r' || c == '\v' || c == '\f') {
+			if b.Len() > 0 {
+				spaces++
+			}
+			continue
+		}
+		if !quoted && (c == '#' || c == ';') || c == '\\' && i == len(v)-1 {
+			// A comment, or a backslash at the end that escapes nothing.
+			break
+		}
+		b.WriteString(strings.Repeat(" ", spaces))
+		spaces = 0
+		switch c {
+		case '"':
+			quoted = !quoted
+		case '\\':
+			i++
+			b.WriteByte(gitEscape(v[i]))
 		default:
 			b.WriteByte(c)
 		}
 	}
-	return strings.TrimSpace(b.String())
+	return b.String()
+}
+
+// gitEscape is the character git reads for a backslash and c.
+func gitEscape(c byte) byte {
+	switch c {
+	case 'n':
+		return '\n'
+	case 't':
+		return '\t'
+	case 'b':
+		return '\b'
+	}
+	return c
 }

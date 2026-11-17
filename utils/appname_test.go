@@ -160,6 +160,9 @@ func TestOriginURL(t *testing.T) {
 		{"escaped backslashes", "[remote \"origin\"]\n\turl = C:\\\\src\\\\orders-api\n", `C:\src\orders-api`},
 		{"an escaped backslash at the end", "[remote \"origin\"]\n\turl = /srv/orders-api\\\\\n\tfetch = x\n", `/srv/orders-api\`},
 		{"an escaped backslash, then a continuation", "[remote \"origin\"]\n\turl = /srv/orders-api\\\\\\\n-b\n", `/srv/orders-api\-b`},
+		{"a comment after a value ending in a backslash", "[remote \"origin\"]\n\tfetch = x # C:\\\n[remote \"upstream\"]\n\turl = https://github.com/acme/up.git\n", ""},
+		{"a quoted # is no comment, so its backslash continues", "[remote \"origin\"]\n\turl = \"https://github.com/acme/a#\\\nb.git\"\n", "https://github.com/acme/a#b.git"},
+		{"a ; comment after a url ending in a backslash", "[remote \"origin\"]\n\turl = https://github.com/acme/a.git ; C:\\\n\turl = https://github.com/acme/b.git\n", "https://github.com/acme/a.git"},
 		{"a ; comment ending in a backslash", "; see C:\\\n[remote \"origin\"]\n\turl = https://github.com/acme/a.git\n", "https://github.com/acme/a.git"},
 		{"a header with no closing quote is not git's", "[remote \"origin]\n\turl = https://github.com/acme/a.git\n", ""},
 		{"a header with no opening quote is not git's", "[remote origin\"]\n\turl = https://github.com/acme/a.git\n", ""},
@@ -178,6 +181,26 @@ func TestOriginURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A config is read up to gitFileLimit: an origin past it is not seen, and
+// the app is named after the repository's top folder, as with no remote.
+func TestAppNameForAConfigPastTheReadLimit(t *testing.T) {
+	top := filepath.Join(t.TempDir(), "checkout")
+	if err := os.MkdirAll(filepath.Join(top, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pad := strings.Repeat("# padding\n", gitFileLimit/len("# padding\n")+1)
+	config := pad + "[remote \"origin\"]\n\turl = https://github.com/acme/far.git\n"
+	if err := os.WriteFile(filepath.Join(top, ".git", "config"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantAppName(t, top, "checkout", AppNameFromRepo)
+	// The same origin within the limit names the app.
+	if err := os.WriteFile(filepath.Join(top, ".git", "config"), []byte(config[len(pad):]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantAppName(t, top, "far", AppNameFromRemote)
 }
 
 // A .git file that names no git directory still marks the repository's
@@ -333,6 +356,15 @@ func TestGitConfigValue(t *testing.T) {
 		`a\\`:                             `a\`,
 		`a\`:                              "a",
 		`"a#b";c`:                         "a#b",
+		`a\nb`:                            "a\nb",
+		`a\tb`:                            "a\tb",
+		`a\bb`:                            "a\bb",
+		`a\x`:                             "ax",
+		"a\t \tb":                         "a   b",
+		`"  a "`:                          "  a ",
+		`a\t`:                             "a\t",
+		`a\ `:                             "a ",
+		"a \\":                            "a",
 	} {
 		if got := gitConfigValue(in); got != want {
 			t.Errorf("gitConfigValue(%q) = %q, want %q", in, got, want)
