@@ -43,7 +43,9 @@ func takenInTheGap(t *testing.T, s *roundStore, name string, install func()) (sp
 // another call took a recording in that instant too. So does a staged
 // recording spent for the staging (the pool's, outside every test) with a
 // test opening in that instant, which the new view says is spent as the
-// old one did.
+// old one did, and a protocol-phase recording a delete door spent in a test
+// for that test's view alone (a handshake), which the next test's view
+// shows again: it answered this session all the same.
 func TestATakeIsServedBeforeTheReplaysCountOfIt(t *testing.T) {
 	for _, tc := range []struct {
 		name, take string
@@ -68,6 +70,9 @@ func TestATakeIsServedBeforeTheReplaysCountOfIt(t *testing.T) {
 		{"a spend for the staging, then a test opens", "pool", true, func(s *roundStore) {
 			s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
 		}, (*roundStore).inTest},
+		{"a spend for the view alone, then the next test opens", "hs", false, (*roundStore).inTest, func(s *roundStore) {
+			s.mm.ServeExactTest("T2", []*models.Mock{s.ms["next"], s.ms["next2"]})
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newRoundStore(t)
