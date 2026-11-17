@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -334,7 +335,7 @@ func keployStack(t *testing.T, psJSON string, downCode int) (*App, *inspectRecor
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose -p orderflow up",
+		cmd:             utils.NewAppCommand("docker compose -p orderflow up"),
 		keployContainer: "keploy-v3",
 		container:       "user-app",
 		composeServices: []string{"app", "db", "keploy-agent"},
@@ -439,7 +440,7 @@ func TestSweepSendsTheComposeYAMLOnStdinForInMemoryProjects(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          &inspectRecorder{},
 		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
-		cmd:             "docker compose -f - up",
+		cmd:             utils.NewAppCommand("docker compose -f - up"),
 		composeServices: []string{"app"},
 	}
 
@@ -462,7 +463,7 @@ func TestSweepWithNoKnownServicesDoesNothing(t *testing.T) {
 	ps := `{"ID":"id-app","Service":"app","State":"exited"}` + "\n"
 	stubDockerCLI(t, ps, 1)
 	rec := &inspectRecorder{}
-	a := &App{logger: zap.NewNop(), docker: rec, composeFile: "/tmp/c.yaml", cmd: "docker compose up"}
+	a := &App{logger: zap.NewNop(), docker: rec, composeFile: "/tmp/c.yaml", cmd: utils.NewAppCommand("docker compose up")}
 
 	if ids := a.sweepStragglingProjectContainers(); len(ids) != 0 {
 		t.Fatalf("swept %v with no known service list", ids)
@@ -562,7 +563,7 @@ func TestSweepSurvivesComposeWarningsOnStderr(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose up",
+		cmd:             utils.NewAppCommand("docker compose up"),
 		composeServices: []string{"app"},
 	}
 
@@ -596,7 +597,7 @@ func TestSweepLeavesComposeRunOneOffsAlone(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose up",
+		cmd:             utils.NewAppCommand("docker compose up"),
 		composeServices: []string{"app"},
 	}
 
@@ -627,7 +628,7 @@ func TestSweepIsBoundedWhenComposeHangs(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          &inspectRecorder{},
 		composeFile:     "/tmp/keploy-compose.yaml",
-		cmd:             "docker compose up",
+		cmd:             utils.NewAppCommand("docker compose up"),
 		composeServices: []string{"app"},
 	}
 

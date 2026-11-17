@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -375,55 +376,62 @@ func composeUpSemantics(cmd string) docker.ComposeUpOptions {
 }
 
 // composeProjectScope returns the -p/--project-name and --project-directory
-// values from the command, so the library resolves the SAME project the
-// shell-out would have. Both are empty when the command sets neither, which is
-// the normal case: compose then derives the name from the document or the
-// working directory. A value in quotes (`-p "proj"`) is taken without them,
-// as the shell hands it to compose.
+// values of the compose command's own options (engine.ComposeOptions: before
+// its subcommand, where compose takes them), so the library resolves the
+// SAME project the shell-out would have. Both are empty when the command sets
+// neither, which is the normal case: compose then derives the name from the
+// document or the working directory. A value in quotes (`-p "proj"`) is
+// taken without them, as the shell hands it to compose. Another program's
+// -p, or a container's (docker compose run app ./tool -p <password>), is no
+// project.
 func composeProjectScope(cmd string) (projectName, projectDir string) {
-	parts := strings.Fields(cmd)
+	parts := engine.ComposeOptions(cmd)
 	for i := 0; i < len(parts); i++ {
 		switch {
 		case (parts[i] == "-p" || parts[i] == "--project-name") && i+1 < len(parts):
-			projectName = unquoteWord(parts[i+1])
+			projectName = parts[i+1]
 			i++
-		case strings.HasPrefix(parts[i], "-p="):
-			projectName = unquoteWord(strings.TrimPrefix(parts[i], "-p="))
+		case strings.HasPrefix(parts[i], "-p") && !strings.HasPrefix(parts[i], "--") && len(parts[i]) > 2:
+			// -p=X, and -pX: compose's -p with its value attached.
+			projectName = strings.TrimPrefix(parts[i][2:], "=")
 		case strings.HasPrefix(parts[i], "--project-name="):
-			projectName = unquoteWord(strings.TrimPrefix(parts[i], "--project-name="))
-		case parts[i] == "--project-directory" && i+1 < len(parts):
-			projectDir = unquoteWord(parts[i+1])
+			projectName = strings.TrimPrefix(parts[i], "--project-name=")
+		case (parts[i] == "--project-directory" || parts[i] == "--workdir") && i+1 < len(parts):
+			// --workdir: --project-directory's old, hidden name.
+			projectDir = parts[i+1]
 			i++
 		case strings.HasPrefix(parts[i], "--project-directory="):
-			projectDir = unquoteWord(strings.TrimPrefix(parts[i], "--project-directory="))
+			projectDir = strings.TrimPrefix(parts[i], "--project-directory=")
+		case strings.HasPrefix(parts[i], "--workdir="):
+			projectDir = strings.TrimPrefix(parts[i], "--workdir=")
 		}
 	}
 	return projectName, projectDir
 }
 
-// composeEnvFiles returns the command's --env-file values, in order (compose
-// takes the flag more than once), so the library and the shell-out's tail
-// resolve the document against the env files compose reads; nil when it
-// gives none, when compose reads COMPOSE_ENV_FILES or the project's .env.
+// composeEnvFiles returns the --env-file values of the compose command's
+// own options (engine.ComposeOptions: before its subcommand, the only place
+// compose takes them), in order (compose takes the flag more than once), so
+// the library and the shell-out's tail resolve the document against the env
+// files compose reads; nil when it gives none, when compose reads
+// COMPOSE_ENV_FILES or the project's .env. Another program's --env-file
+// (node --env-file=.env.test, after compose run's service or after the
+// compose command) is none: read as compose's, the library loaded that
+// program's file as the stack's environment instead of the project's .env,
+// and a line it could not parse was quoted in the run's error.
 func composeEnvFiles(cmd string) []string {
 	var files []string
-	parts := strings.Fields(cmd)
+	parts := engine.ComposeOptions(cmd)
 	for i := 0; i < len(parts); i++ {
 		switch {
 		case parts[i] == "--env-file" && i+1 < len(parts):
-			files = append(files, unquoteWord(parts[i+1]))
+			files = append(files, parts[i+1])
 			i++
 		case strings.HasPrefix(parts[i], "--env-file="):
-			files = append(files, unquoteWord(strings.TrimPrefix(parts[i], "--env-file=")))
+			files = append(files, strings.TrimPrefix(parts[i], "--env-file="))
 		}
 	}
 	return files
-}
-
-// unquoteWord is a command word without the quotes around it, as the shell
-// passes it on: `"proj"` and `'proj'` are proj.
-func unquoteWord(w string) string {
-	return strings.Trim(w, `"'`)
 }
 
 // composeAbortFlag matches, with the space before it, a compose up flag that

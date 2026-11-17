@@ -145,9 +145,9 @@ import (
 //     then closed on, is refused although it took it. Each of these costs a
 //     missing mock.
 //
-// Only a client connection that is a TCP socket on Linux can be asked
-// (clientSocketOf). Elsewhere every chunk is teed as it is written, as before,
-// and one numbered after the client's FIN carries
+// Only a client connection that is a TCP socket on Linux or macOS can be
+// asked (clientSocketOf). Elsewhere (Windows) every chunk is teed as it is
+// written, as before, and one numbered after the client's FIN carries
 // fakeconn.Chunk.AfterClientClose for the parser to judge by.
 
 // clientSaid is what the proxy's end of the client connection says of its

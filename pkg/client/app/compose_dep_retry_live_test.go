@@ -118,7 +118,7 @@ func newLiveApp(t *testing.T, composeYAML, appContainer, project string) (*App, 
 		// ensureComposeExitOnAppFailure injects in production, so `up` returns the
 		// app's own exit code the moment the app container exits (and aborts the
 		// stack), exactly as it does for a real recorded app.
-		cmd: "docker compose -p " + project + " -f " + composePath + " up --abort-on-container-exit --exit-code-from app",
+		cmd: utils.NewAppCommand("docker compose -p " + project + " -f " + composePath + " up --abort-on-container-exit --exit-code-from app"),
 	}
 
 	cleanup := func() {

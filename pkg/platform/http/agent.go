@@ -3961,10 +3961,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 
 		if origCmd != cmd {
-			a.logger.Info(
-				"Updated user command to allow Keploy to serve traffic before the app",
-				zap.String("cmd", utils.RedactCommandLine(cmd)),
-			)
+			updated := utils.NewAppCommand(cmd)
+			a.logger.Info("Updated user command to allow Keploy to serve traffic before the app", zap.Inline(updated))
+			utils.LogWholeCommand(a.logger, "cmd", updated)
 		}
 	}
 
@@ -4305,7 +4304,9 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 	cmd.Cancel = dockerAgentCancel(logger, cmd, run, opts.KeployContainer, removal)
 
-	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
+	// On Windows the command carries keploy's own arguments (-c and the
+	// command it runs for the user): written whole but for their secrets.
+	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(utils.RedactCmdArgs(cmd.Args))))
 
 	// Check if we need PTY for interactive input (e.g., sudo password on Linux)
 	if agentUtils.NeedsPTY() {

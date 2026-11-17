@@ -27,7 +27,7 @@ import (
 func TestANativeAppRunsOnInItsCommandsGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "sleep.pid")
 	a := &App{logger: zap.NewNop(), docker: &noContainers{}, kind: utils.Native,
-		cmd: "sleep 60 & echo $! > '" + pidFile + "'; exit 0"}
+		cmd: utils.NewAppCommand("sleep 60 & echo $! > '" + pidFile + "'; exit 0")}
 	var before bool
 	assert.NotPanics(t, func() { before = a.GroupRunsOn() })
 	assert.False(t, before, "an app not run yet runs on")
