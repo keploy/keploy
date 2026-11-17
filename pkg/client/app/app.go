@@ -1995,11 +1995,12 @@ func (a *App) removeCrashedDependencies(ctx context.Context, states []composeSer
 	}
 }
 
-// shouldRetryComposeUp is the SINGLE decision the compose-up retry loop turns
-// on, extracted so the production loop in run() and its unit test call the EXACT
-// same predicate (no hand-copied condition that could silently drift). It returns
-// true iff a failed `docker compose up` should be retried as a transient
-// dependency-startup failure:
+// shouldRetryComposeUp is the SINGLE decision on the up's failure the compose-up
+// retry loop turns on (the loop takes no retry once keploy kept a halt, which
+// ends the run), extracted so the production loop in run() and its unit test call
+// the EXACT same predicate (no hand-copied condition that could silently drift).
+// It returns true iff a failed `docker compose up` should be retried as a
+// transient dependency-startup failure:
 //
 //   - the run is a docker-compose run (kind), AND
 //   - we are still within the bounded attempt budget (attempt <= maxRetries), AND
@@ -2448,8 +2449,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// satisfy the gate — it fails fast with its real error. A dependency that
 	// crashes on EVERY attempt is bounded by composeDepFailureRetries and then
 	// surfaced; the retry can only DELAY a persistent failure, never hide it.
+	// A halt kept (the user's abort flags ended the run on an exit before
+	// the app started, and keploy stopped the stack, its agent with it, which
+	// failed the up) is the run's end: no retry starts the stack again.
 	var states []composeServiceState
-	for attempt := 1; shouldRetryComposeUp(a.kind, attempt, composeDepFailureRetries, ctx.Err(),
+	for attempt := 1; a.composeAppHalt() == nil && shouldRetryComposeUp(a.kind, attempt, composeDepFailureRetries, ctx.Err(),
 		cmdErr.Err, cmdErr.Type, a.composeService,
 		func() []composeServiceState {
 			var zero *composeReportedZero

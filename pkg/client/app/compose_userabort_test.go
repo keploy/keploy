@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"gopkg.in/yaml.v3"
 )
 
@@ -188,6 +190,9 @@ services:
 	}{
 		{"docker compose --profile traffic up --exit-code-from runner", want{onExit: true, from: "runner", attaches: all, flags: "--exit-code-from runner"}},
 		{"docker compose up --exit-code-from=runner --build", want{onExit: true, from: "runner", attaches: all, flags: "--exit-code-from runner"}},
+		{`docker compose up --exit-code-from "runner"`, want{onExit: true, from: "runner", attaches: all, flags: "--exit-code-from runner"}},
+		{`docker compose up --exit-code-from 'runner' --build`, want{onExit: true, from: "runner", attaches: all, flags: "--exit-code-from runner"}},
+		{`docker compose up --exit-code-from="runner"`, want{onExit: true, from: "runner", attaches: all, flags: "--exit-code-from runner"}},
 		{"docker-compose up --abort-on-container-exit", want{onExit: true, attaches: all, flags: "--abort-on-container-exit"}},
 		{"docker compose up --abort-on-container-failure --exit-code-from runner", want{onFailure: true, from: "runner", attaches: all, flags: "--abort-on-container-failure --exit-code-from runner"}},
 		{"docker compose up --abort-on-container-exit --no-attach db", want{onExit: true, attaches: map[string]bool{"app": true, "runner": true, "db": false, "logs": false}, flags: "--abort-on-container-exit"}},
@@ -268,8 +273,9 @@ func TestTheUsersExitCodeFromEndsTheRunOnItsServicesExit(t *testing.T) {
 // An exit the user's flags do not end the run on ends nothing: with no flag
 // (a one-shot's exit), a container compose does not attach to, a clean exit
 // under --abort-on-container-failure, a one-off, another project's, keploy's
-// agent's service, one running again, a die of an earlier run, an exit in
-// keploy's own stop of the stack, and any exit before the app started. A
+// agent's service, one running again, a die of an earlier run, and an exit in
+// keploy's own stop of the stack (an exit before the app started:
+// TestAnExitBeforeTheAppStartedEndsTheRunUnlessComposesUpWaitsOnIt). A
 // failure under --abort-on-container-failure ends the run with its code.
 func TestAnExitTheUsersFlagsDoNotEndTheRunOnEndsNothing(t *testing.T) {
 	for _, proven := range []string{"", "1"} {
@@ -310,9 +316,6 @@ func TestAnExitTheUsersFlagsDoNotEndTheRunOnEndsNothing(t *testing.T) {
 		}, die)
 		nothing("an exit in keploy's own stop of the stack", exit, func(_ *abortDocker, a *App) {
 			a.composeApp.agentStopping.Store(true)
-		}, die)
-		nothing("an exit before the app started", exit, func(d *abortDocker, _ *App) {
-			d.containers["app-id"].state = container.State{Status: "created"}
 		}, die)
 		nothing("keploy's own stop of the app", exit, func(d *abortDocker, a *App) {
 			d.containers["app-id"].state = exitedAt(0, started)
@@ -376,8 +379,10 @@ func TestAnExitTheUsersFlagsDoNotEndTheRunOnEndsNothing(t *testing.T) {
 // With --exit-code-from runner, another attached container's exit ends the
 // run too (the flag implies --abort-on-container-exit), and the run's exit
 // code is the runner's, read once keploy's end has stopped the stack, as
-// compose's abort ended with it. Under --abort-on-container-failure the
-// failure's code stands.
+// compose's abort ended with it, under --abort-on-container-failure too
+// (compose's up captures it whatever the on-exit policy). The halt's text
+// names the worker's code and the runner's apart. A runner that never ran
+// (only made) and a one-off of the runner give no code.
 func TestTheRunsCodeIsTheExitCodeFromServicesOnceTheStackIsStopped(t *testing.T) {
 	for _, proven := range []string{"", "1"} {
 		t.Setenv(provenswitch.Env, proven)
@@ -402,19 +407,39 @@ func TestTheRunsCodeIsTheExitCodeFromServicesOnceTheStackIsStopped(t *testing.T)
 				t.Fatalf("%s=%q failure=%v: the halt's end stopped %v and took the project down %d times", provenswitch.Env, proven, failure, d.stops, downs)
 			}
 			h := a.composeAppHalt()
-			want := 137
-			if failure {
-				want = 1
-			}
-			if h == nil || h.service != "worker" || h.serviceCode != 1 || h.exitCode != want {
-				t.Fatalf("%s=%q failure=%v: halt %+v; want the worker's exit, the run's code %d", provenswitch.Env, proven, failure, h, want)
+			if h == nil || h.service != "worker" || h.serviceCode != 1 || h.exitCode != 137 {
+				t.Fatalf("%s=%q failure=%v: halt %+v; want the worker's exit, the run's code the runner's 137", provenswitch.Env, proven, failure, h)
 			}
 			e := h.appError("")
-			if e.ExitCode != want || e.Err == nil || !strings.Contains(e.Err.Error(), `compose service "worker" exited with code 1`) {
+			if e.ExitCode != 137 || e.Err == nil || !strings.Contains(e.Err.Error(), `compose service "worker" exited with code 1 after the application started`) {
 				t.Fatalf("%s=%q failure=%v: the run's end %+v", provenswitch.Env, proven, failure, e)
 			}
-			if said := strings.Contains(e.Err.Error(), `the run's exit code is that of service "runner", 137`); said == failure {
+			if !strings.Contains(e.Err.Error(), `the run's exit code is that of service "runner", 137`) {
 				t.Fatalf("%s=%q failure=%v: %q", provenswitch.Env, proven, failure, e.Err)
+			}
+		}
+
+		// A runner compose only made, and a one-off of the runner that
+		// exited with its own code, give the run no code: the worker's
+		// stands.
+		for name, setup := range map[string]func(d *abortDocker){
+			"a runner never started": func(d *abortDocker) { d.add("runner-id", "runner", container.State{Status: "created"}) },
+			"a one-off of the runner": func(d *abortDocker) {
+				d.add("runner-id", "runner", runningState(time.Now())).stopIgnored = true
+				d.add("runner-run-id", "runner", exitedAt(7, time.Now())).labels[composeOneOffLabelKey] = "True"
+			},
+		} {
+			ctx := context.Background()
+			d := newAbortDocker(time.Now().Add(-time.Minute))
+			setup(d)
+			d.add("worker-id", "worker", exitedAt(1, time.Now().Add(-time.Minute)))
+			a := newAbortApp(d, "docker compose up --exit-code-from runner", nil)
+			if !a.composeDied(ctx, serviceDie("worker-id", "worker", "1", nil)) {
+				t.Fatalf("%s=%q %s: the worker's exit did not end the run", provenswitch.Env, proven, name)
+			}
+			a.composeHaltEnd(ctx, make(chan struct{}), func() {})()
+			if h := a.composeAppHalt(); h == nil || h.service != "worker" || h.exitCode != 1 || h.codeFrom != "" {
+				t.Fatalf("%s=%q %s: halt %+v; want the worker's code 1", provenswitch.Env, proven, name, h)
 			}
 		}
 
@@ -557,6 +582,141 @@ func TestTheSetupKeepsTheUsersAbortRule(t *testing.T) {
 		}
 		if r := a.composeAbort; r.exitCodeFrom != "runner" || !r.onExit || r.attaches("logs") || !r.attaches("app") {
 			t.Fatalf("in-memory=%v: rule %+v", inMemory, r)
+		}
+	}
+}
+
+// keploy says once, at INFO, that it runs compose's up without the
+// command's abort flags and does what they say itself, naming them; a
+// command with none says nothing.
+func TestTheSetupSaysItDoesWhatTheAbortFlagsSay(t *testing.T) {
+	for cmd, want := range map[string]int{
+		"docker compose up --abort-on-container-failure --exit-code-from runner": 1,
+		"docker compose up": 0,
+	} {
+		core, logs := observer.New(zap.InfoLevel)
+		a := &App{logger: zap.New(core)}
+		a.setComposeUserAbort(cmd, nil)
+		said := logs.FilterMessageSnippet("keploy runs docker compose up without the command's abort flags").All()
+		if len(said) != want || len(logs.All()) != want {
+			t.Fatalf("%q: said %d lines (%d in all); want %d", cmd, len(said), len(logs.All()), want)
+		}
+		if want == 1 {
+			if f, ok := said[0].ContextMap()["flags"].([]interface{}); !ok || len(f) != 2 || f[0] != "--abort-on-container-failure" || f[1] != "--exit-code-from runner" {
+				t.Fatalf("%q: flags %v", cmd, said[0].ContextMap()["flags"])
+			}
+		}
+	}
+}
+
+// An exit the user's flags end the run on, before the app's container has
+// started, ends the run with its code, record and test, in both modes, as
+// compose's own up ended on it (`up --exit-code-from early`, early exiting 3
+// at once): the halt says it came before the app started. compose's up waits
+// on the exit itself only for a service another service of the up depends on
+// with condition service_completed_successfully or service_healthy, that
+// service not started yet: the exit ends nothing then (a 0 is the
+// dependency's completion, a failure fails the up, which keploy's retry
+// reads), and keploy says so at INFO. A dependent that has started, one with
+// no container (not the up's), a started one-off of it, and a depends_on
+// that waits on no more than the start leave the exit to end the run.
+func TestAnExitBeforeTheAppStartedEndsTheRunUnlessComposesUpWaitsOnIt(t *testing.T) {
+	doc := `
+services:
+  app:
+    image: app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      early:
+        condition: service_started
+  api:
+    image: api
+    depends_on:
+      cache:
+        condition: service_healthy
+  side:
+    image: side
+    depends_on: [early]
+  ghost:
+    image: ghost
+    profiles: [off]
+    depends_on:
+      lone:
+        condition: service_completed_successfully
+  migrate: {image: migrate}
+  db: {image: db}
+  cache: {image: cache}
+  early: {image: early}
+  lone: {image: lone}
+`
+	const exit, failure = "docker compose up --abort-on-container-exit", "docker compose up --abort-on-container-failure"
+	for _, proven := range []string{"", "1"} {
+		t.Setenv(provenswitch.Env, proven)
+		for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+			for _, c := range []struct {
+				name, cmd, service string
+				code               int
+				setup              func(d *abortDocker, started time.Time)
+				// waiting is the service the up waits on the exit for; "":
+				// the exit ends the run.
+				waiting string
+			}{
+				{name: "--exit-code-from early, early exits 3", cmd: "docker compose --profile early up --exit-code-from early", service: "early", code: 3},
+				{name: "a migration the app waits on exits 0", cmd: exit, service: "migrate", code: 0, waiting: "app"},
+				{name: "a migration the app waits on fails", cmd: failure, service: "migrate", code: 1, waiting: "app"},
+				{name: "a database the app waits on crashes", cmd: exit, service: "db", code: 1, waiting: "app"},
+				{name: "a cache another service waits on crashes", cmd: exit, service: "cache", code: 2, waiting: "api",
+					setup: func(d *abortDocker, _ time.Time) { d.add("api-id", "api", container.State{Status: "created"}) }},
+				{name: "a cache whose dependent has started crashes", cmd: exit, service: "cache", code: 2,
+					setup: func(d *abortDocker, started time.Time) { d.add("api-id", "api", runningState(started)) }},
+				{name: "a cache whose dependent only a started one-off runs crashes", cmd: exit, service: "cache", code: 2, waiting: "api",
+					setup: func(d *abortDocker, started time.Time) {
+						d.add("api-id", "api", container.State{Status: "created"})
+						d.add("api-run-id", "api", runningState(started)).labels[composeOneOffLabelKey] = "True"
+					}},
+				{name: "a one-shot whose dependent is not the up's exits 0", cmd: exit, service: "lone", code: 0},
+				{name: "a service that others depend on to start only exits 3", cmd: exit, service: "early", code: 3,
+					setup: func(d *abortDocker, _ time.Time) { d.add("side-id", "side", container.State{Status: "created"}) }},
+			} {
+				what := fmt.Sprintf("%s=%q %s: %s", provenswitch.Env, proven, mode, c.name)
+				started := time.Now().Add(-time.Minute)
+				d := newAbortDocker(started)
+				d.containers["app-id"].state = container.State{Status: "created"}
+				d.add(c.service+"-id", c.service, exitedAt(c.code, started))
+				if c.setup != nil {
+					c.setup(d, started)
+				}
+				a := newAbortApp(d, c.cmd, composeDoc(t, doc))
+				a.Mode = mode
+				core, logs := observer.New(zap.InfoLevel)
+				a.logger = zap.New(core)
+				ended := a.composeDied(context.Background(), serviceDie(c.service+"-id", c.service, "ignored: the daemon's state decides", nil))
+				h := a.composeAppHalt()
+				waited := logs.FilterMessageSnippet("docker compose up waits on that exit").All()
+				if c.waiting != "" {
+					if ended || h != nil {
+						t.Fatalf("%s: the exit ended the run (halt %+v); compose's up waits on it", what, h)
+					}
+					if len(waited) != 1 || waited[0].ContextMap()["waitingService"] != c.waiting || waited[0].ContextMap()["service"] != c.service {
+						t.Fatalf("%s: said %v; want once that %s waits on %s", what, logs.All(), c.waiting, c.service)
+					}
+					continue
+				}
+				if !ended || h == nil || h.service != c.service || h.exitCode != c.code || h.serviceCode != c.code || !h.beforeApp || len(waited) != 0 {
+					t.Fatalf("%s: ended %v, halt %+v, said %v; want the exit's halt, code %d, before the app started", what, ended, h, logs.All(), c.code)
+				}
+				e := h.appError("")
+				switch {
+				case c.code == 0 && (e.AppErrorType != models.ErrAppStopped || e.ExitCode != 0):
+					t.Fatalf("%s: the run's end %+v; want the clean end", what, e)
+				case c.code != 0 && (e.AppErrorType != models.ErrUnExpected || e.ExitCode != c.code || e.Err == nil ||
+					!strings.Contains(e.Err.Error(), fmt.Sprintf("compose service %q exited with code %d before the application started", c.service, c.code))):
+					t.Fatalf("%s: the run's end %+v; want an unexpected one, code %d, said before the application started", what, e, c.code)
+				}
+			}
 		}
 	}
 }

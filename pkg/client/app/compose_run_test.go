@@ -132,6 +132,11 @@ func (d *stackDaemon) ContainerInspect(ctx context.Context, ref string) (contain
 		return info, err
 	}
 	st := *info.State
+	if st.Status == "created" {
+		// Made, never started: no start, no end.
+		info.State = &st
+		return info, nil
+	}
 	st.StartedAt = d.started.UTC().Format(time.RFC3339Nano)
 	if !st.Running {
 		st.Status = "exited"
@@ -313,6 +318,72 @@ func TestTheAppsOwnExitEndsAComposeRunWithItsCodeInEveryMode(t *testing.T) {
 			}
 			if trail := r.trail(t); trailAt(trail, "STOP "+runAgentName) < 0 {
 				t.Fatalf("the halt's end did not stop the project:\n%s", strings.Join(trail, "\n"))
+			}
+		})
+	}
+}
+
+// An exit of `up --exit-code-from early`'s service before the app's container
+// has started (early exits 3 at once) ends the run with 3, record and test, in
+// both modes: keploy stops the stack, its agent with it, which fails the up
+// (the app waited on the agent's health), and the run takes no retry of that
+// up. Left to compose's up, which runs without the flag, the run never ended.
+func TestAnExitBeforeTheAppStartedEndsAComposeRunWithItsCodeInEveryMode(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+			t.Run("switch="+proven+"/"+string(mode), func(t *testing.T) {
+				t.Setenv("KEPLOY_STUB_UP_CODE", "1")
+				r := startStackRun(t, proven, func(d *stackDaemon) bool { return !d.running(runAgentName) }, func(a *App) {
+					a.Mode, a.opts.Mode = mode, mode
+					a.setComposeUserAbort("docker compose --profile early up --exit-code-from early", nil)
+				})
+				r.d.mu.Lock()
+				r.d.cs[runAppName].status = "created"
+				r.d.mu.Unlock()
+				r.d.add(&abortContainer{name: "early-1", service: "early", status: "running"})
+				stream := r.watchStream(t)
+				if err := r.d.exit("early-1", 3, "EXIT"); err != nil {
+					t.Fatal(err)
+				}
+				stream <- events.Message{Type: events.ContainerEventType, Action: events.ActionDie, TimeNano: time.Now().UnixNano(),
+					Actor: events.Actor{ID: "early-1", Attributes: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "early", "exitCode": "3"}}}
+				e := r.result(t, "early's exit")
+				if e.AppErrorType != models.ErrUnExpected || e.ExitCode != 3 || !errors.Is(e.Err, models.ErrAppExitedOnItsOwn) ||
+					!strings.Contains(e.Err.Error(), `compose service "early" exited with code 3 before the application started`) {
+					t.Fatalf("run() ended %+v; want early's halt, code 3, before the application started", e)
+				}
+				trail := r.trail(t)
+				if trailAt(trail, "STOP "+runAgentName) < 0 || trailAt(trail, "UP-RETRIED") >= 0 {
+					t.Fatalf("want the agent stopped and the up not retried:\n%s", strings.Join(trail, "\n"))
+				}
+			})
+		}
+	}
+}
+
+// `up --exit-code-from runner` and the app's own crash (3) after it started:
+// the run ends with the app's 3, not the code keploy's stop of the stack gave
+// the runner, in both modes.
+func TestTheAppsOwnExitUnderExitCodeFromKeepsItsCodeInEveryMode(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("switch="+proven, func(t *testing.T) {
+			r := startStackRun(t, proven, func(d *stackDaemon) bool {
+				return !d.running(runAppName) && !d.running(runAgentName) && !d.running("runner-1")
+			},
+				func(a *App) { a.setComposeUserAbort("docker compose up --exit-code-from runner", nil) })
+			r.d.add(&abortContainer{name: "runner-1", service: "runner", status: "running"})
+			stream := r.watchStream(t)
+			if err := r.d.exit(runAppName, 3, "EXIT"); err != nil {
+				t.Fatal(err)
+			}
+			stream <- events.Message{Type: events.ContainerEventType, Action: events.ActionDie, TimeNano: time.Now().UnixNano(),
+				Actor: events.Actor{ID: runAppName, Attributes: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "app", "exitCode": "3"}}}
+			e := r.result(t, "the app's exit")
+			if e.AppErrorType != models.ErrUnExpected || e.ExitCode != 3 || !errors.Is(e.Err, models.ErrAppExitedOnItsOwn) {
+				t.Fatalf("run() ended %+v; want the app's halt, code 3", e)
+			}
+			if trail := r.trail(t); trailAt(trail, "STOP runner-1") < 0 {
+				t.Fatalf("the halt's end did not stop the runner:\n%s", strings.Join(trail, "\n"))
 			}
 		})
 	}

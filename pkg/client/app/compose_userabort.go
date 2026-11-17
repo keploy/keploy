@@ -25,19 +25,30 @@ import (
 // exits when it is through, ran on until it was stopped. So keploy reads them
 // from the user's command (composeUserAbort), says so, and its watch of the
 // app's container does what compose would have done (composeAbortDied),
-// keploy's own stops excepted: once the app has started in this run, an exit
-// of a container compose attaches to, in the app's project, ends the run with
-// --abort-on-container-exit or --exit-code-from, and a failure (a code other
-// than 0) with --abort-on-container-failure. keploy stops the stack then, as
-// compose's abort stopped it. The run's exit code is --exit-code-from's
-// service's, read once the stack is stopped (composeHaltCodeFrom); with no
-// such service, it is that of the container whose exit ended the run.
+// keploy's own stops excepted: an exit of a container compose attaches to, in
+// the app's project, ends the run with --abort-on-container-exit or
+// --exit-code-from, and a failure (a code other than 0) with
+// --abort-on-container-failure. keploy stops the stack then, as compose's
+// abort stopped it. The run's exit code is --exit-code-from's service's first
+// exit's, whatever the other flags say, as compose's up captures it: read once
+// the stack is stopped (composeHaltCodeFrom) when another container's exit
+// ended the run; with no such service, it is that of the container whose exit
+// ended the run.
+//
+// That holds before the app has started too, as compose's own up ended on it
+// (`up --exit-code-from tests`, a test driver that fails at once): left to
+// compose's up, the run never ended, since that up, the flags left out, waits
+// for the app. The one exception is an exit compose's up waits on itself
+// (composeUpWaitsOn): a service another service of the up depends on with
+// condition service_completed_successfully or service_healthy, that other
+// service not yet started. A 0 then is the dependency's completion (a one-shot
+// migration the app waits on), and a failure fails the up, which keploy's
+// retry of the up reads (isTransientComposeDependencyFailure); keploy says so.
+// The stack's stop takes keploy's agent down, and the app runs in the agent's
+// network and pid namespaces, so no app can start after it.
 //
 // The app's own exit ends the run with the app's code, as without the flags,
-// and keploy's agent's exit names the agent (watchComposeApp). Before the app
-// has started, compose's up decides, as for the agent's exit: a dependency
-// that exits first (a one-shot migration the app waits on, or a crash the up's
-// retry reads) ends nothing.
+// and keploy's agent's exit names the agent (watchComposeApp).
 
 // composeAgentServiceKey is the service key keploy gives its agent in the
 // compose document it runs (docker.ModifyComposeForAgent): its exits are
@@ -64,6 +75,9 @@ type composeAbortRule struct {
 	detached map[string]bool
 	// flags are the abort flags as the command gives them.
 	flags []string
+	// waitedOnBy are, by service, the services that depend on it with a
+	// condition compose's up waits on (composeWaitingDependents).
+	waitedOnBy map[string][]string
 }
 
 // active reports whether the rule ends a run on any exit.
@@ -130,6 +144,8 @@ func composeUserAbort(cmd string, compose *docker.Compose) composeAbortRule {
 			continue
 		}
 		name, value, given := strings.Cut(w, "=")
+		// --exit-code-from="runner": the shell's quotes are the value's.
+		value = unquoteWord(value)
 		if !given && composeUpValueFlags[name] && i+1 < len(words) {
 			i++
 			value = unquoteWord(words[i])
@@ -175,7 +191,36 @@ func composeUserAbort(cmd string, compose *docker.Compose) composeAbortRule {
 			r.detached[s] = true
 		}
 	}
+	r.waitedOnBy = composeWaitingDependents(compose)
 	return r
+}
+
+// composeWaitConditions are the depends_on conditions on which compose's up
+// waits for the dependency before it starts the service that names it:
+// its completion, or its health. service_started (the list form's) waits on
+// nothing past the dependency's start.
+var composeWaitConditions = map[string]bool{"service_completed_successfully": true, "service_healthy": true}
+
+// composeWaitingDependents are, by service, the services of compose that
+// depend on it with a condition compose's up waits on (composeWaitConditions),
+// keploy's agent's service aside.
+func composeWaitingDependents(compose *docker.Compose) map[string][]string {
+	by := map[string][]string{}
+	for _, name := range composeServiceNames(compose) {
+		if name == composeAgentServiceKey {
+			continue
+		}
+		on := composeServiceField(composeServiceNode(compose, name), "depends_on")
+		if on == nil || on.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i+1 < len(on.Content); i += 2 {
+			if cond := composeServiceField(on.Content[i+1], "condition"); cond != nil && composeWaitConditions[cond.Value] {
+				by[on.Content[i].Value] = append(by[on.Content[i].Value], name)
+			}
+		}
+	}
+	return by
 }
 
 // composeServiceNode is the mapping of service name in compose; nil when it
@@ -263,7 +308,7 @@ func (a *App) setComposeUserAbort(cmd string, compose *docker.Compose) {
 	if !a.composeAbort.active() {
 		return
 	}
-	a.logger.Info("keploy runs docker compose up without the command's abort flags, which would take keploy's agent down at keploy's own stop of the application; keploy does what they say itself: once the application has started, an exit of a container compose attaches to ends the run, keploy's own stops excepted",
+	a.logger.Info("keploy runs docker compose up without the command's abort flags, which would take keploy's agent down at keploy's own stop of the application; keploy does what they say itself: an exit of a container compose attaches to ends the run, keploy's own stops and an exit compose's up waits on before it starts a service excepted",
 		zap.Strings("flags", a.composeAbort.flags))
 }
 
@@ -271,8 +316,8 @@ func (a *App) setComposeUserAbort(cmd string, compose *docker.Compose) {
 // composeDied's) of a container of the app's
 // project that is neither the app's nor keploy's agent's, ends the run under
 // the user's abort flags (composeUserAbort), keeping its halt if so: keploy
-// has not begun to stop the stack, the container is down, its exit is one the
-// flags end the run on, and the app has started in this run.
+// has not begun to stop the stack, the container is down, and its exit is one
+// the flags end the run on (keepComposeAbortHalt).
 func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 	r := a.composeAbort
 	attrs := m.Actor.Attributes
@@ -303,24 +348,61 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 }
 
 // keepComposeAbortHalt keeps the halt of service's exit with code when the
-// user's flags end the run on it and the app has started in this run; no
-// halt kept yet (the app's own, the agent's) stands.
+// user's flags end the run on it, unless the app has not started in this run
+// and compose's up waits on that exit (composeUpWaitsOn); no halt kept yet
+// (the app's own, the agent's) stands.
 func (a *App) keepComposeAbortHalt(ctx context.Context, service string, code int) bool {
 	if !a.composeAbort.endsOn(code) {
 		return false
 	}
-	if !a.composeAppStarted(ctx) {
-		a.logger.Debug("a container compose attaches to exited before the application started; docker compose up decides the run",
-			zap.String("service", service), zap.Int("exitCode", code))
-		return false
+	beforeApp := !a.composeAppStarted(ctx)
+	if beforeApp {
+		if waiting := a.composeUpWaitsOn(ctx, service); waiting != "" {
+			a.logger.Info("a container compose attaches to exited before the application started, and docker compose up waits on that exit before it starts another service (a depends_on condition): it ends nothing; a 0 is the dependency's completion, and a failure fails the up, which keploy's retry of the up reads",
+				zap.String("service", service), zap.Int("exitCode", code), zap.String("waitingService", waiting))
+			return false
+		}
 	}
-	h := &composeHalt{exitCode: code, service: service, serviceCode: code, flags: strings.Join(a.composeAbort.flags, " ")}
+	h := &composeHalt{exitCode: code, service: service, serviceCode: code, flags: strings.Join(a.composeAbort.flags, " "), beforeApp: beforeApp}
 	if !a.composeApp.halted.CompareAndSwap(nil, h) {
 		return false
 	}
 	a.logger.Info("a container compose attaches to exited, and the command's abort flags end the run on it: ending the run",
 		zap.String("service", service), zap.Int("exitCode", code), zap.Strings("flags", a.composeAbort.flags))
 	return true
+}
+
+// composeUpWaitsOn is a service compose's up waits on service's exit for
+// before it starts it, "" when there is none: one that depends on service with
+// a condition compose waits on (composeWaitingDependents) whose container in
+// the app's project, one-offs aside, has not started in this run. compose's up
+// makes the containers of all its services before it starts any, so a
+// service with no container is not the up's, and waits on nothing. A daemon
+// that gives no answer (ctx's end) leaves the exit to compose's up.
+func (a *App) composeUpWaitsOn(ctx context.Context, service string) string {
+	project := a.composeAppProject(ctx)
+	for _, dependent := range a.composeAbort.waitedOnBy[service] {
+		list, err := askDaemon(ctx, a.logger, fmt.Sprintf("the containers of compose service %q (with no answer, docker compose up decides the exit it may wait on)", dependent),
+			func(ctx context.Context) ([]container.Summary, error) {
+				return a.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
+					filters.Arg("label", composeProjectLabelKey+"="+project),
+					filters.Arg("label", composeServiceLabelKey+"="+dependent),
+				)})
+			})
+		if err != nil {
+			return dependent
+		}
+		for _, c := range list {
+			if isComposeOneOffLabel(c.Labels) {
+				continue
+			}
+			info, read := a.readComposeContainer(ctx, c.ID, "keploy takes it for one that has not started")
+			if !read || daemonNanos(info.State.StartedAt) == 0 {
+				return dependent
+			}
+		}
+	}
+	return ""
 }
 
 // composeAbortExited is the halt the user's flags give an `up` that returned
@@ -365,12 +447,14 @@ func (a *App) composeAbortExited(ctx context.Context) bool {
 // composeHaltCodeFrom makes the run's exit code, on a halt the user's flags
 // gave, that of --exit-code-from's service, as compose's run ended with it,
 // once keploy has stopped the stack: when another container's exit ended
-// the run, that service's code is the one its stop gave it. With
-// --abort-on-container-failure, compose's code is the failure's, kept.
+// the run, that service's code is its first exit's, the one its stop gave it
+// when it ran until then. compose's up captures it whatever the on-exit policy
+// (--abort-on-container-failure too): its captureExitCodeFrom listens apart
+// from the abort's. The app's own halt keeps the app's code.
 func (a *App) composeHaltCodeFrom(ctx context.Context) {
 	h := a.composeApp.halted.Load()
 	from := a.composeAbort.exitCodeFrom
-	if h == nil || h.service == "" || from == "" || from == h.service || a.composeAbort.onFailure {
+	if h == nil || h.service == "" || from == "" || from == h.service {
 		return
 	}
 	code, ok := a.composeServiceExitCode(ctx, from)
@@ -385,7 +469,8 @@ func (a *App) composeHaltCodeFrom(ctx context.Context) {
 }
 
 // composeServiceExitCode is the exit code of service's container in the app's
-// project, when it is down.
+// project, when it ran and is down: one compose only made (`created`, never
+// started) has no exit, nor does a one-off (`compose run`) of service.
 func (a *App) composeServiceExitCode(ctx context.Context, service string) (int, bool) {
 	project := a.composeAppProject(ctx)
 	if project == "" {
@@ -406,7 +491,7 @@ func (a *App) composeServiceExitCode(ctx context.Context, service string) (int, 
 			continue
 		}
 		info, read := a.readComposeContainer(ctx, c.ID, "the run ends with the code of the container whose exit ended it")
-		if read && !info.State.Running {
+		if read && (info.State.Status == "exited" || info.State.Status == "dead") {
 			return info.State.ExitCode, true
 		}
 	}

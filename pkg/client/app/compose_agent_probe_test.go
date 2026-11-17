@@ -13,6 +13,8 @@ import (
 
 	"github.com/docker/docker/api/types/events"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // agentHealth is a stand-in for keploy's agent's health check: it answers
@@ -72,6 +74,8 @@ func TestAnAppKilledFromOutsideDockerKeepsItsHaltAtOnce(t *testing.T) {
 		d := &agentHaltDocker{composeDocker: newComposeDocker(false, true), app: exitedState(137, started),
 			agent: runningState(started), downAfter: tc.downAfter, downCode: 139}
 		a := newAgentHaltApp(d)
+		core, logs := observer.New(zap.InfoLevel)
+		a.logger = zap.New(core)
 		var asks *atomic.Int32
 		switch {
 		case tc.refused:
@@ -101,6 +105,10 @@ func TestAnAppKilledFromOutsideDockerKeepsItsHaltAtOnce(t *testing.T) {
 			}
 		} else if got != kept {
 			t.Fatalf("%s: halt %+v; want the app's own, %+v", name, got, kept)
+		}
+		// The app's own halt says once why it stands; the agent's says nothing of it.
+		if said, want := logs.FilterMessageSnippet("something outside docker killed it, and its exit ends the run").Len(), map[bool]int{false: 1, true: 0}[tc.wantAgent]; said != want {
+			t.Fatalf("%s: said the outside kill %d times; want %d", name, said, want)
 		}
 		if asks != nil && asks.Load() == 0 {
 			t.Fatalf("%s: the agent's health was never asked", name)

@@ -119,7 +119,8 @@ cleanup() {
 	[ ! -f "$W/compose/docker-compose.yml" ] || (cd "$W/compose" && docker compose down --remove-orphans >/dev/null 2>&1)
 	[ ! -f "$W/compose-base/docker-compose.yml" ] || (cd "$W/compose-base" && docker compose down --remove-orphans >/dev/null 2>&1)
 	[ ! -f "$W/compose-runner/docker-compose.yml" ] || (cd "$W/compose-runner" && docker compose down --remove-orphans >/dev/null 2>&1)
-	docker rm -f riso-app riso-base riso-int-c riso-peer riso-oneshot riso-runner >/dev/null 2>&1
+	[ ! -f "$W/compose-early/docker-compose.yml" ] || (cd "$W/compose-early" && docker compose down --remove-orphans >/dev/null 2>&1)
+	docker rm -f riso-app riso-base riso-int-c riso-peer riso-oneshot riso-runner riso-early >/dev/null 2>&1
 	docker network rm riso-int >/dev/null 2>&1
 	$S ip netns del riso-sink 2>/dev/null
 	$S ip link del riso-h 2>/dev/null
@@ -180,14 +181,16 @@ dns_why() {
 	esac
 }
 
-# compose_yml NAME HOSTPORT ARGS [peer] [oneshot] [runner]: a compose file
-# whose service is the probe run with ARGS, container NAME, its 8080 published
-# on HOSTPORT, the sink its DNS server; with "peer", also riso-peer, a
-# container the probe resolves by name; with "oneshot", also riso-oneshot, a
+# compose_yml NAME HOSTPORT ARGS [peer] [oneshot] [runner] [early]: a compose
+# file whose service is the probe run with ARGS, container NAME, its 8080
+# published on HOSTPORT, the sink its DNS server; with "peer", also riso-peer,
+# a container the probe resolves by name; with "oneshot", also riso-oneshot, a
 # container that exits 0 as soon as it starts, as a stack's one-shot migration
 # does; with "runner", also the service runner (container riso-runner), a test
 # driver that calls the app through its published port, once its health check
-# answers 5 more times, and exits 0.
+# answers 5 more times, and exits 0; with "early", also the service early
+# (container riso-early), which waits on nothing and exits 3 at once, before
+# the app's container starts (that waits for keploy's agent's health).
 compose_yml() {
 	cat > docker-compose.yml <<YML
 services:
@@ -218,6 +221,13 @@ YML
     container_name: riso-runner
     command: ["runner", "-url", "http://host.docker.internal:$2", "-n", "5"]
     extra_hosts: ["host.docker.internal:host-gateway"]
+YML
+	;; esac
+	case " ${*:4} " in *" early "*) cat >> docker-compose.yml <<YML
+  early:
+    image: riso-probe:local
+    container_name: riso-early
+    command: ["early"]
 YML
 	;; esac
 }
@@ -687,6 +697,20 @@ for mode in "${MODES[@]}"; do
 		date +%s > "$W/out/record-compose-runner/ended"
 		echo "record-compose-runner exit $(cat "$W/out/record-compose-runner/exit")"
 		docker compose down --remove-orphans >/dev/null 2>&1
+
+		# The user's own `--exit-code-from early`, early exiting 3 before the
+		# application's container has started: keploy record ends at once,
+		# with early's 3, and names its exit. timeout stops a record that
+		# would run on.
+		mkdir -p "$W/compose-early" "$W/out/record-compose-early" && cd "$W/compose-early" || die cd
+		compose_yml riso-app 8080 "$RECARGS" early
+		log "record-compose-early"
+		date +%s > "$W/out/record-compose-early/began"
+		$S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" timeout -s INT -k 30 240 "$KEPLOY" record -c "docker compose up --exit-code-from early" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose-early/keploy.log" 2>&1
+		echo $? > "$W/out/record-compose-early/exit"
+		date +%s > "$W/out/record-compose-early/ended"
+		echo "record-compose-early exit $(cat "$W/out/record-compose-early/exit")"
+		docker compose down --remove-orphans >/dev/null 2>&1
 		sink_stop
 		cd "$W" || die cd
 		;;
@@ -870,6 +894,16 @@ for mode in "${MODES[@]}"; do
 		row "record-compose-runner ends within 60 s of the runner's last line" "$([ -n "$rdone" ] && [ -n "$rend" ] && [ $((rend - rdone)) -le 60 ] && echo 1)" "$([ -n "$rdone" ] && [ -n "$rend" ] && echo "$((rend - rdone)) s after RUNNER DONE" || echo 'no RUNNER DONE line in its log')"
 		rtests=$(ls "$W"/compose-runner/keploy/test-set-*/tests/*.yaml 2>/dev/null | wc -l)
 		row "record-compose-runner records the runner's 6 calls" "$([ "$rtests" = 6 ] && echo 1)" "$rtests tests"
+		# `up --exit-code-from early` at record, early exiting 3 before the
+		# application started: it ended on early's exit, with its 3, within a
+		# minute (before, a record that ran on until it was stopped; timeout's
+		# stop is 124), and its log names early's exit.
+		eexit=$(cat "$W/out/record-compose-early/exit" 2>/dev/null)
+		ebegan=$(cat "$W/out/record-compose-early/began" 2>/dev/null)
+		eend=$(cat "$W/out/record-compose-early/ended" 2>/dev/null)
+		row "record-compose-early ends with early's code, 3" "$([ "$eexit" = 3 ] && echo 1)" "exit ${eexit:-none}"
+		row "record-compose-early ends within 60 s" "$([ -n "$ebegan" ] && [ -n "$eend" ] && [ $((eend - ebegan)) -le 60 ] && echo 1)" "$([ -n "$ebegan" ] && [ -n "$eend" ] && echo "$((eend - ebegan)) s" || echo 'no times')"
+		row "record-compose-early names early's exit before the application started" "$(grep -aqE 'service .{0,2}early.{0,2} exited with code 3 before the application started' "$W/out/record-compose-early/keploy.log" && echo 1)" "$(grep -acE 'exited with code 3 before the application started' "$W/out/record-compose-early/keploy.log") lines"
 		;;
 	esac
 done

@@ -55,7 +55,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|oneshot|runner|fork1|fork2 ...")
+		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|oneshot|early|runner|fork1|fork2 ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -76,6 +76,9 @@ func main() {
 		fmt.Printf("answered rcode=%d\n", rcode)
 	case "oneshot": // exits 0 at once, as a compose stack's one-shot migration does
 		os.Exit(0)
+	case "early": // exits 3 at once, as a test driver that fails before the app is up does
+		fmt.Println("EARLY EXITS 3")
+		os.Exit(3)
 	case "runner":
 		runner(os.Args[2:])
 	case "fork1": // starts fork2 and exits at once, so fork2 is reparented

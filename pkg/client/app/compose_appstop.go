@@ -214,6 +214,8 @@ type composeHalt struct {
 	// (codeFrom) when another's exit ended it (composeHaltCodeFrom).
 	service, codeFrom, flags string
 	serviceCode              int
+	// beforeApp: service's exit came before the app's container started.
+	beforeApp bool
 }
 
 func (h composeHalt) Error() string {
@@ -224,7 +226,11 @@ func (h composeHalt) Error() string {
 			"fix that and run keploy again; if the agent crashed, report it to keploy with that log", h.agent, h.exitCode)
 	}
 	if h.service != "" {
-		msg := fmt.Sprintf("the container of compose service %q exited with code %d after the application started, and the command's %s ends the run on it", h.service, h.serviceCode, h.flags)
+		when := "after"
+		if h.beforeApp {
+			when = "before"
+		}
+		msg := fmt.Sprintf("the container of compose service %q exited with code %d %s the application started, and the command's %s ends the run on it", h.service, h.serviceCode, when, h.flags)
 		if h.codeFrom != "" {
 			msg += fmt.Sprintf("; the run's exit code is that of service %q, %d", h.codeFrom, h.exitCode)
 		}
