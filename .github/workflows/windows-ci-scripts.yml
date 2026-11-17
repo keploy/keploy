@@ -13,6 +13,12 @@ name: Windows CI scripts
 # step), and under Windows PowerShell 5.1 in prepare_and_run's precheck-windows.
 # So does the download-image action's Windows check of the image tarball: only
 # 5.1 there shows a check that lets tar's stderr end the step.
+# setup-git-isolation.tests.ps1: every writer of the known_hosts Windows jobs
+# check github.com against (setup-git-isolation.ps1, prepare_and_run's
+# pre-checkout copy of it, setup-private-parsers' Windows step) writes the
+# pinned keys of .github/ssh/github_known_hosts while ssh-keyscan fails, as it
+# did when a self-hosted runner's DNS blipped; under pwsh here and Windows
+# PowerShell 5.1 on windows-latest.
 
 on:
   push:
@@ -23,12 +29,16 @@ on:
       - '.github/workflows/**'
       - '.github/actions/download-image/**'
       - '.github/actions/windows-binary/**'
+      - '.github/actions/setup-private-parsers/**'
+      - '.github/ssh/**'
   pull_request:
     paths:
       - '.github/scripts/windows/**'
       - '.github/workflows/**'
       - '.github/actions/download-image/**'
       - '.github/actions/windows-binary/**'
+      - '.github/actions/setup-private-parsers/**'
+      - '.github/ssh/**'
 
 permissions:
   contents: read
@@ -47,6 +57,25 @@ jobs:
       - name: Test the Windows machine cache (pwsh)
         shell: pwsh
         run: ./.github/scripts/windows/machine-cache.tests.ps1
+
+      - name: Test the per-job git isolation's pinned GitHub host keys (pwsh)
+        shell: pwsh
+        run: ./.github/scripts/windows/setup-git-isolation.tests.ps1
+
+  # setup-git-isolation.ps1 and its pre-checkout copy run under Windows
+  # PowerShell 5.1 on the self-hosted runners; their cases run here under that
+  # PowerShell too, with Windows' own OpenSSH reading what they write.
+  git-isolation-windows-powershell:
+    timeout-minutes: 10
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the per-job git isolation's pinned GitHub host keys (Windows PowerShell)
+        shell: powershell
+        run: |
+          & .\.github\scripts\windows\setup-git-isolation.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   # machine-cache.ps1 runs under Windows PowerShell 5.1 in the jobs that use
   # it; its cases run here under that PowerShell too, on NTFS.
