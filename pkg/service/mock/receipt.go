@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -211,7 +212,9 @@ type UnchargedMiss struct {
 }
 
 // MissProcess names the process that made a call: its pid, its comm and its
-// whole command line, its secrets redacted as keploy's log of it is. Its pid
+// whole command line, its secrets redacted and its words quoted where one
+// holds white space or a quote (models.Origin.Cmdline); keploy's log writes
+// that command line by its shape alone (utils.RedactProcessArgv). Its pid
 // and command line are in the receipt's file only, which describes one run
 // on this machine and is never committed (receiptIgnore): the receipt's JSON
 // form (enterprise's keploy mock status --json embeds it) leaves them out,
@@ -956,12 +959,18 @@ func readGitIgnore(keployDir string) []byte {
 // The helper is an unlocked read-modify-write, so two replays starting at once
 // in one repository can both decide to append. Reading first makes that a
 // first-run-only race instead of one on every replay.
+//
+// An entry it could not add is said at WARN, once a process for each
+// keploy/.gitignore, naming that file: the receipt holds the test command
+// whole, which a commit of a file git does not ignore would publish.
 func ignoreReceipts(logger *zap.Logger, keployDir string) (failed map[string]error) {
 	existing := readGitIgnore(keployDir)
 	lines := map[string]bool{}
 	for _, l := range strings.Split(string(existing), "\n") {
 		lines[strings.TrimSpace(l)] = true
 	}
+	var entries []string
+	var first error
 	for _, entry := range receiptIgnore {
 		if lines[entry] {
 			continue
@@ -970,12 +979,26 @@ func ignoreReceipts(logger *zap.Logger, keployDir string) (failed map[string]err
 			logger.Debug("failed to git-ignore the replay receipt", zap.String("entry", entry), zap.Error(err))
 			if failed == nil {
 				failed = map[string]error{}
+				first = err
 			}
 			failed[entry] = err
+			entries = append(entries, entry)
+		}
+	}
+	gitignore := filepath.Join(keployDir, ".gitignore")
+	if failed != nil {
+		if _, said := unignoredReceiptsSaid.LoadOrStore(gitignore, true); !said {
+			logger.Warn("keploy could not add the entries of its local receipts to this .gitignore, so git does not ignore them, and a receipt holds the test command whole",
+				zap.String("file", gitignore), zap.Strings("entries", entries), zap.Error(first),
+				zap.String("next_step", "make the file writable, or add the entries to it yourself, so that no receipt is committed"))
 		}
 	}
 	return failed
 }
+
+// unignoredReceiptsSaid are the keploy/.gitignore files ignoreReceipts said
+// it could not add an entry to, in this process.
+var unignoredReceiptsSaid sync.Map
 
 // addGitIgnore is utils.AddToGitIgnore; a variable so a test can make one
 // entry fail.

@@ -529,3 +529,40 @@ func TestReplacePortChangesOnlyThePort(t *testing.T) {
 		}
 	}
 }
+
+// A test report records the command keploy was run with (cmdUsed), and
+// reports are committed and uploaded: the command given with -c, and
+// keploy's own flags, are written with their secrets redacted, its hosts and
+// paths kept, a word with a space or a quote still Go-quoted.
+func TestAReportsCommandUsedHasItsSecretsRedacted(t *testing.T) {
+	saved := os.Args
+	t.Cleanup(func() { os.Args = saved })
+	os.Args = []string{"/usr/local/bin/keploy", "test",
+		"-c", "python app.py --password S3CR3T --db scott/S3CR3T@db.keploy.test:1521/XE",
+		"--delay", "10", "--api-key=S3CR3T", "--path", "./keploy"}
+	const want = `/usr/local/bin/keploy test -c "python app.py --password <redacted> --db scott/<redacted>@db.keploy.test:1521/XE" --delay 10 --api-key=<redacted> --path ./keploy`
+	if got := GetFullCommandUsed(); got != want {
+		t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, want)
+	}
+	// A shell's -c after an image named git is the shell's, not git's.
+	os.Args = []string{"keploy", "test", "-c", `docker run --rm alpine/git sh -c 'mysql -uroot -pS3CR3T -e "select 1"'`}
+	const wantGit = `keploy test -c "docker run --rm alpine/git sh -c 'mysql -uroot -p<redacted> -e '\\''select 1'\\'''"`
+	if got := GetFullCommandUsed(); got != wantGit {
+		t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, wantGit)
+	}
+	// git's setting in an image with a tag: its header's token redacted.
+	os.Args = []string{"keploy", "test", "-c", `docker run --rm alpine/git:2.43.0 -c http.extraHeader="Authorization: Bearer S3CR3T" clone https://github.com/o/r`}
+	const wantTagged = `keploy test -c "docker run --rm alpine/git:2.43.0 -c 'http.extraHeader=Authorization: <redacted>' clone https://github.com/{}/{}"`
+	if got := GetFullCommandUsed(); got != wantTagged {
+		t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, wantTagged)
+	}
+	// A command whose first word holds a dot is recorded whole: no git URL
+	// section names java, python3, node or mvnw.
+	for _, c := range []string{"java.exe -jar app.jar --spring.profiles.active=dev --server.port=8080", "python3 -m a.b --x.y=1 z",
+		"node.exe server.js --db.host=db --db.user=app", "mvnw.cmd spring-boot:run -Dspring-boot.run.profiles=dev"} {
+		os.Args = []string{"keploy", "test", "-c", c}
+		if got, want := GetFullCommandUsed(), `keploy test -c "`+c+`"`; got != want {
+			t.Errorf("GetFullCommandUsed()\n got %q\nwant %q", got, want)
+		}
+	}
+}

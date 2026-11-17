@@ -295,7 +295,7 @@ func startAbortedUpRun(t *testing.T, dc docker.Client, firstUpCode string) abort
 		logger:          zap.NewNop(),
 		docker:          dc,
 		kind:            utils.DockerCompose,
-		cmd:             "docker compose -f /tmp/keploy-compose.yaml up --abort-on-container-exit --exit-code-from runner",
+		cmd:             utils.NewAppCommand("docker compose -f /tmp/keploy-compose.yaml up --abort-on-container-exit --exit-code-from runner"),
 		composeFile:     "/tmp/keploy-compose.yaml",
 		keployContainer: "keploy-v3-test",
 		container:       "runner",
@@ -2517,7 +2517,7 @@ func TestAFailedUpIsReadFromTheDaemonThenFromPs(t *testing.T) {
 			}
 			argvLog := stubDockerCLI(t, `{"Service":"from-ps","State":"exited","ExitCode":9,"ID":"ps-1"}`+"\n", 0)
 			a := &App{logger: zap.NewNop(), docker: tc.dc(), kind: utils.DockerCompose, composeService: "runner", keployContainer: "keploy-v3-test",
-				cmd: "docker compose -f /tmp/keploy-compose.yaml up", composeFile: "/tmp/keploy-compose.yaml"}
+				cmd: utils.NewAppCommand("docker compose -f /tmp/keploy-compose.yaml up"), composeFile: "/tmp/keploy-compose.yaml"}
 			if tc.service == "-" {
 				a.composeService = ""
 			}

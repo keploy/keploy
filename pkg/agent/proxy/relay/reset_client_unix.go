@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package relay
 
@@ -19,7 +19,7 @@ import (
 // reset. The proxy's later close of c then finds the socket closed.
 //
 // Only once the client's stack has acknowledged every byte written to the
-// socket (SIOCOUTQ 0): a reset drops what the socket still holds, so the
+// socket (unsentOf 0): a reset drops what the socket still holds, so the
 // client must have every byte the destination sent first. A client in
 // delayed-ACK mode (a request/response connection, as an HTTP client's is)
 // acknowledges the last bytes some tens of milliseconds after they came, so it

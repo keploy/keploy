@@ -98,6 +98,9 @@ type AgentClient struct {
 	// under docker compose (the project starts it), nor for an agent another
 	// process started (a k8s sidecar).
 	startedAgent atomic.Bool
+	// incomingEnd: the summary the agent's end marker of the last incoming
+	// stream carried (IncomingEndSummary); nil until the agent ends it.
+	incomingEnd atomic.Pointer[models.StreamEndSummary]
 	// --from-container only. The user's own container is stopped for the
 	// duration of the session, so SOMETHING has to start it again on every way
 	// out. restoreOnce makes that safe to call from each of them.
@@ -456,6 +459,9 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		return nil, fmt.Errorf("error marshaling request body for incoming request: %s", err.Error())
 	}
 
+	// A summary is this stream's only once its agent ends it with its marker.
+	a.incomingEnd.Store(nil)
+
 	// The one request of this stream, made again for each restarted agent.
 	newRequest := a.incomingRequest(requestJSON)
 	req, err := newRequest(ctx)
@@ -577,6 +583,16 @@ const unnamedCallerConnsSaid = "the keploy agent recorded no test case for the c
 // app's own TLS unread (models.StreamEndSummary.TLSRelayedConns).
 const tlsRelayedConnsSaid = "the keploy agent recorded no test case for the calls some connections to the app carried: they were TLS (HTTPS), which it relayed to the app's own TLS without reading"
 
+// IncomingEndSummary is what the agent's end marker said the session of the
+// last incoming stream (GetIncoming) lost, once the agent ended that stream
+// with it; false before then, and for an agent that sends no marker.
+func (a *AgentClient) IncomingEndSummary() (models.StreamEndSummary, bool) {
+	if s := a.incomingEnd.Load(); s != nil {
+		return *s, true
+	}
+	return models.StreamEndSummary{}, false
+}
+
 // sayAgentSummary says, in this client's own log, what the agent's summary of
 // the session says it lost (models.StreamEndSummary): for an agent this client
 // did not start (docker compose's, kubelet's), whose own log reaches the user
@@ -608,7 +624,7 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 		a.logger.Warn("the keploy agent did not record some requests: it was short of memory when they came, and its memory guard had paused recording; each connection's requests after the pause are recorded",
 			zap.Uint64("requests", p.Requests), zap.Int("connections", p.Connections))
 	}
-	if d := s.MocksDropped; d.ByPressure > 0 || d.Capacity > 0 {
+	if d := s.MocksDropped; d.Dropped() {
 		a.logger.Warn(models.MocksDroppedSaid,
 			zap.Int64("by_memory_pressure", d.ByPressure), zap.Uint64("for_the_output", d.Capacity),
 			zap.Strings("first_dropped", d.Named))
@@ -759,9 +775,14 @@ func (a *AgentClient) readIncomingParts(ctx context.Context, res *http.Response,
 			// Its marker says what the session lost: said here for an agent
 			// this client did not start, whose own log reaches the user
 			// through compose or kubelet, and can be cut off as it stops.
+			// The recording reads it too (IncomingEndSummary), to mark its
+			// test-set with what the agent dropped.
 			var sum models.StreamEndSummary
-			if err := json.NewDecoder(part).Decode(&sum); err == nil && !a.startedAgent.Load() {
-				a.sayAgentSummary(sum)
+			if err := json.NewDecoder(part).Decode(&sum); err == nil {
+				a.incomingEnd.Store(&sum)
+				if !a.startedAgent.Load() {
+					a.sayAgentSummary(sum)
+				}
 			}
 			ended.Store(true)
 			return true
@@ -3972,10 +3993,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 
 		if origCmd != cmd {
-			a.logger.Info(
-				"Updated user command to allow Keploy to serve traffic before the app",
-				zap.String("cmd", utils.RedactCommandLine(cmd)),
-			)
+			updated := utils.NewAppCommand(cmd)
+			a.logger.Info("Updated user command to allow Keploy to serve traffic before the app", zap.Inline(updated))
+			utils.LogWholeCommand(a.logger, "cmd", updated)
 		}
 	}
 
@@ -4316,7 +4336,9 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 	cmd.Cancel = dockerAgentCancel(logger, cmd, run, opts.KeployContainer, removal)
 
-	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(cmd.String())))
+	// On Windows the command carries keploy's own arguments (-c and the
+	// command it runs for the user): written whole but for their secrets.
+	logger.Debug("running the following command to start agent in docker", zap.String("command", redactToken(utils.RedactCmdArgs(cmd.Args))))
 
 	// Check if we need PTY for interactive input (e.g., sudo password on Linux)
 	if agentUtils.NeedsPTY() {
