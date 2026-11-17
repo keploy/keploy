@@ -16,14 +16,20 @@ import (
 	"go.uber.org/zap"
 )
 
-// finSentRecorder is a client socket that says nothing, and counts the
-// relay's words that it sent the client its TCP FIN.
-type finSentRecorder struct{ told atomic.Int32 }
+// finSentRecorder is a client socket that says nothing but, when closed,
+// that the connection closed before the proxy's FIN; it counts the relay's
+// words that it sent the client its TCP FIN, and how often it was asked
+// before one.
+type finSentRecorder struct {
+	closed      bool
+	told, asked atomic.Int32
+}
 
 func (*finSentRecorder) look() clientLook        { return clientLook{said: clientUnknown} }
 func (*finSentRecorder) written() (uint64, bool) { return 0, false }
 func (s *finSentRecorder) proxyFINSent()         { s.told.Add(1) }
 func (s *finSentRecorder) toldTimes() int32      { return s.told.Load() }
+func (s *finSentRecorder) closedBeforeFIN() bool { s.asked.Add(1); return s.closed }
 
 // The client's socket is told of the proxy's FIN when the half-close of the
 // client conn reached its TCP socket, through the wrappers over it, and not
@@ -85,13 +91,23 @@ func TestTheWalkToTheClientsSocketEndsOnACycleOfWrappers(t *testing.T) {
 
 // Through a relay: the client's FIN forwarded to the destination tells the
 // client's socket nothing; the destination's FIN forwarded to the client
-// tells it once.
+// tells it once, asked first whether the connection had closed: one that
+// had (a client's reset) is half-closed all the same, and told nothing.
 func TestTheRelayTellsTheClientsSocketWhenItForwardsTheDestinationsFIN(t *testing.T) {
 	t.Parallel()
+	for _, closed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "open", true: "closed first"}[closed], func(t *testing.T) {
+			t.Parallel()
+			relayTellsTheDestinationsFIN(t, closed)
+		})
+	}
+}
+
+func relayTellsTheDestinationsFIN(t *testing.T, closed bool) {
 	app, proxyClient := loopbackPair(t)
 	proxyServer, server := loopbackPair(t)
 	r := New(Config{Logger: zap.NewNop()}, proxyClient, connseq.NewUpstream(proxyServer))
-	s := &finSentRecorder{}
+	s := &finSentRecorder{closed: closed}
 	r.client = s
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -103,6 +119,9 @@ func TestTheRelayTellsTheClientsSocketWhenItForwardsTheDestinationsFIN(t *testin
 	halfClosedRequest(t, app, server)
 	if got := s.toldTimes(); got != 0 {
 		t.Fatalf("the client's FIN forwarded to the destination told the client's socket of the proxy's FIN %d times", got)
+	}
+	if got := s.asked.Load(); got != 0 {
+		t.Fatalf("the client's FIN forwarded to the destination asked the client's socket %d times", got)
 	}
 	if _, err := server.Write([]byte("answer")); err != nil {
 		t.Fatal(err)
@@ -117,7 +136,14 @@ func TestTheRelayTellsTheClientsSocketWhenItForwardsTheDestinationsFIN(t *testin
 	case <-time.After(15 * time.Second):
 		t.Fatal("the relay did not end")
 	}
-	if got := s.toldTimes(); got != 1 {
-		t.Fatalf("the destination's FIN forwarded to the client told its socket %d times, want once", got)
+	want := int32(1)
+	if closed {
+		want = 0
+	}
+	if got := s.toldTimes(); got != want {
+		t.Fatalf("the destination's FIN forwarded to the client told its socket %d times, want %d", got, want)
+	}
+	if got := s.asked.Load(); got != 1 {
+		t.Fatalf("the destination's FIN forwarded to the client asked its socket %d times first, want once", got)
 	}
 }

@@ -588,12 +588,17 @@ func (r *Relay) run(ctx context.Context) error {
 	// dead peer) keeps the original immediate teardown: there is no
 	// half-open state to preserve when the connection is already broken.
 	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[net.Conn]) {
-		if r.cfg.HalfCloseGrace < 0 || !errors.Is(err, io.EOF) || !halfCloseWrite(writeSide.Load()) {
+		halfClose := r.cfg.HalfCloseGrace >= 0 && errors.Is(err, io.EOF)
+		// The client's socket is asked before the half-close whether a FIN
+		// can go (clientClosedBeforeFIN): a shutdown of a connection the
+		// client has reset succeeds on Windows, and sends nothing.
+		clientFIN := halfClose && writeSide == &r.src && !r.clientClosedBeforeFIN()
+		if !halfClose || !halfCloseWrite(writeSide.Load()) {
 			closeStopping()
 			r.nudgeDeadline(nudgeSide.Load())
 			return
 		}
-		if c := writeSide.Load(); writeSide == &r.src && c != nil {
+		if c := writeSide.Load(); clientFIN && c != nil {
 			r.noteClientFINSent(*c)
 		}
 		if log := r.cfg.Logger; log != nil {

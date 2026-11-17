@@ -41,6 +41,9 @@ type tcpClientSocket struct {
 	// forwarders are done.
 	ebuf       [wtcpInfoSize]byte
 	resetGiven bool
+	// fbuf is closedBeforeFIN's, asked once, as the destination's forwarder
+	// ends, while resolve may look.
+	fbuf [wtcpInfoSize]byte
 
 	// finSent: the relay sent the client its TCP FIN (proxyFINSent).
 	finSent atomic.Bool
@@ -157,3 +160,22 @@ func (s *tcpClientSocket) finBeforeReset() bool { return s.finIn.Load() }
 // proxyFINSent is the relay's word that it sent the client its own TCP FIN
 // (finSentSocket).
 func (s *tcpClientSocket) proxyFINSent() { s.finSent.Store(true) }
+
+// closedBeforeFIN reports whether the connection had closed (the client reset
+// it) when the relay is about to half-close it. Windows' shutdown succeeds on
+// such a connection and sends no FIN (measured on Windows 11, loopback: 300
+// of 300), so the relay does not tell the socket of a FIN then: a FIN taken as
+// sent would take one of the bytes in flight at the reset for it, and read a
+// byte of a chunk the client refused as taken (winTCPInfo.acked). False when
+// the socket cannot say, and when a reset comes in between this look and the
+// shutdown: the FIN is then taken as sent, as before, which can only tee a
+// chunk as before, never refuse one the client took.
+func (s *tcpClientSocket) closedBeforeFIN() bool {
+	closed := false
+	_ = s.rc.Control(func(fd uintptr) {
+		if info, ok := s.tcpInfo(fd, &s.fbuf); ok {
+			closed = info.state == wtcpClosed
+		}
+	})
+	return closed
+}

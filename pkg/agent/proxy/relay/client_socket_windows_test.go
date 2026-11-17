@@ -3,6 +3,7 @@
 package relay
 
 import (
+	"net"
 	"syscall"
 	"testing"
 
@@ -172,5 +173,67 @@ func TestWindowsTheProxysFINIsTakenIntoTheReset(t *testing.T) {
 	s.proxyFINSent()
 	if err := s.pendingError(false); err != nil {
 		t.Fatalf("pendingError after the proxy's FIN: %v, want none", err)
+	}
+}
+
+// A socket says the connection has closed before the proxy's FIN only once it
+// has: CLOSED, whatever its counts. A socket that cannot say does not: the
+// FIN is taken as sent, as before.
+func TestWindowsAConnectionClosedBeforeTheProxysFINSaysSo(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		ans  []byte
+		want bool
+	}{
+		{"closed", winInfo(wtcpInfoSize, wtcpClosed, 6, 6, 0, 0), true},
+		{"closed, a byte sent again", winInfo(wtcpInfoSize, wtcpClosed, 6, 6, 1, 0), true},
+		{"open", winInfo(wtcpInfoSize, wtcpEstablished, 6, 6, 0, 0), false},
+		{"the client's FIN in", winInfo(wtcpInfoSize, wtcpCloseWait, 6, 6, 0, 0), false},
+		{"the proxy's FIN out", winInfo(wtcpInfoSize, wtcpLastAck, 6, 6, 0, 0), false},
+		{"an answer too short", winInfo(wtcpInfoNeeded-1, wtcpClosed, 6, 6, 0, 0), false},
+	} {
+		if got := winAnsweringSocket(func() []byte { return row.ans }).closedBeforeFIN(); got != row.want {
+			t.Errorf("%s: closedBeforeFIN = %v, want %v", row.name, got, row.want)
+		}
+	}
+	s := winAnsweringSocket(func() []byte { return winInfo(wtcpInfoSize, wtcpClosed, 6, 6, 0, 0) })
+	s.rc = winFailingFD{}
+	if s.closedBeforeFIN() {
+		t.Error("a socket that cannot be asked said the connection had closed")
+	}
+}
+
+// On a real socket: a connection the client reset says so before the proxy's
+// half-close, whose shutdown still succeeds and sends no FIN; the reset
+// answer then reads as refused, not one byte of it as taken.
+func TestWindowsAConnectionTheClientResetSaysSoBeforeTheProxysFIN(t *testing.T) {
+	t.Parallel()
+	const answer = "the answer, after the client's FIN"
+	app, proxyClient := loopbackPair(t)
+	rc, err := proxyClient.(*net.TCPConn).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newTCPClientSocket(rc, nil)
+	if s.closedBeforeFIN() {
+		t.Fatal("an open connection said it had closed")
+	}
+	_ = app.Close()
+	awaitTCPState(t, proxyClient, stateCloseWait, "the closed client's FIN is in")
+	if s.closedBeforeFIN() {
+		t.Fatal("a connection with the client's FIN in said it had closed")
+	}
+	if _, err := proxyClient.Write([]byte(answer)); err != nil {
+		t.Fatal(err)
+	}
+	awaitTCPState(t, proxyClient, stateClosed, "the closed client resets the answer")
+	if !s.closedBeforeFIN() {
+		t.Fatal("a connection the client reset did not say it had closed")
+	}
+	if err := proxyClient.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("the shutdown of a reset connection failed (%v): Windows' succeeds", err)
+	}
+	if l := s.look(); l.said != clientClosed || l.acked != 0 {
+		t.Fatalf("the reset answer reads as %+v, want closed with none of it acknowledged", l)
 	}
 }

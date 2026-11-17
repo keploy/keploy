@@ -95,7 +95,19 @@ func (r *Relay) clientFINBeforeReset() bool {
 // own TCP FIN (Windows': its socket cannot say whether that FIN went).
 type finSentSocket interface {
 	clientSocket
+	// closedBeforeFIN is asked just before the relay half-closes the
+	// client's socket: whether the connection has closed already, so the
+	// half-close sends no FIN, though it succeeds.
+	closedBeforeFIN() bool
 	proxyFINSent()
+}
+
+// clientClosedBeforeFIN is asked before the relay half-closes the client
+// conn: whether the client's socket says the connection has closed already,
+// so no FIN can go and its socket is not told of one (noteClientFINSent).
+func (r *Relay) clientClosedBeforeFIN() bool {
+	s, ok := r.client.(finSentSocket)
+	return ok && s.closedBeforeFIN()
 }
 
 // noteClientFINSent tells the client's socket that the relay half-closed the
