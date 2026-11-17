@@ -208,6 +208,22 @@ type MockEntry struct {
 	// set's mappings. With the switch off it is not read. Empty, the
 	// default. Kept as Series is.
 	CoveredBy string `json:"coveredBy,omitempty" yaml:"coveredBy,omitempty" bson:"covered_by,omitempty"`
+	// CausedBy is, on a worker: entry of a trailing Series, the name of the
+	// recording whose answer, recorded last before this entry's call, carried
+	// the value the call sends: keploy's judging sets it on a call a
+	// background answer led the application to make (a sweep that clears
+	// each item a list it read names). Under the proven switch keploy mock
+	// replay requires such a series only in a run that served one of its
+	// recordings' causes: while every recording that makes the series names
+	// a cause and the run served none of them, the application had no cause
+	// to make the call, and the series is not due (RULE NOT DUE, naming each
+	// cause and the test whose window recorded it). A cause the set's
+	// mappings list nowhere, that names the entry itself, or that is a
+	// covered entry (CoveredBy, never served) is no cause: the series is
+	// required as one with none. Empty, the default, keeps a series required
+	// once its place is reached. With the switch off it is not read. Kept as
+	// Series is.
+	CausedBy string `json:"causedBy,omitempty" yaml:"causedBy,omitempty" bson:"caused_by,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy's
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's

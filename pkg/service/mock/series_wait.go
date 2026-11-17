@@ -134,7 +134,7 @@ func (m *mockService) readOwedSeries(ctx context.Context, ran, passed map[string
 		return nil
 	}
 	m.seriesRead = append(m.seriesRead, read...)
-	return slices.DeleteFunc(owedSeries(m.series, ran, usedNames(m.seriesRead)), func(id string) bool {
+	return slices.DeleteFunc(owedSeries(m.series, ran, usedNames(m.seriesRead), true), func(id string) bool {
 		return !m.series[id].holdsWait(passed)
 	})
 }

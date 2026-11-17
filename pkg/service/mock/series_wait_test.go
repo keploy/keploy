@@ -27,6 +27,13 @@ import (
 // agent.
 func seriesWaitRun(t *testing.T, windows []models.ScopeWindow, reads [][]models.MockState, final []models.MockState, runsOn func() bool, stallLimit int) (int, *Receipt, *TestsReceipt, *observer.ObservedLogs, *composeInstr) {
 	t.Helper()
+	return seriesWaitRunOf(t, seriesMappings, windows, reads, final, runsOn, stallLimit)
+}
+
+// seriesWaitRunOf is seriesWaitRun of the set mappings names, whose
+// recordings are mock-0 to mock-7.
+func seriesWaitRunOf(t *testing.T, mappings string, windows []models.ScopeWindow, reads [][]models.MockState, final []models.MockState, runsOn func() bool, stallLimit int) (int, *Receipt, *TestsReceipt, *observer.ObservedLogs, *composeInstr) {
+	t.Helper()
 	provenOn(t)
 	wake, limit := seriesWake, seriesStallLimit
 	t.Cleanup(func() { seriesWake, seriesStallLimit = wake, limit })
@@ -43,7 +50,7 @@ func seriesWaitRun(t *testing.T, windows []models.ScopeWindow, reads [][]models.
 	keployDir := filepath.Join(repo, "keploy")
 	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(seriesMappings), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(mappings), 0o644))
 	core, logs := observer.New(zapcore.DebugLevel)
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 	instr.consumedReads, instr.consumedMocks, instr.windows, instr.runsOn = reads, final, windows, runsOn
@@ -162,6 +169,19 @@ func TestASeriesNotDueHoldsNoWait(t *testing.T) {
 		[][]models.MockState{{{Name: "mock-0"}, {Name: "mock-3"}}}, nil, runsOnForGood, 3)
 	require.Zero(t, code)
 	require.Empty(t, r.RequiredNotMade)
+	require.Zero(t, logs.FilterMessageSnippet("waiting for the series of declared rules the run owes").Len())
+	require.Equal(t, 2, instr.consumedReadCount, "the wait's one read and the run's end")
+}
+
+// A trailing series none of whose causes the run served holds no wait: the
+// application had no cause to make its call, so waiting for it changes no
+// verdict; the wait reads once and ends, and the run's end says the series
+// not due.
+func TestAnUncausedSeriesHoldsNoWait(t *testing.T) {
+	_, r, _, logs, instr := seriesWaitRunOf(t, causedMappings("mock-1", "mock-1"), seriesWindows(models.ScopeOutcomePassed, models.ScopeOutcomeFailed),
+		[][]models.MockState{{{Name: "mock-0"}}}, nil, runsOnForGood, 3)
+	require.Empty(t, r.RequiredNotMade)
+	require.Len(t, r.RequiredNotDue, 1)
 	require.Zero(t, logs.FilterMessageSnippet("waiting for the series of declared rules the run owes").Len())
 	require.Equal(t, 2, instr.consumedReadCount, "the wait's one read and the run's end")
 }

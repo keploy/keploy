@@ -43,6 +43,61 @@ type seriesDue struct {
 	// early is, at the run's end, that the application's run ended before
 	// due (markEarly): the series is not due, whatever its place.
 	early bool
+	// causes are, by recording of Names, the recording whose answer carried
+	// the value its call sends (models.MockEntry.CausedBy), for those that
+	// name one the set's mappings list (causeOf); causeIn is, by cause, the
+	// test whose list holds it, or whose window a worker: cause was placed
+	// in ("" for none).
+	causes, causeIn map[string]string
+}
+
+// uncaused is whether every recording of s that makes it (makers) names a
+// cause (seriesDue.causes) and used holds none of them: the run served no
+// answer that led the application to make the series' call, so it is not
+// due. A series none or only some of whose makers name a cause is never
+// uncaused: it stays due as one with none.
+func (s seriesDue) uncaused(used map[string]bool) bool {
+	ms := s.makers()
+	if len(ms) == 0 {
+		return false
+	}
+	for _, n := range ms {
+		c, ok := s.causes[n]
+		if !ok || used[c] {
+			return false
+		}
+	}
+	return true
+}
+
+// unserved are the causes of s's makers (seriesDue.causes), each once in
+// makers' order, with the test whose window recorded it and that test's
+// outcome in the run (outcome).
+func (s seriesDue) unserved(outcome map[string]string) []UnservedCause {
+	var out []UnservedCause
+	for _, n := range s.makers() {
+		c := s.causes[n]
+		if slices.ContainsFunc(out, func(u UnservedCause) bool { return u.Name == c }) {
+			continue
+		}
+		w := s.causeIn[c]
+		out = append(out, UnservedCause{Name: c, Window: w, Outcome: outcome[w]})
+	}
+	return out
+}
+
+// UnservedCause is a recording whose answer led the application to make a
+// trailing series' call when it was recorded (models.MockEntry.CausedBy),
+// which the run did not serve (RequiredNotMade.Unserved).
+type UnservedCause struct {
+	// Name is the recording.
+	Name string `yaml:"name" json:"name"`
+	// Window is the test whose window recorded it (its list holds it, or a
+	// rule placed it there); empty when it is no test's.
+	Window string `yaml:"window,omitempty" json:"window,omitempty"`
+	// Outcome is Window's outcome in the run (passed, failed, skipped...);
+	// empty when the run has no line for it.
+	Outcome string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
 }
 
 // RequiredNotMade is a series a declared rule placed in the worker scope that
@@ -67,6 +122,11 @@ type RequiredNotMade struct {
 	// failed: the series not made may follow from that failure, and the run
 	// did not wait for it (seriesDue.holdsWait).
 	TrailsFailed bool `yaml:"trails_failed,omitempty" json:"trails_failed,omitempty"`
+	// Unserved is, of a series the run did not require because it served
+	// none of the answers that led the application to make its call
+	// (Receipt.RequiredNotDue, seriesDue.uncaused), each such answer; empty
+	// otherwise.
+	Unserved []UnservedCause `yaml:"unserved,omitempty" json:"unserved,omitempty"`
 }
 
 // requiredSeries is, by series, each series a declared rule placed in mp's
@@ -132,7 +192,67 @@ func placedSeries(mp *models.Mapping, table map[string][]string) map[string]seri
 		if d := entryDue(e); d > s.due {
 			s.due = d
 		}
+		if e.CausedBy != "" {
+			if s.causes == nil {
+				s.causes = map[string]string{}
+			}
+			s.causes[e.Name] = e.CausedBy
+		}
 		out[e.Series] = s
+	}
+	return keepCauses(mp, out)
+}
+
+// keepCauses is series with each series' causes (seriesDue.causes) kept
+// only where they name a recording mp lists that can be served: in a
+// test's list, start-up, or worker: uncovered (models.MockEntry.CoveredBy:
+// never served), and not the recording itself. A cause the mappings list
+// nowhere could never be served, which would leave its series never due:
+// it is dropped, so the series is required as one with none. Each kept
+// cause's window (seriesDue.causeIn) is the test whose list holds it, or a
+// worker: cause's place.
+func keepCauses(mp *models.Mapping, series map[string]seriesDue) map[string]seriesDue {
+	var window map[string]string
+	for id, s := range series {
+		if len(s.causes) == 0 {
+			continue
+		}
+		if window == nil {
+			window = servableWindows(mp)
+		}
+		kept, in := map[string]string{}, map[string]string{}
+		for n, c := range s.causes {
+			w, ok := window[c]
+			if !ok || c == n {
+				continue
+			}
+			kept[n], in[c] = c, w
+		}
+		s.causes, s.causeIn = kept, in
+		series[id] = s
+	}
+	return series
+}
+
+// servableWindows is, by each recording mp lists that a replay can serve,
+// the test whose window holds it: the test whose list holds it, a worker:
+// entry's place, "" for start-up's or a worker: entry with no place. A
+// covered worker: entry (models.MockEntry.CoveredBy) is never served and
+// is left out.
+func servableWindows(mp *models.Mapping) map[string]string {
+	out := map[string]string{}
+	for _, e := range mp.Startup {
+		out[e.Name] = ""
+	}
+	for _, e := range mp.Worker {
+		if e.CoveredBy == "" {
+			out[e.Name] = e.Place
+		}
+	}
+	for _, tc := range mp.TestCases {
+		for _, e := range tc.Mocks {
+			out[e.Name] = tc.ID
+		}
 	}
 	return out
 }
@@ -155,7 +275,9 @@ func requiredNotMade(req map[string]seriesDue, tests []TestReceipt, consumed []m
 			failed[t.Name] = true
 		}
 	}
-	for _, id := range owedSeries(req, ranTests(tests), usedNames(consumed)) {
+	// What the run consumed unread, whether a series' cause was served is
+	// not known: no series is let off as uncaused (owedSeries).
+	for _, id := range owedSeries(req, ranTests(tests), usedNames(consumed), known) {
 		s := req[id]
 		if !known {
 			if s.Trails == "" {
@@ -191,12 +313,15 @@ func usedNames(consumed []models.MockState) map[string]bool {
 // owedSeries is, in series order, each series of req that is due, by the
 // tests that ran (ran), and none of whose recordings used holds. A trailing
 // series is due when the test it trails ran; a background one when the run
-// reached its place: the set's start, or the test of that ID ran.
-func owedSeries(req map[string]seriesDue, ran, used map[string]bool) []string {
+// reached its place: the set's start, or the test of that ID ran. One whose
+// every making recording names a cause the run did not serve (uncaused) is
+// not due, but only where used is what the run consumed (known): unread,
+// whether a cause was served is not known, and the series stays owed.
+func owedSeries(req map[string]seriesDue, ran, used map[string]bool, known bool) []string {
 	var owed []string
 	for _, id := range slices.Sorted(maps.Keys(req)) {
 		s := req[id]
-		if !s.dueIn(ran) || s.early || s.madeIn(used) {
+		if !s.dueIn(ran) || s.early || s.madeIn(used) || (known && s.uncaused(used)) {
 			continue
 		}
 		owed = append(owed, id)
@@ -335,8 +460,10 @@ func markEarly(series map[string]seriesDue, life appLife) map[string]seriesDue {
 
 // notYetDue is, in series order, each series of req the run reached (dueIn)
 // that it would require but for the application's run ending before its
-// timer bound (seriesDue.early), and none of whose recordings consumed
-// holds: the run says each (RuleNotDueLine) and does not fail on it. None
+// timer bound (seriesDue.early), or but for the run serving none of the
+// answers that led the application to make its call (seriesDue.uncaused),
+// and none of whose recordings consumed holds: the run says each
+// (RuleNotDueLine) and does not fail on it. None
 // when what the run consumed could not be read (known false): the run's
 // end names those series as unread.
 func notYetDue(req map[string]seriesDue, tests []TestReceipt, consumed []models.MockState, known bool) []RequiredNotMade {
@@ -344,15 +471,69 @@ func notYetDue(req map[string]seriesDue, tests []TestReceipt, consumed []models.
 		return nil
 	}
 	ran, used := ranTests(tests), usedNames(consumed)
+	var outcome map[string]string
 	var out []RequiredNotMade
 	for _, id := range slices.Sorted(maps.Keys(req)) {
 		s := req[id]
-		if !s.early || !s.dueIn(ran) || s.madeIn(used) {
+		if !s.dueIn(ran) || s.madeIn(used) {
 			continue
 		}
-		out = append(out, RequiredNotMade{Series: id, Rule: s.Rule, Trails: s.Trails, Names: s.makers(), Due: s.due.String()})
+		switch {
+		case s.early:
+			out = append(out, RequiredNotMade{Series: id, Rule: s.Rule, Trails: s.Trails, Names: s.makers(), Due: s.due.String()})
+		case s.uncaused(used):
+			if outcome == nil {
+				outcome = map[string]string{}
+				for _, t := range tests {
+					outcome[t.Name] = t.Outcome
+				}
+			}
+			out = append(out, RequiredNotMade{Series: id, Rule: s.Rule, Trails: s.Trails, Names: s.makers(), Unserved: s.unserved(outcome)})
+		}
 	}
 	return out
+}
+
+// uncausedWhy says, for a RULE NOT DUE line, why the run did not serve u:
+// what its window's test did in the run.
+func uncausedWhy(u UnservedCause) string {
+	switch {
+	case u.Window == "":
+		return u.Name + ", recorded outside every test's window, which the run never asked for"
+	case u.Outcome == models.ScopeOutcomeFailed:
+		return u.Name + ", recorded in " + u.Window + "'s window: " + u.Window + " failed in this run, so it may have ended before the application asked for it"
+	case u.Outcome == models.ScopeOutcomePassed:
+		return u.Name + ", recorded in " + u.Window + "'s window: " + u.Window + " passed in this run without the application asking for it"
+	case u.Outcome == "":
+		return u.Name + ", recorded in " + u.Window + "'s window: " + u.Window + " did not run in this run"
+	default:
+		return u.Name + ", recorded in " + u.Window + "'s window: " + u.Window + " was " + u.Outcome + " in this run"
+	}
+}
+
+// ruleNotCausedLine is the run's RULE NOT DUE line for n, a series none of
+// whose causes the run served (RequiredNotMade.Unserved): each cause, the
+// window that recorded it and why the run did not serve it. The line's
+// fields end it as JSON, as keploy's other RULE lines.
+func ruleNotCausedLine(n RequiredNotMade) string {
+	id, _, _ := strings.Cut(n.Rule, "@")
+	num := n.Series[strings.LastIndex(n.Series, "/")+1:]
+	causes, whys := make([]string, 0, len(n.Unserved)), make([]string, 0, len(n.Unserved))
+	for _, u := range n.Unserved {
+		causes, whys = append(causes, u.Name), append(whys, uncausedWhy(u))
+	}
+	fields := map[string]any{"event": "not-due", "id": id, "series": n.Series, "unserved": causes}
+	what := "its background series " + num
+	if n.Trails != "" {
+		fields["trails"] = n.Trails
+		what = n.Trails + "'s trailing series " + num
+	}
+	b, err := json.Marshal(fields)
+	if err != nil {
+		b = []byte(`{"event":"unwritable"}`)
+	}
+	return fmt.Sprintf("RULE NOT DUE %s: %s not due: the application made the call of %s (%s) when it was recorded after an answer that carried the value it sends, and the run served no such answer (%s); keploy requires the series only in a run that served one of them, so no test fails on it. rule=%s",
+		n.Rule, id, what, strings.Join(n.Names, ", "), strings.Join(whys, "; "), b)
 }
 
 // RuleNotDueLine is the run's RULE NOT DUE line for n, a series of a once
@@ -360,6 +541,9 @@ func notYetDue(req map[string]seriesDue, tests []TestReceipt, consumed []models.
 // says what the life was read from. The line's fields end it as JSON, as
 // keploy's other RULE lines.
 func RuleNotDueLine(n RequiredNotMade, life appLife) string {
+	if len(n.Unserved) > 0 {
+		return ruleNotCausedLine(n)
+	}
 	id, _, _ := strings.Cut(n.Rule, "@")
 	num := n.Series[strings.LastIndex(n.Series, "/")+1:]
 	ran := life.lived.Round(100 * time.Millisecond)
