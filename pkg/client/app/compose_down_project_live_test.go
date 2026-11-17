@@ -113,7 +113,7 @@ func TestLiveComposeDownTakesDownTheProjectTheUpRan(t *testing.T) {
 				docker:          dc,
 				kind:            utils.DockerCompose,
 				composeFile:     "docker-compose.yml",
-				cmd:             strings.TrimSuffix(up, " -d"),
+				cmd:             utils.NewAppCommand(strings.TrimSuffix(up, " -d")),
 				container:       appContainer,
 				composeServices: []string{"app"},
 			}

@@ -85,6 +85,9 @@ func TestMain(m *testing.M) {
 		_ = resp.Body.Close()
 		os.Exit(0)
 	}
+	if os.Getenv(testChildEnv) == "1" {
+		endWithTheTest()
+	}
 	os.Exit(m.Run())
 }
 

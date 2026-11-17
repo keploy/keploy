@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -48,32 +49,35 @@ func (r *Recorder) markStopKilled(ctx context.Context, testSetID, why string) {
 	r.logger.Warn("the recording's stop had to kill the application: what it would have done as it stopped is not in the recording, so a replay of this test-set does not judge a call the application makes after the set's last test ("+provenswitch.Env+"=1)",
 		zap.String("testSet", testSetID), zap.String("reason", why),
 		zap.String("next_step", "make the application exit promptly on SIGINT, then record the test-set again"))
-	if r.testSetConf == nil {
-		utils.LogError(r.logger, nil, "keploy could not mark the test-set's recording as cut by its stop's kill: there is no test-set config store; a replay may fail it for a call the recording lacks",
-			zap.String("testSet", testSetID))
-		return
-	}
-	u, ok := r.testSetConf.(configForUpdate)
-	if !ok {
-		// Read cannot tell a missing config.yaml from one it could not parse,
-		// and writing would replace that one with a zero document
-		// (persistUIJoinAnnotation refuses for the same reason).
-		utils.LogError(r.logger, nil, "keploy could not mark the test-set's recording as cut by its stop's kill: its config store cannot read a config for update; a replay may fail it for a call the recording lacks",
-			zap.String("testSet", testSetID))
-		return
-	}
-	conf, err := u.ReadForUpdate(ctx, testSetID)
-	if err == nil && conf == nil {
-		conf = &models.TestSet{}
-	}
-	if err == nil {
-		conf.RecordStopKilled = why
-		err = r.testSetConf.Write(ctx, testSetID, conf)
-	}
-	if err != nil {
+	if err := r.updateTestSetConf(ctx, testSetID, func(conf *models.TestSet) { conf.RecordStopKilled = why }); err != nil {
 		utils.LogError(r.logger, err, "keploy could not mark the test-set's recording as cut by its stop's kill; a replay may fail it for a call the recording lacks",
 			zap.String("testSet", testSetID))
 	}
+}
+
+// updateTestSetConf rewrites testSetID's config with set applied to it. It
+// is an error, and nothing is written, when there is no config store, or one
+// that cannot read a config for update (configForUpdate): Read cannot tell a
+// missing config.yaml from one it could not parse, and writing would replace
+// that one with a zero document (persistUIJoinAnnotation refuses for the same
+// reason).
+func (r *Recorder) updateTestSetConf(ctx context.Context, testSetID string, set func(*models.TestSet)) error {
+	if r.testSetConf == nil {
+		return errors.New("there is no test-set config store")
+	}
+	u, ok := r.testSetConf.(configForUpdate)
+	if !ok {
+		return errors.New("its config store cannot read a config for update")
+	}
+	conf, err := u.ReadForUpdate(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	if conf == nil {
+		conf = &models.TestSet{}
+	}
+	set(conf)
+	return r.testSetConf.Write(ctx, testSetID, conf)
 }
 
 // composeAppStopper is an instrumentation that stops the app's container of a

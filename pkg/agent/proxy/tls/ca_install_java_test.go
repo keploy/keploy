@@ -275,12 +275,11 @@ func TestSetupNativeDarwin_SucceedsAndLeavesNoTempFile(t *testing.T) {
 	}
 }
 
-// tempCertFiles lists the ca.crt* scratch files extractCertToTemp creates in
-// the temp dir, so a leak is detectable.
-// putFakeJavaOnPath makes util.IsJavaInstalled() true on the linux test runner
-// by putting the fake JDK's bin (which we give a `java` too) first on PATH.
-// On darwin IsJavaInstalled uses java_home instead, but these tests are
-// Linux-runnable by design (the darwin build's tests never run in CI).
+// putFakeJavaOnPath puts the fake JDK's bin (which we give a `java` too)
+// first on PATH, so util.IsJavaInstalled() is true on Linux and macOS alike:
+// it reads the java on PATH, and asks macOS's java_home only when that java
+// is the /usr/bin/java stub. Its callers above test setupNativeDarwin, which
+// asks IsJavaInstalled nothing; go_macos.yaml runs them on macOS too.
 func putFakeJavaOnPath(t *testing.T, javaHome string) {
 	t.Helper()
 	bin := filepath.Join(javaHome, "bin")
@@ -290,6 +289,8 @@ func putFakeJavaOnPath(t *testing.T, javaHome string) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// tempCertFiles lists the ca.crt* scratch files extractCertToTemp creates in
+// the temp dir, so a leak is detectable.
 func tempCertFiles(t *testing.T) []string {
 	t.Helper()
 	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), "ca.crt*"))

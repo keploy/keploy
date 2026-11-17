@@ -2557,7 +2557,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	r.logTemplateCheck(testSetID, tmplCheck, testCases)
 
 	if conf.PreScript != "" {
-		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
+		// The script by its program (AppCommand), whole at DEBUG: it is a
+		// command the user wrote, and may carry a credential.
+		script := utils.NewAppCommand(conf.PreScript)
+		r.logger.Info("Running Pre-script", zap.Inline(script), zap.String("test-set", testSetID))
+		utils.LogWholeCommand(r.logger, "script", script)
 		err := r.executeScript(runTestSetCtx, conf.PreScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute pre-script: %w", err)
@@ -3730,6 +3734,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// run, as consumedUnread is.
 	var variablesUnjudged []string
 	variablesWhy := map[string]string{}
+	// missedTests names the tests a call of which found no mock, scoped to a
+	// test's last run: a set whose recording's agent dropped mocks cannot
+	// vouch for them (record_mocks_dropped.go).
+	var missedTests []string
 	variablesWarned := false
 	// consumptionUnread names every test, in any cycle and with the switch on or
 	// off, for which a read of what it consumed failed: what it consumed is not
@@ -4521,6 +4529,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if provenswitch.On() {
 					missCategory(res)
 				}
+				missedTests = noteMissed(missedTests, testCase.Name, res)
 			}
 			// Under the proven switch a test keploy's agent lost a call of (or
 			// of a test before it) fails, as one with a miss does: read with
@@ -6582,6 +6591,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Not judged, not broken: the round goes on (abortAfterTestSet).
 			r.markNotJudged(testSetID)
 		}
+		// The set's recording lacks mocks its agent dropped after capturing
+		// them: a call that found no mock may have needed one of them
+		// (record_mocks_dropped.go). A set not judged already names the drop
+		// in its reason too. A set that stopped otherwise (its app exited,
+		// its user stopped it) keeps that status, as a set whose stop drain
+		// failed does, so the run stops past an app that exited; a WARN names
+		// the drop. At the set's end a status other than PASSED or FAILED is
+		// such a stop (resolveTestSetStatus).
+		if d := conf.RecordMocksDropped; d != nil && d.Dropped() && (len(missedTests) > 0 || len(unclaimed) > 0) {
+			why := mocksDroppedWhy(d, missedTests, len(unclaimed))
+			_, stopped := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil)
+			switch {
+			case notJudged != "":
+				notJudged = alsoNotJudged(notJudged, "not judged: "+why)
+				r.logger.Warn(why, zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
+			case !stopped:
+				notJudged = "not judged: " + why
+				r.logger.Error("test-set is not judged: "+why+"; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+					zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
+				testSetStatus = models.TestSetStatusInternalErr
+				r.markNotJudged(testSetID)
+			default:
+				r.logger.Warn(why, zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
+			}
+		}
 		// The set's end had to kill the app it stopped (it had not exited
 		// when the stop's grace ran out): what the app would have done as
 		// it stopped is not known, so neither is the set's verdict.
@@ -6614,6 +6648,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testSetStatus = models.TestSetStatusInternalErr
 			r.markNotJudged(testSetID)
 		}
+	} else if d := conf.RecordMocksDropped; d != nil && d.Dropped() && len(missedTests) > 0 {
+		// With the switch off the verdict is as before, and a WARN names the
+		// drop beside a test's miss: the set's end reads no other call.
+		r.logger.Warn(mocksDroppedWhy(d, missedTests, 0), zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
 	}
 	// With the proven switch off nothing else reads what the application
 	// consumed after the set's last read: the last test's publish made after
@@ -6651,7 +6689,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
-		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))
+		script := utils.NewAppCommand(conf.PostScript)
+		r.logger.Info("Running Post-script", zap.Inline(script), zap.String("test-set", testSetID))
+		utils.LogWholeCommand(r.logger, "script", script)
 		err = r.executeScript(runTestSetCtx, conf.PostScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute post-script: %w", err)

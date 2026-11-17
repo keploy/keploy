@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -937,20 +938,12 @@ func listenPortFor(ctx context.Context, pub publishedPortReader, cmd, containerN
 	return hostPort
 }
 
-// dockerRunMappings reads every -p/--publish of a docker run command.
+// dockerRunMappings reads every -p/--publish of a docker run command, from
+// its own options before the image (engine.Publishes), never a native app's
+// -p or a container's own argument.
 func dockerRunMappings(cmd string) []portMapping {
-	fields := strings.Fields(cmd)
 	var out []portMapping
-	for i := 0; i+1 < len(fields); i++ {
-		spec := ""
-		switch {
-		case fields[i] == "-p" || fields[i] == "--publish":
-			spec = fields[i+1]
-		case strings.HasPrefix(fields[i], "--publish="):
-			spec = strings.TrimPrefix(fields[i], "--publish=")
-		default:
-			continue
-		}
+	for _, spec := range engine.Publishes(cmd) {
 		if m, ok := parsePortMapping(spec, os.LookupEnv); ok {
 			out = append(out, m)
 		}

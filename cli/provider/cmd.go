@@ -1119,12 +1119,14 @@ func resolveCommandKind(logger *zap.Logger, cmd *cobra.Command, command, configu
 			// so a wrapper is supported there (see App.SetupCompose).
 			if (kind == utils.DockerRun || kind == utils.DockerStart) && command != "" &&
 				!mentionsDockerBinary(command) {
+				// The command by its program alone (AppCommand): validate logs
+				// this error at ERROR, and its arguments carry the app's secrets.
 				return "", fmt.Errorf(
 					"--cmd-type %s has to rewrite the command to attach keploy's namespaces, "+
-						"which is only possible on a literal docker command, and %q is not one. "+
+						"which is only possible on a literal docker command, and the %q command is not one. "+
 						"Pass the underlying docker command with -c, or use --cmd-type %s if the "+
 						"wrapper brings up a compose project",
-					explicit, command, utils.DockerCompose)
+					explicit, utils.NewAppCommand(command).Program(), utils.DockerCompose)
 			}
 			return explicit, nil
 		case utils.Empty:

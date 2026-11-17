@@ -55,12 +55,13 @@ func (a *App) composeRunner(ctx context.Context) (composeStack, error) {
 // runner (docker.RegisterComposeStack), scoped to the same project the
 // equivalent `docker compose` invocation would have resolved.
 func (a *App) newLibraryComposeStack(ctx context.Context) (composeStack, error) {
-	projectName, projectDir := composeProjectScope(a.cmd)
+	whole := a.cmd.WholeUnredacted()
+	projectName, projectDir := composeProjectScope(whole)
 	return docker.NewComposeStack(ctx, docker.ComposeStackSpec{
 		Content:     a.composeContent,
 		ProjectName: projectName,
 		WorkingDir:  projectDir,
-		EnvFiles:    composeEnvFiles(a.cmd),
+		EnvFiles:    composeEnvFiles(whole),
 	})
 }
 
@@ -80,12 +81,13 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		return utils.CmdError{Type: utils.Init, Err: err}
 	}
 
-	opts := composeUpSemantics(a.cmd)
-	a.logger.Info("Starting Application :",
-		zap.String("executing_cmd", utils.RedactCommandLine(a.cmd)),
+	opts := composeUpSemantics(a.cmd.WholeUnredacted())
+	// At INFO, the command by its program alone; its project and services,
+	// which its arguments may name, with the whole command at DEBUG.
+	a.logger.Info(utils.StartingApplication, zap.Inline(a.cmd), zap.String("onExit", opts.OnExit.String()))
+	utils.LogWholeCommand(a.logger, "executing_cmd", a.cmd,
 		zap.String("composeProject", runner.ProjectName()),
-		zap.String("exitCodeFrom", opts.ExitCodeFrom),
-		zap.String("onExit", opts.OnExit.String()))
+		zap.String("exitCodeFrom", opts.ExitCodeFrom))
 
 	// Up runs on a context this function owns, NOT the caller's.
 	//

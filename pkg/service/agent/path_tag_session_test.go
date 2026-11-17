@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -62,7 +63,8 @@ func (i *keyedIngress) SetLogKeySession(s *models.LogKeySession) { i.keys = s }
 // path's calls from session to session; and the process's own key, which a
 // line with no session names under, is no session's. The console and the
 // report print the tag each call carries, made where its line was logged, so
-// a new key changes no tag they print.
+// a new key changes no tag they print. The record log names the processes
+// the session's calls come from (starts.Registry) under the same key.
 func TestEachSessionTagsPathsUnderAKeyOfItsOwn(t *testing.T) {
 	a := newClockAgent(t)
 	p := &keyedProxy{workerPool: &workerPool{}}
@@ -76,11 +78,13 @@ func TestEachSessionTagsPathsUnderAKeyOfItsOwn(t *testing.T) {
 	replay := p.last()
 	require.NotNil(t, replay, "the replay's session reached the proxy with no key of its own")
 	require.Same(t, replay, in.keys, "the ingress serves the replay's session under another key")
+	require.Same(t, replay, starts.Default.LogKeySession(), "the record log names the replay's processes under another key")
 	require.Equal(t, tag(replay), tag(replay), "one session gave one path two tags")
 
 	require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{}))
 	next := p.last()
 	require.Same(t, next, in.keys, "the ingress serves the session under another key")
+	require.Same(t, next, starts.Default.LogKeySession(), "the record log names the session's processes under another key")
 	require.NotEqual(t, tag(replay), tag(next), "two replay sessions gave a path one tag")
 
 	_, err := a.GetOutgoing(ctx, models.OutgoingOptions{})
@@ -88,6 +92,7 @@ func TestEachSessionTagsPathsUnderAKeyOfItsOwn(t *testing.T) {
 	record := p.last()
 	require.NotNil(t, record, "the recording reached the proxy with no key of its own")
 	require.Same(t, record, in.keys, "the ingress serves the recording under another key")
+	require.Same(t, record, starts.Default.LogKeySession(), "the record log names the recording's processes under another key")
 	require.NotEqual(t, tag(next), tag(record), "a recording gave a path the tag of the session before it")
 	require.NotEqual(t, tag(replay), tag(record), "a recording gave a path the tag of an earlier session")
 

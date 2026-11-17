@@ -101,7 +101,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		writeReceipt(m.logger, m.config.Path, Receipt{
 			Set:            name,
 			At:             started.UTC().Truncate(time.Second),
-			Command:        m.userCommand,
+			Command:        m.userCommand.WholeUnredacted(),
 			OnMiss:         m.config.Mock.OnMiss,
 			Strict:         m.config.Mock.Strict,
 			ExitCode:       code,
@@ -150,7 +150,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// the report files looked like beforehand is what tells that report from
 	// one an earlier run left behind.
 	workDir, _ := os.Getwd()
-	coverageBefore := report.Snapshot(workDir, m.config.Mock.CoverageReport, m.userCommand)
+	coverageBefore := report.Snapshot(workDir, m.config.Mock.CoverageReport, m.userCommand.WholeUnredacted())
 
 	if provenswitch.On() && !replaysJudged.Load() {
 		return fmt.Errorf("keploy mock replay under %s needs a keploy build that judges each test (keploy enterprise): this one exits with the test command's code, so a test keploy failed after it ended, or a call no test made that got no recorded answer, would pass", provenswitch.Env)
@@ -184,9 +184,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	m.logger.Info("Replaying mocks for your test command",
-		zap.String("mock-set", name),
-		zap.String("command", utils.RedactCommandLine(m.userCommand)),
-		zap.String("on-miss", string(policy)))
+		zap.String("mock-set", name), zap.Inline(m.userCommand), zap.String("on-miss", string(policy)))
+	utils.LogWholeCommand(m.logger, "command", m.userCommand)
 
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
@@ -351,7 +350,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if loaded == 0 {
 		m.logger.Warn("the mock set is empty; the runner will hit a miss on every dependency call",
 			zap.String("mock-set", name),
-			zap.String("next_step", fmt.Sprintf("record it first with: keploy mock record -c %q --name %s", utils.RedactCommandLine(m.userCommand), name)))
+			zap.String("next_step", "record it first with: keploy mock record -c <the same test command> --name "+name))
 	}
 	if err := m.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
 		utils.LogError(m.logger, err, "failed to store mocks on the agent")
@@ -1033,7 +1032,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	writeReceipt(m.logger, m.config.Path, Receipt{
 		Set:             name,
 		At:              started.UTC().Truncate(time.Second),
-		Command:         m.userCommand,
+		Command:         m.userCommand.WholeUnredacted(),
 		OnMiss:          string(policy),
 		Strict:          m.config.Mock.Strict,
 		ExitCode:        utils.ErrCode,
@@ -1092,7 +1091,7 @@ func (m *mockService) readCoverage(dir string, before report.Before, isolated bo
 	if dir == "" {
 		return nil, "could not resolve the directory the test command ran in"
 	}
-	path, why := report.Find(dir, m.config.Mock.CoverageReport, m.userCommand, before)
+	path, why := report.Find(dir, m.config.Mock.CoverageReport, m.userCommand.WholeUnredacted(), before)
 	if path == "" {
 		m.logger.Debug("no coverage report for this replay", zap.String("reason", why))
 		return nil, why
@@ -3066,6 +3065,17 @@ func missNextStep(miss models.UnmatchedCall) string {
 	return miss.NextSteps
 }
 
+// wholeCall is miss's call and next step as the console and MissesFile name
+// them: whole. A miss the agent charged to a test holds them in its Whole
+// (models.UnmatchedCall.Charged), its own fields shaped as evidence keeps
+// them; every other miss, read from the proxy, holds them in its own.
+func wholeCall(miss models.UnmatchedCall) (call, next string) {
+	if w := miss.Whole; w != nil {
+		miss.ActualSummary, miss.Operation, miss.NextSteps = w.Call, "", w.NextStep
+	}
+	return miss.Named(), missNextStep(miss)
+}
+
 // missConsoleMax is how many calls no mock answered keploy mock replay's
 // console names (sayMisses); MissesFile names every one.
 const missConsoleMax = 20
@@ -3080,6 +3090,17 @@ type missedCall struct {
 	HostTag     string `yaml:"host_tag,omitempty"`
 	Count       int    `yaml:"count"`
 	NextStep    string `yaml:"next_step"`
+	// OtherNextSteps is every other next step keploy gave the call in this
+	// replay, whole, each once, in the order first given: a call made again
+	// can be told another (one that quotes how long after a recording's
+	// answer it came, say). MissesFile names each, so every miss's next
+	// step is there whole; the console names NextStep alone.
+	OtherNextSteps []string `yaml:"other_next_steps,omitempty"`
+}
+
+// missedCallKey is what makes two misses one call (missedCalls).
+type missedCallKey struct {
+	Protocol, Call, PathTag, Destination, HostTag string
 }
 
 // missedCalls is misses, each call once, in the order the replay first made
@@ -3089,20 +3110,25 @@ type missedCall struct {
 // so.
 func missedCalls(misses []models.UnmatchedCall) []missedCall {
 	var out []missedCall
-	at := map[missedCall]int{}
+	at := map[missedCallKey]int{}
 	for _, miss := range misses {
 		if miss.MatchPhase == models.MatchPhaseNoRequest {
 			continue
 		}
-		key := missedCall{Protocol: miss.Protocol, Call: miss.Named(), PathTag: miss.PathTag, Destination: miss.Destination, HostTag: miss.HostTag}
+		call, next := wholeCall(miss)
+		next = strings.ReplaceAll(next, "\n", " ")
+		key := missedCallKey{Protocol: miss.Protocol, Call: call, PathTag: miss.PathTag, Destination: miss.Destination, HostTag: miss.HostTag}
 		if i, ok := at[key]; ok {
-			out[i].Count++
+			c := &out[i]
+			c.Count++
+			if next != c.NextStep && !slices.Contains(c.OtherNextSteps, next) {
+				c.OtherNextSteps = append(c.OtherNextSteps, next)
+			}
 			continue
 		}
 		at[key] = len(out)
-		c := key
-		c.Count, c.NextStep = 1, strings.ReplaceAll(missNextStep(miss), "\n", " ")
-		out = append(out, c)
+		out = append(out, missedCall{Protocol: key.Protocol, Call: key.Call, PathTag: key.PathTag, Destination: key.Destination, HostTag: key.HostTag,
+			Count: 1, NextStep: next})
 	}
 	return out
 }

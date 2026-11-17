@@ -28,7 +28,10 @@ import (
 // XNU's sender sends what it held back for a small window once its persist
 // timer, about 5 s, fires; the zero window answers that segment.) The kernel
 // says nothing when the window closes, so its table is looked at again every
-// 20 ms until it has.
+// 20 ms until it has. A write that fails ENOBUFS fails the row naming why:
+// macOS's network buffer memory ran out (as when many such rows run at once;
+// netstat -m counts the requests it denied), which says nothing of the hold
+// the row reads.
 func fill(t *testing.T, app, proxy *net.TCPConn) uint64 {
 	t.Helper()
 	if err := proxy.SetReadBuffer(16 << 10); err != nil {
@@ -58,6 +61,8 @@ func fill(t *testing.T, app, proxy *net.TCPConn) uint64 {
 				return total
 			}
 			time.Sleep(20 * time.Millisecond)
+		case errors.Is(werr, unix.ENOBUFS):
+			t.Fatalf("a write to the application's socket after %d bytes: %v: macOS's network buffer memory is exhausted (netstat -m counts the requests it denied), so the row cannot fill the send buffer", total, werr)
 		case werr != nil:
 			t.Fatal(werr)
 		default:
