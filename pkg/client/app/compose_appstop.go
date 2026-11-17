@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -227,6 +229,9 @@ func (h composeHalt) Error() string {
 			msg += fmt.Sprintf("; the run's exit code is that of service %q, %d", h.codeFrom, h.exitCode)
 		}
 		return msg
+	}
+	if h.oomKilled {
+		return fmt.Sprintf("the application's container exited with code %d (out of memory: docker's memory limit for it was reached), and keploy had not stopped it", h.exitCode)
 	}
 	return fmt.Sprintf("the application's container exited with code %d, and keploy had not stopped it", h.exitCode)
 }
@@ -454,6 +459,21 @@ func (a *App) isComposeAgentEvent(m events.Message) bool {
 // for its own memory, and with no kill of it in the daemon's log
 // (composeHaltKilledWithItsAgent), is read as the agent's end once the
 // agent's container is down (composeAgentNamesTheHalt).
+//
+// AN APP KILLED FROM OUTSIDE DOCKER ENDS THE RUN AT ONCE TOO.
+//
+// The agent of such an app stays up, and keploy waited for docker to say
+// it was down for utils.StopStallBudget (60 s on Linux) of its runnable
+// time before the app's own halt stood. The agent's health check now tells
+// the two apart as soon as it is asked: the kernel kills the namespace's other
+// processes only once every thread of its first process is exiting
+// (zap_pid_ns_processes, from the exit of its last thread), and a thread
+// that is exiting never runs the agent's code again. So an answer of the
+// agent after the app's die proves the agent was not what killed the app,
+// and the app's halt stands at once; an agent that is exiting answers
+// nothing, and docker says its container is down within moments. The stall
+// bound is left only as the guard on a daemon and an agent that both say
+// nothing at all.
 
 // composeAgentDied reports whether m, a die of keploy's agent's container,
 // ends the run, keeping its halt if so: keploy had not begun to stop the
@@ -523,13 +543,19 @@ func (a *App) composeHaltKilledWithItsAgent(h *composeHalt) bool {
 // namespace (composeHaltKilledWithItsAgent) the agent's, with the agent's
 // exit code, once docker says the agent's container is down: keploy reads it
 // again at a walking pace until docker says so, a kill of the app comes to
-// light in the daemon's log, ctx ends, or utils.StopStallBudget of keploy's
-// runnable time passes with the agent up. The app was then killed from
-// outside docker (a kill of its process on the host), and its halt stands.
+// light in the daemon's log, or ctx ends. An agent that answers its health
+// check meanwhile (composeAgentAnswered) is alive: the app was killed from
+// outside docker (a kill of its process on the host), and its halt stands,
+// at once. utils.StopStallBudget of keploy's runnable time with neither the
+// daemon saying the agent is down nor the agent answering leaves the app's
+// halt standing too: a guard on a daemon and an agent that both hang.
 func (a *App) composeAgentNamesTheHalt(ctx context.Context) {
-	if a.keployContainer == "" {
+	if a.keployContainer == "" || !a.composeHaltKilledWithItsAgent(a.composeApp.halted.Load()) {
 		return
 	}
+	actx, stopAsking := context.WithCancel(ctx)
+	defer stopAsking()
+	answered := a.composeAgentAnswered(actx)
 	meter := stall.NewMeter(nil, utils.StopStallBudget)
 	defer meter.Stop()
 	for a.composeHaltKilledWithItsAgent(a.composeApp.halted.Load()) {
@@ -551,9 +577,61 @@ func (a *App) composeAgentNamesTheHalt(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-answered:
+			a.logger.Info("the application's container was killed while keploy's agent runs and answers: something outside docker killed it, and its exit ends the run",
+				zap.String("container", a.container), zap.String("agent", a.keployContainer))
+			return
 		case <-time.After(composeDaemonAskPace):
 		}
 	}
+}
+
+// composeAgentAnswered is closed once keploy's agent answers its health
+// check (composeAgentAnswers), asked at a walking pace until it does or ctx
+// ends. It is asked apart from the daemon's reads, so a request that hangs
+// (an address that no longer leads anywhere) holds none of them.
+func (a *App) composeAgentAnswered(ctx context.Context) <-chan struct{} {
+	answered := make(chan struct{})
+	go func() {
+		for ctx.Err() == nil {
+			if a.composeAgentAnswers(ctx) {
+				close(answered)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(composeDaemonAskPace):
+			}
+		}
+	}()
+	return answered
+}
+
+// composeAgentProbe asks keploy's agent for its health: with no proxy (the
+// agent is this host's, or a container's of keploy's own pod) and no kept
+// connection, so each answer is a fresh one of the agent's process.
+var composeAgentProbe = &http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+
+// composeAgentAnswers reports whether keploy's agent answers its health
+// check (AgentURI/health, which takes no token) with 200: its process runs.
+// An agent keploy has no address for answers nothing. The request's error
+// is not logged: it holds the URI, which may hold a password.
+func (a *App) composeAgentAnswers(ctx context.Context) bool {
+	if a.opts.AgentURI == "" {
+		return false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(a.opts.AgentURI, "/")+"/health", nil)
+	if err != nil {
+		return false
+	}
+	res, err := composeAgentProbe.Do(req)
+	if err != nil {
+		return false
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4<<10))
+	_ = res.Body.Close()
+	return res.StatusCode == http.StatusOK
 }
 
 // composeAppDied reports whether m, a die event of a container of the app's

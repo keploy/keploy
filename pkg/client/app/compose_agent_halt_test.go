@@ -204,7 +204,10 @@ func TestAnAgentExitKeployAskedForOrBeforeTheAppStartedEndsNothing(t *testing.T)
 // it has none), however many reads that takes; an app killed through docker,
 // out of memory, or with a code of its own keeps its halt, at once, as does
 // a halt that is the agent's already, or a run with no agent known; and an
-// agent that stays up for the stall bound leaves the app's halt standing.
+// agent that stays up, answering nothing (no address known for it), for the
+// stall bound leaves the app's halt standing: the guard on a daemon and an
+// agent that both say nothing. An agent that answers is
+// TestAnAppKilledFromOutsideDockerKeepsItsHaltAtOnce's.
 func TestAnAppKilledWithItsAgentsNamespaceNamesTheAgent(t *testing.T) {
 	stallBudget(t, 300*time.Millisecond)
 	started := time.Now().Add(-time.Minute)
@@ -233,7 +236,7 @@ func TestAnAppKilledWithItsAgentsNamespaceNamesTheAgent(t *testing.T) {
 		"the agent's halt already":   {halt: &composeHalt{exitCode: 137, agent: haltAgent}},
 		"no halt":                    {},
 		"no agent known":             {halt: &zap137, noAgent: true},
-		"the agent stays up":         {halt: &zap137, agentUp: true},
+		"the agent stays up, mute":   {halt: &zap137, agentUp: true},
 	} {
 		d := &agentHaltDocker{composeDocker: newComposeDocker(false, true), app: exitedState(137, started),
 			agent: exitedState(139, started), downAfter: tc.downAfter, downCode: 139, agentGone: tc.gone}
