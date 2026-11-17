@@ -162,7 +162,7 @@ func TestOriginURL(t *testing.T) {
 		{"an escaped backslash, then a continuation", "[remote \"origin\"]\n\turl = /srv/orders-api\\\\\\\n-b\n", `/srv/orders-api\-b`},
 		{"a comment after a value ending in a backslash", "[remote \"origin\"]\n\tfetch = x # C:\\\n[remote \"upstream\"]\n\turl = https://github.com/acme/up.git\n", ""},
 		{"a quoted # is no comment, so its backslash continues", "[remote \"origin\"]\n\turl = \"https://github.com/acme/a#\\\nb.git\"\n", "https://github.com/acme/a#b.git"},
-		{"a ; comment after a url ending in a backslash", "[remote \"origin\"]\n\turl = https://github.com/acme/a.git ; C:\\\n\turl = https://github.com/acme/b.git\n", "https://github.com/acme/a.git"},
+		{"a ; comment after a value ending in a backslash", "[remote \"origin\"]\n\tfetch = x ; C:\\\n[remote \"upstream\"]\n\turl = https://github.com/acme/up.git\n", ""},
 		{"a ; comment ending in a backslash", "; see C:\\\n[remote \"origin\"]\n\turl = https://github.com/acme/a.git\n", "https://github.com/acme/a.git"},
 		{"a header with no closing quote is not git's", "[remote \"origin]\n\turl = https://github.com/acme/a.git\n", ""},
 		{"a header with no opening quote is not git's", "[remote origin\"]\n\turl = https://github.com/acme/a.git\n", ""},
@@ -365,6 +365,7 @@ func TestGitConfigValue(t *testing.T) {
 		`a\t`:                             "a\t",
 		`a\ `:                             "a ",
 		"a \\":                            "a",
+		"a b c":                           "a b c",
 	} {
 		if got := gitConfigValue(in); got != want {
 			t.Errorf("gitConfigValue(%q) = %q, want %q", in, got, want)
