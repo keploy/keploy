@@ -52,11 +52,15 @@ func TestWindowsWrittenIsTheCountFromTheAccept(t *testing.T) {
 	written(t, s, 19, true, "a running Write's bytes sent in part")
 	c.running, c.unsure = 0, 5
 	written(t, s, 19, true, "a Write that failed")
-	out, retrans = 26, 3
+	// 19 bytes can have been written through the count: the 4 the accept had
+	// sent once, the 10 said and the 5 of the failed Write. The window closes
+	// with 18 of them sent; its probe sends the 19th and then that byte again
+	// three times (BytesOut 22, BytesRetrans 3), so 19 were sent once.
+	out, retrans = 22, 3
 	written(t, s, 19, true, "a closed window's probe sent again three times")
 	out, retrans, fast = 40, 3, 1
 	written(t, s, 19, true, "an answer after a fast retransmit")
-	out, retrans, fast = 27, 3, 0
+	out, retrans, fast = 23, 3, 0
 	written(t, s, 0, false, "more bytes sent once than written through the count")
 	out, retrans = 20, 0
 	written(t, s, 0, false, "a count once gone around, nothing sent again")
