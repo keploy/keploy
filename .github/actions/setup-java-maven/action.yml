@@ -1,0 +1,43 @@
+name: setup-java-maven
+description: "Set up a Temurin JDK and cache ~/.m2/repository under a key that names the Maven version the build runs"
+
+# In place of actions/setup-java's own `cache: maven`, whose key (OS, arch,
+# pom hash) stays the same when the runner image changes its Maven. A local
+# repository is only of use to a Maven that tracks its files the way the one
+# that filled it did, so a cache saved by one Maven and restored for another
+# can be all "present, but unavailable": every file is fetched from Maven
+# Central again, on every run, since a cache entry is never replaced.
+# maven-cache-key.sh says how, and its tests run in the lint workflow.
+inputs:
+  java-version:
+    required: true
+    description: "The JDK, as actions/setup-java's java-version takes it"
+  cache-dependency-path:
+    required: true
+    description: "The pom.xml files the build reads its dependencies from, one per line, relative to the workspace"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.java-version }}
+
+    - name: Maven repository cache key
+      id: key
+      shell: bash
+      env:
+        MAVEN_CACHE_JAVA_VERSION: ${{ inputs.java-version }}
+        MAVEN_CACHE_DEPENDENCY_PATH: ${{ inputs.cache-dependency-path }}
+      run: |
+        key=$(bash "$GITHUB_ACTION_PATH/maven-cache-key.sh")
+        echo "Maven repository cache key: $key"
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+
+    # Saved at the end of a job that passed, under a key that missed, as
+    # setup-java's was.
+    - uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.key.outputs.key }}

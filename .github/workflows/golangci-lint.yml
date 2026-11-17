@@ -58,6 +58,13 @@ jobs:
       - name: Check artifact downloads
         run: bash ./.github/workflows/test_workflow_scripts/check-artifact-downloads.sh
 
+      # setup-java-maven caches ~/.m2/repository under a key that names the
+      # Maven version the build runs, and no workflow uses setup-java's own
+      # Maven cache, whose key does not (maven-cache-key.sh says why). Needs
+      # no Go; its last case asks the runner's own Maven.
+      - name: Test the Maven repository cache key
+        run: bash ./.github/actions/setup-java-maven/maven-cache-key.tests.sh
+
       # The flag that limits the lint step to issues on the lines this event
       # adds or changes, from the checkout's history (the script says why).
       # It needs no Go, so a checkout it cannot read fails here in seconds.
