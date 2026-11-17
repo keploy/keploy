@@ -202,14 +202,10 @@ func composeUserAbort(cmd string, compose *docker.Compose) composeAbortRule {
 var composeWaitConditions = map[string]bool{"service_completed_successfully": true, "service_healthy": true}
 
 // composeWaitingDependents are, by service, the services of compose that
-// depend on it with a condition compose's up waits on (composeWaitConditions),
-// keploy's agent's service aside.
+// depend on it with a condition compose's up waits on (composeWaitConditions).
 func composeWaitingDependents(compose *docker.Compose) map[string][]string {
 	by := map[string][]string{}
 	for _, name := range composeServiceNames(compose) {
-		if name == composeAgentServiceKey {
-			continue
-		}
 		on := composeServiceField(composeServiceNode(compose, name), "depends_on")
 		if on == nil || on.Kind != yaml.MappingNode {
 			continue
