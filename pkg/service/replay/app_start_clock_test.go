@@ -121,11 +121,16 @@ func TestAComposeSetTellsTheAgentOnlyAnAppStartedAnew(t *testing.T) {
 		name    string
 		stopErr error
 		unread  bool
-		want    int
+		// runsOn1 and runsOn2: the stop before the first, or the second, set
+		// did not end its application (lossAppRunsOn).
+		runsOn1, runsOn2 bool
+		want             int
 	}{
-		{"started anew", nil, false, 2},
-		{"found running", errors.New("stop failed"), false, 1},
-		{"not read", nil, true, 1},
+		{"started anew", nil, false, false, false, 2},
+		{"found running", errors.New("stop failed"), false, false, false, 1},
+		{"not read", nil, true, false, false, 1},
+		{"the stack's first app runs on", nil, false, true, false, 1},
+		{"the kept stack's app runs on", nil, false, false, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &composeInstr{stopErr: tc.stopErr}
@@ -133,8 +138,12 @@ func TestAComposeSetTellsTheAgentOnlyAnAppStartedAnew(t *testing.T) {
 			recordedAt(h, setLater, setEarlier)
 			n := &appNotices{}
 			h.replayer.instrumentation = &noticedCompose{composeInstr: c, appNotices: n}
+			h.replayer.lossAppRunsOn = tc.runsOn1
 			h.runServing(t) // the stack's first set starts its app
 			c.unread = tc.unread
+			if tc.runsOn2 {
+				h.replayer.lossAppRunsOn = true
+			}
 			h.runServing(t) // the kept stack's app starts again, or not anew
 			got := n.notices()
 			if len(got) != tc.want {
@@ -165,6 +174,20 @@ func TestANoticeTheAgentCannotTakeIsSaid(t *testing.T) {
 	r.tellAppStartsAnew(ctx, "test-set-0", nil)
 	if n := len(logs.FilterMessageSnippet("could not be told").All()); n != 1 {
 		t.Fatalf("%d warnings after a stopped run's notice, want still 1", n)
+	}
+}
+
+// A notice the agent takes is not said: it carries the set's earliest case.
+func TestANoticeTheAgentTakesIsNotSaid(t *testing.T) {
+	provenOn(t, true)
+	core, logs := observer.New(zapcore.DebugLevel)
+	n := &appNotices{}
+	r := &Replayer{logger: zap.New(core), instrumentation: &noticedInstr{prInstr: &prInstr{}, appNotices: n}}
+	tc := &models.TestCase{Kind: models.HTTP}
+	tc.HTTPReq.Timestamp = setEarlier
+	r.tellAppStartsAnew(context.Background(), "test-set-0", []*models.TestCase{tc})
+	if got := n.notices(); len(got) != 1 || !got[0].first.Equal(setEarlier) || logs.Len() != 0 {
+		t.Fatalf("notices %v, logs %v; want one at %v and nothing said", got, logs.All(), setEarlier)
 	}
 }
 
