@@ -20,7 +20,7 @@ import (
 // before it. A connection CLOSED with none in flight while the proxy sent no
 // FIN was reset too: nothing else closes ESTABLISHED or CLOSE_WAIT. A timeout
 // closes one as well, and keeps no error either, so a socket that
-// retransmitted a byte or had a timeout episode says nothing.
+// retransmitted a byte or had a timeout episode tells no reset (unresent).
 
 // The TCP_INFO_v0 fields read, at their offsets in mstcpip.h's struct, and the
 // TCPSTATE values looked for.
@@ -29,6 +29,7 @@ const (
 	wtiBytesInFlight   = 28 // ULONG BytesInFlight
 	wtiBytesOut        = 48 // ULONG64 BytesOut
 	wtiBytesRetrans    = 68 // ULONG BytesRetrans
+	wtiFastRetrans     = 72 // ULONG FastRetrans
 	wtiTimeoutEpisodes = 80 // ULONG TimeoutEpisodes
 	// wtcpInfoNeeded is the end of the last field read: a shorter answer
 	// (an older or changed struct) is not read.
@@ -44,11 +45,12 @@ const (
 
 // winTCPInfo is what is read of a TCP_INFO_v0.
 type winTCPInfo struct {
-	state    uint32
-	inFlight uint32 // bytes sent and not acknowledged
-	out      uint64 // bytes sent
-	retrans  uint32 // bytes sent again
-	timeouts uint32 // retransmission timeout episodes
+	state       uint32
+	inFlight    uint32 // bytes sent and not acknowledged
+	out         uint64 // bytes sent, a byte sent again counted again
+	retrans     uint32 // bytes sent again
+	fastRetrans uint32 // fast retransmits
+	timeouts    uint32 // retransmission timeout episodes
 }
 
 // readWinTCPInfo reads the fields of a TCP_INFO_v0 answer b; false when b is
@@ -58,41 +60,72 @@ func readWinTCPInfo(b []byte) (winTCPInfo, bool) {
 		return winTCPInfo{}, false
 	}
 	return winTCPInfo{
-		state:    binary.LittleEndian.Uint32(b[wtiState:]),
-		inFlight: binary.LittleEndian.Uint32(b[wtiBytesInFlight:]),
-		out:      binary.LittleEndian.Uint64(b[wtiBytesOut:]),
-		retrans:  binary.LittleEndian.Uint32(b[wtiBytesRetrans:]),
-		timeouts: binary.LittleEndian.Uint32(b[wtiTimeoutEpisodes:]),
+		state:       binary.LittleEndian.Uint32(b[wtiState:]),
+		inFlight:    binary.LittleEndian.Uint32(b[wtiBytesInFlight:]),
+		out:         binary.LittleEndian.Uint64(b[wtiBytesOut:]),
+		retrans:     binary.LittleEndian.Uint32(b[wtiBytesRetrans:]),
+		fastRetrans: binary.LittleEndian.Uint32(b[wtiFastRetrans:]),
+		timeouts:    binary.LittleEndian.Uint32(b[wtiTimeoutEpisodes:]),
 	}, true
 }
 
-// counted reports whether the counts say what was sent and acknowledged:
-// nothing was sent twice and no timeout ran. With a retransmission it is not
-// documented whether BytesOut counts a byte again, and a connection a timeout
-// closed must not be read as reset.
+// counted reports whether the counts say what was sent and acknowledged: no
+// fast retransmit and no retransmission timeout ran on the connection. Inside
+// that fence the bytes resent are a closed receive window's probes: the
+// first probe of a closed window is a new byte, and each later one sends that
+// byte again, which adds one to BytesOut and one to BytesRetrans (measured on
+// Windows 11, loopback, windows closed up to 8 s: the first probe 0.3-0.7 s
+// in, its resends at about 1-1.5, 2.5 and 5 s, FastRetrans and
+// TimeoutEpisodes 0 throughout, and BytesOut less BytesRetrans and
+// BytesInFlight equal to the bytes the client had acknowledged, before its
+// reset and after). So the bytes sent once are BytesOut less BytesRetrans
+// (sentOnce). A tail-loss probe's resend is read as a window probe's is,
+// BytesOut and BytesRetrans each counting the bytes it sends again; the loss
+// recovery that can follow it, a fast retransmit or a timeout, trips the
+// fence, and from then on the fallback holds: the counts say nothing, and
+// what the destination sends a closed client is teed as it is written, as
+// before.
 func (i winTCPInfo) counted() bool {
+	return i.fastRetrans == 0 && i.timeouts == 0
+}
+
+// unresent reports whether nothing was sent again and no timeout ran: the
+// only answers resetCode reads a reset from. A connection that Windows' stack
+// gave up on closes with a byte in flight and keeps no error, as one reset
+// does, and the stack resends before it gives up.
+func (i winTCPInfo) unresent() bool {
 	return i.retrans == 0 && i.timeouts == 0
 }
 
+// sentOnce is the bytes the socket has sent, each counted once: BytesOut less
+// BytesRetrans (counted); false when the counts cannot say.
+func (i winTCPInfo) sentOnce() (uint64, bool) {
+	if !i.counted() || i.out < uint64(i.retrans) {
+		return 0, false
+	}
+	return i.out - uint64(i.retrans), true
+}
+
 // acked is how many of the bytes sent the client's stack has acknowledged:
-// BytesOut less BytesInFlight; false when the counts cannot say. Once the
-// proxy has sent its FIN (finSent), one byte in flight is taken for it, since
-// TCP_INFO_v0 does not say whether BytesInFlight counts the FIN's sequence
-// number: where it does not, that counts one byte acknowledged that is not,
-// which can only have a chunk teed as before, never refuse one the client
-// took (chunkVerdict).
+// those sent once less BytesInFlight; false when the counts cannot say. Once
+// the proxy has sent its FIN (finSent), one byte in flight is taken for it,
+// since TCP_INFO_v0 does not say whether BytesInFlight counts the FIN's
+// sequence number: where it does not, that counts one byte acknowledged that
+// is not, which can only have a chunk teed as before, never refuse one the
+// client took (chunkVerdict).
 func (i winTCPInfo) acked(finSent bool) (uint64, bool) {
-	if !i.counted() {
+	sent, ok := i.sentOnce()
+	if !ok {
 		return 0, false
 	}
 	inFlight := uint64(i.inFlight)
 	if finSent && inFlight > 0 {
 		inFlight--
 	}
-	if i.out < inFlight {
+	if sent < inFlight {
 		return 0, false
 	}
-	return i.out - inFlight, true
+	return sent - inFlight, true
 }
 
 // look is what the socket says of its client, as Linux's TCP_INFO says it
@@ -113,7 +146,8 @@ func (i winTCPInfo) look(finSent bool) clientLook {
 }
 
 // sent is what written says on a Windows socket with no count from its accept
-// (client_count_accept.go): the bytes the socket has sent. Windows has no
+// (client_count_accept.go): the bytes the socket has sent, each once
+// (sentOnce). Windows has no
 // count of what its send buffer still holds (no SIOCOUTQ, and TCP_INFO
 // counts a byte once it is sent), so those bytes are left out. A chunk set
 // aside is then judged from no more bytes than were written before it, which
@@ -122,12 +156,13 @@ func (i winTCPInfo) look(finSent bool) clientLook {
 // (clientAnswered) can end before the last ones are sent, the socket then read
 // as it is.
 func (i winTCPInfo) sent() (uint64, bool) {
-	return i.out, i.counted()
+	return i.sentOnce()
 }
 
 // resetCode is the error Linux's socket keeps for the reset that closed this
 // connection, where Windows keeps none (see above): 0 when it is not closed,
-// the counts cannot say, or it may have closed cleanly (none in flight after
+// a byte was sent again or a timeout ran (unresent), or it may have closed
+// cleanly (none in flight after
 // the proxy's FIN: the client acknowledged that FIN, or reset with every byte
 // acknowledged). finRead: the relay read the client's FIN; finSent: the proxy
 // sent its own TCP FIN. The code is the one Linux's tcp_reset keeps: EPIPE in
@@ -135,7 +170,7 @@ func (i winTCPInfo) sent() (uint64, bool) {
 // other state.
 func (i winTCPInfo) resetCode(finRead, finSent bool) syscall.Errno {
 	switch {
-	case i.state != wtcpClosed, !i.counted():
+	case i.state != wtcpClosed, !i.unresent():
 		return 0
 	case i.inFlight == 0 && finSent:
 		return 0

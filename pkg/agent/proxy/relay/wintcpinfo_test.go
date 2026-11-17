@@ -8,18 +8,25 @@ import (
 	"testing"
 )
 
-// winInfo is a TCP_INFO_v0 answer of size bytes holding these counts, with
-// every byte that no field read covers set to 0xFF.
+// winInfo is a TCP_INFO_v0 answer of size bytes holding these counts and no
+// fast retransmit (winAnswer).
 func winInfo(size int, state, inFlight uint32, out uint64, retrans, timeouts uint32) []byte {
+	return winAnswer(size, winTCPInfo{state: state, inFlight: inFlight, out: out, retrans: retrans, timeouts: timeouts})
+}
+
+// winAnswer is a TCP_INFO_v0 answer of size bytes holding i's counts, with
+// every byte that no field read covers set to 0xFF.
+func winAnswer(size int, i winTCPInfo) []byte {
 	b := make([]byte, wtcpInfoSize)
-	for i := range b {
-		b[i] = 0xFF
+	for n := range b {
+		b[n] = 0xFF
 	}
-	binary.LittleEndian.PutUint32(b[wtiState:], state)
-	binary.LittleEndian.PutUint32(b[wtiBytesInFlight:], inFlight)
-	binary.LittleEndian.PutUint64(b[wtiBytesOut:], out)
-	binary.LittleEndian.PutUint32(b[wtiBytesRetrans:], retrans)
-	binary.LittleEndian.PutUint32(b[wtiTimeoutEpisodes:], timeouts)
+	binary.LittleEndian.PutUint32(b[wtiState:], i.state)
+	binary.LittleEndian.PutUint32(b[wtiBytesInFlight:], i.inFlight)
+	binary.LittleEndian.PutUint64(b[wtiBytesOut:], i.out)
+	binary.LittleEndian.PutUint32(b[wtiBytesRetrans:], i.retrans)
+	binary.LittleEndian.PutUint32(b[wtiFastRetrans:], i.fastRetrans)
+	binary.LittleEndian.PutUint32(b[wtiTimeoutEpisodes:], i.timeouts)
 	return b[:size]
 }
 
@@ -41,9 +48,9 @@ func readSafely(t *testing.T, b []byte) (info winTCPInfo, ok bool) {
 // answers shorter is not read.
 func TestAWindowsTCPInfoIsReadOnlyWhenItHoldsEveryFieldRead(t *testing.T) {
 	t.Parallel()
-	want := winTCPInfo{state: wtcpCloseWait, inFlight: 0x0102, out: 0x0a0b0c0d0e0f, retrans: 0x0304, timeouts: 0x0506}
+	want := winTCPInfo{state: wtcpCloseWait, inFlight: 0x0102, out: 0x0a0b0c0d0e0f, retrans: 0x0304, fastRetrans: 0x0708, timeouts: 0x0506}
 	for _, size := range []int{wtcpInfoSize, wtcpInfoNeeded} {
-		got, ok := readSafely(t, winInfo(size, want.state, want.inFlight, want.out, want.retrans, want.timeouts))
+		got, ok := readSafely(t, winAnswer(size, want))
 		if !ok || got != want {
 			t.Fatalf("a %d-byte answer read as %+v, %v, want %+v", size, got, ok, want)
 		}
@@ -78,7 +85,10 @@ func TestAWindowsSocketsLookIsItsStateAndTheBytesAcknowledged(t *testing.T) {
 		{"none in flight after the FIN", winTCPInfo{state: wtcpClosed, out: 10}, true, closed(10), 10, true},
 		{"every byte sent in flight", winTCPInfo{state: 4, out: 4, inFlight: 4}, false, open(0), 4, true},
 		{"more in flight than sent", winTCPInfo{state: wtcpClosed, out: 3, inFlight: 4}, false, clientLook{said: clientUnknown}, 3, true},
-		{"a byte sent again", winTCPInfo{state: wtcpClosed, out: 10, inFlight: 4, retrans: 1}, false, clientLook{said: clientUnknown}, 0, false},
+		{"a byte sent again", winTCPInfo{state: wtcpClosed, out: 10, inFlight: 4, retrans: 1}, false, closed(5), 9, true},
+		{"more in flight than sent once", winTCPInfo{state: wtcpClosed, out: 10, inFlight: 8, retrans: 3}, false, clientLook{said: clientUnknown}, 7, true},
+		{"more sent again than sent", winTCPInfo{state: wtcpClosed, out: 3, retrans: 4}, false, clientLook{said: clientUnknown}, 0, false},
+		{"a fast retransmit", winTCPInfo{state: wtcpClosed, out: 10, inFlight: 4, retrans: 1, fastRetrans: 1}, false, clientLook{said: clientUnknown}, 0, false},
 		{"a timeout", winTCPInfo{state: wtcpClosed, out: 10, inFlight: 4, timeouts: 1}, false, clientLook{said: clientUnknown}, 0, false},
 	} {
 		if got := row.info.look(row.finSent); got != row.want {
@@ -86,6 +96,61 @@ func TestAWindowsSocketsLookIsItsStateAndTheBytesAcknowledged(t *testing.T) {
 		}
 		if n, ok := row.info.sent(); ok != row.sentOK || ok && n != row.wantSent {
 			t.Errorf("%s: sent = %d, %v, want %d, %v", row.name, n, ok, row.wantSent, row.sentOK)
+		}
+	}
+}
+
+// A client whose receive window stays closed for 5 s and more: the proxy's
+// socket probes the window with one new byte, then resends that byte about 1,
+// 2.5 and 5 s in, each resend counted in BytesOut and in BytesRetrans with no
+// fast retransmit and no timeout (the counts of a Windows 11 loopback run, a
+// 12288-byte window: the client acknowledged 12288 bytes and never more). The
+// socket still says what the client took, each probe's resend counted once,
+// and once the client has reset, the chunk the destination sent after what
+// it took is refused, not teed; one it took part of is taken. A fast
+// retransmit or a timeout in the connection's life leaves the counts unread,
+// and the chunk teed, as before.
+func TestAWindowsClientWhoseWindowStaysClosedHasWhatItNeverTookRefused(t *testing.T) {
+	t.Parallel()
+	const took = 12288
+	probes := []struct {
+		name  string
+		state uint32
+		out   uint64
+		retr  uint32
+	}{
+		{"the window just closed", 4, took, 0},
+		{"the first probe out", 4, took + 1, 0},
+		{"its first resend", 4, took + 2, 1},
+		{"its resend 2.5 s in", 4, took + 3, 2},
+		{"its resend 5 s in", 4, took + 4, 3},
+		{"the client reset after it", wtcpClosed, took + 4, 3},
+	}
+	for _, p := range probes {
+		info := winTCPInfo{state: p.state, out: p.out, retrans: p.retr, inFlight: uint32(p.out - uint64(p.retr) - took)}
+		l := info.look(false)
+		if l.acked != took || l.said == clientUnknown {
+			t.Fatalf("%s: look = %+v, want the %d bytes the client acknowledged", p.name, l, took)
+		}
+		if n, ok := info.sent(); !ok || n != p.out-uint64(p.retr) {
+			t.Fatalf("%s: sent = %d, %v, want %d", p.name, n, ok, p.out-uint64(p.retr))
+		}
+		if p.state != wtcpClosed {
+			continue
+		}
+		if v := chunkVerdict(l, took, false); v != verdictRefused {
+			t.Errorf("%s: the chunk after what the client took is %v, want refused", p.name, v)
+		}
+		if v := chunkVerdict(l, took-1, false); v != verdictTaken {
+			t.Errorf("%s: the chunk the client took a byte of is %v, want taken", p.name, v)
+		}
+		for _, fenced := range []winTCPInfo{
+			{state: info.state, out: info.out, retrans: info.retrans, inFlight: info.inFlight, fastRetrans: 1},
+			{state: info.state, out: info.out, retrans: info.retrans, inFlight: info.inFlight, timeouts: 1},
+		} {
+			if v := chunkVerdict(fenced.look(false), took, false); v != verdictAsBefore {
+				t.Errorf("%s, fenced %+v: the chunk is %v, want teed as before", p.name, fenced, v)
+			}
 		}
 	}
 }
@@ -117,6 +182,7 @@ func TestAWindowsSocketsResetIsToldFromItsStateAndCounts(t *testing.T) {
 		{"not closed", winTCPInfo{state: wtcpCloseWait, out: 10, inFlight: 4}, true, false, 0},
 		{"closed after both FINs", winTCPInfo{state: wtcpTimeWait, out: 10}, true, true, 0},
 		{"a byte sent again", winTCPInfo{state: wtcpClosed, out: 10, inFlight: 4, retrans: 1}, true, false, 0},
+		{"a window probe sent again", winTCPInfo{state: wtcpClosed, out: 12, inFlight: 1, retrans: 1}, false, false, 0},
 		{"a timeout", winTCPInfo{state: wtcpClosed, out: 10, inFlight: 4, timeouts: 1}, true, false, 0},
 	} {
 		if got := row.info.resetCode(row.finRead, row.finSent); got != row.want {

@@ -156,22 +156,29 @@ func (s *tcpClientSocket) written() (uint64, bool) {
 }
 
 // beginFrom begins the count of writes from a, the count from the socket's
-// accept, at the bytes the socket had sent as it began. Run in New, before
-// any look.
+// accept, at the bytes the socket had sent once as it began (sentOnce). Run in
+// New, before any look. An accept whose counts cannot say begins from 0: a
+// connection with a fast retransmit or a timeout before its count began keeps
+// it, so none of its answers is read (counted), and written's 0 can only
+// count fewer bytes written before a chunk, which tees it as before.
 func (s *tcpClientSocket) beginFrom(a *countedClient) {
-	s.writes, s.out0 = a.count, a.begin.out
+	s.writes = a.count
+	s.out0, _ = a.begin.sentOnce()
 }
 
 // checkCount marks the count from the accept bypassed when info, an answer of
-// the socket, counts more bytes sent than could have been written through the
-// count by the time it answered (read after it): a write went around the
-// count, which then says nothing (written). Only an answer whose counts are
-// read (winTCPInfo.counted): one that resent may count a byte twice.
+// the socket, counts more bytes sent once (sentOnce) than could have been
+// written through the count by the time it answered (read after it): a write
+// went around the count, which then says nothing (written). A window probe's
+// resend counts in BytesOut and BytesRetrans alike, so it never reads as a
+// write around the count. An answer whose counts cannot say (counted) gives
+// 0, which marks nothing.
 func (s *tcpClientSocket) checkCount(info winTCPInfo) {
-	if s.writes == nil || !info.counted() {
+	if s.writes == nil {
 		return
 	}
-	if w := s.writes.now(); info.out > s.out0+w.said+w.maybe {
+	sent, _ := info.sentOnce()
+	if w := s.writes.now(); sent > s.out0+w.said+w.maybe {
 		s.bypassed.Store(true)
 	}
 }

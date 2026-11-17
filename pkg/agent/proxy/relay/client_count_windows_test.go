@@ -18,12 +18,17 @@ import (
 // Write still running, or one that failed, counts every byte it was given. An
 // answer that counts more bytes sent than could have been written through the
 // count says a write went around it: written says nothing from then on, a
-// look's answer telling it as a written's does. An answer that resent is not
-// read for it. With no count, written is the bytes sent, as before.
+// look's answer telling it as a written's does. Each count is of the bytes
+// sent once: a closed window's probe resent is not a write around the count.
+// An answer after a fast retransmit or a timeout is not read for it. With no
+// count, written is the bytes sent, each once, as before.
 func TestWindowsWrittenIsTheCountFromTheAccept(t *testing.T) {
+	var fast uint32
 	counted := func(out *uint64, retrans *uint32) (*tcpClientSocket, *writeCount) {
-		s := winAnsweringSocket(func() []byte { return winInfo(wtcpInfoSize, wtcpEstablished, 0, *out, *retrans, 0) })
-		a := &countedClient{count: &writeCount{said: 10}, begin: winTCPInfo{out: 4}}
+		s := winAnsweringSocket(func() []byte {
+			return winAnswer(wtcpInfoSize, winTCPInfo{state: wtcpEstablished, out: *out, retrans: *retrans, fastRetrans: fast})
+		})
+		a := &countedClient{count: &writeCount{said: 10}, begin: winTCPInfo{out: 6, retrans: 2}}
 		s.beginFrom(a)
 		return s, a.count
 	}
@@ -36,7 +41,7 @@ func TestWindowsWrittenIsTheCountFromTheAccept(t *testing.T) {
 	out, retrans := uint64(14), uint32(0)
 	s, c := counted(&out, &retrans)
 	if s.writes != c || s.out0 != 4 {
-		t.Fatalf("the count does not begin from the accept: %v, from %d", s.writes == c, s.out0)
+		t.Fatalf("the count does not begin from the bytes the accept had sent once: %v, from %d", s.writes == c, s.out0)
 	}
 	written(t, s, 14, true, "every byte sent")
 	out = 8
@@ -47,10 +52,14 @@ func TestWindowsWrittenIsTheCountFromTheAccept(t *testing.T) {
 	written(t, s, 19, true, "a running Write's bytes sent in part")
 	c.running, c.unsure = 0, 5
 	written(t, s, 19, true, "a Write that failed")
-	out, retrans = 30, 1
-	written(t, s, 19, true, "an answer that resent")
+	out, retrans = 26, 3
+	written(t, s, 19, true, "a closed window's probe sent again three times")
+	out, retrans, fast = 40, 3, 1
+	written(t, s, 19, true, "an answer after a fast retransmit")
+	out, retrans, fast = 27, 3, 0
+	written(t, s, 0, false, "more bytes sent once than written through the count")
 	out, retrans = 20, 0
-	written(t, s, 0, false, "more bytes sent than written through the count")
+	written(t, s, 0, false, "a count once gone around, nothing sent again")
 	out = 8
 	written(t, s, 0, false, "a count once gone around")
 
@@ -62,9 +71,17 @@ func TestWindowsWrittenIsTheCountFromTheAccept(t *testing.T) {
 	out = 8
 	written(t, looked, 0, false, "after a look that counted more bytes sent than written")
 
-	out = 8
-	none := winAnsweringSocket(func() []byte { return winInfo(wtcpInfoSize, wtcpEstablished, 0, out, 0, 0) })
+	out, retrans = 8, 0
+	none := winAnsweringSocket(func() []byte { return winInfo(wtcpInfoSize, wtcpEstablished, 0, out, retrans, 0) })
 	written(t, none, 8, true, "no count: the bytes sent")
+	out, retrans = 11, 3
+	written(t, none, 8, true, "no count: the bytes sent, a probe's resends once")
+
+	fenced := &tcpClientSocket{}
+	fenced.beginFrom(&countedClient{count: &writeCount{}, begin: winTCPInfo{out: 6, fastRetrans: 1}})
+	if fenced.out0 != 0 {
+		t.Fatalf("an accept whose counts cannot say begins from %d, want 0", fenced.out0)
+	}
 }
 
 // The proxy counts what is written to an accepted client's socket from its
@@ -87,14 +104,14 @@ func TestWindowsTheCountFromTheAcceptIsTheRelays(t *testing.T) {
 			t.Fatalf("the socket under %T is not asked", src)
 		}
 		countFromAccept(src, s)
-		if s.writes != a.count || s.out0 != a.begin.out {
+		if begun, _ := a.begin.sentOnce(); s.writes != a.count || s.out0 != begun {
 			t.Fatalf("the relay under %T does not count from the accept", src)
 		}
 	}
 	if _, err := a.Write([]byte("0123456789")); err != nil {
 		t.Fatal(err)
 	}
-	if n, ok := s.written(); n != a.begin.out+10 || !ok {
+	if n, ok := s.written(); n != s.out0+10 || !ok {
 		t.Fatalf("written after 10 bytes through the count: %d, %v", n, ok)
 	}
 	got := make([]byte, 15)
