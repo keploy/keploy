@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # maven-cache-key.sh: prints the actions/cache key that setup-java-maven
-# saves and restores ~/.m2/repository under. Run by that action, or by hand:
+# saves and restores ~/.m2/repository under. Run by that action, or by hand
+# from the workspace root:
 #
 #   RUNNER_OS=Linux RUNNER_ARCH=X64 MAVEN_CACHE_JAVA_VERSION=17 \
 #     MAVEN_CACHE_DEPENDENCY_PATH=samples-java/mysql-dual-conn/pom.xml \
@@ -12,10 +13,15 @@
 # change when its dependencies do.
 # MAVEN_CACHE_JAVA_VERSION: the JDK the build runs on, as setup-java takes it.
 #
-# The key is maven-repository-<os>-<arch>-maven<version>-java<version>-<hash of
-# the files>, where the Maven version is the one `mvn` on PATH reports: the
-# one the build runs. It is in the key because a local repository is only of
-# use to the Maven that filled it, or one that tracks files the same way.
+# The key is maven-repository-<os>-<arch>-maven<version>-java<version>-<hash>.
+# The Maven version is the one `mvn` on PATH reports: the one the build runs.
+# The hash is of the poms and of the Maven configuration the build reads:
+# the user and global settings.xml, and the .mvn/maven.config, jvm.config
+# and extensions.xml of each pom's project, found as Maven finds them (the
+# nearest directory at or above the pom's that has a .mvn). A local
+# repository is only of use to a build that tracks its files the way the
+# build that filled it did, and each of these decides that:
+#
 # Maven records, in each directory's _remote.repositories, the repository a
 # file came from, and uses a cached file only when that record names a
 # repository of the current build. Maven Resolver 2.0.23 and later (Maven
@@ -24,18 +30,33 @@
 # `x.pom>central-<hash of the URL>=`); Resolver 1.9 (every Maven 3.9) looks
 # for the bare id (`x.pom>central=`). So a 3.9 build finds every file a 3.10
 # build cached tracked but "present, but unavailable", and fetches it from
-# Maven Central again. The Maven version also picks the default versions of
-# the build's own plugins, so it is part of what the build downloads.
+# Maven Central again. A mirror in settings.xml renames the repository a
+# file comes from (to the mirror's id), with the same effect; a settings
+# profile can add repositories, and .mvn/maven.config can set the resolver's
+# own properties. The Maven version also picks the default versions of the
+# build's own plugins, so it is part of what the build downloads.
+#
 # actions/setup-java's own `cache: maven` key is the OS, the arch and the
-# pom's hash only, and a cache entry is never replaced: when
-# GitHub's runner image moved from Maven 3.10.0 (ubuntu-24.04) to Maven
-# 3.9.15 (ubuntu-26.04), every Java job kept restoring a 3.10.0 cache it
-# could not use and fetched its whole repository from Central on every run,
-# until Central answered 429 Too Many Requests.
+# pom's hash only, and a cache entry is never replaced: when GitHub's runner
+# image moved from Maven 3.10.0 (ubuntu-24.04) to Maven 3.9.15
+# (ubuntu-26.04), every Java job kept restoring a 3.10.0 cache it could not
+# use and fetched its whole repository from Central on every run, until
+# Central answered 429 Too Many Requests.
+#
+# No credential reaches the key or the log. A settings.xml is hashed with
+# its <servers> and <properties> elements and every <username>, <password>,
+# <passphrase> and <privateKey> left out, wherever they are: they hold
+# credentials, and only the properties could change which repositories a
+# build has. Environment variables (MAVEN_OPTS, MAVEN_ARGS) are not read for
+# the same reason. What the key leaves out is caught where it matters: on an
+# exact hit, setup-java-maven runs Maven offline, so a cache that cannot
+# serve the build fails it, naming its key, instead of being fetched again.
+# The log names the files hashed, never what is in them.
 set -euo pipefail
 
 : "${RUNNER_OS:?RUNNER_OS is not set}" "${RUNNER_ARCH:?RUNNER_ARCH is not set}"
 java_version=${MAVEN_CACHE_JAVA_VERSION:?MAVEN_CACHE_JAVA_VERSION is not set}
+die() { printf '::error::maven-cache-key.sh: %s\n' "$1" >&2; exit 1; }
 
 files=()
 while IFS= read -r line; do
@@ -43,16 +64,11 @@ while IFS= read -r line; do
   line="${line%"${line##*[![:space:]]}"}"
   [ -n "$line" ] && files+=("$line")
 done <<<"${MAVEN_CACHE_DEPENDENCY_PATH:-}"
-if [ "${#files[@]}" -eq 0 ]; then
-  echo "::error::maven-cache-key.sh: MAVEN_CACHE_DEPENDENCY_PATH names no file" >&2
-  exit 1
-fi
+[ "${#files[@]}" -gt 0 ] || die "MAVEN_CACHE_DEPENDENCY_PATH names no file"
 for f in "${files[@]}"; do
-  if [ ! -f "$f" ]; then
-    echo "::error::maven-cache-key.sh: $f (in cache-dependency-path) is not a file" >&2
-    exit 1
-  fi
+  [ -f "$f" ] || die "$f (in cache-dependency-path) is not a file"
 done
+command -v perl >/dev/null || die "perl is needed to leave the credentials out of settings.xml"
 
 # Captured whole before it is read: under pipefail, a reader that stops
 # early could fail mvn with SIGPIPE. -B: no color codes in the output.
@@ -67,6 +83,56 @@ case "$maven" in
     exit 1
     ;;
 esac
+maven_home=$(printf '%s\n' "$mvn_v" | sed -n 's/^Maven home: //p')
+case "$maven_home" in
+  '' | *$'\n'*)
+    printf '::error::maven-cache-key.sh: no single "Maven home:" in `mvn -B -v`:\n%s\n' "$mvn_v" >&2
+    exit 1
+    ;;
+esac
+[ -d "$maven_home" ] || die "Maven home $maven_home (from mvn -B -v) is not a directory"
 
-deps=$(sha256sum -- "${files[@]}" | sha256sum | cut -c1-64)
-echo "maven-repository-${RUNNER_OS}-${RUNNER_ARCH}-maven${maven}-java${java_version}-${deps}"
+# settings_digest FILE: the sha256 of FILE without the elements that hold
+# credentials (above).
+settings_digest() {
+  perl -0777 -pe '
+    s{<servers\b.*?</servers\s*>}{}gs;
+    s{<properties\b.*?</properties\s*>}{}gs;
+    s{<(username|password|passphrase|privateKey)\b[^>]*>.*?</\1\s*>}{}gs;
+  ' "$1" | sha256sum | cut -c1-64
+}
+
+parts=()
+hashed=()
+for f in "${files[@]}"; do
+  parts+=("pom $f $(sha256sum <"$f" | cut -c1-64)")
+  hashed+=("$f")
+done
+for s in "user-settings:$HOME/.m2/settings.xml" "global-settings:$maven_home/conf/settings.xml"; do
+  label=${s%%:*} path=${s#*:}
+  if [ -f "$path" ]; then
+    parts+=("$label $(settings_digest "$path")")
+    hashed+=("$path (credentials and properties left out)")
+  else
+    parts+=("$label none")
+  fi
+done
+for f in "${files[@]}"; do
+  d=$(cd "$(dirname "$f")" && pwd)
+  while [ ! -d "$d/.mvn" ] && [ "$d" != / ]; do d=$(dirname "$d"); done
+  for c in maven.config jvm.config extensions.xml; do
+    if [ -d "$d/.mvn" ] && [ -f "$d/.mvn/$c" ]; then
+      parts+=("project-of $f .mvn/$c $(sha256sum <"$d/.mvn/$c" | cut -c1-64)")
+      hashed+=("$d/.mvn/$c")
+    else
+      parts+=("project-of $f .mvn/$c none")
+    fi
+  done
+done
+
+digest=$(printf '%s\n' "${parts[@]}" | sha256sum | cut -c1-64)
+{
+  echo "maven-cache-key.sh: Maven $maven ($maven_home), JDK $java_version; hashed:"
+  printf '  %s\n' "${hashed[@]}"
+} >&2
+echo "maven-repository-${RUNNER_OS}-${RUNNER_ARCH}-maven${maven}-java${java_version}-${digest}"

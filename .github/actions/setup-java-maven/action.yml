@@ -1,13 +1,14 @@
 name: setup-java-maven
-description: "Set up a Temurin JDK and cache ~/.m2/repository under a key that names the Maven version the build runs"
+description: "Set up a Temurin JDK and cache ~/.m2/repository under a key that names the Maven, JDK, poms and Maven configuration of the build; on an exact hit, run Maven offline"
 
 # In place of actions/setup-java's own `cache: maven`, whose key (OS, arch,
 # pom hash) stays the same when the runner image changes its Maven. A local
-# repository is only of use to a Maven that tracks its files the way the one
+# repository is only of use to a build that tracks its files the way the one
 # that filled it did, so a cache saved by one Maven and restored for another
 # can be all "present, but unavailable": every file is fetched from Maven
 # Central again, on every run, since a cache entry is never replaced.
-# maven-cache-key.sh says how, and its tests run in the lint workflow.
+# maven-cache-key.sh says how, and offline/mvn why a hit runs offline.
+# Their tests (setup-java-maven.tests.sh) run in the lint workflow.
 inputs:
   java-version:
     required: true
@@ -19,6 +20,7 @@ inputs:
 runs:
   using: composite
   steps:
+    # setup-java writes ~/.m2/settings.xml, which the key hashes: it comes first.
     - uses: actions/setup-java@v4
       with:
         distribution: temurin
@@ -35,9 +37,31 @@ runs:
         echo "Maven repository cache key: $key"
         echo "key=$key" >> "$GITHUB_OUTPUT"
 
-    # Saved at the end of a job that passed, under a key that missed, as
-    # setup-java's was.
-    - uses: actions/cache@v4
+    # Saved by actions/cache's post step, at the end of a job that passed,
+    # under a key that missed, as setup-java's was. A cell whose lane fails
+    # after its build saves nothing, though its repository is whole: the
+    # build runs inside the lane's script, so there is no step to save it
+    # from earlier. Most keys are shared by several cells that run the same
+    # build, so one of them passing seeds it.
+    - name: Restore the Maven repository
+      id: cache
+      uses: actions/cache@v4
       with:
         path: ~/.m2/repository
         key: ${{ steps.key.outputs.key }}
+
+    # An exact hit holds everything this build resolves, so from here on mvn
+    # runs offline (offline/mvn), and a cache that cannot serve the build
+    # fails it, naming the key. A miss, or a hit of nothing, resolves online.
+    - name: Run Maven offline on the restored repository
+      id: offline
+      if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        KEY: ${{ steps.key.outputs.key }}
+      run: |
+        real=$(command -v mvn)
+        echo "SETUP_JAVA_MAVEN_REAL_MVN=$real" >> "$GITHUB_ENV"
+        echo "SETUP_JAVA_MAVEN_CACHE_KEY=$KEY" >> "$GITHUB_ENV"
+        echo "$GITHUB_ACTION_PATH/offline" >> "$GITHUB_PATH"
+        echo "::notice title=Maven runs offline::~/.m2/repository was restored from the exact key $KEY, so mvn ($real) runs offline for the rest of this job."
