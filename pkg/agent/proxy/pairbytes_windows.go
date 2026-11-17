@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net"
 	"syscall"
 	"unsafe"
 
+	"go.uber.org/zap"
 	"golang.org/x/sys/windows"
 
 	"go.keploy.io/server/v3/pkg/agent"
@@ -209,10 +211,17 @@ func (p *Proxy) closedReached(pc *pairedConn, ps proxySide) (bool, error) {
 // noteWroteAtClose records what the application had written to pc as the
 // proxy begins closing it (pairClosing), from the shim's counts. A side that
 // has taken the application's FIN needs no record: nothing is written after
-// it. Counts that cannot be read leave every wait unknown from then on, said
-// in one line (closeUnknown), as on Linux.
+// it. Hooks that count no send calls leave every wait unknown from then on,
+// said in one line (closeUnknown), as on Linux: no count is ever read. Counts
+// of this connection that cannot be read now (its process is gone, or another
+// process may send on its socket, or one of the run has not said what it
+// holds yet) are this connection's alone: whatever the application wrote
+// past what its side had received may have been on its way and tossed, a
+// loss charged as the close's (pairLost); a later wait reads its own
+// connections' counts.
 func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
-	if ps := readProxySide(pc.conn); ps.err == nil && peerEnded(ps.state) {
+	ps := readProxySide(pc.conn)
+	if ps.err == nil && peerEnded(ps.state) {
 		return
 	}
 	sc, err := p.appSendCounter()
@@ -222,7 +231,11 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	}
 	s, err := appSent(sc, pc)
 	if err != nil {
-		p.closeUnknown(pc, err)
+		low := uint64(1)
+		if ps.err == nil {
+			low = dataReceived(ps) + 1
+		}
+		p.pairLost(pc, low, math.MaxUint64, "keploy's proxy closed a connection whose send counts keploy's shim could not give: whether bytes the application wrote were still on their way, and tossed, cannot be told", zap.Error(err))
 		return
 	}
 	w := sentWrote(s)

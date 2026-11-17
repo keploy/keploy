@@ -551,3 +551,48 @@ func TestOnWindowsAConnectionClosedShortIsSettledOnlyByWhatItsCloseRead(t *testi
 		t.Fatalf("a loss charged at the close: %v, %v", reached, err)
 	}
 }
+
+// TestOnWindowsACloseWhoseCountsCannotBeReadChargesThatConnectionAlone: a
+// proxy-first close while the counts cannot be read (a process of the run
+// had not said what it holds) charges that connection's loss to the test
+// open then; once the counts can be read again (that process exited), a
+// later wait on another connection is judged, not unknown.
+func TestOnWindowsACloseWhoseCountsCannotBeReadChargesThatConnectionAlone(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop(), settleReads: true}
+	f := &fakeSends{}
+	p.listenerCounter = f
+	app1, side1 := winPair(t)
+	p.paired.add(side1, 1, 0)
+	if _, err := app1.Write(make([]byte, 18)); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the first call at the proxy", func() bool { return readProxySide(side1).received == 18 })
+	pcs, err := p.paired.upTo(1)
+	if err != nil || len(pcs) != 1 {
+		t.Fatalf("paired: %d, %v", len(pcs), err)
+	}
+	f.set(appSends{}, errors.New("process 4242 of the run has not said HELLO"))
+	p.noteWroteAtClose(pcs[0])
+	if !pcs[0].lost.Load() || pcs[0].wroteAtClose.Load() != nil {
+		t.Fatalf("the close: lost %v, wrote %+v; want the connection's loss charged, nothing read",
+			pcs[0].lost.Load(), pcs[0].wroteAtClose.Load())
+	}
+	if l := p.losses.Snapshot(); len(l) != 1 || l[0].Kind != models.CaptureLossAppBytesLost {
+		t.Fatalf("losses %+v; want the closed connection's one", l)
+	}
+	if err := p.paired.failure(); err != nil {
+		t.Fatalf("every wait is unknown after one close: %v", err)
+	}
+	p.paired.remove(side1)
+
+	app2, side2 := winPair(t)
+	p.paired.add(side2, 2, 0)
+	if _, err := app2.Write(make([]byte, 7)); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the second call at the proxy", func() bool { return readProxySide(side2).received == 7 })
+	f.set(appSends{done: 7, started: 7}, nil)
+	if err := p.WaitPairedBytes(t.Context(), 2); err != nil {
+		t.Fatalf("a later wait: %v; want it judged", err)
+	}
+}
