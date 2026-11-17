@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -125,15 +126,28 @@ type prepEntry struct { // minimal, enough for lookup
 	mockName    string // for debugging purpose
 }
 
-// truncate returns s trimmed to at most maxLen characters (including "..." suffix if truncated).
+// truncate returns s cut to at most maxLen bytes, including the "..." it adds
+// when it cuts. It never cuts inside a UTF-8 character: a cut that would land
+// inside one moves back to its first byte, so a statement with non-English
+// text or an emoji at the cut point still reads as valid text in the call
+// summary, the report and the dashboard.
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
 	if maxLen <= 3 {
-		return s[:maxLen]
+		return cutAtRuneStart(s, maxLen)
 	}
-	return s[:maxLen-3] + "..."
+	return cutAtRuneStart(s, maxLen-3) + "..."
+}
+
+// cutAtRuneStart returns s[:n], moved back to the start of the character byte
+// n falls in, so no character is split. It needs 0 <= n < len(s).
+func cutAtRuneStart(s string, n int) string {
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // case-insensitive prefix check without allocation
