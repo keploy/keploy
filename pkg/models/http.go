@@ -247,6 +247,17 @@ type HTTPResp struct {
 	// (HTTPAnswerMarks). Replay writes each part at its recorded place. Nil
 	// in a recording older than the marks, whose answer is written at once.
 	Marks *HTTPAnswerMarks `json:"marks,omitempty" yaml:"marks,omitempty"`
+
+	// Chunked: the upstream sent the answer chunked (RFC 9112 7.1), so the
+	// application's client read its body with no Content-Length. Replay
+	// sends it chunked again to a call that can take a chunked answer
+	// (HTTP/1.1 or later) and with its length to any other; an answer with
+	// no body by rule (to a HEAD, a 1xx, 204 or 304) keeps its head as
+	// recorded. Header keeps the length of the body as kept, which a
+	// replayer older than this field serves the answer with, as before.
+	// False for an answer sent with its length or until its connection
+	// closed, and in a recording older than the field.
+	Chunked bool `json:"chunked,omitempty" yaml:"chunked,omitempty"`
 }
 
 // HTTPResponseHasNoBody reports whether a response carries no body whatever
@@ -390,6 +401,7 @@ type httpRespBSON struct {
 
 	HeaderLineLengths HeaderLineLengths    `bson:"headerlinelengths,omitempty"`
 	Marks             *httpAnswerMarksBSON `bson:"marks,omitempty"`
+	Chunked           bool                 `bson:"chunked,omitempty"`
 }
 
 type httpRespBSONReader struct {
@@ -407,6 +419,7 @@ type httpRespBSONReader struct {
 
 	HeaderLineLengths HeaderLineLengths    `bson:"headerlinelengths,omitempty"`
 	Marks             *httpAnswerMarksBSON `bson:"marks,omitempty"`
+	Chunked           bool                 `bson:"chunked,omitempty"`
 }
 
 // MarshalBSON — see the HTTPReq version above. Same rationale.
@@ -426,6 +439,7 @@ func (h HTTPResp) MarshalBSON() ([]byte, error) {
 
 		HeaderLineLengths: h.HeaderLineLengths,
 		Marks:             h.Marks.toBSON(),
+		Chunked:           h.Chunked,
 	})
 }
 
@@ -460,6 +474,7 @@ func (h *HTTPResp) UnmarshalBSON(data []byte) error {
 		Timestamp:     ts,
 
 		HeaderLineLengths: raw.HeaderLineLengths,
+		Chunked:           raw.Chunked,
 	}
 	if h.Marks, err = raw.Marks.marks(); err != nil {
 		return fmt.Errorf("HTTPResp.UnmarshalBSON marks: %w", err)

@@ -2120,7 +2120,7 @@ func TestVariables_ADigestHeaderAVariableSetsIsNotRecomputed(t *testing.T) {
 	if got := m.Spec.Metadata[models.MetadataBodyDigestsKey]; got != "content-md5=content-md5;etag=etag/md5/s" {
 		t.Fatalf("the pooled mock's note was written: %q", got)
 	}
-	raw, err := h.buildMockResponseBytes(stub)
+	raw, err := h.buildMockResponseBytes(stub, true)
 	if err != nil {
 		t.Fatal(err)
 	}

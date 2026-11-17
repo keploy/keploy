@@ -132,7 +132,8 @@ func heldAt(m *models.Mock, place models.RunPlace, release models.AnswerRelease)
 // planHeld splits stub's answer, its response in its Spec with its marks,
 // into what is written when:
 //   - an answer that went out in one write, or that cannot go in parts, whole
-//     at its last mark;
+//     at its last mark, chunked to an HTTP/1.1 call when its upstream sent it
+//     so (buildMockResponseBytes);
 //   - any other with its head at Marks.Head and each write's part at its own
 //     time, sent chunked.
 //
@@ -150,7 +151,7 @@ func (h *HTTP) planHeld(stub *models.Mock, call *http.Request) (*heldAnswer, err
 	}
 	http11 := call != nil && call.ProtoAtLeast(1, 1)
 	if !http11 || wentOutWhole(marks) || !marksFit(marks, len(resp.Body)) || responseHasNoBody(method, resp.StatusCode) {
-		whole, err := h.buildMockResponseBytes(stub)
+		whole, err := h.buildMockResponseBytes(stub, http11)
 		if err != nil {
 			return nil, err
 		}

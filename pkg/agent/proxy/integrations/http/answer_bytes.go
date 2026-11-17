@@ -20,10 +20,10 @@ import (
 // worked out over the body sent. header is the serve's own map.
 type answerRewrite func(header http.Header, body string) (http.Header, string)
 
-// encodeRecordedAnswer is stub's answer as recorded: the only encoder
-// keptAnswers is given.
-func (h *HTTP) encodeRecordedAnswer(stub *models.Mock) ([]byte, error) {
-	return h.encodeAnswer(stub, nil)
+// encodeRecordedAnswer is stub's answer as recorded, chunked or not: the only
+// encoder keptAnswers is given.
+func (h *HTTP) encodeRecordedAnswer(stub *models.Mock, chunked bool) ([]byte, error) {
+	return h.encodeAnswer(stub, nil, chunked)
 }
 
 // reasonPhrase is the reason phrase resp's status line is served with: the one
@@ -46,7 +46,9 @@ func reasonPhrase(resp *models.HTTPResp) string {
 // encodeAnswer is a recorded answer's wire bytes: the status line, the header
 // lines (a Content-Length recomputed over the body sent, unless the answer has
 // no body by rule) and the body, compressed per its Content-Encoding, after
-// rewrite, if any. stub's response is in its Spec (withResponse). The bytes are
+// rewrite, if any. A chunked answer (sendsChunked) is HTTP/1.1's, its body
+// one chunk after a Transfer-Encoding: chunked line in place of its
+// Content-Length. stub's response is in its Spec (withResponse). The bytes are
 // written into one buffer of their size: each header line was a fmt.Sprintf
 // and a new string holding every line before it.
 //
@@ -55,13 +57,18 @@ func reasonPhrase(resp *models.HTTPResp) string {
 // answer built twice is the same bytes. Built in the header map's order, an
 // answer built again (its kept bytes gone with a collected entry, or a table
 // with no room) could be other bytes than its serves before.
-func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, error) {
+func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite, chunked bool) ([]byte, error) {
 	resp := stub.Spec.HTTPResp
 	protoMajor, protoMinor := 1, 1
 	method := ""
 	if stub.Spec.HTTPReq != nil {
 		protoMajor, protoMinor = stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor
 		method = string(stub.Spec.HTTPReq.Method)
+	}
+	if chunked {
+		// A client reads an older answer's Transfer-Encoding as none
+		// (chunkedAnswer).
+		protoMajor, protoMinor = 1, 1
 	}
 	body := resp.Body
 	header := pkg.ToWireHTTPHeader(resp.Header, resp.HeaderLineLengths)
@@ -90,7 +97,14 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	size := len("HTTP/. \r\n ") + 3*20 + len(status) + len("\r\n") + len(respBody)
 	var nameSpace [32]string
 	names := nameSpace[:0]
+	if chunked {
+		size += len("Transfer-Encoding: chunked\r\n") + 16 + len("\r\n\r\n0\r\n\r\n")
+		names = append(names, "Transfer-Encoding")
+	}
 	for key, values := range header {
+		if chunked && (key == "Content-Length" || key == "Transfer-Encoding") {
+			continue
+		}
 		names = append(names, key)
 		if key == "Content-Length" && !noBody {
 			size += len(key) + len(": \r\n") + len(length)
@@ -113,6 +127,10 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 	slices.Sort(names)
 	for _, key := range names {
 		values := header[key]
+		if chunked && key == "Transfer-Encoding" {
+			out = appendHeaderLine(out, key, "chunked")
+			continue
+		}
 		if key == "Content-Length" && !noBody {
 			out = append(out, key...)
 			out = append(out, ": "...)
@@ -125,8 +143,28 @@ func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, e
 		}
 	}
 	out = append(out, "\r\n"...)
-	out = append(out, respBody...)
-	return out, nil
+	if !chunked {
+		return append(out, respBody...), nil
+	}
+	if len(respBody) > 0 {
+		out = strconv.AppendInt(out, int64(len(respBody)), 16)
+		out = append(out, "\r\n"...)
+		out = append(out, respBody...)
+		out = append(out, "\r\n"...)
+	}
+	return append(out, "0\r\n\r\n"...), nil
+}
+
+// sendsChunked reports whether stub's answer goes chunked to a call that can
+// take a chunked answer: its upstream sent it so (HTTPResp.Chunked) and it has
+// a body by rule. stub's response is in its Spec.
+func sendsChunked(stub *models.Mock) bool {
+	resp := stub.Spec.HTTPResp
+	method := ""
+	if stub.Spec.HTTPReq != nil {
+		method = string(stub.Spec.HTTPReq.Method)
+	}
+	return resp.Chunked && !responseHasNoBody(method, resp.StatusCode)
 }
 
 func appendHeaderLine(out []byte, key, value string) []byte {
@@ -183,15 +221,17 @@ type keptAnswer struct {
 	wire atomic.Pointer[[]byte]
 }
 
-// answerInputs is what of a mock outside its response its answer bytes read.
+// answerInputs is what of a mock outside its response its answer bytes read,
+// and whether they are chunked.
 type answerInputs struct {
 	major, minor int
 	method       string
 	digests      string
+	chunked      bool
 }
 
-func inputsOf(stub *models.Mock) answerInputs {
-	in := answerInputs{major: 1, minor: 1, digests: stub.Spec.Metadata[models.MetadataBodyDigestsKey]}
+func inputsOf(stub *models.Mock, chunked bool) answerInputs {
+	in := answerInputs{major: 1, minor: 1, digests: stub.Spec.Metadata[models.MetadataBodyDigestsKey], chunked: chunked}
 	if r := stub.Spec.HTTPReq; r != nil {
 		in.major, in.minor, in.method = r.ProtoMajor, r.ProtoMinor, string(r.Method)
 	}
@@ -202,14 +242,14 @@ func newAnswerTable(limit int64) *answerTable {
 	return &answerTable{limit: limit}
 }
 
-// serve returns stub's answer bytes: the ones kept for its response, else
-// encode's, kept once the answer is served a second time and the table has
-// room. The bytes are shared by every later serve and are never written to.
-// stub must keep its answer (keepsAnswer).
-func (t *answerTable) serve(stub *models.Mock, encode func(*models.Mock) ([]byte, error)) ([]byte, error) {
+// serve returns stub's answer bytes, chunked or not: the ones kept for its
+// response, else encode's, kept once the answer is served a second time the
+// same way and the table has room. The bytes are shared by every later serve
+// and are never written to. stub must keep its answer (keepsAnswer).
+func (t *answerTable) serve(stub *models.Mock, chunked bool, encode func(*models.Mock, bool) ([]byte, error)) ([]byte, error) {
 	resp := stub.Spec.HTTPResp
 	key := weak.Make(resp)
-	in := inputsOf(stub)
+	in := inputsOf(stub, chunked)
 	v, seen := t.entries.Load(key)
 	if seen {
 		k := v.(*keptAnswer)
@@ -220,7 +260,7 @@ func (t *answerTable) serve(stub *models.Mock, encode func(*models.Mock) ([]byte
 		}
 	}
 	t.builds.Add(1)
-	wire, err := encode(stub)
+	wire, err := encode(stub, chunked)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +273,8 @@ func (t *answerTable) serve(stub *models.Mock, encode func(*models.Mock) ([]byte
 	k := v.(*keptAnswer)
 	if k.from != in {
 		// The response is served from a mock that reads it otherwise (a
-		// different request line or digest note): built for this serve only.
+		// different request line or digest note) or to a call that takes
+		// other framing: built for this serve only.
 		return wire, nil
 	}
 	n := int64(len(wire))

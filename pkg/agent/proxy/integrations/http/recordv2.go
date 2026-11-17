@@ -1238,6 +1238,7 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 				// repeated header (Set-Cookie) on its own lines.
 				HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
 				Marks:             marks,
+				Chunked:           sentChunked(respParsed),
 			},
 			Fault:            fault,
 			Created:          time.Now().Unix(),
@@ -1316,6 +1317,13 @@ func (h *HTTP) buildFaultAfterHead(ctx context.Context, m *FinalHTTP, req *http.
 	}
 	mock.Spec.Fault = &fault
 	return mock, nil
+}
+
+// sentChunked reports whether resp came chunked (HTTPResp.Chunked): net/http
+// read it so, which it does only for an HTTP/1.1 or later answer, chunked
+// being the one transfer coding it takes.
+func sentChunked(resp *http.Response) bool {
+	return len(resp.TransferEncoding) > 0
 }
 
 // closeDelimited reports whether resp's body is framed by the connection's

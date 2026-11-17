@@ -428,6 +428,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 				// Replay serves this response: keep what it takes to serve a
 				// repeated header (Set-Cookie) on its own lines.
 				HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(respParsed.Header),
+				Chunked:           sentChunked(respParsed),
 			},
 			Created: time.Now().Unix(),
 

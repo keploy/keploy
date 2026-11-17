@@ -346,7 +346,7 @@ func TestAMockServesRepeatedResponseHeaderLinesAsRecorded(t *testing.T) {
 			t.Fatalf("%s: DecodeMocks = (%d mocks, %v)", path, len(mocks), err)
 		}
 
-		served, err := h.buildMockResponseBytes(mocks[0])
+		served, err := h.buildMockResponseBytes(mocks[0], true)
 		if err != nil {
 			t.Fatalf("%s: buildMockResponseBytes: %v", path, err)
 		}
@@ -412,7 +412,7 @@ func TestANoBodyResponseKeepsItsContentLength(t *testing.T) {
 					t.Fatalf("%s: DecodeMocks = (%d mocks, %v)", path, len(mocks), err)
 				}
 
-				served, err := h.buildMockResponseBytes(mocks[0])
+				served, err := h.buildMockResponseBytes(mocks[0], true)
 				if err != nil {
 					t.Fatalf("%s: buildMockResponseBytes: %v", path, err)
 				}

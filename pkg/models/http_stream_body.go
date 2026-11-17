@@ -134,6 +134,7 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 
 		HeaderLineLengths HeaderLineLengths `yaml:"header_line_lengths,omitempty"`
 		Marks             *HTTPAnswerMarks  `yaml:"marks,omitempty"`
+		Chunked           bool              `yaml:"chunked,omitempty"`
 	}
 
 	return httpRespYAML{
@@ -150,6 +151,7 @@ func (h HTTPResp) MarshalYAML() (interface{}, error) {
 
 		HeaderLineLengths: h.HeaderLineLengths,
 		Marks:             marks,
+		Chunked:           h.Chunked,
 	}, nil
 }
 
@@ -171,6 +173,7 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 
 		HeaderLineLengths HeaderLineLengths `yaml:"header_line_lengths,omitempty"`
 		Marks             *HTTPAnswerMarks  `yaml:"marks,omitempty"`
+		Chunked           bool              `yaml:"chunked,omitempty"`
 	}
 
 	var raw httpRespYAML
@@ -189,6 +192,7 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 	h.Timestamp = raw.Timestamp
 	h.HeaderLineLengths = raw.HeaderLineLengths
 	h.Marks = raw.Marks
+	h.Chunked = raw.Chunked
 
 	// Decode body — may produce a plain string body, streaming chunks, or both.
 	// StreamBody is populated only when the YAML body field was a sequence node.

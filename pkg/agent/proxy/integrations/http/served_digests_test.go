@@ -78,7 +78,7 @@ func recordAndServe(t *testing.T, req, resp []byte, rewrite func(string) string)
 			t.Fatalf("%s: DecodeMocks = (%d mocks, %v)", path, len(mocks), err)
 		}
 		mocks[0].Spec.HTTPResp.Body = rewrite(mocks[0].Spec.HTTPResp.Body)
-		served, err := h.buildMockResponseBytes(mocks[0])
+		served, err := h.buildMockResponseBytes(mocks[0], true)
 		if err != nil {
 			t.Fatalf("%s: buildMockResponseBytes: %v", path, err)
 		}

@@ -18,8 +18,6 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/platform/yaml"
-	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -62,28 +60,6 @@ func appGivesUp(t *testing.T, app net.Conn) seen {
 			return seen{string(got), endOf(err)}
 		}
 	}
-}
-
-// throughDisk is m written as mocks.yaml writes it and read back.
-func throughDisk(t *testing.T, m *models.Mock) *models.Mock {
-	t.Helper()
-	doc, err := mockdb.EncodeMock(m, zap.NewNop())
-	if err != nil {
-		t.Fatalf("EncodeMock: %v", err)
-	}
-	onDisk, err := yamlLib.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var readBack yaml.NetworkTrafficDoc
-	if err := yamlLib.Unmarshal(onDisk, &readBack); err != nil {
-		t.Fatal(err)
-	}
-	mocks, err := mockdb.DecodeMocks([]*yaml.NetworkTrafficDoc{&readBack}, zap.NewNop())
-	if err != nil || len(mocks) != 1 {
-		t.Fatalf("DecodeMocks = (%d mocks, %v)\n%s", len(mocks), err, onDisk)
-	}
-	return mocks[0]
 }
 
 // replaying serves mocks to faultReq on a real socket, as keploy test does:
@@ -565,11 +541,11 @@ func TestReplayFault_APassThroughCallIsNotServedAFault(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := &req{method: "GET", url: u}
-	if got := h.serveOnePassThroughMock(&mockMemDb{mocks: []*models.Mock{m}}, in, "pay.example", 0, nil); got != nil {
+	if got := h.serveOnePassThroughMock(&mockMemDb{mocks: []*models.Mock{m}}, in, "pay.example", 0, nil, true); got != nil {
 		t.Errorf("the pass-through call was served %q, a call that ended in a fault", got)
 	}
 	m.Spec.Fault = nil
-	if got := h.serveOnePassThroughMock(&mockMemDb{mocks: []*models.Mock{m}}, in, "pay.example", 0, nil); got == nil {
+	if got := h.serveOnePassThroughMock(&mockMemDb{mocks: []*models.Mock{m}}, in, "pay.example", 0, nil, true); got == nil {
 		t.Error("the pass-through call was served nothing from the same call with a whole answer")
 	}
 }

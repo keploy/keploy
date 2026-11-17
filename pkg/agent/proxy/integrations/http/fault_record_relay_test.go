@@ -196,7 +196,7 @@ func TestRecordV2_FaultCustomReasonPhraseIsRecorded(t *testing.T) {
 	if m.Spec.HTTPResp.StatusMessage != "Card Declined" {
 		t.Errorf("recorded reason phrase %q, want %q", m.Spec.HTTPResp.StatusMessage, "Card Declined")
 	}
-	wire, berr := (&HTTP{}).encodeRecordedAnswer(m)
+	wire, berr := (&HTTP{}).encodeRecordedAnswer(m, false)
 	if berr != nil {
 		t.Fatal(berr)
 	}

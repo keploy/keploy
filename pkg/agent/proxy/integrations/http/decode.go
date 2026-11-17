@@ -248,7 +248,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// this endpoint (before it became a skip default), and synthesizing a
 				// 200 over it would change replay behaviour on unchanged test data.
 				// Non-consuming; falls back to the synthetic 200 when nothing matches.
-				if recorded := h.serveOnePassThroughMock(mockDb, input, ptHost, ptPort, rule.QueryKeys); recorded != nil {
+				if recorded := h.serveOnePassThroughMock(mockDb, input, ptHost, ptPort, rule.QueryKeys, request.ProtoAtLeast(1, 1)); recorded != nil {
 					out = recorded
 					served = "recorded"
 				}
@@ -311,7 +311,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 								return
 							}
 						}
-						if out, derr = h.buildMockResponseBytes(recorded); derr != nil {
+						if out, derr = h.buildMockResponseBytes(recorded, request.ProtoAtLeast(1, 1)); derr != nil {
 							failAsync(derr, "async: failed to serialize recorded delivery")
 							return
 						}
@@ -909,7 +909,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// Serialize the matched mock's response to wire bytes (hydrates a
 			// spilled body, recomputes Content-Length, compresses per
 			// Content-Encoding). Shared with the async serving branch above.
-			respBytes, err := h.buildMockResponseBytes(stub)
+			respBytes, err := h.buildMockResponseBytes(stub, request.ProtoAtLeast(1, 1))
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				errCh <- err
@@ -963,7 +963,9 @@ func withResponse(m *models.Mock) (*models.Mock, error) {
 
 // buildMockResponseBytes serializes a recorded HTTP mock's response to raw
 // wire bytes (status line + headers + recomputed Content-Length + body,
-// compressing the body when Content-Encoding is set; encodeAnswer). It lives
+// compressing the body when Content-Encoding is set; encodeAnswer), for a
+// call that can take a chunked answer (takesChunks: HTTP/1.1 or later) chunked
+// when its upstream sent it chunked (sendsChunked). It lives
 // here (not in async.go) because it is the shared serializer for BOTH the
 // ordinary matched-mock path and the async serving branch.
 // A response still kept apart from its mock is loaded first (withResponse).
@@ -973,8 +975,8 @@ func withResponse(m *models.Mock) (*models.Mock, error) {
 // An answer served again is written from the bytes built for it before
 // (keptAnswers), unless it is served rewritten or read back per serve
 // (keepsAnswer). The returned bytes are never to be written to.
-func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
-	return h.buildAnswer(stub, nil)
+func (h *HTTP) buildMockResponseBytes(stub *models.Mock, takesChunks bool) ([]byte, error) {
+	return h.buildAnswer(stub, nil, takesChunks)
 }
 
 // buildAnswer is buildMockResponseBytes with rewrite applied to the answer's
@@ -983,9 +985,9 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 // (encodeRecordedAnswer) cannot rewrite, so a serve that changes what the
 // recording answers builds its bytes for itself, and no serve is given
 // another's rewritten answer.
-func (h *HTTP) buildAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, error) {
+func (h *HTTP) buildAnswer(stub *models.Mock, rewrite answerRewrite, takesChunks bool) ([]byte, error) {
 	if rewrite == nil && keepsAnswer(stub) {
-		return keptAnswers.serve(stub, h.encodeRecordedAnswer)
+		return keptAnswers.serve(stub, takesChunks && sendsChunked(stub), h.encodeRecordedAnswer)
 	}
 	name := ""
 	if stub != nil {
@@ -998,7 +1000,7 @@ func (h *HTTP) buildAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, er
 	if stub == nil || stub.Spec.HTTPResp == nil {
 		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
 	}
-	return h.encodeAnswer(stub, rewrite)
+	return h.encodeAnswer(stub, rewrite, takesChunks && sendsChunked(stub))
 }
 
 // RequestNoise is what of a request may differ from its recording when it is

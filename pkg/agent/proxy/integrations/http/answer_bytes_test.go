@@ -241,7 +241,7 @@ func TestAnswersAreMainsAnswers(t *testing.T) {
 					}
 					var kept []byte
 					for serve := range 3 {
-						got, err := h.buildMockResponseBytes(m)
+						got, err := h.buildMockResponseBytes(m, true)
 						if err != nil {
 							t.Fatalf("%s serve %d: %v", m.Name, serve, err)
 						}
@@ -252,7 +252,7 @@ func TestAnswersAreMainsAnswers(t *testing.T) {
 						kept = got
 					}
 					// A copy of the pooled mock (not pooled) is built.
-					got, err := h.buildMockResponseBytes(m.ShallowCopy())
+					got, err := h.buildMockResponseBytes(m.ShallowCopy(), true)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -282,7 +282,7 @@ func TestAnswersAreMainsOnRecordedSets(t *testing.T) {
 				t.Fatalf("%s %s: main: %v", path, m.Name, err)
 			}
 			for serve := range 3 {
-				got, err := h.buildMockResponseBytes(m)
+				got, err := h.buildMockResponseBytes(m, true)
 				if err != nil {
 					t.Fatalf("%s %s serve %d: %v", path, m.Name, serve, err)
 				}
@@ -329,7 +329,7 @@ func TestAnswersServedRewrittenAreBuiltEachServe(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := h.buildMockResponseBytes(m)
+			got, err := h.buildMockResponseBytes(m, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -382,7 +382,7 @@ func TestAnswersServedRewrittenAreBuiltEachServe(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				got, err := h.buildMockResponseBytes(m)
+				got, err := h.buildMockResponseBytes(m, true)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -418,7 +418,7 @@ func TestARewrittenServeNeverReadsOrFillsKeptAnswers(t *testing.T) {
 	}
 	plain := func(what string) {
 		t.Helper()
-		got, err := h.buildMockResponseBytes(m)
+		got, err := h.buildMockResponseBytes(m, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -426,7 +426,7 @@ func TestARewrittenServeNeverReadsOrFillsKeptAnswers(t *testing.T) {
 	}
 	rewritten := func(what, pod string) {
 		t.Helper()
-		got, err := h.buildAnswer(m, alias(pod))
+		got, err := h.buildAnswer(m, alias(pod), true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -496,7 +496,7 @@ func answerBuiltAgain(t *testing.T, names int) {
 		t.Fatal(err)
 	}
 	key := weak.Make(m.Spec.HTTPResp)
-	first, err := h.buildMockResponseBytes(m)
+	first, err := h.buildMockResponseBytes(m, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +504,7 @@ func answerBuiltAgain(t *testing.T, names int) {
 	for evict := range 50 {
 		// Served again (kept, when the table has room) and from what is kept.
 		for range 2 {
-			got, err := h.buildMockResponseBytes(m)
+			got, err := h.buildMockResponseBytes(m, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -517,7 +517,7 @@ func answerBuiltAgain(t *testing.T, names int) {
 			t.Fatal("precondition: the answer's entry is still held after its eviction")
 		}
 		before := keptAnswers.builds.Load()
-		got, err := h.buildMockResponseBytes(m)
+		got, err := h.buildMockResponseBytes(m, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -530,7 +530,7 @@ func answerBuiltAgain(t *testing.T, names int) {
 	}
 	full := newAnswerTable(0)
 	for serve := range 50 {
-		got, err := full.serve(m, h.encodeRecordedAnswer)
+		got, err := full.serve(m, false, h.encodeRecordedAnswer)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -568,7 +568,7 @@ func TestAnAnswerServedAgainIsNotBuiltAgain(t *testing.T) {
 	m := reusedAnswer(`{"ok":true}`)
 	before := keptAnswers.builds.Load()
 	for range 1_000 {
-		if _, err := h.buildMockResponseBytes(m); err != nil {
+		if _, err := h.buildMockResponseBytes(m, true); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -576,7 +576,7 @@ func TestAnAnswerServedAgainIsNotBuiltAgain(t *testing.T) {
 		t.Fatalf("1,000 serves built the answer %d times, want 2", n)
 	}
 	allocs := testing.AllocsPerRun(1_000, func() {
-		if _, err := h.buildMockResponseBytes(m); err != nil {
+		if _, err := h.buildMockResponseBytes(m, true); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -605,7 +605,7 @@ func TestAFirstServeAllocatesTheBufferAndAnEntry(t *testing.T) {
 		})
 		next := 0
 		allocs := testing.AllocsPerRun(runs, func() {
-			if _, err := h.buildMockResponseBytes(mocks[next]); err != nil {
+			if _, err := h.buildMockResponseBytes(mocks[next], true); err != nil {
 				t.Fatal(err)
 			}
 			next++
@@ -626,7 +626,7 @@ func TestKeptAnswersGoWithTheirRecording(t *testing.T) {
 	func() {
 		m := reusedAnswer(strings.Repeat("k", 1_000))
 		for range 3 {
-			if _, err := table.serve(m, h.encodeRecordedAnswer); err != nil {
+			if _, err := table.serve(m, false, h.encodeRecordedAnswer); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -646,7 +646,7 @@ func TestKeptAnswersGoWithTheirRecording(t *testing.T) {
 	small := newAnswerTable(100)
 	m := reusedAnswer(strings.Repeat("s", 1_000))
 	for range 5 {
-		if _, err := small.serve(m, h.encodeRecordedAnswer); err != nil {
+		if _, err := small.serve(m, false, h.encodeRecordedAnswer); err != nil {
 			t.Fatal(err)
 		}
 	}

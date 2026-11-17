@@ -815,7 +815,7 @@ func TestHeldAnswer_ADueAnswerIsBuiltOnce(t *testing.T) {
 	if a, err := h.heldAnswerOf(m, releaseRequest(t, releaseCall), newPlacedDb(), false, nil); err != nil || a != nil {
 		t.Fatalf("held %v, %v; it is due", a, err)
 	}
-	if _, err := h.buildMockResponseBytes(m); err != nil {
+	if _, err := h.buildMockResponseBytes(m, true); err != nil {
 		t.Fatal(err)
 	}
 	if n := keptAnswers.builds.Load(); n != 1 {

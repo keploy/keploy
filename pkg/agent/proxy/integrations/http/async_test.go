@@ -150,7 +150,7 @@ func TestBuildMockResponseBytes(t *testing.T) {
 		HTTPReq:  &models.HTTPReq{ProtoMajor: 1, ProtoMinor: 1},
 		HTTPResp: &models.HTTPResp{StatusCode: 200, Body: "hello", Header: map[string]string{"Content-Type": "text/plain", "Content-Length": "999"}},
 	}}
-	out, err := h.buildMockResponseBytes(stub)
+	out, err := h.buildMockResponseBytes(stub, true)
 	if err != nil {
 		t.Fatal(err)
 	}

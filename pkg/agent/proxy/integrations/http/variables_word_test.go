@@ -597,7 +597,7 @@ func TestVariables_ADigestHeaderAWordIsAnsweredInIsNotRecomputed(t *testing.T) {
 	if _, noted := stub.Spec.Metadata[models.MetadataBodyDigestsKey]; noted {
 		t.Fatalf("the served copy still notes the ETag as a digest: %v", stub.Spec.Metadata)
 	}
-	raw, err := h.buildMockResponseBytes(stub)
+	raw, err := h.buildMockResponseBytes(stub, true)
 	if err != nil {
 		t.Fatal(err)
 	}

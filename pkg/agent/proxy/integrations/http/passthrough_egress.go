@@ -50,7 +50,8 @@ func passThroughEgressDecision(opts models.OutgoingOptions, host string, port ui
 // to a synthetic 200). Candidates are drawn from both the per-test and session
 // pools; a recordOne mock is tagged type:config (LifetimeSession) at record
 // time so it lives in the session pool and is never window-filtered.
-func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req, host string, port uint32, queryKeys []string) []byte {
+// takesChunks: the call can take a chunked answer (buildMockResponseBytes).
+func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req, host string, port uint32, queryKeys []string, takesChunks bool) []byte {
 	if mockDb == nil || input == nil || input.url == nil {
 		return nil
 	}
@@ -111,7 +112,7 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 		// Prefer a 2xx response (a warmup error may also have been recorded
 		// before the first success under recordOne's first-2xx policy).
 		if isSuccessStatus(loaded.Spec.HTTPResp.StatusCode) {
-			if out, err := h.buildMockResponseBytes(loaded); err == nil {
+			if out, err := h.buildMockResponseBytes(loaded, takesChunks); err == nil {
 				return out
 			}
 		} else if fallback == nil {
@@ -119,7 +120,7 @@ func (h *HTTP) serveOnePassThroughMock(mockDb integrations.MockMemDb, input *req
 		}
 	}
 	if fallback != nil {
-		if out, err := h.buildMockResponseBytes(fallback); err == nil {
+		if out, err := h.buildMockResponseBytes(fallback, takesChunks); err == nil {
 			return out
 		}
 	}
