@@ -1417,22 +1417,15 @@ func fallBackNamed(turn time.Time, back time.Duration, loc *time.Location) strin
 // appZoneHint is what a refusal of a value at a place learned with the
 // application's zone named as name (models.ClockOffset.AppZone), learned,
 // adds where this replay's own zone (s.Zone, as its tracker knows it) is
-// another, by its rules (its offset at the span's end and its next change,
-// never its name): the application may now write its clock there, and how
-// to replay it in the zone it was recorded in. "" where the two agree, or
-// either is not known.
+// another, by its rules (its offset at the span's end and at each change of
+// it in the year after: models.SameZoneAt; never its name): the
+// application may now write its clock there, and how to replay it in the
+// zone it was recorded in. "" where the two agree, or either is not known.
 func appZoneHint(name string, learned *time.Location, s Span) string {
-	if s.Zone == nil || learned == nil {
+	if s.Zone == nil || learned == nil || models.SameZoneAt(s.Zone, learned, s.To) {
 		return ""
 	}
-	a, b := s.To.In(s.Zone), s.To.In(learned)
-	_, oa := a.Zone()
-	_, ob := b.Zone()
-	_, ea := a.ZoneBounds()
-	_, eb := b.ZoneBounds()
-	if oa == ob && ea.Equal(eb) {
-		return ""
-	}
+	a := s.To.In(s.Zone)
 	own := s.Zone.String()
 	if own == "" || own == "Local" || own[0] == '+' || own[0] == '-' {
 		own = "a zone at UTC" + a.Format("-07:00")
