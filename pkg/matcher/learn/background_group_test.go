@@ -88,6 +88,46 @@ func TestABackgroundPollIsBoundedByItsOwnGroupsServeNotByAnotherFlows(t *testing
 	}
 }
 
+// A serve of the poll's own group made at the very instant the poll reached
+// keploy (another poller's run of the same work, answered as this one
+// arrived) is not made before the poll's arrival, so the poll read its clock
+// after no such serve: the bound is the group's serve before it, under the
+// proven switch (the learn tracker) and with it off (the serve clock), and
+// the poll's read between the two holds. Mutation: keep a serve made at
+// arrival as the bound.
+func TestABackgroundPollsGroupServedAtItsArrivalIsNotItsBound(t *testing.T) {
+	base := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	ahead := 51 * time.Second
+	early := runWrite{from: base, to: base.Add(5 * time.Millisecond), offset: ahead}
+	clock := &runClock{writes: []runWrite{early}}
+	prevPoll, read, arrival := base.Add(1900*time.Millisecond), base.Add(1990*time.Millisecond), base.Add(2017*time.Millisecond)
+	stamp := EpochOffset{Res: time.Second}
+	v := epochSecond(read.Add(ahead))
+
+	tr := NewTracker()
+	tr.SetAppClock(clock.at)
+	tr.SetAppClockRun(clock.began)
+	tr.SetAppClockShown(clock.shown)
+	tr.ServedMockAt(&models.Mock{Name: "poll-1", Kind: models.Mongo}, prevPoll)
+	tr.ServedMockAt(&models.Mock{Name: "poll-2", Kind: models.Mongo}, arrival)
+	spans, ok := CallSpansOf(WithTracker(context.Background(), tr), arrival, bgPolls)
+	if !ok || len(spans) != 1 || spans[0].From != prevPoll.Add(ahead) || spans[0].To != arrival.Add(ahead) {
+		t.Fatalf("spans = %+v,%v; want the one from the group's serve before arrival, %v..%v", spans, ok, prevPoll.Add(ahead), arrival.Add(ahead))
+	}
+	if !stamp.HoldsIn(v, spans) {
+		t.Fatalf("%s, read after the group's serve before arrival, holds in none of %+v", v, spans)
+	}
+
+	sc := &ServeClock{}
+	sc.SetClock(func(r time.Time) (time.Time, bool) { return r.Add(ahead), true })
+	serveMockAt(t, sc, "poll-1", prevPoll)
+	serveMockAt(t, sc, "poll-2", arrival)
+	spans, ok = CallSpansOf(WithServeClock(context.Background(), sc), arrival, bgPolls)
+	if !ok || len(spans) != 1 || spans[0].From != prevPoll.Add(ahead) || !stamp.HoldsIn(v, spans) {
+		t.Fatalf("serve clock spans = %+v,%v; want the one from the group's serve before arrival, holding %s", spans, ok, v)
+	}
+}
+
 // The test's begin moves the clock forward while a poll's read is in
 // flight, and the test's own call is served after the move and before the
 // poll reaches keploy: the poll's spans run from its group's previous serve

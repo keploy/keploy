@@ -3103,8 +3103,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// A stack this set started, or one reused whose app starts for
 			// the first time, starts its app anew; one started again below
 			// is anew only where its start says so.
-			if composeRestart == nil {
-				r.appStartsAnew()
+			if composeRestart == nil && r.appStartsAnew() {
+				r.tellAppStartsAnew(runTestSetCtx, testSetID, testCases)
 			}
 		}
 
@@ -3135,7 +3135,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// reason says which: an unread container was not found running.
 			switch start {
 			case models.ComposeAppStartedAnew:
-				r.appStartsAnew()
+				if r.appStartsAnew() {
+					r.tellAppStartsAnew(runTestSetCtx, testSetID, testCases)
+				}
 			case models.ComposeAppFoundRunning:
 				r.lossAppKept = "keploy found the application's container still running when it started it for this test-set (its stop at an earlier test-set's end did not end it, or a start keploy was told failed was carried out by the docker daemon)"
 			default:
@@ -3309,7 +3311,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// this set's application starts are not this one's, nor what
 				// an earlier application's processes lost.
 				r.markReadiness(runTestSetCtx)
-				r.appStartsAnew()
+				if r.appStartsAnew() {
+					r.tellAppStartsAnew(runTestSetCtx, testSetID, testCases)
+				}
 				runTestSetErrGrp.Go(func() error {
 					if appExited != nil {
 						defer close(appExited)

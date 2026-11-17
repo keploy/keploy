@@ -1267,6 +1267,15 @@ type AfterTestRunReq struct {
 	Coverage   TestCoverage `json:"coverage"`
 }
 
+// AppStartsAnewReq tells the agent that keploy starts the application anew
+// for the test set TestSetID: no process of an earlier application runs on.
+// FirstRecorded is the earliest instant one of the set's test cases was
+// recorded at (its request's), zero where the set has none.
+type AppStartsAnewReq struct {
+	TestSetID     string    `json:"testSetID"`
+	FirstRecorded time.Time `json:"firstRecorded"`
+}
+
 type AppStart struct {
 	At   time.Time `json:"at"`
 	PID  uint32    `json:"pid"`

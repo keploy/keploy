@@ -1376,6 +1376,17 @@ func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string
 	})
 }
 
+// AppStartsAnew tells the agent that keploy starts the application anew for
+// the test set testSetID, whose test cases' earliest recorded request is at
+// first (agent.AppStartHook). It is not made again on a restarted agent: the
+// application it serves is the one that started.
+func (a *AgentClient) AppStartsAnew(ctx context.Context, testSetID string, first time.Time) error {
+	return a.callHook(ctx, "/hooks/app-starts-anew", models.AppStartsAnewReq{
+		TestSetID:     testSetID,
+		FirstRecorded: first,
+	})
+}
+
 func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 	return a.callHook(ctx, "/hooks/after-test-run", models.AfterTestRunReq{
 		TestRunID:  testRunID,
