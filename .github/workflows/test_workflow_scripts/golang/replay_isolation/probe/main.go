@@ -8,6 +8,8 @@
 //	egressprobe ask   IP NAME           asks the DNS server at IP:53 for NAME
 //	                                    (A, over UDP) and prints "answered
 //	                                    rcode=N", or why it got no answer (exit 1)
+//	egressprobe runner -url URL [-n N]  a compose stack's test driver: waits for URL/health,
+//	                                    then GETs URL/health?n=1..N and exits 0
 //	egressprobe fork1|fork2 ADDR        the double-forked child path (internal)
 //
 // The sink owns the test addresses on its own interface, among them the one
@@ -21,6 +23,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -52,7 +55,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|oneshot|fork1|fork2 ...")
+		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|oneshot|runner|fork1|fork2 ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -73,6 +76,8 @@ func main() {
 		fmt.Printf("answered rcode=%d\n", rcode)
 	case "oneshot": // exits 0 at once, as a compose stack's one-shot migration does
 		os.Exit(0)
+	case "runner":
+		runner(os.Args[2:])
 	case "fork1": // starts fork2 and exits at once, so fork2 is reparented
 		c := exec.Command("/proc/self/exe", "fork2", os.Args[2], os.Args[3])
 		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -86,6 +91,49 @@ func main() {
 	default:
 		os.Exit(2)
 	}
+}
+
+// runner drives the app as a compose stack's test-driver service does (the
+// service `docker compose up --exit-code-from` names): it waits until
+// URL/health answers, makes N more calls, each with its own query so each is
+// its own test, says so with the time on stdout ("RUNNER DONE <unix
+// seconds>", which compose shows in keploy's log) and exits 0. It exits 2 if
+// the app never answers and 3 if a call fails.
+func runner(args []string) {
+	fs := flag.NewFlagSet("runner", flag.ExitOnError)
+	base := fs.String("url", "", "the app's base URL")
+	n := fs.Int("n", 5, "the calls made once the app answers")
+	_ = fs.Parse(args)
+	c := &http.Client{Timeout: 10 * time.Second}
+	get := func(u string) error {
+		resp, err := c.Get(u)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("status %d", resp.StatusCode)
+		}
+		return nil
+	}
+	up := false
+	for i := 0; i < 240 && !up; i++ {
+		if up = get(*base+"/health") == nil; !up {
+			time.Sleep(time.Second)
+		}
+	}
+	if !up {
+		fmt.Fprintln(os.Stderr, "runner: the app never answered")
+		os.Exit(2)
+	}
+	for i := 1; i <= *n; i++ {
+		if err := get(fmt.Sprintf("%s/health?n=%d", *base, i)); err != nil {
+			fmt.Fprintf(os.Stderr, "runner: call %d: %v\n", i, err)
+			os.Exit(3)
+		}
+	}
+	fmt.Printf("RUNNER DONE %d\n", time.Now().Unix())
 }
 
 func outcome(path string, err error) {

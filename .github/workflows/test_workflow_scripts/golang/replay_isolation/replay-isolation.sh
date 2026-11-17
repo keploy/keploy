@@ -118,7 +118,8 @@ cleanup() {
 	[ -n "$SINKPID" ] && $S kill "$SINKPID" 2>/dev/null
 	[ ! -f "$W/compose/docker-compose.yml" ] || (cd "$W/compose" && docker compose down --remove-orphans >/dev/null 2>&1)
 	[ ! -f "$W/compose-base/docker-compose.yml" ] || (cd "$W/compose-base" && docker compose down --remove-orphans >/dev/null 2>&1)
-	docker rm -f riso-app riso-base riso-int-c riso-peer riso-oneshot >/dev/null 2>&1
+	[ ! -f "$W/compose-runner/docker-compose.yml" ] || (cd "$W/compose-runner" && docker compose down --remove-orphans >/dev/null 2>&1)
+	docker rm -f riso-app riso-base riso-int-c riso-peer riso-oneshot riso-runner >/dev/null 2>&1
 	docker network rm riso-int >/dev/null 2>&1
 	$S ip netns del riso-sink 2>/dev/null
 	$S ip link del riso-h 2>/dev/null
@@ -179,11 +180,14 @@ dns_why() {
 	esac
 }
 
-# compose_yml NAME HOSTPORT ARGS [peer] [oneshot]: a compose file whose
-# service is the probe run with ARGS, container NAME, its 8080 published on
-# HOSTPORT, the sink its DNS server; with "peer", also riso-peer, a container
-# the probe resolves by name; with "oneshot", also riso-oneshot, a container
-# that exits 0 as soon as it starts, as a stack's one-shot migration does.
+# compose_yml NAME HOSTPORT ARGS [peer] [oneshot] [runner]: a compose file
+# whose service is the probe run with ARGS, container NAME, its 8080 published
+# on HOSTPORT, the sink its DNS server; with "peer", also riso-peer, a
+# container the probe resolves by name; with "oneshot", also riso-oneshot, a
+# container that exits 0 as soon as it starts, as a stack's one-shot migration
+# does; with "runner", also the service runner (container riso-runner), a test
+# driver that calls the app through its published port, once its health check
+# answers 5 more times, and exits 0.
 compose_yml() {
 	cat > docker-compose.yml <<YML
 services:
@@ -206,6 +210,14 @@ YML
     image: riso-probe:local
     container_name: riso-oneshot
     command: ["oneshot"]
+YML
+	;; esac
+	case " ${*:4} " in *" runner "*) cat >> docker-compose.yml <<YML
+  runner:
+    image: riso-probe:local
+    container_name: riso-runner
+    command: ["runner", "-url", "http://host.docker.internal:$2", "-n", "5"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
 YML
 	;; esac
 }
@@ -655,6 +667,27 @@ for mode in "${MODES[@]}"; do
 		killer=$!
 		replay replay-compose-agent -c "docker compose up" --containerName riso-app --delay 20
 		kill $killer 2>/dev/null; wait $killer 2>/dev/null
+		# `up riso-app` attaches compose to the application alone, so its up
+		# returns as soon as keploy stops the application: keploy holds the
+		# run until its own teardown, so the read after the last test is
+		# made with its agent still up (rows_after_last).
+		compose_yml riso-app 8080 "$APPARGS"
+		replay replay-compose-app -c "docker compose up riso-app" --containerName riso-app --delay 10
+
+		# The user's own `--exit-code-from runner`: keploy record ends when
+		# the test-driver service exits, with its code (0 here), at once, and
+		# holds what the runner sent: its health check and its 5 calls.
+		# timeout stops a record that would run on.
+		mkdir -p "$W/compose-runner" && cd "$W/compose-runner" || die cd
+		compose_yml riso-app 8080 "$RECARGS" runner
+		log "record-compose-runner"
+		sink_start record-compose-runner
+		$S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" timeout -s INT -k 30 240 "$KEPLOY" record -c "docker compose up --exit-code-from runner" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose-runner/keploy.log" 2>&1
+		echo $? > "$W/out/record-compose-runner/exit"
+		date +%s > "$W/out/record-compose-runner/ended"
+		echo "record-compose-runner exit $(cat "$W/out/record-compose-runner/exit")"
+		docker compose down --remove-orphans >/dev/null 2>&1
+		sink_stop
 		cd "$W" || die cd
 		;;
 	internal)
@@ -818,6 +851,25 @@ for mode in "${MODES[@]}"; do
 		row_log "replay-compose-dns: the agent gets the opt-in" "$W/out/replay-compose-dns/keploy.log" "$EGRESS_DNS"
 		rows_reach replay-compose-dns dns-udp
 		rows_recorded_nx compose
+		# `up riso-app`: its up returned at keploy's stop of the application,
+		# and the run read the calls after the last test from its agent.
+		row "replay-compose-app passes" "$([ "$(cat "$W/out/replay-compose-app/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-app/exit" 2>/dev/null)"
+		rows_mode replay-compose-app
+		rows_startup replay-compose-app
+		rows_after_last replay-compose-app
+		row_nolog "replay-compose-app read every call made after the last test" "$W/out/replay-compose-app/keploy.log" 'could not read every call the application made after'
+		row_nolog "replay-compose-app does not name keploy's agent as stopped" "$W/out/replay-compose-app/keploy.log" "keploy's agent container [^ ]* exited with code"
+		# `up --exit-code-from runner` at record: it ended on the runner's
+		# exit, with its code, within a minute of the runner's last line
+		# (before, compose's own abort; a run that went on until timeout's
+		# stop is 124), and holds the runner's 6 calls.
+		rexit=$(cat "$W/out/record-compose-runner/exit" 2>/dev/null)
+		rdone=$(grep -aoE 'RUNNER DONE [0-9]+' "$W/out/record-compose-runner/keploy.log" 2>/dev/null | head -1 | awk '{print $3}')
+		rend=$(cat "$W/out/record-compose-runner/ended" 2>/dev/null)
+		row "record-compose-runner ends with the runner's code, 0" "$([ "$rexit" = 0 ] && echo 1)" "exit ${rexit:-none}"
+		row "record-compose-runner ends within 60 s of the runner's last line" "$([ -n "$rdone" ] && [ -n "$rend" ] && [ $((rend - rdone)) -le 60 ] && echo 1)" "$([ -n "$rdone" ] && [ -n "$rend" ] && echo "$((rend - rdone)) s after RUNNER DONE" || echo 'no RUNNER DONE line in its log')"
+		rtests=$(ls "$W"/compose-runner/keploy/test-set-*/tests/*.yaml 2>/dev/null | wc -l)
+		row "record-compose-runner records the runner's 6 calls" "$([ "$rtests" = 6 ] && echo 1)" "$rtests tests"
 		;;
 	esac
 done
