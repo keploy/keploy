@@ -328,8 +328,10 @@ func gitConfigValue(v string) string {
 		case '"':
 			quoted = !quoted
 		case '\\':
-			i++
-			b.WriteByte(gitEscape(v[i]))
+			// Never at the end: that one ended the value above.
+			if i++; i < len(v) {
+				b.WriteByte(gitEscape(v[i]))
+			}
 		default:
 			b.WriteByte(c)
 		}
