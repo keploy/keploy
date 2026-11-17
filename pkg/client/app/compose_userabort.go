@@ -203,20 +203,29 @@ var composeWaitConditions = map[string]bool{"service_completed_successfully": tr
 
 // composeWaitingDependents are, by service, the services of compose that
 // depend on it with a condition compose's up waits on (composeWaitConditions).
+//
+// Every read here is compose's (docker.MappingEntries): through aliases and
+// `<<` merge keys, so a depends_on a service inherits from an anchor, or
+// whose entries or conditions are anchored, is the one compose's up waits on.
 func composeWaitingDependents(compose *docker.Compose) map[string][]string {
 	by := map[string][]string{}
-	for _, name := range composeServiceNames(compose) {
-		on := composeServiceField(composeServiceNode(compose, name), "depends_on")
-		if on == nil || on.Kind != yaml.MappingNode {
-			continue
-		}
-		for i := 0; i+1 < len(on.Content); i += 2 {
-			if cond := composeServiceField(on.Content[i+1], "condition"); cond != nil && composeWaitConditions[cond.Value] {
-				by[on.Content[i].Value] = append(by[on.Content[i].Value], name)
+	for _, svc := range composeServiceEntries(compose) {
+		for _, dep := range docker.MappingEntries(composeServiceField(svc.Value, "depends_on")) {
+			if cond := composeServiceField(dep.Value, "condition"); cond != nil && composeWaitConditions[cond.Value] {
+				by[dep.Key.Value] = append(by[dep.Key.Value], svc.Key.Value)
 			}
 		}
 	}
 	return by
+}
+
+// composeServiceEntries are compose's services, read as compose reads them
+// (docker.MappingEntries); nil for no compose.
+func composeServiceEntries(compose *docker.Compose) []docker.YAMLEntry {
+	if compose == nil {
+		return nil
+	}
+	return docker.MappingEntries(&compose.Services)
 }
 
 // composeServiceNode is the mapping of service name in compose; nil when it
@@ -225,24 +234,16 @@ func composeServiceNode(compose *docker.Compose, name string) *yaml.Node {
 	if compose == nil {
 		return nil
 	}
-	c := compose.Services.Content
-	for i := 0; i+1 < len(c); i += 2 {
-		if c[i].Value == name && c[i+1].Kind == yaml.MappingNode {
-			return c[i+1]
-		}
-	}
-	return nil
+	return composeServiceField(&compose.Services, name)
 }
 
-// composeServiceField is the value of key in a service's mapping; nil when
+// composeServiceField is the value of key in a mapping (a service's, or one
+// of its fields), read as compose reads it (docker.MappingEntries); nil when
 // it has none.
-func composeServiceField(svc *yaml.Node, key string) *yaml.Node {
-	if svc == nil {
-		return nil
-	}
-	for i := 0; i+1 < len(svc.Content); i += 2 {
-		if svc.Content[i].Value == key {
-			return svc.Content[i+1]
+func composeServiceField(m *yaml.Node, key string) *yaml.Node {
+	for _, e := range docker.MappingEntries(m) {
+		if e.Key.Value == key {
+			return e.Value
 		}
 	}
 	return nil
@@ -251,9 +252,9 @@ func composeServiceField(svc *yaml.Node, key string) *yaml.Node {
 // composeAttachOff are compose's services set `attach: false`.
 func composeAttachOff(compose *docker.Compose) []string {
 	var off []string
-	for _, name := range composeServiceNames(compose) {
-		if v := composeServiceField(composeServiceNode(compose, name), "attach"); v != nil && v.Value == "false" {
-			off = append(off, name)
+	for _, svc := range composeServiceEntries(compose) {
+		if v := composeServiceField(svc.Value, "attach"); v != nil && v.Value == "false" {
+			off = append(off, svc.Key.Value)
 		}
 	}
 	return off
@@ -279,11 +280,11 @@ func composeDependencies(compose *docker.Compose, services []string) []string {
 		switch on.Kind {
 		case yaml.SequenceNode:
 			for _, n := range on.Content {
-				names = append(names, n.Value)
+				names = append(names, docker.AliasTarget(n).Value)
 			}
 		case yaml.MappingNode:
-			for i := 0; i+1 < len(on.Content); i += 2 {
-				names = append(names, on.Content[i].Value)
+			for _, e := range docker.MappingEntries(on) {
+				names = append(names, e.Key.Value)
 			}
 		}
 		for _, n := range names {

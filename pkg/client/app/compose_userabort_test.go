@@ -649,6 +649,18 @@ func TestTheSetupSaysItDoesWhatTheAbortFlagsSay(t *testing.T) {
 // is taken for one that has not started.
 func TestAnExitBeforeTheAppStartedEndsTheRunUnlessComposesUpWaitsOnIt(t *testing.T) {
 	doc := `
+x-waits: &waits
+  depends_on:
+    seed:
+      condition: service_completed_successfully
+x-healthy: &healthy
+  condition: service_healthy
+x-deps: &deps
+  warm:
+    <<: *healthy
+x-seeded: &seeded
+  prime:
+    condition: service_completed_successfully
 services:
   app:
     image: app
@@ -678,11 +690,24 @@ services:
     depends_on:
       lone:
         condition: service_completed_successfully
+  inherit:
+    <<: *waits
+    image: inherit
+  aliased:
+    image: aliased
+    depends_on: *deps
+  fragment:
+    image: fragment
+    depends_on:
+      <<: *seeded
   migrate: {image: migrate}
   db: {image: db}
   cache: {image: cache}
   early: {image: early}
   lone: {image: lone}
+  seed: {image: seed}
+  warm: {image: warm}
+  prime: {image: prime}
 `
 	const exit, failure = "docker compose up --abort-on-container-exit", "docker compose up --abort-on-container-failure"
 	for _, proven := range []string{"", "1"} {
@@ -728,6 +753,14 @@ services:
 						d.add("api-id", "api", runningState(started))
 						d.listFails = "api"
 					}},
+				{name: "a one-shot a service waits on through a merge key exits 0", cmd: exit, service: "seed", code: 0, waiting: "inherit",
+					setup: func(d *abortDocker, _ time.Time) { d.add("inherit-id", "inherit", container.State{Status: "created"}) }},
+				{name: "a cache a service waits on through an alias and a merged condition crashes", cmd: exit, service: "warm", code: 2, waiting: "aliased",
+					setup: func(d *abortDocker, _ time.Time) { d.add("aliased-id", "aliased", container.State{Status: "created"}) }},
+				{name: "a one-shot a service waits on through a merge key in its depends_on fails", cmd: failure, service: "prime", code: 1, waiting: "fragment",
+					setup: func(d *abortDocker, _ time.Time) {
+						d.add("fragment-id", "fragment", container.State{Status: "created"})
+					}},
 				{name: "a one-shot whose dependent is not the up's exits 0", cmd: exit, service: "lone", code: 0},
 				{name: "a service that others depend on to start only exits 3", cmd: exit, service: "early", code: 3,
 					setup: func(d *abortDocker, _ time.Time) {
@@ -772,5 +805,55 @@ services:
 				}
 			}
 		}
+	}
+}
+
+// compose's fields are read as compose reads the file, through its anchors:
+// an `attach: false` and a depends_on a service inherits with `<<`, a
+// depends_on that is an alias, an aliased name in its list, and a service
+// keploy reads only through a merge key on `services:` itself.
+func TestTheAbortReadsTakeComposesAnchors(t *testing.T) {
+	doc := composeDoc(t, `
+x-quiet: &quiet
+  attach: false
+x-needs-db: &needsdb
+  depends_on:
+    db:
+      condition: service_healthy
+x-cache: &cachename cache
+x-after: &after [app, *cachename]
+x-extra: &extra
+  sidecar:
+    image: sidecar
+    <<: *quiet
+services:
+  <<: *extra
+  app:
+    <<: *needsdb
+    image: app
+  runner:
+    image: runner
+    depends_on: *after
+  logs:
+    <<: *quiet
+    image: logs
+  loud:
+    <<: *quiet
+    image: loud
+    attach: true
+  db: {image: db}
+  cache: {image: cache}
+`)
+	if off := composeAttachOff(doc); !slices.Equal(off, []string{"logs", "sidecar"}) {
+		t.Fatalf("attach: false on %v; want logs and sidecar (loud sets attach: true itself)", off)
+	}
+	if deps := composeDependencies(doc, []string{"runner"}); !slices.Equal(deps, []string{"app", "cache", "db"}) {
+		t.Fatalf("runner's dependencies %v; want app, cache and db", deps)
+	}
+	if by := composeWaitingDependents(doc); len(by) != 1 || !slices.Equal(by["db"], []string{"app"}) {
+		t.Fatalf("waiting dependents %v; want app waiting on db", by)
+	}
+	if composeServiceNode(nil, "app") != nil || composeAttachOff(nil) != nil {
+		t.Fatal("no compose read a service")
 	}
 }
