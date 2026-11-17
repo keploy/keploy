@@ -631,6 +631,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// The miss was decided where the request first read the
 				// round: whether that read found a staging is told from it.
 				integrations.StampMark(report, call)
+				// A call that is one more run of the application's
+				// background work (the same request as one of the set's
+				// worker: or startup: recordings, apart from noise and
+				// reads of the clock) is marked so: listed, it counts
+				// against no test (background_mark.go).
+				h.markBackground(reqCtx, report, input, mockDb, call, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(mockDb))
 				// A call that is a recording made elsewhere (another test's,
 				// or a worker-scope one not reached yet) is named as that
 				// recording: it did not change, so no learn-step reason
