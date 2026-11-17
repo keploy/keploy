@@ -846,8 +846,14 @@ func (a *App) signalComposeApp(ctx context.Context, id, signal string) error {
 // the daemon's no-op); models.ComposeAppUnread where the daemon gave no
 // answer of it for utils.StopStallBudget of keploy's runnable time, or the
 // start failed (err). Neither of the last two is a new app: it may be the one
-// that ran before.
-func (a *App) StartComposeApp(ctx context.Context) (start models.ComposeAppStart, err error) {
+// that ran before. anew (never nil) is called where the inspect read the
+// container not running, before the docker start, under the stop's lock: a
+// new app is told to whoever must know before its first instruction runs
+// (keploy's agent, whose clock a new process must find at its own set's
+// first case, never at a later instant only the app before it read). It is
+// called whatever the start then answers: a container read not running holds
+// no process of the app before it, so whatever runs in it next is a new one.
+func (a *App) StartComposeApp(ctx context.Context, anew func()) (start models.ComposeAppStart, err error) {
 	// Under stopMu, as keploy's stops are made and the watch decides
 	// (composeAppDied): a die the watch takes during the start is told
 	// apart by the container running once it is through.
@@ -868,6 +874,7 @@ func (a *App) StartComposeApp(ctx context.Context) (start models.ComposeAppStart
 		start = models.ComposeAppFoundRunning
 		if !info.State.Running {
 			start = models.ComposeAppStartedAnew
+			anew()
 		}
 	}
 	// Bounded only as a hang guard (utils.StopStallBudget), as the stop's

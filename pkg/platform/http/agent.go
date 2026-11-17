@@ -2567,13 +2567,14 @@ func (a *AgentClient) StopComposeApp(ctx context.Context) (string, error) {
 }
 
 // StartComposeApp starts the app's container of a docker compose stack again
-// after StopComposeApp (app.App.StartComposeApp, P101-c).
-func (a *AgentClient) StartComposeApp(ctx context.Context) (models.ComposeAppStart, error) {
+// after StopComposeApp (app.App.StartComposeApp, P101-c), calling anew before
+// the start where the container was read not running.
+func (a *AgentClient) StartComposeApp(ctx context.Context, anew func()) (models.ComposeAppStart, error) {
 	app, err := a.getApp()
 	if err != nil {
 		return models.ComposeAppUnread, err
 	}
-	return app.StartComposeApp(ctx)
+	return app.StartComposeApp(ctx, anew)
 }
 
 // startAgent starts the keploy agent process and handles its lifecycle.

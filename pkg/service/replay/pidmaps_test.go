@@ -1393,7 +1393,7 @@ type composeStartsInstr struct {
 	failStarts int
 }
 
-func (c *composeStartsInstr) StartComposeApp(context.Context) (models.ComposeAppStart, error) {
+func (c *composeStartsInstr) StartComposeApp(context.Context, func()) (models.ComposeAppStart, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.starts++

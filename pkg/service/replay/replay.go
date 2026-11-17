@@ -3119,11 +3119,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		// A stack kept across sets has its app, which the last set's end
 		// stopped, started again now: this set is staged on the agent and
-		// its pids are marked, so its startup is this set's.
+		// its pids are marked, so its startup is this set's. A container
+		// read not running starts a new app: the agent is told before the
+		// docker start, as for a stack this set brings up, so the new
+		// process's first clock read is already at this set's first case,
+		// never at a later instant only the app before it read (told after
+		// the start, the app could read that instant, then the agent's move
+		// to the set's first case put its clock back).
 		if composeRestart != nil {
-			start, err := composeRestart.StartComposeApp(ctx)
+			start, err := composeRestart.StartComposeApp(ctx, func() {
+				if r.appStartsAnew() {
+					r.tellAppStartsAnew(runTestSetCtx, testSetID, testCases)
+				}
+			})
 			if err != nil {
-				// The base stays: the daemon may have carried the start out.
+				// The base stays where the container was not read not
+				// running: the daemon may have carried the start out. One
+				// read not running had its base taken before the start: it
+				// held no process of the app before it, so whatever runs in
+				// it next is a new app.
 				utils.LogError(r.logger, err, "keploy could not start the application's container again for this test-set", zap.String("test-set", testSetID))
 				return models.TestSetStatusAppHalted, err
 			}
@@ -3135,9 +3149,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// reason says which: an unread container was not found running.
 			switch start {
 			case models.ComposeAppStartedAnew:
-				if r.appStartsAnew() {
-					r.tellAppStartsAnew(runTestSetCtx, testSetID, testCases)
-				}
+				// Its base was taken, and the agent told, before its start
+				// (above).
 			case models.ComposeAppFoundRunning:
 				r.lossAppKept = "keploy found the application's container still running when it started it for this test-set (its stop at an earlier test-set's end did not end it, or a start keploy was told failed was carried out by the docker daemon)"
 			default:
