@@ -68,7 +68,7 @@ func TestTheClientsAnswerIsWaitedForOffTheForwardingPath(t *testing.T) {
 	t.Parallel()
 	app, proxyClient := loopbackPair(t)
 	proxyServer, server := loopbackPair(t)
-	r := New(Config{Logger: zap.NewNop(), HalfCloseGrace: time.Minute}, proxyClient, connseq.NewUpstream(proxyServer))
+	r := New(Config{Logger: zap.NewNop(), HalfCloseGrace: time.Minute}, CountClientWrites(proxyClient), connseq.NewUpstream(proxyServer))
 	sock := &scriptedSocket{script: []clientLook{finned(0)}}
 	r.client = sock
 	ctx, cancel := context.WithCancel(context.Background())
@@ -118,7 +118,7 @@ func TestAnAcknowledgementOfBytesWrittenBeforeAChunkTakesNoneOfIt(t *testing.T) 
 	t.Parallel()
 	app, proxyClient := loopbackPair(t)
 	proxyServer, server := loopbackPair(t)
-	r := New(Config{Logger: zap.NewNop(), HalfCloseGrace: time.Minute}, proxyClient, connseq.NewUpstream(proxyServer))
+	r := New(Config{Logger: zap.NewNop(), HalfCloseGrace: time.Minute}, CountClientWrites(proxyClient), connseq.NewUpstream(proxyServer))
 	// The client's FIN is in, with 100 of the 200 bytes written acknowledged.
 	sock := &scriptedSocket{script: []clientLook{finned(100)}, wrote: 200}
 	r.client = sock
@@ -378,7 +378,7 @@ func TestAClientThatNeverAnswersHasItsAnswerTeedBeforeTheRelayEnds(t *testing.T)
 	t.Parallel()
 	app, proxyClient := loopbackPair(t)
 	proxyServer, server := loopbackPair(t)
-	r := New(Config{Logger: zap.NewNop(), HalfCloseGrace: 50 * time.Millisecond}, proxyClient, connseq.NewUpstream(proxyServer))
+	r := New(Config{Logger: zap.NewNop(), HalfCloseGrace: 50 * time.Millisecond}, CountClientWrites(proxyClient), connseq.NewUpstream(proxyServer))
 	r.client = &slowLastLook{s: &scriptedSocket{script: []clientLook{finned(0)}}, last: r.lastLook}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -687,8 +687,11 @@ func TestAfterTheClientHalfClosed_AClientNotReadingYetIsWaitedFor(t *testing.T) 
 	app, proxyClient := dialSmallWindow(t)
 	proxyServer, server := loopbackPair(t)
 	core, logs := observer.New(zapcore.DebugLevel)
-	// The test counts what the relay writes to the client itself (seenWrites).
-	seen := &seenWrites{Conn: proxyClient}
+	// The test counts what the relay writes to the client itself (seenWrites),
+	// over the count the proxy puts on the socket as it accepts it
+	// (CountClientWrites), which macOS reads what the client acknowledged
+	// from.
+	seen := &seenWrites{Conn: CountClientWrites(proxyClient)}
 	r := New(Config{Logger: zap.New(core), HalfCloseGrace: time.Minute}, seen, connseq.NewUpstream(proxyServer))
 	looks := &countedLooks{clientSocket: r.client}
 	r.client = looks

@@ -212,7 +212,7 @@ func TestAfterTheClientHalfClosed_EveryAnswerItTakesIsTeed(t *testing.T) {
 	app, proxyClient := loopbackPair(t)
 	proxyServer, server := loopbackPair(t)
 	core, logs := observer.New(zapcore.DebugLevel)
-	r := New(Config{Logger: zap.New(core)}, proxyClient, connseq.NewUpstream(proxyServer))
+	r := New(Config{Logger: zap.New(core)}, CountClientWrites(proxyClient), connseq.NewUpstream(proxyServer))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); _ = r.Run(ctx) }()
@@ -392,7 +392,7 @@ func TestAChunkTheClientRefusedMarksNoMockIncomplete(t *testing.T) {
 			Logger:               zap.New(core),
 			ClientStopped:        func(func() []byte) { stops.Add(1) },
 			OnMarkMockIncomplete: func(reason string) { m := append(append([]string(nil), *marks.Load()...), reason); marks.Store(&m) },
-		}, proxyClient, connseq.NewUpstream(proxyServer))
+		}, CountClientWrites(proxyClient), connseq.NewUpstream(proxyServer))
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() { defer close(done); _ = r.Run(ctx) }()

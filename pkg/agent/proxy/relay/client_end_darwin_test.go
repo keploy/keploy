@@ -194,7 +194,7 @@ func TestXNUATCPInfoThatCannotBeReadTeesEveryChunk(t *testing.T) {
 			app, proxyClient := loopbackPair(t)
 			proxyServer, server := loopbackPair(t)
 			core, logs := observer.New(zapcore.DebugLevel)
-			r := New(Config{Logger: zap.New(core)}, proxyClient, connseq.NewUpstream(proxyServer))
+			r := New(Config{Logger: zap.New(core)}, CountClientWrites(proxyClient), connseq.NewUpstream(proxyServer))
 			s := r.client.(*tcpClientSocket)
 			s.getInfo, s.fallback = row.get, &infoFallback{}
 			ctx, cancel := context.WithCancel(context.Background())
