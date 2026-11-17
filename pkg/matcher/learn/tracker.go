@@ -2723,8 +2723,12 @@ func (lc liveClock) liveSpan(arrival time.Time, owner ServeOwner) (Span, bool) {
 // request reached the application (SetAppClockRun). A background poller's
 // read is bounded by no such move: the application may have read its
 // clock for the call before the move and sent the call after it, as a
-// timer's poll made as a test begins or ends is. false where LiveSpanOf's
-// is.
+// timer's poll made as a test begins or ends is. Where LiveSpanOf's is
+// none because the hooks cannot tell where the clock's run to arrival
+// began (a move still being written at arrival, which the application may
+// have read on either offset), the spans are what the clock showed from
+// that bound to arrival alone (liveClock.shownTo). false where neither
+// tells one.
 func (t *Tracker) BackgroundSpans(arrival time.Time) ([]Span, bool) {
 	if t == nil {
 		return nil, false
@@ -2732,7 +2736,7 @@ func (t *Tracker) BackgroundSpans(arrival time.Time) ([]Span, bool) {
 	lc, _ := t.liveClockAtOf(arrival, false, nil)
 	s, ok := lc.liveSpan(arrival, OwnerUnknown)
 	if !ok {
-		return nil, false
+		return lc.shownTo(arrival)
 	}
 	return append(lc.before(arrival), s), true
 }
@@ -2832,6 +2836,35 @@ func (lc liveClock) before(arrival time.Time) []Span {
 	if !ok {
 		return nil
 	}
+	return lc.inZone(shown)
+}
+
+// shownTo is what the app's clock showed from the bound a span to arrival
+// is read from (setBound) to arrival, a span per run of it as the hooks
+// tell it (SetAppClockShown), each in lc's zone: the spans of a background
+// call whose span to arrival the hooks cannot tell (BackgroundSpans). A
+// clock move still being written at arrival is told in both offsets, the
+// one it leaves and the one it writes: the application may have read
+// either for the call. false where no bound is known (the clock may have
+// moved before any instant told) or the hooks tell no spans shown, or
+// cannot tell one of them (a write that failed part way, a window).
+func (lc liveClock) shownTo(arrival time.Time) ([]Span, bool) {
+	if lc.shown == nil {
+		return nil, false
+	}
+	bound := lc.setBound()
+	if bound.IsZero() {
+		return nil, false
+	}
+	shown, ok := lc.shown(bound, arrival)
+	if !ok {
+		return nil, false
+	}
+	return lc.inZone(shown), true
+}
+
+// inZone is shown, each span in lc's zone.
+func (lc liveClock) inZone(shown []Span) []Span {
 	spans := make([]Span, 0, len(shown))
 	for _, s := range shown {
 		spans = append(spans, Span{From: s.From, To: s.To, Zone: lc.zone})
