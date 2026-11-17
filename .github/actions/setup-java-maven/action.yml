@@ -1,5 +1,5 @@
 name: setup-java-maven
-description: "Set up a Temurin JDK and restore ~/.m2/repository for a Maven build, keyed by what decides its artifacts; the build's declared mvn command lines then run offline on it"
+description: "Set up a Temurin JDK and restore ~/.m2/repository for a Maven build, keyed by the Maven, JDK, configuration and poms; mvn then runs offline on it, and heals it when it falls short"
 
 # In place of actions/setup-java's own `cache: maven`, whose key (OS, arch,
 # pom hash) stays the same when the runner image changes its Maven. A local
@@ -9,9 +9,12 @@ description: "Set up a Temurin JDK and restore ~/.m2/repository for a Maven buil
 # Central again, on every run, since a cache entry is never replaced.
 #
 # Use it with ./.github/actions/setup-java-maven/save as a step after the
-# build. maven-cache-key.sh says what the key covers, bin/mvn how a restored
-# cache is used (offline) and what happens when it cannot serve the build,
-# and save/save-plan.sh when and under which entry the repository is saved.
+# build. In a job that builds twice, put each use right before its own build:
+# mvn follows the latest use, and its runs count toward that use's save.
+# maven-cache-key.sh says what the key covers, bin/mvn how a restored
+# cache is used (offline) and how it heals when it cannot serve the build
+# (one online run, then a new entry), and save/save-plan.sh when and under
+# which entry the repository is saved.
 # Their tests (setup-java-maven.tests.sh) run in the lint workflow.
 inputs:
   java-version:
@@ -20,9 +23,6 @@ inputs:
   cache-dependency-path:
     required: true
     description: "The pom.xml files the build reads its dependencies from, one per line, relative to the workspace"
-  maven-args:
-    required: true
-    description: "The mvn command lines the build runs, one per line, as the lane passes them (-q, -B, -U, -e and the like do not count): their goals, profiles and -D properties decide its artifacts. These run offline on a restored cache; any other mvn runs online, with a warning."
 
 runs:
   using: composite
@@ -39,14 +39,14 @@ runs:
       env:
         MAVEN_CACHE_JAVA_VERSION: ${{ inputs.java-version }}
         MAVEN_CACHE_DEPENDENCY_PATH: ${{ inputs.cache-dependency-path }}
-        MAVEN_CACHE_MAVEN_ARGS: ${{ inputs.maven-args }}
       run: |
         key=$(bash "$GITHUB_ACTION_PATH/maven-cache-key.sh")
         echo "Maven repository cache key: $key"
         echo "key=$key" >> "$GITHUB_OUTPUT"
 
-    # Entries are saved as KEY-<suffix> (save/save-plan.sh); the newest one
-    # of this key is restored. No entry is ever saved as KEY itself.
+    # Entries are saved as KEY-<suffix> (save/save-plan.sh), and the newest
+    # one of this key is restored: after a heal, the healed one. No entry is
+    # ever saved as KEY itself.
     - name: Restore the Maven repository
       id: cache
       uses: actions/cache/restore@v4
@@ -60,5 +60,4 @@ runs:
       env:
         KEY: ${{ steps.key.outputs.key }}
         MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
-        MAVEN_CACHE_MAVEN_ARGS: ${{ inputs.maven-args }}
       run: bash "$GITHUB_ACTION_PATH/restored.sh"

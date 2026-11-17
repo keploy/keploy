@@ -97,7 +97,7 @@ own() { # own N SAVES: a workflow with N uses of setup-java-maven, SAVES save st
   printf 'jobs:\n  t:\n    steps:\n'
   local i
   for i in $(seq 1 "$1"); do
-    printf '      - uses: ./.github/actions/setup-java-maven\n        with:\n          java-version: "17"\n          cache-dependency-path: pom.xml\n          maven-args: clean package\n      - run: mvn clean package\n'
+    printf '      - uses: ./.github/actions/setup-java-maven\n        with:\n          java-version: "17"\n          cache-dependency-path: pom.xml\n      - run: mvn clean package\n'
   done
   for i in $(seq 1 "$2"); do printf '      - uses: ./.github/actions/setup-java-maven/save\n'; done
 }

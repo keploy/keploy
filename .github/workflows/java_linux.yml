@@ -49,7 +49,6 @@ jobs:
         with:
           java-version: "17"
           cache-dependency-path: samples-java/${{ matrix.app.path }}/pom.xml
-          maven-args: -B -U clean install -Dmaven.test.skip=true
 
       - name: Run the ${{ matrix.app.name }} app
         env:
@@ -137,7 +136,6 @@ jobs:
         with:
           java-version: "17"
           cache-dependency-path: samples-java/mysql-dual-conn/pom.xml
-          maven-args: -B -U clean package -Dmaven.test.skip=true -q
 
       - name: Run mysql-dual-conn app
         env:
@@ -221,7 +219,6 @@ jobs:
         with:
           java-version: "17"
           cache-dependency-path: samples-java/mysql-dual-conn/pom.xml
-          maven-args: -B -U clean package -Dmaven.test.skip=true -q
 
       - name: Run mysql-dual-conn app on a non-default MySQL port
         env:
@@ -307,7 +304,6 @@ jobs:
         with:
           java-version: "17"
           cache-dependency-path: samples-java/tidb-stmt-cache/pom.xml
-          maven-args: -B -U clean package -Dmaven.test.skip=true -q
 
       - name: Run tidb-stmt-cache app
         env:
@@ -370,9 +366,6 @@ jobs:
           cache-dependency-path: |
             .github/workflows/test_workflow_scripts/java/mysql_unbound_types/app/pom.xml
             .github/workflows/test_workflow_scripts/java/mysql_unbound_types/app/pom51.xml
-          maven-args: |
-            -q -B -f pom.xml package -DskipTests
-            -q -B -f pom51.xml package -DskipTests
 
       - name: Ensure yq
         run: |
@@ -470,7 +463,6 @@ jobs:
         with:
           java-version: "8"
           cache-dependency-path: samples-java/async-config-poll/pom.xml
-          maven-args: -B -U clean package -Dmaven.test.skip=true -q
 
       - name: Set up Go (for the config-service stub)
         uses: actions/setup-go@v6

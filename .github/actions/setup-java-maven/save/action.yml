@@ -1,5 +1,5 @@
 name: setup-java-maven/save
-description: "Save ~/.m2/repository for the job's last setup-java-maven step, when its build fetched files the restored cache lacked"
+description: "Save ~/.m2/repository for the job's oldest setup-java-maven step not yet saved: its first fill, or what healed the cache it restored"
 
 # The other half of setup-java-maven, as a step after the job's Maven build
 # (if: ${{ !cancelled() }}, so that a lane that fails after its build still

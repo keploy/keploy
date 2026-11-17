@@ -5,7 +5,6 @@
 #
 #   RUNNER_OS=Linux RUNNER_ARCH=X64 MAVEN_CACHE_JAVA_VERSION=17 \
 #     MAVEN_CACHE_DEPENDENCY_PATH=samples-java/mysql-dual-conn/pom.xml \
-#     MAVEN_CACHE_MAVEN_ARGS='clean package -Dmaven.test.skip=true' \
 #     bash .github/actions/setup-java-maven/maven-cache-key.sh
 #
 # MAVEN_CACHE_DEPENDENCY_PATH: the pom.xml files the build reads its
@@ -13,20 +12,18 @@
 # ignored). Every one must exist: a key that silently left one out would not
 # change when its dependencies do.
 # MAVEN_CACHE_JAVA_VERSION: the JDK the build runs on, as setup-java takes it.
-# MAVEN_CACHE_MAVEN_ARGS: the mvn command lines the build runs, one per line
-# (maven-args.sh says which flags do not count). The goals, profiles and -D
-# properties decide which plugins and artifacts the build resolves, as much
-# as the poms do: a lane that adds a goal needs a cache of its own.
 #
 # The key is maven-repository-<os>-<arch>-maven<version>-java<version>-<hash>.
 # The Maven version is the one `mvn` on PATH reports: the one the build runs.
-# The hash is of the mvn command lines, the poms, and the Maven configuration
-# the build reads: the user and global settings.xml, and the
-# .mvn/maven.config, jvm.config and extensions.xml of each pom's project,
-# found as Maven finds them (the nearest directory at or above the pom's that
-# has a .mvn). The command lines and poms decide what the build resolves. The
-# Maven and its configuration decide whether a local repository filled by
-# one build is of use to another, which needs it to track files the same way:
+# The hash is of the poms and of the Maven configuration the build reads:
+# the user and global settings.xml, and the .mvn/maven.config, jvm.config
+# and extensions.xml of each pom's project, found as Maven finds them (the
+# nearest directory at or above the pom's that has a .mvn). The poms decide
+# most of what the build resolves. The Maven and its configuration decide
+# whether a local repository filled by one build is of use to another, which
+# needs it to track files the same way. What a lane's goals add to that (a
+# plugin, a goal's own dependencies) is not in the key: a restored entry
+# that lacks it heals in one run (bin/mvn, save/save-plan.sh).
 #
 # Maven records, in each directory's _remote.repositories, the repository a
 # file came from, and uses a cached file only when that record names a
@@ -54,21 +51,16 @@
 # <passphrase> and <privateKey>, and the user:password@ of every <url> left
 # out, wherever they are: they hold credentials, and only the properties
 # could change which repositories a build has. Environment variables
-# (MAVEN_OPTS, MAVEN_ARGS) are not read for the same reason. What the key
-# leaves out is caught where it matters: a declared command line runs
-# offline on a restored cache (bin/mvn), so a cache that cannot serve it is
-# named, re-resolved online once, and saved anew (save/save-plan.sh). The
-# log names the files hashed and the command lines, never what the files
-# hold.
+# (MAVEN_OPTS, MAVEN_ARGS) and mvn command lines are not read at all. What
+# the key leaves out is caught where it matters: mvn runs offline on a
+# restored cache (bin/mvn), so a cache that cannot serve the build is named,
+# resolved online once, and saved anew (save/save-plan.sh). The log names
+# the files hashed, never what they hold.
 set -euo pipefail
 
 : "${RUNNER_OS:?RUNNER_OS is not set}" "${RUNNER_ARCH:?RUNNER_ARCH is not set}"
 java_version=${MAVEN_CACHE_JAVA_VERSION:?MAVEN_CACHE_JAVA_VERSION is not set}
 die() { printf '::error::maven-cache-key.sh: %s\n' "$1" >&2; exit 1; }
-# shellcheck source=maven-args.sh
-. "$(dirname "${BASH_SOURCE[0]}")/maven-args.sh"
-invocations=$(maven_args_lines "${MAVEN_CACHE_MAVEN_ARGS:-}")
-[ -n "$invocations" ] || die "MAVEN_CACHE_MAVEN_ARGS names no mvn command line (maven-args)"
 
 files=()
 while IFS= read -r line; do
@@ -123,7 +115,6 @@ settings_digest() {
 
 parts=()
 hashed=()
-while IFS= read -r inv; do parts+=("mvn $inv"); done <<<"$invocations"
 for f in "${files[@]}"; do
   parts+=("pom $f $(sha256sum <"$f" | cut -c1-64)")
   hashed+=("$f")
@@ -152,9 +143,7 @@ done
 
 digest=$(printf '%s\n' "${parts[@]}" | sha256sum | cut -c1-64)
 {
-  echo "maven-cache-key.sh: Maven $maven ($maven_home), JDK $java_version; mvn command lines:"
-  sed 's/^/  mvn /' <<<"$invocations"
-  echo "hashed:"
+  echo "maven-cache-key.sh: Maven $maven ($maven_home), JDK $java_version; hashed:"
   printf '  %s\n' "${hashed[@]}"
 } >&2
 echo "maven-repository-${RUNNER_OS}-${RUNNER_ARCH}-maven${maven}-java${java_version}-${digest}"

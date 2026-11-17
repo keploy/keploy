@@ -12,9 +12,9 @@
 # each file came from in a form Maven 3.9 does not read, so every file was
 # "present, but unavailable" and fetched from Maven Central again, on every
 # run, until Central answered 429 Too Many Requests.
-# setup-java-maven's key names the Maven version, its configuration and the
-# mvn command lines as well, and a restored cache is used offline (its
-# scripts say how).
+# setup-java-maven's key names the Maven version and its configuration as
+# well; mvn runs offline on a restored cache, and a cache that falls short
+# heals in one run (its scripts say how).
 #
 # Every YAML file under .github is read, at any depth: workflows, and the
 # actions they use, composite or nested in another action's directory. A
