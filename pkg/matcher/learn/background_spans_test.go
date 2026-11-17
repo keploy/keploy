@@ -248,8 +248,10 @@ func TestABackgroundPollReadBetweenTwoMovesHoldsOnTheClockBetweenThem(t *testing
 
 // Every span of a background call is in the app's zone where the tracker
 // was told it (SetAppZone), and stays there where the agent read no zone
-// of the call's own process (a ProcZone with no Loc). A nil tracker tells
-// none and takes a shown clock without a panic.
+// of the call's own process (a ProcZone with no Loc), for a call that
+// arrives after a move and for one that arrives while the move is written
+// (the spans the hooks told, which carry no zone of their own). A nil
+// tracker tells none and takes a shown clock without a panic.
 func TestBackgroundSpansKeepTheAppsZoneAndANilTrackerTellsNone(t *testing.T) {
 	base := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
 	move := runWrite{from: base.Add(2 * time.Second), to: base.Add(2*time.Second + 5*time.Millisecond), offset: 3 * time.Second}
@@ -263,14 +265,24 @@ func TestBackgroundSpansKeepTheAppsZoneAndANilTrackerTellsNone(t *testing.T) {
 	tr.SetAppClockShown(clock.shown)
 	tr.ServedMockAt(&models.Mock{Name: "poll-1", Kind: models.Mongo}, base.Add(time.Second))
 	ctx := WithTracker(context.Background(), tr)
+	calls := []struct {
+		what    string
+		arrival time.Time
+		spans   int
+	}{
+		{"after the move", arrival, 3},
+		{"mid-move", move.from.Add(time.Millisecond), 2},
+	}
 	for name, c := range map[string]context.Context{"no process zone": ctx, "a process zone with no Loc": WithProcZone(ctx, ProcZone{Name: "unread"})} {
-		spans, ok := CallSpansOf(c, arrival)
-		if !ok || len(spans) != 3 {
-			t.Fatalf("%s: spans = %+v,%v; want three", name, spans, ok)
-		}
-		for _, s := range spans {
-			if s.Zone != ist || s.Own {
-				t.Fatalf("%s: span %+v is not in the app's zone", name, s)
+		for _, call := range calls {
+			spans, ok := CallSpansOf(c, call.arrival)
+			if !ok || len(spans) != call.spans {
+				t.Fatalf("%s, %s: spans = %+v,%v; want %d", name, call.what, spans, ok, call.spans)
+			}
+			for _, s := range spans {
+				if s.Zone != ist || s.Own {
+					t.Fatalf("%s, %s: span %+v is not in the app's zone", name, call.what, s)
+				}
 			}
 		}
 	}
