@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"sort"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -239,10 +241,13 @@ func TestATakeSpentInItsStepIsNeverUnserved(t *testing.T) {
 }
 
 // A call that read a recording spent, then asks while the take that spent
-// it is still in its step, finds it answered though, between the store's
-// read of the view and its read of the take's note, the step ends and the
-// next test opens, with a view that no longer says the recording is spent:
-// the view is read first, so one of the two reads says it answered.
+// it is still in its step, finds it answered: the store reads the view
+// first, which says the recording is spent, and only then the take's note.
+// The row pins that order. A store that read the note first (not written
+// yet) and the view after would let the step end and the next test open
+// between the two reads, with a view that no longer says the recording is
+// spent, and both reads would miss it: the onRead seam opens the next test
+// there. Read in this order the view answers, and the seam never runs.
 func TestATakeIsAnsweredToACallThatAsksAsTheNextTestOpens(t *testing.T) {
 	s := newRoundStore(t)
 	s.inTest()
@@ -287,5 +292,155 @@ func TestATakeIsAnsweredToACallThatAsksAsTheNextTestOpens(t *testing.T) {
 	}
 	if hasUnserved(t, s.mm, models.HTTP, "own") {
 		t.Fatal("own was unserved once its take ended")
+	}
+}
+
+// onDisk keeps every recording of the set, and extra, on disk as the agent
+// does until their tests open (SetRecordedOfKind): the store reads there one
+// the trees do not hold.
+func (s *roundStore) onDisk(t *testing.T, extra ...*models.Mock) {
+	t.Helper()
+	all := append([]*models.Mock(nil), extra...)
+	for _, m := range s.ms {
+		all = append(all, m)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Name < all[j].Name })
+	s.mm.SetRecordedOfKind(diskOf(t, all...).RangeKind)
+}
+
+// restageWithout stages the set again without the recording called name,
+// as the replay stages the next window: the trees no longer hold it.
+func (s *roundStore) restageWithout(name string) {
+	var rest []*models.Mock
+	for _, m := range s.mm.StagedMocks() {
+		if m.Name != name {
+			rest = append(rest, m)
+		}
+	}
+	s.mm.SetMocksWithWindow(nil, rest, models.BaseTime, time.Now())
+}
+
+// A pool view's ahead the trees do not hold (one the agent keeps on disk
+// until its test opens, handed to the pool view as the next test's call in
+// flight) answered as the pool view took it: the store, which reads it on
+// disk with no view to say it is spent, finds it served from the take on,
+// and once the test it was answered for opens and the replay counts it.
+// Answered for a test that did not open next (the next view voids it), it
+// answered no request the replay counts, and is unserved again, as it was
+// before the take.
+func TestAPoolViewsAheadOffTheTreesIsServedAsItIsTaken(t *testing.T) {
+	for _, tc := range []struct {
+		name, open string
+		own        []string
+		unserved   bool
+	}{
+		{"the test it was answered for opens", "T2", []string{"later", "next2"}, false},
+		{"another test opens instead", "T3", []string{"other"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRoundStore(t)
+			later := httpCall("later", 9*time.Second, "/later")
+			s.onDisk(t, later)
+			s.ms["later"] = later
+			if !hasUnserved(t, s.mm, models.HTTP, "later") {
+				t.Fatal("precondition: later, kept on disk and taken by no call, is not unserved")
+			}
+			s.inTest()
+			s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"}, later)
+			s.end()
+			if roundMock(s.mm, "later") != nil {
+				t.Fatal("precondition: the trees hold later")
+			}
+			mk := shown(s.snapshot(t), "later")
+			if mk == nil {
+				t.Fatal("precondition: the ahead later is not shown in the pool view")
+			}
+			if !s.mm.DeleteFilteredMock(*mk) {
+				t.Fatal("the pool view's ahead later was refused")
+			}
+			if hasUnserved(t, s.mm, models.HTTP, "later") {
+				t.Fatal("the ahead later, taken off the trees, was unserved before the next test opened")
+			}
+			var own []*models.Mock
+			for _, n := range tc.own {
+				own = append(own, s.ms[n])
+			}
+			s.begin()
+			s.mm.ServeExactTest(tc.open, own)
+			if got := hasUnserved(t, s.mm, models.HTTP, "later"); got != tc.unserved {
+				t.Fatalf("the ahead later, taken, is unserved %v once %s opened; want %v", got, tc.open, tc.unserved)
+			}
+		})
+	}
+}
+
+// A take whose recording a restage moves off the trees in the instant
+// before the replay counts it (the next window staged, as the replay stages
+// it) is read on disk, with no view to say it is spent: the store finds it
+// served from the take on, a test's own as a pool view's ahead, whose count
+// comes only as the next test opens.
+func TestATakeRestagedOffTheTreesBeforeTheReplaysCountOfItIsServed(t *testing.T) {
+	for _, tc := range []struct {
+		name, take string
+		before     func(s *roundStore)
+	}{
+		{"a test's own", "own", (*roundStore).inTest},
+		{"a pool view's ahead", "next", (*roundStore).betweenWithAhead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRoundStore(t)
+			s.onDisk(t)
+			tc.before(s)
+			inTrees := true
+			_, unserved := takenInTheGap(t, s, tc.take, func() {
+				s.restageWithout(tc.take)
+				inTrees = roundMock(s.mm, tc.take) != nil
+			})
+			if inTrees {
+				t.Fatalf("precondition: the trees still hold %s once staged again without it", tc.take)
+			}
+			if unserved {
+				t.Fatalf("%s, taken, was unserved once a restage before its count moved it off the trees", tc.take)
+			}
+			if hasUnserved(t, s.mm, models.HTTP, tc.take) {
+				t.Fatalf("%s was unserved off the trees once its take ended", tc.take)
+			}
+		})
+	}
+}
+
+// A take given back in the instant before the replay counts it (its test
+// opened again, a retry, or the staging's spend restarted with its key)
+// answered all the same: the replay's count of it comes as that instant
+// ends and is never taken back. So the store finds it served from the take
+// on, though the view in force shows it unspent again.
+func TestATakeGivenBackBeforeTheReplaysCountOfItAnswered(t *testing.T) {
+	for _, tc := range []struct {
+		name, take       string
+		before, giveBack func(s *roundStore)
+	}{
+		{"its test opens again", "own", (*roundStore).inTest, func(s *roundStore) {
+			s.mm.ServeExactTest("T1", []*models.Mock{s.ms["own"], s.ms["own2"]})
+		}},
+		{"the staging's spend restarts with its key", "pool", func(s *roundStore) {
+			s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+		}, func(s *roundStore) {
+			s.mm.RestartExactKey(models.PoolKeyNone, []string{"pool"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRoundStore(t)
+			tc.before(s)
+			spent, unserved := takenInTheGap(t, s, tc.take, func() { tc.giveBack(s) })
+			if spent {
+				t.Fatalf("precondition: %s, given back, is still spent", tc.take)
+			}
+			if unserved {
+				t.Fatalf("%s, taken and given back before its count, was unserved", tc.take)
+			}
+			if hasUnserved(t, s.mm, models.HTTP, tc.take) {
+				t.Fatalf("%s, given back, was unserved once counted", tc.take)
+			}
+		})
 	}
 }

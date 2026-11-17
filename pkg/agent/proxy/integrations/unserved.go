@@ -14,7 +14,9 @@ import "go.keploy.io/server/v3/pkg/models"
 // session: one the store's trees hold (per-test, session, start-up), or one
 // the agent keeps on disk until its test opens, under either switch. A
 // recording that answered once is not one, whether it stays where it is (a
-// reusable one) or not; one of a test that ended before a call took it is.
+// reusable one) or not; one of a test that ended before a call took it is,
+// and so is a pool view's ahead answer for a test that did not open next
+// (TakeVoided), which the replay never counts as a serve.
 // Nor is one the store reported spent (StagingGenerations.MockSpent) before
 // the call: a parser that read a recording spent, then asks, finds it
 // answered, though the take that spent it has not finished.

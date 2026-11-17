@@ -86,10 +86,11 @@ type roundState struct {
 	// them, never with sleeps.
 	onWait func()
 	onRead func(step string)
-	// onTake is a test seam too: it runs as a take is written to the take
-	// log (takeLocked), holding the round lock, with the take: the step
-	// that settles a consume or a spend has marked the recording spent in
-	// its view and has not noted it taken.
+	// onTake is a test seam too: it runs as a take of any kind is written
+	// to the take log (takeLocked), holding the round lock, with the take,
+	// before the log reads it. For a consume or a spend, the step that
+	// settles it has marked the recording spent in its view and has not
+	// noted it taken (noteTakenLocked).
 	onTake func(t integrations.Take)
 	// onAnswerAgain is a test seam too: it runs as a held call is about to
 	// be answered once more (heldScope.AnswerRepeatRead), its staging
@@ -277,6 +278,8 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 	switch t.How {
 	case integrations.TakeRestored:
 		delete(l.taken, t.Mock.Name)
+	case integrations.TakeVoided:
+		m.forgetVoidedLocked(t.Mock.Name)
 	case integrations.TakeCarried:
 		if t.Of >= 0 {
 			byTest(t.Test, t.Of)
@@ -308,13 +311,30 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 // no longer reports the take spent (MockSpent), and a call held for a
 // recording no call took yet (integrations.UnservedRecordingFinder) would
 // read the taken one as unserved until a window change no test may bring.
-// A take given back later (TakeRestored) answered all the same.
+// The note is that count ahead of it, and reads as the count does once
+// the take is settled: a take given back later (TakeRestored) answered all
+// the same, as the replay's count of it stays, and a pool view's ahead
+// voided did not (forgetVoidedLocked).
 func (m *MockManager) noteTakenLocked(name string) {
 	m.consumedMu.Lock()
 	if m.takenThisSession == nil {
 		m.takenThisSession = map[string]bool{}
 	}
 	m.takenThisSession[name] = true
+	m.consumedMu.Unlock()
+}
+
+// forgetVoidedLocked takes back, holding the round lock, the note of a pool
+// view's ahead answer of the recording named name that a view install
+// voided (TakeVoided: the test it was answered for did not open next). The
+// replay never counts that answer (ServeExactTest flags a carried one
+// alone), so the recording answered no request of this session's, as it
+// reads with no note. No other take of it is noted in between: the pool
+// view holds it as its own, consumed, from the take to the install that
+// voids it, and refuses every other door's take of it.
+func (m *MockManager) forgetVoidedLocked(name string) {
+	m.consumedMu.Lock()
+	delete(m.takenThisSession, name)
 	m.consumedMu.Unlock()
 }
 
