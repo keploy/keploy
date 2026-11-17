@@ -6737,10 +6737,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testSetStatus = models.TestSetStatusInternalErr
 			r.markNotJudged(testSetID)
 		}
-	} else if d := conf.RecordMocksDropped; d != nil && d.Dropped() && len(missedTests) > 0 {
-		// With the switch off the verdict is as before, and a WARN names the
-		// drop beside a test's miss: the set's end reads no other call.
-		r.logger.Warn(mocksDroppedWhy(d, missedTests, 0), zap.String("test-set", testSetID), zap.String("next_step", mocksDroppedNext))
 	}
 	// With the proven switch off nothing else reads what the application
 	// consumed after the set's last read: the last test's publish made after
@@ -7362,6 +7358,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// written whole in its misses file, since nothing else names them
 	// (outside_test_misses.go).
 	outsideTest := r.outsideTestMisses(testSetID)
+	// A set whose recording's agent dropped mocks: with the switch off a
+	// WARN names the drop beside a test's miss and these, every read of
+	// the set made; under the switch, beside these when no call the
+	// verdict counts already named it (above).
+	r.sayMocksDroppedBesideMisses(conf.RecordMocksDropped, testSetID, missedTests, len(unclaimed))
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,
