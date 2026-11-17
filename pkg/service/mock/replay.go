@@ -101,7 +101,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		writeReceipt(m.logger, m.config.Path, Receipt{
 			Set:            name,
 			At:             started.UTC().Truncate(time.Second),
-			Command:        m.userCommand,
+			Command:        m.userCommand.WholeUnredacted(),
 			OnMiss:         m.config.Mock.OnMiss,
 			Strict:         m.config.Mock.Strict,
 			ExitCode:       code,
@@ -150,7 +150,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// the report files looked like beforehand is what tells that report from
 	// one an earlier run left behind.
 	workDir, _ := os.Getwd()
-	coverageBefore := report.Snapshot(workDir, m.config.Mock.CoverageReport, m.userCommand)
+	coverageBefore := report.Snapshot(workDir, m.config.Mock.CoverageReport, m.userCommand.WholeUnredacted())
 
 	if provenswitch.On() && !replaysJudged.Load() {
 		return fmt.Errorf("keploy mock replay under %s needs a keploy build that judges each test (keploy enterprise): this one exits with the test command's code, so a test keploy failed after it ended, or a call no test made that got no recorded answer, would pass", provenswitch.Env)
@@ -184,9 +184,8 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	m.logger.Info("Replaying mocks for your test command",
-		zap.String("mock-set", name),
-		zap.String("command", utils.RedactCommandLine(m.userCommand)),
-		zap.String("on-miss", string(policy)))
+		zap.String("mock-set", name), zap.Inline(m.userCommand), zap.String("on-miss", string(policy)))
+	utils.LogWholeCommand(m.logger, "command", m.userCommand)
 
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
@@ -351,7 +350,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if loaded == 0 {
 		m.logger.Warn("the mock set is empty; the runner will hit a miss on every dependency call",
 			zap.String("mock-set", name),
-			zap.String("next_step", fmt.Sprintf("record it first with: keploy mock record -c %q --name %s", utils.RedactCommandLine(m.userCommand), name)))
+			zap.String("next_step", "record it first with: keploy mock record -c <the same test command> --name "+name))
 	}
 	if err := m.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
 		utils.LogError(m.logger, err, "failed to store mocks on the agent")
@@ -1033,7 +1032,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	writeReceipt(m.logger, m.config.Path, Receipt{
 		Set:             name,
 		At:              started.UTC().Truncate(time.Second),
-		Command:         m.userCommand,
+		Command:         m.userCommand.WholeUnredacted(),
 		OnMiss:          string(policy),
 		Strict:          m.config.Mock.Strict,
 		ExitCode:        utils.ErrCode,
@@ -1092,7 +1091,7 @@ func (m *mockService) readCoverage(dir string, before report.Before, isolated bo
 	if dir == "" {
 		return nil, "could not resolve the directory the test command ran in"
 	}
-	path, why := report.Find(dir, m.config.Mock.CoverageReport, m.userCommand, before)
+	path, why := report.Find(dir, m.config.Mock.CoverageReport, m.userCommand.WholeUnredacted(), before)
 	if path == "" {
 		m.logger.Debug("no coverage report for this replay", zap.String("reason", why))
 		return nil, why

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,6 +52,18 @@ func TestDockerPublishedHostPort(t *testing.T) {
 		// A UDP port never accepts the TCP connection the gate waits for.
 		{"UDP port", "docker run -p 5353:5353/udp img", "", "", false},
 		{"the TCP port after a UDP one", "docker run -p 5353:5353/udp -p 8080:80 img", "127.0.0.1", "8080", true},
+		// The run's own options alone: a native app's -p, a container's own
+		// argument after its image, and compose's project are no mapping.
+		{"a native app's -p", "./app --user admin -p S3CR3T", "", "", false},
+		{"a native app's -p that looks like one", "java -jar app.jar -p 8080:80", "", "", false},
+		{"a container's own -p", "docker run --rm img -p 8080:80", "", "", false},
+		{"compose's project", "docker compose -p shop up", "", "", false},
+		{"an attached -p", "docker run -p18080:80 img", "127.0.0.1", "18080", true},
+		{"--publish=", "docker run --publish=18080:80 img", "127.0.0.1", "18080", true},
+		{"a cluster that ends in p", "docker run -itp 18080:80 img", "127.0.0.1", "18080", true},
+		{"behind sudo and an assignment", "PORT=1 sudo docker run -p 18080:80 img", "127.0.0.1", "18080", true},
+		{"after another command", "docker network create n && docker run --network n -p 18080:80 img", "127.0.0.1", "18080", true},
+		{"compose run's -p", "docker compose run --rm -p 18080:80 app", "127.0.0.1", "18080", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -66,18 +79,92 @@ func TestDockerPublishedHostPort(t *testing.T) {
 // A mapping docker refuses names no host address. It is an error, never an
 // address to wait on: split on its colons, "[::1]:8080" named host "[" and
 // port "1]", where no wait ever ends. In single quotes the shell expands no
-// variable, so docker is given "$KEPLOY_ROW_PORT:8080" as it is written.
+// variable, so docker is given "$KEPLOY_ROW_PORT:8080" as it is written. The
+// error names the mapping by its place among the command's mappings alone,
+// never its text or what keploy's environment expanded in it: keploy logs
+// it at ERROR.
 func TestDockerPublishedHostPortRefusesAMappingDockerRefuses(t *testing.T) {
 	t.Setenv("KEPLOY_ROW_PORT", "18080")
-	for _, spec := range []string{"[::1]:8080", "localhost:8080:80", "abc:8080", "65536:80", "[fd00::1%eth0]:8080:80", "'$KEPLOY_ROW_PORT:8080'"} {
-		cmd := "docker run -p " + spec + " -p 9090:9090 img"
+	t.Setenv("KEPLOY_ROW_PW", "S3CR3T_FROM_ENV")
+	for _, spec := range []string{"[::1]:8080", "localhost:8080:80", "abc:8080", "65536:80", "[fd00::1%eth0]:8080:80", "'$KEPLOY_ROW_PORT:8080'", `"$KEPLOY_ROW_PW"`, "S3CR3T"} {
+		cmd := "docker run -p 9090:9090/udp -p " + spec + " -p 9091:9091 img"
 		host, port, ok, err := dockerPublishedHostPort(cmd)
 		if err == nil || ok {
 			t.Errorf("dockerPublishedHostPort(%q) = (%q,%q,%v,%v), want an error", cmd, host, port, ok, err)
 			continue
 		}
-		if !strings.Contains(err.Error(), spec) {
-			t.Errorf("dockerPublishedHostPort(%q)'s error %q does not name the mapping %q", cmd, err, spec)
+		const want = "docker reads no host address in the command's port mapping number 2 (its -p or --publish)"
+		if err.Error() != want {
+			t.Errorf("dockerPublishedHostPort(%q)'s error is %q, want %q", cmd, err, want)
+		}
+	}
+}
+
+// keploy test's wait for the application before each set's first test, with
+// the proven switch off, reads no port mapping in a native app's command: its
+// -p is the app's own (a password, often), and neither it nor what keploy's
+// environment expands in it reaches a line. A docker run's own -p is still
+// waited on, and its container's own -p after the image is not read.
+func TestTheSetsWaitReadsNoMappingInANativeAppsCommand(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "0")
+	t.Setenv("KEPLOY_ROW_PW", "S3CR3T_FROM_ENV")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	var accepted atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = c.Close()
+		}
+	}()
+	_, appPort, _ := net.SplitHostPort(ln.Addr().String())
+	for _, c := range []struct {
+		cmd    string
+		waited bool // on the docker run's published port
+	}{
+		{"./app --user admin -p S3CR3T", false},
+		{"java -jar app.jar -p S3CR3T", false},
+		{"sshpass -p S3CR3T ./app", false},
+		{`./app -p "$KEPLOY_ROW_PW"`, false},
+		{"./app -p $KEPLOY_ROW_PW", false},
+		{"docker run --rm -p " + appPort + ":80 img -p S3CR3T", true},
+	} {
+		core, logs := observer.New(zap.DebugLevel)
+		before := accepted.Load()
+		cfg := config.New()
+		cfg.Command = c.cmd
+		cfg.Test.Delay = 0
+		cfg.Test.HealthURL = ""
+		r := &Replayer{logger: zap.New(core), config: cfg}
+		ready, why := r.appReady(context.Background(), nil, "test-set-0", true, false)
+		if !ready || why != "" {
+			t.Errorf("%q: appReady = %v %q, want ready", c.cmd, ready, why)
+		}
+		for _, e := range logs.All() {
+			line := e.Level.String() + " " + e.Message + " " + fmt.Sprint(e.ContextMap())
+			if strings.Contains(line, "S3CR3T") {
+				t.Errorf("%q: a line names the app's -p: %s", c.cmd, line)
+			}
+			if e.Level >= zap.WarnLevel {
+				t.Errorf("%q: want no line at WARN or above, got %s", c.cmd, line)
+			}
+		}
+		// The gate's connect is in the listener's backlog when appReady
+		// returns; its Accept may come a moment later. No native command
+		// names this port, so nothing else dials it.
+		waited := accepted.Load() > before
+		for deadline := time.Now().Add(10 * time.Second); c.waited && !waited && time.Now().Before(deadline); waited = accepted.Load() > before {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if waited != c.waited {
+			t.Errorf("%q: waited on a docker-published port = %v, want %v", c.cmd, waited, c.waited)
 		}
 	}
 }
@@ -158,7 +245,8 @@ func TestWaitForAppReady_DockerPortGate_IPv6HostIP(t *testing.T) {
 
 // A mapping keploy cannot read a host address from is said as an error, and
 // the first test waits on none of it rather than on an address no app
-// listens at. The run goes on: there is nothing to wait on.
+// listens at. The run goes on: there is nothing to wait on. The error names
+// the mapping by its place alone: its text is the user's command.
 func TestWaitForAppReady_DockerPortGate_AnUnreadableMappingIsSaidNotWaitedOn(t *testing.T) {
 	for _, spec := range []string{"[::1]:8080", "abc:8080"} {
 		t.Run(spec, func(t *testing.T) {
@@ -172,8 +260,9 @@ func TestWaitForAppReady_DockerPortGate_AnUnreadableMappingIsSaidNotWaitedOn(t *
 			if len(said) != 1 {
 				t.Fatalf("said %d errors about the mapping, want 1 (all: %v)", len(said), logs.All())
 			}
-			if got := fmt.Sprint(said[0].ContextMap()["error"]); !strings.Contains(got, spec) {
-				t.Errorf("the error %q does not name the mapping %q", got, spec)
+			const want = "docker reads no host address in the command's port mapping number 1 (its -p or --publish)"
+			if got := fmt.Sprint(said[0].ContextMap()["error"]); got != want || strings.Contains(got, spec) {
+				t.Errorf("the error is %q, want %q", got, want)
 			}
 		})
 	}

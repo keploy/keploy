@@ -2557,7 +2557,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	r.logTemplateCheck(testSetID, tmplCheck, testCases)
 
 	if conf.PreScript != "" {
-		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
+		// The script by its program (AppCommand), whole at DEBUG: it is a
+		// command the user wrote, and may carry a credential.
+		script := utils.NewAppCommand(conf.PreScript)
+		r.logger.Info("Running Pre-script", zap.Inline(script), zap.String("test-set", testSetID))
+		utils.LogWholeCommand(r.logger, "script", script)
 		err := r.executeScript(runTestSetCtx, conf.PreScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute pre-script: %w", err)
@@ -6651,7 +6655,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
-		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))
+		script := utils.NewAppCommand(conf.PostScript)
+		r.logger.Info("Running Post-script", zap.Inline(script), zap.String("test-set", testSetID))
+		utils.LogWholeCommand(r.logger, "script", script)
 		err = r.executeScript(runTestSetCtx, conf.PostScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute post-script: %w", err)

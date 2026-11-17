@@ -93,7 +93,7 @@ func composeReplayApp(d docker.Client) *App {
 		logger:          zap.NewNop(),
 		docker:          d,
 		kind:            utils.DockerCompose,
-		cmd:             "docker compose -f /tmp/keploy-compose.yaml up",
+		cmd:             utils.NewAppCommand("docker compose -f /tmp/keploy-compose.yaml up"),
 		composeFile:     "/tmp/keploy-compose.yaml",
 		keployContainer: "keploy-v3-test",
 		container:       "runner",

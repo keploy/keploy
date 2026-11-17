@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -306,7 +307,7 @@ func TestComposeDownSweepsTheProjectsNetworksAfterAFailedDown(t *testing.T) {
 	t.Run("no project", func(t *testing.T) {
 		stubDockerCLI(t, "", 1)
 		rec := &inspectRecorder{networks: []network.Summary{{ID: "net-1"}}}
-		a := &App{logger: zap.NewNop(), docker: rec, composeFile: "/tmp/c.yaml", cmd: "docker compose up", container: "user-app"}
+		a := &App{logger: zap.NewNop(), docker: rec, composeFile: "/tmp/c.yaml", cmd: utils.NewAppCommand("docker compose up"), container: "user-app"}
 
 		a.ComposeDown()
 
@@ -420,7 +421,7 @@ func TestComposeDownProject(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("COMPOSE_PROJECT_NAME", tc.env)
-			a := &App{logger: zap.NewNop(), docker: &labelDocker{projects: tc.projects}, cmd: tc.cmd, container: "user-app", keployContainer: "keploy-v3"}
+			a := &App{logger: zap.NewNop(), docker: &labelDocker{projects: tc.projects}, cmd: utils.NewAppCommand(tc.cmd), container: "user-app", keployContainer: "keploy-v3"}
 			if got := a.composeDownProject(context.Background()); got != tc.want {
 				t.Fatalf("project %q; want %q", got, tc.want)
 			}
@@ -441,7 +442,7 @@ func TestComposeDownProject(t *testing.T) {
 				forceComposeLibrary(t)
 			}
 			t.Setenv("COMPOSE_PROJECT_NAME", "")
-			a := &App{logger: zap.NewNop(), docker: &labelDocker{}, cmd: "COMPOSE_PROJECT_NAME=x docker compose up",
+			a := &App{logger: zap.NewNop(), docker: &labelDocker{}, cmd: utils.NewAppCommand("COMPOSE_PROJECT_NAME=x docker compose up"),
 				container: "user-app", keployContainer: "keploy-v3", composeContent: []byte("services: {}\n"), composeRunnerVal: &fakeComposeStack{}}
 			want := "x"
 			if arm.library {
@@ -456,7 +457,7 @@ func TestComposeDownProject(t *testing.T) {
 				forceComposeLibrary(t)
 			}
 			t.Setenv("COMPOSE_PROJECT_NAME", "real")
-			a := &App{logger: zap.NewNop(), docker: &labelDocker{}, cmd: "COMPOSE_PROJECT_NAME=x docker compose up",
+			a := &App{logger: zap.NewNop(), docker: &labelDocker{}, cmd: utils.NewAppCommand("COMPOSE_PROJECT_NAME=x docker compose up"),
 				container: "user-app", keployContainer: "keploy-v3", composeContent: []byte("services: {}\n")}
 			want := "x"
 			if arm.library {
@@ -474,7 +475,7 @@ func TestComposeDownProject(t *testing.T) {
 		t.Setenv("COMPOSE_PROJECT_NAME", "")
 		stallBudget(t, 300*time.Millisecond)
 		d := &labelDocker{projects: map[string]string{"keploy-v3": "orderflow"}, slow: "user-app"}
-		a := &App{logger: zap.NewNop(), docker: d, cmd: "docker compose up", container: "user-app", keployContainer: "keploy-v3"}
+		a := &App{logger: zap.NewNop(), docker: d, cmd: utils.NewAppCommand("docker compose up"), container: "user-app", keployContainer: "keploy-v3"}
 		if got := a.composeDownProject(context.Background()); got != "orderflow" {
 			t.Fatalf("project %q; want orderflow, from the agent's label", got)
 		}
@@ -487,7 +488,7 @@ func TestComposeDownProject(t *testing.T) {
 	t.Run("the daemon fails its first reads", func(t *testing.T) {
 		t.Setenv("COMPOSE_PROJECT_NAME", "")
 		d := &slowDaemon{Client: &labelDocker{projects: map[string]string{"user-app": "orderflow"}}, failInspects: 5}
-		a := &App{logger: zap.NewNop(), docker: d, cmd: "docker compose -p other up", container: "user-app", keployContainer: "keploy-v3"}
+		a := &App{logger: zap.NewNop(), docker: d, cmd: utils.NewAppCommand("docker compose -p other up"), container: "user-app", keployContainer: "keploy-v3"}
 		if got := a.composeDownProject(context.Background()); got != "orderflow" {
 			t.Fatalf("project %q; want orderflow, the app's label, once the daemon answers", got)
 		}
@@ -514,9 +515,71 @@ func TestComposeProjectArgs(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("COMPOSE_PROJECT_NAME", "")
-			a := &App{logger: zap.NewNop(), docker: &labelDocker{projects: tc.projects}, cmd: tc.cmd, container: "user-app", keployContainer: "keploy-v3"}
+			a := &App{logger: zap.NewNop(), docker: &labelDocker{projects: tc.projects}, cmd: utils.NewAppCommand(tc.cmd), container: "user-app", keployContainer: "keploy-v3"}
 			if got := strings.Join(a.composeProjectArgs(a.composeDownProject(context.Background())), " "); got != tc.want {
 				t.Fatalf("project args %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// keploy names a compose project only from compose's own options, before
+// its subcommand. Another program's -p in the command, or a container's
+// own after compose run's service, is no project: taken for one, it was on
+// the argv of keploy's own `docker compose -p <it> down` and `ps`, and in
+// the project field of the down's WARN lines.
+func TestKeployNamesNoProjectFromAnotherProgramsP(t *testing.T) {
+	cmds := []string{
+		"docker compose run --rm app ./tool -p S3CR3T",
+		"./seed.sh -p S3CR3T && docker compose up",
+		"docker compose up -d db && mysql -uroot -p S3CR3T shop && docker compose up app",
+	}
+	for _, cmd := range cmds {
+		name, dir := composeProjectScope(cmd)
+		if p, flags := composeProjectFlag(cmd), extractProjectFlags(cmd); p != "" || len(flags) != 0 || name != "" || dir != "" {
+			t.Errorf("%q: project %q, flags %q, scope (%q, %q); want none: the -p is another program's", cmd, p, flags, name, dir)
+		}
+	}
+	for cmd, want := range map[string]string{
+		"docker compose -p shop up":                               "shop",
+		"docker compose -p shop run --rm app ./tool -p S3CR3T":    "shop",
+		"sh -c 'docker compose -p shop up'":                       "shop",
+		`docker compose --project-name="shop" up`:                 "shop",
+		"docker compose -pshop up":                                "shop",
+		"docker compose --workdir /srv -p shop up":                "shop",
+		"docker compose --insecure-registry r.example -p shop up": "shop",
+	} {
+		if p := composeProjectFlag(cmd); p != want {
+			t.Errorf("%q: project %q, want %q", cmd, p, want)
+		}
+	}
+	shortDownStall(t, 500*time.Millisecond)
+	for _, cmd := range cmds {
+		t.Run(cmd, func(t *testing.T) {
+			t.Setenv("COMPOSE_PROJECT_NAME", "")
+			ps := `{"ID":"id-db","Service":"db","State":"exited"}` + "\n"
+			a, _, argvLog := keployStack(t, ps, 0)
+			a.cmd = utils.NewAppCommand(cmd)
+			downTakes(t, 20*time.Second)
+			core, logs := observer.New(zap.DebugLevel)
+			a.logger = zap.New(core)
+
+			a.ComposeDown()
+
+			log := recordedLog(t, argvLog)
+			if !strings.Contains(log, "ARG down") || !strings.Contains(log, "ARG ps") {
+				t.Fatalf("keploy ran no compose down and ps:\n%s", log)
+			}
+			if strings.Contains(log, "S3CR3T") {
+				t.Errorf("keploy's own compose calls took another program's -p as the project:\n%s", log)
+			}
+			if cut := logs.FilterMessageSnippet("made no progress").FilterLevelExact(zap.WarnLevel).All(); len(cut) != 1 {
+				t.Fatalf("keploy said %v of the cut; want one WARN line", cut)
+			}
+			for _, e := range logs.All() {
+				if line := fmt.Sprint(e.Message, e.ContextMap()); strings.Contains(line, "S3CR3T") {
+					t.Errorf("a %s line names another program's -p: %s", e.Level, line)
+				}
 			}
 		})
 	}
@@ -528,7 +591,7 @@ func TestComposeDownNamesTheProjectTheUpRan(t *testing.T) {
 	t.Setenv("COMPOSE_PROJECT_NAME", "")
 	argvLog := stubDockerCLI(t, "", 0)
 	a := &App{logger: zap.NewNop(), docker: &inspectRecorder{}, composeFile: "/tmp/keploy-compose.yaml",
-		cmd: "COMPOSE_PROJECT_NAME=set docker compose up", container: "user-app", keployContainer: "keploy-v3", composeServices: []string{"app"}}
+		cmd: utils.NewAppCommand("COMPOSE_PROJECT_NAME=set docker compose up"), container: "user-app", keployContainer: "keploy-v3", composeServices: []string{"app"}}
 	a.ComposeDown()
 	if log := recordedLog(t, argvLog); !strings.Contains(log, "ARG -p\nARG set\nARG down") {
 		t.Fatalf("the down did not name the up's project:\n%s", log)
@@ -543,7 +606,7 @@ func TestComposeDownProjectIsBoundedByItsCaller(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	a := &App{logger: zap.NewNop(), docker: &labelDocker{projects: map[string]string{"user-app": "theirs", "keploy-v3": "theirs"}},
-		cmd: "docker compose -p mine up", container: "user-app", keployContainer: "keploy-v3"}
+		cmd: utils.NewAppCommand("docker compose -p mine up"), container: "user-app", keployContainer: "keploy-v3"}
 	if got := a.composeDownProject(ctx); got != "mine" {
 		t.Fatalf("project %q with the caller's budget spent; want the command's, mine", got)
 	}
@@ -567,7 +630,7 @@ func TestAFailedDownIsSweptInTheProjectTheUpRan(t *testing.T) {
 	t.Setenv("COMPOSE_PROJECT_NAME", "")
 	ps := `{"ID":"id-db","Service":"db","State":"exited"}` + "\n"
 	a, rec, argvLog := keployStack(t, ps, 1)
-	a.cmd = "docker compose up" // the project only the labels say
+	a.cmd = utils.NewAppCommand("docker compose up") // the project only the labels say
 	rec.inspects = map[string]container.InspectResponse{"user-app": labelled("orderflow"), "keploy-v3": labelled("orderflow")}
 
 	a.ComposeDown()
@@ -606,7 +669,7 @@ func TestTheComposeProbesReadTheProjectUnderTheirCallersContext(t *testing.T) {
 	t.Setenv("COMPOSE_PROJECT_NAME", "")
 	argvLog := stubDockerCLI(t, "", 0)
 	a := &App{logger: zap.NewNop(), docker: &callerDocker{}, composeFile: "/tmp/keploy-compose.yaml",
-		cmd: "docker compose up", container: "user-app", keployContainer: "keploy-v3", composeServices: []string{"app"}}
+		cmd: utils.NewAppCommand("docker compose up"), container: "user-app", keployContainer: "keploy-v3", composeServices: []string{"app"}}
 	ctx := context.WithValue(context.Background(), callerKey{}, true)
 	_ = a.composeServiceStates(ctx)
 	_ = a.composeAgentContainerIDs(ctx)
@@ -640,7 +703,7 @@ func TestAFailedDownIsSweptOnADaemonSlowToAnswerForGoneContainers(t *testing.T) 
 	t.Setenv("COMPOSE_PROJECT_NAME", "")
 	ps := `{"ID":"id-db","Service":"db","State":"exited"}` + "\n"
 	a, rec, argvLog := keployStack(t, ps, 1)
-	a.cmd = "docker compose up"
+	a.cmd = utils.NewAppCommand("docker compose up")
 	rec.inspects = map[string]container.InspectResponse{"user-app": labelled("orderflow"), "keploy-v3": labelled("orderflow")}
 	a.docker = slowGoneDocker{rec}
 
