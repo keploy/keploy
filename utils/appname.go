@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 )
@@ -22,6 +23,12 @@ const (
 	AppNameFromDir AppNameSource = "the working directory"
 )
 
+// andPath says that the path rel of a folder inside the repository named
+// the app too, after the repository's name.
+func (s AppNameSource) andPath(rel string) AppNameSource {
+	return s + AppNameSource(" and the path "+rel+" inside the repository")
+}
+
 // DefaultAppName is the name keploy gives an app a run was given no name for
 // (no --app-name, no appName in keploy.yml): AppNameFor the working directory.
 // It fails as GetLastDirectory does once the working directory is gone.
@@ -35,10 +42,18 @@ func DefaultAppName() (string, AppNameSource, error) {
 }
 
 // AppNameFor names the app recorded from dir. Inside a git repository it is
-// the repository's name: its origin remote's, or, with no origin, the name of
-// the repository's folder. So a recording made from a subfolder of a checkout,
-// or from a mktemp folder inside one, is named after the repository, not after
-// "backend" or "tmp.Xa81bq". Outside a repository it is dir's own name.
+// the repository's name (its origin remote's, or, with no origin, the name of
+// the repository's folder) at the repository's top folder, and below it that
+// name, a "-", and dir's path inside the repository with each "/" a "-". So
+// the services of a monorepo are separate apps: shop/services/orders of the
+// repository shop is "shop-services-orders". A linked worktree's path is
+// counted from the worktree's own top folder. Outside a repository the name
+// is dir's own, as it was before keploy read repositories. Nothing else in
+// the name changes: dots and spaces stay as the folders have them.
+//
+// The search stops at the user's home folder, and under sudo at the home of
+// the user who ran sudo too: a repository there (dotfiles kept in ~/.git)
+// never names the folders under it.
 //
 // It reads the repository's files and runs no git: a run as root in a
 // checkout that another user owns, or in an image with no git installed,
@@ -46,13 +61,22 @@ func DefaultAppName() (string, AppNameSource, error) {
 // config includes (include.path) is not read: that repository is named after
 // its folder.
 func AppNameFor(dir string) (string, AppNameSource) {
-	if top, common, ok := findGitRepository(dir); ok {
-		if name := repoNameFromURL(originURL(filepath.Join(common, "config"))); name != "" {
-			return name, AppNameFromRemote
-		}
-		return top, AppNameFromRepo
+	dir = filepath.Clean(dir)
+	top, name, common, ok := findGitRepository(dir, homeFolders())
+	if !ok {
+		return filepath.Base(dir), AppNameFromDir
 	}
-	return filepath.Base(dir), AppNameFromDir
+	from := AppNameFromRepo
+	if remote := repoNameFromURL(originURL(filepath.Join(common, "config"))); remote != "" {
+		name, from = remote, AppNameFromRemote
+	}
+	// top is dir or a folder above it, so Rel cannot fail.
+	rel, _ := filepath.Rel(top, dir)
+	if rel == "." {
+		return name, from
+	}
+	rel = filepath.ToSlash(rel)
+	return name + "-" + strings.ReplaceAll(rel, "/", "-"), from.andPath(rel)
 }
 
 // gitFileLimit bounds the reads of a repository's small files: a .git file,
@@ -60,12 +84,16 @@ func AppNameFor(dir string) (string, AppNameSource) {
 const gitFileLimit = 1 << 20
 
 // findGitRepository finds the repository dir is in, as git does: the nearest
-// folder at or above dir that holds .git. It returns the repository's name
-// as its folder names it (top) and its common git directory, which holds
-// the config. A linked worktree's top is the folder of the repository it was
-// added from, so every worktree of one repository names the app alike.
-func findGitRepository(dir string) (top string, common string, ok bool) {
-	for d := filepath.Clean(dir); ; {
+// folder at or above dir that holds .git, below the first of homes it meets.
+// It returns that folder (top), the repository's name as its folder names it,
+// and its common git directory, which holds the config. A linked worktree is
+// named after the folder of the repository it was added from, so every
+// worktree of one repository names the app alike.
+func findGitRepository(dir string, homes []os.FileInfo) (top, name, common string, ok bool) {
+	for d := dir; ; {
+		if isOneOf(d, homes) {
+			return "", "", "", false
+		}
 		dotGit := filepath.Join(d, ".git")
 		if fi, err := os.Stat(dotGit); err == nil {
 			gitDir := dotGit
@@ -73,7 +101,7 @@ func findGitRepository(dir string) (top string, common string, ok bool) {
 				// A linked worktree or a submodule: "gitdir: <path>".
 				target, ok := readGitPointer(dotGit, "gitdir:")
 				if !ok {
-					return filepath.Base(d), dotGit, true
+					return d, filepath.Base(d), dotGit, true
 				}
 				gitDir = resolveFrom(d, target)
 			}
@@ -82,21 +110,57 @@ func findGitRepository(dir string) (top string, common string, ok bool) {
 				common = resolveFrom(gitDir, target)
 			}
 			if filepath.Clean(common) == filepath.Clean(gitDir) {
-				return filepath.Base(d), common, true
+				return d, filepath.Base(d), common, true
 			}
 			// A linked worktree: the repository's own folder holds its
 			// common git directory, or is it when that is bare (repo.git).
 			if filepath.Base(common) == ".git" {
-				return filepath.Base(filepath.Dir(common)), common, true
+				return d, filepath.Base(filepath.Dir(common)), common, true
 			}
-			return strings.TrimSuffix(filepath.Base(common), ".git"), common, true
+			return d, strings.TrimSuffix(filepath.Base(common), ".git"), common, true
 		}
 		parent := filepath.Dir(d)
 		if parent == d {
-			return "", "", false
+			return "", "", "", false
 		}
 		d = parent
 	}
+}
+
+// lookupUser is user.Lookup; tests stand in a user of their own.
+var lookupUser = user.Lookup
+
+// homeFolders are the folders a repository search stops at: the user's home
+// ($HOME), and under sudo the home of the user who ran sudo (SUDO_USER),
+// which sudo may have replaced $HOME with root's. One that is not there is
+// nil, and stops no search.
+func homeFolders() []os.FileInfo {
+	home, _ := os.UserHomeDir()
+	paths := []string{home}
+	if name := os.Getenv("SUDO_USER"); name != "" {
+		if u, err := lookupUser(name); err == nil {
+			paths = append(paths, u.HomeDir)
+		}
+	}
+	homes := make([]os.FileInfo, 0, len(paths))
+	for _, p := range paths {
+		fi, _ := os.Stat(p)
+		homes = append(homes, fi)
+	}
+	return homes
+}
+
+// isOneOf says whether the folder d is one of folders, by whatever path it
+// was reached (a symlinked /home). A nil FileInfo, of a folder d's Stat
+// failed for or of one that is not there, is the same file as none.
+func isOneOf(d string, folders []os.FileInfo) bool {
+	fi, _ := os.Stat(d)
+	for _, f := range folders {
+		if os.SameFile(fi, f) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveFrom(base, p string) string {
