@@ -13,6 +13,7 @@ import (
 
 	"github.com/docker/docker/api/types/network"
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -34,7 +35,7 @@ func TestSweepUsesTheComposeLibraryForInMemoryProjects(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          &inspectRecorder{},
 		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
-		cmd:             "docker compose -f - up",
+		cmd:             utils.NewAppCommand("docker compose -f - up"),
 		composeServices: []string{"app"},
 		newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
 	}
@@ -69,7 +70,7 @@ func TestSweepSkipsComposeRunOneOffsOnTheLibraryPath(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          &inspectRecorder{},
 		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
-		cmd:             "docker compose -f - up",
+		cmd:             utils.NewAppCommand("docker compose -f - up"),
 		composeServices: []string{"app"},
 		newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
 	}
@@ -98,7 +99,7 @@ func libraryDownApp(t *testing.T, build func(context.Context) (composeStack, err
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
-		cmd:             "docker compose -p orderflow -f - up",
+		cmd:             utils.NewAppCommand("docker compose -p orderflow -f - up"),
 		keployContainer: "keploy-v3",
 		container:       "user-app",
 		composeServices: []string{"app", "db"},
