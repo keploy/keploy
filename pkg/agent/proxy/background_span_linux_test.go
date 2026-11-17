@@ -31,6 +31,10 @@ func TestTheServeClockNotesEveryServeButAProtocolPhases(t *testing.T) {
 	if s, ok := c.SpanTo(time.Now()); ok {
 		t.Fatalf("a serve made before the manager had the clock was noted: span from %v", s.From)
 	}
+	// The earliest serve the clock keeps, of neither group read below: a
+	// group none of whose serves was noted by its name would start its span
+	// here (learn.ServeClock.SpansOf).
+	m.observeServed(&models.Mock{Name: "earliest", Kind: models.Mongo}, nil)
 
 	before := time.Now()
 	m.observeServed(&models.Mock{Name: "poll", Kind: models.Mongo}, nil)
@@ -52,7 +56,9 @@ func TestTheServeClockNotesEveryServeButAProtocolPhases(t *testing.T) {
 
 	// Each serve is noted with its recording's name, by either door: a
 	// background call of that recording's group starts its span at it
-	// (learn.ServeClock.SpansOf), not at a later serve of another flow's.
+	// (learn.ServeClock.SpansOf), not at a later serve of another flow's,
+	// nor at the earliest serve kept, as a group whose serve went unnamed
+	// would. Mutation: note a serve by either door without its name.
 	done := time.Now()
 	m.observeServed(&models.Mock{Name: "other", Kind: models.Mongo}, nil)
 	for _, g := range []struct {
