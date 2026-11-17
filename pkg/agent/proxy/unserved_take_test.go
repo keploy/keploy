@@ -374,6 +374,65 @@ func TestAPoolViewsAheadOffTheTreesIsServedAsItIsTaken(t *testing.T) {
 	}
 }
 
+// Two of a pool view's aheads the trees do not hold, both taken as the pool
+// view answered them, are carried into the test they were answered for in
+// the step that installs its view, and the replay counts them only once
+// that step let go of the round lock. Read in the step, as the second is
+// carried (onTake), the first, carried before it, is served: its carry
+// keeps the note its take made until the count comes, as a call that asks
+// after the install and before the count reads it.
+func TestAPoolViewsAheadCarriedOffTheTreesIsServedBeforeTheReplaysCountOfIt(t *testing.T) {
+	s := newRoundStore(t)
+	later := httpCall("later", 9*time.Second, "/later")
+	later2 := httpCall("later2", 10*time.Second, "/later2")
+	s.onDisk(t, later, later2)
+	s.ms["later"], s.ms["later2"] = later, later2
+	s.inTest()
+	s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"}, later, later2)
+	s.end()
+	for _, n := range []string{"later", "later2"} {
+		if roundMock(s.mm, n) != nil {
+			t.Fatalf("precondition: the trees hold %s", n)
+		}
+		mk := shown(s.snapshot(t), n)
+		if mk == nil {
+			t.Fatalf("precondition: the ahead %s is not shown in the pool view", n)
+		}
+		if !s.mm.DeleteFilteredMock(*mk) {
+			t.Fatalf("the pool view's ahead %s was refused", n)
+		}
+	}
+	var carried []string
+	unserved, err := false, error(nil)
+	s.mm.exact.round.onTake = func(tk integrations.Take) {
+		if tk.How != integrations.TakeCarried || tk.Mock == nil {
+			return
+		}
+		carried = append(carried, tk.Mock.Name)
+		if len(carried) == 2 {
+			unserved, err = s.mm.HasUnservedRecording(models.HTTP, named(carried[0]))
+		}
+	}
+	t.Cleanup(func() { s.mm.exact.round.onTake = nil })
+	s.begin()
+	s.mm.ServeExactTest("T2", []*models.Mock{later, later2, s.ms["next2"]})
+	s.mm.exact.round.onTake = nil
+	if len(carried) != 2 {
+		t.Fatalf("precondition: the install carried %v into T2; want both aheads", carried)
+	}
+	if err != nil {
+		t.Fatalf("HasUnservedRecording(%s): %v", carried[0], err)
+	}
+	if unserved {
+		t.Fatalf("%s, carried into T2 before %s, was unserved in the install's step, before the replay's count of it", carried[0], carried[1])
+	}
+	for _, n := range carried {
+		if hasUnserved(t, s.mm, models.HTTP, n) {
+			t.Fatalf("%s, carried into T2, was unserved once T2 opened", n)
+		}
+	}
+}
+
 // A take whose recording a restage moves off the trees in the instant
 // before the replay counts it (the next window staged, as the replay stages
 // it) is read on disk, with no view to say it is spent: the store finds it
