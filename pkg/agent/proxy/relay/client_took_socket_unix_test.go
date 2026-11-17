@@ -293,6 +293,9 @@ func TestTheClientsSocketSaysWhatTheClientTook(t *testing.T) {
 	t.Run("half-closed", func(t *testing.T) {
 		app, proxyClient := loopbackPair(t)
 		s := clientSocketOf(proxyClient, zap.NewNop())
+		if s == nil {
+			t.Fatal("the client's socket is not asked")
+		}
 		// The relay's first look comes before it writes (clientFINBefore),
 		// and macOS counts from the first look (client_took_darwin.go).
 		_ = s.look()
@@ -331,6 +334,9 @@ func TestTheClientsSocketSaysWhatTheClientTook(t *testing.T) {
 	t.Run("closed", func(t *testing.T) {
 		app, proxyClient := loopbackPair(t)
 		s := clientSocketOf(proxyClient, zap.NewNop())
+		if s == nil {
+			t.Fatal("the client's socket is not asked")
+		}
 		if err := app.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -622,6 +628,9 @@ func TestWrittenCountsEveryByteWrittenToARealSocket(t *testing.T) {
 	t.Parallel()
 	_, proxyClient := loopbackPair(t)
 	s := clientSocketOf(proxyClient, zap.NewNop())
+	if s == nil {
+		t.Fatal("the client's socket is not asked")
+	}
 	// The relay's first look comes before it writes (clientFINBefore), and
 	// macOS counts from the first look (client_took_darwin.go).
 	_ = s.look()
@@ -790,6 +799,9 @@ func TestWrittenCountsWhatTheClientHasNotAcknowledgedYet(t *testing.T) {
 	app, proxyClient := dialSmallWindow(t)
 	client := CountClientWrites(proxyClient)
 	s := clientSocketOf(client, zap.NewNop())
+	if s == nil {
+		t.Fatal("the socket under the count from its accept is not asked")
+	}
 	countFromAccept(client, s)
 	n := uint64(receiveBufferBoundOf(t, app) + 128<<10)
 	if _, err := client.Write(make([]byte, n)); err != nil {
