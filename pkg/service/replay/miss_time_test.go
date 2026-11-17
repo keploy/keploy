@@ -108,6 +108,7 @@ var notInTheReport = map[string]string{
 	"Marked":          "the agent's own mark of the call's round, never on the wire (json:\"-\")",
 	"OrderDependent":  "set by keploy mock's evidence on its own copy of the miss, never on the replay's",
 	"EarlierIn":       "named on the test's result's copy of the miss once the run's tests are read (markRecordedIn), after this report is made",
+	"Whole":           "the call and its next step whole, which a miss the agent charged carries for keploy mock replay's console and misses file alone (models.WholeCall): the report is written to the test report, which never holds them",
 }
 
 // notFromTheMiss names each field of the report that no field of the miss
