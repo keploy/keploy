@@ -3843,6 +3843,11 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string
 	detections := make([]pii.Detection, 0)
 	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.Header, "request.header")...)
 	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.URLParams, "request.url_param")...)
+	// Capture decodes query names too, so /?user%40example.com=active holds
+	// an email in a name whose value is clean.
+	for name := range testCase.HTTPReq.URLParams {
+		detections = append(detections, pii.DetectName("request.url_param", name)...)
+	}
 	detections = append(detections, pii.DetectValue("request.url", testCase.HTTPReq.URL)...)
 	// The recorded URL keeps the path escaped as it arrived, so an email sent
 	// as user%40example.com is only visible once the path is decoded.
@@ -3866,11 +3871,13 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string
 	// the name "request.body" and misses a field such as password. Scan each
 	// form field under its own name.
 	for _, field := range urlEncodedFormFields(testCase.HTTPReq.Header, reqBody) {
+		detections = append(detections, pii.DetectName("request.form", field[0])...)
 		detections = append(detections, pii.DetectValue("request.form."+field[0], field[1])...)
 	}
 	// Capture moves multipart fields into Form and clears Body, so scan each
 	// form value under its field name as well.
 	for _, field := range testCase.HTTPReq.Form {
+		detections = append(detections, pii.DetectName("request.form", field.Key)...)
 		name := "request.form." + field.Key
 		if len(field.Values) == 0 {
 			detections = append(detections, pii.DetectValue(name, "")...)

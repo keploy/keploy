@@ -163,3 +163,13 @@ func TestDetectBodyScansObjectKeys(t *testing.T) {
 		t.Fatalf("expected one SSN detection at request.body.users, got %+v", nested)
 	}
 }
+
+func TestDetectName(t *testing.T) {
+	got := DetectName("request.url_param", "user@example.com")
+	if len(got) != 1 || got[0] != (Detection{Field: "request.url_param", PatternType: PatternEmail}) {
+		t.Fatalf("expected one email detection at request.url_param, got %+v", got)
+	}
+	if got := DetectName("request.form", "plan"); len(got) != 0 {
+		t.Fatalf("expected no detection for a clean name, got %+v", got)
+	}
+}

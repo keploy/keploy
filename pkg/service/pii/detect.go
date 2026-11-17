@@ -91,6 +91,14 @@ func DetectValue(field, value string) []Detection {
 	return dedupeDetections(detections)
 }
 
+// DetectName reports the value patterns (email, phone, card, SSN) found in
+// name, a query parameter or form field name, under container, the location
+// that holds it. As with a JSON key, the name itself stays out of the
+// detection's field.
+func DetectName(container, name string) []Detection {
+	return detectValuePatterns(container, name)
+}
+
 // detectValuePatterns reports the value patterns (email, phone, card, SSN)
 // found in value, under field. It skips the field-name check.
 func detectValuePatterns(field, value string) []Detection {

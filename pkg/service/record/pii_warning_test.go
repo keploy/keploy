@@ -266,3 +266,51 @@ func TestPIIWarningQuietForACleanGRPCCall(t *testing.T) {
 		t.Fatalf("got warnings for a clean gRPC call: %q", got)
 	}
 }
+
+func TestPIIWarningScansQueryAndFormNames(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  models.HTTPReq
+		want string
+	}{
+		{
+			name: "query",
+			req: models.HTTPReq{
+				Method:    models.Method("GET"),
+				URL:       "http://localhost:8080/?user%40example.com=active",
+				URLParams: map[string]string{"user@example.com": "active"},
+			},
+			want: "request.url_param (email)",
+		},
+		{
+			name: "multipart",
+			req: models.HTTPReq{
+				Method: models.Method("POST"),
+				URL:    "http://localhost:8080/signup",
+				Form:   []models.FormData{{Key: "user@example.com", Values: []string{"active"}}},
+			},
+			want: "request.form (email)",
+		},
+		{
+			name: "urlencoded",
+			req: models.HTTPReq{
+				Method: models.Method("POST"),
+				URL:    "http://localhost:8080/signup",
+				Header: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+				Body:   "user@example.com=active",
+			},
+			want: "request.form (email)",
+		},
+	} {
+		got := piiWarnings(t, &models.TestCase{HTTPReq: tc.req})
+		if len(got) != 1 {
+			t.Fatalf("%s: got %d warnings, want 1: %q", tc.name, len(got), got)
+		}
+		if !strings.Contains(got[0], tc.want) {
+			t.Errorf("%s: warning %q does not say %q", tc.name, got[0], tc.want)
+		}
+		if strings.Contains(got[0], "user@example.com") {
+			t.Errorf("%s: warning %q repeats the email", tc.name, got[0])
+		}
+	}
+}
