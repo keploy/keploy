@@ -46,8 +46,8 @@ func (d *stackDaemon) note(line string) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
 	_, _ = f.WriteString(line + "\n")
+	_ = f.Close()
 }
 
 // running reports whether container name runs.
@@ -84,11 +84,12 @@ func (d *stackDaemon) ContainerKill(_ context.Context, ref, signal string) error
 	return d.exit(ref, 0, "KILL-"+signal)
 }
 
+// ContainerStop of a container that is not running is the daemon's no-op.
 func (d *stackDaemon) ContainerStop(_ context.Context, ref string, _ container.StopOptions) error {
-	if err := d.exit(ref, 0, "STOP"); err != nil && !errdefs.IsConflict(err) {
-		return err
+	if !d.running(ref) {
+		return nil
 	}
-	return nil
+	return d.exit(ref, 0, "STOP")
 }
 
 // ContainerWait answers once the container is not running (the only
