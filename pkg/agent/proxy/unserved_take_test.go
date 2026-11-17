@@ -3,6 +3,7 @@ package proxy
 import (
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -158,5 +159,128 @@ func TestOnSettledNilRemovesTheSeam(t *testing.T) {
 	}
 	if !served || ran != 0 {
 		t.Fatalf("a consume after OnSettled(nil): served %v, removed seam ran %d times", served, ran)
+	}
+}
+
+// takenInItsStep consumes the recording called name through a delete door
+// and reports, read in the step that settles the consume, holding the round
+// lock, as its take is written to the take log (onTake): whether the view
+// says the recording is spent, and whether the store finds it unserved. It
+// fails t unless the door served the recording in a step that logged it.
+func takenInItsStep(t *testing.T, s *roundStore, name string) (spent, unserved bool) {
+	t.Helper()
+	mk := shown(s.snapshot(t), name)
+	if mk == nil {
+		t.Fatalf("precondition: %s is not shown", name)
+	}
+	ran := false
+	var err error
+	s.mm.exact.round.onTake = func(tk integrations.Take) {
+		if tk.Mock == nil || tk.Mock.Name != name || ran {
+			return
+		}
+		ran = true
+		spent = s.mm.MockSpent(name)
+		unserved, err = s.mm.HasUnservedRecording(models.HTTP, named(name))
+	}
+	defer func() { s.mm.exact.round.onTake = nil }()
+	if !s.mm.DeleteFilteredMock(*mk) || !ran {
+		t.Fatalf("the consume of %s was refused (its take logged: %v)", name, ran)
+	}
+	if err != nil {
+		t.Fatalf("HasUnservedRecording(%s): %v", name, err)
+	}
+	return spent, unserved
+}
+
+// A take marks its recording spent in the view a moment before it notes it
+// taken, both in the step that settles it, holding the round lock. A call
+// that read the recording spent in that instant (a Redis blocking pop held
+// for a recording no call took yet, which leaves out what its read shows)
+// finds it answered, not unserved: else it stays held for a window change
+// no test may bring, though another call took the recording. So for each
+// door's take: a test's own, a pool view's ahead, and a spend for the
+// staging outside every test and in a test.
+func TestATakeSpentInItsStepIsNeverUnserved(t *testing.T) {
+	for _, tc := range []struct {
+		name, take string
+		before     func(s *roundStore)
+	}{
+		{"a test's own", "own", (*roundStore).inTest},
+		{"a pool view's ahead", "next", (*roundStore).betweenWithAhead},
+		{"a spend for the staging outside every test", "pool", func(s *roundStore) {
+			s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+		}},
+		{"a spend for the staging in a test", "pool", func(s *roundStore) {
+			s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+			s.inTest()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRoundStore(t)
+			tc.before(s)
+			spent, unserved := takenInItsStep(t, s, tc.take)
+			if !spent {
+				t.Fatalf("precondition: the step logged the take of %s before its view said it is spent", tc.take)
+			}
+			if unserved {
+				t.Fatalf("%s, which its view says is spent, was unserved in the step that takes it", tc.take)
+			}
+			if hasUnserved(t, s.mm, models.HTTP, tc.take) {
+				t.Fatalf("%s was unserved once its take ended", tc.take)
+			}
+		})
+	}
+}
+
+// A call that read a recording spent, then asks while the take that spent
+// it is still in its step, finds it answered though, between the store's
+// read of the view and its read of the take's note, the step ends and the
+// next test opens, with a view that no longer says the recording is spent:
+// the view is read first, so one of the two reads says it answered.
+func TestATakeIsAnsweredToACallThatAsksAsTheNextTestOpens(t *testing.T) {
+	s := newRoundStore(t)
+	s.inTest()
+	mk := shown(s.snapshot(t), "own")
+	if mk == nil {
+		t.Fatal("precondition: own is not shown")
+	}
+	inStep, release, took := make(chan struct{}), make(chan struct{}), make(chan bool, 1)
+	s.mm.exact.round.onTake = func(tk integrations.Take) {
+		if tk.Mock != nil && tk.Mock.Name == "own" {
+			close(inStep)
+			<-release
+		}
+	}
+	opened := false
+	s.mm.exact.round.onRead = func(step string) {
+		if step != "answered own" || opened {
+			return
+		}
+		opened = true
+		close(release)
+		if !<-took {
+			panic("precondition: the consume of own was refused")
+		}
+		s.mm.ServeExactTest("T2", []*models.Mock{s.ms["next"], s.ms["next2"]})
+	}
+	t.Cleanup(func() { s.mm.exact.round.onTake, s.mm.exact.round.onRead = nil, nil })
+	go func() { took <- s.mm.DeleteFilteredMock(*mk) }()
+	<-inStep
+	if !s.mm.MockSpent("own") {
+		t.Fatal("precondition: own is not spent in the step that takes it")
+	}
+	unserved := hasUnserved(t, s.mm, models.HTTP, "own")
+	if !opened {
+		close(release)
+		if !<-took {
+			t.Fatal("the consume of own was refused")
+		}
+	}
+	if unserved {
+		t.Fatalf("own, read spent in the step that takes it, was unserved to a call that asked as the next test opened (the test opened in the ask: %v)", opened)
+	}
+	if hasUnserved(t, s.mm, models.HTTP, "own") {
+		t.Fatal("own was unserved once its take ended")
 	}
 }

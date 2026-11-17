@@ -15,6 +15,9 @@ import "go.keploy.io/server/v3/pkg/models"
 // the agent keeps on disk until its test opens, under either switch. A
 // recording that answered once is not one, whether it stays where it is (a
 // reusable one) or not; one of a test that ended before a call took it is.
+// Nor is one the store reported spent (StagingGenerations.MockSpent) before
+// the call: a parser that read a recording spent, then asks, finds it
+// answered, though the take that spent it has not finished.
 // match sees each recording at most once, and must not keep it. err is why
 // the store cannot read them all: the parser then does not hold the call.
 type UnservedRecordingFinder interface {

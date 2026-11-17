@@ -80,10 +80,17 @@ type roundState struct {
 	stagedSet uint64
 	// onWait and onRead are test seams, nil outside tests: onWait runs as a
 	// change is about to take the lock (lockRound), onRead inside a
-	// snapshot after each of its reads, with that read's name. A test
-	// drives a change between any two reads with them, never with sleeps.
+	// snapshot after each of its reads, with that read's name, and in
+	// HasUnservedRecording between a recording's view read and its note
+	// read (answeredIn). A test drives a change between any two reads with
+	// them, never with sleeps.
 	onWait func()
 	onRead func(step string)
+	// onTake is a test seam too: it runs as a take is written to the take
+	// log (takeLocked), holding the round lock, with the take: the step
+	// that settles a consume or a spend has marked the recording spent in
+	// its view and has not noted it taken.
+	onTake func(t integrations.Take)
 	// onAnswerAgain is a test seam too: it runs as a held call is about to
 	// be answered once more (heldScope.AnswerRepeatRead), its staging
 	// checked, holding the round lock.
@@ -247,6 +254,9 @@ func (m *MockManager) logLocked() *roundLog {
 // takeLocked writes t to the current staging's take log, holding the round
 // lock, and returns its index.
 func (m *MockManager) takeLocked(t integrations.Take) int {
+	if f := m.exact.round.onTake; f != nil {
+		f(t)
+	}
 	l := m.logLocked()
 	switch t.How {
 	case integrations.TakeCarried, integrations.TakeVoided, integrations.TakeRestored:
