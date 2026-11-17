@@ -233,6 +233,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
 		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
+		r.Post("/hooks/app-starts-anew", a.HandleAppStartsAnew)
 	})
 }
 
@@ -289,6 +290,24 @@ func (a *Agent) HandleBeforeTestSetCompose(w http.ResponseWriter, r *http.Reques
 	if err := agent.ActiveHooks.BeforeTestSetCompose(r.Context(), req.TestSetID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleAppStartsAnew tells the hooks that keploy starts the application
+// anew for a test set (agent.AppStartHook); hooks without the capability
+// have nothing to drop.
+func (a *Agent) HandleAppStartsAnew(w http.ResponseWriter, r *http.Request) {
+	var req models.AppStartsAnewReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if h, ok := agent.ActiveHooks.(agent.AppStartHook); ok {
+		if err := h.AppStartsAnew(r.Context(), req.TestSetID, req.FirstRecorded); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusOK)
 }

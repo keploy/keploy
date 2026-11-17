@@ -26,6 +26,19 @@ type AgentHooks interface {
 	SetFreezeAnchor(ctx context.Context, anchor time.Time) error
 }
 
+// AppStartHook is an optional AgentHooks capability: AppStartsAnew is told,
+// under the proven switch, that keploy starts the application anew for the
+// test set testSetID (no process of an earlier application runs on), after
+// the set's mocks are stored and before the application starts, with first,
+// the earliest instant one of the set's test cases was recorded at (zero for
+// none). Hooks that keep the app's clock from moving back (the enterprise
+// time-freeze) drop what an earlier application read: a new process has read
+// no instant. It is not told again to an agent that restarts under the
+// running application.
+type AppStartHook interface {
+	AppStartsAnew(ctx context.Context, testSetID string, first time.Time) error
+}
+
 // AppClockReader is an optional AgentHooks capability: AppClock is the
 // instant the app's clock showed at the real instant real, as the hooks moved
 // it (the enterprise time-freeze), false where they cannot tell. The agent
