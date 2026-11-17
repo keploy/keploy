@@ -374,6 +374,23 @@ func TestAPerTestWalkOfAHeldStoreStopsWhereTheStagingMoved(t *testing.T) {
 			if !restaged() {
 				t.Fatal("a walk the staging moved under does not say the set was staged again")
 			}
+			// A walk of a hold the staging moved before reads nothing: it
+			// hands fn no mock and allocates nothing, so it never reads the
+			// tier. Counted, not timed.
+			called := false
+			none := func(*models.Mock) bool { called = true; return true }
+			keyedDb, _ := held.(integrations.PerTestKeyRanger)
+			ranger, _ := held.(integrations.PerTestRanger)
+			allocs := testing.AllocsPerRun(20, func() {
+				if keyed {
+					_ = keyedDb.RangePerTestMocksWithKey(byKindAndName, "all", none)
+				} else {
+					_ = ranger.RangePerTestMocksInWindow(none)
+				}
+			})
+			if called || allocs != 0 {
+				t.Fatalf("a walk of a hold the staging moved before handed fn a mock (%v) and allocated %v times a walk; want no mock and no read of the tier", called, allocs)
+			}
 		})
 	}
 }
