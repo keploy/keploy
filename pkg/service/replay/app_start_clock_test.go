@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -45,10 +46,16 @@ type noticedInstr struct {
 	*appNotices
 }
 
-// noticedCompose is the harness's compose instrumentation that takes it.
+// noticedCompose is the harness's compose instrumentation that takes it,
+// each notice noted in the compose order as it comes.
 type noticedCompose struct {
 	*composeInstr
 	*appNotices
+}
+
+func (n *noticedCompose) AppStartsAnew(ctx context.Context, set string, first time.Time) error {
+	n.order = append(n.order, "notice")
+	return n.appNotices.AppStartsAnew(ctx, set, first)
 }
 
 // recordedAt puts the harness's cases at the given recorded instants.
@@ -155,6 +162,29 @@ func TestAComposeSetTellsTheAgentOnlyAnAppStartedAnew(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A kept stack's app started anew is told to the agent before its start, as
+// a stack the set brings up is, once the agent is ready for the set: the new
+// process's first clock read is then at the set's first case. Told after the
+// start, the app could read the later instant only the app before it saw,
+// and the agent's move to the set's first case then put its clock back.
+func TestAKeptStacksAppStartedAnewIsToldBeforeItStarts(t *testing.T) {
+	provenOn(t, true)
+	c := &composeInstr{}
+	h := composeHarness(t, c)
+	n := &appNotices{}
+	h.replayer.instrumentation = &noticedCompose{composeInstr: c, appNotices: n}
+	if status := h.runServing(t); status != models.TestSetStatusPassed {
+		t.Fatalf("the stack's first set: status %s, want PASSED", status)
+	}
+	c.order = nil
+	if status := h.runServing(t); status != models.TestSetStatusPassed {
+		t.Fatalf("the kept stack's set: status %s, want PASSED", status)
+	}
+	if got := strings.Join(c.order, ","); got != "agent ready,notice,start" || len(n.notices()) != 2 {
+		t.Fatalf("the kept stack's set: %s with %d notices; want agent ready,notice,start: told once the agent is ready, before the start", got, len(n.notices()))
 	}
 }
 
