@@ -702,7 +702,7 @@ func TestAfterTheClientHalfClosed_AClientNotReadingYetIsWaitedFor(t *testing.T) 
 	// from.
 	seen := &seenWrites{Conn: CountClientWrites(proxyClient)}
 	r := New(Config{Logger: zap.New(core), HalfCloseGrace: time.Minute}, seen, connseq.NewUpstream(proxyServer))
-	looks := &countedLooks{clientSocket: r.client}
+	looks := &countedLooks{clientSocket: tcpSocket(t, r.client)}
 	r.client = looks
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
