@@ -45,7 +45,8 @@ func (sysProc) Program(pid uint32) string {
 func (sysProc) KernelPidsLocal() bool { return true }
 
 // Command reads process pid's comm (kinfo_proc's p_comm) and command line
-// (kern.procargs2: argc, the executable's path, then argv, NUL-separated).
+// (kern.procargs2: argc, the executable's path and its padding, then argv,
+// NUL-separated: procArgs).
 func (sysProc) Command(pid uint32) (comm string, argv []string, ok bool) {
 	if kp, err := unix.SysctlKinfoProc("kern.proc.pid", int(pid)); err == nil && kp != nil && kp.Proc.P_pid != 0 {
 		c := kp.Proc.P_comm[:]
@@ -54,25 +55,8 @@ func (sysProc) Command(pid uint32) (comm string, argv []string, ok bool) {
 		}
 		comm = string(c)
 	}
-	if b, err := unix.SysctlRaw("kern.procargs2", int(pid)); err == nil && len(b) > 4 {
-		argc := int(b[0]) | int(b[1])<<8 | int(b[2])<<16 | int(b[3])<<24
-		rest := b[4:]
-		// The executable's path, then the NULs that pad it.
-		if i := bytes.IndexByte(rest, 0); i >= 0 {
-			rest = rest[i:]
-		}
-		for len(rest) > 0 && rest[0] == 0 {
-			rest = rest[1:]
-		}
-		for len(argv) < argc && len(rest) > 0 {
-			i := bytes.IndexByte(rest, 0)
-			if i < 0 {
-				argv = append(argv, string(rest))
-				break
-			}
-			argv = append(argv, string(rest[:i]))
-			rest = rest[i+1:]
-		}
+	if b, err := unix.SysctlRaw("kern.procargs2", int(pid)); err == nil {
+		argv = procArgs(b)
 	}
 	return comm, argv, comm != "" || len(argv) > 0
 }

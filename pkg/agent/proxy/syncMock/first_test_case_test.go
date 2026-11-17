@@ -394,7 +394,15 @@ func TestRecordingFromIsWhenTheRecordingStarted(t *testing.T) {
 	}
 	var last time.Time
 	for i := range 2 {
+		// A recording starts after the last one did. macOS reads the wall
+		// clock in microseconds, so two starts in one microsecond read the
+		// same instant there: the next one starts once the clock has passed
+		// the last one's start.
 		before := time.Now()
+		for !before.After(last) {
+			time.Sleep(time.Microsecond)
+			before = time.Now()
+		}
 		m.StartRecordSession()
 		got := m.RecordingFrom()
 		if got.Before(before) || got.After(time.Now()) || !got.After(last) {

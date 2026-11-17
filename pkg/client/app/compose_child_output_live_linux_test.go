@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/utils"
 	keployLog "go.keploy.io/server/v3/utils/log"
 )
 
@@ -58,7 +59,7 @@ func TestRecentAppLogsReadsARealComposeChildsTail(t *testing.T) {
 	})
 
 	a := childComposeApp()
-	a.cmd = "docker compose -p " + project + " -f - up --abort-on-container-exit"
+	a.cmd = utils.NewAppCommand("docker compose -p " + project + " -f - up --abort-on-container-exit")
 	a.composeContent = []byte(doc)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -67,7 +68,7 @@ func TestRecentAppLogsReadsARealComposeChildsTail(t *testing.T) {
 	}
 	// The app exits 3, so the child's error is expected; it is said with any
 	// failure below, so a failed pull is not read as a missing tail.
-	cmdErr := a.executeCommand(ctx, a.cmd, nil, killGroup)
+	cmdErr := a.executeCommand(ctx, a.cmd.WholeUnredacted(), nil, killGroup)
 
 	// The app's stdout and stderr lines are on two streams, compose's and
 	// keploy's copies of each; their order across the streams is not kept.

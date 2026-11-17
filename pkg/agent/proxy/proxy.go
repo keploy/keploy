@@ -2695,25 +2695,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			// counted, or a wait that saw the count reach it could find it
 			// nowhere and call the test settled while its request sat unread.
 			raw := clientConn
-			var tracked *trackedConn
-			if p.keepsConnections() {
-				tracked = p.inflight.trackTold(clientConn, p.flights())
-				clientConn = tracked
-			}
-			// Its sequence number is taken before anything else is done
-			// with it: the agent waits on the numbers the kernel gave the
-			// connections completed to this listener (accepts.go).
-			p.countAccept(raw)
-			// A paired connection is kept too, whatever the switch says
-			// (only a counted listener pairs one): its close is read
-			// before it happens (pairbytes.go).
-			if p.paired.holds(raw) {
-				if tracked == nil {
-					tracked = p.inflight.trackTold(clientConn, p.flights())
-					clientConn = tracked
-				}
-				tracked.beforeClose = func() { p.pairClosing(clientConnCtx, raw, tracked) }
-			}
+			clientConn, tracked := p.acceptedConn(clientConnCtx, raw)
 			// Track the connection BEFORE spawning the goroutine to
 			// close the Add-vs-Wait race that sync.WaitGroup's
 			// contract forbids. If Add ran inside the goroutine
@@ -2759,6 +2741,39 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			})
 		}
 	}
+}
+
+// acceptedConn is the conn the proxy handles an accepted client connection
+// through (raw, as the listener gave it), and its tracking (nil when it is not
+// kept). ctx is the connections' context, which reads a paired connection's
+// close (pairClosing).
+func (p *Proxy) acceptedConn(ctx context.Context, raw net.Conn) (clientConn net.Conn, tracked *trackedConn) {
+	// On macOS every byte written to the client is counted from
+	// here, under the tracking and any TLS, whatever layer writes
+	// it: the relay reads what the client acknowledged from the
+	// count (relay.CountClientWrites). raw stays the socket the
+	// listener gave, for what keys or reads it (countAccept,
+	// pairKey, the paired bytes).
+	clientConn = relay.CountClientWrites(raw)
+	if p.keepsConnections() {
+		tracked = p.inflight.trackTold(clientConn, p.flights())
+		clientConn = tracked
+	}
+	// Its sequence number is taken before anything else is done
+	// with it: the agent waits on the numbers the kernel gave the
+	// connections completed to this listener (accepts.go).
+	p.countAccept(raw)
+	// A paired connection is kept too, whatever the switch says
+	// (only a counted listener pairs one): its close is read
+	// before it happens (pairbytes.go).
+	if p.paired.holds(raw) {
+		if tracked == nil {
+			tracked = p.inflight.trackTold(clientConn, p.flights())
+			clientConn = tracked
+		}
+		tracked.beforeClose = func() { p.pairClosing(ctx, raw, tracked) }
+	}
+	return clientConn, tracked
 }
 
 func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
@@ -2954,7 +2969,7 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 		// Nothing on the connection is captured, so its close is no loss
 		// (pairClosing).
 		if tracked != nil {
-			p.paired.servedWithoutSession(tracked.Conn)
+			p.paired.servedWithoutSession(tracked)
 		}
 		return p.serveWithoutSession(ctx, srcConn, dstAddr, predialed)
 	}

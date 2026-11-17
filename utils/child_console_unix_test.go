@@ -246,7 +246,7 @@ func TestExecuteCommandsTerminalCopyIsCut(t *testing.T) {
 	cmd := exec.Command("sh", "-c", `printf 'token=%s\n' '`+plantedConsoleValue+`'; printf 'tail %s' '`+plantedConsoleValue+`'`)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	var tee tees
-	cmdErr := executeWithPTY(context.Background(), zap.NewNop(), cmd, tee.next)
+	cmdErr := executeWithPTY(context.Background(), zap.NewNop(), cmd, NewAppCommand(cmd.Args[2]), tee.next)
 	stdout, _ := read()
 	if cmdErr.Type == Init {
 		t.Skipf("no terminal to run the command in: %v", cmdErr.Err)

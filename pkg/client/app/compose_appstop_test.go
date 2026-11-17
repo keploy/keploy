@@ -866,7 +866,7 @@ func TestRunHoldsTheProjectAfterKeploysStopOfAnAppAttachedAlone(t *testing.T) {
 				logger:          zap.New(core),
 				docker:          rec,
 				kind:            utils.DockerCompose,
-				cmd:             "docker compose -f /tmp/keploy-compose.yaml up app",
+				cmd:             utils.NewAppCommand("docker compose -f /tmp/keploy-compose.yaml up app"),
 				composeFile:     "/tmp/keploy-compose.yaml",
 				keployContainer: "keploy-v3",
 				container:       "app",

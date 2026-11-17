@@ -2,6 +2,7 @@ package starts
 
 import (
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // THE PROCESS A RECORDED CALL CAME FROM.
@@ -21,10 +23,16 @@ import (
 // go run or go test built, by that go command: programOf): a reason
 // line that routes or moves a call names it, and a miss or an answered call
 // names it too (models.UnmatchedCall.Source). No committed file holds more of
-// its command line: the whole of it, with its secrets redacted
-// (containerkey.RedactArgs), goes to the record log once per process, at
-// debug, beside its pid, and travels with a miss (SourceOf) to keploy mock's
-// local receipt, which names the process of a call no test was charged with.
+// its command line. The record log names it once per process, at debug,
+// beside its pid, by its shape: each word but its program, its flags' names
+// and its short numbers by its shape and its tag under the session
+// (utils.RedactProcessArgv, SetLogKeySession), as a process's words are the
+// hosts, paths and users it calls with, the application's traffic. The
+// whole of it, its secrets redacted (containerkey.RedactArgs), travels with
+// a miss (SourceOf) to keploy mock's local receipt, which names the process
+// of a call no test was charged with. Each reads the process's words
+// (argv), never a line joined from them: a word may hold white space or a
+// quote, and a joined line splits back into other words.
 //
 // The proxy notes each connection's process as it accepts the connection
 // (NoteOrigin: the pid the kernel's redirect gave it), and forgets it once
@@ -91,13 +99,15 @@ type origins struct {
 	// named caches, by process (pid and birth), its comm and argv[0], and
 	// says its command line was logged.
 	named map[procKey]procName
-	// unborn is, by pid, the command line (redacted) last logged of a
-	// process whose birth cannot be read, so not cached in named: it is
-	// logged once per pid, and again only for another command line (the
-	// pid reused).
-	unborn map[uint32]string
+	// unborn is, by pid, the command line's words (redacted) last logged of
+	// a process whose birth cannot be read, so not cached in named: it is
+	// logged once per pid, and again only for other words (the pid reused).
+	unborn map[uint32][]string
 	// logger is where a process's command line is logged, once (SetLogger).
 	logger atomic.Pointer[zap.Logger]
+	// keys is the session the command line is logged in (SetLogKeySession):
+	// the words it writes by their shape are tagged under its key.
+	keys atomic.Pointer[models.LogKeySession]
 	// foreignSaid: the record log said, once, that keploy names no process
 	// because it runs in a PID namespace of its own.
 	foreignSaid atomic.Bool
@@ -135,12 +145,13 @@ func (c *connOrigin) liveAt(at time.Time) bool {
 
 // procName is a process's comm and argv[0]; ok is false when it could not
 // be read. foreign: its pid is a kernel pid keploy does not read a process by
-// (KernelPids), so nothing was read. pid is the pid it was asked by. line is
-// its whole command line, redacted (containerkey.RedactArgs), which only a
-// call's source carries (SourceOf), never a mock's origin.
+// (KernelPids), so nothing was read. pid is the pid it was asked by. argv is
+// its command line's words, redacted (containerkey.RedactArgs), which the
+// record log writes by their shape (logProcess) and only a call's source
+// carries whole (SourceOf), never a mock's origin.
 type procName struct {
 	comm, exe string
-	line      string
+	argv      []string
 	ok        bool
 	foreign   bool
 	pid       uint32
@@ -150,6 +161,24 @@ type procName struct {
 // (redacted) of a process a recorded call came from. nil logs nothing.
 func (r *Registry) SetLogger(l *zap.Logger) {
 	r.origin.logger.Store(l)
+}
+
+// SetLogKeySession sets the session (models.LogKeySession) the registry logs
+// a process's command line in: each word it writes by its shape is followed
+// by the tag of the whole word under the session's key
+// (utils.RedactProcessArgv), so the session's process lines about one word
+// match up. The session's other lines tag a host by its name, with a
+// trailing dot (models.HostTag), so a process line's tag matches no routing
+// line's. The agent sets it as each session begins (a recording, a
+// replay's session); nil is the process's key.
+func (r *Registry) SetLogKeySession(keys *models.LogKeySession) {
+	r.origin.keys.Store(keys)
+}
+
+// LogKeySession is the session the registry logs a process's command line
+// in (SetLogKeySession); nil for the process's key.
+func (r *Registry) LogKeySession() *models.LogKeySession {
+	return r.origin.keys.Load()
 }
 
 // NoteOrigin notes that connection conn (the connection ID its mocks carry)
@@ -295,7 +324,9 @@ func (r *Registry) ProcessOf(pid uint32) (comm, exe string, ok bool) {
 
 // SourceOf is how a call from process pid (a kernel pid) names it
 // (models.UnmatchedCall.Source): its comm and argv[0], with the pid and its
-// whole command line, redacted, which only travel (models.Origin.Cmdline);
+// whole command line, redacted, its words quoted where one holds white space
+// or a quote (utils.JoinCommandLine), which only travel
+// (models.Origin.Cmdline);
 // where keploy does not read a process by a kernel pid (KernelPids), no
 // name, why, and the pid; nil for pid 0, or a process that cannot be read.
 func (r *Registry) SourceOf(pid uint32) *models.Origin {
@@ -306,7 +337,7 @@ func (r *Registry) SourceOf(pid uint32) *models.Origin {
 	n.pid = pid
 	o := n.origin()
 	if o != nil && n.ok {
-		o.PID, o.Cmdline = pid, n.line
+		o.PID, o.Cmdline = pid, utils.JoinCommandLine(n.argv)
 	}
 	return o
 }
@@ -342,8 +373,8 @@ func (r *Registry) connName(id string, pid uint32) (procName, bool) {
 }
 
 // nameOf reads process pid's name (Commander), cached by the process (its
-// pid and birth: a pid reused is another process), and logs its whole
-// command line, redacted, the first time.
+// pid and birth: a pid reused is another process), and logs its command
+// line, by its shape, the first time.
 func (r *Registry) nameOf(pid uint32) procName {
 	cmd, ok := r.proc.(Commander)
 	if !ok {
@@ -382,22 +413,22 @@ func (r *Registry) nameOf(pid uint32) procName {
 	if len(argv) > 0 {
 		n.exe = r.programOf(cmd, pid, argv[0])
 	}
-	line := strings.Join(containerkey.RedactArgs(argv), " ")
-	n.line = line
+	n.argv = containerkey.RedactArgs(argv)
 	if !bornKnown {
 		// Not kept, but its command line is logged all the same, once per
 		// pid: a routing line may name it.
 		o.mu.Lock()
 		prev, logged := o.unborn[pid]
-		if !logged || prev != line {
+		again := !logged || !slices.Equal(prev, n.argv)
+		if again {
 			if o.unborn == nil || len(o.unborn) >= keptProcessNames {
-				o.unborn = map[uint32]string{}
+				o.unborn = map[uint32][]string{}
 			}
-			o.unborn[pid] = line
+			o.unborn[pid] = n.argv
 		}
 		o.mu.Unlock()
-		if !logged || prev != line {
-			o.logProcess(pid, n, line)
+		if again {
+			o.logProcess(pid, n)
 		}
 		return n
 	}
@@ -411,7 +442,7 @@ func (r *Registry) nameOf(pid uint32) procName {
 	}
 	o.named[key] = n
 	o.mu.Unlock()
-	o.logProcess(pid, n, line)
+	o.logProcess(pid, n)
 	return n
 }
 
@@ -429,13 +460,20 @@ func (o *origins) sayForeign(pid uint32) {
 }
 
 // logProcess logs, at debug, that a recorded call came from process pid,
-// named n, with its whole command line, redacted (line).
-func (o *origins) logProcess(pid uint32, n procName, line string) {
-	if l := o.logger.Load(); l != nil && n.ok {
-		l.Debug("a recorded call came from this process",
-			zap.String("pid", strconv.FormatUint(uint64(pid), 10)),
+// named n, with its command line's words (n.argv) by their shape: each word
+// but its program, its flags' names and its short numbers by its shape and
+// its tag under the session (utils.RedactProcessArgv). The words are
+// written only for a logger that writes the line: with debug off, nothing
+// is done.
+func (o *origins) logProcess(pid uint32, n procName) {
+	l := o.logger.Load()
+	if l == nil || !n.ok {
+		return
+	}
+	if ce := l.Check(zapcore.DebugLevel, "a recorded call came from this process"); ce != nil {
+		ce.Write(zap.String("pid", strconv.FormatUint(uint64(pid), 10)),
 			zap.String("comm", n.comm),
-			zap.String("cmdline", utils.RedactCommandLine(line)))
+			zap.String("cmdline", utils.RedactProcessArgv(o.keys.Load(), n.argv)))
 	}
 }
 
