@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -18,8 +19,30 @@ import (
 // keploy decided only after set A had ended, naming test-2 as an earlier
 // set's test (models.UnmatchedCall.EarlierSetTest), as the agent hands it.
 func lateOfSetA() ([]models.UnmatchedCall, error) {
-	return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /orders", Destination: "orders:80",
+	return []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /orders", Destination: "orders:80", PathTag: lateTag,
 		Kind: models.MissOutsideTest, EarlierSetTest: "test-2"}}, nil
+}
+
+// lateTag is the path tag the agent's miss line named set A's test-2's call
+// by, which the call carries (models.UnmatchedCall.PathTag).
+const lateTag = "#0a1b2c3d4e5f"
+
+// sayLate checks what keploy said of set A's test-2's late call, its log
+// line why (the run's verdict) and its console: the line names the call by
+// its shape and the tag it carries, never its path (the run's log reaches log
+// stores, and a path can hold a token); the console names it whole beside
+// that tag, so a reader of the line finds the call by its tag.
+func sayLate(t *testing.T, why []observer.LoggedEntry, console, set string) {
+	t.Helper()
+	// The destination's name by its labels' shape (a name is traffic); the
+	// console names it whole.
+	if len(why) != 1 || !strings.Contains(why[0].Message, "HTTP POST /{} [path tag "+lateTag+"] to {}:80 (made in test-2 of "+set+")") ||
+		strings.Contains(why[0].Message, "/orders") || strings.Contains(why[0].Message, "orders:80") {
+		t.Fatalf("the run's failure said %+v; want the call by its shape and tag, its destination by its shape, test-2 and %s named once, and no path", why, set)
+	}
+	if want := "  Mock mismatch of an earlier test set: [HTTP] POST /orders [path tag " + lateTag + "]  →  orders:80   (made in test-2 of " + set + ")"; strings.Count(console, want) != 1 {
+		t.Fatalf("the console said\n%s\nwant once %q", console, want)
+	}
 }
 
 // A call set A's last test made that keploy decided only after set A had
@@ -39,7 +62,8 @@ func TestRunTestSet_AnEarlierSetsTestsLateCallFailsTheRunNotTheSetThatReadIt(t *
 	}
 	h.instr.mockErrorsFor = misses(lateOfSetA)
 	h.set = "test-set-b"
-	status := h.runServing(t)
+	var status models.TestSetStatus
+	console := consoleOf(h.replayer, func() { status = h.runServing(t) })
 
 	rep := h.report.report
 	if status != models.TestSetStatusPassed || rep.Status != string(models.TestSetStatusPassed) {
@@ -60,7 +84,9 @@ func TestRunTestSet_AnEarlierSetsTestsLateCallFailsTheRunNotTheSetThatReadIt(t *
 	said := logs.FilterMessageSnippet("an earlier test set made a call that no mock answered").
 		FilterField(zap.String("made-in-test", "test-2")).
 		FilterField(zap.String("made-in-test-set", "test-set-a")).
-		FilterField(zap.String("read-in-test-set", "test-set-b"))
+		FilterField(zap.String("read-in-test-set", "test-set-b")).
+		FilterField(zap.String("call", "POST /{}")).
+		FilterField(zap.String("path_tag", lateTag))
 	if said.Len() != 1 {
 		t.Fatalf("the call was said %d times naming test-2, test-set-a and test-set-b; want once: %+v", said.Len(), logs.All())
 	}
@@ -71,9 +97,7 @@ func TestRunTestSet_AnEarlierSetsTestsLateCallFailsTheRunNotTheSetThatReadIt(t *
 		t.Fatal("the run passes with set A's test-2's call no mock answered")
 	}
 	why := logs.FilterMessageSnippet("test run failed: the application made 1 call(s) in an earlier test set").All()
-	if len(why) != 1 || !strings.Contains(why[0].Message, "HTTP POST /orders to orders:80 (made in test-2 of test-set-a)") {
-		t.Fatalf("the run's failure said %+v; want the call, test-2 and test-set-a named once", why)
-	}
+	sayLate(t, why, console, "test-set-a")
 }
 
 // A run's verdict counts only the calls of earlier sets' tests that count
@@ -218,7 +242,9 @@ func TestStart_AnEarlierSetsTestsLateCallFailsTheRunWithEverySetPassed(t *testin
 				return calls, nil
 			}
 
-			code, statuses := startEarlierSetRun(t, h, reports)
+			var code int
+			var statuses map[string]string
+			console := consoleOf(h.replayer, func() { code, statuses = startEarlierSetRun(t, h, reports) })
 			if !handed.Load() {
 				t.Fatal("test-set-1 read nothing: the case needs its first read to return the call")
 			}
@@ -231,9 +257,7 @@ func TestStart_AnEarlierSetsTestsLateCallFailsTheRunWithEverySetPassed(t *testin
 				t.Fatal("the run exits 0 with test-set-0's test-2's call no mock answered")
 			}
 			why := logs.FilterMessageSnippet("test run failed: the application made 1 call(s) in an earlier test set").All()
-			if len(why) != 1 || !strings.Contains(why[0].Message, "HTTP POST /orders to orders:80 (made in test-2 of test-set-0)") {
-				t.Fatalf("the run's failure said %+v; want the call, test-2 and test-set-0 named once", why)
-			}
+			sayLate(t, why, console, "test-set-0")
 
 			// The same Replayer runs again, and no read returns such a call.
 			h.instr.mockErrorsFor = nil
@@ -375,5 +399,56 @@ func aSetEndedAfterItsStagingIsCountedAsTheAgentCountsIt(t *testing.T, h *prRun)
 		FilterField(zap.String("read-in-test-set", "test-set-y"))
 	if said.Len() != 1 {
 		t.Fatalf("the call was said %d times naming test-set-x and test-set-y; want once: %+v", said.Len(), logs.All())
+	}
+}
+
+// keploy test begins a session for its path tags as each run begins
+// (models.StartLogKeySession), carried in the context of the run's work:
+// within a run, over all its sets, a path has one tag; the next run on the
+// same Replayer (a program that embeds it runs many) gives it another, and
+// neither is the process's, so no tag of one run's log agrees with another's.
+func TestStart_EachRunTagsPathsUnderAKeyOfItsOwn(t *testing.T) {
+	provenOn(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	reports := &setsReportDB{prReportDB: h.report}
+	h.replayer.reportDB = reports
+	h.replayer.testDB = twoPRSetsDB{&prTestDB{cases: h.cases}}
+	h.replayer.config.Command = "./app"
+	h.replayer.config.CommandType = string(utils.Native)
+	h.replayer.config.Test.MaxFlakyChecks = 1
+	h.replayer.logger = zap.NewNop()
+	var mu sync.Mutex
+	var seen []string
+	h.instr.mockErrorsFor = func() ([]models.UnmatchedCall, error) {
+		mu.Lock()
+		seen = append(seen, models.PathTag(h.instr.readContext(), "GET", "/v1/users/42"))
+		mu.Unlock()
+		return nil, nil
+	}
+	run := func() map[string]bool {
+		mu.Lock()
+		seen = nil
+		mu.Unlock()
+		startEarlierSetRun(t, h, reports)
+		mu.Lock()
+		defer mu.Unlock()
+		tags := map[string]bool{}
+		for _, tag := range seen {
+			tags[tag] = true
+		}
+		if len(seen) < 2 || len(tags) != 1 {
+			t.Fatalf("a run read its calls %d times under tags %v, want twice or more under one", len(seen), tags)
+		}
+		return tags
+	}
+	first, second := run(), run()
+	process := models.PathTag(context.Background(), "GET", "/v1/users/42")
+	for tag := range first {
+		if second[tag] {
+			t.Fatalf("two runs gave GET /v1/users/42 one tag, %s", tag)
+		}
+	}
+	if first[process] || second[process] {
+		t.Fatalf("a run tagged GET /v1/users/42 under the process's key, %s", process)
 	}
 }

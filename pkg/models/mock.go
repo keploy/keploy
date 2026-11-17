@@ -4,6 +4,7 @@ import (
 	"encoding/gob"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -98,6 +99,42 @@ const (
 	// never sets that flag) never receives it and cannot mis-persist it.
 	RevokedTests Kind = "keploy-revoked-tests"
 )
+
+// RevokeByRequestPrefix starts the name a RevokedTests frame gives a test
+// case the agent's stream sent with no name of its own (the async capture
+// leaves naming to the client, which names it as it saves it): the rest is
+// the request time its window starts at (TestCaseWindow), in Unix
+// nanoseconds, by which the client finds the name it gave it
+// (RequestOfRevokeName). The agent names one so only to a client that says it
+// reads such a name (OutgoingOptions.SupportsRevokeByRequest).
+const RevokeByRequestPrefix = "keploy-request-at:"
+
+// RevokeNameByRequest is the name a RevokedTests frame gives a test case sent
+// with no name whose window starts at req (RevokeByRequestPrefix).
+func RevokeNameByRequest(req time.Time) string {
+	return RevokeByRequestPrefix + strconv.FormatInt(req.UnixNano(), 10)
+}
+
+// RequestOfRevokeName reports the request time, in Unix nanoseconds, a
+// revoked name gives (RevokeNameByRequest), and false for any other name.
+func RequestOfRevokeName(name string) (int64, bool) {
+	rest, ok := strings.CutPrefix(name, RevokeByRequestPrefix)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(rest, 10, 64)
+	return n, err == nil
+}
+
+// TestCaseWindow is a test case's window, by its kind: a gRPC test case's
+// times are its GrpcReq's and GrpcResp's, any other's its HTTPReq's and
+// HTTPResp's.
+func TestCaseWindow(tc *TestCase) (time.Time, time.Time) {
+	if tc.Kind == GRPC_EXPORT {
+		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+	}
+	return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+}
 
 // MockName constants for the PostgresV3 parser. The integrations-side
 // recorder currently hardcodes these values as string literals when

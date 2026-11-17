@@ -17,6 +17,7 @@ import (
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -161,7 +162,7 @@ func readTakenBody(live *models.HTTPReq, h http.Header, body []byte) string {
 			body = decoded
 		case "identity":
 		default:
-			return "its body is encoded (Content-Encoding " + enc + "), which a recording keeps as its client sent it, undecoded"
+			return "its body is encoded (Content-Encoding " + contentCodings(enc) + "), which a recording keeps as its client sent it, undecoded"
 		}
 	}
 	ct := h.Get("Content-Type")
@@ -184,6 +185,23 @@ func readTakenBody(live *models.HTTPReq, h http.Header, body []byte) string {
 	return ""
 }
 
+// contentCodings names enc, a Content-Encoding header's value, by the
+// content codings keploy knows in it (RFC 9110's registry), each other one
+// by its size: the header's value is the client's.
+func contentCodings(enc string) string {
+	var names []string
+	for _, c := range strings.Split(enc, ",") {
+		c = strings.ToLower(strings.TrimSpace(c))
+		switch c {
+		case "gzip", "x-gzip", "deflate", "compress", "x-compress", "br", "zstd", "identity", "aes128gcm", "exi", "pack200-gzip", "dcb", "dcz":
+			names = append(names, c)
+		default:
+			names = append(names, fmt.Sprintf("a coding keploy does not know, %d bytes", len(c)))
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
 // formTextParts are the parts of body, a multipart form of Content-Type ct,
 // in the order sent, each its name's value (hooksUtils.ExtractFormData), or
 // why keploy does not read them: a part that sends a file (a file name), and
@@ -201,7 +219,9 @@ func formTextParts(ct string, body []byte) ([]models.FormData, string) {
 			return form, ""
 		}
 		if err != nil {
-			return nil, "its multipart form does not parse: " + err.Error()
+			// The parser's error quotes the line it refused, a part's
+			// header or body line: withheld.
+			return nil, "its multipart form does not parse: " + utils.WithholdInput(err).Error()
 		}
 		if part.FormName() == "" {
 			continue
@@ -211,10 +231,23 @@ func formTextParts(ct string, body []byte) ([]models.FormData, string) {
 		}
 		v, err := io.ReadAll(part)
 		if err != nil {
-			return nil, "its multipart form does not parse: " + err.Error()
+			return nil, "its multipart form does not parse: " + partReadWhy(err)
 		}
 		form = append(form, models.FormData{Key: part.FormName(), Values: []string{string(v)}})
 	}
+}
+
+// partReadWhy is why a form part's body did not read (err, from reading
+// it), by its kind alone. Reading a part fails only where it ends before a
+// boundary (io.ErrUnexpectedEOF), or where a part sent quoted-printable
+// (multipart.NextPart decodes one) does not decode, whose error names a
+// byte of the body it refused, in hex, or quotes the bytes after an "=":
+// so no error's text is kept.
+func partReadWhy(err error) string {
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "a part ends before its boundary"
+	}
+	return "a part sent quoted-printable does not decode"
 }
 
 // comingBody is a request body the ingress gives the application as it

@@ -96,7 +96,7 @@ func TestStrictMissReportNamesTheHost(t *testing.T) {
 		t.Fatalf("served %s", got.Name)
 	}
 	diag.live = &destination{host: "c.example"}
-	r := newHTTP().buildHTTPMismatchReport(makeReq("GET", "/v1/items"), nil, &mockMemDb{mocks: []*models.Mock{other}}, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), makeReq("GET", "/v1/items"), nil, &mockMemDb{mocks: []*models.Mock{other}}, nil, nil, nil, diag)
 	found := false
 	for _, d := range r.FieldDiffs {
 		if d.Path == "host" && d.Expected == "a.example" && d.Actual == "c.example" {
@@ -108,7 +108,7 @@ func TestStrictMissReportNamesTheHost(t *testing.T) {
 	}
 
 	near := onHost("same-host", "/v1/itemz", "c.example")
-	r = newHTTP().buildHTTPMismatchReport(makeReq("GET", "/v1/items"), nil, &mockMemDb{mocks: []*models.Mock{other, near}}, nil, nil, nil,
+	r = newHTTP().buildHTTPMismatchReport(context.Background(), makeReq("GET", "/v1/items"), nil, &mockMemDb{mocks: []*models.Mock{other, near}}, nil, nil, nil,
 		&matchDiag{phase: models.MatchPhaseSchema, candidates: 2, live: &destination{host: "c.example"}})
 	if r.ClosestMock != "same-host" {
 		t.Fatalf("closest = %q, want the recording to the live destination", r.ClosestMock)

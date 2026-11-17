@@ -459,7 +459,7 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 		if err != nil {
 			p.logger.Debug("upstream DNS forward failed (udp); trying next server",
 				zap.String("server", addr),
-				zap.String("question", question.Name),
+				zap.String("question", p.dnsName(question.Name)),
 				zap.Error(err))
 			lastErr = err
 			continue
@@ -479,7 +479,7 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 			if terr != nil {
 				p.logger.Debug("upstream DNS forward failed (tcp); trying next server",
 					zap.String("server", addr),
-					zap.String("question", question.Name),
+					zap.String("question", p.dnsName(question.Name)),
 					zap.Error(terr))
 				lastErr = terr
 				continue
@@ -494,7 +494,7 @@ func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, e
 	}
 
 	if lastErr == nil {
-		lastErr = fmt.Errorf("no upstream DNS server returned a response for %s", question.Name)
+		lastErr = fmt.Errorf("no upstream DNS server returned a response for %s", p.dnsName(question.Name))
 	}
 	return nil, lastErr
 }

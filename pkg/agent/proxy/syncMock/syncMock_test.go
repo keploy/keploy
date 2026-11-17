@@ -53,9 +53,14 @@ func TestMemoryPressureKeepsCalmCapturedMocksDropsPressureRequestMocks(t *testin
 		t.Fatalf("expected late calm-request mock to be kept during pressure, got %d", len(mgr.buffer))
 	}
 
-	// After recovery, mocks buffer normally again.
+	// After recovery, mocks buffer normally again. A pause's span ends, on the
+	// wall clock, when it closes, and that instant is still the pause (the
+	// test case of a request made then is suppressed too). macOS reads the
+	// wall clock in microseconds, so a read right after SetMemoryPressure(false)
+	// often falls in the closing microsecond; a request made a millisecond
+	// later is after the pause on every OS.
 	mgr.SetMemoryPressure(false)
-	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now().Add(time.Millisecond)}})
 	if len(mgr.buffer) != 4 {
 		t.Fatalf("expected buffer to accept mocks after recovery, got %d", len(mgr.buffer))
 	}
@@ -942,13 +947,14 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 		t.Errorf("first-drop Error missing LOSSY wording: %q", first.Message)
 	}
 
-	// Now drive dropCount up to the next sampler milestone (1024)
+	// Now drive overflowDrops, what an overflow is sampled on, up to the
+	// next sampler milestone (1024)
 	// without a drained send per drop, then walk
 	// sendToOutChan once more to fire the n==1024 branch. The
 	// emitted message must be the TERSE default — without "LOSSY"
 	// — so the sampled telemetry doesn't drown a stuck consumer's
 	// goroutine in the long actionable string.
-	mgr.dropCount.Store(sendDropSampleRate - 1) // next Add brings n to 1024
+	mgr.overflowDrops.Store(sendDropSampleRate - 1) // next Add brings n to 1024
 	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
 	waitOutQueue(t, mgr)
 	if logs.Len() != 2 {
@@ -964,36 +970,16 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 	}
 }
 
-// TestSendToOutChanDropSampling validates the sampling rule:
-// the first drop logs, and subsequent drops only log every
-// sendDropSampleRate entries. Without the sampling, a stuck
-// consumer would flood the log and further starve the producer
-// — the specific anti-pattern the windows-redirector work
-// surfaced. Uses direct atomic writes to avoid a drained send per
-// drop in the test.
+// An overflow's drops are said at ERROR for the first and every
+// sendDropSampleRate-th of a session, the rest at Debug (sayDrop): a stuck
+// consumer's goroutine must not drown in its own logging.
 func TestSendToOutChanDropSampling(t *testing.T) {
 	t.Parallel()
-
-	mgr := &SyncMockManager{
-		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
-	}
 	core, logs := observer.New(zap.ErrorLevel)
-	mgr.SetLogger(zap.New(core))
-
-	// Simulate the drop counter hitting values around the
-	// sampling boundary without paying the per-drop wall-clock
-	// cost. We reach directly into dropCount because the whole
-	// point of this test is the logging cadence, not the send
-	// path's timing.
-	for i := uint64(1); i <= 2050; i++ {
-		n := mgr.dropCount.Add(1)
-		if n == 1 || n%sendDropSampleRate == 0 {
-			mgr.dropLogger().Error("test-sampled-drop",
-				zap.Uint64("dropsSoFar", n),
-			)
-		}
+	mgr := New(zap.New(core))
+	for range 2*sendDropSampleRate + 2 {
+		mgr.dropOut(&models.Mock{Kind: models.HTTP, ConnectionID: "c", Spec: models.MockSpec{ReqTimestampMock: time.Now()}}, "", 0, string(MockDroppedOutputFull))
 	}
-
 	// Expected emits: n=1, n=1024, n=2048 → 3 entries.
 	if got := logs.Len(); got != 3 {
 		t.Fatalf("expected 3 sampled drop logs (n=1, 1024, 2048), got %d", got)

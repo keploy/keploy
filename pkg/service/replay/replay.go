@@ -39,6 +39,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -605,6 +606,21 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
+	// reportsTrackedSaid: the run said that git would track its reports
+	// (sayReportsTracked), which it says once.
+	reportsTrackedSaid atomic.Bool
+	// console is where the run says what is for the user's eyes only and
+	// never for its log, as it names a call whole (the mismatch table, a call
+	// of an earlier set that fails the run): keploy's console, which
+	// keploy's CLI sets (SetConsole). nil, as NewReplayer leaves it, says
+	// nothing: a program that embeds the replayer (a k8s proxy) writes its own
+	// stdout to its log, and a call's summary holds what it sent.
+	console io.Writer
+	// appConsole is where the application's own lines keploy took (its
+	// container's last log lines) are shown: the console alone, never
+	// keploy's log, whose file a recovered panic sends to Sentry. nil,
+	// keploy's console (log.PrimarySink); a test reads its own.
+	appConsole io.Writer
 	// drainClock is the clock the teardown's drains measure a stall on
 	// (teardownDrain): nil, keploy's own runnable time; a test drives its
 	// own.
@@ -880,6 +896,52 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	}
 }
 
+// SetConsole makes w the run's console (Replayer.console): keploy's CLI sets
+// os.Stdout. A program that embeds the replayer sets it only to a place that
+// is for the user's eyes alone (its UI), never to a stream its log is written
+// from. nil says nothing.
+func (r *Replayer) SetConsole(w io.Writer) {
+	r.console = w
+}
+
+// out is the run's console (Replayer.console), io.Discard when none is set:
+// every line the replayer prints for a person (each test's pass or failure,
+// a failure's diff, the summaries) goes there, so one built with defaults
+// writes nothing to its process's stdout, which a program that embeds it (a
+// k8s proxy) has as its pod's log.
+func (r *Replayer) out() io.Writer {
+	if r.console == nil {
+		return io.Discard
+	}
+	return r.console
+}
+
+// sayReportsTracked says, at WARN, once a run, that git would track the run's
+// reports (keploy/reports/<testRunID>), where git can say so (utils.GitIgnores:
+// git is installed and the recording is in a work tree): keploy/.gitignore's
+// "/reports/" is not enough where a later line of the user's un-ignores it
+// ("!reports/"), and a report holds each test's calls whole, beside their
+// path tags. The report is written all the same: it is the run's result.
+func (r *Replayer) sayReportsTracked(testRunID string) {
+	// Said once a run: no git is asked again once it has been said.
+	if r.reportsTrackedSaid.Load() {
+		return
+	}
+	run := filepath.Join("reports", testRunID)
+	if ignored, known := utils.GitIgnores(r.config.Path, run); !known || ignored || r.reportsTrackedSaid.Swap(true) {
+		return
+	}
+	r.logger.Warn("git does not ignore this run's reports, though keploy/.gitignore lists /reports/: a report holds each test's calls whole, a request's path and a statement's values among them, and git would commit it",
+		zap.String("reports", filepath.Join(r.config.Path, run)),
+		zap.String("next_step", "remove the .gitignore line that un-ignores keploy/reports (a later \"!\" line), or keep the reports out of what you commit"))
+}
+
+// printMockMismatches prints the run's mismatch table on its console
+// (TestFailureStore.PrintFailuresTable): nothing with no console.
+func (r *Replayer) printMockMismatches() {
+	r.mockMismatchFailures.PrintFailuresTable(r.console)
+}
+
 func (r *Replayer) SetTestHooks(testHooks TestHooks) {
 	if testHooks == nil {
 		return
@@ -894,6 +956,12 @@ func (r *Replayer) GetTestHooks() TestHooks {
 func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	r.logger.Debug("Starting Keploy replay... Please wait.")
+	// A run of keploy test is a session of its own: what its log names by a
+	// path tag it names under a key drawn now, carried in ctx
+	// (models.LogKeySession), which no other run's tag agrees with, in this
+	// process (a program that embeds the replayer runs many) or another; or
+	// under the session ctx carries, one its embedder began for the run.
+	ctx = models.EnsureLogKeySession(ctx)
 
 	// The run's own teardown scope: what keploy sees its stops do (the
 	// agent's, the app's, the daemons', a compose project's down) moves it,
@@ -956,6 +1024,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.completeTestReportMu.Unlock()
 	r.forgetQuarantined()
 	r.earlierSetCalls.reset()
+	r.reportsTrackedSaid.Store(false)
 	r.failedTCsBySetID = make(map[string][]string)
 	r.mockMismatchFailures = NewTestFailureStore()
 	defer func() { r.armStartExitCode(stoppedByItsUser(parentCtx), err, testRunResult, verdictReached) }()
@@ -1797,7 +1866,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 					zap.String("next_step", "Add drifting dynamic fields as noise (test.globalNoise); if the request structure changed, re-record the test-set with 'keploy record'. A failed test keeps its recorded mapping (--update-test-mapping updates only a passing test's); to remap tests whose mapping is stale, run with --disable-mapping --update-test-mapping, which serves each its recorded window and maps the ones that pass."))
 			}
 
-			r.mockMismatchFailures.PrintFailuresTable()
+			r.printMockMismatches()
 		}
 		coverageData := models.TestCoverage{}
 		var err error
@@ -2112,14 +2181,15 @@ func (r *Replayer) applyBasePath(testCase *models.TestCase) error {
 		return fmt.Errorf("cannot send the test to the base path %q: %w", r.config.Test.BasePath, err)
 	}
 	testCase.HTTPReq.URL = newURL
-	r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.String("TestCaseURL", testCase.HTTPReq.URL), zap.String("basePath", r.config.Test.BasePath))
+	r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.Any("TestCaseURL", utils.URLLogMeta(string(testCase.HTTPReq.Method), testCase.HTTPReq.URL)), zap.String("basePath", r.config.Test.BasePath))
 	return nil
 }
 
 // failUnsentTest reports a test that was not sent to the app as failed, with
 // why, and returns the error of writing that down.
 func (r *Replayer) failUnsentTest(ctx context.Context, testRunID, testSetID string, testCase *models.TestCase, why error) error {
-	utils.LogError(r.logger, why, "failed the test without sending it",
+	// The reason by its shape: it can quote the test's URL.
+	utils.LogError(r.logger, pkg.LoggableAnswerErr(why), "failed the test without sending it",
 		zap.String("testcase", testCase.Name),
 		zap.String("next_step", "write the test case's request URL with its scheme and host, as in http://localhost:8080/orders: they are what the base path replaces"))
 	result := r.CreateFailedTestResult(testCase, testSetID, time.Now().UTC(), why)
@@ -5787,14 +5857,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						Actual:   actualFrameDisplay,
 					})
 					// Display the streaming frame diff in same format as HTTP matcher
-					logDiffs := matcherUtils.NewDiffsPrinter(tc.Name)
+					logDiffs := matcherUtils.NewDiffsPrinterOut(r.console, tc.Name)
 					logDiffs.PushBodyDiff(expectedFrameDisplay, actualFrameDisplay, nil)
 					_ = logDiffs.Render()
 				}
 				// Log failure message in same format as HTTP matcher
 				r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(tc.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(false)))
 				// Print user-facing failure message with red color on test case ID only (matching HTTP matcher style)
-				fmt.Printf("\nTestrun failed for testcase with id: \"%s%s%s\"\n\n--------------------------------------------------------------------\n\n",
+				_, _ = fmt.Fprintf(r.out(), "\nTestrun failed for testcase with id: \"%s%s%s\"\n\n--------------------------------------------------------------------\n\n",
 					"\033[91m", tc.Name, "\033[0m")
 			}
 
@@ -6063,8 +6133,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// on each miss and unconsumed recording of a test recorded beside others,
 	// what keploy knows of that.
 	sharesComplete := resultsComplete && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed)
-	r.logShares(testSetID, r.exact.settleShares(testCaseResults, consumers, sharesComplete, mockLookup))
-	if charged := r.exact.annotateConcurrent(testCaseResults, mockLookup); len(charged) > 0 {
+	r.logShares(testSetID, r.exact.settleShares(models.LogKeys(ctx), testCaseResults, consumers, sharesComplete, mockLookup))
+	if charged := r.exact.annotateConcurrent(models.LogKeys(ctx), testCaseResults, mockLookup); len(charged) > 0 {
 		r.logger.Error("tests failed: they list a call keploy record's full round could not give to one of the tests recorded beside them ("+provenswitch.Env+"=1); the report says why under unmatched_calls",
 			zap.String("test-set", testSetID), zap.Strings("tests", charged),
 			zap.String("next_step", "record these tests one request at a time"))
@@ -6092,7 +6162,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// ends: once per test, whatever cycles it took.
 	for _, res := range lastResultOfEachTest(testCaseResults) {
 		if line := models.UncheckedLine(res.TestCaseID, res.Answers); line != "" {
-			fmt.Println(line)
+			_, _ = fmt.Fprintln(r.out(), line)
 		}
 	}
 	// A call no mock answered whose closest recording was given back to its
@@ -6639,7 +6709,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.logger.Error("test-set is not judged: while some of its tests ran, the application called what keploy cannot capture, a TLS client abandoned its handshake, the kernel dropped connection attempts at keploy's proxy listener, the Docker daemon did not answer keploy's read of a container a call reached, or keploy's agent had been started again under the running application ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", uncapturable),
-			zap.String("reason", what),
+			zap.String("reason", lost.NotJudgedLogText()),
 			zap.String("next_step", lost.NotJudgedRemedy()+", then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
@@ -6850,6 +6920,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// set nothing shows is complete is no basis for deleting recorded mocks.
 	pidVerdict := r.pidMapCaptureIncomplete(ctx, testSetID)
 	captureIncomplete, captureUnverified := pidVerdict.incomplete, pidVerdict.unverified
+	// captureUnverifiedLog is captureUnverified as a log line carries it: a
+	// loss's hosts by their shape (models.CaptureLosses.NotJudgedLogText).
+	captureUnverifiedLog := captureUnverified
 	// Under the proven switch, what the agent lost after this set's last
 	// per-test read is the set's own, charged to none of its tests: the set
 	// fails with it, and it holds the prune and mappings.yaml, as above. The
@@ -6863,7 +6936,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		carriedIn = appLossesCarriedInReason(carried, r.lossAppKept)
 		r.logger.Error("test-set failed: a process of the application's that keploy could not capture before this test-set began runs on in it, and taints its tests ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
-			zap.String("lost", carried.Text()),
+			zap.String("lost", carried.LogText()),
 			zap.String("why", r.lossAppKept),
 			zap.String("next_step", "see the earlier test-set's report for where it was lost; each test charged with it says what to do"))
 	}
@@ -6891,11 +6964,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 	if lateErr != nil && captureIncomplete == "" && captureUnverified == "" {
 		captureUnverified = models.CaptureLossesUnverified(lateErr)
+		captureUnverifiedLog = captureUnverified
 	}
 	// A call keploy cannot capture at all after the set's last test
 	// (decision 20): the set has no verdict, as one whose count is lost.
 	if t := lateNotJudged.NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
-		captureUnverified = t
+		captureUnverified, captureUnverifiedLog = t, lateNotJudged.NotJudgedLogText()
 	}
 	if captureIncomplete != "" && testSetStatus == models.TestSetStatusPassed {
 		testSetStatus = models.TestSetStatusFailed
@@ -7038,7 +7112,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		unverifiedNotJudged = testSetStatus != models.TestSetStatusInternalErr
 		notJudged = alsoNotJudged(notJudged, captureUnverified)
 		r.logger.Error("test-set is not judged: keploy could not read whether its agent captured every call the application made; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
-			zap.String("test-set", testSetID), zap.String("reason", captureUnverified),
+			zap.String("test-set", testSetID), zap.String("reason", captureUnverifiedLog),
 			zap.String("next_step", "check the agent's log for why its count could not be read, then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
@@ -7153,6 +7227,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	err = utils.AddToGitIgnore(r.logger, r.config.Path, "/reports/")
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to create .gitignore file")
+	} else {
+		r.sayReportsTracked(testRunID)
 	}
 
 	// Preserve mocks and mappings for tests that were expected but not executed in this run
@@ -7754,7 +7830,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// it is printed as it was when it was reported PASSED.
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusIgnored {
 		if r.config.JSONOutput {
-			if err := utils.NewJSONWriter(true).Write(testReport); err != nil {
+			// On the run's console, as every line the replayer prints for
+			// a person: the report holds each test's calls whole.
+			if err := utils.NewJSONWriterOut(r.out(), true).Write(testReport); err != nil {
 				utils.LogError(r.logger, err, "failed to print json testrun summary")
 			}
 		} else {
@@ -7786,7 +7864,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				summaryFormat += "\tTime Taken:         %s\n <=========================================> \n\n"
 				args = append(args, timeTakenStr)
 
-				if _, err := pp.Printf(summaryFormat, args...); err != nil {
+				if _, err := pp.Fprintf(r.out(), summaryFormat, args...); err != nil {
 					utils.LogError(r.logger, err, "failed to print testrun summary")
 				}
 
@@ -7808,7 +7886,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				sb.WriteString(fmt.Sprintf("\tTime Taken:         %s\n", timeTakenStr))
 				sb.WriteString(" <=========================================> \n\n")
 
-				fmt.Print(sb.String())
+				_, _ = fmt.Fprint(r.out(), sb.String())
 			}
 		}
 	}
@@ -8529,7 +8607,8 @@ func (r *Replayer) appContainerExit(ctx context.Context) error {
 // compose stops every service the moment the app's container exits. The agent
 // that does not answer is then not a replaced one, and "replaced" sends
 // whoever reads it after the wrong thing: what failed is the app, and its own
-// output says why, so its recent logs are logged with the failure.
+// output says why, so its recent log lines are shown after the failure's
+// line, on the console alone (showAppLogs): never in keploy's log.
 func (r *Replayer) appExitFailure(ctx context.Context, testSetID string, agentErr error) error {
 	exit := r.appContainerExit(ctx)
 	if exit == nil {
@@ -8537,9 +8616,30 @@ func (r *Replayer) appExitFailure(ctx context.Context, testSetID string, agentEr
 	}
 	r.logger.Error("the application's container is no longer running, and keploy-agent could not be set up for this test set during the docker compose bring-up; no test of this set was run",
 		zap.String("testSetID", testSetID), zap.Error(exit),
-		zap.String("appLogs", r.instrumentation.GetRecentAppLogs(ctx)),
-		zap.String("next_step", "fix why the application exited: its last log lines are in appLogs"))
+		zap.String("next_step", "fix why the application exited: its last log lines follow this line on the console"))
+	r.showAppLogs(r.instrumentation.GetRecentAppLogs(ctx))
 	return fmt.Errorf("%w during the docker compose bring-up, before test set %q ran any test; setting keploy-agent up for it failed as well: %w", exit, testSetID, agentErr)
+}
+
+// showAppLogs shows the application's last log lines keploy took on the
+// console (appConsole), between two lines that say whose they are, as the
+// app's own output reaches it: cut by the active redactor's child-output
+// rules (log.ChildOutputWriter), and never through keploy's logger. The
+// logger writes every line to this run's log file as well, and a recovered
+// panic sends that file's tail to Sentry: the app's lines carry its traffic
+// and its secrets.
+func (r *Replayer) showAppLogs(appLogs string) {
+	appLogs = strings.TrimRight(appLogs, "\r\n")
+	if appLogs == "" {
+		return
+	}
+	console := r.appConsole
+	if console == nil {
+		console = keployLog.PrimarySink()
+	}
+	w := keployLog.NewChildOutputWriter(console)
+	_, _ = io.WriteString(w, "--- the application's last log lines ---\n"+appLogs+"\n--- end of the application's log lines ---\n")
+	_ = w.Flush()
 }
 
 func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {
@@ -8577,7 +8677,9 @@ func (r *Replayer) schemaMatch() bool {
 
 // compareHTTPResp is CompareHTTPResp with the matcher's options added.
 func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool, opts ...httpMatcher.MatchOption) (bool, *models.Result) {
-	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt()}, opts...)
+	// The matcher's lines, a failure's diff with both bodies among them, on
+	// the run's console alone (Replayer.console), none without one.
+	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt(), httpMatcher.WithConsole(r.console)}, opts...)
 	noiseConfig := r.httpNoiseConfig(testSetID)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
@@ -8594,7 +8696,8 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 }
 
 func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool, opts ...httpMatcher.MatchOption) (bool, *models.Result) {
-	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt()}, opts...)
+	// On the run's console alone, as compareHTTPResp's.
+	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt(), httpMatcher.WithConsole(r.console)}, opts...)
 	noiseConfig := r.httpNoiseConfig(testSetID)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
@@ -8759,7 +8862,7 @@ func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actua
 	}
 	if assessment != nil {
 		if len(assessment.AddedFields) > 0 {
-			fields = append(fields, zap.Strings("added_fields", assessment.AddedFields))
+			fields = append(fields, zap.Strings("added_fields", models.FieldShapes(assessment.AddedFields)))
 		}
 		if len(assessment.Reasons) > 0 {
 			fields = append(fields, zap.Strings("assessment_reasons", assessment.Reasons))
@@ -8915,7 +9018,8 @@ func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
-	var opts []grpcMatcher.MatchOption
+	// The matcher's lines on the run's console alone (Replayer.console).
+	opts := []grpcMatcher.MatchOption{grpcMatcher.WithConsole(r.console)}
 	if failedElsewhere {
 		opts = append(opts, grpcMatcher.WithoutPassLine())
 	}
@@ -8978,7 +9082,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			summaryFormat += "\tTotal time taken: %s\n"
 			summaryArgs = append(summaryArgs, totalTestTimeTakenStr)
 
-			if _, err := pp.Printf(summaryFormat, summaryArgs...); err != nil {
+			if _, err := pp.Fprintf(r.out(), summaryFormat, summaryArgs...); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
@@ -8996,7 +9100,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			}
 			header += "\t\n"
 
-			_, err := pp.Printf(header)
+			_, err := pp.Fprintf(r.out(), header)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite summary header")
 				return
@@ -9040,27 +9144,27 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 					args = append(args, failedCasesStr)
 				}
 
-				if _, err := pp.Printf(format.String(), args...); err != nil {
+				if _, err := pp.Fprintf(r.out(), format.String(), args...); err != nil {
 					utils.LogError(r.logger, err, "failed to print test suite details")
 					return
 				}
 			}
-			fmt.Print(r.quarantinedSummary())
-			fmt.Print(r.refusedSetsSummary())
-			if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
+			_, _ = fmt.Fprint(r.out(), r.quarantinedSummary())
+			_, _ = fmt.Fprint(r.out(), r.refusedSetsSummary())
+			if _, err := pp.Fprintf(r.out(), "\n<=========================================> \n\n"); err != nil {
 				utils.LogError(r.logger, err, "failed to print separator")
 				return
 			}
 
 		} else {
-			fmt.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %d\n"+"\tTotal test passed: %d\n"+"\tTotal test failed: %d\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot)
+			_, _ = fmt.Fprintf(r.out(), "\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %d\n"+"\tTotal test passed: %d\n"+"\tTotal test failed: %d\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot)
 			if totalTestObsoleteSnapshot > 0 {
-				fmt.Printf("\tTotal test obsolete: %d\n", totalTestObsoleteSnapshot)
+				_, _ = fmt.Fprintf(r.out(), "\tTotal test obsolete: %d\n", totalTestObsoleteSnapshot)
 			}
 			if totalTestIgnoredSnapshot > 0 {
-				fmt.Printf("\tTotal test ignored: %d\n", totalTestIgnoredSnapshot)
+				_, _ = fmt.Fprintf(r.out(), "\tTotal test ignored: %d\n", totalTestIgnoredSnapshot)
 			}
-			fmt.Printf("\tTotal time taken: %s\n", totalTestTimeTakenStr)
+			_, _ = fmt.Fprintf(r.out(), "\tTotal time taken: %s\n", totalTestTimeTakenStr)
 
 			header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
 			if totalTestObsoleteSnapshot > 0 {
@@ -9075,7 +9179,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			}
 			header += "\t\n"
 
-			fmt.Print(header)
+			_, _ = fmt.Fprint(r.out(), header)
 
 			for _, testSuiteName := range testSuiteNames {
 				report := reportSnapshot[testSuiteName]
@@ -9108,18 +9212,18 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 					format.WriteString("\t\t%s")
 					args = append(args, failedCasesStr)
 				}
-				fmt.Printf(format.String(), args...)
+				_, _ = fmt.Fprintf(r.out(), format.String(), args...)
 			}
 
-			fmt.Print(r.quarantinedSummary())
-			fmt.Print(r.refusedSetsSummary())
-			fmt.Print("\n<=========================================> \n\n")
+			_, _ = fmt.Fprint(r.out(), r.quarantinedSummary())
+			_, _ = fmt.Fprint(r.out(), r.refusedSetsSummary())
+			_, _ = fmt.Fprint(r.out(), "\n<=========================================> \n\n")
 		}
 	} else if refused := r.refusedSetsSummary(); refused != "" {
 		// The run counted no test case, so there is no table to print, but
 		// it refused a set (each of whose test cases it ignores): the
 		// summary still lists it, with its reason.
-		fmt.Print("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: 0" + refused + "\n<=========================================> \n\n")
+		_, _ = fmt.Fprint(r.out(), "\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: 0"+refused+"\n<=========================================> \n\n")
 	}
 }
 func (r *Replayer) RunApplication(ctx context.Context, opts models.RunOptions) models.AppError {
@@ -9481,18 +9585,18 @@ func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, log
 	case models.HTTP:
 		testCase.HTTPReq.URL, err = utils.ReplaceHost(testCase.HTTPReq.URL, newHost)
 		if err != nil {
-			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
+			utils.LogError(r.logger, utils.WithholdInput(err), fmt.Sprintf("failed to replace host to %s", logContext), zap.String("testcase", testCase.Name))
 			return err
 		}
-		r.logger.Debug("", zap.String(fmt.Sprintf("replaced %s", logContext), testCase.HTTPReq.URL))
+		r.logger.Debug("", zap.String("testcase", testCase.Name), zap.Any(fmt.Sprintf("replaced %s", logContext), utils.URLLogMeta(string(testCase.HTTPReq.Method), testCase.HTTPReq.URL)))
 
 	case models.GRPC_EXPORT:
 		testCase.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcHost(testCase.GrpcReq.Headers.PseudoHeaders[":authority"], newHost)
 		if err != nil {
-			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
+			utils.LogError(r.logger, utils.WithholdInput(err), fmt.Sprintf("failed to replace host to %s", logContext), zap.String("testcase", testCase.Name))
 			return err
 		}
-		r.logger.Debug("", zap.String(fmt.Sprintf("replaced %s", logContext), testCase.GrpcReq.Headers.PseudoHeaders[":authority"]))
+		r.logger.Debug("", zap.String("testcase", testCase.Name), zap.String(fmt.Sprintf("replaced %s", logContext), testCase.GrpcReq.Headers.PseudoHeaders[":authority"]))
 	}
 	return nil
 }
@@ -9917,7 +10021,9 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 		return
 	}
 
-	host, port, ok := dockerPublishedHostPort(r.config.Command)
+	// A mapping it cannot read names no address to wait on, and the test is
+	// sent again at once, as with no mapping.
+	host, port, ok, _ := dockerPublishedHostPort(r.config.Command)
 	if !ok {
 		return
 	}

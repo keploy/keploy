@@ -108,7 +108,7 @@ func TestTheStillWaitingLineNamesThePortsTheAppListensOnInstead(t *testing.T) {
 func TestARefusedRequestsWaitIsNotTheAppsStallUnderTheProvenSwitch(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	clk := &stall.ManualClock{}
-	w := newAnswerWatch(SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
+	w := newAnswerWatch(context.Background(), SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
 	defer w.stop()
 	defer w.waiting()()
 	addr := refusingAddr(t)

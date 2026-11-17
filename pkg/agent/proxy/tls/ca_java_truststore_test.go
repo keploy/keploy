@@ -42,10 +42,8 @@ func TestSetupJavaTrustStoreEnv_SetsMergedStore(t *testing.T) {
 	if _, err := os.Stat(jks); err != nil {
 		t.Fatalf("truststore not created: %v", err)
 	}
-	if _, err := exec.LookPath("keytool"); err != nil {
-		t.Skip("keytool not available to inspect the store")
-	}
-	out, err := exec.Command("keytool", "-list", "-keystore", jks, "-storepass", "changeit").CombinedOutput()
+	keytool := javaTool(t, "keytool")
+	out, err := exec.Command(keytool, "-list", "-keystore", jks, "-storepass", "changeit").CombinedOutput()
 	if err != nil {
 		t.Fatalf("keytool could not read the generated store: %v\n%s", err, out)
 	}
@@ -63,14 +61,8 @@ func TestSetupJavaTrustStoreEnv_SetsMergedStore(t *testing.T) {
 // the mechanism setupJavaTrustStoreEnv uses, with a test cert standing in for
 // the keploy CA.
 func TestJavaTrustsServerViaTrustStore(t *testing.T) {
-	javac, err := exec.LookPath("javac")
-	if err != nil {
-		t.Skip("javac not available")
-	}
-	java, err := exec.LookPath("java")
-	if err != nil {
-		t.Skip("java not available")
-	}
+	javac := javaTool(t, "javac")
+	java := javaTool(t, "java")
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -128,6 +120,26 @@ public class Client {
 	}
 }
 
+// javaTool is the path of the Java tool name, and skips the test where no
+// Java is installed: name is not on PATH, or it is macOS's /usr/bin stub and
+// /usr/libexec/java_home finds no Java runtime. macOS ships java, javac and
+// keytool in /usr/bin whether or not a Java is installed, as stubs that run
+// an installed one's and otherwise only say there is none. Any other failure
+// of the tool fails the test.
+func javaTool(t *testing.T, name string) string {
+	t.Helper()
+	path, err := exec.LookPath(name)
+	if err != nil {
+		t.Skipf("%s not available", name)
+	}
+	if runtime.GOOS == "darwin" && path == filepath.Join("/usr/bin", name) {
+		if out, err := exec.Command("/usr/libexec/java_home").CombinedOutput(); err != nil {
+			t.Skipf("no Java runtime is installed: %s is macOS's stub (java_home: %v, %s)", path, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return path
+}
+
 func pemEncodeCert(der []byte) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
@@ -152,10 +164,8 @@ func TestGenerateTrustStore_SkipsNonCertSequence(t *testing.T) {
 	}
 	// If keytool is present, the store must LOAD (proving the bogus entry was
 	// dropped, not stored) and contain keploy-root.
-	if _, err := exec.LookPath("keytool"); err != nil {
-		t.Skip("keytool not available to load the store")
-	}
-	out, err := exec.Command("keytool", "-list", "-keystore", jks, "-storepass", "changeit").CombinedOutput()
+	keytool := javaTool(t, "keytool")
+	out, err := exec.Command(keytool, "-list", "-keystore", jks, "-storepass", "changeit").CombinedOutput()
 	if err != nil {
 		t.Fatalf("store did not load (bogus entry was not dropped): %v\n%s", err, out)
 	}

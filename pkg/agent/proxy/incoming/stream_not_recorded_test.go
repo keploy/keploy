@@ -188,7 +188,7 @@ func TestNotRecordedStream_EndsTheWindowAndTellsOnlyWhatTheFiltersKeep(t *testin
 			req := httptest.NewRequest(http.MethodGet, "/events", nil)
 			resp := &http.Response{StatusCode: c.status, Header: http.Header{"Content-Type": {c.contentType}}, Request: req}
 
-			if got := pm.notRecordedStream(zap.New(core), req, resp, &win); got != c.stream {
+			if got := pm.notRecordedStream(context.Background(), zap.New(core), req, resp, &win); got != c.stream {
 				t.Fatalf("notRecordedStream = %v, want %v", got, c.stream)
 			}
 			open := 1

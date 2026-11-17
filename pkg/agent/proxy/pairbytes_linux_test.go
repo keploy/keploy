@@ -915,4 +915,14 @@ func TestTheClosesReadCountsWhatTheApplicationHadWritten(t *testing.T) {
 			}
 		})
 	}
+	// One its first lookup does not find may not be seen from here at all:
+	// no count, and errNoSocket, which the close tells from a later miss.
+	t.Run("not found by the first lookup", func(t *testing.T) {
+		was := lookupWritten
+		lookupWritten = func(*diagSock, *pairedConn, bool) (diagTCP, error) { return diagTCP{}, errNoSocket }
+		t.Cleanup(func() { lookupWritten = was })
+		if w, ok, err := wroteNow(nil, nil); ok || w != (appWrote{}) || !errors.Is(err, errNoSocket) {
+			t.Fatalf("wroteNow = %+v, %v, %v; want no count, and errNoSocket", w, ok, err)
+		}
+	})
 }

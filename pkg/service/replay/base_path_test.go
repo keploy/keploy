@@ -438,6 +438,10 @@ type bpRun struct {
 	mappings *bpMappingDB
 	report   *bpReportDB
 	logs     *observer.ObservedLogs
+	// keys is the run's session (models.LogKeySession), which its context
+	// carries into Start: the path tags the run names a request by are made
+	// under it.
+	keys *models.LogKeySession
 }
 
 // newBasePathRun builds the replayer `keploy test --base-path basePath` runs,
@@ -483,6 +487,7 @@ func newBasePathRunOf(t *testing.T, basePath string, template map[string]interfa
 		mappings: &bpMappingDB{prMappingDB: &prMappingDB{}},
 		report:   &bpReportDB{prReportDB: &prReportDB{}},
 		logs:     logs,
+		keys:     models.NewLogKeySession(),
 	}
 	svc := NewReplayer(zap.New(core), run.tests, run.mocks, run.report, run.mappings,
 		bpTestSetConf{template: template}, prTelemetry{}, run.agent, nil, cfg)
@@ -502,7 +507,7 @@ func (b *bpRun) start(t *testing.T) (int, error) {
 // run starts.
 func (b *bpRun) startStoppedBy(t *testing.T, stop func(interrupt func())) (int, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	ctx, cancel := context.WithTimeout(models.WithLogKeySession(context.Background(), b.keys), prTimeout)
 	defer cancel()
 	if stop != nil {
 		stop(cancel)

@@ -198,6 +198,64 @@ func TestTakeRequestSaysWhyItCannotReadARequest(t *testing.T) {
 	}
 }
 
+// Why keploy could not read a client test's request names no byte the
+// client sent: a Content-Encoding keploy does not know by its size, and a
+// multipart form that does not parse by its parser's error with the line
+// it quotes (a part's header line, here) withheld. Both were whole.
+func TestTakeRequestsWhyNamesNoByteOfTheRequest(t *testing.T) {
+	const canary = "kpLogCanary7Qx3vZ9mW2"
+	for _, c := range []struct{ name, raw, why string }{
+		{"an encoding keploy does not know", postWith("Content-Encoding: x-"+canary+"\r\n", "ab"), "Content-Encoding a coding keploy does not know, 23 bytes)"},
+		{"a part's header that does not parse", postWith("Content-Type: multipart/form-data; boundary=XX\r\n",
+			"--XX\r\nX-Note "+canary+"\r\n\r\nabc\r\n--XX--\r\n"), "its multipart form does not parse: malformed MIME header"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			log := &requestLog{}
+			log.wants.Store(true)
+			pm := &IngressProxyManager{logger: zap.NewNop()}
+			pm.SetRequestTaker(log)
+			pm.takeRequest(readRequest(t, c.raw), time.Now())
+			got := log.list()
+			if len(got) != 1 || !strings.Contains(got[0].unread, c.why) {
+				t.Fatalf("taken %+v, want one unread for %q", got, c.why)
+			}
+			if strings.Contains(got[0].unread, canary) {
+				t.Fatalf("why = %q: it holds the client's bytes", got[0].unread)
+			}
+		})
+	}
+}
+
+// A form part whose body does not read is named by the kind of its end:
+// one sent quoted-printable that does not decode (the decoder's error names
+// the body's byte it refused, in hex, here a control byte and a CR after an
+// "="), and one that ends before its boundary. The why held the decoder's
+// error, the byte with it.
+func TestTakeRequestsWhyNamesAFormPartThatDoesNotReadByItsKind(t *testing.T) {
+	const head = "--XX\r\nContent-Disposition: form-data; name=\"a\"\r\n"
+	const qp = head + "Content-Transfer-Encoding: quoted-printable\r\n\r\n"
+	for _, c := range []struct{ name, form, why, byteHex string }{
+		{"a control byte in a quoted-printable part", qp + "ab\x01cd\r\n--XX--\r\n", "its multipart form does not parse: a part sent quoted-printable does not decode", "0x01"},
+		{"a CR after an = in a quoted-printable part", qp + "a=\rb\r\n--XX--\r\n", "its multipart form does not parse: a part sent quoted-printable does not decode", "0x0d"},
+		{"a part with no boundary after it", head + "\r\nabc", "its multipart form does not parse: a part ends before its boundary", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			log := &requestLog{}
+			log.wants.Store(true)
+			pm := &IngressProxyManager{logger: zap.NewNop()}
+			pm.SetRequestTaker(log)
+			pm.takeRequest(readRequest(t, postWith("Content-Type: multipart/form-data; boundary=XX\r\n", c.form)), time.Now())
+			got := log.list()
+			if len(got) != 1 || got[0].unread != c.why {
+				t.Fatalf("taken %+v, want one unread for %q", got, c.why)
+			}
+			if c.byteHex != "" && strings.Contains(got[0].unread, c.byteHex) {
+				t.Fatalf("why = %q: it holds the body's byte %s", got[0].unread, c.byteHex)
+			}
+		})
+	}
+}
+
 // A body its client did not send whole gives the learn step nothing, and
 // the forward reads the part that came and then the same end it would have
 // met without the read ahead. A taker that wants no request now is given

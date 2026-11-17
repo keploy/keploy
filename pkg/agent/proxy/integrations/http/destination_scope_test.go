@@ -132,7 +132,7 @@ func TestBuildHTTPMismatchReport_DestinationScope(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newHTTP()
 			db := &mockMemDb{mocks: tt.mocks}
-			report := h.buildHTTPMismatchReport(tt.request, nil, db, nil, nil, nil, tt.diag)
+			report := h.buildHTTPMismatchReport(context.Background(), tt.request, nil, db, nil, nil, nil, tt.diag)
 
 			if report.DestinationScope != tt.wantScope {
 				t.Errorf("DestinationScope = %q, want %q", report.DestinationScope, tt.wantScope)
@@ -169,7 +169,7 @@ func TestBuildHTTPMismatchReport_ConsumedHostMakesNoGlobalClaim(t *testing.T) {
 	survivors := []*models.Mock{httpMockOnHost("mock-4", "GET", "/api/vendors?name=vendor-a", "192.0.2.40")}
 	db := &mockMemDb{mocks: survivors}
 
-	report := h.buildHTTPMismatchReport(
+	report := h.buildHTTPMismatchReport(context.Background(),
 		reqToHost("GET", "/api/orders?id=91", "192.0.2.10"), nil, db, survivors, nil, nil,
 		&matchDiag{phase: models.MatchPhaseSchema, candidates: len(survivors)})
 
@@ -215,7 +215,7 @@ func TestBuildHTTPMismatchReport_SchemaSurvivorPathIsStillScored(t *testing.T) {
 	survivors := []*models.Mock{appHealth}
 	db := &mockMemDb{mocks: pool}
 
-	report := h.buildHTTPMismatchReport(
+	report := h.buildHTTPMismatchReport(context.Background(),
 		reqToHost("GET", "/health", "192.0.2.20"), nil, db, nil, nil, nil,
 		&matchDiag{
 			phase:         models.MatchPhaseBody,
@@ -250,7 +250,7 @@ func TestBuildHTTPMismatchReport_SchemaSurvivorPathInScope(t *testing.T) {
 	pool := []*models.Mock{appHealth, httpMockOnHost("mock-2", "GET", "/api/orders?id=90", "192.0.2.10")}
 	db := &mockMemDb{mocks: pool}
 
-	report := h.buildHTTPMismatchReport(
+	report := h.buildHTTPMismatchReport(context.Background(),
 		reqToHost("GET", "/health", "192.0.2.10"), nil, db, nil, nil, nil,
 		&matchDiag{
 			phase:         models.MatchPhaseBody,
@@ -283,7 +283,7 @@ func TestBuildHTTPMismatchReport_SubsetOfComparedPoolMakesNoClaim(t *testing.T) 
 	survivors := []*models.Mock{httpMockOnHost("mock-4", "GET", "/api/vendors?name=vendor-a", "192.0.2.40")}
 	db := &mockMemDb{mocks: survivors}
 
-	report := h.buildHTTPMismatchReport(
+	report := h.buildHTTPMismatchReport(context.Background(),
 		reqToHost("GET", "/v1/metrics", "192.0.2.20"), nil, db, survivors, nil, nil,
 		&matchDiag{phase: models.MatchPhaseSchema, candidates: 19, schemaMatched: survivors})
 
@@ -310,7 +310,7 @@ func TestBuildHTTPMismatchReport_LiveDestinationFromURL(t *testing.T) {
 		URL:    &url.URL{Host: "192.0.2.20", Path: "/v1/metrics"},
 		Header: http.Header{},
 	}
-	report := h.buildHTTPMismatchReport(request, nil, db, mocks, nil, nil,
+	report := h.buildHTTPMismatchReport(context.Background(), request, nil, db, mocks, nil, nil,
 		&matchDiag{phase: models.MatchPhaseSchema, candidates: 1})
 
 	if report.Destination != "192.0.2.20" {
@@ -436,7 +436,7 @@ func TestMatchDiagCarriesTheComparedPool(t *testing.T) {
 
 			// And end to end: the report the builder makes from that diag
 			// reaches a verdict instead of falling back.
-			report := h.buildHTTPMismatchReport(
+			report := h.buildHTTPMismatchReport(context.Background(),
 				reqToHost(tc.live.method, tc.live.url.Path, "192.0.2.20"),
 				tc.live.body, db, nil, nil, nil, diag)
 			if report.DestinationScope != models.DestinationScopeNotInComparedSet {

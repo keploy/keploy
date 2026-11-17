@@ -90,12 +90,11 @@ func (r movesInRead) GetSessionMocks() ([]*models.Mock, error) {
 	return r.MockMemDb.GetSessionMocks() //nolint:staticcheck // SA1019: the matcher reads the pool's session tier through it (loadPool).
 }
 
-// The debug lines of a command the replay staged a test set again under
-// while the pool was read redact its statement whole: the staging is told
-// after the read, so a read that found the set moved is never taken for
-// the pool's places. A read the replay staged nothing under shows the
-// statement by the pool's places.
-func TestMySQLLogsOfAPoolReadWhileTheSetIsStagedAgainRedactTheStatementWhole(t *testing.T) {
+// The debug lines of a command show its statement's shape, whether or not
+// the replay staged a test set again under it while the pool was read: they
+// read no places of the pool, so a read that found the set moved changes
+// nothing they show.
+func TestMySQLLogsOfAPoolReadWhileTheSetIsStagedAgainShowTheShape(t *testing.T) {
 	const placeholder = "xq7Lm2Pw9Rt4Zk"
 	const secret = "sk9LIVEsecret77"
 	// The live statement misses on a clause the recording lacks: its shape
@@ -136,9 +135,8 @@ func TestMySQLLogsOfAPoolReadWhileTheSetIsStagedAgainRedactTheStatementWhole(t *
 			if strings.Contains(lt, secret) {
 				t.Errorf("LEAK: the debug logs show the live secret:\n%.1500s", lt)
 			}
-			byPlace := "SELECT v FROM kv WHERE api_key = '(redacted)' AND id = '(redacted)'"
-			if staged == strings.Contains(lt, byPlace) {
-				t.Errorf("the debug logs show the statement by the pool's places: %v, want %v:\n%.1500s", !staged, !staged, lt)
+			if shape := "SELECT v FROM kv WHERE api_key = ? AND id = ?"; !strings.Contains(lt, shape) {
+				t.Errorf("the debug logs do not show the statement's shape %q:\n%.1500s", shape, lt)
 			}
 		})
 	}

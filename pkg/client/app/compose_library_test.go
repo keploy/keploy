@@ -220,7 +220,7 @@ func TestRunComposeInProcessClassifiesFailures(t *testing.T) {
 // on a context it deliberately makes uncancellable. That is the slow teardown
 // the drain budget cannot absorb, so keploy's fast down must run FIRST: Up's
 // context must still be live when the down starts. If this stops happening,
-// runs fail with "teardown drain timed out" rather than anything that points
+// runs fail with "teardown drain made no progress" rather than anything that points
 // here.
 //
 // And the run returns only once its down has finished: the replay loop starts

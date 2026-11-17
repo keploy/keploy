@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // tcpPair is two ends of one loopback TCP connection.
@@ -46,6 +47,9 @@ type relayRig struct {
 	h2Sends      atomic.Int64
 	mu           sync.Mutex
 	refused      []string
+	// refusedHosts are the hosts each refusal's why names, where it
+	// names them.
+	refusedHosts []models.LossHosts
 	// awaiting is how many AwaitsAnswer marks stand; awaited how many were
 	// made, the first of them closing marked.
 	awaiting, awaited atomic.Int32
@@ -66,9 +70,10 @@ func newRig(t *testing.T, check *Check) *relayRig {
 		Client: client, In: bufio.NewReaderSize(client, ReaderSize), Dest: dest, Check: check,
 		Sent: func(n int) { r.sent.Add(int64(n)) },
 		H2:   func() { r.h2.Store(true); r.h2Sends.Add(1) },
-		Refused: func(why string) {
+		Refused: func(why string, hosts models.LossHosts) {
 			r.mu.Lock()
 			r.refused = append(r.refused, why)
+			r.refusedHosts = append(r.refusedHosts, hosts)
 			r.mu.Unlock()
 		},
 		AwaitsAnswer: func() func() {
@@ -87,6 +92,13 @@ func (r *relayRig) refusals() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.refused...)
+}
+
+// refusalHosts are the hosts each refusal's why names (Refused).
+func (r *relayRig) refusalHosts() []models.LossHosts {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]models.LossHosts(nil), r.refusedHosts...)
 }
 
 func checkFor(t *testing.T, port uint16, entries ...string) *Check {
@@ -555,4 +567,61 @@ func TestAPooledRelayReachesItsDestinationInEveryRead(t *testing.T) {
 	require.Equal(t, []string{"db:5432"}, tr.Run().Reached, "the next set, on the same connection")
 	cancel()
 	<-done
+}
+
+// A name check that refuses the client's other name lists it where its why
+// writes it (Refused's hosts): a log line shapes it there alone, so a Host
+// that is one of keploy's words ("client", as in "let the client open")
+// leaves keploy's words as they are. A refusal for bytes keploy cannot check
+// names no host.
+func TestARefusedNameIsListedWhereTheWhyWritesIt(t *testing.T) {
+	r := newRig(t, checkFor(t, 80, "api.example.com:80"))
+	_, err := r.app.Write([]byte("GET /a HTTP/1.1\r\nHost: client\r\n\r\n"))
+	require.NoError(t, err)
+	<-r.done
+	require.Len(t, r.refusals(), 1)
+	why, hosts := r.refusals()[0], r.refusalHosts()[0]
+	require.Len(t, hosts, 1, "the refused name is not listed: %q", why)
+	require.Equal(t, "client", hosts[0].Name)
+	require.Equal(t, "client", why[hosts[0].At:hosts[0].At+len("client")], "the place does not hold the name")
+	require.Contains(t, why[:hosts[0].At], "a request with Host ", "the place is not where the why writes the name")
+	logged := hosts.LogText(why)
+	require.Equal(t, 1, strings.Count(logged, hosts[0].Tag), "the log form names more than the one place: %q", logged)
+	require.Contains(t, logged, "Host {} "+hosts[0].Tag+", which")
+	require.Contains(t, logged, "let the client open", "keploy's own word was read as the host: %q", logged)
+
+	r = newRig(t, checkFor(t, 80, "api.example.com:80"))
+	_, err = r.app.Write([]byte("GET / HTTP/1.2\r\nHost: api.example.com\r\n\r\n"))
+	require.NoError(t, err)
+	<-r.done
+	require.Len(t, r.refusalHosts(), 1)
+	require.Empty(t, r.refusalHosts()[0], "a refusal of bytes keploy cannot check lists a host")
+}
+
+// A first request line keploy does not read on a connection made REAL by
+// its name is refused (capture_incomplete), and its why describes the line,
+// never quotes it: the line holds the request's path and query, and an
+// absolute target its host, and the why reaches the agent's WARN and
+// keploy's report and log. A chunked body whose size line is no size ends
+// the relay with an error that says the line's size, never its bytes,
+// which the agent logs.
+func TestRelayNamesNoByteOfALineItCannotRead(t *testing.T) {
+	for _, line := range unreadRequestLines {
+		r := newRig(t, checkFor(t, 80, "api.example.com:80"))
+		_, err := r.app.Write([]byte(line))
+		require.NoError(t, err)
+		require.NoError(t, <-r.done)
+		require.Len(t, r.refusals(), 1, "%q", line)
+		why := r.refusals()[0]
+		require.Contains(t, why, "its request line is HTTP keploy does not read (", "%q", line)
+		requireNoRequestBytes(t, why, line)
+	}
+
+	r := newRig(t, checkFor(t, 80, "api.example.com:80"))
+	_, err := r.app.Write([]byte("POST /a HTTP/1.1\r\nHost: api.example.com\r\nTransfer-Encoding: chunked\r\n\r\ntoken=s3cr3tQ7\r\n"))
+	require.NoError(t, err)
+	err = <-r.done
+	require.ErrorIs(t, err, errNotHTTP)
+	require.NotContains(t, err.Error(), "s3cr3tQ7", "the error quotes the chunk-size line")
+	require.Contains(t, err.Error(), "a chunk-size line of 14 bytes")
 }

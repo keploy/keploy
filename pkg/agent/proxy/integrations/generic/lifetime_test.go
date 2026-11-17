@@ -57,16 +57,15 @@ func TestTheRecordersStateAConnectionsPreambleSessionAndTheRestPerTest(t *testin
 		mgr := syncMock.New(zap.NewNop())
 		mgr.SetOutputChannel(out)
 		ctx := syncMock.NewContext(context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1"), mgr)
-		clientCh, destCh := make(chan []byte), make(chan []byte)
+		chunks := make(chan capturedChunk)
 		go func() {
 			for _, x := range []string{"hello", "get a", "get b"} {
-				clientCh <- []byte(x)
-				destCh <- []byte("ok " + x)
+				chunks <- capturedChunk{fromClient: true, buf: []byte(x)}
+				chunks <- capturedChunk{buf: []byte("ok " + x)}
 			}
-			close(clientCh)
-			close(destCh)
+			close(chunks)
 		}()
-		createGenericMocksAsync(ctx, zap.NewNop(), clientCh, destCh)
+		createGenericMocksAsync(ctx, zap.NewNop(), chunks)
 		var got []*models.Mock
 		for len(got) < 3 {
 			got = append(got, <-out)
@@ -852,18 +851,17 @@ func TestLegacyAConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
 		ctx = context.WithValue(ctx, models.CapturedReqTimeKey, func() time.Time { return start.Add(time.Millisecond) })
 		ctx = context.WithValue(ctx, models.CapturedRespTimeKey, func() time.Time { return start.Add(2 * time.Millisecond) })
 		ctx = syncMock.NewContext(ctx, mgr)
-		clientCh, destCh := make(chan []byte), make(chan []byte)
+		chunks := make(chan capturedChunk)
 		go func() {
 			for _, x := range []string{"publish 1", "publish 2"} {
-				clientCh <- []byte(x)
-				destCh <- []byte("ok")
+				chunks <- capturedChunk{fromClient: true, buf: []byte(x)}
+				chunks <- capturedChunk{buf: []byte("ok")}
 			}
-			close(clientCh)
-			close(destCh)
+			close(chunks)
 		}()
 		done := make(chan struct{})
 		go func() {
-			createGenericMocksAsync(ctx, zap.NewNop(), clientCh, destCh)
+			createGenericMocksAsync(ctx, zap.NewNop(), chunks)
 			close(done)
 		}()
 		if inWindow {

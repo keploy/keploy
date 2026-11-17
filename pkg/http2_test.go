@@ -441,3 +441,19 @@ func TestRecordedMessagesCompleteReadsTheStatusAsAClientDoes(t *testing.T) {
 		}
 	}
 }
+
+// ResetStream as its doc says: a stream reset before it was complete is
+// forgotten and reported; a stream it holds nothing of ended so too and is
+// reported; a complete stream is its capture's, so it stays and is not.
+func TestResetStreamForgetsWhatEndedSoAndKeepsACompleteStream(t *testing.T) {
+	sm := NewStreamManager(zap.NewNop())
+	sm.streams[1] = &HTTP2StreamState{ID: 1}
+	sm.streams[3] = &HTTP2StreamState{ID: 3, isComplete: true}
+
+	assert.True(t, sm.ResetStream(1), "an incomplete stream a reset ended")
+	assert.NotContains(t, sm.streams, uint32(1), "what an incomplete stream held goes at its reset")
+	assert.False(t, sm.ResetStream(3), "a complete stream is its capture's")
+	assert.Contains(t, sm.streams, uint32(3), "a complete stream stays for its capture")
+	assert.True(t, sm.ResetStream(5), "a stream it holds nothing of")
+	assert.NotContains(t, sm.streams, uint32(5))
+}

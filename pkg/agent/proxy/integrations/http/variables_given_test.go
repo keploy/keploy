@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -88,7 +89,7 @@ func TestVariables_AGivensMissNamesTheGivenInItsEvidence(t *testing.T) {
 		if ok || diag == nil || diag.phase != models.MatchPhaseVariable {
 			t.Fatalf("want a variable miss, got answered=%v %+v", ok, diag)
 		}
-		rep := h.buildHTTPMismatchReport(makeReq("POST", path), []byte(body), db, nil, nil, nil, diag)
+		rep := h.buildHTTPMismatchReport(context.Background(), makeReq("POST", path), []byte(body), db, nil, nil, nil, diag)
 		return rep, models.UnmatchedCall{Protocol: rep.Protocol, MatchPhase: rep.MatchPhase, ClosestMock: rep.ClosestMock,
 			Diff: rep.Diff, NextSteps: rep.NextSteps, FieldDiffs: rep.FieldDiffs, Given: rep.Given}.Sanitized()
 	}

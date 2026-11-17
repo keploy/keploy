@@ -19,6 +19,10 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+// MappingDb reads and writes each test set's mapping file. Every write of a
+// set's file holds the set's write lock from before it reads the file until
+// it has written it (holdSet), so writes of one set through any MappingDb of
+// the process are one at a time and none loses another's change.
 type MappingDb struct {
 	logger      *zap.Logger
 	path        string
@@ -44,6 +48,11 @@ func NewWithFormat(logger *zap.Logger, path string, mapFileName string, format y
 
 func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error {
 	testSetID := mapping.TestSetID
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -328,6 +337,11 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	if len(byTest) == 0 {
 		return nil
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
@@ -422,6 +436,11 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 // recording derives the scope whole from its test windows (D2), so what is
 // written replaces what was there. An empty scope clears it.
 func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error {
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	var fileData []byte
 	var doc *yamlLib.Node
 	mappingPath := filepath.Join(db.path, testSetID)
@@ -467,6 +486,11 @@ func (db *MappingDb) AddToWorker(ctx context.Context, testSetID string, entries 
 	if len(entries) == 0 {
 		return nil, nil
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -563,6 +587,11 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	if len(moves) == 0 {
 		return nil, nil
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -683,6 +712,11 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 	if feature == "" {
 		return fmt.Errorf("mark what %s was recorded with: an empty mark", testSetID)
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -721,6 +755,11 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 // writes nothing. A set with no mapping file is refused, not created: its
 // record wrote no entry a rule could place.
 func (db *MappingDb) SetRules(ctx context.Context, testSetID, digest string) error {
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -767,6 +806,11 @@ func (db *MappingDb) SetSources(ctx context.Context, testSetID string, sources m
 			return fmt.Errorf("write %s's declared sources of %s: %w", testSetID, name, err)
 		}
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -825,6 +869,11 @@ func (db *MappingDb) SetSources(ctx context.Context, testSetID string, sources m
 func workerAt(e models.MockEntry) time.Time { return e.RecordedAt() }
 
 func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	var fileData []byte
 	var doc *yamlLib.Node
 	mappingPath := filepath.Join(db.path, testSetID)
@@ -862,6 +911,11 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	if len(byTest) == 0 && len(startup) == 0 && len(suites) == 0 {
 		return nil
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -1000,10 +1054,15 @@ func (db *MappingDb) Exists(ctx context.Context, testSetID string) (bool, error)
 }
 
 // Delete removes the set's mappings file in every format; a missing file is not an error.
-func (db *MappingDb) Delete(_ context.Context, testSetID string) error {
+func (db *MappingDb) Delete(ctx context.Context, testSetID string) error {
 	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
 		return fmt.Errorf("rejecting Delete: testSetID %q must be a single-segment name under the mappings directory: %w", testSetID, err)
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	fileName := db.MapFileName
 	if fileName == "" {
 		fileName = "mappings"
@@ -1200,6 +1259,11 @@ func (db *MappingDb) ApplyShares(ctx context.Context, testSetID string, s models
 // created (as an empty mapping) when create; otherwise it is an error when
 // mustExist, and left missing when not.
 func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, mustExist bool, change func(*models.Mapping) bool) error {
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	var fileData []byte
 	var doc *yamlLib.Node
 	mappingPath := filepath.Join(db.path, testSetID)

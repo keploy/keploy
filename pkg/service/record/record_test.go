@@ -496,6 +496,9 @@ type recTestDB struct {
 	// refuseNames refuses only the named test cases for their own payload, as
 	// the store refuses a body its format cannot hold.
 	refuseNames map[string]bool
+	// autoName, when set, names a test case that comes with no name, as the
+	// YAML store does: autoName-N, N its place among those saved.
+	autoName string
 }
 
 func (d *recTestDB) GetAllTestSetIDs(context.Context) ([]string, error) { return nil, nil }
@@ -511,6 +514,9 @@ func (d *recTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ str
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if tc.Name == "" && d.autoName != "" {
+		tc.Name = fmt.Sprintf("%s-%d", d.autoName, len(d.inserted)+1)
+	}
 	d.inserted = append(d.inserted, tc.Name)
 	return nil
 }
@@ -2832,7 +2838,7 @@ func TestStart_FormPartsLeftOutAreNamedInTheSummary(t *testing.T) {
 			}
 			first, _ := list[0].(string)
 			second, _ := list[1].(string)
-			if !strings.Contains(first, "test-set-0/test-1") || !strings.Contains(first, `form part "file"`) || !strings.Contains(first, `path "../outside.txt"`) {
+			if !strings.Contains(first, "test-set-0/test-1") || !strings.Contains(first, `form part "file"`) || !strings.Contains(first, `path "../(file name withheld, 11 bytes)"`) {
 				t.Errorf("the summary's first line %q does not name the test case, the part and the path", first)
 			}
 			if !strings.Contains(second, `form part "doc"`) || !strings.Contains(second, "no path") {
@@ -2905,7 +2911,7 @@ func TestTheRealTestStoresFormPartsLeftOutReachTheSummary(t *testing.T) {
 		t.Fatalf("the summary lists %v, want the one part", fields["stored_without"])
 	}
 	line, _ := list[0].(string)
-	if !strings.Contains(line, "set/test-1") || !strings.Contains(line, `form part "file"`) || !strings.Contains(line, `path "../outside.txt"`) {
+	if !strings.Contains(line, "set/test-1") || !strings.Contains(line, `form part "file"`) || !strings.Contains(line, `path "../(file name withheld, 11 bytes)"`) {
 		t.Errorf("the summary's line %q does not name the test case, the part and the path", line)
 	}
 	if fields["testSetID"] != "set" {

@@ -1,0 +1,51 @@
+name: Held Request Under Load (Linux)
+# Guard: under `keploy record --sync`, a request held in flight past the 7 s
+# stale cutoff, beside a steady load of fast requests whose resolves pass over
+# the mocks buffered for it, is recorded with every mock it made, and so is
+# every fast request: one test case per request, none left out, each held
+# request's resolve takes its calls from the hold the cutoff moved them to,
+# and every test passes keploy test with the upstream gone. The script's
+# header says how the load is made and what each check means.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+
+jobs:
+  held_request_under_load_linux:
+    runs-on: ${{ inputs.runner }}
+    name: held-request-under-load (record_with_build)
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run the held request under load
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/held_request_under_load/golang-linux.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: held-request-under-load-logs
+          path: |
+            .github/workflows/test_workflow_scripts/golang/held_request_under_load/*.log
+          if-no-files-found: warn
+          retention-days: 7

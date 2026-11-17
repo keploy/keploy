@@ -18,7 +18,7 @@ type laneStub struct{}
 func (laneStub) MatchesLane(m *models.Mock, _ models.AsyncLane) bool {
 	return m != nil && m.Spec.Metadata["kind"] == "lane"
 }
-func (laneStub) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, string) {
+func (laneStub) MatchRequestShape(_ context.Context, _, _ *models.Mock, _ models.AsyncLane) (bool, string) {
 	return true, ""
 }
 func (laneStub) EmptyResponse(_ models.AsyncLane) ([]byte, error) { return nil, nil }

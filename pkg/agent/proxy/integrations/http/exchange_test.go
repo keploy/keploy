@@ -265,7 +265,7 @@ func TestARequestAfterEmptyLinesIsParsed(t *testing.T) {
 		if err := h.readRequestV2(stream, &finalReq); err != nil || string(finalReq) != req {
 			t.Fatalf("readRequestV2 = (%q, %v), want the request from its request line: %q", finalReq, err, req)
 		}
-		m, err := h.buildHTTPMock(&FinalHTTP{Req: finalReq, Resp: []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"),
+		m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: finalReq, Resp: []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"),
 			ReqTimestampMock: now, ResTimestampMock: now}, 443, "test-conn", models.OutgoingOptions{})
 		if err != nil || m == nil || m.Spec.HTTPReq == nil || m.Spec.HTTPReq.Body != "hello" {
 			t.Fatalf("buildHTTPMock = (%+v, %v), want a mock of the request", m, err)
