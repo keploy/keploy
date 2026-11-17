@@ -74,18 +74,21 @@ func TestABackgroundPollThatReadTheClockBeforeAMoveHoldsOnWhatTheClockShowedBefo
 	if stamp.Holds(read, last) {
 		t.Fatal("the read before the move holds on the span from the move; the row tests nothing")
 	}
-	spans, ok := CallSpansOf(ctx, arrival)
+	spans, ok := CallSpansOf(ctx, arrival, bgPolls)
 	if !ok || len(spans) != 1 || spans[0] != last {
 		t.Fatalf("spans = %+v,%v with no shown clock told; want the span from the move alone", spans, ok)
 	}
 
 	tr.SetAppClockShown(clock.shown)
-	spans, ok = CallSpansOf(ctx, arrival)
+	spans, ok = CallSpansOf(ctx, arrival, bgPolls)
 	if !ok || len(spans) != 3 {
 		t.Fatalf("spans = %+v,%v; want what the clock showed before the move, through its write in both offsets, then the span from it", spans, ok)
 	}
 	if want := (Span{From: base.Add(time.Second), To: move.to}); spans[0].From != want.From || spans[0].To != want.To {
 		t.Fatalf("first span = %v..%v; want %v..%v: the clock before the move, from the previous serve to the move's end", spans[0].From, spans[0].To, want.From, want.To)
+	}
+	if want := (Span{From: move.from.Add(ahead), To: move.to.Add(ahead)}); spans[1].From != want.From || spans[1].To != want.To {
+		t.Fatalf("second span = %v..%v; want %v..%v: the offset the move wrote, over its write alone (the run from its end is the last span)", spans[1].From, spans[1].To, want.From, want.To)
 	}
 	if spans[2] != last {
 		t.Fatalf("last span = %+v; want CallSpanOf's %+v", spans[2], last)
@@ -103,13 +106,13 @@ func TestABackgroundPollThatReadTheClockBeforeAMoveHoldsOnWhatTheClockShowedBefo
 	// Hooks that cannot tell what the clock showed leave the span from the
 	// move alone; so does a call whose clock did not move since its bound.
 	tr.SetAppClockShown(func(from, to time.Time) ([]Span, bool) { return []Span{{From: from, To: to}}, false })
-	if spans, ok := CallSpansOf(ctx, arrival); !ok || len(spans) != 1 || spans[0] != last {
+	if spans, ok := CallSpansOf(ctx, arrival, bgPolls); !ok || len(spans) != 1 || spans[0] != last {
 		t.Fatalf("spans = %+v,%v with the shown clock untold; want the span from the move alone", spans, ok)
 	}
 	asked := false
 	tr.SetAppClockShown(func(from, to time.Time) ([]Span, bool) { asked = true; return clock.shown(from, to) })
 	tr.ServedMockAt(&models.Mock{Name: "poll-2", Kind: models.Mongo}, move.to.Add(time.Millisecond))
-	if spans, ok := CallSpansOf(ctx, arrival); !ok || len(spans) != 1 || asked {
+	if spans, ok := CallSpansOf(ctx, arrival, bgPolls); !ok || len(spans) != 1 || asked {
 		t.Fatalf("spans = %+v,%v (shown asked: %v) for a call served after the move; want its one span, nothing shown asked", spans, ok, asked)
 	}
 	// A call that reaches keploy while a move is written has no span to
@@ -121,7 +124,7 @@ func TestABackgroundPollThatReadTheClockBeforeAMoveHoldsOnWhatTheClockShowedBefo
 	if _, ok := CallSpanOf(ctx, mid); ok {
 		t.Fatal("a call that arrived mid-move has a span to arrival; the row tests nothing")
 	}
-	spans, ok = CallSpansOf(ctx, mid)
+	spans, ok = CallSpansOf(ctx, mid, bgPolls)
 	if !ok || len(spans) != 2 {
 		t.Fatalf("spans = %+v,%v for a call that arrived mid-move; want the clock before the move and from its begin", spans, ok)
 	}
@@ -143,7 +146,7 @@ func TestABackgroundPollThatReadTheClockBeforeAMoveHoldsOnWhatTheClockShowedBefo
 	// Hooks that cannot tell what the clock showed mid-move (a write that
 	// failed part way) leave the call with no span.
 	tr.SetAppClockShown(func(from, to time.Time) ([]Span, bool) { return []Span{{From: from, To: to}}, false })
-	if spans, ok := CallSpansOf(ctx, mid); ok || spans != nil {
+	if spans, ok := CallSpansOf(ctx, mid, bgPolls); ok || spans != nil {
 		t.Fatalf("spans = %+v,%v mid-move with the shown clock untold; want none", spans, ok)
 	}
 	tr.SetAppClockShown(nil)
@@ -153,7 +156,7 @@ func TestABackgroundPollThatReadTheClockBeforeAMoveHoldsOnWhatTheClockShowedBefo
 				t.Fatalf("mid-move with no shown clock CallSpansOf panicked: %v", r)
 			}
 		}()
-		if spans, ok := CallSpansOf(ctx, mid); ok || spans != nil {
+		if spans, ok := CallSpansOf(ctx, mid, bgPolls); ok || spans != nil {
 			t.Fatalf("spans = %+v,%v mid-move with no shown clock; want none", spans, ok)
 		}
 	}()
@@ -164,7 +167,7 @@ func TestABackgroundPollThatReadTheClockBeforeAMoveHoldsOnWhatTheClockShowedBefo
 	zoned.SetAppClockRun(clock.began)
 	zoned.SetAppClockShown(clock.shown)
 	zoned.ServedMockAt(&models.Mock{Name: "poll-1", Kind: models.Mongo}, base.Add(time.Second))
-	spans, ok = CallSpansOf(WithProcZone(WithTracker(context.Background(), zoned), ProcZone{Loc: ist, Name: "+05:30"}), arrival)
+	spans, ok = CallSpansOf(WithProcZone(WithTracker(context.Background(), zoned), ProcZone{Loc: ist, Name: "+05:30"}), arrival, bgPolls)
 	if !ok || len(spans) != 3 {
 		t.Fatalf("spans = %+v,%v; want three", spans, ok)
 	}
@@ -175,11 +178,12 @@ func TestABackgroundPollThatReadTheClockBeforeAMoveHoldsOnWhatTheClockShowedBefo
 	}
 }
 
-// A call keploy cannot place after any serve of its set has no span, and
-// no earlier one: in a client test before any serve the span is read from
-// the test's begin, and no bound tells what the clock showed before it;
-// mid-move nothing does. With the proven switch off the serve clock tells
-// the call's one span. Mutation: read what the clock showed from no bound.
+// A background call with no serve of its group before it and no set begun
+// has no bound, and no span: not even in a client test, whose own begin
+// bounds the test's calls, never a poller's read; mid-move nothing tells
+// one either. With the proven switch off the serve clock tells the call's
+// one span. Mutation: read what the clock showed from no bound; bound a
+// client test's background call by the test's begin.
 func TestABackgroundCallWithNoBoundHasNoEarlierSpans(t *testing.T) {
 	base := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
 	move := runWrite{from: base.Add(2 * time.Second), to: base.Add(2*time.Second + 5*time.Millisecond), offset: 3 * time.Second}
@@ -192,27 +196,26 @@ func TestABackgroundCallWithNoBoundHasNoEarlierSpans(t *testing.T) {
 	tr.SetAppClockShown(func(from, to time.Time) ([]Span, bool) { asked = true; return clock.shown(from, to) })
 	tr.SetClientTests(true)
 	tr.BeginAt(move.to.Add(time.Millisecond))
-	spans, ok := CallSpansOf(WithTracker(context.Background(), tr), arrival)
-	if !ok || len(spans) != 1 || asked {
-		t.Fatalf("spans = %+v,%v (shown asked: %v); want the span from the test's begin alone", spans, ok, asked)
+	if spans, ok := CallSpansOf(WithTracker(context.Background(), tr), arrival, bgPolls); ok || spans != nil || asked {
+		t.Fatalf("spans = %+v,%v (shown asked: %v); want none: no bound, and the test's begin is none of a poller's", spans, ok, asked)
 	}
 	// Mid-move, with no serve to bound it, nothing tells what the clock
 	// showed: the shown clock is not asked from no bound.
-	if spans, ok := CallSpansOf(WithTracker(context.Background(), tr), move.from.Add(time.Millisecond)); ok || spans != nil || asked {
+	if spans, ok := CallSpansOf(WithTracker(context.Background(), tr), move.from.Add(time.Millisecond), bgPolls); ok || spans != nil || asked {
 		t.Fatalf("spans = %+v,%v (shown asked: %v) mid-move with no bound; want none", spans, ok, asked)
 	}
 
 	sc := &ServeClock{}
 	sc.SetClock(func(r time.Time) (time.Time, bool) { return r, true })
 	sctx := WithServeClock(context.Background(), sc)
-	if spans, ok := CallSpansOf(sctx, arrival); ok || spans != nil {
+	if spans, ok := CallSpansOf(sctx, arrival, bgPolls); ok || spans != nil {
 		t.Fatalf("spans = %+v,%v with no serve noted; want none", spans, ok)
 	}
 	sc.Served()
-	if spans, ok := CallSpansOf(sctx, time.Now().Add(time.Second)); !ok || len(spans) != 1 {
+	if spans, ok := CallSpansOf(sctx, time.Now().Add(time.Second), bgPolls); !ok || len(spans) != 1 {
 		t.Fatalf("spans = %+v,%v after a serve; want its one span", spans, ok)
 	}
-	if spans, ok := CallSpansOf(nil, arrival); ok || spans != nil { //nolint:staticcheck // a nil ctx tells none
+	if spans, ok := CallSpansOf(nil, arrival, bgPolls); ok || spans != nil { //nolint:staticcheck // a nil ctx tells none
 		t.Fatalf("spans = %+v,%v of a nil ctx; want none", spans, ok)
 	}
 }
@@ -232,7 +235,7 @@ func TestABackgroundPollReadBetweenTwoMovesHoldsOnTheClockBetweenThem(t *testing
 	tr.SetAppClockRun(clock.began)
 	tr.SetAppClockShown(clock.shown)
 	tr.ServedMockAt(&models.Mock{Name: "poll-1", Kind: models.Mongo}, base.Add(time.Second))
-	spans, ok := CallSpansOf(WithTracker(context.Background(), tr), arrival)
+	spans, ok := CallSpansOf(WithTracker(context.Background(), tr), arrival, bgPolls)
 	if !ok || len(spans) != 4 {
 		t.Fatalf("spans = %+v,%v; want the clock before, between and through the two moves, then the span from the last", spans, ok)
 	}
@@ -248,8 +251,10 @@ func TestABackgroundPollReadBetweenTwoMovesHoldsOnTheClockBetweenThem(t *testing
 
 // Every span of a background call is in the app's zone where the tracker
 // was told it (SetAppZone), and stays there where the agent read no zone
-// of the call's own process (a ProcZone with no Loc). A nil tracker tells
-// none and takes a shown clock without a panic.
+// of the call's own process (a ProcZone with no Loc), for a call that
+// arrives after a move and for one that arrives while the move is written
+// (the spans the hooks told, which carry no zone of their own). A nil
+// tracker tells none and takes a shown clock without a panic.
 func TestBackgroundSpansKeepTheAppsZoneAndANilTrackerTellsNone(t *testing.T) {
 	base := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
 	move := runWrite{from: base.Add(2 * time.Second), to: base.Add(2*time.Second + 5*time.Millisecond), offset: 3 * time.Second}
@@ -263,14 +268,24 @@ func TestBackgroundSpansKeepTheAppsZoneAndANilTrackerTellsNone(t *testing.T) {
 	tr.SetAppClockShown(clock.shown)
 	tr.ServedMockAt(&models.Mock{Name: "poll-1", Kind: models.Mongo}, base.Add(time.Second))
 	ctx := WithTracker(context.Background(), tr)
+	calls := []struct {
+		what    string
+		arrival time.Time
+		spans   int
+	}{
+		{"after the move", arrival, 3},
+		{"mid-move", move.from.Add(time.Millisecond), 2},
+	}
 	for name, c := range map[string]context.Context{"no process zone": ctx, "a process zone with no Loc": WithProcZone(ctx, ProcZone{Name: "unread"})} {
-		spans, ok := CallSpansOf(c, arrival)
-		if !ok || len(spans) != 3 {
-			t.Fatalf("%s: spans = %+v,%v; want three", name, spans, ok)
-		}
-		for _, s := range spans {
-			if s.Zone != ist || s.Own {
-				t.Fatalf("%s: span %+v is not in the app's zone", name, s)
+		for _, call := range calls {
+			spans, ok := CallSpansOf(c, call.arrival, bgPolls)
+			if !ok || len(spans) != call.spans {
+				t.Fatalf("%s, %s: spans = %+v,%v; want %d", name, call.what, spans, ok, call.spans)
+			}
+			for _, s := range spans {
+				if s.Zone != ist || s.Own {
+					t.Fatalf("%s, %s: span %+v is not in the app's zone", name, call.what, s)
+				}
 			}
 		}
 	}
@@ -287,17 +302,17 @@ func TestBackgroundSpansKeepTheAppsZoneAndANilTrackerTellsNone(t *testing.T) {
 	}
 	noPanic("SetAppClockShown", func() { nilTracker.SetAppClockShown(clock.shown) })
 	noPanic("BackgroundSpans", func() {
-		if spans, ok := nilTracker.BackgroundSpans(arrival); ok || spans != nil {
+		if spans, ok := nilTracker.BackgroundSpans(arrival, bgPolls); ok || spans != nil {
 			t.Fatalf("spans = %+v,%v of a nil tracker; want none", spans, ok)
 		}
 	})
 	noPanic("CallSpansOf", func() {
-		if spans, ok := CallSpansOf(context.Background(), arrival); ok || spans != nil {
+		if spans, ok := CallSpansOf(context.Background(), arrival, bgPolls); ok || spans != nil {
 			t.Fatalf("spans = %+v,%v of a ctx with no tracker; want none", spans, ok)
 		}
 	})
 	noPanic("ClockSpansOf of a nil ctx", func() {
-		if spans, ok := ClockSpansOf(nil, arrival); ok || spans != nil { //nolint:staticcheck // a nil ctx tells none
+		if spans, ok := ClockSpansOf(nil, arrival, bgPolls); ok || spans != nil { //nolint:staticcheck // a nil ctx tells none
 			t.Fatalf("spans = %+v,%v of a nil ctx; want none", spans, ok)
 		}
 	})
