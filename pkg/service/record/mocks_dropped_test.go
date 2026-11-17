@@ -2,13 +2,17 @@ package record
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -84,13 +88,36 @@ func TestARecordingWhoseAgentDroppedMocksSaysSoInItsConfig(t *testing.T) {
 }
 
 // droppedInstr is a recording's instrumentation whose agent's end marker
-// said it dropped d.
+// said it dropped d. As the agent's does, the marker comes only at the end of
+// the incoming stream, once the recording's drain closes it: the stream stays
+// open until then, and the summary is there only once the stream has ended.
+// A mark taken before the drain finds none.
 type droppedInstr struct {
 	*blockingInstr
-	d models.MockDropSummary
+	d     models.MockDropSummary
+	ended atomic.Bool
 }
 
-func (i droppedInstr) IncomingEndSummary() (models.StreamEndSummary, bool) {
+func (i *droppedInstr) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
+	out := make(chan *models.TestCase)
+	go func() {
+		defer close(out)
+		for tc := range i.fakeInstr.incoming {
+			select {
+			case out <- tc:
+			case <-ctx.Done():
+			}
+		}
+		<-ctx.Done() // the drain closed the stream: the agent's end marker comes now
+		i.ended.Store(true)
+	}()
+	return out, nil
+}
+
+func (i *droppedInstr) IncomingEndSummary() (models.StreamEndSummary, bool) {
+	if !i.ended.Load() {
+		return models.StreamEndSummary{}, false
+	}
 	return models.StreamEndSummary{TestCasesSent: 1, MocksDropped: i.d}, true
 }
 
@@ -119,7 +146,8 @@ func (w *writtenConfs) Write(_ context.Context, id string, c *models.TestSet) er
 
 // A recording's stop marks its test-set with what its agent's end marker said
 // it dropped, once the streams have drained, with or without the proven
-// switch.
+// switch. The marker is there only after the drain (droppedInstr), so a mark
+// taken before it would find nothing and leave the test-set unmarked.
 func TestARecordingsStopMarksItsTestSetWithTheAgentsDrops(t *testing.T) {
 	d := models.MockDropSummary{ByPressure: 1, Named: []string{"Http2 mock of connection 7"}}
 	for _, switchOn := range []string{"", "1"} {
@@ -135,8 +163,8 @@ func TestARecordingsStopMarksItsTestSetWithTheAgentsDrops(t *testing.T) {
 			w := &winRecording{f: f, testDB: &recTestDB{}, mockDB: &recMockDB{unencodable: map[string]bool{}}, mapping: &recMappingDB{}, done: make(chan error, 1)}
 			w.r = &Recorder{
 				logger: zap.NewNop(), testDB: w.testDB, mockDB: w.mockDB, mappingDb: w.mapping,
-				telemetry: &recTelemetry{}, instrumentation: droppedInstr{&blockingInstr{f}, d}, testSetConf: confs,
-				hooks: BaseRecordHooks{}, config: &config.Config{},
+				telemetry: &recTelemetry{}, instrumentation: &droppedInstr{blockingInstr: &blockingInstr{f}, d: d}, testSetConf: confs,
+				hooks: BaseRecordHooks{}, config: &config.Config{}, frameQuiet: 50 * time.Millisecond,
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			w.cancel = cancel
@@ -157,5 +185,34 @@ func TestARecordingsStopMarksItsTestSetWithTheAgentsDrops(t *testing.T) {
 				t.Fatalf("the test-sets marked with the agent's drops are %v (configs written: %v), want the recording's one", marked, confs.written)
 			}
 		})
+	}
+}
+
+// failingWriteConf is a test-set config store that reads a config for update
+// but fails every write.
+type failingWriteConf struct{ updatingStore }
+
+func (*failingWriteConf) Write(context.Context, string, *models.TestSet) error {
+	return errors.New("config.yaml: no space left on device")
+}
+
+// A mark the config store fails to write is said, naming the test-set, for
+// the agent's drops and for the stop's kill alike (they share the write): a
+// drop or a kill the recording could not mark never vanishes silently.
+func TestAMarkTheConfigStoreFailsToWriteIsSaid(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const (
+		dropNotMarked = "keploy could not mark the test-set's recording as missing the mocks the agent dropped; a replay that needs one fails without naming the drop"
+		killNotMarked = "keploy could not mark the test-set's recording as cut by its stop's kill; a replay may fail it for a call the recording lacks"
+	)
+	core, logs := observer.New(zapcore.ErrorLevel)
+	r := &Recorder{logger: zap.New(core), testSetConf: &failingWriteConf{updatingStore{confStore{conf: &models.TestSet{}}}},
+		instrumentation: endSummaryInstr{sum: models.StreamEndSummary{MocksDropped: models.MockDropSummary{ByPressure: 1}}, ok: true}}
+	r.markMocksDropped(context.Background(), "test-set-0")
+	r.markStopKilled(context.Background(), "test-set-0", "keploy killed the application at the recording's end")
+	for _, msg := range []string{dropNotMarked, killNotMarked} {
+		if said := logs.FilterMessage(msg).All(); len(said) != 1 || said[0].ContextMap()["testSet"] != "test-set-0" {
+			t.Errorf("%q was said %v; want it once, naming the test-set (all lines: %v)", msg, said, logs.All())
+		}
 	}
 }
