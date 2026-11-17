@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -256,6 +257,10 @@ func TestATakeIsAnsweredToACallThatAsksAsTheNextTestOpens(t *testing.T) {
 		t.Fatal("precondition: own is not shown")
 	}
 	inStep, release, took := make(chan struct{}), make(chan struct{}), make(chan bool, 1)
+	var let sync.Once
+	letGo := func() { let.Do(func() { close(release) }) }
+	ended := false
+	served := func() bool { ended = true; return <-took }
 	s.mm.exact.round.onTake = func(tk integrations.Take) {
 		if tk.Mock != nil && tk.Mock.Name == "own" {
 			close(inStep)
@@ -268,22 +273,38 @@ func TestATakeIsAnsweredToACallThatAsksAsTheNextTestOpens(t *testing.T) {
 			return
 		}
 		opened = true
-		close(release)
-		if !<-took {
+		letGo()
+		if !served() {
 			panic("precondition: the consume of own was refused")
 		}
 		s.mm.ServeExactTest("T2", []*models.Mock{s.ms["next"], s.ms["next2"]})
 	}
-	t.Cleanup(func() { s.mm.exact.round.onTake, s.mm.exact.round.onRead = nil, nil })
+	// A row that fails while the take waits in its step lets it go and
+	// waits for the consume to end, so no take holds the round lock past
+	// the row.
+	t.Cleanup(func() {
+		letGo()
+		if !ended {
+			served()
+		}
+		s.mm.exact.round.onTake, s.mm.exact.round.onRead = nil, nil
+	})
 	go func() { took <- s.mm.DeleteFilteredMock(*mk) }()
-	<-inStep
+	// A consume that ends with no take of own logged fails the row at once,
+	// rather than leave it waiting for a step that never comes.
+	select {
+	case <-inStep:
+	case ok := <-took:
+		ended = true
+		t.Fatalf("the consume of own ended (served: %v) with no take of it logged", ok)
+	}
 	if !s.mm.MockSpent("own") {
 		t.Fatal("precondition: own is not spent in the step that takes it")
 	}
 	unserved := hasUnserved(t, s.mm, models.HTTP, "own")
 	if !opened {
-		close(release)
-		if !<-took {
+		letGo()
+		if !served() {
 			t.Fatal("the consume of own was refused")
 		}
 	}
