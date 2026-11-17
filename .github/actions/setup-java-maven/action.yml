@@ -1,5 +1,5 @@
 name: setup-java-maven
-description: "Set up a Temurin JDK and cache ~/.m2/repository under a key that names the Maven, JDK, poms and Maven configuration of the build; on an exact hit, run Maven offline"
+description: "Set up a Temurin JDK and restore ~/.m2/repository for a Maven build, keyed by what decides its artifacts; the build's declared mvn command lines then run offline on it"
 
 # In place of actions/setup-java's own `cache: maven`, whose key (OS, arch,
 # pom hash) stays the same when the runner image changes its Maven. A local
@@ -7,7 +7,11 @@ description: "Set up a Temurin JDK and cache ~/.m2/repository under a key that n
 # that filled it did, so a cache saved by one Maven and restored for another
 # can be all "present, but unavailable": every file is fetched from Maven
 # Central again, on every run, since a cache entry is never replaced.
-# maven-cache-key.sh says how, and offline/mvn why a hit runs offline.
+#
+# Use it with ./.github/actions/setup-java-maven/save as a step after the
+# build. maven-cache-key.sh says what the key covers, bin/mvn how a restored
+# cache is used (offline) and what happens when it cannot serve the build,
+# and save/save-plan.sh when and under which entry the repository is saved.
 # Their tests (setup-java-maven.tests.sh) run in the lint workflow.
 inputs:
   java-version:
@@ -16,6 +20,9 @@ inputs:
   cache-dependency-path:
     required: true
     description: "The pom.xml files the build reads its dependencies from, one per line, relative to the workspace"
+  maven-args:
+    required: true
+    description: "The mvn command lines the build runs, one per line, as the lane passes them (-q, -B, -U, -e and the like do not count): their goals, profiles and -D properties decide its artifacts. These run offline on a restored cache; any other mvn runs online, with a warning."
 
 runs:
   using: composite
@@ -32,36 +39,26 @@ runs:
       env:
         MAVEN_CACHE_JAVA_VERSION: ${{ inputs.java-version }}
         MAVEN_CACHE_DEPENDENCY_PATH: ${{ inputs.cache-dependency-path }}
+        MAVEN_CACHE_MAVEN_ARGS: ${{ inputs.maven-args }}
       run: |
         key=$(bash "$GITHUB_ACTION_PATH/maven-cache-key.sh")
         echo "Maven repository cache key: $key"
         echo "key=$key" >> "$GITHUB_OUTPUT"
 
-    # Saved by actions/cache's post step, at the end of a job that passed,
-    # under a key that missed, as setup-java's was. A cell whose lane fails
-    # after its build saves nothing, though its repository is whole: the
-    # build runs inside the lane's script, so there is no step to save it
-    # from earlier. Most keys are shared by several cells that run the same
-    # build, so one of them passing seeds it.
+    # Entries are saved as KEY-<suffix> (save/save-plan.sh); the newest one
+    # of this key is restored. No entry is ever saved as KEY itself.
     - name: Restore the Maven repository
       id: cache
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: ~/.m2/repository
         key: ${{ steps.key.outputs.key }}
+        restore-keys: ${{ steps.key.outputs.key }}-
 
-    # An exact hit holds everything this build resolves, so from here on mvn
-    # runs offline (offline/mvn), and a cache that cannot serve the build
-    # fails it, naming the key. A miss, or a hit of nothing, resolves online.
-    - name: Run Maven offline on the restored repository
-      id: offline
-      if: steps.cache.outputs.cache-hit == 'true'
+    - name: Register the Maven repository for bin/mvn
       shell: bash
       env:
         KEY: ${{ steps.key.outputs.key }}
-      run: |
-        real=$(command -v mvn)
-        echo "SETUP_JAVA_MAVEN_REAL_MVN=$real" >> "$GITHUB_ENV"
-        echo "SETUP_JAVA_MAVEN_CACHE_KEY=$KEY" >> "$GITHUB_ENV"
-        echo "$GITHUB_ACTION_PATH/offline" >> "$GITHUB_PATH"
-        echo "::notice title=Maven runs offline::~/.m2/repository was restored from the exact key $KEY, so mvn ($real) runs offline for the rest of this job."
+        MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
+        MAVEN_CACHE_MAVEN_ARGS: ${{ inputs.maven-args }}
+      run: bash "$GITHUB_ACTION_PATH/restored.sh"

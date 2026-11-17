@@ -6,12 +6,14 @@
 #   bash .github/workflows/test_workflow_scripts/check-maven-caches.tests.sh
 #
 # It passes on this repository; on setup-java with no cache or another one
-# (gradle); on setup-java-maven; on a comment, at the start of a line or after
-# one, that names `cache: maven`; on a shell script (not YAML) that does; and
-# where no file names it. It fails, naming the line, on `cache: maven` in a
-# workflow (.yml and .yaml, quoted or not, with a comment after it, with CRLF
-# line ends), in a composite action, in an action nested in another action's
-# directory, and in flow style (`with: { cache: maven }`).
+# (gradle); on setup-java-maven with its save step; on a comment, at the start
+# of a line or after one, that names `cache: maven`; on a shell script (not
+# YAML) that does; and where no file names it. It fails, naming the line, on
+# `cache: maven` in a workflow (.yml and .yaml, quoted or not, with a comment
+# after it, with CRLF line ends), in a composite action, in an action nested
+# in another action's directory, and in flow style (`with: { cache: maven }`).
+# It fails, naming the file, on setup-java-maven with no save step, or with
+# fewer save steps than uses (a save only named in a comment is none).
 set -euo pipefail
 
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,15 +93,26 @@ repo none-at-all ".github/workflows/w.yml=$(wf)"
 expect none-at-all pass "No workflow or action"
 repo gradle ".github/workflows/w.yml=$(wf "$c: gradle")"
 expect gradle pass
-repo own-action ".github/workflows/w.yml=jobs:
-  t:
-    steps:
-      - uses: ./.github/actions/setup-java-maven
-        with:
-          java-version: \"17\"
-          cache-dependency-path: pom.xml
+own() { # own N SAVES: a workflow with N uses of setup-java-maven, SAVES save steps
+  printf 'jobs:\n  t:\n    steps:\n'
+  local i
+  for i in $(seq 1 "$1"); do
+    printf '      - uses: ./.github/actions/setup-java-maven\n        with:\n          java-version: "17"\n          cache-dependency-path: pom.xml\n          maven-args: clean package\n      - run: mvn clean package\n'
+  done
+  for i in $(seq 1 "$2"); do printf '      - uses: ./.github/actions/setup-java-maven/save\n'; done
+}
+repo own-action ".github/workflows/w.yml=$(own 1 1)"
+expect own-action pass "every use of setup-java-maven has its save step"
+repo own-two ".github/workflows/w.yml=$(own 2 2)"
+expect own-two pass
+repo own-no-save ".github/workflows/w.yml=$(own 1 0)"
+expect own-no-save fail ".github/workflows/w.yml: 1 use(s) of setup-java-maven, 0 of setup-java-maven/save"
+repo own-one-save ".github/workflows/w.yml=$(own 2 1)"
+expect own-one-save fail ".github/workflows/w.yml: 2 use(s) of setup-java-maven, 1 of setup-java-maven/save"
+repo own-save-comment ".github/workflows/w.yml=$(own 1 0)
+      # - uses: ./.github/actions/setup-java-maven/save
 "
-expect own-action pass
+expect own-save-comment fail ".github/workflows/w.yml: 1 use(s) of setup-java-maven, 0 of setup-java-maven/save"
 repo comments ".github/workflows/w.yml=$(wf "# $c: maven was setup-java's" "distribution: temurin  # not $c: maven")"
 expect comments pass
 repo shell-script ".github/workflows/s.sh=echo '$c: maven'

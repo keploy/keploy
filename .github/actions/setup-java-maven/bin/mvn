@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# mvn, as setup-java-maven puts it first on PATH: the job's own Maven
+# (SETUP_JAVA_MAVEN_REAL_MVN), run offline when its cache holds what this
+# command line needs.
+#
+# A command line that a use of the action declared (maven-args) and restored
+# a cache for runs offline: that cache was saved by a build of the same mvn
+# command lines, poms, configuration, Maven and JDK, so it should hold
+# everything this run resolves, and needs no network. If it does not, the
+# key is missing something, and Maven says what it could not resolve. Then
+# this says so (an error annotation naming what was missing, the key and the
+# entry), runs the command line once more online, and the save step stores
+# the repository with what that fetched under a new entry of the key, which
+# the next run restores. So a cache that cannot serve the build is never
+# fetched again in silence, as one Maven 3.10.0 saved and Maven 3.9.15
+# restored was, every run, until Central answered 429; and it costs one
+# online run, not every run.
+#
+# A command line declared by a use that restored nothing runs online. One no
+# use declared runs online too, with a warning: the key does not cover it,
+# so add it to that step's maven-args. -v, --version, -h and --help run as
+# they are. Offline, -U has no effect: a remote SNAPSHOT dependency stays at
+# its cached copy while the key hits (no lane has one).
+#
+# Each run's exit code is noted in SETUP_JAVA_MAVEN_STATES, for the save step.
+# A mvn run from inside this one (a build that starts Maven) runs the real
+# mvn as it is, and a SETUP_JAVA_MAVEN_REAL_MVN that is this script refuses
+# to run: neither can loop.
+real=${SETUP_JAVA_MAVEN_REAL_MVN:?SETUP_JAVA_MAVEN_REAL_MVN is not set}
+states=${SETUP_JAVA_MAVEN_STATES:?SETUP_JAVA_MAVEN_STATES is not set}
+self="${BASH_SOURCE[0]}"
+if [ "$real" -ef "$self" ]; then
+  echo "::error::setup-java-maven: SETUP_JAVA_MAVEN_REAL_MVN ($real) is this script; refusing to run it" >&2
+  exit 2
+fi
+if [ -n "${SETUP_JAVA_MAVEN_IN_MVN:-}" ]; then
+  exec "$real" "$@"
+fi
+export SETUP_JAVA_MAVEN_IN_MVN=1
+here="$(cd "$(dirname "$self")/.." && pwd)"
+# shellcheck source=../maven-args.sh
+. "$here/maven-args.sh"
+norm=$(maven_args_normalize "$@")
+case "$norm" in
+  -v | --version | -h | --help) exec "$real" "$@" ;;
+esac
+use=''
+while IFS= read -r d; do
+  if grep -qxF -- "$norm" "$d/declared" 2>/dev/null; then
+    use=$d
+    break
+  fi
+done < <(find "$states" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' 2>/dev/null | LC_ALL=C sort -r)
+id=$(printf '%s' "$norm" | sha256sum | cut -c1-16)
+# runs: "rc mode command-line-id use" per run, for save-plan.sh.
+note() { printf '%s %s %s %s\n' "$1" "$2" "$id" "${use:+$(basename "$use")}" >>"$states/runs"; }
+
+if [ -z "$use" ]; then
+  echo "::warning title=mvn not covered by setup-java-maven::mvn $(maven_args_shown "$@") is in no setup-java-maven step's maven-args in this job, so the Maven cache key does not cover what it resolves. It runs online. Add it to maven-args." >&2
+  "$real" "$@"
+  rc=$?
+  note "$rc" undeclared
+  exit "$rc"
+fi
+if [ "$(cat "$use/hit")" != true ]; then
+  "$real" "$@"
+  rc=$?
+  note "$rc" online
+  exit "$rc"
+fi
+
+key=$(cat "$use/key")
+matched=$(cat "$use/matched")
+echo "setup-java-maven: mvn $norm runs offline on the Maven cache $matched" >&2
+log=$(mktemp "$states/offline.XXXXXX")
+"$real" --offline "$@" | tee "$log"
+rc=${PIPESTATUS[0]}
+if [ "$rc" -eq 0 ]; then
+  rm -f "$log"
+  note 0 offline
+  exit 0
+fi
+unresolved='in offline mode|has not been downloaded from it before|No plugin found for prefix|could not be resolved|Could not resolve dependencies|Could not find artifact|Failed to read artifact descriptor|Non-resolvable'
+if ! grep -qE "$unresolved" "$log"; then
+  rm -f "$log"
+  note "$rc" offline
+  exit "$rc"
+fi
+# What Maven could not resolve offline, by name where it says one.
+missing=$(perl -ne '
+  print "$1\n" while /the artifact (\S+) has not been downloaded from it before/g;
+  print "$1\n" while /Plugin (\S+) or one of its dependencies could not be resolved/g;
+  print "plugin prefix $1\n" while /No plugin found for prefix \x27([^\x27]+)\x27/g;
+  print "$1\n" while /Could not find artifact (\S+)/g;
+  print "$1\n" while /Failed to read artifact descriptor for (\S+?):?\s/g;
+' "$log" | LC_ALL=C sort -u)
+rm -f "$log"
+[ -n "$missing" ] || missing="(Maven names none; see its errors above)"
+shown=$(printf '%s\n' "$missing" | head -n 5 | paste -sd';' | sed 's/;/; /g')
+more=$(($(printf '%s\n' "$missing" | wc -l) - 5))
+[ "$more" -le 0 ] || shown="$shown; and $more more"
+echo "::error title=Maven cache cannot serve this build::mvn $norm could not resolve, offline, $shown from the Maven cache $matched (key $key). Resolving it online once; the save step stores the repository with what that fetches as a new entry of this key, which the next run restores. The key is missing something this build depends on (see .github/actions/setup-java-maven/maven-cache-key.sh)." >&2
+printf '%s\n' "$missing" >>"$use/unresolved"
+"$real" "$@"
+rc=$?
+note "$rc" fallback
+exit "$rc"

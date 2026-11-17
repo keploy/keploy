@@ -5,6 +5,7 @@
 #
 #   RUNNER_OS=Linux RUNNER_ARCH=X64 MAVEN_CACHE_JAVA_VERSION=17 \
 #     MAVEN_CACHE_DEPENDENCY_PATH=samples-java/mysql-dual-conn/pom.xml \
+#     MAVEN_CACHE_MAVEN_ARGS='clean package -Dmaven.test.skip=true' \
 #     bash .github/actions/setup-java-maven/maven-cache-key.sh
 #
 # MAVEN_CACHE_DEPENDENCY_PATH: the pom.xml files the build reads its
@@ -12,15 +13,20 @@
 # ignored). Every one must exist: a key that silently left one out would not
 # change when its dependencies do.
 # MAVEN_CACHE_JAVA_VERSION: the JDK the build runs on, as setup-java takes it.
+# MAVEN_CACHE_MAVEN_ARGS: the mvn command lines the build runs, one per line
+# (maven-args.sh says which flags do not count). The goals, profiles and -D
+# properties decide which plugins and artifacts the build resolves, as much
+# as the poms do: a lane that adds a goal needs a cache of its own.
 #
 # The key is maven-repository-<os>-<arch>-maven<version>-java<version>-<hash>.
 # The Maven version is the one `mvn` on PATH reports: the one the build runs.
-# The hash is of the poms and of the Maven configuration the build reads:
-# the user and global settings.xml, and the .mvn/maven.config, jvm.config
-# and extensions.xml of each pom's project, found as Maven finds them (the
-# nearest directory at or above the pom's that has a .mvn). A local
-# repository is only of use to a build that tracks its files the way the
-# build that filled it did, and each of these decides that:
+# The hash is of the mvn command lines, the poms, and the Maven configuration
+# the build reads: the user and global settings.xml, and the
+# .mvn/maven.config, jvm.config and extensions.xml of each pom's project,
+# found as Maven finds them (the nearest directory at or above the pom's that
+# has a .mvn). The command lines and poms decide what the build resolves. The
+# Maven and its configuration decide whether a local repository filled by
+# one build is of use to another, which needs it to track files the same way:
 #
 # Maven records, in each directory's _remote.repositories, the repository a
 # file came from, and uses a cached file only when that record names a
@@ -44,19 +50,25 @@
 # Central answered 429 Too Many Requests.
 #
 # No credential reaches the key or the log. A settings.xml is hashed with
-# its <servers> and <properties> elements and every <username>, <password>,
-# <passphrase> and <privateKey> left out, wherever they are: they hold
-# credentials, and only the properties could change which repositories a
-# build has. Environment variables (MAVEN_OPTS, MAVEN_ARGS) are not read for
-# the same reason. What the key leaves out is caught where it matters: on an
-# exact hit, setup-java-maven runs Maven offline, so a cache that cannot
-# serve the build fails it, naming its key, instead of being fetched again.
-# The log names the files hashed, never what is in them.
+# its <servers> and <properties> elements, every <username>, <password>,
+# <passphrase> and <privateKey>, and the user:password@ of every <url> left
+# out, wherever they are: they hold credentials, and only the properties
+# could change which repositories a build has. Environment variables
+# (MAVEN_OPTS, MAVEN_ARGS) are not read for the same reason. What the key
+# leaves out is caught where it matters: a declared command line runs
+# offline on a restored cache (bin/mvn), so a cache that cannot serve it is
+# named, re-resolved online once, and saved anew (save/save-plan.sh). The
+# log names the files hashed and the command lines, never what the files
+# hold.
 set -euo pipefail
 
 : "${RUNNER_OS:?RUNNER_OS is not set}" "${RUNNER_ARCH:?RUNNER_ARCH is not set}"
 java_version=${MAVEN_CACHE_JAVA_VERSION:?MAVEN_CACHE_JAVA_VERSION is not set}
 die() { printf '::error::maven-cache-key.sh: %s\n' "$1" >&2; exit 1; }
+# shellcheck source=maven-args.sh
+. "$(dirname "${BASH_SOURCE[0]}")/maven-args.sh"
+invocations=$(maven_args_lines "${MAVEN_CACHE_MAVEN_ARGS:-}")
+[ -n "$invocations" ] || die "MAVEN_CACHE_MAVEN_ARGS names no mvn command line (maven-args)"
 
 files=()
 while IFS= read -r line; do
@@ -72,7 +84,10 @@ command -v perl >/dev/null || die "perl is needed to leave the credentials out o
 
 # Captured whole before it is read: under pipefail, a reader that stops
 # early could fail mvn with SIGPIPE. -B: no color codes in the output.
-if ! mvn_v=$(mvn -B -v 2>&1); then
+# The job's own mvn: after a first use of setup-java-maven, `mvn` on PATH is
+# its bin/mvn, which runs this one.
+mvn=${SETUP_JAVA_MAVEN_REAL_MVN:-mvn}
+if ! mvn_v=$("$mvn" -B -v 2>&1); then
   printf '::error::maven-cache-key.sh: mvn -B -v failed:\n%s\n' "$mvn_v" >&2
   exit 1
 fi
@@ -94,16 +109,21 @@ esac
 
 # settings_digest FILE: the sha256 of FILE without the elements that hold
 # credentials (above).
+# A self-closing element (<properties/>) is cut on its own first, so that the
+# match of an element with content never starts there and runs on to the
+# next one's end tag.
 settings_digest() {
   perl -0777 -pe '
-    s{<servers\b.*?</servers\s*>}{}gs;
-    s{<properties\b.*?</properties\s*>}{}gs;
+    s{<(servers|properties|username|password|passphrase|privateKey)\b[^>]*/>}{}gs;
+    s{<(servers|properties)\b[^>]*>.*?</\1\s*>}{}gs;
     s{<(username|password|passphrase|privateKey)\b[^>]*>.*?</\1\s*>}{}gs;
+    s{(<url>\s*[A-Za-z][A-Za-z0-9+.-]*://)[^/@<\s]*@}{$1}g;
   ' "$1" | sha256sum | cut -c1-64
 }
 
 parts=()
 hashed=()
+while IFS= read -r inv; do parts+=("mvn $inv"); done <<<"$invocations"
 for f in "${files[@]}"; do
   parts+=("pom $f $(sha256sum <"$f" | cut -c1-64)")
   hashed+=("$f")
@@ -132,7 +152,9 @@ done
 
 digest=$(printf '%s\n' "${parts[@]}" | sha256sum | cut -c1-64)
 {
-  echo "maven-cache-key.sh: Maven $maven ($maven_home), JDK $java_version; hashed:"
+  echo "maven-cache-key.sh: Maven $maven ($maven_home), JDK $java_version; mvn command lines:"
+  sed 's/^/  mvn /' <<<"$invocations"
+  echo "hashed:"
   printf '  %s\n' "${hashed[@]}"
 } >&2
 echo "maven-repository-${RUNNER_OS}-${RUNNER_ARCH}-maven${maven}-java${java_version}-${digest}"

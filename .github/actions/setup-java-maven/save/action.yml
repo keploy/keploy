@@ -1,0 +1,21 @@
+name: setup-java-maven/save
+description: "Save ~/.m2/repository for the job's last setup-java-maven step, when its build fetched files the restored cache lacked"
+
+# The other half of setup-java-maven, as a step after the job's Maven build
+# (if: ${{ !cancelled() }}, so that a lane that fails after its build still
+# saves a whole repository). save-plan.sh says when it saves and under which
+# entry; bin/mvn's runs decide whether the build passed.
+runs:
+  using: composite
+  steps:
+    - name: Plan the Maven repository save
+      id: plan
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/save-plan.sh"
+
+    - name: Save the Maven repository
+      if: steps.plan.outputs.save == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.plan.outputs.key }}

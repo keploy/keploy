@@ -49,6 +49,7 @@ jobs:
         with:
           java-version: "17"
           cache-dependency-path: samples-java/${{ matrix.app.path }}/pom.xml
+          maven-args: -B -U clean install -Dmaven.test.skip=true
 
       - name: Run the ${{ matrix.app.name }} app
         env:
@@ -63,6 +64,11 @@ jobs:
         run: |
           cd samples-java/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/${{ matrix.app.script_dir }}/java-linux.sh
+
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
 
       - name: Upload ${{ matrix.app.name }} recorded mocks and replay logs
         if: always()
@@ -131,6 +137,7 @@ jobs:
         with:
           java-version: "17"
           cache-dependency-path: samples-java/mysql-dual-conn/pom.xml
+          maven-args: -B -U clean package -Dmaven.test.skip=true -q
 
       - name: Run mysql-dual-conn app
         env:
@@ -140,6 +147,11 @@ jobs:
         run: |
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_dual_conn/java-linux.sh
+
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
 
       # keploy's log and its agent's boot.json, which keploy removes when it
       # exits: the lane copies them here when it gives up on keploy's start or
@@ -209,6 +221,7 @@ jobs:
         with:
           java-version: "17"
           cache-dependency-path: samples-java/mysql-dual-conn/pom.xml
+          maven-args: -B -U clean package -Dmaven.test.skip=true -q
 
       - name: Run mysql-dual-conn app on a non-default MySQL port
         env:
@@ -218,6 +231,11 @@ jobs:
         run: |
           cd samples-java/mysql-dual-conn
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_auto_port/java-linux.sh
+
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
 
       - name: Upload mysql-auto-port recordings and logs
         if: always()
@@ -289,6 +307,7 @@ jobs:
         with:
           java-version: "17"
           cache-dependency-path: samples-java/tidb-stmt-cache/pom.xml
+          maven-args: -B -U clean package -Dmaven.test.skip=true -q
 
       - name: Run tidb-stmt-cache app
         env:
@@ -297,6 +316,11 @@ jobs:
         run: |
           cd samples-java/tidb-stmt-cache
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/tidb_stmt_cache/java-linux.sh
+
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
 
       - name: Upload tidb-stmt-cache recordings and replay logs
         if: always()
@@ -346,6 +370,9 @@ jobs:
           cache-dependency-path: |
             .github/workflows/test_workflow_scripts/java/mysql_unbound_types/app/pom.xml
             .github/workflows/test_workflow_scripts/java/mysql_unbound_types/app/pom51.xml
+          maven-args: |
+            -q -B -f pom.xml package -DskipTests
+            -q -B -f pom51.xml package -DskipTests
 
       - name: Ensure yq
         run: |
@@ -367,6 +394,11 @@ jobs:
           WORK: ${{ runner.temp }}/mysql_unbound_types
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_unbound_types/java-linux.sh"
+
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
 
       - name: Upload mysql_unbound_types recordings and keploy logs
         if: always()
@@ -438,6 +470,7 @@ jobs:
         with:
           java-version: "8"
           cache-dependency-path: samples-java/async-config-poll/pom.xml
+          maven-args: -B -U clean package -Dmaven.test.skip=true -q
 
       - name: Set up Go (for the config-service stub)
         uses: actions/setup-go@v6
@@ -458,6 +491,11 @@ jobs:
         run: |
           cd samples-java/async-config-poll
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/async_config_poll/java-linux.sh
+
+      # What the build fetched that the restored cache lacked, for the next run.
+      - name: Save the Maven repository
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/setup-java-maven/save
 
       - name: Upload async-config-poll recordings and replay logs
         if: always()
