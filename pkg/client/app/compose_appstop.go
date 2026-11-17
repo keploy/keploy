@@ -205,6 +205,13 @@ type composeHalt struct {
 	// startedAt is when the run of the app that exited began, on the
 	// daemon's clock, in Unix nanoseconds; 0: not said.
 	startedAt int64
+	// service is the compose service whose container's exit ended the run
+	// under the user's abort flags (composeAbortDied), with its exit code
+	// (serviceCode) and those flags; "": the halt is the app's or the
+	// agent's. exitCode is then the run's: --exit-code-from's service's
+	// (codeFrom) when another's exit ended it (composeHaltCodeFrom).
+	service, codeFrom, flags string
+	serviceCode              int
 }
 
 func (h composeHalt) Error() string {
@@ -213,6 +220,13 @@ func (h composeHalt) Error() string {
 			"the application runs in the agent's network and process namespaces, so the run ends. "+
 			"Next step: find why the agent stopped (keploy's log above holds its last lines; 137 with no kill of yours is most often docker's memory limit), "+
 			"fix that and run keploy again; if the agent crashed, report it to keploy with that log", h.agent, h.exitCode)
+	}
+	if h.service != "" {
+		msg := fmt.Sprintf("the container of compose service %q exited with code %d after the application started, and the command's %s ends the run on it", h.service, h.serviceCode, h.flags)
+		if h.codeFrom != "" {
+			msg += fmt.Sprintf("; the run's exit code is that of service %q, %d", h.codeFrom, h.exitCode)
+		}
+		return msg
 	}
 	return fmt.Sprintf("the application's container exited with code %d, and keploy had not stopped it", h.exitCode)
 }
@@ -413,7 +427,7 @@ func (a *App) composeDied(ctx context.Context, m events.Message) bool {
 		}
 		return false
 	}
-	return a.composeAppDied(ctx, m)
+	return a.composeAppDied(ctx, m) || a.composeAbortDied(ctx, m)
 }
 
 // isComposeAgentEvent reports whether m is of keploy's agent's container,
@@ -498,7 +512,7 @@ func daemonNanos(s string) int64 {
 // and with no kill of this run of the app in the daemon's log (appKilledAt,
 // from h's start on; with no start known, any kill).
 func (a *App) composeHaltKilledWithItsAgent(h *composeHalt) bool {
-	if h == nil || h.agent != "" || h.oomKilled || h.exitCode != 128+int(syscall.SIGKILL) {
+	if h == nil || h.agent != "" || h.service != "" || h.oomKilled || h.exitCode != 128+int(syscall.SIGKILL) {
 		return false
 	}
 	killed := a.composeApp.appKilledAt.Load()
@@ -688,6 +702,8 @@ func (a *App) composeHaltEnd(ctx context.Context, halt chan struct{}, composeDow
 			if !a.stopComposeProject(context.WithoutCancel(ctx)) {
 				composeDown()
 			}
+			// Once the stack is down: --exit-code-from's service's code.
+			a.composeHaltCodeFrom(context.WithoutCancel(ctx))
 		})
 	}
 }
@@ -730,12 +746,21 @@ func (a *App) composeAwaitTeardown(ctx context.Context, halt <-chan struct{}, en
 	stopping := a.composeApp.stopping.Load()
 	var h composeHalt
 	exited := false
+	abortExited := false
 	if !halted && !stopping {
 		if h, exited = a.composeAppExited(ctx); exited {
 			a.composeApp.halted.CompareAndSwap(nil, &h)
+		} else {
+			// An up of the user's services alone returns once they
+			// exit: their exit ends the run as the user's flags say.
+			abortExited = a.composeAbortExited(ctx)
 		}
 	}
 	a.composeApp.stopMu.Unlock()
+	if abortExited {
+		end()
+		return composeHaltCame
+	}
 	if halted {
 		// Kept by the watch, or by keploy's stop finding the app exited
 		// (which does not end the run itself): the project ends with it,
@@ -762,6 +787,9 @@ func (a *App) composeAwaitTeardown(ctx context.Context, halt <-chan struct{}, en
 	case <-ctx.Done():
 		return composeTeardownCame
 	case <-halt:
+		// The halt's end is through before the run reads it: its stop
+		// of the stack, and the run's exit code it reads after.
+		end()
 		return composeHaltCame
 	}
 }

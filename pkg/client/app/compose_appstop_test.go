@@ -826,7 +826,9 @@ func TestComposeAwaitTeardownHoldsTheRunAfterKeploysStop(t *testing.T) {
 		{"the app exited on its own, before the watch took it", false, false, exited("exited", 3), context.Background(), nil, composeHaltCame, 1},
 		{"the app halted", true, true, nil, cancelled, nil, composeNoWait, 1},
 		{"keploy's teardown ends the run", true, false, nil, cancelled, nil, composeTeardownCame, 0},
-		{"the app keploy started again halts", true, false, nil, context.Background(), closed, composeHaltCame, 0},
+		// The halt's end (it runs once) is through before the run reads
+		// the halt: its stop of the stack, and the run's code it reads.
+		{"the app keploy started again halts", true, false, nil, context.Background(), closed, composeHaltCame, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &App{logger: zap.NewNop(), container: "app", docker: &inspectRecorder{inspects: tc.app}}

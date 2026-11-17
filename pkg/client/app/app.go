@@ -77,14 +77,17 @@ type App struct {
 	onAgentRestart func(ctx context.Context) error
 	// setEndKill is why the latest stop at a test set's end had to kill the
 	// app (setend_stop.go), until run reports it; nil when it did not.
-	setEndKill      atomic.Pointer[string]
-	logger          *zap.Logger
-	docker          docker.Client
-	cmd             utils.AppCommand
-	kind            utils.CmdType
-	opts            models.SetupOptions
-	container       string
-	composeService  string
+	setEndKill     atomic.Pointer[string]
+	logger         *zap.Logger
+	docker         docker.Client
+	cmd            utils.AppCommand
+	kind           utils.CmdType
+	opts           models.SetupOptions
+	container      string
+	composeService string
+	// composeAbort is what the user's compose up abort flags say, which
+	// keploy does on its watch (compose_userabort.go).
+	composeAbort    composeAbortRule
 	keployContainer string
 	composeFile     string // path to the temp compose file (set during SetupCompose)
 	composeContent  []byte // in-memory compose YAML; set when InMemoryCompose is used
@@ -364,6 +367,9 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	a.logger.Debug("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
 
 	newCmd, composeFileEnv := composeLaunchPlan(a.cmd.WholeUnredacted(), newPath, serviceInfo.ComposePath)
+	if newCmd != "" {
+		a.setComposeUserAbort(a.cmd.WholeUnredacted(), compose)
+	}
 
 	if newCmd != "" {
 		// Literal compose command: our file is spliced in, as before.
@@ -455,7 +461,9 @@ func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) erro
 	}
 	a.setComposeSource("", content, &compose)
 
-	// Ensure the command uses stdin ("-f -"), its abort flags left out.
+	// Ensure the command uses stdin ("-f -"), its abort flags left out,
+	// and keploy does what they say (setComposeUserAbort).
+	a.setComposeUserAbort(a.cmd.WholeUnredacted(), &compose)
 	a.cmd = utils.NewAppCommand(ensureInMemoryComposeFlags(a.cmd.WholeUnredacted()))
 
 	a.logger.Info("Running application using in-memory Keploy-generated Docker Compose (no file written to disk)",
