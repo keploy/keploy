@@ -632,13 +632,13 @@ func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 }
 
 // keploy record run from a folder inside a git checkout, given no app name,
-// names the app after the repository (its origin remote), not after the
-// folder it ran from ("b", or a mktemp "tmp.XXXX"), and writes that name into
-// the keploy.yml it creates, so later runs keep it. A name the run is given
-// is kept.
+// names the app after the repository (its origin remote) and the folder's
+// path inside it, not after the checkout's folder or the folder alone
+// ("b"), and writes that name into the keploy.yml it creates, so later runs
+// keep it. A name the run is given is kept.
 func TestRecordNamesTheAppAfterItsGitRepository(t *testing.T) {
 	for _, c := range []struct{ name, flag, want string }{
-		{"no name given", "", "orders-api"},
+		{"no name given", "", "orders-api-a-b"},
 		{"--app-name", "billing", "billing"},
 	} {
 		t.Run(c.name, func(t *testing.T) {

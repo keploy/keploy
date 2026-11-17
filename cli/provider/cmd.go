@@ -793,8 +793,9 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 	}
 
 	// A run given no name (--app-name, keploy.yml's appName) is named after
-	// its git repository, or after its folder outside one; the name goes into
-	// the keploy.yml a first run writes, so later runs keep it.
+	// its git repository and its folder's path inside it, or after its folder
+	// outside one; the name goes into the keploy.yml a first run writes, so
+	// later runs keep it.
 	appName, from, err := utils.DefaultAppName()
 	if err != nil {
 		// Said here, as every other refusal is: nothing else says it.

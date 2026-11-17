@@ -3,6 +3,7 @@ package utils
 import (
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,21 +54,24 @@ func TestAppNameForOutsideAnyRepository(t *testing.T) {
 	wantAppName(t, dir, "tmp.Xa81bq", AppNameFromDir)
 }
 
-// A repository with no remote is named after its folder, from the folder
-// itself and from any folder inside it, a mktemp one included.
+// A repository with no remote is named after its folder at its top folder,
+// and a folder inside it, a mktemp one included, after the repository and
+// the folder's path inside it.
 func TestAppNameForARepositoryWithNoRemote(t *testing.T) {
 	top := newRepo(t, "orders")
 	wantAppName(t, top, "orders", AppNameFromRepo)
-	wantAppName(t, filepath.Join(top, "a", "b"), "orders", AppNameFromRepo)
+	wantAppName(t, top+string(filepath.Separator), "orders", AppNameFromRepo)
+	wantAppName(t, filepath.Join(top, "a"), "orders-a", AppNameFromRepo.andPath("a"))
+	wantAppName(t, filepath.Join(top, "a", "b"), "orders-a-b", AppNameFromRepo.andPath("a/b"))
 	tmp, err := os.MkdirTemp(top, "tmp.")
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantAppName(t, tmp, "orders", AppNameFromRepo)
+	wantAppName(t, tmp, "orders-"+filepath.Base(tmp), AppNameFromRepo.andPath(filepath.Base(tmp)))
 }
 
 // The origin remote names the repository, whatever its folder is called,
-// with or without .git on its URL, and from a folder inside it.
+// with or without .git on its URL; a folder inside it adds its path.
 func TestAppNameForARepositoryWithAnOriginRemote(t *testing.T) {
 	for _, url := range []string{
 		"https://github.com/acme/orders-api.git",
@@ -83,21 +87,23 @@ func TestAppNameForARepositoryWithAnOriginRemote(t *testing.T) {
 			t.Fatalf("git remote get-url origin names %q for %s", got, url)
 		}
 		wantAppName(t, top, "orders-api", AppNameFromRemote)
-		wantAppName(t, filepath.Join(top, "a", "b"), "orders-api", AppNameFromRemote)
+		wantAppName(t, filepath.Join(top, "a", "b"), "orders-api-a-b", AppNameFromRemote.andPath("a/b"))
 	}
 }
 
 // Every linked worktree of a repository names the app as the repository
 // does: by its remote, or with none by the folder of the repository it was
-// added from, not by the worktree's own folder.
+// added from, not by the worktree's own folder. A folder inside the worktree
+// adds its path from the worktree's top folder.
 func TestAppNameForALinkedWorktree(t *testing.T) {
 	top := newRepo(t, "orders")
 	wt := filepath.Join(filepath.Dir(top), "orders-wt-feature")
 	gitIn(t, top, "worktree", "add", "-q", wt)
 	wantAppName(t, wt, "orders", AppNameFromRepo)
-	wantAppName(t, filepath.Join(wt, "a"), "orders", AppNameFromRepo)
+	wantAppName(t, filepath.Join(wt, "a"), "orders-a", AppNameFromRepo.andPath("a"))
 	gitIn(t, top, "remote", "add", "origin", "https://github.com/acme/orders-api.git")
 	wantAppName(t, wt, "orders-api", AppNameFromRemote)
+	wantAppName(t, filepath.Join(wt, "a", "b"), "orders-api-a-b", AppNameFromRemote.andPath("a/b"))
 
 	// A worktree whose repository is bare: the bare folder without .git.
 	bare := filepath.Join(t.TempDir(), "billing.git")
@@ -189,7 +195,7 @@ func TestAppNameForAnUnreadableGitFile(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(top, "config"), []byte("[remote \"origin\"]\n\turl = https://github.com/acme/elsewhere.git\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		wantAppName(t, filepath.Join(top, "a"), "orders", AppNameFromRepo)
+		wantAppName(t, filepath.Join(top, "a"), "orders-a", AppNameFromRepo.andPath("a"))
 	}
 }
 
@@ -207,8 +213,102 @@ func TestDefaultAppNameIsTheWorkingDirectorysRepository(t *testing.T) {
 	gitIn(t, top, "remote", "add", "origin", "https://github.com/acme/orders-api.git")
 	t.Chdir(filepath.Join(top, "a", "b"))
 	name, from, err := DefaultAppName()
-	if err != nil || name != "orders-api" || from != AppNameFromRemote {
-		t.Fatalf("DefaultAppName() = %q, %s, %v, want orders-api from %s", name, from, err, AppNameFromRemote)
+	if want := AppNameFromRemote.andPath("a/b"); err != nil || name != "orders-api-a-b" || from != want {
+		t.Fatalf("DefaultAppName() = %q, %s, %v, want orders-api-a-b from %s", name, from, err, want)
+	}
+}
+
+// Dots and spaces in the repository's and the folders' names stay as they
+// are; only the path's separators become "-".
+func TestAppNameForFoldersWithDotsAndSpaces(t *testing.T) {
+	top := newRepo(t, "my shop.v2")
+	dir := filepath.Join(top, "svc v1.2", "api.x")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantAppName(t, dir, "my shop.v2-svc v1.2-api.x", AppNameFromRepo.andPath("svc v1.2/api.x"))
+	gitIn(t, top, "remote", "add", "origin", "https://github.com/acme/orders.api.git")
+	wantAppName(t, dir, "orders.api-svc v1.2-api.x", AppNameFromRemote.andPath("svc v1.2/api.x"))
+}
+
+// setHome makes home the user's home folder for the test, as os.UserHomeDir
+// reads it, with no sudo.
+func setHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("SUDO_USER", "")
+}
+
+// newDotfilesHome makes a home folder named name that is a git repository
+// (dotfiles kept in ~/.git) with a remote, and the folders proj/a in it.
+func newDotfilesHome(t *testing.T, parent, name string) string {
+	t.Helper()
+	home := filepath.Join(parent, name)
+	if err := os.MkdirAll(filepath.Join(home, "proj", "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, home, "init", "-q")
+	gitIn(t, home, "remote", "add", "origin", "https://github.com/someone/dotfiles.git")
+	return home
+}
+
+// The search for a repository stops at the user's home folder: dotfiles kept
+// in ~/.git, or a repository holding the home folder, never name the folders
+// under it, nor the home folder itself. A repository under the home folder
+// still names its folders.
+func TestAppNameStopsAtTheHomeFolder(t *testing.T) {
+	home := newDotfilesHome(t, t.TempDir(), "someone")
+	setHome(t, home)
+	wantAppName(t, filepath.Join(home, "proj", "a"), "a", AppNameFromDir)
+	wantAppName(t, filepath.Join(home, "proj"), "proj", AppNameFromDir)
+	wantAppName(t, home, "someone", AppNameFromDir)
+
+	shop := filepath.Join(home, "shop")
+	if err := os.MkdirAll(filepath.Join(shop, "services", "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, shop, "init", "-q")
+	wantAppName(t, filepath.Join(shop, "services", "orders"), "shop-services-orders", AppNameFromRepo.andPath("services/orders"))
+
+	// A repository above the home folder.
+	outer := newRepo(t, "outer")
+	inner := filepath.Join(outer, "a", "home")
+	if err := os.MkdirAll(filepath.Join(inner, "proj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setHome(t, inner)
+	wantAppName(t, filepath.Join(inner, "proj"), "proj", AppNameFromDir)
+	// Outside the home folder the search goes on as before.
+	wantAppName(t, filepath.Join(outer, "a"), "outer-a", AppNameFromRepo.andPath("a"))
+}
+
+// Under sudo, which may set $HOME to root's, the home of the user who ran
+// sudo (SUDO_USER) stops the search too; a SUDO_USER that names no user
+// stops nothing, and nor does an unset one.
+func TestAppNameStopsAtTheSudoUsersHome(t *testing.T) {
+	someone := newDotfilesHome(t, t.TempDir(), "someone")
+	original := lookupUser
+	t.Cleanup(func() { lookupUser = original })
+	lookupUser = func(name string) (*user.User, error) {
+		if name == "nobody-here" {
+			// A user beside the error, which a lookup that fails must not use.
+			return &user.User{HomeDir: someone}, user.UnknownUserError(name)
+		}
+		return &user.User{Username: name, HomeDir: someone}, nil
+	}
+	dir := filepath.Join(someone, "proj", "a")
+	setHome(t, t.TempDir())
+	for _, c := range []struct {
+		sudoUser, want string
+		from           AppNameSource
+	}{
+		{"someone", "a", AppNameFromDir},
+		{"nobody-here", "dotfiles-proj-a", AppNameFromRemote.andPath("proj/a")},
+		{"", "dotfiles-proj-a", AppNameFromRemote.andPath("proj/a")},
+	} {
+		t.Setenv("SUDO_USER", c.sudoUser)
+		wantAppName(t, dir, c.want, c.from)
 	}
 }
 
