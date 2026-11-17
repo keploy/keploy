@@ -89,6 +89,7 @@ type composeAppStopper interface {
 	StopComposeApp(ctx context.Context) (string, error)
 	// StartComposeApp says what keploy read of the container as it started
 	// it: one that was not running (a new app), one found running, or one
-	// the docker daemon gave no answer of.
-	StartComposeApp(ctx context.Context) (models.ComposeAppStart, error)
+	// the docker daemon gave no answer of. anew is called before the start
+	// where the container was read not running.
+	StartComposeApp(ctx context.Context, anew func()) (models.ComposeAppStart, error)
 }
