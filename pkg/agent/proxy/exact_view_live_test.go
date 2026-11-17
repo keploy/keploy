@@ -328,40 +328,52 @@ func TestScopedMockDb_PerTestWalkIsScopedToTheWorker(t *testing.T) {
 }
 
 // TestAPerTestWalkOfAHeldStoreStopsWhereTheStagingMoved: the held store's
-// per-test walk gives its caller no mock read once the replay stages a test
-// set again, even when the staging moves partway through the walk.
+// per-test walk, and its keyed per-test walk, give the caller no mock read
+// once the replay stages a test set again, even when the staging moves
+// partway through the walk.
 func TestAPerTestWalkOfAHeldStoreStopsWhereTheStagingMoved(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	now := time.Now()
-	first := r3Mock("t-jobs-1", now, "GET", "/jobs/1", "", `{"job":1}`)
-	second := r3Mock("t-jobs-2", now.Add(time.Millisecond), "GET", "/jobs/2", "", `{"job":2}`)
-	mm := NewMockManager(nil, nil, zap.NewNop())
-	t.Cleanup(mm.Close)
-	stage := func() {
-		mocks := []*models.Mock{first, second}
-		mm.SetMocksWithWindow(nil, mocks, models.BaseTime, now.Add(time.Hour))
-		mm.ServeExactTest("T", mocks)
-	}
-	walk := func(db integrations.MockMemDb, each func()) (names []string) {
-		t.Helper()
-		if err := db.(integrations.PerTestRanger).RangePerTestMocksInWindow(func(mk *models.Mock) bool {
-			names = append(names, mk.Name)
-			each()
-			return true
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return names
-	}
-	stage()
-	if got := walk(mm, func() {}); len(got) != 2 {
-		t.Fatalf("precondition: the walk reaches %v; want both of the test's recordings", got)
-	}
-	held, restaged := mm.HoldToRound(mm.MarkCallRound())
-	if got := walk(held, stage); len(got) != 1 {
-		t.Fatalf("a per-test walk the staging moved under gave %v; want only the mock it read before the move", got)
-	}
-	if !restaged() {
-		t.Fatal("a per-test walk the staging moved under does not say the set was staged again")
+	for _, keyed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "per-test walk", true: "keyed per-test walk"}[keyed], func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			now := time.Now()
+			first := r3Mock("t-jobs-1", now, "GET", "/jobs/1", "", `{"job":1}`)
+			second := r3Mock("t-jobs-2", now.Add(time.Millisecond), "GET", "/jobs/2", "", `{"job":2}`)
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			stage := func() {
+				mocks := []*models.Mock{first, second}
+				mm.SetMocksWithWindow(nil, mocks, models.BaseTime, now.Add(time.Hour))
+				mm.ServeExactTest("T", mocks)
+			}
+			walk := func(db integrations.MockMemDb, each func()) (names []string) {
+				t.Helper()
+				fn := func(mk *models.Mock) bool {
+					names = append(names, mk.Name)
+					each()
+					return true
+				}
+				var err error
+				if keyed {
+					err = db.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(byKindAndName, "all", fn)
+				} else {
+					err = db.(integrations.PerTestRanger).RangePerTestMocksInWindow(fn)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				return names
+			}
+			stage()
+			if got := walk(mm, func() {}); len(got) != 2 {
+				t.Fatalf("precondition: the walk reaches %v; want both of the test's recordings", got)
+			}
+			held, restaged := mm.HoldToRound(mm.MarkCallRound())
+			if got := walk(held, stage); len(got) != 1 {
+				t.Fatalf("a walk the staging moved under gave %v; want only the mock it read before the move", got)
+			}
+			if !restaged() {
+				t.Fatal("a walk the staging moved under does not say the set was staged again")
+			}
+		})
 	}
 }

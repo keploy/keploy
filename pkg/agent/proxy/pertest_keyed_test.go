@@ -196,7 +196,8 @@ func keyedCallCost(t *testing.T, n int) (allocs, bytes, wholeBytes uint64) {
 // allocates as often and as much when the open test owns 100 recordings as
 // when it owns 5,000: it copies none of them. Counted, not timed. The whole
 // per-test read, which copies every unanswered one on each call, allocates
-// tens of kilobytes more at 5,000, so the row tells a copy from none.
+// about 150 kB a call at 5,000 against 2 kB at 100, so the row tells a copy
+// from none.
 func TestAKeyedPerTestReadAllocatesTheSameAtAnySize(t *testing.T) {
 	smallAllocs, smallBytes, smallWhole := keyedCallCost(t, 100)
 	bigAllocs, bigBytes, bigWhole := keyedCallCost(t, 5000)
@@ -243,4 +244,34 @@ func TestScopedMockDb_KeyedPerTestWalkIsScopedToTheWorker(t *testing.T) {
 		t.Fatalf("precondition: after the scoped consume the read under its kind is [%s]", got)
 	}
 	liveSame(t, "the scoped keyed walk after the worker's test consumed "+perTest[0].Name, want, keyedPerTestWalk(t, db, byKindAndName, kind, -1))
+}
+
+// TestScopedMockDb_KeyedPerTestWalkUnderExactServingIsTheViewsRead: under
+// exact serving the open test's view decides what a worker's connection
+// reads, so a view opened before exact serving began (scopedFor wraps no
+// connection after) walks the per-test tier under a key as its
+// GetPerTestMocksInWindow reads it: the exact view's read, with the test's
+// recording the worker's allowlist does not name, not that read filtered by
+// the worker's scope.
+func TestScopedMockDb_KeyedPerTestWalkUnderExactServingIsTheViewsRead(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	now := time.Now()
+	mine := r3Mock("t-mine", now, "GET", "/jobs/1", "", `{"job":1}`)
+	theirs := r3Mock("t-theirs", now.Add(time.Millisecond), "GET", "/jobs/2", "", `{"job":2}`)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mocks := []*models.Mock{mine, theirs}
+	mm.SetMocksWithWindow(nil, mocks, models.BaseTime, now.Add(time.Hour))
+	db := workerScoped(t, mm, []string{"t-mine"}, []string{"t-mine", "t-theirs"})
+	mm.ServeExactTest("T", mocks)
+	if !db.ExactServing() {
+		t.Fatal("precondition: the worker's view is not under exact serving")
+	}
+	for _, key := range []string{string(models.HTTP), "name:t-theirs"} {
+		want := perTestUnder(t, db, byKindAndName, key)
+		if !slices.ContainsFunc(want, func(mk *models.Mock) bool { return mk.Name == "t-theirs" }) {
+			t.Fatalf("precondition: the worker's per-test read under %q under exact serving is [%s]; want the test's t-theirs", key, verifyNames(want))
+		}
+		liveSame(t, "the scoped keyed walk under exact serving, key "+key, want, keyedPerTestWalk(t, db, byKindAndName, key, -1))
+	}
 }
