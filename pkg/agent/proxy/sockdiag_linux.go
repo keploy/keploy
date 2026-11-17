@@ -65,7 +65,11 @@ type diagSock struct {
 	buf []byte
 }
 
-func openDiag() (*diagSock, error) {
+// openDiag opens a sock_diag socket (newDiag); a test replaces it to make the
+// open fail.
+var openDiag = newDiag
+
+func newDiag() (*diagSock, error) {
 	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, unix.NETLINK_SOCK_DIAG)
 	if err != nil {
 		return nil, fmt.Errorf("sock_diag socket: %w", err)

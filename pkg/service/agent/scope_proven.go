@@ -2705,8 +2705,11 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall { return m.Sanit
 func nextStepOf(m models.UnmatchedCall) string { return m.SanitizedNextStep() }
 
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,
-// as evidence keeps them (no value the app sent): they are counted, and
-// named in the run's summary, but no full request piles up across a run.
+// as evidence keeps them (no value the app sent in a field a receipt or a
+// log is written from), with each call and its next step whole for the
+// console and the misses file alone (models.UnmatchedCall.Charged): they
+// are counted, named whole in the run's summary, and by their path tag in
+// its log, but no full request piles up across a run.
 // test is the test whose end drained them, "" for none (the claim's read of
 // the calls made before the test process started): each miss that counts
 // against a test is that test's, as its evidence lists it, and says so
@@ -2717,7 +2720,7 @@ func (a *Agent) charge(misses []models.UnmatchedCall, test string) {
 	}
 	kept := make([]models.UnmatchedCall, len(misses))
 	for i, m := range misses {
-		kept[i] = sanitizedMiss(a.asRecorded(m))
+		kept[i] = a.asRecorded(m).Charged()
 		if test != "" && m.CountsAgainstTest() {
 			kept[i].ChargedTo = test
 		}

@@ -31,6 +31,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 )
 
 // healthPollInterval is how often the --health-url probe is retried while waiting for 2xx.
@@ -130,23 +131,25 @@ func validateHealthURL(s string) (string, bool) {
 
 // dockerPublishedHostPort returns the first host (ip, port) that a docker
 // `-p/--publish` mapping in cmd exposes on the host, so a docker-run replay can
-// gate on the app actually listening before firing requests. It reads each
+// gate on the app actually listening before firing requests. The mappings are
+// those of a docker or podman run (or create) in cmd, read from its own
+// options before the image (engine.Publishes): a native app's -p, or a
+// container's own argument after its image, is no mapping, and often a
+// password (./app -p <password>, sshpass -p <password>). It reads each
 // mapping as the shell hands it to docker (shellWord), then as docker does
 // (publishedHostAddr): `hostPort:containerPort` and
 // `hostIP:hostPort:containerPort`, an IPv6 hostIP bracketed or not, with an
 // optional `/tcp` suffix. It returns ok=false — keeping the pure --delay
-// behavior — for native apps (no -p), container-only publishes (random host
+// behavior — for native apps, container-only publishes (random host
 // port), port ranges and UDP or SCTP ports, so it never guesses a wrong port
-// to wait on. err is the first mapping it cannot read a host address from.
+// to wait on. err names the first mapping it cannot read a host address from
+// by its place among the command's mappings alone: the mapping is the user's
+// command, and its variables keploy's environment, which no log line takes.
 func dockerPublishedHostPort(cmd string) (host, port string, ok bool, err error) {
-	fields := strings.Fields(cmd)
-	for i := 0; i+1 < len(fields); i++ {
-		if fields[i] != "-p" && fields[i] != "--publish" {
-			continue
-		}
-		h, p, waitable, err := publishedHostAddr(shellWord(fields[i+1]))
+	for n, spec := range engine.Publishes(cmd) {
+		h, p, waitable, err := publishedHostAddr(shellWord(spec))
 		if err != nil {
-			return "", "", false, fmt.Errorf("-p %s: %w", fields[i+1], err)
+			return "", "", false, fmt.Errorf("docker reads no host address in the command's port mapping number %d (its -p or --publish)", n+1)
 		}
 		if waitable {
 			return h, p, true, nil

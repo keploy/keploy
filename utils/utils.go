@@ -2199,10 +2199,16 @@ func GetContainerIPv4() (string, error) {
 	return "", fmt.Errorf("%w: could not find a non-loopback IP for the container", ErrEnvironmentUnsupported)
 }
 
-// GetFullCommandUsed returns the full command-line used to run the current process.
-// It reconstructs the command from os.Args, adding quoting for arguments with spaces or quotes.
+// GetFullCommandUsed is the command line keploy was run with, as a test
+// report records it (cmdUsed): os.Args, its secrets redacted by RedactArgv,
+// the redactor of every line that names a command whole (the command given
+// with -c is read as the command line it is, so its password, token or
+// logon is <redacted> and its hosts and paths are kept), and an argument
+// that holds a space or a quote Go-quoted. Reports are committed, kept as CI
+// artifacts and uploaded: a secret RedactArgv reads in the command reaches
+// none.
 func GetFullCommandUsed() string {
-	args := os.Args
+	args := RedactArgv(os.Args)
 
 	// Build the command string with proper quoting for arguments containing spaces
 	var parts []string

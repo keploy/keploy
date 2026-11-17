@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"os"
+	"os/exec"
 	"runtime"
 	"testing"
 	"time"
@@ -55,6 +56,15 @@ func workerScopedOn(t *testing.T, p *Proxy, db integrations.MockMemDb, allow []s
 	return v
 }
 
+// skipUnlessParentsRead skips a test that needs starts.ParentOf to find this
+// process's parent, which it does on linux and darwin only.
+func skipUnlessParentsRead(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("a process's parent is read on linux and darwin only (starts.ParentOf)")
+	}
+}
+
 func TestScopedMockDbFiltersReads(t *testing.T) {
 	// m1,m2,m3 belong to tests (in the universe); "shared" belongs to no test.
 	db := &fakeMockDb{mocks: []*models.Mock{{Name: "m1"}, {Name: "m2"}, {Name: "m3"}, {Name: "shared"}}}
@@ -89,7 +99,7 @@ func TestScopedForResolvesWorkerAndFallsBack(t *testing.T) {
 		return scopedNames(got)
 	}
 
-	// No worker scoped: fast path, no /proc walk, the bare manager.
+	// No worker scoped: fast path, no process-tree walk, the bare manager.
 	p := &Proxy{}
 	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(self, db), "no scopes ⇒ whole pool")
 
@@ -202,7 +212,7 @@ func TestScopedViewRevisionFollowsTheMappedUniverse(t *testing.T) {
 // take a new view at a recycled address for the one it knew.
 func TestScopedViewStartsAboveEveryEarlierView(t *testing.T) {
 	db := &fakeMockDb{}
-	self, other := uint32(os.Getpid()), uint32(4000000001) // no /proc entry: its chain is itself
+	self, other := uint32(os.Getpid()), uint32(4000000001) // no such process: its chain is itself
 	p := &Proxy{}
 	p.SetMappedUniverse([]string{"a1"})
 	p.SetWorkerScope(other, []string{"a1"}) // before everything the old view goes through
@@ -221,9 +231,7 @@ func TestScopedViewStartsAboveEveryEarlierView(t *testing.T) {
 // the outer worker's test, and when that one ends too, to the whole pool. Each
 // is a change a caching parser must hear of.
 func TestScopedViewFollowsEveryWorkerOnItsChain(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("the parent is found by walking /proc (linux only)")
-	}
+	skipUnlessParentsRead(t)
 	db := &fakeMockDb{mocks: []*models.Mock{{Name: "a"}, {Name: "b"}, {Name: "shared"}}}
 	self, parent := uint32(os.Getpid()), uint32(os.Getppid())
 	sees := func(v integrations.MockMemDb) []string {
@@ -268,9 +276,7 @@ func TestScopedViewRevisionFollowsAWipe(t *testing.T) {
 }
 
 func TestScopedForWalksUpProcessTree(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("process-tree walk is linux only")
-	}
+	skipUnlessParentsRead(t)
 	db := &fakeMockDb{mocks: []*models.Mock{{Name: "parents"}, {Name: "others"}, {Name: "shared"}}}
 	// Register the PARENT of this process; this process's call must resolve up to
 	// it (models a worker whose child/grandchild opened the socket).
@@ -287,16 +293,26 @@ func TestScopedForWalksUpProcessTree(t *testing.T) {
 	require.Equal(t, integrations.MockMemDb(db), p.scopedFor(uint32(os.Getpid()), db))
 }
 
-func TestPpidFromStat(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("/proc only on linux")
+// A connection's chain runs from its process through the process that
+// started it: a process this test starts has this test's process next on its
+// chain, and then this test's parent.
+func TestAncestorChainRunsThroughTheProcessThatStartedIt(t *testing.T) {
+	skipUnlessParentsRead(t)
+	cmd := exec.Command("sleep", "30")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	child, self := uint32(cmd.Process.Pid), uint32(os.Getpid())
+	want := []uint32{child, self}
+	if pp := os.Getppid(); pp > 1 {
+		want = append(want, uint32(pp))
 	}
-	ppid, ok := ppidFromStat(uint32(os.Getpid()))
-	require.True(t, ok)
-	require.Equal(t, uint32(os.Getppid()), ppid)
-
-	_, ok = ppidFromStat(4000000000) // no such pid
-	require.False(t, ok)
+	chain := ancestorChain(child)
+	require.GreaterOrEqual(t, len(chain), len(want), "the chain of a process this test started is %v", chain)
+	require.Equal(t, want, chain[:len(want)],
+		"the chain of a process this test started does not run through this test and its parent")
 }
 
 // SetWorkerScope with an empty name list clears the entry (no-mapping ⇒ suite).

@@ -227,6 +227,11 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 			continue
 		}
 		if flow, ok := flowAt(windows, miss.At, expected); ok {
+			// A test's misses go to the receipt's lines and the replay's
+			// hooks, never to the console: none keeps the whole call a
+			// charged miss carries for the console alone
+			// (models.UnmatchedCall.Whole).
+			miss.Whole = nil
 			get(flow).Missed = append(get(flow).Missed, miss)
 		}
 	}

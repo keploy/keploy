@@ -96,8 +96,8 @@ func (m *mockService) Record(ctx context.Context) error {
 		return err
 	}
 	m.logger.Info("Recording mocks for your test command",
-		zap.String("mock-set", name),
-		zap.String("command", utils.RedactCommandLine(m.userCommand)))
+		zap.String("mock-set", name), zap.Inline(m.userCommand))
+	utils.LogWholeCommand(m.logger, "command", m.userCommand)
 
 	// The caller's context: only ITS cancellation is the user's Ctrl+C. The
 	// errgroup below cancels the context it derives whenever any goroutine in

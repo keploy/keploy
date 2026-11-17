@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -296,8 +297,40 @@ func boundDevice(conn *net.TCPConn) uint32 {
 // connection's first byte.
 type targetBase struct{}
 
+// pairedConnOS is what Linux alone reads of a paired connection: the devices
+// its sockets are bound to. Its counts do not wrap (darwin's wroteCount), and
+// sock_diag lists every socket of the proxy's network namespace (darwin's
+// appHolder).
+type pairedConnOS struct {
+	// appDev is the index of the device the application's socket is bound
+	// to (0 for none), as the first lookup of the connection to find it
+	// read it (lookupApp): nil before one has.
+	appDev atomic.Pointer[uint32]
+	// proxyDev is the index of the device the proxy's socket is bound to (0
+	// for none), read as the proxy began closing it (noteWroteAtClose), for
+	// a wait's later reads of its orphan (orphanTookFIN): after the close,
+	// nothing reads it from the socket. A close whose side had taken the
+	// application's FIN or reset leaves it 0: no wait reads that orphan.
+	proxyDev atomic.Uint32
+}
+
+// pairedConnsOS is what proves, on Linux, an application socket not found
+// gone, not hidden.
+type pairedConnsOS struct {
+	// visible: an application socket has been seen from the proxy's
+	// network namespace (proveAppVisible, pairTarget, noteWroteAtClose):
+	// one that is not is gone, not hidden. Until one is, an application
+	// socket not found may be one hidden from the agent (in another network
+	// namespace), and what it wrote is not known.
+	visible atomic.Bool
+}
+
 // received is how much the proxy's side ps received, its FIN counted.
 func (targetBase) received(ps proxySide) uint64 { return ps.received }
+
+// looks is false on Linux: sock_diag gives what the application had written
+// exactly, and the events the wait waits on mark every change (orphanLooks).
+func (targetBase) looks() bool { return false }
 
 // pairReached says whether t needs no more waiting: the proxy's side received
 // what the application had written, or it never will (a capture loss).
@@ -471,6 +504,10 @@ func appFINAcknowledged(pc *pairedConn) bool {
 // (lookupTCPOrderedOn); a test replaces it to make the read fail.
 var lookupOrphan = lookupTCPOrderedOn
 
+// readSide is pc's proxy side as its close reads it (closing, pairClosing):
+// on Linux its own count (tcpi_bytes_received) is the one the close compares.
+func (pc *pairedConn) readSide() proxySide { return readProxySide(pc.conn) }
+
 // readProxySide reads the proxy's side of a connection from its own socket,
 // in whatever state it is (a reset one too, which sock_diag no longer finds).
 func readProxySide(conn *net.TCPConn) proxySide {
@@ -486,7 +523,7 @@ func readProxySide(conn *net.TCPConn) proxySide {
 	if gerr != nil {
 		return proxySide{err: gerr}
 	}
-	return proxySide{received: ti.Bytes_received, state: ti.State}
+	return proxySide{received: ti.Bytes_received, counted: true, state: ti.State}
 }
 
 // pairEnded is pairReached for a connection whose application socket was gone
@@ -514,7 +551,7 @@ func (p *Proxy) pairEnded(t *pairTarget, ps proxySide, closed bool) (bool, error
 		// bytes written after keploy's close, no capture loss (a TLS
 		// client's close_notify, or its own reset as it closes with
 		// keploy's close_notify unread).
-		if w := pc.wroteAtClose.Load(); w != nil && ps.received >= w.want {
+		if w := pc.wroteAtClose.Load(); w != nil && w.base.received(ps) >= w.want {
 			return true, nil
 		}
 		if _, took, _ := orphanTookFIN(pc); took {
@@ -544,10 +581,15 @@ func (p *Proxy) proveAppVisible(conn *net.TCPConn) {
 	if !ok1 || !ok2 {
 		return
 	}
-	if _, err := lookupTCP(app, pr); err == nil {
+	if _, err := lookupAccepted(app, pr); err == nil {
 		p.paired.visible.Store(true)
 	}
 }
+
+// lookupAccepted is how proveAppVisible reads an accepted connection's
+// application end (lookupTCP); a test replaces it to hide that end, as
+// another network namespace would.
+var lookupAccepted = lookupTCP
 
 // noteWroteAtClose reads, as the proxy begins closing pc, what the application
 // had written to it (pairedConn.wroteAtClose). It is read before the proxy's
@@ -557,8 +599,18 @@ func (p *Proxy) proveAppVisible(conn *net.TCPConn) {
 // connection under it, as a server's close would (the application writing on
 // meets the same reset). A TLS client's close_notify, sent once it has read
 // the answer keploy closed after (a 502 with Connection: close), is such a
-// write. A socket that cannot be read leaves it unset, and the wait judges the
-// connection by what was written when it began.
+// write. A socket not found leaves it unset, and the wait judges the
+// connection by what was written when it began. A read that fails (no
+// sock_diag socket, or a lookup's error) tells nothing: every wait is unknown
+// from then on (closeUnknown), as on darwin.
+//
+// A close that finds the application's socket proves the application's
+// sockets seen from here (paired.visible), as the accept's read does. One that
+// does not find it, while none has been seen, may not see the application's
+// sockets at all (another network namespace): unless the proxy's side shows it
+// took the application's FIN or reset, after which nothing it wrote is on its
+// way, what was on its way cannot be told, and every wait is unknown from then
+// on, said in one line as on darwin (closeUnknown).
 //
 // It runs on every paired close, so it reads no more than an answer needs. A
 // proxy's side that has taken the application's FIN, or its reset, needs no
@@ -569,24 +621,38 @@ func (p *Proxy) proveAppVisible(conn *net.TCPConn) {
 // gave back (diagFree) rather than open one. One from the list that fails is
 // dropped and the read made on a new one, as a close that found none free
 // makes it, so a socket kept between closes cannot change an answer.
-func noteWroteAtClose(pc *pairedConn) {
+func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	if ps := readProxySide(pc.conn); ps.err == nil && peerEnded(ps.state) {
 		return
 	}
 	pc.proxyDev.Store(boundDevice(pc.conn))
 	ds, listed, err := takeDiag()
 	if err != nil {
+		p.closeUnknown(pc, fmt.Errorf("%w: the application's end of a connection to the proxy, %s, cannot be read as the proxy closes it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
 		return
 	}
 	w, ok, err := wroteNow(ds, pc)
-	if err != nil && listed {
+	if err != nil && !errors.Is(err, errNoSocket) && listed {
 		ds.close()
 		if ds, err = openDiag(); err != nil {
+			p.closeUnknown(pc, fmt.Errorf("%w: the application's end of a connection to the proxy, %s, cannot be read as the proxy closes it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
 			return
 		}
 		w, ok, err = wroteNow(ds, pc)
 	}
+	missed := errors.Is(err, errNoSocket)
+	if missed {
+		err = nil
+	}
 	giveDiag(ds, err)
+	switch {
+	case err != nil:
+		p.closeUnknown(pc, fmt.Errorf("%w: sock_diag's read of the application's end of a connection to the proxy, %s, failed as the proxy closes it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
+	case !missed:
+		p.paired.visible.Store(true)
+	case !p.paired.visible.Load():
+		p.closeUnknown(pc, fmt.Errorf("%w: the application's end of a connection to the proxy, %s, cannot be seen from the proxy's network namespace as the proxy closes it, and no application socket has been: whether bytes it wrote were on their way cannot be told", models.ErrProxyConnsUnsupported, pc.app))
+	}
 	if ok {
 		pc.wroteAtClose.Store(&w)
 	}
@@ -611,8 +677,10 @@ func peerEnded(state uint8) bool {
 // looks again until two lookups agree on tcpi_bytes_acked: the second's
 // wqueue is bracketed. A timewait socket (no tcp_info) or one read in CLOSE,
 // or one not found, gives no count: its FIN or reset is the last it sent, and
-// the wait reads it so. A lookup that fails gives no count either, and its
-// error.
+// the wait reads it so. One the first lookup does not find gives errNoSocket
+// too, as it may be one not seen from here (noteWroteAtClose); one a later
+// lookup does not find was found, and has gone since or moved to the timewait
+// table. A lookup that fails gives no count either, and its error.
 //
 // The count surely holds the FIN (appWrote.fin) when the lookup before the one
 // it is taken from shows the FIN sent (finSent), by the lock order appWritten
@@ -626,10 +694,10 @@ func peerEnded(state uint8) bool {
 func wroteNow(ds *diagSock, pc *pairedConn) (appWrote, bool, error) {
 	read := func() (diagTCP, bool, error) {
 		d, err := lookupWritten(ds, pc, true)
-		if err != nil && !errors.Is(err, errNoSocket) {
+		if err != nil {
 			return d, false, err
 		}
-		return d, err == nil && d.info != nil && d.info.State != tcpClose && d.info.Bytes_acked != 0, nil
+		return d, d.info != nil && d.info.State != tcpClose && d.info.Bytes_acked != 0, nil
 	}
 	prev, ok, err := read()
 	if !ok {
@@ -640,6 +708,9 @@ func wroteNow(ds *diagSock, pc *pairedConn) (appWrote, bool, error) {
 	}
 	for {
 		cur, ok, err := read()
+		if errors.Is(err, errNoSocket) {
+			err = nil
+		}
 		if !ok {
 			return appWrote{}, false, err
 		}

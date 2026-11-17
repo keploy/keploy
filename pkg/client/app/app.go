@@ -61,7 +61,7 @@ func resolveKind(commandType, cmd string) utils.CmdType {
 func NewApp(logger *zap.Logger, cmd string, client docker.Client, opts models.SetupOptions) *App {
 	app := &App{
 		logger:          logger,
-		cmd:             cmd,
+		cmd:             utils.NewAppCommand(cmd),
 		docker:          client,
 		kind:            resolveKind(opts.CommandType, cmd),
 		opts:            opts,
@@ -80,7 +80,7 @@ type App struct {
 	setEndKill      atomic.Pointer[string]
 	logger          *zap.Logger
 	docker          docker.Client
-	cmd             string
+	cmd             utils.AppCommand
 	kind            utils.CmdType
 	opts            models.SetupOptions
 	container       string
@@ -156,7 +156,7 @@ func (a *App) Setup(ctx context.Context) error {
 
 	// isDetachMode scans the command for -d/--detach; --from-container has no
 	// command, so there is nothing to scan and nothing to refuse.
-	if utils.IsDockerCmd(a.kind) && utils.HasUserCommand(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
+	if utils.IsDockerCmd(a.kind) && utils.HasUserCommand(a.kind) && isDetachMode(a.logger, a.cmd.WholeUnredacted(), a.kind) {
 		return fmt.Errorf("application could not be started in detached mode")
 	}
 
@@ -200,18 +200,18 @@ func (a *App) SetupDocker(ctx context.Context) error {
 		}
 	}
 
-	a.logger.Debug("inside setup docker", zap.String("cmd", utils.RedactCommandLine(a.cmd)))
+	a.logger.Debug("inside setup docker", zap.String("cmd", a.cmd.WholeRedacted()))
 
 	if HookImpl != nil {
-		newCmd, err := HookImpl.BeforeDockerSetup(ctx, a.cmd)
+		newCmd, err := HookImpl.BeforeDockerSetup(ctx, a.cmd.WholeUnredacted())
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during docker setup")
 			return err
 		}
-		a.cmd = newCmd
+		a.cmd = utils.NewAppCommand(newCmd)
 	}
 
-	a.logger.Debug("after before docker setup hook", zap.String("cmd", utils.RedactCommandLine(a.cmd)))
+	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd.WholeRedacted()))
 
 	// attaching the init container's PID namespace to the app container
 	err := a.modifyDockerRun(ctx)
@@ -232,7 +232,7 @@ func (a *App) SetOnAgentRestart(f func(ctx context.Context) error) {
 
 // ModifyDockerRun modifies the existing Docker command to attach the init container's PID namespace
 func (a *App) modifyDockerRun(_ context.Context) error {
-	if a.cmd == "" {
+	if a.cmd.Empty() {
 		return fmt.Errorf("no command provided to modify")
 	}
 	// Attach the keploy agent container's PID namespace and network namespace to the app container
@@ -250,13 +250,13 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 	tlsFlags := fmt.Sprintf("-v %s:%s:ro ", keployTLSVolumeName, keployTLSMountPath)
 	// An embedder's volumes of the run's own (docker.RunVolume): a command
 	// that mounts one by the name every run shared is given the run's.
-	cmd, runVolumeFlags, renamed := docker.RunVolumesForApp(a.cmd, a.keployContainer)
+	cmd, runVolumeFlags, renamed := docker.RunVolumesForApp(a.cmd.WholeUnredacted(), a.keployContainer)
 	for _, base := range renamed {
 		a.logger.Warn("the command mounts the volume "+base+", the name keploy gave every run's volume until now; "+
 			"this run is given its own, so two runs on one host no longer share it. Drop the mount from the command: keploy mounts the run's own",
 			zap.String("volume", docker.RunVolumeFor(base, a.keployContainer)))
 	}
-	a.cmd = cmd
+	a.cmd = utils.NewAppCommand(cmd)
 	tlsFlags += runVolumeFlags
 	tlsFlags += fmt.Sprintf("-e NODE_EXTRA_CA_CERTS=%s ", certPath)
 	tlsFlags += fmt.Sprintf("-e REQUESTS_CA_BUNDLE=%s ", certPath)
@@ -275,22 +275,23 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 			tlsFlags += "-e " + token.MockAgentTokenEnv + " "
 		}
 	}
-	at := utils.RunSubcommandEnd(a.cmd)
+	at := utils.RunSubcommandEnd(cmd)
 	if at < 0 {
 		if a.kind == utils.DockerStart {
 			// A container that already exists cannot be given these: its
 			// PID and network namespaces were settled when it was created.
-			return engine.StartUnsupported(engine.Detect(a.cmd))
+			return engine.StartUnsupported(engine.Detect(cmd))
 		}
-		return fmt.Errorf("invalid command structure: no `run` subcommand to add keploy's flags to: %s", utils.RedactCommandLine(a.cmd))
+		utils.LogWholeCommand(a.logger, "cmd", a.cmd)
+		return fmt.Errorf("invalid command structure: the %q command has no `run` subcommand to add keploy's flags to", a.cmd.Program())
 	}
 
 	// The flags go right after the engine's run subcommand, wherever it is:
 	// in `sudo docker run` and `docker container run` that is past the second
 	// word, and docker takes nothing in front of `run` but its own flags.
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
-	a.cmd = fmt.Sprintf("%s %s %s", a.cmd[:at], injection, strings.TrimLeft(a.cmd[at:], " "))
-	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", utils.RedactCommandLine(a.cmd)))
+	a.cmd = utils.NewAppCommand(fmt.Sprintf("%s %s %s", cmd[:at], injection, strings.TrimLeft(cmd[at:], " ")))
+	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", a.cmd.WholeRedacted()))
 	return nil
 }
 
@@ -298,7 +299,8 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 // the before-setup hook does its work under it.
 func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	if a.container == "" {
-		utils.LogError(a.logger, nil, "container name not found", zap.String("AppCmd", utils.RedactCommandLine(a.cmd)))
+		utils.LogError(a.logger, nil, "container name not found", zap.Inline(a.cmd))
+		utils.LogWholeCommand(a.logger, "AppCmd", a.cmd)
 		return errors.New("container name not found")
 	}
 
@@ -313,7 +315,7 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	// After that, we add the keploy agent service in a copy of the found user app compose file (by creating docker-compose-tmp.yaml).
 	// Finally, we use this modified docker compose file in place of the user's original compose file to run the application with keploy integration.
 
-	paths := findComposeFile(a.cmd)
+	paths := findComposeFile(a.cmd.WholeUnredacted())
 	if len(paths) == 0 {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}
@@ -361,16 +363,16 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	a.setComposeSource(newPath, nil, compose)
 	a.logger.Debug("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
 
-	newCmd, composeFileEnv := composeLaunchPlan(a.cmd, newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName)
+	newCmd, composeFileEnv := composeLaunchPlan(a.cmd.WholeUnredacted(), newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName)
 
 	if newCmd != "" {
 		// Literal compose command: our file is spliced in, as before.
-		a.cmd = newCmd
+		a.cmd = utils.NewAppCommand(newCmd)
 		a.logger.Info(
 			"Running application using a temporary Keploy-generated Docker Compose file (will be cleaned up automatically)",
-			zap.String("cmd", utils.RedactCommandLine(a.cmd)),
-			zap.String("composePath", newPath),
+			zap.Inline(a.cmd), zap.String("composePath", newPath),
 		)
+		utils.LogWholeCommand(a.logger, "cmd", a.cmd)
 		return nil
 	}
 
@@ -395,13 +397,13 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	a.logger.Info(
 		"Running application through your command with COMPOSE_FILE pointed at a temporary "+
 			"Keploy-generated Docker Compose file (will be cleaned up automatically)",
-		zap.String("cmd", utils.RedactCommandLine(a.cmd)),
-		zap.String("composePath", composeFileEnv),
+		zap.Inline(a.cmd), zap.String("composePath", composeFileEnv),
 	)
+	utils.LogWholeCommand(a.logger, "cmd", a.cmd)
 	// Stated up front because each one otherwise fails a long way from its cause.
 	a.logger.Warn(
 		"the command is not a literal docker compose invocation, so keploy cannot modify it directly",
-		zap.String("cmd", utils.RedactCommandLine(a.cmd)),
+		zap.Inline(a.cmd),
 		zap.String("if it passes its own -f", "COMPOSE_FILE is ignored and keploy's agent will not be injected"),
 		zap.String("if it runs compose detached (up -d)", "the command returns immediately and keploy stops, treating it as the app exiting"),
 		zap.String("if it sets its own project name", "keploy's teardown may not reach every container it started"),
@@ -456,10 +458,11 @@ func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) erro
 
 	// Ensure the command uses stdin ("-f -") and has the exit-code-from flags.
 	preferFailureAbort := composeHasCompletionDependency(&compose)
-	a.cmd = ensureInMemoryComposeFlags(a.cmd, a.composeService, preferFailureAbort)
+	a.cmd = utils.NewAppCommand(ensureInMemoryComposeFlags(a.cmd.WholeUnredacted(), a.composeService, preferFailureAbort))
 
 	a.logger.Info("Running application using in-memory Keploy-generated Docker Compose (no file written to disk)",
-		zap.String("cmd", utils.RedactCommandLine(a.cmd)))
+		zap.Inline(a.cmd))
+	utils.LogWholeCommand(a.logger, "cmd", a.cmd)
 
 	return nil
 }
@@ -501,12 +504,13 @@ func dependsOnRequiresCompletion(dependsOn *yaml.Node) bool {
 }
 
 func (a *App) SetAppCommand(appCommand string) {
-	a.logger.Debug("Setting App Command", zap.String("cmd", utils.RedactCommandLine(appCommand)))
-	a.cmd = appCommand
+	a.cmd = utils.NewAppCommand(appCommand)
+	a.logger.Debug("Setting App Command", zap.String("cmd", a.cmd.WholeRedacted()))
 }
 
+// GetAppCommand is the command the app runs, whole, as its caller runs it.
 func (a *App) GetAppCommand() string {
-	return a.cmd
+	return a.cmd.WholeUnredacted()
 }
 
 func (a *App) Kind(_ context.Context) utils.CmdType {
@@ -745,11 +749,12 @@ func (a *App) composeChildTee(ctx context.Context) []utils.ExecOption {
 	if len(a.composeContent) == 0 || a.useComposeLibrary() {
 		return nil
 	}
-	projectName, projectDir := composeProjectScope(a.cmd)
+	whole := a.cmd.WholeUnredacted()
+	projectName, projectDir := composeProjectScope(whole)
 	if projectName == "" {
-		projectName = normalizeComposeProjectName(composeProjectEnvAssignment(a.cmd))
+		projectName = normalizeComposeProjectName(composeProjectEnvAssignment(whole))
 	}
-	out, err := docker.StartComposeChildOutput(ctx, a.composeContent, projectName, projectDir, composeEnvFiles(a.cmd))
+	out, err := docker.StartComposeChildOutput(ctx, a.composeContent, projectName, projectDir, composeEnvFiles(whole))
 	a.composeChildOut.Store(out)
 	if err != nil {
 		if a.composeChildWarned.CompareAndSwap(false, true) {
@@ -1055,13 +1060,13 @@ func (a *App) composeDownProject(ctx context.Context) string {
 	if p := a.composeProjectSeen.Load(); p != nil && *p != "" {
 		return *p
 	}
-	if p := composeProjectFlag(a.cmd); p != "" {
+	if p := composeProjectFlag(a.cmd.WholeUnredacted()); p != "" {
 		return p
 	}
 	// The library never runs the command in a shell: an assignment in it
 	// does not reach its project, keploy's own environment does.
 	if !a.useComposeLibrary() {
-		if p := composeProjectEnvAssignment(a.cmd); p != "" {
+		if p := composeProjectEnvAssignment(a.cmd.WholeUnredacted()); p != "" {
 			return normalizeComposeProjectName(p)
 		}
 	}
@@ -1131,23 +1136,25 @@ func (a *App) composeProjectLabelAnswered(ctx context.Context, name, unanswered 
 // and left the app's running. With no project known, the command's flags
 // alone, as before.
 func (a *App) composeProjectArgs(project string) []string {
-	flags := extractProjectFlags(a.cmd)
-	if project == "" || composeProjectFlag(a.cmd) != "" {
+	flags := extractProjectFlags(a.cmd.WholeUnredacted())
+	if project == "" || composeProjectFlag(a.cmd.WholeUnredacted()) != "" {
 		return flags
 	}
 	return append(flags, "-p", project)
 }
 
 // composeProjectFlag is the project the compose command cmd names (-p,
-// --project-name), "" when it names none.
+// --project-name, among compose's own options: extractProjectFlags), ""
+// when it names none.
 func composeProjectFlag(cmd string) string {
 	flags := extractProjectFlags(cmd)
 	for i := 0; i < len(flags); i++ {
 		switch {
 		case (flags[i] == "-p" || flags[i] == "--project-name") && i+1 < len(flags):
 			return flags[i+1]
-		case strings.HasPrefix(flags[i], "-p="):
-			return strings.TrimPrefix(flags[i], "-p=")
+		case strings.HasPrefix(flags[i], "-p") && !strings.HasPrefix(flags[i], "--") && len(flags[i]) > 2:
+			// -p=X and -pX.
+			return strings.TrimPrefix(flags[i][2:], "=")
 		case strings.HasPrefix(flags[i], "--project-name="):
 			return strings.TrimPrefix(flags[i], "--project-name=")
 		}
@@ -2212,17 +2219,25 @@ func isDockerRunNameConflict(runErr error, errType utils.ErrType, nameOccupied b
 	return isExit125(runErr, errType) && nameOccupied
 }
 
-// extractProjectFlags returns any project-scoping flags (-p/--project-name,
-// --project-directory) found in the given docker compose command.
+// extractProjectFlags returns the project-scoping flags (-p/--project-name,
+// --project-directory) of the compose command's own options
+// (engine.ComposeOptions), as the shell hands them to compose: compose takes
+// them before its subcommand alone. A -p of another program in the command
+// (./seed.sh -p <password> && docker compose up), or of a container compose
+// runs (docker compose run app ./tool -p <password>), is no project:
+// handed to keploy's own compose calls, it was a password on their argv and
+// the project they took down, and named at WARN.
 func extractProjectFlags(cmd string) []string {
-	parts := strings.Fields(cmd)
+	parts := engine.ComposeOptions(cmd)
 	var flags []string
 	for i := 0; i < len(parts); i++ {
 		switch {
-		case (parts[i] == "-p" || parts[i] == "--project-name" || parts[i] == "--project-directory") && i+1 < len(parts):
+		case (parts[i] == "-p" || parts[i] == "--project-name" || parts[i] == "--project-directory" || parts[i] == "--workdir") && i+1 < len(parts):
 			flags = append(flags, parts[i], parts[i+1])
 			i++
-		case strings.HasPrefix(parts[i], "-p=") || strings.HasPrefix(parts[i], "--project-name=") || strings.HasPrefix(parts[i], "--project-directory="):
+		case strings.HasPrefix(parts[i], "-p") && !strings.HasPrefix(parts[i], "--") && len(parts[i]) > 2,
+			strings.HasPrefix(parts[i], "--project-name=") || strings.HasPrefix(parts[i], "--project-directory=") || strings.HasPrefix(parts[i], "--workdir="):
+			// -p=X, and -pX: compose's -p with its value attached.
 			flags = append(flags, parts[i])
 		}
 	}
@@ -2279,7 +2294,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		return a.runFromContainer(ctx)
 	}
 
-	userCmd := a.cmd
+	userCmd := a.cmd.WholeUnredacted()
 
 	// ComposeDown can fire on two paths within a single run() — cmdCancel below
 	// (SIGINT/teardown) and this deferred call (normal exit / the
@@ -2415,8 +2430,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 				// waiting on it. When the app is kept alive on the outer replay
 				// errgroup (compose + mocking), that teardown runs under
 				// a drain's 30s bound (utils.DrainErrGroupProgress), so the overrun trips a spurious
-				// "teardown drain timed out … a goroutine is ignoring context
-				// cancellation" error and fails an otherwise-green run.
+				// "teardown drain made no progress … a goroutine is ignoring
+				// context cancellation" error and fails an otherwise-green run.
 				//
 				// So for compose: give the app a short grace to flush coverage during
 				// the graceful stop, then bring the WHOLE project down fast via
