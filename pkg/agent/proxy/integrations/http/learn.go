@@ -458,6 +458,26 @@ func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string
 	}
 }
 
+// servedClocks are the leaves of a call's request, answered with m as an
+// exact match, that hold a read of the application's clock, by leaf path:
+// those m's earlier learning and keploy.yml's clock rules name (clocksWith:
+// what the strict comparison checks each such leaf by), and over them those
+// the call's own learn step learned (learned). learn.Named marks them on
+// the exchange the tracker keeps (Seen.Clock, Seen.Offset), so a later
+// call's learn step reads a moment sent there as a read of the clock, as it
+// reads one a paired call's learn step learned: an exact match learns
+// nothing, so learned alone would leave the place unmarked, and a moment it
+// shares with a later read a carried value of two sources.
+func (n learnNoise) servedClocks(m *models.Mock, learned map[string]models.ClockOffset) map[string]models.ClockOffset {
+	known := clocksWith(m, n.declaredRules)
+	if len(known) == 0 {
+		return learned
+	}
+	out := maps.Clone(known)
+	maps.Copy(out, learned)
+	return out
+}
+
 // known is what a comparison with the recorded mock m excuses: keploy.yml's
 // noise, the noise learned onto m, and m's obfuscated values (Mock.Noise).
 func (n learnNoise) known(m *models.Mock) learn.Known {
@@ -2095,7 +2115,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 						continue
 					}
 					if e, ok := n.servedExchange(tracker.Drifts(), picked, answered, rec, recordedParts(picked), liveShape, input, live, out, own, h.learnedView(picked, plan)); ok {
-						tracker.Served(test, learn.Named(e, plan.vars, plan.clocks))
+						tracker.Served(test, learn.Named(e, plan.vars, n.servedClocks(picked, plan.clocks)))
 					}
 					return out, nil, nil
 				}
@@ -2165,7 +2185,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			commit()
 			if e, ok := n.servedExchange(tracker.Drifts(), picked, answered, rec, recordedParts(picked), liveShape, input, live, out, own, h.learnedView(picked, plan)); ok {
-				tracker.Served(test, learn.Named(e, plan.vars, plan.clocks))
+				tracker.Served(test, learn.Named(e, plan.vars, n.servedClocks(picked, plan.clocks)))
 			}
 			return out, nil, nil
 
