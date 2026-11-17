@@ -252,6 +252,18 @@ func TestAfterTheClientHalfClosed_EveryAnswerItTakesIsTeed(t *testing.T) {
 	}
 }
 
+// tcpSocket is s, the relay's look at a client socket, as the TCP socket's;
+// it fails t when s is none (the walk to the socket found nothing), so a row
+// fails with what it found instead of a panic that ends the package's rows.
+func tcpSocket(t *testing.T, s clientSocket) *tcpClientSocket {
+	t.Helper()
+	ts, ok := s.(*tcpClientSocket)
+	if !ok {
+		t.Fatalf("the client's socket is not asked: the look is %T", s)
+	}
+	return ts
+}
+
 // awaitTCPState waits until the TCP state of the socket under c is want.
 func awaitTCPState(t *testing.T, c net.Conn, want uint8, what string) {
 	t.Helper()

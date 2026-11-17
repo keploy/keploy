@@ -413,7 +413,7 @@ func TestTheSocketHoldsTheResetOfAChunkAndAFINSentToAClosedClient(t *testing.T) 
 			}
 		}
 		awaitTCPState(t, proxyClient, stateClosed, "the connection is closed")
-		s := clientSocketOf(proxyClient, zap.NewNop()).(*tcpClientSocket)
+		s := tcpSocket(t, clientSocketOf(proxyClient, zap.NewNop()))
 		err := s.pendingError(true)
 		switch {
 		case took && err != nil:

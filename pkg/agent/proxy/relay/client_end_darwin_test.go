@@ -101,7 +101,7 @@ func TestXNUCountsThatWrapIntoTheFINsSumSayNoFIN(t *testing.T) {
 // logs nothing.
 func TestXNUASocketWithNoLoggerLogsNoFallback(t *testing.T) {
 	_, proxyClient := loopbackPair(t)
-	s := clientSocketOf(proxyClient, nil).(*tcpClientSocket)
+	s := tcpSocket(t, clientSocketOf(proxyClient, nil))
 	s.fallback = &infoFallback{}
 	s.getInfo = func(uintptr, *[tcpInfoBuf]byte) (int, error) { return tcpInfoNeeded - 1, nil }
 	if l := s.look(); l.said != clientUnknown {
@@ -136,7 +136,7 @@ func TestXNUASocketThatCannotAnswerAtTheResetSaysNoFIN(t *testing.T) {
 // tcpi_rxbytes by each byte, with nothing duplicated or out of order.
 func TestXNUCountsTheBytesAndTheFINTheClientSent(t *testing.T) {
 	app, proxyClient := loopbackPair(t)
-	s := clientSocketOf(proxyClient, zap.NewNop()).(*tcpClientSocket)
+	s := tcpSocket(t, clientSocketOf(proxyClient, zap.NewNop()))
 	ask := func() darwinTCPInfo {
 		t.Helper()
 		var info darwinTCPInfo
@@ -195,7 +195,7 @@ func TestXNUATCPInfoThatCannotBeReadTeesEveryChunk(t *testing.T) {
 			proxyServer, server := loopbackPair(t)
 			core, logs := observer.New(zapcore.DebugLevel)
 			r := New(Config{Logger: zap.New(core)}, CountClientWrites(proxyClient), connseq.NewUpstream(proxyServer))
-			s := r.client.(*tcpClientSocket)
+			s := tcpSocket(t, r.client)
 			s.getInfo, s.fallback = row.get, &infoFallback{}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
@@ -295,7 +295,7 @@ func TestXNUAResetSOErrorGaveIsNotHandedOnAgain(t *testing.T) {
 	}
 	_ = app.Close()
 	awaitTCPState(t, proxyClient, stateClosed, "the client's reset is in")
-	s := clientSocketOf(proxyClient, zap.NewNop()).(*tcpClientSocket)
+	s := tcpSocket(t, clientSocketOf(proxyClient, zap.NewNop()))
 	asked := 0
 	s.askInfo = func(_ uintptr, _ *[tcpInfoBuf]byte, info *darwinTCPInfo) bool {
 		asked++
