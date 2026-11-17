@@ -216,3 +216,67 @@ func TestAMarkTheConfigStoreFailsToWriteIsSaid(t *testing.T) {
 		}
 	}
 }
+
+// staleSummaryInstr is an agent that fails the incoming stream (an error
+// that is not a shutdown's, so the recording never starts) while its client
+// still holds an earlier stream's end summary, one that dropped d.
+type staleSummaryInstr struct {
+	*refusedIncomingInstr
+	d models.MockDropSummary
+}
+
+func (i *staleSummaryInstr) GetIncoming(context.Context, models.IncomingOptions) (<-chan *models.TestCase, error) {
+	return nil, errors.New("the agent answered the incoming stream 500: internal error")
+}
+
+func (i *staleSummaryInstr) IncomingEndSummary() (models.StreamEndSummary, bool) {
+	return models.StreamEndSummary{TestCasesSent: 1, MocksDropped: i.d}, true
+}
+
+// A recording that never started (its agent failed the incoming stream)
+// marks no test-set with drops, with or without the proven switch, even
+// where its client still holds an earlier stream's summary: those drops are
+// another recording's, and this test-set holds no capture to miss.
+func TestARecordingThatNeverStartedMarksNoTestSetWithDrops(t *testing.T) {
+	d := models.MockDropSummary{ByPressure: 1, Named: []string{"Http2 mock of connection 7"}}
+	for _, switchOn := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+switchOn, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", switchOn)
+			keepExitCode(t)
+			f := &fakeInstr{
+				mappings: make(chan models.TestMockMapping),
+				incoming: make(chan *models.TestCase),
+				outgoing: make(chan *models.Mock),
+			}
+			instr := &staleSummaryInstr{refusedIncomingInstr: &refusedIncomingInstr{fakeInstr: f, running: make(chan struct{})}, d: d}
+			confs := &writtenConfs{written: map[string]*models.TestSet{}}
+			r := &Recorder{
+				logger: zap.NewNop(), testDB: &recTestDB{}, mockDB: &recMockDB{unencodable: map[string]bool{}}, mappingDb: &recMappingDB{},
+				telemetry: &recTelemetry{}, instrumentation: instr, testSetConf: confs, hooks: BaseRecordHooks{}, config: &config.Config{},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- r.Start(ctx) }()
+			select {
+			case <-done:
+			case <-instr.running:
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(90 * time.Second):
+					t.Fatal("Start never returned")
+				}
+			case <-time.After(60 * time.Second):
+				t.Fatal("Start neither returned nor reached instrumentation.Run")
+			}
+			confs.mu.Lock()
+			defer confs.mu.Unlock()
+			for id, c := range confs.written {
+				if c.RecordMocksDropped != nil {
+					t.Errorf("test-set %s of a recording that never started is marked with drops %+v; want no mark", id, *c.RecordMocksDropped)
+				}
+			}
+		})
+	}
+}
