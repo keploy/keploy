@@ -258,10 +258,10 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		panic("relay: the destination is not read through a connseq.Upstream: dial it with util.DialUpstream")
 	}
 	r.client = clientSocketOf(src, cfg.Logger)
-	// On macOS every byte the relay writes to the client goes through a
-	// count of them (countWrites), which the client's socket reads its
-	// client's acknowledgements from.
-	src = countWrites(src, r.client)
+	// On macOS the client's socket reads its client's acknowledgements from
+	// the count of every byte written to it that the proxy put on it at its
+	// accept (countFromAccept).
+	countFromAccept(src, r.client)
 	r.src.Store(&src)
 	r.dst.Store(&dst)
 	r.lastLook = make(chan struct{})

@@ -255,9 +255,9 @@ func TestAfterTheClientHalfClosed_EveryAnswerItTakesIsTeed(t *testing.T) {
 // awaitTCPState waits until the TCP state of the socket under c is want.
 func awaitTCPState(t *testing.T, c net.Conn, want uint8, what string) {
 	t.Helper()
-	for limit := time.Now().Add(5 * time.Second); tcpState(t, c) != want; {
+	for limit := time.Now().Add(tcpSettle); tcpState(t, c) != want; {
 		if time.Now().After(limit) {
-			t.Fatalf("%s: the socket's state is %d after 5s, want %d", what, tcpState(t, c), want)
+			t.Fatalf("%s: the socket's state is %d after %v, want %d", what, tcpState(t, c), tcpSettle, want)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}

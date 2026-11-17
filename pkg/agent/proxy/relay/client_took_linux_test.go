@@ -101,3 +101,17 @@ func TestWrittenCountsEveryByteWrittenToTheClientsSocket(t *testing.T) {
 		}
 	})
 }
+
+// A chunk written after the client's FIN, while the client has not yet
+// acknowledged all of the one before it, is judged from where it starts, on
+// the socket as the listener gave it: Linux's socket counts what its client
+// acknowledged itself (tcpi_bytes_acked). macOS reads that count from the
+// count of writes the proxy puts on every socket it accepts, and runs this
+// case with it (TestAChunkBehindOneIsJudgedFromItsOwnFirstByteOnASocketCountedFromItsAccept);
+// a macOS socket with no count from its accept is asked by its sequence
+// numbers alone, which a closed window's probes leave unable to say, so the
+// chunk is teed there (TestAResendingClientThatResetsHasWhatItNeverAcknowledgedRefused).
+func TestAChunkBehindOneThatIsNotAcknowledgedYetIsJudgedFromItsOwnFirstByte(t *testing.T) {
+	t.Parallel()
+	judgedFromItsOwnFirstByte(t, noAcceptCount)
+}

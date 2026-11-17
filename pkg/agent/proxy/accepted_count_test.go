@@ -2,9 +2,12 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"runtime"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // acceptedSocket is an accepted loopback TCP connection, as the proxy's
@@ -56,12 +59,7 @@ func TestTheAcceptedSocketIsFoundUnderTheCountOfWrites(t *testing.T) {
 	}
 	t.Cleanup(func() { p.inflight.forget(tracked) })
 	counted := tracked.Conn
-	if onMac := runtime.GOOS == "darwin"; onMac == (counted == net.Conn(raw)) {
-		t.Fatalf("the tracking keeps %T on %s: want a count over the socket on macOS only", counted, runtime.GOOS)
-	}
-	if c, ok := counted.(interface{ NetConn() net.Conn }); runtime.GOOS == "darwin" && (!ok || c.NetConn() != net.Conn(raw)) {
-		t.Fatal("the count under the tracking is not over the accepted socket")
-	}
+	countsOver(t, counted, raw, "the tracking")
 	for _, c := range []net.Conn{raw, counted, tracked} {
 		if k := pairKey(c); k != net.Conn(raw) {
 			t.Errorf("pairKey(%T) = %T, want the accepted socket", c, k)
@@ -94,4 +92,70 @@ func TestTheAcceptedSocketIsFoundUnderTheCountOfWrites(t *testing.T) {
 	if p.paired.holds(raw) {
 		t.Error("removing the tracking did not forget its paired connection")
 	}
+}
+
+// countsOver checks that c, what the proxy hands on of the accepted socket raw
+// (through what), is the count of writes over raw on macOS, and raw itself
+// elsewhere.
+func countsOver(t *testing.T, c net.Conn, raw *net.TCPConn, what string) {
+	t.Helper()
+	if onMac := runtime.GOOS == "darwin"; onMac == (c == net.Conn(raw)) {
+		t.Fatalf("%s keeps %T on %s: want a count over the socket on macOS only", what, c, runtime.GOOS)
+	}
+	if u, ok := c.(interface{ NetConn() net.Conn }); runtime.GOOS == "darwin" && (!ok || u.NetConn() != net.Conn(raw)) {
+		t.Fatalf("the count %s keeps is not over the accepted socket", what)
+	}
+}
+
+// The count is put over every accepted socket, whether the proxy keeps the
+// connection or not, and whether the kernel paired it or not: a proxy that
+// neither keeps nor pairs it hands on the count itself, untracked, and one
+// that pairs but does not keep it tracks it over the count. With the switch
+// off a proxy that settles no reads keeps no connection (keepsConnections),
+// which is how users record; with it on every proxy keeps them. This
+// package's rows start with the switch off whatever KEPLOY_PROVEN the process
+// inherited (switch_main_test.go), so each case sets it itself, and every
+// case runs in either mode. A count put only where the connection is kept, or
+// only where it is paired, or a tracking over the socket instead of the
+// count, would leave a client recorded over TLS uncounted.
+func TestEveryAcceptedSocketIsCountedWhetherKeptOrPaired(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		for _, paired := range []bool{false, true} {
+			t.Run(fmt.Sprintf("switch on %v, paired %v", on, paired), func(t *testing.T) {
+				if on {
+					t.Setenv(provenswitch.Env, "1")
+				}
+				acceptedCountedWhetherKeptOrPaired(t, on, paired)
+			})
+		}
+	}
+}
+
+func acceptedCountedWhetherKeptOrPaired(t *testing.T, on, paired bool) {
+	_, raw := acceptedSocket(t)
+	p := &Proxy{}
+	if keeps := p.keepsConnections(); keeps != on || provenswitch.On() != on {
+		t.Fatalf("a proxy that settles no reads keeps its connections: %v, want %v (the switch on: %v)", keeps, on, provenswitch.On())
+	}
+	if paired {
+		p.countedFromStart.Store(true)
+		p.paired.add(raw, 1, 0)
+	}
+	kept := p.keepsConnections()
+	conn, tracked := p.acceptedConn(context.Background(), raw)
+	if !kept && !paired {
+		if tracked != nil {
+			t.Fatal("a connection the proxy neither keeps nor pairs is tracked")
+		}
+		countsOver(t, conn, raw, "the accept")
+		return
+	}
+	if tracked == nil || conn != net.Conn(tracked) {
+		t.Fatalf("a connection the proxy keeps (%v) or pairs (%v) is handed on as %T, not its tracking", kept, paired, conn)
+	}
+	t.Cleanup(func() { p.inflight.forget(tracked) })
+	if paired && tracked.beforeClose == nil {
+		t.Error("the paired connection's close is not read before it happens")
+	}
+	countsOver(t, tracked.Conn, raw, "the tracking")
 }

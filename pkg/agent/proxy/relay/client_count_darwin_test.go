@@ -3,7 +3,6 @@ package relay
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,17 +15,25 @@ import (
 	"go.uber.org/zap"
 )
 
-// countedXNU is a client socket whose TCP_INFO is answered from a script (in
-// turn, the last repeats), with the count of the relay's writes begun from the
-// script's first answer, and said bytes written through it since.
+// countedXNU is a client socket counted from its accept (countedClient), the
+// script's first answer as the accept's, and whose TCP_INFO is answered from
+// the rest of the script (in turn, the last repeats), with said bytes written
+// through the count since.
 func countedXNU(t *testing.T, said uint64, infos ...darwinTCPInfo) *tcpClientSocket {
 	t.Helper()
-	s := (&scriptedXNU{infos: infos}).socket()
-	if !s.beginCount() {
-		t.Fatal("the count of writes did not begin on a socket that answers")
+	if len(infos) < 2 {
+		t.Fatal("countedXNU wants the accept's answer and a look's")
 	}
-	s.writes.said = said
+	s := (&scriptedXNU{infos: infos[1:]}).socket()
+	s.beginFrom(&countedClient{count: &writeCount{said: said}, begin: infos[0]})
 	return s
+}
+
+// countedOver is the count CountClientWrites puts over the socket c, whatever
+// its TCP_INFO answers.
+func countedOver(c net.Conn) *countedClient {
+	tc := c.(*net.TCPConn)
+	return &countedClient{Conn: tc, tcp: tc, count: &writeCount{}}
 }
 
 // On macOS a look counts what the client acknowledged from the bytes written
@@ -147,44 +154,32 @@ func TestXNUASendBufferHoldingMoreThanWasCountedSaysNothing(t *testing.T) {
 	}
 }
 
-// The count of writes is taken only where it holds: on a socket clientSocketOf
-// found with no TLS layer between it and the conn the relay writes to (TLS
-// writes other bytes than it is given), that answers as the count begins.
-// Elsewhere the relay writes to its conn as it is.
-func TestTheRelaysWritesAreCountedOnlyWhereTheCountHolds(t *testing.T) {
+// A client conn with no count from its accept, plain or under TLS, is asked
+// by the count of sequence numbers alone: no count of writes is begun for it,
+// and no look is taken as the relay begins. A conn with no socket to ask, and
+// a client socket that is no TCP socket's, are left as they are.
+func TestAClientWithNoCountFromItsAcceptIsAskedBySequenceNumbersAlone(t *testing.T) {
 	t.Parallel()
 	_, proxyClient := loopbackPair(t)
-	if c, ok := countWrites(proxyClient, clientSocketOf(proxyClient, zap.NewNop())).(*writeCountingConn); !ok || c.Conn != proxyClient {
-		t.Fatal("a TCP socket's writes are not counted")
-	}
-	under := &seenWrites{Conn: proxyClient}
-	if _, ok := countWrites(under, clientSocketOf(under, zap.NewNop())).(*writeCountingConn); !ok {
-		t.Fatal("the writes to a conn that says what is under it (NetConn) are not counted")
-	}
 	tlsLayer := tls.Server(proxyClient, &tls.Config{MinVersion: tls.VersionTLS12})
-	if s := clientSocketOf(tlsLayer, zap.NewNop()); s == nil || countWrites(tlsLayer, s) != net.Conn(tlsLayer) {
-		t.Fatal("the writes to a TLS layer are counted, or its socket is not asked")
-	}
-	overTLS := &seenWrites{Conn: tlsLayer}
-	if s := clientSocketOf(overTLS, zap.NewNop()); s == nil || countWrites(overTLS, s) != net.Conn(overTLS) {
-		t.Fatal("the writes to a conn over a TLS layer are counted, or its socket is not asked")
-	}
-	silent := &tcpClientSocket{rc: noFD{}, askInfo: func(uintptr, *[tcpInfoBuf]byte, *darwinTCPInfo) bool { return false }}
-	if countWrites(proxyClient, silent) != proxyClient || silent.writes != nil {
-		t.Fatal("the writes to a socket that cannot answer as the count begins are counted")
+	for _, src := range []net.Conn{proxyClient, &seenWrites{Conn: proxyClient}, tlsLayer, &seenWrites{Conn: tlsLayer}} {
+		s, _ := clientSocketOf(src, zap.NewNop()).(*tcpClientSocket)
+		if s == nil {
+			t.Fatalf("the socket under %T is not asked", src)
+		}
+		countFromAccept(src, s)
+		if s.writes != nil || s.seen {
+			t.Errorf("%T, with no count from its accept, is counted from its writes (%v) or looked at (%v)", src, s.writes != nil, s.seen)
+		}
 	}
 	func() {
 		defer func() {
 			if p := recover(); p != nil {
-				t.Errorf("countWrites with no socket to ask panicked: %v", p)
+				t.Errorf("countFromAccept with no TCP socket to ask panicked: %v", p)
 			}
 		}()
-		if countWrites(proxyClient, nil) != proxyClient {
-			t.Error("the writes to a conn with no socket asked are counted")
-		}
-		if countWrites(proxyClient, &countedLooks{}) != proxyClient {
-			t.Error("the writes are counted for a client socket that is no TCP socket's")
-		}
+		countFromAccept(CountClientWrites(proxyClient), nil)
+		countFromAccept(CountClientWrites(proxyClient), &countedLooks{})
 	}()
 }
 
@@ -195,7 +190,7 @@ func TestTheCountOfWritesSaysWhatMayHaveBeenWritten(t *testing.T) {
 	t.Parallel()
 	t.Run("a Write that ends", func(t *testing.T) {
 		_, proxyClient := loopbackPair(t)
-		c := &writeCountingConn{Conn: proxyClient, count: &writeCount{}}
+		c := countedOver(proxyClient)
 		if n, err := c.Write(make([]byte, 1000)); n != 1000 || err != nil {
 			t.Fatalf("Write: %d %v", n, err)
 		}
@@ -205,7 +200,7 @@ func TestTheCountOfWritesSaysWhatMayHaveBeenWritten(t *testing.T) {
 	})
 	t.Run("a Write that runs until the client reads", func(t *testing.T) {
 		app, proxyClient := dialSmallWindow(t)
-		c := &writeCountingConn{Conn: proxyClient, count: &writeCount{}}
+		c := countedOver(proxyClient)
 		n := 4 << 20 // more than both buffers hold
 		wrote := make(chan error, 1)
 		go func() { _, err := c.Write(make([]byte, n)); wrote <- err }()
@@ -231,7 +226,7 @@ func TestTheCountOfWritesSaysWhatMayHaveBeenWritten(t *testing.T) {
 	})
 	t.Run("a Write that fails", func(t *testing.T) {
 		app, proxyClient := loopbackPair(t)
-		c := &writeCountingConn{Conn: proxyClient, count: &writeCount{}}
+		c := countedOver(proxyClient)
 		if err := app.(*net.TCPConn).SetLinger(0); err != nil {
 			t.Fatal(err)
 		}
@@ -247,18 +242,13 @@ func TestTheCountOfWritesSaysWhatMayHaveBeenWritten(t *testing.T) {
 	})
 	t.Run("CloseWrite", func(t *testing.T) {
 		app, proxyClient := loopbackPair(t)
-		c := &writeCountingConn{Conn: proxyClient, count: &writeCount{}}
+		c := countedOver(proxyClient)
 		if err := c.CloseWrite(); err != nil {
 			t.Fatalf("CloseWrite: %v", err)
 		}
 		_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
 		if got, err := io.ReadAll(app); err != nil || len(got) != 0 {
 			t.Fatalf("the client read %d bytes, %v; want the FIN", len(got), err)
-		}
-		a, b := net.Pipe()
-		t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
-		if err := (&writeCountingConn{Conn: a, count: &writeCount{}}).CloseWrite(); !errors.Is(err, errNoCloseWrite) {
-			t.Fatalf("CloseWrite of a conn that cannot half-close: %v, want errNoCloseWrite", err)
 		}
 	})
 }
@@ -318,8 +308,8 @@ func TestXNUCountsWhatIsCertainAcrossWritesThatRun(t *testing.T) {
 
 // The proxy counts what is written to an accepted client's socket from its
 // accept (CountClientWrites): the relay counts from there, under a TLS layer
-// and a wrapper over it too, puts no count of its own over the conn, and the
-// socket is found under the count (AcceptedConn). Writes through the count
+// and a wrapper over it too, and the socket is found under the count
+// (AcceptedConn). Writes through the count
 // reach the socket and are counted, and it half-closes the socket. A socket
 // that cannot answer as it is accepted, and a conn that is not the accepted
 // socket, are not counted.
@@ -336,8 +326,9 @@ func TestTheCountFromTheAcceptIsTheRelaysUnderTLSToo(t *testing.T) {
 		if s == nil {
 			t.Fatalf("the socket under %T is not asked", src)
 		}
-		if c := countWrites(src, s); c != src || s.writes != a.count || s.unsent0 != uint64(a.begin.sbbytes) || !s.seen {
-			t.Errorf("countWrites(%T) gave %T, counting from the accept: %v", src, c, s.writes == a.count)
+		countFromAccept(src, s)
+		if s.writes != a.count || s.unsent0 != uint64(a.begin.sbbytes) || !s.seen {
+			t.Errorf("the relay under %T does not count from the accept: %v", src, s.writes == a.count)
 		}
 	}
 	if _, err := a.Write([]byte("0123456789")); err != nil {
@@ -385,7 +376,11 @@ func TestTheCountFromTheAcceptIsTheRelaysUnderTLSToo(t *testing.T) {
 	// What the send buffer held as the count began is the count's start.
 	held := &countedClient{tcp: proxyClient.(*net.TCPConn), count: &writeCount{}, begin: darwinTCPInfo{sbbytes: 7}}
 	held.Conn = held.tcp
-	if s, _ := clientSocketOf(held, zap.NewNop()).(*tcpClientSocket); s == nil || countWrites(held, s) != net.Conn(held) || s.unsent0 != 7 {
+	s, _ := clientSocketOf(held, zap.NewNop()).(*tcpClientSocket)
+	if s == nil {
+		t.Fatal("the socket under the count is not asked")
+	}
+	if countFromAccept(held, s); s.unsent0 != 7 {
 		t.Error("the count does not start from what the send buffer held as it began")
 	}
 }
@@ -398,12 +393,15 @@ func TestTheCountFromTheAcceptIsTheRelaysUnderTLSToo(t *testing.T) {
 // exactly, so through the relay the part of the answer the client never
 // acknowledged is refused, every byte of it, and the rest is in the
 // destination's stream. Here the flag is set on the socket's real answers
-// once the client's window has closed: the relay's count of its own writes,
-// and the count from the accept, over plain TCP and under TLS.
+// once the client's window has closed, with the count from the accept, over
+// plain TCP and under TLS. A socket with no count from its accept is asked
+// by the count of sequence numbers alone, which cannot say what a resending
+// client took once it reset: the rest of the answer is teed, as before the
+// relay asked, and nothing is refused.
 func TestAResendingClientThatResetsHasWhatItNeverAcknowledgedRefused(t *testing.T) {
 	t.Parallel()
 	for name, by := range map[string]countedBy{
-		"the relay's count":              relayCounts,
+		"no count from the accept":       noAcceptCount,
 		"the count from the accept":      acceptCounts,
 		"the count from the accept, TLS": acceptCountsUnderTLS,
 	} {
@@ -473,11 +471,20 @@ func resendingClientResets(t *testing.T, by countedBy) {
 	var got string
 	select {
 	case got = <-streams:
-		if got == "" || !strings.HasPrefix(answer, got) || len(got) == len(answer) {
-			t.Fatalf("the destination's stream carried %d bytes of the %d-byte answer, want the part the client acknowledged, short of the whole", len(got), len(answer))
-		}
 	case <-time.After(tcpSettle):
 		t.Fatal("the destination's stream did not end")
+	}
+	if by == noAcceptCount {
+		if got != answer {
+			t.Fatalf("the destination's stream carried %d bytes of the %d-byte answer, want it all, teed", len(got), len(answer))
+		}
+		if chunks, bytes := r.NotTaken(); chunks != 0 || bytes != 0 {
+			t.Fatalf("%d chunks (%d bytes) not taken with no count from the accept, want none", chunks, bytes)
+		}
+		return
+	}
+	if got == "" || !strings.HasPrefix(answer, got) || len(got) == len(answer) {
+		t.Fatalf("the destination's stream carried %d bytes of the %d-byte answer, want the part the client acknowledged, short of the whole", len(got), len(answer))
 	}
 	if chunks, bytes := r.NotTaken(); chunks == 0 || bytes != int64(len(answer)-len(got)) {
 		t.Fatalf("%d chunks (%d bytes) not taken, want every byte of the %d written not in the stream's %d",

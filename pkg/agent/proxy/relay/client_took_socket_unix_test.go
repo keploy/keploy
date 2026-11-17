@@ -635,7 +635,7 @@ func TestWrittenCountsEveryByteWrittenToARealSocket(t *testing.T) {
 }
 
 // seenWrites counts the bytes written through it to the socket under it (n),
-// as a test counts them, apart from the relay's own count.
+// as a test counts them, apart from any count of keploy's.
 type seenWrites struct {
 	net.Conn
 	n atomic.Uint64
@@ -778,13 +778,16 @@ func TestAfterTheClientHalfClosed_AClientNotReadingYetIsWaitedFor(t *testing.T) 
 // more than the client's receive buffer holds, and the rest waits in the
 // proxy's send queue while the client, its window full, reads nothing. Once
 // the client reads them all, its stack has acknowledged every one of them.
-// The bytes are written as the relay writes them: through countWrites (on
-// macOS the count the socket answers from).
+// The bytes are written as the proxy writes them: through the count it puts
+// on the socket as it accepts it (CountClientWrites), which the relay's looks
+// read from (countFromAccept; on macOS the count the socket answers from,
+// begun before the write).
 func TestWrittenCountsWhatTheClientHasNotAcknowledgedYet(t *testing.T) {
 	t.Parallel()
 	app, proxyClient := dialSmallWindow(t)
-	s := clientSocketOf(proxyClient, zap.NewNop())
-	client := countWrites(proxyClient, s)
+	client := CountClientWrites(proxyClient)
+	s := clientSocketOf(client, zap.NewNop())
+	countFromAccept(client, s)
 	n := uint64(receiveBufferBoundOf(t, app) + 128<<10)
 	if _, err := client.Write(make([]byte, n)); err != nil {
 		t.Fatal(err)
@@ -823,16 +826,14 @@ func TestWrittenCountsWhatTheClientHasNotAcknowledgedYet(t *testing.T) {
 // client took is teed; the second answer is refused. A count of only the
 // acknowledged bytes judged the second answer from inside the first and, once
 // the client acknowledged more of the first, recorded the second.
-func TestAChunkBehindOneThatIsNotAcknowledgedYetIsJudgedFromItsOwnFirstByte(t *testing.T) {
-	t.Parallel()
-	judgedFromItsOwnFirstByte(t, relayCounts)
-}
-
-// The same, with the client's socket counted from its accept, as the proxy
-// counts it (CountClientWrites): over plain TCP, and under TLS, where every
-// chunk the relay writes reaches the socket as a TLS record. On macOS the
-// count is what the client acknowledged is read from (client_took_darwin.go);
-// on Linux it is the socket itself, and the rows run as before.
+//
+// Here the client's socket is counted from its accept, as the proxy counts it
+// (CountClientWrites): over plain TCP, and under TLS, where every chunk the
+// relay writes reaches the socket as a TLS record. On macOS the count is what
+// the client acknowledged is read from (client_took_darwin.go); on Linux it is
+// the socket itself, which counts what its client acknowledged, and Linux
+// runs the row on the socket as the listener gave it too
+// (TestAChunkBehindOneThatIsNotAcknowledgedYetIsJudgedFromItsOwnFirstByte).
 func TestAChunkBehindOneIsJudgedFromItsOwnFirstByteOnASocketCountedFromItsAccept(t *testing.T) {
 	t.Parallel()
 	judgedFromItsOwnFirstByte(t, acceptCounts)
@@ -843,12 +844,13 @@ func TestAChunkBehindOneIsJudgedFromItsOwnFirstByteUnderTLS(t *testing.T) {
 	judgedFromItsOwnFirstByte(t, acceptCountsUnderTLS)
 }
 
-// How a row's client conn is counted: by the relay's own writes, or from the
-// socket's accept (CountClientWrites), over plain TCP or under TLS.
+// How a row's client conn is counted: not at all (the socket as the listener
+// gave it), or from the socket's accept (CountClientWrites), over plain TCP or
+// under TLS.
 type countedBy int
 
 const (
-	relayCounts countedBy = iota
+	noAcceptCount countedBy = iota
 	acceptCounts
 	acceptCountsUnderTLS
 )
@@ -858,7 +860,7 @@ const (
 // test's own count of the bytes written to the socket (sock, under any TLS).
 func clientUnder(t *testing.T, by countedBy, app, proxyClient net.Conn) (src, appEnd net.Conn, sock *seenWrites) {
 	t.Helper()
-	if by == relayCounts {
+	if by == noAcceptCount {
 		sock = &seenWrites{Conn: proxyClient}
 		return sock, app, sock
 	}
@@ -1006,9 +1008,7 @@ func TestWrittenCountsEveryByteUnderTLSFromTheSocketsAccept(t *testing.T) {
 	if s == nil {
 		t.Fatal("the socket under the TLS layer and the count from its accept is not asked")
 	}
-	if c := countWrites(src, s); c != src {
-		t.Fatalf("the relay put its own count (%T) over a client counted from its accept", c)
-	}
+	countFromAccept(src, s)
 	n := receiveBufferBoundOf(t, app) + 128<<10
 	if _, err := src.Write(make([]byte, n)); err != nil {
 		t.Fatal(err)
