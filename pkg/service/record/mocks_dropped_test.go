@@ -102,7 +102,7 @@ func (i *droppedInstr) GetIncoming(ctx context.Context, _ models.IncomingOptions
 	out := make(chan *models.TestCase)
 	go func() {
 		defer close(out)
-		for tc := range i.fakeInstr.incoming {
+		for tc := range i.incoming {
 			select {
 			case out <- tc:
 			case <-ctx.Done():
