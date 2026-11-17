@@ -101,12 +101,15 @@ func TestAppName(t *testing.T) {
 // had, the folder's ("b"), not the new default ("orders-api-a-b"): record
 // writes the name into it once, and the next run reads it and leaves the
 // file as it is. The agent, which reads the keploy.yml its parent wrote,
-// never writes it.
+// never writes it, nor does any other command that neither records nor
+// tests (templatize here): it reads the name and leaves the file byte for
+// byte.
 func TestRecordKeepsAnExistingProjectsAppName(t *testing.T) {
 	for _, c := range []struct{ name, cmd, doc, want string }{
 		{"no appName", "record", "# my project\ncommand: ./app\n", "# my project\nappName: \"b\"\ncommand: ./app\n"},
 		{"appName \"\" of an older keploy", "record", "appName: \"\"\ncommand: ./app\n", "appName: \"b\"\ncommand: ./app\n"},
 		{"the agent", "agent", "# my project\ncommand: ./app\n", "# my project\ncommand: ./app\n"},
+		{"a command that neither records nor tests", "templatize", "# my project\ncommand: ./app\n", "# my project\ncommand: ./app\n"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			original := NativeCommandSupported
@@ -150,5 +153,59 @@ func TestRecordKeepsAnExistingProjectsAppName(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Only keploy record, keploy test, keploy mock record and keploy mock replay
+// write the app's name into keploy.yml, each by its path below the root.
+func TestRecordsOrTests(t *testing.T) {
+	root := &cobra.Command{Use: "keploy"}
+	leaf := func(parent *cobra.Command, name string) *cobra.Command {
+		c := &cobra.Command{Use: name}
+		parent.AddCommand(c)
+		return c
+	}
+	mock, contract, app := leaf(root, "mock"), leaf(root, "contract"), leaf(root, "app")
+	local := leaf(leaf(root, "sandbox"), "local")
+	for c, want := range map[*cobra.Command]bool{
+		leaf(root, "record"):   true,
+		leaf(root, "test"):     true,
+		leaf(mock, "record"):   true,
+		leaf(mock, "replay"):   true,
+		leaf(root, "agent"):    false,
+		leaf(root, "report"):   false,
+		leaf(root, "replay"):   false,
+		leaf(contract, "test"): false,
+		leaf(mock, "upload"):   false,
+		leaf(mock, "test"):     false,
+		leaf(app, "create"):    false,
+		leaf(local, "record"):  false,
+		root:                   false,
+		mock:                   false,
+		// A command with no parent, as rows build one, by its own name.
+		{Use: "record"}: true,
+		{Use: "agent"}:  false,
+	} {
+		if got := RecordsOrTests(c); got != want {
+			t.Errorf("RecordsOrTests(%q) = %v, want %v", c.CommandPath(), got, want)
+		}
+	}
+}
+
+// A working directory that is gone fails the run, as utils.WorkingDirectory
+// does, whatever name the run was given.
+func TestAppNameInAGoneWorkingDirectory(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Skipf("this system keeps a working directory from being removed: %v", err)
+	}
+	for _, configured := range []string{"", "orders"} {
+		if name, err := AppName(zap.NewNop(), configured, "", false); err == nil {
+			t.Errorf("AppName(%q) in a gone working directory = %q, want an error", configured, name)
+		}
 	}
 }

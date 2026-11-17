@@ -795,8 +795,9 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 		return err
 	}
 
-	// The agent reads the keploy.yml its parent wrote, and writes none.
-	appName, err := AppName(c.logger, c.cfg.AppName, ConfigFile, cmd.Name() != "agent")
+	// Only a run that records or tests writes the name into keploy.yml;
+	// every other command, the agent among them, reads it.
+	appName, err := AppName(c.logger, c.cfg.AppName, ConfigFile, RecordsOrTests(cmd))
 	if err != nil {
 		// Said here, as every other refusal is: nothing else says it.
 		utils.LogError(c.logger, err, "failed to get the last directory for appName")
@@ -872,6 +873,25 @@ func AppName(logger *zap.Logger, configured, configFile string, write bool) (str
 	}
 	logger.Info(fmt.Sprintf("%s named no app, so keploy wrote appName %q into it: the name runs from this folder have had, which the project keeps", configFile, old))
 	return old, nil
+}
+
+// RecordsOrTests says whether cmd records or tests an app: keploy record,
+// keploy test, keploy mock record and keploy mock replay. Only these write the
+// app's name into a keploy.yml that names none; every other command (the
+// agent, report, an enterprise app, branch, mock registry or cloud command)
+// reads the name and leaves the file as it is. cmd is named by its path below
+// the root command, so contract test is not test; a command with no parent is
+// taken by its own name.
+func RecordsOrTests(cmd *cobra.Command) bool {
+	path := cmd.Name()
+	for c := cmd.Parent(); c != nil && c.HasParent(); c = c.Parent() {
+		path = c.Name() + " " + path
+	}
+	switch path {
+	case "record", "test", "mock record", "mock replay":
+		return true
+	}
+	return false
 }
 
 // sameFolder says whether a and b are one folder, by whatever paths.
