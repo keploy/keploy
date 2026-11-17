@@ -348,8 +348,10 @@ func TestReplayFault_ADelayHoldsTheWholeAnswerBoundedByTheRun(t *testing.T) {
 	const delay = 50 * time.Millisecond
 	m := faultMock(&models.Fault{Kind: models.FaultDelay, Delay: delay},
 		okHead(`{"ok":true}`, map[string]string{"Content-Length": "11"}))
-	app, returned := replaying(t, &HTTP{Logger: zap.NewNop()}, m)
+	// The call is sent when replaying hands it to keploy, which may hold it
+	// from then, before replaying returns: the hold is timed from before.
 	sent := time.Now()
+	app, returned := replaying(t, &HTTP{Logger: zap.NewNop()}, m)
 	got := readUntil(app, `{"ok":true}`, 10*time.Second)
 	if !strings.HasPrefix(got, "HTTP/1.1 200 OK\r\n") || !strings.HasSuffix(got, `{"ok":true}`) {
 		t.Fatalf("the delayed call was answered %q, want its whole answer", got)
