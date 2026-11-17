@@ -234,6 +234,9 @@ func BuildDelayExample(command string) string {
 var VersionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
 var IsConfigFileFound = true
 
+// ConfigFile is the keploy.yml PreProcessFlags read, "" when it found none.
+var ConfigFile string
+
 type CmdConfigurator struct {
 	logger *zap.Logger
 	cfg    *config.Config
@@ -792,23 +795,14 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 		return err
 	}
 
-	// A run given no name (--app-name, keploy.yml's appName) is named after
-	// its git repository and its folder's path inside it, or after its folder
-	// outside one; the name goes into the keploy.yml a first run writes, so
-	// later runs keep it.
-	appName, from, err := utils.DefaultAppName()
+	// The agent reads the keploy.yml its parent wrote, and writes none.
+	appName, err := AppName(c.logger, c.cfg.AppName, ConfigFile, cmd.Name() != "agent")
 	if err != nil {
 		// Said here, as every other refusal is: nothing else says it.
 		utils.LogError(c.logger, err, "failed to get the last directory for appName")
 		return fmt.Errorf("failed to get the last directory for appName: %v", err)
 	}
-
-	if c.cfg.AppName == "" {
-		c.logger.Info(fmt.Sprintf("Naming the app %q after %s; set appName in keploy.yml or pass --app-name to name it otherwise", appName, from))
-		c.cfg.AppName = appName
-	} else if c.cfg.AppName != appName {
-		c.logger.Debug(fmt.Sprintf("Using appName %q from the config; %s would name it %q", c.cfg.AppName, from, appName))
-	}
+	c.cfg.AppName = appName
 
 	// The "create config file if missing" behavior is meaningful
 	// only for user-facing commands (record/test/etc.) that are
@@ -834,6 +828,58 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 		}
 	}
 	return nil
+}
+
+// AppName is the name a run records and reports under. configured, the
+// name the run was given (--app-name, KEPLOY_APPNAME, or appName in
+// keploy.yml or its override), is kept. A run given none is named:
+//   - with no keploy.yml (configFile ""), after its git repository and its
+//     folder's path inside it, or after its folder outside one
+//     (utils.DefaultAppName); the keploy.yml the run writes keeps the name;
+//   - with a keploy.yml that names no app, an existing project's, after its
+//     folder, as every run named it before keploy read repositories, so the
+//     project keeps its name. With write, a run from the keploy.yml's own
+//     folder writes the name into it once (tools.AddAppName), for later runs
+//     to read; a file it cannot write is said in a warning, and the run goes
+//     on under that name.
+//
+// It fails, as utils.WorkingDirectory does, once the working directory is
+// gone, whatever the run was given.
+func AppName(logger *zap.Logger, configured, configFile string, write bool) (string, error) {
+	dir, err := utils.WorkingDirectory()
+	if err != nil {
+		return "", err
+	}
+	if configured != "" {
+		return configured, nil
+	}
+	if configFile == "" {
+		name, from := utils.AppNameFor(dir)
+		logger.Info(fmt.Sprintf("Naming the app %q after %s; set appName in keploy.yml or pass --app-name to name it otherwise", name, from))
+		return name, nil
+	}
+	old := filepath.Base(dir)
+	// A keploy.yml in another folder (--config-path) may be shared by the
+	// services of a monorepo, each run named after its own folder: a name
+	// written into it would rename the others, so only a run from the
+	// file's own folder writes one.
+	if !write || !sameFolder(filepath.Dir(configFile), dir) {
+		return old, nil
+	}
+	if err := tools.AddAppName(configFile, old); err != nil {
+		logger.Warn(fmt.Sprintf("%s names no app, so this run uses %q, the name runs from this folder have had; keploy could not write it into the file (%v): set appName there to keep it", configFile, old, err))
+		return old, nil
+	}
+	logger.Info(fmt.Sprintf("%s named no app, so keploy wrote appName %q into it: the name runs from this folder have had, which the project keeps", configFile, old))
+	return old, nil
+}
+
+// sameFolder says whether a and b are one folder, by whatever paths.
+func sameFolder(a, b string) bool {
+	// A folder Stat fails for is nil, which is the same file as none.
+	fa, _ := os.Stat(a)
+	fb, _ := os.Stat(b)
+	return os.SameFile(fa, fb)
 }
 
 func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
@@ -885,6 +931,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	// --path, <path>/keploy is also where keploy keeps its tests, which
 	// utils.EnsureKeployPathIsFolder explains.
 	configFile := loader.Find(configPath)
+	ConfigFile = configFile
 	viper.SetConfigType("yml")
 	if configFile == "" {
 		IsConfigFileFound = false
