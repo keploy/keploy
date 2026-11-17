@@ -50,10 +50,13 @@ import (
 //
 // On a time field the time default settles the refusals the clock checks
 // give of which read, or which scope, a moment is (timeSettles); a two-sources
-// refusal only where both sources are reads of the clock. A Value, a Fresh
-// value and every other refusal stay as learned: a moment an earlier answer
-// or request also holds (pick, unknown, two sources that are no reads) is a
-// bound value, which variables decide, never the time default. A value
+// refusal only where both sources are reads of the clock; and, at a
+// decoder-typed leaf, a pick: round F's moment also stands in an answer it
+// gave earlier, and a decoder-typed time is checked by its type and format
+// alone (a time never blocks keeping a test). A Value, a Fresh value and
+// every other refusal stay as learned: a moment an earlier answer or request
+// also holds in a text (pick), unknown, or two sources that are no reads is
+// a bound value, which variables decide, never the time default. A value
 // whose two runs write it in two forms of an instant (a zone offset in one
 // run where the other wrote Z, an epoch in seconds in one and milliseconds
 // in the other) is checked by its forms alone too: a replay passes a value
@@ -201,10 +204,11 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 // settles reports whether the time default settles a refusal of kind k of
 // the instant instantLearned last decided, at a decoder-typed leaf (typed)
 // or one a clock rule names (declared): on a time field, a refusal of which
-// read, or which scope, a moment is (timeSettles), and a two-sources refusal
-// only where both sources are reads of the clock (readClock: see above).
+// read, or which scope, a moment is (timeSettles), a two-sources refusal
+// only where both sources are reads of the clock (readClock: see above),
+// and a pick at a decoder-typed leaf.
 func (dc *decider) settles(k RefusalKind, typed, declared bool) bool {
-	return k == RefusalTwoSources && dc.readClock || timeSettles[k] && (typed || declared || dc.readClock)
+	return k == RefusalTwoSources && dc.readClock || timeSettles[k] && (typed || declared || dc.readClock) || k == RefusalPick && typed
 }
 
 // amongBinds is d, the refusal of c, a time the time default settles

@@ -96,7 +96,7 @@ func TestTheTimeDefaultKeepsATimeTheClockChecksRefuse(t *testing.T) {
 		{"an answer outside the scope holds the moment", cCall(cR, cF, []Raw{cAns(cR, cF)}, true), RefusalAnotherScope, false, true},
 		{"round F's value a cached time, a minute old", cCall(cR, stale, nil, false), RefusalNoClockRead, false, true},
 		{"an answer served with no view stated", cCall(cR, cF, []Raw{oAnswer("mock-7", 100*time.Millisecond, cF).ServedAs(1)}, false), RefusalUnknown, false, false},
-		{"an answer that gave round F's moment as recorded", cCall(cR, cF, []Raw{oAnswer("mock-7", 100*time.Millisecond, cF).ServedAs(1).ServedAsRecorded()}, false), RefusalPick, false, false},
+		{"an answer that gave round F's moment as recorded", cCall(cR, cF, []Raw{oAnswer("mock-7", 100*time.Millisecond, cF).ServedAs(1).ServedAsRecorded()}, false), RefusalPick, false, true},
 		{"the call's own answer holds the read", echo, RefusalCannotCheck, true, true},
 		{"a clock rule's range holds neither run", rule, RefusalNoClockRead, true, true},
 	} {
