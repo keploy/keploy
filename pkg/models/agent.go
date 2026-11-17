@@ -1453,10 +1453,13 @@ const MocksDroppedSaid = "the keploy agent dropped some mocks after capturing th
 // pressure and for its mock output (closed, full, or its consumer stalled),
 // and the first of them, each named with why (StreamEndSummary).
 type MockDropSummary struct {
-	ByPressure int64    `json:"by_memory_pressure"`
-	Capacity   uint64   `json:"for_the_output"`
-	Named      []string `json:"first_dropped,omitempty"`
+	ByPressure int64    `json:"by_memory_pressure" bson:"by_memory_pressure" yaml:"byMemoryPressure"`
+	Capacity   uint64   `json:"for_the_output" bson:"for_the_output" yaml:"forTheOutput"`
+	Named      []string `json:"first_dropped,omitempty" bson:"first_dropped,omitempty" yaml:"firstDropped,omitempty"`
 }
+
+// Dropped reports whether d counts a dropped mock.
+func (d MockDropSummary) Dropped() bool { return d.ByPressure > 0 || d.Capacity > 0 }
 
 // PressureSkipSummary is how many requests a recording did not record
 // because the memory guard had paused recording when they came, and on how
