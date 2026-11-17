@@ -79,12 +79,15 @@ func readWinTCPInfo(b []byte) (winTCPInfo, bool) {
 // TimeoutEpisodes 0 throughout, and BytesOut less BytesRetrans and
 // BytesInFlight equal to the bytes the client had acknowledged, before its
 // reset and after). So the bytes sent once are BytesOut less BytesRetrans
-// (sentOnce). A tail-loss probe's resend is read as a window probe's is,
-// BytesOut and BytesRetrans each counting the bytes it sends again; the loss
-// recovery that can follow it, a fast retransmit or a timeout, trips the
-// fence, and from then on the fallback holds: the counts say nothing, and
-// what the destination sends a closed client is teed as it is written, as
-// before.
+// (sentOnce). A tail-loss probe's resend counts the same way (measured from
+// Windows 11 to a Linux host over the LAN, 40 connections whose last data
+// segment was dropped once, 20 with it alone in flight and 20 after 2,000
+// bytes: each sent it again once, 205-232 ms in, BytesOut and BytesRetrans
+// each counting the resend, FastRetrans and TimeoutEpisodes 0, so BytesOut
+// less BytesRetrans was the bytes written). A loss recovery that goes
+// further, a fast retransmit or a timeout, trips the fence, and from then on
+// the fallback holds: the counts say nothing, and what the destination sends
+// a closed client is teed as it is written, as before.
 func (i winTCPInfo) counted() bool {
 	return i.fastRetrans == 0 && i.timeouts == 0
 }
