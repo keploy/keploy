@@ -264,8 +264,17 @@ func TestAWatchWhoseDaemonWillNotSayItsTimeTakesKeploysClock(t *testing.T) {
 			if reads != c.wantReads {
 				t.Fatalf("%s=%q %s: %d reads of the daemon's time; want %d", provenswitch.Env, proven, c.name, reads, c.wantReads)
 			}
-			if w := logs.FilterMessageSnippet("could not read the docker daemon's time").Len(); w != 1 {
-				t.Fatalf("%s=%q %s: %d warnings that keploy takes its own clock; want 1", provenswitch.Env, proven, c.name, w)
+			warned := logs.FilterMessageSnippet("could not read the docker daemon's time").All()
+			if len(warned) != 1 {
+				t.Fatalf("%s=%q %s: %d warnings that keploy takes its own clock; want 1", provenswitch.Env, proven, c.name, len(warned))
+			}
+			// A time it gave but cannot use is named, so the user sees
+			// what the daemon said.
+			if c.infoTime != "" {
+				gave := "the daemon gave the time " + strconv.Quote(c.infoTime)
+				if why, _ := warned[0].ContextMap()["error"].(string); why != gave {
+					t.Fatalf("%s=%q %s: the warning says %q; want %q", provenswitch.Env, proven, c.name, why, gave)
+				}
 			}
 			<-d.asked
 			d.die(4, false, 0)
