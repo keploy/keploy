@@ -33,12 +33,18 @@ func (s AppNameSource) andPath(rel string) AppNameSource {
 // (no --app-name, no appName in keploy.yml): AppNameFor the working directory.
 // It fails as GetLastDirectory does once the working directory is gone.
 func DefaultAppName() (string, AppNameSource, error) {
-	dir, err := workingDirectory(os.Getwd)
+	dir, err := WorkingDirectory()
 	if err != nil {
 		return "", "", err
 	}
 	name, from := AppNameFor(dir)
 	return name, from, nil
+}
+
+// WorkingDirectory is the folder the process is in. It fails as
+// GetLastDirectory does once that folder is gone.
+func WorkingDirectory() (string, error) {
+	return workingDirectory(os.Getwd)
 }
 
 // AppNameFor names the app recorded from dir. Inside a git repository it is
