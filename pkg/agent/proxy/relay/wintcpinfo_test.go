@@ -2,6 +2,8 @@ package relay
 
 import (
 	"encoding/binary"
+	"net"
+	"os"
 	"syscall"
 	"testing"
 )
@@ -119,6 +121,41 @@ func TestAWindowsSocketsResetIsToldFromItsStateAndCounts(t *testing.T) {
 	} {
 		if got := row.info.resetCode(row.finRead, row.finSent); got != row.want {
 			t.Errorf("%s (FIN read %v, sent %v): resetCode = %v, want %v", row.name, row.finRead, row.finSent, got, row.want)
+		}
+	}
+}
+
+// winsockRead is a read's error as Windows' net gives it for errno.
+func winsockRead(errno syscall.Errno) error {
+	return &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("wsarecv", errno)}
+}
+
+// A Windows read's reset is taken as one that came after the client's FIN
+// only in the case measured: WSAECONNABORTED on a connection CLOSED with a
+// byte in flight, no timeout episode and no FIN of the proxy's. Every other
+// read is a reset, as before.
+func TestAWindowsReadsResetIsAfterTheClientsFINOnlyByItsCodeAndCounts(t *testing.T) {
+	t.Parallel()
+	closed := winTCPInfo{state: wtcpClosed, out: 8, inFlight: 8}
+	for _, row := range []struct {
+		name    string
+		err     error
+		info    winTCPInfo
+		finSent bool
+		want    bool
+	}{
+		{"WSAECONNABORTED, closed with the proxy's bytes in flight", winsockRead(wsaeConnAborted), closed, false, true},
+		{"the same, retransmitted once", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 8, retrans: 8}, false, true},
+		{"WSAECONNRESET: a reset with no FIN before", winsockRead(10054), closed, false, false},
+		{"WSAENETRESET", winsockRead(10052), closed, false, false},
+		{"a read that ended in no error", nil, closed, false, false},
+		{"a timeout episode", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 8, timeouts: 1}, false, false},
+		{"nothing in flight", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8}, false, false},
+		{"after the proxy's FIN", winsockRead(wsaeConnAborted), closed, true, false},
+		{"not closed", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpCloseWait, out: 8, inFlight: 8}, false, false},
+	} {
+		if got := row.info.resetAfterFIN(row.err, row.finSent); got != row.want {
+			t.Errorf("%s: resetAfterFIN = %v, want %v", row.name, got, row.want)
 		}
 	}
 }

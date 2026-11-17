@@ -113,6 +113,36 @@ func halfClosedRequest(t *testing.T, app, server net.Conn) {
 // is in, after a look found the connection open.
 func TestAClientThatResetsWithNoFINIsReadAsAResetWhenReadLate(t *testing.T) {
 	t.Parallel()
+	lateReadOfAResetWithNoFIN(t, func(app net.Conn) {
+		awaitUnread(t, app)
+		_ = app.Close()
+	})
+}
+
+// The same for a client that aborts (SO_LINGER 0) with every byte taken: on
+// Windows its reset makes the late read fail with WSAECONNRESET, a reset.
+func TestAClientThatAbortsWithNoFINIsReadAsAResetWhenReadLate(t *testing.T) {
+	t.Parallel()
+	lateReadOfAResetWithNoFIN(t, func(app net.Conn) {
+		if _, err := io.ReadFull(app, make([]byte, len(lateAnswer))); err != nil {
+			t.Fatalf("the client did not read the answer: %v", err)
+		}
+		if err := app.(*net.TCPConn).SetLinger(0); err != nil {
+			t.Fatal(err)
+		}
+		_ = app.Close()
+	})
+}
+
+// lateAnswer is the destination's answer in lateReadOfAResetWithNoFIN.
+const lateAnswer = "the destination's answer"
+
+// lateReadOfAResetWithNoFIN has the client send a request, the destination
+// answer it, and then the client end the connection with a reset and no FIN
+// (end), with the relay's read of the client's end held until the reset is in:
+// the relay must tell the client's end once, as a reset.
+func lateReadOfAResetWithNoFIN(t *testing.T, end func(app net.Conn)) {
+	t.Helper()
 	app, proxyClient := loopbackPair(t)
 	proxyServer, server := loopbackPair(t)
 	release := make(chan struct{})
@@ -132,12 +162,11 @@ func TestAClientThatResetsWithNoFINIsReadAsAResetWhenReadLate(t *testing.T) {
 	if _, err := io.ReadFull(server, make([]byte, 3)); err != nil {
 		t.Fatalf("the destination did not read the request: %v", err)
 	}
-	if _, err := server.Write([]byte("an answer the client leaves unread")); err != nil {
+	if _, err := server.Write([]byte(lateAnswer)); err != nil {
 		t.Fatal(err)
 	}
-	awaitUnread(t, app)
-	_ = app.Close()
-	awaitTCPState(t, proxyClient, stateClosed, "the client closed with the answer unread")
+	end(app)
+	awaitTCPState(t, proxyClient, stateClosed, "the client reset with no FIN")
 	// The destination stays open until the relay has ended: the client's
 	// reset, once read, ends it. A FIN from the destination now would race
 	// the late read, and a forwarder that finds the relay torn down by the
@@ -154,6 +183,51 @@ func TestAClientThatResetsWithNoFINIsReadAsAResetWhenReadLate(t *testing.T) {
 	if len(run.ends) != 1 || !run.ends[0] {
 		t.Fatalf("PeerEnded was told of the client's end %v, want once, a reset", run.ends)
 	}
+}
+
+// A closed client whose FIN races the answer, with the relay's read of the
+// client's end held until the FIN and the client's reset of the answer are
+// both in: Linux's read returns the FIN and leaves the reset on the socket;
+// macOS's returns the reset, and the relay tells from the socket that the FIN
+// came first; Windows' returns the reset with WSAECONNABORTED, the code it
+// gives a reset that came after the client's FIN (resetAfterFIN). On each
+// the relay reads the FIN as the client's end, forwards it, and hands the
+// reset on as it ends.
+func TestAClosedClientWhoseFINAndResetAreBothInBeforeTheReadHasTheFINRead(t *testing.T) {
+	t.Parallel()
+	app, proxyClient := loopbackPair(t)
+	proxyServer, server := loopbackPair(t)
+	release := make(chan struct{})
+	c := &finInFlightConn{Conn: &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, release: release}
+	c.hook = func() {
+		_ = app.Close()
+		awaitTCPState(t, proxyClient, stateCloseWait, "the closed client's FIN is in")
+	}
+	run := runClientEnd(t, c, proxyServer)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	if _, err := app.Write([]byte("req")); err != nil {
+		t.Fatal(err)
+	}
+	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(server, make([]byte, 3)); err != nil {
+		t.Fatalf("the destination did not read the request: %v", err)
+	}
+	if _, err := server.Write([]byte("inflight")); err != nil {
+		t.Fatal(err)
+	}
+	awaitTCPState(t, proxyClient, stateClosed, "the closed client resets the answer")
+	close(release)
+	if rest, err := io.ReadAll(server); err != nil || len(rest) != 0 {
+		t.Fatalf("the destination read %d bytes, %v, want the forwarded FIN", len(rest), err)
+	}
+	_ = server.Close()
+	run.ended(t, "inflight", true)
 }
 
 // A destination that resets the connection after the client's FIN is read

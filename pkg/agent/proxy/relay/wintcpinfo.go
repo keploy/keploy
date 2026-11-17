@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/binary"
+	"errors"
 	"syscall"
 )
 
@@ -141,4 +142,31 @@ func (i winTCPInfo) resetCode(finRead, finSent bool) syscall.Errno {
 		return syscall.EPIPE
 	}
 	return syscall.ECONNRESET
+}
+
+// wsaeConnAborted is Winsock's WSAECONNABORTED (winerror.h), named on every
+// OS so the rows that judge it run on every OS.
+const wsaeConnAborted syscall.Errno = 10053
+
+// resetAfterFIN reports whether a read of the client's socket that failed
+// with readErr, on a socket that now says i, returned a reset that came after
+// the client's FIN, where no look found that FIN in before (Windows: its
+// TCP_INFO_v0 has no rcv_nxt to count the FIN by, as macOS's has).
+//
+// Windows' read tells the two apart by its code. Measured on Windows 11 over
+// loopback, 200 of 200 runs each: a client that sent its FIN and then reset
+// the bytes the proxy wrote it after (it had closed its socket) makes the
+// proxy's read fail with WSAECONNABORTED, and every call after it; a client
+// that reset with no FIN before (it closed with bytes unread, or aborted)
+// makes it fail with WSAECONNRESET, also when the proxy writes once the reset
+// is in. Winsock also gives WSAECONNABORTED to a connection its own stack
+// timed out, which counts a timeout episode, and the measured case closed the
+// connection with the proxy's bytes in flight, before any FIN of the proxy's.
+// So only that case is taken: WSAECONNABORTED, the connection CLOSED with a
+// byte in flight, no timeout episode in its life and no FIN of the proxy's
+// (finSent). Anything else is read as a reset, as before, so a reset with no
+// FIN before it is never read as one.
+func (i winTCPInfo) resetAfterFIN(readErr error, finSent bool) bool {
+	return errors.Is(readErr, wsaeConnAborted) && !finSent &&
+		i.state == wtcpClosed && i.inFlight > 0 && i.timeouts == 0
 }

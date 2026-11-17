@@ -1135,11 +1135,11 @@ func (r *Relay) forward(
 			// A reset, as each OS's socket gives it (on Windows,
 			// Winsock's own errors: neterr.IsPeerReset).
 			if neterr.IsPeerReset(err) {
-				if dir == fakeconn.FromClient && r.clientFINBeforeReset() {
-					// macOS: the client's FIN came before the reset this
-					// read returned (client_took_darwin.go). Read as the
-					// FIN, as Linux returns it, and the reset kept for
-					// clientEnd.
+				if dir == fakeconn.FromClient && r.clientFINBeforeReset(err) {
+					// macOS and Windows: the client's FIN came before the
+					// reset this read returned (client_took_darwin.go,
+					// client_socket_windows.go). Read as the FIN, as Linux
+					// returns it, and the reset kept for clientEnd.
 					reset := err
 					r.clientResetRead.CompareAndSwap(nil, &reset)
 					return r.peerFINRead(dir)

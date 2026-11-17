@@ -89,12 +89,14 @@ func IsConnRefused(err error) bool {
 
 // IsPeerReset reports whether err is what a socket's call ends in once its
 // peer reset the connection: IsConnReset's errors, and on Windows also the
-// ones Winsock gives a reset connection's later calls. Measured on Windows 11
-// over loopback: a read waiting as the reset comes, or made after it, ends in
-// WSAECONNRESET (IsConnReset's); a write made once a reset is in, and every
-// call after that write, in WSAECONNABORTED. An overlapped call can also
-// complete with ERROR_NETNAME_DELETED or ERROR_CONNECTION_ABORTED for a reset
-// or an abort, so those are taken too. For a reader that asks how its peer
+// one Winsock gives a reset that came after the peer's FIN. Measured on
+// Windows 11 over loopback: once a peer that reset with no FIN before it (it
+// closed with bytes unread, or aborted), a read, and a write and every call
+// after it, end in WSAECONNRESET (IsConnReset's); once a peer that sent its
+// FIN and then reset the bytes written to it after, they end in
+// WSAECONNABORTED. An overlapped call can also complete with
+// ERROR_NETNAME_DELETED or ERROR_CONNECTION_ABORTED for a reset or an abort,
+// so those are taken too. For a reader that asks how its peer
 // ended the connection, not whether to retry: unlike IsConnReset, it takes
 // WSAECONNABORTED, which Windows also gives a connection its own stack timed
 // out, so there a peer that stopped answering reads as one that reset (Linux
@@ -109,5 +111,5 @@ func IsPeerReset(err error) bool {
 var windowsPeerResetErrnos = []syscall.Errno{
 	64,    // ERROR_NETNAME_DELETED: an overlapped call completed by a reset
 	1236,  // ERROR_CONNECTION_ABORTED: an overlapped call completed by an abort
-	10053, // WSAECONNABORTED: a write once the reset is in, and every call after it
+	10053, // WSAECONNABORTED: every call once a reset that came after the peer's FIN is in
 }

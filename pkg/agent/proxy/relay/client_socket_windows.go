@@ -42,8 +42,9 @@ type tcpClientSocket struct {
 	ebuf       [wtcpInfoSize]byte
 	resetGiven bool
 	// fbuf is closedBeforeFIN's, asked once, as the destination's forwarder
-	// ends, while resolve may look.
-	fbuf [wtcpInfoSize]byte
+	// ends, while resolve may look. rbuf is finBeforeReset's, the client's
+	// forwarder's.
+	fbuf, rbuf [wtcpInfoSize]byte
 
 	// finSent: the relay sent the client its TCP FIN (proxyFINSent).
 	finSent atomic.Bool
@@ -151,11 +152,25 @@ func (s *tcpClientSocket) pendingError(finRead bool) error {
 	return code
 }
 
-// finBeforeReset reports whether the reset the client's forwarder read came
-// after the client's FIN: a look found the FIN in before it (no data comes
-// after a FIN, so the relay had all the client sent). Windows' read returns
-// the reset then, as macOS's does (client_end.go).
-func (s *tcpClientSocket) finBeforeReset() bool { return s.finIn.Load() }
+// finBeforeReset reports whether the reset the client's forwarder read
+// (readErr) came after the client's FIN: a look found the FIN in before it
+// (no data comes after a FIN, so the relay had all the client sent), or the
+// read's code and the socket's TCP_INFO now say it did (winTCPInfo's
+// resetAfterFIN), for a FIN that came in after the relay's last look. Windows'
+// read returns the reset then, as macOS's does (client_end.go). False when
+// the socket cannot answer: the read is then a reset, as before.
+func (s *tcpClientSocket) finBeforeReset(readErr error) bool {
+	if s.finIn.Load() {
+		return true
+	}
+	after := false
+	_ = s.rc.Control(func(fd uintptr) {
+		if info, ok := s.tcpInfo(fd, &s.rbuf); ok {
+			after = info.resetAfterFIN(readErr, s.finSent.Load())
+		}
+	})
+	return after
+}
 
 // proxyFINSent is the relay's word that it sent the client its own TCP FIN
 // (finSentSocket).

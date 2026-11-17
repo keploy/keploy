@@ -57,8 +57,10 @@ import (
 // (client_end_darwin.go), and the relay hands it on as Linux's would be.
 //
 // Windows keeps no error on the socket for a reset in any state, and its read
-// returns the reset where the client's FIN came first, as macOS's does. Its
-// TCP_INFO says the reset from the connection's state and counts instead
+// returns the reset where the client's FIN came first, as macOS's does, with
+// its own code then (WSAECONNABORTED, not WSAECONNRESET: wintcpinfo.go's
+// resetAfterFIN). Its TCP_INFO says the reset from the connection's state and
+// counts instead
 // (wintcpinfo.go), which needs to know whether the proxy sent its own FIN:
 // the relay tells the socket when it does (noteClientFINSent).
 //
@@ -76,19 +78,20 @@ type clientErrorSocket interface {
 }
 
 // resetAfterFINSocket is a clientSocket that can say whether a reset its read
-// returned came after the client's FIN (macOS's and Windows').
+// returned came after the client's FIN (macOS's and Windows'). readErr is the
+// error that read returned, which says it on Windows.
 type resetAfterFINSocket interface {
 	clientSocket
-	finBeforeReset() bool
+	finBeforeReset(readErr error) bool
 }
 
 // clientFINBeforeReset reports whether the reset the client's forwarder read
-// came after the client's FIN, which it then reads as the client's end; false
-// where the socket cannot say (Linux returns the FIN first, so its sockets
-// are never asked).
-func (r *Relay) clientFINBeforeReset() bool {
+// (readErr) came after the client's FIN, which it then reads as the client's
+// end; false where the socket cannot say (Linux returns the FIN first, so its
+// sockets are never asked).
+func (r *Relay) clientFINBeforeReset(readErr error) bool {
 	s, ok := r.client.(resetAfterFINSocket)
-	return ok && s.finBeforeReset()
+	return ok && s.finBeforeReset(readErr)
 }
 
 // finSentSocket is a clientSocket the relay tells when it sends the client its

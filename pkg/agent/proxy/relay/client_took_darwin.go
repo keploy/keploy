@@ -646,8 +646,9 @@ func (s *tcpClientSocket) noteReceived(info *darwinTCPInfo) {
 }
 
 // finBeforeReset reports whether the client's FIN reached the socket before
-// the reset the client's forwarder's read just returned (ECONNRESET).
-func (s *tcpClientSocket) finBeforeReset() bool {
+// the reset the client's forwarder's read just returned (ECONNRESET either
+// way on macOS, so its error says nothing more).
+func (s *tcpClientSocket) finBeforeReset(error) bool {
 	ok := false
 	if err := s.rc.Control(func(fd uintptr) { ok = s.askInfo(fd, &s.rbuf, &s.rinfo) }); err != nil || !ok {
 		return false
