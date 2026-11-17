@@ -196,7 +196,9 @@ type clientSocket interface {
 	// written is how many bytes had been written to the socket in all,
 	// counted as clientLook.acked counts them; ok is false when the socket
 	// cannot say. Where it cannot be had exactly, it is no less than that
-	// (Linux, macOS), or, on Windows, the bytes sent: no more than that.
+	// (Linux, and macOS and Windows through the count from the accept), or,
+	// on a Windows socket with no count from its accept, the bytes sent: no
+	// more than that.
 	written() (n uint64, ok bool)
 }
 

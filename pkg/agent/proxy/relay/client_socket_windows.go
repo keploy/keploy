@@ -18,8 +18,9 @@ const sioTCPInfo = 0xD8000027
 // tcpClientSocket is the proxy's end of a client connection that is a TCP
 // socket, asked through its TCP_INFO_v0 (wintcpinfo.go). Windows' socket has
 // no count of the bytes its send buffer holds and keeps no error for a reset,
-// so written counts only the bytes sent, and pendingError is told from the
-// connection's state and counts.
+// so written reads the count the proxy put on the socket at its accept
+// (client_count_accept.go), or with none the bytes sent, and pendingError is
+// told from the connection's state and counts.
 type tcpClientSocket struct {
 	rc  syscall.RawConn
 	ask func(fd uintptr)
@@ -50,6 +51,15 @@ type tcpClientSocket struct {
 	finSent atomic.Bool
 	// finIn: a look found the client's FIN in (CLOSE_WAIT or LAST_ACK).
 	finIn atomic.Bool
+
+	// writes counts the bytes written to the socket through the count the
+	// proxy put on it at its accept (countFromAccept), nil when it has none;
+	// out0 is the bytes the socket had sent as the count began. bypassed: an
+	// answer counted more bytes sent than could have been written through
+	// the count, so a write went around it (checkCount).
+	writes   *writeCount
+	out0     uint64
+	bypassed atomic.Bool
 }
 
 // newTCPClientSocket is the client socket rc (clientSocketOf); log is where
@@ -113,13 +123,27 @@ func (s *tcpClientSocket) lookAt(fd uintptr) {
 	if !ok {
 		return
 	}
+	s.checkCount(info)
 	s.got = info.look(s.finSent.Load())
 	if s.got.said == clientFinned {
 		s.finIn.Store(true)
 	}
 }
 
+// written is the bytes written through the count from the accept, every byte
+// of a Write still running or failed among them, as macOS counts them
+// (client_took_darwin.go): exact while none is; false once a write went
+// around the count. With no count, the bytes sent (winTCPInfo.sent).
 func (s *tcpClientSocket) written() (uint64, bool) {
+	if s.writes != nil {
+		_ = s.rc.Control(func(fd uintptr) {
+			if info, ok := s.tcpInfo(fd, &s.wbuf); ok {
+				s.checkCount(info)
+			}
+		})
+		w := s.writes.now()
+		return s.out0 + w.said + w.maybe, !s.bypassed.Load()
+	}
 	s.wrote, s.wroteOK = 0, false
 	if err := s.rc.Control(func(fd uintptr) {
 		if info, ok := s.tcpInfo(fd, &s.wbuf); ok {
@@ -129,6 +153,27 @@ func (s *tcpClientSocket) written() (uint64, bool) {
 		return 0, false
 	}
 	return s.wrote, s.wroteOK
+}
+
+// beginFrom begins the count of writes from a, the count from the socket's
+// accept, at the bytes the socket had sent as it began. Run in New, before
+// any look.
+func (s *tcpClientSocket) beginFrom(a *countedClient) {
+	s.writes, s.out0 = a.count, a.begin.out
+}
+
+// checkCount marks the count from the accept bypassed when info, an answer of
+// the socket, counts more bytes sent than could have been written through the
+// count by the time it answered (read after it): a write went around the
+// count, which then says nothing (written). Only an answer whose counts are
+// read (winTCPInfo.counted): one that resent may count a byte twice.
+func (s *tcpClientSocket) checkCount(info winTCPInfo) {
+	if s.writes == nil || !info.counted() {
+		return
+	}
+	if w := s.writes.now(); info.out > s.out0+w.said+w.maybe {
+		s.bypassed.Store(true)
+	}
 }
 
 // pendingError is the reset the connection closed with, as Linux's SO_ERROR
@@ -193,4 +238,19 @@ func (s *tcpClientSocket) closedBeforeFIN() bool {
 		}
 	})
 	return closed
+}
+
+// acceptInfo is what CountClientWrites keeps of the socket's TCP_INFO_v0 as
+// its count begins (beginFrom).
+type acceptInfo = winTCPInfo
+
+// answerAtAccept reads the socket fd's TCP_INFO_v0 into info as its count from
+// the accept begins: false when it answers short. A failed call answers no
+// byte, which reads as no answer.
+func answerAtAccept(fd uintptr, info *winTCPInfo) bool {
+	var buf [wtcpInfoSize]byte
+	n, _ := getTCPInfo(fd, &buf)
+	i, ok := readWinTCPInfo(buf[:n])
+	*info = i
+	return ok
 }

@@ -112,8 +112,9 @@ func (i winTCPInfo) look(finSent bool) clientLook {
 	return clientLook{said: clientOpen, acked: acked}
 }
 
-// sent is what written says on Windows: the bytes the socket has sent. Windows
-// has no count of what its send buffer still holds (no SIOCOUTQ, and TCP_INFO
+// sent is what written says on a Windows socket with no count from its accept
+// (client_count_accept.go): the bytes the socket has sent. Windows has no
+// count of what its send buffer still holds (no SIOCOUTQ, and TCP_INFO
 // counts a byte once it is sent), so those bytes are left out. A chunk set
 // aside is then judged from no more bytes than were written before it, which
 // can only take it for one the client took (teed, as before), never refuse
