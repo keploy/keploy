@@ -37,6 +37,8 @@ type abortSvcContainer struct {
 	labels        map[string]string
 	state         container.State
 	stopCode      int
+	// stopIgnored leaves the container running at keploy's stop.
+	stopIgnored bool
 }
 
 func newAbortDocker(started time.Time) *abortDocker {
@@ -105,7 +107,7 @@ func (d *abortDocker) ContainerStop(_ context.Context, ref string, _ container.S
 		return errdefs.NotFound(errors.New("no such container"))
 	}
 	d.stops = append(d.stops, id)
-	if c.state.Running {
+	if c.state.Running && !c.stopIgnored {
 		c.state = container.State{Status: "exited", ExitCode: c.stopCode, StartedAt: c.state.StartedAt, FinishedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	}
 	return nil
@@ -144,7 +146,8 @@ func composeDoc(t *testing.T, doc string) *docker.Compose {
 // keploy reads the abort flags of the user's `up` before it leaves them out
 // of the command compose runs: which exits end the run, whose code is the
 // run's, and which services compose attaches to (the up's services, --attach,
-// --no-attach, `attach: false`, --attach-dependencies through depends_on).
+// --no-attach, `attach: false` (`attach: true` keeps it attached),
+// --attach-dependencies through depends_on).
 func TestTheUsersComposeAbortFlagsAreRead(t *testing.T) {
 	doc := composeDoc(t, `
 services:
@@ -161,6 +164,9 @@ services:
   logs:
     image: logs
     attach: false
+  metrics:
+    image: metrics
+    attach: true
 `)
 	type want struct {
 		onExit, onFailure bool
@@ -168,7 +174,7 @@ services:
 		attaches          map[string]bool
 		flags             string
 	}
-	all := map[string]bool{"app": true, "runner": true, "db": true, "logs": false, "worker": true}
+	all := map[string]bool{"app": true, "runner": true, "db": true, "logs": false, "metrics": true, "worker": true}
 	for _, c := range []struct {
 		cmd  string
 		want want
@@ -229,11 +235,17 @@ func TestTheUsersExitCodeFromEndsTheRunOnItsServicesExit(t *testing.T) {
 					t.Fatalf("%s=%q %s: the runner's exit (%d) did not end the run", provenswitch.Env, proven, mode, code)
 				}
 				stop()
+				// The halt is --exit-code-from's own service's: its code is
+				// the run's as it stands, read again from no other.
+				a.composeHaltCodeFrom(context.Background())
 				h := a.composeAppHalt()
-				if h == nil || h.service != "runner" || h.exitCode != code || h.serviceCode != code || h.agent != "" {
+				if h == nil || h.service != "runner" || h.exitCode != code || h.serviceCode != code || h.agent != "" || h.codeFrom != "" {
 					t.Fatalf("%s=%q %s: halt %+v; want the runner's, code %d", provenswitch.Env, proven, mode, h, code)
 				}
 				e := h.appError("")
+				if e.Err != nil && strings.Contains(e.Err.Error(), "the run's exit code is that of") {
+					t.Fatalf("%s=%q %s: %q names the runner's code as another's", provenswitch.Env, proven, mode, e.Err)
+				}
 				switch {
 				case code == 0 && (e.AppErrorType != models.ErrAppStopped || e.ExitCode != 0):
 					t.Fatalf("%s=%q %s: the run's end %+v; want the clean end", provenswitch.Env, proven, mode, e)
@@ -391,6 +403,37 @@ func TestTheRunsCodeIsTheExitCodeFromServicesOnceTheStackIsStopped(t *testing.T)
 				t.Fatalf("%s=%q failure=%v: %q", provenswitch.Env, proven, failure, e.Err)
 			}
 		}
+
+		// A runner the stack's stop left running has no code to give: the
+		// worker's exit's stands.
+		ctx := context.Background()
+		started := time.Now().Add(-time.Minute)
+		d := newAbortDocker(started)
+		d.add("runner-id", "runner", runningState(started)).stopIgnored = true
+		d.add("worker-id", "worker", exitedAt(1, started))
+		a := newAbortApp(d, "docker compose up --exit-code-from runner", nil)
+		if !a.composeDied(ctx, serviceDie("worker-id", "worker", "1", nil)) {
+			t.Fatalf("%s=%q: the worker's exit did not end the run", provenswitch.Env, proven)
+		}
+		a.composeHaltEnd(ctx, make(chan struct{}), func() {})()
+		if h := a.composeAppHalt(); h == nil || h.service != "worker" || h.exitCode != 1 || h.codeFrom != "" {
+			t.Fatalf("%s=%q: halt %+v; want the worker's code 1, a running runner's read as none", provenswitch.Env, proven, h)
+		}
+
+		// A service's SIGKILL (137) with keploy's agent's container down is
+		// the service's halt, not the app's killed with its agent's
+		// namespace.
+		d = newAbortDocker(started)
+		d.containers["agent-id"].state = exitedAt(0, started)
+		d.add("worker-id", "worker", exitedAt(137, started))
+		a = newAbortApp(d, "docker compose up --abort-on-container-exit", nil)
+		if !a.composeDied(ctx, serviceDie("worker-id", "worker", "137", nil)) {
+			t.Fatalf("%s=%q: the worker's 137 did not end the run", provenswitch.Env, proven)
+		}
+		a.composeHaltEnd(ctx, make(chan struct{}), func() {})()
+		if h := a.composeAppHalt(); h == nil || h.service != "worker" || h.agent != "" || h.exitCode != 137 {
+			t.Fatalf("%s=%q: halt %+v; want the worker's 137", provenswitch.Env, proven, h)
+		}
 	}
 }
 
@@ -412,6 +455,7 @@ func TestAnUpOfTheUsersServicesAloneEndsOnTheirExit(t *testing.T) {
 			{cmd: "docker compose up --exit-code-from tests tests", want: "tests", code: 6},
 			{cmd: "docker compose up --abort-on-container-exit tests worker", want: "worker", code: 0},
 			{cmd: "docker compose up --abort-on-container-failure tests worker", want: "worker", code: 2},
+			{cmd: "docker compose up --abort-on-container-failure --no-attach app", want: "worker", code: 2},
 			{cmd: "docker compose up tests"},
 			{cmd: "docker compose up --exit-code-from tests tests", noService: true},
 		} {
@@ -427,8 +471,8 @@ func TestAnUpOfTheUsersServicesAloneEndsOnTheirExit(t *testing.T) {
 			d.add("db-id", "db", at(0, time.Second))
 			d.add("worker-id", "worker", at(2, 20*time.Second))
 			d.add("worker-failed-id", "worker", at(0, 10*time.Second))
-			d.add("busy-id", "worker", runningState(started))
-			d.add("old-agent-id", composeAgentServiceKey, at(0, 2*time.Second))
+			d.add("busy-id", "tests", runningState(started))
+			d.add("old-agent-id", composeAgentServiceKey, at(1, 2*time.Second))
 			d.add("tests-run-id", "tests", at(1, 3*time.Second)).labels[composeOneOffLabelKey] = "True"
 			d.add("gone-id", "tests", at(1, 4*time.Second)).name = "unreadable"
 			d.containers["gone-id"].labels = map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "tests"}

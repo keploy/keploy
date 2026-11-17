@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -508,11 +509,28 @@ type stopsAfterPost struct {
 	stoppedN atomic.Int32
 	// exited: the application has exited, a moment after its stop began.
 	exited atomic.Bool
+	// told is what the agent was told of and what the application saw,
+	// in order: "notify" for each notice of the shutdown, "stop" for the
+	// application's stop.
+	toldMu sync.Mutex
+	told   []string
+}
+
+func (f *stopsAfterPost) note(what string) {
+	f.toldMu.Lock()
+	defer f.toldMu.Unlock()
+	f.told = append(f.told, what)
+}
+
+func (f *stopsAfterPost) NotifyGracefulShutdown(context.Context) error {
+	f.note("notify")
+	return nil
 }
 
 func (f *stopsAfterPost) Run(ctx context.Context, opts models.RunOptions) models.AppError {
 	err := f.readsAsAnAgentDoes.Run(ctx, opts)
 	if ctx.Err() != nil {
+		f.note("stop")
 		_, statErr := os.Stat(f.post)
 		f.postRan.Store(statErr == nil)
 		f.stoppedN.Add(1)
@@ -532,7 +550,9 @@ var stopLookup = models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A shutdow
 // it made after its last test, as it stopped among them, and then writes the
 // set's report: the report names the lookup the application made only as it
 // stopped as made after the last test, by its shape, the misses file names it
-// whole, and the set passes (it fails nothing).
+// whole, and the set passes (it fails nothing). The agent is told of the
+// shutdown before the stop, as the set's teardown tells it, so it says the
+// application's shutdown errors as such.
 func TestRunTestSet_ACallTheAppMakesAsItStopsIsNamedWithTheSwitchOff(t *testing.T) {
 	provenOn(t, false)
 	h := newPartialRunHarness(t, 2, 0)
@@ -557,6 +577,12 @@ func TestRunTestSet_ACallTheAppMakesAsItStopsIsNamedWithTheSwitchOff(t *testing.
 	}
 	if !app.postRan.Load() {
 		t.Fatal("the application was stopped before the set's post-script ran; the post-script runs with it up")
+	}
+	app.toldMu.Lock()
+	told := strings.Join(app.told, ",")
+	app.toldMu.Unlock()
+	if !strings.HasPrefix(told, "notify,stop") {
+		t.Fatalf("the agent was told and the application saw %q; want the shutdown's notice before the stop", told)
 	}
 	if ends := agent.ends.Load(); ends != 1 {
 		t.Fatalf("%d set-end reads, want one, after the application's stop", ends)
