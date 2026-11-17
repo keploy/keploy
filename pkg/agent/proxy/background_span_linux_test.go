@@ -49,6 +49,21 @@ func TestTheServeClockNotesEveryServeButAProtocolPhases(t *testing.T) {
 	if s, ok := c.SpanTo(time.Now()); !ok || s.From.Before(after) {
 		t.Fatalf("a serve by value was not noted: span from %v %v; want at or after %v", s.From, ok, after)
 	}
+
+	// Each serve is noted with its recording's name, by either door: a
+	// background call of that recording's group starts its span at it
+	// (learn.ServeClock.SpansOf), not at a later serve of another flow's.
+	done := time.Now()
+	m.observeServed(&models.Mock{Name: "other", Kind: models.Mongo}, nil)
+	for _, g := range []struct {
+		name     string
+		from, to time.Time
+	}{{"poll", before, mid}, {"poll-2", after, done}} {
+		spans, ok := c.SpansOf(time.Now(), func(n string) bool { return n == g.name })
+		if !ok || len(spans) != 1 || spans[0].From.Before(g.from) || spans[0].From.After(g.to) {
+			t.Fatalf("spans = %+v,%v of %s's group; want one from its serve, between %v and %v", spans, ok, g.name, g.from, g.to)
+		}
+	}
 }
 
 // spanParser is a parser the test reaches through handleConnection: it
