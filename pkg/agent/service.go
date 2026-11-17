@@ -420,7 +420,10 @@ type CallerSocketReporter interface {
 	// CallerSocketWhy is "" when process pid, which the kernel's tables name
 	// as the owner of the client socket at client connected to the agent at
 	// server, is the process that sends on it; otherwise why keploy cannot
-	// tell which process called. It never waits.
+	// tell which process called. It may wait, bounded by the
+	// implementation (Windows's: a process of the run that started just
+	// now has a short grace to say what it holds, and the shim's report of
+	// the socket a short time to arrive), and never longer.
 	CallerSocketWhy(pid int, client, server netip.AddrPort) string
 }
 
@@ -438,8 +441,10 @@ type AppSendCounter interface {
 	// proxy's side can have received; pending, the send calls whose
 	// outcome is not known yet (done counts none of them). It fails when
 	// the counts cannot be told: no count is kept for the connection, its
-	// process cannot be read, or another process may send on it. It never
-	// waits.
+	// process cannot be read, or another process may send on it. It may
+	// wait, bounded as CallerSocketWhy is: the proxy asks it as it closes a
+	// paired connection too, which holds that close, and no other, by as
+	// much.
 	AppSent(app netip.AddrPort) (done, started uint64, pending uint32, err error)
 }
 
