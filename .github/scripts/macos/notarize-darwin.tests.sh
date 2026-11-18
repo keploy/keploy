@@ -804,6 +804,17 @@ if step "Download an earlier attempt's notarization state" | grep -qFx '        
 else
   fail release.yml "the state artifact's names or overwrite differ"
 fi
+# The upload keeps NOTARY_STATE's files at the artifact's top; the download
+# puts them back in NOTARY_STATE itself (merge-multiple), not in a folder
+# named after the artifact, where resume would find no state.
+# shellcheck disable=SC2016 # the step's own text, $ and all
+if step "Download an earlier attempt's notarization state" | grep -qFx '          path: ${{ env.NOTARY_STATE }}' &&
+  step "Download an earlier attempt's notarization state" | grep -qFx "          merge-multiple: 'true'" &&
+  step "Keep the submission for a rerun" | grep -qFx '          path: ${{ env.NOTARY_STATE }}'; then
+  pass "release.yml: the state downloaded lands in NOTARY_STATE, where it was kept from"
+else
+  fail release.yml "the state is not kept from and downloaded into NOTARY_STATE itself (path, merge-multiple)"
+fi
 # shellcheck disable=SC2016 # the step's own text, $ and all
 if step "Resume an earlier attempt's notarization?" | grep -qF 'notarize-darwin.sh resume "$NOTARY_STATE" >> "$GITHUB_OUTPUT"' &&
   step "Resume an earlier attempt's notarization?" | grep -qFx '        id: notary'; then
