@@ -103,3 +103,25 @@ func TestTheNextTestPairsItsOwnRequestsInstants(t *testing.T) {
 		t.Fatalf("two tests sending their request at other instants paired the same: %v", got[0])
 	}
 }
+
+// A changed part whose recorded form holds no instant pairs none, and its
+// sent form is not read for instants (driftedBy); one whose recorded form
+// holds one reads both forms and pairs them.
+func TestAChangedPartRecordedWithNoInstantReadsNoneOfItsSentForm(t *testing.T) {
+	const mark = "given-spans-none"
+	read := countGivenSpans(t, mark)
+	sent := mark + " " + eRecAt.Format(time.RFC3339Nano)
+	if got := driftedInstants(mark+" with no clock", sent); got != nil {
+		t.Fatalf("a part recorded with no instant paired %v", got)
+	}
+	if n := read.Load(); n != 1 {
+		t.Errorf("a part recorded with no instant read %d of its forms for instants: want 1, the recorded form alone", n)
+	}
+	read.Store(0)
+	if got := driftedInstants(sent, mark+" "+eRecAt.Add(time.Hour).Format(time.RFC3339Nano)); len(got) != 1 {
+		t.Fatalf("a part recorded and sent with an instant each paired %v: want one pair", got)
+	}
+	if n := read.Load(); n != 2 {
+		t.Errorf("a part recorded and sent with an instant each read %d of its forms for instants: want both", n)
+	}
+}
