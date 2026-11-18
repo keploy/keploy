@@ -1041,6 +1041,9 @@ func (dc *DriftCache) readAnswerWords(x Raw, keep bool) []map[string]bool {
 	xb := x.payload()
 	text := blankStamps(xb.text, xb.stamps)
 	keys := clockKeys(x)
+	if len(keys) == 0 {
+		return dc.fieldTokens(text, xb.fields)
+	}
 	var forms []string
 	for _, f := range xb.fields {
 		if f.end > len(text) || !answerPath(f.path) {
@@ -1054,6 +1057,34 @@ func (dc *DriftCache) readAnswerWords(x Raw, keep bool) []map[string]bool {
 		}
 	}
 	return tokensOfForms(forms)
+}
+
+// fieldTokens are the words of the answer fields of text (fields, as
+// readAnswerWords reads them where no clock read is blanked), in every
+// declared form, by reading: each field's words are its own text's
+// (rawTokens), read once for the test where dc keeps them, and joined here.
+// A word stands within one form of one field, so the join is what one list
+// of every field's forms holds. A recording handed again to a later call
+// (an earlier serve of no set, read in each call), or a view of it that
+// holds the same values (Raw.live), reads no field text it read before:
+// tokenizing an outside recording's answer again in each call was most of a
+// slow call's time.
+func (dc *DriftCache) fieldTokens(text string, fields []rawField) []map[string]bool {
+	out := make([]map[string]bool, len(readings))
+	for i := range out {
+		out[i] = map[string]bool{}
+	}
+	for _, f := range fields {
+		if f.end > len(text) || !answerPath(f.path) {
+			continue
+		}
+		for i, words := range dc.rawTokens(text[f.start:f.end]) {
+			for w := range words {
+				out[i][w] = true
+			}
+		}
+	}
+	return out
 }
 
 // holdsAnswer reports whether a recording whose fields are fields holds an
