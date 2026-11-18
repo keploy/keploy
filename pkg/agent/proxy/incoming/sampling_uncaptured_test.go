@@ -250,7 +250,8 @@ func TestAHeadAnswerDeclaringALengthOverTheCaptureLimitIsCaptured(t *testing.T) 
 // client, which has no deadline: a sampled connection gives its slot back
 // then, so the sampling budget no longer bounds the handlers that hold such
 // bodies. Known at the answer's headers (a stream, a length over the capture
-// limit), it holds nothing as the answer's forward begins.
+// limit), it holds nothing as the answer's forward begins. That holds with
+// sampling and without it.
 func TestAnExchangeNeverCapturedHoldsNoCaptureThroughItsAnswersLastForward(t *testing.T) {
 	over := strings.Repeat("x", maxHTTPBodyCaptureBytes+1)
 	const body = `{"sku":"a"}`
@@ -282,48 +283,55 @@ func TestAnExchangeNeverCapturedHoldsNoCaptureThroughItsAnswersLastForward(t *te
 		{"a chunked answer over the capture limit, to a PUT", request(http.MethodPut), chunkedOver, false},
 		{"a streamed answer", request(http.MethodPost), stream, true},
 		{"a streamed answer, to a PUT", request(http.MethodPut), stream, true},
+		{"an answer whose length is over the capture limit", request(http.MethodPost), lengthOver, true},
 		{"an answer whose length is over the capture limit, to a PUT", request(http.MethodPut), lengthOver, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = io.Copy(io.Discard, r.Body)
-				tc.answer(w, r)
-			}))
-			t.Cleanup(app.Close)
-			var (
-				mu    sync.Mutex
-				holds = map[string]string{}
-			)
-			saved := captureHolds
-			t.Cleanup(func() { captureHolds = saved })
-			// Read on the handler's own goroutine.
-			captureHolds = func(at string, held int, bodyKept bool) {
+		for _, sampling := range []int{1, 0} {
+			mode := "sampled"
+			if sampling == 0 {
+				mode = "unsampled"
+			}
+			t.Run(tc.name+", "+mode, func(t *testing.T) {
+				app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = io.Copy(io.Discard, r.Body)
+					tc.answer(w, r)
+				}))
+				t.Cleanup(app.Close)
+				var (
+					mu    sync.Mutex
+					holds = map[string]string{}
+				)
+				saved := captureHolds
+				t.Cleanup(func() { captureHolds = saved })
+				// Read on the handler's own goroutine.
+				captureHolds = func(at string, held int, bodyKept bool) {
+					mu.Lock()
+					defer mu.Unlock()
+					holds[at] = fmt.Sprintf("%d bytes, a reference to the request body kept %v", held, bodyKept)
+				}
+				pm, captured := recordingPM(t, sampling, &models.IncomingOptions{})
+				serve := servedConns(t, pm, func() {})
+				client, served := serve.open(t, app.Listener.Addr().String(), tc.name, tc.request)
+				_ = answerOf(t, tc.name, client)
+				waitFor(t, serve.ctx, served, "the exchange's handler")
+				waitFor(t, serve.ctx, capturesDone(pm), "the captures")
+
 				mu.Lock()
 				defer mu.Unlock()
-				holds[at] = fmt.Sprintf("%d bytes, a reference to the request body kept %v", held, bodyKept)
-			}
-			pm, captured := recordingPM(t, 1, &models.IncomingOptions{})
-			serve := servedConns(t, pm, func() {})
-			client, served := serve.open(t, app.Listener.Addr().String(), tc.name, tc.request)
-			_ = answerOf(t, tc.name, client)
-			waitFor(t, serve.ctx, served, "the exchange's handler")
-			waitFor(t, serve.ctx, capturesDone(pm), "the captures")
-
-			mu.Lock()
-			defer mu.Unlock()
-			if _, ok := holds["headers"]; !ok || len(holds) != 2 {
-				t.Fatalf("%s: what the exchange held was seen at %v, want at its answer's headers and once it was written", tc.name, holds)
-			}
-			if tc.atHeaders && holds["headers"] != nothing {
-				t.Fatalf("%s: as its answer's forward began, the exchange held %s, want %s: what is never captured is let go as that is known", tc.name, holds["headers"], nothing)
-			}
-			if holds["written"] != nothing {
-				t.Fatalf("%s: as its answer's last forward ended, the exchange held %s, want %s: what is never captured is let go as that is known", tc.name, holds["written"], nothing)
-			}
-			if got := captured(); len(got) != 0 {
-				t.Fatalf("%s had %v handed to the capture", tc.name, got)
-			}
-		})
+				if _, ok := holds["headers"]; !ok || len(holds) != 2 {
+					t.Fatalf("%s: what the exchange held was seen at %v, want at its answer's headers and once it was written", tc.name, holds)
+				}
+				if tc.atHeaders && holds["headers"] != nothing {
+					t.Fatalf("%s: as its answer's forward began, the exchange held %s, want %s: what is never captured is let go as that is known", tc.name, holds["headers"], nothing)
+				}
+				if holds["written"] != nothing {
+					t.Fatalf("%s: as its answer's last forward ended, the exchange held %s, want %s: what is never captured is let go as that is known", tc.name, holds["written"], nothing)
+				}
+				if got := captured(); len(got) != 0 {
+					t.Fatalf("%s had %v handed to the capture", tc.name, got)
+				}
+			})
+		}
 	}
 }
 
