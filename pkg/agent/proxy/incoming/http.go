@@ -2007,7 +2007,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// whose capture was cut short (its write is over: relay.finish).
 		captureEligible = captureEnabled && requestWhole &&
 			(reqCapture == nil || !reqCapture.Truncated()) &&
-			!(hasBody && resp.ContentLength > int64(maxHTTPBodyCaptureBytes))
+			(!hasBody || resp.ContentLength <= int64(maxHTTPBodyCaptureBytes))
 		if !captureEligible {
 			// Nothing of the exchange is captured, and that is known here,
 			// at the answer's headers (a stream, an answer over the

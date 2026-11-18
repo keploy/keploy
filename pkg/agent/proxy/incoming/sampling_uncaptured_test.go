@@ -413,8 +413,22 @@ func TestACaptureDroppedHoldsNothing(t *testing.T) {
 	if b.Total() != 13 {
 		t.Fatalf("a dropped capture counted %d bytes through its tee, want 13", b.Total())
 	}
+	// A side with no capture (capture off, a request with no body or a
+	// pre-buffered one, or an answer whose headers show it is never
+	// captured, before any capture of it is made) has a nil one, and the
+	// handler drops it all the same: a panic there, on the handler's
+	// goroutine, which nothing recovers, would crash the agent. Recovered
+	// here, so when this test runs alone it fails by name and not by a
+	// crash of the test binary.
 	var none *captureBuffer
-	none.drop()
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("dropping a nil capture panicked (%v), want a no-op", r)
+			}
+		}()
+		none.drop()
+	}()
 }
 
 // A capture runs its onCut as it is cut short, by its limit however the
