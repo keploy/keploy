@@ -720,12 +720,14 @@ type SyncMockManager struct {
 	// that was not kept: one whose window ended with no kept verdict
 	// (Window.Close) — a skipped duplicate's, over HTTP or gRPC, or one that
 	// made no test case — and one the ingress opened no window for
-	// (NoteRequestSpan). Only the duplicate cleanup and the hold's let-go read
-	// it (madeOutsideEveryRequestLocked), to tell such a request's leftover
+	// (BeginRequestSpan, open while that request is in flight). Only the
+	// duplicate cleanup and the hold's let-go read it
+	// (madeOutsideEveryRequestLocked), to tell such a request's leftover
 	// (dropped) from a call made outside every request (sent, owned by no
 	// test); nothing else asks it who owns a mock, so the window ring and every
-	// other pass decide as before. Recorded and read under mu. Past its bound
-	// it joins spans, which only widens what counts as a leftover.
+	// other pass decide as before. Read under mu; Spans has its own lock, a
+	// leaf. Past its bound it joins spans, which only widens what counts as a
+	// leftover.
 	unkeptSpans Spans
 	// lostFrom is the earliest request the current recording recorded in
 	// lostOver or cutLost (leaveOutSpan), zero when none: the window of its
@@ -4192,7 +4194,7 @@ func (m *SyncMockManager) OpenLossTallies() int {
 // (madeOutsideEveryRequestLocked). A request owns its time until it is
 // answered, not until the agent gets to close its window. A window a kept
 // resolve already ended, or one claimed kept (Keep), leaves none. A request
-// the ingress opens no window for leaves its span through NoteRequestSpan.
+// the ingress opens no window for leaves its span through BeginRequestSpan.
 func (w *Window) Close() {
 	if w == nil {
 		return
@@ -4634,18 +4636,20 @@ func (w *Window) answeredAtLocked() time.Time {
 	return time.Now()
 }
 
-// NoteRequestSpan marks [start, end] as the span of a request the ingress saw
-// but opened no window for — one that arrived while recording was paused, or
-// one filtered out of the recording — with end its answer: a call in it is
-// that request's, so the duplicate cleanup drops it rather than sending it as
-// one made outside every request. An end before start records start alone.
-func (m *SyncMockManager) NoteRequestSpan(start, end time.Time) {
+// BeginRequestSpan opens the span of a request the ingress sees but opens no
+// window for — one that arrives while recording is paused, one filtered out of
+// the recording — from its start, and returns the func that ends it at its
+// answer. While it is open it covers the request in flight, so a duplicate's
+// prune meanwhile drops the calls in it as that request's, not as calls made
+// outside every request; ended, it covers [start, answered]. The func is
+// idempotent and safe from any goroutine; a zero answered ends it now. Left
+// uncalled, the span stays open and covers every later call: call it on every
+// way the request ends.
+func (m *SyncMockManager) BeginRequestSpan(start time.Time) (answered func(at time.Time)) {
 	if m == nil {
-		return
+		return func(time.Time) {}
 	}
-	m.mu.Lock()
-	m.unkeptSpans.Record(start, end)
-	m.mu.Unlock()
+	return m.unkeptSpans.OpenAt(start)
 }
 
 // holdForClaimLocked holds a per-test mock that a window still open claims

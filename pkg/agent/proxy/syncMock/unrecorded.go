@@ -106,6 +106,8 @@ type openSpan struct {
 	start time.Time
 	refs  int
 	into  *openSpan
+	// end is the latest end its closers gave (OpenAt), on the wall clock.
+	end time.Time
 }
 
 // spansKeepOnJoin is how many closed spans are left once the cap forces a join:
@@ -230,8 +232,17 @@ func joinNearest(spans []pressureRange, keep int) []pressureRange {
 // calling it leaves the span open, which is right for traffic that stays
 // unrecorded until the recording ends. A zero start is ignored (a no-op closer).
 func (s *Spans) Open(start time.Time) func() {
+	end := s.OpenAt(start)
+	return func() { end(time.Time{}) }
+}
+
+// OpenAt is Open with a closer that takes the span's end: when what it
+// covers ended, which can be before the closer runs (a zero end is the
+// moment it runs). A span joined to another past the cap closes once every
+// closer of the pair has run, at the latest end they gave.
+func (s *Spans) OpenAt(start time.Time) func(end time.Time) {
 	if s == nil || start.IsZero() {
-		return func() {}
+		return func(time.Time) {}
 	}
 	start = wallTime(start)
 	r := &openSpan{start: start, refs: 1}
@@ -257,13 +268,20 @@ func (s *Spans) Open(start time.Time) func() {
 	s.mu.Unlock()
 
 	var once sync.Once
-	return func() {
+	return func(end time.Time) {
 		once.Do(func() {
+			if end.IsZero() {
+				end = time.Now()
+			}
+			end = wallTime(end)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			root := r
 			if r.into != nil {
 				root = r.into
+			}
+			if end.After(root.end) {
+				root.end = end
 			}
 			if root.refs--; root.refs > 0 {
 				return
@@ -276,7 +294,7 @@ func (s *Spans) Open(start time.Time) func() {
 					break
 				}
 			}
-			s.addClosedLocked(root.start, time.Now())
+			s.addClosedLocked(root.start, root.end)
 		})
 	}
 }
