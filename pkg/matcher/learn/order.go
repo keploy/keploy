@@ -2900,8 +2900,13 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 				reqs[i].Seen = slices.DeleteFunc(slices.Clone(e.Seen), func(s Seen) bool { return followed[[2]string{e.Mock, s.Leaf.Path}] })
 			}
 		}
+		// Either way the value is the application's clock: a read of it, or
+		// a pick by it among the times the request holds. A copy of the
+		// request's own text would stand there in round F too, where keploy
+		// binds it (2). The time default settles it (settles), at a time
+		// field alone (timeDefault).
 		if where, _ := dc.dr.requestHolds([]moment{*c.rm}, []moment{*c.lm}, reqs); where != "" {
-			return dc.refuse(path, at, n, r, l, RefusalPick, "instant-pick-test-case",
+			return dc.refuse(path, at, n, r, l, RefusalPick, checkPickTestCase,
 				"the recorded moment stands in the test case at "+where+", and no cut there gives round F's", []string{where}, dc.fieldNoise(path))
 		}
 	}
