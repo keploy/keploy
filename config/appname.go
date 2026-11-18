@@ -18,10 +18,18 @@ import (
 // keploy named apps hold `appName: ""`.
 var unnamedAppLine = regexp.MustCompile(`^(\s*)((?i:appname)|"(?i:appname)"|'(?i:appname)')\s*:\s*(""|''|~|null|Null|NULL)?\s*(#.*)?$`)
 
+// KeptAppNameNote is the comment WithAppName ends its appName line with. It
+// says keploy wrote the name, the one an existing project's runs had, and
+// the user did not choose it: enterprise's keploy app create reads it (the
+// value's YAML line comment starts with it) before moving the project's
+// mock.appId to that name's app.
+const KeptAppNameNote = "# kept by keploy: the name runs from this folder have had"
+
 // WithAppName is the keploy.yml doc, which names no app, naming the app name:
-// doc with the line `appName: "<name>"` put before its first key, or in place
-// of an appName line that names no app (unnamedAppLine), whose comment it
-// keeps. Every other byte of doc is kept. A doc with no keys (empty, or
+// doc with the line `appName: "<name>" <KeptAppNameNote>` put before its
+// first key, or in place of an appName line that names no app
+// (unnamedAppLine), whose comment it keeps after the note. Every other byte
+// of doc is kept. A doc with no keys (empty, or
 // comments only) gets the line last.
 //
 // It fails, and doc is not to be changed, unless the result reads as doc with
@@ -37,7 +45,7 @@ func WithAppName(doc []byte, name string) ([]byte, error) {
 	if strings.Contains(string(doc), "\r\n") {
 		nl = "\r\n"
 	}
-	line := "appName: " + strconv.Quote(name)
+	line := "appName: " + strconv.Quote(name) + " " + KeptAppNameNote
 	key := "appName"
 	// No document at all (an empty file, or comments only) reads as null.
 	m := &yamlLib.Node{Tag: "!!null"}
@@ -75,7 +83,7 @@ func WithAppName(doc []byte, name string) ([]byte, error) {
 			if g == nil {
 				return nil, fmt.Errorf("its line %d is not an appName line keploy rewrites", named.Line)
 			}
-			text = g[1] + g[2] + ": " + strconv.Quote(name)
+			text = g[1] + g[2] + ": " + strconv.Quote(name) + " " + KeptAppNameNote
 			if g[4] != "" {
 				text += " " + g[4]
 			}

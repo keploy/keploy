@@ -52,7 +52,7 @@ func TestAppName(t *testing.T) {
 		{name: "a name given, no keploy.yml", configured: "billing", noFile: true, write: true, want: "billing"},
 		{name: "a name given, a keploy.yml naming none", configured: "billing", doc: "path: x\n", write: true, want: "billing", wantDoc: "path: x\n"},
 		{name: "no keploy.yml", noFile: true, write: true, want: "orders-api-a-b", says: `Naming the app "orders-api-a-b" after the git remote origin and the path a/b`, level: zapcore.InfoLevel},
-		{name: "a keploy.yml naming no app", doc: "# mine\npath: x\n", write: true, want: "b", wantDoc: "# mine\nappName: \"b\"\npath: x\n", says: `named no app, so keploy wrote appName "b" into it`, level: zapcore.InfoLevel},
+		{name: "a keploy.yml naming no app", doc: "# mine\npath: x\n", write: true, want: "b", wantDoc: "# mine\nappName: \"b\" " + config.KeptAppNameNote + "\npath: x\n", says: `named no app, so keploy wrote appName "b" into it`, level: zapcore.InfoLevel},
 		{name: "the agent writes none", doc: "path: x\n", want: "b", wantDoc: "path: x\n"},
 		{name: "a keploy.yml in another folder is not written", doc: "path: x\n", up: true, write: true, want: "b", wantDoc: "path: x\n"},
 		{name: "a keploy.yml keploy does not rewrite", doc: "{path: x}\n", write: true, want: "b", wantDoc: "{path: x}\n", says: `names no app, so this run uses "b"`, level: zapcore.WarnLevel},
@@ -106,8 +106,8 @@ func TestAppName(t *testing.T) {
 // byte.
 func TestRecordKeepsAnExistingProjectsAppName(t *testing.T) {
 	for _, c := range []struct{ name, cmd, doc, want string }{
-		{"no appName", "record", "# my project\ncommand: ./app\n", "# my project\nappName: \"b\"\ncommand: ./app\n"},
-		{"appName \"\" of an older keploy", "record", "appName: \"\"\ncommand: ./app\n", "appName: \"b\"\ncommand: ./app\n"},
+		{"no appName", "record", "# my project\ncommand: ./app\n", "# my project\nappName: \"b\" " + config.KeptAppNameNote + "\ncommand: ./app\n"},
+		{"appName \"\" of an older keploy", "record", "appName: \"\"\ncommand: ./app\n", "appName: \"b\" " + config.KeptAppNameNote + "\ncommand: ./app\n"},
 		{"the agent", "agent", "# my project\ncommand: ./app\n", "# my project\ncommand: ./app\n"},
 		{"a command that neither records nor tests", "templatize", "# my project\ncommand: ./app\n", "# my project\ncommand: ./app\n"},
 	} {
