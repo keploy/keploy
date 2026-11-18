@@ -403,8 +403,9 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 		return false
 	}
 	// stackStopped is closed once keploy's stop of the stack for a crash
-	// this exit is has ended (stackStop).
+	// this exit is has ended (stackStop); crash is that crash.
 	var stackStopped chan struct{}
+	var crash *composeHalt
 	verdict := func() composeAbortVerdict {
 		a.composeApp.stopMu.Lock()
 		defer a.composeApp.stopMu.Unlock()
@@ -453,8 +454,9 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 			// none of its exits is a halt, and the retry begins anew.
 			a.composeApp.stopping.Store(true)
 			a.composeApp.agentStopping.Store(true)
-			a.composeApp.depCrash.CompareAndSwap(nil, &composeHalt{exitCode: code, service: service, serviceCode: code,
-				flags: strings.Join(a.composeAbort.flags, " "), beforeApp: true})
+			crash = &composeHalt{exitCode: code, service: service, serviceCode: code,
+				flags: strings.Join(a.composeAbort.flags, " "), beforeApp: true}
+			a.composeApp.depCrash.CompareAndSwap(nil, crash)
 			stackStopped = make(chan struct{})
 			a.composeApp.stackStop.Store(&stackStopped)
 		}
@@ -470,17 +472,46 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 		// so the watch does not wait for them. A late starter still in its
 		// stop's grace (a runner that does not handle SIGTERM) was reused by
 		// the retried up, then killed mid-run.
+		// The halt of a stop that failed is kept before the stop is said
+		// ended: the run's retry, which waits for that, then reads it, and
+		// begins no bring-up.
 		stopped, lateStopped := a.stopComposeStack(context.WithoutCancel(ctx))
+		ends := false
 		if !stopped {
-			a.logger.Warn("keploy could not stop the application's compose stack for the retry of its bring-up; docker compose up goes on as it is",
-				zap.String("service", service))
+			ends = a.composeKeepsAnUnstoppedDepCrash(crash)
 		}
 		go func() {
 			<-lateStopped
 			close(stackStopped)
 		}()
+		return ends
 	}
 	return false
+}
+
+// A CRASH KEPLOY COULD NOT STOP THE STACK ON ENDS THE RUN.
+//
+// keploy holds every exit for one its own stop gave (stopping,
+// agentStopping) from the moment it begins to stop the stack for a crash
+// before the app started. When that stop could not list the project, the
+// stack ran on with keploy still holding it: compose's up started the app,
+// and under `--exit-code-from runner` the runner's exit was taken for
+// keploy's own and ended nothing, so the run went on until the user stopped
+// it. The crash is now the run's halt, as the halt of an exit the flags end
+// the run on is, and the run's end takes the stack down (composeHaltEnd: a
+// stop, else compose down).
+
+// composeKeepsAnUnstoppedDepCrash keeps crash, a crash before the app started
+// of a service the app depends on, whose stop of the stack keploy could not
+// make, as the run's halt (stackNotStopped), and reports that the run ends on
+// it: on a halt kept already, too, which ends it.
+func (a *App) composeKeepsAnUnstoppedDepCrash(crash *composeHalt) bool {
+	h := *crash
+	h.stackNotStopped = true
+	a.composeApp.halted.CompareAndSwap(nil, &h)
+	a.logger.Warn("keploy could not stop the application's compose stack to retry its bring-up after a dependency's crash; it ends the run on that crash and takes the stack down",
+		zap.String("service", crash.service))
+	return true
 }
 
 // composeAbortVerdict is what an exit the user's flags end the run on does.

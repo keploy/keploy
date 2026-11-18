@@ -2026,6 +2026,24 @@ func (a *App) composeKeepsASpentDepCrash(bringUps int) {
 	}
 }
 
+// composeBeginsARun clears what an earlier run of the app kept, before this
+// run's watch and up start: its halt, keploy's stops, the app's kill and
+// first start, the project, a crash keploy stopped the stack on, the up, and
+// keploy's stop of the stack for that crash (stackStop), which this run's
+// retry would otherwise wait on, never closed when that run's stop never
+// ended.
+func (a *App) composeBeginsARun() {
+	a.composeApp.halted.Store(nil)
+	a.composeApp.stopping.Store(false)
+	a.composeApp.agentStopping.Store(false)
+	a.composeApp.appKilledAt.Store(0)
+	a.composeApp.project.Store(nil)
+	a.composeApp.appStartedAt.Store(0)
+	a.composeApp.depCrash.Store(nil)
+	a.composeApp.upReturned.Store(nil)
+	a.composeApp.stackStop.Store(nil)
+}
+
 // composeBeginsABringUpAgain clears what the last bring-up kept before the
 // retry's up starts: the app's first start, and keploy's stop of the stack
 // for a crash (depCrash, stopping, agentStopping), so the new bring-up's
@@ -2289,14 +2307,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		// keploy, not compose's abort, ends the run on an exit of the app
 		// it did not ask for (compose_appstop.go). Deferred last, so the
 		// watch ends before the stack is taken down.
-		a.composeApp.halted.Store(nil)
-		a.composeApp.stopping.Store(false)
-		a.composeApp.agentStopping.Store(false)
-		a.composeApp.appKilledAt.Store(0)
-		a.composeApp.project.Store(nil)
-		a.composeApp.appStartedAt.Store(0)
-		a.composeApp.depCrash.Store(nil)
-		a.composeApp.upReturned.Store(nil)
+		a.composeBeginsARun()
 		halt := make(chan struct{})
 		composeHaltSeen = halt
 		composeEnd = a.composeHaltEnd(ctx, halt, composeDown)

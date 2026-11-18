@@ -245,6 +245,11 @@ type composeHalt struct {
 	// the app started on each of this many bring-ups (the first and keploy's
 	// retries of it), so the run ends on its crash; 0: no retry was taken.
 	bringUps int
+	// stackNotStopped: service is one the app depends on, it crashed before
+	// the app started, and keploy could not stop the stack to retry the
+	// bring-up (composeKeepsAnUnstoppedDepCrash), so the run ends on its
+	// crash.
+	stackNotStopped bool
 }
 
 func (h composeHalt) Error() string {
@@ -260,6 +265,10 @@ func (h composeHalt) Error() string {
 			when = "before"
 		}
 		msg := fmt.Sprintf("the container of compose service %q exited with code %d %s the application started, and the command's %s ends the run on it", h.service, h.serviceCode, when, h.flags)
+		if h.stackNotStopped {
+			msg = fmt.Sprintf("the container of compose service %q, which the application depends on, crashed (exit code %d) before the application started, and keploy could not stop the stack to retry the bring-up (the docker daemon did not list the project's containers), so the command's %s ends the run on it. "+
+				"Next step: check that the docker daemon answers (docker ps), read that service's log above, and run keploy again", h.service, h.serviceCode, h.flags)
+		}
 		if h.bringUps > 0 {
 			msg = fmt.Sprintf("the container of compose service %q, which the application depends on, crashed (its last exit code %d) before the application started, on each of keploy's %d bring-ups of the stack, and the command's %s ends the run on it. "+
 				"Next step: read that service's log above, and fix what makes it fail to start", h.service, h.serviceCode, h.bringUps, h.flags)
