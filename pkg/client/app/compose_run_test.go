@@ -35,6 +35,10 @@ type stackDaemon struct {
 	streams     chan chan events.Message
 	// started is when the containers' current runs began.
 	started time.Time
+	// stopCode is the code a running container exits with on a kill or a
+	// stop (mu): its main process's answer to the signal, 0 for one that
+	// handles it, 128 plus the signal's number for one the signal ends.
+	stopCode int
 }
 
 const (
@@ -82,15 +86,22 @@ func (d *stackDaemon) exit(name string, code int, why string) error {
 }
 
 func (d *stackDaemon) ContainerKill(_ context.Context, ref, signal string) error {
-	return d.exit(ref, 0, "KILL-"+signal)
+	d.mu.Lock()
+	code := d.stopCode
+	d.mu.Unlock()
+	return d.exit(ref, code, "KILL-"+signal)
 }
 
-// ContainerStop of a container that is not running is the daemon's no-op.
+// ContainerStop of a container that is not running is the daemon's no-op;
+// a running one exits with stopCode.
 func (d *stackDaemon) ContainerStop(_ context.Context, ref string, _ container.StopOptions) error {
 	if !d.running(ref) {
 		return nil
 	}
-	return d.exit(ref, 0, "STOP")
+	d.mu.Lock()
+	code := d.stopCode
+	d.mu.Unlock()
+	return d.exit(ref, code, "STOP")
 }
 
 // ContainerWait answers once the container is not running (the only
@@ -393,9 +404,11 @@ func TestTheAppsOwnExitUnderExitCodeFromKeepsItsCodeInEveryMode(t *testing.T) {
 // An attached service that fails because keploy stopped the app at a set's
 // end (`up --abort-on-container-failure`, a worker that exits 1 once the app
 // is down) is keploy's own stop's exit: no halt, the run held, and keploy says
-// so once, for the failure alone (a clean exit in the hold says nothing). Once
-// keploy has started the app again, the worker's own crash still halts and
-// ends the run with its code. In both modes.
+// so once, for the failure alone (a clean exit in the hold says nothing, and
+// nor does the app's own exit in keploy's stop, 130 from an app keploy's
+// interrupt ends: it is never one the user's flags read). Once keploy has
+// started the app again, the worker's own crash still halts and ends the run
+// with its code. In both modes.
 func TestAnExitWhileKeployHoldsTheAppStoppedIsKeploysOwnInEveryMode(t *testing.T) {
 	for _, proven := range []string{"", "1"} {
 		t.Run("switch="+proven, func(t *testing.T) {
@@ -408,6 +421,9 @@ func TestAnExitWhileKeployHoldsTheAppStoppedIsKeploysOwnInEveryMode(t *testing.T
 			})
 			r.d.add(&abortContainer{name: "worker-1", service: "worker", status: "running"},
 				&abortContainer{name: "tidy-1", service: "tidy", status: "running"})
+			r.d.mu.Lock()
+			r.d.stopCode = 130
+			r.d.mu.Unlock()
 			stream := r.watchStream(t)
 			die := func(name, service string, code int) {
 				stream <- events.Message{Type: events.ContainerEventType, Action: events.ActionDie, TimeNano: time.Now().UnixNano(),
@@ -416,7 +432,7 @@ func TestAnExitWhileKeployHoldsTheAppStoppedIsKeploysOwnInEveryMode(t *testing.T
 			if _, err := r.a.StopComposeApp(context.Background()); err != nil {
 				t.Fatalf("keploy's stop of the app: %v", err)
 			}
-			die(runAppName, "app", 0)
+			die(runAppName, "app", 130)
 			for _, c := range []struct {
 				name, service string
 				code          int
@@ -443,7 +459,7 @@ func TestAnExitWhileKeployHoldsTheAppStoppedIsKeploysOwnInEveryMode(t *testing.T
 				}
 			}
 			if said := own(); len(said) != 1 || said[0].ContextMap()["service"] != "worker" || said[0].ContextMap()["exitCode"] != int64(1) {
-				t.Fatalf("said %v; want once, of the worker's exit 1 (the tidy exit 0 ends nothing)", said)
+				t.Fatalf("said %v; want once, of the worker's exit 1 (the tidy exit 0 ends nothing, and the app's 130 in keploy's stop is not the flags')", said)
 			}
 			if _, err := r.a.StartComposeApp(context.Background()); err != nil {
 				t.Fatalf("keploy's start of the app: %v", err)
