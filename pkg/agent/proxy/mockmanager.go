@@ -1711,6 +1711,20 @@ func bootPlaced(mk *models.Mock, cutoff time.Time) bool {
 	return models.PlaceOf(mk).Before(cutoff)
 }
 
+// sessionMockForBoot reports whether an initial staging copies the session
+// or connection mock mk into the start-up tier as well as the session tier:
+// when it was placed before the set's first recorded test (cutoff), the app's
+// own start-up, and whenever nothing tells, with no cutoff known or no time
+// recorded on mk. One placed at or after the cutoff was made while the tests
+// ran (a connection opened then) and is served from the session tier.
+func sessionMockForBoot(mk *models.Mock, cutoff time.Time) bool {
+	if cutoff.IsZero() {
+		return true
+	}
+	place := models.PlaceOf(mk)
+	return place.IsZero() || place.Before(cutoff)
+}
+
 // setMocksWithWindowLocked is SetMocksWithWindow without the window-change
 // signal. The caller holds swapMu and owns the mocks (mockOwner).
 //
@@ -1756,6 +1770,10 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// startupHeld is what the startup tier this staging builds stores but
 	// does not serve without exact serving (TreeDb.held).
 	startupHeld := map[*models.Mock]struct{}{}
+	// sessionOnly counts the session and connection mocks an initial staging
+	// leaves to the session tier alone: recorded at or after the set's first
+	// recorded test (sessionMockForBoot).
+	sessionOnly := 0
 
 	// Runner/Replayer's initial SetMocksWithWindow call fires with
 	// start=models.BaseTime before any test runs — to stage mocks for
@@ -1882,16 +1900,38 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// until a window holds the answer. Exact serving shows it where its
 		// view places it, and every reader of the staged set (the teardown
 		// bound, the views, HasUnservedRecording) still finds it.
+		//
+		// Of the session and connection mocks, only those recorded before the
+		// set's first recorded test are copied (sessionMockForBoot): the app's
+		// own start-up. The rest stay in the session tier alone, where every
+		// parser that reads the start-up tier before the first test also looks
+		// (the session tier, or the whole pool for a Mongo handshake). Copied
+		// whatever their time, a recording's later connection handshakes made
+		// the start-up tier grow with the recording: each new Mongo
+		// connection added two mocks to every following round's start-up
+		// tier, and a matcher that scores the start-up tier on each boot call
+		// got slower each round (k8s-proxy#989).
 		cutoff := m.firstRecordedStartLocked()
-		for _, list := range [][]*models.Mock{filtered, unfiltered} {
-			for _, mk := range list {
-				if mk == nil {
-					continue
-				}
-				startupInit = append(startupInit, mk)
-				if !bootPlaced(mk, cutoff) {
-					startupHeld[mk] = struct{}{}
-				}
+		for _, mk := range filtered {
+			if mk == nil {
+				continue
+			}
+			startupInit = append(startupInit, mk)
+			if !bootPlaced(mk, cutoff) {
+				startupHeld[mk] = struct{}{}
+			}
+		}
+		for _, mk := range unfiltered {
+			if mk == nil {
+				continue
+			}
+			if !sessionMockForBoot(mk, cutoff) {
+				sessionOnly++
+				continue
+			}
+			startupInit = append(startupInit, mk)
+			if !bootPlaced(mk, cutoff) {
+				startupHeld[mk] = struct{}{}
 			}
 		}
 	}
@@ -2138,6 +2178,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	if m.logger != nil && len(startupInit) > 0 {
 		m.logger.Debug("routed startup-init mocks into startup tree",
 			zap.Int("count", len(startupInit)),
+			zap.Int("sessionOnly", sessionOnly),
 			zap.Time("firstTestWindow", firstStart),
 			zap.Bool("initialStaging", isInitialStaging))
 	}
