@@ -484,6 +484,73 @@ func TestSpansOpenAtEndsAtTheEndItIsGiven(t *testing.T) {
 	}
 }
 
+// A call a duplicate made before its answer, held for its window by another
+// duplicate's prune, is the duplicate's own: as the window ends the hold drops
+// it. Close records the window's span before it lets go of what the window
+// held, so the let-go finds the call inside it; recorded after, the call was
+// in no span yet and was sent as one made outside every request.
+func TestADuplicatesHeldCallsAreDroppedWhenItsWindowCloses(t *testing.T) {
+	r := newDedupRig(t)
+	start := time.Now()
+	w := r.m.OpenWindow(start, nil)
+	time.Sleep(200 * time.Microsecond)
+	own := r.call("dup-read")
+	time.Sleep(200 * time.Microsecond)
+	job := r.q.Enqueue(time.Now()) // another duplicate's prune, while w is open
+	r.q.ResolveJob(job, true, time.Now(), "", true, r.m)
+	if !r.stillHeld(own) {
+		t.Fatal("a call an open request may own was not held for it")
+	}
+	answered := time.Now()
+	w.Yield(answered)
+	w.Close() // w's request turns out a duplicate too
+	job = r.q.Enqueue(start)
+	r.q.ResolveJob(job, true, answered, "", true, r.m)
+	r.dup()
+	r.dup()
+	if name, ok := r.sentAs(own); ok {
+		t.Fatalf("a duplicate's own call, held for its window, was sent as %s when the window closed", name)
+	}
+	if r.stillHeld(own) {
+		t.Fatal("a duplicate's own call is still held after its window closed")
+	}
+}
+
+// Past the cap, OpenAt joins a span to the open one whose start is nearest.
+// The joined span closes once both closers have run, at the latest end they
+// gave, whichever closer ran last: an earlier end from the last closer does
+// not cut short what the other request covered.
+func TestSpansJoinedPastTheCapCloseAtTheLatestEnd(t *testing.T) {
+	var s Spans
+	base := time.Now().Add(-time.Hour)
+	far := base.Add(time.Hour) // the other open spans start here, after every probe
+	closers := make([]func(time.Time), 0, maxPressureRanges)
+	host := s.OpenAt(base)
+	for len(closers) < maxPressureRanges-1 {
+		closers = append(closers, s.OpenAt(far.Add(time.Duration(len(closers))*time.Millisecond)))
+	}
+	joined := s.OpenAt(base.Add(time.Millisecond)) // past the cap: joins host, the nearest
+	if closed, open := s.Counts(); closed != 0 || open != maxPressureRanges {
+		t.Fatalf("closed %d, open %d after joining past the cap, want 0 and %d", closed, open, maxPressureRanges)
+	}
+	later, earlier := base.Add(200*time.Millisecond), base.Add(100*time.Millisecond)
+	joined(later)
+	if in, _ := s.Overlaps(base.Add(time.Hour/2), base.Add(time.Hour/2)); !in {
+		t.Fatal("the joined span closed before its other closer ran")
+	}
+	host(earlier) // the last closer gives the earlier end
+	between := base.Add(150 * time.Millisecond)
+	if in, _ := s.Overlaps(between, between); !in {
+		t.Fatal("the joined span closed at the last closer's end, not the latest end its closers gave")
+	}
+	if in, _ := s.Overlaps(later.Add(time.Millisecond), later.Add(time.Millisecond)); in {
+		t.Fatal("the joined span covers a time after the latest end its closers gave")
+	}
+	for _, c := range closers {
+		c(time.Time{})
+	}
+}
+
 // Calls no request made are sent by a duplicate's prune. The stale cutoff of
 // a kept resolve (resolveRange) still drops one more than StaleHorizon old:
 // that cutoff also stands for requests whose windows the manager does not know

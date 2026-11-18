@@ -702,6 +702,12 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// body's last byte moves it on, after resp.Write.
 		respTimestamp := clockNow()
 
+		// A stream is answered at its headers: a paused one's span ends here,
+		// not when the stream does, as an unpaused one's window does below.
+		if models.IsHTTPStreamResponse(resp) {
+			endRequestSpan(&pausedSpan, respTimestamp)
+		}
+
 		// A stream is no test case, and that is known at its headers
 		// (notRecordedStream): its body is not captured.
 		if captureEligible && pm.notRecordedStream(ctx, logger, req, resp, &win, respTimestamp) {
@@ -1874,6 +1880,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 
 		// The response's headers are read: the earliest its exchange can end.
 		headersAt := clockNow()
+
+		// A stream is answered at its headers: a paused one's span ends here,
+		// not when the stream does, as an unpaused one's window does below.
+		if models.IsHTTPStreamResponse(resp) {
+			endRequestSpan(&pausedSpan, headersAt)
+		}
 
 		// A stream is no test case, and that is known at its headers
 		// (notRecordedStream): its body is not captured.
