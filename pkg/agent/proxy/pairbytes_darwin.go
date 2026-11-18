@@ -536,7 +536,8 @@ const heldUncounted = "macOS's TCP table does not list this socket to keploy's a
 // lists with the first sequence number the proxy's side began from (gone:
 // reset, its reset the last it sent), as Linux makes none for a socket it
 // cannot read: the close then finds nothing on its way. A table that cannot
-// be read tells nothing: every wait is unknown from then on (closeUnknown).
+// be read tells nothing: what the connection carried is a loss of the tests
+// it could have served (closeUnknown).
 //
 // An application socket not listed is gone only once one of the
 // application's has been (paired.visible). Before, it may be hidden from the
@@ -548,8 +549,10 @@ const heldUncounted = "macOS's TCP table does not list this socket to keploy's a
 // acknowledged (FIN_WAIT_1, CLOSING, LAST_ACK), and no holder's read finds
 // it. The table shows a FIN taken in the proxy's side's entry; a reset it
 // shows by dropping that entry, which the side's own socket then tells
-// (noteUnlistedAtClose). Otherwise what was on its way cannot be told, and
-// every wait is unknown from then on.
+// (noteUnlistedAtClose). The side's own read, as the close begins, may show
+// one the table's read did not (noteUnheldAtClose). Before either, what was
+// on its way cannot be told: it is a loss of the tests the connection could
+// have served (closeUnknown).
 func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	if xnuTableReadable() != nil {
 		return
@@ -567,7 +570,7 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 		case listed && p.noteHeldAtClose(pc, pr):
 		case listed && peerEnded(pr.state):
 		case listed:
-			p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side has not taken its FIN or reset: bytes it wrote may still be on their way, as a socket its holder closed lives on until they are acknowledged (%s)", models.ErrProxyConnsUnsupported, pc.app, xnuHidden))
+			p.noteUnheldAtClose(pc)
 		default:
 			p.noteUnlistedAtClose(pc)
 		}
@@ -578,6 +581,30 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 		return
 	}
 	pc.wroteAtClose.Store(&appWrote{want: pc.count(app.writeSeq() - app.iss - 1), fin: app.finPending(), base: targetBase{isn: app.iss}})
+}
+
+// noteUnheldAtClose is noteWroteAtClose for an application socket the table
+// does not list and no process the agent may read holds, the proxy's side not
+// past the application's FIN or reset as the table was read. Its holder closed it (an HTTP client that read the proxy's
+// answer with Connection: close, as the answer to a call no mock answers is,
+// and closed at once), or a process of another user holds it. The FIN of one
+// its holder closed may reach the proxy's side between the table's read and
+// the close: the side is read again, and one past the FIN or reset by then has
+// nothing on its way, and no record is made, as for one the table shows past
+// it. Otherwise what the application wrote cannot be counted, and the close
+// waits for nothing to tell it: a socket held open (a pool's idle one) sends
+// no FIN, and a close that read until it would hang. The close is unknown, a
+// loss of the tests the connection could have served (closeUnknown), as is
+// one whose side cannot be read.
+func (p *Proxy) noteUnheldAtClose(pc *pairedConn) {
+	ps := readHeldProxySide(pc.conn)
+	switch {
+	case ps.err != nil:
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side of it cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err))
+	case peerEnded(ps.state):
+	default:
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side has not taken its FIN or reset (it is in %s): bytes it wrote may still be on their way, as a socket its holder closed lives on until they are acknowledged (%s)", models.ErrProxyConnsUnsupported, pc.app, tcpStateName(ps.state), xnuHidden))
+	}
 }
 
 // noteUnlistedAtClose is noteWroteAtClose for a connection the table lists
@@ -612,10 +639,10 @@ func (p *Proxy) noteUnlistedAtClose(pc *pairedConn) {
 // taken it: the record (exact, as the table's). A reset socket's buffer is
 // emptied unsent: it is gone, and no record is made. Bytes in that buffer the
 // side had not acknowledged, its FIN not taken, may be data on its way or
-// bytes received: which cannot be told (heldUncounted), and every wait is
-// unknown from then on, said in one log line naming the connection and the
-// bytes (closeUnknown). So is every wait when the processes or the proxy's
-// side cannot be read.
+// bytes received: which cannot be told (heldUncounted), and what the
+// connection carried is a loss of the tests it could have served, said in one
+// log line naming the connection and the bytes (closeUnknown). So it is when
+// the processes or the proxy's side cannot be read.
 //
 // With the holder not yet known (pairedConn.holder) the read is of every
 // process the agent may read, as a wait's is (heldSockets): on macOS 27 a

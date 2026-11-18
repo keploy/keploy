@@ -29,31 +29,34 @@ import (
 // platform's own; what a close with bytes unread, or on their way, charges is
 // the same.
 
-// closeUnknown makes every wait unknown from now on (paired.fail) for err:
-// what the application had written to pc, as the proxy closes it, cannot be
-// told (noteWroteAtClose). It says so in one log line naming the connection
-// and why, the first time only: every wait is unknown from then on, and a
-// later close tells no more. A proxy whose reads do not wait for the paired
-// connections' bytes (holdsPairedBytes) vouches for none, and says it at debug
-// level, as pairedBytesUnsupported does.
+// closeUnknown charges what the application had written to pc, as the proxy
+// closes it, that cannot be told (noteWroteAtClose), to the tests pc could
+// have served (pairLost): each test whose end was cut short with bytes on pc
+// unsettled, and the test open now. No other test is: a test open later has no
+// bytes on a connection the proxy closed before it, and a bytes wait reads
+// for itself each connection it holds. The charge is said in one line naming
+// the connection and why (err). A proxy whose reads do not wait for the
+// paired connections' bytes (holdsPairedBytes) vouches for none: it charges
+// nothing, and says it at debug level.
 func (p *Proxy) closeUnknown(pc *pairedConn, err error, fields ...zap.Field) {
-	if !p.paired.fail(err) {
+	fields = append([]zap.Field{zap.String("connection", fmt.Sprintf("%s -> %s", pc.app, pc.proxy)), zap.Error(err)}, fields...)
+	if !p.holdsPairedBytes() {
+		p.logger.Debug(closeUnknownLost, fields...)
 		return
 	}
-	log := p.logger.Warn
-	if !p.holdsPairedBytes() {
-		log = p.logger.Debug
-	}
-	log("keploy cannot tell what the application had written to a connection its proxy closed: from now on it cannot vouch that every call of a test is in its hands",
-		append([]zap.Field{zap.String("connection", fmt.Sprintf("%s -> %s", pc.app, pc.proxy)), zap.Error(err)}, fields...)...)
+	p.pairLost(pc, 1, math.MaxUint64, closeUnknownLost, fields...)
 }
+
+// closeUnknownLost is pairLost's message for a close that cannot tell what
+// the application had written (closeUnknown).
+const closeUnknownLost = "keploy cannot tell what the application had written to a connection its proxy closed: it cannot vouch that every call of the tests that connection could have served is in its hands"
 
 // pairClosing is a paired connection's beforeClose: its side as the proxy
 // closes it (closing), and a capture loss when the close tosses bytes the
 // application wrote that the proxy never read. Its side counts those
 // received, so no wait would find them missing. Bytes held that cannot be
-// counted leave every wait unknown, and are a loss of this connection's
-// whether or not a wait holds it.
+// counted are a loss of the tests this connection could have served, whether
+// or not a wait holds it.
 //
 // Over TLS (tc's layer) what is unread is read through the layer first: a
 // TLS client's goodbye ends with a close_notify -- go-sql-driver/mysql's
@@ -93,8 +96,9 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 	switch {
 	case pc == nil, ctx.Err() != nil, pc.noSession.Load():
 	case err != nil:
-		p.paired.fail(fmt.Errorf("%w: read what the proxy's socket from %s held unread as the proxy closed it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
-		p.pairLost(pc, 1, lostTop(pc), "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: from now on it cannot vouch that every call of a test is in its hands", zap.Error(err))
+		// Unaccountable, as closeUnknown's: a loss of the tests the
+		// connection could have served, and of no other.
+		p.pairLost(pc, 1, lostTop(pc), "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: it cannot vouch that every call of the tests that connection could have served is in its hands", zap.Error(err))
 	case unread == 0 && !onItsWayAtClose(pc):
 	case unread == 0 && !tlsLayer && finAloneOnItsWay(pc):
 		// The application's FIN alone: it carries no call, and a bytes
