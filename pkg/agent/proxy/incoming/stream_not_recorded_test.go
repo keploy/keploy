@@ -188,7 +188,7 @@ func TestNotRecordedStream_EndsTheWindowAndTellsOnlyWhatTheFiltersKeep(t *testin
 			req := httptest.NewRequest(http.MethodGet, "/events", nil)
 			resp := &http.Response{StatusCode: c.status, Header: http.Header{"Content-Type": {c.contentType}}, Request: req}
 
-			if got := pm.notRecordedStream(context.Background(), zap.New(core), req, resp, &win); got != c.stream {
+			if got := pm.notRecordedStream(context.Background(), zap.New(core), req, resp, &win, time.Now()); got != c.stream {
 				t.Fatalf("notRecordedStream = %v, want %v", got, c.stream)
 			}
 			open := 1
@@ -203,5 +203,54 @@ func TestNotRecordedStream_EndsTheWindowAndTellsOnlyWhatTheFiltersKeep(t *testin
 			}
 			win.Close()
 		})
+	}
+}
+
+// A stream's request is answered at its headers: notRecordedStream yields its
+// window there, so what the stream's handler calls while it runs is not the
+// request's own. A call before the headers is, and a duplicate's prune drops
+// it; one after is sent as a call made outside every request.
+func TestNotRecordedStream_ACallAfterTheHeadersIsNotTheRequestsOwn(t *testing.T) {
+	mgr := syncMock.New(zap.NewNop())
+	out := make(chan *models.Mock, 64)
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled()
+	start := time.Now().Add(-time.Second)
+	for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+		mgr.ResolveRange(start.Add(-time.Minute), start.Add(-time.Minute), "", true, false)
+	}
+	call := func(at time.Time) *models.Mock {
+		m := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)},
+			TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+		mgr.AddMock(m)
+		return m
+	}
+	win := mgr.OpenWindow(start, nil)
+	headersAt := start.Add(10 * time.Millisecond)
+	before := call(start.Add(5 * time.Millisecond))
+	after := call(headersAt.Add(20 * time.Millisecond))
+	req := httptest.NewRequest(http.MethodGet, "/events", nil)
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Request: req}
+	pm := &IngressProxyManager{}
+	if !pm.notRecordedStream(context.Background(), zap.NewNop(), req, resp, &win, headersAt) {
+		t.Fatal("a text/event-stream answer was not taken for a stream")
+	}
+	queue := mgr.DedupQueue()
+	job := queue.Enqueue(time.Now()) // a duplicate's prune after it
+	queue.ResolveJob(job, true, time.Now(), "", false, mgr)
+	var sentBefore, sentAfter bool
+	for len(out) > 0 {
+		switch <-out {
+		case before:
+			sentBefore = true
+		case after:
+			sentAfter = true
+		}
+	}
+	if sentBefore {
+		t.Fatal("a call before the stream's headers was sent; it is the request's own")
+	}
+	if !sentAfter {
+		t.Fatal("a call after the stream's headers was dropped as the request's own")
 	}
 }

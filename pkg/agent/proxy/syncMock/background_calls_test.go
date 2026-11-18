@@ -76,6 +76,7 @@ func (r *dedupRig) dup(during ...func()) (start, end time.Time) {
 	}
 	time.Sleep(time.Millisecond)
 	end = time.Now()
+	w.Yield(end) // answered: the ingress yields at the answer's last byte
 	w.Close()
 	job := r.q.Enqueue(start)
 	r.q.ResolveJob(job, true, end, "", true, r.m)
@@ -345,44 +346,117 @@ func TestADuplicatesSpanStartsAtItsOwnRequestNotItsPruneHorizon(t *testing.T) {
 	}
 }
 
-// A duplicate's span ends when its window closes, after its verdict. Work it
-// does after responding but before then is its own and dropped with it; work
-// it does after its window closed is outside every request's span and is sent
-// as a call no request made. That is the trade-off of telling calls apart by
-// time: a tail on the span would also swallow the timer calls that land in
-// it, at every duplicate.
-func TestADuplicatesCallsAfterItsWindowClosesAreSentAsBackground(t *testing.T) {
+// A request owns its time until it is answered (Window.Yield: the answer's
+// last byte, or a stream's headers), not until the agent closes its window. A
+// skipped duplicate's call before its answer is its own and dropped; one after
+// it (work a handler does after responding, a stream's calls past its
+// headers) is outside every request's span and sent as a call made outside
+// every request. That is the trade-off of telling calls apart by time: a tail
+// on the span would also swallow the timer calls that land in it after every
+// duplicate.
+func TestADuplicatesCallsAfterItsAnswerAreSentAsBackground(t *testing.T) {
 	r := newDedupRig(t)
-	var inside, beforeClose *models.Mock
 	start := time.Now()
 	w := r.m.OpenWindow(start, nil)
 	time.Sleep(200 * time.Microsecond)
-	inside = r.call("dup-read")
+	inside := r.call("dup-read")
 	time.Sleep(200 * time.Microsecond)
-	end := time.Now() // its response
+	answered := time.Now()
 	time.Sleep(200 * time.Microsecond)
-	beforeClose = r.call("dup-audit-before-close")
+	afterAnswer := r.call("dup-audit-after-answer")
 	time.Sleep(200 * time.Microsecond)
+	w.Yield(answered)
 	w.Close()
 	job := r.q.Enqueue(start)
-	r.q.ResolveJob(job, true, end, "", true, r.m)
-	time.Sleep(200 * time.Microsecond)
-	afterClose := r.call("dup-audit-after-close")
-	time.Sleep(time.Millisecond)
+	r.q.ResolveJob(job, true, answered, "", true, r.m)
 	r.dup()
 	r.dup()
 	if _, ok := r.sentAs(inside); ok {
-		t.Fatal("a duplicate's call inside its response was sent")
+		t.Fatal("a duplicate's call before its answer was sent")
 	}
-	if _, ok := r.sentAs(beforeClose); ok {
-		t.Fatal("a duplicate's call after its response but before its window closed was sent")
-	}
-	name, ok := r.sentAs(afterClose)
+	name, ok := r.sentAs(afterAnswer)
 	if !ok {
-		t.Fatal("a call after the duplicate's window closed, outside every span, was dropped")
+		t.Fatal("a call after the duplicate's answer, outside every request's span, was dropped")
 	}
 	if got := r.mappedTo(name); len(got) > 0 {
 		t.Fatalf("a call outside every span is mapped to %v, want none", got)
+	}
+}
+
+// A span ends at the request's answer, not when the agent gets to close its
+// window: a proxyless agent closes it after reading, parsing and deciding the
+// request, a lag after the answer. A call in that lag is not the request's.
+func TestASpanEndsAtItsAnswerNotWhenTheAgentClosesIt(t *testing.T) {
+	r := newDedupRig(t)
+	start := time.Now()
+	w := r.m.OpenWindow(start, nil)
+	time.Sleep(time.Millisecond)
+	answered := time.Now()
+	time.Sleep(10 * time.Millisecond)
+	inLag := r.call("timer-in-lag")
+	time.Sleep(40 * time.Millisecond) // the agent's lag
+	w.Yield(answered)
+	w.Close()
+	r.dup()
+	r.dup()
+	if _, ok := r.sentAs(inLag); !ok {
+		t.Fatal("a call after the request's answer, before the agent closed its window, was dropped as the request's")
+	}
+}
+
+// A call a duplicate's prune met while a request was still open, and before
+// the ingress said that request was answered, is held for it. Once the request
+// turns out to have been answered before the call, the call was no part of it:
+// as the window ends the hold lets it go on as a call made outside every
+// request, not dropped.
+func TestACallHeldBeforeItsRequestSaidItWasAnsweredIsLetGoAsBackground(t *testing.T) {
+	r := newDedupRig(t)
+	start := time.Now()
+	w := r.m.OpenWindow(start, nil)
+	time.Sleep(200 * time.Microsecond)
+	answered := time.Now()
+	time.Sleep(200 * time.Microsecond)
+	after := r.call("timer-after-answer")
+	time.Sleep(200 * time.Microsecond)
+	job := r.q.Enqueue(time.Now()) // a duplicate's prune, before the answer is said
+	r.q.ResolveJob(job, true, time.Now(), "", true, r.m)
+	if !r.stillHeld(after) {
+		t.Fatal("a call an open request may own was not held for it")
+	}
+	w.Yield(answered) // said late, as an agent behind its traffic says it
+	w.Close()
+	r.dup() // the next pass hands on what the hold let go of
+	name, ok := r.sentAs(after)
+	if !ok {
+		t.Fatalf("a call made after its request's answer was dropped as the hold let it go (still held: %v)", r.stillHeld(after))
+	}
+	if got := r.mappedTo(name); len(got) > 0 {
+		t.Fatalf("it is mapped to %v, want none", got)
+	}
+}
+
+// A request the ingress opens no window for (one that arrived while recording
+// was paused, one filtered out of the recording) leaves its span through
+// NoteRequestSpan: its own calls are dropped at the next duplicate's prune, and
+// a call after its answer is sent.
+func TestARequestWithNoWindowLeavesItsSpan(t *testing.T) {
+	r := newDedupRig(t)
+	start := time.Now()
+	time.Sleep(200 * time.Microsecond)
+	own := r.call("health-db-ping")
+	time.Sleep(200 * time.Microsecond)
+	answered := time.Now()
+	r.m.NoteRequestSpan(start, answered)
+	time.Sleep(200 * time.Microsecond)
+	after := r.call("timer")
+	time.Sleep(time.Millisecond)
+	r.dup()
+	r.dup()
+	if _, ok := r.sentAs(own); ok {
+		t.Fatal("a call made during a request that opened no window was sent as one made outside every request")
+	}
+	if _, ok := r.sentAs(after); !ok {
+		t.Fatal("a call after that request's answer was dropped")
 	}
 }
 
@@ -406,21 +480,32 @@ func TestTheStaleCutoffStillDropsACallNoRequestMade(t *testing.T) {
 	}
 }
 
-// A request claimed kept (Window.Keep) whose window closes before its resolve
-// leaves no unkept span: a prune in between must not drop its calls as an
-// unkept request's.
+// A request claimed kept (Window.Keep) leaves no unkept span when its window
+// closes, so its calls stay its own: its kept resolve maps them to its test.
 func TestAClaimedRequestsWindowLeavesNoUnkeptSpan(t *testing.T) {
 	r := newDedupRig(t)
-	w := r.m.OpenWindow(time.Now(), nil)
+	start := time.Now()
+	w := r.m.OpenWindow(start, nil)
 	time.Sleep(200 * time.Microsecond)
 	mk := r.call("kept-find")
 	time.Sleep(200 * time.Microsecond)
+	end := time.Now()
 	if !w.Keep() {
 		t.Fatal("window given up")
 	}
 	w.Close()
-	r.dup() // a duplicate's prune passes the call before the kept request resolves
-	if _, sent := r.sentAs(mk); !sent && !r.stillHeld(mk) {
-		t.Fatal("a claimed request's call was dropped as an unkept request's")
+	r.m.mu.Lock()
+	in, _ := r.m.unkeptSpans.Overlaps(mk.Spec.ReqTimestampMock, mk.Spec.ReqTimestampMock)
+	r.m.mu.Unlock()
+	if in {
+		t.Fatal("a claimed request's window left an unkept span over its call")
+	}
+	r.m.ResolveKept(w, start, end, "test-k", true)
+	name, ok := r.sentAs(mk)
+	if !ok {
+		t.Fatal("the claimed request's call was not sent at its kept resolve")
+	}
+	if got := r.mappedTo(name); len(got) != 1 || got[0] != "test-k" {
+		t.Fatalf("the claimed request's call is mapped to %v, want [test-k]", got)
 	}
 }

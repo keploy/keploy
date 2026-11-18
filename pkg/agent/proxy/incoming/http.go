@@ -694,7 +694,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		// A stream is no test case, and that is known at its headers
 		// (notRecordedStream): its body is not captured.
-		if captureEligible && pm.notRecordedStream(ctx, logger, req, resp, &win) {
+		if captureEligible && pm.notRecordedStream(ctx, logger, req, resp, &win, respTimestamp) {
 			captureEnabled = false
 		}
 
@@ -906,6 +906,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// stream still being sent (a no-op for one that yielded at its
 		// headers already).
 		win.Yield(respTimestamp)
+		if pausedAtRequest {
+			noteUnwindowedRequest(ctx, req, resp, reqTimestamp, headersAt, respTimestamp)
+		}
 
 		shouldCapture := captureEnabled
 		if forceCloseMode {
@@ -1093,10 +1096,27 @@ const streamWhy = "its answer is a stream, which keploy does not record as a tes
 // recording's filters leave the request out anyway, by the request's shape
 // and path tag, and on the recording's console by its path beside the same
 // tag (notRecordedMeta).
-func (pm *IngressProxyManager) notRecordedStream(ctx context.Context, logger *zap.Logger, req *http.Request, resp *http.Response, win **syncMock.Window) bool {
+// noteUnwindowedRequest leaves the span of a request that opened no window
+// (one that arrived while recording was paused) with the mock manager, from
+// its request to its answer — a stream's headers, else its last byte — so the
+// calls it made are its own, not calls made outside every request
+// (syncMock.SyncMockManager.NoteRequestSpan).
+func noteUnwindowedRequest(ctx context.Context, req *http.Request, resp *http.Response, reqAt, headersAt, endAt time.Time) {
+	answered := endAt
+	if models.IsHTTPStreamResponse(resp) {
+		answered = headersAt
+	}
+	syncMock.FromContextOrGlobal(ctx).NoteRequestSpan(reqAt, answered)
+}
+
+func (pm *IngressProxyManager) notRecordedStream(ctx context.Context, logger *zap.Logger, req *http.Request, resp *http.Response, win **syncMock.Window, headersAt time.Time) bool {
 	if !models.IsHTTPStreamResponse(resp) {
 		return false
 	}
+	// A stream's request is answered at its headers: what its handler goes
+	// on to call while the stream runs is no longer the request's own
+	// (syncMock.Window.Yield), the same rule as a call after any answer.
+	(*win).Yield(headersAt)
 	(*win).Close()
 	*win = nil
 	if !hooksUtils.IsFiltered(logger, req, pm.loadIncomingOpts()) {
@@ -1833,7 +1853,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 
 		// A stream is no test case, and that is known at its headers
 		// (notRecordedStream): its body is not captured.
-		if captureEnabled && pm.notRecordedStream(ctx, logger, req, resp, &win) {
+		if captureEnabled && pm.notRecordedStream(ctx, logger, req, resp, &win, headersAt) {
 			captureEnabled = false
 		}
 
@@ -1993,6 +2013,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		respTimestamp := endAt
 		if !ended {
 			respTimestamp = clockNow()
+		}
+		// Answered: from here on the request claims none of the calls made
+		// beside it (syncMock.Window.Yield), as the buffered path's does.
+		win.Yield(respTimestamp)
+		if paused && connCapture {
+			noteUnwindowedRequest(ctx, req, resp, reqTimestamp, headersAt, respTimestamp)
 		}
 
 		// Async capture (matches synchronous-mode pattern at the call

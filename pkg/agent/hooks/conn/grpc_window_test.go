@@ -293,3 +293,38 @@ func TestCaptureGRPCWithoutSyncDuplicatesMockIsDroppedAtTheNextPrune(t *testing.
 		}
 	}
 }
+
+// A duplicate gRPC call's span ends at its answer (CaptureGRPC yields its
+// window at the response): a call made after the answer, before the capture
+// got to it, is not the call's own, and the next prune sends it.
+func TestCaptureGRPCWithoutSyncDuplicatesSpanEndsAtItsAnswer(t *testing.T) {
+	mgr, w, out, maps, start, mock := heldGRPCManager(t)
+	answered := start.Add(2 * time.Millisecond)
+	after := perTestMock(answered.Add(5 * time.Millisecond))
+	mgr.AddMock(after)
+	prev := GRPCCaptureHook
+	GRPCCaptureHook = func(*models.GrpcReq, *models.GrpcResp) (bool, string) { return true, "" }
+	defer func() { GRPCCaptureHook = prev }()
+	CaptureGRPC(syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w), zap.NewNop(), make(chan *models.TestCase, 1), grpcCall(start, answered), 50051, false, true)
+	queue := mgr.DedupQueue()
+	job := queue.Enqueue(time.Now()) // an HTTP duplicate after it
+	queue.ResolveJob(job, true, time.Now(), "", true, mgr)
+	for len(maps) > 0 {
+		<-maps
+	}
+	var sentOwn, sentAfter bool
+	for len(out) > 0 {
+		switch m := <-out; {
+		case m == mock:
+			sentOwn = true
+		case m.Spec.ReqTimestampMock.Equal(after.Spec.ReqTimestampMock):
+			sentAfter = true
+		}
+	}
+	if sentOwn {
+		t.Fatal("the duplicate call's own mock, before its answer, was sent")
+	}
+	if !sentAfter {
+		t.Fatal("a call after the duplicate's answer was dropped as its own")
+	}
+}
