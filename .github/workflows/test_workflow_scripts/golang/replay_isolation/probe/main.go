@@ -27,6 +27,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -272,6 +273,7 @@ func app(args []string) {
 	unrecorded := fs.Bool("unrecorded", false, "also look up the names a recording must not hold (the replay's and the baselines' args; the recording's leave it off)")
 	stopLookup := fs.Bool("stop-lookup", false, "look a name up as the app stops (SIGINT or SIGTERM), after its last test and in no recording, then exit (the replay's args: keploy test reads the calls made after a set's last test once its app has stopped)")
 	stopRecorded := fs.Bool("stop-recorded", false, "look a name up as the app stops (SIGINT or SIGTERM), after its last test, at record and at replay, then exit (the recording's args too: keploy record stops the app before it saves what the agent captured, so the recording holds it and the replay serves it)")
+	stopHold := fs.Duration("stop-hold", 0, "on a stop (SIGINT or SIGTERM), stop answering first (the listener closes), then make the stop lookups, then stay up this long before exiting 0 (0: answer until the stop lookups end): a container beside the app that watches it (the watcher) sees it gone while keploy's stop of it still waits on it")
 	crashOnFire := fs.Int("crash-on-fire", 0, "exit with this code as /fire is asked, before it answers (0: never): a crash during a test")
 	listen := fs.String("listen", ":8080", "")
 	_ = fs.Parse(args)
@@ -371,11 +373,18 @@ func app(args []string) {
 	// saves what the agent captured, so the recording holds that NXDOMAIN, the
 	// replay serves it, and no report or misses file names it (the
 	// stop-recorded rows).
-	if *stopLookup || *stopRecorded {
+	// With -stop-hold it stops answering at once, before those lookups, and
+	// stays up that long after them: a watcher beside it sees it gone while
+	// keploy's stop of it still waits on it (the compose watch rows).
+	srv := &http.Server{Addr: *listen}
+	if *stopLookup || *stopRecorded || *stopHold > 0 {
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
 			<-stop
+			if *stopHold > 0 {
+				_ = srv.Close()
+			}
 			if *stopRecorded {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				_, err := net.DefaultResolver.LookupHost(ctx, "stop-recorded.invalid-replay-isolation.test")
@@ -388,10 +397,16 @@ func app(args []string) {
 				cancel()
 				outcome("dns-stop-lookup", err)
 			}
+			time.Sleep(*stopHold)
 			os.Exit(0)
 		}()
 	}
-	fmt.Fprintln(os.Stderr, http.ListenAndServe(*listen, nil))
+	err := srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		// The stop closed it (-stop-hold): the stop ends the process.
+		select {}
+	}
+	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
 }
 

@@ -778,16 +778,20 @@ for mode in "${MODES[@]}"; do
 		replay replay-compose-app -c "docker compose up riso-app" --containerName riso-app --delay 10
 		# The user's own `up --abort-on-container-failure`, a watcher beside
 		# the app that exits 1 once the app stops answering, and two sets (the
-		# recording's, twice): keploy's own stop of the app at the first
-		# set's end makes the watcher exit 1. That exit is keploy's stop, not
-		# a failure: it keeps no halt and ends nothing, and the second set
-		# runs and passes.
+		# recording's, twice): keploy's own stop of the app makes the watcher
+		# exit 1: at the run's end with the switch unset (the app runs across
+		# sets), at the first set's end under the switch (each set starts the
+		# app again). That exit is keploy's stop, not a failure: it keeps no
+		# halt and ends nothing, and both sets pass. The app stops answering
+		# at once on its stop and stays up 3 s longer (-stop-hold), so the
+		# watcher's exit comes while keploy's stop still waits on the app,
+		# whichever stop it is.
 		mkdir -p "$W/compose-watch/keploy" && cd "$W/compose-watch" || die cd
 		cp "$W/compose/keploy.yml" . || die "keploy.yml"
 		for s in 0 1; do
 			mkdir -p "keploy/test-set-$s" && cp -r "$W/compose/keploy/test-set-0/tests" "$W/compose/keploy/test-set-0/mocks.yaml" "keploy/test-set-$s/" || die "the watcher's sets"
 		done
-		compose_yml riso-app 8080 "$APPARGS" watcher
+		compose_yml riso-app 8080 "$APPARGS -stop-hold 3s" watcher
 		replay replay-compose-watch -c "docker compose up --abort-on-container-failure" --containerName riso-app --delay 10
 		cd "$W/compose" || die cd
 
@@ -1034,13 +1038,13 @@ for mode in "${MODES[@]}"; do
 		rows_runner record-compose-migrate
 		row_log "record-compose-migrate: the migration exited 0" "$W/out/record-compose-migrate/keploy.log" 'MIGRATE DONE'
 		row_log "record-compose-migrate: its exit ends nothing, as compose's up waits on it" "$W/out/record-compose-migrate/keploy.log" 'docker compose up waits on that exit before it starts another service.*migrate'
-		row_nolog "record-compose-migrate: its exit does not end the run" "$W/out/record-compose-migrate/keploy.log" "the command.s abort flags end the run on it"
+		row_nolog "record-compose-migrate: its exit does not end the run" "$W/out/record-compose-migrate/keploy.log" 'the command.s abort flags end the run on it.*"service": "migrate"'
 		# seed's 0 after the app started, which the runner waits on: it ended
 		# nothing, and the runner compose started after it ended the record.
 		rows_runner record-compose-seed
 		row_log "record-compose-seed: the seed exited 0" "$W/out/record-compose-seed/keploy.log" 'SEED DONE'
 		row_log "record-compose-seed: its exit ends nothing, as compose's up waits on it" "$W/out/record-compose-seed/keploy.log" 'docker compose up waits on that exit before it starts another service.*seed'
-		row_nolog "record-compose-seed: its exit does not end the run" "$W/out/record-compose-seed/keploy.log" "the command.s abort flags end the run on it"
+		row_nolog "record-compose-seed: its exit does not end the run" "$W/out/record-compose-seed/keploy.log" 'the command.s abort flags end the run on it.*"service": "seed"'
 		;;
 	esac
 done
