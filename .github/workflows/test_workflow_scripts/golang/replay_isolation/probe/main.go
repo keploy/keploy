@@ -62,7 +62,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|oneshot|early|runner|after|flaky|watcher|fork1|fork2 ...")
+		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|oneshot|early|runner|after|flaky|watcher|hold|fork1|fork2 ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -94,6 +94,8 @@ func main() {
 		flaky(os.Args[2:])
 	case "watcher":
 		watcher(os.Args[2:])
+	case "hold":
+		hold(os.Args[2:])
 	case "fork1": // starts fork2 and exits at once, so fork2 is reparented
 		c := exec.Command("/proc/self/exe", "fork2", os.Args[2], os.Args[3])
 		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -154,14 +156,46 @@ func runner(args []string) {
 
 // after is a compose stack's one-shot service that takes a while (a
 // migration a service waits on with service_completed_successfully, a seed
-// that runs once the app is up): it waits D, says "WORD DONE" and exits 0.
+// that runs once the app is up): it waits D, says "WORD DONE" and exits 0;
+// with -code N other than 0 (a test driver that fails a while after the app
+// is up), it says "WORD EXITS N" and exits N.
 func after(args []string) {
 	fs := flag.NewFlagSet("after", flag.ExitOnError)
-	wait := fs.Duration("wait", 0, "how long it runs before it exits 0")
+	wait := fs.Duration("wait", 0, "how long it runs before it exits")
 	say := fs.String("say", "AFTER", "the word it prints before DONE")
+	code := fs.Int("code", 0, "the code it exits with")
 	_ = fs.Parse(args)
 	time.Sleep(*wait)
+	if *code != 0 {
+		fmt.Printf("%s EXITS %d\n", *say, *code)
+		os.Exit(*code)
+	}
 	fmt.Printf("%s DONE\n", *say)
+}
+
+// hold is a service that runs until it is stopped: it says "WORD UP", and at
+// SIGTERM or SIGINT says "WORD STOPPED" and exits 0 (a sidecar that a
+// service waits on with service_completed_successfully then completes).
+// With -ignore-term it ignores both, and only docker's kill at its stop
+// grace's end stops it (a service that does not handle SIGTERM): it sleeps
+// rather than blocks on nothing, since the lane's static build
+// (CGO_ENABLED=0) has the Go runtime's deadlock check, which ends a process
+// whose every goroutine blocks for good with "all goroutines are asleep"
+// and exit 2, at once.
+func hold(args []string) {
+	fs := flag.NewFlagSet("hold", flag.ExitOnError)
+	say := fs.String("say", "HOLD", "the word it prints")
+	ignore := fs.Bool("ignore-term", false, "ignore SIGTERM and SIGINT")
+	_ = fs.Parse(args)
+	fmt.Printf("%s UP\n", *say)
+	if *ignore {
+		signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+	untilStopped()
+	fmt.Printf("%s STOPPED\n", *say)
 }
 
 // untilStopped blocks until the container is stopped (SIGINT or SIGTERM:

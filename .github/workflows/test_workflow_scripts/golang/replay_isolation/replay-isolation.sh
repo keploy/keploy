@@ -116,11 +116,16 @@ die() { echo "FATAL: $*"; FAILED=1; exit 1; }
 
 cleanup() {
 	[ -n "$SINKPID" ] && $S kill "$SINKPID" 2>/dev/null
-	[ ! -f "$W/compose/docker-compose.yml" ] || (cd "$W/compose" && docker compose down --remove-orphans >/dev/null 2>&1)
-	[ ! -f "$W/compose-base/docker-compose.yml" ] || (cd "$W/compose-base" && docker compose down --remove-orphans >/dev/null 2>&1)
-	[ ! -f "$W/compose-runner/docker-compose.yml" ] || (cd "$W/compose-runner" && docker compose down --remove-orphans >/dev/null 2>&1)
-	[ ! -f "$W/compose-early/docker-compose.yml" ] || (cd "$W/compose-early" && docker compose down --remove-orphans >/dev/null 2>&1)
-	docker rm -f riso-app riso-base riso-int-c riso-peer riso-oneshot riso-runner riso-early >/dev/null 2>&1
+	# Every compose case's project, each in a directory of its own under $W
+	# (compose, compose-*, and record_runner's), and every container name the
+	# lane gives: a die between a case's record and its own down leaves none
+	# running on a reused runner or box.
+	local f
+	for f in "$W"/*/docker-compose.yml; do
+		[ ! -f "$f" ] || (cd "$(dirname "$f")" && docker compose down -v --remove-orphans >/dev/null 2>&1)
+	done
+	docker rm -f riso-app riso-base riso-int-c riso-peer riso-oneshot riso-runner riso-early riso-migrate riso-seed \
+		riso-flaky riso-watcher riso-ender riso-holder riso-late >/dev/null 2>&1
 	docker network rm riso-int >/dev/null 2>&1
 	$S ip netns del riso-sink 2>/dev/null
 	$S ip link del riso-h 2>/dev/null
@@ -287,6 +292,31 @@ YML
     depends_on: [$1]
     command: ["watcher", "-url", "http://host.docker.internal:$2"]
     extra_hosts: ["host.docker.internal:host-gateway"]
+YML
+	;; esac
+	# ender ends the run 8 s after the app starts; holder exits 0 at
+	# keploy's stop of the stack, which meets late's wait, so compose's up
+	# starts late during that stop; late ignores SIGTERM and SIGINT, and runs
+	# until docker kills it at its 5 s stop grace's end (exit 137).
+	case " ${*:4} " in *" latestart "*) cat >> docker-compose.yml <<YML
+  ender:
+    image: riso-probe:local
+    container_name: riso-ender
+    depends_on: [$1]
+    command: ["after", "-wait", "8s", "-say", "ENDER", "-code", "2"]
+  holder:
+    image: riso-probe:local
+    container_name: riso-holder
+    depends_on: [$1]
+    command: ["hold", "-say", "HOLDER"]
+  late:
+    image: riso-probe:local
+    container_name: riso-late
+    depends_on:
+      holder:
+        condition: service_completed_successfully
+    command: ["hold", "-say", "LATE", "-ignore-term"]
+    stop_grace_period: 5s
 YML
 	;; esac
 	case " ${*:4} " in *" flaky "*) printf 'volumes:\n  flakymark: {}\n' >> docker-compose.yml ;; esac
@@ -831,6 +861,31 @@ for mode in "${MODES[@]}"; do
 		# runner, which compose started after it, and a record that never
 		# ended).
 		record_runner record-compose-seed seed
+		# The user's own `--exit-code-from ender`, ender exiting 2 8 s after
+		# the application started: keploy stops the stack, and holder's exit
+		# 0 at that stop meets late's wait, so compose's up starts late while
+		# the stop still waits on the application, which stays up 3 s after
+		# its stop (-stop-hold): every time, late starts after keploy's
+		# listing of the stack and during its stops. late ignores SIGTERM, so
+		# it runs until a stop kills it at its 5 s grace's end, and compose's
+		# up returns only once late has ended. keploy stops late too, as
+		# compose's own abort stops a late starter, and the record ends with
+		# ender's 2 well within 60 s; a keploy that never stopped late ran on
+		# until timeout's INT at 240 s (exit 124). The rows read late's end as
+		# docker's kill (137), never the Go runtime's deadlock exit (2), which
+		# a probe that blocks on nothing hits at once in the lane's static
+		# build: then compose's up never waits on late, and the case cannot
+		# fail.
+		mkdir -p "$W/compose-latestart" "$W/out/record-compose-latestart" && cd "$W/compose-latestart" || die cd
+		compose_yml riso-app 8080 "$RECARGS -stop-hold 3s" latestart
+		docker compose down --remove-orphans >/dev/null 2>&1
+		log "record-compose-latestart"
+		date +%s > "$W/out/record-compose-latestart/began"
+		$S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" timeout -s INT -k 30 240 "$KEPLOY" record -c "docker compose up --exit-code-from ender" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose-latestart/keploy.log" 2>&1
+		echo $? > "$W/out/record-compose-latestart/exit"
+		date +%s > "$W/out/record-compose-latestart/ended"
+		echo "record-compose-latestart exit $(cat "$W/out/record-compose-latestart/exit")"
+		docker compose down --remove-orphans >/dev/null 2>&1
 		sink_stop
 		cd "$W" || die cd
 		;;
@@ -1045,6 +1100,19 @@ for mode in "${MODES[@]}"; do
 		row_log "record-compose-seed: the seed exited 0" "$W/out/record-compose-seed/keploy.log" 'SEED DONE'
 		row_log "record-compose-seed: its exit ends nothing, as compose's up waits on it" "$W/out/record-compose-seed/keploy.log" 'docker compose up waits on that exit before it starts another service.*seed'
 		row_nolog "record-compose-seed: its exit does not end the run" "$W/out/record-compose-seed/keploy.log" 'the command.s abort flags end the run on it.*"service": "seed"'
+		# ender's 2 after the app started ended the record, with its 2,
+		# within a minute (timeout's stop is 124), and late, which compose's
+		# up started during keploy's stop of the stack, was named and stopped.
+		lexit=$(cat "$W/out/record-compose-latestart/exit" 2>/dev/null)
+		lbegan=$(cat "$W/out/record-compose-latestart/began" 2>/dev/null)
+		lend=$(cat "$W/out/record-compose-latestart/ended" 2>/dev/null)
+		row "record-compose-latestart ends with ender's code, 2" "$([ "$lexit" = 2 ] && echo 1)" "exit ${lexit:-none}"
+		row "record-compose-latestart ends within 60 s" "$([ -n "$lbegan" ] && [ -n "$lend" ] && [ $((lend - lbegan)) -le 60 ] && echo 1)" "$([ -n "$lbegan" ] && [ -n "$lend" ] && echo "$((lend - lbegan)) s" || echo 'no times')"
+		row_log "record-compose-latestart: ender exited 2 after the application started" "$W/out/record-compose-latestart/keploy.log" 'service .{0,2}ender.{0,2} exited with code 2 after the application started'
+		row_log "record-compose-latestart: late started" "$W/out/record-compose-latestart/keploy.log" 'LATE UP'
+		row_log "record-compose-latestart: keploy saw late's start" "$W/out/record-compose-latestart/keploy.log" 'started after keploy began to stop the stack.*"service": "late"'
+		row_log "record-compose-latestart: late ran until its stop killed it (137)" "$W/out/record-compose-latestart/keploy.log" 'riso-late exited with code 137'
+		row_nolog "record-compose-latestart: late did not end on the Go runtime's deadlock check" "$W/out/record-compose-latestart/keploy.log" 'all goroutines are asleep'
 		;;
 	esac
 done
