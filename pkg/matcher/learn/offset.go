@@ -280,7 +280,7 @@ func (dc *DriftCache) offsetPlacesBy(at time.Time, served []Earlier, raw []Raw, 
 				}
 				where := e.Mock + " at " + s.Leaf.Path
 				for _, f := range [][2]string{{s.Leaf.Value, s.Live}, {dc.rawExtra(s.Leaf.Value), dc.rawExtra(s.Live)}} {
-					for _, p := range driftedInstants(f[0], f[1]) {
+					for _, p := range dc.driftedInstantsOf(f[0], f[1]) {
 						op.given = append(op.given, [2]offsetPlace{{m: p.rec, mock: e.Mock, where: where, recorded: true}, {m: p.live, mock: e.Mock, where: where, given: true}})
 					}
 				}
