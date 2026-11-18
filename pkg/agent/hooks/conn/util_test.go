@@ -249,6 +249,53 @@ func TestIsFiltered_FilterPolicy(t *testing.T) {
 	}
 }
 
+// A filter on the Host header decides alike for a request as the ingress
+// reads it off the wire (http.ReadRequest, which takes Host out of the
+// header into req.Host) and as its capture rebuilds it from the recorded
+// dump (pkg.ParseHTTPRequest, which puts it back). The ingress takes a
+// request the filters leave out out of the sample at its head: read there
+// as having no Host, a request an include filter on Host keeps would be
+// left out of the recording.
+func TestIsFilteredReadsHostAlikeOffTheWireAndFromTheDump(t *testing.T) {
+	const raw = "POST /order HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: 0\r\n\r\n"
+	for _, tc := range []struct {
+		name   string
+		filter models.Filter
+		want   bool
+	}{
+		{"an include filter on Host that matches",
+			models.Filter{Headers: map[string]string{"Host": `^api\.example\.com$`}, FilterPolicy: models.Include}, false},
+		{"an include filter on Host keyed in lower case, as a config file's keys are read",
+			models.Filter{Headers: map[string]string{"host": `^api\.example\.com$`}, FilterPolicy: models.Include}, false},
+		{"an include filter on Host that does not match",
+			models.Filter{Headers: map[string]string{"Host": `^other$`}, FilterPolicy: models.Include}, true},
+		{"an exclude filter on Host that matches",
+			models.Filter{Headers: map[string]string{"Host": `^api\.`}, FilterPolicy: models.Exclude}, true},
+		// Only Host is read from req.Host: a header the request does not
+		// carry matches nothing.
+		{"an exclude filter on a header the request does not carry",
+			models.Filter{Headers: map[string]string{"X-Tenant": `^api\.`}, FilterPolicy: models.Exclude}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := models.IncomingOptions{Filters: []models.Filter{tc.filter}}
+			wire, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			dumped, err := pkg.ParseHTTPRequest([]byte(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := IsFiltered(zap.NewNop(), dumped, opts); got != tc.want {
+				t.Fatalf("the request rebuilt from its dump: filtered %v, want %v", got, tc.want)
+			}
+			if got := IsFiltered(zap.NewNop(), wire, opts); got != tc.want {
+				t.Fatalf("the request as read off the wire (no Host header, req.Host %q): filtered %v, want %v as for its capture", wire.Host, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCaptureGRPC_SchemaKeyStamping pins the GRPCCaptureHook contract: the
 // hook's schemaKey return is stamped onto the kept test case (so the control
 // plane can mark cross-pod duplicates), a duplicate verdict still drops the

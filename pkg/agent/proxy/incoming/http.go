@@ -447,8 +447,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// many requests captured" on sequential-call workloads. Pass
 		// releaseLock so the handler gives the slot back as soon as the
 		// connection has no more use for it: as its exchange's answer
-		// ends (markEnd), or as it is demoted to bypass (chunked /
-		// memory pressure). The deferred releaseLock is the backstop.
+		// ends (markEnd), as its head shows the recording's filters
+		// leave it out (leaveOutOfSample), or as it is demoted to
+		// bypass (chunked / memory pressure). The deferred releaseLock
+		// is the backstop.
 		//
 		// Normal mode: forceClose=false (keep-alive preserved), and we
 		// release any (unused) lock here since normal mode doesn't
@@ -1155,6 +1157,19 @@ func (pm *IngressProxyManager) notRecordedStream(ctx context.Context, logger *za
 	return true
 }
 
+// filteredAsSent reports whether the recording's filters leave a sampled
+// connection's request out, read as its capture will read it: the capture
+// is handed the request as the app was sent it, with the forced close's
+// "Connection: close", which is set only after the demotes, so that an
+// exchange demoted to bypass is forwarded unchanged. Read as the client
+// sent it, a filter on Connection would decide here unlike the capture, and
+// a request the capture keeps could be taken out of the sample.
+func filteredAsSent(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
+	sent := req.Clone(req.Context())
+	sent.Header.Set("Connection", "close")
+	return hooksUtils.IsFiltered(logger, sent, opts)
+}
+
 func isHTTPUpgrade(req *http.Request) bool {
 	if req.Method == http.MethodConnect {
 		return true
@@ -1266,10 +1281,11 @@ func writeBadRequest(c net.Conn) {
 //     sampling slot before the caller's deferred release: as the answer's
 //     end is found (markEnd), before the client can have it, once the
 //     exchange's capture holds a capture slot or when nothing of it is
-//     captured; when the exchange is demoted to bypass (chunked /
-//     unknown-length body, or memory pressure); and as a request that did
-//     not reach the app whole ends the connection. After demotion the
-//     connection continues as pure passthrough with no header mutation,
+//     captured; as the exchange's head shows the recording's filters leave
+//     it out (leaveOutOfSample); when the exchange is demoted to bypass
+//     (chunked / unknown-length body, or memory pressure); and as a request
+//     that did not reach the app whole ends the connection. After demotion
+//     the connection continues as pure passthrough with no header mutation,
 //     matching the "untracked + unchanged" rule for ineligible exchanges.
 //
 // Downstream (envoy↔keploy) keep-alive is preserved across the entire
@@ -1397,6 +1413,25 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			releaseSlot()
 		}
 	}
+	// leaveOutOfSample takes a sampled connection's exchange that the
+	// recording's filters leave out (hooksUtils.IsFiltered: k8s-proxy's
+	// built-in filter leaves out the kubelet's probes and the cloud load
+	// balancers' health checks, unless probe traffic is asked for) out of
+	// the sample as its head is read, before the app has any of it: its slot
+	// is given back, and nothing of it is handed to the capture, which would
+	// drop it. Held until the app had answered it, the exchange took the one
+	// slot of --enable-sampling=1 for as long as the app took, and a request
+	// that came meanwhile on another connection was passed through
+	// uncaptured, missing from the recording and from the static-dedup
+	// counts. Unlike a demote, the connection keeps its forced close: its
+	// client's next request comes on a new connection, where it can be
+	// sampled.
+	leaveOutOfSample := func() {
+		connCapture = false
+		if releaseSlot != nil {
+			releaseSlot()
+		}
+	}
 
 	// Close the most recent upstream conn on function return. The caller
 	// (handleHttp1Connection) defers Close on its own copy of the original
@@ -1515,6 +1550,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 		if forceCloseActive && (req.ContentLength == -1 || isChunked(req.TransferEncoding)) {
 			demoteToBypass()
+		}
+		// An exchange the recording's filters leave out is never recorded:
+		// it gives its slot back as its head is read (leaveOutOfSample).
+		if forceCloseActive && filteredAsSent(logger, req, pm.loadIncomingOpts()) {
+			leaveOutOfSample()
 		}
 		// The pause is read as the request has come: what it costs is this
 		// exchange, which is counted, and the connection's next one is

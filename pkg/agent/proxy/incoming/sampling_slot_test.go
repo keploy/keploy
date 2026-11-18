@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -240,6 +241,21 @@ func servedConns(t *testing.T, pm *IngressProxyManager, letGo func()) *servedCon
 // closes as its handler returns.
 func (s *servedConnSet) exchange(t *testing.T, appAddr, path, body string) (served chan struct{}) {
 	t.Helper()
+	request := "GET " + path + " HTTP/1.1\r\nHost: app\r\n\r\n"
+	if body != "" {
+		request = "POST " + path + " HTTP/1.1\r\nHost: app\r\nContent-Type: application/json\r\nContent-Length: " +
+			strconv.Itoa(len(body)) + "\r\n\r\n" + body
+	}
+	client, served := s.open(t, appAddr, path, request)
+	_ = answerOf(t, path, client)
+	return served
+}
+
+// open sends request, named what in failures, on a new connection and
+// returns the client's end of it; served closes as the connection's handler
+// returns.
+func (s *servedConnSet) open(t *testing.T, appAddr, what, request string) (client net.Conn, served chan struct{}) {
+	t.Helper()
 	proxied, client := tcpPair(t)
 	served = make(chan struct{})
 	s.mu.Lock()
@@ -251,22 +267,23 @@ func (s *servedConnSet) exchange(t *testing.T, appAddr, path, body string) (serv
 		s.pm.ServeLive(s.ctx, proxied, appAddr, 8080)
 	}()
 	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
-	request := "GET " + path + " HTTP/1.1\r\nHost: app\r\n\r\n"
-	if body != "" {
-		request = "POST " + path + " HTTP/1.1\r\nHost: app\r\nContent-Type: application/json\r\nContent-Length: " +
-			strconv.Itoa(len(body)) + "\r\n\r\n" + body
-	}
 	if _, err := client.Write([]byte(request)); err != nil {
-		t.Fatalf("%s: %v", path, err)
+		t.Fatalf("%s: the client could not send its request: %v", what, err)
 	}
+	return client, served
+}
+
+// answerOf reads the answer to what on client whole and closes client.
+func answerOf(t *testing.T, what string, client net.Conn) *http.Response {
+	t.Helper()
+	defer func() { _ = client.Close() }()
 	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
 	if err != nil {
-		t.Fatalf("%s: the client had no answer: %v", path, err)
+		t.Fatalf("%s: the client had no answer: %v", what, err)
 	}
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-		t.Fatalf("%s: the client did not have the answer whole: %v", path, err)
+		t.Fatalf("%s: the client did not have the answer whole: %v", what, err)
 	}
 	_ = resp.Body.Close()
-	_ = client.Close()
-	return served
+	return resp
 }

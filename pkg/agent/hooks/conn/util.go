@@ -421,6 +421,20 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	// here, before the ingress ends it (syncMock.TestSpanAt).
 	syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 }
+
+// headerValues is req's values of the header key, as a filter reads them. A
+// server reads a request's Host into req.Host and leaves no Host header
+// (http.ReadRequest), while the request a capture rebuilds from its dump
+// carries one (pkg.ParseHTTPRequest): a request with no Host header is read
+// as having req.Host for it, so that a filter on Host decides alike for the
+// request as the ingress reads it and as its capture does.
+func headerValues(req *http.Request, key string) []string {
+	if vals := req.Header.Values(key); len(vals) > 0 || http.CanonicalHeaderKey(key) != "Host" {
+		return vals
+	}
+	return []string{req.Host}
+}
+
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
 	dstPort := 0
 	var err error
@@ -472,7 +486,7 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 					utils.LogError(logger, err, "bad header regex")
 					continue
 				}
-				for _, v := range req.Header.Values(key) {
+				for _, v := range headerValues(req, key) {
 					if rx.MatchString(v) {
 						headerMatch = true
 						break
