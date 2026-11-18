@@ -37,7 +37,8 @@ func inCheckoutFolder(t *testing.T) string {
 	return work
 }
 
-// AppName keeps a name the run was given; names a run with no keploy.yml
+// AppName keeps a name the run was given, unless it is blank (a blank one
+// names no app); names a run with no keploy.yml
 // after its repository and path; and names a run whose keploy.yml names no
 // app (an existing project) after its folder, as runs named it before, and
 // writes that name into the file once, unless it may not write (the agent)
@@ -52,6 +53,10 @@ func TestAppName(t *testing.T) {
 		{name: "a name given, no keploy.yml", configured: "billing", noFile: true, write: true, want: "billing"},
 		{name: "a name given, a keploy.yml naming none", configured: "billing", doc: "path: x\n", write: true, want: "billing", wantDoc: "path: x\n"},
 		{name: "no keploy.yml", noFile: true, write: true, want: "orders-api-a-b", says: `Naming the app "orders-api-a-b" after the git remote origin and the path a/b`, level: zapcore.InfoLevel},
+		{name: "a blank name given, no keploy.yml", configured: "  ", noFile: true, write: true, want: "orders-api-a-b", says: `Naming the app "orders-api-a-b" after the git remote origin and the path a/b`, level: zapcore.InfoLevel},
+		{name: "a blank name given, a keploy.yml naming none", configured: " \t", doc: "path: x\n", write: true, want: "b", wantDoc: "appName: \"b\" " + config.KeptAppNameNote + "\npath: x\n", says: `named no app, so keploy wrote appName "b" into it`, level: zapcore.InfoLevel},
+		{name: "a blank name written as an escape is not rewritten", configured: "\t", doc: "appName: \"\\t\"\n", write: true, want: "b", wantDoc: "appName: \"\\t\"\n", says: `names no app, so this run uses "b"`, level: zapcore.WarnLevel},
+		{name: "a name between spaces is kept as given", configured: " billing ", noFile: true, write: true, want: " billing "},
 		{name: "a keploy.yml naming no app", doc: "# mine\npath: x\n", write: true, want: "b", wantDoc: "# mine\nappName: \"b\" " + config.KeptAppNameNote + "\npath: x\n", says: `named no app, so keploy wrote appName "b" into it`, level: zapcore.InfoLevel},
 		{name: "the agent writes none", doc: "path: x\n", want: "b", wantDoc: "path: x\n"},
 		{name: "a keploy.yml in another folder is not written", doc: "path: x\n", up: true, write: true, want: "b", wantDoc: "path: x\n"},
@@ -97,7 +102,8 @@ func TestAppName(t *testing.T) {
 }
 
 // An existing project's keploy.yml that names no app, one a keploy before
-// apps were named wrote (appName: "") among them, keeps the name its runs
+// apps were named wrote (appName: "") and a null or blank appName among
+// them, keeps the name its runs
 // had, the folder's ("b"), not the new default ("orders-api-a-b"): record
 // writes the name into it once, and the next run reads it and leaves the
 // file as it is. The agent, which reads the keploy.yml its parent wrote,
@@ -108,6 +114,12 @@ func TestRecordKeepsAnExistingProjectsAppName(t *testing.T) {
 	for _, c := range []struct{ name, cmd, doc, want string }{
 		{"no appName", "record", "# my project\ncommand: ./app\n", "# my project\nappName: \"b\" " + config.KeptAppNameNote + "\ncommand: ./app\n"},
 		{"appName \"\" of an older keploy", "record", "appName: \"\"\ncommand: ./app\n", "appName: \"b\" " + config.KeptAppNameNote + "\ncommand: ./app\n"},
+		{"appName null", "record", "appName: null\ncommand: ./app\n", "appName: \"b\" " + config.KeptAppNameNote + "\ncommand: ./app\n"},
+		{"appName ~", "record", "appName: ~\ncommand: ./app\n", "appName: \"b\" " + config.KeptAppNameNote + "\ncommand: ./app\n"},
+		{"appName Null", "record", "appName: Null\ncommand: ./app\n", "appName: \"b\" " + config.KeptAppNameNote + "\ncommand: ./app\n"},
+		{"appName of spaces", "record", "appName: \"  \"\ncommand: ./app\n", "appName: \"b\" " + config.KeptAppNameNote + "\ncommand: ./app\n"},
+		{"appName of a tab, single-quoted", "record", "appName: '\t'\ncommand: ./app\n", "appName: \"b\" " + config.KeptAppNameNote + "\ncommand: ./app\n"},
+		{"appName of spaces, the agent", "agent", "appName: \"  \"\ncommand: ./app\n", "appName: \"  \"\ncommand: ./app\n"},
 		{"the agent", "agent", "# my project\ncommand: ./app\n", "# my project\ncommand: ./app\n"},
 		{"a command that neither records nor tests", "templatize", "# my project\ncommand: ./app\n", "# my project\ncommand: ./app\n"},
 	} {
