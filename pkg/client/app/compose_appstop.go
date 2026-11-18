@@ -978,6 +978,18 @@ func (a *App) composeAppExited(ctx context.Context) (composeHalt, bool) {
 // reaches, which can be another stack's; with no service known, that label,
 // as before.
 func (a *App) stopComposeProject(ctx context.Context) bool {
+	stopped, _ := a.stopComposeStack(ctx)
+	return stopped
+}
+
+// stopComposeStack is stopComposeProject, and lateStopped is closed once the
+// stops of the containers it took down as late starters have ended too
+// (stopComposeLateStarters): after the run's `compose up` has returned, as
+// compose's abort ended its stop of late starters before its up returned.
+// It is closed at once when no late starter can be stopped.
+func (a *App) stopComposeStack(ctx context.Context) (stopped bool, lateStopped <-chan struct{}) {
+	none := make(chan struct{})
+	close(none)
 	project := a.composeAppProject(ctx)
 	if project == "" && a.composeService == "" {
 		project = a.composeProjectLabelAnswered(ctx, a.container, "keploy takes the project down instead")
@@ -985,13 +997,13 @@ func (a *App) stopComposeProject(ctx context.Context) bool {
 	if project == "" {
 		a.logger.Warn("keploy could not tell the application's compose project; taking it down instead",
 			zap.String("container", a.container))
-		return false
+		return false, none
 	}
 	// Armed before the listing, as compose's own abort arms its stop of
 	// late starters: a container compose's up starts after the listing (a
 	// service whose wait a stopped dependency's exit just met) is stopped
 	// too, or the up, waiting on it, never returned and the run hung.
-	a.stopComposeLateStarters(ctx, project)
+	lateStopped = a.stopComposeLateStarters(ctx, project)
 	// The list asks the daemon again when it fails (askDaemon): with a 2 s
 	// budget, a loaded daemon's slow list took the project down whole
 	// instead, keploy's agent with it, mid-drain.
@@ -1001,7 +1013,7 @@ func (a *App) stopComposeProject(ctx context.Context) bool {
 		})
 	if err != nil {
 		a.logger.Warn("keploy could not list the application's compose project to stop it; taking it down instead", zap.String("project", project), zap.Error(err))
-		return false
+		return false, lateStopped
 	}
 	var wg sync.WaitGroup
 	for _, c := range running {
@@ -1019,7 +1031,7 @@ func (a *App) stopComposeProject(ctx context.Context) bool {
 		}(c.ID)
 	}
 	wg.Wait()
-	return true
+	return true, lateStopped
 }
 
 // A STOP OF THE STACK ENDS BEFORE THE RETRY'S BRING-UP, AND ITS EXITS STAY KEPLOY'S.
@@ -1079,16 +1091,21 @@ func (a *App) composeAwaitsTheStackStop(ctx context.Context) bool {
 // run never ended. It reads the daemon's start events of the project from the
 // daemon's clock read now, so a start between that read and the stream's
 // subscription is replayed to it; a stream that breaks is asked for again
-// from its last event. With no up running, nothing can start late.
-func (a *App) stopComposeLateStarters(ctx context.Context, project string) {
+// from its last event. With no up running, nothing can start late. The
+// returned channel is closed once the watch has ended (the up returned) and
+// every stop it began has ended.
+func (a *App) stopComposeLateStarters(ctx context.Context, project string) <-chan struct{} {
+	ended := make(chan struct{})
 	upReturned := a.composeUpReturned()
 	select {
 	case <-upReturned:
-		return
+		close(ended)
+		return ended
 	default:
 	}
 	since := a.composeWatchSince(ctx, "the starts of the compose project's containers")
 	go func() {
+		defer close(ended)
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		var stops sync.WaitGroup
@@ -1141,6 +1158,7 @@ func (a *App) stopComposeLateStarters(ctx context.Context, project string) {
 			}
 		}
 	}()
+	return ended
 }
 
 // composeUpRunning marks this bring-up's `compose up` running; the returned

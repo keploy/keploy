@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -368,6 +369,79 @@ services:
 				trail := r.trail(t)
 				return trailAt(trail, "STOP runner-1") >= 0 && trailAt(trail, "UP-DONE") >= 0
 			})
+		})
+	}
+}
+
+// keploy's stop of the stack for a dependency's crash ends, before the run's
+// retry of the bring-up begins, with the stops of the containers it took down
+// as late starters, as compose's abort stopped those too before its up
+// returned: a runner that started after the stop's listing and does not
+// handle SIGTERM was still in its stop's grace when the up returned (on the
+// stopped agent), the retried up reused it, and the stop then killed it
+// mid-run (137), so the retry recorded one test of six and the run never
+// ended. Both KEPLOY_PROVEN modes.
+func TestTheRetryOfTheBringUpWaitsForTheStopOfALateStarter(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("switch="+proven, func(t *testing.T) {
+			t.Setenv("KEPLOY_STUB_UP_CODE", "1")
+			release := make(chan struct{})
+			var released sync.Once
+			r := startStackRun(t, proven, nil, func(a *App) {
+				a.setComposeUserAbort("docker compose up --exit-code-from runner", composeDoc(t, `
+services:
+  app:
+    image: app
+    depends_on: [flaky]
+  runner:
+    image: runner
+  flaky:
+    image: flaky
+`))
+			})
+			// Before the run's own cleanup, which waits for run() to return.
+			t.Cleanup(func() { released.Do(func() { close(release) }) })
+			r.d.mu.Lock()
+			r.d.cs[runAppName].status = "created"
+			r.d.stopHeld = map[string]chan struct{}{"runner-1": release}
+			r.d.mu.Unlock()
+			r.d.add(&abortContainer{name: "flaky-1", service: "flaky", status: "running"})
+			stream := r.watchStream(t)
+			if err := r.d.exit("flaky-1", 1, "EXIT"); err != nil {
+				t.Fatal(err)
+			}
+			stream <- events.Message{Type: events.ContainerEventType, Action: events.ActionDie, TimeNano: time.Now().UnixNano(),
+				Actor: events.Actor{ID: "flaky-1", Attributes: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "flaky", "exitCode": "1"}}}
+			var starts chan events.Message
+			select {
+			case starts = <-r.d.streams:
+			case <-time.After(30 * time.Second):
+				t.Fatal("keploy's stop of the stack did not watch the project's starts while the up ran")
+			}
+			r.d.add(&abortContainer{name: "runner-1", service: "runner", status: "running"})
+			starts <- events.Message{Type: events.ContainerEventType, Action: events.ActionStart, TimeNano: time.Now().UnixNano(),
+				Actor: events.Actor{ID: "runner-1", Attributes: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "runner"}}}
+			eventually(t, "keploy's stop takes the agent and the late starter down", func() bool {
+				_, stopping := r.a.composeApp.stoppedRuns.Load("runner-1")
+				return stopping && !r.d.running(runAgentName)
+			})
+			// compose's up returns on the stopped agent (the app's dependency
+			// failed to start), the late starter still in its stop's grace.
+			if err := os.WriteFile(r.d.upEnds, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			eventually(t, "the first up returns", func() bool { return trailAt(r.trail(t), "UP-DONE") >= 0 })
+			for end := time.Now().Add(2 * composeDepFailureBaseBackoff); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+				if trailAt(r.trail(t), "UP-RETRIED") >= 0 {
+					t.Fatalf("the retried up ran while keploy's stop of the stack was still taking the late starter runner-1 down:\n%s", strings.Join(r.trail(t), "\n"))
+				}
+			}
+			released.Do(func() { close(release) })
+			eventually(t, "the retried up runs once the late starter's stop has ended", func() bool { return trailAt(r.trail(t), "UP-RETRIED") >= 0 })
+			trail := r.trail(t)
+			if stop, retried := trailAt(trail, "STOP runner-1"), trailAt(trail, "UP-RETRIED"); stop < 0 || retried < stop {
+				t.Fatalf("want runner-1 stopped, then the up retried:\n%s", strings.Join(trail, "\n"))
+			}
 		})
 	}
 }

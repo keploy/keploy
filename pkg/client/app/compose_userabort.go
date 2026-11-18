@@ -465,12 +465,20 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 		return true
 	case composeAbortRetry:
 		// Outside stopMu: the stop waits for the stack's containers to go,
-		// and the run's retry of the bring-up waits for the stop.
-		if !a.stopComposeProject(context.WithoutCancel(ctx)) {
+		// and the run's retry of the bring-up waits for the stop, the stops
+		// of its late starters among it: those end once the up has returned,
+		// so the watch does not wait for them. A late starter still in its
+		// stop's grace (a runner that does not handle SIGTERM) was reused by
+		// the retried up, then killed mid-run.
+		stopped, lateStopped := a.stopComposeStack(context.WithoutCancel(ctx))
+		if !stopped {
 			a.logger.Warn("keploy could not stop the application's compose stack for the retry of its bring-up; docker compose up goes on as it is",
 				zap.String("service", service))
 		}
-		close(stackStopped)
+		go func() {
+			<-lateStopped
+			close(stackStopped)
+		}()
 	}
 	return false
 }
