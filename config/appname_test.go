@@ -83,6 +83,8 @@ func TestWithAppNameRefuses(t *testing.T) {
 	for _, c := range []struct{ name, doc, says string }{
 		{"names an app already", "appName: orders\n", "its line 1 is not an appName line"},
 		{"names an app between spaces", "appName: \" orders \"\n", "its line 1 is not an appName line"},
+		{"names an app in single quotes", "appName: 'orders'\n", "its line 1 is not an appName line"},
+		{"names an app between spaces in single quotes", "appName: ' orders '\n", "its line 1 is not an appName line"},
 		{"a blank name written as an escape", "appName: \"\\t\"\n", "its line 1 is not an appName line"},
 		{"two appName keys", "appName: \"\"\nAPPNAME: \"\"\n", "it has more than one appName key"},
 		{"a list", "- a\n", "it is not a mapping of keys"},
