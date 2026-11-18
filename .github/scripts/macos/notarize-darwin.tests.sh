@@ -613,12 +613,16 @@ q info "$(info 'Accepted-ish')"
 q log "$(applog Accepted "$sum")"
 run wait "$c/state" "$c/dist/keploy"
 expect_code wait-unknown-status 1
+expect_calls wait-unknown-status "notarytool info" 1
+expect_err wait-unknown-status "answered 'Accepted-ish' for submission $ID, which is not one of its statuses"
 if [ -e "$c/dist/keploy" ]; then fail wait-unknown-status "BIN was written"; else pass "wait-unknown-status: BIN not written"; fi
 
 submitted wait-no-status
 q info "$(ok "{\"id\":\"$ID\"}")"
 run wait "$c/state" "$c/dist/keploy"
 expect_code wait-no-status 1
+expect_calls wait-no-status "notarytool info" 1
+expect_err wait-no-status "answered '' for submission $ID, which is not one of its statuses"
 
 submitted wait-401
 q info "$(info 'In Progress')" "$(er "$ERR401")"
