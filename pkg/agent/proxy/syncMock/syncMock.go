@@ -1056,6 +1056,26 @@ func (m *SyncMockManager) SetMappingChannel(streamCtx context.Context, ch chan<-
 	m.mappingOverflowMu.Unlock()
 }
 
+// ForwardMappingChannel copies this manager's mapping channel and stream
+// context onto dst, so dst's resolves emit mappings to the same recorder
+// stream. It is a no-op when this manager has no channel (SetMappingChannel
+// was not called yet) or dst is nil. Callers use it to wire a per-app
+// manager created by NewAgentRuntime — which the recorder never sees — to
+// the channel the recorder opened on the global manager (Proxy.Mapping).
+func (m *SyncMockManager) ForwardMappingChannel(dst *SyncMockManager) {
+	if m == nil || dst == nil {
+		return
+	}
+	m.mappingOverflowMu.Lock()
+	ch := m.mappingStreamCh
+	streamCtx := m.mappingStreamCtx
+	m.mappingOverflowMu.Unlock()
+	if ch == nil {
+		return
+	}
+	dst.SetMappingChannel(streamCtx, ch)
+}
+
 // sendMapping hands a mapping to the recorder without ever blocking the capture
 // path and without ever discarding the mapping.
 //
