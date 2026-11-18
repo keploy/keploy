@@ -50,6 +50,20 @@
 #   2. KEPLOY_PROVEN=1, the app in Pacific/Honolulu (-10:00): the set
 #      passes. The app's zone, read from its process, wins over the one the
 #      learn step named: its hour read in +05:30 is 15.5 hours off.
+#   2b. KEPLOY_PROVEN=1, the app's TZ naming a slim zone file of
+#      Europe/Berlin, a zone of summer time (SLIM_DIR: zic -b slim's form,
+#      zic's default, Go's own zoneinfo.zip's and so the zone data built
+#      into keploy: no transition after the year its rule took over; the
+#      distributions' tzdata is fat, every change to 2037): the set passes,
+#      the app's zone read as Berlin. keploy compares such a file with its
+#      own zone data of the name at each change of offset, and its walk of
+#      them stopped on a leap year's last day, where Go ends a slim file's
+#      zone without advancing (golang/go#81583): it never returned, and the
+#      call, its replay with it, never ended.
+#   2c. Switch off, keploy's own TZ naming that slim file, the app in
+#      Asia/Kolkata: the set passes. keploy reads its own zone as its agent
+#      starts, with the switch or without it, and hung there: the replay
+#      never started the app.
 #   3. KEPLOY_PROVEN=1, SKEW_HOURS=3: the set fails, its report naming
 #      body.hour with the reason (more than one cut off), never body.day (a
 #      day is checked at its cut, and three hours are within one).
@@ -94,6 +108,13 @@
 #              /etc/localtime links Sao Paulo: passes (TZ wins over the link).
 #           2. The image whose /etc/localtime links Honolulu, no TZ: passes.
 #           3. As 2, SKEW_HOURS=-49: fails naming body.day.
+#           4. The image whose /etc/localtime links a slim zone file of
+#              Europe/Berlin (IMG_DST, from Go's own zoneinfo.zip), no TZ:
+#              passes, read in Berlin, a zone of summer time (step 2b's
+#              hang, in the CLI's read of the container's zone and the
+#              agent's of the call's).
+#           5. As 4, SKEW_HOURS=-49: fails naming body.day, checked in
+#              Europe/Berlin.
 #   compose 1. The app's service, of the image linking Honolulu, beside a
 #              second service of the image linking Sao Paulo, which makes no
 #              call: passes, the app's container read in its own zone.
@@ -111,12 +132,16 @@
 # Readiness is the app's listening port while recording natively, the app's
 # answer while recording in docker and compose (its port is the agent's,
 # which accepts before the app runs), and keploy's own probe of the app
-# (--health-path) while replaying. The script stops only the processes and
-# removes only the containers and images it started. Ports: 8092 (app), 9098
+# (--health-path) while replaying. Each replay ends within REPLAY_LIMIT
+# seconds (default 300): a keploy that never ends fails its step.
+# The script stops only the processes and removes only the containers and
+# images it started. Ports: 8092 (app), 9098
 # (payments), as the app has them. Env: RECORD_BIN, REPLAY_BIN,
 # CLOCK_ZONE_LEGS (the legs to run, of native, docker and compose; default
 # native). The docker and compose legs need Docker, docker compose, and the
-# agent image the binary names loaded (.github/actions/download-image).
+# agent image the binary names loaded (.github/actions/download-image). Go's
+# own zoneinfo.zip (go env GOROOT) gives the slim zone file of
+# Europe/Berlin, which python3 reads.
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
@@ -147,9 +172,14 @@ want() { case $LEGS in *" $1 "*) return 0 ;; esac; return 1; }
 # with it in DLIVE_ZONE.
 DREC_ZONE=America/Sao_Paulo
 DLIVE_ZONE=Pacific/Honolulu
+# A zone of summer time, read from a slim zone file (steps 2b, docker 4
+# and 5).
+DST_ZONE=Europe/Berlin
+REPLAY_LIMIT="${REPLAY_LIMIT:-300}"
 ID=$$
 IMG_REC="clockzone-app-rec:$ID"
 IMG_LIVE="clockzone-app-live:$ID"
+IMG_DST="clockzone-app-dst:$ID"
 RUN_NAME="cz-run-$ID"
 CAPP="cz-app-$ID"
 COTHER="cz-other-$ID"
@@ -162,6 +192,25 @@ COMPOSE_DIR="$WORK/cz-compose-$ID"
 (cd "$ROOT" && go build -o "$WORK/learnclocks" ./.github/workflows/test_workflow_scripts/golang/clock-zone/learnclocks/main.go) ||
     { echo "::error::cannot build learn's clocks writer (learnclocks) from the keploy module at $ROOT"; exit 1; }
 cd "$WORK" || exit 1
+
+# slim <file>: whether the zone file is in zic's slim form: version 2 or
+# later, its 32-bit block listing no transition.
+slim() {
+    local version timecnt
+    version="$(od -An -tu1 -j4 -N1 "$1" | tr -d ' ')"
+    timecnt="$(od -An -tu1 -j32 -N4 "$1" | tr -s ' ' | sed 's/^ //')"
+    [ "$version" -ge 50 ] 2>/dev/null && [ "$timecnt" = "0 0 0 0" ]
+}
+# SLIM_DIR holds the slim zone file of DST_ZONE, from Go's own
+# zoneinfo.zip (zic -b slim's form).
+SLIM_DIR="$WORK/slim/zoneinfo"
+if ! mkdir -p "$SLIM_DIR/${DST_ZONE%/*}" ||
+    ! python3 -I -c 'import sys, zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' \
+        "$(go env GOROOT)/lib/time/zoneinfo.zip" "$DST_ZONE" >"$SLIM_DIR/$DST_ZONE"; then
+    echo "::error::cannot read $DST_ZONE from Go's zoneinfo.zip"
+    exit 1
+fi
+slim "$SLIM_DIR/$DST_ZONE" || { echo "::error::Go's zone file of $DST_ZONE is not slim: steps 2b, docker 4 and 5 would read no slim file"; exit 1; }
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 # pid_running PID: whether PID still runs, by its state in /proc (keploy runs
@@ -201,17 +250,50 @@ newest_run() { ls -1d keploy/reports/test-run-* 2>/dev/null | sort -t- -k3 -n | 
 REPORT() { echo "$(newest_run)/test-set-0-report.yaml"; }
 set_status() { grep -m1 '^status:' "$(REPORT)" 2>/dev/null | awk '{print $2}'; }
 
+# kill_tree <pid>: SIGKILL to pid and every process under it.
+kill_tree() {
+    local c
+    for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done
+    sudo kill -KILL "$1" 2>/dev/null
+}
+# bounded <log> <command...>: command (a sudo of keploy), its output in log,
+# ended where it has not ended within REPLAY_LIMIT seconds: SIGINT to keploy
+# (the sudo's child), then, 30 seconds on, SIGKILL to it and every process
+# under it (the app). RC is the command's exit code, 124 where it was ended
+# so: a keploy that never ends fails its step, never the job at its timeout.
+bounded() {
+    local log="$1" pid child n=0
+    shift
+    "$@" >"$log" 2>&1 </dev/null &
+    pid=$!
+    while pid_running "$pid"; do
+        if [ "$n" -ge "$REPLAY_LIMIT" ]; then
+            fail "$log: keploy did not end within ${REPLAY_LIMIT}s"
+            child="$(pgrep -P "$pid" 2>/dev/null | head -n1)"
+            [ -n "$child" ] && sudo kill -INT "$child" 2>/dev/null
+            sleep 30
+            [ -n "$child" ] && kill_tree "$child"
+            wait "$pid" 2>/dev/null
+            RC=124
+            return
+        fi
+        sleep 1
+        n=$((n + 1))
+    done
+    wait "$pid"
+    RC=$?
+}
 # replay <name> <zone> <skew hours> [env...]: keploy test of the recording,
-# the app in zone; RC is its exit code.
+# the app in zone (a TZ: a name, or a zone file's path); RC is its exit
+# code.
 replay() {
     local name="$1" zone="$2" skew="$3" before
     shift 3
     before="$(newest_run)"
     # The switch is on only where a step asks for it, whatever the job's
     # environment holds.
-    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$@" "$REPLAY_BIN" test -c "env TZ=$zone SKEW_HOURS=$skew PAYMENTS_URL=http://127.0.0.1:$DEP ./order-app" \
-        --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
-    RC=$?
+    bounded "$name.log" sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" "$@" "$REPLAY_BIN" test -c "env TZ=$zone SKEW_HOURS=$skew PAYMENTS_URL=http://127.0.0.1:$DEP ./order-app" \
+        --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele
     verify_ran "$(proven_of "$@")" "$name.log" || FAIL=$((FAIL + 1))
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
@@ -259,7 +341,7 @@ cleanup() {
     if want docker || want compose; then
         [ -f "$COMPOSE_DIR/docker-compose.yml" ] && (cd "$COMPOSE_DIR" && compose_down)
         sudo docker rm -f "$RUN_NAME" "$CAPP" "$COTHER" >/dev/null 2>&1
-        sudo docker rmi -f "$IMG_REC" "$IMG_LIVE" >/dev/null 2>&1
+        sudo docker rmi -f "$IMG_REC" "$IMG_LIVE" "$IMG_DST" >/dev/null 2>&1
     fi
     return 0
 }
@@ -307,6 +389,14 @@ native_leg() {
     replay appzone Pacific/Honolulu 0 KEPLOY_PROVEN=1
     expect_pass "step 2" appzone
 
+    echo "== 2b. KEPLOY_PROVEN=1, the app's TZ naming a slim zone file of $DST_ZONE, a zone of summer time: passes, read in it =="
+    replay slimzone "$SLIM_DIR/$DST_ZONE" 0 KEPLOY_PROVEN=1
+    expect_pass "step 2b" slimzone
+
+    echo "== 2c. switch off, keploy's own TZ naming a slim zone file of $DST_ZONE, the app in $REC_ZONE: passes =="
+    replay ownzone "$REC_ZONE" 0 TZ="$SLIM_DIR/$DST_ZONE"
+    expect_pass "step 2c" ownzone
+
     echo "== 3. KEPLOY_PROVEN=1, the hour three hours off: fails naming body.hour =="
     replay hourskew "$REC_ZONE" 3 KEPLOY_PROVEN=1
     expect_clock_miss "step 3" body.hour
@@ -323,25 +413,30 @@ native_leg() {
         fail "step 5: the report lists a call keploy could not answer"
 
     echo "== 6. no data race =="
-    for f in record.log samezone.log appzone.log hourskew.log dayskew.log dayskewoff.log; do
+    for f in record.log samezone.log appzone.log slimzone.log ownzone.log hourskew.log dayskew.log dayskewoff.log; do
         grep -q 'WARNING: DATA RACE' "$f" 2>/dev/null && fail "data race in $f"
     done
 }
 
-# The docker and compose legs. build_images: the app's two images, from
-# scratch: the app (static), the zone files of both zones, and
+# The docker and compose legs. build_images: the app's three images, from
+# scratch: the app (static), the zone files of the zones below, and
 # /etc/localtime a link into them, as a distribution's image has it:
-# $IMG_REC's links DREC_ZONE, $IMG_LIVE's DLIVE_ZONE.
+# $IMG_REC's links DREC_ZONE, $IMG_LIVE's DLIVE_ZONE (the host's files of
+# both), $IMG_DST's DST_ZONE (SLIM_DIR's slim file of it alone).
 build_images() {
     local spec img link ctx z cid ok
     (cd "$SRC" && CGO_ENABLED=0 go build -o "$WORK/order-app-static" ./app) || return 1
-    for spec in "$IMG_REC=$DREC_ZONE" "$IMG_LIVE=$DLIVE_ZONE"; do
+    for spec in "$IMG_REC=$DREC_ZONE" "$IMG_LIVE=$DLIVE_ZONE" "$IMG_DST=$DST_ZONE"; do
         img=${spec%%=*} link=${spec#*=}
         ctx="$WORK/img-${link##*/}"
         mkdir -p "$ctx/root/etc" && cp "$WORK/order-app-static" "$ctx/root/order-app" || return 1
-        for z in "$DREC_ZONE" "$DLIVE_ZONE"; do
-            mkdir -p "$ctx/root/usr/share/zoneinfo/${z%/*}" && cp -L "/usr/share/zoneinfo/$z" "$ctx/root/usr/share/zoneinfo/$z" || return 1
-        done
+        if [ "$img" = "$IMG_DST" ]; then
+            mkdir -p "$ctx/root/usr/share/zoneinfo/${link%/*}" && cp "$SLIM_DIR/$link" "$ctx/root/usr/share/zoneinfo/$link" || return 1
+        else
+            for z in "$DREC_ZONE" "$DLIVE_ZONE"; do
+                mkdir -p "$ctx/root/usr/share/zoneinfo/${z%/*}" && cp -L "/usr/share/zoneinfo/$z" "$ctx/root/usr/share/zoneinfo/$z" || return 1
+            done
+        fi
         ln -sfn "/usr/share/zoneinfo/$link" "$ctx/root/etc/localtime" || return 1
         printf 'FROM scratch\nCOPY root/ /\nENTRYPOINT ["/order-app"]\n' >"$ctx/Dockerfile"
         sudo docker build -q -t "$img" "$ctx" >/dev/null || return 1
@@ -404,15 +499,25 @@ drecord() {
     verify_ran 1 record.log || FAIL=$((FAIL + 1))
     learn_in "$DREC_ZONE"
 }
+# agent_containers: the IDs of keploy agents' containers (keploy-v3-<random>),
+# sorted.
+agent_containers() { sudo docker ps -aq --filter 'name=^keploy-v3-' 2>/dev/null | sort; }
 # dreplay <name> <container> <command>: keploy test (KEPLOY_PROVEN=1) of the
 # recording in the working directory, the app run by command in container,
 # its payments service down; RC is its exit code.
 dreplay() {
-    local name="$1" ctr="$2" cmd="$3" before
+    local name="$1" ctr="$2" cmd="$3" before agents
     before="$(newest_run)"
-    sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$cmd" --container-name "$ctr" \
-        --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"$name.log" 2>&1 </dev/null
-    RC=$?
+    agents="$(agent_containers)"
+    bounded "$name.log" sudo env -u KEPLOY_PROVEN PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "$cmd" --container-name "$ctr" \
+        --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele
+    # A replay ended by bounded may leave its app's container, and the
+    # agent's container its keploy started (keploy-v3-<random>), which holds
+    # the app's port: removed, never one that was there before it.
+    if [ "$RC" = 124 ]; then
+        sudo docker rm -f "$RUN_NAME" "$CAPP" >/dev/null 2>&1
+        comm -13 <(printf '%s\n' "$agents") <(agent_containers) | xargs -r sudo docker rm -f >/dev/null 2>&1
+    fi
     verify_ran 1 "$name.log" || FAIL=$((FAIL + 1))
     own
     if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
@@ -456,6 +561,15 @@ docker_leg() {
     dreplay docker-stale "$RUN_NAME" "$(run_cmd "$IMG_LIVE" -49)"
     expect_clock_miss "docker 3" body.day
     checked_in "docker 3" body.day "$DLIVE_ZONE"
+
+    echo "== docker 4. KEPLOY_PROVEN=1, the image linking a slim zone file of $DST_ZONE, a zone of summer time, no TZ: passes, read in it =="
+    dreplay docker-dst "$RUN_NAME" "$(run_cmd "$IMG_DST" 0)"
+    expect_pass "docker 4" docker-dst
+
+    echo "== docker 5. KEPLOY_PROVEN=1, as 4, the day two days stale: fails naming body.day, checked in $DST_ZONE =="
+    dreplay docker-dst-stale "$RUN_NAME" "$(run_cmd "$IMG_DST" -49)"
+    expect_clock_miss "docker 5" body.day
+    checked_in "docker 5" body.day "$DST_ZONE"
 
     no_race
 }

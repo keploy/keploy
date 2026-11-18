@@ -1,0 +1,60 @@
+name: GitHub host keys
+
+# CI writes GitHub's SSH host keys from .github/ssh/github_known_hosts, which
+# cites where they come from, and never fetches them at run time: a run-time
+# `ssh-keyscan github.com` failed a self-hosted Windows job before it built
+# anything when the runner's DNS blipped, and it trusts whatever answers.
+#
+# github-host-keys.tests.sh runs here, offline, on any change that could add
+# such a fetch (a file under .github, a script, a YAML file, a Dockerfile or a
+# Makefile): each pinned key has a fingerprint GitHub publishes, every copy of
+# the keys is the whole pinned set, the action that appends them writes them
+# with no network call, and no workflow or script calls ssh-keyscan or trusts
+# the first host key it sees.
+#
+# The check against GitHub itself, which needs the network, is
+# github-host-keys-live.yml. The Windows writers of these keys have their
+# cases in .github/scripts/windows/setup-git-isolation.tests.ps1
+# (windows-ci-scripts.yml).
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/**'
+      - '**.sh'
+      - '**.bash'
+      - '**.ps1'
+      - '**.psm1'
+      - '**.yml'
+      - '**.yaml'
+      - '**/Dockerfile*'
+      - '**/Makefile'
+      - '**.mk'
+  pull_request:
+    paths:
+      - '.github/**'
+      - '**.sh'
+      - '**.bash'
+      - '**.ps1'
+      - '**.psm1'
+      - '**.yml'
+      - '**.yaml'
+      - '**/Dockerfile*'
+      - '**/Makefile'
+      - '**.mk'
+
+permissions:
+  contents: read
+
+jobs:
+  pinned:
+    # Eight rows over the repository's scripts and YAML; a few seconds.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the pinned GitHub host keys (published fingerprints, whole copies, no run-time fetch)
+        run: bash .github/workflows/test_workflow_scripts/github-host-keys.tests.sh

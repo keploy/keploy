@@ -35,6 +35,9 @@ var (
 		windows.WSAESHUTDOWN, // 10058
 	}
 
+	// IsPeerReset's errors beyond IsConnReset's (neterr.go).
+	peerResetErrnos = windowsPeerResetErrnos
+
 	connRefusedErrnos = []syscall.Errno{
 		windows.WSAECONNREFUSED, // 10061 - "connectex: ... actively refused it"
 	}

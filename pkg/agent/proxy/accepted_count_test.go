@@ -32,7 +32,7 @@ func acceptedSocket(t *testing.T) (app net.Conn, accepted *net.TCPConn) {
 	return app, c.(*net.TCPConn)
 }
 
-// The accept loop puts the macOS count of what is written to the client
+// The accept loop puts the macOS and Windows count of what is written to the client
 // (relay.CountClientWrites) over the accepted socket, under the tracking.
 // Every site that keys or reads the accepted socket itself finds it under the
 // count: the pairing's key (pairKey, for countAccept's store, pairedDest and
@@ -95,14 +95,15 @@ func TestTheAcceptedSocketIsFoundUnderTheCountOfWrites(t *testing.T) {
 }
 
 // countsOver checks that c, what the proxy hands on of the accepted socket raw
-// (through what), is the count of writes over raw on macOS, and raw itself
-// elsewhere.
+// (through what), is the count of writes over raw on macOS and Windows, and
+// raw itself elsewhere.
 func countsOver(t *testing.T, c net.Conn, raw *net.TCPConn, what string) {
 	t.Helper()
-	if onMac := runtime.GOOS == "darwin"; onMac == (c == net.Conn(raw)) {
-		t.Fatalf("%s keeps %T on %s: want a count over the socket on macOS only", what, c, runtime.GOOS)
+	counted := runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+	if counted == (c == net.Conn(raw)) {
+		t.Fatalf("%s keeps %T on %s: want a count over the socket on macOS and Windows only", what, c, runtime.GOOS)
 	}
-	if u, ok := c.(interface{ NetConn() net.Conn }); runtime.GOOS == "darwin" && (!ok || u.NetConn() != net.Conn(raw)) {
+	if u, ok := c.(interface{ NetConn() net.Conn }); counted && (!ok || u.NetConn() != net.Conn(raw)) {
 		t.Fatalf("the count %s keeps is not over the accepted socket", what)
 	}
 }
