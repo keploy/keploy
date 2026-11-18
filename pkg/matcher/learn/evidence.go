@@ -1947,10 +1947,6 @@ func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
 	if t == nil || s.Side != Request {
 		return nil
 	}
-	rec, live := variables.Words(s.Leaf.Value), variables.Words(s.Live)
-	if len(rec) != len(live) {
-		return nil
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	place := s.Place
@@ -1958,6 +1954,16 @@ func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
 		place = seenVar(Earlier{incoming: true}, s)
 	}
 	if place == "" {
+		return nil
+	}
+	// A place no variable is bound at a word of names none, and its
+	// leaf's words are not split: a call reads every earlier leaf of its
+	// test.
+	if at := mock + "\x00" + place + "#"; !t.runWordPlaces[at] && !t.wordPlaces[at] {
+		return nil
+	}
+	rec, live := boundWordsOf(s.Leaf.Value), boundWordsOf(s.Live)
+	if len(rec) != len(live) {
 		return nil
 	}
 	var out []BoundWord
@@ -1976,6 +1982,17 @@ func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
 	}
 	return out
 }
+
+// boundWordsOf splits a leaf's text into its words for BoundWords and
+// UsedWords (variables.Words); the rows count its calls.
+var boundWordsOf = variables.Words
+
+// wordPlaceOf is "<mock>\x00<place>#" of key, a variable's key
+// "<mock>\x00<place>#<word>" (BoundWords): key up to its last '#', none
+// of a key holding none. A place holding a '#' of its own is kept at its
+// last, a place no word is asked at: it only lets a leaf be read, as
+// every leaf was.
+func wordPlaceOf(key string) string { return key[:strings.LastIndexByte(key, '#')+1] }
 
 // tookRequestLocked reports whether mock is the place of a client test's
 // request the running test took (Incoming): one of t.incoming. t.mu is held.

@@ -138,6 +138,11 @@ type Tracker struct {
 	// mock and place), and taken the names given.
 	names map[string]string
 	taken map[string]bool
+	// wordPlaces, runWordPlaces and usedWordPlaces are the places names,
+	// runNames and usedWords hold a variable at a word of (wordPlaceOf),
+	// made and dropped with them: BoundWords and UsedWords split a leaf's
+	// words at those places alone.
+	wordPlaces, runWordPlaces, usedWordPlaces map[string]bool
 	// usedWords are the running test's variables its learn steps used at
 	// one word of a request place, by mock and "<place>#<word>"
 	// (ServedNamed, UsedWords).
@@ -252,7 +257,7 @@ type Tracker struct {
 
 // NewTracker makes a tracker with no test open.
 func NewTracker() *Tracker {
-	t := &Tracker{places: newSetPlaces(), derived: newSetDerived(), usedWords: map[string]string{}}
+	t := &Tracker{places: newSetPlaces(), derived: newSetDerived(), usedWords: map[string]string{}, usedWordPlaces: map[string]bool{}}
 	t.drifts = t.newDrifts()
 	return t
 }
@@ -287,8 +292,9 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.derived.drop()
 	t.places, t.derived = newSetPlaces(), newSetDerived()
 	t.outside, t.outsideKept = nil, nil
-	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
-	t.names, t.taken, t.usedWords = nil, nil, map[string]string{}
+	t.run, t.runNames, t.runTaken, t.setTaken, t.runWordPlaces = nil, nil, nil, nil, nil
+	t.names, t.taken, t.wordPlaces = nil, nil, nil
+	t.usedWords, t.usedWordPlaces = map[string]string{}, map[string]bool{}
 	t.answered, t.drifts = nil, t.newDrifts()
 	t.servedAt, t.serveAt = nil, nil
 	t.given, t.gave = nil, nil
@@ -606,7 +612,8 @@ func (t *Tracker) beginAt(at time.Time) func() {
 	t.before, t.mocks, t.kept = t.mocks, nil, nil
 	t.answered = nil
 	t.drifts = t.newDrifts()
-	t.names, t.taken, t.usedWords = nil, nil, map[string]string{}
+	t.names, t.taken, t.wordPlaces = nil, nil, nil
+	t.usedWords, t.usedWordPlaces = map[string]string{}, map[string]bool{}
 	t.given, t.gave = nil, nil
 	t.cases, t.incoming, t.incomingWords = caseCursor{}, nil, 0
 	t.incomingGen++
@@ -2040,13 +2047,14 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 		return name, true
 	}
 	if t.names == nil {
-		t.names, t.taken = map[string]string{}, map[string]bool{}
+		t.names, t.taken, t.wordPlaces = map[string]string{}, map[string]bool{}, map[string]bool{}
 	}
 	if t.setTaken == nil {
 		t.setTaken = map[string]bool{}
 	}
 	name = t.free(varName(place), reserved, t.taken)
 	t.names[key], t.taken[name], t.setTaken[name] = name, true, true
+	t.wordPlaces[wordPlaceOf(key)] = true
 	return name, true
 }
 
@@ -2088,10 +2096,11 @@ func (t *Tracker) RunName(n uint64, mock, place string, reserved map[string]bool
 		return name, !reserved[name]
 	}
 	if t.runNames == nil {
-		t.runNames, t.runTaken = map[string]string{}, map[string]bool{}
+		t.runNames, t.runTaken, t.runWordPlaces = map[string]string{}, map[string]bool{}, map[string]bool{}
 	}
 	name := t.free(runPrefix+varName(place), reserved, t.setTaken)
 	t.runNames[key], t.runTaken[name] = name, true
+	t.runWordPlaces[wordPlaceOf(key)] = true
 	return name, true
 }
 
