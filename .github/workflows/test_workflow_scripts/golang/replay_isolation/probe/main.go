@@ -10,6 +10,12 @@
 //	                                    rcode=N", or why it got no answer (exit 1)
 //	egressprobe runner -url URL [-n N]  a compose stack's test driver: waits for URL/health,
 //	                                    then GETs URL/health?n=1..N and exits 0
+//	egressprobe after -wait D -say WORD a compose stack's one-shot (a migration, a seed): waits D,
+//	                                    prints "WORD DONE" and exits 0
+//	egressprobe flaky -mark FILE        a dependency that crashes (exit 1) on its first start only:
+//	                                    FILE marks that it ran once; later starts run until stopped
+//	egressprobe watcher -url URL        a service that watches the app: once URL/health has
+//	                                    answered, it exits 1 as soon as it stops answering
 //	egressprobe fork1|fork2 ADDR        the double-forked child path (internal)
 //
 // The sink owns the test addresses on its own interface, among them the one
@@ -55,7 +61,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|oneshot|early|runner|fork1|fork2 ...")
+		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|oneshot|early|runner|after|flaky|watcher|fork1|fork2 ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -81,6 +87,12 @@ func main() {
 		os.Exit(3)
 	case "runner":
 		runner(os.Args[2:])
+	case "after":
+		after(os.Args[2:])
+	case "flaky":
+		flaky(os.Args[2:])
+	case "watcher":
+		watcher(os.Args[2:])
 	case "fork1": // starts fork2 and exits at once, so fork2 is reparented
 		c := exec.Command("/proc/self/exe", "fork2", os.Args[2], os.Args[3])
 		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -137,6 +149,100 @@ func runner(args []string) {
 		}
 	}
 	fmt.Printf("RUNNER DONE %d\n", time.Now().Unix())
+}
+
+// after is a compose stack's one-shot service that takes a while (a
+// migration a service waits on with service_completed_successfully, a seed
+// that runs once the app is up): it waits D, says "WORD DONE" and exits 0.
+func after(args []string) {
+	fs := flag.NewFlagSet("after", flag.ExitOnError)
+	wait := fs.Duration("wait", 0, "how long it runs before it exits 0")
+	say := fs.String("say", "AFTER", "the word it prints before DONE")
+	_ = fs.Parse(args)
+	time.Sleep(*wait)
+	fmt.Printf("%s DONE\n", *say)
+}
+
+// untilStopped blocks until the container is stopped (SIGINT or SIGTERM:
+// the process is the container's PID 1, which the kernel sends no signal it
+// does not handle).
+func untilStopped() {
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+}
+
+// flaky is a dependency that crashes on its first start only, as one that
+// starts before its own backing store is up does: with no FILE it creates
+// it, says "FLAKY CRASHES 1" and exits 1; with FILE (a start after that one,
+// FILE on a volume that outlives the container) it says "FLAKY UP" and runs
+// until it is stopped, then exits 0.
+func flaky(args []string) {
+	fs := flag.NewFlagSet("flaky", flag.ExitOnError)
+	mark := fs.String("mark", "", "the file that marks its first start")
+	_ = fs.Parse(args)
+	if _, err := os.Stat(*mark); err != nil {
+		if err := os.WriteFile(*mark, nil, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "flaky: %v\n", err)
+			os.Exit(2)
+		}
+		fmt.Println("FLAKY CRASHES 1")
+		os.Exit(1)
+	}
+	fmt.Println("FLAKY UP")
+	untilStopped()
+}
+
+// watcher is a service that fails once the app stops answering, as a
+// sidecar that needs the app does: it waits until URL/health answers, then
+// asks it every 100 ms, and after 3 failed asks in a row says "WATCHER EXITS
+// 1" and exits 1. It exits 2 if the app never answers, and 0 if it is
+// stopped first.
+func watcher(args []string) {
+	fs := flag.NewFlagSet("watcher", flag.ExitOnError)
+	base := fs.String("url", "", "the app's base URL")
+	_ = fs.Parse(args)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	c := &http.Client{Timeout: 2 * time.Second}
+	healthy := func() bool {
+		resp, err := c.Get(*base + "/health")
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode == http.StatusOK
+	}
+	up := false
+	for i := 0; i < 2400 && !up; i++ {
+		if up = healthy(); !up {
+			select {
+			case <-stop:
+				os.Exit(0)
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+	if !up {
+		fmt.Fprintln(os.Stderr, "watcher: the app never answered")
+		os.Exit(2)
+	}
+	fmt.Println("WATCHER SEES THE APP")
+	for failed := 0; failed < 3; {
+		select {
+		case <-stop:
+			os.Exit(0)
+		case <-time.After(100 * time.Millisecond):
+		}
+		if healthy() {
+			failed = 0
+		} else {
+			failed++
+		}
+	}
+	fmt.Println("WATCHER EXITS 1")
+	os.Exit(1)
 }
 
 func outcome(path string, err error) {
