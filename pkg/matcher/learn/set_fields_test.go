@@ -142,8 +142,8 @@ func TestASetBuildsEachFieldViewOnceAtAnySize(t *testing.T) {
 		if fs.fieldBuilds != 2*n || dc.Loads()-loads > 8*n || setUsed(dc.set) != u {
 			t.Errorf("%d places, 9 later calls: %d views built more, %d loads at once, %d bytes counted more; want none, at most %d, none", n, fs.fieldBuilds-2*n, dc.Loads()-loads, setUsed(dc.set)-u, 8*n)
 		}
-		if fs.fieldsUsed <= 0 || fs.fieldsUsed > readerBudgetBytes() {
-			t.Errorf("%d places: the set's views count %d bytes; want some, within %d", n, fs.fieldsUsed, readerBudgetBytes())
+		if fs.fieldsUsed <= 0 || fs.fieldsUsed > readerBudgetBytes(dc.set) {
+			t.Errorf("%d places: the set's views count %d bytes; want some, within %d", n, fs.fieldsUsed, readerBudgetBytes(dc.set))
 		}
 	}
 }
@@ -217,7 +217,7 @@ func TestASetsCallReadsARecordingOncePerQuestionItKeepsNoViewOf(t *testing.T) {
 		}
 	}
 	dc, fs, recs, views, words := fresh(1 << 30)
-	fs.fieldsUsed = readerBudgetBytes()
+	fs.fieldsUsed = readerBudgetBytes(dc.set)
 	for c := range 2 {
 		call(fmt.Sprintf("the set's views past its cap, call %d", c), dc, recs, views, words, n)
 	}

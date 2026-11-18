@@ -45,10 +45,18 @@ import (
 // that the set's words and payloads keep.
 var readerBudget int64
 
-// readerBudgetBytes is the cap of what one call's index keeps (readerBudget).
-func readerBudgetBytes() int64 {
+// readerBudgetBytes is the cap of what one call's index keeps (readerBudget)
+// in set s: a quarter of the budget s read when it started, not read again
+// in each call. setBudget reads the agent's memory limit from its cgroup
+// files and /proc/meminfo, about 60 us, and a call of a small set decides
+// in a few hundred: each Decide read them all again. A call of no set (s
+// nil) reads setBudget, as its set would.
+func readerBudgetBytes(s *setDerived) int64 {
 	if readerBudget > 0 {
 		return readerBudget
+	}
+	if s != nil {
+		return s.budget.limit / 4
 	}
 	return setBudget() / 4
 }
@@ -149,10 +157,11 @@ type readerText struct {
 // newReaderIndex is an empty index for one call, reading through dc's
 // caches (nil: none).
 func newReaderIndex(dc *DriftCache) *readerIndex {
-	x := &readerIndex{dc: dc, budget: readerBudgetBytes(), seed: maphash.MakeSeed(), texts: map[uint64][]*readerEntry{}}
+	x := &readerIndex{dc: dc, seed: maphash.MakeSeed(), texts: map[uint64][]*readerEntry{}}
 	if dc != nil {
 		x.set = dc.set
 	}
+	x.budget = readerBudgetBytes(x.set)
 	if x.set != nil {
 		x.filters = filtersOf(x.set)
 	}
@@ -1346,7 +1355,7 @@ func fieldsEntryOf(fs *setFilters, s *setDerived, b rawBody) *fieldsEntry {
 // that cap too (fieldsUsed); false where it does not fit. The build's peak
 // is the call's, as its own index would count it.
 func (t *readerText) buildSetFields(fs *setFilters, b rawBody) (fieldWords, bool) {
-	x, own, room := t.x, textBytes(b.text), readerBudgetBytes()
+	x, own, room := t.x, textBytes(b.text), readerBudgetBytes(t.x.set)
 	fw, fits := buildFieldWords(b.text, b.fields, room, func(n, held int64) { x.peak = max(x.peak, x.used+own+n+held) })
 	n := fieldWordsBytes(fw)
 	fs.mu.Lock()

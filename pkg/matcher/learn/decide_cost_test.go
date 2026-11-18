@@ -2,6 +2,7 @@ package learn
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -173,5 +174,52 @@ func TestASetsKeptWordsNameTheRecordingTheCallHands(t *testing.T) {
 	other := Raw{mock: "mock-b", conn: "conn-b"}
 	if got := e.of(other); got.mock != "mock-b" || got.conn != "conn-b" {
 		t.Errorf("the entry reads a recording named %q on %q as %q on %q; want its own", other.mock, other.conn, got.mock, got.conn)
+	}
+}
+
+// A call's index takes a quarter of the budget its set read when it
+// started, and reads no memory limit of its own: a limit that changes in
+// the set holds from the next set (setBudget), and a call of no set reads
+// it at the call. Each Decide read the agent's cgroup files and
+// /proc/meminfo again, about 60 us, more than a small set's decision.
+func TestACallsIndexTakesTheBudgetItsSetReadWhenItStarted(t *testing.T) {
+	defer func(b, r int64) { learnBudget, readerBudget = b, r }(learnBudget, readerBudget)
+	readerBudget, learnBudget = 0, 64<<20
+	dc := NewDriftCache()
+	dc.set = newSetDerived()
+	learnBudget = 8 << 20
+	if got := newReaderIndex(dc).budget; got != 16<<20 {
+		t.Errorf("a call of a set begun at a 64 MiB budget, the limit 8 MiB since: its index takes %d bytes; want %d, a quarter of its set's", got, 16<<20)
+	}
+	if got := readerBudgetBytes(dc.set); got != 16<<20 {
+		t.Errorf("the set's views, a set begun at 64 MiB: within %d bytes; want %d", got, 16<<20)
+	}
+	if got := newReaderIndex(nil).budget; got != 2<<20 {
+		t.Errorf("a call of no set at an 8 MiB limit: its index takes %d bytes; want %d", got, 2<<20)
+	}
+	dc.set = newSetDerived()
+	if got := newReaderIndex(dc).budget; got != 2<<20 {
+		t.Errorf("a call of the next set, begun at 8 MiB: its index takes %d bytes; want %d", got, 2<<20)
+	}
+}
+
+// The set's field views stay within a quarter of the budget the set read
+// when it started, as its calls' indexes do: a limit that falls during the
+// set leaves them the cap they began with, until the next set.
+func TestASetsFieldViewsTakeTheCapItsBudgetGaveWhenItStarted(t *testing.T) {
+	defer func(b, r int64) { learnBudget, readerBudget = b, r }(learnBudget, readerBudget)
+	readerBudget = 0
+	recs, views, words := setFieldsFixture(nil, 40)
+	want, _, _ := askAll(nil, recs, views, words)
+	learnBudget = 1 << 30
+	dc := NewDriftCache()
+	dc.set = newSetDerived()
+	fs := filtersOf(dc.set)
+	learnBudget = 1
+	if got, _, _ := askAll(dc, recs, views, words); !slices.EqualFunc(got, want, slices.Equal) {
+		t.Fatalf("a set begun at 1 GiB, the limit 1 byte since: answers differ from a call with no set")
+	}
+	if kept := keptViews(fs); kept != 80 || fs.fieldBuilds != 80 {
+		t.Errorf("a set begun at 1 GiB, the limit 1 byte since: %d views kept, %d built; want all 80 kept, each built once, within the set's cap of %d", kept, fs.fieldBuilds, 1<<28)
 	}
 }
