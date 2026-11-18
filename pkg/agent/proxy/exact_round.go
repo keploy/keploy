@@ -46,8 +46,11 @@ import (
 //
 // What the replay drains (flagMockAsUsed), the revisions and the window
 // signal move after a view's own serve, as before: a parser that keeps an
-// index reads again. A consume the view passes goes through its tier inside
-// the step, since the tier decides whether it is a serve at all.
+// index reads again. That the take answered this session
+// (HasUnservedRecording) moves with the take, in the step (takeLocked): a
+// view installed before the drain no longer shows the take spent. A
+// consume the view passes goes through its tier inside the step, since the
+// tier decides whether it is a serve at all.
 
 // roundState is the round's state that changes holding mu alone.
 type roundState struct {
@@ -77,18 +80,27 @@ type roundState struct {
 	stagedSet uint64
 	// onWait and onRead are test seams, nil outside tests: onWait runs as a
 	// change is about to take the lock (lockRound), onRead inside a
-	// snapshot after each of its reads, with that read's name. A test
-	// drives a change between any two reads with them, never with sleeps.
+	// snapshot after each of its reads, with that read's name, and in
+	// HasUnservedRecording between a recording's view read and its note
+	// read (answeredIn). A test drives a change between any two reads with
+	// them, never with sleeps. Only _test.go files assign them, so no
+	// build that ships ever runs either.
 	onWait func()
 	onRead func(step string)
+	// onTake is a test seam too: it runs as a take of any kind is written
+	// to the take log (takeLocked), holding the round lock, with the take,
+	// before the log reads it. For a consume or a spend, the step that
+	// settles it has marked the recording spent in its view and has not
+	// noted it taken (noteTakenLocked).
+	onTake func(t integrations.Take)
 	// onAnswerAgain is a test seam too: it runs as a held call is about to
 	// be answered once more (heldScope.AnswerRepeatRead), its staging
 	// checked, holding the round lock.
 	onAnswerAgain func()
-	// onSettled is a test seam too: it runs once a consume has settled and
-	// let the round lock go, before what it tells the replay
-	// (flagMockAsUsed).
-	onSettled func()
+	// onSettled is a test seam too (MockManager.OnSettled): it runs once a
+	// consume has settled as a serve and let the round lock go, before what
+	// it tells the replay (flagMockAsUsed), with the recording's name.
+	onSettled atomic.Pointer[func(name string)]
 	// onConsume is a test seam too (MockManager.OnConsume): it runs as a
 	// consume is about to be settled, no lock held.
 	onConsume atomic.Pointer[func(name string)]
@@ -244,6 +256,9 @@ func (m *MockManager) logLocked() *roundLog {
 // takeLocked writes t to the current staging's take log, holding the round
 // lock, and returns its index.
 func (m *MockManager) takeLocked(t integrations.Take) int {
+	if f := m.exact.round.onTake; f != nil {
+		f(t)
+	}
 	l := m.logLocked()
 	switch t.How {
 	case integrations.TakeCarried, integrations.TakeVoided, integrations.TakeRestored:
@@ -264,6 +279,8 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 	switch t.How {
 	case integrations.TakeRestored:
 		delete(l.taken, t.Mock.Name)
+	case integrations.TakeVoided:
+		m.forgetVoidedLocked(t.Mock.Name)
 	case integrations.TakeCarried:
 		if t.Of >= 0 {
 			byTest(t.Test, t.Of)
@@ -273,6 +290,7 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 			l.taken = map[string]bool{}
 		}
 		l.taken[t.Mock.Name] = true
+		m.noteTakenLocked(t.Mock.Name)
 		switch {
 		case t.Ahead:
 			if l.ahead == nil {
@@ -284,6 +302,41 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 		}
 	}
 	return i
+}
+
+// noteTakenLocked counts the recording named name as one that answered this
+// session (servedThisSession), holding the round lock, in the step that
+// takes it. What the replay counts of the serve (flagMockAsUsed) is written
+// only once the round lock is let go, a pool view's ahead only as the next
+// test opens: a view installed before then, the next test's or the pool's,
+// no longer reports the take spent (MockSpent), and a call held for a
+// recording no call took yet (integrations.UnservedRecordingFinder) would
+// read the taken one as unserved until a window change no test may bring.
+// The note is that count ahead of it, and reads as the count does once
+// the take is settled: a take given back later (TakeRestored) answered all
+// the same, as the replay's count of it stays, and a pool view's ahead
+// voided did not (forgetVoidedLocked).
+func (m *MockManager) noteTakenLocked(name string) {
+	m.consumedMu.Lock()
+	if m.takenThisSession == nil {
+		m.takenThisSession = map[string]bool{}
+	}
+	m.takenThisSession[name] = true
+	m.consumedMu.Unlock()
+}
+
+// forgetVoidedLocked takes back, holding the round lock, the note of a pool
+// view's ahead answer of the recording named name that a view install
+// voided (TakeVoided: the test it was answered for did not open next). The
+// replay never counts that answer (ServeExactTest flags a carried one
+// alone), so the recording answered no request of this session's, as it
+// reads with no note. No other take of it is noted in between: the pool
+// view holds it as its own, consumed, from the take to the install that
+// voids it, and refuses every other door's take of it.
+func (m *MockManager) forgetVoidedLocked(name string) {
+	m.consumedMu.Lock()
+	delete(m.takenThisSession, name)
+	m.consumedMu.Unlock()
 }
 
 // takenInStagingLocked reports whether name was consumed or spent in the
