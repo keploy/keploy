@@ -5132,7 +5132,17 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retErr error) {
 	defer func() {
-		if retErr == nil {
+		// A release the watch cut (the agent's container exited, or its
+		// start failed or stopped making progress, before it took the
+		// release) is still owed to the agent compose starts in its place:
+		// compose's bring-up retry starts the agent again when a dependency
+		// crashed, and the restarted agent is set up with the calls recorded
+		// here (reapply). Without it that agent is never released, its
+		// health check never passes, and the app it gates never starts: the
+		// run waits for good. A release the agent refused for good (a
+		// latched CA setup failure, a proven switch that disagrees) or one
+		// the run's end cut is not owed to anyone.
+		if retErr == nil || errors.Is(retErr, errReleaseCut) {
 			a.session().record(stepAgentReady, func(c context.Context) error { return a.MakeAgentReadyForDockerCompose(c) })
 		}
 	}()
@@ -5160,7 +5170,7 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 		go func() {
 			select {
 			case err := <-gone:
-				cancel(fmt.Errorf("the keploy agent did not take its release of the application (/agent/ready): %w", err))
+				cancel(fmt.Errorf("%w: %w", errReleaseCut, err))
 			case <-ctx.Done():
 			}
 		}()
@@ -5246,6 +5256,10 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 		}
 	}
 }
+
+// errReleaseCut begins the error of a release the agent's watch ended before
+// the agent took it (MakeAgentReadyForDockerCompose).
+var errReleaseCut = errors.New("the keploy agent did not take its release of the application (/agent/ready)")
 
 // agentCASetupFailed begins the agent's answer to /agent/ready when its CA
 // setup has failed (pkg/agent/routes, MakeAgentReady): a failure it latches.
