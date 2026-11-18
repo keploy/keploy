@@ -835,7 +835,9 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 // name the run was given (--app-name, KEPLOY_APPNAME, or appName in
 // keploy.yml or its override), is kept unless it is blank: a name of spaces
 // alone, like the "" a YAML null (appName:, ~, null, Null) reads as, names no
-// app, as enterprise reads keploy.yml. A run given none is named:
+// app, as enterprise reads keploy.yml. PreProcessFlags drops a blank
+// --app-name or KEPLOY_APPNAME before it reads keploy.yml (dropBlankAppName),
+// so keploy.yml's appName is not hidden by one. A run given none is named:
 //   - with no keploy.yml (configFile ""), after its git repository and its
 //     folder's path inside it, or after its folder outside one
 //     (utils.DefaultAppName); the keploy.yml the run writes keeps the name;
@@ -910,6 +912,10 @@ func sameFolder(a, b string) bool {
 }
 
 func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
+	// 0) A blank --app-name or KEPLOY_APPNAME names no app, so it is no
+	// choice: dropped before viper reads the layers below.
+	dropBlankAppName(c.logger, cmd.Flags())
+
 	// 1) Bind flags (highest precedence in Viper)
 	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
 	if err := viper.BindPFlags(cmd.Flags()); err != nil {
@@ -1018,6 +1024,30 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	c.cfg.ConfigPath = configPath
 	c.configRead = true
 	return nil
+}
+
+// dropBlankAppName drops an --app-name or a KEPLOY_APPNAME that is empty or
+// blank, so that the run is named as if it were given no name: by
+// keploy.yml's appName, else by its git repository, else by its folder
+// (AppName). viper takes a given flag, then the env, over keploy.yml, so a
+// blank one hid keploy.yml's appName, and the run was named after its folder
+// with a warning that keploy.yml named no app. A blank name names no app, as
+// a blank or null appName in keploy.yml does. The flag is set back to its
+// default and marked not given, so viper, and any later read of the flag,
+// sees none; the variable is unset for this process and the ones it starts.
+// Each one dropped is said in a warning, but for an empty KEPLOY_APPNAME,
+// which viper never read.
+func dropBlankAppName(logger *zap.Logger, flags *pflag.FlagSet) {
+	if f := flags.Lookup("app-name"); f != nil && f.Changed && strings.TrimSpace(f.Value.String()) == "" {
+		logger.Warn(fmt.Sprintf("ignoring --app-name %q: a blank name is no name, so this run takes keploy.yml's appName, else its git repository's or its folder's name", f.Value.String()))
+		// A string flag's Set takes any value.
+		_ = f.Value.Set(f.DefValue)
+		f.Changed = false
+	}
+	if v := os.Getenv("KEPLOY_APPNAME"); v != "" && strings.TrimSpace(v) == "" {
+		logger.Warn(fmt.Sprintf("ignoring KEPLOY_APPNAME %q: a blank name is no name, so this run takes keploy.yml's appName, else its git repository's or its folder's name", v))
+		_ = os.Unsetenv("KEPLOY_APPNAME")
+	}
 }
 
 // mockViperPrefix keeps `keploy mock record` flags out of the record.* config section, whose passThroughPorts holds rules, not ports.

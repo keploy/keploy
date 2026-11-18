@@ -26,6 +26,7 @@ func TestWithAppName(t *testing.T) {
 		{"appName null", "a", "appName: null\n", "appName: \"a\"" + k + "\n"},
 		{"appName Null", "a", "appName: Null\npath: x\n", "appName: \"a\"" + k + "\npath: x\n"},
 		{"appName of spaces", "shop", "path: x\nappName: \"  \"\n", "path: x\nappName: \"shop\"" + k + "\n"},
+		{"appName of a tab, double-quoted", "shop", "appName: \"\t\"\npath: x\n", "appName: \"shop\"" + k + "\npath: x\n"},
 		{"appName of a tab and a space, single-quoted, with a comment", "shop", "appName: '\t ' # blank\npath: x\n", "appName: \"shop\"" + k + " # blank\npath: x\n"},
 		{"a key in another case, CRLF", "shop", "appname: ~\r\npath: x\r\n", "appname: \"shop\"" + k + "\r\npath: x\r\n"},
 		{"a quoted key", "shop", "'appName': ''\npath: x\n", "'appName': \"shop\"" + k + "\npath: x\n"},
