@@ -1059,9 +1059,9 @@ func (m *SyncMockManager) SetMappingChannel(streamCtx context.Context, ch chan<-
 // ForwardMappingChannel copies this manager's mapping channel and stream
 // context onto dst, so dst's resolves emit mappings to the same recorder
 // stream. It is a no-op when this manager has no channel (SetMappingChannel
-// was not called yet) or dst is nil. Callers use it to wire a per-app
-// manager created by NewAgentRuntime — which the recorder never sees — to
-// the channel the recorder opened on the global manager (Proxy.Mapping).
+// was not called yet), dst is nil, or dst already has the same channel
+// (safe for repeated calls — no overflow is dropped and no generation is
+// bumped when the channel has not changed).
 func (m *SyncMockManager) ForwardMappingChannel(dst *SyncMockManager) {
 	if m == nil || dst == nil {
 		return
@@ -1071,6 +1071,16 @@ func (m *SyncMockManager) ForwardMappingChannel(dst *SyncMockManager) {
 	streamCtx := m.mappingStreamCtx
 	m.mappingOverflowMu.Unlock()
 	if ch == nil {
+		return
+	}
+	// Skip when dst already has this channel: SetMappingChannel is not
+	// idempotent (it clears the overflow queue and bumps the generation
+	// on every call), so calling it again with the same channel would
+	// silently drop queued mappings under backpressure.
+	dst.mappingOverflowMu.Lock()
+	already := dst.mappingStreamCh == ch
+	dst.mappingOverflowMu.Unlock()
+	if already {
 		return
 	}
 	dst.SetMappingChannel(streamCtx, ch)
