@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -267,6 +268,61 @@ func TestKeploysStopOfTheStackStopsALateStarterUntilTheUpReturns(t *testing.T) {
 			defer d.mu.Unlock()
 			if slices.Contains(d.stops, "late-id") {
 				t.Fatalf("stops %v; want nothing stopped once the up has returned", d.stops)
+			}
+		})
+	}
+}
+
+// TestALateStarterKeployCannotStopIsSaidAtDebugUnlessItIsGone: keploy's stop
+// of a late starter the daemon refuses is said at Debug, naming the
+// container; one already gone (the daemon's NotFound) and one stopped say
+// nothing.
+func TestALateStarterKeployCannotStopIsSaidAtDebugUnlessItIsGone(t *testing.T) {
+	const said = "could not stop a late-started container of the application's compose project"
+	for _, proven := range []string{"", "1"} {
+		t.Run("switch="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			d := newAbortDocker(time.Now().Add(-time.Minute))
+			a := newAbortApp(d, "docker compose up --abort-on-container-exit", nil)
+			core, logs := observer.New(zap.DebugLevel)
+			a.logger = zap.New(core)
+			returned := a.composeUpRunning()
+			defer returned()
+			if !a.stopComposeProject(context.Background()) {
+				t.Fatal("the stack's stop could not tell the project")
+			}
+			var stream chan events.Message
+			select {
+			case stream = <-d.streams:
+			case <-time.After(time.Minute):
+				t.Fatal("keploy's stop did not watch the project's starts")
+			}
+			d.add("refused-id", "refused", runningState(time.Now()))
+			d.add("runner-id", "runner", runningState(time.Now()))
+			d.mu.Lock()
+			d.stopFails = map[string]error{"refused-id": errors.New("the daemon refuses the stop")}
+			d.mu.Unlock()
+			// gone-id started and was removed before keploy's stop reached it.
+			for _, s := range []struct{ id, service string }{{"gone-id", "gone"}, {"refused-id", "refused"}, {"runner-id", "runner"}} {
+				stream <- events.Message{Type: events.ContainerEventType, Action: events.ActionStart, TimeNano: time.Now().UnixNano(),
+					Actor: events.Actor{ID: s.id, Attributes: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: s.service}}}
+			}
+			eventually(t, "keploy asked to stop each late starter", func() bool {
+				d.mu.Lock()
+				defer d.mu.Unlock()
+				return slices.Contains(d.stopAsks, "gone-id") && slices.Contains(d.stopAsks, "refused-id") && slices.Contains(d.stopAsks, "runner-id")
+			})
+			eventually(t, "the refused stop is said at Debug", func() bool {
+				return logs.FilterMessage(said).FilterField(zap.String("container", "refused-id")).Len() == 1
+			})
+			time.Sleep(200 * time.Millisecond)
+			for _, e := range logs.FilterMessage(said).All() {
+				if c := e.ContextMap()["container"]; c != "refused-id" {
+					t.Fatalf("keploy said %q for %v; want it said only for the stop the daemon refused", said, c)
+				}
+			}
+			if e := logs.FilterMessage(said).All()[0]; e.Level != zap.DebugLevel {
+				t.Fatalf("the refused stop is said at %v; want Debug", e.Level)
 			}
 		})
 	}

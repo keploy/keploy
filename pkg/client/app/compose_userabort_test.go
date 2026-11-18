@@ -40,6 +40,12 @@ type abortDocker struct {
 	// (the NotFound stands for any failure askDaemon gives up on, without
 	// its wait).
 	listFails string
+	// stopFails is, by container ID, the error the daemon gives keploy's
+	// stop of that container.
+	stopFails map[string]error
+	// stopAsks are the containers keploy asked the daemon to stop, those it
+	// has no such container for included.
+	stopAsks []string
 }
 
 type abortSvcContainer struct {
@@ -119,6 +125,10 @@ func (d *abortDocker) ContainerList(_ context.Context, opts container.ListOption
 func (d *abortDocker) ContainerStop(_ context.Context, ref string, _ container.StopOptions) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.stopAsks = append(d.stopAsks, ref)
+	if err := d.stopFails[ref]; err != nil {
+		return err
+	}
 	id, c := d.find(ref)
 	if c == nil {
 		return errdefs.NotFound(errors.New("no such container"))

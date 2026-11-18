@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
@@ -1066,7 +1067,7 @@ func (a *App) stopComposeLateStarters(ctx context.Context, project string) {
 					stops.Add(1)
 					go func(id string) {
 						defer stops.Done()
-						if err := a.docker.ContainerStop(ctx, id, container.StopOptions{}); err != nil && !errdefs.IsNotFound(err) {
+						if err := a.docker.ContainerStop(ctx, id, container.StopOptions{}); err != nil && !cerrdefs.IsNotFound(err) {
 							a.logger.Debug("could not stop a late-started container of the application's compose project", zap.String("container", id), zap.Error(err))
 						}
 					}(m.Actor.ID)
