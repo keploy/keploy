@@ -4556,6 +4556,18 @@ func (m *SyncMockManager) holdOrDropLocked(mk *models.Mock, why dropReason, from
 	return false
 }
 
+// noRequestCanOwn reports whether mk, which no resolved window owns (the
+// caller asked ownerOrSharedLocked), can be owned by no request at all: no
+// window open from at or before its request (from, open: openFromLocked;
+// holdOrDropLocked holds a mock such a window may own), and it has a request
+// time to place it by. Such a call was made while no request was in flight —
+// a timer, a poller, a lease sweep — so it is no request's leftover, and the
+// app makes it at replay too.
+func noRequestCanOwn(mk *models.Mock, from time.Time, open bool) bool {
+	at := mk.Spec.ReqTimestampMock
+	return !at.IsZero() && !(open && !at.Before(from))
+}
+
 // holdForClaimLocked holds a per-test mock that a window still open claims
 // (openClaimLocked) and that goes back to owner, a resolved kept window whose
 // part after its yield covers it, if that window's request ends without it:
@@ -4840,6 +4852,9 @@ type dropTally struct {
 	// kept verdict on their request. A mock held and let go within one call is
 	// in held as well.
 	windowsGivenUp, givenUpDrops int
+	// background: sent owned by no test instead of dropped, as a call no
+	// request made (noRequestCanOwn). Not a drop.
+	background int
 }
 
 func (d *dropTally) count(why dropReason) {
@@ -4853,7 +4868,7 @@ func (d *dropTally) count(why dropReason) {
 func (d dropTally) dropped() int { return d.duplicateLeftovers + d.outsideAnyWindow }
 
 func (d dropTally) changed() bool {
-	return d.dropped() > 0 || d.held > 0 || d.windowsGivenUp > 0 || d.givenUpDrops > 0
+	return d.dropped() > 0 || d.held > 0 || d.windowsGivenUp > 0 || d.givenUpDrops > 0 || d.background > 0
 }
 
 func (d dropTally) fields() []zap.Field {
@@ -4864,6 +4879,7 @@ func (d dropTally) fields() []zap.Field {
 		zap.Int("held_now", d.held),
 		zap.Int("windows_given_up", d.windowsGivenUp),
 		zap.Int("dropped_given_up", d.givenUpDrops),
+		zap.Int("sent_background", d.background),
 	}
 }
 
@@ -6389,6 +6405,32 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	}
 }
 
+// resolveSkipped decides a duplicate static dedup skipped, requested over
+// [start, end]. It records the duplicate's window, not kept, as a sync-mode
+// duplicate's ResolveRange(keep=false) does, so that this and later cleanups
+// tell its calls (dropped) from calls no request made (sent, owned by no test),
+// whenever they arrive; then it clears what is before start
+// (DeleteMocksStrictlyBefore). start is the job's: the duplicate's request
+// time, or its prune horizon when a request still in flight started earlier
+// (PruneHorizon) — a call of that request in between is taken first by its
+// window, kept, or held for it while it is open (ownerOrSharedLocked,
+// holdOrDropLocked). An end before start (none known) records the request
+// time alone.
+func (m *SyncMockManager) resolveSkipped(start, end time.Time, testName string) {
+	if m == nil {
+		return
+	}
+	if !start.IsZero() {
+		if end.Before(start) {
+			end = start
+		}
+		m.mu.Lock()
+		m.addRecentWindowLocked(resolvedWindow{start: start, end: end, testName: testName, recording: m.recording})
+		m.mu.Unlock()
+	}
+	m.DeleteMocksStrictlyBefore(start)
+}
+
 // DeleteMocksStrictlyBefore is the dedup-queue cleanup invoked when a
 // DUPLICATE request is skipped: it clears buffered mocks captured before
 // the duplicate's request timestamp so the recording doesn't accumulate
@@ -6405,16 +6447,18 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 // ResolveRange, so without the rescue here the kept mocks are gone.
 //
 // Discriminator: a mock belongs to a kept test iff its ReqTimestampMock
-// falls inside a recently-resolved KEPT window. (In async mode, the only
-// caller, duplicates resolve through here rather than ResolveRange, so every
-// window in recentWindows is kept; a sync-mode ResolveRange(keep=false) window
-// is recorded with keep=false and never claims a mock here.) So a
-// before-the-horizon mock that owns a recent kept window is a late kept mock
-// → flush it (rescue); one that owns none is the skipped duplicate's own
-// debris → drop it, unless a request still in flight may own it
-// (OpenWindow): that one is held for it, however long the request takes.
-// Session/connection mocks are reusable across tests and are never reaped by
-// a per-test cleanup.
+// falls inside a recently-resolved KEPT window, and to a skipped duplicate iff
+// it falls inside one's window (ResolveJob records each skipped duplicate's
+// window, not kept, as a sync-mode ResolveRange(keep=false) does; a window not
+// kept never claims a mock here). So a before-the-horizon mock that owns a
+// recent kept window is a late kept mock → flush it (rescue); one inside a
+// skipped duplicate's window is that duplicate's debris → drop it, unless a
+// request still in flight may own it (OpenWindow): that one is held for it,
+// however long the request takes; one inside no window, with none open that
+// may own it, was made while no request was in flight (a timer, a poller): no
+// request's debris, and the app makes it at replay too → send it owned by no
+// test. Session/connection mocks are reusable across tests and are never
+// reaped by a per-test cleanup.
 func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	if m == nil {
 		return
@@ -6522,10 +6566,26 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 			continue
 		}
 
-		// Owns no kept window and is before the horizon → the skipped
-		// duplicate's own debris, unless a request still in flight started
-		// before it: then it may be that request's, and is held for it.
-		// Drop it (fall through without keeping), or hold it.
+		// Owns no window at all — no kept one, no skipped one (ResolveJob
+		// records a skipped duplicate's window, not kept), and none open may
+		// own it: no request made it. A background call, not a skipped
+		// duplicate's debris: sent owned by no test.
+		if !ok && !behind && noRequestCanOwn(mock, openFrom, open) {
+			if !outChanBound {
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			mock.Name = "mock-" + generateRandomString(8)
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+			tally.background++
+			continue
+		}
+
+		// Inside a skipped duplicate's window → its own debris, unless a
+		// request still in flight started before it: then it may be that
+		// request's, and is held for it. Drop it (fall through without
+		// keeping), or hold it.
 		m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
 	}
 
@@ -6657,7 +6717,7 @@ func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp t
 
 		// If it is a duplicate, perform the strict cleanup.
 		if head.IsDuplicate && mockMgr != nil {
-			mockMgr.DeleteMocksStrictlyBefore(head.ReqTimestamp)
+			mockMgr.resolveSkipped(head.ReqTimestamp, head.ResTimestamp, head.TestName)
 		} else if head.IsDuplicate == false && mockMgr != nil {
 			mockMgr.ResolveRange(head.ReqTimestamp, head.ResTimestamp, head.TestName, true, enableMapping)
 

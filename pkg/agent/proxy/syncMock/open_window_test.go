@@ -1020,7 +1020,9 @@ func TestPruneAndFlushDiagnosticsSplitDropsByReason(t *testing.T) {
 	mgr.ResolveRange(d, d.Add(10*time.Millisecond), "test-0", false, true) // a sync duplicate
 	mgr.AddMock(httpMockAt(d.Add(time.Millisecond)))                       // its late debris
 	mgr.FlushOwnedWindows()
-	mgr.AddMock(httpMockAt(time.Now().Add(-2 * time.Second))) // an async duplicate's debris
+	a := time.Now().Add(-2 * time.Second)
+	mgr.AddMock(httpMockAt(a))                                                // an async duplicate's debris
+	mgr.resolveSkipped(a.Add(-time.Millisecond), a.Add(time.Millisecond), "") // that duplicate, skipped
 	slow := mgr.OpenWindow(time.Now().Add(-time.Second), nil)
 	mgr.AddMock(httpMockAt(time.Now().Add(-500 * time.Millisecond))) // may be slow's
 	mgr.DeleteMocksStrictlyBefore(time.Now())
