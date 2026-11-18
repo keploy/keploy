@@ -226,8 +226,16 @@ func originURL(path string) string {
 	sc := bufio.NewScanner(strings.NewReader(string(b)))
 	sc.Buffer(make([]byte, 0, 64*1024), gitFileLimit)
 	pending := ""
-	for sc.Scan() {
-		line := strings.TrimSpace(pending + sc.Text())
+	for more := true; more; {
+		next := ""
+		if more = sc.Scan(); more {
+			next = sc.Text()
+		}
+		// git reads the file's end as a line's end: a last line that ends
+		// with a backslash goes on into nothing, and is read as it is. A
+		// continued line's leading spaces stay in the value, as git keeps
+		// them.
+		line := strings.TrimSpace(pending + next)
 		pending = ""
 		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
 			continue
@@ -250,9 +258,21 @@ func originURL(path string) string {
 		if !inOrigin {
 			continue
 		}
-		// A line with no "=" (a blank one among them) sets no url.
 		key, value, hasValue := strings.Cut(line, "=")
-		if !hasValue || !strings.EqualFold(strings.TrimSpace(key), "url") {
+		if !hasValue {
+			// A blank line sets nothing. A url key with no "=" is no url:
+			// git refuses the config ("missing value for
+			// 'remote.origin.url'"), so it names no repository.
+			name := key
+			if i := strings.IndexAny(name, " \t#;"); i >= 0 {
+				name = name[:i]
+			}
+			if strings.EqualFold(name, "url") {
+				return ""
+			}
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(key), "url") {
 			continue
 		}
 		return gitConfigValue(value)
@@ -296,25 +316,31 @@ func continues(line string) bool {
 	return false
 }
 
-// gitConfigValue is a config value as git reads it (config.c parse_value):
+// gitConfigValue is a config value as git 2.46 and later read it (config.c
+// parse_value):
 //   - quotes removed;
 //   - \n, \t and \b read as a newline, a tab and a backspace, and a backslash
 //     taking any other character after it as it is (git refuses a value with
 //     one of those; a URL holds none);
-//   - outside quotes, the spaces it starts and ends with dropped, and each
-//     space or tab within it kept as a space;
+//   - outside quotes, the spaces, tabs and carriage returns it starts and ends
+//     with dropped, and those within it kept as they are (older git turned
+//     each into a space; a URL holds none);
 //   - a # or ; outside quotes starting a comment.
 func gitConfigValue(v string) string {
 	var b strings.Builder
 	quoted := false
-	// spaces counts the unquoted spaces read since the last character kept:
-	// written before the next one, dropped at the value's end.
-	spaces := 0
+	// end is the value's length before the unquoted spaces read since the
+	// last character kept, where the value ends if nothing follows them; -1
+	// with none.
+	end := -1
 	for i := 0; i < len(v); i++ {
 		c := v[i]
-		if !quoted && (c == ' ' || c == '\t' || c == '\r' || c == '\v' || c == '\f') {
+		if !quoted && (c == ' ' || c == '\t' || c == '\r') {
+			if end < 0 {
+				end = b.Len()
+			}
 			if b.Len() > 0 {
-				spaces++
+				b.WriteByte(c)
 			}
 			continue
 		}
@@ -322,8 +348,7 @@ func gitConfigValue(v string) string {
 			// A comment, or a backslash at the end that escapes nothing.
 			break
 		}
-		b.WriteString(strings.Repeat(" ", spaces))
-		spaces = 0
+		end = -1
 		switch c {
 		case '"':
 			quoted = !quoted
@@ -335,6 +360,9 @@ func gitConfigValue(v string) string {
 		default:
 			b.WriteByte(c)
 		}
+	}
+	if end >= 0 {
+		return b.String()[:end]
 	}
 	return b.String()
 }
