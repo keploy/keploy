@@ -723,6 +723,9 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// mocks resolve on the manager its window is on.
 	mgr := syncMock.FromContextOrGlobal(ctx)
 	win := syncMock.WindowFromContext(ctx)
+	// The call is answered: what is made beside it from here on is not its
+	// own (syncMock.Window.Yield), and a duplicate's span ends here.
+	win.Yield(resTime)
 	if synchronous {
 		// The name its mocks are mapped to and its test case's (below), as an
 		// HTTP request's is (Capture): the recording joins a mapping to its

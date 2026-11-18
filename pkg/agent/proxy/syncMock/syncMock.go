@@ -715,6 +715,18 @@ type SyncMockManager struct {
 	// sharedLossMu, as lostOver is, so a test case whose window holds one is
 	// left out or revoked, never sent between the two.
 	cutLost Spans
+
+	// unkeptSpans is the span, from its start to its answer, of every request
+	// that was not kept: one whose window ended with no kept verdict
+	// (Window.Close) — a skipped duplicate's, over HTTP or gRPC, or one that
+	// made no test case — and one the ingress opened no window for
+	// (NoteRequestSpan). Only the duplicate cleanup and the hold's let-go read
+	// it (madeOutsideEveryRequestLocked), to tell such a request's leftover
+	// (dropped) from a call made outside every request (sent, owned by no
+	// test); nothing else asks it who owns a mock, so the window ring and every
+	// other pass decide as before. Recorded and read under mu. Past its bound
+	// it joins spans, which only widens what counts as a leftover.
+	unkeptSpans Spans
 	// lostFrom is the earliest request the current recording recorded in
 	// lostOver or cutLost (leaveOutSpan), zero when none: the window of its
 	// test case with no request time (tcWindow.open) is read from it, so it
@@ -4171,6 +4183,16 @@ func (m *SyncMockManager) OpenLossTallies() int {
 
 // Close ends the window and drops the held mocks no window still open may own
 // any more. Idempotent, and a no-op on a window ResolveKept already ended.
+//
+// A window that ends here with no kept verdict — a skipped duplicate's, a
+// request that made no test case, one given up while in flight — leaves its
+// request's span in unkeptSpans, from its start to its answer (answeredAtLocked):
+// the calls in it were that request's, so the duplicate cleanup drops them
+// rather than sending them as calls made outside every request
+// (madeOutsideEveryRequestLocked). A request owns its time until it is
+// answered, not until the agent gets to close its window. A window a kept
+// resolve already ended, or one claimed kept (Keep), leaves none. A request
+// the ingress opens no window for leaves its span through NoteRequestSpan.
 func (w *Window) Close() {
 	if w == nil {
 		return
@@ -4179,6 +4201,9 @@ func (w *Window) Close() {
 		m := w.m
 		var t dropTally
 		m.mu.Lock()
+		if (w.idx >= 0 || w.inFlight) && !w.kept {
+			m.unkeptSpans.Record(w.start, w.answeredAtLocked())
+		}
 		m.endWindowLocked(w, &t, false)
 		m.publishHoldLocked()
 		hold := m.holdStateLocked()
@@ -4319,6 +4344,13 @@ func (m *SyncMockManager) dropHeldLocked(n int, t *dropTally, givenUp bool) (dro
 			m.owed = append(m.owed, owedMock{mock: h.mock, to: h.owner})
 			continue
 		}
+		if !givenUp && h.why == droppedDuplicateLeftover && m.letGoOutsideEveryRequestLocked(h.mock) {
+			m.owed = append(m.owed, owedMock{mock: h.mock})
+			if t != nil {
+				t.background++
+			}
+			continue
+		}
 		if h.why == droppedOutsideAnyWindow {
 			m.heldCut = append(m.heldCut, cutHeld{mock: h.mock, epoch: epoch})
 			m.letGo.Store(true)
@@ -4338,6 +4370,19 @@ func (m *SyncMockManager) dropHeldLocked(n int, t *dropTally, givenUp bool) (dro
 
 // earliestOpenLocked returns the open window that started first, nil when
 // none is open. O(1). Caller holds mu.
+// letGoOutsideEveryRequestLocked reports whether a held mock the hold lets go
+// of as a window ends was made outside every request: held because a request
+// open then might own it, it turned out to be made after that request's answer
+// (its yield came after the hold), in no window the ring holds and no unkept
+// request's span. Such a call goes on as a call made outside every request
+// (owed, owned by no test) instead of being dropped. Caller holds mu.
+func (m *SyncMockManager) letGoOutsideEveryRequestLocked(mk *models.Mock) bool {
+	if _, ok, _, behind := m.ownerOrSharedLocked(mk.Spec.ReqTimestampMock); ok || behind {
+		return false
+	}
+	return m.madeOutsideEveryRequestLocked(mk)
+}
+
 func (m *SyncMockManager) earliestOpenLocked() *Window {
 	if len(m.open) == 0 {
 		return nil
@@ -4516,6 +4561,11 @@ func (m *SyncMockManager) handOwedLocked(outChanBound bool, send *[]ownedMock, l
 	}
 	n := 0
 	for _, o := range m.owed {
+		if o.to == nil { // a call made outside every request (dropHeldLocked)
+			o.mock.Name = "mock-" + generateRandomString(8)
+			*send = append(*send, ownedMock{mock: o.mock})
+			continue
+		}
 		if m.goneLocked(o.to.recording) {
 			// Owed to a test case of a recording that has ended, whose
 			// streams are no longer bound: the next recording's is no
@@ -4550,6 +4600,52 @@ func (m *SyncMockManager) holdOrDropLocked(mk *models.Mock, why dropReason, from
 	}
 	t.count(why)
 	return false
+}
+
+// madeOutsideEveryRequestLocked reports whether mk, which no window in the ring
+// owns (the caller asked ownerOrSharedLocked), was made outside every request:
+// it has a request time to place it by, no window still open started at or
+// before it (one that may still own it, whatever it yielded: a recorded stream
+// yields at its headers and still owns what it calls up to its last byte, so
+// such a mock is held until that window's verdict, holdOrDropLocked), and no
+// request that ended unkept spans it (unkeptSpans, which ends each span at its
+// request's answer). Such a call is a timer's, a poller's, a lease sweep's, or
+// work a request did after its answer — no request's leftover, and the app
+// makes it at replay too. Caller holds mu.
+func (m *SyncMockManager) madeOutsideEveryRequestLocked(mk *models.Mock) bool {
+	at := mk.Spec.ReqTimestampMock
+	if at.IsZero() {
+		return false
+	}
+	if from, open := m.openFromLocked(); open && !at.Before(from) {
+		return false
+	}
+	in, _ := m.unkeptSpans.Overlaps(at, at)
+	return !in
+}
+
+// answeredAtLocked is when w's request was answered: its yield (Window.Yield,
+// the answer's last byte, or a stream's headers), or now when the ingress
+// never said. Caller holds mu.
+func (w *Window) answeredAtLocked() time.Time {
+	if w.yieldAt != 0 {
+		return time.Unix(0, w.yieldAt)
+	}
+	return time.Now()
+}
+
+// NoteRequestSpan marks [start, end] as the span of a request the ingress saw
+// but opened no window for — one that arrived while recording was paused, or
+// one filtered out of the recording — with end its answer: a call in it is
+// that request's, so the duplicate cleanup drops it rather than sending it as
+// one made outside every request. An end before start records start alone.
+func (m *SyncMockManager) NoteRequestSpan(start, end time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.unkeptSpans.Record(start, end)
+	m.mu.Unlock()
 }
 
 // holdForClaimLocked holds a per-test mock that a window still open claims
@@ -4836,6 +4932,9 @@ type dropTally struct {
 	// kept verdict on their request. A mock held and let go within one call is
 	// in held as well.
 	windowsGivenUp, givenUpDrops int
+	// background: sent owned by no test instead of dropped, as a call no
+	// request made (noRequestCanOwn). Not a drop.
+	background int
 }
 
 func (d *dropTally) count(why dropReason) {
@@ -4849,7 +4948,7 @@ func (d *dropTally) count(why dropReason) {
 func (d dropTally) dropped() int { return d.duplicateLeftovers + d.outsideAnyWindow }
 
 func (d dropTally) changed() bool {
-	return d.dropped() > 0 || d.held > 0 || d.windowsGivenUp > 0 || d.givenUpDrops > 0
+	return d.dropped() > 0 || d.held > 0 || d.windowsGivenUp > 0 || d.givenUpDrops > 0 || d.background > 0
 }
 
 func (d dropTally) fields() []zap.Field {
@@ -4860,6 +4959,7 @@ func (d dropTally) fields() []zap.Field {
 		zap.Int("held_now", d.held),
 		zap.Int("windows_given_up", d.windowsGivenUp),
 		zap.Int("dropped_given_up", d.givenUpDrops),
+		zap.Int("sent_background", d.background),
 	}
 }
 
@@ -6401,16 +6501,19 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 // ResolveRange, so without the rescue here the kept mocks are gone.
 //
 // Discriminator: a mock belongs to a kept test iff its ReqTimestampMock
-// falls inside a recently-resolved KEPT window. (In async mode, the only
-// caller, duplicates resolve through here rather than ResolveRange, so every
-// window in recentWindows is kept; a sync-mode ResolveRange(keep=false) window
-// is recorded with keep=false and never claims a mock here.) So a
+// falls inside a recently-resolved KEPT window, and to a request that was not
+// kept iff it falls inside that request's span (unkeptSpans: Window.Close
+// records the span of every window that ends with no kept verdict — a skipped
+// duplicate's, over HTTP or gRPC, from its own request time). So a
 // before-the-horizon mock that owns a recent kept window is a late kept mock
-// → flush it (rescue); one that owns none is the skipped duplicate's own
-// debris → drop it, unless a request still in flight may own it
-// (OpenWindow): that one is held for it, however long the request takes.
-// Session/connection mocks are reusable across tests and are never reaped by
-// a per-test cleanup.
+// → flush it (rescue); one inside an unkept request's span is that request's
+// debris → drop it, unless a request still in flight may own it (OpenWindow):
+// that one is held for it, however long the request takes; one inside no
+// window and no span, with no window open that may own it, was made outside
+// every request (a timer, a poller, a request's work after its window
+// closed): no request's debris, and the app makes it at replay too → send it
+// owned by no test. Session/connection mocks are reusable across tests and
+// are never reaped by a per-test cleanup.
 func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	if m == nil {
 		return
@@ -6518,12 +6621,31 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 			continue
 		}
 
-		// Owns no kept window and is before the horizon → the skipped
-		// duplicate's own debris, unless a request still in flight started
-		// before it: then it may be that request's, and is held for it.
-		// Drop it (fall through without keeping), or hold it.
+		// Owns no window, no open request claims it, and it lies in no
+		// unkept request's span: made outside every request. A background
+		// call, not a skipped duplicate's debris: sent owned by no test.
+		if !ok && !behind && m.madeOutsideEveryRequestLocked(mock) {
+			if !outChanBound {
+				m.buffer[keepIdx] = mock
+				keepIdx++
+				continue
+			}
+			mock.Name = "mock-" + generateRandomString(8)
+			mocksToSend = append(mocksToSend, ownedMock{mock: mock})
+			tally.background++
+			continue
+		}
+
+		// Inside an unkept request's span (a skipped duplicate's) → its own
+		// debris, unless a request still in flight started before it: then
+		// it may be that request's, and is held for it. Drop it (fall
+		// through without keeping), or hold it.
 		m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
 	}
+	// Every buffered mock before the horizon is decided: past its bound the
+	// span set joins the spans before it first, so a mock that arrives there
+	// late is dropped as a leftover, as on main.
+	m.unkeptSpans.CheckedBefore(timestamp)
 
 	// Memory Cleanup: Nil out the deleted entries to allow GC to reclaim the memory
 	for i := keepIdx; i < len(m.buffer); i++ {

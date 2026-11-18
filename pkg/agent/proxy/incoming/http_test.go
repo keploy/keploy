@@ -1345,3 +1345,138 @@ func TestBothIngressLoopsCountAnExchangeAPauseCutMidBody(t *testing.T) {
 		}
 	}
 }
+
+// A request that arrives while recording is paused opens no window, yet it is
+// still a request: both ingress loops leave its span with the mock manager
+// (NoteRequestSpan), from its request to its answer. A call its handler made is
+// its own, and a duplicate's prune drops it; a call after its answer is sent
+// as one made outside every request.
+func TestBothIngressLoopsLeaveAPausedRequestsSpan(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		name := "zero-copy"
+		if synchronous {
+			name = "synchronous"
+		}
+		t.Run(name, func(t *testing.T) {
+			stubIngressPaused(t, func() bool { return true })
+			mgr := syncMock.New(zap.NewNop())
+			out := make(chan *models.Mock, 64)
+			mgr.SetOutputChannel(out)
+			mgr.SetFirstRequestSignaled()
+			old := time.Now().Add(-time.Minute)
+			for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+				mgr.ResolveRange(old, old, "", true, false)
+			}
+			handled := make(chan time.Time, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handled <- time.Now() // the handler's own DB call, made while it serves the request
+				time.Sleep(2 * time.Millisecond)
+				_, _ = w.Write([]byte("ok"))
+			}))
+			t.Cleanup(upstream.Close)
+			pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: synchronous}
+			ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+			defer cancel()
+			client, done := ingressPipeOn(t, ctx, pm, strings.TrimPrefix(upstream.URL, "http://"), make(chan struct{}, 1), nil)
+			pausedExchange(t, client, bufio.NewReader(client), "/health", true)
+			<-done
+			pm.captures.Wait()
+
+			call := func(at time.Time) *models.Mock {
+				m := &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(100 * time.Microsecond)},
+					TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+				mgr.AddMock(m)
+				return m
+			}
+			own := call(<-handled)
+			time.Sleep(time.Millisecond)
+			after := call(time.Now())
+			time.Sleep(time.Millisecond)
+			queue := mgr.DedupQueue()
+			job := queue.Enqueue(time.Now()) // a duplicate's prune after it
+			queue.ResolveJob(job, true, time.Now(), "", false, mgr)
+			var sentOwn, sentAfter bool
+			for len(out) > 0 {
+				switch <-out {
+				case own:
+					sentOwn = true
+				case after:
+					sentAfter = true
+				}
+			}
+			if sentOwn {
+				t.Fatal("a call the paused request's handler made was sent as one made outside every request")
+			}
+			if !sentAfter {
+				t.Fatal("a call after the paused request's answer was dropped")
+			}
+		})
+	}
+}
+
+// Both ingress loops yield a captured request's window at its answer, before
+// the capture decides it. A duplicate the capture closes a moment later leaves
+// its span to the answer, not to the close: a call made between the two is not
+// the duplicate's own, and the next duplicate's prune sends it.
+func TestBothIngressLoopsEndADuplicatesSpanAtItsAnswer(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		name := "zero-copy"
+		if synchronous {
+			name = "synchronous"
+		}
+		t.Run(name, func(t *testing.T) {
+			stubIngressPaused(t, func() bool { return false })
+			mgr := syncMock.New(zap.NewNop())
+			out := make(chan *models.Mock, 64)
+			mgr.SetOutputChannel(out)
+			mgr.SetFirstRequestSignaled()
+			old := time.Now().Add(-time.Minute)
+			for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+				mgr.ResolveRange(old, old, "", true, false)
+			}
+			call := func(at time.Time) *models.Mock {
+				m := &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(100 * time.Microsecond)},
+					TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+				mgr.AddMock(m)
+				return m
+			}
+			afterAnswer := make(chan *models.Mock, 1)
+			stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+				req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+				opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+				// A call made just after the answer, before the capture got
+				// to decide the request, then the duplicate's verdict: its
+				// window ends here, as enterprise's capture ends a duplicate's.
+				time.Sleep(3 * time.Millisecond)
+				afterAnswer <- call(respTS.Add(time.Millisecond))
+				time.Sleep(2 * time.Millisecond)
+				syncMock.WindowFromContext(ctx).Close()
+			})
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("ok"))
+			}))
+			t.Cleanup(upstream.Close)
+			pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: synchronous}
+			ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+			defer cancel()
+			client, done := ingressPipeOn(t, ctx, pm, strings.TrimPrefix(upstream.URL, "http://"), make(chan struct{}, 1), nil)
+			pausedExchange(t, client, bufio.NewReader(client), "/items", true)
+			<-done
+			pm.captures.Wait()
+			mk := <-afterAnswer
+			time.Sleep(time.Millisecond)
+			queue := mgr.DedupQueue()
+			job := queue.Enqueue(time.Now()) // the next duplicate's prune
+			queue.ResolveJob(job, true, time.Now(), "", false, mgr)
+			sent := false
+			for len(out) > 0 {
+				if <-out == mk {
+					sent = true
+				}
+			}
+			if !sent {
+				t.Fatal("a call made after the request's answer, before its duplicate verdict, was dropped as the duplicate's own")
+			}
+		})
+	}
+}

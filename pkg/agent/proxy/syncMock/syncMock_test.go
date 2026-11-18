@@ -1448,10 +1448,13 @@ func TestDeleteMocksStrictlyBeforeRescuesLateKeptMock(t *testing.T) {
 	mgr.ResolveRange(base, base.Add(5*time.Millisecond), "test-1", true, true)
 
 	keptTs := base.Add(2 * time.Millisecond)      // inside test-1's window → rescue
-	debrisTs := base.Add(500 * time.Millisecond)  // owns no window → the duplicate's debris → drop
+	debrisTs := base.Add(500 * time.Millisecond)  // inside a skipped duplicate's window → its debris → drop
 	sessionTs := base.Add(300 * time.Millisecond) // session lifetime → never reaped by per-test cleanup
 	dupHorizon := base.Add(1 * time.Second)       // the duplicate request's timestamp
 	futureTs := dupHorizon.Add(5 * time.Millisecond)
+
+	// An earlier duplicate, skipped, made the debris call.
+	mgr.OpenWindow(debrisTs.Add(-time.Millisecond), nil).Close()
 
 	mgr.mu.Lock()
 	mgr.buffer = append(mgr.buffer,
@@ -1837,9 +1840,10 @@ func TestStartupMockFlushedByFlushOwnedWindows(t *testing.T) {
 
 // TestDuplicateDebrisStillDroppedAfterStartupWindow is the negative control:
 // once we are PAST the startup window (>= N unique recorded test cases), an
-// outbound mock captured after firstReqSeen that owns no window is the skipped
-// duplicate's own debris — it is NOT a startup mock and the dedup cleanup must
-// still drop it, so the widened startup rescue does not over-rescue forever.
+// outbound mock captured after firstReqSeen inside a skipped duplicate's window
+// is that duplicate's own debris — it is NOT a startup mock and the dedup
+// cleanup must still drop it, so the widened startup rescue does not
+// over-rescue forever.
 func TestDuplicateDebrisStillDroppedAfterStartupWindow(t *testing.T) {
 	t.Parallel()
 
@@ -1850,12 +1854,16 @@ func TestDuplicateDebrisStillDroppedAfterStartupWindow(t *testing.T) {
 	// Advance past the startup window so new ingests are no longer tagged.
 	mgr.resolvedTestCount = models.StartupMockTestCaseWindow
 
-	debris := startupHTTPMock(time.Now().Add(-1 * time.Second))
+	debrisAt := time.Now().Add(-1 * time.Second)
+	debris := startupHTTPMock(debrisAt)
 	mgr.AddMock(debris)
 	if mgr.buffer[0].TestModeInfo.IsStartup {
 		t.Fatalf("a mock captured past the startup window must NOT be tagged IsStartup")
 	}
 
+	// The duplicate whose call it is is skipped, then the next one's cleanup
+	// passes it.
+	mgr.OpenWindow(debrisAt.Add(-time.Millisecond), nil).Close()
 	mgr.DeleteMocksStrictlyBefore(time.Now())
 
 	select {
@@ -2390,7 +2398,12 @@ func TestResolveRangeOwnsAGenericTestMockUnderTheSwitch(t *testing.T) {
 		if got := flushed(func(m *SyncMockManager) { m.FlushOwnedWindows() }); !reflect.DeepEqual(got, want) {
 			t.Fatalf("switch %v: a flush with no window sent %v, want %v", on, got, want)
 		}
-		if got := flushed(func(m *SyncMockManager) { m.DeleteMocksStrictlyBefore(now.Add(time.Second)) }); !reflect.DeepEqual(got, want) {
+		if got := flushed(func(m *SyncMockManager) {
+			// The duplicate whose calls they are is skipped, then the next
+			// one's cleanup passes them.
+			m.OpenWindow(now.Add(-time.Millisecond), nil).Close()
+			m.DeleteMocksStrictlyBefore(now.Add(time.Second))
+		}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("switch %v: a duplicate's cleanup sent %v, want %v", on, got, want)
 		}
 	}
