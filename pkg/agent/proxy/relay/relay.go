@@ -10,12 +10,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -588,10 +588,18 @@ func (r *Relay) run(ctx context.Context) error {
 	// dead peer) keeps the original immediate teardown: there is no
 	// half-open state to preserve when the connection is already broken.
 	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[net.Conn]) {
-		if r.cfg.HalfCloseGrace < 0 || !errors.Is(err, io.EOF) || !halfCloseWrite(writeSide.Load()) {
+		halfClose := r.cfg.HalfCloseGrace >= 0 && errors.Is(err, io.EOF)
+		// The client's socket is asked before the half-close whether a FIN
+		// can go (clientClosedBeforeFIN): a shutdown of a connection the
+		// client has reset succeeds on Windows, and sends nothing.
+		clientFIN := halfClose && writeSide == &r.src && !r.clientClosedBeforeFIN()
+		if !halfClose || !halfCloseWrite(writeSide.Load()) {
 			closeStopping()
 			r.nudgeDeadline(nudgeSide.Load())
 			return
+		}
+		if c := writeSide.Load(); clientFIN && c != nil {
+			r.noteClientFINSent(*c)
 		}
 		if log := r.cfg.Logger; log != nil {
 			log.Debug("relay: peer half-closed; forwarding FIN and draining the opposite direction",
@@ -1124,12 +1132,14 @@ func (r *Relay) forward(
 			if errors.Is(err, io.EOF) {
 				return r.peerFINRead(dir)
 			}
-			if errors.Is(err, syscall.ECONNRESET) {
-				if dir == fakeconn.FromClient && r.clientFINBeforeReset() {
-					// macOS: the client's FIN came before the reset this
-					// read returned (client_took_darwin.go). Read as the
-					// FIN, as Linux returns it, and the reset kept for
-					// clientEnd.
+			// A reset, as each OS's socket gives it (on Windows,
+			// Winsock's own errors: neterr.IsPeerReset).
+			if neterr.IsPeerReset(err) {
+				if dir == fakeconn.FromClient && r.clientFINBeforeReset(err) {
+					// macOS and Windows: the client's FIN came before the
+					// reset this read returned (client_took_darwin.go,
+					// client_socket_windows.go). Read as the FIN, as Linux
+					// returns it, and the reset kept for clientEnd.
 					reset := err
 					r.clientResetRead.CompareAndSwap(nil, &reset)
 					return r.peerFINRead(dir)

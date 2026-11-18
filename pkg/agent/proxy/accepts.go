@@ -338,8 +338,9 @@ func (p *Proxy) countAccept(conn net.Conn) bool {
 // two accepted connections with the same two addresses, both waiting for the
 // proxy; by them, the later one's pairing would replace the earlier one's
 // before its handler took it, and send it to the later one's destination.
-// The connection is taken from under the macOS count of what is written to it
-// (relay.CountClientWrites), which the trackedConn keeps over it there.
+// The connection is taken from under the macOS and Windows count of what is
+// written to it (relay.CountClientWrites), which the trackedConn keeps over it
+// there.
 func pairKey(conn net.Conn) net.Conn {
 	if tc, ok := conn.(*trackedConn); ok {
 		conn = tc.Conn

@@ -113,5 +113,5 @@ func TestWrittenCountsEveryByteWrittenToTheClientsSocket(t *testing.T) {
 // chunk is teed there (TestAResendingClientThatResetsHasWhatItNeverAcknowledgedRefused).
 func TestAChunkBehindOneThatIsNotAcknowledgedYetIsJudgedFromItsOwnFirstByte(t *testing.T) {
 	t.Parallel()
-	judgedFromItsOwnFirstByte(t, noAcceptCount)
+	judgedFromItsOwnFirstByte(t, noAcceptCount, 0)
 }
