@@ -168,6 +168,117 @@ func TestRecordKeepsAnExistingProjectsAppName(t *testing.T) {
 	}
 }
 
+// A blank or empty --app-name or KEPLOY_APPNAME names no app, so it is no
+// choice: keploy.yml's appName names the run, and with no keploy.yml the git
+// repository's name and path, else the folder's. The run warns once that it
+// ignores the blank name, never that keploy.yml names no app, and leaves
+// keploy.yml as it is. The flag then reads as not given. A name given that is
+// not blank still wins over keploy.yml, and an empty KEPLOY_APPNAME, which
+// viper never read, is not warned about.
+func TestABlankGivenNameIsNoChoice(t *testing.T) {
+	const orders = "appName: orders\ncommand: ./app\n"
+	for _, c := range []struct {
+		name, doc string
+		flag      []string
+		env       *string
+		noRepo    bool
+		want      string
+		warns     bool
+	}{
+		{name: "--app-name of spaces over keploy.yml", doc: orders, flag: []string{"--app-name", "  "}, want: "orders", warns: true},
+		{name: "--app-name empty over keploy.yml", doc: orders, flag: []string{"--app-name", ""}, want: "orders", warns: true},
+		{name: "--app-name of a tab over keploy.yml", doc: orders, flag: []string{"--app-name=\t"}, want: "orders", warns: true},
+		{name: "KEPLOY_APPNAME of spaces over keploy.yml", doc: orders, env: strPtr("  "), want: "orders", warns: true},
+		{name: "KEPLOY_APPNAME empty over keploy.yml", doc: orders, env: strPtr(""), want: "orders"},
+		{name: "nothing given over keploy.yml", doc: orders, want: "orders"},
+		{name: "--app-name of spaces, no keploy.yml, in a repository", flag: []string{"--app-name", "  "}, want: "orders-api-a-b", warns: true},
+		{name: "KEPLOY_APPNAME of spaces, no keploy.yml, in a repository", env: strPtr(" "), want: "orders-api-a-b", warns: true},
+		{name: "--app-name of spaces, no keploy.yml, outside a repository", flag: []string{"--app-name", "  "}, noRepo: true, want: "svc", warns: true},
+		{name: "a name given still wins over keploy.yml", doc: orders, flag: []string{"--app-name", "billing"}, want: "billing"},
+		{name: "a KEPLOY_APPNAME still wins over keploy.yml", doc: orders, env: strPtr("billing"), want: "billing"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			original := NativeCommandSupported
+			t.Cleanup(func() { NativeCommandSupported = original })
+			RegisterNativeCommandSupport(func(string, string) bool { return true })
+			t.Cleanup(viper.Reset)
+			t.Cleanup(log.TestOnlyResetSink)
+			found, file := IsConfigFileFound, ConfigFile
+			t.Cleanup(func() { IsConfigFileFound, ConfigFile = found, file })
+			// t.Setenv puts back whatever the run unset.
+			t.Setenv("KEPLOY_APPNAME", "")
+			if err := os.Unsetenv("KEPLOY_APPNAME"); err != nil {
+				t.Fatal(err)
+			}
+			if c.env != nil {
+				t.Setenv("KEPLOY_APPNAME", *c.env)
+			}
+
+			var work string
+			if c.noRepo {
+				root := t.TempDir()
+				t.Setenv("HOME", root)
+				work = filepath.Join(root, "svc")
+				if err := os.MkdirAll(filepath.Join(work, "keploy"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				t.Chdir(work)
+			} else {
+				work = inCheckoutFolder(t)
+			}
+			path := filepath.Join(work, "keploy.yml")
+			if c.doc != "" {
+				if err := os.WriteFile(path, []byte(c.doc), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			viper.Reset()
+			core, logs := observer.New(zapcore.InfoLevel)
+			c2 := NewCmdConfigurator(zap.New(core), config.New())
+			cmd := &cobra.Command{Use: "record"}
+			if err := c2.AddFlags(cmd); err != nil {
+				t.Fatalf("AddFlags: %v", err)
+			}
+			if err := cmd.ParseFlags(append([]string{"--config-path", work, "-c", "./app"}, c.flag...)); err != nil {
+				t.Fatalf("ParseFlags: %v", err)
+			}
+			cmd.SetContext(context.Background())
+			if err := c2.Validate(context.Background(), cmd); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			if c2.cfg.AppName != c.want {
+				t.Errorf("appName = %q, want %q", c2.cfg.AppName, c.want)
+			}
+			if c.doc != "" {
+				if b, _ := os.ReadFile(path); string(b) != c.doc {
+					t.Errorf("keploy.yml =\n%q\nwant it as it was:\n%q", b, c.doc)
+				}
+			}
+			warned := 0
+			for _, e := range logs.All() {
+				if strings.Contains(e.Message, "names no app") || strings.Contains(e.Message, "named no app") {
+					t.Errorf("the run said %q, but keploy.yml was not what named it", e.Message)
+				}
+				if e.Level >= zapcore.WarnLevel && strings.HasPrefix(e.Message, "ignoring ") {
+					warned++
+				}
+			}
+			if want := map[bool]int{true: 1}[c.warns]; warned != want {
+				t.Errorf("the run warned %d times that it ignores a blank name, want %d: %v", warned, want, logs.All())
+			}
+			if len(c.flag) > 0 && c.want != "billing" {
+				f := cmd.Flags().Lookup("app-name")
+				if f.Changed || f.Value.String() != f.DefValue {
+					t.Errorf("--app-name after the run: given %v, value %q; want it not given, at its default %q", f.Changed, f.Value.String(), f.DefValue)
+				}
+			}
+		})
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
 // Only keploy record and keploy test, and their sandbox subcommands, write
 // the app's name into keploy.yml, each by its path below the root. mock record
 // and mock replay do not: their app is not keploy.yml's appName.
