@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"testing"
@@ -345,18 +346,51 @@ func (s *roundStore) restageWithout(name string) {
 // until its test opens, handed to the pool view as the next test's call in
 // flight) answered as the pool view took it: the store, which reads it on
 // disk with no view to say it is spent, finds it served from the take on,
-// and once the test it was answered for opens and the replay counts it.
-// Answered for a test that did not open next (the next view voids it), it
-// answered no request the replay counts, and is unserved again, as it was
-// before the take.
+// and once the test it was answered for opens and the replay counts it. A
+// pool view installed next that names it again keeps it in flight, still
+// served. Answered for a test that did not open next (the next view, a
+// test's or a pool view's, voids it), it answered no request the replay
+// counts, and is unserved again, as it was before the take. A restage
+// between the take and the next test's view (the next window staged) takes
+// the take out of the staging's log and changes neither outcome.
 func TestAPoolViewsAheadOffTheTreesIsServedAsItIsTaken(t *testing.T) {
+	opens := func(test string, own ...string) func(s *roundStore) {
+		return func(s *roundStore) {
+			var ms []*models.Mock
+			for _, n := range own {
+				ms = append(ms, s.ms[n])
+			}
+			s.begin()
+			s.mm.ServeExactTest(test, ms)
+		}
+	}
+	poolNames := func(ahead string) func(s *roundStore) {
+		return func(s *roundStore) {
+			s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"}, s.ms[ahead])
+		}
+	}
+	restaged := func(then func(s *roundStore)) func(s *roundStore) {
+		return func(s *roundStore) {
+			s.mm.SetMocksWithWindow(nil, s.mm.StagedMocks(), models.BaseTime, time.Now())
+			then(s)
+		}
+	}
+	// void is the TakeVoided entry the next view writes for later: none,
+	// one of the take in the staging's log, or one of a take a restage
+	// took out of it.
+	const none, logged, unlogged = "none", "logged", "unlogged"
 	for _, tc := range []struct {
-		name, open string
-		own        []string
-		unserved   bool
+		name     string
+		then     func(s *roundStore)
+		void     string
+		unserved bool
 	}{
-		{"the test it was answered for opens", "T2", []string{"later", "next2"}, false},
-		{"another test opens instead", "T3", []string{"other"}, true},
+		{"the test it was answered for opens", opens("T2", "later", "next2"), none, false},
+		{"another test opens instead", opens("T3", "other"), logged, true},
+		{"the next pool view names it again", poolNames("later"), none, false},
+		{"the next pool view names another ahead", poolNames("next"), logged, true},
+		{"the test it was answered for opens after a restage", restaged(opens("T2", "later", "next2")), none, false},
+		{"another test opens after a restage", restaged(opens("T3", "other")), unlogged, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newRoundStore(t)
@@ -380,16 +414,31 @@ func TestAPoolViewsAheadOffTheTreesIsServedAsItIsTaken(t *testing.T) {
 				t.Fatal("the pool view's ahead later was refused")
 			}
 			if hasUnserved(t, s.mm, models.HTTP, "later") {
-				t.Fatal("the ahead later, taken off the trees, was unserved before the next test opened")
+				t.Fatal("the ahead later, taken off the trees, was unserved before the next view")
 			}
-			var own []*models.Mock
-			for _, n := range tc.own {
-				own = append(own, s.ms[n])
+			var voids []int
+			s.mm.exact.round.onTake = func(tk integrations.Take) {
+				if tk.How == integrations.TakeVoided && tk.Mock != nil && tk.Mock.Name == "later" {
+					voids = append(voids, tk.Of)
+				}
 			}
-			s.begin()
-			s.mm.ServeExactTest(tc.open, own)
+			t.Cleanup(func() { s.mm.exact.round.onTake = nil })
+			tc.then(s)
+			s.mm.exact.round.onTake = nil
+			void := none
+			switch {
+			case len(voids) > 1:
+				void = fmt.Sprintf("%d voids", len(voids))
+			case len(voids) == 1 && voids[0] >= 0:
+				void = logged
+			case len(voids) == 1:
+				void = unlogged
+			}
+			if void != tc.void {
+				t.Fatalf("precondition: the void of later once %s is %s (Of %v); want %s", tc.name, void, voids, tc.void)
+			}
 			if got := hasUnserved(t, s.mm, models.HTTP, "later"); got != tc.unserved {
-				t.Fatalf("the ahead later, taken, is unserved %v once %s opened; want %v", got, tc.open, tc.unserved)
+				t.Fatalf("the ahead later, taken, is unserved %v once %s; want %v", got, tc.name, tc.unserved)
 			}
 		})
 	}

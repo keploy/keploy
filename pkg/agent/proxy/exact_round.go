@@ -83,7 +83,8 @@ type roundState struct {
 	// snapshot after each of its reads, with that read's name, and in
 	// HasUnservedRecording between a recording's view read and its note
 	// read (answeredIn). A test drives a change between any two reads with
-	// them, never with sleeps.
+	// them, never with sleeps. Only _test.go files assign them, so no
+	// build that ships ever runs either.
 	onWait func()
 	onRead func(step string)
 	// onTake is a test seam too: it runs as a take of any kind is written
