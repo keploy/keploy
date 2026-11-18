@@ -190,11 +190,16 @@ run() {
     NOTARIZE_ATTEMPTS="${ATTEMPTS:-3}" GITHUB_RUN_ID="${RUNID-44164655348}" \
     bash "$script" "$@" >"$c/out" 2>"$c/err" &
   pid=$!
+  # The watchdog gets a process group of its own (set -m), and stopping it
+  # stops that whole group: killing only its shell would leave the sleep it
+  # is in running on its own after the tests end.
+  set -m
   watchdog "$pid" </dev/null >/dev/null 2>&1 &
   dog=$!
+  set +m
   wait "$pid"
   code=$?
-  kill "$dog" 2>/dev/null
+  kill -- -"$dog" 2>/dev/null
   wait "$dog" 2>/dev/null
   if [ -e "$c/hung" ]; then
     fail "${c##*/}" "notarize-darwin.sh $1 ran past 30 s and was stopped"
