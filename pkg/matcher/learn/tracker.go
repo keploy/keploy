@@ -2172,8 +2172,14 @@ func (t *Tracker) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
 // it (echoedIn), so such a pick is followed, never noise. It keeps only that
 // instant, so a caller can feed it every recording of the set as a store
 // streams them, holding none.
+//
+// Its cost per recording seen is a few comparisons of the recording's
+// stamps, and nothing it allocates: only a recording sent before paired and
+// after the latest previous call seen so far could move the answer, so only
+// such a one is asked the costlier questions (a protocol phase, a sibling,
+// and OwnCall's test and owner). Paired itself, sent at paired's own
+// instant, never moves it.
 type PreviousCall struct {
-	id      string
 	to, at  time.Time
 	sibling Siblings
 }
@@ -2191,26 +2197,39 @@ func NewPreviousCallOf(paired *models.Mock, sibling Siblings) *PreviousCall {
 	if paired == nil {
 		return &PreviousCall{}
 	}
-	return &PreviousCall{id: MockID(paired), to: paired.Spec.ReqTimestampMock, sibling: sibling}
+	return &PreviousCall{to: paired.Spec.ReqTimestampMock, sibling: sibling}
 }
 
 // See considers m as paired's previous call.
 func (p *PreviousCall) See(m *models.Mock) {
-	if p == nil || m == nil || p.to.IsZero() || m.IsProtocolPhase() || MockID(m) == p.id {
-		return
+	if p.moves(m) {
+		p.at = m.Spec.ReqTimestampMock
 	}
-	if p.sibling != nil && p.sibling(m) {
-		return
+}
+
+// moves says whether m is paired's previous call of those seen so far,
+// m included: a data-plane call, no sibling, sent before paired and later
+// than the latest such call seen before it, and not answered after paired
+// was sent.
+func (p *PreviousCall) moves(m *models.Mock) bool {
+	if p == nil || m == nil {
+		return false
+	}
+	// Sent before paired (paired itself, and any call sent at its instant,
+	// is not) and after the latest seen so far. p.at starts at the zero
+	// time, so a recording of no request time is never after it, and a
+	// paired of none (p.to zero) has no call sent before it.
+	if at := m.Spec.ReqTimestampMock; !at.Before(p.to) || !at.After(p.at) {
+		return false
 	}
 	// Answered after paired was sent: another flow's call, pending across
-	// its send. One whose answer time is not known still counts: it may be
-	// the previous call, and the later bound only narrows the window.
-	if res := m.Spec.ResTimestampMock; !res.IsZero() && res.After(p.to) {
-		return
+	// its send. One whose answer time is not known (zero, never after
+	// paired's) still counts: it may be the previous call, and the later
+	// bound only narrows the window.
+	if m.Spec.ResTimestampMock.After(p.to) {
+		return false
 	}
-	if at := m.Spec.ReqTimestampMock; !at.IsZero() && at.Before(p.to) && at.After(p.at) {
-		p.at = at
-	}
+	return !m.IsProtocolPhase() && (p.sibling == nil || !p.sibling(m))
 }
 
 // At is the previous call's request time, zero when it saw none.
@@ -2358,14 +2377,18 @@ func (t *Tracker) NewOwnCall(paired *models.Mock, sibling Siblings, tests Record
 // files a serve) is none, as its serve starts no span of the call in this
 // run. One the store cannot place is not known to be in the call's test
 // (same is false), and stays a previous call.
+//
+// The store is asked of m only where m would move the previous call
+// (PreviousCall.moves): asked of every recording, it was a question of the
+// store's test windows and view per recording of the set, per call.
 func (o *OwnCall) See(m *models.Mock) {
-	if o == nil || m == nil {
+	if o == nil || !o.prev.moves(m) {
 		return
 	}
 	if same, _ := o.tests.SameRecordedTestWindow(m.Spec.ReqTimestampMock, o.paired.Spec.ReqTimestampMock); same && o.owner(m) != OwnerTest {
 		return
 	}
-	o.prev.See(m)
+	o.prev.at = m.Spec.ReqTimestampMock
 }
 
 // Window is the window of the call that reached keploy at the real instant
