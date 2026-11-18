@@ -80,6 +80,21 @@ type composeAppState struct {
 	// (composeAppProject); nil while it has not been. Each run reads it
 	// afresh.
 	project atomic.Pointer[string]
+	// appStartedAt is when the app's container first started in this run
+	// (in this bring-up: a retry of the up begins anew), on the daemon's
+	// clock, in Unix nanoseconds, kept once read (composeAppFirstStart);
+	// 0 while keploy has not seen it start. keploy's own start of it again
+	// between sets moves the container's StartedAt, never this.
+	appStartedAt atomic.Int64
+	// depCrash is the crash, before the app started, of a service the app
+	// depends on, for which keploy stopped the stack as compose's abort
+	// stopped it (composeAbortDied): the run's retry of the up reads it,
+	// as it read compose's abort; nil when there is none.
+	depCrash atomic.Pointer[composeHalt]
+	// upReturned is closed when the run's `compose up` (this bring-up's)
+	// has returned; nil while none runs. keploy's stops of the stack stop
+	// what compose starts after them until then (stopComposeLateStarters).
+	upReturned atomic.Pointer[chan struct{}]
 }
 
 // THE APP'S CONTAINER IS THE ONE COMPOSE MADE FOR THE APP'S SERVICE (P101-b-n).
@@ -216,6 +231,10 @@ type composeHalt struct {
 	serviceCode              int
 	// beforeApp: service's exit came before the app's container started.
 	beforeApp bool
+	// bringUps: service is one the app depends on, and it crashed before
+	// the app started on each of this many bring-ups (the first and keploy's
+	// retries of it), so the run ends on its crash; 0: no retry was taken.
+	bringUps int
 }
 
 func (h composeHalt) Error() string {
@@ -231,6 +250,10 @@ func (h composeHalt) Error() string {
 			when = "before"
 		}
 		msg := fmt.Sprintf("the container of compose service %q exited with code %d %s the application started, and the command's %s ends the run on it", h.service, h.serviceCode, when, h.flags)
+		if h.bringUps > 0 {
+			msg = fmt.Sprintf("the container of compose service %q, which the application depends on, crashed (its last exit code %d) before the application started, on each of keploy's %d bring-ups of the stack, and the command's %s ends the run on it. "+
+				"Next step: read that service's log above, and fix what makes it fail to start", h.service, h.serviceCode, h.bringUps, h.flags)
+		}
 		if h.codeFrom != "" {
 			msg += fmt.Sprintf("; the run's exit code is that of service %q, %d", h.codeFrom, h.exitCode)
 		}
@@ -273,7 +296,7 @@ func (h composeHalt) appError(appLogs string) models.AppError {
 func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 	wctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	since := a.composeWatchSince(wctx)
+	since := a.composeWatchSince(wctx, "the exits of the application's container")
 	go func() {
 		defer close(done)
 		for wctx.Err() == nil {
@@ -338,7 +361,7 @@ func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 // fails it composeWatchSinceReads times, or cannot be reached
 // (composeAbortLost) leaves keploy's clock, said at Warn: it is as right as
 // the daemon's clock is close to keploy's.
-func (a *App) composeWatchSince(ctx context.Context) time.Time {
+func (a *App) composeWatchSince(ctx context.Context, what string) time.Time {
 	var since time.Time
 	var unsaid error
 	reads := 0
@@ -375,7 +398,7 @@ func (a *App) composeWatchSince(ctx context.Context) time.Time {
 		unsaid = err
 	}
 	if ctx.Err() == nil {
-		a.logger.Warn("keploy could not read the docker daemon's time; it reads the daemon's events for the exits of the application's container from keploy's clock instead, which is as right as the daemon's clock is close to keploy's",
+		a.logger.Warn("keploy could not read the docker daemon's time; it reads the daemon's events for "+what+" from keploy's clock instead, which is as right as the daemon's clock is close to keploy's",
 			zap.Int("reads", reads), zap.Error(unsaid))
 	}
 	return time.Now()
@@ -512,15 +535,46 @@ func (a *App) composeAgentDied(ctx context.Context, m events.Message) bool {
 }
 
 // composeAppStarted reports whether the app's container has started in this
-// run: docker says when it last started. compose down removes the project's
-// containers at each run's end, so a start it says is this run's.
+// run (composeAppFirstStart).
 func (a *App) composeAppStarted(ctx context.Context) bool {
+	return a.composeAppFirstStart(ctx) != 0
+}
+
+// composeAppFirstStart is when the app's container first started in this
+// run, on the daemon's clock, in Unix nanoseconds; 0 when it has not
+// started. docker says when the container last started; compose down removes
+// the project's containers at each run's end, so a start it says is this
+// run's, and the first one keploy reads is kept (appStartedAt): keploy's own
+// stop of the app at a set's end reads it before it starts the app again, so
+// a later start keploy gave it never stands for the first.
+func (a *App) composeAppFirstStart(ctx context.Context) int64 {
+	if at := a.composeApp.appStartedAt.Load(); at != 0 {
+		return at
+	}
 	id, err := a.composeAppContainer(ctx)
 	if err != nil {
-		return false
+		return 0
 	}
 	info, read := a.readComposeContainer(ctx, id, "keploy takes the application for one that never started")
-	return read && daemonNanos(info.State.StartedAt) != 0
+	if !read {
+		return 0
+	}
+	if at := daemonNanos(info.State.StartedAt); at != 0 {
+		a.composeApp.appStartedAt.CompareAndSwap(0, at)
+	}
+	return a.composeApp.appStartedAt.Load()
+}
+
+// composeExitBeforeApp reports whether an exit the daemon recorded at
+// exitedAt (its FinishedAt, or its die event's time, on the daemon's clock;
+// 0: not said) came before the app's container first started in this run:
+// decided by the daemon's own instants, never by what runs when keploy reads,
+// which a start compose's up gave since (it starts a waiting service as soon
+// as the dependency's exit meets its condition) would answer wrongly. With no
+// instant said, the app has not started only if it has not started yet.
+func (a *App) composeExitBeforeApp(ctx context.Context, exitedAt int64) bool {
+	started := a.composeAppFirstStart(ctx)
+	return started == 0 || (exitedAt != 0 && exitedAt < started)
 }
 
 // daemonNanos is a time the daemon gives (RFC 3339), in Unix nanoseconds; 0
@@ -921,6 +975,11 @@ func (a *App) stopComposeProject(ctx context.Context) bool {
 			zap.String("container", a.container))
 		return false
 	}
+	// Armed before the listing, as compose's own abort arms its stop of
+	// late starters: a container compose's up starts after the listing (a
+	// service whose wait a stopped dependency's exit just met) is stopped
+	// too, or the up, waiting on it, never returned and the run hung.
+	a.stopComposeLateStarters(ctx, project)
 	// The list asks the daemon again when it fails (askDaemon): with a 2 s
 	// budget, a loaded daemon's slow list took the project down whole
 	// instead, keploy's agent with it, mid-drain.
@@ -948,6 +1007,98 @@ func (a *App) stopComposeProject(ctx context.Context) bool {
 	}
 	wg.Wait()
 	return true
+}
+
+// stopComposeLateStarters stops each container of project that starts from
+// now until the run's `compose up` returns (upReturned), as compose's own
+// abort stops the services that start after its stop's listing
+// (stopLateStarters): compose's up, run without the abort flags, goes on
+// starting services, and one whose depends_on wait a stopped container's
+// exit met (service_completed_successfully) runs on, the up with it, and the
+// run never ended. It reads the daemon's start events of the project from the
+// daemon's clock read now, so a start between that read and the stream's
+// subscription is replayed to it; a stream that breaks is asked for again
+// from its last event. With no up running, nothing can start late.
+func (a *App) stopComposeLateStarters(ctx context.Context, project string) {
+	upReturned := a.composeUpReturned()
+	select {
+	case <-upReturned:
+		return
+	default:
+	}
+	since := a.composeWatchSince(ctx, "the starts of the compose project's containers")
+	go func() {
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		var stops sync.WaitGroup
+		defer stops.Wait()
+		for ctx.Err() == nil {
+			msgs, errs := a.docker.Events(ctx, events.ListOptions{
+				Since: fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond()),
+				Filters: filters.NewArgs(
+					filters.Arg("type", string(events.ContainerEventType)),
+					filters.Arg("event", string(events.ActionStart)),
+					filters.Arg("label", composeProjectLabelKey+"="+project),
+				),
+			})
+		stream:
+			for {
+				select {
+				case <-upReturned:
+					return
+				case err := <-errs:
+					a.logger.Debug("the docker events stream for the starts of the compose project's containers broke; asking for it again from its last event",
+						zap.String("project", project), zap.Error(err))
+					break stream
+				case m := <-msgs:
+					select {
+					case <-upReturned:
+						// The up has returned: what starts now is no late
+						// starter of its.
+						return
+					default:
+					}
+					if m.TimeNano > 0 {
+						since = time.Unix(0, m.TimeNano)
+					}
+					a.logger.Info("a container of the application's compose project started after keploy began to stop the stack; keploy stops it too, as compose's own abort stops a late starter",
+						zap.String("project", project), zap.String("service", m.Actor.Attributes[composeServiceLabelKey]), zap.String("container", m.Actor.ID))
+					stops.Add(1)
+					go func(id string) {
+						defer stops.Done()
+						if err := a.docker.ContainerStop(ctx, id, container.StopOptions{}); err != nil && !errdefs.IsNotFound(err) {
+							a.logger.Debug("could not stop a late-started container of the application's compose project", zap.String("container", id), zap.Error(err))
+						}
+					}(m.Actor.ID)
+				}
+			}
+			select {
+			case <-upReturned:
+				return
+			case <-time.After(composeDaemonAskPace):
+			}
+		}
+	}()
+}
+
+// composeUpRunning marks this bring-up's `compose up` running; the returned
+// func marks it returned (upReturned).
+func (a *App) composeUpRunning() (returned func()) {
+	ch := make(chan struct{})
+	a.composeApp.upReturned.Store(&ch)
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }
+}
+
+// composeUpReturned is closed once the run's `compose up` has returned, and
+// is closed already when none runs.
+func (a *App) composeUpReturned() <-chan struct{} {
+	if ch := a.composeApp.upReturned.Load(); ch != nil {
+		return *ch
+	}
+	none := make(chan struct{})
+	close(none)
+	return none
 }
 
 // composeAppHalt is how the app's container exited when keploy had not asked
@@ -1024,6 +1175,9 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 		// Gone, or stopped by keploy already: nothing to stop.
 		return "", nil
 	}
+	// The app's first start, kept before keploy's start of it again
+	// moves its StartedAt (composeAppFirstStart).
+	a.composeAppFirstStart(wctx)
 	a.composeApp.stopping.Store(true)
 	// Asked for before the interrupt: an exit before it is still seen.
 	daemonSaid, waitErr := a.docker.ContainerWait(wctx, id, container.WaitConditionNotRunning)

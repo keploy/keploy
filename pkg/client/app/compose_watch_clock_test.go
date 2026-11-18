@@ -295,7 +295,7 @@ func TestAWatchWhoseDaemonWillNotSayItsTimeTakesKeploysClock(t *testing.T) {
 	a := skewedApp(d, zap.New(core))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if since := a.composeWatchSince(ctx); since.IsZero() {
+	if since := a.composeWatchSince(ctx, "the exits of the application's container"); since.IsZero() {
 		t.Fatal("an ended watch's since is zero; want keploy's clock")
 	}
 	if d.infos != 1 || logs.Len() != 0 {

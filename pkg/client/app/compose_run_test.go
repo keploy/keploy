@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -566,5 +567,67 @@ func TestARunTakesTheAgentsExitAfterAnEarlierRunsDownInEveryMode(t *testing.T) {
 				t.Fatalf("run() ended %+v; want the agent's halt, code 2", e)
 			}
 		})
+	}
+}
+
+// `up --exit-code-from runner`, the app `depends_on: [flaky]`, and flaky
+// crashes (1) on its first start, before the app started: keploy stops the
+// stack, as compose's abort stopped it, keeps no halt, removes flaky's
+// crashed container and retries the bring-up, as before compose ran without
+// the flag; the run does not end on flaky's crash. Record and test, both
+// modes.
+func TestADependencysCrashBeforeTheAppStartedRetriesTheBringUpInEveryMode(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+			t.Run("switch="+proven+"/"+string(mode), func(t *testing.T) {
+				t.Setenv("KEPLOY_STUB_UP_CODE", "1")
+				var logs *observer.ObservedLogs
+				r := startStackRun(t, proven, func(d *stackDaemon) bool { return !d.running(runAgentName) }, func(a *App) {
+					a.Mode, a.opts.Mode = mode, mode
+					var core zapcore.Core
+					core, logs = observer.New(zap.InfoLevel)
+					a.logger = zap.New(core)
+					a.setComposeUserAbort("docker compose up --exit-code-from runner", composeDoc(t, `
+services:
+  app:
+    image: app
+    depends_on: [flaky]
+  runner:
+    image: runner
+  flaky:
+    image: flaky
+`))
+				})
+				r.d.mu.Lock()
+				r.d.cs[runAppName].status = "created"
+				r.d.mu.Unlock()
+				r.d.add(&abortContainer{name: "flaky-1", service: "flaky", status: "running"})
+				stream := r.watchStream(t)
+				if err := r.d.exit("flaky-1", 1, "EXIT"); err != nil {
+					t.Fatal(err)
+				}
+				stream <- events.Message{Type: events.ContainerEventType, Action: events.ActionDie, TimeNano: time.Now().UnixNano(),
+					Actor: events.Actor{ID: "flaky-1", Attributes: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "flaky", "exitCode": "1"}}}
+				e := r.result(t, "the retried bring-up")
+				if errors.Is(e.Err, models.ErrAppExitedOnItsOwn) || e.ExitCode == 1 {
+					t.Fatalf("run() ended %+v; want no end on flaky's crash", e)
+				}
+				trail := r.trail(t)
+				stop, retried := trailAt(trail, "STOP "+runAgentName), trailAt(trail, "UP-RETRIED")
+				if stop < 0 || retried < 0 || retried < stop {
+					t.Fatalf("want the agent stopped, then the up retried:\n%s", strings.Join(trail, "\n"))
+				}
+				said := len(logs.FilterMessageSnippet("crashed before the application started: keploy stops the stack").All())
+				if took := len(logs.FilterMessageSnippet("retrying the bring-up").All()); said != 1 || took != 1 {
+					t.Fatalf("said the crash %d times and took %d retries; want one each:\n%v", said, took, logs.All())
+				}
+				r.d.mu.Lock()
+				_, kept := r.d.cs["flaky-1"]
+				r.d.mu.Unlock()
+				if kept {
+					t.Fatal("flaky's crashed container was kept; want it removed before the retry")
+				}
+			})
+		}
 	}
 }

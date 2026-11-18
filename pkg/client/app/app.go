@@ -1995,6 +1995,34 @@ func (a *App) removeCrashedDependencies(ctx context.Context, states []composeSer
 	}
 }
 
+// composeRetriesADepCrash reports whether the run retries the bring-up for
+// the crash, before the app started, of a service the app depends on, on
+// which keploy stopped the stack (depCrash): within composeDepFailureRetries,
+// the run not cancelled.
+func (a *App) composeRetriesADepCrash(ctxErr error, attempt int) bool {
+	return a.kind == utils.DockerCompose && a.composeApp.depCrash.Load() != nil &&
+		attempt <= composeDepFailureRetries && ctxErr == nil
+}
+
+// composeBeginsABringUpAgain clears what the last bring-up kept before the
+// retry's up starts: the app's first start, and keploy's stop of the stack
+// for a crash (depCrash, stopping, agentStopping), so the new bring-up's
+// exits are read anew. Under stopMu, as the watch decides an exit; false,
+// with nothing cleared, when a halt was kept meanwhile, which ends the run.
+func (a *App) composeBeginsABringUpAgain() bool {
+	a.composeApp.stopMu.Lock()
+	defer a.composeApp.stopMu.Unlock()
+	if a.composeAppHalt() != nil {
+		return false
+	}
+	a.composeApp.appStartedAt.Store(0)
+	if a.composeApp.depCrash.Swap(nil) != nil {
+		a.composeApp.stopping.Store(false)
+		a.composeApp.agentStopping.Store(false)
+	}
+	return true
+}
+
 // shouldRetryComposeUp is the SINGLE decision on the up's failure the compose-up
 // retry loop turns on (the loop takes no retry once keploy kept a halt, which
 // ends the run), extracted so the production loop in run() and its unit test call
@@ -2244,6 +2272,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 		a.composeApp.agentStopping.Store(false)
 		a.composeApp.appKilledAt.Store(0)
 		a.composeApp.project.Store(nil)
+		a.composeApp.appStartedAt.Store(0)
+		a.composeApp.depCrash.Store(nil)
+		a.composeApp.upReturned.Store(nil)
 		halt := make(chan struct{})
 		composeHaltSeen = halt
 		composeEnd = a.composeHaltEnd(ctx, halt, composeDown)
@@ -2384,6 +2415,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// existing shell-out: it may carry flags and shell syntax keploy does not
 	// model, and it is not keploy's to reinterpret.
 	executeApp := func(runCmd string, runEnv []string) utils.CmdError {
+		if a.kind == utils.DockerCompose {
+			// Until it returns, keploy's stops of the stack stop what the
+			// up starts after them (stopComposeLateStarters).
+			defer a.composeUpRunning()()
+		}
 		if a.useComposeLibrary() {
 			return a.runComposeInProcess(ctx, composeDown)
 		}
@@ -2451,9 +2487,17 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// surfaced; the retry can only DELAY a persistent failure, never hide it.
 	// A halt kept (the user's abort flags ended the run on an exit before
 	// the app started, and keploy stopped the stack, its agent with it, which
-	// failed the up) is the run's end: no retry starts the stack again.
+	// failed the up) is the run's end: no retry starts the stack again, on
+	// any attempt.
+	//
+	// Under the user's abort flags, compose's up runs without them, and a
+	// crash of a service the app depends on before the app started no
+	// longer stops the stack: keploy stops it, as compose's abort did, and
+	// keeps the crash (depCrash), which the retry reads as it read compose's
+	// abort, whatever the up's own end, within the same bound.
 	var states []composeServiceState
-	for attempt := 1; a.composeAppHalt() == nil && shouldRetryComposeUp(a.kind, attempt, composeDepFailureRetries, ctx.Err(),
+	attempt := 1
+	for ; a.composeAppHalt() == nil && (a.composeRetriesADepCrash(ctx.Err(), attempt) || shouldRetryComposeUp(a.kind, attempt, composeDepFailureRetries, ctx.Err(),
 		cmdErr.Err, cmdErr.Type, a.composeService,
 		func() []composeServiceState {
 			var zero *composeReportedZero
@@ -2463,7 +2507,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 			}
 			states = a.composeFailedUpStates(ctx)
 			return states
-		}); attempt++ {
+		})); attempt++ {
+		if a.composeApp.depCrash.Load() != nil {
+			states = a.composeFailedUpStates(ctx)
+		}
 		a.logger.Info("a dependency container failed to start transiently during docker compose up (it crashed before the app could start); retrying the bring-up",
 			zap.String("appService", a.composeService),
 			zap.Int("attempt", attempt),
@@ -2493,7 +2540,19 @@ func (a *App) run(ctx context.Context) models.AppError {
 		if ctx.Err() != nil {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
+		// A new bring-up: the app has not started in it, and keploy's stop
+		// of the last one (a crash it stopped the stack on) is behind.
+		if !a.composeBeginsABringUpAgain() {
+			break
+		}
 		cmdErr = a.retryComposeUp(ctx, func() utils.CmdError { return executeApp(runCmd, runEnv) })
+	}
+	// A crash keploy stopped the stack on, still kept when the retries are
+	// spent: the run ends on it, as it ended on compose's abort.
+	if dc := a.composeApp.depCrash.Load(); dc != nil && a.kind == utils.DockerCompose {
+		h := *dc
+		h.bringUps = attempt
+		a.composeApp.halted.CompareAndSwap(nil, &h)
 	}
 
 	// The project is keploy's to take down: an up that returned because

@@ -673,8 +673,6 @@ services:
         condition: service_completed_successfully
       db:
         condition: service_healthy
-      early:
-        condition: service_started
   api:
     image: api
     depends_on:
@@ -867,7 +865,7 @@ services:
 	if deps := composeDependencies(doc, []string{"worker"}); !slices.Equal(deps, []string{"cache", "queue"}) {
 		t.Fatalf("worker's dependencies %v; want cache, and queue through the merge key in its depends_on", deps)
 	}
-	if by := composeWaitingDependents(doc); len(by) != 1 || !slices.Equal(by["db"], []string{"app"}) {
+	if by := composeWaitingDependents(doc); len(by) != 1 || len(by["db"]) != 1 || by["db"][0].service != "app" || !by["db"][0].required {
 		t.Fatalf("waiting dependents %v; want app waiting on db", by)
 	}
 	if composeServiceNode(nil, "app") != nil || composeAttachOff(nil) != nil {
