@@ -2715,36 +2715,41 @@ func (lc liveClock) liveSpan(arrival time.Time, owner ServeOwner) (Span, bool) {
 
 // BackgroundSpans is the spans on the app's clock of a call that reached
 // keploy at arrival, for the check that a call no recording answered is one
-// more run of the set's background work alone (CallSpansOf), whose own
-// background group's recordings ofGroup names: the span from the bound
-// (backgroundClockAt, liveClock.backgroundBound) or from where the clock's
-// run to arrival began after it (runFrom) to arrival, last, and before it
-// what the app's clock showed from the bound to where that run began,
-// where it began after the bound (liveClock.before).
+// more run of the set's background work alone (CallSpansOf): the span from
+// the set's begin (liveClock.backgroundBound) or from where the clock's run
+// to arrival began after it (runFrom) to arrival, last, and before it what
+// the app's clock showed from the set's begin to where that run began,
+// where it began after it (liveClock.before).
 //
-// The bound is the latest serve before arrival of the call's own group (the
-// poller's previous run, which it read its clock after), else the set's
-// begin, never a serve of another flow's: a background poller's read of the
-// clock is ordered with no other flow's call. The open test's call, another
-// poller's or a worker's may be served between the poll's read and its
-// arrival, and a span read from that serve would start after the read (the
-// poll's read would hold in none). Nor is it bounded by the move a test's
-// begin wrote, after which only the test's request reached the application
-// (SetAppClockRun): the application may have read its clock for the call
-// before the move and sent the call after it, as a timer's poll made as a
-// test begins or ends is.
+// The bound is the set's begin, never a serve: a background poller's read
+// of the clock is ordered with no call keploy serves. The open test's call,
+// a worker's, or another poller's run of the same poll (several goroutines
+// may run one poll, sending the same request, and keploy cannot tell them
+// apart) may be served between the poll's read and its arrival, and a span
+// read from that serve would start after the read (the poll's read would
+// hold in none). Nor is it bounded by the move a test's begin wrote, after
+// which only the test's request reached the application (SetAppClockRun):
+// the application may have read its clock for the call before the move and
+// sent the call after it, as a timer's poll made as a test begins or ends
+// is. A value a move jumped over still holds in none: what the clock showed
+// is told one span per offset in force (SetAppClockShown).
 //
 // Where the hooks cannot tell where the clock's run to arrival began (a move
 // still being written at arrival, which the application may have read on
-// either offset), the spans are what the clock showed from the bound to
-// arrival alone (liveClock.shownTo). false where neither tells one, and for
-// a nil ofGroup (no group named: no bound is known).
-func (t *Tracker) BackgroundSpans(arrival time.Time, ofGroup func(name string) bool) ([]Span, bool) {
-	if t == nil || ofGroup == nil {
+// either offset), the spans are what the clock showed from the set's begin
+// to arrival alone (liveClock.shownTo). false where neither tells one, with
+// no app clock, with no bound (backgroundBound), and for a call that
+// reached keploy before the running set began (a call of the set before,
+// checked late: no read of this set's).
+func (t *Tracker) BackgroundSpans(arrival time.Time) ([]Span, bool) {
+	if t == nil {
 		return nil, false
 	}
-	lc := t.backgroundClockAt(arrival, ofGroup)
+	lc := t.backgroundClock()
 	bound := lc.backgroundBound()
+	if lc.clock == nil || bound.After(arrival) {
+		return nil, false
+	}
 	s, ok := lc.from(lc.runFrom(bound, arrival), arrival)
 	if !ok {
 		return lc.shownTo(bound, arrival)
@@ -2753,31 +2758,24 @@ func (t *Tracker) BackgroundSpans(arrival time.Time, ofGroup func(name string) b
 	return append(lc.before(bound, arrival), s), true
 }
 
-// backgroundClockAt is the app's clock as the tracker tells it now, for a
-// background call that reached keploy at arrival (BackgroundSpans): its
-// previous serve (liveClock.prev) is the latest serve made before arrival
-// of a recording ofGroup names, of the call's own background group (zero
-// for none); the set's begin is the tracker's. ofGroup reads the name
-// alone, with the tracker's lock held: it never calls back into the
-// tracker.
-func (t *Tracker) backgroundClockAt(arrival time.Time, ofGroup func(name string) bool) liveClock {
+// backgroundClock is the app's clock as the tracker tells it now, for a
+// background call (BackgroundSpans): how to read it, where its runs began,
+// what it showed, the set's begin and the app's zone.
+func (t *Tracker) backgroundClock() liveClock {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	lc := liveClock{clock: t.appClock, run: t.appClockRun, shown: t.appClockShown, set: t.setBegan, zone: t.appZone}
-	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].at.Before(arrival) })
-	lc.prev = t.latestFromLocked(i, false, func(m *models.Mock) bool { return !ofGroup(m.Name) })
-	return lc
+	return liveClock{clock: t.appClock, run: t.appClockRun, shown: t.appClockShown, set: t.setBegan, zone: t.appZone}
 }
 
 // ClockSpansOf is BackgroundSpans by the tracker on ctx, each span in the
 // zone of the process that made the call where the agent read it
 // (ClockSpanOf).
-func ClockSpansOf(ctx context.Context, arrival time.Time, ofGroup func(name string) bool) ([]Span, bool) {
+func ClockSpansOf(ctx context.Context, arrival time.Time) ([]Span, bool) {
 	if ctx == nil {
 		return nil, false
 	}
 	t, _ := ctx.Value(trackerKey{}).(*Tracker)
-	spans, ok := t.BackgroundSpans(arrival, ofGroup)
+	spans, ok := t.BackgroundSpans(arrival)
 	for i := range spans {
 		inProcZone(ctx, &spans[i])
 	}
@@ -2842,17 +2840,18 @@ func (lc liveClock) span(arrival time.Time) (Span, bool) {
 }
 
 // backgroundBound is the bound a background call's spans are read from
-// (BackgroundSpans): its group's previous serve (backgroundClockAt) or the
-// set's begin where that came after it, and the set's begin where the
-// group has none, as setBound reads a server test's bound, in a client
-// test too: a poller's read of the clock is ordered with no test's begin,
-// so the client test's own begin, which bounds its own calls (span), bounds
-// no background call's. Zero (no bound) where neither is known, or where
-// the group has none and the hooks tell no run of the app's clock: the
-// clock may have moved between the set's begin and the call (setBound).
+// (BackgroundSpans): the set's begin, where the hooks tell where the app's
+// clock's runs began, in a client test too. A poller's read of the clock
+// is ordered with no test's begin, so the client test's own begin, which
+// bounds its own calls (span), bounds no background call's. Zero (no bound)
+// before any set began, and where the hooks tell no run: the clock may have
+// moved between the set's begin and the call, as setBound reads a server
+// test's bound.
 func (lc liveClock) backgroundBound() time.Time {
-	lc.client = false
-	return lc.setBound()
+	if lc.run == nil {
+		return time.Time{}
+	}
+	return lc.set
 }
 
 // before is what the app's clock showed, a span per run of it as the hooks
@@ -2884,15 +2883,15 @@ func (lc liveClock) before(bound, arrival time.Time) []Span {
 // spans of a background call whose span to arrival the hooks cannot tell
 // (BackgroundSpans). A clock move still being written at arrival is told in
 // both offsets, the one it leaves and the one it writes: the application
-// may have read either for the call. false where bound is zero (no bound is
-// known: the clock may have moved before any instant told) or the hooks
-// tell no spans shown, and where they cannot tell one of them, a refusal
-// the design needs, which leaves the call checked as a test's call is
-// (fail closed): across a write that failed part way the offset a reader
-// read is not known, and under a window the shim clamps a C reader's reads
-// into it while a Go reader reads the offset alone, and the hooks cannot
-// tell which of the two the application's call was read by, so no value
-// is known to be one the clock showed.
+// may have read either for the call. Under a window the hooks tell what
+// both of the application's readers showed, a Go reader's (the offset
+// alone) and a C reader's (clamped into the window), as one union. false
+// where bound is zero (no bound is known: the clock may have moved before
+// any instant told) or the hooks tell no spans shown, and where they cannot
+// tell one of them, refusals the design needs, which leave the call checked
+// as a test's call is (fail closed): across a write that failed part way
+// the offset a reader read is not known, and before the oldest write the
+// hooks keep, what the clock showed is not known.
 func (lc liveClock) shownTo(bound, arrival time.Time) ([]Span, bool) {
 	if lc.shown == nil || bound.IsZero() {
 		return nil, false
