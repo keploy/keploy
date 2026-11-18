@@ -90,10 +90,21 @@ func httpHealthPoll(ctx context.Context, url string) bool {
 // On unparseable input we return a fixed placeholder — the operator
 // already gets the raw reason via the separate "reason" field in the
 // invalid-URL Error log, so we don't need to echo the raw string back.
-func sanitizeHealthURL(raw string) string {
+//
+// With hidePath (config.Test.HideHealthURLPath) it is the URL's scheme and
+// host only, its path written as redacted whether it has one or not
+// ("http://localhost:8080/<path-redacted>"), and a fixed placeholder for a
+// URL with no host, whose text would be all path.
+func sanitizeHealthURL(raw string, hidePath bool) string {
 	u, err := url.Parse(raw)
 	if err != nil || u == nil {
 		return "<unparseable-health-url-redacted>"
+	}
+	if hidePath {
+		if u.Host == "" {
+			return "<health-url-redacted>"
+		}
+		return (&url.URL{Scheme: u.Scheme, Host: u.Host}).String() + "/<path-redacted>"
 	}
 	u.User = nil
 	u.RawQuery = ""
@@ -111,9 +122,15 @@ func sanitizeHealthURL(raw string) string {
 //
 // Returns ("", true) when the URL is usable, and (reason, false) otherwise
 // with a short human-readable reason the caller can surface to the operator.
-func validateHealthURL(s string) (string, bool) {
+// The parser's reason quotes the URL whole; with hidePath
+// (config.Test.HideHealthURLPath) the reason for a URL that does not parse
+// quotes no part of it.
+func validateHealthURL(s string, hidePath bool) (string, bool) {
 	u, err := url.Parse(s)
 	if err != nil {
+		if hidePath {
+			return "it does not parse as a URL", false
+		}
 		return err.Error(), false
 	}
 	switch u.Scheme {
@@ -725,7 +742,7 @@ func reportHTTPGate(ctx context.Context, logger *zap.Logger, label string, cfg *
 			zap.String("gate", label),
 			zap.String("probeHost", probe.host),
 			zap.String("probePort", probe.port),
-			zap.String("probePath", healthProbePathForLog(cfg.Test.HealthPath)),
+			zap.String("probePath", healthProbePathForLog(cfg.Test.HealthPath, cfg.Test.HideHealthURLPath)),
 			zap.Duration("ceiling", ceiling),
 			zap.Error(err))
 		return true
@@ -734,14 +751,20 @@ func reportHTTPGate(ctx context.Context, logger *zap.Logger, label string, cfg *
 		zap.String("gate", label),
 		zap.String("probeHost", probe.host),
 		zap.String("probePort", probe.port),
-		zap.String("probePath", healthProbePathForLog(cfg.Test.HealthPath)))
+		zap.String("probePath", healthProbePathForLog(cfg.Test.HealthPath, cfg.Test.HideHealthURLPath)))
 	return true
 }
 
 // healthProbePathForLog reports the path gateOnAppAddress actually requests.
-func healthProbePathForLog(configured string) string {
+// With hidePath (config.Test.HideHealthURLPath) a configured path is said as
+// redacted, as sanitizeHealthURL says a hidden URL's path; keploy's own probe
+// path is no caller's secret and is said as it is.
+func healthProbePathForLog(configured string, hidePath bool) string {
 	if configured == "" {
 		return keployReadinessProbePath
+	}
+	if hidePath {
+		return "/<path-redacted>"
 	}
 	if !strings.HasPrefix(configured, "/") {
 		return "/" + configured
@@ -935,6 +958,8 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 	delay := time.Duration(cfg.Test.Delay) * time.Second
 
 	healthURL := cfg.Test.HealthURL
+	// Whether the lines below name the health URL by its scheme and host only.
+	hide := cfg.Test.HideHealthURLPath
 
 	// Fail gracefully on a malformed --health-url instead of burning the entire
 	// HealthPollTimeout window on http.NewRequestWithContext errors that
@@ -953,9 +978,9 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 	// misconfig, and the contract of "false only on ctx cancel" stays
 	// truthful for callers (see replay.go classification of the return).
 	if healthURL != "" {
-		if reason, ok := validateHealthURL(healthURL); !ok {
+		if reason, ok := validateHealthURL(healthURL, hide); !ok {
 			logger.Error("invalid --health-url; falling back to fixed delay",
-				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+				zap.String("healthUrl", sanitizeHealthURL(healthURL, hide)),
 				zap.String("reason", reason),
 				zap.String("next_step", "--health-url must be a full URL with scheme (http:// or https://) and host — fix it or omit to use --delay only"),
 			)
@@ -969,13 +994,13 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			pollCeiling = config.DefaultHealthPollTimeout
 		}
 		logger.Info("polling application health endpoint before firing tests",
-			zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+			zap.String("healthUrl", sanitizeHealthURL(healthURL, hide)),
 			zap.Duration("pollTimeout", pollCeiling),
 		)
 		began := time.Now()
 		if pollHealthURL(ctx, healthURL, pollCeiling) {
 			logger.Debug("health endpoint reported 2xx; proceeding",
-				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+				zap.String("healthUrl", sanitizeHealthURL(healthURL, hide)),
 			)
 			return true
 		}
@@ -987,7 +1012,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			// it would end a wait with no limit: the fixed --delay, then
 			// the first test.
 			logger.Info("health probe timed out, falling back to fixed delay — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) or point --health-url at an endpoint that returns 2xx sooner",
-				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+				zap.String("healthUrl", sanitizeHealthURL(healthURL, hide)),
 				zap.Duration("pollTimeout", pollCeiling),
 				zap.Duration("fallbackDelay", delay),
 			)
@@ -1005,14 +1030,14 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			// URL, which the user asked for, stays what the wait is for,
 			// and it says every so often that it still waits.
 			logger.Info("the health URL has not answered 2xx within the poll timeout, and probing the app's address is disabled by configuration; the first test waits for the health URL to answer 2xx, the application to exit, or keploy to be stopped",
-				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+				zap.String("healthUrl", sanitizeHealthURL(healthURL, hide)),
 				zap.Duration("pollTimeout", pollCeiling),
 			)
-			defer sayStillWaiting(ctx, logger, "answer 2xx at "+sanitizeHealthURL(healthURL), healthURLWaitAddr(healthURL), began)()
+			defer sayStillWaiting(ctx, logger, "answer 2xx at "+sanitizeHealthURL(healthURL, hide), healthURLWaitAddr(healthURL, hide), began)()
 			return pollHealthURL(ctx, healthURL, 0)
 		}
 		logger.Info("the health URL has not answered 2xx within the poll timeout; the first test waits instead for the application to accept a connection on its port — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) to wait longer for the health URL",
-			zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+			zap.String("healthUrl", sanitizeHealthURL(healthURL, hide)),
 			zap.Duration("pollTimeout", pollCeiling),
 		)
 		return gateOnAppAddresses(ctx, logger, cfg, probe, healthURL)
@@ -1202,11 +1227,11 @@ var sayStillWaiting = pkg.SayStillWaiting
 // healthURLWaitAddr is the address a wait on healthURL names: the one its
 // request dials (healthURLAddress), so that the line can name the ports the
 // application listens on instead, or the URL as given when it names none.
-func healthURLWaitAddr(healthURL string) string {
+func healthURLWaitAddr(healthURL string, hidePath bool) string {
 	if host, port, ok := healthURLAddress(healthURL); ok {
 		return net.JoinHostPort(host, port)
 	}
-	return sanitizeHealthURL(healthURL)
+	return sanitizeHealthURL(healthURL, hidePath)
 }
 
 // healthURLAddress is the host and port a valid --health-url dials; ok is

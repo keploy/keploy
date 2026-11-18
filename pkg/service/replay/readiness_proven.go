@@ -294,7 +294,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 		probing, probeFrom = true, wakes
 		go func() {
 			if health != "" {
-				ok, what := answers(pctx, health, healthAny)
+				ok, what := answers(pctx, health, healthAny, p.cfg.Test.HideHealthURLPath)
 				probes <- probeResult{ok, what}
 				return
 			}
@@ -399,7 +399,7 @@ func (p provenReadiness) wait(ctx context.Context) (bool, string) {
 				p.logger.Warn("keploy's agent cannot tell when the application listens; the first test's address taking a connect decides", zap.Error(r.err), zap.String("address", net.JoinHostPort(p.host, p.port)))
 				startProbe()
 			} else {
-				p.logger.Warn("keploy's agent cannot tell when the application listens; the health URL alone decides", zap.Error(r.err), zap.String("healthUrl", sanitizeHealthURL(health)))
+				p.logger.Warn("keploy's agent cannot tell when the application listens; the health URL alone decides", zap.Error(r.err), zap.String("healthUrl", sanitizeHealthURL(health, p.cfg.Test.HideHealthURLPath)))
 			}
 		case r.err != nil:
 			// No progress seen (a transient failure, the agent
@@ -584,7 +584,7 @@ func (p provenReadiness) sayStillWaiting(health, lastProbe, lastErr string, st m
 	case p.resolve != nil && p.listen == 0 && health == "" && !p.dial:
 		waits = fmt.Sprintf("a listen where the set's first test dials %s (docker has not said which container port that is)", net.JoinHostPort(p.host, p.port))
 	case health != "":
-		waits = sanitizeHealthURL(health) + "'s answer"
+		waits = sanitizeHealthURL(health, p.cfg.Test.HideHealthURLPath) + "'s answer"
 	case p.dial:
 		waits = net.JoinHostPort(p.host, p.port) + " taking a connect (keploy's agent cannot tell when the application listens)"
 	}
@@ -710,7 +710,7 @@ func (p provenReadiness) afterEvent(ctx context.Context, what string, atOnce boo
 // event.
 func (p provenReadiness) healthTarget() (string, bool) {
 	if u := strings.TrimSpace(p.cfg.Test.HealthURL); u != "" {
-		if _, ok := validateHealthURL(u); ok {
+		if _, ok := validateHealthURL(u, p.cfg.Test.HideHealthURLPath); ok {
 			return u, false
 		}
 	}
@@ -743,7 +743,7 @@ func (p provenReadiness) stalled(health, lastProbe, lastErr string, st models.Ap
 	var what string
 	switch {
 	case health != "":
-		what = fmt.Sprintf("the application never answered %s", sanitizeHealthURL(health))
+		what = fmt.Sprintf("the application never answered %s", sanitizeHealthURL(health, p.cfg.Test.HideHealthURLPath))
 	case p.dial:
 		what = fmt.Sprintf("%s, where the set's first test dials, never took a connect", net.JoinHostPort(p.host, p.port))
 	case p.resolve != nil && p.listen == 0:
@@ -833,10 +833,16 @@ func (p provenReadiness) listeningOn(st models.AppReadiness) string {
 // answers sends one GET to target, with no deadline but ctx's: true on a 2xx
 // (any HTTP answer when anyAnswer), with what it saw otherwise. A 2xx is
 // looked for across redirects, as the health poll always followed them; any
-// answer is the first one.
-func answers(ctx context.Context, target string, anyAnswer bool) (bool, string) {
+// answer is the first one. What it says names target as sanitizeHealthURL
+// does with hidePath; with hidePath, too, the reason a target does not parse
+// quotes no part of it, and a failure's reason does not repeat what the
+// server sent.
+func answers(ctx context.Context, target string, anyAnswer, hidePath bool) (bool, string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
+		if hidePath {
+			return false, "the health URL does not parse as a URL"
+		}
 		return false, err.Error()
 	}
 	client := &http.Client{
@@ -850,7 +856,7 @@ func answers(ctx context.Context, target string, anyAnswer bool) (bool, string) 
 	if err != nil {
 		if anyAnswer && isTLSVerificationError(err) {
 			// It completed a TLS handshake: it serves.
-			return true, sanitizeHealthURL(target) + " answered (a certificate keploy does not trust)"
+			return true, sanitizeHealthURL(target, hidePath) + " answered (a certificate keploy does not trust)"
 		}
 		// Its cause only: the URL, which may carry a secret, is said
 		// sanitized where the reason is written.
@@ -858,12 +864,22 @@ func answers(ctx context.Context, target string, anyAnswer bool) (bool, string) 
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return false, "last: " + err.Error()
+		why := err.Error()
+		if hidePath {
+			// net/http quotes what the server sent where it could not use
+			// it (a Location header that does not parse, a malformed status
+			// line), and a server may echo the path there: said up to the
+			// quote.
+			if i := strings.IndexByte(why, '"'); i >= 0 {
+				why = strings.TrimSpace(why[:i]) + " (what the server sent is not said)"
+			}
+		}
+		return false, "last: " + why
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	if anyAnswer || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
-		return true, fmt.Sprintf("%s answered %d", sanitizeHealthURL(target), resp.StatusCode)
+		return true, fmt.Sprintf("%s answered %d", sanitizeHealthURL(target, hidePath), resp.StatusCode)
 	}
 	return false, fmt.Sprintf("last answer: %d", resp.StatusCode)
 }
@@ -1175,10 +1191,10 @@ func (r *Replayer) appReady(ctx context.Context, testCases []*models.TestCase, t
 		p.scheme, p.host, p.port = scheme, host, port
 	}
 	if u := strings.TrimSpace(r.config.Test.HealthURL); u != "" {
-		if reason, valid := validateHealthURL(u); !valid {
+		if reason, valid := validateHealthURL(u, r.config.Test.HideHealthURLPath); !valid {
 			r.badHealthURLSaid.Do(func() {
 				r.logger.Error("invalid --health-url; the application's listen is the event instead",
-					zap.String("healthUrl", sanitizeHealthURL(u)), zap.String("reason", reason),
+					zap.String("healthUrl", sanitizeHealthURL(u, r.config.Test.HideHealthURLPath)), zap.String("reason", reason),
 					zap.String("next_step", "--health-url must be a full URL with scheme (http:// or https://) and host"))
 			})
 		}

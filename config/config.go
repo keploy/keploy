@@ -506,6 +506,17 @@ type Test struct {
 	// app's answer however long a loaded machine takes.
 	APITimeoutSet bool `json:"-" yaml:"-" mapstructure:"-"`
 
+	// HideHealthURLPath has every line keploy writes about the readiness
+	// URL (HealthURL, or the one HealthPath builds) name it by its scheme
+	// and host only, and the readiness gate's lines name a configured
+	// HealthPath as "/<path-redacted>": no path, query or fragment
+	// is written, nor quoted in the reason an invalid URL is refused with
+	// or a probe of it failed for. For a caller whose readiness path is
+	// itself a secret, such as a replay built from a recording's sealed
+	// config. Set by the caller, never read from keploy.yml or a flag; off,
+	// the lines are as before.
+	HideHealthURLPath bool `json:"-" yaml:"-" mapstructure:"-"`
+
 	// DisableAppReadyProbe turns off the app-readiness probing that
 	// runs before the first test fires — the docker/compose
 	// published-port gates, AppReadyProbeAddr, and the resolved
