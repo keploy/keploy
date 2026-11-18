@@ -136,25 +136,38 @@ type placeText struct {
 	same      int8
 }
 
-// withTexts gives each of ps the handles its texts are read by, in x.
+// withTexts gives each of ps the handles its texts are read by, in x. A
+// recording's handle reads the call's own Raw (p.src, fSrc, views), which
+// no rule writes, as textOf reads its copy.
 func withTexts(x *readerIndex, ps []evPlace) []evPlace {
-	// One block for the places' handles: one allocation per call, not one
-	// per place.
+	// One block each for the places' texts, their handles and their views'
+	// handles: a few allocations per call, however many places it has.
 	ts := make([]placeText, len(ps))
+	nh, nv := 0, 0
+	for i := range ps {
+		nh, nv = nh+2+len(ps[i].views), nv+len(ps[i].views)
+	}
+	hs, vs := make([]readerText, 0, nh), make([]*readerText, 0, nv)
+	handle := func(h readerText) *readerText {
+		hs = append(hs, h)
+		return &hs[len(hs)-1]
+	}
 	for i := range ps {
 		p, t := &ps[i], &ts[i]
 		if p.src == nil {
-			t.rec, t.live = x.text(p.rec), x.text(p.live)
+			t.rec, t.live = handle(readerText{x: x, text: p.rec}), handle(readerText{x: x, text: p.live})
 		} else {
-			t.rec = x.textOf(*p.src)
+			t.rec = handle(readerText{x: x, raw: p.src})
 			t.live = t.rec
 			if p.fSrc != p.src {
-				t.live = x.textOf(*p.fSrc)
+				t.live = handle(readerText{x: x, raw: p.fSrc})
 			}
 		}
+		k := len(vs)
 		for _, v := range p.views {
-			t.views = append(t.views, x.textOf(*v))
+			vs = append(vs, handle(readerText{x: x, raw: v}))
 		}
+		t.views = vs[k:len(vs):len(vs)] // read by range alone: none is no views
 		p.t = t
 	}
 	return ps
@@ -949,25 +962,22 @@ func (dc *decider) outside() *offsetPlaces {
 // (Raw.OfAnotherTest) read as offsetPlacesOf reads them, in raw's order
 // before the set's, but its words kept for the set (outsideWords), not read
 // again in each call. offsetPlacesOf reads Raw.elsewhere only there, so it
-// is handed raw with the mark cleared, and reads every other place as
-// before.
+// is asked to leave those recordings' words and instants to the call
+// (offsetPlacesBy), and reads every other place as before, of raw itself:
+// a copy of raw with the mark cleared was a call's largest allocation over
+// a set of thousands of recordings.
 func (dc *decider) offsetPlaces() *offsetPlaces {
-	raw := dc.in.Raw
-	var words []givenWords
+	outside := func(x Raw) bool { return x.elsewhere && x.isRead() }
+	// Read by range alone: no words is none.
+	words := make([]givenWords, 0, countOf(dc.in.Raw, outside))
 	var answers []givenMoment
-	if slices.ContainsFunc(raw, func(r Raw) bool { return r.elsewhere }) {
-		raw = slices.Clone(raw)
-		for i, x := range dc.in.Raw {
-			if x.elsewhere {
-				raw[i].elsewhere = false
-				if x.isRead() {
-					words = append(words, dc.outsideWords(x))
-					answers = append(answers, dc.dr.answerMoments(x)...)
-				}
-			}
+	for _, x := range dc.in.Raw {
+		if outside(x) {
+			words = append(words, dc.outsideWords(x))
+			answers = append(answers, dc.dr.answerMoments(x)...)
 		}
 	}
-	op := dc.dr.offsetPlacesOf(dc.in.At, dc.in.Earlier, raw, dc.set)
+	op := dc.dr.offsetPlacesBy(dc.in.At, dc.in.Earlier, dc.in.Raw, dc.set, false)
 	op.words = append(words, op.words...)
 	op.answers = append(answers, op.answers...)
 	return op
@@ -1095,7 +1105,9 @@ func keptWordsOf(k wordsKey, g givenWords) *wordsEntry {
 			e.lists.views[i] = keepLists(v)
 		}
 	}
-	e.lists.mock, e.lists.conn = "", ""
+	// The recording's name and connection, wordsOf's own copies, kept for
+	// the calls that hand it (of), each of which copied them anew.
+	n += allocBytes(len(g.mock), false) + allocBytes(len(g.conn), false)
 	e.bytes = n
 	return e
 }
@@ -1166,13 +1178,33 @@ func sameBody(a, b rawBody) bool {
 }
 
 // of is e's words as wordsOf reads them of x, the recording e keeps them
-// of: x's own times, serves and test (as wordsOf copies them), and e's
-// words.
+// of: x's own times, serves and test, its name and connection as copies
+// (wordsOf's, which e keeps), and e's words.
 func (e *wordsEntry) of(x Raw) givenWords {
 	g := e.lists
-	g.mock, g.at, g.late, g.noTime, g.answered, g.conn, g.pos = strings.Clone(x.mock), x.at, x.late, x.noTime, x.answered, strings.Clone(x.conn), x.pos
+	g.mock, g.at, g.late, g.noTime, g.answered, g.conn, g.pos = keptCopy(e.lists.mock, x.mock), x.at, x.late, x.noTime, x.answered, keptCopy(e.lists.conn, x.conn), x.pos
 	g.test, g.prev, g.first, g.last = x.test, x.prev, x.first, x.last
 	return g
+}
+
+// countOf is how many of xs keep holds of.
+func countOf[T any](xs []T, keep func(T) bool) (n int) {
+	for _, x := range xs {
+		if keep(x) {
+			n++
+		}
+	}
+	return n
+}
+
+// keptCopy is s as its own copy: kept, a copy the set already holds, where
+// it is s (the recording's name and connection, read the same in each call
+// that hands it), else a new one.
+func keptCopy(kept, s string) string {
+	if kept == s {
+		return kept
+	}
+	return strings.Clone(s)
 }
 
 // setSecondSource names a recording of the set (Input.Given), which round
@@ -1562,7 +1594,7 @@ func dropLists(g listsGone) {
 // them unknown (state).
 type outsideHeld struct {
 	ls    []heldList
-	byID  map[int32][]int32
+	byID  postings
 	open  []int32
 	state []int32
 	fs    *setFilters
@@ -1584,9 +1616,17 @@ func (dc *decider) held() *outsideHeld {
 		return dc.oh
 	}
 	// A call in no set asks empty postings: every list is open.
-	oh := &outsideHeld{byID: map[int32][]int32{}, fs: &setFilters{}}
+	oh := &outsideHeld{fs: &setFilters{}}
 	dc.oh = oh
-	for j, g := range dc.outside().words {
+	words := dc.outside().words
+	// One block for the lists, sized for the most each recording can add:
+	// its own, F's view and each of its views.
+	n := 0
+	for _, g := range words {
+		n += 2 + len(g.views)
+	}
+	oh.ls = make([]heldList, 0, n)
+	for j, g := range words {
 		if g.unstated || g.unread {
 			oh.state = append(oh.state, int32(j))
 		}
@@ -1627,6 +1667,7 @@ func (dc *decider) held() *outsideHeld {
 		}
 		fs.mu.Unlock()
 	}
+	oh.byID = newPostings(len(es))
 	for i, e := range es {
 		if e != nil {
 			e.once.Do(func() { buildLists(oh.fs, s, e, oh.ls[i].l) })
@@ -1635,8 +1676,9 @@ func (dc *decider) held() *outsideHeld {
 			oh.open = append(oh.open, int32(i))
 			continue
 		}
-		oh.byID[e.id] = append(oh.byID[e.id], int32(i))
+		oh.byID.add(e.id, int32(i))
 	}
+	oh.byID.seal()
 	return oh
 }
 
@@ -1649,8 +1691,8 @@ func (oh *outsideHeld) holding(t string) map[int32]heldRoles {
 	ids := slices.Clone(oh.fs.post[t])
 	oh.fs.mu.Unlock()
 	for _, id := range ids {
-		for _, i := range oh.byID[id] {
-			out[oh.ls[i].g] |= oh.ls[i].role
+		for _, p := range oh.byID.of(id) {
+			out[oh.ls[p.i].g] |= oh.ls[p.i].role
 		}
 	}
 	for _, i := range oh.open {
@@ -1704,7 +1746,7 @@ func (oh *outsideHeld) asked(state bool, in ...map[int32]heldRoles) []int32 {
 // every word of every call, most of the learn step's work on api-server's
 // round F.
 type placeIndex struct {
-	rec, live map[int32][]int32
+	rec, live postings
 	always    []int32
 	fs        *setFilters
 }
@@ -1717,7 +1759,7 @@ func (dc *decider) places() *placeIndex {
 	}
 	// A call in no set asks empty postings: every place's texts are
 	// unposted (postID), and every place is read.
-	pi := &placeIndex{rec: map[int32][]int32{}, live: map[int32][]int32{}, fs: cmp.Or(dc.x.filters, &setFilters{})}
+	pi := &placeIndex{rec: newPostings(len(dc.ps)), live: newPostings(len(dc.ps)), fs: cmp.Or(dc.x.filters, &setFilters{})}
 	dc.pi = pi
 	placeBuilds.Add(1)
 	for i, p := range dc.ps {
@@ -1729,9 +1771,11 @@ func (dc *decider) places() *placeIndex {
 			pi.always = append(pi.always, int32(i))
 			continue
 		}
-		pi.rec[r] = append(pi.rec[r], int32(i))
-		pi.live[l] = append(pi.live[l], int32(i))
+		pi.rec.add(r, int32(i))
+		pi.live.add(l, int32(i))
 	}
+	pi.rec.seal()
+	pi.live.seal()
 	return pi
 }
 
@@ -1800,12 +1844,47 @@ func askedPlaces(at []int32, all bool, n int) []int32 {
 // mark adds to ask the places whose text on side (rec or live) the set's
 // postings say may hold every run of runs; false where runs is empty, which
 // every text may hold.
-func (pi *placeIndex) mark(ask *[]int32, side map[int32][]int32, runs []string) bool {
+func (pi *placeIndex) mark(ask *[]int32, side postings, runs []string) bool {
 	ids, ok := pi.fs.holdingRuns(runs)
 	for _, id := range ids {
-		*ask = append(*ask, side[id]...)
+		for _, p := range side.of(id) {
+			*ask = append(*ask, p.i)
+		}
 	}
 	return ok
+}
+
+// postings are a call's places, or lists, by the set's id of a text or a
+// list (placeIndex, outsideHeld), in one block for the call, where a slice
+// per id was an allocation for nearly every place of a call over a set of
+// thousands of recordings. A call adds every posting, then seals them, then
+// reads them.
+type postings struct{ at []posting }
+
+type posting struct{ id, i int32 }
+
+// newPostings are empty postings with room for n.
+func newPostings(n int) postings { return postings{at: make([]posting, 0, n)} }
+
+func (ps *postings) add(id, i int32) { ps.at = append(ps.at, posting{id: id, i: i}) }
+
+// seal orders the postings by id.
+func (ps *postings) seal() {
+	slices.SortFunc(ps.at, func(a, b posting) int { return cmp.Compare(a.id, b.id) })
+}
+
+// of is the postings added with id, in no set order (their readers sort
+// them or merge them); none where no posting has it.
+func (ps postings) of(id int32) []posting {
+	lo, found := slices.BinarySearchFunc(ps.at, id, func(p posting, id int32) int { return cmp.Compare(p.id, id) })
+	if !found {
+		return nil
+	}
+	hi := lo + 1
+	for hi < len(ps.at) && ps.at[hi].id == id {
+		hi++
+	}
+	return ps.at[lo:hi]
 }
 
 // runsOf is s's runs of letters and digits, as eachWord cuts them.

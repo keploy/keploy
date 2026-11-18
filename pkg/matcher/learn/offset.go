@@ -225,6 +225,14 @@ type offsetPlaces struct {
 // and the parts of the test case's own request keploy test sent with
 // another value than recorded.
 func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, set []GivenPlaces) *offsetPlaces {
+	return dc.offsetPlacesBy(at, served, raw, set, true)
+}
+
+// offsetPlacesBy is offsetPlacesOf's places, with the words and instants of
+// raw's recordings of another test (Raw.elsewhere) read where others is set,
+// and left to the caller otherwise (decider.offsetPlaces), which reads them
+// its own way: every other place of raw is read alike either way.
+func (dc *DriftCache) offsetPlacesBy(at time.Time, served []Earlier, raw []Raw, set []GivenPlaces, others bool) *offsetPlaces {
 	op := &offsetPlaces{at: at}
 	// One recording read once, whether F gave it the application before
 	// the call as any of its readings says: a payload a leaf-by-leaf
@@ -232,7 +240,9 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 	// (offsetSource.key). Its serves, where two readings of it number them,
 	// span both: an order read wider than it is fails closed
 	// (inRecordedOrder).
-	var srcs []offsetSource
+	// One block for the sources and one for their keys: a few allocations
+	// per call, however many recordings it reads.
+	srcs, keys := make([]offsetSource, 0, len(raw)+len(served)+len(set)), newOffsetKeys(len(raw)+len(served)+len(set))
 	// What F served at the leaves of an exchange's answer with another value
 	// than recorded (a template value: Raw.moves), each where the payload
 	// holds it, of each exchange: places F gave the application, never the
@@ -256,7 +266,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			moves = append(moves, moved{mock: x.mock, call: x.call, at: x.at, first: x.first, last: x.last, moves: x.moves})
 			continue
 		}
-		srcs = append(srcs, offsetSource{key: offsetKeyOf(x.mock, x.at), x: x, given: x.served, first: x.first, last: x.last})
+		srcs = append(srcs, offsetSource{key: keys.of(x.mock, x.at), x: x, given: x.served, first: x.first, last: x.last})
 	}
 	for i := range served {
 		e := &served[i]
@@ -279,7 +289,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		}
 		if e.Payload.isRead() {
 			x := &e.Payload
-			srcs = append(srcs, offsetSource{key: offsetKeyOf(x.mock, x.at), x: x, given: true, first: x.first, last: x.last})
+			srcs = append(srcs, offsetSource{key: keys.of(x.mock, x.at), x: x, given: true, first: x.first, last: x.last})
 			if mv := e.servedMoves(); len(mv) > 0 {
 				moves = append(moves, moved{mock: e.Mock, call: x.call, at: e.At, first: x.first, last: x.last, moves: mv})
 			}
@@ -292,7 +302,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		}
 	}
 	for _, x := range raw {
-		if x.isRead() && x.elsewhere {
+		if others && x.isRead() && x.elsewhere {
 			op.words = append(op.words, dc.wordsOf(x))
 			op.answers = append(op.answers, dc.answerMoments(x)...)
 		}
@@ -300,7 +310,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 	payloads := len(srcs)
 	for i := range set {
 		if g := &set[i]; g.read {
-			srcs = append(srcs, offsetSource{key: offsetKeyOf(g.mock, g.at), g: g, given: true, first: g.first, last: g.last})
+			srcs = append(srcs, offsetSource{key: keys.of(g.mock, g.at), g: g, given: true, first: g.first, last: g.last})
 		}
 	}
 	// The set's index, shared by its handlers; past its budget, one of the
