@@ -1422,6 +1422,131 @@ func TestBothIngressLoopsLeaveAPausedRequestsSpan(t *testing.T) {
 	}
 }
 
+// On a kept-alive connection a paused request's span ends at its answer, not
+// when the connection does: a call made after the answer, before the client's
+// next request, is not the request's own, and a duplicate's prune sends it.
+// Ended only as the handler returns, the span covered every later exchange's
+// time on the connection. The zero-copy loop's case: the buffered loop ends
+// the connection after a paused exchange (pressureCloseMode).
+func TestHandleHttp1ZeroCopy_APausedRequestsSpanEndsAtItsAnswerOnAKeptAliveConnection(t *testing.T) {
+	stubIngressPaused(t, func() bool { return true })
+	mgr := syncMock.New(zap.NewNop())
+	out := make(chan *models.Mock, 64)
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled()
+	old := time.Now().Add(-time.Minute)
+	for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+		mgr.ResolveRange(old, old, "", true, false)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4)}
+	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+	defer cancel()
+	client, done := ingressPipeOn(t, ctx, pm, strings.TrimPrefix(upstream.URL, "http://"), make(chan struct{}, 1), nil)
+	br := bufio.NewReader(client)
+	pausedExchange(t, client, br, "/first", false)
+	time.Sleep(time.Millisecond)
+	between := &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: time.Now(), ResTimestampMock: time.Now().Add(100 * time.Microsecond)},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+	mgr.AddMock(between) // a timer's call between the two exchanges
+	time.Sleep(time.Millisecond)
+	// The connection's next exchange: the loop has done with the
+	// first one once it reads this, and it ends the connection.
+	pausedExchange(t, client, br, "/second", true)
+	<-done
+	pm.captures.Wait()
+	queue := mgr.DedupQueue()
+	job := queue.Enqueue(time.Now()) // a duplicate's prune after both
+	queue.ResolveJob(job, true, time.Now(), "", false, mgr)
+	sent := false
+	for len(out) > 0 {
+		if <-out == between {
+			sent = true
+		}
+	}
+	if !sent {
+		t.Fatal("a call between two paused exchanges on one connection was dropped as the first one's own")
+	}
+}
+
+// The buffered loop ends a paused request's span at the app's answer, not
+// once its client has taken it: a call made after the app answered, while a
+// slow client still reads, is not the request's own, and a duplicate's prune
+// sends it. Ended where the exchange is left (leave), the span covered the
+// client's read as well.
+func TestHandleHttp1Connection_APausedRequestsSpanEndsAtTheAppsAnswerNotTheClients(t *testing.T) {
+	stubIngressPaused(t, func() bool { return true })
+	mgr := syncMock.New(zap.NewNop())
+	out := make(chan *models.Mock, 64)
+	mgr.SetOutputChannel(out)
+	mgr.SetFirstRequestSignaled()
+	old := time.Now().Add(-time.Minute)
+	for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+		mgr.ResolveRange(old, old, "", true, false)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok")) // sent whole, in one write, as the handler returns
+	}))
+	t.Cleanup(upstream.Close)
+	// The read-ahead has the app's answer: its first read is the whole of it.
+	appAnswered := make(chan struct{})
+	var answeredOnce sync.Once
+	seen := func(n int, err error) {
+		if n > 0 {
+			answeredOnce.Do(func() { close(appAnswered) })
+		}
+	}
+	prev := aheadReadSeen.Load()
+	aheadReadSeen.Store(&seen)
+	t.Cleanup(func() { aheadReadSeen.Store(prev) })
+	gate := make(chan struct{})
+	var gateOnce sync.Once
+	openGate := func() { gateOnce.Do(func() { close(gate) }) }
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: true}
+	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+	defer cancel()
+	client, done := ingressPipeOn(t, ctx, pm, strings.TrimPrefix(upstream.URL, "http://"), make(chan struct{}, 1),
+		func(c net.Conn) net.Conn { return gatedWriteConn{Conn: c, gate: gate} }) // a slow client
+	t.Cleanup(openGate)
+	if _, err := client.Write([]byte("GET /health HTTP/1.1\r\nHost: app.local\r\nConnection: close\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-appAnswered:
+	case <-ctx.Done():
+		t.Fatal("the app's answer never reached the proxy")
+	}
+	time.Sleep(time.Millisecond)
+	whileClientReads := &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: time.Now(), ResTimestampMock: time.Now().Add(100 * time.Microsecond)},
+		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+	mgr.AddMock(whileClientReads) // a timer's call after the app answered
+	time.Sleep(time.Millisecond)
+	openGate()
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	<-done
+	pm.captures.Wait()
+	queue := mgr.DedupQueue()
+	job := queue.Enqueue(time.Now()) // a duplicate's prune after it
+	queue.ResolveJob(job, true, time.Now(), "", false, mgr)
+	sent := false
+	for len(out) > 0 {
+		if <-out == whileClientReads {
+			sent = true
+		}
+	}
+	if !sent {
+		t.Fatal("a call made after the app answered a paused request, while its client still read, was dropped as the request's own")
+	}
+}
+
 // Both ingress loops yield a captured request's window at its answer, before
 // the capture decides it. A duplicate the capture closes a moment later leaves
 // its span to the answer, not to the close: a call made between the two is not
@@ -1484,6 +1609,76 @@ func TestBothIngressLoopsEndADuplicatesSpanAtItsAnswer(t *testing.T) {
 			}
 			if !sent {
 				t.Fatal("a call made after the request's answer, before its duplicate verdict, was dropped as the duplicate's own")
+			}
+		})
+	}
+}
+
+// A stream that arrives while recording is paused is answered at its headers,
+// as an unpaused stream is (notRecordedStream): its span ends there, not when
+// the stream ends. A call made while the stream still runs, after its headers,
+// is not the request's own, so a duplicate's prune meanwhile sends it.
+func TestBothIngressLoopsEndAPausedStreamsSpanAtItsHeaders(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		name := "zero-copy"
+		if synchronous {
+			name = "synchronous"
+		}
+		t.Run(name, func(t *testing.T) {
+			stubIngressPaused(t, func() bool { return true })
+			mgr := syncMock.New(zap.NewNop())
+			out := make(chan *models.Mock, 64)
+			mgr.SetOutputChannel(out)
+			mgr.SetFirstRequestSignaled()
+			old := time.Now().Add(-time.Minute)
+			for i := 0; i < models.StartupMockTestCaseWindow; i++ {
+				mgr.ResolveRange(old, old, "", true, false)
+			}
+			release := make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("data: first\n\n"))
+				w.(http.Flusher).Flush()
+				<-release
+				_, _ = w.Write([]byte("data: last\n\n"))
+			}))
+			t.Cleanup(upstream.Close)
+			var releaseOnce sync.Once
+			releaseStream := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(releaseStream)
+			pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: synchronous}
+			ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+			defer cancel()
+			client, done := ingressPipeOn(t, ctx, pm, strings.TrimPrefix(upstream.URL, "http://"), make(chan struct{}, 1), nil)
+			if _, err := client.Write([]byte("GET /events HTTP/1.1\r\nHost: app.local\r\nConnection: close\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			// The client has the headers, so the proxy has read them: both
+			// loops end the span before they forward them.
+			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			go func() { _, _ = io.Copy(io.Discard, resp.Body) }()
+			time.Sleep(time.Millisecond)
+			call := &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: time.Now(), ResTimestampMock: time.Now().Add(100 * time.Microsecond)},
+				TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+			mgr.AddMock(call) // a timer's call while the stream runs
+			time.Sleep(time.Millisecond)
+			queue := mgr.DedupQueue()
+			job := queue.Enqueue(time.Now()) // a duplicate decided mid-stream
+			queue.ResolveJob(job, true, time.Now(), "", false, mgr)
+			sent := false
+			for len(out) > 0 {
+				if <-out == call {
+					sent = true
+				}
+			}
+			releaseStream()
+			<-done
+			pm.captures.Wait()
+			if !sent {
+				t.Fatal("a call made after a paused stream's headers, while it still ran, was dropped as the stream's own")
 			}
 		})
 	}

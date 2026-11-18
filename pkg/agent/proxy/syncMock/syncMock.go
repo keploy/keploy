@@ -4211,8 +4211,8 @@ func (w *Window) Close() {
 		hold := m.holdStateLocked()
 		m.mu.Unlock()
 		m.settleLetGo()
-		if t.dropped() > 0 {
-			if ce := m.dropLogger().Check(zap.DebugLevel, "diag/syncMock: window ended: dropped the held mocks no request in flight may own"); ce != nil {
+		if t.changed() {
+			if ce := m.dropLogger().Check(zap.DebugLevel, "diag/syncMock: window ended: let go of the held mocks no request in flight may own"); ce != nil {
 				ce.Write(append(t.fields(), hold.fields()...)...)
 			}
 		}
