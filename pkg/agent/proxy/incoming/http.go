@@ -160,7 +160,8 @@ func (c *wireTimeConn) LastReadTime() time.Time {
 
 // captureHookConcurrency caps the number of CaptureHook goroutines
 // running at the same time across every handleHttp1ZeroCopy
-// invocation: each takes its slot with takeCaptureSlot.
+// invocation: each takes its slot with takeCaptureSlot, or a sampled
+// exchange as its answer's end is found (heldCaptureSlot).
 // Each goroutine takes a reference to the parsed *http.Request /
 // *http.Response (each carrying up to MaxTestCaseSize=5MB of body) and
 // runs io.ReadAll a second time inside Capture to materialise its own
@@ -190,6 +191,48 @@ func takeCaptureSlot(ctx context.Context) (release func(), ok bool) {
 		return func() { <-sem }, true
 	case <-ctx.Done():
 		return nil, false
+	}
+}
+
+// heldCaptureSlot is the capture slot a sampled exchange holds from its
+// answer's end found to its capture's hand-off, or none. Holding it is what
+// lets the exchange give its sampling slot back before its client can have
+// that end: the capture then hands on without waiting, and the sampling
+// budget still bounds the handlers that wait for a capture slot. The hold
+// spans the answer's last forward to the client, so a capture slot can be
+// held by a handler as well as by a capture goroutine. A handler holds at
+// most one: it holds only as the end of an exchange it captures is found,
+// and a sampled connection captures at most one exchange.
+type heldCaptureSlot struct{ release func() }
+
+// tryHold takes a capture slot if one is free now, as takeCaptureSlot takes
+// it, and says whether it did. It never waits.
+func (h *heldCaptureSlot) tryHold() bool {
+	sem := captureHookSem
+	select {
+	case sem <- struct{}{}:
+		h.release = func() { <-sem }
+		return true
+	default:
+		return false
+	}
+}
+
+// take hands on the slot held, or else waits for one (takeCaptureSlot).
+func (h *heldCaptureSlot) take(ctx context.Context) (release func(), ok bool) {
+	if release = h.release; release != nil {
+		h.release = nil
+		return release, true
+	}
+	return takeCaptureSlot(ctx)
+}
+
+// giveBack gives back a slot held and not handed on: the exchange ended
+// another way.
+func (h *heldCaptureSlot) giveBack() {
+	if h.release != nil {
+		h.release()
+		h.release = nil
 	}
 }
 
@@ -402,8 +445,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// the connection's idle lifetime, starving subsequent
 		// connections of capture slots — the symptom is "only N of
 		// many requests captured" on sequential-call workloads. Pass
-		// releaseLock so demote-to-bypass (chunked / memory pressure)
-		// can free the slot mid-connection.
+		// releaseLock so the handler gives the slot back as soon as the
+		// connection has no more use for it: as its exchange's answer
+		// ends (markEnd), or as it is demoted to bypass (chunked /
+		// memory pressure). The deferred releaseLock is the backstop.
 		//
 		// Normal mode: forceClose=false (keep-alive preserved), and we
 		// release any (unused) lock here since normal mode doesn't
@@ -1218,11 +1263,14 @@ func writeBadRequest(c net.Conn) {
 //     captured" symptom).
 //
 //   - releaseSlot (only set when forceClose=true): invoked to free the
-//     sampling slot early when the exchange is demoted to bypass
-//     (chunked / unknown-length body, or memory pressure). After demotion
-//     the connection continues as pure passthrough with no header
-//     mutation, matching the "untracked + unchanged" rule for ineligible
-//     exchanges.
+//     sampling slot before the caller's deferred release: as the answer's
+//     end is found (markEnd), before the client can have it, once the
+//     exchange's capture holds a capture slot or when nothing of it is
+//     captured; when the exchange is demoted to bypass (chunked /
+//     unknown-length body, or memory pressure); and as a request that did
+//     not reach the app whole ends the connection. After demotion the
+//     connection continues as pure passthrough with no header mutation,
+//     matching the "untracked + unchanged" rule for ineligible exchanges.
 //
 // Downstream (envoy↔keploy) keep-alive is preserved across the entire
 // connection lifetime for normal mode and sampling-bypass; only upstream
@@ -1423,6 +1471,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// countPause.
 	countCut := func() {}
 	defer func() { countCut() }()
+
+	// held is the capture slot a sampled exchange took as its answer's end
+	// was found (markEnd), to give its sampling slot back then. Its capture
+	// hands it on; every other way out gives it back here.
+	var held heldCaptureSlot
+	defer held.giveBack()
 
 	for {
 		iterStart := clockNow()
@@ -1668,9 +1722,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// Sampling-tracked force-close: tell upstream this is a
 		// one-shot exchange so it tears the connection down after the
 		// response. The sampling slot held by this connection is
-		// released when handleHttp1Connection's defer fires — which
-		// happens when this loop returns via the req.Close || resp.Close
-		// branch at the bottom of the iteration. Without this, a Go
+		// given back as the answer's end is found (markEnd), and at the
+		// latest by handleHttp1Connection's deferred release once this
+		// loop returns via the req.Close || resp.Close branch at the
+		// bottom of the iteration. Without this, a Go
 		// upstream's default keep-alive response leaves the slot held
 		// for the idle keep-alive window and starves subsequent
 		// connections of capture slots.
@@ -1869,9 +1924,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// suspenders override in case the upstream ignores the request
 		// hint and still hands back a keep-alive response. The loop
 		// exits at the req.Close || resp.Close check at the bottom of
-		// this iteration, which triggers the deferred releaseLock in
-		// the caller and frees the sampling slot. appResp is the response
-		// as the app sent it, which is what is recorded.
+		// this iteration; the sampling slot is given back before then
+		// (markEnd), or by the caller's deferred releaseLock as the loop
+		// returns. appResp is the response as the app sent it, which is
+		// what is recorded.
 		appResp := resp
 		if forceCloseActive || !requestWhole {
 			appResp = closeAfter(resp)
@@ -1915,6 +1971,25 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				// capture waits for a slot or this goroutine for the CPU.
 				building.note(ctx, endAt)
 				waitPastYield(win, endAt)
+				// A sampled connection's slot is given back here, before
+				// the client can have the answer's end, once its capture
+				// holds a capture slot: the exchange has all it captures,
+				// and the connection carries nothing after it (its answer
+				// closes it). Given back only as this handler returned, it
+				// was still held when a client that sends its requests one
+				// after another came with the next one on a loaded host,
+				// and that request was passed through uncaptured. With no
+				// capture slot free, it is kept until the capture has one:
+				// given back before, every connection after it would be
+				// sampled and wait for a slot too, each with its bodies in
+				// hand, and the sampling budget would bound nothing.
+				if releaseSlot != nil && held.tryHold() {
+					releaseSlot()
+				}
+			} else if releaseSlot != nil {
+				// Nothing of it is captured: its slot is given back before
+				// its client can have the end, as above.
+				releaseSlot()
 			}
 		}
 		if hasBody {
@@ -2017,7 +2092,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			// client could have it; one whose end the write did not read
 			// is noted here. A stop waits for it while it waits for a slot.
 			building.note(ctx, respTimestamp)
-			releaseCaptureSlot, ok := takeCaptureSlot(ctx)
+			// A sampled exchange hands on the capture slot it took as its
+			// answer's end was found; one that found none waits here,
+			// holding its sampling slot.
+			releaseCaptureSlot, ok := held.take(ctx)
 			if !ok {
 				// The ingress stopped before a slot came: the app served
 				// the exchange, and its test case is never made. Counted
