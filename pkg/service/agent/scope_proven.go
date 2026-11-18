@@ -1977,6 +1977,17 @@ func seenMiss(ev *models.ScopeEvidence) bool {
 	return ev != nil && len(ev.Misses) > 0
 }
 
+// kindCount is how many of l's losses are of kind k.
+func kindCount(l models.CaptureLosses, k models.CaptureLossKind) uint64 {
+	var n uint64
+	for _, c := range l {
+		if c.Kind == k {
+			n += c.Count
+		}
+	}
+	return n
+}
+
 // chargeCaptureLosses adds to a test's evidence what the agent could not
 // capture that the test is charged (design v14 §3.2): a loss since the run
 // began taints the test open when it happened and every later one, but for a
@@ -2080,6 +2091,17 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	// Evidence the test's harness and the receipts keep past this session:
 	// each host whole, no tag (a tag names a host only in its session).
 	judged, notJudged := lost.Untagged().Split()
+	if untold := kindCount(notJudged, models.CaptureLossAppBytesUntold); untold > 0 && seenMiss(ev) {
+		// A close of the proxy's that keploy could not account for leaves
+		// a test without a verdict only when keploy saw nothing fail it: a
+		// miss keploy saw is definite, and the test stays failed on it, the
+		// close named in its reason, never in what leaves it unjudged.
+		notJudged = notJudged.Without(models.CaptureLossAppBytesUntold)
+		ev.Reason = strings.TrimSpace(ev.Reason + " " + fmt.Sprintf("keploy also cannot tell whether bytes the application wrote to %d connection(s) this test used were on their way when keploy's proxy closed them; the call keploy saw miss fails the test whatever they held.", untold))
+		if len(judged) == 0 && len(notJudged) == 0 {
+			return ev, outcome
+		}
+	}
 	ev.CannotCapture = notJudged
 	if len(judged) == 0 {
 		if ev.Reason == "" {

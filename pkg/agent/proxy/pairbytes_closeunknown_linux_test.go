@@ -60,8 +60,8 @@ func wantCloseUnknown(t *testing.T, p *Proxy, lines *observer.ObservedLogs, app,
 	if level == zapcore.WarnLevel {
 		want = 1
 	}
-	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != want {
-		t.Errorf("%d bytes losses, want %d: the close is a loss of the test open, for a proxy that holds the paired bytes", l, want)
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != want {
+		t.Errorf("%d untold closes charged, want %d: the close is the open test's, which used the connection, for a proxy that holds the paired bytes", l, want)
 	}
 }
 
@@ -164,7 +164,7 @@ func TestEachCloseThatCannotTellIsALossOfItsOwnConnection(t *testing.T) {
 			if settle {
 				want = 2
 			}
-			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != want {
+			if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != want {
 				t.Fatalf("%d bytes losses after two such closes, want %d", l, want)
 			}
 		})
@@ -241,7 +241,7 @@ func TestACloseWhoseUnreadCountCannotBeReadIsALossOfItsOwnConnection(t *testing.
 	if len(said) != 1 {
 		t.Fatalf("%d lines say the close cannot tell what it left unread, want one: %+v", len(said), lines.All())
 	}
-	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
 		t.Fatalf("%d bytes losses, want 1: the close is a loss of the test open", l)
 	}
 }

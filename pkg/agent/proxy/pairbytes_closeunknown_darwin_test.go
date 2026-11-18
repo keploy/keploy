@@ -40,6 +40,11 @@ func darwinPairOn(t *testing.T, p *Proxy, appSeq uint64) (app, proxySide *net.TC
 	p.paired.add(proxySide, appSeq, 0)
 	reader = p.inflight.track(proxySide)
 	reader.beforeClose = func() { p.pairClosing(context.Background(), proxySide, reader) }
+	// Its use counted as the proxy's accept counts it, and used once by
+	// the test open now: a close that cannot tell what was on its way is
+	// that test's (pairUntold).
+	reader.pairUse = p.paired.useOf(proxySide)
+	reader.pairUse.Add(1)
 	t.Cleanup(func() { p.inflight.forget(reader) })
 	return app, proxySide, reader
 }

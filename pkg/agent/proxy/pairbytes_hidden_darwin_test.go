@@ -136,8 +136,8 @@ func TestAHiddenApplicationSocketIsUnknownNotGoneOnDarwin(t *testing.T) {
 				if tc.unknown && p.holdsPairedBytes() {
 					want = 1
 				}
-				if l := lossesOf(p, models.CaptureLossAppBytesLost); l != want {
-					t.Fatalf("%d bytes losses, want %d", l, want)
+				if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != want {
+					t.Fatalf("%d untold closes charged, want %d", l, want)
 				}
 				return
 			}

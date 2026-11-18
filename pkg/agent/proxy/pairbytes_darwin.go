@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -47,6 +48,9 @@ func (p *Proxy) WaitPairedBytes(ctx context.Context, n uint64) error {
 	if err := xnuTableReadable(); err != nil {
 		return err
 	}
+	// What the proxy had moved on each connection as this end began is
+	// this wait's to answer for (pairUntold).
+	p.paired.markEnd(n, agent.EndWorkerOf(ctx))
 	pending, err := p.pairTargets(n)
 	if err != nil {
 		return err
@@ -536,8 +540,8 @@ const heldUncounted = "macOS's TCP table does not list this socket to keploy's a
 // lists with the first sequence number the proxy's side began from (gone:
 // reset, its reset the last it sent), as Linux makes none for a socket it
 // cannot read: the close then finds nothing on its way. A table that cannot
-// be read tells nothing: what the connection carried is a loss of the tests
-// it could have served (closeUnknown).
+// be read tells nothing: the tests the connection could have served are left
+// without a verdict (closeUnknown).
 //
 // An application socket not listed is gone only once one of the
 // application's has been (paired.visible). Before, it may be hidden from the
@@ -551,8 +555,8 @@ const heldUncounted = "macOS's TCP table does not list this socket to keploy's a
 // shows by dropping that entry, which the side's own socket then tells
 // (noteUnlistedAtClose). The side's own read, as the close begins, may show
 // one the table's read did not (noteUnheldAtClose). Before either, what was
-// on its way cannot be told: it is a loss of the tests the connection could
-// have served (closeUnknown).
+// on its way cannot be told: the tests the connection could have served are
+// left without a verdict (closeUnknown).
 func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	if xnuTableReadable() != nil {
 		return
@@ -585,17 +589,18 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 
 // noteUnheldAtClose is noteWroteAtClose for an application socket the table
 // does not list and no process the agent may read holds, the proxy's side not
-// past the application's FIN or reset as the table was read. Its holder closed it (an HTTP client that read the proxy's
-// answer with Connection: close, as the answer to a call no mock answers is,
-// and closed at once), or a process of another user holds it. The FIN of one
-// its holder closed may reach the proxy's side between the table's read and
-// the close: the side is read again, and one past the FIN or reset by then has
-// nothing on its way, and no record is made, as for one the table shows past
-// it. Otherwise what the application wrote cannot be counted, and the close
-// waits for nothing to tell it: a socket held open (a pool's idle one) sends
-// no FIN, and a close that read until it would hang. The close is unknown, a
-// loss of the tests the connection could have served (closeUnknown), as is
-// one whose side cannot be read.
+// past the application's FIN or reset as the table was read. Its holder closed
+// it (an HTTP client that read the proxy's answer with Connection: close, as
+// the answer to a call no mock answers is, and closed at once), or a process
+// of another user holds it. The FIN of one its holder closed may reach the
+// proxy's side between the table's read and the close: the side is read again,
+// and one past the FIN or reset by then has nothing on its way, and no record
+// is made, as for one the table shows past it. Otherwise what the application
+// wrote cannot be counted, and the close waits for nothing to tell it: a
+// socket held open (a pool's idle one) sends no FIN, and a close that read
+// until it would hang. The close is unknown: the tests the connection could
+// have served are left without a verdict (closeUnknown), as for one whose side
+// cannot be read.
 func (p *Proxy) noteUnheldAtClose(pc *pairedConn) {
 	ps := readHeldProxySide(pc.conn)
 	switch {
@@ -639,8 +644,8 @@ func (p *Proxy) noteUnlistedAtClose(pc *pairedConn) {
 // taken it: the record (exact, as the table's). A reset socket's buffer is
 // emptied unsent: it is gone, and no record is made. Bytes in that buffer the
 // side had not acknowledged, its FIN not taken, may be data on its way or
-// bytes received: which cannot be told (heldUncounted), and what the
-// connection carried is a loss of the tests it could have served, said in one
+// bytes received: which cannot be told (heldUncounted), and the tests the
+// connection could have served are left without a verdict, said in one
 // log line naming the connection and the bytes (closeUnknown). So it is when
 // the processes or the proxy's side cannot be read.
 //

@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -68,6 +69,9 @@ const orphanEstablished = tcpEstablished
 // been seen, an application socket that is gone is one whose FIN or reset is on
 // its way: the wait waits for it (it ends the handler's read).
 func (p *Proxy) WaitPairedBytes(ctx context.Context, n uint64) error {
+	// What the proxy had moved on each connection as this end began is
+	// this wait's to answer for (pairUntold).
+	p.paired.markEnd(n, agent.EndWorkerOf(ctx))
 	pending, err := p.pairTargets(n)
 	if err != nil {
 		return err
@@ -601,8 +605,8 @@ var lookupAccepted = lookupTCP
 // the answer keploy closed after (a 502 with Connection: close), is such a
 // write. A socket not found leaves it unset, and the wait judges the
 // connection by what was written when it began. A read that fails (no
-// sock_diag socket, or a lookup's error) tells nothing: what the connection
-// carried is a loss of the tests it could have served (closeUnknown), as on
+// sock_diag socket, or a lookup's error) tells nothing: the tests the
+// connection could have served are left without a verdict (closeUnknown), as on
 // darwin.
 //
 // A close that finds the application's socket proves the application's
@@ -610,8 +614,8 @@ var lookupAccepted = lookupTCP
 // does not find it, while none has been seen, may not see the application's
 // sockets at all (another network namespace): unless the proxy's side shows it
 // took the application's FIN or reset, after which nothing it wrote is on its
-// way, what was on its way cannot be told, and what the connection carried is
-// a loss of the tests it could have served, said in one line as on darwin
+// way, what was on its way cannot be told, and the tests the connection could
+// have served are left without a verdict, said in one line as on darwin
 // (closeUnknown).
 //
 // It runs on every paired close, so it reads no more than an answer needs. A

@@ -41,6 +41,17 @@ type pairedConn struct {
 	// lost: bytes the application wrote to it were charged as never
 	// reaching the proxy, once.
 	lost atomic.Bool
+	// untold: a close of it that could not tell whether bytes the
+	// application wrote were on their way was charged, once (pairUntold).
+	// Apart from lost: a loss keploy sees at the same close (bytes it
+	// tosses unread) is charged as well.
+	untold atomic.Bool
+	// used counts the proxy's reads and writes of it that moved bytes
+	// (trackedConn.pairUse), and usedAtEnd is used as the latest test's end
+	// that held it began its bytes wait (pairedConns.markEnd): the open
+	// test moved bytes on it only when used has grown past usedAtEnd
+	// (usedSinceEnd).
+	used, usedAtEnd atomic.Uint64
 	// atClose is the proxy's side as the proxy closed it (closing), read
 	// from its socket while it still could be: after the close nothing
 	// reads it (a reset socket is unhashed, sock_diag no longer finds it).
@@ -207,22 +218,65 @@ const maxOwned = agent.MaxOwnedLosses
 // own notes a loss of the bytes test wrote to the connection from app, which
 // its end could not wait for.
 func (s *pairedConns) own(test string, app netip.AddrPort) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Bounded while no agent takes them (a run that never reads them):
-	// past maxOwned, one entry of no test's, the run's, counts the rest.
-	if n := len(s.owned); n >= maxOwned {
-		if s.owned[n-1].Test != "" {
-			s.owned = append(s.owned, agent.OwnedLoss{Loss: models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, What: agent.OwnedLossesPastTheBound}})
-		}
-		s.owned[len(s.owned)-1].Loss.Count++
-		return
-	}
-	s.owned = append(s.owned, agent.OwnedLoss{Test: test, Loss: models.CaptureLoss{
+	s.ownKind(test, models.CaptureLoss{
 		Kind:  models.CaptureLossAppBytesLost,
 		Count: 1,
 		What:  "from " + app.String() + ", written " + agent.WrittenIn(test) + ", where keploy's wait for them was cut short",
-	}})
+	})
+}
+
+// ownKind notes loss, of test's (OwnedLoss). Bounded while no agent takes
+// them (a run that never reads them): past maxOwned, one entry of no test's,
+// the run's, for each kind counts the rest.
+func (s *pairedConns) ownKind(test string, loss models.CaptureLoss) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.owned) >= maxOwned {
+		for i := maxOwned; i < len(s.owned); i++ {
+			if s.owned[i].Loss.Kind == loss.Kind {
+				s.owned[i].Loss.Count += loss.Count
+				return
+			}
+		}
+		s.owned = append(s.owned, agent.OwnedLoss{Loss: models.CaptureLoss{Kind: loss.Kind, Count: loss.Count, What: agent.OwnedLossesPastTheBound}})
+		return
+	}
+	s.owned = append(s.owned, agent.OwnedLoss{Test: test, Loss: loss})
+}
+
+// markEnd marks, as the end of a test of worker begins its bytes wait for the
+// connections whose application connection is numbered 1..n, what the proxy
+// had moved on each of them (pairedConn.usedAtEnd): bytes moved before it are
+// that test's or an earlier one's, which the wait answers for, or leaves
+// marked as the ending test's when it is cut short (cutShort). Worker 0 is a
+// run of one test process: every connection. Another worker's connections
+// are its own open test's, and are not marked.
+func (s *pairedConns) markEnd(n uint64, worker uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, pc := range s.byConn {
+		if pc.appSeq <= n && (worker == 0 || pc.instance == worker) {
+			pc.usedAtEnd.Store(pc.used.Load())
+		}
+	}
+}
+
+// useOf is the count of the proxy's moves of bytes on conn
+// (pairedConn.used), for its trackedConn to count them in: nil for a
+// connection it does not keep.
+func (s *pairedConns) useOf(conn net.Conn) *atomic.Uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pc := s.byConn[pairKey(conn)]; pc != nil {
+		return &pc.used
+	}
+	return nil
+}
+
+// usedSinceEnd says the proxy moved bytes on pc since the latest test's end
+// that held it began its bytes wait (markEnd), or, before any did, ever.
+func (pc *pairedConn) usedSinceEnd() bool {
+	return pc.used.Load() > pc.usedAtEnd.Load()
 }
 
 // TakeOwnedLosses returns, once, the losses counted on a connection that a

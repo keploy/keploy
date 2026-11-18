@@ -29,12 +29,9 @@ import (
 // platform's own; what a close with bytes unread, or on their way, charges is
 // the same.
 
-// closeUnknown charges what the application had written to pc, as the proxy
-// closes it, that cannot be told (noteWroteAtClose), to the tests pc could
-// have served (pairLost): each test whose end was cut short with bytes on pc
-// unsettled, and the test open now. No other test is: a test open later has no
-// bytes on a connection the proxy closed before it, and a bytes wait reads
-// for itself each connection it holds. The charge is said in one line naming
+// closeUnknown is a close of pc that cannot tell what the application had
+// written to it (noteWroteAtClose): the tests pc could have served are left
+// without a verdict, and no other (pairUntold). It is said in one line naming
 // the connection and why (err). A proxy whose reads do not wait for the
 // paired connections' bytes (holdsPairedBytes) vouches for none: it charges
 // nothing, and says it at debug level.
@@ -44,18 +41,76 @@ func (p *Proxy) closeUnknown(pc *pairedConn, err error, fields ...zap.Field) {
 		p.logger.Debug(closeUnknownLost, fields...)
 		return
 	}
-	p.pairLost(pc, 1, math.MaxUint64, closeUnknownLost, fields...)
+	p.pairUntold(pc, math.MaxUint64, closeUnknownLost, fields...)
 }
 
-// closeUnknownLost is pairLost's message for a close that cannot tell what
+// unreadOrUntold says pc's socket holds bytes the proxy has not read (bytes
+// the application wrote that reached it), or that it cannot be read.
+func unreadOrUntold(pc *pairedConn) bool {
+	n, err := readUnread(pc.conn)
+	return err != nil || n > 0
+}
+
+// closeUnknownLost is pairUntold's message for a close that cannot tell what
 // the application had written (closeUnknown).
-const closeUnknownLost = "keploy cannot tell what the application had written to a connection its proxy closed: it cannot vouch that every call of the tests that connection could have served is in its hands"
+const closeUnknownLost = "keploy cannot tell what the application had written to a connection its proxy closed: the tests that connection could have served are left without a verdict"
+
+// pairUntold charges, once per connection, a close of pc that cannot tell
+// whether bytes the application wrote to it, up to top (counted from 1),
+// were still on their way (models.CaptureLossAppBytesUntold). It is no loss
+// keploy saw: each test it is charged to is left without a verdict (NOT
+// JUDGED), never failed, and a test keploy saw miss a call stays failed on
+// that miss. It is charged to the tests pc could have served, and no other:
+// each test whose end was cut short with some of those bytes unsettled
+// (pairedConn.lostBy) owns it, and the test open now is charged when the
+// proxy moved bytes on pc since the latest test's end that held pc began
+// its bytes wait (usedSinceEnd), or when no such end has, or when pc's
+// socket holds bytes the proxy has not read, or cannot tell whether it does
+// (unreadOrUntold). A test that ended before that wait had its bytes on pc
+// answered for by it; a test open now that moved none on pc, with none
+// unread, sent or received nothing keploy saw there, and is left as it is,
+// whatever test is open at the close. Charged to no test, the close is said
+// at info level. Apart from pairLost: a loss keploy sees at the same close
+// is charged too, and fails the test it is charged to.
+func (p *Proxy) pairUntold(pc *pairedConn, top uint64, msg string, fields ...zap.Field) {
+	if pc.noSession.Load() || pc.untold.Load() {
+		return
+	}
+	owners, open := pc.lostBy(1, top)
+	open = open && (pc.usedSinceEnd() || unreadOrUntold(pc))
+	if len(owners) == 0 && !open {
+		p.logger.Info(msg, append([]zap.Field{
+			zap.String("from", pc.app.String()),
+			zap.String("next_step", "none: no test used the connection since the last test end that waited for its bytes, so no test is charged with it"),
+		}, fields...)...)
+		return
+	}
+	if !pc.untold.CompareAndSwap(false, true) {
+		return
+	}
+	for _, test := range owners {
+		p.paired.ownKind(test, models.CaptureLoss{
+			Kind:  models.CaptureLossAppBytesUntold,
+			Count: 1,
+			What:  "from " + pc.app.String() + ", written " + agent.WrittenIn(test) + ", where keploy's wait for them was cut short",
+		})
+	}
+	if open {
+		p.losses.Add(models.CaptureLossAppBytesUntold, "from "+pc.app.String())
+	}
+	p.logger.Warn(msg, append([]zap.Field{
+		zap.String("from", pc.app.String()),
+		zap.Strings("owned_by", owners),
+		zap.Bool("open_test_charged", open),
+		zap.String("next_step", models.AppBytesUntoldRemedy),
+	}, fields...)...)
+}
 
 // pairClosing is a paired connection's beforeClose: its side as the proxy
 // closes it (closing), and a capture loss when the close tosses bytes the
 // application wrote that the proxy never read. Its side counts those
 // received, so no wait would find them missing. Bytes held that cannot be
-// counted are a loss of the tests this connection could have served, whether
+// counted leave the tests this connection could have served unjudged, whether
 // or not a wait holds it.
 //
 // Over TLS (tc's layer) what is unread is read through the layer first: a
@@ -96,9 +151,9 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 	switch {
 	case pc == nil, ctx.Err() != nil, pc.noSession.Load():
 	case err != nil:
-		// Unaccountable, as closeUnknown's: a loss of the tests the
-		// connection could have served, and of no other.
-		p.pairLost(pc, 1, lostTop(pc), "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: it cannot vouch that every call of the tests that connection could have served is in its hands", zap.Error(err))
+		// Unaccountable, as closeUnknown's: the tests the connection
+		// could have served are left without a verdict, and no other.
+		p.pairUntold(pc, lostTop(pc), "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: the tests that connection could have served are left without a verdict", zap.Error(err))
 	case unread == 0 && !onItsWayAtClose(pc):
 	case unread == 0 && !tlsLayer && finAloneOnItsWay(pc):
 		// The application's FIN alone: it carries no call, and a bytes

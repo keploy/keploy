@@ -90,6 +90,18 @@ const (
 	// proxy closed it, first. What they carried was neither recorded nor
 	// mocked.
 	CaptureLossAppBytesLost CaptureLossKind = "app_bytes_lost"
+	// CaptureLossAppBytesUntold: the proxy closed a connection it holds and
+	// keploy cannot tell whether bytes the application had written to it
+	// were still on their way (macOS's TCP table no longer lists the
+	// application's end, no process the agent may read holds it, and the
+	// proxy's side had not taken its FIN or reset; or the close's own read
+	// failed). That is no loss keploy saw: it leaves without a verdict
+	// (NotJudged), never failed, only the tests the connection could have
+	// served -- one whose end was cut short with bytes on it unsettled, and
+	// the test open at the close when the proxy moved bytes on it since the
+	// last end that waited for them -- a test's own kind (PerTest). A test
+	// keploy saw miss a call keeps that verdict.
+	CaptureLossAppBytesUntold CaptureLossKind = "app_bytes_untold"
 	// CaptureLossUnixSocket (4c a, decision 20): a process of the
 	// application connected, or sent a datagram, to a Unix socket no process
 	// of it owns and that is not on the allow-list (UnixAllowList): a call
@@ -273,6 +285,10 @@ const (
 	CaptureLossUnattributed CaptureLossKind = "call_unattributed"
 )
 
+// AppBytesUntoldRemedy is what to do about a close of the proxy's that
+// keploy could not account for (CaptureLossAppBytesUntold).
+const AppBytesUntoldRemedy = "run the test again (the close raced the application's own; keploy's agent log names the connection), and report it to keploy if it comes back"
+
 // UnattributedRemedy is what to do about a call from a process in no test
 // worker's keploy instance while workers' tests were open
 // (CaptureLossUnattributed).
@@ -292,7 +308,7 @@ const ContainerUnreadMetadata = "containerUnread"
 // kernel dropped at keploy's listener, which keploy cannot tell lost a call,
 // as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossUnclassified || k == CaptureLossAgentStartedAgain || k == CaptureLossProcessUnshimmed || k == CaptureLossUnattributed
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossUnclassified || k == CaptureLossAgentStartedAgain || k == CaptureLossProcessUnshimmed || k == CaptureLossUnattributed || k == CaptureLossAppBytesUntold
 }
 
 // Evidence reports whether a loss of kind k is evidence only, never a
@@ -523,9 +539,11 @@ const ProcessUnshimmedRemedy = "run the test where keploy sees every process (Li
 // all; make a TLS client that abandoned its handshake trust keploy's CA; list
 // a server-first destination in mock.real. Empty for none.
 func (l CaptureLosses) NotJudgedRemedy() string {
-	var unix, unseen, tls, serverFirst, refused, docker, dropped, unclassified, restarted, unshimmed, unattributed bool
+	var unix, unseen, tls, serverFirst, refused, docker, dropped, unclassified, restarted, unshimmed, unattributed, untold bool
 	for _, c := range l {
 		switch c.Kind {
+		case CaptureLossAppBytesUntold:
+			untold = true
 		case CaptureLossProcessUnshimmed:
 			unshimmed = true
 		case CaptureLossUnattributed:
@@ -583,6 +601,9 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 	}
 	if unattributed {
 		do = append(do, UnattributedRemedy)
+	}
+	if untold {
+		do = append(do, AppBytesUntoldRemedy)
 	}
 	return strings.Join(do, ", and ")
 }
@@ -730,7 +751,7 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // build does not know. (CaptureLossRealUncaptured is a test's own too, but never in the
 // agent's counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossAppBytesLost || k == CaptureLossProcessUnshimmed || k == CaptureLossUnattributed
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossAppBytesLost || k == CaptureLossProcessUnshimmed || k == CaptureLossUnattributed || k == CaptureLossAppBytesUntold
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -1040,6 +1061,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("%d connection(s) reached keploy's proxy that it could not tie to a connection of the application's (another address in between, a NAT among the causes), so keploy could not tell where they were going and refused them", c.Count)
 	case CaptureLossAppBytesLost:
 		return fmt.Sprintf("on %d connection(s) to keploy's proxy, bytes the application had written never reached the proxy (the connection was reset, or closed, first), so what they carried was neither recorded nor mocked", c.Count)
+	case CaptureLossAppBytesUntold:
+		return fmt.Sprintf("keploy's proxy closed %d connection(s) this test used, and keploy cannot tell whether bytes the application had written to them were still on their way, so whether a call of this test was lost cannot be told", c.Count)
 	case CaptureLossAppConnLost:
 		return fmt.Sprintf("%d connection(s) of the application's to keploy's proxy closed before the proxy received them, so what they carried was neither recorded nor mocked", c.Count)
 	case CaptureLossRealUncaptured:

@@ -10417,7 +10417,8 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 		// A test whose misses could not all be read is marked, and whatever
 		// was read is still attached. Under the proven switch a miss fails its
 		// test, so such a test has no verdict and its test set is not judged
-		// (UnmatchedCallsUnread; see testsWithUnreadMisses). With the switch
+		// (UnmatchedCallsUnread; see testsWithUnreadMisses), unless the read
+		// returned a miss: that miss was seen, and fails it. With the switch
 		// off the set is judged as before, but the test is marked
 		// MissesUnattributed: a miss may be missing from it, or have been read
 		// with another test's, so nothing may take a failed difference of its
@@ -10437,9 +10438,12 @@ func (r *Replayer) attachReadMockErrors(read testMisses, testSetID, testCaseName
 			zap.Int("callsRead", len(mockErrors)),
 			zap.Error(err),
 		}
-		if provenswitch.On() {
+		switch {
+		case provenswitch.On() && len(mockErrors) > 0:
+			r.logger.Error("could not read every call this test made that no mock answered; it fails on the ones read", fields...)
+		case provenswitch.On():
 			r.logger.Error("could not read every call this test made that no mock answered; its test set is not judged", fields...)
-		} else {
+		default:
 			r.logger.Warn("could not read every call this test made that no mock answered; a miss may be missing from this test, or have been read with another test's", fields...)
 		}
 	}

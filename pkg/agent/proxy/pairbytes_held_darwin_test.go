@@ -102,8 +102,11 @@ func wantOneCloseUnknownLine(t *testing.T, p *Proxy, logs *observer.ObservedLogs
 	if err := p.PairedBytesErr(); err != nil {
 		t.Fatalf("PairedBytesErr = %v after a close that could not tell what was written, want nil: every later wait would end with it", err)
 	}
-	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
-		t.Fatalf("%d bytes losses, want 1: the close is a loss of the test open", l)
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+		t.Fatalf("%d untold closes charged, want 1: the close is the open test's, which used the connection", l)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d judged bytes losses, want 0: keploy cannot tell a byte was lost", l)
 	}
 	lines := logs.FilterMessageSnippet("keploy cannot tell what the application had written").All()
 	if len(lines) != 1 {
