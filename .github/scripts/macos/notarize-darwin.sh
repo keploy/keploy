@@ -93,7 +93,7 @@ usage() {
 
 whole() {
   case $2 in
-  '' | *[!0-9]*) die 2 "$1 must be a whole number, got '$2'" ;;
+  *[!0-9]*) die 2 "$1 must be a whole number, got '$2'" ;;
   esac
 }
 
@@ -114,7 +114,7 @@ whole NOTARIZE_BACKOFF_S "$BACKOFF_S"
 # "try again"), the network, or codesign's timestamp service out of reach.
 # Any other 4xx (credentials, a submission that is not the team's) is final,
 # whatever else its text says.
-TRANSIENT='HTTP status code: (5[0-9][0-9]|429)|internal server error|service unavailable|bad gateway|gateway time-?out|try again|error communicating with|timed out|network connection was lost|not connected to the internet|could not connect|cannot connect|connection (was )?reset|NSURLErrorDomain|timestamp service is not available'
+TRANSIENT='HTTP status code: (5[0-9][0-9]|429)|internal server error|service unavailable|bad gateway|gateway time-?out|try again|error communicating with|timed out|network connection was lost|internet connection appears to be offline|hostname could not be found|could not connect|connection (was )?reset|NSURLErrorDomain|timestamp service is not available'
 FINAL='HTTP status code: 4([0-1][0-9]|2[0-8]|[3-9][0-9])'
 
 transient() {
@@ -242,7 +242,7 @@ cmd_submit() {
     die 1 "submit: zipping $bin with ditto failed"
   sum=$(sha256_of "$state/keploy.zip")
   case $sum in
-  *[!0-9a-f]* | '') die 1 "submit: no SHA-256 for $state/keploy.zip" ;;
+  *[!0-9a-f]*) die 1 "submit: no SHA-256 for $state/keploy.zip" ;;
   esac
   [ ${#sum} -eq 64 ] || die 1 "submit: no SHA-256 for $state/keploy.zip"
   printf '%s\n' "$sum" >"$state/keploy.zip.sha256"
@@ -294,8 +294,7 @@ cmd_wait() {
   id=$(cat "$state/submission-id")
   valid_id "$id" || die 1 "wait: '$id' in $state is not a submission id"
   want=$(cat "$state/keploy.zip.sha256" 2>/dev/null)
-  if [ ! -f "$state/keploy.zip" ] || [ -z "$want" ] ||
-    [ "$(sha256_of "$state/keploy.zip")" != "$want" ]; then
+  if [ -z "$want" ] || [ "$(sha256_of "$state/keploy.zip")" != "$want" ]; then
     die 1 "wait: $state/keploy.zip is missing or is not the zip sent as submission $id"
   fi
   start=$SECONDS

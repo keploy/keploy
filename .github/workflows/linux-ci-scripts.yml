@@ -319,8 +319,8 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh
 
   notarize-darwin:
-    # A hundred and fourteen checks against stand-ins, about seven
-    # seconds: the bound cases wait 2 s each, for real.
+    # Two hundred and forty checks against stand-ins, about ten seconds:
+    # only the bound cases wait, 2 s each, for real.
     timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
