@@ -221,7 +221,7 @@ func TestTheCountsOfWhatWasWrittenHoldPastTheWrapOnDarwin(t *testing.T) {
 	}
 	pc.cutShort("test-1", tg.want)
 	wrote(100)
-	p.noteWroteAtClose(pc)
+	p.noteWroteAtClose(context.Background(), pc)
 	w := pc.wroteAtClose.Load()
 	if w == nil || w.want != 1<<32+100 {
 		t.Fatalf("the close counted %+v, want %d written: 110 past the wait's count", w, uint64(1<<32+100))

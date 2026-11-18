@@ -144,7 +144,7 @@ func (p *Proxy) pairUntold(pc *pairedConn, top uint64, msg string, fields ...zap
 func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn) {
 	pc, unread, err := p.paired.closing(conn, func(pc *pairedConn) {
 		if ctx.Err() == nil && !pc.noSession.Load() {
-			p.noteWroteAtClose(pc)
+			p.noteWroteAtClose(ctx, pc)
 		}
 	})
 	tlsLayer := tc != nil && tc.tlsLayer.Load() != nil

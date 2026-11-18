@@ -627,7 +627,7 @@ var lookupAccepted = lookupTCP
 // gave back (diagFree) rather than open one. One from the list that fails is
 // dropped and the read made on a new one, as a close that found none free
 // makes it, so a socket kept between closes cannot change an answer.
-func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
+func (p *Proxy) noteWroteAtClose(_ context.Context, pc *pairedConn) {
 	if ps := readProxySide(pc.conn); ps.err == nil && peerEnded(ps.state) {
 		return
 	}

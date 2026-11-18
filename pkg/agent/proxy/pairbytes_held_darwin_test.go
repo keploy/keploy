@@ -117,6 +117,30 @@ func wantOneCloseUnknownLine(t *testing.T, p *Proxy, logs *observer.ObservedLogs
 	}
 }
 
+// wantOneCloseUnknownLineBesideATossedLoss is wantOneCloseUnknownLine for a
+// close that also tossed bytes the proxy's side received and the proxy never
+// read: those keploy saw lost, a judged loss of their own (pairClosing), apart
+// from the close it cannot account for.
+func wantOneCloseUnknownLineBesideATossedLoss(t *testing.T, p *Proxy, logs *observer.ObservedLogs, has string) {
+	t.Helper()
+	if err := p.PairedBytesErr(); err != nil {
+		t.Fatalf("PairedBytesErr = %v after a close that could not tell what was written, want nil: every later wait would end with it", err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+		t.Fatalf("%d untold closes charged, want 1: the close is the open test's, which used the connection", l)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+		t.Fatalf("%d judged bytes losses, want 1: the bytes the close tossed unread", l)
+	}
+	lines := logs.FilterMessageSnippet("keploy cannot tell what the application had written").All()
+	if len(lines) != 1 {
+		t.Fatalf("%d lines say the close cannot tell what was written, want one: %+v", len(lines), logs.All())
+	}
+	if e, _ := lines[0].ContextMap()["error"].(string); !strings.Contains(e, has) {
+		t.Errorf("the line's error is %q, want it to say %q", e, has)
+	}
+}
+
 // failHeldProxySide makes every read of the proxy's side a held socket's wait
 // or close makes (readHeldProxySide) fail, as one of a descriptor closed under
 // it would.
@@ -431,10 +455,10 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 		p.logger = zap.New(core)
 		fillSendBuffer(t, p, app, proxySide)
 		_ = reader.Close()
-		// One loss of the test open, said in the line that says why
-		// nothing counts: the bytes the close tosses unread are of the
-		// same connection, charged once.
-		wantOneCloseUnknownLine(t, p, logs, "send buffer held")
+		// The bytes in the send buffer cannot be counted: the test open is
+		// left without a verdict, said in one line. The bytes the close
+		// tosses unread keploy saw lost: a loss of their own.
+		wantOneCloseUnknownLineBesideATossedLoss(t, p, logs, "send buffer held")
 		lines := logs.FilterMessageSnippet("keploy cannot tell what the application had written").All()
 		if len(lines) != 1 {
 			t.Fatalf("%d such warnings, want one: %+v", len(lines), logs.All())
@@ -598,10 +622,12 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 			// One no process the agent may read holds (another user's, or
 			// one its holder closed) is gone only once the proxy's side
 			// took its FIN or reset: until then bytes it wrote may still
-			// be on their way, and the close is unknown, a loss of the
-			// test open (the tests its connection could have served). It
-			// waits for no FIN: this application keeps its socket open
-			// and sends none, as a pool's idle socket does.
+			// be on their way. The close waits for that FIN while keploy
+			// could run for orphanFINBudget (a clock the row moves), no
+			// longer: this application keeps its socket open and sends
+			// none, as a pool's idle socket does, and the close is
+			// unknown, left without a verdict for the test open (the
+			// tests its connection could have served).
 			p, app, proxySide, reader := heldPair(t)
 			p.settleReads = true
 			core, logs := observer.New(zapcore.WarnLevel)
@@ -619,6 +645,8 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 			pcs, _ := p.paired.upTo(1)
 			pcs[0].holder.Store(nil)
 			hideSockets(t, app.LocalAddr())
+			clk := &stall.ManualClock{Step: stall.OnTime}
+			p.paired.clk = clk
 			if fin {
 				if err := app.CloseWrite(); err != nil {
 					t.Fatal(err)
@@ -638,6 +666,14 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 			}
 			if !fin {
 				wantOneCloseUnknownLine(t, p, logs, "no process keploy's agent may read holds it, and the proxy's side has not taken its FIN or reset (it is in ESTABLISHED)")
+				wantOneCloseUnknownLine(t, p, logs, "keploy waited for its FIN while it could run for "+orphanFINBudget.String())
+				// Its looks twice as far apart each time, up to
+				// stall.CheckEvery(orphanFINBudget): 66 over the
+				// budget, not one every stall.Tick (6000), nor 13 with
+				// no bound on how far apart.
+				if clk.Waits <= 20 || clk.Waits >= 100 {
+					t.Errorf("the close looked %d times over the budget, want 66: a stall.Tick, then twice as far apart, up to a second", clk.Waits)
+				}
 				return
 			}
 			if err := p.PairedBytesErr(); err != nil {
@@ -783,7 +819,7 @@ func TestACloseReadsAnApplicationSocketTheTableHidesFromItsHolderOnDarwin(t *tes
 			t.Fatalf("the application's socket, closed by its holder, is %+v (listed %v), want it with its FIN and bytes still unacknowledged", e, ok)
 		}
 		_ = reader.Close()
-		wantOneCloseUnknownLine(t, p, logs, "may still be on their way")
+		wantOneCloseUnknownLineBesideATossedLoss(t, p, logs, "may still be on their way")
 	})
 	t.Run("bytes in the send buffer once the proxy's side took the FIN", func(t *testing.T) {
 		// Taken, not yet seen acknowledged by the holder: the FIN came
