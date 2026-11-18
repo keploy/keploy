@@ -30,6 +30,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/textcut"
 	"go.uber.org/zap"
 )
 
@@ -1705,8 +1706,8 @@ func truncateStrings(exp, act string) (string, string) {
 
 	// If both exceed max bytes, truncate both to max bytes
 	if expLen > maxBytes && actLen > maxBytes {
-		exp = exp[:maxBytes]
-		act = act[:maxBytes]
+		exp = textcut.Prefix(exp, maxBytes)
+		act = textcut.Prefix(act, maxBytes)
 		expTruncated = true
 		actTruncated = true
 	} else {
@@ -1722,25 +1723,25 @@ func truncateStrings(exp, act string) (string, string) {
 				// Expected is larger, truncate it
 				newExpLen := min(actLen+maxDiff, maxBytes)
 				if newExpLen < expLen {
-					exp = exp[:newExpLen]
+					exp = textcut.Prefix(exp, newExpLen)
 					expTruncated = true
 				}
 			} else {
 				// Actual is larger, truncate it
 				newActLen := min(expLen+maxDiff, maxBytes)
 				if newActLen < actLen {
-					act = act[:newActLen]
+					act = textcut.Prefix(act, newActLen)
 					actTruncated = true
 				}
 			}
 		} else {
 			// If either exceeds maxBytes individually, truncate it
 			if expLen > maxBytes {
-				exp = exp[:maxBytes]
+				exp = textcut.Prefix(exp, maxBytes)
 				expTruncated = true
 			}
 			if actLen > maxBytes {
-				act = act[:maxBytes]
+				act = textcut.Prefix(act, maxBytes)
 				actTruncated = true
 			}
 		}
