@@ -6,10 +6,10 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/textcut"
 )
 
 type junitTestSuites struct {
@@ -706,11 +706,7 @@ func capBytes(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	cut := n
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "…"
+	return textcut.Prefix(s, n) + "…"
 }
 
 // ignoredSkipMessage is the historical <skipped message> literal for an IGNORED

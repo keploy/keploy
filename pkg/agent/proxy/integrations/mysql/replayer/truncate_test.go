@@ -47,18 +47,40 @@ func TestTruncate_NeverSplitsACharacter(t *testing.T) {
 	}
 }
 
-// Bytes that are not UTF-8 text are cut near the budget, never shortened
-// further. In latin1, © and ° are 0xA9 and 0xB0, which UTF-8 reads as the
-// continuation bytes of a character, so an unbounded walk back to a
-// character's first byte would drop the whole run.
-func TestTruncate_BytesThatAreNotTextAreCutNearTheBudget(t *testing.T) {
+// Bytes that are not UTF-8 text are cut exactly at the budget, never walked
+// back. In latin1, © and ° are 0xA9 and 0xB0, which UTF-8 reads as the
+// continuation bytes of a character, so a walk back to a character's first
+// byte would drop the whole run.
+func TestTruncate_BytesThatAreNotTextAreCutAtTheBudget(t *testing.T) {
 	s := "INSERT INTO notes (body) VALUES ('" + strings.Repeat("\xa9\xb0", 60) + "')"
-	for maxLen := 4; maxLen < len(s); maxLen++ {
-		got := truncate(s, maxLen)
-		require.LessOrEqualf(t, len(got), maxLen, "maxLen %d: %q is over the budget", maxLen, got)
-		require.GreaterOrEqualf(t, len(got), maxLen-3, "maxLen %d: %q was cut shorter than needed", maxLen, got)
-		require.Truef(t, strings.HasPrefix(s, strings.TrimSuffix(got, "...")), "maxLen %d: %q is not the start of the statement", maxLen, got)
+	for maxLen := 0; maxLen < len(s); maxLen++ {
+		want := s[:maxLen]
+		if maxLen > 3 {
+			want = s[:maxLen-3] + "..."
+		}
+		require.Equalf(t, want, truncate(s, maxLen), "maxLen %d", maxLen)
 	}
+}
+
+// A latin1 name in a statement (ª and º are 0xAA and 0xBA there, which UTF-8
+// reads as continuation bytes) is kept up to the budget in the miss's
+// summary, and again in the shape a miss is named by (models.CallShape: the
+// agent's miss, the reason a test fails with, the JUnit evidence), which
+// cuts that summary once more at its own 160 bytes. Neither cut walks back
+// over the run.
+func TestMySQLMissKeepsBytesThatAreNotTextUpToTheBudget(t *testing.T) {
+	live := "SELECT id FROM t WHERE " + strings.Repeat("\xaa\xba", 100) + " = 1"
+	db := &fakeMockDb{session: []*models.Mock{nativeHandshake(),
+		queryRecorded("mock-users", "SELECT name FROM users WHERE api_key = 'k1'", nil)}}
+	rep, _ := missOf(t, db, models.OutgoingOptions{}, func(c mysqlClient) {
+		c.send(0, append([]byte{mysql.COM_QUERY}, live...))
+	})
+	require.Equal(t, "COM_QUERY "+live[:160-len("...")]+"...", rep.ActualSummary)
+
+	const maxSQLText = 160 // models.maxSQLText, the shape's own cut
+	shape := models.CallShape(rep.Protocol, rep.ActualSummary)
+	require.Truef(t, strings.HasSuffix(shape, "…"), "the shape does not say it was cut: %q", shape)
+	require.Equal(t, rep.ActualSummary[:maxSQLText], strings.TrimSuffix(shape, "…"))
 }
 
 // The cuts an ASCII statement gets are unchanged, and a multi-byte character

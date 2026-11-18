@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/textcut"
 )
 
 type pathMaps struct {
@@ -357,14 +357,9 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 		if maxVal <= 0 || len(s) <= maxVal {
 			return s
 		}
-		// Back the cut off to a rune boundary so a multi-byte UTF-8
-		// character is never split — invalid UTF-8 here would garble the
-		// report yaml/json encoders downstream.
-		cut := maxVal
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
-		}
-		return s[:cut] + "…"
+		// Never split a multi-byte UTF-8 character: invalid UTF-8 here
+		// would garble the report yaml/json encoders downstream.
+		return textcut.Prefix(s, maxVal) + "…"
 	}
 
 	var out []models.MockFieldDiff

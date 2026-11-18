@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils/textcut"
 )
 
 // maxLoggedSQL is the most of a statement's shape a log line shows.
@@ -90,7 +91,7 @@ func sqlLogShape(sql string) string {
 	}
 	out := b.String()
 	if len(out) > maxLoggedSQL {
-		out = cutAtRuneStart(out, maxLoggedSQL)
+		out = textcut.Prefix(out, maxLoggedSQL)
 	}
 	if b.Len() >= maxLoggedSQL {
 		out += "..."

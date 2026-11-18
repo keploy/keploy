@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 	"unsafe"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -30,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/textcut"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"vitess.io/vitess/go/vt/sqlparser"
@@ -139,21 +139,9 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	if maxLen <= 3 {
-		return cutAtRuneStart(s, maxLen)
+		return textcut.Prefix(s, maxLen)
 	}
-	return cutAtRuneStart(s, maxLen-3) + "..."
-}
-
-// cutAtRuneStart returns s[:n], moved back to the start of the character byte
-// n falls in, so no character is split. A character is at most utf8.UTFMax
-// bytes, so the cut moves back at most utf8.UTFMax-1 of them: bytes that are
-// not UTF-8 text (a binary or latin1 value) are cut near n as before, not
-// shortened further. It needs 0 <= n < len(s).
-func cutAtRuneStart(s string, n int) string {
-	for back := 0; back < utf8.UTFMax-1 && n > 0 && !utf8.RuneStart(s[n]); back++ {
-		n--
-	}
-	return s[:n]
+	return textcut.Prefix(s, maxLen-3) + "..."
 }
 
 // case-insensitive prefix check without allocation
