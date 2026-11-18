@@ -833,7 +833,9 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 
 // AppName is the name a run records and reports under. configured, the
 // name the run was given (--app-name, KEPLOY_APPNAME, or appName in
-// keploy.yml or its override), is kept. A run given none is named:
+// keploy.yml or its override), is kept unless it is blank: a name of spaces
+// alone, like the "" a YAML null (appName:, ~, null, Null) reads as, names no
+// app, as enterprise reads keploy.yml. A run given none is named:
 //   - with no keploy.yml (configFile ""), after its git repository and its
 //     folder's path inside it, or after its folder outside one
 //     (utils.DefaultAppName); the keploy.yml the run writes keeps the name;
@@ -852,7 +854,7 @@ func AppName(logger *zap.Logger, configured, configFile string, write bool) (str
 	if err != nil {
 		return "", err
 	}
-	if configured != "" {
+	if strings.TrimSpace(configured) != "" {
 		return configured, nil
 	}
 	if configFile == "" {

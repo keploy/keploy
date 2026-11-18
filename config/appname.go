@@ -13,10 +13,11 @@ import (
 )
 
 // unnamedAppLine is a top-level appName line that names no app: the key, in
-// any case (viper reads keys so) and quoted or not, a colon, and an empty or
-// null value or none, then perhaps a comment. keploy.yml files written before
-// keploy named apps hold `appName: ""`.
-var unnamedAppLine = regexp.MustCompile(`^(\s*)((?i:appname)|"(?i:appname)"|'(?i:appname)')\s*:\s*(""|''|~|null|Null|NULL)?\s*(#.*)?$`)
+// any case (viper reads keys so) and quoted or not, a colon, and a value
+// that is null, or quoted and empty or of spaces and tabs alone (a blank
+// name names no app), or none, then perhaps a comment. keploy.yml files
+// written before keploy named apps hold `appName: ""`.
+var unnamedAppLine = regexp.MustCompile(`^(\s*)((?i:appname)|"(?i:appname)"|'(?i:appname)')\s*:\s*("[ \t]*"|'[ \t]*'|~|null|Null|NULL)?\s*(#.*)?$`)
 
 // KeptAppNameNote is the comment WithAppName ends its appName line with. It
 // says keploy wrote the name, the one an existing project's runs had, and
