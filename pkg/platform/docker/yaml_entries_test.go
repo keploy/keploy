@@ -28,7 +28,7 @@ m:
   "<<": quoted
   *k : aliased-key
 alias: *b
-list: [*a]
+list: [*a, plain]
 `
 	if err := yaml.Unmarshal([]byte(src), &doc); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ list: [*a]
 		t.Fatalf("an aliased mapping's entries %+v; want x, z and w, w's value its anchor's mapping", e)
 	}
 	if MappingEntries(&doc.List) != nil || MappingEntries(nil) != nil {
-		t.Fatal("a sequence, or no node, has entries")
+		t.Fatal("a sequence (its items never read as keys and values), or no node, has entries")
 	}
 	if n := AliasTarget(doc.List.Content[0]); n.Kind != yaml.MappingNode || AliasTarget(nil) != nil {
 		t.Fatalf("an alias's target %v; want its anchor's mapping", n)

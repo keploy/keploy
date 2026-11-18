@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // stackDaemon is an abortDaemon whose app and agent containers keploy can
@@ -387,6 +388,98 @@ func TestTheAppsOwnExitUnderExitCodeFromKeepsItsCodeInEveryMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An attached service that fails because keploy stopped the app at a set's
+// end (`up --abort-on-container-failure`, a worker that exits 1 once the app
+// is down) is keploy's own stop's exit: no halt, the run held, and keploy says
+// so once, for the failure alone (a clean exit in the hold says nothing). Once
+// keploy has started the app again, the worker's own crash still halts and
+// ends the run with its code. In both modes.
+func TestAnExitWhileKeployHoldsTheAppStoppedIsKeploysOwnInEveryMode(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("switch="+proven, func(t *testing.T) {
+			core, logs := observer.New(zap.InfoLevel)
+			r := startStackRun(t, proven, func(d *stackDaemon) bool {
+				return !d.running(runAppName) && !d.running(runAgentName) && !d.running("worker-1")
+			}, func(a *App) {
+				a.logger = zap.New(core)
+				a.setComposeUserAbort("docker compose up --abort-on-container-failure", nil)
+			})
+			r.d.add(&abortContainer{name: "worker-1", service: "worker", status: "running"},
+				&abortContainer{name: "tidy-1", service: "tidy", status: "running"})
+			stream := r.watchStream(t)
+			die := func(name, service string, code int) {
+				stream <- events.Message{Type: events.ContainerEventType, Action: events.ActionDie, TimeNano: time.Now().UnixNano(),
+					Actor: events.Actor{ID: name, Attributes: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: service, "exitCode": fmt.Sprint(code)}}}
+			}
+			if _, err := r.a.StopComposeApp(context.Background()); err != nil {
+				t.Fatalf("keploy's stop of the app: %v", err)
+			}
+			die(runAppName, "app", 0)
+			for _, c := range []struct {
+				name, service string
+				code          int
+			}{{"tidy-1", "tidy", 0}, {"worker-1", "worker", 1}} {
+				if err := r.d.exit(c.name, c.code, "EXIT"); err != nil {
+					t.Fatal(err)
+				}
+				die(c.name, c.service, c.code)
+			}
+			own := func() []observer.LoggedEntry {
+				return logs.FilterMessageSnippet("exited while keploy held the application stopped").All()
+			}
+			eventually(t, "keploy decides the worker's exit", func() bool { return len(own()) > 0 || r.a.composeAppHalt() != nil })
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				select {
+				case e := <-r.ran:
+					r.ran <- e
+					t.Fatalf("run() ended %+v on an exit keploy's stop of the app gave; want it held", e)
+				case <-time.After(50 * time.Millisecond):
+				}
+				if h := r.a.composeAppHalt(); h != nil {
+					t.Fatalf("an exit keploy's stop of the app gave was kept as a halt: %+v", h)
+				}
+			}
+			if said := own(); len(said) != 1 || said[0].ContextMap()["service"] != "worker" || said[0].ContextMap()["exitCode"] != int64(1) {
+				t.Fatalf("said %v; want once, of the worker's exit 1 (the tidy exit 0 ends nothing)", said)
+			}
+			if _, err := r.a.StartComposeApp(context.Background()); err != nil {
+				t.Fatalf("keploy's start of the app: %v", err)
+			}
+			r.d.mu.Lock()
+			r.d.cs["worker-1"].status = "running"
+			r.d.mu.Unlock()
+			if err := r.d.exit("worker-1", 2, "CRASH"); err != nil {
+				t.Fatal(err)
+			}
+			die("worker-1", "worker", 2)
+			e := r.result(t, "the worker's crash")
+			if e.AppErrorType != models.ErrUnExpected || e.ExitCode != 2 || !errors.Is(e.Err, models.ErrAppExitedOnItsOwn) ||
+				!strings.Contains(e.Err.Error(), `compose service "worker" exited with code 2 after the application started`) {
+				t.Fatalf("run() ended %+v; want the worker's halt, code 2, after the application started", e)
+			}
+			if len(own()) != 1 {
+				t.Fatalf("said %v; want the crash outside the hold not taken for keploy's own", own())
+			}
+		})
+	}
+}
+
+// ContainerStart starts container ref's run again.
+func (d *stackDaemon) ContainerStart(_ context.Context, ref string, _ container.StartOptions) error {
+	d.mu.Lock()
+	c, ok := d.cs[ref]
+	if ok {
+		c.status, c.exitCode = "running", 0
+	}
+	d.mu.Unlock()
+	if !ok {
+		return errdefs.NotFound(fmt.Errorf("No such container: %s", ref))
+	}
+	d.note("START " + ref)
+	return nil
 }
 
 // watchStream is the stream of the run's watch of the app's container.

@@ -329,6 +329,10 @@ func TestAnExitTheUsersFlagsDoNotEndTheRunOnEndsNothing(t *testing.T) {
 			d.containers["app-id"].state = exitedAt(0, started)
 			a.composeApp.stopping.Store(true)
 		}, serviceDie("app-id", "app", "0", nil))
+		nothing("a failure while keploy holds the app stopped", "docker compose up --abort-on-container-failure", func(d *abortDocker, a *App) {
+			d.containers["worker-id"].state = exitedAt(1, started)
+			a.composeApp.stopping.Store(true)
+		}, serviceDie("worker-id", "worker", "1", nil))
 		nothing("an exit with no service of the app known", exit, func(d *abortDocker, a *App) {
 			d.containers["app-id"].name = "app-1"
 			a.composeService = ""
@@ -810,7 +814,8 @@ services:
 
 // compose's fields are read as compose reads the file, through its anchors:
 // an `attach: false` and a depends_on a service inherits with `<<`, a
-// depends_on that is an alias, an aliased name in its list, and a service
+// depends_on that is an alias, an aliased name in its list, a dependency a
+// depends_on mapping takes through its own merge key, and a service
 // keploy reads only through a merge key on `services:` itself.
 func TestTheAbortReadsTakeComposesAnchors(t *testing.T) {
 	doc := composeDoc(t, `
@@ -821,6 +826,9 @@ x-needs-db: &needsdb
     db:
       condition: service_healthy
 x-cache: &cachename cache
+x-queue: &queuedep
+  queue:
+    condition: service_started
 x-after: &after [app, *cachename]
 x-extra: &extra
   sidecar:
@@ -841,14 +849,23 @@ services:
     <<: *quiet
     image: loud
     attach: true
+  worker:
+    image: worker
+    depends_on:
+      <<: *queuedep
+      cache: {condition: service_started}
   db: {image: db}
   cache: {image: cache}
+  queue: {image: queue}
 `)
 	if off := composeAttachOff(doc); !slices.Equal(off, []string{"logs", "sidecar"}) {
 		t.Fatalf("attach: false on %v; want logs and sidecar (loud sets attach: true itself)", off)
 	}
 	if deps := composeDependencies(doc, []string{"runner"}); !slices.Equal(deps, []string{"app", "cache", "db"}) {
 		t.Fatalf("runner's dependencies %v; want app, cache and db", deps)
+	}
+	if deps := composeDependencies(doc, []string{"worker"}); !slices.Equal(deps, []string{"cache", "queue"}) {
+		t.Fatalf("worker's dependencies %v; want cache, and queue through the merge key in its depends_on", deps)
 	}
 	if by := composeWaitingDependents(doc); len(by) != 1 || !slices.Equal(by["db"], []string{"app"}) {
 		t.Fatalf("waiting dependents %v; want app waiting on db", by)

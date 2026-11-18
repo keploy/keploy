@@ -25,8 +25,10 @@ import (
 // exits when it is through, ran on until it was stopped. So keploy reads them
 // from the user's command (composeUserAbort), says so, and its watch of the
 // app's container does what compose would have done (composeAbortDied),
-// keploy's own stops excepted: an exit of a container compose attaches to, in
-// the app's project, ends the run with --abort-on-container-exit or
+// keploy's own stops excepted (its stop of the stack, and an exit while it
+// holds the app stopped at a set's end, which its stop gave: a dependent that
+// fails once the app is down is no failure of the app): an exit of a
+// container compose attaches to, in the app's project, ends the run with --abort-on-container-exit or
 // --exit-code-from, and a failure (a code other than 0) with
 // --abort-on-container-failure. keploy stops the stack then, as compose's
 // abort stopped it. The run's exit code is --exit-code-from's service's first
@@ -313,8 +315,9 @@ func (a *App) setComposeUserAbort(cmd string, compose *docker.Compose) {
 // composeDied's) of a container of the app's
 // project that is neither the app's nor keploy's agent's, ends the run under
 // the user's abort flags (composeUserAbort), keeping its halt if so: keploy
-// has not begun to stop the stack, the container is down, and its exit is one
-// the flags end the run on (keepComposeAbortHalt).
+// has not begun to stop the stack, nor holds the app stopped (stopping, from
+// its stop at a set's end until it starts the app again), the container is
+// down, and its exit is one the flags end the run on (keepComposeAbortHalt).
 func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 	r := a.composeAbort
 	attrs := m.Actor.Attributes
@@ -340,6 +343,17 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 		code = info.State.ExitCode
 	} else if c, err := strconv.Atoi(attrs["exitCode"]); err == nil {
 		code = c
+	}
+	// Read after the inspect, under stopMu, as composeAppDied reads it: an
+	// exit while keploy holds the app stopped is one keploy's stop gave (a
+	// service that fails once the app is down), never the app's failure, so
+	// it keeps no halt and ends nothing, whatever the flags say.
+	if a.composeApp.stopping.Load() {
+		if a.composeAbort.endsOn(code) {
+			a.logger.Info("a container compose attaches to exited while keploy held the application stopped at a set's end: keploy takes the exit for one its own stop gave, and it ends nothing",
+				zap.String("service", service), zap.Int("exitCode", code), zap.Strings("flags", a.composeAbort.flags))
+		}
+		return false
 	}
 	return a.keepComposeAbortHalt(ctx, service, code)
 }
