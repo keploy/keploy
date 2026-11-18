@@ -73,8 +73,18 @@ func newTCPClientSocket(rc syscall.RawConn, log *zap.Logger) *tcpClientSocket {
 // getTCPInfo asks the socket fd for its TCP_INFO_v0 into buf: how many bytes
 // it answered.
 func getTCPInfo(fd uintptr, buf *[wtcpInfoSize]byte) (int, error) {
+	return askTCPInfo(windows.WSAIoctl, fd, buf)
+}
+
+// wsaIoctl is windows.WSAIoctl's signature.
+type wsaIoctl func(s windows.Handle, iocc uint32, inbuf *byte, cbif uint32, outbuf *byte, cbob uint32,
+	cbbr *uint32, overlapped *windows.Overlapped, completionRoutine uintptr) error
+
+// askTCPInfo is getTCPInfo through ioctl, which a row gives an answer of any
+// length: the bytes the call says it answered, never more than buf holds.
+func askTCPInfo(ioctl wsaIoctl, fd uintptr, buf *[wtcpInfoSize]byte) (int, error) {
 	var version, got uint32 // version 0: TCP_INFO_v0
-	err := windows.WSAIoctl(windows.Handle(fd), sioTCPInfo,
+	err := ioctl(windows.Handle(fd), sioTCPInfo,
 		(*byte)(unsafe.Pointer(&version)), uint32(unsafe.Sizeof(version)),
 		&buf[0], uint32(len(buf)), &got, nil, 0)
 	if err != nil {

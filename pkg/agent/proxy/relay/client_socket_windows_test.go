@@ -40,6 +40,38 @@ func winAnsweringSocket(ans func() []byte) *tcpClientSocket {
 	return s
 }
 
+// SIO_TCP_INFO's answer is as long as the call says, and never longer than
+// the buffer: a short one (an older or changed TCP_INFO_v0) is then read as
+// short, and a failed call answers nothing.
+func TestWindowsASIOTCPInfoAnswerIsAsLongAsTheCallSays(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct {
+		said    uint32
+		err     error
+		wantLen int
+	}{
+		{said: wtcpInfoSize, wantLen: wtcpInfoSize},
+		{said: wtcpInfoNeeded - 1, wantLen: wtcpInfoNeeded - 1},
+		{said: 0, wantLen: 0},
+		{said: 2 * wtcpInfoSize, wantLen: wtcpInfoSize},
+		{said: wtcpInfoSize, err: windows.WSAEINVAL, wantLen: 0},
+	} {
+		ioctl := func(_ windows.Handle, iocc uint32, _ *byte, _ uint32, _ *byte, cbob uint32,
+			cbbr *uint32, _ *windows.Overlapped, _ uintptr) error {
+			if iocc != sioTCPInfo || cbob != wtcpInfoSize {
+				t.Fatalf("asked ioctl %#x into %d bytes, want SIO_TCP_INFO into %d", iocc, cbob, wtcpInfoSize)
+			}
+			*cbbr = row.said
+			return row.err
+		}
+		var buf [wtcpInfoSize]byte
+		n, err := askTCPInfo(ioctl, 0, &buf)
+		if n != row.wantLen || err != row.err {
+			t.Errorf("an answer said to be %d bytes, %v: %d, %v; want %d, %v", row.said, row.err, n, err, row.wantLen, row.err)
+		}
+	}
+}
+
 // A SIO_TCP_INFO that answers shorter than the last field keploy reads (an
 // older or changed TCP_INFO_v0), or a call that fails, says nothing of the
 // client: a look is unknown, written cannot count, no reset is told, and the
@@ -127,6 +159,22 @@ func TestWindowsASocketThatCannotBeAskedSaysNothing(t *testing.T) {
 	}
 	if err := s.pendingError(false); err != nil {
 		t.Fatalf("pendingError: %v, want none", err)
+	}
+}
+
+// A look takes the relay's word that the proxy sent its FIN (proxyFINSent):
+// one byte in flight is then the FIN's, and every byte sent is acknowledged
+// (acked).
+func TestWindowsALookAfterTheProxysFINTakesOneByteInFlightForIt(t *testing.T) {
+	t.Parallel()
+	ans := func() []byte { return winInfo(wtcpInfoSize, wtcpLastAck, 1, 6, 0, 0) }
+	if l := winAnsweringSocket(ans).look(); l.said != clientFinned || l.acked != 5 {
+		t.Fatalf("with no FIN of the proxy's sent: %+v, want the FIN in and 5 bytes acknowledged", l)
+	}
+	s := winAnsweringSocket(ans)
+	s.proxyFINSent()
+	if l := s.look(); l.said != clientFinned || l.acked != 6 {
+		t.Fatalf("after the proxy's FIN: %+v, want the FIN in and all 6 bytes acknowledged", l)
 	}
 }
 

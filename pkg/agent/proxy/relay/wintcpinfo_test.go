@@ -62,6 +62,33 @@ func TestAWindowsTCPInfoIsReadOnlyWhenItHoldsEveryFieldRead(t *testing.T) {
 	}
 }
 
+// The fields are read at TCP_INFO_v0's own offsets (mstcpip.h, Windows SDK
+// 10.0.26100), written here as numbers, apart from the constants keploy reads
+// with, and every field around them holds a value of its own: a field read
+// one slot off reads its neighbour's.
+func TestAWindowsTCPInfoIsReadAtMstcpipsOffsets(t *testing.T) {
+	t.Parallel()
+	b := make([]byte, 88) // sizeof(TCP_INFO_v0)
+	u32 := map[int]string{
+		4: "Mss", 20: "RttUs", 24: "MinRttUs", 28: "BytesInFlight", 32: "Cwnd", 36: "SndWnd", 40: "RcvWnd",
+		44: "RcvBuf", 64: "BytesReordered", 68: "BytesRetrans", 72: "FastRetrans", 76: "DupAcksIn", 80: "TimeoutEpisodes",
+	}
+	for off := range u32 {
+		binary.LittleEndian.PutUint32(b[off:], uint32(0x1000+off))
+	}
+	binary.LittleEndian.PutUint32(b[0:], wtcpCloseWait) // State
+	binary.LittleEndian.PutUint64(b[8:], 0x3000000008)  // ConnectionTimeMs
+	b[16] = 1                                           // TimestampsEnabled
+	binary.LittleEndian.PutUint64(b[48:], 0x2000000030) // BytesOut
+	binary.LittleEndian.PutUint64(b[56:], 0x2000000038) // BytesIn
+	b[84] = 0x54                                        // SynRetrans
+	want := winTCPInfo{state: wtcpCloseWait, inFlight: 0x1000 + 28, out: 0x2000000030,
+		retrans: 0x1000 + 68, fastRetrans: 0x1000 + 72, timeouts: 0x1000 + 80}
+	if got, ok := readSafely(t, b); !ok || got != want {
+		t.Fatalf("TCP_INFO_v0 read as %+v, %v, want %+v", got, ok, want)
+	}
+}
+
 // What a Windows socket's look says, from its TCP state and its counts.
 func TestAWindowsSocketsLookIsItsStateAndTheBytesAcknowledged(t *testing.T) {
 	t.Parallel()
