@@ -906,7 +906,7 @@ func TestReaderFieldsOfAnUnreadRecordingAreUnread(t *testing.T) {
 // release lets go of every kind of answer, not only the words.
 func TestReaderReleaseClearsEveryKindOfAnswer(t *testing.T) {
 	const w = "ord7Kq2Xw9"
-	x := newReaderIndex(NewDriftCache())
+	x := newReaderIndex(noSetCache())
 	tt := x.textOf(RawOf(getAnswer("mock-1", "http://api/items/1", `{"a":"`+w+` 2026-10-31T10:50:13Z"}`, eRecAt), false))
 	tt.holdsWord(strings.ToLower(w)) // only its case-folded form holds it
 	tt.fieldsWith(w)
@@ -935,7 +935,7 @@ func TestReaderANumberInAJSONBodyStandsAtItsField(t *testing.T) {
 // The field view counts on the budget: the PR's "kept on the same budget".
 func TestReaderTheFieldViewCountsOnTheBudget(t *testing.T) {
 	body, ids := uuidAnswer(40, 16<<10)
-	x := newReaderIndex(NewDriftCache())
+	x := newReaderIndex(noSetCache())
 	tt := x.textOf(RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false))
 	w := ids[3][9:13]
 	tt.holdsWord(w)
@@ -953,7 +953,7 @@ func TestReaderTheFieldViewCountsOnTheBudget(t *testing.T) {
 func viewRoom(t *testing.T, rec Raw, w string) int64 {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	readerBudget = 1 << 40
-	x := newReaderIndex(NewDriftCache())
+	x := newReaderIndex(noSetCache())
 	r := x.textOf(rec)
 	if at, read := r.fieldsWith(w); len(at) == 0 || !read || !r.e.fields.ok {
 		t.Fatalf("fixture: at %v read %v; want %q at a field, and the view kept", at, read, w)
@@ -991,7 +991,7 @@ func TestReaderOneLargeBodyIsReadFieldByFieldWithinABound(t *testing.T) {
 			view   bool
 		}{{1, false}, {room - 1, false}, {room, true}} {
 			readerBudget = b.budget
-			x := newReaderIndex(NewDriftCache())
+			x := newReaderIndex(noSetCache())
 			r := x.textOf(rec)
 			at, _ := r.fieldsWith(w)
 			kept := r.e.fields.ok
@@ -1034,7 +1034,7 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 		// first group), or its second (388) where it keeps the other's.
 		kept, entry := int64(0), entryBytes(0, 0)
 		if keeps {
-			probe := newReaderIndex(NewDriftCache())
+			probe := newReaderIndex(noSetCache())
 			probe.textOf(other).holdsWord(held)
 			if kept = probe.used; kept == 0 {
 				t.Fatalf("fixture: the other text's words were not kept")
@@ -1047,7 +1047,7 @@ func TestReaderAFieldViewIsBuiltOnlyWhereWhatIsLeftHasRoom(t *testing.T) {
 			view   bool
 		}{{need + kept - 1, false}, {need + kept, true}} {
 			readerBudget = c.budget
-			x := newReaderIndex(NewDriftCache())
+			x := newReaderIndex(noSetCache())
 			if keeps {
 				if x.textOf(other).holdsWord(held); x.used != kept {
 					t.Fatalf("fixture: kept %d, want %d", x.used, kept)
@@ -1623,10 +1623,10 @@ func TestReaderAViewThatDoesNotFitIsBuiltOnceACall(t *testing.T) {
 	rec := RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false)
 	room := viewRoom(t, rec, ids[3][9:13])
 	readerBudget = 1
-	past := newReaderIndex(NewDriftCache())
+	past := newReaderIndex(noSetCache())
 	past.textOf(rec).fieldsWith(ids[5][9:13])
 	readerBudget = room - 1
-	x := newReaderIndex(NewDriftCache())
+	x := newReaderIndex(noSetCache())
 	r := x.textOf(rec)
 	r.fieldsWith(ids[3][9:13])
 	if r.e.fields.ok || !r.e.fields.big || x.peak <= past.peak {
@@ -1731,7 +1731,7 @@ func TestReaderTheViewAndTheScanPlaceEveryWordAlike(t *testing.T) {
 			var first string
 			for i, budget := range budgets {
 				readerBudget = budget
-				r := newReaderIndex(NewDriftCache()).textOf(rec)
+				r := newReaderIndex(noSetCache()).textOf(rec)
 				at, read := r.fieldsWith(w)
 				if got := fmt.Sprint(at, read); i == 0 {
 					first = got
