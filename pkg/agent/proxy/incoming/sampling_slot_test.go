@@ -256,7 +256,7 @@ func waitFor(t *testing.T, ctx context.Context, done <-chan struct{}, what strin
 	case <-ctx.Done():
 		hint := ""
 		if strings.HasSuffix(what, "handler") || what == "the captures" {
-			hint = "; a handler or a capture blocked giving a capture slot back twice (the last to give it back waits for ever) never returns"
+			hint = "; a handler or a capture never returned, e.g. one blocked giving a capture slot back twice (the last to give it back waits for ever)"
 		}
 		t.Fatalf("%s: not done within the bound%s", what, hint)
 	}
@@ -270,6 +270,29 @@ func capturesDone(pm *IngressProxyManager) <-chan struct{} {
 		close(done)
 	}()
 	return done
+}
+
+// hangBound bounds a row's wait for a handler, a passthrough or the captures
+// to end, and its reads: far more than any of them takes, even under -race on
+// a loaded machine.
+const hangBound = 10 * time.Second
+
+// waitBounded waits for done, what names it in a failure, for at most
+// hangBound (waitFor): a handler or a capture that never returns (one blocked
+// giving a capture slot back twice) fails its row by name, rather than by the
+// package's -timeout, which drops what the row said and every row after it.
+func waitBounded(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), hangBound)
+	defer cancel()
+	waitFor(t, ctx, done, what)
+}
+
+// waitCaptures waits for every capture pm started to return, for at most
+// hangBound (waitBounded).
+func waitCaptures(t *testing.T, pm *IngressProxyManager) {
+	t.Helper()
+	waitBounded(t, capturesDone(pm), "the captures")
 }
 
 // servedConns is a servedConnSet whose teardown, registered after the test's

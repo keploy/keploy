@@ -111,11 +111,11 @@ func TestARequestTheFiltersLeaveOutGivesItsSamplingSlotBackAtItsHead(t *testing.
 				t.Fatal("the request the filters leave out never reached the app")
 			}
 			orderServed := serve.exchange(t, appAddr, "/order", `{"sku":"a","qty":1}`)
-			<-orderServed
+			waitBounded(t, orderServed, "/order's handler")
 			letGo()
 			resp := answerOf(t, tc.name, held)
-			<-heldServed
-			pm.captures.Wait()
+			waitBounded(t, heldServed, tc.name+": the handler")
+			waitCaptures(t, pm)
 
 			if got := captured(); !reflect.DeepEqual(got, []string{"/order"}) {
 				t.Fatalf("with one sampling slot, a request sent while the app answered %s had %v handed to the capture, want [/order]: what the filters leave out held the slot, and the request was passed through uncaptured", tc.name, got)
@@ -183,8 +183,8 @@ func TestARequestItsCaptureKeepsIsNotLeftOutAtItsHead(t *testing.T) {
 
 			client, served := serve.open(t, appAddr, tc.name, tc.request)
 			_ = answerOf(t, tc.name, client)
-			<-served
-			pm.captures.Wait()
+			waitBounded(t, served, tc.name+": the handler")
+			waitCaptures(t, pm)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -221,8 +221,8 @@ func TestAPausedSampledExchangeIsForwardedAsItsClientSentIt(t *testing.T) {
 
 	client, served := serve.open(t, appAddr, "/order", "GET /order HTTP/1.1\r\nHost: app\r\n\r\n")
 	resp := answerOf(t, "/order", client)
-	<-served
-	pm.captures.Wait()
+	waitBounded(t, served, "/order's handler")
+	waitCaptures(t, pm)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -252,8 +252,8 @@ func TestAProbeTheFiltersKeepIsSampled(t *testing.T) {
 
 	probe, served := serve.open(t, appAddr, "the probe", probeRequest)
 	_ = answerOf(t, "the probe", probe)
-	<-served
-	pm.captures.Wait()
+	waitBounded(t, served, "the probe's handler")
+	waitCaptures(t, pm)
 
 	if got := captured(); !reflect.DeepEqual(got, []string{"/health"}) {
 		t.Fatalf("a probe no filter leaves out had %v handed to the capture, want [/health]: a probe that is to be recorded was passed through", got)
@@ -299,8 +299,8 @@ func TestWithoutSamplingAFilteredRequestLeavesItsConnectionCaptured(t *testing.T
 		}
 	}
 	_ = client.Close()
-	<-served
-	pm.captures.Wait()
+	waitBounded(t, served, "the handler")
+	waitCaptures(t, pm)
 
 	if got := captured(); !slices.Contains(got, "/order") {
 		t.Fatalf("without sampling, the request after one the filters leave out on its keep-alive connection was not handed to the capture (handed: %v)", got)
