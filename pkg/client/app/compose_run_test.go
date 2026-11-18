@@ -40,6 +40,9 @@ type stackDaemon struct {
 	// stop (mu): its main process's answer to the signal, 0 for one that
 	// handles it, 128 plus the signal's number for one the signal ends.
 	stopCode int
+	// stopHeld is, by container name, what a stop of it waits for before the
+	// container exits (mu): its main process outlasting the stop's grace.
+	stopHeld map[string]chan struct{}
 }
 
 const (
@@ -100,8 +103,11 @@ func (d *stackDaemon) ContainerStop(_ context.Context, ref string, _ container.S
 		return nil
 	}
 	d.mu.Lock()
-	code := d.stopCode
+	code, held := d.stopCode, d.stopHeld[ref]
 	d.mu.Unlock()
+	if held != nil {
+		<-held
+	}
 	return d.exit(ref, code, "STOP")
 }
 

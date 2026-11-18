@@ -2529,6 +2529,13 @@ func (a *App) run(ctx context.Context) models.AppError {
 			states = a.composeFailedUpStates(ctx)
 			return states
 		}); attempt++ {
+		// keploy's stop of the stack for a crash ends first, as compose's
+		// abort ended before its up returned: a container it had not yet
+		// taken down was reused by the retried up, then taken down mid-run.
+		if !a.composeAwaitsTheStackStop(ctx) {
+			a.logger.Debug("context cancelled while keploy's stop of the compose stack ran", zap.Error(ctx.Err()))
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
+		}
 		if a.composeApp.depCrash.Load() != nil {
 			states = a.composeFailedUpStates(ctx)
 		}

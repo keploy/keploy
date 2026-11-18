@@ -91,8 +91,9 @@ func stateAt(started time.Time, exited bool, code int, finished time.Time) conta
 //     that service on it); its crash after the app started ends the run;
 //   - an app started after the exit (compose's up started it on that exit,
 //     before keploy read it) is the exit before the app; the app's first
-//     start in the run is kept, so keploy's start of it again later reads
-//     no exit since as one before the app;
+//     start in the run is kept, so keploy's start of it again later, or a
+//     daemon that no longer answers for the app's container, reads no exit
+//     since as one before the app;
 //   - only the app's project's containers say whether a dependent waits:
 //     another project's container of it, only created, does not.
 //
@@ -134,6 +135,8 @@ func TestAnExitIsDecidedByTheDaemonsInstantsAndADependencysCrashRetriesTheBringU
 				{name: "a dependency crashes, and compose's up started the app after it", cmd: codeFrom, service: "flaky", code: 1, app: &after, want: retries},
 				{name: "a dependency crashes after the app's first start, read after keploy started it again", cmd: codeFrom, service: "flaky", code: 1,
 					app: &after, keptStart: before, want: ends},
+				{name: "a dependency crashes after the app's first start, read when the daemon no longer answers for the app's container", cmd: codeFrom,
+					service: "flaky", code: 1, app: &before, keptStart: before, want: ends, setup: func(d *abortDocker) { d.unreadable = "app-id" }},
 				{name: "a dependency exits 0", cmd: exit, service: "flaky", code: 0, want: ends},
 				{name: "a service nothing depends on exits 3", cmd: "docker compose --profile early up --exit-code-from early", service: "early", code: 3, want: ends},
 				{name: "an optional dependency another service waits on crashes", cmd: exit, service: "opt", code: 1, want: ends,
@@ -222,12 +225,72 @@ func TestAnExitIsDecidedByTheDaemonsInstantsAndADependencysCrashRetriesTheBringU
 	}
 }
 
+// keploy's stop of the stack for a dependency's crash keeps the runs it takes
+// down, so their exits, read once the run's retry of the bring-up has begun
+// (keploy no longer holds the stack stopped), are keploy's own and end
+// nothing: an attached service's (`--exit-code-from runner`, a runner killed
+// at its stop grace's end, 137) and the app's (compose's up started it just
+// after the crash) alike. A start the retried up gives a container is another
+// run, whose crash ends the run as the flags say. Record and test, both
+// KEPLOY_PROVEN modes.
+func TestTheExitsOfKeploysStopOfTheStackStayItsOwnOnceTheRetryBegan(t *testing.T) {
+	doc := `
+services:
+  app:
+    image: app
+    depends_on: [flaky]
+  runner:
+    image: runner
+  flaky:
+    image: flaky
+`
+	for _, proven := range []string{"", "1"} {
+		t.Setenv(provenswitch.Env, proven)
+		for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+			what := fmt.Sprintf("%s=%q %s", provenswitch.Env, proven, mode)
+			ctx := context.Background()
+			t0 := time.Now().Add(-time.Hour)
+			d := newAbortDocker(t0)
+			d.containers["app-id"].state = runningState(t0.Add(2 * time.Second))
+			d.add("runner-id", "runner", runningState(t0)).stopCode = 137
+			d.add("flaky-id", "flaky", stateAt(t0, true, 1, t0.Add(time.Second)))
+			a := newAbortApp(d, "docker compose up --exit-code-from runner", composeDoc(t, doc))
+			a.Mode = mode
+			if a.composeDied(ctx, serviceDie("flaky-id", "flaky", "1", nil)) || a.composeAppHalt() != nil || a.composeApp.depCrash.Load() == nil {
+				t.Fatalf("%s: flaky's crash: halt %+v, crash %+v; want no halt and the crash kept for the retry", what, a.composeAppHalt(), a.composeApp.depCrash.Load())
+			}
+			if !slices.Contains(d.stops, "runner-id") || !slices.Contains(d.stops, "app-id") {
+				t.Fatalf("%s: stops %v; want keploy's stop of the stack to take the runner and the app down", what, d.stops)
+			}
+			if !a.composeBeginsABringUpAgain() {
+				t.Fatalf("%s: the retry's bring-up did not begin", what)
+			}
+			if a.composeDied(ctx, serviceDie("runner-id", "runner", "137", nil)) || a.composeAppHalt() != nil {
+				t.Fatalf("%s: the runner's 137 from keploy's stop, read after the retry began, ended the run (halt %+v); want keploy's own stop", what, a.composeAppHalt())
+			}
+			if a.composeDied(ctx, serviceDie("app-id", "app", "143", nil)) || a.composeAppHalt() != nil {
+				t.Fatalf("%s: the app's exit from keploy's stop, read after the retry began, ended the run (halt %+v); want keploy's own stop", what, a.composeAppHalt())
+			}
+			d.mu.Lock()
+			d.containers["runner-id"].state = stateAt(t0.Add(time.Minute), true, 3, t0.Add(2*time.Minute))
+			d.mu.Unlock()
+			if !a.composeDied(ctx, serviceDie("runner-id", "runner", "3", nil)) {
+				t.Fatalf("%s: the crash of the runner's run the retried up started ended nothing; want the run ended on it", what)
+			}
+			if h := a.composeAppHalt(); h == nil || h.service != "runner" || h.serviceCode != 3 {
+				t.Fatalf("%s: halt %+v; want the runner's crash, code 3", what, h)
+			}
+		}
+	}
+}
+
 // keploy's stop of the stack stops what compose's up starts after the stop's
 // listing, until the up returns, as compose's own abort stops a late starter:
 // a service whose service_completed_successfully wait a stopped one-shot's
 // exit met started after the listing, and the up, waiting on it, never
-// returned, so the run hung. Once the up has returned, nothing more is
-// stopped. Both KEPLOY_PROVEN modes.
+// returned, so the run hung. The late starter's run is one keploy's stop took
+// down, so its exit, keploy not holding the stack stopped, ends nothing. Once
+// the up has returned, nothing more is stopped. Both KEPLOY_PROVEN modes.
 func TestKeploysStopOfTheStackStopsALateStarterUntilTheUpReturns(t *testing.T) {
 	for _, proven := range []string{"", "1"} {
 		t.Run("switch="+proven, func(t *testing.T) {
@@ -256,6 +319,9 @@ func TestKeploysStopOfTheStackStopsALateStarterUntilTheUpReturns(t *testing.T) {
 				defer d.mu.Unlock()
 				return slices.Contains(d.stops, "runner-id")
 			})
+			if a.composeDied(context.Background(), serviceDie("runner-id", "runner", "143", nil)) || a.composeAppHalt() != nil {
+				t.Fatalf("the late starter's exit from keploy's stop ended the run (halt %+v); want keploy's own stop", a.composeAppHalt())
+			}
 			returned()
 			d.add("late-id", "late", runningState(time.Now()))
 			select {

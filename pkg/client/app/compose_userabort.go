@@ -402,6 +402,9 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 	if project := a.composeAppProject(ctx); project == "" || attrs[composeProjectLabelKey] != project {
 		return false
 	}
+	// stackStopped is closed once keploy's stop of the stack for a crash
+	// this exit is has ended (stackStop).
+	var stackStopped chan struct{}
 	verdict := func() composeAbortVerdict {
 		a.composeApp.stopMu.Lock()
 		defer a.composeApp.stopMu.Unlock()
@@ -437,6 +440,13 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 			}
 			return composeAbortNone
 		}
+		// A run keploy's stop of the stack took down, read after the run's
+		// retry of the bring-up began, is keploy's own stop too.
+		if read && a.composeStoppedRun(info.ID, info.State) {
+			a.logger.Debug("a container compose attaches to exited from keploy's stop of the stack for the retry of the bring-up: keploy's own stop, which ends nothing",
+				zap.String("service", service), zap.Int("exitCode", code))
+			return composeAbortNone
+		}
 		v := a.decideComposeAbortExit(ctx, service, code, exitedAt, true)
 		if v == composeAbortRetry {
 			// keploy's stop of the stack, as compose's abort stopped it:
@@ -445,6 +455,8 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 			a.composeApp.agentStopping.Store(true)
 			a.composeApp.depCrash.CompareAndSwap(nil, &composeHalt{exitCode: code, service: service, serviceCode: code,
 				flags: strings.Join(a.composeAbort.flags, " "), beforeApp: true})
+			stackStopped = make(chan struct{})
+			a.composeApp.stackStop.Store(&stackStopped)
 		}
 		return v
 	}()
@@ -452,11 +464,13 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 	case composeAbortHalt:
 		return true
 	case composeAbortRetry:
-		// Outside stopMu: the stop waits for the stack's containers to go.
+		// Outside stopMu: the stop waits for the stack's containers to go,
+		// and the run's retry of the bring-up waits for the stop.
 		if !a.stopComposeProject(context.WithoutCancel(ctx)) {
 			a.logger.Warn("keploy could not stop the application's compose stack for the retry of its bring-up; docker compose up goes on as it is",
 				zap.String("service", service))
 		}
+		close(stackStopped)
 	}
 	return false
 }

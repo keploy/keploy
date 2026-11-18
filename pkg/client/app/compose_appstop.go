@@ -96,6 +96,15 @@ type composeAppState struct {
 	// has returned; nil while none runs. keploy's stops of the stack stop
 	// what compose starts after them until then (stopComposeLateStarters).
 	upReturned atomic.Pointer[chan struct{}]
+	// stackStop is closed when keploy's stop of the stack for a crash
+	// (depCrash) has taken every container it stops down; nil while there
+	// has been none. The run's retry of the bring-up waits for it
+	// (composeAwaitsTheStackStop).
+	stackStop atomic.Pointer[chan struct{}]
+	// stoppedRuns are, by container ID, the runs keploy's stops of the
+	// stack took down, each by its StartedAt on the daemon's clock, in Unix
+	// nanoseconds (composeStopsARun).
+	stoppedRuns sync.Map
 }
 
 // THE APP'S CONTAINER IS THE ONE COMPOSE MADE FOR THE APP'S SERVICE (P101-b-n).
@@ -734,8 +743,10 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 	if read && composeDieOfAnEarlierRun(m, info.State) {
 		return false
 	}
-	// Read after the inspect: a stop keploy began meanwhile is its own.
-	if a.composeApp.stopping.Load() {
+	// Read after the inspect: a stop keploy began meanwhile is its own, and
+	// so is a run keploy's stop of the stack took down, read after the run's
+	// retry of the bring-up began (composeStoppedRun).
+	if a.composeApp.stopping.Load() || (read && a.composeStoppedRun(info.ID, info.State)) {
 		return false
 	}
 	// The halt's exit code is the run's that is down now, as the daemon
@@ -997,6 +1008,7 @@ func (a *App) stopComposeProject(ctx context.Context) bool {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
+			a.composeStopsARun(ctx, id)
 			// The container's own stop grace, as compose's abort gave it:
 			// keploy's agent, under keploy record, waits for keploy to drain
 			// what it captured, and goes by that event; its grace
@@ -1008,6 +1020,54 @@ func (a *App) stopComposeProject(ctx context.Context) bool {
 	}
 	wg.Wait()
 	return true
+}
+
+// A STOP OF THE STACK ENDS BEFORE THE RETRY'S BRING-UP, AND ITS EXITS STAY KEPLOY'S.
+//
+// keploy's stop of the stack for a dependency's crash stands for compose's
+// abort, whose up returns only once every container it stopped is down. The
+// retry's bring-up began as soon as keploy's up returned, while the stop
+// still waited out a container's grace: `up --exit-code-from runner`, a
+// runner that does not handle SIGTERM, was left running into the retried up,
+// which reused it, and then the stop killed it (137), with keploy no longer
+// holding the stack stopped, so its exit ended the run and the retried
+// bring-up recorded one test of six. The retry now waits for the stop to end
+// (composeAwaitsTheStackStop), and an exit of a run the stop took down is
+// keploy's own whenever the watch reads it (composeStoppedRun): the watch's
+// read of a die comes after the stop, and may come after the retry began.
+
+// composeStopsARun keeps the run of container id that keploy's stop of the
+// stack is about to take down, by its StartedAt on the daemon's clock, so
+// that run's exit is read as keploy's own stop (composeStoppedRun); a
+// container the daemon does not read is kept as no run.
+func (a *App) composeStopsARun(ctx context.Context, id string) {
+	if info, read := a.readComposeContainer(ctx, id, "keploy reads its exit as any other"); read {
+		a.composeApp.stoppedRuns.Store(id, daemonNanos(info.State.StartedAt))
+	}
+}
+
+// composeStoppedRun reports whether st, container id's state, is of a run
+// keploy's stop of the stack took down (composeStopsARun): a start the
+// retry's up gave the container since is another run.
+func (a *App) composeStoppedRun(id string, st *container.State) bool {
+	run, ok := a.composeApp.stoppedRuns.Load(id)
+	return ok && run.(int64) == daemonNanos(st.StartedAt)
+}
+
+// composeAwaitsTheStackStop waits for keploy's stop of the stack for a
+// crash (stackStop) to end, before the run's retry of the bring-up begins;
+// false when ctx ends first.
+func (a *App) composeAwaitsTheStackStop(ctx context.Context) bool {
+	stopped := a.composeApp.stackStop.Load()
+	if stopped == nil {
+		return true
+	}
+	select {
+	case <-*stopped:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // stopComposeLateStarters stops each container of project that starts from
@@ -1067,6 +1127,7 @@ func (a *App) stopComposeLateStarters(ctx context.Context, project string) {
 					stops.Add(1)
 					go func(id string) {
 						defer stops.Done()
+						a.composeStopsARun(ctx, id)
 						if err := a.docker.ContainerStop(ctx, id, container.StopOptions{}); err != nil && !cerrdefs.IsNotFound(err) {
 							a.logger.Debug("could not stop a late-started container of the application's compose project", zap.String("container", id), zap.Error(err))
 						}

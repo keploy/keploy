@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -219,6 +220,100 @@ func TestKeploysStopOfTheComposeAppKeepsItsFirstStart(t *testing.T) {
 			}
 			if a.composeExitBeforeApp(context.Background(), first.Add(time.Second).UnixNano()) {
 				t.Fatal("an exit between the app's first start and keploy's start of it again was read as before the app")
+			}
+		})
+	}
+}
+
+// The run's retry of the bring-up waits for keploy's stop of the stack: at
+// once with no stop, until a stop under way ends, and no longer than the run
+// (its context's end, false). Both KEPLOY_PROVEN modes.
+func TestTheRetryWaitsForKeploysStopOfTheStack(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("switch="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			a := newAbortApp(newAbortDocker(time.Now()), "docker compose up --abort-on-container-exit", nil)
+			if !a.composeAwaitsTheStackStop(context.Background()) {
+				t.Fatal("no stop of the stack under way: the wait said the run ended")
+			}
+			stopped := make(chan struct{})
+			a.composeApp.stackStop.Store(&stopped)
+			waited := make(chan bool, 1)
+			go func() { waited <- a.composeAwaitsTheStackStop(context.Background()) }()
+			select {
+			case <-waited:
+				t.Fatal("the wait ended with keploy's stop of the stack still under way")
+			case <-time.After(200 * time.Millisecond):
+			}
+			close(stopped)
+			select {
+			case ok := <-waited:
+				if !ok {
+					t.Fatal("the wait for a stop that ended said the run ended")
+				}
+			case <-time.After(time.Minute):
+				t.Fatal("the wait did not end with keploy's stop of the stack")
+			}
+			open := make(chan struct{})
+			a.composeApp.stackStop.Store(&open)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if a.composeAwaitsTheStackStop(ctx) {
+				t.Fatal("a cancelled run's wait said keploy's stop of the stack had ended")
+			}
+		})
+	}
+}
+
+// keploy's stop of the stack for a dependency's crash ends before the run's
+// retry of the bring-up begins, as compose's abort ended before its up
+// returned: a runner whose stop outlasts the retry's backoff (one that does
+// not handle SIGTERM, killed at its grace's end) is down before the retried
+// up runs, so that up starts it afresh instead of reusing a run keploy then
+// takes down. Both KEPLOY_PROVEN modes.
+func TestTheRetryOfTheBringUpBeginsOnceKeploysStopOfTheStackHasEnded(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("switch="+proven, func(t *testing.T) {
+			t.Setenv("KEPLOY_STUB_UP_CODE", "1")
+			release := make(chan struct{})
+			var released sync.Once
+			r := startStackRun(t, proven, func(d *stackDaemon) bool { return !d.running(runAgentName) }, func(a *App) {
+				a.setComposeUserAbort("docker compose up --exit-code-from runner", composeDoc(t, `
+services:
+  app:
+    image: app
+    depends_on: [flaky]
+  runner:
+    image: runner
+  flaky:
+    image: flaky
+`))
+			})
+			// Before the run's own cleanup, which waits for run() to return.
+			t.Cleanup(func() { released.Do(func() { close(release) }) })
+			r.d.mu.Lock()
+			r.d.cs[runAppName].status = "created"
+			r.d.stopHeld = map[string]chan struct{}{"runner-1": release}
+			r.d.mu.Unlock()
+			r.d.add(&abortContainer{name: "flaky-1", service: "flaky", status: "running"},
+				&abortContainer{name: "runner-1", service: "runner", status: "running"})
+			stream := r.watchStream(t)
+			if err := r.d.exit("flaky-1", 1, "EXIT"); err != nil {
+				t.Fatal(err)
+			}
+			stream <- events.Message{Type: events.ContainerEventType, Action: events.ActionDie, TimeNano: time.Now().UnixNano(),
+				Actor: events.Actor{ID: "flaky-1", Attributes: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "flaky", "exitCode": "1"}}}
+			eventually(t, "keploy's agent is stopped and the first up returns", func() bool { return trailAt(r.trail(t), "UP-DONE") >= 0 })
+			for end := time.Now().Add(2 * composeDepFailureBaseBackoff); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+				if trailAt(r.trail(t), "UP-RETRIED") >= 0 {
+					t.Fatalf("the retried up ran while keploy's stop of the stack was still taking runner-1 down:\n%s", strings.Join(r.trail(t), "\n"))
+				}
+			}
+			released.Do(func() { close(release) })
+			eventually(t, "the retried up runs once keploy's stop of the stack has ended", func() bool { return trailAt(r.trail(t), "UP-RETRIED") >= 0 })
+			trail := r.trail(t)
+			if stop, retried := trailAt(trail, "STOP runner-1"), trailAt(trail, "UP-RETRIED"); stop < 0 || retried < stop {
+				t.Fatalf("want runner-1 stopped, then the up retried:\n%s", strings.Join(trail, "\n"))
 			}
 		})
 	}
