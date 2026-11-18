@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,12 +39,19 @@ import (
 //
 // An answer that ends as the app closes its connection is no shape here:
 // its client has the end only as the handler has returned.
+//
+// Once both handlers have returned, no capture slot is left held: the one
+// the first exchange held from its answer's end is handed to its capture,
+// which gives it back, and none is given back twice.
 func TestASequentialClientIsNotBypassedByTheExchangeBefore(t *testing.T) {
 	stubIngressPaused(t, func() bool { return false })
 	okAnswer := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "2")
 		_, _ = w.Write([]byte("ok"))
 	}
+	// over is a body one byte over the capture limit: its capture is cut
+	// short, and its exchange is not recorded.
+	over := strings.Repeat("x", maxHTTPBodyCaptureBytes+1)
 	for _, shape := range []struct {
 		name string
 		// body is the first request's body; the second request is a GET.
@@ -67,6 +75,24 @@ func TestASequentialClientIsNotBypassedByTheExchangeBefore(t *testing.T) {
 			_, _ = w.Write([]byte("data: ok\n\n"))
 			w.(http.Flusher).Flush()
 		}, []string{"/second"}},
+		// Nor of an exchange whose capture is cut short: known at the
+		// request's head, at the answer's headers, or only as the answer
+		// ends.
+		{"an answer over the capture limit", "", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", strconv.Itoa(len(over)))
+			_, _ = w.Write([]byte(over))
+		}, []string{"/second"}},
+		{"a chunked answer over the capture limit", "", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(over))
+			w.(http.Flusher).Flush()
+		}, []string{"/second"}},
+		{"a request body over the capture limit", over, okAnswer, []string{"/second"}},
+		// A body at the capture limit is captured whole.
+		{"an answer at the capture limit", "", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", strconv.Itoa(len(over)-1))
+			_, _ = w.Write([]byte(over[1:]))
+		}, []string{"/first", "/second"}},
+		{"a request body at the capture limit", over[1:], okAnswer, []string{"/first", "/second"}},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			// Restored once the handlers are gone: Cleanup runs last-in
@@ -78,6 +104,8 @@ func TestASequentialClientIsNotBypassedByTheExchangeBefore(t *testing.T) {
 			captureHookSem = make(chan struct{}, 1)
 
 			app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// The app reads its request whole before it answers.
+				_, _ = io.Copy(io.Discard, r.Body)
 				if r.URL.Path == "/first" {
 					shape.first(w, r)
 					return
@@ -125,15 +153,18 @@ func TestASequentialClientIsNotBypassedByTheExchangeBefore(t *testing.T) {
 			}
 			secondServed := serve.exchange(t, appAddr, "/second", "")
 			letGo()
-			<-firstServed
-			<-secondServed
-			pm.captures.Wait()
+			waitFor(t, serve.ctx, firstServed, "the first exchange's handler")
+			waitFor(t, serve.ctx, secondServed, "the second exchange's handler")
+			waitFor(t, serve.ctx, capturesDone(pm), "the captures")
 
 			mu.Lock()
 			defer mu.Unlock()
 			sort.Strings(captured)
 			if !reflect.DeepEqual(captured, shape.want) {
 				t.Fatalf("a client that sent its second request once it had the first answer whole had %v captured with one sampling slot, want %v: the slot of the exchange before was still held", captured, shape.want)
+			}
+			if n := len(captureHookSem); n != 0 {
+				t.Fatalf("%d capture slot(s) still held once every handler and capture had returned: a slot held from an answer's end was never given back", n)
 			}
 		})
 	}
@@ -214,6 +245,33 @@ type servedConnSet struct {
 	served []chan struct{}
 }
 
+// waitFor waits for done, what names it in a failure, until ctx ends: what
+// never happens (a handler or a capture that never returns, one blocked
+// giving a capture slot back twice) fails the test by name, not by the
+// package's timeout.
+func waitFor(t *testing.T, ctx context.Context, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		hint := ""
+		if strings.HasSuffix(what, "handler") || what == "the captures" {
+			hint = "; a handler or a capture blocked giving a capture slot back twice (the last to give it back waits for ever) never returns"
+		}
+		t.Fatalf("%s: not done within the bound%s", what, hint)
+	}
+}
+
+// capturesDone closes once every capture pm started has returned.
+func capturesDone(pm *IngressProxyManager) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		pm.captures.Wait()
+		close(done)
+	}()
+	return done
+}
+
 // servedConns is a servedConnSet whose teardown, registered after the test's
 // restores so it runs before them, lets the held go (letGo), ends the
 // context, and waits for every handler and capture: what the test swapped is
@@ -228,10 +286,14 @@ func servedConns(t *testing.T, pm *IngressProxyManager, letGo func()) *servedCon
 		s.mu.Lock()
 		served := s.served
 		s.mu.Unlock()
+		// Bounded, so that one that never returns is named, not left to
+		// the package's timeout, which drops what the test said.
+		bound, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
 		for _, c := range served {
-			<-c
+			waitFor(t, bound, c, "a connection's handler")
 		}
-		pm.captures.Wait()
+		waitFor(t, bound, capturesDone(pm), "the captures")
 	})
 	return s
 }

@@ -274,6 +274,12 @@ func (n *buildingNote) end() { n.take()() }
 // it all and the handler has not yet decided its capture.
 var answerWritten func()
 
+// captureHolds, when set (tests only), runs on a zero-copy handler's goroutine
+// with what its exchange holds for its capture, in bytes, and whether it keeps
+// its request's body: at "headers", as the answer's forward begins, and at
+// "written", once it is written whole.
+var captureHolds func(at string, held int, bodyKept bool)
+
 // lossCounted, when set (tests only), runs as a way out of an exchange that
 // does not record it has counted what it lost, before the note's end
 // (buildingNote) lets a recording's stop go on: the instant a stop that asks
@@ -447,10 +453,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// many requests captured" on sequential-call workloads. Pass
 		// releaseLock so the handler gives the slot back as soon as the
 		// connection has no more use for it: as its exchange's answer
-		// ends (markEnd), as its head shows the recording's filters
-		// leave it out (leaveOutOfSample), or as it is demoted to
-		// bypass (chunked / memory pressure). The deferred releaseLock
-		// is the backstop.
+		// ends (markEnd), as its head or its answer's headers show it is
+		// never captured (leaveOutOfSample; a stream, a body over the
+		// capture limit), or as it is demoted to bypass (chunked /
+		// memory pressure). The deferred releaseLock is the backstop.
 		//
 		// Normal mode: forceClose=false (keep-alive preserved), and we
 		// release any (unused) lock here since normal mode doesn't
@@ -1278,15 +1284,19 @@ func writeBadRequest(c net.Conn) {
 //     captured" symptom).
 //
 //   - releaseSlot (only set when forceClose=true): invoked to free the
-//     sampling slot before the caller's deferred release: as the answer's
-//     end is found (markEnd), before the client can have it, once the
-//     exchange's capture holds a capture slot or when nothing of it is
-//     captured; as the exchange's head shows the recording's filters leave
-//     it out (leaveOutOfSample); when the exchange is demoted to bypass
-//     (chunked / unknown-length body, or memory pressure); and as a request
-//     that did not reach the app whole ends the connection. After demotion
-//     the connection continues as pure passthrough with no header mutation,
-//     matching the "untracked + unchanged" rule for ineligible exchanges.
+//     sampling slot before the caller's deferred release, as soon as the
+//     connection has no more use for it: as the exchange's head shows it is
+//     never captured (leaveOutOfSample: the recording's filters leave it
+//     out, or its request body is over the capture limit); when the
+//     exchange is demoted to bypass (chunked / unknown-length body, or
+//     memory pressure); as the answer's headers show nothing of it is
+//     captured (a stream, an answer over the capture limit, a request that
+//     did not reach the app whole); and as the answer's end is found
+//     (markEnd), before the client can have it, once the exchange's capture
+//     holds a capture slot or when its capture was cut short. After
+//     demotion the connection continues as pure passthrough with no header
+//     mutation, matching the "untracked + unchanged" rule for ineligible
+//     exchanges.
 //
 // Downstream (envoy↔keploy) keep-alive is preserved across the entire
 // connection lifetime for normal mode and sampling-bypass; only upstream
@@ -1413,19 +1423,20 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			releaseSlot()
 		}
 	}
-	// leaveOutOfSample takes a sampled connection's exchange that the
-	// recording's filters leave out (hooksUtils.IsFiltered: k8s-proxy's
-	// built-in filter leaves out the kubelet's probes and the cloud load
-	// balancers' health checks, unless probe traffic is asked for) out of
-	// the sample as its head is read, before the app has any of it: its slot
-	// is given back, and nothing of it is handed to the capture, which would
-	// drop it. Held until the app had answered it, the exchange took the one
-	// slot of --enable-sampling=1 for as long as the app took, and a request
-	// that came meanwhile on another connection was passed through
-	// uncaptured, missing from the recording and from the static-dedup
-	// counts. Unlike a demote, the connection keeps its forced close: its
-	// client's next request comes on a new connection, where it can be
-	// sampled.
+	// leaveOutOfSample takes a sampled connection's exchange that is never
+	// captured, as its head shows, out of the sample as that head is read,
+	// before the app has any of it: one the recording's filters leave out
+	// (hooksUtils.IsFiltered: k8s-proxy's built-in filter leaves out the
+	// kubelet's probes and the cloud load balancers' health checks, unless
+	// probe traffic is asked for), or one whose request body is over the
+	// capture limit. Its slot is given back, and nothing of it is handed to
+	// the capture, which would drop it. Held until the app had answered it,
+	// the exchange took the one slot of --enable-sampling=1 for as long as
+	// the app took, and a request that came meanwhile on another connection
+	// was passed through uncaptured, missing from the recording and from the
+	// static-dedup counts. Unlike a demote, the connection keeps its forced
+	// close: its client's next request comes on a new connection, where it
+	// can be sampled.
 	leaveOutOfSample := func() {
 		connCapture = false
 		if releaseSlot != nil {
@@ -1554,6 +1565,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// An exchange the recording's filters leave out is never recorded:
 		// it gives its slot back as its head is read (leaveOutOfSample).
 		if forceCloseActive && filteredAsSent(logger, req, pm.loadIncomingOpts()) {
+			leaveOutOfSample()
+		}
+		// So is one whose request body is over the capture limit: its
+		// capture is cut short (captureBuffer), as its head shows.
+		if forceCloseActive && req.ContentLength > int64(maxHTTPBodyCaptureBytes) {
 			leaveOutOfSample()
 		}
 		// The pause is read as the request has come: what it costs is this
@@ -1756,7 +1772,42 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 		if captureEligible && preBufferedReqBody == nil && req.Body != nil && req.Body != http.NoBody {
 			reqCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
+			if releaseSlot != nil {
+				// A sampled request whose capture a pause cuts short (the
+				// pause lets go of what it held) is known never captured
+				// as it is cut, on whichever goroutine writes the request:
+				// its slot is given back then, not as the answer ends.
+				reqCapture.onCut = releaseSlot
+			}
 			req.Body = newTeeReadCloser(req.Body, reqCapture)
+		}
+		// letGo: the exchange is known never captured, once its request's
+		// write is over (relay.finish). What it holds for its capture (its
+		// captures and a pre-buffered request body, up to the limit for each
+		// body) is let go, not kept through the answer's last forward,
+		// which has no deadline, and a sampled connection gives its slot
+		// back now, not as the answer ends. Held until then, the exchange
+		// held the one slot of --enable-sampling=1 for as long as its answer
+		// took (a stream, a download), and every request that came
+		// meanwhile on another connection was passed through uncaptured,
+		// missing from the recording and from the static-dedup counts. Run
+		// on the handler's goroutine, which reads the answer, and once:
+		// what it let go stays let go (a dropped capture takes no more, and
+		// nothing sets the request's body after the answer's headers), so
+		// markEnd's call after a cut has nothing to do.
+		letGone := false
+		letGo := func() {
+			if letGone {
+				return
+			}
+			letGone = true
+			reqCapture.drop()
+			respCapture.drop()
+			preBufferedReqBody = nil
+			req.Body = http.NoBody
+			if releaseSlot != nil {
+				releaseSlot()
+			}
 		}
 
 		// Sampling-tracked force-close: tell upstream this is a
@@ -1931,6 +1982,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if captureEnabled && pm.notRecordedStream(ctx, logger, req, resp, &win) {
 			captureEnabled = false
 		}
+		hasBody := resp.Body != nil && resp.Body != http.NoBody
 
 		// The app has answered. The rest of a body it answered before it came
 		// is forwarded, within bounds, before the answer (requestRelay.finish).
@@ -1950,9 +2002,24 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			watch = watchClient(logger, clientConn, clientReader, appConn, upSide.drainArrived)
 		}
 
-		captureEligible = captureEnabled && requestWhole
-		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
+		// An answer whose length is over the capture limit is cut short
+		// (captureBuffer), as is known at its headers, and so is a request
+		// whose capture was cut short (its write is over: relay.finish).
+		captureEligible = captureEnabled && requestWhole &&
+			(reqCapture == nil || !reqCapture.Truncated()) &&
+			!(hasBody && resp.ContentLength > int64(maxHTTPBodyCaptureBytes))
+		if !captureEligible {
+			// Nothing of the exchange is captured, and that is known here,
+			// at the answer's headers (a stream, an answer over the
+			// capture limit, a request not whole or not wholly captured).
+			letGo()
+		}
+		if captureEligible && hasBody {
 			respCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
+			// An answer of unknown length (chunked, or ended by the app's
+			// close) is known never captured as its capture is cut short,
+			// by the limit or a pause, not as it ends.
+			respCapture.onCut = letGo
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
 		}
 
@@ -1989,7 +2056,6 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// On Linux the wait returns at once; on a clock as coarse as Windows'
 		// it holds the end up to one tick, as the synchronous loop does.
 		endAt, ended := headersAt, false
-		hasBody := resp.Body != nil && resp.Body != http.NoBody
 		closeDelimited := hasBody && resp.ContentLength < 0 && !isChunked(resp.TransferEncoding)
 		markEnd := func() {
 			// The answer's end is read from the app: what the client does
@@ -2026,10 +2092,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if releaseSlot != nil && held.tryHold() {
 					releaseSlot()
 				}
-			} else if releaseSlot != nil {
-				// Nothing of it is captured: its slot is given back before
-				// its client can have the end, as above.
-				releaseSlot()
+			} else {
+				// Nothing of it is captured: let go before its client can
+				// have the end, if not already as that was known.
+				letGo()
 			}
 		}
 		if hasBody {
@@ -2043,6 +2109,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// and the connection carries nothing after it.
 		clientGone := false
 		forward := &clientWriter{Writer: clientConn}
+		if captureHolds != nil {
+			captureHolds("headers", len(preBufferedReqBody)+reqCapture.held()+respCapture.held(), req.Body != nil && req.Body != http.NoBody)
+		}
 		if err := writeAnswer(resp, forward); err != nil {
 			// A forward the client's side failed before the answer's end
 			// was found reads on to the end what of the answer is the
@@ -2084,6 +2153,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		} else {
 			if resp.Body != nil {
 				_ = resp.Body.Close()
+			}
+			if captureHolds != nil {
+				captureHolds("written", len(preBufferedReqBody)+reqCapture.held()+respCapture.held(), req.Body != nil && req.Body != http.NoBody)
 			}
 			if answerWritten != nil {
 				answerWritten()

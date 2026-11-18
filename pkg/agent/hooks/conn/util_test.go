@@ -272,9 +272,9 @@ func TestIsFilteredReadsHostAlikeOffTheWireAndFromTheDump(t *testing.T) {
 		{"an exclude filter on Host that matches",
 			models.Filter{Headers: map[string]string{"Host": `^api\.`}, FilterPolicy: models.Exclude}, true},
 		// Only Host is read from req.Host: a header the request does not
-		// carry matches nothing.
+		// carry matches nothing, not even a regex that matches "".
 		{"an exclude filter on a header the request does not carry",
-			models.Filter{Headers: map[string]string{"X-Tenant": `^api\.`}, FilterPolicy: models.Exclude}, false},
+			models.Filter{Headers: map[string]string{"X-Tenant": `.*`}, FilterPolicy: models.Exclude}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := models.IncomingOptions{Filters: []models.Filter{tc.filter}}
