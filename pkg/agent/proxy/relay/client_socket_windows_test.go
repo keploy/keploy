@@ -278,3 +278,64 @@ func TestWindowsAConnectionTheClientResetSaysSoBeforeTheProxysFIN(t *testing.T) 
 		t.Fatalf("the reset answer reads as %+v, want closed with none of it acknowledged", l)
 	}
 }
+
+// On a real socket: a client that resets after its FIN, with no FIN of the
+// proxy's sent, closes the connection with the error Linux's socket keeps in
+// CLOSE_WAIT, EPIPE, and no other: the session keeps a pipe apart from a reset
+// (supervisor's client_end_codes.go), so its parsers see which came. A client
+// does so two ways: it closes and then resets the answer the proxy writes it,
+// or it aborts its half-closed socket and its stack resets that answer.
+// Windows sends no reset when a client aborts (SO_LINGER 0) a socket whose
+// FIN is acknowledged: measured on Windows 11 over loopback, the proxy's end
+// stayed in CLOSE_WAIT for 3 s and read EOF, whether the linger was set before
+// or after the half-close, with a shutdown of both sides or a read pending;
+// the client's stack resets the next segment the proxy sends instead. So the
+// aborting client's reset is drawn by the answer, and until then the socket
+// tells none.
+func TestWindowsAClientsResetAfterItsFINIsEPIPE(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct {
+		name  string
+		reset func(t *testing.T, app, proxyClient net.Conn)
+	}{
+		{"aborted after its half-close, then sent the answer", func(t *testing.T, app, proxyClient net.Conn) {
+			tc := app.(*net.TCPConn)
+			if err := tc.CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+			awaitTCPState(t, proxyClient, stateCloseWait, "the client's FIN is in")
+			if err := tc.SetLinger(0); err != nil {
+				t.Fatal(err)
+			}
+			_ = tc.Close()
+			// A stack that did reset at the abort has closed the socket, and
+			// the write may then fail; the reset is the same one.
+			if _, err := proxyClient.Write([]byte("the answer, after the client's abort")); err != nil &&
+				tcpState(t, proxyClient) != stateClosed {
+				t.Fatal(err)
+			}
+		}},
+		{"closed, then reset the proxy's answer", func(t *testing.T, app, proxyClient net.Conn) {
+			_ = app.Close()
+			awaitTCPState(t, proxyClient, stateCloseWait, "the closed client's FIN is in")
+			if _, err := proxyClient.Write([]byte("the answer, after the client's FIN")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			app, proxyClient := loopbackPair(t)
+			rc, err := proxyClient.(*net.TCPConn).SyscallConn()
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := newTCPClientSocket(rc, nil)
+			row.reset(t, app, proxyClient)
+			awaitTCPState(t, proxyClient, stateClosed, "the client's reset is in")
+			if err := s.pendingError(true); err != syscall.EPIPE {
+				t.Fatalf("pendingError(true) = %v, want EPIPE exactly", err)
+			}
+		})
+	}
+}

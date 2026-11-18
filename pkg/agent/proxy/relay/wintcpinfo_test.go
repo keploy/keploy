@@ -212,6 +212,7 @@ func TestAWindowsReadsResetIsAfterTheClientsFINOnlyByItsCodeAndCounts(t *testing
 	}{
 		{"WSAECONNABORTED, closed with the proxy's bytes in flight", winsockRead(wsaeConnAborted), closed, false, true},
 		{"the same, retransmitted once", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 8, retrans: 8}, false, true},
+		{"one byte in flight (a window probe's)", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 1}, false, true},
 		{"WSAECONNRESET: a reset with no FIN before", winsockRead(10054), closed, false, false},
 		{"WSAENETRESET", winsockRead(10052), closed, false, false},
 		{"a read that ended in no error", nil, closed, false, false},
