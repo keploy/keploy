@@ -621,7 +621,7 @@ func filtersOf(s *setDerived) *setFilters {
 	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{},
 		seeds: [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}, words: map[string][]*wordsEntry{},
 		lists: map[weak.Pointer[[]string]]*listsEntry{}, post: map[string][]int32{}, runs: map[string][]int32{},
-		short: map[string]*filterEntry{}})
+		short: map[string]*filterEntry{}, fieldTexts: map[fieldsTextKey]*fieldsEntry{}})
 	if !loaded {
 		runtime.AddCleanup(s, func(k weak.Pointer[setDerived]) { setsFilters.Delete(k) }, k)
 	}
@@ -675,21 +675,22 @@ func (t *readerText) idEntry(fs *setFilters) *filterEntry {
 	if first {
 		n += filterIDGroupBytes
 	}
-	return newFilterEntry(fs, t.x.set, fs.of, id, strings.Clone, n, false)
+	return newSetEntry(fs, t.x.set, fs.of, id, strings.Clone, n, &filterEntry{})
 }
 
-// newFilterEntry is m's entry at k, made where m holds none yet: n counted
-// on s's budget first (nil where it does not fit), then the entry stored
-// under key(k), fs's lock held. A call that finds the entry another call
-// made meanwhile gives its count back.
-func newFilterEntry[K comparable](fs *setFilters, s *setDerived, m map[K]*filterEntry, k K, key func(K) K, n int64, byText bool) *filterEntry {
+// newSetEntry is m's entry at k, made where m holds none yet: n counted on
+// s's budget first (nil where it does not fit), then made stored under
+// key(k), fs's lock held: one of the set's filter entries (filterEntry) or
+// field views (fieldsEntry). A call that finds the entry another call made
+// meanwhile gives its count back.
+func newSetEntry[K comparable, E any](fs *setFilters, s *setDerived, m map[K]*E, k K, key func(K) K, n int64, made *E) *E {
 	if !setClaim(s, n) {
 		return nil
 	}
 	fs.mu.Lock()
 	e := m[k]
 	if e == nil {
-		e, n = &filterEntry{byText: byText}, 0
+		e, n = made, 0
 		m[key(k)] = e
 	}
 	fs.mu.Unlock()
@@ -734,8 +735,12 @@ func (t *readerText) textEntry(fs *setFilters) *filterEntry {
 	if first {
 		n += filterTextGroupBytes
 	}
-	return newFilterEntry(fs, t.x.set, fs.texts, k, func(k filterTextKey) filterTextKey { return k }, n, true)
+	return newSetEntry(fs, t.x.set, fs.texts, k, sameKey[filterTextKey], n, &filterEntry{byText: true})
 }
+
+// sameKey is k: a map's key that holds nothing to copy for the set to keep
+// (newSetEntry).
+func sameKey[K any](k K) K { return k }
 
 // buildFilter is the filter of t's recording's words (setFilter), or of its
 // text's (textEntry), counted on the set's budget by its bits as allocated
@@ -980,7 +985,7 @@ func (t *readerText) shortEntry() *filterEntry {
 		if first {
 			n += filterIDGroupBytes
 		}
-		if e = newFilterEntry(fs, t.x.set, fs.short, s, strings.Clone, n, true); e == nil {
+		if e = newSetEntry(fs, t.x.set, fs.short, s, strings.Clone, n, &filterEntry{byText: true}); e == nil {
 			return nil
 		}
 	}
@@ -1289,7 +1294,7 @@ func fieldsHash(seed maphash.Seed, s string, fields []rawField) uint64 {
 // payload read here (held), not read again. t finds its entry once.
 func (t *readerText) setFields() (fieldWords, bool) {
 	if t.fields != nil {
-		return t.fields.v, t.fields.ok
+		return t.fields.v, true
 	}
 	fs := t.x.filters
 	if fs == nil || t.raw == nil || t.rawUnread || t.noFields {
@@ -1314,9 +1319,8 @@ func (t *readerText) setFields() (fieldWords, bool) {
 // fieldsEntryOf is the set's entry for the field view of b, a payload
 // read, by its text and fields (fieldsTextKey): the one there, or one made
 // and counted on the set's budget as the set holds it (fieldsEntryBytes,
-// fieldsTextSlotBytes, and the map's first group for the first). nil where
-// b was not read or that does not fit. A call that finds the entry another
-// call made meanwhile gives its count back.
+// fieldsTextSlotBytes, and the map's first group for the first;
+// newSetEntry). nil where b was not read or that does not fit.
 func fieldsEntryOf(fs *setFilters, s *setDerived, b rawBody) *fieldsEntry {
 	if !b.read {
 		return nil
@@ -1332,25 +1336,7 @@ func fieldsEntryOf(fs *setFilters, s *setDerived, b rawBody) *fieldsEntry {
 	if first {
 		n += fieldsTextGroupBytes
 	}
-	if !setClaim(s, n) {
-		return nil
-	}
-	fs.mu.Lock()
-	if fs.fieldTexts == nil {
-		fs.fieldTexts = map[fieldsTextKey]*fieldsEntry{}
-	}
-	e = fs.fieldTexts[k]
-	if e == nil {
-		e, n = &fieldsEntry{}, 0
-		fs.fieldTexts[k] = e
-	}
-	fs.mu.Unlock()
-	if n > 0 {
-		s.mu.Lock()
-		s.budget.used -= n
-		s.mu.Unlock()
-	}
-	return e
+	return newSetEntry(fs, s, fs.fieldTexts, k, sameKey[fieldsTextKey], n, &fieldsEntry{})
 }
 
 // buildSetFields is the field view of b, t's payload, for the set
