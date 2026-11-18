@@ -3963,8 +3963,8 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 			}
 			return verdict, wait, after
 		}()
-		if f := m.exact.round.onSettled; f != nil && verdict == exactServed {
-			f()
+		if f := m.exact.round.onSettled.Load(); f != nil && verdict == exactServed {
+			(*f)(mk.Name)
 		}
 		if after != nil {
 			after()

@@ -1232,12 +1232,12 @@ func TestARecordingTheStagingTookIsNoCandidateBeforeTheReplaysAccountOfIt(t *tes
 	own := *shown(s.snapshot(t), "own")
 	var mid integrations.RoundSnapshot
 	var claimed bool
-	s.mm.exact.round.onSettled = func() {
-		s.mm.exact.round.onSettled = nil
+	s.mm.OnSettled(func(string) {
+		s.mm.OnSettled(nil)
 		s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
 		mid = s.snapshot(t)
 		claimed = s.mm.ClaimPairing(s.ms["own"])
-	}
+	})
 	if !s.mm.DeleteFilteredMock(own) {
 		t.Fatal("the consume was refused")
 	}
