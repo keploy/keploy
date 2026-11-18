@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package relay
 
@@ -170,7 +170,7 @@ func receiveBufferOf(t *testing.T, c net.Conn) int {
 	n := 0
 	if err := rc.Control(func(fd uintptr) {
 		var gerr error
-		if n, gerr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF); gerr != nil {
+		if n, gerr = receiveBufferSizeOf(fd); gerr != nil {
 			t.Error(gerr)
 		}
 	}); err != nil {

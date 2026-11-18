@@ -269,3 +269,17 @@ func (m *MockManager) OnConsume(f func(name string)) {
 	}
 	m.exact.round.onConsume.Store(&f)
 }
+
+// OnSettled is a test seam: f, when not nil, runs on a consuming call's
+// goroutine once the store settled the consume of the recording named name
+// as a serve and let its round lock go, before what the consume tells the
+// replay (the served count, the parsers' indexes); nil removes it. A test
+// installs a view, or runs another call, in that instant with it, never by
+// timing. Production code never sets it.
+func (m *MockManager) OnSettled(f func(name string)) {
+	if f == nil {
+		m.exact.round.onSettled.Store(nil)
+		return
+	}
+	m.exact.round.onSettled.Store(&f)
+}

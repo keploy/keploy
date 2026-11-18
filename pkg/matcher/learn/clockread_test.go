@@ -1838,3 +1838,42 @@ func TestADateOfNoZoneOnADayWithNoMidnightIsThatDaysFirstInstant(t *testing.T) {
 		}
 	}
 }
+
+// A refusal names this replay's zone beside the learned one only where the two
+// read other offsets (appZoneHint), never for two forms of one zone's file: a
+// slim one (tzifSlim: no transition after the year its rule took over, zic's
+// default form, as the zone data built into keploy holds them) and a fat one
+// (every change to 2037: the distributions' tzdata). Go ends a slim file's
+// zones at each year's start after its last transition, and at the start of a
+// leap year's last day (golang/go#81583), a fat file's at their next change of
+// offset; keploy compared where Go ends them, and told an application read in
+// Europe/Berlin that it ran in Europe/Berlin, not in Europe/Berlin.
+func TestARefusalNamesNoOtherZoneForTwoFormsOfOneZonesFile(t *testing.T) {
+	load := func(b []byte) *time.Location {
+		loc, err := time.LoadLocationFromTZData("Europe/Berlin", b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loc
+	}
+	eu := euTurns(2037)
+	slim := load(tzifSlim(3600, 7200, euTurns(1996), "CET-1CEST,M3.5.0,M10.5.0/3"))
+	fat := load(tzif(alternate(3600, 7200, len(eu)), eu))
+	newYork := load(tzifSlim(-5*3600, -4*3600, usTurns(2007), "EST5EDT,M3.2.0,M11.1.0"))
+	for _, at := range []time.Time{time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC), time.Date(2028, 12, 31, 12, 0, 0, 0, time.UTC)} {
+		for _, row := range []struct {
+			what            string
+			replay, learned *time.Location
+			hint            bool
+		}{
+			{"a slim file, learned in a fat one", slim, fat, false},
+			{"a fat file, learned in a slim one", fat, slim, false},
+			{"New York's rules, learned in Berlin's", newYork, fat, true},
+		} {
+			s := Span{From: at.Add(-time.Second), To: at, Zone: row.replay, Own: true}
+			if h := appZoneHint("Europe/Berlin", row.learned, s); (h != "") != row.hint {
+				t.Errorf("%s on %s: hint %q; want one %v", row.what, at.Format(time.RFC3339), h, row.hint)
+			}
+		}
+	}
+}

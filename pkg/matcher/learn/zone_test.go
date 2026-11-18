@@ -2,6 +2,7 @@ package learn
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -144,7 +145,10 @@ func tzif(offs []int, at []time.Time) []byte {
 }
 
 // tzifRules is the zone file data's rules from 1901 to 2038 hold, written
-// as a version 1 file (tzif): other bytes of the same rules there.
+// as a version 1 file (tzif): other bytes of the same rules there, one
+// transition at each change of offset (models.ZoneEnd steps to the start
+// of each UTC year too, where most read none). tzif names a transition's
+// offset by a byte, so it holds at most 255 of them.
 func tzifRules(t *testing.T, data []byte) []byte {
 	t.Helper()
 	loc, err := time.LoadLocationFromTZData("", data)
@@ -155,18 +159,241 @@ func tzifRules(t *testing.T, data []byte) []byte {
 	_, off := from.In(loc).Zone()
 	offs, at := []int{off}, []time.Time(nil)
 	for tt := from; ; {
-		_, end := tt.In(loc).ZoneBounds()
+		end := models.ZoneEnd(tt.In(loc))
 		if end.IsZero() || !end.Before(to) {
 			break
 		}
-		_, off := end.In(loc).Zone()
-		offs, at, tt = append(offs, off), append(at, end), end
+		if _, off := end.In(loc).Zone(); off != offs[len(offs)-1] {
+			offs, at = append(offs, off), append(at, end)
+		}
+		tt = end
+	}
+	if len(at) > 255 {
+		t.Fatalf("tzifRules: %d changes of offset, more than a version 1 file of tzif's holds", len(at))
 	}
 	b := tzif(offs, at)
 	if bytes.Equal(b, data) {
 		t.Fatal("tzifRules wrote the bytes it read")
 	}
 	return b
+}
+
+// tzifSlim is a zone file (version 2) as zic -b slim writes one: an empty
+// 32-bit block; the transitions at, the zone std seconds east of UTC
+// before at[0], turning to dst at each even one and back at each odd one;
+// and rule, its TZ footer, which gives every instant after the last of
+// them: no transition is listed after the year it took over.
+func tzifSlim(std, dst int, at []time.Time, rule string) []byte {
+	var b []byte
+	header := func(counts ...int) {
+		b = append(b, "TZif2"...)
+		b = append(b, make([]byte, 15)...)
+		for _, n := range counts {
+			b = binary.BigEndian.AppendUint32(b, uint32(n))
+		}
+	}
+	// isutcnt, isstdcnt, leapcnt, timecnt, typecnt, charcnt.
+	header(0, 0, 0, 0, 0, 0)
+	header(0, 0, 0, len(at), 2, 8)
+	for _, t := range at {
+		b = binary.BigEndian.AppendUint64(b, uint64(t.Unix()))
+	}
+	for i := range at {
+		b = append(b, byte(1-i%2))
+	}
+	b = binary.BigEndian.AppendUint32(b, uint32(int32(std)))
+	b = append(b, 0, 0)
+	b = binary.BigEndian.AppendUint32(b, uint32(int32(dst)))
+	b = append(b, 1, 4)
+	b = append(b, "STD\x00DST\x00"...)
+	return append(b, "\n"+rule+"\n"...)
+}
+
+// alternate is the offsets of a zone that turns from a to b and back at
+// each of n transitions: a before the first (tzif's offs).
+func alternate(a, b, n int) []int {
+	offs := []int{a}
+	for i := 0; i < n; i++ {
+		offs = append(offs, []int{b, a}[i%2])
+	}
+	return offs
+}
+
+// sundayAt is the n-th Sunday (the last for n -1) of month m in year y,
+// at h:00 in zone.
+func sundayAt(y int, m time.Month, n, h int, zone *time.Location) time.Time {
+	if n < 0 {
+		last := time.Date(y, m+1, 0, h, 0, 0, 0, zone)
+		return last.AddDate(0, 0, -int(last.Weekday()))
+	}
+	first := time.Date(y, m, 1, h, 0, 0, 0, zone)
+	return first.AddDate(0, 0, (7-int(first.Weekday()))%7+7*(n-1))
+}
+
+// euTurns are Europe/Berlin's changes of offset from 1980 through the
+// year to, worked out from its rules, never read from a zone file: summer
+// time (UTC+02:00) from the last Sunday of March (1980: April 6) to the
+// last of September (from 1996, of October), both at 01:00 UTC.
+func euTurns(to int) []time.Time {
+	at := []time.Time{time.Date(1980, 4, 6, 1, 0, 0, 0, time.UTC), time.Date(1980, 9, 28, 1, 0, 0, 0, time.UTC)}
+	for y := 1981; y <= to; y++ {
+		end := time.September
+		if y >= 1996 {
+			end = time.October
+		}
+		at = append(at, sundayAt(y, time.March, -1, 1, time.UTC), sundayAt(y, end, -1, 1, time.UTC))
+	}
+	return at
+}
+
+// usTurns are the changes of offset of a zone of America/New_York's rule
+// since 2007 from 2007 through the year to (UTC-05:00 before): summer time
+// (UTC-04:00) from the second Sunday of March at 02:00 EST to the first of
+// November at 02:00 EDT.
+func usTurns(to int) []time.Time {
+	est, edt := time.FixedZone("EST", -5*3600), time.FixedZone("EDT", -4*3600)
+	var at []time.Time
+	for y := 2007; y <= to; y++ {
+		at = append(at, sundayAt(y, time.March, 2, 2, est), sundayAt(y, time.November, 1, 2, edt))
+	}
+	return at
+}
+
+// auTurns are the changes of offset of a zone of Australia/Sydney's rule
+// from 1970 through the year to, in summer time (UTC+11:00) on 1970-01-01:
+// standard time (UTC+10:00) from the first Sunday of April at 03:00 AEDT,
+// summer time from the first of October at 02:00 AEST.
+func auTurns(to int) []time.Time {
+	aest, aedt := time.FixedZone("AEST", 10*3600), time.FixedZone("AEDT", 11*3600)
+	var at []time.Time
+	for y := 1970; y <= to; y++ {
+		at = append(at, sundayAt(y, time.April, 1, 3, aedt), sundayAt(y, time.October, 1, 2, aest))
+	}
+	return at
+}
+
+// turnMoved is at with at[i] moved to to.
+func turnMoved(at []time.Time, i int, to time.Time) []time.Time {
+	m := append([]time.Time(nil), at...)
+	m[i] = to
+	return m
+}
+
+// returnsWithin runs f, failing t at once where it has not returned after
+// d: a walk that stops advancing never returns (its goroutine spins on
+// until the test binary ends).
+func returnsWithin(t *testing.T, d time.Duration, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s: did not return within %s: the walk of the two zones' changes of offset stopped advancing", what, d)
+	}
+}
+
+// zoneRulesDiffer compares two zones at every change of offset either makes
+// from 1970 to 2038, whichever of zic's two forms each zone file is in, and
+// returns. A slim file (zic -b slim, zic's default: Go's own zoneinfo.zip and
+// so the zone data built into keploy) lists no transition after the year its
+// rule (the TZ footer) took over, and Go reads every later instant through
+// that rule, ending the last zone of a leap year at the start of its last day
+// (golang/go#81583): a walk that steps to ZoneBounds' end stops there
+// (Europe/Berlin's slim file on 1996-12-31, America/New_York's on 2008-12-31)
+// and never returns, so keploy hung reading such a zone, either side of the
+// comparison slim. A fat file (zic -b fat: the distributions' tzdata) lists
+// every change to 2037. The rows' files are written from each zone's rules
+// worked out by hand (euTurns, usTurns, auTurns), never from Go's reading of a
+// rule: a slim file of Berlin's rule (transitions to 1996), of New York's
+// (2007) and of Sydney's (its rule alone, so its first such day is 1972-12-31,
+// in summer time), each the same as its fat file, and other than a fat file
+// one change of offset moved, after such a day: the first instant they differ
+// is named, either way round.
+func TestAZoneFileOfARuleOfSummerTimeIsComparedAtEveryChangeInEitherForm(t *testing.T) {
+	load := func(b []byte) *time.Location {
+		loc, err := time.LoadLocationFromTZData("", b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loc
+	}
+	eu, us, au := euTurns(2037), usTurns(2037), auTurns(2037)
+	euSlim := load(tzifSlim(3600, 7200, euTurns(1996), "CET-1CEST,M3.5.0,M10.5.0/3"))
+	usSlim := load(tzifSlim(-5*3600, -4*3600, usTurns(2007), "EST5EDT,M3.2.0,M11.1.0"))
+	auSlim := load(tzifSlim(11*3600, 10*3600, nil, "AEST-10AEDT,M10.1.0,M4.1.0/3"))
+	euFat := func(at []time.Time) *time.Location { return load(tzif(alternate(3600, 7200, len(at)), at)) }
+	usFat := func(at []time.Time) *time.Location { return load(tzif(alternate(-5*3600, -4*3600, len(at)), at)) }
+	auFat := func(at []time.Time) *time.Location { return load(tzif(alternate(11*3600, 10*3600, len(at)), at)) }
+	// Berlin's turns of 1997 are eu[34] and eu[35]; an hour of summer
+	// time on 1997-01-01, the first instant after the day the slim file's
+	// walk stopped on, is set in before them.
+	blip := append(append(append([]time.Time(nil), eu[:34]...), time.Date(1997, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(1997, 1, 1, 1, 0, 0, 0, time.UTC)), eu[34:]...)
+	for _, row := range []struct {
+		what string
+		a, b *time.Location
+		at   time.Time // the first instant they differ; zero for none
+	}{
+		{"Berlin's slim file and itself", euSlim, euSlim, time.Time{}},
+		{"Berlin's slim file and its fat one", euSlim, euFat(eu), time.Time{}},
+		{"Berlin's slim file and a fat one of an hour of summer time on 1997-01-01", euSlim, euFat(blip), time.Date(1997, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{"Berlin's slim file and a fat one whose summer time of 2030 starts a week late", euSlim, euFat(turnMoved(eu, 2*(2030-1980), time.Date(2030, 4, 7, 1, 0, 0, 0, time.UTC))), time.Date(2030, 3, 31, 1, 0, 0, 0, time.UTC)},
+		{"New York's slim file and its fat one", usSlim, usFat(us), time.Time{}},
+		{"New York's slim file and a fat one whose summer time of 2009 ends a week early", usSlim, usFat(turnMoved(us, 2*(2009-2007)+1, time.Date(2009, 10, 25, 6, 0, 0, 0, time.UTC))), time.Date(2009, 10, 25, 6, 0, 0, 0, time.UTC)},
+		{"Sydney's rule alone and its fat file", auSlim, auFat(au), time.Time{}},
+		{"Sydney's rule alone and a fat file whose summer time of 1973 ends a week late", auSlim, auFat(turnMoved(au, 2*(1973-1970), time.Date(1973, 4, 7, 16, 0, 0, 0, time.UTC))), time.Date(1973, 3, 31, 16, 0, 0, 0, time.UTC)},
+	} {
+		for _, swap := range []bool{false, true} {
+			a, b := row.a, row.b
+			if swap {
+				a, b = b, a
+			}
+			var at time.Time
+			var differ bool
+			returnsWithin(t, 10*time.Second, row.what, func() { at, differ = zoneRulesDiffer(a, b) })
+			if differ != !row.at.IsZero() || !at.Equal(row.at) {
+				t.Errorf("%s (swapped %v): differ %v at %s; want %v at %s", row.what, swap, differ, at, !row.at.IsZero(), row.at)
+			}
+		}
+	}
+}
+
+// The zone keploy reads of a process whose /etc/localtime links to a slim
+// file of Europe/Berlin (zic's default form, Go's own zoneinfo.zip's) is
+// Berlin, whatever form keploy's own zone data holds it in (the host's
+// files, or the slim ones built into keploy): the slim file's rules are
+// Berlin's from 1970 to 2038
+// (TestAZoneFileOfARuleOfSummerTimeIsComparedAtEveryChangeInEitherForm).
+// keploy compared the two at every change of offset and never returned, so
+// the agent hung where it read the zone: its own as it started, an
+// application's process's at each of its connections.
+func TestAProcessWhoseLocaltimeIsASlimZoneFileOfSummerTimeIsReadInItsZone(t *testing.T) {
+	r := t.TempDir()
+	p := filepath.Join(r, "usr/share/zoneinfo/Europe/Berlin")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, tzifSlim(3600, 7200, euTurns(1996), "CET-1CEST,M3.5.0,M10.5.0/3"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(r, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/share/zoneinfo/Europe/Berlin", filepath.Join(r, "etc/localtime")); err != nil {
+		t.Fatal(err)
+	}
+	var loc *time.Location
+	var err error
+	returnsWithin(t, 10*time.Second, "ReadZone of a slim Europe/Berlin", func() { loc, err = ReadZone(r, "", false) })
+	if err != nil {
+		t.Fatalf("ReadZone of a slim Europe/Berlin: %v", err)
+	}
+	if _, off := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC).In(loc).Zone(); loc.String() != "Europe/Berlin" || off != 7200 {
+		t.Errorf("ReadZone of a slim Europe/Berlin: %q at %d on 2026-07-01; want Europe/Berlin at 7200", loc.String(), off)
+	}
 }
 
 // A zone file whose rules are not those of the zone its link or its

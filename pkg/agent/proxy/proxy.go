@@ -2749,11 +2749,12 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 // kept). ctx is the connections' context, which reads a paired connection's
 // close (pairClosing).
 func (p *Proxy) acceptedConn(ctx context.Context, raw net.Conn) (clientConn net.Conn, tracked *trackedConn) {
-	// On macOS every byte written to the client is counted from
-	// here, under the tracking and any TLS, whatever layer writes
-	// it: the relay reads what the client acknowledged from the
-	// count (relay.CountClientWrites). raw stays the socket the
-	// listener gave, for what keys or reads it (countAccept,
+	// On macOS and Windows every byte written to the client is
+	// counted from here, under the tracking and any TLS, whatever
+	// layer writes it: the relay reads what was written to the
+	// client from the count, and on macOS what the client
+	// acknowledged (relay.CountClientWrites). raw stays the socket
+	// the listener gave, for what keys or reads it (countAccept,
 	// pairKey, the paired bytes).
 	clientConn = relay.CountClientWrites(raw)
 	if p.keepsConnections() {
