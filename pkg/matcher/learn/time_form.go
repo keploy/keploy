@@ -22,8 +22,13 @@ import (
 //   - a value learning read as the application's clock: a Clock it
 //     learned; a read it refused as one it cannot check (cannot-check: an
 //     offset the replay does not compare, or a read the call's own answer
-//     holds); or a moment sent at two places, each its own call's read of
-//     the clock (two-sources).
+//     holds); a moment sent at two places, each its own call's read of
+//     the clock (two-sources); or a moment the test case's own request held
+//     when recorded by a cut round F's request gives none of round F's by
+//     (instant-pick-test-case: the iat of the token a test sent, beside a
+//     created_at written in the same second): a read of the clock, or a
+//     pick by it among the request's times, a time either way, since a
+//     copy of the request's text would stand in round F's too.
 //
 // Two of those are ids, not times, and keep the check learning gave them
 // (refused, bound, or a read of the clock checked by its range), as under
@@ -53,10 +58,12 @@ import (
 // refusal only where both sources are reads of the clock; and, at a
 // decoder-typed leaf, a pick: round F's moment also stands in an answer it
 // gave earlier, and a decoder-typed time is checked by its type and format
-// alone (a time never blocks keeping a test). A Value, a Fresh value and
-// every other refusal stay as learned: a moment an earlier answer or request
-// also holds in a text (pick), unknown, or two sources that are no reads is
-// a bound value, which variables decide, never the time default. A value
+// alone (a time never blocks keeping a test); and a pick from the test
+// case's request (instant-pick-test-case), a read of the clock as above, in
+// a text too. A Value, a Fresh value and every other refusal stay as
+// learned: a moment an earlier answer or a send also holds in a text (pick),
+// unknown, or two sources that are no reads is a bound value, which
+// variables decide, never the time default. A value
 // whose two runs write it in two forms of an instant (a zone offset in one
 // run where the other wrote Z, an epoch in seconds in one and milliseconds
 // in the other) is checked by its forms alone too: a replay passes a value
@@ -175,7 +182,7 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 		// by form the time default gives a word of a text the same around
 		// it (amongBinds; a text's word is no decoder-typed time), which
 		// text keeps only where every other changed word is put back.
-		if d.Refusal != nil && dc.settles(d.Refusal.Kind, false, declared) {
+		if d.Refusal != nil && dc.settles(*d.Refusal, false, declared) {
 			dc.around = dc.amongBinds(path, at, n, c, d, declared)
 		}
 		return d
@@ -183,7 +190,7 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	// A leaf typed Instant is decided here whole, never as a text's word,
 	// and only where both runs' values read as instants (leaf).
 	typed := dc.in.Rec.Leaves[path].Type == Instant
-	if atKey(path, declared) || !dc.settles(d.Refusal.Kind, typed, declared) {
+	if atKey(path, declared) || !dc.settles(*d.Refusal, typed, declared) {
 		return d
 	}
 	form, formF := dc.timeFormOf(path, c, nil)
@@ -201,14 +208,22 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 	return nd
 }
 
-// settles reports whether the time default settles a refusal of kind k of
-// the instant instantLearned last decided, at a decoder-typed leaf (typed)
-// or one a clock rule names (declared): on a time field, a refusal of which
+// checkPickTestCase is the check of a pick from the test case's own request
+// (Refusal.Check): the recorded moment stands there by a cut that gives none
+// of round F's moments in the request as round F sent it.
+const checkPickTestCase = "instant-pick-test-case"
+
+// settles reports whether the time default settles rf, a refusal of the
+// instant instantLearned last decided, at a decoder-typed leaf (typed) or
+// one a clock rule names (declared): on a time field, a refusal of which
 // read, or which scope, a moment is (timeSettles), a two-sources refusal
-// only where both sources are reads of the clock (readClock: see above),
-// and a pick at a decoder-typed leaf.
-func (dc *decider) settles(k RefusalKind, typed, declared bool) bool {
-	return k == RefusalTwoSources && dc.readClock || timeSettles[k] && (typed || declared || dc.readClock) || k == RefusalPick && typed
+// only where both sources are reads of the clock (readClock: see above), a
+// pick at a decoder-typed leaf, and a pick from the test case's request
+// (checkPickTestCase), a read of the clock or a pick by it (see above), on
+// any field.
+func (dc *decider) settles(rf Refusal, typed, declared bool) bool {
+	k := rf.Kind
+	return k == RefusalTwoSources && dc.readClock || timeSettles[k] && (typed || declared || dc.readClock) || k == RefusalPick && (typed || rf.Check == checkPickTestCase)
 }
 
 // amongBinds is d, the refusal of c, a time the time default settles
