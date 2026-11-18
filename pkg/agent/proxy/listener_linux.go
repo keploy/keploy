@@ -5,14 +5,18 @@ package proxy
 import (
 	"bufio"
 	"encoding/hex"
+	"math"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -164,7 +168,61 @@ func listening(ip net.IP, port uint32) bool {
 	return len(listenInodes(ip, port)) > 0
 }
 
+// listenSockets reads the sockets that listen on a port
+// (util.TCPListenSockets); a test replaces it to make the read fail.
+var listenSockets = util.TCPListenSockets
+
+// procReads counts listenInodes' reads of /proc/net/tcp and tcp6 (each read
+// of the two counts once), for the rows that pin none while sock_diag
+// answers.
+var procReads atomic.Int64
+
+// listenInodes is the inodes of the sockets listening on port at an address
+// a connection to ip reaches (reaches). It takes them from sock_diag's dump
+// of the sockets listening on port (listenSockets), whose cost is the
+// machine's listeners: a read of /proc/net/tcp formats every socket of the
+// namespace and walks every bucket of the kernel's established hash, a cost
+// that grows with every connection the machine holds, and it is made twice
+// for each local connection a mock run takes (unowned, listenerOwner). When
+// sock_diag cannot be read (a kernel without inet_diag) it reads
+// /proc/net/tcp and tcp6 (listenInodesProc), which list the same sockets.
 func listenInodes(ip net.IP, port uint32) map[string]bool {
+	out := map[string]bool{}
+	if port > math.MaxUint16 {
+		return out // no socket listens on it, and no /proc/net/tcp line has it
+	}
+	socks, err := listenSockets(uint16(port))
+	if err != nil {
+		return listenInodesProc(ip, port)
+	}
+	want := connAddr(ip)
+	for _, s := range socks {
+		if reaches(s.Addr.WithZone(""), want) {
+			out[strconv.FormatUint(uint64(s.Inode), 10)] = true
+		}
+	}
+	return out
+}
+
+// connAddr is ip as reaches compares it: an IPv4 address as itself, not
+// v4-mapped; the zero Addr for nil.
+func connAddr(ip net.IP) netip.Addr {
+	a, _ := netip.AddrFromSlice(ip)
+	return a.Unmap()
+}
+
+// reaches says whether a connection to want reaches a socket listening at
+// local (both unzoned, an IPv4 address as itself): one at any address does,
+// one at want does, and, when want is a loopback address, one at any loopback
+// address does.
+func reaches(local, want netip.Addr) bool {
+	return local.IsUnspecified() || local == want || (want.IsLoopback() && local.IsLoopback())
+}
+
+// listenInodesProc is listenInodes read from /proc/net/tcp and tcp6.
+func listenInodesProc(ip net.IP, port uint32) map[string]bool {
+	procReads.Add(1)
+	want := connAddr(ip)
 	out := map[string]bool{}
 	for _, file := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
 		f, err := os.Open(file)
@@ -186,7 +244,7 @@ func listenInodes(ip net.IP, port uint32) map[string]bool {
 			if err != nil || uint32(n) != port {
 				continue
 			}
-			if local := procIP(addr); local != nil && (local.IsUnspecified() || local.Equal(ip) || (ip.IsLoopback() && local.IsLoopback())) {
+			if local, ok := netip.AddrFromSlice(procIP(addr)); ok && reaches(local.Unmap(), want) {
 				out[fields[9]] = true
 			}
 		}
