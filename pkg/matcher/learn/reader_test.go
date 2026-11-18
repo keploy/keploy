@@ -1647,7 +1647,9 @@ func TestReaderAViewThatDoesNotFitIsBuiltOnceACall(t *testing.T) {
 // Past the budget, a question on one long text holds by the index's count
 // the text as the runtime allocates it (whole pages past 32 KiB), the
 // decoder's buffer of it (twice its length) and each of its declared forms,
-// beside what the index keeps: exactly that, no more and no less.
+// beside what the index keeps: exactly that, no more and no less. The text
+// is a call's own, in no set (noSetCache): a set's call asks the set's view
+// of a handed text (setFields).
 func TestReaderAQuestionPastTheBudgetCountsTheTextAndItsForms(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	readerBudget = 1
@@ -1664,7 +1666,7 @@ func TestReaderAQuestionPastTheBudgetCountsTheTextAndItsForms(t *testing.T) {
 		if readerBudget = 1; keep != "" {
 			readerBudget = int64(len(s))
 		}
-		x := newReaderIndex(NewDriftCache())
+		x := newReaderIndex(noSetCache())
 		if keep != "" {
 			if x.textOf(RawOf(getAnswer("mock-2", "http://api/items/2", keep, eRecAt), false)).holdsWord("zzzz"); x.used == 0 || x.used+int64(len(s)) <= readerBudget {
 				t.Fatalf("fixture: the index keeps %d bytes; want some, and no room for the text", x.used)

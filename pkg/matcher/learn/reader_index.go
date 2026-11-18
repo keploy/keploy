@@ -1146,9 +1146,10 @@ var (
 // main's readings and any declared form of the field's own text (holdsWord,
 // field by field): a recording's by its fields, so a word that moved to
 // another field in round F's view is not at its recorded field. In a set's
-// call, a recording's view, and a view F served of one, is the set's
-// (setFields), built once for the set. Else it is read once for the call
-// where the view fits what is left of the index's cap as it is built
+// call, a recording's view, a view F served of one, and a handed text's is
+// the set's (setFields), built once for the set. Else it is read once for
+// the call where the view fits what is left of the index's cap as it is
+// built
 // (counted word by word, with the field it reads and that field's forms,
 // and dropped once past it); else, by a scan of the fields of the text read
 // now, which keeps nothing. Either way the question's peak is the index's
@@ -1165,6 +1166,7 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 	fw, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[fieldWords] { return &e.fields },
 		func(s string, fields []rawField, room int64) (fieldWords, bool) {
 			own := t.e.own(s)
+			callFieldBuilds.Add(1)
 			return buildFieldWords(s, fields, room, func(n, held int64) { x.peak = max(x.peak, x.used+own+n+held) })
 		}, fieldWordsBytes, func(s string, fields []rawField) {
 			own := t.e.own(s)
@@ -1181,6 +1183,11 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 	}
 	return fw.with(w), true
 }
+
+// callFieldBuilds counts the field views a call's own index builds
+// (fieldsWith: the set keeps none of them), for the rows that bound a
+// call's work.
+var callFieldBuilds atomic.Int64
 
 // with are the fields of the view that hold w.
 func (fw fieldWords) with(w string) (at []fieldAt) {
@@ -1287,30 +1294,38 @@ func fieldsHash(seed maphash.Seed, s string, fields []rawField) uint64 {
 	return h.Sum64()
 }
 
-// setFields is the set's field view of t's recording, or of a view F served
-// of one (fieldsWith), by its text and fields (fieldsTextKey), never by the
-// recording's identity: a view bears none (Raw.viewOf, servedAnswer), and a
-// view keyed by what it is read from answers as the text does whatever
-// names it. It is built the first time a call of the set asks it a word,
-// within the cap of one call's index (readerBudgetBytes), and kept for the
-// set on its budget (setClaim), the set's views in all within that cap too:
-// every later call reads the text and asks the view, and builds none, so a
-// call's work per earlier place stays flat in the set's size. Calls asking
-// at once wait for the one building it. false where t is in no set's call,
-// is a text the caller handed (a call's own text: no later call asks it),
-// or the set keeps no view of it (not read, or past either cap): the call's
-// own index answers it, as it did before the set kept any, from the
-// payload read here (held), not read again. t finds its entry once.
+// setFields is the set's field view of t's recording, of a view F served of
+// one, or of a text the caller handed (fieldsWith), by its text and fields
+// (fieldsTextKey), never by the recording's identity: a view bears none
+// (Raw.viewOf, servedAnswer), and a view keyed by what it is read from
+// answers as the text does whatever names it. A handed text is one field,
+// the text whole (eachField), as a recording's text read with no fields is:
+// the two share a view. It is built the first time a call of the set asks it
+// a word, within the cap of one call's index (readerBudgetBytes), and kept
+// for the set on its budget (setClaim), the set's views in all within that
+// cap too: every later call reads the text and asks the view, and builds
+// none, so a call's work per earlier place stays flat in the set's size.
+// That holds for an earlier exchange's leaves (Earlier.Seen) too, which
+// each later call of the set hands again: a Mongo exchange's every request
+// key and value, an id each request of a run sends. Calls asking at once
+// wait for the one building it. false where t is in no set's call, or the
+// set keeps no view of it (not read, or past either cap): the call's own
+// index answers it, as it did before the set kept any, from the payload
+// read here (held), not read again (a handed text is read from t, whatever
+// it holds). t finds its entry once.
 func (t *readerText) setFields() (fieldWords, bool) {
 	if t.fields != nil {
 		return t.fields.v, true
 	}
 	fs := t.x.filters
-	if fs == nil || t.raw == nil || t.rawUnread || t.noFields {
+	if fs == nil || t.rawUnread || t.noFields {
 		return fieldWords{}, false
 	}
 	t.noFields = true
-	b := t.raw.payload()
+	b := rawBody{text: t.text, read: true}
+	if t.raw != nil {
+		b = t.raw.payload()
+	}
 	e := fieldsEntryOf(fs, t.x.set, b)
 	if e == nil {
 		t.held = &b
