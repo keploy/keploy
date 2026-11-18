@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/config/loader"
 )
 
@@ -16,8 +17,8 @@ import (
 // one it replaces leaves nothing of that one behind.
 func TestAddAppNameWritesInPlace(t *testing.T) {
 	for _, c := range []struct{ name, app, doc, want string }{
-		{"a line added", "shop", "# mine\npath: x\n", "# mine\nappName: \"shop\"\npath: x\n"},
-		{"a longer line replaced by a shorter one", "a", "appName: null\npath: x\n", "appName: \"a\"\npath: x\n"},
+		{"a line added", "shop", "# mine\npath: x\n", "# mine\nappName: \"shop\" " + config.KeptAppNameNote + "\npath: x\n"},
+		{"a longer line replaced by a shorter one", "a", "appName: null" + strings.Repeat(" ", 100) + "\npath: x\n", "appName: \"a\" " + config.KeptAppNameNote + "\npath: x\n"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "keploy.yml")
@@ -60,7 +61,7 @@ func TestAddAppNameWritesThroughALinkInItsFolder(t *testing.T) {
 	if err := AddAppName(link, "shop"); err != nil {
 		t.Fatalf("AddAppName: %v", err)
 	}
-	if got, _ := os.ReadFile(real); string(got) != "appName: \"shop\"\npath: x\n" {
+	if got, _ := os.ReadFile(real); string(got) != "appName: \"shop\" "+config.KeptAppNameNote+"\npath: x\n" {
 		t.Errorf("the linked file = %q", got)
 	}
 	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {

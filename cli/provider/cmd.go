@@ -841,8 +841,9 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 //     folder, as every run named it before keploy read repositories, so the
 //     project keeps its name. With write, a run from the keploy.yml's own
 //     folder writes the name into it once (tools.AddAppName), for later runs
-//     to read; a file it cannot write is said in a warning, and the run goes
-//     on under that name.
+//     to read, its line ending with config.KeptAppNameNote, which says
+//     keploy, not the user, chose it; a file it cannot write is said in a
+//     warning, and the run goes on under that name.
 //
 // It fails, as utils.WorkingDirectory does, once the working directory is
 // gone, whatever the run was given.

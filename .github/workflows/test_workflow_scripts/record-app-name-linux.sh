@@ -103,7 +103,7 @@ checkout "$WORK/checkout3"
 ORDERS="$WORK/checkout3/services/orders"
 mkdir -p "$ORDERS" || exit 1
 printf '# the keploy.yml of a project recorded before keploy read repositories\n\npath: ""\n' > "$ORDERS/keploy.yml"
-printf '# the keploy.yml of a project recorded before keploy read repositories\n\nappName: "orders"\npath: ""\n' > "$WORK/orders-want.yml"
+printf '# the keploy.yml of a project recorded before keploy read repositories\n\nappName: "orders" # kept by keploy: the name runs from this folder have had\npath: ""\n' > "$WORK/orders-want.yml"
 if record existing-project "$ORDERS"; then
   if ! grep -aqF 'keploy.yml named no app, so keploy wrote appName "orders" into it' "$WORK/existing-project.log"; then
     fail "existing-project: its log does not say keploy wrote appName \"orders\" into keploy.yml"
