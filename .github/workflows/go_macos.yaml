@@ -67,6 +67,15 @@ jobs:
       - name: Test the client hang-up watch on darwin
         run: go test -count=1 ./pkg/agent/proxy/util/ ./pkg/agent/proxy/incoming/
 
+      # The relay asks the proxy's end of a client connection what the client
+      # took of the destination's answer, and the reset it ended with, from
+      # xnu's TCP_INFO (relay/client_took_darwin.go, client_end_darwin.go),
+      # and the session keeps that reset for the parsers (supervisor). Most of
+      # these rows drive real darwin sockets; a Linux runner builds the Linux
+      # reading instead, so only this job runs them.
+      - name: Test the relay's client socket reading on darwin
+        run: go test -count=1 ./pkg/agent/proxy/relay/ ./pkg/agent/proxy/supervisor/
+
       # The proven flow on macOS: the claimant's start time and zombie state
       # from the kernel's process table (claimer_darwin.go), the caller read
       # from the process socket tables (caller_darwin.go), and the proxy's

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,17 +302,23 @@ func TestValidateFlags_HonoursCmdTypeEndToEnd(t *testing.T) {
 // `make -f ./docker-compose-tmp.yaml up --abort-on-container-exit`, which
 // fails with an unrecognised option nowhere near its cause. Refusing up front
 // is the difference between a usable flag and one that looks like it worked.
+// The refusal names the command by its program, never its arguments: it is
+// logged at ERROR, and a command's arguments carry what the user passes the
+// app.
 func TestResolveCommandType_DockerRunRejectsWrapperCommand(t *testing.T) {
 	for _, cmdType := range []string{"docker-run", "docker-start"} {
-		for _, command := range []string{"make up", "./start.sh", "npm start"} {
+		for command, program := range map[string]string{"make up": "make", "./start.sh": "start.sh", "npm start": "npm"} {
 			cmd := cmdWithCmdTypeFlag(cmdType, true)
 			_, err := resolveCommandType(zap.NewNop(), cmd, command, cmdType)
 			if err == nil {
 				t.Errorf("%s with command %q: want an error, got none", cmdType, command)
 				continue
 			}
-			if !strings.Contains(err.Error(), command) {
-				t.Errorf("error for %q does not name the command: %v", command, err)
+			if !strings.Contains(err.Error(), fmt.Sprintf("the %q command", program)) {
+				t.Errorf("error for %q does not name its program %q: %v", command, program, err)
+			}
+			if strings.Contains(err.Error(), fmt.Sprintf("%q", command)) {
+				t.Errorf("error for %q names the command whole: %v", command, err)
 			}
 		}
 	}
@@ -740,5 +747,55 @@ func TestWorkerMockRulesAreRefusedByKeployRecordOnly(t *testing.T) {
 	}
 	if err := run(t, mockRecord, cfg, bad); refused(err) {
 		t.Fatalf("keploy mock record refused over a rule it does not apply: %v", err)
+	}
+}
+
+// keploy record and keploy test refuse --cmd-type docker-run for a command
+// that is no docker command (make up), and validate logs that refusal at
+// ERROR: it names the command by its program, never an argument, so the
+// password the command passes reaches no line and not the error.
+func TestTheCmdTypeRefusalNamesTheProgramAlone(t *testing.T) {
+	const command = "make up DB_PASSWORD=S3CR3T"
+	if _, err := resolveCommandType(zap.NewNop(), cmdWithCmdTypeFlag("docker-run", true), command, "docker-run"); err == nil ||
+		strings.Contains(err.Error(), "S3CR3T") || !strings.Contains(err.Error(), `the "make" command is not one`) {
+		t.Errorf("resolveCommandType: %v, want a refusal that names the make command alone", err)
+	}
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return true })
+	for _, use := range []string{"record", "test"} {
+		cfg := config.New()
+		core, logs := observer.New(zapcore.DebugLevel)
+		c := NewCmdConfigurator(zap.New(core), cfg)
+		cmd := &cobra.Command{Use: use}
+		if err := c.AddFlags(cmd); err != nil {
+			t.Fatalf("AddFlags: %v", err)
+		}
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "keploy"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		if err := cmd.ParseFlags([]string{"-c", command, "--cmd-type", "docker-run", "-p", dir}); err != nil {
+			t.Fatalf("ParseFlags: %v", err)
+		}
+		cfg.Command, cfg.Path = command, dir
+		err := c.Validate(context.Background(), cmd)
+		if err == nil || strings.Contains(err.Error(), "S3CR3T") || !strings.Contains(err.Error(), `"make"`) {
+			t.Errorf("%s: Validate: %v, want the refusal naming the make command alone", use, err)
+		}
+		refused := false
+		for _, e := range logs.All() {
+			line := e.Message + " " + fmt.Sprint(e.ContextMap())
+			if e.Level >= zapcore.InfoLevel && strings.Contains(line, "S3CR3T") {
+				t.Errorf("%s: a %v line names the command's password: %s", use, e.Level, line)
+			}
+			refused = refused || e.Level == zapcore.ErrorLevel && e.Message == "failed to validate flags"
+		}
+		if !refused {
+			t.Errorf("%s: no ERROR line said the flags failed to validate: %v", use, logs.All())
+		}
 	}
 }

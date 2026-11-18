@@ -1355,25 +1355,11 @@ var (
 // zoneRulesDiffer is the first instant from zoneRulesFrom to zoneRulesTo at
 // which a and b read different offsets from UTC, and whether there is one:
 // each is read at every change of offset either makes
-// (time.Time.ZoneBounds), so no change of either between two reads is
-// missed.
+// (models.ZoneRulesDiffer), so no change of either between two reads is
+// missed, in a slim zone file too, whose zones Go ends at a leap year's
+// last day without advancing (models.ZoneEnd).
 func zoneRulesDiffer(a, b *time.Location) (time.Time, bool) {
-	for t := zoneRulesFrom; t.Before(zoneRulesTo); {
-		ta, tb := t.In(a), t.In(b)
-		_, oa := ta.Zone()
-		_, ob := tb.Zone()
-		if oa != ob {
-			return t, true
-		}
-		next := zoneRulesTo
-		for _, tt := range []time.Time{ta, tb} {
-			if _, end := tt.ZoneBounds(); !end.IsZero() && end.Before(next) {
-				next = end
-			}
-		}
-		t = next.UTC()
-	}
-	return time.Time{}, false
+	return models.ZoneRulesDiffer(a, b, zoneRulesFrom, zoneRulesTo)
 }
 
 // utcOffset is off, in seconds east of UTC, as "+05:30" (seconds where it

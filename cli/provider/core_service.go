@@ -151,7 +151,9 @@ func resolveDockerNames(logger *zap.Logger, c *config.Config, cont, net string, 
 
 	switch {
 	case c.ContainerName == "":
-		utils.LogError(logger, err, "failed to resolve the app container from the docker command", zap.String("cmd", utils.RedactCommandLine(c.Command)))
+		cmd := utils.NewAppCommand(c.Command)
+		utils.LogError(logger, err, "failed to resolve the app container from the docker command", zap.Inline(cmd))
+		utils.LogWholeCommand(logger, "cmd", cmd)
 	case cont == "":
 		logger.Warn("could not read a container name out of the docker command; using the one that was provided",
 			zap.String("containerName", c.ContainerName), zap.Error(err))

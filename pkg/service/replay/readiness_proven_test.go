@@ -622,6 +622,9 @@ func TestTheListenPortIsTheContainerPortTheTestsHostPortPublishes(t *testing.T) 
 		{"docker run --publish=8081:80 app", 8081, 80},
 		{"docker run -p 3000 app", 3000, 3000}, // a random host port: nothing maps 3000
 		{"./app", 8080, 8080},
+		// A native app's -p, and a container's own after its image, map nothing.
+		{"./app -p 8080:3000", 8080, 8080},
+		{"docker run -p 9090:90 app -p 8080:3000", 8080, 8080},
 	} {
 		if got := listenPortFor(ctx, fakePublished{}, c.cmd, "", c.host); got != c.want {
 			t.Errorf("listenPortFor(%q, %d) = %d, want %d", c.cmd, c.host, got, c.want)

@@ -190,7 +190,7 @@ func TestZoneLocationRefusesItsOwnFileMountedFromAnotherZones(t *testing.T) {
 			if err == nil || IsOwnZoneMount(err) != row.own || !strings.Contains(err.Error(), row.why) {
 				t.Errorf("%s: %v %v; want an error (own mount %v) holding %q", row.what, loc, err, row.own, row.why)
 			}
-		case err != nil || !sameZoneAt(loc, row.want, time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)):
+		case err != nil || !SameZoneAt(loc, row.want, time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)):
 			t.Errorf("%s: %v %v; want %v", row.what, loc, err, row.want)
 		}
 	}
