@@ -71,4 +71,40 @@ func TestOutcomeCostBoundWordsSplitOnlyLeavesAtAWordPlace(t *testing.T) {
 			t.Errorf("%d other leaves: the three leaves at word places split %d texts; want their two texts each, 6", others, splits)
 		}
 	}
+	// A place holding a '#' of its own is read at its words too.
+	tr, n := servedUsed(e, vars)
+	const hashed = "body.tags#a"
+	name, _ := tr.Name(n, "mock-501", hashed+"#3", nil)
+	at := Seen{Side: Request, Leaf: oText(hashed, bound.Leaf.Value), Live: bound.Live, Place: hashed}
+	if got, want := tr.BoundWords(n, "mock-501", at), []BoundWord{{Name: name, Word: 3, Recorded: "1793224420036884439", Live: "1793311234567890123", Place: hashed}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("a place holding a '#': the bound leaf names %+v; want %+v", got, want)
+	}
+	// A later test holds none of the earlier test's places, but the run's;
+	// a later set holds none.
+	run, _ := tr.RunName(n, "mock-301", place+"#3", nil)
+	tr.Name(n, "mock-201", place+"#3", nil)
+	tr.End()
+	tr.Begin()
+	later, _, _ := tr.State()
+	splits = 0
+	if got := tr.BoundWords(later, "mock-201", bound); got != nil {
+		t.Errorf("a later test: the earlier test's bound leaf names %+v; want none", got)
+	}
+	if got := tr.UsedWords(later, "mock-856", e.Seen[1]); got != nil {
+		t.Errorf("a later test: the earlier test's used leaf names %+v; want none", got)
+	}
+	if got, want := tr.BoundWords(later, "mock-301", bound), []BoundWord{{Name: run, Word: 3, Recorded: "1793224420036884439", Live: "1793311234567890123", Place: place}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("a later test: the run's bound leaf names %+v; want %+v", got, want)
+	}
+	if splits != 2 {
+		t.Errorf("a later test split %d texts; want the run's leaf's two alone", splits)
+	}
+	tr.End()
+	tr.NewSet()
+	tr.Begin()
+	next, _, _ := tr.State()
+	splits = 0
+	if got := tr.BoundWords(next, "mock-301", bound); got != nil || splits != 0 {
+		t.Errorf("a later set: the run's bound leaf names %+v, %d texts split; want none, none split", got, splits)
+	}
 }
