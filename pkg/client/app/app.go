@@ -2004,6 +2004,28 @@ func (a *App) composeRetriesADepCrash(ctxErr error, attempt int) bool {
 		attempt <= composeDepFailureRetries && ctxErr == nil
 }
 
+// composeRetriesTheBringUp is the run's retry loop's decision after
+// bring-up number attempt ended with cmdErr: never once keploy kept a halt,
+// which ends the run, on any attempt; else a crash keploy stopped the stack
+// on (composeRetriesADepCrash), or compose's own abort on a dependency's
+// crash (shouldRetryComposeUp, which reads states).
+func (a *App) composeRetriesTheBringUp(ctxErr error, attempt int, cmdErr utils.CmdError, states func() []composeServiceState) bool {
+	return a.composeAppHalt() == nil && (a.composeRetriesADepCrash(ctxErr, attempt) || shouldRetryComposeUp(a.kind, attempt, composeDepFailureRetries, ctxErr,
+		cmdErr.Err, cmdErr.Type, a.composeService, states))
+}
+
+// composeKeepsASpentDepCrash keeps, once the retry loop has ended after
+// bringUps bring-ups, a crash keploy stopped the stack on that is still kept
+// (depCrash: the retries are spent) as the run's halt, naming the bring-ups;
+// a halt kept already stands.
+func (a *App) composeKeepsASpentDepCrash(bringUps int) {
+	if dc := a.composeApp.depCrash.Load(); dc != nil && a.kind == utils.DockerCompose {
+		h := *dc
+		h.bringUps = bringUps
+		a.composeApp.halted.CompareAndSwap(nil, &h)
+	}
+}
+
 // composeBeginsABringUpAgain clears what the last bring-up kept before the
 // retry's up starts: the app's first start, and keploy's stop of the stack
 // for a crash (depCrash, stopping, agentStopping), so the new bring-up's
@@ -2497,8 +2519,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// abort, whatever the up's own end, within the same bound.
 	var states []composeServiceState
 	attempt := 1
-	for ; a.composeAppHalt() == nil && (a.composeRetriesADepCrash(ctx.Err(), attempt) || shouldRetryComposeUp(a.kind, attempt, composeDepFailureRetries, ctx.Err(),
-		cmdErr.Err, cmdErr.Type, a.composeService,
+	for ; a.composeRetriesTheBringUp(ctx.Err(), attempt, cmdErr,
 		func() []composeServiceState {
 			var zero *composeReportedZero
 			if errors.As(cmdErr.Err, &zero) {
@@ -2507,7 +2528,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 			}
 			states = a.composeFailedUpStates(ctx)
 			return states
-		})); attempt++ {
+		}); attempt++ {
 		if a.composeApp.depCrash.Load() != nil {
 			states = a.composeFailedUpStates(ctx)
 		}
@@ -2548,12 +2569,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 		cmdErr = a.retryComposeUp(ctx, func() utils.CmdError { return executeApp(runCmd, runEnv) })
 	}
 	// A crash keploy stopped the stack on, still kept when the retries are
-	// spent: the run ends on it, as it ended on compose's abort.
-	if dc := a.composeApp.depCrash.Load(); dc != nil && a.kind == utils.DockerCompose {
-		h := *dc
-		h.bringUps = attempt
-		a.composeApp.halted.CompareAndSwap(nil, &h)
-	}
+	// spent: the run ends on it, as it ended on compose's abort. attempt is
+	// the number of bring-ups the loop ran.
+	a.composeKeepsASpentDepCrash(attempt)
 
 	// The project is keploy's to take down: an up that returned because
 	// keploy stopped the app itself (a set's end, the recording's) has not

@@ -18,8 +18,9 @@ import (
 // depCrashDoc is a stack whose app depends on flaky (the list form), base
 // (service_started, which itself depends on deep) and again (restart: true),
 // waits on migrate's completion and on an optional cache's health; seed is a
-// one-shot runner waits on, opt an optional dependency api waits on, and
-// early a service nothing depends on.
+// one-shot runner waits on, opt an optional dependency api waits on to be
+// healthy, optmig an optional one-shot api waits on, and early a service
+// nothing depends on.
 const depCrashDoc = `
 services:
   app:
@@ -47,6 +48,9 @@ services:
       opt:
         condition: service_healthy
         required: false
+      optmig:
+        condition: service_completed_successfully
+        required: false
   base:
     image: base
     depends_on: [deep]
@@ -57,6 +61,7 @@ services:
   optcache: {image: optcache}
   seed: {image: seed}
   opt: {image: opt}
+  optmig: {image: optmig}
   early: {image: early}
 `
 
@@ -115,6 +120,9 @@ func TestAnExitIsDecidedByTheDaemonsInstantsAndADependencysCrashRetriesTheBringU
 				want      want
 				// waiting is the service said to wait on the exit.
 				waiting string
+				// noInstant: the daemon gives no instant of the exit (no
+				// FinishedAt, no time on its die event).
+				noInstant bool
 			}{
 				{name: "a dependency in the list form crashes", cmd: codeFrom, service: "flaky", code: 1, want: retries},
 				{name: "a service_started dependency crashes", cmd: exit, service: "base", code: 2, want: retries},
@@ -129,6 +137,12 @@ func TestAnExitIsDecidedByTheDaemonsInstantsAndADependencysCrashRetriesTheBringU
 				{name: "a service nothing depends on exits 3", cmd: "docker compose --profile early up --exit-code-from early", service: "early", code: 3, want: ends},
 				{name: "an optional dependency another service waits on crashes", cmd: exit, service: "opt", code: 1, want: ends,
 					setup: func(d *abortDocker) { d.add("api-id", "api", container.State{Status: "created"}) }},
+				{name: "an optional dependency another service waits on to be healthy exits 0 after the app started", cmd: exit, service: "opt", code: 0, app: &before,
+					want: ends, setup: func(d *abortDocker) { d.add("api-id", "api", container.State{Status: "created"}) }},
+				{name: "an optional one-shot a service not yet started waits on completes after the app started", cmd: exit, service: "optmig", code: 0, app: &before,
+					want: nothing, waiting: "api", setup: func(d *abortDocker) { d.add("api-id", "api", container.State{Status: "created"}) }},
+				{name: "a dependency crashes after the app started, and the daemon gives no instant of the exit", cmd: codeFrom, service: "flaky", code: 1, app: &before,
+					noInstant: true, want: ends},
 				{name: "a migration the app waits on completes, and compose's up started the app on it", cmd: exit, service: "migrate", code: 0, app: &after,
 					want: nothing, waiting: "app"},
 				{name: "a one-shot a service not yet started waits on completes after the app started", cmd: exit, service: "seed", code: 0, app: &before,
@@ -154,7 +168,10 @@ func TestAnExitIsDecidedByTheDaemonsInstantsAndADependencysCrashRetriesTheBringU
 				if c.app != nil {
 					d.containers["app-id"].state = runningState(*c.app)
 				}
-				d.add(c.service+"-id", c.service, stateAt(before.Add(-time.Second), true, c.code, at))
+				exited := d.add(c.service+"-id", c.service, stateAt(before.Add(-time.Second), true, c.code, at))
+				if c.noInstant {
+					exited.state.FinishedAt = ""
+				}
 				if c.setup != nil {
 					c.setup(d)
 				}
@@ -168,6 +185,9 @@ func TestAnExitIsDecidedByTheDaemonsInstantsAndADependencysCrashRetriesTheBringU
 				// The event's own time is keploy's read, long after the exit:
 				// the daemon's FinishedAt decides.
 				m := serviceDie(c.service+"-id", c.service, "ignored: the daemon's state decides", nil)
+				if c.noInstant {
+					m.TimeNano = 0
+				}
 				ended := a.composeDied(context.Background(), m)
 				h, dc := a.composeAppHalt(), a.composeApp.depCrash.Load()
 				retried := logs.FilterMessageSnippet("crashed before the application started: keploy stops the stack").All()
