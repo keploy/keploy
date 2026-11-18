@@ -1806,7 +1806,9 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 
 // endTest records a test's outcome and evidence and closes its window. A
 // read that failed is an error, and the test is recorded failed with it: a
-// test keploy could not judge never passes. A test that skipped itself is
+// test keploy could not judge never passes. One that failed after it found
+// a miss is no error: the miss fails the test (seenMiss), and its reason
+// names the read's error. A test that skipped itself is
 // not failed for the recorded calls it then never made.
 func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	var ev *models.ScopeEvidence
@@ -1850,6 +1852,15 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		// session: each name whole, no tag (a tag names a host only in its
 		// session).
 		ev.Incomplete = append(ev.Incomplete, models.UntaggedIncomplete(incomplete)...)
+	}
+	if readErr != nil && seenMiss(ev) {
+		// The read failed part way, after it found a miss: that miss was
+		// seen, and fails the test whatever the rest of the read could not
+		// tell. The test keeps that verdict, with the read's error named in
+		// front of its reason, as a note of keploy's (why), and its end
+		// answers it failed: it is not unread.
+		why = strings.TrimPrefix(why+"; keploy could not read all of what "+id+" did: "+readErr.Error(), "; ")
+		readErr = nil
 	}
 	switch {
 	case readErr != nil:
@@ -1905,15 +1916,19 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		} else {
 			why += "; " + note
 		}
-		if readErr == nil {
-			readErr = settleErr
-		}
 		// Unsettled, what the test did cannot all have been read: it has
-		// no verdict of its own.
-		if ev == nil {
-			ev = &models.ScopeEvidence{}
+		// no verdict of its own, unless keploy saw it miss a call. That
+		// miss fails it whatever else keploy could not tell, so it keeps
+		// its verdict, with the note, and its end answers it failed.
+		if !seenMiss(ev) {
+			if readErr == nil {
+				readErr = settleErr
+			}
+			if ev == nil {
+				ev = &models.ScopeEvidence{}
+			}
+			ev.Unread = true
 		}
-		ev.Unread = true
 	}
 	if why != "" {
 		if ev == nil {
@@ -1951,6 +1966,15 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		outcome = models.ScopeOutcomeFailed
 	}
 	return ev, outcome, readErr
+}
+
+// seenMiss reports whether ev holds a call of the test that keploy answered
+// with no recording: definite evidence that fails the test. Nothing keploy
+// cannot tell (the rest of a read that failed after it found the miss, a
+// call it cannot settle, a count it cannot read) takes it back into "not
+// judged" (endTest).
+func seenMiss(ev *models.ScopeEvidence) bool {
+	return ev != nil && len(ev.Misses) > 0
 }
 
 // chargeCaptureLosses adds to a test's evidence what the agent could not
@@ -2039,8 +2063,12 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	}
 	if err != nil {
 		ev.Reason = strings.TrimSpace("keploy: keploy could not tell whether every call of " + id + " was captured: " + err.Error() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
-		// As a test whose evidence could not be read: no verdict of its own.
-		ev.Unread = true
+		// As a test whose evidence could not be read: no verdict of its
+		// own, unless keploy saw it miss a call, which fails it whatever
+		// else keploy could not tell.
+		if !seenMiss(ev) {
+			ev.Unread = true
+		}
 		if a.replaying() {
 			outcome = models.ScopeOutcomeFailed
 		}

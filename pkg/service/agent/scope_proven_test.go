@@ -2321,7 +2321,8 @@ func TestTheAgentRefusesItsOwnClaim(t *testing.T) {
 }
 
 // A read that returns misses together with an error keeps them: they fail
-// the test, and stay in the run's misses.
+// the test, whose end answers it failed and names the read's error, and
+// they stay in the run's misses.
 func TestMissesReadWithAnErrorAreKept(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	p := &partialProxy{wireProxy: &wireProxy{served: map[string]uint64{}}}
@@ -2332,10 +2333,14 @@ func TestMissesReadWithAnErrorAreKept(t *testing.T) {
 	require.Nil(t, serr)
 	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}
 	p.err = errors.New("some misses were not read")
-	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
-	require.NotNil(t, serr)
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr, "a miss keploy saw is judged: the end answers, not keploy's error")
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "keploy could not read all of what o::TestA did: ")
+	require.Contains(t, e.Reason, "some misses were not read")
 	w := windowOf(t, a, "o::TestA")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.False(t, w.Evidence.Unread)
 	require.Len(t, w.Evidence.Misses, 1)
 	_, err := a.GetMockErrors(ctx)
 	require.Error(t, err, "the read still fails")

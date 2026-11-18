@@ -56,6 +56,38 @@ func TestAnEndThatCannotCountFailsTheTest(t *testing.T) {
 	require.NotNil(t, serr)
 	w := evidenceOf(t, a, "o::TestA")
 	require.Contains(t, w.Reason, "could not tell that every call of o::TestA reached it")
+	require.True(t, w.Unread, "no miss seen: the test has no verdict of its own")
+	require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "o::TestA").Outcome)
+}
+
+// A miss keploy saw is definite: an end that then cannot count the calls
+// still on their way (as after a close keploy cannot account for) says so,
+// and the test stays failed on the miss, never unread. Erasing it would turn
+// a test keploy failed into one it did not judge.
+func TestAMissSeenBeforeAnEndThatCannotCountKeepsTheTestFailed(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/stock/book", "3", t0)},
+		map[string][]string{"o::TestMiss": {"mock-1"}}, map[string][]string{})
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestMiss"))
+	require.Nil(t, serr)
+	code, _ := p.call(t, "/stock/book")
+	require.Equal(t, 200, code)
+	code, _ = p.call(t, "/reserve/book")
+	require.Equal(t, 502, code, "the changed call has no recorded answer")
+	h := a.Hooks.(*countHooks)
+	h.mu.Lock()
+	h.err = models.ErrProxyConnsUnsupported
+	h.mu.Unlock()
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestMiss", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr, "the test is judged: its end answers, not keploy's error")
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "could not tell that every call of o::TestMiss reached it")
+	require.Contains(t, e.Reason, "GET /reserve/book to 127.0.0.1:18093 had no recorded answer")
+	w := windowOf(t, a, "o::TestMiss")
+	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
+	require.False(t, w.Evidence.Unread, "a miss keploy saw keeps the test's verdict")
+	require.Len(t, w.Evidence.Misses, 1)
 }
 
 // The run's last read of its misses waits, as a test's end does, until the

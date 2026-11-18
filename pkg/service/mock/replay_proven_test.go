@@ -165,24 +165,60 @@ func TestWithEvidence(t *testing.T) {
 	require.NotNil(t, got[0].Evidence)
 	require.Contains(t, got[0].Evidence.Reason, "exited while the test was open")
 
-	// A test keploy could not read stays unread on its line, through the
-	// receipt the CLI reads: one unread attempt is enough. A read test's
-	// evidence says nothing of it.
-	got = withEvidence([]TestReceipt{{Name: "o::D", Outcome: "failed"}, {Name: "o::E", Outcome: "failed"}}, []models.ScopeWindow{
-		{Name: "o::D", Evidence: &models.ScopeEvidence{Reason: "keploy: keploy could not tell what o::D did: x", Unread: true}},
-		{Name: "o::D", Evidence: ev("GET /y", "")},
-		{Name: "o::E", Evidence: ev("GET /z", "")},
+	// A miss keploy saw, in any attempt, fails the test whatever another
+	// attempt could not tell: the line is failed on the miss, with the
+	// reason of the first attempt that saw one, and never unread, whichever
+	// attempt came first.
+	unread := func(name string) *models.ScopeEvidence {
+		return &models.ScopeEvidence{Reason: "keploy: keploy could not tell what " + name + " did: x", Unread: true}
+	}
+	missed := func(reason, call string) *models.ScopeEvidence {
+		return &models.ScopeEvidence{Reason: reason, Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: call}}}
+	}
+	for _, c := range []struct {
+		name   string
+		ws     []*models.ScopeEvidence
+		misses int
+	}{
+		{"unread, then a miss", []*models.ScopeEvidence{unread("o::F"), missed("keploy: a miss", "GET /a")}, 1},
+		{"a miss, then unread", []*models.ScopeEvidence{missed("keploy: a miss", "GET /a"), unread("o::F")}, 1},
+		{"a miss, then another", []*models.ScopeEvidence{missed("keploy: a miss", "GET /a"), missed("keploy: another miss", "GET /b")}, 2},
+	} {
+		var ws []models.ScopeWindow
+		for _, e := range c.ws {
+			ws = append(ws, models.ScopeWindow{Name: "o::F", Evidence: e})
+		}
+		got = withEvidence([]TestReceipt{{Name: "o::F", Outcome: "failed"}}, ws)
+		require.False(t, got[0].Evidence.Unread, c.name)
+		require.Equal(t, "keploy: a miss", got[0].Evidence.Reason, c.name)
+		require.Len(t, got[0].Evidence.Misses, c.misses, c.name)
+	}
+
+	// A test keploy could not read, with no miss in any attempt, stays
+	// unread on its line, through the receipt the CLI reads: one unread
+	// attempt is enough, and the line has its reason, whichever attempt came
+	// first. A read test's evidence says nothing of it.
+	for _, ws := range [][]*models.ScopeEvidence{
+		{unread("o::D"), ev("", "mock-6")},
+		{ev("", "mock-6"), unread("o::D")},
+	} {
+		got = withEvidence([]TestReceipt{{Name: "o::D", Outcome: "failed"}, {Name: "o::E", Outcome: "failed"}}, []models.ScopeWindow{
+			{Name: "o::D", Evidence: ws[0]},
+			{Name: "o::D", Evidence: ws[1]},
+			{Name: "o::E", Evidence: ev("GET /z", "")},
+		})
+		require.True(t, got[0].Evidence.Unread)
+		require.Contains(t, got[0].Evidence.Reason, "could not tell what o::D did")
+		require.Equal(t, []string{"mock-6"}, got[0].Evidence.Unconsumed)
+		require.False(t, got[1].Evidence.Unread)
+	}
+	// Two unread attempts: the line has the first one's reason.
+	twice := withEvidence([]TestReceipt{{Name: "o::G", Outcome: "failed"}}, []models.ScopeWindow{
+		{Name: "o::G", Evidence: unread("o::G")},
+		{Name: "o::G", Evidence: &models.ScopeEvidence{Reason: "keploy: keploy could not tell what o::G did: y", Unread: true}},
 	})
-	require.True(t, got[0].Evidence.Unread)
-	require.False(t, got[1].Evidence.Unread)
-	// An unread attempt after a read one: the line says unread, with the
-	// unread attempt's reason.
-	late := withEvidence([]TestReceipt{{Name: "o::F", Outcome: "failed"}}, []models.ScopeWindow{
-		{Name: "o::F", Evidence: &models.ScopeEvidence{Reason: "keploy: a miss", Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /a"}}}},
-		{Name: "o::F", Evidence: &models.ScopeEvidence{Reason: "keploy: keploy could not tell what o::F did: y", Unread: true}},
-	})
-	require.True(t, late[0].Evidence.Unread)
-	require.Contains(t, late[0].Evidence.Reason, "could not tell what o::F did")
+	require.True(t, twice[0].Evidence.Unread)
+	require.Equal(t, "keploy: keploy could not tell what o::G did: x", twice[0].Evidence.Reason)
 	k := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(k, "set"), 0o755))
 	writeTestsReceipt(zap.NewNop(), k, TestsReceipt{Set: "set", Tests: got})
