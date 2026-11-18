@@ -54,6 +54,11 @@ func TestWatermark_HeldProgressIsNotMovedByOtherConnections(t *testing.T) {
 		t.Fatal("setup: the window is settled with its parser behind")
 	}
 	held := w.HeldProgress("", "", before, after)
+	// The other connection's bytes come after the window: on a clock that
+	// moves on only at its tick (Windows') they would read the instant the
+	// window ends at, inside it, unless the clock has passed it first, as the
+	// ingress has it (waitPastYield) before what follows a window's end.
+	waitClockPast(t, after)
 
 	other := newHarness(t, Config{})
 	untrack := w.Track(other.r, "conn-2")

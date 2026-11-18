@@ -69,7 +69,7 @@ func TestXNUTellsAFINBeforeAResetByItsCounts(t *testing.T) {
 			for range row.script[:len(row.script)-1] {
 				_ = s.look()
 			}
-			if got := s.finBeforeReset(); got != row.want {
+			if got := s.finBeforeReset(syscall.ECONNRESET); got != row.want {
 				t.Fatalf("finBeforeReset = %v, want %v", got, row.want)
 			}
 		})
@@ -126,7 +126,7 @@ func TestXNUASocketThatCannotAnswerAtTheResetSaysNoFIN(t *testing.T) {
 	}}
 	s.ask, s.count = s.lookAt, s.countAt
 	_ = s.look()
-	if s.finBeforeReset() {
+	if s.finBeforeReset(syscall.ECONNRESET) {
 		t.Fatal("finBeforeReset = true with no answer at the reset; want false")
 	}
 }

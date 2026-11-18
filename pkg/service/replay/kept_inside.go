@@ -14,7 +14,11 @@ import (
 // closed connection, a synthetic DNS answer). keptInside collects, for the
 // whole run, each destination the app called that way, so the run's output
 // names each one once, with how many calls it took and how real egress would
-// be opened for it. The misses themselves are still reported per test.
+// be opened for it. The misses themselves are still reported per test. A
+// line names a host as the agent's own lines do, by its shape beside its
+// host tag ({}.{}.{}. #3fa2c1d0e9b8): the app chose the name (a tenant's, a
+// customer's), and the line reaches log stores. The console and the report
+// name each miss's host whole beside the same tag.
 
 // KeptInsidePrefix starts each line of that report.
 const KeptInsidePrefix = "kept inside the replay: "
@@ -31,6 +35,9 @@ type keptDest struct {
 	destination string
 	// unnamed: the miss's parser reported no destination.
 	unnamed bool
+	// hostTag is the tag of destination's host (models.HostTag) the agent
+	// named it by: the first a miss of it carried.
+	hostTag string
 	calls   int
 }
 
@@ -63,6 +70,9 @@ func (k *keptInside) add(read []models.UnmatchedCall) {
 			k.dests[key] = d
 			k.order = append(k.order, key)
 		}
+		if d.hostTag == "" {
+			d.hostTag = c.HostTag
+		}
 		d.calls++
 	}
 }
@@ -87,6 +97,23 @@ func keptDestination(c models.UnmatchedCall) (protocol, dest string, unnamed boo
 		return protocol, c.Destination, false
 	}
 	return protocol, "(the " + protocol + " parser did not name the destination)", true
+}
+
+// logName is how a line names d: a host by its shape beside its tag, as the
+// agent's own lines name it (models.TaggedHostLogName): a DNS name as the
+// fully qualified name its question asked for, "{}.{}.{}. #3fa2c1d0e9b8",
+// any other destination with its port, "{}.{}.{}:443 #3fa2c1d0e9b8", an IP
+// address whole. Its shape alone when no miss carried a tag. A destination
+// no parser named is keploy's words (keptDestination), whole.
+func (d keptDest) logName() string {
+	switch {
+	case d.unnamed:
+		return d.destination
+	case d.protocol == "DNS":
+		return models.TaggedHostLogName(d.destination+".", d.hostTag)
+	default:
+		return models.TaggedHostLogName(d.destination, d.hostTag)
+	}
 }
 
 // snapshot returns the destinations in the order each was first missed.
@@ -133,6 +160,6 @@ func (r *Replayer) sayKeptInside() {
 		zap.Int("destinations", len(dests)),
 		zap.String("opt_in", keptInsideOptIn))
 	for _, d := range dests {
-		r.logger.Info(KeptInsidePrefix+d.protocol+" "+d.destination, zap.Int("calls", d.calls))
+		r.logger.Info(KeptInsidePrefix+d.protocol+" "+d.logName(), zap.Int("calls", d.calls))
 	}
 }

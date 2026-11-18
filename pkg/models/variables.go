@@ -702,17 +702,6 @@ type zoneLoad struct {
 	err error
 }
 
-// sameZoneAt reports whether a and b write at with one offset and next
-// change it at one instant (time.Time.ZoneBounds; none in either).
-func sameZoneAt(a, b *time.Location, at time.Time) bool {
-	ta, tb := at.In(a), at.In(b)
-	_, oa := ta.Zone()
-	_, ob := tb.Zone()
-	_, ea := ta.ZoneBounds()
-	_, eb := tb.ZoneBounds()
-	return oa == ob && ea.Equal(eb)
-}
-
 // isDigits reports whether s is ASCII digits alone (strconv.Atoi takes a
 // sign, which a fixed offset's hours or minutes never carry).
 func isDigits(s string) bool {
@@ -742,10 +731,10 @@ func ZoneNameOf(loc *time.Location, at time.Time) string {
 	t := at.In(loc)
 	if _, end := t.ZoneBounds(); !end.IsZero() {
 		// A name another zone's file holds ("CET" of a rule IANA's CET
-		// does not follow) names loc only where the two agree at at and on
-		// its next change of offset.
+		// does not follow) names loc only where the two agree at at and at
+		// each change of offset in the year after it (SameZoneAt).
 		if n := loc.String(); n != "" && n != "Local" {
-			if l, err := ZoneLocation(n); err == nil && sameZoneAt(l, loc, at) {
+			if l, err := ZoneLocation(n); err == nil && SameZoneAt(l, loc, at) {
 				return n
 			}
 		}
@@ -1510,8 +1499,8 @@ const maxFallBack = 3 * time.Hour
 // back by there; where across, only a turn AcrossHour holds.
 func fallBackIn(lo, hi time.Time, loc *time.Location, across bool) (time.Time, time.Duration, bool) {
 	for t := lo.Add(-maxFallBack); ; {
-		_, end := t.In(loc).ZoneBounds()
-		if end.IsZero() || !end.After(t) || end.After(hi.Add(maxFallBack)) {
+		end := ZoneEnd(t.In(loc))
+		if end.IsZero() || end.After(hi.Add(maxFallBack)) {
 			return time.Time{}, 0, false
 		}
 		_, before := end.Add(-time.Nanosecond).In(loc).Zone()
@@ -1565,8 +1554,8 @@ func yearFallBacks(y int) []zoneFallBack {
 			continue
 		}
 		for t := start.Add(-time.Nanosecond); ; {
-			_, e := t.In(loc).ZoneBounds()
-			if e.IsZero() || !e.After(t) || !e.Before(end) {
+			e := ZoneEnd(t.In(loc))
+			if e.IsZero() || !e.Before(end) {
 				break
 			}
 			_, before := e.Add(-time.Nanosecond).In(loc).Zone()

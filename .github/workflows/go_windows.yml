@@ -71,6 +71,14 @@ jobs:
       #                       (client_end_windows.go). Its Windows rows keep
       #                       the errors real loopback sockets gave and run
       #                       only here.
+      #   .../proxy/relay     which chunks of an answer the client took before
+      #                       it closed or reset, judged from the client
+      #                       socket's TCP_INFO_v0 (SIO_TCP_INFO,
+      #                       client_socket_windows.go). Its real-socket rows
+      #                       drive loopback clients that half-close, reset,
+      #                       or stop reading until their receive window
+      #                       closes, so they prove the Windows reading only
+      #                       when they run here.
       #   ./internal/testnet  the ports ./pkg, ./pkg/neterr and
       #                       ./pkg/agent/proxy/incoming take for their
       #                       refused dials and their listeners. Their
@@ -107,7 +115,18 @@ jobs:
       # &&: under `shell: cmd` a multi-line block is a batch file that does not
       # stop on failure and reports only the last exit code.
       - name: Test amd64
-        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/... ./pkg/agent/proxy/supervisor/ ./internal/testnet/
+        run: go test -count=1 ./pkg/ ./pkg/neterr/... ./pkg/agent/proxy/incoming/... ./pkg/agent/proxy/integrations/http/... ./pkg/agent/proxy/connseq/... ./pkg/agent/proxy/supervisor/ ./pkg/agent/proxy/relay/ ./internal/testnet/
+        shell: cmd
+
+      # The count of writes the proxy puts over every accepted client socket
+      # (relay.CountClientWrites, under the tracking), which the relay's
+      # closed-window rows above read on Windows: every site that keys or
+      # reads the accepted socket finds it under the count, whether the proxy
+      # keeps the connection, pairs it, both or neither. Only these two rows
+      # of ./pkg/agent/proxy/ run here: the package as a whole is not listed
+      # above (see its line).
+      - name: Test the proxy's count of accepted sockets (amd64)
+        run: go test -count=1 -run "^(TestTheAcceptedSocketIsFoundUnderTheCountOfWrites|TestEveryAcceptedSocketIsCountedWhetherKeptOrPaired)$" ./pkg/agent/proxy/
         shell: cmd
 
       # The Windows stop of a native app (utils.interruptProcessTree): one that
