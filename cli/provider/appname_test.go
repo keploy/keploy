@@ -156,8 +156,9 @@ func TestRecordKeepsAnExistingProjectsAppName(t *testing.T) {
 	}
 }
 
-// Only keploy record, keploy test, keploy mock record and keploy mock replay
-// write the app's name into keploy.yml, each by its path below the root.
+// Only keploy record and keploy test, and their sandbox subcommands, write
+// the app's name into keploy.yml, each by its path below the root. mock record
+// and mock replay do not: their app is not keploy.yml's appName.
 func TestRecordsOrTests(t *testing.T) {
 	root := &cobra.Command{Use: "keploy"}
 	leaf := func(parent *cobra.Command, name string) *cobra.Command {
@@ -166,22 +167,26 @@ func TestRecordsOrTests(t *testing.T) {
 		return c
 	}
 	mock, contract, app := leaf(root, "mock"), leaf(root, "contract"), leaf(root, "app")
+	record, test := leaf(root, "record"), leaf(root, "test")
 	local := leaf(leaf(root, "sandbox"), "local")
 	for c, want := range map[*cobra.Command]bool{
-		leaf(root, "record"):   true,
-		leaf(root, "test"):     true,
-		leaf(mock, "record"):   true,
-		leaf(mock, "replay"):   true,
-		leaf(root, "agent"):    false,
-		leaf(root, "report"):   false,
-		leaf(root, "replay"):   false,
-		leaf(contract, "test"): false,
-		leaf(mock, "upload"):   false,
-		leaf(mock, "test"):     false,
-		leaf(app, "create"):    false,
-		leaf(local, "record"):  false,
-		root:                   false,
-		mock:                   false,
+		record:                  true,
+		test:                    true,
+		leaf(record, "sandbox"): true,
+		leaf(test, "sandbox"):   true,
+		leaf(mock, "record"):    false,
+		leaf(mock, "replay"):    false,
+		leaf(local, "replay"):   false,
+		leaf(root, "agent"):     false,
+		leaf(root, "report"):    false,
+		leaf(root, "replay"):    false,
+		leaf(contract, "test"):  false,
+		leaf(mock, "upload"):    false,
+		leaf(mock, "test"):      false,
+		leaf(app, "create"):     false,
+		leaf(local, "record"):   false,
+		root:                    false,
+		mock:                    false,
 		// A command with no parent, as rows build one, by its own name.
 		{Use: "record"}: true,
 		{Use: "agent"}:  false,

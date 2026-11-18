@@ -795,8 +795,8 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 		return err
 	}
 
-	// Only a run that records or tests writes the name into keploy.yml;
-	// every other command, the agent among them, reads it.
+	// Only a run that records or tests keploy.yml's app writes the name into
+	// it; every other command, the agent and mock record among them, reads it.
 	appName, err := AppName(c.logger, c.cfg.AppName, ConfigFile, RecordsOrTests(cmd))
 	if err != nil {
 		// Said here, as every other refusal is: nothing else says it.
@@ -875,20 +875,24 @@ func AppName(logger *zap.Logger, configured, configFile string, write bool) (str
 	return old, nil
 }
 
-// RecordsOrTests says whether cmd records or tests an app: keploy record,
-// keploy test, keploy mock record and keploy mock replay. Only these write the
-// app's name into a keploy.yml that names none; every other command (the
-// agent, report, an enterprise app, branch, mock registry or cloud command)
-// reads the name and leaves the file as it is. cmd is named by its path below
-// the root command, so contract test is not test; a command with no parent is
-// taken by its own name.
+// RecordsOrTests says whether cmd records or tests the app keploy.yml names:
+// keploy record and keploy test, and enterprise's record sandbox and test
+// sandbox, which record and test through them. Only these write the app's
+// name into a keploy.yml that names none. Every other command reads the name
+// and leaves the file as it is: the agent, report, an enterprise app, branch,
+// mock registry or cloud command, and keploy mock record and mock replay,
+// whose app is not keploy.yml's appName but --app's, or the one enterprise
+// looks up for the folder (so a name they wrote would be another app's than
+// the one they use). cmd is named by its path below the root command, so
+// contract test is not test; a command with no parent is taken by its own
+// name.
 func RecordsOrTests(cmd *cobra.Command) bool {
 	path := cmd.Name()
 	for c := cmd.Parent(); c != nil && c.HasParent(); c = c.Parent() {
 		path = c.Name() + " " + path
 	}
 	switch path {
-	case "record", "test", "mock record", "mock replay":
+	case "record", "test", "record sandbox", "test sandbox":
 		return true
 	}
 	return false
