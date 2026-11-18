@@ -1158,7 +1158,7 @@ const ZoneUnreadLog = "keploy cannot read the zone of the process that made the 
 // made the call says to do: where keploy reads that zone, and, in keploy's
 // own docker and compose modes, where its CLI reads an app container's
 // (containerkey.ConnZone) and where it reads none.
-const zoneUnread = " Run keploy where it reads the application's zone: in the host PID namespace (--pid=host or hostPID), the application's process and its files readable, or in keploy's own docker and compose modes, whose CLI reads the zone of the app container that made the call through Docker. The agent's debug line \"" + ZoneUnreadLog + "\" (run keploy with --debug) says why it could not. In docker and compose modes keploy reads no zone of a container whose configuration sets a JVM's user.timezone (keploy reads a JVM's zone only from its process: drop -Duser.timezone= from the container's configuration and set the zone with TZ), of one whose TZ names no zone while its /etc/timezone names a zone other than its /etc/localtime, or whose TZ is empty and its files hold no UTC (set TZ to the zone), of one whose TZ or zone files keploy cannot resolve (a TZ of a POSIX rule or of a zone with no file in the container, an /etc/localtime linking to nothing), of one whose read failed or stalled, or of any on a host of cgroup v1 alone (and it may not on a host of both versions), where the agent cannot tell which container made the call."
+const zoneUnread = " Run keploy where it reads the application's zone: in the host PID namespace (--pid=host or hostPID), the application's process and its files readable, or in keploy's own docker and compose modes, whose CLI reads the zone of the app container that made the call through Docker. The agent's debug line \"" + ZoneUnreadLog + "\" (run keploy with --debug) says why it could not. In docker and compose modes keploy reads no zone of a container whose configuration sets a JVM's user.timezone (keploy reads a JVM's zone only from its process: drop -Duser.timezone= from the container's configuration and set the zone with TZ), of one whose TZ names no zone while its /etc/timezone names a zone other than its /etc/localtime, or whose TZ is empty and its files hold no UTC (set TZ to the zone), of one whose TZ or zone files keploy cannot resolve (a TZ of a POSIX rule or of a zone with no file in the container, an /etc/localtime linking to nothing), of one whose zone file is another zone's (another zone's file copied through its /etc/localtime link, or a host's /etc/localtime mounted over it: set TZ to the zone, or link /etc/localtime to it), of one whose read failed or stalled, or of any on a host of cgroup v1 alone (and it may not on a host of both versions), where the agent cannot tell which container made the call."
 
 // hourFarWhy is what a refusal of a wall clock of no zone (models.ZoneApp)
 // checked at an hour in name, the zone the learn step stored, adds where
@@ -1420,10 +1420,23 @@ func fallBackNamed(turn time.Time, back time.Duration, loc *time.Location) strin
 // another, by its rules (its offset at the span's end and at each change of
 // it in the year after: models.SameZoneAt; never its name): the
 // application may now write its clock there, and how to replay it in the
-// zone it was recorded in. "" where the two agree, or either is not known.
+// zone it was recorded in. Where the two are of one name, their zone files
+// are of two releases of IANA's data (learn's loadZone names such a file
+// by its zone), and it says so, with the first instant they part at. ""
+// where the two agree, or either is not known.
 func appZoneHint(name string, learned *time.Location, s Span) string {
 	if s.Zone == nil || learned == nil || models.SameZoneAt(s.Zone, learned, s.To) {
 		return ""
+	}
+	if s.Zone.String() == name {
+		whose := "this machine's"
+		if s.Own {
+			whose = "the application's"
+		}
+		at, _ := models.ZoneRulesDiffer(s.Zone, learned, s.To, s.To.AddDate(1, 0, 0))
+		_, off := at.In(s.Zone).Zone()
+		_, ownOff := at.In(learned).Zone()
+		return ". The zone file of " + name + " the value was checked in, " + whose + ", is of another release of IANA's zone data (tzdata) than keploy's: on " + at.UTC().Format(time.RFC3339) + " it reads UTC" + utcOffset(off) + ", keploy's UTC" + utcOffset(ownOff) + ", where the test was recorded in keploy's reading of the zone. Update the zone data that is out of date, the application's or keploy's"
 	}
 	a := s.To.In(s.Zone)
 	own := s.Zone.String()

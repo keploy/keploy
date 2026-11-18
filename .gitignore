@@ -89,6 +89,10 @@ testdata
 # replayed, it must be served byte for byte as the server sent it.
 !pkg/agent/proxy/integrations/mysql/replayer/testdata/
 !pkg/agent/proxy/integrations/mysql/replayer/testdata/**
+# Real zone files of IANA's tzdata releases, copied from Go's zoneinfo.zip of
+# each: a zone file of another release than keploy's must read as its zone.
+!pkg/matcher/learn/testdata/
+!pkg/matcher/learn/testdata/**
 
 #Ignore the c and header files
 *.c
