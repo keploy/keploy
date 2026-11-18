@@ -344,6 +344,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// manager holds every mock it may own until then, however long it streams.
 	// A capture takes it over; any other way out ends it (leave).
 	var win *syncMock.Window
+	// pausedSpan ends the span of the exchange in flight when it arrived while
+	// recording was paused and so opened no window (BeginRequestSpan): at its
+	// answer, or at any other way out (leave).
+	var pausedSpan func(time.Time)
 	// countPause counts the exchange in flight as not recorded under the
 	// memory guard's pause (syncMock NoteNotRecordedUnderPressure), if the
 	// pause kept it from being recorded: once, however it ends. A pause read
@@ -368,6 +372,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		win.Close()
 		win = nil
+		endRequestSpan(&pausedSpan, time.Time{})
 		building.end()
 	}
 	defer leave()
@@ -575,6 +580,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// One that cannot be captured opens none: nothing would decide it.
 		if captureEnabled {
 			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
+		} else {
+			// A request paused at arrival opens no window, yet it is a
+			// request: its span covers it while it is in flight, so a
+			// duplicate's prune meanwhile takes the calls in it for its own.
+			pausedSpan = syncMock.FromContextOrGlobal(ctx).BeginRequestSpan(reqTimestamp)
 		}
 		// A pause read as the request comes is counted at once, as the
 		// zero-copy loop counts it: the exchange opens no window, so a stop's
@@ -906,9 +916,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// stream still being sent (a no-op for one that yielded at its
 		// headers already).
 		win.Yield(respTimestamp)
-		if pausedAtRequest {
-			noteUnwindowedRequest(ctx, req, resp, reqTimestamp, headersAt, respTimestamp)
-		}
+		endRequestSpan(&pausedSpan, answeredAt(resp, headersAt, respTimestamp))
 
 		shouldCapture := captureEnabled
 		if forceCloseMode {
@@ -1096,17 +1104,23 @@ const streamWhy = "its answer is a stream, which keploy does not record as a tes
 // recording's filters leave the request out anyway, by the request's shape
 // and path tag, and on the recording's console by its path beside the same
 // tag (notRecordedMeta).
-// noteUnwindowedRequest leaves the span of a request that opened no window
-// (one that arrived while recording was paused) with the mock manager, from
-// its request to its answer — a stream's headers, else its last byte — so the
-// calls it made are its own, not calls made outside every request
-// (syncMock.SyncMockManager.NoteRequestSpan).
-func noteUnwindowedRequest(ctx context.Context, req *http.Request, resp *http.Response, reqAt, headersAt, endAt time.Time) {
-	answered := endAt
+// answeredAt is when an exchange was answered: a stream's headers, else its
+// last byte.
+func answeredAt(resp *http.Response, headersAt, endAt time.Time) time.Time {
 	if models.IsHTTPStreamResponse(resp) {
-		answered = headersAt
+		return headersAt
 	}
-	syncMock.FromContextOrGlobal(ctx).NoteRequestSpan(reqAt, answered)
+	return endAt
+}
+
+// endRequestSpan ends the span of a request that opened no window
+// (syncMock.SyncMockManager.BeginRequestSpan) at answered, once; a zero
+// answered ends it now. A nil span is none.
+func endRequestSpan(span *func(time.Time), answered time.Time) {
+	if *span != nil {
+		(*span)(answered)
+		*span = nil
+	}
 }
 
 func (pm *IngressProxyManager) notRecordedStream(ctx context.Context, logger *zap.Logger, req *http.Request, resp *http.Response, win **syncMock.Window, headersAt time.Time) bool {
@@ -1432,6 +1446,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// A capture takes it over; any other way out ends it here.
 	var win *syncMock.Window
 	defer func() { win.Close() }()
+	// pausedSpan ends the span of the exchange in flight when it arrived while
+	// recording was paused and so opened no window: at its answer, or when
+	// the handler returns.
+	var pausedSpan func(time.Time)
+	defer func() { endRequestSpan(&pausedSpan, time.Time{}) }()
 	// countCut counts the exchange in flight as not recorded under the
 	// pause if a pause that began after its request came cut a body's
 	// capture: once, however it ends. Its end runs it, and every way out
@@ -1561,6 +1580,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// none: nothing would decide it, and a tunnel can last for hours.
 		if captureEnabled {
 			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
+		} else if paused && connCapture {
+			// A request paused at arrival opens no window, yet it is a
+			// request: its span covers it while it is in flight, so a
+			// duplicate's prune meanwhile takes the calls in it for its own.
+			pausedSpan = syncMock.FromContextOrGlobal(ctx).BeginRequestSpan(reqTimestamp)
 		}
 
 		// MSG_PEEK before reusing a pooled upstream conn.
@@ -2017,9 +2041,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// Answered: from here on the request claims none of the calls made
 		// beside it (syncMock.Window.Yield), as the buffered path's does.
 		win.Yield(respTimestamp)
-		if paused && connCapture {
-			noteUnwindowedRequest(ctx, req, resp, reqTimestamp, headersAt, respTimestamp)
-		}
+		endRequestSpan(&pausedSpan, answeredAt(resp, headersAt, respTimestamp))
 
 		// Async capture (matches synchronous-mode pattern at the call
 		// site below — keeps the proxy hot-loop free of dump+parse

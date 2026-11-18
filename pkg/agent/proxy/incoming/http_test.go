@@ -1347,10 +1347,11 @@ func TestBothIngressLoopsCountAnExchangeAPauseCutMidBody(t *testing.T) {
 }
 
 // A request that arrives while recording is paused opens no window, yet it is
-// still a request: both ingress loops leave its span with the mock manager
-// (NoteRequestSpan), from its request to its answer. A call its handler made is
-// its own, and a duplicate's prune drops it; a call after its answer is sent
-// as one made outside every request.
+// still a request: both ingress loops open its span with the mock manager at
+// its request (BeginRequestSpan) and end it at its answer. A call its handler
+// made is its own, and a duplicate's prune drops it, even one that runs while
+// the request is still in flight; a call after its answer is sent as one made
+// outside every request.
 func TestBothIngressLoopsLeaveAPausedRequestsSpan(t *testing.T) {
 	for _, synchronous := range []bool{false, true} {
 		name := "zero-copy"
@@ -1367,10 +1368,25 @@ func TestBothIngressLoopsLeaveAPausedRequestsSpan(t *testing.T) {
 			for i := 0; i < models.StartupMockTestCaseWindow; i++ {
 				mgr.ResolveRange(old, old, "", true, false)
 			}
-			handled := make(chan time.Time, 1)
+			call := func(at time.Time) *models.Mock {
+				m := &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(100 * time.Microsecond)},
+					TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
+				mgr.AddMock(m)
+				return m
+			}
+			prune := func() {
+				queue := mgr.DedupQueue()
+				job := queue.Enqueue(time.Now())
+				queue.ResolveJob(job, true, time.Now(), "", false, mgr)
+			}
+			ownCh := make(chan *models.Mock, 1)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handled <- time.Now() // the handler's own DB call, made while it serves the request
-				time.Sleep(2 * time.Millisecond)
+				// The handler's own DB call, then a duplicate decided while
+				// this request is still in flight: its prune passes the call.
+				ownCh <- call(time.Now())
+				time.Sleep(time.Millisecond)
+				prune()
+				time.Sleep(time.Millisecond)
 				_, _ = w.Write([]byte("ok"))
 			}))
 			t.Cleanup(upstream.Close)
@@ -1382,19 +1398,11 @@ func TestBothIngressLoopsLeaveAPausedRequestsSpan(t *testing.T) {
 			<-done
 			pm.captures.Wait()
 
-			call := func(at time.Time) *models.Mock {
-				m := &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(100 * time.Microsecond)},
-					TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}}
-				mgr.AddMock(m)
-				return m
-			}
-			own := call(<-handled)
+			own := <-ownCh
 			time.Sleep(time.Millisecond)
 			after := call(time.Now())
 			time.Sleep(time.Millisecond)
-			queue := mgr.DedupQueue()
-			job := queue.Enqueue(time.Now()) // a duplicate's prune after it
-			queue.ResolveJob(job, true, time.Now(), "", false, mgr)
+			prune() // a duplicate's prune after it
 			var sentOwn, sentAfter bool
 			for len(out) > 0 {
 				switch <-out {

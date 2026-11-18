@@ -436,27 +436,51 @@ func TestACallHeldBeforeItsRequestSaidItWasAnsweredIsLetGoAsBackground(t *testin
 }
 
 // A request the ingress opens no window for (one that arrived while recording
-// was paused, one filtered out of the recording) leaves its span through
-// NoteRequestSpan: its own calls are dropped at the next duplicate's prune, and
-// a call after its answer is sent.
+// was paused, one filtered out of the recording) opens its span at its start
+// (BeginRequestSpan): a duplicate's prune while it is still in flight drops its
+// calls as its own, and once it is answered a call after its answer is sent.
 func TestARequestWithNoWindowLeavesItsSpan(t *testing.T) {
 	r := newDedupRig(t)
-	start := time.Now()
+	answered := r.m.BeginRequestSpan(time.Now())
 	time.Sleep(200 * time.Microsecond)
 	own := r.call("health-db-ping")
 	time.Sleep(200 * time.Microsecond)
-	answered := time.Now()
-	r.m.NoteRequestSpan(start, answered)
+	r.dup() // decided while the request is still in flight: its prune passes the call
+	if _, ok := r.sentAs(own); ok {
+		t.Fatal("a call made during a request in flight that opened no window was sent as one made outside every request")
+	}
+	answered(time.Now())
 	time.Sleep(200 * time.Microsecond)
 	after := r.call("timer")
 	time.Sleep(time.Millisecond)
 	r.dup()
 	r.dup()
 	if _, ok := r.sentAs(own); ok {
-		t.Fatal("a call made during a request that opened no window was sent as one made outside every request")
+		t.Fatal("the request's own call was sent once it was answered")
 	}
 	if _, ok := r.sentAs(after); !ok {
-		t.Fatal("a call after that request's answer was dropped")
+		t.Fatal("a call after the request's answer was dropped")
+	}
+}
+
+// OpenAt's closer ends the span at the end it is given, not when it runs: a
+// span ended at its request's answer covers the request and nothing after it.
+// It covers to now while open; its closer acts once.
+func TestSpansOpenAtEndsAtTheEndItIsGiven(t *testing.T) {
+	var s Spans
+	start := time.Now().Add(-time.Second)
+	end := s.OpenAt(start)
+	if in, _ := s.Overlaps(time.Now(), time.Now()); !in {
+		t.Fatal("an open span does not cover now")
+	}
+	answered := start.Add(100 * time.Millisecond)
+	end(answered)
+	end(time.Now()) // a second close is a no-op
+	if in, _ := s.Overlaps(answered.Add(-time.Millisecond), answered.Add(-time.Millisecond)); !in {
+		t.Fatal("the span does not cover a time before its end")
+	}
+	if in, _ := s.Overlaps(answered.Add(time.Millisecond), answered.Add(time.Millisecond)); in {
+		t.Fatal("the span covers a time after the end its closer gave")
 	}
 }
 
