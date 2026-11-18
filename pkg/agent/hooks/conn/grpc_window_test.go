@@ -271,3 +271,25 @@ func TestCaptureGRPCWithoutSyncDecidesItsWindow(t *testing.T) {
 		t.Fatalf("a handed-on call's span: %v %v, want it noted to %v", span, ok, end)
 	}
 }
+
+// Without --sync, a duplicate gRPC call's window closes with no kept verdict:
+// the span it leaves marks the call's mock as its own, so the next HTTP
+// duplicate's prune drops it rather than sending it as a call no request made.
+func TestCaptureGRPCWithoutSyncDuplicatesMockIsDroppedAtTheNextPrune(t *testing.T) {
+	mgr, w, out, maps, start, mock := heldGRPCManager(t)
+	prev := GRPCCaptureHook
+	GRPCCaptureHook = func(*models.GrpcReq, *models.GrpcResp) (bool, string) { return true, "" }
+	defer func() { GRPCCaptureHook = prev }()
+	CaptureGRPC(syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w), zap.NewNop(), make(chan *models.TestCase, 1), grpcCall(start, time.Now()), 50051, false, true)
+	queue := mgr.DedupQueue()
+	job := queue.Enqueue(time.Now()) // an HTTP duplicate after it
+	queue.ResolveJob(job, true, time.Now(), "", true, mgr)
+	for len(maps) > 0 {
+		<-maps
+	}
+	for len(out) > 0 {
+		if got := <-out; got == mock {
+			t.Fatal("a duplicate gRPC call's own mock was sent at the next duplicate's prune")
+		}
+	}
+}

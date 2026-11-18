@@ -220,7 +220,7 @@ func TestANodeManagerOfOneRecordingReapsAtThePruneHorizon(t *testing.T) {
 			m.AddMock(startupHTTPMock(now.Add(-20 * time.Millisecond)))
 			// The duplicate whose call it is is skipped, then the next
 			// one's cleanup passes it.
-			m.resolveSkipped(now.Add(-30*time.Millisecond), now.Add(-10*time.Millisecond), "")
+			m.OpenWindow(now.Add(-30*time.Millisecond), nil).Close()
 			m.DeleteMocksStrictlyBefore(now)
 			select {
 			case got := <-out:

@@ -290,3 +290,137 @@ func TestEveryBackgroundCallSurvivesAStreamOfDuplicates(t *testing.T) {
 		t.Fatalf("%d of %d background calls did not reach the recording", lost, len(bgs))
 	}
 }
+
+// Without --sync, conn.CaptureGRPC ends a duplicate gRPC call by closing its
+// window, with no dedup job and no resolve. The span its window leaves
+// (Window.Close) is what still marks the call's calls as its own: the next
+// HTTP duplicate's prune drops them, as it did before calls no request made
+// were kept.
+func TestAnAsyncGRPCDuplicatesCallsAreStillDropped(t *testing.T) {
+	r := newDedupRig(t)
+	const n = 100
+	var own []*models.Mock
+	for i := 0; i < n; i++ {
+		w := r.m.OpenWindow(time.Now(), nil)
+		time.Sleep(200 * time.Microsecond)
+		own = append(own, r.call("grpc-dup-find"))
+		time.Sleep(200 * time.Microsecond)
+		w.Close() // CaptureGRPC's duplicate without --sync: no job, no resolve
+		r.dup()   // an HTTP duplicate, whose prune passes the gRPC call's
+	}
+	r.dup()
+	stored := 0
+	for _, m := range own {
+		if _, ok := r.sentAs(m); ok {
+			stored++
+		}
+	}
+	if stored > 0 {
+		t.Fatalf("%d of %d async gRPC duplicates' own calls were stored as calls no request made", stored, n)
+	}
+}
+
+// A duplicate's job is enqueued at its prune horizon, which is earlier than
+// its own request when another request is in flight (enterprise PruneHorizon).
+// The duplicate's span starts at its own request (its window's start), so a
+// call made after the other request started but before the duplicate did is
+// not taken for the duplicate's.
+func TestADuplicatesSpanStartsAtItsOwnRequestNotItsPruneHorizon(t *testing.T) {
+	r := newDedupRig(t)
+	other := time.Now() // a request in flight with no window of its own (one no test case is recorded for)
+	time.Sleep(2 * time.Millisecond)
+	timer := r.call("timer")
+	time.Sleep(2 * time.Millisecond)
+	dStart := time.Now()
+	w := r.m.OpenWindow(dStart, nil)
+	time.Sleep(time.Millisecond)
+	dEnd := time.Now()
+	w.Close()
+	job := r.q.Enqueue(other) // PruneHorizon(dStart) == other
+	r.q.ResolveJob(job, true, dEnd, "", true, r.m)
+	r.dup()
+	r.dup()
+	if _, ok := r.sentAs(timer); !ok {
+		t.Fatal("a call made before the duplicate's own request was dropped as the duplicate's")
+	}
+}
+
+// A duplicate's span ends when its window closes, after its verdict. Work it
+// does after responding but before then is its own and dropped with it; work
+// it does after its window closed is outside every request's span and is sent
+// as a call no request made. That is the trade-off of telling calls apart by
+// time: a tail on the span would also swallow the timer calls that land in
+// it, at every duplicate.
+func TestADuplicatesCallsAfterItsWindowClosesAreSentAsBackground(t *testing.T) {
+	r := newDedupRig(t)
+	var inside, beforeClose *models.Mock
+	start := time.Now()
+	w := r.m.OpenWindow(start, nil)
+	time.Sleep(200 * time.Microsecond)
+	inside = r.call("dup-read")
+	time.Sleep(200 * time.Microsecond)
+	end := time.Now() // its response
+	time.Sleep(200 * time.Microsecond)
+	beforeClose = r.call("dup-audit-before-close")
+	time.Sleep(200 * time.Microsecond)
+	w.Close()
+	job := r.q.Enqueue(start)
+	r.q.ResolveJob(job, true, end, "", true, r.m)
+	time.Sleep(200 * time.Microsecond)
+	afterClose := r.call("dup-audit-after-close")
+	time.Sleep(time.Millisecond)
+	r.dup()
+	r.dup()
+	if _, ok := r.sentAs(inside); ok {
+		t.Fatal("a duplicate's call inside its response was sent")
+	}
+	if _, ok := r.sentAs(beforeClose); ok {
+		t.Fatal("a duplicate's call after its response but before its window closed was sent")
+	}
+	name, ok := r.sentAs(afterClose)
+	if !ok {
+		t.Fatal("a call after the duplicate's window closed, outside every span, was dropped")
+	}
+	if got := r.mappedTo(name); len(got) > 0 {
+		t.Fatalf("a call outside every span is mapped to %v, want none", got)
+	}
+}
+
+// Calls no request made are sent by a duplicate's prune. The stale cutoff of
+// a kept resolve (resolveRange) still drops one more than StaleHorizon old:
+// that cutoff also stands for requests whose windows the manager does not know
+// (late proxyless windows, windows evicted from the ring), so whether such a
+// call survives an idle stretch depends on whether a duplicate's prune reaches
+// it first. Pinned so a change to the cutoff is a deliberate one.
+func TestTheStaleCutoffStillDropsACallNoRequestMade(t *testing.T) {
+	r := newDedupRig(t)
+	old := time.Now().Add(-(StaleHorizon + 3*time.Second))
+	bg := r.callAt("old-timer", old, old.Add(time.Millisecond))
+	r.kept(t, "test-1")
+	r.dup()
+	if name, ok := r.sentAs(bg); ok {
+		t.Fatalf("the stale cutoff sent a call no request made as %s; it is expected to drop it", name)
+	}
+	if r.stillHeld(bg) {
+		t.Fatal("the stale cutoff neither dropped nor sent the call")
+	}
+}
+
+// A request claimed kept (Window.Keep) whose window closes before its resolve
+// leaves no unkept span: a prune in between must not drop its calls as an
+// unkept request's.
+func TestAClaimedRequestsWindowLeavesNoUnkeptSpan(t *testing.T) {
+	r := newDedupRig(t)
+	w := r.m.OpenWindow(time.Now(), nil)
+	time.Sleep(200 * time.Microsecond)
+	mk := r.call("kept-find")
+	time.Sleep(200 * time.Microsecond)
+	if !w.Keep() {
+		t.Fatal("window given up")
+	}
+	w.Close()
+	r.dup() // a duplicate's prune passes the call before the kept request resolves
+	if _, sent := r.sentAs(mk); !sent && !r.stillHeld(mk) {
+		t.Fatal("a claimed request's call was dropped as an unkept request's")
+	}
+}

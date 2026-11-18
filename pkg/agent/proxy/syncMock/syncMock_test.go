@@ -1459,7 +1459,7 @@ func TestDeleteMocksStrictlyBeforeRescuesLateKeptMock(t *testing.T) {
 	futureTs := dupHorizon.Add(5 * time.Millisecond)
 
 	// An earlier duplicate, skipped, made the debris call.
-	mgr.resolveSkipped(debrisTs.Add(-time.Millisecond), debrisTs.Add(time.Millisecond), "")
+	mgr.OpenWindow(debrisTs.Add(-time.Millisecond), nil).Close()
 
 	mgr.mu.Lock()
 	mgr.buffer = append(mgr.buffer,
@@ -1868,7 +1868,7 @@ func TestDuplicateDebrisStillDroppedAfterStartupWindow(t *testing.T) {
 
 	// The duplicate whose call it is is skipped, then the next one's cleanup
 	// passes it.
-	mgr.resolveSkipped(debrisAt.Add(-time.Millisecond), debrisAt.Add(time.Millisecond), "")
+	mgr.OpenWindow(debrisAt.Add(-time.Millisecond), nil).Close()
 	mgr.DeleteMocksStrictlyBefore(time.Now())
 
 	select {
@@ -2406,7 +2406,7 @@ func TestResolveRangeOwnsAGenericTestMockUnderTheSwitch(t *testing.T) {
 		if got := flushed(func(m *SyncMockManager) {
 			// The duplicate whose calls they are is skipped, then the next
 			// one's cleanup passes them.
-			m.resolveSkipped(now.Add(-time.Millisecond), now.Add(time.Millisecond), "")
+			m.OpenWindow(now.Add(-time.Millisecond), nil).Close()
 			m.DeleteMocksStrictlyBefore(now.Add(time.Second))
 		}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("switch %v: a duplicate's cleanup sent %v, want %v", on, got, want)

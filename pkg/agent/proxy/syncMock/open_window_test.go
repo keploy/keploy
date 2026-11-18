@@ -1020,17 +1020,18 @@ func TestPruneAndFlushDiagnosticsSplitDropsByReason(t *testing.T) {
 	mgr.ResolveRange(d, d.Add(10*time.Millisecond), "test-0", false, true) // a sync duplicate
 	mgr.AddMock(httpMockAt(d.Add(time.Millisecond)))                       // its late debris
 	mgr.FlushOwnedWindows()
+	mgr.AddMock(httpMockAt(time.Now().Add(-2500 * time.Millisecond))) // a call no request made
 	a := time.Now().Add(-2 * time.Second)
-	mgr.AddMock(httpMockAt(a))                                                // an async duplicate's debris
-	mgr.resolveSkipped(a.Add(-time.Millisecond), a.Add(time.Millisecond), "") // that duplicate, skipped
+	mgr.AddMock(httpMockAt(a))                            // an async duplicate's debris
+	mgr.OpenWindow(a.Add(-time.Millisecond), nil).Close() // that duplicate, skipped
 	slow := mgr.OpenWindow(time.Now().Add(-time.Second), nil)
 	mgr.AddMock(httpMockAt(time.Now().Add(-500 * time.Millisecond))) // may be slow's
 	mgr.DeleteMocksStrictlyBefore(time.Now())
 	slow.Close()
 
 	for msg, want := range map[string]map[string]int64{
-		"diag/FlushOwnedWindows: buffer transition":         {"dropped": 1, "dropped_duplicate_leftovers": 1, "dropped_outside_any_window": 0, "held_now": 0},
-		"diag/DeleteMocksStrictlyBefore: buffer transition": {"dropped": 1, "dropped_duplicate_leftovers": 1, "dropped_outside_any_window": 0, "held_now": 1},
+		"diag/FlushOwnedWindows: buffer transition":         {"dropped": 1, "dropped_duplicate_leftovers": 1, "dropped_outside_any_window": 0, "held_now": 0, "sent_background": 0},
+		"diag/DeleteMocksStrictlyBefore: buffer transition": {"dropped": 1, "dropped_duplicate_leftovers": 1, "dropped_outside_any_window": 0, "held_now": 1, "sent_background": 1},
 	} {
 		entries := logs.FilterMessage(msg).All()
 		if len(entries) != 1 {
