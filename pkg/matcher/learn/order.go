@@ -73,7 +73,7 @@ func decideBoth(in Input, allScope bool) ([]Decision, []string) {
 	alt.RefusedOnly = false
 	alt.Earlier, alt.Raw = kept, append(append([]Raw(nil), in.Raw...), late...)
 	as, afields := decideWords(alt, allScope)
-	return bothWays(in, ds, fields, as, afields), fields
+	return bothWays(in, ds, fields, as, afields)
 }
 
 // refusesAny reports whether ds refuses a word.
@@ -84,8 +84,16 @@ func refusesAny(ds []Decision) bool {
 // bothWays is ds, the call read with its exchanges at the call's own
 // instant as earlier places of its test, with each word the reading as
 // recordings made after the call (as) refuses, or learns otherwise,
-// refused.
-func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields []string) []Decision {
+// refused. The two readings may decide one leaf at different grains: a
+// text one reading decides whole (word -1: a token made anew, a whole
+// copy) the other may decide word by word, and the reverse. A decision of
+// ds is read against each decision of as at its own word, else against
+// as's decision of its field whole, and a whole one of ds against every
+// decision of as inside it too. A refusal of as that no decision of ds is
+// read against still refuses: the first decision of its field ds does not
+// refuse takes it, and with none, it is added (fields names it). So a word
+// either reading refuses is refused, by construction.
+func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields []string) ([]Decision, []string) {
 	// A word is keyed by its field, its steps and its index: two texts one
 	// leaf opens to number their words each from 0.
 	key := func(f string, a variables.Address) string {
@@ -94,16 +102,44 @@ func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields [
 		}
 		return f + "\x00" + strconv.Itoa(a.Word)
 	}
-	late := make(map[string]Decision, len(as))
+	late := make(map[string]int, len(as))
 	for i, a := range as {
-		late[key(afields[i], a.At)] = a
+		late[key(afields[i], a.At)] = i
 	}
+	// read: the decisions of as some decision of ds was read against;
+	// byField: as's decisions by field, built at the first whole one of ds.
+	read := make([]bool, len(as))
+	var byField map[string][]int
 	dc := &decider{in: in}
 	names := [...]string{"refused", "a read of the clock", "a value bound to an earlier place", "a value made anew each run"}
 	for i, d := range ds {
-		a, ok := late[key(fields[i], d.At)]
+		j, ok := late[key(fields[i], d.At)]
 		if !ok {
-			a, ok = late[key(fields[i], variables.Address{Word: -1})]
+			j, ok = late[key(fields[i], variables.Address{Word: -1})]
+		}
+		var a Decision
+		if ok {
+			a, read[j] = as[j], true
+		}
+		if d.At.Word < 0 {
+			// Decided whole here: each decision of as inside it is read
+			// against it, the worst first (a refusal, then one learned
+			// otherwise).
+			if byField == nil {
+				byField = make(map[string][]int, len(as))
+				for k := range as {
+					byField[afields[k]] = append(byField[afields[k]], k)
+				}
+			}
+			for _, k := range byField[fields[i]] {
+				if !stepsUnder(d.At.Steps, as[k].At.Steps) {
+					continue
+				}
+				read[k] = true
+				if c := as[k]; !ok || worse(c, a, d.Outcome) {
+					a, ok = c, true
+				}
+			}
 		}
 		switch {
 		case !ok || d.Outcome == OutcomeRefused || a.Outcome == d.Outcome && a.Outcome != OutcomeRefused:
@@ -120,7 +156,39 @@ func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields [
 				nil, dc.fieldNoise(fields[i]))
 		}
 	}
-	return ds
+	for k, a := range as {
+		if read[k] || a.Outcome != OutcomeRefused {
+			continue
+		}
+		rf := *a.Refusal
+		rf.Why += "; read as an earlier place of the test instead, no decision stands at this word, yet keploy refuses a value either reading refuses"
+		hideSecrets(&rf)
+		ds = append(ds, Decision{At: a.At, Recorded: a.Recorded, Full: a.Full, Refusal: &rf, Line: RefusalLine(rf)})
+		fields = append(fields, afields[k])
+	}
+	return ds, fields
+}
+
+// stepsUnder reports whether a word opened by the steps inner lies inside
+// the text the steps outer open: outer is where inner starts.
+func stepsUnder(outer, inner []variables.Step) bool {
+	return len(inner) >= len(outer) && slices.Equal(inner[:len(outer)], outer)
+}
+
+// worse reports whether c, a decision of the second reading, says more
+// against a decision first read as d than a does: a refusal, then one
+// learned otherwise than d, then one learned as d.
+func worse(c, a Decision, d WordOutcome) bool {
+	rank := func(x Decision) int {
+		switch {
+		case x.Outcome == OutcomeRefused:
+			return 2
+		case x.Outcome != d:
+			return 1
+		}
+		return 0
+	}
+	return rank(c) > rank(a)
 }
 
 // decider is one call's state: its input, places, index and scope.
