@@ -24,8 +24,10 @@ type handoverAgent struct {
 	c      *scriptedContainer
 	answer atomic.Value
 	asked  chan struct{}
-	// hold, when set, holds each /agent/ready until it is closed.
-	hold chan struct{}
+	// hold, when set, holds each /agent/ready until it is closed, or until
+	// the row ends (ended).
+	hold  chan struct{}
+	ended chan struct{}
 
 	mu    sync.Mutex
 	calls []string
@@ -33,7 +35,7 @@ type handoverAgent struct {
 
 func newHandoverAgent(t *testing.T, answer string, hold chan struct{}) *handoverAgent {
 	t.Helper()
-	ag := &handoverAgent{c: &scriptedContainer{}, asked: make(chan struct{}, 16), hold: hold}
+	ag := &handoverAgent{c: &scriptedContainer{}, asked: make(chan struct{}, 16), hold: hold, ended: make(chan struct{})}
 	ag.answer.Store(answer)
 	ag.c.install(t)
 	// The agent's exit is the only verdict here.
@@ -46,7 +48,10 @@ func newHandoverAgent(t *testing.T, answer string, hold chan struct{}) *handover
 			default:
 			}
 			if ag.hold != nil {
-				<-ag.hold
+				select {
+				case <-ag.hold:
+				case <-ag.ended:
+				}
 			}
 			if ag.answer.Load().(string) == "ok" {
 				ag.note("release")
@@ -62,6 +67,10 @@ func newHandoverAgent(t *testing.T, answer string, hold chan struct{}) *handover
 		}
 	}))
 	t.Cleanup(srv.Close)
+	// Cleanups run last first, so this one lets a held answer go before
+	// srv.Close waits for every handler: a row that fails before it opens
+	// its hold fails, rather than hanging the test binary.
+	t.Cleanup(func() { close(ag.ended) })
 	ag.s = storeSession(t, srv.URL, true)
 	ag.a = clientFor(srv.URL)
 	ag.a.agentContainer = &namedContainer{name: "keploy-v3-test"}
@@ -185,6 +194,32 @@ func TestAHeldReleaseSendsNothingUntilTheHoldIsLetGo(t *testing.T) {
 	}
 	if got := ag.took(); strings.Join(got, ",") != "release,release" {
 		t.Fatalf("the agent took %v; want the setup's release, then the run's", got)
+	}
+}
+
+// Letting the hold go is what wakes a release it held: with nothing else
+// changing in the session, the release goes on as soon as the hold is let go.
+func TestLettingAHoldGoWakesTheReleaseItHeld(t *testing.T) {
+	ag := newHandoverAgent(t, "ok", nil)
+	resume := ag.s.holdReleases(context.Background())
+
+	released := make(chan error, 1)
+	go func() { released <- ag.a.MakeAgentReadyForDockerCompose(context.Background()) }()
+	// The release is held by now: it waits for the hold's end alone.
+	select {
+	case <-ag.asked:
+		t.Fatal("a release the run asked for reached the agent while the releases were held")
+	case err := <-released:
+		t.Fatalf("a held release ended (%v) before its hold was let go", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	resume()
+	if err := awaitErr(t, released, "the release the hold let go"); err != nil {
+		t.Fatalf("the release the hold let go ended with %v", err)
+	}
+	if got := ag.took(); strings.Join(got, ",") != "release" {
+		t.Fatalf("the agent took %v; want the run's release", got)
 	}
 }
 
