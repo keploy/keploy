@@ -1499,11 +1499,10 @@ func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
 	dc := t.x.dc
 	asked := func() { t.x.momentAsks++ }
-	forms := func(s string) []instant { return slices.Concat(dc.spansOf(s), dc.spansOf(dc.rawExtra(s))) }
 	ix, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[momentIndex] { return &e.formSpans },
-		uncapped(func(s string, _ []rawField) momentIndex { return newMomentIndex(forms(s)) }), momentIndexBytes,
+		uncapped(func(s string, _ []rawField) momentIndex { return newMomentIndex(dc.instantsOfForms(s)) }), momentIndexBytes,
 		func(s string, _ []rawField) {
-			for _, sp := range forms(s) {
+			for _, sp := range dc.instantsOfForms(s) {
 				if !sp.keyed {
 					continue
 				}
@@ -1519,6 +1518,28 @@ func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
 		held, fine = ix.holds(m, asked)
 	}
 	return held, fine, true
+}
+
+// instantsOfForms are the instants of s and of each of its declared forms
+// (rawExtra: a percent-encoded time opened, a cursor's base64 decoded), the
+// instants holdsMoment and formsName read, and keep for the call as one
+// momentIndex (readerEntry.formSpans): one read of them, whichever asks
+// first.
+func (dc *DriftCache) instantsOfForms(s string) []instant {
+	return slices.Concat(dc.spansOf(s), dc.spansOf(dc.rawExtra(s)))
+}
+
+// formsName reports whether an instant of the text or of any of its forms,
+// the ones holdsMoment reads (a percent-encoded time opened, a cursor's
+// base64 decoded), names a moment by the rule by; read is false where the
+// recording was not read. It reads holdsMoment's index of them, kept for
+// the call, or past the budget built for the question alone: it is asked
+// only of a place that holds a changed moment, never of every place.
+func (t *readerText) formsName(by func(h moment) bool) (named, read bool) {
+	dc := t.x.dc
+	ix, _, ok := indexOnce(t, func(e *readerEntry) *answer[momentIndex] { return &e.formSpans },
+		uncapped(func(s string, _ []rawField) momentIndex { return newMomentIndex(dc.instantsOfForms(s)) }), momentIndexBytes, nil)
+	return ok && slices.ContainsFunc(ix.moments, by), ok
 }
 
 // momentIndex is the moments of a text's instants that name one

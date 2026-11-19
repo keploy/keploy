@@ -58,7 +58,10 @@ func tiedInput(r *Reader, dc *DriftCache, raw ...Raw) Input {
 func TestATiedCallsDecidesReadEachPlaceIntoItsViewOnceForTheCall(t *testing.T) {
 	const tied = 40
 	place := RawOf(tiedBigMock("mock-1784", sentInTurnRec, oAt.Add(-8*time.Microsecond), oAt.Add(220*time.Microsecond)), false)
-	dc := oDrifts()
+	// A cache of no set in every mode (everyCacheSet): the row counts the
+	// call's own field views, and a set's call reads the set's view
+	// (setFields), built once for the set, never one of the call's.
+	dc := noSet(oDrifts())
 
 	// Each Decide with its own index, as before.
 	var want Decision
