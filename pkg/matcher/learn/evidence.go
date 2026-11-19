@@ -136,11 +136,13 @@ type reqPlace struct {
 // there, as the call's index reads them (readerIndex.textOf for a
 // recording): made once per place and shared by its copies, so the index
 // finds each text's entry once, and the place keeps no recording's text.
-// same: whether round F gave the place as recorded (0: not asked yet).
+// same: whether round F gave the place as recorded, and fresh: whether
+// round F's text there holds a word the recording's lacks (nothingNew), each
+// read once for the call (0: not asked yet), as each word's check asks it.
 type placeText struct {
-	rec, live *readerText
-	views     []*readerText
-	same      int8
+	rec, live   *readerText
+	views       []*readerText
+	same, fresh int8
 }
 
 // withTexts gives each of ps the handles its texts are read by, in x. A
@@ -941,9 +943,23 @@ func sameTokenAround(p evPlace, w readWord, moved bool) string {
 
 // nothingNew reports whether every word of round F's text at p stands among
 // the recording's: true where keploy could not read one (it shows nothing).
+// Both texts are the place's for the whole call, so they are split into
+// words once (newWordReads), not again for each changed word asked there.
 func nothingNew(p evPlace) bool {
-	rec, okR := p.t.rec.textNow()
-	live, okL := p.t.live.textNow()
+	if p.t.fresh == 0 {
+		p.t.fresh = 1
+		if !wordsAmongRecorded(p.t) {
+			p.t.fresh = -1
+		}
+	}
+	return p.t.fresh > 0
+}
+
+// wordsAmongRecorded is nothingNew's read of t's texts.
+func wordsAmongRecorded(t *placeText) bool {
+	newWordReads.Add(1)
+	rec, okR := t.rec.textNow()
+	live, okL := t.live.textNow()
 	if !okR || !okL {
 		return true
 	}
@@ -953,6 +969,10 @@ func nothingNew(p evPlace) bool {
 	}
 	return !slices.ContainsFunc(variables.Words(live), func(w [2]int) bool { return !had[live[w[0]:w[1]]] })
 }
+
+// newWordReads counts nothingNew's reads of a place's texts, for the row
+// that bounds them to one a place a call.
+var newWordReads atomic.Int64
 
 // The recordings round F gave the application before the call that are
 // outside its scope: another test's, or one recorded after the call
