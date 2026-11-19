@@ -1877,3 +1877,40 @@ func TestARefusalNamesNoOtherZoneForTwoFormsOfOneZonesFile(t *testing.T) {
 		}
 	}
 }
+
+// A refusal of a value learned in a zone this replay reads from a file of
+// that zone of another release of IANA's data (loadZone names such a file
+// by its zone) says the two releases part, where, and how each reads it,
+// never that the application runs in Africa/Casablanca, not in
+// Africa/Casablanca: tzdata 2024a and 2026c read Africa/Casablanca at
+// UTC+01:00 and UTC+00:00 from 2026-09-20 on.
+func TestARefusalNamesTwoReleasesOfOneZoneAsSuch(t *testing.T) {
+	load := func(rel string) *time.Location {
+		loc, err := time.LoadLocationFromTZData("Africa/Casablanca", casablancaOf(t, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loc
+	}
+	old, cur := load("2024a"), load("2026c")
+	at := zoneReleaseAt
+	for _, row := range []struct {
+		what            string
+		replay, learned *time.Location
+		own             bool
+		says            string
+	}{
+		{"the application's 2024a, keploy's 2026c", old, cur, true, ". The zone file of Africa/Casablanca the value was checked in, the application's, is of another release of IANA's zone data (tzdata) than keploy's: on 2026-11-17T12:00:00Z it reads UTC+01:00, keploy's UTC+00:00"},
+		{"the application's 2026c, keploy's 2024a", cur, old, true, "the application's, is of another release of IANA's zone data (tzdata) than keploy's: on 2026-11-17T12:00:00Z it reads UTC+00:00, keploy's UTC+01:00"},
+		{"this machine's 2026c, keploy's 2024a", cur, old, false, "the value was checked in, this machine's, is of another release"},
+	} {
+		h := appZoneHint("Africa/Casablanca", row.learned, Span{From: at.Add(-time.Second), To: at, Zone: row.replay, Own: row.own})
+		if !strings.Contains(h, row.says) || strings.Contains(h, "not in Africa/Casablanca") || strings.Contains(h, "not Africa/Casablanca") {
+			t.Errorf("%s: hint %q; want one saying %q, never that the zone is not itself", row.what, h, row.says)
+		}
+	}
+	// Where the two agree (before 2026-09-20) there is none.
+	if h := appZoneHint("Africa/Casablanca", cur, Span{From: time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), To: time.Date(2024, 6, 1, 0, 0, 1, 0, time.UTC), Zone: old, Own: true}); h != "" {
+		t.Errorf("two releases of Africa/Casablanca in 2024, where they agree: hint %q; want none", h)
+	}
+}

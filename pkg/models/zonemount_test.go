@@ -89,6 +89,21 @@ func TestZoneFileMountTellsAnotherZonesFile(t *testing.T) {
 		{"the same zone's", root + line("2", "1", "/sub/usr/share/zoneinfo/Etc/UTC", utc), utc, "Etc/UTC", nil},
 		{"another of UTC's names", root + line("2", "1", "/usr/share/zoneinfo/UTC", utc), utc, "Etc/UTC", nil},
 		{"the file an alias links to, of its own name", root + line("2", "1", "/usr/share/zoneinfo/Asia/Kolkata", "/usr/share/zoneinfo/Asia/Kolkata"), "/usr/share/zoneinfo/Asia/Kolkata", "Asia/Calcutta", nil},
+		// A host's file of an alias of the zone, or of the zone an alias
+		// names: one zone by two names, which keploy's own zone data
+		// reads alike from 1970 to 2038.
+		{"a host's Asia/Calcutta at an image's Asia/Kolkata", root + line("2", "1", "/usr/share/zoneinfo/Asia/Calcutta", "/usr/share/zoneinfo/Asia/Kolkata"), "/usr/share/zoneinfo/Asia/Kolkata", "Asia/Kolkata", nil},
+		{"a host's US/Eastern at an image's America/New_York", root + line("2", "1", "/usr/share/zoneinfo/US/Eastern", "/usr/share/zoneinfo/America/New_York"), "/usr/share/zoneinfo/America/New_York", "America/New_York", nil},
+		{"a host's America/Detroit at an image's America/New_York, apart from 1970 to 1975", root + line("2", "1", "/usr/share/zoneinfo/America/Detroit", "/usr/share/zoneinfo/America/New_York"), "/usr/share/zoneinfo/America/New_York", "America/New_York",
+			&ZoneMount{Source: "/usr/share/zoneinfo/America/Detroit", Zone: "America/Detroit"}},
+		// One zone by the newest release keploy knows, two by an older
+		// one: 2024b linked EET to Europe/Athens.
+		{"a host's EET at an image's Europe/Athens", root + line("2", "1", "/usr/share/zoneinfo/EET", "/usr/share/zoneinfo/Europe/Athens"), "/usr/share/zoneinfo/Europe/Athens", "Europe/Athens", nil},
+		// Two zones by the newest release keploy knows, one by an older
+		// one: Asia/Urumqi's rules were Antarctica/Vostok's from 1970 until
+		// 2023d corrected Vostok's.
+		{"a host's Asia/Urumqi at an image's Antarctica/Vostok", root + line("2", "1", "/usr/share/zoneinfo/Asia/Urumqi", "/usr/share/zoneinfo/Antarctica/Vostok"), "/usr/share/zoneinfo/Antarctica/Vostok", "Antarctica/Vostok",
+			&ZoneMount{Source: "/usr/share/zoneinfo/Asia/Urumqi", Zone: "Asia/Urumqi"}},
 		{"a directory at the zoneinfo directory", root + line("2", "1", "/", "/usr/share/zoneinfo"), utc, "Etc/UTC", nil},
 		{"a directory above it", root + line("2", "1", "/x", "/usr"), utc, "Etc/UTC", nil},
 		{"a directory inside the name, of the same names", root + line("2", "1", "/usr/share/zoneinfo/Etc", "/usr/share/zoneinfo/Etc"), utc, "Etc/UTC", nil},
@@ -160,14 +175,14 @@ func TestZoneLocationRefusesItsOwnFileMountedFromAnotherZones(t *testing.T) {
 		why                string
 	}{
 		{"Berlin's file mounted from Kolkata's", root + "2 1 8:1 /usr/share/zoneinfo/Asia/Kolkata " + dir + "/Europe/Berlin ro - xfs /dev/sda1 rw\n", "Europe/Berlin", nil, true,
-			`keploy reads "Europe/Berlin" from its own zone file ` + dir + `/Europe/Berlin, which is a file mounted from /usr/share/zoneinfo/Asia/Kolkata, the zone file of "Asia/Kolkata", so keploy cannot tell whether it holds "Europe/Berlin"'s rules`},
+			`keploy reads "Europe/Berlin" from its own zone file ` + dir + `/Europe/Berlin, which is a file mounted from the zone file of "Asia/Kolkata", so keploy cannot tell whether it holds "Europe/Berlin"'s rules`},
 		{"Berlin's file mounted from a copy, since replaced", root + "2 1 8:1 /etc/localtime//deleted " + dir + "/Europe/Berlin ro - xfs /dev/sda1 rw\n", "Europe/Berlin", nil, true,
 			"a file whose path names no zone (a copy), since replaced on the host"},
 		{"Etc/UTC's file mounted from Kolkata's: UTC to every runtime, no file read", root + "2 1 8:1 /usr/share/zoneinfo/Asia/Kolkata " + dir + "/Etc/UTC ro - xfs /dev/sda1 rw\n", "Etc/UTC", time.UTC, false, ""},
 		{"Etc/UTC's file mounted from the same zone's", root + "2 1 8:1 /usr/share/zoneinfo/Etc/UTC " + dir + "/Etc/UTC ro - xfs /dev/sda1 rw\n", "Etc/UTC", time.UTC, false, ""},
 		{"Etc/UTC's file mounted from UTC's", root + "2 1 8:1 /usr/share/zoneinfo/UTC " + dir + "/Etc/UTC ro - xfs /dev/sda1 rw\n", "Etc/UTC", time.UTC, false, ""},
 		{"Asia/Calcutta, linked to Kolkata's file, mounted from the host's Kolkata", root + "2 1 8:1 /usr/share/zoneinfo/Asia/Kolkata " + dir + "/Asia/Kolkata ro - xfs /dev/sda1 rw\n", "Asia/Calcutta", kolkata, false, ""},
-		{"Asia/Calcutta, linked to Kolkata's file, mounted from Etc/UTC's", root + "2 1 8:1 /usr/share/zoneinfo/Etc/UTC " + dir + "/Asia/Kolkata ro - xfs /dev/sda1 rw\n", "Asia/Calcutta", nil, true, `mounted from /usr/share/zoneinfo/Etc/UTC`},
+		{"Asia/Calcutta, linked to Kolkata's file, mounted from Etc/UTC's", root + "2 1 8:1 /usr/share/zoneinfo/Etc/UTC " + dir + "/Asia/Kolkata ro - xfs /dev/sda1 rw\n", "Asia/Calcutta", nil, true, `mounted from the zone file of "Etc/UTC"`},
 		{"nothing mounted", root, "Etc/UTC", time.UTC, false, ""},
 		{"a name of no host file", root + "2 1 8:1 /usr/share/zoneinfo/Asia/Kolkata " + dir + "/Europe/Berlin ro - xfs /dev/sda1 rw\n", "America/New_York", nil, false, "-"},
 		{"a table keploy cannot read", "-", "Europe/Berlin", nil, false, "keploy cannot read its own mounts"},
