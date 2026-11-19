@@ -236,6 +236,10 @@ type Agent struct {
 	// run, those charged to no test among them. A session's reset keeps it,
 	// as every count is kept.
 	runsOwn models.CaptureLosses
+	// session numbers the agent's sessions, each reset moving it on (0
+	// before the first), with the wire held: the log of a loss a session
+	// left unread names the session it was counted in (resetSession).
+	session uint64
 	// instanceGen is, for each keploy instance id, the generation its next
 	// claim gets (coreAgent.InstanceValue), for the agent's life: a session's
 	// reset keeps it, so no claim of an id is stamped with the value of an

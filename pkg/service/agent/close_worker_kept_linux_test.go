@@ -65,11 +65,21 @@ func TestALossKeptForAWorkersOpenTestIsNeverDropped(t *testing.T) {
 	})
 	t.Run("kept for a test still open when the run's losses are read: the run's, once", func(t *testing.T) {
 		a, src, inst1, endOne, endTwo := keptAgent(t)
+		// mock record's base, before the command.
+		base, err := a.CaptureLosses(context.Background())
+		require.NoError(t, err)
 		src.put(coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: untoldFrom("62766")})
 		endTwo()
 		run, err := a.UnchargedCaptureLosses(context.Background())
 		require.NoError(t, err)
 		require.EqualValues(t, 1, kindCount(run, untold), "a loss kept for a test still open is the run's as the run's losses are read: %+v", run)
+		// And in the run's own verdict, the counts since the base mock
+		// replay and mock record read next: not judged.
+		now, err := a.CaptureLosses(context.Background())
+		require.NoError(t, err)
+		judged, notJudged := lossesIn(now.Since(base), untold)
+		require.Zero(t, judged)
+		require.EqualValues(t, 1, notJudged, "the loss kept for TestOne, open at the run's last read, is in the run's own verdict: %+v", now.Since(base))
 		endOne()
 		judged, one := kindOf(windowOf(t, a, "a::TestOne"), untold)
 		require.Zero(t, judged+one, "TestOne is not charged a loss the run already reported")

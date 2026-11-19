@@ -159,19 +159,3 @@ func TestACloseCountedInAnEndsSettleIsTheEndingTests(t *testing.T) {
 		})
 	}
 }
-
-// A loss kept for a worker's test still open (ownedOpen) when the session
-// is reset is the next session's to report, as the run's: never dropped.
-func TestASessionResetKeepsALossKeptForAnOpenTestAsTheRuns(t *testing.T) {
-	a, src, inst1, _, endTwo := keptAgent(t)
-	src.put(coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: untoldFrom("62766")})
-	endTwo()
-	a.provenMu.Lock()
-	kept := len(a.proven.ownedOpen["a::TestOne"])
-	a.provenMu.Unlock()
-	require.Equal(t, 1, kept, "premise: TestTwo's end kept the loss for TestOne, still open")
-	require.NoError(t, a.resetSession(context.Background()))
-	run, err := a.UnchargedCaptureLosses(context.Background())
-	require.NoError(t, err)
-	require.EqualValues(t, 1, kindCount(run, models.CaptureLossAppBytesUntold), "the loss kept for the earlier session's open test is the run's: %+v", run)
-}

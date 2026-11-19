@@ -97,10 +97,13 @@ type provenWire struct {
 	// uncharged losses are read with that test still open
 	// (UnchargedCaptureLosses).
 	ownedOpen map[string]models.CaptureLosses
-	// ownedLeft are losses cut-short ends owned that the session before
-	// counted and no read took: the run's, which the next read takes
-	// (takeOwnedLosses), never dropped.
-	ownedLeft []coreAgent.OwnedLoss
+	// runsAt is, by kind, the count of that kind (captureCounts) read with
+	// the newest loss of the kind that names what it lost and that this
+	// session made the run's (runsLocked): the kind's count in the run's own
+	// count takes that loss's words only while the count has not grown past
+	// it (withCounted), so a count is named by its newest loss, and never by
+	// a loss an earlier session counted, whose entry the reset drops.
+	runsAt map[models.CaptureLossKind]uint64
 	// claim is the live claim; zero when none.
 	claim claimant
 	// workers is, in a run whose claims declared more than one test worker,
@@ -430,38 +433,35 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// no worker's is in the counts again, after the mark (in this session's,
 	// whichever test it charges), until a run of one test process claims it
 	// (ClaimInstance). One the proxy stamped as the last session's process's
-	// before this is taken just below: the run's.
+	// before this is taken just below: the session before's.
 	if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
 		pb.PairedBytesOneProcess(false)
 	}
-	// Losses an earlier session's cut-short ends owned that no read took
-	// are this session's to report, as the run's: none of its tests is the
-	// test that owned them, which only their words still name.
-	// Bounded, as the proxy's are, while no read takes them.
-	// So are those kept for an earlier session's test still open
-	// (ownedOpen), which no end of this session's takes.
-	left, taken := a.takeOwnedLosses()
-	left = append(left, taken...)
+	// The losses the session before counted that no read of it took: a
+	// cut-short end's or a close of its connections counted after its last
+	// read (in its teardown), or in a session that never made one, and
+	// those kept for its tests still open (ownedOpen). That session is over
+	// and they came before this session's mark, so no test of a later
+	// session caused them: each is logged once, with what it was, the test
+	// it was counted in where keploy knows it and the session, and charges
+	// no later session's run or test (leftLossesLocked). keploy test's owned
+	// take reads them only within the session they were counted in.
+	taken := a.takeOwnedLosses()
 	a.provenMu.Lock()
-	kept := make([]string, 0, len(a.proven.ownedOpen))
-	for id := range a.proven.ownedOpen {
-		kept = append(kept, id)
-	}
-	sort.Strings(kept)
-	for _, id := range kept {
-		for _, c := range a.proven.ownedOpen[id] {
-			left = append(left, coreAgent.OwnedLoss{Loss: c})
-		}
-	}
-	for i := range left {
-		// Its loss alone: no test, worker or epoch of an earlier session's
-		// names one of this session's.
-		left[i] = coreAgent.OwnedLoss{Loss: left[i].Loss}
-	}
-	left = boundOwnedLeft(left)
+	left := a.leftLossesLocked(taken)
 	workers := a.workerIDs()
-	a.proven = provenWire{losses: losses, ownedLeft: left}
+	a.proven = provenWire{losses: losses}
+	session := a.session
+	a.session++
 	a.provenMu.Unlock()
+	for _, l := range left {
+		f := []zap.Field{zap.Uint64("session", session), zap.String("kind", string(l.Loss.Kind)),
+			zap.Uint64("count", l.Loss.Count), zap.String("what", l.Loss.LogWhat())}
+		if l.Test != "" {
+			f = append(f, zap.String("test", l.Test))
+		}
+		a.logger.Warn("keploy could not capture a call that the session before counted and never read (after its last read, or with none made); it charges no run or test of a later session", f...)
+	}
 	// The previous session's workers are no workers of this one.
 	a.endInstances(workers)
 	if provenswitch.On() {
@@ -2079,14 +2079,9 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	// tests, it is no test's, and never its next test's. None is in the
 	// counts, so none is charged to this test by them, and none to another
 	// worker's test.
-	// Those an earlier session left are the run's, and in no count of this
-	// session's own (takeOwnedLosses).
 	var mine models.CaptureLosses
-	left, taken := a.takeOwnedLosses()
+	taken := a.takeOwnedLosses()
 	a.provenMu.Lock()
-	for _, o := range left {
-		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
-	}
 	for _, o := range taken {
 		owner := o.Test
 		if o.Open {
@@ -2105,14 +2100,14 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 			mine = mine.Plus(models.CaptureLosses{o.Loss})
 			continue
 		}
-		a.runsLocked(models.CaptureLosses{o.Loss})
+		a.runsLocked(models.CaptureLosses{o.Loss}, now)
 	}
 	if kept := a.proven.ownedOpen[id]; len(kept) > 0 {
 		delete(a.proven.ownedOpen, id)
 		if err == nil {
 			mine = mine.Plus(kept)
 		} else {
-			a.runsLocked(kept)
+			a.runsLocked(kept, now)
 		}
 	}
 	a.provenMu.Unlock()

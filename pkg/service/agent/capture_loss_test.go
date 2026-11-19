@@ -567,9 +567,10 @@ func TestAnEndCutShortNamesItsTestToTheBytesWait(t *testing.T) {
 // A loss a cut-short end owned, counted after the run's last end, is in no
 // test's charge: the run's read of what no test was charged with takes it from
 // the proxy, and holds it however often it is made. One no read took before a
-// new session's reset is never dropped: it is the new run's, and no test of
-// the new run is charged with it, not even one of the owner's name.
-func TestALossOwnedAfterTheLastEndIsTheRunsAndOneLeftUnreadTheNextRuns(t *testing.T) {
+// new session's reset charges no later session: the reset logs it, and
+// neither the new run nor any of its tests is charged with it, not even one
+// of the owner's name.
+func TestALossOwnedAfterTheLastEndIsTheRunsAndOneLeftUnreadNoLaterSessions(t *testing.T) {
 	a, p := wireAgent(t, models.MODE_TEST)
 	var owned []coreAgent.OwnedLoss
 	a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
@@ -592,14 +593,14 @@ func TestALossOwnedAfterTheLastEndIsTheRunsAndOneLeftUnreadTheNextRuns(t *testin
 	require.Nil(t, windowOf(t, a, "o::TestLast").Evidence)
 	un, err := a.UnchargedCaptureLosses(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, models.CaptureLosses{loss}, un, "the next session's run")
+	require.Empty(t, un, "not the next session's run")
 }
 
 // keploy test takes, at each test case's end and at its set's end, what a
 // cut-short end owned, by test, each once: a pool call's between test cases
 // too, which reached no verdict before. None is in the counts its per-test
 // reads charge the open test case from. One the session before left unread
-// is the run's.
+// is no later session's (TestKeployTestsOwnedTakeReadsOnlyItsOwnSessions).
 func TestKeployTestTakesTheLossesACutShortEndOwned(t *testing.T) {
 	a, p := wireAgent(t, models.MODE_TEST)
 	var owned []coreAgent.OwnedLoss
@@ -624,7 +625,7 @@ func TestKeployTestTakesTheLossesACutShortEndOwned(t *testing.T) {
 	require.NoError(t, a.resetSession(ctx))
 	got, err = a.TakeOwnedCaptureLosses(ctx)
 	require.NoError(t, err)
-	require.Equal(t, []models.OwnedCaptureLoss{{Loss: gap}}, got, "the session before's, the run's")
+	require.Empty(t, got, "the session before's is no later session's")
 }
 
 // A TLS client's rejection of keploy's certificate is the test's it happened

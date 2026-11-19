@@ -250,9 +250,8 @@ func TestAGapsCloseIsInTheRunsOwnVerdict(t *testing.T) {
 // session's run, nor its own verdict, nor the same-named test of the process
 // that claims it. The earlier session's tests had all ended and been judged.
 // A loss an earlier session stamped and never read (its command gone before
-// its last read, a test still open) is the next session's run's
-// (resetSession's ownedLeft), but never in that session's own verdict: it was
-// counted in the earlier one.
+// its last read, a test still open) charges no later session either: the
+// reset logs it (TestAnEarlierSessionsUnreadLossIsNotTheNextRecords).
 func TestATeardownCloseOfTheOneProcessChargesNoLaterSession(t *testing.T) {
 	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
 		for _, kind := range []models.CaptureLossKind{models.CaptureLossAppBytesUntold, models.CaptureLossAppBytesLost} {
@@ -292,9 +291,7 @@ func TestATeardownCloseOfTheOneProcessChargesNoLaterSession(t *testing.T) {
 					}
 					run, err := a.UnchargedCaptureLosses(ctx)
 					require.NoError(t, err)
-					if lastRead {
-						require.Zero(t, kindCount(run, kind), "the teardown's close is not the next session's run's: %+v", run)
-					}
+					require.Zero(t, kindCount(run, kind), "the teardown's close is not the next session's run's: %+v", run)
 					now, err := a.CaptureLosses(ctx)
 					require.NoError(t, err)
 					require.Zero(t, kindCount(now.Since(base), kind), "nor in the next session's own verdict")
@@ -357,32 +354,55 @@ func TestACloseCountedAfterAnEndsSettleIsTheRuns(t *testing.T) {
 
 // The run's own count adds each loss the wire made the run's to the count of
 // its kind, one count per kind, so a count since a base reads the sum; a
-// kind no count has is its own.
+// kind no count has is its own. A count is named by its newest loss: the
+// run's loss of its kind only when this session made it the run's (at) and
+// the count has not grown past what was read with it; a kind no count has
+// keeps no words of an earlier session's loss.
 func TestTheRunsOwnLossesAddToTheirKindsCount(t *testing.T) {
+	lost, untold, tls := models.CaptureLossAppBytesLost, models.CaptureLossAppBytesUntold, models.CaptureLossTLSAbort
 	counts := models.CaptureLosses{
-		{Kind: models.CaptureLossAppBytesLost, Count: 2, What: "from 127.0.0.1:1"},
-		{Kind: models.CaptureLossTLSAbort, Count: 1, What: "tls"},
+		{Kind: lost, Count: 2, What: "from 127.0.0.1:1"},
+		{Kind: tls, Count: 1, What: "tls"},
 	}
 	run := models.CaptureLosses{
-		{Kind: models.CaptureLossAppBytesLost, Count: 1, What: "from 127.0.0.1:2"},
-		{Kind: models.CaptureLossAppBytesUntold, Count: 3, What: "from 127.0.0.1:3"},
-		{Kind: models.CaptureLossTLSAbort, Count: 1},
+		{Kind: lost, Count: 1, What: "from 127.0.0.1:2"},
+		{Kind: untold, Count: 3, What: "from 127.0.0.1:3"},
+		{Kind: tls, Count: 1},
 	}
-	got := withCounted(counts, run)
-	require.EqualValues(t, 3, kindCount(got, models.CaptureLossAppBytesLost))
-	require.EqualValues(t, 2, kindCount(got, models.CaptureLossTLSAbort))
-	require.EqualValues(t, 3, kindCount(got, models.CaptureLossAppBytesUntold))
-	require.Len(t, got, 3, "one count per kind: %+v", got)
-	for _, l := range got {
-		switch l.Kind {
-		case models.CaptureLossAppBytesLost:
-			require.Equal(t, "from 127.0.0.1:2", l.What, "the run's latest loss names what was lost")
-		case models.CaptureLossTLSAbort:
-			require.Equal(t, "tls", l.What, "a loss that names nothing keeps the count's words")
+	whats := func(got models.CaptureLosses) map[models.CaptureLossKind]string {
+		out := map[models.CaptureLossKind]string{}
+		for _, l := range got {
+			out[l.Kind] = l.What
 		}
+		return out
 	}
-	require.EqualValues(t, 2, counts[0].Count, "the counts read are not changed")
-	require.Equal(t, counts, withCounted(counts, nil))
+	for _, c := range []struct {
+		name string
+		at   map[models.CaptureLossKind]uint64
+		want map[models.CaptureLossKind]string
+	}{
+		{"made the run's this session, the count not grown since: the run's loss is the newest",
+			map[models.CaptureLossKind]uint64{lost: 2, untold: 0, tls: 1},
+			map[models.CaptureLossKind]string{lost: "from 127.0.0.1:2", untold: "from 127.0.0.1:3", tls: "tls"}},
+		{"the count grew since: its own loss is the newest",
+			map[models.CaptureLossKind]uint64{lost: 1, untold: 0},
+			map[models.CaptureLossKind]string{lost: "from 127.0.0.1:1", untold: "from 127.0.0.1:3", tls: "tls"}},
+		{"none made the run's this session: no words of an earlier session's",
+			nil,
+			map[models.CaptureLossKind]string{lost: "from 127.0.0.1:1", untold: "", tls: "tls"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := withCounted(counts, run, c.at)
+			require.EqualValues(t, 3, kindCount(got, lost))
+			require.EqualValues(t, 2, kindCount(got, tls))
+			require.EqualValues(t, 3, kindCount(got, untold))
+			require.Len(t, got, 3, "one count per kind: %+v", got)
+			require.Equal(t, c.want, whats(got), "a loss that names nothing keeps the count's words")
+			require.EqualValues(t, 2, counts[0].Count, "the counts read are not changed")
+			require.Equal(t, "from 127.0.0.1:1", counts[0].What, "nor their words")
+		})
+	}
+	require.Equal(t, counts, withCounted(counts, nil, nil))
 }
 
 // A close counted after the run's last test ended, before the run's last read
