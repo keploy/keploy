@@ -1,7 +1,7 @@
 package manager
 
 import (
-	"crypto/sha256"
+	"hash/maphash"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,9 +15,9 @@ import (
 // test (a timer's write, a worker's poll, a token refresh), which the user
 // names with worker-mock rules (models.WorkerMockRule, config
 // record.workerMocks). The recorder adds what a rule matches to the set's
-// worker scope, which a replay serves to every test; it hands the rules to
-// the agent (models.OutgoingOptions.WorkerMockRules), and this manager keeps
-// those calls from its cleanups:
+// worker scope, which a replay serves to every test; its agent client hands
+// the rules to the agent (models.OutgoingReq.WorkerMockRules), and this
+// manager keeps those calls from its cleanups:
 //
 //   - AddMock tags each mock a rule of its recording names
 //     (TestModeInfo.Background, markBackground).
@@ -62,9 +62,10 @@ type backgroundCalls struct {
 	rules atomic.Pointer[map[string]map[string][]models.WorkerMockRule]
 	// mu guards sent and full, and orders the writers of rules.
 	mu sync.Mutex
-	// sent is, per recording, the calls sent with no owner, as digests (a
-	// call's key can hold a whole Redis value, or an AUTH password).
-	sent map[string]map[[sha256.Size]byte]struct{}
+	// sent is, per recording, the calls sent with no owner, by their
+	// callSum (a call's key can hold a whole Redis value, or an AUTH
+	// password: the key itself is never kept).
+	sent map[string]map[callSum]struct{}
 	// full is the recordings that reached maxBackgroundCalls, said once.
 	full map[string]bool
 	// kept counts the background calls sent; repeats the copies let go.
@@ -75,8 +76,22 @@ type backgroundCalls struct {
 // of the call. The zero value is none.
 type backgroundCall struct {
 	dest string
-	sum  [sha256.Size]byte
+	sum  callSum
 	ok   bool
+}
+
+// callSum is a call's key (models.WorkerMockCallOf) as two 64-bit hashes
+// under this process's own random seeds (hash/maphash): a set of calls sent
+// in memory, never stored or compared outside the process, in which two
+// different calls share a sum with a chance of about 2^-128.
+type callSum [2]uint64
+
+// callSeeds are the seeds of callSum, one per half.
+var callSeeds = [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}
+
+// sumOfCall is key's callSum.
+func sumOfCall(key string) callSum {
+	return callSum{maphash.String(callSeeds[0], key), maphash.String(callSeeds[1], key)}
 }
 
 // SetBackgroundRules sets the worker-mock rules of dest's recording ("" for
@@ -192,7 +207,7 @@ func (m *SyncMockManager) backgroundRepeat(mock *models.Mock) (backgroundCall, b
 		return backgroundCall{}, false
 	}
 	dest, _ := m.mockDest(mock)
-	call := backgroundCall{dest: m.destKey(dest), sum: sha256.Sum256([]byte(key)), ok: true}
+	call := backgroundCall{dest: m.destKey(dest), sum: sumOfCall(key), ok: true}
 	b := &m.bg
 	b.mu.Lock()
 	sent := b.sent[call.dest]
@@ -219,9 +234,9 @@ func (m *SyncMockManager) backgroundRepeat(mock *models.Mock) (backgroundCall, b
 		return backgroundCall{}, false
 	}
 	if sent == nil {
-		sent = map[[sha256.Size]byte]struct{}{}
+		sent = map[callSum]struct{}{}
 		if b.sent == nil {
-			b.sent = map[string]map[[sha256.Size]byte]struct{}{}
+			b.sent = map[string]map[callSum]struct{}{}
 		}
 		b.sent[call.dest] = sent
 	}

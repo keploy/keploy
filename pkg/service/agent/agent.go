@@ -750,12 +750,6 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	if err := a.resetSession(ctx); err != nil {
 		return nil, err
 	}
-	// The recording's worker-mock rules, before its first mock: the calls
-	// they name are kept from the manager's cleanups and sent with no owner,
-	// one copy of each (syncMock background_calls.go). A recorder that does
-	// not add what they match to the set's worker scope sends none, and the
-	// manager ignores them under the proven switch.
-	syncMock.Get().SetBackgroundRules("", opts.WorkerMockRules)
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
 		return nil, err
@@ -773,6 +767,16 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	syncMock.Get().SetRevokeByRequest(opts.SupportsRevokeByRequest)
 
 	return m, nil
+}
+
+// SetBackgroundRules sets the worker-mock rules of the recording an
+// /outgoing request starts (models.OutgoingReq.WorkerMockRules), before its
+// first mock: the calls they name are kept from the manager's cleanups and
+// sent with no owner, one copy of each (syncMock background_calls.go). Nil
+// clears the last recording's. The manager ignores them under the proven
+// switch.
+func (a *Agent) SetBackgroundRules(rules []models.WorkerMockRule) {
+	syncMock.Get().SetBackgroundRules("", rules)
 }
 
 func (a *Agent) GetMapping(ctx context.Context) (<-chan models.TestMockMapping, error) {

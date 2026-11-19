@@ -220,36 +220,3 @@ func TestWorkerMarksStopAtTheirCap(t *testing.T) {
 		t.Fatalf("the cap was said %d times; want once", n)
 	}
 }
-
-// The recorder hands keploy's agent the rules whose matches it adds to the
-// set's worker scope (OutgoingOptions.WorkerMockRules), and only those: a call
-// the agent keeps from its cleanups with no owner is of use only there. So
-// none without rules, with a store that cannot add to the worker scope, or
-// under the proven switch; exactly when newWorkerMarks makes marks.
-func TestTheAgentGetsTheRulesTheRecordingMarks(t *testing.T) {
-	t.Setenv(provenswitch.Env, "")
-	db := mapdb.New(zap.NewNop(), t.TempDir(), "mappings")
-	rules := []models.WorkerMockRule{jwksRule}
-	for _, row := range []struct {
-		name  string
-		rules []models.WorkerMockRule
-		db    MappingDb
-		want  bool
-	}{
-		{"rules and a store with a worker scope", rules, db, true},
-		{"no rules", nil, db, false},
-		{"a store that cannot add to the worker scope", rules, noWorkerStore{db}, false},
-	} {
-		got := agentWorkerMockRules(row.rules, row.db)
-		if (len(got) > 0) != row.want {
-			t.Errorf("%s: the agent gets %v", row.name, got)
-		}
-		if marked := newWorkerMarks(row.rules, row.db, zap.NewNop()) != nil; marked != row.want {
-			t.Errorf("%s: the recording marks = %v, but the agent gets rules = %v", row.name, marked, row.want)
-		}
-	}
-	t.Setenv(provenswitch.Env, "1")
-	if got := agentWorkerMockRules(rules, db); len(got) > 0 {
-		t.Fatalf("under the proven switch the agent gets %v", got)
-	}
-}

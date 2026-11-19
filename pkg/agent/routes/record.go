@@ -1387,6 +1387,11 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The recording's worker-mock rules, before its first mock. An agent
+	// service that keeps no background calls takes none.
+	if s, ok := a.svc.(backgroundRuleSetter); ok {
+		s.SetBackgroundRules(outgoingReq.WorkerMockRules)
+	}
 	mockChan, err := a.svc.GetOutgoing(ctx, outgoingReq.OutgoingOptions)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to get outgoing: %v", err), http.StatusInternalServerError)
@@ -1722,4 +1727,11 @@ func (a *Agent) HandleGracefulShutdown(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("Graceful shutdown flag set\n"))
+}
+
+// backgroundRuleSetter is the agent service's SetBackgroundRules: the
+// worker-mock rules of the recording an /outgoing request starts
+// (models.OutgoingReq.WorkerMockRules).
+type backgroundRuleSetter interface {
+	SetBackgroundRules(rules []models.WorkerMockRule)
 }

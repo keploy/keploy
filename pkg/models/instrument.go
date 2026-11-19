@@ -276,16 +276,6 @@ type OutgoingOptions struct {
 	// replay). Empty ⇒ built-in telemetry defaults only (see MergePassThroughDefaults).
 	PassThroughPorts []PassThroughRule
 	PassThroughHosts []PassThroughRule
-	// WorkerMockRules are the recording's worker-mock rules (config
-	// record.workerMocks), set by a recorder that adds what they match to the
-	// set's worker scope (keploy record without the proven switch). The
-	// agent's manager tags each mock a rule names (TestModeInfo.Background)
-	// and keeps it from its cleanups: a call the application makes on its own
-	// (a timer, a worker's poll) is otherwise dropped whenever it lands inside
-	// a static-dedup duplicate's request, or once it is older than the stale
-	// cutoff with no request to own it. Empty, the manager applies none. An
-	// agent from before this field ignores it. Record path only.
-	WorkerMockRules []WorkerMockRule
 	// PassThroughScope isolates recordOne de-duplication to one app/session. The
 	// HTTP integration (and its ptRecorder) is a single instance shared across
 	// apps in a long-lived proxyless/DaemonSet agent, so without a scope the first

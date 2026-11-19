@@ -399,8 +399,8 @@ type TestModeInfo struct {
 
 	// Background is set, on a mock the recording agent's manager (syncMock)
 	// takes, when a worker-mock rule of the recording names its call
-	// (WorkerMockRule; the recorder hands its rules to the agent on
-	// OutgoingOptions.WorkerMockRules): a call the application makes on its
+	// (WorkerMockRule; the recording's agent client hands its rules to the
+	// agent on OutgoingReq.WorkerMockRules): a call the application makes on its
 	// own, not for one test. A cleanup that would drop such a mock (a
 	// static-dedup duplicate's, the stale cutoff's) sends it with no owner
 	// instead, one copy of each call (WorkerMockCallOf), and the recorder
