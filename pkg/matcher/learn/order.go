@@ -3048,8 +3048,9 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	// F's view of a recording of the set holds (echoedOutside).
 	// At a millisecond or coarser such an answer may hold the moment only
 	// as two stamps the runs' timing put in one cut: where the call's own
-	// window holds the read (5) it is that read, and else it is refused so.
-	// One that holds it finer is a pick from it, refused here.
+	// window holds the read (5) it is that read, in a client test a coarse
+	// copy of a send of the scope (6) is that copy, and else it is refused
+	// so. One that holds it finer is a pick from it, refused here.
 	var gaveOutside []string
 	var gaveRefusal *Decision
 	fine := false
@@ -3171,7 +3172,15 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	if inWindow {
 		return dc.clock(path, at, n, c, off, "a read of the application's clock its call's window holds in both runs", copies(false) != nil)
 	}
-	if gaveRefusal != nil {
+	// In keploy mock's client tests (T2) a coarse answer outside the scope
+	// (gaveRefusal: two stamps in one cut by chance) yields to a coarse copy
+	// of a send of the scope (6, sameText): api-server's eventsV2 insert
+	// carries the app's creation second its own audit insert sent a moment
+	// before, while an earlier test's answers hold that second as its calls
+	// fell in it. The bind is checked at replay, so a replay whose two
+	// values differ misses (fail closed). keploy test's server tests (T1)
+	// refuse it as before.
+	if gaveRefusal != nil && !dc.dr.clientTests {
 		return *gaveRefusal
 	}
 
@@ -3200,6 +3209,9 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	}
 	if len(sameText) > 0 && !clockSrc(sameText) {
 		return dc.copied(path, at, n, c, sameText, copiedWhy)
+	}
+	if gaveRefusal != nil {
+		return *gaveRefusal
 	}
 
 	// 7. Since begin (client tests): a plain read the window from each
