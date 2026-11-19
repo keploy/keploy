@@ -223,3 +223,28 @@ func TestALossIsSplitOnlyPastItsCutEnds(t *testing.T) {
 		t.Fatalf("owned %+v, want only session 2's share of bytes 10..12: bytes 6..9 are test-1's", got)
 	}
 }
+
+// Bytes the application wrote in one session and the proxy never read are a
+// later session's loss when the proxy moved bytes on the connection in that
+// later session (an answer it wrote, with nothing new written to it): the
+// stamp is the newer of the session the proxy last moved bytes in and the
+// session the bytes' mark names, never only the session the connection was
+// accepted in (PairedBytesSession keeps the session its use was in).
+func TestALossIsStampedWithTheSessionTheProxyLastMovedBytesIn(t *testing.T) {
+	was := unreadAtSession
+	unreadAtSession = func(*pairedConn) (int, error) { return 5, nil } // written in session 1, never read
+	t.Cleanup(func() { unreadAtSession = was })
+	p := &Proxy{}
+	p.PairedBytesSession(1)
+	pc := heldInSession(p, "50005")
+	p.PairedBytesSession(2)
+	pc.used.Add(1) // the proxy moves bytes on it in session 2; the application writes none
+	p.PairedBytesSession(3)
+	if want := []sessionMark{{1, 1}, {3, 6}}; !slices.Equal(pc.marks, want) {
+		t.Fatalf("premise: marks %v, want %v: the application wrote nothing in session 2", pc.marks, want)
+	}
+	p.chargeOpen(pc, models.CaptureLossAppBytesLost, 1, 5)
+	if got := p.TakeOwnedLosses(); len(got) != 1 || got[0].Session != 2 || !got[0].Open || got[0].Worker != 1 {
+		t.Fatalf("owned %+v, want worker 1's one open loss stamped with session 2, the last the proxy moved bytes on the connection in", got)
+	}
+}
