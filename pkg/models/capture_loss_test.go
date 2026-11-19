@@ -705,3 +705,15 @@ func TestARefusedUnattributedCallLeavesOnlyTheTestsOpenThenNotJudged(t *testing.
 		t.Fatalf("remedy %q does not say to stop a worker's process before the worker ends", r)
 	}
 }
+
+// A close's loss names the application's address and port alone, never a
+// host name: from an agent that lists no hosts it is still logged whole,
+// for bytes lost and for a close keploy could not account for alike.
+func TestACloseLossIsLoggedWholeWithNoHostsListed(t *testing.T) {
+	for _, k := range []CaptureLossKind{CaptureLossAppBytesLost, CaptureLossAppBytesUntold} {
+		c := CaptureLoss{Kind: k, Count: 1, What: "from 127.0.0.1:62766"}
+		if got := c.logWhat(false); got != "from 127.0.0.1:62766" {
+			t.Errorf("%s: logged %q, not its What whole", k, got)
+		}
+	}
+}

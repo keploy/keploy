@@ -213,6 +213,28 @@ func TestACloseWaitsForTheFINOfASocketItsHolderClosedOnDarwin(t *testing.T) {
 		closeWithin(t, app, reader, 10*time.Second, "the close waited on a side it cannot read")
 		wantOneCloseUnknownLine(t, p, logs, "the proxy's side of it cannot be read: bad file descriptor")
 	})
+	t.Run("the proxy's side cannot be read in a test that moved nothing on the connection", func(t *testing.T) {
+		// The FIN went unseen, so bytes of the open test's may be on
+		// their way: it is charged though the proxy moved nothing on the
+		// connection since the last end was done with it (closeUnseen).
+		p, app, reader, logs := unheldPair(t, true)
+		pc := pairedConnOf(t, p, 1)
+		p.paired.markEnd(1, 0)
+		if pc.usedSinceEnd() {
+			t.Fatal("premise: the open test moved nothing on the connection")
+		}
+		was := readHeldProxySide
+		var reads atomic.Int32
+		readHeldProxySide = func(c *net.TCPConn) proxySide {
+			if reads.Add(1) == 1 {
+				return was(c)
+			}
+			return proxySide{err: errors.New("bad file descriptor")}
+		}
+		t.Cleanup(func() { readHeldProxySide = was })
+		closeWithin(t, app, reader, 10*time.Second, "the close waited on a side it cannot read")
+		wantOneCloseUnknownLine(t, p, logs, "the proxy's side of it cannot be read: bad file descriptor")
+	})
 }
 
 // A test's end marks the connections its bytes wait answers for (markEnd), on
