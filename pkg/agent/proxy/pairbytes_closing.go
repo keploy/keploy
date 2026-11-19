@@ -91,8 +91,12 @@ func (p *Proxy) pairUntold(pc *pairedConn, top uint64, msg string, fields ...zap
 	if pc.noSession.Load() || pc.untold.Load() {
 		return
 	}
-	owners, open := pc.lostBy(1, top)
+	cuts, open := pc.lostByCuts(1, top)
 	open = open && (!finSeen(pc) || pc.usedSinceEnd() || unreadOrUntold(pc))
+	owners := make([]string, len(cuts))
+	for i, c := range cuts {
+		owners[i] = c.test
+	}
 	if len(owners) == 0 && !open {
 		if pc.untoldSaid.CompareAndSwap(false, true) {
 			p.logger.Info(msg, append([]zap.Field{
@@ -105,11 +109,11 @@ func (p *Proxy) pairUntold(pc *pairedConn, top uint64, msg string, fields ...zap
 	if !pc.untold.CompareAndSwap(false, true) {
 		return
 	}
-	for _, test := range owners {
-		p.paired.ownKind(agent.OwnedLoss{Test: test, Loss: models.CaptureLoss{
+	for _, c := range cuts {
+		p.paired.ownKind(agent.OwnedLoss{Test: c.test, Session: c.session, Loss: models.CaptureLoss{
 			Kind:  models.CaptureLossAppBytesUntold,
 			Count: 1,
-			What:  "from " + pc.app.String() + ", written " + agent.WrittenIn(test) + ", where keploy's wait for them was cut short",
+			What:  "from " + pc.app.String() + ", written " + agent.WrittenIn(c.test) + ", where keploy's wait for them was cut short",
 		}})
 	}
 	if open {
@@ -352,7 +356,7 @@ func (p *Proxy) chargeOpen(pc *pairedConn, kind models.CaptureLossKind) {
 		p.losses.Add(kind, what)
 		return
 	}
-	s.ownKindLocked(agent.OwnedLoss{Worker: pc.instance, Open: true, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: what}})
+	s.ownKindLocked(agent.OwnedLoss{Worker: pc.instance, Open: true, Session: s.sessionOfLocked(pc), Loss: models.CaptureLoss{Kind: kind, Count: 1, What: what}})
 }
 
 // unreadLost is pairLost's message for a close that tossed bytes unread.
@@ -369,9 +373,11 @@ func (p *Proxy) pairLost(pc *pairedConn, low, top uint64, msg string, fields ...
 	if pc.noSession.Load() || !pc.lost.CompareAndSwap(false, true) {
 		return
 	}
-	owners, open := pc.lostBy(low, top)
-	for _, test := range owners {
-		p.paired.own(test, pc.app)
+	cuts, open := pc.lostByCuts(low, top)
+	owners := make([]string, len(cuts))
+	for i, c := range cuts {
+		owners[i] = c.test
+		p.paired.own(c, pc.app)
 	}
 	next := "keploy cannot vouch for the calls of the test that was open (under the proven switch, that test is not verified); check the agent's log for why the connection ended"
 	if open {

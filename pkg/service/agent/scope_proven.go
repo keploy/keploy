@@ -453,14 +453,17 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	a.proven = provenWire{losses: losses}
 	session := a.session
 	a.session++
+	next := a.session
 	a.provenMu.Unlock()
+	// The proxy stamps each loss counted from here with the session its
+	// connection was used in: one the session before used is taken in this
+	// one as that session's, logged and charged to nothing
+	// (takeOwnedLosses).
+	if ps, ok := a.Proxy.(coreAgent.PairedBytesSessioner); ok {
+		ps.PairedBytesSession(next)
+	}
 	for _, l := range left {
-		f := []zap.Field{zap.Uint64("session", session), zap.String("kind", string(l.Loss.Kind)),
-			zap.Uint64("count", l.Loss.Count), zap.String("what", l.Loss.LogWhat())}
-		if l.Test != "" {
-			f = append(f, zap.String("test", l.Test))
-		}
-		a.logger.Warn("keploy could not capture a call that the session before counted and never read (after its last read, or with none made); it charges no run or test of a later session", f...)
+		a.logEarlierSessionsLoss(session, l.Test, l.Loss, leftLoss)
 	}
 	// The previous session's workers are no workers of this one.
 	a.endInstances(workers)
@@ -2100,14 +2103,14 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 			mine = mine.Plus(models.CaptureLosses{o.Loss})
 			continue
 		}
-		a.runsLocked(models.CaptureLosses{o.Loss}, now)
+		a.runsLocked(models.CaptureLosses{o.Loss}, now, err == nil)
 	}
 	if kept := a.proven.ownedOpen[id]; len(kept) > 0 {
 		delete(a.proven.ownedOpen, id)
 		if err == nil {
 			mine = mine.Plus(kept)
 		} else {
-			a.runsLocked(kept, now)
+			a.runsLocked(kept, now, err == nil)
 		}
 	}
 	a.provenMu.Unlock()

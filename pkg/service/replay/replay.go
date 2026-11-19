@@ -2255,9 +2255,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Whether this run of the set is judged is this run's to say: a mark left
 	// by an earlier attempt, or an earlier Start, says nothing about it.
 	r.forgetNotJudged(testSetID)
-	// The losses cut-short ends owned that keploy takes in this set name its
-	// test cases; any its end does not apply are no later set's by name.
-	defer r.unnameUnappliedOwnedLosses()
+	// The losses cut-short ends owned that keploy takes in this set are this
+	// set's: one that returns before its end applies them reports them as it
+	// returns, and none reaches a later set (reportUnappliedOwnedLosses).
+	ownedApplied := false
+	defer func() {
+		if !ownedApplied {
+			r.reportUnappliedOwnedLosses(context.WithoutCancel(ctx), testSetID)
+		}
+	}()
 	// Where the app's ports are published is this run's to say too: the
 	// agent container an attempt starts may publish them on other host ports.
 	publishedPortsOf(r.logger, r.instrumentation).newRun(testSetID)
@@ -7089,6 +7095,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// end: named in its test case's report, or the set's (applyOwnedLosses).
 	r.takeOwnedLosses(context.WithoutCancel(ctx))
 	ownedBySet, ownedErr := r.applyOwnedLosses(testCaseResults)
+	ownedApplied = true
 	late = append(late, ownedBySet...)
 	if lateErr == nil {
 		lateErr = ownedErr

@@ -78,6 +78,15 @@ type pairedConn struct {
 	// its own, never the test open when the loss is counted (lostBy).
 	cutMu sync.Mutex
 	cuts  []cutEnd
+	// sessions is the proxy's session count (pairedConns.session), which a
+	// cut is stamped with; nil (session 0) for a connection no add made.
+	sessions *atomic.Uint64
+	// session is, under the pairedConns' mu, the agent's session the proxy
+	// last moved bytes on the connection in, or that it was accepted in when
+	// it moved none, as of the last session move (PairedBytesSession), and
+	// usedAtSession is used then: a loss of it is the session its use is
+	// (sessionOfLocked).
+	session, usedAtSession uint64
 	// pairedConnOS is what one OS alone reads of the connection: on Linux
 	// the devices its sockets are bound to, on darwin one count of what the
 	// application wrote and the process holding the application's end.
@@ -85,10 +94,13 @@ type pairedConn struct {
 }
 
 // cutEnd is a test's end cut short on a connection: what the application had
-// written to it when the end's wait began (want), and the test.
+// written to it when the end's wait began (want), the test, and the agent's
+// session the end was in (pairedConns.session), which a loss it owns is
+// stamped with (agent.OwnedLoss.Session).
 type cutEnd struct {
-	want uint64
-	test string
+	want    uint64
+	test    string
+	session uint64
 }
 
 // cutShort marks pc with test's end, which waited for want and was cut short
@@ -99,7 +111,11 @@ func (pc *pairedConn) cutShort(test string, want uint64) {
 	}
 	pc.cutMu.Lock()
 	defer pc.cutMu.Unlock()
-	pc.cuts = append(pc.cuts, cutEnd{want: want, test: test})
+	var session uint64
+	if pc.sessions != nil {
+		session = pc.sessions.Load()
+	}
+	pc.cuts = append(pc.cuts, cutEnd{want: want, test: test, session: session})
 }
 
 // lostBy is who owns the bytes low..top (counted from 1, as the application
@@ -111,6 +127,15 @@ func (pc *pairedConn) cutShort(test string, want uint64) {
 // so the cuts split the bytes in order; an end whose want is no more than
 // the one before it wrote nothing more, and owns none.
 func (pc *pairedConn) lostBy(low, top uint64) (owners []string, open bool) {
+	cuts, open := pc.lostByCuts(low, top)
+	for _, c := range cuts {
+		owners = append(owners, c.test)
+	}
+	return owners, open
+}
+
+// lostByCuts is lostBy with each owner's cut, which names its session.
+func (pc *pairedConn) lostByCuts(low, top uint64) (owners []cutEnd, open bool) {
 	low = max(low, 1)
 	top = max(top, low)
 	pc.cutMu.Lock()
@@ -118,7 +143,7 @@ func (pc *pairedConn) lostBy(low, top uint64) (owners []string, open bool) {
 	var prev uint64
 	for _, c := range pc.cuts {
 		if c.want > prev && low <= c.want && top > prev {
-			owners = append(owners, c.test)
+			owners = append(owners, c)
 		}
 		prev = max(prev, c.want)
 	}
@@ -225,18 +250,22 @@ type pairedConns struct {
 	// worker's (instance 0) is then its open test's, stamped with worker
 	// 0's epoch, and in no count (chargeOpen).
 	oneProcess bool
+	// session is the agent's session (PairedBytesSession), moved under mu: a
+	// loss is stamped with the session its connection was used in, or its
+	// cut end was in (agent.OwnedLoss.Session).
+	session atomic.Uint64
 }
 
 // maxOwned bounds the owned losses the proxy keeps untaken.
 const maxOwned = agent.MaxOwnedLosses
 
-// own notes a loss of the bytes test wrote to the connection from app, which
-// its end could not wait for.
-func (s *pairedConns) own(test string, app netip.AddrPort) {
-	s.ownKind(agent.OwnedLoss{Test: test, Loss: models.CaptureLoss{
+// own notes a loss of the bytes the test of cut wrote to the connection from
+// app, which its end could not wait for, in the session of that end.
+func (s *pairedConns) own(cut cutEnd, app netip.AddrPort) {
+	s.ownKind(agent.OwnedLoss{Test: cut.test, Session: cut.session, Loss: models.CaptureLoss{
 		Kind:  models.CaptureLossAppBytesLost,
 		Count: 1,
-		What:  "from " + app.String() + ", written " + agent.WrittenIn(test) + ", where keploy's wait for them was cut short",
+		What:  "from " + app.String() + ", written " + agent.WrittenIn(cut.test) + ", where keploy's wait for them was cut short",
 	}})
 }
 
@@ -248,7 +277,7 @@ func (s *pairedConns) own(test string, app netip.AddrPort) {
 // one counted after is stamped with the gap's.
 // Bounded while no agent takes them (a run that never reads them): past
 // maxOwned, one entry of no test's and no worker's, the run's, for each kind
-// counts the rest.
+// and session counts the rest.
 func (s *pairedConns) ownKind(o agent.OwnedLoss) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -260,12 +289,12 @@ func (s *pairedConns) ownKindLocked(o agent.OwnedLoss) {
 	o.Epoch = s.epochs[o.Worker]
 	if len(s.owned) >= maxOwned {
 		for i := maxOwned; i < len(s.owned); i++ {
-			if s.owned[i].Loss.Kind == o.Loss.Kind {
+			if s.owned[i].Loss.Kind == o.Loss.Kind && s.owned[i].Session == o.Session {
 				s.owned[i].Loss.Count += o.Loss.Count
 				return
 			}
 		}
-		s.owned = append(s.owned, agent.OwnedLoss{Loss: models.CaptureLoss{Kind: o.Loss.Kind, Count: o.Loss.Count, What: agent.OwnedLossesPastTheBound}})
+		s.owned = append(s.owned, agent.OwnedLoss{Session: o.Session, Loss: models.CaptureLoss{Kind: o.Loss.Kind, Count: o.Loss.Count, What: agent.OwnedLossesPastTheBound}})
 		return
 	}
 	s.owned = append(s.owned, o)
@@ -345,9 +374,38 @@ func (p *Proxy) PairedBytesOneProcess(on bool) {
 	}
 }
 
+// PairedBytesSession is told, as the agent resets a session, the new one's
+// number (agent.PairedBytesSessioner): each connection the proxy holds keeps
+// the session it last moved bytes on it in (or was accepted in, with none
+// moved), so a loss of it counted from here is that session's whatever
+// session is open then (sessionOfLocked).
+func (p *Proxy) PairedBytesSession(session uint64) {
+	s := &p.paired
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, pc := range s.byConn {
+		if used := pc.used.Load(); used > pc.usedAtSession {
+			pc.session, pc.usedAtSession = s.session.Load(), used
+		}
+	}
+	s.session.Store(session)
+}
+
+// sessionOfLocked is the agent's session a loss of pc is made in: the one
+// open now when the proxy moved bytes on pc in it, or accepted pc in it, and
+// otherwise the session it last moved bytes on pc in, or accepted it in. With
+// mu held.
+func (s *pairedConns) sessionOfLocked(pc *pairedConn) uint64 {
+	if pc.used.Load() > pc.usedAtSession {
+		return s.session.Load()
+	}
+	return pc.session
+}
+
 var (
-	_ agent.PairedBytesSettler  = (*Proxy)(nil)
-	_ agent.PairedBytesBeginner = (*Proxy)(nil)
+	_ agent.PairedBytesSettler   = (*Proxy)(nil)
+	_ agent.PairedBytesBeginner  = (*Proxy)(nil)
+	_ agent.PairedBytesSessioner = (*Proxy)(nil)
 )
 
 // ofWorker says pc is a connection of worker's: any, for worker 0 (a run of
@@ -419,7 +477,8 @@ func (s *pairedConns) add(conn *net.TCPConn, appSeq uint64, instance uint32) {
 	if s.byConn == nil {
 		s.byConn = map[net.Conn]*pairedConn{}
 	}
-	s.byConn[conn] = &pairedConn{appSeq: appSeq, instance: instance, app: app, proxy: proxy, conn: conn, done: make(chan struct{})}
+	s.byConn[conn] = &pairedConn{appSeq: appSeq, instance: instance, app: app, proxy: proxy, conn: conn, done: make(chan struct{}),
+		sessions: &s.session, session: s.session.Load()}
 }
 
 // remove forgets conn once the proxy is done with it, its socket closed. A

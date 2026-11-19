@@ -26,15 +26,34 @@ type ownedSource struct {
 	// (PairedBytesOneProcess), "on" or "off", and each read of its counts
 	// ("read"), in order.
 	told []string
+	// session is the agent's session it was last told
+	// (coreAgent.PairedBytesSessioner).
+	session uint64
 }
 
+// put counts o on a connection used in the session open now.
 func (s *ownedSource) put(o coreAgent.OwnedLoss) {
+	s.mu.Lock()
+	session := s.session
+	s.mu.Unlock()
+	s.putFrom(session, o)
+}
+
+// putFrom counts o on a connection, or at a cut end, of session.
+func (s *ownedSource) putFrom(session uint64, o coreAgent.OwnedLoss) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Every loss is stamped with its worker's epoch now, as the proxy's
 	// ownKind stamps it, one that names its test too.
 	o.Epoch = s.epochs[o.Worker]
+	o.Session = session
 	s.owned = append(s.owned, o)
+}
+
+func (s *ownedSource) PairedBytesSession(session uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.session = session
 }
 
 func (s *ownedSource) move(worker uint32) uint64 {

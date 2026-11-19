@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -180,36 +183,58 @@ func (postScriptFails) Read(context.Context, string) (*models.TestSet, error) {
 }
 
 // A set that returns before its end applies what keploy took (its
-// post-script failed) leaves losses that name its test cases, and the next
-// set's test cases repeat those names. A later set's end never names one of
-// its own test cases with them: they are the run's, and fail that set, in
-// words that still name the test case they were written in.
-func TestOwnedLossesASetLeftUnappliedNameNoLaterSetsTestCase(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	h := newPartialRunHarness(t, 3, 0)
-	h.replayer.config.Test.Mocking = true
-	h.replayer.testSetConf = postScriptFails{}
-	loss := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
-		What: "from 127.0.0.1:50912, written in test-2, where keploy's wait for them was cut short"}
-	// Taken at test-3's end, the set's last before its post-script.
-	instr := &prOwnedInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}},
-		at: 3, owned: []models.OwnedCaptureLoss{{Test: "test-2", Loss: loss}}}
-	h.replayer.instrumentation = instr
-	h.replayer.markPIDMaps(context.Background())
-	status, err := h.replayer.RunTestSet(context.Background(), "test-set-0", "test-run-0", false)
-	if status != models.TestSetStatusFaultScript || err == nil {
-		t.Fatalf("set %q, %v; want %q and the post-script's error", status, err, models.TestSetStatusFaultScript)
-	}
-	if instr.takes != 3 {
-		t.Fatalf("%d takes, want 3: one at each test case's end, none at a set's end it never reached", instr.takes)
-	}
-	// The next set's own test-2 failed.
-	next := []models.TestResult{{TestCaseID: "test-1", Status: models.TestStatusPassed}, {TestCaseID: "test-2", Status: models.TestStatusFailed}}
-	set, err := h.replayer.applyOwnedLosses(next)
-	if err != nil || len(set) != 1 || !reflect.DeepEqual(set[0], loss) {
-		t.Fatalf("the next set's end: %v, %v; want the set's, %v", set, err, loss)
-	}
-	if got := next[1].FailureInfo.CaptureIncomplete; len(got) != 0 {
-		t.Fatalf("the next set's test-2 names %v: an earlier set's loss, by its name", got)
+// post-script failed) reports, as it returns, the losses its cut-short ends
+// owned: those taken at its test cases' ends, and those its return takes
+// once more. Each is said in its log, naming the set and the test case; none
+// reaches a later set, whose test cases repeat its names, so the next set's
+// end applies nothing and its test-2 stays as it was.
+func TestOwnedLossesASetLeftUnappliedReachNoLaterSet(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		at   int
+	}{
+		{"taken at its last test case's end", 3},
+		{"taken as it returns", 4},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			h := newPartialRunHarness(t, 3, 0)
+			h.replayer.config.Test.Mocking = true
+			h.replayer.testSetConf = postScriptFails{}
+			core, logs := observer.New(zap.DebugLevel)
+			h.replayer.logger = zap.New(core)
+			loss := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+				What: "from 127.0.0.1:50912, written in test-2, where keploy's wait for them was cut short"}
+			instr := &prOwnedInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}},
+				at: c.at, owned: []models.OwnedCaptureLoss{{Test: "test-2", Loss: loss}}}
+			h.replayer.instrumentation = instr
+			h.replayer.markPIDMaps(context.Background())
+			status, err := h.replayer.RunTestSet(context.Background(), "test-set-0", "test-run-0", false)
+			if status != models.TestSetStatusFaultScript || err == nil {
+				t.Fatalf("set %q, %v; want %q and the post-script's error", status, err, models.TestSetStatusFaultScript)
+			}
+			if instr.takes != 4 {
+				t.Fatalf("%d takes, want 4: one at each test case's end, and one as the set returns", instr.takes)
+			}
+			var said []map[string]any
+			for _, e := range logs.All() {
+				if m := e.ContextMap(); m["test-case"] != nil && e.Level == zap.ErrorLevel {
+					said = append(said, m)
+				}
+			}
+			if len(said) != 1 || said[0]["test-set"] != "test-set-0" || said[0]["test-case"] != "test-2" ||
+				said[0]["kind"] != string(models.CaptureLossAppBytesLost) || !strings.Contains(said[0]["what"].(string), "50912") {
+				t.Fatalf("the set's log said %v; want one error naming test-set-0's test-2 and the loss", said)
+			}
+			// The next set's own test-2 failed; its test-1 passed.
+			next := []models.TestResult{{TestCaseID: "test-1", Status: models.TestStatusPassed}, {TestCaseID: "test-2", Status: models.TestStatusFailed}}
+			set, err := h.replayer.applyOwnedLosses(next)
+			if err != nil || len(set) != 0 {
+				t.Fatalf("the next set's end: %v, %v; want nothing: an earlier set's loss is no later set's", set, err)
+			}
+			if got := next[1].FailureInfo.CaptureIncomplete; len(got) != 0 {
+				t.Fatalf("the next set's test-2 names %v: an earlier set's loss, by its name", got)
+			}
+		})
 	}
 }

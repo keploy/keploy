@@ -94,12 +94,19 @@ type CaptureLossReporter interface {
 // in the worker's gap between tests, or under no open test, is the run's,
 // charged to no test: never to the worker's next test, which did not exist
 // when it was counted, and never to another worker's.
+//
+// Session is the agent's session the loss was made in (PairedBytesSessioner):
+// a cut-short end's, the session that end was in; an Open one's, the session
+// the proxy last moved bytes on its connection in (or accepted it in, with
+// none moved). The agent charges a loss of an earlier session than the one
+// open as it takes it to no run or test: it logs it, once, and drops it.
 type OwnedLoss struct {
-	Test   string
-	Worker uint32
-	Epoch  uint64
-	Open   bool
-	Loss   models.CaptureLoss
+	Test    string
+	Worker  uint32
+	Epoch   uint64
+	Open    bool
+	Session uint64
+	Loss    models.CaptureLoss
 }
 
 // OwnedLossTaker is the optional extension implemented by a proxy that tells
@@ -587,6 +594,13 @@ type PairedBytesSettler interface {
 type PairedBytesBeginner interface {
 	PairedBytesBegun(worker uint32) uint64
 	PairedBytesOneProcess(on bool)
+}
+
+// PairedBytesSessioner is the optional extension of an OwnedLossTaker that is
+// told, as the agent resets a session, the new session's number, and stamps
+// each owned loss with the session it was made in (OwnedLoss.Session).
+type PairedBytesSessioner interface {
+	PairedBytesSession(session uint64)
 }
 
 // PairedBytesChecker is the proxy's account of whether it can count the bytes

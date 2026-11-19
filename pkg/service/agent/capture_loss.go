@@ -7,6 +7,8 @@ import (
 	"maps"
 	"slices"
 
+	"go.uber.org/zap"
+
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -257,7 +259,7 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 	// The run's, with the counts read with them (none, when the read
 	// failed), and kept whatever it gave.
 	a.provenMu.Lock()
-	a.runsLocked(runs, now)
+	a.runsLocked(runs, now, err == nil)
 	owned := a.proven.ownedRun
 	a.provenMu.Unlock()
 	if err != nil {
@@ -278,15 +280,16 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 // runsLocked makes l, losses this session counted, the run's: charged to no
 // test (ownedRun, UnchargedCaptureLosses) and in the run's own count
 // (runsOwn, CaptureLosses), which no count of the proxy's holds. at is the
-// counts read with them, nil when that read failed: each kind's count read
-// there is noted with the newest of l that names what it lost (runsAt), so
-// a later count of the kind is named by its own words (withCounted). With
-// provenMu held.
-func (a *Agent) runsLocked(l, at models.CaptureLosses) {
+// counts read with them, and read says that read worked: each kind's count
+// read there is noted with the newest of l that names what it lost (runsAt),
+// so a later count of the kind is named by its own words (withCounted). A
+// read that failed notes nothing, and leaves the note an earlier read of this
+// session made. With provenMu held.
+func (a *Agent) runsLocked(l, at models.CaptureLosses, read bool) {
 	a.proven.ownedRun = a.proven.ownedRun.Plus(l)
 	a.runsOwn = a.runsOwn.Plus(l)
 	for _, r := range l {
-		if r.What == "" {
+		if r.What == "" || !read {
 			continue
 		}
 		if a.proven.runsAt == nil {
@@ -299,12 +302,60 @@ func (a *Agent) runsLocked(l, at models.CaptureLosses) {
 // takeOwnedLosses takes, once each, the losses the proxy counted that a test
 // whose end was cut short owned (coreAgent.OwnedLossTaker), or that a close
 // of a worker's connection charged (OwnedLoss.Open). None from a proxy that
-// does not tell them apart, whose counts hold every loss.
+// does not tell them apart, whose counts hold every loss. Only the open
+// session's: one the proxy stamped with an earlier session
+// (coreAgent.PairedBytesSessioner) was made in a session that is over, which
+// took everything it could, and no test of this one caused it; it is logged,
+// once, and charges no run or test.
 func (a *Agent) takeOwnedLosses() []coreAgent.OwnedLoss {
-	if t, ok := a.Proxy.(coreAgent.OwnedLossTaker); ok && a.Proxy != nil {
-		return t.TakeOwnedLosses()
+	t, ok := a.Proxy.(coreAgent.OwnedLossTaker)
+	if !ok || a.Proxy == nil {
+		return nil
 	}
-	return nil
+	taken := t.TakeOwnedLosses()
+	if _, stamps := a.Proxy.(coreAgent.PairedBytesSessioner); !stamps || len(taken) == 0 {
+		return taken
+	}
+	a.provenMu.Lock()
+	session := a.session
+	a.provenMu.Unlock()
+	mine := make([]coreAgent.OwnedLoss, 0, len(taken))
+	for _, o := range taken {
+		if o.Session == session {
+			mine = append(mine, o)
+			continue
+		}
+		a.logEarlierSessionsLoss(o.Session, o.Test, o.Loss, lateLoss)
+	}
+	return mine
+}
+
+// lateLoss and leftLoss are the two ways a loss of an earlier session reaches
+// none of the open session's verdicts (logEarlierSessionsLoss): counted after
+// its session was reset, from a connection that session used, or counted in
+// it and never read by it.
+const (
+	lateLoss = "it was counted after that session ended, on a connection that session used"
+	leftLoss = "the session counted it and never read it (it ended before its last read, or made none)"
+)
+
+// logEarlierSessionsLoss logs, at warning level, a loss l that session, an
+// earlier session than the one open, made (in test, where keploy knows it),
+// which charges no run or test of a later session, and why it reached none of
+// that session's verdicts (lateLoss, leftLoss).
+func (a *Agent) logEarlierSessionsLoss(session uint64, test string, l models.CaptureLoss, why string) {
+	msg := "keploy could not capture a call on a connection of an earlier session's; it charges no run or test of a later session"
+	next := "the earlier session's tests may have made calls keploy neither recorded nor mocked: run them again, and check the agent's log for why the connection ended"
+	if l.Kind.NotJudged() {
+		msg = "keploy could not tell whether a connection of an earlier session's carried a call it did not capture; it charges no run or test of a later session"
+		next = models.AppBytesUntoldRemedy
+	}
+	f := []zap.Field{zap.Uint64("session", session), zap.String("kind", string(l.Kind)),
+		zap.Uint64("count", l.Count), zap.String("what", l.LogWhat()), zap.String("why", why), zap.String("next_step", next)}
+	if test != "" {
+		f = append(f, zap.String("test", test))
+	}
+	a.logger.Warn(msg, f...)
 }
 
 // leftLossesLocked is what the session a reset ends counted that no read of

@@ -14,10 +14,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// leftLine is the start of resetSession's log line for a loss the session
-// before counted and never read.
-const leftLine = "keploy could not capture a call that the session before counted and never read"
-
 // observe gives a its logger's lines from here on.
 func observe(a *Agent) *observer.ObservedLogs {
 	core, logs := observer.New(zap.DebugLevel)
@@ -26,12 +22,20 @@ func observe(a *Agent) *observer.ObservedLogs {
 }
 
 // leftLogged is each line resetSession logged for a loss left unread, by its
-// fields.
+// fields, with its level as "_level".
 func leftLogged(logs *observer.ObservedLogs) []map[string]any {
+	return earlierLogged(logs, leftLoss)
+}
+
+// earlierLogged is each line logged for an earlier session's loss that
+// reached none of its verdicts for why (logEarlierSessionsLoss), by its
+// fields, with its level as "_level".
+func earlierLogged(logs *observer.ObservedLogs, why string) []map[string]any {
 	var out []map[string]any
 	for _, e := range logs.All() {
-		if len(e.Message) >= len(leftLine) && e.Message[:len(leftLine)] == leftLine {
-			out = append(out, e.ContextMap())
+		if m := e.ContextMap(); m["why"] == why {
+			m["_level"] = e.Level
+			out = append(out, m)
 		}
 	}
 	return out
@@ -80,6 +84,8 @@ func TestAnEarlierSessionsUnreadLossIsNotTheNextRecords(t *testing.T) {
 					left := leftLogged(logs)
 					if earlier {
 						require.Len(t, left, 1, "the reset logs the earlier session's loss once")
+						require.Equal(t, zap.WarnLevel, left[0]["_level"], "at warning level")
+						require.NotEmpty(t, left[0]["next_step"])
 						require.Equal(t, string(kind), left[0]["kind"])
 						require.EqualValues(t, 1, left[0]["count"])
 						require.Contains(t, left[0]["what"], "62999", "the line names the connection")
@@ -186,6 +192,7 @@ func TestKeployTestsOwnedTakeReadsOnlyItsOwnSessions(t *testing.T) {
 // names the count, and a loss made the run's after a counted close names it.
 func TestTheRunsOwnCountIsNamedByItsNewestLoss(t *testing.T) {
 	const old, counted, gap, tail = "from 10.0.0.1:1111", "from 10.0.0.2:2222", "from 10.0.0.3:3333", "from 10.0.0.4:4444"
+	const gap2 = "from 10.0.0.5:5555"
 	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
 		for _, kind := range []models.CaptureLossKind{models.CaptureLossAppBytesUntold, models.CaptureLossAppBytesLost} {
 			for _, c := range []struct {
@@ -199,6 +206,7 @@ func TestTheRunsOwnCountIsNamedByItsNewestLoss(t *testing.T) {
 				{"after an earlier session's gap close", true, []string{counted}, 1, counted},
 				{"a counted close after the gap's", true, []string{gap, counted}, 2, counted},
 				{"the gap's after a counted close", true, []string{counted, gap}, 2, gap},
+				{"a second gap close after a counted close after the first", true, []string{gap, counted, gap2}, 3, gap2},
 				{"a close after the last test, taken by the last read, after a counted close", true, []string{counted, tail}, 2, tail},
 			} {
 				t.Run(string(mode)+"/"+string(kind)+"/"+c.name, func(t *testing.T) {
@@ -274,7 +282,7 @@ func TestARunsLossThatNamesNothingTakesNoEarlierSessionsWords(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, a.resetSession(ctx))
 			a.provenMu.Lock()
-			a.runsLocked(models.CaptureLosses{{Kind: kind, Count: 1}}, nil)
+			a.runsLocked(models.CaptureLosses{{Kind: kind, Count: 1}}, nil, true)
 			a.provenMu.Unlock()
 			now, err := a.CaptureLosses(ctx)
 			require.NoError(t, err)

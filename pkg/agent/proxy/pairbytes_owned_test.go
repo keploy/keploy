@@ -65,7 +65,7 @@ func TestOwnedLossesPastTheBoundCountAsTheRuns(t *testing.T) {
 	app := netip.MustParseAddrPort("127.0.0.1:50912")
 	const past = 3
 	for i := range maxOwned + past {
-		s.own("test-"+strconv.Itoa(i+1), app)
+		s.own(cutEnd{test: "test-" + strconv.Itoa(i+1)}, app)
 	}
 	if len(s.owned) != maxOwned+1 {
 		t.Fatalf("%d owned losses kept, want %d", len(s.owned), maxOwned+1)
@@ -95,12 +95,12 @@ func TestOwnedLossesPastTheBoundKeepEachKindApart(t *testing.T) {
 	var s pairedConns
 	app := netip.MustParseAddrPort("127.0.0.1:50912")
 	for i := range maxOwned + 1 {
-		s.own("test-"+strconv.Itoa(i+1), app)
+		s.own(cutEnd{test: "test-" + strconv.Itoa(i+1)}, app)
 	}
 	untold := models.CaptureLoss{Kind: models.CaptureLossAppBytesUntold, Count: 1, What: "from 127.0.0.1:50912"}
 	s.ownKind(agent.OwnedLoss{Test: "test-past-1", Loss: untold})
 	s.ownKind(agent.OwnedLoss{Test: "test-past-2", Loss: untold})
-	s.own("test-past-3", app)
+	s.own(cutEnd{test: "test-past-3"}, app)
 	if len(s.owned) != maxOwned+2 {
 		t.Fatalf("%d owned losses kept, want %d: the bound's own and one of the run's for each kind", len(s.owned), maxOwned+2)
 	}
@@ -120,8 +120,8 @@ func TestOwnedLossesPastTheBoundKeepEachKindApart(t *testing.T) {
 func TestAGapsOwnedLossSaysBetweenTestCases(t *testing.T) {
 	var s pairedConns
 	app := netip.MustParseAddrPort("127.0.0.1:50912")
-	s.own("test-1", app)
-	s.own(agent.BetweenTestCases, app)
+	s.own(cutEnd{test: "test-1"}, app)
+	s.own(cutEnd{test: agent.BetweenTestCases}, app)
 	want := []string{
 		"from 127.0.0.1:50912, written in test-1, where keploy's wait for them was cut short",
 		"from 127.0.0.1:50912, written between test cases, where keploy's wait for them was cut short",

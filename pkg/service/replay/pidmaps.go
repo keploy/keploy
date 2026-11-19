@@ -269,18 +269,35 @@ func (r *Replayer) applyOwnedLosses(results []models.TestResult) (set models.Cap
 	return set, err
 }
 
-// unnameUnappliedOwnedLosses gives the run the losses keploy took that no
-// set's end applied, as a session's reset does on the agent: a set that
-// returned before its end's applyOwnedLosses (a failed post-script) left
-// losses naming its test cases, whose names the next set's repeat (test-1,
-// test-2), so a later set's end must not match them by name. They stay,
-// and that end fails its set on them, their words still naming the test
-// case.
-func (r *Replayer) unnameUnappliedOwnedLosses() {
+// reportUnappliedOwnedLosses reports, for a set that returns before its end
+// applies them (applyOwnedLosses: a failed post-script, an error), the losses
+// cut-short ends owned that keploy took in it, and takes once more: the set
+// has its result already, and a later set's tests caused none of them, so
+// each is said in this set's log, naming its test case, and none reaches a
+// later set's end, whose test cases repeat this set's names (test-1, test-2).
+func (r *Replayer) reportUnappliedOwnedLosses(ctx context.Context, testSetID string) {
+	r.takeOwnedLosses(ctx)
 	r.ownedMu.Lock()
-	defer r.ownedMu.Unlock()
-	for i := range r.owned {
-		r.owned[i].Test = ""
+	owned, err := r.owned, r.ownedErr
+	r.owned, r.ownedErr = nil, nil
+	r.ownedMu.Unlock()
+	for _, o := range owned {
+		msg := "keploy could not capture a call of this test-set's, on a connection a test case's end could not wait for; the test-set ended before its end could judge it, and no later test-set is charged with it"
+		if o.Loss.Kind.NotJudged() {
+			msg = "keploy could not tell whether a connection of this test-set's, which a test case's end could not wait for, carried a call it did not capture; the test-set ended before its end could judge it, and no later test-set is charged with it"
+		}
+		r.logger.Error(msg,
+			zap.String("test-set", testSetID),
+			zap.String("test-case", o.Test),
+			zap.String("kind", string(o.Loss.Kind)),
+			zap.Uint64("count", o.Loss.Count),
+			zap.String("what", o.Loss.LogWhat()),
+			zap.String("next_step", "fix what ended the test-set early (the error above says), then run it again: its test cases are not verified"))
+	}
+	if err != nil {
+		r.logger.Error("keploy could not take from the agent the capture losses of this test-set's test cases whose ends were cut short; the test-set ended before its end could judge them",
+			zap.String("test-set", testSetID), zap.Error(err),
+			zap.String("next_step", "fix what ended the test-set early (the error above says), then run it again"))
 	}
 }
 
