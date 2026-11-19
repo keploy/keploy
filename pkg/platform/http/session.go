@@ -59,18 +59,23 @@ type agentSession struct {
 	// releases are the releases of the app in flight (makeAgentReady), and
 	// readyBy the one that recorded the release step, while it is the one.
 	// held counts the holds on the releases the run asked for
-	// (holdReleases).
+	// (holdReleases). refused is why no release of this run reaches the
+	// agent any more: the setup of the agent compose started again failed
+	// (holdReleases' resume); nil until then, and again once the run ends.
 	releases map[*releaseCall]struct{}
 	readyBy  *releaseCall
 	held     int
+	refused  error
 }
 
 // releaseCall is one release of the app in flight (makeAgentReady). setup: it
 // is the release a restarted agent's setup makes (reapply), which no hold
-// holds. posting: its request to the agent is out.
+// holds. posting: its request to the agent is out. refused: why it sends
+// nothing to the agent any more (agentSession.refused).
 type releaseCall struct {
 	setup   bool
 	posting bool
+	refused error
 }
 
 // beginRelease notes a release of the app in flight. A release is owed from
@@ -83,7 +88,7 @@ type releaseCall struct {
 func (s *agentSession) beginRelease(setup bool, apply func(ctx context.Context) error) *releaseCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rc := &releaseCall{setup: setup}
+	rc := &releaseCall{setup: setup, refused: s.refused}
 	if s.releases == nil {
 		s.releases = map[*releaseCall]struct{}{}
 	}
@@ -115,23 +120,28 @@ func (s *agentSession) endRelease(rc *releaseCall, owed bool) {
 
 // awaitPost waits until release rc may send its request to the agent: at
 // once for a restarted agent's setup, otherwise while no hold is on. It
-// reports false once done is closed first.
-func (s *agentSession) awaitPost(done <-chan struct{}, rc *releaseCall) bool {
+// reports false once done is closed first, and refused, with no wait, once
+// the setup of an agent compose started again has failed (holdReleases):
+// rc then sends nothing to the agent.
+func (s *agentSession) awaitPost(done <-chan struct{}, rc *releaseCall) (post bool, refused error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for !rc.setup && s.held > 0 {
+	for rc.refused == nil && !rc.setup && s.held > 0 {
 		changed := s.changed
 		s.mu.Unlock()
 		select {
 		case <-changed:
 		case <-done:
 			s.mu.Lock()
-			return false
+			return false, nil
 		}
 		s.mu.Lock()
 	}
+	if rc.refused != nil {
+		return false, rc.refused
+	}
 	rc.posting = true
-	return true
+	return true, nil
 }
 
 // releaseOut reports whether a release has its request out; with s.mu held.
@@ -160,7 +170,13 @@ func (s *agentSession) posted(rc *releaseCall) {
 // a release it took before its setup was made again (reapply) would start the
 // app against an agent with none of the run's mocks or settings. Its setup
 // releases it, last.
-func (s *agentSession) holdReleases(ctx context.Context) (resume func()) {
+//
+// resume(failed), failed the error of that setup, lets the hold go without
+// letting a release go: every release of this run, in flight or asked for
+// until the run ends (end), then ends with failed and sends nothing to the
+// agent, which would start the app against an agent that is not set up. The
+// run ends on that failure (App.retryComposeUp).
+func (s *agentSession) holdReleases(ctx context.Context) (resume func(failed error)) {
 	s.mu.Lock()
 	s.held++
 	for ctx.Err() == nil && s.releaseOut() {
@@ -174,13 +190,26 @@ func (s *agentSession) holdReleases(ctx context.Context) (resume func()) {
 	}
 	s.mu.Unlock()
 	var once sync.Once
-	return func() {
+	return func(failed error) {
 		once.Do(func() {
 			s.mu.Lock()
 			defer s.mu.Unlock()
+			if failed != nil {
+				s.refuseReleases(failed)
+			}
 			s.held--
 			s.notify()
 		})
+	}
+}
+
+// refuseReleases ends every release of this run with failed, in flight or
+// asked for until the run ends, before it sends anything more to the agent;
+// with s.mu held.
+func (s *agentSession) refuseReleases(failed error) {
+	s.refused = failed
+	for rc := range s.releases {
+		rc.refused = failed
 	}
 }
 
@@ -259,6 +288,7 @@ func (s *agentSession) end() {
 	defer s.mu.Unlock()
 	s.ends++
 	s.steps = nil
+	s.refused = nil
 	s.notify()
 }
 

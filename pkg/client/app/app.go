@@ -78,7 +78,7 @@ type App struct {
 	// holdAgentRelease, when set, holds the releases of the app the run
 	// asked for until the func it returns is called; see
 	// SetAgentReleaseHold.
-	holdAgentRelease func(ctx context.Context) (resume func())
+	holdAgentRelease func(ctx context.Context) (resume func(failed error))
 	// setEndKill is why the latest stop at a test set's end had to kill the
 	// app (setend_stop.go), until run reports it; nil when it did not.
 	setEndKill     atomic.Pointer[string]
@@ -241,8 +241,10 @@ func (a *App) SetOnAgentRestart(f func(ctx context.Context) error) {
 // /agent/ready) the run asked for while compose's bring-up retry starts
 // keploy's agent again: no release reaches the agent compose started in its
 // place before the agent client has set it up again (SetOnAgentRestart),
-// which releases it last.
-func (a *App) SetAgentReleaseHold(f func(ctx context.Context) (resume func())) {
+// which releases it last. resume(failed), failed the error of that setup,
+// lets the hold go and ends every release of the run with failed instead of
+// letting it reach that agent, which is not set up.
+func (a *App) SetAgentReleaseHold(f func(ctx context.Context) (resume func(failed error))) {
 	a.holdAgentRelease = f
 }
 
@@ -2602,7 +2604,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		if !a.composeBeginsABringUpAgain() {
 			break
 		}
-		cmdErr = a.retryComposeUp(ctx, func() utils.CmdError { return executeApp(runCmd, runEnv) })
+		cmdErr = a.retryComposeUp(ctx, composeEnd, func() utils.CmdError { return executeApp(runCmd, runEnv) })
 	}
 	// A crash keploy stopped the stack on, still kept when the retries are
 	// spent: the run ends on it, as it ended on compose's abort. attempt is

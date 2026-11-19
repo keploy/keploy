@@ -221,12 +221,17 @@ func (a *App) isComposeAppEvent(ctx context.Context, m events.Message) bool {
 }
 
 // composeHalt is an exit of the app's container keploy did not ask for, or
-// of keploy's agent's after the app started.
+// of keploy's agent's after the app started, or a failed setup of the agent
+// compose's retry started again (agentSetup).
 type composeHalt struct {
 	exitCode int
 	// agent is keploy's agent's container when the halt is its exit, not
 	// the app's: exitCode is then the agent's.
 	agent string
+	// agentSetup is why keploy could not set up again the agent compose's
+	// retry of the bring-up started again (composeAgentSetupFailed); agent
+	// is then its container, and exitCode -1: no container exited.
+	agentSetup error
 	// oomKilled: the daemon says the app's container ran out of memory.
 	oomKilled bool
 	// startedAt is when the run of the app that exited began, on the
@@ -253,6 +258,12 @@ type composeHalt struct {
 }
 
 func (h composeHalt) Error() string {
+	if h.agentSetup != nil {
+		return fmt.Sprintf("keploy's agent container %q, which docker compose started again in keploy's retry of the bring-up (a dependency crashed before the application started), could not be set up again: %v. "+
+			"The application waits on that agent, and it holds none of the run's mocks or settings, so keploy does not release the application to it, and the run ends. "+
+			"Next step: read keploy's log above for why the setup failed (the agent's own last lines among it), fix that and run keploy again; "+
+			"if the agent ran but refused its setup, report it to keploy with that log", h.agent, h.agentSetup)
+	}
 	if h.agent != "" {
 		return fmt.Sprintf("keploy's agent container %q exited with code %d after the application started, and keploy had not stopped it: "+
 			"the application runs in the agent's network and process namespaces, so the run ends. "+

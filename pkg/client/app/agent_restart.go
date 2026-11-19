@@ -47,6 +47,31 @@ func (a *App) agentIdentity(ctx context.Context) (id string, started time.Time, 
 	return info.ID + "@" + info.State.StartedAt, started, true
 }
 
+// composeAgentSetupFailed ends the run on err, the failed setup of keploy's
+// agent that compose's retry started again: the halt is kept, naming that
+// setup, its error and the next step; then the releases of the app the run
+// asked for end with err (resume), none reaching that agent, which has none
+// of the run's mocks or settings and would start the app against them; then
+// the stack is stopped (end). Releases left held would hold the app back
+// until the agent's healthcheck gave up, and let go they would release it.
+// A halt kept already stands: its end is under way.
+func (a *App) composeAgentSetupFailed(err error, resume func(failed error), end func()) {
+	a.composeApp.stopMu.Lock()
+	kept := a.composeApp.halted.CompareAndSwap(nil, &composeHalt{exitCode: -1, agentSetup: err, agent: a.keployContainer})
+	a.composeApp.stopMu.Unlock()
+	resume(err)
+	if !kept {
+		a.logger.Debug("keploy's agent, started again by docker compose, could not be set up again; the run ends on the halt kept before",
+			zap.String("agentContainer", a.keployContainer), zap.Error(err))
+		return
+	}
+	a.logger.Info("keploy's agent, started again by docker compose, could not be set up again: ending the run",
+		zap.String("agentContainer", a.keployContainer), zap.Error(err))
+	if end != nil {
+		end()
+	}
+}
+
 // appStarted reports whether the app's container runs: compose starts it only
 // behind a healthy agent, so the agent then is one the run set up.
 func (a *App) appStarted(ctx context.Context) bool {
@@ -66,8 +91,10 @@ func (a *App) appStarted(ctx context.Context) bool {
 // one that ran before the retry, the agent client sets it up again; when the
 // app's container starts first, the agent was kept. The watch ends with run.
 // When docker cannot say which agent ran before, an agent that started after
-// the retry began is taken for one compose started again.
-func (a *App) retryComposeUp(ctx context.Context, run func() utils.CmdError) utils.CmdError {
+// the retry began is taken for one compose started again. A setup of it that
+// fails ends the run at once (composeAgentSetupFailed), through end, the
+// run's end on a halt (composeHaltEnd); nil: nothing ends it.
+func (a *App) retryComposeUp(ctx context.Context, end func(), run func() utils.CmdError) utils.CmdError {
 	if a.onAgentRestart == nil || a.keployContainer == "" || a.docker == nil {
 		return run()
 	}
@@ -92,7 +119,7 @@ func (a *App) retryComposeUp(ctx context.Context, run func() utils.CmdError) uti
 	// the `up` until the watch has had the agent set up again, which
 	// releases it last, or the watch ends. One kept running is the one the
 	// run set up, and a release still owed to it goes on.
-	resume := func() {}
+	resume := func(error) {}
 	if baselineKnown && before == "" && a.holdAgentRelease != nil {
 		resume = a.holdAgentRelease(ctx)
 	}
@@ -112,7 +139,7 @@ func (a *App) retryComposeUp(ctx context.Context, run func() utils.CmdError) uti
 	g, watch := errgroup.WithContext(watch)
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
-		defer resume()
+		defer resume(nil)
 		tick := time.NewTicker(agentRestartPoll)
 		defer tick.Stop()
 		for {
@@ -125,8 +152,7 @@ func (a *App) retryComposeUp(ctx context.Context, run func() utils.CmdError) uti
 				a.logger.Info("docker compose started keploy's agent again in its retry; setting it up again",
 					zap.String("agentContainer", a.keployContainer))
 				if err := a.onAgentRestart(watch); err != nil && watch.Err() == nil {
-					utils.LogError(a.logger, err, "keploy's agent, started again by docker compose, could not be set up again; "+
-						"the application waits on it and will not start")
+					a.composeAgentSetupFailed(err, resume, end)
 				}
 				return nil
 			}

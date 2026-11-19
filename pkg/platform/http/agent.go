@@ -4014,7 +4014,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// session puts back what the run set up on it (see agentSession).
 	a.session().configure(utils.CmdType(opts.CommandType) == utils.DockerCompose)
 	usrApp.SetOnAgentRestart(a.setUpRestartedAgent)
-	usrApp.SetAgentReleaseHold(func(ctx context.Context) func() { return a.session().holdReleases(ctx) })
+	usrApp.SetAgentReleaseHold(func(ctx context.Context) func(error) { return a.session().holdReleases(ctx) })
 
 	// Set up cleanup on failure
 	defer func() {
@@ -5234,8 +5234,13 @@ func (a *AgentClient) makeAgentReady(ctx context.Context, setup bool) (retErr er
 
 		// Not while compose's bring-up retry may be starting the agent
 		// again (holdReleases): the agent that answers here then may be one
-		// its setup has not made the run's calls on again yet.
-		if !s.awaitPost(ctx.Done(), rc) {
+		// its setup has not made the run's calls on again yet. Never once
+		// that setup failed: the run ends on that failure.
+		post, refused := s.awaitPost(ctx.Done(), rc)
+		if refused != nil {
+			return fmt.Errorf("the keploy agent was not released (/agent/ready), since keploy's agent, started again by docker compose, could not be set up again: %w", refused)
+		}
+		if !post {
 			if parent.Err() != nil {
 				return parent.Err()
 			}

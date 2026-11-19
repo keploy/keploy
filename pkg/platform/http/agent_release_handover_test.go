@@ -188,7 +188,7 @@ func TestAHeldReleaseSendsNothingUntilTheHoldIsLetGo(t *testing.T) {
 		t.Fatalf("the agent took %v while the run's release was held; want the setup's release alone", got)
 	}
 
-	resume()
+	resume(nil)
 	if err := awaitErr(t, released, "the release the hold let go"); err != nil {
 		t.Fatalf("the release the hold let go ended with %v", err)
 	}
@@ -214,7 +214,7 @@ func TestLettingAHoldGoWakesTheReleaseItHeld(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 
-	resume()
+	resume(nil)
 	if err := awaitErr(t, released, "the release the hold let go"); err != nil {
 		t.Fatalf("the release the hold let go ended with %v", err)
 	}
@@ -241,11 +241,11 @@ func holdWaitsForTheRequestOut(t *testing.T, answer string) {
 	go func() { released <- ag.a.MakeAgentReadyForDockerCompose(ctx) }()
 	ag.awaitAsked(t)
 
-	held := make(chan func(), 1)
+	held := make(chan func(error), 1)
 	go func() { held <- ag.s.holdReleases(context.Background()) }()
 	select {
 	case resume := <-held:
-		resume()
+		resume(nil)
 		t.Fatal("the hold began while a release's request was out")
 	case <-time.After(300 * time.Millisecond):
 	}
@@ -255,7 +255,7 @@ func holdWaitsForTheRequestOut(t *testing.T, answer string) {
 	// (held), and ends only with the run.
 	select {
 	case resume := <-held:
-		resume()
+		resume(nil)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the hold did not begin once the release's request was back")
 	}
