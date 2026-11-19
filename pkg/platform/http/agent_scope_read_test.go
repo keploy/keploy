@@ -403,7 +403,8 @@ func TestScopeTableWithoutOnceAckIsRefused(t *testing.T) {
 // (models.ScopeTableReq.Gates) pushed to an agent whose answer names the
 // series but not the gates is refused with ErrAgentIgnoresRules: it would
 // serve a later part's answer before the write that opens it. An agent that
-// names gates is taken, and the table posted carries them.
+// names gates is taken, and the table posted carries them. A table whose
+// only rule field is gates is checked all the same.
 func TestScopeTableWithoutGatesAckIsRefused(t *testing.T) {
 	var answer string
 	var posted models.ScopeTableReq
@@ -436,5 +437,10 @@ func TestScopeTableWithoutGatesAckIsRefused(t *testing.T) {
 	}
 	if !reflect.DeepEqual(posted.Gates, gates) {
 		t.Fatalf("the posted table's gates %v, want %v", posted.Gates, gates)
+	}
+	// A table whose only rule field is gates is checked all the same.
+	answer = `{"status":"ok"}`
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestT": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, gates, false); !errors.Is(err, ErrAgentIgnoresRules) {
+		t.Fatalf("a table with gates and no other rule field was taken by an agent that names none: got %v, want ErrAgentIgnoresRules", err)
 	}
 }

@@ -121,6 +121,24 @@ func TestSeriesGatesKeepTheirServedOpenersAcrossTheSameTable(t *testing.T) {
 	}
 }
 
+// A consume of the opening write that the view refuses (another test's
+// recording, in TestU's window) served nothing, so it opens no part: the
+// sweep is still answered the first part, and the second stays shut.
+func TestARefusedConsumeOfTheOpeningWriteOpensNothing(t *testing.T) {
+	mm, del := gatedSweep(t)
+	mm.ServeExactTest("TestU", nil)
+	if v := mm.exactConsumeAt(del, false, nil, nil, nil); v != exactRefused {
+		t.Fatalf("a consume of TestT's write in TestU's window: %v, want refused", v)
+	}
+	s := mm.exact.poolSeries.Load()
+	if !s.shut("d1") || s.shut("c1") {
+		t.Fatalf("a refused consume of the write moved the series: d1 shut %v, c1 shut %v; want d1 shut, c1 open", s.shut("d1"), s.shut("c1"))
+	}
+	if got := callURL(t, mm, sweepURL, false); got != "c1" {
+		t.Fatalf("after a refused consume of the write the sweep was answered %q, want c1", got)
+	}
+}
+
 // A consume of a shut recording that a parser read before the write closed
 // its part is refused, outside every window and between tests, so the
 // parser reads again.

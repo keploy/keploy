@@ -960,3 +960,65 @@ func TestScopeTableCarriesTheIntervalsAndAcksThem(t *testing.T) {
 		t.Fatalf("an agent without intervals answered %d, %s to a table without any; want 200 naming once, not every", rec.Code, rec.Body.String())
 	}
 }
+
+type gatesSvc struct {
+	everySvc
+	gates *map[string]models.SeriesGate
+	err   error
+}
+
+func (s gatesSvc) SetScopeGates(_ context.Context, gates map[string]models.SeriesGate) error {
+	if s.err != nil {
+		return s.err
+	}
+	*s.gates = gates
+	s.order = append(s.order, "gates")
+	return nil
+}
+
+// Under the switch the scope table carries, by series, the writes that open
+// and close its part (models.ScopeTableReq.Gates), installed after the
+// intervals, before the pool slices, and the answer names them served, an
+// empty table's too. An agent that refuses the gates answers 400 before the
+// pool. An agent that cannot serve them refuses a table that has some (it
+// would serve a later part's answer before the write that opens it), and
+// takes one without, naming them not served.
+func TestScopeTableCarriesTheGatesAndAcksThem(t *testing.T) {
+	post := func(svc agent.Service, body string) (*httptest.ResponseRecorder, models.ScopeTableResp) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		var ack models.ScopeTableResp
+		_ = json.Unmarshal(rec.Body.Bytes(), &ack)
+		return rec, ack
+	}
+	withGates := `{"mappings":{"o::TestA":[]},"pool":{"o":["mock-1"]},"worker":{"o":["mock-1"]},"series":{"pat/-/1.2":["mock-1"]},"gates":{"pat/-/1.2":{"openedBy":"mock-0"}}}`
+	t.Setenv(provenswitch.Env, "1")
+	series, once, every := map[string][]string{}, []string(nil), map[string]string(nil)
+	without := func(ps *poolSvc) everySvc {
+		return everySvc{onceSvc{seriesSvc{workerSvc{ps}, &series, nil}, &once, nil}, &every, nil}
+	}
+	ps, gates := &poolSvc{}, map[string]models.SeriesGate(nil)
+	rec, ack := post(gatesSvc{without(ps), &gates, nil}, withGates)
+	if rec.Code != http.StatusOK || !slices.Equal(ack.Served, []string{"series", "once", "every", "gates"}) {
+		t.Fatalf("status %d, answer %s; want 200 naming series, once, every and gates served", rec.Code, rec.Body.String())
+	}
+	if gates["pat/-/1.2"] != (models.SeriesGate{OpenedBy: "mock-0"}) || len(gates) != 1 || !slices.Equal(ps.order, []string{"windows", "worker", "series", "once", "every", "gates", "pool"}) {
+		t.Fatalf("gates %v, installed %v; want them installed after the intervals, before the pool", gates, ps.order)
+	}
+	ps, gates = &poolSvc{}, map[string]models.SeriesGate{"stale": {OpenedBy: "mock-9"}}
+	if rec, ack := post(gatesSvc{without(ps), &gates, nil}, `{"mappings":{},"pool":{}}`); rec.Code != http.StatusOK || len(gates) != 0 || !slices.Contains(ack.Served, "gates") {
+		t.Fatalf("a table without gates: status %d, gates %v, answer %s; want none installed, gates served", rec.Code, gates, rec.Body.String())
+	}
+	ps = &poolSvc{}
+	if rec, _ := post(gatesSvc{without(ps), &gates, errors.New("a gate names no recording")}, withGates); rec.Code != http.StatusBadRequest || slices.Contains(ps.order, "pool") {
+		t.Fatalf("an agent that refused the gates answered %d and installed %v; want 400 before the pool", rec.Code, ps.order)
+	}
+	ps = &poolSvc{}
+	if rec, _ := post(without(ps), withGates); rec.Code != http.StatusNotImplemented || slices.Contains(ps.order, "pool") {
+		t.Fatalf("an agent without gates answered %d to a table with some (installed %v); want 501 before the pool", rec.Code, ps.order)
+	}
+	if rec, ack := post(without(&poolSvc{}), `{"mappings":{},"pool":{}}`); rec.Code != http.StatusOK || slices.Contains(ack.Served, "gates") || !slices.Contains(ack.Served, "every") {
+		t.Fatalf("an agent without gates answered %d, %s to a table without any; want 200 naming every, not gates", rec.Code, rec.Body.String())
+	}
+}
