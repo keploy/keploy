@@ -123,6 +123,10 @@ func listenKey(inodes map[string]bool) string {
 	return strings.Join(keys, ",")
 }
 
+// procRoot is the process table the walk reads; a var so a test can point it
+// at a fixture tree.
+var procRoot = "/proc"
+
 // walk reads every process's fd table, in /proc's name order as
 // filepath.Glob lists it, for the first fd that names one of inodes; the
 // zero heldAt when none does.
@@ -134,12 +138,12 @@ func (c *ownerCache) walk(inodes map[string]bool) heldAt {
 	for inode := range inodes {
 		links["socket:["+inode+"]"] = inode
 	}
-	for _, proc := range procNames("/proc") {
+	for _, proc := range procNames(procRoot) {
 		pid, err := strconv.Atoi(proc)
 		if err != nil {
 			continue
 		}
-		dir := "/proc/" + proc + "/fd/"
+		dir := procRoot + "/" + proc + "/fd/"
 		for _, fd := range procNames(dir) {
 			link, _ := os.Readlink(dir + fd)
 			if inode, ok := links[link]; ok {

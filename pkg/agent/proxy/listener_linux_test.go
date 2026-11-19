@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"testing"
@@ -135,5 +136,54 @@ func TestListenKeyIsTheSocketsInOrder(t *testing.T) {
 		if got := listenKey(map[string]bool{"7": true, "13": true, "9": true}); got != "13,7,9" {
 			t.Fatalf("listenKey = %q, want 13,7,9", got)
 		}
+	}
+}
+
+// Of the processes that hold a listener's socket, the walk takes the first by
+// name, and of its fds the first by name, as filepath.Glob over /proc listed
+// them before: by text, so 1043 before 52, and fd 12 before 4. The fixture's
+// holders are made out of that order, and its first by number (52) is not its
+// first by name, so a walk in the order the directory lists them, or in
+// number order, finds another holder.
+func TestListenerWalkTakesTheFirstHolderInProcsNameOrder(t *testing.T) {
+	root := t.TempDir()
+	for _, h := range []struct{ pid, fd, link string }{
+		{"307", "3", "socket:[900]"},
+		{"52", "7", "socket:[901]"},
+		{"2000", "9", "socket:[900]"},
+		{"88", "5", "socket:[900]"},
+		{"1043", "4", "socket:[901]"},
+		{"1043", "12", "socket:[900]"},
+		{"1043", "2", "pipe:[77]"},
+		{"1043", "30", "socket:[901]"},
+		{"615", "1", "socket:[901]"},
+		{"1100", "1", "socket:[901]"},
+		{"7", "2", "socket:[900]"},
+		{"1044", "6", "socket:[900]"},
+		{"40", "3", "pipe:[78]"},             // holds neither
+		{"self", "3", "socket:[900]"},        // no process number: never walked
+		{"1000x", "3", "socket:[900]"},       // nor this
+		{"999", "8", "socket:[902]"},         // another listener's socket
+		{"10430", "3", "socket:[900]"},       // after 1043 by name
+		{"104", "3", "anon_inode:[eventfd]"}, // before 1043, holds neither
+	} {
+		dir := filepath.Join(root, h.pid, "fd")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(h.link, filepath.Join(dir, h.fd)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := procRoot
+	procRoot = root
+	t.Cleanup(func() { procRoot = old })
+
+	want := heldAt{pid: 1043, path: root + "/1043/fd/12", inode: "900"}
+	if got := newOwnerCache().walk(map[string]bool{"900": true, "901": true}); got != want {
+		t.Fatalf("the walk found %+v; want %+v, the first holder by name and its first fd by name", got, want)
+	}
+	if got := newOwnerCache().walk(map[string]bool{"903": true}); got != (heldAt{}) {
+		t.Fatalf("the walk found %+v for a socket no process holds; want none", got)
 	}
 }
