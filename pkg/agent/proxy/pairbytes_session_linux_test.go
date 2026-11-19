@@ -117,8 +117,8 @@ func TestAnEarlierSetsBytesLostInALaterSetAreNotItsCount(t *testing.T) {
 			t.Fatalf("counted %d app_bytes_lost, want 1: set 2's share", n)
 		}
 		got := ownedLossesOf(p.TakeOwnedLosses(), models.CaptureLossAppBytesLost)
-		if len(got) != 1 || got[0].Session != 0 {
-			t.Fatalf("owned %+v, want set 1's share, stamped with session 0", got)
+		if len(got) != 1 || got[0].Session != 0 || !got[0].Open || got[0].Test != "" {
+			t.Fatalf("owned %+v, want set 1's share, a close (open, naming no test) stamped with session 0", got)
 		}
 	})
 }

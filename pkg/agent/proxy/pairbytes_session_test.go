@@ -86,11 +86,17 @@ func TestACloseIsStampedWithTheSessionItsConnectionWasUsedIn(t *testing.T) {
 	}
 	// A loss of a byte past session 3's mark on the connection used in
 	// session 1 is session 3's, split at that mark: the bytes before it
-	// are session 1's, a share apart.
+	// are session 1's, a share apart. Each share is a close of worker 1's
+	// connection (OwnedLoss: Open, no test), its session's.
 	p.chargeOpen(usedIn1, models.CaptureLossAppBytesLost, 5, 6)
 	got = p.TakeOwnedLosses()
 	if len(got) != 2 || got[0].Session != 1 || got[1].Session != 3 {
 		t.Fatalf("owned %+v, want session 1's share, then session 3's", got)
+	}
+	for _, o := range got {
+		if !o.Open || o.Worker != 1 || o.Test != "" {
+			t.Errorf("share %+v, want a close of worker 1's connection: open, naming no test", o)
+		}
 	}
 }
 
