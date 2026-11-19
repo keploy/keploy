@@ -147,6 +147,11 @@ func TestOutcomeAFineHoldOutsideTheScopeIsRefusedThoughTheWindowHoldsTheRead(t *
 	ns.rAt, ns.fAt = time.Unix(0, rNs).Add(1149*time.Microsecond), time.Unix(0, fNs).Add(1149*time.Microsecond)
 	recCopy := echoPg("mock-c", ns.rAt.Add(-2*time.Millisecond), ns.rec).ServedAs(1).ServedAsRecorded().OfAnotherTest()
 	refused("the hour, and the recorded nanosecond in another test's answer", decide(ns, true, nil, hour, recCopy, unrelatedAt(ns)), "instant-another-scope")
+	// The same answer recorded after the call: no answer of another test
+	// names a moment before the call, and the echo's own read of what the
+	// recordings hold names the recorded nanosecond at its own cut.
+	lateCopy := echoPg("mock-c", ns.rAt.Add(2*time.Millisecond), ns.rec).ServedAs(1).ServedAsRecorded().OfAnotherTest()
+	refused("the hour, and the recorded nanosecond in another test's answer recorded after the call", decide(ns, true, nil, hour, lateCopy, unrelatedAt(ns)), "instant-pick-outside-scope")
 
 	// A second read: the recorded second in another test's answer names it
 	// at the second, a cut two stamps of the runs' timing can share.
