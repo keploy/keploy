@@ -440,7 +440,8 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// Bounded, as the proxy's are, while no read takes them.
 	// So are those kept for an earlier session's test still open
 	// (ownedOpen), which no end of this session's takes.
-	left := a.takeOwnedLosses()
+	left, taken := a.takeOwnedLosses()
+	left = append(left, taken...)
 	a.provenMu.Lock()
 	kept := make([]string, 0, len(a.proven.ownedOpen))
 	for id := range a.proven.ownedOpen {
@@ -615,7 +616,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		// read below (closeDropsGapHeld: the claim holds the wire). A read
 		// that fails leaves that test to count from the previous test's end.
 		a.closeDropsGapHeld(ctx)
-		if now, err := a.CaptureLosses(ctx); err == nil {
+		if now, err := a.captureCounts(ctx); err == nil {
 			a.provenMu.Lock()
 			a.proven.testLosses = now
 			a.provenMu.Unlock()
@@ -1518,7 +1519,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// charges it the other test's too (chargeCaptureLosses).
 	var from models.CaptureLosses
 	if overlaps {
-		from, _ = a.CaptureLosses(ctx)
+		from, _ = a.captureCounts(ctx)
 	}
 	a.NoteScope(id, 0, dir, false)
 	seed := a.beginSeed(id, models.NormalizeScopeSeed(req.Seed))
@@ -2078,9 +2079,14 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	// tests, it is no test's, and never its next test's. None is in the
 	// counts, so none is charged to this test by them, and none to another
 	// worker's test.
+	// Those an earlier session left are the run's, and in no count of this
+	// session's own (takeOwnedLosses).
 	var mine models.CaptureLosses
-	taken := a.takeOwnedLosses()
+	left, taken := a.takeOwnedLosses()
 	a.provenMu.Lock()
+	for _, o := range left {
+		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
+	}
 	for _, o := range taken {
 		owner := o.Test
 		if o.Open {
@@ -2099,14 +2105,14 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 			mine = mine.Plus(models.CaptureLosses{o.Loss})
 			continue
 		}
-		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
+		a.runsLocked(models.CaptureLosses{o.Loss})
 	}
 	if kept := a.proven.ownedOpen[id]; len(kept) > 0 {
 		delete(a.proven.ownedOpen, id)
 		if err == nil {
 			mine = mine.Plus(kept)
 		} else {
-			a.proven.ownedRun = a.proven.ownedRun.Plus(kept)
+			a.runsLocked(kept)
 		}
 	}
 	a.provenMu.Unlock()

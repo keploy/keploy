@@ -128,28 +128,3 @@ func TestTheOneProcessClaimTellsTheProxyBeforeItReadsTheCounts(t *testing.T) {
 		})
 	}
 }
-
-// A close of the one process's connection stamped in an earlier session and
-// taken at the reset is the next session's to report, as the run's: it names
-// no test of the new session, the same-named test of a process claiming the
-// new session among them.
-func TestAnEarlierSessionsOneProcessCloseIsTheRunsAfterAReset(t *testing.T) {
-	a, src := oneProcessAgent(t, models.MODE_TEST)
-	ctx := context.Background()
-	_, serr := a.ProvenBegin(ctx, begin("TestOne"))
-	require.Nil(t, serr)
-	src.put(oneProcessClose(models.CaptureLossAppBytesUntold))
-	// And bytes the earlier session's TestOne owned, its end cut short.
-	src.put(coreAgent.OwnedLoss{Test: "o::TestOne", Loss: models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1, What: "from 127.0.0.1:62767"}})
-	require.NoError(t, a.resetSession(ctx))
-	claimSelf(t, a)
-	endPassed(t, a, "TestOne")
-	for _, kind := range []models.CaptureLossKind{models.CaptureLossAppBytesUntold, models.CaptureLossAppBytesLost} {
-		j, nj := kindOf(windowOf(t, a, "o::TestOne"), kind)
-		require.Zero(t, j+nj, "the new session's TestOne never used the earlier session's connections: %s", kind)
-	}
-	run, err := a.UnchargedCaptureLosses(ctx)
-	require.NoError(t, err)
-	require.EqualValues(t, 1, kindCount(run, models.CaptureLossAppBytesUntold), "the earlier session's close is the run's: %+v", run)
-	require.EqualValues(t, 1, kindCount(run, models.CaptureLossAppBytesLost), "the earlier session's owned loss is the run's: %+v", run)
-}

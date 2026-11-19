@@ -227,6 +227,15 @@ type Agent struct {
 	// taking scopeMu.
 	provenMu sync.Mutex
 	proven   provenWire
+	// runsOwn is every loss of a session's own the wire made the run's
+	// (provenWire.ownedRun: a cut-short end's, or a close counted in a
+	// worker's gap between tests), for the agent's life, under provenMu. No
+	// count of the proxy's holds one, so CaptureLosses adds them: the run's
+	// own verdict (mock replay's and mock record's count of what the agent
+	// could not capture while the test command ran) has every loss of the
+	// run, those charged to no test among them. A session's reset keeps it,
+	// as every count is kept.
+	runsOwn models.CaptureLosses
 	// instanceGen is, for each keploy instance id, the generation its next
 	// claim gets (coreAgent.InstanceValue), for the agent's life: a session's
 	// reset keeps it, so no claim of an id is stamped with the value of an

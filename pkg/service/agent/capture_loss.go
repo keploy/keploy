@@ -20,7 +20,56 @@ import (
 // (design v14 §3.2) adds its kind here. With neither source able to
 // count it gives models.ErrCaptureLossesUnsupported, "unknown"; a count that
 // could not be read is its own error.
+//
+// This is what GET /agent/capturelosses answers, the run's own verdict's
+// read: the counts (captureCounts), and every loss the wire made the run's
+// (runsOwn), which no count holds -- a close counted in a test process's
+// gap between tests, charged to no test, still fails the replay it was
+// counted in, or leaves it not judged. The tests' own charges read the
+// counts alone.
 func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	out, err := a.captureCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	a.provenMu.Lock()
+	run := a.runsOwn
+	a.provenMu.Unlock()
+	return withCounted(out, run), nil
+}
+
+// withCounted is counts with each of run's losses added to the count of
+// its kind (a kind none of counts has, appended): one count per kind, as
+// models.CaptureLosses.Since reads them.
+func withCounted(counts, run models.CaptureLosses) models.CaptureLosses {
+	if len(run) == 0 {
+		return counts
+	}
+	out := append(models.CaptureLosses(nil), counts...)
+	for _, r := range run {
+		at := -1
+		for i := range out {
+			if out[i].Kind == r.Kind {
+				at = i
+				break
+			}
+		}
+		if at < 0 {
+			out = append(out, r)
+			continue
+		}
+		out[at].Count += r.Count
+		if r.What != "" {
+			out[at].SetWhatOf(r)
+		}
+	}
+	return out
+}
+
+// captureCounts is CaptureLosses's counts: the hooks', the proxy's, the
+// listener's and a downstream build's. Each test's charge, and the run's
+// mark, count from them.
+func (a *Agent) captureCounts(ctx context.Context) (models.CaptureLosses, error) {
 	// Every report the kernel made before this read is counted first, so a
 	// call the application made before it is in it (a test's end, the run's
 	// last read), however late the agent's goroutines run.
@@ -156,7 +205,7 @@ type captureLossMark struct {
 // markCaptureLosses reads the counts the run's tests are counted from. Called
 // as a session starts.
 func (a *Agent) markCaptureLosses(ctx context.Context) captureLossMark {
-	at, err := a.CaptureLosses(ctx)
+	at, err := a.captureCounts(ctx)
 	if err != nil {
 		return captureLossMark{err: err}
 	}
@@ -175,16 +224,29 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 	// What the listener dropped after the last test is counted first
 	// (closeDropsGap), as every loss after it is.
 	a.closeDropsGap(ctx)
+	// The session's last read: no test of a run of one test process is
+	// begun after it, so a close of a connection of no worker's is counted
+	// again (coreAgent.PairedBytesBeginner), as the session's reset counts
+	// it -- one counted during the session's teardown is in the counts
+	// before the next session's mark, said as the proxy counts it, and no
+	// later session's. Told before the take below, so one the proxy stamped
+	// before it is taken here: the run's.
+	if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
+		pb.PairedBytesOneProcess(false)
+	}
 	// Read first: a loss the proxy counted before the counts are read
 	// is in this answer whichever way it was counted.
-	taken := a.takeOwnedLosses()
+	left, taken := a.takeOwnedLosses()
 	a.provenMu.Lock()
-	for _, o := range taken {
+	for _, o := range left {
 		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
+	}
+	for _, o := range taken {
+		a.runsLocked(models.CaptureLosses{o.Loss})
 	}
 	// Kept for a worker's open test whose end never charged them.
 	for id, kept := range a.proven.ownedOpen {
-		a.proven.ownedRun = a.proven.ownedRun.Plus(kept)
+		a.runsLocked(kept)
 		delete(a.proven.ownedOpen, id)
 	}
 	mark, charged, outside, owned := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside, a.proven.ownedRun
@@ -205,19 +267,31 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 	return uncharged, nil
 }
 
+// runsLocked makes l, losses this session counted, the run's: charged to no
+// test (ownedRun, UnchargedCaptureLosses) and in the run's own count
+// (runsOwn, CaptureLosses), which no count of the proxy's holds. With
+// provenMu held.
+func (a *Agent) runsLocked(l models.CaptureLosses) {
+	a.proven.ownedRun = a.proven.ownedRun.Plus(l)
+	a.runsOwn = a.runsOwn.Plus(l)
+}
+
 // takeOwnedLosses takes, once each, the losses the proxy counted that a test
-// whose end was cut short owned (coreAgent.OwnedLossTaker), after those the
-// session before left unread (resetSession): none from a proxy that does not
-// tell them apart, whose counts hold every loss.
-func (a *Agent) takeOwnedLosses() []coreAgent.OwnedLoss {
+// whose end was cut short owned (coreAgent.OwnedLossTaker), or that a close
+// of a worker's connection charged (OwnedLoss.Open): left are those the
+// session before left unread (resetSession), counted in that session and so
+// never in this one's own count (runsOwn); taken are the proxy's, this
+// session's. None from a proxy that does not tell them apart, whose counts
+// hold every loss.
+func (a *Agent) takeOwnedLosses() (left, taken []coreAgent.OwnedLoss) {
 	a.provenMu.Lock()
-	out := a.proven.ownedLeft
+	left = a.proven.ownedLeft
 	a.proven.ownedLeft = nil
 	a.provenMu.Unlock()
 	if t, ok := a.Proxy.(coreAgent.OwnedLossTaker); ok && a.Proxy != nil {
-		out = append(out, t.TakeOwnedLosses()...)
+		taken = t.TakeOwnedLosses()
 	}
-	return out
+	return left, taken
 }
 
 // boundOwnedLeft bounds the losses a session leaves unread to the next run
@@ -252,7 +326,8 @@ func boundOwnedLeft(left []coreAgent.OwnedLoss) []coreAgent.OwnedLoss {
 // a pool call's (endingTestCase), "" for the run's.
 func (a *Agent) TakeOwnedCaptureLosses(context.Context) ([]models.OwnedCaptureLoss, error) {
 	var out []models.OwnedCaptureLoss
-	for _, o := range a.takeOwnedLosses() {
+	left, taken := a.takeOwnedLosses()
+	for _, o := range append(left, taken...) {
 		out = append(out, models.OwnedCaptureLoss{Test: o.Test, Loss: o.Loss})
 	}
 	return out, nil
@@ -301,7 +376,7 @@ func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark, te
 		}
 		return nil, nil, fmt.Errorf("at the start of the run: %w", mark.err)
 	}
-	now, err = a.CaptureLosses(ctx)
+	now, err = a.captureCounts(ctx)
 	if err != nil {
 		// Hooks that counted at the run's start and no longer can: the count
 		// was lost, which is not "never counted".
