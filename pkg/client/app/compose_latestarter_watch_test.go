@@ -17,14 +17,18 @@ import (
 
 // projectDaemon is a compose daemon (abortDocker's containers, by project
 // label) whose events stream as dockerd's does: it logs each container start
-// it makes, stamped by its clock; a stream gets the logged events stamped at
-// or after its since, then each one logged after it is subscribed, and only
-// those its filters match (type, event, label and container, as dockerd
-// reads them). onStop, by container ID, runs as keploy's stop of that
-// container has taken it down (compose's up starting a service whose wait
-// that exit met). breakFirst breaks the first stream it is asked for before
-// it gives any event (a daemon restarting, a dropped connection); asked gets
-// one value per stream asked for.
+// it makes, stamped by its clock; a stream asked for with a since gets the
+// logged events stamped at or after it, then each one logged after it is
+// subscribed, and one asked for with none gets only those (dockerd's live
+// events); a stream gets only the events its filters match (type, event,
+// label and container, as dockerd reads them). onStop, by container ID, runs
+// as keploy's stop of that container has taken it down (compose's up
+// starting a service whose wait that exit met). holdFirst, when set, holds
+// the first stream asked for, before it is subscribed, until it is closed (a
+// daemon slow to answer). breakFirst breaks the first stream it is asked for
+// before it gives any event (a daemon restarting, a dropped connection),
+// running onBreak first, between the break and keploy's read of it; asked
+// gets one value per stream asked for.
 type projectDaemon struct {
 	*abortDocker
 	logMu      sync.Mutex
@@ -32,7 +36,9 @@ type projectDaemon struct {
 	subs       []projectSub
 	asks       int
 	asked      chan int
+	holdFirst  chan struct{}
 	breakFirst bool
+	onBreak    func()
 	onStop     map[string]func()
 }
 
@@ -86,16 +92,28 @@ func (d *projectDaemon) Events(ctx context.Context, o events.ListOptions) (<-cha
 	d.logMu.Lock()
 	d.asks++
 	n := d.asks
+	d.logMu.Unlock()
+	if n == 1 && d.holdFirst != nil {
+		select {
+		case <-d.holdFirst:
+		case <-ctx.Done():
+		}
+	}
 	if n == 1 && d.breakFirst {
-		d.logMu.Unlock()
+		if d.onBreak != nil {
+			d.onBreak()
+		}
 		errs <- io.ErrUnexpectedEOF
 		d.asked <- n
 		return msgs, errs
 	}
-	since := sinceNanos(o.Since)
-	for _, m := range d.logged {
-		if m.TimeNano >= since && d.matches(o.Filters, m) {
-			msgs <- m
+	d.logMu.Lock()
+	if o.Since != "" {
+		since := sinceNanos(o.Since)
+		for _, m := range d.logged {
+			if m.TimeNano >= since && d.matches(o.Filters, m) {
+				msgs <- m
+			}
 		}
 	}
 	d.subs = append(d.subs, projectSub{ch: msgs, filters: o.Filters})
@@ -247,6 +265,68 @@ func TestKeploysStopOfTheStackStopsALateStarterOnceItsStreamBrokeAndWasAskedAgai
 			}
 			d.start("late-id", "late", "proj")
 			eventually(t, "the late starter on the stream asked for again is stopped", func() bool { return d.stopAsked("late-id") })
+		})
+	}
+}
+
+// keploy's stop of the stack reads the project's starts from the daemon's
+// clock read before it lists, not from the stream's subscription: here the
+// daemon holds the events request until holder's stop has started late, so
+// late's start is logged before the stream is subscribed. A watch of live
+// events only never saw it, and the up, waiting on late, never returned.
+// Both KEPLOY_PROVEN modes.
+func TestKeploysStopOfTheStackStopsALateStarterThatStartsBeforeItsStreamIsSubscribed(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("switch="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			d := newProjectDaemon(time.Now().Add(-time.Minute))
+			d.holdFirst = make(chan struct{})
+			d.add("holder-id", "holder", runningState(time.Now().Add(-time.Minute)))
+			d.onStop["holder-id"] = func() {
+				d.start("late-id", "late", "proj")
+				close(d.holdFirst)
+			}
+			a := projectDaemonApp(d)
+			returned := a.composeUpRunning()
+			defer returned()
+			stopped, late := a.stopComposeStack(context.Background())
+			if !stopped || !d.stopAsked("holder-id") {
+				t.Fatalf("stopped %v, holder's stop asked %v; want the listed holder stopped", stopped, d.stopAsked("holder-id"))
+			}
+			eventually(t, "late, started before the watch's stream was subscribed, is stopped", func() bool { return d.stopAsked("late-id") })
+			returned()
+			if !isClosed(late, time.Minute) {
+				t.Fatal("the late starters' stops were not said ended once the up returned")
+			}
+		})
+	}
+}
+
+// keploy asks again for a broken stream of the project's starts from its
+// last event, not from when it read the break: here late starts after the
+// daemon broke the stream and before keploy reads that break, so the stream
+// asked for again replays late's start. A stream asked for from the time of
+// the break's read never gave it, and the up, waiting on late, never
+// returned. Both KEPLOY_PROVEN modes.
+func TestKeploysStopOfTheStackStopsALateStarterThatStartedWhileItsStreamWasBroken(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("switch="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			d := newProjectDaemon(time.Now().Add(-time.Minute))
+			d.breakFirst = true
+			d.onBreak = func() { d.start("late-id", "late", "proj") }
+			a := projectDaemonApp(d)
+			returned := a.composeUpRunning()
+			defer returned()
+			stopped, late := a.stopComposeStack(context.Background())
+			if !stopped {
+				t.Fatal("the stack's stop could not tell the project")
+			}
+			eventually(t, "late, started while the stream was broken, is stopped", func() bool { return d.stopAsked("late-id") })
+			returned()
+			if !isClosed(late, time.Minute) {
+				t.Fatal("the late starters' stops were not said ended once the up returned")
+			}
 		})
 	}
 }

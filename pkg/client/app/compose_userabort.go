@@ -473,8 +473,9 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 		// stop's grace (a runner that does not handle SIGTERM) was reused by
 		// the retried up, then killed mid-run.
 		// The halt of a stop that failed is kept before the stop is said
-		// ended: the run's retry, which waits for that, then reads it, and
-		// begins no bring-up.
+		// ended: the run's retry, which waits for that, reads it before it
+		// would begin a bring-up again (composeBeginsABringUpAgain), and
+		// begins none.
 		stopped, lateStopped := a.stopComposeStack(context.WithoutCancel(ctx))
 		ends := false
 		if !stopped {
@@ -504,13 +505,18 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 // composeKeepsAnUnstoppedDepCrash keeps crash, a crash before the app started
 // of a service the app depends on, whose stop of the stack keploy could not
 // make, as the run's halt (stackNotStopped), and reports that the run ends on
-// it: on a halt kept already, too, which ends it.
+// it. A halt kept already stands, and the run ends on that one.
 func (a *App) composeKeepsAnUnstoppedDepCrash(crash *composeHalt) bool {
 	h := *crash
 	h.stackNotStopped = true
-	a.composeApp.halted.CompareAndSwap(nil, &h)
-	a.logger.Warn("keploy could not stop the application's compose stack to retry its bring-up after a dependency's crash; it ends the run on that crash and takes the stack down",
-		zap.String("service", crash.service))
+	if a.composeApp.halted.CompareAndSwap(nil, &h) {
+		a.logger.Warn("keploy could not stop the application's compose stack to retry its bring-up after a dependency's crash; it ends the run on that crash and takes the stack down",
+			zap.String("service", crash.service))
+		return true
+	}
+	kept := a.composeAppHalt()
+	a.logger.Warn("keploy could not stop the application's compose stack to retry its bring-up after a dependency's crash; the run ends on the halt kept before it, and keploy takes the stack down",
+		zap.String("service", crash.service), zap.String("haltService", kept.service), zap.Int("haltExitCode", kept.exitCode))
 	return true
 }
 

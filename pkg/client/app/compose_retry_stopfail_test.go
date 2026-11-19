@@ -20,13 +20,18 @@ import (
 
 // stackListFailsDocker is abortDocker whose daemon will not list the running
 // containers of the project (keploy's stop of the stack's listing), after
-// askDaemon's asks; every other listing answers.
+// askDaemon's asks; every other listing answers. onList, when set, runs at
+// each listing it will not make.
 type stackListFailsDocker struct {
 	*abortDocker
+	onList func()
 }
 
 func (d *stackListFailsDocker) ContainerList(ctx context.Context, o container.ListOptions) ([]container.Summary, error) {
 	if l := o.Filters.Get("label"); !o.All && len(l) == 1 && l[0] == composeProjectLabelKey+"=proj" {
+		if d.onList != nil {
+			d.onList()
+		}
 		return nil, errdefs.NotFound(errors.New("the daemon will not list them"))
 	}
 	return d.abortDocker.ContainerList(ctx, o)
@@ -129,5 +134,117 @@ func TestARunBeginsWithNothingAnEarlierRunKept(t *testing.T) {
 			t.Fatalf("%s=%q: the run's retry waits on an earlier run's stop of the stack that never ended", provenswitch.Env, proven)
 		}
 		cancel()
+	}
+}
+
+// A HALT KEPT BEFORE A FAILED STACK STOP STANDS. A dependency the app depends
+// on crashes before the app started; while keploy's stop of the stack for
+// the retry tries to list the project, another exit's halt is kept (here
+// runner's 3, which the user's --exit-code-from names). The stop fails: the
+// run ends on runner's halt, its service and code, not on the crash, and the
+// warning says so. Record and test, both KEPLOY_PROVEN modes.
+func TestAHaltKeptBeforeAFailedStackStopForARetryStands(t *testing.T) {
+	doc := `
+services:
+  app:
+    image: app
+    depends_on: [flaky]
+  runner:
+    image: runner
+  flaky:
+    image: flaky
+`
+	for _, proven := range []string{"", "1"} {
+		t.Setenv(provenswitch.Env, proven)
+		for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+			what := fmt.Sprintf("%s=%q %s", provenswitch.Env, proven, mode)
+			ctx := context.Background()
+			t0 := time.Now().Add(-time.Hour)
+			d := newAbortDocker(t0)
+			d.containers["app-id"].state = runningState(t0.Add(2 * time.Second))
+			d.add("runner-id", "runner", runningState(t0))
+			d.add("flaky-id", "flaky", stateAt(t0, true, 1, t0.Add(time.Second)))
+			a := newAbortApp(d, "docker compose up --exit-code-from runner", composeDoc(t, doc))
+			runner := &composeHalt{exitCode: 3, service: "runner", serviceCode: 3, flags: "--exit-code-from runner"}
+			a.docker = &stackListFailsDocker{abortDocker: d, onList: func() { a.composeApp.halted.CompareAndSwap(nil, runner) }}
+			core, logs := observer.New(zapcore.WarnLevel)
+			a.logger = zap.New(core)
+			a.Mode = mode
+			returned := a.composeUpRunning()
+			if !a.composeDied(ctx, serviceDie("flaky-id", "flaky", "1", nil)) {
+				t.Fatalf("%s: flaky's crash, with keploy's stop of the stack unable to list the project, ended nothing; want the run ended", what)
+			}
+			if h := a.composeAppHalt(); h != runner || h.service != "runner" || h.exitCode != 3 || h.stackNotStopped {
+				t.Fatalf("%s: halt %+v; want runner's 3, kept before the stack's stop failed, to stand", what, h)
+			}
+			if n := logs.FilterMessageSnippet("the run ends on the halt kept before it").Len(); n != 1 {
+				t.Fatalf("%s: %d warnings that the run ends on the halt kept before the failed stop; want 1", what, n)
+			}
+			if n := logs.FilterMessageSnippet("it ends the run on that crash").Len(); n != 0 {
+				t.Fatalf("%s: %d warnings that the run ends on flaky's crash; want none, runner's halt stands", what, n)
+			}
+			returned()
+			sctx, cancel := context.WithTimeout(ctx, time.Minute)
+			if !a.composeAwaitsTheStackStop(sctx) {
+				t.Fatalf("%s: keploy's stop of the stack was not said ended once the up returned", what)
+			}
+			cancel()
+		}
+	}
+}
+
+// The halt of a failed stack stop for a retry is kept before that stop is
+// said ended: the run's retry, which waits for the stop, finds the halt the
+// moment its wait ends, so it never takes the crash for one to retry. The up
+// returns as the stop's listing fails, so the stop is said ended as soon as
+// it can be. Record and test, both KEPLOY_PROVEN modes.
+func TestTheHaltOfAFailedStackStopIsKeptBeforeTheStopIsSaidEnded(t *testing.T) {
+	doc := `
+services:
+  app:
+    image: app
+    depends_on: [flaky]
+  runner:
+    image: runner
+  flaky:
+    image: flaky
+`
+	for _, proven := range []string{"", "1"} {
+		t.Setenv(provenswitch.Env, proven)
+		for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+			what := fmt.Sprintf("%s=%q %s", provenswitch.Env, proven, mode)
+			for i := 0; i < 20; i++ {
+				ctx := context.Background()
+				t0 := time.Now().Add(-time.Hour)
+				d := newAbortDocker(t0)
+				d.containers["app-id"].state = runningState(t0.Add(2 * time.Second))
+				d.add("flaky-id", "flaky", stateAt(t0, true, 1, t0.Add(time.Second)))
+				d.add("runner-id", "runner", runningState(t0))
+				a := newAbortApp(d, "docker compose up --exit-code-from runner", composeDoc(t, doc))
+				a.logger = zap.NewNop()
+				a.Mode = mode
+				returned := a.composeUpRunning()
+				a.docker = &stackListFailsDocker{abortDocker: d, onList: returned}
+				seen := make(chan *composeHalt, 1)
+				go func() {
+					for a.composeApp.stackStop.Load() == nil {
+						time.Sleep(50 * time.Microsecond)
+					}
+					sctx, cancel := context.WithTimeout(ctx, time.Minute)
+					defer cancel()
+					if !a.composeAwaitsTheStackStop(sctx) {
+						seen <- nil
+						return
+					}
+					seen <- a.composeAppHalt()
+				}()
+				if !a.composeDied(ctx, serviceDie("flaky-id", "flaky", "1", nil)) {
+					t.Fatalf("%s: flaky's crash, with keploy's stop of the stack unable to list the project, ended nothing", what)
+				}
+				if h := <-seen; h == nil || h.service != "flaky" || !h.stackNotStopped {
+					t.Fatalf("%s: the retry's wait for the stack's stop ended with halt %+v; want flaky's crash kept already, the stack not stopped", what, h)
+				}
+			}
+		}
 	}
 }
