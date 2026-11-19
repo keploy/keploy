@@ -12,8 +12,10 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // procRoot is where the kernel's process and socket tables are read; a var so
@@ -48,36 +50,57 @@ func tcpOwner(self, peer netip.AddrPort) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	fds, err := filepath.Glob(filepath.Join(procRoot, "[0-9]*", "fd", "*"))
-	if err != nil {
-		return 0, err
-	}
 	want := "socket:[" + inode + "]"
 	holders := map[int]bool{}
-	for _, fd := range fds {
-		link, err := os.Readlink(fd)
-		if err != nil || link != want {
+	// Every fd of every process whose name starts with a digit, as
+	// filepath.Glob(procRoot/[0-9]*/fd/*) listed them, read directly: the
+	// table's names, then each process's fd directory. Glob also read each
+	// process's own directory to find "fd" in it, one more directory per
+	// process on the machine for each call.
+	for _, name := range dirNames(procRoot) {
+		if name == "" || name[0] < '0' || name[0] > '9' {
 			continue
 		}
-		rel, err := filepath.Rel(procRoot, fd)
-		if err != nil {
-			continue
+		dir := filepath.Join(procRoot, name, "fd")
+		for _, fd := range dirNames(dir) {
+			link, err := os.Readlink(filepath.Join(dir, fd))
+			if err != nil || link != want {
+				continue
+			}
+			pid, err := pidOf(name)
+			if err != nil {
+				// A holder whose name is no process ID could be the caller
+				// itself: taking another holder for it would hand the run to
+				// the wrong process, and reading no holder would hide why the
+				// caller is unknown.
+				return 0, fmt.Errorf("the socket %s -> %s (inode %s) is held by %s, which is not a process ID: %w", self, peer, inode, filepath.Join(procRoot, name), err)
+			}
+			holders[pid] = true
 		}
-		name := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
-		pid, err := pidOf(name)
-		if err != nil {
-			// A holder whose name is no process ID could be the caller
-			// itself: taking another holder for it would hand the run to
-			// the wrong process, and reading no holder would hide why the
-			// caller is unknown.
-			return 0, fmt.Errorf("the socket %s -> %s (inode %s) is held by %s, which is not a process ID: %w", self, peer, inode, filepath.Join(procRoot, name), err)
-		}
-		holders[pid] = true
 	}
 	if len(holders) == 0 {
 		return 0, fmt.Errorf("no process holds the socket %s -> %s (inode %s)", self, peer, inode)
 	}
 	return soleHolder(self, peer, holders, procParent)
+}
+
+// dirReads counts the directories dirNames read, for the rows that pin how
+// many one call reads. Nothing in keploy reads it.
+var dirReads atomic.Int64
+
+// dirNames is dir's entries sorted by name, none when it cannot be read.
+// What it read before an error counts, as filepath.Glob takes it: a process
+// that exits mid-read ends its own table, not the walk.
+func dirNames(dir string) []string {
+	dirReads.Add(1)
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+	names, _ := f.Readdirnames(-1)
+	sort.Strings(names)
+	return names
 }
 
 // pidOf reads a /proc directory's name as the process ID it is: a pid_t,

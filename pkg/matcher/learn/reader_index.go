@@ -2,6 +2,7 @@ package learn
 
 import (
 	"cmp"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"hash/maphash"
@@ -45,10 +46,18 @@ import (
 // that the set's words and payloads keep.
 var readerBudget int64
 
-// readerBudgetBytes is the cap of what one call's index keeps (readerBudget).
-func readerBudgetBytes() int64 {
+// readerBudgetBytes is the cap of what one call's index keeps (readerBudget)
+// in set s: a quarter of the budget s read when it started, not read again
+// in each call. setBudget reads the agent's memory limit from its cgroup
+// files and /proc/meminfo, about 60 us, and a call of a small set decides
+// in a few hundred: each Decide read them all again. A call of no set (s
+// nil) reads setBudget, as its set would.
+func readerBudgetBytes(s *setDerived) int64 {
 	if readerBudget > 0 {
 		return readerBudget
+	}
+	if s != nil {
+		return s.budget.limit / 4
 	}
 	return setBudget() / 4
 }
@@ -137,15 +146,26 @@ type readerText struct {
 	// idEntry), and is scanned.
 	filter   *filterEntry
 	noFilter bool
+	// held is the recording's payload a question's build of the set's view
+	// read (setFields) where the set keeps no view of it: the call's index
+	// answers that one question from it (read), not from the recording
+	// read again, and lets it go.
+	held *rawBody
+	// fields is the set's entry for the text's field view, once the set
+	// answers from it (setFields); noFields: the set was asked and keeps
+	// none, so the call's own index answers.
+	fields   *fieldsEntry
+	noFields bool
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
 // caches (nil: none).
 func newReaderIndex(dc *DriftCache) *readerIndex {
-	x := &readerIndex{dc: dc, budget: readerBudgetBytes(), seed: maphash.MakeSeed(), texts: map[uint64][]*readerEntry{}}
+	x := &readerIndex{dc: dc, seed: maphash.MakeSeed(), texts: map[uint64][]*readerEntry{}}
 	if dc != nil {
 		x.set = dc.set
 	}
+	x.budget = readerBudgetBytes(x.set)
 	if x.set != nil {
 		x.filters = filtersOf(x.set)
 	}
@@ -275,7 +295,12 @@ func (t *readerText) read() (string, []rawField, bool) {
 	if t.rawUnread {
 		return "", nil, false
 	}
-	b := t.raw.payload()
+	var b rawBody
+	if t.held != nil {
+		b, t.held = *t.held, nil
+	} else {
+		b = t.raw.payload()
+	}
 	if !b.read {
 		t.rawUnread = true
 		t.x.unreadTexts++
@@ -544,6 +569,12 @@ type setFilters struct {
 	// short are the entries that post the words of texts shorter than
 	// filterTextMin, by the text (shortEntry): postings alone, no filter.
 	short map[string]*filterEntry
+	// fieldTexts are the set's field views (setFields), by their text and
+	// fields; fieldsUsed is what their views count on the set's budget,
+	// and fieldBuilds the views built, for the rows.
+	fieldTexts  map[fieldsTextKey]*fieldsEntry
+	fieldsUsed  int64
+	fieldBuilds int
 }
 
 // filterTextKey is a text by what it holds: its length and two hashes of
@@ -603,7 +634,7 @@ func filtersOf(s *setDerived) *setFilters {
 	v, loaded := setsFilters.LoadOrStore(k, &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{},
 		seeds: [2]maphash.Seed{maphash.MakeSeed(), maphash.MakeSeed()}, words: map[string][]*wordsEntry{},
 		lists: map[weak.Pointer[[]string]]*listsEntry{}, post: map[string][]int32{}, runs: map[string][]int32{},
-		short: map[string]*filterEntry{}})
+		short: map[string]*filterEntry{}, fieldTexts: map[fieldsTextKey]*fieldsEntry{}})
 	if !loaded {
 		runtime.AddCleanup(s, func(k weak.Pointer[setDerived]) { setsFilters.Delete(k) }, k)
 	}
@@ -657,21 +688,22 @@ func (t *readerText) idEntry(fs *setFilters) *filterEntry {
 	if first {
 		n += filterIDGroupBytes
 	}
-	return newFilterEntry(fs, t.x.set, fs.of, id, strings.Clone, n, false)
+	return newSetEntry(fs, t.x.set, fs.of, id, strings.Clone, n, &filterEntry{})
 }
 
-// newFilterEntry is m's entry at k, made where m holds none yet: n counted
-// on s's budget first (nil where it does not fit), then the entry stored
-// under key(k), fs's lock held. A call that finds the entry another call
-// made meanwhile gives its count back.
-func newFilterEntry[K comparable](fs *setFilters, s *setDerived, m map[K]*filterEntry, k K, key func(K) K, n int64, byText bool) *filterEntry {
+// newSetEntry is m's entry at k, made where m holds none yet: n counted on
+// s's budget first (nil where it does not fit), then made stored under
+// key(k), fs's lock held: one of the set's filter entries (filterEntry) or
+// field views (fieldsEntry). A call that finds the entry another call made
+// meanwhile gives its count back.
+func newSetEntry[K comparable, E any](fs *setFilters, s *setDerived, m map[K]*E, k K, key func(K) K, n int64, made *E) *E {
 	if !setClaim(s, n) {
 		return nil
 	}
 	fs.mu.Lock()
 	e := m[k]
 	if e == nil {
-		e, n = &filterEntry{byText: byText}, 0
+		e, n = made, 0
 		m[key(k)] = e
 	}
 	fs.mu.Unlock()
@@ -716,8 +748,12 @@ func (t *readerText) textEntry(fs *setFilters) *filterEntry {
 	if first {
 		n += filterTextGroupBytes
 	}
-	return newFilterEntry(fs, t.x.set, fs.texts, k, func(k filterTextKey) filterTextKey { return k }, n, true)
+	return newSetEntry(fs, t.x.set, fs.texts, k, sameKey[filterTextKey], n, &filterEntry{byText: true})
 }
+
+// sameKey is k: a map's key that holds nothing to copy for the set to keep
+// (newSetEntry).
+func sameKey[K any](k K) K { return k }
 
 // buildFilter is the filter of t's recording's words (setFilter), or of its
 // text's (textEntry), counted on the set's budget by its bits as allocated
@@ -962,7 +998,7 @@ func (t *readerText) shortEntry() *filterEntry {
 		if first {
 			n += filterIDGroupBytes
 		}
-		if e = newFilterEntry(fs, t.x.set, fs.short, s, strings.Clone, n, true); e == nil {
+		if e = newSetEntry(fs, t.x.set, fs.short, s, strings.Clone, n, &filterEntry{byText: true}); e == nil {
 			return nil
 		}
 	}
@@ -1113,58 +1149,30 @@ var (
 // fieldsWith are the fields of the text that hold w as a word, in any of
 // main's readings and any declared form of the field's own text (holdsWord,
 // field by field): a recording's by its fields, so a word that moved to
-// another field in round F's view is not at its recorded field. Read once
-// for the call where the view fits what is left of the index's cap as it is
-// built (counted word by word, with the field it reads and that field's
-// forms, and dropped once past it); else, by a scan of the fields of the text
-// read now, which keeps nothing. Either way the question's peak is the
-// index's count of what these hold: the text, the view's slots and lists by
-// their capacity, and the field read with its forms (the decoder's garbage
-// and a map's growth as it happens are outside it). read is false where the
+// another field in round F's view is not at its recorded field. In a set's
+// call, a recording's view, a view F served of one, and a handed text's is
+// the set's (setFields), built once for the set. Else it is read once for
+// the call where the view fits what is left of the index's cap as it is
+// built
+// (counted word by word, with the field it reads and that field's forms,
+// and dropped once past it); else, by a scan of the fields of the text read
+// now, which keeps nothing. Either way the question's peak is the index's
+// count of what these hold: the text, the view's slots and lists by their
+// capacity, and the field read with its forms (the decoder's garbage and a
+// map's growth as it happens are outside it). read is false where the
 // recording was not read.
 func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
+	if fw, ok := t.setFields(); ok {
+		return fw.with(w), true
+	}
+	defer func() { t.held = nil }()
 	x := t.x
 	fw, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[fieldWords] { return &e.fields },
 		func(s string, fields []rawField, room int64) (fieldWords, bool) {
 			x.views++
-			fw, n, fits, own := fieldWords{of: map[string][]int32{}}, fieldFirstBytes, room >= 0, t.e.own(s)
-			eachField(s, fields, func(f fieldAt, text string) {
-				if !fits {
-					return
-				}
-				forms, held := formsHeld(text)
-				k, ats := int32(len(fw.at)), append(fw.at, f)
-				head := fieldsAtBytes(cap(ats)) - fieldsAtBytes(cap(fw.at)) + allocBytes(len(f.path), false) + allocBytes(len(f.in), false)
-				if fits = n+head+held <= room; fits {
-					fw.at = ats
-					n += head
-				}
-				for _, form := range forms {
-					for _, word := range readings {
-						for i, j := 0, 0; i < len(form) && fits; i = max(j, i+1) {
-							for j = i; j < len(form) && word(form[j]); {
-								j++
-							}
-							l, seen := fw.of[form[i:j]]
-							if j == i || seen && l[len(l)-1] == k {
-								continue
-							}
-							w, more, grown := form[i:j], int64(0), append(l, k)
-							if !seen {
-								w, more = strings.Clone(w), fieldSlotBytes+allocBytes(len(w), false)
-							}
-							if more += allocBytes(4*cap(grown), false) - allocBytes(4*cap(l), false); n+more+held <= room {
-								n += more
-								fw.of[w] = grown
-							} else {
-								fits = false
-							}
-						}
-					}
-				}
-				x.peak = max(x.peak, x.used+own+n+held)
-			})
-			return fw, fits
+			own := t.e.own(s)
+			callFieldBuilds.Add(1)
+			return buildFieldWords(s, fields, room, func(n, held int64) { x.peak = max(x.peak, x.used+own+n+held) })
 		}, fieldWordsBytes, func(s string, fields []rawField) {
 			own := t.e.own(s)
 			eachField(s, fields, func(f fieldAt, text string) {
@@ -1178,10 +1186,214 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 	if scanned || !ok {
 		return at, ok
 	}
+	return fw.with(w), true
+}
+
+// callFieldBuilds counts the field views a call's own index builds
+// (fieldsWith: the set keeps none of them), for the rows that bound a
+// call's work.
+var callFieldBuilds atomic.Int64
+
+// with are the fields of the view that hold w.
+func (fw fieldWords) with(w string) (at []fieldAt) {
 	for _, k := range fw.of[w] {
 		at = append(at, fw.at[k])
 	}
-	return at, true
+	return at
+}
+
+// buildFieldWords is the field view of s, the text read now with its
+// recording's fields, built within room bytes by the index's count (counted
+// word by word, with the field it reads and that field's forms; room < 0:
+// none); false where it passed room, and stopped there. peak is told what
+// the build holds at each field: the view so far (n) and the field read
+// with its forms (held).
+func buildFieldWords(s string, fields []rawField, room int64, peak func(n, held int64)) (fieldWords, bool) {
+	fw, n, fits := fieldWords{of: map[string][]int32{}}, fieldFirstBytes, room >= 0
+	eachField(s, fields, func(f fieldAt, text string) {
+		if !fits {
+			return
+		}
+		forms, held := formsHeld(text)
+		k, ats := int32(len(fw.at)), append(fw.at, f)
+		head := fieldsAtBytes(cap(ats)) - fieldsAtBytes(cap(fw.at)) + allocBytes(len(f.path), false) + allocBytes(len(f.in), false)
+		if fits = n+head+held <= room; fits {
+			fw.at = ats
+			n += head
+		}
+		for _, form := range forms {
+			for _, word := range readings {
+				for i, j := 0, 0; i < len(form) && fits; i = max(j, i+1) {
+					for j = i; j < len(form) && word(form[j]); {
+						j++
+					}
+					l, seen := fw.of[form[i:j]]
+					if j == i || seen && l[len(l)-1] == k {
+						continue
+					}
+					w, more, grown := form[i:j], int64(0), append(l, k)
+					if !seen {
+						w, more = strings.Clone(w), fieldSlotBytes+allocBytes(len(w), false)
+					}
+					if more += allocBytes(4*cap(grown), false) - allocBytes(4*cap(l), false); n+more+held <= room {
+						n += more
+						fw.of[w] = grown
+					} else {
+						fits = false
+					}
+				}
+			}
+		}
+		peak(n, held)
+	})
+	return fw, fits
+}
+
+// fieldsEntry is the set's field view of one text read with its fields,
+// built once for the set (once): ok where it was read and fit; else every
+// call answers it by its own index, as before, and the set never builds it
+// again.
+type fieldsEntry struct {
+	once sync.Once
+	v    fieldWords
+	ok   bool
+}
+
+// fieldsTextKey is a text and its fields by what they hold: the text's
+// length, its fields' count, and two hashes of both by the set's two seeds
+// (fieldsHash), as filterTextKey keys a text: two that differ share a key by
+// chance alone, about once in 2^128 pairs.
+type fieldsTextKey struct {
+	n, fields int
+	a, b      uint64
+}
+
+// What a field view's entry counts on the set's budget past its view, as
+// the runtime allocates it: the entry, and its slot in the set's map of
+// them (setFilters.fieldTexts), with the map's first group for the first.
+var (
+	fieldsEntryBytes     = allocBytes(unsafe.Sizeof(fieldsEntry{}), true)
+	fieldsTextSlotBytes  = mapSlotBytes(slotOf[fieldsTextKey, *fieldsEntry](), true)
+	fieldsTextGroupBytes = mapGroupBytes(slotOf[fieldsTextKey, *fieldsEntry](), true)
+)
+
+// fieldsHash is s and its fields hashed by seed: each field's place, path
+// and kind, so a text read with other fields hashes apart.
+func fieldsHash(seed maphash.Seed, s string, fields []rawField) uint64 {
+	var h maphash.Hash
+	h.SetSeed(seed)
+	h.WriteString(s)
+	var b [17]byte
+	for _, f := range fields {
+		binary.LittleEndian.PutUint64(b[0:], uint64(f.start))
+		binary.LittleEndian.PutUint64(b[8:], uint64(f.end))
+		b[16] = 0
+		if f.key {
+			b[16] = 1
+		}
+		_, _ = h.Write(b[:])
+		binary.LittleEndian.PutUint64(b[0:], uint64(len(f.path)))
+		_, _ = h.Write(b[:8])
+		h.WriteString(f.path)
+	}
+	return h.Sum64()
+}
+
+// setFields is the set's field view of t's recording, of a view F served of
+// one, or of a text the caller handed (fieldsWith), by its text and fields
+// (fieldsTextKey), never by the recording's identity: a view bears none
+// (Raw.viewOf, servedAnswer), and a view keyed by what it is read from
+// answers as the text does whatever names it. A handed text is one field,
+// the text whole (eachField), as a recording's text read with no fields is:
+// the two share a view. It is built the first time a call of the set asks it
+// a word, within the cap of one call's index (readerBudgetBytes), and kept
+// for the set on its budget (setClaim), the set's views in all within that
+// cap too: every later call reads the text and asks the view, and builds
+// none, so a call's work per earlier place stays flat in the set's size.
+// That holds for an earlier exchange's leaves (Earlier.Seen) too, which
+// each later call of the set hands again: a Mongo exchange's every request
+// key and value, an id each request of a run sends. Calls asking at once
+// wait for the one building it. false where t is in no set's call, or the
+// set keeps no view of it (not read, or past either cap): the call's own
+// index answers it, as it did before the set kept any, from the payload
+// read here (held), not read again (a handed text is read from t, whatever
+// it holds). t finds its entry once.
+func (t *readerText) setFields() (fieldWords, bool) {
+	if t.fields != nil {
+		return t.fields.v, true
+	}
+	fs := t.x.filters
+	if fs == nil || t.rawUnread || t.noFields {
+		return fieldWords{}, false
+	}
+	t.noFields = true
+	b := rawBody{text: t.text, read: true}
+	if t.raw != nil {
+		b = t.raw.payload()
+	}
+	e := fieldsEntryOf(fs, t.x.set, b)
+	if e == nil {
+		t.held = &b
+		return fieldWords{}, false
+	}
+	e.once.Do(func() { e.v, e.ok = t.buildSetFields(fs, b) })
+	if !e.ok {
+		t.held = &b
+		return fieldWords{}, false
+	}
+	t.fields = e
+	return e.v, true
+}
+
+// fieldsEntryOf is the set's entry for the field view of b, a payload
+// read, by its text and fields (fieldsTextKey): the one there, or one made
+// and counted on the set's budget as the set holds it (fieldsEntryBytes,
+// fieldsTextSlotBytes, and the map's first group for the first;
+// newSetEntry). nil where b was not read or that does not fit.
+func fieldsEntryOf(fs *setFilters, s *setDerived, b rawBody) *fieldsEntry {
+	if !b.read {
+		return nil
+	}
+	k := fieldsTextKey{n: len(b.text), fields: len(b.fields), a: fieldsHash(fs.seeds[0], b.text, b.fields), b: fieldsHash(fs.seeds[1], b.text, b.fields)}
+	fs.mu.Lock()
+	e, first := fs.fieldTexts[k], len(fs.fieldTexts) == 0
+	fs.mu.Unlock()
+	if e != nil {
+		return e
+	}
+	n := fieldsEntryBytes + fieldsTextSlotBytes
+	if first {
+		n += fieldsTextGroupBytes
+	}
+	return newSetEntry(fs, s, fs.fieldTexts, k, sameKey[fieldsTextKey], n, &fieldsEntry{})
+}
+
+// buildSetFields is the field view of b, t's payload, for the set
+// (setFields), built within the cap of one call's index (readerBudgetBytes),
+// as that call's own index would build it, and counted on the set's budget
+// by its parts (fieldWordsBytes) where the set's views in all stay within
+// that cap too (fieldsUsed); false where it does not fit. The build's peak
+// is the call's, as its own index would count it.
+func (t *readerText) buildSetFields(fs *setFilters, b rawBody) (fieldWords, bool) {
+	x, own, room := t.x, textBytes(b.text), readerBudgetBytes(t.x.set)
+	fw, fits := buildFieldWords(b.text, b.fields, room, func(n, held int64) { x.peak = max(x.peak, x.used+own+n+held) })
+	n := fieldWordsBytes(fw)
+	fs.mu.Lock()
+	fs.fieldBuilds++
+	if fits = fits && fs.fieldsUsed+n <= room; fits {
+		fs.fieldsUsed += n
+	}
+	fs.mu.Unlock()
+	if !fits {
+		return fieldWords{}, false
+	}
+	if !setClaim(x.set, n) {
+		fs.mu.Lock()
+		fs.fieldsUsed -= n
+		fs.mu.Unlock()
+		return fieldWords{}, false
+	}
+	return fw, true
 }
 
 // formsHeld are text's declared forms (textForms), and what reading them

@@ -16,7 +16,7 @@ func scanDecide(in Input, allScope, scan bool) ([]Decision, []string) {
 	defer x.release()
 	dc := newDecider(in, allScope, x)
 	if scan {
-		pi := &placeIndex{rec: map[int32][]int32{}, live: map[int32][]int32{}, fs: &setFilters{}}
+		pi := &placeIndex{fs: &setFilters{}}
 		for i := range dc.ps.all() {
 			pi.always = append(pi.always, int32(i))
 		}
