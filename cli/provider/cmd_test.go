@@ -638,6 +638,69 @@ func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 	}
 }
 
+// keploy record run from a folder inside a git checkout, given no app name,
+// names the app after the repository (its origin remote) and the folder's
+// path inside it, not after the checkout's folder or the folder alone
+// ("b"), and writes that name into the keploy.yml it creates, so later runs
+// keep it. A name the run is given is kept.
+func TestRecordNamesTheAppAfterItsGitRepository(t *testing.T) {
+	for _, c := range []struct{ name, flag, want string }{
+		{"no name given", "", "orders-api-a-b"},
+		{"--app-name", "billing", "billing"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			original := NativeCommandSupported
+			t.Cleanup(func() { NativeCommandSupported = original })
+			RegisterNativeCommandSupport(func(string, string) bool { return true })
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			t.Cleanup(log.TestOnlyResetSink)
+			found := IsConfigFileFound
+			t.Cleanup(func() { IsConfigFileFound = found })
+
+			top := filepath.Join(t.TempDir(), "checkout")
+			if err := os.MkdirAll(filepath.Join(top, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(top, ".git", "config"), []byte("[remote \"origin\"]\n\turl = git@github.com:acme/orders-api.git\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			work := filepath.Join(top, "a", "b")
+			if err := os.MkdirAll(filepath.Join(work, "keploy"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(work)
+
+			c2 := NewCmdConfigurator(zap.NewNop(), config.New())
+			cmd := &cobra.Command{Use: "record"}
+			if err := c2.AddFlags(cmd); err != nil {
+				t.Fatalf("AddFlags: %v", err)
+			}
+			args := []string{"-c", "./app", "--config-path", work}
+			if c.flag != "" {
+				args = append(args, "--app-name", c.flag)
+			}
+			if err := cmd.ParseFlags(args); err != nil {
+				t.Fatalf("ParseFlags: %v", err)
+			}
+			cmd.SetContext(context.Background())
+			if err := c2.Validate(context.Background(), cmd); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			if c2.cfg.AppName != c.want {
+				t.Errorf("appName = %q, want %q", c2.cfg.AppName, c.want)
+			}
+			written, err := os.ReadFile(filepath.Join(work, "keploy.yml"))
+			if err != nil {
+				t.Fatalf("the keploy.yml record writes: %v", err)
+			}
+			if !strings.Contains(string(written), "\nappName: "+c.want+"\n") {
+				t.Errorf("the keploy.yml record wrote does not name the app %q:\n%s", c.want, written)
+			}
+		})
+	}
+}
+
 // keploy record refuses a worker-mock rule it cannot apply, read from
 // keploy.yml as written (a camel-case key such as pathRegex included); every
 // other command, keploy mock record among them, goes on.

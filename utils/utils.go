@@ -1925,7 +1925,16 @@ func GetLastDirectory() (string, error) {
 }
 
 func lastDirectory(getwd func() (string, error)) (string, error) {
-	// Get the current working directory
+	dir, err := workingDirectory(getwd)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(dir), nil
+}
+
+// workingDirectory is getwd's answer, once confirmWorkingDirectory says it
+// still leads to the directory the process is in.
+func workingDirectory(getwd func() (string, error)) (string, error) {
 	dir, err := getwd()
 	if err == nil {
 		err = confirmWorkingDirectory(dir)
@@ -1937,10 +1946,7 @@ func lastDirectory(getwd func() (string, error)) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	// Extract the base (last directory)
-	lastDir := filepath.Base(dir)
-	return lastDir, nil
+	return dir, nil
 }
 
 // confirmWorkingDirectory fails unless dir, os.Getwd's answer, still leads to
