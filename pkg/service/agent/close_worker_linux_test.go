@@ -27,9 +27,9 @@ type ownedSource struct {
 func (s *ownedSource) put(o coreAgent.OwnedLoss) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if o.Test == "" && o.Worker != 0 {
-		o.Epoch = s.epochs[o.Worker]
-	}
+	// Every loss is stamped with its worker's epoch now, as the proxy's
+	// ownKind stamps it, one that names its test too.
+	o.Epoch = s.epochs[o.Worker]
 	s.owned = append(s.owned, o)
 }
 

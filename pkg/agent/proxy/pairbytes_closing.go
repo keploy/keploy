@@ -79,14 +79,14 @@ const closeUnknownLost = "keploy cannot tell what the application had written to
 // close waited for that FIN and did not see it (noteUnheldAtClose): bytes
 // the open test wrote may be on their way, unseen. TCP is ordered, so once
 // that FIN is taken every byte written before it was too, and what the
-// proxy moved is all the application sent. A test that ended before had its bytes on pc
-// answered for by its end; a test open now that moved none on pc, with none
-// unread and the FIN taken, sent or received nothing keploy saw there, and
-// is left as it is, whatever test is open at the close. Another worker's
-// test is never charged. Charged to no test, the close is said at info
-// level, once, and a later read of the same close that finds a test to
-// charge still charges it. Apart from pairLost: a loss keploy sees at the
-// same close is charged too, and fails the test it is charged to.
+// proxy moved is all the application sent. A test that ended before had its
+// bytes on pc answered for by its end; a test open now that moved none on
+// pc, with none unread and the FIN taken, sent or received nothing keploy
+// saw there, and is left as it is, whatever test is open at the close.
+// Another worker's test is never charged. Charged to no test, the close is
+// said at info level, once, and a later read of the same close that finds a
+// test to charge still charges it. Apart from pairLost: a loss keploy sees
+// at the same close is charged too, and fails the test it is charged to.
 func (p *Proxy) pairUntold(pc *pairedConn, top uint64, msg string, fields ...zap.Field) {
 	if pc.noSession.Load() || pc.untold.Load() {
 		return

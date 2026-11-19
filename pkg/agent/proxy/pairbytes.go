@@ -237,9 +237,10 @@ func (s *pairedConns) own(test string, app netip.AddrPort) {
 
 // ownKind notes o, a test's loss or a worker's open test's (OwnedLoss),
 // stamped with its worker's test epoch now, under the hold of mu that keeps
-// it (the agent reads the stamp of a worker's open test's alone): an end's settle done (settledEnd) moves the epoch under
-// mu too, so a loss stamped with a test's epoch is kept before that test's
-// end reads the losses, and one counted after is stamped with the gap's.
+// it (the agent reads the stamp of a worker's open test's alone): an end's
+// settle done (settledEnd) moves the epoch under mu too, so a loss stamped
+// with a test's epoch is kept before that test's end reads the losses, and
+// one counted after is stamped with the gap's.
 // Bounded while no agent takes them (a run that never reads them): past
 // maxOwned, one entry of no test's and no worker's, the run's, for each kind
 // counts the rest.

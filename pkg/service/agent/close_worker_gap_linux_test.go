@@ -76,6 +76,15 @@ func TestACloseInAWorkersGapSparesItsNextTest(t *testing.T) {
 					}
 					_, serr = a.ProvenEnd(as(w1), models.ScopeReq{Name: "TestThree", Outcome: models.ScopeOutcomePassed})
 					require.Nil(t, serr)
+					if inGap {
+						// TestThree's end took it: the run's at once, kept
+						// for no test's end (ownedOpen holds an open test's).
+						a.provenMu.Lock()
+						kept, run := len(a.proven.ownedOpen), kindCount(a.proven.ownedRun, kind)
+						a.provenMu.Unlock()
+						require.Zero(t, kept, "a close counted in worker 1's gap is kept for no test")
+						require.EqualValues(t, 1, run, "a close counted in worker 1's gap is the run's as soon as an end takes it")
+					}
 					_, serr = a.ProvenEnd(as(w2), models.ScopeReq{Name: "TestTwo", Outcome: models.ScopeOutcomePassed})
 					require.Nil(t, serr)
 					for _, id := range []string{"a::TestOne", "b::TestTwo"} {
