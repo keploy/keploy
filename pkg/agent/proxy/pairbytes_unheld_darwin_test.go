@@ -236,6 +236,42 @@ func TestACloseWaitsForTheFINOfASocketItsHolderClosedOnDarwin(t *testing.T) {
 		closeWithin(t, app, reader, 10*time.Second, "the close waited on a side it cannot read")
 		wantOneCloseUnknownLine(t, p, logs, "the proxy's side of it cannot be read: bad file descriptor")
 	})
+	t.Run("the proxy's side's tcp_info cannot be read in a test that moved nothing on the connection", func(t *testing.T) {
+		// A read of the side's tcp_info that fails gives XNU state 0,
+		// CLOSED, which is what a side that took the application's reset
+		// shows (peerEnded). A failed read saw no FIN: the open test is
+		// charged though it moved nothing on the connection and the
+		// side holds no byte unread.
+		p, app, reader, logs := unheldPair(t, true)
+		pc := pairedConnOf(t, p, 1)
+		p.paired.markEnd(1, 0)
+		if pc.usedSinceEnd() {
+			t.Fatal("premise: the open test moved nothing on the connection")
+		}
+		if n, err := readUnread(pc.conn); err != nil || n != 0 {
+			t.Fatalf("premise: the side holds %d bytes unread (%v), want 0 and a read: only the read of its tcp_info fails", n, err)
+		}
+		var spoilt atomic.Bool
+		onTCPOptRead(t, func(fd, opt int, buf []byte, macOS func(int, int, []byte) (uint32, error)) (uint32, error) {
+			if spoilt.Load() && opt == xnuTCPInfoOpt {
+				return 0, errors.New("bad file descriptor")
+			}
+			return macOS(fd, opt, buf)
+		})
+		was := readHeldProxySide
+		var reads atomic.Int32
+		readHeldProxySide = func(c *net.TCPConn) proxySide {
+			// The close's first look reads the side; every later read of
+			// its tcp_info fails, pairUntold's among them.
+			if reads.Add(1) > 1 {
+				spoilt.Store(true)
+			}
+			return was(c)
+		}
+		t.Cleanup(func() { readHeldProxySide = was })
+		closeWithin(t, app, reader, 10*time.Second, "the close waited on a side it cannot read")
+		wantOneCloseUnknownLine(t, p, logs, "the proxy's side of it cannot be read: getsockopt TCP_INFO: bad file descriptor")
+	})
 }
 
 // A test's end marks the connections its bytes wait answers for (markEnd), on
