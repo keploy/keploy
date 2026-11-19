@@ -79,6 +79,10 @@ type App struct {
 	// asked for until the func it returns is called; see
 	// SetAgentReleaseHold.
 	holdAgentRelease func(ctx context.Context) (resume func(failed error))
+	// refuseAgentReleases, when set, ends every release of the app the run
+	// asked for, in flight or later, with failed; see
+	// SetAgentReleaseRefusal.
+	refuseAgentReleases func(failed error)
 	// setEndKill is why the latest stop at a test set's end had to kill the
 	// app (setend_stop.go), until run reports it; nil when it did not.
 	setEndKill     atomic.Pointer[string]
@@ -246,6 +250,16 @@ func (a *App) SetOnAgentRestart(f func(ctx context.Context) error) {
 // letting it reach that agent, which is not set up.
 func (a *App) SetAgentReleaseHold(f func(ctx context.Context) (resume func(failed error))) {
 	a.holdAgentRelease = f
+}
+
+// SetAgentReleaseRefusal sets what ends every release of the app the run
+// asked for, in flight or later, with failed, the error of the setup of the
+// agent compose's retry started again, where no release was held
+// (SetAgentReleaseHold): docker could not say which agent ran before the
+// retry, or compose recreated one that ran. None reaches that agent, which is
+// not set up; the run ends on the failure.
+func (a *App) SetAgentReleaseRefusal(f func(failed error)) {
+	a.refuseAgentReleases = f
 }
 
 // ModifyDockerRun modifies the existing Docker command to attach the init container's PID namespace

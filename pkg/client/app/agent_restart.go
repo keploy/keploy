@@ -50,8 +50,9 @@ func (a *App) agentIdentity(ctx context.Context) (id string, started time.Time, 
 // composeAgentSetupFailed ends the run on err, the failed setup of keploy's
 // agent that compose's retry started again: the halt is kept, naming that
 // setup, its error and the next step; then the releases of the app the run
-// asked for end with err (resume), none reaching that agent, which has none
-// of the run's mocks or settings and would start the app against them; then
+// asked for, held or not, end with err (resume), none reaching that agent,
+// which has none of the run's mocks or settings and would start the app
+// against them; then
 // the stack is stopped (end). Releases left held would hold the app back
 // until the agent's healthcheck gave up, and let go they would release it.
 // A halt kept already stands: its end is under way.
@@ -118,8 +119,16 @@ func (a *App) retryComposeUp(ctx context.Context, end func(), run func() utils.C
 	// before the agent client set it up again: releases are held from before
 	// the `up` until the watch has had the agent set up again, which
 	// releases it last, or the watch ends. One kept running is the one the
-	// run set up, and a release still owed to it goes on.
-	resume := func(error) {}
+	// run set up, and a release still owed to it goes on. With no hold on,
+	// a failed setup of an agent the watch takes for one compose started
+	// again ends every release of the run all the same (refuseAgentReleases):
+	// docker not saying which agent ran before, or compose recreating one
+	// that ran, never lets a release reach an agent that is not set up.
+	resume := func(failed error) {
+		if failed != nil && a.refuseAgentReleases != nil {
+			a.refuseAgentReleases(failed)
+		}
+	}
 	if baselineKnown && before == "" && a.holdAgentRelease != nil {
 		resume = a.holdAgentRelease(ctx)
 	}

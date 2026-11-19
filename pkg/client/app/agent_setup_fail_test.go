@@ -287,3 +287,100 @@ services:
 		}
 	}
 }
+
+// A FAILED SETUP WITH NO HOLD ON STILL REFUSES EVERY RELEASE OF THE RUN. No
+// release was held while the retry's `up` ran: compose recreated an agent that
+// ran before the retry (a new container), or docker could not say which
+// agent ran before and the agent the watch saw started after the retry
+// began. The agent client cannot set that agent up again: the run ends on the
+// halt as it does under a hold, and first every release of the run, in
+// flight or later, ends with the failed setup (refuseAgentReleases), none
+// reaching an agent with none of the run's mocks or settings. A setup that
+// succeeds refuses nothing, and an App no agent client gave a refusal still
+// ends the run. Both KEPLOY_PROVEN modes.
+func TestAFailedSetupWithNoHoldStillRefusesEveryReleaseInEveryMode(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		for _, c := range []struct {
+			name      string
+			setUp     error
+			noRefusal bool
+			before    func(d *restartingDocker)
+			restart   func(d *restartingDocker)
+		}{
+			{name: "recreated", setUp: errRestartedAgentSetup,
+				before:  func(d *restartingDocker) { d.set("keploy-v3-test", "agent-1", "t1", true) },
+				restart: func(d *restartingDocker) { d.set("keploy-v3-test", "agent-2", "t3", true) }},
+			{name: "unknown", setUp: errRestartedAgentSetup,
+				before: func(d *restartingDocker) {
+					d.failing = agentBaselineTries
+					d.set("keploy-v3-test", "agent-1", "t1", false)
+				},
+				restart: func(d *restartingDocker) {
+					d.set("keploy-v3-test", "agent-1", time.Now().Add(time.Second).Format(time.RFC3339Nano), true)
+				}},
+			{name: "set up", setUp: nil,
+				before:  func(d *restartingDocker) { d.set("keploy-v3-test", "agent-1", "t1", true) },
+				restart: func(d *restartingDocker) { d.set("keploy-v3-test", "agent-2", "t3", true) }},
+			{name: "no refusal set", setUp: errRestartedAgentSetup, noRefusal: true,
+				before:  func(d *restartingDocker) { d.set("keploy-v3-test", "agent-1", "t1", true) },
+				restart: func(d *restartingDocker) { d.set("keploy-v3-test", "agent-2", "t3", true) }},
+		} {
+			t.Run("switch="+proven+"/"+c.name, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, proven)
+				setUp, tried := c.setUp, make(chan struct{})
+				s := newSetupFailApp(t, func(context.Context) error { close(tried); return setUp })
+				var refused []error
+				if !c.noRefusal {
+					s.a.SetAgentReleaseRefusal(func(failed error) {
+						s.mu.Lock()
+						defer s.mu.Unlock()
+						refused = append(refused, failed)
+						s.got = append(s.got, "refuse")
+					})
+				}
+				c.before(s.d)
+				s.d.set("app", "app-1", "", false)
+				s.a.retryComposeUp(context.Background(), s.end, func() utils.CmdError {
+					s.note("up")
+					c.restart(s.d)
+					// A failed setup ends the run while the up runs; one that
+					// succeeds lets the up go on to its end.
+					over := s.ended
+					if setUp == nil {
+						over = tried
+					}
+					select {
+					case <-over:
+					case <-time.After(30 * time.Second):
+						t.Error("the agent compose started again was never set up, or its failed setup did not end the run")
+					}
+					return utils.CmdError{}
+				})
+				s.mu.Lock()
+				got := append([]error(nil), refused...)
+				s.mu.Unlock()
+				if c.setUp == nil {
+					if g := s.trail(); g != "up,setup" {
+						t.Fatalf("the retry did %s; want the agent set up again, nothing held, nothing refused and the run not ended", g)
+					}
+					if h := s.a.composeAppHalt(); h != nil {
+						t.Fatalf("halt %+v kept for a setup that succeeded; want none", h)
+					}
+					return
+				}
+				if c.noRefusal {
+					if g := s.trail(); g != "up,setup,end" {
+						t.Fatalf("the retry did %s with no refusal set; want the run ended on the failed setup", g)
+					}
+				} else if g := s.trail(); g != "up,setup,refuse,end" {
+					t.Fatalf("the retry did %s; want no hold, the releases refused with the setup's failure, then the run ended", g)
+				} else if len(got) != 1 || !errors.Is(got[0], errRestartedAgentSetup) {
+					t.Fatalf("the releases were refused with %v; want the failed setup, once", got)
+				}
+				if h := s.a.composeAppHalt(); h == nil || !errors.Is(h.agentSetup, errRestartedAgentSetup) {
+					t.Fatalf("halt %+v; want the restarted agent's failed setup", h)
+				}
+			})
+		}
+	}
+}

@@ -61,7 +61,8 @@ type agentSession struct {
 	// held counts the holds on the releases the run asked for
 	// (holdReleases). refused is why no release of this run reaches the
 	// agent any more: the setup of the agent compose started again failed
-	// (holdReleases' resume); nil until then, and again once the run ends.
+	// (refuseReleases, held or not); nil until then, and again once the run
+	// ends.
 	releases map[*releaseCall]struct{}
 	readyBy  *releaseCall
 	held     int
@@ -71,11 +72,19 @@ type agentSession struct {
 // releaseCall is one release of the app in flight (makeAgentReady). setup: it
 // is the release a restarted agent's setup makes (reapply), which no hold
 // holds. posting: its request to the agent is out. refused: why it sends
-// nothing to the agent any more (agentSession.refused).
+// nothing to the agent any more (agentSession.refused). cut ends its wait,
+// and the request it has out, with why (its context's cancel).
 type releaseCall struct {
 	setup   bool
 	posting bool
 	refused error
+	cut     context.CancelCauseFunc
+}
+
+// releaseRefused is how a release the failed setup of a restarted agent
+// refused (refuseReleases) ends.
+func releaseRefused(failed error) error {
+	return fmt.Errorf("the keploy agent was not released (/agent/ready), since keploy's agent, started again by docker compose, could not be set up again: %w", failed)
 }
 
 // beginRelease notes a release of the app in flight. A release is owed from
@@ -84,11 +93,17 @@ type releaseCall struct {
 // late this release learns that the agent it asked is gone. Its watch's
 // verdict, and the look that verdict waits for, can come after that setup
 // has read what to make again (reapply), and an agent set up without its
-// release holds the app back for good.
-func (s *agentSession) beginRelease(setup bool, apply func(ctx context.Context) error) *releaseCall {
+// release holds the app back for good. cut ends the release (refuseReleases).
+// A release asked for once the run's releases were refused is neither noted
+// nor recorded: it ends with refused, asking the agent nothing.
+func (s *agentSession) beginRelease(setup bool, cut context.CancelCauseFunc, apply func(ctx context.Context) error) (rc *releaseCall, refused error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rc := &releaseCall{setup: setup, refused: s.refused}
+	rc = &releaseCall{setup: setup, cut: cut}
+	if s.refused != nil {
+		rc.refused = s.refused
+		return rc, s.refused
+	}
 	if s.releases == nil {
 		s.releases = map[*releaseCall]struct{}{}
 	}
@@ -97,7 +112,7 @@ func (s *agentSession) beginRelease(setup bool, apply func(ctx context.Context) 
 		s.steps = append(s.steps, sessionStep{kind: stepAgentReady, apply: apply})
 		s.readyBy = rc
 	}
-	return rc
+	return rc, nil
 }
 
 // endRelease notes the end of release rc. One that was not owed (the agent
@@ -120,28 +135,29 @@ func (s *agentSession) endRelease(rc *releaseCall, owed bool) {
 
 // awaitPost waits until release rc may send its request to the agent: at
 // once for a restarted agent's setup, otherwise while no hold is on. It
-// reports false once done is closed first, and refused, with no wait, once
-// the setup of an agent compose started again has failed (holdReleases):
-// rc then sends nothing to the agent.
-func (s *agentSession) awaitPost(done <-chan struct{}, rc *releaseCall) (post bool, refused error) {
+// reports false once done, rc's context, is closed first, and, with no wait,
+// once the setup of an agent compose started again has failed: rc then sends
+// nothing to the agent, and its context carries that failure, since its
+// refusal cut it (refuseReleases).
+func (s *agentSession) awaitPost(done <-chan struct{}, rc *releaseCall) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for rc.refused == nil && !rc.setup && s.held > 0 {
+	for !rc.setup && s.held > 0 {
 		changed := s.changed
 		s.mu.Unlock()
 		select {
 		case <-changed:
 		case <-done:
 			s.mu.Lock()
-			return false, nil
+			return false
 		}
 		s.mu.Lock()
 	}
 	if rc.refused != nil {
-		return false, rc.refused
+		return false
 	}
 	rc.posting = true
-	return true, nil
+	return true
 }
 
 // releaseOut reports whether a release has its request out; with s.mu held.
@@ -154,12 +170,15 @@ func (s *agentSession) releaseOut() bool {
 	return false
 }
 
-// posted notes that release rc's request is back.
-func (s *agentSession) posted(rc *releaseCall) {
+// posted notes that release rc's request is back, and its answer read. It
+// returns why rc was refused (refuseReleases) while that request was out: the
+// release then ends with that, whatever the agent answered.
+func (s *agentSession) posted(rc *releaseCall) (refused error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rc.posting = false
 	s.notify()
+	return rc.refused
 }
 
 // holdReleases holds every release of the app the run asked for, in flight or
@@ -205,12 +224,27 @@ func (s *agentSession) holdReleases(ctx context.Context) (resume func(failed err
 
 // refuseReleases ends every release of this run with failed, in flight or
 // asked for until the run ends, before it sends anything more to the agent;
-// with s.mu held.
+// with s.mu held. A release in flight is cut at once, its wait and the
+// request it has out with it: that request, still on its way, never reaches
+// the agent, and one the agent answered ends with failed all the same.
 func (s *agentSession) refuseReleases(failed error) {
 	s.refused = failed
 	for rc := range s.releases {
 		rc.refused = failed
+		rc.cut(releaseRefused(failed))
 	}
+}
+
+// refuseRun ends every release of this run with failed (refuseReleases), held
+// or not: the setup of the agent compose's retry started again failed where
+// no hold was on (docker could not say which agent ran before the retry, or
+// compose recreated a running agent), and the run ends on that failure
+// (App.retryComposeUp). A release must never reach that agent, which has none
+// of the run's mocks or settings.
+func (s *agentSession) refuseRun(failed error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refuseReleases(failed)
 }
 
 // sessionStep is one configuring call, made again by apply.
