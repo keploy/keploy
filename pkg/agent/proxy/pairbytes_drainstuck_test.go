@@ -153,7 +153,18 @@ func TestADrainGivesUpAHandlerThatNeverClosesByName(t *testing.T) {
 		clk, got := drainAt(p)
 		got2 := make(chan error, 1)
 		go func() { got2 <- p.PairedBytesDrain(context.Background()) }()
+		deadline := time.Now().Add(10 * time.Second) // only turns a hang into a failure
 		for clk.Pending() < 2 {
+			select {
+			case err := <-got:
+				t.Fatalf("a drain answered (%v) before its bound passed", err)
+			case err := <-got2:
+				t.Fatalf("a drain answered (%v) before its bound passed", err)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d of the two drains waited on their bound, want both", clk.Pending())
+			}
 			time.Sleep(time.Millisecond)
 		}
 		clk.Advance(drainBudget)
