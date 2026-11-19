@@ -42,7 +42,8 @@ func TestNormalizeRepoTakesAnIPv6Host(t *testing.T) {
 }
 
 // detectCI names the provider from its own variable, and Woodpecker, which
-// sets none, from CI=woodpecker; any other CI value is an unknown provider.
+// sets none, from CI=woodpecker; CI=false, 0 or no is not CI, and any other
+// CI value is an unknown provider.
 func TestDetectCI(t *testing.T) {
 	for _, tc := range []struct {
 		env      map[string]string
@@ -65,6 +66,17 @@ func TestDetectCI(t *testing.T) {
 		{env: map[string]string{"BITBUCKET_BUILD_NUMBER": "17"}, ci: true, provider: "bitbucket"},
 		{env: map[string]string{"CI_PIPELINE_ID": "4242"}, ci: true, provider: "unknown"},
 		{env: map[string]string{"CI_PIPELINE_ID": "4242", "GITLAB_CI": "true", "CI": "true"}, ci: true, provider: "gitlab-ci"},
+		// CI=false, 0 or no (any case, padded) says this is not CI, as
+		// enterprise's CLI reads it; any other value is an unknown runner.
+		{env: map[string]string{"CI": "false"}, ci: false, provider: ""},
+		{env: map[string]string{"CI": " FALSE "}, ci: false, provider: ""},
+		{env: map[string]string{"CI": "0"}, ci: false, provider: ""},
+		{env: map[string]string{"CI": "No"}, ci: false, provider: ""},
+		{env: map[string]string{"CI": " \t"}, ci: false, provider: ""},
+		{env: map[string]string{"CI": "1"}, ci: true, provider: "unknown"},
+		{env: map[string]string{"CI": "yes"}, ci: true, provider: "unknown"},
+		// A runner's own variable still names it whatever CI says.
+		{env: map[string]string{"GITHUB_ACTIONS": "true", "CI": "false"}, ci: true, provider: "github-actions"},
 	} {
 		t.Setenv("CI", "")
 		for _, p := range ciProviders {
