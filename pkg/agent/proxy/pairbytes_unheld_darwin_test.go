@@ -216,8 +216,12 @@ func TestACloseWaitsForTheFINOfASocketItsHolderClosedOnDarwin(t *testing.T) {
 }
 
 // A test's end marks the connections its bytes wait answers for (markEnd), on
-// macOS as on Linux: a close keploy cannot account for in a later test that
-// never used the connection charges no test.
+// macOS as on Linux. A close in a later test that never used the connection
+// that waited for the application's FIN, sent after every byte it wrote, and
+// saw it, is accounted for (TestACloseWaitsForTheFINOfASocketItsHolderClosedOnDarwin).
+// One that did not wait for it, no application socket read from its holder
+// yet, cannot rule out bytes of the open test's on their way unseen: it
+// charges the open test (closeUnseen), left NOT JUDGED.
 func TestAnEndsWaitMarksTheConnectionsItAnswersForOnDarwin(t *testing.T) {
 	p, app, _, reader := darwinPair(t)
 	p.settleReads = true
@@ -242,11 +246,11 @@ func TestAnEndsWaitMarksTheConnectionsItAnswersForOnDarwin(t *testing.T) {
 	core, logs := observer.New(zapcore.InfoLevel)
 	p.logger = zap.New(core)
 	closeWithin(t, app, reader, 10*time.Second, "the close waited with no application socket read from its holder")
-	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 0 {
-		t.Errorf("%d untold closes charged, want none: the test open at the close never used the connection", l)
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+		t.Errorf("%d untold closes charged, want one: the close did not see the FIN, so bytes of the open test's may have been on their way", l)
 	}
 	said := logs.FilterMessageSnippet("keploy cannot tell what the application had written").All()
-	if len(said) != 1 || said[0].Level != zap.InfoLevel {
-		t.Errorf("lines %+v, want one info line: the close is charged to no test", said)
+	if len(said) != 1 || said[0].Level != zap.WarnLevel {
+		t.Errorf("lines %+v, want one warn line: the close is charged to the open test", said)
 	}
 }

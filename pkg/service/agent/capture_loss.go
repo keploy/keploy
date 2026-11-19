@@ -182,6 +182,11 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 	for _, o := range taken {
 		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
 	}
+	// Kept for a worker's open test whose end never charged them.
+	for id, kept := range a.proven.ownedOpen {
+		a.proven.ownedRun = a.proven.ownedRun.Plus(kept)
+		delete(a.proven.ownedOpen, id)
+	}
 	mark, charged, outside, owned := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside, a.proven.ownedRun
 	a.provenMu.Unlock()
 	_, now, err := a.captureLossesSince(ctx, mark, nil)

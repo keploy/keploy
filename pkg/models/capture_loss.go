@@ -1020,14 +1020,15 @@ func (c CaptureLoss) logWhat(shape bool) string {
 // agent's processes, the proxy listener's count, a TLS upgrade a parser
 // asked for), or the kernel's addresses and ports alone (a connection that
 // never reached the proxy whole, one keploy could not pair, bytes the
-// application lost, a UDP answer, a connection's queue keploy dropped). A
-// kind not listed here, a new one among them, may name one.
+// application lost or that a close could not account for, a UDP answer, a
+// connection's queue keploy dropped). A kind not listed here, a new one among
+// them, may name one.
 func (k CaptureLossKind) namesNoHost() bool {
 	switch k {
 	case CaptureLossContainerUnread, CaptureLossKernelSkip, CaptureLossKernelSkipCall, CaptureLossPIDMap, CaptureLossPIDMapExcluded,
 		CaptureLossUnclassified, CaptureLossAppSubtreeUntracked, CaptureLossProcessUnshimmed, CaptureLossAgentStartedAgain,
 		CaptureLossUnixSocket, CaptureLossUnixUnseen, CaptureLossListenerDropped,
-		CaptureLossAppConnLost, CaptureLossUnpairedConn, CaptureLossAppBytesLost, CaptureLossUDPReply, CaptureLossSTARTTLS,
+		CaptureLossAppConnLost, CaptureLossUnpairedConn, CaptureLossAppBytesLost, CaptureLossAppBytesUntold, CaptureLossUDPReply, CaptureLossSTARTTLS,
 		CaptureLossParserStall, CaptureLossDropped:
 		return true
 	}

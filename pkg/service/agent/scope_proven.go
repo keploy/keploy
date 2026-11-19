@@ -89,6 +89,12 @@ type provenWire struct {
 	// what it lost: the run's, naming the connection and the test, and
 	// no later test's (UnchargedCaptureLosses).
 	ownedRun models.CaptureLosses
+	// ownedOpen are, by test ID, losses the proxy counted at a close of a
+	// connection of that test's worker while the test was open
+	// (coreAgent.OwnedLoss's Worker), taken at another worker's test's end:
+	// that test's end charges them (chargeCaptureLosses), and they are the
+	// run's if it never does (closeOpen, UnchargedCaptureLosses).
+	ownedOpen map[string]models.CaptureLosses
 	// ownedLeft are losses cut-short ends owned that the session before
 	// counted and no read took: the run's, which the next read takes
 	// (takeOwnedLosses), never dropped.
@@ -420,7 +426,7 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// Bounded, as the proxy's are, while no read takes them.
 	left := a.takeOwnedLosses()
 	for i := range left {
-		left[i].Test = ""
+		left[i].Test, left[i].Worker = "", 0
 	}
 	left = boundOwnedLeft(left)
 	a.provenMu.Lock()
@@ -1746,6 +1752,11 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 			}
 		}
 		delete(a.proven.openFrom, id)
+		// Kept for an end that never charged them: the run's.
+		if kept := a.proven.ownedOpen[id]; len(kept) > 0 {
+			a.proven.ownedRun = a.proven.ownedRun.Plus(kept)
+			delete(a.proven.ownedOpen, id)
+		}
 		a.provenMu.Unlock()
 		if closed {
 			// Connections from here on are the run's again, in a scope of
@@ -2016,18 +2027,43 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	lost, now, err := a.captureLossesSince(ctx, mark, test)
 	// What a cut-short end owned that was counted since: this test's when
 	// it is the owner (its own end was cut short, and the loss counted
-	// before this read), the run's otherwise. None is in the counts, so
-	// none is charged to this test by them.
+	// before this read), the run's otherwise. A loss of the open test of a
+	// connection's worker (a close of it: coreAgent.OwnedLoss's Worker) is
+	// that worker's open test's alone: this test's when it is that test,
+	// kept for that test's end when another worker's test is (ownedOpen),
+	// and the run's when the worker has none open. None is in the counts,
+	// so none is charged to this test by them, and none to another
+	// worker's test.
 	var mine models.CaptureLosses
-	for _, o := range a.takeOwnedLosses() {
-		if o.Test == id && err == nil {
+	taken := a.takeOwnedLosses()
+	a.provenMu.Lock()
+	for _, o := range taken {
+		owner := o.Test
+		if owner == "" && o.Worker != 0 {
+			owner = a.proven.openOf(o.Worker)
+			if owner != "" && owner != id {
+				if a.proven.ownedOpen == nil {
+					a.proven.ownedOpen = map[string]models.CaptureLosses{}
+				}
+				a.proven.ownedOpen[owner] = a.proven.ownedOpen[owner].Plus(models.CaptureLosses{o.Loss})
+				continue
+			}
+		}
+		if owner == id && err == nil {
 			mine = mine.Plus(models.CaptureLosses{o.Loss})
 			continue
 		}
-		a.provenMu.Lock()
 		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
-		a.provenMu.Unlock()
 	}
+	if kept := a.proven.ownedOpen[id]; len(kept) > 0 {
+		delete(a.proven.ownedOpen, id)
+		if err == nil {
+			mine = mine.Plus(kept)
+		} else {
+			a.proven.ownedRun = a.proven.ownedRun.Plus(kept)
+		}
+	}
+	a.provenMu.Unlock()
 	if !a.replaying() {
 		// A record charges a container read the daemon did not answer by
 		// the mock its stamp marked (unreadMock), its own test's whenever

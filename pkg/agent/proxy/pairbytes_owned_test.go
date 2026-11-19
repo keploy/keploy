@@ -98,8 +98,8 @@ func TestOwnedLossesPastTheBoundKeepEachKindApart(t *testing.T) {
 		s.own("test-"+strconv.Itoa(i+1), app)
 	}
 	untold := models.CaptureLoss{Kind: models.CaptureLossAppBytesUntold, Count: 1, What: "from 127.0.0.1:50912"}
-	s.ownKind("test-past-1", untold)
-	s.ownKind("test-past-2", untold)
+	s.ownKind(agent.OwnedLoss{Test: "test-past-1", Loss: untold})
+	s.ownKind(agent.OwnedLoss{Test: "test-past-2", Loss: untold})
 	s.own("test-past-3", app)
 	if len(s.owned) != maxOwned+2 {
 		t.Fatalf("%d owned losses kept, want %d: the bound's own and one of the run's for each kind", len(s.owned), maxOwned+2)

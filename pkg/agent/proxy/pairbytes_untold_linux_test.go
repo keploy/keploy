@@ -282,7 +282,7 @@ func TestAnUntoldCloseOfBytesAllOwnedByACutEndSparesTheOpenTest(t *testing.T) {
 	if !pc.usedSinceEnd() {
 		t.Fatal("premise: the proxy wrote to the connection in the open test")
 	}
-	p.pairUntold(pc, 5, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread")
+	p.pairUntold(pc, 5, false, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread")
 	owned := p.TakeOwnedLosses()
 	if len(owned) != 1 || owned[0].Test != "TestStock" || owned[0].Loss.Kind != models.CaptureLossAppBytesUntold {
 		t.Fatalf("owned %+v, want one untold close of TestStock's", owned)

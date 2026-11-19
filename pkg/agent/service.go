@@ -83,9 +83,16 @@ type CaptureLossReporter interface {
 // it (Test): bytes that test wrote to a connection, which its end could not
 // wait for, and which were lost later, under another test. It is no capture
 // loss of that other test's, and is in no count CaptureLosses reports.
+//
+// One with no Test and a Worker is the loss of the test the test worker
+// whose keploy instance is Worker has open (the kernel's stamp of the
+// process that made the connection): a close of that worker's connection,
+// which no other worker's test used. The agent charges it to that test, and
+// to the run when that worker has none open; never to another worker's.
 type OwnedLoss struct {
-	Test string
-	Loss models.CaptureLoss
+	Test   string
+	Worker uint32
+	Loss   models.CaptureLoss
 }
 
 // OwnedLossTaker is the optional extension implemented by a proxy that tells
@@ -537,6 +544,17 @@ type PairedBytesWaiter interface {
 	// connection received more, saw its orphan change state, or was
 	// resolved), for a watchdog: it only ever grows.
 	PairedBytesProgress() uint64
+}
+
+// PairedBytesSettler is the optional extension of a PairedBytesWaiter that
+// is told when a settle that waited for the bytes on the paired connections
+// is done (PairedBytesSettled), for the test worker whose keploy instance
+// is worker (0: a run of one test process, every connection): by then the
+// settle has had its connections' handlers take, and in a replay answer,
+// the calls it waited for, and every byte the proxy moved on them since the
+// wait began is the ending test's, never the next one's.
+type PairedBytesSettler interface {
+	PairedBytesSettled(worker uint32)
 }
 
 // PairedBytesChecker is the proxy's account of whether it can count the bytes

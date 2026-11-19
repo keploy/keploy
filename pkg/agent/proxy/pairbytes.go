@@ -48,10 +48,13 @@ type pairedConn struct {
 	untold atomic.Bool
 	// used counts the proxy's reads and writes of it that moved bytes
 	// (trackedConn.pairUse), and usedAtEnd is used as the latest test's end
-	// that held it began its bytes wait (pairedConns.markEnd): the open
-	// test moved bytes on it only when used has grown past usedAtEnd
-	// (usedSinceEnd).
+	// that held it was done with it: as its bytes wait began (markEnd), and
+	// again once its settle had taken and answered the calls it waited for
+	// (settledEnd). The open test moved bytes on it only when used has grown
+	// past usedAtEnd (usedSinceEnd). ending: an end marked it and its settle
+	// is not done yet.
 	used, usedAtEnd atomic.Uint64
+	ending          atomic.Bool
 	// atClose is the proxy's side as the proxy closed it (closing), read
 	// from its socket while it still could be: after the close nothing
 	// reads it (a reset socket is unhashed, sock_diag no longer finds it).
@@ -178,7 +181,7 @@ func (s *pairedConns) closing(conn net.Conn, first func(*pairedConn)) (*pairedCo
 	}
 	ps := pc.readSide()
 	pc.atClose.Store(&ps)
-	unread, err := readUnread(pc.conn)
+	unread, err := readUnreadAtClose(pc.conn)
 	return pc, unread, err
 }
 
@@ -218,48 +221,77 @@ const maxOwned = agent.MaxOwnedLosses
 // own notes a loss of the bytes test wrote to the connection from app, which
 // its end could not wait for.
 func (s *pairedConns) own(test string, app netip.AddrPort) {
-	s.ownKind(test, models.CaptureLoss{
+	s.ownKind(agent.OwnedLoss{Test: test, Loss: models.CaptureLoss{
 		Kind:  models.CaptureLossAppBytesLost,
 		Count: 1,
 		What:  "from " + app.String() + ", written " + agent.WrittenIn(test) + ", where keploy's wait for them was cut short",
-	})
+	}})
 }
 
-// ownKind notes loss, of test's (OwnedLoss). Bounded while no agent takes
-// them (a run that never reads them): past maxOwned, one entry of no test's,
-// the run's, for each kind counts the rest.
-func (s *pairedConns) ownKind(test string, loss models.CaptureLoss) {
+// ownKind notes o, a test's loss or a worker's open test's (OwnedLoss).
+// Bounded while no agent takes them (a run that never reads them): past
+// maxOwned, one entry of no test's and no worker's, the run's, for each kind
+// counts the rest.
+func (s *pairedConns) ownKind(o agent.OwnedLoss) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.owned) >= maxOwned {
 		for i := maxOwned; i < len(s.owned); i++ {
-			if s.owned[i].Loss.Kind == loss.Kind {
-				s.owned[i].Loss.Count += loss.Count
+			if s.owned[i].Loss.Kind == o.Loss.Kind {
+				s.owned[i].Loss.Count += o.Loss.Count
 				return
 			}
 		}
-		s.owned = append(s.owned, agent.OwnedLoss{Loss: models.CaptureLoss{Kind: loss.Kind, Count: loss.Count, What: agent.OwnedLossesPastTheBound}})
+		s.owned = append(s.owned, agent.OwnedLoss{Loss: models.CaptureLoss{Kind: o.Loss.Kind, Count: o.Loss.Count, What: agent.OwnedLossesPastTheBound}})
 		return
 	}
-	s.owned = append(s.owned, agent.OwnedLoss{Test: test, Loss: loss})
+	s.owned = append(s.owned, o)
 }
 
 // markEnd marks, as the end of a test of worker begins its bytes wait for the
 // connections whose application connection is numbered 1..n, what the proxy
 // had moved on each of them (pairedConn.usedAtEnd): bytes moved before it are
 // that test's or an earlier one's, which the wait answers for, or leaves
-// marked as the ending test's when it is cut short (cutShort). Worker 0 is a
-// run of one test process: every connection. Another worker's connections
-// are its own open test's, and are not marked.
+// marked as the ending test's when it is cut short (cutShort). The end's
+// settle, once done, marks them again (settledEnd). Worker 0 is a run of one
+// test process: every connection. Another worker's connections are its own
+// open test's, and are not marked.
 func (s *pairedConns) markEnd(n uint64, worker uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, pc := range s.byConn {
-		if pc.appSeq <= n && (worker == 0 || pc.instance == worker) {
+		if pc.appSeq <= n && ofWorker(pc, worker) {
+			pc.usedAtEnd.Store(pc.used.Load())
+			pc.ending.Store(true)
+		}
+	}
+}
+
+// settledEnd marks again, once the settle of an end of a test of worker is
+// done, each connection that end's bytes wait marked (markEnd): what the
+// settle moved on it after the wait began, the ending test's calls its
+// handler took and answered, is that test's. The next test of worker
+// begins only after the end, so none of it is that test's.
+func (s *pairedConns) settledEnd(worker uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, pc := range s.byConn {
+		if ofWorker(pc, worker) && pc.ending.CompareAndSwap(true, false) {
 			pc.usedAtEnd.Store(pc.used.Load())
 		}
 	}
 }
+
+// ofWorker says pc is a connection of worker's: any, for worker 0 (a run of
+// one test process).
+func ofWorker(pc *pairedConn, worker uint32) bool {
+	return worker == 0 || pc.instance == worker
+}
+
+// PairedBytesSettled is told that the settle of an end of a test of worker
+// is done (agent.PairedBytesSettler): what it moved on worker's connections
+// since its bytes wait began is the ending test's (settledEnd).
+func (p *Proxy) PairedBytesSettled(worker uint32) { p.paired.settledEnd(worker) }
 
 // useOf is the count of the proxy's moves of bytes on conn
 // (pairedConn.used), for its trackedConn to count them in: nil for a
@@ -273,8 +305,13 @@ func (s *pairedConns) useOf(conn net.Conn) *atomic.Uint64 {
 	return nil
 }
 
+// readUnreadAtClose is the close's read of what the proxy's socket holds
+// unread (closing): readUnread, but in a row that makes it fail.
+var readUnreadAtClose = readUnread
+
 // usedSinceEnd says the proxy moved bytes on pc since the latest test's end
-// that held it began its bytes wait (markEnd), or, before any did, ever.
+// that held it was done with it (markEnd, settledEnd), or, before any was,
+// ever.
 func (pc *pairedConn) usedSinceEnd() bool {
 	return pc.used.Load() > pc.usedAtEnd.Load()
 }

@@ -36,12 +36,26 @@ import (
 // paired connections' bytes (holdsPairedBytes) vouches for none: it charges
 // nothing, and says it at debug level.
 func (p *Proxy) closeUnknown(pc *pairedConn, err error, fields ...zap.Field) {
+	p.closeUntold(pc, false, err, fields...)
+}
+
+// closeUnseen is closeUnknown for a close that waited for the application's
+// FIN, sent after every byte it wrote, and did not see it (noteUnheldAtClose):
+// bytes the open test wrote may be among those on their way, which no read of
+// the proxy's saw, so the open test of pc's worker is charged whether or not
+// the proxy moved bytes on pc in it (pairUntold's unseen).
+func (p *Proxy) closeUnseen(pc *pairedConn, err error, fields ...zap.Field) {
+	p.closeUntold(pc, true, err, fields...)
+}
+
+// closeUntold is closeUnknown, and closeUnseen when unseen.
+func (p *Proxy) closeUntold(pc *pairedConn, unseen bool, err error, fields ...zap.Field) {
 	fields = append([]zap.Field{zap.String("connection", fmt.Sprintf("%s -> %s", pc.app, pc.proxy)), zap.Error(err)}, fields...)
 	if !p.holdsPairedBytes() {
 		p.logger.Debug(closeUnknownLost, fields...)
 		return
 	}
-	p.pairUntold(pc, math.MaxUint64, closeUnknownLost, fields...)
+	p.pairUntold(pc, math.MaxUint64, unseen, closeUnknownLost, fields...)
 }
 
 // unreadOrUntold says pc's socket holds bytes the proxy has not read (bytes
@@ -62,22 +76,25 @@ const closeUnknownLost = "keploy cannot tell what the application had written to
 // JUDGED), never failed, and a test keploy saw miss a call stays failed on
 // that miss. It is charged to the tests pc could have served, and no other:
 // each test whose end was cut short with some of those bytes unsettled
-// (pairedConn.lostBy) owns it, and the test open now is charged when the
-// proxy moved bytes on pc since the latest test's end that held pc began
-// its bytes wait (usedSinceEnd), or when no such end has, or when pc's
-// socket holds bytes the proxy has not read, or cannot tell whether it does
-// (unreadOrUntold). A test that ended before that wait had its bytes on pc
-// answered for by it; a test open now that moved none on pc, with none
-// unread, sent or received nothing keploy saw there, and is left as it is,
-// whatever test is open at the close. Charged to no test, the close is said
-// at info level. Apart from pairLost: a loss keploy sees at the same close
-// is charged too, and fails the test it is charged to.
-func (p *Proxy) pairUntold(pc *pairedConn, top uint64, msg string, fields ...zap.Field) {
-	if pc.noSession.Load() || pc.untold.Load() {
+// (pairedConn.lostBy) owns it, and the test open now on pc's worker is
+// charged (chargeOpen) when the proxy moved bytes on pc since the latest
+// test's end that held pc was done with it (usedSinceEnd), or when no such
+// end was, or when pc's socket holds bytes the proxy has not read, or cannot
+// tell whether it does (unreadOrUntold), or when the close waited for the
+// application's FIN and did not see it (unseen: bytes the open test wrote
+// may be on their way unseen). A test that ended before had its bytes on pc
+// answered for by its end; a test open now that moved none on pc, with none
+// unread and the FIN seen or never waited for, sent or received nothing
+// keploy saw there, and is left as it is, whatever test is open at the
+// close. Another worker's test is never charged. Charged to no test, the
+// close is said at info level, once. Apart from pairLost: a loss keploy sees
+// at the same close is charged too, and fails the test it is charged to.
+func (p *Proxy) pairUntold(pc *pairedConn, top uint64, unseen bool, msg string, fields ...zap.Field) {
+	if pc.noSession.Load() || !pc.untold.CompareAndSwap(false, true) {
 		return
 	}
 	owners, open := pc.lostBy(1, top)
-	open = open && (pc.usedSinceEnd() || unreadOrUntold(pc))
+	open = open && (unseen || pc.usedSinceEnd() || unreadOrUntold(pc))
 	if len(owners) == 0 && !open {
 		p.logger.Info(msg, append([]zap.Field{
 			zap.String("from", pc.app.String()),
@@ -85,18 +102,15 @@ func (p *Proxy) pairUntold(pc *pairedConn, top uint64, msg string, fields ...zap
 		}, fields...)...)
 		return
 	}
-	if !pc.untold.CompareAndSwap(false, true) {
-		return
-	}
 	for _, test := range owners {
-		p.paired.ownKind(test, models.CaptureLoss{
+		p.paired.ownKind(agent.OwnedLoss{Test: test, Loss: models.CaptureLoss{
 			Kind:  models.CaptureLossAppBytesUntold,
 			Count: 1,
 			What:  "from " + pc.app.String() + ", written " + agent.WrittenIn(test) + ", where keploy's wait for them was cut short",
-		})
+		}})
 	}
 	if open {
-		p.losses.Add(models.CaptureLossAppBytesUntold, "from "+pc.app.String())
+		p.chargeOpen(pc, models.CaptureLossAppBytesUntold)
 	}
 	p.logger.Warn(msg, append([]zap.Field{
 		zap.String("from", pc.app.String()),
@@ -153,7 +167,7 @@ func (p *Proxy) pairClosing(ctx context.Context, conn net.Conn, tc *trackedConn)
 	case err != nil:
 		// Unaccountable, as closeUnknown's: the tests the connection
 		// could have served are left without a verdict, and no other.
-		p.pairUntold(pc, lostTop(pc), "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: the tests that connection could have served are left without a verdict", zap.Error(err))
+		p.pairUntold(pc, lostTop(pc), false, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread: the tests that connection could have served are left without a verdict", zap.Error(err))
 	case unread == 0 && !onItsWayAtClose(pc):
 	case unread == 0 && !tlsLayer && finAloneOnItsWay(pc):
 		// The application's FIN alone: it carries no call, and a bytes
@@ -313,6 +327,21 @@ func lostTop(pc *pairedConn) uint64 {
 	return math.MaxUint64
 }
 
+// chargeOpen charges a loss of kind at a close of pc to the test open now on
+// pc's worker (pairedConn.instance): an owned loss naming that worker, which
+// the agent charges to that worker's open test alone (agent.OwnedLoss), never
+// to another worker's. A connection of no worker's (instance 0: a run of one
+// test process, or a process no worker's claim stamped) is the run's count,
+// which charges the test open now (CaptureLosses).
+func (p *Proxy) chargeOpen(pc *pairedConn, kind models.CaptureLossKind) {
+	what := "from " + pc.app.String()
+	if pc.instance == 0 {
+		p.losses.Add(kind, what)
+		return
+	}
+	p.paired.ownKind(agent.OwnedLoss{Worker: pc.instance, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: what}})
+}
+
 // unreadLost is pairLost's message for a close that tossed bytes unread.
 const unreadLost = "keploy's proxy closed a connection with bytes the application wrote still unread: what they carried was neither recorded nor mocked"
 
@@ -333,7 +362,7 @@ func (p *Proxy) pairLost(pc *pairedConn, low, top uint64, msg string, fields ...
 	}
 	next := "keploy cannot vouch for the calls of the test that was open (under the proven switch, that test is not verified); check the agent's log for why the connection ended"
 	if open {
-		p.losses.Add(models.CaptureLossAppBytesLost, "from "+pc.app.String())
+		p.chargeOpen(pc, models.CaptureLossAppBytesLost)
 	} else {
 		where := make([]string, len(owners))
 		for i, test := range owners {

@@ -132,8 +132,8 @@ type trackedConn struct {
 	// (pairbytes.go).
 	beforeClose func()
 	// pairUse, when set (by the accept, before the handler runs), counts
-	// each read and write of it that moved bytes, for the paired
-	// connection it is (pairedConn.used).
+	// each read of it that moved bytes, and each write of bytes as it
+	// begins, for the paired connection it is (pairedConn.used).
 	pairUse   *atomic.Uint64
 	closeOnce sync.Once
 	// closing: its Close has begun. A read from then on is the close's own
@@ -516,18 +516,20 @@ func (c *trackedConn) Write(b []byte) (int, error) {
 	var f *learn.Flight
 	if len(b) > 0 {
 		f = c.land()
-	}
-	n, err := c.Conn.Write(b)
-	if n > 0 {
+		// Counted before the bytes go out, as the landing is: the
+		// application may read them, and its test end, before this
+		// goroutine runs again (pairedConn.usedSinceEnd).
 		c.noteUse()
 	}
+	n, err := c.Conn.Write(b)
 	if err != nil {
 		f.EndUntold()
 	}
 	return n, err
 }
 
-// noteUse counts a read or write of c that moved bytes (pairUse).
+// noteUse counts a read of c that moved bytes, or a write of bytes as it
+// begins (pairUse).
 func (c *trackedConn) noteUse() {
 	if c.pairUse != nil {
 		c.pairUse.Add(1)
