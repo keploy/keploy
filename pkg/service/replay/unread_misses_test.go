@@ -19,6 +19,8 @@ import (
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // misses answers the harness's per-test GetMockErrors calls in test order:
@@ -154,6 +156,40 @@ func TestAttachMockErrors_KeepsWhatAnIncompleteReadReturned(t *testing.T) {
 			}
 			if len(result.FailureInfo.UnmatchedCalls) != 1 || result.FailureInfo.UnmatchedCalls[0].ActualSummary != "GET /read" {
 				t.Fatalf("unmatched calls %+v; the calls the read did return must be kept", result.FailureInfo.UnmatchedCalls)
+			}
+		})
+	}
+}
+
+// The log of an incomplete read says what keploy does with it: under the
+// switch, a test it read a miss of fails on that miss, and one it read none
+// of leaves its set not judged; with the switch off, the miss may be missing.
+func TestAnIncompleteMissesReadLogsWhatItMeansForTheTest(t *testing.T) {
+	for _, tc := range []struct {
+		on   bool
+		read func() ([]models.UnmatchedCall, error)
+		want zapcore.Level
+		say  string
+	}{
+		{true, incompleteRead, zapcore.ErrorLevel, "it fails on the ones read"},
+		{true, incompleteReadOfNone, zapcore.ErrorLevel, "its test set is not judged"},
+		{false, incompleteRead, zapcore.WarnLevel, "a miss may be missing from this test"},
+		{false, incompleteReadOfNone, zapcore.WarnLevel, "a miss may be missing from this test"},
+	} {
+		v := ""
+		if tc.on {
+			v = "1"
+		}
+		t.Run(fmt.Sprintf("switch=%v/%s", tc.on, tc.say), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, v)
+			h := newPartialRunHarness(t, 1, 0)
+			core, logs := observer.New(zapcore.DebugLevel)
+			h.replayer.logger = zap.New(core)
+			h.instr.mockErrorsFor = misses(tc.read)
+			h.replayer.attachMockErrors(t.Context(), "test-set-0", "test-1", &models.TestResult{})
+			got := logs.FilterMessageSnippet("could not read every call this test made").All()
+			if len(got) != 1 || got[0].Level != tc.want || !strings.Contains(got[0].Message, tc.say) {
+				t.Fatalf("logged %+v; want one %v line that says %q", got, tc.want, tc.say)
 			}
 		})
 	}

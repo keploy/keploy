@@ -319,6 +319,29 @@ func TestAServerFirstConnectionLeavesItsTestNotJudged(t *testing.T) {
 	}
 }
 
+// A close of the proxy's that keploy cannot account for leaves the tests that
+// used the connection not judged, those tests only, never failed: it says how
+// many of a test's connections it was, and its remedy is a run again.
+func TestAnUntoldCloseLeavesItsTestNotJudged(t *testing.T) {
+	k := CaptureLossAppBytesUntold
+	if !k.NotJudged() || !k.PerTest() || k.runScoped() {
+		t.Fatalf("NotJudged %v PerTest %v runScoped %v; want a test's own loss that leaves it not judged", k.NotJudged(), k.PerTest(), k.runScoped())
+	}
+	judged, notJudged := CaptureLosses{{Kind: k, Count: 2, What: "from 127.0.0.1:50000"}}.Split()
+	if len(judged) != 0 || len(notJudged) != 1 {
+		t.Fatalf("Split = %+v, %+v; want it not judged, never a judged loss", judged, notJudged)
+	}
+	if text := notJudged.NotJudgedText(); !strings.Contains(text, "keploy's proxy closed 2 connection(s) this test used") {
+		t.Fatalf("NotJudgedText = %q", text)
+	}
+	if r := notJudged.NotJudgedRemedy(); !strings.Contains(r, AppBytesUntoldRemedy) {
+		t.Fatalf("remedy %q, want %q", r, AppBytesUntoldRemedy)
+	}
+	if r := (CaptureLosses{{Kind: CaptureLossServerFirst, Count: 1}}).NotJudgedRemedy(); strings.Contains(r, AppBytesUntoldRemedy) {
+		t.Fatalf("remedy %q names the untold close's remedy for a test it was not charged to", r)
+	}
+}
+
 // A connection a destination refused at accept, relayed (P250), is a loss of
 // its own kind: not judged, the test's own, with its text and remedy.
 func TestARefusalAtAcceptIsALossOfItsOwnKind(t *testing.T) {

@@ -88,6 +88,32 @@ func TestOwnedLossesPastTheBoundCountAsTheRuns(t *testing.T) {
 	}
 }
 
+// Past the bound, the run's owned losses keep each kind apart: an untold
+// close (no verdict) is never counted as bytes lost (a judged loss), nor the
+// other way round.
+func TestOwnedLossesPastTheBoundKeepEachKindApart(t *testing.T) {
+	var s pairedConns
+	app := netip.MustParseAddrPort("127.0.0.1:50912")
+	for i := range maxOwned + 1 {
+		s.own("test-"+strconv.Itoa(i+1), app)
+	}
+	untold := models.CaptureLoss{Kind: models.CaptureLossAppBytesUntold, Count: 1, What: "from 127.0.0.1:50912"}
+	s.ownKind("test-past-1", untold)
+	s.ownKind("test-past-2", untold)
+	s.own("test-past-3", app)
+	if len(s.owned) != maxOwned+2 {
+		t.Fatalf("%d owned losses kept, want %d: the bound's own and one of the run's for each kind", len(s.owned), maxOwned+2)
+	}
+	for i, want := range []models.CaptureLoss{
+		{Kind: models.CaptureLossAppBytesLost, Count: 2, What: agent.OwnedLossesPastTheBound},
+		{Kind: models.CaptureLossAppBytesUntold, Count: 2, What: agent.OwnedLossesPastTheBound},
+	} {
+		if got := s.owned[maxOwned+i]; got.Test != "" || got.Loss.Kind != want.Kind || got.Loss.Count != want.Count || got.Loss.What != want.What {
+			t.Errorf("the run's owned loss %d = %+v, want %+v of no test's", i, got, want)
+		}
+	}
+}
+
 // TestAGapsOwnedLossSaysBetweenTestCases pins the words of an owned loss:
 // a test's bytes were written in it, the gap's between test cases, never in
 // a test case named for the gap.

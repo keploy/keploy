@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -195,5 +196,201 @@ func TestAnEndMarksOnlyItsOwnWorkersConnections(t *testing.T) {
 	p.paired.markEnd(1, 0)
 	if pairedConnOf(t, p, 1).usedSinceEnd() {
 		t.Fatal("the end of a run of one test process did not mark its connection")
+	}
+}
+
+// waitHeld waits until pc's socket holds n bytes the proxy has not read: they
+// cross loopback, which nothing the proxy does reports.
+func waitHeld(t *testing.T, pc *pairedConn, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := readUnread(pc.conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the socket holds %d bytes unread, want %d", got, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// The test open at a close keploy cannot account for is charged, though the
+// proxy moved no bytes on the connection since the last end that waited for
+// them, when the socket holds bytes the application wrote that the proxy
+// never read (those bytes are sent in the open test), or when keploy cannot
+// read whether it does.
+func TestAnUntoldCloseChargesTheOpenTestWithWhatTheSocketHolds(t *testing.T) {
+	t.Run("bytes the proxy has not read", func(t *testing.T) {
+		p, app, tracked := untoldPair(t)
+		use(t, app, tracked)
+		endWait(t, p, "TestStock")
+		if _, err := app.Write([]byte("GET")); err != nil {
+			t.Fatal(err)
+		}
+		pc := pairedConnOf(t, p, 1)
+		waitHeld(t, pc, 3)
+		if pc.usedSinceEnd() {
+			t.Fatal("premise: the proxy moved no bytes since TestStock's end")
+		}
+		emptyDiagFree(t)
+		failLookupWritten(t)
+		_ = tracked.Close()
+		if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+			t.Errorf("%d untold closes charged to the open test, want 1: the bytes it holds were sent in it", l)
+		}
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+			t.Errorf("%d judged bytes losses, want 1: the close tossed the 3 bytes keploy saw unread", l)
+		}
+	})
+	t.Run("a socket whose unread bytes cannot be read", func(t *testing.T) {
+		p, app, tracked := untoldPair(t)
+		use(t, app, tracked)
+		endWait(t, p, "TestStock")
+		pc := pairedConnOf(t, p, 1)
+		_ = pc.conn.Close()
+		if _, err := readUnread(pc.conn); err == nil {
+			t.Fatal("premise: a closed socket's unread bytes cannot be read")
+		}
+		p.closeUnknown(pc, errors.New("netlink: no buffer space"))
+		if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+			t.Errorf("%d untold closes charged to the open test, want 1: keploy cannot tell what the socket held", l)
+		}
+	})
+}
+
+// A close keploy cannot account for charges the open test only for bytes the
+// application wrote after the last end cut short on the connection: when
+// that end owns every byte the application had written, the open test is not
+// charged though the proxy wrote to the connection in it.
+func TestAnUntoldCloseOfBytesAllOwnedByACutEndSparesTheOpenTest(t *testing.T) {
+	p, app, tracked := untoldPair(t)
+	use(t, app, tracked)
+	p.paired.markEnd(1, 0)
+	pc := pairedConnOf(t, p, 1)
+	pc.cutShort("TestStock", 5)
+	if _, err := tracked.Write([]byte("push")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(app, make([]byte, 4)); err != nil {
+		t.Fatal(err)
+	}
+	if !pc.usedSinceEnd() {
+		t.Fatal("premise: the proxy wrote to the connection in the open test")
+	}
+	p.pairUntold(pc, 5, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread")
+	owned := p.TakeOwnedLosses()
+	if len(owned) != 1 || owned[0].Test != "TestStock" || owned[0].Loss.Kind != models.CaptureLossAppBytesUntold {
+		t.Fatalf("owned %+v, want one untold close of TestStock's", owned)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 0 {
+		t.Errorf("%d untold closes charged to the open test, want none: every byte the application wrote is TestStock's", l)
+	}
+}
+
+// A connection the proxy serves with no session records and mocks nothing by
+// design: a close of it that keploy cannot account for charges no test, and
+// says nothing.
+func TestAnUntoldCloseOfAConnectionWithNoSessionChargesNothing(t *testing.T) {
+	p, app, tracked := untoldPair(t)
+	lines := closeUnknownLines(p)
+	use(t, app, tracked)
+	pc := pairedConnOf(t, p, 1)
+	pc.noSession.Store(true)
+	p.closeUnknown(pc, errors.New("netlink: no buffer space"))
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 0 {
+		t.Errorf("%d untold closes charged, want none", l)
+	}
+	if owned := p.TakeOwnedLosses(); len(owned) != 0 {
+		t.Errorf("owned %+v, want none", owned)
+	}
+	if said := lines.FilterMessageSnippet("keploy cannot tell").All(); len(said) != 0 {
+		t.Errorf("%d lines about the close, want none: %+v", len(said), said)
+	}
+}
+
+// A connection's close keploy cannot account for is charged once and said
+// once, however many of the close's reads cannot tell: a second, in the same
+// close or after a test's end, charges nothing more and says nothing (it
+// would say no test was charged).
+func TestAnUntoldCloseIsChargedAndSaidOnce(t *testing.T) {
+	for _, between := range []bool{false, true} {
+		name := "twice in one close"
+		if between {
+			name = "again after a test's end"
+		}
+		t.Run(name, func(t *testing.T) {
+			p, app, tracked := untoldPair(t)
+			lines := closeUnknownLines(p)
+			use(t, app, tracked)
+			pc := pairedConnOf(t, p, 1)
+			p.closeUnknown(pc, errors.New("netlink: no buffer space"))
+			if between {
+				p.paired.markEnd(1, 0)
+			}
+			p.closeUnknown(pc, errors.New("netlink: no buffer space"))
+			if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+				t.Errorf("%d untold closes charged, want 1", l)
+			}
+			said := lines.FilterMessageSnippet("keploy cannot tell what the application had written").All()
+			if len(said) != 1 || said[0].Level != zap.WarnLevel {
+				t.Errorf("lines %+v, want one warn line", said)
+			}
+		})
+	}
+}
+
+// The proxy's use of a connection, which charges the open test with a close
+// keploy cannot account for (usedSinceEnd), is any read or write of it that
+// moved bytes, each alone; one that moved none is no use.
+func TestTheProxysUseOfAConnectionIsAnyMoveOfBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		do   func(t *testing.T, app *net.TCPConn, tracked *trackedConn)
+		used bool
+	}{
+		{"a read alone", func(t *testing.T, app *net.TCPConn, tracked *trackedConn) {
+			if _, err := app.Write([]byte("hi")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadFull(tracked, make([]byte, 2)); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"a write alone", func(t *testing.T, app *net.TCPConn, tracked *trackedConn) {
+			if _, err := tracked.Write([]byte("hello")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadFull(app, make([]byte, 5)); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"a write of nothing", func(t *testing.T, _ *net.TCPConn, tracked *trackedConn) {
+			if _, err := tracked.Write(nil); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"a read that waited out its deadline", func(t *testing.T, _ *net.TCPConn, tracked *trackedConn) {
+			if err := tracked.SetReadDeadline(time.Now().Add(10 * time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+			if n, err := tracked.Read(make([]byte, 2)); n != 0 || !isTimeout(err) {
+				t.Fatalf("read %d, %v; want a timeout", n, err)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, app, tracked := untoldPair(t)
+			use(t, app, tracked)
+			p.paired.markEnd(1, 0)
+			tc.do(t, app, tracked)
+			if got := pairedConnOf(t, p, 1).usedSinceEnd(); got != tc.used {
+				t.Errorf("usedSinceEnd = %v, want %v", got, tc.used)
+			}
+		})
 	}
 }

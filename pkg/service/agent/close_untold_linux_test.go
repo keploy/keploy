@@ -68,6 +68,7 @@ func TestAnUntoldCloseBesideASeenMiss(t *testing.T) {
 			require.Empty(t, stock.Evidence.CannotCapture, "a seen miss is not left without a verdict by an untold close")
 			if during {
 				require.Contains(t, stock.Evidence.Reason, "keploy also cannot tell whether bytes the application wrote to 1 connection(s) this test used")
+				require.True(t, strings.HasSuffix(stock.Evidence.Reason, "the call keploy saw miss fails the test whatever they held."), "nothing is left to say after the untold close: %q", stock.Evidence.Reason)
 			} else {
 				require.NotContains(t, stock.Evidence.Reason, "keploy also cannot tell")
 			}
@@ -85,6 +86,53 @@ func TestAnUntoldCloseBesideASeenMiss(t *testing.T) {
 			require.Empty(t, clock.Evidence.CaptureIncomplete, "never a judged loss")
 			require.Empty(t, clock.Evidence.Misses)
 			require.True(t, strings.HasPrefix(clock.Evidence.Reason, "keploy: not judged: keploy's proxy closed 1 connection(s) this test used"), clock.Evidence.Reason)
+		})
+	}
+}
+
+// Only the untold close is taken out of a seen-miss test's unjudged losses:
+// another loss that leaves a test without a verdict stays as it was, the
+// untold close is counted on its own, and a seen-miss test with no untold
+// close gets no word of one.
+func TestAnUntoldCloseBesideASeenMissLeavesItsOtherLossesAsTheyWere(t *testing.T) {
+	serverFirst := models.CaptureLoss{Kind: models.CaptureLossServerFirst, Count: 1, What: "to 10.0.0.9:25"}
+	untold := models.CaptureLoss{Kind: models.CaptureLossAppBytesUntold, Count: 1, What: "from [::ffff:127.0.0.1]:62766"}
+	miss := []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /reserve/book", Destination: "127.0.0.1:20218"}}
+	for _, tc := range []struct {
+		name   string
+		losses models.CaptureLosses
+		untold bool
+	}{
+		{"another loss, no untold close", models.CaptureLosses{serverFirst}, false},
+		{"another loss beside an untold close", models.CaptureLosses{serverFirst, untold}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, wp := wireAgent(t, models.MODE_TEST)
+			lp := lossProxy{wireProxy: wp}
+			a.Proxy = lp
+			a.proven.losses = a.markCaptureLosses(context.Background())
+			claimSelf(t, a)
+			ctx := context.Background()
+			_, serr := a.ProvenBegin(ctx, begin("TestStock"))
+			require.Nil(t, serr)
+			wp.mu.Lock()
+			wp.misses = miss
+			wp.mu.Unlock()
+			lp.losses = tc.losses
+			a.Proxy = lp
+			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestStock", Outcome: "failed"})
+			require.Nil(t, serr)
+
+			stock := windowOf(t, a, "o::TestStock")
+			require.NotNil(t, stock.Evidence)
+			require.Len(t, stock.Evidence.Misses, 1, "the seen miss is the test's evidence")
+			require.Len(t, stock.Evidence.CannotCapture, 1, "%+v", stock.Evidence.CannotCapture)
+			require.Equal(t, models.CaptureLossServerFirst, stock.Evidence.CannotCapture[0].Kind, "the other loss is kept, and the untold close taken out")
+			if tc.untold {
+				require.Contains(t, stock.Evidence.Reason, "keploy also cannot tell whether bytes the application wrote to 1 connection(s) this test used")
+			} else {
+				require.NotContains(t, stock.Evidence.Reason, "keploy also cannot tell whether bytes")
+			}
 		})
 	}
 }

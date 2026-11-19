@@ -117,6 +117,31 @@ func TestACloseWaitsForTheFINOfASocketItsHolderClosedOnDarwin(t *testing.T) {
 		}
 		wantNoCloseUnknown(t, p, logs)
 	})
+	t.Run("its FIN taken before the close's first look", func(t *testing.T) {
+		// The FIN reaches the proxy's side after the table's read, before
+		// the close looks at the side: the close does not wait.
+		p, app, reader, logs := unheldPair(t, true)
+		clk := &stall.ManualClock{Step: stall.OnTime}
+		p.paired.clk = clk
+		was := readHeldProxySide
+		var reads atomic.Int32
+		readHeldProxySide = func(c *net.TCPConn) proxySide {
+			if reads.Add(1) == 1 {
+				_ = app.CloseWrite()
+				deadline := time.Now().Add(10 * time.Second)
+				for ps := was(c); ps.err == nil && !peerEnded(ps.state) && time.Now().Before(deadline); ps = was(c) {
+					time.Sleep(time.Millisecond)
+				}
+			}
+			return was(c)
+		}
+		t.Cleanup(func() { readHeldProxySide = was })
+		closeWithin(t, app, reader, 10*time.Second, "the close waited for a FIN its side had taken")
+		if reads.Load() != 1 || clk.Waits != 0 {
+			t.Fatalf("the close read the proxy's side %d times and waited %d times, want one read and no wait: the side had taken the FIN", reads.Load(), clk.Waits)
+		}
+		wantNoCloseUnknown(t, p, logs)
+	})
 	t.Run("no application socket read from its holder yet", func(t *testing.T) {
 		// A process the agent may not read may hold it open, sending no
 		// FIN: the close does not wait, and is unknown at once.
@@ -188,4 +213,40 @@ func TestACloseWaitsForTheFINOfASocketItsHolderClosedOnDarwin(t *testing.T) {
 		closeWithin(t, app, reader, 10*time.Second, "the close waited on a side it cannot read")
 		wantOneCloseUnknownLine(t, p, logs, "the proxy's side of it cannot be read: bad file descriptor")
 	})
+}
+
+// A test's end marks the connections its bytes wait answers for (markEnd), on
+// macOS as on Linux: a close keploy cannot account for in a later test that
+// never used the connection charges no test.
+func TestAnEndsWaitMarksTheConnectionsItAnswersForOnDarwin(t *testing.T) {
+	p, app, _, reader := darwinPair(t)
+	p.settleReads = true
+	pc := pairedConnOf(t, p, 1)
+	if !pc.usedSinceEnd() {
+		t.Fatal("premise: the open test used the connection")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.WaitPairedBytes(ctx, 1); err != nil {
+		t.Fatalf("the end's wait: %v", err)
+	}
+	if pc.usedSinceEnd() {
+		t.Fatal("the end's wait did not mark the connection it answers for")
+	}
+	// The next test's close of it cannot tell what was on its way: no
+	// application socket was read from its holder.
+	hideSockets(t, app.LocalAddr())
+	p.paired.visible.Store(false)
+	p.paired.held.Store(false)
+	pc.holder.Store(nil)
+	core, logs := observer.New(zapcore.InfoLevel)
+	p.logger = zap.New(core)
+	closeWithin(t, app, reader, 10*time.Second, "the close waited with no application socket read from its holder")
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 0 {
+		t.Errorf("%d untold closes charged, want none: the test open at the close never used the connection", l)
+	}
+	said := logs.FilterMessageSnippet("keploy cannot tell what the application had written").All()
+	if len(said) != 1 || said[0].Level != zap.InfoLevel {
+		t.Errorf("lines %+v, want one info line: the close is charged to no test", said)
+	}
 }
