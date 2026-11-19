@@ -366,12 +366,21 @@ func TestTheRunsOwnLossesAddToTheirKindsCount(t *testing.T) {
 	run := models.CaptureLosses{
 		{Kind: models.CaptureLossAppBytesLost, Count: 1, What: "from 127.0.0.1:2"},
 		{Kind: models.CaptureLossAppBytesUntold, Count: 3, What: "from 127.0.0.1:3"},
+		{Kind: models.CaptureLossTLSAbort, Count: 1},
 	}
 	got := withCounted(counts, run)
 	require.EqualValues(t, 3, kindCount(got, models.CaptureLossAppBytesLost))
-	require.EqualValues(t, 1, kindCount(got, models.CaptureLossTLSAbort))
+	require.EqualValues(t, 2, kindCount(got, models.CaptureLossTLSAbort))
 	require.EqualValues(t, 3, kindCount(got, models.CaptureLossAppBytesUntold))
 	require.Len(t, got, 3, "one count per kind: %+v", got)
+	for _, l := range got {
+		switch l.Kind {
+		case models.CaptureLossAppBytesLost:
+			require.Equal(t, "from 127.0.0.1:2", l.What, "the run's latest loss names what was lost")
+		case models.CaptureLossTLSAbort:
+			require.Equal(t, "tls", l.What, "a loss that names nothing keeps the count's words")
+		}
+	}
 	require.EqualValues(t, 2, counts[0].Count, "the counts read are not changed")
 	require.Equal(t, counts, withCounted(counts, nil))
 }
