@@ -26,6 +26,11 @@ type restartingDocker struct {
 	// failing makes that many inspects fail, as a daemon too busy to answer.
 	failing int
 	removed []string
+	// parkNext parks the next inspect of keploy's agent until its context
+	// is done, once it has said so on parked: the watch's look, held while
+	// the `up` changes the stack and returns.
+	parkNext atomic.Bool
+	parked   chan struct{}
 }
 
 func (d *restartingDocker) set(name, id, startedAt string, running bool) {
@@ -35,7 +40,14 @@ func (d *restartingDocker) set(name, id, startedAt string, running bool) {
 	d.containers[name] = &container.State{Running: running, StartedAt: startedAt}
 }
 
-func (d *restartingDocker) ContainerInspect(_ context.Context, name string) (container.InspectResponse, error) {
+func (d *restartingDocker) ContainerInspect(ctx context.Context, name string) (container.InspectResponse, error) {
+	if name == "keploy-v3-test" && d.parkNext.CompareAndSwap(true, false) {
+		d.parked <- struct{}{}
+		<-ctx.Done()
+	}
+	if err := ctx.Err(); err != nil {
+		return container.InspectResponse{}, err
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.failing > 0 {
@@ -69,11 +81,24 @@ func newRestartApp(t *testing.T) (*App, *restartingDocker, *atomic.Int32) {
 	orig := agentRestartPoll
 	agentRestartPoll = 10 * time.Millisecond
 	t.Cleanup(func() { agentRestartPoll = orig })
-	d := &restartingDocker{containers: map[string]*container.State{}, ids: map[string]string{}}
+	d := &restartingDocker{containers: map[string]*container.State{}, ids: map[string]string{}, parked: make(chan struct{}, 1)}
 	a := &App{logger: zap.NewNop(), docker: d, keployContainer: "keploy-v3-test", container: "app", kind: utils.DockerCompose}
 	var setUp atomic.Int32
 	a.SetOnAgentRestart(func(context.Context) error { setUp.Add(1); return nil })
 	return a, d, &setUp
+}
+
+// parkTheWatch holds the retry's watch at its next look at keploy's agent
+// until the `up` returns, and returns once it is held: what the `up` changes
+// then, the watch has not seen when it ends.
+func (d *restartingDocker) parkTheWatch(t *testing.T) {
+	t.Helper()
+	d.parkNext.Store(true)
+	select {
+	case <-d.parked:
+	case <-time.After(30 * time.Second):
+		t.Error("the watch never looked at the agent again")
+	}
 }
 
 // up is a retried `up` that runs steps one after another, a short while apart,

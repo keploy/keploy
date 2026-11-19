@@ -83,14 +83,18 @@ type App struct {
 	// asked for, in flight or later, with failed; see
 	// SetAgentReleaseRefusal.
 	refuseAgentReleases func(failed error)
-	// agentNotSetUp: the agent that may run now is not one the run set up.
-	// A retry of the bring-up held the releases for an agent its `up` could
-	// start (none ran before it), or took a running agent for one compose
-	// started again, and no setup of that agent completed: its setup was
-	// cut, or its `up` returned before the watch saw it. The next retry
-	// takes whatever agent runs for one to set up again (retryComposeUp).
+	// agentSetUp is the identity (agentIdentity) of the last keploy agent
+	// whose setup completed, once agentSetUpKnown: the run's first agent,
+	// which ran before the bring-up's first retry, or the last one a retry's
+	// watch set up again; "" when none of them runs any more. Every other
+	// agent that runs is one no setup has completed on, which the retry
+	// sets up (retryComposeUp). agentBlindSince is when the first retry
+	// docker could not name the agent before began, while agentSetUpKnown
+	// is false: an agent that started after it is not the run's first.
 	// Read and written only by the run's bring-up loop.
-	agentNotSetUp bool
+	agentSetUp      string
+	agentSetUpKnown bool
+	agentBlindSince time.Time
 	// setEndKill is why the latest stop at a test set's end had to kill the
 	// app (setend_stop.go), until run reports it; nil when it did not.
 	setEndKill     atomic.Pointer[string]
@@ -255,7 +259,9 @@ func (a *App) SetOnAgentRestart(f func(ctx context.Context) error) {
 // place before the agent client has set it up again (SetOnAgentRestart),
 // which releases it last. Letting the hold go (resume(nil)) lets no release
 // go to an agent no setup has completed on: the agent client lets them go
-// once a setup of it completes. resume(failed), failed the error of that
+// once a setup of it completes. So a hold let go at once marks the agent
+// that answers as one no setup has completed on (an agent the retry's `up`
+// left, which no setup of it completed). resume(failed), failed the error of that
 // setup, lets the hold go and ends every release of the run with failed
 // instead of letting it reach that agent, which is not set up.
 func (a *App) SetAgentReleaseHold(f func(ctx context.Context) (resume func(failed error))) {
@@ -2070,7 +2076,8 @@ func (a *App) composeKeepsASpentDepCrash(bringUps int) {
 // first start, the project, a crash keploy stopped the stack on, the up, and
 // keploy's stop of the stack for that crash (stackStop), which this run's
 // retry would otherwise wait on, never closed when that run's stop never
-// ended.
+// ended, and which agent was set up last (agentSetUp): this run's first
+// agent is its own.
 func (a *App) composeBeginsARun() {
 	a.composeApp.halted.Store(nil)
 	a.composeApp.stopping.Store(false)
@@ -2081,7 +2088,7 @@ func (a *App) composeBeginsARun() {
 	a.composeApp.depCrash.Store(nil)
 	a.composeApp.upReturned.Store(nil)
 	a.composeApp.stackStop.Store(nil)
-	a.agentNotSetUp = false
+	a.agentSetUp, a.agentSetUpKnown, a.agentBlindSince = "", false, time.Time{}
 }
 
 // composeBeginsABringUpAgain clears what the last bring-up kept before the

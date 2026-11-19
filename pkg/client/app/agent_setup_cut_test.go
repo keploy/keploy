@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -120,9 +121,9 @@ func TestASetupKeploysOwnStopCutKeepsNoHaltAndTheNextBringUpSetsTheAgentUp(t *te
 				if g := s.trail(); g != "hold,up,setup,resume,hold,up,setup,resume" {
 					t.Fatalf("the retries did %s; want the next bring-up's agent held for and set up", g)
 				}
-				if s.a.agentNotSetUp || ended || s.a.composeAppHalt() != nil {
-					t.Fatalf("after the next bring-up: agentNotSetUp=%v ended=%v halt=%v; want the agent set up and the run on",
-						s.a.agentNotSetUp, ended, s.a.composeAppHalt())
+				if !s.a.agentKept("agent-1@t4") || ended || s.a.composeAppHalt() != nil {
+					t.Fatalf("after the next bring-up: set up last %q (known %v) ended=%v halt=%v; want agent-1@t4 set up and the run on",
+						s.a.agentSetUp, s.a.agentSetUpKnown, ended, s.a.composeAppHalt())
 				}
 			})
 		})
@@ -177,10 +178,17 @@ func TestAnAgentWhoseSetupWasCutIsSetUpAgainByTheNextRetry(t *testing.T) {
 					}
 					return utils.CmdError{} // compose's up returned on its own: the setup is cut
 				})
-				if !s.a.agentNotSetUp {
-					t.Fatalf("after %s (trail %s), the agent left running is not marked as not set up", shape, s.trail())
+				left := "agent-1@" + startAt.Format(time.RFC3339Nano)
+				if s.a.agentKept(left) {
+					t.Fatalf("after %s (trail %s), the agent left running is taken for the last one set up", shape, s.trail())
 				}
 				first := s.trail()
+				// The up returned before the watch saw the agent: the releases are
+				// held for it and let go, so none goes to it until a setup of it
+				// completes.
+				if shape == "up returned before the watch saw it" && first != "hold,up,hold,resume,resume" {
+					t.Fatalf("the retry did %s; want the agent its up left held for once the up returned", first)
+				}
 				nextRetry.Store(true)
 				if !s.a.composeBeginsABringUpAgain() {
 					t.Fatal("the next bring-up did not begin")
@@ -206,8 +214,8 @@ func TestAnAgentWhoseSetupWasCutIsSetUpAgainByTheNextRetry(t *testing.T) {
 				if g := strings.TrimPrefix(s.trail(), first); g != want {
 					t.Fatalf("the next retry did %q after %q; want %q: the agent whose setup was cut held for and set up again", g, first, want)
 				}
-				if s.a.agentNotSetUp {
-					t.Fatal("the agent set up again is still marked as not set up")
+				if !s.a.agentKept(left) {
+					t.Fatalf("the agent set up again (%s) is not the last one set up (%q)", left, s.a.agentSetUp)
 				}
 				if h := s.a.composeAppHalt(); h != nil {
 					t.Fatalf("halt %+v kept; want none", h)
@@ -217,9 +225,9 @@ func TestAnAgentWhoseSetupWasCutIsSetUpAgainByTheNextRetry(t *testing.T) {
 	}
 }
 
-// An agent whose setup completed is the one the run set up: a later retry
-// that finds it running keeps it, holding nothing and setting nothing up.
-// A new run begins with no agent marked.
+// An agent whose setup completed is the one the run set up: every later
+// retry that finds it running keeps it, holding nothing and setting nothing
+// up. A new run begins with no agent set up yet.
 func TestAnAgentSetUpAgainIsKeptByTheNextRetry(t *testing.T) {
 	everyRunMode(t, func(t *testing.T, mode models.Mode) {
 		s := newSetupFailApp(t, func(context.Context) error { return nil })
@@ -231,17 +239,327 @@ func TestAnAgentSetUpAgainIsKeptByTheNextRetry(t *testing.T) {
 		if first != "hold,up,setup,resume" {
 			t.Fatalf("the first retry did %s; want the agent compose started again held for and set up", first)
 		}
-		if s.a.agentNotSetUp {
-			t.Fatalf("an agent whose setup completed is marked as not set up (trail %s)", first)
+		if !s.a.agentKept("agent-1@t3") {
+			t.Fatalf("an agent whose setup completed is not the last one set up (%q, trail %s)", s.a.agentSetUp, first)
 		}
-		s.a.retryComposeUp(context.Background(), nil, s.up(func() { s.d.set("app", "app-1", "t5", true) }))
-		if g := strings.TrimPrefix(s.trail(), first); g != ",up" {
-			t.Fatalf("the next retry did %q for an agent set up again; want it kept", g)
+		for retry := 2; retry <= 3; retry++ {
+			before := s.trail()
+			s.a.retryComposeUp(context.Background(), nil, s.up())
+			if g := strings.TrimPrefix(s.trail(), before); g != ",up" {
+				t.Fatalf("retry %d did %q for an agent set up again; want it kept", retry, g)
+			}
+			if !s.a.agentKept("agent-1@t3") {
+				t.Fatalf("after retry %d the last agent set up is %q (known %v); want agent-1@t3 kept", retry, s.a.agentSetUp, s.a.agentSetUpKnown)
+			}
 		}
-		s.a.agentNotSetUp = true
+		s.a.agentBlindSince = time.Now()
 		s.a.composeBeginsARun()
-		if s.a.agentNotSetUp {
-			t.Fatal("a new run begins with an agent marked as not set up")
+		if s.a.agentSetUpKnown || s.a.agentSetUp != "" || !s.a.agentBlindSince.IsZero() {
+			t.Fatalf("a new run begins with %q (known %v, blind since %v) set up; want none", s.a.agentSetUp, s.a.agentSetUpKnown, s.a.agentBlindSince)
 		}
 	})
+}
+
+// agentKept reports whether id is the last agent whose setup completed.
+func (a *App) agentKept(id string) bool {
+	return a.agentSetUpKnown && a.agentSetUp == id
+}
+
+// agentNow is the id of keploy's agent container while it runs, else "".
+func (d *restartingDocker) agentNow() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, ok := d.containers["keploy-v3-test"]
+	if !ok || !st.Running {
+		return ""
+	}
+	return d.ids["keploy-v3-test"]
+}
+
+// AGENTS ARE TOLD APART BY IDENTITY, AND THE WATCH SETS UP EVERY ONE THAT IS
+// NOT THE LAST SET UP. A recreate flag on two retries in a row. On the
+// first, compose replaces the agent the run set up (agent-1) with agent-2,
+// and its up returns on its own while agent-2's setup runs, cutting it (a
+// service_completed_successfully dependency that exits non-zero). On the
+// next, agent-2 still runs as the up starts, and compose replaces it with
+// agent-3 100 ms in. agent-2 is held for and set up, and agent-3 after it,
+// whether agent-2's setup ends before the recreate (20 ms) or the recreate
+// cuts it (300 ms: compose replaced the agent, which no longer runs, so the
+// setup is cut, not failed). The run ends on nothing, and agent-3 is the last
+// agent set up. Record and test, both KEPLOY_PROVEN modes.
+func TestARecreatedAgentAfterACutSetupIsSetUpAndEndsNothing(t *testing.T) {
+	for _, setupTakes := range []time.Duration{20 * time.Millisecond, 300 * time.Millisecond} {
+		t.Run("setup_takes_"+setupTakes.String(), func(t *testing.T) {
+			everyRunMode(t, func(t *testing.T, mode models.Mode) {
+				a, d, _ := newRestartApp(t)
+				a.Mode = mode
+				var mu sync.Mutex
+				var setUpOn []string
+				calls := 0
+				a.SetOnAgentRestart(func(ctx context.Context) error {
+					id := d.agentNow()
+					mu.Lock()
+					calls++
+					n := calls
+					mu.Unlock()
+					if n == 1 {
+						<-ctx.Done() // the first retry's up returns on its own, cutting this setup
+						return ctx.Err()
+					}
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(setupTakes):
+					}
+					if now := d.agentNow(); now != id {
+						return errors.New("keploy's agent container exited while keploy set it up again")
+					}
+					mu.Lock()
+					setUpOn = append(setUpOn, id)
+					mu.Unlock()
+					return nil
+				})
+				var holds atomic.Int32
+				a.SetAgentReleaseHold(func(context.Context) func(error) { holds.Add(1); return func(error) {} })
+				ended := false
+				d.set("keploy-v3-test", "agent-1", "t1", true)
+				d.set("app", "app-1", "", false)
+				a.retryComposeUp(context.Background(), func() { ended = true }, func() utils.CmdError {
+					time.Sleep(60 * time.Millisecond)
+					d.set("keploy-v3-test", "agent-2", "t3", true)
+					time.Sleep(200 * time.Millisecond)
+					return utils.CmdError{}
+				})
+				if a.agentKept("agent-2@t3") || !a.agentKept("agent-1@t1") {
+					t.Fatalf("after the first retry the last agent set up is %q (known %v); want agent-1@t1, agent-2's setup cut", a.agentSetUp, a.agentSetUpKnown)
+				}
+				holdsBefore := holds.Load()
+				a.retryComposeUp(context.Background(), func() { ended = true }, func() utils.CmdError {
+					time.Sleep(100 * time.Millisecond)
+					d.set("keploy-v3-test", "agent-2", "t3", false)
+					time.Sleep(20 * time.Millisecond)
+					d.set("keploy-v3-test", "agent-3", "t5", true)
+					time.Sleep(800 * time.Millisecond)
+					d.set("app", "app-1", "t6", true)
+					time.Sleep(100 * time.Millisecond)
+					return utils.CmdError{}
+				})
+				mu.Lock()
+				got := append([]string(nil), setUpOn...)
+				mu.Unlock()
+				if h := a.composeAppHalt(); h != nil {
+					t.Fatalf("the run ended on a halt (agentSetup=%v) after compose recreated the agent; set up: %v", h.agentSetup, got)
+				}
+				if ended {
+					t.Fatalf("the run's end on a halt was called after compose recreated the agent; set up: %v", got)
+				}
+				if len(got) == 0 || got[len(got)-1] != "agent-3" || !a.agentKept("agent-3@t5") {
+					t.Fatalf("set up %v, last %q; want agent-3, the agent compose's recreate left running, set up last", got, a.agentSetUp)
+				}
+				if holds.Load() == holdsBefore {
+					t.Fatal("the next retry held no release though agent-2, never set up, ran before its up")
+				}
+			})
+		})
+	}
+}
+
+// A RETRY DOCKER SAID NOTHING AT LEAVES NO AGENT TAKEN FOR KEPT. docker could
+// not name the agent before a retry (keploy's stop had taken the run's), and
+// that retry's up started an agent again and returned before the watch saw
+// it. The next retry, with docker answering, finds that agent: it started
+// after the first such retry began, so it is not the run's, and it is held
+// for and set up. Both KEPLOY_PROVEN modes, record and test.
+func TestAnAgentAnUnnamedRetryStartedIsSetUpByTheNext(t *testing.T) {
+	everyRunMode(t, func(t *testing.T, mode models.Mode) {
+		s := newSetupFailApp(t, func(context.Context) error { return nil })
+		s.a.Mode = mode
+		s.d.set("keploy-v3-test", "agent-1", "t1", false) // keploy's stop took the agent
+		s.d.set("app", "app-1", "", false)
+		s.d.failing = agentBaselineTries
+		started := time.Now().Add(time.Second).Format(time.RFC3339Nano)
+		s.a.retryComposeUp(context.Background(), nil, func() utils.CmdError {
+			s.note("up")
+			s.d.parkTheWatch(t)
+			s.d.set("keploy-v3-test", "agent-2", started, true) // the up starts the agent again
+			return utils.CmdError{}                             // and returns before the watch saw it
+		})
+		first := s.trail()
+		if first != "up,hold,resume" {
+			t.Fatalf("the unnamed retry did %s; want no hold before its up, and the agent it left held for once it returned", first)
+		}
+		s.a.retryComposeUp(context.Background(), nil, s.up(func() { s.d.set("app", "app-1", "t9", true) }))
+		if g := strings.TrimPrefix(s.trail(), first); g != ",hold,up,setup,resume" {
+			t.Fatalf("the next retry did %q; want agent-2, started by the unnamed retry and never set up, held for and set up", g)
+		}
+		if !s.a.agentKept("agent-2@" + started) {
+			t.Fatalf("the last agent set up is %q; want agent-2", s.a.agentSetUp)
+		}
+	})
+}
+
+// Two retries in a row that docker names no agent before: an agent the first
+// one's up started (and that it never set up) is still not the run's at the
+// second, which sets it up. Both KEPLOY_PROVEN modes, record and test.
+func TestAnAgentStartedInAnUnnamedRetryIsSetUpByTheNextUnnamedOne(t *testing.T) {
+	everyRunMode(t, func(t *testing.T, mode models.Mode) {
+		s := newSetupFailApp(t, func(context.Context) error { return nil })
+		s.a.Mode = mode
+		s.d.set("keploy-v3-test", "agent-1", time.Now().Add(-time.Hour).Format(time.RFC3339Nano), true) // the run's
+		s.d.set("app", "app-1", "", false)
+		s.d.failing = agentBaselineTries
+		started := ""
+		s.a.retryComposeUp(context.Background(), nil, func() utils.CmdError {
+			s.note("up")
+			s.d.parkTheWatch(t)
+			started = time.Now().Format(time.RFC3339Nano)
+			s.d.set("keploy-v3-test", "agent-2", started, true) // compose recreated the run's agent
+			return utils.CmdError{}
+		})
+		first := s.trail()
+		time.Sleep(agentStartSkew + 500*time.Millisecond) // the retry's backoff
+		s.d.failing = agentBaselineTries
+		s.a.retryComposeUp(context.Background(), nil, s.up(func() { s.d.set("app", "app-1", "t9", true) }))
+		if g := strings.TrimPrefix(s.trail(), first); g != ",up,setup" {
+			t.Fatalf("the second unnamed retry did %q after %q; want agent-2, which the first started, set up", g, first)
+		}
+		if !s.a.agentKept("agent-2@" + started) {
+			t.Fatalf("the last agent set up is %q (known %v); want agent-2", s.a.agentSetUp, s.a.agentSetUpKnown)
+		}
+	})
+}
+
+// A SET-UP AGENT THAT COMPOSE REPLACED, LEFT BY THE UP, IS HELD FOR. The
+// watch set the restarted agent up; compose then replaced it, and its up
+// returned before the watch saw the new one. The releases are held for that
+// agent and let go, so none goes to it until a setup of it completes: the
+// next retry's, which sets it up. Both KEPLOY_PROVEN modes, record and test.
+func TestAnAgentReplacedAfterItsSetupIsHeldForUntilSetUp(t *testing.T) {
+	everyRunMode(t, func(t *testing.T, mode models.Mode) {
+		setUp := make(chan struct{}, 4)
+		s := newSetupFailApp(t, func(context.Context) error { setUp <- struct{}{}; return nil })
+		s.a.Mode = mode
+		s.d.set("keploy-v3-test", "agent-1", "t1", false)
+		s.d.set("app", "app-1", "", false)
+		s.a.retryComposeUp(context.Background(), nil, func() utils.CmdError {
+			s.note("up")
+			s.d.set("keploy-v3-test", "agent-1", "t3", true)
+			select {
+			case <-setUp:
+			case <-time.After(30 * time.Second):
+				t.Error("the agent compose started again was never set up")
+			}
+			s.d.parkTheWatch(t)
+			s.d.set("keploy-v3-test", "agent-2", "t4", true) // compose replaced it
+			return utils.CmdError{}
+		})
+		first := s.trail()
+		if first != "hold,up,setup,hold,resume,resume" {
+			t.Fatalf("the retry did %s; want the agent compose put in place of the one set up held for once the up returned", first)
+		}
+		if !s.a.agentKept("agent-1@t3") {
+			t.Fatalf("the last agent set up is %q; want agent-1@t3", s.a.agentSetUp)
+		}
+		s.a.retryComposeUp(context.Background(), nil, s.up(func() { s.d.set("app", "app-1", "t9", true) }))
+		if g := strings.TrimPrefix(s.trail(), first); g != ",hold,up,setup,resume" {
+			t.Fatalf("the next retry did %q; want agent-2 held for and set up", g)
+		}
+		if !s.a.agentKept("agent-2@t4") {
+			t.Fatalf("the last agent set up is %q; want agent-2@t4", s.a.agentSetUp)
+		}
+	})
+}
+
+// The up's end holds nothing for an agent that is the last set up, for none
+// running, or once the app's container runs: the app starts only behind an
+// agent set up. Both KEPLOY_PROVEN modes, record and test.
+func TestTheUpsEndHoldsNothingForAKeptOrNoAgent(t *testing.T) {
+	for _, shape := range []string{"kept, no app", "kept, stopped by the up", "app started behind an agent the watch missed"} {
+		t.Run(shape, func(t *testing.T) {
+			everyRunMode(t, func(t *testing.T, mode models.Mode) {
+				s := newSetupFailApp(t, func(context.Context) error { return nil })
+				s.a.Mode = mode
+				s.d.set("keploy-v3-test", "agent-1", "t1", true)
+				s.d.set("app", "app-1", "", false)
+				s.a.retryComposeUp(context.Background(), nil, func() utils.CmdError {
+					s.note("up")
+					s.d.parkTheWatch(t)
+					switch shape {
+					case "kept, stopped by the up":
+						s.d.set("keploy-v3-test", "agent-1", "t1", false)
+					case "app started behind an agent the watch missed":
+						s.d.set("keploy-v3-test", "agent-2", "t4", true)
+						s.d.set("app", "app-1", "t5", true)
+					}
+					return utils.CmdError{}
+				})
+				if g := s.trail(); g != "up" {
+					t.Fatalf("the retry did %s; want nothing held", g)
+				}
+			})
+		})
+	}
+}
+
+// A setup that failed where docker cannot say whether its agent still runs
+// is a failed setup: the run ends on it, as on one whose agent runs. Both
+// KEPLOY_PROVEN modes, record and test.
+func TestAFailedSetupDockerCannotPlaceEndsTheRun(t *testing.T) {
+	everyRunMode(t, func(t *testing.T, mode models.Mode) {
+		var s *setupFailApp
+		s = newSetupFailApp(t, func(context.Context) error {
+			s.d.mu.Lock()
+			s.d.failing = 1 // the look after the failed setup gets no answer
+			s.d.mu.Unlock()
+			return errRestartedAgentSetup
+		})
+		s.a.Mode = mode
+		s.d.set("keploy-v3-test", "agent-1", "t1", false)
+		s.d.set("app", "app-1", "", false)
+		s.a.retryComposeUp(context.Background(), s.end, func() utils.CmdError {
+			s.note("up")
+			s.d.set("keploy-v3-test", "agent-1", "t3", true)
+			select {
+			case <-s.ended:
+			case <-time.After(30 * time.Second):
+				t.Error("the run did not end within 30 s of the restarted agent's failed setup")
+			}
+			return utils.CmdError{}
+		})
+		if g := s.trail(); !strings.HasPrefix(g, "hold,up,setup,resume-failed,end") {
+			t.Fatalf("the retry did %s; want the releases ended with the setup's failure, then the run ended", g)
+		}
+		if h := s.a.composeAppHalt(); h == nil || !errors.Is(h.agentSetup, errRestartedAgentSetup) {
+			t.Fatalf("halt %+v; want the restarted agent's failed setup", h)
+		}
+	})
+}
+
+// The run's first agent, kept running, is the one the run set up: the first
+// retry docker names it at keeps it, also after a retry docker named no agent
+// at. Both KEPLOY_PROVEN modes, record and test.
+func TestTheRunsFirstAgentIsKeptOnceDockerNamesIt(t *testing.T) {
+	for _, shape := range []string{"first retry named", "an unnamed retry, then a named one"} {
+		t.Run(shape, func(t *testing.T) {
+			everyRunMode(t, func(t *testing.T, mode models.Mode) {
+				s := newSetupFailApp(t, func(context.Context) error { return nil })
+				s.a.Mode = mode
+				runs := "agent-1@" + time.Now().Add(-time.Hour).Format(time.RFC3339Nano)
+				s.d.set("keploy-v3-test", "agent-1", strings.TrimPrefix(runs, "agent-1@"), true)
+				s.d.set("app", "app-1", "", false)
+				if shape != "first retry named" {
+					s.d.failing = agentBaselineTries
+					s.a.retryComposeUp(context.Background(), nil, s.up())
+				}
+				first := s.trail()
+				s.a.retryComposeUp(context.Background(), nil, s.up(func() { s.d.set("app", "app-1", "t9", true) }))
+				if g := strings.TrimPrefix(s.trail(), first); g != ",up" && g != "up" {
+					t.Fatalf("the named retry did %q after %q; want the run's agent kept", g, first)
+				}
+				if !s.a.agentKept(runs) {
+					t.Fatalf("the last agent set up is %q (known %v); want the run's, %s", s.a.agentSetUp, s.a.agentSetUpKnown, runs)
+				}
+			})
+		})
+	}
 }

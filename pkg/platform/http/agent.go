@@ -4008,12 +4008,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	// Continue with app setup and registration as per normal flow
-	usrApp := app.NewApp(a.logger, cmd, a.dockerClient, opts)
-	a.apps.Store(uint64(0), usrApp) // key = 0, since there's only one client per agent
-	// Under compose the agent is the user's project's to start again: the
-	// session puts back what the run set up on it (see agentSession).
-	a.session().configure(utils.CmdType(opts.CommandType) == utils.DockerCompose)
-	a.handRestartHooks(usrApp)
+	usrApp := a.registerApp(cmd, opts)
 
 	// Set up cleanup on failure
 	defer func() {
@@ -5136,6 +5131,22 @@ type restartHooks interface {
 	SetOnAgentRestart(func(ctx context.Context) error)
 	SetAgentReleaseHold(func(ctx context.Context) (resume func(failed error)))
 	SetAgentReleaseRefusal(func(failed error))
+}
+
+// registerApp makes the application client of this run and keeps it as the
+// agent's one (key 0: there's only one client per agent), with the hooks of
+// an agent compose's retry starts again (handRestartHooks): an app kept
+// without them would run a plain retry, with no hold, no setup and no
+// refusal, and the agent compose started again would take the run's
+// releases with none of its mocks or settings.
+func (a *AgentClient) registerApp(cmd string, opts models.SetupOptions) *app.App {
+	usrApp := app.NewApp(a.logger, cmd, a.dockerClient, opts)
+	a.apps.Store(uint64(0), usrApp)
+	// Under compose the agent is the user's project's to start again: the
+	// session puts back what the run set up on it (see agentSession).
+	a.session().configure(utils.CmdType(opts.CommandType) == utils.DockerCompose)
+	a.handRestartHooks(usrApp)
+	return usrApp
 }
 
 // handRestartHooks gives app what sets up again, through this client's

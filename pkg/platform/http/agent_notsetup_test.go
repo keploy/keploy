@@ -3,11 +3,14 @@ package http
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 )
 
 // everySwitchMode runs row under KEPLOY_PROVEN unset and =1.
@@ -82,6 +85,29 @@ func TestTheAgentClientHandsTheAppHooksThatReachItsSession(t *testing.T) {
 		if got := ag.took(); len(got) != 0 {
 			t.Fatalf("the agent took %v after the refusal; want nothing", got)
 		}
+	})
+}
+
+// The application client Setup keeps (registerApp, its only source of the
+// app it runs) has the three hooks of an agent compose's retry starts again.
+// Without them the retry would run a plain `up`: no hold, no setup and no
+// refusal, and the agent compose started again would take the run's releases
+// with none of its mocks or settings. Both KEPLOY_PROVEN modes.
+func TestTheAppSetupKeepsHasTheRestartHooks(t *testing.T) {
+	everySwitchMode(t, func(t *testing.T) {
+		ag := newHandoverAgent(t, "ok", nil)
+		usrApp := ag.a.registerApp("docker compose up", models.SetupOptions{CommandType: string(utils.DockerCompose)})
+		stored, ok := ag.a.apps.Load(uint64(0))
+		if !ok || stored != usrApp {
+			t.Fatalf("the app Setup keeps is %v; want the one it runs", stored)
+		}
+		v := reflect.ValueOf(usrApp).Elem()
+		for _, hook := range []string{"onAgentRestart", "holdAgentRelease", "refuseAgentReleases"} {
+			if f := v.FieldByName(hook); !f.IsValid() || f.IsNil() {
+				t.Errorf("the app Setup keeps has no %s hook", hook)
+			}
+		}
+		ag.s.end()
 	})
 }
 
