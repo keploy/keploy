@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -219,5 +220,56 @@ func TestASocketHolderPastAProcessIDIsNoCaller(t *testing.T) {
 				t.Fatalf("refusals %+v; want the one no-caller refusal", svc.refusals)
 			}
 		})
+	}
+}
+
+// A call reads the process table and each process's fd directory, one
+// directory per process whatever the machine runs, never the process's own
+// directory (filepath.Glob read that too, to find "fd" in it), and reads
+// the fds of names that start with a digit alone, as Glob's [0-9]* did: a
+// socket link under another name is no holder.
+func TestTCPOwnerReadsOneDirectoryPerProcess(t *testing.T) {
+	for _, procs := range []int{3, 30} {
+		root := t.TempDir()
+		mk := func(rel string) string {
+			p := filepath.Join(root, rel)
+			if err := os.MkdirAll(p, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}
+		if err := os.WriteFile(filepath.Join(mk("net"), "tcp"), []byte("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"+
+			"   0: 0100007F:C350 0100007F:41ED 01 00000000:00000000 00:00000000 00000000  1000        0 222 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i <= procs; i++ {
+			pid := strconv.Itoa(100 + i)
+			fd := mk(filepath.Join(pid, "fd"))
+			mk(filepath.Join(pid, "task"))
+			for n, link := range []string{"/dev/null", "socket:[9" + pid + "]"} {
+				if err := os.Symlink(link, filepath.Join(fd, strconv.Itoa(n))); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if err := os.Symlink("socket:[222]", filepath.Join(root, "102", "fd", "7")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("socket:[222]", filepath.Join(mk("sys/fd"), "3")); err != nil {
+			t.Fatal(err)
+		}
+		old := procRoot
+		procRoot = root
+		t.Cleanup(func() { procRoot = old })
+
+		before := dirReads.Load()
+		got, err := tcpOwner(netip.MustParseAddrPort("127.0.0.1:50000"), netip.MustParseAddrPort("127.0.0.1:16877"))
+		reads := dirReads.Load() - before
+		if err != nil || got != 102 {
+			t.Fatalf("%d processes: tcpOwner = %d, %v; want 102", procs, got, err)
+		}
+		if want := int64(1 + procs); reads != want {
+			t.Errorf("%d processes: read %d directories, want %d (the table and one fd directory per process)", procs, reads, want)
+		}
 	}
 }
