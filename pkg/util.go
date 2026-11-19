@@ -827,7 +827,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	} else if hostHeader != "" {
 		// The test's recorded Host header by its labels' shape: the app's
 		// traffic named it (models.HostShape); the report keeps the test.
-		logger.Debug("overriding host header", zap.String("testcase", tc.Name), zap.String("host", models.HostShape(hostHeader)))
+		logger.Debug("overriding host header", zap.String("testcase", tc.Name), zap.String("host", models.HostLogName(ctx, hostHeader)))
 		req.Host = hostHeader
 	}
 	// A CONNECT in authority form (ConnectsToAuthority) names the host and
@@ -1138,7 +1138,10 @@ func sayStillWaiting(ctx context.Context, logger *zap.Logger, what, addr string,
 
 // stillWaitingLine is SayStillWaiting's line.
 func stillWaitingLine(ctx context.Context, what, addr string, waited time.Duration) string {
-	line := fmt.Sprintf("still waiting for the application to %s on %s: %s so far. The wait ends when it does, when the application exits, or when keploy is stopped", what, addr, waited.Round(time.Second))
+	// addr is the replay target: its host name by its labels' shape beside
+	// its tag in ctx's session (models.HostLogName; an IP address whole). A
+	// host name is traffic; the console and the report name it whole.
+	line := fmt.Sprintf("still waiting for the application to %s on %s: %s so far. The wait ends when it does, when the application exits, or when keploy is stopped", what, models.HostLogName(ctx, addr), waited.Round(time.Second))
 	if other := otherListenPorts(ctx, addr); other != "" {
 		line += ". " + other
 	}
@@ -1240,11 +1243,15 @@ func waitToReSend(ctx context.Context, logger *zap.Logger, what, addr string, re
 	first := w.began.IsZero()
 	if first {
 		w.began = time.Now()
+		// addr is the replay target: its host name by its labels' shape
+		// beside its tag in ctx's session (models.HostLogName; an IP address
+		// whole). A host name is traffic.
+		at := models.HostLogName(ctx, addr)
 		if probe {
-			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; waiting for it to accept a connection, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped", what, addr),
+			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; waiting for it to accept a connection, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped", what, at),
 				zap.Error(utils.WithholdInput(refusal)))
 		} else {
-			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; sending it again every %s until it is accepted (probing the application's address is disabled by configuration). The wait ends when it is, when the application exits, or when keploy is stopped", what, addr, acceptPollInterval),
+			logger.Info(fmt.Sprintf("the %s was refused at %s: the application is not accepting connections there yet; sending it again every %s until it is accepted (probing the application's address is disabled by configuration). The wait ends when it is, when the application exits, or when keploy is stopped", what, at, acceptPollInterval),
 				zap.Error(utils.WithholdInput(refusal)))
 		}
 		w.still = sayStillWaiting(ctx, logger, "accept a connection", addr, w.began, &w.gate)
@@ -1333,17 +1340,36 @@ func isAnswerCutShort(err error) bool {
 }
 
 // isConnDropped reports whether err is the connection to the app dropping: a
-// reset (ECONNRESET), a broken pipe (EPIPE), a bare io.EOF, or net/http's
-// errServerClosedIdle. One drop is reported as any of these. Which one depends
-// on timing: net/http reports a close its read loop reads before the request
-// is on the connection as errServerClosedIdle, which a request on a fresh
-// connection gets as is (on a reused one, net/http sends again a request it
-// can replay), and a close it reads after as io.EOF. By the error alone a
-// reset can also have come part-way through an answer (see
-// IsTransportConnReset). Every rule about a drop asks this one.
+// reset (ECONNRESET), a broken pipe (EPIPE), a bare io.EOF, net/http's
+// errServerClosedIdle, or the request's I/O on the connection the transport
+// closed on the drop (isClosedOnTheDrop). One drop is reported as any of
+// these. Which one depends on timing: net/http reports a close its read loop
+// reads before the request is on the connection as errServerClosedIdle, which
+// a request on a fresh connection gets as is (on a reused one, net/http sends
+// again a request it can replay), or as the write that came after it, and a
+// close it reads after as io.EOF. By the error alone a reset can also have
+// come part-way through an answer (see IsTransportConnReset). Every rule
+// about a drop asks this one.
 func isConnDropped(err error) bool {
 	return neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) ||
-		errors.Is(err, io.EOF) || isServerClosedIdle(err)
+		errors.Is(err, io.EOF) || isServerClosedIdle(err) || isClosedOnTheDrop(err)
+}
+
+// isClosedOnTheDrop reports whether err is net.ErrClosed: a read or write on a
+// connection its own side had already closed. A test request gets it when
+// net/http's transport closed the connection on the app's drop before the
+// request's write reached it. Its read loop reads a close that comes before
+// the request is on the connection and closes the connection on it
+// (errServerClosedIdle), but its writer may already have taken the request,
+// and writes it to the closed connection; roundTrip then has both the write's
+// error and the close, and a select in it picks the one the request gets.
+// Over TCP the write's error is a *net.OpError ("write tcp ...: use of closed
+// network connection"); over TLS it is net.ErrClosed itself, from the
+// *tls.Conn. The transport closes a connection a request is on otherwise only
+// once a write on it failed (a drop too), or for a cancel or a timeout, which
+// the request gets ahead of what its I/O found.
+func isClosedOnTheDrop(err error) bool {
+	return errors.Is(err, net.ErrClosed)
 }
 
 // IsAppConnectionError reports whether err says a test request failed because
@@ -1583,9 +1609,12 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			return nil, cfg.answer.err()
 		}
 		// The line withholds what the client's error quotes (the request's
-		// URL, query and all); the error returned keeps it for the test's
-		// report, which shows the request anyway.
-		utils.LogError(logger, utils.WithholdInput(errHTTPReq), "failed to send testcase request to app")
+		// URL, query and all), and names a host the error names outside its
+		// quotes (a lookup's: "lookup <host>: no such host") by its labels'
+		// shape beside its tag (models.HostsInError); the error returned
+		// keeps it whole for the test's report, which shows the request
+		// anyway.
+		utils.LogError(logger, models.HostsInError(ctx, utils.WithholdInput(errHTTPReq), models.HostsNamedIn(errHTTPReq)...), "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
 	endAtHeaders(httpResp)
@@ -1697,9 +1726,12 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 			return nil, cfg.answer.err()
 		}
 		// The line withholds what the client's error quotes (the request's
-		// URL, query and all); the error returned keeps it for the test's
-		// report, which shows the request anyway.
-		utils.LogError(logger, utils.WithholdInput(errHTTPReq), "failed to send testcase request to app")
+		// URL, query and all), and names a host the error names outside its
+		// quotes (a lookup's: "lookup <host>: no such host") by its labels'
+		// shape beside its tag (models.HostsInError); the error returned
+		// keeps it whole for the test's report, which shows the request
+		// anyway.
+		utils.LogError(logger, models.HostsInError(ctx, utils.WithholdInput(errHTTPReq), models.HostsNamedIn(errHTTPReq)...), "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
 	endAtHeaders(httpResp)
@@ -5478,6 +5510,21 @@ func urlReplacement(target string, urlReplacements map[string]string) (substr, r
 	return substr, replacement, ok
 }
 
+// replaceLogName is a replaceWith rule's text (a host, a host and port, a URL
+// or its start) as ResolveTestTarget's line names it, under keys: a URL by
+// its scheme, its host's labels' shape beside its tag (HostLogName) and its
+// path's shape; anything else as a host.
+func replaceLogName(keys *models.LogKeySession, s string) string {
+	if !strings.Contains(s, "://") {
+		return keys.HostLogName(s)
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return "<unparseable-url-withheld>"
+	}
+	return u.Scheme + "://" + keys.HostLogName(u.Host) + utils.URLPathShape(u)
+}
+
 // ResolveTestTarget determines the final target (URL for HTTP, Authority for gRPC)
 // by applying replacement logic and precedence rules. Its lines name the
 // target by its shape: a caller hands it a logger that names the test case
@@ -5490,13 +5537,20 @@ func urlReplacement(target string, urlReplacements map[string]string) (substr, r
 //  3. replaceWith URL replacements – if replacement has explicit port, skip steps 1-2.
 //  4. replaceWith port mappings – always applied last, overrides everything.
 func ResolveTestTarget(originalTarget string, urlReplacements map[string]string, portMappings map[uint32]uint32, configHost string, appPort uint16, configPort uint32, isHTTP bool, logger *zap.Logger) (string, error) {
+	// Its lines name a host by its labels' shape beside its tag under the
+	// process's key (a context with no session), as this function, which
+	// embedders call, is handed no context to carry a session in. A host
+	// name is traffic: the target's, and those keploy.yaml's replaceWith
+	// rules name.
+	keys := models.LogKeys(context.Background())
 	// An HTTP target by its shape (utils.URLLogMeta): it is the test's URL,
-	// whose path or query can hold its token. A gRPC target is an authority.
+	// whose path or query can hold its token. A gRPC target is an authority,
+	// named as a host is.
 	targetLog := func(target string) any {
 		if isHTTP {
 			return utils.URLLogMeta("", target)
 		}
-		return target
+		return keys.HostLogName(target)
 	}
 	finalTarget := originalTarget
 	replacementHasPort := false
@@ -5509,8 +5563,8 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		// Whether the replacement value explicitly defines a port.
 		replacementHasPort = replacementNamesPort(replacement, isHTTP)
 		logger.Debug("Applied replaceWith substitution",
-			zap.String("find", substr),
-			zap.String("replace", replacement),
+			zap.String("find", replaceLogName(keys, substr)),
+			zap.String("replace", replaceLogName(keys, replacement)),
 			zap.Any("result_target", targetLog(finalTarget)),
 			zap.Bool("replacement_has_port", replacementHasPort))
 	}
@@ -5533,7 +5587,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 			utils.LogError(logger, utils.WithholdInput(err), "failed to replace host with config host")
 			return "", err
 		}
-		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.Any("target", targetLog(finalTarget)))
+		logger.Debug("Replaced host with config host", zap.String("host", keys.HostLogName(configHost)), zap.Any("target", targetLog(finalTarget)))
 	}
 
 	// Parse host and port from finalTarget

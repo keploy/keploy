@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"testing"
 
 	"go.keploy.io/server/v3/internal/logleak"
@@ -26,10 +28,14 @@ func TestSayNoAnswerLogsTheRequestsShapeAndKeepsACancelQuiet(t *testing.T) {
 		{"a cancelled test", fmt.Errorf("failed to send: %w", context.Canceled), ""},
 		{"a stalled request", &pkg.AnswerStallError{Target: "GET /v1/reset/" + s + "?token=" + s}, "not judged: the app never answered; waited 0s of keploy's runnable time for GET /{}/{}/{} " + models.PathTagLabel(models.PathTag(context.Background(), "GET", "/v1/reset/"+s))},
 		{"a client's error", fmt.Errorf("Post %q: %w", "http://app/v1/reset/"+s, errors.New("EOF")), "failed to simulate request"},
+		// A test request to an app whose name does not resolve: the client's
+		// error quotes the URL, and its dial's names the host outside the
+		// quotes (a Service name, an app's own name).
+		{"a lookup of the app's name", &url.Error{Op: "Get", URL: "http://" + canaryHost + ":8080/v1", Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: canaryHost, IsNotFound: true}}}, "failed to simulate request"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, logs := logleak.Observe()
-			sayNoAnswer(logger, "test-1", tc.err, "failed to simulate request")
+			sayNoAnswer(context.Background(), logger, "test-1", tc.err, "failed to simulate request")
 			if tc.want == "" {
 				if logs.Len() != 0 {
 					t.Fatalf("logged %d lines for a cancelled test, want none", logs.Len())

@@ -606,6 +606,10 @@ func shouldIncludeAppLogs(status models.TestSetStatus) bool {
 }
 
 type Replayer struct {
+	// readyHosts holds, per test set, the hosts its readiness check waited on
+	// (appReady): its not-ready reason names them whole for the report and
+	// the console, and its log line by their shape and tag.
+	readyHosts sync.Map
 	// reportsTrackedSaid: the run said that git would track its reports
 	// (sayReportsTracked), which it says once.
 	reportsTrackedSaid atomic.Bool
@@ -2090,7 +2094,7 @@ func (r *Replayer) stoppedAfterNoVerdict() bool {
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	if !r.instrument {
-		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
+		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.String("base path", targetLogName(ctx, r.config.Test.BasePath)))
 		return &InstrumentState{}, nil
 	}
 	passPortsUint := config.GetByPassPorts(r.config)
@@ -2172,7 +2176,7 @@ func stoppedByItsUser(ctx context.Context) bool {
 // address it was recorded at, and a base-path run sends each test to the
 // address in its URL: the request, which may be a write, would go to the
 // recording's environment, and the answer would be compared as the app's.
-func (r *Replayer) applyBasePath(testCase *models.TestCase) error {
+func (r *Replayer) applyBasePath(ctx context.Context, testCase *models.TestCase) error {
 	if r.config.Test.BasePath == "" || testCase.Kind != models.HTTP {
 		return nil
 	}
@@ -2181,7 +2185,7 @@ func (r *Replayer) applyBasePath(testCase *models.TestCase) error {
 		return fmt.Errorf("cannot send the test to the base path %q: %w", r.config.Test.BasePath, err)
 	}
 	testCase.HTTPReq.URL = newURL
-	r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.Any("TestCaseURL", utils.URLLogMeta(string(testCase.HTTPReq.Method), testCase.HTTPReq.URL)), zap.String("basePath", r.config.Test.BasePath))
+	r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.Any("TestCaseURL", utils.URLLogMeta(string(testCase.HTTPReq.Method), testCase.HTTPReq.URL)), zap.String("basePath", targetLogName(ctx, r.config.Test.BasePath)))
 	return nil
 }
 
@@ -4090,7 +4094,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// replace the request URL's BasePath/origin if provided — gated on
 			// replay==0 to prevent the prefix from being joined on again on retries.
 			if replay == 0 {
-				if err := r.applyBasePath(testCase); err != nil {
+				if err := r.applyBasePath(ctx, testCase); err != nil {
 					currentFailures++
 					testSetStatus = models.TestSetStatusFailed
 					if loopErr = r.failUnsentTest(runTestSetCtx, testRunID, testSetID, testCase, err); loopErr != nil {
@@ -4299,7 +4303,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if loopErr != nil {
-				sayNoAnswer(r.logger, testCase.Name, loopErr, "failed to simulate request")
+				sayNoAnswer(ctx, r.logger, testCase.Name, loopErr, "failed to simulate request")
 				noteNoAnswer(testCase.Name, loopErr)
 				drainBeforeFiling(runTestSetCtx, testCase.Name, answeredInGap, gapReadErr)
 				currentFailures++
@@ -5302,7 +5306,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			// The base path goes in a streaming test's URL here: Phase 1, which
 			// puts it in every other test's, defers these before that point.
-			if err := r.applyBasePath(tc); err != nil {
+			if err := r.applyBasePath(ctx, tc); err != nil {
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 				if loopErr = r.failUnsentTest(runTestSetCtx, testRunID, testSetID, tc, err); loopErr != nil {
@@ -5460,7 +5464,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if simErr != nil {
-				sayNoAnswer(r.logger, tc.Name, simErr, "failed to simulate streaming request")
+				sayNoAnswer(ctx, r.logger, tc.Name, simErr, "failed to simulate streaming request")
 				noteNoAnswer(tc.Name, simErr)
 				endStreamOnFailure(r.logger, tc.Name, endStream())
 				drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
@@ -5624,7 +5628,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							// Nothing of the stream came, the app keeping
 							// it open (the stall rule, or its keepalives):
 							// not judged, failing closed (ruling a).
-							sayNoAnswer(r.logger, tc.Name, streamErr, "failed to read streaming response")
+							sayNoAnswer(ctx, r.logger, tc.Name, streamErr, "failed to read streaming response")
 						} else if errors.Is(streamErr, pkg.ErrStreamNotRecorded) {
 							// Its recording saved nothing of its stream
 							// (a body over 1 MB): refused, its stream
@@ -6835,7 +6839,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		r.logger.Error("test-set is not judged: its application never got ready, so keploy fired none of its tests; the run goes on to the next test-set ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
-			zap.String("reason", notReady),
+			zap.String("reason", models.HostsInText(ctx, notReady, r.readyHostsOf(testSetID)...)),
 			zap.String("next_step", "start the application so that it listens where the set's first test dials (or answers its --health-url), see its logs in this report for why it did not, then run the test-set again"))
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
@@ -8321,7 +8325,7 @@ func (r *Replayer) workerRuleMockNames(ctx context.Context, testSetID string) []
 // call (see recordedSetShape); pass the zero value on per-test calls.
 func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, consumed *models.ConsumedHistory, region map[string]struct{}, useMappingBased bool, shape recordedSetShape, open *testOpening) error {
 	if !r.instrument {
-		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
+		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", targetLogName(ctx, r.config.Test.BasePath)))
 		return nil
 	}
 
@@ -9636,7 +9640,9 @@ func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, log
 			utils.LogError(r.logger, utils.WithholdInput(err), fmt.Sprintf("failed to replace host to %s", logContext), zap.String("testcase", testCase.Name))
 			return err
 		}
-		r.logger.Debug("", zap.String("testcase", testCase.Name), zap.String(fmt.Sprintf("replaced %s", logContext), testCase.GrpcReq.Headers.PseudoHeaders[":authority"]))
+		// The new :authority by its host's shape, as the HTTP line above
+		// names the new URL's host (URLLogMeta).
+		r.logger.Debug("", zap.String("testcase", testCase.Name), zap.String(fmt.Sprintf("replaced %s", logContext), models.HostShape(testCase.GrpcReq.Headers.PseudoHeaders[":authority"])))
 	}
 	return nil
 }
@@ -10049,14 +10055,15 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 			addr := net.JoinHostPort(host, port)
 			if !*said {
 				*said = true
-				r.logger.Info(fmt.Sprintf("the test request was reset at %s before the application took it: waiting for the application to answer HTTP there, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped", addr),
-					zap.String("testSetID", testSetID), zap.String("testCaseID", testCase.Name))
+				logLine, consoleLine := resetWaitLines(ctx, addr)
+				r.logger.Info(logLine, zap.String("testSetID", testSetID), zap.String("testCaseID", testCase.Name))
+				_, _ = fmt.Fprintln(r.out(), consoleLine)
 			}
 			defer sayStillWaiting(ctx, r.logger, "answer HTTP", addr, time.Now())()
 		}
 		if err := waitForHTTPServing(serveCtx, scheme, host, port); err != nil {
 			r.logger.Debug("app not serving HTTP before reset re-send; re-sending anyway",
-				zap.String("host", host), zap.String("port", port), zap.Error(err))
+				zap.String("host", models.HostLogName(ctx, host)), zap.String("port", port), zap.Error(models.HostsInError(ctx, err, host)))
 		}
 		return
 	}
@@ -10069,8 +10076,30 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 	}
 	if err := pkg.WaitForPort(wctx, host, port, resetResendReadyTimeout); err != nil {
 		r.logger.Debug("app host port not ready before reset re-send; re-sending anyway",
-			zap.String("host", host), zap.String("port", port), zap.Error(err))
+			zap.String("host", models.HostLogName(ctx, host)), zap.String("port", port), zap.Error(models.HostsInError(ctx, err, host)))
 	}
+}
+
+// readyHostsOf is the hosts testSetID's readiness check waited on (appReady),
+// none before it ran.
+func (r *Replayer) readyHostsOf(testSetID string) []string {
+	if v, ok := r.readyHosts.Load(testSetID); ok {
+		if hs, ok := v.([]string); ok {
+			return hs
+		}
+	}
+	return nil
+}
+
+// resetWaitLines are the two lines that say a test request was reset at addr
+// (the replay target) before the application took it: the log's, which names
+// addr's host by its labels' shape beside its tag in the session ctx carries
+// (models.HostLogName; an IP address whole), and the console's, which names it
+// whole beside that tag (models.WithHostTag), so the user finds the log's
+// line by its tag. A host name is traffic: the log never names it whole.
+func resetWaitLines(ctx context.Context, addr string) (logLine, consoleLine string) {
+	const say = "the test request was reset at %s before the application took it: waiting for the application to answer HTTP there, then sending it again. The wait ends when it does, when the application exits, or when keploy is stopped"
+	return fmt.Sprintf(say, models.HostLogName(ctx, addr)), "keploy: " + fmt.Sprintf(say, models.WithHostTag(addr, models.HostTag(ctx, addr)))
 }
 
 // openTestErrorCapture opens a test's mock-error capture window on the agent,

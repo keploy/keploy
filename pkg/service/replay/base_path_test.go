@@ -1450,8 +1450,11 @@ func TestBasePathSaysOnceThatTestHostIsNotUsed(t *testing.T) {
 			if len(said) != tc.want {
 				t.Fatalf("the run said %d time(s) that test.host is not used, want %d: %+v", len(said), tc.want, said)
 			}
-			if tc.want == 1 && (said[0].ContextMap()["host"] != tc.host || said[0].ContextMap()["next_step"] == nil) {
-				t.Fatalf("it said %v; want the host %q and a next step", said[0].ContextMap(), tc.host)
+			// test.host by its labels' shape beside its tag (the run's
+			// context carries no session: the process's key), never whole.
+			if want := models.HostLogName(context.Background(), tc.host); tc.want == 1 &&
+				(said[0].ContextMap()["host"] != want || strings.Contains(want, tc.host) || said[0].ContextMap()["next_step"] == nil) {
+				t.Fatalf("it said %v; want the host as %q (%q by its shape and tag) and a next step", said[0].ContextMap(), want, tc.host)
 			}
 		})
 	}
