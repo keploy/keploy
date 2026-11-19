@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"sync"
@@ -84,9 +85,19 @@ type pairedConn struct {
 	// session is, under the pairedConns' mu, the agent's session the proxy
 	// last moved bytes on the connection in, or that it was accepted in when
 	// it moved none, as of the last session move (PairedBytesSession), and
-	// usedAtSession is used then: a loss of it is the session its use is
-	// (sessionOfLocked).
+	// usedAtSession is used then: a loss of it is at least the session its
+	// use is (sessionsOfLocked).
 	session, usedAtSession uint64
+	// read counts the bytes the proxy's reads of the application's end
+	// returned (trackedConn.pairRead): with what its socket holds unread,
+	// what the application had written that reached the proxy
+	// (writtenNow).
+	read atomic.Uint64
+	// marks are, under the pairedConns' mu, oldest first, where each
+	// session's bytes begin on the connection (sessionMark): a loss of
+	// bytes past a session's mark is that session's, whichever session the
+	// proxy last moved bytes in (sessionsOfLocked).
+	marks []sessionMark
 	// pairedConnOS is what one OS alone reads of the connection: on Linux
 	// the devices its sockets are bound to, on darwin one count of what the
 	// application wrote and the process holding the application's end.
@@ -148,6 +159,18 @@ func (pc *pairedConn) lostByCuts(low, top uint64) (owners []cutEnd, open bool) {
 		prev = max(prev, c.want)
 	}
 	return owners, top > prev
+}
+
+// cutTop is the last byte an end cut short on pc owns (lostByCuts): 0 with
+// none. A loss's share past it is the open test's.
+func (pc *pairedConn) cutTop() uint64 {
+	pc.cutMu.Lock()
+	defer pc.cutMu.Unlock()
+	var top uint64
+	for _, c := range pc.cuts {
+		top = max(top, c.want)
+	}
+	return top
 }
 
 // appWrote is what the application had written to a connection, in bytes and
@@ -254,6 +277,70 @@ type pairedConns struct {
 	// loss is stamped with the session its connection was used in, or its
 	// cut end was in (agent.OwnedLoss.Session).
 	session atomic.Uint64
+}
+
+// sessionMark is where a session's bytes begin on a paired connection: from
+// is the first byte, counted from 1 as the application wrote them, that it
+// wrote in session or later. Taken as each session begins
+// (PairedBytesSession) from what the application had written that reached
+// the proxy by then (writtenNow): a byte past it may have been written in
+// the new session, and a loss of it is charged there.
+type sessionMark struct {
+	session, from uint64
+}
+
+// maxSessionMarks bounds the marks a connection keeps: past it, the oldest
+// session's bytes are the next oldest's. Both are sessions that ended long
+// before, whose losses charge no later session either way.
+const maxSessionMarks = 8
+
+// markSessionLocked marks the start of session on pc: the application had
+// written written bytes of it that reached the proxy, or, when known is
+// false, that cannot be told. A session before it in which the application
+// wrote nothing more owns no bytes, and its mark is the new session's; one
+// whose bytes cannot be told gives them all to the new session, which is
+// then charged with a loss of any of them (fail closed: never a later
+// session's bytes to an earlier, ended session). With the pairedConns' mu
+// held.
+func (pc *pairedConn) markSessionLocked(session, written uint64, known bool) {
+	if len(pc.marks) == 0 {
+		pc.marks = []sessionMark{{session: pc.session, from: 1}}
+	}
+	last := &pc.marks[len(pc.marks)-1]
+	if from := written + 1; known && from > last.from {
+		pc.marks = append(pc.marks, sessionMark{session: session, from: from})
+	} else {
+		last.session = session
+	}
+	if n := len(pc.marks); n > maxSessionMarks {
+		copy(pc.marks, pc.marks[1:])
+		pc.marks = pc.marks[:n-1]
+		pc.marks[0].from = 1
+	}
+}
+
+// unreadAtSession is the session move's read of what pc's socket holds
+// unread (writtenNow): readUnread, but in a row that sets it. A connection
+// with no socket (one a row makes by hand) cannot be read.
+var unreadAtSession = func(pc *pairedConn) (int, error) {
+	if pc.conn == nil {
+		return 0, errors.New("the connection has no socket to read")
+	}
+	return readUnread(pc.conn)
+}
+
+// writtenNow is what the application had written to pc that reached the
+// proxy: what the proxy's reads of it returned (read), then what its socket
+// holds unread, read in that order: a read of the handler's between the two
+// can only make the sum smaller, so a byte the application wrote after it
+// began is never counted in it. false when the socket cannot be read.
+func (pc *pairedConn) writtenNow() (uint64, bool) {
+	read := pc.read.Load()
+	n, err := unreadAtSession(pc)
+	if err != nil {
+		return 0, false
+	}
+	return read + uint64(n), true
 }
 
 // maxOwned bounds the owned losses the proxy keeps untaken.
@@ -377,8 +464,11 @@ func (p *Proxy) PairedBytesOneProcess(on bool) {
 // PairedBytesSession is told, as the agent resets a session, the new one's
 // number (agent.PairedBytesSessioner): each connection the proxy holds keeps
 // the session it last moved bytes on it in (or was accepted in, with none
-// moved), so a loss of it counted from here is that session's whatever
-// session is open then (sessionOfLocked).
+// moved), and marks where the new session's bytes begin on it, at what the
+// application had written that reached the proxy by now (markSessionLocked):
+// a loss of it counted from here is the newest session whose bytes it lost,
+// or that the proxy moved bytes on it in, whatever session is open then
+// (sessionsOfLocked).
 func (p *Proxy) PairedBytesSession(session uint64) {
 	s := &p.paired
 	s.mu.Lock()
@@ -387,19 +477,37 @@ func (p *Proxy) PairedBytesSession(session uint64) {
 		if used := pc.used.Load(); used > pc.usedAtSession {
 			pc.session, pc.usedAtSession = s.session.Load(), used
 		}
+		written, known := pc.writtenNow()
+		pc.markSessionLocked(session, written, known)
 	}
 	s.session.Store(session)
 }
 
-// sessionOfLocked is the agent's session a loss of pc is made in: the one
-// open now when the proxy moved bytes on pc in it, or accepted pc in it, and
-// otherwise the session it last moved bytes on pc in, or accepted it in. With
-// mu held.
-func (s *pairedConns) sessionOfLocked(pc *pairedConn) uint64 {
+// sessionsOfLocked is the agent's sessions a loss of pc's bytes low..top
+// (counted from 1, as the application wrote them) is made in. newest is the
+// latest of: the session open now when the proxy moved bytes on pc in it
+// (or accepted pc in it), else the one it last moved bytes on pc in (or
+// accepted it in); and the latest session whose mark the bytes reach past
+// (sessionMark), the session they may have been written in. The loss is
+// split at newest's mark (split): the bytes before it are older's, the
+// session whose mark is just before, a share apart. Never stamped only by
+// the session that last moved bytes: bytes the application wrote in a later
+// session that the proxy never read are that session's. With mu held.
+func (s *pairedConns) sessionsOfLocked(pc *pairedConn, low, top uint64) (newest, older uint64, split bool) {
+	newest = pc.session
 	if pc.used.Load() > pc.usedAtSession {
-		return s.session.Load()
+		newest = s.session.Load()
 	}
-	return pc.session
+	// from is newest's mark, 0 when no mark reaches it. The first mark
+	// begins at byte 1 (markSessionLocked), so a loss is never split there.
+	var from, prev uint64
+	for _, m := range pc.marks {
+		if m.from <= top && m.session >= newest {
+			newest, from, older = m.session, m.from, prev
+		}
+		prev = m.session
+	}
+	return newest, older, low < from
 }
 
 var (
@@ -427,6 +535,17 @@ func (s *pairedConns) useOf(conn net.Conn) *atomic.Uint64 {
 	defer s.mu.Unlock()
 	if pc := s.byConn[pairKey(conn)]; pc != nil {
 		return &pc.used
+	}
+	return nil
+}
+
+// readOf is the count of the bytes the proxy read of conn's application end
+// (pairedConn.read), nil for a connection it does not keep.
+func (s *pairedConns) readOf(conn net.Conn) *atomic.Uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pc := s.byConn[pairKey(conn)]; pc != nil {
+		return &pc.read
 	}
 	return nil
 }
@@ -477,8 +596,9 @@ func (s *pairedConns) add(conn *net.TCPConn, appSeq uint64, instance uint32) {
 	if s.byConn == nil {
 		s.byConn = map[net.Conn]*pairedConn{}
 	}
+	session := s.session.Load()
 	s.byConn[conn] = &pairedConn{appSeq: appSeq, instance: instance, app: app, proxy: proxy, conn: conn, done: make(chan struct{}),
-		sessions: &s.session, session: s.session.Load()}
+		sessions: &s.session, session: session, marks: []sessionMark{{session: session, from: 1}}}
 }
 
 // remove forgets conn once the proxy is done with it, its socket closed. A

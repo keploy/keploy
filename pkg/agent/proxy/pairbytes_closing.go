@@ -117,7 +117,7 @@ func (p *Proxy) pairUntold(pc *pairedConn, top uint64, msg string, fields ...zap
 		}})
 	}
 	if open {
-		p.chargeOpen(pc, models.CaptureLossAppBytesUntold)
+		p.chargeOpen(pc, models.CaptureLossAppBytesUntold, 1, top)
 	}
 	p.logger.Warn(msg, append([]zap.Field{
 		zap.String("from", pc.app.String()),
@@ -334,29 +334,44 @@ func lostTop(pc *pairedConn) uint64 {
 	return math.MaxUint64
 }
 
-// chargeOpen charges a loss of kind at a close of pc to the test open now on
-// pc's worker (pairedConn.instance): an owned loss naming that worker and
-// stamped with its test epoch now (ownKind), which the agent charges to the
-// test of that worker begun at that epoch alone (agent.OwnedLoss): never to
-// another worker's, and, counted in the worker's gap between tests, to no
-// test but the run. A connection of no worker's (instance 0) is worker 0's
-// the same way while a run of one test process holds the session
-// (pairedConns.oneProcess): that process's. Otherwise (keploy test's test
-// cases, or a process no worker's claim stamped in a run of workers) it is
-// the run's count, which charges the test open now (CaptureLosses). Which
-// one is told under mu, the hold that turns oneProcess on before the claim
-// reads the counts its first test counts from: a close counted before it is
-// in them, one after it is stamped.
-func (p *Proxy) chargeOpen(pc *pairedConn, kind models.CaptureLossKind) {
+// chargeOpen charges a loss of kind at a close of pc, of the bytes low..top
+// (counted from 1, as the application wrote them) past the last end cut
+// short on pc, to the test open now on pc's worker (pairedConn.instance): an
+// owned loss naming that worker and stamped with its test epoch now
+// (ownKind), which the agent charges to the test of that worker begun at
+// that epoch alone (agent.OwnedLoss): never to another worker's, and,
+// counted in the worker's gap between tests, to no test but the run. A
+// connection of no worker's (instance 0) is worker 0's the same way while a
+// run of one test process holds the session (pairedConns.oneProcess): that
+// process's. Otherwise (keploy test's test cases, or a process no worker's
+// claim stamped in a run of workers) it is the run's count, which charges
+// the test open now (CaptureLosses). Which one is told under mu, the hold
+// that turns oneProcess on before the claim reads the counts its first test
+// counts from: a close counted before it is in them, one after it is
+// stamped.
+//
+// Each is stamped with the session the bytes are in (sessionsOfLocked), and
+// split at that session's mark: the share before it is the session before's,
+// owned apart. A loss of an earlier session than the one open is never in
+// the counts, which charge the test open now: keploy test's sets each begin
+// a session, and a connection a set used that the application keeps into the
+// next set charges no test of that set with bytes it wrote before that set
+// began. Owned, the agent's take logs it, once, with its session, and
+// charges no run or test with it.
+func (p *Proxy) chargeOpen(pc *pairedConn, kind models.CaptureLossKind, low, top uint64) {
 	what := "from " + pc.app.String()
 	s := &p.paired
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pc.instance == 0 && !s.oneProcess {
+	newest, older, split := s.sessionsOfLocked(pc, max(low, pc.cutTop()+1), top)
+	if split {
+		s.ownKindLocked(agent.OwnedLoss{Worker: pc.instance, Open: true, Session: older, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: what}})
+	}
+	if pc.instance == 0 && !s.oneProcess && newest == s.session.Load() {
 		p.losses.Add(kind, what)
 		return
 	}
-	s.ownKindLocked(agent.OwnedLoss{Worker: pc.instance, Open: true, Session: s.sessionOfLocked(pc), Loss: models.CaptureLoss{Kind: kind, Count: 1, What: what}})
+	s.ownKindLocked(agent.OwnedLoss{Worker: pc.instance, Open: true, Session: newest, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: what}})
 }
 
 // unreadLost is pairLost's message for a close that tossed bytes unread.
@@ -381,7 +396,7 @@ func (p *Proxy) pairLost(pc *pairedConn, low, top uint64, msg string, fields ...
 	}
 	next := "keploy cannot vouch for the calls of the test that was open (under the proven switch, that test is not verified); check the agent's log for why the connection ended"
 	if open {
-		p.chargeOpen(pc, models.CaptureLossAppBytesLost)
+		p.chargeOpen(pc, models.CaptureLossAppBytesLost, low, top)
 	} else {
 		where := make([]string, len(owners))
 		for i, test := range owners {

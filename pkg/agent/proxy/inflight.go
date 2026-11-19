@@ -133,8 +133,10 @@ type trackedConn struct {
 	beforeClose func()
 	// pairUse, when set (by the accept, before the handler runs), counts
 	// each read of it that moved bytes, and each write of bytes as it
-	// begins, for the paired connection it is (pairedConn.used).
+	// begins, for the paired connection it is (pairedConn.used); pairRead,
+	// set with it, counts the bytes its reads returned (pairedConn.read).
 	pairUse   *atomic.Uint64
+	pairRead  *atomic.Uint64
 	closeOnce sync.Once
 	// closing: its Close has begun. A read from then on is the close's own
 	// (pairClosing reads through the TLS layer what the socket holds) or one
@@ -490,6 +492,9 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 	if n > 0 {
 		c.lift()
 		c.noteUse()
+		if c.pairRead != nil {
+			c.pairRead.Add(uint64(n))
+		}
 	}
 	c.returned(n, errors.Is(err, io.EOF))
 	if n == 0 && (err == nil || isTimeout(err) || errors.Is(err, io.EOF)) {
