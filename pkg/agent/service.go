@@ -608,8 +608,11 @@ type PairedBytesSessioner interface {
 // has stopped, until it has counted the close of every connection whose
 // application end has ended or whose close it has begun: a loss of such a
 // close is then in that read (counted, or owned), never in a later session's
-// or set's. A connection the application holds open is not waited for. It
-// ends with ctx, with an error: the read is then not made.
+// or set's. A connection the application holds open is not waited for. A
+// close whose handler makes no progress for the proxy's bound is owned as the
+// session's, not judged, naming where the connection went and the session,
+// and the drain answers: the read then has it. It ends with ctx, with an
+// error: the read is then not made.
 type PairedBytesDrainer interface {
 	PairedBytesDrain(ctx context.Context) error
 }

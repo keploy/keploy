@@ -23,7 +23,7 @@ func silentAgent(t *testing.T) (a *AgentClient, asked, left chan struct{}) {
 	t.Helper()
 	asked, left = make(chan struct{}, 8), make(chan struct{}, 8)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/capturelosses" && r.URL.Path != "/capturelosses/uncharged" {
+		if r.URL.Path != "/capturelosses" && r.URL.Path != "/capturelosses/uncharged" && r.URL.Path != "/capturelosses/drain" {
 			http.NotFound(w, r)
 			return
 		}
@@ -41,9 +41,9 @@ func silentAgent(t *testing.T) (a *AgentClient, asked, left chan struct{}) {
 func onCaptureLossClock(t *testing.T, grace time.Duration) *stall.ManualClock {
 	t.Helper()
 	clk := &stall.ManualClock{}
-	oldClk, oldStall := captureLossClock, captureLossStall
-	captureLossClock, captureLossStall = clk, grace
-	t.Cleanup(func() { captureLossClock, captureLossStall = oldClk, oldStall })
+	oldClk, oldStall, oldDrain := captureLossClock, captureLossStall, captureLossDrainStall
+	captureLossClock, captureLossStall, captureLossDrainStall = clk, grace, 0
+	t.Cleanup(func() { captureLossClock, captureLossStall, captureLossDrainStall = oldClk, oldStall, oldDrain })
 	return clk
 }
 
@@ -103,6 +103,57 @@ func TestACaptureLossReadAWedgedAgentNeverAnswersIsGivenUp(t *testing.T) {
 			case <-left:
 			case <-time.After(time.Minute): // only turns a hang into a failure
 				t.Fatal("the given-up read's connection to the agent never ended")
+			}
+		})
+	}
+}
+
+// A read that has the agent drain first (the losses no test was charged
+// with, and the drain itself) waits the agent's drain bound on top of the
+// read's own: the agent answers once its proxy could run for that bound with
+// no close it waits for done, naming the stuck ones, and the read waits for
+// that answer rather than give up first with none. Past both, it is given up
+// as any read is. A read that does not drain is given up at its own bound.
+func TestACaptureLossReadThatDrainsWaitsTheDrainsBoundToo(t *testing.T) {
+	const grace, drain = 50 * time.Millisecond, 70 * time.Millisecond
+	clk := onCaptureLossClock(t, grace)
+	captureLossDrainStall = drain
+	a, asked, _ := silentAgent(t)
+	reads := map[string]struct {
+		read   func(context.Context) error
+		drains bool
+	}{
+		"GetCaptureLosses":          {func(ctx context.Context) error { _, err := a.GetCaptureLosses(ctx); return err }, false},
+		"GetUnchargedCaptureLosses": {func(ctx context.Context) error { _, err := a.GetUnchargedCaptureLosses(ctx); return err }, true},
+		"DrainCaptureLosses":        {a.DrainCaptureLosses, true},
+	}
+	for name, r := range reads {
+		t.Run(name, func(t *testing.T) {
+			done := make(chan error, 1)
+			go func() { done <- r.read(context.WithoutCancel(context.Background())) }()
+			<-asked
+			waitLook(t, clk)
+			clk.Advance(grace)
+			if r.drains {
+				waitLook(t, clk)
+				select {
+				case err := <-done:
+					t.Fatalf("a read that drains was given up at the read's own bound, before the agent's drain could answer: %v", err)
+				default:
+				}
+				clk.Advance(drain)
+			}
+			want := grace
+			if r.drains {
+				want += drain
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, errAgentSilent) || !strings.Contains(err.Error(), want.String()+" of its own time to run") {
+					t.Fatalf("the read: %v; want errAgentSilent at its bound of %v", err, want)
+				}
+			case <-time.After(time.Minute): // only turns a hang into a failure
+				t.Fatal("HANG: the read was not given up past its bound")
 			}
 		})
 	}

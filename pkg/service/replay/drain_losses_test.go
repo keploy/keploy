@@ -88,6 +88,22 @@ func TestASetsEndCountsTheClosesItsApplicationsStopMade(t *testing.T) {
 		}
 	})
 
+	t.Run("a drain that gave up on a stuck handler leaves the set unjudged, named", func(t *testing.T) {
+		// The agent's drain owns, as the session's, the close of a
+		// connection whose handler never finished closing it: not judged,
+		// naming where it went and the session. The set's take has it.
+		stuck := models.CaptureLoss{Kind: models.CaptureLossAppBytesUntold, Count: 1,
+			What: "to 10.0.0.5:5432 from 127.0.0.1:40000, in session 2, whose handler never finished closing it once the application's end had ended"}
+		h, _, status := run(t, &models.OwnedCaptureLoss{Loss: stuck}, nil)
+		if status == models.TestSetStatusPassed || status == models.TestSetStatusFailed {
+			t.Fatalf("set %q, want neither PASSED nor FAILED: what the stuck close lost cannot be told", status)
+		}
+		cv := h.report.report.CaptureVerification
+		if cv == nil || cv.Status != models.CaptureUnverifiedStatus || !strings.Contains(cv.Reason, "10.0.0.5:5432") || !strings.Contains(cv.Reason, "session 2") {
+			t.Fatalf("capture_verification %+v, want unverified naming the stuck connection's destination and session", cv)
+		}
+	})
+
 	t.Run("an agent that does not drain", func(t *testing.T) {
 		_, instr, status := run(t, nil, models.ErrCaptureLossesUnsupported)
 		if status != models.TestSetStatusPassed {

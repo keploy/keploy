@@ -2311,9 +2311,10 @@ func (a *AgentClient) getCaptureLossesAndAgent(ctx context.Context) (models.Capt
 // the run began that no test was charged with: what was lost after the last
 // test ended (GET /agent/capturelosses/uncharged). An agent that cannot say
 // is ErrCaptureLossesUnsupported. The read is bounded as
-// GetCaptureLossesAndAgent's is (boundedAgentRead).
+// GetCaptureLossesAndAgent's is (boundedAgentRead), and waits the agent's
+// drain on top (captureLossDrainStall): the agent drains first.
 func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
-	return boundedAgentRead(ctx, "the read of the agent's capture losses no test was charged with", a.getUnchargedCaptureLosses)
+	return boundedAgentReadFor(ctx, captureLossStall+captureLossDrainStall, "the read of the agent's capture losses no test was charged with", a.getUnchargedCaptureLosses)
 }
 
 // getUnchargedCaptureLosses is GetUnchargedCaptureLosses's exchange,
@@ -2352,9 +2353,9 @@ func (a *AgentClient) getUnchargedCaptureLosses(ctx context.Context) (models.Cap
 // test's set end, once the set's application has stopped, before it reads
 // the set's losses. An agent that does not drain (older than it) is
 // ErrCaptureLossesUnsupported. The wait is bounded as GetCaptureLossesAndAgent's
-// is (boundedAgentRead).
+// is (boundedAgentRead), with the agent's drain on top (captureLossDrainStall).
 func (a *AgentClient) DrainCaptureLosses(ctx context.Context) error {
-	_, err := boundedAgentRead(ctx, "the agent's count of the closes the application's stop made", func(ctx context.Context) (struct{}, error) {
+	_, err := boundedAgentReadFor(ctx, captureLossStall+captureLossDrainStall, "the agent's count of the closes the application's stop made", func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, a.drainCaptureLosses(ctx)
 	})
 	return err
@@ -2435,9 +2436,17 @@ func (a *AgentClient) takeOwnedCaptureLosses(ctx context.Context) ([]models.Owne
 // starved keploy accrues it only as fast as it gets to run, so load is never
 // taken for a silent agent. captureLossClock is the clock it is counted on
 // (nil: keploy's own runnable time); tests drive one of their own.
+//
+// captureLossDrainStall is what a read that has the agent drain first (the
+// losses no test was charged with, the drain itself) waits on top of it: the
+// agent's drain answers once keploy's proxy could run for stall.HangBudget
+// with no close it waits for done (the proxy's drainBudget), owning the ones
+// stuck by name, so the read waits for that answer, and the reason it names,
+// rather than give up first with none.
 var (
-	captureLossStall = stall.HangBudget
-	captureLossClock stall.Clock
+	captureLossStall      = stall.HangBudget
+	captureLossDrainStall = stall.HangBudget
+	captureLossClock      stall.Clock
 )
 
 // errAgentSilent is a read of the agent given up on: it made no answer while
@@ -2455,6 +2464,11 @@ var errAgentSilent = errors.New("the keploy agent made no answer")
 // count, no verdict that relies on one. A read given up on ends as its
 // context does, on its own goroutine.
 func boundedAgentRead[T any](ctx context.Context, what string, read func(context.Context) (T, error)) (T, error) {
+	return boundedAgentReadFor(ctx, captureLossStall, what, read)
+}
+
+// boundedAgentReadFor is boundedAgentRead with a bound of grace.
+func boundedAgentReadFor[T any](ctx context.Context, grace time.Duration, what string, read func(context.Context) (T, error)) (T, error) {
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type answer struct {
@@ -2466,7 +2480,7 @@ func boundedAgentRead[T any](ctx context.Context, what string, read func(context
 		v, err := read(readCtx)
 		got <- answer{v, err}
 	}()
-	m := stall.NewMeter(captureLossClock, captureLossStall)
+	m := stall.NewMeter(captureLossClock, grace)
 	defer m.Stop()
 	var zero T
 	for {

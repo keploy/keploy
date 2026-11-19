@@ -2963,6 +2963,12 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
+	// A drain that gives up on the connection's close names where it went
+	// (PairedBytesDrain).
+	if tracked != nil {
+		p.paired.destined(tracked, dstAddr)
+	}
+
 	//get the session rule
 	rule := p.getSession()
 	if rule == nil {

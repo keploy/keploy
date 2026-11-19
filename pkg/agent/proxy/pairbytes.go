@@ -72,6 +72,13 @@ type pairedConn struct {
 	// nothing on it by design, so nothing the application wrote to it is a
 	// capture loss, and no bytes wait holds it.
 	noSession atomic.Bool
+	// dest is where the proxy's handler serves the connection to (its
+	// destination's address, destined), nil until the handler knows it: a
+	// drain that gives up on the connection's close names it
+	// (PairedBytesDrain). drainGaveUp: such a drain owned its close as the
+	// session's, once, and no later drain waits for it.
+	dest        atomic.Pointer[string]
+	drainGaveUp atomic.Bool
 	// cuts are the ends cut short on the connection, oldest first: each a
 	// test whose bytes wait ended before the proxy's side had received what
 	// the application had written when the wait began (cutShort). Bytes up
@@ -681,6 +688,16 @@ func (s *pairedConns) servedWithoutSession(conn net.Conn) {
 	if pc := s.byConn[pairKey(conn)]; pc != nil {
 		pc.noSession.Store(true)
 		s.wakeLocked()
+	}
+}
+
+// destined notes where the proxy's handler serves conn to
+// (pairedConn.dest). A connection it does not keep is ignored.
+func (s *pairedConns) destined(conn net.Conn, dst string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pc := s.byConn[pairKey(conn)]; pc != nil {
+		pc.dest.Store(&dst)
 	}
 }
 
