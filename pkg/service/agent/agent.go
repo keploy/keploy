@@ -240,6 +240,16 @@ type Agent struct {
 	// before the first), with the wire held: the log of a loss a session
 	// left unread names the session it was counted in (resetSession).
 	session uint64
+	// setRun is the keploy test run whose sessions sessionSets names
+	// (models.TestSetSession.Run), "" for none, and setRunFrom its first
+	// session: sessionSets has, for each of its latest sessions
+	// (models.MaxSessionSets), the test set it served. earlierSets are the
+	// losses of that run's earlier sessions that keploy test's next take
+	// returns, each naming its set (keepEarlierSetLocked). Under provenMu.
+	setRun      string
+	setRunFrom  uint64
+	sessionSets map[uint64]string
+	earlierSets []models.OwnedCaptureLoss
 	// instanceGen is, for each keploy instance id, the generation its next
 	// claim gets (coreAgent.InstanceValue), for the agent's life: a session's
 	// reset keeps it, so no claim of an id is stamped with the value of an

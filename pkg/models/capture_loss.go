@@ -683,14 +683,30 @@ func (l CaptureLosses) Untagged() CaptureLosses {
 	return out
 }
 
+// MaxSessionSets is how many of its latest sessions' test sets an agent
+// names an earlier session's loss by (OwnedCaptureLoss.Set).
+const MaxSessionSets = 1024
+
 // OwnedCaptureLoss is a capture loss of bytes a test wrote to a connection,
 // which its end could not wait for, counted later, under another test or
 // none: Test's own (agent.OwnedLoss), in none of the agent's counts. Test is
 // "between test cases" for the gap's bytes in keploy test, and "" for the
-// run's (a bound passed, or a session's left to the next).
+// run's (a bound passed).
 type OwnedCaptureLoss struct {
 	Test string      `json:"test"`
 	Loss CaptureLoss `json:"loss"`
+	// EarlierSession says the loss was made in an earlier session of keploy
+	// test's run than the one open (TestSetSession): counted after that
+	// session ended, on a connection it used, or counted in it and never
+	// read by it. It is a verdict of Set's that came after that set's end:
+	// keploy test reports it as that set's, naming Test where it is known
+	// ("" for bytes written in none of its tests), and its run ends not
+	// judged for it. It charges no test or verdict of the set open.
+	EarlierSession bool `json:"earlier_session,omitempty"`
+	// Set is, for an EarlierSession loss, the test set that session served;
+	// "" where the agent no longer holds its name (it holds the names of its
+	// last MaxSessionSets sessions).
+	Set string `json:"set,omitempty"`
 }
 
 // CaptureLosses are the agent's counts of every kind of capture loss, each

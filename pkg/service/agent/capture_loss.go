@@ -333,7 +333,9 @@ func (a *Agent) runsLocked(l, at models.CaptureLosses, read bool) {
 // session's: one the proxy stamped with an earlier session
 // (coreAgent.PairedBytesSessioner) was made in a session that is over, which
 // took everything it could, and no test of this one caused it; it is logged,
-// once, and charges no run or test.
+// once, and charges no run or test of this session. One of a session of the
+// keploy test run open is kept for its next take, as the set's that session
+// served (keepEarlierSetLocked).
 func (a *Agent) takeOwnedLosses() []coreAgent.OwnedLoss {
 	t, ok := a.Proxy.(coreAgent.OwnedLossTaker)
 	if !ok || a.Proxy == nil {
@@ -343,18 +345,69 @@ func (a *Agent) takeOwnedLosses() []coreAgent.OwnedLoss {
 	if _, stamps := a.Proxy.(coreAgent.PairedBytesSessioner); !stamps || len(taken) == 0 {
 		return taken
 	}
-	a.provenMu.Lock()
-	session := a.session
-	a.provenMu.Unlock()
 	mine := make([]coreAgent.OwnedLoss, 0, len(taken))
+	var earlier []coreAgent.OwnedLoss
+	a.provenMu.Lock()
 	for _, o := range taken {
-		if o.Session == session {
+		if o.Session == a.session {
 			mine = append(mine, o)
 			continue
 		}
+		a.keepEarlierSetLocked(o.Session, o.Test, o.Loss)
+		earlier = append(earlier, o)
+	}
+	a.provenMu.Unlock()
+	for _, o := range earlier {
 		a.logEarlierSessionsLoss(o.Session, o.Test, o.Loss, lateLoss)
 	}
 	return mine
+}
+
+// noteSessionSetLocked notes that session, the one a reset begins, serves
+// set (models.TestSetSession; the zero value from a client that names none:
+// a record, keploy mock, an older keploy test, whose run is ""). A run other
+// than the one noted so far starts afresh: an earlier run's sessions, and the
+// losses kept for its takes, are no set of this one's, whose sets may have
+// the same names. Only the latest models.MaxSessionSets sessions' names are
+// held (below that many, the key dropped wraps to one no session has). With
+// provenMu held.
+func (a *Agent) noteSessionSetLocked(session uint64, set models.TestSetSession) {
+	if set.Run != a.setRun {
+		a.setRun, a.setRunFrom, a.sessionSets, a.earlierSets = set.Run, session, nil, nil
+	}
+	if a.sessionSets == nil {
+		a.sessionSets = map[uint64]string{}
+	}
+	a.sessionSets[session] = set.Set
+	delete(a.sessionSets, session-models.MaxSessionSets)
+}
+
+// keepEarlierSetLocked keeps l, a loss session made (in test, "" where no
+// test is known), for keploy test's next take (TakeOwnedCaptureLosses), when
+// session, an earlier session than the one open, is of the keploy test run
+// the open one serves: a verdict of the set it served that came after that
+// set's end, named by that set ("" when its name is no longer held,
+// models.MaxSessionSets). Nothing for a session of no keploy test run's, or
+// of an earlier run's: no take of now could report it. Past
+// coreAgent.MaxOwnedLosses, one entry per set and kind, naming no test,
+// counts the rest. With provenMu held.
+func (a *Agent) keepEarlierSetLocked(session uint64, test string, l models.CaptureLoss) {
+	if a.setRun == "" || session < a.setRunFrom {
+		return
+	}
+	set := a.sessionSets[session]
+	if len(a.earlierSets) >= coreAgent.MaxOwnedLosses {
+		for i := coreAgent.MaxOwnedLosses; i < len(a.earlierSets); i++ {
+			if e := &a.earlierSets[i]; e.Set == set && e.Loss.Kind == l.Kind {
+				e.Loss.Count += l.Count
+				return
+			}
+		}
+		a.earlierSets = append(a.earlierSets, models.OwnedCaptureLoss{EarlierSession: true, Set: set,
+			Loss: models.CaptureLoss{Kind: l.Kind, Count: l.Count, What: coreAgent.OwnedLossesPastTheBound}})
+		return
+	}
+	a.earlierSets = append(a.earlierSets, models.OwnedCaptureLoss{Test: test, Loss: l, EarlierSession: true, Set: set})
 }
 
 // lateLoss and leftLoss are the two ways a loss of an earlier session reaches
@@ -413,12 +466,18 @@ func (a *Agent) leftLossesLocked(taken []coreAgent.OwnedLoss) []coreAgent.OwnedL
 // at the set's end. keploy test reaches no end that charges them
 // (chargeCaptureLosses), and they are in none of the counts it reads, so
 // this is its only report of them. A test's own is "between test cases" for
-// a pool call's (endingTestCase), "" for the run's.
+// a pool call's (endingTestCase), "" for the run's. Then those of the run's
+// earlier sessions, each naming the set it served
+// (models.OwnedCaptureLoss.EarlierSession, keepEarlierSetLocked).
 func (a *Agent) TakeOwnedCaptureLosses(context.Context) ([]models.OwnedCaptureLoss, error) {
 	var out []models.OwnedCaptureLoss
 	for _, o := range a.takeOwnedLosses() {
 		out = append(out, models.OwnedCaptureLoss{Test: o.Test, Loss: o.Loss})
 	}
+	a.provenMu.Lock()
+	out = append(out, a.earlierSets...)
+	a.earlierSets = nil
+	a.provenMu.Unlock()
 	return out, nil
 }
 

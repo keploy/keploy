@@ -445,7 +445,10 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// session caused them: each is logged once, with what it was, the test
 	// it was counted in where keploy knows it and the session, and charges
 	// no later session's run or test (leftLossesLocked). keploy test's owned
-	// take reads them only within the session they were counted in.
+	// take reads them only within the session they were counted in, but for
+	// one of a session of the same keploy test run: its next take returns it
+	// as the set's that session served (keepEarlierSetLocked), a verdict of
+	// that set's that came after its end.
 	taken := a.takeOwnedLosses()
 	a.provenMu.Lock()
 	left := a.leftLossesLocked(taken)
@@ -454,6 +457,10 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	session := a.session
 	a.session++
 	next := a.session
+	a.noteSessionSetLocked(next, models.TestSetSessionOf(ctx))
+	for _, l := range left {
+		a.keepEarlierSetLocked(session, l.Test, l.Loss)
+	}
 	a.provenMu.Unlock()
 	// The proxy stamps each loss counted from here with the session its
 	// connection was used in: one the session before used is taken in this

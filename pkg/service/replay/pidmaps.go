@@ -259,6 +259,9 @@ func (r *Replayer) takeOwnedLosses(ctx context.Context) {
 	if errors.Is(err, models.ErrCaptureLossesUnsupported) {
 		return
 	}
+	// A loss of an earlier set's, found after its end, is that set's: the
+	// run keeps it, and no test of this set is charged with it.
+	owned = r.takeEarlierSetLosses(owned, r.earlierSetCalls.reading())
 	r.ownedMu.Lock()
 	defer r.ownedMu.Unlock()
 	r.owned = append(r.owned, owned...)

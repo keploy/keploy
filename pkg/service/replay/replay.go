@@ -536,7 +536,7 @@ func (r *Replayer) agentConsumedHistoryUnusable() bool {
 // Deliberately not used by the mid-set repair in ensureAgentHoldsStoredMocks:
 // that MockOutgoing is a repair, not a set boundary, and its own latch must
 // stay set across it.
-func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, opts models.OutgoingOptions) error {
+func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, testSetID string, opts models.OutgoingOptions) error {
 	// Under the proven switch the agent is handed mock.real before each set
 	// (design v14 §4): its destinations are reached for real. Only the run's
 	// first push starts the agent's REAL bookkeeping afresh: what came
@@ -565,7 +565,9 @@ func (r *Replayer) mockOutgoingForTestSet(ctx context.Context, opts models.Outgo
 	// hold a call for a later test of the set only then
 	// (models.OutgoingOptions.ReadsSetEnds).
 	opts.ReadsSetEnds = provenswitch.On()
-	if err := r.instrumentation.MockOutgoing(ctx, opts); err != nil {
+	// The session serves testSetID, of this run: a capture loss the agent
+	// finds after the set's end is named as the set's (earlierSetLosses).
+	if err := r.instrumentation.MockOutgoing(r.withTestSetSession(ctx, testSetID), opts); err != nil {
 		return err
 	}
 	r.agentHistoryStaleForSet.Store(false)
@@ -857,6 +859,12 @@ type Replayer struct {
 	// returned (proven switch): they fail the run, and no set
 	// (earlier_set_calls.go).
 	earlierSetCalls earlierSetCalls
+	// earlierSetLosses are the capture losses of earlier sets that the
+	// agent found after those sets had ended (earlier_set_losses.go), and
+	// setSessionRun the token each set's session names this run by
+	// (models.TestSetSession), drawn as the run starts.
+	earlierSetLosses earlierSetLosses
+	setSessionRun    string
 	// keptInside is each destination the app called that no mock answered,
 	// over the whole run, for the run's report of them (kept_inside.go).
 	keptInside keptInside
@@ -1033,6 +1041,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.completeTestReportMu.Unlock()
 	r.forgetQuarantined()
 	r.earlierSetCalls.reset()
+	r.earlierSetLosses.reset()
+	r.setSessionRun = newSetSessionRun()
 	r.reportsTrackedSaid.Store(false)
 	r.failedTCsBySetID = make(map[string][]string)
 	r.mockMismatchFailures = NewTestFailureStore()
@@ -1790,6 +1800,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// A call an earlier set's test made that keploy decided only after that
 	// set had ended fails the run: no set's verdict counts it.
 	testRunResult = r.passesEarlierSetCalls(testRunResult)
+	// So does a capture loss of an earlier set's that the agent found only
+	// after that set had ended: that set is not judged.
+	testRunResult = r.passesEarlierSetLosses(testRunResult)
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
@@ -3141,7 +3154,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		}
-		err = r.mockOutgoingForTestSet(runTestSetCtx, outgoingOpts)
+		err = r.mockOutgoingForTestSet(runTestSetCtx, testSetID, outgoingOpts)
 		if err != nil {
 			if ctx.Err() != context.Canceled {
 				utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -3305,7 +3318,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			})
 		}
 
-		err = r.mockOutgoingForTestSet(runTestSetCtx, models.OutgoingOptions{
+		err = r.mockOutgoingForTestSet(runTestSetCtx, testSetID, models.OutgoingOptions{
 			Rules:                     r.config.BypassRules,
 			MongoPassword:             r.config.Test.MongoPassword,
 			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
@@ -8729,7 +8742,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 	// The set's reads are its, as the set's own session said
 	// (mockOutgoingForTestSet).
 	outgoingOpts.ReadsSetEnds = provenswitch.On()
-	if err := r.instrumentation.MockOutgoing(ctx, outgoingOpts); err != nil {
+	if err := r.instrumentation.MockOutgoing(r.withTestSetSession(ctx, testSetID), outgoingOpts); err != nil {
 		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
 			return exitErr
 		}
@@ -9345,6 +9358,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			}
 			_, _ = fmt.Fprint(r.out(), r.quarantinedSummary())
 			_, _ = fmt.Fprint(r.out(), r.refusedSetsSummary())
+			_, _ = fmt.Fprint(r.out(), r.earlierSetLossesSummary())
 			if _, err := pp.Fprintf(r.out(), "\n<=========================================> \n\n"); err != nil {
 				utils.LogError(r.logger, err, "failed to print separator")
 				return
@@ -9411,6 +9425,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 			_, _ = fmt.Fprint(r.out(), r.quarantinedSummary())
 			_, _ = fmt.Fprint(r.out(), r.refusedSetsSummary())
+			_, _ = fmt.Fprint(r.out(), r.earlierSetLossesSummary())
 			_, _ = fmt.Fprint(r.out(), "\n<=========================================> \n\n")
 		}
 	} else if refused := r.refusedSetsSummary(); refused != "" {

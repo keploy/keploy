@@ -1217,9 +1217,14 @@ func (a *AgentClient) readMappings(ctx context.Context, res *http.Response, mapp
 }
 
 func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) (retErr error) {
+	// The test set keploy test starts the session for (models.OutgoingReq.
+	// TestSet), told again to a restarted agent with the options.
+	set := models.TestSetSessionOf(ctx)
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			a.session().record(stepMockOutgoing, func(c context.Context) error { return a.MockOutgoing(c, opts) })
+			a.session().record(stepMockOutgoing, func(c context.Context) error {
+				return a.MockOutgoing(models.WithTestSetSession(c, set), opts)
+			})
 		}
 	}()
 	a.pushContainers(ctx)
@@ -1235,6 +1240,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	// make a request to the server to mock outgoing
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
+		TestSet:         set,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
