@@ -1277,7 +1277,7 @@ func (dc *decider) echoedOutside(c changedInstant, served []Earlier) (mock strin
 		return "", false, false
 	}
 	if i := slices.IndexFunc(dc.set, func(g GivenPlaces) bool { return namesApart(g.fView, *c.lm, *c.rm) }); i >= 0 {
-		return dc.set[i].mock, slices.ContainsFunc(dc.set[i].fView, func(v givenMoment) bool { return namesApartFine(v.m, *c.lm, *c.rm, nil) }), true
+		return dc.set[i].mock, slices.ContainsFunc(dc.set[i].fView, func(v givenMoment) bool { return namesApartFine(v.m, *c.lm, *c.rm) }), true
 	}
 	op := dc.outside()
 	pair := []driftedInstant{{rec: *c.rm, live: *c.lm}}
@@ -1292,7 +1292,7 @@ func (dc *decider) echoedOutside(c changedInstant, served []Earlier) (mock strin
 		return namesMomentApart(g.m, *c.lm, *c.rm, nil) || !g.at.After(dc.in.At) && namesMomentApart(g.m, *c.rm, *c.lm, nil)
 	}); i >= 0 {
 		g := op.answers[i]
-		return g.mock, namesApartFine(g.m, *c.lm, *c.rm, nil) || !g.at.After(dc.in.At) && namesApartFine(g.m, *c.rm, *c.lm, nil), true
+		return g.mock, namesApartFine(g.m, *c.lm, *c.rm) || !g.at.After(dc.in.At) && namesApartFine(g.m, *c.rm, *c.lm), true
 	}
 	return "", fine, true
 }

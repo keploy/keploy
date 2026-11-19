@@ -636,11 +636,10 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 }
 
 // echoedElsewhereAt is echoedElsewhere, and fine: an instant the echo read
-// that names a moment of one of the pairs it took for a copy (echoMatch) by
-// one of its rules, as echoedElsewhere names it (namesMomentApart), names it
-// at a cut finer than a millisecond (namesApartFine): what F saw, among what
-// F gave the application, or what it was recorded with, among what the
-// recordings hold.
+// names a moment of one of the pairs it took for a copy (echoMatch) apart
+// from the other run's at a cut finer than a millisecond, by any rule
+// (namesApartFine): what F saw, among what F gave the application, or what
+// it was recorded with, among what the recordings hold.
 func (dc *DriftCache) echoedElsewhereAt(pairs []driftedInstant, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) (why string, fine bool) {
 	if len(pairs) == 0 {
 		return "", false
@@ -666,8 +665,8 @@ func (dc *DriftCache) echoedElsewhereAt(pairs []driftedInstant, at time.Time, se
 		return "", false
 	}
 	for _, e := range echoed {
-		fine = fine || slices.ContainsFunc(held.list, func(h moment) bool { return namesApartFine(h, e.live, e.rec, e.rules) }) ||
-			slices.ContainsFunc(recorded.list, func(h moment) bool { return namesApartFine(h, e.rec, e.live, e.rules) })
+		fine = fine || slices.ContainsFunc(held.list, func(h moment) bool { return namesApartFine(h, e.live, e.rec) }) ||
+			slices.ContainsFunc(recorded.list, func(h moment) bool { return namesApartFine(h, e.rec, e.live) })
 	}
 	for _, g := range op.answers {
 		for _, e := range echoed {

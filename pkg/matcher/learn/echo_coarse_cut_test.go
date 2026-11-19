@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // An audit's nanosecond clock read (an insert's auditedAtNanos, a
@@ -90,7 +91,8 @@ func echoPg(name string, at time.Time, word string) Raw {
 // refused at once, though the call's own window holds the read; one that
 // names it at a second or at the hour defers to that window, as an answer of
 // the scope does, whether it stands in another test's answer or in a
-// recording of the set F gave earlier.
+// recording of the set F gave earlier, as recorded or in round F's view of
+// it.
 func TestOutcomeAFineHoldOutsideTheScopeIsRefusedThoughTheWindowHoldsTheRead(t *testing.T) {
 	rNs, fNs := int64(1795035151700359825), int64(1795035685607825904)
 	hourAt := time.Unix(1795035600, 500_000_000)
@@ -99,7 +101,7 @@ func TestOutcomeAFineHoldOutsideTheScopeIsRefusedThoughTheWindowHoldsTheRead(t *
 		path, rec, live string
 		rAt, fAt        time.Time
 	}
-	decide := func(c call, window bool, given []Raw, raw ...Raw) Decision {
+	decide := func(c call, window bool, given []GivenPlaces, raw ...Raw) Decision {
 		var w *Window
 		if window {
 			w = &Window{Rec: Span{From: c.rAt.Add(-5 * time.Millisecond), To: c.rAt}, F: Span{From: c.fAt.Add(-5 * time.Millisecond), To: c.fAt}}
@@ -107,13 +109,7 @@ func TestOutcomeAFineHoldOutsideTheScopeIsRefusedThoughTheWindowHoldsTheRead(t *
 		in := iCall(c.path, String, c.rec, c.live, c.rAt, c.fAt, w, nil, raw)
 		in.Drifts = oClientDrifts()
 		if given != nil {
-			in.Given = func() ([]GivenPlaces, error) {
-				gs := make([]GivenPlaces, 0, len(given))
-				for _, g := range given {
-					gs = append(gs, PlacesOf(g))
-				}
-				return gs, nil
-			}
+			in.Given = func() ([]GivenPlaces, error) { return given, nil }
 		}
 		d := Decide(in)
 		if len(d) != 1 {
@@ -162,6 +158,56 @@ func TestOutcomeAFineHoldOutsideTheScopeIsRefusedThoughTheWindowHoldsTheRead(t *
 	refused("the hour, and the recorded second in another test's answer, no window", decide(sec, false, nil, hour, recSecond, unrelatedAt(sec)), "instant-another-scope")
 
 	// The hour in a recording of the set F gave earlier.
-	iClock(t, "the hour in a recording of the set", decide(ns, true, []Raw{hour}, unrelatedAt(ns)))
-	refused("the hour in a recording of the set, no window", decide(ns, false, []Raw{hour}, unrelatedAt(ns)), "instant-another-scope")
+	iClock(t, "the hour in a recording of the set", decide(ns, true, []GivenPlaces{PlacesOf(hour)}, unrelatedAt(ns)))
+	refused("the hour in a recording of the set, no window", decide(ns, false, []GivenPlaces{PlacesOf(hour)}, unrelatedAt(ns)), "instant-another-scope")
+
+	// The hour in round F's view of a recording of the set, which the
+	// recording itself did not hold (an hour before the recorded one): what
+	// F's serve of it was told to give, read under the proven switch only
+	// (GivenPlaces.fView). It names F's moment at the hour, so it defers to
+	// the window as the recording's own hour does; F's very nanosecond in
+	// that view is a pick from it, refused at once.
+	t.Setenv(provenswitch.Env, "1")
+	viewed := func(word string) []GivenPlaces {
+		g := PlacesOf(echoPg("mock-audits", hourAt, "1795028400").ServedAs(1).ServedAsRecorded())
+		g.fView = viewAnswerMoments(echoPg("mock-audits", hourAt, word))
+		if len(g.fView) == 0 {
+			t.Fatalf("round F's view %q holds no instant", word)
+		}
+		for i := range g.fView {
+			g.fView[i].at = g.at
+		}
+		return []GivenPlaces{g}
+	}
+	iClock(t, "the hour in round F's view of a recording of the set", decide(ns, true, viewed("1795035600"), unrelatedAt(ns)))
+	refused("the hour in round F's view of a recording of the set, no window", decide(ns, false, viewed("1795035600"), unrelatedAt(ns)), "instant-another-scope")
+	refused("F's nanosecond in round F's view of a recording of the set", decide(ns, true, viewed(fWord), unrelatedAt(ns)), "instant-another-scope")
+}
+
+// namesApartFine reads every rule that names the moment: a place holding it
+// at a cut finer than a millisecond (the same moment at a fine resolution,
+// or a nanosecond instant whose microsecond the moment is) names it finely
+// whichever rule found it, unless that cut names the other run's moment
+// too; one whose millisecond, second or hour it is names it only at that
+// cut.
+func TestNamesApartFineReadsEveryRuleAtAFineCut(t *testing.T) {
+	ns, other := momentOf(t, "2026-11-19T21:00:00.123456789Z"), momentOf(t, "2026-11-19T20:40:00.987654321Z")
+	us := momentOf(t, "2026-11-19T21:00:00.123456Z")
+	for _, c := range []struct {
+		what        string
+		h, m, other moment
+		want        bool
+	}{
+		{"the same nanosecond", ns, ns, other, true},
+		{"the same nanosecond, which the other run's moment is too", ns, ns, ns, false},
+		{"the same second", momentOf(t, "2026-11-19T21:00:00Z"), momentOf(t, "2026-11-19T21:00:00Z"), other, false},
+		{"a nanosecond whose microsecond the moment is", ns, us, other, true},
+		{"a nanosecond whose microsecond both runs' moments are", ns, us, momentOf(t, "1795122000123456"), false},
+		{"a nanosecond whose millisecond the moment is", ns, momentOf(t, "2026-11-19T21:00:00.123Z"), other, false},
+		{"a nanosecond whose second the moment is", ns, momentOf(t, "2026-11-19T21:00:00Z"), other, false},
+	} {
+		if got := namesApartFine(c.h, c.m, c.other); got != c.want {
+			t.Errorf("%s: namesApartFine = %v, want %v", c.what, got, c.want)
+		}
+	}
 }
