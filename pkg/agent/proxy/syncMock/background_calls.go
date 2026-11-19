@@ -133,7 +133,9 @@ func (m *SyncMockManager) SetBackgroundRules(dest string, rules []models.WorkerM
 // it) names its call. Called by AddMock before it takes mu.
 func (m *SyncMockManager) markBackground(mock *models.Mock, dest string, known bool) {
 	b := &m.bg
-	if !b.any.Load() || mock == nil || !known || provenswitch.On() {
+	// No proven-switch check here: SetBackgroundRules sets no rule under it,
+	// so any is false, and this runs for every mock.
+	if !b.any.Load() || mock == nil || !known {
 		return
 	}
 	all := b.rules.Load()
@@ -265,4 +267,62 @@ func (m *SyncMockManager) BackgroundCalls() (sent, repeats uint64) {
 		return 0, 0
 	}
 	return m.bg.kept.Load(), m.bg.repeats.Load()
+}
+
+// noteWaitingBackgroundLocked notes a call a worker-mock rule names, requested
+// at at, buffered to wait for a request to claim it or for its time to pass
+// (bgOldest). Caller holds mu.
+func (m *SyncMockManager) noteWaitingBackgroundLocked(at time.Time) {
+	if !m.bgWaiting || at.Before(m.bgOldest) {
+		m.bgOldest = at
+	}
+	m.bgWaiting = true
+}
+
+// sendDueSettledBackgroundLocked keeps, to be sent with no owner
+// (handBackgroundLocked), the calls a worker-mock rule names that the settled
+// prefix holds and that no request may claim any more (backgroundDueLocked).
+// The prefix is walked only once the oldest call waiting is due by its time
+// (or the recording is stopping): a timer's call waits StaleHorizon, so a
+// recording with a rule walks it about once a flush, not once a resolve. The
+// prefix keeps the rest, settled, in their order, and bgOldest is read again
+// from what waits in it; a call the walk after it keeps is noted as it is
+// added. Counted in t. Caller holds mu.
+func (m *SyncMockManager) sendDueSettledBackgroundLocked(t *dropTally) {
+	if !m.bgWaiting {
+		return
+	}
+	if at := m.bgOldest; !at.IsZero() && m.stopAt.IsZero() && !at.Before(time.Now().Add(-StaleHorizon)) {
+		return
+	}
+	settled := m.settledLocked()
+	at := m.settledTimes(settled)
+	keep := 0
+	m.bgWaiting, m.bgOldest = false, time.Time{}
+	for i := 0; i < settled; i++ {
+		mk := m.buffer[i]
+		if mk != nil && mk.TestModeInfo.Background {
+			if m.backgroundDueLocked(mk) {
+				m.keepBackgroundLocked(mk, t)
+				continue
+			}
+			m.noteWaitingBackgroundLocked(mk.Spec.ReqTimestampMock)
+		}
+		m.buffer[keep] = mk
+		at[keep] = at[i]
+		keep++
+	}
+	if keep < settled {
+		n := copy(m.buffer[keep:], m.buffer[settled:])
+		clear(m.buffer[keep+n:])
+		m.buffer = m.buffer[:keep+n]
+		m.keepSettledLocked(keep, at)
+	}
+	// The calls after the prefix are walked by the flush, and those it keeps
+	// wait on: noted again.
+	for _, mk := range m.buffer[keep:] {
+		if mk != nil && mk.TestModeInfo.Background {
+			m.noteWaitingBackgroundLocked(mk.Spec.ReqTimestampMock)
+		}
+	}
 }

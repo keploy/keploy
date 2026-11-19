@@ -438,6 +438,14 @@ type SyncMockManager struct {
 	// output wired (handOwedLocked), one copy of each call
 	// (backgroundCalls.repeat). Guarded by mu.
 	background []*models.Mock
+	// bgWaiting says a call a worker-mock rule names may wait in the buffer
+	// for no request to claim it any more, and bgOldest is the request time
+	// of the oldest such call: a flush walks the settled prefix for the due
+	// ones only once that one is due (sendDueSettledBackgroundLocked). A call
+	// that left the buffer another way may leave it too old, which costs one
+	// walk that finds nothing. Guarded by mu.
+	bgWaiting bool
+	bgOldest  time.Time
 	// bg is the recording's worker-mock rules and the calls sent as
 	// background (background_calls.go). Its own lock.
 	bg backgroundCalls
@@ -3396,29 +3404,21 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) MockDrop {
 	case bound && !m.firstReqSeen:
 		m.noteSending(mock) // under mu: it leaves no gap for PendingIn
 		m.mu.Unlock()
-		// A call a worker-mock rule names, made before any request: no test
-		// owns it, so a copy of a call sent already is let go, as a
-		// cleanup's background call is (sendTaken). Taken, not dropped: it
-		// is no loss to the recording.
-		var call backgroundCall
-		if mock.TestModeInfo.Background {
-			var repeat bool
-			if call, repeat = m.backgroundRepeat(mock); repeat {
-				m.sent(mock)
-				return MockTaken
-			}
-		}
+		// Every copy, a call a worker-mock rule names too: no cleanup would
+		// drop it here. A recording whose requests the manager never learns
+		// of (no --sync, no static dedup: nothing calls
+		// SetFirstRequestSignaled) sends every mock here, its tests' own
+		// calls among them; only a copy a cleanup would have dropped is
+		// one of a call (sendTaken).
 		// Dropped at once (the output closed since outChanStatus, or the
 		// byte bound) or taken: delivered, or queued for the drainer, whose
 		// drop of it later is said there (dropOut), not here.
-		return m.send(mock, "", func(delivered bool) {
-			if !delivered {
-				m.bg.forget(call)
-			}
-			m.sent(mock)
-		})
+		return m.send(mock, "", func(bool) { m.sent(mock) })
 	default:
 		m.buffer = append(m.buffer, mock)
+		if mock != nil && mock.TestModeInfo.Background {
+			m.noteWaitingBackgroundLocked(mock.Spec.ReqTimestampMock)
+		}
 		m.mu.Unlock()
 		// !bound here means outChan was never wired (closed was handled
 		// above). For the package-global manager the proxy binds outChan
@@ -3726,6 +3726,11 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mocksToSend []ownedMock, lateMappings map[string][]string, gaveUp []*Window) {
 	openFrom, open := m.openFromLocked()
 	var refs ownerRefs
+
+	// The calls a worker-mock rule names that the settled prefix holds, and
+	// that no request may claim any more, go first: the walk below starts
+	// after the prefix.
+	m.sendDueSettledBackgroundLocked(tally)
 
 	// A settled mock (settledPrefix) is one the flush keeps (flushKeep): the
 	// prefix stays where it is, and the walk starts after it.
@@ -4991,6 +4996,7 @@ func (m *SyncMockManager) StartRecordSession() {
 	// A previous recording's background calls no stream of this one takes.
 	clear(m.background)
 	m.background = nil
+	m.bgWaiting, m.bgOldest = false, time.Time{}
 	m.mu.Unlock()
 	m.EndStoppedRecording()
 }

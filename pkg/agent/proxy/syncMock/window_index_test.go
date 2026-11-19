@@ -451,8 +451,28 @@ func mockOf(row int, at time.Time, kind int) *models.Mock {
 		mk.Spec.Metadata[models.MetadataUndeliveredKey] = models.MetadataUndelivered
 	case 4:
 		mk.Spec.ReqTimestampMock = time.Time{}
+	case 5:
+		// A background call: twinTimerRule names it by its destination (a
+		// kind whose request a rule does not read, as an HTTP rule needs one).
+		mk.Kind = models.GENERIC
+		mk.Spec.Metadata["destAddr"] = "timer:1"
 	}
 	return mk
+}
+
+// twinTimerRule names mockOf's background calls (kind 5).
+var twinTimerRule = models.WorkerMockRule{ID: "timer", Kind: string(models.GENERIC), Match: map[string]string{"destination": "timer:1"}}
+
+// renoteBackground has s's manager note again the background calls its buffer
+// holds, as a row that rewrote their request times leaves them
+// (bgOldest follows each call's time, which the manager never moves).
+func (s *twinSide) renoteBackground() {
+	s.m.bgWaiting, s.m.bgOldest = false, time.Time{}
+	for _, mk := range s.m.buffer {
+		if mk != nil && mk.TestModeInfo.Background {
+			s.m.noteWaitingBackgroundLocked(mk.Spec.ReqTimestampMock)
+		}
+	}
 }
 
 // TestPassesThatStepOverSettledMocksDecideAsTheWalkOfEveryMockDid drives two
@@ -492,6 +512,13 @@ func mockOf(row int, at time.Time, kind int) *models.Mock {
 // them, and no window is resolved over the hour they move to. The bursts are
 // ten hours ahead, where no mock is.
 func TestPassesThatStepOverSettledMocksDecideAsTheWalkOfEveryMockDid(t *testing.T) {
+	// The background calls the seeds with a rule sent: some, over the run.
+	var backgroundSent uint64
+	t.Cleanup(func() {
+		if backgroundSent == 0 {
+			t.Error("no seed with a worker-mock rule sent a background call: the rule's paths went untested")
+		}
+	})
 	for seed := range uint64(8) {
 		t.Run(fmt.Sprint("seed", seed), func(t *testing.T) {
 			r := rand.New(rand.NewPCG(seed, 0xd1ff))
@@ -517,9 +544,15 @@ func TestPassesThatStepOverSettledMocksDecideAsTheWalkOfEveryMockDid(t *testing.
 			bound := seed%4 != 3 // one seed in four wires its output late
 			a, b := newTwinSide(bound), newTwinSide(bound)
 			sides := []*twinSide{a, b}
-			// Half the seeds' clients can be told of a revoke.
+			// Half the seeds' clients can be told of a revoke; the other half's
+			// recordings have a worker-mock rule, which names one in three of
+			// a test's own mocks (mockOf's kind 5).
+			withRule := seed%2 == 1
 			for _, s := range sides {
 				s.m.SetRevokeCapable(seed%2 == 0)
+				if withRule {
+					s.m.SetBackgroundRules("", []models.WorkerMockRule{twinTimerRule})
+				}
 			}
 			t.Cleanup(func() {
 				for _, s := range sides {
@@ -570,6 +603,9 @@ func TestPassesThatStepOverSettledMocksDecideAsTheWalkOfEveryMockDid(t *testing.
 					span = 128
 					when := at(base)
 					span = 64
+					if withRule && kind == 0 && row%3 == 0 {
+						kind = 5
+					}
 					did = fmt.Sprintf("add %d %d", row, kind)
 					each(func(s *twinSide) { s.m.AddMock(mockOf(row, when, kind)) })
 				case op < 54:
@@ -703,6 +739,7 @@ func TestPassesThatStepOverSettledMocksDecideAsTheWalkOfEveryMockDid(t *testing.
 						if i < len(s.m.settled.at) {
 							s.m.settled.at[i] = now
 						}
+						s.renoteBackground()
 						s.m.mu.Unlock()
 						s.m.SetMemoryPressure(true)
 					})
@@ -793,6 +830,7 @@ func TestPassesThatStepOverSettledMocksDecideAsTheWalkOfEveryMockDid(t *testing.
 						for i := range min(len(s.m.settled.at), len(s.m.buffer)) {
 							s.m.settled.at[i] = s.m.buffer[i].Spec.ReqTimestampMock
 						}
+						s.renoteBackground()
 						s.m.mu.Unlock()
 					})
 				default:
@@ -836,6 +874,16 @@ func TestPassesThatStepOverSettledMocksDecideAsTheWalkOfEveryMockDid(t *testing.
 			}
 			if done["new output bound"]+done["output wired"] == 0 {
 				t.Fatalf("no output was bound after the first: %v", done)
+			}
+			// The seeds with a rule sent the same background calls on both.
+			if withRule {
+				sa, ra := a.m.BackgroundCalls()
+				sb, rb := b.m.BackgroundCalls()
+				if sa != sb || ra != rb {
+					t.Fatalf("background calls sent %d/%d, repeats %d/%d: want the same on both managers", sa, sb, ra, rb)
+				}
+				backgroundSent += sa
+				t.Logf("background calls sent %d, repeats let go %d", sa, ra)
 			}
 			da, _ := a.m.passWorkLocked()
 			db, _ := b.m.passWorkLocked()

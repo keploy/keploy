@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // timerRule names an application's timer: an update of its jobs collection,
@@ -266,23 +268,38 @@ func TestABackgroundCallARequestInFlightMayClaimIsHeldForIt(t *testing.T) {
 	})
 }
 
-// A copy of a call sent already before the first request is let go too, and
-// is no loss: AddMock takes it.
-func TestBeforeTheFirstRequestOneCopyOfABackgroundCallIsSent(t *testing.T) {
+// Before the first request every copy of a call a rule names is sent: no
+// cleanup would drop it there. A recording whose requests the manager never
+// learns of (no --sync, no static dedup) sends every mock there for its whole
+// run, its tests' own calls among them: a test that makes the call a rule
+// names keeps its copy. Only a copy a cleanup would have dropped is one of a
+// call.
+func TestBeforeTheFirstRequestEveryCopyOfACallARuleNamesIsSent(t *testing.T) {
 	m := New(zap.NewNop())
 	out := make(chan *models.Mock, 100)
 	m.SetOutputChannel(out)
 	m.SetBackgroundRules("", []models.WorkerMockRule{timerRule})
 	now := time.Now()
-	for i := 0; i < 3; i++ {
-		if got := m.AddMock(mongoUpdate("jobs", now.Add(time.Duration(i)*time.Millisecond))); got != MockTaken {
+	// A boot copy, then 20 tests each making the call itself, the first
+	// request never signalled.
+	for i := 0; i <= 20; i++ {
+		if got := m.AddMock(mongoUpdate("jobs", now.Add(time.Duration(i)*time.Second))); got != MockTaken {
 			t.Fatalf("copy %d: %q, want it taken", i, got)
 		}
+		m.AddMock(mongoUpdate("user", now.Add(time.Duration(i)*time.Second+time.Millisecond)))
 	}
-	m.AddMock(mongoUpdate("user", now))
-	m.AddMock(mongoUpdate("user", now.Add(time.Millisecond)))
-	if c := collections(received(t, m, out)); !slices.Equal(c, []string{"jobs", "user", "user"}) {
-		t.Fatalf("sent %v; want one copy of the timer's call and every other call", c)
+	got := collections(received(t, m, out))
+	jobs := 0
+	for _, c := range got {
+		if c == "jobs" {
+			jobs++
+		}
+	}
+	if jobs != 21 || len(got) != 42 {
+		t.Fatalf("sent %d copies of the call a rule names (of %d mocks); want all 21 of 42", jobs, len(got))
+	}
+	if sent, repeats := m.BackgroundCalls(); sent != 0 || repeats != 0 {
+		t.Fatalf("background calls sent %d, repeats let go %d; want none: no cleanup ran", sent, repeats)
 	}
 }
 
@@ -340,27 +357,200 @@ func TestBackgroundRulesAreEachRecordingsOwn(t *testing.T) {
 	}
 }
 
-// A call a rule names is never left in the settled prefix, which a flush steps
-// over: the next flush must look at it again, to send it once it is due.
-func TestABackgroundCallIsNeverSettled(t *testing.T) {
+// A call a rule names waiting in the buffer is settled as any other, so a
+// resolve still steps over the buffer it has decided: a timer's calls, always
+// waiting, would otherwise have every resolve walk the whole buffer under the
+// manager's lock. A flush still sends it once it is due, and the prefix keeps
+// the rest, in their order.
+func TestAWaitingBackgroundCallStaysSettledAndIsSentOnceDue(t *testing.T) {
 	m, out, _ := bgRig(t, timerRule)
 	now := time.Now()
-	m.AddMock(mongoUpdate("user", now.Add(-2*time.Second)))
-	timer := mongoUpdate("jobs", now.Add(-time.Second))
+	timer := mongoUpdate("jobs", now.Add(-time.Second)) // the oldest, at the front
 	m.AddMock(timer)
+	for i := 0; i < 50; i++ {
+		m.AddMock(mongoUpdate("user", now.Add(time.Duration(i)*time.Millisecond)))
+	}
+	// A kept test elsewhere decides the buffer; then it is settled whole.
+	far := now.Add(time.Hour)
+	m.ResolveRange(far, far.Add(time.Millisecond), "test-9", true, false)
 	m.FlushOwnedWindows()
 	m.mu.Lock()
-	settled := m.settledLocked()
+	settled, buffered := m.settledLocked(), len(m.buffer)
 	m.mu.Unlock()
-	if settled != 1 {
-		t.Fatalf("settled prefix %d; want the call before the background call alone", settled)
+	if buffered != 51 || settled != buffered {
+		t.Fatalf("settled prefix %d of %d buffered; want the whole buffer settled with a background call waiting", settled, buffered)
 	}
-	// Due now: the next flush finds it.
+	if got := received(t, m, out); len(got) != 0 {
+		t.Fatalf("sent %d before the call was due, want none", len(got))
+	}
+	// Due now (its time has passed): the next flush finds it in the prefix.
 	m.mu.Lock()
 	timer.Spec.ReqTimestampMock = now.Add(-time.Minute)
+	m.bgOldest = timer.Spec.ReqTimestampMock
 	m.mu.Unlock()
 	m.FlushOwnedWindows()
 	if c := collections(received(t, m, out)); !slices.Equal(c, []string{"jobs"}) {
 		t.Fatalf("sent %v; want the background call once due", c)
+	}
+	m.mu.Lock()
+	settled, buffered = m.settledLocked(), len(m.buffer)
+	first := m.buffer[0]
+	m.mu.Unlock()
+	if buffered != 50 || settled != 50 || first.TestModeInfo.Background {
+		t.Fatalf("after the send: settled %d of %d buffered; want the other 50 still settled, in order", settled, buffered)
+	}
+}
+
+// A young call a rule names in the settled prefix is sent when the recording
+// stops: no request will claim it then.
+func TestASettledBackgroundCallIsSentAtTheStop(t *testing.T) {
+	m, out, _ := bgRig(t, timerRule)
+	now := time.Now()
+	m.AddMock(mongoUpdate("user", now.Add(-time.Second)))
+	m.AddMock(mongoUpdate("jobs", now))
+	m.FlushOwnedWindows()
+	if got := received(t, m, out); len(got) != 0 {
+		t.Fatalf("sent %d young calls, want none", len(got))
+	}
+	m.NoteStop(time.Now())
+	m.FlushOwnedWindows()
+	if c := collections(received(t, m, out)); !slices.Equal(c, []string{"jobs"}) {
+		t.Fatalf("the stopping recording's flush sent %v; want the background call", c)
+	}
+}
+
+// A background call whose send is dropped (no output wired, so the send
+// fails at once) is forgotten by that send, so the call's next copy is sent:
+// the call would otherwise never reach the recording.
+func TestADroppedBackgroundSendForgetsTheCall(t *testing.T) {
+	m := New(zap.NewNop())
+	m.SetBackgroundRules("", []models.WorkerMockRule{timerRule})
+	first := mongoUpdate("jobs", time.Now())
+	first.TestModeInfo.Background = true
+	m.sendTaken([]ownedMock{{mock: first, background: true}})
+	if _, repeat := m.backgroundRepeat(mongoUpdate("jobs", time.Now())); repeat {
+		t.Fatal("the copy after a dropped send is a repeat: the call would never reach the recording")
+	}
+}
+
+// A background call waiting to be sent is a mock the stop's drain waits for
+// (handOnPendingBefore): it was requested before the stop and is not on the
+// stream yet.
+func TestAKeptBackgroundCallIsPendingUntilSent(t *testing.T) {
+	m := New(zap.NewNop())
+	at := time.Now().Add(-time.Second)
+	m.mu.Lock()
+	m.background = append(m.background, mongoUpdate("jobs", at))
+	m.mu.Unlock()
+	if why := m.handOnPendingBefore(time.Now()); why == "" {
+		t.Fatal("a kept background call requested before the stop is not pending")
+	}
+	if why := m.handOnPendingBefore(at.Add(-time.Second)); why != "" {
+		t.Fatalf("a background call requested after the moment asked is pending: %q", why)
+	}
+}
+
+// A recording's background calls kept but not sent when it ends (its output
+// unwired) are let go with it, and a new recording starts with none: the next
+// recording's stream is no place for them.
+func TestARecordingsKeptBackgroundCallsEndWithIt(t *testing.T) {
+	m := New(zap.NewNop())
+	keep := func() {
+		m.mu.Lock()
+		m.background = append(m.background, mongoUpdate("jobs", time.Now()))
+		m.noteWaitingBackgroundLocked(time.Now())
+		m.mu.Unlock()
+	}
+	held := func() (int, bool) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return len(m.background), m.bgWaiting
+	}
+	keep()
+	m.NoteStop(time.Now())
+	m.EndStoppedRecording()
+	if n, _ := held(); n != 0 {
+		t.Fatalf("%d background calls kept past their recording's end", n)
+	}
+	keep()
+	m.StartRecordSession()
+	if n, waiting := held(); n != 0 || waiting {
+		t.Fatalf("a new recording starts with %d background calls kept (waiting %v)", n, waiting)
+	}
+}
+
+// A recording remembers at most maxBackgroundCalls calls it sent: past it,
+// every copy of a new call is sent, so a rule that names a call per request
+// cannot grow the set without end.
+func TestTheCallsARecordingRemembersAreBounded(t *testing.T) {
+	m, _, _ := bgRig(t, timerRule)
+	for i := 0; i < maxBackgroundCalls; i++ {
+		if _, repeat := m.backgroundRepeat(mongoUpdate(fmt.Sprintf("c%d", i), time.Now())); repeat {
+			t.Fatalf("call %d: a new call is a repeat", i)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, repeat := m.backgroundRepeat(mongoUpdate("past-the-bound", time.Now())); repeat {
+			t.Fatalf("copy %d of a call past the bound is let go; want every copy sent", i)
+		}
+	}
+	m.bg.mu.Lock()
+	n := len(m.bg.sent[""])
+	m.bg.mu.Unlock()
+	if n != maxBackgroundCalls {
+		t.Fatalf("the recording remembers %d calls, want %d", n, maxBackgroundCalls)
+	}
+}
+
+// Under the proven switch a recording's rules are not set, so no mock is
+// tagged: the proven model places the worker scope by its own rules.
+func TestNoRuleIsSetUnderTheProvenSwitch(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := New(zap.NewNop())
+	m.SetBackgroundRules("", []models.WorkerMockRule{timerRule})
+	if m.bg.any.Load() {
+		t.Fatal("rules set under the proven switch")
+	}
+	mk := mongoUpdate("jobs", time.Now())
+	m.markBackground(mk, "", true)
+	if mk.TestModeInfo.Background {
+		t.Fatal("a mock was tagged under the proven switch")
+	}
+}
+
+// BenchmarkResolveWithAWaitingBackgroundCall is
+// BenchmarkResolveOverABufferAndAFullRing's resolve with a worker-mock rule set
+// and one call it names waiting at the front of the buffer, as a timer's
+// always is: a resolve must still step over the buffer it settled, not walk it
+// all again. Run it with a fixed count (-benchtime=200x).
+func BenchmarkResolveWithAWaitingBackgroundCall(b *testing.B) {
+	for _, buffered := range []int{10000, 100000} {
+		b.Run(fmt.Sprintf("buffered=%d/ring=%d", buffered, maxRecentWindows), func(b *testing.B) {
+			rb := newResolveBench(maxRecentWindows, 0)
+			rb.mgr.SetBackgroundRules("", []models.WorkerMockRule{timerRule})
+			rb.mgr.AddMock(mongoUpdate("jobs", rb.gap(0, 0))) // young: it waits
+			gaps := max(rb.ring, 1)
+			for i := range buffered {
+				rb.mgr.AddMock(httpMockAt(rb.gap(i%gaps, 1+i/gaps)))
+			}
+			far := rb.s0.Add(24 * time.Hour)
+			rb.mgr.ResolveRange(far, far, "warm", true, false)
+			sentMocks(rb.out)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				at := rb.s0.Add(-time.Duration(i+1) * time.Millisecond)
+				rb.mgr.AddMock(httpMockAt(at))
+				rb.mgr.ResolveRange(at, at.Add(time.Microsecond), "t", true, false)
+				rb.drain()
+			}
+			b.StopTimer()
+			rb.mgr.mu.Lock()
+			settled, n := rb.mgr.settledLocked(), len(rb.mgr.buffer)
+			rb.mgr.mu.Unlock()
+			if n != buffered+1 || settled != n {
+				b.Fatalf("settled prefix %d of %d buffered; want the whole buffer settled with the background call waiting", settled, n)
+			}
+		})
 	}
 }
