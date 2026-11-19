@@ -14,10 +14,13 @@ import (
 // On macOS, the drain a session's last read and keploy test's set end wait on
 // holds for a connection whose application end ended until the proxy has
 // counted its close and is done with it: whether the application's FIN was
-// taken by the proxy's side, or is held behind bytes the proxy's full receive
-// buffer will not take (only the application's socket, read from macOS's TCP
-// table, shows it closed). A connection the application holds open never
-// holds it.
+// taken by the proxy's side, or the application closed with bytes the
+// proxy's full receive buffer had not taken. macOS's proxy side can take that
+// FIN too (Linux's holds it behind the bytes,
+// TestADrainWaitsForTheCloseOfAConnectionTheApplicationsStopEnded). Until
+// that FIN is taken, the application's socket, read from macOS's TCP table,
+// shows it on its way: one of the two tells, so the row asks only that the
+// drain holds. A connection the application holds open never holds it.
 func TestADrainWaitsForTheCloseOfAConnectionTheApplicationsStopEndedOnDarwin(t *testing.T) {
 	t.Run("the application's FIN taken", func(t *testing.T) {
 		p, app, proxySide, reader := darwinPair(t)
@@ -39,7 +42,7 @@ func TestADrainWaitsForTheCloseOfAConnectionTheApplicationsStopEndedOnDarwin(t *
 			t.Fatalf("the drain: %v", err)
 		}
 	})
-	t.Run("the application's FIN held behind the bytes", func(t *testing.T) {
+	t.Run("the application closed with the proxy's buffer full", func(t *testing.T) {
 		p, app, proxySide, reader := darwinPair(t)
 		_ = proxySide.SetReadBuffer(4096)
 		_ = app.SetWriteBuffer(4096)
@@ -48,9 +51,8 @@ func TestADrainWaitsForTheCloseOfAConnectionTheApplicationsStopEndedOnDarwin(t *
 			t.Fatalf("premise: the write fills the buffers and times out, wrote %d, %v", n, err)
 		}
 		_ = app.Close()
-		if ps := readProxySide(proxySide); ps.err != nil || peerEnded(ps.state) {
-			t.Fatalf("premise: the proxy's side has not taken the FIN held behind the bytes (state %d, %v)", ps.state, ps.err)
-		}
+		ps := readProxySide(proxySide)
+		t.Logf("the proxy's side at the drain: state %d, peer ended %v, %v", ps.state, ps.err == nil && peerEnded(ps.state), ps.err)
 		got := drainReturns(context.Background(), p)
 		drainHolds(t, got, "while the application's socket had closed and the proxy had not counted its close")
 		_ = reader.Close() // its close counts the bytes it tosses, or that it cannot tell

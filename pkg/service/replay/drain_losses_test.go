@@ -127,3 +127,46 @@ func TestASetsEndDrainsOnlyUnderTheSwitchWithAnAgent(t *testing.T) {
 		})
 	}
 }
+
+// A set whose application runs on past its end (--keep-app-alive keeps it
+// across sets, and this set's end did not stop it) has no stop's closes to
+// count: its end asks the agent for no drain, and its reads are as they
+// were. The final attempt of the run's last set stops that application, so
+// its end drains once, before the set's own take.
+func TestASetsEndDrainsOnlyWhenItStoppedItsApplication(t *testing.T) {
+	provenOn(t, true)
+	for _, c := range []struct {
+		name        string
+		last, final bool
+		drains      bool
+	}{
+		{name: "another set, its application kept running", last: false, final: true},
+		{name: "an earlier attempt of the last set, its application kept running", last: true, final: false},
+		{name: "the last set's final attempt, which stops it", last: true, final: true, drains: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0) // every test case passes
+			h.replayer.config.Test.Mocking = true
+			instr := &drainInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}}}
+			h.replayer.instrumentation = instr
+			h.replayer.markPIDMaps(context.Background())
+			stops := 0
+			h.replayer.isLastTestSet, h.replayer.finalAttempt = c.last, c.final
+			h.replayer.keepAliveStop = func() string { stops++; return "" }
+			status := h.runServing(t)
+			if status != models.TestSetStatusPassed {
+				t.Fatalf("set %q, want PASSED", status)
+			}
+			if stopped := stops == 1; stopped != c.drains {
+				t.Fatalf("premise: the set's end stopped the application %d time(s), want stopped %v", stops, c.drains)
+			}
+			got := strings.Join(instr.order, ",")
+			if instr.drained != c.drains {
+				t.Fatalf("the agent asked to drain: %v (drain and takes %q), want %v", instr.drained, got, c.drains)
+			}
+			if c.drains && !strings.HasSuffix(got, "drain,take") {
+				t.Fatalf("drain and takes %q, want the set's end to drain before its own take", got)
+			}
+		})
+	}
+}
