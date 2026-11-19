@@ -79,7 +79,7 @@ func TestADrainNamesWhereHandleConnectionServedAStuckConnection(t *testing.T) {
 	go func() { done <- p.handleConnection(context.Background(), conn) }()
 	t.Cleanup(func() {
 		close(sp.release)
-		awaitEvent(t, done, "handleConnection returning once its parser is released")
+		_ = awaitEvent(t, done, "handleConnection returning once its parser is released")
 	})
 	if _, err := io.WriteString(app, "hello\n"); err != nil {
 		t.Fatal(err)
