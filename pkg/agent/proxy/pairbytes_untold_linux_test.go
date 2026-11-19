@@ -64,6 +64,31 @@ func use(t *testing.T, app *net.TCPConn, tracked *trackedConn) {
 	}
 }
 
+// finAtProxy has the application send its FIN, after every byte it wrote,
+// and waits until the proxy's side has taken it (finSeen).
+func finAtProxy(t *testing.T, p *Proxy, app *net.TCPConn) {
+	t.Helper()
+	if err := app.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	pc := pairedConnOf(t, p, 1)
+	for deadline := time.Now().Add(10 * time.Second); !finSeen(pc); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the application's FIN never reached the proxy's side")
+		}
+	}
+}
+
+// failUnreadAtClose makes the close's read of what the proxy's socket holds
+// unread fail (pairClosing's read-error path): with the application's FIN
+// taken, the one close keploy cannot account for on Linux.
+func failUnreadAtClose(t *testing.T) {
+	t.Helper()
+	was := readUnreadAtClose
+	readUnreadAtClose = func(*net.TCPConn) (int, error) { return 0, errors.New("bad file descriptor") }
+	t.Cleanup(func() { readUnreadAtClose = was })
+}
+
 // endWait is a test's end waiting for the bytes on the connection.
 func endWait(t *testing.T, p *Proxy, test string) {
 	t.Helper()
@@ -80,18 +105,23 @@ func endWait(t *testing.T, p *Proxy, test string) {
 // that waited for them. A test that never used it is untouched, whatever
 // test is open at the close: the macOS m5-miss race closed a connection used
 // in the miss test after that test ended, and the test open then (TestClock,
-// which never used it) came out failed, then not judged.
+// which never used it) came out failed, then not judged. What the proxy
+// moved is all the application sent only once the proxy's side has taken
+// the application's FIN: before it, bytes the open test wrote may be on
+// their way unseen, and the open test is charged, on Linux as on macOS.
 func TestAnUntoldCloseIsOnlyTheTestsThatUsedTheConnection(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// ended: the test that used it ended before the close; usedAfter:
-		// the test open at the close used it too.
-		ended, usedAfter bool
-		charged          uint64
+		// the test open at the close used it too; fin: the application's
+		// FIN reached the proxy's side before the close.
+		ended, usedAfter, fin bool
+		charged               uint64
 	}{
-		{"the close in the test that used it", false, false, 1},
-		{"the close after the test that used it ended, in one that did not", true, false, 0},
-		{"the close after the test that used it ended, in one that used it too", true, true, 1},
+		{"the close in the test that used it, the FIN taken", false, false, true, 1},
+		{"the close after the test that used it ended, in one that did not, the FIN taken", true, false, true, 0},
+		{"the close after the test that used it ended, in one that did not, the FIN not taken", true, false, false, 1},
+		{"the close after the test that used it ended, in one that used it too, the FIN taken", true, true, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, app, tracked := untoldPair(t)
@@ -103,8 +133,15 @@ func TestAnUntoldCloseIsOnlyTheTestsThatUsedTheConnection(t *testing.T) {
 			if tc.usedAfter {
 				use(t, app, tracked)
 			}
-			emptyDiagFree(t)
-			failLookupWritten(t)
+			if tc.fin {
+				// Taken, the FIN makes what the application wrote known;
+				// the close's read of what is unread fails.
+				finAtProxy(t, p, app)
+				failUnreadAtClose(t)
+			} else {
+				emptyDiagFree(t)
+				failLookupWritten(t)
+			}
 			_ = tracked.Close()
 			if err := p.PairedBytesErr(); err != nil {
 				t.Fatalf("PairedBytesErr = %v, want nil: no later wait is answered by this close", err)
@@ -118,7 +155,7 @@ func TestAnUntoldCloseIsOnlyTheTestsThatUsedTheConnection(t *testing.T) {
 			if owned := p.TakeOwnedLosses(); len(owned) != 0 {
 				t.Errorf("owned %+v, want none: no end was cut short", owned)
 			}
-			said := lines.FilterMessageSnippet("keploy cannot tell what the application had written").All()
+			said := lines.FilterMessageSnippet("keploy cannot tell").All()
 			if len(said) != 1 {
 				t.Fatalf("%d lines say the close cannot tell what was written, want one: %+v", len(said), lines.All())
 			}
@@ -152,8 +189,8 @@ func TestAnUntoldCloseIsOwnedByATestCutShortOnTheConnection(t *testing.T) {
 			if usedAfter {
 				use(t, app, tracked)
 			}
-			emptyDiagFree(t)
-			failLookupWritten(t)
+			finAtProxy(t, p, app)
+			failUnreadAtClose(t)
 			_ = tracked.Close()
 			owned := p.TakeOwnedLosses()
 			if len(owned) != 1 || owned[0].Test != "TestStock" || owned[0].Loss.Kind != models.CaptureLossAppBytesUntold || owned[0].Loss.Count != 1 {
@@ -282,7 +319,7 @@ func TestAnUntoldCloseOfBytesAllOwnedByACutEndSparesTheOpenTest(t *testing.T) {
 	if !pc.usedSinceEnd() {
 		t.Fatal("premise: the proxy wrote to the connection in the open test")
 	}
-	p.pairUntold(pc, 5, false, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread")
+	p.pairUntold(pc, 5, "keploy cannot tell whether its proxy closed a connection with bytes the application wrote still unread")
 	owned := p.TakeOwnedLosses()
 	if len(owned) != 1 || owned[0].Test != "TestStock" || owned[0].Loss.Kind != models.CaptureLossAppBytesUntold {
 		t.Fatalf("owned %+v, want one untold close of TestStock's", owned)

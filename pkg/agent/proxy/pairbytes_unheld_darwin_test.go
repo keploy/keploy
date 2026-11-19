@@ -216,7 +216,8 @@ func TestACloseWaitsForTheFINOfASocketItsHolderClosedOnDarwin(t *testing.T) {
 	t.Run("the proxy's side cannot be read in a test that moved nothing on the connection", func(t *testing.T) {
 		// The FIN went unseen, so bytes of the open test's may be on
 		// their way: it is charged though the proxy moved nothing on the
-		// connection since the last end was done with it (closeUnseen).
+		// connection since the last end was done with it (pairUntold: the
+		// side has not taken the FIN).
 		p, app, reader, logs := unheldPair(t, true)
 		pc := pairedConnOf(t, p, 1)
 		p.paired.markEnd(1, 0)
@@ -243,7 +244,8 @@ func TestACloseWaitsForTheFINOfASocketItsHolderClosedOnDarwin(t *testing.T) {
 // saw it, is accounted for (TestACloseWaitsForTheFINOfASocketItsHolderClosedOnDarwin).
 // One that did not wait for it, no application socket read from its holder
 // yet, cannot rule out bytes of the open test's on their way unseen: it
-// charges the open test (closeUnseen), left NOT JUDGED.
+// charges the open test (pairUntold: the side has not taken the FIN), left
+// NOT JUDGED.
 func TestAnEndsWaitMarksTheConnectionsItAnswersForOnDarwin(t *testing.T) {
 	p, app, _, reader := darwinPair(t)
 	p.settleReads = true

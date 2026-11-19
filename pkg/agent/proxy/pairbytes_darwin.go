@@ -603,17 +603,17 @@ func (p *Proxy) noteWroteAtClose(ctx context.Context, pc *pairedConn) {
 // the open test wrote may be on their way before that FIN, unseen: the close
 // is unknown, and the tests the connection could have served, the open test
 // of its worker among them whether or not the proxy moved bytes on it, are
-// left without a verdict (closeUnseen).
+// left without a verdict (closeUnknown: the side has not taken the FIN).
 // keploy's own stop (ctx) ends the wait and charges nothing.
 func (p *Proxy) noteUnheldAtClose(ctx context.Context, pc *pairedConn) {
 	ps, why := p.unheldSideAtClose(ctx, pc)
 	switch {
 	case ctx.Err() != nil:
 	case ps.err != nil:
-		p.closeUnseen(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side of it cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err))
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side of it cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, ps.err))
 	case peerEnded(ps.state):
 	default:
-		p.closeUnseen(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side has not taken its FIN or reset (it is in %s): bytes it wrote may still be on their way, as a socket its holder closed lives on until they are acknowledged (%s); %s", models.ErrProxyConnsUnsupported, pc.app, tcpStateName(ps.state), xnuHidden, why))
+		p.closeUnknown(pc, fmt.Errorf("%w: macOS's TCP table does not list the application's end of a connection to the proxy, %s, as the proxy closes it, no process keploy's agent may read holds it, and the proxy's side has not taken its FIN or reset (it is in %s): bytes it wrote may still be on their way, as a socket its holder closed lives on until they are acknowledged (%s); %s", models.ErrProxyConnsUnsupported, pc.app, tcpStateName(ps.state), xnuHidden, why))
 	}
 }
 

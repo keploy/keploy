@@ -84,14 +84,19 @@ type CaptureLossReporter interface {
 // wait for, and which were lost later, under another test. It is no capture
 // loss of that other test's, and is in no count CaptureLosses reports.
 //
-// One with no Test and a Worker is the loss of the test the test worker
-// whose keploy instance is Worker has open (the kernel's stamp of the
-// process that made the connection): a close of that worker's connection,
-// which no other worker's test used. The agent charges it to that test, and
-// to the run when that worker has none open; never to another worker's.
+// One with no Test and a Worker is a close of a connection of the test
+// worker whose keploy instance is Worker (the kernel's stamp of the process
+// that made the connection), which no other worker's test used. Epoch is
+// that worker's test epoch as the proxy counted it (PairedBytesBeginner):
+// the agent charges it to the test of that worker it began at that epoch
+// alone, while that test is open. One counted in the worker's gap between
+// tests, or under no open test, is the run's, charged to no test: never to
+// the worker's next test, which did not exist when it was counted, and
+// never to another worker's.
 type OwnedLoss struct {
 	Test   string
 	Worker uint32
+	Epoch  uint64
 	Loss   models.CaptureLoss
 }
 
@@ -555,6 +560,18 @@ type PairedBytesWaiter interface {
 // wait began is the ending test's, never the next one's.
 type PairedBytesSettler interface {
 	PairedBytesSettled(worker uint32)
+}
+
+// PairedBytesBeginner is the optional extension of a PairedBytesSettler
+// that keeps, for each test worker (its keploy instance), a test epoch: it
+// moves at each begin of one of that worker's tests the agent tells it
+// (PairedBytesBegun, which returns the epoch the test begins at) and at
+// each end's mark, once the end's settle is done (PairedBytesSettled). A
+// close of that worker's connection is stamped with the epoch as it is
+// counted (OwnedLoss.Epoch): the begun test's while it is open and its end
+// is settling, a newer one in the gap after it, which no test began at.
+type PairedBytesBeginner interface {
+	PairedBytesBegun(worker uint32) uint64
 }
 
 // PairedBytesChecker is the proxy's account of whether it can count the bytes

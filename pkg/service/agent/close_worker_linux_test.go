@@ -14,17 +14,38 @@ import (
 )
 
 // ownedSource is a proxy's owned losses (coreAgent.OwnedLossTaker), each
-// taken once, and no count.
+// taken once, and no count. As the proxy does, it keeps each worker's test
+// epoch (coreAgent.PairedBytesBeginner), moved at each begin it is told and
+// at each end's settle done, and stamps a close of a worker's connection
+// with it as it is put.
 type ownedSource struct {
-	mu    sync.Mutex
-	owned []coreAgent.OwnedLoss
+	mu     sync.Mutex
+	owned  []coreAgent.OwnedLoss
+	epochs map[uint32]uint64
 }
 
 func (s *ownedSource) put(o coreAgent.OwnedLoss) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if o.Test == "" && o.Worker != 0 {
+		o.Epoch = s.epochs[o.Worker]
+	}
 	s.owned = append(s.owned, o)
 }
+
+func (s *ownedSource) move(worker uint32) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.epochs == nil {
+		s.epochs = map[uint32]uint64{}
+	}
+	s.epochs[worker]++
+	return s.epochs[worker]
+}
+
+func (s *ownedSource) PairedBytesBegun(worker uint32) uint64 { return s.move(worker) }
+
+func (s *ownedSource) PairedBytesSettled(worker uint32) { s.move(worker) }
 
 func (s *ownedSource) TakeOwnedLosses() []coreAgent.OwnedLoss {
 	s.mu.Lock()

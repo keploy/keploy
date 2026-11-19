@@ -44,8 +44,10 @@ type pairedConn struct {
 	// untold: a close of it that could not tell whether bytes the
 	// application wrote were on their way was charged, once (pairUntold).
 	// Apart from lost: a loss keploy sees at the same close (bytes it
-	// tosses unread) is charged as well.
-	untold atomic.Bool
+	// tosses unread) is charged as well. untoldSaid: such a close that
+	// charged no test was said, once; it leaves untold unset, so a later
+	// read of the same close that finds a test to charge still charges it.
+	untold, untoldSaid atomic.Bool
 	// used counts the proxy's reads and writes of it that moved bytes
 	// (trackedConn.pairUse), and usedAtEnd is used as the latest test's end
 	// that held it was done with it: as its bytes wait began (markEnd), and
@@ -213,6 +215,11 @@ type pairedConns struct {
 	// was cut short owned (pairLost), under mu, until the agent takes them
 	// (TakeOwnedLosses).
 	owned []agent.OwnedLoss
+	// epochs are, under mu, each test worker's test epoch (by its keploy
+	// instance): moved at each begin of a test of it the agent tells
+	// (PairedBytesBegun) and at each end's settle done (settledEnd). A close
+	// of a worker's connection is stamped with it as it is counted (ownKind).
+	epochs map[uint32]uint64
 }
 
 // maxOwned bounds the owned losses the proxy keeps untaken.
@@ -228,13 +235,18 @@ func (s *pairedConns) own(test string, app netip.AddrPort) {
 	}})
 }
 
-// ownKind notes o, a test's loss or a worker's open test's (OwnedLoss).
+// ownKind notes o, a test's loss or a worker's open test's (OwnedLoss),
+// stamped with its worker's test epoch now, under the hold of mu that keeps
+// it (the agent reads the stamp of a worker's open test's alone): an end's settle done (settledEnd) moves the epoch under
+// mu too, so a loss stamped with a test's epoch is kept before that test's
+// end reads the losses, and one counted after is stamped with the gap's.
 // Bounded while no agent takes them (a run that never reads them): past
 // maxOwned, one entry of no test's and no worker's, the run's, for each kind
 // counts the rest.
 func (s *pairedConns) ownKind(o agent.OwnedLoss) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	o.Epoch = s.epochs[o.Worker]
 	if len(s.owned) >= maxOwned {
 		for i := maxOwned; i < len(s.owned); i++ {
 			if s.owned[i].Loss.Kind == o.Loss.Kind {
@@ -271,15 +283,40 @@ func (s *pairedConns) markEnd(n uint64, worker uint32) {
 // done, each connection that end's bytes wait marked (markEnd): what the
 // settle moved on it after the wait began, the ending test's calls its
 // handler took and answered, is that test's. The next test of worker
-// begins only after the end, so none of it is that test's.
+// begins only after the end, so none of it is that test's. It moves
+// worker's test epoch too: a close of worker's connection counted from here
+// is the gap's, never the ending test's, whose calls the settle answered,
+// nor the next test's, which begins at a newer epoch (PairedBytesBegun). A
+// close counted while the settle ran is the ending test's.
 func (s *pairedConns) settledEnd(worker uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.moveEpoch(worker)
 	for _, pc := range s.byConn {
 		if ofWorker(pc, worker) && pc.ending.CompareAndSwap(true, false) {
 			pc.usedAtEnd.Store(pc.used.Load())
 		}
 	}
+}
+
+// moveEpoch moves worker's test epoch, under mu, and returns the new one.
+func (s *pairedConns) moveEpoch(worker uint32) uint64 {
+	if s.epochs == nil {
+		s.epochs = map[uint32]uint64{}
+	}
+	s.epochs[worker]++
+	return s.epochs[worker]
+}
+
+// PairedBytesBegun is told that a test of worker begins
+// (agent.PairedBytesBeginner): it moves worker's test epoch and returns the
+// one the test begins at. A close of worker's connection counted from here
+// until the test's end's settle is done is stamped with it (ownKind): that
+// test's, and no other's.
+func (p *Proxy) PairedBytesBegun(worker uint32) uint64 {
+	p.paired.mu.Lock()
+	defer p.paired.mu.Unlock()
+	return p.paired.moveEpoch(worker)
 }
 
 // ofWorker says pc is a connection of worker's: any, for worker 0 (a run of

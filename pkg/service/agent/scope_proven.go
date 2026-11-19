@@ -276,6 +276,10 @@ func (o recordedOrder) learnsOnto(id string) bool {
 type scopeTest struct {
 	id    string
 	start time.Time
+	// epoch is its worker's test epoch the proxy began it at
+	// (coreAgent.PairedBytesBeginner): a close of its worker's connection
+	// stamped with it is this test's (chargeCaptureLosses).
+	epoch uint64
 }
 
 // openOf is the ID of the test instance inst has open, "" when none is.
@@ -426,12 +430,24 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// are this session's to report, as the run's: none of its tests is the
 	// test that owned them, which only their words still name.
 	// Bounded, as the proxy's are, while no read takes them.
+	// So are those kept for an earlier session's test still open
+	// (ownedOpen), which no end of this session's takes.
 	left := a.takeOwnedLosses()
+	a.provenMu.Lock()
+	kept := make([]string, 0, len(a.proven.ownedOpen))
+	for id := range a.proven.ownedOpen {
+		kept = append(kept, id)
+	}
+	sort.Strings(kept)
+	for _, id := range kept {
+		for _, c := range a.proven.ownedOpen[id] {
+			left = append(left, coreAgent.OwnedLoss{Loss: c})
+		}
+	}
 	for i := range left {
-		left[i].Test, left[i].Worker = "", 0
+		left[i].Test, left[i].Worker, left[i].Epoch = "", 0, 0
 	}
 	left = boundOwnedLeft(left)
-	a.provenMu.Lock()
 	workers := a.workerIDs()
 	a.proven = provenWire{losses: losses, ownedLeft: left}
 	a.provenMu.Unlock()
@@ -1542,11 +1558,20 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		// to from here are this test's.
 		t.BeginTestOf(worker)
 	}
+	// A close of its worker's connection the proxy counts from here until
+	// its end's settle is done is stamped with the epoch it begins at, and
+	// is its own (chargeCaptureLosses); one counted before, in the gap
+	// since its worker's previous test, is stamped with an older one, and
+	// is the run's. Moved after every settle of the begin's.
+	var epoch uint64
+	if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
+		epoch = pb.PairedBytesBegun(worker)
+	}
 	a.provenMu.Lock()
 	if a.proven.open == nil {
 		a.proven.open = map[uint32]scopeTest{}
 	}
-	a.proven.open[worker] = scopeTest{id: id, start: boundaryTime(at)} // its window's start (BeginScopeAt)
+	a.proven.open[worker] = scopeTest{id: id, start: boundaryTime(at), epoch: epoch} // its window's start (BeginScopeAt)
 	if from != nil {
 		if a.proven.openFrom == nil {
 			a.proven.openFrom = map[string]models.CaptureLosses{}
@@ -2024,12 +2049,14 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	lost, now, err := a.captureLossesSince(ctx, mark, test)
 	// What a cut-short end owned that was counted since: this test's when
 	// it is the owner (its own end was cut short, and the loss counted
-	// before this read), the run's otherwise. A loss of the open test of a
-	// connection's worker (a close of it: coreAgent.OwnedLoss's Worker) is
-	// that worker's open test's alone: this test's when it is that test,
-	// kept for that test's end when another worker's test is (ownedOpen),
-	// and the run's when the worker has none open. None is in the counts,
-	// so none is charged to this test by them, and none to another
+	// before this read), the run's otherwise. A close of a worker's
+	// connection (coreAgent.OwnedLoss's Worker) is the test of that worker
+	// open at the epoch it was stamped with alone: this test's when it is
+	// that test, kept for that test's end when another worker's test is
+	// (ownedOpen), and the run's when that worker's open test began at
+	// another epoch, or none is open: counted in the worker's gap between
+	// tests, it is no test's, and never its next test's. None is in the
+	// counts, so none is charged to this test by them, and none to another
 	// worker's test.
 	var mine models.CaptureLosses
 	taken := a.takeOwnedLosses()
@@ -2037,7 +2064,9 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	for _, o := range taken {
 		owner := o.Test
 		if owner == "" && o.Worker != 0 {
-			owner = a.proven.openOf(o.Worker)
+			if t := a.proven.open[o.Worker]; t.epoch == o.Epoch {
+				owner = t.id
+			}
 			if owner != "" && owner != id {
 				if a.proven.ownedOpen == nil {
 					a.proven.ownedOpen = map[string]models.CaptureLosses{}

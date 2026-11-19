@@ -45,9 +45,10 @@ func TestTheCallsAnEndsSettleAnswersAreTheEndingTests(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.PairedBytesSettled(0) // TestStock's settle is done
-	// TestClock opens, and never uses the connection. The proxy closes it, untold.
-	emptyDiagFree(t)
-	failLookupWritten(t)
+	// TestClock opens, and never uses the connection. The application ends
+	// it, and the proxy closes it, untold.
+	finAtProxy(t, p, app)
+	failUnreadAtClose(t)
 	_ = tracked.Close()
 	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 0 {
 		t.Errorf("the test open at the close, which never used the connection, is charged %d untold close(s), want 0", l)
@@ -199,35 +200,38 @@ func TestAnUnreadableCloseOfBytesAllOwnedByACutEndSparesTheOpenTest(t *testing.T
 	}
 }
 
-// A close that waited for the application's FIN and did not see it
-// (closeUnseen) charges the open test though the proxy moved no bytes on the
-// connection in it: bytes it wrote may be on their way unseen. One that
-// cannot tell for another reason (closeUnknown) charges it only for a use the
-// proxy saw, and says a close charged to no test once, at info level.
+// A close that cannot tell what the application wrote (closeUnknown) whose
+// proxy's side has not taken the application's FIN charges the open test
+// though the proxy moved no bytes on the connection in it: bytes it wrote
+// may be on their way unseen, on Linux as on macOS (where the close waited
+// for that FIN and did not see it). One whose side has taken it charges the
+// open test only for a use the proxy saw, and says a close charged to no
+// test once, at info level.
 func TestAnUntoldCloseThatDidNotSeeTheFINChargesTheOpenTest(t *testing.T) {
-	for _, unseen := range []bool{false, true} {
-		name := "a close that cannot tell"
-		if unseen {
-			name = "a close that waited for the FIN and did not see it"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fin  bool
+	}{
+		{"a close that cannot tell, the FIN taken", true},
+		{"a close that cannot tell, the FIN not taken", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			p, app, tracked := untoldPair(t)
 			lines := closeUnknownLines(p)
 			use(t, app, tracked)
 			endWait(t, p, "TestStock")
 			p.PairedBytesSettled(0)
+			if tc.fin {
+				finAtProxy(t, p, app)
+			}
 			pc := pairedConnOf(t, p, 1)
 			for range 2 { // a second read of the same close says nothing more
-				if unseen {
-					p.closeUnseen(pc, errors.New("no FIN"))
-				} else {
-					p.closeUnknown(pc, errors.New("netlink: no buffer space"))
-				}
+				p.closeUnknown(pc, errors.New("netlink: no buffer space"))
 			}
-			want := uint64(0)
-			level := zap.InfoLevel
-			if unseen {
-				want, level = 1, zap.WarnLevel
+			want := uint64(1)
+			level := zap.WarnLevel
+			if tc.fin {
+				want, level = 0, zap.InfoLevel
 			}
 			if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != want {
 				t.Errorf("%d untold closes charged to the open test, want %d", l, want)
@@ -274,5 +278,73 @@ func TestACloseChargesTheOpenTestOfItsConnectionsWorker(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A read of a close that charged no test, said once at info level, leaves a
+// later read of the same close free to charge: one that finds the proxy
+// moved bytes on the connection since charges the open test, and says so.
+func TestAnUntoldCloseSaidForNoTestStillChargesALaterReadsTest(t *testing.T) {
+	p, app, tracked := untoldPair(t)
+	lines := closeUnknownLines(p)
+	use(t, app, tracked)
+	endWait(t, p, "TestStock")
+	p.PairedBytesSettled(0)
+	finAtProxy(t, p, app)
+	pc := pairedConnOf(t, p, 1)
+	p.closeUnknown(pc, errors.New("netlink: no buffer space"))
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 0 {
+		t.Fatalf("premise: the first read charges no test, charged %d", l)
+	}
+	if _, err := tracked.Write([]byte("late")); err != nil {
+		t.Fatal(err)
+	}
+	p.closeUnknown(pc, errors.New("netlink: no buffer space"))
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+		t.Errorf("%d untold closes charged to the open test, want 1: the later read found the proxy's move", l)
+	}
+	said := lines.FilterMessageSnippet("keploy cannot tell what the application had written").All()
+	if len(said) != 2 || said[0].Level != zap.InfoLevel || said[1].Level != zap.WarnLevel {
+		t.Errorf("lines %+v, want one at info, then one at warn", said)
+	}
+}
+
+// A close of a test worker's connection is stamped with that worker's test
+// epoch as it is counted (ownKind): the epoch a begin of its test moved it to
+// (PairedBytesBegun), while that test is open, a newer one once its end's
+// settle is done (PairedBytesSettled), in the gap, and the next test's after
+// its begin. Another worker's begins and settles leave it as it is.
+func TestACloseIsStampedWithItsWorkersTestEpoch(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	stamp := func() uint64 {
+		t.Helper()
+		p.paired.ownKind(agent.OwnedLoss{Worker: 1, Loss: models.CaptureLoss{Kind: models.CaptureLossAppBytesUntold, Count: 1}})
+		owned := p.TakeOwnedLosses()
+		if len(owned) != 1 {
+			t.Fatalf("owned %+v, want one", owned)
+		}
+		return owned[0].Epoch
+	}
+	before := stamp()
+	one := p.PairedBytesBegun(1)
+	if one == before {
+		t.Fatalf("a begin left worker 1's epoch at %d", one)
+	}
+	p.PairedBytesBegun(2)
+	p.PairedBytesSettled(2)
+	if e := stamp(); e != one {
+		t.Errorf("a close in worker 1's open test is stamped %d, want its test's %d", e, one)
+	}
+	p.PairedBytesSettled(1)
+	gap := stamp()
+	if gap == one || gap == before {
+		t.Errorf("a close in worker 1's gap is stamped %d, an epoch a test began at (%d, %d)", gap, before, one)
+	}
+	next := p.PairedBytesBegun(1)
+	if next == gap || next == one {
+		t.Errorf("worker 1's next test begins at %d, the gap's or the earlier test's (%d, %d)", next, gap, one)
+	}
+	if e := stamp(); e != next {
+		t.Errorf("a close in worker 1's next test is stamped %d, want %d", e, next)
 	}
 }
