@@ -251,9 +251,10 @@ func TestADroppedConnectionAtAnUnreachableAppPortSaysSo(t *testing.T) {
 			if tc.Kind == models.HTTP {
 				assert.True(t, pkg.IsTransportConnReset(err), "the reset must still classify as one: %v", err)
 			}
-			// However the drop is reported (net/http's io.EOF or reset, or its
-			// errServerClosedIdle, by a race inside it), the test is labelled
-			// APP_CONNECTION_ERROR.
+			// However the drop is reported (net/http's io.EOF or reset, its
+			// errServerClosedIdle, or the request's write to the connection
+			// it closed on the drop, by races inside it), the test is
+			// labelled APP_CONNECTION_ERROR.
 			assert.Contains(t, failedWith(tc, err).FailureInfo.Category, models.AppConnectionError,
 				"a test that failed with %v", err)
 			instr.mu.Lock()
