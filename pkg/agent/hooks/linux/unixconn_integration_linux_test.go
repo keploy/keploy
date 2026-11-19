@@ -64,7 +64,7 @@ func runUnixHelper(step string) int {
 
 func startUnixHelper(t *testing.T, step string) {
 	t.Helper()
-	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	cmd := exec.Command(appExe(), "-test.run=^$")
 	cmd.Env = append(os.Environ(), unixHelperEnv+"="+step)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
