@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // sessionConn is a key for a paired connection the test makes by hand.
@@ -186,6 +187,26 @@ func TestACutEndsLossIsStampedWithItsEndsSession(t *testing.T) {
 	bare.cutShort("test-2", 1)
 	if len(bare.cuts) != 1 || bare.cuts[0].session != 0 {
 		t.Fatalf("cuts %+v, want test-2's in session 0", bare.cuts)
+	}
+}
+
+// A close keploy cannot account for, of bytes a cut-short end owns, is
+// stamped as that end's loss is (pairUntold): with the session of the end,
+// never session 0, which the agent's take in a later session reads as an
+// earlier session's and charges to no test.
+func TestACutEndsUntoldCloseIsStampedWithItsEndsSession(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	p.PairedBytesSession(4)
+	pc := heldInSession(p, "50008")
+	pc.cutShort("test-1", 3)
+	p.PairedBytesSession(5)
+	p.pairUntold(pc, 3, closeUnknownLost)
+	got := p.TakeOwnedLosses()
+	if len(got) != 1 || got[0].Test != "test-1" || got[0].Session != 4 || got[0].Open || got[0].Loss.Kind != models.CaptureLossAppBytesUntold {
+		t.Fatalf("owned %+v, want test-1's untold close, stamped with session 4", got)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 0 {
+		t.Errorf("%d untold closes counted for the open test, want none: every byte is test-1's", l)
 	}
 }
 

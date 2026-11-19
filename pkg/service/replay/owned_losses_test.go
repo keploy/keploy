@@ -185,16 +185,22 @@ func (postScriptFails) Read(context.Context, string) (*models.TestSet, error) {
 // A set that returns before its end applies what keploy took (its
 // post-script failed) reports, as it returns, the losses its cut-short ends
 // owned: those taken at its test cases' ends, and those its return takes
-// once more. Each is said in its log, naming the set and the test case; none
+// once more. Each is said in its log, naming the set and the test case, as
+// what it was: bytes lost, a call keploy could not capture; a close keploy
+// could not tell the bytes of, one it cannot tell carried a call. None
 // reaches a later set, whose test cases repeat its names, so the next set's
 // end applies nothing and its test-2 stays as it was.
 func TestOwnedLossesASetLeftUnappliedReachNoLaterSet(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		at   int
+		kind models.CaptureLossKind
+		says string
 	}{
-		{"taken at its last test case's end", 3},
-		{"taken as it returns", 4},
+		{"taken at its last test case's end", 3, models.CaptureLossAppBytesLost, "keploy could not capture a call of this test-set's"},
+		{"taken as it returns", 4, models.CaptureLossAppBytesLost, "keploy could not capture a call of this test-set's"},
+		{"an untold close, taken at its last test case's end", 3, models.CaptureLossAppBytesUntold, "keploy could not tell whether a connection of this test-set's"},
+		{"an untold close, taken as it returns", 4, models.CaptureLossAppBytesUntold, "keploy could not tell whether a connection of this test-set's"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, "1")
@@ -203,7 +209,7 @@ func TestOwnedLossesASetLeftUnappliedReachNoLaterSet(t *testing.T) {
 			h.replayer.testSetConf = postScriptFails{}
 			core, logs := observer.New(zap.DebugLevel)
 			h.replayer.logger = zap.New(core)
-			loss := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+			loss := models.CaptureLoss{Kind: c.kind, Count: 1,
 				What: "from 127.0.0.1:50912, written in test-2, where keploy's wait for them was cut short"}
 			instr := &prOwnedInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}},
 				at: c.at, owned: []models.OwnedCaptureLoss{{Test: "test-2", Loss: loss}}}
@@ -219,12 +225,16 @@ func TestOwnedLossesASetLeftUnappliedReachNoLaterSet(t *testing.T) {
 			var said []map[string]any
 			for _, e := range logs.All() {
 				if m := e.ContextMap(); m["test-case"] != nil && e.Level == zap.ErrorLevel {
+					m["_msg"] = e.Message
 					said = append(said, m)
 				}
 			}
 			if len(said) != 1 || said[0]["test-set"] != "test-set-0" || said[0]["test-case"] != "test-2" ||
-				said[0]["kind"] != string(models.CaptureLossAppBytesLost) || !strings.Contains(said[0]["what"].(string), "50912") {
+				said[0]["kind"] != string(c.kind) || !strings.Contains(said[0]["what"].(string), "50912") {
 				t.Fatalf("the set's log said %v; want one error naming test-set-0's test-2 and the loss", said)
+			}
+			if msg := said[0]["_msg"].(string); !strings.HasPrefix(msg, c.says) {
+				t.Fatalf("the set's log said %q; want it to begin %q", msg, c.says)
 			}
 			// The next set's own test-2 failed; its test-1 passed.
 			next := []models.TestResult{{TestCaseID: "test-1", Status: models.TestStatusPassed}, {TestCaseID: "test-2", Status: models.TestStatusFailed}}

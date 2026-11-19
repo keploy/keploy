@@ -628,6 +628,29 @@ func TestKeployTestTakesTheLossesACutShortEndOwned(t *testing.T) {
 	require.Empty(t, got, "the session before's is no later session's")
 }
 
+// A proxy that stamps no session (no coreAgent.PairedBytesSessioner) hands
+// each loss as it counts it, made in the session open: a later session's
+// take reads it as that session's, never as an earlier session's that no
+// test or run is charged with (its Session is 0 whatever session is open).
+func TestAProxyThatStampsNoSessionHasEachSessionsTakeReadItsLosses(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	var owned []coreAgent.OwnedLoss
+	a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+	if _, stamps := a.Proxy.(coreAgent.PairedBytesSessioner); stamps {
+		t.Fatal("premise: the proxy stamps no session")
+	}
+	ctx := context.Background()
+	for session := range 2 {
+		require.NoError(t, a.resetSession(ctx))
+		lost := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+			What: "from [::ffff:127.0.0.1]:50912, written in test-2, where keploy's wait for them was cut short"}
+		owned = []coreAgent.OwnedLoss{{Test: "test-2", Loss: lost}}
+		got, err := a.TakeOwnedCaptureLosses(ctx)
+		require.NoError(t, err)
+		require.Equal(t, []models.OwnedCaptureLoss{{Test: "test-2", Loss: lost}}, got, "session %d's take reads its loss", session+1)
+	}
+}
+
 // A TLS client's rejection of keploy's certificate is the test's it happened
 // in, not a taint of every later test: the client's other calls are captured,
 // or rejected, on their own. One between two tests is the next test's, as a

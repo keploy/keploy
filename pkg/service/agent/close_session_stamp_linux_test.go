@@ -82,6 +82,24 @@ func TestAReadThatFailedKeepsTheRunsCountsNote(t *testing.T) {
 	}
 }
 
+// wantEarlierWording checks the line logged for an earlier session's loss
+// of kind (logEarlierSessionsLoss) says what it was: a close keploy could
+// not tell the bytes of is no call keploy saw it miss, and its next step is
+// the untold remedy; a loss of bytes is a call keploy could not capture.
+func wantEarlierWording(t *testing.T, kind models.CaptureLossKind, line map[string]any) {
+	t.Helper()
+	switch kind {
+	case models.CaptureLossAppBytesUntold:
+		require.Contains(t, line["_msg"], "could not tell whether a connection of an earlier session's carried a call")
+		require.Equal(t, models.AppBytesUntoldRemedy, line["next_step"])
+	case models.CaptureLossAppBytesLost:
+		require.Contains(t, line["_msg"], "could not capture a call on a connection of an earlier session's")
+		require.Contains(t, line["next_step"], "run them again")
+	default:
+		t.Fatalf("no wording row for %s", kind)
+	}
+}
+
 // A loss the proxy stamps with an earlier session, counted after that
 // session's reset, charges no run or test of a later one: a close of an
 // ended worker's connection, or of one the session before used, is in
@@ -138,7 +156,7 @@ func TestAnEarlierSessionsLossCountedAfterItsResetChargesNoLaterSession(t *testi
 							require.Len(t, late, 1, "logged once")
 							require.Equal(t, zap.WarnLevel, late[0]["_level"])
 							require.EqualValues(t, 0, late[0]["session"], "naming the session it was made in")
-							require.NotEmpty(t, late[0]["next_step"])
+							wantEarlierWording(t, kind, late[0])
 							return
 						}
 						require.Empty(t, late)

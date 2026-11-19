@@ -21,7 +21,17 @@ import (
 // it), for a proxy that holds the paired bytes.
 func untoldPair(t *testing.T) (p *Proxy, app *net.TCPConn, tracked *trackedConn) {
 	t.Helper()
+	return untoldPairIn(t, 0)
+}
+
+// untoldPairIn is untoldPair accepted in the agent's session session
+// (PairedBytesSession), told before the accept.
+func untoldPairIn(t *testing.T, session uint64) (p *Proxy, app *net.TCPConn, tracked *trackedConn) {
+	t.Helper()
 	p = &Proxy{logger: zap.NewNop(), settleReads: true}
+	if session > 0 {
+		p.PairedBytesSession(session)
+	}
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -369,6 +379,35 @@ func TestAnUntoldCloseOfBytesAllOwnedByACutEndSparesTheOpenTest(t *testing.T) {
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 0 {
 		t.Errorf("%d untold closes charged to the open test, want none: every byte the application wrote is TestStock's", l)
+	}
+}
+
+// A connection the proxy accepted in a session and never moved bytes on is
+// that session's: a close of it keploy cannot account for, of nothing the
+// application wrote (its FIN taken, what its socket holds unread unreadable),
+// is counted for the open test of the session it was accepted in, never
+// owned as session 0's, which the agent's take reads as an earlier session's
+// and charges to no test.
+func TestAnUnusedConnectionsUntoldCloseIsTheSessionItWasAcceptedIn(t *testing.T) {
+	p, app, tracked := untoldPairIn(t, 1)
+	finAtProxy(t, p, app)
+	failUnreadAtClose(t)
+	was := readUnreadHeld
+	readUnreadHeld = func(*net.TCPConn) (int, error) { return 0, errors.New("bad file descriptor") }
+	t.Cleanup(func() { readUnreadHeld = was })
+	pc := pairedConnOf(t, p, 1)
+	if pc.used.Load() != 0 {
+		t.Fatal("premise: the proxy moved no bytes on the connection")
+	}
+	_ = tracked.Close()
+	if top := lostTop(pc); top != 0 {
+		t.Fatalf("premise: the application wrote %d bytes before its FIN, want none", top)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+		t.Errorf("%d untold closes counted for session 1's open test, want 1", l)
+	}
+	if owned := p.TakeOwnedLosses(); len(owned) != 0 {
+		t.Errorf("owned %+v, want none: the connection is session 1's", owned)
 	}
 }
 

@@ -29,12 +29,13 @@ func leftLogged(logs *observer.ObservedLogs) []map[string]any {
 
 // earlierLogged is each line logged for an earlier session's loss that
 // reached none of its verdicts for why (logEarlierSessionsLoss), by its
-// fields, with its level as "_level".
+// fields, with its level as "_level" and its message as "_msg".
 func earlierLogged(logs *observer.ObservedLogs, why string) []map[string]any {
 	var out []map[string]any
 	for _, e := range logs.All() {
 		if m := e.ContextMap(); m["why"] == why {
 			m["_level"] = e.Level
+			m["_msg"] = e.Message
 			out = append(out, m)
 		}
 	}
@@ -162,6 +163,7 @@ func TestKeployTestsOwnedTakeReadsOnlyItsOwnSessions(t *testing.T) {
 		require.Len(t, left, 1)
 		require.Equal(t, "test-2", left[0]["test"], "the line names the test whose end owned it")
 		require.Equal(t, string(models.CaptureLossAppBytesLost), left[0]["kind"])
+		wantEarlierWording(t, models.CaptureLossAppBytesLost, left[0])
 	})
 	t.Run("kept for a worker's test still open", func(t *testing.T) {
 		a, src, inst1, _, endTwo := keptAgent(t)
@@ -175,6 +177,7 @@ func TestKeployTestsOwnedTakeReadsOnlyItsOwnSessions(t *testing.T) {
 		require.Equal(t, "a::TestOne", left[0]["test"])
 		require.Equal(t, string(models.CaptureLossAppBytesUntold), left[0]["kind"])
 		require.Contains(t, left[0]["what"], "62766")
+		wantEarlierWording(t, models.CaptureLossAppBytesUntold, left[0])
 		claimSelf(t, a)
 		endPassed(t, a, "TestOne")
 		j, nj := kindOf(windowOf(t, a, "o::TestOne"), models.CaptureLossAppBytesUntold)
