@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/base64"
 	"strconv"
 	"strings"
 	"testing"
@@ -426,6 +427,75 @@ func TestAClientTestsUnixNanoNameIsBoundAtItsRequest(t *testing.T) {
 	w := oWord(t, Decide(oInput("body.key", "uploads/17/a.png", "uploads/18/a.png", append(placed, served...), nil)), "17", "18")
 	if w.Outcome != OutcomeValue || w.From.Mock != "mock-20" || w.From.Client {
 		t.Fatalf("uploads/17 beside mock-20's id 17 to 18, after a client request: %s (client test's request: %v); want a Value from mock-20, no client test's", oDescribe([]Decision{w}), w.From.Client)
+	}
+}
+
+// TestAClientTestsUnixNanoNameBesideAServedDateHeaderIsBoundAtItsRequest:
+// a client test names its app by its own clock (UnixNano), and in both
+// runs the name's nanoseconds fall inside the hour of a Date header whole
+// at the hour that an answer keploy served before the call carries,
+// unchanged (an OpenBao lookup's). The header holds the moment only as its
+// hour, none of the digits below it where the change lies: no pick, and
+// the name is bound at the test case's body.name, whether the header was a
+// read keploy stamped or not, served as recorded or not, and where the
+// header was recorded at another hour. A header that holds round F's
+// nanoseconds whole is still a pick, and so is one that holds round F's
+// moment at its own unit only in a form of its text (percent-encoded, a
+// base64 page cursor).
+func TestAClientTestsUnixNanoNameBesideAServedDateHeaderIsBoundAtItsRequest(t *testing.T) {
+	sec := time.Date(2026, 11, 18, 21, 0, 0, 0, time.UTC)
+	rNanos := sec.Add(541*time.Millisecond + 123456*time.Nanosecond).UnixNano()
+	fNanos := sec.Add(612*time.Millisecond + 987654*time.Nanosecond).UnixNano()
+	rReq, fReq := time.Unix(0, rNanos).Add(131*time.Microsecond), time.Unix(0, fNanos).Add(131*time.Microsecond)
+	rCall, fCall := rReq.Add(9*time.Millisecond), fReq.Add(9*time.Millisecond)
+	name := func(n int64) string { return "[E2E] app-crud-" + strconv.FormatInt(n, 10) }
+	const p, date = "body.cmd.query.app.name", "Wed, 18 Nov 2026 21:00:00 GMT"
+	decide := func(stamp, asRecorded bool, more ...Seen) Decision {
+		t.Helper()
+		earlier := clientPlaced(t, "post-client-v1-apps-1", appNameCase(rNanos, rReq), appNameCase(fNanos, fReq), fReq)
+		served := &models.Mock{Name: "mock-13270", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rCall.Add(-4 * time.Millisecond), ResTimestampMock: rCall.Add(-3 * time.Millisecond)}}
+		seen := append([]Seen{{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: date}, Live: date, Stamp: stamp}}, more...)
+		earlier = append(earlier, Earlier{Mock: "mock-13270", At: rCall.Add(-3 * time.Millisecond), Payload: RawOf(served, true), AsRecorded: asRecorded, Own: true, Seen: seen})
+		in := iCall(p, String, name(rNanos), name(fNanos), rCall, fCall, nil, earlier, nil)
+		in.Drifts = oClientDrifts()
+		d := Decide(in)
+		if len(d) != 1 {
+			t.Fatalf("stamp=%v asRecorded=%v: %s; want one decision", stamp, asRecorded, oDescribe(d))
+		}
+		return d[0]
+	}
+	for _, stamp := range []bool{true, false} {
+		for _, asRecorded := range []bool{true, false} {
+			d := decide(stamp, asRecorded)
+			if d.Outcome != OutcomeValue || d.From.Mock != "test case post-client-v1-apps-1" || d.From.Path != "body.name" || !d.From.Client || d.Clock != nil {
+				t.Errorf("stamp=%v asRecorded=%v: the app name %q -> %q beside mock-13270's Date %q: %s; want a Value of test case post-client-v1-apps-1's body.name, a client test's, no clock",
+					stamp, asRecorded, name(rNanos), name(fNanos), date, oDescribe([]Decision{d}))
+			}
+		}
+	}
+	// The same answer carries round F's nanoseconds whole in another header
+	// (the moment at its own unit): round F's application could take the
+	// name's number from it, a pick.
+	whole := Seen{Side: Response, Leaf: Leaf{Path: "header.x-start", Noise: "header.x-start", Type: String, Value: "0"}, Live: strconv.FormatInt(fNanos, 10)}
+	oRefused(t, "the app name beside mock-13270's header holding round F's nanoseconds whole", decide(false, false, whole), RefusalPick, "mock-13270")
+	// The same moment at its own unit, held only in a form of the text: a
+	// link whose query holds it percent-encoded, a page cursor holding it in
+	// base64. Neither text holds the name's number, and neither, as
+	// written, holds an instant at the moment's unit: opened, each does, a
+	// pick.
+	fRFC := time.Unix(0, fNanos).UTC().Format(time.RFC3339Nano)
+	pct := Seen{Side: Response, Leaf: Leaf{Path: "header.link", Noise: "header.link", Type: String, Value: "0"},
+		Live: "</v1/apps?since=" + strings.ReplaceAll(fRFC, ":", "%3A") + `>; rel="next"`}
+	oRefused(t, "the app name beside mock-13270's link holding round F's moment percent-encoded", decide(false, false, pct), RefusalPick, "mock-13270")
+	cursor := Seen{Side: Response, Leaf: Leaf{Path: "header.x-next-page", Noise: "header.x-next-page", Type: String, Value: "0"},
+		Live: base64.StdEncoding.EncodeToString([]byte(`{"since":"` + fRFC + `"}`))}
+	oRefused(t, "the app name beside mock-13270's page cursor holding round F's moment in base64", decide(false, false, cursor), RefusalPick, "mock-13270")
+	// A header recorded at another hour holds round F's moment, as its hour,
+	// in round F alone: still none of its digits below the hour, no pick.
+	otherHour := Seen{Side: Response, Leaf: Leaf{Path: "header.last-modified", Noise: "header.last-modified", Type: String, Value: "Wed, 18 Nov 2026 19:00:00 GMT"}, Live: date}
+	d := decide(false, false, otherHour)
+	if d.Outcome != OutcomeValue || d.From.Mock != "test case post-client-v1-apps-1" || d.From.Path != "body.name" {
+		t.Errorf("the app name beside a header recorded at another hour that holds round F's hour: %s; want a Value of test case post-client-v1-apps-1's body.name", oDescribe([]Decision{d}))
 	}
 }
 

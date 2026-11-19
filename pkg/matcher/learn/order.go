@@ -2013,11 +2013,12 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 type instantHold struct {
 	p evPlace
 	// coarseR: R's text holds R's value only as an instant of a coarser
-	// unit (a day, an hour) that the value, cut to it, is (coarserOnly).
+	// unit (a day, an hour) that the value, cut to it, is (coarserOnly);
+	// coarseL: F's text holds F's value only so.
 	// A recording's place is held in one of its halves: a moment F's view
 	// of it holds only in the request the application sent there is a
 	// send, which the send rules decide, never a pick from what F gave.
-	hr, hl, fr, fl, coarseR bool
+	hr, hl, fr, fl, coarseR, coarseL bool
 	// rank orders the places that name a value: by its exact text (0),
 	// else by the finest cut that gives it (its unit in nanoseconds).
 	rank int64
@@ -2265,12 +2266,30 @@ const escapeReach = 128
 // place gives none of m's part below that unit, where its change lies, so
 // it is no answer's source: bound to it, a replay would check the date
 // alone and pass any time of that day. A wall clock of no zone is read in
-// the application's zone too (inZone).
+// the application's zone too (inZone). The text is read as holds reads it,
+// with its forms: one that holds w itself, inside a longer word or as a
+// word of any form (a claim of a token it carries), or an instant of any
+// form that names m at its own unit or coarser (a percent-encoded time
+// opened, whose date alone stands as written), holds it whole. One keploy
+// cannot read is no coarser hold (fail closed: the place stays a source
+// and a pick).
 func (dc *decider) coarserOnly(t *readerText, w string, m moment) bool {
-	in, ok := t.contains(w)
-	return ok && !in && dc.namedBy(t, m, func(h, m moment) bool {
-		return h.key == m.key || cuts(h, m, func(c cutRule) bool { return !c.finer })
-	}) == 0
+	if in, ok := t.contains(w); !ok || in {
+		return false
+	}
+	if word, ok := t.holdsWord(w); !ok || word {
+		return false
+	}
+	ms := []moment{m}
+	if z, ok := dc.inZone(m); ok {
+		ms = append(ms, z)
+	}
+	whole, ok := t.formsName(func(h moment) bool {
+		return slices.ContainsFunc(ms, func(m moment) bool {
+			return h.key == m.key || cuts(h, m, func(c cutRule) bool { return !c.finer })
+		})
+	})
+	return ok && !whole
 }
 
 // cutOfFinerOnly reports whether t, which holds w (moment m), holds it only
@@ -2707,7 +2726,8 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			}
 			if hr || hl {
 				hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, coarseR: hr && c.rm != nil && dc.coarserOnly(p.t.rec, r, *c.rm),
-					rank: min(dc.rank(p.t.rec, r, c.rm, hr), dc.rank(p.t.live, l, c.lm, hl))})
+					coarseL: hl && c.lm != nil && dc.coarserOnly(p.t.live, l, *c.lm),
+					rank:    min(dc.rank(p.t.rec, r, c.rm, hr), dc.rank(p.t.live, l, c.lm, hl))})
 			}
 			if hr && !hl && len(c.aside) < maxLinePlaces && !slices.Contains(c.aside, p.name) {
 				c.aside = append(c.aside, p.name)
@@ -2855,8 +2875,15 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 		cut := func() bool {
 			return c.lm != nil && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && dc.namedFiner(p.t.live, p.t.rec, *c.lm, finer)
 		}
+		// Nor did a place whose round F text holds round F's moment only as
+		// an instant of a coarser unit (coarseL: a served Date header whole
+		// at the hour, beside a UnixNano a client test read from its own
+		// clock within that hour). It gives none of the moment's part below
+		// that unit, where its change lies, so round F's application picked
+		// no value there, as no answer is bound to such a place at step 3.
+		// A place that holds the moment at its own unit stays a pick.
 		switch {
-		case before(p) && h.hl && (!h.hr || p.same()) && !cut() && !readsBack(p):
+		case before(p) && h.hl && (!h.hr || p.same()) && !cut() && !h.coarseL && !readsBack(p):
 			why := "round F's moment stands unchanged in " + p.name
 			if !p.same() {
 				why = "round F's moment stands in " + p.name + ", which does not show it"
@@ -2867,7 +2894,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 		// The recorded application never read it, so R's moment standing
 		// there too (by another cut) says nothing. One that reads back a
 		// copy's send (readsCopy) is no pick.
-		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut() && !readsCopy(h):
+		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut() && !h.coarseL && !readsCopy(h):
 			return dc.refuse(path, at, n, r, l, RefusalPick, "instant-pick-recorded-after", "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.fieldNoise(path))
 		case p.side == Response && p.state == stateUnknown && (h.hr || h.hl):
 			return untold(p.why)

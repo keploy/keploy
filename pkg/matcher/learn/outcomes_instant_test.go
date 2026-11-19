@@ -2557,6 +2557,24 @@ func TestOutcomeAMomentARecordingsRequestHoldsIsASend(t *testing.T) {
 	coarseFind := served("mock-5", "none", rs, "none", ls, after, after.Add(ms))
 	d = oWord(t, Decide(iCall(p, String, rs, ls, rAt, fAt, w, nil, []Raw{coarse, coarseFind})), rs, ls)
 	oRefused(t, "a find given early in round F beside an insert of the second", d, RefusalPick, "mock-5", "recorded after it")
+	// A find given early in round F that returns the moment only as its
+	// hour, in each run (a time whole at the hour, which a time of
+	// microseconds within it is built on: cuts' finer rule): it gives none
+	// of the moment's part below the hour, where its change lies, so it is
+	// no pick, and the value, read at the call's own instant, is the call's
+	// read of the clock. The recorded application never read the find, so
+	// the recorded find returning the recorded moment whole says nothing:
+	// still the call's read. Where round F's find returns round F's moment
+	// whole, it is a pick (the find above).
+	hour := func(at time.Time) string { return at.UTC().Truncate(time.Hour).Format(time.RFC3339) }
+	rn, ln := iMicro(rAt), iMicro(fAt)
+	hourFind := served("mock-5", "none", hour(rAt), "none", hour(fAt), after, after.Add(ms))
+	iClock(t, "a clock read beside a find given early in round F that returns only its hour", oWord(t, Decide(iCall(p, String, rn, ln, rAt, fAt, w, nil, []Raw{hourFind})), rn, ln))
+	wholeFind := served("mock-5", "none", rn, "none", hour(fAt), after, after.Add(ms))
+	iClock(t, "a clock read beside a find given early in round F that returns only its hour, recorded whole", oWord(t, Decide(iCall(p, String, rn, ln, rAt, fAt, w, nil, []Raw{wholeFind})), rn, ln))
+	fWhole := served("mock-5", "none", hour(rAt), "none", ln, after, after.Add(ms))
+	d = oWord(t, Decide(iCall(p, String, rn, ln, rAt, fAt, w, nil, []Raw{fWhole})), rn, ln)
+	oRefused(t, "a clock read beside a find given early in round F that returns it whole, recorded as its hour", d, RefusalPick, "mock-5", "recorded after it")
 	// A typed instant (a decoder's, held by its moment, never by its text):
 	// the find returning that moment in another layout reads back the insert.
 	d = oWord(t, Decide(iCall(p, Instant, rec, live, rAt, fAt, w, nil, []Raw{insert, reformed})), rec, live)
