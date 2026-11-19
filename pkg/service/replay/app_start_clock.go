@@ -19,13 +19,16 @@ type appStartNotifier interface {
 // tellAppStartsAnew tells the agent, under the proven switch, that keploy
 // starts the application anew for the test set testSetID, whose test cases
 // are tcs, once its mocks are stored and before the application starts
-// (appStartsAnew reported it starts anew). The agent's clock then keeps no
-// instant an earlier application read: a new process has read none, so the
-// set's first case begins at its own recorded instant, never late for an
-// instant only a stopped application saw. A notice the agent cannot take is
-// said, and the set runs on: its clock then never moves back past what the
-// earlier application read, and a test that checks a recorded token's age
-// can fail for it.
+// (appStartsAnew reported it starts anew). A new process has read no
+// instant, so on a clock only the application reads, the agent drops what
+// the earlier application read and the set's first case begins at its own
+// recorded instant. On a clock other processes share (a docker or compose
+// stack's, which every service that preloads keploy's time shim reads), the
+// clock still never moves back: the set's first case begins at its recorded
+// instant, or after it where the clock already showed a later one. A notice
+// the agent cannot take is said, and the set runs on: its clock then never
+// moves back past what the earlier application read, and a test that checks
+// a recorded token's age can fail for it.
 func (r *Replayer) tellAppStartsAnew(ctx context.Context, testSetID string, tcs []*models.TestCase) {
 	if !provenswitch.On() {
 		return
