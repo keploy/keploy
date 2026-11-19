@@ -384,3 +384,107 @@ func TestTheRunsOwnLossesAddToTheirKindsCount(t *testing.T) {
 	require.EqualValues(t, 2, counts[0].Count, "the counts read are not changed")
 	require.Equal(t, counts, withCounted(counts, nil))
 }
+
+// A close counted after the run's last test ended, before the run's last read
+// (the uncharged read, mock replay's and mock record's), is taken by that
+// read, and it is in the run's own verdict all the same: the counts since the
+// run's base that mock replay and mock record read next. Lost bytes fail the
+// replay there, and a close keploy cannot account for leaves the run not
+// judged. A run of one test process (worker 0) and a run of workers (worker
+// 1's connection), in a record and a replay. Counted once over two reads.
+func TestACloseAfterTheLastTestIsInTheRunsOwnVerdict(t *testing.T) {
+	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+		for _, kind := range []models.CaptureLossKind{models.CaptureLossAppBytesUntold, models.CaptureLossAppBytesLost} {
+			for _, workers := range []bool{false, true} {
+				name := "one test process"
+				if workers {
+					name = "a worker"
+				}
+				t.Run(string(mode)+"/"+string(kind)+"/"+name, func(t *testing.T) {
+					ctx := context.Background()
+					a, sw := switchAgent(t, mode)
+					base, err := a.CaptureLosses(ctx)
+					require.NoError(t, err)
+					var ids []string
+					if workers {
+						w1, w2 := child(t), child(t)
+						claimWorker(t, a, w1.Process.Pid, "a", 2)
+						claimWorker(t, a, w2.Process.Pid, "b", 2)
+						_, serr := a.ProvenBegin(as(w2.Process.Pid), begin("TestTwo"))
+						require.Nil(t, serr)
+						_, serr = a.ProvenBegin(as(w1.Process.Pid), begin("TestOne"))
+						require.Nil(t, serr)
+						inst1 := a.scopeInstance("a::TestOne")
+						require.NotZero(t, inst1, "premise: TestOne is a worker's test")
+						_, serr = a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: models.ScopeOutcomePassed})
+						require.Nil(t, serr)
+						_, serr = a.ProvenEnd(as(w2.Process.Pid), models.ScopeReq{Name: "TestTwo", Outcome: models.ScopeOutcomePassed})
+						require.Nil(t, serr)
+						// Worker 1's connection closes after the run's last test.
+						sw.closeOf(inst1, kind)
+						ids = []string{"a::TestOne", "b::TestTwo"}
+					} else {
+						claimSelf(t, a)
+						endPassed(t, a, "TestOne")
+						// The one process's connection closes after its last test.
+						sw.closeOf(0, kind)
+						require.True(t, sw.isOn(), "premise: the close is stamped, for the run's last read to take")
+						ids = []string{"o::TestOne"}
+					}
+					run, err := a.UnchargedCaptureLosses(ctx)
+					require.NoError(t, err)
+					require.EqualValues(t, 1, kindCount(run, kind), "the close after the last test is the run's: %+v", run)
+					for _, id := range ids {
+						j, nj := kindOf(windowOf(t, a, id), kind)
+						require.Zero(t, j+nj, "%s had ended before the connection closed", id)
+					}
+					now, err := a.CaptureLosses(ctx)
+					require.NoError(t, err)
+					j, nj := lossesIn(now.Since(base), kind)
+					if kind == models.CaptureLossAppBytesLost {
+						require.EqualValues(t, 1, j, "lost bytes after the last test are in the run's own verdict, judged: they fail the replay")
+						require.Zero(t, nj)
+					} else {
+						require.EqualValues(t, 1, nj, "a close after the last test keploy cannot account for is in the run's own verdict, not judged: the run is not judged")
+						require.Zero(t, j)
+					}
+					_, err = a.UnchargedCaptureLosses(ctx)
+					require.NoError(t, err)
+					again, err := a.CaptureLosses(ctx)
+					require.NoError(t, err)
+					require.Equal(t, kindCount(now, kind), kindCount(again, kind), "a second read counts it no more")
+				})
+			}
+		}
+	}
+}
+
+// The proxy's entry for the owned losses past its bound (coreAgent.MaxOwnedLosses)
+// names no test and no worker's close: it is the run's, never the test open
+// when an end takes it, even from a proxy that stamps no test epochs (whose
+// open tests all begin at epoch 0, the epoch the entry carries).
+func TestTheOwnedLossesPastTheBoundAreTheRunsNotTheOpenTests(t *testing.T) {
+	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+		t.Run(string(mode), func(t *testing.T) {
+			ctx := context.Background()
+			a, p := wireAgent(t, mode)
+			var owned []coreAgent.OwnedLoss
+			a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+			_, beginner := a.Proxy.(coreAgent.PairedBytesBeginner)
+			require.False(t, beginner, "premise: a proxy that stamps no test epochs")
+			a.proven.losses = a.markCaptureLosses(ctx)
+			claimSelf(t, a)
+			_, serr := a.ProvenBegin(ctx, begin("TestOne"))
+			require.Nil(t, serr)
+			past := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 3, What: coreAgent.OwnedLossesPastTheBound}
+			owned = []coreAgent.OwnedLoss{{Loss: past}}
+			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestOne", Outcome: models.ScopeOutcomePassed})
+			require.Nil(t, serr)
+			require.Empty(t, e.Action, "TestOne is not charged the entry past the bound")
+			require.Nil(t, windowOf(t, a, "o::TestOne").Evidence)
+			run, err := a.UnchargedCaptureLosses(ctx)
+			require.NoError(t, err)
+			require.Equal(t, models.CaptureLosses{past}, run, "the run's")
+		})
+	}
+}

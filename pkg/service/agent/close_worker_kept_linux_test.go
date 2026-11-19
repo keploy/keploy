@@ -76,6 +76,10 @@ func TestALossKeptForAWorkersOpenTestIsNeverDropped(t *testing.T) {
 	})
 	t.Run("taken by ends whose count read failed: the run's", func(t *testing.T) {
 		a, src, inst1, endOne, endTwo := keptAgent(t)
+		ctx := context.Background()
+		// mock record's base, before the command.
+		base, err := a.CaptureLosses(ctx)
+		require.NoError(t, err)
 		// The counts can no longer be read (no mark of the run's start).
 		a.provenMu.Lock()
 		a.proven.losses = captureLossMark{}
@@ -87,8 +91,15 @@ func TestALossKeptForAWorkersOpenTestIsNeverDropped(t *testing.T) {
 		src.put(coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: untoldFrom("62767")})
 		endOne()
 		a.provenMu.Lock()
-		defer a.provenMu.Unlock()
 		require.EqualValues(t, 2, kindCount(a.proven.ownedRun, untold), "both are the run's: %+v", a.proven.ownedRun)
 		require.Empty(t, a.proven.ownedOpen)
+		a.provenMu.Unlock()
+		// And both are in the run's own verdict, the counts since the base
+		// that mock record reads after the command: the run is not judged.
+		now, err := a.CaptureLosses(ctx)
+		require.NoError(t, err)
+		judged, notJudged := lossesIn(now.Since(base), untold)
+		require.EqualValues(t, 2, notJudged, "the kept loss and TestOne's own are in the run's own verdict: %+v", now)
+		require.Zero(t, judged)
 	})
 }
