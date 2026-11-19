@@ -23,6 +23,15 @@ func (p *Proxy) PairedBytesErr() error {
 
 func (p *Proxy) checkPairedBytes(net.Conn, net.Conn) {}
 
+// targetBase is nothing here: no count is read.
+type targetBase struct{}
+
+// pairedConnOS is nothing here: no connection is paired.
+type pairedConnOS struct{}
+
+// pairedConnsOS is nothing here: no application socket is read.
+type pairedConnsOS struct{}
+
 func (p *Proxy) proveAppVisible(*net.TCPConn) {}
 
 // pairClosing notes a paired connection's close; none is paired here.
@@ -37,3 +46,5 @@ func readUnread(*net.TCPConn) (int, error) {
 func readProxySide(*net.TCPConn) proxySide {
 	return proxySide{err: fmt.Errorf("%w: the proxy's sockets are read on Linux only", models.ErrProxyConnsUnsupported)}
 }
+
+func (pc *pairedConn) readSide() proxySide { return readProxySide(pc.conn) }

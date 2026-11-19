@@ -13,7 +13,6 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
-	"go.keploy.io/server/v3/utils"
 )
 
 // Per-PID (worker-keyed) mock scoping — "Design A".
@@ -35,7 +34,7 @@ import (
 // A worker self-reports its PID in the scope call (ScopeReq.Pid — e.g. Node
 // process.pid), which registers an allowlist of that test's mock names on the
 // proxy (SetWorkerScope). A connection's origin PID (OutgoingOptions.SrcPid,
-// from the eBPF redirect map) is resolved up the /proc process tree once, when
+// from the eBPF redirect map) is resolved up its process tree once, when
 // it opens; each read on it is then filtered by the allowlist of the nearest
 // worker on that chain registered at that moment, so the connection follows
 // its worker from test to test. Connections from unregistered process trees
@@ -1050,6 +1049,15 @@ func (s *scopedMockDb) SourcesOf(mock string) []models.DeclaredSource {
 
 var _ integrations.DeclaredSourcesOf = (*scopedMockDb)(nil)
 
+// DeclaresSources forwards integrations.SourcesDeclarer: whether the
+// replay's scope table declares sources is the store's, whatever view a
+// worker reads; a store that cannot tell declares them.
+func (s *scopedMockDb) DeclaresSources() bool {
+	return integrations.DeclaresSources(s.MockMemDb)
+}
+
+var _ integrations.SourcesDeclarer = (*scopedMockDb)(nil)
+
 // TimeForm forwards integrations.TimeFormReader: whether the replay turned
 // the time default on is the store's, whatever view a worker reads.
 func (s *scopedMockDb) TimeForm() bool {
@@ -1558,7 +1566,7 @@ func (p *Proxy) scopedFor(kpid uint32, mgr integrations.MockMemDb) integrations.
 	nobody := len(p.workerScope) == 0
 	p.workerScopeMu.RUnlock()
 	if nobody {
-		return mgr // fast path: no worker scoped — no /proc walk, exact old behavior
+		return mgr // fast path: no worker scoped — no process-tree walk, exact old behavior
 	}
 	chain := ancestorChain(kpid)
 	if v := p.workerViewFor(chain); v.allow == nil && v.refused == "" {
@@ -1578,14 +1586,15 @@ func (p *Proxy) WorkerViewForTest(pid uint32, mgr integrations.MockMemDb) integr
 	return p.scopedFor(pid, mgr)
 }
 
-// ancestorChain is pid and its ancestors, nearest first, read from /proc once
-// per connection, outside any lock. Bounded so a reparent race or an
-// unexpected /proc shape can never spin.
+// ancestorChain is pid and its ancestors, nearest first, read from the host's
+// process table (starts.ParentOf: /proc on Linux, sysctl on macOS) once per
+// connection, outside any lock. Bounded so a reparent race or an unexpected
+// process table can never spin.
 func ancestorChain(pid uint32) []uint32 {
 	chain := make([]uint32, 0, 8)
 	for i := 0; i < 32 && pid > 1; i++ {
 		chain = append(chain, pid)
-		ppid, ok := ppidFromStat(pid)
+		ppid, ok := starts.ParentOf(pid)
 		if !ok {
 			break
 		}
@@ -1610,16 +1619,6 @@ func (p *Proxy) workerViewFor(chain []uint32) workerView {
 		}
 	}
 	return v
-}
-
-// ppidFromStat reads the parent PID of pid from /proc/<pid>/stat
-// (utils.ReadProcStat).
-func ppidFromStat(pid uint32) (uint32, bool) {
-	st, ok := utils.ReadProcStat(int(pid))
-	if !ok {
-		return 0, false
-	}
-	return uint32(st.PPID), true
 }
 
 // byStart is mocks as a live view for pid shows them (starts View): those it

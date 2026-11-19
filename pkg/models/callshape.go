@@ -9,7 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf8"
+
+	"go.keploy.io/server/v3/utils/textcut"
 )
 
 // The shape of a call keploy could not answer, as the proven model's evidence
@@ -920,11 +921,7 @@ scan:
 		out = strings.TrimSpace(out + " …")
 	}
 	if len(out) > maxSQLText {
-		i := maxSQLText
-		for i > 0 && !utf8.RuneStart(out[i]) {
-			i--
-		}
-		out = out[:i] + "…"
+		out = textcut.Prefix(out, maxSQLText) + "…"
 	}
 	return out
 }

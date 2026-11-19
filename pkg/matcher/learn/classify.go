@@ -2,6 +2,7 @@ package learn
 
 import (
 	"encoding/json"
+	"iter"
 	"regexp"
 	"slices"
 	"sort"
@@ -2857,16 +2858,27 @@ func idByte(c byte) bool { return wordByte(c) || c == '-' || c == '_' }
 // segmentsBy are the stretches of s that are all bytes word says continue a
 // word, or none.
 func segmentsBy(s string, word func(byte) bool) []segment {
-	var out []segment
-	for i := 0; i < len(s); {
-		w, j := word(s[i]), i+1
-		for j < len(s) && word(s[j]) == w {
-			j++
+	return slices.Collect(segmentsOf(s, word))
+}
+
+// segmentsOf yields segmentsBy(s, word) in order, keeping none: a reader that
+// takes each stretch once (tokensBy, wordsBy) builds no list of them. The
+// list tokensBy built of each text it read was the replay agent's largest
+// allocation: over half the bytes it allocated in a profile of
+// api-server's tests.
+func segmentsOf(s string, word func(byte) bool) iter.Seq[segment] {
+	return func(yield func(segment) bool) {
+		for i := 0; i < len(s); {
+			w, j := word(s[i]), i+1
+			for j < len(s) && word(s[j]) == w {
+				j++
+			}
+			if !yield(segment{s[i:j], w}) {
+				return
+			}
+			i = j
 		}
-		out = append(out, segment{s[i:j], w})
-		i = j
 	}
-	return out
 }
 
 // runsBy are the parts of a drifted value that drifted (its runs):
@@ -3197,7 +3209,7 @@ func clockSide(w string, recorded bool, cs []clockSet) bool {
 // tokensBy are the words of s as word reads it.
 func tokensBy(s string, word func(byte) bool) map[string]bool {
 	out := map[string]bool{}
-	for _, seg := range segmentsBy(s, word) {
+	for seg := range segmentsOf(s, word) {
 		if seg.word {
 			out[seg.text] = true
 		}
@@ -3208,7 +3220,7 @@ func tokensBy(s string, word func(byte) bool) map[string]bool {
 // wordsBy are the words of s as word reads it, in order.
 func wordsBy(s string, word func(byte) bool) []string {
 	var out []string
-	for _, seg := range segmentsBy(s, word) {
+	for seg := range segmentsOf(s, word) {
 		if seg.word {
 			out = append(out, seg.text)
 		}

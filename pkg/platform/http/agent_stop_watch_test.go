@@ -1140,8 +1140,8 @@ func awaitMoves(t *testing.T, scope *utils.TeardownScope, n uint64) {
 // the run's goroutines waits on a keploy agent that is still stopping, and
 // keeps reporting its teardown, while holding no drain (it does not record
 // its steps, or its hold went stale). The drain gave up at a fixed 30 s of
-// wall time ("teardown drain timed out after cancellation; forcing
-// shutdown"), with the stop still going. Bounded by the run's teardown
+// wall time, with the stop still going (its give-up line is now "teardown
+// drain made no progress"). Bounded by the run's teardown
 // moving, a stop that keeps reporting progress past 30 s of keploy's
 // runnable time is never cut; one that stops reporting is cut on the bound.
 func TestATeardownDrainWaitsForAnAgentStopThatReportsProgress(t *testing.T) {

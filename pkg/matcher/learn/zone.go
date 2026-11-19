@@ -13,6 +13,8 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,9 +41,10 @@ import (
 // rules with no name (ZoneNameOf then names it by its fixed offset, where it
 // has one). An error where keploy cannot read the zone: a TZ of a POSIX rule
 // ("IST-5:30"), which keploy does not read (Go reads UTC there, and the C
-// library the rule), no zone file (a link to nothing), or a file whose rules
-// are not those of the zone its name gives (loadZone), or that is mounted
-// from another zone's file (mountedZone).
+// library the rule), no zone file (a link to nothing), or a file that is
+// another zone's (loadZone: its offsets are no release's of the zone its
+// name gives; one of another release of IANA's data than keploy's is its
+// name's), or that is mounted from another zone's file (mountedZone).
 func ReadZone(root, tz string, set bool) (*time.Location, error) {
 	return readZone(root, ownMounts, tz, set, true)
 }
@@ -53,43 +56,52 @@ func ReadZone(root, tz string, set bool) (*time.Location, error) {
 // reads UTC there, or a copy of the zone built into it, and keploy cannot
 // tell which.
 func readZone(root string, mounts zoneMounts, tz string, set, own bool) (*time.Location, error) {
-	loc, _, err := readZoneIn(dirFiles{root: root, mounts: mounts}, tz, set, own)
+	loc, _, err := readZoneIn(dirFiles{root: root, mounts: mounts}, tz, set, own, false)
 	return loc, err
 }
 
-// readZoneIn is readZone of the root whose files f gives, with the bytes of
-// the zone file it read the zone from: none for UTC, or a zone read from
-// keploy's own zone files.
-func readZoneIn(f ZoneFiles, tz string, set, own bool) (*time.Location, []byte, error) {
+// ZoneFile is the zone file a zone was read from (none for UTC, or for a
+// zone read from keploy's own zone files): its bytes, and the extract of
+// the zone source of the root it was read in (models.ZoneSource.Extract),
+// where keploy read its offsets in that source, for a reader whose own zone
+// data may be another release (ZoneOfFile).
+type ZoneFile struct {
+	Data, Source []byte
+}
+
+// readZoneIn is readZone of the root whose files f gives, with the zone
+// file it read the zone from (the source's extract with it where extract
+// is set and keploy took it: zoneSourceOf).
+func readZoneIn(f ZoneFiles, tz string, set, own, extract bool) (*time.Location, ZoneFile, error) {
 	if !set {
-		loc, data, err := zoneFileIn(f, "/etc/localtime")
+		loc, file, err := zoneFileIn(f, "/etc/localtime", extract)
 		if err != nil && localtimeAbsentIn(f) {
 			// No /etc/localtime at all (an Alpine or distroless image):
 			// the C library, Go, Python and Node read UTC.
-			return time.UTC, nil, nil
+			return time.UTC, ZoneFile{}, nil
 		}
-		return loc, data, err
+		return loc, file, err
 	}
 	tz = strings.TrimPrefix(tz, ":")
 	switch {
 	case tz == "" || tz == "UTC":
 		loc, err := utcZone(f, tz)
-		return loc, nil, err
+		return loc, ZoneFile{}, err
 	case strings.HasPrefix(tz, "/"):
-		return zoneFileIn(f, tz)
+		return zoneFileIn(f, tz, extract)
 	}
 	_, rerr := resolveIn(f, "/usr/share/zoneinfo/"+tz)
 	if rerr == nil && !strings.Contains(tz, "..") {
-		return zoneFileIn(f, "/usr/share/zoneinfo/"+tz)
+		return zoneFileIn(f, "/usr/share/zoneinfo/"+tz, extract)
 	}
 	if !own {
 		if rerr != nil && !absent(rerr) && !isLasting(rerr) {
-			return nil, nil, fmt.Errorf("keploy cannot read the zone file TZ=%s names under the process's root: %w", tz, rerr)
+			return nil, ZoneFile{}, fmt.Errorf("keploy cannot read the zone file TZ=%s names under the process's root: %w", tz, rerr)
 		}
-		return nil, nil, lasting(fmt.Errorf("TZ=%s names no zone file under the process's root", tz))
+		return nil, ZoneFile{}, lasting(fmt.Errorf("TZ=%s names no zone file under the process's root", tz))
 	}
 	loc, err := time.LoadLocation(tz)
-	return loc, nil, err
+	return loc, ZoneFile{}, err
 }
 
 // ProcZone is the zone one process writes a wall clock of no zone in, as
@@ -1084,22 +1096,24 @@ func procZoneFrom(ctx context.Context) (ProcZone, bool) {
 // under root's /usr/share/zoneinfo; with no name otherwise. A file that is
 // not there (a link to nothing) is an error, as Go and the C library read
 // UTC there, never the zone its link names. So is a file that names its
-// zone by its path but is mounted from another zone's (mountedZone). With
-// the zone, the zone file's bytes.
-func zoneFileIn(f ZoneFiles, name string) (*time.Location, []byte, error) {
+// zone by its path but is mounted from another zone's (mountedZone), or
+// whose offsets are another zone's (loadZone). With the zone, the zone
+// file (its source's extract where extract is set: zoneSourceOf).
+func zoneFileIn(f ZoneFiles, name string, extract bool) (*time.Location, ZoneFile, error) {
 	data, final, err := readZoneFileIn(f, name)
 	if absent(err) {
 		// A link to nothing: lasting (lastingError).
-		return nil, nil, lasting(err)
+		return nil, ZoneFile{}, lasting(err)
 	} else if err != nil {
-		return nil, nil, err
+		return nil, ZoneFile{}, err
 	}
-	zn := ""
+	zn, srcAt := "", ""
 	for _, p := range []string{final, name} {
 		if zn = models.ZoneinfoName(p); zn != "" {
 			if err := mountedZone(f, final, zn); err != nil {
-				return nil, nil, err
+				return nil, ZoneFile{}, err
 			}
+			srcAt = p
 			break
 		}
 	}
@@ -1109,18 +1123,18 @@ func zoneFileIn(f ZoneFiles, name string) (*time.Location, []byte, error) {
 			if tzn != "" && !strings.Contains(tzn, "..") {
 				if same, at, err := readZoneFileIn(f, "/usr/share/zoneinfo/"+tzn); err == nil && bytes.Equal(same, data) {
 					if err := mountedZone(f, at, tzn); err != nil {
-						return nil, nil, err
+						return nil, ZoneFile{}, err
 					}
-					zn = tzn
+					zn, srcAt = tzn, at
 				}
 			}
 		}
 	}
-	loc, err := loadZone(zn, data)
+	loc, source, err := loadZone(zn, data, zoneSourceOf{read: readZoneSource(f, srcAt), extract: extract})
 	if err != nil {
-		return nil, nil, err
+		return nil, ZoneFile{}, err
 	}
-	return loc, data, nil
+	return loc, ZoneFile{Data: data, Source: source}, nil
 }
 
 // utcZone is the zone of a TZ of "UTC" or "" (tz, its ":" cut), which Go,
@@ -1167,8 +1181,8 @@ func utcZone(files ZoneFiles, tz string) (*time.Location, error) {
 		if m.Replaced {
 			what += ", since replaced on the host"
 		}
-		return nil, lasting(fmt.Errorf("%s, which is %s, a file mounted from %s, %s, so keploy cannot tell the zone the application writes in, and reads it as unknown. A host's /etc/localtime bind-mounted over an image's link to Etc/UTC (-v /etc/localtime:/etc/localtime:ro lands on the file the link names) gives this: drop the mount, or set TZ to the mounted file's zone (%s), which every runtime reads alike",
-			who, final, m.Source, what, remedy))
+		return nil, lasting(fmt.Errorf("%s, which is %s, a file mounted from %s, so keploy cannot tell the zone the application writes in, and reads it as unknown. A host's /etc/localtime bind-mounted over an image's link to Etc/UTC (-v /etc/localtime:/etc/localtime:ro lands on the file the link names) gives this: drop the mount, or set TZ to the mounted file's zone (%s), which every runtime reads alike",
+			who, final, what, remedy))
 	}
 	loc, err := time.LoadLocationFromTZData(zn, data)
 	if err != nil {
@@ -1185,10 +1199,12 @@ func utcZone(files ZoneFiles, tz string) (*time.Location, error) {
 // mountedZone is nil where the zone file at p (a path in the process's own
 // view, its links resolved, in f's root) is, as far as the mounts it is
 // read through tell (ZoneFiles.ZoneMount), the file of the zone zn its path
-// names.
-// A lasting error naming both where the file is read from another zone's,
-// or one whose path names no zone (a host's /etc/localtime that is a
-// copy): Node and a JVM read the zone by zn, the C library, Go and Python
+// names (or one keploy's own zone data reads alike: models.ZoneFileMount).
+// A lasting error naming the file and the zone the mount's source names
+// where the file is read from another zone's, or from a file whose path
+// names no zone (a host's /etc/localtime that is a copy), never the
+// source's own path, a host's, which the agent's log never shows: Node and
+// a JVM read the zone by zn, the C library, Go and Python
 // by the mounted file's rules, so the zone is unknown. A host's
 // /etc/localtime bind-mounted over an image's link to its zone
 // (`-v /etc/localtime:/etc/localtime:ro`, which lands on the file the link
@@ -1208,8 +1224,8 @@ func mountedZone(f ZoneFiles, p, zn string) error {
 	if m.Replaced {
 		what += ", since replaced on the host"
 	}
-	return lasting(fmt.Errorf("the zone file %s, which names %q by its path, is a file mounted from %s, %s. Node and a JVM read the zone by the name %q, the C library, Go and Python by the mounted file's rules, so keploy reads the application's zone as unknown. A host's /etc/localtime bind-mounted over an image's link to its zone (-v /etc/localtime:/etc/localtime:ro lands on the file the link names) gives this: set TZ to the mounted file's zone (%s), which the C library, Go and Python run in now, or drop the mount (a TZ of the zone the link names reads the mounted file too, and so does TZ=UTC where the C library reads a file for it: Debian's glibc)",
-		p, zn, m.Source, what, zn, remedy))
+	return lasting(fmt.Errorf("the zone file %s, which names %q by its path, is a file mounted from %s. Node and a JVM read the zone by the name %q, the C library, Go and Python by the mounted file's rules, so keploy reads the application's zone as unknown. A host's /etc/localtime bind-mounted over an image's link to its zone (-v /etc/localtime:/etc/localtime:ro lands on the file the link names) gives this: set TZ to the mounted file's zone (%s), which the C library, Go and Python run in now, or drop the mount (a TZ of the zone the link names reads the mounted file too, and so does TZ=UTC where the C library reads a file for it: Debian's glibc)",
+		p, zn, what, zn, remedy))
 }
 
 // zoneMountOf is the mount the zone file at p (a path in the process's own
@@ -1267,78 +1283,297 @@ func (m zoneMounts) point(root, p string) (string, error) {
 // zoneLocCap bounds zoneLocs: a cache holding it starts again.
 const zoneLocCap = 256
 
-// zoneLocs are the zones zoneFileIn loaded, by their name and their file's
-// bytes, so the processes that share a zone file (every process of one
-// image, or of one host) share one *time.Location (ProcZones holds up to
-// procZoneCap processes), never one parsed each. Bytes and name alike give
-// one zone, so a zone file another image ships differently (other rules)
-// is its own.
+// zoneLocs are the zones loadZone loaded, and the files it refused, by
+// their name and their file's bytes (and, where the answer took the zone
+// source of the file's root, that source's bytes), so the processes that
+// share a zone file (every process of one image, or of one host) share
+// one *time.Location (ProcZones holds up to procZoneCap processes), never
+// one parsed each, nor one file's rules read against IANA's releases
+// again. Bytes and name alike give one zone, so a zone file another image
+// ships differently (other rules) is its own.
 var zoneLocs = struct {
 	mu sync.Mutex
-	m  map[zoneLocKey]*time.Location
-}{m: map[zoneLocKey]*time.Location{}}
+	m  map[zoneLocKey]zoneLoaded
+}{m: map[zoneLocKey]zoneLoaded{}}
 
 type zoneLocKey struct {
 	name string
 	sum  [sha256.Size]byte
+	// sourced: the answer took the zone source whose sum src is
+	// (zoneSource.sum, zero for none). The first answer of a name and
+	// bytes takes none, and says what the file's offsets are
+	// (zoneLoaded.kind).
+	sourced bool
+	src     [sha256.Size]byte
+}
+
+// zoneLoaded is loadZone's answer for one zoneLocKey: the zone, the
+// extract of the zone source it was read in (models.ZoneSource.Extract,
+// where the answer took one), or the lasting error it refused the file
+// with; and, of an answer that took no source, what the file's offsets
+// are (zoneKind).
+type zoneLoaded struct {
+	loc     *time.Location
+	extract []byte
+	err     error
+	kind    zoneKind
+}
+
+// zoneKind is what loadZone read a zone file's offsets from 1970 to 2038
+// as before any zone source: keploy's own reading of the name or a
+// release's it knows (or no name to check), keploy's own alone, or
+// neither, which the source of the file's root decides (zoneOfName).
+type zoneKind int
+
+const (
+	zoneOfARelease zoneKind = iota
+	zoneOfOwnAlone
+	zoneOfNeither
+)
+
+// zoneSource is the zone source of the root a zone file was read in (its
+// tzdata.zi: models.ZoneSource) and the sum of its bytes; src nil where
+// the root holds none.
+type zoneSource struct {
+	src *models.ZoneSource
+	sum [sha256.Size]byte
+}
+
+// zoneSourceOf is the zone source of the root a zone file was read in:
+// read reads it (readZoneSource; nil for none), called only where the
+// file's offsets are no release's keploy knows of its name. With extract,
+// the caller hands the file on (the keploy CLI to a docker-mode agent,
+// whose own zone data may be another release than the CLI's): a file
+// keploy's own data alone reads as its name's is given the root's extract
+// too, where the root's source gives its offsets.
+type zoneSourceOf struct {
+	read    func() (zoneSource, error)
+	extract bool
+}
+
+// zoneSourceCap bounds zoneSources, as zoneLocCap bounds zoneLocs.
+const zoneSourceCap = 8
+
+// zoneSources are the zone sources parseZoneSource parsed, by the sum of
+// their bytes: a root's tzdata.zi is parsed once, whichever process of
+// the root (or of another of one image) reads it.
+var zoneSources = struct {
+	mu sync.Mutex
+	m  map[[sha256.Size]byte]*models.ZoneSource
+}{m: map[[sha256.Size]byte]*models.ZoneSource{}}
+
+// parseZoneSource is models.ParseZoneSource(b), the one zoneSources holds
+// where it holds one of these bytes. A source zic would not compile is
+// none: a lasting error.
+func parseZoneSource(b []byte) (zoneSource, error) {
+	sum := sha256.Sum256(b)
+	zoneSources.mu.Lock()
+	src, ok := zoneSources.m[sum]
+	zoneSources.mu.Unlock()
+	if ok {
+		return zoneSource{src: src, sum: sum}, nil
+	}
+	src, err := models.ParseZoneSource(b)
+	if err != nil {
+		return zoneSource{}, lasting(err)
+	}
+	zoneSources.mu.Lock()
+	if len(zoneSources.m) >= zoneSourceCap {
+		zoneSources.m = map[[sha256.Size]byte]*models.ZoneSource{}
+	}
+	zoneSources.m[sum] = src
+	zoneSources.mu.Unlock()
+	return zoneSource{src: src, sum: sum}, nil
+}
+
+// readZoneSource is the zone source of the root f gives whose zoneinfo
+// directory holds the zone file at p (a path in the root's own view, its
+// links resolved; under /usr/share/zoneinfo where p names no zoneinfo
+// directory: a copy named by /etc/timezone): the tzdata.zi IANA's
+// Makefile writes beside a release's zone files, from the same data, and
+// distributions install (Debian, Ubuntu, Fedora, RHEL). None where the root
+// holds no such file; an error, not lasting, where keploy cannot read it.
+func readZoneSource(f ZoneFiles, p string) func() (zoneSource, error) {
+	return func() (zoneSource, error) {
+		dir := "/usr/share/zoneinfo"
+		if i := strings.LastIndex(p, "zoneinfo/"); i >= 0 {
+			dir = p[:i+len("zoneinfo")]
+		}
+		b, err := readUnderIn(f, dir+"/tzdata.zi")
+		var nr errNotRegular
+		switch {
+		case absent(err), errors.As(err, &nr):
+			return zoneSource{}, nil
+		case err != nil:
+			return zoneSource{}, fmt.Errorf("keploy cannot read the zone source %s/tzdata.zi: %w", dir, err)
+		}
+		return parseZoneSource(b)
+	}
 }
 
 // loadZone is time.LoadLocationFromTZData(name, data), the one zoneLocs
-// holds where it holds one of that name and bytes. A name whose rules in
-// keploy's own zone data (models.ZoneLocation) are not data's is a lasting
-// error that names both (zoneRulesDiffer): the zone is unknown, as runtimes
-// disagree on it. Node (ICU) and a JVM read the zone by the name, in their
-// own zone data; the C library, Go and Python read the file's rules. A
-// host's /etc/localtime bind-mounted over an image's link to its zone
-// (`-v /etc/localtime:/etc/localtime:ro`) lands on the file the link
-// names, and gives that shape; so does a file of another release of IANA's
-// data than keploy's, for a zone whose rules changed between the two (a
-// stated limit: a right value of such a zone is refused, saying why). A
-// reference that is the very file read (keploy's own zone files, where the
-// process shares keploy's root) finds no difference: zoneFileIn reads the
-// bind mount itself there (mountedZone). A name keploy's zone
-// data does not hold (nor "Local", which names keploy's own zone) is
-// dropped: the file's rules with no name, as keploy cannot tell whether
-// they are the name's.
-func loadZone(name string, data []byte) (*time.Location, error) {
+// holds where it holds one of that name and bytes, and the extract of the
+// zone source it was read in (models.ZoneSource.Extract: none where the
+// answer took none). Its rules are the file's, which the C library, Go and
+// Python read; Node (ICU) and a JVM read the zone by the name, in their own
+// zone data. So a file that is another zone's leaves the application's
+// zone unknown, as runtimes disagree on it: a host's /etc/localtime
+// bind-mounted over an image's link to its zone (`-v
+// /etc/localtime:/etc/localtime:ro` lands on the file the link names), or
+// another zone's file copied through the link (a Dockerfile's COPY or
+// docker cp onto /etc/localtime, cp /usr/share/zoneinfo/<zone>
+// /etc/localtime), whichever release or build its bytes are of. One of
+// another release of IANA's zone data than keploy's is the name's, its
+// rules other than keploy's where IANA changed the zone between the two
+// (Africa/Casablanca reads UTC+01:00 from 2026-09-20 in tzdata 2024a,
+// UTC+00:00 in 2026c). The file's content tells the two apart
+// (zoneOfName), against keploy's own zone data, every release of IANA's
+// keploy knows, and the zone source of the root the file was read in
+// (src: its tzdata.zi), which gives the release the root's own zone files
+// are of, a later one than keploy knows among them. A lasting error
+// otherwise, naming both, and the zone whose file it is. A reference that
+// is the very file read (keploy's own zone files, where the process shares
+// keploy's root) finds no difference: zoneFileIn reads the bind mount
+// itself there (mountedZone). A name keploy's zone data does not hold (nor
+// "Local", which names keploy's own zone) is dropped: the file's rules
+// with no name, as keploy cannot tell whether they are the name's.
+func loadZone(name string, data []byte, src zoneSourceOf) (*time.Location, []byte, error) {
 	var own *time.Location
 	if name != "" {
 		var err error
 		if own, err = models.ZoneLocation(name); models.IsOwnZoneMount(err) {
 			// keploy's own file of the name is another zone's: it cannot
 			// check the name against the file's rules.
-			return nil, lasting(fmt.Errorf("the zone file named %q (by TZ, the /etc/localtime link or /etc/timezone) cannot be checked against %q's rules: %w", name, name, err))
+			return nil, nil, lasting(fmt.Errorf("the zone file named %q (by TZ, the /etc/localtime link or /etc/timezone) cannot be checked against %q's rules: %w", name, name, err))
 		} else if err != nil {
 			name = ""
 		}
 	}
 	k := zoneLocKey{name: name, sum: sha256.Sum256(data)}
-	zoneLocs.mu.Lock()
-	loc, ok := zoneLocs.m[k]
-	zoneLocs.mu.Unlock()
-	if ok {
-		return loc, nil
+	z, ok := zoneLoadedOf(k)
+	if !ok {
+		loc, err := time.LoadLocationFromTZData(name, data)
+		if err != nil {
+			// Bytes that are no zone file's: lasting (lastingError).
+			z = zoneLoaded{err: lasting(err)}
+		} else {
+			z = zoneLoaded{loc: loc, kind: zoneKindOf(name, loc, own)}
+		}
+		storeZoneLoaded(k, z)
 	}
-	loc, err := time.LoadLocationFromTZData(name, data)
-	if err != nil {
-		// Bytes that are no zone file's: lasting (lastingError).
-		return nil, lasting(err)
+	switch {
+	case z.err != nil || z.kind == zoneOfARelease:
+		return z.loc, nil, z.err
+	case z.kind == zoneOfOwnAlone && (!src.extract || src.read == nil):
+		return z.loc, nil, nil
 	}
-	if own != nil {
-		if at, ok := zoneRulesDiffer(loc, own); ok {
-			_, off := at.In(loc).Zone()
-			_, ownOff := at.In(own).Zone()
-			return nil, lasting(fmt.Errorf("the zone file named %q (by TZ, the /etc/localtime link or /etc/timezone) does not hold %q's rules: their offsets first differ on %s, where it reads UTC%s and %q UTC%s. Node and a JVM read the zone by its name, the C library, Go and Python by the file's rules, so keploy reads the application's zone as unknown. A host's /etc/localtime bind-mounted over an image's link to its zone (-v /etc/localtime:/etc/localtime:ro lands on the file the link names) gives this: set TZ to the zone the application runs in. So does zone data (tzdata) of another release than keploy's, for a zone whose rules changed between them: update the image's tzdata",
-				name, name, at.UTC().Format(time.RFC3339), utcOffset(off), name, utcOffset(ownOff)))
+	s := zoneSource{}
+	if src.read != nil {
+		var err error
+		if s, err = src.read(); err != nil && z.kind == zoneOfOwnAlone {
+			// keploy's own data reads the file as its name's: the source
+			// would only have gone on with it.
+			return z.loc, nil, nil
+		} else if err != nil {
+			// keploy cannot read the root's zone source now: no answer.
+			return nil, nil, err
 		}
 	}
-	zoneLocs.mu.Lock()
-	if len(zoneLocs.m) >= zoneLocCap {
-		zoneLocs.m = map[zoneLocKey]*time.Location{}
+	if z.kind == zoneOfOwnAlone {
+		if models.ReadZoneReleases(z.loc).Of(s.src, name) {
+			return z.loc, s.src.Extract(name), nil
+		}
+		return z.loc, nil, nil
 	}
-	zoneLocs.m[k] = loc
-	zoneLocs.mu.Unlock()
-	return loc, nil
+	k.sourced, k.src = true, s.sum
+	if z, ok := zoneLoadedOf(k); ok {
+		return z.loc, z.extract, z.err
+	}
+	if err := zoneOfName(name, z.loc, own, s.src); err != nil {
+		z = zoneLoaded{err: err}
+	} else {
+		z = zoneLoaded{loc: z.loc, extract: s.src.Extract(name)}
+	}
+	storeZoneLoaded(k, z)
+	return z.loc, z.extract, z.err
+}
+
+func zoneLoadedOf(k zoneLocKey) (zoneLoaded, bool) {
+	zoneLocs.mu.Lock()
+	defer zoneLocs.mu.Unlock()
+	z, ok := zoneLocs.m[k]
+	return z, ok
+}
+
+func storeZoneLoaded(k zoneLocKey, z zoneLoaded) {
+	zoneLocs.mu.Lock()
+	defer zoneLocs.mu.Unlock()
+	if len(zoneLocs.m) >= zoneLocCap {
+		zoneLocs.m = map[zoneLocKey]zoneLoaded{}
+	}
+	zoneLocs.m[k] = z
+}
+
+// zoneKindOf is what loc, the rules of a zone file named name, are before
+// any zone source (zoneKind), own the rules keploy's own zone data gives
+// the name (nil where it holds none: nothing to check): a release's of the
+// name keploy knows (models.ZoneReading.OfARelease), or own's from 1970 to
+// 2038 alone (zoneRulesDiffer), or neither.
+func zoneKindOf(name string, loc, own *time.Location) zoneKind {
+	if own == nil || models.ReadZoneReleases(loc).OfARelease(name) {
+		return zoneOfARelease
+	}
+	if _, differ := zoneRulesDiffer(loc, own); !differ {
+		return zoneOfOwnAlone
+	}
+	return zoneOfNeither
+}
+
+// zoneOfName is nil where loc, the rules of a zone file named name, which
+// are neither own's (the rules keploy's own zone data gives the name) nor
+// those of any release of IANA's zone data keploy knows of the name
+// (zoneOfNeither), are the ones the zone source of the root the file was
+// read in gives the name (src, its tzdata.zi; nil where the root holds
+// none): a file of name of the root's own release, whichever that is, one
+// later than every release keploy knows among them (models.ZoneReading.Of).
+// A lasting error otherwise, naming the first instant the file and own
+// differ at, and the zone a release keploy knows, or the root's source,
+// reads the file's offsets as, where one does: another zone's file, of a
+// release keploy knows or of a later one.
+func zoneOfName(name string, loc, own *time.Location, src *models.ZoneSource) error {
+	r := models.ReadZoneReleases(loc)
+	if r.Of(src, name) {
+		return nil
+	}
+	others := r.Releases()
+	if src != nil {
+		for _, n := range src.Holding(r.Digest()) {
+			if !slices.Contains(others, n) {
+				others = append(others, n)
+			}
+		}
+		sort.Strings(others)
+	}
+	at, _ := zoneRulesDiffer(loc, own)
+	_, off := at.In(loc).Zone()
+	_, ownOff := at.In(own).Zone()
+	msg := fmt.Sprintf("the zone file named %q (by TZ, the /etc/localtime link or /etc/timezone) does not hold %q's rules: their offsets first differ on %s, where it reads UTC%s and %q UTC%s. Node and a JVM read the zone by its name, the C library, Go and Python by the file's rules, so keploy reads the application's zone as unknown: no release of IANA's zone data (tzdata) from %s to %s gives %q the file's offsets from 1970 to 2038",
+		name, name, at.UTC().Format(time.RFC3339), utcOffset(off), name, utcOffset(ownOff), models.ZoneReleasesFirst, models.ZoneReleasesLast, name)
+	switch {
+	case src == nil:
+		msg += ", nor does a tzdata.zi of the root's own zone data, which it holds none of"
+	case src.Version() != "":
+		msg += fmt.Sprintf(", nor does the root's own zone data (tzdata.zi, release %s)", src.Version())
+	default:
+		msg += ", nor does the root's own zone data (tzdata.zi)"
+	}
+	if len(others) > 0 {
+		if len(others) > 3 {
+			others = append(others[:3:3], "…")
+		}
+		msg += fmt.Sprintf(", and one gives them %s: it is that zone's file", strings.Join(others, ", "))
+	}
+	return lasting(errors.New(msg + ". Another zone's file copied through an image's link to its zone (a Dockerfile's COPY or docker cp onto /etc/localtime, or cp /usr/share/zoneinfo/<zone> /etc/localtime, writes the file the link names), or a host's /etc/localtime bind-mounted over the link (-v /etc/localtime:/etc/localtime:ro lands on that file), gives this: set TZ to the zone the application runs in, or link /etc/localtime to it (ln -sf)"))
 }
 
 // zoneRulesFrom and zoneRulesTo bound the instants zoneRulesDiffer reads:
@@ -1355,25 +1590,11 @@ var (
 // zoneRulesDiffer is the first instant from zoneRulesFrom to zoneRulesTo at
 // which a and b read different offsets from UTC, and whether there is one:
 // each is read at every change of offset either makes
-// (time.Time.ZoneBounds), so no change of either between two reads is
-// missed.
+// (models.ZoneRulesDiffer), so no change of either between two reads is
+// missed, in a slim zone file too, whose zones Go ends at a leap year's
+// last day without advancing (models.ZoneEnd).
 func zoneRulesDiffer(a, b *time.Location) (time.Time, bool) {
-	for t := zoneRulesFrom; t.Before(zoneRulesTo); {
-		ta, tb := t.In(a), t.In(b)
-		_, oa := ta.Zone()
-		_, ob := tb.Zone()
-		if oa != ob {
-			return t, true
-		}
-		next := zoneRulesTo
-		for _, tt := range []time.Time{ta, tb} {
-			if _, end := tt.ZoneBounds(); !end.IsZero() && end.Before(next) {
-				next = end
-			}
-		}
-		t = next.UTC()
-	}
-	return time.Time{}, false
+	return models.ZoneRulesDiffer(a, b, zoneRulesFrom, zoneRulesTo)
 }
 
 // utcOffset is off, in seconds east of UTC, as "+05:30" (seconds where it

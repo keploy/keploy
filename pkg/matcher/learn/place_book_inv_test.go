@@ -50,8 +50,8 @@ func TestPlaceBookInverseNamesTheCallsPlaces(t *testing.T) {
 		}
 	})
 	t.Run("a second place of an entry is the call's own", func(t *testing.T) {
-		if pi.at[es[0].seq].i != 1 || len(pi.rec) != 1 || len(pi.live) != 1 {
-			t.Fatalf("P0's slot %+v, the call's maps %v / %v; want P0 in its slot and P2 in the call's maps", pi.at[es[0].seq], pi.rec, pi.live)
+		if pi.at[es[0].seq].i != 1 || len(pi.rec.at) != 1 || len(pi.live.at) != 1 {
+			t.Fatalf("P0's slot %+v, the call's postings %v / %v; want P0 in its slot and P2 in the call's postings", pi.at[es[0].seq], pi.rec, pi.live)
 		}
 	})
 	t.Run("a leaf listed but not in the call names nothing", func(t *testing.T) {
@@ -76,7 +76,7 @@ func TestPlaceBookInverseNamesTheCallsPlaces(t *testing.T) {
 		late := &leafPost{book: bk, seq: bk.n.Load() + 5}
 		c.ps.rest = append(c.ps.rest, bookPlace(x, "alpha-1 one", "beta-1 two", late))
 		if at, all := c.places().recAsked("alpha"); all || !slices.Equal(at, []int32{0, 1, 2}) {
-			t.Fatalf("a call with a leaf numbered past the book is asked at %v (all %v); want all three, the last from the call's maps", at, all)
+			t.Fatalf("a call with a leaf numbered past the book is asked at %v (all %v); want all three, the last from the call's own postings", at, all)
 		}
 	})
 }
@@ -132,7 +132,7 @@ func TestPlaceBookInverseFollowsChangedTexts(t *testing.T) {
 }
 
 // Over a test's calls the book lists each booked leaf once, every call
-// indexes it through the book, and none of them goes in a call's maps:
+// indexes it through the book, and none of them goes in a call's own postings:
 // counted as work, never as time.
 func TestPlaceBookIndexesLeavesWithNoMapOfTheCall(t *testing.T) {
 	const e, l, r, n = 60, 4, 30, 3

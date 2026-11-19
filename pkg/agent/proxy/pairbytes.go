@@ -55,16 +55,6 @@ type pairedConn struct {
 	// nothing on it by design, so nothing the application wrote to it is a
 	// capture loss, and no bytes wait holds it.
 	noSession atomic.Bool
-	// appDev is the index of the device the application's socket is bound
-	// to (0 for none), as the first lookup of the connection to find it
-	// read it (lookupApp): nil before one has.
-	appDev atomic.Pointer[uint32]
-	// proxyDev is the index of the device the proxy's socket is bound to (0
-	// for none), read as the proxy began closing it (noteWroteAtClose), for
-	// a wait's later reads of its orphan (orphanTookFIN): after the close,
-	// nothing reads it from the socket. A close whose side had taken the
-	// application's FIN or reset leaves it 0: no wait reads that orphan.
-	proxyDev atomic.Uint32
 	// cuts are the ends cut short on the connection, oldest first: each a
 	// test whose bytes wait ended before the proxy's side had received what
 	// the application had written when the wait began (cutShort). Bytes up
@@ -72,6 +62,10 @@ type pairedConn struct {
 	// its own, never the test open when the loss is counted (lostBy).
 	cutMu sync.Mutex
 	cuts  []cutEnd
+	// pairedConnOS is what one OS alone reads of the connection: on Linux
+	// the devices its sockets are bound to, on darwin one count of what the
+	// application wrote and the process holding the application's end.
+	pairedConnOS
 }
 
 // cutEnd is a test's end cut short on a connection: what the application had
@@ -119,15 +113,24 @@ func (pc *pairedConn) lostBy(low, top uint64) (owners []string, open bool) {
 // a FIN (noteWroteAtClose), and whether that count surely holds its FIN (fin):
 // a plaintext close does not wait for the FIN alone (finAloneOnItsWay), and
 // one byte short of a count that holds the FIN is that FIN. false says only
-// that the count may not hold it.
+// that the count may not hold it. want counts from base, as a bytes wait's
+// does (pairTarget): on darwin a distance between sequence numbers, from the
+// one after the application socket's first.
 type appWrote struct {
 	want uint64
 	fin  bool
+	base targetBase
 }
 
 // proxySide is what the wait reads of the proxy's side of a connection.
 type proxySide struct {
-	received uint64 // tcpi_bytes_received (Linux)
+	// received is tcpi_bytes_received on Linux. On darwin it is filled in
+	// at the close once the close has read what the application had
+	// written (readSide, noteWroteAtClose), counted as that is.
+	received uint64
+	// counted says received is a count: on Linux whenever the side was
+	// read, on darwin only once a close's read of the side counted it.
+	counted bool
 	// rcvNxt is, on darwin, the next sequence number the socket expects
 	// (tcpi_rcv_nxt): XNU's received count (tcpi_rxbytes) also counts
 	// payload that arrived twice, so the wait compares sequence numbers.
@@ -141,7 +144,7 @@ type proxySide struct {
 func (s *pairedConns) holds(conn net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.byConn[conn]
+	_, ok := s.byConn[pairKey(conn)]
 	return ok
 }
 
@@ -154,7 +157,7 @@ func (s *pairedConns) holds(conn net.Conn) bool {
 // side is read.
 func (s *pairedConns) closing(conn net.Conn, first func(*pairedConn)) (*pairedConn, int, error) {
 	s.mu.Lock()
-	pc := s.byConn[conn]
+	pc := s.byConn[pairKey(conn)]
 	s.mu.Unlock()
 	if pc == nil || pc.atClose.Load() != nil {
 		return nil, 0, nil
@@ -162,7 +165,7 @@ func (s *pairedConns) closing(conn net.Conn, first func(*pairedConn)) (*pairedCo
 	if first != nil {
 		first(pc)
 	}
-	ps := readProxySide(pc.conn)
+	ps := pc.readSide()
 	pc.atClose.Store(&ps)
 	unread, err := readUnread(pc.conn)
 	return pc, unread, err
@@ -171,17 +174,20 @@ func (s *pairedConns) closing(conn net.Conn, first func(*pairedConn)) (*pairedCo
 // pairedConns are the paired connections the proxy holds, under the proven
 // switch, from their accept until the proxy is done with them.
 type pairedConns struct {
-	mu     sync.Mutex
+	mu sync.Mutex
+	// byConn is keyed by the accepted socket (add). Every lookup takes the
+	// socket from under what the proxy keeps over it (pairKey: the tracking,
+	// and on macOS the count of what is written to it), so a site handed
+	// any of them finds the same connection.
 	byConn map[net.Conn]*pairedConn
 	// err is why no wait on them can be answered: the listener closed, or
 	// this kernel's sock_diag cannot see the application's sockets.
 	err error
 	// changed is closed, and replaced, at every removal or failure.
 	changed chan struct{}
-	// visible: an application socket has been seen from the proxy's
-	// network namespace (proveAppVisible, pairTarget): one that is not is
-	// gone, not hidden.
-	visible atomic.Bool
+	// pairedConnsOS is what proves, on one OS, an application socket not
+	// found gone, not hidden from the agent (visible, and on darwin held).
+	pairedConnsOS
 	// progress counts what the bytes waits saw move: a waited-for
 	// connection that received more, whose orphan changed state, or that
 	// was resolved (PairedBytesProgress).
@@ -257,6 +263,7 @@ func (s *pairedConns) add(conn *net.TCPConn, appSeq uint64, instance uint32) {
 func (s *pairedConns) remove(conn net.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	conn = pairKey(conn)
 	pc, ok := s.byConn[conn]
 	if !ok {
 		return
@@ -267,14 +274,16 @@ func (s *pairedConns) remove(conn net.Conn) {
 }
 
 // fail makes every wait, now and from then on, end with err. The first call
-// wins.
-func (s *pairedConns) fail(err error) {
+// wins, and says so (first).
+func (s *pairedConns) fail(err error) (first bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.err == nil {
+	first = s.err == nil
+	if first {
 		s.err = err
 	}
 	s.wakeLocked()
+	return first
 }
 
 func (s *pairedConns) wakeLocked() {
@@ -312,7 +321,7 @@ func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
 func (s *pairedConns) servedWithoutSession(conn net.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pc := s.byConn[conn]; pc != nil {
+	if pc := s.byConn[pairKey(conn)]; pc != nil {
 		pc.noSession.Store(true)
 		s.wakeLocked()
 	}

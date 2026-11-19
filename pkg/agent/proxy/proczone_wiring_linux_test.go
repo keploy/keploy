@@ -170,7 +170,7 @@ func TestADockerModeAgentLearnsAConnectionInItsAppContainersZone(t *testing.T) {
 	if err != nil {
 		t.Skipf("no host zone files: %v", err)
 	}
-	ist, err := learn.ZoneOfFile("Asia/Kolkata", kolkata)
+	ist, err := learn.ZoneOfFile("Asia/Kolkata", learn.ZoneFile{Data: kolkata})
 	if err != nil {
 		t.Fatal(err)
 	}

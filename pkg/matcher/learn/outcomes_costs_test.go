@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -2683,7 +2684,10 @@ func runAlone(t *testing.T, name string, env ...string) (lines string, passed bo
 // aloneProbeEnv tells a copy that TestOutcomeCostARowRunAloneHasItsCopysVerdict
 // starts what its row does: fail ("fail"), fail once its output says it
 // passed ("says passed"), or run the row alone itself, as the process that
-// started it would, in a further copy that fails it ("outer").
+// started it would, in a further copy that fails it ("outer"). It tells
+// TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds's copy to keep twice the
+// objects each measure counts ("twice"), or to have the runtime start two
+// new OS threads inside each measure's window ("threads", rowThreads).
 const aloneProbeEnv = "KEPLOY_LEARN_HEAP_ROW_PROBE"
 
 // A row run alone (aloneInAProcess) runs in a copy of its own, never in the
@@ -3265,10 +3269,59 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 // (any other against the bytes allocated for them).
 // A tiny object counts its block, which the race detector's runtime
 // (which has no tiny blocks) holds less of.
+//
+// Each is read in its own size class alone (heapClasses.heldBy), never as
+// the whole heap's bytes: the runtime allocates beside the row's objects
+// inside a measure's window. Each OS thread it starts there takes 5,576
+// bytes in a binary built with cgo: its m (2,048), its g0 and signal
+// goroutines (480 each), two profiling stack buffers (1,152 each), its cgo
+// callers (256) and a weak pointer (8). A collection drops the runtime's
+// central cache of sudogs, and a goroutine that then waits on the
+// semaphore its marking ends on, on a P whose own cache is empty, takes a
+// new one of 112 bytes. The row allows half a byte an object, 500 bytes in
+// a measure of 1,000; one thread, or five sudogs, in each of a size's
+// measures takes more than that. A copy of the row whose every window
+// has the runtime start two new threads at least (rowThreads) passes, and
+// says that read as the whole
+// heap's bytes it would not.
 func TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds(t *testing.T) {
 	if !aloneInAProcess(t) {
+		// A copy whose every measure keeps twice the objects it counts
+		// (aloneProbeEnv "twice") fails, and says why: an object of 16
+		// bytes, read in the heap after a collection, holds twice its
+		// class, and the large objects besides its own cannot be told
+		// from its own.
+		lines, passed, err := runAlone(t, t.Name(), aloneProbeEnv+"=twice")
+		if passed || !strings.Contains(lines, " 16 bytes (pointers: false): the runtime holds 32.") || !strings.Contains(lines, " large objects made: the heap allocated ") {
+			t.Errorf("a copy that keeps twice the objects it counts passed: %v (%v); want it failed, 16 bytes held as 32 each and the large objects not told apart. The copy:\n%s", passed, err, lines)
+		}
+		// A copy whose every measure has the runtime start two new OS threads
+		// inside its window (aloneProbeEnv "threads") passes, and says that
+		// the whole heap's bytes, as the row once read them, moved past
+		// what it allows: the threads' objects are not the row's.
+		lines, passed, err = runAlone(t, t.Name(), aloneProbeEnv+"=threads")
+		if !passed || !strings.Contains(lines, " OS threads started in each window: ") {
+			t.Errorf("a copy whose every measure has the runtime start two new OS threads in its window: passed %v (%v); want it passed, saying what the threads moved. The copy:\n%s", passed, err, lines)
+		}
 		return
 	}
+	// Each measure keeps as many objects as it counts, or twice as many
+	// where the process that started this copy asks (aloneProbeEnv), or
+	// has the runtime start two new OS threads in its window (rowThreads).
+	keeps := 1
+	switch os.Getenv(aloneProbeEnv) {
+	case "twice":
+		keeps = 2
+	case "threads":
+		rowThreads.more = 2
+	}
+	// Sizes whose least measure, read as the whole heap's bytes allocated
+	// in its window, holds more than the row allows: in a copy whose
+	// windows start threads, the read the row once took fails there.
+	moved, wholeRead := 0, 0
+	// Read once here, so that a read in a measure's window allocates
+	// nothing: the samples' histograms and the slices they are copied to.
+	before, after := readHeapClasses(), readHeapClasses()
 	sizes := []int{1, 2, 7, 8, 9, 15, 16, 17, 24, 25, 100, 504, 512, 513, 520, 1000, 1024, 4096, 9000, 27000, 32760, 32761, 32768, 33000, 40960, 70000}
 	for _, ptrs := range []bool{false, true} {
 		for _, n := range sizes {
@@ -3277,21 +3330,23 @@ func TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds(t *testing.T) {
 			}
 			want := allocBytes(n, ptrs)
 			// An object of up to 16 bytes without pointers is made among 15
-			// that die, and read as the heap it keeps once they are gone
-			// (liveHeap); any other as the bytes the heap allocated for it
-			// (allocatedNow), which the runtime letting go of objects of
+			// that die, and read as the heap of its class it keeps once they
+			// are gone (liveHeap first); any other as the bytes the heap
+			// allocated for it, which the runtime letting go of objects of
 			// its own in the window cannot lower, as it lowers the heap in
 			// use.
 			garbage := !ptrs && n <= 16
-			read := allocatedNow
-			if garbage {
-				read = liveHeap
-			}
+			whole := 0.0 // the least whole-heap read an object; 0: none
 			total, _, copies := leastHeld(t, fmt.Sprintf("%d bytes (pointers: %v)", n, ptrs), func(copies int) (int64, int64) {
 				count := 1000 * copies
-				bs, ps := make([][]byte, count), make([][]*int, count)
-				h0 := read()
-				for i := range count {
+				bs, ps := make([][]byte, keeps*count), make([][]*int, keeps*count)
+				if garbage {
+					liveHeap()
+				}
+				prepRowThreads()
+				before.read()
+				startRowThreads()
+				for i := range keeps * count {
 					if ptrs {
 						ps[i] = make([]*int, n/8)
 						continue
@@ -3304,9 +3359,20 @@ func TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds(t *testing.T) {
 					}
 				}
 				allocSink = nil
-				held := read() - h0
+				if garbage {
+					liveHeap()
+				}
+				after.read()
+				endRowThreads()
 				runtime.KeepAlive(bs)
 				runtime.KeepAlive(ps)
+				held, err := after.heldBy(before, count, garbage)
+				if err != nil {
+					t.Fatalf("%d bytes (pointers: %v): %v", n, ptrs, err)
+				}
+				if e := float64(after.allocated-before.allocated) / float64(count); !garbage && (whole == 0 || e < whole) {
+					whole = e
+				}
 				return held, int64(count) * want
 			})
 			held := float64(total) / float64(1000*copies)
@@ -3314,10 +3380,57 @@ func TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds(t *testing.T) {
 			if held > float64(want)+0.5 || !ptrs && n < 16 && want != 16 || (ptrs || n >= 16) && held < float64(want)-0.5 {
 				t.Errorf("%d bytes (pointers: %v): the runtime holds %.1f bytes each; allocBytes counts %d", n, ptrs, held, want)
 			}
+			if whole > 0 {
+				wholeRead++
+				if whole > float64(want)+0.5 {
+					moved++
+				}
+			}
+		}
+	}
+	if rowThreads.more > 0 {
+		t.Logf("OS threads started in each window: %d of the %d sizes read as allocated, read as the whole heap's bytes, hold more than allocBytes counts and the row allows; each window started as many as the runtime held and %d more, %d in the last", moved, wholeRead, rowThreads.more, rowThreads.k)
+		if moved == 0 {
+			t.Errorf("OS threads started in each window, %d more than the runtime held: no size read as the whole heap's bytes holds more than the row allows; want some, the runtime's objects for the threads beside the row's", rowThreads.more)
 		}
 	}
 	if allocBytes(0, true) != 0 || allocBytes(-1, false) != 0 {
 		t.Errorf("no bytes count %d and %d; want 0", allocBytes(0, true), allocBytes(-1, false))
+	}
+	// A read's large bytes are those of its large objects alone: 1,000
+	// small objects of 100 bytes and one of every small size class, made
+	// beside one large one, add nothing to them. An object without pointers
+	// of under 16 bytes is a tiny one, in a 16-byte block, so the one of 8
+	// bytes holds a pointer; one past 32,760 bytes is large, so the one of
+	// the class of 32,768 is of 32,760.
+	hist := heapClassSamples[0].Value.Float64Histogram()
+	classes := len(hist.Counts) - 1
+	small, ofClass, eight := make([][]byte, 1000), make([][]byte, classes), make([][]*int, 1)
+	before.read()
+	for i := range small {
+		small[i] = make([]byte, 100)
+	}
+	for c := range classes {
+		if size := int(classSize(hist, c)); size == 8 {
+			eight[0] = make([]*int, 1)
+		} else {
+			ofClass[c] = make([]byte, min(size, 32760))
+		}
+	}
+	allocSink = make([]byte, 40000)
+	after.read()
+	runtime.KeepAlive(allocSink)
+	allocSink = nil
+	runtime.KeepAlive(small)
+	runtime.KeepAlive(ofClass)
+	runtime.KeepAlive(eight)
+	if got := after.largeBytes - before.largeBytes; got != 40960 {
+		t.Errorf("one large object of 40,000 bytes made beside 1,000 of 100 and one of every small class: the large objects' bytes grew by %d; want 40960, its 5 pages", got)
+	}
+	for c := range classes {
+		if after.allocs[c] == before.allocs[c] {
+			t.Errorf("the size class of %d bytes took no object beside the large one; want one of every small class", classSize(hist, c))
+		}
 	}
 }
 
@@ -3325,14 +3438,204 @@ func TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds(t *testing.T) {
 // makes on the heap.
 var allocSink []byte
 
-// allocStats is where allocatedNow reads the heap's stats: a variable of
-// the package, so that the read allocates nothing itself.
+// rowThreads has each measure of TestOutcomeCostAllocBytesIsWhatTheRuntimeHolds,
+// in a copy asked to (aloneProbeEnv "threads"), start k goroutines inside
+// its window, each locked to an OS thread of its own and parked until the
+// window ends (startRowThreads, endRowThreads): as many as the threads the
+// runtime holds before the window, and more. A thread hosts one locked
+// goroutine at most, so the runtime makes more new threads at least in the
+// window, what it allocates for each (its m, its g0 and signal goroutines,
+// its profiling stacks) beside the row's objects, as for a thread it
+// starts there under load. Each goroutine exits still locked, so that its
+// thread ends with it. The channel they park on is made before the window
+// (prepRowThreads), and they start with no arguments, so that inside it
+// only the runtime allocates for them.
+var rowThreads struct {
+	more, k     int
+	stop        chan struct{}
+	ready, done sync.WaitGroup
+}
+
+// rowThreadsSample is where prepRowThreads reads how many threads the
+// runtime holds.
+var rowThreadsSample = []metrics.Sample{{Name: "/sched/threads/total:threads"}}
+
+// prepRowThreads waits for the last window's goroutines to end and readies
+// the next window's: none, or the runtime's threads and rowThreads.more.
+func prepRowThreads() {
+	rowThreads.done.Wait()
+	rowThreads.k = 0
+	if rowThreads.more > 0 {
+		metrics.Read(rowThreadsSample)
+		rowThreads.k = int(rowThreadsSample[0].Value.Uint64()) + rowThreads.more
+	}
+	rowThreads.stop = make(chan struct{})
+	rowThreads.ready.Add(rowThreads.k)
+	rowThreads.done.Add(rowThreads.k)
+}
+
+// startRowThreads starts the window's goroutines and returns once each has
+// locked its OS thread.
+func startRowThreads() {
+	for range rowThreads.k {
+		go rowThread()
+	}
+	rowThreads.ready.Wait()
+}
+
+// rowThread is one of a window's goroutines: locked to its OS thread until
+// it exits, parked until the window ends.
+func rowThread() {
+	stop := rowThreads.stop
+	runtime.LockOSThread()
+	rowThreads.ready.Done()
+	<-stop
+	rowThreads.done.Done()
+}
+
+// endRowThreads lets the window's goroutines end.
+func endRowThreads() {
+	close(rowThreads.stop)
+}
+
+// heapClasses is what the heap has allocated and freed so far, by size
+// class: objects of each class, as runtime/metrics buckets them
+// (/gc/heap/allocs-by-size and /gc/heap/frees-by-size: a bucket a class,
+// from past the class below up to its own size, then one for every large
+// object, past the largest class), the bytes allocated for large objects,
+// and the bytes allocated for every object.
+type heapClasses struct {
+	allocs, frees []uint64
+	largeBytes    int64
+	allocated     int64
+}
+
+// heapClassSamples is where heapClasses reads the heap: a variable of the
+// package, whose histograms each read after the first fills again.
+var heapClassSamples = []metrics.Sample{{Name: "/gc/heap/allocs-by-size:bytes"}, {Name: "/gc/heap/frees-by-size:bytes"}, {Name: "/gc/heap/allocs:bytes"}}
+
+// allocStats is where heapClasses.read has the runtime give back every P's
+// cached spans (runtime.ReadMemStats): a variable of the package, so that
+// the read allocates nothing itself.
 var allocStats runtime.MemStats
 
-// allocatedNow is the bytes the heap has allocated so far (TotalAlloc).
-func allocatedNow() int64 {
+// readHeapClasses is the heap's classes now (heapClasses.read).
+func readHeapClasses() *heapClasses {
+	h := &heapClasses{}
+	h.read()
+	return h
+}
+
+// read reads the heap's classes now, once every P has given its cached
+// spans back: runtime/metrics counts what a span allocated only then.
+func (h *heapClasses) read() {
 	runtime.ReadMemStats(&allocStats)
-	return int64(allocStats.TotalAlloc)
+	metrics.Read(heapClassSamples)
+	allocs, frees := heapClassSamples[0].Value.Float64Histogram(), heapClassSamples[1].Value.Float64Histogram()
+	h.allocs, h.frees = append(h.allocs[:0], allocs.Counts...), append(h.frees[:0], frees.Counts...)
+	h.allocated = int64(heapClassSamples[2].Value.Uint64())
+	h.largeBytes = h.allocated
+	for c := range len(allocs.Counts) - 1 {
+		h.largeBytes -= int64(allocs.Counts[c]) * classSize(allocs, c)
+	}
+}
+
+// classSize is the size of the objects of the size class bucket c of a
+// histogram of heapClassSamples holds: its upper bound is one past it.
+func classSize(hist *metrics.Float64Histogram, c int) int64 {
+	return int64(hist.Buckets[c+1]) - 1
+}
+
+// heldBy is what count objects of one size and kind, made since h0 was read
+// and up to h, hold, read in their size class alone: the one bucket that
+// took count objects or more in between (what else the runtime allocates
+// there takes a few, in any class), whatever else the heap took. A small
+// one holds its class's size, each one allocated (live false) or each of
+// its class still in the heap (live: the heap h read after a collection,
+// where an object that keeps a tiny block alive alone holds the whole
+// block). Large ones hold the bytes the heap allocated for them, where no
+// other large object was allocated in between.
+func (h *heapClasses) heldBy(h0 *heapClasses, count int, live bool) (int64, error) {
+	class := -1
+	for c := range h.allocs {
+		if h.allocs[c]-h0.allocs[c] < uint64(count) {
+			continue
+		}
+		if class >= 0 {
+			return 0, fmt.Errorf("%d objects made: the heap's size class buckets %d and %d each took %d or more, and the objects' class cannot be told", count, class, c, count)
+		}
+		class = c
+	}
+	if class < 0 {
+		return 0, fmt.Errorf("%d objects made: no size class took %d", count, count)
+	}
+	if class == len(h.allocs)-1 {
+		if n := h.allocs[class] - h0.allocs[class]; n != uint64(count) {
+			return 0, fmt.Errorf("%d large objects made: the heap allocated %d, and the bytes of the others cannot be told from theirs", count, n)
+		}
+		return h.largeBytes - h0.largeBytes, nil
+	}
+	size := classSize(heapClassSamples[0].Value.Float64Histogram(), class)
+	if live {
+		return (int64(h.allocs[class]-h0.allocs[class]) - int64(h.frees[class]-h0.frees[class])) * size, nil
+	}
+	return int64(count) * size, nil
+}
+
+// A row's objects are read in their size class alone (heapClasses.heldBy):
+// the one class that took as many objects as the row made, at its size
+// each, whatever the runtime allocated beside them, in it or in another
+// class. Where no class or two took as many, or large objects besides the
+// row's were allocated beside them, the read says so and gives nothing.
+func TestOutcomeCostARowsObjectsAreReadInTheirClassAlone(t *testing.T) {
+	h0 := readHeapClasses()
+	hist := heapClassSamples[0].Value.Float64Histogram()
+	bucket := func(size int64) int {
+		for c := range len(hist.Counts) - 1 {
+			if classSize(hist, c) == size {
+				return c
+			}
+		}
+		t.Fatalf("no size class of %d bytes", size)
+		return -1
+	}
+	c16, c112, c576, large := bucket(16), bucket(112), bucket(576), len(h0.allocs)-1
+	const count = 1000
+	type add struct {
+		c             int
+		allocs, frees uint64
+	}
+	// What an OS thread the runtime starts takes, in a binary built with cgo:
+	// its m, its g0 and signal goroutines, two profiling stack buffers, its
+	// cgo callers and a weak pointer, 5,576 bytes.
+	thread := []add{{bucket(2048), 1, 0}, {bucket(480), 2, 0}, {bucket(1152), 2, 0}, {bucket(256), 1, 0}, {bucket(8), 1, 0}}
+	for _, r := range []struct {
+		what       string
+		adds       []add
+		largeBytes int64
+		live       bool
+		want       int64 // -1: none, said
+	}{
+		{"1,000 objects of 112 bytes beside 5 sudogs of their class and 3 objects of another", []add{{c112, count + 5, 0}, {c576, 3, 0}}, 0, false, count * 112},
+		{"1,000 objects of 1,152 bytes beside the objects of two OS threads, four in their class", slices.Concat([]add{{bucket(1152), count, 0}}, thread, thread), 0, false, count * 1152},
+		{"as many objects of a class as the row made", []add{{c112, count, 0}}, 0, false, count * 112},
+		{"one object fewer than the row made", []add{{c112, count - 1, 0}}, 0, false, -1},
+		{"two classes that took as many as the row made", []add{{c112, count, 0}, {c576, count, 0}}, 0, false, -1},
+		{"tiny blocks, 15 of every 16 freed, 7 more of their class kept beside them", []add{{c16, 16 * count, 15*count - 7}}, 0, true, (count + 7) * 16},
+		{"the same blocks, as allocated", []add{{c16, 16 * count, 15*count - 7}}, 0, false, count * 16},
+		{"large objects beside a sudog", []add{{large, count, 0}, {c112, 1, 0}}, count * 40960, false, count * 40960},
+		{"large objects beside another large one", []add{{large, count + 1, 0}}, count*40960 + 49152, false, -1},
+	} {
+		h := &heapClasses{allocs: slices.Clone(h0.allocs), frees: slices.Clone(h0.frees), largeBytes: h0.largeBytes + r.largeBytes}
+		for _, a := range r.adds {
+			h.allocs[a.c] += a.allocs
+			h.frees[a.c] += a.frees
+		}
+		held, err := h.heldBy(h0, count, r.live)
+		if r.want < 0 && err == nil || r.want >= 0 && (err != nil || held != r.want) {
+			t.Errorf("%s: the row's objects hold %d bytes (%v); want %d (-1: none, said)", r.what, held, err, r.want)
+		}
+	}
 }
 
 // Each text a call's index reads takes an entry, counted when it is made,
@@ -3393,31 +3696,36 @@ func TestOutcomeCostAReaderEntryCountsWhatItHolds(t *testing.T) {
 	}
 }
 
-// Two calls that both find no filter entry for a recording (or a text) make
-// it at once: each counts the entry on the set's budget, then stores it
-// under the set's lock. The one that finds the other's entry there keeps
-// it, stores nothing, and gives its count back, so the set holds one entry
-// and counts it once.
+// Two calls that both find no filter entry for a recording (or a text), or
+// no field view's entry for a text, make it at once: each counts the entry
+// on the set's budget, then stores it under the set's lock. The one that
+// finds the other's entry there keeps it, stores nothing, and gives its
+// count back, so the set holds one entry and counts it once.
 func TestOutcomeCostAFilterEntryAnotherCallMadeIsKeptAndCountedOnce(t *testing.T) {
 	s := newSetDerived()
-	fs := &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{}}
+	fs := &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{}, fieldTexts: map[fieldsTextKey]*fieldsEntry{}}
 	used := func() int64 { s.mu.Lock(); defer s.mu.Unlock(); return s.budget.used }
 	u := used()
-	won := newFilterEntry(fs, s, fs.of, "mock-1", strings.Clone, 100, false)
+	won := newSetEntry(fs, s, fs.of, "mock-1", strings.Clone, 100, &filterEntry{})
 	if won == nil || fs.of["mock-1"] != won || used()-u != 100 {
 		t.Fatalf("the first call's entry %v, stored %v, counted %d bytes; want an entry, stored, 100 counted", won != nil, won != nil && fs.of["mock-1"] == won, used()-u)
 	}
-	lost := newFilterEntry(fs, s, fs.of, "mock-1", strings.Clone, 100, false)
+	lost := newSetEntry(fs, s, fs.of, "mock-1", strings.Clone, 100, &filterEntry{})
 	if lost != won || fs.of["mock-1"] != won || len(fs.of) != 1 || used()-u != 100 {
 		t.Errorf("a call that finds the entry another made gets it back %v, leaves it stored %v (%d entries), and the set counts %d bytes; want the entry, stored, 1 entry, 100 counted", lost == won, fs.of["mock-1"] == won, len(fs.of), used()-u)
 	}
 	k := filterTextKey{n: filterTextMin, a: 1, b: 2}
-	same := func(k filterTextKey) filterTextKey { return k }
 	u = used()
-	won = newFilterEntry(fs, s, fs.texts, k, same, 60, true)
-	lost = newFilterEntry(fs, s, fs.texts, k, same, 60, true)
+	won = newSetEntry(fs, s, fs.texts, k, sameKey, 60, &filterEntry{byText: true})
+	lost = newSetEntry(fs, s, fs.texts, k, sameKey, 60, &filterEntry{byText: true})
 	if won == nil || !won.byText || lost != won || fs.texts[k] != won || len(fs.texts) != 1 || used()-u != 60 {
 		t.Errorf("by text: the entry made %v (by text: %v), the later call's is it %v, stored %v (%d entries), %d bytes counted; want one entry by text, both calls', 60 counted", won != nil, won != nil && won.byText, lost == won, fs.texts[k] == won, len(fs.texts), used()-u)
+	}
+	fk := fieldsTextKey{n: 3, fields: 1, a: 1, b: 2}
+	u = used()
+	made := newSetEntry(fs, s, fs.fieldTexts, fk, sameKey, 70, &fieldsEntry{})
+	if other := newSetEntry(fs, s, fs.fieldTexts, fk, sameKey, 70, &fieldsEntry{}); made == nil || other != made || fs.fieldTexts[fk] != made || len(fs.fieldTexts) != 1 || used()-u != 70 {
+		t.Errorf("a field view: the entry made %v, the later call's is it %v, stored %v (%d entries), %d bytes counted; want one entry, both calls', 70 counted", made != nil, other == made, fs.fieldTexts[fk] == made, len(fs.fieldTexts), used()-u)
 	}
 }
 

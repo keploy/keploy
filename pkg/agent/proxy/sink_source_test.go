@@ -20,7 +20,8 @@ import (
 // pid): its comm, and its program as keploy names one (starts.ProcessOf: a
 // test binary the go tool built by its go test, else argv[0], redacted),
 // with, only to travel to keploy mock's receipt, its pid and its whole
-// command line, redacted (containerkey.RedactArgs), where kernel pids are
+// command line, redacted (containerkey.RedactArgs), a word with white space
+// or a quote quoted (utils.JoinCommandLine), where kernel pids are
 // keploy's own (utils.KernelPidsAreLocal); else no name, why, and the pid. The comm is read here from /proc; how a program is
 // named is starts' to pin (TestAGoTestBinaryIsNamedByItsGoTest), and this
 // row pins only that the sink names the call's process.
@@ -43,7 +44,7 @@ func selfSource(t *testing.T) models.Origin {
 		t.Skipf("no /proc/self/cmdline: %v", err)
 	}
 	argv := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
-	return models.Origin{Comm: strings.TrimSpace(string(comm)), Exe: exe, PID: pid, Cmdline: strings.Join(containerkey.RedactArgs(argv), " ")}
+	return models.Origin{Comm: strings.TrimSpace(string(comm)), Exe: exe, PID: pid, Cmdline: utils.JoinCommandLine(containerkey.RedactArgs(argv))}
 }
 
 // The sink names the process that made each call it is told of, a miss and

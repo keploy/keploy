@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/plaintcp"
@@ -283,7 +284,9 @@ func (p *Proxy) countAccept(conn net.Conn) bool {
 	if _, err := p.markedListener(); err != nil {
 		return false
 	}
-	tc, ok := conn.(*net.TCPConn)
+	// Found under the conns put over it (NetConn), the count of writes
+	// among them (relay.CountClientWrites).
+	tc, ok := tcpConnOf(conn)
 	if !ok {
 		p.failCount(fmt.Errorf("an accepted connection is not TCP (%T)", conn))
 		return false
@@ -335,11 +338,14 @@ func (p *Proxy) countAccept(conn net.Conn) bool {
 // two accepted connections with the same two addresses, both waiting for the
 // proxy; by them, the later one's pairing would replace the earlier one's
 // before its handler took it, and send it to the later one's destination.
+// The connection is taken from under the macOS and Windows count of what is
+// written to it (relay.CountClientWrites), which the trackedConn keeps over it
+// there.
 func pairKey(conn net.Conn) net.Conn {
 	if tc, ok := conn.(*trackedConn); ok {
-		return tc.Conn
+		conn = tc.Conn
 	}
-	return conn
+	return relay.AcceptedConn(conn)
 }
 
 // usesPairing reports whether the proxy takes its connections' destinations

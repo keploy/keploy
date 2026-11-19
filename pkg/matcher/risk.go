@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/textcut"
 )
 
 type pathMaps struct {
@@ -353,26 +353,13 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
-	// diffMaps iterates Go maps, so bucket order is randomized per run; sort
-	// each bucket so reports, yaml output and the capped diff subset are
-	// stable across runs.
-	sort.Strings(added)
-	sort.Strings(removed)
-	sort.Strings(typeChanges)
-	sort.Strings(valueChanges)
-
 	trunc := func(s string) string {
 		if maxVal <= 0 || len(s) <= maxVal {
 			return s
 		}
-		// Back the cut off to a rune boundary so a multi-byte UTF-8
-		// character is never split — invalid UTF-8 here would garble the
-		// report yaml/json encoders downstream.
-		cut := maxVal
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
-		}
-		return s[:cut] + "…"
+		// Never split a multi-byte UTF-8 character: invalid UTF-8 here
+		// would garble the report yaml/json encoders downstream.
+		return textcut.Prefix(s, maxVal) + "…"
 	}
 
 	var out []models.MockFieldDiff
@@ -509,6 +496,12 @@ func scalarTypeValue(v interface{}) (typ, val string) {
 	return "null", "null"
 }
 
+// diffMaps returns the paths added, removed, retyped and changed in value
+// between two path maps, each list sorted. It walks Go maps, whose order is
+// random on every run, so it sorts what it found: the same two documents give
+// the same lists, and the failure assessment's reasons, the reports, the yaml
+// output and the capped diff subset built from them read the same on every
+// run.
 func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []string) {
 	seen := map[string]struct{}{}
 
@@ -539,6 +532,10 @@ func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []st
 			added = append(added, k)
 		}
 	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(typeChanges)
+	sort.Strings(valueChanges)
 	return
 }
 

@@ -5,10 +5,8 @@
 #
 #   go-test-darwin-rows.sh <package dir> <test file>...
 #
-# For a package whose whole run cannot be the check on macOS. pkg/agent/proxy
-# and pkg/agent/routes each hold a test that does not end on macOS (a DNS
-# server that cannot bind, a bind to a port still held), so go_macos.yaml runs
-# their macOS files' rows instead of the package.
+# For a package go_macos.yaml runs by its macOS files' rows instead of whole
+# (pkg/client/app, whose whole run takes about six minutes on a Mac).
 #
 # The rows are read from the files, so a test added to one runs without a
 # workflow edit. A row that does not run is no proof: a `-run` pattern that

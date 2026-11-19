@@ -151,7 +151,7 @@ func updateAssetName(goos, goarch string) (string, error) {
 			// Retrying cannot help -- there is no asset for this OS/arch -- so
 			// give the caller the code that says so rather than a generic 1.
 			utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
-			return "", fmt.Errorf("keploy's native macOS build is Apple Silicon (arm64) only; this Mac is %s. On an Intel Mac, run Keploy inside Lima: https://keploy.io/docs/installation/macos-installation/#option-2-install-keploy-with-lima", goarch)
+			return "", fmt.Errorf("keploy does not support Intel Macs; it runs on Apple silicon Macs only (this is a %s/%s build). See https://keploy.io/docs/installation/macos-installation/", goos, goarch)
 		}
 		return "keploy_darwin_arm64.tar.gz", nil
 	}
