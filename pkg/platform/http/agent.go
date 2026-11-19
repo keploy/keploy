@@ -2347,6 +2347,45 @@ func (a *AgentClient) getUnchargedCaptureLosses(ctx context.Context) (models.Cap
 	return losses, nil
 }
 
+// DrainCaptureLosses asks the agent to count the close of every connection
+// whose application end has ended (POST /agent/capturelosses/drain): keploy
+// test's set end, once the set's application has stopped, before it reads
+// the set's losses. An agent that does not drain (older than it) is
+// ErrCaptureLossesUnsupported. The wait is bounded as GetCaptureLossesAndAgent's
+// is (boundedAgentRead).
+func (a *AgentClient) DrainCaptureLosses(ctx context.Context) error {
+	_, err := boundedAgentRead(ctx, "the agent's count of the closes the application's stop made", func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, a.drainCaptureLosses(ctx)
+	})
+	return err
+}
+
+// drainCaptureLosses is DrainCaptureLosses's exchange, unbounded.
+func (a *AgentClient) drainCaptureLosses(ctx context.Context) error {
+	url := fmt.Sprintf("%s/capturelosses/drain", a.conf.Agent.AgentURI)
+	req, err := newAgentRequest(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := doAgent(&a.client, req)
+	if err != nil {
+		return fmt.Errorf("failed to ask the agent to count the closes the application's stop made: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for capturelosses/drain")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented || res.StatusCode == http.StatusMethodNotAllowed {
+		return fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusNoContent {
+		rawBody, _ := readAgentBody(res)
+		return agentRespErr("count the closes the application's stop made", res, rawBody)
+	}
+	return nil
+}
+
 // TakeOwnedCaptureLosses takes from the agent, once each, the losses a test
 // whose end was cut short owned (POST /agent/capturelosses/owned): keploy
 // test's report of them, which no count it reads holds. An agent that has

@@ -17,6 +17,8 @@ func (p *Proxy) WaitPairedBytes(context.Context, uint64) error {
 }
 
 // PairedBytesErr says the bytes cannot be counted here (WaitPairedBytes).
+func (p *Proxy) PairedBytesDrain(context.Context) error { return nil }
+
 func (p *Proxy) PairedBytesErr() error {
 	return fmt.Errorf("%w: the bytes on the proxy's connections are counted on Linux only", models.ErrProxyConnsUnsupported)
 }

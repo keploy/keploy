@@ -536,6 +536,20 @@ func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
 	return out, nil
 }
 
+// heldNow is every paired connection the proxy holds, but for one it serves
+// with no session (noSession), whatever its waits can tell (PairedBytesDrain).
+func (s *pairedConns) heldNow() []*pairedConn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*pairedConn, 0, len(s.byConn))
+	for _, pc := range s.byConn {
+		if !pc.noSession.Load() {
+			out = append(out, pc)
+		}
+	}
+	return out
+}
+
 // servedWithoutSession notes that the proxy serves conn with no session
 // (pairedConn.noSession), and wakes the waits: one that took conn before the
 // mark is released by it (pairReached), with no read or close of conn's to

@@ -603,6 +603,17 @@ type PairedBytesSessioner interface {
 	PairedBytesSession(session uint64)
 }
 
+// PairedBytesDrainer is the optional extension of an OwnedLossTaker that
+// waits, as a session's last read of its losses asks once the application
+// has stopped, until it has counted the close of every connection whose
+// application end has ended or whose close it has begun: a loss of such a
+// close is then in that read (counted, or owned), never in a later session's
+// or set's. A connection the application holds open is not waited for. It
+// ends with ctx, with an error: the read is then not made.
+type PairedBytesDrainer interface {
+	PairedBytesDrain(ctx context.Context) error
+}
+
 // PairedBytesChecker is the proxy's account of whether it can count the bytes
 // on its paired connections: nil while it can (PairedBytesWaiter's waits can
 // be answered).

@@ -218,6 +218,32 @@ type OwnedLossTaker interface {
 	TakeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error)
 }
 
+// CaptureLossDrainer is an optional Instrumentation extension: the agent's
+// wait until its proxy has counted the close of every connection whose
+// application end has ended (POST /agent/capturelosses/drain).
+type CaptureLossDrainer interface {
+	DrainCaptureLosses(ctx context.Context) error
+}
+
+// drainCaptureLosses asks, under the proven switch, at a set's end whose
+// application stopped, the agent to count the close of every connection the
+// stop ended, before the set's end reads its losses (endCaptureLosses,
+// takeOwnedLosses): a loss of such a close is the set's, never a later
+// set's. An agent that does not drain answers nothing (the set's reads are
+// as they were); a drain that failed is returned: what the stop's closes
+// lost cannot be told, and the set is not judged on it.
+func (r *Replayer) drainCaptureLosses(ctx context.Context) error {
+	d, ok := r.instrumentation.(CaptureLossDrainer)
+	if !ok || r.noAgent || !provenswitch.On() {
+		return nil
+	}
+	err := d.DrainCaptureLosses(ctx)
+	if errors.Is(err, models.ErrCaptureLossesUnsupported) {
+		return nil
+	}
+	return err
+}
+
 // takeOwnedLosses takes, under the proven switch, the losses a cut-short end
 // owned that the agent counted, and keeps them for the set's end
 // (applyOwnedLosses). Made at each test case's end and at the set's end, so

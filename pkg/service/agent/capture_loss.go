@@ -228,6 +228,12 @@ func (a *Agent) markCaptureLosses(ctx context.Context) captureLossMark {
 // run on it (design v14 §7.5: evidence charged to no test). A standing state
 // (unix_unseen) is kept by every mark and is in it whatever was charged.
 func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	// First, the proxy counts the close of every connection the run's stop
+	// ended (DrainCaptureLosses): a loss of one is in this read, the
+	// session's last, never only the log line of a later session's reset.
+	// One it could not finish fails the read, below, once the one-process
+	// switch is off.
+	drainErr := a.DrainCaptureLosses(ctx)
 	// What the listener dropped after the last test is counted first
 	// (closeDropsGap), as every loss after it is.
 	a.closeDropsGap(ctx)
@@ -240,6 +246,9 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 	// before it is taken here: the run's.
 	if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
 		pb.PairedBytesOneProcess(false)
+	}
+	if drainErr != nil {
+		return nil, drainErr
 	}
 	// Taken first: a loss the proxy counted before the counts are read
 	// is in this answer whichever way it was counted.
@@ -275,6 +284,24 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 		uncharged = uncharged.Without(models.CaptureLossContainerUnread).Plus(outside)
 	}
 	return uncharged, nil
+}
+
+// DrainCaptureLosses waits until the proxy has counted the close of every
+// connection whose application end has ended, or whose close it has begun
+// (coreAgent.PairedBytesDrainer): keploy test asks at a test set's end, once
+// the set's application has stopped and before it reads the set's losses,
+// and the session's last read (UnchargedCaptureLosses) drains first. A loss
+// of a close the application's stop made is then in that read, never in a
+// later set's or session's. nil from a proxy that does not drain.
+func (a *Agent) DrainCaptureLosses(ctx context.Context) error {
+	d, ok := a.Proxy.(coreAgent.PairedBytesDrainer)
+	if !ok {
+		return nil
+	}
+	if err := d.PairedBytesDrain(ctx); err != nil {
+		return fmt.Errorf("keploy could not count the close of every connection the application's stop ended: %w", err)
+	}
+	return nil
 }
 
 // runsLocked makes l, losses this session counted, the run's: charged to no

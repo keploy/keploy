@@ -7090,6 +7090,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("why", r.lossAppKept),
 			zap.String("next_step", "see the earlier test-set's report for where it was lost; each test charged with it says what to do"))
 	}
+	// The set's application stopped at its end (stopAppBeforeSetEnd): what
+	// its stop's closes lost is counted before the set's reads below, so it
+	// is the set's, never a later set's.
+	var drainErr error
+	if stopAppBeforeSetEnd != nil {
+		drainErr = r.drainCaptureLosses(context.WithoutCancel(ctx))
+	}
 	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
 	// What a cut-short end owned that its loss was counted for after the
 	// end: named in its test case's report, or the set's (applyOwnedLosses).
@@ -7099,6 +7106,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	late = append(late, ownedBySet...)
 	if lateErr == nil {
 		lateErr = ownedErr
+	}
+	if lateErr == nil {
+		lateErr = drainErr
 	}
 	// A call keploy cannot capture at all (decision 20) is no loss of what it
 	// saw: below, it leaves the set without a verdict, never failed.
