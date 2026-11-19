@@ -227,6 +227,44 @@ func TestNativeAgentArgs_AnAgentThatGotNoTokenIsStillChecked(t *testing.T) {
 	require.True(t, launched, "an agent that got no token is not on record as launched, so nothing checks it and it serves open unreported")
 }
 
+// TestNativeAgentArgs_EveryRunKindHandsItsAgentsTheRunToken: every native
+// agent of a run is handed the run's token, the one this process presents: in
+// a record, a test, and keploy mock's record and replay, and again for a
+// second agent of the same run (one that replaces the first). An agent's run
+// mark on the shared clock files is drawn from that token, so it is the same
+// for every agent of a run and differs between runs; an agent that holds none
+// was started by something that hands none, such as a keploy CLI older than
+// the agent.
+func TestNativeAgentArgs_EveryRunKindHandsItsAgentsTheRunToken(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup() })
+	require.NotEmpty(t, token.Session(), "this process has no run token to hand its agents")
+	a := New(zap.NewNop(), nil, &config.Config{})
+	for _, tc := range []struct {
+		name string
+		opts models.SetupOptions
+	}{
+		{"record", models.SetupOptions{Mode: models.MODE_RECORD}},
+		{"test", models.SetupOptions{Mode: models.MODE_TEST}},
+		{"mock record", models.SetupOptions{Mode: models.MODE_RECORD, MockMode: true}},
+		{"mock replay", models.SetupOptions{Mode: models.MODE_TEST, MockMode: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for agent := 1; agent <= 2; agent++ {
+				opts := tc.opts
+				opts.AgentPort, opts.ProxyPort, opts.DnsPort = 26789, 26790, 26791
+				opts.AgentURI = "http://localhost:26789/agent"
+				args := a.nativeAgentArgs(opts)
+				i := slices.Index(args, "--token-file")
+				require.GreaterOrEqual(t, i, 0, "agent %d of a %s run is started without --token-file: %v", agent, tc.name, args)
+				require.Less(t, i+1, len(args))
+				got, err := token.ReadFile(args[i+1])
+				require.NoError(t, err)
+				require.Equal(t, token.Session(), got, "agent %d of a %s run is handed a token that is not the run's", agent, tc.name)
+			}
+		})
+	}
+}
+
 // TestNew_BuildsClientsThatCarryTheSessionToken pins what New wires up. The
 // transport has its own tests, but New handing it an empty token left them all
 // green while every request the CLI made was a 401 — or, against an agent that
