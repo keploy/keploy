@@ -86,9 +86,9 @@ func TestGetAlias_LinuxNamesTheToken(t *testing.T) {
 // gets the token this process presents (the client fills the value in from
 // its own environment: TestPrepareDockerCommand_GivesTheClientTheTokenTheAliasNames,
 // and app's TestRun_OnlyTheComposeCommandStartsAnAgentWithTheToken for every
-// agent a compose test-set restart starts). An agent's run mark on the shared
-// clock files is drawn from that token; an agent that holds none was started
-// by something that hands none, such as a keploy CLI older than the agent.
+// agent a compose test-set restart starts). An agent handed no token serves
+// its control-plane API to any caller that reaches its port
+// (routes.ConsumeSessionToken), so no run kind may start one without it.
 func TestAgentLaunch_EveryRunKindNamesTheRunToken(t *testing.T) {
 	for _, tc := range []struct {
 		name string
