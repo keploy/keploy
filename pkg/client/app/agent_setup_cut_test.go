@@ -364,6 +364,107 @@ func TestARecreatedAgentAfterACutSetupIsSetUpAndEndsNothing(t *testing.T) {
 	}
 }
 
+// A SETUP CUT WHILE NO AGENT RUNS AT ALL ENDS NOTHING. compose's recreate
+// stops and removes the agent being set up before it starts the one in its
+// place, so the setup fails, and the look right after it usually finds no
+// agent running. That setup was cut by the recreate, not failed: no halt, no
+// end, no release of the run refused (through the hold's end or the refusal
+// hook), and agent-3, the replacement, is the one agent set up, last. Two
+// shapes: held (no agent ran before the up, so its releases are held) and
+// not held (the agent kept from before is the one compose recreates). Record
+// and test, both KEPLOY_PROVEN modes.
+func TestASetupCutInTheRecreateWindowEndsNothing(t *testing.T) {
+	for _, held := range []bool{true, false} {
+		shape := "held_none_ran_before"
+		if !held {
+			shape = "not_held_the_kept_agent_recreated"
+		}
+		t.Run(shape, func(t *testing.T) {
+			everyRunMode(t, func(t *testing.T, mode models.Mode) {
+				a, d, _ := newRestartApp(t)
+				a.Mode = mode
+				gone := make(chan struct{})
+				var mu sync.Mutex
+				var setUpOn []string
+				var refused []error
+				calls := 0
+				a.SetOnAgentRestart(func(context.Context) error {
+					id := d.agentNow()
+					mu.Lock()
+					calls++
+					n := calls
+					mu.Unlock()
+					if n == 1 {
+						// compose's recreate stops and removes the agent
+						// being set up; the one in its place is not started
+						// yet.
+						d.set("keploy-v3-test", "agent-2", "t3", false)
+						close(gone)
+						return errors.New("keploy's agent container exited while keploy set it up again")
+					}
+					mu.Lock()
+					setUpOn = append(setUpOn, id)
+					mu.Unlock()
+					return nil
+				})
+				var holds atomic.Int32
+				a.SetAgentReleaseHold(func(context.Context) func(error) {
+					holds.Add(1)
+					return func(failed error) {
+						if failed != nil {
+							mu.Lock()
+							refused = append(refused, failed)
+							mu.Unlock()
+						}
+					}
+				})
+				a.SetAgentReleaseRefusal(func(failed error) {
+					mu.Lock()
+					refused = append(refused, failed)
+					mu.Unlock()
+				})
+				ended := false
+				d.set("keploy-v3-test", "agent-1", "t1", !held)
+				d.set("app", "app-1", "", false)
+				a.retryComposeUp(context.Background(), func() { ended = true }, func() utils.CmdError {
+					time.Sleep(30 * time.Millisecond)
+					d.set("keploy-v3-test", "agent-2", "t3", true)
+					select {
+					case <-gone:
+					case <-time.After(30 * time.Second):
+						t.Error("the watch never set up agent-2")
+					}
+					time.Sleep(100 * time.Millisecond) // the replacement starts a while after
+					d.set("keploy-v3-test", "agent-3", "t5", true)
+					time.Sleep(400 * time.Millisecond)
+					d.set("app", "app-1", "t6", true)
+					time.Sleep(100 * time.Millisecond)
+					return utils.CmdError{}
+				})
+				mu.Lock()
+				got := append([]string(nil), setUpOn...)
+				ref := append([]error(nil), refused...)
+				mu.Unlock()
+				if h := a.composeAppHalt(); h != nil {
+					t.Fatalf("the run ended on a halt (agentSetup=%v) for a setup the recreate cut; set up: %v", h.agentSetup, got)
+				}
+				if ended {
+					t.Fatalf("the run's end on a halt was called for a setup the recreate cut; set up: %v", got)
+				}
+				if len(ref) != 0 {
+					t.Fatalf("the run's releases were refused (%v) for a setup the recreate cut", ref)
+				}
+				if len(got) != 1 || got[0] != "agent-3" || !a.agentKept("agent-3@t5") {
+					t.Fatalf("set up %v, last %q; want agent-3 alone set up, last", got, a.agentSetUp)
+				}
+				if n := holds.Load(); held != (n > 0) {
+					t.Fatalf("%d hold(s) of the run's releases; want one only when no agent ran before the up", n)
+				}
+			})
+		})
+	}
+}
+
 // A RETRY DOCKER SAID NOTHING AT LEAVES NO AGENT TAKEN FOR KEPT. docker could
 // not name the agent before a retry (keploy's stop had taken the run's), and
 // that retry's up started an agent again and returned before the watch saw

@@ -93,11 +93,28 @@ func TestTheAgentClientHandsTheAppHooksThatReachItsSession(t *testing.T) {
 // app it runs) has the three hooks of an agent compose's retry starts again.
 // Without them the retry would run a plain `up`: no hold, no setup and no
 // refusal, and the agent compose started again would take the run's releases
-// with none of its mocks or settings. Both KEPLOY_PROVEN modes.
+// with none of its mocks or settings. registerApp also makes the session
+// restartable under compose, whose project starts the agent again, so what
+// the run sets up is kept to put back on it; under docker run it is not.
+// Both KEPLOY_PROVEN modes.
 func TestTheAppSetupKeepsHasTheRestartHooks(t *testing.T) {
+	restartable := func(s *agentSession) bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.restartable
+	}
 	everySwitchMode(t, func(t *testing.T) {
 		ag := newHandoverAgent(t, "ok", nil)
+		ag.s.configure(true)
+		ag.a.registerApp("docker run app", models.SetupOptions{CommandType: string(utils.DockerRun)})
+		if restartable(ag.s) {
+			t.Fatal("a docker run app left the session restartable; want it not")
+		}
+		ag.s.configure(false)
 		usrApp := ag.a.registerApp("docker compose up", models.SetupOptions{CommandType: string(utils.DockerCompose)})
+		if !restartable(ag.s) {
+			t.Fatal("a compose app left the session not restartable; a restarted agent's setup would put back nothing")
+		}
 		stored, ok := ag.a.apps.Load(uint64(0))
 		if !ok || stored != usrApp {
 			t.Fatalf("the app Setup keeps is %v; want the one it runs", stored)
