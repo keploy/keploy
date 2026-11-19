@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -170,6 +171,47 @@ func TestACutSetupLetsNoReleaseGoUntilASetupCompletes(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("the release did not go on within 5 s of the completed setup")
 		}
+	})
+}
+
+// A completed setup is what wakes a release parked waiting for it: with
+// nothing else changing in the session, the release goes on at the setup's
+// end. The row above can also pass when the release, woken by the setup's own
+// steps, reads the session only after the setup ended; in a synctest bubble
+// the release is parked before the setup ends, so no timing decides this
+// row. Both KEPLOY_PROVEN modes.
+func TestACompletedSetupWakesTheParkedRelease(t *testing.T) {
+	everySwitchMode(t, func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			s := newAgentSession()
+			s.settingUp()
+			ctx, cut := context.WithCancelCause(context.Background())
+			defer cut(nil)
+			rc, refused := s.beginRelease(false, cut, func(context.Context) error { return nil })
+			if refused != nil {
+				t.Fatalf("a release asked while the agent was set up was refused with %v", refused)
+			}
+			defer s.endRelease(rc, true)
+			posts := make(chan bool, 1)
+			go func() { posts <- s.awaitPost(ctx.Done(), rc) }()
+			synctest.Wait() // the release is parked on the session
+			select {
+			case ok := <-posts:
+				t.Fatalf("a release went on (post %v) while the agent was not set up", ok)
+			default:
+			}
+
+			s.setUpDone()
+			synctest.Wait()
+			select {
+			case ok := <-posts:
+				if !ok {
+					t.Fatal("the release the completed setup woke may not post")
+				}
+			default:
+				t.Fatal("the completed setup woke no release parked waiting for it")
+			}
+		})
 	})
 }
 
