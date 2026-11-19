@@ -400,12 +400,26 @@ type driftedInstant struct{ rec, live moment }
 // the k-th of it in the other, as clockIn pairs them; one the live form holds
 // none of is no pair.
 func driftedInstants(recorded, live string) []driftedInstant {
-	rs := instantSpans(recorded)
+	return driftedBy(recorded, live, instantSpans)
+}
+
+// driftedInstantsOf is driftedInstants(recorded, live), each form's instants
+// read once for the test (spansOf), not once for each call that reads them:
+// every call of a test reads its test case's own request as sent
+// (offsetPlacesBy), and each read its instants anew.
+func (dc *DriftCache) driftedInstantsOf(recorded, live string) []driftedInstant {
+	return driftedBy(recorded, live, dc.spansOf)
+}
+
+// driftedBy is driftedInstants(recorded, live), each form's instants read by
+// spans; the live form is read only where the recorded one holds any.
+func driftedBy(recorded, live string, spans func(string) []instant) []driftedInstant {
+	rs := spans(recorded)
 	if len(rs) == 0 {
 		return nil
 	}
 	byLayout := map[int][]moment{}
-	for _, sp := range instantSpans(live) {
+	for _, sp := range spans(live) {
 		if sp.keyed {
 			byLayout[sp.layout] = append(byLayout[sp.layout], sp.moment())
 		}

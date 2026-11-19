@@ -20,6 +20,7 @@ const (
 	listenDiagSockid = 4  // idiag_id's offset in inet_diag_msg (and in inet_diag_req_v2, after states)
 	listenDiagIf     = 36 // idiag_if's offset in inet_diag_sockid: the device the socket is bound to
 	listenDiagCookie = 40 // idiag_cookie's offset in inet_diag_sockid
+	listenDiagInode  = 68 // idiag_inode's offset in inet_diag_msg
 	listenDiagBufLen = 32 << 10
 	listenDiagListen = 10 // TCP_LISTEN
 )
@@ -34,24 +35,38 @@ const (
 // the socket is bound to (the kernel binds one there only with a device), so
 // a dial to it names the link; it has no zone if the table gives no device.
 func TCPListeners(port uint16) ([]netip.Addr, error) {
+	socks, err := TCPListenSockets(port) // none with an error
+	var out []netip.Addr
+	for _, s := range socks {
+		out = append(out, s.Addr)
+	}
+	return out, err
+}
+
+// TCPListenSockets is TCPListeners with each socket's inode: the sockets that
+// listen on port in this process's network namespace, IPv4 then IPv6. It
+// costs a dump of the listening sockets alone, never a read of every socket
+// of the namespace, as /proc/net/tcp is: the kernel's listening hash, which
+// it filters to port.
+func TCPListenSockets(port uint16) ([]ListenSocket, error) {
 	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, unix.NETLINK_SOCK_DIAG)
 	if err != nil {
 		return nil, fmt.Errorf("sock_diag socket: %w", err)
 	}
 	defer func() { _ = unix.Close(fd) }()
-	var out []netip.Addr
+	var out []ListenSocket
 	for i, family := range []uint8{unix.AF_INET, unix.AF_INET6} {
-		addrs, err := dumpListeners(fd, uint32(i+1), family, port)
+		socks, err := dumpListeners(fd, uint32(i+1), family, port)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, addrs...)
+		out = append(out, socks...)
 	}
 	return out, nil
 }
 
-// dumpListeners is TCPListeners for one address family, as request seq.
-func dumpListeners(fd int, seq uint32, family uint8, port uint16) ([]netip.Addr, error) {
+// dumpListeners is TCPListenSockets for one address family, as request seq.
+func dumpListeners(fd int, seq uint32, family uint8, port uint16) ([]ListenSocket, error) {
 	req := make([]byte, unix.NLMSG_HDRLEN+listenDiagReqLen)
 	binary.NativeEndian.PutUint32(req[0:], uint32(len(req)))
 	binary.NativeEndian.PutUint16(req[4:], unix.SOCK_DIAG_BY_FAMILY)
@@ -69,7 +84,7 @@ func dumpListeners(fd int, seq uint32, family uint8, port uint16) ([]netip.Addr,
 		return nil, fmt.Errorf("sock_diag dump request: %w", err)
 	}
 	buf := make([]byte, listenDiagBufLen)
-	var out []netip.Addr
+	var out []ListenSocket
 	for {
 		var n int
 		var err error
@@ -121,7 +136,7 @@ func dumpListeners(fd int, seq uint32, family uint8, port uint16) ([]netip.Addr,
 						a = a.WithZone(strconv.FormatUint(uint64(dev), 10))
 					}
 				}
-				out = append(out, a)
+				out = append(out, ListenSocket{Addr: a, Inode: binary.NativeEndian.Uint32(b[listenDiagInode:])})
 			}
 		}
 	}

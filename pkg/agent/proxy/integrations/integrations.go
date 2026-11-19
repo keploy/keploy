@@ -1773,6 +1773,23 @@ func SourcesOf(db MockMemDb, mock string) []models.DeclaredSource {
 	return s.SourcesOf(mock)
 }
 
+// SourcesDeclarer is an optional MockMemDb capability under the proven
+// switch: whether keploy mock replay's scope table declares sources of any
+// recording (DeclaredSourcesOf). A declared source may excuse the very field
+// a matcher files recordings by, so a matcher that reads only the
+// recordings filed under a call's key reads them all while one is declared.
+type SourcesDeclarer interface {
+	DeclaresSources() bool
+}
+
+// DeclaresSources is whether db's replay declares sources of any recording
+// (SourcesDeclarer); true for a db that cannot tell, which so reads every
+// recording.
+func DeclaresSources(db MockMemDb) bool {
+	s, ok := db.(SourcesDeclarer)
+	return !ok || s.DeclaresSources()
+}
+
 // TimeFormReader is an optional MockMemDb capability under the proven
 // switch: whether keploy mock replay's scope table turned on the learn
 // step's time default (models.ScopeTableReq.TimeForm), which checks a

@@ -3696,31 +3696,36 @@ func TestOutcomeCostAReaderEntryCountsWhatItHolds(t *testing.T) {
 	}
 }
 
-// Two calls that both find no filter entry for a recording (or a text) make
-// it at once: each counts the entry on the set's budget, then stores it
-// under the set's lock. The one that finds the other's entry there keeps
-// it, stores nothing, and gives its count back, so the set holds one entry
-// and counts it once.
+// Two calls that both find no filter entry for a recording (or a text), or
+// no field view's entry for a text, make it at once: each counts the entry
+// on the set's budget, then stores it under the set's lock. The one that
+// finds the other's entry there keeps it, stores nothing, and gives its
+// count back, so the set holds one entry and counts it once.
 func TestOutcomeCostAFilterEntryAnotherCallMadeIsKeptAndCountedOnce(t *testing.T) {
 	s := newSetDerived()
-	fs := &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{}}
+	fs := &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{}, fieldTexts: map[fieldsTextKey]*fieldsEntry{}}
 	used := func() int64 { s.mu.Lock(); defer s.mu.Unlock(); return s.budget.used }
 	u := used()
-	won := newFilterEntry(fs, s, fs.of, "mock-1", strings.Clone, 100, false)
+	won := newSetEntry(fs, s, fs.of, "mock-1", strings.Clone, 100, &filterEntry{})
 	if won == nil || fs.of["mock-1"] != won || used()-u != 100 {
 		t.Fatalf("the first call's entry %v, stored %v, counted %d bytes; want an entry, stored, 100 counted", won != nil, won != nil && fs.of["mock-1"] == won, used()-u)
 	}
-	lost := newFilterEntry(fs, s, fs.of, "mock-1", strings.Clone, 100, false)
+	lost := newSetEntry(fs, s, fs.of, "mock-1", strings.Clone, 100, &filterEntry{})
 	if lost != won || fs.of["mock-1"] != won || len(fs.of) != 1 || used()-u != 100 {
 		t.Errorf("a call that finds the entry another made gets it back %v, leaves it stored %v (%d entries), and the set counts %d bytes; want the entry, stored, 1 entry, 100 counted", lost == won, fs.of["mock-1"] == won, len(fs.of), used()-u)
 	}
 	k := filterTextKey{n: filterTextMin, a: 1, b: 2}
-	same := func(k filterTextKey) filterTextKey { return k }
 	u = used()
-	won = newFilterEntry(fs, s, fs.texts, k, same, 60, true)
-	lost = newFilterEntry(fs, s, fs.texts, k, same, 60, true)
+	won = newSetEntry(fs, s, fs.texts, k, sameKey, 60, &filterEntry{byText: true})
+	lost = newSetEntry(fs, s, fs.texts, k, sameKey, 60, &filterEntry{byText: true})
 	if won == nil || !won.byText || lost != won || fs.texts[k] != won || len(fs.texts) != 1 || used()-u != 60 {
 		t.Errorf("by text: the entry made %v (by text: %v), the later call's is it %v, stored %v (%d entries), %d bytes counted; want one entry by text, both calls', 60 counted", won != nil, won != nil && won.byText, lost == won, fs.texts[k] == won, len(fs.texts), used()-u)
+	}
+	fk := fieldsTextKey{n: 3, fields: 1, a: 1, b: 2}
+	u = used()
+	made := newSetEntry(fs, s, fs.fieldTexts, fk, sameKey, 70, &fieldsEntry{})
+	if other := newSetEntry(fs, s, fs.fieldTexts, fk, sameKey, 70, &fieldsEntry{}); made == nil || other != made || fs.fieldTexts[fk] != made || len(fs.fieldTexts) != 1 || used()-u != 70 {
+		t.Errorf("a field view: the entry made %v, the later call's is it %v, stored %v (%d entries), %d bytes counted; want one entry, both calls', 70 counted", made != nil, other == made, fs.fieldTexts[fk] == made, len(fs.fieldTexts), used()-u)
 	}
 }
 
