@@ -657,7 +657,8 @@ jobs:
   # spellings) and keploy.yml's bypassRules in keploy record and keploy test,
   # and --disable-tele (no telemetry or crash-report lookup, in the CLI and in
   # the agent it starts); and a clean stop of the agent, which forces
-  # nothing. Its own job: the proven strict-HTTP job above is near its
+  # nothing; and the name keploy record gives an app it was given no name
+  # for. Its own job: the proven strict-HTTP job above is near its
   # timeout, as is mock-mode's. The disable-tele leg builds this checkout
   # with a crash tag, so Go comes from keploy's go.mod.
   cli_flags_linux:
@@ -707,6 +708,20 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/pass_through_ports/pass-through-ports-linux.sh"
+
+      # The name keploy record gives an app it was given no name for, in real
+      # git checkouts: the origin remote's repository name at the top folder,
+      # that name and the folder's path inside the repository in a mktemp
+      # folder of the checkout (it was the folder alone: "tmp.XXXXXXXXXX"),
+      # and the folder's name outside any repository. An existing project's
+      # keploy.yml that names no app keeps the folder's name, which keploy
+      # writes into it once, every other byte kept.
+      - name: Run record app-name e2e (named after the git repository)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/record-app-name-linux.sh"
 
       # keploy record --disable-tele looks no telemetry host up: the native
       # agent, a keploy process of its own that pings telemetry at its start,
