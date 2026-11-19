@@ -3058,8 +3058,8 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 			gaveOutside, fine = append(gaveOutside, p.mock), fine || h.fr || h.fl
 		}
 	}
-	if mock, ok := dc.echoedOutside(c, earlier); ok {
-		gaveOutside, fine = append(gaveOutside, mock), fine || fineCut(c.rm.res) || fineCut(c.lm.res)
+	if mock, echoFine, ok := dc.echoedOutside(c, earlier); ok {
+		gaveOutside, fine = append(gaveOutside, mock), fine || echoFine
 	}
 	if len(gaveOutside) > 0 {
 		d := dc.refuse(path, at, n, r, l, RefusalPick, "instant-pick-outside-scope", "round F's moment, or the recorded one, stands in an answer round F gave before the call outside its scope", nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))

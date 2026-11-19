@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -630,12 +631,23 @@ func (dc *DriftCache) readAnswerMoments(x Raw) []givenMoment {
 // instant asks, and only after the offset rule, which refuses every changed
 // instant where one of those recordings could not be read (places().unread).
 func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) string {
+	why, _ := dc.echoedElsewhereAt(pairs, at, served, raw, places)
+	return why
+}
+
+// echoedElsewhereAt is echoedElsewhere, and fine: an instant the echo read
+// that names a moment of one of the pairs it took for a copy (echoMatch) by
+// one of its rules, as echoedElsewhere names it (namesMomentApart), names it
+// at a cut finer than a millisecond (namesApartFine): what F saw, among what
+// F gave the application, or what it was recorded with, among what the
+// recordings hold.
+func (dc *DriftCache) echoedElsewhereAt(pairs []driftedInstant, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) (why string, fine bool) {
 	if len(pairs) == 0 {
-		return ""
+		return "", false
 	}
 	op := places()
 	if len(op.answers) == 0 {
-		return ""
+		return "", false
 	}
 	held, recorded := dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)
 	var late heldMoments
@@ -651,12 +663,16 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 	echoed := echoedPairs(pairs, held, recorded)
 	echoed = append(echoed, lateEchoes(pairs, echoed, &late)...)
 	if len(echoed) == 0 {
-		return ""
+		return "", false
+	}
+	for _, e := range echoed {
+		fine = fine || slices.ContainsFunc(held.list, func(h moment) bool { return namesApartFine(h, e.live, e.rec, e.rules) }) ||
+			slices.ContainsFunc(recorded.list, func(h moment) bool { return namesApartFine(h, e.rec, e.live, e.rules) })
 	}
 	for _, g := range op.answers {
 		for _, e := range echoed {
 			if namesMomentApart(g.m, e.live, e.rec, e.rules) {
-				return "the moment record's full round saw in it stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether the value is a copy of what the application was given there, or a pick from it by its clock, which moves as a read of the clock does, or a read of the clock. " + correction(g.mock, false)
+				return "the moment record's full round saw in it stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether the value is a copy of what the application was given there, or a pick from it by its clock, which moves as a read of the clock does, or a read of the clock. " + correction(g.mock, false), fine
 			}
 		}
 	}
@@ -675,13 +691,13 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 		}
 		for _, e := range echoed {
 			if namesMomentApart(g.m, e.rec, e.live, e.rules) {
-				return "the moment record's full round saw in it stands " + where + ", and the moment it was recorded with stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether the value is a copy of what the application was given, cut by one rule in both runs, or a read of the clock. " + correction(g.mock, false)
+				return "the moment record's full round saw in it stands " + where + ", and the moment it was recorded with stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether the value is a copy of what the application was given, cut by one rule in both runs, or a read of the clock. " + correction(g.mock, false), fine
 			}
 		}
 	}
 	// Unreached but where an instant names both moments by one rule: refused
 	// all the same.
-	return pickUnaccounted(where)
+	return pickUnaccounted(where), fine
 }
 
 // lateEchoes are the pairs of pairs that echoed (the echo's other reads)

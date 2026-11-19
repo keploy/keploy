@@ -1265,24 +1265,36 @@ func namesApart(ms []givenMoment, m, other moment) bool {
 // it, never a read of the clock. served is the call's earlier places the
 // echo reads: dc.in.Earlier, or those without a client test's requests where
 // a read of the clock goes before them (readOverClients).
-func (dc *decider) echoedOutside(c changedInstant, served []Earlier) (mock string, ok bool) {
+// fine: a place that names the moment so names it at a cut finer than a
+// millisecond (namesApartFine), as an answer of the scope holds one at a
+// fine cut (holds): a pick from it. One that names it only at a millisecond
+// or coarser (the hour of a nanosecond read, in a recording made on that
+// hour's whole second) may hold it only as two stamps the runs' timing put
+// in one cut, as an answer of the scope may, and the instant order reads it
+// as such (step 5's window, else this refusal).
+func (dc *decider) echoedOutside(c changedInstant, served []Earlier) (mock string, fine, ok bool) {
 	if c.rm == nil || c.lm == nil {
-		return "", false
+		return "", false, false
 	}
 	if i := slices.IndexFunc(dc.set, func(g GivenPlaces) bool { return namesApart(g.fView, *c.lm, *c.rm) }); i >= 0 {
-		return dc.set[i].mock, true
+		return dc.set[i].mock, slices.ContainsFunc(dc.set[i].fView, func(v givenMoment) bool { return namesApartFine(v.m, *c.lm, *c.rm, nil) }), true
 	}
 	op := dc.outside()
 	pair := []driftedInstant{{rec: *c.rm, live: *c.lm}}
-	if len(op.answers) == 0 || dc.dr.echoedElsewhere(pair, dc.in.At, served, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
-		return "", false
+	if len(op.answers) == 0 {
+		return "", false, false
+	}
+	why, fine := dc.dr.echoedElsewhereAt(pair, dc.in.At, served, dc.in.Raw, func() *offsetPlaces { return op })
+	if why == "" {
+		return "", false, false
 	}
 	if i := slices.IndexFunc(op.answers, func(g givenMoment) bool {
 		return namesMomentApart(g.m, *c.lm, *c.rm, nil) || !g.at.After(dc.in.At) && namesMomentApart(g.m, *c.rm, *c.lm, nil)
 	}); i >= 0 {
-		return op.answers[i].mock, true
+		g := op.answers[i]
+		return g.mock, namesApartFine(g.m, *c.lm, *c.rm, nil) || !g.at.After(dc.in.At) && namesApartFine(g.m, *c.rm, *c.lm, nil), true
 	}
-	return "", true
+	return "", fine, true
 }
 
 // setEvidence is what g shows of the changed word r (R) to f (F), and
