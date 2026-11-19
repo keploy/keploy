@@ -554,3 +554,76 @@ func BenchmarkResolveWithAWaitingBackgroundCall(b *testing.B) {
 		})
 	}
 }
+
+// A due background call taken out of the middle of the settled prefix leaves
+// the mocks after it settled on their own request times: a resolve steps over a
+// settled mock by the time kept beside the buffer, not the mock's, so a time
+// left one slot off would hide a kept test's own mock from its window until
+// the stale cutoff dropped it. The prefix is re-recorded whole after the
+// removal.
+func TestABackgroundCallSentFromTheMiddleOfThePrefixLeavesTheRestOnTheirTimes(t *testing.T) {
+	m, out, maps := bgRig(t, timerRule)
+	now := time.Now()
+	m.AddMock(mongoUpdate("user", now.Add(-1000*time.Millisecond)))
+	timer := mongoUpdate("jobs", now.Add(-900*time.Millisecond))
+	m.AddMock(timer)
+	own := now.Add(-500 * time.Millisecond)
+	m.AddMock(mongoUpdate("owns", own))
+	m.AddMock(mongoUpdate("aftr", now.Add(-400*time.Millisecond)))
+	far := now.Add(time.Hour)
+	m.ResolveRange(far, far.Add(time.Millisecond), "test-far", true, false)
+	m.mu.Lock()
+	settled := m.settledLocked()
+	m.mu.Unlock()
+	if settled != 4 {
+		t.Fatalf("settled prefix %d, want all 4 buffered mocks", settled)
+	}
+	// The timer's call is due (its time has passed): a flush sends it from
+	// the middle of the prefix.
+	m.mu.Lock()
+	timer.Spec.ReqTimestampMock = now.Add(-time.Minute)
+	m.bgOldest = timer.Spec.ReqTimestampMock
+	decided := m.decided
+	m.mu.Unlock()
+	m.FlushOwnedWindows()
+	if c := collections(received(t, m, out)); !slices.Equal(c, []string{"jobs"}) {
+		t.Fatalf("the flush sent %v, want the background call alone", c)
+	}
+	m.mu.Lock()
+	settled, buffered, walked := m.settledLocked(), len(m.buffer), m.decided-decided
+	m.mu.Unlock()
+	if buffered != 3 || settled != 3 {
+		t.Fatalf("after the removal: settled %d of %d buffered; want the prefix re-recorded over the 3 left", settled, buffered)
+	}
+	// Re-recorded by the removal itself, so the flush decided none of them
+	// again: the prefix it found was whole.
+	if walked != 0 {
+		t.Fatalf("the flush decided %d mocks again after the removal, want none", walked)
+	}
+	// A kept request over own's time takes own.
+	m.ResolveRange(own.Add(-time.Millisecond), own.Add(time.Millisecond), "test-own", true, true)
+	got := received(t, m, out)
+	if c := collections(got); !slices.Equal(c, []string{"owns"}) {
+		t.Fatalf("the kept request over its own mock was handed %v, want that mock", c)
+	}
+	if ids := mappedTo(maps, "test-own"); !slices.Contains(ids, got[0].Name) {
+		t.Fatalf("the test's mapping %v does not list its own mock %q", ids, got[0].Name)
+	}
+}
+
+// The manager keeps the request time of the OLDEST call a rule names that
+// waits in the buffer, whatever order the calls are noted in: a flush walks
+// the settled prefix only once that one is due, so a newer time kept there
+// would put off every due call until the recording stopped.
+func TestTheOldestWaitingBackgroundCallIsNoted(t *testing.T) {
+	m := New(zap.NewNop())
+	t0 := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, at := range []time.Time{t0.Add(2 * time.Second), t0, t0.Add(time.Second), t0.Add(3 * time.Second)} {
+		m.noteWaitingBackgroundLocked(at)
+	}
+	if !m.bgWaiting || !m.bgOldest.Equal(t0) {
+		t.Fatalf("noted waiting %v, oldest %v; want the oldest, %v", m.bgWaiting, m.bgOldest, t0)
+	}
+}
