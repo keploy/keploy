@@ -188,7 +188,7 @@ func (a *Agent) settleKeeping(ctx context.Context, answers bool, worker uint32, 
 	// ending test's: its calls, which the settle had the handlers take and
 	// answer. The next test of worker begins after the end, so none of them
 	// is that test's (coreAgent.PairedBytesSettler).
-	if ps, ok := a.Proxy.(coreAgent.PairedBytesSettler); ok && a.Proxy != nil {
+	if ps, ok := a.Proxy.(coreAgent.PairedBytesSettler); ok {
 		defer ps.PairedBytesSettled(worker)
 	}
 	cut := false

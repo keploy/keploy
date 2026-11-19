@@ -92,8 +92,10 @@ type provenWire struct {
 	// ownedOpen are, by test ID, losses the proxy counted at a close of a
 	// connection of that test's worker while the test was open
 	// (coreAgent.OwnedLoss's Worker), taken at another worker's test's end:
-	// that test's end charges them (chargeCaptureLosses), and they are the
-	// run's if it never does (closeOpen, UnchargedCaptureLosses).
+	// that test's end charges them (chargeCaptureLosses, which every end
+	// reaches, the wire held), and they are the run's when the run's
+	// uncharged losses are read with that test still open
+	// (UnchargedCaptureLosses).
 	ownedOpen map[string]models.CaptureLosses
 	// ownedLeft are losses cut-short ends owned that the session before
 	// counted and no read took: the run's, which the next read takes
@@ -1752,11 +1754,6 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 			}
 		}
 		delete(a.proven.openFrom, id)
-		// Kept for an end that never charged them: the run's.
-		if kept := a.proven.ownedOpen[id]; len(kept) > 0 {
-			a.proven.ownedRun = a.proven.ownedRun.Plus(kept)
-			delete(a.proven.ownedOpen, id)
-		}
 		a.provenMu.Unlock()
 		if closed {
 			// Connections from here on are the run's again, in a scope of
