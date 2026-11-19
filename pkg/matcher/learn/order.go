@@ -30,8 +30,11 @@ func init() { decideBy = decideOrder }
 
 // decideOrder is Decide's order: Mode Elsewhere's guard around the words
 // decided with every earlier place in scope, or the call's own order.
+// Mode Elsewhere decides every word (Input.RefusedOnly): its guard keeps a
+// call whose refused words keploy.yml declares noise.
 func decideOrder(in Input) []Decision {
 	if in.Mode == ModeElsewhere {
+		in.RefusedOnly = false
 		ds, fields := decideBoth(in, true)
 		out := elsewhere(in, ds, fields)
 		(&decider{in: in}).ruled(out, fields)
@@ -50,19 +53,32 @@ func decideOrder(in Input) []Decision {
 // keploy cannot read (timedEarlier, timedRaw), may have come before the
 // call or after it: the call is read both ways (leafedAtCall), and a word
 // either reading refuses is refused, as is one the two readings learn
-// differently, naming both (bothWays).
+// differently, naming both (bothWays). Where the caller reads only whether
+// a word is refused (Input.RefusedOnly) and the first reading refuses one,
+// the second is not read: bothWays keeps every word the first refuses.
+// The second reading always decides every word, as bothWays looks each
+// word of the first up in it.
 func decideBoth(in Input, allScope bool) ([]Decision, []string) {
 	in.Earlier, in.Raw = timedEarlier(arrivedBefore(ofOwnCall(in, in.Earlier), in.At, in.Arrived), in.At), timedRaw(in.Raw, in.At)
 	in.Earlier, in.Raw = leafedAfterCall(in.Earlier, in.Raw, in.At)
 	ds, fields := decideWords(in, allScope)
+	if in.RefusedOnly && refusesAny(ds) {
+		return ds, fields
+	}
 	kept, late := leafedAtCall(in.Earlier, in.At)
 	if len(late) == 0 {
 		return ds, fields
 	}
 	alt := in
+	alt.RefusedOnly = false
 	alt.Earlier, alt.Raw = kept, append(append([]Raw(nil), in.Raw...), late...)
 	as, afields := decideWords(alt, allScope)
 	return bothWays(in, ds, fields, as, afields), fields
+}
+
+// refusesAny reports whether ds refuses a word.
+func refusesAny(ds []Decision) bool {
+	return slices.ContainsFunc(ds, func(d Decision) bool { return d.Outcome == OutcomeRefused })
 }
 
 // bothWays is ds, the call read with its exchanges at the call's own
@@ -199,10 +215,16 @@ type decider struct {
 // could not read (readerIndex.unread, counted since it began).
 func (dc *decider) unreadHere() bool { return dc.x.unreadTexts > dc.unreadFrom }
 
+// wordReadings counts the readings of a call's words Decide decided
+// (decideWords): one a call, two where it read exchanges at the call's own
+// instant both ways (decideBoth), for the rows that bound a call's work.
+var wordReadings atomic.Int64
+
 // decideWords decides every changed word of in, and the field each
 // decision is of; allScope reads every earlier place of the run as the
 // call's scope (Mode Elsewhere).
 func decideWords(in Input, allScope bool) ([]Decision, []string) {
+	wordReadings.Add(1)
 	// The call's Reader where its caller gives one (it lets it go), so
 	// the call's Decides read each text into its views once.
 	x := in.Reader.index(in.Drifts)
@@ -229,7 +251,12 @@ func newDecider(in Input, allScope bool, x *readerIndex) *decider {
 }
 
 // decide decides every changed word of dc's call, and the field each
-// decision is of (decideWords).
+// decision is of (decideWords). Where the caller reads only whether a word
+// is refused (Input.RefusedOnly), it stops at the first leaf it refuses a
+// word of: no step after a leaf's own (minted, clockOnly) makes a refused
+// word anything else (noPayload and oneValue re-decide fresh words only,
+// mintedUses keeps a refused word's decision, unread refuses every word,
+// ruled names a refusal's rule), so the call is refused either way.
 func (dc *decider) decide() ([]Decision, []string) {
 	var out []Decision
 	var fields []string // fields[i] is the field out[i] decides
@@ -243,6 +270,9 @@ func (dc *decider) decide() ([]Decision, []string) {
 		out = append(out, ds...)
 		for len(fields) < len(out) {
 			fields = append(fields, path)
+		}
+		if dc.in.RefusedOnly && refusesAny(ds) {
+			return out, fields
 		}
 	}
 	if dc.noPayload.why != "" {

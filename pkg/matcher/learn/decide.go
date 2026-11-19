@@ -239,6 +239,18 @@ type Input struct {
 	// reads each text into its views once for the call, not once a Decide.
 	// nil: each Decide builds its own index and lets it go.
 	Reader *Reader
+	// RefusedOnly says the caller reads only whether Decide refuses a
+	// word, never which word or why: an adapter trying the recordings a
+	// call is tied with in turn, which drops a refused try's reasons.
+	// Decide may then stop at the first drifted leaf it refuses a word of,
+	// returning the decisions made so far, that refusal among them. No
+	// later step makes a refused word anything else (the call's other
+	// leaves, the steps after the leaves, the reading of exchanges at the
+	// call's own instant: decide, bothWays), so the call is refused with
+	// or without it; where no word is refused, every word is decided as
+	// without it. Mode Elsewhere decides every word whatever it says: its
+	// guard keeps a call whose refused words keploy.yml declares noise.
+	RefusedOnly bool
 }
 
 // Trail is the test a call trails: keploy record marked the call's
