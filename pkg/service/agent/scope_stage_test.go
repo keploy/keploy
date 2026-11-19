@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -722,5 +723,43 @@ func TestScopeBeginReadsOnlyItsMocksFromDisk(t *testing.T) {
 	}
 	if f := reads[0].ContextMap(); f["mode"] != "mapping" || f["loadedFromDisk"] != int64(1) {
 		t.Fatalf("the begin read %v from disk; want its own mock only (mode mapping, 1 loaded)", f)
+	}
+}
+
+// Each test's staging hands the proxy the set's worker-scope mocks in its
+// per-test pool as well as the session pool (models.ServeAsSession marks
+// them), whatever the test's window: a parser that matches a call from the
+// per-test pool alone (Mongo's data calls) finds a timer's call made between
+// the tests. A session mock the replay did not mark stays in the session pool
+// only.
+func TestEachTestIsHandedTheWorkerScopeInItsPerTestPool(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	p := &recordingProxy{}
+	cfg := &config.Config{}
+	cfg.Agent.Mode = models.MODE_TEST
+	a := New(zap.NewNop(), nil, p, nil, nil, cfg)
+	ctx := context.Background()
+	worker := stageSessionMock("worker", "/tick")
+	worker.Spec.ReqTimestampMock = stageT0.Add(30 * time.Second) // between the tests
+	worker.TestModeInfo.Background = true
+	perTest := []*models.Mock{stageMock("own-1", "/q", stageT0), stageMock("own-2", "/q", stageT0.Add(time.Minute))}
+	if err := a.StoreMocks(ctx, perTest, []*models.Mock{worker, stageSessionMock("cfg", "/cfg")}); err != nil {
+		t.Fatal(err)
+	}
+	for _, start := range []time.Time{stageT0, stageT0.Add(time.Minute)} {
+		if err := a.UpdateMockParams(ctx, models.MockFilterParams{AfterTime: start.Add(-time.Millisecond), BeforeTime: start.Add(time.Second), StrictMockWindow: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(p.windowed) != 2 {
+		t.Fatalf("stagings %v, want one per test", p.windowed)
+	}
+	for i, staged := range p.windowed {
+		if !slices.Contains(staged[0], "worker") || !slices.Contains(staged[1], "worker") {
+			t.Fatalf("test %d staged per-test %v, session %v; want the worker-scope mock in both", i+1, staged[0], staged[1])
+		}
+		if slices.Contains(staged[0], "cfg") {
+			t.Fatalf("test %d staged an unmarked session mock per-test: %v", i+1, staged[0])
+		}
 	}
 }

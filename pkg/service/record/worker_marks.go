@@ -205,3 +205,19 @@ func (w *workerMarks) count() int {
 	defer w.mu.Unlock()
 	return w.written
 }
+
+// agentWorkerMockRules is the rules the recorder hands keploy's agent
+// (models.OutgoingOptions.WorkerMockRules), for its manager to keep the calls
+// they name from its cleanups and send one copy of each with no owner: rules,
+// when the recording marks what they match (newWorkerMarks), else nil. A call
+// kept so is of use only in the set's worker scope, which a replay serves to
+// every test: no test's window lists it.
+func agentWorkerMockRules(rules []models.WorkerMockRule, db MappingDb) []models.WorkerMockRule {
+	if len(rules) == 0 || provenswitch.On() {
+		return nil
+	}
+	if _, ok := db.(workerAdder); !ok {
+		return nil
+	}
+	return rules
+}

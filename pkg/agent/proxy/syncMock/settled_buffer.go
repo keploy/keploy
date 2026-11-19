@@ -9,8 +9,9 @@ import (
 
 // settledPrefix is how many of the buffer's first mocks the last pass over it
 // left settled: a per-test mock (not one any test may reuse,
-// attributedReusable, nor a startup one, isStartupMock) whose request no
-// window in the ring holds. Such a mock waits for a window to be resolved over
+// attributedReusable, nor a startup one, isStartupMock, nor a call a
+// worker-mock rule names, TestModeInfo.Background) whose request no window in
+// the ring holds. Such a mock waits for a window to be resolved over
 // its request, or for the stale cutoff: nothing else moves it.
 //
 //   - ResolveRange decides it in full only when its window holds the request,
@@ -77,6 +78,20 @@ func keepAt(at []time.Time, i int, t time.Time) []time.Time {
 // keepSettledLocked notes that the buffer's first n mocks are settled, at
 // holding their request times (n of them or more). Caller holds mu.
 func (m *SyncMockManager) keepSettledLocked(n int, at []time.Time) {
+	// A call a worker-mock rule names is never settled: a flush sends it once
+	// no request may claim it any more (backgroundDueLocked), with no request
+	// resolving over it, so each flush must look at it again. The prefix ends
+	// before the first. A walk of the prefix, only while a recording has
+	// rules: the buffer holds the last StaleHorizon of mocks, as the stale
+	// cutoff lets go of older ones.
+	if m.bg.any.Load() && n > 0 && n <= len(m.buffer) {
+		for i, mk := range m.buffer[:n] {
+			if mk != nil && mk.TestModeInfo.Background {
+				n = i
+				break
+			}
+		}
+	}
 	if n <= 0 || n > len(m.buffer) || n > len(at) {
 		m.settled = settledPrefix{at: at[:0]}
 		return

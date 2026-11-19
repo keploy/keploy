@@ -750,6 +750,12 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	if err := a.resetSession(ctx); err != nil {
 		return nil, err
 	}
+	// The recording's worker-mock rules, before its first mock: the calls
+	// they name are kept from the manager's cleanups and sent with no owner,
+	// one copy of each (syncMock background_calls.go). A recorder that does
+	// not add what they match to the set's worker scope sends none, and the
+	// manager ignores them under the proven switch.
+	syncMock.Get().SetBackgroundRules("", opts.WorkerMockRules)
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
 		return nil, err
@@ -2033,6 +2039,18 @@ func (a *Agent) loadCarryOverLookahead(disk *proxyPkg.DiskMocks, params models.M
 
 // appendCarryOver adds the lookahead mocks the filtered slice does not hold
 // already (by name), marked per-test like the rest of it.
+// appendWorkerScope is filtered with the worker-scope mocks of unfiltered
+// (TestModeInfo.Background, set by models.ServeAsSession) appended: the same
+// mocks, also in the session pool.
+func appendWorkerScope(filtered, unfiltered []*models.Mock) []*models.Mock {
+	for _, m := range unfiltered {
+		if m != nil && m.TestModeInfo.Background {
+			filtered = append(filtered, m)
+		}
+	}
+	return filtered
+}
+
 func appendCarryOver(filtered, carry []*models.Mock) []*models.Mock {
 	if len(carry) == 0 {
 		return filtered
@@ -2514,6 +2532,12 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// SetMocksWithWindow files into that tier. filterOutDeleted below still
 	// drops the ones already consumed.
 	filteredMocks = appendCarryOver(filteredMocks, carryOver)
+	// The set's worker-scope mocks (models.ServeAsSession) are every test's:
+	// the session pool holds them, and so does each test's per-test pool, for
+	// the parsers that read only that one (Mongo matches a data call from it
+	// alone). The mock manager stages them into it whatever the window
+	// (pkg.serveRuleOf). Reusable, a parser keeps them when it serves one.
+	filteredMocks = appendWorkerScope(filteredMocks, unfilteredMocks)
 
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.AgentOwnsConsumed {

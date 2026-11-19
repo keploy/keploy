@@ -4545,6 +4545,12 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		case ruleSessionLifetime, ruleLaxPromoted:
 			p.TestModeInfo.IsFiltered = false
 			unfilteredMocks = append(unfilteredMocks, p)
+		case ruleWorkerScope:
+			// A worker-scope mock (models.ServeAsSession's copy) is every
+			// test's: kept as the session mock it is. The agent hands it to
+			// each test's per-test pool too (appendWorkerScope), where the
+			// mock manager stages it whatever the window.
+			unfilteredMocks = append(unfilteredMocks, p)
 		case ruleInWindow, ruleInFlight:
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)

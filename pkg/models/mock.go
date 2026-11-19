@@ -397,6 +397,25 @@ type TestModeInfo struct {
 	// for RepeatRead: a Mock stays in its size class.
 	Concurrent bool `json:"-" bson:"-"`
 
+	// Background is set, on a mock the recording agent's manager (syncMock)
+	// takes, when a worker-mock rule of the recording names its call
+	// (WorkerMockRule; the recorder hands its rules to the agent on
+	// OutgoingOptions.WorkerMockRules): a call the application makes on its
+	// own, not for one test. A cleanup that would drop such a mock (a
+	// static-dedup duplicate's, the stale cutoff's) sends it with no owner
+	// instead, one copy of each call (WorkerMockCallOf), and the recorder
+	// adds that copy to the set's worker scope, which a replay serves to
+	// every test. A test whose window holds the mock still owns it.
+	//
+	// At replay it marks the copies of the set's worker-scope mocks the
+	// replay serves as session mocks (ServeAsSession): the agent stages each
+	// into every test's per-test pool too (pkg.serveRuleOf), since a parser
+	// may read only that pool for a call (Mongo's data calls read no session
+	// mock). Runtime-only, and in the padding after Concurrent, so a Mock
+	// stays in its size class: no file keeps it, and the replay's stream to
+	// the agent (gob) carries it.
+	Background bool `json:"-" bson:"-"`
+
 	// ServedIn is, on a copy exact serving serves an open test
 	// (KEPLOY_PROVEN), the number of that test's view; zero on every other mock. A
 	// consume of a copy an earlier view served (a previous attempt of the

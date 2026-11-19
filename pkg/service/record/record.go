@@ -3353,6 +3353,10 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		DisableMysqlEndpointDrift: r.config.DisableMysqlEndpointDrift,
 		PassThroughPorts:          r.config.Record.PassThroughPorts,
 		PassThroughHosts:          r.config.Record.PassThroughHosts,
+		// The worker-mock rules whose matches this recording adds to the
+		// set's worker scope (newWorkerMarks): the agent keeps the calls they
+		// name from its cleanups, one copy of each.
+		WorkerMockRules: agentWorkerMockRules(r.config.Record.WorkerMocks, r.mappingDb),
 		// Advertise that this CLI understands the reserved Kind=RevokedTests
 		// control frame: it diverts such a frame into a revoke set and deletes
 		// those deferred-orphan test cases at finalize instead of persisting it

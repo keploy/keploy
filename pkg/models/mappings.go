@@ -525,7 +525,9 @@ func (m *Mapping) WorkerRuleMockNames() []string {
 // pool, into unfiltered, the session pool, as copies stated and derived
 // session lifetime (TestModeInfo.Lifetime, LifetimeDerived), so every test of
 // the run can be answered by them, again and again, and none is charged with
-// them; a loader that derives lifetimes again leaves them so. The stored
+// them; a loader that derives lifetimes again leaves them so. Each copy is
+// marked TestModeInfo.Background: the agent stages it into every test's
+// per-test pool as well, for the parsers that read only that pool. The stored
 // mocks are not written (models.Mock.ShallowCopy). With no names the pools
 // are handed back as they are.
 func ServeAsSession(filtered, unfiltered []*Mock, names []string) ([]*Mock, []*Mock) {
@@ -546,6 +548,11 @@ func ServeAsSession(filtered, unfiltered []*Mock, names []string) ([]*Mock, []*M
 		c.TestModeInfo.Lifetime = LifetimeSession
 		c.TestModeInfo.LifetimeDerived = true
 		c.TestModeInfo.IsFiltered = false
+		// Marked, so the agent stages it into every test's per-test pool too
+		// (pkg.serveRuleOf's worker-scope rule): a parser that matches its
+		// calls from that pool alone (Mongo's data calls read no session
+		// mock) finds it in every test.
+		c.TestModeInfo.Background = true
 		unfiltered = append(unfiltered, c)
 	}
 	return kept, unfiltered
