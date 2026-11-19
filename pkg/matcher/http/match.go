@@ -1066,6 +1066,6 @@ func assertRenderedDigests(res *models.Result, recordedBody, answerBody string, 
 		want := form(answerBody)
 		hr.Normal = strings.Join(hr.Actual.Value, ",") == want
 		logger.Debug("a digest header of a templated body is asserted over the answer's body",
-			zap.String("header", name), zap.String("want", want), zap.Bool("normal", hr.Normal))
+			zap.String("header", name), zap.Bool("normal", hr.Normal))
 	}
 }

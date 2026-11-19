@@ -739,9 +739,11 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// easily exceed this threshold.
 	totalSize := len(http2Stream.GRPCReq.Body.DecodedData) + len(http2Stream.GRPCResp.Body.DecodedData)
 	if totalSize > MaxTestCaseSize {
+		// The method by its path's shape, as an HTTP call over the limit is
+		// named by its request's: the path is the app's.
 		logger.Error("gRPC test case data exceeds 5MB limit, skipping capture",
 			zap.Int("totalSize", totalSize),
-			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+			zap.String("path", utils.URLPathShape(&url.URL{Path: http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]})))
 		return
 	}
 

@@ -1277,7 +1277,9 @@ func TestUnderTheSwitchALongWaitSaysWhatItWaitsOn(t *testing.T) {
 		t.Fatalf("said it was waiting %d times, want every 2 wake-ups", len(said))
 	}
 	f := said[0].ContextMap()
-	if f["waitingFor"] != "a listen on :8080, where the set's first test dials localhost:8080" || f["newExecs"] != uint64(2) {
+	// The address by its host's shape beside its tag (HostLogName: the wait
+	// is handed no session, so the process's key), never whole.
+	if f["waitingFor"] != "a listen on :8080, where the set's first test dials "+models.HostLogName(context.Background(), "localhost:8080") || f["newExecs"] != uint64(2) {
 		t.Fatalf("said %v, want what it waits on and the two execs since the first look", f)
 	}
 }
