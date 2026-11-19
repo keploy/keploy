@@ -3,12 +3,14 @@ package replay
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -102,10 +104,16 @@ func TestAnEarlierSetsLossFoundAfterItsEndLeavesThatSetNotJudged(t *testing.T) {
 					}
 
 					pass := h.replayer.passesEarlierSetLosses(true)
-					var out bytes.Buffer
-					h.replayer.console = &out
-					h.replayer.printSummary(context.Background(), pass)
-					summary := out.String()
+					// The summary keploy prints without colours, then with
+					// them: each says it once.
+					var summary string
+					for _, plain := range []bool{true, false} {
+						var out bytes.Buffer
+						h.replayer.console = &out
+						h.replayer.config.DisableANSI = plain
+						h.replayer.printSummary(context.Background(), pass)
+						summary += out.String()
+					}
 					if !on {
 						if !pass || instr.takes != 0 || strings.Contains(summary, "not judged") {
 							t.Fatalf("switch off: pass %v, takes %d, summary %q; want a pass, no take, no set listed", pass, instr.takes, summary)
@@ -119,9 +127,9 @@ func TestAnEarlierSetsLossFoundAfterItsEndLeavesThatSetNotJudged(t *testing.T) {
 					if test == "" {
 						where = "no test (between two of its tests, or after its last) of test-set-0"
 					}
-					if !strings.Contains(summary, "Test sets not judged, a capture loss of theirs found after their end: 1") ||
-						!strings.Contains(summary, where+": "+models.CaptureLosses{lost}.LogText()) {
-						t.Fatalf("summary %q, want it to name %q and what was lost", summary, where)
+					if strings.Count(summary, "Test sets not judged, a capture loss of theirs found after their end: 1") != 2 ||
+						strings.Count(summary, where+": "+models.CaptureLosses{lost}.LogText()) != 2 {
+						t.Fatalf("summaries %q, want each to name %q and what was lost", summary, where)
 					}
 					h.replayer.completeTestReportMu.RLock()
 					set0, set1 := h.replayer.completeTestReport["test-set-0"], h.replayer.completeTestReport["test-set-1"]
@@ -193,4 +201,92 @@ func TestAnEarlierSetsLossIsSaidAndCountedBySet(t *testing.T) {
 	if s := r.earlierSetLossesSummary(); !strings.Contains(s, "found after their end: 2\n") || !strings.Contains(s, "of an earlier test set: ") {
 		t.Fatalf("summary %q, want 2 sets, one of them unnamed", s)
 	}
+}
+
+// keploy test over a whole run, the application kept across sets:
+// test-set-1's owned take returns a loss of test-set-0's that the agent found
+// only after test-set-0's end. Start names each set's session by one token of
+// the run's, drawn anew for each run; test-set-1 passes, charged nothing; the
+// run exits non-zero, its summary naming test-set-0 and its test. A second
+// run on the same Replayer, with no such loss, passes: the first run's loss
+// is not the second's. With the switch off keploy test takes no owned loss,
+// and both runs pass.
+func TestStart_AnEarlierSetsLossFoundAfterItsEndLeavesTheRunNotJudged(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("switch=%v", on), func(t *testing.T) {
+			provenOn(t, on)
+			h := newPartialRunHarness(t, 2, 0)
+			reports := &setsReportDB{prReportDB: h.report}
+			h.replayer.reportDB = reports
+			h.replayer.testDB = twoPRSetsDB{&prTestDB{cases: h.cases}}
+			h.replayer.config.Command = "./app"
+			h.replayer.config.CommandType = string(utils.Native)
+			h.replayer.config.Test.MaxFlakyChecks = 1
+			h.replayer.config.Test.Mocking = true
+			h.replayer.config.DisableANSI = true
+			core, logs := observer.New(zap.ErrorLevel)
+			h.replayer.logger = zap.New(core)
+			lost := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1, What: "from [::ffff:127.0.0.1]:50914"}
+			instr := &setLossInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}},
+				later: "test-set-1", late: []models.OwnedCaptureLoss{{Test: "test-2", Loss: lost, EarlierSession: true, Set: "test-set-0"}}}
+			h.replayer.instrumentation = instr
+
+			var code int
+			var statuses map[string]string
+			console := consoleOf(h.replayer, func() { code, statuses = startEarlierSetRun(t, h, reports) })
+			first := runOfSessions(t, instr, "the first run")
+			if statuses["test-set-1"] != string(models.TestSetStatusPassed) {
+				t.Fatalf("test-set-1 is %q (all %v); the loss is test-set-0's", statuses["test-set-1"], statuses)
+			}
+			why := logs.FilterMessageSnippet("test run not judged: keploy found 1 capture loss(es) of earlier test sets").All()
+			if !on {
+				if code != 0 || len(why) != 0 || strings.Contains(console, "not judged") {
+					t.Fatalf("switch off: exit code %d, said %+v, console %q; want a pass with no set listed", code, why, console)
+				}
+			} else {
+				if code == 0 {
+					t.Fatal("the run exits 0: test-set-0's loss was found after its end, so test-set-0 is not judged")
+				}
+				where := "test-2 of test-set-0: " + models.CaptureLosses{lost}.LogText()
+				if len(why) != 1 || !strings.Contains(why[0].Message, "made in test-2 of test-set-0") ||
+					!strings.Contains(console, "Test sets not judged, a capture loss of theirs found after their end: 1") ||
+					!strings.Contains(console, where) {
+					t.Fatalf("the run said %+v and the console\n%s\nwant the run's line and the summary naming %q", why, console, where)
+				}
+			}
+
+			// The same Replayer runs again, and no take returns such a loss.
+			code, statuses = startEarlierSetRun(t, h, reports)
+			if second := runOfSessions(t, instr, "the second run"); second == first {
+				t.Fatalf("both runs named their sessions %q: an agent kept from the first would take the second's sets for its own", first)
+			}
+			if code != 0 || statuses["test-set-0"] != string(models.TestSetStatusPassed) || statuses["test-set-1"] != string(models.TestSetStatusPassed) {
+				t.Fatalf("the second run exits %d with the sets %v; want 0 and both PASSED: the first run's loss is not the second's", code, statuses)
+			}
+		})
+	}
+}
+
+// runOfSessions is the run token every session instr was started with names,
+// one token for them all and not "", with test-set-0's sessions before
+// test-set-1's; it forgets them, for the next run.
+func runOfSessions(t *testing.T, instr *setLossInstr, which string) string {
+	t.Helper()
+	instr.smu.Lock()
+	defer instr.smu.Unlock()
+	got := instr.sessions
+	instr.sessions = nil
+	var sets []string
+	for _, s := range got {
+		if s.Run == "" || s.Run != got[0].Run {
+			t.Fatalf("%s's sessions %+v: want each named by one token of the run's", which, got)
+		}
+		if len(sets) == 0 || sets[len(sets)-1] != s.Set {
+			sets = append(sets, s.Set)
+		}
+	}
+	if fmt.Sprint(sets) != "[test-set-0 test-set-1]" {
+		t.Fatalf("%s's sessions %+v: want test-set-0's, then test-set-1's", which, got)
+	}
+	return got[0].Run
 }
