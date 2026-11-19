@@ -837,7 +837,8 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 // alone, like the "" a YAML null (appName:, ~, null, Null) reads as, names no
 // app, as enterprise reads keploy.yml. PreProcessFlags drops a blank
 // --app-name or KEPLOY_APPNAME before it reads keploy.yml (dropBlankAppName),
-// so keploy.yml's appName is not hidden by one. A run given none is named:
+// and a blank appName in the override file as it merges that file, so
+// keploy.yml's appName is not hidden by one. A run given none is named:
 //   - with no keploy.yml (configFile ""), after its git repository and its
 //     folder's path inside it, or after its folder outside one
 //     (utils.DefaultAppName); the keploy.yml the run writes keeps the name;
@@ -999,10 +1000,21 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		overridePath := filepath.Join(appDir, fmt.Sprintf("%s.keploy.yml", lastDir))
 
 		if _, statErr := os.Stat(overridePath); statErr == nil {
+			// The name the run has before the override: keploy.yml's
+			// appName, or a given --app-name or KEPLOY_APPNAME, which no
+			// file overrides.
+			named := viper.GetString("appName")
 			if err := loader.Merge(viper.GetViper(), overridePath); err != nil {
 				errMsg := fmt.Sprintf("failed to merge override config file: %s", overridePath)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
+			}
+			// A blank or null appName in the override names no app, so it
+			// is no choice, as a blank --app-name is none: keploy.yml's
+			// appName names the run, not the folder with a warning that
+			// keploy.yml names no app.
+			if strings.TrimSpace(viper.GetString("appName")) == "" {
+				viper.Set("appName", named)
 			}
 			c.logger.Info("merged override config file", zap.String("file", overridePath))
 		} else if !errors.Is(statErr, os.ErrNotExist) {

@@ -170,32 +170,46 @@ func TestRecordKeepsAnExistingProjectsAppName(t *testing.T) {
 
 // A blank or empty --app-name or KEPLOY_APPNAME names no app, so it is no
 // choice: keploy.yml's appName names the run, and with no keploy.yml the git
-// repository's name and path, else the folder's. The run warns once that it
-// ignores the blank name, never that keploy.yml names no app, and leaves
-// keploy.yml as it is. The flag then reads as not given. A name given that is
-// not blank still wins over keploy.yml, and an empty KEPLOY_APPNAME, which
-// viper never read, is not warned about.
+// repository's name and path, else the folder's. The run warns once for each
+// blank name it ignores, never that keploy.yml names no app, and leaves
+// keploy.yml as it is. The flag then reads as not given, and a blank variable
+// is unset, while a KEPLOY_APPNAME that names an app stays set and names the
+// run. A name given that is not blank still wins over keploy.yml, and an
+// empty KEPLOY_APPNAME, which viper never read, is not warned about. A blank,
+// empty or null appName in the override file <folder>.keploy.yml is no choice
+// either: keploy.yml's appName names the run, with no warning; an override
+// that names an app still wins.
 func TestABlankGivenNameIsNoChoice(t *testing.T) {
 	const orders = "appName: orders\ncommand: ./app\n"
 	for _, c := range []struct {
 		name, doc string
 		flag      []string
 		env       *string
+		override  string
 		noRepo    bool
 		want      string
-		warns     bool
+		warns     int
 	}{
-		{name: "--app-name of spaces over keploy.yml", doc: orders, flag: []string{"--app-name", "  "}, want: "orders", warns: true},
-		{name: "--app-name empty over keploy.yml", doc: orders, flag: []string{"--app-name", ""}, want: "orders", warns: true},
-		{name: "--app-name of a tab over keploy.yml", doc: orders, flag: []string{"--app-name=\t"}, want: "orders", warns: true},
-		{name: "KEPLOY_APPNAME of spaces over keploy.yml", doc: orders, env: strPtr("  "), want: "orders", warns: true},
+		{name: "--app-name of spaces over keploy.yml", doc: orders, flag: []string{"--app-name", "  "}, want: "orders", warns: 1},
+		{name: "--app-name empty over keploy.yml", doc: orders, flag: []string{"--app-name", ""}, want: "orders", warns: 1},
+		{name: "--app-name of a tab over keploy.yml", doc: orders, flag: []string{"--app-name=\t"}, want: "orders", warns: 1},
+		{name: "KEPLOY_APPNAME of spaces over keploy.yml", doc: orders, env: strPtr("  "), want: "orders", warns: 1},
 		{name: "KEPLOY_APPNAME empty over keploy.yml", doc: orders, env: strPtr(""), want: "orders"},
 		{name: "nothing given over keploy.yml", doc: orders, want: "orders"},
-		{name: "--app-name of spaces, no keploy.yml, in a repository", flag: []string{"--app-name", "  "}, want: "orders-api-a-b", warns: true},
-		{name: "KEPLOY_APPNAME of spaces, no keploy.yml, in a repository", env: strPtr(" "), want: "orders-api-a-b", warns: true},
-		{name: "--app-name of spaces, no keploy.yml, outside a repository", flag: []string{"--app-name", "  "}, noRepo: true, want: "svc", warns: true},
+		{name: "--app-name of spaces, no keploy.yml, in a repository", flag: []string{"--app-name", "  "}, want: "orders-api-a-b", warns: 1},
+		{name: "KEPLOY_APPNAME of spaces, no keploy.yml, in a repository", env: strPtr(" "), want: "orders-api-a-b", warns: 1},
+		{name: "--app-name of spaces, no keploy.yml, outside a repository", flag: []string{"--app-name", "  "}, noRepo: true, want: "svc", warns: 1},
 		{name: "a name given still wins over keploy.yml", doc: orders, flag: []string{"--app-name", "billing"}, want: "billing"},
 		{name: "a KEPLOY_APPNAME still wins over keploy.yml", doc: orders, env: strPtr("billing"), want: "billing"},
+		{name: "--app-name and KEPLOY_APPNAME both of spaces over keploy.yml", doc: orders, flag: []string{"--app-name", "  "}, env: strPtr("  "), want: "orders", warns: 2},
+		{name: "--app-name of spaces with a KEPLOY_APPNAME that names an app", doc: orders, flag: []string{"--app-name", "  "}, env: strPtr("billing"), want: "billing", warns: 1},
+		{name: "KEPLOY_APPNAME of a tab over keploy.yml", doc: orders, env: strPtr("\t"), want: "orders", warns: 1},
+		{name: "an override file's appName of spaces over keploy.yml", doc: orders, override: "appName: \"  \"\n", want: "orders"},
+		{name: "an override file's empty appName over keploy.yml", doc: orders, override: "appName: \"\"\n", want: "orders"},
+		{name: "an override file's null appName over keploy.yml", doc: orders, override: "appName:\n", want: "orders"},
+		{name: "an override file's blank appName with --app-name of spaces", doc: orders, flag: []string{"--app-name", "  "}, override: "appName: \" \"\n", want: "orders", warns: 1},
+		{name: "an override file's appName still wins over keploy.yml", doc: orders, override: "appName: billing\n", want: "billing"},
+		{name: "a KEPLOY_APPNAME still wins over an override file's blank appName", doc: orders, env: strPtr("billing"), override: "appName: \"  \"\n", want: "billing"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			original := NativeCommandSupported
@@ -232,6 +246,11 @@ func TestABlankGivenNameIsNoChoice(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if c.override != "" {
+				if err := os.WriteFile(filepath.Join(work, filepath.Base(work)+".keploy.yml"), []byte(c.override), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			viper.Reset()
 			core, logs := observer.New(zapcore.InfoLevel)
@@ -264,10 +283,18 @@ func TestABlankGivenNameIsNoChoice(t *testing.T) {
 					warned++
 				}
 			}
-			if want := map[bool]int{true: 1}[c.warns]; warned != want {
-				t.Errorf("the run warned %d times that it ignores a blank name, want %d: %v", warned, want, logs.All())
+			if warned != c.warns {
+				t.Errorf("the run warned %d times that it ignores a blank name, want %d: %v", warned, c.warns, logs.All())
 			}
-			if len(c.flag) > 0 && c.want != "billing" {
+			if c.env != nil && *c.env != "" {
+				v, set := os.LookupEnv("KEPLOY_APPNAME")
+				if named := strings.TrimSpace(*c.env) != ""; named && v != *c.env {
+					t.Errorf("KEPLOY_APPNAME after the run = %q (set %v), want %q kept", v, set, *c.env)
+				} else if !named && set {
+					t.Errorf("KEPLOY_APPNAME after the run = %q, want the blank variable unset", v)
+				}
+			}
+			if len(c.flag) > 0 && strings.TrimSpace(strings.TrimPrefix(c.flag[len(c.flag)-1], "--app-name=")) == "" {
 				f := cmd.Flags().Lookup("app-name")
 				if f.Changed || f.Value.String() != f.DefValue {
 					t.Errorf("--app-name after the run: given %v, value %q; want it not given, at its default %q", f.Changed, f.Value.String(), f.DefValue)
