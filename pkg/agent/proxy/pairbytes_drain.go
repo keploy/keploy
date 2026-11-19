@@ -44,9 +44,8 @@ func (p *Proxy) PairedBytesDrain(ctx context.Context) error {
 	var waited map[*pairedConn]bool
 	look := meter.Wait()
 	for {
-		// Taken before looking: a removal after the look wakes the wait.
-		changed := p.paired.changes()
-		closing := p.closingConns()
+		// A removal after the look wakes the wait (closingConns).
+		closing, changed := p.closingConns()
 		if len(closing) == 0 {
 			return nil
 		}
@@ -131,24 +130,25 @@ func (p *Proxy) drainGiveUp(stuck []*pairedConn) {
 // application's sockets cannot be read (pairTargets fails: the waits fail the
 // same way), the proxy's side alone tells. One the proxy serves with no
 // session counts no loss at its close, and is not waited for (heldNow); nor
-// is one whose close a drain already owned (drainGaveUp).
-func (p *Proxy) closingConns() []*pairedConn {
+// is one whose close a drain already owned (drainGaveUp). changed is closed
+// at the next removal after the look (heldNow).
+func (p *Proxy) closingConns() (closing []*pairedConn, changed <-chan struct{}) {
 	app := map[*pairedConn]*pairTarget{}
 	if targets, err := p.pairTargets(math.MaxUint64); err == nil {
 		for _, t := range targets {
 			app[t.pc] = t
 		}
 	}
-	var out []*pairedConn
-	for _, pc := range p.paired.heldNow() {
+	held, changed := p.paired.heldNow()
+	for _, pc := range held {
 		if pc.drainGaveUp.Load() {
 			continue
 		}
 		if drainsFor(pc.atClose.Load() != nil, app[pc], func() proxySide { return readProxySide(pc.conn) }) {
-			out = append(out, pc)
+			closing = append(closing, pc)
 		}
 	}
-	return out
+	return closing, changed
 }
 
 // drainsFor says whether PairedBytesDrain waits for a paired connection:

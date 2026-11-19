@@ -664,8 +664,10 @@ func (s *pairedConns) upTo(n uint64) ([]*pairedConn, error) {
 }
 
 // heldNow is every paired connection the proxy holds, but for one it serves
-// with no session (noSession), whatever its waits can tell (PairedBytesDrain).
-func (s *pairedConns) heldNow() []*pairedConn {
+// with no session (noSession), whatever its waits can tell (PairedBytesDrain),
+// and the channel closed at the next change after it (changes). Both are
+// taken under one lock, so no removal falls between the look and the wake.
+func (s *pairedConns) heldNow() ([]*pairedConn, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]*pairedConn, 0, len(s.byConn))
@@ -674,7 +676,7 @@ func (s *pairedConns) heldNow() []*pairedConn {
 			out = append(out, pc)
 		}
 	}
-	return out
+	return out, s.changesLocked()
 }
 
 // servedWithoutSession notes that the proxy serves conn with no session
@@ -706,6 +708,10 @@ func (s *pairedConns) destined(conn net.Conn, dst string) {
 func (s *pairedConns) changes() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.changesLocked()
+}
+
+func (s *pairedConns) changesLocked() <-chan struct{} {
 	if s.changed == nil {
 		s.changed = make(chan struct{})
 	}
