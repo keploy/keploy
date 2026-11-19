@@ -83,6 +83,14 @@ type App struct {
 	// asked for, in flight or later, with failed; see
 	// SetAgentReleaseRefusal.
 	refuseAgentReleases func(failed error)
+	// agentNotSetUp: the agent that may run now is not one the run set up.
+	// A retry of the bring-up held the releases for an agent its `up` could
+	// start (none ran before it), or took a running agent for one compose
+	// started again, and no setup of that agent completed: its setup was
+	// cut, or its `up` returned before the watch saw it. The next retry
+	// takes whatever agent runs for one to set up again (retryComposeUp).
+	// Read and written only by the run's bring-up loop.
+	agentNotSetUp bool
 	// setEndKill is why the latest stop at a test set's end had to kill the
 	// app (setend_stop.go), until run reports it; nil when it did not.
 	setEndKill     atomic.Pointer[string]
@@ -245,9 +253,11 @@ func (a *App) SetOnAgentRestart(f func(ctx context.Context) error) {
 // /agent/ready) the run asked for while compose's bring-up retry starts
 // keploy's agent again: no release reaches the agent compose started in its
 // place before the agent client has set it up again (SetOnAgentRestart),
-// which releases it last. resume(failed), failed the error of that setup,
-// lets the hold go and ends every release of the run with failed instead of
-// letting it reach that agent, which is not set up.
+// which releases it last. Letting the hold go (resume(nil)) lets no release
+// go to an agent no setup has completed on: the agent client lets them go
+// once a setup of it completes. resume(failed), failed the error of that
+// setup, lets the hold go and ends every release of the run with failed
+// instead of letting it reach that agent, which is not set up.
 func (a *App) SetAgentReleaseHold(f func(ctx context.Context) (resume func(failed error))) {
 	a.holdAgentRelease = f
 }
@@ -2071,6 +2081,7 @@ func (a *App) composeBeginsARun() {
 	a.composeApp.depCrash.Store(nil)
 	a.composeApp.upReturned.Store(nil)
 	a.composeApp.stackStop.Store(nil)
+	a.agentNotSetUp = false
 }
 
 // composeBeginsABringUpAgain clears what the last bring-up kept before the

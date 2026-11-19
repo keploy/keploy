@@ -67,6 +67,15 @@ type agentSession struct {
 	readyBy  *releaseCall
 	held     int
 	refused  error
+	// notSetUp: the agent at this address may be one compose's retry
+	// started again that no setup has completed on, from a hold (no agent
+	// ran before the retry's `up`, so any that runs now is a new one) or
+	// from the beginning of a restarted agent's setup, until a setup of the
+	// agent completes (setUpDone), or the run ends. No release the run asked
+	// for reaches the agent meanwhile: one the retry's watch cut short of
+	// that setup is set up again by the next retry, before any release goes
+	// to it, and the hold's end alone lets none go.
+	notSetUp bool
 }
 
 // releaseCall is one release of the app in flight (makeAgentReady). setup: it
@@ -134,7 +143,8 @@ func (s *agentSession) endRelease(rc *releaseCall, owed bool) {
 }
 
 // awaitPost waits until release rc may send its request to the agent: at
-// once for a restarted agent's setup, otherwise while no hold is on. It
+// once for a restarted agent's setup, otherwise while no hold is on and no
+// agent that is not set up may run (notSetUp). It
 // reports false once done, rc's context, is closed first, and, with no wait,
 // once the setup of an agent compose started again has failed: rc then sends
 // nothing to the agent, and its context carries that failure, since its
@@ -142,7 +152,7 @@ func (s *agentSession) endRelease(rc *releaseCall, owed bool) {
 func (s *agentSession) awaitPost(done <-chan struct{}, rc *releaseCall) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for !rc.setup && s.held > 0 {
+	for !rc.setup && (s.held > 0 || s.notSetUp) {
 		changed := s.changed
 		s.mu.Unlock()
 		select {
@@ -190,6 +200,10 @@ func (s *agentSession) posted(rc *releaseCall) (refused error) {
 // app against an agent with none of the run's mocks or settings. Its setup
 // releases it, last.
 //
+// The agent that may answer from the hold on is one no setup has completed
+// on (notSetUp): letting the hold go alone lets no release go to it; a
+// completed setup of it (setUpDone) does.
+//
 // resume(failed), failed the error of that setup, lets the hold go without
 // letting a release go: every release of this run, in flight or asked for
 // until the run ends (end), then ends with failed and sends nothing to the
@@ -198,6 +212,7 @@ func (s *agentSession) posted(rc *releaseCall) (refused error) {
 func (s *agentSession) holdReleases(ctx context.Context) (resume func(failed error)) {
 	s.mu.Lock()
 	s.held++
+	s.notSetUp = true
 	for ctx.Err() == nil && s.releaseOut() {
 		changed := s.changed
 		s.mu.Unlock()
@@ -323,6 +338,25 @@ func (s *agentSession) end() {
 	s.ends++
 	s.steps = nil
 	s.refused = nil
+	s.notSetUp = false
+	s.notify()
+}
+
+// settingUp notes that the setup of an agent compose started again begins:
+// no release the run asked for reaches it until that setup completes
+// (setUpDone), however the setup ends.
+func (s *agentSession) settingUp() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notSetUp = true
+}
+
+// setUpDone notes that the setup of the agent compose started again
+// completed: the releases the run asked for may go to it, once no hold is on.
+func (s *agentSession) setUpDone() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notSetUp = false
 	s.notify()
 }
 
@@ -597,6 +631,8 @@ func (a *AgentClient) session() *agentSession {
 // answers: its container runs before its server listens, and a stream that
 // reconnected, or a call made, before then would only be refused.
 func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
+	s := a.session()
+	s.settingUp()
 	if err := a.awaitAgentAnswers(ctx); err != nil {
 		return err
 	}
@@ -613,7 +649,7 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	a.pushContainers(ctx)
 	forgetNetworkNames(a.conf.Agent.AgentURI)
 	a.pushNetworkNames(ctx)
-	if err := a.session().reapply(ctx, a.logger); err != nil {
+	if err := s.reapply(ctx, a.logger); err != nil {
 		return err
 	}
 	// The agent compose started again holds the whole setup again, and the
@@ -623,6 +659,7 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	// what a watch of the agent's process keeps to (a test set's evidence)
 	// is all on this one.
 	instancesAt(agentHost(a.conf.Agent.AgentURI)).accept()
+	s.setUpDone()
 	return nil
 }
 

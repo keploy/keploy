@@ -162,8 +162,8 @@ func TestAReleaseInFlightWhenARestartedAgentsSetupBeginsIsMadeAgainLast(t *testi
 
 // While a hold is on (compose's bring-up retry may be starting the agent
 // again), a release the run asked for sends nothing to the agent, and the
-// release a restarted agent's setup makes is not held. Once the hold is let
-// go, the release the run asked for goes on.
+// release a restarted agent's setup makes is not held. Once that setup has
+// completed and the hold is let go, the release the run asked for goes on.
 func TestAHeldReleaseSendsNothingUntilTheHoldIsLetGo(t *testing.T) {
 	ag := newHandoverAgent(t, "ok", nil)
 	resume := ag.s.holdReleases(context.Background())
@@ -188,6 +188,7 @@ func TestAHeldReleaseSendsNothingUntilTheHoldIsLetGo(t *testing.T) {
 		t.Fatalf("the agent took %v while the run's release was held; want the setup's release alone", got)
 	}
 
+	ag.s.setUpDone() // the restarted agent's setup completed
 	resume(nil)
 	if err := awaitErr(t, released, "the release the hold let go"); err != nil {
 		t.Fatalf("the release the hold let go ended with %v", err)
@@ -197,11 +198,13 @@ func TestAHeldReleaseSendsNothingUntilTheHoldIsLetGo(t *testing.T) {
 	}
 }
 
-// Letting the hold go is what wakes a release it held: with nothing else
-// changing in the session, the release goes on as soon as the hold is let go.
+// Letting the hold go is what wakes a release it held: once the restarted
+// agent is set up, with nothing else changing in the session, the release
+// goes on as soon as the hold is let go.
 func TestLettingAHoldGoWakesTheReleaseItHeld(t *testing.T) {
 	ag := newHandoverAgent(t, "ok", nil)
 	resume := ag.s.holdReleases(context.Background())
+	ag.s.setUpDone() // the restarted agent's setup completed
 
 	released := make(chan error, 1)
 	go func() { released <- ag.a.MakeAgentReadyForDockerCompose(context.Background()) }()

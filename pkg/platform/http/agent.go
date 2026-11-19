@@ -4013,9 +4013,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// Under compose the agent is the user's project's to start again: the
 	// session puts back what the run set up on it (see agentSession).
 	a.session().configure(utils.CmdType(opts.CommandType) == utils.DockerCompose)
-	usrApp.SetOnAgentRestart(a.setUpRestartedAgent)
-	usrApp.SetAgentReleaseHold(func(ctx context.Context) func(error) { return a.session().holdReleases(ctx) })
-	usrApp.SetAgentReleaseRefusal(func(failed error) { a.session().refuseRun(failed) })
+	a.handRestartHooks(usrApp)
 
 	// Set up cleanup on failure
 	defer func() {
@@ -5130,6 +5128,23 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 
 	a.logger.Debug("Successfully notified agent of graceful shutdown")
 	return nil
+}
+
+// restartHooks is what the application client takes from the agent client
+// for an agent docker compose starts again (app.App's setters).
+type restartHooks interface {
+	SetOnAgentRestart(func(ctx context.Context) error)
+	SetAgentReleaseHold(func(ctx context.Context) (resume func(failed error)))
+	SetAgentReleaseRefusal(func(failed error))
+}
+
+// handRestartHooks gives app what sets up again, through this client's
+// session, an agent compose's retry started again, and what holds and
+// refuses the releases of the app meanwhile.
+func (a *AgentClient) handRestartHooks(app restartHooks) {
+	app.SetOnAgentRestart(a.setUpRestartedAgent)
+	app.SetAgentReleaseHold(func(ctx context.Context) func(error) { return a.session().holdReleases(ctx) })
+	app.SetAgentReleaseRefusal(func(failed error) { a.session().refuseRun(failed) })
 }
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
