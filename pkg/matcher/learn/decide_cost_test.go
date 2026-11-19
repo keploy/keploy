@@ -57,7 +57,9 @@ func decideAllocs(t *testing.T, shape string, n int) (string, float64) {
 // offset keys and its outside recordings' words each take a block per call
 // or what the set keeps, never an allocation per recording. Each was one or
 // two per recording per call, the most of a call's work over api-server's
-// set besides the reads themselves. The decisions stay.
+// set besides the reads themselves. The decisions stay. Under -race a
+// decision's count moves by a few from run to run at one size, so the
+// counts are compared only without it; the verdicts always are.
 func TestADecisionAllocatesAlikeOverAnySetSize(t *testing.T) {
 	for _, shape := range []string{"own", "other", "half"} {
 		few, fewAllocs := decideAllocs(t, shape, 300)
@@ -66,7 +68,7 @@ func TestADecisionAllocatesAlikeOverAnySetSize(t *testing.T) {
 		if many != few {
 			t.Errorf("over %s recordings the call decides %q over 3,000 and %q over 300; want one verdict", shape, many, few)
 		}
-		if manyAllocs > fewAllocs {
+		if !raceOn && manyAllocs > fewAllocs {
 			t.Errorf("over %s recordings a decision allocates %v times over 3,000 and %v over 300; want no more over 3,000", shape, manyAllocs, fewAllocs)
 		}
 	}

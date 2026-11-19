@@ -300,8 +300,9 @@ func TestASetsCallAsksAnUnreadRecordingNoView(t *testing.T) {
 // A view's text read with other fields is another view: one set entry each,
 // each answering as a call with no set does (a text with no fields is one
 // field, the zero fieldAt). So is one whose fields differ only in whether
-// one is a key, and one whose fields' places and paths run, byte by byte,
-// as another's do without each path's length.
+// one is a key, only in where one starts, or only in where one ends, and one
+// whose fields' places and paths run, byte by byte, as another's do without
+// each path's length.
 func TestASetsViewOfATextReadWithOtherFieldsIsAnother(t *testing.T) {
 	_, views, _ := setFieldsFixture(nil, 1)
 	b := views[0].payload()
@@ -327,6 +328,15 @@ func TestASetsViewOfATextReadWithOtherFieldsIsAnother(t *testing.T) {
 	threeRuns := Raw{mock: "runs", rText: text, rFields: []rawField{f1, f2, f3}, rRead: true}
 	f1.path, f3.path = "a"+place(f2)+"b", ""
 	runsAlike := Raw{mock: "runs", rText: text, rFields: []rawField{f1, f3, h}, rRead: true}
+	// Two fields, then the same but the second's start, or its end, a byte
+	// over: the word asked is in the first, alike in all three.
+	two := []rawField{at("w0q", false, "a"), at("w1q", false, "b")}
+	moved := func(start, end int) Raw {
+		fl := slices.Clone(two)
+		fl[1].start += start
+		fl[1].end += end
+		return Raw{mock: "two", rText: text, rFields: fl, rRead: true}
+	}
 	dc := NewDriftCache()
 	dc.set = newSetDerived()
 	fs := filtersOf(dc.set)
@@ -335,7 +345,9 @@ func TestASetsViewOfATextReadWithOtherFieldsIsAnother(t *testing.T) {
 		v    Raw
 		w    string
 	}{{"by fields", byFields, "w0q"}, {"whole", whole, "w0q"}, {"a key", byKey, "w0q"}, {"its value", byValue, "w0q"},
-		{"three fields", threeRuns, "w0q"}, {"three fields that run alike", runsAlike, "w0q"}} {
+		{"three fields", threeRuns, "w0q"}, {"three fields that run alike", runsAlike, "w0q"},
+		{"two fields", moved(0, 0), "w0q"}, {"two fields, the second started earlier", moved(-1, 0), "w0q"},
+		{"two fields, the second ended later", moved(0, 1), "w0q"}} {
 		want, _ := newReaderIndex(nil).textOf(c.v).fieldsWith(c.w)
 		x := newReaderIndex(dc)
 		got, read := x.textOf(c.v).fieldsWith(c.w)
@@ -344,7 +356,7 @@ func TestASetsViewOfATextReadWithOtherFieldsIsAnother(t *testing.T) {
 			t.Errorf("view %s: %v (read %v); want %v", c.what, got, read, want)
 		}
 	}
-	if len(fs.fieldTexts) != 6 || fs.fieldBuilds != 6 {
-		t.Errorf("%d views by text, %d builds; want 6 and 6", len(fs.fieldTexts), fs.fieldBuilds)
+	if len(fs.fieldTexts) != 9 || fs.fieldBuilds != 9 {
+		t.Errorf("%d views by text, %d builds; want 9 and 9", len(fs.fieldTexts), fs.fieldBuilds)
 	}
 }
