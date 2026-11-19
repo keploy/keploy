@@ -64,14 +64,17 @@
 #      Asia/Kolkata: the set passes. keploy reads its own zone as its agent
 #      starts, with the switch or without it, and hung there: the replay
 #      never started the app.
-#   2d. KEPLOY_PROVEN=1, keploy's own zone data Go's zoneinfo.zip
-#      (ZONEINFO), the app's TZ naming a zone file of Africa/Casablanca of an
-#      older release of IANA's data (OLD_DIR: tzdata 2024a, from keploy's
-#      learn testdata), whose rules Go's release changed (UTC+01:00 there
-#      from 2026-09-20 on, UTC+00:00 in Go's): the set passes, the app's zone
-#      read as Africa/Casablanca in its file's rules. keploy read a file of
-#      a zone whose rules are not its own release's as an unknown zone, and
-#      refused the app's clock reads.
+#   2d. KEPLOY_PROVEN=1, keploy's own zone data tzdata 2026c's (OWN_DIR:
+#      keploy's learn testdata, as ZONEINFO), the app's TZ naming a zone file
+#      of Africa/Casablanca of an older release of IANA's data (OLD_DIR:
+#      tzdata 2024a, from the same testdata), whose rules 2026c changed
+#      (UTC+01:00 there from 2026-09-20 on, UTC+00:00 in 2026c's): the set
+#      passes, the app's zone read as Africa/Casablanca in its file's rules.
+#      keploy read a file of a zone whose rules are not its own release's as
+#      an unknown zone, and refused the app's clock reads. Both releases are
+#      keploy's own testdata, so the step reads one pair of releases whatever
+#      the day and whatever Go builds keploy; the lane refuses to run where
+#      the two read the zone alike from 1970 to 2038 (zonediff).
 #   2e. KEPLOY_PROVEN=1, the app's TZ naming Europe/Berlin of a release of
 #      IANA's data later than every one keploy knows (LATER_DIR: zic's build
 #      of keploy's newest tzdata.zi made release 2099a, Berlin at UTC+03:00
@@ -130,14 +133,15 @@
 #              Europe/Berlin.
 #           6. The image whose /etc/localtime links a zone file of
 #              Africa/Casablanca of tzdata 2024a (IMG_OLD, OLD_DIR's), the
-#              keploy CLI's own zone data Go's zoneinfo.zip (ZONEINFO), whose
-#              release changed the zone's rules (UTC+00:00 from 2026-09-20,
-#              2024a's UTC+01:00): passes, the app's container read as
+#              keploy CLI's own zone data tzdata 2026c's (OWN_DIR, as
+#              ZONEINFO), which changed the zone's rules (UTC+00:00 from
+#              2026-09-20, 2024a's UTC+01:00): passes, the app's container read as
 #              Africa/Casablanca in its file's rules. keploy read a file of
 #              a zone whose rules are not its own release's as an unknown
 #              zone, and checked the app's clock in the learn step's zone.
 #           7. The image whose /etc/localtime links Europe/Berlin, a
-#              Dockerfile's COPY of Asia/Kolkata's file (Go's own) onto
+#              Dockerfile's COPY of Asia/Kolkata's file (tzdata 2026c's,
+#              OWN_DIR's) onto
 #              /etc/localtime after it, which writes the file the link names
 #              (IMG_COPY): fails naming body.hour, keploy having read the
 #              zone as unknown, never as Europe/Berlin in Kolkata's rules
@@ -223,7 +227,7 @@ IMG_COPY="clockzone-app-copy:$ID"
 IMG_LATER="clockzone-app-later:$ID"
 IMG_SPLIT="clockzone-app-split:$ID"
 # The zone a COPY of another zone's file overwrites in IMG_COPY, and that
-# zone (Go's own file of it).
+# zone (tzdata 2026c's file of it, OWN_DIR's).
 COPY_LINK=Europe/Berlin
 COPY_ZONE=Asia/Kolkata
 RUN_NAME="cz-run-$ID"
@@ -250,12 +254,13 @@ slim() {
 # SLIM_DIR holds the slim zone file of DST_ZONE, from Go's own
 # zoneinfo.zip (zic -b slim's form).
 SLIM_DIR="$WORK/slim/zoneinfo"
-# OLD_DIR holds OLD_ZONE's zone file of tzdata 2024a (learn's testdata,
-# copied from Go 1.23.12's zoneinfo.zip), and GO_ZONEINFO is Go's own
-# zoneinfo.zip, keploy's own zone data in step 2d.
+# OLD_DIR holds OLD_ZONE's zone file of tzdata 2024a, and OWN_DIR, keploy's
+# own zone data in steps 2d and docker 6 (ZONEINFO), tzdata 2026c's (learn's
+# testdata, copied from Go 1.23.12's and Go 1.27.3's zoneinfo.zip): one pair
+# of releases, whichever Go builds keploy and runs this lane.
 OLD_ZONE=Africa/Casablanca
 OLD_DIR="$WORK/old/zoneinfo"
-GO_ZONEINFO="$(go env GOROOT)/lib/time/zoneinfo.zip"
+OWN_DIR="$ROOT/pkg/matcher/learn/testdata/zoneinfo-2026c"
 if ! mkdir -p "$SLIM_DIR/${DST_ZONE%/*}" ||
     ! python3 -I -c 'import sys, zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' \
         "$(go env GOROOT)/lib/time/zoneinfo.zip" "$DST_ZONE" >"$SLIM_DIR/$DST_ZONE"; then
@@ -265,11 +270,18 @@ fi
 slim "$SLIM_DIR/$DST_ZONE" || { echo "::error::Go's zone file of $DST_ZONE is not slim: steps 2b, docker 4 and 5 would read no slim file"; exit 1; }
 mkdir -p "$OLD_DIR/${OLD_ZONE%/*}" && cp "$ROOT/pkg/matcher/learn/testdata/zoneinfo-2024a/$OLD_ZONE" "$OLD_DIR/$OLD_ZONE" ||
     { echo "::error::cannot copy tzdata 2024a's $OLD_ZONE from keploy's learn testdata"; exit 1; }
-# Step 2d shows something only where the two releases read the zone apart
-# today: the C library reads each file as the app and keploy do.
-python3 -I -c 'import sys, zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' "$GO_ZONEINFO" "$OLD_ZONE" >"$WORK/old/go-$$" &&
-    [ "$(TZ="$OLD_DIR/$OLD_ZONE" date +%z)" != "$(TZ="$WORK/old/go-$$" date +%z)" ] ||
-    { echo "::error::Go's $OLD_ZONE reads today as tzdata 2024a's does ($(TZ="$OLD_DIR/$OLD_ZONE" date +%z)): step 2d would read no other release"; exit 1; }
+# Steps 2d and docker 6 show something only where the two releases read the
+# zone apart: zonediff reads the first instant from 1970 to 2038 at which
+# they do from the files themselves (keploy's own check reads those years),
+# never from the day the lane runs or from a date command's reading of a TZ
+# (Ubuntu 26.04's reads no zone file there).
+(cd "$ROOT" && go build -o "$WORK/zonediff" ./.github/workflows/test_workflow_scripts/golang/clock-zone/zonediff/main.go) ||
+    { echo "::error::cannot build zonediff from the keploy module at $ROOT"; exit 1; }
+if ! apart="$("$WORK/zonediff" "$OLD_DIR/$OLD_ZONE" "$OWN_DIR/$OLD_ZONE")"; then
+    echo "::error::tzdata 2024a's and keploy's own $OLD_ZONE read one offset at every instant from 1970 to 2038: steps 2d and docker 6 would read no other release"
+    exit 1
+fi
+echo "tzdata 2024a's and 2026c's $OLD_ZONE first read apart at ${apart%% *} (${apart#* }, in that order)"
 # LATER_DIR and SPLIT_DIR hold zic's build of keploy's newest tzdata.zi
 # (pkg/models/testdata) made a release later than every one keploy knows,
 # that tzdata.zi beside it: 2099a keeps Europe/Berlin at UTC+03:00 from
@@ -481,8 +493,8 @@ native_leg() {
     replay ownzone "$REC_ZONE" 0 TZ="$SLIM_DIR/$DST_ZONE"
     expect_pass "step 2c" ownzone
 
-    echo "== 2d. KEPLOY_PROVEN=1, keploy's own zone data Go's, the app's TZ naming tzdata 2024a's $OLD_ZONE, which Go's release changed: passes, read in it =="
-    replay oldrelease "$OLD_DIR/$OLD_ZONE" 0 KEPLOY_PROVEN=1 ZONEINFO="$GO_ZONEINFO"
+    echo "== 2d. KEPLOY_PROVEN=1, keploy's own zone data tzdata 2026c's, the app's TZ naming tzdata 2024a's $OLD_ZONE, which 2026c changed: passes, read in it =="
+    replay oldrelease "$OLD_DIR/$OLD_ZONE" 0 KEPLOY_PROVEN=1 ZONEINFO="$OWN_DIR"
     expect_pass "step 2d" oldrelease
 
     echo "== 2e. KEPLOY_PROVEN=1, the app's TZ naming $LATER_ZONE of release 2099a, later than keploy knows, its tzdata.zi beside it: passes, read in it =="
@@ -516,7 +528,7 @@ native_leg() {
 # $IMG_REC's links DREC_ZONE, $IMG_LIVE's DLIVE_ZONE (the host's files of
 # both), $IMG_DST's DST_ZONE (SLIM_DIR's slim file of it alone), $IMG_OLD's
 # OLD_ZONE (OLD_DIR's file of tzdata 2024a alone), $IMG_COPY's COPY_LINK
-# (the host's file), over which a COPY of Go's own file of COPY_ZONE onto
+# (the host's file), over which a COPY of OWN_DIR's file of COPY_ZONE onto
 # /etc/localtime writes, as a Dockerfile's COPY writes through a link;
 # $IMG_LATER's LATER_ZONE (LATER_DIR's whole release), $IMG_SPLIT's
 # LATER_ZONE (SPLIT_DIR's), over which a COPY of its own Europe/Oslo writes.
@@ -543,7 +555,7 @@ build_images() {
         ln -sfn "/usr/share/zoneinfo/$link" "$ctx/root/etc/localtime" || return 1
         if [ "$img" = "$IMG_COPY" ] || [ "$img" = "$IMG_SPLIT" ]; then
             if [ "$img" = "$IMG_COPY" ]; then
-                python3 -I -c 'import sys, zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' "$GO_ZONEINFO" "$COPY_ZONE" >"$ctx/copied" || return 1
+                cp "$OWN_DIR/$COPY_ZONE" "$ctx/copied" || return 1
             fi
             printf 'FROM scratch\nCOPY root/ /\nCOPY copied /etc/localtime\nENTRYPOINT ["/order-app"]\n' >"$ctx/Dockerfile"
         else
@@ -697,8 +709,8 @@ docker_leg() {
     expect_clock_miss "docker 5" body.day
     checked_in "docker 5" body.day "$DST_ZONE"
 
-    echo "== docker 6. KEPLOY_PROVEN=1, the image linking tzdata 2024a's $OLD_ZONE, the CLI's own zone data Go's, which changed it: passes, read in it =="
-    CLI_ZONEINFO="$GO_ZONEINFO" dreplay docker-old "$RUN_NAME" "$(run_cmd "$IMG_OLD" 0)"
+    echo "== docker 6. KEPLOY_PROVEN=1, the image linking tzdata 2024a's $OLD_ZONE, the CLI's own zone data tzdata 2026c's, which changed it: passes, read in it =="
+    CLI_ZONEINFO="$OWN_DIR" dreplay docker-old "$RUN_NAME" "$(run_cmd "$IMG_OLD" 0)"
     expect_pass "docker 6" docker-old
 
     echo "== docker 7. KEPLOY_PROVEN=1, the image's link to $COPY_LINK, a COPY of $COPY_ZONE's file onto /etc/localtime written through it: fails, the zone unknown =="
