@@ -473,9 +473,9 @@ func (a *App) composeAbortDied(ctx context.Context, m events.Message) bool {
 		// stop's grace (a runner that does not handle SIGTERM) was reused by
 		// the retried up, then killed mid-run.
 		// The halt of a stop that failed is kept before the stop is said
-		// ended: the run's retry, which waits for that, reads it before it
-		// would begin a bring-up again (composeBeginsABringUpAgain), and
-		// begins none.
+		// ended: the run's retry, which waits for that, reads it as soon as
+		// the wait ends, and the run ends on it, with no retry said, no
+		// backoff waited and no bring-up begun.
 		stopped, lateStopped := a.stopComposeStack(context.WithoutCancel(ctx))
 		ends := false
 		if !stopped {

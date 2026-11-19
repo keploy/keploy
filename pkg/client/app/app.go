@@ -2560,6 +2560,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 			a.logger.Debug("context cancelled while keploy's stop of the compose stack ran", zap.Error(ctx.Err()))
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
+		// A stop that failed kept its halt before it was said ended: the
+		// run ends on it, with no retry said and no backoff waited.
+		if a.composeAppHalt() != nil {
+			break
+		}
 		if a.composeApp.depCrash.Load() != nil {
 			states = a.composeFailedUpStates(ctx)
 		}

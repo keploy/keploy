@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -245,6 +249,99 @@ services:
 					t.Fatalf("%s: the retry's wait for the stack's stop ended with halt %+v; want flaky's crash kept already, the stack not stopped", what, h)
 				}
 			}
+		}
+	}
+}
+
+// stackListFailsDaemon is a stackDaemon whose daemon will not list the
+// running containers of the project (the listing of keploy's stop of the
+// stack); onList runs at each listing it will not make.
+type stackListFailsDaemon struct {
+	*stackDaemon
+	onList func()
+}
+
+func (d *stackListFailsDaemon) ContainerList(ctx context.Context, o container.ListOptions) ([]container.Summary, error) {
+	if l := o.Filters.Get("label"); !o.All && len(l) == 1 && l[0] == composeProjectLabelKey+"=proj" {
+		d.onList()
+		return nil, errdefs.NotFound(errors.New("the daemon will not list them"))
+	}
+	return d.stackDaemon.ContainerList(ctx, o)
+}
+
+// A RUN WHOSE STACK STOP FAILED SAYS NO RETRY. A dependency the app depends
+// on crashes before the app started, and compose's up returns on it (its own
+// "dependency failed to start") while keploy's stop of the stack lists the
+// project, so the run's retry waits for that stop. The listing fails: run()
+// ends on the crash the stop kept, naming the failed stop, with no "retrying
+// the bring-up" said, no backoff waited, the crashed dependency not removed
+// for a bring-up that never begins, and no up run again. Record and test,
+// both KEPLOY_PROVEN modes.
+func TestARunWhoseStackStopFailedSaysNoRetryInEveryMode(t *testing.T) {
+	doc := `
+services:
+  app:
+    image: app
+    depends_on: [flaky]
+  runner:
+    image: runner
+  flaky:
+    image: flaky
+`
+	for _, proven := range []string{"", "1"} {
+		for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+			t.Run("switch="+proven+"/"+string(mode), func(t *testing.T) {
+				t.Setenv("KEPLOY_STUB_UP_CODE", "1")
+				var logs *observer.ObservedLogs
+				var once sync.Once
+				r := startStackRun(t, proven, nil, func(a *App) {
+					a.Mode, a.opts.Mode = mode, mode
+					var core zapcore.Core
+					core, logs = observer.New(zap.DebugLevel)
+					a.logger = zap.New(core)
+					a.setComposeUserAbort("docker compose up --exit-code-from runner", composeDoc(t, doc))
+					d := a.docker.(*stackDaemon)
+					a.docker = &stackListFailsDaemon{stackDaemon: d, onList: func() {
+						once.Do(func() {
+							// compose's up returns on the crash, and the
+							// stop's listing fails only once the run's retry
+							// waits for the stop.
+							_ = os.WriteFile(d.upEnds, nil, 0o600)
+							deadline := time.Now().Add(time.Minute)
+							for logs.FilterMessageSnippet("waits for keploy's stop of the stack to end").Len() == 0 {
+								if time.Now().After(deadline) {
+									t.Errorf("the run's retry did not wait for keploy's stop of the stack within a minute of the up's return")
+									return
+								}
+								time.Sleep(time.Millisecond)
+							}
+						})
+					}}
+				})
+				r.d.mu.Lock()
+				r.d.cs[runAppName].status = "created"
+				r.d.mu.Unlock()
+				r.d.add(&abortContainer{name: "flaky-1", service: "flaky", status: "running"})
+				stream := r.watchStream(t)
+				if err := r.d.exit("flaky-1", 1, "EXIT"); err != nil {
+					t.Fatal(err)
+				}
+				stream <- events.Message{Type: events.ContainerEventType, Action: events.ActionDie, TimeNano: time.Now().UnixNano(),
+					Actor: events.Actor{ID: "flaky-1", Attributes: map[string]string{composeProjectLabelKey: "proj", composeServiceLabelKey: "flaky", "exitCode": "1"}}}
+				e := r.result(t, "flaky's crash, which keploy's stop of the stack could not stop the stack on")
+				if e.Err == nil || !strings.Contains(e.Err.Error(), `compose service "flaky"`) || !strings.Contains(e.Err.Error(), "could not stop the stack to retry the bring-up") {
+					t.Fatalf("run() ended %+v; want flaky's crash, naming the stack stop that failed", e)
+				}
+				if n := logs.FilterMessageSnippet("retrying the bring-up").Len(); n != 0 {
+					t.Fatalf("the run said %d retries of the bring-up; want none, its stack stop having failed:\n%v", n, logs.FilterMessageSnippet("retrying the bring-up").All())
+				}
+				if slices.Contains(r.d.trailNow(), "remove flaky-1") {
+					t.Fatalf("flaky's crashed container was removed for a bring-up that never begins: %v", r.d.trailNow())
+				}
+				if trailAt(r.trail(t), "UP-RETRIED") >= 0 {
+					t.Fatalf("the up ran again after a stack stop that failed:\n%s", strings.Join(r.trail(t), "\n"))
+				}
+			})
 		}
 	}
 }

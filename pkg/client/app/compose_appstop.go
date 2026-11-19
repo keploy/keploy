@@ -1083,6 +1083,7 @@ func (a *App) composeAwaitsTheStackStop(ctx context.Context) bool {
 	if stopped == nil {
 		return true
 	}
+	a.logger.Debug("the retry of the compose bring-up waits for keploy's stop of the stack to end")
 	select {
 	case <-*stopped:
 		return true
