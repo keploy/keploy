@@ -1333,17 +1333,36 @@ func isAnswerCutShort(err error) bool {
 }
 
 // isConnDropped reports whether err is the connection to the app dropping: a
-// reset (ECONNRESET), a broken pipe (EPIPE), a bare io.EOF, or net/http's
-// errServerClosedIdle. One drop is reported as any of these. Which one depends
-// on timing: net/http reports a close its read loop reads before the request
-// is on the connection as errServerClosedIdle, which a request on a fresh
-// connection gets as is (on a reused one, net/http sends again a request it
-// can replay), and a close it reads after as io.EOF. By the error alone a
-// reset can also have come part-way through an answer (see
-// IsTransportConnReset). Every rule about a drop asks this one.
+// reset (ECONNRESET), a broken pipe (EPIPE), a bare io.EOF, net/http's
+// errServerClosedIdle, or the request's I/O on the connection the transport
+// closed on the drop (isClosedOnTheDrop). One drop is reported as any of
+// these. Which one depends on timing: net/http reports a close its read loop
+// reads before the request is on the connection as errServerClosedIdle, which
+// a request on a fresh connection gets as is (on a reused one, net/http sends
+// again a request it can replay), or as the write that came after it, and a
+// close it reads after as io.EOF. By the error alone a reset can also have
+// come part-way through an answer (see IsTransportConnReset). Every rule
+// about a drop asks this one.
 func isConnDropped(err error) bool {
 	return neterr.IsConnReset(err) || neterr.IsBrokenPipe(err) ||
-		errors.Is(err, io.EOF) || isServerClosedIdle(err)
+		errors.Is(err, io.EOF) || isServerClosedIdle(err) || isClosedOnTheDrop(err)
+}
+
+// isClosedOnTheDrop reports whether err is net.ErrClosed: a read or write on a
+// connection its own side had already closed. A test request gets it when
+// net/http's transport closed the connection on the app's drop before the
+// request's write reached it. Its read loop reads a close that comes before
+// the request is on the connection and closes the connection on it
+// (errServerClosedIdle), but its writer may already have taken the request,
+// and writes it to the closed connection; roundTrip then has both the write's
+// error and the close, and a select in it picks the one the request gets.
+// Over TCP the write's error is a *net.OpError ("write tcp ...: use of closed
+// network connection"); over TLS it is net.ErrClosed itself, from the
+// *tls.Conn. The transport closes a connection a request is on otherwise only
+// once a write on it failed (a drop too), or for a cancel or a timeout, which
+// the request gets ahead of what its I/O found.
+func isClosedOnTheDrop(err error) bool {
+	return errors.Is(err, net.ErrClosed)
 }
 
 // IsAppConnectionError reports whether err says a test request failed because
