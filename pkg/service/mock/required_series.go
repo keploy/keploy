@@ -184,7 +184,10 @@ func placedSeries(mp *models.Mapping, table map[string][]string) map[string]seri
 			s = seriesDue{Rule: e.Rule, Trails: e.Trails, Place: e.Place}
 		}
 		s.Names = append(s.Names, e.Name)
-		if e.Read || e.Unchanged || e.Optional {
+		// A later part of a trailing series (OpenedBy) answers only once
+		// the run served the write that opened it, and is never required:
+		// the application looks the value up again on its own clock.
+		if e.Read || e.Unchanged || e.Optional || e.OpenedBy != "" {
 			s.served = append(s.served, e.Name)
 		} else {
 			s.write = true

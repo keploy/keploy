@@ -1508,7 +1508,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
 	once := onceSeries(served, worker)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), inRecordOrder(workerSeries(served, worker), decoded), declaredSources(served, loaded), once, everySeries(served, worker, once), m.config.Mock.TimeForm); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), inRecordOrder(workerSeries(served, worker), decoded), declaredSources(served, loaded), once, everySeries(served, worker, once), seriesGates(served, worker), m.config.Mock.TimeForm); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -2064,6 +2064,38 @@ func everySeries(mp *models.Mapping, worker map[string][]string, once []string) 
 			out = map[string]string{}
 		}
 		out[id] = d.String()
+	}
+	return out
+}
+
+// seriesGates is, by series of workerSeries, the recordings whose serving
+// in the run opens and closes it (models.MockEntry.OpenedBy, ClosedBy):
+// the agent serves a part of a trailing series whose recorded answer
+// changed part-way only after the trailed test's write that opened it,
+// and the part before only until then. A series' gate is its first
+// served entry's that names one. nil when none does.
+func seriesGates(mp *models.Mapping, worker map[string][]string) map[string]models.SeriesGate {
+	if mp == nil {
+		return nil
+	}
+	served := map[string]bool{}
+	for _, names := range workerSeries(mp, worker) {
+		for _, n := range names {
+			served[n] = true
+		}
+	}
+	var out map[string]models.SeriesGate
+	for _, e := range mp.Worker {
+		if e.OpenedBy == "" && e.ClosedBy == "" || !served[e.Name] {
+			continue
+		}
+		if _, ok := out[e.Series]; ok {
+			continue
+		}
+		if out == nil {
+			out = map[string]models.SeriesGate{}
+		}
+		out[e.Series] = models.SeriesGate{OpenedBy: e.OpenedBy, ClosedBy: e.ClosedBy}
 	}
 	return out
 }

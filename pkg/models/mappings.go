@@ -224,6 +224,16 @@ type MockEntry struct {
 	// once its place is reached. With the switch off it is not read. Kept as
 	// Series is.
 	CausedBy string `json:"causedBy,omitempty" yaml:"causedBy,omitempty" bson:"caused_by,omitempty"`
+	// OpenedBy is, on a worker: entry of a later part of a trailing
+	// Series, the recording of the trailed test's write that carried the
+	// series' value, recorded between the part before and this one, whose
+	// document this part's calls answered: keploy mock replay serves the
+	// entry only once the run served that recording, and never requires
+	// it. ClosedBy is, on an entry of the part before, the same recording:
+	// keploy mock replay serves the entry only until the run served it.
+	// "" for none.
+	OpenedBy string `json:"openedBy,omitempty" yaml:"openedBy,omitempty" bson:"opened_by,omitempty"`
+	ClosedBy string `json:"closedBy,omitempty" yaml:"closedBy,omitempty" bson:"closed_by,omitempty"`
 	// NotRequired says, on an entry of a test's own list, that keploy's
 	// judging (keploy mock record's, or keploy mock judge's) proved the
 	// recording served, not required, and why, in keploy's words: the test's

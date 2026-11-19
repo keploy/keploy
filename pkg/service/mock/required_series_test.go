@@ -451,3 +451,29 @@ func TestAOnceSeriesIsMadeByItsWriteAlone(t *testing.T) {
 		require.Equal(t, 1-len(row.notMade), uses[0].Made, "used %v", row.used)
 	}
 }
+
+// A later part of a trailing series (models.MockEntry.OpenedBy) is served,
+// never required: the run requires the part before it as before, and the
+// gates the replay sends name each part's write, of served entries alone.
+func TestALaterPartOfASeriesIsServedNeverRequired(t *testing.T) {
+	mp := &models.Mapping{Worker: []models.MockEntry{
+		{Name: "c1", Trails: "o::TestT", Series: "lookup/o::TestT/1", ClosedBy: "del"},
+		{Name: "c2", Trails: "o::TestT", Series: "lookup/o::TestT/1", ClosedBy: "del"},
+		{Name: "d1", Trails: "o::TestT", Series: "lookup/o::TestT/1.2", OpenedBy: "del"},
+		{Name: "d2", Trails: "o::TestT", Series: "lookup/o::TestT/1.2", OpenedBy: "del"},
+		{Name: "x1", Trails: "o::TestT", Series: "other/o::TestT/1", OpenedBy: "w9"},
+	}}
+	table := map[string][]string{"o::TestT": nil}
+	req := requiredSeries(mp, table)
+	require.Equal(t, []string{"lookup/o::TestT/1"}, slices.Sorted(maps.Keys(req)), "only the part before the write is required")
+	placed := placedSeries(mp, table)
+	require.Equal(t, []string{"d1", "d2"}, placed["lookup/o::TestT/1.2"].served)
+
+	gates := seriesGates(mp, map[string][]string{"k": {"c1", "c2", "d1", "d2"}})
+	require.Equal(t, map[string]models.SeriesGate{
+		"lookup/o::TestT/1":   {ClosedBy: "del"},
+		"lookup/o::TestT/1.2": {OpenedBy: "del"},
+	}, gates, "x1 is served by no key: its gate is not sent")
+	require.Nil(t, seriesGates(&models.Mapping{Worker: []models.MockEntry{{Name: "a", Series: "s/-/1"}}}, map[string][]string{"k": {"a"}}))
+	require.Nil(t, seriesGates(nil, nil))
+}

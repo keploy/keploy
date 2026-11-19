@@ -5483,26 +5483,28 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // sources declared rules give fields of its request
 // (models.ScopeTableReq.Sources), and once the series of series that answer
 // once in a run (models.ScopeTableReq.Once), every the interval of each
-// that answers again after it (models.ScopeTableReq.Every): an agent whose answer does not
+// that answers again after it (models.ScopeTableReq.Every), gates the
+// recordings whose serving opens and closes a part of a series
+// (models.ScopeTableReq.Gates): an agent whose answer does not
 // name each of them the table has (models.ScopeTableResp.Served) is refused
 // with ErrAgentIgnoresRules. timeForm turns on the learn step's time default
 // (models.ScopeTableReq.TimeForm); an agent that does not take it decides
 // times by the clock checks alone, which refuses more and never passes
 // more, so it is not refused.
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, timeForm bool) (retErr error) {
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, every map[string]string, gates map[string]models.SeriesGate, timeForm bool) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), maps.Clone(skippedReads), maps.Clone(trails), slices.Clone(windows), maps.Clone(given), maps.Clone(repeats), maps.Clone(notRequired), slices.Clone(background), maps.Clone(series), maps.Clone(sources), slices.Clone(once)
-			ev := maps.Clone(every)
+			ev, ga := maps.Clone(every), maps.Clone(gates)
 			a.session().record(stepScopeTable, func(c context.Context) error {
-				return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on, ev, timeForm)
+				return a.PushProvenTable(c, t, p, wk, sr, tr, w, g, r, nr, bg, se, so, on, ev, ga, timeForm)
 			})
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, Every: every, TimeForm: timeForm})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, SkippedReads: skippedReads, Trails: trails, Windows: windows, Given: given, RepeatReads: repeats, NotRequired: notRequired, Background: background, Series: series, Sources: sources, Once: once, Every: every, Gates: gates, TimeForm: timeForm})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
@@ -5523,7 +5525,7 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("the agent refused the per-test table and pool slices (status %d): %s", res.StatusCode, strings.TrimSpace(string(b)))
 	}
-	if len(series) == 0 && len(sources) == 0 && len(once) == 0 && len(every) == 0 {
+	if len(series) == 0 && len(sources) == 0 && len(once) == 0 && len(every) == 0 && len(gates) == 0 {
 		return nil
 	}
 	// An older agent answers with no field named: it would serve a series'
@@ -5537,7 +5539,8 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 	}
 	if len(series) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedSeries) || len(sources) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedSources) ||
 		len(once) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedOnce) ||
-		len(every) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedEvery) {
+		len(every) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedEvery) ||
+		len(gates) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedGates) {
 		return ErrAgentIgnoresRules
 	}
 	return nil

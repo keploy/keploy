@@ -129,6 +129,9 @@ type provenWire struct {
 	// every is, by once series, the interval after which its recordings
 	// answer again (models.ScopeTableReq.Every, SetScopeEvery).
 	every map[string]time.Duration
+	// gates is, by series, the recordings whose serving opens and closes
+	// it (models.ScopeTableReq.Gates, SetScopeGates).
+	gates map[string]models.SeriesGate
 	// sources is, in a replay, by recording name, the sources rules
 	// declared in keploy.yml give fields of its request (the CLI's scope
 	// table, models.ScopeTableReq.Sources), which SetScopePool hands the
@@ -669,6 +672,7 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	series := maps.Clone(a.proven.series)
 	once := slices.Clone(a.proven.once)
 	every := maps.Clone(a.proven.every)
+	gates := maps.Clone(a.proven.gates)
 	sources := maps.Clone(a.proven.sources)
 	timeForm := a.proven.timeForm
 	a.provenMu.Unlock()
@@ -693,6 +697,14 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 		}
 	} else if len(every) > 0 {
 		return errors.New("this keploy agent's proxy cannot serve a once series again after an interval")
+	}
+	// So do their gates (MockManager.SetPoolGates).
+	if gs, ok := a.Proxy.(coreAgent.PoolGatesSetter); ok {
+		if err := gs.SetPoolGates(gates); err != nil {
+			return err
+		}
+	} else if len(gates) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a part of a series only after the write that opens it")
 	}
 	if ss, ok := a.Proxy.(coreAgent.PoolSeriesSetter); ok {
 		if err := ss.SetPoolSeries(series); err != nil {
@@ -869,6 +881,30 @@ func (a *Agent) SetScopeEvery(ctx context.Context, every map[string]string) erro
 	defer a.wire.unlock()
 	a.provenMu.Lock()
 	a.proven.every = parsed
+	a.provenMu.Unlock()
+	return nil
+}
+
+// SetScopeGates installs, by series of a replay, the recordings whose
+// serving in the run opens and closes it (models.ScopeTableReq.Gates),
+// which SetScopePool hands the proxy before the series. A gate that names
+// no recording, or a series id that is empty, is refused: the table is
+// not what the CLI sends.
+func (a *Agent) SetScopeGates(ctx context.Context, gates map[string]models.SeriesGate) error {
+	if _, ok := a.Proxy.(coreAgent.PoolGatesSetter); !ok && len(gates) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a part of a series only after the write that opens it")
+	}
+	for id, g := range gates {
+		if id == "" || g.OpenedBy == "" && g.ClosedBy == "" || g.OpenedBy != "" && g.OpenedBy == g.ClosedBy {
+			return fmt.Errorf("the scope table's gate for series %q (opened by %q, closed by %q) names no recording, or one that both opens and closes it", id, g.OpenedBy, g.ClosedBy)
+		}
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.provenMu.Lock()
+	a.proven.gates = maps.Clone(gates)
 	a.provenMu.Unlock()
 	return nil
 }

@@ -435,6 +435,19 @@ const ScopeTableServedOnce = "once"
 // ScopeTableReq.Every.
 const ScopeTableServedEvery = "every"
 
+// ScopeTableServedGates is ScopeTableResp.Served's name for
+// ScopeTableReq.Gates.
+const ScopeTableServedGates = "gates"
+
+// SeriesGate is, of one part of a trailing series whose recorded answer
+// changed part-way (MockEntry.OpenedBy, MockEntry.ClosedBy), the
+// recording whose serving in the run opens the part (OpenedBy) and the
+// one whose serving closes it (ClosedBy). "" for none.
+type SeriesGate struct {
+	OpenedBy string `json:"openedBy,omitempty"`
+	ClosedBy string `json:"closedBy,omitempty"`
+}
+
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
 // runner's /agent/scope/begin calls can restrict the served pool per test.
@@ -514,6 +527,15 @@ type ScopeTableReq struct {
 	// answer such a series once in the run, and its next round's calls
 	// would miss.
 	Every map[string]string `json:"every,omitempty"`
+	// Gates is, under the proven switch, by series of Series, the part
+	// of a trailing series whose recorded answer changed part-way it is
+	// (SeriesGate): the agent serves its recordings only once the run
+	// served its OpenedBy and only until the run served its ClosedBy.
+	// Absent when no series has one. The agent's answer to the table
+	// names it (ScopeTableResp.Served) when it serves it; the CLI refuses
+	// an agent that does not: an older agent would serve a later part's
+	// answer before the write that made it was served.
+	Gates map[string]SeriesGate `json:"gates,omitempty"`
 	// Sources is, under the proven switch, by recording name, the sources
 	// rules the user declared in keploy.yml give fields of the recording's
 	// request (MockEntry.Sources): only names the agent holds. The learn

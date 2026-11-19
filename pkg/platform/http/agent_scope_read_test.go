@@ -83,41 +83,41 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	defer srv.Close()
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	// The recorded test windows go with them, in the same request.
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	// The values each test gave when it was recorded ride the same request.
 	given := map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, given, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, given, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	// So do each test's repeated reads.
 	repeats := map[string][]models.RepeatRead{"o::TestA": {{Name: "onboarding", Mocks: []string{"mock-3", "mock-4"}}}}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3", "mock-4"}}, nil, nil, nil, nil, nil, nil, repeats, nil, nil, nil, nil, nil, nil, false); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3", "mock-4"}}, nil, nil, nil, nil, nil, nil, repeats, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	// The test each worker recording trails rides it with the worker scope.
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}, "o::TestB": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, map[string]string{"mock-2": "o::TestA"}, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}, "o::TestB": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, map[string]string{"mock-2": "o::TestA"}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	// The names each test's own list marks served, not required, too.
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, nil, nil, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, false); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, nil, nil, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	// So do the names of the worker scope that are the reads of tests the
 	// replay's gate skips.
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, map[string]string{"mock-2": "o::TestCRUD"}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, map[string]string{"mock-2": "o::TestCRUD"}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, true); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, true); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -136,7 +136,7 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	}
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushProvenTable(ctx, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err == nil {
+		if err := a.PushProvenTable(ctx, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false); err == nil {
 			t.Fatalf("status %d: want an error", s)
 		}
 	}
@@ -174,7 +174,7 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
 	notRequired := map[string][]string{"o::TestA": {"mock-3"}}
 	skipped := map[string]string{"mock-1": "o::TestCRUD"}
 	background := []string{"mock-1"}
-	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, map[string][]string{"o": {"mock-1"}}, skipped, trails, windows, given, repeats, notRequired, background, nil, nil, nil, nil, true); err != nil {
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, map[string][]string{"o": {"mock-1"}}, skipped, trails, windows, given, repeats, notRequired, background, nil, nil, nil, nil, nil, true); err != nil {
 		t.Fatal(err)
 	}
 	windows[0].TestCase = "o::Changed" // the caller's slice is its own
@@ -217,7 +217,7 @@ func TestAgentClient_PushProvenTableIsReappliedWithItsRules(t *testing.T) {
 	sources := map[string][]models.DeclaredSource{"mock-1": {{Rule: "lease", Kind: "minted", Field: "_id"}}}
 	once := []string{"pat-last-use-touch"}
 	every := map[string]string{"pat-last-use-touch": "5m"}
-	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, sources, once, every, false); err != nil {
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-1", "mock-2"}}, map[string][]string{"o": {"mock-1", "mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, sources, once, every, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	series["pat-last-use-touch"] = nil // the caller's maps are its own
@@ -263,7 +263,7 @@ func TestScopeTableWithoutAckIsRefused(t *testing.T) {
 	ctx := context.Background()
 	series := map[string][]string{"sweep/o::TestA/1": {"mock-2"}}
 	push := func(series map[string][]string) error {
-		return a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, nil, nil, nil, false)
+		return a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, nil, nil, nil, nil, false)
 	}
 	for _, old := range []string{"", `{"status":"ok"}`, `{"status":"ok","served":["trails"]}`, `not json`, `{"status":"ok","served":["series"],`, `{"status":1,"served":["series"]}`} {
 		answer = old
@@ -306,7 +306,7 @@ func TestScopeTableWithoutSourcesAckIsRefused(t *testing.T) {
 	sources := map[string][]models.DeclaredSource{"mock-3": {{Rule: "audit-at@0a1b2c3d", Kind: models.DeclaredSourceClock, Field: "body.docs.msgs.0.at", Clock: &models.ClockOffset{Min: -time.Second, Res: time.Second}}}}
 	series := map[string][]string{"sweep/o::TestA/1": {"mock-2"}}
 	push := func(series map[string][]string, sources map[string][]models.DeclaredSource) error {
-		return a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, sources, nil, nil, false)
+		return a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, sources, nil, nil, nil, false)
 	}
 	for _, old := range []string{"", `{"status":"ok"}`, `{"status":"ok","served":["series"]}`, `not json`, `{"status":1,"served":["sources"]}`} {
 		answer = old
@@ -353,7 +353,7 @@ func TestScopeTableWithoutOnceAckIsRefused(t *testing.T) {
 	ctx := context.Background()
 	series := map[string][]string{"pat/-/1": {"mock-2"}}
 	push := func(once []string) error {
-		return a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, nil, once, nil, false)
+		return a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, nil, once, nil, nil, false)
 	}
 	for _, old := range []string{"", `{"status":"ok"}`, `{"status":"ok","served":["series"]}`, `{"status":"ok","served":["series","sources"]}`, `{"status":1,"served":["series","once"]}`} {
 		answer = old
@@ -366,7 +366,7 @@ func TestScopeTableWithoutOnceAckIsRefused(t *testing.T) {
 		t.Fatalf("a table with no once series was refused by an agent that names series: %v", err)
 	}
 	answer = `{"status":"ok"}`
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, []string{"pat/-/1"}, nil, false); !errors.Is(err, ErrAgentIgnoresRules) {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, []string{"pat/-/1"}, nil, nil, false); !errors.Is(err, ErrAgentIgnoresRules) {
 		t.Fatalf("a table with once series and no series was taken by an agent that names none: got %v, want ErrAgentIgnoresRules", err)
 	}
 	answer = `{"status":"ok","served":["series","once"]}`
@@ -380,7 +380,7 @@ func TestScopeTableWithoutOnceAckIsRefused(t *testing.T) {
 	// it would answer the series once in the run.
 	every := map[string]string{"pat/-/1": "5m0s"}
 	pushEvery := func() error {
-		return a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, nil, []string{"pat/-/1"}, every, false)
+		return a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, nil, []string{"pat/-/1"}, every, nil, false)
 	}
 	if err := pushEvery(); !errors.Is(err, ErrAgentIgnoresRules) {
 		t.Fatalf("an agent that does not name every took a table with an every series: got %v, want ErrAgentIgnoresRules", err)
@@ -394,7 +394,47 @@ func TestScopeTableWithoutOnceAckIsRefused(t *testing.T) {
 	}
 	// A table whose only rule field is every is checked all the same.
 	answer = `{"status":"ok","served":["series","once"]}`
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, every, false); !errors.Is(err, ErrAgentIgnoresRules) {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, every, nil, false); !errors.Is(err, ErrAgentIgnoresRules) {
 		t.Fatalf("a table with every series and no other rule field was taken by an agent that does not name every: got %v, want ErrAgentIgnoresRules", err)
+	}
+}
+
+// TestScopeTableWithoutGatesAckIsRefused: a table with series gates
+// (models.ScopeTableReq.Gates) pushed to an agent whose answer names the
+// series but not the gates is refused with ErrAgentIgnoresRules: it would
+// serve a later part's answer before the write that opens it. An agent that
+// names gates is taken, and the table posted carries them.
+func TestScopeTableWithoutGatesAckIsRefused(t *testing.T) {
+	var answer string
+	var posted models.ScopeTableReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted = models.ScopeTableReq{}
+		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+			t.Errorf("the posted table does not decode: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, answer)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	ctx := context.Background()
+	series := map[string][]string{"lookup/o::TestT/1.2": {"mock-2"}}
+	gates := map[string]models.SeriesGate{"lookup/o::TestT/1.2": {OpenedBy: "mock-1"}}
+	push := func(gates map[string]models.SeriesGate) error {
+		return a.PushProvenTable(ctx, map[string][]string{"o::TestT": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, nil, nil, nil, gates, false)
+	}
+	answer = `{"status":"ok","served":["series"]}`
+	if err := push(gates); !errors.Is(err, ErrAgentIgnoresRules) {
+		t.Fatalf("an agent that does not name gates: got %v, want ErrAgentIgnoresRules", err)
+	}
+	if err := push(nil); err != nil {
+		t.Fatalf("a table with no gates was refused: %v", err)
+	}
+	answer = `{"status":"ok","served":["series","gates"]}`
+	if err := push(gates); err != nil {
+		t.Fatalf("an agent that acknowledges gates was refused: %v", err)
+	}
+	if !reflect.DeepEqual(posted.Gates, gates) {
+		t.Fatalf("the posted table's gates %v, want %v", posted.Gates, gates)
 	}
 }

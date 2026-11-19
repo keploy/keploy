@@ -1178,6 +1178,15 @@ type PoolEverySetter interface {
 	SetPoolEvery(every map[string]time.Duration) error
 }
 
+// PoolGatesSetter is implemented by a proxy that serves a part of a
+// trailing series only between the serving of the recording that opens
+// it and of the one that closes it: SetPoolGates installs, of keploy mock
+// replay's scope table under the proven switch, by series, those
+// recordings (models.ScopeTableReq.Gates).
+type PoolGatesSetter interface {
+	SetPoolGates(gates map[string]models.SeriesGate) error
+}
+
 // PoolSourcesSetter is implemented by a proxy whose learn step decides a
 // field by the source a rule declared in keploy.yml gives it
 // (integrations.DeclaredSourcesOf): SetPoolSources installs, of keploy mock

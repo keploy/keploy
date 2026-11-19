@@ -407,6 +407,20 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a once series again after an interval", http.StatusNotImplemented)
 			return
 		}
+		// The parts of a trailing series whose answer changed part-way.
+		// Every table says them, an empty one too. An agent that cannot
+		// serve them refuses a table that has one: it would serve a later
+		// part's answer before the write that made it was served.
+		if gs, ok := a.svc.(scopeGatesSetter); ok {
+			if err := gs.SetScopeGates(r.Context(), req.Gates); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			served = append(served, models.ScopeTableServedGates)
+		} else if len(req.Gates) > 0 {
+			http.Error(w, "this keploy agent cannot serve a part of a series only after the write that opens it", http.StatusNotImplemented)
+			return
+		}
 		// The sources rules declared in keploy.yml give fields of the
 		// recordings' requests. Every table says them, an empty one too.
 		// An agent that cannot learn by them, or that does not know a
@@ -525,6 +539,13 @@ type scopeOnceSetter interface {
 // proven wire).
 type scopeEverySetter interface {
 	SetScopeEvery(ctx context.Context, every map[string]string) error
+}
+
+// scopeGatesSetter installs, by series of a replay, the recordings whose
+// serving opens and closes the series (models.ScopeTableReq.Gates,
+// proven wire).
+type scopeGatesSetter interface {
+	SetScopeGates(ctx context.Context, gates map[string]models.SeriesGate) error
 }
 
 // scopeSourcesSetter installs, by recording name, the sources rules

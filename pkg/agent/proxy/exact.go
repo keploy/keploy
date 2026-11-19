@@ -411,6 +411,11 @@ type exactState struct {
 	// SetPoolSeries marks on the index it builds (seriesMember.every). nil
 	// until a replay sent one.
 	poolEvery atomic.Pointer[map[string]time.Duration]
+	// poolGates is, of the same scope table, by series, the recordings
+	// whose serving opens and closes it (SetPoolGates): what SetPoolSeries
+	// marks on the index it builds (seriesMember.openedBy, closedBy). nil
+	// until a replay sent one.
+	poolGates atomic.Pointer[map[string]models.SeriesGate]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
 	// cached for one staging generation of the trees (StagingGeneration: an
 	// exact serve does not move it), one scope table, one recording's times
@@ -954,6 +959,9 @@ func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict 
 	// staging, as a trailing write with no series does
 	// (seriesIndex.answersOnce).
 	series := m.exact.poolSeries.Load()
+	if series.shut(mk.Name) {
+		return exactRefused
+	}
 	if answersOnce(&m.exact.poolTrails, series, mk.Name) {
 		if !m.takeOnce(st, series, mk.Name) {
 			return exactRefused
@@ -1006,7 +1014,11 @@ func (m *MockManager) consumeBetween(mk *models.Mock) (verdict exactVerdict, fir
 	// answers again here, as the rest of the worker scope does, but for a
 	// once series' recording, which answers once in the staging wherever
 	// its call lands (seriesIndex.answersOnce).
-	if series := m.exact.poolSeries.Load(); answersOnce(&m.exact.poolTrails, series, mk.Name) {
+	series := m.exact.poolSeries.Load()
+	if series.shut(mk.Name) {
+		return exactRefused, false
+	}
+	if answersOnce(&m.exact.poolTrails, series, mk.Name) {
 		if !m.takeOnce(st, series, mk.Name) {
 			return exactRefused, false
 		}
@@ -2128,6 +2140,14 @@ type seriesIndex struct {
 	of map[string]seriesMember
 	// members is, by series, its recordings in placement order.
 	members map[string][]string
+	// gates is, by series, the recordings whose serving opens and closes
+	// it (SetPoolGates), and openers every recording one names.
+	gates   map[string]models.SeriesGate
+	openers map[string]bool
+	// opened holds the openers the run served (noteServed). An index
+	// built again with the same gates keeps it: a scope table sent again
+	// is the same run.
+	opened *sync.Map
 }
 
 type seriesMember struct {
@@ -2144,6 +2164,10 @@ type seriesMember struct {
 	// the series' rounds (everyRound). Zero, the series answers once in the
 	// run.
 	every time.Duration
+	// openedBy and closedBy are the recordings whose serving in the run
+	// opens and closes the member's series (SetPoolGates): until the
+	// first and from the second on, the member answers nothing (shut).
+	openedBy, closedBy string
 }
 
 // SetPoolSeries installs, of the replay's scope table, the series the
@@ -2167,6 +2191,21 @@ func (m *MockManager) SetPoolSeries(series map[string][]string) {
 	if p := m.exact.poolEvery.Load(); p != nil {
 		every = *p
 	}
+	if p := m.exact.poolGates.Load(); p != nil {
+		idx.gates = *p
+	}
+	idx.openers = map[string]bool{}
+	for _, g := range idx.gates {
+		for _, n := range []string{g.OpenedBy, g.ClosedBy} {
+			if n != "" {
+				idx.openers[n] = true
+			}
+		}
+	}
+	idx.opened = &sync.Map{}
+	if prev := m.exact.poolSeries.Load(); prev != nil && prev.opened != nil && maps.Equal(prev.gates, idx.gates) {
+		idx.opened = prev.opened
+	}
 	ids := make([]string, 0, len(series))
 	for id := range series {
 		ids = append(ids, id)
@@ -2178,13 +2217,13 @@ func (m *MockManager) SetPoolSeries(series map[string][]string) {
 			if _, dup := idx.of[n]; n == "" || dup {
 				continue
 			}
-			idx.of[n] = seriesMember{id: id, once: once[id], every: everyOf(once, every, id)}
+			idx.of[n] = seriesMember{id: id, once: once[id], every: everyOf(once, every, id), openedBy: idx.gates[id].OpenedBy, closedBy: idx.gates[id].ClosedBy}
 			names = append(names, n)
 		}
 		if len(names) == 0 {
 			continue
 		}
-		idx.of[names[len(names)-1]] = seriesMember{id: id, last: true, once: once[id], every: everyOf(once, every, id)}
+		idx.of[names[len(names)-1]] = seriesMember{id: id, last: true, once: once[id], every: everyOf(once, every, id), openedBy: idx.gates[id].OpenedBy, closedBy: idx.gates[id].ClosedBy}
 		idx.members[id] = names
 	}
 	m.exact.poolSeries.Store(idx)
@@ -2226,6 +2265,60 @@ func (m *MockManager) SetPoolEvery(every map[string]time.Duration) {
 		}
 	}
 	m.exact.poolEvery.Store(&set)
+}
+
+// SetPoolGates installs, of the replay's scope table, by series, the
+// recordings whose serving in the run opens and closes it
+// (models.ScopeTableReq.Gates): a part of a trailing series whose
+// recorded answer changed part-way, after the trailed test's write that
+// carried its value. The next SetPoolSeries marks their members
+// (seriesMember.openedBy, closedBy), so the agent sends these before the
+// series. A member of a series with an opener answers nothing until the
+// run served the opener, and one with a closer nothing from the moment
+// the run served the closer (seriesIndex.shut): before the write, the
+// part before it answers; after it, the part that write opened. An empty
+// id, and a gate that names no recording, mark nothing. None leaves the
+// set none, never the previous set's.
+func (m *MockManager) SetPoolGates(gates map[string]models.SeriesGate) {
+	set := make(map[string]models.SeriesGate, len(gates))
+	for id, g := range gates {
+		if id != "" && (g.OpenedBy != "" || g.ClosedBy != "") {
+			set[id] = g
+		}
+	}
+	m.exact.poolGates.Store(&set)
+}
+
+// shut reports whether name, a member of a series with a gate
+// (seriesMember.openedBy, closedBy), answers nothing now: the run has not
+// served its opener, or has served its closer. false for a name of no
+// series, a member of one with no gate, and a nil s.
+func (s *seriesIndex) shut(name string) bool {
+	if s == nil || s.opened == nil {
+		return false
+	}
+	mem := s.of[name]
+	if mem.openedBy != "" {
+		if _, ok := s.opened.Load(mem.openedBy); !ok {
+			return true
+		}
+	}
+	if mem.closedBy != "" {
+		if _, ok := s.opened.Load(mem.closedBy); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// noteServed notes that the run served name, when a gate of s names it
+// (seriesIndex.openers): the parts it opens answer from now on, and the
+// part it closes no longer does (shut).
+func (s *seriesIndex) noteServed(name string) {
+	if s == nil || s.opened == nil || !s.openers[name] {
+		return
+	}
+	s.opened.Store(name, true)
 }
 
 // everyOf is the interval SetPoolEvery gave series id, for a once series
@@ -3378,6 +3471,11 @@ func (v *exactView) spentOutsideIn(name string, windowed bool) bool {
 	if v.series != nil {
 		series = v.series.Load()
 	}
+	// A part of a series the run has not opened, or has closed, answers
+	// nothing anywhere (seriesIndex.shut).
+	if series.shut(name) {
+		return true
+	}
 	if answersOnce(v.trails, series, name) {
 		// A trailing write with no series, or a once series' recording,
 		// that answered once is spent for the staging, in every window and
@@ -4154,6 +4252,12 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 			if wait == nil && verdict != exactRefused && observe != nil {
 				observe()
 				observe = nil
+			}
+			// A served recording a series' gate names opens or closes
+			// that part from now on (seriesIndex.noteServed), in this
+			// step: the next read sees it.
+			if wait == nil && verdict != exactRefused && mk != nil {
+				m.exact.poolSeries.Load().noteServed(mk.Name)
 			}
 			return verdict, wait, after
 		}()

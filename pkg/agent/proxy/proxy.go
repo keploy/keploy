@@ -5203,6 +5203,20 @@ func (p *Proxy) SetPoolTrails(trails map[string]string) error {
 
 var _ agent.PoolSeriesSetter = (*Proxy)(nil)
 var _ agent.PoolOnceSetter = (*Proxy)(nil)
+var _ agent.PoolGatesSetter = (*Proxy)(nil)
+
+// SetPoolGates implements agent.PoolGatesSetter: by series, the
+// recordings whose serving in the run opens and closes it, on the mock
+// manager (MockManager.SetPoolGates).
+func (p *Proxy) SetPoolGates(gates map[string]models.SeriesGate) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolGates(gates)
+	return nil
+}
+
 var _ agent.PoolEverySetter = (*Proxy)(nil)
 
 // SetPoolEvery implements agent.PoolEverySetter: by once series, the

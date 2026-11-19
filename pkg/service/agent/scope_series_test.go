@@ -254,3 +254,65 @@ func TestTheScopeIntervalsReachTheProxyAfterTheOnceSeries(t *testing.T) {
 	b.scopeTable = map[string][]string{"o::TestA": {}}
 	require.Error(t, b.SetScopePool(ctx, pool), "and the pool refuses them too")
 }
+
+// gatesProxy is everyProxy that also serves a part of a series only between
+// its writes (coreAgent.PoolGatesSetter), noting the order the pool hands it.
+type gatesProxy struct {
+	*everyProxy
+	gates map[string]models.SeriesGate
+}
+
+var _ coreAgent.PoolGatesSetter = (*gatesProxy)(nil)
+
+func (p *gatesProxy) SetPoolGates(gates map[string]models.SeriesGate) error {
+	p.gates, p.order = gates, append(p.order, "gates")
+	return nil
+}
+
+// The table's series gates reach the proxy with the pool (SetScopePool),
+// after the intervals and before the series, as the CLI sent them; a table
+// with none clears the previous set's. A gate that names no recording, one
+// recording that both opens and closes its series, or an empty series id
+// refuses the table and leaves the set as it was. A proxy that cannot serve
+// them refuses gates and takes a table without any.
+func TestTheScopeGatesReachTheProxyBeforeTheSeries(t *testing.T) {
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &gatesProxy{everyProxy: &everyProxy{onceProxy: &onceProxy{seriesProxy: &seriesProxy{wireProxy: wp}}}}
+	a.Proxy = p
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"), httpMock("mock-2", "GET", "http://h/b"))
+	ctx := context.Background()
+	a.scopeTable = map[string][]string{"o::TestT": {"mock-1"}}
+	pool := map[string][]string{models.PoolKeyNone: {"mock-2"}}
+	require.NoError(t, a.SetScopeSeries(ctx, map[string][]string{"lookup/o::TestT/1.2": {"mock-2"}}))
+	sent := map[string]models.SeriesGate{"lookup/o::TestT/1.2": {OpenedBy: "mock-1"}}
+	require.NoError(t, a.SetScopeGates(ctx, sent))
+	sent["lookup/o::TestT/1.2"] = models.SeriesGate{OpenedBy: "other"} // the caller's map is its own
+	require.Empty(t, p.order, "the gates go to the proxy with the pool, not before")
+	require.NoError(t, a.SetScopePool(ctx, pool))
+	require.Equal(t, map[string]models.SeriesGate{"lookup/o::TestT/1.2": {OpenedBy: "mock-1"}}, p.gates)
+	require.Equal(t, []string{"once", "every", "gates", "series"}, p.order)
+
+	for _, bad := range []map[string]models.SeriesGate{
+		{"lookup/o::TestT/1.2": {}},                                       // names no recording
+		{"lookup/o::TestT/1.2": {OpenedBy: "mock-1", ClosedBy: "mock-1"}}, // opens and closes
+		{"": {OpenedBy: "mock-1"}},                                        // no series
+	} {
+		require.Error(t, a.SetScopeGates(ctx, bad), "the table's gates %v are refused", bad)
+	}
+	p.order = nil
+	require.NoError(t, a.SetScopePool(ctx, pool))
+	require.Equal(t, map[string]models.SeriesGate{"lookup/o::TestT/1.2": {OpenedBy: "mock-1"}}, p.gates, "a refused table leaves the set as it was")
+	require.NoError(t, a.SetScopeGates(ctx, map[string]models.SeriesGate{"lookup/o::TestT/1": {ClosedBy: "mock-1"}}), "a closer alone is a gate")
+	require.NoError(t, a.SetScopeGates(ctx, nil))
+	require.NoError(t, a.SetScopePool(ctx, pool))
+	require.Empty(t, p.gates, "a table with no gates leaves the set none")
+
+	b, bp := wireAgent(t, models.MODE_TEST)
+	b.Proxy = &everyProxy{onceProxy: &onceProxy{seriesProxy: &seriesProxy{wireProxy: bp}}}
+	require.Error(t, b.SetScopeGates(ctx, map[string]models.SeriesGate{"s/-/1": {OpenedBy: "mock-1"}}), "a proxy that cannot serve gates refuses them")
+	require.NoError(t, b.SetScopeGates(ctx, nil), "and takes a table with none")
+	b.proven.gates = map[string]models.SeriesGate{"s/-/1": {OpenedBy: "mock-1"}} // as if the proxy changed under the table
+	storeMocks(b, httpMock("mock-2", "GET", "http://h/b"))
+	b.scopeTable = map[string][]string{"o::TestT": {}}
+	require.Error(t, b.SetScopePool(ctx, pool), "and the pool refuses them too")
+}
