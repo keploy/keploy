@@ -4014,6 +4014,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// session puts back what the run set up on it (see agentSession).
 	a.session().configure(utils.CmdType(opts.CommandType) == utils.DockerCompose)
 	usrApp.SetOnAgentRestart(a.setUpRestartedAgent)
+	usrApp.SetAgentReleaseHold(func(ctx context.Context) func() { return a.session().holdReleases(ctx) })
 
 	// Set up cleanup on failure
 	defer func() {
@@ -5130,22 +5131,27 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 	return nil
 }
 
-func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retErr error) {
-	defer func() {
-		// A release the watch cut (the agent's container exited, or its
-		// start failed or stopped making progress, before it took the
-		// release) is still owed to the agent compose starts in its place:
-		// compose's bring-up retry starts the agent again when a dependency
-		// crashed, and the restarted agent is set up with the calls recorded
-		// here (reapply). Without it that agent is never released, its
-		// health check never passes, and the app it gates never starts: the
-		// run waits for good. A release the agent refused for good (a
-		// latched CA setup failure, a proven switch that disagrees) or one
-		// the run's end cut is not owed to anyone.
-		if retErr == nil || errors.Is(retErr, errReleaseCut) {
-			a.session().record(stepAgentReady, func(c context.Context) error { return a.MakeAgentReadyForDockerCompose(c) })
-		}
-	}()
+func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
+	return a.makeAgentReady(ctx, false)
+}
+
+// makeAgentReady releases the app (MakeAgentReadyForDockerCompose). setup: it
+// is the release a restarted agent's setup makes again, last (reapply).
+func (a *AgentClient) makeAgentReady(ctx context.Context, setup bool) (retErr error) {
+	// A release is recorded as it begins (beginRelease), to be made again on
+	// an agent compose starts in its place: compose's bring-up retry starts
+	// the agent again when a dependency crashed, and the restarted agent is
+	// set up with the calls recorded here (reapply). Without it that agent is
+	// never released, its health check never passes, and the app it gates
+	// never starts: the run waits for good. A release the watch cut (the
+	// agent's container exited, or its start failed or stopped making
+	// progress, before it took the release) is still owed to that agent. A
+	// release the agent refused for good (a latched CA setup failure, a
+	// proven switch that disagrees) or one the run's end cut is owed to
+	// no one, and is taken back as it ends.
+	s := a.session()
+	rc := s.beginRelease(setup, func(c context.Context) error { return a.makeAgentReady(c, true) })
+	defer func() { s.endRelease(rc, retErr == nil || errors.Is(retErr, errReleaseCut)) }()
 	// The wait follows the agent, not a clock: it goes on while the agent
 	// answers that it is not ready yet, or while its start makes progress
 	// (watchAgent), and ends at once on an answer that says it never will be
@@ -5226,7 +5232,17 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 			return err
 		}
 
+		// Not while compose's bring-up retry may be starting the agent
+		// again (holdReleases): the agent that answers here then may be one
+		// its setup has not made the run's calls on again yet.
+		if !s.awaitPost(ctx.Done(), rc) {
+			if parent.Err() != nil {
+				return parent.Err()
+			}
+			return context.Cause(ctx)
+		}
 		resp, err := doAgent(&a.client, req)
+		s.posted(rc)
 		if err == nil {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			_, _ = io.Copy(io.Discard, resp.Body)

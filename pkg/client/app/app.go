@@ -75,6 +75,10 @@ type App struct {
 	// onAgentRestart, when set, sets keploy's agent up again after the
 	// compose retry's `up` started it again; see SetOnAgentRestart.
 	onAgentRestart func(ctx context.Context) error
+	// holdAgentRelease, when set, holds the releases of the app the run
+	// asked for until the func it returns is called; see
+	// SetAgentReleaseHold.
+	holdAgentRelease func(ctx context.Context) (resume func())
 	// setEndKill is why the latest stop at a test set's end had to kill the
 	// app (setend_stop.go), until run reports it; nil when it did not.
 	setEndKill     atomic.Pointer[string]
@@ -231,6 +235,15 @@ func (a *App) SetupDocker(ctx context.Context) error {
 // one before. The agent client puts that setup back.
 func (a *App) SetOnAgentRestart(f func(ctx context.Context) error) {
 	a.onAgentRestart = f
+}
+
+// SetAgentReleaseHold sets what holds the releases of the app (the agent's
+// /agent/ready) the run asked for while compose's bring-up retry starts
+// keploy's agent again: no release reaches the agent compose started in its
+// place before the agent client has set it up again (SetOnAgentRestart),
+// which releases it last.
+func (a *App) SetAgentReleaseHold(f func(ctx context.Context) (resume func())) {
+	a.holdAgentRelease = f
 }
 
 // ModifyDockerRun modifies the existing Docker command to attach the init container's PID namespace

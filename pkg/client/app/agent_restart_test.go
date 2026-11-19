@@ -255,3 +255,90 @@ func TestRemoveCrashedDependencies(t *testing.T) {
 		t.Fatalf("removed %v, want only the crashed dependency", d.removed)
 	}
 }
+
+// holdingApp is newRestartApp with the agent client's release hold and setup
+// noted in order, the retry's `up` among them.
+func holdingApp(t *testing.T) (*App, *restartingDocker, func(string), func() string, chan struct{}) {
+	t.Helper()
+	a, d, _ := newRestartApp(t)
+	var mu sync.Mutex
+	var got []string
+	note := func(s string) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, s)
+	}
+	setUp := make(chan struct{})
+	var once sync.Once
+	a.SetOnAgentRestart(func(context.Context) error {
+		note("setup")
+		once.Do(func() { close(setUp) })
+		return nil
+	})
+	a.SetAgentReleaseHold(func(context.Context) func() {
+		note("hold")
+		return func() { note("resume") }
+	})
+	return a, d, note, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Join(got, ",")
+	}, setUp
+}
+
+// keploy's stop of the stack took the agent: the retry's `up` starts it
+// again, at the same address. The releases the run asked for are held from
+// before the `up` until the agent compose started again was set up (which
+// releases it last), and let go only then: one that reached it first would
+// start the app against an agent with none of the run's setup.
+func TestRetryComposeUpHoldsReleasesUntilTheRestartedAgentIsSetUp(t *testing.T) {
+	a, d, note, got, setUp := holdingApp(t)
+	d.set("keploy-v3-test", "agent-1", "t1", false)
+	d.set("app", "app-1", "", false)
+	a.retryComposeUp(context.Background(), func() utils.CmdError {
+		note("up")
+		d.set("keploy-v3-test", "agent-1", "t3", true)
+		select {
+		case <-setUp:
+		case <-time.After(30 * time.Second):
+			t.Error("the agent compose started again was never set up")
+		}
+		return utils.CmdError{}
+	})
+	if g := got(); g != "hold,up,setup,resume" {
+		t.Fatalf("the retry did %s; want the releases held before its up, and let go once the agent was set up again", g)
+	}
+}
+
+// An `up` that ends with no agent started again lets the hold go with it.
+func TestRetryComposeUpLetsTheHoldGoWhenItsUpEnds(t *testing.T) {
+	a, d, note, got, _ := holdingApp(t)
+	d.set("keploy-v3-test", "agent-1", "t1", false)
+	a.retryComposeUp(context.Background(), func() utils.CmdError { note("up"); return utils.CmdError{} })
+	if g := got(); g != "hold,up,resume" {
+		t.Fatalf("the retry did %s; want the hold let go once its up ended", g)
+	}
+}
+
+// An agent kept running is the one the run set up: a release still owed to
+// it goes on, unheld. So does one where docker could not say which agent ran.
+func TestRetryComposeUpHoldsNoReleaseOfAKeptOrUnknownAgent(t *testing.T) {
+	t.Run("kept", func(t *testing.T) {
+		a, d, _, got, _ := holdingApp(t)
+		d.set("keploy-v3-test", "agent-1", "t1", true)
+		d.set("app", "app-1", "", false)
+		a.retryComposeUp(context.Background(), up(func() { d.set("app", "app-1", "t2", true) }))
+		if g := got(); g != "" {
+			t.Fatalf("the retry did %s for a kept agent; want nothing held", g)
+		}
+	})
+	t.Run("unknown", func(t *testing.T) {
+		a, d, _, got, _ := holdingApp(t)
+		d.failing = agentBaselineTries
+		d.set("keploy-v3-test", "agent-1", "t1", false)
+		a.retryComposeUp(context.Background(), func() utils.CmdError { return utils.CmdError{} })
+		if strings.Contains(got(), "hold") {
+			t.Fatalf("the retry did %s with no agent docker could name; want nothing held", got())
+		}
+	})
+}

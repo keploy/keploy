@@ -56,6 +56,132 @@ type agentSession struct {
 	changed chan struct{}
 	// reapplying lets one re-application run at a time.
 	reapplying sync.Mutex
+	// releases are the releases of the app in flight (makeAgentReady), and
+	// readyBy the one that recorded the release step, while it is the one.
+	// held counts the holds on the releases the run asked for
+	// (holdReleases).
+	releases map[*releaseCall]struct{}
+	readyBy  *releaseCall
+	held     int
+}
+
+// releaseCall is one release of the app in flight (makeAgentReady). setup: it
+// is the release a restarted agent's setup makes (reapply), which no hold
+// holds. posting: its request to the agent is out.
+type releaseCall struct {
+	setup   bool
+	posting bool
+}
+
+// beginRelease notes a release of the app in flight. A release is owed from
+// the moment it is asked for, so it is recorded now, unless one already is: a
+// restarted agent whose setup begins from here on is released last, however
+// late this release learns that the agent it asked is gone. Its watch's
+// verdict, and the look that verdict waits for, can come after that setup
+// has read what to make again (reapply), and an agent set up without its
+// release holds the app back for good.
+func (s *agentSession) beginRelease(setup bool, apply func(ctx context.Context) error) *releaseCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rc := &releaseCall{setup: setup}
+	if s.releases == nil {
+		s.releases = map[*releaseCall]struct{}{}
+	}
+	s.releases[rc] = struct{}{}
+	if s.restartable && !slices.ContainsFunc(s.steps, func(st sessionStep) bool { return st.kind == stepAgentReady }) {
+		s.steps = append(s.steps, sessionStep{kind: stepAgentReady, apply: apply})
+		s.readyBy = rc
+	}
+	return rc
+}
+
+// endRelease notes the end of release rc. One that was not owed (the agent
+// refused it for good, or the run's end cut it) takes back the release step
+// it recorded, unless a release that was owed has ended since; one recorded
+// before it stays.
+func (s *agentSession) endRelease(rc *releaseCall, owed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.releases, rc)
+	switch {
+	case owed:
+		s.readyBy = nil
+	case s.readyBy == rc:
+		s.steps = slices.DeleteFunc(s.steps, func(st sessionStep) bool { return st.kind == stepAgentReady })
+		s.readyBy = nil
+	}
+	s.notify()
+}
+
+// awaitPost waits until release rc may send its request to the agent: at
+// once for a restarted agent's setup, otherwise while no hold is on. It
+// reports false once done is closed first.
+func (s *agentSession) awaitPost(done <-chan struct{}, rc *releaseCall) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for !rc.setup && s.held > 0 {
+		changed := s.changed
+		s.mu.Unlock()
+		select {
+		case <-changed:
+		case <-done:
+			s.mu.Lock()
+			return false
+		}
+		s.mu.Lock()
+	}
+	rc.posting = true
+	return true
+}
+
+// releaseOut reports whether a release has its request out; with s.mu held.
+func (s *agentSession) releaseOut() bool {
+	for rc := range s.releases {
+		if rc.posting {
+			return true
+		}
+	}
+	return false
+}
+
+// posted notes that release rc's request is back.
+func (s *agentSession) posted(rc *releaseCall) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rc.posting = false
+	s.notify()
+}
+
+// holdReleases holds every release of the app the run asked for, in flight or
+// asked for from now on, until the func it returns is called: none sends a
+// request to the agent while a hold is on. It returns once no release has one
+// out, or once ctx is done. compose's bring-up retry holds them while its `up` can
+// start the agent again: the restarted agent answers at the same address, and
+// a release it took before its setup was made again (reapply) would start the
+// app against an agent with none of the run's mocks or settings. Its setup
+// releases it, last.
+func (s *agentSession) holdReleases(ctx context.Context) (resume func()) {
+	s.mu.Lock()
+	s.held++
+	for ctx.Err() == nil && s.releaseOut() {
+		changed := s.changed
+		s.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+		}
+		s.mu.Lock()
+	}
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.held--
+			s.notify()
+		})
+	}
 }
 
 // sessionStep is one configuring call, made again by apply.

@@ -84,6 +84,18 @@ func (a *App) retryComposeUp(ctx context.Context, run func() utils.CmdError) uti
 			"an agent that starts after the retry began is taken for one compose started again",
 			zap.String("agentContainer", a.keployContainer))
 	}
+	// An agent that does not run before the retry (keploy's stop of the
+	// stack took it) is one the retry's `up` starts again, which answers at
+	// the same address with none of what the run set up. A release the run
+	// asked for and that this agent took would start the app against it
+	// before the agent client set it up again: releases are held from before
+	// the `up` until the watch has had the agent set up again, which
+	// releases it last, or the watch ends. One kept running is the one the
+	// run set up, and a release still owed to it goes on.
+	resume := func() {}
+	if baselineKnown && before == "" && a.holdAgentRelease != nil {
+		resume = a.holdAgentRelease(ctx)
+	}
 	// The start docker reports is by the daemon's clock, which can lag the
 	// CLI's a little (Docker Desktop's VM); an agent kept from before started
 	// at least the retry's backoff before this.
@@ -100,6 +112,7 @@ func (a *App) retryComposeUp(ctx context.Context, run func() utils.CmdError) uti
 	g, watch := errgroup.WithContext(watch)
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
+		defer resume()
 		tick := time.NewTicker(agentRestartPoll)
 		defer tick.Stop()
 		for {
