@@ -347,6 +347,11 @@ func (s *pairedConns) useOf(conn net.Conn) *atomic.Uint64 {
 // unread (closing): readUnread, but in a row that makes it fail.
 var readUnreadAtClose = readUnread
 
+// readUnreadHeld is unreadOrUntold's read of what the proxy's socket holds
+// unread: readUnread, but in a row that makes it fail while the proxy's side
+// still reads.
+var readUnreadHeld = readUnread
+
 // usedSinceEnd says the proxy moved bytes on pc since the latest test's end
 // that held it was done with it (markEnd, settledEnd), or, before any was,
 // ever.

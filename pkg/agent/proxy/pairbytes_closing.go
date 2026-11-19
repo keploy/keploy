@@ -55,7 +55,7 @@ func finSeen(pc *pairedConn) bool {
 // unreadOrUntold says pc's socket holds bytes the proxy has not read (bytes
 // the application wrote that reached it), or that it cannot be read.
 func unreadOrUntold(pc *pairedConn) bool {
-	n, err := readUnread(pc.conn)
+	n, err := readUnreadHeld(pc.conn)
 	return err != nil || n > 0
 }
 

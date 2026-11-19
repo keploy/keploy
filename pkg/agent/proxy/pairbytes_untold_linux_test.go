@@ -172,12 +172,20 @@ func TestAnUntoldCloseIsOnlyTheTestsThatUsedTheConnection(t *testing.T) {
 // A test whose end was cut short with bytes on the connection unsettled owns
 // a close keploy cannot account for that comes later: it is left without a
 // verdict whichever test is open then. The open test is charged too only
-// when it used the connection itself.
+// when it used the connection itself, whether the close's read of what the
+// socket held fails or the close cannot tell what the application wrote
+// (closeUnknown: every byte past the cut end's may be the open test's).
 func TestAnUntoldCloseIsOwnedByATestCutShortOnTheConnection(t *testing.T) {
-	for _, usedAfter := range []bool{false, true} {
+	for _, tc := range []struct {
+		usedAfter, unknown bool
+	}{{false, false}, {true, false}, {false, true}, {true, true}} {
+		usedAfter := tc.usedAfter
 		name := "the open test did not use it"
 		if usedAfter {
 			name = "the open test used it too"
+		}
+		if tc.unknown {
+			name += ", what the application wrote unknown"
 		}
 		t.Run(name, func(t *testing.T) {
 			p, app, tracked := untoldPair(t)
@@ -190,8 +198,12 @@ func TestAnUntoldCloseIsOwnedByATestCutShortOnTheConnection(t *testing.T) {
 				use(t, app, tracked)
 			}
 			finAtProxy(t, p, app)
-			failUnreadAtClose(t)
-			_ = tracked.Close()
+			if tc.unknown { // closeUnknown: every byte past the cut end's may be the open test's
+				p.closeUnknown(pairedConnOf(t, p, 1), errors.New("netlink: no buffer space"))
+			} else {
+				failUnreadAtClose(t)
+				_ = tracked.Close()
+			}
 			owned := p.TakeOwnedLosses()
 			if len(owned) != 1 || owned[0].Test != "TestStock" || owned[0].Loss.Kind != models.CaptureLossAppBytesUntold || owned[0].Loss.Count != 1 {
 				t.Fatalf("owned %+v, want one untold close of TestStock's, whose end was cut short on the connection", owned)
@@ -284,6 +296,37 @@ func TestAnUntoldCloseChargesTheOpenTestWithWhatTheSocketHolds(t *testing.T) {
 			t.Errorf("%d judged bytes losses, want 1: the close tossed the 3 bytes keploy saw unread", l)
 		}
 	})
+	t.Run("bytes the proxy has not read, the FIN taken", func(t *testing.T) {
+		p, app, tracked := untoldPair(t)
+		use(t, app, tracked)
+		endWait(t, p, "TestStock")
+		if _, err := app.Write([]byte("GET")); err != nil {
+			t.Fatal(err)
+		}
+		finAtProxy(t, p, app)
+		pc := pairedConnOf(t, p, 1)
+		if pc.usedSinceEnd() {
+			t.Fatal("premise: the proxy moved no bytes since TestStock's end")
+		}
+		p.closeUnknown(pc, errors.New("netlink: no buffer space"))
+		if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+			t.Errorf("%d untold closes charged to the open test, want 1: the bytes it holds were sent in it", l)
+		}
+	})
+	t.Run("a socket whose unread count cannot be read, the FIN taken", func(t *testing.T) {
+		p, app, tracked := untoldPair(t)
+		use(t, app, tracked)
+		endWait(t, p, "TestStock")
+		finAtProxy(t, p, app)
+		pc := pairedConnOf(t, p, 1)
+		was := readUnreadHeld
+		readUnreadHeld = func(*net.TCPConn) (int, error) { return 0, errors.New("bad file descriptor") }
+		t.Cleanup(func() { readUnreadHeld = was })
+		p.closeUnknown(pc, errors.New("netlink: no buffer space"))
+		if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {
+			t.Errorf("%d untold closes charged to the open test, want 1: keploy cannot tell what the socket held", l)
+		}
+	})
 	t.Run("a socket whose unread bytes cannot be read", func(t *testing.T) {
 		p, app, tracked := untoldPair(t)
 		use(t, app, tracked)
@@ -352,13 +395,13 @@ func TestAnUntoldCloseOfAConnectionWithNoSessionChargesNothing(t *testing.T) {
 
 // A connection's close keploy cannot account for is charged once and said
 // once, however many of the close's reads cannot tell: a second, in the same
-// close or after a test's end, charges nothing more and says nothing (it
-// would say no test was charged).
+// close or after a test's end and the application's FIN, charges nothing
+// more and says nothing (it would say no test was charged).
 func TestAnUntoldCloseIsChargedAndSaidOnce(t *testing.T) {
 	for _, between := range []bool{false, true} {
 		name := "twice in one close"
 		if between {
-			name = "again after a test's end"
+			name = "again after a test's end and the FIN"
 		}
 		t.Run(name, func(t *testing.T) {
 			p, app, tracked := untoldPair(t)
@@ -368,6 +411,7 @@ func TestAnUntoldCloseIsChargedAndSaidOnce(t *testing.T) {
 			p.closeUnknown(pc, errors.New("netlink: no buffer space"))
 			if between {
 				p.paired.markEnd(1, 0)
+				finAtProxy(t, p, app) // the second read finds no test to charge
 			}
 			p.closeUnknown(pc, errors.New("netlink: no buffer space"))
 			if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 1 {

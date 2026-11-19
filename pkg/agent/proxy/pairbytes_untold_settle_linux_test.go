@@ -114,10 +114,11 @@ func (s *stallAfterWrite) Write(b []byte) (int, error) {
 }
 
 // The m5-miss shape: the proxy reads the call and writes keploy's answer. The
-// answer reaches the application, which reads it and ends its test, before
-// the proxy's goroutine runs again after the write's syscall. The write was
-// counted as it began, so the end's mark holds it, and the next test, which
-// never uses the connection, is not charged with its untold close.
+// answer reaches the application, which reads it and ends its test, and the
+// end's settle is done, before the proxy's goroutine runs again after the
+// write's syscall. The write was counted as it began, so the end's mark holds
+// it, and the next test, which never uses the connection, is not charged with
+// its untold close once the application's FIN is taken.
 func TestAnAnswerIsCountedBeforeItGoesOut(t *testing.T) {
 	p, app, tracked := untoldPair(t)
 	if _, err := app.Write([]byte("GET /")); err != nil {
@@ -138,13 +139,14 @@ func TestAnAnswerIsCountedBeforeItGoesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	endWait(t, p, "TestStock") // the application answered its test; the test ends
+	p.PairedBytesSettled(0)    // and its settle is done
 	close(st.release)          // the proxy's goroutine runs again
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 	tracked.Conn = st.Conn
-	emptyDiagFree(t)
-	failLookupWritten(t)
+	finAtProxy(t, p, app)
+	failUnreadAtClose(t)
 	_ = tracked.Close()
 	if l := lossesOf(p, models.CaptureLossAppBytesUntold); l != 0 {
 		t.Errorf("the test open at the close, which never used the connection, is charged %d untold close(s), want 0", l)
