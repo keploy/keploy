@@ -105,21 +105,34 @@ func TestADrainGivesUpAHandlerThatNeverClosesByName(t *testing.T) {
 		}
 	})
 
-	t.Run("a handler that named no destination", func(t *testing.T) {
-		p, app, served := stuckPair(t)
-		_ = app.Close()
-		awaitState(t, served.(*net.TCPConn), peerEnded, "the application's FIN")
-		clk, got := drainAt(p)
-		awaitDrainLook(t, clk, got)
-		clk.Advance(drainBudget)
-		if err := drainAnswers(t, got, "once its bound passed"); err != nil {
-			t.Fatal(err)
-		}
-		owned := stuckLosses(t, p)
-		if len(owned) != 1 || !strings.Contains(owned[0].Loss.What, "a destination its handler had not named yet") {
-			t.Fatalf("owned %+v, want it to say no destination was named", owned)
-		}
-	})
+	// A handler names no destination before it reads one, or names an empty
+	// one when the kernel's record holds neither an IPv4 nor an IPv6 address
+	// (proxy.go's destInfo.Version switch): both say no destination was
+	// named, never "to  from".
+	for _, c := range []struct {
+		name  string
+		named func(p *Proxy, served net.Conn)
+	}{
+		{"a handler that named no destination", func(*Proxy, net.Conn) {}},
+		{"a handler that named an empty destination", func(p *Proxy, served net.Conn) { p.paired.destined(served, "") }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p, app, served := stuckPair(t)
+			c.named(p, served)
+			_ = app.Close()
+			awaitState(t, served.(*net.TCPConn), peerEnded, "the application's FIN")
+			clk, got := drainAt(p)
+			awaitDrainLook(t, clk, got)
+			clk.Advance(drainBudget)
+			if err := drainAnswers(t, got, "once its bound passed"); err != nil {
+				t.Fatal(err)
+			}
+			owned := stuckLosses(t, p)
+			if len(owned) != 1 || !strings.Contains(owned[0].Loss.What, "a destination its handler had not named yet") || strings.Contains(owned[0].Loss.What, "to  from") {
+				t.Fatalf("owned %+v, want it to say no destination was named", owned)
+			}
+		})
+	}
 
 	t.Run("a close begun starts the bound again", func(t *testing.T) {
 		p, app, served := stuckPair(t)
