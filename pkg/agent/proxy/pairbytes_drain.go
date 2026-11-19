@@ -39,32 +39,39 @@ func (p *Proxy) PairedBytesDrain(ctx context.Context) error {
 	}
 }
 
-// closingConns are the paired connections PairedBytesDrain waits for: those
-// whose close the proxy has begun (atClose), and those whose application end
-// has ended: its socket sent its FIN, or is gone (pairTargets, read first),
-// or the proxy's side has taken its FIN or reset (peerEnded, read after: an
-// application socket whose FIN was acknowledged between the two reads is
-// seen in the second). A side that cannot be read is waited for: whether it
-// ended cannot be told. One the proxy serves with no session counts no loss
-// at its close, and is not waited for. When the application's sockets cannot
-// be read (pairTargets fails: the waits fail the same way), the proxy's side
-// alone tells.
+// closingConns are the paired connections PairedBytesDrain waits for
+// (drainsFor). The application's sockets are read first (pairTargets) and
+// each proxy side after (readProxySide): an application socket whose FIN was
+// acknowledged between the two reads is seen in the second. When the
+// application's sockets cannot be read (pairTargets fails: the waits fail the
+// same way), the proxy's side alone tells. One the proxy serves with no
+// session counts no loss at its close, and is not waited for (heldNow).
 func (p *Proxy) closingConns() []*pairedConn {
-	appEnded := map[*pairedConn]bool{}
+	app := map[*pairedConn]*pairTarget{}
 	if targets, err := p.pairTargets(math.MaxUint64); err == nil {
 		for _, t := range targets {
-			appEnded[t.pc] = t.gone || t.finCounted
+			app[t.pc] = t
 		}
 	}
 	var out []*pairedConn
 	for _, pc := range p.paired.heldNow() {
-		if pc.atClose.Load() != nil || appEnded[pc] {
-			out = append(out, pc)
-			continue
-		}
-		if ps := readProxySide(pc.conn); ps.err != nil || peerEnded(ps.state) {
+		if drainsFor(pc.atClose.Load() != nil, app[pc], func() proxySide { return readProxySide(pc.conn) }) {
 			out = append(out, pc)
 		}
 	}
 	return out
+}
+
+// drainsFor says whether PairedBytesDrain waits for a paired connection:
+// one whose close the proxy has begun (closeBegun), or whose application end
+// has ended: its socket is gone, or sent its FIN (app, nil when it was not
+// read), or the proxy's side (side, read only when the rest does not tell)
+// has taken its FIN or reset. A side that cannot be read is waited for:
+// whether it ended cannot be told.
+func drainsFor(closeBegun bool, app *pairTarget, side func() proxySide) bool {
+	if closeBegun || (app != nil && (app.gone || app.finCounted)) {
+		return true
+	}
+	ps := side()
+	return ps.err != nil || peerEnded(ps.state)
 }

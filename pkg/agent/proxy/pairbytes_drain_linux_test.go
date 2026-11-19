@@ -14,59 +14,11 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// drainReturns runs PairedBytesDrain on ctx and hands its answer back.
-func drainReturns(ctx context.Context, p *Proxy) <-chan error {
-	got := make(chan error, 1)
-	go func() { got <- p.PairedBytesDrain(ctx) }()
-	return got
-}
-
-// drainHolds fails t if the drain answered within a while: it still waits for
-// a close the proxy has not counted. A drain that does not wait answers at
-// once, well within it.
-func drainHolds(t *testing.T, got <-chan error, why string) {
-	t.Helper()
-	select {
-	case err := <-got:
-		t.Fatalf("the drain answered (%v) %s", err, why)
-	case <-time.After(300 * time.Millisecond):
-	}
-}
-
-// drainAnswers is the drain's answer, which must come once nothing holds it.
-func drainAnswers(t *testing.T, got <-chan error, why string) error {
-	t.Helper()
-	select {
-	case err := <-got:
-		return err
-	case <-time.After(10 * time.Second):
-		t.Fatalf("the drain did not answer %s", why)
-		return nil
-	}
-}
-
 // proxyServed is the accepted socket untoldPair's connection was paired from.
 func proxyServed(t *testing.T, p *Proxy) net.Conn {
 	t.Helper()
 	pc := pairedConnOf(t, p, 1)
 	return pc.conn
-}
-
-// awaitState waits, bounded, until the proxy's side of conn is in a state ok
-// says: the kernel's, which a write or close on loopback reaches at once.
-func awaitState(t *testing.T, conn *net.TCPConn, ok func(uint8) bool, what string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		ps := readProxySide(conn)
-		if ps.err == nil && ok(ps.state) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("premise: the proxy's side never reached %s (state %d, %v)", what, ps.state, ps.err)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 }
 
 // A connection that closes as the application stops, with bytes it wrote that

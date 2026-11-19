@@ -98,3 +98,32 @@ func TestASetsEndCountsTheClosesItsApplicationsStopMade(t *testing.T) {
 		}
 	})
 }
+
+// The set's end asks the agent to drain only under the proven switch and
+// with an agent: with the switch off, or keploy test run with no agent
+// (noAgent), it asks nothing, and what a drain answers is the set's.
+func TestASetsEndDrainsOnlyUnderTheSwitchWithAnAgent(t *testing.T) {
+	failed := errors.New("keploy's proxy had not finished counting the close of 1 connection(s)")
+	for _, c := range []struct {
+		name    string
+		env     string
+		noAgent bool
+		want    error
+	}{
+		{name: "the switch on, an agent", env: "1", want: failed},
+		{name: "the switch off", env: "0"},
+		{name: "no agent", env: "1", noAgent: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, c.env)
+			instr := &drainInstr{prLossInstr: &prLossInstr{prInstr: &prInstr{}}, err: failed}
+			r := &Replayer{instrumentation: instr, noAgent: c.noAgent}
+			if err := r.drainCaptureLosses(context.Background()); !errors.Is(err, c.want) || (c.want == nil) != (err == nil) {
+				t.Fatalf("drain = %v, want %v", err, c.want)
+			}
+			if asked := c.want != nil; instr.drained != asked {
+				t.Fatalf("the agent asked to drain: %v, want %v", instr.drained, asked)
+			}
+		})
+	}
+}
