@@ -142,7 +142,7 @@ func TestListenKeyIsTheSocketsInOrder(t *testing.T) {
 // Of the processes that hold a listener's socket, the walk takes the first by
 // name, and of its fds the first by name, as filepath.Glob over /proc listed
 // them before: by text, so 1043 before 52, and fd 12 before 4. The fixture's
-// holders are made out of that order, and its first by number (52) is not its
+// holders are made out of that order, and its first by number (7) is not its
 // first by name, so a walk in the order the directory lists them, or in
 // number order, finds another holder.
 func TestListenerWalkTakesTheFirstHolderInProcsNameOrder(t *testing.T) {
