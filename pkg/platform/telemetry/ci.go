@@ -24,6 +24,7 @@ var ciProviders = []struct {
 	{"BUILDKITE", "buildkite"},
 	{"TF_BUILD", "azure-pipelines"},
 	{"BITBUCKET_PIPELINE_UUID", "bitbucket"},
+	{"BITBUCKET_BUILD_NUMBER", "bitbucket"},
 	{"CODEBUILD_BUILD_ID", "aws-codebuild"},
 	{"TEAMCITY_VERSION", "teamcity"},
 	{"DRONE", "drone"},
@@ -34,6 +35,9 @@ var ciProviders = []struct {
 	// Bamboo and GoCD set no CI variable: each is known by its own.
 	{"bamboo_planKey", "bamboo"},
 	{"GO_PIPELINE_LABEL", "gocd"},
+	// A pipeline id with no runner named: GitLab's (it sets GITLAB_CI too,
+	// read above) and other runners' that copy its variable names.
+	{"CI_PIPELINE_ID", "unknown"},
 }
 
 // ciRepoVars are the variables in which a CI provider names the repository

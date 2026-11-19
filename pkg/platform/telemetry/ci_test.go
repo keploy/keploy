@@ -59,6 +59,12 @@ func TestDetectCI(t *testing.T) {
 		{env: map[string]string{"APPVEYOR": "True", "CI": "True"}, ci: true, provider: "appveyor"},
 		{env: map[string]string{"bamboo_planKey": "PROJ-PLAN"}, ci: true, provider: "bamboo"},
 		{env: map[string]string{"GO_PIPELINE_LABEL": "42"}, ci: true, provider: "gocd"},
+		// The run ids enterprise's CLI also reads: a Bitbucket step by its
+		// build number alone, and a pipeline id with no runner named, which
+		// GitLab's own variable names first.
+		{env: map[string]string{"BITBUCKET_BUILD_NUMBER": "17"}, ci: true, provider: "bitbucket"},
+		{env: map[string]string{"CI_PIPELINE_ID": "4242"}, ci: true, provider: "unknown"},
+		{env: map[string]string{"CI_PIPELINE_ID": "4242", "GITLAB_CI": "true", "CI": "true"}, ci: true, provider: "gitlab-ci"},
 	} {
 		t.Setenv("CI", "")
 		for _, p := range ciProviders {
