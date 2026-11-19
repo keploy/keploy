@@ -84,19 +84,21 @@ type CaptureLossReporter interface {
 // wait for, and which were lost later, under another test. It is no capture
 // loss of that other test's, and is in no count CaptureLosses reports.
 //
-// One with no Test and a Worker is a close of a connection of the test
-// worker whose keploy instance is Worker (the kernel's stamp of the process
-// that made the connection), which no other worker's test used. Epoch is
-// that worker's test epoch as the proxy counted it (PairedBytesBeginner):
-// the agent charges it to the test of that worker it began at that epoch
-// alone, while that test is open. One counted in the worker's gap between
-// tests, or under no open test, is the run's, charged to no test: never to
-// the worker's next test, which did not exist when it was counted, and
-// never to another worker's.
+// One with no Test and Open is a close of a connection of the test worker
+// whose keploy instance is Worker (the kernel's stamp of the process that
+// made the connection; 0, the one test process of a run of one, while it
+// holds its claim: PairedBytesBeginner.PairedBytesOneProcess), which no
+// other worker's test used. Epoch is that worker's test epoch as the proxy
+// counted it (PairedBytesBeginner): the agent charges it to the test of that
+// worker it began at that epoch alone, while that test is open. One counted
+// in the worker's gap between tests, or under no open test, is the run's,
+// charged to no test: never to the worker's next test, which did not exist
+// when it was counted, and never to another worker's.
 type OwnedLoss struct {
 	Test   string
 	Worker uint32
 	Epoch  uint64
+	Open   bool
 	Loss   models.CaptureLoss
 }
 
@@ -570,8 +572,21 @@ type PairedBytesSettler interface {
 // close of that worker's connection is stamped with the epoch as it is
 // counted (OwnedLoss.Epoch): the begun test's while it is open and its end
 // is settling, a newer one in the gap after it, which no test began at.
+//
+// PairedBytesOneProcess is told, on, as a run of one test process claims the
+// session, before the claim reads the counts its first test counts from, and
+// off as the session is reset: while on, a close of a connection of no
+// worker's (keploy instance 0: that process's) is stamped with worker 0's
+// test epoch as a worker's is (OwnedLoss.Open), and is in no count, so one
+// counted in the gap between that process's tests is the run's, never its
+// next test's. Turned on, it moves worker 0's epoch past every test's: a
+// close counted between the claim and the first begin is the run's too.
+// While off (keploy test's test cases, which the agent begins no test of,
+// and a run of workers, whose instance 0 is no worker's) such a close is
+// in the counts (CaptureLossReporter).
 type PairedBytesBeginner interface {
 	PairedBytesBegun(worker uint32) uint64
+	PairedBytesOneProcess(on bool)
 }
 
 // PairedBytesChecker is the proxy's account of whether it can count the bytes

@@ -22,6 +22,10 @@ type ownedSource struct {
 	mu     sync.Mutex
 	owned  []coreAgent.OwnedLoss
 	epochs map[uint32]uint64
+	// told is what the agent told it of a run of one test process
+	// (PairedBytesOneProcess), "on" or "off", and each read of its counts
+	// ("read"), in order.
+	told []string
 }
 
 func (s *ownedSource) put(o coreAgent.OwnedLoss) {
@@ -47,6 +51,31 @@ func (s *ownedSource) PairedBytesBegun(worker uint32) uint64 { return s.move(wor
 
 func (s *ownedSource) PairedBytesSettled(worker uint32) { s.move(worker) }
 
+// PairedBytesOneProcess notes what it is told and, turned on, moves worker
+// 0's epoch, as the proxy does.
+func (s *ownedSource) PairedBytesOneProcess(on bool) {
+	s.mu.Lock()
+	if on {
+		s.told = append(s.told, "on")
+	} else {
+		s.told = append(s.told, "off")
+	}
+	s.mu.Unlock()
+	if on {
+		s.move(0)
+	}
+}
+
+// toldOf is what the agent told s of a run of one test process, and its
+// reads of the counts, in order, since the last toldOf; it forgets them.
+func (s *ownedSource) toldOf() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.told
+	s.told = nil
+	return out
+}
+
 func (s *ownedSource) TakeOwnedLosses() []coreAgent.OwnedLoss {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,7 +84,14 @@ func (s *ownedSource) TakeOwnedLosses() []coreAgent.OwnedLoss {
 	return out
 }
 
-func (s *ownedSource) CaptureLosses() models.CaptureLosses { return nil }
+// CaptureLosses counts nothing, and notes the read in told ("read"), so a
+// row can tell what the agent told the proxy before a read of the counts.
+func (s *ownedSource) CaptureLosses() models.CaptureLosses {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.told = append(s.told, "read")
+	return nil
+}
 
 // ownedWire and ownedInstanceWire are the record's and the replay's worker
 // proxies with owned losses.
@@ -116,7 +152,7 @@ func TestACloseOfOneWorkersConnectionSparesAnotherWorkersTest(t *testing.T) {
 					require.NotZero(t, inst1, "premise: TestOne is a worker's test")
 					require.NotEqual(t, inst1, a.scopeInstance("b::TestTwo"), "premise: the tests are two workers'")
 					// Worker 1's connection, used by TestOne alone, closes.
-					src.put(coreAgent.OwnedLoss{Worker: inst1, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: "from 127.0.0.1:62766"}})
+					src.put(coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: "from 127.0.0.1:62766"}})
 					endOne := func() {
 						_, serr := a.ProvenEnd(as(w1.Process.Pid), models.ScopeReq{Name: "TestOne", Outcome: models.ScopeOutcomePassed})
 						require.Nil(t, serr)
@@ -129,7 +165,7 @@ func TestACloseOfOneWorkersConnectionSparesAnotherWorkersTest(t *testing.T) {
 						endOne()
 						// Worker 1 has no test open: a close of its
 						// connection now is the run's.
-						src.put(coreAgent.OwnedLoss{Worker: inst1, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: "from 127.0.0.1:62767"}})
+						src.put(coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: "from 127.0.0.1:62767"}})
 						endTwo()
 					} else {
 						endTwo()

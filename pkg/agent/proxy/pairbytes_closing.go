@@ -335,16 +335,24 @@ func lostTop(pc *pairedConn) uint64 {
 // stamped with its test epoch now (ownKind), which the agent charges to the
 // test of that worker begun at that epoch alone (agent.OwnedLoss): never to
 // another worker's, and, counted in the worker's gap between tests, to no
-// test but the run. A connection of no worker's (instance 0: a run of one
-// test process, or a process no worker's claim stamped) is the run's count,
-// which charges the test open now (CaptureLosses).
+// test but the run. A connection of no worker's (instance 0) is worker 0's
+// the same way while a run of one test process holds the session
+// (pairedConns.oneProcess): that process's. Otherwise (keploy test's test
+// cases, or a process no worker's claim stamped in a run of workers) it is
+// the run's count, which charges the test open now (CaptureLosses). Which
+// one is told under mu, the hold that turns oneProcess on before the claim
+// reads the counts its first test counts from: a close counted before it is
+// in them, one after it is stamped.
 func (p *Proxy) chargeOpen(pc *pairedConn, kind models.CaptureLossKind) {
 	what := "from " + pc.app.String()
-	if pc.instance == 0 {
+	s := &p.paired
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pc.instance == 0 && !s.oneProcess {
 		p.losses.Add(kind, what)
 		return
 	}
-	p.paired.ownKind(agent.OwnedLoss{Worker: pc.instance, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: what}})
+	s.ownKindLocked(agent.OwnedLoss{Worker: pc.instance, Open: true, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: what}})
 }
 
 // unreadLost is pairLost's message for a close that tossed bytes unread.

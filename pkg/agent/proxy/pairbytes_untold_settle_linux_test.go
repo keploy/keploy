@@ -271,7 +271,7 @@ func TestACloseChargesTheOpenTestOfItsConnectionsWorker(t *testing.T) {
 					}
 					return
 				}
-				want := agent.OwnedLoss{Worker: worker, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: "from " + pc.app.String()}}
+				want := agent.OwnedLoss{Worker: worker, Open: true, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: "from " + pc.app.String()}}
 				if len(owned) != 1 || !reflect.DeepEqual(owned[0], want) {
 					t.Fatalf("owned %+v, want %+v", owned, want)
 				}

@@ -220,6 +220,11 @@ type pairedConns struct {
 	// (PairedBytesBegun) and at each end's settle done (settledEnd). A close
 	// of a worker's connection is stamped with it as it is counted (ownKind).
 	epochs map[uint32]uint64
+	// oneProcess is, under mu, whether a run of one test process holds the
+	// session (PairedBytesOneProcess): a close of a connection of no
+	// worker's (instance 0) is then its open test's, stamped with worker
+	// 0's epoch, and in no count (chargeOpen).
+	oneProcess bool
 }
 
 // maxOwned bounds the owned losses the proxy keeps untaken.
@@ -247,6 +252,11 @@ func (s *pairedConns) own(test string, app netip.AddrPort) {
 func (s *pairedConns) ownKind(o agent.OwnedLoss) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ownKindLocked(o)
+}
+
+// ownKindLocked is ownKind, mu held.
+func (s *pairedConns) ownKindLocked(o agent.OwnedLoss) {
 	o.Epoch = s.epochs[o.Worker]
 	if len(s.owned) >= maxOwned {
 		for i := maxOwned; i < len(s.owned); i++ {
@@ -319,6 +329,26 @@ func (p *Proxy) PairedBytesBegun(worker uint32) uint64 {
 	defer p.paired.mu.Unlock()
 	return p.paired.moveEpoch(worker)
 }
+
+// PairedBytesOneProcess is told that a run of one test process claimed the
+// session (on) or that the session was reset (off)
+// (agent.PairedBytesBeginner): while on, a close of a connection of no
+// worker's is that process's open test's at worker 0's epoch, and in no count
+// (chargeOpen). Turned on, it moves worker 0's epoch: no test began at the
+// one a close counted from here until the first begin is stamped with.
+func (p *Proxy) PairedBytesOneProcess(on bool) {
+	p.paired.mu.Lock()
+	defer p.paired.mu.Unlock()
+	p.paired.oneProcess = on
+	if on {
+		p.paired.moveEpoch(0)
+	}
+}
+
+var (
+	_ agent.PairedBytesSettler  = (*Proxy)(nil)
+	_ agent.PairedBytesBeginner = (*Proxy)(nil)
+)
 
 // ofWorker says pc is a connection of worker's: any, for worker 0 (a run of
 // one test process).

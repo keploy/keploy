@@ -63,7 +63,7 @@ func TestACloseInAWorkersGapSparesItsNextTest(t *testing.T) {
 					require.NotZero(t, inst1, "premise: TestOne is a worker's test")
 					_, serr = a.ProvenEnd(as(w1), models.ScopeReq{Name: "TestOne", Outcome: models.ScopeOutcomePassed})
 					require.Nil(t, serr)
-					closed := coreAgent.OwnedLoss{Worker: inst1, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: "from 127.0.0.1:62766"}}
+					closed := coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: models.CaptureLoss{Kind: kind, Count: 1, What: "from 127.0.0.1:62766"}}
 					if inGap {
 						// Worker 1 has no test open: its connection closes now.
 						src.put(closed)
@@ -139,7 +139,7 @@ func TestACloseCountedInAnEndsSettleIsTheEndingTests(t *testing.T) {
 			wp.bytesWait = func(context.Context, uint64) error {
 				once.Do(func() {
 					waited = true
-					src.put(coreAgent.OwnedLoss{Worker: inst1, Loss: untoldFrom("62766")})
+					src.put(coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: untoldFrom("62766")})
 				})
 				return nil
 			}
@@ -164,7 +164,7 @@ func TestACloseCountedInAnEndsSettleIsTheEndingTests(t *testing.T) {
 // is reset is the next session's to report, as the run's: never dropped.
 func TestASessionResetKeepsALossKeptForAnOpenTestAsTheRuns(t *testing.T) {
 	a, src, inst1, _, endTwo := keptAgent(t)
-	src.put(coreAgent.OwnedLoss{Worker: inst1, Loss: untoldFrom("62766")})
+	src.put(coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: untoldFrom("62766")})
 	endTwo()
 	a.provenMu.Lock()
 	kept := len(a.proven.ownedOpen["a::TestOne"])

@@ -426,6 +426,14 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// What the run's tests count their capture losses from: read before
 	// provenMu, which is never held while calling into the hooks.
 	losses := a.markCaptureLosses(ctx)
+	// No process of this session has claimed it: a close of a connection of
+	// no worker's is in the counts again, after the mark (in this session's,
+	// whichever test it charges), until a run of one test process claims it
+	// (ClaimInstance). One the proxy stamped as the last session's process's
+	// before this is taken just below: the run's.
+	if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
+		pb.PairedBytesOneProcess(false)
+	}
 	// Losses an earlier session's cut-short ends owned that no read took
 	// are this session's to report, as the run's: none of its tests is the
 	// test that owned them, which only their words still name.
@@ -445,7 +453,9 @@ func (a *Agent) resetSession(ctx context.Context) error {
 		}
 	}
 	for i := range left {
-		left[i].Test, left[i].Worker, left[i].Epoch = "", 0, 0
+		// Its loss alone: no test, worker or epoch of an earlier session's
+		// names one of this session's.
+		left[i] = coreAgent.OwnedLoss{Loss: left[i].Loss}
 	}
 	left = boundOwnedLeft(left)
 	workers := a.workerIDs()
@@ -587,6 +597,15 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		// still running, is in the counts its first test is counted from.
 		if h, ok := a.Hooks.(coreAgent.ShimReporter); ok {
 			h.ShimClaimedBy(caller)
+		}
+		// A close of this process's connection is its open test's from
+		// here, at the epoch the test began at, and the run's in the gap
+		// between its tests (coreAgent.PairedBytesBeginner): told before the
+		// read below, so one counted before it is in the counts read there,
+		// which its first test does not count, and one after it is stamped
+		// with an epoch no test began at until the first begin.
+		if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
+			pb.PairedBytesOneProcess(true)
 		}
 		// A failed TLS handshake before this claim is the run's -- charged
 		// to no test (UnchargedCaptureLosses), and in the run's own verdict,
@@ -2050,7 +2069,8 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	// What a cut-short end owned that was counted since: this test's when
 	// it is the owner (its own end was cut short, and the loss counted
 	// before this read), the run's otherwise. A close of a worker's
-	// connection (coreAgent.OwnedLoss's Worker) is the test of that worker
+	// connection (coreAgent.OwnedLoss's Open; worker 0's in a run of one
+	// test process) is the test of that worker
 	// open at the epoch it was stamped with alone: this test's when it is
 	// that test, kept for that test's end when another worker's test is
 	// (ownedOpen), and the run's when that worker's open test began at
@@ -2063,7 +2083,7 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	a.provenMu.Lock()
 	for _, o := range taken {
 		owner := o.Test
-		if owner == "" && o.Worker != 0 {
+		if o.Open {
 			if t := a.proven.open[o.Worker]; t.epoch == o.Epoch {
 				owner = t.id
 			}

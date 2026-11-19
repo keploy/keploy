@@ -65,7 +65,7 @@ func TestALossKeptForAWorkersOpenTestIsNeverDropped(t *testing.T) {
 	})
 	t.Run("kept for a test still open when the run's losses are read: the run's, once", func(t *testing.T) {
 		a, src, inst1, endOne, endTwo := keptAgent(t)
-		src.put(coreAgent.OwnedLoss{Worker: inst1, Loss: untoldFrom("62766")})
+		src.put(coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: untoldFrom("62766")})
 		endTwo()
 		run, err := a.UnchargedCaptureLosses(context.Background())
 		require.NoError(t, err)
@@ -82,9 +82,9 @@ func TestALossKeptForAWorkersOpenTestIsNeverDropped(t *testing.T) {
 		a.provenMu.Unlock()
 		// Taken at TestTwo's end and kept for TestOne, then one taken at
 		// TestOne's own end.
-		src.put(coreAgent.OwnedLoss{Worker: inst1, Loss: untoldFrom("62766")})
+		src.put(coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: untoldFrom("62766")})
 		endTwo()
-		src.put(coreAgent.OwnedLoss{Worker: inst1, Loss: untoldFrom("62767")})
+		src.put(coreAgent.OwnedLoss{Worker: inst1, Open: true, Loss: untoldFrom("62767")})
 		endOne()
 		a.provenMu.Lock()
 		defer a.provenMu.Unlock()
