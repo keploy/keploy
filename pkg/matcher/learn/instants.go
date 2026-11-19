@@ -635,17 +635,19 @@ func namesMomentApart(h, m, other moment, rules map[cutRule]bool) bool {
 }
 
 // namesApartFine reports whether h names m apart from other
-// (namesMomentApart) by a rule of rules (any, nil) at a cut finer than a
-// millisecond, as byMoment reads a cut: the same moment where the coarser of
-// the two resolutions is finer than one, or a rule whose unit is. An hour
-// that a nanosecond read, truncated, is names it at the hour: a cut two
-// stamps of the runs' timing can share, no copy of a fine instant.
-func namesApartFine(h, m, other moment, rules map[cutRule]bool) bool {
+// (namesMomentApart) by any rule at a cut finer than a millisecond, as
+// byMoment reads a cut: the same moment where the coarser of the two
+// resolutions is finer than one, or a rule whose unit is. An hour that a
+// nanosecond read, truncated, is names it at the hour: a cut two stamps of
+// the runs' timing can share, no copy of a fine instant. It reads every
+// rule, not only the one an echo found the copy by: a place that holds the
+// moment at a fine cut is a pick from it whichever rule names it there.
+func namesApartFine(h, m, other moment) bool {
 	if h.key == m.key {
-		return fineCut(max(h.res, m.res)) && namesMomentApart(h, m, other, rules)
+		return fineCut(max(h.res, m.res)) && namesMomentApart(h, m, other, nil)
 	}
 	return cuts(h, m, func(c cutRule) bool {
-		if rules != nil && !rules[c] || !fineCut(time.Duration(c.unit)) {
+		if !fineCut(time.Duration(c.unit)) {
 			return false
 		}
 		return !cuts(h, other, func(d cutRule) bool { return d == c })
