@@ -207,6 +207,7 @@ func TestABlankGivenNameIsNoChoice(t *testing.T) {
 		{name: "an override file's appName of spaces over keploy.yml", doc: orders, override: "appName: \"  \"\n", want: "orders"},
 		{name: "an override file's empty appName over keploy.yml", doc: orders, override: "appName: \"\"\n", want: "orders"},
 		{name: "an override file's null appName over keploy.yml", doc: orders, override: "appName:\n", want: "orders"},
+		{name: "an override file's appName of a tab over keploy.yml", doc: orders, override: "appName: \"\\t\"\n", want: "orders"},
 		{name: "an override file's blank appName with --app-name of spaces", doc: orders, flag: []string{"--app-name", "  "}, override: "appName: \" \"\n", want: "orders", warns: 1},
 		{name: "an override file's appName still wins over keploy.yml", doc: orders, override: "appName: billing\n", want: "billing"},
 		{name: "a KEPLOY_APPNAME still wins over an override file's blank appName", doc: orders, env: strPtr("billing"), override: "appName: \"  \"\n", want: "billing"},
