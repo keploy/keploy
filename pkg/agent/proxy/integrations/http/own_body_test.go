@@ -140,9 +140,10 @@ func TestAFieldOnlyTheCallHasThatNoiseCoversIsNoDifference(t *testing.T) {
 }
 
 // formKeysOnlyLive names each key the live form holds that the recorded one
-// holds neither as written nor by its decoded name: as written, or by its
-// decoded name where an entry with patterns guards it; a key known with no
-// patterns is none.
+// holds neither as written nor by its decoded name, by its decoded name; a
+// key an entry with no patterns names, as written or by its decoded name in
+// any case, is none, but an entry naming id keys does not name a key only
+// the live form holds.
 func TestFormKeysOnlyLive(t *testing.T) {
 	for _, tc := range []struct {
 		name, rec, live string
@@ -155,8 +156,13 @@ func TestFormKeysOnlyLive(t *testing.T) {
 		{name: "a key written another way", rec: "a%20b=1", live: "a+b=1"},
 		{name: "a key known with no patterns", rec: "q=ada", live: "q=ada&admin=1", known: map[string][]string{"body.admin": {}}},
 		{name: "a key known with patterns", rec: "q=ada", live: "q=ada&admin=1", known: map[string][]string{"body.admin": {"^1$"}}, want: []string{"body.admin"}},
-		{name: "an escaped key known with patterns as written", rec: "q=ada", live: "q=ada&a%20b=1", known: map[string][]string{"body.a%20b": {"^1$"}}, want: []string{"body.a%20b"}},
+		{name: "an escaped key known with patterns as written", rec: "q=ada", live: "q=ada&a%20b=1", known: map[string][]string{"body.a%20b": {"^1$"}}, want: []string{"body.a b"}},
 		{name: "a guarded key by its decoded name", rec: "q=ada", live: "q=ada&a%20b=1", known: map[string][]string{"body.a b": {"^1$"}}, want: []string{"body.a b"}},
+		{name: "an escaped key", rec: "q=ada", live: "q=ada&ad%6Din=1", want: []string{"body.admin"}},
+		{name: "a key in capitals known in lower case", rec: "q=ada", live: "q=ada&userId=1", known: map[string][]string{"body.userid": {}}},
+		{name: "an escaped key known by its decoded name", rec: "q=ada", live: "q=ada&ad%6Din=1", known: map[string][]string{"body.admin": {}}},
+		{name: "an escaped key known as written", rec: "q=ada", live: "q=ada&ad%6Din=1", known: map[string][]string{"body.ad%6Din": {}}},
+		{name: "an id key and an entry naming id keys", rec: "q=ada", live: "q=ada&1234567890=1", known: map[string][]string{"body.{id}": {}}, want: []string{"body.1234567890"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got []string

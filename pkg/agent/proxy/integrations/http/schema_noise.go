@@ -78,7 +78,7 @@ func (httpNoiseAdapter) Diff(m *models.Mock, recorded, live []byte, known map[st
 		// enforcement is a JSON-body feature for now.
 		// Form bodies are comparable; formReqBodyNoise emits "body."-prefixed
 		// drift and expects a "body."-prefixed known set.
-		return formReqBodyNoise(string(recorded), string(live), schemanoise.AddBodyPrefix(known), valIsNoise), true
+		return formReqBodyNoise(string(recorded), string(live), schemanoise.AddBodyPrefix(known), valIsNoise, false), true
 	default:
 		return nil, false
 	}
