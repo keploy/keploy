@@ -389,21 +389,22 @@ func TestALocalhostNameOnTheMockRealListIsAnsweredByKeploy(t *testing.T) {
 	noErrorLines(t, logs)
 }
 
-// unansweredLines is what logs holds at each level for msg about name.
-func unansweredLines(logs *observer.ObservedLogs, msg, name, qtype string) map[zapcore.Level]int {
+// unansweredLines is what logs holds at each level for msg about name. p's
+// lines name a question by its shape and tag (dnsName), never whole.
+func unansweredLines(p *Proxy, logs *observer.ObservedLogs, msg, name, qtype string) map[zapcore.Level]int {
 	got := map[zapcore.Level]int{}
 	for _, e := range logs.FilterMessage(msg).All() {
 		f := e.ContextMap()
-		if f["query"] == name && f["qtype"] == qtype && f["error"] != nil {
+		if f["query"] == p.dnsName(name) && f["qtype"] == qtype && f["error"] != nil {
 			got[e.Level]++
 		}
 	}
 	return got
 }
 
-func wantUnanswered(t *testing.T, logs *observer.ObservedLogs, msg, name, qtype string, warn, debug int) {
+func wantUnanswered(t *testing.T, p *Proxy, logs *observer.ObservedLogs, msg, name, qtype string, warn, debug int) {
 	t.Helper()
-	got := unansweredLines(logs, msg, name, qtype)
+	got := unansweredLines(p, logs, msg, name, qtype)
 	if got[zapcore.WarnLevel] != warn || got[zapcore.DebugLevel] != debug || len(got) > 2 || (len(got) == 2 && (warn == 0 || debug == 0)) {
 		t.Errorf("%s %s: logged %v, want %d WARN and %d Debug and nothing else", qtype, name, got, warn, debug)
 	}
@@ -440,14 +441,14 @@ func TestAnUpstreamThatDoesNotAnswerARecordingIsAWarnOncePerQuestion(t *testing.
 			ask("svc.example.", dns.TypeA)
 			ask("svc.example.", dns.TypeA)
 			ask("svc.example.", dns.TypeAAAA)
-			wantUnanswered(t, logs, msg, "svc.example.", "A", 1, 1)
-			wantUnanswered(t, logs, msg, "svc.example.", "AAAA", 1, 0)
+			wantUnanswered(t, p, logs, msg, "svc.example.", "A", 1, 1)
+			wantUnanswered(t, p, logs, msg, "svc.example.", "AAAA", 1, 0)
 			noErrorLines(t, logs)
 
 			// A new session says it again.
 			p.ResetRecordedDNSMocks()
 			ask("svc.example.", dns.TypeA)
-			wantUnanswered(t, logs, msg, "svc.example.", "A", 2, 1)
+			wantUnanswered(t, p, logs, msg, "svc.example.", "A", 2, 1)
 		})
 	}
 	// The silent upstream was asked each time, so each failure was its timeout.
@@ -481,7 +482,7 @@ func TestARecordingWithNoUpstreamOfTheAppsIsStillAnError(t *testing.T) {
 		t.Errorf("logged the failure %d times, %d at ERROR; want 2, both at ERROR", all, len(errs))
 	}
 	for _, e := range errs {
-		if f := e.ContextMap(); f["query"] != "svc.example." || f["qtype"] != "A" || f["error"] == nil {
+		if f := e.ContextMap(); f["query"] != p.dnsName("svc.example.") || f["qtype"] != "A" || f["error"] == nil {
 			t.Errorf("the ERROR logs %v, want the question (query svc.example., qtype A) and the error", f)
 		}
 	}
@@ -509,7 +510,7 @@ func TestARealNameNoUpstreamAnswersIsAWarnOncePerQuestion(t *testing.T) {
 					t.Fatalf("answered %v, want SERVFAIL", resp.Msg)
 				}
 			}
-			wantUnanswered(t, logs, msg, "auth.test.", "A", 1, 1)
+			wantUnanswered(t, p, logs, msg, "auth.test.", "A", 1, 1)
 			noErrorLines(t, logs)
 		})
 	}
