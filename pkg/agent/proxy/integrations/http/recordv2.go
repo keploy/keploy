@@ -320,11 +320,14 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		}
 		method := requestMethod(finalReq)
 		if fault == nil && bodyEndsAtClose(finalResp, method) && !closeEnded(sess, streamEnded) {
-			if h.passedThrough(ctx, finalReq, destPort, sess.Opts) {
-				// keploy records nothing of this call (a bypass rule's or
-				// a skip pass-through's): there is no mock to leave out,
-				// and no test case over it is left out for it. Its read
-				// ended, so nothing more of the connection is read.
+			_, _, status, _ := messageHead(finalResp, true)
+			if h.recordsNothing(ctx, finalReq, status, destPort, sess.Opts) {
+				// keploy records nothing of this call (a bypass rule's, a
+				// skip pass-through's, or a recordOne rule's duplicate of
+				// its endpoint's representative): there is no mock to
+				// leave out, and no test case over it is left out for it.
+				// Its read ended, so nothing more of the connection is
+				// read.
 				sess.MarkMockComplete()
 				return nil
 			}
@@ -1152,17 +1155,28 @@ func (h *HTTP) passThrough(ctx context.Context, req *http.Request, destPort uint
 	return false, rule, matched
 }
 
-// passedThrough reports whether keploy records nothing of the call whose
-// request is reqBytes, to destPort, as buildHTTPMock decides it
-// (passThrough). A request that does not parse is not known to pass through.
-func (h *HTTP) passedThrough(ctx context.Context, reqBytes []byte, destPort uint, opts models.OutgoingOptions) bool {
+// recordsNothing reports whether keploy records nothing of the call whose
+// request is reqBytes, to destPort, answered with status, as buildHTTPMock
+// decides it: a pass-through (passThrough), or a recordOne rule's call that
+// its ptRecorder drops as a duplicate of the representative its endpoint
+// has kept (ptRecorder.dropsDuplicate), which it asks without taking: the
+// call is not recorded here, so it is no representative. A request that
+// does not parse is not known to record nothing.
+func (h *HTTP) recordsNothing(ctx context.Context, reqBytes []byte, status int, destPort uint, opts models.OutgoingOptions) bool {
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBytes)))
 	if err != nil {
 		return false
 	}
 	req.Header.Set("Host", req.Host)
-	skip, _, _ := h.passThrough(ctx, req, recordedDestPort(destPort, opts), opts)
-	return skip
+	destPort = recordedDestPort(destPort, opts)
+	skip, rule, matched := h.passThrough(ctx, req, destPort, opts)
+	return skip || matched && h.ptRecorder.dropsDuplicate(ptRecordKeyOf(opts, req, destPort, rule), status)
+}
+
+// ptRecordKeyOf is the endpoint key a recordOne rule's call to destPort
+// (recordedDestPort) is deduplicated by (ptRecordKey).
+func ptRecordKeyOf(opts models.OutgoingOptions, req *http.Request, destPort uint, rule models.PassThroughRule) string {
+	return ptRecordKey(opts.PassThroughScope, req.Method, passThroughHost(req), uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
 }
 
 // buildHTTPMock constructs a *models.Mock with the same shape the legacy
@@ -1301,7 +1315,7 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 			// recordOne: defer the dedup decision to emit time (below) so a later
 			// drop can't burn the one representative and leave zero mocks.
 			ptRecordOne = true
-			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, passThroughHost(req), uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
+			ptKey = ptRecordKeyOf(opts, req, destPort, rule)
 			meta["type"] = "config"
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}

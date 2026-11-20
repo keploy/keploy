@@ -103,3 +103,29 @@ func TestATunnelsCallsNotRecordedAreSaidOncePerHost(t *testing.T) {
 		}()
 	}
 }
+
+// ResetLeftOutWarningsForTest forgets the tunnel WARNs too, so a parser's test
+// can count the ones it causes: a host's tunnel said at WARN is said at WARN
+// again after a reset, within the interval, and the WARN counts none held
+// back before the reset.
+// Not parallel: the WARN limit is process-wide, and this test sets its clock.
+func TestResetForgetsTheTunnelWarnings(t *testing.T) {
+	clock := time.Unix(7000, 0)
+	saved := tunnelWarns
+	tunnelWarns = &WarnLimiters{every: tunnelWarnEvery, now: func() time.Time { return clock }}
+	t.Cleanup(func() { tunnelWarns = saved })
+	core, logs := observer.New(zapcore.DebugLevel)
+	s := &Session{Logger: zap.New(core), ClientConnID: "c1"}
+
+	s.ReportTunnel("api.example:443")
+	s.ReportTunnel("api.example:443")
+	ResetLeftOutWarningsForTest()
+	s.ReportTunnel("api.example:443")
+	w := logs.FilterMessage(TunnelWarnMsg).FilterLevelExact(zapcore.WarnLevel).All()
+	if len(w) != 2 {
+		t.Fatalf("%d WARN lines for a host's tunnel, its first and its first after a reset; want 2", len(w))
+	}
+	if held, ok := w[1].ContextMap()["sameWarningsHeldBack"]; ok {
+		t.Fatalf("the WARN after the reset says %v held back; want none: the reset forgot them", held)
+	}
+}

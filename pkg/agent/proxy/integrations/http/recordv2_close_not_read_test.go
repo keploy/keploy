@@ -356,6 +356,13 @@ func drainMocks(mocks chan *models.Mock) []*models.Mock {
 // what it recorded, what was left out and what recordV2 returned.
 func recordUnit(t *testing.T, req, resp string, prep func(*supervisor.Session)) ([]*models.Mock, *observer.ObservedLogs, error) {
 	t.Helper()
+	return recordUnitOn(t, nil, req, resp, prep)
+}
+
+// recordUnitOn is recordUnit by a recorder whose recordOne dedup is pt, as
+// one parser instance's connections share it (New): nil dedups nothing.
+func recordUnitOn(t *testing.T, pt *ptRecorder, req, resp string, prep func(*supervisor.Session)) ([]*models.Mock, *observer.ObservedLogs, error) {
+	t.Helper()
 	supervisor.ResetLeftOutWarningsForTest()
 	core, logs := observer.New(zapcore.DebugLevel)
 	sess, sendReq, closeReq, sendResp, closeResp, mocks := newTestSession(t)
@@ -368,7 +375,7 @@ func recordUnit(t *testing.T, req, resp string, prep func(*supervisor.Session)) 
 	}
 	closeReq()
 	closeResp()
-	err := (&HTTP{Logger: zap.New(core)}).recordV2(t.Context(), sess)
+	err := (&HTTP{Logger: zap.New(core), ptRecorder: pt}).recordV2(t.Context(), sess)
 	return drainMocks(mocks), logs, err
 }
 
@@ -619,6 +626,17 @@ func TestABuiltConnectMockIsItsHeadWhateverFollowsIt(t *testing.T) {
 	}
 	check("V2 builder", m)
 
+	// A fault after the head (the upstream reset the connection) ends the
+	// tunnel, not a body: the head is still the whole answer, built as the
+	// head alone, with the fault on it.
+	faulted := read()
+	faulted.Fault = &models.Fault{Kind: models.FaultReset, AfterHead: true, Observed: "the upstream reset the connection partway through the answer"}
+	m, err = h.buildHTTPMock(context.Background(), faulted, 443, "tunnel-conn", models.OutgoingOptions{})
+	if err != nil {
+		t.Fatalf("buildHTTPMock with a fault after the head: %v", err)
+	}
+	check("V2 builder, a fault after the head", m)
+
 	var v1 *models.Mock
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "tunnel-conn")
 	err = h.parseFinalHTTP(ctx, read(), 443, make(chan *models.Mock, 1), models.OutgoingOptions{},
@@ -792,6 +810,68 @@ func TestRecordV2_ACloseDelimitedBodyOfAPassedThroughCallLeavesNothingOut(t *tes
 		}
 		for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
 			t.Errorf("%s: logged at ERROR: %s", tc.name, e.Message)
+		}
+	}
+}
+
+// A recordOne rule's call that its endpoint's representative already stands
+// for is a duplicate: keploy records nothing of it (buildHTTPMock drops it at
+// ptRecorder.take). Its close-delimited body cut short of the upstream's close
+// leaves nothing out, as for a call passed through, and a mark set during it
+// is cleared. One that would be the representative, the endpoint's first 2xx
+// or its first call while it has kept none, is left out, and, not recorded,
+// stands for nothing: the endpoint's next call is still taken. The calls share
+// one recorder's dedup, as one parser instance's connections do.
+func TestRecordV2_ACloseDelimitedBodyOfARecordOneDuplicateLeavesNothingOut(t *testing.T) {
+	pt := &ptRecorder{logger: zap.NewNop()}
+	const (
+		cut   = "Connection: close\r\n\r\n" + firstHalf
+		whole = "Content-Length: 5\r\n\r\nwhole"
+	)
+	for _, step := range []struct {
+		name, resp string
+		recorded   int  // the status recorded whole, 0 for none
+		leftOut    bool // left out, cut short of the close
+	}{
+		{"the endpoint's first call, a 503, cut", "HTTP/1.1 503 Service Unavailable\r\n" + cut, 0, true},
+		{"a 500 while the endpoint has kept none", "HTTP/1.1 500 Internal Server Error\r\n" + whole, 500, false},
+		{"another error, cut, a duplicate of the 500", "HTTP/1.1 503 Service Unavailable\r\n" + cut, 0, false},
+		{"the endpoint's first 2xx, cut", "HTTP/1.1 200 OK\r\n" + cut, 0, true},
+		{"its first 2xx recorded whole", "HTTP/1.1 200 OK\r\n" + whole, 200, false},
+		{"a 2xx, cut, a duplicate of the 200", "HTTP/1.1 200 OK\r\n" + cut, 0, false},
+		{"an error, cut, a duplicate of the 200", "HTTP/1.1 404 Not Found\r\n" + cut, 0, false},
+	} {
+		var sess *supervisor.Session
+		mocks, logs, err := recordUnitOn(t, pt, reportReq, step.resp, func(s *supervisor.Session) {
+			sess = s
+			s.Opts.DstCfg = &models.ConditionalDstCfg{Port: 80}
+			s.Opts.PassThroughHosts = []models.PassThroughRule{{Host: "reports.example", Mode: models.PassThroughRecordOne}}
+			if step.recorded == 0 {
+				s.MarkMockIncomplete("a mark set during the call")
+			}
+		})
+		switch {
+		case step.leftOut:
+			wantLeftOutUnread(t, step.name, logs, mocks, err,
+				"a mark set during the call: "+supervisor.LeftOutCloseNotRead)
+			continue
+		case step.recorded != 0:
+			if err != nil || len(mocks) != 1 || mocks[0].Spec.HTTPResp == nil || mocks[0].Spec.HTTPResp.StatusCode != step.recorded {
+				t.Fatalf("%s: recorded %d mocks, recordV2 = %v; want the %d, and nil", step.name, len(mocks), err, step.recorded)
+			}
+		default:
+			if err != nil || len(mocks) != 0 {
+				t.Errorf("%s: recorded %d mocks, recordV2 = %v; want none, and nil: keploy records nothing of a duplicate", step.name, len(mocks), err)
+			}
+			if r, ok := sess.TakeMockIncomplete(); ok {
+				t.Errorf("%s: the mark %q is still set; want it cleared: nothing was recorded for it", step.name, r)
+			}
+		}
+		if got := leftOutReasons(logs); len(got) != 0 {
+			t.Errorf("%s: left out for %q; want nothing: there is no mock to leave out", step.name, got)
+		}
+		for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+			t.Errorf("%s: logged at ERROR: %s", step.name, e.Message)
 		}
 	}
 }
