@@ -158,9 +158,12 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		// A test keploy could not judge says why, right under its status:
 		// whatever its row's status, nothing vouches for it.
 		fmt.Fprint(r.out, notJudgedLines(t))
-		// A test keploy skipped for a reason says why, right under its status.
+		// A test keploy skipped for a reason says why, and what kind of skip
+		// it was, right under its status.
 		if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
-			fmt.Fprintf(r.out, "  %s\n", quarantinedLine(models.SkipReasonOneLine(t.SkipReason)))
+			if _, err := r.out.WriteString("  " + skipLine(t.SkipKind, models.SkipReasonOneLine(t.SkipReason)) + "\n"); err != nil {
+				return fmt.Errorf("failed to print why a test was skipped in printTests: %w", err)
+			}
 		}
 		// ... but a PASSED test can still have stopped making a recorded
 		// outgoing call. That is the silent-green case; it gets one line here
@@ -302,13 +305,23 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	if obsolete > 0 {
 		fmt.Fprintf(r.out, "\tTotal test obsolete: %d\n", obsolete)
 	}
-	// Tests keploy quarantined, with their reasons. Only a run whose caller
-	// skipped a test for a reason writes one (TestResult.SkipReason: the
-	// proven switch's gate, or a cloud replay skipping a test with no mapping
-	// entry), so a report without one prints exactly what it printed before.
-	quarantined := quarantinedTests(reports)
-	if len(quarantined) > 0 {
-		fmt.Fprintf(r.out, "\tTotal test quarantined: %d\n", len(quarantined))
+	// Tests keploy skipped for a reason, counted by kind of skip
+	// (TestResult.SkipKind: a quarantine, a skip for that run only, or one
+	// until the test is re-recorded), each kind in its own words. Only a run
+	// whose caller skipped a test for a reason writes one
+	// (TestResult.SkipReason: the proven switch's gate, a cloud replay, or a
+	// judge rerun), so a report without one prints exactly what it printed
+	// before, and one whose skips are all quarantines prints what it printed
+	// before skips had kinds.
+	skipped := skippedTests(reports)
+	for _, kind := range models.SkipKinds() {
+		if len(skipped[kind]) == 0 {
+			continue
+		}
+		total, _ := skipSummaryWords(kind)
+		if _, err := fmt.Fprintf(r.out, "\t%s: %d\n", total, len(skipped[kind])); err != nil {
+			return fmt.Errorf("failed to print the count of skipped tests in printSummary: %w", err)
+		}
 	}
 
 	// Dependencies that the recording says a test exercises but that the test
@@ -446,11 +459,13 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		}
 	}
 
-	if len(quarantined) > 0 {
-		fmt.Fprintln(r.out, "\nQUARANTINED TEST CASES:")
-		for _, q := range quarantined {
-			fmt.Fprintf(r.out, "\t- %s/%s: %s\n", q.set, q.test, models.SkipReasonOneLine(q.reason))
-		}
+	var lists strings.Builder
+	for _, kind := range models.SkipKinds() {
+		_, heading := skipSummaryWords(kind)
+		lists.WriteString(skippedTestsBlock(heading, skipped[kind]))
+	}
+	if _, err := r.out.WriteString(lists.String()); err != nil {
+		return fmt.Errorf("failed to print the skipped tests in printSummary: %w", err)
 	}
 
 	fmt.Fprintln(r.out, "<=========================================>")
@@ -461,27 +476,58 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	return nil
 }
 
-// quarantinedTest is a test keploy skipped for a reason.
-type quarantinedTest struct{ set, test, reason string }
+// skippedTest is a test keploy skipped for a reason.
+type skippedTest struct{ set, test, reason string }
 
-// quarantinedTests are the IGNORED tests of the reports that carry a skip
-// reason, by test set and then in report order.
-func quarantinedTests(reports map[string]*models.TestReport) []quarantinedTest {
+// skipSummaryWords are the summary's words for the tests skipped as kind: its
+// count's, and its list's heading. A quarantine's are what they were before
+// skips had kinds.
+func skipSummaryWords(kind models.SkipKind) (total, heading string) {
+	switch kind {
+	case models.SkipThisRunOnly:
+		return "Total test skipped for this run only", "TEST CASES SKIPPED FOR THIS RUN ONLY:"
+	case models.SkipUntilRerecorded:
+		return "Total test skipped until re-recorded", "TEST CASES SKIPPED UNTIL RE-RECORDED:"
+	}
+	return "Total test quarantined", "QUARANTINED TEST CASES:"
+}
+
+// skippedTestsBlock is the summary's list of tests under heading, each with
+// its reason on one line; "" when there are none, so no heading is printed.
+func skippedTestsBlock(heading string, tests []skippedTest) string {
+	if len(tests) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n" + heading + "\n")
+	for _, q := range tests {
+		fmt.Fprintf(&b, "\t- %s/%s: %s\n", q.set, q.test, models.SkipReasonOneLine(q.reason))
+	}
+	return b.String()
+}
+
+// skippedTests are the IGNORED tests of the reports that carry a skip reason,
+// by the kind they are said as (models.SkipKind.Said: a kind keploy does not
+// know with the quarantined, as skipLine says it), each kind's by test set
+// and then in report order.
+func skippedTests(reports map[string]*models.TestReport) map[models.SkipKind][]skippedTest {
 	names := make([]string, 0, len(reports))
 	for name := range reports {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	var out []quarantinedTest
+	out := make(map[models.SkipKind][]skippedTest)
 	for _, name := range names {
 		rep := reports[name]
 		if rep == nil {
 			continue
 		}
 		for _, t := range rep.Tests {
-			if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
-				out = append(out, quarantinedTest{set: name, test: t.TestCaseID, reason: t.SkipReason})
+			if t.Status != models.TestStatusIgnored || t.SkipReason == "" {
+				continue
 			}
+			kind := t.SkipKind.Said()
+			out[kind] = append(out[kind], skippedTest{set: name, test: t.TestCaseID, reason: t.SkipReason})
 		}
 	}
 	return out
