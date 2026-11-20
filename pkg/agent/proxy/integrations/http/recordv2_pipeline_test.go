@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap/zaptest"
 )
@@ -134,9 +135,9 @@ func chunkWrittenAt(i int) time.Time {
 }
 
 // recordChunks runs recordV2 over a connection whose client sent reqs and
-// whose server then sent resps, each a chunk as the capture cut them, every
-// request chunk captured before any response chunk. It returns the mocks
-// recordV2 emitted, in order, and its error.
+// whose server then sent resps and closed it, each a chunk as the capture cut
+// them, every request chunk captured before any response chunk. It returns the
+// mocks recordV2 emitted, in order, and its error.
 func recordChunks(t *testing.T, reqs, resps []string) ([]*models.Mock, error) {
 	t.Helper()
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
@@ -148,6 +149,10 @@ func recordChunks(t *testing.T, reqs, resps []string) ([]*models.Mock, error) {
 		sendResp([]byte(c), chunkWrittenAt(i), chunkWrittenAt(i))
 	}
 	closeReq()
+	// The destination's stream ends with the upstream's close, which the
+	// relay says (Session.MarkPeerEnded) before it ends the stream: a last
+	// answer framed by that close is read whole.
+	sess.MarkPeerEnded(fakeconn.FromDest, false)
 	closeResp()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
