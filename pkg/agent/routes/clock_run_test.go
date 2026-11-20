@@ -69,10 +69,11 @@ func TestClockRunAnswersTheHooksRefusal(t *testing.T) {
 	}
 }
 
-// A body that cannot be read, or one with no run id, is refused before the
-// hooks are told anything.
+// A body that cannot be read whole, or one with no run id, is refused before
+// the hooks are told anything: a run id read from a body with a value that
+// does not decode is not taken.
 func TestClockRunRefusesABodyWithNoRunID(t *testing.T) {
-	for _, body := range []string{`{`, `{}`, `{"run":""}`} {
+	for _, body := range []string{`{`, `{}`, `{"run":""}`, `{"run":"run-1","run":1}`} {
 		h := &clockRunHooks{}
 		useHooks(t, h)
 		if rec := clockRun(body); rec.Code != http.StatusBadRequest || len(h.runs) != 0 {

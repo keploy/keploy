@@ -232,8 +232,17 @@ func TestARunIDTheAgentDoesNotTakeIsSaidOnceAndTheRunGoesOn(t *testing.T) {
 }
 
 // A keploy whose startup hook hands no run id (OSS's own, or one with none
-// for this run) asks the agent nothing.
+// for this run) asks the agent nothing, and a client with no agent address
+// to ask hands nothing: neither says anything.
 func TestNoRunIDIsHandedWithoutOne(t *testing.T) {
+	t.Run("no agent address", func(t *testing.T) {
+		useStartupHook(t, &clockRunStarter{run: "run-1"})
+		a, logs := observedClient("")
+		a.handClockRun(context.Background())
+		if l := runIDLines(logs); len(l) != 0 {
+			t.Fatalf("said %q with no agent to hand the run id to, want nothing", l[0].Message)
+		}
+	})
 	for name, h := range map[string]agent.StartupHook{
 		"no capability": &agent.StartupHooks{},
 		"no id":         &clockRunStarter{},
