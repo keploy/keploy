@@ -1,6 +1,7 @@
 package tls
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -235,5 +236,54 @@ func TestNativeInstallGivesItsChangesOneBudget(t *testing.T) {
 	err = setupNativeForApp(installCtx(t), zap.NewNop(), ca, nil, 0, "")
 	if !errors.Is(err, ErrStoreLockHeld) || !strings.Contains(err.Error(), "in one CA install") {
 		t.Fatalf("the install ended with %v, want ErrStoreLockHeld, its bound the install's", err)
+	}
+}
+
+// envBudgetChild names, in the child process of
+// TestSetupCAForAppGivesItsChangesOneBudget, the directory the child's legacy
+// sweep looks in for anchors.
+const envBudgetChild = "KEPLOY_TEST_SETUP_BUDGET_CHILD_STORE"
+
+// budgetChildRan is what the child prints when its check passed.
+const budgetChildRan = "setup budget child: checked"
+
+// SetupCAForApp gives all the changes of one app's CA setup, its legacy sweep's
+// store refresh and the native install, one bound to wait out for the store
+// lock: the install is handed the context the sweep had, with the budget on it
+// (withStoreLockBudget). Run in a child process: SetupCAForApp sets the
+// process's active CA.
+func TestSetupCAForAppGivesItsChangesOneBudget(t *testing.T) {
+	if store := os.Getenv(envBudgetChild); store != "" {
+		caStorePath = []string{store + "/"}
+		var handed *storeLockBudget
+		setupNativeForAppFn = func(ctx context.Context, _ *zap.Logger, _ *caState, _ caStore, _ int, _ string) error {
+			_, handed = storeLockBound(ctx)
+			return nil
+		}
+		if err := SetupCAForApp(context.Background(), zap.NewNop(), false, 0, ""); err != nil {
+			fmt.Println("SetupCAForApp:", err)
+			os.Exit(2)
+		}
+		if handed == nil {
+			fmt.Println("the native install was handed a context with no store-lock budget: its changes wait out a bound of their own after the sweep's")
+			os.Exit(1)
+		}
+		fmt.Println(budgetChildRan)
+		os.Exit(0)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSetupCAForAppGivesItsChangesOneBudget$", "-test.count=1")
+	cmd.Env = append(os.Environ(), envBudgetChild+"="+t.TempDir())
+	setOwnProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	cmd.WaitDelay = 10 * time.Second
+	t.Cleanup(func() { _ = killProcessGroup(cmd) })
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), budgetChildRan) {
+		t.Fatalf("the child ran no check (did -test.run stop matching?):\n%s", out)
 	}
 }
