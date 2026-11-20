@@ -501,7 +501,7 @@ func TestAClosedClientThatResetsBeforeTheRelayReadsItsFINHasTheAnswerRefused(t *
 		r := New(Config{
 			Logger:               zap.NewNop(),
 			OnMarkMockIncomplete: func(m string) { mu.Lock(); marks = append(marks, m); mu.Unlock() },
-			ClientStopped:        func(func() []byte) { stops.Add(1) },
+			ClientStopped:        func() { stops.Add(1) },
 		}, c, connseq.NewUpstream(proxyServer))
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
