@@ -320,6 +320,14 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		}
 		method := requestMethod(finalReq)
 		if fault == nil && bodyEndsAtClose(finalResp, method) && !closeEnded(sess, streamEnded) {
+			if h.passedThrough(ctx, finalReq, destPort, sess.Opts) {
+				// keploy records nothing of this call (a bypass rule's or
+				// a skip pass-through's): there is no mock to leave out,
+				// and no test case over it is left out for it. Its read
+				// ended, so nothing more of the connection is read.
+				sess.MarkMockComplete()
+				return nil
+			}
 			// The body ends at the upstream's close, and its read did not
 			// end there (closeEnded): it is not known to be whole, and no
 			// fault is known to record it with. Recorded as far as it
@@ -1102,6 +1110,61 @@ func decompressReadInPart(encoding string, data []byte, limit int64) ([]byte, er
 	return out, nil
 }
 
+// recordedDestPort is the destination port a call is recorded and its
+// pass-through decided with: the resolved one, opts.DstCfg.Port, where it is
+// set. The V2 recorder derives destPort from the DestStream FakeConn, which in
+// proxyless (observe-only) capture has no real remote port (0) — breaking
+// port-keyed telemetry-passthrough matching. routeEgressToParser sets
+// DstCfg.Port authoritatively; equal to the FakeConn port on the proxy path,
+// so this is a no-op there.
+func recordedDestPort(destPort uint, opts models.OutgoingOptions) uint {
+	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
+		return opts.DstCfg.Port
+	}
+	return destPort
+}
+
+// passThroughHost is the host a pass-through rule is matched against: req's
+// Host, else its URL's.
+func passThroughHost(req *http.Request) string {
+	if req.Host == "" && req.URL != nil {
+		return req.URL.Host
+	}
+	return req.Host
+}
+
+// passThrough is buildHTTPMock's pass-through decision for req to destPort
+// (recordedDestPort): skip where keploy records nothing of the call, as a
+// bypass rule (utils.IsPassThrough) or an egress pass-through rule in skip
+// mode says; else rule, where an egress pass-through rule matched it
+// (matched), which keeps one representative exchange (recordOne).
+func (h *HTTP) passThrough(ctx context.Context, req *http.Request, destPort uint, opts models.OutgoingOptions) (skip bool, rule models.PassThroughRule, matched bool) {
+	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
+		h.Logger.Debug("V2: request is a passThrough, skipping mock emit",
+			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+		return true, rule, false
+	}
+	rule, matched = passThroughRecordDecision(opts, passThroughHost(req), uint32(destPort), req.Method, req.URL, req.Header)
+	if matched && rule.Mode == models.PassThroughSkip {
+		h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+		return true, rule, matched
+	}
+	return false, rule, matched
+}
+
+// passedThrough reports whether keploy records nothing of the call whose
+// request is reqBytes, to destPort, as buildHTTPMock decides it
+// (passThrough). A request that does not parse is not known to pass through.
+func (h *HTTP) passedThrough(ctx context.Context, reqBytes []byte, destPort uint, opts models.OutgoingOptions) bool {
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBytes)))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Host", req.Host)
+	skip, _, _ := h.passThrough(ctx, req, recordedDestPort(destPort, opts), opts)
+	return skip
+}
+
 // buildHTTPMock constructs a *models.Mock with the same shape the legacy
 // parseFinalHTTP produces. Returns (nil, nil) when the request is a
 // pass-through (IsPassThrough true) so the caller skips emission.
@@ -1114,14 +1177,7 @@ func decompressReadInPart(encoding string, data []byte, limit int64) ([]byte, er
 // input bytes (modulo timestamps, which are allowed to differ because
 // legacy uses time.Now() and V2 uses chunk timestamps).
 func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
-	// Prefer the resolved destination port. The V2 recorder derives destPort from
-	// the DestStream FakeConn, which in proxyless (observe-only) capture has no
-	// real remote port (0) — breaking port-keyed telemetry-passthrough matching.
-	// routeEgressToParser sets DstCfg.Port authoritatively; equal to the FakeConn
-	// port on the proxy path, so this is a no-op there.
-	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
-		destPort = opts.DstCfg.Port
-	}
+	destPort = recordedDestPort(destPort, opts)
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
 		// The parser's error quotes the request: withheld, as the error
@@ -1227,9 +1283,8 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 		"operation": req.Method,
 		"connID":    connID,
 	}
-	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
-		h.Logger.Debug("V2: request is a passThrough, skipping mock emit",
-			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+	skip, rule, matched := h.passThrough(ctx, req, destPort, opts)
+	if skip {
 		return nil, nil
 	}
 
@@ -1242,19 +1297,11 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 	var ptRecordOne bool
 	var ptKey string
 	{
-		ptHost := req.Host
-		if ptHost == "" && req.URL != nil {
-			ptHost = req.URL.Host
-		}
-		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
-			if rule.Mode == models.PassThroughSkip {
-				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
-				return nil, nil
-			}
+		if matched {
 			// recordOne: defer the dedup decision to emit time (below) so a later
 			// drop can't burn the one representative and leave zero mocks.
 			ptRecordOne = true
-			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
+			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, passThroughHost(req), uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
 			meta["type"] = "config"
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}

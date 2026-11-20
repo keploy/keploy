@@ -694,3 +694,63 @@ func TestRecordV2_AMalformedResponseIsADecodeError(t *testing.T) {
 		}
 	}
 }
+
+// A call keploy records nothing of (a bypass rule's, or an egress
+// pass-through rule's in skip mode) has no mock to leave out: a
+// close-delimited body whose read did not reach the upstream's close leaves
+// nothing out, and no test case over the call is left out for it. A mark set
+// during it is cleared, as for any call passed through. A call that a rule
+// does not pass through (another path's bypass, a recordOne rule, which
+// records one exchange of its kind) is still left out.
+func TestRecordV2_ACloseDelimitedBodyOfAPassedThroughCallLeavesNothingOut(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opts    func(*models.OutgoingOptions)
+		leftOut bool
+	}{
+		{"a bypass rule's path", func(o *models.OutgoingOptions) { o.Rules = []models.BypassRule{{Path: "/report"}} }, false},
+		{"a bypass rule's host and port", func(o *models.OutgoingOptions) {
+			o.Rules = []models.BypassRule{{Host: "reports.example", Port: 80}}
+		}, false},
+		{"a skip pass-through's host", func(o *models.OutgoingOptions) {
+			o.PassThroughHosts = []models.PassThroughRule{{Host: "reports.example", Mode: models.PassThroughSkip}}
+		}, false},
+		{"another path's bypass rule", func(o *models.OutgoingOptions) { o.Rules = []models.BypassRule{{Path: "/other"}} }, true},
+		{"a bypass rule's host on another port", func(o *models.OutgoingOptions) {
+			o.Rules = []models.BypassRule{{Host: "reports.example", Port: 81}}
+		}, true},
+		{"a recordOne pass-through's host", func(o *models.OutgoingOptions) {
+			o.PassThroughHosts = []models.PassThroughRule{{Host: "reports.example", Mode: models.PassThroughRecordOne}}
+		}, true},
+	} {
+		var sess *supervisor.Session
+		mocks, logs, err := recordUnit(t, reportReq, reportHead+firstHalf, func(s *supervisor.Session) {
+			sess = s
+			// The resolved destination port, which the rules' ports are
+			// matched against: the test stream's own has none.
+			s.Opts.DstCfg = &models.ConditionalDstCfg{Port: 80}
+			tc.opts(&s.Opts)
+			s.MarkMockIncomplete("a mark set during the call")
+		})
+		if tc.leftOut {
+			wantLeftOutUnread(t, tc.name, logs, mocks, err,
+				"a mark set during the call: "+supervisor.LeftOutCloseNotRead)
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: recordV2 = %v, want nil", tc.name, err)
+		}
+		if len(mocks) != 0 {
+			t.Errorf("%s: recorded %d mocks; want none: keploy records nothing of the call", tc.name, len(mocks))
+		}
+		if got := leftOutReasons(logs); len(got) != 0 {
+			t.Errorf("%s: left out for %q; want nothing: there is no mock to leave out", tc.name, got)
+		}
+		if r, ok := sess.TakeMockIncomplete(); ok {
+			t.Errorf("%s: the mark %q is still set; want it cleared: nothing was recorded for it", tc.name, r)
+		}
+		for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+			t.Errorf("%s: logged at ERROR: %s", tc.name, e.Message)
+		}
+	}
+}
