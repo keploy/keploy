@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/textcut"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"vitess.io/vitess/go/vt/sqlparser"
@@ -125,15 +126,22 @@ type prepEntry struct { // minimal, enough for lookup
 	mockName    string // for debugging purpose
 }
 
-// truncate returns s trimmed to at most maxLen characters (including "..." suffix if truncated).
+// truncate returns s cut to at most maxLen bytes, including the "..." it adds
+// when it cuts. It never cuts inside a UTF-8 character: a cut that would land
+// inside one moves back to its first byte, so a statement with non-English
+// text or an emoji at the cut point still reads as valid text in the call
+// summary, the report and the dashboard. What a reader sees as one character
+// can be several UTF-8 characters (a letter and its vowel sign, an emoji and
+// its skin tone); the cut can fall between those, and what it keeps is still
+// valid text.
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
 	if maxLen <= 3 {
-		return s[:maxLen]
+		return textcut.Prefix(s, maxLen)
 	}
-	return s[:maxLen-3] + "..."
+	return textcut.Prefix(s, maxLen-3) + "..."
 }
 
 // case-insensitive prefix check without allocation

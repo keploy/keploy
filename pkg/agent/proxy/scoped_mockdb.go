@@ -1049,6 +1049,15 @@ func (s *scopedMockDb) SourcesOf(mock string) []models.DeclaredSource {
 
 var _ integrations.DeclaredSourcesOf = (*scopedMockDb)(nil)
 
+// DeclaresSources forwards integrations.SourcesDeclarer: whether the
+// replay's scope table declares sources is the store's, whatever view a
+// worker reads; a store that cannot tell declares them.
+func (s *scopedMockDb) DeclaresSources() bool {
+	return integrations.DeclaresSources(s.MockMemDb)
+}
+
+var _ integrations.SourcesDeclarer = (*scopedMockDb)(nil)
+
 // TimeForm forwards integrations.TimeFormReader: whether the replay turned
 // the time default on is the store's, whatever view a worker reads.
 func (s *scopedMockDb) TimeForm() bool {

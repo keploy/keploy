@@ -549,6 +549,23 @@ func HostsInError(ctx context.Context, err error, hosts ...string) error {
 	return hostsShapedErr{err: err, text: text}
 }
 
+// HostsNamedIn is the host names err names outside any quotes by its own
+// errors: the name a lookup did not resolve (net.DNSError: "dial tcp: lookup
+// api.example.com: no such host"), which a client's error holds after the URL
+// it quotes. For HostsInError, where a line logs the error of a request whose
+// host it does not name itself (a test request, sent where its base path,
+// replaceWith and test.host put it). A TLS check's names HostsInError finds
+// itself (x509.HostnameError); a dial's address past its lookup is an IP
+// address, which a line writes whole. None for nil, or an error with no
+// lookup in it.
+func HostsNamedIn(err error) []string {
+	var de *net.DNSError
+	if errors.As(err, &de) && de.Name != "" {
+		return []string{de.Name}
+	}
+	return nil
+}
+
 // hostsShapedErr is an error whose text HostsInError shaped.
 type hostsShapedErr struct {
 	err  error

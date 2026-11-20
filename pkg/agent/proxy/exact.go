@@ -2063,6 +2063,17 @@ func (m *MockManager) SourcesOf(mock string) []models.DeclaredSource {
 	return slices.Clone((*sources)[mock])
 }
 
+var _ integrations.SourcesDeclarer = (*MockManager)(nil)
+
+// DeclaresSources implements integrations.SourcesDeclarer: whether the
+// replay's scope table gives any recording a declared source
+// (SetPoolSources, which keeps only names with one); false until a replay
+// sent them.
+func (m *MockManager) DeclaresSources() bool {
+	sources := m.exact.poolSources.Load()
+	return sources != nil && len(*sources) > 0
+}
+
 // SetPoolTimeForm installs, of the replay's scope table, whether the learn
 // step checks a changed time by its form alone, the time default
 // (models.ScopeTableReq.TimeForm; keploy mock replay under the proven
@@ -3963,8 +3974,8 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 			}
 			return verdict, wait, after
 		}()
-		if f := m.exact.round.onSettled; f != nil && verdict == exactServed {
-			f()
+		if f := m.exact.round.onSettled.Load(); f != nil && verdict == exactServed {
+			(*f)(mk.Name)
 		}
 		if after != nil {
 			after()
