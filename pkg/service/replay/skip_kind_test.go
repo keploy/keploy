@@ -175,6 +175,9 @@ func TestStart_ARunListsNoneOfTheLastRunsSkips(t *testing.T) {
 			setProvenSwitch(t, m.on)
 			app := newBPApp(t)
 			run := newBasePathRun(t, app.URL, "test-1", "test-2")
+			// A replayer NewReplayer builds has no console and prints
+			// nothing; the CLI gives it stdout, which captureStdout reads.
+			run.replayer.SetConsole(stdoutConsole{})
 			cfg := run.replayer.config
 			cfg.Test.IgnoredTests = map[string][]string{"test-set-0": {}}
 
