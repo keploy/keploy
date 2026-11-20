@@ -1313,6 +1313,26 @@ type BoundValues interface {
 	TrailOf(mock string) learn.Trail
 }
 
+// RunBindings is an optional capability of BoundValues: the run's bindings
+// (variables.Table.RunOf: of a run's variable, models.RunVariable) that a
+// scope of test made itself, which Own, EndedOf and LookupOf never give: a
+// run's variable a test's call bound is the run's from then on, not that
+// test's scope's. A clean-up the application runs for a test once it
+// answered it can carry such a value.
+type RunBindings interface {
+	RunOf(test string) []variables.Binding
+}
+
+// RunOf is bv's RunBindings answer for test: none from a nil bv, or one
+// that cannot tell.
+func RunOf(bv BoundValues, test string) []variables.Binding {
+	r, ok := bv.(RunBindings)
+	if !ok {
+		return nil
+	}
+	return r.RunOf(test)
+}
+
 // RoundBoundReader is an optional MockMemDb capability: the bound values
 // (BoundValues) of the set the call was marked in (call, from
 // MarkCallRound), not of the set whose variables are in force when its
@@ -1372,10 +1392,13 @@ func (b boundNow) Own() []variables.Binding {
 }
 
 func (b boundNow) EndedOf(test string) []variables.Binding { return b.table.EndedOf(test) }
+func (b boundNow) RunOf(test string) []variables.Binding   { return b.table.RunOf(test) }
 func (b boundNow) TrailOf(mock string) learn.Trail         { return TrailOf(b.db, mock) }
 func (b boundNow) LookupOf(test, name string) (variables.Binding, bool, bool) {
 	return b.table.LookupOf(test, name)
 }
+
+var _ RunBindings = boundNow{}
 
 // LearnEnder is an optional MockMemDb capability: whether the test set's
 // learn step has ended (models.MockFilterParams.LearnEnded). keploy replay's

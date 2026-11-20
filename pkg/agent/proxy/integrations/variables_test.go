@@ -75,3 +75,32 @@ func TestBoundValuesAtReadsTheBindingsOfTheTestTheCallWasMarkedIn(t *testing.T) 
 		t.Fatalf("a mark of test-1 that keeps no scope reads %+v while test-1 runs again; want the running scope's key=again", got)
 	}
 }
+
+// noRun is bound values that cannot tell the run's (no RunBindings).
+type noRun struct{ BoundValues }
+
+// RunOf reads the run's bindings a test's scope made through the bound
+// values in force (BoundNow), and none from nil or bound values that
+// cannot tell.
+func TestRunOfReadsTheRunsBindingsATestMadeThroughTheBoundValues(t *testing.T) {
+	tb := &variables.Table{}
+	tb.KeepEnded()
+	tb.KeepRun()
+	db := varsOnly{t: tb}
+	tb.StartOpeningTest("test-1", func() {}, nil, nil, nil)
+	tb.Bind(variables.Binding{Name: models.RunVariablePrefix + "appId0", Value: "live", Recorded: "rec", Mock: "own-1", Place: "body.appId#0"})
+	tb.StartOpeningTest("test-2", func() {}, nil, nil, nil)
+	bv := BoundValuesAt(db, NewCallRound(1, nil).OfTest("test-2"))
+	if got := RunOf(bv, "test-1"); len(got) != 1 || got[0].Value != "live" || got[0].Mock != "own-1" {
+		t.Fatalf("RunOf through the bound values in force = %+v; want test-1's run-appId0", got)
+	}
+	if got := RunOf(bv, "test-2"); len(got) != 0 {
+		t.Fatalf("RunOf of a test that made none = %+v", got)
+	}
+	if got := RunOf(nil, "test-1"); got != nil {
+		t.Fatalf("RunOf(nil) = %+v; want none", got)
+	}
+	if got := RunOf(noRun{bv}, "test-1"); got != nil {
+		t.Fatalf("RunOf of bound values that cannot tell = %+v; want none", got)
+	}
+}

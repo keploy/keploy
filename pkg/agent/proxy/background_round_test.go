@@ -97,8 +97,9 @@ func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
 	}
 	// look is what each test's own scope bound of a name, as a trailing
 	// call's mark reads it (LookupOf): set A's ended test-a1's app, its
-	// running test-a2's own, and set B's test-b1's own.
-	type read struct{ own, ended, look, trail, trailMocks string }
+	// running test-a2's own, and set B's test-b1's own. run is the run's
+	// bindings the ended test's scope made (integrations.RunOf).
+	type read struct{ own, ended, look, trail, trailMocks, run string }
 	text := func(bv integrations.BoundValues, endedTest, mock string) *read {
 		if bv == nil {
 			return nil
@@ -117,7 +118,7 @@ func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
 			}
 		}
 		tr := bv.TrailOf(mock)
-		return &read{own: names(bv.Own()), ended: names(bv.EndedOf(endedTest)), look: look, trail: tr.Test, trailMocks: fmt.Sprint(tr.Mocks)}
+		return &read{own: names(bv.Own()), ended: names(bv.EndedOf(endedTest)), look: look, trail: tr.Test, trailMocks: fmt.Sprint(tr.Mocks), run: names(integrations.RunOf(bv, endedTest))}
 	}
 	reads := func(what string, call integrations.CallRound, endedTest, mock string, want *read) {
 		t.Helper()
@@ -129,8 +130,9 @@ func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
 		}
 	}
 
-	// Set A: test-a1 bound app=a1 at mock-1 and ended; test-a2 bound
-	// own=a2. mock-9, a worker: recording, trails test-a1.
+	// Set A: test-a1 bound app=a1 and the run's run-app=r1 at mock-1 and
+	// ended; test-a2 bound own=a2. mock-9, a worker: recording, trails
+	// test-a1.
 	mm.ResetForReplaySession()
 	mm.NewVariableSet()
 	mm.SetPoolTests(map[string][]string{"test-a1": {"mock-1"}, "test-a2": {"mock-2"}})
@@ -138,10 +140,11 @@ func TestACallReadsTheBoundValuesOfTheSetItWasMarkedIn(t *testing.T) {
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
 	mm.Variables().StartOpeningTest("test-a1", func() {}, nil, nil, nil)
 	mm.Variables().Bind(bind("app", "a1", "mock-1"))
+	mm.Variables().Bind(bind(models.RunVariablePrefix+"app", "r1", "mock-1"))
 	mm.Variables().StartOpeningTest("test-a2", func() {}, nil, nil, nil)
 	mm.Variables().Bind(bind("own", "a2", "mock-2"))
 	a := mark()
-	setA := &read{own: "own=a2;", ended: "app=a1;", look: "test-a1.app=a1 ended=true;test-a2.own=a2 ended=false;", trail: "test-a1", trailMocks: "[mock-1]"}
+	setA := &read{own: "own=a2;", ended: "app=a1;", look: "test-a1.app=a1 ended=true;test-a2.own=a2 ended=false;", trail: "test-a1", trailMocks: "[mock-1]", run: "run-app=r1;"}
 	reads("a call of set A", a, "test-a1", "mock-9", setA)
 
 	// Set B begins (twice: the replay's re-registration before staging),

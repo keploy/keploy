@@ -72,6 +72,12 @@ type Table struct {
 	ended []endedScope
 	// keepEnded: the table keeps its ended scopes' bindings (KeepEnded).
 	keepEnded bool
+	// runMade is, on a table that keeps its ended scopes (KeepEnded),
+	// each run's binding (KeepRun) the table made, with the test whose
+	// scope made it ("" for the start-up's, and a scope begun with no test
+	// named), in the order made, until NewSet (RunOf). A later entry of a
+	// name is the run's binding of it from then on (put).
+	runMade []madeRun
 	// test is the test whose scope is running (StartOpeningTest), "" for a
 	// scope begun with no test named, or before the first.
 	test string
@@ -99,6 +105,13 @@ type Table struct {
 // the test it was the scope of, its number (InScope), and the run's
 // variables it answered as recorded while they were not bound
 // (AnsweredAsRecorded, AnsweredAsRecordedOf).
+// madeRun is a run's binding (Table.runMade) and the test whose scope made
+// it ("" for none named).
+type madeRun struct {
+	test string
+	b    Binding
+}
+
 type endedScope struct {
 	test       string
 	scope      uint64
@@ -435,6 +448,9 @@ func (t *Table) put(b Binding) {
 			t.run = make(map[string]Binding)
 		}
 		t.run[b.Name] = b
+		if t.keepEnded {
+			t.runMade = append(t.runMade, madeRun{test: t.test, b: b})
+		}
 		return
 	}
 	if t.vals == nil {
@@ -1164,6 +1180,7 @@ func (t *Table) NewSet() {
 // newSet is NewSet's step. t.mu is held.
 func (t *Table) newSet() {
 	t.vals, t.run, t.ended, t.notes, t.asRecorded = nil, nil, nil, nil, nil
+	t.runMade = nil
 	t.began, t.test = false, ""
 	t.gen++
 	t.scope++
@@ -1176,6 +1193,9 @@ func (t *Table) newSet() {
 type SetBound struct {
 	own   []Binding
 	ended []endedScope
+	// run is the run's bindings the set's named tests' scopes made, as
+	// Table.runMade held them then (RunOf).
+	run []madeRun
 	// test is the test the running scope was begun for then ("" for none
 	// named, or before the first scope began), scope its number (InScope).
 	test  string
@@ -1212,7 +1232,7 @@ func (t *Table) Bound() *SetBound {
 
 // bound is Bound's step. t.mu is held.
 func (t *Table) bound() *SetBound {
-	kept := &SetBound{ended: t.ended[:len(t.ended):len(t.ended)], scope: t.scope}
+	kept := &SetBound{ended: t.ended[:len(t.ended):len(t.ended)], run: t.runMade[:len(t.runMade):len(t.runMade)], scope: t.scope}
 	if t.began {
 		kept.own, kept.test = sorted(t.vals), t.test
 	}
@@ -1259,6 +1279,15 @@ func (s *SetBound) EndedOf(test string) []Binding {
 		return nil
 	}
 	return endedOf(s.ended, test)
+}
+
+// RunOf is the run's bindings a scope of test had made when the set ended
+// (Table.RunOf then).
+func (s *SetBound) RunOf(test string) []Binding {
+	if s == nil {
+		return nil
+	}
+	return runOf(s.run, test)
 }
 
 // LookupOf is the binding of name test's own scope had made when the set
@@ -1395,6 +1424,42 @@ func (t *Table) EndedOf(test string) []Binding {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return endedOf(t.ended, test)
+}
+
+// RunOf is the run's bindings (KeepRun: of a run's variable,
+// models.RunVariable) that a scope begun for test made, by name: a call of
+// test bound each for the tests after it, so no scope's own bindings (Own,
+// EndedOf, LookupOf) hold it. Never one bound before the set's first scope
+// began (the start-up's, no test's), nor in a scope begun with no test
+// named, nor one another test's scope made later under the same name
+// (put): none for test "", and none on a table that does not keep its
+// ended scopes (KeepEnded). NewSet forgets them. A background miss reads
+// them: a clean-up the application runs for a test once it answered it can
+// carry the value of a run's variable that test's call bound.
+func (t *Table) RunOf(test string) []Binding {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return runOf(t.runMade, test)
+}
+
+// runOf is RunOf of made: of each name, its latest entry's binding where
+// test made it, by name; none for test "".
+func runOf(made []madeRun, test string) []Binding {
+	if test == "" {
+		return nil
+	}
+	latest := make(map[string]madeRun, len(made))
+	for _, m := range made {
+		latest[m.b.Name] = m
+	}
+	var out []Binding
+	for _, m := range latest {
+		if m.test == test {
+			out = append(out, m.b)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // OwnOf is what a call marked in test's view reads as its own test's
