@@ -1,6 +1,9 @@
 package http
 
 import (
+	"maps"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -167,7 +170,8 @@ const ownBodiesMaxBytes = 8 << 20
 // read while it holds the recording, beside the body it was read from: a
 // recording whose body is not that one is read again. Up to
 // ownBodiesMaxBytes of bodies, so recordings a store let go of are let go
-// of here too. Safe for concurrent use: a kept body is only read.
+// of here too. Safe for concurrent use: a kept body is only read, and its
+// print (ownRead.printOf) is taken under its own lock.
 type ownBodies struct {
 	mu    sync.Mutex
 	bytes int
@@ -176,18 +180,29 @@ type ownBodies struct {
 
 type ownBody struct {
 	body string
-	read *mocknoise.JSONBody
+	read *ownRead
+}
+
+// ownRead is a recording's request body read once (json), and its print
+// as sameCallBodies last took it (printOf).
+type ownRead struct {
+	json  *mocknoise.JSONBody
+	mu    sync.Mutex
+	print ownPrint
 }
 
 // ownBodyReads counts the recorded bodies ownBodies read, so a row can
 // count that each is read once.
 var ownBodyReads atomic.Int64
 
+// noRead is the read of a recording of no request: it holds no body.
+var noRead = &ownRead{}
+
 // read is m's recorded request body, read once (false: m records no
-// request).
-func (o *ownBodies) read(m *models.Mock) (*mocknoise.JSONBody, bool) {
+// request, and its read is noRead).
+func (o *ownBodies) read(m *models.Mock) (*ownRead, bool) {
 	if m.Spec.HTTPReq == nil {
-		return nil, false
+		return noRead, false
 	}
 	body := m.Spec.HTTPReq.Body
 	o.mu.Lock()
@@ -197,7 +212,7 @@ func (o *ownBodies) read(m *models.Mock) (*mocknoise.JSONBody, bool) {
 		return b.read, true
 	}
 	ownBodyReads.Add(1)
-	read := mocknoise.NewReadJSONBody([]byte(body))
+	read := &ownRead{json: mocknoise.NewReadJSONBody([]byte(body))}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.of == nil || o.bytes+len(body) > ownBodiesMaxBytes {
@@ -206,4 +221,138 @@ func (o *ownBodies) read(m *models.Mock) (*mocknoise.JSONBody, bool) {
 	o.bytes += len(body)
 	o.of[m] = ownBody{body: body, read: read}
 	return read, true
+}
+
+// ownPrint is a recording's body's print (matcher.JSONPrinter), once
+// printed, and what it was printed under: keploy.yml's request-body noise
+// (userKey, its keys as noiseKey writes them), the noise the record learned
+// on the recording (learned, MockSpec.ReqBodyNoise's keys sorted;
+// learnedKey, them as keysKey writes them) and the values the obfuscator
+// redacted in it (noise, Mock.Noise), which decide decided.
+type ownPrint struct {
+	printed    bool
+	userKey    string
+	learned    []string
+	learnedKey string
+	noise      []string
+	sum        uint64
+	decided    bool
+}
+
+// ownPrints counts the recorded bodies printed (ownRead.printOf),
+// livePrints the calls' bodies printed (callPrints.another), and
+// sameCallChecks the recordings sameCallBodies compared with the call, so a
+// row can count that each recording is printed once, a call once for each
+// noise, and that a recording whose print is not the call's is not
+// compared.
+var ownPrints, livePrints, sameCallChecks atomic.Int64
+
+// under reports whether p was printed under userKey and m's noise as m
+// holds it now: its learned noise's keys, its redacted values.
+func (p ownPrint) under(m *models.Mock, userKey string) bool {
+	learned := httpNoiseAdapter{}.StoredNoise(m)
+	if !p.printed || p.userKey != userKey || !slices.Equal(p.noise, m.Noise) || len(p.learned) != len(learned) {
+		return false
+	}
+	for _, k := range p.learned {
+		if _, ok := learned[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// printOf is the print of r, m's recorded body, decoded as rv, under user,
+// keploy.yml's request-body noise (its keys userKey), and the noise the
+// record learned on m (printedNoise): printed once, and again where m's
+// noise or user's keys are not what it was printed under (ownPrint.under).
+// A value the obfuscator redacted in it (RecordedValueIsNoise) leaves its
+// print undecided.
+func (r *ownRead) printOf(m *models.Mock, rv any, user map[string][]string, userKey string) ownPrint {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.print.under(m, userKey) {
+		return r.print
+	}
+	ownPrints.Add(1)
+	learned := slices.Sorted(maps.Keys(httpNoiseAdapter{}.StoredNoise(m)))
+	p := ownPrint{printed: true, userKey: userKey, learned: learned, learnedKey: keysKey(learned), noise: slices.Clone(m.Noise)}
+	p.sum, p.decided = matcher.NewJSONPrinter(printedNoise(user, learned)).Print(rv, httpNoiseAdapter{}.RecordedValueIsNoise(m))
+	r.print = p
+	return p
+}
+
+// printedNoise is the noise a recording is printed under: user's entries
+// and those the record learned on it (their keys, learned), each read as a
+// path of the body as StripBodyPrefix reads it, whatever the proven switch.
+// It holds every entry SameCallDrift compares the recording under, so its
+// print leaves out at least what that comparison does not compare.
+func printedNoise(user map[string][]string, learned []string) map[string][]string {
+	out := make(map[string][]string, len(user)+len(learned))
+	for k := range user {
+		out[k] = nil
+	}
+	for _, k := range learned {
+		out[strings.TrimPrefix(k, "body.")] = nil
+	}
+	return out
+}
+
+// noiseKey is noise's keys, sorted, as keysKey writes them.
+func noiseKey(noise map[string][]string) string {
+	return keysKey(slices.Sorted(maps.Keys(noise)))
+}
+
+// keysKey writes keys, each after its length, so two lists of other keys
+// are never written alike.
+func keysKey(keys []string) string {
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(strconv.Itoa(len(k)))
+		b.WriteByte(':')
+		b.WriteString(k)
+	}
+	return b.String()
+}
+
+// callPrints is a call's body's prints (matcher.JSONPrinter) under
+// keploy.yml's request-body noise (user, its keys userKey) and, for each
+// noise a recording it is compared with learned (ownPrint.learnedKey), that
+// noise too: each printed once per call.
+type callPrints struct {
+	live    *mocknoise.JSONBody
+	user    map[string][]string
+	userKey string
+	of      map[string]uint64
+}
+
+func newCallPrints(live *mocknoise.JSONBody, user map[string][]string) *callPrints {
+	return &callPrints{live: live, user: user, userKey: noiseKey(user), of: map[string]uint64{}}
+}
+
+// another reports whether r, m's recorded body as ownBodies read it, is by
+// its print another call's: both bodies are JSON, and their prints under
+// the same noise differ, so the two differ at a field SameCallDrift
+// compares. false says nothing: the prints are the same, a body is not
+// JSON, or r's print is undecided.
+func (c *callPrints) another(m *models.Mock, r *ownRead) bool {
+	lv, ok := c.live.Decoded()
+	if !ok {
+		return false
+	}
+	rv, ok := r.json.Decoded()
+	if !ok {
+		return false
+	}
+	p := r.printOf(m, rv, c.user, c.userKey)
+	if !p.decided {
+		return false
+	}
+	live, ok := c.of[p.learnedKey]
+	if !ok {
+		livePrints.Add(1)
+		live, _ = matcher.NewJSONPrinter(printedNoise(c.user, p.learned)).Print(lv, nil)
+		c.of[p.learnedKey] = live
+	}
+	return live != p.sum
 }

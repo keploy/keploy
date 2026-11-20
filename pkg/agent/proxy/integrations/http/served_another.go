@@ -52,12 +52,24 @@ func noteServedAs(how *servedAs, idVaried, closest bool) {
 // of other elements, is; a form holds the same keys and values; any other
 // body is the same bytes. Each is a recording of the very call. Each
 // recording's body is read once (ownBodies), the call's once per call.
+//
+// A JSON recording whose print differs from the call's (callPrints) is
+// another call's without the two being compared: the prints leave out at
+// least what the comparison does not compare, so only a recording whose
+// print is the call's, or says nothing, is compared (sameCallChecks counts
+// them). Each recording is printed once (ownBodies.printOf), the call once
+// per noise the recordings were printed under.
 func (h *HTTP) sameCallBodies(candidates []*models.Mock, body []byte, userBodyNoise map[string][]string) []*models.Mock {
 	live := mocknoise.NewJSONBody(body)
+	prints := newCallPrints(live, userBodyNoise)
 	var own []*models.Mock
 	for _, m := range candidates {
 		recorded, ok := h.ownBodies.read(m)
-		if ok && len(mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded, true, live, userBodyNoise)) == 0 {
+		if !ok || prints.another(m, recorded) {
+			continue
+		}
+		sameCallChecks.Add(1)
+		if len(mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded.json, true, live, userBodyNoise)) == 0 {
 			own = append(own, m)
 		}
 	}
@@ -72,7 +84,7 @@ func (h *HTTP) sameCallBodies(candidates []*models.Mock, body []byte, userBodyNo
 // the same kind of JSON document.
 func (h *HTTP) bodyFieldsDiffering(x *models.Mock, body []byte, userBodyNoise map[string][]string) []string {
 	recorded, ok := h.ownBodies.read(x)
-	return bodyFieldsOf(mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded, ok, mocknoise.NewJSONBody(body), userBodyNoise))
+	return bodyFieldsOf(mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded.json, ok, mocknoise.NewJSONBody(body), userBodyNoise))
 }
 
 // bodyFieldsOf names, sorted, the request-body fields of drift
@@ -109,11 +121,11 @@ func (h *HTTP) noteFieldsOnOneSide(how *servedAs, x *models.Mock, body []byte, u
 		return
 	}
 	live := mocknoise.NewJSONBody(body)
-	oneSide := fieldsOnOneSide(x, recorded, live)
+	oneSide := fieldsOnOneSide(x, recorded.json, live)
 	if len(oneSide) == 0 {
 		return
 	}
-	drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded, true, live, userBodyNoise)
+	drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded.json, true, live, userBodyNoise)
 	for p := range drift {
 		if oneSide[p] {
 			how.answer, how.fields = models.AnswerClosestBody, bodyFieldsOf(drift)
