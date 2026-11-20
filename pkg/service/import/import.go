@@ -232,6 +232,8 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 			testSet := item.Name
 			if item.Name == "" {
 				testSet = pi.generateTestSetName()
+			} else if err := validateTestSetName(testSet); err != nil {
+				return err
 			}
 
 			testSetPath := filepath.Join(cwd, "keploy", testSet)
@@ -270,6 +272,17 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 		return nil
 	}
 
+	return nil
+}
+
+func validateTestSetName(name string) error {
+	if name == "" {
+		return nil
+	}
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" ||
+		strings.ContainsAny(name, `/\\`) || strings.Contains(name, "..") || name == "." {
+		return fmt.Errorf("invalid test set name %q: must be a simple directory name", name)
+	}
 	return nil
 }
 
