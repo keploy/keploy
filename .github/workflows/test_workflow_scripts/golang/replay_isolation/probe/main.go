@@ -8,6 +8,14 @@
 //	egressprobe ask   IP NAME           asks the DNS server at IP:53 for NAME
 //	                                    (A, over UDP) and prints "answered
 //	                                    rcode=N", or why it got no answer (exit 1)
+//	egressprobe runner -url URL [-n N]  a compose stack's test driver: waits for URL/health,
+//	                                    then GETs URL/health?n=1..N and exits 0
+//	egressprobe after -wait D -say WORD a compose stack's one-shot (a migration, a seed): waits D,
+//	                                    prints "WORD DONE" and exits 0
+//	egressprobe flaky -mark FILE        a dependency that crashes (exit 1) on its first start only:
+//	                                    FILE marks that it ran once; later starts run until stopped
+//	egressprobe watcher -url URL        a service that watches the app: once URL/health has
+//	                                    answered, it exits 1 as soon as it stops answering
 //	egressprobe fork1|fork2 ADDR        the double-forked child path (internal)
 //
 // The sink owns the test addresses on its own interface, among them the one
@@ -19,12 +27,15 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,7 +62,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|fork1|fork2 ...")
+		fmt.Fprintln(os.Stderr, "usage: egressprobe sink|app|oneshot|early|runner|after|flaky|watcher|hold|fork1|fork2 ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -70,6 +81,21 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("answered rcode=%d\n", rcode)
+	case "oneshot": // exits 0 at once, as a compose stack's one-shot migration does
+		os.Exit(0)
+	case "early": // exits 3 at once, as a test driver that fails before the app is up does
+		fmt.Println("EARLY EXITS 3")
+		os.Exit(3)
+	case "runner":
+		runner(os.Args[2:])
+	case "after":
+		after(os.Args[2:])
+	case "flaky":
+		flaky(os.Args[2:])
+	case "watcher":
+		watcher(os.Args[2:])
+	case "hold":
+		hold(os.Args[2:])
 	case "fork1": // starts fork2 and exits at once, so fork2 is reparented
 		c := exec.Command("/proc/self/exe", "fork2", os.Args[2], os.Args[3])
 		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -83,6 +109,175 @@ func main() {
 	default:
 		os.Exit(2)
 	}
+}
+
+// runner drives the app as a compose stack's test-driver service does (the
+// service `docker compose up --exit-code-from` names): it waits until
+// URL/health answers, makes N more calls, each with its own query so each is
+// its own test, says so with the time on stdout ("RUNNER DONE <unix
+// seconds>", which compose shows in keploy's log) and exits 0. It exits 2 if
+// the app never answers and 3 if a call fails.
+func runner(args []string) {
+	fs := flag.NewFlagSet("runner", flag.ExitOnError)
+	base := fs.String("url", "", "the app's base URL")
+	n := fs.Int("n", 5, "the calls made once the app answers")
+	_ = fs.Parse(args)
+	c := &http.Client{Timeout: 10 * time.Second}
+	get := func(u string) error {
+		resp, err := c.Get(u)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("status %d", resp.StatusCode)
+		}
+		return nil
+	}
+	up := false
+	for i := 0; i < 240 && !up; i++ {
+		if up = get(*base+"/health") == nil; !up {
+			time.Sleep(time.Second)
+		}
+	}
+	if !up {
+		fmt.Fprintln(os.Stderr, "runner: the app never answered")
+		os.Exit(2)
+	}
+	for i := 1; i <= *n; i++ {
+		if err := get(fmt.Sprintf("%s/health?n=%d", *base, i)); err != nil {
+			fmt.Fprintf(os.Stderr, "runner: call %d: %v\n", i, err)
+			os.Exit(3)
+		}
+	}
+	fmt.Printf("RUNNER DONE %d\n", time.Now().Unix())
+}
+
+// after is a compose stack's one-shot service that takes a while (a
+// migration a service waits on with service_completed_successfully, a seed
+// that runs once the app is up): it waits D, says "WORD DONE" and exits 0;
+// with -code N other than 0 (a test driver that fails a while after the app
+// is up), it says "WORD EXITS N" and exits N.
+func after(args []string) {
+	fs := flag.NewFlagSet("after", flag.ExitOnError)
+	wait := fs.Duration("wait", 0, "how long it runs before it exits")
+	say := fs.String("say", "AFTER", "the word it prints before DONE")
+	code := fs.Int("code", 0, "the code it exits with")
+	_ = fs.Parse(args)
+	time.Sleep(*wait)
+	if *code != 0 {
+		fmt.Printf("%s EXITS %d\n", *say, *code)
+		os.Exit(*code)
+	}
+	fmt.Printf("%s DONE\n", *say)
+}
+
+// hold is a service that runs until it is stopped: it says "WORD UP", and at
+// SIGTERM or SIGINT says "WORD STOPPED" and exits 0 (a sidecar that a
+// service waits on with service_completed_successfully then completes).
+// With -ignore-term it ignores both, and only docker's kill at its stop
+// grace's end stops it (a service that does not handle SIGTERM): it sleeps
+// rather than blocks on nothing, since the lane's static build
+// (CGO_ENABLED=0) has the Go runtime's deadlock check, which ends a process
+// whose every goroutine blocks for good with "all goroutines are asleep"
+// and exit 2, at once.
+func hold(args []string) {
+	fs := flag.NewFlagSet("hold", flag.ExitOnError)
+	say := fs.String("say", "HOLD", "the word it prints")
+	ignore := fs.Bool("ignore-term", false, "ignore SIGTERM and SIGINT")
+	_ = fs.Parse(args)
+	fmt.Printf("%s UP\n", *say)
+	if *ignore {
+		signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+	untilStopped()
+	fmt.Printf("%s STOPPED\n", *say)
+}
+
+// untilStopped blocks until the container is stopped (SIGINT or SIGTERM:
+// the process is the container's PID 1, which the kernel sends no signal it
+// does not handle).
+func untilStopped() {
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+}
+
+// flaky is a dependency that crashes on its first start only, as one that
+// starts before its own backing store is up does: with no FILE it creates
+// it, says "FLAKY CRASHES 1" and exits 1; with FILE (a start after that one,
+// FILE on a volume that outlives the container) it says "FLAKY UP" and runs
+// until it is stopped, then exits 0.
+func flaky(args []string) {
+	fs := flag.NewFlagSet("flaky", flag.ExitOnError)
+	mark := fs.String("mark", "", "the file that marks its first start")
+	_ = fs.Parse(args)
+	if _, err := os.Stat(*mark); err != nil {
+		if err := os.WriteFile(*mark, nil, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "flaky: %v\n", err)
+			os.Exit(2)
+		}
+		fmt.Println("FLAKY CRASHES 1")
+		os.Exit(1)
+	}
+	fmt.Println("FLAKY UP")
+	untilStopped()
+}
+
+// watcher is a service that fails once the app stops answering, as a
+// sidecar that needs the app does: it waits until URL/health answers, then
+// asks it every 100 ms, and after 3 failed asks in a row says "WATCHER EXITS
+// 1" and exits 1. It exits 2 if the app never answers, and 0 if it is
+// stopped first.
+func watcher(args []string) {
+	fs := flag.NewFlagSet("watcher", flag.ExitOnError)
+	base := fs.String("url", "", "the app's base URL")
+	_ = fs.Parse(args)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	c := &http.Client{Timeout: 2 * time.Second}
+	healthy := func() bool {
+		resp, err := c.Get(*base + "/health")
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode == http.StatusOK
+	}
+	up := false
+	for i := 0; i < 2400 && !up; i++ {
+		if up = healthy(); !up {
+			select {
+			case <-stop:
+				os.Exit(0)
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+	if !up {
+		fmt.Fprintln(os.Stderr, "watcher: the app never answered")
+		os.Exit(2)
+	}
+	fmt.Println("WATCHER SEES THE APP")
+	for failed := 0; failed < 3; {
+		select {
+		case <-stop:
+			os.Exit(0)
+		case <-time.After(100 * time.Millisecond):
+		}
+		if healthy() {
+			failed = 0
+		} else {
+			failed++
+		}
+	}
+	fmt.Println("WATCHER EXITS 1")
+	os.Exit(1)
 }
 
 func outcome(path string, err error) {
@@ -110,11 +305,19 @@ func app(args []string) {
 	imds := fs.String("imds", "", "the metadata address the sink owns (empty: the app makes no metadata call)")
 	peer := fs.String("peer", "", "a container name the network holds, resolved through it (empty: skip)")
 	unrecorded := fs.Bool("unrecorded", false, "also look up the names a recording must not hold (the replay's and the baselines' args; the recording's leave it off)")
+	stopLookup := fs.Bool("stop-lookup", false, "look a name up as the app stops (SIGINT or SIGTERM), after its last test and in no recording, then exit (the replay's args: keploy test reads the calls made after a set's last test once its app has stopped)")
+	stopRecorded := fs.Bool("stop-recorded", false, "look a name up as the app stops (SIGINT or SIGTERM), after its last test, at record and at replay, then exit (the recording's args too: keploy record stops the app before it saves what the agent captured, so the recording holds it and the replay serves it)")
+	stopHold := fs.Duration("stop-hold", 0, "on a stop (SIGINT or SIGTERM), stop answering first (the listener closes), then make the stop lookups, then stay up this long before exiting 0 (0: answer until the stop lookups end): a container beside the app that watches it (the watcher) sees it gone while keploy's stop of it still waits on it")
+	crashOnFire := fs.Int("crash-on-fire", 0, "exit with this code as /fire is asked, before it answers (0: never): a crash during a test")
 	listen := fs.String("listen", ":8080", "")
 	_ = fs.Parse(args)
 	at := func(p int) string { return net.JoinHostPort(*sinkIP, strconv.Itoa(p)) }
 
 	http.HandleFunc("/fire", func(w http.ResponseWriter, _ *http.Request) {
+		if *crashOnFire != 0 {
+			fmt.Fprintf(os.Stderr, "probe crash: exit %d\n", *crashOnFire)
+			os.Exit(*crashOnFire)
+		}
 		outcome("tcp", dialWrite("tcp", at(portTCP), "tcp"))
 		outcome("bypass-tcp", dialWrite("tcp", at(portBypass), "bypass"))
 		outcome("udp-connected", dialWrite("udp", at(portUDP), "udp-connected"))
@@ -183,7 +386,61 @@ func app(args []string) {
 		_, _ = w.Write([]byte("fired\n"))
 	})
 	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
-	fmt.Fprintln(os.Stderr, http.ListenAndServe(*listen, nil))
+	// A name looked up as the app starts, before it serves, so outside every
+	// test, and only with -unrecorded: a start-up lookup made only in a
+	// replay (a configuration that differs from the recording's), which no
+	// mock answers. keploy test answers it itself; its report names it by its
+	// shape and its misses file names it whole (the startup rows).
+	if *unrecorded {
+		_, err := net.DefaultResolver.LookupHost(context.Background(), "startup-probe.invalid-replay-isolation.test")
+		outcome("dns-startup-lookup", err)
+	}
+	// A name looked up as the app stops, so after its last test, which no
+	// recording holds (the recording's args leave -stop-lookup off). keploy
+	// test stops the app before it reads the calls made after the set's last
+	// test (with the switch off after the set's post-script, before its
+	// report), so that read takes it: the report names it as made after the
+	// last test by its shape, and the misses file names it whole (the
+	// after-last rows). Bounded, so the stop is prompt.
+	// With -stop-recorded it first looks up a name the recording holds, made
+	// as the app stops at record too: keploy record stops the app before it
+	// saves what the agent captured, so the recording holds that NXDOMAIN, the
+	// replay serves it, and no report or misses file names it (the
+	// stop-recorded rows).
+	// With -stop-hold it stops answering at once, before those lookups, and
+	// stays up that long after them: a watcher beside it sees it gone while
+	// keploy's stop of it still waits on it (the compose watch rows).
+	srv := &http.Server{Addr: *listen}
+	if *stopLookup || *stopRecorded || *stopHold > 0 {
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-stop
+			if *stopHold > 0 {
+				_ = srv.Close()
+			}
+			if *stopRecorded {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_, err := net.DefaultResolver.LookupHost(ctx, "stop-recorded.invalid-replay-isolation.test")
+				cancel()
+				outcome("dns-stop-recorded-lookup", err)
+			}
+			if *stopLookup {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_, err := net.DefaultResolver.LookupHost(ctx, "stop-probe.invalid-replay-isolation.test")
+				cancel()
+				outcome("dns-stop-lookup", err)
+			}
+			time.Sleep(*stopHold)
+			os.Exit(0)
+		}()
+	}
+	err := srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		// The stop closed it (-stop-hold): the stop ends the process.
+		select {}
+	}
+	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
 }
 
@@ -330,8 +587,9 @@ func sink(args []string) {
 					p = string(buf[:n]) // udp-connected, udp-sendto, udp6
 				}
 				if path == "dns-udp" {
-					// The probe's own dotted name counts as dns-udp, the one
-					// its recording holds as dns-recorded, its single-label one
+					// The probe's own dotted name counts as dns-udp, the ones
+					// its recording holds (recorded-nx.*, and stop-recorded.*,
+					// looked up as it stops) as dns-recorded, its single-label one
 					// as dns-bare; any other name
 					// (keploy's or the runtime's own lookups) as dns-other, so a
 					// count names who leaked. Every name goes to dns-names.txt.
@@ -357,7 +615,7 @@ func sink(args []string) {
 					switch {
 					case strings.HasPrefix(name, "sink-check."):
 						p = "dns-check"
-					case strings.HasPrefix(name, "recorded-nx."):
+					case strings.HasPrefix(name, "recorded-nx."), strings.HasPrefix(name, "stop-recorded."):
 						p = "dns-recorded"
 					case peer && qtype != 1 && qtype != 28 && qtype != 15:
 						p = "dns-owned"

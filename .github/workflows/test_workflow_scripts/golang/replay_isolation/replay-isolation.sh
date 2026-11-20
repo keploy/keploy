@@ -51,6 +51,13 @@
 # no resolver asked even under the DNS opt-in; and the peer's name, before
 # the peer is up, so the recording holds that NXDOMAIN too and the replay must
 # still ask docker's resolver, which now knows the peer.
+# With -unrecorded the probe also looks up startup-probe.* as it starts,
+# before it serves, so outside every test (the startup rows, rows_startup).
+# It also looks up stop-probe.* as it stops, after its last test (the
+# after-last rows, rows_after_last). Recording and replay both look up
+# stop-recorded.* as the app stops (-stop-recorded): keploy record stops the
+# app before it saves what the agent captured, in every mode, so the
+# recording holds that NXDOMAIN and the replay serves it (rows_recorded_nx).
 # "internal" (report only) runs the probe on an internal: true docker network.
 # Counts land in $W/out/<phase>/<path>.count. Each assertion prints one
 # "ROW <name>: PASS|FAIL" line and any FAIL fails the lane.
@@ -64,8 +71,19 @@
 # switches a workflow sets for keploy, each only while it is set.
 # shellcheck source=../../sudo_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+# A record whose exit code a row reads is bounded by hang_guard.sh, never by
+# timeout(1), whose code on a stop differs between GNU and uutils coreutils:
+# the code is keploy's own, and HANG_FIRED says whether the guard stopped it.
+# shellcheck source=../../hang_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../hang_guard.sh" || exit 1
 
 set -uo pipefail
+# The proven switch is not among them (sudo_env.tests.sh): each keploy
+# command here names KEPLOY_PROVEN itself, as this script has it (unset stays
+# unset), so keploy runs in the mode the rows expect. Each replay's report
+# then says that mode (the proven rows, rows_mode).
+PROVEN_ENV=()
+[ -z "${KEPLOY_PROVEN+x}" ] || PROVEN_ENV=("KEPLOY_PROVEN=$KEPLOY_PROVEN")
 HERE=$(cd "$(dirname "$0")" && pwd)
 KEPLOY_SRC=${KEPLOY_SRC:-$(cd "$HERE/../../../../.." && pwd)}
 IMAGE=${KEPLOY_IMAGE:-ghcr.io/keploy/keploy:v3-dev}
@@ -82,8 +100,15 @@ PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic ic
 # closes without reading, and the sink closes as it accepts, so a recorded one
 # would be a fault mock (whichever close came first) that the replay serves,
 # and the replay's report would not name the call.
-RECARGS="app -sink 198.18.0.10 -sink6 fd00::10 -peer riso-peer"
+RECARGS="app -sink 198.18.0.10 -sink6 fd00::10 -peer riso-peer -stop-recorded"
 APPARGS="$RECARGS -imds 198.18.0.11 -unrecorded"
+# keploy test stops each set's application before it reads the calls made
+# after the set's last test (with the switch off after the set's
+# post-script, before its report), so a call the application makes as it
+# stops is read and named as made after its last test (rows_after_last).
+# Under docker compose too: keploy stops the application's container itself,
+# its stack, keploy's agent among it, running on.
+APPARGS="$APPARGS -stop-lookup"
 # Native runs: as root, in a mount namespace of their own whose resolv.conf
 # names the sink and whose nsswitch.conf asks files then DNS (a runner's image
 # may list systemd-resolved first, which answers from outside the namespace).
@@ -96,9 +121,16 @@ die() { echo "FATAL: $*"; FAILED=1; exit 1; }
 
 cleanup() {
 	[ -n "$SINKPID" ] && $S kill "$SINKPID" 2>/dev/null
-	[ ! -f "$W/compose/docker-compose.yml" ] || (cd "$W/compose" && docker compose down --remove-orphans >/dev/null 2>&1)
-	[ ! -f "$W/compose-base/docker-compose.yml" ] || (cd "$W/compose-base" && docker compose down --remove-orphans >/dev/null 2>&1)
-	docker rm -f riso-app riso-base riso-int-c riso-peer >/dev/null 2>&1
+	# Every compose case's project, each in a directory of its own under $W
+	# (compose, compose-*, and record_runner's), and every container name the
+	# lane gives: a die between a case's record and its own down leaves none
+	# running on a reused runner or box.
+	local f
+	for f in "$W"/*/docker-compose.yml; do
+		[ ! -f "$f" ] || (cd "$(dirname "$f")" && docker compose down -v --remove-orphans >/dev/null 2>&1)
+	done
+	docker rm -f riso-app riso-base riso-int-c riso-peer riso-oneshot riso-runner riso-early riso-migrate riso-seed \
+		riso-flaky riso-watcher riso-ender riso-holder riso-late >/dev/null 2>&1
 	docker network rm riso-int >/dev/null 2>&1
 	$S ip netns del riso-sink 2>/dev/null
 	$S ip link del riso-h 2>/dev/null
@@ -159,10 +191,27 @@ dns_why() {
 	esac
 }
 
-# compose_yml NAME HOSTPORT ARGS [peer]: a compose file whose service is the
-# probe run with ARGS, container NAME, its 8080 published on HOSTPORT, the
-# sink its DNS server; with "peer", also riso-peer, a container the probe
-# resolves by name.
+# compose_yml NAME HOSTPORT ARGS [peer] [oneshot] [runner] [early] [migrate]
+# [flaky] [seed] [watcher]: a compose file whose service is the probe run with
+# ARGS, container NAME, its 8080 published on HOSTPORT, the sink its DNS
+# server; with "peer", also riso-peer, a container the probe resolves by name;
+# with "oneshot", also riso-oneshot, a container that exits 0 as soon as it
+# starts, as a stack's one-shot migration does; with "runner", also the
+# service runner (container riso-runner), a test driver that calls the app
+# through its published port, once its health check answers 5 more times, and
+# exits 0; with "early", also the service early (container riso-early), which
+# waits on nothing and exits 3 at once, before the app's container starts
+# (that waits for keploy's agent's health); with "migrate", also the service
+# migrate, which exits 0 15 s after it starts (after keploy's agent is
+# healthy), and the app waits on it (depends_on,
+# service_completed_successfully); with "flaky", also the service flaky, which
+# exits 1 on its first start only (a mark on the stack's volume flakymark) and
+# runs on at a later one, and the app depends on it in list form (`depends_on:
+# [flaky]`: no wait on its exit); with "seed", also the service seed, which
+# starts once the app has (`depends_on: [NAME]`) and exits 0 8 s later, and
+# the runner waits on it (service_completed_successfully); with "watcher",
+# also the service watcher, which exits 1 once the app, which it calls through
+# its published port, stops answering.
 compose_yml() {
 	cat > docker-compose.yml <<YML
 services:
@@ -173,12 +222,138 @@ services:
     ports: ["$2:8080"]
     dns: ["198.18.0.10"]
 YML
-	[ "${4:-}" != peer ] || cat >> docker-compose.yml <<YML
+	case " ${*:4} " in *" migrate "*) cat >> docker-compose.yml <<YML
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+YML
+	;; esac
+	case " ${*:4} " in *" flaky "*) cat >> docker-compose.yml <<YML
+    depends_on: [flaky]
+YML
+	;; esac
+	case " ${*:4} " in *" peer "*) cat >> docker-compose.yml <<YML
   riso-peer:
     image: riso-probe:local
     container_name: riso-peer
     command: ["app"]
 YML
+	;; esac
+	case " ${*:4} " in *" oneshot "*) cat >> docker-compose.yml <<YML
+  riso-oneshot:
+    image: riso-probe:local
+    container_name: riso-oneshot
+    command: ["oneshot"]
+YML
+	;; esac
+	case " ${*:4} " in *" runner "*) cat >> docker-compose.yml <<YML
+  runner:
+    image: riso-probe:local
+    container_name: riso-runner
+    command: ["runner", "-url", "http://host.docker.internal:$2", "-n", "5"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+YML
+		case " ${*:4} " in *" seed "*) cat >> docker-compose.yml <<YML
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+YML
+		;; esac
+	;; esac
+	case " ${*:4} " in *" early "*) cat >> docker-compose.yml <<YML
+  early:
+    image: riso-probe:local
+    container_name: riso-early
+    command: ["early"]
+YML
+	;; esac
+	case " ${*:4} " in *" migrate "*) cat >> docker-compose.yml <<YML
+  migrate:
+    image: riso-probe:local
+    container_name: riso-migrate
+    command: ["after", "-wait", "15s", "-say", "MIGRATE"]
+YML
+	;; esac
+	case " ${*:4} " in *" flaky "*) cat >> docker-compose.yml <<YML
+  flaky:
+    image: riso-probe:local
+    container_name: riso-flaky
+    command: ["flaky", "-mark", "/w/ran"]
+    volumes: ["flakymark:/w"]
+YML
+	;; esac
+	case " ${*:4} " in *" seed "*) cat >> docker-compose.yml <<YML
+  seed:
+    image: riso-probe:local
+    container_name: riso-seed
+    depends_on: [$1]
+    command: ["after", "-wait", "8s", "-say", "SEED"]
+YML
+	;; esac
+	case " ${*:4} " in *" watcher "*) cat >> docker-compose.yml <<YML
+  watcher:
+    image: riso-probe:local
+    container_name: riso-watcher
+    depends_on: [$1]
+    command: ["watcher", "-url", "http://host.docker.internal:$2"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+YML
+	;; esac
+	# ender ends the run 8 s after the app starts; holder exits 0 at
+	# keploy's stop of the stack, which meets late's wait, so compose's up
+	# starts late during that stop; late ignores SIGTERM and SIGINT, and runs
+	# until docker kills it at its 5 s stop grace's end (exit 137).
+	case " ${*:4} " in *" latestart "*) cat >> docker-compose.yml <<YML
+  ender:
+    image: riso-probe:local
+    container_name: riso-ender
+    depends_on: [$1]
+    command: ["after", "-wait", "8s", "-say", "ENDER", "-code", "2"]
+  holder:
+    image: riso-probe:local
+    container_name: riso-holder
+    depends_on: [$1]
+    command: ["hold", "-say", "HOLDER"]
+  late:
+    image: riso-probe:local
+    container_name: riso-late
+    depends_on:
+      holder:
+        condition: service_completed_successfully
+    command: ["hold", "-say", "LATE", "-ignore-term"]
+    stop_grace_period: 5s
+YML
+	;; esac
+	case " ${*:4} " in *" flaky "*) printf 'volumes:\n  flakymark: {}\n' >> docker-compose.yml ;; esac
+}
+
+# record_bounded PHASE UP: keploy record of the compose command UP (the app
+# riso-app) in the current dir. The hang guard stops a record that would run
+# on: SIGINT at 240 s, SIGKILL 30 s later. Its log, its exit (keploy's own
+# code), whether the guard stopped it (fired: 1, else 0) and when it ended go
+# to $W/out/PHASE.
+record_bounded() {
+	local phase=$1 up=$2
+	bounded -s INT -k 30 240 $S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" record -c "$up" --container-name riso-app --disable-tele --disableANSI > "$W/out/$phase/keploy.log" 2>&1
+	echo $? > "$W/out/$phase/exit"
+	echo "$HANG_FIRED" > "$W/out/$phase/fired"
+	date +%s > "$W/out/$phase/ended"
+	echo "$phase exit $(cat "$W/out/$phase/exit")$([ "$HANG_FIRED" = 0 ] || echo ', stopped by the hang guard')"
+}
+
+# record_runner PHASE [SERVICE...]: keploy record of `docker compose up
+# --exit-code-from runner` in $W/PHASE, the app run with RECARGS beside the
+# runner and SERVICEs (compose_yml), bounded (record_bounded). The stack's
+# volumes are removed before and after it, so a service's first start in it
+# is its first.
+record_runner() {
+	local phase=$1; shift
+	mkdir -p "$W/$phase" "$W/out/$phase" && cd "$W/$phase" || die cd
+	compose_yml riso-app 8080 "$RECARGS" runner "$@"
+	docker compose down -v --remove-orphans >/dev/null 2>&1
+	log "$phase"
+	record_bounded "$phase" "docker compose up --exit-code-from runner"
+	docker compose down -v --remove-orphans >/dev/null 2>&1
 }
 
 # A port-only bypass rule for 7002 (the sink's bypass port), in keploy.yml.
@@ -226,12 +401,15 @@ rows_reach() {
 # row_log NAME FILE REGEX: FILE has a line matching REGEX.
 row_log() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null && echo 1)" "/$3/ in $(basename "$(dirname "$2")")"; }
 # rows_recorded_nx MODE: the recording holds an NXDOMAIN for recorded-nx.*
-# (and, under docker, for the peer, which was not up yet); the replay serves
-# it, so the app's lookup fails as it did while recording, the name is not
-# reported as one keploy answered itself, and no resolver is asked, with the
-# DNS opt-in too.
+# (and, under docker, for the peer, which was not up yet), and for
+# stop-recorded.*, which the app looked up as keploy record stopped it, after
+# its last test; the replay serves each, so the app's lookup fails as it did
+# while recording, the name is not reported as one keploy answered itself nor
+# as a miss after the last test, and no resolver is asked, with the DNS opt-in
+# too.
+STOPREC=stop-recorded.invalid-replay-isolation.test.
 rows_recorded_nx() {
-	local m=$1 names=(recorded-nx.invalid-replay-isolation.test.) n p
+	local m=$1 names=(recorded-nx.invalid-replay-isolation.test. "$STOPREC") n p
 	[ "$m" = native ] || names+=(riso-peer.)
 	rows_reach "record-$m" dns-recorded
 	for n in "${names[@]}"; do
@@ -241,20 +419,36 @@ rows_recorded_nx() {
 		rows_zero "$p" dns-recorded
 		row_log "$p serves the recorded NXDOMAIN" "$W/out/$p/keploy.log" 'probe dns-recorded-lookup: .*no such host'
 		row_not_kept_dns "$p does not report the recorded name as a miss" "$p" recorded-nx.invalid-replay-isolation.test.
+		row_log "$p serves the NXDOMAIN recorded as the app stopped" "$W/out/$p/keploy.log" 'probe dns-stop-recorded-lookup: .*no such host'
+		row_not_kept_dns "$p does not report the name recorded as the app stopped as a miss" "$p" "$STOPREC"
+		row "$p's misses file does not name the lookup recorded as the app stopped" "$(grep -qF "${STOPREC%.}" "$W/out/$p/last-test-misses.yaml" 2>/dev/null || echo 1)" "${STOPREC%.} in $p's last-test-misses.yaml"
 	done
 }
 # row_nolog NAME FILE REGEX: FILE has no line matching REGEX.
 row_nolog() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null || echo 1)" "no /$3/ in $(basename "$(dirname "$2")")"; }
 # A kept-inside line names a DNS name as keploy's lines name a host: by its
 # labels' shape beside its host tag ("DNS {}.{}.{}. #3fa2c1d0e9b8"), never
-# whole. The run's report names each DNS question no mock answered whole,
-# beside that tag, so the rows read which name a line names from it.
-# report_dns PHASE: "TAG NAME" for each DNS question PHASE's report names.
-report_dns() {
-	cat "$W/out/$1"/report/*.yaml 2>/dev/null | awk '
-		/^[[:space:]]*(- )?protocol:/ { dns = ($NF == "DNS"); name = ""; next }
-		dns && /^[[:space:]]*actual_summary:/ { name = $NF; next }
-		dns && name != "" && /^[[:space:]]*host_tag:/ { t = $NF; gsub(/[\047"]/, "", t); print t, name; name = "" }' | sort -u
+# whole. The run's report names each DNS question a test made that no mock
+# answered whole, beside that tag; keploy test's misses file names each one
+# made outside every test whole, beside the same tag (the report names those
+# by their shape). The rows read which name a line names from the two.
+# whole_dns PHASE: "TAG NAME" for each DNS question PHASE's report or misses
+# file names whole.
+whole_dns() {
+	{
+		cat "$W/out/$1"/report/*.yaml 2>/dev/null | awk '
+			/^[[:space:]]*(- )?protocol:/ { dns = ($NF == "DNS"); name = ""; next }
+			dns && /^[[:space:]]*actual_summary:/ { name = $NF; next }
+			dns && name != "" && /^[[:space:]]*host_tag:/ { t = $NF; gsub(/[\047"]/, "", t); print t, name; name = "" }'
+		yaml_list misses "$W/out/$1/last-test-misses.yaml" | awk -F'|' '{
+			p = c = t = ""
+			for (i = 2; i < NF; i++) {
+				k = $i; sub(/=.*/, "", k); v = substr($i, length(k) + 2)
+				if (k == "protocol") p = v; else if (k == "call") c = v; else if (k == "host_tag") t = v
+			}
+			if (p == "DNS" && t != "" && c != "") { n = split(c, w, " "); print t, w[n] }
+		}'
+	} | sort -u
 }
 # kept_dns_tags PHASE: the tag of each DNS name PHASE's kept-inside report
 # names, and "untagged" for a line that names one by its shape alone (keploy
@@ -268,19 +462,129 @@ kept_dns_tags() {
 # question QNAME (fully qualified), by the tag PHASE's report names it by.
 row_kept_dns() {
 	local tag
-	tag=$(report_dns "$2" | awk -v n="$3" '$2 == n { print $1; exit }')
+	tag=$(whole_dns "$2" | awk -v n="$3" '$2 == n { print $1; exit }')
 	row "$1" "$([ -n "$tag" ] && kept_dns_tags "$2" | grep -qxF -- "$tag" && echo 1)" "$3 is ${tag:-not in the report} in $2"
 }
 # row_not_kept_dns NAME PHASE QNAME: no kept-inside DNS line of PHASE names
-# QNAME: each names the tag of another name PHASE's report holds (a tag the
-# report does not hold could be QNAME's, so it fails the row).
+# QNAME: each names the tag of another name PHASE's report or misses file
+# holds whole (a tag neither holds could be QNAME's, so it fails the row).
 row_not_kept_dns() {
 	local t n bad=""
 	for t in $(kept_dns_tags "$2"); do
-		n=$(report_dns "$2" | awk -v t="$t" '$1 == t { print $2; exit }')
+		n=$(whole_dns "$2" | awk -v t="$t" '$1 == t { print $2; exit }')
 		[ -n "$n" ] && [ "$n" != "$3" ] || bad="$bad $t=${n:-unknown}"
 	done
 	row "$1" "$([ -z "$bad" ] && echo 1)" "kept DNS tags in $2:${bad:- none names $3}"
+}
+
+# The start-up lookup: the probe looks STARTUP up as it starts, only with
+# -unrecorded (the replay's args, never the recording's), so outside every
+# test and in no recording. keploy test answers it itself and fails nothing
+# for it; the run's report names it among the set's outside-test misses by
+# its shape beside its host tag, never whole (a report may be uploaded), and
+# the log says its next step; keploy test's own misses file
+# (keploy/<set>/last-test-misses.yaml, by: keploy test) names it whole beside
+# the same tag, and git ignores that file. keploy mock replay's misses file
+# (last-replay-misses.yaml) is left as it was.
+STARTUP=startup-probe.invalid-replay-isolation.test.
+# mock_misses SET: keploy mock replay's misses file of SET, as the lane plants
+# it before each keploy test run.
+mock_misses() { printf '# Written by `keploy mock replay` (planted by the lane)\nset: %s\nby: keploy mock replay\n' "$1"; }
+# yaml_list KEY FILE...: each entry of the top-level list KEY in FILEs, one
+# line each, as "|key=value|key=value|", each value unquoted.
+yaml_list() {
+	local key=$1; shift
+	cat "$@" 2>/dev/null | awk -v key="$key" '
+		function flush() { if (e != "") print e; e = "" }
+		$0 ~ "^" key ":" { inl = 1; next }
+		inl && /^[^[:space:]#-]/ { flush(); inl = 0 }
+		!inl { next }
+		/^[[:space:]]*- / { flush(); e = "|" }
+		e != "" {
+			l = $0; sub(/^[[:space:]]*(- )?/, "", l)
+			k = l; sub(/:.*/, "", k)
+			v = l; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/^[\047"]|[\047"]$/, "", v)
+			e = e k "=" v "|"
+		}
+		END { flush() }'
+}
+# git_ignores GITIGNORE: git ignores a set's keploy test misses file in a
+# repository whose keploy/.gitignore is GITIGNORE (the lane's work dirs are
+# no repository, so it reads the file keploy wrote in one of its own).
+git_ignores() {
+	local g rc
+	g=$(mktemp -d) || return 1
+	mkdir -p "$g/keploy/test-set-0" && cp "$1" "$g/keploy/.gitignore" && : > "$g/keploy/test-set-0/last-test-misses.yaml" &&
+		git -C "$g" init -q && git -C "$g" check-ignore -q keploy/test-set-0/last-test-misses.yaml
+	rc=$?
+	rm -rf "$g"
+	return $rc
+}
+# rows_startup PHASE: PHASE's report, log and misses files name the start-up
+# lookup as above.
+rows_startup() {
+	local p=$1 whole tag shaped
+	whole=$(yaml_list misses "$W/out/$p/last-test-misses.yaml" | grep -E "[|]call=(A|AAAA) ${STARTUP//./[.]}[|]")
+	tag=$(printf '%s\n' "$whole" | grep -oE '[|]host_tag=#[0-9a-f]+[|]' | head -1 | sed 's/^|host_tag=//; s/|$//')
+	row "$p's misses file names the start-up lookup whole" "$([ -n "$tag" ] && grep -qx 'by: keploy test' "$W/out/$p/last-test-misses.yaml" && echo 1)" "${whole:-none in last-test-misses.yaml}"
+	shaped=$(yaml_list outside_test_misses "$W/out/$p"/report/*.yaml | grep -F '|protocol=DNS|' | grep -F '|when=before_first_test|' | grep -F " $tag|")
+	row "$p's report names the start-up lookup by its shape, before the first test" "$([ -n "$tag" ] && [ -n "$shaped" ] && ! printf '%s' "$shaped" | grep -qF startup-probe && echo 1)" "$(printf '%s' "${shaped:-no outside-test miss with tag ${tag:-unknown}}" | cut -c1-160)"
+	row "$p's report names the start-up lookup nowhere whole" "$(cat "$W/out/$p"/report/*.yaml 2>/dev/null | grep -qF startup-probe || echo 1)" "startup-probe in $p's report"
+	row_log "$p says the start-up lookup's next step" "$W/out/$p/keploy.log" 'made a call outside every test that no mock answered.*record the test set again'
+	row_log "$p points to its misses file" "$W/out/$p/keploy.log" 'misses file names each call the application made outside every test whole.*last-test-misses[.]yaml'
+	row "git ignores $p's misses file" "$(git_ignores "$W/out/$p/keploy.gitignore" && echo 1)" "keploy/.gitignore $p left"
+	row "$p leaves mock replay's misses file as it was" "$([ -f "$W/out/$p/mock-misses-kept" ] && echo 1)" "last-replay-misses.yaml"
+}
+
+# The lookup after the last test (-stop-lookup):
+# the probe looks STOPNAME up as it stops, in no recording. keploy test
+# answers it itself and fails nothing for it; the run's report names it among
+# the set's outside-test misses as made after the last test, by its shape
+# beside its host tag, never whole, and keploy test's misses file names it
+# whole beside the same tag.
+STOPNAME=stop-probe.invalid-replay-isolation.test.
+# rows_after_last PHASE: PHASE's report and misses file name the lookup made
+# after the last test as above.
+rows_after_last() {
+	local p=$1 whole tag shaped
+	whole=$(yaml_list misses "$W/out/$p/last-test-misses.yaml" | grep -E "[|]call=(A|AAAA) ${STOPNAME//./[.]}[|]")
+	tag=$(printf '%s\n' "$whole" | grep -oE '[|]host_tag=#[0-9a-f]+[|]' | head -1 | sed 's/^|host_tag=//; s/|$//')
+	row "$p's misses file names the lookup made after the last test whole" "$([ -n "$tag" ] && echo 1)" "${whole:-none in last-test-misses.yaml}"
+	shaped=$(yaml_list outside_test_misses "$W/out/$p"/report/*.yaml | grep -F '|protocol=DNS|' | grep -F '|when=after_last_test|' | grep -F " $tag|")
+	row "$p's report names the lookup made after the last test by its shape" "$([ -n "$tag" ] && [ -n "$shaped" ] && ! printf '%s' "$shaped" | grep -qF stop-probe && echo 1)" "$(printf '%s' "${shaped:-no outside-test miss with tag ${tag:-unknown}}" | cut -c1-160)"
+	row "$p's report names the lookup made after the last test nowhere whole" "$(cat "$W/out/$p"/report/*.yaml 2>/dev/null | grep -qF stop-probe || echo 1)" "stop-probe in $p's report"
+}
+# row_unguarded PHASE: PHASE's bounded record (record_bounded) ended by
+# itself; the hang guard did not stop it.
+row_unguarded() {
+	local fired
+	fired=$(cat "$W/out/$1/fired" 2>/dev/null)
+	row "$1 ends by itself, not by the hang guard's stop at 240 s" "$([ "$fired" = 0 ] && echo 1)" "fired ${fired:-none}"
+}
+# rows_runner PHASE: PHASE's record (record_runner) ended by itself, on the
+# runner's exit with its code, 0, within a minute of the runner's last line
+# (a record that went on ran until the hang guard stopped it), and holds the
+# runner's 6 calls: its health check and its 5 more.
+rows_runner() {
+	local p=$1 rexit rdone rend rtests
+	rexit=$(cat "$W/out/$p/exit" 2>/dev/null)
+	rdone=$(grep -aoE 'RUNNER DONE [0-9]+' "$W/out/$p/keploy.log" 2>/dev/null | head -1 | awk '{print $3}')
+	rend=$(cat "$W/out/$p/ended" 2>/dev/null)
+	row_unguarded "$p"
+	row "$p ends with the runner's code, 0" "$([ "$rexit" = 0 ] && echo 1)" "exit ${rexit:-none}"
+	row "$p ends within 60 s of the runner's last line" "$([ -n "$rdone" ] && [ -n "$rend" ] && [ $((rend - rdone)) -le 60 ] && echo 1)" "$([ -n "$rdone" ] && [ -n "$rend" ] && echo "$((rend - rdone)) s after RUNNER DONE" || echo 'no RUNNER DONE line in its log')"
+	rtests=$(ls "$W/$p"/keploy/test-set-*/tests/*.yaml 2>/dev/null | wc -l)
+	row "$p records the runner's 6 calls" "$([ "$rtests" = 6 ] && echo 1)" "$rtests tests"
+}
+# rows_mode PHASE: PHASE's keploy test ran in this script's mode: its report
+# says it ran under the proven switch (proven: true) only when KEPLOY_PROVEN=1,
+# so a sudo line that drops the switch fails a row instead of running the
+# rows in the other mode.
+rows_mode() {
+	local p=$1 said want=0
+	said=$(grep -hc '^proven: true$' "$W/out/$p"/report/*.yaml 2>/dev/null | head -1)
+	[ "${KEPLOY_PROVEN:-}" != 1 ] || want=1
+	row "$p ran in this lane's mode (KEPLOY_PROVEN=${KEPLOY_PROVEN:-unset})" "$([ "${said:-0}" = "$want" ] && echo 1)" "proven: true in $p's report ${said:-0} time(s), want $want"
 }
 
 # replay PHASE CMD...: one keploy test run in the current dir, its log and exit.
@@ -296,15 +600,28 @@ replay() {
 	# Under docker, the resolv.conf docker wrote for the app (for dns_why).
 	waitfor 300 docker_resolv "$phase" riso-app &
 	local resolvwatch=$!
-	"${RUNNER[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" test "$@" --apiTimeout 60 --disable-tele --disableANSI --generate-github-actions=false > "$W/out/$phase/keploy.log" 2>&1
+	# keploy mock replay's misses file of the set, as a last mock replay
+	# would leave it, for the startup rows: keploy test never writes or
+	# removes it.
+	local set
+	set=$(ls -d keploy/test-set-* 2>/dev/null | head -1)
+	[ -z "$set" ] || mock_misses "${set##*/}" | $S tee "$set/last-replay-misses.yaml" >/dev/null
+	"${RUNNER[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" test "$@" --apiTimeout 60 --disable-tele --disableANSI --generate-github-actions=false > "$W/out/$phase/keploy.log" 2>&1
 	echo $? > "$W/out/$phase/exit"
 	echo "$phase exit $(cat "$W/out/$phase/exit")"
 	waitfor 15 grep -q 'probe fork-tcp' "$W/out/$phase/keploy.log"
 	grep -h 'status:' keploy/reports/test-run-*/*.yaml 2>/dev/null | sort | uniq -c
-	# This run's report, for the DNS rows (report_dns).
+	# This run's report, for the DNS rows (whole_dns).
 	local run
 	run=$(ls -td keploy/reports/test-run-* 2>/dev/null | head -1)
 	[ -z "$run" ] || cp -r "$run" "$W/out/$phase/report"
+	# keploy test's own misses file and the keploy/.gitignore it was
+	# written under, and whether mock replay's file is as it was.
+	if [ -n "$set" ]; then
+		cp "$set/last-test-misses.yaml" "$W/out/$phase/" 2>/dev/null
+		if cmp -s "$set/last-replay-misses.yaml" <(mock_misses "${set##*/}"); then : > "$W/out/$phase/mock-misses-kept"; fi
+	fi
+	cp keploy/.gitignore "$W/out/$phase/keploy.gitignore" 2>/dev/null
 	kill $peerwatch $resolvwatch 2>/dev/null; wait $peerwatch $resolvwatch 2>/dev/null
 	docker rm -f riso-app >/dev/null 2>&1
 	[ ! -f docker-compose.yml ] || docker compose down --remove-orphans >/dev/null 2>&1
@@ -386,7 +703,7 @@ for mode in "${MODES[@]}"; do
 		bypass_yml
 		log "record-native"
 		sink_start record-native
-		"${SINKDNS[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" record -c "$W/egressprobe $RECARGS" --disable-tele --disableANSI > "$W/out/record-native/keploy.log" 2>&1 &
+		"${SINKDNS[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" record -c "$W/egressprobe $RECARGS" --disable-tele --disableANSI > "$W/out/record-native/keploy.log" 2>&1 &
 		KP=$!
 		waitfor 180 curl -sf localhost:8080/health || echo "record app not up"
 		fire http://localhost:8080 "$W/out/record-native/keploy.log"
@@ -402,7 +719,7 @@ for mode in "${MODES[@]}"; do
 		# An entry keploy does not act on is refused before anything starts.
 		log "refuse-native"
 		mkdir -p "$W/out/refuse-native"
-		"${SINKDNS[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" test -c "$W/egressprobe $APPARGS" --allow-egress imds --disable-tele --disableANSI --generate-github-actions=false > "$W/out/refuse-native/keploy.log" 2>&1
+		"${SINKDNS[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" test -c "$W/egressprobe $APPARGS" --allow-egress imds --disable-tele --disableANSI --generate-github-actions=false > "$W/out/refuse-native/keploy.log" 2>&1
 		echo $? > "$W/out/refuse-native/exit"
 		cd "$W" || die cd
 		;;
@@ -424,7 +741,7 @@ for mode in "${MODES[@]}"; do
 		bypass_yml
 		log "record-docker"
 		sink_start record-docker
-		$S env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" record -c "$RECRUN" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-docker/keploy.log" 2>&1 &
+		$S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" record -c "$RECRUN" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-docker/keploy.log" 2>&1 &
 		KP=$!
 		waitfor 300 curl -sf localhost:8080/health || { echo "record app not up"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}'; }
 		docker_resolv record-docker riso-app
@@ -467,7 +784,7 @@ for mode in "${MODES[@]}"; do
 		bypass_yml
 		log "record-compose"
 		sink_start record-compose
-		$S env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" record -c "docker compose up" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose/keploy.log" 2>&1 &
+		$S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" record -c "docker compose up" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose/keploy.log" 2>&1 &
 		KP=$!
 		# A call before keploy's agent holds the published port is reset
 		# (record-bind-race), so the probe is fired once it does.
@@ -483,10 +800,110 @@ for mode in "${MODES[@]}"; do
 
 		# The peer service joins only now, after the recording, which holds
 		# only its NXDOMAIN (as in the docker phase).
-		compose_yml riso-app 8080 "$APPARGS" peer
+		# A one-shot container beside it exits 0 as the stack starts, and
+		# ends nothing.
+		compose_yml riso-app 8080 "$APPARGS" peer oneshot
 		RUNNER=($S)
 		replay replay-compose -c "docker compose up" --containerName riso-app --delay 10
 		replay replay-compose-dns -c "docker compose up" --containerName riso-app --delay 10 --allow-egress dns
+		# The application crashes during its test (exit 3): the run ends on
+		# it, the set APP_HALTED, naming the container's exit code.
+		compose_yml riso-app 8080 "$APPARGS -crash-on-fire 3"
+		replay replay-compose-crash -c "docker compose up" --containerName riso-app --delay 10
+		# keploy's agent's container is killed once the application runs,
+		# before the tests are sent: the run ends, naming the agent, its exit
+		# code and the next step, not the application.
+		compose_yml riso-app 8080 "$APPARGS"
+		mkdir -p "$W/out/replay-compose-agent"
+		(
+			waitfor 300 sh -c "docker inspect -f '{{.State.Running}}' riso-app 2>/dev/null | grep -qx true" || exit 0
+			agent=$(docker ps --filter name=^keploy-v3- --format '{{.Names}}' | head -1)
+			[ -z "$agent" ] || docker kill "$agent" > "$W/out/replay-compose-agent/killed" 2>&1
+		) &
+		killer=$!
+		replay replay-compose-agent -c "docker compose up" --containerName riso-app --delay 20
+		kill $killer 2>/dev/null; wait $killer 2>/dev/null
+		# `up riso-app` attaches compose to the application alone, so its up
+		# returns as soon as keploy stops the application: keploy holds the
+		# run until its own teardown, so the read after the last test is
+		# made with its agent still up (rows_after_last).
+		compose_yml riso-app 8080 "$APPARGS"
+		replay replay-compose-app -c "docker compose up riso-app" --containerName riso-app --delay 10
+		# The user's own `up --abort-on-container-failure`, a watcher beside
+		# the app that exits 1 once the app stops answering, and two sets (the
+		# recording's, twice): keploy's own stop of the app makes the watcher
+		# exit 1: at the run's end with the switch unset (the app runs across
+		# sets), at the first set's end under the switch (each set starts the
+		# app again). That exit is keploy's stop, not a failure: it keeps no
+		# halt and ends nothing, and both sets pass. The app stops answering
+		# at once on its stop and stays up 3 s longer (-stop-hold), so the
+		# watcher's exit comes while keploy's stop still waits on the app,
+		# whichever stop it is.
+		mkdir -p "$W/compose-watch/keploy" && cd "$W/compose-watch" || die cd
+		cp "$W/compose/keploy.yml" . || die "keploy.yml"
+		for s in 0 1; do
+			mkdir -p "keploy/test-set-$s" && cp -r "$W/compose/keploy/test-set-0/tests" "$W/compose/keploy/test-set-0/mocks.yaml" "keploy/test-set-$s/" || die "the watcher's sets"
+		done
+		compose_yml riso-app 8080 "$APPARGS -stop-hold 3s" watcher
+		replay replay-compose-watch -c "docker compose up --abort-on-container-failure" --containerName riso-app --delay 10
+		cd "$W/compose" || die cd
+
+		# The user's own `--exit-code-from runner`: keploy record ends when
+		# the test-driver service exits, with its code (0 here), at once, and
+		# holds what the runner sent: its health check and its 5 calls.
+		sink_start record-compose-runner
+		record_runner record-compose-runner
+
+		# The user's own `--exit-code-from early`, early exiting 3 before the
+		# application's container has started: keploy record ends at once,
+		# with early's 3, and names its exit. The hang guard stops a record
+		# that would run on (record_bounded).
+		mkdir -p "$W/compose-early" "$W/out/record-compose-early" && cd "$W/compose-early" || die cd
+		compose_yml riso-app 8080 "$RECARGS" early
+		log "record-compose-early"
+		date +%s > "$W/out/record-compose-early/began"
+		record_bounded record-compose-early "docker compose up --exit-code-from early"
+		docker compose down --remove-orphans >/dev/null 2>&1
+		# A dependency of the app's (`depends_on: [flaky]`, no wait on its
+		# exit) that crashes on its first start only, before the app starts:
+		# keploy stops the stack, as compose's abort stopped it, and retries
+		# the bring-up, and the record ends on the runner's exit, as above.
+		record_runner record-compose-flaky flaky
+		# A migration the app waits on (service_completed_successfully) that
+		# exits 0 after keploy's agent is healthy, so compose starts the app
+		# as soon as it has exited: its exit ends nothing, whichever of the two
+		# keploy reads first (the daemon's instants decide, not the read).
+		record_runner record-compose-migrate migrate
+		# A seed that starts once the app has (`depends_on: [riso-app]`) and
+		# exits 0 8 s later, and that the runner waits on: its exit ends
+		# nothing, compose's up then starts the runner, and the record ends on
+		# the runner's exit, as above (before, a stack stop that missed the
+		# runner, which compose started after it, and a record that never
+		# ended).
+		record_runner record-compose-seed seed
+		# The user's own `--exit-code-from ender`, ender exiting 2 8 s after
+		# the application started: keploy stops the stack, and holder's exit
+		# 0 at that stop meets late's wait, so compose's up starts late while
+		# the stop still waits on the application, which stays up 3 s after
+		# its stop (-stop-hold): every time, late starts after keploy's
+		# listing of the stack and during its stops. late ignores SIGTERM, so
+		# it runs until a stop kills it at its 5 s grace's end, and compose's
+		# up returns only once late has ended. keploy stops late too, as
+		# compose's own abort stops a late starter, and the record ends with
+		# ender's 2 well within 60 s; a keploy that never stopped late ran on
+		# until the hang guard's INT at 240 s. The rows read late's end as
+		# docker's kill (137), never the Go runtime's deadlock exit (2), which
+		# a probe that blocks on nothing hits at once in the lane's static
+		# build: then compose's up never waits on late, and the case cannot
+		# fail.
+		mkdir -p "$W/compose-latestart" "$W/out/record-compose-latestart" && cd "$W/compose-latestart" || die cd
+		compose_yml riso-app 8080 "$RECARGS -stop-hold 3s" latestart
+		docker compose down --remove-orphans >/dev/null 2>&1
+		log "record-compose-latestart"
+		date +%s > "$W/out/record-compose-latestart/began"
+		record_bounded record-compose-latestart "docker compose up --exit-code-from ender"
+		docker compose down --remove-orphans >/dev/null 2>&1
+		sink_stop
 		cd "$W" || die cd
 		;;
 	internal)
@@ -550,6 +967,12 @@ for mode in "${MODES[@]}"; do
 	native)
 		rows_reach base-native tcp tfo imds-tcp dns-udp
 		row "replay-native passes" "$([ "$(cat "$W/out/replay-native/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-native/exit" 2>/dev/null)"
+		# The start-up lookup, outside every test (rows_startup), and the one
+		# made after the last test, as the application stopped
+		# (rows_after_last).
+		rows_startup replay-native
+		rows_mode replay-native
+		rows_after_last replay-native
 		# A DNS miss is answered by keploy: native has no in-network resolver.
 		rows_zero replay-native tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp
 		row_log "replay-native names the resolvers it does not ask" "$W/out/replay-native/keploy.log" 'forwarded only to a resolver inside the replay.s own network.*not_asked.*198\.18\.0\.10'
@@ -573,6 +996,12 @@ for mode in "${MODES[@]}"; do
 		# dns-bare: it recurses an unrecorded single-label name there too.
 		rows_reach base-docker tcp fork-tcp tfo imds-tcp dns-udp dns-bare
 		row "replay-docker passes" "$([ "$(cat "$W/out/replay-docker/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-docker/exit" 2>/dev/null)"
+		# The start-up lookup, outside every test (rows_startup), and the one
+		# made after the last test, as the application stopped
+		# (rows_after_last).
+		rows_startup replay-docker
+		rows_mode replay-docker
+		rows_after_last replay-docker
 		# keploy answers that name itself: 127.0.0.11 gets only the network's
 		# own names, so the name never reaches its upstream. Nor does any
 		# other (dns-other): only 127.0.0.11 asks the sink here.
@@ -602,6 +1031,26 @@ for mode in "${MODES[@]}"; do
 		rows_reach base-compose dns-owned
 		row_log "base-compose resolves the peer service" "$W/out/base-compose/app.log" 'probe dns-peer: [0-9]'
 		row "replay-compose passes" "$([ "$(cat "$W/out/replay-compose/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose/exit" 2>/dev/null)"
+		# The start-up lookup, outside every test (rows_startup), and the one
+		# made after the last test (rows_after_last), in either mode.
+		rows_startup replay-compose
+		rows_mode replay-compose
+		rows_after_last replay-compose
+		# keploy takes the stack down as the run ends, the one-shot container
+		# with it, so its exit is read from compose's own line in the run's
+		# log: a test was sent after it, and the run passed (the row above).
+		row "replay-compose: the one-shot container exited 0 and ended nothing" "$(awk '/riso-oneshot exited with code 0/ { o = 1 } o && /starting test for/ { t = 1 } END { exit !t }' "$W/out/replay-compose/keploy.log" 2>/dev/null && echo 1)" "$(grep -aom1 'riso-oneshot exited with code [0-9]*' "$W/out/replay-compose/keploy.log" 2>/dev/null || echo 'no exit of riso-oneshot'), then a test sent after it"
+		# The application's crash ends the run on it.
+		row "replay-compose-crash fails" "$([ "$(cat "$W/out/replay-compose-crash/exit" 2>/dev/null)" != 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-crash/exit" 2>/dev/null)"
+		row_log "replay-compose-crash: the application crashed" "$W/out/replay-compose-crash/keploy.log" 'probe crash: exit 3'
+		row_log "replay-compose-crash names the application's exit code" "$W/out/replay-compose-crash/keploy.log" "the application's container exited with code 3, and keploy had not stopped it"
+		row "replay-compose-crash: the set is APP_HALTED" "$(cat "$W/out/replay-compose-crash"/report/*.yaml 2>/dev/null | grep -q '^status: APP_HALTED$' && echo 1)" "$(cat "$W/out/replay-compose-crash"/report/*.yaml 2>/dev/null | grep -m1 '^status:' || echo 'no report')"
+		rows_mode replay-compose-crash
+		# keploy's agent's death ends the run on it, named.
+		row "replay-compose-agent: keploy's agent was killed" "$(grep -q . "$W/out/replay-compose-agent/killed" 2>/dev/null && echo 1)" "$(cat "$W/out/replay-compose-agent/killed" 2>/dev/null || echo 'no agent container found')"
+		row "replay-compose-agent fails" "$([ "$(cat "$W/out/replay-compose-agent/exit" 2>/dev/null)" != 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-agent/exit" 2>/dev/null)"
+		row_log "replay-compose-agent names keploy's agent, its exit code and the next step" "$W/out/replay-compose-agent/keploy.log" "keploy's agent container [^ ]*keploy-v3-[^ ]* exited with code 137 after the application started.*Next step: find why the agent stopped"
+		row_nolog "replay-compose-agent does not name the application's own exit" "$W/out/replay-compose-agent/keploy.log" "the application's container exited with code [0-9]+, and keploy had not stopped it"
 		# keploy answers that name itself, so it never reaches 127.0.0.11's
 		# upstream, nor does any other name (dns-other).
 		rows_zero replay-compose tcp fork-tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp
@@ -618,6 +1067,71 @@ for mode in "${MODES[@]}"; do
 		row_log "replay-compose-dns: the agent gets the opt-in" "$W/out/replay-compose-dns/keploy.log" "$EGRESS_DNS"
 		rows_reach replay-compose-dns dns-udp
 		rows_recorded_nx compose
+		# `up riso-app`: its up returned at keploy's stop of the application,
+		# and the run read the calls after the last test from its agent.
+		row "replay-compose-app passes" "$([ "$(cat "$W/out/replay-compose-app/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-app/exit" 2>/dev/null)"
+		rows_mode replay-compose-app
+		rows_startup replay-compose-app
+		rows_after_last replay-compose-app
+		row_nolog "replay-compose-app read every call made after the last test" "$W/out/replay-compose-app/keploy.log" 'could not read every call the application made after'
+		row_nolog "replay-compose-app does not name keploy's agent as stopped" "$W/out/replay-compose-app/keploy.log" "keploy's agent container [^ ]* exited with code"
+		# The watcher (`up --abort-on-container-failure`): keploy's stop of
+		# the app at the first set's end made it exit 1, which ended nothing.
+		row "replay-compose-watch passes" "$([ "$(cat "$W/out/replay-compose-watch/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-watch/exit" 2>/dev/null)"
+		rows_mode replay-compose-watch
+		wpassed=$(cat "$W/out/replay-compose-watch"/report/*.yaml 2>/dev/null | grep -c '^status: PASSED$')
+		row "replay-compose-watch passes both sets" "$([ "$wpassed" = 2 ] && echo 1)" "$wpassed sets PASSED"
+		row_log "replay-compose-watch: the watcher exited 1 as keploy stopped the app" "$W/out/replay-compose-watch/keploy.log" 'WATCHER EXITS 1'
+		row_log "replay-compose-watch takes the watcher's exit for keploy's own stop" "$W/out/replay-compose-watch/keploy.log" 'exited while keploy held the application stopped.*it ends nothing.*watcher'
+		row_nolog "replay-compose-watch ends nothing on the watcher's exit" "$W/out/replay-compose-watch/keploy.log" "the command.s abort flags end the run on it"
+		row_nolog "replay-compose-watch keeps no halt" "$W/out/replay-compose-watch/keploy.log" 'APP_HALTED|exited with code [0-9]+, and keploy had not stopped it'
+		# `up --exit-code-from runner` at record: it ended on the runner's
+		# exit, with its code, within a minute of the runner's last line
+		# (before, compose's own abort), and holds the runner's 6 calls.
+		rows_runner record-compose-runner
+		# `up --exit-code-from early` at record, early exiting 3 before the
+		# application started: it ended by itself on early's exit, with its 3,
+		# within a minute (before, a record that ran on until it was
+		# stopped), and its log names early's exit.
+		eexit=$(cat "$W/out/record-compose-early/exit" 2>/dev/null)
+		ebegan=$(cat "$W/out/record-compose-early/began" 2>/dev/null)
+		eend=$(cat "$W/out/record-compose-early/ended" 2>/dev/null)
+		row_unguarded record-compose-early
+		row "record-compose-early ends with early's code, 3" "$([ "$eexit" = 3 ] && echo 1)" "exit ${eexit:-none}"
+		row "record-compose-early ends within 60 s" "$([ -n "$ebegan" ] && [ -n "$eend" ] && [ $((eend - ebegan)) -le 60 ] && echo 1)" "$([ -n "$ebegan" ] && [ -n "$eend" ] && echo "$((eend - ebegan)) s" || echo 'no times')"
+		row "record-compose-early names early's exit before the application started" "$(grep -aqE 'service .{0,2}early.{0,2} exited with code 3 before the application started' "$W/out/record-compose-early/keploy.log" && echo 1)" "$(grep -acE 'exited with code 3 before the application started' "$W/out/record-compose-early/keploy.log") lines"
+		# flaky's crash on its first start, before the app started: the
+		# bring-up was retried, flaky came up, and the record is the runner's.
+		rows_runner record-compose-flaky
+		row_log "record-compose-flaky: flaky crashed on its first start" "$W/out/record-compose-flaky/keploy.log" 'FLAKY CRASHES 1'
+		row_log "record-compose-flaky retried the bring-up on flaky's crash" "$W/out/record-compose-flaky/keploy.log" 'crashed before the application started: keploy stops the stack, as compose.s abort stopped it, and retries the bring-up'
+		row_log "record-compose-flaky: flaky came up on the retry" "$W/out/record-compose-flaky/keploy.log" 'FLAKY UP'
+		# migrate's 0 after keploy's agent was healthy: compose's up waits on
+		# it, so it ended nothing.
+		rows_runner record-compose-migrate
+		row_log "record-compose-migrate: the migration exited 0" "$W/out/record-compose-migrate/keploy.log" 'MIGRATE DONE'
+		row_log "record-compose-migrate: its exit ends nothing, as compose's up waits on it" "$W/out/record-compose-migrate/keploy.log" 'docker compose up waits on that exit before it starts another service.*migrate'
+		row_nolog "record-compose-migrate: its exit does not end the run" "$W/out/record-compose-migrate/keploy.log" 'the command.s abort flags end the run on it.*"service": "migrate"'
+		# seed's 0 after the app started, which the runner waits on: it ended
+		# nothing, and the runner compose started after it ended the record.
+		rows_runner record-compose-seed
+		row_log "record-compose-seed: the seed exited 0" "$W/out/record-compose-seed/keploy.log" 'SEED DONE'
+		row_log "record-compose-seed: its exit ends nothing, as compose's up waits on it" "$W/out/record-compose-seed/keploy.log" 'docker compose up waits on that exit before it starts another service.*seed'
+		row_nolog "record-compose-seed: its exit does not end the run" "$W/out/record-compose-seed/keploy.log" 'the command.s abort flags end the run on it.*"service": "seed"'
+		# ender's 2 after the app started ended the record by itself, with
+		# its 2, within a minute, and late, which compose's up started during
+		# keploy's stop of the stack, was named and stopped.
+		lexit=$(cat "$W/out/record-compose-latestart/exit" 2>/dev/null)
+		lbegan=$(cat "$W/out/record-compose-latestart/began" 2>/dev/null)
+		lend=$(cat "$W/out/record-compose-latestart/ended" 2>/dev/null)
+		row_unguarded record-compose-latestart
+		row "record-compose-latestart ends with ender's code, 2" "$([ "$lexit" = 2 ] && echo 1)" "exit ${lexit:-none}"
+		row "record-compose-latestart ends within 60 s" "$([ -n "$lbegan" ] && [ -n "$lend" ] && [ $((lend - lbegan)) -le 60 ] && echo 1)" "$([ -n "$lbegan" ] && [ -n "$lend" ] && echo "$((lend - lbegan)) s" || echo 'no times')"
+		row_log "record-compose-latestart: ender exited 2 after the application started" "$W/out/record-compose-latestart/keploy.log" 'service .{0,2}ender.{0,2} exited with code 2 after the application started'
+		row_log "record-compose-latestart: late started" "$W/out/record-compose-latestart/keploy.log" 'LATE UP'
+		row_log "record-compose-latestart: keploy saw late's start" "$W/out/record-compose-latestart/keploy.log" 'started after keploy began to stop the stack.*"service": "late"'
+		row_log "record-compose-latestart: late ran until its stop killed it (137)" "$W/out/record-compose-latestart/keploy.log" 'riso-late exited with code 137'
+		row_nolog "record-compose-latestart: late did not end on the Go runtime's deadlock check" "$W/out/record-compose-latestart/keploy.log" 'all goroutines are asleep'
 		;;
 	esac
 done

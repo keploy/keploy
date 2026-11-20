@@ -4008,12 +4008,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	// Continue with app setup and registration as per normal flow
-	usrApp := app.NewApp(a.logger, cmd, a.dockerClient, opts)
-	a.apps.Store(uint64(0), usrApp) // key = 0, since there's only one client per agent
-	// Under compose the agent is the user's project's to start again: the
-	// session puts back what the run set up on it (see agentSession).
-	a.session().configure(utils.CmdType(opts.CommandType) == utils.DockerCompose)
-	usrApp.SetOnAgentRestart(a.setUpRestartedAgent)
+	usrApp := a.registerApp(cmd, opts)
 
 	// Set up cleanup on failure
 	defer func() {
@@ -5130,12 +5125,73 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 	return nil
 }
 
-func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retErr error) {
-	defer func() {
-		if retErr == nil {
-			a.session().record(stepAgentReady, func(c context.Context) error { return a.MakeAgentReadyForDockerCompose(c) })
-		}
-	}()
+// restartHooks is what the application client takes from the agent client
+// for an agent docker compose starts again (app.App's setters).
+type restartHooks interface {
+	SetOnAgentRestart(func(ctx context.Context) error)
+	SetAgentReleaseHold(func(ctx context.Context) (resume func(failed error)))
+	SetAgentReleaseRefusal(func(failed error))
+	SetAgentHeldRelease(func(ctx context.Context, current func(ctx context.Context) bool) error)
+}
+
+// registerApp makes the application client of this run and keeps it as the
+// agent's one (key 0: there's only one client per agent), with the hooks of
+// an agent compose's retry starts again (handRestartHooks): an app kept
+// without them would run a plain retry, with no hold, no setup and no
+// refusal, and the agent compose started again would take the run's
+// releases with none of its mocks or settings.
+func (a *AgentClient) registerApp(cmd string, opts models.SetupOptions) *app.App {
+	usrApp := app.NewApp(a.logger, cmd, a.dockerClient, opts)
+	a.apps.Store(uint64(0), usrApp)
+	// Under compose the agent is the user's project's to start again: the
+	// session puts back what the run set up on it (see agentSession).
+	a.session().configure(utils.CmdType(opts.CommandType) == utils.DockerCompose)
+	a.handRestartHooks(usrApp)
+	return usrApp
+}
+
+// handRestartHooks gives app what sets up again, through this client's
+// session, an agent compose's retry started again, and what holds and
+// refuses the releases of the app meanwhile, and what makes, on the agent
+// set up, a release the hold holds that no setup made (releaseHeld).
+func (a *AgentClient) handRestartHooks(app restartHooks) {
+	app.SetOnAgentRestart(a.setUpRestartedAgent)
+	app.SetAgentReleaseHold(func(ctx context.Context) func(error) { return a.session().holdReleases(ctx) })
+	app.SetAgentReleaseRefusal(func(failed error) { a.session().refuseRun(failed) })
+	app.SetAgentHeldRelease(func(ctx context.Context, current func(ctx context.Context) bool) error {
+		return a.session().releaseHeld(ctx, current)
+	})
+}
+
+func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
+	return a.makeAgentReady(ctx, false)
+}
+
+// makeAgentReady releases the app (MakeAgentReadyForDockerCompose). setup: it
+// is the release a restarted agent's setup makes again, last (reapply).
+func (a *AgentClient) makeAgentReady(ctx context.Context, setup bool) (retErr error) {
+	// A release is recorded as it begins (beginRelease), to be made again on
+	// an agent compose starts in its place: compose's bring-up retry starts
+	// the agent again when a dependency crashed, and the restarted agent is
+	// set up with the calls recorded here (reapply). Without it that agent is
+	// never released, its health check never passes, and the app it gates
+	// never starts: the run waits for good. A release the watch cut (the
+	// agent's container exited, or its start failed or stopped making
+	// progress, before it took the release) is still owed to that agent. A
+	// release the agent refused for good (a latched CA setup failure, a
+	// proven switch that disagrees) or one the run's end cut is owed to
+	// no one, and is taken back as it ends. So is one the failed setup of a
+	// restarted agent refused (refuseReleases): it is cut at once, and one
+	// asked for after that asks the agent nothing.
+	s := a.session()
+	parent := ctx
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	rc, refused := s.beginRelease(setup, cancel, func(c context.Context) error { return a.makeAgentReady(c, true) })
+	if refused != nil {
+		return releaseRefused(refused)
+	}
+	defer func() { s.endRelease(rc, retErr == nil || errors.Is(retErr, errReleaseCut)) }()
 	// The wait follows the agent, not a clock: it goes on while the agent
 	// answers that it is not ready yet, or while its start makes progress
 	// (watchAgent), and ends at once on an answer that says it never will be
@@ -5145,9 +5201,6 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 	//
 	// The watch's verdict ends a request in flight too: an agent that takes
 	// a connection and never answers it holds the request, not the release.
-	parent := ctx
-	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
 	if gone, over := a.watchAgent(ctx, true); gone != nil {
 		// The release ends only once its watch has, and so once the
 		// watch's look, and the engine command that look runs, have been
@@ -5160,7 +5213,7 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 		go func() {
 			select {
 			case err := <-gone:
-				cancel(fmt.Errorf("the keploy agent did not take its release of the application (/agent/ready): %w", err))
+				cancel(fmt.Errorf("%w: %w", errReleaseCut, err))
 			case <-ctx.Done():
 			}
 		}()
@@ -5216,11 +5269,30 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 			return err
 		}
 
+		// Not while compose's bring-up retry may be starting the agent
+		// again (holdReleases): the agent that answers here then may be one
+		// its setup has not made the run's calls on again yet. Never once
+		// that setup failed: the run ends on that failure, which the
+		// release's context then carries (refuseReleases).
+		if !s.awaitPost(ctx.Done(), rc) {
+			if parent.Err() != nil {
+				return parent.Err()
+			}
+			return context.Cause(ctx)
+		}
 		resp, err := doAgent(&a.client, req)
+		var body []byte
 		if err == nil {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			body, _ = io.ReadAll(io.LimitReader(resp.Body, 4096))
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
+		}
+		// Refused while its request was out: the release ends with the
+		// failed setup, even where the agent took it.
+		if refused := s.posted(rc); refused != nil {
+			return releaseRefused(refused)
+		}
+		if err == nil {
 			if resp.StatusCode == http.StatusOK {
 				a.logger.Debug("Successfully marked agent as ready")
 				// A docker-mode agent is given the names its replay's
@@ -5246,6 +5318,10 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 		}
 	}
 }
+
+// errReleaseCut begins the error of a release the agent's watch ended before
+// the agent took it (MakeAgentReadyForDockerCompose).
+var errReleaseCut = errors.New("the keploy agent did not take its release of the application (/agent/ready)")
 
 // agentCASetupFailed begins the agent's answer to /agent/ready when its CA
 // setup has failed (pkg/agent/routes, MakeAgentReady): a failure it latches.

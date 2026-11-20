@@ -276,25 +276,20 @@ func overflowPending(p *Proxy) {
 }
 
 // Misses made while no test's window is open, past the list's room, are kept
-// on the agent's disk and are the set's first test's as the rest are: with
-// the proven switch off they are discarded, said, and no read is made
-// incomplete by them; under the switch the first test reads every one, marked
-// as made before the set, complete. Past the disk's bound they are dropped:
-// with the switch off the drop is said; under it the first test's read says
-// it is short of them.
-func TestBeginTestErrorCapture_SaysAPendingOverflowAndJudgesTheTest(t *testing.T) {
+// on the agent's disk and are the set's when its first test opens its window,
+// with the proven switch on or off: the first test reads every one, marked as
+// made before the set, complete. Past the disk's bound they are dropped, and
+// the first test's read says it is short of them (with the switch off the
+// replay marks that test's misses unattributed and says why; with it on it
+// does not judge the set). None is discarded unsaid.
+func TestBeginTestErrorCapture_CarriesAPendingOverflowAsTheSetsAndSaysTheReadIsShort(t *testing.T) {
 	for _, full := range []bool{false, true} {
 		t.Run(fmt.Sprintf("disk full %v", full), func(t *testing.T) {
 			eitherSwitch(t, func(t *testing.T) {
 				if full {
 					noSpillRoom(t)
 				}
-				// The logger is the proxy's before its drain starts: the drain reads it.
-				core, logs := observer.New(zap.WarnLevel)
-				p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 8)}
-				ctx, cancel := context.WithCancel(context.Background())
-				t.Cleanup(cancel)
-				p.StartErrorDrain(ctx)
+				p := startedDrainProxy(t, 8)
 				overflowPending(p)
 				p.BeginTestErrorCapture()
 				got, err := p.GetMockErrors(context.Background())
@@ -302,20 +297,11 @@ func TestBeginTestErrorCapture_SaysAPendingOverflowAndJudgesTheTest(t *testing.T
 				if full {
 					kept = maxPendingMockErrors
 				}
-				if provenswitch.On() {
-					if full != errors.Is(err, models.ErrUnmatchedCallsUnread) || (full && !strings.Contains(err.Error(), missLostBeforeSetFull)) {
-						t.Fatalf("the set's first test's read err %v; want it short of the misses made before the set only past the disk's bound", err)
-					}
-					if len(got) != kept || !got[0].BeforeSet || !got[len(got)-1].BeforeSet {
-						t.Fatalf("the set's first test read %d misses (first %+v); want the %d kept, marked as the set's", len(got), got[0], kept)
-					}
-					return
+				if full != errors.Is(err, models.ErrUnmatchedCallsUnread) || (full && !strings.Contains(err.Error(), missLostBeforeSetFull)) {
+					t.Fatalf("the set's first test's read err %v; want it short of the misses made before the set only past the disk's bound", err)
 				}
-				if err != nil || len(got) != 0 {
-					t.Fatalf("the set's first test read %d misses, err %v; want none, complete", len(got), err)
-				}
-				if n := len(logs.FilterMessageSnippet("than keploy keeps; the rest were dropped").All()); n != map[bool]int{false: 0, true: 1}[full] {
-					t.Fatalf("the drop was said %d times; want it said once, past the disk's bound only", n)
+				if len(got) != kept || !got[0].BeforeSet || !got[len(got)-1].BeforeSet {
+					t.Fatalf("the set's first test read %d misses; want the %d kept, each marked as the set's", len(got), kept)
 				}
 			})
 		})

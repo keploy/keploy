@@ -123,18 +123,14 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		defer close(teardownDone)
 		select {
 		case <-ctx.Done():
-			if composeStopsTheApp() {
-				// Under the switch the app's stop is keploy's own, and says
-				// when it had to kill (compose_appstop.go).
-				// It says a recording's kill itself.
-				// An app that exited on its own needs no stop.
-				if _, err := a.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
-					a.logger.Warn("keploy could not stop the application's container before taking its compose stack down", zap.Error(err))
-				}
-				composeDown()
-			} else {
-				a.composeGraceThenDown(composeDown)
+			// The app's stop is keploy's own, and says when it had to
+			// kill (compose_appstop.go).
+			// It says a recording's kill itself.
+			// An app that exited on its own needs no stop.
+			if _, err := a.StopComposeApp(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, models.ErrAppExitedOnItsOwn) {
+				a.logger.Warn("keploy could not stop the application's container before taking its compose stack down", zap.Error(err))
 			}
+			composeDown()
 			cancelUp()
 		case <-upDone:
 		}
@@ -154,7 +150,7 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 	// teardown's reap barrier exists to prevent.
 	//
 	// It cannot hang: the goroutine closes teardownDone on both branches, and
-	// composeGraceThenDown is bounded by graceBudget, ComposeDown by the
+	// StopComposeApp is bounded by its stop's progress, ComposeDown by the
 	// project's progress (keploy cuts a down that made none) and the per-call
 	// budgets of its sweeps.
 	<-teardownDone
@@ -163,13 +159,6 @@ func (a *App) runComposeInProcess(ctx context.Context, composeDown func()) utils
 		return utils.CmdError{Type: utils.Runtime, Err: err}
 	}
 	return utils.CmdError{}
-}
-
-// composeGraceThenDown is the in-process port of cmdCancel's compose branch:
-// the app's grace (composeAppGrace), then the down.
-func (a *App) composeGraceThenDown(composeDown func()) {
-	a.composeAppGrace(nil)
-	composeDown()
 }
 
 // joinComposeLabels renders a label map in the comma-separated "k=v,k=v" form

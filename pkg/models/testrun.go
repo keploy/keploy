@@ -53,6 +53,18 @@ type TestReport struct {
 	// (UnmatchedCall.Held). They fail the set; JUnit fails a case of its own
 	// with them, and another with the held ones.
 	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
+	// OutsideTestMisses are the calls the set's application made outside
+	// every test that no mock answered and that fail nothing, each once
+	// with how many times it was made, and what to do about it: with the
+	// proven switch off, every one, made as it started, before the set's
+	// first test, or after its last (no parser holds a call for a later
+	// test then); with it on, those that count against no test (a DNS
+	// lookup, a background call), made before its first test, after its
+	// last, or held for a later test's recording. A call outside every test
+	// is served, not required: the set's verdict is what it would be
+	// without them. Each is named by its shape (OutsideTestMiss), as
+	// keploy's log lines name a call: the report may be uploaded.
+	OutsideTestMisses []OutsideTestMiss `json:"outsideTestMisses,omitempty" yaml:"outside_test_misses,omitempty"`
 	// AppNotStopped, under the proven switch, says why keploy read the set's
 	// end with its application still running (a stack kept across test-sets,
 	// --keep-app-alive, an application keploy did not start): a call the
