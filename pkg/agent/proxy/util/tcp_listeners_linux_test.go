@@ -5,6 +5,7 @@ package util
 import (
 	"net"
 	"net/netip"
+	"os"
 	"slices"
 	"strconv"
 	"testing"
@@ -77,5 +78,34 @@ func TestTCPListenersGivesTheListenersOnThePortAlone(t *testing.T) {
 	boundPort := uint16(n)
 	if got, err := TCPListeners(boundPort); err != nil || len(got) != 0 {
 		t.Fatalf("TCPListeners of a port a socket is bound to but does not listen on = %v, %v", got, err)
+	}
+}
+
+// TCPListenSockets gives each listener's inode: the one the fd that holds it
+// links to.
+func TestTCPListenSocketsGivesTheInodeItsFdLinksTo(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	raw, err := ln.(*net.TCPListener).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var link string
+	var lerr error
+	if err := raw.Control(func(fd uintptr) {
+		link, lerr = os.Readlink("/proc/self/fd/" + strconv.Itoa(int(fd)))
+	}); err != nil || lerr != nil {
+		t.Fatal(err, lerr)
+	}
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	got, err := TCPListenSockets(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Addr != netip.MustParseAddr("127.0.0.1") || "socket:["+strconv.FormatUint(uint64(got[0].Inode), 10)+"]" != link {
+		t.Fatalf("TCPListenSockets(%d) = %v, want 127.0.0.1 at the socket its fd links to, %s", port, got, link)
 	}
 }
