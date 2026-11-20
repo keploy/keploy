@@ -228,7 +228,9 @@ func TestAHealthURLWaitWithProbingDisabledSaysItStillWaits(t *testing.T) {
 	case <-time.After(prTimeout):
 		t.Fatal("the wait never said it still waits")
 	}
-	if want := "answer 2xx at " + srv.URL + "/health"; call.what != want {
+	// The health URL as a log line names it (targetLogName): its host (an IP
+	// address here, whole) and its path's shape.
+	if want := "answer 2xx at " + srv.URL + "/{}"; call.what != want {
 		t.Errorf("it says it waits for the application to %q, want %q", call.what, want)
 	}
 	if want := strings.TrimPrefix(srv.URL, "http://"); call.addr != want {

@@ -1332,6 +1332,14 @@ type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }
 
+// IncomingOptionsReader is the optional extension of an IncomingProxy that
+// says what options the recorder last started ingress with (zero before
+// Start), so a capture path other than the proxy's own can filter the same
+// way.
+type IncomingOptionsReader interface {
+	IncomingOptions() models.IncomingOptions
+}
+
 // AppListenPorter is the optional extension of an IncomingProxy that knows
 // which port the app's own socket listens on for one of the app's ports. While
 // recording, keploy's ingress forwarder holds the app's port and the app

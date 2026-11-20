@@ -179,6 +179,12 @@ func TestBothWaysReadsEveryWordOfTheSecondReading(t *testing.T) {
 		{"a refused word of another field", []Decision{whole(OutcomeFresh)}, []string{f},
 			[]Decision{bgDecision(OutcomeFresh, "w0", 0), bgDecision(OutcomeRefused, "g0", 0)}, []string{f, g},
 			[]WordOutcome{OutcomeFresh, OutcomeRefused}, "probe"},
+		// The second reading's first decision is the refusal no decision of
+		// the first reading stands over: a lookup that finds nothing reads
+		// no decision of the second, so it is still added.
+		{"a refused word of another field, decided first", []Decision{whole(OutcomeFresh)}, []string{f},
+			[]Decision{bgDecision(OutcomeRefused, "g0", 0), bgDecision(OutcomeFresh, "w0", 0)}, []string{g, f},
+			[]WordOutcome{OutcomeFresh, OutcomeRefused}, "probe"},
 		{"a refused word the first reading did not decide", []Decision{bgDecision(OutcomeFresh, "w0", 0)}, []string{f},
 			[]Decision{bgDecision(OutcomeFresh, "w0", 0), bgDecision(OutcomeRefused, "w3", 3)}, []string{f, f},
 			[]WordOutcome{OutcomeFresh, OutcomeRefused}, "probe"},
@@ -224,8 +230,14 @@ func TestBothWaysReadsEveryWordOfTheSecondReading(t *testing.T) {
 				t.Errorf("%s: decision %d %s; want refused by %q, saying either reading refuses it", c.name, i, oDescribe([]Decision{d}), c.check)
 			}
 		}
-		if len(fs) > len(c.fs) && fs[len(fs)-1] != c.afs[len(c.afs)-1] {
-			t.Errorf("%s: the added refusal's field %q; want %q", c.name, fs[len(fs)-1], c.afs[len(c.afs)-1])
+		// An added refusal names the field of the second reading's
+		// decision it carries.
+		for i := len(c.fs); i < len(fs) && i < len(ds); i++ {
+			for k, a := range c.as {
+				if a.Recorded == ds[i].Recorded && fs[i] != c.afs[k] {
+					t.Errorf("%s: the added refusal %s names field %q; want %q", c.name, oDescribe([]Decision{ds[i]}), fs[i], c.afs[k])
+				}
+			}
 		}
 	}
 }

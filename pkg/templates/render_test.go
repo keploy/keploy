@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/internal/logleak"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -132,6 +133,27 @@ func TestRequest_ANonNumberForAnIntPlaceholderStaysAsWritten(t *testing.T) {
 	r := newRun(t, map[string]interface{}{"n": "abc"})
 	req := r.Request(models.HTTPReq{Body: `{"n":"{{int .n}}"}`})
 	assert.Equal(t, `{"n":"{{int .n}}"}`, req.Body)
+}
+
+// The warning about such a value names the placeholder and the value's size,
+// never the value: a run's values are what the app answered (an id, a
+// token), and a program that embeds the replay (k8s-proxy) writes the
+// warning into its own log. Both places a placeholder renders a number warn
+// so: in a request's text (a URL) and as a bare JSON value.
+func TestRequest_ANonNumberIsWarnedAboutBySizeNeverWhole(t *testing.T) {
+	const s = logleak.Canary
+	logger, logs := logleak.Observe()
+	r := NewRun(logger, map[string]interface{}{"n": s, "m": "x" + s}, nil)
+	req := r.Request(models.HTTPReq{URL: "http://h/{{int .n}}", Body: `{"bare":{{int .m}}}`})
+	assert.Equal(t, "http://h/{{int .n}}", req.URL)
+	warned := logs.FilterMessage("a placeholder's value is not a number of its type; it is left as written").All()
+	require.Len(t, warned, 2, "precondition: one warning for the URL's placeholder, one for the bare JSON value's (%v)", logs.All())
+	var sizes []interface{}
+	for _, e := range warned {
+		sizes = append(sizes, e.ContextMap()["value_bytes"])
+	}
+	assert.ElementsMatch(t, []interface{}{int64(len(s)), int64(len(s) + 1)}, sizes, "each warning names its value's size")
+	logleak.Check(t, logs, s, "Run.Request")
 }
 
 // What makes a re-send safe: the request is a copy. The test case is left
