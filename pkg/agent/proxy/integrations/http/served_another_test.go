@@ -179,6 +179,17 @@ func TestTheClosestOfSeveralBodiesIsReportedAsAnsweredWithAnotherCallsRecording(
 	if one.status != 200 || len(one.answers()) != 0 {
 		t.Fatalf("the call one recording's body keys answer got %d %q with %d answer reports, want it served with none", one.status, one.body, len(one.answers()))
 	}
+
+	// The fuzzy fallback with one recording left: a form body, which no
+	// body-keys pass reads, is served the one recording of its method and
+	// path, no guess between calls.
+	h = newHTTP()
+	form := &mockMemDb{updateUnFilteredReturn: true, mocks: []*models.Mock{
+		recordedAs(t, h, "mock-form-1", 1, orderOfID("1", "application/x-www-form-urlencoded", "qty=1&note=first"), jsonAnswer(200, `{"order":1}`), nil)}}
+	single := serveReported(t, h, form, orderOfID("1", "application/x-www-form-urlencoded", "qty=2&note=first"))
+	if single.status != 200 || len(single.answers()) != 0 {
+		t.Fatalf("the form call one recording answers got %d %q with %d answer reports, want it served with none", single.status, single.body, len(single.answers()))
+	}
 }
 
 // idSegmentsDiffering names each segment that differs, by the learn step's
