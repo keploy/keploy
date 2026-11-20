@@ -107,8 +107,10 @@ func unreportedBy(logs *observer.ObservedLogs, set string) int {
 // has no test case: it returns before it begins a session of its own, so it
 // takes nothing (the session open on the agent is test-set-0's, whose take
 // would return the loss as the open session's own) and logs nothing. So
-// does a set whose MockOutgoing failed: the agent may not have begun its
-// session. The loss stays on the agent, and test-set-2's take, after its
+// does a set whose MockOutgoing failed, which RunTestSet returns as its
+// error: the agent may not have begun its session. Start ends the run on
+// that error; test-set-2 here is the next session a run would begin. The
+// loss stays on the agent, and test-set-2's take, after its
 // session began, has it as test-set-0's: test-set-2 passes, charged nothing,
 // and the run ends not judged for test-set-0, naming its test-2. The control
 // has no set between. With the switch off keploy test takes no owned loss at
@@ -157,7 +159,21 @@ func TestASetThatReturnsBeforeItsSessionLeavesAnEarlierSetsLateLossToTheNext(t *
 						}
 						h.set = "test-set-1"
 						before := instr.takesSoFar()
-						if status := h.runServing(t); status != want {
+						var status models.TestSetStatus
+						if between == "unbegun" {
+							// The agent's refusal is the set's error, as
+							// RunTestSet returns it to Start.
+							ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+							var err error
+							status, err = h.replayer.RunTestSet(ctx, "test-set-1", "test-run-0", true)
+							cancel()
+							if err == nil || !strings.Contains(err.Error(), "MockOutgoing") {
+								t.Fatalf("test-set-1 returned %v; want the agent's refusal of its MockOutgoing", err)
+							}
+						} else {
+							status = h.runServing(t)
+						}
+						if status != want {
 							t.Fatalf("test-set-1 %q, want %q", status, want)
 						}
 						if n := instr.takesSoFar() - before; n != 0 {
@@ -209,7 +225,8 @@ func TestASetThatReturnsBeforeItsSessionLeavesAnEarlierSetsLateLossToTheNext(t *
 // keptStopInstr is drainInstr whose application, the one --keep-app-alive
 // keeps across the run's sets, notes its stop in order ("stop") as its run
 // ends, with the set whose session was open then (stoppedIn), and whether
-// test-set-0's report was written by then (reportedAtStop, from reports).
+// test-set-0's end had written its report by then (reportedAtStop, from
+// reports: a status other than the RUNNING its start inserts).
 type keptStopInstr struct {
 	*drainInstr
 	reports         *setsReportDB
@@ -229,8 +246,11 @@ func (k *keptStopInstr) Run(ctx context.Context, opts models.RunOptions) models.
 	reported := false
 	if k.reports != nil {
 		k.reports.mu.Lock()
-		_, reported = k.reports.statuses["test-set-0"]
+		status, ok := k.reports.statuses["test-set-0"]
 		k.reports.mu.Unlock()
+		// The set's start inserts its report RUNNING; its end writes it
+		// again with the set's status.
+		reported = ok && status != string(models.TestStatusRunning)
 	}
 	k.lmu.Lock()
 	k.order = append(k.order, "stop")
