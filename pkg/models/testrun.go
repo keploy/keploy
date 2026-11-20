@@ -926,14 +926,38 @@ const (
 )
 
 // The answers an answered call reports (UnmatchedCall.Answer,
-// MockMismatchReport.Answer, ReportAnswer), under the proven switch.
+// MockMismatchReport.Answer, ReportAnswer): the first two under the proven
+// switch, the last two with it off.
 const (
 	// AnswerProvisional: record's full round paired the call with a recording
 	// another test owns and answered it with that recording.
 	AnswerProvisional = "provisional"
 	// AnswerByKind: a background write answered by its write kind, unchecked.
 	AnswerByKind = "by_kind"
+	// AnswerOtherID: with the proven switch off, no recording had the call's
+	// path, and the call was answered with the recording of a path that
+	// differs from it only at segments that look like ids (all digits, a
+	// uuid, long hex, a long token), each of one shape on both sides: the
+	// recording of another call, GET /users/1 for GET /users/3. ClosestMock
+	// names the recording, Diff names its call, and Differs the segments
+	// (url.path.<i>). Where OutgoingOptions.DisableAutoURLDynamic is set,
+	// such a call is a miss instead.
+	AnswerOtherID = "other_id"
+	// AnswerClosestBody: with the proven switch off, the call was answered
+	// with the recording whose request body is closest to the call's, of the
+	// recordings of its method and path, none of whose bodies is the call's:
+	// the recording of another call. ClosestMock names the recording, Diff
+	// names its call, and Differs holds "body".
+	AnswerClosestBody = "closest_body"
 )
+
+// AnsweredAsAnother reports whether answer says the call was answered with
+// the recording of another call (AnswerOtherID, AnswerClosestBody): served,
+// so no miss, and no test's verdict reads it, but nothing shows the call's
+// own answer was served.
+func AnsweredAsAnother(answer string) bool {
+	return answer == AnswerOtherID || answer == AnswerClosestBody
+}
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),
 // as the learn step decides them (package matcher/learn).
