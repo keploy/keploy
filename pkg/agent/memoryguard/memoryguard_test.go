@@ -1445,12 +1445,9 @@ func TestDeriveSoftLimit(t *testing.T) {
 	for _, tt := range tests {
 		// The budget run() judges against: the lower of the container's
 		// limit and --memory-limit.
-		budget := mib(tt.limitMB)
-		if tt.cs.limit > 0 && tt.cs.limit < budget {
-			budget = tt.cs.limit
-		}
-		dec := evaluateMemory(tt.cs.workingSet, budget, mib(tt.overheadMB))
-		s := deriveSoftLimit(dec, mib(tt.limitMB), tt.cs, tt.m)
+		g := &guard{logger: zap.NewNop(), limitBytes: mib(tt.limitMB)}
+		dec := evaluateMemory(tt.cs.workingSet, g.budget(tt.cs), mib(tt.overheadMB))
+		s := deriveSoftLimit(dec, tt.cs, tt.m)
 		if s.bytes != tt.want || s.derived != tt.derived || s.short != tt.short ||
 			(tt.derived && (s.nonGo != tt.wantNonGo || s.hard != tt.wantHard)) {
 			t.Errorf("%s: %d MiB (%d B), derived %v, short %v, not Go's %d MiB, limit %d MiB; want %d MiB (%d B), %v, %v, %d, %d",
@@ -1617,6 +1614,7 @@ func TestTooSmallIsReportedOnlyWhenPausedRecordingDoesNotFit(t *testing.T) {
 		run             time.Duration // 0: 7 s
 		pauses          int
 		reportAt        time.Duration // 0: none
+		source          string        // the too-small line's limit_source; "": --memory-limit
 	}{
 		// Live memory under the pause point, each heap goal 97% of the soft
 		// limit installed less Go's memory outside the heap.
@@ -1650,6 +1648,10 @@ func TestTooSmallIsReportedOnlyWhenPausedRecordingDoesNotFit(t *testing.T) {
 		// at 5500 ms; reported at the next sample.
 		{name: "1 GiB sidecar, 700 MiB not Go's: live memory stays over the room with recording paused", limitMB: 1024, ringMB: 64,
 			f: &fakeMemory{ws: mib(1060), limit: mib(1024), m: goFig(330, 300, 10, 360)}, pauses: 1, reportAt: 6000 * ms},
+		// The same container under a 2 GiB --memory-limit: its limit binds,
+		// and is the one the line names and advises raising.
+		{name: "a 1 GiB container under a 2 GiB --memory-limit, 700 MiB not Go's: live memory stays over the room", limitMB: 2048, ringMB: 64,
+			f: &fakeMemory{ws: mib(1060), limit: mib(1024), m: goFig(330, 300, 10, 360)}, pauses: 1, reportAt: 6000 * ms, source: "container"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1692,9 +1694,16 @@ func TestTooSmallIsReportedOnlyWhenPausedRecordingDoesNotFit(t *testing.T) {
 				}
 				return
 			}
+			source, raise := "--memory-limit", "--memory-limit"
+			if tt.source == "container" {
+				source, raise = "container", "the container's memory limit"
+			}
 			if c["go_mem_limit_bytes"] != mib(384) || c["go_room_bytes"] != mib(260) || c["go_live_memory_bytes"] != mib(320) ||
-				c["limit_bytes"] != mib(1024) || c["limit_source"] != "--memory-limit" || c["non_go_memory_bytes"] != mib(700) {
-				t.Errorf("too-small line's sizes %v; want GOMEMLIMIT 384 MiB over a 260 MiB room, 320 MiB live, 1024 MiB limit, 700 MiB not Go's", c)
+				c["limit_bytes"] != mib(1024) || c["limit_source"] != source || c["non_go_memory_bytes"] != mib(700) {
+				t.Errorf("too-small line's sizes %v; want GOMEMLIMIT 384 MiB over a 260 MiB room, 320 MiB live, 1024 MiB limit from %s, 700 MiB not Go's", c, source)
+			}
+			if !strings.HasSuffix(lines[0].Message, "; raise "+raise) {
+				t.Errorf("too-small line %q; want it to advise raising %s", lines[0].Message, raise)
 			}
 		})
 	}

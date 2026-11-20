@@ -61,7 +61,7 @@ const (
 	minViableEffLimitBytes = minPauseHeadroomBytes + minResumeHeadroomBytes // 320 MiB
 
 	// softLimitLowerStep and softLimitRaiseStep are the least moves of a
-	// GOMEMLIMIT derived from the container (deriveSoftLimit) that the guard
+	// GOMEMLIMIT derived from the budget (deriveSoftLimit) that the guard
 	// installs: it lowers the limit on the next sample once the derivation is
 	// softLimitLowerStep under it, and raises it once the derivation has been
 	// softLimitRaiseStep over it for reclaimCooldown, so that memory Go does not
@@ -290,8 +290,8 @@ type softLimit struct {
 //	room = budget - memory Go does not manage - margin
 //
 // Its terms:
-//   - The budget is the one the guard pauses against: --memory-limit, or the
-//     container's cgroup limit (memory.max, or memory.limit_in_bytes on
+//   - The budget is the one the guard pauses against (budget, dec.limit):
+//     --memory-limit, or the container's cgroup limit (memory.max, or memory.limit_in_bytes on
 //     cgroup v1) where that is lower. A container with no memory limit (an
 //     agent container docker starts) leaves it --memory-limit: 90% of that,
 //     blind to the memory Go does not manage, would let the runtime's next
@@ -317,8 +317,8 @@ type softLimit struct {
 //     unless the memory Go does not manage has grown more than that since the
 //     last sample.
 //
-// The limit is never over 90% of the budget (goMemTarget, the limit without a
-// container limit): where that already leaves the container room, a higher
+// The limit is never over 90% of the budget (goMemTarget, the limit where
+// none is derived): where that already leaves room under the budget, a higher
 // soft limit would only let the runtime keep more garbage, and take the
 // working set nearer the budget. Under that, it is never under the Go memory no
 // collection can free (need: the last GC's live heap and Go's own memory
@@ -333,16 +333,13 @@ type softLimit struct {
 //
 // With no memory.stat, unreadable runtime figures, or a budget too small to
 // record, it is goMemTarget.
-func deriveSoftLimit(dec memoryDecision, limitBytes int64, cs cgroupSample, m goMemory) softLimit {
+func deriveSoftLimit(dec memoryDecision, cs cgroupSample, m goMemory) softLimit {
 	s := softLimit{bytes: dec.goMemTarget}
 	if !cs.statOK || !m.ok || !dec.viable {
 		return s
 	}
 	s.derived = true
-	s.hard = limitBytes
-	if cs.limit > 0 {
-		s.hard = min(cs.limit, limitBytes)
-	}
+	s.hard = dec.limit
 	s.nonGo = max(cs.workingSet-cs.activeFile-m.mapped, 0)
 	margin := (dec.effLimit-dec.pauseThreshold)/4 + softLimitSlack
 	s.room = s.hard - s.nonGo - margin
@@ -595,11 +592,11 @@ func (g *guard) sample() (next time.Duration, more bool) {
 	// not manage is measured (deriveSoftLimit, applySoftLimit), so that the
 	// runtime collects its garbage before the budget, whether or not the
 	// container has a memory limit. Where that cannot be measured, as
-	// before: realign it with the Go-heap budget (the room left after the non-Go fixed
-	// overhead), recomputing only when the overhead changes so we don't
-	// thrash debug.SetMemoryLimit every tick. Floored (see evaluateMemory)
-	// so a small budget can't drive near-continuous GC.
-	if sl := deriveSoftLimit(dec, g.limitBytes, cs, m); sl.derived {
+	// before: realign it with the Go-heap budget (the room left after the
+	// non-Go fixed overhead), recomputing only when the overhead changes so
+	// we don't thrash debug.SetMemoryLimit every tick. Floored (see
+	// evaluateMemory) so a small budget can't drive near-continuous GC.
+	if sl := deriveSoftLimit(dec, cs, m); sl.derived {
 		g.applySoftLimit(sl, now)
 		g.goMemAligned = false
 	} else if !g.goMemAligned || dec.overhead != g.lastOverhead {
@@ -749,9 +746,8 @@ func (g *guard) enterPressure(now time.Time, dec memoryDecision, why ...zap.Fiel
 }
 
 // sampleSoftLimit takes one sample and installs the GOMEMLIMIT derived from
-// it (applySoftLimit), where the container has a memory limit: Start calls it
-// so that the derived limit is in force from the start, not from run's first
-// sample.
+// it (applySoftLimit), where it can be derived: Start calls it so that the
+// derived limit is in force from the start, not from run's first sample.
 func (g *guard) sampleSoftLimit() {
 	m := g.goMemory()
 	cs, err := g.cgroup()
@@ -760,7 +756,7 @@ func (g *guard) sampleSoftLimit() {
 	}
 	dec := evaluateMemory(cs.workingSet, g.budget(cs), fixedOverheadBytes.Load())
 	goMemoryBudget.Store(dec.goMemTarget)
-	if sl := deriveSoftLimit(dec, g.limitBytes, cs, m); sl.derived {
+	if sl := deriveSoftLimit(dec, cs, m); sl.derived {
 		g.applySoftLimit(sl, g.timeNow())
 	}
 }
