@@ -23,50 +23,22 @@ import (
 // the two halves of this feature.
 //
 // ensureInMemoryComposeFlags decides which `up` flags the run carries;
-// composeUpSemantics is what the in-process path reads them back with. If the
-// two ever drift, the library path silently runs with different abort/exit-code
-// behaviour than the command string says — a stack that never aborts on app
-// exit, or an exit code that stops propagating — and nothing fails loudly.
+// composeUpSemantics is what the in-process path reads them back with. The run
+// carries no abort flag, the user's own left out too (compose_appstop.go), so
+// the library path runs as the CLI does with none: the stack runs on when a
+// container exits, and keploy, watching the app's container, ends the run.
 func TestComposeUpSemanticsAgreeWithTheInjectedFlags(t *testing.T) {
-	tests := []struct {
-		name               string
-		service            string
-		preferFailureAbort bool
-		wantExitCodeFrom   string
-		wantOnExit         docker.ComposeOnExit
-	}{
-		{
-			name:             "abort on container exit carries the app service",
-			service:          "app",
-			wantExitCodeFrom: "app",
-			wantOnExit:       docker.ComposeOnExitStop,
-		},
-		{
-			name:               "a completion dependency switches to abort-on-failure",
-			service:            "app",
-			preferFailureAbort: true,
-			wantExitCodeFrom:   "",
-			wantOnExit:         docker.ComposeOnExitFail,
-		},
-		{
-			name:             "no service means no --exit-code-from",
-			service:          "",
-			wantExitCodeFrom: "",
-			wantOnExit:       docker.ComposeOnExitStop,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cmd := ensureInMemoryComposeFlags("docker compose up", tt.service, tt.preferFailureAbort)
-			got := composeUpSemantics(cmd)
-
-			if got.ExitCodeFrom != tt.wantExitCodeFrom {
-				t.Errorf("ExitCodeFrom = %q, want %q (command was %q)", got.ExitCodeFrom, tt.wantExitCodeFrom, cmd)
-			}
-			if got.OnExit != tt.wantOnExit {
-				t.Errorf("OnExit = %v, want %v (command was %q)", got.OnExit, tt.wantOnExit, cmd)
-			}
-		})
+	for _, in := range []string{
+		"docker compose up",
+		"docker compose up --abort-on-container-exit --exit-code-from app",
+		"docker compose up --abort-on-container-failure",
+		"docker compose up --exit-code-from=app",
+	} {
+		cmd := ensureInMemoryComposeFlags(in)
+		got := composeUpSemantics(cmd)
+		if got.ExitCodeFrom != "" || got.OnExit != docker.ComposeOnExitIgnore {
+			t.Errorf("%q: ExitCodeFrom = %q, OnExit = %v, want none and ComposeOnExitIgnore (command was %q)", in, got.ExitCodeFrom, got.OnExit, cmd)
+		}
 	}
 }
 
@@ -87,8 +59,7 @@ func TestComposeUpSemanticsDefaultsToCascadeIgnore(t *testing.T) {
 }
 
 // TestComposeUpSemanticsReadsTheEqualsForm covers `--exit-code-from=app`, which
-// a user may write by hand; ensureComposeExitOnAppFailure leaves any
-// user-supplied flag untouched, so this form does reach the parser.
+// a user may write by hand: the parser reads it as the CLI does.
 func TestComposeUpSemanticsReadsTheEqualsForm(t *testing.T) {
 	got := composeUpSemantics("docker compose -f - up --abort-on-container-failure --exit-code-from=web")
 
@@ -302,21 +273,18 @@ func TestRunComposeInProcessTearsDownOnCancel(t *testing.T) {
 	}
 }
 
-// TestACancelledInProcessRunStopsTheAppAsTheSwitchSays pins which teardown a
-// cancelled in-process run takes. Under the proven switch keploy stops the app
-// itself (StopComposeApp): it looks for the app's container through the
-// compose project on its agent's container, and says so when it cannot find
-// it. With the switch off the app gets its grace (composeAppGrace): keploy
-// reads the app's container until it has exited and asks for no stop. Both
-// end in the same down, so a run that took the wrong one is seen only here.
-func TestACancelledInProcessRunStopsTheAppAsTheSwitchSays(t *testing.T) {
+// TestACancelledInProcessRunStopsTheAppInEveryMode pins the teardown a
+// cancelled in-process run takes, with the proven switch on and off alike:
+// keploy stops the app itself (StopComposeApp), looking for the app's
+// container through the compose project on its agent's container, and says
+// so when it cannot find it, then takes the stack down once.
+func TestACancelledInProcessRunStopsTheAppInEveryMode(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		proven string
-		stops  bool
 	}{
-		{name: "under the switch keploy stops the app itself", proven: "1", stops: true},
-		{name: "with the switch off the app gets its grace", proven: "", stops: false},
+		{name: "under the switch", proven: "1"},
+		{name: "with the switch off", proven: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, tc.proven)
@@ -360,12 +328,9 @@ func TestACancelledInProcessRunStopsTheAppAsTheSwitchSays(t *testing.T) {
 			}
 			const cannotStop = "keploy could not stop the application's container before taking its compose stack down"
 			warned := logs.FilterMessage(cannotStop).Len() == 1
-			if asked := d.askedAbout(a.keployContainer); asked != tc.stops || warned != tc.stops {
+			if asked := d.askedAbout(a.keployContainer); !asked || !warned {
 				t.Fatalf("keploy looked for the app's container through its agent's project: %v, and warned %q: %v; "+
-					"want both %v (the switch %q)", asked, cannotStop, warned, tc.stops, tc.proven)
-			}
-			if !tc.stops && !d.askedAbout(a.container) {
-				t.Fatalf("with the switch off keploy never read the app's container %q for its grace (inspected %v)", a.container, d.asked)
+					"want both (the switch %q)", asked, cannotStop, warned, tc.proven)
 			}
 		})
 	}

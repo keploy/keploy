@@ -729,25 +729,26 @@ func TestAComposeHaltIsTheAppsExit(t *testing.T) {
 	}
 }
 
-// Under the proven switch compose runs without the flags that end the stack
-// on a container's exit, the user's own too, the rest of the command as
-// written; with the switch off they are added as before.
-func TestUnderTheSwitchComposeRunsWithoutItsAbortFlags(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	for in, want := range map[string]string{
-		"docker compose up": "docker compose up",
-		"docker compose up --abort-on-container-exit --exit-code-from app":       "docker compose up",
-		"docker compose -f a.yml up --exit-code-from=app --build":                "docker compose -f a.yml up --build",
-		"docker compose up --abort-on-container-failure  --build":                "docker compose up  --build",
-		"docker compose -p abort-on-container-exit up --abort-on-container-exit": "docker compose -p abort-on-container-exit up",
-	} {
-		if got := ensureComposeExitOnAppFailure(in, "app", false); got != want {
-			t.Errorf("%q: %q, want %q", in, got, want)
+// Compose runs without the flags that end the stack on a container's exit,
+// the user's own too, the rest of the command as written, with the proven
+// switch on or off: keploy watches the app's container itself.
+func TestComposeRunsWithoutItsAbortFlagsInEveryMode(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Setenv(provenswitch.Env, proven)
+		for in, want := range map[string]string{
+			"docker compose up": "docker compose -f - up",
+			"docker compose up --abort-on-container-exit --exit-code-from app":       "docker compose -f - up",
+			"docker compose -f a.yml up --exit-code-from=app --build":                "docker compose -f - up --build",
+			"docker compose up --abort-on-container-failure  --build":                "docker compose -f - up --build",
+			"docker compose -p abort-on-container-exit up --abort-on-container-exit": "docker compose -p abort-on-container-exit -f - up",
+		} {
+			if got := ensureInMemoryComposeFlags(in); got != want {
+				t.Errorf("%s=%q: %q: %q, want %q", provenswitch.Env, proven, in, got, want)
+			}
 		}
-	}
-	t.Setenv(provenswitch.Env, "")
-	if got := ensureComposeExitOnAppFailure("docker compose up", "app", false); got != "docker compose up --abort-on-container-exit --exit-code-from app" {
-		t.Errorf("switch off: %q", got)
+		if got := modifyDockerComposeCommand("docker compose up --abort-on-container-failure", "c.yaml", "docker-compose.yml"); got != "docker compose -f ./c.yaml up" {
+			t.Errorf("%s=%q: an on-disk file's command: %q", provenswitch.Env, proven, got)
+		}
 	}
 }
 
@@ -825,7 +826,9 @@ func TestComposeAwaitTeardownHoldsTheRunAfterKeploysStop(t *testing.T) {
 		{"the app exited on its own, before the watch took it", false, false, exited("exited", 3), context.Background(), nil, composeHaltCame, 1},
 		{"the app halted", true, true, nil, cancelled, nil, composeNoWait, 1},
 		{"keploy's teardown ends the run", true, false, nil, cancelled, nil, composeTeardownCame, 0},
-		{"the app keploy started again halts", true, false, nil, context.Background(), closed, composeHaltCame, 0},
+		// The halt's end (it runs once) is through before the run reads
+		// the halt: its stop of the stack, and the run's code it reads.
+		{"the app keploy started again halts", true, false, nil, context.Background(), closed, composeHaltCame, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &App{logger: zap.NewNop(), container: "app", docker: &inspectRecorder{inspects: tc.app}}

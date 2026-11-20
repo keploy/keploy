@@ -88,9 +88,15 @@ for a in "$@"; do
     # KEPLOY_STUB_UP_CODE: the first up exits with this code, and every up
     # after it exits 0 at once, as a retried up whose dependency is healthy
     # now (the first up may also be killed: it is the first all the same).
+    # KEPLOY_STUB_UP_RETRY_WAIT_FILE: a retried up runs until that file
+    # exists instead, as an up whose stack keploy then stops.
     if [ -n "${KEPLOY_STUB_UP_CODE:-}" ]; then
       if [ -e "$KEPLOY_STUB_UP_WAIT_FILE.first" ]; then
         printf 'UP-RETRIED\n' >> "` + argvLog + `"
+        if [ -n "${KEPLOY_STUB_UP_RETRY_WAIT_FILE:-}" ]; then
+          while [ ! -e "$KEPLOY_STUB_UP_RETRY_WAIT_FILE" ] && [ -d "` + dir + `" ] && kill -0 ` + strconv.Itoa(os.Getpid()) + ` 2>/dev/null; do sleep 0.05 </dev/null >/dev/null 2>&1; done
+          printf 'UP-RETRY-DONE\n' >> "` + argvLog + `"
+        fi
         exit 0
       fi
       : > "$KEPLOY_STUB_UP_WAIT_FILE.first"

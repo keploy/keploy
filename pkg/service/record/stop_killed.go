@@ -81,8 +81,8 @@ func (r *Recorder) updateTestSetConf(ctx context.Context, testSetID string, set 
 }
 
 // composeAppStopper is an instrumentation that stops the app's container of a
-// docker compose stack, its stack running on, under the proven switch
-// (AgentClient; P101-c).
+// docker compose stack, its stack running on, in every mode (AgentClient):
+// a recording's stop stops the app first, then drains the agent.
 type composeAppStopper interface {
 	StopComposeApp(ctx context.Context) (string, error)
 }

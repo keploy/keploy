@@ -25,11 +25,12 @@ var composeSubcommands = map[string]bool{
 }
 
 // ensureInMemoryComposeFlags rewrites the docker compose command to use stdin
-// ("-f -") for in-memory content and injects the exit-code-from flags.
+// ("-f -") for in-memory content, the abort flags left out
+// (withoutComposeAbortFlags).
 // It tokenizes the arguments, strips all -f/--file flags (including dangling
 // ones without a value), and injects a single "-f -" before the first compose
 // subcommand to avoid producing multiple stdin readers.
-func ensureInMemoryComposeFlags(appCmd, serviceName string, preferFailureAbort bool) string {
+func ensureInMemoryComposeFlags(appCmd string) string {
 	parts := strings.Fields(appCmd)
 
 	// Strip every existing -f/--file flag and its value, including dangling
@@ -65,7 +66,7 @@ func ensureInMemoryComposeFlags(appCmd, serviceName string, preferFailureAbort b
 		result = append(result, "-f", "-")
 	}
 
-	return ensureComposeExitOnAppFailure(strings.Join(result, " "), serviceName, preferFailureAbort)
+	return withoutComposeAbortFlags(strings.Join(result, " "))
 }
 
 func findComposeFile(cmd string) []string {
@@ -102,7 +103,7 @@ func findComposeFile(cmd string) []string {
 //
 // It is false for a wrapper — `make up`, `./start.sh`, an npm script — that
 // runs compose internally. Splicing into those produces nonsense
-// (`make -f ./docker-compose-tmp.yaml up --abort-on-container-exit`), so
+// (`make -f ./docker-compose-tmp.yaml up`), so
 // those commands are run untouched and pointed at keploy's compose file
 // through the COMPOSE_FILE environment variable instead.
 func isRewritableComposeCommand(appCmd string) bool {
@@ -116,19 +117,18 @@ func isRewritableComposeCommand(appCmd string) bool {
 // without a docker client.
 //
 // Exactly one of the two results is non-empty. A literal compose command
-// gets the file spliced in (and with it --abort-on-container-exit, which is
-// how keploy notices the app container dying). A wrapper cannot be rewritten
-// — splicing yields `make -f ./docker-compose-tmp.yaml up
-// --abort-on-container-exit` — so it runs untouched and the file travels in
-// COMPOSE_FILE instead.
+// gets the file spliced in, its abort flags left out (keploy watches the
+// app's container itself: compose_appstop.go). A wrapper cannot be rewritten
+// — splicing yields `make -f ./docker-compose-tmp.yaml up` — so it runs
+// untouched and the file travels in COMPOSE_FILE instead.
 //
 // composeFileEnv is absolute: compose resolves a relative COMPOSE_FILE
 // against its own working directory and derives the project directory from
 // it, so `make -C deploy up` would otherwise look for
 // deploy/docker-compose-tmp.yaml and find nothing.
-func composeLaunchPlan(appCmd, newComposeFile, appComposePath, appServiceName string) (newCmd, composeFileEnv string) {
+func composeLaunchPlan(appCmd, newComposeFile, appComposePath string) (newCmd, composeFileEnv string) {
 	if isRewritableComposeCommand(appCmd) {
-		return modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName), ""
+		return modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath), ""
 	}
 	abs, err := filepath.Abs(newComposeFile)
 	if err != nil {
@@ -137,7 +137,7 @@ func composeLaunchPlan(appCmd, newComposeFile, appComposePath, appServiceName st
 	return "", abs
 }
 
-func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName string) string {
+func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath string) string {
 	// Ensure newComposeFile starts with ./
 	if !strings.HasPrefix(newComposeFile, "./") {
 		newComposeFile = "./" + newComposeFile
@@ -168,13 +168,13 @@ func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServi
 				// Check if this file matches the appComposePath
 				if actualFile == appComposePath {
 					modifiedCmd = strings.Replace(appCmd, fullMatch, fmt.Sprintf("-f %s", newComposeFile), 1)
-					return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
+					return withoutComposeAbortFlags(modifiedCmd)
 				}
 			}
 		}
 		// If no matching compose path found, return original command
 		modifiedCmd = appCmd
-		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
+		return withoutComposeAbortFlags(modifiedCmd)
 	}
 
 	// If the pattern doesn't exist, inject the new Compose file right before
@@ -182,11 +182,11 @@ func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServi
 	// project named "upload", say) are not the subcommand.
 	if upAt, ok := composeUpOffset(appCmd, true); ok {
 		modifiedCmd = fmt.Sprintf("%s-f %s %s", appCmd[:upAt], newComposeFile, appCmd[upAt:])
-		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
+		return withoutComposeAbortFlags(modifiedCmd)
 	}
 
 	modifiedCmd = fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
-	return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
+	return withoutComposeAbortFlags(modifiedCmd)
 }
 
 func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
@@ -212,53 +212,6 @@ func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
 	}
 
 	return false
-}
-
-// ensureComposeExitOnAppFailure ensures that the docker-compose command will exit when the application
-// container stops by injecting --abort-on-container-exit and --exit-code-from flags if not already present.
-// It inserts these flags immediately after the "up" subcommand if found, otherwise appends them to the end.
-//
-// Parameters:
-//   - appCmd: the docker-compose command to modify
-//   - serviceName: the name of the service whose exit code should be monitored (empty string skips --exit-code-from)
-//
-// Returns: the modified command with the necessary flags added
-func ensureComposeExitOnAppFailure(appCmd, serviceName string, preferFailureAbort bool) string {
-	// Under the proven switch keploy, not compose, ends the run on the app's
-	// exit, and stops the app itself with its stack running on
-	// (compose_appstop.go): the abort flags, which would take keploy's agent
-	// down with the app, are left out, the user's own too.
-	if composeStopsTheApp() {
-		return withoutComposeAbortFlags(appCmd)
-	}
-	// If the user already passed one of these flags, don't touch the command.
-	if strings.Contains(appCmd, "--abort-on-container-exit") || strings.Contains(appCmd, "--abort-on-container-failure") || strings.Contains(appCmd, "--exit-code-from") {
-		return appCmd
-	}
-
-	// Arguments we want to inject.
-	var args []string
-	if preferFailureAbort {
-		args = []string{"--abort-on-container-failure"}
-	} else {
-		args = []string{"--abort-on-container-exit"}
-		if serviceName != "" {
-			args = append(args, "--exit-code-from", serviceName)
-		}
-	}
-
-	// Insert the flags immediately after the `up` subcommand, where it
-	// stands, its spacing and quoting kept. Not into a wrapper's quoted
-	// script (`bash -c "docker compose up"`): keploy reads these flags back
-	// off the command's words (composeUpSemantics), where a flag inside
-	// the quotes would end in the quote.
-	if upAt, ok := composeUpOffset(appCmd, false); ok {
-		end := upAt + len("up")
-		return appCmd[:end] + " " + strings.Join(args, " ") + appCmd[end:]
-	}
-
-	// Fallback: no explicit "up" token detected — do not append flags.
-	return appCmd
 }
 
 // composeGlobalValueFlags are compose's global flags whose value is the next
@@ -339,9 +292,8 @@ func composeUpOffset(cmd string, intoQuoted bool) (int, bool) {
 //
 // It parses the same string the shell-out would have executed rather than
 // re-deriving the flags from the compose document, so the in-process path and
-// the shell-out can never disagree: ensureComposeExitOnAppFailure leaves a
-// user-supplied --exit-code-from / --abort-* untouched, and only the final
-// string records which of the two decided them.
+// the shell-out can never disagree: only the final string records the flags
+// either runs with.
 func composeUpSemantics(cmd string) docker.ComposeUpOptions {
 	opts := docker.ComposeUpOptions{OnExit: docker.ComposeOnExitIgnore}
 	parts := strings.Fields(cmd)
@@ -364,10 +316,10 @@ func composeUpSemantics(cmd string) docker.ComposeUpOptions {
 	// exited, where the shell-out returns. --abort-on-container-failure is the
 	// documented exception and keeps precedence.
 	//
-	// keploy's own generated commands always carry both flags
-	// (ensureComposeExitOnAppFailure), so nothing reaches this today — which is
-	// exactly why it is worth stating: the claim above is that the two paths
-	// cannot disagree, and that has to hold for inputs keploy does not
+	// keploy strips every --abort-* and --exit-code-from from the commands it
+	// runs (withoutComposeAbortFlags), so nothing reaches this today — which
+	// is exactly why it is worth stating: the claim above is that the two
+	// paths cannot disagree, and that has to hold for inputs keploy does not
 	// currently produce, not only for the ones it does.
 	if opts.ExitCodeFrom != "" && opts.OnExit == docker.ComposeOnExitIgnore {
 		opts.OnExit = docker.ComposeOnExitStop

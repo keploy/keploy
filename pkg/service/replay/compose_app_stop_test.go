@@ -110,7 +110,8 @@ func TestAComposeSetStopsItsAppBeforeItsEndsRead(t *testing.T) {
 
 // A compose app's stop that had to kill it, or that failed, leaves the set's
 // end not judged, naming why; an app that could not be started again halts
-// the set; with the switch off nothing is stopped.
+// the set; with the switch off nothing is stopped at the end of a kept stack's
+// set that another follows (compose_report_stop_test.go).
 func TestAComposeAppsStopThatKilledOrFailedLeavesTheSetUnjudged(t *testing.T) {
 	provenOn(t, true)
 	for _, tc := range []struct {

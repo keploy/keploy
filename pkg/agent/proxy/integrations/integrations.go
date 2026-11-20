@@ -2103,8 +2103,8 @@ type WindowPacer interface {
 //     switch, which the agent passes on only to a Proxy that files at that
 //     read, agent.SetEndFilingProxy). It is false, and nothing is
 //     registered, on a test worker's store, which no such read asks; in a
-//     session whose client makes none (keploy mock, keploy test without the
-//     switch or from before the read); on a closed store; and for a nil
+//     session whose client does not set ReadsSetEnds (keploy mock, keploy
+//     test without the switch or from before the read); on a closed store; and for a nil
 //     file or an empty kind. It is the word of the session handed to the
 //     store last when AtSetEnd is called, and a registration outlives that
 //     session: so the parser registers at each call it would hold past its
