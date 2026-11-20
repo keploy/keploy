@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+
+	"go.keploy.io/server/v3/pkg/neterr"
 )
 
 // BindFreePort binds the first free port it finds with bind, which binds the
@@ -51,7 +53,7 @@ func bindFreePortAbove(ephemeral func() (lo, hi uint32, known bool), bind func(p
 		if err == nil {
 			return port, nil
 		}
-		if !IsAddrInUse(err) {
+		if !neterr.IsAddrInUse(err) {
 			return 0, fmt.Errorf("bind port %d: %w", port, err)
 		}
 		last = err
