@@ -15,7 +15,8 @@ import (
 // switch off (Receipt.AnsweredAsAnother): Call and Answered say it whole, as
 // the receipt holds the run's calls; Mock is the recording served, Answer
 // how it was chosen (models.AnswerOtherID: its path differs at an id
-// segment; models.AnswerClosestBody: its body was the closest of several),
+// segment; models.AnswerClosestBody: its body was the closest of several,
+// or the one left, which holds a field the call's does not or lacks one),
 // Differs where the call differs from it, without values, and NextStep how
 // to give the call its own recording.
 type AnsweredAsAnother struct {

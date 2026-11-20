@@ -949,7 +949,11 @@ const (
 	// recordings of its method and path, none of whose bodies is the call's
 	// outside its noise (keploy.yml's request-body noise and the noise the
 	// record learned; JSON compared field by field): the recording of
-	// another call. ClosestMock names the recording, Diff names its call,
+	// another call. Where one recording of its method and path is left to
+	// serve it, only a field one of the two bodies holds and the other
+	// does not, outside that noise, makes it another call's; values alone
+	// that differ keep it served as the call's own, with no report.
+	// ClosestMock names the recording, Diff names its call,
 	// and Differs the body fields the call differs from it at ("body.ts"),
 	// or "body" for bodies with no fields to compare.
 	AnswerClosestBody = "closest_body"
