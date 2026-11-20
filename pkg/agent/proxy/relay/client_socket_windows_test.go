@@ -32,11 +32,15 @@ func (winFailingFD) Read(func(uintptr) bool) error  { return syscall.EINVAL }
 func (winFailingFD) Write(func(uintptr) bool) error { return syscall.EINVAL }
 
 // winAnsweringSocket is a client socket whose SIO_TCP_INFO answers ans, in full.
+// Its next read (readAgain), when one is made, fails with WSAECONNABORTED, as
+// the read after a client's FIN does: a read made where none may be is then
+// taken as that FIN, and the row that made it fails on its answer.
 func winAnsweringSocket(ans func() []byte) *tcpClientSocket {
 	s := &tcpClientSocket{rc: winScriptFD{}, fallback: &infoFallback{}}
 	s.getInfo = func(_ uintptr, buf *[wtcpInfoSize]byte) (int, error) {
 		return copy(buf[:], ans()), nil
 	}
+	s.recvAgain = func(uintptr) error { return windows.WSAECONNABORTED }
 	s.ask = s.lookAt
 	return s
 }
