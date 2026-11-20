@@ -536,8 +536,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// answered so (reportServedAnother), never as its own.
 					// Under the switch the matcher serves only a call's own
 					// recording, and notes nothing.
-					matchCtx, how := withServedAs(reqCtx)
-					ok, stub, diag, err = h.matchOf(matchCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+					var how servedAs
+					ok, stub, diag, err = h.matchServing(reqCtx, &how, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
 					if ok && err == nil && !proven {
 						reportServedAnother(reqCtx, input, stub, how.answer)
 					}

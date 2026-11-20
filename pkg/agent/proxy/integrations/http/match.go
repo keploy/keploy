@@ -130,8 +130,17 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 // (integrations.HoldToRound), or base itself: the strict pass's index of a
 // staging generation is kept for base (strictIndexed). A nil base keeps none.
 func (h *HTTP) matchOf(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
+	return h.matchServing(ctx, nil, input, mockDb, base, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+}
+
+// matchServing is matchOf for the match that serves the call (decodeHTTP's
+// replay), noting in how, when it is not nil, how matchCascade served it
+// (servedAs). The matcher's other reads of the store, which only diagnose a
+// call (ownCall, answeredMatch), pass none, so nothing they match is
+// reported as served.
+func (h *HTTP) matchServing(ctx context.Context, how *servedAs, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 	ctx = context.WithValue(ctx, statefulMocksKey{}, statefulMocks)
-	ok, stub, diag, err := h.matchCascade(ctx, input, mockDb, base, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+	ok, stub, diag, err := h.matchCascade(ctx, how, input, mockDb, base, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
 	if errors.Is(err, context.Canceled) && ctx.Err() == nil {
 		// Only its client's end (admit) cancels a match its caller's
 		// context still runs.
@@ -203,7 +212,7 @@ func ownedBy(ctx context.Context) func(*models.Mock) bool {
 }
 
 // matchCascade is match without its proven-switch report additions.
-func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 
 	// Mock-noise engine for this match, built from HTTP's own adapter so it is
 	// ALWAYS present. keploy.yml request-body patterns (PatternDrift) are a user
@@ -453,7 +462,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			if commitCursor != nil {
 				commitCursor()
 			}
-			noteServedAs(ctx, idVaried, false)
+			noteServedAs(how, idVaried, false)
 			return true, served, nil, nil
 		}
 
@@ -484,7 +493,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			if !claimed {
 				continue
 			}
-			noteServedAs(ctx, idVaried, false)
+			noteServedAs(how, idVaried, false)
 			return true, served, nil, nil
 		}
 
@@ -529,7 +538,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 				if !claimed {
 					continue
 				}
-				noteServedAs(ctx, idVaried, false)
+				noteServedAs(how, idVaried, false)
 				return true, served, nil, nil
 			}
 
@@ -575,7 +584,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			// above serves that one), so it is another call's recording.
 			// One recording left is the call's method, path and body
 			// shape, as the body-schema pass above serves it.
-			noteServedAs(ctx, idVaried, len(shortListed) > 1)
+			noteServedAs(how, idVaried, len(shortListed) > 1)
 			return true, served, nil, nil
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: shortListed, pool: comparedPool}, nil
