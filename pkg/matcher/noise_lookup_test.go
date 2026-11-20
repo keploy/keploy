@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -114,6 +115,28 @@ func TestNoiseLookupIDKeys(t *testing.T) {
 	} {
 		if got := l.Covers(tc.path, "v", true); got != tc.want {
 			t.Errorf("Covers(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// A hint names an entry naming id keys as it is written, by the run of the
+// path with its ids collapsed and in the path's case: never by an id, which
+// is a value, nor by the whole path.
+func TestNoiseLookupEntryNamesIDKeys(t *testing.T) {
+	u := testUUID(4)
+	l := NewNoiseLookup(map[string][]string{"options.{id}.traceid": {`^t-`}, "{id}": {`^x`}, "sessions." + u + ".token": {`^s`}})
+	for _, tc := range []struct{ path, key string }{
+		{"options." + u + ".traceId", "options.{id}.traceId"},
+		{"req.Options." + strings.ToUpper(u) + ".traceId", "Options.{id}.traceId"},
+		{"options." + u + ".traceId[]", "options.{id}.traceId"},
+		{"tags." + u, "{id}"},
+		{"tags." + u + "[]", "{id}"},
+		// An entry that names an id as a literal is named as it is written.
+		{"sessions." + u + ".token", "sessions." + u + ".token"},
+	} {
+		key, pats, ok := l.Entry(tc.path)
+		if !ok || key != tc.key || len(pats) != 1 {
+			t.Errorf("Entry(%q) = %q, %q, %v; want %q and its one pattern", tc.path, key, pats, ok, tc.key)
 		}
 	}
 }
