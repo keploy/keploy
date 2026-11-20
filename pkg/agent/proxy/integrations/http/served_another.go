@@ -45,18 +45,19 @@ func noteServedAs(how *servedAs, idVaried, closest bool) {
 
 // sameCallBodies are the candidates whose request body is the call's (body)
 // outside the noise keploy.yml declares (userBodyNoise) and the noise the
-// record learned on each (MockSpec.ReqBodyNoise), as strict enforcement
-// compares them (mocknoise.Engine.StrictReject), whichever noise mode the
-// replay runs in: a JSON body field by field, so key order and spacing are
-// no difference; a form key by key; any other body byte for byte. Each is a
-// recording of the very call.
+// record learned on each (MockSpec.ReqBodyNoise), compared both ways and
+// whole (mocknoise.SameCallDrift, DiffBothWays), whichever noise mode the
+// replay runs in: a JSON body is the same document, so key order and
+// spacing are no difference while a field only one side holds, or an array
+// of other elements, is; a form holds the same keys and values; any other
+// body is the same bytes. Each is a recording of the very call. Each
+// recording's body is read once (ownBodies), the call's once per call.
 func (h *HTTP) sameCallBodies(candidates []*models.Mock, body []byte, userBodyNoise map[string][]string) []*models.Mock {
-	eng := mocknoise.New(h.MockNoise(), false, true)
 	live := mocknoise.NewJSONBody(body)
 	var own []*models.Mock
 	for _, m := range candidates {
-		recorded, ok := h.MockNoise().RecordedBody(m)
-		if allowed, _ := eng.StrictRejectRecordedBody(m, recorded, ok, live, userBodyNoise); allowed {
+		recorded, ok := h.ownBodies.read(m)
+		if ok && len(mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded, true, live, userBodyNoise)) == 0 {
 			own = append(own, m)
 		}
 	}
@@ -64,15 +65,18 @@ func (h *HTTP) sameCallBodies(candidates []*models.Mock, body []byte, userBodyNo
 }
 
 // bodyFieldsDiffering names, sorted, the request-body fields ("body.ts") at
-// which body, the call's, differs from x's, outside the noise sameCallBodies
-// reads: marking each as request-body noise makes x the call's own
-// recording. None where the bodies have no fields to compare (neither JSON
-// nor a form).
+// which body, the call's, differs from x's, as sameCallBodies compares
+// them, a field only the call holds among them: marking each as
+// request-body noise makes x the call's own recording. None where the
+// bodies have no fields to compare (neither JSON nor a form), or are not
+// the same kind of JSON document.
 func (h *HTTP) bodyFieldsDiffering(x *models.Mock, body []byte, userBodyNoise map[string][]string) []string {
-	recorded, ok := h.MockNoise().RecordedBody(x)
-	_, drift := mocknoise.New(h.MockNoise(), false, true).StrictRejectRecorded(x, recorded, ok, body, userBodyNoise)
+	recorded, ok := h.ownBodies.read(x)
+	if !ok {
+		return nil
+	}
 	var out []string
-	for p := range drift {
+	for p := range mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded, true, mocknoise.NewJSONBody(body), userBodyNoise) {
 		if strings.HasPrefix(p, "body.") {
 			out = append(out, p)
 		}

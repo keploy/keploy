@@ -562,8 +562,9 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 		}
 
 		// A recording whose body is the call's outside the noise keploy.yml
-		// declares and the record learned (sameCallBodies: JSON field by
-		// field, so key order and spacing are no difference) is a recording
+		// declares and the record learned (sameCallBodies: compared both
+		// ways and whole, so key order and spacing are no difference while
+		// a field only one side holds is) is a recording
 		// of this very call, and the call is served as its own: the first
 		// of them in the order the store holds them (the test's own in
 		// recorded order, then the session's), never the closest string,
