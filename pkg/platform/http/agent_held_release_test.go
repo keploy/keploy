@@ -210,3 +210,56 @@ func TestAHeldReleaseGoesOnlyToTheAgentSetUp(t *testing.T) {
 		}
 	})
 }
+
+// THE HOOK THE AGENT CLIENT HANDS THE APP FOR A HELD RELEASE CARRIES THAT
+// RELEASE'S ERROR. The retry's watch decides the run on it: the agent's
+// latched CA setup failure ends the run at once, as a setup whose own
+// release got it does, and a release cut because the agent's container
+// exited before it took it lets the watch's next look set up the agent
+// compose starts in its place. A hook that swallowed the error left the
+// run waiting on an app that never starts until compose's healthcheck gave
+// up, and every row of the app's watch fakes this hook. Both KEPLOY_PROVEN
+// modes.
+func TestTheHeldReleaseHookCarriesTheReleasesError(t *testing.T) {
+	for _, c := range []struct {
+		name, answer string
+		exit         bool
+		want         func(err error) bool
+	}{
+		{"the agent's container exits before it takes the release", "wait", true, func(err error) bool {
+			return errors.Is(err, errReleaseCut) && strings.Contains(err.Error(), "exited with code 137")
+		}},
+		{"the agent answers its latched CA setup failure", "ca", false, func(err error) bool {
+			return err != nil && !errors.Is(err, errReleaseCut) && strings.Contains(err.Error(), agentCASetupFailed+" open /tmp/keploy-tls/ca.crt")
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			everySwitchMode(t, func(t *testing.T) {
+				ag := newHandoverAgent(t, c.answer, nil)
+				app := &recordingApp{}
+				ag.a.handRestartHooks(app)
+				resume := app.hold(context.Background()) // no agent ran before the retry's up
+				t.Cleanup(func() { resume(nil) })
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := app.restart(ctx); err != nil {
+					t.Fatalf("setting the agent the retry started up: %v", err)
+				}
+				go func() { _ = ag.a.MakeAgentReadyForDockerCompose(ctx) }()
+				awaitReleaseWaits(t, ag.s)
+				if c.exit {
+					go func() {
+						select {
+						case <-ag.asked:
+							ag.c.exit(137)
+						case <-ctx.Done():
+						}
+					}()
+				}
+				if err := app.held(ctx, func(context.Context) bool { return true }); !c.want(err) {
+					t.Fatalf("the held release ended with %v; want the release's own error, which the watch decides the run on", err)
+				}
+			})
+		})
+	}
+}

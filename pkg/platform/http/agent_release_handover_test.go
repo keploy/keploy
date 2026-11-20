@@ -16,8 +16,9 @@ import (
 )
 
 // handoverAgent is a stand-in compose agent for the handover of the app's
-// release to a restarted agent's setup: what /agent/ready answers ("wait" or
-// "ok"), the calls it took in order, and a signal for each release asked.
+// release to a restarted agent's setup: what /agent/ready answers ("wait",
+// "ok", or "ca": its CA setup failure, which the agent latches), the calls it
+// took in order, and a signal for each release asked.
 type handoverAgent struct {
 	a      *AgentClient
 	s      *agentSession
@@ -53,9 +54,13 @@ func newHandoverAgent(t *testing.T, answer string, hold chan struct{}) *handover
 				case <-ag.ended:
 				}
 			}
-			if ag.answer.Load().(string) == "ok" {
+			switch ag.answer.Load().(string) {
+			case "ok":
 				ag.note("release")
 				w.WriteHeader(http.StatusOK)
+				return
+			case "ca":
+				http.Error(w, agentCASetupFailed+" open /tmp/keploy-tls/ca.crt: read-only file system", http.StatusServiceUnavailable)
 				return
 			}
 			w.WriteHeader(http.StatusServiceUnavailable)

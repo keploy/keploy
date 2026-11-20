@@ -25,6 +25,8 @@ var errHeldCALatched = errors.New("the keploy agent cannot release the applicati
 type heldAnswerRun struct {
 	*setupFailApp
 	calls atomic.Int32
+	// atUpEnd is the trail as the retry's up returned.
+	atUpEnd string
 }
 
 func newHeldAnswerRun(t *testing.T, mode models.Mode, setUp func(context.Context) error, held func(r *heldAnswerRun, n int32) error) *heldAnswerRun {
@@ -46,12 +48,14 @@ func newHeldAnswerRun(t *testing.T, mode models.Mode, setUp func(context.Context
 // run is the retry of a bring-up whose stack keploy stopped: no agent runs
 // before it, and its up starts keploy's agent again (agent-1 at t3), then
 // waits, for at most 10 s, until the run ends, the app's container runs, or
-// the retry's watch has ended and let its hold go. ended: the run ended.
+// the retry's watch has ended and let its hold go, keeping the trail as it
+// returns (atUpEnd). ended: the run ended.
 func (r *heldAnswerRun) run(t *testing.T) (ended bool) {
 	t.Helper()
 	r.d.set("keploy-v3-test", "agent-1", "t1", false)
 	r.d.set("app", "app-1", "", false)
 	r.a.retryComposeUp(context.Background(), r.end, func() utils.CmdError {
+		defer func() { r.atUpEnd = r.trail() }()
 		r.note("up")
 		r.d.set("keploy-v3-test", "agent-1", "t3", true)
 		deadline := time.After(10 * time.Second)
@@ -189,8 +193,9 @@ func TestAHeldReleaseAnswerCutByARecreatedAgentIsMadeAgainOnTheNext(t *testing.T
 // A HELD RELEASE THAT FAILS WHILE KEPLOY'S OWN STOP IS UNDER WAY KEEPS NO
 // HALT. keploy stops the stack as the release made on the agent it set up
 // ends: that stop took the agent, and the release's failure ends nothing.
-// The watch ends and lets its hold go with nil. KEPLOY_PROVEN unset and =1,
-// record and test.
+// The watch ends at once and lets its hold go with nil, before the retry's
+// up returns: a watch that went on looking would let it go only once the up
+// returned. KEPLOY_PROVEN unset and =1, record and test.
 func TestAHeldReleaseAnswerWhileKeploysStopIsUnderWayEndsNothing(t *testing.T) {
 	everyRunMode(t, func(t *testing.T, mode models.Mode) {
 		r := newHeldAnswerRun(t, mode, func(context.Context) error { return nil }, func(r *heldAnswerRun, _ int32) error {
@@ -202,6 +207,9 @@ func TestAHeldReleaseAnswerWhileKeploysStopIsUnderWayEndsNothing(t *testing.T) {
 		}
 		if g := r.trail(); g != "hold,up,setup,release,resume" {
 			t.Fatalf("the retry did %s; want the hold let go with nil once keploy's stop cut the held release", g)
+		}
+		if g := r.atUpEnd; g != "hold,up,setup,release,resume" {
+			t.Fatalf("the retry's up returned after %s; want the watch ended, its hold let go with nil, before the up returned", g)
 		}
 		if h := r.a.composeAppHalt(); h != nil {
 			t.Fatalf("halt %+v kept for a held release keploy's own stop cut; want none", h)
