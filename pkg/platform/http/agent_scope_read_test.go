@@ -444,3 +444,46 @@ func TestScopeTableWithoutGatesAckIsRefused(t *testing.T) {
 		t.Fatalf("a table with gates and no other rule field was taken by an agent that names none: got %v, want ErrAgentIgnoresRules", err)
 	}
 }
+
+// TestScopeTableWithoutAgainGatesAckIsRefused: a table whose gate names
+// writes that end a read series' repeats (models.SeriesGate.AgainClosedBy)
+// pushed to an agent whose answer names the gates but not againClosedBy is
+// refused with ErrAgentIgnoresRules: it would answer the series' repeats
+// with an answer the write made untrue. Gates with no such write need no
+// againClosedBy, and an agent that names it is taken, the table posted
+// carrying the writes.
+func TestScopeTableWithoutAgainGatesAckIsRefused(t *testing.T) {
+	var answer string
+	var posted models.ScopeTableReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted = models.ScopeTableReq{}
+		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+			t.Errorf("the posted table does not decode: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, answer)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	ctx := context.Background()
+	series := map[string][]string{"marks/-/1": {"mock-2"}}
+	push := func(gates map[string]models.SeriesGate) error {
+		return a.PushProvenTable(ctx, map[string][]string{"o::TestT": {}}, map[string][]string{"o": {"mock-2"}}, map[string][]string{"o": {"mock-2"}}, nil, nil, nil, nil, nil, nil, nil, series, nil, nil, nil, gates, false)
+	}
+	plain := map[string]models.SeriesGate{"marks/-/1": {OpenedBy: "mock-1"}}
+	again := map[string]models.SeriesGate{"lookup/-/1": {OpenedBy: "mock-1"}, "marks/-/1": {AgainClosedBy: []string{"mock-3"}}}
+	answer = `{"status":"ok","served":["series","gates"]}`
+	if err := push(again); !errors.Is(err, ErrAgentIgnoresRules) {
+		t.Fatalf("an agent that names gates but not againClosedBy took a gate that ends repeats: got %v, want ErrAgentIgnoresRules", err)
+	}
+	if err := push(plain); err != nil {
+		t.Fatalf("gates that end no repeats were refused by an agent that names gates: %v", err)
+	}
+	answer = `{"status":"ok","served":["series","gates","againClosedBy"]}`
+	if err := push(again); err != nil {
+		t.Fatalf("an agent that acknowledges againClosedBy was refused: %v", err)
+	}
+	if !reflect.DeepEqual(posted.Gates, again) {
+		t.Fatalf("the posted table's gates %v, want %v", posted.Gates, again)
+	}
+}
