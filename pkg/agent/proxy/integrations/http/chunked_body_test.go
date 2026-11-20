@@ -784,6 +784,10 @@ func TestLastChunkRead(t *testing.T) {
 		{name: "a head alone", resp: head},
 		{name: "a head cut short", resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"},
 		{name: "a bare LF", resp: head + chunk + "0\n"},
+		// Past the last chunk, a trailer section not framed by the RFC: the
+		// body is not read whole as far as it came.
+		{name: "a bare LF in the trailer section", resp: head + chunk + "0\r\nX-A: 1\n"},
+		{name: "a trailer line too long with no line ending", resp: head + chunk + "0\r\n" + strings.Repeat("a", maxChunkedLineLen+1)},
 		{name: "a size line that is not hex", resp: head + "zz\r\nhello\r\n0\r\n"},
 		{name: "a Content-Length body that reads as a last chunk", resp: "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0\r\n"},
 		{name: "a body the connection's close ends that reads as a last chunk", resp: "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n0\r\n"},

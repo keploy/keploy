@@ -143,6 +143,52 @@ func TestRecordV2_ThroughTheRelayAnAnswerTheRecordingsStopCutIsLeftOut(t *testin
 	}
 }
 
+// The app reads part of an answer the server's close ends (no length, no
+// chunking) and closes; the upstream sends the rest after the app's FIN, which
+// the relay refuses for it (Session.EndedWhereClientStopped), and the
+// destination's stream ended at a capture hole (Session.EndedAtHole), which
+// marks no mock incomplete. The hole makes no fault (partAnswerFault), so what
+// the stream holds is not known to be what the app read: the exchange is left
+// out, and said so (LeftOutClientClosedPartway), with no mock. Recorded, its
+// first bytes would be a whole, shorter 200, served complete at replay.
+func TestRecordV2_ThroughTheRelayAnAnswerCutAtACaptureHoleWhereTheAppStoppedIsLeftOut(t *testing.T) {
+	const read = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n01234"
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", proven)
+			c := newRelayedConn(t)
+			c.start(t)
+			write(t, c.app, c.src, jdkRequest(7))
+			relayed(t, c.dest, jdkRequest(7))
+			if _, err := c.dest.Write([]byte(read)); err != nil {
+				t.Fatal(err)
+			}
+			relayed(t, c.app, read)
+			c.sess.MarkEndedAtHole(fakeconn.FromDest, "per_conn_cap")
+			if err := c.app.Close(); err != nil {
+				t.Fatal(err)
+			}
+			awaitFIN(t, c.dest)
+			if _, err := c.dest.Write([]byte("56789abcdefghij")); err != nil {
+				t.Fatal(err)
+			}
+			awaitStopped := time.Now().Add(10 * time.Second)
+			for !c.sess.EndedWhereClientStopped() && time.Now().Before(awaitStopped) {
+				time.Sleep(time.Millisecond)
+			}
+			if !c.sess.EndedWhereClientStopped() {
+				t.Fatal("the relay did not end the stream where the client stopped taking it")
+			}
+			if mocks := c.end(t); len(mocks) != 0 {
+				t.Fatalf("recorded %d mocks, want none: the stream ended at a capture hole (fault %v)", len(mocks), mocks[0].Spec.Fault)
+			}
+			if got := c.leftOut(supervisor.LeftOutClientClosedPartway); len(got) != 1 {
+				t.Fatalf("said %d times that the exchange was left out under %q, want once", len(got), supervisor.LeftOutClientClosedPartway)
+			}
+		})
+	}
+}
+
 // partAnswerFault: the relay's word that the stream ended where the client
 // stopped taking it (Session.EndedWhereClientStopped) makes the fault the
 // app's stop, whichever end the session has marked first, or none yet: the
