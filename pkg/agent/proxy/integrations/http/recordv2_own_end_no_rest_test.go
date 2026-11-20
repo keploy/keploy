@@ -1,17 +1,17 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package http
 
 import (
 	"errors"
 	"io"
-	"syscall"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 )
 
 // Through the relay, as the proxy records on Linux: the app closes partway
@@ -322,7 +322,7 @@ func TestRecordV2_ThroughTheRelayAnAppThatClosedOnceItHadTheUpstreamsEndIsJudged
 						}
 						_ = c.app.SetReadDeadline(time.Now().Add(10 * time.Second))
 						n, err := c.app.Read(make([]byte, 1))
-						if wantEOF := !up.reset; n != 0 || wantEOF && !errors.Is(err, io.EOF) || !wantEOF && !errors.Is(err, syscall.ECONNRESET) {
+						if wantEOF := !up.reset; n != 0 || wantEOF && !errors.Is(err, io.EOF) || !wantEOF && !neterr.IsConnReset(err) {
 							t.Fatalf("the app read %d byte(s), %v, after the upstream's end; want its end (io.EOF for a close, ECONNRESET for a reset)", n, err)
 						}
 						if err := c.app.Close(); err != nil {
