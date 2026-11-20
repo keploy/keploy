@@ -23,6 +23,18 @@
 #              answered with that recording as its own, the receipt
 #              isolated, and the replay passes
 #
+# Then a second record of GET /Users/<id> (a path with capitals) and two
+# POST /orders whose JSON body holds the order id at data.id, and two
+# replays of new ids:
+#   names      GET /Users/3 and POST /orders of a new data.id: both served
+#              another call's recording, and the next steps name a url
+#              noise key with capitals and a request-body noise key with a
+#              dot
+#   names-yml  the same with both keys in keploy.yml and --strict: keploy
+#              loads them as written (the case kept, the dotted key one
+#              field) and answers each call with that recording as its
+#              own, and the replay passes
+#
 # Runs without the proven switch only: under it the matcher serves only a
 # call's own recording, and a replay under it needs a build that judges each
 # test (keploy enterprise); this build refuses it (mock-offline-linux.sh
@@ -86,6 +98,14 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+    def do_POST(self):
+        sent = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        body = json.dumps({"created": sent["data"]["id"]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
     def log_message(self, *a): pass
 socketserver.TCPServer.allow_reuse_address = True
 with socketserver.TCPServer(("127.0.0.1", int(sys.argv[1])), H) as s:
@@ -108,6 +128,28 @@ def test_users():
         f.write(" ".join(got))
 PY
 
+# The second test calls GET /Users/<id> for each id in USERS, then POSTs
+# /orders {"data": {"id": <id>, "item": <item>}} for each id:item in
+# ORDERS; it writes the ids it was answered with to GOT.
+cat > test_orders.py <<PY
+import json, os, urllib.request
+def test_orders():
+    got = []
+    base = "http://127.0.0.1:$PORT"
+    for uid in os.environ["USERS"].split():
+        with urllib.request.urlopen(base + "/Users/" + uid, timeout=5) as r:
+            assert r.status == 200
+            got.append(str(json.load(r)["id"]))
+    for oid, item in (o.split(":") for o in os.environ["ORDERS"].split()):
+        sent = json.dumps({"data": {"id": oid, "item": item}}).encode()
+        req = urllib.request.Request(base + "/orders", data=sent, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 200
+            got.append(str(json.load(r)["created"]))
+    with open(os.environ["GOT"], "w") as f:
+        f.write(" ".join(got))
+PY
+
 echo "== record GET /users/1 and GET /users/2 =="
 : > dep.log
 python3 depserver.py "$PORT" >dep.log 2>&1 &
@@ -126,15 +168,16 @@ for p in /users/1 /users/2; do
   grep -qE "^ +url: \"?[^ ]*$p\"?\$" keploy/users/mocks.yaml || { echo "FAIL: no recording of GET $p"; sed -n "s/^ *url: //p" keploy/users/mocks.yaml; exit 1; }
 done
 
-# replay <label> <users> [flag]: replays the test calling users, with the
-# dependency stopped; sets RC and LOG.
+# replay <label> <users> [flag]: replays the mock set SET's test (CMD)
+# calling users (and ORDERS), with the dependency stopped; sets RC and LOG.
+SET=users
 replay() {
   local label="$1" users="$2" flag="${3:-}"
   LOG="$ROOT/$label.log"
   rm -f "$ROOT/got-$label"
   echo "== $label: replay, users $users${flag:+, $flag}, the dependency stopped =="
   # shellcheck disable=SC2086 # flag is one word or none
-  sudo env PATH="$PATH" "${SUDO_ENV[@]}" USERS="$users" GOT="$ROOT/got-$label" "$RECORD_BIN" mock replay -c "$CMD" --name users --disable-tele $flag 2>&1 | tee "$LOG"
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" USERS="$users" ORDERS="${ORDERS:-}" GOT="$ROOT/got-$label" "$RECORD_BIN" mock replay -c "$CMD" --name "$SET" --disable-tele $flag 2>&1 | tee "$LOG"
   RC=${PIPESTATUS[0]}
   echo "$label: replay exit=$RC, answered with ids '$(cat "$ROOT/got-$label" 2>/dev/null)'"
 }
@@ -202,6 +245,54 @@ else
   grep -qx 'isolated: true' "$RECEIPT" || fail "noise: the receipt does not prove the run isolated"
   if grep -q '^answeredAsAnother:' "$RECEIPT"; then fail "noise: the receipt lists a call answered with another call's recording"; fi
 fi
+
+# 5. names: keploy.yml noise keys as the next steps write them, with capitals
+# and a dot, load as written and make each recording the call's own.
+SET=orders
+CMD="python3 -m pytest -q -p no:cacheprovider test_orders.py"
+RECEIPT="keploy/orders/last-replay.yaml"
+echo "== record GET /Users/1 and POST /orders of data.id a1 and a2 =="
+: > dep.log
+python3 depserver.py "$PORT" >dep.log 2>&1 &
+DEP_PID=$!
+until grep -qx ready dep.log 2>/dev/null; do
+  kill -0 "$DEP_PID" 2>/dev/null || { echo "FAIL: the dependency exited before it listened"; cat dep.log; exit 1; }
+  sleep 0.1
+done
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" USERS="1" ORDERS="a1:pen a2:book" GOT="$ROOT/got-record2" "$RECORD_BIN" mock record -c "$CMD" --name orders --disable-tele 2>&1 | tee rec2.log
+rc=${PIPESTATUS[0]}
+kill "$DEP_PID" 2>/dev/null; wait "$DEP_PID" 2>/dev/null; DEP_PID=""
+[ "$rc" -eq 0 ] || { echo "FAIL: the second record exited $rc, want 0"; exit 1; }
+mocks=$(http_mocks_are keploy/orders/mocks.yaml 3) || { echo "FAIL: expected 3 Http mocks and no other kind but DNS: $mocks"; exit 1; }
+echo "recorded: $mocks"
+grep -qE '^ +url: "?[^ ]*/Users/1"?$' keploy/orders/mocks.yaml || { echo "FAIL: no recording of GET /Users/1"; sed -n "s/^ *url: //p" keploy/orders/mocks.yaml; exit 1; }
+
+ORDERS="n7:book"
+replay names "3"
+passed || fail "names: the replay failed (exit $RC); without --strict both calls are served another call's recording, want it to pass"
+[ "$(cat "$ROOT/got-names" 2>/dev/null)" = "1 a2" ] || fail "names: the calls were answered with ids '$(cat "$ROOT/got-names" 2>/dev/null)', want '1 a2' (user 1's and the book order's recordings)"
+grep -q 'mock replay summary.*"missed": 0.*"answered_as_another": 2' "$LOG" || fail "names: the summary does not say missed 0 and answered_as_another 2"
+grep -qE '^ +answer: closest_body$' "$RECEIPT" || fail "names: the receipt's answeredAsAnother does not say closest_body"
+grep -qE '^ +- body\.data\.id$' "$RECEIPT" || fail "names: the receipt's answeredAsAnother does not name body.data.id"
+URLKEY=$(grep -o 'test\.globalNoise\.global\.url: {"[^"]*": \[\]}' "$LOG" | head -1)
+URLKEY=${URLKEY#test.globalNoise.global.url: }
+BODYKEY=$(grep -o 'test\.globalNoise\.global\.requestbody: {[^}]*}' "$LOG" | head -1)
+BODYKEY=${BODYKEY#test.globalNoise.global.requestbody: }
+[ "$URLKEY" = '{"^/Users/[0-9]+$": []}' ] || fail "names: the next step for GET /Users/3 names url noise '$URLKEY', want '{\"^/Users/[0-9]+\$\": []}'"
+[ "$BODYKEY" = '{"data.id": []}' ] || fail "names: the next step for POST /orders names request-body noise '$BODYKEY', want '{\"data.id\": []}'"
+if [ -n "$URLKEY" ] && [ -n "$BODYKEY" ]; then
+  echo "== names-yml: keploy.yml url $URLKEY, requestbody $BODYKEY =="
+  printf 'test:\n  globalNoise:\n    global:\n      url: %s\n      requestbody: %s\n' "$URLKEY" "$BODYKEY" > keploy.yml
+  replay names-yml "3" --strict
+  rm -f keploy.yml
+  passed || fail "names-yml: with the noise keys the next steps name, the replay under --strict failed (exit $RC), want it to pass"
+  [ "$(cat "$ROOT/got-names-yml" 2>/dev/null)" = "1 a2" ] || fail "names-yml: the calls were answered with ids '$(cat "$ROOT/got-names-yml" 2>/dev/null)', want '1 a2'"
+  if grep -q "answered with the recording of another call" "$LOG"; then fail "names-yml: a call is still said to be answered with another call's recording"; fi
+  grep -q 'mock replay summary.*"missed": 0' "$LOG" || fail "names-yml: the summary does not say missed 0"
+  grep -qx 'isolated: true' "$RECEIPT" || fail "names-yml: the receipt does not prove the run isolated"
+  if grep -q '^answeredAsAnother:' "$RECEIPT"; then fail "names-yml: the receipt lists a call answered with another call's recording"; fi
+fi
+if [ "$FAIL" -ne 0 ]; then echo "== receipt =="; cat "$RECEIPT"; fi
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK ANOTHER-ID E2E: PASSED"; else echo "MOCK ANOTHER-ID E2E: FAILED"; fi
 exit "$FAIL"
