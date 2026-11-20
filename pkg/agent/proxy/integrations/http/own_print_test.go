@@ -180,3 +180,21 @@ func TestAPrintSaysNothingOfABodyThatIsNotJSON(t *testing.T) {
 		})
 	}
 }
+
+// Two lists of other keys are never written alike, so a print taken under
+// one noise is never read as one taken under another.
+func TestKeysKeyWritesOtherKeysApart(t *testing.T) {
+	for _, pair := range [][2][]string{
+		{{"a", "bc"}, {"ab", "c"}},
+		{{"body.a", "body.body.c"}, {"body.abody.", "body.c"}},
+		{{""}, nil},
+		{{"a", ""}, {"a"}},
+	} {
+		if keysKey(pair[0]) == keysKey(pair[1]) {
+			t.Fatalf("%q and %q are written alike: %q", pair[0], pair[1], keysKey(pair[0]))
+		}
+	}
+	if noiseKey(map[string][]string{"ts": {"^x$"}, "q": nil}) != keysKey([]string{"q", "ts"}) {
+		t.Fatal("a noise's key is not its keys sorted, whatever their patterns")
+	}
+}
