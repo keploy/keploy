@@ -57,7 +57,8 @@ func TestACallAnsweredWithAnotherCallsRecordingIsLoggedByItsShape(t *testing.T) 
 	}
 	field := "body.sessions." + token + ".user"
 	body := models.UnmatchedCall{Protocol: "HTTP", Destination: "users:8080", ActualSummary: "POST /search", ClosestMock: "mock-2",
-		Answer: models.AnswerClosestBody, Differs: []string{field}, Diff: "POST /search was answered with the recording of POST /search whose request body is closest to the call's"}
+		Answer: models.AnswerClosestBody, Differs: []string{field, "body.data.id"}, Diff: "POST /search was answered with the recording of POST /search whose request body is closest to the call's",
+		NextSteps: `If the call is a new input, record it (keploy mock record) so it is answered with its own recording. If the fields it differs at (` + field + `, body.data.id) change on every run, mark them as noise in keploy.yml, under test.globalNoise.global.requestbody: {"sessions.` + token + `.user": [], "data.id": []}; the call is then answered with this recording as its own.`}
 
 	core, logs := observer.New(zapcore.DebugLevel)
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
@@ -84,11 +85,13 @@ func TestACallAnsweredWithAnotherCallsRecordingIsLoggedByItsShape(t *testing.T) 
 	}
 	var reason string
 	var differs [][]string
+	var nextSteps []string
 	for _, e := range logs.All() {
 		switch e.Message {
 		case "this replay did not prove the tests run with the dependencies off":
 			reason, _ = e.ContextMap()["reason"].(string)
 		case "an outgoing call was answered with the recording of another call, not its own: this replay is not counted as proven, and --strict fails it":
+			nextSteps = append(nextSteps, e.ContextMap()["next_step"].(string))
 			for _, f := range e.Context {
 				if f.Key == "differs" {
 					got, _ := f.Interface.(zapcore.ArrayMarshaler)
@@ -104,8 +107,19 @@ func TestACallAnsweredWithAnotherCallsRecordingIsLoggedByItsShape(t *testing.T) 
 	if !strings.Contains(reason, "2 call(s) were answered with the recording of another call") || !strings.Contains(reason, tag) || !strings.Contains(reason, "answered with recording mock-1 (other_id)") {
 		t.Errorf("the INFO line's reason %q does not name the call by its path tag and its recording", reason)
 	}
-	if len(differs) != 2 || !slices.Equal(differs[0], []string{"url.path.3"}) || !slices.Equal(differs[1], []string{models.FieldShape(field)}) || models.FieldShape(field) == field {
-		t.Errorf("the WARNs' differs fields are %q, want [url.path.3] and [%s]", differs, models.FieldShape(field))
+	if len(differs) != 2 || !slices.Equal(differs[0], []string{"url.path.3"}) || !slices.Equal(differs[1], []string{models.FieldShape(field), "body.data.id"}) || models.FieldShape(field) == field {
+		t.Errorf("the WARNs' differs fields are %q, want [url.path.3] and [%s body.data.id]", differs, models.FieldShape(field))
+	}
+	// The body WARN's next step names each requestbody entry's key as its
+	// differs names the field, without the root: data.id, and the token's
+	// key with the token {} as in differs.
+	if len(nextSteps) == 2 && len(differs) == 2 && len(differs[1]) == 2 {
+		entries := `requestbody: {"` + strings.TrimPrefix(differs[1][0], "body.") + `": [], "` + strings.TrimPrefix(differs[1][1], "body.") + `": []}`
+		if !strings.Contains(nextSteps[1], entries) {
+			t.Errorf("the body WARN's next_step %q does not name its entries as its differs %q does: want %s", nextSteps[1], differs[1], entries)
+		}
+	} else {
+		t.Errorf("the WARNs' next steps %q", nextSteps)
 	}
 
 	r, err := ReadReceipt(cfg.Path, "set")
@@ -115,7 +129,7 @@ func TestACallAnsweredWithAnotherCallsRecordingIsLoggedByItsShape(t *testing.T) 
 	if r.Isolated || !strings.Contains(r.IsolationNote, call.Diff) {
 		t.Errorf("the receipt's isolation note %q does not name the call whole", r.IsolationNote)
 	}
-	if len(r.AnsweredAsAnother) != 2 || r.AnsweredAsAnother[0].NextStep != call.NextSteps || !slices.Equal(r.AnsweredAsAnother[1].Differs, []string{field}) {
+	if len(r.AnsweredAsAnother) != 2 || r.AnsweredAsAnother[0].NextStep != call.NextSteps || !slices.Equal(r.AnsweredAsAnother[1].Differs, body.Differs) {
 		t.Errorf("the receipt's answeredAsAnother %+v does not hold the calls whole", r.AnsweredAsAnother)
 	}
 	if !strings.Contains(console.String(), call.Diff) || !strings.Contains(console.String(), call.NextSteps) {
