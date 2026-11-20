@@ -3,8 +3,10 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -328,6 +330,47 @@ func TestARunIDTheAgentDoesNotTakeIsSaidOnceAndTheRunGoesOn(t *testing.T) {
 			t.Fatalf("said %q for a call the run stopped, want nothing", lines[0].Message)
 		}
 	})
+}
+
+// An agent of the run that answers the route with any other status took no
+// id either: 401 from its auth, a 5xx, 503 from an agent not up yet, or a
+// 501 whose body does not name models.NoTimelineHooks (a proxy in front of a
+// remote agent). The client warns once, naming the status and the agent's
+// own reason, never calls it an older agent, and never takes the answer for
+// an agent that keeps no timeline.
+func TestAnyOtherAnswerIsAWarningWithTheAgentsReason(t *testing.T) {
+	for _, st := range switchStates {
+		t.Run(st.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, st.env)
+			useStartupHook(t, &clockRunStarter{run: "run-1"})
+			for _, code := range []int{
+				http.StatusUnauthorized, http.StatusInternalServerError,
+				http.StatusServiceUnavailable, http.StatusNotImplemented,
+			} {
+				t.Run(strconv.Itoa(code), func(t *testing.T) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						http.Error(w, "the agent's own reason", code)
+					}))
+					t.Cleanup(srv.Close)
+					t.Cleanup(func() { sessions.Delete(srv.URL) })
+					a, logs := observedClient(srv.URL)
+					a.handClockRun(context.Background())
+					a.handClockRun(context.Background())
+					lines := runIDLines(logs)
+					want := fmt.Sprintf("it answered %d: the agent's own reason", code)
+					if len(lines) != 1 || lines[0].Level != zapcore.WarnLevel || !strings.Contains(lines[0].Message, want) {
+						t.Fatalf("said %v, want one warning naming %q", lines, want)
+					}
+					if strings.Contains(lines[0].Message, "older than this keploy") {
+						t.Fatalf("said %q: an agent that answered %d is not an older one", lines[0].Message, code)
+					}
+					if l := logs.FilterMessageSnippet("keeps no clock timeline").AllUntimed(); len(l) != 0 {
+						t.Fatalf("said %q: an agent that answered %d is not one that keeps no timeline", l[0].Message, code)
+					}
+				})
+			}
+		})
+	}
 }
 
 // A keploy whose startup hook hands no run id (OSS's own, or one with none
