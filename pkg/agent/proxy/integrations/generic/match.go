@@ -292,15 +292,15 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 	for idx, mock := range tcsMocks {
 		recorded := mock.Spec.GenericRequests
 		nc := util.NewNoiseChecker(mock.Noise)
-		sim, compared, noisy := bytesSimilarity(recorded, nc, req)
+		sim, noisy := bytesSimilarity(recorded, nc, req)
 		if noisy {
 			if pieces := similarPieces(recorded, reqBuffs, &old); pieces != nil {
 				if s := pieceSimilarity(recorded, nc, pieces); s > sim {
-					sim, compared = s, true
+					sim = s
 				}
 			}
 		}
-		if compared && sim > mxSim {
+		if sim > mxSim {
 			mxSim = sim
 			mxIdx = idx
 		}
@@ -309,29 +309,25 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 }
 
 // bytesSimilarity is the similarity of the request's bytes with recorded's
-// joined, its noisy (obfuscated) pieces left out. compared is false when
-// there is nothing to compare (sim is 0): every piece is noisy, or one
-// holds no message. noisy reports whether a piece is noisy, and is false
-// for a recording a piece of which holds no message: it is not compared.
-func bytesSimilarity(recorded []models.Payload, nc *util.NoiseChecker, req *sentRequest) (sim float64, compared, noisy bool) {
+// joined, its noisy (obfuscated) pieces left out: 0 when every piece is
+// noisy, as no bytes are like any. noisy reports whether a piece is noisy.
+// A recording a piece of which holds no message is compared with nothing:
+// 0, and not noisy, so it is not compared piece by piece either.
+func bytesSimilarity(recorded []models.Payload, nc *util.NoiseChecker, req *sentRequest) (sim float64, noisy bool) {
 	var joined []byte
 	for _, p := range recorded {
 		if len(p.Message) == 0 {
-			return 0, false, false
+			return 0, false
 		}
 		mockData := p.Message[0].Data
 		if nc.IsNoisy(mockData) {
 			noisy = true
 			continue
 		}
-		compared = true
 		encoded, _ := util.DecodeBase64(mockData)
 		joined = append(joined, encoded...)
 	}
-	if !compared {
-		return 0, false, noisy
-	}
-	return fuzzyCheck(joined, req.bytes()), true, noisy
+	return fuzzyCheck(joined, req.bytes()), noisy
 }
 
 // pieceSimilarity is the average similarity of each of pieces with the

@@ -276,6 +276,39 @@ func TestARedactedPieceIsLeftOutOfASimilarity(t *testing.T) {
 	}
 }
 
+// A recording with no redacted piece is compared with a request by its bytes
+// only, even where the request's pieces line up with its own: a short piece
+// the same beside a long piece changed is not like it, though the two
+// pieces' average similarity (1 and 0) is over the 0.4 bound. The pieces are
+// binary: a recorded text piece is not compared by its bytes, as on main.
+func TestARecordingWithNoRedactedPieceIsComparedByItsBytesOnly(t *testing.T) {
+	head := varied(100, true)
+	body := varied(4<<10, true)
+	changed := make([]byte, len(body))
+	for i, b := range body {
+		changed[i] = b ^ 0x20 // every letter's case flipped: no 8-byte run in common
+	}
+	recorded := recordedAs("unredacted", head, body)
+	if got := findBinaryMatch([]*models.Mock{recorded}, [][]byte{head, changed}, 0.4); got != -1 {
+		t.Errorf("the long piece changed, the pieces lined up: findBinaryMatch = %d, want -1", got)
+	}
+	if got := findBinaryMatch([]*models.Mock{recorded}, [][]byte{head, body}, 0.9); got != 0 {
+		t.Errorf("the same request, the pieces lined up: findBinaryMatch = %d, want 0", got)
+	}
+}
+
+// Of recordings equally like a request, the first in the pool's order is
+// matched.
+func TestOfRecordingsEquallyLikeARequestTheFirstIsMatched(t *testing.T) {
+	req := varied(4<<10, true)
+	near := append([]byte(nil), req...)
+	near[100] ^= 1
+	pool := []*models.Mock{recordedAs("first", req), recordedAs("second", req)}
+	if got := findBinaryMatch(pool, [][]byte{near}, 0.4); got != 0 {
+		t.Errorf("findBinaryMatch = %d, want 0", got)
+	}
+}
+
 // A recording a piece of which holds no message, or holds no bytes keploy
 // can read, is compared with nothing, by the matcher or the miss report,
 // and stops neither.
