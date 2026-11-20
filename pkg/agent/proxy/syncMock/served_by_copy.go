@@ -76,20 +76,42 @@ type heldCopies struct {
 	first map[copyKey]time.Time
 }
 
-// noteDelivered notes mock, delivered to the consumer of the channel of
-// epoch, as a copy the recording holds of its key. An answer the client
-// never read serves no call, and a mock with no request time cannot be shown
-// requested before a loss: neither is noted. A delivery for an older
-// recording's channel notes nothing for this one.
-func (m *SyncMockManager) noteDelivered(mock *models.Mock, epoch uint64) {
+// deliveryNote is what noteDelivered records of a mock delivered to the
+// recording's consumer, read off the mock before it is sent (noteOf). Once
+// the consumer takes a mock it is the consumer's: the agent's record stream
+// writes its metadata as it streams it (starts.Registry.Stamp). A read of the
+// mock by the send after the hand-over races that write, and a map read that
+// races a write ends the agent ("concurrent map read and map write"), with
+// every capture it held.
+type deliveryNote struct {
+	key copyKey
+	req time.Time
+	ok  bool // false: nothing is noted of the mock
+}
+
+// noteOf reads mock's deliveryNote, while the sender still holds mock. An
+// answer the client never read serves no call, and a mock with no request
+// time cannot be shown requested before a loss: neither is noted.
+func noteOf(mock *models.Mock) deliveryNote {
 	if mock.IsUndelivered() || mock.Spec.ReqTimestampMock.IsZero() {
-		return
+		return deliveryNote{}
 	}
 	key, ok := servedByCopy(mock)
 	if !ok || key == "" {
+		return deliveryNote{}
+	}
+	return deliveryNote{key: copyKey{kind: mock.Kind, key: key}, req: mock.Spec.ReqTimestampMock, ok: true}
+}
+
+// noteDelivered notes the mock of n (noteOf), delivered to the consumer of
+// the channel of epoch, as a copy the recording holds of its key. It reads
+// nothing of the mock, which is the consumer's by then. A delivery for an
+// older recording's channel notes nothing for this one.
+func (m *SyncMockManager) noteDelivered(n deliveryNote, epoch uint64) {
+	if !n.ok {
 		return
 	}
-	k, req := copyKey{kind: mock.Kind, key: key}, mock.Spec.ReqTimestampMock
+	k, req := n.key, n.req
 	h := &m.copies
 	h.mu.Lock()
 	defer h.mu.Unlock()
