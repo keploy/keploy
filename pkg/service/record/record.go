@@ -221,7 +221,9 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 	}
 	// mayBeHeld reports whether a frame handed on after the stop may be what
 	// the agent said it held from before it: one captured before the stop, or
-	// undated. Counted in r.heldFrames (agentEndedDrain).
+	// undated. Counted in r.heldFrames (agentEndedDrain). It reads the frame,
+	// so it is asked before the hand-over: a handed frame is the consumer's,
+	// which may change it (handing).
 	mayBeHeld := func(item T) bool {
 		at := o.capturedAt(item)
 		return at.IsZero() || !at.After(stoppedAt)
@@ -237,13 +239,14 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 			again = utils.StopNow()
 		}
 		onHanded := o.beforeHand(item)
+		held := mayBeHeld(item) // before the hand-over (mayBeHeld)
 		handed := false
 		select {
 		case out <- item:
 			r.frameProgress.Add(1)
 			if draining {
 				sinceStop++
-				if mayBeHeld(item) {
+				if held {
 					r.heldFrames.Add(1)
 				}
 			}
@@ -331,10 +334,11 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 				stopTimer(idle)
 				if forward, _ := keep(item); forward {
 					onHanded := o.beforeHand(item)
+					held := mayBeHeld(item) // before the hand-over (mayBeHeld)
 					select {
 					case out <- item:
 						r.frameProgress.Add(1)
-						if mayBeHeld(item) {
+						if held {
 							r.heldFrames.Add(1)
 						}
 						onHanded()
