@@ -535,11 +535,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// or the closest of several bodies) is reported as
 					// answered so (reportServedAnother), never as its own.
 					// Under the switch the matcher serves only a call's own
-					// recording, and notes nothing.
+					// recording, and notes nothing. The report carries
+					// the call's round where the call was marked (call),
+					// as its miss would.
 					var how servedAs
 					ok, stub, diag, err = h.matchServing(reqCtx, &how, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
 					if ok && err == nil && !proven {
-						reportServedAnother(reqCtx, input, stub, how.answer)
+						reportServedAnother(reqCtx, input, stub, how.answer, call)
 					}
 					// A call that missed before the background could answer
 					// it asks now whether it is one of the open test's own

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -247,23 +248,73 @@ func TestACallOfAnotherIDIsReportedOnEachPassThatServesIt(t *testing.T) {
 	}
 }
 
+// reportedServedAnother is the reports reportServedAnother makes of input
+// served x with answer, its call marked in call.
+func reportedServedAnother(input *req, x *models.Mock, answer string, call integrations.CallRound) []*models.MockMismatchReport {
+	var got []*models.MockMismatchReport
+	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) {
+		var w interface {
+			MismatchReport() *models.MockMismatchReport
+		}
+		if errors.As(err, &w) {
+			got = append(got, w.MismatchReport())
+		}
+	})
+	reportServedAnother(ctx, input, x, answer, call)
+	return got
+}
+
+// A report of a call served another call's recording carries the round its
+// call was marked in, as a miss's report does (integrations.StampMark): the
+// proxy places it by that mark, so a call keploy answers after its test
+// ended is never listed under the next test. An unmarked call (the zero
+// CallRound, as the decode leaves every call with the switch off) leaves
+// the report unmarked, placed by when it reaches the proxy, as that mode's
+// misses are.
+func TestAReportOfAnotherCallsRecordingCarriesItsCallsRound(t *testing.T) {
+	x := &models.Mock{Name: "mock-1", Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://users.local/users/1"}}}
+	live, err := url.Parse("http://users.local/users/3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := &req{method: "GET", url: live, header: http.Header{"Host": {"users.local"}}}
+	for _, tc := range []struct {
+		name    string
+		call    integrations.CallRound
+		mark    models.RoundMark
+		inTest  bool
+		test    string
+		epoch   uint64
+		bounds  uint64
+		known   bool
+		reads   uint64
+		answers string
+	}{
+		{name: "a call marked in a test's view", call: integrations.NewCallRound(4, nil).ReadAt(integrations.RoundAt{Epoch: 4, Gen: 9, Bounds: 6}).InView(true, false).OfTest("test-2").AfterReads(3),
+			mark: models.RoundMarkedSettled, inTest: true, test: "test-2", epoch: 4, bounds: 6, known: true, reads: 3, answers: models.AnswerOtherID},
+		{name: "a call marked while a set was staged", call: integrations.NewCallRound(5, nil).InStaging(true),
+			mark: models.RoundMarkedStaging, epoch: 5, answers: models.AnswerClosestBody},
+		{name: "an unmarked call", call: integrations.CallRound{}, answers: models.AnswerOtherID},
+	} {
+		got := reportedServedAnother(in, x, tc.answers, tc.call)
+		if len(got) != 1 {
+			t.Fatalf("%s: %d reports, want 1", tc.name, len(got))
+		}
+		r := got[0]
+		if r.Mark != tc.mark || r.MarkedInTest != tc.inTest || r.MarkedTest != tc.test || r.MarkEpoch != tc.epoch || r.MarkBounds != tc.bounds || r.MarkRound != tc.known || r.MarkReads != tc.reads {
+			t.Errorf("%s: the report is marked %v (in a test %v, test %q, epoch %d, bounds %d, round known %v, after %d reads), want %v (%v, %q, %d, %d, %v, %d)",
+				tc.name, r.Mark, r.MarkedInTest, r.MarkedTest, r.MarkEpoch, r.MarkBounds, r.MarkRound, r.MarkReads, tc.mark, tc.inTest, tc.test, tc.epoch, tc.bounds, tc.known, tc.reads)
+		}
+	}
+}
+
 // reportServedAnother names both calls whole where the call's request
 // gives no Host header or no path, or the recording's URL no path ("/"),
 // and reports nothing for an answer that is not of another call's
 // recording, for no recording, or for one with no request.
 func TestAReportOfAnotherCallsRecordingNamesBothCallsWhole(t *testing.T) {
 	report := func(input *req, x *models.Mock, answer string) []*models.MockMismatchReport {
-		var got []*models.MockMismatchReport
-		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) {
-			var w interface {
-				MismatchReport() *models.MockMismatchReport
-			}
-			if errors.As(err, &w) {
-				got = append(got, w.MismatchReport())
-			}
-		})
-		reportServedAnother(ctx, input, x, answer)
-		return got
+		return reportedServedAnother(input, x, answer, integrations.CallRound{})
 	}
 	root := &models.Mock{Name: "mock-root", Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://users.local"}}}
 	live, err := url.Parse("http://users.local")
