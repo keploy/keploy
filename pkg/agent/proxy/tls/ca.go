@@ -1147,6 +1147,12 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	// certificate (caDER), whatever alias holds it.
 	alias, caDER := runAlias(ca), ca.cert.Raw
 
+	// This run's lock, before any entry is written: other keploy runs' sweeps
+	// leave a live run's entries (runlock.go).
+	if writesSweptEntries(runtime.GOOS) {
+		holdCARunLock(ctx, logger, ca.runID)
+	}
+
 	// Windows Specific Logic
 	if runtime.GOOS == "windows" {
 		// Extract certificate to a temporary file
@@ -1301,8 +1307,12 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 // path, where the run's context is already cancelled — so it runs the trust-store
 // and keytool commands under its own short-lived context rather than the dead
 // one. Safe to call when nothing was installed (docker/k8s modes, or a persisted
-// per-user CA): it is then a no-op.
+// per-user CA): it then removes nothing, and only gives up the run's lock if it
+// holds one.
 func TeardownNativeCA(logger *zap.Logger) {
+	// The run's lock goes last, once its entries are gone: until then other
+	// runs' sweeps leave them.
+	defer releaseCARunLock()
 	installedNativeMu.Lock()
 	n := installedNative
 	installedNative = nil
@@ -1363,8 +1373,10 @@ func removeWindowsCAByName(ctx context.Context, logger *zap.Logger, cn string) {
 	}
 }
 
-// sweepRunLeftovers removes keploy-mitm-*.crt anchors from a previous crashed
-// run (any run id other than the current one). They are inert — their signing
+// sweepRunLeftovers removes the keploy-mitm-*.crt anchors of other runs (any
+// run id other than the current one) that are no longer alive: a run that
+// holds its lock (caRunLive) keeps its anchor, so two keploy runs on one host
+// do not remove each other's. A crashed run's anchor is inert — its signing
 // key is gone — so this is housekeeping, not a security fix.
 func sweepRunLeftovers(logger *zap.Logger, currentRunID string) {
 	current := "keploy-mitm-" + currentRunID + ".crt"
@@ -1376,6 +1388,10 @@ func sweepRunLeftovers(logger *zap.Logger, currentRunID string) {
 		for _, e := range entries {
 			name := e.Name()
 			if name == current || !strings.HasPrefix(name, "keploy-mitm-") || !strings.HasSuffix(name, ".crt") {
+				continue
+			}
+			if liveRunEntry(name) {
+				logger.Debug("left the CA anchor of a keploy run that is still alive", zap.String("path", filepath.Join(dir, name)))
 				continue
 			}
 			if err := os.Remove(filepath.Join(dir, name)); err == nil {
