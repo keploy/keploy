@@ -1068,12 +1068,27 @@ func runGuardForEdges(t *testing.T, g *guard, d time.Duration) []pauseEdge {
 	return append([]pauseEdge(nil), edges...)
 }
 
-// churn allocates 1 MiB pieces for d, holding only the current 10 MiB batch.
+// churn allocates 1 MiB pieces for d, holding only the current 10 MiB batch,
+// and takes no piece while the heap is at its goal: there the runtime's GC is
+// behind, and churn waits for it to end. Go's mark assists would hold an
+// allocator there, but they scale with the heap's pointers, and a heap of
+// byte slices has next to none. So on a loaded host, where the GC's workers
+// wait for a CPU while it marks (210 ms of marking for 1 ms of its CPU, seen),
+// an unpaced churn takes the heap past its goal and Go's memory over its
+// GOMEMLIMIT, and the GC counts live all it allocates meanwhile
+// (/gc/heap/live), as far as the load lets the GC fall behind. Paced, the
+// heap stays at its goal, and a GC counts live at most what churn allocates
+// between the GC's start and the goal, whatever the load.
 func churn(d time.Duration) {
 	for end := time.Now().Add(d); time.Now().Before(end); {
 		batch := make([][]byte, 10)
-		for i := range batch {
+		for i := 0; i < len(batch) && time.Now().Before(end); {
+			if m := readGoMemoryStats(); m.ok && m.objects >= m.goal {
+				time.Sleep(time.Millisecond)
+				continue
+			}
 			batch[i] = make([]byte, 1<<20)
+			i++
 		}
 		runtime.KeepAlive(batch)
 		time.Sleep(5 * time.Millisecond)
@@ -1087,9 +1102,10 @@ func churn(d time.Duration) {
 // nor makes the guard collect. The limit derived from --memory-limit (350.4
 // MiB) has the runtime's next GC due under the ceiling, as a container's
 // limit would. 90% of the budget (460.8 MiB) would not: GOGC's goal, twice
-// what the last GC marked (190 MiB, more where it marked while the churn
-// allocated, as on a loaded host), has the working set due over the 486.4
-// MiB ceiling at the next GC, and the guard pause recording on garbage.
+// what the last GC marked (190 MiB), has the working set due over the 486.4
+// MiB ceiling at the next GC, and the guard pause recording on garbage. The
+// churn keeps the heap at its goal (churn), so the row's figures are the
+// same on a loaded host.
 func TestRealGarbageOverThePausePointNeitherPausesNorCollects(t *testing.T) {
 	g, maxWS := realGuard(t, 120, 0)
 	debug.FreeOSMemory()
