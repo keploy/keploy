@@ -173,6 +173,20 @@ func TestABodyWithNoFieldsNamesNoNoiseEntry(t *testing.T) {
 	}
 }
 
+// A JSON call of another kind of document than the recording's (an array
+// against an object) has no field of either at which they differ:
+// bodyFieldsDiffering names none, so no next step names a request-body
+// noise entry for it.
+func TestAnotherKindOfJSONDocumentNamesNoField(t *testing.T) {
+	h := newHTTP()
+	x := recordedAs(t, h, "mock-search-1", 1, searchCall(`{"q":"ada"}`), jsonAnswer(200, `{"hit":1}`), nil)
+	for _, call := range []string{`["ada"]`, `"ada"`} {
+		if got := h.bodyFieldsDiffering(x, []byte(call), nil); len(got) != 0 {
+			t.Errorf("bodyFieldsDiffering of %s against {\"q\":\"ada\"} = %q, want none", call, got)
+		}
+	}
+}
+
 // bodyFieldsDiffering names every field that differs, in sorted order, each
 // time.
 func TestBodyFieldsDifferingAreSorted(t *testing.T) {

@@ -25,6 +25,8 @@ func TestDecodedJSONFieldsDiffering(t *testing.T) {
 		{name: "a type differs", exp: `{"n":1}`, act: `{"n":"1"}`, want: []string{"n"}},
 		{name: "a field only the live call has", exp: `{"q":"ada"}`, act: `{"q":"ada","admin":true}`, want: []string{"admin"}},
 		{name: "a field only the recording has", exp: `{"q":"ada","x":1}`, act: `{"q":"ada"}`, want: []string{"x"}},
+		{name: "a null field only the live call has", exp: `{"q":"ada"}`, act: `{"q":"ada","x":null}`, want: []string{"x"}},
+		{name: "a null field only the recording has", exp: `{"q":"ada","x":null}`, act: `{"q":"ada"}`, want: []string{"x"}},
 		{name: "a nested field only the live call has", exp: `{"f":{"x":1}}`, act: `{"f":{"x":1,"y":2}}`, want: []string{"f.y"}},
 		{name: "an object only the live call has", exp: `{"q":"ada"}`, act: `{"q":"ada","f":{"y":2}}`, want: []string{"f"}},
 		{name: "an object against a scalar", exp: `{"f":{"x":1}}`, act: `{"f":1}`, want: []string{"f"}},
