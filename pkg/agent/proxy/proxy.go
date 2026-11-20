@@ -26,7 +26,6 @@ import (
 	"syscall"
 	"time"
 
-	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
@@ -45,6 +44,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/lru"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -406,7 +406,7 @@ type Proxy struct {
 	// fanning one lookup into many qualified names — would otherwise grow this
 	// forever in a long-lived agent. Allocated once in New and purged, never
 	// replaced, by ResetRecordedDNSMocks.
-	nodataRelayLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
+	nodataRelayLogged *lru.Expirable[string, bool] // keyed by generateCacheKey
 
 	// The DNS servers, set by startDNSServers before anything serves or
 	// stops them.
@@ -469,7 +469,7 @@ type Proxy struct {
 	unnamedConnsLogged atomic.Int64
 
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
-	dnsCache *expirable.LRU[string, dnsCacheEntry]
+	dnsCache *lru.Expirable[string, dnsCacheEntry]
 
 	// recordedDNSMocks tracks DNS queries that have already been recorded
 	// to avoid recording duplicate mocks. Key format: "name:qtype:qclass",
@@ -1662,13 +1662,10 @@ func (p *Proxy) GetIntegrations() map[integrations.IntegrationType]integrations.
 // re-surfaced for the new session instead of being suppressed by state left
 // over from the previous one.
 //
-// Purges in place rather than reallocating. expirable.NewLRU with a non-zero
-// TTL starts a janitor goroutine whose done channel is never closed (see the
-// note in hashicorp/golang-lru v2's expirable_lru.go), and that goroutine
-// captures the cache — so every replacement cache would strand a goroutine
-// AND pin the discarded entries beyond the reach of the GC. Purge keeps both
-// trackers at one allocation for the process lifetime, and avoids swapping a
-// pointer that the DNS handler goroutines read concurrently.
+// Purges in place rather than reallocating: the DNS handler goroutines read
+// both tracker pointers concurrently, so swapping in new trackers would race
+// with them. Purge keeps each tracker at one allocation for the process
+// lifetime.
 func (p *Proxy) ResetRecordedDNSMocks() {
 	if p.recordedDNSMocks != nil {
 		p.recordedDNSMocks.Purge()
