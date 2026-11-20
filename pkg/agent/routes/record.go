@@ -314,13 +314,15 @@ func (a *Agent) HandleAppStartsAnew(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleClockRun hands the hooks the run id of the process that started the
-// agent (agent.ClockRunTaker). Hooks that take none answer 404, as an agent
-// older than the route does: the starter goes on without one. An id the
-// hooks refuse is answered 409 with their reason.
+// agent (agent.ClockRunTaker). Hooks that take none keep no clock timeline
+// (OSS's own, and a native macOS or Windows agent's): they answer 501 with
+// NoTimelineHooks, which the starter takes as nothing to hand. 404 stays
+// what an agent older than the route answers. An id the hooks refuse is
+// answered 409 with their reason.
 func (a *Agent) HandleClockRun(w http.ResponseWriter, r *http.Request) {
 	h, ok := agent.ActiveHooks.(agent.ClockRunTaker)
 	if !ok {
-		http.Error(w, "this keploy agent takes no run id", http.StatusNotFound)
+		http.Error(w, models.NoTimelineHooks, http.StatusNotImplemented)
 		return
 	}
 	var req models.ClockRunReq

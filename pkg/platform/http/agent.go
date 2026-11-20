@@ -1422,12 +1422,15 @@ func (a *AgentClient) AppStartsAnew(ctx context.Context, testSetID string, first
 // have left. It is called once the agent answers: right after Setup's health
 // handshake, and before a docker compose test set's hook, the first call to
 // each agent compose starts (BeforeTestSetCompose). Every call that can move
-// the agent's clock comes after it. An agent that takes no id (one older
-// than this keploy, a user-pinned agent image) answers 404, and one that
-// cannot be reached or refuses the id answers otherwise: the run goes on
-// without one either way, and the client says so once. The id is never
-// passed on the agent's command line, where a flag it does not know would
-// end it, and never fails the run.
+// the agent's clock comes after it. An agent of this keploy whose hooks keep
+// no clock timeline (OSS's own, a native macOS or Windows agent) answers 501
+// (models.NoTimelineHooks): it has no use for the id, so that is said only
+// at Debug. An agent older than the route (a user-pinned agent image)
+// answers 404, one that already holds another run's id answers 409, and one
+// that cannot be reached answers nothing: the run goes on without an id
+// either way, and the client says so once. The id is never passed on the
+// agent's command line, where a flag it does not know would end it, and
+// never fails the run.
 func (a *AgentClient) handClockRun(ctx context.Context) {
 	s, ok := agent.StartupAgentHook.(agent.ClockRunStarter)
 	if !ok || a.conf.Agent.AgentURI == "" {
@@ -1439,21 +1442,21 @@ func (a *AgentClient) handClockRun(ctx context.Context) {
 	}
 	body, err := json.Marshal(models.ClockRunReq{Run: run})
 	if err != nil {
-		a.sayNoClockRun(fmt.Sprintf("its request could not be made: %v", err), false)
+		a.sayNoClockRun(fmt.Sprintf("its request could not be made: %v", err), noClockRunOther)
 		return
 	}
 	hctx, stop := a.whileAgentRuns(ctx)
 	defer stop()
 	req, err := newAgentRequest(hctx, http.MethodPost, a.conf.Agent.AgentURI+"/hooks/clock-run", bytes.NewReader(body))
 	if err != nil {
-		a.sayNoClockRun(fmt.Sprintf("its request could not be made: %v", err), false)
+		a.sayNoClockRun(fmt.Sprintf("its request could not be made: %v", err), noClockRunOther)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := doAgent(&a.client, req)
 	if err != nil {
 		if ctx.Err() == nil {
-			a.sayNoClockRun(fmt.Sprintf("it did not answer: %v", err), false)
+			a.sayNoClockRun(fmt.Sprintf("it did not answer: %v", err), noClockRunOther)
 		}
 		return
 	}
@@ -1463,28 +1466,56 @@ func (a *AgentClient) handClockRun(ctx context.Context) {
 	}()
 	switch res.StatusCode {
 	case http.StatusOK:
+	case http.StatusNotImplemented:
+		a.logger.Debug("keploy's agent keeps no clock timeline, so it takes no run id", zap.String("agent", agentAnswer(res.Body)))
 	case http.StatusNotFound:
-		a.sayNoClockRun("it is older than this keploy and does not take one", true)
+		a.sayNoClockRun("it is older than this keploy and does not take one", noClockRunOlder)
+	case http.StatusConflict:
+		a.sayNoClockRun("the agent already holds another run's id: an earlier run's agent is still running; "+agentAnswer(res.Body), noClockRunHeld)
 	default:
-		why, _ := io.ReadAll(io.LimitReader(res.Body, 1<<12))
-		a.sayNoClockRun(fmt.Sprintf("it answered %d: %s", res.StatusCode, strings.TrimSpace(string(why))), false)
+		a.sayNoClockRun(fmt.Sprintf("it answered %d: %s", res.StatusCode, agentAnswer(res.Body)), noClockRunOther)
 	}
 }
 
+// agentAnswer is the start of an agent's answer body, trimmed.
+func agentAnswer(body io.Reader) string {
+	why, _ := io.ReadAll(io.LimitReader(body, 1<<12))
+	return strings.TrimSpace(string(why))
+}
+
+// noClockRunCause is why an agent took no run id (sayNoClockRun).
+type noClockRunCause int
+
+const (
+	// noClockRunOther: the agent could not be asked, or answered an error.
+	noClockRunOther noClockRunCause = iota
+	// noClockRunOlder: the agent is older than the clock-run route.
+	noClockRunOlder
+	// noClockRunHeld: the agent already holds another run's id.
+	noClockRunHeld
+)
+
 // sayNoClockRun says, once per client, that the agent took no run id from
-// it and why: older says it is an agent older than this keploy, said at
-// Info with the upgrade that gives it one; any other cause is a warning.
-func (a *AgentClient) sayNoClockRun(why string, older bool) {
+// it and why. An agent older than this keploy is said at Info with the
+// upgrade that gives it one. One that holds another run's id is a warning
+// naming the earlier run's agent left running, with the step that frees
+// it. Any other cause is a warning.
+func (a *AgentClient) sayNoClockRun(why string, cause noClockRunCause) {
 	if a.saidNoClockRun.Swap(true) {
 		return
 	}
-	msg := fmt.Sprintf("keploy's agent took no run id from this keploy (%s); the run goes on without one: where the agent "+
-		"keeps a clock timeline on the shared clock files, it cannot tell this run's there from one an earlier run left", why)
-	if older {
-		a.logger.Info(msg + ". Use an agent image of this keploy's version to have the run's timeline marked as its own")
-		return
+	msg := fmt.Sprintf("keploy's agent took no run id from this keploy (%s); the run goes on without one", why)
+	switch cause {
+	case noClockRunOlder:
+		a.logger.Info(msg + ": where the agent keeps a clock timeline on the shared clock files, it cannot tell this run's there " +
+			"from one an earlier run left. Use an agent image of this keploy's version to have the run's timeline marked as its own")
+	case noClockRunHeld:
+		a.logger.Warn(msg + ". Stop the earlier run's keploy agent (its process or container) and run again, to have this run's " +
+			"timeline marked as its own")
+	default:
+		a.logger.Warn(msg + ": where the agent keeps a clock timeline on the shared clock files, it cannot tell this run's there " +
+			"from one an earlier run left")
 	}
-	a.logger.Warn(msg)
 }
 
 func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
