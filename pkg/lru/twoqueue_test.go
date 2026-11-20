@@ -149,6 +149,25 @@ func TestTwoQueueRememberedKeyBackPastItsOwnEviction(t *testing.T) {
 	wantState(t, q, "s13-s16", state{recent: keys("s", 11, 16), frequent: []string{"s1", "s2"}, ghost: keys("s", 7, 10)})
 }
 
+// TestTwoQueueRememberedKeyBackMakesRoomFirst: a remembered key that is not
+// the oldest remembered one, added again with the remembered list full,
+// makes room first, which pushes the list past its size and drops its
+// oldest entry, and only then leaves the list, as golang-lru's TwoQueueCache
+// does. Leaving it first would keep the oldest entry, and that key, added
+// again, would count as seen twice.
+func TestTwoQueueRememberedKeyBackMakesRoomFirst(t *testing.T) {
+	defer failOnPanic(t)
+	q := newTwoQueue(t, 8) // seen-once share 2, ghost 4
+	for _, k := range keys("s", 1, 12) {
+		q.Add(k, 0)
+	}
+	wantState(t, q, "s1-s12", state{recent: keys("s", 5, 12), ghost: keys("s", 1, 4)})
+	q.Add("s3", 3)
+	wantState(t, q, "s3 back", state{recent: keys("s", 6, 12), frequent: []string{"s3"}, ghost: []string{"s2", "s4", "s5"}})
+	q.Add("s1", 1)
+	wantState(t, q, "s1 again", state{recent: append(keys("s", 7, 12), "s1"), frequent: []string{"s3"}, ghost: []string{"s2", "s4", "s5", "s6"}})
+}
+
 func TestNew2QRefusesSizesBelowOne(t *testing.T) {
 	defer failOnPanic(t)
 	for _, size := range []int{0, -1} {
