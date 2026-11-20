@@ -36,13 +36,19 @@ const (
 // conn (conn, then each NetConn), one already closed, or a Windows that has
 // no SIO_TCP_INFO.
 func PeerGone(conn net.Conn) (gone, known bool) {
+	return peerGone(conn, tcpState)
+}
+
+// peerGone is PeerGone through stateOf, which a row gives a socket that
+// cannot be asked.
+func peerGone(conn net.Conn, stateOf func(fd uintptr) (uint32, bool)) (gone, known bool) {
 	_, rc, ok := socketOf(conn)
 	if !ok {
 		return false, false
 	}
 	var state uint32
 	var asked bool
-	if cerr := rc.Control(func(fd uintptr) { state, asked = tcpState(fd) }); cerr != nil || !asked {
+	if cerr := rc.Control(func(fd uintptr) { state, asked = stateOf(fd) }); cerr != nil || !asked {
 		return false, false
 	}
 	switch state {
@@ -64,9 +70,20 @@ func finOnly(fd uintptr) bool {
 // tcpState is the TCP socket fd's state (TCP_INFO_v0's State); false when it
 // cannot be asked.
 func tcpState(fd uintptr) (uint32, bool) {
+	return askTCPState(windows.WSAIoctl, fd)
+}
+
+// wsaIoctl is windows.WSAIoctl's signature.
+type wsaIoctl func(s windows.Handle, iocc uint32, inbuf *byte, cbif uint32, outbuf *byte, cbob uint32,
+	cbbr *uint32, overlapped *windows.Overlapped, completionRoutine uintptr) error
+
+// askTCPState is tcpState through ioctl, which a row gives an answer of any
+// length or a failure: false when the call fails or answers fewer bytes than
+// State's four.
+func askTCPState(ioctl wsaIoctl, fd uintptr) (uint32, bool) {
 	var buf [tcpInfoV0Size]byte
-	var version, got uint32
-	err := windows.WSAIoctl(windows.Handle(fd), sioTCPInfo,
+	var version, got uint32 // version 0: TCP_INFO_v0
+	err := ioctl(windows.Handle(fd), sioTCPInfo,
 		(*byte)(unsafe.Pointer(&version)), uint32(unsafe.Sizeof(version)),
 		&buf[0], uint32(len(buf)), &got, nil, 0)
 	if err != nil || got < 4 {
