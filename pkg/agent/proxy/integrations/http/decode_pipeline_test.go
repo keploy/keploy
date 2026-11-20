@@ -225,6 +225,25 @@ func TestDecodeHTTPAnswersPipelinedRequestsOnEachPath(t *testing.T) {
 	}
 }
 
+// A call whose answer is held for its recorded place (heldAnswerOf,
+// writeHeld) keeps the connection too: the call the client pipelined after it,
+// in the same write, is answered once the held answer is written. Taking the
+// client's next bytes from the connection instead dropped that call, and the
+// client waited for its answer.
+func TestDecodeHTTPAnswersACallPipelinedAfterAHeldAnswer(t *testing.T) {
+	registerStandIn(t)
+	db := newPlacedDb(singleAnswer(t, releaseAt(45)), singleAnswer(t, releaseAt(45)))
+	app, _ := serveHeldCall(t, db, nil, releaseCall+releaseCall)
+	db.waitHeld(t)
+	db.reach(models.RunOpen(2))
+	got := readAnswers(t, app, "GET", "GET")
+	for i, body := range got {
+		if body != `{"state":"done"}` {
+			t.Fatalf("answer %d of the two pipelined calls is %q, want the recorded answer", i+1, body)
+		}
+	}
+}
+
 // keepAlivePath is a path of a replay that answers a call and keeps the
 // connection, other than a call its mock answers: a call that takes it, and
 // how the replay is set up for it.
