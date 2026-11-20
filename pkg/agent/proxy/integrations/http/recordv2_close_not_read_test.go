@@ -353,14 +353,17 @@ func drainMocks(mocks chan *models.Mock) []*models.Mock {
 
 // recordUnit records one exchange of req and resp on a session whose streams
 // end with no side's end marked, after prep sets the session up, and returns
-// what it recorded, what was left out and what recordV2 returned.
+// what it recorded, what was left out and what recordV2 returned. Its
+// recorder has a recordOne dedup of its own, as New builds one, which has
+// kept nothing yet.
 func recordUnit(t *testing.T, req, resp string, prep func(*supervisor.Session)) ([]*models.Mock, *observer.ObservedLogs, error) {
 	t.Helper()
-	return recordUnitOn(t, nil, req, resp, prep)
+	return recordUnitOn(t, &ptRecorder{logger: zap.NewNop()}, req, resp, prep)
 }
 
 // recordUnitOn is recordUnit by a recorder whose recordOne dedup is pt, as
-// one parser instance's connections share it (New): nil dedups nothing.
+// one parser instance's connections share it (New): nil dedups nothing, as a
+// recorder built without New does.
 func recordUnitOn(t *testing.T, pt *ptRecorder, req, resp string, prep func(*supervisor.Session)) ([]*models.Mock, *observer.ObservedLogs, error) {
 	t.Helper()
 	supervisor.ResetLeftOutWarningsForTest()
@@ -821,7 +824,8 @@ func TestRecordV2_ACloseDelimitedBodyOfAPassedThroughCallLeavesNothingOut(t *tes
 // is cleared. One that would be the representative, the endpoint's first 2xx
 // or its first call while it has kept none, is left out, and, not recorded,
 // stands for nothing: the endpoint's next call is still taken. The calls share
-// one recorder's dedup, as one parser instance's connections do.
+// one recorder's dedup, as one parser instance's connections do. A parser
+// with no dedup drops no call as a duplicate, so it leaves the call out.
 func TestRecordV2_ACloseDelimitedBodyOfARecordOneDuplicateLeavesNothingOut(t *testing.T) {
 	pt := &ptRecorder{logger: zap.NewNop()}
 	const (
@@ -832,17 +836,23 @@ func TestRecordV2_ACloseDelimitedBodyOfARecordOneDuplicateLeavesNothingOut(t *te
 		name, resp string
 		recorded   int  // the status recorded whole, 0 for none
 		leftOut    bool // left out, cut short of the close
+		noDedup    bool // recorded by a parser with no dedup (built without New)
 	}{
-		{"the endpoint's first call, a 503, cut", "HTTP/1.1 503 Service Unavailable\r\n" + cut, 0, true},
-		{"a 500 while the endpoint has kept none", "HTTP/1.1 500 Internal Server Error\r\n" + whole, 500, false},
-		{"another error, cut, a duplicate of the 500", "HTTP/1.1 503 Service Unavailable\r\n" + cut, 0, false},
-		{"the endpoint's first 2xx, cut", "HTTP/1.1 200 OK\r\n" + cut, 0, true},
-		{"its first 2xx recorded whole", "HTTP/1.1 200 OK\r\n" + whole, 200, false},
-		{"a 2xx, cut, a duplicate of the 200", "HTTP/1.1 200 OK\r\n" + cut, 0, false},
-		{"an error, cut, a duplicate of the 200", "HTTP/1.1 404 Not Found\r\n" + cut, 0, false},
+		{"the endpoint's first call, a 503, cut", "HTTP/1.1 503 Service Unavailable\r\n" + cut, 0, true, false},
+		{"a 500 while the endpoint has kept none", "HTTP/1.1 500 Internal Server Error\r\n" + whole, 500, false, false},
+		{"another error, cut, a duplicate of the 500", "HTTP/1.1 503 Service Unavailable\r\n" + cut, 0, false, false},
+		{"the endpoint's first 2xx, cut", "HTTP/1.1 200 OK\r\n" + cut, 0, true, false},
+		{"its first 2xx recorded whole", "HTTP/1.1 200 OK\r\n" + whole, 200, false, false},
+		{"a 2xx, cut, a duplicate of the 200", "HTTP/1.1 200 OK\r\n" + cut, 0, false, false},
+		{"an error, cut, a duplicate of the 200", "HTTP/1.1 404 Not Found\r\n" + cut, 0, false, false},
+		{"a 2xx, cut, by a parser that dedups nothing", "HTTP/1.1 200 OK\r\n" + cut, 0, true, true},
 	} {
+		dedup := pt
+		if step.noDedup {
+			dedup = nil
+		}
 		var sess *supervisor.Session
-		mocks, logs, err := recordUnitOn(t, pt, reportReq, step.resp, func(s *supervisor.Session) {
+		mocks, logs, err := recordUnitOn(t, dedup, reportReq, step.resp, func(s *supervisor.Session) {
 			sess = s
 			s.Opts.DstCfg = &models.ConditionalDstCfg{Port: 80}
 			s.Opts.PassThroughHosts = []models.PassThroughRule{{Host: "reports.example", Mode: models.PassThroughRecordOne}}
