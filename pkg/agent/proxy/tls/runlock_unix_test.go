@@ -237,9 +237,11 @@ func TestNativeInstallHoldsTheRunsLockUntilTeardown(t *testing.T) {
 		t.Skip("the trust-store anchors are Linux's")
 	}
 	useRunsDir(t)
-	// The store's update lists the lock files there are as it runs.
+	// The store's update lists the lock files there are as it runs, and says
+	// whether the store lock is held then (probeStoreLock).
 	seen := filepath.Join(t.TempDir(), "locks-at-update")
-	stores := nativeLinuxForLockRows(t, 1, "for f in '"+caRunsDir+"'/*.lock; do [ -e \"$f\" ] && echo \"${f##*/}\" >> '"+seen+"'; done\nexit 0\n")
+	stores := nativeLinuxForLockRows(t, 1, "for f in '"+caRunsDir+"'/*.lock; do [ -e \"$f\" ] && echo \"${f##*/}\" >> '"+seen+"'; done\n"+
+		"p=$(KEPLOY_TEST_PROBE_STORE_LOCK='"+caRunsDir+"' '"+os.Args[0]+"')\necho \"store lock $p\" >> '"+seen+"'\nexit 0\n")
 	ca, err := generateRunCA()
 	if err != nil {
 		t.Fatal(err)
@@ -247,8 +249,10 @@ func TestNativeInstallHoldsTheRunsLockUntilTeardown(t *testing.T) {
 	if err := setupNativeForApp(installCtx(t), zap.NewNop(), ca, nil, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(seen); strings.TrimSpace(string(b)) != filepath.Base(ownLockFile(ca.runID)) {
-		t.Fatalf("lock files when the store was updated: %q, want this run's %s", b, filepath.Base(ownLockFile(ca.runID)))
+	// The update runs holding the store lock too (storelock.go), whose file
+	// sorts after this run's hex id.
+	if b, _ := os.ReadFile(seen); strings.TrimSpace(string(b)) != filepath.Base(ownLockFile(ca.runID))+"\n"+storeLockName+"\nstore lock held" {
+		t.Fatalf("lock files when the store was updated: %q, want this run's %s and %s, and the store lock held", b, filepath.Base(ownLockFile(ca.runID)), storeLockName)
 	}
 	if !caRunLive(ca.runID) {
 		t.Fatal("after the install, this run is not live: other runs' sweeps would remove its entries")

@@ -105,7 +105,7 @@ func TestNativeInstallImportsTheCAIntoTheJDKOnceForAllItsAnchors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, jdk); err != nil {
+	if err := setupNativeForApp(installCtx(t), zap.NewNop(), ca, nil, 0, jdk); err != nil {
 		t.Fatal(err)
 	}
 	for _, d := range []string{storeA, storeB} {
@@ -476,7 +476,7 @@ func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytoolAtTheInstall(t *testing.T)
 			if tc.noJDK {
 				named = ""
 			}
-			if err := setupNativeForApp(context.Background(), zap.NewNop(), ca, nil, 0, named); err != nil {
+			if err := setupNativeForApp(installCtx(t), zap.NewNop(), ca, nil, 0, named); err != nil {
 				t.Fatal(err)
 			}
 			// The teardown finds the JDK by JAVA_HOME.

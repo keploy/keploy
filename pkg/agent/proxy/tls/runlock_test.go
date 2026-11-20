@@ -23,8 +23,19 @@ import (
 // KEPLOY_TEST_HOLD_RUN_LOCK=<id>, the test binary is instead a lock holder for
 // the cross-process tests (startLockHolder): it takes the run lock for id in
 // KEPLOY_TEST_RUN_LOCK_DIR, says "held", and keeps it until it is killed or its
-// stdin closes.
+// stdin closes. Started with KEPLOY_TEST_PROBE_STORE_LOCK=<dir>, it only says
+// whether <dir>/store.lock is held (probeStoreLock: the fake commands of the
+// store-lock rows run it). Started with KEPLOY_TEST_IMPORT=<id>, it is another
+// run that imports its CA (importAsAnotherRun).
 func TestMain(m *testing.M) {
+	if dir := os.Getenv("KEPLOY_TEST_PROBE_STORE_LOCK"); dir != "" {
+		probeStoreLock(dir)
+		os.Exit(0)
+	}
+	if id := os.Getenv("KEPLOY_TEST_IMPORT"); id != "" {
+		importAsAnotherRun(id)
+		os.Exit(0)
+	}
 	if id := os.Getenv("KEPLOY_TEST_HOLD_RUN_LOCK"); id != "" {
 		caRunsDir = os.Getenv("KEPLOY_TEST_RUN_LOCK_DIR")
 		holdCARunLock(context.Background(), zap.NewNop(), id)
