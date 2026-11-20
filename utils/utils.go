@@ -1948,7 +1948,17 @@ func isPortAvailable(port uint32) bool {
 // draws kept returning the excluded port and the search failed with a port
 // free.
 func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
-	if !slices.Contains(exclude, port) && isPortAvailable(port) {
+	return EnsureFreePort(isPortAvailable, port, exclude...)
+}
+
+// EnsureFreePort is EnsureAvailablePorts with free saying whether port is
+// free, in place of a probe listener on it. A test that calls a port free
+// holds it with a listener of its own, so that no other process can take it,
+// and hands in a probe that says it is free: a port it let go of for the
+// probe could be taken by another process before the probe bound it, and the
+// port would then move with the test's answer wrong.
+func EnsureFreePort(free func(port uint32) bool, port uint32, exclude ...uint32) (uint32, error) {
+	if !slices.Contains(exclude, port) && free(port) {
 		return port, nil
 	}
 	newPort, err := GetAvailablePortExcept(exclude...)
