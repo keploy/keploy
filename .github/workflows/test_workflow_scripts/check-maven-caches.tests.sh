@@ -14,6 +14,12 @@
 # in another action's directory, and in flow style (`with: { cache: maven }`).
 # It fails, naming the file, on setup-java-maven with no save step, or with
 # fewer save steps than uses (a save only named in a comment is none).
+# It fails, naming the step's line, on a step that caches ~/.m2/repository or
+# ~/.m2 with actions/cache, actions/cache/restore or actions/cache/save, in
+# block or flow style, with CRLF line ends, in a workflow or in another
+# action. It passes on actions/cache of other paths (~/.m2/wrapper alone too)
+# beside a step whose script names ~/.m2/repository, on such a step left in a
+# comment, and on setup-java-maven's own action, which restores ~/.m2/repository.
 set -euo pipefail
 
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -137,6 +143,63 @@ repo flow ".github/workflows/w.yml=jobs:
       - { uses: actions/setup-java@v4, with: { java-version: \"17\", $c: maven } }
 "
 expect flow fail ".github/workflows/w.yml:4:"
+
+# raw USES PATHLINES...: a workflow whose second step uses USES with a block
+# path of PATHLINES (line 6 is that step's first).
+raw() {
+  local uses=$1 l
+  shift
+  printf 'jobs:\n  t:\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: m2\n        uses: %s\n        with:\n          path: |\n' "$uses"
+  for l in "$@"; do printf '            %s\n' "$l"; done
+  printf '          key: k\n      - run: mvn -B package\n'
+}
+repo raw-cache ".github/workflows/w.yml=$(raw actions/cache@v4 \~/.m2/wrapper \~/.m2/repository)"
+expect raw-cache fail ".github/workflows/w.yml:6" "setup-java-maven"
+repo raw-restore ".github/workflows/w.yaml=$(raw actions/cache/restore@v4 \~/.m2)"
+expect raw-restore fail ".github/workflows/w.yaml:6"
+repo raw-save-pinned ".github/workflows/w.yml=$(raw 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4' \$HOME/.m2/repository/)"
+expect raw-save-pinned fail ".github/workflows/w.yml:6"
+repo raw-crlf ".github/workflows/w.yml=$(raw actions/cache@v4 \~/.m2/repository | sed 's/$/\r/')"
+expect raw-crlf fail ".github/workflows/w.yml:6"
+repo raw-flow ".github/workflows/w.yml=jobs:
+  t:
+    steps:
+      - { uses: actions/cache/restore@v4, with: { path: ~/.m2/repository, key: k } }
+"
+expect raw-flow fail ".github/workflows/w.yml:4"
+repo raw-composite ".github/actions/x/action.yml=runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: k
+"
+expect raw-composite fail ".github/actions/x/action.yml:4"
+repo raw-other ".github/workflows/w.yml=$(raw actions/cache@v4 \~/.cache/go-build)
+      - run: ls ~/.m2/repository
+"
+expect raw-other pass
+repo raw-wrapper-only ".github/workflows/w.yml=$(raw actions/cache@v4 \~/.m2/wrapper)"
+expect raw-wrapper-only pass
+repo raw-commented ".github/workflows/w.yml=jobs:
+  t:
+    steps:
+      - run: true
+      # - uses: actions/cache@v4
+      #   with:
+      #     path: ~/.m2/repository
+"
+expect raw-commented pass
+repo raw-own-action ".github/actions/setup-java-maven/action.yml=runs:
+  using: composite
+  steps:
+    - uses: actions/cache/restore@v4
+      with:
+        path: ~/.m2/repository
+        key: k
+"
+expect raw-own-action pass
 
 echo "$((n - fails))/$n passed"
 [ "$fails" -eq 0 ]
