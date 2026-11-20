@@ -40,14 +40,17 @@ func until(cond func() bool) bool {
 // socket's own read times out alike. With more, the first read after the
 // parser's look at what the socket holds (UnreadBytes, which asks through
 // NetConn) and the deadline it sets then is held too, until the socket holds
-// more than ReadChunkSize bytes beyond what it held at that deadline (seen):
-// after counts the bytes read from there. idle counts the reads after the
-// look, before the parser's next answer, that waited and timed out with
-// nothing in the socket (the round after that answer waits on an empty
-// socket for the next request, as it should; a read whose deadline had
-// passed when it began did not wait), and early the reads before the
-// parser's first answer (its first Write). With deadlineErr, no read
-// deadline can be set once the parser looked. With eof, the read past the
+// more than four reads (4 x ReadChunkSize) beyond what it held at that
+// deadline (seen), then times out without reading: those bytes arrived as
+// that read took. after counts the bytes read from there. idle counts the
+// reads after the look, before the parser's next answer, that waited and
+// timed out with nothing in the socket (the round after that answer waits
+// on an empty socket for the next request, as it should; a read whose
+// deadline had passed when it began did not wait), and early the reads
+// before the parser's first answer (its first Write). With deadlineErr, no
+// read deadline can be set once the parser looked; with pastOnly too, only
+// one that has passed when it is set (the one the parser reads what the
+// layers above the socket hold with). With eof, the read past the
 // hold that empties the socket returns its bytes with io.EOF, as a read that
 // meets the application's close does; reads after it return io.EOF, and
 // deadlinesAfterEOF counts the read deadlines set after it. With wrote, the
@@ -58,6 +61,7 @@ type heldPast struct {
 	cut, rest   int
 	more        bool
 	deadlineErr error
+	pastOnly    bool
 	eof         bool
 	wrote       func() int64
 
@@ -104,7 +108,7 @@ func (c *heldPast) NetConn() net.Conn {
 
 func (c *heldPast) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
-	refused := c.phase >= 3 && c.deadlineErr != nil
+	refused := c.phase >= 3 && c.deadlineErr != nil && (!c.pastOnly || !t.After(time.Now()))
 	if c.eofRead {
 		c.deadlinesAfterEOF++
 	}
@@ -148,7 +152,7 @@ func (c *heldPast) Read(p []byte) (int, error) {
 		c.to(2)
 		return 0, timedOut
 	case 4:
-		if !until(func() bool { return pUtil.UnreadBytes(c.Conn) > seen+pUtil.ReadChunkSize }) {
+		if !until(func() bool { return pUtil.UnreadBytes(c.Conn) > seen+4*pUtil.ReadChunkSize }) {
 			return 0, errors.New("the socket never held more")
 		}
 		c.mu.Lock()
@@ -267,7 +271,9 @@ func TestAnEndReadAsTheParserReadsOnEndsTheParser(t *testing.T) {
 // the socket has given as many bytes as it held at the parser's first look,
 // less what arrived as a read took (at most what the application wrote as
 // the parser read on), within one read of them, and the request misses. A
-// parser that looked again would read on to what the socket held then.
+// parser that looked again would read on to what the socket held then, and
+// one that counted what arrived as its held read took, more than four reads
+// of bytes, as making the request longer would read on through them.
 func TestAHeldRequestWhoseBytesNeverPauseEndsAfterWhatTheSocketHeld(t *testing.T) {
 	eachSwitch(t, func(t *testing.T) {
 		app, proxySide := tcpPair(t)
@@ -432,21 +438,33 @@ func TestARequestInTheSocketAtARoundsEndIsReadWhole(t *testing.T) {
 
 // A connection whose read deadline cannot be set as the parser reads on past
 // a request's window, to what the socket held when it looked, ends the
-// parser, the request unanswered and no miss filed.
+// parser, the request unanswered and no miss filed: the deadline it reads
+// on with, or only the one, already passed, it reads what the layers above
+// the socket hold with once the socket has given what it held.
 func TestADeadlineThatCannotBeSetPastTheWindowEndsTheParser(t *testing.T) {
 	req := varied(40<<10, true)
 	store := bigExchanges(req)["recorded whole"]
-	eachSwitch(t, func(t *testing.T) {
-		app, proxySide := tcpPair(t)
-		conn := &heldPast{Conn: proxySide, cut: 1000, rest: len(req) - 1000, deadlineErr: errors.New("the deadline cannot be set")}
-		done := make(chan error, 1)
-		go func() {
-			done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), conn, nil, store, models.OutgoingOptions{})
-		}()
-		readAnswer(t, app, "PONG")
-		if _, err := app.Write(req); err != nil {
-			t.Fatal(err)
-		}
-		awaitEnd(t, done, "a connection whose deadline cannot be set")
-	})
+	for _, c := range []struct {
+		name     string
+		pastOnly bool
+	}{
+		{"any deadline after its look", false},
+		{"only the deadline that has passed", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			eachSwitch(t, func(t *testing.T) {
+				app, proxySide := tcpPair(t)
+				conn := &heldPast{Conn: proxySide, cut: 1000, rest: len(req) - 1000, deadlineErr: errors.New("the deadline cannot be set"), pastOnly: c.pastOnly}
+				done := make(chan error, 1)
+				go func() {
+					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), conn, nil, store, models.OutgoingOptions{})
+				}()
+				readAnswer(t, app, "PONG")
+				if _, err := app.Write(req); err != nil {
+					t.Fatal(err)
+				}
+				awaitEnd(t, done, "a connection whose deadline cannot be set")
+			})
+		})
+	}
 }
