@@ -221,39 +221,39 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 			WithPhase(models.MatchPhaseNoMocks, 0).Build()
 	}
 
+	// The request's bytes are compared with each recording's, wherever reads
+	// cut either (findBinaryMatch).
+	req := newSentRequest(reqBuffs)
 	bestIdx, bestSim := -1, -1.0
-	var old [][]byte
 	for idx, mock := range genericMocks {
-		pieces := similarPieces(mock.Spec.GenericRequests, reqBuffs, &old)
-		if pieces == nil {
-			continue
-		}
-		var simSum float64
-		comparable := true
-		for i, reqBuff := range pieces {
-			msg := mock.Spec.GenericRequests[i].Message[0]
+		var recorded []byte
+		comparable := len(mock.Spec.GenericRequests) > 0
+		for _, p := range mock.Spec.GenericRequests {
+			if len(p.Message) == 0 {
+				comparable = false
+				break
+			}
+			msg := p.Message[0]
 			// The recorder stores ASCII payloads verbatim (Type String) and
 			// binary payloads base64-encoded — decode per the recorded type,
 			// otherwise the similarity is computed against nil bytes and the
 			// closest-candidate ranking degrades to noise.
-			var recorded []byte
 			if msg.Type == models.String {
-				recorded = []byte(msg.Data)
-			} else {
-				decoded, err := util.DecodeBase64(msg.Data)
-				if err != nil {
-					comparable = false
-					break
-				}
-				recorded = decoded
+				recorded = append(recorded, msg.Data...)
+				continue
 			}
-			simSum += fuzzyCheck(recorded, reqBuff)
+			decoded, err := util.DecodeBase64(msg.Data)
+			if err != nil {
+				comparable = false
+				break
+			}
+			recorded = append(recorded, decoded...)
 		}
 		if !comparable {
 			continue
 		}
-		if avg := simSum / float64(len(pieces)); avg > bestSim {
-			bestSim = avg
+		if sim := fuzzyCheck(recorded, req.bytes()); sim > bestSim {
+			bestSim = sim
 			bestIdx = idx
 		}
 	}
@@ -270,54 +270,96 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 		b = b.WithClosest(genericMocks[bestIdx].Name, nil).
 			WithDiff(fmt.Sprintf("closest recorded exchange %q has Jaccard similarity %.2f (%s)", genericMocks[bestIdx].Name, bestSim, served))
 	} else {
-		b = b.WithDiff("no recorded exchange has the same number of request buffers")
+		b = b.WithDiff("no recorded exchange's request could be read to compare")
 	}
 	return b.Build()
 }
 
-// TODO: need to generalize this function for different types of integrations.
+// findBinaryMatch returns the index of the recording most like the request,
+// over mxSim, or -1. The request's bytes are compared with the recording's
+// (bytesSimilarity), wherever reads cut either: a read returns what has
+// arrived, the recorder's as this replay's, so the same request comes in
+// other pieces when it arrives at another pace or the parser is held, and
+// it is still the same bytes. A recording with a noisy (obfuscated) piece
+// is also compared piece by piece, that piece skipped, when the request's
+// pieces line up with its own (pieceSimilarity), as it was before: only
+// there are the live bytes in the redacted piece's place known. The closer
+// of the two is its similarity.
 func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) int {
-	// TODO: need find a proper similarity index to set a benchmark for matching or need to find another way to do approximate matching
 	mxIdx := -1
+	req := newSentRequest(reqBuffs)
 	var old [][]byte
 	for idx, mock := range tcsMocks {
-		if pieces := similarPieces(mock.Spec.GenericRequests, reqBuffs, &old); pieces != nil {
-			nc := util.NewNoiseChecker(mock.Noise)
-			var simSum float64
-			var simCount int
-			for requestIndex, reqBuff := range pieces {
-				mockData := mock.Spec.GenericRequests[requestIndex].Message[0].Data
-
-				// Skip noisy (obfuscated) buffers — don't let them influence similarity
-				if nc != nil && nc.IsNoisy(mockData) {
-					continue
-				}
-
-				encoded, _ := util.DecodeBase64(mockData)
-
-				similarity := fuzzyCheck(encoded, reqBuff)
-				simSum += similarity
-				simCount++
-			}
-			// Compute average similarity across non-noisy buffers.
-			// If all buffers are noisy, treat as neutral (1.0) so the
-			// mock remains matchable — schema/length already matched.
-			if simCount > 0 {
-				avgSim := simSum / float64(simCount)
-				if avgSim > mxSim {
-					mxSim = avgSim
-					mxIdx = idx
-				}
-			} else if len(pieces) > 0 {
-				// All buffers were noisy — neutral match
-				if 1.0 > mxSim {
-					mxSim = 1.0
-					mxIdx = idx
+		recorded := mock.Spec.GenericRequests
+		nc := util.NewNoiseChecker(mock.Noise)
+		sim, compared, noisy := bytesSimilarity(recorded, nc, req)
+		if noisy {
+			if pieces := similarPieces(recorded, reqBuffs, &old); pieces != nil {
+				if s := pieceSimilarity(recorded, nc, pieces); s > sim {
+					sim, compared = s, true
 				}
 			}
 		}
+		if compared && sim > mxSim {
+			mxSim = sim
+			mxIdx = idx
+		}
 	}
 	return mxIdx
+}
+
+// bytesSimilarity is the similarity of the request's bytes with recorded's
+// joined, its noisy (obfuscated) pieces left out. compared is false when
+// there is nothing to compare (sim is 0): every piece is noisy, or one
+// holds no message. noisy reports whether a piece is noisy, and is false
+// for a recording a piece of which holds no message: it is not compared.
+func bytesSimilarity(recorded []models.Payload, nc *util.NoiseChecker, req *sentRequest) (sim float64, compared, noisy bool) {
+	var joined []byte
+	for _, p := range recorded {
+		if len(p.Message) == 0 {
+			return 0, false, false
+		}
+		mockData := p.Message[0].Data
+		if nc.IsNoisy(mockData) {
+			noisy = true
+			continue
+		}
+		compared = true
+		encoded, _ := util.DecodeBase64(mockData)
+		joined = append(joined, encoded...)
+	}
+	if !compared {
+		return 0, false, noisy
+	}
+	return fuzzyCheck(joined, req.bytes()), true, noisy
+}
+
+// pieceSimilarity is the average similarity of each of pieces with the
+// recorded piece at its index, a noisy (obfuscated) recorded piece skipped.
+// Every piece noisy, it is neutral (1.0), so the mock remains matchable:
+// schema/length already matched.
+func pieceSimilarity(recorded []models.Payload, nc *util.NoiseChecker, pieces [][]byte) float64 {
+	var simSum float64
+	var simCount int
+	for requestIndex, reqBuff := range pieces {
+		mockData := recorded[requestIndex].Message[0].Data
+
+		// Skip noisy (obfuscated) buffers — don't let them influence similarity
+		if nc.IsNoisy(mockData) {
+			continue
+		}
+
+		encoded, _ := util.DecodeBase64(mockData)
+
+		similarity := fuzzyCheck(encoded, reqBuff)
+		simSum += similarity
+		simCount++
+	}
+	if simCount == 0 {
+		// All buffers were noisy — neutral match
+		return 1.0
+	}
+	return simSum / float64(simCount)
 }
 
 func fuzzyCheck(encoded, reqBuf []byte) float64 {
@@ -457,69 +499,6 @@ func (r *sentRequest) bytes() []byte {
 		}
 	}
 	return r.joined
-}
-
-// restToCome reports whether the request read so far is the start of a
-// recorded request and no recorded request whole: its bytes begin a generic
-// recording's request in db and are fewer than it (begins), and they are no
-// generic recording's request, compared as bytes (findExactMatch). The rest
-// of such a request is still to come, and the parser reads it before the
-// request is matched (decodeGeneric). A store that cannot be read holds no
-// recording to begin: the matcher reports its error.
-func restToCome(db integrations.MockMemDb, pieces [][]byte) bool {
-	mocks, _ := db.GetSessionMocks() //nolint:staticcheck // SA1019: the matcher reads the recordings through it (fuzzyMatch), and this reads the same ones.
-	req := newSentRequest(pieces)
-	generic := make([]*models.Mock, 0, len(mocks))
-	begins := false
-	for _, mock := range mocks {
-		if mock.Kind != models.GENERIC {
-			continue
-		}
-		generic = append(generic, mock)
-		begins = begins || req.begins(mock.Spec.GenericRequests)
-	}
-	return begins && findExactMatch(generic, pieces, true) == -1
-}
-
-// begins reports whether the request's bytes are the first bytes of
-// recorded's, fewer than them: each recorded piece's bytes read as
-// isRecordedBytes reads them, and a piece of unknown length
-// (recordedPieceLen) begun by none.
-func (r *sentRequest) begins(recorded []models.Payload) bool {
-	b := r.bytes()
-	for _, p := range recorded {
-		n := recordedPieceLen(p)
-		if n < 0 {
-			return false
-		}
-		if len(b) < n {
-			// The request ends inside this piece.
-			return recordedStartsWith(p, b)
-		}
-		if !recordedStartsWith(p, b[:n]) {
-			return false
-		}
-		b = b[n:]
-	}
-	// As long as the recording, or longer.
-	return false
-}
-
-// recordedStartsWith reports whether the recorded piece p's bytes, read as
-// isRecordedBytes reads them, start with b.
-func recordedStartsWith(p models.Payload, b []byte) bool {
-	if len(p.Message) != 1 {
-		return false
-	}
-	msg := p.Message[0]
-	switch msg.Type {
-	case models.String:
-		return len(msg.Data) >= len(b) && msg.Data[:len(b)] == string(b)
-	case binaryPayload:
-		data, err := util.DecodeBase64(msg.Data)
-		return err == nil && bytes.HasPrefix(data, b)
-	}
-	return false
 }
 
 // cutLikeRecorded returns the request's bytes cut where recorded's pieces

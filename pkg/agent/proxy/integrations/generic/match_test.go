@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"regexp"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -202,25 +203,112 @@ func TestARequestLongerThanAReadMatchesItsRecordingExactly(t *testing.T) {
 	}
 }
 
-// A request that differs a little from an old recording longer than one read
-// is still compared with it for a similarity, as the old read loop would have
-// read it: a 32 KiB read is joined with the reads after it, up to the first
-// shorter one. A request in pieces no full read joins is compared with no
-// recording of another number of pieces, as before.
-func TestASimilarRequestIsComparedWithAnOldRecordingAsTheOldLoopReadIt(t *testing.T) {
+// A request that differs a little from a recording longer than one read is
+// compared with it by its bytes for a similarity, whatever pieces its reads
+// cut it in and whatever pieces the recording holds: the old read loop's
+// one piece, the relay's 32 KiB and 8 KiB, or others. So is the miss
+// report's closest. Other bytes are not like it.
+func TestASimilarRequestIsComparedWithARecordingByItsBytes(t *testing.T) {
 	req := varied(40<<10, true)
-	old := recordedAs("old", req)
 	near := append([]byte(nil), req...)
 	near[100] ^= 1
-	if got := findBinaryMatch([]*models.Mock{old}, splitAt(near, 32<<10), 0.9); got != 0 {
-		t.Fatalf("a near request read as 32 KiB and 8 KiB: findBinaryMatch = %d, want 0", got)
+	for _, recorded := range []*models.Mock{
+		recordedAs("old", req),
+		recordedAs("relay", req[:32<<10], req[32<<10:]),
+	} {
+		for _, reads := range [][][]byte{
+			{near}, splitAt(near, 32<<10), splitAt(near, 16<<10), splitAt(near, 1000, 1000+32<<10),
+		} {
+			if got := findBinaryMatch([]*models.Mock{recorded}, reads, 0.9); got != 0 {
+				t.Errorf("%s: a near request read in %d pieces: findBinaryMatch = %d, want 0", recorded.Name, len(reads), got)
+			}
+			store := eofStore{mocks: []*models.Mock{exchange("ping", "PING"), recorded}}
+			if r := buildGenericMismatchReport(context.Background(), reads, store, nil); r.ClosestMock != recorded.Name {
+				t.Errorf("%s: a near request read in %d pieces: the miss report's closest is %q", recorded.Name, len(reads), r.ClosestMock)
+			}
+		}
+		if got := findBinaryMatch([]*models.Mock{recorded}, splitAt(varied(40<<10, false), 1000), 0.4); got != -1 {
+			t.Errorf("%s: other bytes: findBinaryMatch = %d, want -1", recorded.Name, got)
+		}
 	}
-	if got := findBinaryMatch([]*models.Mock{old}, splitAt(near, 16<<10), 0.9); got != -1 {
-		t.Fatalf("a request in two pieces no full read joins was compared with a one-piece recording: %d", got)
+}
+
+// noisyRecording is a recording of body and of a piece the obfuscator
+// redacted (redacted, kept binary), its Noise naming that piece.
+func noisyRecording(body, redacted []byte) *models.Mock {
+	m := recordedAs("noisy", body, redacted)
+	m.Noise = []string{"^" + regexp.QuoteMeta(m.Spec.GenericRequests[1].Message[0].Data) + "$"}
+	return m
+}
+
+// A piece the obfuscator redacted is left out of a similarity: out of the
+// recording's bytes, and, when the request's pieces line up with the
+// recording's, the request's piece in its place too, as before. A recording
+// every piece of which is redacted is like any request whose pieces line up
+// with its own, as before, and like no other.
+func TestARedactedPieceIsLeftOutOfASimilarity(t *testing.T) {
+	body := varied(4<<10, true)
+	near := append([]byte(nil), body...)
+	near[100] ^= 1
+	token := varied(4<<10, false)
+	allNoisy := recordedAs("all-noisy", []byte("A"), []byte("B"))
+	allNoisy.Noise = []string{"^A$", "^B$"}
+	for _, c := range []struct {
+		name     string
+		recorded *models.Mock
+		reads    [][]byte
+		want     int
+	}{
+		// The recorded redaction is long, the live token short: compared
+		// with every byte the recording holds, the request is not like it.
+		{"a long redaction, the request in other pieces", noisyRecording(body, varied(32<<10, true)), splitAt(append(append([]byte(nil), near...), "tok"...), 1000, 2000), 0},
+		// The live token is long: it is like the recording only once left
+		// out, in the place the request's pieces give it.
+		{"a long token, the pieces lined up", noisyRecording(body, []byte("REDACTED")), [][]byte{near, token}, 0},
+		{"every piece redacted, the pieces lined up", allNoisy, [][]byte{near, token}, 0},
+		{"every piece redacted, in other pieces", allNoisy, [][]byte{near}, -1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := findBinaryMatch([]*models.Mock{c.recorded}, c.reads, 0.9); got != c.want {
+				t.Fatalf("findBinaryMatch = %d, want %d", got, c.want)
+			}
+		})
 	}
-	store := eofStore{mocks: []*models.Mock{exchange("ping", "PING"), old}}
-	if r := buildGenericMismatchReport(context.Background(), splitAt(near, 32<<10), store, nil); r.ClosestMock != "old" {
-		t.Fatalf("the miss report's closest is %q, want old", r.ClosestMock)
+}
+
+// A recording a piece of which holds no message, or holds no bytes keploy
+// can read, is compared with nothing, by the matcher or the miss report,
+// and stops neither.
+func TestARecordingWithAPieceOfNoMessageIsComparedWithNothing(t *testing.T) {
+	near := varied(4<<10, true)
+	noMessage := noisyRecording(near, []byte("REDACTED"))
+	noMessage.Spec.GenericRequests = append(noMessage.Spec.GenericRequests, models.Payload{})
+	noPieces := &models.Mock{Name: "no-pieces", Kind: models.GENERIC}
+	notBase64 := &models.Mock{Name: "not-base64", Kind: models.GENERIC}
+	notBase64.Spec.GenericRequests = []models.Payload{{Message: []models.OutputBinary{{Type: binaryPayload, Data: "!!!!"}}}}
+	for _, m := range []*models.Mock{noMessage, noPieces} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: findBinaryMatch panicked: %v", m.Name, r)
+				}
+			}()
+			if got := findBinaryMatch([]*models.Mock{m}, [][]byte{near, []byte("tok"), nil}, 0.4); got != -1 {
+				t.Errorf("%s: findBinaryMatch = %d, want -1", m.Name, got)
+			}
+		}()
+	}
+	for _, m := range []*models.Mock{noMessage, noPieces, notBase64} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: the miss report panicked: %v", m.Name, r)
+				}
+			}()
+			if r := buildGenericMismatchReport(context.Background(), [][]byte{near}, eofStore{mocks: []*models.Mock{m}}, nil); r.ClosestMock != "" {
+				t.Errorf("%s: the miss report's closest is %q, want none", m.Name, r.ClosestMock)
+			}
+		}()
 	}
 }
 
