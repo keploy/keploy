@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -227,6 +228,9 @@ func TestRecordV2FramesAFoldedHeaderAsItsPeerDoes(t *testing.T) {
 				want = append(want, ex.want)
 			}
 			closeReq()
+			// The response's stream ends with the upstream's close, which the
+			// relay says (Session.MarkPeerEnded) before it ends the stream.
+			sess.MarkPeerEnded(fakeconn.FromDest, false)
 			closeResp()
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
