@@ -48,7 +48,7 @@ func (m UnmatchedCall) Sanitized() UnmatchedCall {
 		// A repeat's hint is the parser's word on serving the call, and
 		// quotes the sessionCalls entry that would: its path and host, as
 		// the next step that ends with it has them (shapedNextStep).
-		out.Repeat.Hint = adviceShape(out.Repeat.Hint, m.FieldDiffs, evidencePaths)
+		out.Repeat.Hint = adviceShape(out.Repeat.Hint, m.FieldDiffs, m.Differs, evidencePaths)
 	}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (MissShape) still writes them {}. Any other place
@@ -194,7 +194,7 @@ func (m UnmatchedCall) shapedNextStep() string {
 	if m.NextSteps == "" {
 		return ""
 	}
-	return adviceShape(m.NextSteps, m.FieldDiffs, evidencePaths)
+	return adviceShape(m.NextSteps, m.FieldDiffs, m.Differs, evidencePaths)
 }
 
 // shapedText is text, a matcher's or a parser's own words about m, with
