@@ -16,6 +16,7 @@ import (
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
@@ -208,6 +209,13 @@ type dnsCacheEntry struct {
 	// true if the response came from upstream resolution or a recorded mock.
 	// false if we synthesized defaults (fallback).
 	FromUpstream bool
+
+	// Unrecorded: resolved while the control plane had paused recording
+	// (recordDNSMock), so no mock was made of it. It is not cached: the next
+	// lookup of the name, once recording has resumed, must reach
+	// recordDNSMock again, or the name would have no mock for as long as the
+	// cache held its answer.
+	Unrecorded bool
 }
 
 const (
@@ -270,7 +278,7 @@ func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 // resolutions from client libraries that open one TCP connection per
 // request.
 func shouldCacheDNSResponse(mode models.Mode, resp dnsCacheEntry) bool {
-	if !resp.FromUpstream {
+	if !resp.FromUpstream || resp.Unrecorded {
 		return false
 	}
 	return mode == models.MODE_TEST || mode == models.MODE_RECORD
@@ -1311,6 +1319,14 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 	// If no session, we still return resolved response but skip recording.
 	if session == nil || session.MC == nil {
+		return resp, nil
+	}
+
+	// While the control plane has paused recording the name is resolved and
+	// answered, and no mock is made of it, nor is it marked recorded: its
+	// next lookup after the resume records it (dnsCacheEntry.Unrecorded).
+	if memoryguard.ExternalPausedNow() {
+		resp.Unrecorded = true
 		return resp, nil
 	}
 

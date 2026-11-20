@@ -18,7 +18,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.uber.org/zap"
 )
 
@@ -93,6 +92,8 @@ func MinViableLowLatencyLimitBytes(overheadBytes int64) int64 {
 	return overheadBytes + minViableEffLimitBytes
 }
 
+// recordingPaused is the one flag every consumer reads (IsRecordingPaused):
+// whether recording is paused for any reason (pause_reasons.go).
 var recordingPaused atomic.Bool
 
 // fixedOverheadBytes is memory the agent allocates up-front and that pausing
@@ -419,24 +420,26 @@ func GoMemoryBudget() int64 {
 }
 
 // IsRecordingPaused reports whether the agent is currently dropping captured
-// tests and mocks due to memory pressure.
+// tests and mocks: because it is short of memory, or because it was asked to
+// pause (SetExternalPause). It is the OR of every reason for a pause
+// (pause_reasons.go); PauseCause says which.
 func IsRecordingPaused() bool {
 	return recordingPaused.Load()
 }
 
 // SetRecordingPausedForTest sets what IsRecordingPaused reports, as memory
 // pressure does, without telling the mock managers, and returns what puts the
-// previous value back. Tests only.
+// previous value back. It is a reason of its own (reasonTest), so a pause held
+// for another reason stays on under it. Tests only.
 func SetRecordingPausedForTest(paused bool) (restore func()) {
 	pauseEdgeMu.Lock()
 	defer pauseEdgeMu.Unlock()
-	was := recordingPaused.Swap(paused)
-	notePauseEdgeLocked(paused)
+	was := pauseReasons&reasonTest != 0
+	setReasonLocked(reasonTest, paused)
 	return func() {
 		pauseEdgeMu.Lock()
 		defer pauseEdgeMu.Unlock()
-		recordingPaused.Store(was)
-		notePauseEdgeLocked(was)
+		setReasonLocked(reasonTest, was)
 	}
 }
 
@@ -853,6 +856,13 @@ func resetAllPressure() {
 	applyPausedState(false)
 }
 
+// applyPausedState is the memory guard's own reason for a pause, set or
+// cleared (reasonMemory). Recording stays paused under a clear while another
+// reason holds it (SetExternalPause).
+func applyPausedState(paused bool) {
+	applyPauseReason(reasonMemory, paused, "")
+}
+
 // pressureHooks are additional sinks for the memory-pressure signal,
 // registered via RegisterPressureHook. The decision to pause is global
 // (pod-level cgroup memory), but the buffered mocks that consume that memory
@@ -888,30 +898,6 @@ func RegisterPressureHook(fn func(paused bool)) (unregister func()) {
 		pressureHookMu.Lock()
 		delete(pressureHooks, id)
 		pressureHookMu.Unlock()
-	}
-}
-
-func applyPausedState(paused bool) {
-	// The flag and the request count read at its change move together, so
-	// each open PauseTally sees the pauses in the order the ingress does.
-	pauseEdgeMu.Lock()
-	recordingPaused.Store(paused)
-	notePauseEdgeLocked(paused)
-	pauseEdgeMu.Unlock()
-	// Global manager: the buffering manager in single-app mode.
-	if mgr := syncMock.Get(); mgr != nil {
-		mgr.SetMemoryPressure(paused)
-	}
-	// Fan out to registered managers (multi-app: one per app). The global
-	// trigger stays global; only the action reaches every live buffer.
-	pressureHookMu.RLock()
-	hooks := make([]func(paused bool), 0, len(pressureHooks))
-	for _, fn := range pressureHooks {
-		hooks = append(hooks, fn)
-	}
-	pressureHookMu.RUnlock()
-	for _, fn := range hooks {
-		fn(paused)
 	}
 }
 
