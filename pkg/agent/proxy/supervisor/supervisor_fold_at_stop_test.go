@@ -305,11 +305,13 @@ func (c *dueClock) pending() int {
 // A parser that has read both its streams to their end and then makes no
 // progress is aborted promptly: not before its fold window has passed with
 // none, and by a quarter of the window after that at most, on the time the
-// process could run. The stop waits no longer on a parser that waits on
-// something else than that.
+// process could run, counted from when it read both its streams to their end
+// (the process ran a while before that). The stop waits no longer on a
+// parser that waits on something else than that.
 func TestRun_AtTheStopAnIdleParserIsAbortedWithinAQuarterWindowOfItsWindow(t *testing.T) {
 	t.Parallel()
 	const window = time.Second
+	const start = 5 * window // run time before the parser read both its streams to their end
 	client, dest := newBehindProducer(), newBehindProducer()
 	go client.run([]string{"request"})
 	go dest.run([]string{"answer"})
@@ -327,7 +329,17 @@ func TestRun_AtTheStopAnIdleParserIsAbortedWithinAQuarterWindowOfItsWindow(t *te
 	go func() {
 		resc <- s.Run(ctx, func(context.Context, *Session) error {
 			cancel() // the stop
-			readBoth(sess)
+			for {
+				if _, err := sess.ClientStream.ReadChunk(); err != nil {
+					break
+				}
+			}
+			clk.advance(start) // fires nothing: the watchdog's look is due at a quarter of an hour
+			for {
+				if _, err := sess.DestStream.ReadChunk(); err != nil {
+					break
+				}
+			}
 			<-unpark // it waits on something else
 			return nil
 		}, sess)
@@ -354,15 +366,15 @@ func TestRun_AtTheStopAnIdleParserIsAbortedWithinAQuarterWindowOfItsWindow(t *te
 	}
 	var res Result
 	for done := false; !done; {
-		if clk.Runnable() >= 2*window {
-			t.Fatalf("the parser idle since it read both its streams to their end was not aborted within %s of run time (fold window %s)", clk.Runnable(), window)
+		if ran := clk.Runnable() - start; ran >= 2*window {
+			t.Fatalf("the parser idle since it read both its streams to their end was not aborted within %s of run time (fold window %s)", ran, window)
 		}
 		if clk.advance(window/8) > 0 {
 			res, done = settled()
 		}
 	}
-	if ran := clk.Runnable(); ran <= window || ran > window+window/4 {
-		t.Fatalf("Run returned %+v at %s of run time, want past the fold window %s and within a quarter of it after", res, ran, window)
+	if ran := clk.Runnable() - start; ran <= window || ran > window+window/4 {
+		t.Fatalf("Run returned %+v %s of run time after the parser read both its streams to their end, want past the fold window %s and within a quarter of it after", res, ran, window)
 	}
 	select {
 	case <-aborted:
