@@ -71,6 +71,11 @@
 # switches a workflow sets for keploy, each only while it is set.
 # shellcheck source=../../sudo_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../sudo_env.sh" || exit 1
+# A record whose exit code a row reads is bounded by hang_guard.sh, never by
+# timeout(1), whose code on a stop differs between GNU and uutils coreutils:
+# the code is keploy's own, and HANG_FIRED says whether the guard stopped it.
+# shellcheck source=../../hang_guard.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../hang_guard.sh" || exit 1
 
 set -uo pipefail
 # The proven switch is not among them (sudo_env.tests.sh): each keploy
@@ -322,22 +327,32 @@ YML
 	case " ${*:4} " in *" flaky "*) printf 'volumes:\n  flakymark: {}\n' >> docker-compose.yml ;; esac
 }
 
+# record_bounded PHASE UP: keploy record of the compose command UP (the app
+# riso-app) in the current dir. The hang guard stops a record that would run
+# on: SIGINT at 240 s, SIGKILL 30 s later. Its log, its exit (keploy's own
+# code), whether the guard stopped it (fired: 1, else 0) and when it ended go
+# to $W/out/PHASE.
+record_bounded() {
+	local phase=$1 up=$2
+	bounded -s INT -k 30 240 $S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" "$KEPLOY" record -c "$up" --container-name riso-app --disable-tele --disableANSI > "$W/out/$phase/keploy.log" 2>&1
+	echo $? > "$W/out/$phase/exit"
+	echo "$HANG_FIRED" > "$W/out/$phase/fired"
+	date +%s > "$W/out/$phase/ended"
+	echo "$phase exit $(cat "$W/out/$phase/exit")$([ "$HANG_FIRED" = 0 ] || echo ', stopped by the hang guard')"
+}
+
 # record_runner PHASE [SERVICE...]: keploy record of `docker compose up
 # --exit-code-from runner` in $W/PHASE, the app run with RECARGS beside the
-# runner and SERVICEs (compose_yml); its log, its exit and when it ended go
-# to $W/out/PHASE. timeout stops a record that would run on (its 124). The
-# stack's volumes are removed before and after it, so a service's first
-# start in it is its first.
+# runner and SERVICEs (compose_yml), bounded (record_bounded). The stack's
+# volumes are removed before and after it, so a service's first start in it
+# is its first.
 record_runner() {
 	local phase=$1; shift
 	mkdir -p "$W/$phase" "$W/out/$phase" && cd "$W/$phase" || die cd
 	compose_yml riso-app 8080 "$RECARGS" runner "$@"
 	docker compose down -v --remove-orphans >/dev/null 2>&1
 	log "$phase"
-	$S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" timeout -s INT -k 30 240 "$KEPLOY" record -c "docker compose up --exit-code-from runner" --container-name riso-app --disable-tele --disableANSI > "$W/out/$phase/keploy.log" 2>&1
-	echo $? > "$W/out/$phase/exit"
-	date +%s > "$W/out/$phase/ended"
-	echo "$phase exit $(cat "$W/out/$phase/exit")"
+	record_bounded "$phase" "docker compose up --exit-code-from runner"
 	docker compose down -v --remove-orphans >/dev/null 2>&1
 }
 
@@ -539,15 +554,23 @@ rows_after_last() {
 	row "$p's report names the lookup made after the last test by its shape" "$([ -n "$tag" ] && [ -n "$shaped" ] && ! printf '%s' "$shaped" | grep -qF stop-probe && echo 1)" "$(printf '%s' "${shaped:-no outside-test miss with tag ${tag:-unknown}}" | cut -c1-160)"
 	row "$p's report names the lookup made after the last test nowhere whole" "$(cat "$W/out/$p"/report/*.yaml 2>/dev/null | grep -qF stop-probe || echo 1)" "stop-probe in $p's report"
 }
-# rows_runner PHASE: PHASE's record (record_runner) ended on the runner's
-# exit with its code, 0, within a minute of the runner's last line (a record
-# that went on until timeout's stop is 124), and holds the runner's 6 calls:
-# its health check and its 5 more.
+# row_unguarded PHASE: PHASE's bounded record (record_bounded) ended by
+# itself; the hang guard did not stop it.
+row_unguarded() {
+	local fired
+	fired=$(cat "$W/out/$1/fired" 2>/dev/null)
+	row "$1 ends by itself, not by the hang guard's stop at 240 s" "$([ "$fired" = 0 ] && echo 1)" "fired ${fired:-none}"
+}
+# rows_runner PHASE: PHASE's record (record_runner) ended by itself, on the
+# runner's exit with its code, 0, within a minute of the runner's last line
+# (a record that went on ran until the hang guard stopped it), and holds the
+# runner's 6 calls: its health check and its 5 more.
 rows_runner() {
 	local p=$1 rexit rdone rend rtests
 	rexit=$(cat "$W/out/$p/exit" 2>/dev/null)
 	rdone=$(grep -aoE 'RUNNER DONE [0-9]+' "$W/out/$p/keploy.log" 2>/dev/null | head -1 | awk '{print $3}')
 	rend=$(cat "$W/out/$p/ended" 2>/dev/null)
+	row_unguarded "$p"
 	row "$p ends with the runner's code, 0" "$([ "$rexit" = 0 ] && echo 1)" "exit ${rexit:-none}"
 	row "$p ends within 60 s of the runner's last line" "$([ -n "$rdone" ] && [ -n "$rend" ] && [ $((rend - rdone)) -le 60 ] && echo 1)" "$([ -n "$rdone" ] && [ -n "$rend" ] && echo "$((rend - rdone)) s after RUNNER DONE" || echo 'no RUNNER DONE line in its log')"
 	rtests=$(ls "$W/$p"/keploy/test-set-*/tests/*.yaml 2>/dev/null | wc -l)
@@ -833,16 +856,13 @@ for mode in "${MODES[@]}"; do
 
 		# The user's own `--exit-code-from early`, early exiting 3 before the
 		# application's container has started: keploy record ends at once,
-		# with early's 3, and names its exit. timeout stops a record that
-		# would run on.
+		# with early's 3, and names its exit. The hang guard stops a record
+		# that would run on (record_bounded).
 		mkdir -p "$W/compose-early" "$W/out/record-compose-early" && cd "$W/compose-early" || die cd
 		compose_yml riso-app 8080 "$RECARGS" early
 		log "record-compose-early"
 		date +%s > "$W/out/record-compose-early/began"
-		$S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" timeout -s INT -k 30 240 "$KEPLOY" record -c "docker compose up --exit-code-from early" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose-early/keploy.log" 2>&1
-		echo $? > "$W/out/record-compose-early/exit"
-		date +%s > "$W/out/record-compose-early/ended"
-		echo "record-compose-early exit $(cat "$W/out/record-compose-early/exit")"
+		record_bounded record-compose-early "docker compose up --exit-code-from early"
 		docker compose down --remove-orphans >/dev/null 2>&1
 		# A dependency of the app's (`depends_on: [flaky]`, no wait on its
 		# exit) that crashes on its first start only, before the app starts:
@@ -871,7 +891,7 @@ for mode in "${MODES[@]}"; do
 		# up returns only once late has ended. keploy stops late too, as
 		# compose's own abort stops a late starter, and the record ends with
 		# ender's 2 well within 60 s; a keploy that never stopped late ran on
-		# until timeout's INT at 240 s (exit 124). The rows read late's end as
+		# until the hang guard's INT at 240 s. The rows read late's end as
 		# docker's kill (137), never the Go runtime's deadlock exit (2), which
 		# a probe that blocks on nothing hits at once in the lane's static
 		# build: then compose's up never waits on late, and the case cannot
@@ -881,10 +901,7 @@ for mode in "${MODES[@]}"; do
 		docker compose down --remove-orphans >/dev/null 2>&1
 		log "record-compose-latestart"
 		date +%s > "$W/out/record-compose-latestart/began"
-		$S env PATH="$PATH" "${SUDO_ENV[@]}" "${PROVEN_ENV[@]}" timeout -s INT -k 30 240 "$KEPLOY" record -c "docker compose up --exit-code-from ender" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose-latestart/keploy.log" 2>&1
-		echo $? > "$W/out/record-compose-latestart/exit"
-		date +%s > "$W/out/record-compose-latestart/ended"
-		echo "record-compose-latestart exit $(cat "$W/out/record-compose-latestart/exit")"
+		record_bounded record-compose-latestart "docker compose up --exit-code-from ender"
 		docker compose down --remove-orphans >/dev/null 2>&1
 		sink_stop
 		cd "$W" || die cd
@@ -1073,12 +1090,13 @@ for mode in "${MODES[@]}"; do
 		# (before, compose's own abort), and holds the runner's 6 calls.
 		rows_runner record-compose-runner
 		# `up --exit-code-from early` at record, early exiting 3 before the
-		# application started: it ended on early's exit, with its 3, within a
-		# minute (before, a record that ran on until it was stopped; timeout's
-		# stop is 124), and its log names early's exit.
+		# application started: it ended by itself on early's exit, with its 3,
+		# within a minute (before, a record that ran on until it was
+		# stopped), and its log names early's exit.
 		eexit=$(cat "$W/out/record-compose-early/exit" 2>/dev/null)
 		ebegan=$(cat "$W/out/record-compose-early/began" 2>/dev/null)
 		eend=$(cat "$W/out/record-compose-early/ended" 2>/dev/null)
+		row_unguarded record-compose-early
 		row "record-compose-early ends with early's code, 3" "$([ "$eexit" = 3 ] && echo 1)" "exit ${eexit:-none}"
 		row "record-compose-early ends within 60 s" "$([ -n "$ebegan" ] && [ -n "$eend" ] && [ $((eend - ebegan)) -le 60 ] && echo 1)" "$([ -n "$ebegan" ] && [ -n "$eend" ] && echo "$((eend - ebegan)) s" || echo 'no times')"
 		row "record-compose-early names early's exit before the application started" "$(grep -aqE 'service .{0,2}early.{0,2} exited with code 3 before the application started' "$W/out/record-compose-early/keploy.log" && echo 1)" "$(grep -acE 'exited with code 3 before the application started' "$W/out/record-compose-early/keploy.log") lines"
@@ -1100,12 +1118,13 @@ for mode in "${MODES[@]}"; do
 		row_log "record-compose-seed: the seed exited 0" "$W/out/record-compose-seed/keploy.log" 'SEED DONE'
 		row_log "record-compose-seed: its exit ends nothing, as compose's up waits on it" "$W/out/record-compose-seed/keploy.log" 'docker compose up waits on that exit before it starts another service.*seed'
 		row_nolog "record-compose-seed: its exit does not end the run" "$W/out/record-compose-seed/keploy.log" 'the command.s abort flags end the run on it.*"service": "seed"'
-		# ender's 2 after the app started ended the record, with its 2,
-		# within a minute (timeout's stop is 124), and late, which compose's
-		# up started during keploy's stop of the stack, was named and stopped.
+		# ender's 2 after the app started ended the record by itself, with
+		# its 2, within a minute, and late, which compose's up started during
+		# keploy's stop of the stack, was named and stopped.
 		lexit=$(cat "$W/out/record-compose-latestart/exit" 2>/dev/null)
 		lbegan=$(cat "$W/out/record-compose-latestart/began" 2>/dev/null)
 		lend=$(cat "$W/out/record-compose-latestart/ended" 2>/dev/null)
+		row_unguarded record-compose-latestart
 		row "record-compose-latestart ends with ender's code, 2" "$([ "$lexit" = 2 ] && echo 1)" "exit ${lexit:-none}"
 		row "record-compose-latestart ends within 60 s" "$([ -n "$lbegan" ] && [ -n "$lend" ] && [ $((lend - lbegan)) -le 60 ] && echo 1)" "$([ -n "$lbegan" ] && [ -n "$lend" ] && echo "$((lend - lbegan)) s" || echo 'no times')"
 		row_log "record-compose-latestart: ender exited 2 after the application started" "$W/out/record-compose-latestart/keploy.log" 'service .{0,2}ender.{0,2} exited with code 2 after the application started'
