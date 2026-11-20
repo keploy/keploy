@@ -24,7 +24,7 @@ var marksBase = time.Unix(1_700_000_000, 0).UTC()
 func markAt(n int) time.Time { return marksBase.Add(time.Duration(n) * time.Second) }
 
 // recordWrites records req answered by pieces, piece i written to the client
-// at writtenAt[i], and returns the mock.
+// at writtenAt[i], and then the upstream's close, and returns the mock.
 func recordWrites(t *testing.T, req string, pieces []string, writtenAt []time.Time) *models.Mock {
 	t.Helper()
 	newStream := func(dir fakeconn.Direction, parts []string, times []time.Time) *fakeconn.FakeConn {
@@ -45,6 +45,10 @@ func recordWrites(t *testing.T, req string, pieces []string, writtenAt []time.Ti
 		Mocks:        mocks, Logger: zaptest.NewLogger(t), ClientConnID: "marks-1", DestConnID: "marks-dest-1",
 		Ctx: context.Background(),
 	}
+	// The destination's stream ends with the upstream's close, which the
+	// relay reads and says (Session.MarkPeerEnded) before it ends the stream:
+	// a body framed by that close is read whole.
+	sess.MarkPeerEnded(fakeconn.FromDest, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(ctx, sess); err != nil {
