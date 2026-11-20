@@ -57,8 +57,9 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		// deadline's timeout or the connection's EOF, which ReadBytes returns
 		// at the read that gets it. It returns whether it was the EOF, how
 		// many bytes it read, and false for any other error (logged). With
-		// rearm, a read that returns bytes gives the next one quietWindow
-		// from then.
+		// rearm, the first read that returns bytes gives the reads after it
+		// quietWindow from then: one window, as a round has, so bytes that
+		// never pause still end the read.
 		readPieces := func(rearm bool) (ended bool, got int, ok bool) {
 			for {
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
@@ -87,6 +88,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					return atEOF, got, true
 				}
 				if rearm {
+					rearm = false
 					if err := clientConn.SetReadDeadline(time.Now().Add(quietWindow)); err != nil {
 						utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 						return false, got, false
@@ -137,7 +139,10 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// once, what is still on its way within restWait. Matched in
 			// part, it missed, or took a recording's answer and left its
 			// rest to miss as a request of its own. A request whose rest
-			// never comes is matched as it is, after restWait.
+			// never comes is matched as it is, after restWait. Each read of
+			// the rest is one window long, and the rest is read only while
+			// the request begins a recording, so what it holds is bounded
+			// by the longest recording.
 			for !ended && restToCome(db, genericRequests) {
 				if err := clientConn.SetReadDeadline(time.Now().Add(time.Duration(restWait.Load()))); err != nil {
 					utils.LogError(logger, err, "failed to set the read deadline for the client conn")
