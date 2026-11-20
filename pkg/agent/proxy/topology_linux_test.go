@@ -1543,9 +1543,7 @@ func bypassRecordProxyLogging(t *testing.T, addr string) (*Proxy, *observer.Obse
 	}
 	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
 	// The session's mock manager sweeps its pools on a ticker until it is
-	// closed: closed here, or each run leaves its sweeper behind. (The
-	// proxy's expiring caches keep their janitors: golang-lru's expirable
-	// LRU has no way to stop one.)
+	// closed: closed here, or each run leaves its sweeper behind.
 	t.Cleanup(func() { p.setMockManager(nil) })
 	return p, logs
 }
