@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package http
 
@@ -12,13 +12,13 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.uber.org/zap"
@@ -38,7 +38,7 @@ type seen struct {
 
 func endOf(err error) string {
 	switch {
-	case errors.Is(err, syscall.ECONNRESET):
+	case neterr.IsConnReset(err):
 		return "reset"
 	case err == io.EOF:
 		return "eof"

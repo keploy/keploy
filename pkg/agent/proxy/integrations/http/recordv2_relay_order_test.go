@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package http
 
@@ -22,7 +22,6 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
 	"go.uber.org/zap/zaptest/observer"
-	"golang.org/x/sys/unix"
 )
 
 // These tests record through the proxy's relay on real sockets, and nothing in
@@ -179,8 +178,8 @@ func received(t *testing.T, c net.Conn) uint64 {
 	}
 	var got uint64
 	if err := rc.Control(func(fd uintptr) {
-		if info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO); err == nil {
-			got = info.Bytes_received
+		if _, n, ok := tcpInfoOf(fd); ok {
+			got = n
 		}
 	}); err != nil {
 		t.Fatal(err)
