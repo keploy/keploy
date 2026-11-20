@@ -2759,7 +2759,7 @@ func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
 		many = append(many, models.FieldReason{Field: f, Why: "keploy.yml's noise lets " + f + " vary only within \"^x$\"; the live value (a string of 2 bytes) is outside it, so it is compared"})
 	}
 	whys := many[0].Why + "; " + many[1].Why + "; " + many[2].Why + "; and 57 more reasons"
-	sixty := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", FieldReasons: many}}}, nil, time.Time{})
+	sixty := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", FieldReasons: many}}}, nil, time.Time{}, nil)
 	require.Contains(t, sixty, "GET /x had no recorded answer ("+whys+")")
 	require.NotContains(t, sixty, many[3].Why)
 	capped := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: "re-record the test", FieldReasons: many})
