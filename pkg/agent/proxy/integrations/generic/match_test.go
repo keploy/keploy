@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -242,6 +243,14 @@ func TestASimilarRequestIsComparedWithARecordingByItsBytes(t *testing.T) {
 		if got := findBinaryMatch([]*models.Mock{recorded}, splitAt(varied(40<<10, false), 1000), 0.4); got != -1 {
 			t.Errorf("%s: other bytes: findBinaryMatch = %d, want -1", recorded.Name, got)
 		}
+		// A recording of the request's first piece alone is no closer than
+		// the one of all its bytes, though that piece is the same as it.
+		reads := splitAt(near, 1000, 1000+32<<10)
+		decoy := recordedAs("first piece", reads[0])
+		store := eofStore{mocks: []*models.Mock{exchange("ping", "PING"), decoy, recorded}}
+		if r := buildGenericMismatchReport(context.Background(), reads, store, nil); r.ClosestMock != recorded.Name {
+			t.Errorf("%s: a recording of the request's first piece beside it: the miss report's closest is %q", recorded.Name, r.ClosestMock)
+		}
 	}
 }
 
@@ -285,6 +294,31 @@ func TestARedactedPieceIsLeftOutOfASimilarity(t *testing.T) {
 				t.Fatalf("findBinaryMatch = %d, want %d", got, c.want)
 			}
 		})
+	}
+}
+
+// Compared piece by piece, a recording's similarity is the average over the
+// pieces it does not redact: a redacted piece counts neither for nor against
+// it. A request whose piece in a redaction's place is long and like nothing
+// recorded is like the recording piece by piece only: its bytes are mostly
+// that piece.
+func TestARedactedPieceIsNotInAPieceBySimilaritysAverage(t *testing.T) {
+	body := varied(4<<10, true)
+	near := append([]byte(nil), body...)
+	near[100] ^= 1
+	// Bytes below 'a' and 0x80, none of body's, in no repeating run.
+	token := make([]byte, 32<<10)
+	for i, x := range token {
+		x = byte(uint32(i)*2654435761>>16) % 0x60
+		token[i] = x
+	}
+	recorded := noisyRecording(body, []byte("REDACTED"))
+	reads := [][]byte{near, token}
+	if sim, _ := bytesSimilarity(recorded.Spec.GenericRequests, util.NewNoiseChecker(recorded.Noise), newSentRequest(reads)); sim >= 0.6 {
+		t.Fatalf("the request's bytes are %.2f like the recording's; the row needs them unlike", sim)
+	}
+	if got := findBinaryMatch([]*models.Mock{recorded}, reads, 0.6); got != 0 {
+		t.Fatalf("findBinaryMatch = %d, want 0", got)
 	}
 }
 
