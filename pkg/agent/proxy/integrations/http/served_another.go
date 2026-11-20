@@ -142,6 +142,8 @@ func idSegmentsDiffering(recorded, live string) []string {
 // run, the keploy.yml noise entry that makes x its own (urlNoiseEntry,
 // requestBodyNoiseEntries). The call is served either way; the report is
 // what keeps keploy mock replay from counting it as the call's own answer.
+// A how with no such answer (a call served its own recording, or one no
+// pass served) reports nothing.
 // The call and x's call are named as the miss's report names them: the
 // segments x redacted stay redacted.
 //

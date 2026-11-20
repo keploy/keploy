@@ -564,19 +564,22 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 		// A recording whose body is the call's outside the noise keploy.yml
 		// declares and the record learned (sameCallBodies: JSON field by
 		// field, so key order and spacing are no difference) is a recording
-		// of this very call: the fuzzy fallback chooses among those alone,
-		// and the call is served as its own. Only when none is, the closest
-		// of several recordings is a guess between calls.
-		pool := shortListed
+		// of this very call, and the call is served as its own: the first
+		// of them in the order the store holds them (the test's own in
+		// recorded order, then the session's), never the closest string,
+		// so a noise value that changes on every run never changes which
+		// recording serves it. Only when none is, the closest of several
+		// recordings is a guess between calls.
 		sameCall := h.sameCallBodies(shortListed, input.body, userBodyNoise)
-		if len(sameCall) > 0 {
-			pool = sameCall
-		}
-		h.Logger.Debug("Performing fuzzy match for req buffer")
-		// Perform fuzzy match on the request
-		isMatched, bestMatch, err := h.performFuzzyMatch(ctx, pool, input.body)
-		if err != nil {
-			return false, nil, nil, err
+		isMatched := len(sameCall) > 0
+		if isMatched {
+			bestMatch = sameCall[0]
+		} else {
+			h.Logger.Debug("Performing fuzzy match for req buffer")
+			isMatched, bestMatch, err = h.performFuzzyMatch(ctx, shortListed, input.body)
+			if err != nil {
+				return false, nil, nil, err
+			}
 		}
 		if isMatched {
 			if ce := h.Logger.Check(zap.DebugLevel, "fuzzy match found a matching mock"); ce != nil {

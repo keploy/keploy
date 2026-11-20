@@ -49,8 +49,8 @@ func searchRecordings(t *testing.T, h *HTTP, learned map[string][]string, bodies
 // in the default noise mode too, and it is served with no report: a field
 // keploy.yml declares request-body noise, a field the record learned as
 // noise, the same JSON with its keys in another order or other spacing. Of
-// several such recordings the call is served one, with no report, and it is
-// served its own over another call's whose body is the closer string. A call
+// several such recordings the call is served the first, with no report, and
+// it is served its own over another call's whose body is the closer string. A call
 // whose body differs from every recording outside its noise is served the
 // closest and reported closest_body, naming the fields it differs at and
 // none its noise covers, and
@@ -72,7 +72,7 @@ func TestABodyThatIsTheCallsOutsideItsNoiseIsServedAsItsOwn(t *testing.T) {
 		{name: "learned noise", recorded: []string{`{"q":"ada","ts":1}`, `{"q":"alan","ts":2}`}, learned: map[string][]string{"body.ts": {}}, call: `{"q":"ada","ts":3}`, want: []string{`{"hit":1}`}},
 		{name: "keys in another order", recorded: []string{`{"q":"ada","page":1}`, `{"q":"alan","page":2}`}, call: `{"page":1,"q":"ada"}`, want: []string{`{"hit":1}`}},
 		{name: "other spacing", recorded: []string{`{"q":"ada","page":1}`, `{"q":"alan","page":2}`}, call: `{"q": "ada", "page": 1}`, want: []string{`{"hit":1}`}},
-		{name: "several of the call's own", recorded: []string{`{"q":"ada","ts":1}`, `{"q":"ada","ts":2}`, `{"q":"alan","ts":5}`}, opts: models.OutgoingOptions{NoiseConfig: ts}, call: `{"q":"ada","ts":9}`, want: []string{`{"hit":1}`, `{"hit":2}`}},
+		{name: "several of the call's own", recorded: []string{`{"q":"ada","ts":1}`, `{"q":"ada","ts":2}`, `{"q":"alan","ts":5}`}, opts: models.OutgoingOptions{NoiseConfig: ts}, call: `{"q":"ada","ts":9}`, want: []string{`{"hit":1}`}},
 		// The other call's body is the closer string (one letter of q
 		// against three digits of ts), so a fuzzy choice over every
 		// recording would serve it as the call's own.
@@ -126,6 +126,26 @@ func TestABodyThatIsTheCallsOutsideItsNoiseIsServedAsItsOwn(t *testing.T) {
 				t.Fatalf("with keploy.yml's requestbody %v, the next step's entries added, the call got %d %q with answer reports %+v, want %s's answer and none", noise, again.status, again.body, again.answers(), tc.closest)
 			}
 		})
+	}
+}
+
+// Of several recordings that are all the call's own outside its noise, the
+// call is served the first in recorded order on every run, whichever of them
+// its noise value of that run is the closer string to: a timestamp that
+// changes on every run never changes which recording answers the call. The
+// first is served with no report.
+func TestOfSeveralOfTheCallsOwnRecordingsTheFirstServesItOnEveryRun(t *testing.T) {
+	ts := models.OutgoingOptions{NoiseConfig: map[string]map[string][]string{"requestbody": {"ts": {}}}}
+	recorded := []string{`{"q":"ada","ts":1000}`, `{"q":"ada","ts":2}`, `{"q":"alan","ts":5}`}
+	// The runs' ts: the first is the closer string to the second
+	// recording, the second to the first, the third to neither.
+	for _, call := range []string{`{"q":"ada","ts":3}`, `{"q":"ada","ts":1001}`, `{"q":"ada","ts":77}`} {
+		setProven(t, false)
+		h := newHTTP()
+		got := serveReportedWith(t, h, searchRecordings(t, h, nil, recorded...), ts, searchCall(call))
+		if got.status != 200 || got.body != `{"hit":1}` || len(got.answers()) != 0 {
+			t.Fatalf("the call %s got %d %q with answer reports %+v, want the first recording's {\"hit\":1} and none", call, got.status, got.body, got.answers())
+		}
 	}
 }
 
