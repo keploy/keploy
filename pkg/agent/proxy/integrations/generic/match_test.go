@@ -6,6 +6,7 @@ import (
 	"net"
 	"regexp"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
@@ -59,7 +60,9 @@ func (s answeredStore) ConsumedTestMocks() []*models.Mock { return s.answered }
 // missReport is the report of the miss decodeGeneric returns for req. A
 // request answered instead writes its answer to the app, which reads it
 // and hangs up: the decoder ends with no miss, and the row fails at once
-// rather than leaving the answer blocked on a pipe nobody reads.
+// rather than leaving the answer blocked on a pipe nobody reads. A parser
+// that never ends the request (the connection is quiet once req is sent)
+// fails the row at the bound instead of holding the package's run.
 func missReport(t *testing.T, store integrations.MockMemDb, req string) *models.MockMismatchReport {
 	t.Helper()
 	app, proxySide := net.Pipe()
@@ -69,7 +72,16 @@ func missReport(t *testing.T, store integrations.MockMemDb, req string) *models.
 			_ = app.Close()
 		}
 	}()
-	err := decodeGeneric(context.Background(), zap.NewNop(), []byte(req), proxySide, nil, store, models.OutgoingOptions{})
+	done := make(chan error, 1)
+	go func() {
+		done <- decodeGeneric(context.Background(), zap.NewNop(), []byte(req), proxySide, nil, store, models.OutgoingOptions{})
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%q: the parser never ended the request on a quiet connection", req)
+	}
 	var r interface {
 		MismatchReport() *models.MockMismatchReport
 	}
