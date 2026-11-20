@@ -671,7 +671,9 @@ type Replayer struct {
 	// noLaterSetRuns: no set after the one running begins its session on the
 	// agent (lastSetThatRuns): each is wholly ignored or has no test case.
 	// The set is then the last that runs, and its final attempt stops the
-	// application --keep-app-alive keeps across sets (P101-c).
+	// application --keep-app-alive keeps across sets (P101-c), or, with the
+	// proven switch off, a docker compose stack reused across them. Start
+	// works it out only for a run whose application is kept across its sets.
 	noLaterSetRuns bool
 	// finalAttempt: the set's attempt now running is the last one the run
 	// can give it (MaxFlakyChecks); no attempt of it comes after.
@@ -1402,13 +1404,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.testRunID = testRunID
 	r.firstRun = true
 	r.keptAppWaited = false
-	// The application --keep-app-alive keeps across sets stops at the end of
-	// the last set that runs (P101-c), not of the last set by its place: a
-	// later set that is wholly ignored or has no test case returns before it
-	// begins its session on the agent, and the app's stop in the run's
-	// teardown, after every read, would be in no verdict.
+	// The application kept across sets, by --keep-app-alive or in a docker
+	// compose stack reused across them, stops at the end of the last set
+	// that runs (P101-c, stopForSetEndRead), not of the last set by its
+	// place: a later set that is wholly ignored or has no test case returns
+	// before it begins its session on the agent, and the app's stop in the
+	// run's teardown, after every read, would be in no verdict, nor in the
+	// report's read of the calls the app made after its last test.
 	keptAppStopsAt := len(testSets) - 1
-	if r.keepAliveStop != nil {
+	if effectiveKeepAlive {
 		keptAppStopsAt = r.lastSetThatRuns(ctx, testSets)
 	}
 	for i, testSet := range testSets {
@@ -2997,8 +3001,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// the report then takes the calls the app made as it stopped
 		// (stopForSetEndRead). Only a set after which no other set or
 		// attempt is served by the app is stopped: one the stack brings up
-		// for itself, or the run's last set on an attempt no other follows,
-		// as --keep-app-alive's app is stopped.
+		// for itself, or the run's last set that runs (noLaterSetRuns) on an
+		// attempt no other follows, as --keep-app-alive's app is stopped.
 		stopper, ok := r.instrumentation.(composeAppStopper)
 		// The app is started again below, once this set is staged on the
 		// agent and its pids are marked (composeRestart), as compose starts
@@ -3007,7 +3011,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			composeRestart = stopper
 			r.pidMarked = false
 		}
-		if ok && !provenswitch.On() && (!serveTest || r.isLastTestSet && r.finalAttempt) {
+		if ok && !provenswitch.On() && (!serveTest || (r.isLastTestSet || r.noLaterSetRuns) && r.finalAttempt) {
 			stopAppBeforeReport = func() {
 				_, err := stopper.StopComposeApp(context.WithoutCancel(runTestSetCtx))
 				r.composeAppStopped = true

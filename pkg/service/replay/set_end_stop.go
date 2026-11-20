@@ -83,7 +83,9 @@ func wholeSetIgnored(ignored map[string][]string, id string) bool {
 
 // lastSetThatRuns is the index in testSets of the last set that begins its
 // session on the agent, where the final attempt stops the application
-// --keep-app-alive keeps across sets (P101-c); -1 for none. A set wholly
+// --keep-app-alive keeps across sets (P101-c), or, with the proven switch
+// off, a docker compose stack reused across them (stopForSetEndRead); -1 for
+// none. A set wholly
 // ignored (wholeSetIgnored), or with no test case, returns before it begins
 // one (RunTestSet) and runs nothing of the app's: a stop at the run's
 // teardown, after every read, would leave its closes in no verdict. A set

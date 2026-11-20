@@ -208,10 +208,13 @@ func TestASetThatReturnsBeforeItsSessionLeavesAnEarlierSetsLateLossToTheNext(t *
 
 // keptStopInstr is drainInstr whose application, the one --keep-app-alive
 // keeps across the run's sets, notes its stop in order ("stop") as its run
-// ends, with the set whose session was open then (stoppedIn).
+// ends, with the set whose session was open then (stoppedIn), and whether
+// test-set-0's report was written by then (reportedAtStop, from reports).
 type keptStopInstr struct {
 	*drainInstr
+	reports         *setsReportDB
 	open, stoppedIn string
+	reportedAtStop  bool
 }
 
 func (k *keptStopInstr) MockOutgoing(ctx context.Context, _ models.OutgoingOptions) error {
@@ -223,10 +226,16 @@ func (k *keptStopInstr) MockOutgoing(ctx context.Context, _ models.OutgoingOptio
 
 func (k *keptStopInstr) Run(ctx context.Context, opts models.RunOptions) models.AppError {
 	appErr := k.prInstr.Run(ctx, opts)
+	reported := false
+	if k.reports != nil {
+		k.reports.mu.Lock()
+		_, reported = k.reports.statuses["test-set-0"]
+		k.reports.mu.Unlock()
+	}
 	k.lmu.Lock()
 	k.order = append(k.order, "stop")
 	if k.stoppedIn == "" {
-		k.stoppedIn = k.open
+		k.stoppedIn, k.reportedAtStop = k.open, reported
 	}
 	k.lmu.Unlock()
 	return appErr
@@ -239,7 +248,9 @@ func (k *keptStopInstr) Run(ctx context.Context, opts models.RunOptions) models.
 // end's read, has the agent count the closes the stop made, and takes them,
 // so bytes a connection lost as the application stopped fail test-set-0. They
 // are never left to the run's teardown, after every read, in no verdict.
-// With the switch off nothing stops the application before a read.
+// With the switch off test-set-0's final attempt stops it too, before its
+// report's read of the calls the application made after its last test, and
+// nothing drains or takes: the set passes.
 func TestTheKeptApplicationStopsAtTheEndOfTheLastSetThatRuns(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		for _, last := range []string{"ignored", "empty"} {
@@ -266,15 +277,18 @@ func TestTheKeptApplicationStopsAtTheEndOfTheLastSetThatRuns(t *testing.T) {
 				lost := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
 					What: "from [::ffff:127.0.0.1]:50914, written as the application stopped"}
 				instr := &keptStopInstr{drainInstr: &drainInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}},
-					stopLoss: &models.OwnedCaptureLoss{Loss: lost}}}
+					stopLoss: &models.OwnedCaptureLoss{Loss: lost}}, reports: reports}
 				h.replayer.instrumentation = instr
 
 				code, statuses := startEarlierSetRun(t, h, reports)
 				instr.lmu.Lock()
-				order, stoppedIn := strings.Join(instr.order, ","), instr.stoppedIn
+				order, stoppedIn, reportedAtStop := strings.Join(instr.order, ","), instr.stoppedIn, instr.reportedAtStop
 				instr.lmu.Unlock()
 				if statuses["test-set-1"] != string(want) {
 					t.Fatalf("test-set-1 is %q (all %v), want %q", statuses["test-set-1"], statuses, want)
+				}
+				if stoppedIn != "test-set-0" || reportedAtStop || strings.Count(order, "stop") != 1 {
+					t.Fatalf("the application stopped in %q's session, test-set-0's report written first: %v, order %q; want it stopped once, at test-set-0's end, before its report", stoppedIn, reportedAtStop, order)
 				}
 				if !on {
 					if statuses["test-set-0"] != string(models.TestSetStatusPassed) || strings.Contains(order, "drain") {
@@ -282,8 +296,8 @@ func TestTheKeptApplicationStopsAtTheEndOfTheLastSetThatRuns(t *testing.T) {
 					}
 					return
 				}
-				if stoppedIn != "test-set-0" || !strings.Contains(order, "stop,drain,take") || strings.Count(order, "stop") != 1 {
-					t.Fatalf("the application stopped in %q's session, order %q; want it stopped once, at test-set-0's end, before its drain and its take", stoppedIn, order)
+				if !strings.Contains(order, "stop,drain,take") {
+					t.Fatalf("order %q; want test-set-0's end to stop the application before its drain and its take", order)
 				}
 				if statuses["test-set-0"] != string(models.TestSetStatusFailed) || code == 0 {
 					t.Fatalf("test-set-0 %q, exit code %d; want FAILED and non-zero: bytes were lost as the application stopped", statuses["test-set-0"], code)

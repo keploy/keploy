@@ -97,9 +97,11 @@ func composeReadHarness(t *testing.T, c *composeReads) *prRun {
 // the app made only as it stopped, which the report names as made after the
 // set's last test, by its shape, and the misses file names whole. The set
 // passes (the lookup fails nothing). A set the stack brings up for itself is
-// stopped so; of a stack kept across sets only the run's last set, on an
-// attempt no other follows, is, and an earlier one is read with the app
-// running, before its post-script, as --keep-app-alive's app is.
+// stopped so; of a stack kept across sets only the run's last set that runs
+// (the last by place, or one after which every set is wholly ignored or has
+// no test case), on an attempt no other follows, is, and an earlier one is
+// read with the app running, before its post-script, as --keep-app-alive's
+// app is.
 func TestAComposeAppIsStoppedBeforeTheReportWithTheSwitchOff(t *testing.T) {
 	provenOn(t, false)
 	const stopNamed = "DNS A {}.{}.{}. @after_last_test;"
@@ -112,16 +114,22 @@ func TestAComposeAppIsStoppedBeforeTheReportWithTheSwitchOff(t *testing.T) {
 		stops      int
 		named      string
 		postBefore bool
+		// noLater: no later set runs (noLaterSetRuns): each is wholly
+		// ignored or has no test case.
+		noLater bool
 	}{
-		{"a stack the set brings up for itself", false, false, false, 1, stopNamed, true},
-		{"a kept stack's last set, its final attempt", true, true, true, 1, stopNamed, true},
-		{"a kept stack's earlier set", true, false, true, 0, "", false},
-		{"a kept stack's last set, an attempt that another follows", true, true, false, 0, "", false},
+		{"a stack the set brings up for itself", false, false, false, 1, stopNamed, true, false},
+		{"a kept stack's last set, its final attempt", true, true, true, 1, stopNamed, true, false},
+		{"a kept stack's earlier set", true, false, true, 0, "", false, false},
+		{"a kept stack's last set, an attempt that another follows", true, true, false, 0, "", false, false},
+		{"a kept stack's last set that runs, its final attempt", true, false, true, 1, stopNamed, true, true},
+		{"a kept stack's last set that runs, an attempt that another follows", true, false, false, 0, "", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &composeReads{}
 			h := composeReadHarness(t, c)
 			h.replayer.isLastTestSet, h.replayer.finalAttempt = tc.last, tc.finalTry
+			h.replayer.noLaterSetRuns = tc.noLater
 			status := h.runTestSet(t, tc.serveTest)
 			if status != models.TestSetStatusPassed {
 				t.Fatalf("status %s (reason %q), want PASSED: a lookup the app makes as it stops fails nothing", status, h.report.report.FailureReason)

@@ -596,22 +596,27 @@ func TestRunTestSet_ACallTheAppMakesAsItStopsIsNamedWithTheSwitchOff(t *testing.
 }
 
 // With the switch off the application --keep-app-alive keeps across the sets
-// is stopped before a set's end read only on the run's last set, on an
-// attempt no other follows: that read, after the set's post-script, then
-// takes the calls it made as it stopped. On any other set it is read
-// running, before the set's post-script, as before, and not stopped; so is
-// an application keploy does not stop at all (a docker compose stack's).
+// is stopped before a set's end read only on the run's last set that runs
+// (the last by place, or one after which every set is wholly ignored or has
+// no test case: noLaterSetRuns), on an attempt no other follows: that read,
+// after the set's post-script, then takes the calls it made as it stopped.
+// On any other set it is read running, before the set's post-script, as
+// before, and not stopped; so is an application keploy does not stop at all
+// (a docker compose stack's).
 func TestRunTestSet_TheKeptAppIsStoppedBeforeTheReadOnlyAtTheRunsEnd(t *testing.T) {
 	for _, c := range []struct {
 		name        string
 		last, final bool
 		noStop      bool
 		wantStop    bool
+		noLater     bool
 	}{
-		{"the run's last set, final attempt", true, true, false, true},
-		{"an earlier set", false, true, false, false},
-		{"the last set, an attempt that others follow", true, false, false, false},
-		{"the last set, final attempt, an app keploy does not stop", true, true, true, false},
+		{"the run's last set, final attempt", true, true, false, true, false},
+		{"an earlier set", false, true, false, false, false},
+		{"the last set, an attempt that others follow", true, false, false, false, false},
+		{"the last set, final attempt, an app keploy does not stop", true, true, true, false, false},
+		{"the last set that runs, final attempt", false, true, false, true, true},
+		{"the last set that runs, an attempt that others follow", false, false, false, false, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			provenOn(t, false)
@@ -623,6 +628,7 @@ func TestRunTestSet_TheKeptAppIsStoppedBeforeTheReadOnlyAtTheRunsEnd(t *testing.
 				h.replayer.keepAliveStop = func() string { stops.Add(1); return "" }
 			}
 			h.replayer.isLastTestSet, h.replayer.finalAttempt = c.last, c.final
+			h.replayer.noLaterSetRuns = c.noLater
 			post := filepath.Join(t.TempDir(), "post-ran")
 			h.replayer.testSetConf = postScriptTouches{path: post}
 			var postAtRead atomic.Bool

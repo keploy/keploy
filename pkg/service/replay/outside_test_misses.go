@@ -82,8 +82,10 @@ func cutReadStatus(status models.TestSetStatus) models.TestSetStatus {
 // the application keploy started for the set, or of the app's container of
 // its docker compose stack, the stack running on, when no later set or
 // attempt is served by it (stopAppBeforeReport, which stops it as the set's
-// teardown does), or, on the run's last set, on an attempt no other follows,
-// the stop of the one --keep-app-alive kept across the sets (keepAliveStop).
+// teardown does), or, on the run's last set that runs (noLaterSetRuns: a
+// later one wholly ignored, or with no test case, runs none), on an attempt
+// no other follows, the stop of the one --keep-app-alive kept across the
+// sets (keepAliveStop).
 // nil when keploy stops the application only later: one kept alive, or kept
 // in its compose stack, for a later set or attempt, or one it did not start;
 // the read is then made before the set's post-script, with it running.
@@ -94,7 +96,7 @@ func (r *Replayer) stopForSetEndRead(stopAppBeforeReport func()) func() {
 	switch {
 	case stopAppBeforeReport != nil:
 		return stopAppBeforeReport
-	case r.isLastTestSet && r.finalAttempt && r.keepAliveStop != nil:
+	case (r.isLastTestSet || r.noLaterSetRuns) && r.finalAttempt && r.keepAliveStop != nil:
 		return func() { r.keepAliveStop() }
 	}
 	return nil
