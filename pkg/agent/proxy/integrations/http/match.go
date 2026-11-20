@@ -229,6 +229,12 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 	// the use stay one source of truth; it never returns nil for HTTP, so New
 	// cannot be handed a nil adapter here.
 	noiseEngine := mocknoise.New(h.MockNoise(), schemaNoiseDetection, schemaNoiseStrict)
+	// The call's body, read once for this match, the first time a check
+	// reads it (callBodyRead): every check below that compares it with
+	// recordings (filterStrictNoiseMatches, noteFieldsOnOneSide,
+	// sameCallBodies, bodyFieldsDiffering) reads this one, and a call
+	// served before any of them makes none.
+	callBody := callBodyRead{raw: input.body}
 
 	// Under the proven switch no path segment or query value is relaxed for
 	// its shape (design v14 row S1): what may differ between record and
@@ -515,7 +521,7 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 			// the whole body, not just the lenient key/schema match above.
 			beforeStrict := len(bodyMatched)
 			if schemaNoiseStrict {
-				bodyMatched = h.filterStrictNoiseMatches(bodyMatched, input.body, userBodyNoise)
+				bodyMatched = h.filterStrictNoiseMatches(bodyMatched, callBody.get(), userBodyNoise)
 			}
 
 			if len(bodyMatched) == 0 {
@@ -543,7 +549,7 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 				// another call's where a field only one of the two
 				// bodies holds is outside noise (noteFieldsOnOneSide).
 				noteServedAs(how, idVaried, false)
-				h.noteFieldsOnOneSide(how, bodyMatched[0], input.body, userBodyNoise)
+				h.noteFieldsOnOneSide(how, bodyMatched[0], callBody.get(), userBodyNoise)
 				return true, served, nil, nil
 			}
 
@@ -576,7 +582,7 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 		// so a noise value that changes on every run never changes which
 		// recording serves it. Only when none is, the closest of several
 		// recordings is a guess between calls.
-		sameCall := h.sameCallBodies(shortListed, input.body, userBodyNoise)
+		sameCall := h.sameCallBodies(shortListed, callBody.get(), userBodyNoise)
 		isMatched := len(sameCall) > 0
 		if isMatched {
 			bestMatch = sameCall[0]
@@ -608,9 +614,9 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 			// noise (noteFieldsOnOneSide).
 			noteServedAs(how, idVaried, len(sameCall) == 0 && len(shortListed) > 1)
 			if how != nil && how.answer == models.AnswerClosestBody {
-				how.fields = h.bodyFieldsDiffering(bestMatch, input.body, userBodyNoise)
+				how.fields = h.bodyFieldsDiffering(bestMatch, callBody.get(), userBodyNoise)
 			}
-			h.noteFieldsOnOneSide(how, bestMatch, input.body, userBodyNoise)
+			h.noteFieldsOnOneSide(how, bestMatch, callBody.get(), userBodyNoise)
 			return true, served, nil, nil
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: shortListed, pool: comparedPool}, nil
@@ -2088,15 +2094,14 @@ func (h *HTTP) consumeWith(ctx context.Context, matchedMock *models.Mock, mockDb
 // no learned noise passes only so too: only fields explicitly marked as
 // noise may differ.
 //
-// Each recording's body is read once (ownBodies), the call's once per call;
-// the drift names the offending field path(s) for the rejection log, and the
+// Each recording's body is read whole once (ownRead.json), the call's
+// (live) once per match; the drift names the offending field path(s) for the rejection log, and the
 // miss's report names them as JSONBodyDiffs reads them.
-func (h *HTTP) filterStrictNoiseMatches(candidates []*models.Mock, reqBody []byte, userBodyNoise map[string][]string) []*models.Mock {
-	live := mocknoise.NewJSONBody(reqBody)
+func (h *HTTP) filterStrictNoiseMatches(candidates []*models.Mock, live *mocknoise.JSONBody, userBodyNoise map[string][]string) []*models.Mock {
 	var kept []*models.Mock
 	for _, m := range candidates {
 		recorded, ok := h.ownBodies.read(m)
-		drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded.json, ok, live, userBodyNoise)
+		drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded.json(), ok, live, userBodyNoise)
 		if len(drift) == 0 {
 			kept = append(kept, m)
 			continue
@@ -2758,7 +2763,7 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// above); its other fields are no reason. (A call that is not JSON
 		// against a JSON recording differs whole, which names no field.)
 		if pkg.IsJSON([]byte(mockReq.Body)) {
-			for _, p := range h.bodyFieldsDiffering(closestMock, diffBody, userBodyNoise) {
+			for _, p := range h.bodyFieldsDiffering(closestMock, mocknoise.NewJSONBody(diffBody), userBodyNoise) {
 				if !slices.ContainsFunc(fieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == p }) {
 					fieldDiffs = append(fieldDiffs, models.MockFieldDiff{Path: p, Kind: models.DiffKindValueChanged})
 				}

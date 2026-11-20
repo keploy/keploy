@@ -3,6 +3,7 @@ package http
 import (
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
@@ -53,7 +54,7 @@ func TestARecordingWhosePrintIsNotTheCallsIsNotComparedWithIt(t *testing.T) {
 	call := []byte(`{"page":{"tags":["a","b"],"n":1},"ts":9,"q":"ada"}`)
 
 	before := counts()
-	own := h.sameCallBodies(db.mocks, call, ts)
+	own := h.sameCallBodies(db.mocks, mocknoise.NewJSONBody(call), ts)
 	if want := []string{"mock-search-7", "mock-search-8"}; !slices.Equal(names(own), want) {
 		t.Fatalf("the call's own recordings are %q, want %q", names(own), want)
 	}
@@ -61,7 +62,7 @@ func TestARecordingWhosePrintIsNotTheCallsIsNotComparedWithIt(t *testing.T) {
 		t.Fatalf("the first call printed %d recordings and %d calls, and compared %d recordings; want %v", got[0], got[1], got[2], want)
 	}
 	before = counts()
-	own = h.sameCallBodies(db.mocks, call, ts)
+	own = h.sameCallBodies(db.mocks, mocknoise.NewJSONBody(call), ts)
 	if got, want := since(before), [3]int64{0, 1, 2}; got != want || len(own) != 2 {
 		t.Fatalf("the second call printed %d recordings and %d calls, and compared %d recordings, with %d own; want %v and 2", got[0], got[1], got[2], len(own), want)
 	}
@@ -128,11 +129,11 @@ func TestARecordingIsPrintedAgainUnderOtherNoise(t *testing.T) {
 				tc.first(m)
 			}
 			user := tc.user
-			if own := h.sameCallBodies(db.mocks, call, user); len(own) != 0 {
+			if own := h.sameCallBodies(db.mocks, mocknoise.NewJSONBody(call), user); len(own) != 0 {
 				t.Fatalf("before the change the call's own recordings are %q, want none", names(own))
 			}
 			tc.change(m, &user)
-			if own := h.sameCallBodies(db.mocks, call, user); !slices.Equal(names(own), []string{"mock-search-1"}) {
+			if own := h.sameCallBodies(db.mocks, mocknoise.NewJSONBody(call), user); !slices.Equal(names(own), []string{"mock-search-1"}) {
 				t.Fatalf("after the change the call's own recordings are %q, want mock-search-1", names(own))
 			}
 		})
@@ -150,7 +151,7 @@ func TestACallIsPrintedOnceForEachLearnedNoise(t *testing.T) {
 	db.mocks[3].Spec.ReqBodyNoise = map[string][]string{"body.n": {}}
 	db.mocks[4].Spec.ReqBodyNoise = map[string][]string{"body.n": {}, "body.ts": {}}
 	before := counts()
-	if own := h.sameCallBodies(db.mocks, []byte(`{"q":"a","ts":7,"n":1}`), nil); !slices.Equal(names(own), []string{"mock-search-1"}) {
+	if own := h.sameCallBodies(db.mocks, mocknoise.NewJSONBody([]byte(`{"q":"a","ts":7,"n":1}`)), nil); !slices.Equal(names(own), []string{"mock-search-1"}) {
 		t.Fatalf("the call's own recordings are %q, want mock-search-1", names(own))
 	}
 	if c := since(before); c[1] != 4 || c[2] != 1 {
@@ -196,5 +197,101 @@ func TestKeysKeyWritesOtherKeysApart(t *testing.T) {
 	}
 	if noiseKey(map[string][]string{"ts": {"^x$"}, "q": nil}) != keysKey([]string{"q", "ts"}) {
 		t.Fatal("a noise's key is not its keys sorted, whatever their patterns")
+	}
+}
+
+// A recording only printed keeps no read of its body: one whose print is
+// not the call's is never read whole, so a pool of other calls' recordings
+// keeps no decoded document alive. A recording whose print is the call's is
+// read whole once to compare it, and kept so; its print is read from that
+// read, never from another decode.
+func TestARecordingOnlyPrintedKeepsNoReadOfItsBody(t *testing.T) {
+	setProven(t, false)
+	h := newHTTP()
+	db := searchRecordings(t, h, nil, `{"q":"ada"}`, `{"q":"alan"}`, `{"q":"bob"}`)
+	before := ownBodyReads.Load()
+	if own := h.sameCallBodies(db.mocks, mocknoise.NewJSONBody([]byte(`{"q":"eve"}`)), nil); len(own) != 0 {
+		t.Fatalf("the call's own recordings are %q, want none", names(own))
+	}
+	if n := ownBodyReads.Load() - before; n != 3 {
+		t.Fatalf("the call read the recordings' bodies %d times, want 3 (each printed)", n)
+	}
+	kept := func() []string {
+		var out []string
+		for _, m := range db.mocks {
+			if r, _ := h.ownBodies.read(m); r.whole.Load() != nil {
+				out = append(out, m.Name)
+			}
+		}
+		return out
+	}
+	if k := kept(); len(k) != 0 {
+		t.Fatalf("recordings only printed keep a read of their bodies: %q", k)
+	}
+	before = ownBodyReads.Load()
+	if own := h.sameCallBodies(db.mocks, mocknoise.NewJSONBody([]byte(`{ "q" : "alan" }`)), nil); !slices.Equal(names(own), []string{"mock-search-2"}) {
+		t.Fatalf("the call's own recordings are %q, want mock-search-2", names(own))
+	}
+	if n := ownBodyReads.Load() - before; n != 1 {
+		t.Fatalf("the call read the recordings' bodies %d times, want 1 (its own, read whole)", n)
+	}
+	if k := kept(); !slices.Equal(k, []string{"mock-search-2"}) {
+		t.Fatalf("the recordings keeping a read of their bodies are %q, want mock-search-2", k)
+	}
+	r, _ := h.ownBodies.read(db.mocks[1])
+	r.print.Store(nil)
+	before = ownBodyReads.Load()
+	if r.printOf(db.mocks[1], nil, "") == nil || ownBodyReads.Load() != before {
+		t.Fatal("a recording read whole was decoded again to print it")
+	}
+}
+
+// The report of a call served another call's recording renders that
+// recording's request as renderMockRequest does, once for each recorded
+// request however many calls it serves; a recording whose method, URL,
+// header, body or redacted values are not what was rendered is rendered
+// again.
+func TestARecordingServedToManyCallsIsRenderedOnce(t *testing.T) {
+	setProven(t, false)
+	x := &models.Mock{Name: "x", Spec: models.MockSpec{HTTPReq: &models.HTTPReq{
+		Method: "POST", URL: "http://api.local/rendered-once", Header: map[string]string{"Content-Type": "application/json"}, Body: `{"q":"rendered-once"}`}}}
+	before := rendersMade.Load()
+	for i := 0; i < 3; i++ {
+		if got, want := renderedOf(x), renderMockRequest(x.Spec.HTTPReq, x.Noise); got != want {
+			t.Fatalf("the report renders %q, want %q", got, want)
+		}
+	}
+	if n := rendersMade.Load() - before; n != 1 {
+		t.Fatalf("three reports of one recording rendered it %d times, want once", n)
+	}
+	for _, change := range []struct {
+		name string
+		do   func()
+	}{
+		{"its method", func() { x.Spec.HTTPReq.Method = "PUT" }},
+		{"its URL", func() { x.Spec.HTTPReq.URL = "http://api.local/find" }},
+		{"a header", func() { x.Spec.HTTPReq.Header["X-Team"] = "a" }},
+		{"its body", func() { x.Spec.HTTPReq.Body = `{"q":"rendered-once-again"}` }},
+		{"its redacted values", func() { x.Noise = []string{"^rendered-once-again$"} }},
+	} {
+		change.do()
+		before = rendersMade.Load()
+		if got, want := renderedOf(x), renderMockRequest(x.Spec.HTTPReq, x.Noise); got != want || rendersMade.Load()-before != 1 {
+			t.Fatalf("after a change to %s the report renders %q (%d renders), want %q rendered again", change.name, got, rendersMade.Load()-before, want)
+		}
+	}
+}
+
+// The rendered requests kept start again from none past maxKeptRenders.
+func TestKeptRendersStartAgainPastTheirBound(t *testing.T) {
+	var k keptRenders
+	k.put(renderKey{method: "GET"}, "a")
+	k.put(renderKey{method: "PUT"}, strings.Repeat("x", maxKeptRenders-1))
+	if _, ok := k.get(renderKey{method: "GET"}); !ok || k.bytes != maxKeptRenders {
+		t.Fatalf("renders up to the bound were not all kept: %d bytes", k.bytes)
+	}
+	k.put(renderKey{method: "POST"}, "b")
+	if _, ok := k.get(renderKey{method: "GET"}); ok || len(k.of) != 1 || k.bytes != 1 {
+		t.Fatalf("past the bound keptRenders keeps %d renders of %d bytes, want only the last", len(k.of), k.bytes)
 	}
 }

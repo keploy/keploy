@@ -9,6 +9,7 @@ import (
 
 	yamlLib "gopkg.in/yaml.v3"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -181,7 +182,7 @@ func TestAnotherKindOfJSONDocumentNamesNoField(t *testing.T) {
 	h := newHTTP()
 	x := recordedAs(t, h, "mock-search-1", 1, searchCall(`{"q":"ada"}`), jsonAnswer(200, `{"hit":1}`), nil)
 	for _, call := range []string{`["ada"]`, `"ada"`} {
-		if got := h.bodyFieldsDiffering(x, []byte(call), nil); len(got) != 0 {
+		if got := h.bodyFieldsDiffering(x, mocknoise.NewJSONBody([]byte(call)), nil); len(got) != 0 {
 			t.Errorf("bodyFieldsDiffering of %s against {\"q\":\"ada\"} = %q, want none", call, got)
 		}
 	}
@@ -194,7 +195,7 @@ func TestBodyFieldsDifferingAreSorted(t *testing.T) {
 	x := recordedAs(t, h, "mock-search-1", 1, searchCall(`{"a":1,"b":1,"c":1,"d":1,"e":1,"f":1,"same":1}`), jsonAnswer(200, `{}`), nil)
 	want := []string{"body.a", "body.b", "body.c", "body.d", "body.e", "body.f"}
 	for range 20 {
-		if got := h.bodyFieldsDiffering(x, []byte(`{"f":2,"e":2,"d":2,"c":2,"b":2,"a":2,"same":1}`), nil); !slices.Equal(got, want) {
+		if got := h.bodyFieldsDiffering(x, mocknoise.NewJSONBody([]byte(`{"f":2,"e":2,"d":2,"c":2,"b":2,"a":2,"same":1}`)), nil); !slices.Equal(got, want) {
 			t.Fatalf("bodyFieldsDiffering = %q, want %q", got, want)
 		}
 	}

@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
@@ -57,10 +59,10 @@ func noteServedAs(how *servedAs, idVaried, closest bool) {
 // another call's without the two being compared: the prints leave out at
 // least what the comparison does not compare, so only a recording whose
 // print is the call's, or says nothing, is compared (sameCallChecks counts
-// them). Each recording is printed once (ownBodies.printOf), the call once
-// per noise the recordings were printed under.
-func (h *HTTP) sameCallBodies(candidates []*models.Mock, body []byte, userBodyNoise map[string][]string) []*models.Mock {
-	live := mocknoise.NewJSONBody(body)
+// them). Each recording is printed once (ownRead.printOf), the call (live,
+// the match's read of it) once per noise the recordings were printed
+// under, and only a recording compared is read whole (ownRead.json).
+func (h *HTTP) sameCallBodies(candidates []*models.Mock, live *mocknoise.JSONBody, userBodyNoise map[string][]string) []*models.Mock {
 	prints := newCallPrints(live, userBodyNoise)
 	var own []*models.Mock
 	for _, m := range candidates {
@@ -69,7 +71,7 @@ func (h *HTTP) sameCallBodies(candidates []*models.Mock, body []byte, userBodyNo
 			continue
 		}
 		sameCallChecks.Add(1)
-		if len(mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded.json, true, live, userBodyNoise)) == 0 {
+		if len(mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded.json(), true, live, userBodyNoise)) == 0 {
 			own = append(own, m)
 		}
 	}
@@ -77,14 +79,14 @@ func (h *HTTP) sameCallBodies(candidates []*models.Mock, body []byte, userBodyNo
 }
 
 // bodyFieldsDiffering names, sorted, the request-body fields ("body.ts") at
-// which body, the call's, differs from x's, as sameCallBodies compares
+// which live, the call's body, differs from x's, as sameCallBodies compares
 // them, a field only the call holds among them: marking each as
 // request-body noise makes x the call's own recording. None where the
 // bodies have no fields to compare (neither JSON nor a form), or are not
 // the same kind of JSON document.
-func (h *HTTP) bodyFieldsDiffering(x *models.Mock, body []byte, userBodyNoise map[string][]string) []string {
+func (h *HTTP) bodyFieldsDiffering(x *models.Mock, live *mocknoise.JSONBody, userBodyNoise map[string][]string) []string {
 	recorded, ok := h.ownBodies.read(x)
-	return bodyFieldsOf(mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded.json, ok, mocknoise.NewJSONBody(body), userBodyNoise))
+	return bodyFieldsOf(mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded.json(), ok, live, userBodyNoise))
 }
 
 // bodyFieldsOf names, sorted, the request-body fields of drift
@@ -112,7 +114,7 @@ func bodyFieldsOf(drift map[string][]string) []string {
 // differ at, as for the closest of several. Where only values differ, x is
 // still served as the call's own, with no report. Nothing is noted where how
 // is nil (a match that only diagnoses the call) or noted another answer.
-func (h *HTTP) noteFieldsOnOneSide(how *servedAs, x *models.Mock, body []byte, userBodyNoise map[string][]string) {
+func (h *HTTP) noteFieldsOnOneSide(how *servedAs, x *models.Mock, live *mocknoise.JSONBody, userBodyNoise map[string][]string) {
 	if how == nil || how.answer != "" {
 		return
 	}
@@ -120,12 +122,11 @@ func (h *HTTP) noteFieldsOnOneSide(how *servedAs, x *models.Mock, body []byte, u
 	if !ok {
 		return
 	}
-	live := mocknoise.NewJSONBody(body)
-	oneSide := fieldsOnOneSide(x, recorded.json, live)
+	oneSide := fieldsOnOneSide(x, recorded.json(), live)
 	if len(oneSide) == 0 {
 		return
 	}
-	drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded.json, true, live, userBodyNoise)
+	drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded.json(), true, live, userBodyNoise)
 	for p := range drift {
 		if oneSide[p] {
 			how.answer, how.fields = models.AnswerClosestBody, bodyFieldsOf(drift)
@@ -226,7 +227,7 @@ func reportServedAnother(ctx context.Context, input *req, x *models.Mock, how se
 	r.Operation = models.HTTPOperationLabel(liveRequest(nil, input))
 	r.Answer, r.ClosestMock = answer, x.Name
 	r.PathTag = models.URLPathTag(ctx, input.method, input.url)
-	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)
+	r.ClosestMockReq = renderedOf(x)
 	recordedPath, _ := recordedURLPath(x.Spec.HTTPReq.URL)
 	if recordedPath == "" {
 		recordedPath = "/"
@@ -255,4 +256,66 @@ func reportServedAnother(ctx context.Context, input *req, x *models.Mock, how se
 	}
 	integrations.StampMark(r, call)
 	models.ReportAnswer(ctx, r)
+}
+
+// renderedOf is x's recorded request (x records one) as renderMockRequest
+// renders it, for the report of a call served x: rendered once for each
+// recorded request and kept (servedRenders) by what renderMockRequest reads
+// of it (renderKey), so the calls served x are reported without rendering
+// x again, and a recording whose request or redacted values are not what
+// was rendered is rendered again.
+func renderedOf(x *models.Mock) string {
+	key := renderKey{places: placesKey(x.Spec.HTTPReq, x.Noise), method: x.Spec.HTTPReq.Method}
+	if s, ok := servedRenders.get(key); ok {
+		return s
+	}
+	rendersMade.Add(1)
+	s := renderMockRequest(x.Spec.HTTPReq, x.Noise)
+	servedRenders.put(key, s)
+	return s
+}
+
+// renderKey is what renderMockRequest reads of a recording: its request's
+// URL, query parameters, headers and body and the patterns of the values
+// the obfuscator redacted (placesKey's digest of them), and its method.
+type renderKey struct {
+	places placesDigest
+	method models.Method
+}
+
+// servedRenders are the recorded requests renderedOf rendered, by their
+// renderKey.
+var servedRenders keptRenders
+
+// rendersMade counts the requests renderedOf rendered, so a row can count
+// that a recording is rendered once however many calls it serves.
+var rendersMade atomic.Int64
+
+// maxKeptRenders bounds the rendered text keptRenders holds: past it, it
+// starts again from none.
+const maxKeptRenders = 8 << 20
+
+// keptRenders are rendered requests by their renderKey, holding at most
+// maxKeptRenders bytes of them. Safe for concurrent use.
+type keptRenders struct {
+	mu    sync.Mutex
+	bytes int
+	of    map[renderKey]string
+}
+
+func (k *keptRenders) get(key renderKey) (string, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	s, ok := k.of[key]
+	return s, ok
+}
+
+func (k *keptRenders) put(key renderKey, s string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.of == nil || k.bytes+len(s) > maxKeptRenders {
+		k.of, k.bytes = map[renderKey]string{}, 0
+	}
+	k.bytes += len(s)
+	k.of[key] = s
 }
