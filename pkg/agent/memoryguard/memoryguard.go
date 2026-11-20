@@ -162,15 +162,16 @@ type guard struct {
 	pausedAt time.Time
 
 	// The GOMEMLIMIT installed (applySoftLimit): its bytes, when it last
-	// changed, whether it was derived from the container, and whether the
-	// container has been reported too small for the agent (once each way).
+	// changed, whether it was derived from the budget, and whether the
+	// budget has been reported too small for the agent (once each way).
 	softLimit        int64
 	softLimitAt      time.Time
 	softLimitDerived bool
 	tooSmall         bool
-	// Without a container limit, the budget's 90% is installed on the first
-	// sample (goMemAligned) and again only when the ring buffer's size
-	// (lastOverhead) changes.
+	// Where no limit is derived (deriveSoftLimit: memory.stat or the
+	// runtime's figures unreadable, or a budget too small to record), the
+	// budget's 90% is installed on the first such sample (goMemAligned) and
+	// again only when the ring buffer's size (lastOverhead) changes.
 	goMemAligned bool
 	lastOverhead int64
 	// One-time log latches, so a persistent misconfiguration is reported
@@ -268,8 +269,8 @@ func heldAndNext(workingSet, activeFile int64, m goMemory) (held, next int64) {
 // it comes from.
 type softLimit struct {
 	bytes   int64 // the limit to install
-	derived bool  // from the container; false: goMemTarget, 90% of the budget
-	hard    int64 // the container's limit (the lower of the cgroup's and --memory-limit)
+	derived bool  // from the budget; false: goMemTarget, 90% of the budget
+	hard    int64 // the budget: --memory-limit, or the container's limit where that is lower
 	nonGo   int64 // memory in the container the Go runtime does not manage, page cache aside
 	room    int64 // hard less nonGo less the margin: what Go may use
 	need    int64 // Go memory no collection can free now
@@ -277,21 +278,27 @@ type softLimit struct {
 	// that the GC has at least 64 MiB to allocate between its collections.
 	floorBytes int64
 	// short: the room is under floorBytes and under 90% of the budget: the
-	// container's limit, not the budget, leaves Go less than its floor, and
-	// the limit installed is over the room.
+	// memory Go does not manage, not the budget's 90%, leaves Go less than
+	// its floor, and the limit installed is over the room.
 	short bool
 }
 
-// deriveSoftLimit is the GOMEMLIMIT for one sample: the room the container
+// deriveSoftLimit is the GOMEMLIMIT for one sample: the room the budget
 // leaves Go, so that the runtime's own GC collects its garbage before the
-// container's limit:
+// budget:
 //
-//	room = container limit - memory Go does not manage - margin
+//	room = budget - memory Go does not manage - margin
 //
 // Its terms:
-//   - The container's limit is its cgroup's (memory.max, or
-//     memory.limit_in_bytes on cgroup v1), or --memory-limit where that is
-//     lower.
+//   - The budget is the one the guard pauses against: --memory-limit, or the
+//     container's cgroup limit (memory.max, or memory.limit_in_bytes on
+//     cgroup v1) where that is lower. A container with no memory limit (an
+//     agent container docker starts) leaves it --memory-limit: 90% of that,
+//     blind to the memory Go does not manage, would let the runtime's next
+//     GC fall due over the ceiling on garbage alone, since a GC counts live
+//     all it allocates while it marks (more, the longer a loaded host keeps
+//     it marking) and GOGC lets the heap grow to twice what it marked; the
+//     guard would then pause recording on garbage.
 //   - Memory Go does not manage is measured, every sample: the working set less
 //     its active page cache (the kernel reclaims page cache before it
 //     OOM-kills; inactive page cache is already out of the working set) less
@@ -313,27 +320,29 @@ type softLimit struct {
 // The limit is never over 90% of the budget (goMemTarget, the limit without a
 // container limit): where that already leaves the container room, a higher
 // soft limit would only let the runtime keep more garbage, and take the
-// container nearer its limit. Under that, it is never under the Go memory no
+// working set nearer the budget. Under that, it is never under the Go memory no
 // collection can free (need: the last GC's live heap and Go's own memory
 // outside the heap) plus minGoMemLimitBytes (floorBytes): a soft limit at
 // what Go holds makes the GC run back to back. The floor is over the room
-// only when Go's live memory is within 64 MiB of it: with the container's
-// limit at --memory-limit, that is past the pause point on every low-latency
-// budget and every proxy-mode one of 534 MiB or more, so recording pauses
-// there. Where the container's room is under the floor (short), the floor
-// is installed, up to 90% of the budget, and applySoftLimit reports the
-// container too small if pausing recording does not bring Go's live memory
-// back under it.
+// only when Go's live memory is within 64 MiB of it: with the budget at
+// --memory-limit, that is past the pause point on every low-latency budget
+// and every proxy-mode one of 534 MiB or more, so recording pauses there.
+// Where the room is under the floor (short), the floor is installed, up to
+// 90% of the budget, and applySoftLimit reports the budget too small if
+// pausing recording does not bring Go's live memory back under it.
 //
-// With no container limit, no memory.stat, unreadable runtime figures, or a
-// budget too small to record, it is goMemTarget.
+// With no memory.stat, unreadable runtime figures, or a budget too small to
+// record, it is goMemTarget.
 func deriveSoftLimit(dec memoryDecision, limitBytes int64, cs cgroupSample, m goMemory) softLimit {
 	s := softLimit{bytes: dec.goMemTarget}
-	if cs.limit <= 0 || !cs.statOK || !m.ok || !dec.viable {
+	if !cs.statOK || !m.ok || !dec.viable {
 		return s
 	}
 	s.derived = true
-	s.hard = min(cs.limit, limitBytes)
+	s.hard = limitBytes
+	if cs.limit > 0 {
+		s.hard = min(cs.limit, limitBytes)
+	}
 	s.nonGo = max(cs.workingSet-cs.activeFile-m.mapped, 0)
 	margin := (dec.effLimit-dec.pauseThreshold)/4 + softLimitSlack
 	s.room = s.hard - s.nonGo - margin
@@ -405,10 +414,10 @@ var goMemoryBudget atomic.Int64
 // GoMemoryBudget returns the Go memory budget the guard holds the agent to:
 // 90% of its memory budget (--memory-limit, or the container's limit where
 // that is lower) left after the capture ring buffer, floored at 64 MiB: the
-// GOMEMLIMIT the guard sets where the container has no memory limit. It is 0
-// when no guard runs. Where the container has one, GOMEMLIMIT is fitted
-// lower, to the room the container leaves Go once the memory Go does not
-// manage is measured (deriveSoftLimit). A reader that sizes a buffer as a
+// GOMEMLIMIT the guard sets where it cannot measure the memory Go does not
+// manage. It is 0 when no guard runs. Where it can, GOMEMLIMIT is fitted
+// lower, to the room the budget leaves Go once that memory is measured
+// (deriveSoftLimit). A reader that sizes a buffer as a
 // share of the agent's memory, such as the enterprise agent's capture
 // budget, sizes it from this, so that the share is what it was before
 // GOMEMLIMIT was fitted: on a 1 GiB sidecar with a 64 MiB ring buffer,
@@ -476,8 +485,8 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 	// the OOM boundary, causing connection drops and I/O disruptions.
 	// Floored (see minGoMemLimitBytes) so a small limit can't drive the GC
 	// nearly continuous; run() realigns this once the overhead is known, and
-	// where the container has a memory limit, sets it from the memory Go does
-	// not manage as measured (deriveSoftLimit).
+	// sets it from the budget less the memory Go does not manage, as
+	// measured (deriveSoftLimit).
 	goMemLimit := int64(float64(limitBytes) * 0.9)
 	if goMemLimit < minGoMemLimitBytes {
 		goMemLimit = minGoMemLimitBytes
@@ -582,11 +591,11 @@ func (g *guard) sample() (next time.Duration, more bool) {
 	dec := evaluateMemory(currentBytes, g.budget(cs), fixedOverheadBytes.Load())
 	goMemoryBudget.Store(dec.goMemTarget)
 
-	// GOMEMLIMIT: where the container has a memory limit, the room it
-	// leaves Go once the memory Go does not manage is measured
-	// (deriveSoftLimit, applySoftLimit), so that the runtime collects its
-	// garbage before the container's limit. Elsewhere, as before: realign
-	// it with the Go-heap budget (the room left after the non-Go fixed
+	// GOMEMLIMIT: the room the budget leaves Go once the memory Go does
+	// not manage is measured (deriveSoftLimit, applySoftLimit), so that the
+	// runtime collects its garbage before the budget, whether or not the
+	// container has a memory limit. Where that cannot be measured, as
+	// before: realign it with the Go-heap budget (the room left after the non-Go fixed
 	// overhead), recomputing only when the overhead changes so we don't
 	// thrash debug.SetMemoryLimit every tick. Floored (see evaluateMemory)
 	// so a small budget can't drive near-continuous GC.
@@ -602,7 +611,7 @@ func (g *guard) sample() (next time.Duration, more bool) {
 	// it is no longer floored so the two states stay in sync.
 	if dec.goMemFloored {
 		if !g.goMemFlooredLogged {
-			source, raise := g.limitSource(dec)
+			source, raise := g.limitSource(dec.limit)
 			g.logger.Warn("keploy-agent GOMEMLIMIT floored — the heap budget left "+
 				"after the capture ring buffer is very small; raise "+raise+
 				" or lower record.ringbufSizeMB",
@@ -627,7 +636,7 @@ func (g *guard) sample() (next time.Duration, more bool) {
 	// upstream (reject the record-start); this is the in-agent backstop.
 	if !dec.viable {
 		if !g.nonViableLogged {
-			source, raise := g.limitSource(dec)
+			source, raise := g.limitSource(dec.limit)
 			g.logger.Error("capture ring buffer leaves too little memory below the "+
 				"limit for a usable recording budget; recording cannot proceed — "+
 				"raise "+raise+" or lower record.ringbufSizeMB",
@@ -657,12 +666,12 @@ func (g *guard) sample() (next time.Duration, more bool) {
 	// the kernel cannot reclaim reaches the ceiling (next), waiting for
 	// it would let memory that may be live come within a quarter of the
 	// pause point's headroom of the limit unchecked, and the guard
-	// pauses on the working set as before. A soft limit derived from
-	// the container has the runtime's GC due under the ceiling
+	// pauses on the working set as before. The soft limit derived from
+	// the budget has the runtime's GC due under the ceiling
 	// (deriveSoftLimit), so that pause is left to where it cannot hold:
-	// no container limit, a GC that runs long while live memory grows
-	// past its goal, a container too small for Go's live memory, or
-	// memory Go does not manage grown since the last sample. While it
+	// no memory.stat, a GC that runs long while live memory grows past
+	// its goal, a budget too small for Go's live memory, or memory Go
+	// does not manage grown since the last sample. While it
 	// waits, the guard samples every bandCheckInterval.
 	held, nextGC := heldAndNext(currentBytes, cs.activeFile, m)
 	heldEff, nextEff := max(held-dec.overhead, 0), max(nextGC-dec.overhead, 0)
@@ -722,7 +731,7 @@ func (g *guard) enterPressure(now time.Time, dec memoryDecision, why ...zap.Fiel
 
 	if !alreadyPaused {
 		g.pausedAt = now
-		source, raise := g.limitSource(dec)
+		source, raise := g.limitSource(dec.limit)
 		g.logger.Info("Pausing keploy-agent recording due to memory pressure. "+
 			"Consider increasing "+raise+", enabling sampling, or reducing request concurrency",
 			append([]zap.Field{
@@ -776,33 +785,34 @@ func (g *guard) budget(cs cgroupSample) int64 {
 	return cs.limit
 }
 
-// limitSource is where the limit dec judged against (budget) came from, as
-// the lines that report it name it, and the limit those lines advise raising:
-// the container's where that is under --memory-limit, since raising
+// limitSource is where a budget the guard judged against (budget) came
+// from, as the lines that report it name it, and the limit those lines advise
+// raising: the container's where that is under --memory-limit, since raising
 // --memory-limit then changes nothing.
-func (g *guard) limitSource(dec memoryDecision) (source, raise string) {
-	if dec.limit < g.limitBytes {
+func (g *guard) limitSource(limit int64) (source, raise string) {
+	if limit < g.limitBytes {
 		return "container", "the container's memory limit"
 	}
 	return "--memory-limit", "--memory-limit"
 }
 
-// applySoftLimit installs a GOMEMLIMIT derived from the container
+// applySoftLimit installs a GOMEMLIMIT derived from the budget
 // (deriveSoftLimit) over the one installed (Start's 90% of --memory-limit
 // at first): lower once the derivation is softLimitLowerStep under it, higher
 // at once where Go's live memory with its floor is over it, and otherwise
 // higher only once the derivation has been softLimitRaiseStep over it
 // reclaimCooldown after the last change.
 //
-// It reports the container too small for the agent once, and once again when
+// It reports the budget too small for the agent once, and once again when
 // it has room: too small only where Go's live memory with its floor is over
-// the room the container leaves Go (short) with recording paused, after the
+// the room the budget leaves Go (short) with recording paused, after the
 // guard's collection reclaimCooldown into the pause. Until then, live memory
 // over the room may be recording's own, which a pause drops: capture
 // buffers, at the GC that first finds a burst live, are as live as the rest.
 func (g *guard) applySoftLimit(s softLimit, now time.Time) {
 	first := !g.softLimitDerived
 	g.softLimitDerived = true
+	source, raise := g.limitSource(s.hard)
 	changed := s.bytes <= g.softLimit-softLimitLowerStep || (s.bytes > g.softLimit && s.floorBytes > g.softLimit) ||
 		(s.bytes >= g.softLimit+softLimitRaiseStep && now.Sub(g.softLimitAt) >= reclaimCooldown)
 	if changed {
@@ -814,10 +824,11 @@ func (g *guard) applySoftLimit(s softLimit, now time.Time) {
 		if first {
 			log = g.logger.Info
 		}
-		log("keploy-agent GOMEMLIMIT set from the container's memory limit",
+		log("keploy-agent GOMEMLIMIT set from the memory limit",
 			zap.Int64("go_mem_limit_bytes", g.softLimit),
 			zap.Int64("go_room_bytes", s.room),
-			zap.Int64("container_limit_bytes", s.hard),
+			zap.Int64("limit_bytes", s.hard),
+			zap.String("limit_source", source),
 			zap.Int64("non_go_memory_bytes", s.nonGo),
 			zap.Int64("go_live_memory_bytes", s.need))
 	}
@@ -825,18 +836,20 @@ func (g *guard) applySoftLimit(s softLimit, now time.Time) {
 	switch {
 	case s.short && collectedWhilePaused && !g.tooSmall:
 		g.tooSmall = true
-		g.logger.Error("the container's memory limit is too small for the keploy-agent: with recording paused "+
+		g.logger.Error("the memory limit is too small for the keploy-agent: with recording paused "+
 			"and its memory collected, the agent's live Go memory plus 64 MiB is over the room the limit leaves Go, "+
-			"so GOMEMLIMIT is set over that room; raise --memory-limit and the container's memory limit",
-			zap.Int64("container_limit_bytes", s.hard),
+			"so GOMEMLIMIT is set over that room; raise "+raise,
+			zap.Int64("limit_bytes", s.hard),
+			zap.String("limit_source", source),
 			zap.Int64("non_go_memory_bytes", s.nonGo),
 			zap.Int64("go_room_bytes", s.room),
 			zap.Int64("go_live_memory_bytes", s.need),
 			zap.Int64("go_mem_limit_bytes", g.softLimit))
 	case g.tooSmall && s.room >= s.floorBytes+softLimitRaiseStep:
 		g.tooSmall = false
-		g.logger.Info("the container's memory limit has room for the keploy-agent's live Go memory plus 64 MiB again",
-			zap.Int64("container_limit_bytes", s.hard),
+		g.logger.Info("the memory limit has room for the keploy-agent's live Go memory plus 64 MiB again",
+			zap.Int64("limit_bytes", s.hard),
+			zap.String("limit_source", source),
 			zap.Int64("non_go_memory_bytes", s.nonGo),
 			zap.Int64("go_room_bytes", s.room),
 			zap.Int64("go_live_memory_bytes", s.need),

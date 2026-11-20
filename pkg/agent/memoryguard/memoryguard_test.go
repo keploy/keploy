@@ -996,8 +996,9 @@ func forcedGCs() uint64 {
 // MiB) over the real runtime: its working set is otherMB of memory Go does
 // not manage plus this process's Go memory, in a container with a
 // containerMB memory limit (0: none); the runtime's figures, its GOMEMLIMIT,
-// the collections and the clock are real. It reports the highest working
-// set it read.
+// the collections and the clock are real. GOMEMLIMIT is in force from the
+// start, as Start installs it before run: 90% of the budget, then the limit
+// derived from the budget. It reports the highest working set it read.
 func realGuard(t *testing.T, otherMB, containerMB int64) (*guard, func() int64) {
 	t.Helper()
 	prevOverhead := fixedOverheadBytes.Swap(0)
@@ -1021,6 +1022,13 @@ func realGuard(t *testing.T, otherMB, containerMB int64) (*guard, func() int64) 
 			return cgroupSample{workingSet: ws, statOK: true, limit: mib(containerMB)}, nil
 		},
 	}
+	// Start's sample, of this process alone: no earlier row's heap in it,
+	// and not among the working sets reported.
+	debug.FreeOSMemory()
+	g.softLimit = evaluateMemory(0, g.limitBytes, 0).goMemTarget
+	debug.SetMemoryLimit(g.softLimit)
+	g.sampleSoftLimit()
+	maxWS = 0
 	return g, func() int64 {
 		mu.Lock()
 		defer mu.Unlock()
@@ -1073,13 +1081,19 @@ func churn(d time.Duration) {
 }
 
 // TestRealGarbageOverThePausePointNeitherPausesNorCollects: on the real
-// runtime, GOGC 100 and the GOMEMLIMIT the guard installs, garbage churned
-// over 150 MiB of live memory takes the working set over the pause point and
-// neither pauses recording nor makes the guard collect.
+// runtime, GOGC 100 and the GOMEMLIMIT the guard installs, with no container
+// limit and 120 MiB not Go's, garbage churned over 180 MiB of live memory
+// takes the working set over the pause point and neither pauses recording
+// nor makes the guard collect. The limit derived from --memory-limit (350.4
+// MiB) has the runtime's next GC due under the ceiling, as a container's
+// limit would. 90% of the budget (460.8 MiB) would not: GOGC's goal, twice
+// what the last GC marked (190 MiB, more where it marked while the churn
+// allocated, as on a loaded host), has the working set due over the 486.4
+// MiB ceiling at the next GC, and the guard pause recording on garbage.
 func TestRealGarbageOverThePausePointNeitherPausesNorCollects(t *testing.T) {
 	g, maxWS := realGuard(t, 120, 0)
 	debug.FreeOSMemory()
-	live := make([][]byte, 150)
+	live := make([][]byte, 180)
 	for i := range live {
 		live[i] = make([]byte, 1<<20)
 	}
@@ -1331,10 +1345,11 @@ func withGoal(m goMemory, goalMB int64) goMemory {
 	return m
 }
 
-// TestDeriveSoftLimit: the GOMEMLIMIT is the room the container leaves Go,
-// never over 90% of the budget nor under Go's live memory plus 64 MiB; the
-// container's room is short only where it is under that and under 90% of
-// the budget.
+// TestDeriveSoftLimit: the GOMEMLIMIT is the room the budget (the container's
+// limit, or --memory-limit where that is lower or the container has none)
+// leaves Go, never over 90% of the budget nor under Go's live memory plus 64
+// MiB; the room is short only where it is under that and under 90% of the
+// budget.
 func TestDeriveSoftLimit(t *testing.T) {
 	t.Parallel()
 	// A 1 GiB sidecar with a 64 MiB ring buffer: margin 48 + 16 MiB. Go holds
@@ -1408,9 +1423,15 @@ func TestDeriveSoftLimit(t *testing.T) {
 		{name: "a container too small for Go's live memory", limitMB: 1024, overheadMB: 64, m: goFig(330, 300, 10, 360),
 			cs:   cgroupSample{workingSet: mib(1060), statOK: true, limit: mib(1024)},
 			want: mib(320) + mib(64), derived: true, short: true, wantNonGo: mib(700), wantHard: mib(1024)},
-		{name: "no container limit", limitMB: 1024, overheadMB: 64, m: sidecar,
+		// The sidecar's 252 MiB not Go's, against --memory-limit: 90% of it,
+		// 864 MiB, would have Go's next GC due at 1116 MiB, over its 976 MiB
+		// ceiling.
+		{name: "no container limit: the room --memory-limit leaves Go", limitMB: 1024, overheadMB: 64, m: sidecar,
 			cs:   cgroupSample{workingSet: mib(652), statOK: true},
-			want: ninety(960)},
+			want: mib(708), derived: true, wantNonGo: mib(252), wantHard: mib(1024)},
+		{name: "no container limit, short", limitMB: 1024, overheadMB: 64, m: goFig(330, 300, 10, 360),
+			cs:   cgroupSample{workingSet: mib(1060), statOK: true},
+			want: mib(320) + mib(64), derived: true, short: true, wantNonGo: mib(700), wantHard: mib(1024)},
 		{name: "memory.stat unreadable", limitMB: 1024, overheadMB: 64, m: sidecar,
 			cs:   cgroupSample{workingSet: mib(652), limit: mib(1024)},
 			want: ninety(960)},
@@ -1462,7 +1483,8 @@ func sidecarMemory() *fakeMemory {
 }
 
 // TestTheGuardDerivesTheSoftLimitFromTheContainer: run() installs the
-// derived GOMEMLIMIT on its first sample, lowers it on the next sample as
+// derived GOMEMLIMIT on its first sample, from --memory-limit where the
+// container has no limit or loses it, lowers it on the next sample as
 // memory Go does not manage grows, raises it at the first sample
 // reclaimCooldown after the last change, and leaves it alone as that memory
 // comes and goes by a few MiB.
@@ -1485,14 +1507,15 @@ func TestTheGuardDerivesTheSoftLimitFromTheContainer(t *testing.T) {
 		// the budget, which is installed once.
 		{name: "Go's live memory with its floor over 90% of the budget", ws: mib(1020), m: &over90, run: twoSamples,
 			want: []int64{int64(float64(mib(960)) * 0.9)}, at: []time.Duration{500 * ms}},
-		{name: "no container limit: 90% of the budget, once", limit: -1, run: twoSamples,
-			want: []int64{int64(float64(mib(960)) * 0.9)}, at: []time.Duration{500 * ms}},
-		{name: "the container's limit stops being readable: 90% of the budget", run: 2200 * ms,
+		{name: "no container limit: the room --memory-limit leaves Go", limit: -1, run: twoSamples,
+			want: []int64{mib(708)}, at: []time.Duration{500 * ms}},
+		// The sidecar's limit is --memory-limit's: losing it leaves the room.
+		{name: "the container's limit stops being readable: the same room, from --memory-limit", run: 2200 * ms,
 			limits: []limitPhase{{1200 * ms, 0}},
-			want:   []int64{mib(708), int64(float64(mib(960)) * 0.9)}, at: []time.Duration{500 * ms, 1500 * ms}},
-		{name: "a container limit read, then lost: 90% of the budget again", limit: -1, run: 3200 * ms,
+			want:   []int64{mib(708)}, at: []time.Duration{500 * ms}},
+		{name: "a container limit read, then lost: the same room throughout", limit: -1, run: 3200 * ms,
 			limits: []limitPhase{{1200 * ms, mib(1024)}, {2200 * ms, 0}},
-			want:   []int64{int64(float64(mib(960)) * 0.9), mib(708), int64(float64(mib(960)) * 0.9)}, at: []time.Duration{500 * ms, 1500 * ms, 2500 * ms}},
+			want:   []int64{mib(708)}, at: []time.Duration{500 * ms}},
 		{name: "memory Go does not manage grows", phases: []phase{{from: 1200 * ms, ws: mib(752)}}, run: 2200 * ms,
 			want: []int64{mib(708), mib(608)}, at: []time.Duration{500 * ms, 1500 * ms}},
 		{name: "memory Go does not manage shrinks", phases: []phase{{from: 1200 * ms, ws: mib(552)}}, run: 6700 * ms,
@@ -1670,7 +1693,7 @@ func TestTooSmallIsReportedOnlyWhenPausedRecordingDoesNotFit(t *testing.T) {
 				return
 			}
 			if c["go_mem_limit_bytes"] != mib(384) || c["go_room_bytes"] != mib(260) || c["go_live_memory_bytes"] != mib(320) ||
-				c["container_limit_bytes"] != mib(1024) || c["non_go_memory_bytes"] != mib(700) {
+				c["limit_bytes"] != mib(1024) || c["limit_source"] != "--memory-limit" || c["non_go_memory_bytes"] != mib(700) {
 				t.Errorf("too-small line's sizes %v; want GOMEMLIMIT 384 MiB over a 260 MiB room, 320 MiB live, 1024 MiB limit, 700 MiB not Go's", c)
 			}
 		})
@@ -1701,8 +1724,8 @@ func TestTheGuardBudgetsAgainstTheLowerOfTheContainersLimitAndTheFlag(t *testing
 		{name: "a 768 MiB container: the next GC due over its ceiling", container: mib(768), ws: mib(700), m: nextOver, pause: true, install: room768},
 		{name: "a 2 GiB container: held memory under the pause point", container: mib(2048), ws: mib(662), m: heldOver, install: mib(708)},
 		{name: "a 2 GiB container: the working set under the pause point", container: mib(2048), ws: mib(700), m: nextOver, install: mib(708)},
-		{name: "no container limit: held memory under the pause point", ws: mib(662), m: heldOver, install: int64(float64(mib(960)) * 0.9)},
-		{name: "no container limit: the working set under the pause point", ws: mib(700), m: nextOver, install: int64(float64(mib(960)) * 0.9)},
+		{name: "no container limit: held memory under the pause point", ws: mib(662), m: heldOver, install: mib(708)},
+		{name: "no container limit: the working set under the pause point", ws: mib(700), m: nextOver, install: mib(708)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1899,9 +1922,8 @@ func TestRealSoftLimitKeepsTheWorkingSetUnderTheContainerLimit(t *testing.T) {
 }
 
 // TestTheDerivedLimitIsInForceFromTheStart: Start's sample installs the
-// derived GOMEMLIMIT before run's first sample; with no container limit it
-// installs nothing (Start's 90% of --memory-limit stays until run's first
-// sample).
+// derived GOMEMLIMIT before run's first sample, from --memory-limit where the
+// container has no limit.
 func TestTheDerivedLimitIsInForceFromTheStart(t *testing.T) {
 	// A 768 MiB container under the 1024 MiB --memory-limit: its own budget,
 	// margin 35.2 + 16 MiB.
@@ -1918,11 +1940,8 @@ func TestTheDerivedLimitIsInForceFromTheStart(t *testing.T) {
 		g := fakeGuard(t, 1024, 64, f)
 		g.softLimit = int64(float64(mib(1024)) * 0.9)
 		g.sampleSoftLimit()
-		if limit > 0 && (len(f.installs) != 1 || f.installs[0] != mib(708)) {
-			t.Errorf("container limit %d MiB: installed %v; want 708 MiB", limit>>20, f.installs)
-		}
-		if limit == 0 && len(f.installs) != 0 {
-			t.Errorf("no container limit: installed %v; want none", f.installs)
+		if len(f.installs) != 1 || f.installs[0] != mib(708) {
+			t.Errorf("container limit %d MiB (0: none): installed %v; want 708 MiB", limit>>20, f.installs)
 		}
 	}
 }
