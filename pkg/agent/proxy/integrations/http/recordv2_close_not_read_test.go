@@ -491,10 +491,9 @@ func TestRecordV2_TheAnswerToAHEADWithNoFramingIsWholeAtItsHead(t *testing.T) {
 const connectReq = "CONNECT api.example:443 HTTP/1.1\r\nHost: api.example:443\r\n\r\n"
 
 // A CONNECT's 2xx whose head's lines end in a bare LF, which readResponseV2
-// finds no end of and reads to the stream's end, tunnel bytes and all, is
-// framed as buildHTTPMock parses it: at its head, with no body and no
-// Content-Length, however the stream ends; not as a body that ends at a close
-// never read.
+// ends where net/http's reader ends it, is framed at its head too, tunnel bytes
+// after it: with no body and no Content-Length, however the stream ends; not as
+// a body that ends at a close never read.
 func TestRecordV2_ABareLFConnectHeadIsWholeAtItsHead(t *testing.T) {
 	mocks, logs, err := recordUnit(t, connectReq, "HTTP/1.1 200 Connection Established\nProxy-Agent: corp-proxy\n\n\x16\x03\x01tunnel", nil)
 	wantRecordedWhole(t, "bare-LF CONNECT head", logs, mocks, err, 200, "")
@@ -611,14 +610,12 @@ func wantTunnelWarned(t *testing.T, name string, logs *observer.ObservedLogs, ho
 // what was read is not the response, and the cut is keploy's own, not a decode
 // error. The exchange is left out, and said so (LeftOutReadAborted), with
 // nothing logged at ERROR. What was read whole by then is recorded: a 101's
-// head, and a bare-LF head's response, which readResponseV2 reads to the
-// stream's end, once whole.
+// head, whose upgraded stream the parser goes on reading.
 func TestRecordV2_AResponseReadTheAbortClosedIsLeftOutUnlessWhole(t *testing.T) {
 	for _, tc := range []struct {
 		name, req, resp string
 		marked          bool
 		whole           int // the status recorded, 0 for none
-		body            string
 	}{
 		{name: "Content-Length body", req: reportReq, resp: "HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\n" + firstHalf},
 		{name: "chunked, between chunks", req: reportReq, resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"},
@@ -626,7 +623,6 @@ func TestRecordV2_AResponseReadTheAbortClosedIsLeftOutUnlessWhole(t *testing.T) 
 		{name: "head", req: reportReq, resp: "HTTP/1.1 200 OK\r\nContent-Le"},
 		{name: "head, marked", req: reportReq, resp: "HTTP/1.1 200 OK\r\nContent-Le", marked: true},
 		{name: "101", req: upgradeReq, resp: upgradeHead + wsFrame, whole: 101},
-		{name: "bare-LF head, whole", req: reportReq, resp: "HTTP/1.1 200 OK\nContent-Length: 5\n\nhello", whole: 200, body: "hello"},
 	} {
 		supervisor.ResetLeftOutWarningsForTest()
 		core, logs := observer.New(zapcore.DebugLevel)
@@ -657,7 +653,7 @@ func TestRecordV2_AResponseReadTheAbortClosedIsLeftOutUnlessWhole(t *testing.T) 
 			if errors.Is(err, context.Canceled) {
 				err = nil
 			}
-			wantRecordedWhole(t, tc.name, logs, drainMocks(mocks), err, tc.whole, tc.body)
+			wantRecordedWhole(t, tc.name, logs, drainMocks(mocks), err, tc.whole, "")
 			continue
 		}
 		want := supervisor.LeftOutReadAborted
@@ -668,20 +664,33 @@ func TestRecordV2_AResponseReadTheAbortClosedIsLeftOutUnlessWhole(t *testing.T) 
 	}
 }
 
-// A response read to its stream's end, not to a close of keploy's own, that
-// does not parse is the upstream's malformed answer: a decode error, said at
-// ERROR, as before.
-func TestRecordV2_AMalformedResponseReadToItsStreamsEndIsADecodeError(t *testing.T) {
-	mocks, logs, err := recordUnit(t, reportReq, "HTTP/1.1 200 OK\nContent-Type text/plain\n\nbody", nil)
-	if err == nil || len(mocks) != 0 {
-		t.Errorf("recorded %d mocks, recordV2 = %v; want none and the decode error", len(mocks), err)
-	}
-	if got := logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessage("V2 HTTP record: failed to build mock").Len(); got != 1 {
-		t.Errorf("logged the decode error at ERROR %d times; want once", got)
-	}
-	for _, r := range leftOutReasons(logs) {
-		if r == supervisor.LeftOutReadAborted {
-			t.Errorf("left out for %q; want the decode error: keploy did not close the read", r)
+// A response whose read keploy did not close, and that does not parse, is the
+// upstream's malformed answer: a decode error, said at ERROR, as before, never
+// left out as a read the abort cut. A head net/http's reader refuses is refused
+// as readResponseV2 reads it; a body read whole that does not decode fails the
+// mock's build.
+func TestRecordV2_AMalformedResponseIsADecodeError(t *testing.T) {
+	for name, tc := range map[string]struct{ resp, logged string }{
+		"a header line with no colon, read to the stream's end": {
+			resp:   "HTTP/1.1 200 OK\nContent-Type text/plain\n\nbody",
+			logged: "V2 HTTP record: failed to read full response",
+		},
+		"a gzip body read whole that does not decode": {
+			resp:   "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 4\r\n\r\nbody",
+			logged: "V2 HTTP record: failed to build mock",
+		},
+	} {
+		mocks, logs, err := recordUnit(t, reportReq, tc.resp, nil)
+		if err == nil || len(mocks) != 0 {
+			t.Errorf("%s: recorded %d mocks, recordV2 = %v; want none and the decode error", name, len(mocks), err)
+		}
+		if got := logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessage(tc.logged).Len(); got != 1 {
+			t.Errorf("%s: logged %q at ERROR %d times; want once", name, tc.logged, got)
+		}
+		for _, r := range leftOutReasons(logs) {
+			if r == supervisor.LeftOutReadAborted {
+				t.Errorf("%s: left out for %q; want the decode error: keploy did not close the read", name, r)
+			}
 		}
 	}
 }
