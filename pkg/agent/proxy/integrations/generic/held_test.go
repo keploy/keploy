@@ -55,7 +55,8 @@ func until(cond func() bool) bool {
 // meets the application's close does; reads after it return io.EOF, and
 // deadlinesAfterEOF counts the read deadlines set after it. With wrote, the
 // bytes the application has written, writtenAtMore is what it had written
-// when the second hold ended.
+// when the second hold ended. With piece, the reads past the hold go through
+// a layer above the socket that reads ahead, as TLS does (readBeneath).
 type heldPast struct {
 	net.Conn
 	cut, rest   int
@@ -64,6 +65,10 @@ type heldPast struct {
 	pastOnly    bool
 	eof         bool
 	wrote       func() int64
+	piece       int
+	// layer: what the layer read of the socket and has not given yet; only
+	// the parser's reads touch it.
+	layer []byte
 
 	mu sync.Mutex
 	// phase: 0 to the cut, 1 the hold, 2 after it, 3 looked, 4 the second
@@ -166,7 +171,7 @@ func (c *heldPast) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	expired := !c.deadline.After(time.Now())
 	c.mu.Unlock()
-	n, err := c.Conn.Read(p)
+	n, err := c.readBeneath(p, phase)
 	if c.eof && phase >= 2 && n > 0 && pUtil.UnreadBytes(c.Conn) == 0 {
 		c.mu.Lock()
 		c.eofRead = true
@@ -195,42 +200,71 @@ func (c *heldPast) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// readBeneath is the read beneath the parser's. With piece, past the hold, it
+// is a layer that reads ahead, as TLS does: while the layer holds bytes it
+// gives at most piece of them a read without the socket, whatever the
+// deadline, as TLS gives a whole record it read ahead; holding none, it
+// reads all the socket holds, which times out on a deadline that passed.
+// So once the socket has given what it held, the layer may hold most of the
+// request.
+func (c *heldPast) readBeneath(p []byte, phase int) (int, error) {
+	if c.piece == 0 || phase < 2 {
+		return c.Conn.Read(p)
+	}
+	if len(c.layer) == 0 {
+		buf := make([]byte, 1<<20)
+		n, err := c.Conn.Read(buf)
+		if n == 0 {
+			return 0, err
+		}
+		c.layer = buf[:n]
+	}
+	n := copy(p[:min(len(p), c.piece)], c.layer)
+	c.layer = c.layer[n:]
+	return n, nil
+}
+
 // A request whose parser is held past its window after it read part of it,
 // the rest in the socket, is answered whole, and nothing more is waited for
 // once the parser has read what the socket held when it looked. Held only
 // past the round's deadline, the parser read on to the window's end; held
 // past that too, it cut the request there, and the part it read missed.
+// Through a layer above the socket that reads ahead, as TLS does, the parser
+// reads what the layer holds once the socket has given what it held, every
+// piece of it, not one.
 func TestARequestWhoseParserIsHeldPastItsWindowIsAnsweredWhole(t *testing.T) {
 	req := varied(40<<10, true)
 	for name, store := range bigExchanges(req) {
 		for _, cut := range []int{1000, 32 << 10, 40<<10 - 1} {
-			t.Run(fmt.Sprintf("%s, cut at %d", name, cut), func(t *testing.T) {
-				eachSwitch(t, func(t *testing.T) {
-					app, proxySide := tcpPair(t)
-					conn := &heldPast{Conn: proxySide, cut: cut, rest: len(req) - cut}
-					done := make(chan error, 1)
-					go func() {
-						done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), conn, nil, store, models.OutgoingOptions{})
-					}()
-					readAnswer(t, app, "PONG")
-					if _, err := app.Write(req); err != nil {
-						t.Fatal(err)
-					}
-					readAnswer(t, app, "BIGOK")
-					conn.mu.Lock()
-					idle, early := conn.idle, conn.early
-					conn.mu.Unlock()
-					if idle != 0 {
-						t.Fatalf("the parser waited on an empty socket %d times after it read what the socket held", idle)
-					}
-					// PING, whole, is answered at its round's first timeout.
-					if early != 1 {
-						t.Fatalf("the parser read %d times before it answered a whole request; want 1", early)
-					}
-					_ = app.Close()
-					awaitEnd(t, done, "a connection the application closed")
+			for _, piece := range []int{0, 1 << 10} {
+				t.Run(fmt.Sprintf("%s, cut at %d, %s", name, cut, map[bool]string{false: "tcp", true: "through a layer that reads ahead"}[piece > 0]), func(t *testing.T) {
+					eachSwitch(t, func(t *testing.T) {
+						app, proxySide := tcpPair(t)
+						conn := &heldPast{Conn: proxySide, cut: cut, rest: len(req) - cut, piece: piece}
+						done := make(chan error, 1)
+						go func() {
+							done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), conn, nil, store, models.OutgoingOptions{})
+						}()
+						readAnswer(t, app, "PONG")
+						if _, err := app.Write(req); err != nil {
+							t.Fatal(err)
+						}
+						readAnswer(t, app, "BIGOK")
+						conn.mu.Lock()
+						idle, early := conn.idle, conn.early
+						conn.mu.Unlock()
+						if idle != 0 {
+							t.Fatalf("the parser waited on an empty socket %d times after it read what the socket held", idle)
+						}
+						// PING, whole, is answered at its round's first timeout.
+						if early != 1 {
+							t.Fatalf("the parser read %d times before it answered a whole request; want 1", early)
+						}
+						_ = app.Close()
+						awaitEnd(t, done, "a connection the application closed")
+					})
 				})
-			})
+			}
 		}
 	}
 }
