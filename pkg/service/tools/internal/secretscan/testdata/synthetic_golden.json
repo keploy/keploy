@@ -1,0 +1,1628 @@
+[
+  {
+    "case": "secret groups",
+    "text": "sgk=abc-123",
+    "findings": [
+      {
+        "rule": "sg-third",
+        "description": "secret group three",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 11,
+        "line": "sgk=abc-123",
+        "match": "sgk=abc-123",
+        "secret": "123",
+        "entropy": 1.5849625,
+        "tags": [
+          "t1",
+          "t2"
+        ]
+      }
+    ]
+  },
+  {
+    "case": "secret groups",
+    "text": "fnk=abc123",
+    "findings": [
+      {
+        "rule": "sg-first-nonempty",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 10,
+        "line": "fnk=abc123",
+        "match": "fnk=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "secret groups",
+    "text": "fnkx=abc123",
+    "findings": [
+      {
+        "rule": "sg-first-nonempty",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 11,
+        "line": "fnkx=abc123",
+        "match": "fnkx=abc123",
+        "secret": "x",
+        "entropy": 0,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "secret groups",
+    "text": "ogk=zz99",
+    "findings": [
+      {
+        "rule": "sg-one-group",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 8,
+        "line": "ogk=zz99",
+        "match": "ogk=zz99",
+        "secret": "zz99",
+        "entropy": 1,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "secret groups",
+    "text": "nok=zz99",
+    "findings": [
+      {
+        "rule": "sg-none",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 8,
+        "line": "nok=zz99",
+        "match": "nok=zz99",
+        "secret": "nok=zz99",
+        "entropy": 2.5,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "secret groups",
+    "text": "fnk=aaaa",
+    "findings": [
+      {
+        "rule": "sg-first-nonempty",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 8,
+        "line": "fnk=aaaa",
+        "match": "fnk=aaaa",
+        "secret": "aaaa",
+        "entropy": 0,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "secret groups",
+    "text": "x\ny\nfnk=abc123",
+    "findings": [
+      {
+        "rule": "sg-first-nonempty",
+        "description": "",
+        "startLine": 2,
+        "endLine": 2,
+        "startColumn": 2,
+        "endColumn": 11,
+        "line": "x\ny\nfnk=abc123",
+        "match": "fnk=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "secret groups",
+    "text": "fnk=abc123\nx",
+    "findings": [
+      {
+        "rule": "sg-first-nonempty",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 10,
+        "line": "fnk=abc123",
+        "match": "fnk=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "secret groups",
+    "text": "x\nfnk=abc123\ny",
+    "findings": [
+      {
+        "rule": "sg-first-nonempty",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 11,
+        "line": "\nfnk=abc123",
+        "match": "fnk=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "secret groups",
+    "text": "fnk=ab1 fnk=cd2\nogk=ef3",
+    "findings": [
+      {
+        "rule": "sg-first-nonempty",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "fnk=ab1 fnk=cd2",
+        "match": "fnk=ab1",
+        "secret": "ab1",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "sg-first-nonempty",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 9,
+        "endColumn": 15,
+        "line": "fnk=ab1 fnk=cd2",
+        "match": "fnk=cd2",
+        "secret": "cd2",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "sg-one-group",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 8,
+        "line": "fnk=ab1 fnk=cd2\nogk=ef3",
+        "match": "ogk=ef3",
+        "secret": "ef3",
+        "entropy": 1.5849625,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "secret groups",
+    "text": "",
+    "findings": []
+  },
+  {
+    "case": "a secret group past the last group",
+    "text": "pgk=abc",
+    "findings": []
+  },
+  {
+    "case": "a secret group past the last group",
+    "text": "lgk=abc",
+    "findings": [
+      {
+        "rule": "sg-last",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "lgk=abc",
+        "match": "lgk=abc",
+        "secret": "abc",
+        "entropy": 1.5849625,
+        "tags": null
+      }
+    ]
+  },
+  {
+    "case": "a secret group past the last group",
+    "text": "ngk=abc",
+    "findings": [
+      {
+        "rule": "sg-no-groups",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "ngk=abc",
+        "match": "ngk=abc",
+        "secret": "ngk=abc",
+        "entropy": 2.807355,
+        "tags": null
+      }
+    ]
+  },
+  {
+    "case": "a keyword in upper case",
+    "text": "upk_abcd",
+    "findings": [
+      {
+        "rule": "kw-upper",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 8,
+        "line": "upk_abcd",
+        "match": "upk_abcd",
+        "secret": "upk_abcd",
+        "entropy": 3,
+        "tags": null
+      }
+    ]
+  },
+  {
+    "case": "a keyword in upper case",
+    "text": "UPK_abcd",
+    "findings": []
+  },
+  {
+    "case": "paths",
+    "text": "prk=abc123 pnk=abc123",
+    "findings": [
+      {
+        "rule": "path-only-empty",
+        "description": "path only, empty path",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 0,
+        "endColumn": 0,
+        "line": "",
+        "match": "file detected: ",
+        "secret": "",
+        "entropy": 0,
+        "tags": []
+      },
+      {
+        "rule": "path-regex-empty",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 10,
+        "line": "prk=abc123 pnk=abc123",
+        "match": "prk=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "paths",
+    "text": "nothing here",
+    "findings": [
+      {
+        "rule": "path-only-empty",
+        "description": "path only, empty path",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 0,
+        "endColumn": 0,
+        "line": "",
+        "match": "file detected: ",
+        "secret": "",
+        "entropy": 0,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "paths",
+    "text": "",
+    "findings": [
+      {
+        "rule": "path-only-empty",
+        "description": "path only, empty path",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 0,
+        "endColumn": 0,
+        "line": "",
+        "match": "file detected: ",
+        "secret": "",
+        "entropy": 0,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "skip report",
+    "text": "skk=abc123 rpk=abc123",
+    "findings": [
+      {
+        "rule": "report-me",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 12,
+        "endColumn": 21,
+        "line": "skk=abc123 rpk=abc123",
+        "match": "rpk=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=globstop1",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=globre1",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=keepme1",
+    "findings": [
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 11,
+        "line": "plk=keepme1",
+        "match": "plk=keepme1",
+        "secret": "keepme1",
+        "entropy": 2.1280854,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "aak=allowword",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "aak=allowwrd",
+    "findings": [
+      {
+        "rule": "al-and-regex-stopword",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 12,
+        "line": "aak=allowwrd",
+        "match": "aak=allowwrd",
+        "secret": "allowwrd",
+        "entropy": 2.5,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "aak=xallowword",
+    "findings": [
+      {
+        "rule": "al-and-regex-stopword",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 14,
+        "line": "aak=xallowword",
+        "match": "aak=xallowword",
+        "secret": "xallowword",
+        "entropy": 2.7219281,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "aso=onlyme",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "aso=notme",
+    "findings": [
+      {
+        "rule": "al-and-stopword-only",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 9,
+        "line": "aso=notme",
+        "match": "aso=notme",
+        "secret": "notme",
+        "entropy": 2.321928,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "aro=rxme",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "aro=notme",
+    "findings": [
+      {
+        "rule": "al-and-regex-only",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 9,
+        "line": "aro=notme",
+        "match": "aro=notme",
+        "secret": "notme",
+        "entropy": 2.321928,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "lsk=abc zzstop",
+    "findings": [
+      {
+        "rule": "al-line-stopword",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "lsk=abc zzstop",
+        "match": "lsk=abc",
+        "secret": "abc",
+        "entropy": 1.5849625,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "lsk=zzstop1",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "apk=abc123",
+    "findings": [
+      {
+        "rule": "al-and-path",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 10,
+        "line": "apk=abc123",
+        "match": "apk=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "ack=abc123",
+    "findings": [
+      {
+        "rule": "al-and-commit",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 10,
+        "line": "ack=abc123",
+        "match": "ack=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "opk=abc123",
+    "findings": [
+      {
+        "rule": "al-or-path",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 10,
+        "line": "opk=abc123",
+        "match": "opk=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "rtm=skipme",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "rtm=keepme",
+    "findings": [
+      {
+        "rule": "al-target-match",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 10,
+        "line": "rtm=keepme",
+        "match": "rtm=keepme",
+        "secret": "keepme",
+        "entropy": 1.7924813,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "rtl=abc #ok",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "x\nrtl=abc #ok\r",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "x\nrtl=abc #ok\r\ny",
+    "findings": [
+      {
+        "rule": "al-target-line",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 8,
+        "line": "\nrtl=abc #ok\r",
+        "match": "rtl=abc",
+        "secret": "abc",
+        "entropy": 1.5849625,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "rtl=abc #no",
+    "findings": [
+      {
+        "rule": "al-target-line",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "rtl=abc #no",
+        "match": "rtl=abc",
+        "secret": "abc",
+        "entropy": 1.5849625,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "rts=skipme",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "rts=keepme",
+    "findings": [
+      {
+        "rule": "al-target-secret",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 10,
+        "line": "rts=keepme",
+        "match": "rts=keepme",
+        "secret": "keepme",
+        "entropy": 1.7924813,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=abc123 # gitleaks:allow",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=abc123\n# gitleaks:allow",
+    "findings": [
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 10,
+        "line": "plk=abc123",
+        "match": "plk=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=abc123 # gitleaks:allow\nplk=def456",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=abc123 # gitleaks:allow\r\nplk=def456 plk=ghi789",
+    "findings": []
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=abc123 # gitleaks:allow\nplk=def456\nend",
+    "findings": [
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 11,
+        "line": "\nplk=def456",
+        "match": "plk=def456",
+        "secret": "def456",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=abc123 # gitleaks:allow\r\nplk=def456 plk=ghi789\r\nend",
+    "findings": [
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 11,
+        "line": "\nplk=def456 plk=ghi789\r",
+        "match": "plk=def456",
+        "secret": "def456",
+        "entropy": 2.5849626,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 13,
+        "endColumn": 22,
+        "line": "\nplk=def456 plk=ghi789\r",
+        "match": "plk=ghi789",
+        "secret": "ghi789",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=globstop1 plk=keepme2",
+    "findings": [
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 15,
+        "endColumn": 25,
+        "line": "plk=globstop1 plk=keepme2",
+        "match": "plk=keepme2",
+        "secret": "keepme2",
+        "entropy": 2.1280854,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=globre1\nplk=keepme3",
+    "findings": [
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 12,
+        "line": "plk=globre1\nplk=keepme3",
+        "match": "plk=keepme3",
+        "secret": "keepme3",
+        "entropy": 2.1280854,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "rts=skipme rts=keepme",
+    "findings": [
+      {
+        "rule": "al-target-secret",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 12,
+        "endColumn": 21,
+        "line": "rts=skipme rts=keepme",
+        "match": "rts=keepme",
+        "secret": "keepme",
+        "entropy": 1.7924813,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "rtm=skipme\nrtm=keepme",
+    "findings": [
+      {
+        "rule": "al-target-match",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 11,
+        "line": "rtm=skipme\nrtm=keepme",
+        "match": "rtm=keepme",
+        "secret": "keepme",
+        "entropy": 1.7924813,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "rtl=abc #ok\nrtl=def #no",
+    "findings": [
+      {
+        "rule": "al-target-line",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 8,
+        "line": "rtl=abc #ok\nrtl=def #no",
+        "match": "rtl=def",
+        "secret": "def",
+        "entropy": 1.5849625,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "aak=allowword aak=allowwrd",
+    "findings": [
+      {
+        "rule": "al-and-regex-stopword",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 15,
+        "endColumn": 26,
+        "line": "aak=allowword aak=allowwrd",
+        "match": "aak=allowwrd",
+        "secret": "allowwrd",
+        "entropy": 2.5,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+    "findings": [
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k01",
+        "secret": "k01",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 9,
+        "endColumn": 15,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k02",
+        "secret": "k02",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 17,
+        "endColumn": 23,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k03",
+        "secret": "k03",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 25,
+        "endColumn": 31,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k04",
+        "secret": "k04",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 33,
+        "endColumn": 39,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k05",
+        "secret": "k05",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 41,
+        "endColumn": 47,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k06",
+        "secret": "k06",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 49,
+        "endColumn": 55,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k07",
+        "secret": "k07",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 57,
+        "endColumn": 63,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k08",
+        "secret": "k08",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 65,
+        "endColumn": 71,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k09",
+        "secret": "k09",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 73,
+        "endColumn": 79,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k10",
+        "secret": "k10",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 81,
+        "endColumn": 87,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k11",
+        "secret": "k11",
+        "entropy": 0.91829586,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 89,
+        "endColumn": 95,
+        "line": "plk=k01 plk=k02 plk=k03 plk=k04 plk=k05 plk=k06 plk=k07 plk=k08 plk=k09 plk=k10 plk=k11 plk=k12",
+        "match": "plk=k12",
+        "secret": "k12",
+        "entropy": 1.5849625,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "allowlists",
+    "text": "plk=k01\nplk=k02\nplk=k03 # gitleaks:allow\nplk=k04\nplk=k05\nplk=k06\nplk=k07\nplk=k08",
+    "findings": [
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "plk=k01",
+        "match": "plk=k01",
+        "secret": "k01",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 8,
+        "line": "\nplk=k02",
+        "match": "plk=k02",
+        "secret": "k02",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 3,
+        "endLine": 3,
+        "startColumn": 2,
+        "endColumn": 8,
+        "line": "\nplk=k04",
+        "match": "plk=k04",
+        "secret": "k04",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 4,
+        "endLine": 4,
+        "startColumn": 2,
+        "endColumn": 8,
+        "line": "\nplk=k05",
+        "match": "plk=k05",
+        "secret": "k05",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 5,
+        "endLine": 5,
+        "startColumn": 2,
+        "endColumn": 8,
+        "line": "\nplk=k06",
+        "match": "plk=k06",
+        "secret": "k06",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "al-plain",
+        "description": "",
+        "startLine": 6,
+        "endLine": 6,
+        "startColumn": 2,
+        "endColumn": 8,
+        "line": "\nplk=k07",
+        "match": "plk=k07",
+        "secret": "k07",
+        "entropy": 1.5849625,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "ent=aaaa",
+    "findings": []
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "ent=abcd",
+    "findings": []
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "ent=abcde",
+    "findings": [
+      {
+        "rule": "ent",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 9,
+        "line": "ent=abcde",
+        "match": "ent=abcde",
+        "secret": "abcde",
+        "entropy": 2.321928,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "ent=aaaa ent=abcde",
+    "findings": [
+      {
+        "rule": "ent",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 10,
+        "endColumn": 18,
+        "line": "ent=aaaa ent=abcde",
+        "match": "ent=abcde",
+        "secret": "abcde",
+        "entropy": 2.321928,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "ent=aaaa\nent=abcd\nent=abcde",
+    "findings": [
+      {
+        "rule": "ent",
+        "description": "",
+        "startLine": 2,
+        "endLine": 2,
+        "startColumn": 2,
+        "endColumn": 10,
+        "line": "ent=aaaa\nent=abcd\nent=abcde",
+        "match": "ent=abcde",
+        "secret": "abcde",
+        "entropy": 2.321928,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "ent=aaaa ent=abcde ent=bbbb ent=bcdef ent=cccc ent=cdefg ent=dddd ent=defgh ent=eeee ent=efghi ent=ffff ent=fghij",
+    "findings": [
+      {
+        "rule": "ent",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 10,
+        "endColumn": 18,
+        "line": "ent=aaaa ent=abcde ent=bbbb ent=bcdef ent=cccc ent=cdefg ent=dddd ent=defgh ent=eeee ent=efghi ent=ffff ent=fghij",
+        "match": "ent=abcde",
+        "secret": "abcde",
+        "entropy": 2.321928,
+        "tags": []
+      },
+      {
+        "rule": "ent",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 29,
+        "endColumn": 37,
+        "line": "ent=aaaa ent=abcde ent=bbbb ent=bcdef ent=cccc ent=cdefg ent=dddd ent=defgh ent=eeee ent=efghi ent=ffff ent=fghij",
+        "match": "ent=bcdef",
+        "secret": "bcdef",
+        "entropy": 2.321928,
+        "tags": []
+      },
+      {
+        "rule": "ent",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 48,
+        "endColumn": 56,
+        "line": "ent=aaaa ent=abcde ent=bbbb ent=bcdef ent=cccc ent=cdefg ent=dddd ent=defgh ent=eeee ent=efghi ent=ffff ent=fghij",
+        "match": "ent=cdefg",
+        "secret": "cdefg",
+        "entropy": 2.321928,
+        "tags": []
+      },
+      {
+        "rule": "ent",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 67,
+        "endColumn": 75,
+        "line": "ent=aaaa ent=abcde ent=bbbb ent=bcdef ent=cccc ent=cdefg ent=dddd ent=defgh ent=eeee ent=efghi ent=ffff ent=fghij",
+        "match": "ent=defgh",
+        "secret": "defgh",
+        "entropy": 2.321928,
+        "tags": []
+      },
+      {
+        "rule": "ent",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 86,
+        "endColumn": 94,
+        "line": "ent=aaaa ent=abcde ent=bbbb ent=bcdef ent=cccc ent=cdefg ent=dddd ent=defgh ent=eeee ent=efghi ent=ffff ent=fghij",
+        "match": "ent=efghi",
+        "secret": "efghi",
+        "entropy": 2.321928,
+        "tags": []
+      },
+      {
+        "rule": "ent",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 105,
+        "endColumn": 113,
+        "line": "ent=aaaa ent=abcde ent=bbbb ent=bcdef ent=cccc ent=cdefg ent=dddd ent=defgh ent=eeee ent=efghi ent=ffff ent=fghij",
+        "match": "ent=fghij",
+        "secret": "fghij",
+        "entropy": 2.321928,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "enu=\"aaa:abé\"",
+    "findings": []
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "enu=pässwört",
+    "findings": [
+      {
+        "rule": "ent-any",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 14,
+        "line": "enu=pässwört",
+        "match": "enu=pässwört",
+        "secret": "pässwört",
+        "entropy": 2.4575424,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "nlk=abc\nnext",
+    "findings": [
+      {
+        "rule": "nl",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "nlk=abc",
+        "match": "nlk=abc",
+        "secret": "nlk=abc",
+        "entropy": 2.807355,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "x\nnlk=abc\n",
+    "findings": [
+      {
+        "rule": "nl",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 8,
+        "line": "\nnlk=abc",
+        "match": "nlk=abc",
+        "secret": "nlk=abc",
+        "entropy": 2.807355,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "y\nlnk=abc",
+    "findings": [
+      {
+        "rule": "nl-lead",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "y\nlnk=abc",
+        "match": "lnk=abc",
+        "secret": "lnk=abc",
+        "entropy": 2.807355,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "mlk=abc\ndef",
+    "findings": [
+      {
+        "rule": "multi-line",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 0,
+        "line": "mlk=abc\ndef",
+        "match": "mlk=abc\ndef",
+        "secret": "mlk=abc\ndef",
+        "entropy": 3.4594316,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "x\nmlk=abc\ndef",
+    "findings": [
+      {
+        "rule": "multi-line",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 0,
+        "line": "\nmlk=abc\ndef",
+        "match": "mlk=abc\ndef",
+        "secret": "mlk=abc\ndef",
+        "entropy": 3.4594316,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "entropy and newlines",
+    "text": "x\nmlk=abc\ndef\ny",
+    "findings": [
+      {
+        "rule": "multi-line",
+        "description": "",
+        "startLine": 1,
+        "endLine": 2,
+        "startColumn": 2,
+        "endColumn": 4,
+        "line": "\nmlk=abc\ndef",
+        "match": "mlk=abc\ndef",
+        "secret": "mlk=abc\ndef",
+        "entropy": 3.4594316,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "keywords",
+    "text": "kwz_abcd",
+    "findings": [
+      {
+        "rule": "kw",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 8,
+        "line": "kwz_abcd",
+        "match": "kwz_abcd",
+        "secret": "kwz_abcd",
+        "entropy": 3,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "keywords",
+    "text": "KWZ_ABCD",
+    "findings": [
+      {
+        "rule": "kw",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 8,
+        "line": "KWZ_ABCD",
+        "match": "KWZ_ABCD",
+        "secret": "KWZ_ABCD",
+        "entropy": 3,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "keywords",
+    "text": "qqb=abcd",
+    "findings": [
+      {
+        "rule": "kw-two",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 8,
+        "line": "qqb=abcd",
+        "match": "qqb=abcd",
+        "secret": "abcd",
+        "entropy": 2,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "keywords",
+    "text": "qqa=abcd qqb=efgh",
+    "findings": [
+      {
+        "rule": "kw-two",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 8,
+        "line": "qqa=abcd qqb=efgh",
+        "match": "qqa=abcd",
+        "secret": "abcd",
+        "entropy": 2,
+        "tags": []
+      },
+      {
+        "rule": "kw-two",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 10,
+        "endColumn": 17,
+        "line": "qqa=abcd qqb=efgh",
+        "match": "qqb=efgh",
+        "secret": "efgh",
+        "entropy": 2,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "keywords",
+    "text": "nkw=abcd",
+    "findings": [
+      {
+        "rule": "kw-none",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 8,
+        "line": "nkw=abcd",
+        "match": "nkw=abcd",
+        "secret": "abcd",
+        "entropy": 2,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "keywords",
+    "text": "kwz_ab",
+    "findings": []
+  },
+  {
+    "case": "generic rules",
+    "text": "spc=abc123",
+    "findings": [
+      {
+        "rule": "spc-thing",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 10,
+        "line": "spc=abc123",
+        "match": "spc=abc123",
+        "secret": "abc123",
+        "entropy": 2.5849626,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "generic rules",
+    "text": "gen=abc\nspc=abc1",
+    "findings": [
+      {
+        "rule": "Generic-Thing",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "gen=abc",
+        "match": "gen=abc",
+        "secret": "abc",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "spc-thing",
+        "description": "",
+        "startLine": 1,
+        "endLine": 1,
+        "startColumn": 2,
+        "endColumn": 9,
+        "line": "gen=abc\nspc=abc1",
+        "match": "spc=abc1",
+        "secret": "abc1",
+        "entropy": 2,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "generic rules",
+    "text": "gen=abc oth=abc",
+    "findings": [
+      {
+        "rule": "Generic-Thing",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "gen=abc oth=abc",
+        "match": "gen=abc",
+        "secret": "abc",
+        "entropy": 1.5849625,
+        "tags": []
+      },
+      {
+        "rule": "GENERIC-Other",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 9,
+        "endColumn": 15,
+        "line": "gen=abc oth=abc",
+        "match": "oth=abc",
+        "secret": "abc",
+        "entropy": 1.5849625,
+        "tags": []
+      }
+    ]
+  },
+  {
+    "case": "generic rules",
+    "text": "gen=abc",
+    "findings": [
+      {
+        "rule": "Generic-Thing",
+        "description": "",
+        "startLine": 0,
+        "endLine": 0,
+        "startColumn": 1,
+        "endColumn": 7,
+        "line": "gen=abc",
+        "match": "gen=abc",
+        "secret": "abc",
+        "entropy": 1.5849625,
+        "tags": []
+      }
+    ]
+  }
+]
