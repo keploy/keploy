@@ -539,7 +539,11 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 				if !claimed {
 					continue
 				}
+				// The one recording whose body keys the call's holds is
+				// another call's where a field only one of the two
+				// bodies holds is outside noise (noteFieldsOnOneSide).
 				noteServedAs(how, idVaried, false)
+				h.noteFieldsOnOneSide(how, bodyMatched[0], input.body, userBodyNoise)
 				return true, served, nil, nil
 			}
 
@@ -599,12 +603,14 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 			// call's outside noise (sameCall), is a guess between calls: it is
 			// another call's recording, and the report names the body
 			// fields it differs at (bodyFieldsDiffering). One recording
-			// left is the call's method, path and body shape, as the
-			// body-schema pass above serves it.
+			// left is another call's, as the body-keys pass's one match
+			// is, where a field only one of the two bodies holds is outside
+			// noise (noteFieldsOnOneSide).
 			noteServedAs(how, idVaried, len(sameCall) == 0 && len(shortListed) > 1)
 			if how != nil && how.answer == models.AnswerClosestBody {
 				how.fields = h.bodyFieldsDiffering(bestMatch, input.body, userBodyNoise)
 			}
+			h.noteFieldsOnOneSide(how, bestMatch, input.body, userBodyNoise)
 			return true, served, nil, nil
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: shortListed, pool: comparedPool}, nil

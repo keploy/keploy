@@ -99,3 +99,42 @@ func TestDecodedJSONFieldsDifferingNamesEachOnceSorted(t *testing.T) {
 		}
 	}
 }
+
+// DecodedJSONFieldsOnOneSide names only the fields one document holds and the
+// other does not, whichever side holds them, at any depth both share, and
+// none that both hold with another value, of another type, or as arrays of
+// another length.
+func TestDecodedJSONFieldsOnOneSide(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		exp, act string
+		want     []string
+	}{
+		{name: "the same document in another order", exp: `{"q":"ada","f":{"x":1}}`, act: `{"f":{"x":1},"q":"ada"}`},
+		{name: "a value differs", exp: `{"q":"ada"}`, act: `{"q":"bob"}`},
+		{name: "a type differs", exp: `{"n":1}`, act: `{"n":"1"}`},
+		{name: "an object against a scalar", exp: `{"f":{"x":1}}`, act: `{"f":1}`},
+		{name: "an array of another length", exp: `{"ids":[{"a":1}]}`, act: `{"ids":[{"a":1},{"b":2}]}`},
+		{name: "documents of another kind", exp: `[1]`, act: `{"a":1}`},
+		{name: "a field only the live call has", exp: `{"name":"ada"}`, act: `{"name":"ada","role":"admin"}`, want: []string{"role"}},
+		{name: "a field only the recording has", exp: `{"name":"ada","role":"admin"}`, act: `{"name":"ada"}`, want: []string{"role"}},
+		{name: "a null field one side has", exp: `{"q":1,"x":null}`, act: `{"q":1}`, want: []string{"x"}},
+		{name: "nested, on each side, beside a value that differs", exp: `{"user":{"name":"ada","role":"admin"},"n":1}`, act: `{"user":{"name":"ada","age":3},"n":2}`, want: []string{"user.age", "user.role"}},
+		{name: "in an array's elements of one length", exp: `{"items":[{"a":1}]}`, act: `{"items":[{"a":1,"b":2}]}`, want: []string{"items[].b"}},
+		{name: "an object only one side has, once", exp: `{"q":1}`, act: `{"q":1,"f":{"y":2}}`, want: []string{"f"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var exp, act interface{}
+			if err := json.Unmarshal([]byte(tc.exp), &exp); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tc.act), &act); err != nil {
+				t.Fatal(err)
+			}
+			got := DecodedJSONFieldsOnOneSide(exp, act)
+			if !slices.Equal(got, tc.want) || (got == nil) != (tc.want == nil) {
+				t.Fatalf("%s against %s: fields on one side %#v, want %#v", tc.act, tc.exp, got, tc.want)
+			}
+		})
+	}
+}

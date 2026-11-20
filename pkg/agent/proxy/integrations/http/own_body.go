@@ -22,10 +22,9 @@ func (httpNoiseAdapter) DiffBothWays(m *models.Mock, recorded, live *mocknoise.J
 	if m == nil || m.Spec.HTTPReq == nil {
 		return nil, false
 	}
-	rv, rok := recorded.Decoded()
-	lv, lok := live.Decoded()
+	rv, lv, asJSON, asForm := bodiesCompared(m, recorded, live)
 	switch {
-	case rok && lok:
+	case asJSON:
 		var out map[string][]string
 		for _, p := range matcher.DecodedJSONFieldsDiffering(rv, lv, known, typeStrict, valIsNoise) {
 			if out == nil {
@@ -40,7 +39,7 @@ func (httpNoiseAdapter) DiffBothWays(m *models.Mock, recorded, live *mocknoise.J
 			out["body."+p] = []string{}
 		}
 		return out, true
-	case isFormURLEncoded(m.Spec.HTTPReq.Header):
+	case asForm:
 		rec, call := string(recorded.Raw()), string(live.Raw())
 		prefixed := mocknoise.AddBodyPrefix(known)
 		out := formReqBodyNoise(rec, call, prefixed, valIsNoise)
@@ -53,6 +52,60 @@ func (httpNoiseAdapter) DiffBothWays(m *models.Mock, recorded, live *mocknoise.J
 		return out, true
 	default:
 		return nil, false
+	}
+}
+
+// bodiesCompared is how DiffBothWays compares recorded and live, m's
+// recorded request body (m records a request) and the call's: as JSON
+// documents where both decode as JSON (asJSON, rv and lv their decoded
+// values), else as forms where m's recorded request is form-urlencoded
+// (asForm), else not at all.
+func bodiesCompared(m *models.Mock, recorded, live *mocknoise.JSONBody) (rv, lv any, asJSON, asForm bool) {
+	rv, rok := recorded.Decoded()
+	lv, lok := live.Decoded()
+	if rok && lok {
+		return rv, lv, true, false
+	}
+	return nil, nil, false, isFormURLEncoded(m.Spec.HTTPReq.Header)
+}
+
+// fieldsOnOneSide names, "body."-prefixed as DiffBothWays names drift, the
+// fields only one of recorded and live, m's recorded request body and the
+// call's, holds, whichever side it is, read with no noise and compared as
+// DiffBothWays compares the two (bodiesCompared): JSON fields as
+// matcher.DecodedJSONFieldsOnOneSide names them, or form keys whose decoded
+// name (formKeyName) the other form holds by no key, each by both names its
+// drift can have, as written and decoded. None where the two have no fields
+// to compare.
+func fieldsOnOneSide(m *models.Mock, recorded, live *mocknoise.JSONBody) map[string]bool {
+	rv, lv, asJSON, asForm := bodiesCompared(m, recorded, live)
+	out := map[string]bool{}
+	switch {
+	case asJSON:
+		for _, p := range matcher.DecodedJSONFieldsOnOneSide(rv, lv) {
+			out["body."+p] = true
+		}
+	case asForm:
+		formKeysOnOneSide(string(recorded.Raw()), string(live.Raw()), out)
+		formKeysOnOneSide(string(live.Raw()), string(recorded.Raw()), out)
+	}
+	return out
+}
+
+// formKeysOnOneSide adds to out each key the form body holds whose decoded
+// name (formKeyName) other, the other form, holds by no key, by both names
+// a form key's drift can have (formReqBodyNoise, formKeysOnlyLive): as
+// written, and by its decoded name where an entry with patterns guards it.
+func formKeysOnOneSide(body, other string, out map[string]bool) {
+	names := map[string]bool{}
+	for _, k := range formRawKeys(other) {
+		names[formKeyName(k)] = true
+	}
+	for _, k := range formRawKeys(body) {
+		if !names[formKeyName(k)] {
+			out["body."+k] = true
+			out["body."+formKeyName(k)] = true
+		}
 	}
 }
 

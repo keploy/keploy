@@ -31,11 +31,29 @@ func DecodedJSONFieldsDiffering(exp, act interface{}, known map[string][]string,
 	idx.markTypeStrict(typeStrict)
 	d := jsonDiffering{idx: idx, excluded: excludeRecordedValue}
 	d.walk(exp, act, "", true, true)
-	if len(d.out) == 0 {
+	return sortedPaths(d.out)
+}
+
+// DecodedJSONFieldsOnOneSide names, sorted, the fields of exp and act, two
+// JSON documents decoded as DecodedJSONFieldsDiffering reads them, that only
+// one of the two holds, whichever it is, read with no noise and named as
+// DecodedJSONFieldsDiffering names them: a key of an object both hold at the
+// same path, at any depth, the elements of arrays of one length read in
+// their order. A field both hold with another value or type, or an array of
+// another length, is none. nil when there is none.
+func DecodedJSONFieldsOnOneSide(exp, act interface{}) []string {
+	var d jsonDiffering
+	d.walk(exp, act, "", true, true)
+	return sortedPaths(d.oneSide)
+}
+
+// sortedPaths is the paths of set, sorted; nil when it holds none.
+func sortedPaths(set map[string]struct{}) []string {
+	if len(set) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(d.out))
-	for p := range d.out {
+	out := make([]string, 0, len(set))
+	for p := range set {
 		out = append(out, p)
 	}
 	sort.Strings(out)
@@ -43,11 +61,13 @@ func DecodedJSONFieldsDiffering(exp, act interface{}, known map[string][]string,
 }
 
 // jsonDiffering is DecodedJSONFieldsDiffering's walk: the noise it reads and
-// the paths it found differing.
+// the paths it found differing (out), those of a field only one side holds
+// among them (oneSide).
 type jsonDiffering struct {
 	idx      noiseIndex
 	excluded func(string) bool
 	out      map[string]struct{}
+	oneSide  map[string]struct{}
 }
 
 func (d *jsonDiffering) differs(path string) {
@@ -55,6 +75,15 @@ func (d *jsonDiffering) differs(path string) {
 		d.out = map[string]struct{}{}
 	}
 	d.out[path] = struct{}{}
+}
+
+// onOneSide notes path as differing, a field only one side holds.
+func (d *jsonDiffering) onOneSide(path string) {
+	d.differs(path)
+	if d.oneSide == nil {
+		d.oneSide = map[string]struct{}{}
+	}
+	d.oneSide[path] = struct{}{}
 }
 
 // hides reports whether an entry with no patterns, not a learned one, hides
@@ -71,7 +100,7 @@ func (d *jsonDiffering) walk(e, a interface{}, path string, inE, inA bool) {
 		return
 	}
 	if !inE || !inA {
-		d.differs(path)
+		d.onOneSide(path)
 		return
 	}
 	switch et := e.(type) {

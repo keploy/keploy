@@ -72,14 +72,54 @@ func (h *HTTP) sameCallBodies(candidates []*models.Mock, body []byte, userBodyNo
 // the same kind of JSON document.
 func (h *HTTP) bodyFieldsDiffering(x *models.Mock, body []byte, userBodyNoise map[string][]string) []string {
 	recorded, ok := h.ownBodies.read(x)
+	return bodyFieldsOf(mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded, ok, mocknoise.NewJSONBody(body), userBodyNoise))
+}
+
+// bodyFieldsOf names, sorted, the request-body fields of drift
+// (SameCallDrift's), the whole body ("body") not among them.
+func bodyFieldsOf(drift map[string][]string) []string {
 	var out []string
-	for p := range mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded, ok, mocknoise.NewJSONBody(body), userBodyNoise) {
+	for p := range drift {
 		if strings.HasPrefix(p, "body.") {
 			out = append(out, p)
 		}
 	}
 	slices.Sort(out)
 	return out
+}
+
+// noteFieldsOnOneSide notes, in how, a call served x, the one recording of
+// its method and path left to serve it (the body-keys pass's one match, the
+// fuzzy fallback's one candidate), that noteServedAs noted as served its own
+// recording, as answered with the closest body (models.AnswerClosestBody)
+// where a field only one of the two bodies holds, the call's or x's
+// (fieldsOnOneSide), is a field they differ at outside the noise keploy.yml
+// declares and the record learned (SameCallDrift, as sameCallBodies compares
+// them): the call sent an input x's call did not, or lacks one it sent, so x
+// is another call's recording. Its fields are then every field the two
+// differ at, as for the closest of several. Where only values differ, x is
+// still served as the call's own, with no report. Nothing is noted where how
+// is nil (a match that only diagnoses the call) or noted another answer.
+func (h *HTTP) noteFieldsOnOneSide(how *servedAs, x *models.Mock, body []byte, userBodyNoise map[string][]string) {
+	if how == nil || how.answer != "" {
+		return
+	}
+	recorded, ok := h.ownBodies.read(x)
+	if !ok {
+		return
+	}
+	live := mocknoise.NewJSONBody(body)
+	oneSide := fieldsOnOneSide(x, recorded, live)
+	if len(oneSide) == 0 {
+		return
+	}
+	drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded, true, live, userBodyNoise)
+	for p := range drift {
+		if oneSide[p] {
+			how.answer, how.fields = models.AnswerClosestBody, bodyFieldsOf(drift)
+			return
+		}
+	}
 }
 
 // urlNoiseEntry is the keploy.yml url-noise key (test.globalNoise.global.url,
