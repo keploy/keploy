@@ -1693,6 +1693,79 @@ func TestTheFloorIsRaisedAtOnceOverARoomThatCameBack(t *testing.T) {
 	}
 }
 
+// TestWhereNoLimitIsDerivedTheBudgets90PercentIsInstalledOnce: where no soft
+// limit can be derived (memory.stat or the runtime's figures unreadable, or a
+// budget the ring buffer leaves too small to record), run() installs 90% of
+// what the budget leaves after the ring buffer on its first sample, and again
+// only when the ring buffer's size changes or a derived limit was installed
+// in between: never on every sample.
+func TestWhereNoLimitIsDerivedTheBudgets90PercentIsInstalledOnce(t *testing.T) {
+	ms := time.Millisecond
+	ninety := func(mb int64) int64 { return int64(float64(mib(mb)) * 0.9) }
+	unreadable := func(noStat, noRuntime bool) *fakeMemory {
+		f := sidecarMemory()
+		f.noStat, f.m.ok = noStat, !noRuntime
+		return f
+	}
+	// 300 MiB less a 64 MiB ring buffer is 236 MiB, under the 320 MiB a
+	// low-latency budget needs: the guard holds recording paused.
+	tooSmall := func() *fakeMemory { return &fakeMemory{ws: mib(200), m: goFig(60, 40, 5, 80)} }
+	type statPhase struct {
+		from       time.Duration
+		unreadable bool
+	}
+	tests := []struct {
+		name            string
+		limitMB, ringMB int64
+		f               *fakeMemory
+		ringAt          time.Duration // the ring buffer is 128 MiB from then on; 0: never
+		stats           []statPhase
+		run             time.Duration
+		want            []int64
+		at              []time.Duration
+	}{
+		{name: "memory.stat unreadable", limitMB: 1024, ringMB: 64, f: unreadable(true, false), run: 2200 * ms,
+			want: []int64{ninety(960)}, at: []time.Duration{500 * ms}},
+		{name: "the runtime's figures unreadable", limitMB: 1024, ringMB: 64, f: unreadable(false, true), run: 2200 * ms,
+			want: []int64{ninety(960)}, at: []time.Duration{500 * ms}},
+		{name: "proxy mode, memory.stat unreadable", limitMB: 1024, f: unreadable(true, false), run: 2200 * ms,
+			want: []int64{ninety(1024)}, at: []time.Duration{500 * ms}},
+		{name: "memory.stat unreadable, the ring buffer grows", limitMB: 1024, ringMB: 64, f: unreadable(true, false),
+			ringAt: 1200 * ms, run: 3200 * ms, want: []int64{ninety(960), ninety(896)}, at: []time.Duration{500 * ms, 1500 * ms}},
+		{name: "a budget too small to record", limitMB: 300, ringMB: 64, f: tooSmall(), run: 2200 * ms,
+			want: []int64{ninety(236)}, at: []time.Duration{500 * ms}},
+		{name: "a budget too small to record, the ring buffer grows", limitMB: 300, ringMB: 64, f: tooSmall(),
+			ringAt: 1200 * ms, run: 3200 * ms, want: []int64{ninety(236), ninety(172)}, at: []time.Duration{500 * ms, 1500 * ms}},
+		{name: "memory.stat lost, back, and lost again", limitMB: 1024, ringMB: 64, f: sidecarMemory(), run: 4200 * ms,
+			stats: []statPhase{{1200 * ms, true}, {2200 * ms, false}, {3200 * ms, true}},
+			want:  []int64{mib(708), ninety(960), mib(708), ninety(960)}, at: []time.Duration{500 * ms, 1500 * ms, 2500 * ms, 3500 * ms}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := tt.f
+			g := fakeGuard(t, tt.limitMB, tt.ringMB, f)
+			simulate(t, g, tt.run, func(now time.Duration) {
+				if tt.ringAt > 0 && now >= tt.ringAt {
+					fixedOverheadBytes.Store(mib(128))
+				}
+				for _, s := range tt.stats {
+					if now >= s.from {
+						f.noStat = s.unreadable
+					}
+				}
+			})
+			if len(f.installs) != len(tt.want) || len(f.installAt) != len(tt.at) {
+				t.Fatalf("installed %v at %v; want %v at %v", f.installs, f.installAt, tt.want, tt.at)
+			}
+			for i := range tt.want {
+				if f.installs[i] != tt.want[i] || f.installAt[i] != tt.at[i] {
+					t.Fatalf("installed %v at %v; want %v at %v", f.installs, f.installAt, tt.want, tt.at)
+				}
+			}
+		})
+	}
+}
+
 // tooSmallLines is the error lines that report the container too small.
 func tooSmallLines(logs *observer.ObservedLogs) []observer.LoggedEntry {
 	return logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessageSnippet("too small for the keploy-agent").All()
@@ -1723,7 +1796,7 @@ func TestTooSmallIsReportedOnlyWhenPausedRecordingDoesNotFit(t *testing.T) {
 		run             time.Duration // 0: 7 s
 		pauses          int
 		reportAt        time.Duration // 0: none
-		source          string        // the too-small line's limit_source; "": --memory-limit
+		source          string        // the too-small line's limit_source: "container", "both"; "": --memory-limit
 	}{
 		// Live memory under the pause point, each heap goal 97% of the soft
 		// limit installed less Go's memory outside the heap.
@@ -1754,9 +1827,15 @@ func TestTooSmallIsReportedOnlyWhenPausedRecordingDoesNotFit(t *testing.T) {
 			phases: []phase{{from: 6000 * ms, ws: droppedWS, m: dropped}, {from: 8000 * ms, ws: burstWS, m: burst}}},
 		// 700 MiB not Go's leaves Go a room of 260 MiB; it holds 320 MiB no GC
 		// can free with recording paused. Paused at 500 ms; collected again
-		// at 5500 ms; reported at the next sample.
+		// at 5500 ms; reported at the next sample. The sidecar's limit is
+		// --memory-limit's (k8s-proxy sets them equal): raising either alone
+		// leaves the other binding, so the line names and advises both.
 		{name: "1 GiB sidecar, 700 MiB not Go's: live memory stays over the room with recording paused", limitMB: 1024, ringMB: 64,
-			f: &fakeMemory{ws: mib(1060), limit: mib(1024), m: goFig(330, 300, 10, 360)}, pauses: 1, reportAt: 6000 * ms},
+			f: &fakeMemory{ws: mib(1060), limit: mib(1024), m: goFig(330, 300, 10, 360)}, pauses: 1, reportAt: 6000 * ms, source: "both"},
+		// The same with no container limit (an agent container docker
+		// starts): --memory-limit alone binds.
+		{name: "a 1 GiB --memory-limit, no container limit, 700 MiB not Go's: live memory stays over the room", limitMB: 1024, ringMB: 64,
+			f: &fakeMemory{ws: mib(1060), m: goFig(330, 300, 10, 360)}, pauses: 1, reportAt: 6000 * ms},
 		// The same container under a 2 GiB --memory-limit: its limit binds,
 		// and is the one the line names and advises raising.
 		{name: "a 1 GiB container under a 2 GiB --memory-limit, 700 MiB not Go's: live memory stays over the room", limitMB: 2048, ringMB: 64,
@@ -1804,8 +1883,11 @@ func TestTooSmallIsReportedOnlyWhenPausedRecordingDoesNotFit(t *testing.T) {
 				return
 			}
 			source, raise := "--memory-limit", "--memory-limit"
-			if tt.source == "container" {
+			switch tt.source {
+			case "container":
 				source, raise = "container", "the container's memory limit"
+			case "both":
+				source, raise = "--memory-limit and container", "--memory-limit and the container's memory limit"
 			}
 			if c["go_mem_limit_bytes"] != mib(384) || c["go_room_bytes"] != mib(260) || c["go_live_memory_bytes"] != mib(320) ||
 				c["limit_bytes"] != mib(1024) || c["limit_source"] != source || c["non_go_memory_bytes"] != mib(700) {
@@ -1888,15 +1970,20 @@ func TestTheGuardBudgetsAgainstTheLowerOfTheContainersLimitAndTheFlag(t *testing
 }
 
 // TestTheLinesNameTheLimitTheGuardJudgesAgainst: the pause line, the
-// non-viable line and the floored warning carry the limit the guard judged
-// against and where it came from, and advise raising that one: the
-// container's limit where it is under --memory-limit, else --memory-limit.
+// non-viable line, the floored warning and the soft limit's line carry the
+// limit the guard judged against and where it came from, and advise raising
+// that one: the container's limit where it is under --memory-limit; both
+// where the container's limit is --memory-limit to the MiB, as k8s-proxy
+// sets a sidecar's; else --memory-limit.
 func TestTheLinesNameTheLimitTheGuardJudgesAgainst(t *testing.T) {
 	const (
 		pausing   = "Pausing keploy-agent recording due to memory pressure"
 		nonViable = "recording cannot proceed"
 		floored   = "GOMEMLIMIT floored"
+		setFrom   = "GOMEMLIMIT set from the memory limit"
+		both      = "--memory-limit and container"
 	)
+	sidecar := goFig(350, 200, 20, 400)
 	tests := []struct {
 		name                       string
 		limitMB, ringMB, container int64
@@ -1911,6 +1998,15 @@ func TestTheLinesNameTheLimitTheGuardJudgesAgainst(t *testing.T) {
 		{name: "paused against --memory-limit, no container limit", limitMB: 1024, ringMB: 64,
 			ws: mib(900), m: heap(600, 580, 0, 830), line: pausing,
 			advice: "Consider increasing --memory-limit,", source: "--memory-limit", limit: mib(1024)},
+		{name: "paused against a container limit equal to --memory-limit", limitMB: 1024, ringMB: 64, container: mib(1024),
+			ws: mib(900), m: heap(600, 580, 0, 830), line: pausing,
+			advice: "Consider increasing --memory-limit and the container's memory limit,", source: both, limit: mib(1024)},
+		{name: "paused against a container limit a byte under a MiB over --memory-limit", limitMB: 1024, ringMB: 64, container: mib(1025) - 1,
+			ws: mib(900), m: heap(600, 580, 0, 830), line: pausing,
+			advice: "Consider increasing --memory-limit and the container's memory limit,", source: both, limit: mib(1024)},
+		{name: "paused against --memory-limit under a container limit a MiB over it", limitMB: 1024, ringMB: 64, container: mib(1025),
+			ws: mib(900), m: heap(600, 580, 0, 830), line: pausing,
+			advice: "Consider increasing --memory-limit,", source: "--memory-limit", limit: mib(1024)},
 		// A 64 MiB ring buffer leaves 192 MiB of 256, and 236 of 300: under 320 MiB.
 		{name: "non-viable against a 256 MiB container under a 1024 MiB --memory-limit", limitMB: 1024, ringMB: 64, container: mib(256),
 			ws: mib(200), m: goFig(60, 40, 5, 80), line: nonViable,
@@ -1918,12 +2014,26 @@ func TestTheLinesNameTheLimitTheGuardJudgesAgainst(t *testing.T) {
 		{name: "non-viable against a 300 MiB --memory-limit", limitMB: 300, ringMB: 64,
 			ws: mib(200), m: goFig(60, 40, 5, 80), line: nonViable,
 			advice: "raise --memory-limit or lower record.ringbufSizeMB", source: "--memory-limit", limit: mib(300)},
+		{name: "non-viable against a 300 MiB container and --memory-limit", limitMB: 300, ringMB: 64, container: mib(300),
+			ws: mib(200), m: goFig(60, 40, 5, 80), line: nonViable,
+			advice: "raise --memory-limit and the container's memory limit or lower record.ringbufSizeMB", source: both, limit: mib(300)},
 		{name: "floored against a 64 MiB container under a 1024 MiB --memory-limit", limitMB: 1024, container: mib(64),
 			ws: mib(40), m: goFig(20, 10, 2, 30), line: floored,
 			advice: "raise the container's memory limit or lower record.ringbufSizeMB", source: "container", limit: mib(64)},
 		{name: "floored against a 64 MiB --memory-limit", limitMB: 64,
 			ws: mib(40), m: goFig(20, 10, 2, 30), line: floored,
 			advice: "raise --memory-limit or lower record.ringbufSizeMB", source: "--memory-limit", limit: mib(64)},
+		{name: "floored against a 64 MiB container and --memory-limit", limitMB: 64, container: mib(64),
+			ws: mib(40), m: goFig(20, 10, 2, 30), line: floored,
+			advice: "raise --memory-limit and the container's memory limit or lower record.ringbufSizeMB", source: both, limit: mib(64)},
+		// The soft limit's line advises nothing: the sidecar's figures, a
+		// soft limit derived from each budget.
+		{name: "soft limit set from --memory-limit, no container limit", limitMB: 1024, ringMB: 64,
+			ws: mib(652), m: sidecar, line: setFrom, source: "--memory-limit", limit: mib(1024)},
+		{name: "soft limit set from a 768 MiB container under a 1024 MiB --memory-limit", limitMB: 1024, ringMB: 64, container: mib(768),
+			ws: mib(652), m: sidecar, line: setFrom, source: "container", limit: mib(768)},
+		{name: "soft limit set from a container limit equal to --memory-limit", limitMB: 1024, ringMB: 64, container: mib(1024),
+			ws: mib(652), m: sidecar, line: setFrom, source: both, limit: mib(1024)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1939,7 +2049,7 @@ func TestTheLinesNameTheLimitTheGuardJudgesAgainst(t *testing.T) {
 			if ctx["limit_bytes"] != tt.limit || ctx["limit_source"] != tt.source {
 				t.Errorf("limit_bytes %v, limit_source %v; want %d (%d MiB), %q", ctx["limit_bytes"], ctx["limit_source"], tt.limit, tt.limit>>20, tt.source)
 			}
-			if !strings.Contains(lines[0].Message, tt.advice) {
+			if tt.advice != "" && !strings.Contains(lines[0].Message, tt.advice) {
 				t.Errorf("line %q; want it to advise %q", lines[0].Message, tt.advice)
 			}
 			for _, k := range []string{"memory_limit_bytes", "memory_limit_mb"} {
@@ -1975,6 +2085,8 @@ func TestATooSmallContainerIsReportedOnceEachWay(t *testing.T) {
 	room := logs.FilterMessageSnippet("has room for the keploy-agent's live Go memory plus 64 MiB again").All()
 	if len(room) != 1 || room[0].Time.Sub(simStart) != 7500*ms || room[0].ContextMap()["go_room_bytes"] != mib(708) {
 		t.Errorf("%d room-again lines; want one, at 7.5 s, with the 708 MiB room", len(room))
+	} else if c := room[0].ContextMap(); c["limit_bytes"] != mib(1024) || c["limit_source"] != "--memory-limit and container" {
+		t.Errorf("room-again line's limit_bytes %v, limit_source %v; want 1024 MiB from both", c["limit_bytes"], c["limit_source"])
 	}
 	for _, e := range logs.All() {
 		for _, fld := range e.Context {
@@ -2022,7 +2134,7 @@ func TestRealSoftLimitKeepsTheWorkingSetUnderTheContainerLimit(t *testing.T) {
 	var edges []pauseEdge
 	done := make(chan struct{})
 	go func() { edges = runGuardForEdges(t, g, 3500*time.Millisecond); close(done) }()
-	time.Sleep(700 * time.Millisecond) // the first sample installs the soft limit
+	time.Sleep(700 * time.Millisecond) // past run's first sample: the soft limit it leaves in force
 	soft := debug.SetMemoryLimit(-1)
 	churn(2700 * time.Millisecond)
 	<-done

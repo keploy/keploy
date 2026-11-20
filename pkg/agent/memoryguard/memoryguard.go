@@ -281,6 +281,9 @@ type softLimit struct {
 	// memory Go does not manage, not the budget's 90%, leaves Go less than
 	// its floor, and the limit installed is over the room.
 	short bool
+	// source and raise: where hard came from and what the lines advise
+	// raising (limitSource).
+	source, raise string
 }
 
 // deriveSoftLimit is the GOMEMLIMIT for one sample: the room the budget
@@ -291,8 +294,9 @@ type softLimit struct {
 //
 // Its terms:
 //   - The budget is the one the guard pauses against (budget, dec.limit):
-//     --memory-limit, or the container's cgroup limit (memory.max, or memory.limit_in_bytes on
-//     cgroup v1) where that is lower. A container with no memory limit (an
+//     --memory-limit, or the container's cgroup limit (memory.max, or
+//     memory.limit_in_bytes on cgroup v1) where that is lower. A
+//     container with no memory limit (an
 //     agent container docker starts) leaves it --memory-limit: 90% of that,
 //     blind to the memory Go does not manage, would let the runtime's next
 //     GC fall due over the ceiling on garbage alone, since a GC counts live
@@ -339,7 +343,7 @@ func deriveSoftLimit(dec memoryDecision, cs cgroupSample, m goMemory) softLimit 
 		return s
 	}
 	s.derived = true
-	s.hard = dec.limit
+	s.hard, s.source, s.raise = dec.limit, dec.source, dec.raise
 	s.nonGo = max(cs.workingSet-cs.activeFile-m.mapped, 0)
 	margin := (dec.effLimit-dec.pauseThreshold)/4 + softLimitSlack
 	s.room = s.hard - s.nonGo - margin
@@ -585,7 +589,7 @@ func (g *guard) sample() (next time.Duration, more bool) {
 	// See evaluateMemory. In proxy mode overhead is 0, so this reduces to
 	// the previous working-set-vs-limit behaviour. The limit is the
 	// container's where that is under --memory-limit (budget).
-	dec := evaluateMemory(currentBytes, g.budget(cs), fixedOverheadBytes.Load())
+	dec := g.decide(cs)
 	goMemoryBudget.Store(dec.goMemTarget)
 
 	// GOMEMLIMIT: the room the budget leaves Go once the memory Go does
@@ -608,15 +612,14 @@ func (g *guard) sample() (next time.Duration, more bool) {
 	// it is no longer floored so the two states stay in sync.
 	if dec.goMemFloored {
 		if !g.goMemFlooredLogged {
-			source, raise := g.limitSource(dec.limit)
 			g.logger.Warn("keploy-agent GOMEMLIMIT floored — the heap budget left "+
-				"after the capture ring buffer is very small; raise "+raise+
+				"after the capture ring buffer is very small; raise "+dec.raise+
 				" or lower record.ringbufSizeMB",
 				zap.Int64("go_mem_limit_bytes", g.softLimit),
 				zap.Int64("effective_limit_bytes", dec.effLimit),
 				zap.Int64("fixed_overhead_bytes", dec.overhead),
 				zap.Int64("limit_bytes", dec.limit),
-				zap.String("limit_source", source))
+				zap.String("limit_source", dec.source))
 			g.goMemFlooredLogged = true
 		}
 	} else {
@@ -633,14 +636,13 @@ func (g *guard) sample() (next time.Duration, more bool) {
 	// upstream (reject the record-start); this is the in-agent backstop.
 	if !dec.viable {
 		if !g.nonViableLogged {
-			source, raise := g.limitSource(dec.limit)
 			g.logger.Error("capture ring buffer leaves too little memory below the "+
 				"limit for a usable recording budget; recording cannot proceed — "+
-				"raise "+raise+" or lower record.ringbufSizeMB",
+				"raise "+dec.raise+" or lower record.ringbufSizeMB",
 				zap.Int64("fixed_overhead_bytes", dec.overhead),
 				zap.Int64("effective_limit_bytes", dec.effLimit),
 				zap.Int64("limit_bytes", dec.limit),
-				zap.String("limit_source", source),
+				zap.String("limit_source", dec.source),
 				zap.Int64("min_viable_budget_bytes", int64(minViableEffLimitBytes)))
 			g.nonViableLogged = true
 		}
@@ -720,7 +722,8 @@ func (g *guard) sample() (next time.Duration, more bool) {
 // paused, it collects (FreeOSMemory), so that the buffers the pause drops are
 // returned and the next sample judges up-to-date figures. It is the guard's
 // only collection: it never collects to decide whether to pause. Its line
-// names the limit dec judged against and where that came from (limitSource).
+// names the limit dec judged against, where that came from and what to
+// raise (limitSource).
 func (g *guard) enterPressure(now time.Time, dec memoryDecision, why ...zap.Field) {
 	alreadyPaused := g.underPressure
 	g.underPressure = true
@@ -728,16 +731,15 @@ func (g *guard) enterPressure(now time.Time, dec memoryDecision, why ...zap.Fiel
 
 	if !alreadyPaused {
 		g.pausedAt = now
-		source, raise := g.limitSource(dec.limit)
 		g.logger.Info("Pausing keploy-agent recording due to memory pressure. "+
-			"Consider increasing "+raise+", enabling sampling, or reducing request concurrency",
+			"Consider increasing "+dec.raise+", enabling sampling, or reducing request concurrency",
 			append([]zap.Field{
 				zap.Int64("memory_usage_bytes", dec.effCurrent),
 				zap.Int64("pause_threshold_bytes", dec.pauseThreshold),
 				zap.Int64("fixed_overhead_bytes", dec.overhead),
 				zap.Int64("effective_limit_bytes", dec.effLimit),
 				zap.Int64("limit_bytes", dec.limit),
-				zap.String("limit_source", source)}, why...)...)
+				zap.String("limit_source", dec.source)}, why...)...)
 	}
 	if !alreadyPaused || now.Sub(g.lastReclaim) >= reclaimCooldown {
 		g.lastReclaim = now
@@ -754,7 +756,7 @@ func (g *guard) sampleSoftLimit() {
 	if err != nil {
 		return
 	}
-	dec := evaluateMemory(cs.workingSet, g.budget(cs), fixedOverheadBytes.Load())
+	dec := g.decide(cs)
 	goMemoryBudget.Store(dec.goMemTarget)
 	if sl := deriveSoftLimit(dec, cs, m); sl.derived {
 		g.applySoftLimit(sl, g.timeNow())
@@ -781,13 +783,31 @@ func (g *guard) budget(cs cgroupSample) int64 {
 	return cs.limit
 }
 
+// decide is evaluateMemory of the working set against the budget (budget),
+// with where the budget came from (limitSource).
+func (g *guard) decide(cs cgroupSample) memoryDecision {
+	dec := evaluateMemory(cs.workingSet, g.budget(cs), fixedOverheadBytes.Load())
+	dec.source, dec.raise = g.limitSource(dec.limit, cs.limit)
+	return dec
+}
+
 // limitSource is where a budget the guard judged against (budget) came
-// from, as the lines that report it name it, and the limit those lines advise
-// raising: the container's where that is under --memory-limit, since raising
-// --memory-limit then changes nothing.
-func (g *guard) limitSource(limit int64) (source, raise string) {
-	if limit < g.limitBytes {
+// from, as the lines that report it name it, and the limit those lines
+// advise raising, given the container's limit as read (0: none):
+//   - the container's, where that is under --memory-limit: raising
+//     --memory-limit then changes nothing;
+//   - both, where the container's limit is --memory-limit to the MiB
+//     (--memory-limit's unit), as in every sidecar k8s-proxy injects (it
+//     sets the two equal): raising either alone leaves the other binding,
+//     and the budget where it was;
+//   - --memory-limit, where the container has no limit or one a MiB or more
+//     over it.
+func (g *guard) limitSource(limit, containerLimit int64) (source, raise string) {
+	switch {
+	case limit < g.limitBytes:
 		return "container", "the container's memory limit"
+	case containerLimit > 0 && containerLimit < g.limitBytes+1<<20:
+		return "--memory-limit and container", "--memory-limit and the container's memory limit"
 	}
 	return "--memory-limit", "--memory-limit"
 }
@@ -808,7 +828,6 @@ func (g *guard) limitSource(limit int64) (source, raise string) {
 func (g *guard) applySoftLimit(s softLimit, now time.Time) {
 	first := !g.softLimitDerived
 	g.softLimitDerived = true
-	source, raise := g.limitSource(s.hard)
 	changed := s.bytes <= g.softLimit-softLimitLowerStep || (s.bytes > g.softLimit && s.floorBytes > g.softLimit) ||
 		(s.bytes >= g.softLimit+softLimitRaiseStep && now.Sub(g.softLimitAt) >= reclaimCooldown)
 	if changed {
@@ -824,7 +843,7 @@ func (g *guard) applySoftLimit(s softLimit, now time.Time) {
 			zap.Int64("go_mem_limit_bytes", g.softLimit),
 			zap.Int64("go_room_bytes", s.room),
 			zap.Int64("limit_bytes", s.hard),
-			zap.String("limit_source", source),
+			zap.String("limit_source", s.source),
 			zap.Int64("non_go_memory_bytes", s.nonGo),
 			zap.Int64("go_live_memory_bytes", s.need))
 	}
@@ -834,9 +853,9 @@ func (g *guard) applySoftLimit(s softLimit, now time.Time) {
 		g.tooSmall = true
 		g.logger.Error("the memory limit is too small for the keploy-agent: with recording paused "+
 			"and its memory collected, the agent's live Go memory plus 64 MiB is over the room the limit leaves Go, "+
-			"so GOMEMLIMIT is set over that room; raise "+raise,
+			"so GOMEMLIMIT is set over that room; raise "+s.raise,
 			zap.Int64("limit_bytes", s.hard),
-			zap.String("limit_source", source),
+			zap.String("limit_source", s.source),
 			zap.Int64("non_go_memory_bytes", s.nonGo),
 			zap.Int64("go_room_bytes", s.room),
 			zap.Int64("go_live_memory_bytes", s.need),
@@ -845,7 +864,7 @@ func (g *guard) applySoftLimit(s softLimit, now time.Time) {
 		g.tooSmall = false
 		g.logger.Info("the memory limit has room for the keploy-agent's live Go memory plus 64 MiB again",
 			zap.Int64("limit_bytes", s.hard),
-			zap.String("limit_source", source),
+			zap.String("limit_source", s.source),
 			zap.Int64("non_go_memory_bytes", s.nonGo),
 			zap.Int64("go_room_bytes", s.room),
 			zap.Int64("go_live_memory_bytes", s.need),
@@ -1507,6 +1526,10 @@ type memoryDecision struct {
 	goMemTarget     int64 // GOMEMLIMIT to install (floored at minGoMemLimitBytes)
 	goMemFloored    bool  // goMemTarget hit its floor
 	viable          bool  // false ⇒ budget too small to record; hold paused
+	// source and raise: where limit came from and what the lines advise
+	// raising (guard.limitSource); set by guard.decide, empty from
+	// evaluateMemory alone.
+	source, raise string
 }
 
 // evaluateMemory discounts the fixed, non-reclaimable overhead (the low-latency
