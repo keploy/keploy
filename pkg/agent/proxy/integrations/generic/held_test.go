@@ -242,7 +242,7 @@ func TestARequestWhoseParserIsHeldPastItsWindowIsAnsweredWhole(t *testing.T) {
 				t.Run(fmt.Sprintf("%s, cut at %d, %s", name, cut, map[bool]string{false: "tcp", true: "through a layer that reads ahead"}[piece > 0]), func(t *testing.T) {
 					eachSwitch(t, func(t *testing.T) {
 						app, proxySide := tcpPair(t)
-						conn := &heldPast{Conn: proxySide, cut: cut, rest: len(req) - cut, piece: piece}
+						conn := &heldPast{Conn: arriving(proxySide, len(req)), cut: cut, rest: len(req) - cut, piece: piece}
 						done := make(chan error, 1)
 						go func() {
 							done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), conn, nil, store, models.OutgoingOptions{})

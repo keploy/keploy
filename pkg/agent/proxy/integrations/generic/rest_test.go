@@ -48,6 +48,66 @@ func bigExchanges(req []byte) map[string]eofStore {
 	return out
 }
 
+// arrivesWhole is the proxy's end of a TCP connection whose next request, of
+// whole bytes written at once, reaches the parser whole: the read that would
+// give its first bytes waits until the socket holds all of them or, while it
+// holds none, until the read's deadline passes, as a read of an empty socket
+// waits. A write longer than a TCP segment (32 KiB on loopback) arrives in
+// segments, and a writer the scheduler stops between two for longer than a
+// window, as one was under -race on a loaded machine, brings the rest more
+// than a window after the first bytes: a request the window ends by design,
+// not one the parser was held in as it read.
+type arrivesWhole struct {
+	net.Conn
+	whole    int64
+	mu       sync.Mutex
+	deadline time.Time
+	arrived  bool
+}
+
+// arriving is conn with its next request, of whole bytes, reaching the
+// parser whole (arrivesWhole).
+func arriving(conn net.Conn, whole int) *arrivesWhole {
+	return &arrivesWhole{Conn: conn, whole: int64(whole)}
+}
+
+func (c *arrivesWhole) NetConn() net.Conn { return c.Conn }
+
+func (c *arrivesWhole) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.deadline = t
+	c.mu.Unlock()
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *arrivesWhole) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.deadline = t
+	c.mu.Unlock()
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *arrivesWhole) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	arrived, deadline := c.arrived, c.deadline
+	c.mu.Unlock()
+	if !arrived {
+		var held int64
+		if !until(func() bool {
+			held = pUtil.UnreadBytes(c.Conn)
+			return held >= c.whole || (held == 0 && !deadline.IsZero() && time.Now().After(deadline))
+		}) {
+			return 0, errors.New("the request never reached the socket whole")
+		}
+		if held >= c.whole {
+			c.mu.Lock()
+			c.arrived = true
+			c.mu.Unlock()
+		}
+	}
+	return c.Conn.Read(p)
+}
+
 // faults is the proxy's end of a connection that breaks once left bytes
 // have been read, the reads before returning at most what is left. With
 // expire its read deadline passes there: the parser was held past it while
@@ -157,7 +217,9 @@ func awaitReadOn(t *testing.T, rearmed <-chan struct{}, done <-chan error) {
 // of its reads, the rest already in the socket (the parser was held past
 // it), is answered whole: the parser reads on to the end of the request's
 // window, one window from its first bytes. It matched the part it had read:
-// it missed, or took the recording's answer and left the rest to miss.
+// it missed, or took the recording's answer and left the rest to miss. The
+// request's one write reaches the parser whole (arriving), so its rest is in
+// the socket when the parser is held.
 func TestARequestWhoseWindowEndsInsideItIsAnsweredWhole(t *testing.T) {
 	req := varied(40<<10, true)
 	for name, store := range bigExchanges(req) {
@@ -165,7 +227,7 @@ func TestARequestWhoseWindowEndsInsideItIsAnsweredWhole(t *testing.T) {
 			t.Run(fmt.Sprintf("%s, cut at %d", name, cut), func(t *testing.T) {
 				eachSwitch(t, func(t *testing.T) {
 					app, proxySide := tcpPair(t)
-					conn := &faults{Conn: proxySide, left: cut, expire: true}
+					conn := &faults{Conn: arriving(proxySide, len(req)), left: cut, expire: true}
 					done := make(chan error, 1)
 					go func() {
 						done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), conn, nil, store, models.OutgoingOptions{})
@@ -233,9 +295,9 @@ func TestAChangedLongRequestIsAnsweredWhateverItsReads(t *testing.T) {
 			for _, cut := range []int{0, 1000, 32 << 10, 40<<10 - 1} {
 				t.Run(fmt.Sprintf("changed at %d, %s, cut at %d", changedAt, name, cut), func(t *testing.T) {
 					app, proxySide := tcpPair(t)
-					conn := net.Conn(proxySide)
+					conn := net.Conn(arriving(proxySide, len(live)))
 					if cut > 0 {
-						conn = &faults{Conn: proxySide, left: cut, expire: true}
+						conn = &faults{Conn: arriving(proxySide, len(live)), left: cut, expire: true}
 					}
 					done := make(chan error, 1)
 					go func() {
@@ -354,7 +416,7 @@ func TestAWholeRequestIsNotWaitedOn(t *testing.T) {
 				app, proxySide := tcpPair(t)
 				done := make(chan error, 1)
 				go func() {
-					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), proxySide, nil, c.store, models.OutgoingOptions{})
+					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), arriving(proxySide, len(c.send)), nil, c.store, models.OutgoingOptions{})
 				}()
 				readAnswer(t, app, "PONG")
 				sent := time.Now()
