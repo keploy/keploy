@@ -249,8 +249,8 @@ func (h *HTTP) serveStoppedReading(ctx context.Context, clientConn net.Conn, stu
 // (written by hand, or by a keploy that did not record it), it does only
 // where the app's FIN (or a reset) is already in on c before the serve
 // writes, c's socket asked at once (pUtil.PeerGone); where c's socket cannot
-// be asked (Windows, or a wrapper with no socket under it), the app's FIN
-// ends the hold, as before.
+// be asked (a wrapper with no socket under it), the app's FIN ends the hold,
+// as before.
 func heldPastFIN(c net.Conn, fault *models.Fault) bool {
 	if fault.AppEndedFirst {
 		return true
