@@ -41,6 +41,31 @@ func wantState(t *testing.T, q *TwoQueue[string, int], step string, want state) 
 	if n := q.Len(); n != len(want.recent)+len(want.frequent) {
 		t.Fatalf("after %s: Len = %d; want %d", step, n, len(want.recent)+len(want.frequent))
 	}
+	wantRing(t, step, "recent", &q.recent)
+	wantRing(t, step, "frequent", &q.frequent)
+	wantRing(t, step, "ghost", &q.ghost)
+}
+
+// wantRing checks that a store's ring, walked either way, holds exactly the
+// entries its map holds, each linked to its neighbours both ways.
+func wantRing[V any](t *testing.T, step, list string, s *store[string, V]) {
+	t.Helper()
+	n := 0
+	for e := s.root.next; e != &s.root; e = e.next {
+		if s.items[e.key] != e || e.next.prev != e || e.prev.next != e {
+			t.Fatalf("after %s: the %s ring is broken at %s", step, list, e.key)
+		}
+		if n++; n > len(s.items) {
+			t.Fatalf("after %s: the %s ring holds more than its %d mapped entries", step, list, len(s.items))
+		}
+	}
+	back := 0
+	for e := s.root.prev; e != &s.root && back <= n; e = e.prev {
+		back++
+	}
+	if n != len(s.items) || back != n {
+		t.Fatalf("after %s: the %s ring holds %d entries forward and %d back; its map %d", step, list, n, back, len(s.items))
+	}
 }
 
 // TestTwoQueueKeysFrequentFirst pins Keys' order, golang-lru's: the frequent
@@ -63,6 +88,65 @@ func TestTwoQueueKeysFrequentFirst(t *testing.T) {
 		t.Fatalf("Keys = %v; want the frequent keys, then the seen-once keys, each oldest first: %v", got, want)
 	}
 	wantState(t, q, "Keys", state{recent: []string{"a", "c", "e"}, frequent: []string{"b", "d"}})
+}
+
+// TestTwoQueueKeysAndContainsSkipRememberedKeys: a key the cache remembers
+// after evicting it is not held, so Keys does not list it and Contains, Peek
+// and Get do not find it, and none of them brings it back.
+func TestTwoQueueKeysAndContainsSkipRememberedKeys(t *testing.T) {
+	defer failOnPanic(t)
+	q := newTwoQueue(t, 8) // seen-once share 2, ghost 4
+	for _, k := range keys("s", 1, 12) {
+		q.Add(k, 0)
+	}
+	q.Get("s5")
+	held := state{recent: keys("s", 6, 12), frequent: []string{"s5"}, ghost: keys("s", 1, 4)}
+	wantState(t, q, "s1-s12, reading s5", held)
+	if got, want := q.Keys(), keys("s", 5, 12); !slices.Equal(got, want) {
+		t.Fatalf("Keys = %v; want only the held keys %v, none of the remembered s1-s4", got, want)
+	}
+	for _, k := range keys("s", 1, 4) {
+		if q.Contains(k) {
+			t.Errorf("Contains(%s) = true for a key evicted and only remembered", k)
+		}
+		if _, ok := q.Peek(k); ok {
+			t.Errorf("Peek(%s) found a key evicted and only remembered", k)
+		}
+		if _, ok := q.Get(k); ok {
+			t.Errorf("Get(%s) found a key evicted and only remembered", k)
+		}
+	}
+	for _, k := range keys("s", 5, 12) {
+		if !q.Contains(k) {
+			t.Errorf("Contains(%s) = false for a held key", k)
+		}
+	}
+	wantState(t, q, "Keys, Contains, Peek and Get", held)
+}
+
+// TestTwoQueueRememberedKeyBackPastItsOwnEviction: a remembered key that is
+// added again makes room first, and when that pushes the full remembered
+// list past its size, the list drops its oldest entry, which is the key
+// itself. The key goes to the frequent list once, and the remembered list
+// keeps the key just evicted, as golang-lru's TwoQueueCache does.
+func TestTwoQueueRememberedKeyBackPastItsOwnEviction(t *testing.T) {
+	defer failOnPanic(t)
+	q := newTwoQueue(t, 8) // seen-once share 2, ghost 4
+	for _, k := range keys("s", 1, 12) {
+		q.Add(k, 0)
+	}
+	wantState(t, q, "s1-s12", state{recent: keys("s", 5, 12), ghost: keys("s", 1, 4)})
+	q.Add("s1", 1)
+	wantState(t, q, "s1 back", state{recent: keys("s", 6, 12), frequent: []string{"s1"}, ghost: keys("s", 2, 5)})
+	if v, ok := q.Peek("s1"); !ok || v != 1 {
+		t.Fatalf("Peek(s1) = %d, %v; want 1, true", v, ok)
+	}
+	q.Add("s2", 2)
+	wantState(t, q, "s2 back", state{recent: keys("s", 7, 12), frequent: []string{"s1", "s2"}, ghost: keys("s", 3, 6)})
+	for _, k := range keys("s", 13, 16) {
+		q.Add(k, 0)
+	}
+	wantState(t, q, "s13-s16", state{recent: keys("s", 11, 16), frequent: []string{"s1", "s2"}, ghost: keys("s", 7, 10)})
 }
 
 func TestNew2QRefusesSizesBelowOne(t *testing.T) {

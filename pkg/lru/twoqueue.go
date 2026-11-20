@@ -75,7 +75,11 @@ func (q *TwoQueue[K, V]) Add(key K, value V) {
 	}
 	if g, ok := q.ghost.items[key]; ok {
 		q.makeRoom(true)
-		q.ghost.remove(g)
+		// makeRoom may have pushed the remembered list past its size and
+		// dropped g, its oldest entry, already.
+		if q.ghost.items[key] == g {
+			q.ghost.remove(g)
+		}
 		q.frequent.push(key, value)
 		return
 	}
