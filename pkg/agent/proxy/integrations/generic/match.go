@@ -467,7 +467,7 @@ func (r *sentRequest) bytes() []byte {
 // request is matched (decodeGeneric). A store that cannot be read holds no
 // recording to begin: the matcher reports its error.
 func restToCome(db integrations.MockMemDb, pieces [][]byte) bool {
-	mocks, _ := db.GetSessionMocks()
+	mocks, _ := db.GetSessionMocks() //nolint:staticcheck // SA1019: the matcher reads the recordings through it (fuzzyMatch), and this reads the same ones.
 	req := newSentRequest(pieces)
 	generic := make([]*models.Mock, 0, len(mocks))
 	begins := false
