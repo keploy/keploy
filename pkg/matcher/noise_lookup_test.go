@@ -124,15 +124,21 @@ func TestNoiseLookupIDKeys(t *testing.T) {
 // is a value, nor by the whole path.
 func TestNoiseLookupEntryNamesIDKeys(t *testing.T) {
 	u := testUUID(4)
-	l := NewNoiseLookup(map[string][]string{"options.{id}.traceid": {`^t-`}, "{id}": {`^x`}, "sessions." + u + ".token": {`^s`}})
+	l := NewNoiseLookup(map[string][]string{"options.{id}.traceid": {`^t-`}, "{id}": {`^x`}, "sessions." + u + ".token": {`^s`},
+		"hotels." + u + ".rooms.{id}.rate": {`^h`}, "Groups.{ID}.Name": {`^g`}})
 	for _, tc := range []struct{ path, key string }{
 		{"options." + u + ".traceId", "options.{id}.traceId"},
+		// An entry written in capitals names no id as a literal.
+		{"groups." + testUUID(5) + ".name", "groups.{id}.name"},
 		{"req.Options." + strings.ToUpper(u) + ".traceId", "Options.{id}.traceId"},
 		{"options." + u + ".traceId[]", "options.{id}.traceId"},
 		{"tags." + u, "{id}"},
 		{"tags." + u + "[]", "{id}"},
 		// An entry that names an id as a literal is named as it is written.
 		{"sessions." + u + ".token", "sessions." + u + ".token"},
+		// One that also names id keys is named by the field's whole path
+		// (""): its collapsed run names no entry keploy.yml has.
+		{"hotels." + u + ".rooms." + testUUID(6) + ".rate", ""},
 	} {
 		key, pats, ok := l.Entry(tc.path)
 		if !ok || key != tc.key || len(pats) != 1 {

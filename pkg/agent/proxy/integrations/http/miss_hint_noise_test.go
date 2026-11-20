@@ -1000,3 +1000,62 @@ func TestReasonsOfGivesAFieldOneReason(t *testing.T) {
 		t.Errorf("reasons of no field %#v; want none", got)
 	}
 }
+
+// A hint to widen a keploy.yml entry written by hand with an id in it names
+// an entry that, declared with the patterns it asks for, serves the call,
+// and the run's summary of the miss (SanitizedNextStep) names none of the
+// call's ids or keys that may be values. An entry naming an id as a literal
+// beside {id} is named by the field's whole path: the collapsed run would
+// name an entry keploy.yml does not have, which ties with the user's and
+// loses. A run of the path the hint names, and the fields beside an {id},
+// are shaped in the summary.
+func TestAnIDEntrysHintServesTheCallAndItsSummaryNamesNoValue(t *testing.T) {
+	u := "00000009-0000-4000-8000-000000000009"
+	u1 := "00000001-0000-4000-8000-000000000001"
+	num := "1700000000"
+	for _, c := range []struct {
+		name      string
+		cfg       map[string][]string
+		rec, live string
+		named     string   // the entry the hint names
+		values    []string // the live values its widened patterns match
+		hidden    []string // the call's values the summary does not name
+	}{
+		{"an id as a literal beside {id}", map[string][]string{"hotels." + u1 + ".rooms.{id}.rate": {"^h"}},
+			`{"hotels":{"` + u1 + `":{"rooms":{"` + num + `":{"rate":"h1"}}}}}`, `{"hotels":{"` + u1 + `":{"rooms":{"` + num + `":{"rate":"z2"}}}}}`,
+			"hotels." + u1 + ".rooms." + num + ".rate", []string{"z2"}, []string{u1, num}},
+		{"a key that may be a value beside {id}", map[string][]string{"accounts.{id}.jane@example.com": {"^s"}},
+			`{"accounts":{"` + u + `":{"jane@example.com":"s1"}}}`, `{"accounts":{"` + u + `":{"jane@example.com":"x2"}}}`,
+			"accounts.{id}.jane@example.com", []string{"x2"}, []string{u, "jane@example"}},
+		{"an id as a literal, named by a run shorter than the path", map[string][]string{u1 + ".token": {"^s"}},
+			`{"sessions":{"` + u1 + `":{"token":"s1"}}}`, `{"sessions":{"` + u1 + `":{"token":"x2"}}}`,
+			u1 + ".token", []string{"x2"}, []string{u1}},
+	} {
+		for _, on := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, switch on %v", c.name, on), func(t *testing.T) {
+				cfg := map[string]map[string][]string{"requestbody": c.cfg}
+				rec := func() *models.Mock { return recorded("m", "/x", nil, c.rec) }
+				served, r := missWith(t, on, false, cfg, rec(), nil, c.live)
+				if served {
+					t.Fatal("served; want a miss")
+				}
+				if !strings.Contains(r.NextSteps, "entries for "+c.named+" (") {
+					t.Fatalf("hint %q; want it to name the entry %s", r.NextSteps, c.named)
+				}
+				remedy, offered := remedyOf(t, r.NextSteps, cfg, map[string]map[string][]string{c.named: {"live": c.values}})
+				if !offered {
+					t.Fatalf("hint %q offers no noise", r.NextSteps)
+				}
+				if served, r := missWith(t, on, false, remedy, rec(), nil, c.live); !served {
+					t.Errorf("declaring the remedy the hint names, %v, leaves a miss; its hint then %q", remedy, r.NextSteps)
+				}
+				next := models.UnmatchedCall{Protocol: "HTTP", NextSteps: r.NextSteps, FieldDiffs: r.FieldDiffs, FieldReasons: r.FieldReasons}.SanitizedNextStep()
+				for _, v := range c.hidden {
+					if strings.Contains(next, v) {
+						t.Errorf("the run summary's next step %q names %s, a value of the call", next, v)
+					}
+				}
+			})
+		}
+	}
+}

@@ -74,15 +74,25 @@ func (l NoiseLookup) Patterns(path string) ([]string, bool) {
 // entry is held by would name, for "requestId", a key keploy.yml does not
 // spell so. A hint names the entry to edit, which may name the leaf by its
 // last field alone ("qty" for "order.qty") or name the array it is an
-// element of ("ids" for "ids[]"). An entry naming id keys (NoiseIDKey) is
-// named by the run of path with its id keys collapsed, as it matched it
-// ("options.{id}.traceId"), never by an id the path holds.
+// element of ("ids" for "ids[]"). An entry naming id keys (NoiseIDKey)
+// with no id written as a literal beside them is named by the run of path
+// with its id keys collapsed, as it matched it ("options.{id}.traceId"),
+// never by an id the path holds. One that also writes an id as a literal
+// ("hotels.<id>.rooms.{id}.rate") is named "", by the field's whole path:
+// its collapsed run would name an entry keploy.yml does not have, and one
+// declared so would tie with the user's on its key and lose the tie, so
+// widening it would never serve the call.
 func (l NoiseLookup) Entry(path string) (key string, patterns []string, ok bool) {
 	e, noisy := l.idx.entryWholeFields(strings.ToLower(path), true)
 	if !noisy {
 		return "", []string{}, false
 	}
 	if e.idKeys {
+		if strings.ToLower(e.key) != e.keyLower {
+			// The collapse (NoiseEntryKey) changed the key: it writes
+			// an id as a literal.
+			return "", regexpTexts(e.regexps), true
+		}
 		// IsIDKey ignores case, so this collapses the segments the
 		// lowercased path's collapse (entryWholeFields) did.
 		path = CollapseIDKeys(path)

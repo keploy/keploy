@@ -204,3 +204,38 @@ func TestTheNextStepNamesAFewFieldReasons(t *testing.T) {
 		t.Errorf("the next step is %q; want %q", said, want)
 	}
 }
+
+// The run summary's next step names no value of the call where a hint names
+// a keploy.yml entry by a run of a field's path, or an entry written by hand
+// whose fields beside its id key ({id}) may be values; it keeps the words
+// that only hold a run (a count, a longer name) and a header's name.
+func TestTheNextStepShapesTheRunsOfAFieldsPath(t *testing.T) {
+	u := "00000001-0000-4000-8000-000000000001"
+	for _, c := range []struct {
+		name, path, hint, want string
+	}{
+		{"a run of a field's path", "body.sessions." + u + ".token",
+			"widen the patterns of keploy.yml's entries for " + u + ".token (\"^s\") so they match",
+			"widen the patterns of keploy.yml's entries for {}.token (\"{}\") so they match"},
+		{"a value alone", "body.sessions." + u + ".token", "entries for " + u + ": widen them", "entries for {}: widen them"},
+		{"a run ending at an index", "body.series.1700000000.tags[0]", "entries for 1700000000.tags[] and 1700000000.tags.", "entries for {}.tags[] and {}.tags."},
+		{"a run beside fields the path does not hold", "body.sessions." + u + ".token", "entries for app." + u + ".other", "entries for app.{}.other"},
+		{"a key with a space", "body.users.John Smith.age", "entries for John Smith.age differ", "entries for {}.age differ"},
+		{"a body object named header", "body.header.X-Trace2", "header.X-Trace2 differs", "header.{} differs"},
+		{"a value-like key beside {id}", "body.accounts." + u + ".jane@example.com",
+			"entries for accounts.{id}.jane@example.com (\"^s\")", "entries for accounts.{id}.{}.com (\"{}\")"},
+		{"a run inside a longer name is that name's", "body.address.line1", "the headline1 and line1s fields; line1 differs", "the headline1 and line1s fields; {} differs"},
+		{"a number alone is a count", "body.docs.1.q", "docs.1 differs, and 1 more reason", "docs.{} differs, and 1 more reason"},
+		{"a header's name is kept", "header.X-Trace2", "X-Trace2 differs", "X-Trace2 differs"},
+	} {
+		m := UnmatchedCall{Protocol: "HTTP", NextSteps: c.hint, FieldDiffs: []MockFieldDiff{{Path: c.path, Kind: DiffKindValueChanged}}}
+		if got := m.SanitizedNextStep(); got != c.want {
+			t.Errorf("%s: next step %q; want %q", c.name, got, c.want)
+		}
+	}
+	// An entry written with {id} is shaped with no field diff to read: a log
+	// line's words name no call.
+	if got, want := AdviceLogText("entries for accounts.{id}.jane@example.com, and {id}[1].tags[0]."), "entries for accounts.{id}.{}.com, and {id}[1].tags[0]."; got != want {
+		t.Errorf("AdviceLogText = %q; want %q", got, want)
+	}
+}
