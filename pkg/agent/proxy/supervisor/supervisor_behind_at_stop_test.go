@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // behindProducer stands in for the relay's tee: it hands chunks to its
@@ -134,10 +135,14 @@ func TestRun_AtTheStopAParserBehindItsCaptureReadsAllOfIt(t *testing.T) {
 
 // Once the parser has read both its streams to their end, nothing of the
 // capture is left for it: the supervisor aborts one that still has not
-// returned (it waits on something else) then, and only then. One that has read
-// only one stream to its end is aborted only once the stop's own deadline
-// passes.
-func TestRun_AtTheStopAbortsOnceBothStreamsAreReadToTheirEndOrTheDeadlinePasses(t *testing.T) {
+// returned and makes no progress on what it read (it waits on something
+// else) once its fold window has passed, on the process's own clock, and
+// says nothing of a cut. One that has read only one stream to its end is
+// aborted only once the stop's own deadline passes, and is not said to have
+// been cut while recording what it had read: it had not read it all.
+// (TestRun_AtTheStopAParserFoldingWhatItReadHandsOverEveryRecord: one that
+// makes progress is waited for.)
+func TestRun_AtTheStopAbortsAParserIdleOnceBothStreamsAreReadOrAtTheDeadline(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name     string
@@ -154,7 +159,8 @@ func TestRun_AtTheStopAbortsOnceBothStreamsAreReadToTheirEndOrTheDeadlinePasses(
 
 			aborted := make(chan struct{})
 			var abortOnce sync.Once
-			s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour})
+			core, logs := observer.New(zapcore.DebugLevel)
+			s := New(Config{Logger: zap.New(core), HangBudget: time.Hour, FoldWindow: 50 * time.Millisecond})
 			s.SessionOnAbort = func() { abortOnce.Do(func() { close(aborted) }) }
 			deadline := make(chan struct{})
 			s.StopDeadline = deadline
@@ -203,7 +209,10 @@ func TestRun_AtTheStopAbortsOnceBothStreamsAreReadToTheirEndOrTheDeadlinePasses(
 			select {
 			case res = <-resc:
 			case <-time.After(20 * time.Second):
-				t.Fatal("Run did not return once the parser had read both its streams to their end, or the stop's deadline had passed")
+				t.Fatal("Run did not return once the parser had read both its streams to their end and made no progress for its fold window, or the stop's deadline had passed")
+			}
+			if n := logs.FilterMessage(FoldCutWarnMsg).Len(); n != 0 {
+				t.Fatalf("%d WARNs of a cut fold for a parser that handed nothing over, or had not read both its streams", n)
 			}
 			select {
 			case <-aborted:

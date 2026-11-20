@@ -157,7 +157,9 @@ type Session struct {
 	// endedWithConnectionShift, one bit per fakeconn.Direction: that stream
 	// ended because its connection did (MarkEndedWithConnection); and, from
 	// clientEndErrnoShift, the errno the client's socket gave after the
-	// relay was done with it (MarkClientEndError). Internal;
+	// relay was done with it (MarkClientEndError); and handedOverBit: the
+	// parser made progress on what it read since the supervisor's last look
+	// (handedOver). Internal;
 	// one word here, in the padding after the bools, so a Session stays in
 	// its size class with clientStopped.
 	peerEnds atomic.Uint32
@@ -1010,15 +1012,47 @@ func (s *Session) EmitMockOutcome(m *models.Mock, shutdown bool) (lost bool, err
 // (OnPendingCleared), as an emitted mock clears it. Work left pending through
 // the next idle spell is taken for a hung parser. Nil-safe.
 func (s *Session) MockHeld() {
+	s.handedOver()
 	if s != nil && s.OnPendingCleared != nil {
 		s.OnPendingCleared()
 	}
 }
 
+// handedOverBit, in peerEnds, after endFollowedStopBit: handedOver.
+const handedOverBit = 1 << (peerEndFirstShift + 4)
+
+// handedOver notes that the parser made progress on what it has read: it
+// handed a mock over (taken, left out or refused: emitMockCore), reported an
+// exchange or a part of one left out (ReportLeftOut, ReportLeftOutPart, and so
+// ReportStoppedOn), held a mock it made (MockHeld), or folded bytes it read
+// (Folded). At the recording's stop, once the parser has read both its
+// streams to their end, the supervisor waits for it for as long as it makes
+// such progress (Supervisor.Run). Nil-safe.
+func (s *Session) handedOver() {
+	if s != nil {
+		s.peerEnds.Or(handedOverBit)
+	}
+}
+
+// takeHandedOver reports whether the parser made progress (handedOver) since
+// the last take, and clears the mark.
+func (s *Session) takeHandedOver() bool {
+	return s.peerEnds.And(^uint32(handedOverBit))&handedOverBit != 0
+}
+
+// Folded tells the session its parser folded bytes it had read into what it
+// will hand over, with nothing to hand over yet. At the recording's stop that
+// is progress, as a hand-over is: the supervisor waits for a parser that has
+// read both its streams to their end for as long as it makes progress
+// (Supervisor.Run). A parser that folds a long stretch of what it read between
+// two hand-overs calls it as it goes. Nil-safe.
+func (s *Session) Folded() { s.handedOver() }
+
 func (s *Session) emitMockCore(m *models.Mock, shutdown bool) (bool, error) {
 	if s == nil || m == nil {
 		return false, nil
 	}
+	s.handedOver()
 	if s.LeaveOutIfIncomplete(m) {
 		// Left out, and the flag reset, so the next mock in this cycle
 		// gets a fresh chance; a retired session's mark stays set, and
@@ -1262,6 +1296,7 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 	if s == nil {
 		return
 	}
+	s.handedOver()
 	if m == nil {
 		m = &models.Mock{}
 	}
@@ -1303,6 +1338,7 @@ func (s *Session) ReportLeftOut(m *models.Mock, reason string) {
 // the span exists. It does not touch the session's pending work: the report
 // of the exchange the part belongs to dealt with it. Nil-safe.
 func (s *Session) ReportLeftOutPart(start, end time.Time) {
+	s.handedOver()
 	s.spanLeftOut(start, end)
 }
 
