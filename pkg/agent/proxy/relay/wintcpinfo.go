@@ -206,7 +206,8 @@ const wsaeConnAborted syscall.Errno = 10053
 // resetAfterFIN reports whether a read of the client's socket that failed
 // with readErr, on a socket that now says i, returned a reset that came after
 // the client's FIN, where no look found that FIN in before (Windows: its
-// TCP_INFO_v0 has no rcv_nxt to count the FIN by, as macOS's has).
+// TCP_INFO_v0 has no rcv_nxt to count the FIN by, as macOS's has). readAgain
+// reads the socket once more and returns that read's error.
 //
 // Windows' read tells the two apart by its code. Measured on Windows 11 over
 // loopback, 200 of 200 runs each: a client that sent its FIN and then reset
@@ -221,7 +222,20 @@ const wsaeConnAborted syscall.Errno = 10053
 // byte in flight, no timeout episode in its life and no FIN of the proxy's
 // (finSent). Anything else is read as a reset, as before, so a reset with no
 // FIN before it is never read as one.
-func (i winTCPInfo) resetAfterFIN(readErr error, finSent bool) bool {
-	return errors.Is(readErr, wsaeConnAborted) && !finSent &&
-		i.state == wtcpClosed && i.inFlight > 0 && i.timeouts == 0
+//
+// One read is the exception: the first after the FIN, posted as the FIN and
+// the reset come in, can fail with WSAECONNRESET though the FIN came first.
+// The socket's next read fails with WSAECONNABORTED then (measured on Windows
+// 11, loopback: the relay's read of such a client, about 1 in 1000). A reset
+// with no FIN before fails every read with WSAECONNRESET (300 of 300 runs
+// each: an abort, an abort with a read pending, a close with bytes unread,
+// and an abort with the proxy's bytes in flight). So a read that failed with
+// any other code, on a connection in that case, is asked again (readAgain),
+// and that read's WSAECONNABORTED is taken. Only a CLOSED connection is read
+// again: no read of it waits.
+func (i winTCPInfo) resetAfterFIN(readErr error, finSent bool, readAgain func() error) bool {
+	if finSent || i.state != wtcpClosed || i.inFlight == 0 || i.timeouts != 0 {
+		return false
+	}
+	return errors.Is(readErr, wsaeConnAborted) || errors.Is(readAgain(), wsaeConnAborted)
 }

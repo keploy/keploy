@@ -3,6 +3,7 @@
 package relay
 
 import (
+	"errors"
 	"net"
 	"syscall"
 	"testing"
@@ -19,9 +20,9 @@ const wtcpEstablished = 4
 // winScriptFD runs a question with no socket under it: the script answers.
 type winScriptFD struct{}
 
-func (winScriptFD) Control(f func(uintptr)) error  { f(0); return nil }
-func (winScriptFD) Read(func(uintptr) bool) error  { return nil }
-func (winScriptFD) Write(func(uintptr) bool) error { return nil }
+func (winScriptFD) Control(f func(uintptr)) error   { f(0); return nil }
+func (winScriptFD) Read(f func(uintptr) bool) error { f(0); return nil }
+func (winScriptFD) Write(func(uintptr) bool) error  { return nil }
 
 // winFailingFD is a socket whose Control fails, as a closed one's does.
 type winFailingFD struct{}
@@ -200,12 +201,15 @@ func TestWindowsALookThatFindsTheFINInIsKept(t *testing.T) {
 // FIN in asks the socket, which says whether the reset came after that FIN
 // (resetAfterFIN): yes for a connection closed with the proxy's bytes in
 // flight, no after the proxy's own FIN or a timeout episode, and no when the
-// socket cannot answer. A WSAECONNRESET is a reset. One look that found the
-// FIN in decides, whatever the read's code.
+// socket cannot answer. A WSAECONNRESET is a reset unless the socket's next
+// read fails with WSAECONNABORTED. One look that found the FIN in decides,
+// whatever the read's code.
 func TestWindowsAResetReadAfterNoLookFoundTheFINIsAskedOfTheSocket(t *testing.T) {
 	aborted, reset := winsockRead(windows.WSAECONNABORTED), winsockRead(windows.WSAECONNRESET)
-	answering := func(size int, timeouts uint32) *tcpClientSocket {
-		return winAnsweringSocket(func() []byte { return winInfo(size, wtcpClosed, 8, 8, 0, timeouts) })
+	answering := func(size int, timeouts uint32, again error) *tcpClientSocket {
+		s := winAnsweringSocket(func() []byte { return winInfo(size, wtcpClosed, 8, 8, 0, timeouts) })
+		s.recvAgain = func(uintptr) error { return again }
+		return s
 	}
 	for _, row := range []struct {
 		name    string
@@ -214,14 +218,15 @@ func TestWindowsAResetReadAfterNoLookFoundTheFINIsAskedOfTheSocket(t *testing.T)
 		finSent bool
 		want    bool
 	}{
-		{"WSAECONNABORTED, closed with bytes in flight", answering(wtcpInfoSize, 0), aborted, false, true},
-		{"WSAECONNRESET", answering(wtcpInfoSize, 0), reset, false, false},
-		{"after the proxy's FIN", answering(wtcpInfoSize, 0), aborted, true, false},
-		{"after a timeout episode", answering(wtcpInfoSize, 1), aborted, false, false},
-		{"an answer one byte short", answering(wtcpInfoNeeded-1, 0), aborted, false, false},
+		{"WSAECONNABORTED, closed with bytes in flight", answering(wtcpInfoSize, 0, windows.WSAECONNRESET), aborted, false, true},
+		{"WSAECONNRESET, and the next read", answering(wtcpInfoSize, 0, windows.WSAECONNRESET), reset, false, false},
+		{"WSAECONNRESET, the next read WSAECONNABORTED", answering(wtcpInfoSize, 0, windows.WSAECONNABORTED), reset, false, true},
+		{"after the proxy's FIN", answering(wtcpInfoSize, 0, windows.WSAECONNABORTED), aborted, true, false},
+		{"after a timeout episode", answering(wtcpInfoSize, 1, windows.WSAECONNABORTED), aborted, false, false},
+		{"an answer one byte short", answering(wtcpInfoNeeded-1, 0, windows.WSAECONNABORTED), aborted, false, false},
 		{"a socket that cannot be asked", &tcpClientSocket{rc: winFailingFD{}, getInfo: func(_ uintptr, buf *[wtcpInfoSize]byte) (int, error) {
 			return copy(buf[:], winInfo(wtcpInfoSize, wtcpClosed, 8, 8, 0, 0)), nil
-		}, fallback: &infoFallback{}}, aborted, false, false},
+		}, recvAgain: func(uintptr) error { return windows.WSAECONNABORTED }, fallback: &infoFallback{}}, reset, false, false},
 	} {
 		if row.finSent {
 			row.s.proxyFINSent()
@@ -234,6 +239,63 @@ func TestWindowsAResetReadAfterNoLookFoundTheFINIsAskedOfTheSocket(t *testing.T)
 	_ = finned.look()
 	if !finned.finBeforeReset(reset) {
 		t.Error("finBeforeReset = false after a look found the FIN in; want true, whatever the read's code")
+	}
+}
+
+// On a real socket: the next read of a connection the client reset says
+// whether its FIN came first. A client that closed and then reset the
+// proxy's answer: WSAECONNABORTED, so a read that failed with WSAECONNRESET
+// on it is a reset after the FIN. A client that aborted with the proxy's
+// bytes in flight, no FIN sent: WSAECONNRESET, and such a read is a reset.
+func TestWindowsTheNextReadOfAResetSocketSaysWhetherTheFINCameFirst(t *testing.T) {
+	t.Parallel()
+	for _, finFirst := range []bool{true, false} {
+		app, proxyClient := loopbackPair(t)
+		rc, err := proxyClient.(*net.TCPConn).SyscallConn()
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := newTCPClientSocket(rc, nil)
+		want := windows.WSAECONNABORTED
+		if finFirst {
+			_ = app.Close()
+			awaitTCPState(t, proxyClient, stateCloseWait, "the closed client's FIN is in")
+			if _, err := proxyClient.Write([]byte("the answer")); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			want = windows.WSAECONNRESET
+			stop := make(chan struct{})
+			wrote := make(chan struct{})
+			go func() {
+				defer close(wrote)
+				chunk := make([]byte, 1024)
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if _, err := proxyClient.Write(chunk); err != nil {
+						return
+					}
+				}
+			}()
+			if err := app.(*net.TCPConn).SetLinger(0); err != nil {
+				t.Fatal(err)
+			}
+			_ = app.Close()
+			awaitTCPState(t, proxyClient, stateClosed, "the aborting client's reset is in")
+			close(stop)
+			<-wrote
+		}
+		awaitTCPState(t, proxyClient, stateClosed, "the connection is closed")
+		if got := s.readAgain(); !errors.Is(got, want) {
+			t.Fatalf("FIN first %v: the next read failed with %v, want %v", finFirst, got, want)
+		}
+		if got := s.finBeforeReset(winsockRead(windows.WSAECONNRESET)); got != finFirst {
+			t.Fatalf("FIN first %v: a read's WSAECONNRESET is taken as after the FIN: %v", finFirst, got)
+		}
 	}
 }
 
