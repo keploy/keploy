@@ -81,7 +81,7 @@ func TestTheCLIHandsEachAppContainersZoneToItsAgent(t *testing.T) {
 		if !ok || z.Err != "" {
 			t.Fatalf("the agent holds no zone of %s (%+v, %v)", r.id, z, ok)
 		}
-		got, err := learn.ZoneOfFile(z.Name, z.Data)
+		got, err := learn.ZoneOfFile(z.Name, learn.ZoneFile{Data: z.Data, Source: z.Source})
 		if err != nil {
 			t.Fatalf("the agent cannot read %s's zone: %v", r.id, err)
 		}

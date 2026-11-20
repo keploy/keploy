@@ -1049,6 +1049,9 @@ var (
 	// A parser's per-generation index serves only a store that tells whose
 	// a recording is (the HTTP strict index).
 	_ integrations.TestOwner = (*heldScope)(nil)
+	// A call held to its round reads keyed only while the manager's
+	// replay declares no sources (the manager's, promoted).
+	_ integrations.SourcesDeclarer = (*heldScope)(nil)
 )
 
 // heldScope is the manager held to one call's staging (HoldToRound): its

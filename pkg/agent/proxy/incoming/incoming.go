@@ -177,6 +177,14 @@ func (pm *IngressProxyManager) loadIncomingOpts() models.IncomingOptions {
 	return models.IncomingOptions{}
 }
 
+// IncomingOptions returns the options the recorder last started ingress
+// with (filters, sampling): zero before Start. It is how a capture path that
+// does not go through this manager's forwarder (an enterprise build's
+// observe-only capture) applies the same recording options.
+func (pm *IngressProxyManager) IncomingOptions() models.IncomingOptions {
+	return pm.loadIncomingOpts()
+}
+
 // SetIngressHook replaces the default Go TCP forwarder with an external
 // ingress handler supplied by an enterprise build.
 func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {

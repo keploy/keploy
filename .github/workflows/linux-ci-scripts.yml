@@ -63,6 +63,15 @@ name: Linux CI scripts
 # exit, the failed test sets and tests of the test run it wrote, and the
 # command's log; under `bash -e` the lane ended at that command with none of
 # them, and an echo-sql record, its exit taken as tee's, did not stop it.
+#
+# And macos/notarize-darwin.tests.sh: the signing, submission and wait of
+# release.yml's build-darwin job, against stand-ins for codesign and
+# notarytool. A failure on Apple's side (HTTP 5xx, "try again later") or the
+# network is tried again, a poll about the same submission; a refusal is not;
+# the wait ends at its bound with the submission id and the rerun that resumes
+# it; only Apple's Accepted for the zip that was sent writes the binary. And
+# build-darwin's steps: the state is kept before the wait, and a rerun skips
+# the build, signing and submission.
 
 on:
   push:
@@ -94,6 +103,9 @@ on:
       - '.github/workflows/test_workflow_scripts/sudo_env.sh'
       - '.github/workflows/test_workflow_scripts/hang_guard.sh'
       - '.github/workflows/golang_docker.yml'
+      - '.github/scripts/macos/notarize-darwin.sh'
+      - '.github/scripts/macos/notarize-darwin.tests.sh'
+      - '.github/workflows/release.yml'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
@@ -122,6 +134,9 @@ on:
       - '.github/workflows/test_workflow_scripts/sudo_env.sh'
       - '.github/workflows/test_workflow_scripts/hang_guard.sh'
       - '.github/workflows/golang_docker.yml'
+      - '.github/scripts/macos/notarize-darwin.sh'
+      - '.github/scripts/macos/notarize-darwin.tests.sh'
+      - '.github/workflows/release.yml'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -302,3 +317,14 @@ jobs:
         # Runs even when the gin_mongo step failed, so one run reports both.
         if: ${{ !cancelled() }}
         run: bash .github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh
+
+  notarize-darwin:
+    # Two hundred and forty checks against stand-ins, about ten seconds:
+    # only the bound cases wait, 2 s each, for real.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test notarize-darwin.sh (Apple's transient failures are tried again on the same submission; a rerun resumes it; only Accepted for the zip sent writes the binary)
+        run: bash .github/scripts/macos/notarize-darwin.tests.sh

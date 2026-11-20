@@ -299,3 +299,49 @@ func TestTwoFormsOfOneZonesFileReadTheSameRules(t *testing.T) {
 		t.Errorf("a zone that changes its offset on %s read as one that never does", part.Format(time.RFC3339))
 	}
 }
+
+// ZoneRulesDiffer reads two zone files apart at the first instant their
+// offsets differ however short the difference, as the clock-zone lane's
+// zonediff relies on: two files that each change once within one hour
+// (at 01:15 and 01:45 UTC), and a 30-minute excursion inside an hour, are
+// read apart to the second, though no hour's start or end reads them apart;
+// a file and itself, never.
+func TestZoneRulesDifferFindsADifferenceWithinAnHour(t *testing.T) {
+	from, to := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2038, 1, 1, 0, 0, 0, 0, time.UTC)
+	at := func(h, m int) time.Time { return time.Date(2030, 3, 10, h, m, 0, 0, time.UTC) }
+	zone := func(offs []int, changes ...time.Time) *time.Location {
+		t.Helper()
+		loc, err := time.LoadLocationFromTZData("", tzifV1(offs, changes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loc
+	}
+	early, late := zone([]int{0, 3600}, at(1, 15)), zone([]int{0, 3600}, at(1, 45))
+	steady, excursion := zone([]int{0}), zone([]int{0, 3600, 0}, at(1, 10), at(1, 40))
+	for _, row := range []struct {
+		what string
+		a, b *time.Location
+		want time.Time
+	}{
+		{"one change at 01:15, the other at 01:45", early, late, at(1, 15)},
+		{"the same, the other way round", late, early, at(1, 15)},
+		{"UTC throughout, and UTC+01:00 from 01:10 to 01:40", steady, excursion, at(1, 10)},
+	} {
+		for _, h := range []time.Time{at(1, 0), at(2, 0)} {
+			_, oa := h.In(row.a).Zone()
+			_, ob := h.In(row.b).Zone()
+			if oa != ob {
+				t.Fatalf("precondition, %s: the two read apart at %s", row.what, h.Format(time.RFC3339))
+			}
+		}
+		if got, differ := ZoneRulesDiffer(row.a, row.b, from, to); !differ || !got.Equal(row.want) {
+			t.Errorf("%s: differ %v at %s; want at %s", row.what, differ, got.Format(time.RFC3339), row.want.Format(time.RFC3339))
+		}
+	}
+	for _, loc := range []*time.Location{early, excursion} {
+		if got, differ := ZoneRulesDiffer(loc, loc, from, to); differ {
+			t.Errorf("a file and itself read apart at %s", got.Format(time.RFC3339))
+		}
+	}
+}

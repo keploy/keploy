@@ -57,7 +57,7 @@ builds:
       - arm64
     # macOS ships as darwin/arm64 only (Apple silicon); the amd64 leg is
     # not built anywhere. Signing/notarization of the darwin binary is
-    # done by gon in .github/workflows/release.yml, not here — this
+    # done by release.yml's build-darwin job, not here — this
     # config has no universal_binaries block and no darwin post hook.
     ignore:
       - goos: windows

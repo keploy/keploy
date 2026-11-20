@@ -29,6 +29,7 @@ const (
 	bpfMapExcludedPids                = "excluded_pids"
 	bpfMapInstanceLost                = "instance_lost"
 	bpfMapInstanceOfTgid              = "instance_of_tgid"
+	bpfMapKeployAgentExeMap           = "keploy_agent_exe_map"
 	bpfMapKeployAgentKernelPidMap     = "keploy_agent_kernel_pid_map"
 	bpfMapKeployAgentRegistrationMap  = "keploy_agent_registration_map"
 	bpfMapKeployClientKernelPidMap    = "keploy_client_kernel_pid_map"
@@ -188,6 +189,7 @@ type bpfMapSpecs struct {
 	ExcludedPids                *ebpf.MapSpec `ebpf:"excluded_pids"`
 	InstanceLost                *ebpf.MapSpec `ebpf:"instance_lost"`
 	InstanceOfTgid              *ebpf.MapSpec `ebpf:"instance_of_tgid"`
+	KeployAgentExeMap           *ebpf.MapSpec `ebpf:"keploy_agent_exe_map"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
@@ -263,6 +265,7 @@ type bpfMaps struct {
 	ExcludedPids                *ebpf.Map `ebpf:"excluded_pids"`
 	InstanceLost                *ebpf.Map `ebpf:"instance_lost"`
 	InstanceOfTgid              *ebpf.Map `ebpf:"instance_of_tgid"`
+	KeployAgentExeMap           *ebpf.Map `ebpf:"keploy_agent_exe_map"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
@@ -314,6 +317,7 @@ func (m *bpfMaps) Close() error {
 		m.ExcludedPids,
 		m.InstanceLost,
 		m.InstanceOfTgid,
+		m.KeployAgentExeMap,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
