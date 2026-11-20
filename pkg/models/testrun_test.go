@@ -226,6 +226,10 @@ func TestTheNextStepShapesTheRunsOfAFieldsPath(t *testing.T) {
 			"entries for accounts.{id}.jane@example.com (\"^s\")", "entries for accounts.{id}.{}.com (\"{}\")"},
 		{"a run inside a longer name is that name's", "body.address.line1", "the headline1 and line1s fields; line1 differs", "the headline1 and line1s fields; {} differs"},
 		{"a number alone is a count", "body.docs.1.q", "docs.1 differs, and 1 more reason", "docs.{} differs, and 1 more reason"},
+		// A field that is only an index ("[0]", a key so written) has no
+		// name to keep without its indexes, so no run ends before it: a
+		// number alone ending a sentence ("7.") stays a count.
+		{"a field that is only an index", "body.docs.7.[0]", "docs.7.[0] differs, in 7 of 7.", "docs.{}.[0] differs, in 7 of 7."},
 		{"a header's name is kept", "header.X-Trace2", "X-Trace2 differs", "X-Trace2 differs"},
 	} {
 		m := UnmatchedCall{Protocol: "HTTP", NextSteps: c.hint, FieldDiffs: []MockFieldDiff{{Path: c.path, Kind: DiffKindValueChanged}}}
@@ -235,7 +239,9 @@ func TestTheNextStepShapesTheRunsOfAFieldsPath(t *testing.T) {
 	}
 	// An entry written with {id} is shaped with no field diff to read: a log
 	// line's words name no call.
-	if got, want := AdviceLogText("entries for accounts.{id}.jane@example.com, and {id}[1].tags[0]."), "entries for accounts.{id}.{}.com, and {id}[1].tags[0]."; got != want {
+	// The id key with its indexes ({id}[1]) is that key too: the fields
+	// beside it are shaped.
+	if got, want := AdviceLogText("entries for accounts.{id}.jane@example.com, and {id}[1].tags[0], {id}[2].bob@example.org."), "entries for accounts.{id}.{}.com, and {id}[1].tags[0], {id}[2].{}.org."; got != want {
 		t.Errorf("AdviceLogText = %q; want %q", got, want)
 	}
 }
