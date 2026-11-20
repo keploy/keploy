@@ -338,6 +338,46 @@ func TestRecordV2_ObserveOnly_ACloseDelimitedBodyEndedAtAHoleIsLeftOut(t *testin
 	wantLeftOutUnread(t, "a hole, then the connection's end", logs, mocks, err, supervisor.LeftOutCloseNotRead)
 }
 
+// A pipeline's last answer can be framed by the upstream's close. The answer
+// before it, framed by its Content-Length, ends in the chunk the last one
+// starts in, and is recorded whole however the stream ends; the last is
+// recorded only where that close was read. With no side's end marked (the
+// recording's stop), it alone is left out, its span recorded; with the
+// upstream's close read (Session.MarkPeerEnded), both are recorded.
+func TestRecordV2_APipelinesCloseDelimitedLastAnswerAloneWaitsForTheClose(t *testing.T) {
+	reqs := "GET /first HTTP/1.1\r\nHost: reports.example\r\n\r\n" + reportReq
+	resps := "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nfirst" + reportHead + firstHalf
+	for _, closeRead := range []bool{false, true} {
+		var prep func(*supervisor.Session)
+		if closeRead {
+			prep = func(s *supervisor.Session) { s.MarkPeerEnded(fakeconn.FromDest, false) }
+		}
+		mocks, logs, err := recordUnit(t, reqs, resps, prep)
+		want := []string{"first"}
+		if closeRead {
+			want = append(want, firstHalf)
+		}
+		if err != nil || len(mocks) != len(want) {
+			t.Fatalf("close read %v: recorded %d mocks, recordV2 = %v; want %d and nil", closeRead, len(mocks), err, len(want))
+		}
+		for i, m := range mocks {
+			if m.Spec.HTTPResp == nil || m.Spec.HTTPResp.StatusCode != 200 || m.Spec.HTTPResp.Body != want[i] || m.Spec.Fault != nil {
+				t.Errorf("close read %v: mock %d = %+v; want status 200, body %q, no fault", closeRead, i, m.Spec.HTTPResp, want[i])
+			}
+		}
+		reasons := leftOutReasons(logs)
+		switch {
+		case closeRead && len(reasons) != 0:
+			t.Errorf("close read: left out for %q; want nothing left out", reasons)
+		case !closeRead && (len(reasons) != 1 || reasons[0] != supervisor.LeftOutCloseNotRead):
+			t.Errorf("close not read: left out for %q; want the last answer once, for %q", reasons, supervisor.LeftOutCloseNotRead)
+		}
+		for _, e := range logs.FilterLevelExact(zapcore.ErrorLevel).All() {
+			t.Errorf("close read %v: logged at ERROR: %s", closeRead, e.Message)
+		}
+	}
+}
+
 // drainMocks returns the mocks on mocks, without waiting.
 func drainMocks(mocks chan *models.Mock) []*models.Mock {
 	var got []*models.Mock
