@@ -305,84 +305,102 @@ func (c *dueClock) pending() int {
 // A parser that has read both its streams to their end and then makes no
 // progress is aborted promptly: not before its fold window has passed with
 // none, and by a quarter of the window after that at most, on the time the
-// process could run, counted from when it read both its streams to their end
-// (the process ran a while before that). The stop waits no longer on a
-// parser that waits on something else than that.
+// process could run. The window counts from when it read both its streams to
+// their end (the process ran a while before that), or from its latest
+// progress since. The stop waits no longer than that on a parser that waits
+// on something else.
 func TestRun_AtTheStopAnIdleParserIsAbortedWithinAQuarterWindowOfItsWindow(t *testing.T) {
 	t.Parallel()
 	const window = time.Second
-	const start = 5 * window // run time before the parser read both its streams to their end
-	client, dest := newBehindProducer(), newBehindProducer()
-	go client.run([]string{"request"})
-	go dest.run([]string{"answer"})
-	clk := newDueClock()
-	aborted := make(chan struct{})
-	var abortOnce sync.Once
-	s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour, FoldWindow: window, Clock: clk})
-	s.SessionOnAbort = func() { abortOnce.Do(func() { close(aborted) }) }
-	sess := &Session{ClientStream: client.fc, DestStream: dest.fc}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	unpark := make(chan struct{})
-	defer close(unpark)
-	resc := make(chan Result, 1)
-	go func() {
-		resc <- s.Run(ctx, func(context.Context, *Session) error {
-			cancel() // the stop
-			for {
-				if _, err := sess.ClientStream.ReadChunk(); err != nil {
-					break
+	for _, tc := range []struct {
+		name string
+		// busy is how long the parser folds what it read, once it has read
+		// both its streams to their end, before it idles.
+		busy time.Duration
+	}{
+		{"idle from its streams' end", 0},
+		{"idle after folding for two windows", 2 * window},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			const start = 5 * window // run time before the parser read both its streams to their end
+			client, dest := newBehindProducer(), newBehindProducer()
+			go client.run([]string{"request"})
+			go dest.run([]string{"answer"})
+			clk := newDueClock()
+			aborted := make(chan struct{})
+			var abortOnce sync.Once
+			s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour, FoldWindow: window, Clock: clk})
+			s.SessionOnAbort = func() { abortOnce.Do(func() { close(aborted) }) }
+			sess := &Session{ClientStream: client.fc, DestStream: dest.fc}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			unpark := make(chan struct{})
+			defer close(unpark)
+			resc := make(chan Result, 1)
+			go func() {
+				resc <- s.Run(ctx, func(context.Context, *Session) error {
+					cancel() // the stop
+					for {
+						if _, err := sess.ClientStream.ReadChunk(); err != nil {
+							break
+						}
+					}
+					clk.advance(start) // fires nothing: the watchdog's look is due at a quarter of an hour
+					for {
+						if _, err := sess.DestStream.ReadChunk(); err != nil {
+							break
+						}
+					}
+					<-unpark // it waits on something else
+					return nil
+				}, sess)
+			}()
+			// settled waits until the watchdog and the fold watch both wait on
+			// their next look again, or Run has returned (done).
+			settled := func() (res Result, done bool) {
+				bound := time.Now().Add(time.Minute) // only turns a hang into a failure
+				for clk.pending() != 2 {
+					select {
+					case res = <-resc:
+						return res, true
+					default:
+					}
+					if time.Now().After(bound) {
+						t.Fatalf("the fold watch never armed its next look (%s of run time)", clk.Runnable())
+					}
+					time.Sleep(time.Millisecond)
+				}
+				return Result{}, false
+			}
+			if res, done := settled(); done {
+				t.Fatalf("Run returned %+v before the parser's fold window began", res)
+			}
+			var res Result
+			for done := false; !done; {
+				ran := clk.Runnable() - start
+				if ran >= tc.busy+2*window {
+					t.Fatalf("the parser idle from %s after it read both its streams to their end was not aborted within %s of run time (fold window %s)", tc.busy, ran, window)
+				}
+				if ran < tc.busy {
+					sess.Folded() // the parser folds what it read, and runs on
+				}
+				if clk.advance(window/8) > 0 {
+					res, done = settled()
 				}
 			}
-			clk.advance(start) // fires nothing: the watchdog's look is due at a quarter of an hour
-			for {
-				if _, err := sess.DestStream.ReadChunk(); err != nil {
-					break
-				}
+			if ran := clk.Runnable() - start - tc.busy; ran <= window || ran > window+window/4 {
+				t.Fatalf("Run returned %+v %s of run time after the parser's latest progress, want past the fold window %s and within a quarter of it after", res, ran, window)
 			}
-			<-unpark // it waits on something else
-			return nil
-		}, sess)
-	}()
-	// settled waits until the watchdog and the fold watch both wait on their
-	// next look again, or Run has returned (done).
-	settled := func() (res Result, done bool) {
-		bound := time.Now().Add(time.Minute) // only turns a hang into a failure
-		for clk.pending() != 2 {
 			select {
-			case res = <-resc:
-				return res, true
+			case <-aborted:
 			default:
+				t.Fatalf("Run returned %+v without aborting the parser", res)
 			}
-			if time.Now().After(bound) {
-				t.Fatalf("the fold watch never armed its next look (%s of run time)", clk.Runnable())
+			if res.Status != StatusCanceled || !res.FallthroughToPassthrough {
+				t.Fatalf("result %+v, want canceled and retired", res)
 			}
-			time.Sleep(time.Millisecond)
-		}
-		return Result{}, false
-	}
-	if res, done := settled(); done {
-		t.Fatalf("Run returned %+v before the parser's fold window began", res)
-	}
-	var res Result
-	for done := false; !done; {
-		if ran := clk.Runnable() - start; ran >= 2*window {
-			t.Fatalf("the parser idle since it read both its streams to their end was not aborted within %s of run time (fold window %s)", ran, window)
-		}
-		if clk.advance(window/8) > 0 {
-			res, done = settled()
-		}
-	}
-	if ran := clk.Runnable() - start; ran <= window || ran > window+window/4 {
-		t.Fatalf("Run returned %+v %s of run time after the parser read both its streams to their end, want past the fold window %s and within a quarter of it after", res, ran, window)
-	}
-	select {
-	case <-aborted:
-	default:
-		t.Fatalf("Run returned %+v without aborting the parser", res)
-	}
-	if res.Status != StatusCanceled || !res.FallthroughToPassthrough {
-		t.Fatalf("result %+v, want canceled and retired", res)
+		})
 	}
 }
 
