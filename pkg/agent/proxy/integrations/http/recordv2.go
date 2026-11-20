@@ -232,7 +232,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// stream ended with the connection (EndedWithConnection) it is the
 		// client that stopped reading and closed, and the response is
 		// recorded as the client had it (FinalHTTP.RespReadInPart).
-		streamEnded := false
+		streamEnded, readClosed := false, false
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// Legacy encodeHTTP treats EOF after some bytes as
@@ -243,6 +243,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				// ended the stream (its tee gave up on a consumer) marked the
 				// mock incomplete for them.
 				streamEnded = errors.Is(err, io.EOF)
+				readClosed = !streamEnded
 				if !gotLastWritten.IsZero() {
 					resTs = gotLastWritten
 				}
@@ -317,6 +318,35 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			}
 			fault = partAnswerFault(sess)
 		}
+		method := requestMethod(finalReq)
+		if fault == nil && bodyEndsAtClose(finalResp, method) && !closeEnded(sess, streamEnded) {
+			_, _, status, _ := messageHead(finalResp, true)
+			if h.recordsNothing(ctx, finalReq, status, destPort, sess.Opts) {
+				// keploy records nothing of this call (a bypass rule's, a
+				// skip pass-through's, or a recordOne rule's duplicate of
+				// its endpoint's representative): there is no mock to
+				// leave out, and no test case over it is left out for it.
+				// Its read ended, so nothing more of the connection is
+				// read.
+				sess.MarkMockComplete()
+				return nil
+			}
+			// The body ends at the upstream's close, and its read did not
+			// end there (closeEnded): it is not known to be whole, and no
+			// fault is known to record it with. Recorded as far as it
+			// came, the call would be served a complete-looking shorter
+			// response at replay.
+			reason := supervisor.LeftOutCloseNotRead
+			if mark, ok := sess.TakeMockIncomplete(); ok {
+				reason = mark + ": " + reason
+			}
+			logger.Debug("V2 HTTP record: the response's body ends at the upstream's close, which its read did not reach; the exchange is left out")
+			sess.ReportLeftOut(&models.Mock{
+				Kind: models.HTTP,
+				Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+			}, reason)
+			return nil
+		}
 		final := &FinalHTTP{
 			Req:              finalReq,
 			Resp:             finalResp,
@@ -328,6 +358,27 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			Fault:            fault,
 		}
 		mock, err := h.buildHTTPMock(ctx, final, destPort, sess.ClientConnID, sess.Opts)
+		if err != nil && readClosed {
+			// The session closed the response's stream under its read (the
+			// supervisor's abort, once the parser's context has ended or the
+			// parser is retired) before the response's end came, as its
+			// Content-Length, its chunked framing or its head's end sets it:
+			// what was read of it does not parse whole because the read was
+			// cut there, which is no decode error. It is not known to be
+			// whole, and no fault is known to record it with. The streams are
+			// closed: nothing more of the connection can be read.
+			reason := supervisor.LeftOutReadAborted
+			if mark, ok := sess.TakeMockIncomplete(); ok {
+				reason = mark + ": " + reason
+			}
+			// The error can quote what the application sent: withheld.
+			logger.Debug("V2 HTTP record: the response's read was closed before its end; the exchange is left out", zap.Error(utils.WithholdInput(err)))
+			sess.ReportLeftOut(&models.Mock{
+				Kind: models.HTTP,
+				Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+			}, reason)
+			return nil
+		}
 		if err != nil {
 			// The error can quote what the application sent (a parser's
 			// does): withheld wherever it goes.
@@ -359,6 +410,13 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		}
 		if upgraded {
 			passUpgradeThrough(sess)
+			return nil
+		}
+		if tunnelFollows(method, status) {
+			// The connection is a tunnel from here (RFC 9110 9.3.6), whose
+			// bytes are no HTTP/1 exchange: there is nothing more of it for
+			// this parser to record, and that is said (ReportTunnel).
+			sess.ReportTunnel(requestTarget(finalReq))
 			return nil
 		}
 	}
@@ -500,6 +558,62 @@ func partAnswerFault(sess *supervisor.Session) *models.Fault {
 	return &models.Fault{Kind: models.FaultTruncate, Observed: "the upstream closed the connection partway through the answer"}
 }
 
+// bodyEndsAtClose reports whether resp, a response as readResponseV2 read it to
+// the request of method, has a body framed by the upstream's close: its final
+// head has come whole (messageHead), it has a body (not framedHeadOnly, nor a
+// CONNECT's 2xx, which ends at its head: what follows is the tunnel), and the
+// head names neither a Content-Length nor a chunked Transfer-Encoding, as
+// readResponseV2 frames it (parseHeaders).
+func bodyEndsAtClose(resp []byte, method string) bool {
+	head, _, status, ok := messageHead(resp, true)
+	if !ok || framedHeadOnly(method, status) || tunnelFollows(method, status) {
+		return false
+	}
+	contentLength, chunked, err := parseHeaders(head, true)
+	return err == nil && contentLength < 0 && !chunked
+}
+
+// tunnelFollows reports whether a response of status to a request of method
+// opens a tunnel: a CONNECT's 2xx, after whose head the connection carries
+// the tunnel's bytes (RFC 9110 9.3.6), not its body (RFC 9112 6.3).
+func tunnelFollows(method string, status int) bool {
+	return method == http.MethodConnect && status/100 == 2
+}
+
+// requestTarget is req's request-target, between its request line's first
+// and second space: a CONNECT's is the tunnel's host and port (RFC 9112
+// 3.2.3).
+func requestTarget(req []byte) string {
+	line, _, _ := bytes.Cut(req[emptyLinesBefore(req):], []byte("\n"))
+	_, rest, _ := strings.Cut(strings.TrimSpace(string(line)), " ")
+	target, _, _ := strings.Cut(rest, " ")
+	return target
+}
+
+// closeEnded reports whether a response's read, which ended at the stream's
+// end where streamEnded (io.EOF) and else at its reader's close, ended at the
+// upstream's close, the one end of a body framed by it (bodyEndsAtClose): the
+// stream ran out, not at a capture hole (Session.EndedAtHole), and the
+// upstream's side had ended with its FIN (Session.PeerEnded), which the relay
+// marks before it ends the stream; not with its reset, nor with no end of its
+// own, as where the relay ends the stream at the recording's stop or when its
+// read of a side fails otherwise. An observe-only capture (Opts.SkipTLSMITM),
+// with no relay to mark it, says instead that the stream ended because its
+// connection did (Session.EndedWithConnection): the client read the body to
+// that end.
+func closeEnded(sess *supervisor.Session, streamEnded bool) bool {
+	if !streamEnded {
+		return false
+	}
+	if _, hole := sess.EndedAtHole(fakeconn.FromDest); hole {
+		return false
+	}
+	if sess.Opts.SkipTLSMITM {
+		return sess.EndedWithConnection(fakeconn.FromDest)
+	}
+	return sess.PeerEnded(fakeconn.FromDest) == supervisor.PeerClosed
+}
+
 // recordFault builds and emits the mock of a call that got no answer, with the
 // fault it ended in, and ends the connection's recording: its stream has
 // ended.
@@ -630,8 +744,9 @@ func (h *HTTP) readResponseV2(stream *fakeconn.FakeConn, finalResp *[]byte, reqM
 // *finalResp each chunk it took bytes of ended and when the relay wrote it to
 // the client (respWrite): the answer's marks (answerMarks). The answer to a
 // HEAD, a 204, a 304 and a 101 is its head alone whatever its headers say
-// (framedHeadOnly): what came after the head in its read is no part of it (a
-// 101's: the switched-to protocol's), and stays on the stream.
+// (framedHeadOnly), and so is a CONNECT's 2xx (tunnelFollows): what came after
+// the head in its read is no part of it (a 101's: the switched-to protocol's;
+// a CONNECT's 2xx: the tunnel's), and stays on the stream.
 func (h *HTTP) readResponseWrites(stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string, writes *[]respWrite) (time.Time, error) {
 	return readMessageV2(stream, finalResp, &messageFrame{response: true, reqMethod: reqMethod, body: chunkedBody{response: true}}, writes)
 }
@@ -690,9 +805,10 @@ func readMessageV2(stream *fakeconn.FakeConn, msg *[]byte, frame *messageFrame, 
 // messageFrame finds where one HTTP/1 message ends as its bytes arrive. The
 // header section that governs its body (a response's final one, past any
 // interim 1xx: messageHead) says how the body is framed: none (the answer to a
-// HEAD, a 204, a 304 or a 101: framedHeadOnly; a request with neither field
-// below), a Content-Length, chunked framing (chunkedBody), or, for a response
-// with neither, the stream's end.
+// HEAD, a 204, a 304 or a 101: framedHeadOnly; a CONNECT's 2xx, whose head
+// opens a tunnel: tunnelFollows; a request with neither field below), a
+// Content-Length, chunked framing (chunkedBody), or, for a response with
+// neither, the stream's end.
 type messageFrame struct {
 	response  bool
 	reqMethod string      // a response's request's method
@@ -715,7 +831,9 @@ func (f *messageFrame) end(msg []byte) (int, bool, error) {
 	if err != nil {
 		return 0, false, err
 	}
-	if f.response && framedHeadOnly(f.reqMethod, status) {
+	if f.response && (framedHeadOnly(f.reqMethod, status) || tunnelFollows(f.reqMethod, status)) {
+		// What follows the head is no part of the response (a 101's: the
+		// switched-to protocol's; a CONNECT's 2xx: the tunnel's).
 		return bodyStart, true, nil
 	}
 	if contentLength >= 0 {
@@ -922,6 +1040,13 @@ func (h *HTTP) isPollLaneRequest(rawReq []byte) bool {
 // final one's status line) is an error wrapping io.ErrUnexpectedEOF, as a
 // response cut short is.
 func parseFinalResponse(m *FinalHTTP, req *http.Request) (resp *http.Response, cut bool, err error) {
+	defer func() {
+		// net/http reads a CONNECT's 2xx as a response whose body ends at
+		// the close: what follows its head is the tunnel's bytes.
+		if err == nil && tunnelFollows(req.Method, resp.StatusCode) {
+			resp.Body, resp.ContentLength = http.NoBody, 0
+		}
+	}()
 	rd := bytes.NewReader(m.Resp)
 	br := bufio.NewReader(rd)
 	interim, final := 0, 0 // final: where the response after the interims begins
@@ -988,6 +1113,72 @@ func decompressReadInPart(encoding string, data []byte, limit int64) ([]byte, er
 	return out, nil
 }
 
+// recordedDestPort is the destination port a call is recorded and its
+// pass-through decided with: the resolved one, opts.DstCfg.Port, where it is
+// set. The V2 recorder derives destPort from the DestStream FakeConn, which in
+// proxyless (observe-only) capture has no real remote port (0) — breaking
+// port-keyed telemetry-passthrough matching. routeEgressToParser sets
+// DstCfg.Port authoritatively; equal to the FakeConn port on the proxy path,
+// so this is a no-op there.
+func recordedDestPort(destPort uint, opts models.OutgoingOptions) uint {
+	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
+		return opts.DstCfg.Port
+	}
+	return destPort
+}
+
+// passThroughHost is the host a pass-through rule is matched against: req's
+// Host, else its URL's.
+func passThroughHost(req *http.Request) string {
+	if req.Host == "" && req.URL != nil {
+		return req.URL.Host
+	}
+	return req.Host
+}
+
+// passThrough is buildHTTPMock's pass-through decision for req to destPort
+// (recordedDestPort): skip where keploy records nothing of the call, as a
+// bypass rule (utils.IsPassThrough) or an egress pass-through rule in skip
+// mode says; else rule, where an egress pass-through rule matched it
+// (matched), which keeps one representative exchange (recordOne).
+func (h *HTTP) passThrough(ctx context.Context, req *http.Request, destPort uint, opts models.OutgoingOptions) (skip bool, rule models.PassThroughRule, matched bool) {
+	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
+		h.Logger.Debug("V2: request is a passThrough, skipping mock emit",
+			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+		return true, rule, false
+	}
+	rule, matched = passThroughRecordDecision(opts, passThroughHost(req), uint32(destPort), req.Method, req.URL, req.Header)
+	if matched && rule.Mode == models.PassThroughSkip {
+		h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+		return true, rule, matched
+	}
+	return false, rule, matched
+}
+
+// recordsNothing reports whether keploy records nothing of the call whose
+// request is reqBytes, to destPort, answered with status, as buildHTTPMock
+// decides it: a pass-through (passThrough), or a recordOne rule's call that
+// its ptRecorder drops as a duplicate of the representative its endpoint
+// has kept (ptRecorder.dropsDuplicate), which it asks without taking: the
+// call is not recorded here, so it is no representative. A request that
+// does not parse is not known to record nothing.
+func (h *HTTP) recordsNothing(ctx context.Context, reqBytes []byte, status int, destPort uint, opts models.OutgoingOptions) bool {
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBytes)))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Host", req.Host)
+	destPort = recordedDestPort(destPort, opts)
+	skip, rule, matched := h.passThrough(ctx, req, destPort, opts)
+	return skip || matched && h.ptRecorder.dropsDuplicate(ptRecordKeyOf(opts, req, destPort, rule), status)
+}
+
+// ptRecordKeyOf is the endpoint key a recordOne rule's call to destPort
+// (recordedDestPort) is deduplicated by (ptRecordKey).
+func ptRecordKeyOf(opts models.OutgoingOptions, req *http.Request, destPort uint, rule models.PassThroughRule) string {
+	return ptRecordKey(opts.PassThroughScope, req.Method, passThroughHost(req), uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
+}
+
 // buildHTTPMock constructs a *models.Mock with the same shape the legacy
 // parseFinalHTTP produces. Returns (nil, nil) when the request is a
 // pass-through (IsPassThrough true) so the caller skips emission.
@@ -1000,14 +1191,7 @@ func decompressReadInPart(encoding string, data []byte, limit int64) ([]byte, er
 // input bytes (modulo timestamps, which are allowed to differ because
 // legacy uses time.Now() and V2 uses chunk timestamps).
 func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
-	// Prefer the resolved destination port. The V2 recorder derives destPort from
-	// the DestStream FakeConn, which in proxyless (observe-only) capture has no
-	// real remote port (0) — breaking port-keyed telemetry-passthrough matching.
-	// routeEgressToParser sets DstCfg.Port authoritatively; equal to the FakeConn
-	// port on the proxy path, so this is a no-op there.
-	if opts.DstCfg != nil && opts.DstCfg.Port != 0 {
-		destPort = opts.DstCfg.Port
-	}
+	destPort = recordedDestPort(destPort, opts)
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
 		// The parser's error quotes the request: withheld, as the error
@@ -1090,7 +1274,9 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 		// A response with no body by rule (to a HEAD, a 1xx, 204 or 304)
 		// keeps the Content-Length it was sent with: a HEAD's is the size of
 		// the body a GET gets (an S3 client's Stat), not its own 0.
-		if !responseHasNoBody(req.Method, respParsed.StatusCode) {
+		// Nor is one set on a CONNECT's 2xx, whose head opens a tunnel
+		// (RFC 9110 9.3.6: it carries no Content-Length).
+		if !responseHasNoBody(req.Method, respParsed.StatusCode) && !tunnelFollows(req.Method, respParsed.StatusCode) {
 			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
 		}
 	}
@@ -1111,9 +1297,8 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 		"operation": req.Method,
 		"connID":    connID,
 	}
-	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
-		h.Logger.Debug("V2: request is a passThrough, skipping mock emit",
-			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+	skip, rule, matched := h.passThrough(ctx, req, destPort, opts)
+	if skip {
 		return nil, nil
 	}
 
@@ -1126,19 +1311,11 @@ func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, c
 	var ptRecordOne bool
 	var ptKey string
 	{
-		ptHost := req.Host
-		if ptHost == "" && req.URL != nil {
-			ptHost = req.URL.Host
-		}
-		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
-			if rule.Mode == models.PassThroughSkip {
-				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
-				return nil, nil
-			}
+		if matched {
 			// recordOne: defer the dedup decision to emit time (below) so a later
 			// drop can't burn the one representative and leave zero mocks.
 			ptRecordOne = true
-			ptKey = ptRecordKey(opts.PassThroughScope, req.Method, ptHost, uint32(destPort), req.URL.Path, rule.QueryKeys, req.URL.Query())
+			ptKey = ptRecordKeyOf(opts, req, destPort, rule)
 			meta["type"] = "config"
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}
