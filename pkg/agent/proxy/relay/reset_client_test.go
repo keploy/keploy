@@ -5,6 +5,7 @@ package relay
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -26,13 +27,20 @@ type netConnOf struct{ net.Conn }
 
 func (c netConnOf) NetConn() net.Conn { return c.Conn }
 
-// readsReset reports whether the client's next read of app is a reset.
+// readsReset is nil when the client's next read of app is a reset, and what
+// it read otherwise: a byte (as a close_notify alert's would be, read ahead of
+// the reset), the end of the stream, or another error.
 func readsReset(t *testing.T, app net.Conn) error {
 	t.Helper()
 	_ = app.SetReadDeadline(time.Now().Add(tcpSettle))
-	_, err := app.Read(make([]byte, 1))
-	if neterr.IsConnReset(err) {
+	n, err := app.Read(make([]byte, 1))
+	switch {
+	case n > 0:
+		return errors.New("a byte")
+	case neterr.IsConnReset(err):
 		return nil
+	case err == nil:
+		return errors.New("no byte and no error")
 	}
 	return err
 }
@@ -91,8 +99,32 @@ func TestResetClientOnCloseResetsUnderATLSLayerWithNoCloseNotify(t *testing.T) {
 		t.Fatal("resetClientOnClose = false under a TLS layer once the client read every byte; want a reset")
 	}
 	_ = srv.Close() // the proxy's close: the socket under it is closed already
-	if err := readsReset(t, app); err != nil {
+	if err := readsReset(t, cli); err != nil {
 		t.Errorf("the HTTPS client read %v after the close; want a reset, not the close_notify's clean end", err)
+	}
+}
+
+// A socket that can no longer say what its client took (a failed SIOCOUTQ,
+// SO_NWRITE or SIO_TCP_INFO, or counts outside the fence on Windows) ends the
+// wait at once, however long the grace: the proxy's close stays a FIN.
+func TestResetOnceTakenStopsWhenTheSocketCannotSay(t *testing.T) {
+	t.Parallel()
+	_, raw := loopbackPair(t)
+	tc := tcpConnUnder(raw)
+	if tc == nil {
+		t.Fatal("no TCP socket under the proxy's end")
+	}
+	done := make(chan bool, 1)
+	go func() {
+		done <- resetOnceTaken(context.Background(), raw, tc, time.Hour, func(uintptr) (all, known bool) { return false, false })
+	}()
+	select {
+	case reset := <-done:
+		if reset {
+			t.Error("resetOnceTaken = true when the socket cannot say; want the close kept a FIN")
+		}
+	case <-time.After(tcpSettle):
+		t.Fatalf("resetOnceTaken still waited %v after the socket could not say", tcpSettle)
 	}
 }
 
