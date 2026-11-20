@@ -75,8 +75,15 @@ func TestAwaitPeerReset(t *testing.T) {
 			t.Fatal("AwaitPeerReset returned at the peer's FIN; want it to wait on to the peer's reset")
 		case <-time.After(waitedOn):
 		}
-		_ = c.SetLinger(0)
+		// The peer closes its socket, and the next bytes sent it meet its
+		// reset, on every OS. The close itself sends none on Windows, even
+		// an abortive one (SO_LINGER 0), once the socket has sent its FIN
+		// (measured on Windows 11: its end stays in FIN_WAIT_2, and this
+		// side in CLOSE_WAIT).
 		_ = c.Close()
+		if _, err := s.Write([]byte("bytes the peer will not take")); err != nil {
+			t.Fatal(err)
+		}
 		returnsWithin(t, returned, "at the peer's reset")
 	})
 	t.Run("ctx's end", func(t *testing.T) {
