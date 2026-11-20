@@ -459,6 +459,69 @@ func (r *sentRequest) bytes() []byte {
 	return r.joined
 }
 
+// restToCome reports whether the request read so far is the start of a
+// recorded request and no recorded request whole: its bytes begin a generic
+// recording's request in db and are fewer than it (begins), and they are no
+// generic recording's request, compared as bytes (findExactMatch). The rest
+// of such a request is still to come, and the parser reads it before the
+// request is matched (decodeGeneric). A store that cannot be read holds no
+// recording to begin: the matcher reports its error.
+func restToCome(db integrations.MockMemDb, pieces [][]byte) bool {
+	mocks, _ := db.GetSessionMocks()
+	req := newSentRequest(pieces)
+	generic := make([]*models.Mock, 0, len(mocks))
+	begins := false
+	for _, mock := range mocks {
+		if mock.Kind != models.GENERIC {
+			continue
+		}
+		generic = append(generic, mock)
+		begins = begins || req.begins(mock.Spec.GenericRequests)
+	}
+	return begins && findExactMatch(generic, pieces, true) == -1
+}
+
+// begins reports whether the request's bytes are the first bytes of
+// recorded's, fewer than them: each recorded piece's bytes read as
+// isRecordedBytes reads them, and a piece of unknown length
+// (recordedPieceLen) begun by none.
+func (r *sentRequest) begins(recorded []models.Payload) bool {
+	b := r.bytes()
+	for _, p := range recorded {
+		n := recordedPieceLen(p)
+		if n < 0 {
+			return false
+		}
+		if len(b) < n {
+			// The request ends inside this piece.
+			return recordedStartsWith(p, b)
+		}
+		if !recordedStartsWith(p, b[:n]) {
+			return false
+		}
+		b = b[n:]
+	}
+	// As long as the recording, or longer.
+	return false
+}
+
+// recordedStartsWith reports whether the recorded piece p's bytes, read as
+// isRecordedBytes reads them, start with b.
+func recordedStartsWith(p models.Payload, b []byte) bool {
+	if len(p.Message) != 1 {
+		return false
+	}
+	msg := p.Message[0]
+	switch msg.Type {
+	case models.String:
+		return len(msg.Data) >= len(b) && msg.Data[:len(b)] == string(b)
+	case binaryPayload:
+		data, err := util.DecodeBase64(msg.Data)
+		return err == nil && bytes.HasPrefix(data, b)
+	}
+	return false
+}
+
 // cutLikeRecorded returns the request's bytes cut where recorded's pieces
 // end, to be compared with them piece by piece. nil when the request is not
 // as long as the recording (it cannot be the same bytes), when a recorded
