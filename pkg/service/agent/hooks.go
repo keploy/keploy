@@ -39,6 +39,16 @@ type AppStartHook interface {
 	AppStartsAnew(ctx context.Context, testSetID string, first time.Time) error
 }
 
+// ClockRunTaker is an optional AgentHooks capability: TakeClockRun takes the
+// run id the process that started the agent hands it (ClockRunStarter, POST
+// /agent/hooks/clock-run), before any call that can move the app's clock.
+// Hooks that keep a run's timeline on clock files another run may have left
+// (the enterprise time-freeze) mark that timeline with it. An agent whose
+// hooks lack it answers the route 404, as an agent older than the route.
+type ClockRunTaker interface {
+	TakeClockRun(ctx context.Context, run string) error
+}
+
 // AppClockReader is an optional AgentHooks capability: AppClock is the
 // instant the app's clock showed at the real instant real, as the hooks moved
 // it (the enterprise time-freeze), false where they cannot tell. The agent
@@ -138,6 +148,16 @@ type StartupHook interface {
 type StartupHooks struct{}
 
 func (h *StartupHooks) GetArgs(ctx context.Context) []string { return nil }
+
+// ClockRunStarter is an optional StartupHook capability: ClockRun is the run
+// id the client hands each agent it set up once the agent answers (the
+// agent's ClockRunTaker), "" for none. It travels over an agent route, never
+// on the agent's command line: an agent older than its starter (a
+// user-pinned agent image) answers the route 404 and runs on without it,
+// where a flag it does not know would end it.
+type ClockRunStarter interface {
+	ClockRun(ctx context.Context) string
+}
 
 var StartupAgentHook StartupHook = &StartupHooks{}
 

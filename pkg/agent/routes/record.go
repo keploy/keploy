@@ -234,6 +234,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
 		r.Post("/hooks/app-starts-anew", a.HandleAppStartsAnew)
+		r.Post("/hooks/clock-run", a.HandleClockRun)
 	})
 }
 
@@ -308,6 +309,32 @@ func (a *Agent) HandleAppStartsAnew(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleClockRun hands the hooks the run id of the process that started the
+// agent (agent.ClockRunTaker). Hooks that take none answer 404, as an agent
+// older than the route does: the starter goes on without one. An id the
+// hooks refuse is answered 409 with their reason.
+func (a *Agent) HandleClockRun(w http.ResponseWriter, r *http.Request) {
+	h, ok := agent.ActiveHooks.(agent.ClockRunTaker)
+	if !ok {
+		http.Error(w, "this keploy agent takes no run id", http.StatusNotFound)
+		return
+	}
+	var req models.ClockRunReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Run == "" {
+		http.Error(w, "the run id is empty", http.StatusBadRequest)
+		return
+	}
+	if err := h.TakeClockRun(r.Context(), req.Run); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 }
