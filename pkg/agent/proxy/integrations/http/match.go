@@ -505,16 +505,17 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 				return false, nil, nil, err
 			}
 
-			// Strict enforcement (replay path): every candidate's request-body
-			// fields must match the recorded body except the user's configured
-			// body noise and any learned req_body_noise paths. A drift on a
-			// non-noise field rejects that candidate, so a changed-but-unmarked
-			// field fails the test instead of being silently served. This applies
+			// Strict enforcement (replay path): a candidate's recorded body
+			// must be the call's, both ways and whole, except the user's
+			// configured body noise and any learned req_body_noise paths. A
+			// drift on a non-noise field, a field only one side holds among
+			// them, rejects that candidate, so a changed-but-unmarked field
+			// fails the test instead of being silently served. This applies
 			// even to candidates with no learned noise — strict mode value-checks
 			// the whole body, not just the lenient key/schema match above.
 			beforeStrict := len(bodyMatched)
 			if schemaNoiseStrict {
-				bodyMatched = h.filterStrictNoiseMatches(noiseEngine, bodyMatched, input.body, userBodyNoise)
+				bodyMatched = h.filterStrictNoiseMatches(bodyMatched, input.body, userBodyNoise)
 			}
 
 			if len(bodyMatched) == 0 {
@@ -2069,22 +2070,28 @@ func (h *HTTP) consumeWith(ctx context.Context, matchedMock *models.Mock, mockDb
 }
 
 // filterStrictNoiseMatches enforces strict request-body matching on the
-// replay path. Under strict enforcement EVERY candidate is value-compared
-// against its recorded body — not just those carrying learned req_body_noise.
-// A candidate is dropped when a field OUTSIDE the known-noise set (configured
-// global/user body noise ∪ anything the mock already learned) drifted from the
-// recorded body, i.e. an unmarked value or type changed. So a mock with no
-// learned noise no longer passes by default: only fields explicitly marked as
+// replay path: it keeps only the candidates that are recordings of this very
+// call, those whose recorded body is the call's outside the known-noise set
+// (configured global/user body noise and anything the mock learned, a
+// learned path still held to its type), compared both ways and whole
+// (mocknoise.SameCallDrift, as sameCallBodies compares them). A field only
+// the call holds, a field only the recording holds, an unmarked value or type
+// that changed, or an array with another element or length drops the
+// candidate, so a changed-but-unmarked input fails the match instead of
+// being served another call's recording as the call's own. A candidate with
+// no learned noise passes only so too: only fields explicitly marked as
 // noise may differ.
 //
-// It delegates to schemanoise.Engine.StrictReject. The JSON/form comparison and
-// known-noise merge are owned by the shared engine + httpNoiseAdapter; the
-// returned drift names the offending field path(s) for the rejection log.
-func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*models.Mock, reqBody []byte, userBodyNoise map[string][]string) []*models.Mock {
+// Each recording's body is read once (ownBodies), the call's once per call;
+// the drift names the offending field path(s) for the rejection log, and the
+// miss's report names them as JSONBodyDiffs reads them.
+func (h *HTTP) filterStrictNoiseMatches(candidates []*models.Mock, reqBody []byte, userBodyNoise map[string][]string) []*models.Mock {
+	live := mocknoise.NewJSONBody(reqBody)
 	var kept []*models.Mock
 	for _, m := range candidates {
-		allowed, drift := eng.StrictReject(m, reqBody, userBodyNoise)
-		if allowed {
+		recorded, ok := h.ownBodies.read(m)
+		drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded, ok, live, userBodyNoise)
+		if len(drift) == 0 {
 			kept = append(kept, m)
 			continue
 		}
@@ -2710,6 +2717,20 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		for _, f := range guarded {
 			if !slices.ContainsFunc(fieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == f.diff.Path }) {
 				fieldDiffs = append(fieldDiffs, f.diff)
+			}
+		}
+		// The strict check compares JSON bodies both ways and whole
+		// (filterStrictNoiseMatches): a field it refused at that the
+		// diffs above do not name (an array element before the last, a
+		// learned field of another type) is named too, by its path alone.
+		// A form is refused only by the patterns that guard it (named
+		// above); its other fields are no reason. (A call that is not JSON
+		// against a JSON recording differs whole, which names no field.)
+		if pkg.IsJSON([]byte(mockReq.Body)) {
+			for _, p := range h.bodyFieldsDiffering(closestMock, diffBody, userBodyNoise) {
+				if !slices.ContainsFunc(fieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == p }) {
+					fieldDiffs = append(fieldDiffs, models.MockFieldDiff{Path: p, Kind: models.DiffKindValueChanged})
+				}
 			}
 		}
 	}
