@@ -433,7 +433,7 @@ func TestRunTestSet_ASetNoTestOfWhichOpenedItsWindowReadsNoSetEnd(t *testing.T) 
 				if kept {
 					// Kept for a later set: read running, not stopped.
 					h.replayer.keepAliveStop = func() string { return "" }
-					h.replayer.isLastTestSet, h.replayer.finalAttempt = false, true
+					h.replayer.noLaterSetRuns, h.replayer.finalAttempt = false, true
 					h.runServing(t)
 				} else {
 					h.run(t)
@@ -605,18 +605,18 @@ func TestRunTestSet_ACallTheAppMakesAsItStopsIsNamedWithTheSwitchOff(t *testing.
 // (a docker compose stack's).
 func TestRunTestSet_TheKeptAppIsStoppedBeforeTheReadOnlyAtTheRunsEnd(t *testing.T) {
 	for _, c := range []struct {
-		name        string
-		last, final bool
-		noStop      bool
-		wantStop    bool
-		noLater     bool
+		name     string
+		final    bool
+		noStop   bool
+		wantStop bool
+		// noLater: no later set runs (noLaterSetRuns): the run's last set
+		// that runs.
+		noLater bool
 	}{
-		{"the run's last set, final attempt", true, true, false, true, false},
-		{"an earlier set", false, true, false, false, false},
-		{"the last set, an attempt that others follow", true, false, false, false, false},
-		{"the last set, final attempt, an app keploy does not stop", true, true, true, false, false},
-		{"the last set that runs, final attempt", false, true, false, true, true},
-		{"the last set that runs, an attempt that others follow", false, false, false, false, true},
+		{"the run's last set that runs, final attempt", true, false, true, true},
+		{"an earlier set", true, false, false, false},
+		{"the last set that runs, an attempt that others follow", false, false, false, true},
+		{"the last set that runs, final attempt, an app keploy does not stop", true, true, false, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			provenOn(t, false)
@@ -627,8 +627,7 @@ func TestRunTestSet_TheKeptAppIsStoppedBeforeTheReadOnlyAtTheRunsEnd(t *testing.
 			if !c.noStop {
 				h.replayer.keepAliveStop = func() string { stops.Add(1); return "" }
 			}
-			h.replayer.isLastTestSet, h.replayer.finalAttempt = c.last, c.final
-			h.replayer.noLaterSetRuns = c.noLater
+			h.replayer.noLaterSetRuns, h.replayer.finalAttempt = c.noLater, c.final
 			post := filepath.Join(t.TempDir(), "post-ran")
 			h.replayer.testSetConf = postScriptTouches{path: post}
 			var postAtRead atomic.Bool

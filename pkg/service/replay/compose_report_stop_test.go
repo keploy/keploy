@@ -109,27 +109,23 @@ func TestAComposeAppIsStoppedBeforeTheReportWithTheSwitchOff(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		serveTest  bool
-		last       bool
 		finalTry   bool
 		stops      int
 		named      string
 		postBefore bool
-		// noLater: no later set runs (noLaterSetRuns): each is wholly
-		// ignored or has no test case.
+		// noLater: no later set runs (noLaterSetRuns): the run's last set
+		// that runs.
 		noLater bool
 	}{
-		{"a stack the set brings up for itself", false, false, false, 1, stopNamed, true, false},
-		{"a kept stack's last set, its final attempt", true, true, true, 1, stopNamed, true, false},
-		{"a kept stack's earlier set", true, false, true, 0, "", false, false},
-		{"a kept stack's last set, an attempt that another follows", true, true, false, 0, "", false, false},
-		{"a kept stack's last set that runs, its final attempt", true, false, true, 1, stopNamed, true, true},
-		{"a kept stack's last set that runs, an attempt that another follows", true, false, false, 0, "", false, true},
+		{"a stack the set brings up for itself", false, false, 1, stopNamed, true, false},
+		{"a kept stack's last set that runs, its final attempt", true, true, 1, stopNamed, true, true},
+		{"a kept stack's earlier set", true, true, 0, "", false, false},
+		{"a kept stack's last set that runs, an attempt that another follows", true, false, 0, "", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &composeReads{}
 			h := composeReadHarness(t, c)
-			h.replayer.isLastTestSet, h.replayer.finalAttempt = tc.last, tc.finalTry
-			h.replayer.noLaterSetRuns = tc.noLater
+			h.replayer.noLaterSetRuns, h.replayer.finalAttempt = tc.noLater, tc.finalTry
 			status := h.runTestSet(t, tc.serveTest)
 			if status != models.TestSetStatusPassed {
 				t.Fatalf("status %s (reason %q), want PASSED: a lookup the app makes as it stops fails nothing", status, h.report.report.FailureReason)
@@ -159,9 +155,9 @@ func TestAComposeAppIsStoppedBeforeTheReportWithTheSwitchOff(t *testing.T) {
 	// once it is staged on the agent, whatever the switch.
 	c := &composeReads{}
 	h := composeReadHarness(t, c)
-	h.replayer.isLastTestSet, h.replayer.finalAttempt = true, true
+	h.replayer.noLaterSetRuns, h.replayer.finalAttempt = true, true
 	h.runServing(t)
-	h.replayer.isLastTestSet = false
+	h.replayer.noLaterSetRuns = false
 	if status := h.runServing(t); status != models.TestSetStatusPassed {
 		t.Fatalf("the set after the stop: status %s, want PASSED", status)
 	}
@@ -185,7 +181,7 @@ func TestAComposeAppIsStoppedBeforeTheReportWithTheSwitchOff(t *testing.T) {
 	for _, serveTest := range []bool{false, true} {
 		c = &composeReads{}
 		h = composeReadHarness(t, c)
-		h.replayer.isLastTestSet, h.replayer.finalAttempt = true, true
+		h.replayer.noLaterSetRuns, h.replayer.finalAttempt = true, true
 		h.runTestSet(t, serveTest)
 		if stops, _, _ := c.counts(); stops != 1 {
 			t.Fatalf("under the switch (kept stack: %v): %d stops of the app's container, want one", serveTest, stops)

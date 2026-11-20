@@ -167,7 +167,7 @@ func TestASetsEndDrainsOnlyWhenItStoppedItsApplication(t *testing.T) {
 			h.replayer.instrumentation = instr
 			h.replayer.markPIDMaps(context.Background())
 			stops := 0
-			h.replayer.isLastTestSet, h.replayer.finalAttempt = c.last, c.final
+			h.replayer.noLaterSetRuns, h.replayer.finalAttempt = c.last, c.final
 			h.replayer.keepAliveStop = func() string { stops++; return "" }
 			status := h.runServing(t)
 			if status != models.TestSetStatusPassed {

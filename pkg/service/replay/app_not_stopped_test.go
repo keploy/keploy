@@ -76,7 +76,7 @@ func TestTheLastSetStopsTheAppKeptAcrossSets(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPartialRunHarness(t, 2, 0)
 			stops := 0
-			h.replayer.isLastTestSet, h.replayer.finalAttempt = tc.last, tc.final
+			h.replayer.noLaterSetRuns, h.replayer.finalAttempt = tc.last, tc.final
 			h.replayer.keepAliveStop = func() string { stops++; return tc.killed }
 			status := h.runServing(t)
 			if stops != tc.stops || status != tc.status || (h.report.report.AppNotStopped != "") != tc.disclosed {

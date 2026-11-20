@@ -82,16 +82,22 @@ func wholeSetIgnored(ignored map[string][]string, id string) bool {
 }
 
 // lastSetThatRuns is the index in testSets of the last set that begins its
-// session on the agent, where the final attempt stops the application
+// session on the agent (noLaterSetRuns), -1 for none: its last test case
+// carries KEPLOY-LAST-TESTCASE, and its final attempt stops the application
 // --keep-app-alive keeps across sets (P101-c), or, with the proven switch
-// off, a docker compose stack reused across them (stopForSetEndRead); -1 for
-// none. A set wholly
-// ignored (wholeSetIgnored), or with no test case, returns before it begins
-// one (RunTestSet) and runs nothing of the app's: a stop at the run's
-// teardown, after every read, would leave its closes in no verdict. A set
-// whose test cases cannot be read here counts as one that runs: stopping the
-// app before a set that runs would fail its tests, and RunTestSet fails one
-// that cannot be read.
+// off, a docker compose stack reused across them (stopForSetEndRead). A set
+// wholly ignored (wholeSetIgnored), or with no test case, returns before it
+// begins one (RunTestSet) and runs nothing of the app's: a stop at the run's
+// teardown, after every read, would leave its closes in no verdict, and no
+// test case would carry KEPLOY-LAST-TESTCASE.
+// A set whose test cases cannot be read here counts as one that runs:
+// stopping the app before a set that runs would fail its tests, and
+// RunTestSet fails one that cannot be read. So do the two other sets that
+// return before their session, each FAILED, which fails the run: one refused
+// as half-written (refuseInterruptedSet) and one none of whose -t-named test
+// cases is recorded (failSetUnrun). After a trailing one of those, no
+// request carries the header and the kept application stops only in the
+// run's teardown, on a run that has already failed.
 func (r *Replayer) lastSetThatRuns(ctx context.Context, testSets []string) int {
 	for i := len(testSets) - 1; i >= 0; i-- {
 		if wholeSetIgnored(r.config.Test.IgnoredTests, testSets[i]) {

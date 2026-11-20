@@ -96,7 +96,7 @@ func (r *Replayer) stopForSetEndRead(stopAppBeforeReport func()) func() {
 	switch {
 	case stopAppBeforeReport != nil:
 		return stopAppBeforeReport
-	case (r.isLastTestSet || r.noLaterSetRuns) && r.finalAttempt && r.keepAliveStop != nil:
+	case r.noLaterSetRuns && r.finalAttempt && r.keepAliveStop != nil:
 		return func() { r.keepAliveStop() }
 	}
 	return nil

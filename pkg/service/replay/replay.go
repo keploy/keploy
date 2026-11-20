@@ -666,15 +666,26 @@ type Replayer struct {
 	noAgent         bool // runsWithoutAgent, decided once in NewReplayer and handed to its hooks
 	// realPushed: this run's agent holds its mock.real (mockOutgoingForTestSet).
 	realPushed     atomic.Bool
-	isLastTestSet  bool
 	isLastTestCase bool
 	// noLaterSetRuns: no set after the one running begins its session on the
 	// agent (lastSetThatRuns): each is wholly ignored or has no test case.
-	// The set is then the last that runs, and its final attempt stops the
-	// application --keep-app-alive keeps across sets (P101-c), or, with the
-	// proven switch off, a docker compose stack reused across them. Start
-	// works it out only for a run whose application is kept across its sets.
+	// The set is then the last that runs, not only the last by its place: its
+	// last test case carries KEPLOY-LAST-TESTCASE (an SDK's finalization, its
+	// coverage among it), and its final attempt stops the application
+	// --keep-app-alive keeps across sets (P101-c), or, with the proven switch
+	// off, a docker compose stack reused across them.
 	noLaterSetRuns bool
+	// noSetFollows: the set running is the run's last by its place: every
+	// other set of the run has returned, its report written, before it
+	// begins. Under docker compose it, not the last set that runs
+	// (noLaterSetRuns), calls the run's AfterTestRun at its end, after its
+	// own report: the hook reads the report of every set it is handed, and a
+	// later set wholly ignored, or with no test case, writes its report only
+	// as it returns. When that set runs nothing, the hook is called after the
+	// run, as for a run that ended early; with a stack per set its agent went
+	// down with the last stack, and the hook's call to it is left out
+	// (withoutAgent).
+	noSetFollows bool
 	// finalAttempt: the set's attempt now running is the last one the run
 	// can give it (MaxFlakyChecks); no attempt of it comes after.
 	finalAttempt bool
@@ -1322,7 +1333,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	var keepAliveAppErr atomic.Pointer[models.AppError]
 
 	// This run's last set, and its final attempt, are this run's alone.
-	r.keepAliveStop, r.isLastTestSet, r.noLaterSetRuns, r.finalAttempt = nil, false, false, false
+	r.keepAliveStop, r.noLaterSetRuns, r.noSetFollows, r.finalAttempt = nil, false, false, false
 	r.composeAppStopped = false
 	if effectiveKeepAlive {
 		// Under the proven switch the app runs under a context of its own,
@@ -1404,17 +1415,18 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.testRunID = testRunID
 	r.firstRun = true
 	r.keptAppWaited = false
-	// The application kept across sets, by --keep-app-alive or in a docker
-	// compose stack reused across them, stops at the end of the last set
-	// that runs (P101-c, stopForSetEndRead), not of the last set by its
-	// place: a later set that is wholly ignored or has no test case returns
-	// before it begins its session on the agent, and the app's stop in the
-	// run's teardown, after every read, would be in no verdict, nor in the
-	// report's read of the calls the app made after its last test.
-	keptAppStopsAt := len(testSets) - 1
-	if effectiveKeepAlive {
-		keptAppStopsAt = r.lastSetThatRuns(ctx, testSets)
-	}
+	// What the run's last set does is done by the last set that runs
+	// (noLaterSetRuns), not by the last set by its place: a later set that
+	// is wholly ignored or has no test case returns before it begins its
+	// session on the agent, and runs nothing of the app's. Done after it,
+	// the application kept across sets, by --keep-app-alive or in a docker
+	// compose stack reused across them, would stop in the run's teardown,
+	// after every read, in no verdict, nor in the report's read of the calls
+	// the app made after its last test (P101-c, stopForSetEndRead); and no
+	// test case would carry KEPLOY-LAST-TESTCASE. The run's AfterTestRun is
+	// not among them: it reads every set's report, so it waits for the last
+	// set by its place (noSetFollows).
+	lastRuns := r.lastSetThatRuns(ctx, testSets)
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -1437,13 +1449,9 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 		}
 
-		// check if its the last testset running -
-
-		if i == len(testSets)-1 {
-			r.isLastTestSet = true
-		}
-		r.noLaterSetRuns = i >= keptAppStopsAt
-		// Mirror of isLastTestSet but for the first-testset boundary:
+		r.noLaterSetRuns = i >= lastRuns
+		r.noSetFollows = i == len(testSets)-1
+		// Mirror of noLaterSetRuns but for the first-testset boundary:
 		// the first set to reach the application's wait, not the set
 		// at index 0 (keptAppWaited). Set BEFORE the RunTestSet call so
 		// the waitForAppReady call sites in RunTestSet observe the
@@ -1931,11 +1939,12 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		//executing afterTestRun hook, executed after running all the test-sets
 		if !r.afterTestRunCalled {
 			// Under docker compose without a kept stack, the agent is part
-			// of each set's stack and goes down with it, so the last set
-			// listed calls this hook while its agent is up (RunTestSet).
-			// One that ran nothing (ignored, empty, or ended early) leaves
-			// no agent to answer here: the run's hooks still run, all but
-			// the agent's (withoutAgent).
+			// of each set's stack and goes down with it, so the run's last
+			// set by its place calls this hook at its end, after its
+			// report, while its agent is up (RunTestSet, noSetFollows).
+			// One that ran nothing (wholly ignored, with no test case, or
+			// ended early) leaves no agent to answer here: the run's hooks
+			// still run, all but the agent's (withoutAgent).
 			hookCtx := ctx
 			if cmdType == utils.DockerCompose && r.instrument && !effectiveKeepAlive {
 				hookCtx = withoutAgent(ctx)
@@ -3011,7 +3020,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			composeRestart = stopper
 			r.pidMarked = false
 		}
-		if ok && !provenswitch.On() && (!serveTest || (r.isLastTestSet || r.noLaterSetRuns) && r.finalAttempt) {
+		if ok && !provenswitch.On() && (!serveTest || r.noLaterSetRuns && r.finalAttempt) {
 			stopAppBeforeReport = func() {
 				_, err := stopper.StopComposeApp(context.WithoutCancel(runTestSetCtx))
 				r.composeAppStopped = true
@@ -4160,8 +4169,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		for idx, testCase := range testsToRun {
 			tmplPass.reach(testCase)
 
-			// check if its the last test case running
-			if idx == len(testsToRun)-1 && r.isLastTestSet && len(streamingTests) == 0 {
+			// The run's last test case, of the last set that runs
+			// (noLaterSetRuns), carries KEPLOY-LAST-TESTCASE.
+			if idx == len(testsToRun)-1 && r.noLaterSetRuns && len(streamingTests) == 0 {
 				r.isLastTestCase = true
 				testCase.IsLast = true
 			}
@@ -5404,7 +5414,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			// Set isLastTestCase on the last deferred streaming test: it is the true last
 			// test to execute in the entire run, so finalization must trigger here, not in Phase 1.
-			if i == len(streamingTests)-1 && r.isLastTestSet {
+			if i == len(streamingTests)-1 && r.noLaterSetRuns {
 				r.isLastTestCase = true
 				tc.IsLast = true
 			}
@@ -6492,7 +6502,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// --keep-app-alive keeps across sets before its end's read, as a set
 		// stops its own (P101-c): no set after it begins a session
 		// (noLaterSetRuns), and no attempt of it follows.
-		if stopAppBeforeSetEnd == nil && serveTest && (r.isLastTestSet || r.noLaterSetRuns) && r.finalAttempt && r.keepAliveStop != nil {
+		if stopAppBeforeSetEnd == nil && serveTest && r.noLaterSetRuns && r.finalAttempt && r.keepAliveStop != nil {
 			stopAppBeforeSetEnd = r.keepAliveStop
 		}
 		if stopAppBeforeSetEnd != nil {
@@ -8148,10 +8158,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// In Docker Compose mode, RunTestSet's defer block stops the agent container.
-	// We must call AfterTestRun HERE (before defer fires) while the agent is alive.
+	// We must call AfterTestRun HERE (before defer fires) while the agent is alive,
+	// in the run's last set by its place (noSetFollows), after its report: the
+	// hook reads every set's report, and a later set, even one wholly ignored
+	// or with no test case, writes its own only as it returns. Each attempt of
+	// that set that ends here calls it (MaxFlakyChecks, --must-pass).
 	// Start sets r.testRunTestSets for the run whose id it passes in as
 	// testRunID, so when Start calls this the two name the same run.
-	if r.isLastTestSet && r.instrument && cmdType == utils.DockerCompose {
+	if r.noSetFollows && r.instrument && cmdType == utils.DockerCompose {
 		r.afterTestRunCalled = true
 		if hookErr := r.hookImpl.AfterTestRun(ctx, testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
 			utils.LogError(r.logger, hookErr, "failed to execute after test run hook")
