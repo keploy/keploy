@@ -155,6 +155,7 @@ func TestFormKeysOnlyLive(t *testing.T) {
 		{name: "a key written another way", rec: "a%20b=1", live: "a+b=1"},
 		{name: "a key known with no patterns", rec: "q=ada", live: "q=ada&admin=1", known: map[string][]string{"body.admin": {}}},
 		{name: "a key known with patterns", rec: "q=ada", live: "q=ada&admin=1", known: map[string][]string{"body.admin": {"^1$"}}, want: []string{"body.admin"}},
+		{name: "an escaped key known with patterns as written", rec: "q=ada", live: "q=ada&a%20b=1", known: map[string][]string{"body.a%20b": {"^1$"}}, want: []string{"body.a%20b"}},
 		{name: "a guarded key by its decoded name", rec: "q=ada", live: "q=ada&a%20b=1", known: map[string][]string{"body.a b": {"^1$"}}, want: []string{"body.a b"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,5 +244,39 @@ func TestEachRecordingsBodyIsReadOnce(t *testing.T) {
 	o.read(m)
 	if len(o.of) != 1 {
 		t.Fatalf("ownBodies keeps %d bodies past its bound, want 1", len(o.of))
+	}
+}
+
+// DiffBothWays reads a body as JSON only where both bodies are JSON: a form
+// whose live body reads as JSON is compared key by key. A recording of no
+// request has no fields to compare, and no recording of no request is the
+// call's own.
+func TestDiffBothWaysReadsJSONOnlyWhereBothAre(t *testing.T) {
+	h := newHTTP()
+	m := recordedAs(t, h, "f", 1, formSearchCall("a=1"), jsonAnswer(200, `{}`), nil)
+	d, comparable := httpNoiseAdapter{}.DiffBothWays(m, mocknoise.NewJSONBody([]byte("a=1")), mocknoise.NewJSONBody([]byte("1")), nil, nil, nil)
+	if !comparable || len(d) != 2 || d["body.a"] == nil || d["body.1"] == nil {
+		t.Errorf("the form a=1 against the form 1 drifts at %v (comparable %v), want body.a and body.1", d, comparable)
+	}
+	if d, comparable := (httpNoiseAdapter{}).DiffBothWays(&models.Mock{}, mocknoise.NewJSONBody([]byte("{}")), mocknoise.NewJSONBody([]byte("{}")), nil, nil, nil); d != nil || comparable {
+		t.Errorf("a recording of no request drifts at %v (comparable %v)", d, comparable)
+	}
+	if own := h.sameCallBodies([]*models.Mock{{Name: "none"}}, []byte(`{"q":1}`), nil); len(own) != 0 {
+		t.Errorf("a recording of no request is the call's own: %v", own)
+	}
+	if f := h.bodyFieldsDiffering(&models.Mock{Name: "none"}, []byte(`{"q":1}`), nil); f != nil {
+		t.Errorf("a recording of no request differs at %v", f)
+	}
+}
+
+// keploy.yml's entries with patterns decide only the fields they guard: a
+// learned container still excuses a field in it that no entry guards.
+func TestALearnedContainerExcusesAFieldNoPatternGuards(t *testing.T) {
+	h := newHTTP()
+	j := recordedAs(t, h, "j", 1, searchCall(`{"user":{"id":"u-1"}}`), jsonAnswer(200, `{}`), nil)
+	j.Spec.ReqBodyNoise = map[string][]string{"body.user": {}}
+	other := map[string][]string{"other": {"^u-[0-9]+$"}}
+	if d := mocknoise.SameCallDrift(httpNoiseAdapter{}, j, mocknoise.NewReadJSONBody([]byte(`{"user":{"id":"u-1"}}`)), true, mocknoise.NewJSONBody([]byte(`{"user":{"id":"x"}}`)), other); d != nil {
+		t.Errorf("a field in a learned container no entry guards drifts at %v", d)
 	}
 }

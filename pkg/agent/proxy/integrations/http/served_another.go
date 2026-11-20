@@ -72,11 +72,8 @@ func (h *HTTP) sameCallBodies(candidates []*models.Mock, body []byte, userBodyNo
 // the same kind of JSON document.
 func (h *HTTP) bodyFieldsDiffering(x *models.Mock, body []byte, userBodyNoise map[string][]string) []string {
 	recorded, ok := h.ownBodies.read(x)
-	if !ok {
-		return nil
-	}
 	var out []string
-	for p := range mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded, true, mocknoise.NewJSONBody(body), userBodyNoise) {
+	for p := range mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded, ok, mocknoise.NewJSONBody(body), userBodyNoise) {
 		if strings.HasPrefix(p, "body.") {
 			out = append(out, p)
 		}

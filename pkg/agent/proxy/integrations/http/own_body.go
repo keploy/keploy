@@ -57,21 +57,21 @@ func (httpNoiseAdapter) DiffBothWays(m *models.Mock, recorded, live *mocknoise.J
 }
 
 // formKeysOnlyLive is the drift ("body."-prefixed, known so too) of the
-// keys the live form body holds that rec, the recorded one, holds neither
-// as written nor by the name they decode to (formKeyName), each named as
+// keys the live form body holds that rec, the recorded one, holds by no key
+// that decodes to the same name (formKeyName), each named as
 // formReqBodyNoise names a key: by its decoded name where an entry with
 // patterns guards it (formGuards), else as written. A key known with no
 // patterns is no drift, as formReqBodyNoise skips one. nil when there is
 // none.
 func formKeysOnlyLive(rec, live string, known map[string][]string) map[string][]string {
-	recRaw, recNames := map[string]bool{}, map[string]bool{}
+	recNames := map[string]bool{}
 	for _, k := range formRawKeys(rec) {
-		recRaw[k], recNames[formKeyName(k)] = true, true
+		recNames[formKeyName(k)] = true
 	}
 	guards := formGuards(known)
 	var out map[string][]string
 	for _, k := range formRawKeys(live) {
-		if recRaw[k] || recNames[formKeyName(k)] {
+		if recNames[formKeyName(k)] {
 			continue
 		}
 		key := "body." + k

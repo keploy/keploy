@@ -52,6 +52,9 @@ func TestDecodedJSONFieldsDiffering(t *testing.T) {
 		{name: "patterns: a redacted recorded value, the live one inside", exp: `{"id":"REDACTED-1"}`, act: `{"id":"u-2"}`, known: map[string][]string{"id": {"^u-[0-9]+$"}}, excluded: true},
 		{name: "patterns: a redacted recorded value, the live one outside", exp: `{"id":"REDACTED-1"}`, act: `{"id":"x"}`, known: map[string][]string{"id": {"^u-[0-9]+$"}}, excluded: true, want: []string{"id"}},
 		{name: "a redacted recorded value is not compared", exp: `{"pw":"REDACTED-1"}`, act: `{"pw":"hunter2"}`, excluded: true},
+		{name: "a redacted recorded field the call lacks", exp: `{"pw":"REDACTED-1","q":1}`, act: `{"q":1}`, excluded: true, want: []string{"pw"}},
+		{name: "null against an object", exp: `{"f":null}`, act: `{"f":{"x":1}}`, want: []string{"f"}},
+		{name: "a longer array in the call", exp: `{"ids":[1]}`, act: `{"ids":[1,1]}`, want: []string{"ids[]"}},
 		{name: "a value that is not redacted is", exp: `{"pw":"secret"}`, act: `{"pw":"hunter2"}`, excluded: true, want: []string{"pw"}},
 		{name: "noise read without case, named in the documents'", exp: `{"Q":"ada","TS":1}`, act: `{"Q":"bob","TS":2}`, known: map[string][]string{"ts": {}}, want: []string{"Q"}},
 	} {
@@ -87,8 +90,10 @@ func TestDecodedJSONFieldsDifferingNamesEachOnceSorted(t *testing.T) {
 	var exp, act interface{}
 	_ = json.Unmarshal([]byte(`{"z":1,"a":[1,2],"m":{"x":1}}`), &exp)
 	_ = json.Unmarshal([]byte(`{"z":2,"a":[3,4],"m":{"x":2},"b":true}`), &act)
-	got := DecodedJSONFieldsDiffering(exp, act, nil, nil, nil)
-	if want := []string{"a[]", "b", "m.x", "z"}; !slices.Equal(got, want) {
-		t.Fatalf("got %q, want %q", got, want)
+	for range 10 { // the fields are found in map order, random on every walk
+		got := DecodedJSONFieldsDiffering(exp, act, nil, nil, nil)
+		if want := []string{"a[]", "b", "m.x", "z"}; !slices.Equal(got, want) {
+			t.Fatalf("got %q, want %q", got, want)
+		}
 	}
 }
