@@ -408,6 +408,12 @@ type Proxy struct {
 	// replaced, by ResetRecordedDNSMocks.
 	nodataRelayLogged *lru.Expirable[string, bool] // keyed by generateCacheKey
 
+	// unansweredForwardLogged dedupes the WARN for a query no upstream
+	// answered (logUnansweredForward) to once per (name,qtype) every 30
+	// minutes; the rest are Debug. Same shape, lifetime and reset as
+	// nodataRelayLogged.
+	unansweredForwardLogged *lru.Expirable[string, bool] // keyed by generateCacheKey
+
 	// The DNS servers, set by startDNSServers before anything serves or
 	// stops them.
 	tcpDNS, udpDNS *dnsServer
@@ -1112,6 +1118,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		dnsCache:                  newDNSCache(),
 		recordedDNSMocks:          newRecordedDNSMocksCache(),
 		nodataRelayLogged:         newNodataRelayLogCache(),
+		unansweredForwardLogged:   newNodataRelayLogCache(),
 		mysqlPorts:                newMysqlPortRegistry(),
 		// dnsForwardTimeout is the per-forward deadline for upstream DNS
 		// exchanges. 2 s is long enough to absorb a single UDP retransmit
@@ -1658,12 +1665,12 @@ func (p *Proxy) GetIntegrations() map[integrations.IntegrationType]integrations.
 
 // ResetRecordedDNSMocks clears the per-session DNS deduplication trackers.
 // This should be called when starting a new recording session so DNS mocks are
-// recorded fresh, and so the once-per-(name,qtype) NODATA relay notice is
-// re-surfaced for the new session instead of being suppressed by state left
-// over from the previous one.
+// recorded fresh, and so the once-per-(name,qtype) notices (the NODATA relay
+// and the unanswered upstream forward) are re-surfaced for the new session
+// instead of being suppressed by state left over from the previous one.
 //
 // Purges in place rather than reallocating: the DNS handler goroutines read
-// both tracker pointers concurrently, so swapping in new trackers would race
+// the tracker pointers concurrently, so swapping in new trackers would race
 // with them. Purge keeps each tracker at one allocation for the process
 // lifetime.
 func (p *Proxy) ResetRecordedDNSMocks() {
@@ -1672,6 +1679,9 @@ func (p *Proxy) ResetRecordedDNSMocks() {
 	}
 	if p.nodataRelayLogged != nil {
 		p.nodataRelayLogged.Purge()
+	}
+	if p.unansweredForwardLogged != nil {
+		p.unansweredForwardLogged.Purge()
 	}
 	p.logger.Debug("DNS deduplication trackers reset")
 }
