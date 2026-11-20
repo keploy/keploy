@@ -232,8 +232,10 @@ func TestTheGenericParserAnswersARequestReturnedWithItsEOF(t *testing.T) {
 
 // A request longer than one read is answered with its recording, whether
 // the old read loop recorded it whole or the relay in its pieces: the
-// parser reads it in pieces of at most ReadChunkSize, as they arrive, and
-// matched them piece by piece with a recording made in other pieces (none).
+// parser reads it in pieces of at most ReadChunkSize, and matched them
+// piece by piece with a recording made in other pieces (none). Its one
+// write reaches the parser whole (arriving): one the scheduler stops for
+// longer than a window between two segments is a request the window ends.
 // A window that ends between two of its reads, as one did under -race on a
 // loaded machine, leaves its rest to be read before it is matched
 // (TestARequestWhoseWindowEndsInsideItIsAnsweredWhole).
@@ -251,7 +253,7 @@ func TestTheGenericParserAnswersARequestLongerThanARead(t *testing.T) {
 				app, proxySide := tcpPair(t)
 				done := make(chan error, 1)
 				go func() {
-					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), proxySide, nil, store, models.OutgoingOptions{})
+					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), arriving(proxySide, len(req)), nil, store, models.OutgoingOptions{})
 				}()
 				readAnswer(t, app, "PONG")
 				// One write, then the half-close: the request's end is its
