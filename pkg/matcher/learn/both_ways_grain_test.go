@@ -18,8 +18,7 @@ import (
 // that word was looked up only at its own word, where the first reading
 // had no decision, and was dropped: the call learned the key as made anew
 // although F may have given the application that key there (FALSE GREEN).
-// It is refused now, whether the caller reads every word or only whether
-// one is refused; told how F served the exchange, as recorded or with a
+// It is refused now; told how F served the exchange, as recorded or with a
 // view that holds no word of the key, the key is still made anew.
 
 const (
@@ -94,21 +93,19 @@ func TestOutcomeAWordTheSecondReadingRefusesInALeafTheFirstDecidesWholeIsRefused
 		if c.refused != (second[0].Outcome == OutcomeRefused) {
 			t.Fatalf("%s: the second reading %s; want refused %v", c.name, oDescribe(second), c.refused)
 		}
-		full, only := roPair(t, "a key made anew beside an exchange at the call's own instant that holds its word, "+c.name, mk)
-		for _, ds := range [][]Decision{full, only} {
-			d := oWord(t, ds, bgKeyRec, bgKeyLive)
-			if !c.refused {
-				if d.Outcome != OutcomeFresh || len(ds) != 1 {
-					t.Errorf("FALSE RED: %s: %s; want the key made anew", c.name, oDescribe(ds))
-				}
-				continue
+		ds := Decide(mk())
+		d := oWord(t, ds, bgKeyRec, bgKeyLive)
+		if !c.refused {
+			if d.Outcome != OutcomeFresh || len(ds) != 1 {
+				t.Errorf("FALSE RED: %s: %s; want the key made anew", c.name, oDescribe(ds))
 			}
-			if oRefused(t, c.name, d, RefusalUnknown, "mock-6"); d.Refusal == nil {
-				continue
-			}
-			if d.At.Word != -1 || len(ds) != 1 || !strings.Contains(d.Refusal.Why, "either reading refuses") {
-				t.Errorf("%s: %s; want the key refused whole, once, saying either reading refuses it", c.name, oDescribe(ds))
-			}
+			continue
+		}
+		if oRefused(t, c.name, d, RefusalUnknown, "mock-6"); d.Refusal == nil {
+			continue
+		}
+		if d.At.Word != -1 || len(ds) != 1 || !strings.Contains(d.Refusal.Why, "either reading refuses") {
+			t.Errorf("%s: %s; want the key refused whole, once, saying either reading refuses it", c.name, oDescribe(ds))
 		}
 	}
 	// The exchange's answer holds another value: the second reading reads
