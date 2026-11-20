@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package relay
 
@@ -18,7 +18,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
-	"golang.org/x/sys/unix"
 )
 
 // heldDest is the destination's socket under the relay, its reads held until
@@ -116,7 +115,7 @@ func TestADestinationsResetInItsSocketAsTheClientsFINIsForwardedIsReadAndTold(t 
 		t.Fatal(err)
 	}
 	_ = server.Close()
-	awaitTCPState(t, proxyServer, unix.BPF_TCP_CLOSE, "the destination's reset")
+	awaitTCPState(t, proxyServer, stateClosed, "the destination's reset")
 	close(destEnded)
 	awaitDone(t, done, "the relay did not end")
 	want := []string{"the client's end", "the destination's end (reset)", "the client's end before the destination's"}
@@ -223,7 +222,7 @@ func TestOverTLSADestinationsResetMetAsTheClientsFINIsForwardedIsNotToldAsAClose
 		t.Fatal(err)
 	}
 	_ = server.Close()
-	awaitTCPState(t, proxyServer, unix.BPF_TCP_CLOSE, "the destination's reset")
+	awaitTCPState(t, proxyServer, stateClosed, "the destination's reset")
 	close(destEnded)
 	awaitDone(t, done, "the relay did not end")
 	select {
@@ -352,7 +351,7 @@ func TestAClientsResetAsTheDestinationsFINIsForwardedIsNoFINSent(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = app.Close()
-	awaitTCPState(t, proxyClient, unix.BPF_TCP_CLOSE, "the client's reset")
+	awaitTCPState(t, proxyClient, stateClosed, "the client's reset")
 	close(clientReset)
 	// The client's forwarder reads on once the relay has decided: drained,
 	// or torn down (the relay then ends with the client's reads held).

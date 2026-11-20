@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package http
 
@@ -21,7 +21,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
-	"golang.org/x/sys/unix"
 )
 
 // readRequestHead reads one request head off c, as the destination does.
@@ -600,8 +599,8 @@ func isReset(c net.Conn) bool {
 	}
 	var reset bool
 	_ = rc.Control(func(fd uintptr) {
-		if info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO); err == nil {
-			reset = info.State == unix.BPF_TCP_CLOSE
+		if state, _, ok := tcpInfoOf(fd); ok {
+			reset = state == stateClosed
 		}
 	})
 	return reset
