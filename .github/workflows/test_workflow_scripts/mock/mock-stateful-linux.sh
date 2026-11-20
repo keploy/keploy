@@ -497,7 +497,7 @@ until grep -qx ready dep.log 2>/dev/null; do
   kill -0 "$DP" 2>/dev/null || { echo "FAIL: the pipeline's dependency exited before it listened"; cat dep.log; exit 1; }
   sleep 0.1
 done
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 pipe.py $PORT $PIPE_N" --name pipe --disable-tele 2>&1 | tee rec-pipe.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 pipe.py $PORT $PIPE_N" --name pipe --disable-tele 2>&1 | tee rec-pipe.log
 RC=${PIPESTATUS[0]}
 stop_dep
 [ "$RC" -eq 0 ] || { echo "FAIL: the pipeline record should pass (exit 0), got $RC"; FAIL=1; }
@@ -508,7 +508,7 @@ GOT_PIPE=$(grep -cE '^\s*url: \S*/counter\s*$' keploy/pipe/mocks.yaml 2>/dev/nul
 [ "${GOT_PIPE:-0}" -eq "$PIPE_N" ] || { echo "FAIL: want the pipeline's $PIPE_N reads recorded, got $GOT_PIPE mocks"; FAIL=1; }
 # Consume-once (KEPLOY_STRICT_MOCK_WINDOW=1): each read is served one
 # recording, in the order they were recorded.
-sudo -E env PATH="$PATH" KEPLOY_PROVEN= KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 pipe.py $PORT $PIPE_N" --name pipe --disable-tele 2>&1 | tee rep-pipe.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 pipe.py $PORT $PIPE_N" --name pipe --disable-tele 2>&1 | tee rep-pipe.log
 grep -qx "PIPE=$WANT_PIPE" rep-pipe.log ||
   { echo "FAIL: the pipeline's reads were not served 1..$PIPE_N in turn (got: $(grep -o 'PIPE=[^ ]*' rep-pipe.log | head -1))"; FAIL=1; }
 fi
