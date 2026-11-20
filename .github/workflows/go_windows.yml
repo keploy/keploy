@@ -135,7 +135,7 @@ jobs:
       # ends at the reset. Only these rows of ./pkg/agent/proxy/util/ run
       # here: the package as a whole has not been shown to pass on Windows.
       - name: Test the look at a socket's peer (amd64)
-        run: go test -count=1 -run "^(TestPeerGone|TestAwaitPeerReset)$" ./pkg/agent/proxy/util/
+        run: go test -count=1 -run "^(TestPeerGone|TestPeerGoneByTheSocketsState|TestAwaitPeerReset|TestTCPStateOnWindows)$" ./pkg/agent/proxy/util/
         shell: cmd
 
       # The Windows stop of a native app (utils.interruptProcessTree): one that
