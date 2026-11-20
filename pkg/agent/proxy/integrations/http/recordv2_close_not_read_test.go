@@ -378,6 +378,33 @@ func TestRecordV2_APipelinesCloseDelimitedLastAnswerAloneWaitsForTheClose(t *tes
 	}
 }
 
+// bodyEndsAtClose names a body framed by the upstream's close only in a final
+// head that has come whole and that net/http's reader frames with neither a
+// Content-Length nor chunked coding: never in a head it refuses (a coding
+// other than chunked), whose response is a decode error, not a body to wait
+// for the close of.
+func TestBodyEndsAtCloseOnlyInAWholeHeadWithNeitherField(t *testing.T) {
+	for _, c := range []struct {
+		name, method, resp string
+		want               bool
+	}{
+		{"neither field", "GET", reportHead + firstHalf, true},
+		{"neither field, no body yet", "GET", reportHead, true},
+		{"a refused coding", "GET", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n" + firstHalf, false},
+		{"a refused start line", "GET", "HTTP/1.1 2x0 OK\r\n\r\n" + firstHalf, false},
+		{"a Content-Length", "GET", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nfirst", false},
+		{"chunked", "GET", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", false},
+		{"a head not yet whole", "GET", "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n", false},
+		{"a HEAD's answer", "HEAD", reportHead, false},
+		{"a CONNECT's 2xx", "CONNECT", "HTTP/1.1 200 Connection Established\r\n\r\n" + firstHalf, false},
+		{"a CONNECT refused", "CONNECT", "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n" + firstHalf, true},
+	} {
+		if got := bodyEndsAtClose([]byte(c.resp), c.method); got != c.want {
+			t.Errorf("%s: bodyEndsAtClose = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // drainMocks returns the mocks on mocks, without waiting.
 func drainMocks(mocks chan *models.Mock) []*models.Mock {
 	var got []*models.Mock
