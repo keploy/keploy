@@ -1823,7 +1823,14 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 	}
 
 	jdk.imported = true
-	if isJavaCAExistWithTool(ctx, keytoolBin, alias, storePass, cacertsPath) {
+	// One keytool -list of the whole keystore says whether alias is there and
+	// which other keploy CAs' aliases are; only a keystore that cannot be
+	// listed so is asked for alias alone.
+	present, listed := sweepJavaLeftovers(ctx, logger, keytoolBin, cacertsPath, alias)
+	if !listed {
+		present = isJavaCAExistWithTool(ctx, keytoolBin, alias, storePass, cacertsPath)
+	}
+	if present {
 		logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
 		return jdk, nil
 	}
@@ -1838,6 +1845,80 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 	logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
 	logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
 	return jdk, nil
+}
+
+// javaSweepMax is the most aliases of other keploy CAs one install removes.
+// Each removal is a keytool -delete: a JVM start and a rewrite of the whole
+// keystore, about 0.3 s. A keystore can hold hundreds of them (every crashed
+// run's, and every run's whose teardown deleted from another JDK's keystore),
+// so a backlog is worked off a few per start instead of holding one start up
+// for minutes.
+const javaSweepMax = 3
+
+// sweepJavaLeftovers lists the keystore cacerts with keytool and removes from
+// it up to javaSweepMax aliases named keploy-mitm-* other than alias, this
+// run's, whose runs are no longer alive (liveRunEntry), and nothing else. Such
+// an alias is an earlier run's whose teardown never deleted it: the run
+// crashed (its CA's key died with it), or its teardown deleted from another
+// JDK's keystore. The start-up sweep (sweepRunLeftovers) removes only such
+// runs' anchors. It stops at the first delete that fails: the keystore is
+// most likely not writable, and the next would fail too. It reports whether
+// the listing holds alias, and whether cacerts could be listed at all (when
+// not, present says nothing). Best-effort, like the anchors' sweep. The
+// caller holds jdkKeystoreMu.
+func sweepJavaLeftovers(ctx context.Context, logger *zap.Logger, keytool, cacerts, alias string) (present, listed bool) {
+	out, err := exec.CommandContext(ctx, keytool, "-list", "-keystore", cacerts, "-storepass", "changeit").Output()
+	utils.BootStep("keytool -list is over")
+	if err != nil {
+		logger.Debug("could not list the JDK keystore to remove other keploy CAs' aliases", zap.String("cacerts", cacerts), zap.Error(err))
+		return false, false
+	}
+	present, others := javaLeftovers(out, alias)
+	var leftovers []string
+	for _, a := range others {
+		if !liveRunEntry(a) {
+			leftovers = append(leftovers, a)
+		}
+	}
+	removed := 0
+	var failed error // the delete the sweep stopped at, with keytool's output
+	for _, a := range leftovers[:min(len(leftovers), javaSweepMax)] {
+		delOut, delErr := exec.CommandContext(ctx, keytool, "-delete", "-alias", a, "-keystore", cacerts, "-storepass", "changeit", "-noprompt").CombinedOutput()
+		utils.BootStep("keytool -delete is over")
+		if delErr != nil {
+			logger.Debug("could not remove another keploy CA's alias from the JDK keystore", zap.String("alias", a), zap.String("cacerts", cacerts), zap.ByteString("output", delOut), zap.Error(delErr))
+			failed = fmt.Errorf("keytool -delete -alias %s: %w: %s", a, delErr, bytes.TrimSpace(delOut))
+			break
+		}
+		removed++
+		logger.Debug("removed another keploy CA's alias from the JDK keystore", zap.String("alias", a), zap.String("cacerts", cacerts))
+	}
+	if remaining := len(leftovers) - removed; remaining > 0 {
+		logger.Info("the JDK keystore holds CA aliases that other keploy runs left there",
+			zap.String("cacerts", cacerts), zap.Int("removed", removed), zap.Int("remaining", remaining), zap.Int("removedPerStart", javaSweepMax),
+			zap.NamedError("deleteFailed", failed))
+	}
+	return present, true
+}
+
+// javaLeftovers reads `keytool -list` output: whether it lists alias (this
+// run's), and every alias in it that another keploy CA left there, named
+// keploy-mitm-<run id> (runAlias) and not alias. keytool prints each entry as
+// a line that starts with its alias and a comma ("<alias>, <date>,
+// trustedCertEntry,"), in each of its languages. A JKS or PKCS12 keystore
+// keeps its aliases in lower case, so alias is compared without case.
+func javaLeftovers(list []byte, alias string) (present bool, leftovers []string) {
+	for _, line := range strings.Split(string(list), "\n") {
+		a, _, _ := strings.Cut(line, ",")
+		if strings.EqualFold(a, alias) {
+			present = true
+			continue
+		}
+		if strings.HasPrefix(a, "keploy-mitm-") {
+			leftovers = append(leftovers, a)
+		}
+	}
+	return present, leftovers
 }
 
 // jdkCacerts returns the cacerts keystore of the JDK or JRE at home: JDK 9+

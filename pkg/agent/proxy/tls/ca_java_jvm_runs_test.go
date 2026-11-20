@@ -31,7 +31,8 @@ func writeScript(t *testing.T, path, body string) {
 }
 
 // fakeJDK lays out a JDK under root whose java and keytool log each run to
-// calls: java says javaHome as its java.home, keytool -list finds no alias.
+// calls: java says javaHome as its java.home, keytool -list lists an empty
+// keystore and finds no alias.
 // cacertsUnder is where lib/security/cacerts goes ("" for none), relative to
 // root.
 func fakeJDK(t *testing.T, root, cacertsUnder, javaHome, calls string) {
@@ -41,7 +42,7 @@ func fakeJDK(t *testing.T, root, cacertsUnder, javaHome, calls string) {
 			"echo \"    java.home = "+javaHome+"\" >&2\n")
 	writeScript(t, filepath.Join(root, "bin", "keytool"),
 		"echo \"keytool $*\" >> "+calls+"\n"+
-			"case \"$1\" in -list) exit 1;; esac\n")
+			"case \"$1 $*\" in -list*\" -alias \"*) exit 1;; esac\n")
 	if cacertsUnder != "" {
 		cacerts := filepath.Join(root, cacertsUnder, "lib", "security", "cacerts")
 		if err := os.MkdirAll(filepath.Dir(cacerts), 0o755); err != nil {
@@ -409,16 +410,16 @@ func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytoolAtTheInstall(t *testing.T)
 	for _, tc := range []struct {
 		name    string
 		hook    string   // "keeps": the update puts the CA there and leaves it (Debian's); "rebuilds": while its anchor is there (Adoptium's); "unreadable": then leaves a keystore Go cannot read; "": never
-		keytool string   // the JDK's keytool's exit, by its first word; "" for fakeJDK's
+		keytool string   // the JDK's keytool's exit, by its first word ("ALIAS": this run's alias); "" for fakeJDK's
 		noJDK   bool     // no JDK named, nor a java on PATH, at the install
-		want    []string // each keytool run, "<op> run" of this run's alias, "<op> hook" of the hook's
+		want    []string // each keytool run, "<op> run" of this run's alias, "<op> hook" of the hook's, "-list" of the whole keystore
 	}{
 		{"the update put the CA there and rebuilds without it", "rebuilds", "", false, nil},
 		{"the update put the CA there and leaves it", "keeps", "", false, []string{"-delete hook"}},
 		{"the update put the CA there, then leaves a keystore Go cannot read", "unreadable", "", false, nil},
-		{"the update left the keystore alone", "", "", false, []string{"-list run", "-import run", "-delete run"}},
-		{"keytool finds the alias there already", "", "-list) exit 0;;", false, []string{"-list run", "-delete run"}},
-		{"keytool's import fails", "", "-list|-import) exit 1;;", false, []string{"-list run", "-import run", "-delete run"}},
+		{"the update left the keystore alone", "", "", false, []string{"-list", "-import run", "-delete run"}},
+		{"keytool finds the alias there already", "", "-list) echo \"ALIAS, 20 Nov 2026, trustedCertEntry,\"; exit 0;;", false, []string{"-list", "-delete run"}},
+		{"keytool's import fails", "", "-import) exit 1;;", false, []string{"-list", "-import run", "-delete run"}},
 		{"no JDK at the install", "", "", true, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -426,9 +427,6 @@ func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytoolAtTheInstall(t *testing.T)
 			calls := filepath.Join(dir, "calls")
 			jdk := filepath.Join(dir, "jdk")
 			fakeJDK(t, jdk, ".", jdk, calls)
-			if tc.keytool != "" {
-				writeScript(t, filepath.Join(jdk, "bin", "keytool"), "echo \"keytool $*\" >> "+calls+"\ncase \"$1\" in "+tc.keytool+" esac\n")
-			}
 			bin, home := filepath.Join(dir, "bin"), filepath.Join(dir, "home")
 			hooked, rebuilt := filepath.Join(dir, "hooked.jks"), filepath.Join(dir, "rebuilt.jks")
 			store := filepath.Join(dir, "a")
@@ -470,6 +468,9 @@ func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytoolAtTheInstall(t *testing.T)
 			hookAlias := "debian:" + strings.TrimSuffix(runCertFileName(ca), ".crt") + ".pem"
 			writeJKS(t, hooked, "changeit", map[string][]byte{hookAlias: ca.cert.Raw})
 			writeJKS(t, rebuilt, "changeit", nil)
+			if tc.keytool != "" {
+				writeScript(t, filepath.Join(jdk, "bin", "keytool"), "echo \"keytool $*\" >> "+calls+"\ncase \"$1\" in "+strings.ReplaceAll(tc.keytool, "ALIAS", runAlias(ca))+" esac\n")
+			}
 
 			named := jdk
 			if tc.noJDK {
@@ -487,11 +488,14 @@ func TestAJDKKeystoreTheStoreUpdateFilledRunsNoKeytoolAtTheInstall(t *testing.T)
 			}
 			for i, w := range tc.want {
 				op, whose, _ := strings.Cut(w, " ")
-				alias := runAlias(ca)
-				if whose == "hook" {
-					alias = hookAlias
+				alias := " -alias " + runAlias(ca) + " "
+				switch whose {
+				case "hook":
+					alias = " -alias " + hookAlias + " "
+				case "": // the -list of the whole keystore (sweepJavaLeftovers)
+					alias = " -storepass "
 				}
-				if !strings.HasPrefix(got[i], "keytool "+op+" ") || !strings.Contains(got[i]+" ", " -alias "+alias+" ") || !strings.Contains(got[i]+" ", " -keystore "+cacerts+" ") {
+				if !strings.HasPrefix(got[i], "keytool "+op+" ") || !strings.Contains(got[i]+" ", alias) || whose == "" && strings.Contains(got[i], " -alias ") || !strings.Contains(got[i]+" ", " -keystore "+cacerts+" ") {
 					t.Fatalf("the install's and teardown's JVM runs: %q, want %q (run: %s, hook: %s) in %s", got, tc.want, runAlias(ca), hookAlias, cacerts)
 				}
 			}
