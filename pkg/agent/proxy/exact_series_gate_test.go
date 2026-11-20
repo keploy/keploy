@@ -121,6 +121,34 @@ func TestSeriesGatesKeepTheirServedOpenersAcrossTheSameTable(t *testing.T) {
 	}
 }
 
+// A table sent again with the same series whose gates open or close a part
+// otherwise is another set: it starts from no served opener. One whose
+// gates differ only by the writes that end a read series' repeats
+// (SeriesGate.AgainClosedBy) is the same run's: its served openers stay.
+func TestSeriesGatesKeepServedOpenersOnlyWhileEveryPartGateIsTheSame(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		gates map[string]models.SeriesGate
+		kept  bool
+	}{
+		{"a part closed by another write", map[string]models.SeriesGate{partOne: {ClosedBy: "x"}, partTwo: {OpenedBy: "del"}}, false},
+		{"a part opened by another write", map[string]models.SeriesGate{partOne: {ClosedBy: "del"}, partTwo: {OpenedBy: "x"}}, false},
+		{"another write ending a series' repeats", map[string]models.SeriesGate{partOne: {ClosedBy: "del", AgainClosedBy: []string{"y"}}, partTwo: {OpenedBy: "del"}}, true},
+	} {
+		mm, del := gatedSweep(t)
+		mm.ServeExactTest("TestT", []*models.Mock{del})
+		if got := callURL(t, mm, auditTo, false); got != "del" {
+			t.Fatalf("%s: TestT's write was answered %q, want del", c.name, got)
+		}
+		before := mm.exact.poolSeries.Load().opened
+		mm.SetPoolGates(c.gates)
+		mm.SetPoolSeries(map[string][]string{partOne: {"c1", "c2"}, partTwo: {"d1", "d2"}})
+		if kept := mm.exact.poolSeries.Load().opened == before; kept != c.kept {
+			t.Errorf("%s: the served openers kept %v, want %v", c.name, kept, c.kept)
+		}
+	}
+}
+
 // A consume of the opening write that the view refuses (another test's
 // recording, in TestU's window) served nothing, so it opens no part: the
 // sweep is still answered the first part, and the second stays shut.

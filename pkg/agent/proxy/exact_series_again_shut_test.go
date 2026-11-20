@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // The shape of a sweep that lists marks and unmarks each one: the read
@@ -22,6 +24,13 @@ const (
 
 func againSweep(t *testing.T) (*MockManager, []*models.Mock) {
 	t.Helper()
+	return againSweepLogged(t, zap.NewNop(), "w")
+}
+
+// againSweepLogged is againSweep logging to lg, its marks gate naming the
+// writes closers.
+func againSweepLogged(t *testing.T, lg *zap.Logger, closers ...string) (*MockManager, []*models.Mock) {
+	t.Helper()
 	mks := []*models.Mock{
 		httpCall("r1", time.Second, marksURL),
 		httpCall("r2", 2*time.Second, marksURL),
@@ -29,9 +38,9 @@ func againSweep(t *testing.T) (*MockManager, []*models.Mock) {
 		httpCall("x", 4*time.Second, otherURL),
 		httpCall("q1", 5*time.Second, pollURL),
 	}
-	mm := stagedManager(t, nil, mks)
+	mm := stagedManagerLogged(t, lg, nil, mks)
 	mm.ServeExactWorker([]string{"r1", "r2", "w", "x", "q1"})
-	mm.SetPoolGates(map[string]models.SeriesGate{"marks/-/1": {AgainClosedBy: []string{"w"}}})
+	mm.SetPoolGates(map[string]models.SeriesGate{"marks/-/1": {AgainClosedBy: closers}})
 	mm.SetPoolSeries(map[string][]string{"marks/-/1": {"r1", "r2"}, "unmark/T/1": {"w"}, "other/-/1": {"x"}, "poll/-/1": {"q1"}})
 	mm.ServeExactTest("TestU", nil)
 	return mm, mks
@@ -110,4 +119,24 @@ func TestAServedRecordingWithNoSeriesEndsNoRepeats(t *testing.T) {
 	var got string
 	require.NotPanics(t, func() { got = callURL(t, mm, marksURL, false) })
 	require.Equal(t, "a", got)
+}
+
+// The end is said once per series and staging, at Info, naming the series
+// and the write that ended it: a second write the gate names ends nothing
+// more and says nothing more.
+func TestAnEndedSeriesIsSaidOncePerStaging(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	mm, _ := againSweepLogged(t, zap.New(core), "w", "x")
+	ended := func() []observer.LoggedEntry {
+		return logs.FilterMessageSnippet("ends that series' repeats").All()
+	}
+	if got := callURL(t, mm, unmarkURL, false); got != "w" {
+		t.Fatalf("the unmark was answered %q, want w", got)
+	}
+	if got := callURL(t, mm, otherURL, false); got != "x" {
+		t.Fatalf("the other write was answered %q, want x", got)
+	}
+	got := ended()
+	require.Len(t, got, 1, "the end of the marks series' repeats is said once in the staging")
+	require.Equal(t, map[string]any{"series": "marks/-/1", "write": "w"}, got[0].ContextMap())
 }

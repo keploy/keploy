@@ -12,7 +12,8 @@ import (
 // recording of the series (w2), a read (w3), a write that changed nothing
 // (w4), a write the replay does not serve (w5) and a write a write series
 // caused (w6) end nothing. The last is the agent's (ordered), not
-// mappings.yaml's order, and a series' part gate is kept beside it.
+// mappings.yaml's order, and a series' part gate is kept beside it. A
+// second write the last answer caused (w7) is named beside w1.
 func TestAgainClosersNameTheWritesAReadSeriesLastAnswerCaused(t *testing.T) {
 	mp := &models.Mapping{Worker: []models.MockEntry{
 		{Name: "r1", Series: "marks/-/1", Read: true},
@@ -38,4 +39,10 @@ func TestAgainClosersNameTheWritesAReadSeriesLastAnswerCaused(t *testing.T) {
 	mp.Worker[0].ClosedBy = "del"
 	require.Equal(t, map[string]models.SeriesGate{"marks/-/1": {ClosedBy: "del", AgainClosedBy: []string{"w1"}}}, seriesGates(mp, worker, workerSeries(mp, worker)),
 		"a part gate and the writes that end the repeats are one gate")
+
+	mp.Worker[0].ClosedBy = ""
+	mp.Worker = append(mp.Worker, models.MockEntry{Name: "w7", Series: "unmark/T/7", CausedBy: "r2"})
+	worker["k"] = append(worker["k"], "w7")
+	require.Equal(t, map[string]models.SeriesGate{"marks/-/1": {AgainClosedBy: []string{"w1", "w7"}}}, seriesGates(mp, worker, workerSeries(mp, worker)),
+		"every served write the last answer caused ends the repeats, in mappings order")
 }
