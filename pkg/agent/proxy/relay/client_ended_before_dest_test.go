@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package relay
 
@@ -8,15 +8,14 @@ import (
 	"io"
 	"net"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
-	"golang.org/x/sys/unix"
 )
 
 // endsTold is what a relay told, in order, of a connection's ends: each side's
@@ -148,7 +147,7 @@ func TestTheClientsEndBeforeTheDestinationsIsToldByALookAtItsSocket(t *testing.T
 				if err := app.Close(); err != nil {
 					t.Fatal(err)
 				}
-				awaitTCPState(t, proxyClient, unix.BPF_TCP_CLOSE_WAIT, "the client's FIN")
+				awaitTCPState(t, proxyClient, stateCloseWait, "the client's FIN")
 				if !row.unread {
 					_ = server.SetReadDeadline(time.Now().Add(10 * time.Second))
 					if n, err := server.Read(make([]byte, 1)); n != 0 || !errors.Is(err, io.EOF) {
@@ -160,7 +159,7 @@ func TestTheClientsEndBeforeTheDestinationsIsToldByALookAtItsSocket(t *testing.T
 					t.Fatal(err)
 				}
 				_ = app.Close()
-				awaitTCPState(t, proxyClient, unix.BPF_TCP_CLOSE, "the client's reset")
+				awaitTCPState(t, proxyClient, stateClosed, "the client's reset")
 			}
 			if row.destReset {
 				if err := server.(*net.TCPConn).SetLinger(0); err != nil {
@@ -171,7 +170,7 @@ func TestTheClientsEndBeforeTheDestinationsIsToldByALookAtItsSocket(t *testing.T
 			if row.client == "" {
 				_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
 				n, err := app.Read(make([]byte, 1))
-				if n != 0 || !row.destReset && !errors.Is(err, io.EOF) || row.destReset && !errors.Is(err, syscall.ECONNRESET) {
+				if n != 0 || !row.destReset && !errors.Is(err, io.EOF) || row.destReset && !neterr.IsConnReset(err) {
 					t.Fatalf("the client read %d byte(s), %v, want the destination's end", n, err)
 				}
 				_ = app.Close()

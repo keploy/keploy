@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package http
 
@@ -17,7 +17,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
-	"golang.org/x/sys/unix"
 )
 
 // At replay a half-closed app half-closes again, as it did at record: its
@@ -361,8 +360,8 @@ func awaitPeerFIN(c net.Conn) {
 	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
 	defer func() { _ = c.SetReadDeadline(time.Time{}) }()
 	_ = rc.Read(func(fd uintptr) bool {
-		info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
-		return err != nil || info.State != unix.BPF_TCP_ESTABLISHED
+		state, _, ok := tcpInfoOf(fd)
+		return !ok || state != stateEstablished
 	})
 }
 

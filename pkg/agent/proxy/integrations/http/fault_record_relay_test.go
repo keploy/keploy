@@ -1,20 +1,19 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package http
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -116,7 +115,7 @@ func TestRecordV2_FaultUpstreamResetBeforeAnswer(t *testing.T) {
 	}
 	_ = c.src.Close()
 	got, rerr := appRead(t, c.app)
-	if got != "" || !errors.Is(rerr, syscall.ECONNRESET) {
+	if got != "" || !neterr.IsConnReset(rerr) {
 		t.Errorf("the application read %q, %v; want nothing, then a reset, as the upstream gave", got, rerr)
 	}
 	mocks, err := c.finish(t)
@@ -245,7 +244,7 @@ func TestRecordV2_FaultUpstreamResetsAfterTheHead(t *testing.T) {
 	<-c.relayDone
 	_ = c.src.Close()
 	got, rerr := appRead(t, c.app)
-	if got != "" || !errors.Is(rerr, syscall.ECONNRESET) {
+	if got != "" || !neterr.IsConnReset(rerr) {
 		t.Errorf("the application read %q, %v after the head and 5 bytes; want a reset, as the upstream gave", got, rerr)
 	}
 	mocks, err := c.finish(t)
@@ -350,7 +349,7 @@ func TestRecordV2_FaultBeforeAnswerOnAReusedConnectionIsNotRecorded(t *testing.T
 		}
 		// The upstream's end reaches the application before it closes.
 		got, rerr := appRead(t, c.app)
-		if want := error(io.EOF); reset && !errors.Is(rerr, syscall.ECONNRESET) || !reset && rerr != want || got != "" {
+		if want := error(io.EOF); reset && !neterr.IsConnReset(rerr) || !reset && rerr != want || got != "" {
 			t.Errorf("reset %v: the application read %q, %v; want nothing, then the upstream's end", reset, got, rerr)
 		}
 		mocks, err := c.finish(t)
