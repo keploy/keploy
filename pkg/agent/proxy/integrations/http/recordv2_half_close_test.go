@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package http
 
@@ -6,12 +6,12 @@ import (
 	"errors"
 	"io"
 	"net"
-	"syscall"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 )
 
 // Through the relay, as the proxy records on Linux: an app that half-closes
@@ -90,7 +90,7 @@ func TestRecordV2_ThroughTheRelayAHalfClosedAppThatReadToTheUpstreamsEndIsHeld(t
 						upstreamEndsAfter(t, c, up.reset)
 						_ = c.app.SetReadDeadline(time.Now().Add(10 * time.Second))
 						n, err := c.app.Read(make([]byte, 1))
-						if n != 0 || !up.reset && !errors.Is(err, io.EOF) || up.reset && !errors.Is(err, syscall.ECONNRESET) {
+						if n != 0 || !up.reset && !errors.Is(err, io.EOF) || up.reset && !neterr.IsConnReset(err) {
 							t.Fatalf("the half-closed app read %d byte(s), %v, "+
 								"after the answer; want the upstream's end (io.EOF for a close, ECONNRESET for a reset)", n, err)
 						}
