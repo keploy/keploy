@@ -24,20 +24,23 @@
 # resolver the app is given, so a DNS lookup that leaves keploy is counted too
 # (the sink answers NXDOMAIN and logs each name). That holds natively, where
 # keploy and the app run in a mount namespace whose resolv.conf names the sink,
-# so the runner's own resolver is left alone. Under docker the app shares the
-# agent container's netns (docker refuses an app --dns there: "conflicting
-# options"), whose only resolver is docker's 127.0.0.11. That resolver answers
-# the network's own names and forwards every other one to the nameservers of
-# the host's /etc/resolv.conf, read when a container starts and asked from the
-# host's netns, a loopback stub such as systemd-resolved's 127.0.0.53 included
-# (moby 26 and later, for a user-defined network such as keploy-network). So for
-# the docker phases the lane binds over /etc/resolv.conf a copy that lists the
-# sink first: whatever 127.0.0.11 forwards is then counted at the sink too. The
-# sink answers REFUSED to every other name, so the runner's own lookups, and
-# 127.0.0.11's for them, move on to the runner's resolver listed after it.
-# A compose app shares the keploy-agent service's netns
-# (network_mode: service:keploy-agent), on the project's own user-defined
-# network, so the same bind makes its 127.0.0.11 countable as well.
+# so the runner's own resolver is left alone. Under docker the app's resolver
+# is docker's 127.0.0.11, which answers the network's own names and forwards
+# every other one to its upstream. The app is run with --dns 198.18.0.10
+# (a compose app with dns: [198.18.0.10]), so that upstream is the sink and
+# only the sink: keploy moves an app's DNS servers onto its agent container,
+# whose netns the app joins (docker refuses them on the app there), and docker
+# gives a container's own DNS servers precedence over a DNS server set for
+# the whole daemon (dockerd --dns, daemon.json "dns") and over the host's
+# /etc/resolv.conf. The host's file is no way to set it: on a runner whose
+# daemon has a DNS server of its own, 127.0.0.11 never asks the hosts the file
+# names. GitHub's runners in its westus2 egress-proxy experiment are such
+# runners (their resolv.conf is written by repoint-resolv-conf); a lane that
+# listed the sink first in /etc/resolv.conf counted 0 for every docker DNS row
+# there, the baseline's included. Each phase also asks the sink one question
+# of its own as it starts (sink-check), and keeps the resolv.conf docker wrote
+# for its app, whose ExtServers line names what 127.0.0.11 forwards to: a DNS
+# row with nothing at the sink then says which side failed (dns_why).
 #
 # Per mode: baseline (no keploy: each path must reach the sink, so a zero in
 # replay means keploy kept it in), record, replay, and the opt-in rows.
@@ -71,7 +74,6 @@ rm -rf "$W" && mkdir -p "$W/out"
 S=""; [ "$(id -u)" = 0 ] || S="sudo"
 MODES=("$@"); [ ${#MODES[@]} -gt 0 ] || MODES=(native docker)
 SINKPID=""
-DOCKER_RESOLV=""
 FAILED=0
 PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic icmp-raw icmp-dgram dns-udp dns-bare dns-other dns-tcp tcp6 udp6 dns-owned dns-recorded"
 # The recording makes no metadata call (RECARGS has no -imds), so the replay's
@@ -94,7 +96,6 @@ die() { echo "FATAL: $*"; FAILED=1; exit 1; }
 
 cleanup() {
 	[ -n "$SINKPID" ] && $S kill "$SINKPID" 2>/dev/null
-	[ -z "$DOCKER_RESOLV" ] || $S umount "$DOCKER_RESOLV" 2>/dev/null
 	[ ! -f "$W/compose/docker-compose.yml" ] || (cd "$W/compose" && docker compose down --remove-orphans >/dev/null 2>&1)
 	[ ! -f "$W/compose-base/docker-compose.yml" ] || (cd "$W/compose-base" && docker compose down --remove-orphans >/dev/null 2>&1)
 	docker rm -f riso-app riso-base riso-int-c riso-peer >/dev/null 2>&1
@@ -116,28 +117,52 @@ waitfor() {
 	done
 }
 
-# The host's resolv.conf with the sink listed first, for the docker phases (see
-# the top). systemd-resolved's real list (/run/systemd/resolve/resolv.conf) is
-# what dockerd reads for the legacy default bridge only, which these phases do
-# not use: binding over it left 127.0.0.11 forwarding to the stub, so on a CI
-# runner nothing reached the sink.
-docker_resolv_conf() {
-	echo "nameserver 198.18.0.10"
-	cat /etc/resolv.conf
+# The docker phases' app DNS server: the sink, as 127.0.0.11's only upstream
+# (see the top).
+APPDNS="--dns 198.18.0.10"
+
+# docker_resolv PHASE CONTAINER: keeps the resolv.conf docker wrote for
+# CONTAINER (an app in keploy's agent's netns reads the agent's), as
+# $W/out/PHASE/resolv.conf. Fails until docker has written it.
+docker_resolv() {
+	local f
+	f=$(docker inspect -f '{{.ResolvConfPath}}' "$2" 2>/dev/null) && [ -n "$f" ] &&
+		$S cat "$f" > "$W/out/$1/resolv.conf.part" 2>/dev/null && grep -q '^nameserver' "$W/out/$1/resolv.conf.part" &&
+		mv "$W/out/$1/resolv.conf.part" "$W/out/$1/resolv.conf"
 }
-# Binds that copy over /etc/resolv.conf for one docker or compose mode; the
-# mode unbinds it at its end (cleanup does too).
-docker_resolv_bind() {
-	docker_resolv_conf > "$W/resolv-docker.conf" || die "read /etc/resolv.conf"
-	$S mount --bind "$W/resolv-docker.conf" /etc/resolv.conf || die "bind the sink-first resolv.conf over /etc/resolv.conf"
-	DOCKER_RESOLV=/etc/resolv.conf
-	log "docker's 127.0.0.11 forwards to the sink first ($(awk '$1 == "nameserver" {print $2}' /etc/resolv.conf | paste -sd' '))"
+# upstreams PHASE: what docker's 127.0.0.11 forwarded PHASE's names to, as
+# docker wrote it (its ExtServers line: "host(ADDR)" is asked from the
+# host's netns, a bare ADDR, set as a DNS server of the container's or the
+# daemon's, from the container's).
+upstreams() { sed -n 's/^# ExtServers: \[\(.*\)\]$/\1/p' "$W/out/$1/resolv.conf" 2>/dev/null; }
+# dns_why PHASE: for a DNS row with nothing at the sink, which side failed:
+# the sink, when it did not answer the lane's own question at the phase's
+# start (sink_start); else the resolver the app asked, when what it forwards
+# to does not start with the sink (another resolver answered the name); else
+# the path between them.
+dns_why() {
+	local p=$1 chk ext
+	chk=$(cat "$W/out/$p/sink-check" 2>/dev/null)
+	case $chk in
+	"answered rcode="*) ;;
+	"") echo "the lane asked the sink no DNS question of its own in $p, so which side failed is not known"; return ;;
+	*) echo "the sink did not answer the lane's own DNS question at the start of $p ($chk): the sink was not receiving"; return ;;
+	esac
+	case $p in
+	*native*) echo "the sink answered the lane's own DNS question at the start of $p, and $p's resolv.conf names the sink alone: nothing in $p asked it"; return ;;
+	esac
+	ext=$(upstreams "$p")
+	case "$ext" in
+	"") echo "the sink answered the lane's own DNS question at the start of $p; docker's resolv.conf for $p was not read, so where 127.0.0.11 forwarded is not known" ;;
+	198.18.0.10 | "198.18.0.10 "* | "host(198.18.0.10)"*) echo "the sink answered the lane's own DNS question at the start of $p, and docker's 127.0.0.11 there forwards to [$ext], the sink first: the queries were lost between them" ;;
+	*) echo "the sink answered the lane's own DNS question at the start of $p, but docker's 127.0.0.11 there forwards to [$ext], not to the sink: another resolver answered the names" ;;
+	esac
 }
-docker_resolv_unbind() { $S umount "$DOCKER_RESOLV" && DOCKER_RESOLV=""; }
 
 # compose_yml NAME HOSTPORT ARGS [peer]: a compose file whose service is the
-# probe run with ARGS, container NAME, its 8080 published on HOSTPORT; with
-# "peer", also riso-peer, a container the probe resolves by name.
+# probe run with ARGS, container NAME, its 8080 published on HOSTPORT, the
+# sink its DNS server; with "peer", also riso-peer, a container the probe
+# resolves by name.
 compose_yml() {
 	cat > docker-compose.yml <<YML
 services:
@@ -146,6 +171,7 @@ services:
     container_name: $1
     command: [$(printf '"%s", ' $3 | sed 's/, $//')]
     ports: ["$2:8080"]
+    dns: ["198.18.0.10"]
 YML
 	[ "${4:-}" != peer ] || cat >> docker-compose.yml <<YML
   riso-peer:
@@ -163,6 +189,9 @@ sink_start() {
 	$S ip netns exec riso-sink "$W/egressprobe" sink -dir "$W/out/$1" 2> "$W/out/$1/sink.log" &
 	SINKPID=$!
 	waitfor 30 grep -q ready "$W/out/$1/sink.log" || die "sink for $1 did not start"
+	# One DNS question of the lane's own, from the host, for dns_why: an
+	# answer says the sink was receiving DNS as the phase started.
+	"$W/egressprobe" ask 198.18.0.10 "sink-check.$1.invalid" > "$W/out/$1/sink-check" 2>&1
 }
 # The sink runs under ip netns exec, which execs it: $SINKPID is the sink.
 sink_stop() { [ -n "$SINKPID" ] && { $S kill "$SINKPID" 2>/dev/null; wait "$SINKPID" 2>/dev/null; SINKPID=""; }; true; }
@@ -184,10 +213,15 @@ rows_zero() {
 	local phase=$1 p c; shift
 	for p in "$@"; do c=$(count "$phase" "$p"); row "$phase $p kept inside" "$([ "$c" = 0 ] && echo 1)" "$c at the sink"; done
 }
-# rows_reach PHASE PATH...: each PATH reached the sink in PHASE (the probe works).
+# rows_reach PHASE PATH...: each PATH reached the sink in PHASE (the probe
+# works). A DNS path with nothing there says which side failed (dns_why).
 rows_reach() {
-	local phase=$1 p c; shift
-	for p in "$@"; do c=$(count "$phase" "$p"); row "$phase $p reaches the sink" "$([ "$c" -gt 0 ] && echo 1)" "$c at the sink"; done
+	local phase=$1 p c why; shift
+	for p in "$@"; do
+		c=$(count "$phase" "$p"); why=""
+		[ "$c" -gt 0 ] || [ "${p#dns-}" = "$p" ] || why="; $(dns_why "$phase")"
+		row "$phase $p reaches the sink" "$([ "$c" -gt 0 ] && echo 1)" "$c at the sink$why"
+	done
 }
 # row_log NAME FILE REGEX: FILE has a line matching REGEX.
 row_log() { row "$1" "$(grep -qE -- "$3" "$2" 2>/dev/null && echo 1)" "/$3/ in $(basename "$(dirname "$2")")"; }
@@ -259,6 +293,9 @@ replay() {
 	# has none, which docker prints as "invalid IP").
 	waitfor 300 sh -c "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' riso-peer 2>/dev/null | grep -E '^[0-9]+([.][0-9]+){3}\$' > '$W/out/$phase/peer-ip'" &
 	local peerwatch=$!
+	# Under docker, the resolv.conf docker wrote for the app (for dns_why).
+	waitfor 300 docker_resolv "$phase" riso-app &
+	local resolvwatch=$!
 	"${RUNNER[@]}" env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" test "$@" --apiTimeout 60 --disable-tele --disableANSI --generate-github-actions=false > "$W/out/$phase/keploy.log" 2>&1
 	echo $? > "$W/out/$phase/exit"
 	echo "$phase exit $(cat "$W/out/$phase/exit")"
@@ -268,7 +305,7 @@ replay() {
 	local run
 	run=$(ls -td keploy/reports/test-run-* 2>/dev/null | head -1)
 	[ -z "$run" ] || cp -r "$run" "$W/out/$phase/report"
-	kill $peerwatch 2>/dev/null; wait $peerwatch 2>/dev/null
+	kill $peerwatch $resolvwatch 2>/dev/null; wait $peerwatch $resolvwatch 2>/dev/null
 	docker rm -f riso-app >/dev/null 2>&1
 	[ ! -f docker-compose.yml ] || docker compose down --remove-orphans >/dev/null 2>&1
 	sink_stop
@@ -370,19 +407,19 @@ for mode in "${MODES[@]}"; do
 		cd "$W" || die cd
 		;;
 	docker)
-		docker_resolv_bind
 		log "baseline-docker"
 		sink_start base-docker
-		docker run -d --name riso-base -p 18082:8080 --net keploy-network riso-probe:local $APPARGS >/dev/null || die "baseline container"
+		docker run -d --name riso-base -p 18082:8080 $APPDNS --net keploy-network riso-probe:local $APPARGS >/dev/null || die "baseline container"
 		waitfor 30 curl -sf localhost:18082/health || echo "baseline container not up"
+		docker_resolv base-docker riso-base
 		curl -s --max-time 120 localhost:18082/fire > /dev/null
 		waitfor 15 sh -c 'docker logs riso-base 2>&1 | grep -q "probe fork-tcp"'
 		docker logs riso-base > "$W/out/base-docker/app.log" 2>&1
 		docker rm -f riso-base >/dev/null
 		sink_stop
 
-		RUN="docker run -p 8080:8080 --net keploy-network --rm --name riso-app riso-probe:local $APPARGS"
-		RECRUN="docker run -p 8080:8080 --net keploy-network --rm --name riso-app riso-probe:local $RECARGS"
+		RUN="docker run -p 8080:8080 $APPDNS --net keploy-network --rm --name riso-app riso-probe:local $APPARGS"
+		RECRUN="docker run -p 8080:8080 $APPDNS --net keploy-network --rm --name riso-app riso-probe:local $RECARGS"
 		mkdir -p "$W/docker" && cd "$W/docker" || die cd
 		bypass_yml
 		log "record-docker"
@@ -390,6 +427,7 @@ for mode in "${MODES[@]}"; do
 		$S env PATH="$PATH" "${SUDO_ENV[@]}" "$KEPLOY" record -c "$RECRUN" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-docker/keploy.log" 2>&1 &
 		KP=$!
 		waitfor 300 curl -sf localhost:8080/health || { echo "record app not up"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}'; }
+		docker_resolv record-docker riso-app
 		fire http://localhost:8080 "$W/out/record-docker/keploy.log"
 		waitfor 60 sh -c 'ls keploy/test-set-*/tests/*.yaml' || { echo "no test recorded"; FAILED=1; }
 		$S kill -INT $KP 2>/dev/null
@@ -406,11 +444,9 @@ for mode in "${MODES[@]}"; do
 		replay replay-docker -c "$RUN" --containerName riso-app --delay 10
 		replay replay-docker-dns -c "$RUN" --containerName riso-app --delay 10 --allow-egress dns
 		docker rm -f riso-peer >/dev/null 2>&1
-		docker_resolv_unbind
 		cd "$W" || die cd
 		;;
 	compose)
-		docker_resolv_bind
 		# Baseline: the same compose app with no keploy, on its project's own
 		# network, so a zero in replay-compose means keploy kept the name in.
 		log "baseline-compose"
@@ -419,6 +455,7 @@ for mode in "${MODES[@]}"; do
 		compose_yml riso-cbase 18083 "$APPARGS" peer
 		docker compose up -d >/dev/null 2>&1 || die "baseline compose"
 		waitfor 30 curl -sf localhost:18083/health || echo "baseline compose app not up"
+		docker_resolv base-compose riso-cbase
 		curl -s --max-time 120 localhost:18083/fire > /dev/null
 		waitfor 15 sh -c 'docker logs riso-cbase 2>&1 | grep -q "probe fork-tcp"'
 		docker logs riso-cbase > "$W/out/base-compose/app.log" 2>&1
@@ -436,6 +473,7 @@ for mode in "${MODES[@]}"; do
 		# (record-bind-race), so the probe is fired once it does.
 		waitfor 300 sh -c "curl -sf localhost:8080/health && grep -q 'Started ingress forwarding' '$W/out/record-compose/keploy.log'" ||
 			{ echo "record compose app not up"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}'; }
+		docker_resolv record-compose riso-app
 		fire http://localhost:8080 "$W/out/record-compose/keploy.log"
 		waitfor 60 sh -c 'ls keploy/test-set-*/tests/*.yaml' || { echo "no test recorded"; FAILED=1; }
 		$S kill -INT $KP 2>/dev/null
@@ -449,7 +487,6 @@ for mode in "${MODES[@]}"; do
 		RUNNER=($S)
 		replay replay-compose -c "docker compose up" --containerName riso-app --delay 10
 		replay replay-compose-dns -c "docker compose up" --containerName riso-app --delay 10 --allow-egress dns
-		docker_resolv_unbind
 		cd "$W" || die cd
 		;;
 	internal)
@@ -493,6 +530,12 @@ for p in $phases; do
 done
 log "dns names seen"
 for p in $phases; do echo "-- $p"; sort "$W/out/$p/dns-names.txt" 2>/dev/null | uniq -c | head -20; done
+log "DNS: the sink's answer to the lane's own question, and what docker's 127.0.0.11 forwarded to"
+for p in $phases; do
+	printf -- '-- %s: sink %s' "$p" "$(cat "$W/out/$p/sink-check" 2>/dev/null || echo 'not asked')"
+	[ ! -f "$W/out/$p/resolv.conf" ] || printf '; docker %s' "$(grep -E '^# (ExtServers|Overrides)' "$W/out/$p/resolv.conf" | tr '\n' ' ')"
+	echo
+done
 log "kept inside (each replay's report)"
 for p in $phases; do
 	[ -f "$W/out/$p/keploy.log" ] || continue
@@ -517,7 +560,7 @@ for mode in "${MODES[@]}"; do
 		# The opt-in: the same misses now reach the host's resolver.
 		row "replay-native-dns passes" "$([ "$(cat "$W/out/replay-native-dns/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-native-dns/exit" 2>/dev/null)"
 		c=$(( $(count replay-native-dns dns-udp) + $(count replay-native-dns dns-other) + $(count replay-native-dns dns-tcp) ))
-		row "replay-native-dns forwards to the host's resolver" "$([ "$c" -gt 0 ] && echo 1)" "$c DNS at the sink"
+		row "replay-native-dns forwards to the host's resolver" "$([ "$c" -gt 0 ] && echo 1)" "$c DNS at the sink$([ "$c" -gt 0 ] || echo "; $(dns_why replay-native-dns)")"
 		row_log "replay-native-dns names its opt-in" "$W/out/replay-native-dns/keploy.log" "$EGRESS_DNS"
 		row_not_kept_dns "replay-native-dns does not report the forwarded name as kept inside" replay-native-dns leak-probe.invalid-replay-isolation.test.
 		rows_recorded_nx native
@@ -531,8 +574,9 @@ for mode in "${MODES[@]}"; do
 		rows_reach base-docker tcp fork-tcp tfo imds-tcp dns-udp dns-bare
 		row "replay-docker passes" "$([ "$(cat "$W/out/replay-docker/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-docker/exit" 2>/dev/null)"
 		# keploy answers that name itself: 127.0.0.11 gets only the network's
-		# own names, so the name never reaches its upstream.
-		rows_zero replay-docker tcp fork-tcp tfo imds-tcp dns-udp dns-bare dns-tcp
+		# own names, so the name never reaches its upstream. Nor does any
+		# other (dns-other): only 127.0.0.11 asks the sink here.
+		rows_zero replay-docker tcp fork-tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp
 		# ... and every name it does hold still goes to it: the peer resolves
 		# to its own address, which keploy could not have made up.
 		peer_row replay-docker
@@ -558,8 +602,9 @@ for mode in "${MODES[@]}"; do
 		rows_reach base-compose dns-owned
 		row_log "base-compose resolves the peer service" "$W/out/base-compose/app.log" 'probe dns-peer: [0-9]'
 		row "replay-compose passes" "$([ "$(cat "$W/out/replay-compose/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose/exit" 2>/dev/null)"
-		# keploy answers that name itself, so it never reaches 127.0.0.11's upstream.
-		rows_zero replay-compose tcp fork-tcp tfo imds-tcp dns-udp dns-bare dns-tcp
+		# keploy answers that name itself, so it never reaches 127.0.0.11's
+		# upstream, nor does any other name (dns-other).
+		rows_zero replay-compose tcp fork-tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp
 		# The peer service resolves to its address on the project network,
 		# as docker's resolver answers it, not to keploy's own answer.
 		peer_row replay-compose
