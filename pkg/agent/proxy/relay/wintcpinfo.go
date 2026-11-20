@@ -131,6 +131,22 @@ func (i winTCPInfo) acked(finSent bool) (uint64, bool) {
 	return sent - inFlight, true
 }
 
+// tookAll reports whether the client's stack has acknowledged every one of
+// the written bytes written to the socket (the count from its accept, as
+// resetClientOnClose reads it): each was sent (sentOnce) and none is in
+// flight, so its send buffer holds nothing. known is false when the counts
+// cannot say (counted), and when they count more bytes sent than were
+// written, so a write went around the count (checkCount). A FIN the proxy
+// sent can count in BytesInFlight until the client acknowledges it (acked),
+// which only has the reset wait for that.
+func (i winTCPInfo) tookAll(written uint64) (all, known bool) {
+	sent, ok := i.sentOnce()
+	if !ok || sent > written {
+		return false, false
+	}
+	return sent == written && i.inFlight == 0, true
+}
+
 // look is what the socket says of its client, as Linux's TCP_INFO says it
 // (client_took_linux.go): TIME_WAIT is closed as well (the client's FIN came
 // after the proxy's, and both are acknowledged).

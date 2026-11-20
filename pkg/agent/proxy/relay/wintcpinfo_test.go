@@ -182,6 +182,34 @@ func TestAWindowsClientWhoseWindowStaysClosedHasWhatItNeverTookRefused(t *testin
 	}
 }
 
+// A Windows socket's client took every byte written to it (so its close may
+// reset it: resetClientOnClose) only when each was sent once and none is in
+// flight, inside the counts' fence; an answer outside the fence, or one that
+// counts more bytes sent than were written, says nothing.
+func TestAWindowsSocketsClientTookEveryByteOnlyWhenNoneIsUnsentOrInFlight(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct {
+		name       string
+		info       winTCPInfo
+		written    uint64
+		all, known bool
+	}{
+		{"every byte sent and acknowledged", winTCPInfo{out: 10}, 10, true, true},
+		{"nothing written", winTCPInfo{}, 0, true, true},
+		{"bytes in flight", winTCPInfo{out: 10, inFlight: 3}, 10, false, true},
+		{"the proxy's FIN in flight", winTCPInfo{out: 10, inFlight: 1}, 10, false, true},
+		{"bytes the send buffer holds unsent", winTCPInfo{out: 7}, 10, false, true},
+		{"a window probe sent again, every byte acknowledged", winTCPInfo{out: 12, retrans: 2}, 10, true, true},
+		{"a write around the count", winTCPInfo{out: 11}, 10, false, false},
+		{"a fast retransmit", winTCPInfo{out: 10, fastRetrans: 1}, 10, false, false},
+		{"a timeout", winTCPInfo{out: 10, timeouts: 1}, 10, false, false},
+	} {
+		if all, known := row.info.tookAll(row.written); all != row.all || known != row.known {
+			t.Errorf("%s: tookAll(%d) = %v, %v; want %v, %v", row.name, row.written, all, known, row.all, row.known)
+		}
+	}
+}
+
 // The reset a Windows socket kept no error for, told from its state and
 // counts as Linux's socket keeps it: EPIPE in CLOSE_WAIT, ECONNRESET in every
 // other state; nothing where the connection may have closed cleanly, a
