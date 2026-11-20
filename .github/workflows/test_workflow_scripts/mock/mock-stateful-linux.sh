@@ -41,7 +41,7 @@
 #      between tests is never served a test's recording, consumed or not.
 #      (A pid-less end stages the whole pool again, t1's consumed mock with
 #      it: the call between tests is served it. Reported, not guarded here.)
-#   6. a pipeline: 20 reads of the counter sent in ONE write on one
+#   6. (both halves) a pipeline: 20 reads of the counter sent in ONE write on one
 #      keep-alive connection (HTTP/1.1 pipelining), each answer read in
 #      turn. The record must keep the 20 (it kept the first of them, with
 #      nothing said), and the replay, with consume-once mocks, must answer
@@ -487,31 +487,42 @@ done
 grep -qx 'missed: 3' keploy/once/last-replay.yaml || { echo "FAIL: the once replay's receipt does not count the 3 misses: $(grep -E '^(missed|consumed|loaded):' keploy/once/last-replay.yaml | tr '\n' ' ')"; FAIL=1; }
 grep -q "_FAILED_BY_KEPLOY=" rep-once.log && { echo "FAIL: an end answered fail on the scope API without the switch: $(grep -o 'ONCE_[a-z0-9]*_FAILED_BY_KEPLOY=.*' rep-once.log | head -1)"; FAIL=1; }
 
-echo "== 6. without the switch: a pipeline of 20 reads in one write, replayed in turn, dependency DOWN =="
-PIPE_N=20
-WANT_PIPE=$(seq -s, 1 "$PIPE_N")
-: > dep.log
-python3 dep-pipe.py "$PORT" > dep.log 2>&1 &
-DP=$!
-until grep -qx ready dep.log 2>/dev/null; do
-  kill -0 "$DP" 2>/dev/null || { echo "FAIL: the pipeline's dependency exited before it listened"; cat dep.log; exit 1; }
-  sleep 0.1
-done
-sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= "$RECORD_BIN" mock record -c "python3 pipe.py $PORT $PIPE_N" --name pipe --disable-tele 2>&1 | tee rec-pipe.log
-RC=${PIPESTATUS[0]}
-stop_dep
-[ "$RC" -eq 0 ] || { echo "FAIL: the pipeline record should pass (exit 0), got $RC"; FAIL=1; }
-grep -qx "PIPE=$WANT_PIPE" rec-pipe.log ||
-  { echo "FAIL: the pipeline record did not read 1..$PIPE_N (got: $(grep -o 'PIPE=[^ ]*' rec-pipe.log | head -1))"; FAIL=1; }
-# Each read of the pipeline has its mock.
-GOT_PIPE=$(grep -cE '^\s*url: \S*/counter\s*$' keploy/pipe/mocks.yaml 2>/dev/null)
-[ "${GOT_PIPE:-0}" -eq "$PIPE_N" ] || { echo "FAIL: want the pipeline's $PIPE_N reads recorded, got $GOT_PIPE mocks"; FAIL=1; }
-# Consume-once (KEPLOY_STRICT_MOCK_WINDOW=1): each read is served one
-# recording, in the order they were recorded.
-sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN= KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 pipe.py $PORT $PIPE_N" --name pipe --disable-tele 2>&1 | tee rep-pipe.log
-grep -qx "PIPE=$WANT_PIPE" rep-pipe.log ||
-  { echo "FAIL: the pipeline's reads were not served 1..$PIPE_N in turn (got: $(grep -o 'PIPE=[^ ]*' rep-pipe.log | head -1))"; FAIL=1; }
 fi
+
+# Step 6, in each half the run runs: SW is KEPLOY_PROVEN's value ("" off, 1
+# on). Under the switch the agent serves through its exact pools, which keep
+# recordings of one request time in the order they were staged.
+pipeline_step() {
+  local sw=$1 how=off name=pipe
+  if [ -n "$sw" ]; then how=on; name=pipe-proven; fi
+  echo "== 6. ($how) a pipeline of 20 reads in one write, replayed in turn, dependency DOWN =="
+  PIPE_N=20
+  WANT_PIPE=$(seq -s, 1 "$PIPE_N")
+  : > dep.log
+  python3 dep-pipe.py "$PORT" > dep.log 2>&1 &
+  DP=$!
+  until grep -qx ready dep.log 2>/dev/null; do
+    kill -0 "$DP" 2>/dev/null || { echo "FAIL: ($how) the pipeline's dependency exited before it listened"; cat dep.log; exit 1; }
+    sleep 0.1
+  done
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$sw" "$RECORD_BIN" mock record -c "python3 pipe.py $PORT $PIPE_N" --name "$name" --disable-tele 2>&1 | tee "rec-$name.log"
+  RC=${PIPESTATUS[0]}
+  stop_dep
+  [ "$RC" -eq 0 ] || { echo "FAIL: ($how) the pipeline record should pass (exit 0), got $RC"; FAIL=1; }
+  grep -qx "PIPE=$WANT_PIPE" "rec-$name.log" ||
+    { echo "FAIL: ($how) the pipeline record did not read 1..$PIPE_N (got: $(grep -o 'PIPE=[^ ]*' "rec-$name.log" | head -1))"; FAIL=1; }
+  # Each read of the pipeline has its mock.
+  GOT_PIPE=$(grep -cE '^\s*url: \S*/counter\s*$' "keploy/$name/mocks.yaml" 2>/dev/null)
+  [ "${GOT_PIPE:-0}" -eq "$PIPE_N" ] || { echo "FAIL: ($how) want the pipeline's $PIPE_N reads recorded, got $GOT_PIPE mocks"; FAIL=1; }
+  # Consume-once (KEPLOY_STRICT_MOCK_WINDOW=1): each read is served one
+  # recording, in the order they were recorded.
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN="$sw" KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" mock replay -c "python3 pipe.py $PORT $PIPE_N" --name "$name" --disable-tele 2>&1 | tee "rep-$name.log"
+  grep -qx "PIPE=$WANT_PIPE" "rep-$name.log" ||
+    { echo "FAIL: ($how) the pipeline's reads were not served 1..$PIPE_N in turn (got: $(grep -o 'PIPE=[^ ]*' "rep-$name.log" | head -1))"; FAIL=1; }
+}
+for sw in "${SWITCH_VALUES[@]}"; do
+  pipeline_step "$sw"
+done
 
 [ "$FAIL" = 0 ] && echo "MOCK STATEFUL E2E: PASSED" || echo "MOCK STATEFUL E2E: FAILED"
 exit $FAIL
