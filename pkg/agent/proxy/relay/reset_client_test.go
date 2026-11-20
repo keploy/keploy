@@ -199,6 +199,27 @@ func TestResetClientOnCloseStopsWaitingAtTheRecordingsStop(t *testing.T) {
 	}
 }
 
+// The grace's end ends the wait for the client's acknowledgement: with the
+// bytes still outstanding, the answer comes within a small multiple of the
+// grace (plus slack for a loaded machine's scheduling), and the close stays a
+// FIN.
+func TestResetClientOnCloseStopsWaitingWhenItsGraceEnds(t *testing.T) {
+	app, raw := dialSmallWindow(t)
+	proxy := CountClientWrites(raw)
+	fillPastTheClient(t, app, proxy)
+	const grace, slack = 100 * time.Millisecond, 2 * time.Second
+	done := make(chan bool, 1)
+	go func() { done <- resetClientOnClose(context.Background(), proxy, grace) }()
+	select {
+	case reset := <-done:
+		if reset {
+			t.Error("resetClientOnClose = true with bytes outstanding at the grace's end; want the close kept a FIN")
+		}
+	case <-time.After(3*grace + slack):
+		t.Fatalf("resetClientOnClose still waited %v after a grace of %v", 3*grace+slack, grace)
+	}
+}
+
 // Through the relay, as keploy record runs it: a destination that resets the
 // connection after its answer has the client read the answer, then the reset,
 // as it would from the destination, not the end of the stream.
