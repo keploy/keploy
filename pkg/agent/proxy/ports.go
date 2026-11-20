@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -43,7 +44,7 @@ func (p *Proxy) bindOrMove(server string, port *uint32, bind func(port uint32) e
 	if err == nil {
 		return nil
 	}
-	if !utils.IsAddrInUse(err) {
+	if !neterr.IsAddrInUse(err) {
 		return err
 	}
 	taken := fmt.Sprintf("the %s's %s", server, utils.PortTaken(*port))

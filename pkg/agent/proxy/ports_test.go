@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -32,7 +33,7 @@ func TestATakenPortThatMayNotMoveFailsAsOneToStartAgain(t *testing.T) {
 		}
 		return err
 	}, func() {})
-	if !errors.Is(err, utils.ErrPortTaken) || !utils.IsAddrInUse(err) || !strings.Contains(err.Error(), fmt.Sprintf("the proxy's port %d is taken", port)) {
+	if !errors.Is(err, utils.ErrPortTaken) || !neterr.IsAddrInUse(err) || !strings.Contains(err.Error(), fmt.Sprintf("the proxy's port %d is taken", port)) {
 		t.Fatalf("bindOrMove on a held port: %v; want utils.ErrPortTaken naming port %d", err, port)
 	}
 	// Any other failure of the bind is not one a fresh start would change.
