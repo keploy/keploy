@@ -1457,8 +1457,8 @@ func (a *AgentClient) sayNoClockRun(why string, older bool) {
 	if a.saidNoClockRun.Swap(true) {
 		return
 	}
-	msg := fmt.Sprintf("keploy's agent took no run id from this keploy (%s); the run goes on without one, and the agent "+
-		"cannot tell this run's clock timeline on the shared clock files from one an earlier run left there", why)
+	msg := fmt.Sprintf("keploy's agent took no run id from this keploy (%s); the run goes on without one: where the agent "+
+		"keeps a clock timeline on the shared clock files, it cannot tell this run's there from one an earlier run left", why)
 	if older {
 		a.logger.Info(msg + ". Use an agent image of this keploy's version to have the run's timeline marked as its own")
 		return
