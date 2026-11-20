@@ -60,6 +60,11 @@ func bigExchanges(req []byte) map[string]eofStore {
 // (rest bytes), so the rest comes in the request's window however long the
 // parser takes to read it. It gives the connection beneath (NetConn), as
 // the proxy's own wrappers do: the parser looks at what its socket holds.
+// It gives the request's first bytes only once the clock has moved past
+// the start of the round that reads them, so they come late in the round on
+// any clock: on one that moves in steps (Windows' moves about every 2 ms),
+// bytes read just as a round begins share its start's reading, and their
+// window is the round's.
 type faults struct {
 	net.Conn
 	mu          sync.Mutex
@@ -72,14 +77,19 @@ type faults struct {
 	reached     bool
 	expired     bool
 	waiting     bool
+	began       bool
+	setAt       time.Time
 }
 
 func (c *faults) NetConn() net.Conn { return c.Conn }
 
 func (c *faults) Read(p []byte) (int, error) {
 	c.mu.Lock()
-	reached, expired, waiting, left := c.reached, c.expired, c.waiting, c.left
+	reached, expired, waiting, left, began, setAt := c.reached, c.expired, c.waiting, c.left, c.began, c.setAt
 	c.mu.Unlock()
+	if !began && !expired && !reached && !until(func() bool { return time.Now().After(setAt) }) {
+		return 0, errors.New("the clock never moved past the round's start")
+	}
 	switch {
 	case expired:
 		return 0, timedOut
@@ -97,6 +107,7 @@ func (c *faults) Read(p []byte) (int, error) {
 	}
 	n, err := c.Conn.Read(p)
 	c.mu.Lock()
+	c.began = c.began || n > 0
 	if !c.reached {
 		c.left -= n
 		c.reached = c.left == 0
@@ -117,6 +128,7 @@ func (c *faults) SetReadDeadline(t time.Time) error {
 		close(c.rearmed)
 	}
 	c.expired = false
+	c.setAt = time.Now()
 	c.mu.Unlock()
 	return c.Conn.SetReadDeadline(t)
 }
@@ -382,7 +394,9 @@ func TestARequestTheConnectionsEndCutsShortMissesAtOnce(t *testing.T) {
 // since it was set (the bytes are that much faster than the window). It
 // counts the bytes it gave. Past limit bytes, or closed, its reads fail: a
 // parser that never ended its read stops there. What the parser writes is
-// dropped.
+// dropped. It gives the first byte only once the clock has moved past the
+// start of the round that reads it, so the bytes come late in that round on
+// any clock (faults says why).
 type endless struct {
 	net.Conn
 	mu        sync.Mutex
@@ -392,9 +406,16 @@ type endless struct {
 	reads     int
 	total     int
 	closed    bool
+	setAt     time.Time
 }
 
 func (c *endless) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	first, setAt := c.total == 0 && c.quiet == 0 && !c.closed, c.setAt
+	c.mu.Unlock()
+	if first && !until(func() bool { return time.Now().After(setAt) }) {
+		return 0, errors.New("the clock never moved past the round's start")
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch {
@@ -418,6 +439,7 @@ func (c *endless) SetReadDeadline(time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.reads = 0
+	c.setAt = time.Now()
 	return nil
 }
 
