@@ -438,8 +438,9 @@ func (p *Proxy) recordViaSupervisor(
 	switch {
 	case result.FallthroughToPassthrough:
 		// A parser retired as the recording stops (RecordingStopping), however
-		// it ends: aborted once it has read its streams to their end, or once
-		// the stop's deadline passed (canceled), or dead of a panic as the
+		// it ends: aborted once it has read its streams to their end and then
+		// made no progress on what it read for its fold window, or once the
+		// stop's deadline passed (canceled), or dead of a panic as the
 		// recording stops (panicked).
 		// There is no "rest of the connection" left to lose, so the warning
 		// does not apply, any more than the span does (openSpan): emitting it

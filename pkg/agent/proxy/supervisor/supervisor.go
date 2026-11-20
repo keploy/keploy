@@ -18,6 +18,12 @@ import (
 const (
 	defaultHangBudget = stall.HangBudget
 	defaultMemCap     = 8 * 1024 * 1024 // 8 MiB
+	// defaultFoldWindow is Config.FoldWindow's default. A parser folding
+	// what it has already read hands each record over within milliseconds
+	// of the one before (the bytes are in memory): a second of the time the
+	// process could run is far past that, and is the most the stop waits on
+	// a parser that has read everything and waits on something else.
+	defaultFoldWindow = time.Second
 	// minHangTick bounds how often the watchdog checks its budget so
 	// very short HangBudgets (used in tests) do not cause a ridiculous
 	// polling rate. HangBudget/4 is the target; we never go below this.
@@ -39,10 +45,19 @@ type Config struct {
 	// not hung, and its stall counts only as fast as it gets to run.
 	HangBudget time.Duration
 
-	// Clock measures HangBudget (utils/stall); nil is the process's own
-	// runnable clock, held while there is pending work to measure (see
-	// watchdogLoop). Tests set it.
+	// Clock measures HangBudget and FoldWindow (utils/stall); nil is the
+	// process's own runnable clock, held while there is pending work to
+	// measure (see watchdogLoop) and while Run's stop wait watches a parser
+	// fold what it read (foldWatch). Tests set it.
 	Clock stall.Clock
+
+	// FoldWindow is how long, at the recording's stop, a parser that has
+	// read both its streams to their end may make no progress on what it
+	// read (Session.handedOver: a record handed over or reported, a mock
+	// held, bytes folded) before Run aborts it. While it makes progress,
+	// Run waits for it, up to the stop's deadline (StopDeadline). It is
+	// time the process could run (Clock), as HangBudget is. Default 1s.
+	FoldWindow time.Duration
 
 	// MemCap is the per-connection byte cap on parser-owned buffers.
 	// Enforced by callers via MarkMemCapExceeded; exposed here as
@@ -123,10 +138,11 @@ type Supervisor struct {
 
 	// StopDeadline, when set before Run, is closed once the stop's own
 	// overall deadline has passed. After the outer ctx ends (the recording's
-	// stop) Run waits for its parser to return, to read both its streams to
-	// their end, or to hang, and aborts it on none of those before this is
-	// closed. nil: the stop has no deadline of its own here (the process's
-	// end bounds it).
+	// stop) Run waits for its parser to return, or to hang, or, once it has
+	// read both its streams to their end, to make no progress for its fold
+	// window (Config.FoldWindow), and aborts it on none of those before
+	// this is closed. nil: the stop has no deadline of its own here (the
+	// process's end bounds it).
 	StopDeadline <-chan struct{}
 
 	// suspended, once set, permanently disarms the hang watchdog for
@@ -159,6 +175,9 @@ func New(cfg Config) *Supervisor {
 	}
 	if cfg.MemCap <= 0 {
 		cfg.MemCap = defaultMemCap
+	}
+	if cfg.FoldWindow <= 0 {
+		cfg.FoldWindow = defaultFoldWindow
 	}
 
 	clk := cfg.Clock
@@ -335,11 +354,18 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		// that costs nothing captured, or once the stop's own deadline says
 		// the wait is over:
 		//   - the parser has read both its streams to their end
-		//     (fakeconn.FakeConn.ReadToEnd): whatever it still waits on,
-		//     nothing of the capture is left for it to read;
+		//     (fakeconn.FakeConn.ReadToEnd), and has then made no progress
+		//     on what it read for its fold window (foldWatch): nothing of
+		//     the capture is left for it to read, and it hands nothing
+		//     over, so whatever it waits on costs nothing captured. One
+		//     still handing over what it read is waited for: an abort then
+		//     lost every record it had not handed over yet;
 		//   - the stop's overall deadline passed (StopDeadline): what the
 		//     parser has not read by then is left out, with its span, as
-		//     everything a retired parser never read is;
+		//     everything a retired parser never read is; and a parser that
+		//     had read both its streams to their end, and was still in its
+		//     fold window, is said to lose what it had not handed over
+		//     (warnCut);
 		//   - it hangs (the watchdog, on the time it could run): the hang
 		//     path, as before the stop. From the stop, a hang is judged by
 		//     what the parser still has to read (watchTheStop), not by the
@@ -351,6 +377,10 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		// goroutine does not leak, and the relay's tees do not stay armed.
 		ends := streamEnds(sess)
 		s.watchTheStop(sess)
+		// fold watches the parser once it has read both its streams to their
+		// end (watchTheFold), and look is its next look: nil until then.
+		var fold *foldWatch
+		var look <-chan time.Time
 	wait:
 		for {
 			var end <-chan struct{}
@@ -378,9 +408,20 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 				return s.hung(sess, runCancel)
 			case <-end:
 				if ends = ends[1:]; len(ends) == 0 {
+					// Once: with no end left, this case never fires again.
+					fold = s.watchTheFold(sess)
+					defer fold.stop()
+					look = fold.look
+				}
+			case <-look:
+				if fold.idle() {
 					break wait
 				}
+				look = fold.look
 			case <-s.StopDeadline:
+				if fold != nil {
+					s.warnCut(sess)
+				}
 				break wait
 			}
 		}
@@ -419,6 +460,76 @@ func (s *Supervisor) hung(sess *Session, runCancel context.CancelFunc) Result {
 		Status:                   StatusHung,
 		Err:                      fmt.Errorf("supervisor: parser hung beyond %s", s.cfg.HangBudget),
 		FallthroughToPassthrough: true,
+	}
+}
+
+// foldWatch is what Run's stop wait measures once sess's parser has read both
+// its streams to their end (watchTheFold): whether it still makes progress on
+// what it read (Session.handedOver), looked at every quarter of the fold
+// window, on the supervisor's clock. Run alone uses it.
+type foldWatch struct {
+	s    *Supervisor
+	sess *Session
+	// look fires at the next look; stopLook releases its timer.
+	look     <-chan time.Time
+	stopLook func() bool
+	// release releases the process clock (nil: a Config's Clock).
+	release func()
+	// since is the clock's runnable time at the latest look that found
+	// progress, or at the watch's start.
+	since time.Duration
+}
+
+// watchTheFold starts the fold watch of sess's parser, which has read both its
+// streams to their end. It holds the process clock until stop: the watchdog,
+// which held it while bytes were unread, has nothing left to measure.
+func (s *Supervisor) watchTheFold(sess *Session) *foldWatch {
+	w := &foldWatch{s: s, sess: sess}
+	if s.holdClk != nil {
+		w.release = s.holdClk()
+	}
+	sess.takeHandedOver() // progress counts from here
+	w.since = s.clk.Runnable()
+	w.arm()
+	return w
+}
+
+// arm arms the next look, a quarter of the fold window from now.
+func (w *foldWatch) arm() {
+	w.look, w.stopLook = w.s.clk.After(w.s.cfg.FoldWindow / 4)
+}
+
+// idle looks at the parser's progress: it reports whether the parser has made
+// none for more than the fold window, and arms the next look when it has not.
+func (w *foldWatch) idle() bool {
+	now := w.s.clk.Runnable()
+	if w.sess.takeHandedOver() {
+		w.since = now
+	} else if now-w.since > w.s.cfg.FoldWindow {
+		return true
+	}
+	w.arm()
+	return false
+}
+
+// FoldCutWarnMsg is the WARN warnCut logs.
+const FoldCutWarnMsg = "the recording's stop deadline cut short a parser still recording what it had captured"
+
+// warnCut says, as the stop's deadline aborts sess's parser, which had read both
+// its streams to their end and was still within its fold window, that the
+// records it had not handed over by then are lost.
+func (s *Supervisor) warnCut(sess *Session) {
+	s.cfg.Logger.Warn(FoldCutWarnMsg,
+		zap.String("clientConnID", sess.ClientConnID),
+		zap.String("next_step", "the parser had read everything this connection carried before the stop and was still handing over the records it made of it: the records it had not handed over by the stop's deadline are missing from the recording. Give the recording's stop more time, or record with less traffic in flight at the stop"),
+	)
+}
+
+// stop ends the watch: its timer and its hold on the process clock.
+func (w *foldWatch) stop() {
+	w.stopLook()
+	if w.release != nil {
+		w.release()
 	}
 }
 
