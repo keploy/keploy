@@ -406,8 +406,9 @@ func TestDecodeHTTPDropsEmptyLinesAfterARequest(t *testing.T) {
 // Reads as their buffers take them, the last of them with the step's error,
 // as crypto/tls gives a TLS 1.2 client's last bytes with the io.EOF of its
 // close_notify. With no step left a Read gives io.EOF. A Read after an
-// io.EOF has been given gives io.EOF again, and is counted: a replay that
-// honours the client's end reads no more.
+// error that ends the connection (any but a deadline's) has been given gives
+// io.EOF, and is counted: a replay that honours the client's end reads no
+// more.
 type scriptedClient struct {
 	net.Conn
 	mu       sync.Mutex
@@ -434,7 +435,7 @@ func (c *scriptedClient) Read(p []byte) (int, error) {
 	}
 	err := st.err
 	c.steps = c.steps[1:]
-	c.ended = errors.Is(err, io.EOF)
+	c.ended = err != nil && !errors.Is(err, os.ErrDeadlineExceeded)
 	return n, err
 }
 
@@ -508,6 +509,11 @@ func TestDecodeHTTPServesARequestReadWithItsEOF(t *testing.T) {
 		// served, and the client's next call read after it.
 		{keepAlivePath: matched("a body's end read with a timeout, then the next call"), first: eofPost[:cut],
 			steps: []readStep{{data: []byte(eofPost[cut:]), err: os.ErrDeadlineExceeded}, {data: []byte(eofPost)}}, answers: 2},
+		// A network error that is no timeout ends the connection as the
+		// EOF does: the call it came with is served, and the connection
+		// is not read again.
+		{keepAlivePath: matched("a call read with a connection reset"), answers: 2,
+			steps: []readStep{{data: []byte(eofPost), err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}}}},
 		// A request cut by the EOF is no request: the one before it is
 		// answered, and the cut one is logged, without another read.
 		{keepAlivePath: matched("part of a call read with the EOF"), steps: eof(eofPost + eofPost[:10]), answers: 2,
@@ -562,7 +568,7 @@ func TestDecodeHTTPServesARequestReadWithItsEOF(t *testing.T) {
 				t.Fatalf("error logs %q, want %q", errs, wantErrs)
 			}
 			if n := client.readsAfterEOF(); n != 0 {
-				t.Fatalf("the client's connection was read %d more times after its EOF, want none: the EOF is honoured once its bytes are served", n)
+				t.Fatalf("the client's connection was read %d more times after its end, want none: the end is honoured once its bytes are served", n)
 			}
 			if tc.dep {
 				eachCallAlone(t, depAfter, tc.answers)
