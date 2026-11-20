@@ -317,9 +317,10 @@ func TestAWholeRequestIsNotWaitedOn(t *testing.T) {
 				} else {
 					awaitMiss(t, done)
 				}
-				// 50 windows: a parser that waited past the request's window
-				// for more bytes (a second, as one did) is not answered so.
-				if took := time.Since(sent); took > 50*quietWindow {
+				// A parser that waited past the request's window for more
+				// bytes (a second, as one did) is not answered so soon, nor
+				// is one whose window grew to that.
+				if took := time.Since(sent); took > answeredWithin {
 					t.Fatalf("the request was answered %v after it was sent; its window is %v", took, quietWindow)
 				}
 			})
