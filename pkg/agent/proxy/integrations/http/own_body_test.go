@@ -271,7 +271,8 @@ func TestEachRecordingsBodyIsReadOnce(t *testing.T) {
 	first, _ := o.read(m)
 	m.Spec.HTTPReq.Body = `{"a":2}`
 	second, _ := o.read(m)
-	if v, _ := second.json().Decoded(); v.(map[string]any)["a"] != float64(2) || first == second || second.json() != second.json() {
+	read1, read2 := second.json(), second.json()
+	if v, _ := read1.Decoded(); v.(map[string]any)["a"] != float64(2) || first == second || read1 != read2 {
 		t.Fatalf("a recording whose body changed was not read again: %v", v)
 	}
 	if r, ok := o.read(&models.Mock{}); ok || r.json() != nil {
