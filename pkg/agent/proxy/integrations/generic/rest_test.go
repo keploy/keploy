@@ -54,7 +54,8 @@ func bigExchanges(req []byte) map[string]eofStore {
 // the rest of the request sat in the socket, and every read times out, as a
 // TCP connection's does once its deadline passed, until the parser sets
 // another deadline. From there its reads fail with readErr, and its read
-// deadlines cannot be set (deadlineErr). With rearmed, the row sends the
+// deadlines cannot be set (deadlineErr; with deadlineOnce only the first
+// one, the deadline the parser reads on to). With rearmed, the row sends the
 // rest of the request only once the parser sets that deadline (rearmed is
 // closed then), and the parser's next read waits until the socket holds it
 // (rest bytes), so the rest comes in the request's window however long the
@@ -67,18 +68,19 @@ func bigExchanges(req []byte) map[string]eofStore {
 // window is the round's.
 type faults struct {
 	net.Conn
-	mu          sync.Mutex
-	left        int
-	expire      bool
-	readErr     error
-	deadlineErr error
-	rearmed     chan struct{}
-	rest        int
-	reached     bool
-	expired     bool
-	waiting     bool
-	began       bool
-	setAt       time.Time
+	mu           sync.Mutex
+	left         int
+	expire       bool
+	readErr      error
+	deadlineErr  error
+	deadlineOnce bool
+	rearmed      chan struct{}
+	rest         int
+	reached      bool
+	expired      bool
+	waiting      bool
+	began        bool
+	setAt        time.Time
 }
 
 func (c *faults) NetConn() net.Conn { return c.Conn }
@@ -120,8 +122,12 @@ func (c *faults) Read(p []byte) (int, error) {
 func (c *faults) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
 	if c.reached && c.deadlineErr != nil {
+		err := c.deadlineErr
+		if c.deadlineOnce {
+			c.deadlineErr = nil
+		}
 		c.mu.Unlock()
-		return c.deadlineErr
+		return err
 	}
 	if c.expired && c.rearmed != nil {
 		c.waiting = true
@@ -489,7 +495,8 @@ func TestARequestWhoseBytesNeverPauseEndsAtItsWindow(t *testing.T) {
 
 // A connection that breaks while the parser reads a request ends the
 // parser, the request unmatched: no miss is filed for a request the
-// connection never finished sending.
+// connection never finished sending. A deadline the parser cannot set as
+// it reads on ends it there, though a later one could be set.
 func TestAConnectionThatBreaksInARequestEndsTheParser(t *testing.T) {
 	reset := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
 	refused := errors.New("the deadline cannot be set")
@@ -508,6 +515,9 @@ func TestAConnectionThatBreaksInARequestEndsTheParser(t *testing.T) {
 		}},
 		{"the deadline to read on to cannot be set", req, func(c net.Conn) net.Conn {
 			return &faults{Conn: c, left: 1000, expire: true, deadlineErr: refused}
+		}},
+		{"only the deadline to read on to cannot be set", req, func(c net.Conn) net.Conn {
+			return &faults{Conn: c, left: 1000, expire: true, deadlineErr: refused, deadlineOnce: true}
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
