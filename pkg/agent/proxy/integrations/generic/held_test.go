@@ -16,6 +16,8 @@ import (
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // timedOut is what a read whose deadline passed returns, without reading.
@@ -501,4 +503,110 @@ func TestADeadlineThatCannotBeSetPastTheWindowEndsTheParser(t *testing.T) {
 			})
 		})
 	}
+}
+
+// refills is the proxy's end of a TCP connection whose application never
+// pauses, and refills the socket within each of the parser's reads past its
+// look: those reads give the parser bytes without taking them from the
+// socket, which so holds as many bytes after each as before it, and the
+// read-on never ends by its count of the socket's bytes. Its reads give cut
+// bytes, then wait until the deadline last set has passed and the socket
+// holds held bytes, and time out without reading, until the parser looks at
+// what the socket holds (its first NetConn since). Past stopAfter bytes
+// past the look its reads read the socket, so a parser with no bound of its
+// own ends by the socket's count, holding a few MiB, not without bound. No
+// read waits on the network once the socket holds held bytes, so the row
+// does not race the parser's window.
+type refills struct {
+	net.Conn
+	cut, held, stopAfter int
+
+	mu sync.Mutex
+	// total: what the reads gave; atLook: total at the parser's look.
+	total, atLook int
+	looked        bool
+	deadline      time.Time
+}
+
+func (c *refills) NetConn() net.Conn {
+	c.mu.Lock()
+	if !c.looked && c.total >= c.cut {
+		c.looked, c.atLook = true, c.total
+	}
+	c.mu.Unlock()
+	return c.Conn
+}
+
+func (c *refills) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.deadline = t
+	c.mu.Unlock()
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *refills) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	total, looked, deadline, atLook := c.total, c.looked, c.deadline, c.atLook
+	c.mu.Unlock()
+	if looked && total-atLook >= c.stopAfter {
+		return c.Conn.Read(p)
+	}
+	n := len(p)
+	switch {
+	case !looked && total >= c.cut:
+		if !until(func() bool { return time.Now().After(deadline) && pUtil.UnreadBytes(c.Conn) >= int64(c.held) }) {
+			return 0, errors.New("the socket never held the request's rest")
+		}
+		return 0, timedOut
+	case !looked && n > c.cut-total:
+		n = c.cut - total
+	}
+	for i := range p[:n] {
+		p[i] = 'Z'
+	}
+	c.mu.Lock()
+	c.total += n
+	c.mu.Unlock()
+	return n, nil
+}
+
+// A request whose application refills the socket as fast as the parser
+// reads it, once the parser was held past its window, ends 2 MiB past the
+// parser's look, within one read, said in one Warn that names the client
+// (what it read before the look, more than one read, is not counted):
+// the read-on's count of the socket's bytes never falls to what it held at
+// the look. It read on, holding the request, for as long as the
+// application wrote. The request is the parser's first and the store is
+// empty, so its miss compares 2 MiB with nothing.
+func TestARequestWhoseSenderRefillsEveryReadEndsAtTheReadOnLimit(t *testing.T) {
+	eachSwitch(t, func(t *testing.T) {
+		app, proxySide := tcpPair(t)
+		conn := &refills{Conn: proxySide, cut: 40 << 10, held: 64 << 10, stopAfter: 8 << 20}
+		core, logs := observer.New(zapcore.WarnLevel)
+		done := make(chan error, 1)
+		go func() {
+			done <- decodeGeneric(context.Background(), zap.New(core), nil, conn, nil, eofStore{}, models.OutgoingOptions{})
+		}()
+		if _, err := app.Write(bytes.Repeat([]byte("Z"), 64<<10)); err != nil {
+			t.Fatal(err)
+		}
+		awaitMiss(t, done)
+		conn.mu.Lock()
+		looked, after := conn.looked, conn.total-conn.atLook
+		conn.mu.Unlock()
+		if !looked {
+			t.Fatal("the parser never looked at what the socket holds")
+		}
+		if after < 2<<20 || after >= 2<<20+pUtil.ReadChunkSize {
+			t.Fatalf("the parser read %d bytes past its look; want 2 MiB, within one read", after)
+		}
+		warns := logs.FilterMessageSnippet("never paused").All()
+		if len(warns) != 1 || logs.Len() != 1 {
+			t.Fatalf("%d warnings, %d of them that the request's bytes never paused; want that one", logs.Len(), len(warns))
+		}
+		fields := warns[0].ContextMap()
+		if fields["client"] != proxySide.RemoteAddr().String() || fields["bytesReadPastWindow"] != int64(after) {
+			t.Fatalf("the warning's fields %v; want the client %s and %d bytes", fields, proxySide.RemoteAddr(), after)
+		}
+	})
 }
