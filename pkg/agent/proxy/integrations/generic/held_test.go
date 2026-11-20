@@ -40,8 +40,10 @@ func until(cond func() bool) bool {
 // NetConn) and the deadline it sets then is held too, until the socket holds
 // more than ReadChunkSize bytes beyond what it held at that deadline (seen):
 // after counts the bytes read from there. idle counts the reads after the
-// look that timed out with nothing in the socket, and early the reads before
-// the parser's first answer (its first Write). With deadlineErr, no read
+// look, before the parser's next answer, that timed out with nothing in the
+// socket (the round after that answer waits on an empty socket for the next
+// request, as it should), and early the reads before the parser's first
+// answer (its first Write). With deadlineErr, no read
 // deadline can be set once the parser looked.
 type heldPast struct {
 	net.Conn
@@ -59,14 +61,18 @@ type heldPast struct {
 	after int
 	idle  int
 	early int
-	// answered: the parser has written its first answer.
-	answered bool
+	// answered: the parser has written its first answer; repliedAfterLook:
+	// an answer since its look.
+	answered, repliedAfterLook bool
 }
 
 func (c *heldPast) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	c.mu.Lock()
 	c.answered = true
+	if c.phase >= 3 {
+		c.repliedAfterLook = true
+	}
 	c.mu.Unlock()
 	return n, err
 }
@@ -141,7 +147,7 @@ func (c *heldPast) Read(p []byte) (int, error) {
 	case 5:
 		c.after += n
 	}
-	if c.phase >= 3 && waited {
+	if c.phase >= 3 && waited && !c.repliedAfterLook {
 		c.idle++
 	}
 	c.mu.Unlock()
