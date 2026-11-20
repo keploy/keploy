@@ -874,6 +874,99 @@ func TestResumeJudgesHeldMemory(t *testing.T) {
 	}
 }
 
+// gcFig is the runtime's figures after some GCs, in bytes: what the heap's
+// objects take, what the last GC found live of them, and the heap goal.
+func gcFig(objects, live, goal int64) goMemory {
+	return goMemory{objects: objects, live: live, goal: goal, cycles: 7, ok: true}
+}
+
+// TestThePausePointAndTheCeilingHoldToTheByte: held memory at the pause
+// point pauses, and so does the working set at the pause point with the next
+// GC due at the ceiling; one byte under either point does not.
+func TestThePausePointAndTheCeilingHoldToTheByte(t *testing.T) {
+	// 1 GiB sidecar with a 64 MiB ring buffer, no container limit.
+	dec := evaluateMemory(0, mib(1024), mib(64))
+	ov, p, c := dec.overhead, dec.pauseThreshold, dec.ceiling
+	// unmarked: 250 MiB the last GC did not find live, so held is under the
+	// working set by that much.
+	unmarked := func(goal int64) goMemory { return gcFig(mib(400), mib(150), goal) }
+	tests := []struct {
+		name  string
+		ws    int64
+		m     goMemory
+		pause bool
+	}{
+		// All of it live, and the next GC due under the ceiling.
+		{name: "held at the pause point", ws: ov + p, m: gcFig(mib(500), mib(500), mib(500)+(c-p)/2), pause: true},
+		{name: "held a byte under the pause point", ws: ov + p - 1, m: gcFig(mib(500), mib(500), mib(500)+(c-p)/2), pause: false},
+		// Held under the pause point, the next GC due over the ceiling.
+		{name: "the working set at the pause point", ws: ov + p, m: unmarked(mib(400) + c - p + mib(8)), pause: true},
+		{name: "the working set a byte under the pause point", ws: ov + p - 1, m: unmarked(mib(400) + c - p + mib(8)), pause: false},
+		// Held under the pause point, the working set 8 MiB over it.
+		{name: "the next GC due at the ceiling", ws: ov + p + mib(8), m: unmarked(mib(400) + c - p - mib(8)), pause: true},
+		{name: "the next GC due a byte under the ceiling", ws: ov + p + mib(8), m: unmarked(mib(400) + c - p - mib(8) - 1), pause: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeMemory{ws: tt.ws, m: tt.m}
+			g := fakeGuard(t, 1024, 64, f)
+			edges, _ := simulate(t, g, twoSamples, nil)
+			paused := len(edges) == 1 && edges[0].paused && edges[0].after == defaultCheckInterval
+			if paused != tt.pause || len(edges) > 1 {
+				t.Fatalf("pause edges %v; want a pause on the first sample: %v", edges, tt.pause)
+			}
+			want := 0
+			if tt.pause {
+				want = 1
+			}
+			if n := f.forced(); n != want {
+				t.Errorf("%d collections; want %d", n, want)
+			}
+		})
+	}
+}
+
+// TestTheResumePointHoldsToTheByte: a pause lifts with held memory and the
+// working set at the resume point, or the working set over it and the next GC
+// due a byte under the ceiling; not with held a byte over it, nor with the
+// next GC due at the ceiling.
+func TestTheResumePointHoldsToTheByte(t *testing.T) {
+	dec := evaluateMemory(0, mib(1024), mib(64))
+	ov, r, c := dec.overhead, dec.resumeThreshold, dec.ceiling
+	unmarked := func(goal int64) goMemory { return gcFig(mib(400), mib(150), goal) }
+	tests := []struct {
+		name   string
+		ws     int64
+		m      goMemory
+		resume bool
+	}{
+		{name: "held and the working set at the resume point", ws: ov + r, m: gcFig(mib(300), mib(300), mib(400)), resume: true},
+		{name: "held a byte over the resume point", ws: ov + r + 1, m: gcFig(mib(300), mib(300), mib(400)), resume: false},
+		// Held under the resume point, the working set 8 MiB over it.
+		{name: "the next GC due at the ceiling", ws: ov + r + mib(8), m: unmarked(mib(400) + c - r - mib(8)), resume: false},
+		{name: "the next GC due a byte under the ceiling", ws: ov + r + mib(8), m: unmarked(mib(400) + c - r - mib(8) - 1), resume: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Live memory pauses; the pause's collection leaves the case's figures.
+			f := &fakeMemory{ws: mib(900), m: heap(600, 580, 0, 830)}
+			f.onReclaim = func(f *fakeMemory) { f.ws, f.m = tt.ws, tt.m }
+			g := fakeGuard(t, 1024, 64, f)
+			edges, _ := simulate(t, g, twoSamples, nil)
+			if len(edges) == 0 || !edges[0].paused {
+				t.Fatalf("setup: live memory did not pause: %v", edges)
+			}
+			resumed := len(edges) == 2 && !edges[1].paused && edges[1].after == 2*defaultCheckInterval
+			if resumed != tt.resume || len(edges) > 2 {
+				t.Errorf("pause edges %v; want resumed on the next sample: %v", edges, tt.resume)
+			}
+			if n := f.forced(); n != 1 {
+				t.Errorf("%d collections; want 1, on pausing", n)
+			}
+		})
+	}
+}
+
 // TestUnreadableRuntimeFiguresJudgeTheWorkingSet: without the runtime's
 // figures the guard judges the working set alone, as before.
 func TestUnreadableRuntimeFiguresJudgeTheWorkingSet(t *testing.T) {
