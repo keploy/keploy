@@ -201,9 +201,8 @@ func querySigOf(sig string) string {
 // to mark a field that work under exact serving, the field written as
 // listed. First configured noise in keploy.yml
 // (test.globalNoise.global.requestBody, requestBodyNoise): it covers every
-// recording of the statement and survives a re-record. A shipped keploy
-// (built with -tags=viper_bind_struct, as goreleaser, the Dockerfile and
-// the release script build it) loads a dotted key there whole. Then the
+// recording of the statement and survives a re-record. keploy loads a
+// dotted key there whole, as written (config/loader.Files). Then the
 // recording's own noise (the noise.req list of its document in mocks.yaml,
 // MockSpec.ReqBodyNoise): one recording, which a re-record discards. Nothing
 // learns MySQL noise there: the drifted recording is never served, so
