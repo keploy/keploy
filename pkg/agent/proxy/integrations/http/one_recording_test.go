@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -155,25 +156,25 @@ func TestNoteFieldsOnOneSideNotesOnlyAServedCallsOwn(t *testing.T) {
 	h := newHTTP()
 	x := recordedAs(t, h, "mock-one-1", 1, searchCall(`{"name":"ada"}`), jsonAnswer(200, `{"hit":1}`), nil)
 	call := []byte(`{"name":"ada","role":"admin"}`)
-	h.noteFieldsOnOneSide(nil, x, call, nil)
+	h.noteFieldsOnOneSide(nil, x, mocknoise.NewJSONBody(call), nil)
 	other := servedAs{answer: models.AnswerOtherID}
-	h.noteFieldsOnOneSide(&other, x, call, nil)
+	h.noteFieldsOnOneSide(&other, x, mocknoise.NewJSONBody(call), nil)
 	if other.answer != models.AnswerOtherID || other.fields != nil {
 		t.Fatalf("a call noted %q became %+v", models.AnswerOtherID, other)
 	}
 	var none servedAs
-	h.noteFieldsOnOneSide(&none, &models.Mock{Name: "no-request"}, call, nil)
+	h.noteFieldsOnOneSide(&none, &models.Mock{Name: "no-request"}, mocknoise.NewJSONBody(call), nil)
 	if none.answer != "" {
 		t.Fatalf("a recording with no request noted %+v", none)
 	}
 	var own servedAs
-	h.noteFieldsOnOneSide(&own, x, call, nil)
+	h.noteFieldsOnOneSide(&own, x, mocknoise.NewJSONBody(call), nil)
 	if own.answer != models.AnswerClosestBody || !slices.Equal(own.fields, []string{"body.role"}) {
 		t.Fatalf("the call noted %+v, want %q at body.role", own, models.AnswerClosestBody)
 	}
 	for i := range 3 { // the fields are found in map order
 		var again servedAs
-		h.noteFieldsOnOneSide(&again, x, []byte(`{"name":"bob","role":"admin","z":`+strconv.Itoa(i)+`}`), nil)
+		h.noteFieldsOnOneSide(&again, x, mocknoise.NewJSONBody([]byte(`{"name":"bob","role":"admin","z":`+strconv.Itoa(i)+`}`)), nil)
 		if want := []string{"body.name", "body.role", "body.z"}; !slices.Equal(again.fields, want) {
 			t.Fatalf("the call noted %+v, want fields %q", again, want)
 		}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -162,11 +163,11 @@ func TestFilterStrictNoiseMatches_UserNoiseAllowsDrift(t *testing.T) {
 
 	// ts drifted; without user noise the candidate must be rejected.
 	live := []byte(`{"request_id":"r-9","ts":"222"}`)
-	if kept := h.filterStrictNoiseMatches([]*models.Mock{mock}, live, nil); len(kept) != 0 {
+	if kept := h.filterStrictNoiseMatches([]*models.Mock{mock}, mocknoise.NewJSONBody(live), nil); len(kept) != 0 {
 		t.Fatalf("expected strict rejection without user noise, kept %d", len(kept))
 	}
 	// With user noise on ts the drift is allowed.
-	if kept := h.filterStrictNoiseMatches([]*models.Mock{mock}, live, map[string][]string{"ts": {}}); len(kept) != 1 {
+	if kept := h.filterStrictNoiseMatches([]*models.Mock{mock}, mocknoise.NewJSONBody(live), map[string][]string{"ts": {}}); len(kept) != 1 {
 		t.Fatalf("expected candidate kept with user noise, kept %d", len(kept))
 	}
 }

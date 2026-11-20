@@ -214,21 +214,56 @@ func TestSameCallDrift(t *testing.T) {
 	}
 }
 
-// Each recording's body is read once however many calls compare it, read
-// again when the recording's body is not the one it was read from, and the
-// kept bodies start again from none past ownBodiesMaxBytes.
+// Each recording's body is read once to print it, and once more, kept,
+// the first time a comparison reads it whole (the recording served the
+// call, whose fields the report names), however many calls compare it; a
+// recording no comparison read keeps no read of its body. Each call's body
+// is made once for its match, however many checks read it. Each report
+// carries the served recording's request as renderMockRequest renders it,
+// rendered once for the calls it serves. A body is read again when the
+// recording's body is not the one it was read from, and the kept bodies
+// start again from none past ownBodiesMaxBytes.
 func TestEachRecordingsBodyIsReadOnce(t *testing.T) {
 	setProven(t, false)
 	h := newHTTP()
 	db := searchRecordings(t, h, nil, `{"q":"ada","x":1}`, `{"q":"alan","x":1}`)
-	before := ownBodyReads.Load()
-	for _, call := range []string{`{"q":"bob","x":1}`, `{"q":"eve","x":1}`, `{"q":"ada","x":1,"y":2}`} {
-		if got := serveReported(t, h, db, searchCall(call)); got.status != 200 {
-			t.Fatalf("%s got %d %q", call, got.status, got.body)
+	calls := []string{`{"q":"bob","x":1}`, `{"q":"eve","x":1}`, `{"q":"ada","x":1,"y":2}`}
+	before, made, rendered := ownBodyReads.Load(), callBodiesMade.Load(), rendersMade.Load()
+	for _, call := range calls {
+		got := serveReported(t, h, db, searchCall(call))
+		if got.status != 200 || len(got.answers()) != 1 {
+			t.Fatalf("%s got %d %q with %d answers, want the closest served and reported", call, got.status, got.body, len(got.answers()))
+		}
+		a := got.answers()[0]
+		i := slices.IndexFunc(db.mocks, func(m *models.Mock) bool { return m.Name == a.ClosestMock })
+		if i < 0 || a.ClosestMockReq != renderMockRequest(db.mocks[i].Spec.HTTPReq, db.mocks[i].Noise) {
+			t.Fatalf("%s's report carries %q for %s, want its request as renderMockRequest renders it", call, a.ClosestMockReq, a.ClosestMock)
 		}
 	}
-	if n := ownBodyReads.Load() - before; n != 2 {
-		t.Fatalf("three calls read the two recordings' bodies %d times, want 2", n)
+	if n := callBodiesMade.Load() - made; n != 3 {
+		t.Fatalf("three calls made %d reads of their bodies, want one each", n)
+	}
+	if n := rendersMade.Load() - rendered; n > 1 {
+		t.Fatalf("three reports of the one recording served rendered it %d times, want once at most", n)
+	}
+	if n := ownBodyReads.Load() - before; n != 3 {
+		t.Fatalf("three calls read the two recordings' bodies %d times, want 3: each printed, the one served read whole", n)
+	}
+	var whole []string
+	for _, m := range db.mocks {
+		if r, _ := h.ownBodies.read(m); r.whole.Load() != nil {
+			whole = append(whole, m.Name)
+		}
+	}
+	if len(whole) != 1 {
+		t.Fatalf("the recordings read whole are %q, want only the one served", whole)
+	}
+	before = ownBodyReads.Load()
+	for _, call := range calls {
+		serveReported(t, h, db, searchCall(call))
+	}
+	if n := ownBodyReads.Load() - before; n != 0 {
+		t.Fatalf("the same three calls again read the recordings' bodies %d times, want none", n)
 	}
 
 	var o ownBodies
@@ -236,10 +271,10 @@ func TestEachRecordingsBodyIsReadOnce(t *testing.T) {
 	first, _ := o.read(m)
 	m.Spec.HTTPReq.Body = `{"a":2}`
 	second, _ := o.read(m)
-	if v, _ := second.json.Decoded(); v.(map[string]any)["a"] != float64(2) || first == second {
+	if v, _ := second.json().Decoded(); v.(map[string]any)["a"] != float64(2) || first == second || second.json() != second.json() {
 		t.Fatalf("a recording whose body changed was not read again: %v", v)
 	}
-	if _, ok := o.read(&models.Mock{}); ok {
+	if r, ok := o.read(&models.Mock{}); ok || r.json() != nil {
 		t.Fatal("a recording of no request has a body")
 	}
 	big := &models.Mock{Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Body: `"` + strings.Repeat("x", ownBodiesMaxBytes) + `"`}}}
@@ -267,10 +302,10 @@ func TestDiffBothWaysReadsJSONOnlyWhereBothAre(t *testing.T) {
 	if d, comparable := (httpNoiseAdapter{}).DiffBothWays(&models.Mock{}, mocknoise.NewJSONBody([]byte("{}")), mocknoise.NewJSONBody([]byte("{}")), nil, nil, nil); d != nil || comparable {
 		t.Errorf("a recording of no request drifts at %v (comparable %v)", d, comparable)
 	}
-	if own := h.sameCallBodies([]*models.Mock{{Name: "none"}}, []byte(`{"q":1}`), nil); len(own) != 0 {
+	if own := h.sameCallBodies([]*models.Mock{{Name: "none"}}, mocknoise.NewJSONBody([]byte(`{"q":1}`)), nil); len(own) != 0 {
 		t.Errorf("a recording of no request is the call's own: %v", own)
 	}
-	if f := h.bodyFieldsDiffering(&models.Mock{Name: "none"}, []byte(`{"q":1}`), nil); f != nil {
+	if f := h.bodyFieldsDiffering(&models.Mock{Name: "none"}, mocknoise.NewJSONBody([]byte(`{"q":1}`)), nil); f != nil {
 		t.Errorf("a recording of no request differs at %v", f)
 	}
 }
