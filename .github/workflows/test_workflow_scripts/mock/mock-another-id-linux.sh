@@ -9,7 +9,7 @@
 # only checks the status passes on another user's data. keploy reported every
 # call answered from the recording, which made that pass look proven.
 #
-# One record, then three replays with the dependency stopped:
+# One record, then four replays with the dependency stopped:
 #   own        the recorded calls: served their own recordings, no call
 #              answered with another's, the receipt isolated
 #   another    GET /users/3: served another id's recording and passes, but
@@ -18,6 +18,10 @@
 #              answered_as_another, the console and the receipt's
 #              answeredAsAnother), and the receipt is not isolated
 #   strict     GET /users/3 with --strict: the replay fails (exit 1)
+#   noise      GET /users/3 with --strict and, in keploy.yml, the url noise
+#              the next step names for an id the app makes on every run:
+#              answered with that recording as its own, the receipt
+#              isolated, and the replay passes
 #
 # Runs without the proven switch only: under it the matcher serves only a
 # call's own recording, and a replay under it needs a build that judges each
@@ -174,6 +178,30 @@ if [ "$FAIL" -ne 0 ]; then echo "== receipt =="; cat "$RECEIPT"; fi
 replay strict "3" --strict
 [ "$RC" -eq 1 ] || fail "strict: the replay exited $RC, want 1"
 grep -q 'replay failed under --strict: calls were answered with the recording of another call, not their own' "$LOG" || fail "strict: the failure does not say a call was answered with another call's recording"
+
+# 4. noise: the next step's other cause, an id the app makes on every run,
+# names the keploy.yml url noise that makes the recording the call's own.
+# With it, GET /users/3 is answered with that recording as its own: nothing
+# says otherwise, the receipt is isolated, and --strict passes.
+ENTRY=$(grep -o 'test\.globalNoise\.global\.url: {"[^"]*": \[\]}' "$ROOT/another.log" | head -1)
+ENTRY=${ENTRY#test.globalNoise.global.url: }
+if [ -z "$ENTRY" ]; then
+  fail "noise: the console's next step for GET /users/3 names no test.globalNoise.global.url entry"
+else
+  echo "== noise: keploy.yml test.globalNoise.global.url: $ENTRY =="
+  printf 'test:\n  globalNoise:\n    global:\n      url: %s\n' "$ENTRY" > keploy.yml
+  replay noise "3" --strict
+  rm -f keploy.yml
+  passed || fail "noise: with the url noise the next step names, the replay under --strict failed (exit $RC), want it to pass"
+  case "$(cat "$ROOT/got-noise" 2>/dev/null)" in
+    1 | 2) echo "ok: noise: GET /users/3 was answered with user $(cat "$ROOT/got-noise")'s recording as its own" ;;
+    *) fail "noise: GET /users/3 was answered with id '$(cat "$ROOT/got-noise" 2>/dev/null)', want 1 or 2" ;;
+  esac
+  if grep -q "answered with the recording of another call" "$LOG"; then fail "noise: the call is still said to be answered with another call's recording"; fi
+  grep -q 'mock replay summary.*"missed": 0' "$LOG" || fail "noise: the summary does not say missed 0"
+  grep -qx 'isolated: true' "$RECEIPT" || fail "noise: the receipt does not prove the run isolated"
+  if grep -q '^answeredAsAnother:' "$RECEIPT"; then fail "noise: the receipt lists a call answered with another call's recording"; fi
+fi
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK ANOTHER-ID E2E: PASSED"; else echo "MOCK ANOTHER-ID E2E: FAILED"; fi
 exit "$FAIL"

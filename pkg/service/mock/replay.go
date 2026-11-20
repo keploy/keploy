@@ -884,7 +884,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		failedBy = FailedByStrict
 		m.logger.Error("replay failed under --strict: calls were answered with the recording of another call, not their own",
 			zap.Int("answered_as_another", len(counts.asAnother)),
-			zap.String("next_step", "record those calls (keploy mock record) so each is answered with its own recording; each is named above"))
+			zap.String("next_step", "follow each call's next step above: record a new input (keploy mock record), or mark as noise in keploy.yml what changes on every run, so each call is answered with its own recording"))
 	}
 
 	// A replay that served NONE of the recorded calls verified nothing: the test
@@ -1024,14 +1024,17 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		m.logger.Info("this replay ran with every dependency answered from the recording",
 			zap.String("mock-set", name), zap.Int("served", counts.consumed))
 	} else {
-		// The note as a log line carries it: a loss's hosts by their shape
-		// (the receipt keeps them whole).
+		// The note as a log line carries it: a loss's hosts by their shape,
+		// a call answered with another call's recording by its shape and
+		// path tag (the receipt keeps them whole).
 		isolationLog := isolationNote
 		switch {
 		case isolationNote == captureIncomplete && captureIncompleteLog != "":
 			isolationLog = captureIncompleteLog
 		case isolationNote == captureUnverified && captureUnverifiedLog != "":
 			isolationLog = captureUnverifiedLog
+		case isolationNote == answeredAsAnotherNote(counts.asAnother):
+			isolationLog = answeredAsAnotherLogNote(counts.asAnother)
 		}
 		m.logger.Info("this replay did not prove the tests run with the dependencies off",
 			zap.String("mock-set", name), zap.String("reason", isolationLog))

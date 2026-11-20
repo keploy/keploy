@@ -78,6 +78,39 @@ func answeredAsAnotherNote(calls []models.UnmatchedCall) string {
 	return fmt.Sprintf("%d call(s) were answered with the recording of another call, not their own: %s%s", len(calls), strings.Join(named, "; "), more)
 }
 
+// answeredAsAnotherLogNote is answeredAsAnotherNote as a log line carries
+// it: each call by its shape and path tag (models.UnmatchedCallLogName), the
+// recording served by name and how it was chosen, in keploy's log form
+// (models.UnmatchedCallLogText), never a path or body value of either call.
+// The receipt and the console keep the note whole.
+func answeredAsAnotherLogNote(calls []models.UnmatchedCall) string {
+	named := make([]string, 0, min(len(calls), answeredAsAnotherMax))
+	for _, c := range calls[:min(len(calls), answeredAsAnotherMax)] {
+		named = append(named, models.UnmatchedCallLogText(c, models.UnmatchedCallLogName(c)+" was answered with recording "+c.ClosestMock+" ("+c.Answer+")"))
+	}
+	more := ""
+	if n := len(calls) - len(named); n > 0 {
+		more = fmt.Sprintf("; and %d more (the receipt's answeredAsAnother lists each)", n)
+	}
+	return fmt.Sprintf("%d call(s) were answered with the recording of another call, not their own: %s%s", len(calls), strings.Join(named, "; "), more)
+}
+
+// differsLogShape is differs, where a call differs from the recording it
+// was answered with, as a log line names them: a path segment by its place
+// (url.path.<i>, keploy's own name), a body field in its shape
+// (models.FieldShape: a map's key in a path can be a value).
+func differsLogShape(differs []string) []string {
+	out := make([]string, 0, len(differs))
+	for _, d := range differs {
+		if strings.HasPrefix(d, "url.path.") {
+			out = append(out, d)
+			continue
+		}
+		out = append(out, models.FieldShape(d))
+	}
+	return out
+}
+
 // answeredText is the call and the recording it was answered with, whole:
 // the agent's own words (UnmatchedCall.Diff), or, from an agent that gave
 // none, the call and the recording's name.
@@ -90,8 +123,9 @@ func answeredText(c models.UnmatchedCall) string {
 
 // sayAnsweredAsAnother tells, for each call answered with another call's
 // recording, a WARN that names it by its shape and path tag, the recording
-// served by name, where the two differ and the next step, and on the
-// console the call and the recording's call whole.
+// served by name, where the two differ (differsLogShape) and the next step
+// in log form, and on the console the call, the recording's call and the
+// next step whole.
 func sayAnsweredAsAnother(logger *zap.Logger, console io.Writer, calls []models.UnmatchedCall) {
 	for _, c := range calls {
 		next := c.NextSteps
@@ -104,7 +138,7 @@ func sayAnsweredAsAnother(logger *zap.Logger, console io.Writer, calls []models.
 			utils.PathTagField(c.PathTag),
 			zap.String("answer", c.Answer),
 			zap.String("recording", c.ClosestMock),
-			zap.Strings("differs", c.Differs),
+			zap.Strings("differs", differsLogShape(c.Differs)),
 			zap.String("next_step", models.UnmatchedCallLogText(c, next)))
 		if console != nil {
 			_, _ = fmt.Fprintf(console, "answered with another call's recording: %s\n  next step: %s\n", answeredText(c), next)
