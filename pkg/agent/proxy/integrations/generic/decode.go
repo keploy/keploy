@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -17,6 +18,18 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// quietWindow is how long a round of the parser reads its connection: the
+// request is what came in it. The generic protocol has no framing the
+// parser could read a request's end from.
+const quietWindow = 10 * time.Millisecond
+
+// restWait is how long, in nanoseconds, the parser waits for the rest of a
+// request whose bytes begin a recorded request (restToCome). Atomic: a row
+// sets it while another row's parser may still read it.
+var restWait atomic.Int64
+
+func init() { restWait.Store(int64(time.Second)) }
 
 // decodeGeneric answers the client's requests from the mocks, on a goroutine,
 // and returns only once that goroutine has returned, ctx's end included: then
@@ -40,19 +53,13 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	go func(errCh chan error, genericRequests [][]byte) {
 		defer close(errCh)
 		defer integrations.RecoverIntoCtx(ctx, logger, clientConn, nil, errCh)
-		for {
-			// Since protocol packets have to be parsed for checking stream end,
-			// clientConnection have deadline for read to determine the end of stream.
-			err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
-			if err != nil {
-				utils.LogError(logger, err, "failed to set the read deadline for the client conn")
-				return
-			}
-
-			// To read the stream of request packets from the client. The
-			// connection's end is its EOF, which ReadBytes returns at the
-			// read that gets it.
-			ended := false
+		// readPieces reads the request's pieces until a read returns the
+		// deadline's timeout or the connection's EOF, which ReadBytes returns
+		// at the read that gets it. It returns whether it was the EOF, how
+		// many bytes it read, and false for any other error (logged). With
+		// rearm, a read that returns bytes gives the next one quietWindow
+		// from then.
+		readPieces := func(rearm bool) (ended bool, got int, ok bool) {
 			for {
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				netErr, isNet := err.(net.Error)
@@ -60,7 +67,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				atEOF := errors.Is(err, io.EOF) || (err != nil && err.Error() == "EOF")
 				if err != nil && !timeout && !atEOF {
 					utils.LogError(logger, err, "failed to read the request message in proxy for generic dependency")
-					return
+					return false, got, false
 				}
 				// What a read returned with its deadline's timeout or its EOF
 				// is a request: a request as long as the read buffer (or a
@@ -73,12 +80,35 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						release, holding = integrations.HoldRequest(ctx), true
 					}
 					genericRequests = append(genericRequests, buffer)
+					got += len(buffer)
 				}
 				if timeout || atEOF {
 					logger.Debug("the timeout for the client read in generic or EOF")
-					ended = atEOF
-					break
+					return atEOF, got, true
 				}
+				if rearm {
+					if err := clientConn.SetReadDeadline(time.Now().Add(quietWindow)); err != nil {
+						utils.LogError(logger, err, "failed to set the read deadline for the client conn")
+						return false, got, false
+					}
+				}
+			}
+		}
+		for {
+			// Since protocol packets have to be parsed for checking stream end,
+			// clientConnection have deadline for read to determine the end of stream.
+			err := clientConn.SetReadDeadline(time.Now().Add(quietWindow))
+			if err != nil {
+				utils.LogError(logger, err, "failed to set the read deadline for the client conn")
+				return
+			}
+
+			// To read the stream of request packets from the client: the
+			// round's window is from its start, so bytes that never pause
+			// still end a request.
+			ended, _, ok := readPieces(false)
+			if !ok {
+				return
 			}
 
 			if len(genericRequests) == 0 {
@@ -99,6 +129,28 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// another set, the request finds nothing of it to be answered
 			// with, nor compared with, and misses saying so.
 			db, _ := integrations.HoldToRound(mockDb, call)
+			// A request whose bytes begin a recorded request, and are none,
+			// is not whole: its window ended between two of its reads (it
+			// came late in the round, or the parser was held past the
+			// deadline while the rest sat in the socket). Its rest is read
+			// before it is matched: what the socket holds comes back at
+			// once, what is still on its way within restWait. Matched in
+			// part, it missed, or took a recording's answer and left its
+			// rest to miss as a request of its own. A request whose rest
+			// never comes is matched as it is, after restWait.
+			for !ended && restToCome(db, genericRequests) {
+				if err := clientConn.SetReadDeadline(time.Now().Add(time.Duration(restWait.Load()))); err != nil {
+					utils.LogError(logger, err, "failed to set the read deadline for the client conn")
+					return
+				}
+				var got int
+				if ended, got, ok = readPieces(true); !ok {
+					return
+				}
+				if got == 0 {
+					break
+				}
+			}
 			// An exchange one of the open test's own recordings is, byte for
 			// byte (extraCall's reading), answered or not, is read with the
 			// set's background hidden once the background is about to answer
