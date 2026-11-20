@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -193,6 +194,94 @@ func TestIDSegmentsDiffering(t *testing.T) {
 	} {
 		if got := idSegmentsDiffering(tc.rec, tc.live); !slices.Equal(got, tc.want) {
 			t.Errorf("idSegmentsDiffering(%q, %q) = %q, want %q", tc.rec, tc.live, got, tc.want)
+		}
+	}
+}
+
+func orderOfID(id, contentType, body string) string {
+	return "POST /orders/" + id + " HTTP/1.1\r\nHost: users.local\r\nContent-Type: " + contentType + "\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+}
+
+// Each of matchCascade's passes that serves a call another id's recording
+// says so: the call's echo of a value the app minted (correlation), its
+// JSON body's keys (one recording has them), and the closest body (fuzzy,
+// a form one recording has), each for POST /orders/3 served the recording
+// of POST /orders/1, with the proven switch off.
+func TestACallOfAnotherIDIsReportedOnEachPassThatServesIt(t *testing.T) {
+	const minted = "3f2b8c1e-9a4d-4e6b-8f0a-1c2d3e4f5a6b"
+	for _, tc := range []struct {
+		name, contentType, recorded, live string
+		correlate                         bool
+	}{
+		{"correlation", "application/json", `{"qty":1,"key":"` + minted + `"}`, `{"qty":1,"key":"a1b2c3d4-0000-4000-8000-0123456789ab"}`, true},
+		{"body keys", "application/json", `{"qty":1}`, `{"qty":2}`, false},
+		{"closest body", "application/x-www-form-urlencoded", "qty=1&note=first", "qty=2&note=first", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setProven(t, false)
+			h := newHTTP()
+			m := recordedAs(t, h, "mock-order-1", 1, orderOfID("1", tc.contentType, tc.recorded), jsonAnswer(200, `{"order":1}`), nil)
+			if tc.correlate {
+				m.Spec.Correlations = []models.FieldCorrelation{{RequestPath: "body.key", ResponsePaths: []string{"body.order"}, RecordedValue: minted, ValueClass: "uuid"}}
+			}
+			got := serveReported(t, h, &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}, orderOfID("3", tc.contentType, tc.live))
+			if got.status != 200 {
+				t.Fatalf("POST /orders/3 got %d %q, want order 1's recording served", got.status, got.body)
+			}
+			a := got.answers()
+			if len(a) != 1 || a[0].Answer != models.AnswerOtherID || a[0].ClosestMock != "mock-order-1" || !slices.Equal(a[0].Differs, []string{"url.path.1"}) {
+				t.Fatalf("POST /orders/3's answer reports are %+v, want one %q with mock-order-1 at url.path.1", a, models.AnswerOtherID)
+			}
+		})
+	}
+}
+
+// reportServedAnother names both calls whole where the call's request
+// gives no Host header or no path, or the recording's URL no path ("/"),
+// and reports nothing for an answer that is not of another call's
+// recording, for no recording, or for one with no request.
+func TestAReportOfAnotherCallsRecordingNamesBothCallsWhole(t *testing.T) {
+	report := func(input *req, x *models.Mock, answer string) []*models.MockMismatchReport {
+		var got []*models.MockMismatchReport
+		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) {
+			var w interface {
+				MismatchReport() *models.MockMismatchReport
+			}
+			if errors.As(err, &w) {
+				got = append(got, w.MismatchReport())
+			}
+		})
+		reportServedAnother(ctx, input, x, answer)
+		return got
+	}
+	root := &models.Mock{Name: "mock-root", Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://users.local"}}}
+	live, err := url.Parse("http://users.local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range []*req{{method: "GET", url: live, header: http.Header{}}, {method: "GET", header: http.Header{"Host": {"users.local"}}}} {
+		got := report(in, root, models.AnswerOtherID)
+		if len(got) != 1 {
+			t.Fatalf("%d reports for a call served another's recording, want 1", len(got))
+		}
+		r := got[0]
+		if r.Destination != "users.local" || r.ActualSummary != "GET /" || !strings.Contains(r.Diff, "GET / was answered with the recording of GET /: ") {
+			t.Errorf("the report names %q at %q and says %q, want GET / at users.local, answered with the recording of GET /", r.ActualSummary, r.Destination, r.Diff)
+		}
+	}
+	in := &req{method: "GET", url: live, header: http.Header{}}
+	for _, tc := range []struct {
+		name   string
+		x      *models.Mock
+		answer string
+	}{
+		{"its own recording", root, ""},
+		{"an answer by kind", root, models.AnswerByKind},
+		{"no recording", nil, models.AnswerOtherID},
+		{"a recording with no request", &models.Mock{Name: "mock-x"}, models.AnswerClosestBody},
+	} {
+		if got := report(in, tc.x, tc.answer); len(got) != 0 {
+			t.Errorf("%s: reported %+v, want nothing", tc.name, got[0])
 		}
 	}
 }
