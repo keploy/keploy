@@ -111,6 +111,28 @@ func (a *App) appStarted(ctx context.Context) bool {
 	return err == nil && info.ContainerJSONBase != nil && info.State != nil && info.State.Running
 }
 
+// releaseHeld has the agent client make, on setUp, the agent the retry's
+// watch set up and found running at its latest look, a release of the app the
+// run asked for once that setup had completed, which the watch's hold holds
+// (SetAgentHeldRelease): the app's container starts only behind it, and the
+// hold ends only once the app's container starts. Not while keploy stops the
+// stack (agentStopping, or a dependency's crash kept for the next bring-up):
+// that stop takes the agent. Right before the request goes, the agent that
+// runs must still be setUp.
+func (a *App) releaseHeld(ctx context.Context, setUp string) {
+	if a.makeHeldRelease == nil || a.composeApp.agentStopping.Load() || a.composeApp.depCrash.Load() != nil {
+		return
+	}
+	current := func(ctx context.Context) bool {
+		now, _, _ := a.agentIdentity(ctx)
+		return now == setUp
+	}
+	if err := a.makeHeldRelease(ctx, current); err != nil {
+		a.logger.Debug("the release of the app the retry's hold held, made on keploy's agent the retry set up, did not reach it; the watch makes it again at its next look while the agent is the one set up",
+			zap.String("agentContainer", a.keployContainer), zap.Error(err))
+	}
+}
+
 // retryComposeUp runs the compose retry's `up` (run) while it watches keploy's
 // agent container: compose keeps a running agent, but starts again one it
 // stopped and recreates one under a recreate flag, and either has none of
@@ -197,6 +219,9 @@ func (a *App) retryComposeUp(ctx context.Context, end func(), run func() utils.C
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
 		defer resume(nil)
+		// setUp is the agent this watch set up, which a release the run
+		// asked for once that setup completed is owed to (releaseHeld).
+		setUp := ""
 		tick := time.NewTicker(agentRestartPoll)
 		defer tick.Stop()
 		for {
@@ -223,6 +248,9 @@ func (a *App) retryComposeUp(ctx context.Context, end func(), run func() utils.C
 				if a.appStarted(watch) {
 					return nil
 				}
+				if now != "" && now == setUp {
+					a.releaseHeld(watch, now)
+				}
 				continue
 			}
 			a.logger.Info("docker compose started keploy's agent again in its retry; setting it up again",
@@ -239,7 +267,7 @@ func (a *App) retryComposeUp(ctx context.Context, end func(), run func() utils.C
 				}
 				continue
 			}
-			last, lastKnown = now, true
+			last, lastKnown, setUp = now, true, now
 		}
 	})
 	cmdErr := run()

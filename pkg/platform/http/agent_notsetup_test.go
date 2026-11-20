@@ -30,6 +30,7 @@ type recordingApp struct {
 	restart func(ctx context.Context) error
 	hold    func(ctx context.Context) (resume func(failed error))
 	refuse  func(failed error)
+	held    func(ctx context.Context, current func(ctx context.Context) bool) error
 }
 
 func (r *recordingApp) SetOnAgentRestart(f func(ctx context.Context) error) { r.restart = f }
@@ -37,19 +38,23 @@ func (r *recordingApp) SetAgentReleaseHold(f func(ctx context.Context) (resume f
 	r.hold = f
 }
 func (r *recordingApp) SetAgentReleaseRefusal(f func(failed error)) { r.refuse = f }
+func (r *recordingApp) SetAgentHeldRelease(f func(ctx context.Context, current func(ctx context.Context) bool) error) {
+	r.held = f
+}
 
-// The agent client hands the application client the three hooks of an agent
+// The agent client hands the application client the four hooks of an agent
 // compose's retry starts again, and each reaches this client's session: the
-// setup, the hold on the releases, and their refusal once the setup failed.
-// Without the hold or the refusal, every release would go to an agent that
-// is not set up.
+// setup, the hold on the releases, their refusal once the setup failed, and
+// the release a hold holds made on the agent set up. Without the hold or the
+// refusal, every release would go to an agent that is not set up; without
+// the last, a release asked for after the setup waits for good.
 func TestTheAgentClientHandsTheAppHooksThatReachItsSession(t *testing.T) {
 	everySwitchMode(t, func(t *testing.T) {
 		ag := newHandoverAgent(t, "ok", nil)
 		app := &recordingApp{}
 		ag.a.handRestartHooks(app)
-		if app.restart == nil || app.hold == nil || app.refuse == nil {
-			t.Fatalf("hooks handed: setup %v, hold %v, refusal %v; want all three", app.restart != nil, app.hold != nil, app.refuse != nil)
+		if app.restart == nil || app.hold == nil || app.refuse == nil || app.held == nil {
+			t.Fatalf("hooks handed: setup %v, hold %v, refusal %v, held release %v; want all four", app.restart != nil, app.hold != nil, app.refuse != nil, app.held != nil)
 		}
 
 		resume := app.hold(context.Background())
@@ -90,7 +95,7 @@ func TestTheAgentClientHandsTheAppHooksThatReachItsSession(t *testing.T) {
 }
 
 // The application client Setup keeps (registerApp, its only source of the
-// app it runs) has the three hooks of an agent compose's retry starts again.
+// app it runs) has the four hooks of an agent compose's retry starts again.
 // Without them the retry would run a plain `up`: no hold, no setup and no
 // refusal, and the agent compose started again would take the run's releases
 // with none of its mocks or settings. registerApp also makes the session
@@ -120,7 +125,7 @@ func TestTheAppSetupKeepsHasTheRestartHooks(t *testing.T) {
 			t.Fatalf("the app Setup keeps is %v; want the one it runs", stored)
 		}
 		v := reflect.ValueOf(usrApp).Elem()
-		for _, hook := range []string{"onAgentRestart", "holdAgentRelease", "refuseAgentReleases"} {
+		for _, hook := range []string{"onAgentRestart", "holdAgentRelease", "refuseAgentReleases", "makeHeldRelease"} {
 			if f := v.FieldByName(hook); !f.IsValid() || f.IsNil() {
 				t.Errorf("the app Setup keeps has no %s hook", hook)
 			}

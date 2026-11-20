@@ -76,6 +76,11 @@ type agentSession struct {
 	// that setup is set up again by the next retry, before any release goes
 	// to it, and the hold's end alone lets none go.
 	notSetUp bool
+	// releasedGen is the agent (gen) a setup's release reached: the ready
+	// step its setup made again last (reapply), or the release a hold held
+	// that the retry's watch had made on it (releaseHeld). 0, the run's
+	// first agent, is released by the run itself.
+	releasedGen int
 }
 
 // releaseCall is one release of the app in flight (makeAgentReady). setup: it
@@ -235,6 +240,63 @@ func (s *agentSession) holdReleases(ctx context.Context) (resume func(failed err
 			s.notify()
 		})
 	}
+}
+
+// releaseHeld makes, on the agent the latest setup completed on, the release
+// of the app the run asked for once that setup had read what to make again,
+// which a hold still holds: the retry's watch, which holds the releases until
+// the app's container starts, has the agent client make it (App.
+// SetAgentHeldRelease), as that setup would have made it last. A run whose
+// first agent was stopped before it answered (a dependency's crash keploy
+// stopped the stack on) has set nothing up on any agent and asked for no
+// release when the watch sets up the agent the retry started: that setup
+// makes nothing again, the run then sets the agent up itself and asks for its
+// release, and the hold held it while the app it would start, behind the
+// agent's healthcheck, held the hold. Each run of the app waited for good.
+//
+// It makes the release only while a hold is on, a setup has completed since
+// it began (notSetUp clear: no agent that is not set up may answer), no
+// setup's release has reached that agent, no refusal stands, and a release
+// the run asked for waits on the hold, and then only if current, asked right
+// before the request goes, says the agent that runs is still the one set up.
+// The release held goes on once the hold ends, to the agent this one
+// released. nil once nothing is owed, or the release taken; otherwise the
+// release's error.
+func (s *agentSession) releaseHeld(ctx context.Context, current func(ctx context.Context) bool) error {
+	s.mu.Lock()
+	gen := s.gen
+	var apply func(ctx context.Context) error
+	if s.held > 0 && !s.notSetUp && s.refused == nil && s.releasedGen != gen && s.releaseWaits() {
+		for _, step := range s.steps {
+			if step.kind == stepAgentReady {
+				apply = step.apply
+			}
+		}
+	}
+	s.mu.Unlock()
+	if apply == nil || !current(ctx) {
+		return nil
+	}
+	if err := apply(ctx); err != nil {
+		return err
+	}
+	// The watch makes this release and every setup (reapply), one at a
+	// time, so gen is still the agent released.
+	s.mu.Lock()
+	s.releasedGen = gen
+	s.mu.Unlock()
+	return nil
+}
+
+// releaseWaits reports whether a release the run asked for waits to send its
+// request: one no setup makes, with none out and no refusal; with s.mu held.
+func (s *agentSession) releaseWaits() bool {
+	for rc := range s.releases {
+		if !rc.setup && !rc.posting && rc.refused == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // refuseReleases ends every release of this run with failed, in flight or
@@ -570,6 +632,7 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 
 	s.mu.Lock()
 	s.gen++
+	gen := s.gen
 	var steps, ready []sessionStep
 	for _, step := range s.steps {
 		if step.kind == stepAgentReady {
@@ -616,6 +679,13 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 			}
 			return fmt.Errorf("failed to set keploy's restarted agent up again (%s): %w", step.kind, err)
 		}
+	}
+	if len(ready) > 0 {
+		// gen is still this setup's: setups run one at a time (reapplying),
+		// and only a setup moves gen.
+		s.mu.Lock()
+		s.releasedGen = gen
+		s.mu.Unlock()
 	}
 	logger.Info("keploy's agent was started again by docker compose; set it up again as before",
 		zap.Int("calls", len(steps)+len(ready)))

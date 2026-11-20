@@ -83,6 +83,10 @@ type App struct {
 	// asked for, in flight or later, with failed; see
 	// SetAgentReleaseRefusal.
 	refuseAgentReleases func(failed error)
+	// makeHeldRelease, when set, makes on the agent a retry's watch set up
+	// a release of the app the run asked for once that setup completed,
+	// which the watch's hold holds; see SetAgentHeldRelease.
+	makeHeldRelease func(ctx context.Context, current func(ctx context.Context) bool) error
 	// agentSetUp is the identity (agentIdentity) of the last keploy agent
 	// whose setup completed, once agentSetUpKnown: the run's first agent,
 	// which ran before the bring-up's first retry, or the last one a retry's
@@ -276,6 +280,19 @@ func (a *App) SetAgentReleaseHold(f func(ctx context.Context) (resume func(faile
 // not set up; the run ends on the failure.
 func (a *App) SetAgentReleaseRefusal(f func(failed error)) {
 	a.refuseAgentReleases = f
+}
+
+// SetAgentHeldRelease sets what makes, on the agent compose's retry started
+// again that the retry's watch set up, a release of the app the run asked for
+// once that setup had completed, which the watch's hold
+// (SetAgentReleaseHold) holds until the app's container starts: the app
+// starts only behind that release (the agent's healthcheck), so a release no
+// setup made, held to the app's start, held the app back for good. The agent
+// client makes it only when one is owed, and asks current, right before its
+// request goes, whether the agent that runs is still the one the watch set
+// up; nil once nothing is owed or the agent took it.
+func (a *App) SetAgentHeldRelease(f func(ctx context.Context, current func(ctx context.Context) bool) error) {
+	a.makeHeldRelease = f
 }
 
 // ModifyDockerRun modifies the existing Docker command to attach the init container's PID namespace

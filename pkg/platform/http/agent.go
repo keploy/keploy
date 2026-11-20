@@ -5131,6 +5131,7 @@ type restartHooks interface {
 	SetOnAgentRestart(func(ctx context.Context) error)
 	SetAgentReleaseHold(func(ctx context.Context) (resume func(failed error)))
 	SetAgentReleaseRefusal(func(failed error))
+	SetAgentHeldRelease(func(ctx context.Context, current func(ctx context.Context) bool) error)
 }
 
 // registerApp makes the application client of this run and keeps it as the
@@ -5151,11 +5152,15 @@ func (a *AgentClient) registerApp(cmd string, opts models.SetupOptions) *app.App
 
 // handRestartHooks gives app what sets up again, through this client's
 // session, an agent compose's retry started again, and what holds and
-// refuses the releases of the app meanwhile.
+// refuses the releases of the app meanwhile, and what makes, on the agent
+// set up, a release the hold holds that no setup made (releaseHeld).
 func (a *AgentClient) handRestartHooks(app restartHooks) {
 	app.SetOnAgentRestart(a.setUpRestartedAgent)
 	app.SetAgentReleaseHold(func(ctx context.Context) func(error) { return a.session().holdReleases(ctx) })
 	app.SetAgentReleaseRefusal(func(failed error) { a.session().refuseRun(failed) })
+	app.SetAgentHeldRelease(func(ctx context.Context, current func(ctx context.Context) bool) error {
+		return a.session().releaseHeld(ctx, current)
+	})
 }
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
