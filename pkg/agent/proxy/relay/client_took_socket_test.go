@@ -312,7 +312,7 @@ func TestAClientThatResetsWithNoFINBeforeKeepsWhatItWasWritten(t *testing.T) {
 				proxyServer, server := loopbackPair(t)
 				core, logs := observer.New(zapcore.DebugLevel)
 				var stops atomic.Int32
-				r := New(Config{Logger: zap.New(core), ClientStopped: func(func() []byte) { stops.Add(1) }},
+				r := New(Config{Logger: zap.New(core), ClientStopped: func() { stops.Add(1) }},
 					row.wrap(proxyClient), connseq.NewUpstream(proxyServer))
 				ctx, cancel := context.WithCancel(context.Background())
 				done := make(chan struct{})
@@ -377,7 +377,7 @@ func TestAChunkTheClientRefusedMarksNoMockIncomplete(t *testing.T) {
 		var stops atomic.Int32
 		r := New(Config{
 			Logger:               zap.New(core),
-			ClientStopped:        func(func() []byte) { stops.Add(1) },
+			ClientStopped:        func() { stops.Add(1) },
 			OnMarkMockIncomplete: func(reason string) { m := append(append([]string(nil), *marks.Load()...), reason); marks.Store(&m) },
 		}, CountClientWrites(proxyClient), connseq.NewUpstream(proxyServer))
 		ctx, cancel := context.WithCancel(context.Background())
@@ -434,7 +434,7 @@ func TestAChunkTheClientRefusedMarksNoMockIncomplete(t *testing.T) {
 		r := New(Config{
 			Logger:               zap.NewNop(),
 			HalfCloseGrace:       time.Minute,
-			ClientStopped:        func(func() []byte) { stops.Add(1) },
+			ClientStopped:        func() { stops.Add(1) },
 			OnMarkMockIncomplete: func(reason string) { m := append(append([]string(nil), *marks.Load()...), reason); marks.Store(&m) },
 		}, &writesThenFails{Conn: proxyClient, short: true}, connseq.NewUpstream(proxyServer))
 		// The client's FIN is in, as far as the relay can tell, and the
@@ -489,7 +489,7 @@ func TestAChunkTheClientRefusedMarksNoMockIncomplete(t *testing.T) {
 		held := &heldConn{Conn: proxyClient, release: make(chan struct{})}
 		r := New(Config{
 			Logger:               zap.NewNop(),
-			ClientStopped:        func(func() []byte) { stops.Add(1) },
+			ClientStopped:        func() { stops.Add(1) },
 			OnMarkMockIncomplete: func(reason string) { m := append(append([]string(nil), *marks.Load()...), reason); marks.Store(&m) },
 		}, held, connseq.NewUpstream(proxyServer))
 		ctx, cancel := context.WithCancel(context.Background())

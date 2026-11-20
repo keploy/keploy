@@ -429,8 +429,8 @@ func TestHalfClose_SurvivesTheTLSReadTimeWrapper(t *testing.T) {
 	wrapped := newReadTimeReportingConn(tracked, tracked)
 	var asConn net.Conn = wrapped
 
-	if !halfCloseWrite(&asConn) {
-		t.Fatal("halfCloseWrite failed through readTimeReportingConn: every TLS-upgraded " +
+	if err := closeWrite(&asConn); err != nil {
+		t.Fatal("closeWrite failed through readTimeReportingConn: every TLS-upgraded " +
 			"connection silently loses half-close, and the plaintext tests cannot see it")
 	}
 
@@ -582,8 +582,8 @@ func TestHalfClose_SurvivesTheProductionConnWrappers(t *testing.T) {
 			defer func() { _ = peer.Close() }()
 
 			wrapped := tc.wrap(raw)
-			if !halfCloseWrite(&wrapped) {
-				t.Fatalf("halfCloseWrite failed through %T: the FIN is silently dropped and "+
+			if err := closeWrite(&wrapped); err != nil {
+				t.Fatalf("closeWrite failed through %T: the FIN is silently dropped and "+
 					"half-close is dead on this path, while raw-socket tests stay green", wrapped)
 			}
 

@@ -3,7 +3,9 @@
 package util
 
 import (
+	"errors"
 	"net"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -36,13 +38,28 @@ func eventuallyGone(t *testing.T, conn net.Conn) {
 	t.Fatal("PeerGone never said the peer had gone")
 }
 
+// socketlessConn is a wrapper that is a syscall.Conn with no socket of its
+// own (its SyscallConn fails, as the proxy's tracked conn's does over a conn
+// with none), and gives the conn beneath (NetConn).
+type socketlessConn struct{ net.Conn }
+
+func (c socketlessConn) SyscallConn() (syscall.RawConn, error) {
+	return nil, errors.New("no socket under this connection")
+}
+func (c socketlessConn) NetConn() net.Conn { return c.Conn }
+
 // A peer that is there is not gone; one that closed is, with bytes it sent
 // still unread before its FIN, as is one that reset; a wrapper that gives
-// its conn is seen through; and a closed socket cannot be asked.
+// its conn is seen through, one whose SyscallConn fails included; and a
+// closed socket cannot be asked.
 func TestPeerGone(t *testing.T) {
 	c, s := loopbackPair(t)
 	if gone, known := PeerGone(s); gone || !known {
 		t.Fatalf("a peer that is there: gone %v, known %v", gone, known)
+	}
+	if gone, known := PeerGone(socketlessConn{s}); gone || !known {
+		t.Fatalf("a peer that is there, under a wrapper whose SyscallConn fails: gone %v, known %v; "+
+			"want its socket asked", gone, known)
 	}
 	if _, err := c.Write([]byte("a request the server has not read")); err != nil {
 		t.Fatal(err)
@@ -50,6 +67,7 @@ func TestPeerGone(t *testing.T) {
 	_ = c.Close()
 	eventuallyGone(t, s)
 	eventuallyGone(t, &Conn{Conn: s})
+	eventuallyGone(t, socketlessConn{&Conn{Conn: s}})
 
 	c, s = loopbackPair(t)
 	_ = c.SetLinger(0)
