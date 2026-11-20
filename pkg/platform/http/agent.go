@@ -1424,13 +1424,15 @@ func (a *AgentClient) AppStartsAnew(ctx context.Context, testSetID string, first
 // each agent compose starts (BeforeTestSetCompose). Every call that can move
 // the agent's clock comes after it. An agent of this keploy whose hooks keep
 // no clock timeline (OSS's own, a native macOS or Windows agent) answers 501
-// (models.NoTimelineHooks): it has no use for the id, so that is said only
-// at Debug. An agent older than the route (a user-pinned agent image)
-// answers 404, one that already holds another run's id answers 409, and one
-// that cannot be reached answers nothing: the run goes on without an id
-// either way, and the client says so once. The id is never passed on the
-// agent's command line, where a flag it does not know would end it, and
-// never fails the run.
+// with models.NoTimelineHooks as its body: it has no use for the id, so that
+// is said only at Debug. A 501 with any other body (a proxy in front of a
+// remote agent) is an answer like any other. An agent older than the route
+// (a user-pinned agent image) answers 404, one that already holds another
+// run's id answers 409, one that refuses it otherwise answers its own
+// status and reason (401 from its auth, a 5xx), and one that cannot be
+// reached answers nothing: the run goes on without an id either way, and
+// the client says so once. The id is never passed on the agent's command
+// line, where a flag it does not know would end it, and never fails the run.
 func (a *AgentClient) handClockRun(ctx context.Context) {
 	s, ok := agent.StartupAgentHook.(agent.ClockRunStarter)
 	if !ok || a.conf.Agent.AgentURI == "" {
@@ -1467,7 +1469,12 @@ func (a *AgentClient) handClockRun(ctx context.Context) {
 	switch res.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotImplemented:
-		a.logger.Debug("keploy's agent keeps no clock timeline, so it takes no run id", zap.String("agent", agentAnswer(res.Body)))
+		why := agentAnswer(res.Body)
+		if !strings.Contains(why, models.NoTimelineHooks) {
+			a.sayNoClockRun(fmt.Sprintf("it answered %d: %s", res.StatusCode, why), noClockRunOther)
+			return
+		}
+		a.logger.Debug("keploy's agent keeps no clock timeline, so it takes no run id", zap.String("agent", why))
 	case http.StatusNotFound:
 		a.sayNoClockRun("it is older than this keploy and does not take one", noClockRunOlder)
 	case http.StatusConflict:
