@@ -308,9 +308,8 @@ func TestARedactedPieceIsNotInAPieceBySimilaritysAverage(t *testing.T) {
 	near[100] ^= 1
 	// Bytes below 'a' and 0x80, none of body's, in no repeating run.
 	token := make([]byte, 32<<10)
-	for i, x := range token {
-		x = byte(uint32(i)*2654435761>>16) % 0x60
-		token[i] = x
+	for i := range token {
+		token[i] = byte(uint32(i)*2654435761>>16) % 0x60
 	}
 	recorded := noisyRecording(body, []byte("REDACTED"))
 	reads := [][]byte{near, token}
