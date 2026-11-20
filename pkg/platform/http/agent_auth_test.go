@@ -230,11 +230,11 @@ func TestNativeAgentArgs_AnAgentThatGotNoTokenIsStillChecked(t *testing.T) {
 // TestNativeAgentArgs_EveryRunKindHandsItsAgentsTheRunToken: every native
 // agent of a run is handed the run's token, the one this process presents: in
 // a record, a test, and keploy mock's record and replay, and again for a
-// second agent of the same run (one that replaces the first). An agent's run
-// mark on the shared clock files is drawn from that token, so it is the same
-// for every agent of a run and differs between runs; an agent that holds none
-// was started by something that hands none, such as a keploy CLI older than
-// the agent.
+// second agent of the same run (one that replaces the first). The client
+// presents that one token on every request it sends any agent of the run, so
+// an agent handed another would refuse them all, and one handed none would
+// serve its control-plane API to any caller that reaches its port
+// (routes.ConsumeSessionToken).
 func TestNativeAgentArgs_EveryRunKindHandsItsAgentsTheRunToken(t *testing.T) {
 	t.Cleanup(func() { _ = token.Cleanup() })
 	require.NotEmpty(t, token.Session(), "this process has no run token to hand its agents")
