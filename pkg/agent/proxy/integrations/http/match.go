@@ -570,11 +570,12 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			if !claimed {
 				continue
 			}
-			// The closest of several recordings none of whose bodies is
-			// the call's is a guess between calls: another call's
-			// recording. One recording left is the call's method, path
-			// and body shape, as the body-schema pass above serves it.
-			noteServedAs(ctx, idVaried, len(shortListed) > 1 && bestMatch.Spec.HTTPReq.Body != string(input.body))
+			// The closest of several recordings is a guess between calls:
+			// none has the call's body byte for byte (the exact-body pass
+			// above serves that one), so it is another call's recording.
+			// One recording left is the call's method, path and body
+			// shape, as the body-schema pass above serves it.
+			noteServedAs(ctx, idVaried, len(shortListed) > 1)
 			return true, served, nil, nil
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: shortListed, pool: comparedPool}, nil

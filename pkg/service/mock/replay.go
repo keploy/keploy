@@ -2713,7 +2713,8 @@ type replayCounts struct {
 	// another call (models.AnsweredAsAnother), with the proven switch off:
 	// served, so missed does not count them, but nothing shows the call's
 	// own answer was served, so the run is not counted as proven
-	// (isolation) and --strict fails it. nil when the misses were not read.
+	// (isolation) and --strict fails it. From a read that was incomplete
+	// (missesUnread), the calls it gave, each also said in its WARN.
 	asAnother []models.UnmatchedCall
 	// missesUnread is why the read of the calls no mock answered was
 	// incomplete (models.UnreadCause), when missed is -1.
@@ -3003,7 +3004,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.consumed = -1
 	}
 	if missesErr != nil {
-		counts.missed, counts.missedData, counts.asAnother = -1, -1, nil
+		counts.missed, counts.missedData = -1, -1
 		counts.missesUnread = models.UnreadCause(missesErr)
 	} else if provenswitch.On() {
 		counts.uncharged = unchargedMisses(misses)

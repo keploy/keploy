@@ -99,8 +99,8 @@ func reportServedAnother(ctx context.Context, input *req, x *models.Mock, answer
 	recordedCall := string(x.Spec.HTTPReq.Method) + " " + recordedPath
 	switch answer {
 	case models.AnswerOtherID:
-		livePath := "/"
-		if input.url != nil && input.url.Path != "" {
+		livePath := ""
+		if input.url != nil {
 			livePath = input.url.Path
 		}
 		r.Differs = idSegmentsDiffering(recordedPath, livePath)

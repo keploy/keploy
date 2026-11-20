@@ -6,6 +6,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A call answered with another call's recording (models.AnsweredAsAnother),
@@ -45,6 +47,22 @@ func TestACallAnsweredWithAnotherCallsRecordingIsReadAndNoMiss(t *testing.T) {
 			// (noteAnswerDropped), never as a lost miss.
 			if !isByKindAnswer(asParserError(answered(answer))) {
 				t.Errorf("a dropped %q answer is noted as a lost miss, which leaves its read incomplete", answer)
+			}
+			core, logs := observer.New(zapcore.WarnLevel)
+			lost := &Proxy{logger: zap.New(core)}
+			lost.noteMissLost(asParserError(answered(answer)), missLostListFull)
+			lost.pendingDroppedForRoom(&lost.missWindow, asParserError(answered(answer)))
+			if cause := lost.missLoss.Load(); cause != nil || lost.pendingLost {
+				t.Errorf("a %q answer lost for room made a read incomplete: %v, pending %v", answer, cause, lost.pendingLost)
+			}
+			if got := lost.answersDropped.Load(); got != 2 {
+				t.Errorf("%d %q answers counted dropped; want 2", got, answer)
+			}
+			if n := logs.FilterMessageSnippet("a call answered with another call's recording was not kept").Len(); n != 1 {
+				t.Errorf("the dropped %q answers were said %d times as such; want once, for the first", answer, n)
+			}
+			if n := logs.FilterMessageSnippet("a background write answered by its kind").Len(); n != 0 {
+				t.Errorf("a dropped %q answer was said as a background write's", answer)
 			}
 		})
 	}
