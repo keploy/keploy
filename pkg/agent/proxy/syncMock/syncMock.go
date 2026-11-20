@@ -1741,6 +1741,9 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 			return false
 		}
 	}
+	// What noteDelivered records of mock, read now: once trySend delivers it,
+	// mock is the consumer's (deliveryNote).
+	note := noteOf(mock)
 	// sent ends a send that trySend delivered, under outQueueMu and
 	// outChanMu's read lock, which it lets go: the recording's consumer took
 	// mock (noteDelivered).
@@ -1748,7 +1751,7 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 		epoch := m.out.epoch
 		m.outQueueMu.Unlock()
 		m.outChanMu.RUnlock()
-		m.noteDelivered(mock, epoch)
+		m.noteDelivered(note, epoch)
 		tell(true, 0)
 		return MockTaken
 	}
@@ -1834,13 +1837,14 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 		epoch := lane.epoch
 		m.outQueueMu.Unlock()
 
+		note := noteOf(q.mock) // before the hand-over (deliveryNote)
 		if !m.deliverQueued(lane.ch, q.mock, &meter, &closing) {
 			m.giveUpOutQueue(lane, q, "the consumer took no mock for the stall bound of the time the process could run")
 			meter.Reset() // what was queued since waits from now
 			continue
 		}
 		meter.Reset() // the consumer took one
-		m.noteDelivered(q.mock, epoch)
+		m.noteDelivered(note, epoch)
 		m.handedOn.Add(1)
 		if q.done != nil {
 			q.done(true, 0)
