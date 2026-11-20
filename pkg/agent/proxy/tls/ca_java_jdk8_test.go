@@ -94,7 +94,9 @@ func TestInstallJavaCAForHomeUsesTheKeystoreTheJDKHas(t *testing.T) {
 // resolveKeytoolAndCacerts (the JDK the retired alias's removal and the
 // teardown's Debian keystore pass use when the install found none) looked
 // only in <home>/lib/security, so a JDK 8 named by JAVA_HOME or found on PATH
-// was no JDK to it.
+// was no JDK to it. It also took the directory above a PATH keytool's own
+// bin/ for its JDK, so a keytool that links into its JDK, as the
+// alternatives' /usr/bin/keytool does, found no keystore.
 func TestResolveKeytoolAndCacertsFindsAJDK8Keystore(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fake JDK's tools are /bin/sh scripts")
@@ -136,6 +138,23 @@ func TestResolveKeytoolAndCacertsFindsAJDK8Keystore(t *testing.T) {
 			}
 			return jre, filepath.Join(dir, "empty"), "", ""
 		}},
+		{"a keytool on PATH that links, through another link, into a JDK", func(t *testing.T, dir string) (string, string, string, string) {
+			jdk := filepath.Join(dir, "jdk-21")
+			fakeJDK(t, jdk, ".", "/not/read", filepath.Join(dir, "calls"))
+			bin, alt := filepath.Join(dir, "usr", "bin"), filepath.Join(dir, "alternatives")
+			for _, d := range []string{bin, alt} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(filepath.Join(jdk, "bin", "keytool"), filepath.Join(alt, "keytool")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(alt, "keytool"), filepath.Join(bin, "keytool")); err != nil {
+				t.Fatal(err)
+			}
+			return "", bin, filepath.Join(jdk, "bin", "keytool"), filepath.Join(jdk, "lib", "security", "cacerts")
+		}},
 		{"a keytool on PATH with no keystore above it", func(t *testing.T, dir string) (string, string, string, string) {
 			jdk := filepath.Join(dir, "wrapper")
 			fakeJDK(t, jdk, "", "/not/read", filepath.Join(dir, "calls"))
@@ -143,7 +162,12 @@ func TestResolveKeytoolAndCacertsFindsAJDK8Keystore(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			// The keytool found is named by its real path, so the wanted ones
+			// are too (macOS's temp dir is under a link).
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			javaHome, path, wantKT, wantCC := tc.lay(t, dir)
 			t.Setenv("JAVA_HOME", javaHome)
 			t.Setenv("PATH", path)

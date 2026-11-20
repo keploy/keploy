@@ -214,7 +214,9 @@ func exportJavaAliasCert(ctx context.Context, keytool, cacerts, alias string) []
 }
 
 // resolveKeytoolAndCacerts finds a keytool and the cacerts it manages, from
-// JAVA_HOME first then PATH. ok=false when no JDK is reachable.
+// JAVA_HOME first then PATH. A keytool on PATH is often a link into its JDK
+// (/usr/bin/keytool through the alternatives), so its JDK is the one above
+// the file the link names. ok=false when no JDK is reachable.
 func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 	exe := "keytool"
 	if runtime.GOOS == "windows" {
@@ -229,6 +231,9 @@ func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 	kt, err := exec.LookPath(exe)
 	if err != nil {
 		return "", "", false
+	}
+	if resolved, err := filepath.EvalSymlinks(kt); err == nil {
+		kt = resolved
 	}
 	// Derive JAVA_HOME from <home>/bin/keytool, then its cacerts (jdkCacerts:
 	// JDK 8 keeps it under jre/).
