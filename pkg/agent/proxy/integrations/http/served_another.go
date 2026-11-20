@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -59,7 +60,14 @@ func idSegmentsDiffering(recorded, live string) []string {
 // what keeps keploy mock replay from counting it as the call's own answer.
 // The call and x's call are named as the miss's report names them: the
 // segments x redacted stay redacted.
-func reportServedAnother(ctx context.Context, input *req, x *models.Mock, answer string) {
+//
+// The report carries the round its call was made in (call, where the
+// request's first read of the round found it: integrations.StampMark), as a
+// miss's does, so the proxy places it by that mark. With the switch off,
+// the one mode a call is served so, the decode marks no call (the zero
+// CallRound), its misses included: the report is placed as they are, by
+// when it reaches the proxy.
+func reportServedAnother(ctx context.Context, input *req, x *models.Mock, answer string, call integrations.CallRound) {
 	if !models.AnsweredAsAnother(answer) || x == nil || x.Spec.HTTPReq == nil {
 		return
 	}
@@ -73,8 +81,8 @@ func reportServedAnother(ctx context.Context, input *req, x *models.Mock, answer
 		}
 	}
 	places := placesOf(x)
-	call := places.summary(input.method, path)
-	r := mismatch.NewReport(mismatch.ProtocolHTTP, call).WithDestination(dest).Build()
+	liveCall := places.summary(input.method, path)
+	r := mismatch.NewReport(mismatch.ProtocolHTTP, liveCall).WithDestination(dest).Build()
 	r.Operation = models.HTTPOperationLabel(liveRequest(nil, input))
 	r.Answer, r.ClosestMock = answer, x.Name
 	r.PathTag = models.URLPathTag(ctx, input.method, input.url)
@@ -91,12 +99,13 @@ func reportServedAnother(ctx context.Context, input *req, x *models.Mock, answer
 			livePath = input.url.Path
 		}
 		r.Differs = idSegmentsDiffering(recordedPath, livePath)
-		r.Diff = call + " was answered with the recording of " + recordedCall + ": no recording has the call's path, which differs from that recording's only at segments that look like ids (" + strings.Join(r.Differs, ", ") + ")"
+		r.Diff = liveCall + " was answered with the recording of " + recordedCall + ": no recording has the call's path, which differs from that recording's only at segments that look like ids (" + strings.Join(r.Differs, ", ") + ")"
 		r.NextSteps = "Record the call (keploy mock record) so it is answered with its own recording, not another id's."
 	case models.AnswerClosestBody:
 		r.Differs = []string{"body"}
-		r.Diff = call + " was answered with the recording of " + recordedCall + " whose request body is closest to the call's: no recording of the call's method and path has the call's body"
+		r.Diff = liveCall + " was answered with the recording of " + recordedCall + " whose request body is closest to the call's: no recording of the call's method and path has the call's body"
 		r.NextSteps = "Record the call (keploy mock record) so it is answered with its own recording; or mark the body fields that change between runs as noise."
 	}
+	integrations.StampMark(r, call)
 	models.ReportAnswer(ctx, r)
 }
