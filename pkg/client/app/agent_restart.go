@@ -99,6 +99,28 @@ func (a *App) composeAgentSetupFailed(err error, replaced bool, resume func(fail
 	return false
 }
 
+// agentAnswerFailed decides err, the end of a setup of now, the agent the
+// retry's watch found running and not the last one set up, or of a release
+// made on now once its setup had completed (releaseHeld): the release is that
+// setup's last step (reapply), so one classification takes both, and they
+// never disagree on an answer. The watch's end (run returned) cut it: the
+// watch ends. Keploy's own stop of the stack, or an agent that no longer
+// runs as now (compose recreated or stopped it, or it is gone), cut it too:
+// no halt is kept, and the watch's next look sets up the agent that runs in
+// its place (composeAgentSetupFailed). Any other end, while now still runs,
+// is one no later look changes: the agent's answer for good (a CA setup
+// failure it latches until it is started again, a proven switch that is not
+// this keploy's), or a wait its watch gave up on. The run ends on it at once,
+// as composeAgentSetupFailed ends it, never asking that agent again until
+// compose's healthcheck gives up. goOn: the watch looks again.
+func (a *App) agentAnswerFailed(watch context.Context, now string, err error, resume func(failed error), end func()) (goOn bool) {
+	after, _, afterKnown := a.agentIdentity(watch)
+	if watch.Err() != nil {
+		return false // run's end cut it, which marked its agent not set up
+	}
+	return a.composeAgentSetupFailed(err, afterKnown && after != now, resume, end)
+}
+
 // appStarted reports whether the app's container runs: compose starts it only
 // behind a healthy agent, so the agent then is one the run set up.
 func (a *App) appStarted(ctx context.Context) bool {
@@ -117,20 +139,18 @@ func (a *App) appStarted(ctx context.Context) bool {
 // (SetAgentHeldRelease): the app's container starts only behind it, and the
 // hold ends only once the app's container starts. Not while keploy stops the
 // stack (agentStopping, or a dependency's crash kept for the next bring-up):
-// that stop takes the agent. Right before the request goes, the agent that
-// runs must still be setUp.
-func (a *App) releaseHeld(ctx context.Context, setUp string) {
+// that stop takes the agent. Before the release's first request goes, the
+// agent that runs must still be setUp. Its error is the watch's to decide, as
+// a failed setup's is (agentAnswerFailed); nil: made, or nothing to make.
+func (a *App) releaseHeld(ctx context.Context, setUp string) error {
 	if a.makeHeldRelease == nil || a.composeApp.agentStopping.Load() || a.composeApp.depCrash.Load() != nil {
-		return
+		return nil
 	}
 	current := func(ctx context.Context) bool {
 		now, _, _ := a.agentIdentity(ctx)
 		return now == setUp
 	}
-	if err := a.makeHeldRelease(ctx, current); err != nil {
-		a.logger.Debug("the release of the app the retry's hold held, made on keploy's agent the retry set up, did not reach it; the watch makes it again at its next look while the agent is the one set up",
-			zap.String("agentContainer", a.keployContainer), zap.Error(err))
-	}
+	return a.makeHeldRelease(ctx, current)
 }
 
 // retryComposeUp runs the compose retry's `up` (run) while it watches keploy's
@@ -249,20 +269,16 @@ func (a *App) retryComposeUp(ctx context.Context, end func(), run func() utils.C
 					return nil
 				}
 				if now != "" && now == setUp {
-					a.releaseHeld(watch, now)
+					if err := a.releaseHeld(watch, now); err != nil && !a.agentAnswerFailed(watch, now, err, resume, end) {
+						return nil
+					}
 				}
 				continue
 			}
 			a.logger.Info("docker compose started keploy's agent again in its retry; setting it up again",
 				zap.String("agentContainer", a.keployContainer))
 			if err := a.onAgentRestart(watch); err != nil {
-				// A setup whose agent no longer runs, or runs as another
-				// process, was cut by compose replacing it.
-				after, _, afterKnown := a.agentIdentity(watch)
-				if watch.Err() != nil {
-					return nil // run's end cut the setup, which marked its agent not set up
-				}
-				if !a.composeAgentSetupFailed(err, afterKnown && after != now, resume, end) {
+				if !a.agentAnswerFailed(watch, now, err, resume, end) {
 					return nil
 				}
 				continue

@@ -257,8 +257,9 @@ func (s *agentSession) holdReleases(ctx context.Context) (resume func(failed err
 // It makes the release only while a hold is on, a setup has completed since
 // it began (notSetUp clear: no agent that is not set up may answer), no
 // setup's release has reached that agent, no refusal stands, and a release
-// the run asked for waits on the hold, and then only if current, asked right
-// before the request goes, says the agent that runs is still the one set up.
+// the run asked for waits on the hold, and then only if current, asked once
+// before the release's first request goes, says the agent that runs is still
+// the one set up.
 // The release held goes on once the hold ends, to the agent this one
 // released. nil once nothing is owed, or the release taken; otherwise the
 // release's error.
