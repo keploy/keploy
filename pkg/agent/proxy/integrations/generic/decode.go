@@ -32,7 +32,13 @@ const quietWindow = 10 * time.Millisecond
 // leave the goroutine reading, matching and logging after it had returned.
 func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	defer pUtil.InterruptOnDone(ctx, clientConn)()
-	genericRequests := [][]byte{reqBuf}
+	// The first round's request begins with reqBuf, the bytes the proxy
+	// read. A parser handed none has no request until it reads one: a round
+	// that reads nothing is no request.
+	var genericRequests [][]byte
+	if len(reqBuf) > 0 {
+		genericRequests = [][]byte{reqBuf}
+	}
 	logger.Debug("Into the generic parser in test mode")
 	// The requests it has read are held from the read on: it reads on with
 	// a deadline before it matches them, blocked reading while it holds them
