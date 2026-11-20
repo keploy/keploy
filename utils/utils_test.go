@@ -212,16 +212,24 @@ func TestParseEphemeralPortRange(t *testing.T) {
 // that coincidence correspondingly more likely.
 func TestEnsureAvailablePortsHonoursTheExclusionSet(t *testing.T) {
 	// A port that IS free: without the exclusion set it is returned unchanged.
+	// This test holds it, so that no other process takes it before the check,
+	// and the check's probe says it is free (EnsureFreePort).
 	free, err := GetAvailablePort()
 	if err != nil {
 		t.Fatalf("GetAvailablePort: %v", err)
 	}
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", free))
+	if err != nil {
+		t.Fatalf("hold the drawn port %d: %v", free, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	isFree := func(port uint32) bool { return port == free }
 
-	if got, err := EnsureAvailablePorts(free); err != nil || got != free {
+	if got, err := EnsureFreePort(isFree, free); err != nil || got != free {
 		t.Fatalf("precondition: a free port must be returned unchanged, got %d (%v)", got, err)
 	}
 
-	got, err := EnsureAvailablePorts(free, free)
+	got, err := EnsureFreePort(isFree, free, free)
 	if err != nil {
 		t.Fatalf("EnsureAvailablePorts: %v", err)
 	}
@@ -229,6 +237,23 @@ func TestEnsureAvailablePortsHonoursTheExclusionSet(t *testing.T) {
 		t.Fatalf("EnsureAvailablePorts returned %d, which the caller had already claimed: "+
 			"nothing is bound to it yet, so isPortAvailable says free and two subsystems "+
 			"end up racing for the same port", got)
+	}
+}
+
+// EnsureAvailablePorts is EnsureFreePort with a TCP probe listener on the port:
+// a port this test holds is taken, and another is drawn in its place.
+func TestEnsureAvailablePortsMovesOffAHeldPort(t *testing.T) {
+	held, err := GetAvailablePort()
+	if err != nil {
+		t.Fatalf("GetAvailablePort: %v", err)
+	}
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", held))
+	if err != nil {
+		t.Fatalf("hold the drawn port %d: %v", held, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	if got, err := EnsureAvailablePorts(held); err != nil || got == held || got == 0 {
+		t.Fatalf("EnsureAvailablePorts(%d) = %d, %v while this test holds it; want another port", held, got, err)
 	}
 }
 

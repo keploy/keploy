@@ -28,6 +28,11 @@ func TestSetupPicksADockerAgentsPortAsAContainersPort(t *testing.T) {
 	if reflect.ValueOf(hostPort).Pointer() != reflect.ValueOf(utils.GetAvailablePortExcept).Pointer() {
 		t.Fatal("hostPort is not utils.GetAvailablePortExcept")
 	}
+	// The check of a native agent's proxy and DNS ports off Linux, which the
+	// proxyPorts rows replace with a probe they control.
+	if reflect.ValueOf(availablePort).Pointer() != reflect.ValueOf(utils.EnsureAvailablePorts).Pointer() {
+		t.Fatal("availablePort is not utils.EnsureAvailablePorts")
+	}
 	defer func(h, c func(...uint32) (uint32, error)) { hostPort, containerPort = h, c }(hostPort, containerPort)
 	stop := errors.New("stop at the agent's port")
 	var picked []string

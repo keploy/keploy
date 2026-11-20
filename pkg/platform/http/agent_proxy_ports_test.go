@@ -51,34 +51,30 @@ func heldTCPPort(t *testing.T) uint32 {
 	return p
 }
 
-// freeAtProbe gives the test a draw of ports that are free when proxyPorts
-// checks them (availablePort), and not before: each is held from its draw
-// (holdPort), and the check itself closes its listener just before it binds
-// the port. A port drawn later is never one drawn before it, and no other
-// process can take one between its draw and the check. A port proxyPorts
-// does not check, as the agent's, stays held until the test ends.
+// freeAtProbe gives the test a draw of ports that proxyPorts' check
+// (availablePort) finds free: each is held from its draw until the test ends
+// (holdPort), and the check is utils.EnsureFreePort with a probe that says
+// such a port is free and every other port is taken, as heldTCPPort's are.
+// No port a row calls free is ever let go of, so no other process can take
+// one before the check, and a port drawn later is never one drawn before it.
+// The ports the check draws in place of a taken one are real draws.
 //
-// The rows drew free ports with utils.GetAvailablePort alone and let them go
-// at once: twice, two of a row's draws returned one port, and proxyPorts
-// rightly moved the second server off it.
+// The rows drew free ports with utils.GetAvailablePort and let them go at
+// once: two of a row's draws returned one port, or another process took one
+// before proxyPorts checked it, and proxyPorts rightly moved the server off
+// it.
 func freeAtProbe(t *testing.T) func() uint32 {
 	t.Helper()
-	held := map[uint32]net.Listener{}
+	free := map[uint32]bool{}
 	was := availablePort
 	t.Cleanup(func() { availablePort = was })
 	availablePort = func(port uint32, exclude ...uint32) (uint32, error) {
-		if ln, ok := held[port]; ok {
-			delete(held, port)
-			if err := ln.Close(); err != nil {
-				return 0, err
-			}
-		}
-		return was(port, exclude...)
+		return utils.EnsureFreePort(func(p uint32) bool { return free[p] }, port, exclude...)
 	}
 	return func() uint32 {
 		t.Helper()
-		p, ln := holdPort(t)
-		held[p] = ln
+		p, _ := holdPort(t)
+		free[p] = true
 		return p
 	}
 }
