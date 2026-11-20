@@ -123,6 +123,21 @@ func TestACallAnsweredWithAnotherCallsRecordingIsLoggedByItsShape(t *testing.T) 
 	}
 }
 
+// A replay not proven for a reason of its own (here passthrough), with no call
+// answered with another call's recording, logs that reason as the receipt
+// holds it: the log form of another call's answers is for those alone.
+func TestAReplayNotProvenForAnotherReasonLogsItsOwnNote(t *testing.T) {
+	keployDir, _, logs := replayIn(t, replayCase{onMiss: "passthrough"})
+	r := mustReceipt(t, keployDir)
+	infos := logs.FilterMessage("this replay did not prove the tests run with the dependencies off").All()
+	if len(infos) != 1 || r.Isolated || r.IsolationNote == "" || len(r.AnsweredAsAnother) != 0 {
+		t.Fatalf("a passthrough replay logged %d reason lines with receipt isolated=%v note %q answeredAsAnother %+v, want one, not isolated, a note and none", len(infos), r.Isolated, r.IsolationNote, r.AnsweredAsAnother)
+	}
+	if reason, _ := infos[0].ContextMap()["reason"].(string); reason != r.IsolationNote {
+		t.Errorf("the reason logged is %q, want the receipt's isolation note %q", reason, r.IsolationNote)
+	}
+}
+
 // stringsEncoder is a zapcore.ArrayEncoder that keeps the strings it is
 // given: how a test reads a zap.Strings field back.
 type stringsEncoder struct {
