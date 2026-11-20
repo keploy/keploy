@@ -133,10 +133,13 @@ func bgDecision(o WordOutcome, why string, w int, st ...variables.Step) Decision
 // bothWays reads each decision of the second reading against the first
 // reading's decision it stands under: at its own word, under the first's
 // decision of its field whole (inside the text that one's steps open), or
-// as the second's decision of its field whole. A refusal no decision of
-// the first stands over is added, never dropped; a word the second learns
-// otherwise refuses the first's; the worst of several decides; and where
-// every word learns as the first did, nothing changes.
+// as the second's decision of its field whole. A word of the second that
+// the first decides itself is read only against that decision, never
+// against a whole one it stands under. A refusal no decision of the first
+// stands over is added, never dropped; a word the second learns otherwise
+// refuses the first's (keploy cannot tell which the application did); the
+// worst of several decides; and where every word learns as the first did,
+// nothing changes.
 func TestBothWaysReadsEveryWordOfTheSecondReading(t *testing.T) {
 	const f, g = "bind.$7", "bind.$8"
 	json, b64 := variables.Step("json"), variables.Step("b64")
@@ -182,6 +185,18 @@ func TestBothWaysReadsEveryWordOfTheSecondReading(t *testing.T) {
 		{"a refused whole under a word", []Decision{bgDecision(OutcomeFresh, "w0", 0)}, []string{f},
 			[]Decision{whole(OutcomeRefused)}, []string{f},
 			[]WordOutcome{OutcomeRefused}, "probe"},
+		// A minted id: made anew whole, its copied piece bound beside it,
+		// decided so by both readings. The piece is the first's own
+		// decision, so it never refuses the whole.
+		{"a whole and a piece under it, each decided alike", []Decision{whole(OutcomeFresh), bgDecision(OutcomeValue, "w0", 0)}, []string{f, f},
+			[]Decision{whole(OutcomeFresh), bgDecision(OutcomeValue, "w0", 0)}, []string{f, f},
+			[]WordOutcome{OutcomeFresh, OutcomeValue}, ""},
+		{"a whole and a piece under it, the second refusing the piece", []Decision{whole(OutcomeFresh), bgDecision(OutcomeValue, "w0", 0)}, []string{f, f},
+			[]Decision{whole(OutcomeFresh), bgDecision(OutcomeRefused, "w0", 0)}, []string{f, f},
+			[]WordOutcome{OutcomeFresh, OutcomeRefused}, "probe"},
+		{"a whole and a piece under it, the second learning the piece otherwise", []Decision{whole(OutcomeFresh), bgDecision(OutcomeValue, "w0", 0)}, []string{f, f},
+			[]Decision{whole(OutcomeFresh), bgDecision(OutcomeFresh, "w0", 0)}, []string{f, f},
+			[]WordOutcome{OutcomeFresh, OutcomeRefused}, "own-instant-both-ways"},
 		{"a word under two whole decisions", []Decision{whole(OutcomeRefused), whole(OutcomeFresh)}, []string{f, f},
 			[]Decision{bgDecision(OutcomeRefused, "w0", 0)}, []string{f},
 			[]WordOutcome{OutcomeRefused, OutcomeRefused}, "probe"},
@@ -211,6 +226,41 @@ func TestBothWaysReadsEveryWordOfTheSecondReading(t *testing.T) {
 		}
 		if len(fs) > len(c.fs) && fs[len(fs)-1] != c.afs[len(c.afs)-1] {
 			t.Errorf("%s: the added refusal's field %q; want %q", c.name, fs[len(fs)-1], c.afs[len(c.afs)-1])
+		}
+	}
+}
+
+// A minted <copied>-<random> id whose copied prefix was bound to an
+// earlier place (mock-48's body.tenant) is decided whole, made anew by the
+// rule, with the piece bound beside it. Beside an exchange of the test that
+// holds nothing of it, at the call's own instant or untimed, the call is
+// read both ways, and both readings decide the field so. The piece is a
+// word the first reading decides itself, so read against the whole
+// decision too it refused the whole and lost the rule's name (a false
+// red); it stays made anew, as with the exchange a second before.
+func TestBothWaysKeepsAMintedIdBothReadingsDecideAlike(t *testing.T) {
+	const tRec, tLiv = "t4821-7f3e9b2c41d6", "t9057-c0d18e5a77b2"
+	form := models.MintedForm{MinLen: 18, MaxLen: 18}
+	tenant := oCarried("mock-48", "body.tenant", "t4821", "t9057", 2*time.Second, time.Second, 1)
+	atCall := oCarried("mock-49", "body.other", "qq", "qq", 0, time.Millisecond, 2)
+	atCall.AsRecorded = true
+	untimed := atCall
+	untimed.At = time.Time{}
+	before := oCarried("mock-49", "body.other", "qq", "qq", time.Second, time.Millisecond, 2)
+	for _, c := range []struct {
+		name   string
+		beside Earlier
+	}{
+		{"an exchange at the call's instant", atCall},
+		{"an untimed exchange", untimed},
+		{"control: the exchange a second before (read one way)", before},
+	} {
+		in := oInput(mPath, tRec, tLiv, []Earlier{tenant, c.beside}, nil)
+		in.Source = mMintedAs(mPath, form)
+		mFreshBeside(t, "a minted <copied>-<random> beside "+c.name, Decide(in), tRec, tLiv, form, "t4821")
+		if t.Failed() {
+			first, second := bgReadings(in)
+			t.Logf("%s: first reading %s; second reading %s", c.name, oDescribe(first), oDescribe(second))
 		}
 	}
 }

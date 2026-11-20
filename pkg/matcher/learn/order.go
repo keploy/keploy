@@ -89,10 +89,12 @@ func refusesAny(ds []Decision) bool {
 // copy) the other may decide word by word, and the reverse. A decision of
 // ds is read against each decision of as at its own word, else against
 // as's decision of its field whole, and a whole one of ds against every
-// decision of as inside it too. A refusal of as that no decision of ds is
-// read against still refuses: the first decision of its field ds does not
-// refuse takes it, and with none, it is added (fields names it). So a word
-// either reading refuses is refused, by construction.
+// decision of as inside it too, but one at a word ds decides itself: that
+// one is read against ds's own decision there (a minted id decided whole
+// with its copied pieces bound beside it is decided so by both). A
+// refusal of as that no decision of ds is read against is added to ds as
+// a refusal, and fields names its field. So a word either reading refuses
+// is refused, by construction.
 func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields []string) ([]Decision, []string) {
 	// A word is keyed by its field, its steps and its index: two texts one
 	// leaf opens to number their words each from 0.
@@ -107,9 +109,11 @@ func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields [
 		late[key(afields[i], a.At)] = i
 	}
 	// read: the decisions of as some decision of ds was read against;
-	// byField: as's decisions by field, built at the first whole one of ds.
+	// byField: as's decisions by field, and own: the words ds decides, both
+	// built at the first whole one of ds.
 	read := make([]bool, len(as))
 	var byField map[string][]int
+	var own map[string]bool
 	dc := &decider{in: in}
 	names := [...]string{"refused", "a read of the clock", "a value bound to an earlier place", "a value made anew each run"}
 	for i, d := range ds {
@@ -124,15 +128,20 @@ func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields [
 		if d.At.Word < 0 {
 			// Decided whole here: each decision of as inside it is read
 			// against it, the worst first (a refusal, then one learned
-			// otherwise).
+			// otherwise), but one at a word ds decides itself, read
+			// against that decision on its own pass.
 			if byField == nil {
 				byField = make(map[string][]int, len(as))
 				for k := range as {
 					byField[afields[k]] = append(byField[afields[k]], k)
 				}
+				own = make(map[string]bool, len(ds))
+				for n, e := range ds {
+					own[key(fields[n], e.At)] = true
+				}
 			}
 			for _, k := range byField[fields[i]] {
-				if !stepsUnder(d.At.Steps, as[k].At.Steps) {
+				if own[key(afields[k], as[k].At)] || !stepsUnder(d.At.Steps, as[k].At.Steps) {
 					continue
 				}
 				read[k] = true
