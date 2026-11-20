@@ -473,9 +473,9 @@ func breakSpill(t *testing.T, a *testErrorAccumulator) {
 // Misses kept on the disk that cannot be read back make the read that would
 // list them incomplete, naming why, said at Warn, wherever the list is
 // drained: the test's own at its read, those made between two tests carried
-// into the next test, those made before a set's first test (the set's, under
-// the proven switch), a window read on the degenerate path, a test set's
-// start, and EndTestErrorCapture.
+// into the next test, those made before a set's first test (the set's, with
+// the proven switch on or off), a window read on the degenerate path, a test
+// set's start, and EndTestErrorCapture.
 func TestMissesNotReadBackMakeTheirReadIncomplete(t *testing.T) {
 	const cause = "could not be read back"
 	overfill := func(p *Proxy) {
@@ -499,7 +499,12 @@ func TestMissesNotReadBackMakeTheirReadIncomplete(t *testing.T) {
 			breakSpill(t, &p.pendingMockErrors)
 			p.ContinueTestErrorCapture()
 		}},
-		{"made before the set, the set's", true, func(t *testing.T, p *Proxy) {
+		{"made before the set, the set's, switch on", true, func(t *testing.T, p *Proxy) {
+			overfill(p)
+			breakSpill(t, &p.pendingMockErrors)
+			p.BeginTestErrorCapture()
+		}},
+		{"made before the set, the set's, switch off", false, func(t *testing.T, p *Proxy) {
 			overfill(p)
 			breakSpill(t, &p.pendingMockErrors)
 			p.BeginTestErrorCapture()
@@ -558,73 +563,54 @@ func TestMissesNotReadBackMakeTheirReadIncomplete(t *testing.T) {
 	}
 }
 
-// Misses kept on the disk that are dropped anyway as no test's are said at
-// Warn when they cannot be read back: those of a window never read, and,
-// with the proven switch off, those made before a set's first test. Where
-// all were read back, nothing is said.
+// Misses kept on the disk that are dropped anyway as no test's (those of a
+// window never read) are said at Warn when they cannot be read back, with the
+// proven switch on or off; the next test's read stays complete. Where all were
+// read back, nothing is said. (Misses made before a set's first test are the
+// set's, not dropped: TestMissesNotReadBackMakeTheirReadIncomplete.)
 func TestMissesNotReadBackThatAreNoTestsAreSaid(t *testing.T) {
-	unreadWindow := func(t *testing.T, p *Proxy, broken bool) {
-		acc := &testErrorAccumulator{}
-		for i := 0; i <= maxPendingMockErrors; i++ {
-			acc.addBounded(distinctMiss(i), maxPendingMockErrors)
-		}
-		if broken {
-			breakSpill(t, acc)
-		}
-		p.captureMu.Lock()
-		p.activeTestErrors.Store(acc)
-		p.captureMu.Unlock()
-		p.ContinueTestErrorCapture()
-	}
-	beforeSet := func(t *testing.T, p *Proxy, broken bool) {
-		for i := 0; i <= maxPendingMockErrors; i++ {
-			p.SendError(distinctMiss(i))
-		}
-		flushDrain(p)
-		if broken {
-			breakSpill(t, &p.pendingMockErrors)
-		}
-		p.BeginTestErrorCapture()
-	}
-	rows := []struct {
-		name   string
-		run    func(t *testing.T, p *Proxy, broken bool)
-		broken bool
-	}{
-		{"a window never read", unreadWindow, true},
-		{"a window never read, all read back", unreadWindow, false},
-		{"made before the set, switch off", beforeSet, true},
-		{"made before the set, switch off, all read back", beforeSet, false},
-	}
-	for _, row := range rows {
-		t.Run(row.name, func(t *testing.T) {
-			t.Setenv(provenswitch.Env, "")
-			core, logs := observer.New(zap.WarnLevel)
-			p := startedDrainProxyLogging(t, 8, zap.New(core))
-			row.run(t, p, row.broken)
-			if _, err := p.GetMockErrors(context.Background()); err != nil {
-				t.Fatalf("GetMockErrors = %v; misses that are no test's leave the read complete", err)
-			}
-			want := map[bool]int{true: 1, false: 0}[row.broken]
-			if n := logs.FilterMessageSnippet("could not be read back").Len(); n != want {
-				t.Fatalf("said %d times at Warn; want %d", n, want)
-			}
+	for _, broken := range []bool{true, false} {
+		t.Run(map[bool]string{true: "a window never read", false: "a window never read, all read back"}[broken], func(t *testing.T) {
+			eitherSwitch(t, func(t *testing.T) {
+				core, logs := observer.New(zap.WarnLevel)
+				p := startedDrainProxyLogging(t, 8, zap.New(core))
+				acc := &testErrorAccumulator{}
+				for i := 0; i <= maxPendingMockErrors; i++ {
+					acc.addBounded(distinctMiss(i), maxPendingMockErrors)
+				}
+				if broken {
+					breakSpill(t, acc)
+				}
+				p.captureMu.Lock()
+				p.activeTestErrors.Store(acc)
+				p.captureMu.Unlock()
+				p.ContinueTestErrorCapture()
+				if _, err := p.GetMockErrors(context.Background()); err != nil {
+					t.Fatalf("GetMockErrors = %v; misses that are no test's leave the read complete", err)
+				}
+				want := map[bool]int{true: 1, false: 0}[broken]
+				if n := logs.FilterMessageSnippet("could not be read back").Len(); n != want {
+					t.Fatalf("said %d times at Warn; want %d", n, want)
+				}
+			})
 		})
 	}
 }
 
-// A list carried into the next test's window (made between two tests, or,
-// under the proven switch, before a set's first test) that its window, and
-// the disk past it, cannot keep makes that test's read incomplete, naming
-// the full list and why the disk took no more, said at Warn with what to do.
+// A list carried into the next test's window (made between two tests, or
+// before a set's first test, with the proven switch on or off) that its
+// window, and the disk past it, cannot keep makes that test's read
+// incomplete, naming the full list and why the disk took no more, said at
+// Warn with what to do.
 func TestACarriedListPastTheDiskSaysWhy(t *testing.T) {
 	for name, row := range map[string]struct {
 		on    bool
 		open  func(p *Proxy)
 		cause string
 	}{
-		"between two tests":      {false, func(p *Proxy) { p.ContinueTestErrorCapture() }, missLostListFull},
-		"before the set's first": {true, func(p *Proxy) { p.BeginTestErrorCapture() }, missLostBeforeSetFull},
+		"between two tests":                  {false, func(p *Proxy) { p.ContinueTestErrorCapture() }, missLostListFull},
+		"before the set's first, switch on":  {true, func(p *Proxy) { p.BeginTestErrorCapture() }, missLostBeforeSetFull},
+		"before the set's first, switch off": {false, func(p *Proxy) { p.BeginTestErrorCapture() }, missLostBeforeSetFull},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[bool]string{true: "1", false: ""}[row.on])
