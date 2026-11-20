@@ -1282,6 +1282,11 @@ type ClockRunReq struct {
 	Run string `json:"run"`
 }
 
+// NoTimelineHooks is the body of the 501 an agent of a keploy that has the
+// clock-run route answers it with when its hooks keep no clock timeline
+// (OSS's own, and a native macOS or Windows agent's), so take no run id.
+const NoTimelineHooks = "no timeline hooks in this agent: it keeps no clock timeline, so it takes no run id"
+
 type AppStart struct {
 	At   time.Time `json:"at"`
 	PID  uint32    `json:"pid"`

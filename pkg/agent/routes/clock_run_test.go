@@ -51,12 +51,20 @@ func TestClockRunHandsTheHooksTheRunID(t *testing.T) {
 	}
 }
 
-// Hooks that take no run id (OSS's own) answer 404, as an agent older than
-// the route does, so the starter treats both alike and goes on without one.
-func TestClockRunWithoutTheCapabilityIsNotFound(t *testing.T) {
-	useHooks(t, &agent.AgentHook{})
-	if rec := clockRun(`{"run":"run-1"}`); rec.Code != http.StatusNotFound {
-		t.Fatalf("status %d: %s, want 404", rec.Code, rec.Body.String())
+// Hooks that take no run id keep no clock timeline (OSS's own, a native
+// macOS or Windows agent's): the route answers them 501 naming that, never
+// the 404 of an agent older than the route, so the starter does not call an
+// agent of its own version older. Whichever the switch.
+func TestClockRunWithoutTimelineHooksIsNotImplemented(t *testing.T) {
+	for _, env := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+env, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, env)
+			useHooks(t, &agent.AgentHook{})
+			rec := clockRun(`{"run":"run-1"}`)
+			if rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), "no timeline hooks in this agent") {
+				t.Fatalf("status %d %q, want 501 naming no timeline hooks", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

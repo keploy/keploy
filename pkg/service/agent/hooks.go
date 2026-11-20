@@ -44,7 +44,8 @@ type AppStartHook interface {
 // /agent/hooks/clock-run), before any call that can move the app's clock.
 // Hooks that keep a run's timeline on clock files another run may have left
 // (the enterprise time-freeze) mark that timeline with it. An agent whose
-// hooks lack it answers the route 404, as an agent older than the route.
+// hooks lack it keeps no such timeline and answers the route 501
+// (models.NoTimelineHooks); 404 is an agent older than the route.
 type ClockRunTaker interface {
 	TakeClockRun(ctx context.Context, run string) error
 }
@@ -154,7 +155,8 @@ func (h *StartupHooks) GetArgs(ctx context.Context) []string { return nil }
 // agent's ClockRunTaker), "" for none. It travels over an agent route, never
 // on the agent's command line: an agent older than its starter (a
 // user-pinned agent image) answers the route 404 and runs on without it,
-// where a flag it does not know would end it.
+// where a flag it does not know would end it. One whose hooks keep no
+// timeline answers 501, and the client takes that as nothing to hand.
 type ClockRunStarter interface {
 	ClockRun(ctx context.Context) string
 }

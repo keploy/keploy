@@ -36,47 +36,87 @@ func useStartupHook(t *testing.T, h agent.StartupHook) {
 
 // runIDAgent is a stand-in agent whose health check answers healthy with this
 // keploy's switch, and whose /hooks/clock-run answers takes (404 for an agent
-// older than the route). It notes every other request's path, in order, and
-// the run ids it was handed.
+// older than the route, 501 for one whose hooks keep no timeline). It notes
+// every other request's path, in order, and the run ids it took. Like a
+// real agent, it takes none before it is up: until its health check has
+// answered healthy, the route answers 503 and the call is counted early.
 type runIDAgent struct {
 	url   string
 	takes int
 	mu    sync.Mutex
+	// sick is how many health checks are still answered 503, as an agent
+	// not up yet answers them; up says one has answered healthy.
+	sick  int
+	up    bool
+	early int
 	paths []string
 	runs  []string
 }
 
+// newRunIDAgent is a stand-in agent that is up: a client is past its health
+// handshake with it.
 func newRunIDAgent(t *testing.T, takes int) *runIDAgent {
 	t.Helper()
-	ra := &runIDAgent{takes: takes}
+	ra := startRunIDAgent(t, takes, 0)
+	ra.up = true
+	return ra
+}
+
+// startRunIDAgent is a stand-in agent that has just started: its first sick
+// health checks answer 503, and its route takes no run id until a check
+// answers healthy.
+func startRunIDAgent(t *testing.T, takes, sick int) *runIDAgent {
+	t.Helper()
+	ra := &runIDAgent{takes: takes, sick: sick}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/health") {
+			ra.mu.Lock()
+			notUp := ra.sick > 0
+			if notUp {
+				ra.sick--
+			} else {
+				ra.up = true
+			}
+			ra.mu.Unlock()
+			if notUp {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			w.Header().Set(provenswitch.HealthHeader, provenswitch.State())
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		ra.mu.Lock()
 		ra.paths = append(ra.paths, r.URL.Path)
+		up := ra.up
+		if !up && r.URL.Path == "/hooks/clock-run" {
+			ra.early++
+		}
 		ra.mu.Unlock()
 		if r.URL.Path != "/hooks/clock-run" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		if !up {
+			http.Error(w, "the agent is not up yet", http.StatusServiceUnavailable)
+			return
+		}
 		var req models.ClockRunReq
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		ra.mu.Lock()
-		ra.runs = append(ra.runs, req.Run)
-		ra.mu.Unlock()
-		if ra.takes == http.StatusNotFound {
+		switch ra.takes {
+		case http.StatusOK:
+			ra.mu.Lock()
+			ra.runs = append(ra.runs, req.Run)
+			ra.mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		case http.StatusNotFound:
 			// What chi answers for a route the agent does not have.
 			http.NotFound(w, r)
-			return
+		case http.StatusNotImplemented:
+			http.Error(w, models.NoTimelineHooks, http.StatusNotImplemented)
+		default:
+			http.Error(w, "keploy's agent already marks its clock's timeline with another keploy run's id", ra.takes)
 		}
-		if ra.takes != http.StatusOK {
-			http.Error(w, "this agent's clock is on another run's id", ra.takes)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { sessions.Delete(srv.URL) })
@@ -88,6 +128,14 @@ func (ra *runIDAgent) asked() ([]string, []string) {
 	ra.mu.Lock()
 	defer ra.mu.Unlock()
 	return append([]string(nil), ra.paths...), append([]string(nil), ra.runs...)
+}
+
+// handedEarly is how many times the agent was handed the run id before its
+// health check answered healthy.
+func (ra *runIDAgent) handedEarly() int {
+	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	return ra.early
 }
 
 // observedClient is a client of the agent at uri whose log is observed.
@@ -102,17 +150,21 @@ func runIDLines(logs *observer.ObservedLogs) []observer.LoggedEntry {
 }
 
 // A new keploy beside a new agent: the agent is handed the run id once it
-// answers its health check, before anything else is asked of it, and nothing
-// is said.
+// answers its health check healthy (an agent starting up answers it 503
+// first, and takes no id then), before anything else is asked of it, and
+// nothing is said.
 func TestANewAgentIsHandedTheRunIDOnceItAnswers(t *testing.T) {
 	for _, st := range switchStates {
 		t.Run(st.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, st.env)
 			useStartupHook(t, &clockRunStarter{run: "run-1"})
-			ra := newRunIDAgent(t, http.StatusOK)
+			ra := startRunIDAgent(t, http.StatusOK, 2)
 			a, logs := observedClient(ra.url)
 			if err := a.agentReady(context.Background(), nil, false, models.SetupOptions{}); err != nil {
 				t.Fatalf("agentReady = %v", err)
+			}
+			if n := ra.handedEarly(); n != 0 {
+				t.Fatalf("the agent was handed the run id %d time(s) before it answered its health check", n)
 			}
 			paths, runs := ra.asked()
 			if len(paths) != 1 || paths[0] != "/hooks/clock-run" || len(runs) != 1 || runs[0] != "run-1" {
@@ -134,7 +186,7 @@ func TestAnAgentOlderThanTheRouteRunsOnWithoutARunID(t *testing.T) {
 		t.Run(st.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, st.env)
 			useStartupHook(t, &clockRunStarter{run: "run-1"})
-			ra := newRunIDAgent(t, http.StatusNotFound)
+			ra := startRunIDAgent(t, http.StatusNotFound, 2)
 			a, logs := observedClient(ra.url)
 			if err := a.agentReady(context.Background(), nil, false, models.SetupOptions{}); err != nil {
 				t.Fatalf("agentReady = %v; an agent without the route must not fail the run", err)
@@ -151,6 +203,41 @@ func TestAnAgentOlderThanTheRouteRunsOnWithoutARunID(t *testing.T) {
 			l := lines[0]
 			if l.Level != zapcore.InfoLevel || !strings.Contains(l.Message, "older than this keploy") || !strings.Contains(l.Message, "agent image of this keploy's version") {
 				t.Fatalf("said %s %q, want an Info line naming an older agent and its upgrade", l.Level, l.Message)
+			}
+		})
+	}
+}
+
+// A new keploy beside an agent of its own version whose hooks keep no clock
+// timeline (OSS's own, a native macOS or Windows agent): the route answers
+// 501 naming that. The agent is not older than this keploy and has no use
+// for the id, so the run goes on, nothing is said above Debug, and no agent
+// image is advised, however many agents of the run it hands the id.
+func TestAnAgentWithoutTimelineHooksIsNotCalledOlder(t *testing.T) {
+	for _, st := range switchStates {
+		t.Run(st.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, st.env)
+			useStartupHook(t, &clockRunStarter{run: "run-1"})
+			ra := startRunIDAgent(t, http.StatusNotImplemented, 2)
+			a, logs := observedClient(ra.url)
+			if err := a.agentReady(context.Background(), nil, false, models.SetupOptions{}); err != nil {
+				t.Fatalf("agentReady = %v; an agent without timeline hooks must not fail the run", err)
+			}
+			for _, set := range []string{"test-set-0", "test-set-1"} {
+				if err := a.BeforeTestSetCompose(context.Background(), "test-run-1", set, false); err != nil {
+					t.Fatalf("BeforeTestSetCompose(%s) = %v; an agent without timeline hooks must not fail the set", set, err)
+				}
+			}
+			if paths, _ := ra.asked(); len(paths) != 5 || paths[0] != "/hooks/clock-run" {
+				t.Fatalf("the agent was asked %v, want the run id handed once it answers and before each set's hook", paths)
+			}
+			for _, l := range logs.AllUntimed() {
+				if l.Level > zapcore.DebugLevel {
+					t.Fatalf("said %s %q, want nothing above Debug for an agent that keeps no timeline", l.Level, l.Message)
+				}
+			}
+			if l := logs.FilterMessageSnippet("keeps no clock timeline").AllUntimed(); len(l) == 0 {
+				t.Fatalf("said nothing of the agent that keeps no timeline, want a Debug line")
 			}
 		})
 	}
@@ -203,8 +290,20 @@ func TestARunIDTheAgentDoesNotTakeIsSaidOnceAndTheRunGoesOn(t *testing.T) {
 		a.handClockRun(context.Background())
 		a.handClockRun(context.Background())
 		lines := runIDLines(logs)
-		if len(lines) != 1 || lines[0].Level != zapcore.WarnLevel || !strings.Contains(lines[0].Message, "another run's id") {
-			t.Fatalf("said %v, want one warning with the agent's reason", lines)
+		if len(lines) != 1 || lines[0].Level != zapcore.WarnLevel {
+			t.Fatalf("said %v, want one warning", lines)
+		}
+		for _, want := range []string{
+			"the agent already holds another run's id: an earlier run's agent is still running",
+			"already marks its clock's timeline with another keploy run's id",
+			"Stop the earlier run's keploy agent",
+		} {
+			if !strings.Contains(lines[0].Message, want) {
+				t.Fatalf("said %q, want it to name %q", lines[0].Message, want)
+			}
+		}
+		if strings.Contains(lines[0].Message, "cannot tell this run's") {
+			t.Fatalf("said %q: an agent that holds another run's id is not one that cannot tell the runs' timelines apart", lines[0].Message)
 		}
 	})
 	t.Run("unreachable", func(t *testing.T) {
