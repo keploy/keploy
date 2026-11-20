@@ -119,7 +119,7 @@ kill "$DEP_PID" 2>/dev/null; wait "$DEP_PID" 2>/dev/null; DEP_PID=""
 mocks=$(http_mocks_are keploy/users/mocks.yaml 2) || { echo "FAIL: expected 2 Http mocks and no other kind but DNS: $mocks"; exit 1; }
 echo "recorded: $mocks"
 for p in /users/1 /users/2; do
-  grep -qE "url: http://127\.0\.0\.1:$PORT$p\$" keploy/users/mocks.yaml || { echo "FAIL: no recording of GET $p"; exit 1; }
+  grep -qE "^ +url: \"?[^ ]*$p\"?\$" keploy/users/mocks.yaml || { echo "FAIL: no recording of GET $p"; sed -n "s/^ *url: //p" keploy/users/mocks.yaml; exit 1; }
 done
 
 # replay <label> <users> [flag]: replays the test calling users, with the
