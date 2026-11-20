@@ -33,6 +33,11 @@ func returnsWithin(t *testing.T, returned <-chan struct{}, after string) {
 	}
 }
 
+// waitedOn is how long a row watches a wait that must go on: long enough
+// for one that returns early to have returned, a look at a Windows socket
+// (every 50 ms) included.
+const waitedOn = 200 * time.Millisecond
+
 // finRead has s read c's FIN, c having half-closed.
 func finRead(t *testing.T, c, s *net.TCPConn) {
 	t.Helper()
@@ -68,7 +73,7 @@ func TestAwaitPeerReset(t *testing.T) {
 		select {
 		case <-returned:
 			t.Fatal("AwaitPeerReset returned at the peer's FIN; want it to wait on to the peer's reset")
-		default:
+		case <-time.After(waitedOn):
 		}
 		_ = c.SetLinger(0)
 		_ = c.Close()
@@ -98,7 +103,7 @@ func TestAwaitPeerReset(t *testing.T) {
 		select {
 		case <-returned:
 			t.Fatal("AwaitPeerReset returned with no socket to ask and ctx not ended; want it to wait on ctx")
-		default:
+		case <-time.After(waitedOn):
 		}
 		cancel()
 		returnsWithin(t, returned, "once ctx ended")
