@@ -247,6 +247,133 @@ func TestRun_AtTheStopAParserIdleOnceItReadItAllIsAbortedOnceItsWindowPasses(t *
 	close(r.ops)
 }
 
+// dueClock is a stall.Clock whose timers each fire once Runnable has reached
+// the time they are due (advance), where a ManualClock's fire on any Advance:
+// it shows when a look comes, not only that it comes.
+type dueClock struct {
+	mu  sync.Mutex
+	ran time.Duration
+	// due is each pending timer's due time.
+	due map[chan time.Time]time.Duration
+}
+
+func newDueClock() *dueClock { return &dueClock{due: map[chan time.Time]time.Duration{}} }
+
+func (c *dueClock) Runnable() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ran
+}
+
+func (c *dueClock) After(d time.Duration) (<-chan time.Time, func() bool) {
+	ch := make(chan time.Time, 1)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.due[ch] = c.ran + d
+	return ch, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		_, ok := c.due[ch]
+		delete(c.due, ch)
+		return ok
+	}
+}
+
+// advance moves Runnable by d, fires the timers due by then, and reports how
+// many it fired.
+func (c *dueClock) advance(d time.Duration) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ran += d
+	n := 0
+	for ch, due := range c.due {
+		if due <= c.ran {
+			ch <- time.Time{}
+			delete(c.due, ch)
+			n++
+		}
+	}
+	return n
+}
+
+func (c *dueClock) pending() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.due)
+}
+
+// A parser that has read both its streams to their end and then makes no
+// progress is aborted promptly: not before its fold window has passed with
+// none, and by a quarter of the window after that at most, on the time the
+// process could run. The stop waits no longer on a parser that waits on
+// something else than that.
+func TestRun_AtTheStopAnIdleParserIsAbortedWithinAQuarterWindowOfItsWindow(t *testing.T) {
+	t.Parallel()
+	const window = time.Second
+	client, dest := newBehindProducer(), newBehindProducer()
+	go client.run([]string{"request"})
+	go dest.run([]string{"answer"})
+	clk := newDueClock()
+	aborted := make(chan struct{})
+	var abortOnce sync.Once
+	s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour, FoldWindow: window, Clock: clk})
+	s.SessionOnAbort = func() { abortOnce.Do(func() { close(aborted) }) }
+	sess := &Session{ClientStream: client.fc, DestStream: dest.fc}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unpark := make(chan struct{})
+	defer close(unpark)
+	resc := make(chan Result, 1)
+	go func() {
+		resc <- s.Run(ctx, func(context.Context, *Session) error {
+			cancel() // the stop
+			readBoth(sess)
+			<-unpark // it waits on something else
+			return nil
+		}, sess)
+	}()
+	// settled waits until the watchdog and the fold watch both wait on their
+	// next look again, or Run has returned (done).
+	settled := func() (res Result, done bool) {
+		bound := time.Now().Add(time.Minute) // only turns a hang into a failure
+		for clk.pending() != 2 {
+			select {
+			case res = <-resc:
+				return res, true
+			default:
+			}
+			if time.Now().After(bound) {
+				t.Fatalf("the fold watch never armed its next look (%s of run time)", clk.Runnable())
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return Result{}, false
+	}
+	if res, done := settled(); done {
+		t.Fatalf("Run returned %+v before the parser's fold window began", res)
+	}
+	var res Result
+	for done := false; !done; {
+		if clk.Runnable() >= 2*window {
+			t.Fatalf("the parser idle since it read both its streams to their end was not aborted within %s of run time (fold window %s)", clk.Runnable(), window)
+		}
+		if clk.advance(window/8) > 0 {
+			res, done = settled()
+		}
+	}
+	if ran := clk.Runnable(); ran <= window || ran > window+window/4 {
+		t.Fatalf("Run returned %+v at %s of run time, want past the fold window %s and within a quarter of it after", res, ran, window)
+	}
+	select {
+	case <-aborted:
+	default:
+		t.Fatalf("Run returned %+v without aborting the parser", res)
+	}
+	if res.Status != StatusCanceled || !res.FallthroughToPassthrough {
+		t.Fatalf("result %+v, want canceled and retired", res)
+	}
+}
+
 // A parser still making progress on what it read when the stop's deadline
 // passes is aborted at the deadline, and a WARN says the records it had not
 // handed over then are lost, naming its connection.
@@ -307,6 +434,63 @@ func TestRun_AtTheStopDeadlineCutsAParserStillFoldingAndSaysSo(t *testing.T) {
 	}
 }
 
+// A session without both streams has nothing to say its parser read both to
+// their end: the stop's deadline aborts its parser without saying it was cut
+// while recording what it had read, even once it has read the one stream it
+// has to its end.
+func TestRun_AtTheStopDeadlineSaysNoCutForASessionWithoutBothStreams(t *testing.T) {
+	t.Parallel()
+	client := newBehindProducer()
+	go client.run([]string{"request"})
+	aborted := make(chan struct{})
+	var abortOnce sync.Once
+	core, logs := observer.New(zapcore.DebugLevel)
+	s := New(Config{Logger: zap.New(core), HangBudget: time.Hour, FoldWindow: time.Hour})
+	s.SessionOnAbort = func() { abortOnce.Do(func() { close(aborted) }) }
+	deadline := make(chan struct{})
+	s.StopDeadline = deadline
+	sess := &Session{ClientStream: client.fc, ClientConnID: "42"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	read := make(chan struct{})
+	unpark := make(chan struct{})
+	defer close(unpark)
+	resc := make(chan Result, 1)
+	go func() {
+		resc <- s.Run(ctx, func(context.Context, *Session) error {
+			cancel() // the stop
+			for {
+				if _, err := sess.ClientStream.ReadChunk(); err != nil {
+					break
+				}
+			}
+			close(read)
+			<-unpark // it waits on something else
+			return nil
+		}, sess)
+	}()
+	<-read
+	close(deadline)
+	var res Result
+	select {
+	case res = <-resc:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("Run did not return once the stop's deadline had passed")
+	}
+	select {
+	case <-aborted:
+	default:
+		t.Fatalf("Run returned %+v without aborting the parser", res)
+	}
+	if res.Status != StatusCanceled || !res.FallthroughToPassthrough {
+		t.Fatalf("result %+v, want canceled and retired", res)
+	}
+	if n := logs.FilterMessage(FoldCutWarnMsg).Len(); n != 0 {
+		t.Fatalf("%d WARNs of a cut fold for a session without both streams", n)
+	}
+}
+
 // The process clock moves only while held: the fold watch holds it while it
 // watches (the watchdog, with nothing unread, does not), and lets it go once
 // Run returns.
@@ -322,15 +506,18 @@ func TestRun_TheFoldWatchHoldsTheProcessClockWhileItWatches(t *testing.T) {
 	client, dest := newBehindProducer(), newBehindProducer()
 	go client.run([]string{"request"})
 	go dest.run([]string{"answer"})
-	// An hour's budget: the watchdog's next look, which would hold the
-	// clock for what the parser had not read yet, comes after the test.
+	// The watchdog holds the clock only while it has work to measure:
+	// before the stop, none pending; from the stop, nothing unread, as the
+	// parser reads both its streams to their end before it. An hour's
+	// budget: its next look comes after the test.
 	s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour})
 	sess := &Session{ClientStream: client.fc, DestStream: dest.fc}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	res := s.Run(ctx, func(context.Context, *Session) error {
-		cancel()
 		readBoth(sess)
+		cancel() // the stop
+
 		bound := time.Now().Add(time.Minute) // only turns a hang into a failure
 		for holds.Load() != 1 {
 			if time.Now().After(bound) {
