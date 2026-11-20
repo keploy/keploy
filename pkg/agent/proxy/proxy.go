@@ -6117,7 +6117,7 @@ func (p *Proxy) noteAnswerDropped(err error) {
 	kind := ""
 	if errors.As(err, &pe) && pe.MismatchReport != nil {
 		if r := pe.MismatchReport; models.AnsweredAsAnother(r.Answer) {
-			p.logger.Warn("a call answered with another call's recording was not kept for its test's report: its window already holds as many such calls as it keeps, and the replay is not counted as proven on them",
+			p.logger.Warn("a call answered with another call's recording was not kept for its test's report: its window already holds as many such calls as it keeps, so the report lists fewer of them than were served; no test verdict reads them, and a mock replay is not counted as proven on the ones it holds",
 				zap.String("answer", r.Answer), zap.String("recorded", r.ClosestMock), zap.Int64("dropped", n),
 				zap.Int("kept", maxPendingMockErrors))
 			return

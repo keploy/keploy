@@ -42,6 +42,13 @@ func (c servedCall) answers() []*models.MockMismatchReport {
 // a connection of its own, with a reporter that keeps every report.
 func serveReported(t *testing.T, h *HTTP, db *mockMemDb, raw string) servedCall {
 	t.Helper()
+	return serveReportedWith(t, h, db, models.OutgoingOptions{}, raw)
+}
+
+// serveReportedWith is serveReported under opts (keploy.yml's noise, the
+// noise mode).
+func serveReportedWith(t *testing.T, h *HTTP, db *mockMemDb, opts models.OutgoingOptions, raw string) servedCall {
+	t.Helper()
 	var mu sync.Mutex
 	var reports []*models.MockMismatchReport
 	app, proxy := tcpPair(t)
@@ -56,7 +63,7 @@ func serveReported(t *testing.T, h *HTTP, db *mockMemDb, raw string) servedCall 
 				mu.Unlock()
 			}
 		})
-		return h.decodeHTTP(ctx, []byte(raw), proxy, &models.ConditionalDstCfg{Addr: "127.0.0.1:1"}, db, models.OutgoingOptions{})
+		return h.decodeHTTP(ctx, []byte(raw), proxy, &models.ConditionalDstCfg{Addr: "127.0.0.1:1"}, db, opts)
 	})
 	_ = app.SetReadDeadline(time.Now().Add(30 * time.Second))
 	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
@@ -162,8 +169,8 @@ func TestTheClosestOfSeveralBodiesIsReportedAsAnsweredWithAnotherCallsRecording(
 		t.Fatalf("the call got %d %q, want the closest recording served", got.status, got.body)
 	}
 	a := got.answers()
-	if len(a) != 1 || a[0].Answer != models.AnswerClosestBody || !slices.Equal(a[0].Differs, []string{"body"}) {
-		t.Fatalf("the call's answer reports are %+v, want one %q differing at body", a, models.AnswerClosestBody)
+	if len(a) != 1 || a[0].Answer != models.AnswerClosestBody || !slices.Equal(a[0].Differs, []string{"body.page"}) {
+		t.Fatalf("the call's answer reports are %+v, want one %q differing at body.page", a, models.AnswerClosestBody)
 	}
 	if !strings.HasPrefix(a[0].ClosestMock, "mock-search-") || !strings.Contains(a[0].Diff, "POST /search was answered with the recording of POST /search") {
 		t.Errorf("the report names %q and says %q", a[0].ClosestMock, a[0].Diff)
@@ -260,7 +267,7 @@ func reportedServedAnother(input *req, x *models.Mock, answer string, call integ
 			got = append(got, w.MismatchReport())
 		}
 	})
-	reportServedAnother(ctx, input, x, answer, call)
+	reportServedAnother(ctx, input, x, servedAs{answer: answer}, call)
 	return got
 }
 

@@ -541,7 +541,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					var how servedAs
 					ok, stub, diag, err = h.matchServing(reqCtx, &how, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
 					if ok && err == nil && !proven {
-						reportServedAnother(reqCtx, input, stub, how.answer, call)
+						reportServedAnother(reqCtx, input, stub, how, call)
 					}
 					// A call that missed before the background could answer
 					// it asks now whether it is one of the open test's own

@@ -196,12 +196,13 @@ type TestResult struct {
 	// A later call that sent another value failed the test case as a miss.
 	// Absent when none was bound.
 	Variables []VariableBinding `json:"variables,omitempty" yaml:"variables,omitempty"`
-	// Answers are, under the proven switch, the answered calls
-	// (UnmatchedCall.Answer) charged to this test's window, or to the gap
-	// before it, as misses are: a pairing record's full round
-	// made, a background write answered by its kind. They never fail the
-	// test, nor land in FailureInfo.UnmatchedCalls. Absent when there is
-	// none.
+	// Answers are the answered calls (UnmatchedCall.Answer) charged to this
+	// test's window, or to the gap before it, as misses are: under the
+	// proven switch a pairing record's full round made and a background
+	// write answered by its kind; with it off a call answered with the
+	// recording of another call (AnsweredAsAnother: other_id,
+	// closest_body). They never fail the test, nor land in
+	// FailureInfo.UnmatchedCalls. Absent when there is none.
 	Answers []UnmatchedCall `json:"answers,omitempty" yaml:"answers,omitempty"`
 	// Rewritten are the places of the expected response a replay hook
 	// rewrote for this send before the answer was compared with it
@@ -945,9 +946,12 @@ const (
 	AnswerOtherID = "other_id"
 	// AnswerClosestBody: with the proven switch off, the call was answered
 	// with the recording whose request body is closest to the call's, of the
-	// recordings of its method and path, none of whose bodies is the call's:
-	// the recording of another call. ClosestMock names the recording, Diff
-	// names its call, and Differs holds "body".
+	// recordings of its method and path, none of whose bodies is the call's
+	// outside its noise (keploy.yml's request-body noise and the noise the
+	// record learned; JSON compared field by field): the recording of
+	// another call. ClosestMock names the recording, Diff names its call,
+	// and Differs the body fields the call differs from it at ("body.ts"),
+	// or "body" for bodies with no fields to compare.
 	AnswerClosestBody = "closest_body"
 )
 

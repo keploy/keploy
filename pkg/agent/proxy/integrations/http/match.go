@@ -561,9 +561,20 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 			shortListed = held
 		}
 
+		// A recording whose body is the call's outside the noise keploy.yml
+		// declares and the record learned (sameCallBodies: JSON field by
+		// field, so key order and spacing are no difference) is a recording
+		// of this very call: the fuzzy fallback chooses among those alone,
+		// and the call is served as its own. Only when none is, the closest
+		// of several recordings is a guess between calls.
+		pool := shortListed
+		sameCall := h.sameCallBodies(shortListed, input.body, userBodyNoise)
+		if len(sameCall) > 0 {
+			pool = sameCall
+		}
 		h.Logger.Debug("Performing fuzzy match for req buffer")
 		// Perform fuzzy match on the request
-		isMatched, bestMatch, err := h.performFuzzyMatch(ctx, shortListed, input.body)
+		isMatched, bestMatch, err := h.performFuzzyMatch(ctx, pool, input.body)
 		if err != nil {
 			return false, nil, nil, err
 		}
@@ -579,12 +590,16 @@ func (h *HTTP) matchCascade(ctx context.Context, how *servedAs, input *req, mock
 			if !claimed {
 				continue
 			}
-			// The closest of several recordings is a guess between calls:
-			// none has the call's body byte for byte (the exact-body pass
-			// above serves that one), so it is another call's recording.
-			// One recording left is the call's method, path and body
-			// shape, as the body-schema pass above serves it.
-			noteServedAs(how, idVaried, len(shortListed) > 1)
+			// The closest of several recordings, none of which is the
+			// call's outside noise (sameCall), is a guess between calls: it is
+			// another call's recording, and the report names the body
+			// fields it differs at (bodyFieldsDiffering). One recording
+			// left is the call's method, path and body shape, as the
+			// body-schema pass above serves it.
+			noteServedAs(how, idVaried, len(sameCall) == 0 && len(shortListed) > 1)
+			if how != nil && how.answer == models.AnswerClosestBody {
+				how.fields = h.bodyFieldsDiffering(bestMatch, input.body, userBodyNoise)
+			}
 			return true, served, nil, nil
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: shortListed, pool: comparedPool}, nil
