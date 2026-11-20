@@ -3,18 +3,25 @@ package routes
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A stop signal waits while a recording's client holds a frame stream open,
@@ -442,5 +449,204 @@ func TestHandleStopNoticeAnswersOnceTheStopIsAnnounced(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("a wait made after the stop answered %d, want 204 at once", resp.StatusCode)
+	}
+}
+
+// recordingOnTheAgent binds the agent's mock manager to a recording's mock and
+// mapping streams, with its log observed, and returns them with the func that
+// ends the mapping stream's request (its client read the marker and went).
+// The manager records again when the test ends.
+func recordingOnTheAgent(t *testing.T) (out chan *models.Mock, mappings chan models.TestMockMapping, endStream func(), logs *observer.ObservedLogs) {
+	t.Helper()
+	core, logs := observer.New(zapcore.DebugLevel)
+	g := syncmgr.Get()
+	g.SetLogger(zap.New(core))
+	out = make(chan *models.Mock, 64)
+	g.SetOutputChannel(out)
+	g.SetFirstRequestSignaled()
+	streamCtx, endStream := context.WithCancel(context.Background())
+	mappings = make(chan models.TestMockMapping) // its client reads none past its marker
+	g.SetMappingChannel(streamCtx, mappings)
+	t.Cleanup(func() {
+		endStream()
+		g.SetMappingChannel(context.Background(), nil)
+		syncmgr.Get().StartRecordSession()
+		g.SetLogger(nil)
+	})
+	return out, mappings, endStream, logs
+}
+
+// tokenStream is a frame stream's request carrying its recording's token.
+func tokenStream(tok string) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/agent/outgoing", nil)
+	r.Header.Set(models.StreamEndTokenHeader, tok)
+	return r
+}
+
+// callAt is a mock of a call the app made at at, one a test's window owns.
+func callAt(at time.Time) *models.Mock {
+	return &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "mocks"},
+		ReqTimestampMock: at,
+		ResTimestampMock: at.Add(time.Millisecond),
+	}}
+}
+
+// served captures one exchange the app served at at through the ingress's
+// capture hook, and returns what it handed on, if anything.
+func served(t *testing.T, at time.Time) []*models.TestCase {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "http://app:8080/q", strings.NewReader(`{"k":1}`))
+	resp := &http.Response{StatusCode: http.StatusOK, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+		Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}
+	tcs := make(chan *models.TestCase, 1)
+	conn.Capture(context.Background(), zap.NewNop(), tcs, req, resp, at, at.Add(5*time.Millisecond), models.IncomingOptions{}, false, true, 8080)
+	close(tcs)
+	var got []*models.TestCase
+	for tc := range tcs {
+		got = append(got, tc)
+	}
+	return got
+}
+
+// A sidecar's app serves on after its recording's stop. Once the recording's
+// client has read all it was owed and asked the agent to end its streams, the
+// agent captures nothing of it: no test case, no mock, no mapping, and no
+// ERROR. Before, it captured on until it exited, and each mapping of a
+// request served after the stop queued for the stream whose client had read
+// its marker and gone, and was lost with one ERROR each ("mapping stream
+// closed with mappings still queued"). A recording that starts after it
+// captures from its start.
+func TestTheAgentCapturesNothingOnceARecordingsClientEndsItsStreams(t *testing.T) {
+	out, mappings, endStream, logs := recordingOnTheAgent(t)
+	tok := rand.Text()
+	_, closed := streamEnding(tokenStream(tok))
+	endRecordingStreams(tok) // its client read all it was owed
+	closed()
+	endStream()
+
+	at := time.Now()
+	if d := syncmgr.Get().AddMock(callAt(at.Add(time.Millisecond))); !d.Dropped() {
+		t.Fatal("a call the app made after its recording ended was captured")
+	}
+	if got := served(t, at); len(got) != 0 {
+		t.Fatalf("a request the app served after its recording ended was made %d test case(s)", len(got))
+	}
+	syncmgr.Get().ResolveRange(at, at.Add(5*time.Millisecond), "test-after", true, true)
+	time.Sleep(100 * time.Millisecond) // a drainer that would say its loss has had its time
+	select {
+	case m := <-mappings:
+		t.Fatalf("a request served after the recording ended was mapped: %+v", m)
+	default:
+	}
+	if n := len(out); n != 0 {
+		t.Fatalf("%d mocks went to the ended recording's mock stream", n)
+	}
+	for _, e := range logs.All() {
+		if e.Level >= zapcore.ErrorLevel {
+			t.Fatalf("the app's traffic after its recording ended was said at %s: %q", e.Level, e.Message)
+		}
+	}
+
+	next := rand.Text()
+	_, closedNext := streamEnding(tokenStream(next)) // the next recording's stream attached
+	defer closedNext()
+	if d := syncmgr.Get().AddMock(callAt(time.Now())); d.Dropped() {
+		t.Fatalf("the next recording's call was dropped: %q", d)
+	}
+	if got := served(t, time.Now()); len(got) != 1 {
+		t.Fatalf("the next recording made %d test cases of a request it served, want 1", len(got))
+	}
+}
+
+// A recording's client that stopped but never asked for the markers (its
+// drain gave up, or it went away mid-stop) ends the capture as its last
+// stream closes: no client resumes a stopped recording. One whose streams
+// close with no stop asked (a client that died mid-recording, and comes
+// back) leaves the capture on.
+func TestARecordingsStreamsClosingAfterItsStopEndItsCapture(t *testing.T) {
+	recordingOnTheAgent(t)
+	tok := rand.Text()
+	_, closedMocks := streamEnding(tokenStream(tok))
+	_, closedMappings := streamEnding(tokenStream(tok))
+	syncmgr.Get().BacklogBefore(time.Now()) // its stop asked what the agent holds
+	closedMocks()
+	if d := syncmgr.Get().AddMock(callAt(time.Now())); d.Dropped() {
+		t.Fatalf("the capture ended while one of the recording's streams was still open: %q", d)
+	}
+	closedMappings()
+	if d := syncmgr.Get().AddMock(callAt(time.Now())); !d.Dropped() {
+		t.Fatal("the agent captured on after a stopped recording's last stream closed")
+	}
+
+	again := rand.Text()
+	_, closedAgain := streamEnding(tokenStream(again)) // a recording no stop has asked of
+	closedAgain()
+	if d := syncmgr.Get().AddMock(callAt(time.Now())); d.Dropped() {
+		t.Fatalf("a recording whose streams closed with no stop asked stopped its capture: %q", d)
+	}
+}
+
+// One recording's end leaves the capture of the recording whose streams
+// attached after it as it is.
+func TestARecordingsEndLeavesTheNextOnesCapture(t *testing.T) {
+	recordingOnTheAgent(t)
+	old, current := rand.Text(), rand.Text()
+	_, closedOld := streamEnding(tokenStream(old))
+	defer closedOld()
+	_, closedCurrent := streamEnding(tokenStream(current))
+	defer closedCurrent()
+	endRecordingStreams(old)
+	if d := syncmgr.Get().AddMock(callAt(time.Now())); d.Dropped() {
+		t.Fatalf("an older recording's end stopped the current one's capture: %q", d)
+	}
+}
+
+// An agent stopping after its recording ended says once how much of the app's
+// traffic it left uncaptured, as its HTTP server shuts down: a sidecar's
+// proxyless agent stops without the proxy's teardown (CloseOutChan). When
+// both run, it is said once.
+func TestAnAgentSaysOnceWhatItLeftUncapturedAsItStops(t *testing.T) {
+	_, _, endStream, logs := recordingOnTheAgent(t)
+	tok := rand.Text()
+	_, closed := streamEnding(tokenStream(tok))
+	endRecordingStreams(tok)
+	closed()
+	endStream()
+	served(t, time.Now()) // the app serves on: not captured
+
+	holder, port, _ := grabPort(t)
+	_ = holder.Close()
+	ctx, stop := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		StartAgentServer(ctx, zap.NewNop(), port, false, http.NotFoundHandler())
+	}()
+	deadline := time.Now().Add(time.Minute) // only turns a hang into a failure
+	for {
+		if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second); err == nil {
+			_ = c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the agent's server never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stop() // the agent stops
+	<-stopped
+	said := func() []observer.LoggedEntry {
+		return logs.FilterMessageSnippet("no recording took the application's traffic").All()
+	}
+	for time.Now().Before(deadline) && len(said()) == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := said(); len(got) != 1 || got[0].ContextMap()["requests_not_captured"] != uint64(1) {
+		t.Fatalf("as the agent stopped it said %v, want once: 1 request not captured", got)
+	}
+	syncmgr.Get().CloseOutChan() // the proxy's teardown, too
+	if n := len(said()); n != 1 {
+		t.Fatalf("with both teardowns it was said %d times, want once", n)
 	}
 }

@@ -96,6 +96,9 @@ type drainOpts[T any] struct {
 	// recording's stream end, for its end by the agent's marker (streamsEnd).
 	stream models.FrameStream
 	ends   *streamsEnd
+	// cut is the stop's cut-off, which the recording's other drains judge
+	// their frames by too (stopCut); nil: when this drain sees the stop.
+	cut *stopCut
 }
 
 // beforeHand runs o.handing for a frame about to be handed over, and returns
@@ -178,7 +181,7 @@ func forwardUntilDrained[T any](ctx context.Context, r *Recorder, stream <-chan 
 	var quietUntil time.Time
 	// stopCame starts the drain: the stop has come, now.
 	stopCame := func() {
-		stoppedAt = time.Now()
+		stoppedAt = o.cut.at()
 		quietUntil = stoppedAt.Add(quiet)
 		resetTimer(idle, quiet)
 	}
@@ -726,6 +729,9 @@ type Recorder struct {
 	// cover, are not counted. Whether one came since the look that said the
 	// agent held something decides if a loss is certain (agentEndedDrain).
 	heldFrames atomic.Uint64
+	// unmapped counts the mapping entries this recording settled with no
+	// mock, by why: its stop says them once (sayUnmapped).
+	unmapped unmappedMocks
 	// mappingsStreamed counts the test-mock mappings the agent handed over
 	// this recording. A recording made without --sync that the agent mapped
 	// itself (enterprise's static dedup resolves its windows in the agent)
@@ -1386,18 +1392,22 @@ func (r *Recorder) addSettled(res *mappingResolution, test, tempID string, entry
 			// The test is deleted at the recording's end (and counted short
 			// there only if its delete fails): no loss to report per mock.
 			r.logger.Debug("not waiting for a revoked test's mock",
-				zap.String("test", test),
 				zap.String("tempMockID", tempID))
 			return
 		}
-		r.logger.Error("Failed to correlate mock mapping",
-			zap.String("test", test),
+		// Said once, counted by why, at the recording's stop (sayUnmapped):
+		// a mapping names about a hundred mocks, and a line for each (an
+		// ERROR, with a stack) pushed everything else out of the log. No
+		// test name: the agent's can be a request's own header.
+		r.unmapped.add(why)
+		r.logger.Debug(unmappedEntryLog,
 			zap.String("tempMockID", tempID),
+			zap.String("why", lossReasonName(why)),
 			zap.String("next_step", lossNextStep(why)))
 	}
 }
 
-// lossNextStep is what a "Failed to correlate" line says of why.
+// lossNextStep is what an entry's debug line says of why it has no mock.
 func lossNextStep(why lossReason) string {
 	switch why {
 	case reasonTaken:
@@ -1432,7 +1442,6 @@ func (r *Recorder) resolveMappingEntries(mapping models.TestMockMapping, correla
 		if c.capFirst {
 			r.logger.Warn("too many mapping entries are waiting for their mocks: entries past the cap are not held, and each test that names one is recorded without that mock",
 				zap.Int("maxHeldMappingEntries", maxHeldMappingEntries),
-				zap.String("test", mapping.TestName),
 				zap.String("next_step", "the agent is naming mocks it does not send; re-record the test set and report it"))
 		}
 		r.addSettled(&res, mapping.TestName, tempID, c.entry, c.fate, c.why, asyncMockIDs)
@@ -2225,8 +2234,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					zap.Int("testsWithShortMockPool", shortPoolTests),
 					zap.Int("mocksUncorrelated", shortPoolMocks),
 					zap.String("testSetID", newTestSetID),
-					zap.String("next_step", "ensure the mapping store is enabled; each test's \"Failed to correlate mock mapping\" line says why its mock is missing; re-record the test set if this count is non-trivial"))
+					zap.String("next_step", "ensure the mapping store is enabled; the line on mappings that named mocks the recording does not hold says why they are missing; re-record the test set if this count is non-trivial"))
 			}
+			r.sayUnmapped(newTestSetID)
 			if droppedSnapshot > 0 {
 				r.logger.Warn("recording finished with mocks dropped; the tests that owned them were revoked rather than recorded with a short mock pool",
 					zap.Int("mocksDropped", droppedSnapshot),
@@ -3194,6 +3204,13 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// that only their forwarders end. framesDrained closes when both have
 	// ended: the mapping drain waits for it (see MAPPINGS).
 	framesDrained := make(chan struct{})
+	// The stop's cut-off, one for the three drains (stopCut), fixed as the
+	// stop comes: a drain that is handing a frame to a consumer still
+	// persisting the last one sees the stop only once the consumer takes
+	// it, and fixed by the first drain to look, the cut came after every
+	// request made meanwhile, and those were recorded.
+	cut := &stopCut{}
+	context.AfterFunc(ctx, func() { cut.at() })
 	// Under docker compose the app runs on while the agent drains (Start's
 	// stop): what it serves after the stop is not recorded. postStopTests
 	// names the test cases left out for it, and recordedTests those handed to
@@ -3267,6 +3284,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			kind:        "test cases",
 			stream:      models.TestCaseStream,
 			ends:        ends,
+			cut:         cut,
 		}
 		if appRunsOn {
 			// A test case the app served after the stop is not part of the
@@ -3414,6 +3432,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			kind:        "mocks",
 			stream:      models.MockStream,
 			ends:        ends,
+			cut:         cut,
 		}
 		if appRunsOn {
 			// Traffic the app serves after the stop is not recorded: a mock
@@ -3465,6 +3484,14 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// is through.
 		mapCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
+		// leftOut counts the mappings of requests made after the stop that
+		// were left out (below): said once, at debug, with no test name.
+		leftOut := 0
+		defer func() {
+			if leftOut > 0 {
+				r.logger.Debug("left out the mappings of requests the app served after the stop", zap.Int("mappings", leftOut))
+			}
+		}()
 
 		// lastMapping is when the stream last delivered a mapping, or a
 		// hand-over to the consumer ended (UnixNano); handing is set while one
@@ -3644,13 +3671,20 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 					return nil
 				}
 				if appRunsOn && ctx.Err() != nil {
-					// A mapping of a test case served after the stop is not
-					// recorded. Once the test-case drain is over, every test
-					// case recorded has been handed on, so a mapping of any
-					// other one is left out.
+					// A mapping of a request made after the stop is not
+					// recorded: one the agent dated after the stop's cut-off
+					// (the one the test-case drain judges by), or one of a
+					// test case served after it. Once the test-case drain is
+					// over, every test case recorded has been handed on, so a
+					// mapping of any other one is left out too, and so is one
+					// that names no test (an unnamed test case is named only
+					// as it is saved: no mapping can name it). None of these
+					// is waited for or moves the quiet bound: an app that goes
+					// on serving after the stop does not hold its save open.
 					_, after := postStopTests.Load(m.TestName)
 					_, recorded := recordedTests.Load(m.TestName)
-					if after || (framesDone && !recorded) {
+					if mappingAfterStop(m, cut.at()) || after || (framesDone && (!recorded || m.TestName == "")) {
+						leftOut++
 						continue
 					}
 				}

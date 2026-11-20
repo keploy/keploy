@@ -204,3 +204,53 @@ func TestAMappingForAReplacedStreamDoesNotHoldTheNewOnes(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// A recording that stops while its app goes on serving judges each mapping by
+// when its request was made, as it judges test cases and mocks: the agent
+// dates a test's own mapping by the test's request, and a later delta to a
+// past test's mapping by the earliest mock it adds, the times it owes each to
+// a stop by (BacklogBefore).
+func TestMappingsAreDatedAsTheyAreOwed(t *testing.T) {
+	m := New(nil)
+	out := make(chan *models.Mock, 16)
+	m.SetOutputChannel(out)
+	m.SetFirstRequestSignaled()
+	mappings := make(chan models.TestMockMapping, 8)
+	m.SetMappingChannel(context.Background(), mappings)
+	mock := func(at time.Time) *models.Mock {
+		return &models.Mock{Kind: models.Mongo, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "mocks"},
+			ReqTimestampMock: at,
+			ResTimestampMock: at.Add(time.Millisecond),
+		}}
+	}
+	next := func() models.TestMockMapping {
+		t.Helper()
+		select {
+		case got := <-mappings:
+			return got
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatal("no mapping came")
+			return models.TestMockMapping{}
+		}
+	}
+
+	base := time.Now().Add(-2 * time.Second)
+	start, end := base, base.Add(5*time.Millisecond)
+	m.AddMock(mock(base.Add(time.Millisecond)))
+	m.ResolveRange(start, end, "test-1", true, true)
+	own := next()
+	if own.TestName != "test-1" || !own.RequestedAt.Equal(start) {
+		t.Fatalf("test-1's own mapping is %+v; want it dated by its request, %v", own, start)
+	}
+
+	// A mock of test-1's request decoded after its window closed is binned
+	// into it when the next request resolves: a delta to test-1's mapping.
+	late := base.Add(3 * time.Millisecond)
+	m.AddMock(mock(late))
+	m.ResolveRange(base.Add(100*time.Millisecond), base.Add(105*time.Millisecond), "test-2", true, true)
+	delta := next()
+	if delta.TestName != "test-1" || !delta.RequestedAt.Equal(late) {
+		t.Fatalf("the late delta to test-1's mapping is %+v; want it dated by its mock, %v", delta, late)
+	}
+}

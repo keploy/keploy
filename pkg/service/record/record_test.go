@@ -843,7 +843,7 @@ func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
 		t.Fatal("recorder never consumed the test case")
 	}
 	// "ghost" was never streamed as a mock, so it never correlates — the
-	// pre-existing "Failed to correlate mock mapping" path.
+	// pre-existing unmapped-entry path (addSettled).
 	select {
 	case f.mappings <- models.TestMockMapping{TestName: "test-1", MockIDs: []string{"mock-1", "ghost"}}:
 	case <-time.After(10 * time.Second):

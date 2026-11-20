@@ -37,8 +37,8 @@ const (
 	fateLost
 )
 
-// lossReason is why an entry settled with no mock (fateUnknown): what its
-// "Failed to correlate" line says.
+// lossReason is why an entry settled with no mock (fateUnknown): what its debug
+// line and the stop's summary of them (sayUnmapped) say.
 type lossReason int
 
 const (
