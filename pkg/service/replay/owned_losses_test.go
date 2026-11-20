@@ -248,3 +248,85 @@ func TestOwnedLossesASetLeftUnappliedReachNoLaterSet(t *testing.T) {
 		})
 	}
 }
+
+// composeOwnedInstr is a docker compose stack's agent (composeInstr) whose
+// takes are o's (prOwnedInstr).
+type composeOwnedInstr struct {
+	*composeInstr
+	o *prOwnedInstr
+}
+
+func (c *composeOwnedInstr) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	return c.o.GetCaptureLosses(ctx)
+}
+
+func (c *composeOwnedInstr) TakeOwnedCaptureLosses(ctx context.Context) ([]models.OwnedCaptureLoss, error) {
+	return c.o.TakeOwnedCaptureLosses(ctx)
+}
+
+// TestOwnedLossesASetLeftUnappliedReachNoLaterSet under docker compose, a
+// stack per set and one kept across sets: the set's session is begun on the
+// agent in the stack (beginSession), so a set whose post-script failed takes
+// once more as it returns, and says the loss its cut-short end owned, lost or
+// untold, naming its test case. None reaches the next set's end.
+func TestOwnedLossesAComposeSetLeftUnappliedReachNoLaterSet(t *testing.T) {
+	for _, kept := range []bool{false, true} {
+		for _, c := range []struct {
+			name string
+			at   int
+			kind models.CaptureLossKind
+		}{
+			{"taken at its last test case's end", 2, models.CaptureLossAppBytesLost},
+			{"taken as it returns", 3, models.CaptureLossAppBytesLost},
+			{"an untold close, taken at its last test case's end", 2, models.CaptureLossAppBytesUntold},
+			{"an untold close, taken as it returns", 3, models.CaptureLossAppBytesUntold},
+		} {
+			name := "a stack per set/" + c.name
+			if kept {
+				name = "a reused stack/" + c.name
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, "1")
+				ci := &composeInstr{}
+				h := composeHarness(t, ci) // two test cases
+				// As Start runs them: keploy mocking the dependencies reuses
+				// the stack across sets, and a stack per set mocks nothing.
+				h.replayer.config.Test.Mocking = kept
+				h.replayer.testSetConf = postScriptFails{}
+				core, logs := observer.New(zap.DebugLevel)
+				h.replayer.logger = zap.New(core)
+				loss := models.CaptureLoss{Kind: c.kind, Count: 1,
+					What: "from 127.0.0.1:50912, written in test-2, where keploy's wait for them was cut short"}
+				o := &prOwnedInstr{prLossInstr: &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil}},
+					at: c.at, owned: []models.OwnedCaptureLoss{{Test: "test-2", Loss: loss}}}
+				h.replayer.instrumentation = &composeOwnedInstr{composeInstr: ci, o: o}
+				h.replayer.markPIDMaps(context.Background())
+				status, err := h.replayer.RunTestSet(context.Background(), "test-set-0", "test-run-0", kept)
+				if status != models.TestSetStatusFaultScript || err == nil {
+					t.Fatalf("set %q, %v; want %q and the post-script's error", status, err, models.TestSetStatusFaultScript)
+				}
+				o.lmu.Lock()
+				takes := o.takes
+				o.lmu.Unlock()
+				if takes != 3 {
+					t.Fatalf("%d takes, want 3: one at each test case's end, and one as the set returns", takes)
+				}
+				var said []map[string]any
+				for _, e := range logs.All() {
+					if m := e.ContextMap(); m["test-case"] != nil && e.Level == zap.ErrorLevel {
+						said = append(said, m)
+					}
+				}
+				if len(said) != 1 || said[0]["test-set"] != "test-set-0" || said[0]["test-case"] != "test-2" ||
+					said[0]["kind"] != string(c.kind) || !strings.Contains(said[0]["what"].(string), "50912") {
+					t.Fatalf("the set's log said %v; want one error naming test-set-0's test-2 and the loss", said)
+				}
+				next := []models.TestResult{{TestCaseID: "test-1", Status: models.TestStatusPassed}, {TestCaseID: "test-2", Status: models.TestStatusFailed}}
+				set, err := h.replayer.applyOwnedLosses(next)
+				if err != nil || len(set) != 0 || len(next[1].FailureInfo.CaptureIncomplete) != 0 {
+					t.Fatalf("the next set's end: %v, %v, test-2 names %v; want nothing: an earlier set's loss is no later set's", set, err, next[1].FailureInfo.CaptureIncomplete)
+				}
+			})
+		}
+	}
+}
