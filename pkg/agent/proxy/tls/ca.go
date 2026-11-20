@@ -1733,8 +1733,8 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 //     agent has no better signal (pre-registration boot, or the
 //     auto-detector returned empty).
 //   - non-empty: use $javaHome/bin/keytool as the executable and
-//     $javaHome/lib/security/cacerts as the target keystore, bypassing
-//     PATH. This is the path that fixes the SDKMAN/Maven-wrapper
+//     $javaHome's cacerts (jdkCacerts: lib/security, or jre/lib/security
+//     on JDK 8) as the target keystore, bypassing PATH. This is the path that fixes the SDKMAN/Maven-wrapper
 //     divergence described at the top of java_detect.go.
 //
 // The split matters because keytool reads and writes cacerts using its
@@ -1787,9 +1787,12 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 		keytoolBin = "keytool"
 	}
 
-	// Assuming modern Java structure (without /jre/).
-	// Use filepath.Join for proper cross-platform path handling (Windows uses backslashes).
-	cacertsPath := filepath.Join(javaHome, "lib", "security", "cacerts")
+	// JDK 8 keeps its keystore under jre/: with no keystore, no keytool
+	// runs, since keytool -import would fail on the missing directory.
+	cacertsPath, found := jdkCacerts(javaHome)
+	if !found {
+		return javaInstall{}, fmt.Errorf("no cacerts keystore under %s (looked in lib/security and jre/lib/security)", javaHome)
+	}
 	// You can modify these as per your requirements
 	storePass := "changeit"
 
@@ -1819,6 +1822,21 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 	logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
 	logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
 	return jdk, nil
+}
+
+// jdkCacerts returns the cacerts keystore of the JDK or JRE at home: JDK 9+
+// and a JRE keep it in <home>/lib/security, JDK 8 in <home>/jre/lib/security
+// (a JDK 8 root has no lib/security). found=false when neither file exists.
+func jdkCacerts(home string) (path string, found bool) {
+	for _, p := range []string{
+		filepath.Join(home, "lib", "security", "cacerts"),
+		filepath.Join(home, "jre", "lib", "security", "cacerts"),
+	} {
+		if fileExists(p) {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // installWindowsCA installs the CA certificate into a Windows trust store.
