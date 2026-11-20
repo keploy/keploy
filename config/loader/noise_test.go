@@ -2,6 +2,7 @@ package loader
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -139,6 +140,15 @@ func TestGlobalNoiseValuesAreDecodedAsViperDecodesThem(t *testing.T) {
 		{name: "an entry that is a map", body: "test:\n  globalNoise:\n    global:\n      body: {id: {x: 1}}\n", wantErr: true},
 		{name: "globalNoise a string", body: "test:\n  globalNoise: x\n", wantErr: true},
 		{name: "test-sets a list", body: "test:\n  globalNoise:\n    test-sets: [1]\n", wantErr: true},
+		// A bucket that is a list over a bucket that is a map: viper keeps
+		// the map, and keploy reads it.
+		{name: "a list over a map", body: "test:\n  globalNoise:\n    global:\n      body: {id: []}\n", override: "test:\n  globalNoise:\n    global:\n      body: [a]\n"},
+		// A key that is not a string makes YAML's map a map[any]any: Body is
+		// still read as body.
+		{name: "a numeric bucket name", body: "test:\n  globalNoise:\n    global:\n      Body: {id: []}\n      5: {x: []}\n"},
+		{name: "globalNoise a string, an override without it", body: "test:\n  globalNoise: x\n", override: "test:\n  delay: 5\n", wantErr: true},
+		{name: "globalNoise a string, emptied by the override", body: "test:\n  globalNoise: x\n", override: "test:\n  globalNoise:\n"},
+		{name: "globalNoise a map, emptied by the override", body: "test:\n  globalNoise:\n    global:\n      body: {id: []}\n", override: "test:\n  globalNoise:\n"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := writeConfig(t, c.body, c.override)
@@ -179,5 +189,52 @@ func TestNoGlobalNoiseIsViperUnmarshal(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("read\n%#v\nviper reads\n%#v", got.Test.GlobalNoise, want.Test.GlobalNoise)
 		}
+	}
+}
+
+// Keys of one name in different cases -- two buckets, or globalNoise twice --
+// are merged, the same way every run, where viper keeps one of them, which
+// one varying with Go's map order. Mutation: keep one of them.
+func TestNamesInDifferentCasesAreMerged(t *testing.T) {
+	body := `test:
+  globalNoise:
+    global:
+      body: {a: []}
+      Body: {b: ["^x$"]}
+  GlobalNoise:
+    global:
+      url: {"^/Users/[0-9]+$": []}
+`
+	for i := 0; i < 5; i++ {
+		cfg, err := readWithFiles(writeConfig(t, body, ""))
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		want := config.GlobalNoise{
+			"body": {"a": {}, "b": {"^x$"}},
+			"url":  {"^/Users/[0-9]+$": {}},
+		}
+		if !reflect.DeepEqual(cfg.Test.GlobalNoise.Global, want) {
+			t.Fatalf("read %d: test.globalNoise.global read as\n%#v\nwant\n%#v", i, cfg.Test.GlobalNoise.Global, want)
+		}
+	}
+}
+
+// With no file read that has test.globalNoise, Unmarshal is viper's: a
+// test.globalNoise set on viper itself is decoded as viper holds it.
+// Mutation: put the files' (none) in its place.
+func TestNoiseSetOnViperOnlyIsViperUnmarshal(t *testing.T) {
+	f := New(newViper())
+	if err := f.Read(filepath.Join(writeConfig(t, "test:\n  delay: 9\n", ""), "keploy.yml")); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	f.v.Set("test.globalNoise.global.body", map[string]any{"id": []string{"x"}})
+	var cfg config.Config
+	if err := f.Unmarshal(&cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := config.GlobalNoise{"body": {"id": {"x"}}}
+	if !reflect.DeepEqual(cfg.Test.GlobalNoise.Global, want) || cfg.Test.Delay != 9 {
+		t.Fatalf("read globalNoise.global %#v, delay %d; want %#v, 9", cfg.Test.GlobalNoise.Global, cfg.Test.Delay, want)
 	}
 }
