@@ -16,14 +16,17 @@ import (
 // The keploy.yml entries a miss's hint names load as keploy.yml, through
 // keploy's own read of it (loader.Files, as PreProcessFlags reads it), with
 // each key as the hint writes it: a nested request-body field's dotted key,
-// one in an array, one with upper case, and a header. Before, keploy refused
-// keploy.yml for the first dotted key ("failed to unmarshal the config"), so
-// a user who followed the hint stopped every keploy command.
+// one in an array, one with upper case, an array's elements ("ids[]"), keys
+// YAML reads otherwise when written plain ("@type", "a: b", "#tag", ""), keys
+// that start with '-', '.' or '/', and a header. Before, keploy refused
+// keploy.yml for the first dotted key ("failed to unmarshal the config"),
+// and the hint wrote every key plain, so the hint for an array's elements
+// was no YAML: a user who followed the hint stopped every keploy command.
 func TestHintNoiseEntriesLoadAsKeployYml(t *testing.T) {
 	drift := func(path string) models.MockFieldDiff {
 		return models.MockFieldDiff{Path: path, Kind: models.DiffKindValueChanged, Expected: "a", Actual: "b"}
 	}
-	hint, ok := matchingNoise(ProtocolHTTP, []models.MockFieldDiff{drift("body.meta.ts"), drift("body.items.0.ts"), drift("body.Data.Id"), drift("header.X-Request-Id")}, noiseFacts{})
+	hint, ok := matchingNoise(ProtocolHTTP, []models.MockFieldDiff{drift("body.meta.ts"), drift("body.items.0.ts"), drift("body.Data.Id"), drift("body.ids[]"), drift("body.@type"), drift("body.a: b"), drift("body.#tag"), drift("body.-x"), drift("body.-"), drift("body..x"), drift("body./x"), drift("body.x_y"), drift("body."), drift("header.X-Request-Id")}, noiseFacts{})
 	if !ok {
 		t.Fatal("no noise offered")
 	}
@@ -32,7 +35,10 @@ func TestHintNoiseEntriesLoadAsKeployYml(t *testing.T) {
 		t.Fatalf("hint %q names %d keploy.yml entries; want 2", hint, len(entries))
 	}
 	got := loadGlobalNoise(t, entries)
-	for bucket, keys := range map[string][]string{"requestbody": {"meta.ts", "items.0.ts", "Data.Id"}, "header": {"x-request-id"}} {
+	if want := `requestbody: {meta.ts: [], items.0.ts: [], Data.Id: [], "ids[]": [], "@type": [], "a: b": [], "#tag": [], -x: [], -: [], .x: [], /x: [], x_y: [], "": []}`; !strings.Contains(hint, want) {
+		t.Errorf("hint %q does not write %s: plain only the keys YAML reads as written plain", hint, want)
+	}
+	for bucket, keys := range map[string][]string{"requestbody": {"meta.ts", "items.0.ts", "Data.Id", "ids[]", "@type", "a: b", "#tag", "-x", "-", ".x", "/x", "x_y", ""}, "header": {"x-request-id"}} {
 		for _, k := range keys {
 			if _, ok := got[bucket][k]; !ok {
 				t.Errorf("%s key %q is not in test.globalNoise.global as loaded: %v (hint %q)", bucket, k, got, hint)
