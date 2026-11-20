@@ -531,7 +531,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					if proven {
 						detect, correlate = false, true
 					}
-					ok, stub, diag, err = h.matchOf(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+					// With the switch off a call served the recording of
+					// another call (a path that differs at an id segment,
+					// or the closest of several bodies) is reported as
+					// answered so (reportServedAnother), never as its own.
+					// Under the switch the matcher serves only a call's own
+					// recording, and notes nothing.
+					matchCtx, how := withServedAs(reqCtx)
+					ok, stub, diag, err = h.matchOf(matchCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+					if ok && err == nil && !proven {
+						reportServedAnother(reqCtx, input, stub, how.answer)
+					}
 					// A call that missed before the background could answer
 					// it asks now whether it is one of the open test's own
 					// (integrations.OwnRepeat): one is matched again as it

@@ -1,0 +1,113 @@
+package mock
+
+import (
+	"fmt"
+	"io"
+	"strings"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+)
+
+// AnsweredAsAnother is one call of the run that the agent answered with the
+// recording of another call (models.AnsweredAsAnother), with the proven
+// switch off (Receipt.AnsweredAsAnother): Call and Answered say it whole, as
+// the receipt holds the run's calls; Mock is the recording served, Answer
+// how it was chosen (models.AnswerOtherID: its path differs at an id
+// segment; models.AnswerClosestBody: its body was the closest of several),
+// Differs where the call differs from it, without values, and NextStep how
+// to give the call its own recording.
+type AnsweredAsAnother struct {
+	Call     string   `yaml:"call" json:"call"`
+	Mock     string   `yaml:"mock" json:"mock"`
+	Answer   string   `yaml:"answer" json:"answer"`
+	Differs  []string `yaml:"differs,omitempty" json:"differs,omitempty"`
+	Answered string   `yaml:"answered,omitempty" json:"answered,omitempty"`
+	NextStep string   `yaml:"nextStep,omitempty" json:"nextStep,omitempty"`
+}
+
+// splitAnsweredAsAnother takes, out of a read of the calls no mock answered,
+// the calls the agent answered with another call's recording: they were
+// served, so they are no miss, and the replay counts them apart
+// (replayCounts.asAnother). Every other entry stays as it came, in order.
+func splitAnsweredAsAnother(read []models.UnmatchedCall) (misses, asAnother []models.UnmatchedCall) {
+	for _, c := range read {
+		if models.AnsweredAsAnother(c.Answer) {
+			asAnother = append(asAnother, c)
+			continue
+		}
+		misses = append(misses, c)
+	}
+	return misses, asAnother
+}
+
+// answeredAsAnotherReceipt is the receipt's account of calls
+// (Receipt.AnsweredAsAnother); nil for none.
+func answeredAsAnotherReceipt(calls []models.UnmatchedCall) []AnsweredAsAnother {
+	var out []AnsweredAsAnother
+	for _, c := range calls {
+		out = append(out, AnsweredAsAnother{
+			Call:     c.ActualSummary,
+			Mock:     c.ClosestMock,
+			Answer:   c.Answer,
+			Differs:  c.Differs,
+			Answered: c.Diff,
+			NextStep: c.NextSteps,
+		})
+	}
+	return out
+}
+
+// answeredAsAnotherMax is how many such calls the isolation note names
+// whole; the receipt's AnsweredAsAnother holds every one.
+const answeredAsAnotherMax = 5
+
+// answeredAsAnotherNote is why a run with calls answered with another
+// call's recording is not counted as proven (isolation), naming the first
+// answeredAsAnotherMax of them whole.
+func answeredAsAnotherNote(calls []models.UnmatchedCall) string {
+	named := make([]string, 0, min(len(calls), answeredAsAnotherMax))
+	for _, c := range calls[:min(len(calls), answeredAsAnotherMax)] {
+		named = append(named, answeredText(c))
+	}
+	more := ""
+	if n := len(calls) - len(named); n > 0 {
+		more = fmt.Sprintf("; and %d more (the receipt's answeredAsAnother lists each)", n)
+	}
+	return fmt.Sprintf("%d call(s) were answered with the recording of another call, not their own: %s%s", len(calls), strings.Join(named, "; "), more)
+}
+
+// answeredText is the call and the recording it was answered with, whole:
+// the agent's own words (UnmatchedCall.Diff), or, from an agent that gave
+// none, the call and the recording's name.
+func answeredText(c models.UnmatchedCall) string {
+	if c.Diff != "" {
+		return c.Diff
+	}
+	return c.ActualSummary + " was answered with recording " + c.ClosestMock
+}
+
+// sayAnsweredAsAnother tells, for each call answered with another call's
+// recording, a WARN that names it by its shape and path tag, the recording
+// served by name, where the two differ and the next step, and on the
+// console the call and the recording's call whole.
+func sayAnsweredAsAnother(logger *zap.Logger, console io.Writer, calls []models.UnmatchedCall) {
+	for _, c := range calls {
+		next := c.NextSteps
+		if next == "" {
+			next = "record this call (keploy mock record) so it is answered with its own recording"
+		}
+		logger.Warn("an outgoing call was answered with the recording of another call, not its own: this replay is not counted as proven, and --strict fails it",
+			zap.String("protocol", c.Protocol),
+			zap.String("call", models.UnmatchedCallLogShape(c)),
+			utils.PathTagField(c.PathTag),
+			zap.String("answer", c.Answer),
+			zap.String("recording", c.ClosestMock),
+			zap.Strings("differs", c.Differs),
+			zap.String("next_step", models.UnmatchedCallLogText(c, next)))
+		if console != nil {
+			_, _ = fmt.Fprintf(console, "answered with another call's recording: %s\n  next step: %s\n", answeredText(c), next)
+		}
+	}
+}

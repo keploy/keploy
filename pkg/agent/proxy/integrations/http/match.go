@@ -394,12 +394,17 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		// or under url-noise, retry allowing auto-detected dynamic id segments
 		// (numeric/uuid/hex/long token) to vary — so a non-deterministic path id
 		// doesn't 502 with no config. Disable via OutgoingOptions.DisableAutoURLDynamic.
+		// A recording this pass finds is of another path: the call is
+		// served with it, and reported as answered with another call's
+		// recording (noteServedAs, reportServedAnother), never as its own.
+		idVaried := false
 		if len(schemaMatched) == 0 && autoURLDynamic {
 			schemaMatched, err = h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise, urlNoise, true)
 			if err != nil {
 				return false, nil, nil, err
 			}
 			if len(schemaMatched) > 0 {
+				idVaried = true
 				if ce := h.Logger.Check(zap.DebugLevel, "http url: matched via auto-detected dynamic path segment(s) after no exact/url-noise match"); ce != nil {
 					ce.Write(zap.Int("candidates", len(schemaMatched)))
 				}
@@ -448,6 +453,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			if commitCursor != nil {
 				commitCursor()
 			}
+			noteServedAs(ctx, idVaried, false)
 			return true, served, nil, nil
 		}
 
@@ -478,6 +484,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			if !claimed {
 				continue
 			}
+			noteServedAs(ctx, idVaried, false)
 			return true, served, nil, nil
 		}
 
@@ -522,6 +529,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 				if !claimed {
 					continue
 				}
+				noteServedAs(ctx, idVaried, false)
 				return true, served, nil, nil
 			}
 
@@ -562,6 +570,11 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			if !claimed {
 				continue
 			}
+			// The closest of several recordings none of whose bodies is
+			// the call's is a guess between calls: another call's
+			// recording. One recording left is the call's method, path
+			// and body shape, as the body-schema pass above serves it.
+			noteServedAs(ctx, idVaried, len(shortListed) > 1 && bestMatch.Spec.HTTPReq.Body != string(input.body))
 			return true, served, nil, nil
 		}
 		return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: shortListed, pool: comparedPool}, nil

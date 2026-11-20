@@ -6083,12 +6083,24 @@ func isAnswerReport(err error) bool {
 	return errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.Answer != ""
 }
 
-// isByKindAnswer reports whether err is the report of a background write
-// answered by its kind (models.AnswerByKind): unchecked, read by
-// no judging, only counted in the reports.
+// isByKindAnswer reports whether err is the report of a call answered in a
+// way no verdict of keploy test reads: a background write answered by its
+// kind (models.AnswerByKind), unchecked, or, with the proven switch off, a
+// call answered with another call's recording (models.AnsweredAsAnother),
+// which only keploy mock replay reads. A loss of one leaves no read
+// incomplete (noteMissLost). With the switch off no parser reports any other
+// answer, so the answers' room (addBounded) holds only these: one is dropped
+// only once its window holds maxPendingMockErrors of them, each of which
+// keeps the replay from being counted as proven.
 func isByKindAnswer(err error) bool {
 	var pe models.ParserError
-	return errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.Answer == models.AnswerByKind
+	return errors.As(err, &pe) && pe.MismatchReport != nil && uncountedAnswer(pe.MismatchReport.Answer)
+}
+
+// uncountedAnswer reports whether answer is one no verdict of keploy test
+// reads (isByKindAnswer).
+func uncountedAnswer(answer string) bool {
+	return answer == models.AnswerByKind || models.AnsweredAsAnother(answer)
 }
 
 // noteAnswerDropped says that the report of a background write answered by
@@ -6104,6 +6116,12 @@ func (p *Proxy) noteAnswerDropped(err error) {
 	var pe models.ParserError
 	kind := ""
 	if errors.As(err, &pe) && pe.MismatchReport != nil {
+		if r := pe.MismatchReport; models.AnsweredAsAnother(r.Answer) {
+			p.logger.Warn("a call answered with another call's recording was not kept for its test's report: its window already holds as many such calls as it keeps, and the replay is not counted as proven on them",
+				zap.String("answer", r.Answer), zap.String("recorded", r.ClosestMock), zap.Int64("dropped", n),
+				zap.Int("kept", maxPendingMockErrors))
+			return
+		}
 		kind = pe.MismatchReport.WriteKind
 	}
 	p.logger.Warn("a background write answered by its kind was not kept for its test's report: no verdict reads it, but the count of writes the report says were answered unchecked is short of it",
@@ -6142,7 +6160,7 @@ func missCounts(err error) bool {
 	var pe models.ParserError
 	if errors.As(err, &pe) && pe.MismatchReport != nil {
 		r := pe.MismatchReport
-		return r.CountsAgainstTest() || (r.Answer != "" && r.Answer != models.AnswerByKind)
+		return r.CountsAgainstTest() || (r.Answer != "" && !uncountedAnswer(r.Answer))
 	}
 	return true
 }
