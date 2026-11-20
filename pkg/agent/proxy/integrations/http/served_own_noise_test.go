@@ -49,9 +49,11 @@ func searchRecordings(t *testing.T, h *HTTP, learned map[string][]string, bodies
 // in the default noise mode too, and it is served with no report: a field
 // keploy.yml declares request-body noise, a field the record learned as
 // noise, the same JSON with its keys in another order or other spacing. Of
-// several such recordings the call is served one, with no report. A call
+// several such recordings the call is served one, with no report, and it is
+// served its own over another call's whose body is the closer string. A call
 // whose body differs from every recording outside its noise is served the
-// closest and reported closest_body, naming the fields it differs at, and
+// closest and reported closest_body, naming the fields it differs at and
+// none its noise covers, and
 // its next step names both causes with the exact keploy.yml entry; the entry
 // it names, read as YAML and given as keploy.yml's noise, makes the
 // recording the call's own.
@@ -71,6 +73,10 @@ func TestABodyThatIsTheCallsOutsideItsNoiseIsServedAsItsOwn(t *testing.T) {
 		{name: "keys in another order", recorded: []string{`{"q":"ada","page":1}`, `{"q":"alan","page":2}`}, call: `{"page":1,"q":"ada"}`, want: []string{`{"hit":1}`}},
 		{name: "other spacing", recorded: []string{`{"q":"ada","page":1}`, `{"q":"alan","page":2}`}, call: `{"q": "ada", "page": 1}`, want: []string{`{"hit":1}`}},
 		{name: "several of the call's own", recorded: []string{`{"q":"ada","ts":1}`, `{"q":"ada","ts":2}`, `{"q":"alan","ts":5}`}, opts: models.OutgoingOptions{NoiseConfig: ts}, call: `{"q":"ada","ts":9}`, want: []string{`{"hit":1}`, `{"hit":2}`}},
+		// The other call's body is the closer string (one letter of q
+		// against three digits of ts), so a fuzzy choice over every
+		// recording would serve it as the call's own.
+		{name: "the call's own over a closer other call", recorded: []string{`{"q":"ada","ts":1700000000}`, `{"q":"adx","ts":1800000099}`}, opts: models.OutgoingOptions{NoiseConfig: ts}, call: `{"q":"ada","ts":1800000099}`, want: []string{`{"hit":1}`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setProven(t, false)
@@ -84,15 +90,19 @@ func TestABodyThatIsTheCallsOutsideItsNoiseIsServedAsItsOwn(t *testing.T) {
 
 	for _, tc := range []struct {
 		name, call, closest string
+		opts                models.OutgoingOptions
 		differs             []string
 	}{
 		{name: "a value no noise covers", call: `{"q":"ada","ts":3}`, closest: "mock-search-1", differs: []string{"body.ts"}},
 		{name: "a real input", call: `{"q":"bob","ts":1}`, closest: "mock-search-1", differs: []string{"body.q"}},
+		// ts differs too, and keploy.yml declares it noise: the report
+		// names only the field that is a difference.
+		{name: "a real input beside declared noise", call: `{"q":"bob","ts":3}`, opts: models.OutgoingOptions{NoiseConfig: ts}, closest: "mock-search-1", differs: []string{"body.q"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setProven(t, false)
 			h := newHTTP()
-			got := serveReported(t, h, searchRecordings(t, h, nil, `{"q":"ada","ts":1}`, `{"q":"alan","ts":2}`), searchCall(tc.call))
+			got := serveReportedWith(t, h, searchRecordings(t, h, nil, `{"q":"ada","ts":1}`, `{"q":"alan","ts":2}`), tc.opts, searchCall(tc.call))
 			a := got.answers()
 			if got.status != 200 || len(a) != 1 || a[0].Answer != models.AnswerClosestBody || a[0].ClosestMock != tc.closest || !slices.Equal(a[0].Differs, tc.differs) {
 				t.Fatalf("the call got %d %q with answer reports %+v, want one %q with %s at %q", got.status, got.body, a, models.AnswerClosestBody, tc.closest, tc.differs)
@@ -102,10 +112,18 @@ func TestABodyThatIsTheCallsOutsideItsNoiseIsServedAsItsOwn(t *testing.T) {
 				t.Errorf("the next step %q does not name both causes and the fields", next)
 			}
 			entries := noiseEntriesIn(t, next, "test.globalNoise.global.requestbody: ")
+			// keploy.yml's requestbody noise with the next step's entries
+			// added to what it already declares.
+			noise := map[string][]string{}
+			for _, from := range []map[string][]string{tc.opts.NoiseConfig["requestbody"], entries} {
+				for k, v := range from {
+					noise[k] = v
+				}
+			}
 			h = newHTTP()
-			again := serveReportedWith(t, h, searchRecordings(t, h, nil, `{"q":"ada","ts":1}`, `{"q":"alan","ts":2}`), models.OutgoingOptions{NoiseConfig: map[string]map[string][]string{"requestbody": entries}}, searchCall(tc.call))
+			again := serveReportedWith(t, h, searchRecordings(t, h, nil, `{"q":"ada","ts":1}`, `{"q":"alan","ts":2}`), models.OutgoingOptions{NoiseConfig: map[string]map[string][]string{"requestbody": noise}}, searchCall(tc.call))
 			if again.status != 200 || again.body != `{"hit":1}` || len(again.answers()) != 0 {
-				t.Fatalf("with keploy.yml's requestbody %v, as the next step names it, the call got %d %q with answer reports %+v, want %s's answer and none", entries, again.status, again.body, again.answers(), tc.closest)
+				t.Fatalf("with keploy.yml's requestbody %v, the next step's entries added, the call got %d %q with answer reports %+v, want %s's answer and none", noise, again.status, again.body, again.answers(), tc.closest)
 			}
 		})
 	}
