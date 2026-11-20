@@ -144,6 +144,10 @@ type AgentClient struct {
 	// first: a store addresses an agent, possibly a fresh one.
 	concurrentServing atomic.Bool
 
+	// saidNoClockRun says the client has said that an agent took no run id
+	// from it (handClockRun): it says so once.
+	saidNoClockRun atomic.Bool
+
 	// run is the agent's current start (startAgent); guarded by mu. A stop
 	// reads how to end the agent from the run it stops, never from a later one.
 	run *agentRun
@@ -1370,6 +1374,11 @@ func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string
 	if a.session().recording() {
 		a.session().record(stepTestSetHook, func(c context.Context) error { return a.BeforeTestSetCompose(c, testRunID, testSetID, false) })
 	}
+	// The set's hook is the first call made to the agent docker compose
+	// started for it, to one it started again (the session makes it again)
+	// and to one that replaced it (replay's repair): the agent is handed
+	// the run id before it.
+	a.handClockRun(ctx)
 	return a.callHook(ctx, "/hooks/before-test-set-compose", models.BeforeTestSetCompose{
 		TestRunID: testRunID,
 		TestSetID: testSetID,
@@ -1385,6 +1394,76 @@ func (a *AgentClient) AppStartsAnew(ctx context.Context, testSetID string, first
 		TestSetID:     testSetID,
 		FirstRecorded: first,
 	})
+}
+
+// handClockRun hands the agent this run's id (agent.ClockRunStarter), which
+// marks the timeline a frozen agent writes on clock files another run may
+// have left. It is called once the agent answers: right after Setup's health
+// handshake, and before a docker compose test set's hook, the first call to
+// each agent compose starts (BeforeTestSetCompose). Every call that can move
+// the agent's clock comes after it. An agent that takes no id (one older
+// than this keploy, a user-pinned agent image) answers 404, and one that
+// cannot be reached or refuses the id answers otherwise: the run goes on
+// without one either way, and the client says so once. The id is never
+// passed on the agent's command line, where a flag it does not know would
+// end it, and never fails the run.
+func (a *AgentClient) handClockRun(ctx context.Context) {
+	s, ok := agent.StartupAgentHook.(agent.ClockRunStarter)
+	if !ok || a.conf.Agent.AgentURI == "" {
+		return
+	}
+	run := s.ClockRun(ctx)
+	if run == "" {
+		return
+	}
+	body, err := json.Marshal(models.ClockRunReq{Run: run})
+	if err != nil {
+		a.sayNoClockRun(fmt.Sprintf("its request could not be made: %v", err), false)
+		return
+	}
+	hctx, stop := a.whileAgentRuns(ctx)
+	defer stop()
+	req, err := newAgentRequest(hctx, http.MethodPost, a.conf.Agent.AgentURI+"/hooks/clock-run", bytes.NewReader(body))
+	if err != nil {
+		a.sayNoClockRun(fmt.Sprintf("its request could not be made: %v", err), false)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := doAgent(&a.client, req)
+	if err != nil {
+		if ctx.Err() == nil {
+			a.sayNoClockRun(fmt.Sprintf("it did not answer: %v", err), false)
+		}
+		return
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, res.Body)
+		_ = res.Body.Close()
+	}()
+	switch res.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		a.sayNoClockRun("it is older than this keploy and does not take one", true)
+	default:
+		why, _ := io.ReadAll(io.LimitReader(res.Body, 1<<12))
+		a.sayNoClockRun(fmt.Sprintf("it answered %d: %s", res.StatusCode, strings.TrimSpace(string(why))), false)
+	}
+}
+
+// sayNoClockRun says, once per client, that the agent took no run id from
+// it and why: older says it is an agent older than this keploy, said at
+// Info with the upgrade that gives it one; any other cause is a warning.
+func (a *AgentClient) sayNoClockRun(why string, older bool) {
+	if a.saidNoClockRun.Swap(true) {
+		return
+	}
+	msg := fmt.Sprintf("keploy's agent took no run id from this keploy (%s); the run goes on without one, and the agent "+
+		"cannot tell this run's clock timeline on the shared clock files from one an earlier run left there", why)
+	if older {
+		a.logger.Info(msg + ". Use an agent image of this keploy's version to have the run's timeline marked as its own")
+		return
+	}
+	a.logger.Warn(msg)
 }
 
 func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
@@ -3554,6 +3633,17 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	}
 }
 
+// agentReady waits for the agent Setup started to answer (waitForAgent), then
+// hands it the run id (handClockRun): nothing asked of it before then can move
+// its clock. Under docker compose, BeforeTestSetCompose hands it.
+func (a *AgentClient) agentReady(ctx context.Context, exited <-chan error, isDockerCmd bool, opts models.SetupOptions) error {
+	if err := a.waitForAgent(ctx, exited, isDockerCmd, opts); err != nil {
+		return err
+	}
+	a.handClockRun(ctx)
+	return nil
+}
+
 // readAgentSwitch reads the agent's report of its proven switch from /health:
 // the provenswitch.HealthHeader value, "" when a healthy agent sends none. A
 // transport failure or a status other than 200 is an error: the header of
@@ -3994,7 +4084,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		if err = a.waitForAgent(ctx, agentExited, isDockerCmd, opts); err != nil {
+		if err = a.agentReady(ctx, agentExited, isDockerCmd, opts); err != nil {
 			return err
 		}
 	}

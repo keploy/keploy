@@ -1276,6 +1276,12 @@ type AppStartsAnewReq struct {
 	FirstRecorded time.Time `json:"firstRecorded"`
 }
 
+// ClockRunReq hands the agent the run id of the process that started it
+// (POST /agent/hooks/clock-run): Run, never empty.
+type ClockRunReq struct {
+	Run string `json:"run"`
+}
+
 type AppStart struct {
 	At   time.Time `json:"at"`
 	PID  uint32    `json:"pid"`
