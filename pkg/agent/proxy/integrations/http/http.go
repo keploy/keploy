@@ -70,6 +70,8 @@ type HTTP struct {
 	// strictIx is the strict pass's index of the last staging generation, or
 	// shared part of an open test's reads, a strict call read (strictIndex).
 	strictIx strictIndexes
+	// ownBodies is each recording's request body as sameCallBodies read it.
+	ownBodies ownBodies
 	// verify is the exact view's verify mode of this handler's own reads
 	// (verifying): nil follows the process's (integrations.ExactViewVerify),
 	// what every handler the proxy makes does; a row gives a handler its
