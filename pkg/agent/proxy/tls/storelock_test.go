@@ -561,6 +561,23 @@ func TestStoreLockThatCannotBeTaken(t *testing.T) {
 			if n := logs.FilterMessageSnippet(storeLockWarnMsg).Len(); n != 1 || logs.Len() != 1 {
 				t.Fatalf("warnings %v, want one", logs.All())
 			}
+			// The one warning names what going on without the lock
+			// risks and how to fix it: the lock's directory, the
+			// directory above it and the lock's file, with the access
+			// each needs.
+			path := filepath.Join(caRunsDir, storeLockName)
+			msg := logs.All()[0].Message
+			for _, want := range []string{
+				"keploy runs on this host that change the same trust store at the same time race, and one may undo another's change",
+				"make the directory " + caRunsDir + " (write access to " + filepath.Dir(caRunsDir) + ")",
+				"create the file " + path + " (write access to " + caRunsDir + ")",
+				"or create that file with read access for that user",
+				"keep " + caRunsDir + " on a file system that supports file locks",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the warning %q does not say %q", msg, want)
+				}
+			}
 		})
 	}
 }

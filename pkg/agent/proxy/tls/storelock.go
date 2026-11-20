@@ -236,11 +236,23 @@ func waitForStoreLock(ctx context.Context, logger *zap.Logger, f *os.File, path 
 }
 
 // warnNoStoreLock says, once per process, that a change of a trust store ran
-// without the store lock, and why: another keploy run's change of the same
-// store at the same time may then undo it.
+// without the store lock, why (err), what that risks (keploy runs on this host
+// that change one store at once race, and one may undo another's change), and
+// how to give the runs the lock (storeLockFix).
 func warnNoStoreLock(logger *zap.Logger, path string, err error) {
 	if storeLockWarned.CompareAndSwap(false, true) {
-		logger.Warn("keploy could not take the trust stores' lock, so another keploy run on this host that changes the same trust store at the same time may undo this run's change",
+		logger.Warn("keploy could not take the trust stores' lock, so it changes trust stores without it: keploy runs on this host that change the same trust store at the same time race, and one may undo another's change. "+storeLockFix(path),
 			zap.String("lock", path), zap.Error(err))
 	}
+}
+
+// storeLockFix says what the store lock at path needs so that a run can take
+// it, as lockStores takes it: its directory, which a run makes when it is
+// missing (write access to the directory above it), and its file, which a run
+// creates in that directory (write access to it) or opens to read when it is
+// there, and then locks.
+func storeLockFix(path string) string {
+	dir := filepath.Dir(path)
+	return fmt.Sprintf("To fix it, let the user keploy runs as make the directory %s (write access to %s), or make it for that user; let it create the file %s (write access to %s), or create that file with read access for that user; and keep %s on a file system that supports file locks.",
+		dir, filepath.Dir(dir), path, dir, dir)
 }
