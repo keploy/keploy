@@ -283,6 +283,55 @@ func TestARequestAfterAnEmptyFirstReadIsReadWhole(t *testing.T) {
 	}
 }
 
+// rounds is the proxy's end of a connection that tells when the parser
+// sets its second read deadline (second is closed then): its first round
+// has ended.
+type rounds struct {
+	net.Conn
+	mu     sync.Mutex
+	set    int
+	second chan struct{}
+}
+
+func (c *rounds) NetConn() net.Conn { return c.Conn }
+
+func (c *rounds) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	if c.set++; c.set == 2 {
+		close(c.second)
+	}
+	c.mu.Unlock()
+	return c.Conn.SetReadDeadline(t)
+}
+
+// A parser handed no bytes has no request until it reads one: a round that
+// reads nothing is no request, and the parser waits on for the request's
+// first bytes. It took its empty first round for a request of no bytes,
+// which missed, and ended.
+func TestAParserHandedNoBytesWaitsForTheRequestsFirst(t *testing.T) {
+	eachSwitch(t, func(t *testing.T) {
+		app, proxySide := tcpPair(t)
+		conn := &rounds{Conn: proxySide, second: make(chan struct{})}
+		done := make(chan error, 1)
+		go func() {
+			done <- decodeGeneric(context.Background(), zap.NewNop(), nil, conn, nil, bigStore(), models.OutgoingOptions{})
+		}()
+		select {
+		case <-conn.second:
+		case err := <-done:
+			t.Fatalf("the parser ended with %v before a request came", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("the parser never ended its first round")
+		}
+		if _, err := app.Write([]byte("PING")); err != nil {
+			t.Fatal(err)
+		}
+		readAnswer(t, app, "PONG")
+		_ = app.Close()
+		awaitEnd(t, done, "a connection the application closed")
+	})
+}
+
 // A whole request is answered, or missed, at its window's end: nothing more
 // is waited for, whether or not it begins a longer recording.
 func TestAWholeRequestIsNotWaitedOn(t *testing.T) {
