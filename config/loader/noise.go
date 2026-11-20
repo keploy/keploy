@@ -68,7 +68,10 @@ func (f *Files) Read(file string) error {
 // Merge merges the config file over what the viper instance holds, as the
 // package's Merge, and its test.globalNoise over the one kept, as viper
 // merges maps: an entry the file writes replaces the one kept, and a map in
-// both is merged key by key. Its error is Read's.
+// both is merged key by key. A file with no test.globalNoise keeps a map
+// kept and drops any other value, so Unmarshal decodes viper's copy of that
+// value: one that is not a map has no keys for viper to rewrite. Its error
+// is Read's.
 func (f *Files) Merge(file string) error {
 	raw, err := readConfigFile(file)
 	if err != nil {
@@ -81,13 +84,7 @@ func (f *Files) Merge(file string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", filepath.Base(file), err)
 	}
-	if noise == nil {
-		return nil
-	}
 	kept := map[string]any{"globalNoise": f.noise}
-	if f.noise == nil {
-		kept = map[string]any{}
-	}
 	mergeNoise(map[string]any{"globalNoise": noise}, kept)
 	f.noise = kept["globalNoise"]
 	return nil
@@ -126,17 +123,12 @@ func globalNoiseOf(raw []byte) (any, error) {
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return nil, err
 	}
-	test, ok := asMap(lookupFold(doc, "test"))
-	if !ok {
-		return nil, nil
-	}
+	test, _ := asMap(lookupFold(doc, "test"))
 	gn := lookupFold(test, "globalNoise")
-	if gn == nil {
-		return nil, nil
-	}
 	top, ok := asMap(gn)
 	if !ok {
-		// Not a map: kept, Unmarshal refuses it in viper's words.
+		// None, or not a map: kept, and Unmarshal refuses one in viper's
+		// words.
 		return gn, nil
 	}
 	out := map[string]any{}
@@ -214,16 +206,18 @@ func mergeNoise(src, tgt map[string]any) {
 	}
 }
 
-// lookupFold is m's value at the key equal to k under case folding, as
-// viper looks keys up; the last of several such keys in key order.
+// lookupFold is m's value at the keys equal to k under case folding, as
+// viper looks keys up. Several such keys are merged in key order, as
+// lowerKeys merges buckets: maps key by key (setMerged), and any other value
+// replaces the one before it.
 func lookupFold(m map[string]any, k string) any {
-	var v any
+	out := map[string]any{}
 	for _, mk := range sortedKeys(m) {
 		if strings.EqualFold(mk, k) {
-			v = m[mk]
+			setMerged(out, k, m[mk])
 		}
 	}
-	return v
+	return out[k]
 }
 
 // asMap is v as a map with string keys, as viper casts a YAML mapping
