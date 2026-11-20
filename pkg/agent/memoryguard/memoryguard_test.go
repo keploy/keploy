@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1698,7 +1699,8 @@ func TestTheFloorIsRaisedAtOnceOverARoomThatCameBack(t *testing.T) {
 // budget the ring buffer leaves too small to record), run() installs 90% of
 // what the budget leaves after the ring buffer on its first sample, and again
 // only when the ring buffer's size changes or a derived limit was installed
-// in between: never on every sample.
+// in between: never on every sample. A derived limit installed after it is
+// reported at Info, as the first one was.
 func TestWhereNoLimitIsDerivedTheBudgets90PercentIsInstalledOnce(t *testing.T) {
 	ms := time.Millisecond
 	ninety := func(mb int64) int64 { return int64(float64(mib(mb)) * 0.9) }
@@ -1723,6 +1725,9 @@ func TestWhereNoLimitIsDerivedTheBudgets90PercentIsInstalledOnce(t *testing.T) {
 		run             time.Duration
 		want            []int64
 		at              []time.Duration
+		// The Info lines that set a derived GOMEMLIMIT, by time: the first
+		// derived install, and each that follows a 90% install. nil: none.
+		infoAt []time.Duration
 	}{
 		{name: "memory.stat unreadable", limitMB: 1024, ringMB: 64, f: unreadable(true, false), run: 2200 * ms,
 			want: []int64{ninety(960)}, at: []time.Duration{500 * ms}},
@@ -1738,12 +1743,14 @@ func TestWhereNoLimitIsDerivedTheBudgets90PercentIsInstalledOnce(t *testing.T) {
 			ringAt: 1200 * ms, run: 3200 * ms, want: []int64{ninety(236), ninety(172)}, at: []time.Duration{500 * ms, 1500 * ms}},
 		{name: "memory.stat lost, back, and lost again", limitMB: 1024, ringMB: 64, f: sidecarMemory(), run: 4200 * ms,
 			stats: []statPhase{{1200 * ms, true}, {2200 * ms, false}, {3200 * ms, true}},
-			want:  []int64{mib(708), ninety(960), mib(708), ninety(960)}, at: []time.Duration{500 * ms, 1500 * ms, 2500 * ms, 3500 * ms}},
+			want:  []int64{mib(708), ninety(960), mib(708), ninety(960)}, at: []time.Duration{500 * ms, 1500 * ms, 2500 * ms, 3500 * ms},
+			infoAt: []time.Duration{500 * ms, 2500 * ms}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := tt.f
 			g := fakeGuard(t, tt.limitMB, tt.ringMB, f)
+			logs := observe(g, zapcore.InfoLevel)
 			simulate(t, g, tt.run, func(now time.Duration) {
 				if tt.ringAt > 0 && now >= tt.ringAt {
 					fixedOverheadBytes.Store(mib(128))
@@ -1761,6 +1768,13 @@ func TestWhereNoLimitIsDerivedTheBudgets90PercentIsInstalledOnce(t *testing.T) {
 				if f.installs[i] != tt.want[i] || f.installAt[i] != tt.at[i] {
 					t.Fatalf("installed %v at %v; want %v at %v", f.installs, f.installAt, tt.want, tt.at)
 				}
+			}
+			var infoAt []time.Duration
+			for _, l := range logs.FilterLevelExact(zapcore.InfoLevel).FilterMessageSnippet("GOMEMLIMIT set from the memory limit").All() {
+				infoAt = append(infoAt, l.Time.Sub(simStart))
+			}
+			if !slices.Equal(infoAt, tt.infoAt) {
+				t.Errorf("Info lines setting GOMEMLIMIT from the memory limit at %v; want at %v", infoAt, tt.infoAt)
 			}
 		})
 	}
@@ -2152,27 +2166,46 @@ func TestRealSoftLimitKeepsTheWorkingSetUnderTheContainerLimit(t *testing.T) {
 }
 
 // TestTheDerivedLimitIsInForceFromTheStart: Start's sample installs the
-// derived GOMEMLIMIT before run's first sample, from --memory-limit where the
-// container has no limit.
+// derived GOMEMLIMIT before run's first sample, from the budget the guard
+// judges against, and says so in one line at Info that names that limit and
+// where it came from: the container's limit where it is under
+// --memory-limit, --memory-limit where the container has no limit, and both
+// where they are equal.
 func TestTheDerivedLimitIsInForceFromTheStart(t *testing.T) {
-	// A 768 MiB container under the 1024 MiB --memory-limit: its own budget,
-	// margin 35.2 + 16 MiB.
-	f := sidecarMemory()
-	f.limit = mib(768)
-	g := fakeGuard(t, 1024, 64, f)
-	g.sampleSoftLimit()
-	if want := mib(768) - mib(252) - (mib(704)-thresholdBytes(mib(704), pauseThresholdRatio))/4 - softLimitSlack; len(f.installs) != 1 || f.installs[0] != want {
-		t.Errorf("container limit 768 MiB: installed %v; want %d", f.installs, want)
-	}
-	for _, limit := range []int64{mib(1024), 0} {
-		f := sidecarMemory()
-		f.limit = limit
-		g := fakeGuard(t, 1024, 64, f)
-		g.softLimit = int64(float64(mib(1024)) * 0.9)
-		g.sampleSoftLimit()
-		if len(f.installs) != 1 || f.installs[0] != mib(708) {
-			t.Errorf("container limit %d MiB (0: none): installed %v; want 708 MiB", limit>>20, f.installs)
-		}
+	for _, tt := range []struct {
+		name        string
+		container   int64 // 0: none
+		want, limit int64
+		source      string
+	}{
+		// Its own budget, margin 35.2 + 16 MiB.
+		{name: "a 768 MiB container under the 1024 MiB --memory-limit", container: mib(768),
+			want:  mib(768) - mib(252) - (mib(704)-thresholdBytes(mib(704), pauseThresholdRatio))/4 - softLimitSlack,
+			limit: mib(768), source: "container"},
+		{name: "a container limit equal to --memory-limit", container: mib(1024),
+			want: mib(708), limit: mib(1024), source: "--memory-limit and container"},
+		{name: "no container limit", want: mib(708), limit: mib(1024), source: "--memory-limit"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := sidecarMemory()
+			f.limit = tt.container
+			g := fakeGuard(t, 1024, 64, f)
+			g.softLimit = int64(float64(mib(1024)) * 0.9) // Start's, before its sample
+			logs := observe(g, zapcore.InfoLevel)
+			g.sampleSoftLimit()
+			if len(f.installs) != 1 || f.installs[0] != tt.want {
+				t.Errorf("installed %v; want %d", f.installs, tt.want)
+			}
+			lines := logs.FilterMessageSnippet("GOMEMLIMIT set from the memory limit").All()
+			if len(lines) != 1 || lines[0].Level != zapcore.InfoLevel {
+				t.Fatalf("lines setting GOMEMLIMIT from the memory limit, at Info and above: %v; want one, at Info", lines)
+			}
+			ctx := lines[0].ContextMap()
+			if ctx["go_mem_limit_bytes"] != tt.want || ctx["limit_bytes"] != tt.limit || ctx["limit_source"] != tt.source {
+				t.Errorf("go_mem_limit_bytes %v, limit_bytes %v, limit_source %v; want %d, %d (%d MiB), %q",
+					ctx["go_mem_limit_bytes"], ctx["limit_bytes"], ctx["limit_source"], tt.want, tt.limit, tt.limit>>20, tt.source)
+			}
+		})
 	}
 }
 
