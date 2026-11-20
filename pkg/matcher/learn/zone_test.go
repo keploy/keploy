@@ -2564,6 +2564,9 @@ func refused(t *testing.T, what string, loc *time.Location, err error, why []str
 // zone, or from one whose path names no zone, is unknown too, naming the
 // zone the mount's source names but never the host's path.
 func TestAnotherZonesFileAtAZonesPathIsUnknownWhereverItsBytesCameFrom(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("a zone file is read from the application's mount table, which only Linux has")
+	}
 	own, child := inZoneRelease(t, "TestAnotherZonesFileAtAZonesPathIsUnknownWhereverItsBytesCameFrom", nil)
 	if !child {
 		return
@@ -2653,6 +2656,9 @@ func TestAnotherZonesFileAtAZonesPathIsUnknownWhereverItsBytesCameFrom(t *testin
 // keploy reads otherwise (America/Detroit over America/New_York: apart
 // from 1970 to 1975) is not, whatever its file holds.
 func TestAZoneFileMountedFromAnAliasOfItsZoneIsItsZone(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("a zone file is read from the application's mount table, which only Linux has")
+	}
 	zi := "usr/share/zoneinfo/"
 	for i, row := range []struct {
 		zone, src string
