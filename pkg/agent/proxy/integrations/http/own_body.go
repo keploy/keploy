@@ -17,7 +17,10 @@ import (
 // array of another length or with another element anywhere, differs.
 // Form-urlencoded bodies are compared key by key as Diff compares them
 // (formReqBodyNoise), and a key only the live body holds (formKeysOnlyLive)
-// differs too. Any other body has no fields to compare (comparable false).
+// differs too, each key's drift named by its decoded name, as the strict
+// comparison names it, so the noise entry a report names for it is one
+// keploy reads as covering it. Any other body has no fields to compare
+// (comparable false).
 func (httpNoiseAdapter) DiffBothWays(m *models.Mock, recorded, live *mocknoise.JSONBody, known map[string][]string, typeStrict map[string]struct{}, valIsNoise func(string) bool) (map[string][]string, bool) {
 	if m == nil || m.Spec.HTTPReq == nil {
 		return nil, false
@@ -42,7 +45,7 @@ func (httpNoiseAdapter) DiffBothWays(m *models.Mock, recorded, live *mocknoise.J
 	case asForm:
 		rec, call := string(recorded.Raw()), string(live.Raw())
 		prefixed := mocknoise.AddBodyPrefix(known)
-		out := formReqBodyNoise(rec, call, prefixed, valIsNoise)
+		out := formReqBodyNoise(rec, call, prefixed, valIsNoise, true)
 		for k, v := range formKeysOnlyLive(rec, call, prefixed) {
 			if out == nil {
 				out = map[string][]string{}
@@ -74,8 +77,8 @@ func bodiesCompared(m *models.Mock, recorded, live *mocknoise.JSONBody) (rv, lv 
 // call's, holds, whichever side it is, read with no noise and compared as
 // DiffBothWays compares the two (bodiesCompared): JSON fields as
 // matcher.DecodedJSONFieldsOnOneSide names them, or form keys whose decoded
-// name (formKeyName) the other form holds by no key, each by both names its
-// drift can have, as written and decoded. None where the two have no fields
+// name (formKeyName) the other form holds by no key, by that name, as
+// DiffBothWays names a form key's drift. None where the two have no fields
 // to compare.
 func fieldsOnOneSide(m *models.Mock, recorded, live *mocknoise.JSONBody) map[string]bool {
 	rv, lv, asJSON, asForm := bodiesCompared(m, recorded, live)
@@ -92,10 +95,9 @@ func fieldsOnOneSide(m *models.Mock, recorded, live *mocknoise.JSONBody) map[str
 	return out
 }
 
-// formKeysOnOneSide adds to out each key the form body holds whose decoded
-// name (formKeyName) other, the other form, holds by no key, by both names
-// a form key's drift can have (formReqBodyNoise, formKeysOnlyLive): as
-// written, and by its decoded name where an entry with patterns guards it.
+// formKeysOnOneSide adds to out the decoded name (formKeyName) of each key
+// the form body holds that other, the other form, holds by no key that
+// decodes to it, as DiffBothWays names a form key's drift.
 func formKeysOnOneSide(body, other string, out map[string]bool) {
 	names := map[string]bool{}
 	for _, k := range formRawKeys(other) {
@@ -103,7 +105,6 @@ func formKeysOnOneSide(body, other string, out map[string]bool) {
 	}
 	for _, k := range formRawKeys(body) {
 		if !names[formKeyName(k)] {
-			out["body."+k] = true
 			out["body."+formKeyName(k)] = true
 		}
 	}
@@ -111,32 +112,29 @@ func formKeysOnOneSide(body, other string, out map[string]bool) {
 
 // formKeysOnlyLive is the drift ("body."-prefixed, known so too) of the
 // keys the live form body holds that rec, the recorded one, holds by no key
-// that decodes to the same name (formKeyName), each named as
-// formReqBodyNoise names a key: by its decoded name where an entry with
-// patterns guards it (formGuards), else as written. A key known with no
-// patterns is no drift, as formReqBodyNoise skips one. nil when there is
-// none.
+// that decodes to the same name (formKeyName), each named by that name, as
+// formReqBodyNoise names a key by name. A key an entry with no patterns
+// names is no drift, as formReqBodyNoise skips one: as written, or by its
+// decoded name as the strict comparison reads a key only the live body
+// holds (formKeyExcused). nil when there is none.
 func formKeysOnlyLive(rec, live string, known map[string][]string) map[string][]string {
 	recNames := map[string]bool{}
 	for _, k := range formRawKeys(rec) {
 		recNames[formKeyName(k)] = true
 	}
-	guards := formGuards(known)
+	excused := formKeyExcused(known)
 	var out map[string][]string
 	for _, k := range formRawKeys(live) {
 		if recNames[formKeyName(k)] {
 			continue
 		}
-		key := "body." + k
-		if len(guards(k)) > 0 {
-			key = "body." + formKeyName(k)
-		} else if pats, ok := known[key]; ok && len(pats) == 0 {
+		if pats, ok := known["body."+k]; ok && len(pats) == 0 || excused(k, true) {
 			continue
 		}
 		if out == nil {
 			out = map[string][]string{}
 		}
-		out[key] = []string{}
+		out["body."+formKeyName(k)] = []string{}
 	}
 	return out
 }

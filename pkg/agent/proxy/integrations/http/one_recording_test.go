@@ -42,7 +42,9 @@ func TestTheOneRecordingLeftIsAnotherCallsWhereAFieldIsOnOneSide(t *testing.T) {
 		{name: "a field on one side beside a value that differs", recorded: `{"name":"ada"}`, call: `{"name":"bob","role":"admin"}`, differs: []string{"body.name", "body.role"}, nextNoise: true},
 		{name: "a form key only the call has", recorded: `q=ada`, call: `q=ada&admin=1`, form: true, differs: []string{"body.admin"}, nextNoise: true},
 		{name: "a form key only the recording has", recorded: `q=ada&admin=1`, call: `q=ada`, form: true, differs: []string{"body.admin"}, nextNoise: true},
-		{name: "a form key only the call has, written encoded", recorded: `q=ada`, call: `q=ada&ad%6din=1`, form: true, differs: []string{"body.ad%6din"}, nextNoise: true},
+		{name: "a form key only the call has, written encoded", recorded: `q=ada`, call: `q=ada&ad%6din=1`, form: true, differs: []string{"body.admin"}, nextNoise: true},
+		{name: "a form key only the call has, escaped in capitals", recorded: `q=ada`, call: `q=ada&ad%6Din=1`, form: true, differs: []string{"body.admin"}, nextNoise: true},
+		{name: "a form key only the call has, named in capitals", recorded: `q=ada`, call: `q=ada&userId=1`, form: true, differs: []string{"body.userId"}, nextNoise: true},
 		{name: "a form key only the call has, guarded by its decoded name", recorded: `q=ada`, call: `q=ada&ad%6Din=1`, form: true, noise: map[string][]string{"admin": {"^1$"}}, differs: []string{"body.admin"}},
 	} {
 		mk := searchCall
@@ -103,6 +105,9 @@ func TestTheOneRecordingLeftIsTheCallsOwnWithNoFieldOnOneSide(t *testing.T) {
 		{name: "noise covers the field only the call has, and a value differs", recorded: `{"name":"ada"}`, call: `{"name":"bob","role":"admin"}`, noise: map[string][]string{"role": {}}},
 		{name: "noise covers a nested field only the recording has", recorded: `{"user":{"name":"ada","role":"admin"}}`, call: `{"user":{"name":"ada"}}`, noise: map[string][]string{"user.role": {}}},
 		{name: "noise covers the form key only the call has", recorded: `q=ada`, call: `q=ada&admin=1`, form: true, noise: map[string][]string{"admin": {}}},
+		{name: "noise covers the form key in capitals only the call has", recorded: `q=ada`, call: `q=ada&userId=1`, form: true, noise: map[string][]string{"userId": {}}},
+		{name: "noise covers the form key in capitals only the recording has", recorded: `q=ada&userId=1`, call: `q=ada`, form: true, noise: map[string][]string{"userId": {}}},
+		{name: "noise covers the form key the call escapes", recorded: `q=ada`, call: `q=ada&ad%6Din=1`, form: true, noise: map[string][]string{"admin": {}}},
 		{name: "a value alone differs", recorded: `{"name":"ada"}`, call: `{"name":"bob"}`},
 		{name: "a form value alone differs", recorded: `q=ada&n=1`, call: `q=bob&n=1`, form: true},
 		{name: "a form key written another way", recorded: `q=ada&ad%6Din=1`, call: `q=ada&admin=1`, form: true},

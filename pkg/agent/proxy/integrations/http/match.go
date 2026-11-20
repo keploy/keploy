@@ -2193,8 +2193,13 @@ func unobfuscated(mv []string, isObfuscated func(string) bool) []string {
 // the strict comparison compares them (sameFormValues: decoded, in any
 // order, where both bodies parse), and its drift is named by it, which
 // PatternDrift's filter reads. Any other key is read by its raw text and its
-// raw values are compared in order, as before.
-func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool) map[string][]string {
+// raw values are compared in order, as before. It is skipped where an entry
+// with no patterns names it, as written or by its decoded key as the strict
+// comparison reads it (formKeyExcused: keploy.yml writes a key in any case,
+// and keploy reads it in lower case). byName names its drift by its decoded
+// key (formKeyName), as the strict comparison names a field, so an entry
+// naming that drift excuses the key; else as written, as before.
+func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObfuscated func(string) bool, byName bool) map[string][]string {
 	// Split on raw bytes (Split on '&', IndexByte on '=') rather than via
 	// url.ParseQuery so the "key=value" segment handed to isObfuscated carries
 	// the same URL-encoded form the obfuscator's formKeyNoiseRegex anchored on
@@ -2226,6 +2231,7 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 	}
 
 	guards := formGuards(known)
+	excused := formKeyExcused(known)
 	read := map[string]bool{} // decoded keys a guarded key was read under
 	out := map[string][]string{}
 	for rawKey, mv := range mockVals {
@@ -2245,8 +2251,10 @@ func formReqBodyNoise(mockBody, reqBody string, known map[string][]string, isObf
 			pats, ok, key = gp, true, "body."+name
 			mv = mockByName[name]
 			rv, inLive = reqByName[name]
+		} else if byName {
+			key = "body." + formKeyName(rawKey)
 		}
-		if ok && len(pats) == 0 {
+		if ok && len(pats) == 0 || excused(rawKey, false) {
 			continue
 		}
 		if len(pats) > 0 {
@@ -2341,6 +2349,23 @@ func formGuards(known map[string][]string) func(rawKey string) []string {
 		}
 	}
 	return func(string) []string { return nil }
+}
+
+// formKeyExcused returns, for a raw form key, whether an entry of known
+// ("body."-prefixed) with no patterns names its decoded key as the strict
+// comparison's formDiffs reads it (matcher.NoiseLookup: without case, whole
+// fields at any depth), so the key is no drift whatever it holds. For a key
+// only the live body holds (added), that entry must not name id keys, as
+// NoiseLookup.CoversAdded reads it: one that does speaks for the recorded
+// keys.
+func formKeyExcused(known map[string][]string) func(rawKey string, added bool) bool {
+	lookup := matcher.NewNoiseLookup(stripBodyPrefix(known))
+	return func(rawKey string, added bool) bool {
+		if added {
+			return lookup.CoversAdded(formKeyName(rawKey))
+		}
+		return lookup.Covers(formKeyName(rawKey), "", false)
+	}
 }
 
 // formKeyName is a raw form key as the application named it (URL-decoded),
