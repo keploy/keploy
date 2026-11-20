@@ -1381,6 +1381,8 @@ func errorsSaying(logs *observer.ObservedLogs, what string) int {
 	return n
 }
 
+var _ composeAppStopper = (*composeStartsInstr)(nil)
+
 // composeStartsInstr is a compose stack whose counts are now, and whose
 // app's first failStarts starts are told failed though the daemon carried
 // them out (the start call timed out on a starved daemon: StartComposeApp's

@@ -47,7 +47,12 @@ func (c *composeReads) StopComposeApp(context.Context) (string, error) {
 	return "", c.stopErr
 }
 
-func (c *composeReads) StartComposeApp(context.Context) (models.ComposeAppStart, error) {
+var _ composeAppStopper = (*composeReads)(nil)
+
+// StartComposeApp answers as app.App's for a container it reads not running:
+// anew is told before the start, which starts a new app.
+func (c *composeReads) StartComposeApp(_ context.Context, anew func()) (models.ComposeAppStart, error) {
+	anew()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.starts++

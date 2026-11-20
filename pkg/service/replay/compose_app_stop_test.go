@@ -13,6 +13,8 @@ import (
 	"go.keploy.io/server/v3/utils"
 )
 
+var _ composeAppStopper = (*composeInstr)(nil)
+
 // composeInstr is the harness's instrumentation with the stop and start of a
 // compose app's container (AgentClient's), counting each.
 type composeInstr struct {

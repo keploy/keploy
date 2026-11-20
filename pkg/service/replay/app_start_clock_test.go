@@ -9,9 +9,19 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	agenthttp "go.keploy.io/server/v3/pkg/platform/http"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+)
+
+// keploy's agent client is what keploy test tells a new app through and
+// starts a compose app again through. The run finds both by a type assertion,
+// so a signature that drifted from these interfaces would skip the notice or
+// the start with no build error.
+var (
+	_ appStartNotifier  = (*agenthttp.AgentClient)(nil)
+	_ composeAppStopper = (*agenthttp.AgentClient)(nil)
 )
 
 // appNotice is one notice that the application starts anew.
