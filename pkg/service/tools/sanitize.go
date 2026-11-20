@@ -537,8 +537,18 @@ func isReqHeaderPath(path []string) bool {
 func redactJSONString(s string, parentKey string, secretSet map[string]struct{},
 	secretNames map[string]string, secrets map[string]string, testName string) (bool, string, []replacement) {
 
+	// Decode numbers as json.Number, which keeps each literal's text. A
+	// float64 would round an integer above 2^53 (a 64-bit id) and rewrite
+	// 10.50 as 10.5, changing values that are not secrets.
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
 	var v interface{}
-	if err := json.Unmarshal([]byte(s), &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
+		return false, s, nil
+	}
+	// Decode stops after the first value; trailing bytes mean s is not one
+	// JSON document, and re-encoding would drop them.
+	if _, err := dec.Token(); err != io.EOF {
 		return false, s, nil
 	}
 	var repls []replacement
@@ -546,11 +556,15 @@ func redactJSONString(s string, parentKey string, secretSet map[string]struct{},
 	if !changed {
 		return false, s, nil
 	}
-	b, err := json.Marshal(v) // compact
-	if err != nil {
+	// Compact, and without HTML escaping, so "<", ">" and "&" in a value are
+	// written as they were rather than as <, > and &.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		return false, s, nil
 	}
-	return true, string(b), repls
+	return true, strings.TrimSuffix(buf.String(), "\n"), repls
 }
 
 func redactJSONValue(v *interface{}, parentKey string, secretSet map[string]struct{},
