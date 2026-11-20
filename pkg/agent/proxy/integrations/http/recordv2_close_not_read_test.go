@@ -892,7 +892,11 @@ func TestRecordV2_ACloseDelimitedBodyOfAPassedThroughCallLeavesNothingOut(t *tes
 // or its first call while it has kept none, is left out, and, not recorded,
 // stands for nothing: the endpoint's next call is still taken. The calls share
 // one recorder's dedup, as one parser instance's connections do. A parser
-// with no dedup drops no call as a duplicate, so it leaves the call out.
+// with no dedup drops no call as a duplicate, so it leaves the call out. A
+// call no rule matches is no duplicate of anything, though its endpoint's key
+// holds a representative a rule kept on an earlier connection (the session's
+// rules can differ between connections): buildHTTPMock records it whole and
+// asks no dedup, so cut, it is left out.
 func TestRecordV2_ACloseDelimitedBodyOfARecordOneDuplicateLeavesNothingOut(t *testing.T) {
 	pt := &ptRecorder{logger: zap.NewNop()}
 	const (
@@ -904,15 +908,17 @@ func TestRecordV2_ACloseDelimitedBodyOfARecordOneDuplicateLeavesNothingOut(t *te
 		recorded   int  // the status recorded whole, 0 for none
 		leftOut    bool // left out, cut short of the close
 		noDedup    bool // recorded by a parser with no dedup (built without New)
+		noRule     bool // recorded under rules none of which matches the endpoint
 	}{
-		{"the endpoint's first call, a 503, cut", "HTTP/1.1 503 Service Unavailable\r\n" + cut, 0, true, false},
-		{"a 500 while the endpoint has kept none", "HTTP/1.1 500 Internal Server Error\r\n" + whole, 500, false, false},
-		{"another error, cut, a duplicate of the 500", "HTTP/1.1 503 Service Unavailable\r\n" + cut, 0, false, false},
-		{"the endpoint's first 2xx, cut", "HTTP/1.1 200 OK\r\n" + cut, 0, true, false},
-		{"its first 2xx recorded whole", "HTTP/1.1 200 OK\r\n" + whole, 200, false, false},
-		{"a 2xx, cut, a duplicate of the 200", "HTTP/1.1 200 OK\r\n" + cut, 0, false, false},
-		{"an error, cut, a duplicate of the 200", "HTTP/1.1 404 Not Found\r\n" + cut, 0, false, false},
-		{"a 2xx, cut, by a parser that dedups nothing", "HTTP/1.1 200 OK\r\n" + cut, 0, true, true},
+		{"the endpoint's first call, a 503, cut", "HTTP/1.1 503 Service Unavailable\r\n" + cut, 0, true, false, false},
+		{"a 500 while the endpoint has kept none", "HTTP/1.1 500 Internal Server Error\r\n" + whole, 500, false, false, false},
+		{"another error, cut, a duplicate of the 500", "HTTP/1.1 503 Service Unavailable\r\n" + cut, 0, false, false, false},
+		{"the endpoint's first 2xx, cut", "HTTP/1.1 200 OK\r\n" + cut, 0, true, false, false},
+		{"its first 2xx recorded whole", "HTTP/1.1 200 OK\r\n" + whole, 200, false, false, false},
+		{"a 2xx, cut, a duplicate of the 200", "HTTP/1.1 200 OK\r\n" + cut, 0, false, false, false},
+		{"an error, cut, a duplicate of the 200", "HTTP/1.1 404 Not Found\r\n" + cut, 0, false, false, false},
+		{"a 2xx, cut, by a parser that dedups nothing", "HTTP/1.1 200 OK\r\n" + cut, 0, true, true, false},
+		{"a 2xx, cut, that no rule matches, beside the kept 200", "HTTP/1.1 200 OK\r\n" + cut, 0, true, false, true},
 	} {
 		dedup := pt
 		if step.noDedup {
@@ -922,7 +928,9 @@ func TestRecordV2_ACloseDelimitedBodyOfARecordOneDuplicateLeavesNothingOut(t *te
 		mocks, logs, err := recordUnitOn(t, dedup, reportReq, step.resp, func(s *supervisor.Session) {
 			sess = s
 			s.Opts.DstCfg = &models.ConditionalDstCfg{Port: 80}
-			s.Opts.PassThroughHosts = []models.PassThroughRule{{Host: "reports.example", Mode: models.PassThroughRecordOne}}
+			if !step.noRule {
+				s.Opts.PassThroughHosts = []models.PassThroughRule{{Host: "reports.example", Mode: models.PassThroughRecordOne}}
+			}
 			if step.recorded == 0 {
 				s.MarkMockIncomplete("a mark set during the call")
 			}
