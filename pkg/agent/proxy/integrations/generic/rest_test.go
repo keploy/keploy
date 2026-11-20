@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -53,7 +54,12 @@ func bigExchanges(req []byte) map[string]eofStore {
 // the rest of the request sat in the socket, and every read times out, as a
 // TCP connection's does once its deadline passed, until the parser sets
 // another deadline. From there its reads fail with readErr, and its read
-// deadlines cannot be set (deadlineErr).
+// deadlines cannot be set (deadlineErr). With rearmed, the row sends the
+// rest of the request only once the parser sets that deadline (rearmed is
+// closed then), and the parser's next read waits until the socket holds it
+// (rest bytes), so the rest comes in the request's window however long the
+// parser takes to read it. It gives the connection beneath (NetConn), as
+// the proxy's own wrappers do: the parser looks at what its socket holds.
 type faults struct {
 	net.Conn
 	mu          sync.Mutex
@@ -61,19 +67,31 @@ type faults struct {
 	expire      bool
 	readErr     error
 	deadlineErr error
+	rearmed     chan struct{}
+	rest        int
 	reached     bool
 	expired     bool
+	waiting     bool
 }
+
+func (c *faults) NetConn() net.Conn { return c.Conn }
 
 func (c *faults) Read(p []byte) (int, error) {
 	c.mu.Lock()
-	reached, expired, left := c.reached, c.expired, c.left
+	reached, expired, waiting, left := c.reached, c.expired, c.waiting, c.left
 	c.mu.Unlock()
 	switch {
 	case expired:
-		return 0, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+		return 0, timedOut
 	case reached && c.readErr != nil:
 		return 0, c.readErr
+	case waiting:
+		if !until(func() bool { return pUtil.UnreadBytes(c.Conn) >= int64(c.rest) }) {
+			return 0, errors.New("the rest never reached the socket")
+		}
+		c.mu.Lock()
+		c.waiting = false
+		c.mu.Unlock()
 	case !reached && len(p) > left:
 		p = p[:left]
 	}
@@ -94,9 +112,27 @@ func (c *faults) SetReadDeadline(t time.Time) error {
 		c.mu.Unlock()
 		return c.deadlineErr
 	}
+	if c.expired && c.rearmed != nil {
+		c.waiting = true
+		close(c.rearmed)
+	}
 	c.expired = false
 	c.mu.Unlock()
 	return c.Conn.SetReadDeadline(t)
+}
+
+// awaitReadOn waits until the parser sets the deadline it reads on to
+// (rearmed), and fails the test if it ends first: it ended the request at
+// the deadline that passed, before the rest came.
+func awaitReadOn(t *testing.T, rearmed <-chan struct{}, done <-chan error) {
+	t.Helper()
+	select {
+	case <-rearmed:
+	case err := <-done:
+		t.Fatalf("the parser ended with %v before it read on to the request's window", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the parser never read on to the request's window")
+	}
 }
 
 // A request longer than one read whose round's deadline passes between two
@@ -118,6 +154,42 @@ func TestARequestWhoseWindowEndsInsideItIsAnsweredWhole(t *testing.T) {
 					}()
 					readAnswer(t, app, "PONG")
 					if _, err := app.Write(req); err != nil {
+						t.Fatal(err)
+					}
+					readAnswer(t, app, "BIGOK")
+					_ = app.Close()
+					awaitEnd(t, done, "a connection the application closed")
+				})
+			})
+		}
+	}
+}
+
+// A request whose rest comes after the round's deadline has passed, inside
+// the request's window (one window from its first bytes), is answered whole:
+// the parser reads on to the window's end and waits for the rest there. It
+// ended the request at the round's deadline, and the part it had read
+// missed. The rest is sent once the parser reads on, and its read waits for
+// it, so the row does not race the window: past it, the parser reads what
+// the socket holds.
+func TestARequestWhoseRestComesAfterTheRoundsDeadlineIsAnsweredWhole(t *testing.T) {
+	req := varied(40<<10, true)
+	for name, store := range bigExchanges(req) {
+		for _, cut := range []int{1000, 32 << 10} {
+			t.Run(fmt.Sprintf("%s, cut at %d", name, cut), func(t *testing.T) {
+				eachSwitch(t, func(t *testing.T) {
+					app, proxySide := tcpPair(t)
+					conn := &faults{Conn: proxySide, left: cut, expire: true, rearmed: make(chan struct{}), rest: len(req) - cut}
+					done := make(chan error, 1)
+					go func() {
+						done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), conn, nil, store, models.OutgoingOptions{})
+					}()
+					readAnswer(t, app, "PONG")
+					if _, err := app.Write(req[:cut]); err != nil {
+						t.Fatal(err)
+					}
+					awaitReadOn(t, conn.rearmed, done)
+					if _, err := app.Write(req[cut:]); err != nil {
 						t.Fatal(err)
 					}
 					readAnswer(t, app, "BIGOK")
@@ -165,19 +237,24 @@ func TestAChangedLongRequestIsAnsweredWhateverItsReads(t *testing.T) {
 }
 
 // A request on a connection whose first read brought no bytes has its
-// window from its first bytes too.
+// window from its first bytes too: its rest, sent after the round's
+// deadline has passed, is read in it.
 func TestARequestAfterAnEmptyFirstReadIsReadWhole(t *testing.T) {
 	req := varied(40<<10, true)
 	for name, store := range bigExchanges(req) {
 		t.Run(name, func(t *testing.T) {
 			eachSwitch(t, func(t *testing.T) {
 				app, proxySide := tcpPair(t)
-				conn := &faults{Conn: proxySide, left: 1000, expire: true}
+				conn := &faults{Conn: proxySide, left: 1000, expire: true, rearmed: make(chan struct{}), rest: len(req) - 1000}
 				done := make(chan error, 1)
 				go func() {
 					done <- decodeGeneric(context.Background(), zap.NewNop(), nil, conn, nil, store, models.OutgoingOptions{})
 				}()
-				if _, err := app.Write(req); err != nil {
+				if _, err := app.Write(req[:1000]); err != nil {
+					t.Fatal(err)
+				}
+				awaitReadOn(t, conn.rearmed, done)
+				if _, err := app.Write(req[1000:]); err != nil {
 					t.Fatal(err)
 				}
 				readAnswer(t, app, "BIGOK")

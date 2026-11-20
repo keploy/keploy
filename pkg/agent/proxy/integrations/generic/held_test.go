@@ -132,13 +132,13 @@ func (c *heldPast) Read(p []byte) (int, error) {
 	if !c.answered {
 		c.early++
 	}
-	switch {
-	case c.phase == 0:
+	switch c.phase {
+	case 0:
 		c.read += n
 		if c.read == c.cut {
 			c.phase, c.cutAt = 1, time.Now()
 		}
-	case c.phase == 5:
+	case 5:
 		c.after += n
 	}
 	if c.phase >= 3 && waited {
@@ -265,6 +265,10 @@ func (c *heldAtARoundsEnd) Write(p []byte) (int, error) {
 	c.mu.Unlock()
 	return n, err
 }
+
+// NetConn is the connection beneath, as the proxy's own wrappers give it, so
+// the parser's look at what the socket holds sees through this one too.
+func (c *heldAtARoundsEnd) NetConn() net.Conn { return c.Conn }
 
 func (c *heldAtARoundsEnd) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
