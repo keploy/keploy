@@ -1508,7 +1508,8 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	worker := workerSlices(served, pool)
 	repeats := namedRepeatReads(name, httpint.NewRepeatReadNoise(m.matchNoise(name)), table, loaded)
 	once := onceSeries(served, worker)
-	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), inRecordOrder(workerSeries(served, worker), decoded), declaredSources(served, loaded), once, everySeries(served, worker, once), seriesGates(served, worker), m.config.Mock.TimeForm); err != nil {
+	ordered := inRecordOrder(workerSeries(served, worker), decoded)
+	if err := pp.PushProvenTable(ctx, table, pool, worker, moved, workerTrails(served, worker, table), windows, recordedGivens(mp), repeats, notRequired(mappings, table), backgroundNames(mp, pool), ordered, declaredSources(served, loaded), once, everySeries(served, worker, once), seriesGates(served, worker, ordered), m.config.Mock.TimeForm); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
@@ -2073,8 +2074,11 @@ func everySeries(mp *models.Mapping, worker map[string][]string, once []string) 
 // the agent serves a part of a trailing series whose recorded answer
 // changed part-way only after the trailed test's write that opened it,
 // and the part before only until then. A series' gate is its first
-// served entry's that names one. nil when none does.
-func seriesGates(mp *models.Mapping, worker map[string][]string) map[string]models.SeriesGate {
+// served entry's that names one. Of a read series it also names the
+// state-changing writes its last answer caused (againClosers, of ordered:
+// workerSeries in the agent's placement order, inRecordOrder). nil when
+// none does.
+func seriesGates(mp *models.Mapping, worker map[string][]string, ordered map[string][]string) map[string]models.SeriesGate {
 	if mp == nil {
 		return nil
 	}
@@ -2096,6 +2100,46 @@ func seriesGates(mp *models.Mapping, worker map[string][]string) map[string]mode
 			out = map[string]models.SeriesGate{}
 		}
 		out[e.Series] = models.SeriesGate{OpenedBy: e.OpenedBy, ClosedBy: e.ClosedBy}
+	}
+	for id, closers := range againClosers(mp, served, ordered) {
+		if out == nil {
+			out = map[string]models.SeriesGate{}
+		}
+		g := out[id]
+		g.AgainClosedBy = closers
+		out[id] = g
+	}
+	return out
+}
+
+// againClosers is, by read series of ordered (every entry of it says
+// models.MockEntry.Read), the served worker entries that are
+// state-changing writes (neither Read nor Unchanged) whose CausedBy names
+// the series' last recording in ordered, the one the agent answers the
+// series' repeats with (models.SeriesGate.AgainClosedBy): once the run
+// served one, that answer lists what the write changed, and the recording
+// holds no later answer. In mp.Worker order; nil when none.
+func againClosers(mp *models.Mapping, served map[string]bool, ordered map[string][]string) map[string][]string {
+	byName := make(map[string]models.MockEntry, len(mp.Worker))
+	for _, e := range mp.Worker {
+		byName[e.Name] = e
+	}
+	lastOf := map[string]string{}
+	for id, names := range ordered {
+		if len(names) > 0 && !slices.ContainsFunc(names, func(n string) bool { return !byName[n].Read }) {
+			lastOf[names[len(names)-1]] = id
+		}
+	}
+	var out map[string][]string
+	for _, e := range mp.Worker {
+		id, ok := lastOf[e.CausedBy]
+		if !ok || !served[e.Name] || e.Read || e.Unchanged {
+			continue
+		}
+		if out == nil {
+			out = map[string][]string{}
+		}
+		out[id] = append(out[id], e.Name)
 	}
 	return out
 }

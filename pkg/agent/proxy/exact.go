@@ -795,6 +795,11 @@ type outsideState struct {
 	// of the series had answered there (seriesIndex.againIn): each a
 	// *atomic.Int64.
 	seriesRepeats sync.Map
+	// againShut holds the series (poolSeries) whose repeats a served write
+	// their last-placed answer caused ended in the staging
+	// (MockManager.noteAgainShut), with that write's name: againIn answers
+	// none of them again. It is the staging's, as inTests is.
+	againShut sync.Map
 	// unstaged holds the names of the recordings a door named that staged
 	// does not hold, once each is said (MockManager.servedAsNamed).
 	unstaged sync.Map
@@ -2148,6 +2153,10 @@ type seriesIndex struct {
 	// built again with the same gates keeps it: a scope table sent again
 	// is the same run.
 	opened *sync.Map
+	// againBy is, by recording, the series whose repeats its serving ends
+	// (models.SeriesGate.AgainClosedBy): a state-changing write their
+	// last-placed answer caused (MockManager.noteAgainShut).
+	againBy map[string][]string
 }
 
 type seriesMember struct {
@@ -2202,8 +2211,14 @@ func (m *MockManager) SetPoolSeries(series map[string][]string) {
 			}
 		}
 	}
+	idx.againBy = map[string][]string{}
+	for id, g := range idx.gates {
+		for _, n := range g.AgainClosedBy {
+			idx.againBy[n] = append(idx.againBy[n], id)
+		}
+	}
 	idx.opened = &sync.Map{}
-	if prev := m.exact.poolSeries.Load(); prev != nil && prev.opened != nil && maps.Equal(prev.gates, idx.gates) {
+	if prev := m.exact.poolSeries.Load(); prev != nil && prev.opened != nil && maps.EqualFunc(prev.gates, idx.gates, samePartGate) {
 		idx.opened = prev.opened
 	}
 	ids := make([]string, 0, len(series))
@@ -2282,7 +2297,7 @@ func (m *MockManager) SetPoolEvery(every map[string]time.Duration) {
 func (m *MockManager) SetPoolGates(gates map[string]models.SeriesGate) {
 	set := make(map[string]models.SeriesGate, len(gates))
 	for id, g := range gates {
-		if id != "" && (g.OpenedBy != "" || g.ClosedBy != "") {
+		if id != "" && (g.OpenedBy != "" || g.ClosedBy != "" || len(g.AgainClosedBy) > 0) {
 			set[id] = g
 		}
 	}
@@ -2309,6 +2324,40 @@ func (s *seriesIndex) shut(name string) bool {
 		}
 	}
 	return false
+}
+
+// samePartGate reports whether a and b open and close their series alike
+// (OpenedBy, ClosedBy): what seriesIndex.opened holds the served openers of.
+func samePartGate(a, b models.SeriesGate) bool {
+	return a.OpenedBy == b.OpenedBy && a.ClosedBy == b.ClosedBy
+}
+
+// noteAgainShut notes, in the staging in force, that the run served name,
+// a state-changing write the last-placed answer of each series s.againBy
+// names for it caused: from now on that recording answers no repeat of its
+// series there (seriesIndex.againIn, outsideState.againShut), so the
+// series' next call in a window misses, a call one of the set's background
+// recordings answered (counted against no test). Said once per series and
+// staging. It runs where noteServed does, holding the round lock, so the
+// outside answers are the staging's own.
+func (m *MockManager) noteAgainShut(s *seriesIndex, name string) {
+	if s == nil {
+		return
+	}
+	ids := s.againBy[name]
+	if len(ids) == 0 {
+		return
+	}
+	st := m.exact.outside.cur.Load()
+	if st == nil {
+		return
+	}
+	for _, id := range ids {
+		if _, was := st.againShut.LoadOrStore(id, name); !was && m.logger != nil {
+			m.logger.Info("a served write that a background series' last recorded answer caused ends that series' repeats in this run: the answer lists what the write changed, so the series' next calls miss as background calls, counted against no test",
+				zap.String("series", id), zap.String("write", name))
+		}
+	}
 }
 
 // noteServed notes that the run served name, when a gate of s names it
@@ -2504,13 +2553,18 @@ func (s *seriesIndex) has(name string) bool {
 // Its answer is the series' one answer (a series of two answers is never
 // placed), so a repeat the application makes because the replay is slower
 // than the record never misses, and how many it makes does not move what
-// a window is answered.
+// a window is answered. Once the staging served a state-changing write that
+// answer caused (outsideState.againShut), it answers none: it lists what
+// the write changed.
 func (s *seriesIndex) againIn(st *outsideState, name string) bool {
 	if s == nil || st == nil {
 		return false
 	}
 	mem := s.of[name] // a name of no series is the zero member, never the last
 	if !mem.last {
+		return false
+	}
+	if _, ended := st.againShut.Load(mem.id); ended {
 		return false
 	}
 	for _, n := range s.members[mem.id] {
@@ -4257,7 +4311,9 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 			// that part from now on (seriesIndex.noteServed), in this
 			// step: the next read sees it.
 			if wait == nil && verdict != exactRefused && mk != nil {
-				m.exact.poolSeries.Load().noteServed(mk.Name)
+				series := m.exact.poolSeries.Load()
+				series.noteServed(mk.Name)
+				m.noteAgainShut(series, mk.Name)
 			}
 			return verdict, wait, after
 		}()

@@ -439,13 +439,24 @@ const ScopeTableServedEvery = "every"
 // ScopeTableReq.Gates.
 const ScopeTableServedGates = "gates"
 
+// ScopeTableServedAgainGates is ScopeTableResp.Served's name for
+// SeriesGate.AgainClosedBy of ScopeTableReq.Gates.
+const ScopeTableServedAgainGates = "againClosedBy"
+
 // SeriesGate is, of one part of a trailing series whose recorded answer
 // changed part-way (MockEntry.OpenedBy, MockEntry.ClosedBy), the
 // recording whose serving in the run opens the part (OpenedBy) and the
-// one whose serving closes it (ClosedBy). "" for none.
+// one whose serving closes it (ClosedBy). "" for none. AgainClosedBy is,
+// of a read series (every entry of it MockEntry.Read), the state-changing
+// writes (neither Read nor Unchanged) whose entry's MockEntry.CausedBy names
+// the series' last-placed recording: once the run served one, that
+// recording's answer lists what the write changed and the recording holds
+// no later answer, so the agent answers no repeat of the series with it.
+// nil for none.
 type SeriesGate struct {
-	OpenedBy string `json:"openedBy,omitempty"`
-	ClosedBy string `json:"closedBy,omitempty"`
+	OpenedBy      string   `json:"openedBy,omitempty"`
+	ClosedBy      string   `json:"closedBy,omitempty"`
+	AgainClosedBy []string `json:"againClosedBy,omitempty"`
 }
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands

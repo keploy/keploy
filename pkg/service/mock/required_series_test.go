@@ -469,11 +469,11 @@ func TestALaterPartOfASeriesIsServedNeverRequired(t *testing.T) {
 	placed := placedSeries(mp, table)
 	require.Equal(t, []string{"d1", "d2"}, placed["lookup/o::TestT/1.2"].served)
 
-	gates := seriesGates(mp, map[string][]string{"k": {"c1", "c2", "d1", "d2"}})
+	gates := seriesGates(mp, map[string][]string{"k": {"c1", "c2", "d1", "d2"}}, nil)
 	require.Equal(t, map[string]models.SeriesGate{
 		"lookup/o::TestT/1":   {ClosedBy: "del"},
 		"lookup/o::TestT/1.2": {OpenedBy: "del"},
 	}, gates, "x1 is served by no key: its gate is not sent")
-	require.Nil(t, seriesGates(&models.Mapping{Worker: []models.MockEntry{{Name: "a", Series: "s/-/1"}}}, map[string][]string{"k": {"a"}}))
-	require.Nil(t, seriesGates(nil, nil))
+	require.Nil(t, seriesGates(&models.Mapping{Worker: []models.MockEntry{{Name: "a", Series: "s/-/1"}}}, map[string][]string{"k": {"a"}}, nil))
+	require.Nil(t, seriesGates(nil, nil, nil))
 }

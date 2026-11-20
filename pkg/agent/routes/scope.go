@@ -416,7 +416,7 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			served = append(served, models.ScopeTableServedGates)
+			served = append(served, models.ScopeTableServedGates, models.ScopeTableServedAgainGates)
 		} else if len(req.Gates) > 0 {
 			http.Error(w, "this keploy agent cannot serve a part of a series only after the write that opens it", http.StatusNotImplemented)
 			return

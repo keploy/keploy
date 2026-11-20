@@ -5540,10 +5540,23 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker m
 	if len(series) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedSeries) || len(sources) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedSources) ||
 		len(once) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedOnce) ||
 		len(every) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedEvery) ||
-		len(gates) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedGates) {
+		len(gates) > 0 && !slices.Contains(ack.Served, models.ScopeTableServedGates) ||
+		endsRepeats(gates) && !slices.Contains(ack.Served, models.ScopeTableServedAgainGates) {
 		return ErrAgentIgnoresRules
 	}
 	return nil
+}
+
+// endsRepeats reports whether a gate of gates names a write that ends its
+// series' repeats (models.SeriesGate.AgainClosedBy): an older agent would
+// answer the series' repeats with an answer that write made untrue.
+func endsRepeats(gates map[string]models.SeriesGate) bool {
+	for _, g := range gates {
+		if len(g.AgainClosedBy) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ErrAgentIgnoresRules is PushProvenTable's refusal of an agent that does

@@ -1000,10 +1000,10 @@ func TestScopeTableCarriesTheGatesAndAcksThem(t *testing.T) {
 	}
 	ps, gates := &poolSvc{}, map[string]models.SeriesGate(nil)
 	rec, ack := post(gatesSvc{without(ps), &gates, nil}, withGates)
-	if rec.Code != http.StatusOK || !slices.Equal(ack.Served, []string{"series", "once", "every", "gates"}) {
-		t.Fatalf("status %d, answer %s; want 200 naming series, once, every and gates served", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK || !slices.Equal(ack.Served, []string{"series", "once", "every", "gates", "againClosedBy"}) {
+		t.Fatalf("status %d, answer %s; want 200 naming series, once, every, gates and againClosedBy served", rec.Code, rec.Body.String())
 	}
-	if gates["pat/-/1.2"] != (models.SeriesGate{OpenedBy: "mock-0"}) || len(gates) != 1 || !slices.Equal(ps.order, []string{"windows", "worker", "series", "once", "every", "gates", "pool"}) {
+	if !reflect.DeepEqual(gates["pat/-/1.2"], models.SeriesGate{OpenedBy: "mock-0"}) || len(gates) != 1 || !slices.Equal(ps.order, []string{"windows", "worker", "series", "once", "every", "gates", "pool"}) {
 		t.Fatalf("gates %v, installed %v; want them installed after the intervals, before the pool", gates, ps.order)
 	}
 	ps, gates = &poolSvc{}, map[string]models.SeriesGate{"stale": {OpenedBy: "mock-9"}}
