@@ -71,11 +71,16 @@ func TestResetClientOnCloseResetsWhenTheClientHoldsEveryByte(t *testing.T) {
 // Through a TLS layer, as an HTTPS client's connection is: the proxy's close of
 // the TLS conn would send a close_notify alert before the socket closes, which
 // the client reads as the clean end of the stream. The socket is reset under
-// it, so the client reads the reset the destination gave.
+// it, so the client reads the reset the destination gave. The row also counts
+// what reaches the socket under the TLS layer (seen): the reset must write
+// nothing there first. The client's read alone cannot tell an alert sent
+// ahead of the reset on Windows, whose stack drops what its client has not
+// read yet when the reset comes.
 func TestResetClientOnCloseResetsUnderATLSLayerWithNoCloseNotify(t *testing.T) {
 	t.Parallel()
 	app, raw := loopbackPair(t)
-	srv := tls.Server(CountClientWrites(raw), &tls.Config{Certificates: []tls.Certificate{selfSignedCert(t)}})
+	seen := &seenWrites{Conn: CountClientWrites(raw)}
+	srv := tls.Server(seen, &tls.Config{Certificates: []tls.Certificate{selfSignedCert(t)}})
 	cli := tls.Client(app, &tls.Config{InsecureSkipVerify: true}) // #nosec G402 -- a test's self-signed peer
 	hs := make(chan error, 1)
 	go func() { hs <- srv.Handshake() }()
@@ -95,8 +100,12 @@ func TestResetClientOnCloseResetsUnderATLSLayerWithNoCloseNotify(t *testing.T) {
 	// The client's stack is in delayed-ACK mode after the handshake's
 	// exchanges, so "head" can be unacknowledged still: it waits for the
 	// acknowledgement, within the grace.
+	before := seen.n.Load()
 	if !resetClientOnClose(context.Background(), srv, tcpSettle) {
 		t.Fatal("resetClientOnClose = false under a TLS layer once the client read every byte; want a reset")
+	}
+	if n := seen.n.Load() - before; n != 0 {
+		t.Errorf("the reset wrote %d bytes to the client's socket before it (a close_notify alert's); want none", n)
 	}
 	_ = srv.Close() // the proxy's close: the socket under it is closed already
 	if err := readsReset(t, cli); err != nil {
