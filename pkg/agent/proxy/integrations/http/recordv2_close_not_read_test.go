@@ -588,6 +588,47 @@ func TestRecordV2_AConnectsTunnelIsNoBodyAndNoExchange(t *testing.T) {
 	}
 }
 
+// A CONNECT's 2xx is built into a mock as its head alone, also from bytes that
+// run on past its head into the tunnel: the V1 recorder (parseFinalHTTP) does
+// not end a response with no length of its own at its head, and net/http reads
+// a CONNECT's 2xx as a body that ends at the close. What follows the head is
+// the tunnel's, no body of the response (RFC 9112 6.3), and is not recorded.
+func TestABuiltConnectMockIsItsHeadWhateverFollowsIt(t *testing.T) {
+	const head = "HTTP/1.1 200 Connection Established\r\nProxy-Agent: corp-proxy\r\n\r\n"
+	at := time.Unix(1_700_007_400, 0)
+	read := func() *FinalHTTP {
+		return &FinalHTTP{Req: []byte(connectReq), Resp: []byte(head + "\x16\x03\x01tunnel"), ReqTimestampMock: at, ResTimestampMock: at}
+	}
+	check := func(name string, m *models.Mock) {
+		t.Helper()
+		if m == nil || m.Spec.HTTPResp == nil || m.Spec.HTTPResp.StatusCode != 200 {
+			t.Fatalf("%s: built %+v; want the CONNECT's 200", name, m)
+		}
+		if b := m.Spec.HTTPResp.Body; b != "" {
+			t.Errorf("%s: the CONNECT's 200 was built with body %q; want none: those are the tunnel's bytes", name, b)
+		}
+		if cl, ok := m.Spec.HTTPResp.Header["Content-Length"]; ok {
+			t.Errorf("%s: the CONNECT's 200 was built with Content-Length %q, which it was not sent", name, cl)
+		}
+	}
+	h := &HTTP{Logger: zap.NewNop()}
+
+	m, err := h.buildHTTPMock(context.Background(), read(), 443, "tunnel-conn", models.OutgoingOptions{})
+	if err != nil {
+		t.Fatalf("buildHTTPMock: %v", err)
+	}
+	check("V2 builder", m)
+
+	var v1 *models.Mock
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "tunnel-conn")
+	err = h.parseFinalHTTP(ctx, read(), 443, make(chan *models.Mock, 1), models.OutgoingOptions{},
+		func(m *models.Mock) { v1 = m })
+	if err != nil {
+		t.Fatalf("parseFinalHTTP: %v", err)
+	}
+	check("V1 builder", v1)
+}
+
 // wantTunnelWarned checks that the connection said once, at WARN, that its
 // recording ended at a tunnel to host (Session.ReportTunnel).
 func wantTunnelWarned(t *testing.T, name string, logs *observer.ObservedLogs, host string) {

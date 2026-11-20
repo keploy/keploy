@@ -333,9 +333,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 
 		h.Logger.Debug("read the response body", zap.Int("bytes", len(respBody)))
 		//Set the content length to the headers, except on a response with no
-		//body by rule (to a HEAD, a 1xx, 204 or 304), which keeps its own (as
+		//body by rule (to a HEAD, a 1xx, 204 or 304), which keeps its own, and
+		//on a CONNECT's 2xx, whose head opens a tunnel and carries none (as
 		//buildHTTPMock does).
-		if !responseHasNoBody(req.Method, respParsed.StatusCode) {
+		if !responseHasNoBody(req.Method, respParsed.StatusCode) && !tunnelFollows(req.Method, respParsed.StatusCode) {
 			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
 		}
 	}
