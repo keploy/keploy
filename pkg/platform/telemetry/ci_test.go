@@ -75,6 +75,8 @@ func TestDetectCI(t *testing.T) {
 		{env: map[string]string{"CI": " \t"}, ci: false, provider: ""},
 		{env: map[string]string{"CI": "1"}, ci: true, provider: "unknown"},
 		{env: map[string]string{"CI": "yes"}, ci: true, provider: "unknown"},
+		// off is not one of them: as enterprise reads it, an unknown runner.
+		{env: map[string]string{"CI": "off"}, ci: true, provider: "unknown"},
 		// A runner's own variable still names it whatever CI says.
 		{env: map[string]string{"GITHUB_ACTIONS": "true", "CI": "false"}, ci: true, provider: "github-actions"},
 	} {
