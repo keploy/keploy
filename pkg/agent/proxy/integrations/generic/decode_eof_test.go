@@ -234,6 +234,9 @@ func TestTheGenericParserAnswersARequestReturnedWithItsEOF(t *testing.T) {
 // the old read loop recorded it whole or the relay in its pieces: the
 // parser reads it in pieces of at most ReadChunkSize, as they arrive, and
 // matched them piece by piece with a recording made in other pieces (none).
+// A window that ends between two of its reads, as one did under -race on a
+// loaded machine, leaves its rest to be read before it is matched
+// (TestARequestWhoseWindowEndsInsideItIsAnsweredWhole).
 func TestTheGenericParserAnswersARequestLongerThanARead(t *testing.T) {
 	req := varied(40<<10, true)
 	for name, recorded := range map[string]*models.Mock{
