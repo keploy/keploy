@@ -29,7 +29,8 @@
 #   names      GET /Users/3 and POST /orders of a new data.id: both served
 #              another call's recording, and the next steps name a url
 #              noise key with capitals and a request-body noise key with a
-#              dot
+#              dot on the console, while the WARNs keep the calls' path
+#              tokens out of the log
 #   names-yml  the same with both keys in keploy.yml and --strict: keploy
 #              loads them as written (the case kept, the dotted key one
 #              field) and answers each call with that recording as its
@@ -185,6 +186,13 @@ replay() {
 # passed: the last replay exited 0 and its test passed.
 passed() { [ "$RC" -eq 0 ] && grep -q "1 passed" "$LOG"; }
 
+# noise_entry KIND FILE: the first test.globalNoise.global.KIND entry a
+# console next step in FILE names, whole. Only the console's "  next step:"
+# lines carry it whole: the WARN's next_step is in log form, its keys shaped.
+noise_entry() {
+  grep '^  next step: ' "$2" | grep -o "test\\.globalNoise\\.global\\.$1: {\"[^\"]*\": \\[\\]}" | head -1 | sed "s/^test\\.globalNoise\\.global\\.$1: //"
+}
+
 # 1. own: each call is answered with its own recording, and nothing says
 # otherwise.
 replay own "1 2"
@@ -226,8 +234,7 @@ grep -q 'replay failed under --strict: calls were answered with the recording of
 # names the keploy.yml url noise that makes the recording the call's own.
 # With it, GET /users/3 is answered with that recording as its own: nothing
 # says otherwise, the receipt is isolated, and --strict passes.
-ENTRY=$(grep -o 'test\.globalNoise\.global\.url: {"[^"]*": \[\]}' "$ROOT/another.log" | head -1)
-ENTRY=${ENTRY#test.globalNoise.global.url: }
+ENTRY=$(noise_entry url "$ROOT/another.log")
 if [ -z "$ENTRY" ]; then
   fail "noise: the console's next step for GET /users/3 names no test.globalNoise.global.url entry"
 else
@@ -274,12 +281,14 @@ passed || fail "names: the replay failed (exit $RC); without --strict both calls
 grep -q 'mock replay summary.*"missed": 0.*"answered_as_another": 2' "$LOG" || fail "names: the summary does not say missed 0 and answered_as_another 2"
 grep -qE '^ +answer: closest_body$' "$RECEIPT" || fail "names: the receipt's answeredAsAnother does not say closest_body"
 grep -qE '^ +- body\.data\.id$' "$RECEIPT" || fail "names: the receipt's answeredAsAnother does not name body.data.id"
-URLKEY=$(grep -o 'test\.globalNoise\.global\.url: {"[^"]*": \[\]}' "$LOG" | head -1)
-URLKEY=${URLKEY#test.globalNoise.global.url: }
-BODYKEY=$(grep -o 'test\.globalNoise\.global\.requestbody: {[^}]*}' "$LOG" | head -1)
-BODYKEY=${BODYKEY#test.globalNoise.global.requestbody: }
+URLKEY=$(noise_entry url "$LOG")
+BODYKEY=$(noise_entry requestbody "$LOG")
 [ "$URLKEY" = '{"^/Users/[0-9]+$": []}' ] || fail "names: the next step for GET /Users/3 names url noise '$URLKEY', want '{\"^/Users/[0-9]+\$\": []}'"
 [ "$BODYKEY" = '{"data.id": []}' ] || fail "names: the next step for POST /orders names request-body noise '$BODYKEY', want '{\"data.id\": []}'"
+# The WARNs name each call in log form: no path token of the call reaches the log.
+if grep 'an outgoing call was answered with the recording of another call' "$LOG" | grep -q 'Users'; then
+  fail "names: a WARN for a call answered with another call's recording carries the path token Users, want the call in log form"
+fi
 if [ -n "$URLKEY" ] && [ -n "$BODYKEY" ]; then
   echo "== names-yml: keploy.yml url $URLKEY, requestbody $BODYKEY =="
   printf 'test:\n  globalNoise:\n    global:\n      url: %s\n      requestbody: %s\n' "$URLKEY" "$BODYKEY" > keploy.yml
