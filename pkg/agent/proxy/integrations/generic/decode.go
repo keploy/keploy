@@ -25,6 +25,14 @@ import (
 // from.
 const quietWindow = 10 * time.Millisecond
 
+// readOnLimit is the most a request's read-on returns past its look at the
+// socket, in the bytes its reads return: 64 of the parser's reads. The
+// read-on ends once the socket has given what it held at the look, counted
+// in the socket's bytes, and a sender that puts back into the socket what
+// each read takes from it never lets that count fall: the request ends
+// here, said in a Warn, and it is never held growing without bound.
+const readOnLimit = 64 * pUtil.ReadChunkSize
+
 // decodeGeneric answers the client's requests from the mocks, on a goroutine,
 // and returns only once that goroutine has returned, ctx's end included: then
 // its read or write of clientConn is ended (pUtil.InterruptOnDone), and it is
@@ -78,7 +86,8 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// that the socket has still to give, in the socket's bytes.
 			// drained: the socket has given it all, and the parser reads,
 			// without waiting, what a layer above the socket still holds.
-			looked, left, drained := false, int64(0), false
+			// readOn: what the reads past the look returned.
+			looked, left, drained, readOn := false, int64(0), false, 0
 
 			// To read the stream of request packets from the client. The
 			// connection's end is its EOF, which ReadBytes returns at the
@@ -125,6 +134,14 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					logger.Debug("the client closed the generic connection")
 					ended = true
 					break
+				}
+				if looked {
+					if readOn += len(buffer); readOn >= readOnLimit {
+						logger.Warn("a generic request's bytes never paused once its window had passed: the client wrote into the connection as fast as the proxy read it, so the request ends here, after the most the proxy reads past its window, and is matched as read",
+							zap.Any("client", clientConn.RemoteAddr()),
+							zap.Int("bytesReadPastWindow", readOn))
+						break
+					}
 				}
 				// Draining reads have a deadline that has passed: each gives
 				// what a layer above the socket holds whole (a TLS record,
@@ -181,7 +198,8 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// to give, so what the socket holds is all there is to read.
 				// It looks once, so a request whose bytes never pause still
 				// ends: once the socket has given what it held then (less
-				// what arrived as each read took).
+				// what arrived as each read took), or, for a sender that
+				// refills the socket as each read takes, at readOnLimit.
 				if timeout && !first.IsZero() {
 					if unread := pUtil.UnreadBytes(clientConn); unread > 0 {
 						if !looked {
