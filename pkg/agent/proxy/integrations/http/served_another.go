@@ -9,43 +9,30 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// servedAsKey carries, on the context of a match that serves its call
-// (decodeHTTP's replay), where matchCascade notes how it served the call
-// (servedAs): the matcher's other reads of the store, which only diagnose
-// a call (ownCall, answeredMatch), carry none, so nothing they match is
-// reported as served.
-type servedAsKey struct{}
-
-// servedAs is how matchCascade served a call with the proven switch off:
-// answer is "" for the call's own recording, or the answer that says the
-// call was served the recording of another call (models.AnsweredAsAnother).
+// servedAs is how matchCascade served a call with the proven switch off
+// (matchServing): answer is "" for the call's own recording, or the answer
+// that says the call was served the recording of another call
+// (models.AnsweredAsAnother).
 type servedAs struct {
 	answer string
 }
 
-// withServedAs is ctx carrying a fresh servedAs, which matchCascade fills.
-func withServedAs(ctx context.Context) (context.Context, *servedAs) {
-	s := &servedAs{}
-	return context.WithValue(ctx, servedAsKey{}, s), s
-}
-
-// noteServedAs notes, on ctx's servedAs when it carries one, how
-// matchCascade served the call: with the recording of another path when
-// idVaried (its second pass, which lets id segments differ, found the
-// recording), else of another body when closest (the fuzzy fallback served a
-// recording whose body is not the call's), else the call's own.
-func noteServedAs(ctx context.Context, idVaried, closest bool) {
-	s, _ := ctx.Value(servedAsKey{}).(*servedAs)
-	if s == nil {
+// noteServedAs notes, in how when it is not nil, how matchCascade served
+// the call: with the recording of another path when idVaried (its second
+// pass, which lets id segments differ, found the recording), else of
+// another body when closest (the fuzzy fallback served the closest of
+// several recordings), else the call's own.
+func noteServedAs(how *servedAs, idVaried, closest bool) {
+	if how == nil {
 		return
 	}
 	switch {
 	case idVaried:
-		s.answer = models.AnswerOtherID
+		how.answer = models.AnswerOtherID
 	case closest:
-		s.answer = models.AnswerClosestBody
+		how.answer = models.AnswerClosestBody
 	default:
-		s.answer = ""
+		how.answer = ""
 	}
 }
 
