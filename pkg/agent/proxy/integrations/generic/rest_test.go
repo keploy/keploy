@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -220,6 +221,53 @@ func TestARequestWhoseRestNeverComesMisses(t *testing.T) {
 	}
 }
 
+// endsWith is the proxy's end of a connection the application closed right
+// after the first part of a request: its next read returns that part with
+// the connection's EOF, and from then on, as net.Pipe's do once its peer
+// closed it, its read deadlines cannot be set.
+type endsWith struct {
+	net.Conn
+	mu    sync.Mutex
+	part  []byte
+	ended bool
+}
+
+func (c *endsWith) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ended {
+		return 0, io.EOF
+	}
+	c.ended = true
+	return copy(p, c.part), io.EOF
+}
+
+func (c *endsWith) SetReadDeadline(time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ended {
+		return io.ErrClosedPipe
+	}
+	return nil
+}
+
+// A request the connection's end cuts short is matched as it is, at once,
+// though it begins a recorded one: no rest comes after the end, and the
+// parser reads no more of a connection whose end it read. It misses.
+func TestARequestTheConnectionsEndCutsShortMissesAtOnce(t *testing.T) {
+	withRestWait(t, time.Hour)
+	eachSwitch(t, func(t *testing.T) {
+		app, proxySide := net.Pipe()
+		t.Cleanup(func() { _ = app.Close(); _ = proxySide.Close() })
+		conn := &endsWith{Conn: proxySide, part: []byte("N")}
+		done := make(chan error, 1)
+		go func() {
+			done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PI"), conn, nil, bigStore(), models.OutgoingOptions{})
+		}()
+		awaitMiss(t, done)
+	})
+}
+
 // A request that is a recorded request, and begins a longer one, is answered
 // at its window's end: no rest is waited for.
 func TestARequestThatIsARecordingIsNotWaitedOn(t *testing.T) {
@@ -261,14 +309,17 @@ func TestARequestThatBeginsNoRecordingIsNotWaitedOn(t *testing.T) {
 // endless is the proxy's end of a connection whose bytes never pause: each
 // read returns one more byte at once, and a deadline passes once perWindow
 // reads have come since it was set (the bytes are that much faster than the
-// window). Past limit reads, or closed, its reads fail: a parser that never
-// ended the request stops there, unmatched.
+// window). It keeps the most reads that came between two of its timeouts.
+// Past limit reads, or closed, its reads fail: a parser that never ended
+// its read stops there. What the parser writes is dropped.
 type endless struct {
 	net.Conn
 	mu        sync.Mutex
 	perWindow int
 	limit     int
 	reads     int
+	run       int
+	longest   int
 	total     int
 	closed    bool
 }
@@ -280,13 +331,18 @@ func (c *endless) Read(p []byte) (int, error) {
 	case c.closed || c.total >= c.limit:
 		return 0, net.ErrClosed
 	case c.reads >= c.perWindow:
+		c.run = 0
 		return 0, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
 	}
 	c.reads++
 	c.total++
+	c.run++
+	c.longest = max(c.longest, c.run)
 	p[0] = 'Z'
 	return 1, nil
 }
+
+func (c *endless) Write(p []byte) (int, error) { return len(p), nil }
 
 func (c *endless) SetReadDeadline(time.Time) error {
 	c.mu.Lock()
@@ -302,22 +358,41 @@ func (c *endless) Close() error {
 	return nil
 }
 
-// A request whose bytes never pause still ends at its round's window: the
-// window is the round's, from its start, so the parser neither waits for
-// ever nor holds a request that grows without bound.
+// A request whose bytes never pause still ends its read at a window: the
+// round's is from its start, and the rest of a request that begins a
+// recording is read one window at a time, so the parser never reads more
+// than a window's bytes at once, nor holds a request that grows without
+// bound.
 func TestARequestWhoseBytesNeverPauseEndsAtItsWindow(t *testing.T) {
 	withRestWait(t, time.Hour)
-	eachSwitch(t, func(t *testing.T) {
-		app, proxySide := net.Pipe()
-		t.Cleanup(func() { _ = app.Close(); _ = proxySide.Close() })
-		conn := &endless{Conn: proxySide, perWindow: 64, limit: 4096}
-		t.Cleanup(func() { _ = conn.Close() })
-		done := make(chan error, 1)
-		go func() {
-			done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("ZZZZ"), conn, nil, bigStore(), models.OutgoingOptions{})
-		}()
-		awaitMiss(t, done)
-	})
+	for name, store := range map[string]eofStore{
+		"beginning no recording": bigStore(),
+		"beginning a recording":  {mocks: []*models.Mock{recordedExchange("mock-z", strings.Repeat("Z", 1000)+"Q", "ZOK")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			eachSwitch(t, func(t *testing.T) {
+				app, proxySide := net.Pipe()
+				t.Cleanup(func() { _ = app.Close(); _ = proxySide.Close() })
+				conn := &endless{Conn: proxySide, perWindow: 64, limit: 4096}
+				t.Cleanup(func() { _ = conn.Close() })
+				done := make(chan error, 1)
+				go func() {
+					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("ZZZZ"), conn, nil, store, models.OutgoingOptions{})
+				}()
+				select {
+				case <-done:
+				case <-time.After(10 * time.Second):
+					t.Fatal("the parser never ended")
+				}
+				conn.mu.Lock()
+				longest := conn.longest
+				conn.mu.Unlock()
+				if longest > conn.perWindow+1 {
+					t.Fatalf("the parser read %d times between two of its timeouts; a window holds %d reads", longest, conn.perWindow)
+				}
+			})
+		})
+	}
 }
 
 // A connection that breaks while the parser reads a request ends the
@@ -409,6 +484,7 @@ func TestARequestBeginsARecordingWithItsFirstBytes(t *testing.T) {
 		{"other bytes in a later piece", textPieces("PING", "PONG"), requestOf("PINGPA"), false},
 		{"a binary piece's start", []models.Payload{binaryPiece(b64([]byte("PINGPONG")))}, requestOf("PIN"), true},
 		{"a binary piece whose base64 breaks later", []models.Payload{binaryPiece("UElO!!!!")}, requestOf("PIN"), false},
+		{"ending where a piece ends, before one whose base64 breaks", []models.Payload{textPieces("PING")[0], binaryPiece("UE9O!!!!")}, requestOf("PING"), false},
 		{"a binary piece of no whole length", []models.Payload{binaryPiece("UElOR1BPTkc")}, requestOf("PIN"), false},
 		{"a piece of two messages", []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: "PINGPONG"}, {Type: models.String, Data: "X"}}}}, requestOf("PING"), false},
 		{"a piece of no message", []models.Payload{{}}, requestOf("PING"), false},
