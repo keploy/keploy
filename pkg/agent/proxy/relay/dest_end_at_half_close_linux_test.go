@@ -283,3 +283,97 @@ func TestAFINThatCannotBeForwardedToAnOpenDestinationTearsDownAtOnce(t *testing.
 		})
 	}
 }
+
+// heldClient is the proxy's end of the client connection under the relay, its
+// reads held until release, so the client's forwarder reads nothing until the
+// relay has decided what the destination's end does to the client. It wraps
+// the TCP socket (NetConn), as the proxy's own wrappers do.
+type heldClient struct {
+	*net.TCPConn
+	release chan struct{}
+}
+
+func (c *heldClient) Read(p []byte) (int, error) {
+	<-c.release
+	return c.TCPConn.Read(p)
+}
+
+func (c *heldClient) NetConn() net.Conn { return c.TCPConn }
+
+// The client resets the connection as the relay forwards the destination's
+// FIN: its socket could not say so before the half-close (closedBeforeFIN),
+// and the half-close of the client conn then fails, the connection being over.
+// No FIN went, so the client's socket is not told of one (noteClientFINSent):
+// told, a Windows socket would take one of its bytes in flight for a FIN the
+// client never got. The relay drains as for a half-close, and its log says the
+// FIN was not forwarded.
+func TestAClientsResetAsTheDestinationsFINIsForwardedIsNoFINSent(t *testing.T) {
+	app, proxyClient := loopbackPair(t)
+	proxyServer, server := loopbackPair(t)
+	t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
+	client := &heldClient{TCPConn: proxyClient.(*net.TCPConn), release: make(chan struct{})}
+	const drainMsg = "draining the opposite direction"
+	drains := make(chan struct{})
+	var drainOnce sync.Once
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
+		if strings.Contains(e.Message, drainMsg) {
+			drainOnce.Do(func() { close(drains) })
+		}
+		return nil
+	}))
+	destEndRead, clientReset := make(chan struct{}), make(chan struct{})
+	cfg := Config{Logger: logger, PeerEnded: func(dir fakeconn.Direction, _ bool) {
+		if dir != fakeconn.FromDest {
+			return
+		}
+		// The destination's forwarder, having read the destination's FIN
+		// and before it half-closes the client, waits for the client's
+		// reset to be in the client's socket.
+		close(destEndRead)
+		select {
+		case <-clientReset:
+		case <-time.After(10 * time.Second):
+		}
+	}}
+	r := New(cfg, client, connseq.NewUpstream(proxyServer))
+	s := &finSentRecorder{}
+	r.client = s
+	done := runRelay(t, r)
+	if err := server.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-destEndRead:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the relay did not read the destination's FIN within 10s")
+	}
+	if err := app.(*net.TCPConn).SetLinger(0); err != nil {
+		t.Fatal(err)
+	}
+	_ = app.Close()
+	awaitTCPState(t, proxyClient, unix.BPF_TCP_CLOSE, "the client's reset")
+	close(clientReset)
+	// The client's forwarder reads on once the relay has decided: drained,
+	// or torn down (the relay then ends with the client's reads held).
+	select {
+	case <-drains:
+	case <-done:
+	case <-time.After(10 * time.Second):
+	}
+	close(client.release)
+	awaitDone(t, done, "the relay did not end")
+	entries := logs.FilterMessageSnippet(drainMsg).All()
+	if len(entries) != 1 {
+		t.Fatalf("the relay drained %d times, want once, for the destination's FIN", len(entries))
+	}
+	if over, ok := entries[0].ContextMap()["over"]; !ok || over == "" {
+		t.Fatalf("the relay drained with the FIN forwarded (fields %v), want it not forwarded: the client's connection was over", entries[0].ContextMap())
+	}
+	if got := s.asked.Load(); got != 1 {
+		t.Fatalf("the client's socket was asked %d times before the half-close, want once", got)
+	}
+	if got := s.toldTimes(); got != 0 {
+		t.Fatalf("the client's socket was told %d times of a FIN that was not sent, want none", got)
+	}
+}
