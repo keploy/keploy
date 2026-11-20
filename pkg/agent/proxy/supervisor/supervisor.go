@@ -419,7 +419,10 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 				}
 				look = fold.look
 			case <-s.StopDeadline:
-				if fold != nil {
+				// Asked of the streams, not of fold: a select picks among
+				// ready cases at random, so Run may not have taken the ends
+				// of streams the parser has read to their end yet.
+				if readToTheirEnd(sess) {
 					s.warnCut(sess)
 				}
 				break wait
@@ -542,6 +545,20 @@ func streamEnds(sess *Session) []<-chan struct{} {
 		ends = append(ends, f.ReadToEnd())
 	}
 	return ends
+}
+
+// readToTheirEnd reports whether sess's parser has read both its streams to
+// their end (streamEnds), false for a session without both.
+func readToTheirEnd(sess *Session) bool {
+	ends := streamEnds(sess)
+	for _, end := range ends {
+		select {
+		case <-end:
+		default:
+			return false
+		}
+	}
+	return len(ends) > 0
 }
 
 // bothStreams is sess's two streams, nil for a session without both.
