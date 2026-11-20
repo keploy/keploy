@@ -565,7 +565,10 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	switch {
 	case strings.HasPrefix(ref.Noise, "body."):
 		path := strings.TrimPrefix(ref.Noise, "body.")
-		if !both && k.n.body.Covers(path, "", false) ||
+		// A leaf only the live request has is excused by an entry that does
+		// not name id keys (CoversAdded).
+		if inRec && !inLive && k.n.body.Covers(path, "", false) ||
+			!inRec && k.n.body.CoversAdded(path) ||
 			both && k.n.body.Covers(path, noiseText(rec), scalarLeaf(rec)) && k.n.body.Covers(path, noiseText(live), scalarLeaf(live)) {
 			return true, false
 		}
