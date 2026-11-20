@@ -2096,7 +2096,7 @@ func (h *HTTP) filterStrictNoiseMatches(candidates []*models.Mock, reqBody []byt
 	var kept []*models.Mock
 	for _, m := range candidates {
 		recorded, ok := h.ownBodies.read(m)
-		drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded, ok, live, userBodyNoise)
+		drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, m, recorded.json, ok, live, userBodyNoise)
 		if len(drift) == 0 {
 			kept = append(kept, m)
 			continue
