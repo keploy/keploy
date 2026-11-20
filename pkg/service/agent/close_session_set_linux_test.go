@@ -157,3 +157,28 @@ func TestAnEarlierSetsLossesAreBounded(t *testing.T) {
 			"still an earlier set's, naming none")
 	})
 }
+
+// An agent kept across keploy test runs: a loss kept for the next take of
+// the run that made it (an earlier set's, kept as a session began) that run
+// never took is no set's of a later run, whose sets may have the same names.
+// The later run's first session drops it, and that run's take returns none
+// of it: never a false red naming a set of the run before.
+func TestAnEarlierRunsUntakenLossReachesNoLaterRun(t *testing.T) {
+	for _, kind := range []models.CaptureLossKind{models.CaptureLossAppBytesLost, models.CaptureLossAppBytesUntold} {
+		t.Run(string(kind), func(t *testing.T) {
+			a, sw := switchAgent(t, models.MODE_TEST)
+			ctx := context.Background()
+			require.NoError(t, a.resetSession(inSet("run-a", "test-set-0"))) // session 1
+			sw.put(coreAgent.OwnedLoss{Test: "test-2", Loss: models.CaptureLoss{Kind: kind, Count: 1, What: "from 127.0.0.1:62766"}})
+			require.NoError(t, a.resetSession(inSet("run-a", "test-set-1"))) // session 2
+			a.provenMu.Lock()
+			kept := len(a.earlierSets)
+			a.provenMu.Unlock()
+			require.Equal(t, 1, kept, "premise: run-a keeps test-set-0's loss for its next take")
+			require.NoError(t, a.resetSession(inSet("run-b", "test-set-0"))) // run-b's first session
+			got, err := a.TakeOwnedCaptureLosses(ctx)
+			require.NoError(t, err)
+			require.Empty(t, got, "run-a's loss is no loss of run-b's test-set-0")
+		})
+	}
+}

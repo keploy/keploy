@@ -70,7 +70,8 @@ func (e *earlierSetLosses) reset() {
 
 // madeWhere is where l was made, as a line says it: "test-2 of test-set-a",
 // or that its bytes were written in no test of the set (between two of its
-// tests, or after its last).
+// tests, or after its last), and, for a loss of the set whose take returned
+// it (sameSet), that it was made in an earlier session of that set.
 func (l earlierSetLoss) madeWhere() string {
 	set := l.loss.Set
 	if set == "" {
@@ -80,7 +81,19 @@ func (l earlierSetLoss) madeWhere() string {
 	if test == "" {
 		test = "no test (between two of its tests, or after its last)"
 	}
+	if l.sameSet() {
+		return test + " of " + set + ", in an earlier session of that set's on keploy's agent"
+	}
 	return test + " of " + set
+}
+
+// sameSet reports whether l was made in an earlier session of the set whose
+// take returned it: keploy began that set's session on its agent again, for a
+// later attempt of the set (a flaky check's), or to register its mocks again
+// part way through it (ensureAgentHoldsStoredMocks). It was found after that
+// session's end, not after the set's.
+func (l earlierSetLoss) sameSet() bool {
+	return l.loss.Set != "" && l.loss.Set == l.readIn
 }
 
 // newSetSessionRun is the token keploy test names a run's sessions by
@@ -103,7 +116,11 @@ func (r *Replayer) withTestSetSession(ctx context.Context, testSetID string) con
 func (r *Replayer) takeEarlierSetLosses(owned []models.OwnedCaptureLoss, readIn string) []models.OwnedCaptureLoss {
 	rest, taken := r.earlierSetLosses.take(owned, readIn)
 	for _, l := range taken {
-		r.logger.Error("test run not judged: keploy found, only after an earlier test set had ended, that "+lossOfASet(l.loss.Loss)+" ("+provenswitch.Env+"=1)",
+		found := "keploy found, only after an earlier test set had ended, that " + lossOfASet(l.loss.Loss)
+		if l.sameSet() {
+			found = "keploy found, only after it began this test set's session on its agent again (for a later attempt of the set, or to register its mocks again part way through it), that " + lossOfASetsEarlierSession(l.loss.Loss)
+		}
+		r.logger.Error("test run not judged: "+found+" ("+provenswitch.Env+"=1)",
 			zap.String("made-in-test", l.loss.Test),
 			zap.String("made-in-test-set", l.loss.Set),
 			zap.String("read-in-test-set", l.readIn),
@@ -121,6 +138,15 @@ func lossOfASet(l models.CaptureLoss) string {
 		return "it cannot tell whether a connection of that set's carried a call it did not capture"
 	}
 	return "it could not capture a call on a connection of that set's"
+}
+
+// lossOfASetsEarlierSession says what l, a loss of an earlier session of the
+// set whose take returned it (earlierSetLoss.sameSet), lost.
+func lossOfASetsEarlierSession(l models.CaptureLoss) string {
+	if l.Kind.NotJudged() {
+		return "it cannot tell whether a connection of the set's earlier session carried a call it did not capture"
+	}
+	return "it could not capture a call on a connection of the set's earlier session"
 }
 
 // earlierSetLossesWhy says why the losses leave the run not judged, as the

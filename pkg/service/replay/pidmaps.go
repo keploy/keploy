@@ -300,12 +300,22 @@ func (r *Replayer) applyOwnedLosses(results []models.TestResult) (set models.Cap
 
 // reportUnappliedOwnedLosses reports, for a set that returns before its end
 // applies them (applyOwnedLosses: a failed post-script, an error), the losses
-// cut-short ends owned that keploy took in it, and takes once more: the set
-// has its result already, and a later set's tests caused none of them, so
-// each is said in this set's log, naming its test case, and none reaches a
-// later set's end, whose test cases repeat this set's names (test-1, test-2).
-func (r *Replayer) reportUnappliedOwnedLosses(ctx context.Context, testSetID string) {
-	r.takeOwnedLosses(ctx)
+// cut-short ends owned that keploy took in it, and, when the set began its
+// own session on the agent (sessionBegun), takes once more: the set has its
+// result already, and a later set's tests caused none of them, so each is
+// said in this set's log, naming its test case, and none reaches a later
+// set's end, whose test cases repeat this set's names (test-1, test-2). A set
+// that returns before its session began (wholly ignored, no test case, a
+// failure before its staging) does not take: the session open on the agent
+// is an earlier set's. The next session's start keeps that set's losses as
+// its own (models.OwnedCaptureLoss.EarlierSession) for the next take, which
+// leaves the run not judged for it (passesEarlierSetLosses); with no later
+// session, the last set that runs stopped the application before its own
+// take (lastSetThatRuns).
+func (r *Replayer) reportUnappliedOwnedLosses(ctx context.Context, testSetID string, sessionBegun bool) {
+	if sessionBegun {
+		r.takeOwnedLosses(ctx)
+	}
 	r.ownedMu.Lock()
 	owned, err := r.owned, r.ownedErr
 	r.owned, r.ownedErr = nil, nil

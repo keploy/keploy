@@ -668,6 +668,11 @@ type Replayer struct {
 	realPushed     atomic.Bool
 	isLastTestSet  bool
 	isLastTestCase bool
+	// noLaterSetRuns: no set after the one running begins its session on the
+	// agent (lastSetThatRuns): each is wholly ignored or has no test case.
+	// The set is then the last that runs, and its final attempt stops the
+	// application --keep-app-alive keeps across sets (P101-c).
+	noLaterSetRuns bool
 	// finalAttempt: the set's attempt now running is the last one the run
 	// can give it (MaxFlakyChecks); no attempt of it comes after.
 	finalAttempt bool
@@ -1315,7 +1320,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	var keepAliveAppErr atomic.Pointer[models.AppError]
 
 	// This run's last set, and its final attempt, are this run's alone.
-	r.keepAliveStop, r.isLastTestSet, r.finalAttempt = nil, false, false
+	r.keepAliveStop, r.isLastTestSet, r.noLaterSetRuns, r.finalAttempt = nil, false, false, false
 	r.composeAppStopped = false
 	if effectiveKeepAlive {
 		// Under the proven switch the app runs under a context of its own,
@@ -1397,6 +1402,15 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	r.testRunID = testRunID
 	r.firstRun = true
 	r.keptAppWaited = false
+	// The application --keep-app-alive keeps across sets stops at the end of
+	// the last set that runs (P101-c), not of the last set by its place: a
+	// later set that is wholly ignored or has no test case returns before it
+	// begins its session on the agent, and the app's stop in the run's
+	// teardown, after every read, would be in no verdict.
+	keptAppStopsAt := len(testSets) - 1
+	if r.keepAliveStop != nil {
+		keptAppStopsAt = r.lastSetThatRuns(ctx, testSets)
+	}
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -1424,6 +1438,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		if i == len(testSets)-1 {
 			r.isLastTestSet = true
 		}
+		r.noLaterSetRuns = i >= keptAppStopsAt
 		// Mirror of isLastTestSet but for the first-testset boundary:
 		// the first set to reach the application's wait, not the set
 		// at index 0 (keptAppWaited). Set BEFORE the RunTestSet call so
@@ -2271,12 +2286,27 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// The losses cut-short ends owned that keploy takes in this set are this
 	// set's: one that returns before its end applies them reports them as it
 	// returns, and none reaches a later set (reportUnappliedOwnedLosses).
-	ownedApplied := false
+	// sessionBegun: the agent answered this set's MockOutgoing, so the session
+	// open on it is this set's. Only then does the return take again: before
+	// it the open session is an earlier set's (a wholly ignored set, one with
+	// no test case, one that failed before its staging), and what a take
+	// returned as the open session's own is that set's, found after its end.
+	// Left on the agent, the next session's start keeps it as that set's
+	// (models.OwnedCaptureLoss.EarlierSession), for the next take.
+	ownedApplied, sessionBegun := false, false
 	defer func() {
 		if !ownedApplied {
-			r.reportUnappliedOwnedLosses(context.WithoutCancel(ctx), testSetID)
+			r.reportUnappliedOwnedLosses(context.WithoutCancel(ctx), testSetID, sessionBegun)
 		}
 	}()
+	// beginSession begins the set's session on the agent, and notes when the
+	// agent answered it (sessionBegun): every path that stages a set begins
+	// it here.
+	beginSession := func(ctx context.Context, opts models.OutgoingOptions) error {
+		err := r.mockOutgoingForTestSet(ctx, testSetID, opts)
+		sessionBegun = err == nil
+		return err
+	}
 	// Where the app's ports are published is this run's to say too: the
 	// agent container an attempt starts may publish them on other host ports.
 	publishedPortsOf(r.logger, r.instrumentation).newRun(testSetID)
@@ -2495,7 +2525,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusNoTestsToRun, nil
 	}
 
-	if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {
+	if wholeSetIgnored(r.config.Test.IgnoredTests, testSetID) {
 		timeTaken := time.Since(startTime)
 		testReport := &models.TestReport{
 			Version:   models.GetVersion(),
@@ -3154,7 +3184,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			PassThroughPorts:          r.config.Record.PassThroughPorts,
 			PassThroughHosts:          r.config.Record.PassThroughHosts,
 		}
-		err = r.mockOutgoingForTestSet(runTestSetCtx, testSetID, outgoingOpts)
+		err = beginSession(runTestSetCtx, outgoingOpts)
 		if err != nil {
 			if ctx.Err() != context.Canceled {
 				utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -3318,7 +3348,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			})
 		}
 
-		err = r.mockOutgoingForTestSet(runTestSetCtx, testSetID, models.OutgoingOptions{
+		err = beginSession(runTestSetCtx, models.OutgoingOptions{
 			Rules:                     r.config.BypassRules,
 			MongoPassword:             r.config.Test.MongoPassword,
 			SQLDelay:                  time.Duration(r.config.Test.Delay) * time.Second,
@@ -6454,10 +6484,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			})
 		}
 		stopDrained := false
-		// The final attempt of a run's last set stops the app --keep-app-alive
-		// keeps across sets before its end's read, as a set stops its own
-		// (P101-c): the run ends after it, and no attempt of it follows.
-		if stopAppBeforeSetEnd == nil && serveTest && r.isLastTestSet && r.finalAttempt && r.keepAliveStop != nil {
+		// The final attempt of a run's last set that runs stops the app
+		// --keep-app-alive keeps across sets before its end's read, as a set
+		// stops its own (P101-c): no set after it begins a session
+		// (noLaterSetRuns), and no attempt of it follows.
+		if stopAppBeforeSetEnd == nil && serveTest && (r.isLastTestSet || r.noLaterSetRuns) && r.finalAttempt && r.keepAliveStop != nil {
 			stopAppBeforeSetEnd = r.keepAliveStop
 		}
 		if stopAppBeforeSetEnd != nil {

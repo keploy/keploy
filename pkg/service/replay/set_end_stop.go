@@ -27,7 +27,7 @@ func whyAppNotStopped(cmdType utils.CmdType, serveTest bool) string {
 	case cmdType == utils.DockerCompose:
 		return "the application runs in a docker compose stack whose application's container keploy cannot stop apart from the stack, keploy's agent among it, so keploy did not stop the application before reading the set's end, and a call it makes after that read is not judged"
 	case serveTest:
-		return "--keep-app-alive keeps the application running across test-sets, so keploy did not stop it before reading the set's end, and a call it makes after that read is not judged; it is stopped before a read only at the run's last set, on an attempt no other follows"
+		return "--keep-app-alive keeps the application running across test-sets, so keploy did not stop it before reading the set's end, and a call it makes after that read is not judged; it is stopped before a read only at the last test-set of the run that runs (a later one wholly ignored, or with no test case, runs none), on an attempt no other follows"
 	default:
 		return "keploy did not start the application (no -c), so it could not stop it before reading the set's end, and a call it makes after that read is not judged"
 	}
@@ -71,6 +71,36 @@ func (r *Replayer) awaitAppExit(ctx context.Context, exited <-chan struct{}, sco
 	default:
 		return false
 	}
+}
+
+// wholeSetIgnored reports whether test.ignoredTests ignores all of the set
+// id: it names the set with no test case. RunTestSet returns for such a set
+// before it begins the set's session on the agent.
+func wholeSetIgnored(ignored map[string][]string, id string) bool {
+	tests, ok := ignored[id]
+	return ok && len(tests) == 0
+}
+
+// lastSetThatRuns is the index in testSets of the last set that begins its
+// session on the agent, where the final attempt stops the application
+// --keep-app-alive keeps across sets (P101-c); -1 for none. A set wholly
+// ignored (wholeSetIgnored), or with no test case, returns before it begins
+// one (RunTestSet) and runs nothing of the app's: a stop at the run's
+// teardown, after every read, would leave its closes in no verdict. A set
+// whose test cases cannot be read here counts as one that runs: stopping the
+// app before a set that runs would fail its tests, and RunTestSet fails one
+// that cannot be read.
+func (r *Replayer) lastSetThatRuns(ctx context.Context, testSets []string) int {
+	for i := len(testSets) - 1; i >= 0; i-- {
+		if wholeSetIgnored(r.config.Test.IgnoredTests, testSets[i]) {
+			continue
+		}
+		if cases, err := r.testDB.GetTestCases(ctx, testSets[i]); err == nil && len(cases) == 0 {
+			continue
+		}
+		return i
+	}
+	return -1
 }
 
 // keepAliveStopper gives the app --keep-app-alive keeps across a run's sets a
