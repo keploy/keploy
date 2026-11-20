@@ -5,6 +5,9 @@
 //	                                    GET /fire fires every path at the sink and answers
 //	                                    a constant body (so record and replay agree); the
 //	                                    per-path outcome goes to stderr only
+//	egressprobe ask   IP NAME           asks the DNS server at IP:53 for NAME
+//	                                    (A, over UDP) and prints "answered
+//	                                    rcode=N", or why it got no answer (exit 1)
 //	egressprobe fork1|fork2 ADDR        the double-forked child path (internal)
 //
 // The sink owns the test addresses on its own interface, among them the one
@@ -56,6 +59,17 @@ func main() {
 		sink(os.Args[2:])
 	case "app":
 		app(os.Args[2:])
+	case "ask":
+		if len(os.Args) != 4 {
+			fmt.Fprintln(os.Stderr, "usage: egressprobe ask IP NAME")
+			os.Exit(2)
+		}
+		rcode, err := ask(os.Args[2], os.Args[3])
+		if err != nil {
+			fmt.Printf("no answer: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("answered rcode=%d\n", rcode)
 	case "fork1": // starts fork2 and exits at once, so fork2 is reparented
 		c := exec.Command("/proc/self/exe", "fork2", os.Args[2], os.Args[3])
 		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -173,6 +187,41 @@ func app(args []string) {
 	os.Exit(1)
 }
 
+// ask sends one DNS question for name (type A) to ip:53 over UDP and returns
+// the answer's RCODE. The lane asks the sink so at the start of each phase:
+// an answer says the sink was receiving DNS then, so a DNS row with nothing
+// at the sink failed on the resolver's side, not the sink's.
+func ask(ip, name string) (int, error) {
+	q := []byte{0x52, 0x49, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0} // id "RI", RD, one question
+	for _, l := range strings.Split(strings.TrimSuffix(name, "."), ".") {
+		if l == "" || len(l) > 63 {
+			return 0, fmt.Errorf("bad name %q", name)
+		}
+		q = append(append(q, byte(len(l))), l...)
+	}
+	q = append(q, 0, 0, 1, 0, 1) // root, type A, class IN
+	c, err := net.Dial("udp", net.JoinHostPort(ip, strconv.Itoa(portDNS)))
+	if err != nil {
+		return 0, err
+	}
+	defer c.Close()
+	if err := c.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return 0, err
+	}
+	if _, err := c.Write(q); err != nil {
+		return 0, err
+	}
+	r := make([]byte, 512)
+	n, err := c.Read(r)
+	if err != nil {
+		return 0, err
+	}
+	if n < 12 || r[0] != q[0] || r[1] != q[1] || r[2]&0x80 == 0 {
+		return 0, fmt.Errorf("not an answer to the question (%d bytes)", n)
+	}
+	return int(r[3] & 0x0f), nil
+}
+
 func sendTo(addr, payload string) error {
 	ua, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
@@ -287,24 +336,34 @@ func sink(args []string) {
 					// (keploy's or the runtime's own lookups) as dns-other, so a
 					// count names who leaked. Every name goes to dns-names.txt.
 					// The sink answers the probe's names NXDOMAIN and every
-					// other name REFUSED, so no lookup waits on a timeout, and a
-					// resolver that lists the sink before the runner's own (the
-					// docker phases) moves on to it for the runner's lookups.
-					// A peer name's lookup of a type other than A, AAAA
-					// and MX counts as dns-owned, each with its type in
-					// dns-owned-types.txt.
+					// other name REFUSED, so no lookup waits on a timeout.
+					// The probe's names include the peer's: before the peer
+					// is up its name does not exist, and the sink is the only
+					// upstream of the docker phases' 127.0.0.11, so it must
+					// say so (with no other upstream to move on to, a REFUSED
+					// would reach the app as a server failure). A peer name's
+					// lookup of a type other than A, AAAA and MX counts as
+					// dns-owned, each with its type in dns-owned-types.txt;
+					// one of those types as dns-other. The lane's own question
+					// at the start of a phase (sink-check.*) counts as
+					// dns-check, so it moves no other count.
 					name := qname(buf[:n])
 					rcode := byte(3) // NXDOMAIN
 					qtype := 0
 					if off := 12 + len(name) + 2; name != "" && off+2 <= n {
 						qtype = int(buf[off])<<8 | int(buf[off+1])
 					}
+					peer := strings.HasPrefix(name, "riso-peer")
 					switch {
+					case strings.HasPrefix(name, "sink-check."):
+						p = "dns-check"
 					case strings.HasPrefix(name, "recorded-nx."):
 						p = "dns-recorded"
-					case strings.HasPrefix(name, "riso-peer") && qtype != 1 && qtype != 28 && qtype != 15:
+					case peer && qtype != 1 && qtype != 28 && qtype != 15:
 						p = "dns-owned"
 						appendLine(filepath.Join(*dir, "dns-owned-types.txt"), name+" "+strconv.Itoa(qtype))
+					case peer:
+						p = "dns-other"
 					case !strings.Contains(name, "replay-isolation"):
 						p = "dns-other"
 						rcode = 5 // REFUSED
