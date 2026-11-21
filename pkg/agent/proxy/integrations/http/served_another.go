@@ -290,9 +290,10 @@ func queryValueEntry(class string, members []string) string {
 		}
 		least = min(least, utf8.RuneCountInString(m))
 		for _, r := range m {
-			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
-				others[r] = true
+			if r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+				continue
 			}
+			others[r] = true
 		}
 	}
 	var set strings.Builder
