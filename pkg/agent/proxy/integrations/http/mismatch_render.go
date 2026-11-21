@@ -81,6 +81,46 @@ func scrubSecretsInText(s string) string {
 	return s
 }
 
+// splitTypedDiffValue splits a matcher type_changed diff side ("<type>: <value>")
+// into its JSON type prefix and bare value. ok is false for container kinds
+// ("object", "array") or any value without a known scalar type prefix.
+func splitTypedDiffValue(v string) (prefix, raw string, ok bool) {
+	for _, p := range []string{"string: ", "number: ", "boolean: ", "null: "} {
+		if raw, found := strings.CutPrefix(v, p); found {
+			return p, raw, true
+		}
+	}
+	return "", "", false
+}
+
+// shouldRedactValue reports whether a bare scalar value matches one of the
+// mock's noise patterns or is credential-shaped.
+func (p redactedPlaces) shouldRedactValue(raw string) bool {
+	return p.noisy(raw) || looksLikeSecretValue(raw)
+}
+
+// redactDiffValue redacts a single Expected or Actual field-diff side. For
+// type_changed diffs rendered as "<type>: <value>", it inspects the bare value
+// so obfuscator patterns anchored on the bare value (^...$) and secret-value
+// backstops match cleanly without touching the type prefix.
+func redactDiffValue(v string, isTypeChanged, sensitive bool, places redactedPlaces) string {
+	if sensitive {
+		return valueRedacted
+	}
+	if isTypeChanged {
+		if prefix, raw, ok := splitTypedDiffValue(v); ok {
+			if places.shouldRedactValue(raw) {
+				return prefix + valueRedacted
+			}
+			return v
+		}
+	}
+	if places.shouldRedactValue(v) {
+		return valueRedacted
+	}
+	return v
+}
+
 // redactFieldDiffs redacts the Expected/Actual values of structured field diffs
 // in place. Both values are redacted at a place the recording redacted
 // (places: by the place, as the live value matches none of the recording's
@@ -95,12 +135,9 @@ func redactFieldDiffs(diffs []models.MockFieldDiff, places redactedPlaces, liveP
 	for i := range diffs {
 		places.redactDiff(&diffs[i], livePath)
 		sensitive := isSensitiveHeader(diffs[i].Path)
-		if sensitive || places.noisy(diffs[i].Expected) || looksLikeSecretValue(diffs[i].Expected) {
-			diffs[i].Expected = valueRedacted
-		}
-		if sensitive || places.noisy(diffs[i].Actual) || looksLikeSecretValue(diffs[i].Actual) {
-			diffs[i].Actual = valueRedacted
-		}
+		isTypeChanged := diffs[i].Kind == models.DiffKindTypeChanged
+		diffs[i].Expected = redactDiffValue(diffs[i].Expected, isTypeChanged, sensitive, places)
+		diffs[i].Actual = redactDiffValue(diffs[i].Actual, isTypeChanged, sensitive, places)
 	}
 }
 

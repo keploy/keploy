@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -226,18 +225,16 @@ type strictGate struct {
 	//   closestMock — the FIRST strict-rejected candidate; it passed the
 	//                 lenient match, so it is the closest mock to name in
 	//                 the report.
-	//   fieldDiffs  — field-level drift vs that first candidate
-	//                 (noise-vocabulary "body."-paths with recorded vs live
-	//                 values via matcher.JSONFieldDiffs) so the report says
-	//                 exactly WHICH request fields drifted outside noise.
+	//   closestDiff — inputs captured on that first strict-rejected candidate
+	//                 so field-level diffs are computed lazily in reportDiffs
+	//                 only when no candidate serves (zero diff cost on served
+	//                 calls).
 	rejected    int
 	closestMock string
 	// closestPlaces are the places of closestMock's recording the
-	// obfuscator redacted (placesOf). fieldDiffs hold both values as they
-	// were compared: a report shows them by reportDiffs only, by the places
-	// of every recording it names.
+	// obfuscator redacted (placesOf).
 	closestPlaces redactedPlaces
-	fieldDiffs    []models.MockFieldDiff
+	closestDiff   closestDiffInput
 
 	// exactRejected is how many of rejected the rule of exact serving ruled
 	// out (allowsDrift without strict enforcement, allowsLiterals):
@@ -358,6 +355,13 @@ func (g *strictGate) liveRequestBody() ([]byte, bool) {
 func (g *strictGate) hasLiveBody() bool {
 	_, ok := g.liveRequestBody()
 	return ok
+}
+
+type closestDiffInput struct {
+	mock   *models.Mock
+	engine *mocknoise.Engine
+	live   *mocknoise.JSONBody
+	noise  map[string][]string
 }
 
 type gateVerdict struct {
@@ -538,11 +542,13 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 	if g.closestMock == "" {
 		g.closestMock = mock.Name
 		g.closestPlaces = placesOf(mock)
-		if recorded, recordedOK := g.recordedBody(mock); recordedOK {
-			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
-			// skips those paths so the report shows only non-noise drift.
-			known := engine.KnownNoise(mock, noise)
-			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body.Raw()), known, "body.", 96), mock, g.live)
+		// Defer field-diff computation until reportDiffs so served calls pay
+		// zero diff/serialization overhead when an earlier candidate is refused.
+		g.closestDiff = closestDiffInput{
+			mock:   mock,
+			engine: engine,
+			live:   body,
+			noise:  noise,
 		}
 	}
 	if ce := g.logger.Check(zap.DebugLevel, "schema-noise strict: rejected candidate mock (non-noise request field drifted)"); ce != nil && !seen {
@@ -588,17 +594,35 @@ type bodyNoiseKey struct {
 	leftOut string
 }
 
-// reportDiffs are fieldDiffs as a miss's report shows them: both values of
-// each at a place of places, the places of every recording the report names
-// (closestPlaces among them), redacted.
+// rawFieldDiffs computes the unredacted field-level diffs against the first
+// strict-rejected candidate on demand (only when a miss report is built).
+func (g *strictGate) rawFieldDiffs() []models.MockFieldDiff {
+	in := g.closestDiff
+	if in.mock == nil || in.live == nil {
+		return nil
+	}
+	recorded, recordedOK := g.recordedBody(in.mock)
+	if !recordedOK {
+		return nil
+	}
+	// Use the same (known, typeStrict) pair as StrictRejectRecordedJSONBody
+	// so learned noise tolerates value drift while still reporting missing
+	// fields and JSON type changes.
+	known, typeStrict := in.engine.StrictNoise(in.mock, in.noise)
+	return maskAttributeDiffs(matcher.JSONFieldDiffsWithTypeStrict(string(recorded), string(in.live.Raw()), known, typeStrict, "body.", 96), in.mock, g.live)
+}
+
+// reportDiffs computes the miss report's field diffs against closestMock and
+// redacts both values of each diff at a place of places (closestPlaces among
+// them).
 func (g *strictGate) reportDiffs(places redactedPlaces) []models.MockFieldDiff {
-	return places.fieldDiffs(slices.Clone(g.fieldDiffs), liveStatementOf(g.live, g.liveQuery))
+	return places.fieldDiffs(g.rawFieldDiffs(), liveStatementOf(g.live, g.liveQuery))
 }
 
 // resetDiagnostics clears the rejection diagnostics for a scan that starts over
 // on the same command, keeping the verdicts: they still hold.
 func (g *strictGate) resetDiagnostics() {
-	g.rejected, g.closestMock, g.closestPlaces, g.fieldDiffs, g.exactRejected = 0, "", redactedPlaces{}, nil, 0
+	g.rejected, g.closestMock, g.closestPlaces, g.closestDiff, g.exactRejected = 0, "", redactedPlaces{}, closestDiffInput{}, 0
 }
 
 // queryShape is the literal-split view of a SQL text: the query with every

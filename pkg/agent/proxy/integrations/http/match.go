@@ -2055,23 +2055,6 @@ func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*m
 	return kept
 }
 
-// mergeNoiseMaps combines two noise maps into a fresh map; entries in a win
-// on key collision. Either input may be nil. The result never aliases an
-// input map, so callers may hold or extend it without mutating shared state.
-func mergeNoiseMaps(a, b map[string][]string) map[string][]string {
-	if len(a) == 0 && len(b) == 0 {
-		return nil
-	}
-	out := make(map[string][]string, len(a)+len(b))
-	for k, v := range b {
-		out[k] = v
-	}
-	for k, v := range a {
-		out[k] = v
-	}
-	return out
-}
-
 // stripBodyPrefix returns a copy of the noise map with the leading "body."
 // trimmed from each key, so the keys align with the matcher's root-relative
 // path convention used by ChangedJSONFieldPaths.
@@ -2648,34 +2631,76 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		}
 	}
 
-	// Body diffs: JSON bodies get field-level diffs excluding everything the
-	// matcher itself ignores (learned req_body_noise + user body noise). The
-	// user's entry wins on a key both name: its patterns decide that field,
-	// so a value outside them stays in the diffs.
+	places = heldPlaces(mockDb, closestMock, comparedPool, request.URL.EscapedPath())
+
+	// Body diffs: JSON bodies get field-level diffs using the same noise sets
+	// strict enforcement applies: user body noise keeps full-ignore / pattern
+	// semantics, while learned req_body_noise is type-strict so value drift
+	// stays ignored but a missing field or type change is still named.
+	// Value redaction runs inside the diff builder BEFORE the 256-byte cut so
+	// placeholders and secrets of any length are never truncated before
+	// anchored noise patterns or secret regexes inspect them.
 	if len(diffBody) > 0 && pkg.IsJSON([]byte(mockReq.Body)) && pkg.IsJSON(diffBody) {
-		ignore := mergeNoiseMaps(userBodyNoise, stripBodyPrefix(closestMock.Spec.ReqBodyNoise))
-		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffs(mockReq.Body, string(diffBody), ignore)...)
+		ignore, typeStrict := mocknoise.StrictNoise(userBodyNoise, closestMock.Spec.ReqBodyNoise)
+		fieldDiffs = append(fieldDiffs, mismatch.JSONBodyDiffsWithTypeStrictRedacted(mockReq.Body, string(diffBody), ignore, typeStrict, places.shouldRedactValue)...)
 	}
 
 	// A refusal under strict enforcement without the switch (the switch's
 	// own is reported above) can be of a field keploy.yml's request-body
 	// patterns guard, a side's value outside them (PatternDrift,
 	// StrictReject): the miss names it, the patterns and that side, as the
-	// switch's does.
+	// switch's does. Its diff replaces any lossy kernel diff at the same path
+	// (e.g. folded array elements or a shape change) so the diff and its
+	// FieldReasons always agree.
 	var guarded []strictField
 	if phase == models.MatchPhaseStrict {
 		guarded = patternRefusals(closestMock, request.Header, liveBody, userBodyNoise)
+		type diffKey struct {
+			path string
+			kind models.MockFieldDiffKind
+		}
+		seen := make(map[diffKey]bool, len(guarded))
+		replaced := make(map[string]bool, len(guarded))
 		for _, f := range guarded {
-			if !slices.ContainsFunc(fieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == f.diff.Path }) {
-				fieldDiffs = append(fieldDiffs, f.diff)
+			key := diffKey{path: f.diff.Path, kind: f.diff.Kind}
+			if seen[key] {
+				continue
 			}
+			seen[key] = true
+			diff := f.diff
+			if diff.Kind == models.DiffKindTypeChanged {
+				fieldDiffs = slices.DeleteFunc(fieldDiffs, func(d models.MockFieldDiff) bool {
+					return matcher.HasAncestorPath(d.Path, []string{diff.Path})
+				})
+			}
+			if !replaced[diff.Path] {
+				replaced[diff.Path] = true
+				if idx := slices.IndexFunc(fieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == diff.Path }); idx >= 0 {
+					if diff.Kind == fieldDiffs[idx].Kind {
+						if diff.Expected == "" {
+							diff.Expected = fieldDiffs[idx].Expected
+						}
+						if diff.Actual == "" {
+							diff.Actual = fieldDiffs[idx].Actual
+						}
+						if diff.Kind == models.DiffKindTypeChanged &&
+							matchesTypeKind(fieldDiffs[idx].Expected, diff.Expected) &&
+							matchesTypeKind(fieldDiffs[idx].Actual, diff.Actual) {
+							diff.Expected = fieldDiffs[idx].Expected
+							diff.Actual = fieldDiffs[idx].Actual
+						}
+					}
+					fieldDiffs[idx] = diff
+					continue
+				}
+			}
+			fieldDiffs = append(fieldDiffs, diff)
 		}
 	}
 
 	// Redact secret / obfuscated values out of the structured diffs before they
 	// are attached — they (and the Diff string derived from them) are persisted
 	// into the report YAML and the platform API.
-	places = heldPlaces(mockDb, closestMock, comparedPool, request.URL.EscapedPath())
 	redactFieldDiffs(fieldDiffs, places, diffReq.URL.EscapedPath())
 
 	b := mismatch.NewReport(mismatch.ProtocolHTTP, places.summary(request.Method, request.URL.EscapedPath())).
@@ -2703,6 +2728,13 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		r.FieldReasons = reasonsOf(guarded)
 	}
 	return withRoutePlaces(r, request, closestMock, comparedPool, variableTable(mockDb), places), places
+}
+
+// matchesTypeKind reports whether a matcher type_changed diff side (either a
+// bare container kind such as "object" or a scalar "<type>: <value>") has JSON
+// type kind.
+func matchesTypeKind(side, kind string) bool {
+	return side == kind || strings.HasPrefix(side, kind+": ")
 }
 
 // patternRefusals are the fields of m's recorded request body that

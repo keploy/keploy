@@ -290,8 +290,16 @@ func RenderFieldDiffs(diffs []models.MockFieldDiff) string {
 	for _, d := range diffs {
 		switch d.Kind {
 		case models.DiffKindMissingInLive:
+			if d.Expected == "" {
+				parts = append(parts, fmt.Sprintf("%s: absent in live call", d.Path))
+				continue
+			}
 			parts = append(parts, fmt.Sprintf("%s: recorded %q, absent in live call", d.Path, d.Expected))
 		case models.DiffKindMissingInMock:
+			if d.Actual == "" {
+				parts = append(parts, fmt.Sprintf("%s: absent in recording", d.Path))
+				continue
+			}
 			parts = append(parts, fmt.Sprintf("%s: live %q, absent in recording", d.Path, d.Actual))
 		case models.DiffKindTypeChanged:
 			parts = append(parts, fmt.Sprintf("%s: type changed (recorded %s, live %s)", d.Path, d.Expected, d.Actual))
@@ -661,6 +669,21 @@ func rerecordRemedy(r *models.MockMismatchReport) string {
 // prefixed with "body.".
 func JSONBodyDiffs(recordedBody, liveBody string, ignore map[string][]string) []models.MockFieldDiff {
 	return matcher.JSONFieldDiffs(recordedBody, liveBody, ignore, "body.", maxFieldDiffValueLen)
+}
+
+// JSONBodyDiffsWithTypeStrict is JSONBodyDiffs where paths in `typeStrict`
+// (root-relative learned-dynamic paths, also carried in `ignore`) tolerate
+// same-type value drift while still reporting missing fields and JSON type
+// changes.
+func JSONBodyDiffsWithTypeStrict(recordedBody, liveBody string, ignore map[string][]string, typeStrict map[string]struct{}) []models.MockFieldDiff {
+	return matcher.JSONFieldDiffsWithTypeStrict(recordedBody, liveBody, ignore, typeStrict, "body.", maxFieldDiffValueLen)
+}
+
+// JSONBodyDiffsWithTypeStrictRedacted is JSONBodyDiffsWithTypeStrict where
+// `redactValue`, when non-nil, inspects each uncut scalar value BEFORE
+// maxFieldDiffValueLen truncation.
+func JSONBodyDiffsWithTypeStrictRedacted(recordedBody, liveBody string, ignore map[string][]string, typeStrict map[string]struct{}, redactValue func(string) bool) []models.MockFieldDiff {
+	return matcher.JSONFieldDiffsWithTypeStrictRedacted(recordedBody, liveBody, ignore, typeStrict, "body.", maxFieldDiffValueLen, redactValue)
 }
 
 // HeaderKeyDiffs reports header keys present on one side and missing on the

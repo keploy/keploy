@@ -160,6 +160,30 @@ func (e *Engine) KnownNoise(m *models.Mock, userNoise map[string][]string) map[s
 	return MergeKnown(userNoise, userDecided(userNoise, StripBodyPrefix(e.adapter.StoredNoise(m))))
 }
 
+// StrictNoise returns the root-relative known-noise set and learned type-strict
+// set that strict enforcement applies to stored learned noise alongside
+// userNoise. Learned paths keep their values ignored while their presence and
+// JSON type stay enforced; user-configured entries keep their full-ignore or
+// value-pattern semantics.
+func StrictNoise(userNoise, stored map[string][]string) (known map[string][]string, typeStrict map[string]struct{}) {
+	_, known, typeStrict = strictNoiseSets(userNoise, stored)
+	return known, typeStrict
+}
+
+// StrictNoise returns the root-relative known-noise set and learned type-strict
+// set for m under strict enforcement, matching StrictRejectRecordedJSONBody.
+func (e *Engine) StrictNoise(m *models.Mock, userNoise map[string][]string) (known map[string][]string, typeStrict map[string]struct{}) {
+	if e == nil {
+		return userNoise, nil
+	}
+	return StrictNoise(userNoise, e.adapter.StoredNoise(m))
+}
+
+func strictNoiseSets(userNoise, stored map[string][]string) (learned, known map[string][]string, typeStrict map[string]struct{}) {
+	learned = userDecided(userNoise, StripBodyPrefix(stored))
+	return learned, knownWithLearned(userNoise, learned), learnedTypeStrict(userNoise, learned)
+}
+
 // Detect returns the new "body."-prefixed schema-noise to record on the mock for
 // a live request body, plus whether the bodies were comparable (both JSON).
 //
@@ -291,9 +315,7 @@ func (e *Engine) StrictRejectRecordedJSONBody(m *models.Mock, recorded *JSONBody
 	// typeStrict, still fully exclude learned noise; typeStrict additionally marks
 	// them so a JSON parser type-enforces rather than fully ignores (collectJSON
 	// consults typeStrict first). User-configured noise stays full-ignore/regex.
-	learned := userDecided(userNoise, StripBodyPrefix(stored))
-	known := knownWithLearned(userNoise, learned)
-	typeStrict := learnedTypeStrict(userNoise, learned)
+	learned, known, typeStrict := strictNoiseSets(userNoise, stored)
 	guarded := e.userGuardedDrift(m, recorded, live, userNoise, learned)
 	var d map[string][]string
 	var comparable bool
