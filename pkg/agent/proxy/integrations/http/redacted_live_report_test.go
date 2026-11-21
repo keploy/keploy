@@ -315,7 +315,7 @@ func TestMissReportRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 					}
 					diag = d
 				}
-				r := newHTTP().buildHTTPMismatchReport(request, []byte(c.live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, diag)
+				r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(c.live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, diag)
 				if r == nil {
 					t.Fatal("no report")
 				}
@@ -453,7 +453,7 @@ func TestSessionHintNamesAnEmptyPathSlash(t *testing.T) {
 			m.Spec.Metadata = map[string]string{models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
 			request, _ := http.NewRequest("POST", "http://api.example", strings.NewReader(`{"x":"bravo2"}`))
 			request.Header.Set("Content-Type", "application/json")
-			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"x":"bravo2"}`), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, nil)
+			r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(`{"x":"bravo2"}`), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, nil)
 			if r == nil || !strings.Contains(r.NextSteps, `pathPrefix: "/"}`) {
 				t.Fatalf("the hint does not name the empty path \"/\": %+v", r)
 			}
@@ -472,7 +472,7 @@ func TestMissReportFieldWithoutValuesIsNotTwoEmptyValues(t *testing.T) {
 	}
 	request, _ := http.NewRequest("POST", "http://api.example/x", strings.NewReader(`x=bravo2`))
 	request.Header = in.header.Clone()
-	r := newHTTP().buildHTTPMismatchReport(request, []byte(`x=bravo2`), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, diag)
+	r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(`x=bravo2`), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, diag)
 	if r == nil || !strings.Contains(r.Diff, "body.x") {
 		t.Fatalf("the report does not name body.x: %+v", r)
 	}
@@ -536,7 +536,7 @@ func TestAnsweredAndPairedReportsRedactTheLiveValueAtARedactedSegment(t *testing
 					t.Fatalf("the walk answered %d (%+v); want the miss naming %s", i, answered, m.Name)
 				}
 				diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 1, pool: []*models.Mock{m}, answered: answered}
-				r := newHTTP().buildHTTPMismatchReport(request, []byte(c.live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, diag)
+				r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(c.live), &mockMemDb{mocks: []*models.Mock{m}}, nil, nil, nil, diag)
 				noSecret(t, r, true)
 				if got := c.carried(t, r); len(got) > 0 {
 					t.Errorf("the report carries %q: summary %s", got, r.ActualSummary)
@@ -570,7 +570,7 @@ func TestAnsweredAndPairedReportsRedactTheLiveValueAtARedactedSegment(t *testing
 						r = e.MismatchReport()
 					}
 				})
-				reportPairing(ctx, in, m, integrations.AnsweredCall{}, false)
+				reportPairing(ctx, in, m, integrations.AnsweredCall{}, false, integrations.CallRound{})
 				noSecret(t, r, true)
 				if got := c.carried(t, r); len(got) > 0 {
 					t.Errorf("the report carries %q: summary %s", got, r.ActualSummary)
@@ -680,7 +680,7 @@ func TestVariableMissRedactsTheLiveValueAtARedactedPlace(t *testing.T) {
 			wantProblem(t, ok, diag, c.why)
 			request, _ := http.NewRequest(c.live.method, "http://store"+c.live.path, strings.NewReader(c.live.body))
 			request.Header = in.header.Clone()
-			r := h.buildHTTPMismatchReport(request, []byte(c.live.body), db, nil, nil, nil, diag)
+			r := h.buildHTTPMismatchReport(context.Background(), request, []byte(c.live.body), db, nil, nil, nil, diag)
 			noSecret(t, r, false)
 			if r != nil && (r.MatchPhase != models.MatchPhaseVariable || !strings.Contains(r.Diff, valueRedacted)) {
 				t.Errorf("the variable miss does not show the place redacted: phase %s Diff %q", r.MatchPhase, r.Diff)
@@ -707,14 +707,14 @@ func TestVariableMissKeepsWhatTheRecordingDidNotRedact(t *testing.T) {
 	}
 	ok, _, diag := matchVar(t, h, db, liveReq("GET", "/orders/ord-other-3", ""))
 	p := wantProblem(t, ok, diag, "this call sent")
-	r := h.buildHTTPMismatchReport(makeReq("GET", "/orders/ord-other-3"), nil, db, nil, nil, nil, diag)
+	r := h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/orders/ord-other-3"), nil, db, nil, nil, nil, diag)
 	if r == nil || r.Diff != p.diff() || !strings.Contains(r.Diff, `"ord-live-9"`) || !strings.Contains(r.Diff, `"ord-other-3"`) {
 		t.Fatalf("the report's Diff is not the problem's evidence, its values shown: %+v", r)
 	}
 	db = &varDb{perTest: createAndReadBack("ord-rec-1")[1:]}
 	ok, _, diag = matchVar(t, h, db, liveReq("GET", "/orders/ord-live-9", ""))
 	p = wantProblem(t, ok, diag, "before the call that binds it")
-	r = h.buildHTTPMismatchReport(makeReq("GET", "/orders/ord-live-9"), nil, db, nil, nil, nil, diag)
+	r = h.buildHTTPMismatchReport(context.Background(), makeReq("GET", "/orders/ord-live-9"), nil, db, nil, nil, nil, diag)
 	if r == nil || r.Diff != p.diff() {
 		t.Fatalf("the report's Diff is not the problem's evidence: %+v", r)
 	}
@@ -789,8 +789,10 @@ func TestMissErrorAndLogsNameTheCallRedacted(t *testing.T) {
 						t.Errorf("the report names the call %q, want %q", reported.ActualSummary, want)
 					}
 					// With the switch on the miss is reported, not returned.
-					if !on && (err == nil || !strings.Contains(err.Error(), "for "+want)) {
-						t.Errorf("decodeHTTP = %v, want the miss's error naming the call %q", err, want)
+					// The error, which is logged, names the call by its
+					// path's shape; the report names it for the user.
+					if !on && (err == nil || !strings.Contains(err.Error(), "for POST /{}/{}/{}")) {
+						t.Errorf("decodeHTTP = %v, want the miss's error naming the call by its shape", err)
 					}
 					if err != nil && (strings.Contains(err.Error(), "zq9Plm") || strings.Contains(err.Error(), "3Xw7Rt")) {
 						t.Errorf("the miss's error carries the secret: %v", err)
@@ -805,11 +807,11 @@ func TestMissErrorAndLogsNameTheCallRedacted(t *testing.T) {
 	}
 }
 
-// The "variable bound" debug line shows a value bound at a place the
-// recording redacted redacted, and one bound elsewhere as it is. A place
-// whose name ends in #<digits> ("body.ref#2") is read as the check read it,
-// the whole name where the recording holds it, not a word of "body.ref".
-func TestVariableBoundLogRedactsAValueAtARedactedPlace(t *testing.T) {
+// The "variable bound" debug line says whether a value was bound at a place
+// the recording redacted, and logs no value, redacted or not. A place whose
+// name ends in #<digits> ("body.ref#2") is read as the check read it, the
+// whole name where the recording holds it, not a word of "body.ref".
+func TestVariableBoundLogNamesARedactedPlace(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const rec, recRef, liveRef = "REDACTED_abc", "REDACTED_def", "Rf7Lq2Zx9Wn"
 	m := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"`+rec+`","item":"pen","ref#2":"`+recRef+`"}`, 201, `{}`,
@@ -822,15 +824,8 @@ func TestVariableBoundLogRedactsAValueAtARedactedPlace(t *testing.T) {
 	if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"`+liveBound+`","item":"pencil","ref#2":"`+liveRef+`"}`)); !ok {
 		t.Fatal("the binding call should match")
 	}
-	values := map[string]string{}
-	for _, e := range logs.FilterMessage("variable bound").All() {
-		v, _ := e.ContextMap()["variable"].(string)
-		values[v], _ = e.ContextMap()["value"].(string)
-	}
-	if values["orderId"] != valueRedacted || values["ref"] != valueRedacted || values["item"] != "pencil" {
-		t.Errorf("logged the bound values as %v, want orderId and ref redacted and item as it is", values)
-	}
-	loggedNone(t, logs, liveBound, liveRef)
+	wantBound(t, logs, map[string]string{"orderId": valueRedacted, "ref": valueRedacted, "item": "pencil"})
+	loggedNone(t, logs, liveBound, liveRef, "pencil")
 }
 
 // A variable used at a path segment the recording redacted, after a
@@ -857,7 +852,7 @@ func TestVariableMissAfterAnEscapedSlashRedactsTheSegment(t *testing.T) {
 	}
 	request, _ := http.NewRequest("GET", "http://store/a%2Fb/"+liveSecret, nil)
 	request.Header = in.header.Clone()
-	r := h.buildHTTPMismatchReport(request, nil, db, nil, nil, nil, diag)
+	r := h.buildHTTPMismatchReport(context.Background(), request, nil, db, nil, nil, nil, diag)
 	noSecret(t, r, true)
 	if want := "GET /a%2Fb/" + valueRedacted; r != nil && r.ActualSummary != want {
 		t.Errorf("the miss names the call %q, want %q", r.ActualSummary, want)
@@ -883,7 +878,7 @@ func TestAPairedCallWithAnEmptyPathIsNamedSlash(t *testing.T) {
 	m := recorded("m", "/REDACTED_abc", nil, "")
 	m.Noise = []string{`^REDACTED_abc$`}
 	in := &req{method: "GET", url: &url.URL{}, header: http.Header{"Host": {"api.example"}}}
-	reportPairing(ctx, in, m, integrations.AnsweredCall{}, false)
+	reportPairing(ctx, in, m, integrations.AnsweredCall{}, false, integrations.CallRound{})
 	if len(got) != 1 || got[0].ActualSummary != "GET /" {
 		t.Fatalf("reports %+v", got)
 	}
@@ -961,7 +956,7 @@ func TestAMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 					}
 					diag = d
 				}
-				r := newHTTP().buildHTTPMismatchReport(request, []byte(c.body), &mockMemDb{mocks: []*models.Mock{b, a, far}}, nil, nil, nil, diag)
+				r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(c.body), &mockMemDb{mocks: []*models.Mock{b, a, far}}, nil, nil, nil, diag)
 				if r == nil {
 					t.Fatal("no report")
 				}
@@ -1034,7 +1029,7 @@ func TestAnAnsweredMissIsRedactedByEveryRecordingOfThePool(t *testing.T) {
 				diag.pool = []*models.Mock{b}
 				db = answeredStore{mockMemDb: &mockMemDb{mocks: []*models.Mock{b}}, answered: []*models.Mock{a}, complete: true}
 			}
-			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{"x":"bravo2"}`), db, nil, nil, nil, diag)
+			r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(`{"x":"bravo2"}`), db, nil, nil, nil, diag)
 			if r == nil || r.ClosestMock != "b" {
 				t.Fatalf("the report %+v does not name the walk's last recording b", r)
 			}
@@ -1061,8 +1056,7 @@ func (reusableReadFails) GetSessionMocks() ([]*models.Mock, error) {
 }
 
 // A miss whose pool cannot be read names the call's path by its shape only,
-// in its summary and in the error the proxy logs at ERROR (missedCall):
-// keploy cannot tell there which segment holds a secret. A miss with no
+// in its summary: keploy cannot tell there which segment holds a secret. A miss with no
 // closest recording is named redacted by the places of every recording of
 // its pool: a variable's recording that left the pool, and under the proven
 // switch a test variable's route place (withRoutePlaces).
@@ -1081,9 +1075,6 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 		if r.ActualSummary != summary || strings.Contains(all, liveSecret) {
 			t.Errorf("summary %q, want %q, and no secret in the report: %s", r.ActualSummary, summary, all)
 		}
-		if got := missedCall(request, r); got != summary {
-			t.Errorf("the error names %q, want %q", got, summary)
-		}
 	}
 	// The recording of the pool that redacted the call's segment 1.
 	other := recorded("other", "/x/REDACTED_abc/y", map[string]string{"Content-Type": "application/json"}, `{}`)
@@ -1092,7 +1083,7 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 		t.Run("the-pool-cannot-be-read/"+mode, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
 			request := newReq()
-			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{}`), &mockMemDb{err: errors.New("read failed")}, nil, nil, nil, nil)
+			r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(`{}`), &mockMemDb{err: errors.New("read failed")}, nil, nil, nil, nil)
 			want := "POST /{}/{}/{}"
 			if mode == "on" && len(r.VariablePlaces) > 0 {
 				want = "POST /" + valueRedacted
@@ -1103,7 +1094,7 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 		t.Run("the-reusable-mocks-cannot-be-read/"+mode, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
 			request := newReq()
-			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{}`), reusableReadFails{&mockMemDb{mocks: []*models.Mock{other}}}, nil, nil, nil, nil)
+			r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(`{}`), reusableReadFails{&mockMemDb{mocks: []*models.Mock{other}}}, nil, nil, nil, nil)
 			if !strings.Contains(r.NextSteps, "Failed to read mock database") {
 				t.Fatalf("the row is of a pool that cannot be read: %+v", r)
 			}
@@ -1116,7 +1107,7 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 			t.Run("the-pool-cannot-be-read/off-stated-lifetime", func(t *testing.T) {
 				t.Setenv(provenswitch.Env, "")
 				request := newReq()
-				r := newHTTP().buildHTTPMismatchReport(request, []byte(`{}`), statedDb{MockMemDb: &mockMemDb{err: errors.New("read failed")}, states: true}, nil, nil, nil, nil)
+				r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(`{}`), statedDb{MockMemDb: &mockMemDb{err: errors.New("read failed")}, states: true}, nil, nil, nil, nil)
 				check(t, r, request, "POST /{}/{}/{}")
 				sessionHintMatchesTheCall(t, r, request)
 			})
@@ -1128,7 +1119,7 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[string]string{"off": "", "on": "1"}[mode])
 			request := newReq()
 			diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 1, pool: []*models.Mock{other}}
-			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{}`), &mockMemDb{}, nil, nil, nil, diag)
+			r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(`{}`), &mockMemDb{}, nil, nil, nil, diag)
 			if r.ClosestMock != "" {
 				t.Fatalf("the row is of a miss with no closest recording, not %q", r.ClosestMock)
 			}
@@ -1144,7 +1135,7 @@ func TestAMissWithNoClosestRecordingNamesNoSecret(t *testing.T) {
 			kept := recorded("kept", "/x/plain/y", map[string]string{"Content-Type": "application/json"}, `{}`)
 			diag := &matchDiag{phase: models.MatchPhaseExhausted, candidates: 1, pool: []*models.Mock{kept}}
 			db := answeredStore{mockMemDb: &mockMemDb{}, answered: []*models.Mock{other}, complete: true}
-			r := newHTTP().buildHTTPMismatchReport(request, []byte(`{}`), db, nil, nil, nil, diag)
+			r := newHTTP().buildHTTPMismatchReport(context.Background(), request, []byte(`{}`), db, nil, nil, nil, diag)
 			if r.ClosestMock != "" {
 				t.Fatalf("the row is of a miss with no closest recording, not %q", r.ClosestMock)
 			}

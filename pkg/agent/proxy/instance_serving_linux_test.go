@@ -106,6 +106,19 @@ func TestEachTestWorkerIsServedFromAManagerOfItsOwn(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Each worker's test view was installed on its own manager's round,
+	// which that worker's test end reads (ExactTestInstalled).
+	for inst, w := range map[uint32]agent.ExactServer{1: w1, 2: w2} {
+		r, ok := w.(agent.ExactTestInstallReader)
+		if !ok {
+			t.Fatalf("worker %d's server cannot say where its test's view was installed", inst)
+		}
+		epoch, bounds, ok := r.ExactTestInstalled("T")
+		wantEpoch, wantBounds, wantOK := instanceMgrOf(t, p, inst).ExactTestInstalled("T")
+		if !ok || !wantOK || epoch != wantEpoch || bounds != wantBounds {
+			t.Fatalf("worker %d's test was installed at %d/%d (%v), want its own manager's %d/%d (%v)", inst, epoch, bounds, ok, wantEpoch, wantBounds, wantOK)
+		}
+	}
 	pt, _ := m1.GetPerTestMocksInWindow()
 	if len(pt) != 1 || !m1.DeleteFilteredMock(*pt[0]) {
 		t.Fatalf("worker 1 could not answer its test's call from its own mock: %v", exactNames(pt))
@@ -141,6 +154,9 @@ func TestEachTestWorkerIsServedFromAManagerOfItsOwn(t *testing.T) {
 	}
 	if _, _, _, on := w1.ExactTestOutcome(); on {
 		t.Fatal("worker 1's test outlived the session that served it")
+	}
+	if _, _, on := w1.(agent.ExactTestInstallReader).ExactTestInstalled("T"); on {
+		t.Fatal("worker 1's test's install outlived the session that served it")
 	}
 }
 
@@ -522,7 +538,7 @@ func TestEachTestWorkersMissesAreReadByItsOwnTestsAlone(t *testing.T) {
 	w1, w2 := s1.(workerMisses), s2.(workerMisses)
 	miss := func(call string, inst uint32) {
 		report := &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: call}
-		p.sendMockNotFoundErrorFrom(models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
+		p.sendMockNotFoundErrorFrom(context.Background(), models.NewMockMismatchError(models.ErrNoMockMatched, report), 0, inst, nil)
 	}
 	read := func(name string, r workerMisses) []string {
 		t.Helper()

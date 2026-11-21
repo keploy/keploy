@@ -1044,7 +1044,7 @@ func TestOutcomeAVariableBoundAtAWordIsNamedAtThatWord(t *testing.T) {
 		t.Fatal("the tracker named no variable")
 	}
 	seen := Seen{Side: Request, Leaf: oText(place, "[E2E] app-crud-1793224420036884439"), Live: "[E2E] app-crud-1793311234567890123", Place: place}
-	want := []BoundWord{{Name: name, Word: 3, Recorded: "1793224420036884439", Live: "1793311234567890123"}}
+	want := []BoundWord{{Name: name, Word: 3, Recorded: "1793224420036884439", Live: "1793311234567890123", Place: place}}
 	if got := tr.BoundWords(n, "mock-201", seen); !reflect.DeepEqual(got, want) {
 		t.Fatalf("FALSE RED: the words of the first send: %+v; want %+v", got, want)
 	}
@@ -1069,6 +1069,88 @@ func TestOutcomeAVariableBoundAtAWordIsNamedAtThatWord(t *testing.T) {
 	}
 }
 
+// api-server's TestTestSuiteCRUD: the client test names a suite
+// "[E2E] suite-<its UnixNano>" and POSTs it; the learn step binds the
+// nanos (word 2) at the test case's body.name, the place its replay binds
+// it at, and the GET's find answers the suite's latest event, which holds
+// the name whole. The client's request reaches the tracker by its arrival
+// (Incoming), whose leaves are named by their paths alone: the tracker
+// still tells the word the test case binds, so the find answers this run's
+// name. A stand-in served the recorded one, and the test failed its assert
+// of the name it made. A leaf of a test case the tracker took no request of,
+// and a leaf of a body that declares no media type (no place a replay binds
+// at, seenVar), name nothing.
+func TestOutcomeAWordBoundAtAClientTestsRequestIsNamedAtThatWord(t *testing.T) {
+	const rec, live = "[E2E] suite-1794311366512792518", "[E2E] suite-1794311434794323879"
+	body := func(name string) string { return `{"description":"e2e test suite","name":"` + name + `"}` }
+	setUp := func(ct string) (*Tracker, uint64, Earlier) {
+		tr := NewTracker()
+		tr.SetClientTests(true)
+		tr.Begin()
+		recReq := &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/client/v1/apps/2bfcff7f-864a-42d1-9aab-413193282423/test-suites",
+			Timestamp: time.Now().Add(-time.Hour), Header: map[string]string{"Content-Type": ct}, Body: body(rec)}
+		tr.SetCases([]ClientCase{{Name: "post-client-v1-apps-by-id-test-suites-5", Req: recReq}})
+		sent := *recReq
+		sent.Body, sent.Timestamp = body(live), time.Now()
+		if !tr.Incoming(&sent, "", time.Now()) {
+			t.Fatal("the run's POST paired with no recorded request")
+		}
+		n, earlier, _, _ := tr.Test()
+		for _, e := range earlier {
+			if e.Mock == givenPlace("post-client-v1-apps-by-id-test-suites-5") {
+				return tr, n, e
+			}
+		}
+		t.Fatalf("the test's places %+v hold no client request", earlier)
+		return nil, 0, Earlier{}
+	}
+	leafOf := func(e Earlier) Seen {
+		for _, s := range e.Seen {
+			if s.Leaf.Path == "body.name" {
+				return s
+			}
+		}
+		t.Fatalf("the client's request holds no body.name: %+v", e.Seen)
+		return Seen{}
+	}
+
+	tr, n, e := setUp("application/json")
+	seen := leafOf(e)
+	if seen.Place != "" {
+		t.Fatalf("the client's leaf has place %q; this row reads a leaf named by its path alone", seen.Place)
+	}
+	name, ok := tr.Name(n, e.Mock, "body.name#2", nil)
+	if !ok {
+		t.Fatal("the tracker named no variable")
+	}
+	want := []BoundWord{{Name: name, Word: 2, Recorded: "1794311366512792518", Live: "1794311434794323879", Place: "body.name"}}
+	if got := tr.BoundWords(n, e.Mock, seen); !reflect.DeepEqual(got, want) {
+		t.Fatalf("FALSE RED (TestTestSuiteCRUD's GET answers the recorded name): the words of the client's request: %+v; want %+v", got, want)
+	}
+	// A variable named at the same word of a test case whose request the
+	// running test never took: the leaf is not that request's, so it names
+	// nothing there.
+	other := givenPlace("post-client-v1-apps-by-id-test-suites-6")
+	if _, ok := tr.Name(n, other, "body.name#2", nil); !ok {
+		t.Fatal("the tracker named no variable at the other test case")
+	}
+	if got := tr.BoundWords(n, other, seen); len(got) != 0 {
+		t.Errorf("a test case the tracker took no request of: %+v; want no variable", got)
+	}
+
+	tr, n, e = setUp("")
+	seen = leafOf(e)
+	if !seen.Undeclared {
+		t.Fatalf("a body that declares no media type: %+v; want its leaves read as undeclared", seen)
+	}
+	if _, ok := tr.Name(n, e.Mock, "body.name#2", nil); !ok {
+		t.Fatal("the tracker named no variable")
+	}
+	if got := tr.BoundWords(n, e.Mock, seen); len(got) != 0 {
+		t.Errorf("a leaf of a body that declares no media type: %+v; want no variable", got)
+	}
+}
+
 // A run's variable (a place of the start-up) keeps its word across the set.
 func TestOutcomeARunVariableBoundAtAWordIsNamedInEveryTest(t *testing.T) {
 	tr := NewTracker()
@@ -1080,7 +1162,7 @@ func TestOutcomeARunVariableBoundAtAWordIsNamedInEveryTest(t *testing.T) {
 	}
 	tr.Begin()
 	seen := Seen{Side: Request, Leaf: oText(place, "sess-0b1e"), Live: "sess-77c4", Place: place}
-	want := []BoundWord{{Name: name, Word: 1, Recorded: "0b1e", Live: "77c4"}}
+	want := []BoundWord{{Name: name, Word: 1, Recorded: "0b1e", Live: "77c4", Place: place}}
 	if got := tr.BoundWords(tr.Epoch(), "mock-1", seen); !reflect.DeepEqual(got, want) {
 		t.Errorf("a run's variable in a later test: %+v; want %+v", got, want)
 	}

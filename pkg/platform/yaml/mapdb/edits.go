@@ -48,6 +48,10 @@ var extraParses atomic.Int64
 // hand edit (holdsEdits), which costs no parse of data, or when old has
 // nothing to keep it in, or either does not parse.
 func keepEdits(old []byte, od *yamlLib.Node, data []byte, renames map[string]string) ([]byte, Unkept) {
+	if od == plainDoc {
+		// old is keploy's encoding of what it decodes to (decodeInto).
+		return data, Unkept{}
+	}
 	if od == nil {
 		if len(old) == 0 {
 			return data, Unkept{}

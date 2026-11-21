@@ -93,11 +93,19 @@ func (m *SyncMockManager) forgiveMappingsBefore(gen uint64) {
 	}
 }
 
+// lateOwed is one mapping to a past window, owed (oweLateMappingsLocked): when
+// the request of its earliest mock was made, which dates it on the stream
+// (models.TestMockMapping.RequestedAt), and the func that pays it.
+type lateOwed struct {
+	at   time.Time
+	paid func()
+}
+
 // oweLateMappingsLocked owes each of a batch's mappings to past windows
-// (late), timed by the earliest of its mocks in the batch, and returns their
-// pay funcs by test name: none when no mapping stream is wired. Caller holds
-// mu, before the batch's mocks are handed on.
-func (m *SyncMockManager) oweLateMappingsLocked(wired bool, late map[string][]string, batch []ownedMock) map[string]func() {
+// (late), timed by the earliest of its mocks in the batch, and returns them by
+// test name: none when no mapping stream is wired. Caller holds mu, before the
+// batch's mocks are handed on.
+func (m *SyncMockManager) oweLateMappingsLocked(wired bool, late map[string][]string, batch []ownedMock) map[string]lateOwed {
 	if !wired || len(late) == 0 {
 		return nil
 	}
@@ -107,14 +115,27 @@ func (m *SyncMockManager) oweLateMappingsLocked(wired bool, late map[string][]st
 			requested[om.mock.Name] = om.mock.Spec.ReqTimestampMock
 		}
 	}
-	paid := make(map[string]func(), len(late))
+	owed := make(map[string]lateOwed, len(late))
 	for tn, ids := range late {
 		if len(ids) == 0 {
 			continue
 		}
-		paid[tn] = m.oweMapping(earliestOf(ids, requested))
+		at := earliestOf(ids, requested)
+		owed[tn] = lateOwed{at: at, paid: m.oweMapping(at)}
 	}
-	return paid
+	return owed
+}
+
+// sendLateMappings puts each of late's mappings on ch, dated and paid as it
+// was owed (oweLateMappingsLocked). Called once m.mu is released.
+func (m *SyncMockManager) sendLateMappings(ch chan<- models.TestMockMapping, late map[string][]string, owed map[string]lateOwed) {
+	for tn, ids := range late {
+		if len(ids) == 0 {
+			continue
+		}
+		o := owed[tn]
+		m.sendMapping(ch, models.TestMockMapping{TestName: tn, MockIDs: ids, RequestedAt: o.at}, o.paid)
+	}
 }
 
 // earliestOf is the earliest request time among the mocks named ids; zero,

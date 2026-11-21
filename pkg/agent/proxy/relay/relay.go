@@ -10,12 +10,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -126,8 +126,10 @@ type Relay struct {
 	finMu                sync.Mutex
 	clientFIN, clientEOF atomic.Bool
 	// clientWriteErr is the error the first failed write to the client
-	// failed with (noteClientWriteFailed), for clientEnd.
-	clientWriteErr atomic.Pointer[error]
+	// failed with (noteClientWriteFailed), and clientResetRead the reset the
+	// client's forwarder read after the client's FIN, and read as that FIN
+	// (clientFINBeforeReset), for clientEnd.
+	clientWriteErr, clientResetRead atomic.Pointer[error]
 	// clientStopped: destination chunks were refused, and no later one is
 	// teed. Set under verdictMu, read without it.
 	clientStopped atomic.Bool
@@ -255,10 +257,14 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		// number by.
 		panic("relay: the destination is not read through a connseq.Upstream: dial it with util.DialUpstream")
 	}
+	r.client = clientSocketOf(src, cfg.Logger)
+	// On macOS the client's socket reads its client's acknowledgements from
+	// the count of every byte written to it that the proxy put on it at its
+	// accept (countFromAccept).
+	countFromAccept(src, r.client)
 	r.src.Store(&src)
 	r.dst.Store(&dst)
 	r.lastLook = make(chan struct{})
-	r.client = clientSocketOf(src)
 	if r.client == nil && canAskClientSockets && src != nil && cfg.Logger != nil {
 		cfg.Logger.Debug("relay: the client conn has no TCP socket under it to ask; what the destination sends "+
 			"once the client has closed is teed as it is written",
@@ -582,10 +588,18 @@ func (r *Relay) run(ctx context.Context) error {
 	// dead peer) keeps the original immediate teardown: there is no
 	// half-open state to preserve when the connection is already broken.
 	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[net.Conn]) {
-		if r.cfg.HalfCloseGrace < 0 || !errors.Is(err, io.EOF) || !halfCloseWrite(writeSide.Load()) {
+		halfClose := r.cfg.HalfCloseGrace >= 0 && errors.Is(err, io.EOF)
+		// The client's socket is asked before the half-close whether a FIN
+		// can go (clientClosedBeforeFIN): a shutdown of a connection the
+		// client has reset succeeds on Windows, and sends nothing.
+		clientFIN := halfClose && writeSide == &r.src && !r.clientClosedBeforeFIN()
+		if !halfClose || !halfCloseWrite(writeSide.Load()) {
 			closeStopping()
 			r.nudgeDeadline(nudgeSide.Load())
 			return
+		}
+		if c := writeSide.Load(); clientFIN && c != nil {
+			r.noteClientFINSent(*c)
 		}
 		if log := r.cfg.Logger; log != nil {
 			log.Debug("relay: peer half-closed; forwarding FIN and draining the opposite direction",
@@ -1116,27 +1130,20 @@ func (r *Relay) forward(
 
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if dir == fakeconn.FromClient {
-					// The client's FIN, numbered here, as its Read returns
-					// and before onForwarderExit forwards it to the
-					// destination, by the rule every client chunk is
-					// numbered by: after every byte the destination had sent
-					// the proxy by then. Every destination chunk numbered
-					// after it is marked as captured after the client closed
-					// (fakeconn.Chunk.AfterClientClose), the destination's
-					// answer to the FIN itself among them, since it can come
-					// only once the FIN is forwarded.
-					r.order.ClientClosed()
-					// And looked for at the client's socket, before the
-					// destination can answer it (client_took.go).
-					r.clientFINRead()
-				}
-				if r.cfg.PeerEnded != nil {
-					r.cfg.PeerEnded(dir, false)
-				}
-				return io.EOF
+				return r.peerFINRead(dir)
 			}
-			if errors.Is(err, syscall.ECONNRESET) {
+			// A reset, as each OS's socket gives it (on Windows,
+			// Winsock's own errors: neterr.IsPeerReset).
+			if neterr.IsPeerReset(err) {
+				if dir == fakeconn.FromClient && r.clientFINBeforeReset(err) {
+					// macOS and Windows: the client's FIN came before the
+					// reset this read returned (client_took_darwin.go,
+					// client_socket_windows.go). Read as the FIN, as Linux
+					// returns it, and the reset kept for clientEnd.
+					reset := err
+					r.clientResetRead.CompareAndSwap(nil, &reset)
+					return r.peerFINRead(dir)
+				}
 				// The peer reset the connection: told as its end, as a FIN
 				// is, before onForwarderExit tears the other direction down.
 				if r.cfg.PeerEnded != nil {
@@ -1171,6 +1178,29 @@ func (r *Relay) forward(
 			return err
 		}
 	}
+}
+
+// peerFINRead is a forwarder's read of its peer's end (io.EOF), told as its
+// end before onForwarderExit forwards the FIN on.
+func (r *Relay) peerFINRead(dir fakeconn.Direction) error {
+	if dir == fakeconn.FromClient {
+		// The client's FIN, numbered here, as its Read returns and before
+		// onForwarderExit forwards it to the destination, by the rule every
+		// client chunk is numbered by: after every byte the destination had
+		// sent the proxy by then. Every destination chunk numbered after it
+		// is marked as captured after the client closed
+		// (fakeconn.Chunk.AfterClientClose), the destination's answer to the
+		// FIN itself among them, since it can come only once the FIN is
+		// forwarded.
+		r.order.ClientClosed()
+		// And looked for at the client's socket, before the destination can
+		// answer it (client_took.go).
+		r.clientFINRead()
+	}
+	if r.cfg.PeerEnded != nil {
+		r.cfg.PeerEnded(dir, false)
+	}
+	return io.EOF
 }
 
 // readNow is the time a forwarder stamps a chunk it read with when its socket

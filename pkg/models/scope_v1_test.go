@@ -1,6 +1,7 @@
 package models
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -104,7 +105,7 @@ func TestChargeNotJudgedWritesOneSentenceWithTheSummedCount(t *testing.T) {
 	ev.ChargeNotJudged(unattributed(2, real))
 	ev.ChargeNotJudged(unattributed(3, mock))
 	want := unattributed(5, real+"; "+mock)
-	if len(ev.CannotCapture) != 1 || ev.CannotCapture[0] != want[0] {
+	if len(ev.CannotCapture) != 1 || !reflect.DeepEqual(ev.CannotCapture[0], want[0]) {
 		t.Fatalf("CannotCapture = %+v, want %+v", ev.CannotCapture, want)
 	}
 	if wantReason := "keploy: " + want.NotJudgedText() + "."; ev.Reason != wantReason {
@@ -143,5 +144,32 @@ func TestChargeNotJudgedWritesOneSentenceWithTheSummedCount(t *testing.T) {
 		if got := ev.CannotCapture[1].What; got != "s" {
 			t.Fatalf("another kind's What = %q, want it untouched", got)
 		}
+	}
+}
+
+// A test's evidence is Unanswered when it holds a call keploy did not answer
+// from a recording, or could not tell it answered: anything but the
+// recordings the test did not make. Those alone leave every call answered.
+func TestScopeEvidenceUnansweredIsAnythingButTheUnmadeRecordings(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		ev   *ScopeEvidence
+		want bool
+	}{
+		{"no evidence", nil, false},
+		{"only unmade recordings", &ScopeEvidence{Unconsumed: []string{"mock-1"}}, false},
+		{"a miss beside them", &ScopeEvidence{Unconsumed: []string{"mock-1"}, Misses: []UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}}, true},
+		{"a call keploy could not capture", &ScopeEvidence{Unconsumed: []string{"mock-1"}, Incomplete: []CaptureIncomplete{{Class: "e", Why: "x"}}}, true},
+		{"a counted loss", &ScopeEvidence{CaptureIncomplete: CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1}}}, true},
+		{"what the test did unread", &ScopeEvidence{Unconsumed: []string{"mock-1"}, Unread: true}, true},
+	} {
+		if got := c.ev.Unanswered(); got != c.want {
+			t.Errorf("%s: Unanswered() = %v, want %v", c.name, got, c.want)
+		}
+	}
+	ev := &ScopeEvidence{Unconsumed: []string{"mock-1"}, Misses: []UnmatchedCall{{Protocol: "HTTP"}}}
+	_ = ev.Unanswered()
+	if len(ev.Unconsumed) != 1 {
+		t.Fatalf("Unanswered changed the evidence it read: %+v", ev)
 	}
 }

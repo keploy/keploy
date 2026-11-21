@@ -61,15 +61,19 @@ func TestRecordV2_PostTLS_AnAnswerCapturedBeforeTheFirstCommandIsNotItsAnswer(t 
 // once however the recorder leaves it. Here the first command the capture has
 // is one whose response the recorder cannot frame, found before it reads a
 // byte of the server's stream (COM_FIELD_LIST): it leaves that exchange out,
-// and skips the server's stream by capture time to the next command's answer
-// (fakeconn.FakeConn.SkipThrough), which takes the answer in flight with it,
-// unread. The skip counts what of it was captured before the first command
-// in the floor's run there (the stream's start), and ends that run at the
-// first byte of the response left out, captured after that command, so the
+// and the next command's floor drops the server's stream up to that command's
+// answer, the answer in flight with it, unread. What of it was captured before
+// the first command is in the floor's run there (the stream's start), which
+// ends at the first byte of the response left out, captured after that
+// command, so the
 // answer in flight is reported as it is when the recorder reads up to it:
 // once, with its own cause, over a span of its own bytes alone. The exchange
-// left out is reported too, by the recorder, and SELECT 1 is recorded with its
-// OK.
+// left out is reported too, by the recorder. The stream joined mid-connection
+// was never read at a packet boundary the recorder knows (it knows one once it
+// has read a response whole), so the server's packets cannot show where the
+// response left out ended (packetWalk): the recording stops at SELECT 1,
+// naming it, and leaves that exchange out too, rather than take its answer on
+// the capture's order alone.
 // Before, the skip took the answer in flight with nothing to say so, and the
 // test case it belonged to was saved without its mock. With no answer in
 // flight, the skip takes the response left out alone, captured after the
@@ -89,8 +93,8 @@ func TestRecordV2_PostTLS_AnAnswerInFlightIsReportedWhenTheFirstResponseCannotBe
 		// COM_FIELD_LIST's, and the answer in flight.
 		mocks, leftOut int
 	}{
-		{"an answer in flight, then a command whose response it cannot frame", true, true, 1, 2},
-		{"no answer in flight, then a command whose response it cannot frame", false, true, 1, 1},
+		{"an answer in flight, then a command whose response it cannot frame", true, true, 0, 3},
+		{"no answer in flight, then a command whose response it cannot frame", false, true, 0, 2},
 		{"an answer in flight, then a query", true, false, 2, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -124,12 +128,22 @@ func TestRecordV2_PostTLS_AnAnswerInFlightIsReportedWhenTheFirstResponseCannotBe
 				j.exchange(cannedCOMQuery(t, 0, "SELECT n FROM t"), resultSet(true, [][]byte{col}, [][]byte{textRowPayload("a")}))
 			}
 			j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
+			if c.unframable {
+				// SELECT 1 is taken up after the response left out, and the
+				// query after it confirms it (takenUp): the end of the
+				// connection would not.
+				j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{cannedOK(t, 1, j.caps)})
+			}
 			mocks, err := j.run(t)
-			if err != nil {
+			if c.unframable {
+				if err == nil || !strings.Contains(err.Error(), "the server's packets were not followed from a packet boundary to it") {
+					t.Fatalf("RecordV2 = %v, want the stop at SELECT 1 to name the packets not followed", err)
+				}
+			} else if err != nil {
 				t.Fatalf("RecordV2 = %v", err)
 			}
-			if len(mocks) != c.mocks || describe(mocks[len(mocks)-1]) != "a OK" {
-				t.Fatalf("%d mocks, want %d, the last SELECT 1 with its OK", len(mocks), c.mocks)
+			if len(mocks) != c.mocks || c.mocks > 0 && describe(mocks[len(mocks)-1]) != "a OK" {
+				t.Fatalf("%d mocks, want %d, the last a query with its OK", len(mocks), c.mocks)
 			}
 			if !c.unframable && describe(mocks[0]) != "a result of 1 rows" {
 				t.Fatalf("SELECT n recorded %s, want its own row", describe(mocks[0]))
@@ -426,5 +440,50 @@ func TestRecordV2_ACommandWithNoCaptureNumberIsRefused(t *testing.T) {
 				t.Fatalf("%d exchanges left out, want %d: the response it could not frame, and nothing for the command refused", leftOut.count(), want)
 			}
 		})
+	}
+}
+
+// The first command of a stream joined mid-connection is read by the post-TLS
+// handshake, whose Session.NextRequest sets the floor at it, and the floor
+// holds through that command's answer: a server chunk its producer did not
+// number is refused there (fakeconn.ErrUnnumbered), as it is after every later
+// command. Setting the floor again at a command with no chunk of its own
+// (Session.FloorAt with ConnSeq 0) lifted it, and the chunk was recorded as
+// the answer.
+func TestRecordV2_PostTLS_AnAnswerWithNoCaptureNumberToTheFirstCommandIsRefused(t *testing.T) {
+	t.Parallel()
+	j := newJoinedMidStream(t)
+	j.h.pushClient(cannedCOMQuery(t, 0, "SELECT 1"), j.at())
+	sent := j.at()
+	j.h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: cannedOK(t, 1, j.caps), ReadAt: sent, WrittenAt: sent}
+	mocks, err := j.run(t)
+	if !errors.Is(err, fakeconn.ErrUnnumbered) {
+		t.Fatalf("RecordV2 = %v, want fakeconn.ErrUnnumbered", err)
+	}
+	if len(mocks) != 0 {
+		t.Fatalf("%d mocks recorded, want none: the answer has no capture number", len(mocks))
+	}
+}
+
+// On a stream joined mid-connection, the server's packets are followed from
+// the end of the first response the recorder read whole (packetWalk): a
+// response it cannot frame after that is left out alone, and the recording
+// goes on from the next command, as on a stream read from its handshake.
+func TestRecordV2_PostTLS_AResponseLeftOutAfterOneReadWholeOnAStreamJoinedMidConnection(t *testing.T) {
+	col := columnPayload(t, &mysql.ColumnDefinition41{Catalog: "def", Name: "n", OrgName: "n", FixedLength: 0x0c, CharacterSet: 0x2e, ColumnLength: 64, Type: byte(mysql.FieldTypeVarString)})
+	j := newJoinedMidStream(t)
+	j.exchange(cannedCOMQuery(t, 0, "SELECT n FROM t"), resultSet(true, [][]byte{col}, [][]byte{textRowPayload("a")}))
+	j.h.pushClient(wrapPacket(append([]byte{0x04}, "t\x00"...), 0), j.at())
+	for _, p := range frame([][]byte{col, okEOFPayload}) {
+		j.h.pushDest(p, j.at())
+	}
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 1"), [][]byte{cannedOK(t, 1, j.caps)})
+	j.exchange(cannedCOMQuery(t, 0, "SELECT 2"), [][]byte{cannedOK(t, 1, j.caps)})
+	mocks, err := j.run(t)
+	if err != nil {
+		t.Fatalf("RecordV2 = %v, want the recording to go on past the response left out", err)
+	}
+	if len(mocks) != 3 || describe(mocks[0]) != "a result of 1 rows" || describe(mocks[2]) != "a OK" {
+		t.Fatalf("%d mocks, want SELECT n with its row, then SELECT 1 and SELECT 2 with their OKs", len(mocks))
 	}
 }

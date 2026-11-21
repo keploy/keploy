@@ -35,7 +35,15 @@ var (
 		windows.WSAESHUTDOWN, // 10058
 	}
 
+	// IsPeerReset's errors beyond IsConnReset's (neterr.go).
+	peerResetErrnos = windowsPeerResetErrnos
+
 	connRefusedErrnos = []syscall.Errno{
 		windows.WSAECONNREFUSED, // 10061 - "connectex: ... actively refused it"
+	}
+
+	// A bind beside another socket that holds the address and port.
+	addrInUseErrnos = []syscall.Errno{
+		windows.WSAEADDRINUSE, // 10048 - "bind: Only one usage of each socket address ... is normally permitted"
 	}
 )

@@ -1,6 +1,8 @@
 package docker
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,7 +15,12 @@ import (
 func TestGenerateKeployAgentService_AddsDebugFileMountAndEnv(t *testing.T) {
 	t.Parallel()
 
-	const hostPath = "/abs/path/to/keploy"
+	// A keploy folder that is there, in its project: only such a folder is
+	// mounted (TestTheAgentMountsOnlyAKeployFolderInsideTheProject).
+	hostPath := filepath.Join(t.TempDir(), "keploy")
+	if err := os.Mkdir(hostPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	serviceNode, err := (&Impl{
 		logger: zap.NewNop(),
 		conf:   &config.Config{Path: hostPath},

@@ -575,7 +575,10 @@ func TestALaterSessionResetsAGlobalSurvivorOnceItIsInEffect(t *testing.T) {
 // does. TestTheFirstReplaySessionResetsWhatWasPassedThroughBeforeItTakesEffect
 // and TestALaterReplaySessionResetsAGlobalSurvivorOnceItIsInEffect are which
 // session each reset sees; this pins where the set-up goes (the learn step's
-// new set too), which no event of a test tells apart.
+// new set too, and the serve clock's with the proven switch off), which no
+// event of a test tells apart. A call on one of the proxy's fields is named
+// with the field (p.serveClock.NewSet is serveClock.NewSet), so two set-up
+// steps that share a method name are each counted on their own.
 func TestMockSetsUpBeforeTheSessionTakesEffect(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "proxy.go", nil, 0)
@@ -595,7 +598,13 @@ func TestMockSetsUpBeforeTheSessionTakesEffect(t *testing.T) {
 	ast.Inspect(mock.Body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				at[sel.Sel.Name] = append(at[sel.Sel.Name], call.Pos())
+				name := sel.Sel.Name
+				if field, ok := sel.X.(*ast.SelectorExpr); ok {
+					if _, ok := field.X.(*ast.Ident); ok {
+						name = field.Sel.Name + "." + name
+					}
+				}
+				at[name] = append(at[name], call.Pos())
 			}
 		}
 		return true
@@ -604,7 +613,7 @@ func TestMockSetsUpBeforeTheSessionTakesEffect(t *testing.T) {
 	if len(sets) != 1 {
 		t.Fatalf("Mock calls setSession %d time(s), want once", len(sets))
 	}
-	for _, name := range []string{"NewSet", "setMockManager", "ResetForReplaySession", "ClearAllWorkerScopes"} {
+	for _, name := range []string{"NewSet", "serveClock.NewSet", "setMockManager", "ResetForReplaySession", "ClearAllWorkerScopes"} {
 		if len(at[name]) != 1 || at[name][0] > sets[0] {
 			t.Fatalf("Mock calls %s %d time(s), or after setSession: want once, before the session takes effect", name, len(at[name]))
 		}

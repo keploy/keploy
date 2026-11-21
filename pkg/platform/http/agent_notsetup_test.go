@@ -1,0 +1,254 @@
+package http
+
+import (
+	"context"
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
+)
+
+// everySwitchMode runs row under KEPLOY_PROVEN unset and =1.
+func everySwitchMode(t *testing.T, row func(t *testing.T)) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("switch="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			row(t)
+		})
+	}
+}
+
+// recordingApp is an application client that keeps the hooks the agent
+// client hands it (restartHooks).
+type recordingApp struct {
+	restart func(ctx context.Context) error
+	hold    func(ctx context.Context) (resume func(failed error))
+	refuse  func(failed error)
+	held    func(ctx context.Context, current func(ctx context.Context) bool) error
+}
+
+func (r *recordingApp) SetOnAgentRestart(f func(ctx context.Context) error) { r.restart = f }
+func (r *recordingApp) SetAgentReleaseHold(f func(ctx context.Context) (resume func(failed error))) {
+	r.hold = f
+}
+func (r *recordingApp) SetAgentReleaseRefusal(f func(failed error)) { r.refuse = f }
+func (r *recordingApp) SetAgentHeldRelease(f func(ctx context.Context, current func(ctx context.Context) bool) error) {
+	r.held = f
+}
+
+// The agent client hands the application client the four hooks of an agent
+// compose's retry starts again, and each reaches this client's session: the
+// setup, the hold on the releases, their refusal once the setup failed, and
+// the release a hold holds made on the agent set up. Without the hold or the
+// refusal, every release would go to an agent that is not set up; without
+// the last, a release asked for after the setup waits for good.
+func TestTheAgentClientHandsTheAppHooksThatReachItsSession(t *testing.T) {
+	everySwitchMode(t, func(t *testing.T) {
+		ag := newHandoverAgent(t, "ok", nil)
+		app := &recordingApp{}
+		ag.a.handRestartHooks(app)
+		if app.restart == nil || app.hold == nil || app.refuse == nil || app.held == nil {
+			t.Fatalf("hooks handed: setup %v, hold %v, refusal %v, held release %v; want all four", app.restart != nil, app.hold != nil, app.refuse != nil, app.held != nil)
+		}
+
+		resume := app.hold(context.Background())
+		ag.s.mu.Lock()
+		held, notSetUp := ag.s.held, ag.s.notSetUp
+		ag.s.mu.Unlock()
+		if held != 1 || !notSetUp {
+			t.Fatalf("the hold hook left the session held=%d notSetUp=%v; want it held for an agent not set up", held, notSetUp)
+		}
+		resume(nil)
+		ag.s.end()
+
+		// The setup hook is this client's setup of the restarted agent: it
+		// marks the session's agent not set up as it begins.
+		cut, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := app.restart(cut); err == nil {
+			t.Fatal("a setup cut before it began reported success")
+		}
+		ag.s.mu.Lock()
+		notSetUp = ag.s.notSetUp
+		ag.s.mu.Unlock()
+		if !notSetUp {
+			t.Fatal("the setup hook did not reach this client's session")
+		}
+		ag.s.end()
+
+		failed := errors.New("the restarted agent refused its mocks (store-mocks): 500")
+		app.refuse(failed)
+		err := ag.a.MakeAgentReadyForDockerCompose(context.Background())
+		if !errors.Is(err, failed) {
+			t.Fatalf("a release after the refusal hook ended with %v; want the failed setup", err)
+		}
+		if got := ag.took(); len(got) != 0 {
+			t.Fatalf("the agent took %v after the refusal; want nothing", got)
+		}
+	})
+}
+
+// The application client Setup keeps (registerApp, its only source of the
+// app it runs) has the four hooks of an agent compose's retry starts again.
+// Without them the retry would run a plain `up`: no hold, no setup and no
+// refusal, and the agent compose started again would take the run's releases
+// with none of its mocks or settings. registerApp also makes the session
+// restartable under compose, whose project starts the agent again, so what
+// the run sets up is kept to put back on it; under docker run it is not.
+// Both KEPLOY_PROVEN modes.
+func TestTheAppSetupKeepsHasTheRestartHooks(t *testing.T) {
+	restartable := func(s *agentSession) bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.restartable
+	}
+	everySwitchMode(t, func(t *testing.T) {
+		ag := newHandoverAgent(t, "ok", nil)
+		ag.s.configure(true)
+		ag.a.registerApp("docker run app", models.SetupOptions{CommandType: string(utils.DockerRun)})
+		if restartable(ag.s) {
+			t.Fatal("a docker run app left the session restartable; want it not")
+		}
+		ag.s.configure(false)
+		usrApp := ag.a.registerApp("docker compose up", models.SetupOptions{CommandType: string(utils.DockerCompose)})
+		if !restartable(ag.s) {
+			t.Fatal("a compose app left the session not restartable; a restarted agent's setup would put back nothing")
+		}
+		stored, ok := ag.a.apps.Load(uint64(0))
+		if !ok || stored != usrApp {
+			t.Fatalf("the app Setup keeps is %v; want the one it runs", stored)
+		}
+		v := reflect.ValueOf(usrApp).Elem()
+		for _, hook := range []string{"onAgentRestart", "holdAgentRelease", "refuseAgentReleases", "makeHeldRelease"} {
+			if f := v.FieldByName(hook); !f.IsValid() || f.IsNil() {
+				t.Errorf("the app Setup keeps has no %s hook", hook)
+			}
+		}
+		ag.s.end()
+	})
+}
+
+// A RELEASE HELD FOR AN AGENT COMPOSE'S RETRY STARTS GOES ON ONLY ONCE THAT
+// AGENT IS SET UP. The retry's `up` returned while the restarted agent's
+// setup was cut, or before the watch saw it: the hold is let go, and the
+// agent left running has none of the run's setup. A release held meanwhile
+// waits for a setup of the agent to complete, then goes on, after the
+// setup's own release. Both KEPLOY_PROVEN modes.
+func TestAHeldReleaseWaitsForTheRestartedAgentsSetupNotTheHoldsEnd(t *testing.T) {
+	everySwitchMode(t, func(t *testing.T) {
+		ag := newHandoverAgent(t, "ok", nil)
+		resume := ag.s.holdReleases(context.Background())
+		released := make(chan error, 1)
+		go func() { released <- ag.a.MakeAgentReadyForDockerCompose(context.Background()) }()
+		time.Sleep(100 * time.Millisecond)
+		resume(nil) // the retry's up ended with no setup of the agent completed
+		awaitNoAsk(t, ag, 300*time.Millisecond, "a held release once the hold was let go with the agent not set up")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := ag.a.setUpRestartedAgent(ctx); err != nil {
+			t.Fatalf("setting the agent up again: %v", err)
+		}
+		if err := awaitErr(t, released, "the held release"); err != nil {
+			t.Fatalf("the held release ended with %v once the agent was set up", err)
+		}
+		if got := ag.took(); strings.Join(got, ",") != "release,release" {
+			t.Fatalf("the agent took %v; want the setup's release, then the run's", got)
+		}
+	})
+}
+
+// A setup of the restarted agent that was cut (no hold on: docker could not
+// say which agent ran before, or compose recreated one) leaves an agent with
+// part of the run's setup: no release goes to it until a setup completes,
+// whose end wakes the release at once. Both KEPLOY_PROVEN modes.
+func TestACutSetupLetsNoReleaseGoUntilASetupCompletes(t *testing.T) {
+	everySwitchMode(t, func(t *testing.T) {
+		ag := newHandoverAgent(t, "ok", nil)
+		cut, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := ag.a.setUpRestartedAgent(cut); err == nil {
+			t.Fatal("a cut setup reported success")
+		}
+		released := make(chan error, 1)
+		go func() { released <- ag.a.MakeAgentReadyForDockerCompose(context.Background()) }()
+		awaitNoAsk(t, ag, 300*time.Millisecond, "a release to an agent whose setup was cut")
+
+		ctx, cancelSetup := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelSetup()
+		if err := ag.a.setUpRestartedAgent(ctx); err != nil {
+			t.Fatalf("setting the agent up again: %v", err)
+		}
+		select {
+		case err := <-released:
+			if err != nil {
+				t.Fatalf("the release ended with %v once the agent was set up", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the release did not go on within 5 s of the completed setup")
+		}
+	})
+}
+
+// A completed setup is what wakes a release parked waiting for it: with
+// nothing else changing in the session, the release goes on at the setup's
+// end. The row above can also pass when the release, woken by the setup's own
+// steps, reads the session only after the setup ended; in a synctest bubble
+// the release is parked before the setup ends, so no timing decides this
+// row. Both KEPLOY_PROVEN modes.
+func TestACompletedSetupWakesTheParkedRelease(t *testing.T) {
+	everySwitchMode(t, func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			s := newAgentSession()
+			s.settingUp()
+			ctx, cut := context.WithCancelCause(context.Background())
+			defer cut(nil)
+			rc, refused := s.beginRelease(false, cut, func(context.Context) error { return nil })
+			if refused != nil {
+				t.Fatalf("a release asked while the agent was set up was refused with %v", refused)
+			}
+			defer s.endRelease(rc, true)
+			posts := make(chan bool, 1)
+			go func() { posts <- s.awaitPost(ctx.Done(), rc) }()
+			synctest.Wait() // the release is parked on the session
+			select {
+			case ok := <-posts:
+				t.Fatalf("a release went on (post %v) while the agent was not set up", ok)
+			default:
+			}
+
+			s.setUpDone()
+			synctest.Wait()
+			select {
+			case ok := <-posts:
+				if !ok {
+					t.Fatal("the release the completed setup woke may not post")
+				}
+			default:
+				t.Fatal("the completed setup woke no release parked waiting for it")
+			}
+		})
+	})
+}
+
+// The run's end lets the next run's releases go: its first bring-up's agent
+// is set up by the run itself.
+func TestARunsEndLetsTheNextRunsReleaseGo(t *testing.T) {
+	everySwitchMode(t, func(t *testing.T) {
+		ag := newHandoverAgent(t, "ok", nil)
+		resume := ag.s.holdReleases(context.Background())
+		resume(nil)
+		ag.s.end()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := ag.a.MakeAgentReadyForDockerCompose(ctx); err != nil {
+			t.Fatalf("the next run's release ended with %v; want it taken", err)
+		}
+	})
+}

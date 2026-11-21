@@ -187,6 +187,15 @@ type ScopeEvidence struct {
 	// or the mocks it consumed), so the test has no verdict of its own;
 	// keploy's verdict on the run is "not judged", never the test's fault.
 	Unread bool `json:"unread,omitempty" yaml:"unread,omitempty"`
+	// FailedOnItsOwn: in a replay, the test's harness ended it failed on
+	// its own (its own assertion, or an end with no verdict, which keploy
+	// counts failed) before this evidence failed it, and keploy answered
+	// every call it made (not Unanswered: the evidence is only the
+	// recordings it never made). Those may then be calls it never reached,
+	// so they say nothing of where the app makes them. A test that met
+	// keploy's error answer to a call (a miss) may have failed on that
+	// answer: it never has it. It is no evidence: Empty ignores it.
+	FailedOnItsOwn bool `json:"failedOnItsOwn,omitempty" yaml:"failedOnItsOwn,omitempty"`
 }
 
 // escapeTestName escapes a test's name for its ID (TestID), so that the ID
@@ -218,6 +227,19 @@ func (e *ScopeEvidence) Empty() bool {
 	return e == nil || (len(e.Misses) == 0 && len(e.Unconsumed) == 0 && len(e.CaptureIncomplete) == 0 && len(e.Incomplete) == 0 && len(e.CannotCapture) == 0)
 }
 
+// Unanswered reports whether the evidence holds a call of the test keploy
+// did not answer from a recording, or could not tell it answered: any
+// evidence but the recordings the test did not make (a miss, a call keploy
+// could not capture), or keploy could not read all the test did (Unread).
+func (e *ScopeEvidence) Unanswered() bool {
+	if e == nil {
+		return false
+	}
+	rest := *e
+	rest.Unconsumed = nil
+	return e.Unread || !rest.Empty()
+}
+
 // ChargeNotJudged charges the test with losses that leave it without a
 // verdict (CaptureLosses.Split's notJudged), never failed: on CannotCapture,
 // and in the reason one sentence names all of CannotCapture with its summed
@@ -235,12 +257,14 @@ func (e *ScopeEvidence) ChargeNotJudged(l CaptureLosses) {
 				continue
 			}
 			// Plus keeps the What charged last: each What charged is named,
-			// once.
+			// once, with the hosts it names. A What c's already holds is
+			// named there, and c's own list (each host where c's What
+			// holds it) names its hosts.
+			joined := c
 			if !strings.Contains(c.What, sum[i].What) {
-				sum[i].What = c.What + "; " + sum[i].What
-			} else {
-				sum[i].What = c.What
+				joined.JoinWhat(sum[i])
 			}
+			sum[i].SetWhatOf(joined)
 		}
 	}
 	e.CannotCapture = sum

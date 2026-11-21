@@ -458,8 +458,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// both when its last thread exits, and the sweep (skipwatch.go) what a
 	// skipped run of it left. Without it the maps only grow, and once
 	// target_namespace_pids is full (10240 TGIDs: seconds of process churn,
-	// and it takes every process in the agent's PID namespace, the whole host
-	// for a native agent) no new process is intercepted, so its calls go to the real dependency with
+	// and it takes every process in the agent's PID namespace that calls
+	// socket(), of the keploy client's tree only for a native agent) no new
+	// process is intercepted, so its calls go to the real dependency with
 	// nothing recorded or mocked. (A refused insert is counted and reported,
 	// pidmaps.go; with this hook it takes more live processes than the map
 	// holds.) Attached in every mode,
@@ -829,7 +830,8 @@ func (h *Hooks) resolveProxyInfo(ctx context.Context, setupOpts config.Agent, op
 // ProxyIPv4 is the IPv4 address the application reaches the proxy at, once
 // Load has returned: loopback for a native agent, which shares the
 // application's network namespace, and for one started with --is-docker, its
-// container's own address, as GetProxyInfo decides.
+// container's own address, or loopback where the container has no IPv4
+// address but loopback's, as GetProxyInfo decides.
 func (h *Hooks) ProxyIPv4() string {
 	return h.proxyIP4
 }
@@ -1069,6 +1071,10 @@ func logKernelPassThroughEgress(ctx context.Context, logger *zap.Logger, opts co
 	}
 }
 
+// containerAddress is the address the container of an agent started with
+// --is-docker is reached at (utils.GetContainerIP); a test sets another.
+var containerAddress = utils.GetContainerIP
+
 func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.HookCfg) (structs.ProxyInfo, error) {
 	port := opts.ProxyPort
 	if cfg.Port != 0 {
@@ -1109,10 +1115,14 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 
 		return proxyInfo, nil
 	}
-	AgentIP, err := utils.GetContainerIPv4() // in case of docker we will get the container's IP fron within the container
+	containerIP, err := containerAddress() // in case of docker we will get the container's IP fron within the container
 	if err != nil {
 		return structs.ProxyInfo{}, err
 	}
+	if containerIP.To4() == nil {
+		return ipv6OnlyProxyInfo(containerIP, port), nil
+	}
+	AgentIP := containerIP.String()
 	ipv4, err := IPv4ToUint32(AgentIP)
 	if err != nil {
 		return structs.ProxyInfo{}, err
@@ -1134,6 +1144,28 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 	}
 
 	return proxyInfo, nil
+}
+
+// ipv6OnlyProxyInfo is where an agent started with --is-docker whose container
+// has no IPv4 address but loopback's (a single-stack IPv6 Pod) has the kernel
+// send the applications' connections: an IPv6 one to the container's own IPv6
+// address ip, as it is, and an IPv4 one to loopback. The applications share
+// the agent's network namespace (a Pod's containers do, and docker runs the
+// application in the agent container's), where loopback reaches the proxy;
+// and on a network with no IPv4 no other IPv4 address could.
+func ipv6OnlyProxyInfo(ip net.IP, port uint32) structs.ProxyInfo {
+	b := ip.To16()
+	var ip6 [4]uint32
+	for i := range ip6 {
+		// Host order, as ToIPv4MappedIPv6 gives it: the programs turn each
+		// word to network order as they rewrite the destination.
+		ip6[i] = binary.BigEndian.Uint32(b[4*i:])
+	}
+	return structs.ProxyInfo{
+		IP4:  0x7f000001, // 127.0.0.1
+		IP6:  ip6,
+		Port: port,
+	}
 }
 
 // IPv4ToUint32 converts a string representation of an IPv4 address to a 32-bit integer.

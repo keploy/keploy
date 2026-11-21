@@ -53,6 +53,33 @@ func (a *Agent) HandleOwnedCaptureLosses(w http.ResponseWriter, r *http.Request)
 	render.JSON(w, r, owned)
 }
 
+// captureLossDrainer is the agent service's wait until the proxy has counted
+// the close of every connection whose application end has ended.
+type captureLossDrainer interface {
+	DrainCaptureLosses(ctx context.Context) error
+}
+
+// HandleDrainCaptureLosses answers POST /agent/capturelosses/drain once the
+// proxy has counted the close of every connection whose application end has
+// ended (204), or with why it could not (500): keploy test's set end asks,
+// once the set's application has stopped, before it reads the set's losses.
+// 501 from an agent that does not drain.
+func (a *Agent) HandleDrainCaptureLosses(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s, ok := a.svc.(captureLossDrainer)
+	if !ok {
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": models.ErrCaptureLossesUnsupported.Error()})
+		return
+	}
+	if err := s.DrainCaptureLosses(r.Context()); err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // HandleUnchargedCaptureLosses answers GET /agent/capturelosses/uncharged:
 // what the agent could not capture since the run began that no test's end
 // charged, by kind (what was lost after the last test ended). 501 from an

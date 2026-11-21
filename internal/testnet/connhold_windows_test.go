@@ -19,7 +19,7 @@ var errConnRefused error = windows.WSAECONNREFUSED
 // names a specific address and sets no option, as Go's do, not with
 // WSAEADDRINUSE (Microsoft's "Using SO_REUSEADDR and SO_EXCLUSIVEADDRUSE",
 // Enhanced Socket Security). A bind at the same address as a socket without
-// the option still ends in WSAEADDRINUSE (errAddrInUse).
+// the option still ends in WSAEADDRINUSE (ErrAddrInUse).
 var errHeldBind error = windows.WSAEACCES
 
 // requireUDPHeld checks that a UDP bind at addr is refused because the hold

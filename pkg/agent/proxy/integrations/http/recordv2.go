@@ -93,9 +93,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 	for {
 		// --- Request side ---------------------------------------------
 		//
-		// First chunk's ReadAt is the request arrival timestamp. We grab
-		// it via ReadChunk so the timestamp is carried regardless of
-		// what ReadBytes does underneath.
+		// The ReadAt of the chunk the request starts in is the request
+		// arrival timestamp. It is shown, not taken: readRequestV2 takes the
+		// request's bytes of it, so a request that starts partway through a
+		// chunk, after the request before it, carries that chunk's time.
 		firstChunk, err := nextRequestV2(sess)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
@@ -106,19 +107,19 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			return err
 		}
 		reqTs, reqClock := firstChunk.ReadAt, firstChunk.ReadClock
-		finalReq := append([]byte(nil), firstChunk.Bytes...)
+		var finalReq []byte
 
-		// Complete the request: read more chunks until headers + body
-		// are on hand. We use chunk-level reads (not HandleChunkedRequests
-		// which wraps bufio-like bulk reads over the conn) so we never
-		// over-read past the end of one request into the start of the
-		// next pipelined request. This is essential for HTTP/1.1
-		// keepalive correctness.
+		// Read the request: its headers and body, and never a byte past its
+		// end (readMessageV2), which is the start of the next request of a
+		// pipeline when its client sent them in one write.
 		if err := h.readRequestV2(sess.ClientStream, &finalReq); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				logger.Debug("V2 HTTP record: client stream closed mid-request", zap.Error(err))
 				return nil
 			}
+			// The error can quote what the application sent (a parser's
+			// does): withheld wherever it goes.
+			err = utils.WithholdInput(err)
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: request read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to read full request")
 			return err
@@ -139,7 +140,11 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		}
 
 		// --- Response side --------------------------------------------
-		firstRespChunk, err := sess.DestStream.ReadChunk()
+		//
+		// Shown, not taken, as the request's first chunk is: readResponseV2
+		// takes the response's bytes of it, and leaves the next response's
+		// for the next request.
+		firstRespChunk, err := sess.DestStream.Peek()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
 				// The stream ended with nothing of a response. A side of the
@@ -192,13 +197,17 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				logger.Debug("V2 HTTP record: dest stream ended before response", zap.Error(err))
 				return nil
 			}
+			// The error can quote what the application sent (a parser's
+			// does): withheld wherever it goes.
+			err = utils.WithholdInput(err)
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: initial response read failed: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: initial response read failed")
 			return err
 		}
-		finalResp := append([]byte(nil), firstRespChunk.Bytes...)
+		var finalResp []byte
 		resTs := firstRespChunk.WrittenAt
-		respWrites := []respWrite{{end: len(finalResp), at: firstRespChunk.WrittenAt}}
+		// readResponseWrites notes each write it takes bytes of, the first too.
+		var respWrites []respWrite
 
 		gotLastWritten, err := h.readResponseWrites(sess.DestStream, &finalResp, requestMethod(finalReq), &respWrites)
 		// A 101 (Switching Protocols) is the connection's last HTTP message:
@@ -238,6 +247,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 					resTs = gotLastWritten
 				}
 			} else {
+				// The error can quote what the application sent (a parser's
+				// does): withheld wherever it goes.
+				err = utils.WithholdInput(err)
 				sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: response read failed: "+err.Error())
 				utils.LogError(logger, err, "V2 HTTP record: failed to read full response")
 				return err
@@ -305,7 +317,7 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			}
 			fault = partAnswerFault(sess)
 		}
-		mock, err := h.buildHTTPMock(&FinalHTTP{
+		final := &FinalHTTP{
 			Req:              finalReq,
 			Resp:             finalResp,
 			ReqTimestampMock: reqTs,
@@ -314,8 +326,12 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
 			RespWrites:       respWrites,
 			Fault:            fault,
-		}, destPort, sess.ClientConnID, sess.Opts)
+		}
+		mock, err := h.buildHTTPMock(ctx, final, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
+			// The error can quote what the application sent (a parser's
+			// does): withheld wherever it goes.
+			err = utils.WithholdInput(err)
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
 			utils.LogError(logger, err, "V2 HTTP record: failed to build mock")
 			return err
@@ -333,7 +349,9 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			// (on another goroutine, meanwhile): that mark is the
 			// next exchange's, whose mock would then be recorded with
 			// nothing reporting it.
-			emitV2(sess, logger, mock)
+			if emitV2(sess, logger, mock) {
+				final.recordOne.giveBack()
+			}
 		} else {
 			// Nothing recorded for this exchange (a passthrough), so a mark
 			// set during it must not leave out the next exchange's mock.
@@ -486,8 +504,11 @@ func partAnswerFault(sess *supervisor.Session) *models.Fault {
 // fault it ended in, and ends the connection's recording: its stream has
 // ended.
 func (h *HTTP) recordFault(ctx context.Context, sess *supervisor.Session, logger *zap.Logger, m *FinalHTTP, destPort uint, reqTs time.Time) error {
-	mock, err := h.buildHTTPMock(m, destPort, sess.ClientConnID, sess.Opts)
+	mock, err := h.buildHTTPMock(ctx, m, destPort, sess.ClientConnID, sess.Opts)
 	if err != nil {
+		// The error can quote what the application sent (a parser's
+		// does): withheld wherever it goes.
+		err = utils.WithholdInput(err)
 		sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
 		utils.LogError(logger, err, "V2 HTTP record: failed to build the mock of a call that ended in a fault")
 		return err
@@ -498,7 +519,9 @@ func (h *HTTP) recordFault(ctx context.Context, sess *supervisor.Session, logger
 	}
 	noteFaultRecorded(logger, mock)
 	integrations.CallServed(ctx)
-	emitV2(sess, logger, mock)
+	if emitV2(sess, logger, mock) {
+		m.recordOne.giveBack()
+	}
 	return nil
 }
 
@@ -513,16 +536,22 @@ const leftOutRefusedAtStop = "the recording stopped as the mock of an exchange r
 // same, as the context ends between the check and its own, is left out and
 // said so (leftOutRefusedAtStop), not dropped: EmitMock refuses a mock only
 // for its context's end, after which the recording goes on with
-// EmitMockOnShutdown.
-func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) {
+// EmitMockOnShutdown. It returns whether m was lost: left out, by the session
+// or here, or dropped by the session's manager as it was handed over
+// (EmitMockOutcome), which counted it. A recordOne representative lost so is
+// not one: its caller gives its mark back (ptMark.giveBack).
+func emitV2(sess *supervisor.Session, logger *zap.Logger, m *models.Mock) (lost bool) {
 	if c := sess.Ctx; c != nil && c.Err() != nil {
-		_ = sess.EmitMockOnShutdown(m)
-		return
+		lost, _ = sess.EmitMockOutcome(m, true)
+		return lost
 	}
-	if err := sess.EmitMock(m); err != nil {
+	lost, err := sess.EmitMockOutcome(m, false)
+	if err != nil {
 		logger.Debug("V2 HTTP record: the session refused a mock as its context ended", zap.Error(err))
 		sess.ReportLeftOut(m, leftOutRefusedAtStop)
+		return true
 	}
+	return lost
 }
 
 // faultNoted makes noteFaultRecorded's note once per process.
@@ -541,13 +570,15 @@ func noteFaultRecorded(logger *zap.Logger, mock *models.Mock) {
 	})
 }
 
-// nextRequestV2 starts the next exchange (Session.NextRequest) and takes its
-// request's first chunk. A chunk with no request bytes, nothing but empty
-// lines (emptyLinesBefore), is no part of a request, so it is taken first, and
-// the request starts at the client's next chunk: its response is what the
-// server sent after that one was captured, and it is the connection's first
-// request when the capture began after the CRLF of a request it does not have.
-// The request's first chunk therefore always holds request bytes.
+// nextRequestV2 starts the next exchange (Session.NextRequest) and returns the
+// chunk its request starts in, not taken (readRequestV2 takes it): what is
+// left of a chunk the request before it ended in, when the client pipelined
+// them, or the client's next chunk. A chunk with no request bytes, nothing but
+// empty lines (emptyLinesBefore), is no part of a request, so it is taken
+// first, and the request starts at the client's next chunk: its response is
+// what the server sent after that one was captured, and it is the connection's
+// first request when the capture began after the CRLF of a request it does not
+// have. The request's first chunk therefore always holds request bytes.
 func nextRequestV2(sess *supervisor.Session) (fakeconn.Chunk, error) {
 	for {
 		c, err := sess.ClientStream.Peek()
@@ -561,90 +592,31 @@ func nextRequestV2(sess *supervisor.Session) (fakeconn.Chunk, error) {
 			return fakeconn.Chunk{}, err
 		}
 	}
-	if _, err := sess.NextRequest(models.HTTP, false); err != nil {
-		return fakeconn.Chunk{}, err
-	}
-	return sess.ClientStream.ReadChunk()
+	return sess.NextRequest(models.HTTP, false)
 }
 
-// readRequestV2 is the V2 counterpart of HandleChunkedRequests. It
-// consumes the remainder of an HTTP/1 request from stream, appending
-// bytes to *finalReq. Unlike HandleChunkedRequests it uses ReadChunk
-// so we pull exactly one tee'd chunk at a time and never over-read
-// past the end of the current request into the start of the next.
+// readRequestV2 is the V2 counterpart of HandleChunkedRequests. It reads the
+// rest of an HTTP/1 request from stream onto *finalReq, which holds what of it
+// was read before, and no byte past its end (readMessageV2): the bytes after it
+// are the next request's, when the client pipelined them. The empty lines
+// before its request line are dropped (dropEmptyLinesBeforeRequest).
 //
 // Returns io.EOF if stream closes before the body is fully consumed.
 // Returns a decode error for malformed Content-Length / body framing.
 func (h *HTTP) readRequestV2(stream *fakeconn.FakeConn, finalReq *[]byte) error {
-	// 1. Complete headers: complete when messageHead finds the header section,
-	// not at the first "\r\n\r\n", which can be empty lines in front of the
-	// request line. Those are dropped (dropEmptyLinesBeforeRequest).
-	head, bodyStart, _, ok := messageHead(*finalReq, false)
-	for ; !ok; head, bodyStart, _, ok = messageHead(*finalReq, false) {
-		chunk, err := stream.ReadChunk()
-		if err != nil {
-			return err
-		}
-		*finalReq = append(*finalReq, chunk.Bytes...)
-	}
-	bodyStart -= dropEmptyLinesBeforeRequest(finalReq)
-
-	contentLength, chunked, err := parseHeaders(head, false)
-	if err != nil {
+	if _, err := readMessageV2(stream, finalReq, &messageFrame{}, nil); err != nil {
 		return err
 	}
-
-	if contentLength >= 0 {
-		remaining := contentLength - (len(*finalReq) - bodyStart)
-		for remaining > 0 {
-			chunk, err := stream.ReadChunk()
-			if err != nil {
-				return err
-			}
-			*finalReq = append(*finalReq, chunk.Bytes...)
-			remaining -= len(chunk.Bytes)
-		}
-		return nil
-	}
-
-	if chunked {
-		// Frame the chunks (see chunkedBody): a suffix test on the buffer ended
-		// a body whose data ends like "0\r\n\r\n" at a chunk boundary, and
-		// never ended one that carries trailers.
-		var body chunkedBody
-		for {
-			done, err := body.complete(*finalReq)
-			if err != nil {
-				return err
-			}
-			if done {
-				return nil
-			}
-			chunk, err := stream.ReadChunk()
-			if err != nil {
-				return err
-			}
-			*finalReq = append(*finalReq, chunk.Bytes...)
-		}
-	}
-
-	// No body framing: the request is headers-only (e.g. GET / HTTP/1.1
-	// with no body). We're done.
+	dropEmptyLinesBeforeRequest(finalReq)
 	return nil
 }
 
-// readResponseV2 is the V2 counterpart of handleChunkedResponses. It
-// consumes the remainder of an HTTP/1 response from stream, appending
-// bytes to *finalResp, and returns the WrittenAt timestamp of the last
-// chunk it consumed. It does NOT write to any client connection — the
-// relay owns forwarding on the V2 path.
-//
-// The completion logic mirrors handleChunkedResponses:
-//   - Pull more chunks until response headers are complete.
-//   - Parse Content-Length / Transfer-Encoding from headers.
-//   - If Content-Length, read until the declared body length is met.
-//   - If Transfer-Encoding chunked, read until the chunked framing ends
-//     (last-chunk, trailer section, final CRLF).
+// readResponseV2 is the V2 counterpart of handleChunkedResponses. It reads the
+// rest of an HTTP/1 response from stream onto *finalResp, as readRequestV2
+// reads a request (messageFrame frames it: past any interim 1xx, by its
+// Content-Length, its chunked framing, or to the stream's end), and returns
+// the WrittenAt of the last chunk it took bytes of. It does NOT write to any
+// client connection — the relay owns forwarding on the V2 path.
 //
 // Returns (lastWrittenAt, err). err may be io.EOF for the legitimate
 // "server closed after sending a full response" case; the caller
@@ -655,102 +627,110 @@ func (h *HTTP) readResponseV2(stream *fakeconn.FakeConn, finalResp *[]byte, reqM
 }
 
 // readResponseWrites is readResponseV2 that also notes, in writes, where in
-// *finalResp each chunk it consumed ended and when the relay wrote it to the
-// client (respWrite): the answer's marks (answerMarks).
+// *finalResp each chunk it took bytes of ended and when the relay wrote it to
+// the client (respWrite): the answer's marks (answerMarks). The answer to a
+// HEAD, a 204, a 304 and a 101 is its head alone whatever its headers say
+// (framedHeadOnly): what came after the head in its read is no part of it (a
+// 101's: the switched-to protocol's), and stays on the stream.
 func (h *HTTP) readResponseWrites(stream *fakeconn.FakeConn, finalResp *[]byte, reqMethod string, writes *[]respWrite) (time.Time, error) {
+	return readMessageV2(stream, finalResp, &messageFrame{response: true, reqMethod: reqMethod, body: chunkedBody{response: true}}, writes)
+}
+
+// readMessageV2 takes the rest of one HTTP/1 message off stream onto *msg,
+// which holds what of it was taken before, chunk by chunk, and no byte past
+// the message's end, which frame finds. A client that pipelines its requests
+// (HTTP/1.1: it sends the next before the answer to the one before comes)
+// writes them in one write as often as not, and a server writes its answers
+// back to back, so a chunk can hold the end of one message and the start of
+// the next: what follows the end stays on the stream, with its chunk's times,
+// for the next message's read. Taking whole chunks recorded only the first
+// message of such a chunk, and the rest of the pipeline was lost.
+//
+// When writes is not nil, it notes where in *msg each chunk it took bytes of
+// ended, and that chunk's WrittenAt (noteWrite). It returns the WrittenAt of
+// the last chunk it took bytes of (zero when none carried one), and frame's
+// error or the stream's, the message unfinished.
+func readMessageV2(stream *fakeconn.FakeConn, msg *[]byte, frame *messageFrame, writes *[]respWrite) (time.Time, error) {
 	var lastWr time.Time
-
-	// 1. Complete headers: the final response's, past any interim 1xx.
-	for {
-		if _, _, _, ok := messageHead(*finalResp, true); ok {
-			break
+	_, done, err := frame.end(*msg)
+	for !done && err == nil {
+		// The chunk is looked at before it is taken: only the end of the
+		// message, framed with it, says how much of it is the message's.
+		c, perr := stream.Peek()
+		if perr != nil {
+			return lastWr, perr
 		}
-		chunk, err := stream.ReadChunk()
-		if err != nil {
-			return lastWr, err
+		from := len(*msg)
+		*msg = append(*msg, c.Bytes...)
+		var end int
+		if end, done, err = frame.end(*msg); done {
+			*msg = (*msg)[:end]
 		}
-		if !chunk.WrittenAt.IsZero() {
-			lastWr = chunk.WrittenAt
+		// Take what msg holds of the chunk off the stream: a Read takes it
+		// from the chunk Peek showed (the same bytes, into the same place),
+		// and leaves the rest of the chunk for the next read. The whole of
+		// it is taken as a chunk, one with no bytes too, which a Read never
+		// takes. Neither fails: the chunk Peek showed is in hand, and only
+		// the reader moves the stream (fakeconn.FakeConn).
+		if len(*msg)-from < len(c.Bytes) {
+			_, _ = stream.Read((*msg)[from:])
+		} else {
+			_, _ = stream.ReadChunk()
 		}
-		*finalResp = append(*finalResp, chunk.Bytes...)
-		noteWrite(writes, len(*finalResp), chunk.WrittenAt)
+		if !c.WrittenAt.IsZero() {
+			lastWr = c.WrittenAt
+		}
+		if writes != nil {
+			noteWrite(writes, len(*msg), c.WrittenAt)
+		}
 	}
+	return lastWr, err
+}
 
-	// 2. Parse the final response's headers for body framing. The answer to
-	// a HEAD, a 204, a 304 and a 101 are their head alone whatever the
-	// headers say (framedHeadOnly), but net/http reads their framing fields
-	// too, and refuses the ones it refuses.
-	head, bodyStart, status, _ := messageHead(*finalResp, true)
-	contentLength, chunked, err := parseHeaders(head, true)
+// messageFrame finds where one HTTP/1 message ends as its bytes arrive. The
+// header section that governs its body (a response's final one, past any
+// interim 1xx: messageHead) says how the body is framed: none (the answer to a
+// HEAD, a 204, a 304 or a 101: framedHeadOnly; a request with neither field
+// below), a Content-Length, chunked framing (chunkedBody), or, for a response
+// with neither, the stream's end.
+type messageFrame struct {
+	response  bool
+	reqMethod string      // a response's request's method
+	body      chunkedBody // frames a chunked body as it arrives
+}
+
+// end reports the length of the message msg starts with, and true, once all
+// of it is in msg (bytes after it are the next message's), or false while it
+// is not. A body that runs to the stream's end never ends here. msg must only
+// grow between calls. A header section net/http's reader refuses
+// (parseHeaders: a Content-Length that is not one length, a negative one
+// among them) and a malformed chunked body are errors. A head-only answer's
+// framing fields are read too, as net/http reads them.
+func (f *messageFrame) end(msg []byte) (int, bool, error) {
+	head, bodyStart, status, ok := messageHead(msg, f.response)
+	if !ok {
+		return 0, false, nil
+	}
+	contentLength, chunked, err := parseHeaders(head, f.response)
 	if err != nil {
-		return lastWr, err
+		return 0, false, err
 	}
-	if framedHeadOnly(reqMethod, status) {
-		// What came after the head in its read is no part of the response
-		// (a 101's: the switched-to protocol's), and the write that completed
-		// the head ends at the head's end.
-		*finalResp = (*finalResp)[:bodyStart]
-		for i := range *writes {
-			(*writes)[i].end = min((*writes)[i].end, bodyStart)
-		}
-		return lastWr, nil
+	if f.response && framedHeadOnly(f.reqMethod, status) {
+		return bodyStart, true, nil
 	}
-
 	if contentLength >= 0 {
-		remaining := contentLength - (len(*finalResp) - bodyStart)
-		for remaining > 0 {
-			chunk, err := stream.ReadChunk()
-			if err != nil {
-				return lastWr, err
-			}
-			if !chunk.WrittenAt.IsZero() {
-				lastWr = chunk.WrittenAt
-			}
-			*finalResp = append(*finalResp, chunk.Bytes...)
-			noteWrite(writes, len(*finalResp), chunk.WrittenAt)
-			remaining -= len(chunk.Bytes)
+		if len(msg)-bodyStart < contentLength {
+			return 0, false, nil
 		}
-		return lastWr, nil
+		return bodyStart + contentLength, true, nil
 	}
-
 	if chunked {
-		// Chunked: read until the body's chunked framing ends (see
-		// chunkedBody), not until finalResp ends in "0\r\n\r\n".
-		body := chunkedBody{response: true}
-		for {
-			done, err := body.complete(*finalResp)
-			if err != nil {
-				return lastWr, err
-			}
-			if done {
-				return lastWr, nil
-			}
-			chunk, err := stream.ReadChunk()
-			if err != nil {
-				return lastWr, err
-			}
-			if !chunk.WrittenAt.IsZero() {
-				lastWr = chunk.WrittenAt
-			}
-			*finalResp = append(*finalResp, chunk.Bytes...)
-			noteWrite(writes, len(*finalResp), chunk.WrittenAt)
-		}
+		done, err := f.body.feed(msg[bodyStart:])
+		return bodyStart + f.body.end, done, err
 	}
-
-	// Neither Content-Length nor chunked: read until EOF (RFC 7230
-	// permits this for HTTP/1.0 and for responses with "Connection:
-	// close"). The loop relies on the stream eventually closing.
-	for {
-		chunk, err := stream.ReadChunk()
-		if err != nil {
-			return lastWr, err
-		}
-		if !chunk.WrittenAt.IsZero() {
-			lastWr = chunk.WrittenAt
-		}
-		*finalResp = append(*finalResp, chunk.Bytes...)
-		noteWrite(writes, len(*finalResp), chunk.WrittenAt)
-	}
+	// Neither field: a request has no body, and a response's runs until the
+	// server closes (RFC 9112 §6.3: HTTP/1.0 and "Connection: close").
+	return bodyStart, !f.response, nil
 }
 
 // errFramingRefused is returned for a message whose header section net/http's
@@ -805,24 +785,28 @@ func parseHeaders(head []byte, response bool) (contentLength int, chunked bool, 
 	var trailers [][]byte
 	lengths, codings, hosts := 0, 0, 0
 	var fieldErr error
+	// The names are compared in place (token bytes: ASCII), with no copy: a
+	// replay frames every request it serves twice (HandleChunkedRequests,
+	// then messageFrame), and a recording frames each chunk it reads.
 	err = headerFields(head, func(name, value []byte) {
-		field := strings.ToLower(string(bytes.TrimRight(name, " "))) // token bytes: ASCII
-		if len(field) != len(name) {
+		if field := bytes.TrimRight(name, " "); len(field) != len(name) {
 			// A name no other field has, to net/http's reader.
-			if field == "content-length" || field == "transfer-encoding" {
-				fieldErr = fmt.Errorf("%w: a space before a %s field's colon", errFramingRefused, field)
+			for _, framing := range []string{"content-length", "transfer-encoding"} {
+				if asciiEqualFold(field, framing) {
+					fieldErr = fmt.Errorf("%w: a space before a %s field's colon", errFramingRefused, framing)
+				}
 			}
 			return
 		}
-		switch field {
-		case "host":
+		switch {
+		case asciiEqualFold(name, "host"):
 			hosts++
-		case "trailer":
+		case asciiEqualFold(name, "trailer"):
 			trailers = append(trailers, value)
-		case "transfer-encoding":
+		case asciiEqualFold(name, "transfer-encoding"):
 			coding = value
 			codings++
-		case "content-length":
+		case asciiEqualFold(name, "content-length"):
 			value = trimWhiteSpace(value) // a value's end, which a fold can leave
 			n, valueErr := contentLengthValue(string(value))
 			switch {
@@ -1015,7 +999,7 @@ func decompressReadInPart(encoding string, data []byte, limit int64) ([]byte, er
 // recordv2_test.go asserts field-by-field equivalence on identical
 // input bytes (modulo timestamps, which are allowed to differ because
 // legacy uses time.Now() and V2 uses chunk timestamps).
-func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
+func (h *HTTP) buildHTTPMock(ctx context.Context, m *FinalHTTP, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
 	// Prefer the resolved destination port. The V2 recorder derives destPort from
 	// the DestStream FakeConn, which in proxyless (observe-only) capture has no
 	// real remote port (0) — breaking port-keyed telemetry-passthrough matching.
@@ -1026,7 +1010,9 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
-		return nil, fmt.Errorf("parse request: %w", err)
+		// The parser's error quotes the request: withheld, as the error
+		// is logged and reported.
+		return nil, fmt.Errorf("parse request: %w", utils.WithholdInput(err))
 	}
 	req.Header.Set("Host", req.Host)
 
@@ -1072,7 +1058,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		// undecoded, so replay sends the same bytes and then the fault.
 		if m.Fault != nil && (errors.Is(err, io.ErrUnexpectedEOF) ||
 			err == nil && m.Fault.Kind != models.FaultTruncate && closeDelimited(respParsed, req.Method)) {
-			return h.buildFaultAfterHead(m, req, respParsed, destPort, connID, opts)
+			return h.buildFaultAfterHead(ctx, m, req, respParsed, destPort, connID, opts)
 		}
 		// A body its client read in part is recorded as far as it read it:
 		// ReadAll returns what it read before the cut. Replay serves it with
@@ -1127,7 +1113,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	}
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
 		h.Logger.Debug("V2: request is a passThrough, skipping mock emit",
-			zap.Any("metadata", utils.GetReqMeta(req)))
+			zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 		return nil, nil
 	}
 
@@ -1146,7 +1132,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
 			if rule.Mode == models.PassThroughSkip {
-				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
+				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
 				return nil, nil
 			}
 			// recordOne: defer the dedup decision to emit time (below) so a later
@@ -1236,9 +1222,13 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 	}
 	// recordOne dedup, committed only now that a mock is actually being emitted.
-	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
-		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
-		return nil, nil
+	// It is m's (FinalHTTP.recordOne), given back if the recording loses the
+	// mock as it is handed over.
+	if ptRecordOne && h.ptRecorder != nil {
+		if m.recordOne = h.ptRecorder.take(ptKey, respParsed.StatusCode); m.recordOne == nil {
+			h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(ctx, req)))
+			return nil, nil
+		}
 	}
 	return mock, nil
 }
@@ -1251,7 +1241,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 // fault. It is buildHTTPMock again with no answer to read, so the mock is
 // what buildHTTPMock makes of the call (or nothing, for a passthrough), with
 // the cut-short answer put on it.
-func (h *HTTP) buildFaultAfterHead(m *FinalHTTP, req *http.Request, resp *http.Response, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
+func (h *HTTP) buildFaultAfterHead(ctx context.Context, m *FinalHTTP, req *http.Request, resp *http.Response, destPort uint, connID string, opts models.OutgoingOptions) (*models.Mock, error) {
 	_, bodyStart, _, ok := messageHead(m.Resp, true)
 	if !ok {
 		return nil, fmt.Errorf("parse response: the head of an answer cut short did not arrive whole: %w", io.ErrUnexpectedEOF)
@@ -1259,13 +1249,15 @@ func (h *HTTP) buildFaultAfterHead(m *FinalHTTP, req *http.Request, resp *http.R
 	raw := m.Resp[bodyStart:]
 	fault := *m.Fault
 	fault.BodyBytes = int64(len(raw))
-	mock, err := h.buildHTTPMock(&FinalHTTP{
+	noAnswer := &FinalHTTP{
 		Req:              m.Req,
 		ReqTimestampMock: m.ReqTimestampMock,
 		ResTimestampMock: m.ResTimestampMock,
 		ReqClock:         m.ReqClock,
 		Fault:            &models.Fault{Kind: models.FaultEOF},
-	}, destPort, connID, opts)
+	}
+	mock, err := h.buildHTTPMock(ctx, noAnswer, destPort, connID, opts)
+	m.recordOne = noAnswer.recordOne
 	if mock == nil || err != nil {
 		return mock, err
 	}

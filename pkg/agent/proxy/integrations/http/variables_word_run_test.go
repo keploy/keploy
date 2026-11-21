@@ -18,11 +18,13 @@ import (
 // words of one text), set side by side at the shared word, differ live at a
 // word both hold. Otherwise the application sent one value where the
 // recording had two, alone or beside another bound value, and it is refused.
-// The words read are the value's own: those the recording also sends whole at
-// another place and that learning names one value (variables.WordBind.Of).
-// The HTTP adapter names no word's learned value, so here each word is its
-// own value, checked as main checks it: a group equal by chance is refused,
-// as main refuses it, never bound where main refuses it.
+// The words read are the value's own: those named one value
+// (variables.WordBind.Of). The HTTP adapter names only a text that is one
+// UUID the call binds at every word (variables.NameUUIDs), so such a UUID's
+// words are one value by its form and a group of it equal by chance to
+// another's is answered under the proven switch. Every other word is its own
+// value, checked as main checks it: a group equal by chance is refused, as
+// main refuses it, never bound where main refuses it.
 
 const (
 	recEvent = "6f9619ff-8b86-4011-b42d-00c04fc964ff"
@@ -101,12 +103,14 @@ func suiteBody(id string, prefixed, sentWhole bool) string {
 	return `{"id":"` + field + `","kind":"update"}`
 }
 
-// Two fresh UUIDs whose version groups are equal by chance are refused at
-// the equal group, as main refuses them, bare or after "APP:", whether or
-// not each is also sent whole in a field of its own: an id sent whole is no
-// proof that its words are one value, and no learned value names them
-// (variables.WordBind.Of).
-func TestVariables_TwoFreshUUIDsWithOneEqualGroupAreRefusedAsMain(t *testing.T) {
+// Two fresh UUIDs whose version groups are equal by chance, whether or not
+// each is also sent whole in a field of its own: bare, each is bound at every
+// word and named its own value (variables.NameUUIDs), so under the proven
+// switch the shared group is chance and the suite's call is answered. After
+// "APP:" the text is no UUID and names nothing (an id sent whole elsewhere is
+// no proof that its words are one value): refused at the equal group, as
+// main refuses it.
+func TestVariables_TwoFreshUUIDsWithOneEqualGroup(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, sentWhole := range []bool{false, true} {
 		for _, prefixed := range []bool{false, true} {
@@ -115,7 +119,13 @@ func TestVariables_TwoFreshUUIDsWithOneEqualGroupAreRefusedAsMain(t *testing.T) 
 			if ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/events", eventBody(liveEvent, sentWhole))); !ok || stub.Name != "mock-1" {
 				t.Fatalf("prefixed %v, sent whole %v: the event should be answered by mock-1: ok=%v stub=%v diag=%+v", prefixed, sentWhole, ok, stub, diag)
 			}
-			ok, _, diag := matchVar(t, h, db, liveReq("POST", "/suites/events", suiteBody(liveSuite, prefixed, sentWhole)))
+			ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/suites/events", suiteBody(liveSuite, prefixed, sentWhole)))
+			if !prefixed {
+				if !ok || stub.Name != "mock-2" {
+					t.Fatalf("sent whole %v: the suite's call, a group equal by chance, should be answered by mock-2: ok=%v stub=%v diag=%+v", sentWhole, ok, stub, diag)
+				}
+				continue
+			}
 			if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != "su2" {
 				t.Fatalf("prefixed %v, sent whole %v: refused at %s, want su2 (the equal group, as main): %q", prefixed, sentWhole, p.name, p.why)
 			}
@@ -151,18 +161,28 @@ func TestVariables_OneUUIDWhereTwoWereRecordedIsRefused(t *testing.T) {
 	}
 }
 
-// Two groups of one fresh UUID equal by chance are refused at the second,
-// as main refuses them, whether or not the recording also sends the UUID
-// whole in a field of its own: no learned value names its words one value.
-func TestVariables_TwoEqualGroupsOfOneUUIDAreRefusedAsMain(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
+// Two groups of one fresh UUID equal by chance, whether or not the recording
+// also sends the UUID whole in a field of its own: bound at every word, its
+// words are named that UUID (variables.NameUUIDs), the groups of one value:
+// answered under the proven switch. After "APP:" its words name nothing and
+// the second is refused, as main refuses it.
+func TestVariables_TwoEqualGroupsOfOneUUID(t *testing.T) {
 	const live = "7d444840-41a3-41a3-a15b-5b4c7a3f9e21"
+	t.Setenv(provenswitch.Env, "1")
 	for _, sentWhole := range []bool{false, true} {
-		h := newHTTP()
-		db := &varDb{perTest: eventAndSuite(false, sentWhole)[:1]}
-		ok, _, diag := matchVar(t, h, db, liveReq("POST", "/events", eventBody(live, sentWhole)))
-		if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != "ev2" {
-			t.Fatalf("sent whole %v: refused at %s, want ev2 (the second equal group, as main): %q", sentWhole, p.name, p.why)
+		for _, prefixed := range []bool{false, true} {
+			h := newHTTP()
+			db := &varDb{perTest: eventAndSuite(prefixed, sentWhole)[1:]}
+			ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/suites/events", suiteBody(live, prefixed, sentWhole)))
+			if !prefixed {
+				if !ok || stub.Name != "mock-2" {
+					t.Fatalf("sent whole %v: one UUID with two equal groups should be answered by mock-2: ok=%v stub=%v diag=%+v", sentWhole, ok, stub, diag)
+				}
+				continue
+			}
+			if p := wantProblem(t, ok, diag, "they were two values when the test was recorded"); p.name != "su2" {
+				t.Fatalf("prefixed %v, sent whole %v: refused at %s, want su2 (the second equal group, as main): %q", prefixed, sentWhole, p.name, p.why)
+			}
 		}
 	}
 }
@@ -225,10 +245,11 @@ func TestVariables_AnEchoWordIsNoPartOfARun(t *testing.T) {
 
 // Two cookies of one header are two texts: a UUID bound word by word in each
 // is a run of its own cookie, never one run with the other's words. Two fresh
-// UUIDs whose version groups are equal by chance are refused, as main
-// refuses them, whether or not the body also sends each whole; the
-// application sending one UUID in both cookies, where the recording had two,
-// is refused either way.
+// UUIDs whose version groups are equal by chance are answered: each cookie's
+// UUID is bound at every word and its words are one value by its form
+// (variables.NameUUIDs), so the shared group is chance. The application
+// sending one UUID in both cookies, where the recording had two, is refused,
+// whether or not the body also sends each whole.
 func TestVariables_TwoCookiesOfOneHeaderAreTwoRuns(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	body := func(sid, csrf string, sentWhole bool) string {
@@ -257,20 +278,22 @@ func TestVariables_TwoCookiesOfOneHeaderAreTwoRuns(t *testing.T) {
 	}
 	h := newHTTP()
 	db := &varDb{perTest: []*models.Mock{rec(true)}}
-	ok, _, diag := matchVar(t, h, db, call(liveEvent, liveSuite, true))
-	wantProblem(t, ok, diag, "they were two values when the test was recorded")
+	if ok, stub, diag := matchVar(t, h, db, call(liveEvent, liveSuite, true)); !ok || stub.Name != "mock-1" {
+		t.Fatalf("two fresh UUIDs, a group equal by chance, should be answered by mock-1: ok=%v stub=%v diag=%+v", ok, stub, diag)
+	}
 	for _, sentWhole := range []bool{true, false} {
 		h = newHTTP()
 		db = &varDb{perTest: []*models.Mock{rec(sentWhole)}}
 		ok, _, diag := matchVar(t, h, db, call(liveEvent, liveEvent, sentWhole))
 		wantProblem(t, ok, diag, "they were two values when the test was recorded")
 	}
-	// Sent nowhere whole, each cookie's word is its own value: the group
-	// equal by chance is refused, as main refuses it.
+	// Sent nowhere whole, each cookie's UUID is still one value by its form:
+	// the group equal by chance is answered.
 	h = newHTTP()
 	db = &varDb{perTest: []*models.Mock{rec(false)}}
-	ok, _, diag = matchVar(t, h, db, call(liveEvent, liveSuite, false))
-	wantProblem(t, ok, diag, "they were two values when the test was recorded")
+	if ok, stub, diag := matchVar(t, h, db, call(liveEvent, liveSuite, false)); !ok || stub.Name != "mock-1" {
+		t.Fatalf("sent nowhere whole: two fresh UUIDs, a group equal by chance, should be answered by mock-1: ok=%v stub=%v diag=%+v", ok, stub, diag)
+	}
 }
 
 // A suite event whose id field holds two fresh UUIDs, each bound word by word

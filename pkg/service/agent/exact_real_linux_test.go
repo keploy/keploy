@@ -100,7 +100,7 @@ func TestATestWithAnExactMockARealRowAndACaptureLoss(t *testing.T) {
 			// The test's REAL connection: relayed before any matcher.
 			p.tracker.Dialed(realdeps.Origin{}, 1, "db.real:8080", true)
 			p.tracker.Sent(realdeps.Origin{}, 1, "db.real:8080")
-			lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full"}}
+			lost := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full", Err: -7}}
 			if tc.taint {
 				p.tracker.Incomplete(realdeps.Origin{}, "10.0.0.7:443", "keploy could not read which name it was opened for")
 				a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 2, LastTargetErr: -7}}

@@ -134,7 +134,7 @@ func mockQueryString(mockReq *models.HTTPReq) string {
 	if len(mockReq.URLParams) > 0 {
 		return urlParamsQuery(mockReq.URLParams)
 	}
-	if parsed, err := url.Parse(mockReq.URL); err == nil {
+	if parsed, err := parseRecordedURL(mockReq.URL); err == nil {
 		return parsed.RawQuery
 	}
 	return ""
@@ -157,7 +157,7 @@ func renderLiveRequest(request *http.Request, body []byte, places redactedPlaces
 // mockURLPath extracts just the path from a mock's URL (mocks store full URL
 // strings); falls back to the raw string when it doesn't parse.
 func mockURLPath(mockURL string) string {
-	if parsed, err := url.Parse(mockURL); err == nil {
+	if parsed, err := parseRecordedURL(mockURL); err == nil {
 		return parsed.Path
 	}
 	return mockURL

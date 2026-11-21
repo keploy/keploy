@@ -616,7 +616,7 @@ func TestMockOfAResponseAfterAnInterimResponse(t *testing.T) {
 	} {
 		resp := []byte(interim + "HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
 		h := &HTTP{Logger: zaptest.NewLogger(t)}
-		v2, err := h.buildHTTPMock(&FinalHTTP{Req: req, Resp: resp, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
+		v2, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: req, Resp: resp, ReqTimestampMock: time.Now(), ResTimestampMock: time.Now()},
 			443, "test-conn", models.OutgoingOptions{})
 		if err != nil || v2 == nil {
 			t.Fatalf("%q: buildHTTPMock = (%v, %v)", interim, v2, err)
@@ -819,5 +819,35 @@ func TestChunkedEndRefused(t *testing.T) {
 				t.Fatalf("resp changed to %q", resp)
 			}
 		})
+	}
+}
+
+// parseHeaders compares a field's name in place, without regard to ASCII case
+// (asciiEqualFold), as net/http's reader canonicalizes it: a name in capitals
+// or in any mix of cases is the field, and a name that only starts like a
+// framing field, or runs past one, is not.
+func TestParseHeadersNamesTheFramingFieldsInAnyCase(t *testing.T) {
+	for _, c := range []struct {
+		name, fields string
+		length       int
+		chunked      bool
+	}{
+		{"Content-Length in capitals", "CONTENT-LENGTH: 5\r\n", 5, false},
+		{"Content-Length in mixed case", "content-LENGTH: 5\r\n", 5, false},
+		{"Transfer-Encoding in capitals", "TRANSFER-ENCODING: chunked\r\n", -1, true},
+		{"a name that only starts like Content-Length", "Content: 3\r\n", -1, false},
+		{"a name that runs past Transfer-Encoding", "Transfer-Encoding-X: chunked\r\nContent-Length: 5\r\n", 5, false},
+		{"other names of the same lengths", "Accept-Charset: utf-8\r\nIf-Modified-Since: Tue, 03 Nov 2026 10:00:00 GMT\r\n", -1, false},
+	} {
+		head := []byte("POST / HTTP/1.1\r\nHost: a\r\n" + c.fields + "\r\n")
+		length, chunked, err := parseHeaders(head, false)
+		if err != nil || length != c.length || chunked != c.chunked {
+			t.Errorf("%s: parseHeaders = (%d, %v, %v), want (%d, %v, nil)", c.name, length, chunked, err, c.length, c.chunked)
+		}
+	}
+	for _, field := range []string{"Content-Length : 5\r\n", "TRANSFER-ENCODING : chunked\r\n"} {
+		if _, _, err := parseHeaders([]byte("POST / HTTP/1.1\r\nHost: a\r\n"+field+"\r\n"), false); !errors.Is(err, errFramingRefused) {
+			t.Errorf("%q: parseHeaders error = %v, want errFramingRefused (a space before a framing field's colon)", field, err)
+		}
 	}
 }

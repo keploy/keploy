@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"slices"
 	"sort"
 	"strconv"
@@ -24,6 +23,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
@@ -1733,15 +1733,16 @@ func interfaceAddrs() ([]netip.Addr, error) {
 // client's Docker endpoint to a native agent (AgentArgs, SetDockerHost).
 const AgentFlag = "docker-host"
 
-// contextEndpoint is the endpoint of the docker CLI's current context (which
-// DOCKER_HOST and DOCKER_CONTEXT choose, as for the docker CLI), "" when the
-// docker CLI cannot say. A variable so a test can give its own.
+// contextEndpoint is the endpoint of the docker CLI's current context
+// (engine.CurrentDockerContext), "" when it uses none of its own (the default
+// context, which is DOCKER_HOST, else the default socket) or the context
+// cannot be read. A variable so a test can give its own.
 var contextEndpoint = func() string {
-	out, err := exec.Command("docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").Output()
-	if err != nil {
+	c, ok, err := engine.CurrentDockerContext()
+	if err != nil || !ok {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return c.Host
 }
 
 // AgentArgs is what the native launcher appends to its agent's argv under the

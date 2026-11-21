@@ -136,25 +136,38 @@ type placeText struct {
 	same      int8
 }
 
-// withTexts gives each of ps the handles its texts are read by, in x.
+// withTexts gives each of ps the handles its texts are read by, in x. A
+// recording's handle reads the call's own Raw (p.src, fSrc, views), which
+// no rule writes, as textOf reads its copy.
 func withTexts(x *readerIndex, ps []evPlace) []evPlace {
-	// One block for the places' handles: one allocation per call, not one
-	// per place.
+	// One block each for the places' texts, their handles and their views'
+	// handles: a few allocations per call, however many places it has.
 	ts := make([]placeText, len(ps))
+	nh, nv := 0, 0
+	for i := range ps {
+		nh, nv = nh+2+len(ps[i].views), nv+len(ps[i].views)
+	}
+	hs, vs := make([]readerText, 0, nh), make([]*readerText, 0, nv)
+	handle := func(h readerText) *readerText {
+		hs = append(hs, h)
+		return &hs[len(hs)-1]
+	}
 	for i := range ps {
 		p, t := &ps[i], &ts[i]
 		if p.src == nil {
-			t.rec, t.live = x.text(p.rec), x.text(p.live)
+			t.rec, t.live = handle(readerText{x: x, text: p.rec}), handle(readerText{x: x, text: p.live})
 		} else {
-			t.rec = x.textOf(*p.src)
+			t.rec = handle(readerText{x: x, raw: p.src})
 			t.live = t.rec
 			if p.fSrc != p.src {
-				t.live = x.textOf(*p.fSrc)
+				t.live = handle(readerText{x: x, raw: p.fSrc})
 			}
 		}
+		k := len(vs)
 		for _, v := range p.views {
-			t.views = append(t.views, x.textOf(*v))
+			vs = append(vs, handle(readerText{x: x, raw: v}))
 		}
+		t.views = vs[k:len(vs):len(vs)] // read by range alone: none is no views
 		p.t = t
 	}
 	return ps
@@ -216,7 +229,11 @@ func payloadless(in Input) (mock, why string) {
 // placesOf lists in's places before the call and each one's state, and the
 // first place keploy could not read ("" where it read every one): every
 // change of the call is then refused.
-func placesOf(in Input) (ps []evPlace, unread string) {
+//
+// byWords are the client tests' requests keploy could not read that keep
+// their words (Earlier.unreadWords): each is unread for a value whose change
+// it may hold (mayHold), and no source of any other (decider.leaf).
+func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 	// Sized once: a call of a long test has thousands of places, and grown
 	// by append the list was copied at each growth (a quarter more each
 	// time past 256), about five times its size allocated per call.
@@ -237,6 +254,10 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			}
 		}
 		if bad != "" {
+			if e.unreadWords != nil {
+				byWords = append(byWords, e)
+				continue
+			}
 			unread = cmp.Or(unread, unreadName(e.Mock, e)+" ("+bad+")")
 			continue
 		}
@@ -332,7 +353,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		}
 		ps = append(ps, p)
 	}
-	return ps, unread
+	return ps, unread, byWords
 }
 
 // rawOutsideTest is evPlace.outsideTest of r: why F's serve of it says
@@ -787,6 +808,14 @@ func evidenceOf(p evPlace, h evHeld, r, f string, piece bool) (ev wordEvidence, 
 		return evUnknown, true
 	case same:
 		return evDisproven, true
+	case hr && hf && piece && unchangedFieldsFor(p, r, f):
+		// A piece of a longer value that the place holds only in fields
+		// round F gave as recorded (a start-up list of every suite's id,
+		// holding one id with the recorded 4-hex group and another with
+		// round F's, the recording changed elsewhere): those fields show
+		// no change, so the place reads as a wholly unchanged one does for
+		// a piece (above), and the value's long words judge it.
+		return evDisproven, true
 	case hr && hf:
 		return evShown, true
 	case nothingNew(p):
@@ -933,25 +962,22 @@ func (dc *decider) outside() *offsetPlaces {
 // (Raw.OfAnotherTest) read as offsetPlacesOf reads them, in raw's order
 // before the set's, but its words kept for the set (outsideWords), not read
 // again in each call. offsetPlacesOf reads Raw.elsewhere only there, so it
-// is handed raw with the mark cleared, and reads every other place as
-// before.
+// is asked to leave those recordings' words and instants to the call
+// (offsetPlacesBy), and reads every other place as before, of raw itself:
+// a copy of raw with the mark cleared was a call's largest allocation over
+// a set of thousands of recordings.
 func (dc *decider) offsetPlaces() *offsetPlaces {
-	raw := dc.in.Raw
-	var words []givenWords
+	outside := func(x Raw) bool { return x.elsewhere && x.isRead() }
+	// Read by range alone: no words is none.
+	words := make([]givenWords, 0, countOf(dc.in.Raw, outside))
 	var answers []givenMoment
-	if slices.ContainsFunc(raw, func(r Raw) bool { return r.elsewhere }) {
-		raw = slices.Clone(raw)
-		for i, x := range dc.in.Raw {
-			if x.elsewhere {
-				raw[i].elsewhere = false
-				if x.isRead() {
-					words = append(words, dc.outsideWords(x))
-					answers = append(answers, dc.dr.answerMoments(x)...)
-				}
-			}
+	for _, x := range dc.in.Raw {
+		if outside(x) {
+			words = append(words, dc.outsideWords(x))
+			answers = append(answers, dc.dr.answerMoments(x)...)
 		}
 	}
-	op := dc.dr.offsetPlacesOf(dc.in.At, dc.in.Earlier, raw, dc.set)
+	op := dc.dr.offsetPlacesBy(dc.in.At, dc.in.Earlier, dc.in.Raw, dc.set, false)
 	op.words = append(words, op.words...)
 	op.answers = append(answers, op.answers...)
 	return op
@@ -1079,7 +1105,9 @@ func keptWordsOf(k wordsKey, g givenWords) *wordsEntry {
 			e.lists.views[i] = keepLists(v)
 		}
 	}
-	e.lists.mock, e.lists.conn = "", ""
+	// The recording's name and connection, wordsOf's own copies, kept for
+	// the calls that hand it (of), each of which copied them anew.
+	n += allocBytes(len(g.mock), false) + allocBytes(len(g.conn), false)
 	e.bytes = n
 	return e
 }
@@ -1150,13 +1178,33 @@ func sameBody(a, b rawBody) bool {
 }
 
 // of is e's words as wordsOf reads them of x, the recording e keeps them
-// of: x's own times, serves and test (as wordsOf copies them), and e's
-// words.
+// of: x's own times, serves and test, its name and connection as copies
+// (wordsOf's, which e keeps), and e's words.
 func (e *wordsEntry) of(x Raw) givenWords {
 	g := e.lists
-	g.mock, g.at, g.late, g.noTime, g.answered, g.conn, g.pos = strings.Clone(x.mock), x.at, x.late, x.noTime, x.answered, strings.Clone(x.conn), x.pos
+	g.mock, g.at, g.late, g.noTime, g.answered, g.conn, g.pos = keptCopy(e.lists.mock, x.mock), x.at, x.late, x.noTime, x.answered, keptCopy(e.lists.conn, x.conn), x.pos
 	g.test, g.prev, g.first, g.last = x.test, x.prev, x.first, x.last
 	return g
+}
+
+// countOf is how many of xs keep holds of.
+func countOf[T any](xs []T, keep func(T) bool) (n int) {
+	for _, x := range xs {
+		if keep(x) {
+			n++
+		}
+	}
+	return n
+}
+
+// keptCopy is s as its own copy: kept, a copy the set already holds, where
+// it is s (the recording's name and connection, read the same in each call
+// that hands it), else a new one.
+func keptCopy(kept, s string) string {
+	if kept == s {
+		return kept
+	}
+	return strings.Clone(s)
 }
 
 // setSecondSource names a recording of the set (Input.Given), which round
@@ -1211,8 +1259,10 @@ func namesApart(ms []givenMoment, m, other moment) bool {
 // of the set (GivenPlaces.fView: what F's serve of it was told to give)
 // holds F's moment so; mock "" where no one recording names it alone. An
 // instant there is a copy of what F gave the application, or a pick from
-// it, never a read of the clock.
-func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
+// it, never a read of the clock. served is the call's earlier places the
+// echo reads: dc.in.Earlier, or those without a client test's requests where
+// a read of the clock goes before them (readOverClients).
+func (dc *decider) echoedOutside(c changedInstant, served []Earlier) (mock string, ok bool) {
 	if c.rm == nil || c.lm == nil {
 		return "", false
 	}
@@ -1221,7 +1271,7 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 	}
 	op := dc.outside()
 	pair := []driftedInstant{{rec: *c.rm, live: *c.lm}}
-	if len(op.answers) == 0 || dc.dr.echoedElsewhere(pair, dc.in.At, dc.in.Earlier, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
+	if len(op.answers) == 0 || dc.dr.echoedElsewhere(pair, dc.in.At, served, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
 		return "", false
 	}
 	if i := slices.IndexFunc(op.answers, func(g givenMoment) bool {
@@ -1544,7 +1594,7 @@ func dropLists(g listsGone) {
 // them unknown (state).
 type outsideHeld struct {
 	ls    []heldList
-	byID  map[int32][]int32
+	byID  postings
 	open  []int32
 	state []int32
 	fs    *setFilters
@@ -1566,9 +1616,17 @@ func (dc *decider) held() *outsideHeld {
 		return dc.oh
 	}
 	// A call in no set asks empty postings: every list is open.
-	oh := &outsideHeld{byID: map[int32][]int32{}, fs: &setFilters{}}
+	oh := &outsideHeld{fs: &setFilters{}}
 	dc.oh = oh
-	for j, g := range dc.outside().words {
+	words := dc.outside().words
+	// One block for the lists, sized for the most each recording can add:
+	// its own, F's view and each of its views.
+	n := 0
+	for _, g := range words {
+		n += 2 + len(g.views)
+	}
+	oh.ls = make([]heldList, 0, n)
+	for j, g := range words {
 		if g.unstated || g.unread {
 			oh.state = append(oh.state, int32(j))
 		}
@@ -1609,6 +1667,7 @@ func (dc *decider) held() *outsideHeld {
 		}
 		fs.mu.Unlock()
 	}
+	oh.byID = newPostings(len(es))
 	for i, e := range es {
 		if e != nil {
 			e.once.Do(func() { buildLists(oh.fs, s, e, oh.ls[i].l) })
@@ -1617,8 +1676,9 @@ func (dc *decider) held() *outsideHeld {
 			oh.open = append(oh.open, int32(i))
 			continue
 		}
-		oh.byID[e.id] = append(oh.byID[e.id], int32(i))
+		oh.byID.add(e.id, int32(i))
 	}
+	oh.byID.seal()
 	return oh
 }
 
@@ -1631,8 +1691,8 @@ func (oh *outsideHeld) holding(t string) map[int32]heldRoles {
 	ids := slices.Clone(oh.fs.post[t])
 	oh.fs.mu.Unlock()
 	for _, id := range ids {
-		for _, i := range oh.byID[id] {
-			out[oh.ls[i].g] |= oh.ls[i].role
+		for _, p := range oh.byID.of(id) {
+			out[oh.ls[p.i].g] |= oh.ls[p.i].role
 		}
 	}
 	for _, i := range oh.open {
@@ -1686,7 +1746,7 @@ func (oh *outsideHeld) asked(state bool, in ...map[int32]heldRoles) []int32 {
 // every word of every call, most of the learn step's work on api-server's
 // round F.
 type placeIndex struct {
-	rec, live map[int32][]int32
+	rec, live postings
 	always    []int32
 	fs        *setFilters
 }
@@ -1699,7 +1759,7 @@ func (dc *decider) places() *placeIndex {
 	}
 	// A call in no set asks empty postings: every place's texts are
 	// unposted (postID), and every place is read.
-	pi := &placeIndex{rec: map[int32][]int32{}, live: map[int32][]int32{}, fs: cmp.Or(dc.x.filters, &setFilters{})}
+	pi := &placeIndex{rec: newPostings(len(dc.ps)), live: newPostings(len(dc.ps)), fs: cmp.Or(dc.x.filters, &setFilters{})}
 	dc.pi = pi
 	placeBuilds.Add(1)
 	for i, p := range dc.ps {
@@ -1711,9 +1771,11 @@ func (dc *decider) places() *placeIndex {
 			pi.always = append(pi.always, int32(i))
 			continue
 		}
-		pi.rec[r] = append(pi.rec[r], int32(i))
-		pi.live[l] = append(pi.live[l], int32(i))
+		pi.rec.add(r, int32(i))
+		pi.live.add(l, int32(i))
 	}
+	pi.rec.seal()
+	pi.live.seal()
 	return pi
 }
 
@@ -1782,12 +1844,47 @@ func askedPlaces(at []int32, all bool, n int) []int32 {
 // mark adds to ask the places whose text on side (rec or live) the set's
 // postings say may hold every run of runs; false where runs is empty, which
 // every text may hold.
-func (pi *placeIndex) mark(ask *[]int32, side map[int32][]int32, runs []string) bool {
+func (pi *placeIndex) mark(ask *[]int32, side postings, runs []string) bool {
 	ids, ok := pi.fs.holdingRuns(runs)
 	for _, id := range ids {
-		*ask = append(*ask, side[id]...)
+		for _, p := range side.of(id) {
+			*ask = append(*ask, p.i)
+		}
 	}
 	return ok
+}
+
+// postings are a call's places, or lists, by the set's id of a text or a
+// list (placeIndex, outsideHeld), in one block for the call, where a slice
+// per id was an allocation for nearly every place of a call over a set of
+// thousands of recordings. A call adds every posting, then seals them, then
+// reads them.
+type postings struct{ at []posting }
+
+type posting struct{ id, i int32 }
+
+// newPostings are empty postings with room for n.
+func newPostings(n int) postings { return postings{at: make([]posting, 0, n)} }
+
+func (ps *postings) add(id, i int32) { ps.at = append(ps.at, posting{id: id, i: i}) }
+
+// seal orders the postings by id.
+func (ps *postings) seal() {
+	slices.SortFunc(ps.at, func(a, b posting) int { return cmp.Compare(a.id, b.id) })
+}
+
+// of is the postings added with id, in no set order (their readers sort
+// them or merge them); none where no posting has it.
+func (ps postings) of(id int32) []posting {
+	lo, found := slices.BinarySearchFunc(ps.at, id, func(p posting, id int32) int { return cmp.Compare(p.id, id) })
+	if !found {
+		return nil
+	}
+	hi := lo + 1
+	for hi < len(ps.at) && ps.at[hi].id == id {
+		hi++
+	}
+	return ps.at[lo:hi]
 }
 
 // runsOf is s's runs of letters and digits, as eachWord cuts them.
@@ -1825,11 +1922,15 @@ func viewNew(g givenWords) bool {
 }
 
 // BoundWord is a variable of a test bound at one word of an earlier request
-// leaf: the word's index and its text in each run.
+// leaf: the word's index, its text in each run, and the leaf's variable
+// place the variable is bound at (Place: "<Place>#<Word>" names it there).
+// A caller names the bind by Place, never by the Seen it asked of: a client
+// test's request leaf has no Seen.Place (BoundWords).
 type BoundWord struct {
 	Name           string
 	Word           int
 	Recorded, Live string
+	Place          string
 }
 
 // BoundWords is each variable of test number n bound at a word of s, a
@@ -1838,19 +1939,36 @@ type BoundWord struct {
 // An adapter answers a later answer leaf that holds s's recorded text whole
 // at the same words. Two runs' texts of different word counts name none: no
 // word of one is known to be the other's, and the answer stays as recorded.
+// A leaf of a client test's request (Earlier.incoming: mock is one the
+// running test took) is read at the place its test case binds a variable
+// at (seenVar), as the learn step bound it there (Place.Var): its leaves are
+// named by their paths alone (GivenRequest), so Seen.Place holds none.
 func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
-	if t == nil || s.Side != Request || s.Place == "" {
-		return nil
-	}
-	rec, live := variables.Words(s.Leaf.Value), variables.Words(s.Live)
-	if len(rec) != len(live) {
+	if t == nil || s.Side != Request {
 		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	place := s.Place
+	if place == "" && t.tookRequestLocked(mock) {
+		place = seenVar(Earlier{incoming: true}, s)
+	}
+	if place == "" {
+		return nil
+	}
+	// A place no variable is bound at a word of names none, and its
+	// leaf's words are not split: a call reads every earlier leaf of its
+	// test.
+	if at := mock + "\x00" + place + "#"; !t.runWordPlaces[at] && !t.wordPlaces[at] {
+		return nil
+	}
+	rec, live := boundWordsOf(s.Leaf.Value), boundWordsOf(s.Live)
+	if len(rec) != len(live) {
+		return nil
+	}
 	var out []BoundWord
 	for k := range rec {
-		key := mock + "\x00" + s.Place + "#" + strconv.Itoa(k)
+		key := mock + "\x00" + place + "#" + strconv.Itoa(k)
 		name, ok := "", false
 		if n >= t.setEpoch {
 			name, ok = t.runNames[key]
@@ -1859,10 +1977,32 @@ func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
 			name, ok = t.names[key]
 		}
 		if ok {
-			out = append(out, BoundWord{Name: name, Word: k, Recorded: s.Leaf.Value[rec[k][0]:rec[k][1]], Live: s.Live[live[k][0]:live[k][1]]})
+			out = append(out, BoundWord{Name: name, Word: k, Recorded: s.Leaf.Value[rec[k][0]:rec[k][1]], Live: s.Live[live[k][0]:live[k][1]], Place: place})
 		}
 	}
 	return out
+}
+
+// boundWordsOf splits a leaf's text into its words for BoundWords and
+// UsedWords (variables.Words); the rows count its calls.
+var boundWordsOf = variables.Words
+
+// wordPlaceOf is "<mock>\x00<place>#" of key, a variable's key
+// "<mock>\x00<place>#<word>" (BoundWords): key up to its last '#', none
+// of a key holding none. A place holding a '#' of its own is kept at its
+// last, a place no word is asked at: it only lets a leaf be read, as
+// every leaf was.
+func wordPlaceOf(key string) string { return key[:strings.LastIndexByte(key, '#')+1] }
+
+// tookRequestLocked reports whether mock is the place of a client test's
+// request the running test took (Incoming): one of t.incoming. t.mu is held.
+func (t *Tracker) tookRequestLocked(mock string) bool {
+	for _, e := range t.incoming {
+		if e.Mock == mock {
+			return true
+		}
+	}
+	return false
 }
 
 // RecBegan is the instant the running test began at in its recording
@@ -1874,4 +2014,51 @@ func (t *Tracker) RecBegan() time.Time {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.recBegan
+}
+
+// unchangedFieldsFor reports whether every field of p that holds the changed
+// word r in the recording, or f in round F's view of it (fieldsWith), holds
+// the same text in both runs: such a field gave round F's application what
+// it gave the recorded one, so neither run's word there shows the change,
+// though p changed elsewhere. false where a text was not read or no field
+// holds the word (fail closed: the place stays as its texts read).
+func unchangedFieldsFor(p evPlace, r, f string) bool {
+	if p.t == nil || p.t.rec == nil || p.t.live == nil {
+		return false
+	}
+	rf, okR := p.t.rec.fieldsWith(r)
+	lf, okL := p.t.live.fieldsWith(f)
+	if !okR || !okL || len(rf) == 0 || len(lf) == 0 {
+		return false
+	}
+	want := append(slices.Clone(rf), lf...)
+	rt, okR := fieldTexts(p.t.rec, want)
+	lt, okL := fieldTexts(p.t.live, want)
+	if !okR || !okL {
+		return false
+	}
+	for _, a := range want {
+		x, inR := rt[a]
+		y, inL := lt[a]
+		if !inR || !inL || x != y {
+			return false
+		}
+	}
+	return true
+}
+
+// fieldTexts is the text, read now, of each field of want that t's text has
+// (eachField); false where the text was not read.
+func fieldTexts(t *readerText, want []fieldAt) (map[fieldAt]string, bool) {
+	s, fields, ok := t.read()
+	if !ok {
+		return nil, false
+	}
+	out := make(map[fieldAt]string, len(want))
+	eachField(s, fields, func(a fieldAt, text string) {
+		if slices.Contains(want, a) {
+			out[a] = text
+		}
+	})
+	return out, true
 }

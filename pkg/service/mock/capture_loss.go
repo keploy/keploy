@@ -54,9 +54,12 @@ type UnchargedLossReader interface {
 // all is left out (NotJudged's). An agent that cannot say which losses no
 // test was charged with leaves every loss of the run as the run's (lost, and
 // the PID-map refusals refused): judging then fails the run rather than pass
-// on a guess. When the run's own count could not be read either (lostErr),
-// what was lost after the last test is unknown: that is the error, and
-// judging fails the run on it as on a loss.
+// on a guess. A read that failed otherwise (the agent's drain before it, or
+// the read itself) leaves what was lost after the last test unknown, never
+// "none": every loss of the run is the run's, and that is the error too, so
+// judging fails the run however few were counted. When the run's own count
+// could not be read either (lostErr), that is the error, as it is the same
+// unknown.
 func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.CaptureLosses, lostErr error, refused models.PIDMapRefusals) (models.CaptureLosses, error) {
 	if !base.checked {
 		return nil, nil
@@ -71,20 +74,32 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 		unchargedErr = err
 		m.logger.Warn("keploy could not read which of the run's capture losses no test was charged with, so every one of them is the run's", zap.Error(err))
 	}
-	all := append(models.CaptureLosses(nil), lost...)
-	if refused.Target > 0 {
-		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refused.Target, What: refused.CaptureIncomplete()})
-	}
-	if refused.Excluded > 0 {
-		all = append(all, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refused.Excluded, What: refused.CaptureIncomplete()})
-	}
+	all := append(append(models.CaptureLosses(nil), lost...), pidMapLosses(refused)...)
 	switch {
 	case lostErr != nil && unchargedErr != nil:
 		return all, fmt.Errorf("%w; nor which of them no test was charged with: %v", lostErr, unchargedErr)
 	case lostErr != nil:
 		return all, lostErr
+	case unchargedErr != nil && !errors.Is(unchargedErr, models.ErrCaptureLossesUnsupported):
+		return all, fmt.Errorf("keploy could not read which of the run's capture losses no test was charged with: %w", unchargedErr)
 	}
 	return all, nil
+}
+
+// pidMapLosses are refused as capture losses, one for each PID map that
+// refused an insert: the inserts it refused, the run's sentence for both
+// maps (PIDMapRefusals.CaptureIncomplete), and the kernel's errno for that
+// map's latest refusal, so a reader takes each map's cause from its own
+// loss. nil when neither refused one.
+func pidMapLosses(refused models.PIDMapRefusals) models.CaptureLosses {
+	var out models.CaptureLosses
+	if refused.Target > 0 {
+		out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refused.Target, What: refused.CaptureIncomplete(), Err: refused.LastTargetErr})
+	}
+	if refused.Excluded > 0 {
+		out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refused.Excluded, What: refused.CaptureIncomplete(), Err: refused.LastExcludedErr})
+	}
+	return out
 }
 
 // captureLossesDuring is what the agent could not capture while the test
@@ -105,8 +120,13 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 // per-test file's CannotCapture say them, as they do a TLS handshake
 // abandoned at the same moment. A test still open (its process went away;
 // the record's read of the windows ends it) keeps its drops to its end.
-// If that read fails, this one goes on without those drops, as runLosses
-// goes on without it (an agent older than it has no such drops).
+// That read also has the agent drain first: its proxy counts the close of
+// every connection the run's stop ended, or owns one it cannot count by name
+// (not judged), so this read has them. If that read fails, this one still
+// reads the counts, and returns what they lost with the read's error: whether
+// a close the stop made lost a call cannot be told, so the run is never
+// judged clean on what was counted. An agent older than it (one that cannot
+// say) has no such drops, and this one goes on without them.
 func (m *mockService) captureLossesDuring(ctx context.Context, base lossBase) (models.CaptureLosses, error) {
 	if !base.checked {
 		return nil, nil
@@ -114,9 +134,10 @@ func (m *mockService) captureLossesDuring(ctx context.Context, base lossBase) (m
 	if base.err != nil {
 		return nil, fmt.Errorf("before the test command ran: %w", base.err)
 	}
+	var unchargedErr error
 	if un, ok := m.instrumentation.(UnchargedLossReader); ok {
-		if _, err := un.GetUnchargedCaptureLosses(ctx); err != nil {
-			m.logger.Debug("keploy's agent could not count what its proxy listener dropped after the last test before its read of the run's capture losses", zap.Error(err))
+		if _, err := un.GetUnchargedCaptureLosses(ctx); err != nil && !errors.Is(err, models.ErrCaptureLossesUnsupported) {
+			unchargedErr = fmt.Errorf("after the test command ran, keploy could not read whether its agent had counted every close the run's stop made: %w", err)
 		}
 	}
 	reader := m.instrumentation.(CaptureLossReader)
@@ -131,5 +152,5 @@ func (m *mockService) captureLossesDuring(ctx context.Context, base lossBase) (m
 		}
 		out = append(out, l)
 	}
-	return out, nil
+	return out, unchargedErr
 }

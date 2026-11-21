@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"time"
 
@@ -17,6 +19,10 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+// MappingDb reads and writes each test set's mapping file. Every write of a
+// set's file holds the set's write lock from before it reads the file until
+// it has written it (holdSet), so writes of one set through any MappingDb of
+// the process are one at a time and none loses another's change.
 type MappingDb struct {
 	logger      *zap.Logger
 	path        string
@@ -25,6 +31,10 @@ type MappingDb struct {
 	// jsonWritten is the mappings.json files this db last encoded, per
 	// test set (encodeOver).
 	jsonWritten writtenFiles
+	// live is the mapping this db last wrote whole, while its file holds no
+	// hand edit: the next write takes it instead of parsing the file
+	// (live_cache.go).
+	live liveMappings
 }
 
 func New(logger *zap.Logger, path string, mapFileName string) *MappingDb {
@@ -42,6 +52,11 @@ func NewWithFormat(logger *zap.Logger, path string, mapFileName string, format y
 
 func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error {
 	testSetID := mapping.TestSetID
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -68,7 +83,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	effFormat := db.Format
 	if exists {
 		effFormat = detected
-		data, err := os.ReadFile(filepath.Join(mappingPath, fileName+"."+effFormat.FileExtension()))
+		data, err := yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to read existing mapping file", zap.String("path", mappingPath))
 			return err
@@ -187,7 +202,8 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		utils.LogError(db.logger, err, "failed to encode mapping", zap.String("testSetID", testSetID))
 		return err
 	}
-	err = yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	db.live.forget() // a write the kept mapping does not follow (live_cache.go)
+	err = yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to write mapping file", zap.String("path", mappingPath))
 		return err
@@ -203,7 +219,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 // keepEntries gives each test entry Insert rebuilt from the tests' mocks
 // alone the rest of its entry (models.MappedTestCase): what the caller wrote
 // for it, else what the file held for it, so a write of a test's mocks keeps
-// its cases, dir, starts, at, real, given, key and seed. The mocks stay the
+// its cases, dir, starts, at, end, real, given, variables, key and seed. The mocks stay the
 // rebuild's.
 func keepEntries(rebuilt *models.Mapping, onDisk, written []models.MappedTestCase) {
 	before := make(map[string]models.MappedTestCase, len(onDisk))
@@ -250,13 +266,18 @@ func entryOver(o, w models.MappedTestCase) models.MappedTestCase {
 		o.Starts = w.Starts
 	}
 	if !w.At.IsZero() {
-		o.At = w.At
+		// The end pairs with the begin of the record that wrote it: a
+		// write with another begin takes its end too, none included.
+		o.At, o.End = w.At, w.End
 	}
 	if len(w.Real) > 0 {
 		o.Real = w.Real
 	}
 	if len(w.Given) > 0 {
 		o.Given = w.Given
+	}
+	if len(w.Variables) > 0 {
+		o.Variables = w.Variables
 	}
 	if w.Key != "" {
 		o.Key = w.Key
@@ -321,6 +342,11 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	if len(byTest) == 0 {
 		return nil
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
@@ -339,9 +365,16 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	}
 
 	effFormat := db.Format
+	var kept *liveMapping
 	if exists {
 		effFormat = detected
-		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		kept = db.live.take(db.path, testSetID, mappingFilePath(mappingPath, fileName, effFormat), effFormat)
+	}
+	if kept != nil {
+		// The file is as this db last wrote it, from this mapping.
+		mapping = kept.mapping
+	} else if exists {
+		fileData, err = yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to read mapping file for upsert",
 				zap.String("testSetID", testSetID))
@@ -389,19 +422,22 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 		})
 	}
 
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerOnNew, testSetID)
+	encodedData, err := db.encodeWrite(mapping, effFormat, fileData, doc, kept, testSetID)
 	if err != nil {
+		db.live.forget()
 		utils.LogError(db.logger, err, "failed to encode mapping during upsert",
 			zap.String("testSetID", testSetID))
 		return err
 	}
 
-	err = yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	err = yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 	if err != nil {
+		db.live.forget()
 		utils.LogError(db.logger, err, "failed to write mapping file during upsert",
 			zap.String("testSetID", testSetID))
 		return err
 	}
+	db.live.keep(db.path, testSetID, mappingFilePath(mappingPath, fileName, effFormat), effFormat, mapping, encodedData, kept != nil)
 
 	db.logger.Debug("Successfully upserted test-mock mappings",
 		zap.String("testSetID", testSetID),
@@ -415,6 +451,11 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 // recording derives the scope whole from its test windows (D2), so what is
 // written replaces what was there. An empty scope clears it.
 func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error {
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	var fileData []byte
 	var doc *yamlLib.Node
 	mappingPath := filepath.Join(db.path, testSetID)
@@ -431,7 +472,7 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -444,7 +485,78 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 	if err != nil {
 		return err
 	}
-	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	db.live.forget() // a write the kept mapping does not follow (live_cache.go)
+	return yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// AddToWorker adds entries to the set's worker scope (models.Mapping.Worker)
+// without taking them out of any test's list, as keploy record does for a
+// mock a worker-mock rule matched (models.WorkerRuleReason): a keploy that does not
+// read the scope still finds each mock with the test that recorded it. An
+// entry whose name the scope holds already is left as it is there; the scope
+// stays in recorded order, and every other section is kept as it is. It
+// returns the names it added, in entries' order. A set with no mapping file
+// gets none: a file holding only a worker scope would make a replay take the
+// set for mapped, with no test owning anything.
+func (db *MappingDb) AddToWorker(ctx context.Context, testSetID string, entries []models.MockEntry) ([]string, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil || !exists {
+		return nil, err
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return nil, err
+	}
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
+	if err != nil {
+		return nil, err
+	}
+	held := make(map[string]bool, len(mapping.Worker)+len(entries))
+	for _, e := range mapping.Worker {
+		held[e.Name] = true
+	}
+	var added []string
+	for _, e := range entries {
+		if e.Name == "" || held[e.Name] {
+			continue
+		}
+		held[e.Name] = true
+		// In recorded order, before the first entry recorded after it;
+		// the entries the scope held keep their order.
+		at := len(mapping.Worker)
+		for i, w := range mapping.Worker {
+			if workerAt(e).Before(workerAt(w)) {
+				at = i
+				break
+			}
+		}
+		mapping.Worker = slices.Insert(mapping.Worker, at, e)
+		added = append(added, e.Name)
+	}
+	if len(added) == 0 {
+		return nil, nil
+	}
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
+	if err != nil {
+		return nil, err
+	}
+	if err := yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat); err != nil {
+		return nil, err
+	}
+	return added, nil
 }
 
 // MoveToWorker bakes recordings into the set's worker scope
@@ -464,7 +576,12 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 // moved it, and its undo) is written on the entry as given: the entry's line
 // is the last placement's. So are its Drift (MockEntry.Drift: the move rests
 // on its owner's quarantine) and its Trails (MockEntry.Trails: the earlier
-// test whose call it trails, which only the move that proved it names). Under the switch a mock taken out of a test's list
+// test whose call it trails, which only the move that proved it names), and
+// its Rule, Series, Read, Unchanged and Once (MockEntry.Rule, Series, Read,
+// Unchanged, Once: the declared rule that placed it, its series, whether
+// that series only reads, whether the write it recorded changed nothing,
+// and whether the series answers once in a run, which only that rule's
+// move names). Under the switch a mock taken out of a test's list
 // names that test as its Owner (MockEntry.Owner), unless the move names one;
 // a worker entry placed again keeps its owner unless the move names one.
 // Without the switch no owner is written, so a move writes what it wrote
@@ -486,6 +603,11 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	if len(moves) == 0 {
 		return nil, nil
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -495,7 +617,7 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	if err != nil || !exists {
 		return nil, err
 	}
-	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	fileData, err := yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +641,8 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	if err != nil {
 		return nil, err
 	}
-	if err := yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat); err != nil {
+	db.live.forget() // a write the kept mapping does not follow (live_cache.go)
+	if err := yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat); err != nil {
 		return nil, err
 	}
 	return moved, nil
@@ -535,6 +658,9 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			mapping.Worker[i].Reason = mv.Reason
 			mapping.Worker[i].Drift = mv.Drift
 			mapping.Worker[i].Trails = mv.Trails
+			mapping.Worker[i].Rule, mapping.Worker[i].Series, mapping.Worker[i].Read = mv.Rule, mv.Series, mv.Read
+			mapping.Worker[i].Unchanged, mapping.Worker[i].Once, mapping.Worker[i].Optional = mv.Unchanged, mv.Once, mv.Optional
+			mapping.Worker[i].Due = mv.Due
 			if mv.Owner != "" {
 				mapping.Worker[i].Owner = mv.Owner
 			}
@@ -570,6 +696,9 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	entry.Reason = mv.Reason
 	entry.Drift = mv.Drift
 	entry.Trails = mv.Trails
+	entry.Rule, entry.Series, entry.Read = mv.Rule, mv.Series, mv.Read
+	entry.Unchanged, entry.Once, entry.Optional = mv.Unchanged, mv.Once, mv.Optional
+	entry.Due = mv.Due
 	// A replay serves a worker entry only while a test process of its key
 	// holds the run, and a moved entry with none would sit in the slice no
 	// test process holds: the move's key, else the test's. A test with no
@@ -600,6 +729,11 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 	if feature == "" {
 		return fmt.Errorf("mark what %s was recorded with: an empty mark", testSetID)
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -612,7 +746,7 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 	if !exists {
 		return fmt.Errorf("mark %s as recorded with %s: the set has no mappings file", testSetID, feature)
 	}
-	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	fileData, err := yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 	if err != nil {
 		return err
 	}
@@ -628,6 +762,123 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 	if err != nil {
 		return err
 	}
+	db.live.forget() // a write the kept mapping does not follow (live_cache.go)
+	return yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// SetRules writes digest as the set's rules digest (models.Mapping.Rules:
+// the rules declared in keploy.yml that keploy mock record placed the set's
+// entries by), keeping every other section, comment and hand edit as it is.
+// An empty digest removes the key, and a digest the file carries already
+// writes nothing. A set with no mapping file is refused, not created: its
+// record wrote no entry a rule could place.
+func (db *MappingDb) SetRules(ctx context.Context, testSetID, digest string) error {
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("write %s's rules digest: the set has no mappings file", testSetID)
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return err
+	}
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
+	if err != nil {
+		return err
+	}
+	if mapping.Rules == digest {
+		return nil
+	}
+	mapping.Rules = digest
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+}
+
+// SetSources writes, on every entry of the set's mapping file, the sources
+// rules declared in keploy.yml give fields of its recording's request
+// (models.MockEntry.Sources), by recording name: an entry sources names
+// gets them in every list that holds it, and every other entry loses any
+// it had, so a set never keeps an earlier record's. Every other section,
+// comment and hand edit stays as it is, and a file that holds them already
+// writes nothing. Sources this keploy cannot decide a field by
+// (models.CheckSources), a name no entry has, and a set with no mapping
+// file are refused, writing nothing.
+func (db *MappingDb) SetSources(ctx context.Context, testSetID string, sources map[string][]models.DeclaredSource) error {
+	for name, of := range sources {
+		if err := models.CheckSources(of); err != nil {
+			return fmt.Errorf("write %s's declared sources of %s: %w", testSetID, name, err)
+		}
+	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("write %s's declared sources: the set has no mappings file", testSetID)
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return err
+	}
+	mapping, doc, err := db.decodeOld(fileData, effFormat)
+	if err != nil {
+		return err
+	}
+	lists := [][]models.MockEntry{mapping.Startup, mapping.Runner, mapping.Worker, mapping.Shared}
+	for i := range mapping.TestCases {
+		lists = append(lists, mapping.TestCases[i].Mocks)
+	}
+	for i := range mapping.Boots {
+		lists = append(lists, mapping.Boots[i].Mocks)
+	}
+	changed, seen := false, make(map[string]bool, len(sources))
+	for _, list := range lists {
+		for i := range list {
+			want := sources[list[i].Name]
+			seen[list[i].Name] = true
+			if !reflect.DeepEqual(list[i].Sources, want) {
+				list[i].Sources = slices.Clone(want)
+				changed = true
+			}
+		}
+	}
+	for name := range sources {
+		if !seen[name] {
+			return fmt.Errorf("write %s's declared sources: its mappings file lists no recording %s", testSetID, name)
+		}
+	}
+	if !changed {
+		return nil
+	}
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerNever, testSetID)
+	if err != nil {
+		return err
+	}
 	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }
 
@@ -636,6 +887,11 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 func workerAt(e models.MockEntry) time.Time { return e.RecordedAt() }
 
 func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	var fileData []byte
 	var doc *yamlLib.Node
 	mappingPath := filepath.Join(db.path, testSetID)
@@ -649,7 +905,7 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -663,7 +919,8 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 	if err != nil {
 		return err
 	}
-	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	db.live.forget() // a write the kept mapping does not follow (live_cache.go)
+	return yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 }
 
 // UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
@@ -673,6 +930,11 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	if len(byTest) == 0 && len(startup) == 0 && len(suites) == 0 {
 		return nil
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -684,7 +946,7 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -719,16 +981,27 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 			tc.Starts = in.Starts
 		}
 		if !in.At.IsZero() {
-			tc.At = in.At
+			// The end of this record's run of the test, none included (its
+			// scope never ended): an earlier record's end would pair with
+			// another begin (MappedTestCase.End).
+			tc.At, tc.End = in.At, in.End
 			// The values the test gave in this record's run of it (proven
 			// switch only, where every test that ran has its begin): they
 			// replace what an earlier record wrote, none included, as they
 			// pair with this record's calls.
 			tc.Given = in.Given
+			// The variables a client test's request binds pair with the
+			// calls of the record that learned them: record's full round
+			// writes this record's below, none included.
+			tc.Variables = nil
 			// The seed its browser drew from in this record, none included
 			// (seeding off): the calls it pairs with were drawn from it.
 			tc.Seed = in.Seed
 		}
+		// What record's full round learned a client test's request binds
+		// (proven switch only), beside what it learned before in the round:
+		// none leaves them as they are.
+		tc.Variables = models.MergeVariables(tc.Variables, in.Variables)
 		// The mock.real destinations this record's run of the test used
 		// (proven switch only): they replace what an earlier record wrote.
 		if len(in.Real) > 0 {
@@ -750,7 +1023,8 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	if err != nil {
 		return err
 	}
-	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	db.live.forget() // a write the kept mapping does not follow (live_cache.go)
+	return yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat)
 }
 
 func mergeMaps[V any](existing, incoming map[string]V) map[string]V {
@@ -800,10 +1074,15 @@ func (db *MappingDb) Exists(ctx context.Context, testSetID string) (bool, error)
 }
 
 // Delete removes the set's mappings file in every format; a missing file is not an error.
-func (db *MappingDb) Delete(_ context.Context, testSetID string) error {
+func (db *MappingDb) Delete(ctx context.Context, testSetID string) error {
 	if err := pathsafe.ValidateSingleSegment(testSetID, false); err != nil {
 		return fmt.Errorf("rejecting Delete: testSetID %q must be a single-segment name under the mappings directory: %w", testSetID, err)
 	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	fileName := db.MapFileName
 	if fileName == "" {
 		fileName = "mappings"
@@ -813,7 +1092,8 @@ func (db *MappingDb) Delete(_ context.Context, testSetID string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		db.live.forget()
+		if err := yaml.RemoveInRecording(db.path, path); err != nil && !os.IsNotExist(err) {
 			utils.LogError(db.logger, err, "failed to delete the mapping file", zap.String("path", path))
 			return err
 		}
@@ -834,7 +1114,7 @@ func (db *MappingDb) decodeMapping(ctx context.Context, testSetID string) (*mode
 		fileName = "mappings"
 	}
 
-	fileData, detected, err := yaml.ReadFileAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	fileData, detected, err := yaml.ReadRecordingFileAny(ctx, db.logger, db.path, mappingPath, fileName, db.Format)
 	if err != nil {
 		if os.IsNotExist(err) {
 			db.logger.Debug("Mapping file does not exist",
@@ -1000,6 +1280,11 @@ func (db *MappingDb) ApplyShares(ctx context.Context, testSetID string, s models
 // created (as an empty mapping) when create; otherwise it is an error when
 // mustExist, and left missing when not.
 func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, mustExist bool, change func(*models.Mapping) bool) error {
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	var fileData []byte
 	var doc *yamlLib.Node
 	mappingPath := filepath.Join(db.path, testSetID)
@@ -1021,8 +1306,17 @@ func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, must
 		effFormat = db.Format
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	var kept *liveMapping
 	if exists {
-		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		kept = db.live.take(db.path, testSetID, mappingFilePath(mappingPath, fileName, effFormat), effFormat)
+	}
+	if kept != nil {
+		// The file is as this db last wrote it, from this mapping. A change
+		// that says it changed nothing may still have touched it: the file
+		// is read again next time.
+		mapping = kept.mapping
+	} else if exists {
+		fileData, err = yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -1031,11 +1325,36 @@ func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, must
 		}
 	}
 	if !change(mapping) {
+		if kept != nil {
+			db.live.forget()
+		}
 		return nil
 	}
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, doc, headerOnNew, testSetID)
+	encodedData, err := db.encodeWrite(mapping, effFormat, fileData, doc, kept, testSetID)
 	if err != nil {
+		db.live.forget()
 		return err
 	}
-	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
+	if err := yaml.WriteRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, encodedData, false, effFormat); err != nil {
+		db.live.forget()
+		return err
+	}
+	db.live.keep(db.path, testSetID, mappingFilePath(mappingPath, fileName, effFormat), effFormat, mapping, encodedData, kept != nil)
+	return nil
+}
+
+// encodeWrite is mapping encoded to replace the set's file: from the kept
+// mapping, when the file is as this db last wrote it (kept), with no read of
+// it; else over the file's bytes and document (encodeOver), keeping its hand
+// edits.
+func (db *MappingDb) encodeWrite(mapping *models.Mapping, format yaml.Format, old []byte, doc *yamlLib.Node, kept *liveMapping, testSetID string) ([]byte, error) {
+	if kept == nil {
+		return db.encodeOver(mapping, format, old, doc, headerOnNew, testSetID)
+	}
+	data, err := encodeKept(mapping, format, kept.head, int(kept.info.Size()))
+	if err == nil && format == yaml.FormatJSON {
+		// What a later rewrite over this file finds is this db's own.
+		db.jsonWritten.set(testSetID, data)
+	}
+	return data, err
 }

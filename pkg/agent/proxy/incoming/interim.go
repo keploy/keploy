@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -248,11 +249,17 @@ func lingerClose(c net.Conn) {
 	_, _ = io.Copy(io.Discard, c)
 }
 
+// answeredEarlyWhy is why the console says a request the app answered before
+// its whole body came is not recorded (warnNotRecorded).
+const answeredEarlyWhy = "the app answered it before the whole request body reached the app (Expect: 100-continue); send it without that header to record it"
+
 // warnNotRecorded tells the user why an exchange whose request the app
 // answered before all of it came (finish's err) is not a test case: a test
-// the user expects is otherwise missing with no trace.
-func warnNotRecorded(logger *zap.Logger, req *http.Request, resp *http.Response, err error) {
+// the user expects is otherwise missing with no trace. The line names the
+// request by its shape and its path tag, and the recording's console by its
+// path beside the same tag (notRecordedMeta).
+func warnNotRecorded(ctx context.Context, logger *zap.Logger, req *http.Request, resp *http.Response, err error) {
 	logger.Warn("Not recording this request as a test case: the app answered it before the whole request body reached the app, so the request the app answered is not the one the client sent. The client still got the app's answer. To record it, send the request without the \"Expect: 100-continue\" header (curl: -H 'Expect:').",
-		zap.String("method", req.Method), zap.String("url", req.URL.String()),
+		zap.Any("metadata", notRecordedMeta(ctx, req, answeredEarlyWhy)),
 		zap.Int("status_code", resp.StatusCode), zap.Error(err))
 }

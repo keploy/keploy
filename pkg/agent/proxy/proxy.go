@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -138,10 +139,15 @@ type Proxy struct {
 	// whenever its error capture window opens (openTestErrorCapture). Under
 	// the proven switch the parsers find it on their connection's context.
 	learnTracker *learn.Tracker
+	// caseBinds are the running client test's recorded requests and the
+	// variables of the test bound at them, which its requests bind as they
+	// reach the application (TakeClientCases, bindCase).
+	caseBinds caseBinds
 	// serveClock tells, with the proven switch off, a call's span on the
 	// application's clock for the background check alone (learn.
-	// CallSpanOf): the managers note their serves to it, and the parsers
-	// find it on their connection's context. The learn tracker, which tells
+	// CallSpanOf, learn.CallSpansOf): the managers note their serves to it,
+	// Mock notes each test set's begin to it, and the parsers find it on
+	// their connection's context. The learn tracker, which tells
 	// it under the switch, is fed nothing with it off.
 	serveClock *learn.ServeClock
 	// procZones reads the zone each application process writes a wall
@@ -252,19 +258,15 @@ type Proxy struct {
 	// their kind that were dropped for room (noteAnswerDropped): no read is
 	// incomplete for them, and each hundredth is said.
 	answersDropped atomic.Int64
-	// missCutPending is set, under the proven switch, by a test set's Mock,
-	// and taken by its first staging (SetMocksWithWindow from
+	// missCutPending is set by a test set's Mock, with the proven switch on
+	// or off, and taken by its first staging (SetMocksWithWindow from
 	// models.BaseTime), which cuts what was missed until then
 	// (cutMissesAtSetStart).
 	missCutPending atomic.Bool
-	// setStaged is the staging (MockManager.StagingEpoch) of the running
-	// test set's first, which cut what was missed until then
-	// (cutMissesAtSetStart), under the proven switch; 0 before any. A miss
-	// whose call was marked in an earlier staging
-	// (models.MockMismatchReport.MarkEpoch) is not the set's, and the drain
-	// cuts it as the set's start did, however late it arrives
-	// (markedBeforeSet).
-	setStaged atomic.Uint64
+	// setStarts counts, under the proven switch, the test sets' starts
+	// (cutMissesAtSetStart): an earlier set's call is read naming how many
+	// sets before the running one it was made in (missWindow.setsBack).
+	setStarts atomic.Uint64
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
 	// no longer needed since the proxy serves a single client-app.
@@ -279,7 +281,7 @@ type Proxy struct {
 	// (Design A). Key is the worker's self-reported PID (ScopeReq.Pid); value is
 	// the set of per-test mock names that worker's current test is allowed to
 	// see. An outgoing call's origin PID (OutgoingOptions.SrcPid) is resolved up
-	// the /proc tree to the nearest registered ancestor, and its per-test view
+	// its process tree to the nearest registered ancestor, and its per-test view
 	// is intersected with that worker's set — so concurrent workers never stomp
 	// each other's pool. Empty/absent ⇒ the worker serves the whole pool
 	// (backward compatible with suite-level and single-worker sequential scope).
@@ -927,7 +929,7 @@ func dialPostgresSSLUpstream(ctx context.Context, connID, addr string, cfg *tls.
 			return nil, fmt.Errorf("postgres SSL upstream: TLS handshake after 'S' failed: %w", err)
 		}
 		logger.Debug("Postgres SSLRequest accepted by upstream; TLS established",
-			zap.String("addr", addr),
+			zap.String("addr", models.HostLogName(ctx, addr)),
 			zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol))
 
 		// Publish the real upstream cert to the cbshim rendezvous.
@@ -1379,7 +1381,7 @@ func (p *Proxy) recordMySQLOutgoing(
 	}
 
 	if err := mysqlParser.RecordOutgoing(parserCtx, mysqlSession); err != nil {
-		p.countParserPanic(err, integrations.MYSQL, dstConn.RemoteAddr())
+		p.countParserPanic(parserCtx, err, integrations.MYSQL, dstConn.RemoteAddr())
 		// A decline is not a failure: relay rather than letting the caller's
 		// deferred close drop a connection keploy merely chose not to parse.
 		if errors.Is(err, integrations.ErrParserDeclined) {
@@ -1404,7 +1406,10 @@ func (p *Proxy) recordMySQLOutgoing(
 // when it returns, and handleConnection's deferred close shuts it after this
 // returns: a returned miss is queued here (sendMockNotFoundErrorFrom) before the
 // application sees its connection fail, so a test that ends as soon as its
-// database call fails still has its miss.
+// database call fails still has its miss. A statement no mock matches does
+// not end the connection: the replayer reports it through the reporter
+// installed below before it answers the statement with an error, and serves
+// on.
 func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, dstAddr string, m integrations.MockMemDb, outgoingOpts models.OutgoingOptions) error {
 	// Same registration hazard as the record path: a probe verdict of IsMySQL
 	// does not imply the parser is registered (the configured-port and
@@ -1425,8 +1430,15 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	reportCtx := p.withClientTLS(parserCtx, dstAddr, srcProcess(outgoingOpts))
 	reportCtx = withNoiseEngine(reportCtx, mysqlMocker, outgoingOpts)
 	mysqlDst := &models.ConditionalDstCfg{Addr: dstAddr}
+	// The replayer answers a statement no mock matches with an error and
+	// serves on (replayer.answerMiss): it reports that miss here, before
+	// the application reads the error, as every other parser's replay
+	// reports through the reporter handleConnection installs.
+	reportCtx = models.WithMockMismatchReporter(reportCtx, func(err error) {
+		p.sendMockNotFoundErrorFrom(parserCtx, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
+	})
 	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, mysqlDst, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
-	p.countParserPanic(err, integrations.MYSQL, dstAddr)
+	p.countParserPanic(parserCtx, err, integrations.MYSQL, dstAddr)
 	if errors.Is(err, util.ErrParserPanicked) {
 		// Counted as a capture loss just above; no miss (mockFailedFrom).
 		utils.LogError(p.logger, err, "failed to mock the outgoing message")
@@ -1434,7 +1446,11 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	}
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
-		p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
+		// A miss the replayer reported before it ended the connection is
+		// queued already; queued again it would count twice.
+		if !models.IsMismatchReported(err) {
+			p.sendMockNotFoundErrorFrom(parserCtx, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, mysqlDst)
+		}
 		if provenswitch.On() && isMockMiss(err) {
 			return reportedMiss{err}
 		}
@@ -2680,25 +2696,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			// counted, or a wait that saw the count reach it could find it
 			// nowhere and call the test settled while its request sat unread.
 			raw := clientConn
-			var tracked *trackedConn
-			if p.keepsConnections() {
-				tracked = p.inflight.trackTold(clientConn, p.flights())
-				clientConn = tracked
-			}
-			// Its sequence number is taken before anything else is done
-			// with it: the agent waits on the numbers the kernel gave the
-			// connections completed to this listener (accepts.go).
-			p.countAccept(raw)
-			// A paired connection is kept too, whatever the switch says
-			// (only a counted listener pairs one): its close is read
-			// before it happens (pairbytes.go).
-			if p.paired.holds(raw) {
-				if tracked == nil {
-					tracked = p.inflight.trackTold(clientConn, p.flights())
-					clientConn = tracked
-				}
-				tracked.beforeClose = func() { p.pairClosing(clientConnCtx, raw, tracked) }
-			}
+			clientConn, tracked := p.acceptedConn(clientConnCtx, raw)
 			// Track the connection BEFORE spawning the goroutine to
 			// close the Add-vs-Wait race that sync.WaitGroup's
 			// contract forbids. If Add ran inside the goroutine
@@ -2746,6 +2744,41 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	}
 }
 
+// acceptedConn is the conn the proxy handles an accepted client connection
+// through (raw, as the listener gave it), and its tracking (nil when it is not
+// kept). ctx is the connections' context, which reads a paired connection's
+// close (pairClosing).
+func (p *Proxy) acceptedConn(ctx context.Context, raw net.Conn) (clientConn net.Conn, tracked *trackedConn) {
+	// On macOS and Windows every byte written to the client is
+	// counted from here, under the tracking and any TLS, whatever
+	// layer writes it: the relay reads what was written to the
+	// client from the count, and on macOS what the client
+	// acknowledged (relay.CountClientWrites). raw stays the socket
+	// the listener gave, for what keys or reads it (countAccept,
+	// pairKey, the paired bytes).
+	clientConn = relay.CountClientWrites(raw)
+	if p.keepsConnections() {
+		tracked = p.inflight.trackTold(clientConn, p.flights())
+		clientConn = tracked
+	}
+	// Its sequence number is taken before anything else is done
+	// with it: the agent waits on the numbers the kernel gave the
+	// connections completed to this listener (accepts.go).
+	p.countAccept(raw)
+	// A paired connection is kept too, whatever the switch says
+	// (only a counted listener pairs one): its close is read
+	// before it happens (pairbytes.go).
+	if p.paired.holds(raw) {
+		if tracked == nil {
+			tracked = p.inflight.trackTold(clientConn, p.flights())
+			clientConn = tracked
+		}
+		tracked.beforeClose = func() { p.pairClosing(ctx, raw, tracked) }
+		tracked.pairUse, tracked.pairRead = p.paired.useOf(raw), p.paired.readOf(raw)
+	}
+	return clientConn, tracked
+}
+
 func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
 	p.logger.Info("Inside MakeClientDeregisterd of proxyServer")
 	p.clientClose <- true
@@ -2767,7 +2800,45 @@ func (p *Proxy) handleRecovered(ctx context.Context, conn net.Conn) error {
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
+//
+// Its error, which the accept loop logs, names each host name the connection
+// named (its CONNECT target, the TLS server it asked for) by its labels'
+// shape beside its tag in the connection's session (connHosts): a parser's
+// or a dial's error quotes the name whole.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
+	var hosts connHosts
+	return hosts.inError(p.serveConnection(ctx, srcConn, &hosts))
+}
+
+// connHosts is the host names a connection named (a CONNECT target, a TLS
+// server name), as serveConnection learns them, and the session it is served
+// in: what handleConnection writes its error's text by.
+type connHosts struct {
+	keys  *models.LogKeySession
+	names []string
+}
+
+// add notes names (each "" skipped) as the connection's.
+func (h *connHosts) add(names ...string) {
+	for _, n := range names {
+		if n != "" {
+			h.names = append(h.names, n)
+		}
+	}
+}
+
+// inError is err with each of h's names written as the session's lines
+// write them (models.HostsInError).
+func (h *connHosts) inError(err error) error {
+	if err == nil || len(h.names) == 0 {
+		return err
+	}
+	return models.HostsInError(models.WithLogKeySession(context.Background(), h.keys), err, h.names...)
+}
+
+// serveConnection is handleConnection, noting in hosts each host name the
+// connection names, and its session.
+func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *connHosts) error {
 	// tracked is the connection as the accept kept it (inflight.go:
 	// keepsConnections): srcConn is wrapped again below (a peek's reader, a
 	// prefix, TLS), and what a test's end reads of it goes to this one.
@@ -2893,6 +2964,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
+	// A drain that gives up on the connection's close names where it went
+	// (PairedBytesDrain).
+	if tracked != nil {
+		p.paired.destined(tracked, dstAddr)
+	}
+
 	//get the session rule
 	rule := p.getSession()
 	if rule == nil {
@@ -2901,7 +2978,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// Nothing on the connection is captured, so its close is no loss
 		// (pairClosing).
 		if tracked != nil {
-			p.paired.servedWithoutSession(tracked.Conn)
+			p.paired.servedWithoutSession(tracked)
 		}
 		return p.serveWithoutSession(ctx, srcConn, dstAddr, predialed)
 	}
@@ -2981,6 +3058,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
+	// The session's key for the path tags its lines name the connection's
+	// calls by (models.LogKeySession), which the agent drew as the session
+	// began (Record, Mock): one key per recording or replay, never one of
+	// another session's, however long the agent lives.
+	parserCtx = models.WithLogKeySession(parserCtx, rule.LogKeys)
+	hosts.keys = rule.LogKeys
 	// Under the proven switch, or settleReads, the accept kept the connection
 	// (inflight.go): a parser that reads ahead says through it which requests
 	// it holds (integrations.HoldRequest).
@@ -3018,6 +3101,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// server's identity verifies the leaf against an IP SAN.
 	parserCtx = withDstIPOf(parserCtx, dstAddr)
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
+	// dstLog is dstAddr as this connection's lines name it: an address
+	// whole, and, once a CONNECT request named the target (below), its host
+	// by its labels' shape beside its tag in the connection's session
+	// (models.HostLogName). The app chose that name.
+	dstLog := func() string { return models.HostLogName(parserCtx, dstAddr) }
 
 	// Capture the initial srcConn before it gets reassigned (TLS upgrade, wrapping).
 	initialSrcConn := srcConn
@@ -3279,7 +3367,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		m, merr := p.connManager(destInfo.Instance)
 		if merr != nil {
-			return p.refuseUnserved(destInfo, dstAddr, merr)
+			return p.refuseUnserved(parserCtx, destInfo, dstAddr, merr)
 		}
 		if m == nil {
 			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
@@ -3413,7 +3501,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// asked for until its ClientHello names something (SNI), so what the
 	// MITM leaf is named for and keploy dials when it sends no SNI.
 	var connectTargetHost string
-	if isConnectRequest(testBuffer) {
+	if connectRequestAhead(reader, testBuffer) {
 		p.logger.Debug("Detected HTTP CONNECT request, handling tunnel",
 			zap.Int("sourcePort", sourcePort),
 			zap.String("dstAddr", dstAddr),
@@ -3438,7 +3526,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstConn = proxyConn
 		}
 
-		connectResult, err = handleConnectTunnel(p.logger, srcConn, proxyConn, isTestMode)
+		connectResult, err = handleConnectTunnel(parserCtx, p.logger, srcConn, proxyConn, isTestMode)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle CONNECT tunnel; check HTTP_PROXY/HTTPS_PROXY settings, proxy authentication (407), DNS/network reachability to the proxy, and egress firewall rules")
 			return err
@@ -3462,6 +3550,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// Also update dstAddr and destInfo to reflect the real target
 		// (e.g., api.example.com:443) instead of the corporate proxy.
 		dstAddr = connectResult.TargetAddr
+		hosts.add(connectResult.TargetAddr, connectResult.TargetHost)
 		destInfo.Port = 443 // CONNECT targets are almost always TLS on 443
 		if connectResult.TargetPort != "" {
 			if portNum, err := strconv.ParseUint(connectResult.TargetPort, 10, 16); err == nil && portNum >= 1 && portNum <= 65535 {
@@ -3496,7 +3585,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		p.logger.Debug("CONNECT tunnel established, proceeding with inner connection",
-			zap.String("target", connectResult.TargetAddr),
+			zap.String("target", models.HostLogName(parserCtx, connectResult.TargetAddr)),
 			zap.Bool("innerTLS", pTls.IsTLSHandshake(testBuffer)),
 		)
 	}
@@ -3528,9 +3617,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if name == "" {
 			name = connectTargetHost
 		}
+		hosts.add(name)
 		if bypassRule, ok := bypassByServerName(p.logger, outgoingOpts.Rules, name, uint(destInfo.Port)); ok && helloErr == nil {
 			p.logger.Debug("a bypassRule names the TLS server the client asks for; passing the connection through before keploy's TLS",
-				zap.String("serverName", name), zap.String("ruleHost", bypassRule.Host), zap.Uint("rulePort", bypassRule.Port))
+				zap.String("serverName", models.HostLogName(parserCtx, name)), zap.String("ruleHost", bypassRule.Host), zap.Uint("rulePort", bypassRule.Port))
 			return p.passBypassRulesUndecided(parserCtx, p.logger, srcConn, &dstConn, func() (net.Conn, error) {
 				return util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
 			}, nil, dstAddr, name)
@@ -3541,7 +3631,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		probeProxy(p.logger, "tls-handshake-start", clientConnID,
 			zap.Int("srcPort", sourcePort),
 			zap.Uint32("dstPort", destInfo.Port),
-			zap.String("dstAddr", dstAddr),
+			zap.String("dstAddr", dstLog()),
 		)
 		tlsStart := time.Now()
 		// On replay, decide the MITM's ALPN offer PER-CONNECTION. If THIS
@@ -3568,7 +3658,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// request named, else the IP it dialled — a client that dialled an IP
 		// literal sends no SNI and checks the leaf's IP SAN. Both go to the
 		// MITM on hsCtx, so nothing another connection left can name it.
-		hsCtx := withDstIPOf(pTls.WithConnectTarget(ctx, connectTargetHost), dstAddr)
+		//
+		// hsCtx carries the connection's session (models.LogKeySession), so
+		// the lines of the handshake (the leaf it mints or reuses) name the
+		// server's name under the session's key, as the connection's other
+		// lines do. Its life stays ctx's.
+		hsCtx := withDstIPOf(pTls.WithConnectTarget(models.WithLogKeySession(ctx, models.LogKeys(parserCtx)), connectTargetHost), dstAddr)
 		if rule.Mode == models.MODE_TEST {
 			connectHost, _ := hostPortFromAuthority(connectTargetHost, "")
 			port, preferAll := destInfo.Port, rule.PreferH2
@@ -3581,8 +3676,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					return false
 				}
 				p.logger.Debug("replay: offering h2 in the TLS ALPN",
-					zap.Bool("preferH2Option", preferAll), zap.String("connectHost", connectHost),
-					zap.String("serverName", serverName), zap.Uint32("dstPort", port))
+					zap.Bool("preferH2Option", preferAll), zap.String("connectHost", models.HostLogName(parserCtx, connectHost)),
+					zap.String("serverName", models.HostLogName(parserCtx, serverName)), zap.Uint32("dstPort", port))
 				return true
 			})
 		}
@@ -3607,6 +3702,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		srcConn = tlsSrcConn
 		clientSNI = util.ClientServerName(tlsSrcConn)
+		hosts.add(clientSNI)
 
 		if isMTLS {
 			if tlsConn, ok := srcConn.(*tls.Conn); ok {
@@ -3630,7 +3726,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
+	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination Address", dstLog()), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
 
 	var initialBuf []byte
 	// attempt to read conn until buffer is either filled or conn is closed
@@ -3786,6 +3882,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			addr = net.JoinHostPort(dstURL, fmt.Sprint(destInfo.Port))
 			predialed.Alias(addr) // the connection dialled while the handshake was held, if it was
 		}
+		// addr as this connection's lines name it: the server's name (the
+		// client's SNI, or its CONNECT target) by its labels' shape beside
+		// its tag in the connection's session; an address whole. A dial's
+		// or a handshake's error names the name whole too, and the
+		// certificate's names beside it: written so as well
+		// (models.HostsInError) before it is logged or returned.
+		addrLog := models.HostLogName(parserCtx, addr)
+		hosts.add(addr, serverName, dstURL)
+		upstreamErr := func(err error) error { return models.HostsInError(parserCtx, err, addr, serverName, dstURL) }
 
 		if rule.Mode != models.MODE_TEST {
 			if connectResult != nil && dstConn != nil {
@@ -3794,14 +3899,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				// reader holds past its 200 (above).
 				tlsConn := tls.Client(dstConn, cfg)
 				if err := tlsConn.Handshake(); err != nil {
+					err = upstreamErr(err)
 					utils.LogError(logger, err, "failed TLS handshake over CONNECT tunnel; verify the corporate proxy allows CONNECT to this target, check proxy auth/egress rules, and confirm the target hostname is reachable",
-						zap.String("target", addr))
+						zap.String("target", addrLog))
 					return err
 				}
 				dstConn = tlsConn
 				logger.Debug("TLS over CONNECT tunnel established",
 					zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol),
-					zap.String("target", addr))
+					zap.String("target", addrLog))
 			} else {
 				// When InterceptPostgresSSLRequest is on AND the
 				// destination is a Postgres service (port 5432 is
@@ -3814,10 +3920,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				// while the upstream connection fails, leaving the
 				// replayed client staring at a broken stream.
 				if agent.InterceptPostgresSSLRequest && destInfo.Port == 5432 {
-					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "pg-ssl"), zap.String("addr", addr))
+					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "pg-ssl"), zap.String("addr", addrLog))
 					dialStart := time.Now()
-					dstConn, err = dialPostgresSSLUpstream(ctx, strconv.Itoa(sourcePort), addr, cfg, p.logger, p.cbshim, predialed)
-					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
+					dstConn, err = dialPostgresSSLUpstream(models.WithLogKeySession(ctx, models.LogKeys(parserCtx)), strconv.Itoa(sourcePort), addr, cfg, p.logger, p.cbshim, predialed)
+					err = upstreamErr(err)
+					probeDial(p.logger, "pg-ssl-upstream", clientConnID, addrLog, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 					// Release cbshim's per-connection rendezvous state
 					// at connection exit. dialPostgresSSLUpstream may
 					// have already called RegisterReal; if the matching
@@ -3834,13 +3941,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 						defer cb.CleanupConnection(connID)
 					}
 				} else {
-					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "synchronous"), zap.String("addr", addr))
+					probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "synchronous"), zap.String("addr", addrLog))
 					dialStart := time.Now()
 					dstConn, err = util.DialDestinationTLS(ctx, p.logger, "tcp", util.DialTarget{Addr: addr, Predialed: predialed}, cfg)
-					probeDial(p.logger, "synchronous-tls", clientConnID, addr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
+					err = upstreamErr(err)
+					probeDial(p.logger, "synchronous-tls", clientConnID, addrLog, time.Since(dialStart).Nanoseconds(), zap.Error(err))
 				}
 				if err != nil {
-					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addr), zap.String("next_step", util.NextStepDialDestination))
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", addrLog), zap.String("next_step", util.NextStepDialDestination))
 					return err
 				}
 
@@ -3856,16 +3964,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	} else {
 		// Only dial if dstConn not already set (e.g., from PostgreSQL SSL handling)
 		if rule.Mode != models.MODE_TEST && dstConn == nil {
-			probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "plain-tcp"), zap.String("addr", dstAddr))
+			probeProxy(p.logger, "upstream-dial-start", clientConnID, zap.String("branch", "plain-tcp"), zap.String("addr", dstLog()))
 			dialStart := time.Now()
 			dstConn, err = util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
-			probeDial(p.logger, "plain-tcp", clientConnID, dstAddr, time.Since(dialStart).Nanoseconds(), zap.Error(err))
+			// A CONNECT target's dial names its host: written by its shape.
+			err = models.HostsInError(parserCtx, err, dstAddr)
+			probeDial(p.logger, "plain-tcp", clientConnID, dstLog(), time.Since(dialStart).Nanoseconds(), zap.Error(err))
 			if err != nil {
 				if refusedLocally(err) {
-					logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstAddr))
+					logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstLog()))
 					return err
 				}
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstLog()), zap.String("next_step", util.NextStepDialDestination))
 				return err
 			}
 		}
@@ -3881,7 +3991,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// workers, the manager of the worker whose process made the connection
 	m, merr := p.connManager(destInfo.Instance)
 	if merr != nil {
-		return p.refuseUnserved(destInfo, dstAddr, merr)
+		return p.refuseUnserved(parserCtx, destInfo, dstAddr, merr)
 	}
 	if m == nil {
 		utils.LogError(logger, err, "failed to fetch the mock manager")
@@ -4033,7 +4143,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
-			p.countParserPanic(err, parserType, dstAddr)
+			p.countParserPanic(parserCtx, err, parserType, dstAddr)
 			if errors.Is(err, integrations.ErrParserDeclined) {
 				return p.relayDeclinedConn(parserCtx, err, logger, parserType, session)
 			}
@@ -4057,7 +4167,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// The reporter names the process the connection came from on
 			// each miss and answer it takes (UnmatchedCall.Source).
 			srcPid, srcInst := outgoingOpts.SrcPid, outgoingOpts.SrcInstance
-			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(err, srcPid, srcInst, dstCfg) })
+			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(parserCtx, err, srcPid, srcInst, dstCfg) })
 			// A replayer that makes the client's TLS handshake itself, in
 			// band (Postgres's, on an SSLRequest), has it charged as the
 			// proxy's own client handshakes are, and a build's client TLS
@@ -4071,10 +4181,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			testCtx = withNoiseEngine(testCtx, matchedParser, outgoingOpts)
 			err := matchedParser.MockOutgoing(testCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
-			p.countParserPanic(err, parserType, dstAddr)
+			p.countParserPanic(testCtx, err, parserType, dstAddr)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				// Send specific error type to error channel for external monitoring
-				return p.mockFailedFrom(logger, err, srcPid, srcInst, dstCfg)
+				return p.mockFailedFrom(parserCtx, logger, err, srcPid, srcInst, dstCfg)
 			}
 		}
 	}
@@ -4146,7 +4256,7 @@ func (p *Proxy) recordGenericOutgoing(
 
 	genericSession := p.buildRecordSession(srcConn, dstConn, mocks, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
 	err := genericParser.RecordOutgoing(parserCtx, genericSession)
-	p.countParserPanic(err, integrations.GENERIC, dstConn.RemoteAddr())
+	p.countParserPanic(parserCtx, err, integrations.GENERIC, dstConn.RemoteAddr())
 	if errors.Is(err, integrations.ErrParserDeclined) {
 		return p.relayDeclinedConn(parserCtx, err, logger, integrations.GENERIC, genericSession)
 	}
@@ -4179,13 +4289,13 @@ func (p *Proxy) mockGenericOutgoing(
 		// mode-gated), so report rather than relay — which is what the MySQL
 		// replay site does too.
 		err := errors.New("no generic parser is registered to mock this connection")
-		return p.mockFailedFrom(logger, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, dstCfg)
+		return p.mockFailedFrom(parserCtx, logger, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, dstCfg)
 	}
 	err := genericParser.MockOutgoing(parserCtx, srcConn, dstCfg, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
-	p.countParserPanic(err, integrations.GENERIC, dstCfg.Addr)
+	p.countParserPanic(parserCtx, err, integrations.GENERIC, dstCfg.Addr)
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		// Send specific error type to error channel for external monitoring
-		return p.mockFailedFrom(logger, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, dstCfg)
+		return p.mockFailedFrom(parserCtx, logger, err, outgoingOpts.SrcPid, outgoingOpts.SrcInstance, dstCfg)
 	}
 	return nil
 }
@@ -4468,6 +4578,9 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
 		OutgoingOptions: opts,
+		// The recording's key, which its client's route drew as it began
+		// (models.LogKeySession; none: the process's).
+		LogKeys: models.LogKeys(ctx),
 	}
 	// Start holding handshakes before the session takes effect. (A
 	// connection that arrives while the rules install is accepted at once,
@@ -4569,6 +4682,9 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	rule := &agent.Session{
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
+		// The replay session's key, which its client's route drew as it
+		// began (models.LogKeySession; none: the process's).
+		LogKeys: models.LogKeys(ctx),
 	}
 	p.ensureHandshakeHold(rule)
 	// What a connection under the session needs is set up before the
@@ -4602,16 +4718,22 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	// explicit reset a long-lived connection could match
 	// LifetimeConnection mocks from the prior test-set or merge them
 	// with the current one's.
+	// A new test set: what is missed until its mocks are staged is not its
+	// (cutMissesAtSetStart, at the set's staging), with the switch off too:
+	// what is missed after, as its application starts, is the set's, and
+	// its first test's read hands it over as the set's (beforeSetMiss).
+	p.missCutPending.Store(true)
 	if provenswitch.On() {
-		// A new test set: what is missed until its mocks are staged is not
-		// its (cutMissesAtSetStart, at the set's staging).
-		p.missCutPending.Store(true)
 		// A new test set: what the previous set served is no earlier place
 		// of this one's, whose mocks reuse its names (package matcher/learn).
 		// A fresh agent holds no manager yet, so its first set begins on the
 		// tracker alone; the set's staging reads the tracker's set itself
 		// (MockManager.SetTrackerSetAt).
 		p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+	} else {
+		// With the switch off the background check bounds a call's read of
+		// the app's clock by the set's begin (learn.ServeClock.SpansOf).
+		p.serveClock.NewSet()
 	}
 	if mm := p.getMockManager(); mm == nil {
 		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
@@ -4812,9 +4934,9 @@ func (p *Proxy) stageWithWindow(ctx context.Context, filtered, unFiltered []*mod
 		}
 		p.dnsCache.Purge()
 	}
-	// A test set's staging (from models.BaseTime, the first since its Mock,
-	// under the proven switch): what was missed until its mocks were in is
-	// not the set's (cutMissesAtSetStart).
+	// A test set's staging (from models.BaseTime, the first since its Mock):
+	// what was missed until its mocks were in is not the set's
+	// (cutMissesAtSetStart).
 	if start.Equal(models.BaseTime) && p.missCutPending.CompareAndSwap(true, false) {
 		p.cutMissesAtSetStart(ctx)
 	}
@@ -5006,6 +5128,19 @@ func (p *Proxy) OpenExactTest(test string, owned []*models.Mock, given []models.
 	return p.openExact(func(m *MockManager) { m.OpenExactTest(test, owned, given) })
 }
 
+// AnswerAsRecordedAtOpen implements agent.ExactTestAnswerer
+// (MockManager.AnswerAsRecordedAtOpen) on the run's manager.
+func (p *Proxy) AnswerAsRecordedAtOpen(test string, names []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.AnswerAsRecordedAtOpen(test, names)
+	return nil
+}
+
+var _ agent.ExactTestAnswerer = (*Proxy)(nil)
+
 // GiveExactTest implements agent.ExactTestGiver (MockManager.GiveExactTest).
 // Under the proven switch the learn step also holds the value as an earlier
 // place of the test's calls (learn.Tracker.GiveValue), so a value made from
@@ -5079,6 +5214,73 @@ func (p *Proxy) SetPoolTrails(trails map[string]string) error {
 	return nil
 }
 
+var _ agent.PoolSeriesSetter = (*Proxy)(nil)
+var _ agent.PoolOnceSetter = (*Proxy)(nil)
+
+// SetPoolOnce implements agent.PoolOnceSetter: the series whose recordings
+// each answer once in a run, on the mock manager (MockManager.SetPoolOnce).
+func (p *Proxy) SetPoolOnce(once []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolOnce(once)
+	return nil
+}
+
+// SetPoolSeries implements agent.PoolSeriesSetter: the series of the
+// worker-scope recordings a declared rule placed, on the mock manager
+// (MockManager.SetPoolSeries).
+func (p *Proxy) SetPoolSeries(series map[string][]string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolSeries(series)
+	return nil
+}
+
+var _ agent.PoolSourcesSetter = (*Proxy)(nil)
+
+// SetPoolSources implements agent.PoolSourcesSetter: the sources rules
+// declared in keploy.yml give fields of the recordings' requests, on the
+// mock manager (MockManager.SetPoolSources).
+func (p *Proxy) SetPoolSources(sources map[string][]models.DeclaredSource) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolSources(sources)
+	return nil
+}
+
+var _ agent.PoolTimeFormSetter = (*Proxy)(nil)
+
+// SetPoolTimeForm implements agent.PoolTimeFormSetter: whether the learn
+// step checks a changed time by its form alone, on the mock manager
+// (MockManager.SetPoolTimeForm).
+func (p *Proxy) SetPoolTimeForm(on bool) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetPoolTimeForm(on)
+	return nil
+}
+
+var _ agent.SeriesRepeatReader = (*Proxy)(nil)
+
+// SeriesRepeats implements agent.SeriesRepeatReader: the mock manager's
+// count of the calls each series answered past its recorded count
+// (MockManager.SeriesRepeats).
+func (p *Proxy) SeriesRepeats() (map[string]int64, error) {
+	m := p.getMockManager()
+	if m == nil {
+		return nil, errNoMockManager
+	}
+	return m.SeriesRepeats(), nil
+}
+
 // learnBoundary runs step (the learn tracker's Begin, End or NewSet) on the
 // proxy's learn tracker through the mock manager it holds
 // (MockManager.LearnBoundary): holding the manager's round lock, so a learn
@@ -5124,6 +5326,79 @@ func (p *Proxy) ClientTests() bool { return p.learnTracker.ClientTests() }
 
 var _ agent.ClientTestsReader = (*Proxy)(nil)
 
+// TakeClientCases gives the learn step the requests the running client
+// test, test, sent the application in its recording (agent.ClientCasesTaker;
+// learn.Tracker.SetCases), and the test's variables bound at them
+// (caseBinds), under the proven switch.
+func (p *Proxy) TakeClientCases(test string, cases []models.ClientCase) {
+	if !provenswitch.On() {
+		return
+	}
+	cs := make([]learn.ClientCase, 0, len(cases))
+	for i := range cases {
+		cs = append(cs, learn.ClientCase{Name: cases[i].Name, Req: &cases[i].Req})
+	}
+	p.learnTracker.SetCases(cs)
+	p.setCaseBinds(test, cases)
+}
+
+var _ agent.ClientCasesTaker = (*Proxy)(nil)
+
+// WantsIncoming reports whether the learn step takes the running client
+// test's requests now (incoming.RequestTaker; learn.Tracker.WantsIncoming),
+// or a variable of the test is bound at one not yet paired (caseBinds), under
+// the proven switch.
+func (p *Proxy) WantsIncoming() bool {
+	return provenswitch.On() && (p.learnTracker.WantsIncoming() || p.caseBinds.wants())
+}
+
+// TakeIncoming gives the learn step a request of the running client test
+// that reached the application's ingress at the real instant at, before any
+// byte of it reached the application (incoming.RequestTaker;
+// learn.Tracker.Incoming), and binds the test's variables bound at the
+// recorded request it pairs with (bindCase), under the proven switch.
+// unread says why keploy could not read it, "" where it could, and words
+// are the words of what it could not read (learn.Tracker.IncomingWords).
+func (p *Proxy) TakeIncoming(req *models.HTTPReq, unread string, words *learn.RequestWords, at time.Time) {
+	if provenswitch.On() {
+		p.learnTracker.IncomingWords(req, unread, words, at)
+		p.bindCase(req, unread)
+	}
+}
+
+// TakeComing gives the learn step a request of the running client test
+// whose body is still coming as it reaches the application's ingress
+// (incoming.RequestTaker; learn.Tracker.IncomingComing), with passed, the
+// words of its body that passed so far, and pairs it with the recorded
+// request whose variables it binds (pairCase), under the proven switch: a
+// variable bound in its URL or a header binds at once, and one bound in its
+// body is noted, until the body ended, as bound at a request keploy has not
+// read yet (learn.ComingUnread). done, once it ended, gives the learn step
+// the request whole, with the words of what keploy could not read of it,
+// and binds the body's variables from it. nil where it takes nothing of
+// it; words says whether the learn step took it, which alone reads a
+// body's words.
+func (p *Proxy) TakeComing(req *models.HTTPReq, at time.Time, passed func() *learn.RequestWords) (done func(*models.HTTPReq, string, *learn.RequestWords), words bool) {
+	if !provenswitch.On() {
+		return nil, false
+	}
+	learned, bind := p.learnTracker.IncomingComing(req, at, passed), p.pairCase(req, learn.ComingUnread)
+	if learned == nil && bind == nil {
+		return nil, false
+	}
+	if bind != nil {
+		bind(req, learn.ComingUnread)
+	}
+	return func(live *models.HTTPReq, unread string, words *learn.RequestWords) {
+		if learned != nil {
+			learned(live, unread, words)
+		}
+		if bind != nil {
+			bind(live, unread)
+		}
+	}, learned != nil
+}
+
 // TakeRecordedBegin gives the learn step the instant the next test began at
 // in its recording (agent.RecordedBeginTaker; learn.Tracker.RecordedBegin),
 // under the proven switch.
@@ -5159,6 +5434,14 @@ func (p *Proxy) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
 }
 
 var _ agent.AppClockRunSetter = (*Proxy)(nil)
+
+// SetAppClockShown makes the learn tracker read what the app's clock showed
+// between two real instants (agent.AppClockShownSetter).
+func (p *Proxy) SetAppClockShown(f func(from, to time.Time) ([]learn.Span, bool)) {
+	p.learnTracker.SetAppClockShown(f)
+}
+
+var _ agent.AppClockShownSetter = (*Proxy)(nil)
 
 // ServeExactTestConcurrent implements agent.ExactConcurrentServer (exact.go).
 func (p *Proxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
@@ -5414,6 +5697,16 @@ func (p *Proxy) ExactTestServed() string {
 	return m.ExactTestServed()
 }
 
+// ExactTestInstalled implements agent.ExactTestInstallReader
+// (MockManager.ExactTestInstalled).
+func (p *Proxy) ExactTestInstalled(test string) (epoch, bounds uint64, ok bool) {
+	m := p.getMockManager()
+	if m == nil {
+		return 0, 0, false
+	}
+	return m.ExactTestInstalled(test)
+}
+
 // ExactTestOutcome implements agent.ExactServer (exact.go).
 func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
 	m := p.getMockManager()
@@ -5437,6 +5730,7 @@ var _ agent.ExactSkippedReadsReader = (*Proxy)(nil)
 var (
 	_ agent.ExactServer            = (*Proxy)(nil)
 	_ agent.ExactTestOpener        = (*Proxy)(nil)
+	_ agent.ExactTestInstallReader = (*Proxy)(nil)
 	_ agent.WindowedTestOpener     = (*Proxy)(nil)
 	_ agent.LearnedElsewhereReader = (*Proxy)(nil)
 )
@@ -5572,35 +5866,68 @@ var (
 // on the scheduler. An unmarked call matched before the staging whose miss
 // reaches the drain only after the flush is not cut: nothing tells it from
 // the set's, so it is read as the set's, red, never green.
+//
+// A miss whose call was marked in a test's view (markedInATest) is not cut,
+// whichever way its report and the staging fall: it is that test's own call,
+// made in an earlier set and decided by keploy only after that test's end
+// was read. Dropped, the test passed with an unanswered call of its own, and
+// no receipt listed it. Nor is one marked in an earlier set with no test's
+// view named (the pool view between two of its tests, or after its last)
+// before that set's last read of the window it was filed
+// in: at zero latency that read would have failed the set with it, and
+// dropped, the set passed with an unanswered call it made
+// (missWindow.keptAsEarlierSet). Each is kept, in the window it was filed in
+// (the run's, or the test worker's that made it), as an earlier set's call
+// (earlierSetMiss), never as this set's: the next read returns it as made
+// outside every test of this set, naming the test it was made in, where it
+// names one (models.UnmatchedCall.EarlierSetTest), and how many sets back
+// (models.UnmatchedCall.EarlierSet), and neither that read's test nor this
+// set, which did not make it, is charged with it.
 func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
-	if m := p.getMockManager(); m != nil {
-		// Before the flush: a marked miss the drain files after this is cut
-		// there (markedBeforeSet), one it filed before, here.
-		p.setStaged.Store(m.StagingEpoch())
+	windows := p.missWindowsMarkedOn()
+	set := p.setStarts.Add(1)
+	for _, o := range windows {
+		if o.m != nil {
+			// Before the flush: a marked miss the drain files after this is
+			// cut or kept there (markedBeforeSet), one it filed before, here.
+			// Each window against its own manager's staging, and its own
+			// reads: the previous set's last read of it came before this.
+			e := o.m.StagingEpoch()
+			o.w.noteSetStart(setStart{epoch: e, reads: o.m.windowReads.Load(), set: set})
+			o.w.setStaged.Store(e)
+		}
 	}
 	if p.errDrainActive.Load() && p.errChannel != nil {
 		_, _ = p.flushOnEvents(ctx, &flushMarker{done: make(chan struct{})})
 	}
 	p.captureMu.Lock()
 	var tail []error
-	if acc := p.activeTestErrors.Swap(nil); acc != nil {
-		tail = acc.drain()
-	}
-	tail = append(tail, p.pendingMockErrors.drain()...)
-	lost := p.pendingLost
-	p.pendingLost = false
-	// A loss since the previous set's last read was of its tail: no read of
-	// this set is short of it.
-	p.missLoss.Store(nil)
+	lost := false
 	// Each test worker's tail is cut with the run's.
-	for _, w := range p.workerMissWindows() {
+	for _, o := range windows {
+		w := o.w
+		var all []error
 		if acc := w.activeTestErrors.Swap(nil); acc != nil {
-			tail = append(tail, acc.drain()...)
+			all = acc.drain()
 		}
-		tail = append(tail, w.pendingMockErrors.drain()...)
+		all = append(all, w.pendingMockErrors.drain()...)
 		lost = lost || w.pendingLost
 		w.pendingLost = false
+		// A loss since the previous set's last read was of its tail: no read
+		// of this set is short of it.
 		w.missLoss.Store(nil)
+		for _, err := range all {
+			if !w.keptAsEarlierSet(err) {
+				tail = append(tail, err)
+				continue
+			}
+			// A test's own call, or one the previous set's reads would
+			// have taken: kept for the next read, which a loss for room
+			// leaves short of it.
+			if !w.pendingMockErrors.addBounded(asEarlierSet(err), maxPendingMockErrors) {
+				p.pendingDroppedForRoom(w, err)
+			}
+		}
 	}
 	p.captureMu.Unlock()
 	p.logDroppedMisses(missesCutAtSetStart, tail)
@@ -5614,14 +5941,15 @@ func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
 // (cutMissesAtSetStart, markedBeforeSet).
 const missesCutAtSetStart = "mock mismatches made after the previous test set's last read, or before this set's mocks were staged, are not attributed to a test or a test set"
 
-// markedBeforeSet reports whether err is a miss whose call's parser marked
-// its round (models.MockMismatchReport.Mark) in a staging before the running
-// test set's first (Proxy.setStaged): a call made before the set's mocks
-// were staged, which is not the set's however late its report reaches the
-// drain, as the set start's cut says (cutMissesAtSetStart). False before a
-// set's first cut, and for a parser that marks no round.
-func (p *Proxy) markedBeforeSet(err error) bool {
-	at := p.setStaged.Load()
+// markedBeforeSet reports whether err, a miss filed in window w, is one whose
+// call's parser marked its round (models.MockMismatchReport.Mark) in a
+// staging before the running test set's first on the manager w's calls are
+// marked on (missWindow.setStaged): a call made before the set's mocks were
+// staged, which is not the set's however late its report reaches the drain,
+// as the set start's cut says (cutMissesAtSetStart). False before a set's
+// first cut, and for a parser that marks no round.
+func (w *missWindow) markedBeforeSet(err error) bool {
+	at := w.setStaged.Load()
 	if at == 0 {
 		return false
 	}
@@ -5632,6 +5960,58 @@ func (p *Proxy) markedBeforeSet(err error) bool {
 	r := pe.MismatchReport
 	return r.Mark != models.RoundUnmarked && r.MarkEpoch < at
 }
+
+// markedInATest reports whether err is a miss whose call's parser marked it
+// in a test's view (models.MockMismatchReport.MarkedTest, which only
+// integrations.StampMark sets, with the mark): that test's own call, however
+// late keploy decided it. The set start's cut keeps it (cutMissesAtSetStart).
+func markedInATest(err error) bool {
+	var pe models.ParserError
+	return errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.MarkedTest != ""
+}
+
+// asBeforeSet is err as made before the running test set's first test
+// (beforeSetMiss), err itself when it already is one, or is an earlier set's
+// test's call (earlierSetMiss), which is no call of this set's: a read
+// unwraps one wrap alone.
+func asBeforeSet(err error) error {
+	switch err.(type) {
+	case beforeSetMiss, earlierSetMiss:
+		return err
+	}
+	return beforeSetMiss{err}
+}
+
+// asEarlierSet is err, a miss an earlier set made (keptAsEarlierSet), as
+// that earlier set's call (earlierSetMiss), in
+// place of a wrap as made before the running set's first test: a read
+// unwraps one wrap alone.
+func asEarlierSet(err error) error {
+	switch e := err.(type) {
+	case earlierSetMiss:
+		return e
+	case beforeSetMiss:
+		return earlierSetMiss(e)
+	}
+	return earlierSetMiss{err}
+}
+
+// earlierSetMiss is a miss whose call was marked in an earlier test set, in
+// the view of one of its tests (models.MockMismatchReport.MarkedTest), or
+// with no test's view named before that set's last read
+// (missWindow.keptAsEarlierSet), which keploy decided only after the running
+// set's mocks were staged: that set's call, which no read of its set can take
+// any more (cutMissesAtSetStart). It is no call of the running set's, nor of
+// any of its tests: the read returns it outside every test, naming the test
+// it was made in, where it names one (models.UnmatchedCall.EarlierSetTest),
+// and how many sets back (models.UnmatchedCall.EarlierSet), for keploy test
+// to fail the run with, naming that set and its test. It is not carried as made before the
+// running set (beforeSetMiss): keploy test would fail that set with it, a set
+// that did not make it.
+type earlierSetMiss struct{ error }
+
+// Unwrap is the miss itself, for errors.As.
+func (e earlierSetMiss) Unwrap() error { return e.error }
 
 // stagingMissNote is what a miss made while the replay was staging a test
 // set's mocks says first in its next steps (models.ParserError.Staging):
@@ -5649,11 +6029,15 @@ func withStagingNote(e models.ParserError, next string) string {
 
 // beforeSetMiss is a miss made before a test set's first test began, with no
 // test's window open: the application's startup, as it is readied for the
-// set. Under the proven switch it is the set's, no test's: the first test's
-// window carries it, so it is read in order with every other miss, and the
-// read returns it marked (models.UnmatchedCall.BeforeSet) for the replay to
-// fail the set with, charging no test. It was dropped with a warning, and a
-// set whose application made, as it started, a call no mock answers passed.
+// set. It is the set's, no test's: the first test's window carries it, so it
+// is read in order with every other miss, and the read returns it marked
+// (models.UnmatchedCall.BeforeSet), charging no test. Under the proven switch
+// the replay fails the set with it; with the switch off it fails nothing and
+// the replay names it in the set's report (TestReport.OutsideTestMisses). It
+// was dropped with a warning, and a set whose application made, as it
+// started, a call no mock answers passed with the call named nowhere: with
+// the switch off at any level, and with it on for a DNS lookup, which counts
+// against no test.
 type beforeSetMiss struct{ error }
 
 // Unwrap is the miss itself, for errors.As.
@@ -5821,12 +6205,22 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 						p.logDroppedMisses("mock mismatches of a test worker keploy no longer serves are not attributed to a test (one made after keploy stopped serving it is counted as a call keploy cannot attribute)", []error{err})
 						continue
 					}
-					if w == &p.missWindow && p.markedBeforeSet(err) {
-						// Made before the running set's mocks were
-						// staged: cut as the set's start cut what it
-						// held, whichever way the two fell.
-						p.logDroppedMisses(missesCutAtSetStart, []error{err})
-						continue
+					// A test worker's mark against its own
+					// manager's staging, the run's against the
+					// run's (missWindow.setStaged).
+					if w.markedBeforeSet(err) {
+						if !w.keptAsEarlierSet(err) {
+							// Made before the running set's mocks
+							// were staged: cut as the set's start
+							// cut what it held, whichever way the
+							// two fell.
+							p.logDroppedMisses(missesCutAtSetStart, []error{err})
+							continue
+						}
+						// An earlier set's call, kept as the set's
+						// start cut keeps it: as that earlier set's
+						// (cutMissesAtSetStart).
+						err = asEarlierSet(err)
 					}
 					// Route under captureMu so the window can't be swapped
 					// between the Load and the add. The accumulator is bounded
@@ -5864,12 +6258,20 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 // test case into a fresh per-test accumulator, so the replayer's GetMockErrors
 // returns only THIS test's misses instead of draining a shared global queue.
 // The replayer opens it for the first test of a test set. Misses retained
-// before it, with no window open (the app's startup, or a previous set's last
-// test's traffic), are not this test's: they are discarded so they don't
-// attach to it, and logged, so none is lost without a word. A miss made after
-// a set's last test is not left for the next set's first window: under the
-// proven switch the replayer reads it at the set's end (GetMockErrors) and it
-// fails the set. One made after that read reaches no verdict.
+// before it, with no window open, are not this test's: what was missed
+// before the set's mocks were staged (a previous set's last test's traffic)
+// was cut at the staging, and logged (cutMissesAtSetStart); the app's startup,
+// made since, is the set's, and the test's read hands it over marked as the
+// set's (beforeSetMiss), charging no test. A miss made after
+// a set's last test is not left for the next set's first window: the
+// replayer reads it at the set's end (GetMockErrors), where under the proven
+// switch it fails the set, and with the switch off it fails nothing and the
+// set's report names it. One keploy decides after that read, whose call was marked in
+// a test's view, is that test's, and one marked with no test's view named
+// before that read is the set's: the next set's first read returns either as
+// an earlier set's call (earlierSetMiss), which fails keploy test's run, not
+// that set. One marked after that read is cut at the next set's start, as at
+// zero latency (cutMissesAtSetStart).
 // GetMockErrors retrieves and the next Begin/ContinueTestErrorCapture resets
 // the window.
 func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false, false) }
@@ -5930,11 +6332,11 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 	between = append(between, w.pendingMockErrors.drain()...)
 	pendingLost := w.pendingLost
 	w.pendingLost = false
-	// Under the proven switch a set's first test carries what was missed
-	// before it as the set's (beforeSetMiss): nothing is dropped.
-	beforeSet := !carry && provenswitch.On()
-	switch {
-	case carry:
+	// A set's first test carries what was missed before it as the set's
+	// (beforeSetMiss), with the proven switch on or off: nothing is dropped.
+	// What was missed before the set's mocks were staged was cut there
+	// (cutMissesAtSetStart).
+	if carry {
 		for _, err := range between {
 			if !acc.addBounded(err, maxPendingMockErrors) {
 				p.missDroppedForRoom(err)
@@ -5944,9 +6346,9 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 			// They were this test's: its read is short of them.
 			w.missLoss.CompareAndSwap(nil, &missLostBetweenFull)
 		}
-	case beforeSet:
+	} else {
 		for _, err := range between {
-			if !acc.addBounded(beforeSetMiss{err}, maxPendingMockErrors) {
+			if !acc.addBounded(asBeforeSet(err), maxPendingMockErrors) {
 				p.noteMissLost(err, missLostBeforeSetFull)
 			}
 		}
@@ -5956,14 +6358,6 @@ func (p *Proxy) openCaptureOn(w *missWindow, carry, awaits bool) {
 		}
 	}
 	p.captureMu.Unlock()
-	if !carry && !beforeSet {
-		p.logDroppedMisses("mock mismatches made while no test's capture window was open are not attributed to a test", between)
-		if pendingLost {
-			// They were no test's either: said, and no read is short of them.
-			p.logger.Warn("more mock mismatches were made while no test's capture window was open than keploy keeps; the rest were dropped, and they are not attributed to a test either",
-				zap.Int("kept", maxPendingMockErrors))
-		}
-	}
 	p.logDroppedMisses("mock mismatches of a test whose capture window was never read are dropped", unread)
 }
 
@@ -5984,7 +6378,8 @@ func (p *Proxy) logDroppedMisses(msg string, errs []error) {
 			break
 		}
 	}
-	p.logger.Log(level, msg, zap.Int("count", len(errs)), zap.Strings("calls", missSummaries(errs)))
+	calls, tags := missSummaries(errs)
+	p.logger.Log(level, msg, zap.Int("count", len(errs)), zap.Strings("calls", calls), zap.Strings("path_tags", tags))
 }
 
 // sayLearnWaits has the learn step's tracker say in the agent's log as a call
@@ -6009,21 +6404,30 @@ func (p *Proxy) sayLearnWaits() {
 	})
 }
 
-// missSummaries names, for a log line, the calls of up to the first 10 misses.
-func missSummaries(errs []error) []string {
-	out := make([]string, 0, min(len(errs), 10))
+// missSummaries names, for a log line, the calls of up to the first 10
+// misses: each by its shape (models.MissLogShape), or by its error's type
+// when it carries no report, and, in tags, each one's path tag, the i-th
+// call's at i ("" for one with none: not an HTTP call). Never the summary
+// or the error's text: they hold what the call sent.
+func missSummaries(errs []error) (calls, tags []string) {
+	calls = make([]string, 0, min(len(errs), 10))
+	tags = make([]string, 0, min(len(errs), 10))
 	for _, err := range errs {
-		if len(out) == 10 {
+		if len(calls) == 10 {
 			break
 		}
 		var pe models.ParserError
-		if errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.ActualSummary != "" {
-			out = append(out, pe.MismatchReport.ActualSummary)
-			continue
+		if errors.As(err, &pe) && pe.MismatchReport != nil {
+			if shape := models.MissLogShape(pe.MismatchReport); shape != "" {
+				calls = append(calls, pe.MismatchReport.Protocol+" "+shape)
+				tags = append(tags, pe.MismatchReport.LogPathTag())
+				continue
+			}
 		}
-		out = append(out, err.Error())
+		calls = append(calls, fmt.Sprintf("%T", err))
+		tags = append(tags, "")
 	}
-	return out
+	return calls, tags
 }
 
 // WithdrawTestErrorCapture takes back the window the latest Begin or
@@ -6122,6 +6526,12 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 	// skipped the marker: either left a miss the drain had not routed yet to
 	// be read with the next test's, on a loaded runner, charging it to that
 	// test, which neither failed for it nor kept auto-noise from masking it.
+	// A call marked from here on is marked after this read began
+	// (MockManager.windowReads): the set-start cut keeps one marked before
+	// its set's last read of w (missWindow.keptAsEarlierSet).
+	if m := p.managerOf(w); m != nil {
+		m.windowReads.Add(1)
+	}
 	unreadCause := ""
 	rendezvousOK := false
 	drainActive := p.errDrainActive.Load()
@@ -6208,10 +6618,16 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 	var errs []models.UnmatchedCall
 	for _, err := range rawErrs {
 		// A miss made before the set's first test (beforeSetMiss) is read
-		// as the set's, an outside_test miss.
+		// as the set's, an outside_test miss; an earlier set's test's call
+		// (earlierSetMiss) as an outside_test miss naming that test, no call
+		// of this set's.
 		before, isBefore := err.(beforeSetMiss)
 		if isBefore {
 			err = before.error
+		}
+		earlier, isEarlier := err.(earlierSetMiss)
+		if isEarlier {
+			err = earlier.error
 		}
 		first := len(errs)
 		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
@@ -6222,6 +6638,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					Protocol:      parserErr.MismatchReport.Protocol,
 					ActualSummary: parserErr.MismatchReport.ActualSummary,
 					Operation:     parserErr.MismatchReport.Operation,
+					Command:       parserErr.MismatchReport.Command,
 					Destination:   parserErr.MismatchReport.Destination,
 					ClosestMock:   parserErr.MismatchReport.ClosestMock,
 					Diff:          parserErr.MismatchReport.Diff,
@@ -6245,11 +6662,19 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
+					BoundIn:          slices.Clone(parserErr.MismatchReport.BoundIn),
 					Given:            parserErr.MismatchReport.Given,
+					VariableWhy:      parserErr.MismatchReport.VariableWhy,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
 					// The same request as a set background recording:
 					// listed, counted against no test.
 					Background: parserErr.MismatchReport.Background,
+					// Of a background miss, the places it differs from
+					// its recording only by its test's bound values.
+					BackgroundBound: slices.Clone(parserErr.MismatchReport.BackgroundBound),
+					// A call carrying a trailed test's kept value: that
+					// test's clean-up, charged to no window, counting.
+					TrailsOf: parserErr.MismatchReport.TrailsOf,
 					// A call the parser held for a later test's recording
 					// that none answered: missed only at the set's end.
 					Held: parserErr.MismatchReport.HeldPastWindow,
@@ -6267,6 +6692,14 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					RecordedIn: parserErr.MismatchReport.RecordedIn,
 					Earlier:    parserErr.MismatchReport.Earlier,
 					Repeat:     parserErr.MismatchReport.Repeat.Clone(),
+					// Where its parser marked the call: a test's end places
+					// the miss by it, not by when it was filed.
+					Marked: missMark(parserErr.MismatchReport),
+					// The tag the agent's miss line names the call by,
+					// for the console and the report to print beside it.
+					PathTag: parserErr.MismatchReport.PathTag,
+					// And the tag it names the destination's host by.
+					HostTag: parserErr.MismatchReport.HostTag,
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach
@@ -6282,7 +6715,7 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 					Instance:      parserErr.Instance,
 					Protocol:      "unknown",
 					ActualSummary: parserErr.Err.Error(),
-					NextSteps:     withStagingNote(parserErr, "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details."),
+					NextSteps:     withStagingNote(parserErr, "This protocol's matcher does not emit structured mismatch reports yet; the parser's own error, above, says what it could not match (the agent's log names only its kind)."),
 					Kind:          parserErr.MissKind,
 				})
 			}
@@ -6293,11 +6726,39 @@ func (p *Proxy) getMockErrorsOn(ctx context.Context, w *missWindow) ([]models.Un
 				errs[i].Kind = models.MissOutsideTest
 			}
 		}
+		if isEarlier {
+			// The test whose view the call was marked in: an earlier
+			// set's (markedInATest), named with or without its round;
+			// none for a call of the set's marked with no test's view
+			// named. And the set: how many before the running one.
+			var test string
+			if pe, ok := err.(models.ParserError); ok && pe.MismatchReport != nil {
+				test = pe.MismatchReport.MarkedTest
+			}
+			back := w.setsBack(err, p.setStarts.Load())
+			for i := first; i < len(errs); i++ {
+				errs[i].EarlierSetTest = test
+				errs[i].EarlierSet = back
+				errs[i].Kind = models.MissOutsideTest
+			}
+		}
 	}
 	if unreadCause != "" {
 		return errs, fmt.Errorf("%w: %s", models.ErrUnmatchedCallsUnread, unreadCause)
 	}
 	return errs, nil
+}
+
+// missMark is the round the call of report r (not nil) was marked in
+// (models.UnmatchedCall.Marked), from where its parser marked it
+// (integrations.StampMark, which sets MarkRound only with Mark): not known
+// for a parser that marks no round, nor for a store that keeps no boundary
+// count.
+func missMark(r *models.MockMismatchReport) models.MissMark {
+	if !r.MarkRound {
+		return models.MissMark{}
+	}
+	return models.MissMark{Epoch: r.MarkEpoch, Bounds: r.MarkBounds, Test: r.MarkedTest, Known: true}
 }
 
 // flushOnEvents is GetMockErrors' rendezvous with the error drain, with the
@@ -6393,7 +6854,7 @@ func isMockMiss(err error) bool {
 // names when its parser named no destination (sendMockNotFoundErrorFrom).
 // There is no form without the worker: a miss filed under none would land
 // in the run's window, which no worker's test reads.
-func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid, inst uint32, dst *models.ConditionalDstCfg) error {
+func (p *Proxy) mockFailedFrom(ctx context.Context, logger *zap.Logger, err error, pid, inst uint32, dst *models.ConditionalDstCfg) error {
 	if errors.Is(err, util.ErrParserPanicked) {
 		// keploy's failure, counted as a capture loss where the parser
 		// returned it (countParserPanic): no miss, so neither the mismatch
@@ -6411,7 +6872,7 @@ func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid, inst uint32, 
 	// queued for its test already; queued again it would count twice, the
 	// second time possibly against the next test.
 	if !models.IsMismatchReported(err) {
-		p.sendMockNotFoundErrorFrom(err, pid, inst, dst)
+		p.sendMockNotFoundErrorFrom(ctx, err, pid, inst, dst)
 	}
 	if quiet {
 		return reportedMiss{err}
@@ -6448,7 +6909,10 @@ func (p *Proxy) mismatchLog() func(string, ...zap.Field) {
 // authority of its own, and its miss said nothing of where the call went. A
 // fabricated address (models.ConditionalDstCfg.AddrFabricated) names no
 // server, so it is not named either.
-func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *models.ConditionalDstCfg) {
+//
+// ctx is the connection's (handleConnection's parserCtx): an HTTP miss's path
+// tag, when its parser made none, is made under the session it carries.
+func (p *Proxy) sendMockNotFoundErrorFrom(ctx context.Context, err error, pid, inst uint32, dst *models.ConditionalDstCfg) {
 	proxyErr := models.ParserError{
 		ParserErrorType: models.ErrMockNotFound,
 		Err:             err,
@@ -6470,6 +6934,17 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		stamped.At = proxyErr.At
 		proxyErr.MismatchReport = &stamped
 	}
+	// Every HTTP miss carries its path tag (models.PathTag), made here, in
+	// the session of ctx, the connection's, whose line below names the call
+	// by it, when its parser made none: the console and the report print the
+	// tag the report carries beside the call. A copy, as above.
+	if r := proxyErr.MismatchReport; r != nil && r.PathTag == "" {
+		if tag := models.CallPathTag(ctx, r.Protocol, r.ActualSummary); tag != "" {
+			tagged := *r
+			tagged.PathTag = tag
+			proxyErr.MismatchReport = &tagged
+		}
+	}
 	// The address the call was dialled at, when its parser named none. A
 	// copy, as above; the report's destination scope was settled by its
 	// parser, on what the parser saw.
@@ -6477,6 +6952,17 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		stamped := *r
 		stamped.Destination = dst.Addr
 		proxyErr.MismatchReport = &stamped
+	}
+	// The tag of the destination's host name (models.HostTag), in the
+	// session of ctx, whose line below names the destination by its shape
+	// beside it, when its parser made none: the console, the report and the
+	// misses file print it beside the destination whole. A copy, as above.
+	if r := proxyErr.MismatchReport; r != nil && r.HostTag == "" {
+		if tag := models.HostTag(ctx, r.Destination); tag != "" {
+			tagged := *r
+			tagged.HostTag = tag
+			proxyErr.MismatchReport = &tagged
+		}
 	}
 	// The process that made the call (proven switch): its comm and argv[0],
 	// and, only to travel to keploy's receipt, its pid and whole command
@@ -6519,7 +7005,8 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		// is open to read it, and any test open now may have made the
 		// call, as at record: it is counted as a call keploy cannot
 		// attribute, naming the ended worker.
-		p.losses.Add(models.CaptureLossUnattributed, stoppedWorkerMissWhat(proxyErr.MismatchReport, dst, pid, inst))
+		what, hosts := stoppedWorkerMissWhat(ctx, proxyErr.MismatchReport, dst, pid, inst)
+		p.losses.Add(models.CaptureLossUnattributed, what, hosts...)
 	}
 	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing
 	// miss funnels through here, so this one line covers HTTP, generic, MySQL,
@@ -6531,21 +7018,30 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		p.logger.Debug("an answered call, reported for judging",
 			zap.String("answer", r.Answer),
 			zap.String("protocol", r.Protocol),
-			zap.String("destination", r.Destination),
+			zap.String("destination", models.HostLogName(ctx, r.Destination)),
 			zap.String("write_kind", r.WriteKind),
 			zap.String("recorded", r.ClosestMock),
 			zap.String("recorded_in", r.RecordedIn),
 			zap.Bool("drift", r.Drift),
 			zap.Bool("reused", r.Reused))
 	} else if r != nil {
+		// The call by its shape (models.MissLogShape), never its summary:
+		// the summary holds what the call sent (a path's token, a
+		// statement's literal) for the user's own report, and this line
+		// reaches the agent's log store.
 		fields := []zap.Field{
 			zap.String("protocol", r.Protocol),
-			zap.String("destination", r.Destination),
-			zap.String("actual", models.WithHTTPOperation(r.ActualSummary, r.Operation)),
+			// A destination's name by its labels' shape and tag
+			// (models.HostLogName): the app chose it; an address whole.
+			zap.String("destination", models.HostLogName(ctx, r.Destination)),
+			zap.String("call", models.MissLogShape(r)),
+			// The tag the console and the report print beside the call
+			// whole (r.PathTag, made above).
+			utils.PathTagField(r.PathTag),
 			zap.String("match_phase", r.MatchPhase),
 			zap.Int("candidates", r.CandidateCount),
 			zap.String("closest", r.ClosestMock),
-			zap.String("next_step", r.NextSteps),
+			zap.String("next_step", models.MissLogNextStep(r)),
 		}
 		// destination_scope is greppable in a node-wide agent log:
 		// "not_in_compared_set" is the one value that says "nothing this miss
@@ -6568,7 +7064,10 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid, inst uint32, dst *mode
 		}
 		p.mismatchLog()("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {
-		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
+		// The error's kind and size, never its text: a parser that built
+		// no report may have written the call into it, quoted or not.
+		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)",
+			zap.String("error_type", fmt.Sprintf("%T", err)), zap.Int("error_bytes", len(err.Error())), zap.Bool("no_mock_matched", errors.Is(err, models.ErrNoMockMatched)))
 	}
 	p.SendError(proxyErr)
 }

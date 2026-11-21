@@ -36,7 +36,9 @@ wait_for_mysql() {
   local attempt
   # shellcheck disable=SC2034  # a bare bound; the loop body never reads it
   for attempt in {1..60}; do
-    if docker exec mysql-container mysql -uroot -ppassword -e "SELECT 1" >/dev/null 2>&1; then
+    # Over TCP, as the app and keploy reach it: the image's first,
+    # socket-only server answers the socket alone, and exits.
+    if docker exec mysql-container mysql -h127.0.0.1 -uroot -ppassword -e "SELECT 1" >/dev/null 2>&1; then
       echo "MySQL is ready."
       endsec; return 0
     fi

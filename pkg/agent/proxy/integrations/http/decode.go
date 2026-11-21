@@ -54,10 +54,20 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		defer close(errCh)
 		defer integrations.RecoverIntoCtx(ctx, h.Logger, clientConn, nil, errCh)
+		// chain is the once chain this connection began, if any: its next
+		// recording answers the connection's next call ahead of any other
+		// (chainNext).
+		var chain integrations.OnceChainOnConn
+		// rest is what the client sent after the request in hand: the start
+		// of its next request when it pipelined it (nextRequest).
+		var rest []byte
+		// The client's bytes are read through client, which gives the
+		// bytes a read ended with before its error (heldErrConn).
+		client := &heldErrConn{Conn: clientConn}
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
-			if _, _, err := h.readRequestHead(ctx, &reqBuf, clientConn, nil); err != nil {
+			if _, _, err := h.readRequestHead(ctx, &reqBuf, client, nil); err != nil {
 				errCh <- err
 				return
 			}
@@ -77,18 +87,37 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			h.Logger.Debug("handling the chunked requests to read the complete request")
-			err := h.HandleChunkedRequests(ctx, &reqBuf, clientConn, nil)
+			err := h.HandleChunkedRequests(ctx, &reqBuf, client, nil)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to handle chunked requests")
 				errCh <- err
 				return
 			}
+			// An HTTP/1.1 client may send its next request before the answer
+			// to this one has come (pipelining), as often as not in the same
+			// write, so reqBuf can run past this request's end. The request
+			// is reqBuf up to its end, framed as the recorder frames it
+			// (messageFrame; HandleChunkedRequests read it whole by the same
+			// framing), and what follows is the next request's start. Taking
+			// all of it as this request answered the first of a pipeline and
+			// dropped the rest, and the client waited for their answers.
+			end, _, err := (&messageFrame{}).end(reqBuf)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to frame the http request message")
+				errCh <- err
+				return
+			}
+			rest = bytes.Clone(reqBuf[end:])
+			reqBuf = reqBuf[:end]
 
 			arrived := time.Now()
 
 			//Parse the request buffer
 			request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf)))
 			if err != nil {
+				// The parser's error quotes the request (its request line,
+				// a header line): withheld, here and where it is returned.
+				err = utils.WithholdInput(err)
 				utils.LogError(h.Logger, err, "failed to parse the http request message")
 				errCh <- err
 				return
@@ -106,18 +135,27 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// }
 			request.Header.Set("Host", request.Host)
 
+			// The recording a once chain this connection began names next
+			// (integrations.OnceChainOnConn): this call's to be answered
+			// with, ahead of any other, when it is that call and is made
+			// in the view the chain was carried on in (chainNext). Taken,
+			// the chain ends here unless this call's answer carries it on
+			// (chain.Answered, after the match): a call passed through,
+			// answered by no recording or by another ends it.
+			follow := chain.Take()
+
 			// A bypassRule that names this call (its host, path and port)
 			// passes it to its server, and the server's answer back, unmocked.
 			// Only port-only rules reach the kernel, so the proxy applies the
 			// rest, here in keploy test as the recorder does in keploy record.
 			if dstCfg != nil && utils.IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
-				h.Logger.Debug("a bypassRule names this call; passing it through to its server", zap.Any("metadata", utils.GetReqMeta(request)))
+				h.Logger.Debug("a bypassRule names this call; passing it through to its server", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				ended, perr := passOneCallThrough(ctx, h.Logger, clientConn, dstCfg, reqBuf, request.Method)
 				if perr != nil {
 					if ctx.Err() != nil {
 						return
 					}
-					utils.LogError(h.Logger, perr, "failed to pass a call a bypassRule names through to its server", zap.Any("metadata", utils.GetReqMeta(request)))
+					utils.LogError(h.Logger, perr, "failed to pass a call a bypassRule names through to its server", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 					errCh <- perr
 					return
 				}
@@ -129,7 +167,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- nil
 					return
 				}
-				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+				reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 				if err != nil {
 					h.Logger.Debug("bypassRule passthrough: client closed connection", zap.Error(err))
 					errCh <- nil
@@ -144,7 +182,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			reqBody, err := io.ReadAll(request.Body)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to read from request body", zap.Any("metadata", utils.GetReqMeta(request)))
+				utils.LogError(h.Logger, err, "failed to read from request body", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				errCh <- err
 				return
 			}
@@ -171,7 +209,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				input.encoded = input.body
 				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body, pkg.MaxDecompressedSize)
 				if err != nil {
-					utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(request)))
+					utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 					errCh <- err
 					return
 				}
@@ -182,6 +220,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if ce := h.Logger.Check(zap.DebugLevel, "decodeHTTP debug logs for input"); ce != nil {
 				ce.Write(zap.String("method", input.method),
 					zap.String("path", utils.URLPathShape(input.url)),
+					utils.PathTagField(models.URLPathTag(ctx, input.method, input.url)),
 					zap.Strings("header names", headerNames(input.header)),
 					zap.Int("body bytes", len(input.body)))
 			}
@@ -237,19 +276,19 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				if ce := h.Logger.Check(zap.DebugLevel, "egress passthrough: serving without mock match"); ce != nil {
 					ce.Write(zap.String("mode", string(mode)), zap.String("served", served),
-						zap.String("path", utils.URLPathShape(input.url)), zap.Any("metadata", utils.GetReqMeta(request)))
+						zap.String("path", utils.URLPathShape(input.url)), zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				}
 				if _, werr := clientConn.Write(out); werr != nil {
 					if ctx.Err() != nil {
 						return
 					}
-					utils.LogError(h.Logger, werr, "egress passthrough: failed to write response", zap.Any("metadata", utils.GetReqMeta(request)))
+					utils.LogError(h.Logger, werr, "egress passthrough: failed to write response", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 					errCh <- werr
 					return
 				}
 				// Read the next request on this keep-alive connection and loop,
 				// mirroring the matched-response path below.
-				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+				reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 				if err != nil {
 					h.Logger.Debug("egress passthrough: client closed connection", zap.Error(err))
 					errCh <- nil
@@ -273,7 +312,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						if ctx.Err() != nil {
 							return
 						}
-						utils.LogError(h.Logger, e, msg, zap.Any("metadata", utils.GetReqMeta(request)))
+						utils.LogError(h.Logger, e, msg, zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 						errCh <- e
 					}
 					recorded, keepAlive, derr := h.asyncEngine.Decide(ctx, lane, live)
@@ -305,7 +344,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 					// Read the next poll on this keep-alive connection and loop,
 					// mirroring the telemetry short-circuit and matched-response paths.
-					reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+					reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 					if err != nil {
 						h.Logger.Debug("async: client closed connection after delivery/keep-alive", zap.Error(err))
 						errCh <- nil
@@ -338,6 +377,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// found it made (integrations.CallRound): a miss's lookup
 				// of a recording made elsewhere is asked of that round.
 				call integrations.CallRound
+				// followed is the recording the connection's once chain
+				// named for the call in its view (follow.For), "" for
+				// none: the chain goes on only when it answers the call.
+				followed string
 				// db is the store the request's matcher and its miss read:
 				// under the switch held to call's staging
 				// (integrations.HoldToRound), so a request is never answered
@@ -360,7 +403,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// (a retry cycle, integrations.LearnEnder) a request is
 				// served as a replay serves it, below: nothing is paired,
 				// nor learned.
-				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, integrations.CallRound{}, &call)
+				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(mockDb), opts, integrations.CallRound{}, &call)
 				ok = stub != nil
 				if !ok {
 					// The call's one hold: the variable pass, the
@@ -413,13 +456,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// whose test recorded none of its kind still pairs; one
 					// whose view moved (-1) pairs nothing.
 					extra, extraAt, extraMatched = h.extraCallOf(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
-					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(mockDb)
 					if extra == 0 {
 						if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
 							// Its repeat note is asked as a miss's is
 							// (repeatNoteOf).
 							a, repeat := repeatNoteOf(reqCtx, input, db, strict, extra)
-							reportPairing(reqCtx, input, x, a, repeat)
+							reportPairing(reqCtx, input, x, a, repeat, call)
 							stub, ok, lmiss = answer, true, nil
 						}
 					}
@@ -441,20 +484,41 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// replay stages another set, the request finds nothing
 					// to be answered with, and misses saying so.
 					db, _ = integrations.HoldToRound(mockDb, call)
-					// A call one of the open test's own recordings is,
-					// answered or not (ownCall), is read with the set's
-					// background hidden once the background is about to
-					// answer it: no pool or worker recording answers a call
-					// one more than the test recorded, which then misses as
-					// such (extraCall), its background copy left unspent,
-					// even when two of them are made at once. A call the
-					// test's own recordings answer never asks.
-					held := db
-					db = integrations.OwnRepeatRead(db, call, func() bool {
-						return h.ownCall(reqCtx, input, held, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
-					})
-					stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
-					ok = stub != nil
+					// On a connection whose once chain is in progress, the
+					// chain's next recording answers the call first when the
+					// call is that recording, whatever the open test owns of
+					// it, and a line says the chain decided it (chainNext).
+					// A chain carried on in another view (a test began or
+					// ended since its last call) ends here, said: the call
+					// is answered as any call is, the open test's own first.
+					followed = follow.For(call)
+					if follow.Next != "" && followed == "" {
+						h.Logger.Info("a once series' chain ended: the replay's view moved since this connection's last call of the series (a test began or ended, or a test set was staged), so the series' next recording does not answer this call ahead of the open test's own; the call is answered as any call is",
+							zap.String("series", follow.Series), zap.String("next", follow.Next), zap.String("call", shapeSummary(request)), utils.PathTagField(models.URLPathTag(ctx, request.Method, request.URL)))
+					}
+					if followed != "" {
+						stub, err = h.chainNext(reqCtx, input, db, chainCall{next: followed, series: follow.Series, call: shapeSummary(request), tag: models.URLPathTag(ctx, request.Method, request.URL)},
+							h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), func() bool {
+								return h.ownCall(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
+							})
+						ok = stub != nil
+					}
+					if !ok && err == nil {
+						// A call one of the open test's own recordings is,
+						// answered or not (ownCall), is read with the set's
+						// background hidden once the background is about to
+						// answer it: no pool or worker recording answers a
+						// call one more than the test recorded, which then
+						// misses as such (extraCall), its background copy left
+						// unspent, even when two of them are made at once. A
+						// call the test's own recordings answer never asks.
+						held := db
+						db = integrations.OwnRepeatRead(db, call, func() bool {
+							return h.ownCall(reqCtx, input, held, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
+						})
+						stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(mockDb), opts)
+						ok = stub != nil
+					}
 				}
 				if !ok && err == nil {
 					// Under the switch the learn step of record's full round
@@ -481,12 +545,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if errors.Is(err, errClientGone) {
 				// No one is left to answer, and a match cut short is no
 				// miss: the connection ends as if read to its end.
-				h.Logger.Debug("the client left while its call was being matched", zap.Any("metadata", utils.GetReqMeta(request)))
+				h.Logger.Debug("the client left while its call was being matched", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				errCh <- io.EOF
 				return
 			}
 			if err != nil {
-				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
+				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				errCh <- err
 				return
 			}
@@ -510,7 +574,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// answers it: the test, the read as the replay named
 					// it, and how many times the test recorded it.
 					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
-						zap.String("test", again.Test), zap.String("call", request.Method+" "+request.URL.Path), zap.String("read", again.Mock.TestModeInfo.ReadMark().Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
+						zap.String("test", again.Test), zap.String("call", shapeSummary(request)), utils.PathTagField(models.URLPathTag(ctx, request.Method, request.URL)), zap.String("read", again.Mock.TestModeInfo.ReadMark().Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
 					stub, ok, diag, lmiss, repeat = again.Mock, true, nil, nil, true
 				}
 			}
@@ -533,7 +597,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if lmiss == nil && provenswitch.On() {
 					// A call that came with an array in another order is
 					// unstable_order in every round, not only the full one.
-					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise))
+					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise).withSources(db))
 				}
 				if lmiss != nil {
 					diag = lmiss.diag()
@@ -560,7 +624,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
 				}
-				report, hint := h.buildHTTPMismatchReportHinted(request, input.body, db, nil, headerNoise, bodyNoise, diag)
+				report, hint := h.buildHTTPMismatchReportHinted(ctx, request, input.body, db, nil, headerNoise, bodyNoise, diag)
 				if hint != "" {
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + hint)
 				}
@@ -589,7 +653,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				var elsewhere *models.Mock
 				staged := false
 				if report != nil && provenswitch.On() && (n == 0 || !nAt.IsZero()) {
-					elsewhere, staged = notOwnedRecordingBefore(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call, nAt)
+					elsewhere, staged = notOwnedRecordingBefore(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), call, nAt)
 				} else if report != nil {
 					// A call no lookup is asked for (its view moved, or
 					// keploy cannot place the test's own recording of it)
@@ -616,7 +680,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				var earlier integrations.AnsweredCall
 				repeated := false
 				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
-					earlier, repeated = repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n)
+					earlier, repeated = repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), n)
 				}
 				// A call of the test's own that changed (it is no
 				// recording made elsewhere, nor one call more than the test
@@ -627,7 +691,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// likely follows. The miss stays the test's own.
 				var earlierRec *models.Mock
 				if elsewhere == nil && !staged && n == 0 && report != nil && provenswitch.On() {
-					earlierRec = earlierRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+					earlierRec = earlierRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise).withSources(db), call)
 				}
 				// The call's view went after the call was decided: a
 				// test's begin or end replaced it before the miss was
@@ -676,20 +740,30 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					report.Reason = models.MissViewReplaced
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + gone)
 				}
+				// One path tag names the call in the lines below, the error
+				// and the report the console and the report print: the
+				// report's, made as it was built, else the request's.
+				missTag := models.URLPathTag(ctx, request.Method, request.URL)
+				if report != nil && report.PathTag != "" {
+					missTag = report.PathTag
+				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
 					// agnostic mock-mismatch WARN is emitted once in
 					// proxy.sendMockNotFoundErrorFrom (where every parser's miss
 					// funnels), so this stays Debug to avoid double-logging.
+					// The call by its shape and the fields it differs in,
+					// never the summary or the diff: they hold what the call
+					// sent, for the user's own report.
 					h.Logger.Debug("no matching http mock found for outgoing request",
 						zap.String("protocol", report.Protocol),
-						zap.String("destination", report.Destination),
-						zap.String("actual", models.WithHTTPOperation(report.ActualSummary, report.Operation)),
+						zap.String("destination", models.HostLogName(ctx, report.Destination)),
+						zap.String("call", shapeSummary(request)), utils.PathTagField(missTag),
 						zap.String("match_phase", report.MatchPhase),
 						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
-						zap.String("diff", report.Diff),
-						zap.String("next_step", report.NextSteps))
+						zap.Strings("differs", models.MissLogDiffers(report)),
+						zap.String("next_step", models.MissLogNextStep(report)))
 				}
 
 				// On-miss policy (keploy mock replay --on-miss): passthrough or
@@ -706,11 +780,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						return
 					}
 					if phErr != nil {
-						h.Logger.Debug("on-miss passthrough failed; falling back to hard miss", zap.Error(phErr), zap.Any("metadata", utils.GetReqMeta(request)))
+						h.Logger.Debug("on-miss passthrough failed; falling back to hard miss", zap.Error(phErr), zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 					} else if handled {
 						// Served live — continue the keep-alive loop for the next
 						// request on this connection. Not reported as a miss.
-						reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+						reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 						if err != nil {
 							h.Logger.Debug("client closed connection after on-miss passthrough", zap.Error(err))
 							errCh <- nil
@@ -725,8 +799,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
-				// The error names the call without its secret (missedCall).
-				baseErr := fmt.Errorf("%w for %s", ErrMockNotMatched, missedCall(request, report))
+				// The error names the call by its path's shape
+				// (shapeSummary), whatever its report says: the proxy and
+				// the parser log the error, and a segment of any look can
+				// hold what the call sent (a token, a user's name). The
+				// report keeps its summary for the user's own view.
+				baseErr := fmt.Errorf("%w for %s", ErrMockNotMatched, models.WithPathTag(shapeSummary(request), missTag))
 				missErr := models.NewMockMismatchError(baseErr, report)
 				// The miss is queued for the test that made it before the app
 				// sees the 502. The replay reads a test's misses once the app
@@ -741,7 +819,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// get-quote-1's difference learned as noise).
 				reported := models.ReportMockMismatch(ctx, missErr)
 				if _, err := clientConn.Write([]byte(noMock)); err != nil {
-					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
+					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				}
 				switch {
 				case reported && provenswitch.On():
@@ -759,10 +837,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			if stub == nil {
-				utils.LogError(h.Logger, nil, "matched mock is nil", zap.Any("metadata", utils.GetReqMeta(request)))
+				utils.LogError(h.Logger, nil, "matched mock is nil", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				errCh <- errors.New("matched mock is nil")
 				return
 			}
+
+			// A once series' first recording begins its chain on this
+			// connection, and the recording the chain named carries it on
+			// (integrations.OnceChainOnConn); any other answer, and a call
+			// that ended above, leave it ended.
+			chain.Answered(mockDb, stub.Name, followed, call)
 
 			// A mock whose call ended in a fault gets the fault, as the
 			// upstream gave it (serveFault), not its head as a whole answer.
@@ -772,7 +856,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					if ctx.Err() != nil {
 						return
 					}
-					utils.LogError(h.Logger, ferr, "failed to serve the matched mock's fault; the connection is closed with no answer", zap.Any("metadata", utils.GetReqMeta(request)))
+					utils.LogError(h.Logger, ferr, "failed to serve the matched mock's fault; the connection is closed with no answer", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 					errCh <- ferr
 					return
 				}
@@ -792,7 +876,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return h.answeredMatch(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)(twins)
 			}
 			if held, err := h.heldAnswerOf(stub, request, mockDb, repeat, same); err != nil {
-				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
+				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				errCh <- err
 				return
 			} else if held != nil {
@@ -807,7 +891,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- nil
 					return
 				}
-				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+				reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 				if err != nil {
 					h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 					errCh <- nil
@@ -821,7 +905,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// Content-Encoding). Shared with the async serving branch above.
 			respBytes, err := h.buildMockResponseBytes(stub)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
+				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				errCh <- err
 				return
 			}
@@ -835,12 +919,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if ctx.Err() != nil {
 					return
 				}
-				utils.LogError(h.Logger, err, "failed to write the mock output to the user application", zap.Any("metadata", utils.GetReqMeta(request)))
+				utils.LogError(h.Logger, err, "failed to write the mock output to the user application", zap.Any("metadata", utils.GetReqMeta(ctx, request)))
 				errCh <- err
 				return
 			}
 
-			reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
+			reqBuf, err = nextRequest(ctx, h.Logger, client, rest)
 			if err != nil {
 				h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 				if ce := h.Logger.Check(zap.DebugLevel, "This was the last response from the server"); ce != nil {
@@ -853,6 +937,69 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	}(errCh, reqBuf, opts)
 
 	return pUtil.JoinParser(ctx, errCh)
+}
+
+// nextRequest returns the start of the client's next request: rest, what it
+// sent after the request just answered, when it pipelined its next request
+// with it, or else what it sends next, read on a small read
+// (pUtil.ReadBytesWaiting). readRequestHead and HandleChunkedRequests read
+// the rest of the request on by its framing.
+//
+// The empty lines in front of it (emptyLinesBefore) are dropped: an old
+// client sends a CRLF after a POST body, and a client may send empty lines
+// between requests (RFC 9112 §2.2 lets a server ignore them). rest, or a
+// read, that holds nothing else is no request start, and the connection is
+// read on, as nextRequestV2 takes such a chunk at record. Handed on as one,
+// it held readRequestHead waiting for a request head, and a client that
+// closed then was logged as an error.
+func nextRequest(ctx context.Context, logger *zap.Logger, clientConn net.Conn, rest []byte) ([]byte, error) {
+	for {
+		if rest = rest[emptyLinesBefore(rest):]; len(rest) > 0 {
+			return rest, nil
+		}
+		var err error
+		if rest, err = pUtil.ReadBytesWaiting(ctx, logger, clientConn); err != nil {
+			return rest, err
+		}
+	}
+}
+
+// heldErrConn is the client's side of a replayed connection as decodeHTTP
+// reads it. A Read that gives bytes with an error gives the bytes alone. An
+// error that ends the connection (anything but a timeout) is held, and
+// every Read after it gives it again without reading the connection. A
+// reader may give the client's last bytes in the same Read as the error:
+// crypto/tls gives them with io.EOF when the client's close_notify follows
+// them (up to TLS 1.2), and io.Reader lets any reader. nextRequest,
+// readRequestHead and the Content-Length body read (contentLengthRequest)
+// took the error as the connection's end and dropped the bytes, so the
+// client's last request went unanswered; the chunked body read kept them. A
+// timeout ends only that read: a body's read deadline, which its reader
+// reads on past, so it is given at the next Read as the connection gives
+// it.
+type heldErrConn struct {
+	net.Conn
+	err error
+}
+
+func (c *heldErrConn) Read(p []byte) (int, error) {
+	if c.err != nil {
+		return 0, c.err
+	}
+	n, err := c.Conn.Read(p)
+	if err != nil && !isTimeout(err) {
+		c.err = err
+	}
+	if n > 0 {
+		return n, nil
+	}
+	return 0, err
+}
+
+// isTimeout reports whether err ends a read at its deadline.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // withResponse returns m with its recorded response in Spec: m itself, or, when
@@ -1143,10 +1290,16 @@ func mockNameOf(m *models.Mock) string {
 // that runs to the close), or upgraded it (101) and the upgraded connection is
 // over, both closed here. Otherwise the client's stays open for its
 // next call.
+//
+// Its error, which its caller logs, names the server's host name (the
+// client's SNI, a CONNECT target) by its labels' shape beside its tag in
+// ctx's session (models.HostsInError): a dial's error and this function's own
+// name it whole.
 func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, raw []byte, method string) (ended bool, err error) {
 	if dstCfg.Addr == "" {
 		return false, errors.New("the call has no destination address to pass it through to")
 	}
+	defer func() { err = models.HostsInError(ctx, err, dstCfg.Addr, tlsServerName(dstCfg)) }()
 	target := pUtil.DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated}
 	var conn net.Conn
 	if dstCfg.TLSCfg != nil {
@@ -1167,7 +1320,7 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 	for {
 		resp, err := http.ReadResponse(br, &http.Request{Method: method})
 		if err != nil {
-			return false, fmt.Errorf("read the answer of %s: %w", dstCfg.Addr, err)
+			return false, fmt.Errorf("read the answer of %s: %w", dstCfg.Addr, utils.WithholdInput(err))
 		}
 		switch {
 		case resp.StatusCode == http.StatusSwitchingProtocols:
@@ -1201,16 +1354,4 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 		// the close, which resp.Write tells the client as Connection: close.
 		return resp.Close, nil
 	}
-}
-
-// missedCall names a missed call in its error as its report does, with the
-// segments a recording of the pool redacted written redacted, or by its
-// path's shape with no recording at hand or no report (shapeSummary): the
-// proxy logs the error at ERROR, and the call may have sent its secret in
-// its path.
-func missedCall(request *http.Request, report *models.MockMismatchReport) string {
-	if report != nil {
-		return report.ActualSummary
-	}
-	return shapeSummary(request)
 }

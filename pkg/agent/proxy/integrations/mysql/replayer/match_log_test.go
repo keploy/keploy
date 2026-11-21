@@ -16,11 +16,12 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// The debug log of an EXECUTE the matcher compares masks its query
-// attributes' values: an attribute named as a secret (a password) holds one
-// whatever it looks like, and was logged in the clear. The statement's own
-// values, its attributes' names and types are logged as they are.
-func TestMatchCommand_TheDebugLogMasksAnExecutesAttributeValues(t *testing.T) {
+// The debug log of an EXECUTE the matcher compares names its statement and
+// how many values it binds, never a value: neither a query attribute's (an
+// attribute named as a secret, a password, holds one whatever it looks
+// like, and was logged in the clear) nor the statement's own, which are the
+// application's data.
+func TestMatchCommand_TheDebugLogShowsNoValueOfAnExecute(t *testing.T) {
 	const secret = "correct-horse-battery-staple"
 	at := stmtT0.Add(time.Second)
 	db := &fakeMockDb{session: []*models.Mock{executedMock("mock-1", 1, at, "row", ordersInsert, "k1", "t1")},
@@ -41,12 +42,14 @@ func TestMatchCommand_TheDebugLogMasksAnExecutesAttributeValues(t *testing.T) {
 		t.Fatal("precondition: the matcher logged no EXECUTE it compared")
 	}
 	for _, e := range entries {
-		logged := fmt.Sprintf("%+v", e.ContextMap()["Req"])
-		if strings.Contains(logged, secret) {
-			t.Fatalf("the debug log holds the attribute's value: %s", logged)
+		logged := fmt.Sprintf("%+v", e.ContextMap())
+		for _, v := range []string{secret, "k1", "t1"} {
+			if strings.Contains(logged, v) {
+				t.Fatalf("the debug log holds a value the EXECUTE bound: %s", logged)
+			}
 		}
-		if !strings.Contains(logged, "password") || !strings.Contains(logged, maskedAttributeValue) || !strings.Contains(logged, "k1") {
-			t.Fatalf("the debug log does not show the EXECUTE as it is, its attribute's value masked: %s", logged)
+		if got := e.ContextMap()["params"]; got != int64(3) {
+			t.Fatalf("the debug log names %v values bound, want 3: %s", got, logged)
 		}
 	}
 	if p.Parameters[2].Value != secret {

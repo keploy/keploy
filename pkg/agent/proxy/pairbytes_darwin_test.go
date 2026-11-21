@@ -20,7 +20,8 @@ import (
 
 // darwinPair is a connection as the proxy holds a paired one under the proven
 // switch, on macOS: the application's end (app) and the proxy's (proxySide),
-// paired as application connection 1, its reads seen through reader
+// paired as application connection 1, its application end looked for in
+// macOS's TCP table (proveAppVisible), its reads seen through reader
 // (inflight.go), its close noted (pairClosing) as the accept loop notes it.
 func darwinPair(t *testing.T) (p *Proxy, app, proxySide *net.TCPConn, reader *trackedConn) {
 	t.Helper()
@@ -43,8 +44,14 @@ func darwinPair(t *testing.T) (p *Proxy, app, proxySide *net.TCPConn, reader *tr
 	proxySide = s.(*net.TCPConn)
 	t.Cleanup(func() { _ = proxySide.Close() })
 	p.paired.add(proxySide, 1, 0)
+	p.proveAppVisible(proxySide)
 	reader = p.inflight.track(proxySide)
 	reader.beforeClose = func() { p.pairClosing(context.Background(), proxySide, reader) }
+	// Its use counted as the proxy's accept counts it, and used once by
+	// the test open now: a close that cannot tell what was on its way is
+	// that test's (pairUntold).
+	reader.pairUse = p.paired.useOf(proxySide)
+	reader.pairUse.Add(1)
 	t.Cleanup(func() { p.inflight.forget(reader) })
 	return p, app, proxySide, reader
 }

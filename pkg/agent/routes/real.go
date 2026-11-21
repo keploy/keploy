@@ -41,10 +41,7 @@ type realUseReader interface {
 // testCaseWindow is when a recorded test case's request came and its
 // response went, by its kind.
 func testCaseWindow(tc *models.TestCase) (time.Time, time.Time) {
-	if tc.Kind == models.GRPC_EXPORT {
-		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
-	}
-	return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+	return models.TestCaseWindow(tc)
 }
 
 // realDepsKeeper is a service that installs a later push of the same run

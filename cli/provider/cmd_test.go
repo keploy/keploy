@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,17 +302,23 @@ func TestValidateFlags_HonoursCmdTypeEndToEnd(t *testing.T) {
 // `make -f ./docker-compose-tmp.yaml up --abort-on-container-exit`, which
 // fails with an unrecognised option nowhere near its cause. Refusing up front
 // is the difference between a usable flag and one that looks like it worked.
+// The refusal names the command by its program, never its arguments: it is
+// logged at ERROR, and a command's arguments carry what the user passes the
+// app.
 func TestResolveCommandType_DockerRunRejectsWrapperCommand(t *testing.T) {
 	for _, cmdType := range []string{"docker-run", "docker-start"} {
-		for _, command := range []string{"make up", "./start.sh", "npm start"} {
+		for command, program := range map[string]string{"make up": "make", "./start.sh": "start.sh", "npm start": "npm"} {
 			cmd := cmdWithCmdTypeFlag(cmdType, true)
 			_, err := resolveCommandType(zap.NewNop(), cmd, command, cmdType)
 			if err == nil {
 				t.Errorf("%s with command %q: want an error, got none", cmdType, command)
 				continue
 			}
-			if !strings.Contains(err.Error(), command) {
-				t.Errorf("error for %q does not name the command: %v", command, err)
+			if !strings.Contains(err.Error(), fmt.Sprintf("the %q command", program)) {
+				t.Errorf("error for %q does not name its program %q: %v", command, program, err)
+			}
+			if strings.Contains(err.Error(), fmt.Sprintf("%q", command)) {
+				t.Errorf("error for %q names the command whole: %v", command, err)
 			}
 		}
 	}
@@ -628,5 +635,167 @@ func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 	}
 	if !cmd.SilenceUsage {
 		t.Errorf("cobra is left to print `keploy record`'s usage text under %q", err)
+	}
+}
+
+// keploy record run from a folder inside a git checkout, given no app name,
+// names the app after the repository (its origin remote) and the folder's
+// path inside it, not after the checkout's folder or the folder alone
+// ("b"), and writes that name into the keploy.yml it creates, so later runs
+// keep it. A name the run is given is kept.
+func TestRecordNamesTheAppAfterItsGitRepository(t *testing.T) {
+	for _, c := range []struct{ name, flag, want string }{
+		{"no name given", "", "orders-api-a-b"},
+		{"--app-name", "billing", "billing"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			original := NativeCommandSupported
+			t.Cleanup(func() { NativeCommandSupported = original })
+			RegisterNativeCommandSupport(func(string, string) bool { return true })
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			t.Cleanup(log.TestOnlyResetSink)
+			found := IsConfigFileFound
+			t.Cleanup(func() { IsConfigFileFound = found })
+
+			top := filepath.Join(t.TempDir(), "checkout")
+			if err := os.MkdirAll(filepath.Join(top, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(top, ".git", "config"), []byte("[remote \"origin\"]\n\turl = git@github.com:acme/orders-api.git\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			work := filepath.Join(top, "a", "b")
+			if err := os.MkdirAll(filepath.Join(work, "keploy"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(work)
+
+			c2 := NewCmdConfigurator(zap.NewNop(), config.New())
+			cmd := &cobra.Command{Use: "record"}
+			if err := c2.AddFlags(cmd); err != nil {
+				t.Fatalf("AddFlags: %v", err)
+			}
+			args := []string{"-c", "./app", "--config-path", work}
+			if c.flag != "" {
+				args = append(args, "--app-name", c.flag)
+			}
+			if err := cmd.ParseFlags(args); err != nil {
+				t.Fatalf("ParseFlags: %v", err)
+			}
+			cmd.SetContext(context.Background())
+			if err := c2.Validate(context.Background(), cmd); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			if c2.cfg.AppName != c.want {
+				t.Errorf("appName = %q, want %q", c2.cfg.AppName, c.want)
+			}
+			written, err := os.ReadFile(filepath.Join(work, "keploy.yml"))
+			if err != nil {
+				t.Fatalf("the keploy.yml record writes: %v", err)
+			}
+			if !strings.Contains(string(written), "\nappName: "+c.want+"\n") {
+				t.Errorf("the keploy.yml record wrote does not name the app %q:\n%s", c.want, written)
+			}
+		})
+	}
+}
+
+// keploy record refuses a worker-mock rule it cannot apply, read from
+// keploy.yml as written (a camel-case key such as pathRegex included); every
+// other command, keploy mock record among them, goes on.
+func TestWorkerMockRulesAreRefusedByKeployRecordOnly(t *testing.T) {
+	t.Cleanup(viper.Reset)
+	const bad = "record:\n  workerMocks:\n    - kind: http\n      match:\n        path: /x\n"
+	const good = "record:\n  workerMocks:\n    - id: jwks\n      kind: Http\n      match:\n        method: GET\n        pathRegex: \"^/jwks$\"\n"
+	run := func(t *testing.T, cmd *cobra.Command, cfg *config.Config, yml string) error {
+		t.Helper()
+		viper.Reset()
+		if err := cmd.ParseFlags([]string{"--config-path", writeKeployYML(t, yml)}); err != nil {
+			t.Fatal(err)
+		}
+		c := NewCmdConfigurator(zap.NewNop(), cfg)
+		if err := c.PreProcessFlags(cmd); err != nil {
+			t.Fatalf("PreProcessFlags: %v", err)
+		}
+		return c.ValidateFlags(context.Background(), cmd)
+	}
+	refused := func(err error) bool { return err != nil && strings.Contains(err.Error(), "workerMocks") }
+
+	cfg := config.New()
+	if err := run(t, newRecordCmdForTest(t, cfg), cfg, bad); !refused(err) {
+		t.Fatalf("keploy record with a misspelled kind: %v; want the record.workerMocks refusal", err)
+	}
+	cfg = config.New()
+	if err := run(t, newRecordCmdForTest(t, cfg), cfg, good); refused(err) {
+		t.Fatalf("keploy record refused a valid rule read from keploy.yml: %v", err)
+	}
+	if len(cfg.Record.WorkerMocks) != 1 || cfg.Record.WorkerMocks[0].ID != "jwks" {
+		t.Fatalf("rules read %+v", cfg.Record.WorkerMocks)
+	}
+	cfg = config.New()
+	if err := run(t, newTestCmdForTest(t, cfg), cfg, bad); refused(err) {
+		t.Fatalf("keploy test refused over a rule it does not apply: %v", err)
+	}
+	cfg = config.New()
+	root, mock := &cobra.Command{Use: "keploy"}, &cobra.Command{Use: "mock"}
+	mockRecord := newRecordCmdForTest(t, cfg)
+	root.AddCommand(mock)
+	mock.AddCommand(mockRecord)
+	if isKeployRecord(mockRecord) {
+		t.Fatal("keploy mock record taken for keploy record")
+	}
+	if err := run(t, mockRecord, cfg, bad); refused(err) {
+		t.Fatalf("keploy mock record refused over a rule it does not apply: %v", err)
+	}
+}
+
+// keploy record and keploy test refuse --cmd-type docker-run for a command
+// that is no docker command (make up), and validate logs that refusal at
+// ERROR: it names the command by its program, never an argument, so the
+// password the command passes reaches no line and not the error.
+func TestTheCmdTypeRefusalNamesTheProgramAlone(t *testing.T) {
+	const command = "make up DB_PASSWORD=S3CR3T"
+	if _, err := resolveCommandType(zap.NewNop(), cmdWithCmdTypeFlag("docker-run", true), command, "docker-run"); err == nil ||
+		strings.Contains(err.Error(), "S3CR3T") || !strings.Contains(err.Error(), `the "make" command is not one`) {
+		t.Errorf("resolveCommandType: %v, want a refusal that names the make command alone", err)
+	}
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return true })
+	for _, use := range []string{"record", "test"} {
+		cfg := config.New()
+		core, logs := observer.New(zapcore.DebugLevel)
+		c := NewCmdConfigurator(zap.New(core), cfg)
+		cmd := &cobra.Command{Use: use}
+		if err := c.AddFlags(cmd); err != nil {
+			t.Fatalf("AddFlags: %v", err)
+		}
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "keploy"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		if err := cmd.ParseFlags([]string{"-c", command, "--cmd-type", "docker-run", "-p", dir}); err != nil {
+			t.Fatalf("ParseFlags: %v", err)
+		}
+		cfg.Command, cfg.Path = command, dir
+		err := c.Validate(context.Background(), cmd)
+		if err == nil || strings.Contains(err.Error(), "S3CR3T") || !strings.Contains(err.Error(), `"make"`) {
+			t.Errorf("%s: Validate: %v, want the refusal naming the make command alone", use, err)
+		}
+		refused := false
+		for _, e := range logs.All() {
+			line := e.Message + " " + fmt.Sprint(e.ContextMap())
+			if e.Level >= zapcore.InfoLevel && strings.Contains(line, "S3CR3T") {
+				t.Errorf("%s: a %v line names the command's password: %s", use, e.Level, line)
+			}
+			refused = refused || e.Level == zapcore.ErrorLevel && e.Message == "failed to validate flags"
+		}
+		if !refused {
+			t.Errorf("%s: no ERROR line said the flags failed to validate: %v", use, logs.All())
+		}
 	}
 }

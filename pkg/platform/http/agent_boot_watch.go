@@ -392,6 +392,13 @@ func engineSaysGone(out []byte, err error) bool {
 	if err != nil && cerrdefs.IsNotFound(err) {
 		return true
 	}
+	said := strings.ToLower(engineSaid(out, err))
+	return strings.Contains(said, "no such container") || strings.Contains(said, "no such object")
+}
+
+// engineSaid is all the engine's CLI said of a command (out, err): its
+// output, its error, and the stderr an *exec.ExitError in it carries.
+func engineSaid(out []byte, err error) string {
 	said := string(out)
 	if err != nil {
 		said += "\n" + err.Error()
@@ -400,8 +407,7 @@ func engineSaysGone(out []byte, err error) bool {
 			said += "\n" + string(exit.Stderr)
 		}
 	}
-	said = strings.ToLower(said)
-	return strings.Contains(said, "no such container") || strings.Contains(said, "no such object")
+	return said
 }
 
 // containerGone is containerExited's code for a container that is no longer

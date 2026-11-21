@@ -20,7 +20,13 @@
 #            with where the proxy is reached: loopback, which only its debug
 #            log can show, as the kernel sends a native application's calls
 #            to the proxy whatever address they are made at. The calls must
-#            still reach both mocks
+#            still reach both mocks. The agent's log names the question by
+#            its labels' shape and tag, never the name (a name is traffic):
+#            the replay's misses file names the lookup whole
+#   The record phases that reach the dependency by its name (online,
+#   hosts-record, and their *-proven runs) run at debug level too, and their
+#   agent's whole log must not name it either: a recording names the DNS
+#   question it records, and the calls it makes to the name.
 #   loopback loopback only: record a dependency on 127.0.0.1, stop it, and
 #            replay it
 #
@@ -207,9 +213,13 @@ ip -brief addr > "$WORK/$PHASE.addr"
 python3 client.py "$URL" > /dev/null 2>&1
 echo $? > "$WORK/$PHASE.direct"
 # Only the debug log says what keploy's DNS server answered a name it has no
-# recorded answer for, which hosts-replay has to show.
+# recorded answer for, which hosts-replay has to show. The record phases that
+# call the dependency by its name run at debug level too: their agent's whole
+# log is checked for the name (hostcheck), at the level production runs it.
 DEBUG=""
-[ "$PHASE" = hosts-replay ] && DEBUG="--debug"
+case "$PHASE" in
+  hosts-replay|online|hosts-record|online-proven|hosts-record-proven) DEBUG="--debug" ;;
+esac
 KEPLOY_PROVEN="$PROVEN" "$BIN" mock "$SUB" -c "python3 client.py $URL" --name "$SET" --disable-tele $DEBUG > "$WORK/$PHASE.log" 2>&1
 echo $? > "$WORK/$PHASE.exit"
 exit 0
@@ -249,8 +259,55 @@ proven_offline() {
   fi
 }
 
+# No line of the agent's names the dependency: not its DNS lines, nor any
+# other (an egress, proxy, ingress or miss line), each naming a host by its
+# labels' shape and tag (a name is traffic). One field is exempt, by its key:
+# the agent's config dump ("config has been initialised") quotes the user's
+# own command line in config.command, which names the dependency as the user
+# wrote it, and is no traffic. The dump must be there exactly once, so a
+# change in its form fails the check instead of exempting more.
+hostcheck() {
+  python3 -I - "$1" dep.keploy.test <<'PY'
+import json, re, sys
+log, name = sys.argv[1], sys.argv[2]
+text = re.sub(r"\x1b\[[0-9;]*m", "", open(log, encoding="utf-8", errors="replace").read())
+leaks, dumps = [], 0
+for line in text.splitlines():
+    if "Keploy(agent):" not in line:
+        continue
+    parts = line.split("\t")
+    if len(parts) >= 4 and parts[2] == "config has been initialised":
+        dumps += 1
+        try:
+            fields = json.loads(parts[3])
+            fields["config"].pop("command")
+        except (ValueError, KeyError, TypeError) as e:
+            leaks.append("the config dump has no config.command to exempt (%s): %s" % (e, line[:300]))
+            continue
+        if name in json.dumps(fields):
+            leaks.append("the config dump names it outside config.command: " + line[:400])
+        continue
+    if name in line:
+        leaks.append(line[:400])
+if dumps != 1:
+    leaks.append("want the agent's config dump exactly once, found %d" % dumps)
+for l in leaks[:5]:
+    print(l)
+sys.exit(1 if leaks else 0)
+PY
+}
+# record_hostcheck <phase>: a record phase's agent names the dependency
+# nowhere in its log (hostcheck).
+record_hostcheck() {
+  local out
+  if ! out=$(hostcheck "$WORK/$1.log"); then
+    fail "$1: the recording agent's log names the dependency dep.keploy.test outside the user's command line: $out"
+  fi
+}
+
 if half off; then
 phase online 0
+record_hostcheck online
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/online/mocks.yaml" 2>/dev/null)" -ge 1 ] ||
   fail "online: no DNS lookup was recorded"
 MOCKS=$(http_mocks_are "$WORK/keploy/online/mocks.yaml" 2) ||
@@ -259,13 +316,23 @@ phase offline 1
 proven_offline online
 
 phase hosts-record 0
+record_hostcheck hosts-record
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/hosts/mocks.yaml" 2>/dev/null)" -eq 0 ] ||
   fail "hosts-record: a DNS lookup was recorded for a name /etc/hosts answers"
 MOCKS=$(http_mocks_only "$WORK/keploy/hosts/mocks.yaml" 2) ||
   fail "hosts-record: want 2 Http mocks and no other, got $MOCKS"
 phase hosts-replay 1
-grep -aq 'synthesized A fallback.*"query": "dep.keploy.test.".*"proxy_ip4": "127.0.0.1"' "$WORK/hosts-replay.log" ||
-  fail "hosts-replay: keploy's DNS server did not answer dep.keploy.test with loopback"
+# The answer, by its line: the question by its labels' shape and its tag
+# under the replay's session, never its name, which the agent's log never
+# holds; the lookup itself, whole, where the replay names each call no mock
+# answered (keploy/<set>/last-replay-misses.yaml).
+grep -aqE 'synthesized A fallback.*"query": "\{\}\.\{\}\.\{\}\. #[0-9a-f]{12}".*"proxy_ip4": "127\.0\.0\.1"' "$WORK/hosts-replay.log" ||
+  fail "hosts-replay: keploy's DNS server did not say it answered the name, by its shape and tag, with loopback"
+if ! out=$(hostcheck "$WORK/hosts-replay.log"); then
+  fail "hosts-replay: the agent's log names the dependency dep.keploy.test outside the user's command line: $out"
+fi
+grep -aqE '^[ -]*call: A dep\.keploy\.test\.$' "$WORK/keploy/hosts/last-replay-misses.yaml" 2>/dev/null ||
+  fail "hosts-replay: the replay's misses file does not name the lookup of dep.keploy.test: $(cat "$WORK/keploy/hosts/last-replay-misses.yaml" 2>/dev/null | head -20)"
 # Not proven_offline: the lookups have no recorded answer, so the receipt
 # counts them as misses and the set as not isolated. What this phase can
 # prove is that the calls made at the answer reached both recorded mocks.
@@ -282,11 +349,13 @@ fi
 if half on; then
 # Under the proven switch: the same records.
 phase online-proven 0
+record_hostcheck online-proven
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/online-proven/mocks.yaml" 2>/dev/null)" -ge 1 ] ||
   fail "online-proven: no DNS lookup was recorded"
 MOCKS=$(http_mocks_are "$WORK/keploy/online-proven/mocks.yaml" 2) ||
   fail "online-proven: want 2 Http mocks and no mock but DNS beside them, got $MOCKS"
 phase hosts-record-proven 0
+record_hostcheck hosts-record-proven
 [ "$(grep -c '^kind: DNS' "$WORK/keploy/hosts-proven/mocks.yaml" 2>/dev/null)" -eq 0 ] ||
   fail "hosts-record-proven: a DNS lookup was recorded for a name /etc/hosts answers"
 MOCKS=$(http_mocks_only "$WORK/keploy/hosts-proven/mocks.yaml" 2) ||

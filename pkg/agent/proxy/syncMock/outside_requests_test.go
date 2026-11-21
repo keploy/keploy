@@ -111,7 +111,7 @@ func TestOutsideRequestsLateMockOfAnEndedRequestIsNotMarked(t *testing.T) {
 	}
 }
 
-// An agent whose ingress opens no window, the proxyless one, says nothing.
+// An agent whose ingress opens no window says nothing.
 func TestOutsideRequestsNoWindowEverMarksNothing(t *testing.T) {
 	m := New(zap.NewNop())
 	now := time.Now()
@@ -120,17 +120,25 @@ func TestOutsideRequestsNoWindowEverMarksNothing(t *testing.T) {
 	}
 }
 
-func TestOutsideRequestsWindowlessIngressMarksNothingFromThenOn(t *testing.T) {
+// An ingress that watches the app's reads opens a request's window only once
+// its parser has read the request, after the app did, so the call that request
+// made can reach the manager first: a manager told so marks nothing, where one
+// that is not marks the same call (TestOutsideRequestsPollBetweenRequestsIsMarked).
+func TestOutsideRequestsLateWindowsMarkNothing(t *testing.T) {
 	m := New(zap.NewNop())
+	m.SetWindowsOpenLate()
 	ended := endedWindow(t, m)
-	m.NoteWindowlessIngress()
-	if addCall(m, ended.Add(time.Second), ended.Add(2*time.Second)) {
-		t.Fatal("a call was marked after a request that opens no window came")
+	read := ended.Add(time.Second) // the app reads the next request
+	if addCall(m, read.Add(time.Second), read.Add(2*time.Second)) {
+		t.Fatal("a call that reached the manager before its request's window opened is marked, on a manager whose windows open late")
 	}
-	ended = endedWindow(t, m)
-	if addCall(m, ended.Add(time.Second), ended.Add(2*time.Second)) {
-		t.Fatal("a window ending lifted the latch")
+	w := m.OpenWindow(read, nil) // that request's window, opened after its call came
+	if w == nil {
+		t.Fatal("no window opened")
 	}
+	w.Close()
+	var none *SyncMockManager
+	none.SetWindowsOpenLate()
 }
 
 func TestOutsideRequestsNeedsBothTimes(t *testing.T) {
@@ -144,12 +152,10 @@ func TestOutsideRequestsNeedsBothTimes(t *testing.T) {
 	}
 }
 
-func TestOutsideRequestsNilMockAndManagerAreSafe(t *testing.T) {
+func TestOutsideRequestsNilMockIsSafe(t *testing.T) {
 	m := New(zap.NewNop())
 	endedWindow(t, m)
 	m.stampOutsideRequestsLocked(nil)
-	var none *SyncMockManager
-	none.NoteWindowlessIngress()
 }
 
 // A request given up while it is in flight (by memory pressure, by the hold's

@@ -157,7 +157,9 @@ assert_no_mysql_ports_config() {
 wait_for_mysql() {
   section "Wait for MySQL readiness on :${MYSQL_PORT}"
   for _ in {1..120}; do
-    if docker compose exec -T mysql mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
+    # Over TCP (to the container's own 3306), as the app and keploy reach it:
+    # the image's first, socket-only server answers the socket alone, and exits.
+    if docker compose exec -T mysql mysql -h127.0.0.1 -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
       echo "MySQL is ready."
       endsec; return 0
     fi

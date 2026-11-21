@@ -378,6 +378,41 @@ func TestNextRequestKeepsTheFloorWhileAnAnswerIsUnread(t *testing.T) {
 	}
 }
 
+// A parser that kept the floor below a request for an earlier answer, and has
+// read that answer, sets the floor at the request (FloorAt): the server bytes
+// captured before the request that are still unread are dropped, with a Debug
+// line, however late they reach it, and the request's answer is read next.
+func TestFloorAtSetsTheFloorOnceTheAnswerIsRead(t *testing.T) {
+	t.Parallel()
+	c := newExchangeConn(t, context.Background())
+	c.req(1, "PREPARE")
+	c.resp(2, "PREPARE OK + definitions")
+	c.req(5, "EXECUTE")
+	if q, r := c.exchange(t); q != "PREPARE" || r != "PREPARE OK + definitions" {
+		t.Fatalf("paired %q with %q", q, r)
+	}
+	first, err := c.sess.NextRequest(models.MySQL, true)
+	if err != nil || string(first.Bytes) != "EXECUTE" {
+		t.Fatalf("NextRequest = %q, %v", first.Bytes, err)
+	}
+	if _, err := c.sess.ClientStream.ReadChunk(); err != nil {
+		t.Fatal(err)
+	}
+	c.resp(3, "EOF of the PREPARE")
+	c.resp(4, "a reply the server sent unasked")
+	c.resp(6, "EXECUTE result")
+	if r, err := c.sess.DestStream.ReadChunk(); err != nil || string(r.Bytes) != "EOF of the PREPARE" {
+		t.Fatalf("read %q, %v; want the PREPARE's EOF", r.Bytes, err)
+	}
+	c.sess.FloorAt(first.ConnSeq)
+	if r, err := c.sess.DestStream.ReadChunk(); err != nil || string(r.Bytes) != "EXECUTE result" {
+		t.Fatalf("read %q, %v; want the EXECUTE's answer, the reply captured before it dropped", r.Bytes, err)
+	}
+	if s := c.spans.all(); len(s) != 0 || c.droppedLines() != 1 {
+		t.Fatalf("spans %v, %d dropped lines; want the unasked reply dropped with a Debug line alone", s, c.droppedLines())
+	}
+}
+
 // endExchanges calls EndExchanges as a parser's return does, and fails the
 // test if it does not return.
 func (c *exchangeConn) endExchanges(t *testing.T) {

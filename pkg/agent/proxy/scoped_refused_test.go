@@ -44,6 +44,7 @@ func TestAReadOfARefusedWorkerIsRefusedUntilItsTestEnds(t *testing.T) {
 			"GetSessionScopedMocks":     errOfRead(conn.GetSessionScopedMocks()),
 			"GetStartupMocks":           errOfRead(conn.GetStartupMocks()),
 			"RangePerTestMocksInWindow": conn.(integrations.PerTestRanger).RangePerTestMocksInWindow(func(*models.Mock) bool { return true }),
+			"RangePerTestMocksWithKey":  conn.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(liveCounterIndex, "counter", func(*models.Mock) bool { return true }),
 			"RangeSessionMocksWithKey":  liveKeyedErr(conn),
 		} {
 			if err == nil {
@@ -68,6 +69,34 @@ func TestAReadOfARefusedWorkerIsRefusedUntilItsTestEnds(t *testing.T) {
 	p.ClearWorkerScope(self)
 	if got, want := readCounter(t, opened, 2), "b1,b2"; got != want {
 		t.Fatalf("after the refused test ended the connection served %s, want %s", got, want)
+	}
+}
+
+// A call of a process a refused worker started (its app, or a program its
+// test runs) is refused, as the worker's own calls are: the proxy finds the
+// worker among the process's parents (starts.ParentOf). On macOS, which has
+// no /proc, it found none, and such a call was served the whole pool.
+func TestACallOfAProcessARefusedWorkerStartedIsRefused(t *testing.T) {
+	skipUnlessParentsRead(t)
+	starts.Default.Reset()
+	t.Cleanup(starts.Default.Reset)
+	mgr := newCursorManager(t)
+	mgr.SetMocksWithWindow(nil, counterPool(time.Now().Add(-time.Hour), "a1", "a2"), models.BaseTime, time.Now())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a1", "a2"})
+	// This process stands for the one the worker started; its parent, for
+	// the worker.
+	const why = "t1 began with the pid 42: keploy narrows a test by its pid only with the marks"
+	p.RefuseWorker(uint32(os.Getppid()), why)
+	conn := p.scopedFor(uint32(os.Getpid()), mgr)
+	if conn == integrations.MockMemDb(mgr) {
+		t.Fatal("a call of a process the refused worker started got the bare manager, which serves every test's mocks")
+	}
+	if err := errOfRead(conn.GetStartupMocks()); err == nil || !strings.Contains(err.Error(), why) {
+		t.Fatalf("a call of a process the refused worker started was read with %v, want the refusal", err)
+	}
+	if resp, body, _ := serveOne(t, httpint.New(zap.NewNop()), conn, "GET /counter HTTP/1.1\r\nHost: api\r\n\r\n"); resp != nil {
+		t.Fatalf("a call of a process the refused worker started was served %s", body)
 	}
 }
 
@@ -148,9 +177,9 @@ func TestALiveKeyedSessionWalkWithNoTestOpenShowsWhatItsReadsShow(t *testing.T) 
 	}
 }
 
-// With the marks, a walk of the per-test tier (MySQL's per-test lookup)
-// shows a connection the open test's recordings only, as its other reads do,
-// not every test's.
+// With the marks, a walk of the per-test tier (MySQL's per-test lookup),
+// and a keyed walk of it (Mongo's), shows a connection the open test's
+// recordings only, as its other reads do, not every test's.
 func TestALivePerTestWalkShowsOnlyTheOpenTestsMocks(t *testing.T) {
 	mgr := newCursorManager(t)
 	base := time.Now().Add(-time.Hour)
@@ -169,6 +198,16 @@ func TestALivePerTestWalkShowsOnlyTheOpenTestsMocks(t *testing.T) {
 	}
 	if got, want := strings.Join(names, ","), "b1,b2"; got != want {
 		t.Fatalf("during t2 a per-test walk showed %s, want %s", got, want)
+	}
+	names = nil
+	if err := conn.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(liveCounterIndex, "counter", func(mk *models.Mock) bool {
+		names = append(names, mk.Name)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(names, ","), "b1,b2"; got != want {
+		t.Fatalf("during t2 a keyed per-test walk showed %s, want %s", got, want)
 	}
 }
 

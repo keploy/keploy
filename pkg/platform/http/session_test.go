@@ -779,3 +779,44 @@ func TestSessionKeepsTheExactStagingBeforeWhatIsServed(t *testing.T) {
 		t.Fatalf("the copy's calls in flight changed with the original: %+v", pc.Exact)
 	}
 }
+
+// A test set's capture files are made only inside the recording: a keploy
+// folder the repository carries as a link out of the project, or a capture
+// file that is a link out of its set, is refused, and nothing is made or
+// written where it leads.
+func TestPcapStreamsWriteOnlyInsideTheRecording(t *testing.T) {
+	client, _ := newRestartingClient(t, true)
+	project := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(project, "keploy")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := client.StreamPcapArtifacts(ctx, filepath.Join(project, "keploy", "test-set-1"))
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("a keploy folder that links out: %v, want it refused", err)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("made %d entries where the link leads", len(entries))
+	}
+
+	set := filepath.Join(t.TempDir(), "keploy", "test-set-1")
+	if err := os.MkdirAll(set, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte("KEEP ME"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(set, "traffic.pcap")); err != nil {
+		t.Fatal(err)
+	}
+	err = client.StreamPcapArtifacts(ctx, set)
+	if err == nil || !strings.Contains(err.Error(), "only inside") {
+		t.Fatalf("a capture file that links out: %v, want it refused", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "KEEP ME" {
+		t.Fatalf("the file the link leads to holds %q", got)
+	}
+}

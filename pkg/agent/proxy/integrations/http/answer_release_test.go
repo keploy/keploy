@@ -182,7 +182,7 @@ const releaseCall = "GET /job HTTP/1.1\r\nHost: api.example\r\n\r\n"
 func heldMock(t *testing.T, req time.Time, resp string, res time.Time) *models.Mock {
 	t.Helper()
 	h := &HTTP{Logger: zap.NewNop()}
-	m, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(releaseCall), Resp: []byte(resp), ReqTimestampMock: req, ResTimestampMock: res,
+	m, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(releaseCall), Resp: []byte(resp), ReqTimestampMock: req, ResTimestampMock: res,
 		RespWrites: []respWrite{{end: len(resp), at: res}}}, 80, "c", models.OutgoingOptions{})
 	if err != nil || m == nil {
 		t.Fatalf("buildHTTPMock = (%v, %v)", m, err)
@@ -760,7 +760,7 @@ func TestHeldAnswer_ItsConnectionAnswersTheNextCall(t *testing.T) {
 	registerStandIn(t)
 	h := &HTTP{Logger: zap.NewNop()}
 	const nextCall = "GET /next HTTP/1.1\r\nHost: api.example\r\n\r\n"
-	next, err := h.buildHTTPMock(&FinalHTTP{Req: []byte(nextCall), Resp: []byte("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nnext"),
+	next, err := h.buildHTTPMock(context.Background(), &FinalHTTP{Req: []byte(nextCall), Resp: []byte("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nnext"),
 		ReqTimestampMock: releaseAt(6), ResTimestampMock: releaseAt(6)}, 80, "c", models.OutgoingOptions{})
 	if err != nil || next == nil {
 		t.Fatalf("buildHTTPMock = (%v, %v)", next, err)

@@ -638,15 +638,15 @@ func TestModifyDockerRunPutsItsFlagsAfterTheRunSubcommand(t *testing.T) {
 		{"sudo -E /usr/bin/podman run  -e 'A=b c' img", "sudo -E /usr/bin/podman run", "-e 'A=b c' img"},
 		{"podman container run -d img", "podman container run", "-d img"},
 	} {
-		a := &App{logger: zap.NewNop(), cmd: tc.cmd, kind: utils.DockerRun, keployContainer: "keploy-v3-test"}
+		a := &App{logger: zap.NewNop(), cmd: utils.NewAppCommand(tc.cmd), kind: utils.DockerRun, keployContainer: "keploy-v3-test"}
 		if err := a.modifyDockerRun(context.Background()); err != nil {
 			t.Fatalf("%q: %v", tc.cmd, err)
 		}
-		if !strings.HasPrefix(a.cmd, tc.before+" --pid=container:keploy-v3-test --network=container:keploy-v3-test ") {
-			t.Errorf("%q: keploy's flags are not right after %q: %s", tc.cmd, tc.before, a.cmd)
+		if !strings.HasPrefix(a.cmd.WholeUnredacted(), tc.before+" --pid=container:keploy-v3-test --network=container:keploy-v3-test ") {
+			t.Errorf("%q: keploy's flags are not right after %q: %s", tc.cmd, tc.before, a.cmd.WholeUnredacted())
 		}
-		if !strings.HasSuffix(a.cmd, " "+tc.after) {
-			t.Errorf("%q: the user's own arguments did not survive verbatim after keploy's: %s", tc.cmd, a.cmd)
+		if !strings.HasSuffix(a.cmd.WholeUnredacted(), " "+tc.after) {
+			t.Errorf("%q: the user's own arguments did not survive verbatim after keploy's: %s", tc.cmd, a.cmd.WholeUnredacted())
 		}
 	}
 }
@@ -655,13 +655,13 @@ func TestModifyDockerRunPutsItsFlagsAfterTheRunSubcommand(t *testing.T) {
 // none can be added to it: say so, instead of handing docker run-only flags
 // it rejects.
 func TestModifyDockerRunRefusesAStart(t *testing.T) {
-	a := &App{logger: zap.NewNop(), cmd: "docker start -a app", kind: utils.DockerStart, keployContainer: "keploy-v3-test"}
+	a := &App{logger: zap.NewNop(), cmd: utils.NewAppCommand("docker start -a app"), kind: utils.DockerStart, keployContainer: "keploy-v3-test"}
 	err := a.modifyDockerRun(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "`docker run`") {
-		t.Fatalf("want a refusal pointing at `docker run`, got %v (command now %q)", err, a.cmd)
+		t.Fatalf("want a refusal pointing at `docker run`, got %v (command now %q)", err, a.cmd.WholeUnredacted())
 	}
-	if a.cmd != "docker start -a app" {
-		t.Fatalf("the command was changed: %q", a.cmd)
+	if a.cmd.WholeUnredacted() != "docker start -a app" {
+		t.Fatalf("the command was changed: %q", a.cmd.WholeUnredacted())
 	}
 }
 

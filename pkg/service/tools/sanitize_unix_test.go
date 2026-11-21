@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v3/utils/linkout"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"gopkg.in/yaml.v3"
@@ -86,6 +88,19 @@ func TestSanitizeFiles_DoNotFollowSymlinks(t *testing.T) {
 		t.Errorf("the symlink's target was changed to %q", b)
 	}
 	requireMode(t, target, 0o644)
+	// Each refusal is said plainly: the link, where it leads, and what to
+	// do, not in the kernel's words (ELOOP's "too many levels of symbolic
+	// links").
+	says := fmt.Sprintf("link.yaml is a symbolic link; keploy does not follow it: it leads to %q; replace the link with the file it leads to", target)
+	for what, err := range map[string]error{
+		"WriteSecretsYAML":      WriteSecretsYAML(link, map[string]string{"TOKEN": "s3cret"}),
+		"SanitizeFileInPlace":   SanitizeFileInPlace(link, "test-1", map[string]string{}),
+		"DesanitizeFileInPlace": DesanitizeFileInPlace(link, map[string]string{"TOKEN": "s3cret"}),
+	} {
+		if err == nil || !strings.HasSuffix(err.Error(), says) || strings.Contains(err.Error(), "levels of symbolic links") {
+			t.Errorf("%s through a symlink said %v; want it to end %q", what, err, says)
+		}
+	}
 }
 
 // A test file sanitize and normalize rewrite keeps its own mode -- a team's
@@ -376,5 +391,67 @@ func TestSanitize_FailsWhenATestSetIsLeftUnsanitized(t *testing.T) {
 	// those names test-set-0 too.
 	if n := logs.FilterMessage("Sanitize failed for test set").Len(); n != 1 {
 		t.Errorf("test-set-0 failed %d time(s) in SanitizeTestSetDir, want 1: %v", n, logs.All())
+	}
+}
+
+// A name that leads out of the test set's folder, which openTestSetFile
+// refuses before os.Root opens it, is said plainly too, as linkout says
+// os.Root's own refusal of it: where it leads and what to name instead, never
+// in os.Root's words, with the refusal kept for errors.Is. One that is not one
+// path element but stays inside is refused as it was, not said as leading
+// out.
+func TestATestSetFileNameThatLeadsOutIsSaidPlainly(t *testing.T) {
+	set := filepath.Join(t.TempDir(), "set")
+	outside := filepath.Join(filepath.Dir(set), "outside")
+	for _, d := range []string{filepath.Join(set, "sub"), outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(set, "out")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "y.yaml"), filepath.Join(set, "sub", "l.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.OpenRoot(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	refused := func(name string) string {
+		return fmt.Sprintf("the test set's file %q is rewritten only inside its folder %q: ", name, set)
+	}
+	for _, c := range []struct{ name, says string }{
+		{"..", refused("..") + fmt.Sprintf("it names %q, a place outside it; name a place inside it", filepath.Dir(set))},
+		{"../x.yaml", refused("../x.yaml") + fmt.Sprintf("it names %q, a place outside it; name a place inside it", filepath.Join(filepath.Dir(set), "x.yaml"))},
+		{"out/x.yaml", refused("out/x.yaml") + fmt.Sprintf("it leads through %q, a link that leads out of it, to %q; replace the link with what it leads to", "out", outside)},
+		// Not one path element, but inside: refused, not as leading out.
+		{"sub/x.yaml", (&fs.PathError{Op: "open", Path: filepath.Join(set, "sub", "x.yaml"), Err: fs.ErrInvalid}).Error()},
+		// Nor is a link out at the end of such a name, which the open would
+		// not follow: it is refused for its name.
+		{"sub/l.yaml", (&fs.PathError{Op: "open", Path: filepath.Join(set, "sub", "l.yaml"), Err: fs.ErrInvalid}).Error()},
+	} {
+		_, rerr := readTestSetFile(dir, c.name)
+		werr := writeTestSetFile(dir, c.name, []byte("x"), 0o644, false)
+		for _, err := range []error{rerr, werr} {
+			if err == nil || err.Error() != c.says || !errors.Is(err, os.ErrInvalid) {
+				t.Errorf("%q: said %v; want %q, with os.ErrInvalid kept", c.name, err, c.says)
+			}
+		}
+	}
+	if ents, err := os.ReadDir(outside); err != nil || len(ents) != 0 {
+		t.Errorf("the folder outside now holds %v (%v)", ents, err)
+	}
+	// Where the open follows a link that stays in the folder (Windows),
+	// os.Root refuses only a link out, and its refusal is said as linkout
+	// says it.
+	if err := os.Symlink(filepath.Join(outside, "y.yaml"), filepath.Join(set, "l.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	_, oerr := dir.OpenFile("l.yaml", os.O_RDONLY, 0)
+	var out *linkout.Error
+	if got := noFollowError(dir, "l.yaml", oerr); !errors.As(got, &out) || out.Link != "l.yaml" || !errors.Is(got, oerr) {
+		t.Errorf("os.Root's %v said %v; want the link out named, with os.Root's refusal kept", oerr, got)
 	}
 }

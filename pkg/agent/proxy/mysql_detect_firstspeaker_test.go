@@ -31,6 +31,12 @@ func acceptingServer(t *testing.T, serve func(c net.Conn)) (addr string, conns *
 	if err != nil {
 		t.Fatal(err)
 	}
+	return acceptingOn(t, ln, serve)
+}
+
+// acceptingOn is acceptingServer on ln, closed when the test ends.
+func acceptingOn(t *testing.T, ln net.Listener, serve func(c net.Conn)) (addr string, conns *atomic.Int32, accepted <-chan struct{}) {
+	t.Helper()
 	t.Cleanup(func() { _ = ln.Close() })
 	var n atomic.Int32
 	ch := make(chan struct{}, 16)

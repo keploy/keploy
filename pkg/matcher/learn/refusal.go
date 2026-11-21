@@ -51,11 +51,11 @@ var editForms = map[EditKind]string{
 	EditNone:          "none, this is the guard",
 }
 
-// refusalKinds are the ten kinds, for reading a line back.
+// refusalKinds are the eleven kinds, for reading a line back.
 var refusalKinds = map[RefusalKind]bool{
 	RefusalPick: true, RefusalNoClockRead: true, RefusalTwoSources: true, RefusalConflict: true,
 	RefusalUnknown: true, RefusalAnotherScope: true, RefusalUnread: true, RefusalChangedShape: true,
-	RefusalCannotCheck: true, RefusalLandedElsewhere: true,
+	RefusalCannotCheck: true, RefusalLandedElsewhere: true, RefusalNotMinted: true,
 }
 
 // RefusalLine is r's one line (see above).

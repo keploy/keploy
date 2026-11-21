@@ -83,9 +83,30 @@ type CaptureLossReporter interface {
 // it (Test): bytes that test wrote to a connection, which its end could not
 // wait for, and which were lost later, under another test. It is no capture
 // loss of that other test's, and is in no count CaptureLosses reports.
+//
+// One with no Test and Open is a close of a connection of the test worker
+// whose keploy instance is Worker (the kernel's stamp of the process that
+// made the connection; 0, the one test process of a run of one, while it
+// holds its claim: PairedBytesBeginner.PairedBytesOneProcess), which no
+// other worker's test used. Epoch is that worker's test epoch as the proxy
+// counted it (PairedBytesBeginner): the agent charges it to the test of that
+// worker it began at that epoch alone, while that test is open. One counted
+// in the worker's gap between tests, or under no open test, is the run's,
+// charged to no test: never to the worker's next test, which did not exist
+// when it was counted, and never to another worker's.
+//
+// Session is the agent's session the loss was made in (PairedBytesSessioner):
+// a cut-short end's, the session that end was in; an Open one's, the session
+// the proxy last moved bytes on its connection in (or accepted it in, with
+// none moved). The agent charges a loss of an earlier session than the one
+// open as it takes it to no run or test: it logs it, once, and drops it.
 type OwnedLoss struct {
-	Test string
-	Loss models.CaptureLoss
+	Test    string
+	Worker  uint32
+	Epoch   uint64
+	Open    bool
+	Session uint64
+	Loss    models.CaptureLoss
 }
 
 // OwnedLossTaker is the optional extension implemented by a proxy that tells
@@ -539,6 +560,63 @@ type PairedBytesWaiter interface {
 	PairedBytesProgress() uint64
 }
 
+// PairedBytesSettler is the optional extension of a PairedBytesWaiter that
+// is told when a settle that waited for the bytes on the paired connections
+// is done (PairedBytesSettled), for the test worker whose keploy instance
+// is worker (0: a run of one test process, every connection): by then the
+// settle has had its connections' handlers take, and in a replay answer,
+// the calls it waited for, and every byte the proxy moved on them since the
+// wait began is the ending test's, never the next one's.
+type PairedBytesSettler interface {
+	PairedBytesSettled(worker uint32)
+}
+
+// PairedBytesBeginner is the optional extension of a PairedBytesSettler
+// that keeps, for each test worker (its keploy instance), a test epoch: it
+// moves at each begin of one of that worker's tests the agent tells it
+// (PairedBytesBegun, which returns the epoch the test begins at) and at
+// each end's mark, once the end's settle is done (PairedBytesSettled). A
+// close of that worker's connection is stamped with the epoch as it is
+// counted (OwnedLoss.Epoch): the begun test's while it is open and its end
+// is settling, a newer one in the gap after it, which no test began at.
+//
+// PairedBytesOneProcess is told, on, as a run of one test process claims the
+// session, before the claim reads the counts its first test counts from, and
+// off as the session is reset: while on, a close of a connection of no
+// worker's (keploy instance 0: that process's) is stamped with worker 0's
+// test epoch as a worker's is (OwnedLoss.Open), and is in no count, so one
+// counted in the gap between that process's tests is the run's, never its
+// next test's. Turned on, it moves worker 0's epoch past every test's: a
+// close counted between the claim and the first begin is the run's too.
+// While off (keploy test's test cases, which the agent begins no test of,
+// and a run of workers, whose instance 0 is no worker's) such a close is
+// in the counts (CaptureLossReporter).
+type PairedBytesBeginner interface {
+	PairedBytesBegun(worker uint32) uint64
+	PairedBytesOneProcess(on bool)
+}
+
+// PairedBytesSessioner is the optional extension of an OwnedLossTaker that is
+// told, as the agent resets a session, the new session's number, and stamps
+// each owned loss with the session it was made in (OwnedLoss.Session).
+type PairedBytesSessioner interface {
+	PairedBytesSession(session uint64)
+}
+
+// PairedBytesDrainer is the optional extension of an OwnedLossTaker that
+// waits, as a session's last read of its losses asks once the application
+// has stopped, until it has counted the close of every connection whose
+// application end has ended or whose close it has begun: a loss of such a
+// close is then in that read (counted, or owned), never in a later session's
+// or set's. A connection the application holds open is not waited for. A
+// close whose handler makes no progress for the proxy's bound is owned as the
+// session's, not judged, naming where the connection went and the session,
+// and the drain answers: the read then has it. It ends with ctx, with an
+// error: the read is then not made.
+type PairedBytesDrainer interface {
+	PairedBytesDrain(ctx context.Context) error
+}
+
 // PairedBytesChecker is the proxy's account of whether it can count the bytes
 // on its paired connections: nil while it can (PairedBytesWaiter's waits can
 // be answered).
@@ -844,6 +922,21 @@ type RecordedBeginTaker interface {
 	TakeRecordedBegin(at time.Time)
 }
 
+// ClientCasesTaker is the optional extension implemented by proxies whose
+// learn step reads a client test's requests as places of its calls: the
+// agent gives it, as a keploy mock test begins in the run's own window and
+// after the proxy opened the test, the requests the test sent the
+// application in its recording (models.ClientCase), which the requests of
+// the test that reach the application this run pair with
+// (learn.Tracker.SetCases, Incoming), and from which each request of the
+// test that pairs with one binds the test's variables bound at it
+// (models.ClientCase.Binds) before the application is given it. nil gives
+// none: the requests that reach it from then give no place and bind
+// nothing. A proxy that lacks it reads no client test's request.
+type ClientCasesTaker interface {
+	TakeClientCases(test string, cases []models.ClientCase)
+}
+
 // VariableBinder is the optional extension implemented by proxies that keep
 // the test variables a replay binds: it begins a test's variables with the
 // values its own request gave (false when it holds no table), and reads back
@@ -1042,6 +1135,16 @@ type ExactTestServedReader interface {
 	ExactTestServed() string
 }
 
+// ExactTestInstallReader is an optional ExactServer capability of a proxy
+// whose parsers mark each call's round (models.MissMark): ExactTestInstalled
+// is the staging and the round's boundary count the view in force was
+// installed at, when it is test's view (ok false otherwise). A test's end
+// tells by them whether a miss was marked before that test's view was
+// installed, however late its call was decided.
+type ExactTestInstallReader interface {
+	ExactTestInstalled(test string) (epoch, bounds uint64, ok bool)
+}
+
 // ExactTestOpener is an optional ExactServer capability of a proxy that keeps
 // the test variables a replay binds (VariableBinder): OpenExactTest opens test
 // as ServeExactTest does, and begins its variables with given bound in the
@@ -1060,6 +1163,20 @@ type ExactTestOpener interface {
 // when b's name is bound already.
 type ExactTestGiver interface {
 	GiveExactTest(test string, b models.VariableBinding) error
+}
+
+// ExactTestAnswerer is an optional ExactServer capability of a proxy that
+// keeps the test variables a replay binds: AnswerAsRecordedAtOpen names, for
+// the scope of test's variables to begin with as test opens next, the run's
+// variables test receives from earlier tests only in answers
+// (models.ScopeNeed.Answers), which this replay did not run before it. While
+// one is not bound in that scope, its answer places are answered with its
+// recorded value; a call that sends it at a request place misses as when
+// nothing names it. The next call replaces them, and an open of another test
+// drops them. A proxy that lacks it cannot answer them so: the agent sets the
+// test aside instead.
+type ExactTestAnswerer interface {
+	AnswerAsRecordedAtOpen(test string, names []string) error
 }
 
 // AppClockSetter is an optional proxy capability: SetAppClock hands the
@@ -1089,6 +1206,14 @@ type AppClockRunSetter interface {
 	SetAppClockRun(f func(real time.Time) (time.Time, bool))
 }
 
+// AppClockShownSetter is an optional proxy capability, beside
+// AppClockRunSetter: SetAppClockShown makes the background check read,
+// through f, what the app's clock showed between two real instants, as the
+// agent's hooks moved it (learn.Tracker.SetAppClockShown); nil for none.
+type AppClockShownSetter interface {
+	SetAppClockShown(f func(from, to time.Time) ([]learn.Span, bool))
+}
+
 // PoolNamesSetter is an optional ExactServer capability: SetPoolNames hands the
 // proxy the names the replay's scope table puts in a pool slice, of every key,
 // so that the parsers' learn steps can tell the pool's mocks from a test's
@@ -1111,6 +1236,48 @@ type PoolNamesSetter interface {
 // (PoolNamesSetter).
 type PoolTrailsSetter interface {
 	SetPoolTrails(trails map[string]string) error
+}
+
+// PoolSeriesSetter is implemented by a proxy that serves a series of
+// worker-scope recordings a declared rule placed: SetPoolSeries installs, of
+// keploy mock replay's scope table under the proven switch, each series'
+// recordings in placement order (models.ScopeTableReq.Series).
+type PoolSeriesSetter interface {
+	SetPoolSeries(series map[string][]string) error
+}
+
+// PoolOnceSetter is implemented by a proxy that serves a series of
+// worker-scope recordings once in a run: SetPoolOnce installs, of keploy
+// mock replay's scope table under the proven switch, the series whose
+// recordings each answer once, in a window or between tests, and never
+// again (models.ScopeTableReq.Once).
+type PoolOnceSetter interface {
+	SetPoolOnce(once []string) error
+}
+
+// PoolSourcesSetter is implemented by a proxy whose learn step decides a
+// field by the source a rule declared in keploy.yml gives it
+// (integrations.DeclaredSourcesOf): SetPoolSources installs, of keploy mock
+// replay's scope table under the proven switch, by recording name, the
+// sources of its request's fields (models.ScopeTableReq.Sources).
+type PoolSourcesSetter interface {
+	SetPoolSources(sources map[string][]models.DeclaredSource) error
+}
+
+// PoolTimeFormSetter is implemented by a proxy whose learn step can check a
+// changed time by its form alone (the time default, learn.Input.TimeForm):
+// SetPoolTimeForm installs, of keploy mock replay's scope table under the
+// proven switch, whether it does (models.ScopeTableReq.TimeForm).
+type PoolTimeFormSetter interface {
+	SetPoolTimeForm(on bool) error
+}
+
+// SeriesRepeatReader is implemented by a proxy that serves the series
+// SetPoolSeries installs: SeriesRepeats is, by series, how many calls in the
+// current staging's tests its last-placed recording answered past the
+// series' recorded count (models.MockStats.SeriesRepeats).
+type SeriesRepeatReader interface {
+	SeriesRepeats() (map[string]int64, error)
 }
 
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
@@ -1231,6 +1398,14 @@ type LearnedElsewhereReader interface {
 
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
+}
+
+// IncomingOptionsReader is the optional extension of an IncomingProxy that
+// says what options the recorder last started ingress with (zero before
+// Start), so a capture path other than the proxy's own can filter the same
+// way.
+type IncomingOptionsReader interface {
+	IncomingOptions() models.IncomingOptions
 }
 
 // AppListenPorter is the optional extension of an IncomingProxy that knows
@@ -1368,5 +1543,10 @@ type Session struct {
 	Mode models.Mode
 	TC   chan<- *models.TestCase
 	MC   chan<- *models.Mock
+	// LogKeys is the session's key for the path tags the lines about its
+	// connections name their calls by (models.LogKeySession): the one the
+	// context Record or Mock was given carries, drawn as the session began.
+	// nil: the process's key.
+	LogKeys *models.LogKeySession
 	models.OutgoingOptions
 }

@@ -1,9 +1,11 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,6 +64,8 @@ func TestAResetRequestWaitsForTheAppKeployStartedToAnswer(t *testing.T) {
 	addr, serving := resettingApp(t)
 	core, logs := observer.New(zapcore.InfoLevel)
 	r := &Replayer{config: &config.Config{Command: "node app.js"}, logger: zap.New(core)}
+	var console bytes.Buffer
+	r.SetConsole(&console)
 	ctx, cancel := context.WithCancel(pkg.EndsWithApp(context.Background()))
 	defer cancel()
 	said := false
@@ -83,10 +87,20 @@ func TestAResetRequestWaitsForTheAppKeployStartedToAnswer(t *testing.T) {
 		t.Fatal("the re-send's wait did not end once the application answered")
 	}
 	// The address is the one the test request dials (keploy test's host,
-	// localhost by default, and the recorded port).
+	// localhost by default, and the recorded port): the log names its host
+	// by its shape beside its tag (the context carries no session: the
+	// process's key), the console names it whole beside that tag.
 	_, port, _ := net.SplitHostPort(addr)
-	if n := logs.FilterMessageSnippet("was reset at localhost:" + port + " before the application took it").Len(); n != 1 {
-		t.Errorf("said %d times that the re-send waits on localhost:%s, want once: %v", n, port, logs.All())
+	target := "localhost:" + port
+	logged := models.HostLogName(context.Background(), target)
+	if n := logs.FilterMessageSnippet("was reset at " + logged + " before the application took it").Len(); n != 1 {
+		t.Errorf("said %d times that the re-send waits on %s (%s by its shape and tag), want once: %v", n, logged, target, logs.All())
+	}
+	if n := logs.FilterMessageSnippet(target).Len(); n != 0 {
+		t.Errorf("%d line(s) name the target %s whole: %v", n, target, logs.All())
+	}
+	if want := "was reset at " + models.WithHostTag(target, models.HostTag(context.Background(), target)) + " before"; !strings.Contains(console.String(), want) {
+		t.Errorf("the console does not name the target whole beside its tag (%q): %q", want, console.String())
 	}
 
 	// The request's next reset does not say it again.

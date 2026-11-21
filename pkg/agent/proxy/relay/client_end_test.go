@@ -21,6 +21,8 @@ type errorSocket struct {
 	always   bool
 	closed   bool
 	errAsked int
+	// finReads is what each ask was told of the client's FIN.
+	finReads []bool
 }
 
 func (s *errorSocket) look() clientLook {
@@ -33,10 +35,11 @@ func (s *errorSocket) look() clientLook {
 	return l
 }
 
-func (s *errorSocket) pendingError() error {
+func (s *errorSocket) pendingError(finRead bool) error {
 	s.emu.Lock()
 	defer s.emu.Unlock()
 	s.errAsked++
+	s.finReads = append(s.finReads, finRead)
 	if !s.closed && !s.always {
 		return nil
 	}
@@ -148,6 +151,11 @@ func TestTheRelayEndsTellingWhatTheClientsSocketHolds(t *testing.T) {
 			}
 			if tc.writeErr != nil && sock.errAsked != 0 {
 				t.Fatal("the socket was asked for its error after a failed write took it")
+			}
+			// The socket is told whether the relay read the client's FIN: a
+			// reset macOS kept no error for comes only after it.
+			if tc.writeErr == nil && (len(sock.finReads) != 1 || sock.finReads[0] != tc.finRead) {
+				t.Fatalf("the socket was asked %v, want once, told the FIN read = %v", sock.finReads, tc.finRead)
 			}
 		})
 	}

@@ -415,8 +415,8 @@ func TestANewChannelRevokesNothingOfTheOldQueueOnIt(t *testing.T) {
 			t.Fatal("the old session's queue was not given up")
 		}
 	}
-	if !m.WasMockDroppedForTC("test-a") || m.DropCount() != 2 {
-		t.Fatalf("the old queue's drops were not reported: %d dropped, test-a recorded %v", m.DropCount(), m.WasMockDroppedForTC("test-a"))
+	if !lostByName(m, "test-a") || m.DropCount() != 2 {
+		t.Fatalf("the old queue's drops were not reported: %d dropped, test-a recorded %v", m.DropCount(), lostByName(m, "test-a"))
 	}
 	m.drainPendingRevokes()
 	select {
@@ -661,7 +661,7 @@ func TestAReplacedLanesClaimedDropRevokesNothingOnTheNewStream(t *testing.T) {
 	mgr.SetOutputChannel(fresh)
 	clk.Advance(time.Hour) // the old consumer took nothing for the bound
 	waitOutQueue(t, mgr)
-	if !mgr.WasMockDroppedForTC("test-3") {
+	if !lostByName(mgr, "test-3") {
 		t.Fatal("fixture: test-3 was not told its mock was dropped")
 	}
 	mgr.drainPendingRevokes()
@@ -736,7 +736,7 @@ func TestAGivenUpLaneIsDoneOnlyOnceItsDropsAreTold(t *testing.T) {
 			if len(early) != 0 {
 				t.Fatalf("%v told while the lane already read done", early)
 			}
-			if !m.WasMockDroppedForTC("test-a") || !m.WasMockDroppedForTC("test-b") {
+			if !lostByName(m, "test-a") || !lostByName(m, "test-b") {
 				t.Fatal("the owners of a given-up lane's mocks were not recorded")
 			}
 		})

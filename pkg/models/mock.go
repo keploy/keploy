@@ -3,8 +3,8 @@ package models
 import (
 	"encoding/gob"
 	"maps"
-	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,6 +99,56 @@ const (
 	// never sets that flag) never receives it and cannot mis-persist it.
 	RevokedTests Kind = "keploy-revoked-tests"
 )
+
+// RevokeByRequestPrefix starts the name a RevokedTests frame gives a test
+// case the agent's stream sent with no name of its own (the async capture
+// leaves naming to the client, which names it as it saves it): the rest is
+// the request time its window starts at (TestCaseWindow), in Unix
+// nanoseconds, by which the client finds the name it gave it
+// (RequestOfRevokeName). The agent names one so only to a client that says it
+// reads such a name (OutgoingOptions.SupportsRevokeByRequest).
+const RevokeByRequestPrefix = "keploy-request-at:"
+
+// RevokeNameByRequest is the name a RevokedTests frame gives a test case sent
+// with no name whose window starts at req (RevokeByRequestPrefix).
+func RevokeNameByRequest(req time.Time) string {
+	return RevokeByRequestPrefix + strconv.FormatInt(req.UnixNano(), 10)
+}
+
+// RequestOfRevokeName reports the request time, in Unix nanoseconds, a
+// revoked name gives (RevokeNameByRequest), and false for any other name.
+func RequestOfRevokeName(name string) (int64, bool) {
+	rest, ok := strings.CutPrefix(name, RevokeByRequestPrefix)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(rest, 10, 64)
+	return n, err == nil
+}
+
+// CaptureIDPrefix starts every capture id (TestCase.CaptureID): the name the
+// agent gives a request it captured without --sync and without a
+// Keploy-Test-Name, for a client that reads such names
+// (OutgoingOptions.SupportsCaptureIDs). The recorder files whatever names a
+// capture id under the name it saves that request's test case with. A
+// Keploy-Test-Name that starts with it is read as a capture id: the prefix is
+// reserved.
+const CaptureIDPrefix = "keploy-capture:"
+
+// IsCaptureID reports whether name is a capture id (CaptureIDPrefix).
+func IsCaptureID(name string) bool {
+	return strings.HasPrefix(name, CaptureIDPrefix)
+}
+
+// TestCaseWindow is a test case's window, by its kind: a gRPC test case's
+// times are its GrpcReq's and GrpcResp's, any other's its HTTPReq's and
+// HTTPResp's.
+func TestCaseWindow(tc *TestCase) (time.Time, time.Time) {
+	if tc.Kind == GRPC_EXPORT {
+		return tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+	}
+	return tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+}
 
 // MockName constants for the PostgresV3 parser. The integrations-side
 // recorder currently hardcodes these values as string literals when
@@ -433,7 +483,7 @@ func (m *Mock) RecordedDestination() (string, bool) {
 			return v, true
 		}
 	}
-	if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
+	if u, err := ParseRequestURL(m.Spec.HTTPReq.URL); err == nil && u.Host != "" {
 		return u.Host, true
 	}
 	return "", false

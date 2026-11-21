@@ -3,10 +3,12 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"reflect"
 	"testing"
 	"time"
 
@@ -28,7 +30,8 @@ import (
 // the number of connections they came on.
 func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 	sum := models.StreamEndSummary{TestCasesSent: 3, TestCasesSuppressed: 9, LeftOutInFlight: 2, NotHandedOn: 4, UnnamedCallerConns: 6, TLSRelayedConns: 7, Unsettled: 1, MassSuppressed: true,
-		NotRecordedUnderPressure: models.PressureSkipSummary{Requests: 5, Connections: 2}}
+		NotRecordedUnderPressure: models.PressureSkipSummary{Requests: 5, Connections: 2},
+		MocksDropped:             models.MockDropSummary{ByPressure: 1, Capacity: 2, Named: []string{"Http2 mock of connection 7"}}}
 	const pauseSaid = "the keploy agent did not record some requests: it was short of memory when they came, and its memory guard had paused recording; each connection's requests after the pause are recorded"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mw := multipart.NewWriter(w)
@@ -51,6 +54,9 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 		cfg.Agent.AgentURI = srv.URL
 		client := New(zap.New(core), nil, cfg)
 		client.startedAgent.Store(started)
+		if _, ok := client.IncomingEndSummary(); ok {
+			t.Fatal("a client that read no stream has a summary")
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		grp, gctx := errgroup.WithContext(ctx)
 		gctx = context.WithValue(gctx, models.ErrGroupKey, grp)
@@ -69,6 +75,11 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 		cancel()
 		if !client.StreamEnded(models.TestCaseStream) {
 			t.Fatal("the stream's end was not read as its marker")
+		}
+		// The recording reads the summary too, to mark its test-set,
+		// whoever started the agent.
+		if got, ok := client.IncomingEndSummary(); !ok || !reflect.DeepEqual(got, sum) {
+			t.Fatalf("the recording reads the summary as %+v (%v), want the marker's %+v", got, ok, sum)
 		}
 		said := map[string]bool{}
 		for _, e := range logs.All() {
@@ -115,5 +126,63 @@ func TestTheClientSaysASessionThatLostOnlyTLSConnections(t *testing.T) {
 	said := logs.FilterMessage(tlsRelayedConnsSaid).All()
 	if len(said) != 1 || said[0].Level != zapcore.WarnLevel || said[0].ContextMap()["connections"] != uint64(2) {
 		t.Fatalf("a session that lost only TLS connections was said %v, want once at WARN with its 2 connections", said)
+	}
+}
+
+// A session that dropped mocks, of either kind alone, is said by the client at
+// WARN with its counts and the mocks named: for an agent it did not start this
+// is where the user learns which. One that dropped none says nothing of it.
+func TestTheClientSaysASessionThatDroppedMocks(t *testing.T) {
+	for _, d := range []models.MockDropSummary{
+		{ByPressure: 2, Named: []string{"a Kafka mock"}},
+		{Capacity: 3, Named: []string{"a Kafka mock"}},
+	} {
+		core, logs := observer.New(zapcore.InfoLevel)
+		a := &AgentClient{logger: zap.New(core)}
+		a.sayAgentSummary(models.StreamEndSummary{MocksDropped: d})
+		said := logs.FilterMessage(models.MocksDroppedSaid).All()
+		if len(said) != 1 || said[0].Level != zapcore.WarnLevel {
+			t.Fatalf("a session that dropped %+v was said %v, want once at WARN", d, said)
+		}
+		f := said[0].ContextMap()
+		if f["by_memory_pressure"] != d.ByPressure || f["for_the_output"] != d.Capacity ||
+			fmt.Sprint(f["first_dropped"]) != "[a Kafka mock]" {
+			t.Fatalf("a session that dropped %+v was said with %v", d, f)
+		}
+	}
+	core, logs := observer.New(zapcore.InfoLevel)
+	a := &AgentClient{logger: zap.New(core)}
+	a.sayAgentSummary(models.StreamEndSummary{})
+	if n := logs.FilterMessage(models.MocksDroppedSaid).Len(); n != 0 {
+		t.Fatalf("a session that dropped nothing was said %d times", n)
+	}
+}
+
+// A summary is the last incoming stream's only once its agent ends it with
+// its marker: a new stream does not read as ended with the one before it.
+func TestAnIncomingStreamHasNoSummaryBeforeItsMarker(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mw := multipart.NewWriter(w)
+		w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	cfg := &config.Config{}
+	cfg.Agent.AgentURI = srv.URL
+	client := New(zap.NewNop(), nil, cfg)
+	client.incomingEnd.Store(&models.StreamEndSummary{MocksDropped: models.MockDropSummary{ByPressure: 3}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	grp, gctx := errgroup.WithContext(ctx)
+	gctx = context.WithValue(gctx, models.ErrGroupKey, grp)
+	if _, err := client.GetIncoming(gctx, models.IncomingOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := client.IncomingEndSummary(); ok {
+		t.Fatalf("a stream with no marker yet reads as ended with the last one's summary %+v", got)
 	}
 }

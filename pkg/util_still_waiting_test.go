@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/stall"
@@ -108,7 +109,7 @@ func TestTheStillWaitingLineNamesThePortsTheAppListensOnInstead(t *testing.T) {
 func TestARefusedRequestsWaitIsNotTheAppsStallUnderTheProvenSwitch(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	clk := &stall.ManualClock{}
-	w := newAnswerWatch(SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
+	w := newAnswerWatch(context.Background(), SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
 	defer w.stop()
 	defer w.waiting()()
 	addr := refusingAddr(t)
@@ -240,5 +241,20 @@ func TestTheStillWaitingLinesStopReturnsOnlyOnceNoLineCanFollow(t *testing.T) {
 	time.Sleep(20 * stillWaitingEvery)
 	if after := core.lines(); after != n {
 		t.Errorf("%d lines said after stop returned", after-n)
+	}
+}
+
+// The still-waiting line names the replay target's host by its labels' shape
+// beside its tag in the run's session, never whole; an IP address whole.
+func TestTheStillWaitingLineNamesTheTargetsHostByItsShapeAndTag(t *testing.T) {
+	const s = "kpLogCanary7Qx3vZ9mW2"
+	ctx := models.StartLogKeySession(context.Background())
+	addr := "app-" + s + ".internal:8080"
+	line := stillWaitingLine(ctx, "answer HTTP", addr, 90*time.Second)
+	if strings.Contains(line, s) || !strings.Contains(line, "on "+models.HostLogName(ctx, addr)+": ") {
+		t.Errorf("the line does not name the target by its shape and tag (%q) alone: %q", models.HostLogName(ctx, addr), line)
+	}
+	if line := stillWaitingLine(ctx, "answer HTTP", "10.0.0.7:8080", time.Second); !strings.Contains(line, "on 10.0.0.7:8080: ") {
+		t.Errorf("an IP address is not written whole: %q", line)
 	}
 }

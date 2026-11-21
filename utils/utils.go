@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -37,6 +38,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/linkout"
 	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
@@ -66,6 +68,25 @@ func IsShutdownError(err error) bool {
 		strings.Contains(errStr, "use of closed network connection")
 }
 
+// UnbracketHost is host without the one pair of brackets an IPv6 literal
+// comes in when it is written next to a port ("[fd00::1]"). "fd00::1" and
+// "[fd00::1]" are one host, and the helpers here bracket an IPv6 host
+// themselves wherever the form they build needs it (net.JoinHostPort, a URL's
+// host), so one passed in bracketed would come out bracketed twice.
+func UnbracketHost(host string) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+	return host
+}
+
+// ReplaceHost replaces currentURL's host with ipAddress, keeping its port.
+//
+// ipAddress may be IPv6, bare ("fd00::1", as a Kubernetes Pod IP is) or
+// bracketed. An IPv6 host has to be bracketed in a URL: "http://fd00::1:8080/"
+// is no URL, and url.Parse refuses it (invalid port "::1:8080" after host).
+// A zone ("fe80::1%eth0") is kept and written as a URL writes it (%25).
+// Any other host (a name, an IPv4 address) is put in as given.
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
@@ -79,26 +100,69 @@ func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
 	}
 
-	// Replace hostname with the IP address
-	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
-	// Return the modified URL
+	host := ipAddress
+	if bare := UnbracketHost(ipAddress); isIPv6Literal(bare) {
+		host = "[" + bare + "]"
+	}
+	if port := parsedURL.Port(); port != "" {
+		host += ":" + port
+	}
+	parsedURL.Host = host
 	return parsedURL.String(), nil
 }
 
+// isIPv6Literal says host is an IPv6 address, with or without a zone, an
+// IPv4-mapped one ("::ffff:127.0.0.1") included: every one has colons, so
+// each needs the brackets.
+func isIPv6Literal(host string) bool {
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Is6()
+}
+
+// ReplaceGrpcHost replaces authority's host with ipAddress, keeping its port.
+//
+// An authority may have no port ("my-svc", "10.0.0.5", "[fd00::1]"): then
+// ipAddress alone comes back, an IPv6 one bracketed as an authority writes
+// it, and ResolveTestTarget gives it its port (app_port, grpcPort or 443).
+// ipAddress may be IPv6, bare or bracketed. One with a zone ("fe80::1%eth0")
+// is put in too, but grpc-go refuses a target with a zone.
 func ReplaceGrpcHost(authority string, ipAddress string) (string, error) {
 	// Check if ipAddress is empty
 	if ipAddress == "" {
 		return authority, fmt.Errorf("failed to replace authority in case of docker env: empty IP address")
 	}
 
-	// Use net.SplitHostPort to properly handle IPv6 addresses
-	_, port, err := net.SplitHostPort(authority)
+	port, hasPort, err := authorityPort(authority)
 	if err != nil {
 		return authority, fmt.Errorf("invalid authority format: %v", err)
 	}
+	host := UnbracketHost(ipAddress)
+	if !hasPort {
+		if isIPv6Literal(host) {
+			return "[" + host + "]", nil
+		}
+		return host, nil
+	}
+	// Replace the host part with ipAddress, keeping the port. JoinHostPort
+	// brackets an IPv6 host, so a bracketed one is given to it bare.
+	return net.JoinHostPort(host, port), nil
+}
 
-	// Replace the host part with ipAddress, keeping the port
-	return net.JoinHostPort(ipAddress, port), nil
+// authorityPort is the port of a host:port authority, and hasPort false for
+// one with no port: one with no colon (a name, an IPv4 address), one in
+// brackets ("[fd00::1]"), or a bare IPv6 address, whose colons are the
+// address's. The host itself is not checked, as ReplaceGrpcHost replaces it
+// whole. Anything else net.SplitHostPort cannot split ("a:b:c", "[fd00::1")
+// is an error.
+func authorityPort(authority string) (port string, hasPort bool, err error) {
+	_, port, err = net.SplitHostPort(authority)
+	if err == nil {
+		return port, true, nil
+	}
+	if !strings.Contains(authority, ":") || UnbracketHost(authority) != authority || isIPv6Literal(authority) {
+		return "", false, nil
+	}
+	return "", false, err
 }
 
 func ReplaceGrpcPort(authority string, port string) (string, error) {
@@ -110,8 +174,9 @@ func ReplaceGrpcPort(authority string, port string) (string, error) {
 	// Use net.SplitHostPort to properly handle IPv6 addresses
 	host, _, err := net.SplitHostPort(authority)
 	if err != nil {
-		// If splitting fails, assume it's just a host without port
-		return net.JoinHostPort(authority, port), nil
+		// If splitting fails, assume it's just a host without port: "[fd00::1]"
+		// or "fd00::1" as much as "localhost", which JoinHostPort brackets.
+		return net.JoinHostPort(UnbracketHost(authority), port), nil
 	}
 
 	// Replace the port part, keeping the host
@@ -157,29 +222,61 @@ func ReplacePort(currentURL string, port string) (string, error) {
 		return currentURL, err
 	}
 
-	if parsedURL.Port() == "" {
-		parsedURL.Host = parsedURL.Host + ":" + port
-	} else {
-		parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Port(), port, 1)
-	}
-
+	// Rebuilt from the hostname, never edited as text: replacing the port's
+	// digits in Host replaced their first occurrence, which can be in the host
+	// ("10.0.0.80:80" became "10.0.0.9000:80", "[fd00::8080]:8080" a
+	// different host). JoinHostPort brackets an IPv6 hostname.
+	parsedURL.Host = net.JoinHostPort(parsedURL.Hostname(), port)
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta is what a log says about req: its method, its host, its path's
-// shape (URLPathShape) and the names of its query parameters. Never a path
-// segment, a query value, a header or the body: those are the application's
-// content (a segment may be a token the recording redacted), and
-// logs get pasted into issues. A query part with no "=" is not named either,
-// since it may be a bare token; a bare token that holds "=" (padded base64,
-// ?dG9rZW4=) is named by what comes before its first "=" (dG9rZW4).
-func GetReqMeta(req *http.Request) map[string]string {
+// GetReqMeta is what a log line logged under ctx says about req: its
+// method, its host (a name by its shape and tag, models.HostLogName), its
+// path's shape (URLPathShape), its path tag (path_tag,
+// models.URLPathTag under the session ctx carries: what the console and the
+// report print beside the request where they name it whole; none for a
+// request that names no method) and the names of its query parameters
+// (GetReqShape). For the agent's lines about a call, which the console and
+// the report name by that tag. ctx is the context of the work the line is
+// logged in (a connection's, a request's): a line under a context with no
+// session tags under the process's key (models.LogKeySession).
+func GetReqMeta(ctx context.Context, req *http.Request) map[string]string {
+	reqMeta := GetReqShape(req)
+	if req != nil && req.Host != "" {
+		// The host's name by its shape beside its tag under the session
+		// (models.HostLogName), so the session's lines about one host match
+		// up; an IP address whole.
+		reqMeta["host"] = models.HostLogName(ctx, req.Host)
+	}
+	if req != nil && req.URL != nil {
+		if tag := models.URLPathTag(ctx, req.Method, req.URL); tag != "" {
+			reqMeta["path_tag"] = tag
+		}
+	}
+	return reqMeta
+}
+
+// GetReqShape is what a log says about req with no path tag: its method, its
+// host (a name by its labels' shape, models.HostShape, with no tag), its
+// path's shape (URLPathShape) and the names of its query
+// parameters. For a line of keploy's CLI about a test case's request (one it
+// sends, stores or compares): no console or report line prints such a tag,
+// so the line names the request by its shape, and the test case where it has
+// one. Never a path segment, a query value, a header or the body: those are
+// the application's content (a segment may be a token the recording
+// redacted), and logs get pasted into issues. A query part with no "=" is not
+// named either, since it may be a bare token; a bare token that holds "="
+// (padded base64, ?dG9rZW4=) is named by what comes before its first "="
+// (dG9rZW4).
+func GetReqShape(req *http.Request) map[string]string {
 	reqMeta := map[string]string{}
 	if req == nil {
 		return reqMeta
 	}
 	reqMeta["method"] = req.Method
-	reqMeta["host"] = req.Host
+	// The host by its labels' shape (models.HostShape): a name is the
+	// app's, as a path is; an IP address whole.
+	reqMeta["host"] = models.HostShape(req.Host)
 	if req.URL != nil {
 		reqMeta["path"] = URLPathShape(req.URL)
 		if keys := queryKeys(req.URL.RawQuery); len(keys) > 0 {
@@ -225,12 +322,18 @@ func queryKeys(rawQuery string) []string {
 		if u, err := url.QueryUnescape(k); err == nil {
 			k = u
 		}
-		keys = append(keys, k)
+		// A name that does not read as one may be a value the app sent (a
+		// token passed as a parameter's name): {} (models.KeyShape).
+		keys = append(keys, models.KeyShape(k))
 	}
 	slices.Sort(keys)
 	return slices.Compact(keys)
 }
 
+// IsPassThrough reports whether one of opts' bypass rules names req, to
+// destPort. A rule whose regex does not compile is said, with req by its
+// shape alone (GetReqShape): the line is about keploy.yml's rule, and no
+// console or report line names the call a rule was tried on beside a tag.
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
 	passThrough := false
 
@@ -238,7 +341,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Host != "" {
 			regex, err := regexp.Compile(bypass.Host)
 			if err != nil {
-				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
+				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqShape(req)))
 				continue
 			}
 			passThrough = regex.MatchString(req.Host)
@@ -249,7 +352,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Path != "" {
 			regex, err := regexp.Compile(bypass.Path)
 			if err != nil {
-				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
+				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqShape(req)))
 				// The rule's host may have matched; a path that does not
 				// compile matches no call.
 				passThrough = false
@@ -1082,7 +1185,9 @@ function Get-ChildProcesses($parentId) {
         Get-ChildProcesses $child.ProcessId
     }
 }
-Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-List`, ppid))
+Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Format-List`, ppid))
+		// Ids and names only, as the listing after the kill: a process's
+		// command line can carry a credential (an inline -e TOKEN=...).
 		if output, err := listAllCmd.CombinedOutput(); err == nil {
 			logger.Debug("ALL descendant processes before kill", zap.Int("parent_pid", ppid), zap.String("output", string(output)))
 		} else {
@@ -1726,13 +1831,26 @@ type PermissionError struct {
 	IsRead   bool // true if it's a read permission issue, false if write
 }
 
-// AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
+// AddToGitIgnore adds ignoreString to path's .gitignore, if it is not there
+// yet. The file is opened inside path, and path from the project
+// (OpenRecordingDir): keploy/.gitignore comes with a cloned repository, so
+// one that links out of path, or a path that links out of the project, is
+// refused, with why, and what it leads to is not written. A link that stays
+// inside is followed.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
-	gitignorePath := path + "/.gitignore"
-
-	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
+	root, err := OpenRecordingDir(path)
 	if err != nil {
-		return fmt.Errorf("error opening or creating .gitignore file: %v", err)
+		return fmt.Errorf("error opening the folder of the .gitignore file: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	file, err := root.OpenFile(".gitignore", os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		refused := fmt.Sprintf("the .gitignore file is written only inside %q", path)
+		if out := linkout.Explain(root, path, ".gitignore", refused, err); out != nil {
+			return out
+		}
+		return fmt.Errorf("%s: %w", refused, err)
 	}
 
 	defer func() {
@@ -1759,6 +1877,37 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 	return nil
 }
 
+// GitIgnores reports whether git ignores path, a path inside dir (relative
+// to dir, or absolute), as `git add` would read it: by every .gitignore that
+// applies, a later entry that un-ignores it (a "!*.yaml") included, the
+// repository's info/exclude, and the global excludes of the HOME keploy runs
+// with. known is false when git cannot say (it is not installed, dir is in no
+// git work tree, or git refused or took too long), and then ignored says
+// nothing. A path git tracks already is not ignored. Under sudo git runs as
+// the user sudo ran keploy for (asInvokingUser): git refuses, as root, a work
+// tree another user owns. sudo usually keeps root's HOME, so that user's own
+// global excludes are then not read: they can only ignore more, never
+// un-ignore a path, so the answer errs only toward not ignored.
+func GitIgnores(dir, path string) (ignored, known bool) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, git, "-C", dir, "check-ignore", "-q", "--", path)
+	cmd.SysProcAttr = asInvokingUser()
+	err = cmd.Run()
+	if err == nil {
+		return true, true
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, true
+	}
+	return false, false
+}
+
 func Hash(data []byte) string {
 	hasher := sha256.New()
 	hasher.Write(data)
@@ -1776,7 +1925,16 @@ func GetLastDirectory() (string, error) {
 }
 
 func lastDirectory(getwd func() (string, error)) (string, error) {
-	// Get the current working directory
+	dir, err := workingDirectory(getwd)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(dir), nil
+}
+
+// workingDirectory is getwd's answer, once confirmWorkingDirectory says it
+// still leads to the directory the process is in.
+func workingDirectory(getwd func() (string, error)) (string, error) {
 	dir, err := getwd()
 	if err == nil {
 		err = confirmWorkingDirectory(dir)
@@ -1788,10 +1946,7 @@ func lastDirectory(getwd func() (string, error)) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	// Extract the base (last directory)
-	lastDir := filepath.Base(dir)
-	return lastDir, nil
+	return dir, nil
 }
 
 // confirmWorkingDirectory fails unless dir, os.Getwd's answer, still leads to
@@ -2002,58 +2157,16 @@ func isValidGRPCIdentifier(name string) bool {
 	return true
 }
 
-func GetContainerIPv4() (string, error) {
-	// Get all network interfaces
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-
-	// Iterate over the interfaces
-	for _, i := range interfaces {
-		// Skip down or loopback interfaces
-		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		// Get the addresses for the current interface
-		addrs, err := i.Addrs()
-		if err != nil {
-			continue
-		}
-
-		// Iterate over the addresses
-		for _, addr := range addrs {
-			var ip net.IP
-			// The address can be of type *net.IPNet or *net.IPAddr
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				// Check if it's an IPv4 address
-				if ipnet.IP.To4() != nil {
-					ip = ipnet.IP
-				}
-			}
-
-			if ip != nil {
-				// Found a valid IPv4 address, return it
-				return ip.String(), nil
-			}
-		}
-	}
-
-	// Tagged, so the agent that cannot start without it says so in its exit
-	// status: a container with no IPv4 address but loopback's (docker
-	// --network none, an IPv6-only network) is the environment to change, not
-	// a privilege to grant. Only an agent started with --is-docker asks (its
-	// hooks, as they load): they send the connections of the applications it
-	// serves to this address. A native one is reached over loopback and needs
-	// no address of its own.
-	return "", fmt.Errorf("%w: could not find a non-loopback IP for the container", ErrEnvironmentUnsupported)
-}
-
-// GetFullCommandUsed returns the full command-line used to run the current process.
-// It reconstructs the command from os.Args, adding quoting for arguments with spaces or quotes.
+// GetFullCommandUsed is the command line keploy was run with, as a test
+// report records it (cmdUsed): os.Args, its secrets redacted by RedactArgv,
+// the redactor of every line that names a command whole (the command given
+// with -c is read as the command line it is, so its password, token or
+// logon is <redacted> and its hosts and paths are kept), and an argument
+// that holds a space or a quote Go-quoted. Reports are committed, kept as CI
+// artifacts and uploaded: a secret RedactArgv reads in the command reaches
+// none.
 func GetFullCommandUsed() string {
-	args := os.Args
+	args := RedactArgv(os.Args)
 
 	// Build the command string with proper quoting for arguments containing spaces
 	var parts []string

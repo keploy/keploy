@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/textcut"
 )
 
 type pathMaps struct {
@@ -43,10 +43,48 @@ func (m *pathMaps) coveredOnly(path string) bool {
 // one noise index and applies bothSides to them.
 func collectBoth(exp, act interface{}, ni noiseIndex) (expMaps, actMaps pathMaps) {
 	expMaps, actMaps = newPathMaps(), newPathMaps()
-	collectJSON(exp, "", ni, &expMaps)
-	collectJSON(act, "", ni, &actMaps)
+	collectJSON(exp, "", ni, &expMaps, nil)
+	collectJSON(act, "", ni, &actMaps, ni.recordedPaths(exp))
 	bothSides(&expMaps, &actMaps)
 	return expMaps, actMaps
+}
+
+// recordedPaths is the path of every node of the recorded document exp, as
+// collectJSON names paths, which collectJSON needs to read the live document
+// as the matcher does: an entry naming id keys excuses a node only where the
+// recording has it (noiseIndex.matchAdded). nil when ni holds no such entry.
+func (ni noiseIndex) recordedPaths(exp interface{}) map[string]bool {
+	if !ni.idKeys {
+		return nil
+	}
+	out := map[string]bool{}
+	eachNodePath(exp, "", func(p string) { out[p] = true })
+	return out
+}
+
+// eachNodePath calls fn with the path of every node of v below its root, as
+// collectJSON names it: an object's member by key, an array's elements under
+// "[]".
+func eachNodePath(v interface{}, path string, fn func(path string)) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, child := range t {
+			p := k
+			if path != "" {
+				p = path + "." + k
+			}
+			fn(p)
+			eachNodePath(child, p, fn)
+		}
+	case []interface{}:
+		p := path + "[]"
+		if len(t) > 0 {
+			fn(p)
+		}
+		for _, e := range t {
+			eachNodePath(e, p, fn)
+		}
+	}
 }
 
 // bothSides decides the scalars a pattern-guarded noise entry matched on
@@ -95,8 +133,8 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	// collectBoth, reading first where the live side holds only values a
 	// pattern matched: the reasons below name the other side there.
 	expMaps, actMaps := newPathMaps(), newPathMaps()
-	collectJSON(exp, "", idx, &expMaps)
-	collectJSON(act, "", idx, &actMaps)
+	collectJSON(exp, "", idx, &expMaps, nil)
+	collectJSON(act, "", idx, &actMaps, idx.recordedPaths(exp))
 	liveIn := map[string]bool{}
 	for p := range actMaps.coveredTypes {
 		liveIn[p] = actMaps.coveredOnly(p)
@@ -266,7 +304,7 @@ func ChangedDecodedJSONFieldPaths(exp, act interface{}, known map[string][]strin
 	// its patterns, which bothSides no longer tells. Read on first need.
 	live := sync.OnceValue(func() pathMaps {
 		m := newPathMaps()
-		collectJSON(act, "", idx, &m)
+		collectJSON(act, "", idx, &m, idx.recordedPaths(exp))
 		return m
 	})
 	// heldRecorded is the paths where the recorded document, read alone,
@@ -353,26 +391,13 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 
 	added, removed, typeChanges, valueChanges := diffMaps(expMaps, actMaps)
 
-	// diffMaps iterates Go maps, so bucket order is randomized per run; sort
-	// each bucket so reports, yaml output and the capped diff subset are
-	// stable across runs.
-	sort.Strings(added)
-	sort.Strings(removed)
-	sort.Strings(typeChanges)
-	sort.Strings(valueChanges)
-
 	trunc := func(s string) string {
 		if maxVal <= 0 || len(s) <= maxVal {
 			return s
 		}
-		// Back the cut off to a rune boundary so a multi-byte UTF-8
-		// character is never split — invalid UTF-8 here would garble the
-		// report yaml/json encoders downstream.
-		cut := maxVal
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
-		}
-		return s[:cut] + "…"
+		// Never split a multi-byte UTF-8 character: invalid UTF-8 here
+		// would garble the report yaml/json encoders downstream.
+		return textcut.Prefix(s, maxVal) + "…"
 	}
 
 	var out []models.MockFieldDiff
@@ -409,16 +434,21 @@ func JSONFieldDiffs(expJSON, actJSON string, known map[string][]string, pathPref
 	return out
 }
 
-func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
+// collectJSON collects v's leaves at path into out, as the matcher reads them
+// under ni. recorded is nil for the recorded document; for the live one it is
+// the recorded document's node paths (recordedPaths): a node the recording
+// lacks was added, and an entry naming id keys does not excuse it
+// (noiseIndex.matchAdded), so the added field is reported.
+func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps, recorded map[string]bool) {
 	keyLower := strings.ToLower(path)
-	// matchKind resolves the winning (most-specific-first) entry. A type-strict
+	// lookup resolves the winning (most-specific-first) entry. A type-strict
 	// entry records the field's TYPE but not its VALUE — so a type change is
 	// reported while a value change is tolerated — but ONLY when it is itself the
 	// most specific match; a more-specific user/regex entry still wins and keeps
 	// its full-ignore / value-regex semantics. (The learned path is also carried in
 	// the known-noise set, so non-JSON parsers, which don't consult the flag, keep
 	// fully excluding it.)
-	regs, noisy, typeStrict := ni.matchKind(keyLower)
+	regs, noisy, typeStrict := ni.lookup(keyLower, recorded == nil || path == "" || recorded[path])
 	if noisy && !typeStrict {
 		// An entry with no patterns ignores the whole subtree. A pattern-guarded
 		// entry ignores only the values it describes, so it must be evaluated
@@ -450,7 +480,7 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 			if path != "" {
 				p = path + "." + k
 			}
-			collectJSON(child, p, ni, out)
+			collectJSON(child, p, ni, out, recorded)
 		}
 	case []interface{}:
 		// normalize array paths using [] suffix so we don't depend on indices
@@ -461,7 +491,7 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 			p = "[]"
 		}
 		for _, e := range t {
-			collectJSON(e, p, ni, out)
+			collectJSON(e, p, ni, out, recorded)
 		}
 	case string, float64, bool, nil:
 		typ, val := scalarTypeValue(t)
@@ -509,6 +539,12 @@ func scalarTypeValue(v interface{}) (typ, val string) {
 	return "null", "null"
 }
 
+// diffMaps returns the paths added, removed, retyped and changed in value
+// between two path maps, each list sorted. It walks Go maps, whose order is
+// random on every run, so it sorts what it found: the same two documents give
+// the same lists, and the failure assessment's reasons, the reports, the yaml
+// output and the capped diff subset built from them read the same on every
+// run.
 func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []string) {
 	seen := map[string]struct{}{}
 
@@ -539,6 +575,10 @@ func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []st
 			added = append(added, k)
 		}
 	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(typeChanges)
+	sort.Strings(valueChanges)
 	return
 }
 

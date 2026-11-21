@@ -1,7 +1,9 @@
 package mock
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -128,6 +130,15 @@ func TestAReplayThatLostACallFailsUnderTheSwitchOnly(t *testing.T) {
 	r := mustReceipt(t, dir)
 	require.True(t, r.Isolated)
 	require.Empty(t, r.FailedBy)
+	require.Empty(t, r.CaptureIncomplete)
+	// A run that lost nothing names no such field, in the receipt's file or
+	// its JSON (keploy mock status --json): older readers see what they did.
+	raw, err := os.ReadFile(filepath.Join(dir, "set", ReceiptFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "captureIncomplete")
+	j, err := json.Marshal(r)
+	require.NoError(t, err)
+	require.NotContains(t, string(j), "captureIncomplete")
 
 	provenOn(t)
 	on := &lossCounter{after: tls}
@@ -138,6 +149,31 @@ func TestAReplayThatLostACallFailsUnderTheSwitchOnly(t *testing.T) {
 	require.Equal(t, FailedByCaptureIncomplete, r.FailedBy)
 	require.False(t, r.Isolated)
 	require.Contains(t, logged(logs), "keploy could not capture every call the test command made")
+	require.Equal(t, tls, r.CaptureIncomplete, "the receipt keeps the run's loss as data")
+
+	// A PID map's refusal and another loss in one run: the receipt keeps
+	// both as data, the refusal with its own errno, as its note says both.
+	refused := models.PIDMapRefusals{Target: 2, LastTargetErr: -7}
+	dir, code, _ = replayIn(t, replayCase{losses: &lossCounter{after: tls}, pidMaps: &pidMapCounter{after: refused}, mapped: true, keployFails: true})
+	require.Equal(t, 1, code)
+	r = mustReceipt(t, dir)
+	require.Equal(t, FailedByCaptureIncomplete, r.FailedBy)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 2, What: refused.CaptureIncomplete(), Err: -7}, tls[0]}, r.CaptureIncomplete)
+	require.Contains(t, r.IsolationNote, refused.CaptureIncomplete())
+	require.Contains(t, r.IsolationNote, "to db:5432")
+
+	// A loss keploy judges, one it cannot capture at all and the kernel's
+	// evidence, in one run: only the judged loss fails the run, so only it is
+	// the receipt's CaptureIncomplete; the one keploy cannot capture is its
+	// CannotCapture alone, and the evidence is neither.
+	unix := models.CaptureLoss{Kind: models.CaptureLossUnixSocket, Count: 1, What: "/var/run/postgresql/.s.PGSQL.5432"}
+	skip := models.CaptureLoss{Kind: models.CaptureLossKernelSkip, Count: 3}
+	dir, code, _ = replayIn(t, replayCase{losses: &lossCounter{after: models.CaptureLosses{tls[0], unix, skip}}, mapped: true, keployFails: true})
+	require.Equal(t, 1, code)
+	r = mustReceipt(t, dir)
+	require.Equal(t, FailedByCaptureIncomplete, r.FailedBy)
+	require.Equal(t, tls, r.CaptureIncomplete, "only what fails the run")
+	require.Equal(t, models.CaptureLosses{unix}, r.CannotCapture)
 
 	// Lost before the test command ran: not this run's.
 	before := &lossCounter{before: tls, after: tls}
@@ -453,7 +489,7 @@ func TestARecordChargesEachTestOpenAtACallFromNoWorker(t *testing.T) {
 				charged[tr.Name] = tr.Evidence.CannotCapture
 			}
 		}
-		want := models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock mock-0, from process 4242"}} // named as recorded
+		want := models.CaptureLosses{{Kind: models.CaptureLossUnattributed, Count: 1, What: "the latest: mock mock-0, from process 4242", HostsListed: true}} // named as recorded
 		require.Equal(t, map[string]models.CaptureLosses{"orders::TestA": want, "orders::TestB": want}, charged)
 	})
 	notJudged := func(t *testing.T, appErr models.AppError, code int) {
@@ -471,4 +507,109 @@ func TestARecordChargesEachTestOpenAtACallFromNoWorker(t *testing.T) {
 	t.Run("not judged, the test command failed", func(t *testing.T) {
 		notJudged(t, models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}, 3)
 	})
+}
+
+// The run's PID map losses each carry their own map's errno as data, beside
+// the run's verdict as words, so a reader of both never takes one map's
+// cause for the other's.
+func TestTheRunsPIDMapLossesCarryEachMapsOwnErrno(t *testing.T) {
+	refused := models.PIDMapRefusals{Target: 4, LastTargetErr: -7, Excluded: 2, LastExcludedErr: -110}
+	got, err := (&mockService{}).runLosses(context.Background(), lossBase{checked: true}, nil, nil, refused)
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{
+		{Kind: models.CaptureLossPIDMap, Count: 4, What: refused.CaptureIncomplete(), Err: -7},
+		{Kind: models.CaptureLossPIDMapExcluded, Count: 2, What: refused.CaptureIncomplete(), Err: -110},
+	}, got)
+}
+
+// Under the proven switch, a replay that lost a call to a host the agent
+// listed (models.CaptureLoss.Hosts) logs it by its shape and the agent's tag,
+// never whole; keploy's console names it whole beside that tag; the receipt,
+// which outlives the session, keeps it whole with no tag. An agent that lists
+// no hosts has its loss logged by its size, and named whole on the console.
+func TestAReplayThatLostACallNamesItsHostByItsTag(t *testing.T) {
+	provenOn(t)
+	agent := models.NewLogKeySession()
+	host := "orders-svc:443"
+	tag := agent.HostTag(host)
+	to := agent.LossText().Say("to ").Host(host)
+	tls := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: to.String(), Hosts: to.Hosts(), HostsListed: true}}
+	var console bytes.Buffer
+	dir, code, logs := replayIn(t, replayCase{losses: &lossCounter{after: tls}, mapped: true, keployFails: true, console: &console})
+	require.Equal(t, 1, code)
+	for _, e := range logs.All() {
+		require.NotContains(t, fmt.Sprint(e.ContextMap()), "orders-svc", "a line names the host whole: %s", e.Message)
+	}
+	require.Contains(t, logged(logs), "to {}:443 "+tag, "no line names the host by its shape and the agent's tag")
+	require.Contains(t, console.String(), "to "+host+" "+models.HostTagLabel(tag), "the console does not name the host whole beside its tag")
+	r := mustReceipt(t, dir)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to " + host, Hosts: models.LossHosts{{Name: host, At: len("to ")}}, HostsListed: true}}, r.CaptureIncomplete, "the receipt keeps the host whole, at its place, with no tag")
+	require.Contains(t, r.IsolationNote, "to "+host)
+	require.NotContains(t, r.IsolationNote, tag, "the receipt's note carries a tag")
+
+	older := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to " + host}}
+	console.Reset()
+	_, _, logs = replayIn(t, replayCase{losses: &lossCounter{after: older}, mapped: true, keployFails: true, console: &console})
+	for _, e := range logs.All() {
+		require.NotContains(t, fmt.Sprint(e.ContextMap()), "orders-svc", "an older agent's loss: a line names the host whole: %s", e.Message)
+	}
+	require.Contains(t, console.String(), "to "+host, "the console does not name an older agent's destination whole")
+}
+
+// Under the proven switch, a recording that lost a call to a host the agent
+// listed logs it by its shape and the agent's tag, in its lines and the error
+// its caller logs; keploy's console names it whole beside that tag.
+func TestARecordingThatLostACallNamesItsHostByItsTag(t *testing.T) {
+	const set = "orders"
+	t.Setenv(provenswitch.Env, "1")
+	agent := models.NewLogKeySession()
+	host := "1234567.suitetalk.api.netsuite.com:443"
+	tag := agent.HostTag(host)
+	to := agent.LossText().Say("to ").Host(host)
+	lost := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: to.String(), Hosts: to.Hosts(), HostsListed: true}}
+	core, logs := observer.New(zapcore.DebugLevel)
+	db := newStatefulMockDB()
+	inst := lossRecordInstr{&drainInstrumentation{out: make(chan *models.Mock, 4), emitAfter: 5 * time.Millisecond}, &lossCounter{after: lost}}
+	cfg := &config.Config{}
+	cfg.Mock.Name = set
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg)
+	var console bytes.Buffer
+	svc.(ConsoleSetter).SetConsole(&console)
+	err := svc.Record(context.Background())
+	require.ErrorContains(t, err, "the recording is incomplete")
+	require.NotContains(t, err.Error(), "netsuite", "the error its caller logs names the host whole")
+	require.Contains(t, err.Error(), "to {}.{}.{}.{}.{}:443 "+tag)
+	for _, e := range logs.All() {
+		require.NotContains(t, fmt.Sprint(e.ContextMap()), "netsuite", "a line names the host whole: %s", e.Message)
+	}
+	require.Contains(t, console.String(), "to "+host+" "+models.HostTagLabel(tag), "the console does not name the host whole beside its tag")
+}
+
+// A per-test results file keeps each host a loss names whole with no tag
+// (persistedTests): it outlives the session a tag names a host in. The
+// receipt it was made from is left as it was.
+func TestAPerTestResultsFileNamesItsHostsWithNoTag(t *testing.T) {
+	keys := models.NewLogKeySession()
+	host := "orders-svc:443"
+	to := keys.LossText().Say("to ").Host(host)
+	why := keys.LossText().Say("Host ").Host(host)
+	loss := models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: to.String(), Hosts: to.Hosts(), HostsListed: true}}
+	inc := []models.CaptureIncomplete{{Class: models.CaptureIncompleteRealName, Destination: "10.0.0.7:443", Why: why.String(), Hosts: why.Hosts(), HostsListed: true}}
+	r := TestsReceipt{
+		Set: "set", Real: &models.RealRun{Incomplete: inc}, CannotCapture: loss, CaptureLosses: loss,
+		Tests: []TestReceipt{{Name: "T", Evidence: &models.ScopeEvidence{CaptureIncomplete: loss, CannotCapture: loss, Incomplete: inc}}},
+	}
+	got := persistedTests(r)
+	inLoss, inWhy := models.LossHosts{{Name: host, At: len("to ")}}, models.LossHosts{{Name: host, At: len("Host ")}}
+	for what, c := range map[string]struct{ want, hosts models.LossHosts }{
+		"Real": {inWhy, got.Real.Incomplete[0].Hosts}, "CannotCapture": {inLoss, got.CannotCapture[0].Hosts}, "CaptureLosses": {inLoss, got.CaptureLosses[0].Hosts},
+		"a test's CaptureIncomplete": {inLoss, got.Tests[0].Evidence.CaptureIncomplete[0].Hosts}, "a test's CannotCapture": {inLoss, got.Tests[0].Evidence.CannotCapture[0].Hosts},
+		"a test's Incomplete": {inWhy, got.Tests[0].Evidence.Incomplete[0].Hosts},
+	} {
+		require.Equal(t, c.want, c.hosts, "%s keeps a tag, or lost its place", what)
+	}
+	require.Equal(t, to.Hosts(), r.Tests[0].Evidence.CaptureIncomplete[0].Hosts, "the receipt it was made from changed")
+	require.Equal(t, why.Hosts(), r.Real.Incomplete[0].Hosts, "the receipt it was made from changed")
 }

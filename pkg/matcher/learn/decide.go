@@ -34,10 +34,10 @@ const (
 	OutcomeFresh
 )
 
-// RefusalKind is why a word is refused: one of the ten below.
+// RefusalKind is why a word is refused: one of the eleven below.
 type RefusalKind string
 
-// The ten refusals.
+// The eleven refusals.
 const (
 	RefusalPick            RefusalKind = "pick"
 	RefusalNoClockRead     RefusalKind = "no-clock-read"
@@ -49,6 +49,10 @@ const (
 	RefusalChangedShape    RefusalKind = "changed-shape"
 	RefusalCannotCheck     RefusalKind = "cannot-check"
 	RefusalLandedElsewhere RefusalKind = "landed-elsewhere"
+	// RefusalNotMinted: keploy.yml declares the field minted (Input.Source),
+	// yet its value is no new one keploy can check: an earlier place holds it
+	// whole in a run, or it is no string or number read as written.
+	RefusalNotMinted RefusalKind = "not-minted"
 )
 
 // EditKind is an edit a person or a tool makes to accept a refused word.
@@ -93,6 +97,9 @@ type Refusal struct {
 	Why      string      `json:"why,omitempty"`
 	Places   []string    `json:"places,omitempty"`
 	Edits    []Edit      `json:"edits,omitempty"`
+	// Rule is the id of the keploy.yml rule that declares the field's
+	// source (Input.Source), "" where none does.
+	Rule string `json:"rule,omitempty"`
 }
 
 // Mode is where a word's sources may be.
@@ -108,9 +115,11 @@ const (
 )
 
 // Caps is what the call's adapter can do at replay: bind a Value at a word
-// address, answer an echo at one, and state what the full round's answers
-// held.
-type Caps struct{ BindAtWord, AnswerAtWord, FViewStated bool }
+// address, answer an echo at one, state what the full round's answers held,
+// and check a time in a claim of a JWT by its form (ClaimByForm:
+// learn.HoldsClaimByForm at a models.ClockOffset.Claim place). An adapter
+// that does not set ClaimByForm gets such a time refused, as before.
+type Caps struct{ BindAtWord, AnswerAtWord, FViewStated, ClaimByForm bool }
 
 // Scope is where mappings.yaml names a mock, as models.Mapping.MockPlaces
 // writes it: "test <name>" for a test's own list, "startup:", "worker:", or
@@ -177,8 +186,9 @@ func (l Landed) String() string {
 // VarPlace; read it through AddressOf), and the instant a client test
 // began at in its recording (RecBegan: the tracker's recorded begin, zero
 // where none is known), which the test's own value must precede where no
-// window tells it, and the test the call trails (Trails; the zero Trail:
-// none).
+// window tells it, the test the call trails (Trails; the zero Trail:
+// none), and the source keploy.yml's rules declare for a drifted field, by
+// its path in Drift (Source; nil: none declared).
 type Input struct {
 	Drifts    *DriftCache
 	Drift     []string
@@ -200,6 +210,13 @@ type Input struct {
 	Landed    Landed
 	PlaceOf   func(l Leaf, answer bool) (string, bool)
 	Trails    Trail
+	Source    func(field string) (Source, bool)
+	// TimeForm turns on the time default (time_form.go): a changed time
+	// passes at replay with any value of its form. false decides times by
+	// the clock checks alone (range, cut, zone, provenance, the time-of-day
+	// echo): keploy.yml's strict times setting, and every caller that sets
+	// nothing.
+	TimeForm bool
 }
 
 // Trail is the test a call trails: keploy record marked the call's
@@ -275,6 +292,15 @@ type Decision struct {
 	// the decision set aside because they were asked at or before the
 	// call and answered after it: R's word there decided nothing.
 	AnsweredAfter []Place
+	// Minted is set on a field a minted rule decided made anew (Input.Source):
+	// the replay checks the value it binds there against it.
+	Minted *Minted
+	// ByForm, of a Value whose field is a time (boundTime), is the time
+	// default's check of it by its form alone, which an adapter takes where
+	// it cannot hold the Value's bind (Mongo: the earlier place holds the
+	// moment in another form, and a variable holds one text); nil
+	// otherwise, and where the time default is off (Input.TimeForm).
+	ByForm *models.ClockOffset
 }
 
 // Decide is every changed word of in, decided (see above).

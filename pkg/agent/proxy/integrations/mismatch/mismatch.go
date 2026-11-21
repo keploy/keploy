@@ -103,6 +103,17 @@ func (b *Builder) WithDestination(dest string) *Builder {
 	return b
 }
 
+// WithCommand names the call by its command, as the parser read it from
+// the request, for a protocol keploy has no shape of (models.CallShape ""):
+// a cache command ("GET"), a broker API ("Produce"), a queue operation
+// ("SendMessage"). It must never be a value the call sent (a key, a topic, a
+// queue URL): the miss's shape is the command (models.MissShape), which a
+// sanitized miss keeps and judging compares with a recording's call.
+func (b *Builder) WithCommand(command string) *Builder {
+	b.report.Command = command
+	return b
+}
+
 // WithComparedDestinations supplies the upstream authority of every mock this
 // miss was actually compared against, so Build() can tell a call whose
 // upstream is absent from that set apart from a drifted request.
@@ -819,7 +830,7 @@ func normalizeDestination(dest string) (host string, ok bool) {
 	// "http", which would make every scheme-carrying destination compare
 	// equal to every other and produce a confident, wrong verdict. No
 	// in-tree producer emits one today — models.RecordedDestination returns
-	// url.Parse's Host, and the live side reads request.Host /
+	// models.ParseRequestURL's Host, and the live side reads request.Host /
 	// request.URL.Host, all scheme-free — but this is the exact failure
 	// class the feature exists to prevent, so it is refused rather than
 	// guessed at.

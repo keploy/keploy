@@ -89,6 +89,19 @@ type composeInstr struct {
 	// notRequired are the names of each test's own list that push said
 	// marked served, not required.
 	notRequired map[string][]string
+	// background are the names of the set's background recordings that
+	// push sent (models.ScopeTableReq.Background).
+	background []string
+	// series is, by series, the worker-scope recordings a declared rule
+	// placed that push sent (models.ScopeTableReq.Series).
+	series map[string][]string
+	// sources is the declared sources the last PushProvenTable carried.
+	sources map[string][]models.DeclaredSource
+	// once is the once series the last PushProvenTable carried.
+	once []string
+	// timeForm is whether the last PushProvenTable turned the time
+	// default on.
+	timeForm bool
 	// begins and seeds are what the last push of the tests' recorded begins
 	// sent, and beginsErr what it fails with.
 	begins    map[string]time.Time
@@ -99,8 +112,24 @@ type composeInstr struct {
 
 	consumedMocks []models.MockState
 	consumedErr   error
-	mockErrors    []models.UnmatchedCall
-	mockErrorsErr error
+	// consumedReads are what the agent hands the reads of what it consumed
+	// before consumedMocks, one each, in order: a read hands back only what
+	// was consumed since the one before.
+	consumedReads [][]models.MockState
+	// runsOn, when set, is what the test command left of the application
+	// running once it exited (models.RunOptions.BeforeStop's running): Run
+	// calls BeforeStop while it says true, as the agent client does.
+	runsOn func() bool
+	// consumedReadCount is how many reads of what the agent consumed were
+	// made.
+	consumedReadCount int
+	mockErrors        []models.UnmatchedCall
+	mockErrorsErr     error
+	// mockStats and mockStatsErr are what GetMockStats answers: the
+	// agent's count of each series' repeats (models.MockStats).
+	mockStats      models.MockStats
+	mockStatsErr   error
+	mockStatsReads int
 
 	// What the agent left as compose stopped it (ComposeOutcomeReader): under
 	// compose, the only account of the run there is.
@@ -187,7 +216,7 @@ func (f *composeInstr) counts() (runs, healthHits int) {
 
 func (f *composeInstr) Setup(context.Context, string, models.SetupOptions) error { return nil }
 
-func (f *composeInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+func (f *composeInstr) Run(ctx context.Context, opts models.RunOptions) models.AppError {
 	f.mu.Lock()
 	f.runs++
 	f.events = append(f.events, "run")
@@ -217,6 +246,9 @@ func (f *composeInstr) Run(ctx context.Context, _ models.RunOptions) models.AppE
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	if opts.BeforeStop != nil && f.runsOn != nil && ctx.Err() == nil && f.runsOn() {
+		opts.BeforeStop(ctx, f.runsOn)
+	}
 	return f.runResult
 }
 
@@ -242,16 +274,19 @@ func (f *composeInstr) PushScopeTable(_ context.Context, _ map[string][]string, 
 
 // PushProvenTable takes the per-test table, the pool slices, the worker
 // scope, the names of it that are skipped tests' reads, the trails, the
-// recorded test windows, the recorded givens, the named repeated reads and
-// the not-required marks (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string) error {
-	f.table, f.pool, f.worker, f.skippedReads, f.trails, f.recordedWindows, f.given, f.repeats, f.notRequired = table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired
+// recorded test windows, the recorded givens, the named repeated reads, the
+// not-required marks, the background recordings' names, the series, the
+// declared sources, the once series and the time default
+// (ProvenTablePusher), and keeps them.
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, skippedReads, trails map[string]string, windows []models.TestWindow, given map[string][]models.GivenValue, repeats map[string][]models.RepeatRead, notRequired map[string][]string, background []string, series map[string][]string, sources map[string][]models.DeclaredSource, once []string, timeForm bool) error {
+	f.table, f.pool, f.worker, f.skippedReads, f.trails, f.recordedWindows, f.given, f.repeats, f.notRequired, f.background = table, pool, worker, skippedReads, trails, windows, given, repeats, notRequired, background
+	f.series, f.sources, f.once, f.timeForm = series, sources, once, timeForm
 	return nil
 }
 
 // PushTestBegins takes the tests' recorded begins (TestBeginsPusher), or
 // fails with beginsErr.
-func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string, seeds map[string]string) error {
+func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string, seeds map[string]string, _ map[string][]models.ClientCase) error {
 	f.begins, f.seeds = begins, seeds
 	return f.beginsErr
 }
@@ -313,7 +348,22 @@ func (f *composeInstr) UpdateMockParams(context.Context, models.MockFilterParams
 	return nil
 }
 func (f *composeInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.consumedReadCount++
+	if len(f.consumedReads) > 0 {
+		read := f.consumedReads[0]
+		f.consumedReads = f.consumedReads[1:]
+		return read, nil
+	}
 	return f.consumedMocks, f.consumedErr
+}
+
+func (f *composeInstr) GetMockStats(context.Context) (models.MockStats, error) {
+	f.mu.Lock()
+	f.mockStatsReads++
+	f.mu.Unlock()
+	return f.mockStats, f.mockStatsErr
 }
 
 func (f *composeInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {

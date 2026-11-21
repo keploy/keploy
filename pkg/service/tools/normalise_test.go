@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/logleak"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
@@ -205,4 +206,70 @@ func TestNormalizeTestCases_LeavesARefusedTestCase(t *testing.T) {
 	require.NoError(t, tools.NormalizeTestCases(context.Background(), "test-run-0", "test-set-0", nil, []models.TestResult{result}))
 	assert.Empty(t, db.written, "a refused test case is not normalized")
 	assert.Len(t, logs.FilterMessageSnippet("refused when its test set loaded").All(), 1)
+}
+
+// keploy normalize says each placeholder it drops for the app's answer, at
+// WARN, by its place and the size of what the app now answers there: never
+// the answer's value (the token, the session cookie, the session header a
+// templated test case holds placeholders for).
+func TestNormalizeTestCases_SaysADroppedPlaceholderByPlaceAndSize(t *testing.T) {
+	const s = logleak.Canary
+	tc := tcase("test-1", "POST", "http://h/login", nil, `{}`, 200,
+		map[string]string{"X-Session": "{{string .session}}", "Set-Cookie": "sid={{string .sid}}; Path=/"},
+		`{"accessToken":"{{string .token}}","id":"{{string .id}}"}`)
+	db := &normaliseTestDB{placementTestDB: placementTestDB{written: map[string]models.TestCase{}}, cases: []*models.TestCase{tc}}
+	logger, logs := logleak.Observe()
+	tools := &Tools{logger: logger, testDB: db, testSetConf: &placementConfStore{}, config: &config.Config{}}
+	result := models.TestResult{
+		TestCaseID: "test-1", Status: models.TestStatusFailed,
+		Res: models.HTTPResp{StatusCode: 200, Header: map[string]string{"X-Session": "s-" + s, "Set-Cookie": "sid=c-" + s + "; Path=/"}, Body: `{"accessToken":"b-` + s + `","id":"1"}`},
+		Result: models.Result{
+			BodyResult: []models.BodyResult{{Expected: `{"accessToken":"old","id":"1"}`}},
+			HeadersResult: []models.HeaderResult{
+				{Expected: models.Header{Key: "X-Session", Value: []string{"old"}}},
+				{Expected: models.Header{Key: "Set-Cookie", Value: []string{"sid=old; Path=/"}}},
+			},
+		},
+	}
+	require.NoError(t, tools.NormalizeTestCases(context.Background(), "test-run-0", "test-set-0", nil, []models.TestResult{result}))
+	logleak.Check(t, logs, s, "keploy normalize's dropped-placeholder lines")
+	var said []string
+	for _, e := range logs.FilterMessageSnippet("where a placeholder was").All() {
+		said = append(said, fmt.Sprint(e.ContextMap()["where"]))
+	}
+	n := len(s) + 2
+	assert.Equal(t, []string{
+		fmt.Sprintf("body.accessToken: the app now answers %d bytes", n),
+		fmt.Sprintf("header Set-Cookie.sid: the app now answers %d bytes", n),
+		fmt.Sprintf("header X-Session: the app now answers %d bytes", n),
+	}, said)
+}
+
+// The lines keploy normalize says for a test case it leaves on a template
+// variable carry the run's why by its shape: a why quotes what the answer
+// held there, and what the variable needed.
+func TestNormalizeTestCases_SaysATemplateFailuresWhyByItsShape(t *testing.T) {
+	const s = logleak.Canary
+	read := tcase("test-2", "GET", "http://h/users/{{string .id}}", nil, "", 200, nil, `{"id":"{{string .id}}"}`)
+	db := &normaliseTestDB{placementTestDB: placementTestDB{written: map[string]models.TestCase{}}, cases: []*models.TestCase{read}}
+	logger, logs := logleak.Observe()
+	tools := &Tools{logger: logger, testDB: db, testSetConf: &placementConfStore{}, config: &config.Config{}}
+	result := models.TestResult{
+		TestCaseID: "test-2", Status: models.TestStatusFailed,
+		FailureInfo: models.FailureInfo{Risk: models.High, Category: []models.FailureCategory{models.TemplateVariable}},
+		TemplateFailures: []models.TemplateFailure{
+			{Where: "body.id", Placeholder: "{{string .id}}", Why: `needs a non-empty string; the answer holds "b-` + s + `" there`},
+			{Where: "body.sessions." + s, Placeholder: "{{string .sid}}", Why: `must equal sid's value "` + s + `"`},
+		},
+		Res: models.HTTPResp{StatusCode: 200, Body: `{"id":"b-` + s + `"}`},
+	}
+	require.NoError(t, tools.NormalizeTestCases(context.Background(), "test-run-0", "test-set-0", nil, []models.TestResult{result}))
+	assert.Empty(t, db.written, "a template failure is not normalized")
+	logleak.Check(t, logs, s, "keploy normalize's template-failure lines")
+	said := logs.FilterMessageSnippet("not normalizing a test case that failed on a template variable").All()
+	require.Len(t, said, 2)
+	assert.Equal(t, "body.id", said[0].ContextMap()["where"])
+	assert.Equal(t, `needs a non-empty string; the answer holds "{}" there`, said[0].ContextMap()["why"])
+	assert.NotEqual(t, "body.sessions."+s, said[1].ContextMap()["where"])
+	assert.Equal(t, "{{string .id}}", said[0].ContextMap()["placeholder"])
 }

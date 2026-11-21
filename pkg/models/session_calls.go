@@ -2,7 +2,6 @@ package models
 
 import (
 	"net"
-	"net/url"
 	"strings"
 	"sync/atomic"
 )
@@ -199,7 +198,7 @@ func httpCallOf(m *Mock) (method, host, path string, ok bool) {
 	switch {
 	case m.Kind == HTTP && m.Spec.HTTPReq != nil:
 		method = string(m.Spec.HTTPReq.Method)
-		u, err := url.Parse(m.Spec.HTTPReq.URL)
+		u, err := ParseRequestURL(m.Spec.HTTPReq.URL)
 		if err != nil {
 			return "", "", "", false
 		}
@@ -215,7 +214,7 @@ func httpCallOf(m *Mock) (method, host, path string, ok bool) {
 	case m.Kind == HTTP2 && m.Spec.HTTP2Req != nil:
 		method = string(m.Spec.HTTP2Req.Method)
 		host = m.Spec.HTTP2Req.Authority
-		u, err := url.Parse(m.Spec.HTTP2Req.URL)
+		u, err := ParseRequestURL(m.Spec.HTTP2Req.URL)
 		if err != nil {
 			return "", "", "", false
 		}

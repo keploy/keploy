@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -143,6 +144,80 @@ func TestAJudgedRecordSaysALossChargedToNoTest(t *testing.T) {
 	require.NotNil(t, got)
 	require.Empty(t, got.CaptureLosses)
 	require.Contains(t, got.CaptureLossesUnread, "bad file descriptor")
+}
+
+// stuckClose is the loss the agent's drain owns, as the session's, for a
+// close its proxy could not count: a handler that never finished closing a
+// connection whose application end had ended (not judged).
+var stuckClose = models.CaptureLosses{{Kind: models.CaptureLossAppBytesUntold, Count: 1,
+	What: "to 10.0.0.5:5432 from 127.0.0.1:40000, in session 2, whose handler never finished closing it once the application's end had ended"}}
+
+// The session's last read has the agent drain first: its proxy counts the
+// close of every connection the run's stop ended. A record whose drain could
+// not count one never ends clean, nor judged on only what was counted:
+//   - the drain gave up on a stuck handler: the agent owns its close, named,
+//     as the run's not-judged loss, so the recording lacks it
+//     (CannotCapture), whatever the tests did;
+//   - the read itself failed (the agent made no answer): what was lost after
+//     the last test is unknown, never "none", and judging fails the run on it
+//     however few losses were counted;
+//   - an agent older than the read (it cannot say) leaves every counted loss
+//     the run's, as before.
+func TestARecordWhoseDrainCouldNotCountACloseIsNeverClean(t *testing.T) {
+	t.Run("the drain gave up on a stuck handler", func(t *testing.T) {
+		err, got, _ := recordWithLosses(t, nil, nil, stuckClose, nil, stuckClose, nil, nil)
+		require.NoError(t, err)
+		require.NotNil(t, got, "no per-test file was written")
+		require.Equal(t, stuckClose, got.CannotCapture, "the stuck close is what the recording lacks, named")
+		require.Empty(t, got.CaptureLosses)
+		require.Empty(t, got.CaptureLossesUnread)
+	})
+	t.Run("the read failed", func(t *testing.T) {
+		err, got, _ := recordWithLosses(t, nil, nil, nil, nil, nil, errors.New("the keploy agent made no answer to the read of the agent's capture losses no test was charged with"), nil)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Empty(t, got.CaptureLosses)
+		require.Contains(t, got.CaptureLossesUnread, "made no answer", "a read that failed is never none, even with nothing counted")
+	})
+	t.Run("an agent older than the read", func(t *testing.T) {
+		err, got, _ := recordWithLosses(t, nil, nil, nil, nil, nil, fmt.Errorf("%w: agent returned 404", models.ErrCaptureLossesUnsupported), nil)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Empty(t, got.CaptureLosses)
+		require.Empty(t, got.CaptureLossesUnread, "an agent that cannot say leaves every counted loss the run's, and none was counted")
+	})
+}
+
+// mock test's read of the run's losses (captureLossesDuring) has the agent
+// drain first too: a drain that gave up is in the counts (the stuck close,
+// not judged, named); a read that failed returns what the counts lost and
+// the error, so the run is never judged clean on what was counted; an agent
+// older than the read is read as before.
+func TestAMockReplaysRunLossesReadIsNeverCleanOnAFailedDrain(t *testing.T) {
+	for _, row := range []struct {
+		name         string
+		after        models.CaptureLosses
+		unchargedErr error
+		want         models.CaptureLosses
+		wantErr      string
+	}{
+		{"the drain gave up on a stuck handler", stuckClose, nil, stuckClose, ""},
+		{"the read failed", stall(1), errors.New("the keploy agent made no answer"), stall(1), "could not read whether its agent had counted every close"},
+		{"an agent older than the read", nil, fmt.Errorf("%w: agent returned 404", models.ErrCaptureLossesUnsupported), nil, ""},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			m := &mockService{logger: zap.NewNop(), instrumentation: &lossRunner{lossCounter: &lossCounter{after: row.after}, uncharged: row.after, unchargedErr: row.unchargedErr}}
+			m.instrumentation.(*lossRunner).reads = 1 // the base read was made
+			got, err := m.captureLossesDuring(context.Background(), lossBase{checked: true})
+			require.Equal(t, row.want, got)
+			if row.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, row.wantErr)
+			require.ErrorContains(t, err, "made no answer")
+		})
+	}
 }
 
 // pidLossRunner is lossRunner whose agent also counts PID-map refusals.

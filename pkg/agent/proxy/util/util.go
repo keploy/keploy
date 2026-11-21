@@ -17,7 +17,6 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"golang.org/x/net/http2"
 	"golang.org/x/sync/errgroup"
@@ -383,9 +382,9 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
-					if logger.Core().Enabled(zap.DebugLevel) {
-						logger.Debug("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
-					}
+					// Its size, never its bytes: they are the application's
+					// traffic, of any protocol, credentials included.
+					logger.Debug("Failed to read buffer", zap.Int("bytes", len(buffer)))
 				}
 				// The bytes that came with the error are the peer's last
 				// ones (a TLS peer's last record read together with its
@@ -443,7 +442,9 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 
 	// Check if the initial buffer already contains complete headers
 	if HasCompleteHTTPHeaders(initialBuf) {
-		logger.Debug("received complete HTTP headers in initial buffer", zap.Any("size", len(initialBuf)), zap.Any("headers", string(initialBuf)))
+		// Its size, never the headers: they carry the request's credentials
+		// (Authorization, Cookie, API keys).
+		logger.Debug("received complete HTTP headers in initial buffer", zap.Int("size", len(initialBuf)))
 		return initialBuf, nil
 	}
 
@@ -477,7 +478,7 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 
 			// Check if we reached the end of headers
 			if HasCompleteHTTPHeaders(buffer) {
-				logger.Debug("received complete HTTP headers", zap.Any("size", len(buffer)), zap.Any("headers", string(buffer)))
+				logger.Debug("received complete HTTP headers", zap.Int("size", len(buffer)))
 				return buffer, nil
 			}
 		}
@@ -831,18 +832,43 @@ func IsJava(input string) bool {
 	return strings.Contains(inputLower, searchTermLower)
 }
 
-// IsJavaInstalled checks if java is installed on the system
+// IsJavaInstalled reports whether the `java` on PATH runs a JVM. That is the
+// java its callers run next (GetJavaHome, then that JDK's keytool), so with
+// no java on PATH it says false, whatever JDK the machine holds elsewhere.
 func IsJavaInstalled() bool {
-	// On macOS, /usr/bin/java is a launcher STUB shipped with the OS on every
-	// machine, JDK or not (it defers to /usr/libexec/java_home). A bare
-	// LookPath would therefore report Java present on every Mac and make
-	// callers spawn keytool/JVMs pointlessly. Ask java_home, which exits
-	// non-zero when no real JDK is installed.
-	if runtime.GOOS == "darwin" {
-		return exec.Command("/usr/libexec/java_home").Run() == nil
+	return pathJavaRuns(runtime.GOOS, "/usr/bin/java", "/usr/libexec/java_home")
+}
+
+// pathJavaRuns is IsJavaInstalled for an OS, with macOS's java stub and
+// java_home passed in. On macOS, stub (/usr/bin/java) is a launcher shipped
+// with the OS on every machine, JDK or not: it runs the JDK javaHome names
+// and fails when there is none. So a PATH java that is that stub runs a JVM
+// only when javaHome exits 0. javaHome is no answer for any other PATH java,
+// though. It names a JDK on a machine whose PATH has no java at all, and it
+// knows no JDK outside its JavaVirtualMachines folders, such as SDKMAN's or
+// Homebrew's openjdk, whose bin/java on PATH is a JVM itself.
+func pathJavaRuns(goos, stub, javaHome string) bool {
+	exe, err := exec.LookPath("java")
+	if err != nil {
+		return false
 	}
-	_, err := exec.LookPath("java")
-	return err == nil
+	if goos == "darwin" && sameFile(exe, stub) {
+		return exec.Command(javaHome).Run() == nil
+	}
+	return true
+}
+
+// sameFile says whether paths a and b, symlinks followed, name one file.
+func sameFile(a, b string) bool {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
 }
 
 // GetJavaHome returns the JAVA_HOME path

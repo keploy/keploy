@@ -36,14 +36,14 @@ func waitArmed(t *testing.T, clk *stall.ManualClock, w *answerWatch) {
 // user's (Unbounded): otherwise nothing is watched.
 func TestTheAnswerStallRuleIsOnOnlyWithNoBoundOfTheUsers(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
-	if w := newAnswerWatch(SimulationConfig{Unbounded: true}); w != nil {
+	if w := newAnswerWatch(context.Background(), SimulationConfig{Unbounded: true}); w != nil {
 		t.Fatal("a watch without the switch")
 	}
 	t.Setenv(provenswitch.Env, "1")
-	if w := newAnswerWatch(SimulationConfig{}); w != nil {
+	if w := newAnswerWatch(context.Background(), SimulationConfig{}); w != nil {
 		t.Fatal("a watch with the user's own bound")
 	}
-	w := newAnswerWatch(SimulationConfig{Unbounded: true, StallClock: &stall.ManualClock{}})
+	w := newAnswerWatch(context.Background(), SimulationConfig{Unbounded: true, StallClock: &stall.ManualClock{}})
 	if w == nil {
 		t.Fatal("no watch under the switch with no bound of the user's")
 	}
@@ -59,7 +59,7 @@ func TestTheAnswerStallRuleIsOnOnlyWithNoBoundOfTheUsers(t *testing.T) {
 func TestTheAnswerStallRuleCutsOnlyAGraceOfRunnableTimeWaitedWithNoProgress(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	clk := &stall.ManualClock{}
-	w := newAnswerWatch(SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
+	w := newAnswerWatch(context.Background(), SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
 	defer w.stop()
 	var cuts atomic.Int32
 	var cutBeforeFlag atomic.Bool
@@ -160,7 +160,7 @@ func TestTheAnswerStallRuleCutsOnlyAGraceOfRunnableTimeWaitedWithNoProgress(t *t
 func TestAStreamsCleanEndIsNeverTakenForTheCut(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	clk := &stall.ManualClock{}
-	w := newAnswerWatch(SimulationConfig{Unbounded: true, StallGrace: time.Second, StallClock: clk})
+	w := newAnswerWatch(context.Background(), SimulationConfig{Unbounded: true, StallGrace: time.Second, StallClock: clk})
 	defer w.stop()
 	done := w.waiting()
 	waitArmed(t, clk, w)
@@ -187,7 +187,7 @@ func TestAStreamsCleanEndIsNeverTakenForTheCut(t *testing.T) {
 func TestTheAnswerStallSaysWhatItWaitedFor(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	clk := &stall.ManualClock{}
-	w := newAnswerWatch(SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
+	w := newAnswerWatch(context.Background(), SimulationConfig{Unbounded: true, StallGrace: 10 * time.Second, StallClock: clk})
 	defer w.stop()
 	w.describe("POST /upload", 1000)
 	w.sentBody(300)
@@ -211,15 +211,15 @@ func TestTheAnswerStallSaysWhatItWaitedFor(t *testing.T) {
 		e    *AnswerStallError
 		want string
 	}{
-		{&AnswerStallError{Target: "GET /x", Waited: time.Minute}, "the app never answered; waited 1m0s of keploy's runnable time for GET /x"},
-		{&AnswerStallError{Target: "GET /x", Waited: time.Minute, Answered: true}, "the app sent its answer's headers and nothing of its body; waited 1m0s of keploy's runnable time for GET /x"},
-		{&AnswerStallError{Target: "GET /x", Waited: time.Minute, Answered: true, Read: 42}, "the app's answer stopped part-way, after 42 bytes of its body; waited 1m0s of keploy's runnable time for GET /x"},
+		{&AnswerStallError{Target: "GET /x", Waited: time.Minute}, "the app never answered; waited 1m0s of keploy's runnable time for GET /x" + tagOf("GET", "/x")},
+		{&AnswerStallError{Target: "GET /x", Waited: time.Minute, Answered: true}, "the app sent its answer's headers and nothing of its body; waited 1m0s of keploy's runnable time for GET /x" + tagOf("GET", "/x")},
+		{&AnswerStallError{Target: "GET /x", Waited: time.Minute, Answered: true, Read: 42}, "the app's answer stopped part-way, after 42 bytes of its body; waited 1m0s of keploy's runnable time for GET /x" + tagOf("GET", "/x")},
 		{keptOpenWithNothing("/pkg.Svc/Method", false, 0), "the app never answered, and sent only keepalives, for /pkg.Svc/Method"},
 		{keptOpenWithNothing("", true, 0), "the app sent its answer's headers and nothing of its body, then only keepalives"},
-		{keptOpenWithNothing("GET /e", true, 9), "the app's answer stopped part-way, after 9 bytes of its body, then only keepalives, for GET /e"},
+		{keptOpenWithNothing("GET /e", true, 9), "the app's answer stopped part-way, after 9 bytes of its body, then only keepalives, for GET /e" + tagOf("GET", "/e")},
 		{keptOpenWithKeepalivesOnly(), "the app sent its answer's headers and nothing of its body but keepalives"},
-		{&AnswerStallError{Target: "POST /x", Waited: time.Minute, Answered: true, Untaken: true, Sent: 3, Request: 10}, "the app sent its answer's headers and stopped taking the test's request (it took at most 3 of its 10 bytes; 7 were never taken); waited 1m0s of keploy's runnable time for POST /x"},
-		{&AnswerStallError{Target: "POST /chunked", Waited: time.Minute, Untaken: true, Sent: 7}, "the app stopped taking the test's request and never answered (it took at most 7 bytes of it); waited 1m0s of keploy's runnable time for POST /chunked"},
+		{&AnswerStallError{Target: "POST /x", Waited: time.Minute, Answered: true, Untaken: true, Sent: 3, Request: 10}, "the app sent its answer's headers and stopped taking the test's request (it took at most 3 of its 10 bytes; 7 were never taken); waited 1m0s of keploy's runnable time for POST /x" + tagOf("POST", "/x")},
+		{&AnswerStallError{Target: "POST /chunked", Waited: time.Minute, Untaken: true, Sent: 7}, "the app stopped taking the test's request and never answered (it took at most 7 bytes of it); waited 1m0s of keploy's runnable time for POST /chunked" + tagOf("POST", "/chunked")},
 	} {
 		if got := c.e.Error(); got != c.want {
 			t.Fatalf("%q, want %q", got, c.want)
@@ -416,10 +416,10 @@ func TestEveryAnswerThatNeverEndedEndsOnTheStallRule(t *testing.T) {
 			chunks      []models.HTTPStreamChunk
 			says        string
 		}{
-			{"/sse-none", "text/event-stream", frames("data", "a"), "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for GET /sse-none"},
-			{"/sse-keepalive-none", "text/event-stream", nil, "the app sent its answer's headers and nothing of its body but keepalives, for GET /sse-keepalive-none"},
-			{"/ndjson-keepalive-none", "application/x-ndjson", frames("raw", `{"id":1}`), "the app sent its answer's headers and nothing of its body but keepalives, for GET /ndjson-keepalive-none"},
-			{"/binary-none", "application/octet-stream", frames("raw", "abcdef"), "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for GET /binary-none"},
+			{"/sse-none", "text/event-stream", frames("data", "a"), "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for GET /sse-none" + tagOf("GET", "/sse-none")},
+			{"/sse-keepalive-none", "text/event-stream", nil, "the app sent its answer's headers and nothing of its body but keepalives, for GET /sse-keepalive-none" + tagOf("GET", "/sse-keepalive-none")},
+			{"/ndjson-keepalive-none", "application/x-ndjson", frames("raw", `{"id":1}`), "the app sent its answer's headers and nothing of its body but keepalives, for GET /ndjson-keepalive-none" + tagOf("GET", "/ndjson-keepalive-none")},
+			{"/binary-none", "application/octet-stream", frames("raw", "abcdef"), "the app sent its answer's headers and nothing of its body; waited 300ms of keploy's runnable time for GET /binary-none" + tagOf("GET", "/binary-none")},
 		} {
 			ok, err := readStream(t, stream(c.path, c.ctype, c.chunks))
 			if ok || !errors.Is(err, ErrAnswerStalled) || errors.Is(err, ErrStreamHeldOpen) || fmtErr(err) != c.says {
@@ -502,7 +502,7 @@ func TestEveryAnswerThatNeverEndedEndsOnTheStallRule(t *testing.T) {
 	t.Run("an answer that stops part-way", func(t *testing.T) {
 		tc := &models.TestCase{Name: "partial", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: url + "/partial"}}
 		resp, err := SimulateHTTP(context.Background(), tc, "s", zap.NewNop(), stallConfig())
-		if want := "the app's answer stopped part-way, after 10 bytes of its body; waited 300ms of keploy's runnable time for GET /partial"; !errors.Is(err, ErrAnswerStalled) || fmtErr(err) != want || !AnswerBegan(err) {
+		if want := "the app's answer stopped part-way, after 10 bytes of its body; waited 300ms of keploy's runnable time for GET /partial" + tagOf("GET", "/partial"); !errors.Is(err, ErrAnswerStalled) || fmtErr(err) != want || !AnswerBegan(err) {
 			t.Fatalf("%v; want %q", err, want)
 		}
 		// Its start goes with the error, for the replay to judge it, and
@@ -785,3 +785,40 @@ func TestHeadersOnlyMakesUpNoStart(t *testing.T) {
 		t.Fatalf("headersOnly(nil) = %+v; want none", got)
 	}
 }
+
+// tagOf is what a stall's text writes after an HTTP request: its path tag
+// (models.PathTag), in this run.
+func tagOf(method, path string) string {
+	return " " + models.PathTagLabel(models.PathTag(context.Background(), method, path))
+}
+
+// A log line names the stalled request by its method and its path's shape,
+// followed by its path tag; the error, which the test report keeps, names it
+// whole, followed by the same tag.
+func TestAStallIsLoggedWithTheRequestsShape(t *testing.T) {
+	const s = "kpLogCanary7Qx3vZ9mW2"
+	err := wrapErr("test-1", &AnswerStallError{Target: "GET /v1/reset/" + s + "?access_token=" + s, Waited: time.Second})
+	tag := tagOf("GET", "/v1/reset/"+s)
+	if !strings.Contains(err.Error(), "for GET /v1/reset/"+s+"?access_token="+s+tag) {
+		t.Fatalf("precondition: the error keeps the request whole for the report, beside its tag: %q", err)
+	}
+	got := LoggableAnswerError(err)
+	if strings.Contains(got, s[:8]) || !strings.HasSuffix(got, "for GET /{}/{}/{}"+tag) || !strings.HasPrefix(got, "test-1: ") {
+		t.Fatalf("LoggableAnswerError = %q, want the request's shape and its tag %q", got, tag)
+	}
+	grpc := &AnswerStallError{Target: "/orders.Orders/Get", Keepalives: true}
+	if got := LoggableAnswerError(grpc); got != grpc.Error() {
+		t.Fatalf("a gRPC method is a name, kept: %q", got)
+	}
+}
+
+// wrapErr is err wrapped with prefix, as a caller wraps it.
+func wrapErr(prefix string, err error) error { return &prefixed{prefix: prefix, err: err} }
+
+type prefixed struct {
+	prefix string
+	err    error
+}
+
+func (p *prefixed) Error() string { return p.prefix + ": " + p.err.Error() }
+func (p *prefixed) Unwrap() error { return p.err }

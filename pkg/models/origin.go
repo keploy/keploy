@@ -43,12 +43,16 @@ type Origin struct {
 	Unnamed string `json:"unnamed,omitempty" yaml:"-" bson:"-"`
 	PID     uint32 `json:"pid,omitempty" yaml:"-" bson:"-"`
 	// Cmdline is, on a call only (UnmatchedCall.Source, never a mock), the
-	// whole command line of the process that made it, redacted as keploy's
-	// log of it is (containerkey.RedactArgs), and PID its kernel pid then
-	// too, so keploy mock's local receipt can name the process that made a
-	// call no test was charged with (Receipt.UnchargedMisses). Like Unnamed
-	// and PID, it only travels: no recording's file, test case's or
-	// report holds it (yaml and bson "-", and Persisted).
+	// whole command line of the process that made it, its secrets redacted
+	// (containerkey.RedactArgs) and the rest kept whole, a word with white
+	// space or a quote quoted (utils.JoinCommandLine), and PID its kernel
+	// pid then too, so keploy mock's local receipt can name the process that
+	// made a call no test was charged with (Receipt.UnchargedMisses).
+	// keploy's log of the process writes its words by their shape instead,
+	// but for its program, its flags' names and its short numbers
+	// (utils.RedactProcessArgv): its words are traffic. Like Unnamed and
+	// PID, it only travels: no recording's file, test case's or report holds
+	// it (yaml and bson "-", and Persisted).
 	Cmdline string `json:"cmdline,omitempty" yaml:"-" bson:"-"`
 }
 

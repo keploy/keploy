@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -179,10 +180,11 @@ func TestTheGateTakesTheSkipMapAndAcknowledgesIt(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil || ack.V != 1 || ack.Skips != 1 {
 		t.Fatalf("ack %s (%v)", rec.Body.String(), err)
 	}
-	// The needs ride the same push, and are acknowledged by count.
-	rec = call(t, a.HandleScopeGate, `{"run":null,"needs":{"o::TestUse":[{"test":"o::TestMake","reason":"r"}]}}`)
+	// The needs ride the same push, each with the values its test only
+	// receives, and are acknowledged by count.
+	rec = call(t, a.HandleScopeGate, `{"run":null,"needs":{"o::TestUse":[{"test":"o::TestMake","reason":"r"},{"test":"o::TestList","reason":"l","answers":["run-a"]}]}}`)
 	if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil || rec.Code != http.StatusOK || ack.Needs != 1 || ack.Skips != 0 ||
-		len(svc.needs["o::TestUse"]) != 1 || svc.needs["o::TestUse"][0] != (models.ScopeNeed{Test: "o::TestMake", Reason: "r"}) {
+		!reflect.DeepEqual(svc.needs["o::TestUse"], []models.ScopeNeed{{Test: "o::TestMake", Reason: "r"}, {Test: "o::TestList", Reason: "l", Answers: []string{"run-a"}}}) {
 		t.Fatalf("needs: %d %s, needs %v (%v)", rec.Code, rec.Body.String(), svc.needs, err)
 	}
 	// A push without a map (an empty one is left out of the JSON) skips nothing.

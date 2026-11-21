@@ -363,7 +363,15 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	case payloadType == mysql.COM_STMT_EXECUTE:
 		stmtID := stmtIDFromExecute(payload)
-		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements, decodeCtx.ClientCapabilities, decodeCtx.LongDataParams[stmtID], decodeCtx.StmtParamTypes[stmtID])
+		longData := decodeCtx.LongDataParams[stmtID]
+		if len(payload) >= 10 {
+			// Execution consumes any long-data parameters buffered for this
+			// statement even if decoding the rest of the packet fails (e.g. an
+			// unsupported parameter type), because the connection keeps
+			// recording subsequent commands on the same statement.
+			delete(decodeCtx.LongDataParams, stmtID)
+		}
+		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements, decodeCtx.ClientCapabilities, longData, decodeCtx.StmtParamTypes[stmtID])
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_EXECUTE packet: %w", err)
 		}
@@ -385,6 +393,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		}
 		// The statement is gone, and its ID may name another one later.
 		delete(decodeCtx.StmtParamTypes, pkt.StatementID)
+		delete(decodeCtx.LongDataParams, pkt.StatementID)
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_CLOSE), clientConn, mysql.COM_STMT_CLOSE, decodeCtx)
 
@@ -419,7 +428,9 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA), clientConn, mysql.COM_STMT_SEND_LONG_DATA, decodeCtx)
 	default:
-		logger.Debug("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Any("payload", payload), zap.Any("last operation", lastOp))
+		// Its size, never its bytes: an unknown command can carry a
+		// credential (COM_REGISTER_SLAVE's password) or data.
+		logger.Debug("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Int("payload_bytes", len(payload)), zap.Any("last operation", lastOp))
 		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), fmt.Sprintf("%#x", payloadType), clientConn, RESET, decodeCtx)
 	}
 

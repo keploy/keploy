@@ -179,12 +179,11 @@ func (m *MockManager) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
 
 var _ integrations.SharedReads = (*MockManager)(nil)
 
-// SharedGeneration, SharedMocks and the owned reads are the manager's while
-// the staging is still h's call's after they were read and h reads in the
-// view in force; they report false once the staging moved, when h reads
-// nothing (heldScope.held), and while h reads in another view
-// (heldScope.elsewhere): they are the view in force's open test's, which h's
-// reads are not.
+// SharedGeneration and SharedMocks are the manager's while the staging is
+// still h's call's after they were read and h reads in the view in force;
+// they report false once the staging moved, when h reads nothing
+// (heldScope.held), and while h reads in another view (heldScope.elsewhere):
+// they are the view in force's open test's, which h's reads are not.
 func (h *heldScope) SharedGeneration(kind models.Kind) (integrations.SharedGen, bool) {
 	g, ok := h.MockManager.SharedGeneration(kind)
 	if !ok || h.moved() || h.elsewhere() {
@@ -201,28 +200,69 @@ func (h *heldScope) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 	return perTest, session, true
 }
 
+// The owned reads are those of the view h's call was read in (ownedView), as
+// h's other reads are: keploy can decide a test's call after the replay
+// began the next test, and the call is still its own test's, one more than
+// that test recorded when it is one of that test's recordings (the own-call
+// check, integrations.OwnRepeatRead), as when keploy decides it at once. The
+// next test's recordings are never the call's own. Each reports false once
+// the staging moved (heldScope.held), while the view h reads in is no test's
+// (a pool view owns none), and once the view a round snapshot's call is
+// diagnosed in was replaced (heldScope.viewGone), checked after the read.
 func (h *heldScope) OwnedUnanswered() ([]*models.Mock, bool) {
-	owned, ok := h.MockManager.OwnedUnanswered()
-	if !ok || h.moved() || h.elsewhere() {
+	v := h.ownedView()
+	if v == nil {
+		return nil, false
+	}
+	owned := v.unanswered("")
+	if !h.ownedHeld() {
 		return nil, false
 	}
 	return owned, true
 }
 
 func (h *heldScope) OwnedRecordings() (uint64, []*models.Mock, bool) {
-	view, owned, ok := h.MockManager.OwnedRecordings()
-	if !ok || h.moved() || h.elsewhere() {
+	v := h.ownedView()
+	if v == nil || !h.ownedHeld() {
 		return 0, nil, false
 	}
-	return view, owned, true
+	return v.gen, v.owned, true
 }
 
 func (h *heldScope) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
-	live, ok := h.MockManager.OwnedUnansweredAt(view, at)
-	if !ok || h.moved() || h.elsewhere() {
+	v := h.ownedView()
+	if v == nil || v.gen != view {
+		return nil, false
+	}
+	live := v.unansweredAt(at)
+	if !h.ownedHeld() {
 		return nil, false
 	}
 	return live, true
+}
+
+// ownedView is the view h's owned reads are made in, while it is a test's
+// (nil otherwise): the view h's reads are made in (readView: its mark's, or
+// the view in force for a call decided in the test the store opens next and
+// for one whose consume the view in force refused), or, for a call marked
+// from a round snapshot, whose other reads are made in the view in force,
+// the view that snapshot read (heldIn).
+func (h *heldScope) ownedView() *exactView {
+	v := h.readView()
+	if h.snapped {
+		v = h.heldIn
+	}
+	if v != nil && v.test != "" {
+		return v
+	}
+	return nil
+}
+
+// ownedHeld reports whether an owned read made in ownedView is h's call's:
+// the staging is still the call's, and the view a round snapshot's call is
+// diagnosed in was not replaced.
+func (h *heldScope) ownedHeld() bool {
+	return !h.moved() && !h.viewGone()
 }
 
 var _ integrations.SharedReads = (*heldScope)(nil)

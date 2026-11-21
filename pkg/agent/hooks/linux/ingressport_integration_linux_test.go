@@ -329,7 +329,7 @@ func TestAPortWhoseSocketWentIsNotHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = cgf.Close() }()
-	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	cmd := exec.Command(appExe(), "-test.run=^$")
 	cmd.Env = append(os.Environ(), ingressSockHelperEnv+"=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(cgf.Fd()), Pdeathsig: syscall.SIGKILL}
 	stdin, _ := cmd.StdinPipe()

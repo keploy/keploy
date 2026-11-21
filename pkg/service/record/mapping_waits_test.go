@@ -26,6 +26,7 @@ type consumerRun struct {
 	r               *Recorder
 	db              *recMappingDB
 	waits           *mappingWaits
+	names           *captureNames
 	correlationMap  sync.Map
 	asyncMockIDs    sync.Map
 	shortPool       sync.Map
@@ -46,6 +47,7 @@ func startConsumerWith(t *testing.T, logger *zap.Logger) *consumerRun {
 	c := &consumerRun{
 		db:       &recMappingDB{},
 		waits:    newMappingWaits(),
+		names:    newCaptureNames(),
 		mappings: make(chan models.TestMockMapping),
 		mapped:   make(chan string, 64),
 		revoked:  make(chan string, 64),
@@ -55,16 +57,17 @@ func startConsumerWith(t *testing.T, logger *zap.Logger) *consumerRun {
 	go func() {
 		c.done <- c.r.consumeMappingsFor(context.Background(), "set-0", c.mappings,
 			&c.correlationMap, &c.asyncMockIDs, &c.dropped, c.waits,
-			func(tn string) { c.revoked <- tn }, &c.shortPool,
+			func(tn string, _ []time.Time) { c.revoked <- tn }, &c.shortPool,
 			func(tn string, entries []models.MockEntry) {
 				for _, e := range entries {
 					c.mapped <- tn + "/" + e.Name
 				}
-			})
+			}, nil, c.names)
 	}()
 	t.Cleanup(func() {
 		c.closeMappings()
 		c.waits.end()
+		c.names.end()
 		select {
 		case err := <-c.done:
 			assert.NoError(t, err)
@@ -225,7 +228,7 @@ func TestMappingWaits_NeverSavedMockIsLostAtTheRecordingsEnd(t *testing.T) {
 // maxHeldMappingEntries an entry is not held but settled at once, as one still
 // waiting at the end would be, so the waits never hold more than the cap. The
 // first entry the cap turns away is said once, in a Warn naming the cap, and
-// each such entry's "Failed to correlate" line says the cap, not the stream's
+// each such entry's debug line says the cap, not the stream's
 // end, is why.
 func TestMappingWaits_HeldEntriesAreBounded(t *testing.T) {
 	prev := maxHeldMappingEntries
@@ -251,7 +254,8 @@ func TestMappingWaits_HeldEntriesAreBounded(t *testing.T) {
 	capWarns := logs.FilterMessageSnippet("too many mapping entries are waiting").All()
 	require.Len(t, capWarns, 1, "the cap must be said once per recording")
 	assert.EqualValues(t, 2, capWarns[0].ContextMap()["maxHeldMappingEntries"])
-	for _, e := range logs.FilterMessageSnippet("Failed to correlate").All() {
+	assert.NotContains(t, capWarns[0].ContextMap(), "test", "the cap's line names a test (the agent's can be a request's own header)")
+	for _, e := range logs.FilterMessageSnippet(unmappedEntryLog).All() {
 		assert.Equal(t, lossNextStep(reasonCapFull), e.ContextMap()["next_step"],
 			"an entry the cap turned away was logged as if the stream had ended")
 	}
@@ -292,7 +296,7 @@ func TestMappingWaits_LossReasonsAreDistinct(t *testing.T) {
 	c.finish(t)
 
 	reasons := map[string]bool{}
-	for _, e := range logs.FilterMessageSnippet("Failed to correlate").All() {
+	for _, e := range logs.FilterMessageSnippet(unmappedEntryLog).All() {
 		reasons[e.ContextMap()["tempMockID"].(string)+": "+e.ContextMap()["next_step"].(string)] = true
 	}
 	assert.Equal(t, map[string]bool{
@@ -301,7 +305,7 @@ func TestMappingWaits_LossReasonsAreDistinct(t *testing.T) {
 	}, reasons)
 }
 
-// TestLossNextStep_EachReasonSaysItsOwnCause: a "Failed to correlate" line's
+// TestLossNextStep_EachReasonSaysItsOwnCause: an unmapped entry's debug line's
 // next_step is lossNextStep(why), and the rows compare a line against
 // lossNextStep(want), which holds however lossNextStep maps the reasons. So
 // this row pins the texts themselves: each reason a loss line can give names
@@ -654,7 +658,7 @@ func TestStart_NeverSentMockIsCountedAtTheStreamsEnd(t *testing.T) {
 	suite := run.stop(t)
 	assert.False(t, gaveUp(logs, "record")(), "the stop's drain had to give the recording's goroutines up")
 	assert.EqualValues(t, 1, suite["tests-short-pool"], "%v", suite)
-	lost := logs.FilterMessageSnippet("Failed to correlate").All()
+	lost := logs.FilterMessageSnippet(unmappedEntryLog).All()
 	require.Len(t, lost, 1)
 	assert.Equal(t, lossNextStep(reasonEnded), lost[0].ContextMap()["next_step"])
 }
@@ -797,11 +801,11 @@ func (run *recRun) stopGivenUp(t *testing.T, clk *armedClock) map[string]interfa
 	return run.tele.suite
 }
 
-// lossLines maps each "Failed to correlate" line's mock to its next_step.
+// lossLines maps each unmapped entry's debug line's mock to its next_step.
 func lossLines(t *testing.T, logs *observer.ObservedLogs) map[string]string {
 	t.Helper()
 	got := map[string]string{}
-	for _, e := range logs.FilterMessageSnippet("Failed to correlate").All() {
+	for _, e := range logs.FilterMessageSnippet(unmappedEntryLog).All() {
 		id, _ := e.ContextMap()["tempMockID"].(string)
 		_, dup := got[id]
 		require.False(t, dup, "two loss lines for %s", id)
@@ -954,7 +958,7 @@ func TestStart_WedgedConsumersReadyEntriesAreCounted(t *testing.T) {
 // never sends. The drop revokes test-1 (the recorder's own revoke, not the
 // agent's frame), and that revoke must release never-1's entry at once: it
 // settles while the streams are open, as a revoked test's entry (a Debug
-// line, no "Failed to correlate" Error), and test-1 is deleted, not counted
+// line, no unmapped-entry line), and test-1 is deleted, not counted
 // short.
 func TestStart_RecorderRevokeReleasesTheTestsHeldEntries(t *testing.T) {
 	release := make(chan struct{})
@@ -972,8 +976,10 @@ func TestStart_RecorderRevokeReleasesTheTestsHeldEntries(t *testing.T) {
 	assert.Contains(t, run.deleted(), "test-1", "a test that owned a dropped mock was not revoked")
 	assert.NotContains(t, suite, "tests-short-pool", "a revoked test was counted short: %v", suite)
 	assert.Empty(t, lossLines(t, logs), "a revoked test's entry was reported as lost")
-	assert.Len(t, logs.FilterMessageSnippet("not waiting for a revoked test's mock").
-		FilterField(zap.String("tempMockID", "never-1")).All(), 1)
+	revokedLines := logs.FilterMessageSnippet("not waiting for a revoked test's mock").
+		FilterField(zap.String("tempMockID", "never-1")).All()
+	require.Len(t, revokedLines, 1)
+	assert.NotContains(t, revokedLines[0].ContextMap(), "test", "a revoked entry's line names its test")
 }
 
 // TestStart_UntrackedDropSettlesAtOnceAndSaysSo: the dropped-mock set is

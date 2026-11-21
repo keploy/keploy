@@ -1,6 +1,7 @@
 package models
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -170,5 +171,48 @@ func TestHTTPResp_YAML_AContentTypeSentTwice(t *testing.T) {
 		if want := "data:one\n\ndata:two\n\n"; back.Body != want {
 			t.Errorf("an older recording's SSE events under %q were read back as %q; want the SSE they were, %q", contentType, back.Body, want)
 		}
+	}
+}
+
+// keploy records no streaming answer as a test case: one is a stream by its
+// Content-Type, unless HTTP says it has no body (an SSE endpoint's answer to a
+// HEAD, its 204 or its 304 is recorded as any answer is). A text/plain or an
+// octet-stream answer is no stream, however it is sent.
+func TestIsHTTPStreamResponse(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	for _, c := range []struct {
+		method      string
+		status      int
+		contentType string
+		want        bool
+	}{
+		{http.MethodGet, 200, "text/event-stream", true},
+		{http.MethodPost, 200, "text/event-stream; charset=utf-8", true},
+		{http.MethodGet, 200, "application/x-ndjson", true},
+		{http.MethodGet, 200, "application/ndjson", true},
+		{http.MethodGet, 200, "multipart/x-mixed-replace; boundary=frame", true},
+		{http.MethodGet, 200, "multipart/mixed; boundary=part", true},
+		{http.MethodGet, 500, "text/event-stream", true},
+		{http.MethodHead, 200, "text/event-stream", false},
+		{http.MethodGet, 204, "text/event-stream", false},
+		{http.MethodGet, 304, "application/x-ndjson", false},
+		{http.MethodGet, 200, "text/plain", false},
+		{http.MethodGet, 200, "application/octet-stream", false},
+		{http.MethodGet, 200, "application/json", false},
+		{http.MethodGet, 200, "application/stream+json", false},
+		{http.MethodGet, 200, "", false},
+	} {
+		resp := &http.Response{
+			StatusCode: c.status,
+			Header:     http.Header{"Content-Type": []string{c.contentType}},
+			Request:    &http.Request{Method: c.method},
+		}
+		if got := IsHTTPStreamResponse(resp); got != c.want {
+			t.Errorf("IsHTTPStreamResponse(%s, %d, %q) = %v; want %v", c.method, c.status, c.contentType, got, c.want)
+		}
+	}
+	// With no request to read the method of, the status and Content-Type say.
+	if !IsHTTPStreamResponse(&http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}}) {
+		t.Error("an SSE answer with no request is no stream; want one")
 	}
 }

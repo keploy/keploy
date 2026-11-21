@@ -53,7 +53,7 @@ func TestACaptureLossFailsTheOpenTestAndEveryLaterOne(t *testing.T) {
 	// The windows last: reading them ends the run.
 	w := windowOf(t, a, "o::TestDuring")
 	require.Equal(t, models.ScopeOutcomeFailed, w.Outcome)
-	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 3, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full"}}, w.Evidence.CaptureIncomplete)
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 3, What: "target_namespace_pids, E2BIG: the map had no room for it, usually because it is full", Err: -7}}, w.Evidence.CaptureIncomplete)
 	require.Equal(t, models.ScopeOutcomeFailed, windowOf(t, a, "o::TestAfter").Outcome)
 	require.Nil(t, windowOf(t, a, "o::TestBefore").Evidence, "a test that ended before the loss is not charged")
 }
@@ -193,6 +193,29 @@ func TestCaptureLossesAreTheHooksAndTheProxys(t *testing.T) {
 	a.Proxy = p
 	_, err = a.CaptureLosses(ctx)
 	require.ErrorIs(t, err, models.ErrCaptureLossesUnsupported)
+}
+
+// Each PID map's loss carries the kernel's errno for its own map's latest
+// refusal as data (models.CaptureLoss.Err), so a reader of both maps' losses
+// takes each one's cause from its own record, never from words.
+func TestEachPIDMapsLossCarriesItsOwnErrno(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Target: 4, LastTargetErr: -7, Excluded: 2, LastExcludedErr: -110}}
+	got, err := a.CaptureLosses(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{
+		{Kind: models.CaptureLossPIDMap, Count: 4, What: "target_namespace_pids, " + models.PIDMapRefusalCause(-7), Err: -7},
+		{Kind: models.CaptureLossPIDMapExcluded, Count: 2, What: "excluded_pids, " + models.PIDMapRefusalCause(-110), Err: -110},
+	}, got)
+}
+
+// Two sources of one kind keep the first errno either of them says.
+func TestMergeKindsKeepsTheFirstErrnoSaid(t *testing.T) {
+	k := models.CaptureLossPIDMap
+	require.Equal(t, models.CaptureLosses{{Kind: k, Count: 3, Err: -7}},
+		mergeKinds(models.CaptureLosses{{Kind: k, Count: 1}, {Kind: k, Count: 2, Err: -7}}), "the first that says one")
+	require.Equal(t, models.CaptureLosses{{Kind: k, Count: 3, Err: -110}},
+		mergeKinds(models.CaptureLosses{{Kind: k, Count: 1, Err: -110}, {Kind: k, Count: 2, Err: -7}}), "never a later one over it")
 }
 
 // lossReporter is a downstream build's own capture-loss count
@@ -544,9 +567,10 @@ func TestAnEndCutShortNamesItsTestToTheBytesWait(t *testing.T) {
 // A loss a cut-short end owned, counted after the run's last end, is in no
 // test's charge: the run's read of what no test was charged with takes it from
 // the proxy, and holds it however often it is made. One no read took before a
-// new session's reset is never dropped: it is the new run's, and no test of
-// the new run is charged with it, not even one of the owner's name.
-func TestALossOwnedAfterTheLastEndIsTheRunsAndOneLeftUnreadTheNextRuns(t *testing.T) {
+// new session's reset charges no later session: the reset logs it, and
+// neither the new run nor any of its tests is charged with it, not even one
+// of the owner's name.
+func TestALossOwnedAfterTheLastEndIsTheRunsAndOneLeftUnreadNoLaterSessions(t *testing.T) {
 	a, p := wireAgent(t, models.MODE_TEST)
 	var owned []coreAgent.OwnedLoss
 	a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
@@ -569,14 +593,14 @@ func TestALossOwnedAfterTheLastEndIsTheRunsAndOneLeftUnreadTheNextRuns(t *testin
 	require.Nil(t, windowOf(t, a, "o::TestLast").Evidence)
 	un, err := a.UnchargedCaptureLosses(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, models.CaptureLosses{loss}, un, "the next session's run")
+	require.Empty(t, un, "not the next session's run")
 }
 
 // keploy test takes, at each test case's end and at its set's end, what a
 // cut-short end owned, by test, each once: a pool call's between test cases
 // too, which reached no verdict before. None is in the counts its per-test
 // reads charge the open test case from. One the session before left unread
-// is the run's.
+// is no later session's (TestKeployTestsOwnedTakeReadsOnlyItsOwnSessions).
 func TestKeployTestTakesTheLossesACutShortEndOwned(t *testing.T) {
 	a, p := wireAgent(t, models.MODE_TEST)
 	var owned []coreAgent.OwnedLoss
@@ -601,7 +625,30 @@ func TestKeployTestTakesTheLossesACutShortEndOwned(t *testing.T) {
 	require.NoError(t, a.resetSession(ctx))
 	got, err = a.TakeOwnedCaptureLosses(ctx)
 	require.NoError(t, err)
-	require.Equal(t, []models.OwnedCaptureLoss{{Loss: gap}}, got, "the session before's, the run's")
+	require.Empty(t, got, "the session before's is no later session's")
+}
+
+// A proxy that stamps no session (no coreAgent.PairedBytesSessioner) hands
+// each loss as it counts it, made in the session open: a later session's
+// take reads it as that session's, never as an earlier session's that no
+// test or run is charged with (its Session is 0 whatever session is open).
+func TestAProxyThatStampsNoSessionHasEachSessionsTakeReadItsLosses(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	var owned []coreAgent.OwnedLoss
+	a.Proxy = ownedLossProxy{lossProxy: lossProxy{wireProxy: p}, owned: &owned}
+	if _, stamps := a.Proxy.(coreAgent.PairedBytesSessioner); stamps {
+		t.Fatal("premise: the proxy stamps no session")
+	}
+	ctx := context.Background()
+	for session := range 2 {
+		require.NoError(t, a.resetSession(ctx))
+		lost := models.CaptureLoss{Kind: models.CaptureLossAppBytesLost, Count: 1,
+			What: "from [::ffff:127.0.0.1]:50912, written in test-2, where keploy's wait for them was cut short"}
+		owned = []coreAgent.OwnedLoss{{Test: "test-2", Loss: lost}}
+		got, err := a.TakeOwnedCaptureLosses(ctx)
+		require.NoError(t, err)
+		require.Equal(t, []models.OwnedCaptureLoss{{Test: "test-2", Loss: lost}}, got, "session %d's take reads its loss", session+1)
+	}
 }
 
 // A TLS client's rejection of keploy's certificate is the test's it happened
@@ -1029,4 +1076,51 @@ func TestARecordChargesALateUnreadMockToItsOwnAttemptNotARetry(t *testing.T) {
 	require.NotNil(t, attempts[0].Evidence, "the first attempt's mock charges the first attempt")
 	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossContainerUnread, Count: 1, What: "container pg (postgres:16)"}}, attempts[0].Evidence.CannotCapture)
 	require.True(t, attempts[1].Evidence == nil || len(attempts[1].Evidence.CannotCapture) == 0, "the retry is untouched: %+v", attempts[1].Evidence)
+}
+
+// The evidence a test's harness and the receipts get keeps each host a loss
+// names whole, with no tag (models.CaptureLosses.Untagged): a tag names a host
+// only in its session, and the evidence outlives it. Its reason names the host
+// whole, with no tag either.
+func TestATestsEvidenceNamesItsHostsWithNoTag(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	lp := lossProxy{wireProxy: p}
+	a.Proxy = lp
+	a.proven.losses = a.markCaptureLosses(context.Background())
+	claimSelf(t, a)
+	keys := models.NewLogKeySession()
+	host := "orders-svc:443"
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestDuring"))
+	require.Nil(t, serr)
+	to := keys.LossText().Say("to ").Host(host)
+	lp.losses = models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: to.String(), Hosts: to.Hosts(), HostsListed: true}}
+	a.Proxy = lp
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestDuring", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "(to "+host+")", "the reason lost the host")
+	require.NotContains(t, e.Reason, keys.HostTag(host), "the reason carries a tag")
+	w := windowOf(t, a, "o::TestDuring")
+	require.Equal(t, models.CaptureLosses{{Kind: models.CaptureLossTLSAbort, Count: 1, What: "to " + host, Hosts: models.LossHosts{{Name: host, At: len("to ")}}, HostsListed: true}}, w.Evidence.CaptureIncomplete, "the evidence keeps the host whole, at its place, with no tag")
+}
+
+// Two sources of one kind join their Whats with the hosts each names, each
+// at its place in the joined What, listed only where both were
+// (models.CaptureLoss.JoinWhat).
+func TestMergeKindsKeepsTheHostsEachWhatNames(t *testing.T) {
+	keys := models.NewLogKeySession()
+	k := models.CaptureLossParserPanic
+	aw := keys.LossText().Say("the http parser, on a connection to ").Host("orders-svc:80")
+	bw := keys.LossText().Say("the generic parser, on a connection to ").Host("redis-cache:6379")
+	a := models.CaptureLoss{Kind: k, Count: 1, What: aw.String(), Hosts: aw.Hosts(), HostsListed: true}
+	b := models.CaptureLoss{Kind: k, Count: 1, What: bw.String(), Hosts: bw.Hosts(), HostsListed: true}
+	got := mergeKinds(models.CaptureLosses{a, b})
+	require.Equal(t, models.CaptureLosses{{Kind: k, Count: 2, What: a.What + "; " + b.What, Hosts: append(a.Hosts, b.Hosts.Shifted(len(a.What)+len("; "))...), HostsListed: true}}, got)
+	require.NotContains(t, got.LogText(), "orders-svc")
+	require.Contains(t, got.LogText(), "on a connection to {}:6379 "+keys.HostTag("redis-cache"), "the second What's host is not shaped at its place")
+	b = models.CaptureLoss{Kind: k, Count: 1, What: "the generic parser, on a connection to 10.0.0.1:6379", HostsListed: true}
+	older := b
+	older.HostsListed = false
+	require.False(t, mergeKinds(models.CaptureLosses{a, older})[0].HostsListed, "joined with an older agent's What, its hosts are not all listed")
 }

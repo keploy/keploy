@@ -77,7 +77,7 @@ func TestSetScopeMocksCountsTheTestsBegun(t *testing.T) {
 type fakeAsyncParser struct{}
 
 func (fakeAsyncParser) MatchesLane(_ *models.Mock, _ models.AsyncLane) bool { return true }
-func (fakeAsyncParser) MatchRequestShape(_, _ *models.Mock, _ models.AsyncLane) (bool, string) {
+func (fakeAsyncParser) MatchRequestShape(_ context.Context, _, _ *models.Mock, _ models.AsyncLane) (bool, string) {
 	return true, ""
 }
 func (fakeAsyncParser) EmptyResponse(_ models.AsyncLane) ([]byte, error)           { return []byte("KA"), nil }

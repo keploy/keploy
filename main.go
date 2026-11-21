@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
@@ -186,6 +187,11 @@ func start(ctx context.Context) {
 			}
 		}()
 	}
+
+	// Reach the docker daemon the docker CLI reaches (its current context, such
+	// as Rancher Desktop's), before the sudo re-exec: root's docker
+	// configuration does not name the user's context.
+	engine.UseDockerContext(logger)
 
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
@@ -360,7 +366,9 @@ func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink)
 	if path == "" {
 		return nil, nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	// Only inside the folder path is in: in the agent container that is the
+	// host's keploy folder, whose files come with the repository.
+	f, err := log.OpenDebugFile(path)
 	if err != nil {
 		logger.Warn("KEPLOY_DEBUG_FILE set but could not be opened; continuing without debug capture",
 			zap.String("path", path), zap.Error(err))

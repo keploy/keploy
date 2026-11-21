@@ -109,7 +109,9 @@ func TestAnExtraCallOfATestsOwnStaysItsMissAfterABackgroundSpend(t *testing.T) {
 // ending test's miss, as an extra call and a recording made elsewhere do. A
 // repeat made before the ending test began is charged to no test, and names
 // no window: which test's was open then is not known here. One filed as the
-// test ended, made after it began, names the test's window.
+// test ended, made after it began, names the test's window. A repeat whose
+// call was marked (models.MissMark) names the window it was marked in, the
+// view's test or none for a pool view, however late it was filed.
 func TestOnlyARepeatOfASpentBackgroundRecordingIsChargedToNoTest(t *testing.T) {
 	began := time.Now()
 	worker := &models.RepeatNote{Mock: "mock-bg", Background: models.RepeatBackgroundWorker}
@@ -125,19 +127,21 @@ func TestOnlyARepeatOfASpentBackgroundRecordingIsChargedToNoTest(t *testing.T) {
 		{Protocol: "HTTP", ActualSummary: "GET /sweep", Destination: "extra:80", Kind: models.MissExtraCall, Recorded: 1, At: began.Add(time.Second), Repeat: worker},
 		{Protocol: "HTTP", ActualSummary: "GET /sweep", Destination: "elsewhere:80", Kind: models.MissInTest, NotOwned: true, ClosestMock: "mock-y", At: began.Add(time.Second), Repeat: worker},
 		{Protocol: "HTTP", ActualSummary: "GET /plain", Destination: "plain:80", Kind: models.MissInTest, At: began.Add(time.Second)},
+		{Protocol: "HTTP", ActualSummary: "GET /sweep", Destination: "marked-in-z:80", Kind: models.MissInTest, At: began.Add(time.Second), Repeat: worker, Marked: models.MissMark{Epoch: 1, Bounds: 2, Test: "o::TestZ", Known: true}},
+		{Protocol: "HTTP", ActualSummary: "GET /sweep", Destination: "marked-in-pool:80", Kind: models.MissOutsideTest, At: began.Add(time.Second), Repeat: worker, Marked: models.MissMark{Epoch: 1, Bounds: 5, Known: true}},
 	}
 	for _, c := range []struct {
 		name    string
 		beganAt time.Time
 		windows map[string]string // uncharged destination -> its WindowOf
 	}{
-		{"begin known", began, map[string]string{"worker:80": "o::TestA", "pool:80": "o::TestA", "early:80": "", "untimed:80": "", "ending:80": "o::TestA"}},
-		{"begin not known", time.Time{}, map[string]string{"worker:80": "", "pool:80": "", "early:80": "", "untimed:80": "", "ending:80": ""}},
+		{"begin known", began, map[string]string{"worker:80": "o::TestA", "pool:80": "o::TestA", "early:80": "", "untimed:80": "", "ending:80": "o::TestA", "marked-in-z:80": "o::TestZ", "marked-in-pool:80": ""}},
+		{"begin not known", time.Time{}, map[string]string{"worker:80": "", "pool:80": "", "early:80": "", "untimed:80": "", "ending:80": "", "marked-in-z:80": "o::TestZ", "marked-in-pool:80": ""}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a, p := wireAgent(t, models.MODE_TEST)
 			p.misses = append([]models.UnmatchedCall(nil), misses...)
-			ev, err := a.testEvidence(context.Background(), "o::TestA", false, c.beganAt)
+			ev, err := a.testEvidence(context.Background(), "o::TestA", false, testBegin{at: c.beganAt})
 			require.NoError(t, err)
 			var listed []string
 			for _, m := range ev.Misses {

@@ -234,7 +234,7 @@ func TestTheHooksSayHowTheApplicationReleasedItsConnection(t *testing.T) {
 		{"its process shuts its end down, then exits on its own", "shutdown", 0, 0, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-test.run=^$")
+			cmd := exec.Command(appExe(), "-test.run=^$")
 			cmd.Env = append(os.Environ(), heldConnHelperEnv+"="+strconv.Itoa(lnPort))
 			stdin, err := cmd.StdinPipe()
 			if err != nil {
