@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"go.uber.org/zap"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg"
+	"go.uber.org/zap"
 )
 
 func TestItemsContainerUnmarshal_DoesNotTreatFoldersAsRequests(t *testing.T) {
@@ -179,4 +179,80 @@ func TestConstructRequest_UrlencodedBodyReachesTheTestcaseEncoded(t *testing.T) 
 		"name":  {"A&B+C"},
 		"email": {"dev+test@example.com"},
 	}, parsed)
+}
+
+func TestReplaceTemplateVarsResolvesPostmanVariableNames(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		vars  map[string]string
+		want  string
+	}{
+		{
+			name:  "hyphenated key",
+			input: "{{base-url}}/users",
+			vars:  map[string]string{"base-url": "https://example.test"},
+			want:  "https://example.test/users",
+		},
+		{
+			name:  "dotted key",
+			input: "{{api.base}}/users",
+			vars:  map[string]string{"api.base": "https://example.test"},
+			want:  "https://example.test/users",
+		},
+		{
+			name:  "underscore key",
+			input: "{{base_url}}/users",
+			vars:  map[string]string{"base_url": "https://example.test"},
+			want:  "https://example.test/users",
+		},
+		{
+			name:  "padded hyphenated key",
+			input: "{{ base-url }}/users",
+			vars:  map[string]string{"base-url": "https://example.test"},
+			want:  "https://example.test/users",
+		},
+		{
+			name:  "unknown hyphenated key stays verbatim",
+			input: "{{base-url}}/users",
+			vars:  map[string]string{"other-key": "https://example.test"},
+			want:  "{{base-url}}/users",
+		},
+		{
+			name:  "name with a space stays verbatim",
+			input: "{{base url}}/users",
+			vars:  map[string]string{"base url": "https://example.test"},
+			want:  "{{base url}}/users",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := replaceTemplateVars(tt.input, tt.vars)
+			if got != tt.want {
+				t.Fatalf("replaceTemplateVars(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConstructRequestResolvesHyphenatedVariableInURLAndCurl(t *testing.T) {
+	req := &PostmanRequest{
+		Method: "GET",
+		URL:    map[string]interface{}{"raw": "{{base-url}}/users"},
+	}
+
+	got := constructRequest(req, map[string]string{"base-url": "https://example.test"})
+
+	if got.URL != "https://example.test/users" {
+		t.Fatalf("URL = %q, want %q", got.URL, "https://example.test/users")
+	}
+
+	curl := pkg.MakeCurlCommand(got)
+	if strings.Contains(curl, "{{base-url}}") {
+		t.Fatalf("curl command still carries the unresolved placeholder: %q", curl)
+	}
+	if !strings.Contains(curl, "https://example.test/users") {
+		t.Fatalf("curl command does not carry the resolved url: %q", curl)
+	}
 }
