@@ -138,6 +138,15 @@ jobs:
         run: go test -count=1 -run "^(TestPeerGone|TestPeerGoneByTheSocketsState|TestAwaitPeerReset|TestTCPStateOnWindows)$" ./pkg/agent/proxy/util/
         shell: cmd
 
+      # A taken port on Windows: the proxy's bind and the DNS servers' tell
+      # Winsock's WSAEADDRINUSE as a taken port (neterr.IsAddrInUse), and a
+      # port the proxy may not move off fails the start as one to start again
+      # on new ports (utils.ErrPortTaken). Only these rows of
+      # ./pkg/agent/proxy/ run here (see the package's line above).
+      - name: Test the proxy's taken port on Windows (amd64)
+        run: go test -count=1 -run "^(TestATakenPortThatMayNotMoveFailsAsOneToStartAgain|TestTheDNSServersBindIsAStageOfTheAgentsStart)$" ./pkg/agent/proxy/
+        shell: cmd
+
       # The Windows stop of a native app (utils.interruptProcessTree): one that
       # had to force-kill the app says so, so a test set's end it cut is not
       # judged (P101-b-o). It takes ~30 s, most of it the stop's own 10 s
@@ -152,10 +161,7 @@ jobs:
 
       # The agent's start on Windows, which has no PTY: what the command
       # prints reaches the tee the CLI reads a failed start's reason from, and
-      # with no tee the command prints to keploy's own console. The row was
-      # added with the code it tests, which no Windows host or Wine was at
-      # hand to run, so this job is its first Windows run; the package's other
-      # tests have not been shown to pass here.
+      # with no tee the command prints to keploy's own console.
       - name: Test the agent command's output on Windows (amd64)
         run: go test -count=1 -run "TestAWindowsCommandsOutputReachesItsTee" ./pkg/platform/http/utils/
         shell: cmd
