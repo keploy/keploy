@@ -239,6 +239,13 @@ type Compose struct {
 	// the original order, and with it the comments and any other tooling's
 	// top-level keys.
 	raw *yaml.Node
+
+	// resolved is what docker compose makes of the project this document is
+	// part of, set by the lookup that found the app in it
+	// (FindContainerInCompose, FindContainerInComposeFiles): every file's
+	// services, each with its container_name as compose resolves it. nil for
+	// a document parsed any other way.
+	resolved *composeIdentity
 }
 
 // UnmarshalYAML captures the original mapping alongside the decoded fields, so
@@ -411,6 +418,7 @@ func (idc *Impl) FindContainerInCompose(ctx context.Context, content []byte, sco
 		// A service an included file brings is not keyed in the document.
 		return nil, fmt.Errorf("compose service %q, container %q, is not keyed in the in-memory compose document keploy rewrites (an included file's service cannot be rewritten)", service, containerName)
 	}
+	compose.resolved = ident
 	return &ComposeServiceInfo{
 		// ComposePath is intentionally empty — content lives in memory.
 		Networks:       networks,
@@ -551,6 +559,7 @@ func (idc *Impl) FindContainerInComposeFiles(ctx context.Context, composePaths [
 			return nil, fmt.Errorf("read compose file %s: %w", composePath, err)
 		}
 		if networks, ports, found := idc.serviceByKey(compose, service); found {
+			compose.resolved = ident
 			return &ComposeServiceInfo{
 				ComposePath:    composePath,
 				Networks:       networks,
@@ -1424,11 +1433,11 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 	// "keploy-agent" is keploy's internal SERVICE KEY, not the agent's container
 	// name: opts.KeployContainer is a randomised `keploy-v3-<rand>` on every
 	// docker run, so there is no container-name clash and docker accepts the file
-	// happily. What breaks is the lookup -- findServiceNodeAndName("keploy-agent")
-	// matches on container_name too, and reaches the USER's service first. keploy
-	// then MOVES the app's `dns` onto that unrelated service, overwriting whatever
-	// dns it declared, while the agent that actually owns the network namespace
-	// gets none. Nothing errors; the recording is simply wrong.
+	// happily. What breaks is a lookup of the agent that takes a service by key
+	// or container_name, service by service, as the enterprise compose hook's
+	// does on this document next (keploy's own, findServiceNodeAndName, takes
+	// every key first): it reaches the USER's service first and makes the
+	// agent's edits there. Nothing errors; the recording is simply wrong.
 	//
 	// Checked before GenerateKeployAgentService so a doomed run does not first
 	// fire the enterprise compose hook.
@@ -1450,6 +1459,26 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 			return fmt.Errorf("service %q already uses container_name "+
 				"\"keploy-agent\"; rename it so keploy can add its own",
 				aliasTarget(e.key).Value)
+		}
+	}
+
+	// The same refusal in the project as docker compose resolves it, which
+	// every keploy run has (the lookup that found the app resolved it): every
+	// file's services, each container_name interpolated. So
+	// `container_name: ${AGENT:-keploy-agent}` is refused as the literal is,
+	// and so is a keploy-agent service another -f file keys, which compose
+	// would merge into keploy's agent. A document its caller parsed itself
+	// has no resolution, and only the names it writes, checked above.
+	if ident := compose.resolved; ident != nil {
+		for _, svc := range ident.services() {
+			if svc == "keploy-agent" {
+				return fmt.Errorf("the compose project already defines a service " +
+					"named \"keploy-agent\"; rename it so keploy can add its own")
+			}
+			if ident.containerNames[svc] == "keploy-agent" {
+				return fmt.Errorf("service %q already uses container_name "+
+					"\"keploy-agent\"; rename it so keploy can add its own", svc)
+			}
 		}
 	}
 

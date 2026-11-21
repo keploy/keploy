@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +20,7 @@ import (
 // unset, and are as they were after the test.
 func composeProjectDir(t *testing.T, files map[string]string) string {
 	t.Helper()
-	for _, k := range []string{composeProjectNameEnv, composeEnvFilesEnv, "COMPOSE_DISABLE_ENV_FILE", "COMPOSE_PROFILES", composeCompatibilityEnv, "APP_CONTAINER", "APP_PROJECT", "PARSE_PROJECT"} {
+	for _, k := range []string{composeProjectNameEnv, composeEnvFilesEnv, "COMPOSE_DISABLE_ENV_FILE", "COMPOSE_PROFILES", composeCompatibilityEnv, "APP_CONTAINER", "APP_PROJECT", "PARSE_PROJECT", "AGENT_NAME"} {
 		if v, ok := os.LookupEnv(k); ok {
 			t.Cleanup(func() { _ = os.Setenv(k, v) })
 		} else {
@@ -440,6 +441,94 @@ func TestModifyComposeForAgent_HookGetsTheContainerName(t *testing.T) {
 		}
 		if len(got) != 2 || got[0] != "keploy-agent" || got[1] != tc.want {
 			t.Fatalf("opts.Container %q: the hook was handed %v, want [keploy-agent %s]", tc.container, got, tc.want)
+		}
+	}
+}
+
+// keploy's agent service is keploy-agent, so a service compose names
+// keploy-agent is refused however the files name it: through a variable, from
+// the project's .env, or in another -f file. Each lookup hands its resolution
+// on with the document ModifyComposeForAgent rewrites.
+func TestModifyComposeForAgent_AgentNameAsComposeResolvesIt(t *testing.T) {
+	const web = "services:\n  web:\n    image: x\n"
+	const side = web + "  side:\n    image: x\n    container_name: ${AGENT_NAME:-keploy-agent}\n"
+	const named = `service "side" already uses container_name "keploy-agent"`
+	for _, tc := range []struct {
+		name     string
+		files    map[string]string
+		paths    []string
+		inMemory bool
+		want     string // "": accepted; else the refusal says it
+	}{
+		{"a variable's default", map[string]string{"compose.yml": side}, []string{"compose.yml"}, false, named},
+		{"a variable's default, in memory", map[string]string{"compose.yml": side}, nil, true, named},
+		{"the .env sets another", map[string]string{"compose.yml": side, ".env": "AGENT_NAME=side-1\n"}, []string{"compose.yml"}, false, ""},
+		{"the .env sets another, in memory", map[string]string{"compose.yml": side, ".env": "AGENT_NAME=side-1\n"}, nil, true, ""},
+		{"the .env sets it", map[string]string{
+			"compose.yml": web + "  side:\n    image: x\n    container_name: ${AGENT_NAME}\n",
+			".env":        "AGENT_NAME=keploy-agent\n",
+		}, []string{"compose.yml"}, false, named},
+		{"another file keys it", map[string]string{
+			"compose.yml": web, "agent.yml": "services:\n  keploy-agent:\n    image: mine\n",
+		}, []string{"compose.yml", "agent.yml"}, false, `the compose project already defines a service named "keploy-agent"`},
+		{"another file names it", map[string]string{
+			"compose.yml": web, "side.yml": "services:\n  side:\n    image: x\n    container_name: keploy-agent\n",
+		}, []string{"compose.yml", "side.yml"}, false, named},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := composeProjectDir(t, tc.files)
+			t.Chdir(dir)
+			var info *ComposeServiceInfo
+			var err error
+			if tc.inMemory {
+				info, err = findInContent(t, tc.files["compose.yml"], ComposeScope{}, "web")
+			} else {
+				info, err = findIn(t, dir, tc.paths, ComposeScope{}, "web")
+			}
+			if err != nil {
+				t.Fatalf("finding web: %v", err)
+			}
+			idc := &Impl{logger: zap.NewNop(), conf: &config.Config{}}
+			err = idc.ModifyComposeForAgent(info.Compose, models.SetupOptions{}, info.AppServiceName)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("refused: %v", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Fatalf("got %v, want the refusal %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A document compose's schema refuses is refused with compose's own message,
+// never a panic in its loader, which keploy runs with the schema unchecked.
+func TestComposeIdentity_SchemaRefusalIsComposesError(t *testing.T) {
+	for _, tc := range []struct{ name, doc, want string }{
+		{"the app's networks left empty", "services:\n  web:\n    image: x\n    networks:\n", "services.web.networks must be a array"},
+		{"another service's volumes left empty", "services:\n  web:\n    image: x\n  db:\n    image: x\n    volumes:\n", "services.db.volumes must be a array"},
+		{"a service with no body", "services:\n  web:\n    image: x\n  db:\n", "services.db must be a mapping"},
+	} {
+		for _, inMemory := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/in-memory=%v", tc.name, inMemory), func(t *testing.T) {
+				dir := composeProjectDir(t, map[string]string{"compose.yml": tc.doc})
+				t.Chdir(dir)
+				var err error
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							err = fmt.Errorf("keploy panicked: %v", r)
+						}
+					}()
+					if inMemory {
+						_, err = findInContent(t, tc.doc, ComposeScope{}, "web")
+					} else {
+						_, err = findIn(t, dir, []string{"compose.yml"}, ComposeScope{}, "web")
+					}
+				}()
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("got %v, want compose's %q", err, tc.want)
+				}
+			})
 		}
 	}
 }
