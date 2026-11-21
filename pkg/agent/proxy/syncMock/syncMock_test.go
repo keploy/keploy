@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2242,11 +2243,17 @@ func TestAddMockStampsTheAddressItsConnectionReached(t *testing.T) {
 	}
 }
 
+var workerInstanceTestConnSeq atomic.Uint64
+
 // Under the proven switch every mock a parser hands over carries the keploy
 // instance (a test worker's) its connection was stamped with, read while
 // that connection is still open; without the switch it carries none.
 func TestAddMockStampsItsConnectionsWorkerInstance(t *testing.T) {
-	const conn = "add-mock-instance"
+	// starts.Default outlives the test: the connection stays known after its
+	// ForgetOrigin (among the last closed), and InstanceEnded marks it ended.
+	// A later run (go test -count=2) noting the same connection again would
+	// find it ended and stamp no instance, so each run notes its own.
+	conn := "add-mock-instance-" + strconv.FormatUint(workerInstanceTestConnSeq.Add(1), 10)
 	starts.Default.InstanceBegan(3)
 	starts.Default.NoteOriginIn(conn, 4242, 3)
 	t.Cleanup(func() { starts.Default.ForgetOrigin(conn); starts.Default.InstanceEnded(3) })
