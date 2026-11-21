@@ -3,10 +3,12 @@ package http
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 
@@ -220,8 +222,7 @@ func TestSameCallDrift(t *testing.T) {
 // is made once for its match, however many checks read it. Each report
 // carries the served recording's request as renderMockRequest renders it,
 // rendered once for the calls it serves. A body is read again when the
-// recording's body is not the one it was read from, and the kept bodies
-// start again from none past ownBodiesMaxBytes.
+// recording's body is not the one it was read from.
 func TestEachRecordingsBodyIsReadOnce(t *testing.T) {
 	setProven(t, false)
 	h := newHTTP()
@@ -277,15 +278,115 @@ func TestEachRecordingsBodyIsReadOnce(t *testing.T) {
 	if r, ok := o.read(&models.Mock{}); ok || r.json() != nil {
 		t.Fatal("a recording of no request has a body")
 	}
-	big := &models.Mock{Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Body: `"` + strings.Repeat("x", ownBodiesMaxBytes) + `"`}}}
-	o.read(big)
-	if len(o.of) != 1 || o.bytes != len(big.Spec.HTTPReq.Body) {
-		t.Fatalf("past ownBodiesMaxBytes ownBodies keeps %d bodies of %d bytes, want only the last", len(o.of), o.bytes)
+	if third, _ := o.read(m); third != second || o.kept() != 1 {
+		t.Fatalf("a recording read again keeps %d reads, the same one %v: want its one read", o.kept(), third == second)
 	}
-	o.read(m)
-	if len(o.of) != 1 {
-		t.Fatalf("ownBodies keeps %d bodies past its bound, want 1", len(o.of))
+	runtime.KeepAlive(m)
+}
+
+// kept is how many recordings o keeps a read of.
+func (o *ownBodies) kept() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.of)
+}
+
+// graphqlPool is n recordings of POST /graphql, the ith (from first)
+// asking {"query":"<pad>","id":i}, each answered with answer bytes.
+func graphqlPool(first, n, pad, answer int) []*models.Mock {
+	out := make([]*models.Mock, n)
+	for i := range out {
+		out[i] = &models.Mock{
+			Name: "mock-" + strconv.Itoa(first+i),
+			Kind: models.HTTP,
+			Spec: models.MockSpec{
+				HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://api.local/graphql", Header: map[string]string{"Content-Type": "application/json"}, Body: `{"query":"` + strings.Repeat("x", pad) + `","id":` + strconv.Itoa(first+i) + `}`},
+				HTTPResp: &models.HTTPResp{StatusCode: 200, Body: strings.Repeat(string(rune('a'+i%26)), answer)},
+			},
+		}
 	}
+	return out
+}
+
+// liveHeap is the heap the live objects take, after a collection.
+func liveHeap() uint64 {
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.HeapAlloc
+}
+
+// What the parser keeps of a recording it read (its body, its print, its
+// read whole) goes with the recording: after the test sets a store let go
+// of are collected, the parser keeps nothing of them, and the heap holds
+// what it held before they were read, as it does where they were never
+// read (main: no read is kept). 40 sets of 200 recordings, each answered
+// with 32 KiB (250 MiB of answers), each read by the fuzzy fallback's
+// own-body check and the strict pass's, as each set is staged. Before, the
+// parser kept every recording by its pointer, its answer included, until
+// 8 MiB of request bodies had been read (25,000 recordings of 330 B): about
+// 260 MiB stayed alive.
+func TestWhatIsKeptOfARecordingGoesWithIt(t *testing.T) {
+	setProven(t, false)
+	const sets, perSet, answer = 40, 200, 32 << 10
+	stage := func(h *HTTP, read bool) {
+		for s := range sets {
+			ms := graphqlPool(s*perSet, perSet, 300, answer)
+			if read {
+				live := mocknoise.NewJSONBody([]byte(`{"query":"zz","id":-1}`))
+				h.sameCallBodies(ms, live, nil)
+				h.filterStrictNoiseMatches(ms, live, nil)
+			}
+		}
+	}
+	retained := func(read bool) (int64, int) {
+		h := newHTTP()
+		before := liveHeap()
+		stage(h, read)
+		// The runtime calls the cleanups of the recordings collected in a
+		// goroutine of its own, after a collection.
+		for deadline := time.Now().Add(30 * time.Second); h.ownBodies.kept() > 0 && time.Now().Before(deadline); {
+			runtime.GC()
+			time.Sleep(10 * time.Millisecond)
+		}
+		after := liveHeap()
+		runtime.KeepAlive(h)
+		return int64(after) - int64(before), h.ownBodies.kept()
+	}
+	base, _ := retained(false)
+	got, kept := retained(true)
+	if kept != 0 {
+		t.Fatalf("after %d sets were let go of, the parser keeps reads of %d of their recordings, want none", sets, kept)
+	}
+	if got-base > 16<<20 {
+		t.Fatalf("after %d sets were let go of, %d MiB stay alive, %d MiB where none was read: want what is kept of them gone with them", sets, got>>20, base>>20)
+	}
+}
+
+// A pool of recordings whose request bodies hold more than 8 MiB is read
+// once: each recording printed on the first call that reaches the
+// own-body check, and no recorded body read again on the calls after,
+// however many. Before, past 8 MiB of bodies the kept reads started again
+// from none on each pass: every call read every recording again, as much
+// as main's whole fuzzy fallback.
+func TestAPoolOverEightMiBIsReadOnce(t *testing.T) {
+	setProven(t, false)
+	const n, pad = 700, 12 << 10
+	h := newHTTP()
+	pool := graphqlPool(0, n, pad, 64)
+	before := ownBodyReads.Load()
+	h.sameCallBodies(pool, mocknoise.NewJSONBody([]byte(`{"query":"zz","id":-1}`)), nil)
+	if got := ownBodyReads.Load() - before; got != n {
+		t.Fatalf("the first call read %d recorded bodies, want each of the %d once", got, n)
+	}
+	before = ownBodyReads.Load()
+	for i := range 5 {
+		h.sameCallBodies(pool, mocknoise.NewJSONBody([]byte(`{"query":"zz","id":`+strconv.Itoa(-2-i)+`}`)), nil)
+	}
+	if got := ownBodyReads.Load() - before; got != 0 {
+		t.Fatalf("five calls after the first read %d recorded bodies of a pool of %d MiB, want none", got, n*pad>>20)
+	}
+	runtime.KeepAlive(pool)
 }
 
 // DiffBothWays reads a body as JSON only where both bodies are JSON: a form
