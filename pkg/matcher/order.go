@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -155,7 +156,15 @@ func leafValue(v interface{}) string {
 		return "s" + t
 	case bool:
 		return "b" + strconv.FormatBool(t)
+	case json.Number:
+		if r, ok := toBigRat(t); ok {
+			return "n" + r.RatString()
+		}
+		return "n" + t.String()
 	case float64:
+		if r, ok := toBigRat(t); ok {
+			return "n" + r.RatString()
+		}
 		return "n" + strconv.FormatFloat(t, 'g', -1, 64)
 	default:
 		return fmt.Sprintf("%T:%v", t, t)

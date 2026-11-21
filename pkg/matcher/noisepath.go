@@ -161,11 +161,12 @@ func BodyNoiseFromJSONDiff(expJSON, actJSON string, known map[string][]string, i
 		return nil, []NoiseSkip{{Reason: NoiseSkipStructural}}
 	}
 
-	var exp, act interface{}
-	if err := json.Unmarshal([]byte(expJSON), &exp); err != nil {
+	exp, err := UnmarshallJSON(expJSON, nil)
+	if err != nil {
 		return nil, []NoiseSkip{{Reason: NoiseSkipInvalidJSON}}
 	}
-	if err := json.Unmarshal([]byte(actJSON), &act); err != nil {
+	act, err := UnmarshallJSON(actJSON, nil)
+	if err != nil {
 		return nil, []NoiseSkip{{Reason: NoiseSkipInvalidJSON}}
 	}
 
@@ -507,7 +508,7 @@ func (w *noiseCandidateWalk) walk(key, id string, exp, act interface{}, ambiguou
 		}
 
 	default:
-		if reflect.DeepEqual(exp, act) {
+		if equalJSONNumbers(exp, act) || reflect.DeepEqual(exp, act) {
 			return
 		}
 		// What the walker can be told to ignore, and nothing more.

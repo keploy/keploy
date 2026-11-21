@@ -564,6 +564,104 @@ func TestJSONDiffWithNoiseControl_NumericObjectKey(t *testing.T) {
 	}
 }
 
+func TestJSONDiffWithNoiseControl_LargeIntegerPrecision(t *testing.T) {
+	tests := []struct {
+		name           string
+		exp            string
+		act            string
+		noise          map[string][]string
+		ignoreOrdering bool
+		wantExact      bool
+	}{
+		{
+			name:      "differing large integers above 2^53 (e.g. snowflake IDs) must not match",
+			exp:       `{"id": 1234567890123456789}`,
+			act:       `{"id": 1234567890123456700}`,
+			wantExact: false,
+		},
+		{
+			name:      "identical large integers above 2^53 must match",
+			exp:       `{"id": 1234567890123456789}`,
+			act:       `{"id": 1234567890123456789}`,
+			wantExact: true,
+		},
+		{
+			name:      "large integers with matching noise regex must pass",
+			exp:       `{"id": 1234567890123456789}`,
+			act:       `{"id": 1234567890123456700}`,
+			noise:     map[string][]string{"id": {"^12345678901234567.*$"}},
+			wantExact: true,
+		},
+		{
+			name:      "mathematically equivalent number spellings match (1 vs 1.0)",
+			exp:       `{"count": 1}`,
+			act:       `{"count": 1.0}`,
+			wantExact: true,
+		},
+		{
+			name:      "scientific notation equivalent to integer matches (1e3 vs 1000)",
+			exp:       `{"val": 1e3}`,
+			act:       `{"val": 1000}`,
+			wantExact: true,
+		},
+		{
+			name:           "large integers in arrays with ignoreOrdering true match when elements are permutations",
+			exp:            `{"ids": [1234567890123456789, 9876543210987654321]}`,
+			act:            `{"ids": [9876543210987654321, 1234567890123456789]}`,
+			ignoreOrdering: true,
+			wantExact:      true,
+		},
+		{
+			name:           "large integers in arrays with ignoreOrdering true fail when values differ slightly",
+			exp:            `{"ids": [1234567890123456789, 9876543210987654321]}`,
+			act:            `{"ids": [9876543210987654321, 1234567890123456700]}`,
+			ignoreOrdering: true,
+			wantExact:      false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e, a := tc.exp, tc.act
+			v, err := ValidateAndMarshalJSON(zap.NewNop(), &e, &a)
+			if err != nil {
+				t.Fatalf("ValidateAndMarshalJSON: %v", err)
+			}
+			res, err := JSONDiffWithNoiseControl(v, tc.noise, tc.ignoreOrdering, zap.NewNop())
+			if err != nil {
+				t.Fatalf("JSONDiffWithNoiseControl: %v", err)
+			}
+			if got := res.IsExact(); got != tc.wantExact {
+				t.Errorf("IsExact() = %v, want %v (differences: %v)", got, tc.wantExact, res.Differences())
+			}
+		})
+	}
+}
+
+func TestJSONFieldDiffs_LargeIntegerPrecision(t *testing.T) {
+	exp := `{"id": 1234567890123456789}`
+	act := `{"id": 1234567890123456700}`
+	diffs := JSONFieldDiffs(exp, act, nil, "body.", 0)
+	if len(diffs) == 0 {
+		t.Errorf("JSONFieldDiffs should report diff for differing large integers, got 0 diffs")
+	}
+}
+
+func TestUnmarshallJSON_Strictness(t *testing.T) {
+	// Trailing garbage must be rejected
+	if _, err := UnmarshallJSON(`{"a": 1} trailing`, zap.NewNop()); err == nil {
+		t.Errorf("expected error on trailing garbage after JSON")
+	}
+	// Whitespace-only trailing is valid
+	if v, err := UnmarshallJSON("{\"a\": 1} \n\t ", zap.NewNop()); err != nil || v == nil {
+		t.Errorf("expected success on trailing whitespace, got err: %v, v: %v", err, v)
+	}
+	// Empty string returns nil, nil
+	if v, err := UnmarshallJSON("", zap.NewNop()); err != nil || v != nil {
+		t.Errorf("expected nil, nil on empty string, got v: %v, err: %v", v, err)
+	}
+}
+
 // TestLooksLikeRegex pins the heuristic behind the sectioned-noise warning.
 // It must not flag OpenAPI/JSON-Schema document keys: telling a user to move
 // "$ref" into a regex position is worse than silence, because as a regex it
