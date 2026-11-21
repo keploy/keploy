@@ -594,16 +594,25 @@ func (r *Relay) run(ctx context.Context) error {
 	// would stop at its nudged read, with the end in its socket unread.
 	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[net.Conn]) {
 		halfClose := r.cfg.HalfCloseGrace >= 0 && errors.Is(err, io.EOF)
-		// The client's socket is asked before the half-close whether a FIN
-		// can go (clientClosedBeforeFIN): a shutdown of a connection the
-		// client has reset succeeds on Windows, and sends nothing.
-		clientFIN := halfClose && writeSide == &r.src && !r.clientClosedBeforeFIN()
 		if !halfClose {
 			closeStopping()
 			r.nudgeDeadline(nudgeSide.Load())
 			return
 		}
-		cerr := closeWrite(writeSide.Load())
+		// The client's socket is asked before the half-close whether a FIN
+		// can go (clientClosedBeforeFIN): a shutdown of a connection the
+		// client has reset succeeds on Windows, and sends nothing, where
+		// Linux's and macOS's fails (ENOTCONN). So the socket's answer is
+		// taken, not the shutdown's: a connection it says is closed is over
+		// (errClientClosedBeforeFIN), and no shutdown is tried.
+		toClient := writeSide == &r.src
+		var cerr error
+		if toClient && r.clientClosedBeforeFIN() {
+			cerr = errClientClosedBeforeFIN
+		} else {
+			cerr = closeWrite(writeSide.Load())
+		}
+		clientFIN := toClient && cerr == nil
 		if cerr != nil && !connOver(cerr) {
 			closeStopping()
 			r.nudgeDeadline(nudgeSide.Load())
@@ -611,7 +620,7 @@ func (r *Relay) run(ctx context.Context) error {
 		}
 		// A FIN not forwarded (cerr: the client's connection over already)
 		// was never sent.
-		if c := writeSide.Load(); clientFIN && cerr == nil && c != nil {
+		if c := writeSide.Load(); clientFIN && c != nil {
 			r.noteClientFINSent(*c)
 		}
 		if log := r.cfg.Logger; log != nil {
@@ -1535,6 +1544,11 @@ func closeWrite(c *net.Conn) error {
 func connOver(err error) bool {
 	return errors.Is(err, syscall.ENOTCONN)
 }
+
+// errClientClosedBeforeFIN is the half-close of a client connection whose
+// socket said it had closed (clientClosedBeforeFIN): over, as Linux's and
+// macOS's shutdown of it says (ENOTCONN).
+var errClientClosedBeforeFIN = fmt.Errorf("relay: the client's socket says its connection is closed, so no FIN can go: %w", syscall.ENOTCONN)
 
 // clearDeadline drops any read deadline previously installed on the
 // conn. Mirror of nudgeDeadline; errors are swallowed for the same

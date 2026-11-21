@@ -264,7 +264,8 @@ func (s *tcpClientSocket) proxyFINSent() { s.finSent.Store(true) }
 // closedBeforeFIN reports whether the connection had closed (the client reset
 // it) when the relay is about to half-close it. Windows' shutdown succeeds on
 // such a connection and sends no FIN (measured on Windows 11, loopback: 300
-// of 300), so the relay does not tell the socket of a FIN then: a FIN taken as
+// of 300), so the relay takes the connection as over then, as Linux's failed
+// shutdown says, and does not tell the socket of a FIN: a FIN taken as
 // sent would take one of the bytes in flight at the reset for it, and read a
 // byte of a chunk the client refused as taken (winTCPInfo.acked). False when
 // the socket cannot say, and when a reset comes in between this look and the
