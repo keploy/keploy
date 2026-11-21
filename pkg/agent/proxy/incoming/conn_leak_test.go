@@ -52,6 +52,7 @@ func TestIngressHandlersLeaveNothingBehindAClosedConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 		server, client := tcpPair(t)
+		_ = client.SetDeadline(time.Now().Add(hangBound))
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
@@ -67,7 +68,7 @@ func TestIngressHandlersLeaveNothingBehindAClosedConnection(t *testing.T) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 		_ = client.Close() // the client hangs up, as most do
-		<-done
+		waitBounded(t, done, fmt.Sprintf("connection %d's handler", i))
 		// What the caller (handleConnection) closes as it returns.
 		_ = server.Close()
 		_ = upConn.Close()
@@ -83,9 +84,9 @@ func TestIngressHandlersLeaveNothingBehindAClosedConnection(t *testing.T) {
 		}()
 		_ = clientSide.Close()
 		_ = appPeer.Close()
-		<-done
+		waitBounded(t, done, fmt.Sprintf("raw connection %d's passthrough", i))
 	}
-	pm.captures.Wait()
+	waitCaptures(t, pm)
 
 	if n, g := leakcheck.Parked("incoming.(*IngressProxyManager).handleHttp1ZeroCopy", "incoming.forwardRawTCP"); n != 0 {
 		t.Errorf("%d goroutines of the ingress's handlers are parked after the %d connections they served all ended; the first:\n%s", n, 2*conns, g)
@@ -102,8 +103,10 @@ func TestIngressHandlersLeaveNothingBehindAClosedConnection(t *testing.T) {
 // these pin it. Each waits until the handler has forwarded the client's bytes
 // (to the backend, or its answer back to the client), which it does after
 // registering the close, then checks the registration is live, stops the
-// ingress and waits for the handler to return. Nothing reads a clock: go
-// test's -timeout is the hang guard.
+// ingress and waits for the handler to return. No wait is left to the
+// package's -timeout: each read the row waits on has a deadline, and each
+// wait for a handler a bound (waitBounded), so one that never ends fails its
+// row by name.
 //
 // The zero-copy loop blocks in two places, so its close has two halves: the
 // upstream's, for a hung backend, and the client's, for a keep-alive client
@@ -116,6 +119,7 @@ func TestZeroCopyHTTPOnAHungBackendReturnsWhenTheIngressStops(t *testing.T) {
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 64)}
 	ctx := leakcheck.NewContext(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())))
 	backend, upConn := tcpPair(t) // a backend that reads the request and never answers
+	_ = backend.SetDeadline(time.Now().Add(hangBound))
 	server, client := tcpPair(t)
 	done := make(chan struct{})
 	go func() {
@@ -132,7 +136,7 @@ func TestZeroCopyHTTPOnAHungBackendReturnsWhenTheIngressStops(t *testing.T) {
 		t.Fatalf("the handler, blocked on a hung backend, has %d closes registered on the ingress's context, want 1", live)
 	}
 	ctx.Cancel()
-	<-done
+	waitBounded(t, done, "once the ingress stopped, the hung backend's connection's handler")
 }
 
 func TestZeroCopyHTTPOnAnIdleKeepAliveClientReturnsWhenTheIngressStops(t *testing.T) {
@@ -144,6 +148,7 @@ func TestZeroCopyHTTPOnAnIdleKeepAliveClientReturnsWhenTheIngressStops(t *testin
 	ctx := leakcheck.NewContext(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())))
 	backend, upConn := tcpPair(t)
 	server, client := tcpPair(t)
+	_ = client.SetDeadline(time.Now().Add(hangBound))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -181,8 +186,8 @@ func TestZeroCopyHTTPOnAnIdleKeepAliveClientReturnsWhenTheIngressStops(t *testin
 		t.Fatalf("the handler of an idle keep-alive client has %d closes registered on the ingress's context, want 1", live)
 	}
 	ctx.Cancel()
-	<-done
-	pm.captures.Wait() // the exchange's capture, on the stubbed hook
+	waitBounded(t, done, "once the ingress stopped, the idle keep-alive client's handler")
+	waitCaptures(t, pm) // the exchange's capture, on the stubbed hook
 }
 
 // waitParkedReading yields, by count, until a goroutine is parked on a socket
@@ -214,6 +219,7 @@ func TestRawPassthroughOfAnIdleConnectionReturnsWhenTheIngressStops(t *testing.T
 	ctx := leakcheck.NewContext(context.Background())
 	appSide, clientSide := tcpPair(t)
 	upSide, appPeer := tcpPair(t)
+	_ = appPeer.SetDeadline(time.Now().Add(hangBound))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -230,5 +236,5 @@ func TestRawPassthroughOfAnIdleConnectionReturnsWhenTheIngressStops(t *testing.T
 		t.Fatalf("the passthrough of an idle connection has %d closes registered on the ingress's context, want 1", live)
 	}
 	ctx.Cancel()
-	<-done
+	waitBounded(t, done, "once the ingress stopped, the idle raw passthrough")
 }

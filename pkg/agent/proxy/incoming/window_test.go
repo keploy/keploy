@@ -245,7 +245,7 @@ func ingressPipeOn(t *testing.T, ctx context.Context, pm *IngressProxyManager, u
 	t.Helper()
 	// Registered first, so it runs last: every capture the handler started is
 	// over before the next test swaps a hook or a semaphore it reads.
-	t.Cleanup(pm.captures.Wait)
+	t.Cleanup(func() { waitCaptures(t, pm) })
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

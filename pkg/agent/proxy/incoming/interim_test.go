@@ -220,7 +220,7 @@ func TestIngressForwardsInterimResponsesAndRecordsTheFinal(t *testing.T) {
 					t.Fatalf("recorded %d %q, want the final response, 200 %q", got.status, got.respBody, "final")
 				}
 				_ = client.Close()
-				<-done
+				waitBounded(t, done, "the connection's handler")
 			})
 		}
 	}
@@ -289,7 +289,7 @@ func TestIngressForwardsTheContinueBeforeTheBody(t *testing.T) {
 					t.Fatalf("recorded %+v, want %+v", got, want)
 				}
 				_ = client.Close()
-				<-done
+				waitBounded(t, done, "the connection's handler")
 			})
 		}
 	}
@@ -469,7 +469,7 @@ func TestIngressSendsNoInterimResponseToAnHTTP10Client(t *testing.T) {
 				t.Fatalf("recorded %d, want the final 200", got.status)
 			}
 			_ = client.Close()
-			<-done
+			waitBounded(t, done, "the connection's handler")
 		})
 	}
 }
@@ -650,7 +650,7 @@ func TestIngressRecordsAnUploadTheAppAnsweredAfterItsContinue(t *testing.T) {
 							got.method, len(got.reqBody), got.status, got.respBody, size, "deny")
 					}
 					_ = client.Close()
-					<-done
+					waitBounded(t, done, "the connection's handler")
 				})
 				if !ok {
 					return // one run that is not recorded is enough
@@ -908,7 +908,7 @@ func TestIngressForwardsInterimResponsesAfterARedial(t *testing.T) {
 				t.Fatalf("the app took %d connections, want the one dropped and the one the request was re-sent on", n)
 			}
 			_ = client.Close()
-			<-done
+			waitBounded(t, done, "the connection's handler")
 		})
 	}
 }
@@ -958,8 +958,8 @@ func TestIngressGivesItsSlotBackBeforeItLingers(t *testing.T) {
 			}
 			_ = first.Close() // ends the linger
 			_ = second.Close()
-			<-firstDone
-			<-secondDone
+			waitBounded(t, firstDone, "the first connection's handler")
+			waitBounded(t, secondDone, "the second connection's handler")
 		})
 	}
 }
@@ -968,7 +968,7 @@ func TestIngressGivesItsSlotBackBeforeItLingers(t *testing.T) {
 // agent does, until the test ends, and returns the listener's URL.
 func ingressServe(t *testing.T, ctx context.Context, pm *IngressProxyManager, upstream string) string {
 	t.Helper()
-	t.Cleanup(pm.captures.Wait)
+	t.Cleanup(func() { waitCaptures(t, pm) })
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
