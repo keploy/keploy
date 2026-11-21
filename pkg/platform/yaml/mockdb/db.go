@@ -95,6 +95,10 @@ type MockYaml struct {
 	// global — see useGobFormat.
 	MockFormat string
 
+	// reads are how far this MockYaml read each mock file: its prune keeps
+	// every mock past that point (live_pass.go).
+	reads readMarks
+
 	// OpenMockFile opens a set's mock file to write it, inside the
 	// recording: yaml.OpenFileInRecording when nil. A test stands a disk
 	// that fails behind it.
@@ -336,10 +340,16 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		mockFileName = ys.MockName
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
-	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
-	lock.Lock()
-	defer lock.Unlock()
+	// The file's appends are held only while the prune notes how far it reads
+	// and while it puts its result in place (see live_pass.go): a recording
+	// that a round prunes while it records goes on appending meanwhile.
+	return withRewriteLock(path, mockFileName, func() error {
+		return ys.updateMocks(ctx, testSetID, path, mockFileName, mockNames, pruneBefore, startupCutoffTime)
+	})
+}
 
+// updateMocks is UpdateMocks, under the file's rewrite lock.
+func (ys *MockYaml) updateMocks(ctx context.Context, testSetID, path, mockFileName string, mockNames map[string]models.MockState, pruneBefore time.Time, startupCutoffTime time.Time) error {
 	// gob is recorded as a single mocks.gob blob (orthogonal to the yaml/json
 	// StorageFormat axis). If we find one on disk, the read/prune path stays
 	// in gob land regardless of what ys.Format says; otherwise we fall through
@@ -377,13 +387,17 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	verdict := &pruneVerdict{keeps: func(m *models.Mock) bool {
 		return pruneKeeps(m, mockNames, pruneBefore, startupCutoffTime)
 	}}
-	st, err := ys.prunePass(ctx, path, mockFileName, detectedFormat, verdict)
+	// The second pass reads what the first did: the file up to where the
+	// first was pinned.
+	st, pinned, err := ys.prunePass(ctx, nil, path, mockFileName, detectedFormat, verdict)
 	if err == nil && st.again {
-		st, err = ys.prunePass(ctx, path, mockFileName, detectedFormat, verdict)
+		st, _, err = ys.prunePass(ctx, pinned, path, mockFileName, detectedFormat, verdict)
 	}
 	if err != nil {
 		return err
 	}
+	// The file read is replaced: a later prune judges what it reads again.
+	ys.forgetRead(path, mockFileName)
 
 	ys.Logger.Debug("pruned mocks successfully",
 		zap.String("testSetID", testSetID),
@@ -431,18 +445,27 @@ func (st *pruneStats) recordPruned(mock *models.Mock, debugEnabled bool) {
 }
 
 // prunePass reads the yaml/json mock file once, judging each mock with
-// verdict, and puts the mocks it keeps in place of the file; or, in a first
+// verdict, and puts the mocks it keeps in place of the file, with the mocks
+// appended to it since it was pinned after them (commitLive); or, in a first
 // pass that dropped a mock a kept one requires, discards what it wrote and
-// says so (pruneStats.again).
-func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, format yaml.Format, verdict *pruneVerdict) (pruneStats, error) {
+// says so (pruneStats.again). It reads the file up to its length now, or, given
+// at, up to where an earlier pass was pinned (pinMockFile), and returns what it
+// was pinned to.
+func (ys *MockYaml) prunePass(ctx context.Context, at os.FileInfo, path, mockFileName string, format yaml.Format, verdict *pruneVerdict) (pruneStats, os.FileInfo, error) {
 	var st pruneStats
 	ext := "." + format.FileExtension()
 	reader, err := yaml.NewRecordingMockReaderF(ctx, ys.Logger, ys.MockPath, path, mockFileName, format)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
-		return st, err
+		return st, nil, err
 	}
 	defer reader.Close()
+	pinned, lock, err := pinMockFile(path, mockFileName, reader, at)
+	if err != nil {
+		return st, nil, err
+	}
+	// What the round did not read it could not consume: kept.
+	readTo := ys.readUpTo(path, mockFileName, pinned)
 
 	rw := newMockFileRewriter(ys.Logger, ys.MockPath, path, mockFileName, format)
 	defer rw.discard()
@@ -456,32 +479,33 @@ func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, fo
 		}
 		if readErr != nil {
 			utils.LogError(ys.Logger, readErr, "failed to decode the file documents", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
-			return st, fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
+			return st, nil, fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
 		}
 		if decodeErr != nil {
-			return st, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
+			return st, nil, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
 		}
 		if doc.verbatim {
 			// A document this keploy cannot decode is not one it can judge,
 			// and a connection failure is not one it changes: copied through
 			// as it is (see fileDoc.verbatim).
 			if err := rw.copyDoc(doc); err != nil {
-				return st, err
+				return st, nil, err
 			}
 			if !doc.incomplete {
 				st.copied++
 			}
 			continue
 		}
+		verdict.unread = readTo >= 0 && doc.off >= readTo
 		for _, mock := range doc.mocks {
 			st.total++
 			keep, err := verdict.judge(mock)
 			if err != nil {
-				return st, err
+				return st, nil, err
 			}
 			if keep {
 				if err := rw.write(mock); err != nil {
-					return st, err
+					return st, nil, err
 				}
 				st.kept++
 				continue
@@ -495,12 +519,12 @@ func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, fo
 	_ = reader.Close()
 	if verdict.secondPass() {
 		st.again = true
-		return st, nil
+		return st, pinned, nil
 	}
 	if err := verdict.checkPlaces(); err != nil {
-		return st, err
+		return st, nil, err
 	}
-	return st, rw.commit()
+	return st, pinned, rw.commitLive(lock, pinned)
 }
 
 // updateMocksGob implements RemoveUnusedMocks for mocks.gob. The
@@ -670,10 +694,20 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		mockFileName = ys.MockName
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
-	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
-	lock.Lock()
-	defer lock.Unlock()
+	// As the prune, the write-back holds the file's appends only while it
+	// notes how far it reads and while it puts its result in place (see
+	// live_pass.go).
+	var out map[string][]string
+	err := withRewriteLock(path, mockFileName, func() error {
+		var err error
+		out, err = ys.persistLearnedLocked(ctx, testSetID, path, mockFileName, withNoise, binds, added)
+		return err
+	})
+	return out, err
+}
 
+// persistLearnedLocked is persistLearned, under the file's rewrite lock.
+func (ys *MockYaml) persistLearnedLocked(ctx context.Context, testSetID, path, mockFileName string, withNoise map[string]models.MockState, binds map[string]models.MockVariables, added map[string][]string) (map[string][]string, error) {
 	// merge applies the learned noise to one mock; returns true when it
 	// changed the mock, so a file nothing changed in is never rewritten.
 	// Every parser (HTTP included) stores noise uniformly on the
@@ -776,34 +810,42 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		return nil, nil
 	}
 
-	// eachDoc streams the file's documents to fn, closing the file before
-	// it returns.
-	eachDoc := func(fn func(doc fileDoc) error) error {
+	// eachDoc streams the file's documents, up to its length when eachDoc
+	// was called (pinMockFile), to fn, closing the file before it returns. It
+	// returns what it read the file up to, and the file's lock; reading is
+	// that file while it reads.
+	var reading os.FileInfo
+	eachDoc := func(fn func(doc fileDoc) error) (os.FileInfo, *sync.RWMutex, error) {
 		reader, err := yaml.NewRecordingMockReaderF(ctx, ys.Logger, ys.MockPath, path, mockFileName, detectedFormat)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		defer reader.Close()
+		pinned, lock, err := pinMockFile(path, mockFileName, reader, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		reading = pinned
 		fileLogger := ys.Logger.With(zap.String("mock_file", reader.Path()))
 		for {
 			doc, readErr, decodeErr := nextDoc(reader, fileLogger, true)
 			if errors.Is(readErr, io.EOF) {
-				return nil
+				return pinned, lock, nil
 			}
 			if readErr != nil {
-				return fmt.Errorf("failed to decode the file documents for noise persistence: %w", readErr)
+				return nil, nil, fmt.Errorf("failed to decode the file documents for noise persistence: %w", readErr)
 			}
 			if decodeErr != nil {
-				return fmt.Errorf("failed to decode the mocks in %s for noise persistence: %w", reader.Path(), decodeErr)
+				return nil, nil, fmt.Errorf("failed to decode the mocks in %s for noise persistence: %w", reader.Path(), decodeErr)
 			}
 			if err := fn(doc); err != nil {
-				return err
+				return nil, nil, err
 			}
 		}
 	}
 
 	changes := false
-	err = eachDoc(func(doc fileDoc) error {
+	_, _, err = eachDoc(func(doc fileDoc) error {
 		if doc.verbatim {
 			return nil
 		}
@@ -825,7 +867,16 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 	rw := newMockFileRewriter(ys.Logger, ys.MockPath, path, mockFileName, detectedFormat)
 	defer rw.discard()
 	total := 0
-	if err := eachDoc(func(doc fileDoc) error {
+	// Where what a read of this MockYaml took ends in the replacement: the
+	// replacement keeps every mock, in order (movedRead).
+	readTo, movedTo := int64(-2), int64(-1)
+	pinned, lock, err := eachDoc(func(doc fileDoc) error {
+		if readTo == -2 {
+			readTo = ys.readUpTo(path, mockFileName, reading)
+		}
+		if readTo >= 0 && movedTo < 0 && doc.off >= readTo {
+			movedTo = rw.offset()
+		}
 		if doc.verbatim {
 			// Copied as read (see fileDoc.verbatim).
 			return rw.copyDoc(doc)
@@ -853,11 +904,20 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 			}
 		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
-	if err := rw.commit(); err != nil {
+	if readTo >= 0 && movedTo < 0 {
+		movedTo = rw.offset()
+	}
+	if err := rw.commitLive(lock, pinned); err != nil {
 		return nil, err
+	}
+	if readTo >= 0 {
+		if now, err := yaml.StatInRecording(ys.MockPath, rw.targetPath); err == nil {
+			ys.movedRead(path, mockFileName, pinned, now, movedTo)
+		}
 	}
 	logPersisted(total)
 	return added, nil
@@ -2016,9 +2076,11 @@ func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string,
 	}
 
 	path := filepath.Join(ys.MockPath, testSetID)
-	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
-	lock.RLock()
-	defer lock.RUnlock()
+
+	// No lock is held for the read (see live_pass.go): a text file is read up
+	// to its length when it is pinned, which a recording appending to it
+	// meanwhile does not change, and a file a rewrite puts in its place is
+	// renamed over it, so the file opened is whole either way.
 
 	// Prefer gob binary format when present (low-latency record output).
 	// gob is mutually exclusive with the yaml/json text formats, so we
@@ -2133,6 +2195,15 @@ func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string,
 		return models.TestSetMocks{}, err
 	}
 	defer reader.Close()
+	pinned, _, err := pinMockFile(path, mockFileName, reader, nil)
+	if err != nil {
+		return models.TestSetMocks{}, err
+	}
+	// What a replay's read takes is what a prune of this MockYaml may judge
+	// (readUpTo); a walk (visit) serves no replay.
+	if visit == nil {
+		ys.noteRead(path, mockFileName, pinned)
+	}
 
 	// The decoders' skip ERRORs name the mock, and mock names repeat in every
 	// test set, so they say which file.

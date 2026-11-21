@@ -15,8 +15,9 @@ import (
 // names the cap. The mocks a held entry waits for are the ones the agent has
 // sent and this recorder has not saved yet, so a healthy recording stays far
 // below it however loaded its host is; only a stream that names mocks it never
-// sends can reach it. A revoked test's entries are not held (revoke), so the
-// tests the agent revokes over a mock it never sent do not count toward it.
+// sends can reach it. The entries of a capture the agent revoked are not held
+// (liveRevokes.heldOut), so the tests the agent revokes over a mock it never
+// sent do not count toward it.
 //
 // A package-level var, not a const, only so a test can shrink it. Never
 // reassigned in production code.
@@ -57,8 +58,8 @@ const (
 	// reasonCapFull: maxHeldMappingEntries entries were already waiting, so
 	// this one was not held.
 	reasonCapFull
-	// reasonRevoked: the entry's test is revoked (deleted at the recording's
-	// end), so its mock is no longer waited for.
+	// reasonRevoked: the entry's test is revoked (deleted as soon as it can
+	// be), so its mock is no longer waited for.
 	reasonRevoked
 	// reasonAbandoned: the recording's teardown gave the mock loop up (its
 	// drain timed out) before the mock's outcome was told.
@@ -67,6 +68,11 @@ const (
 	// teardown gave the mapping consumer up (its drain timed out) before it
 	// applied the entry.
 	reasonConsumerGivenUp
+	// reasonStreamLost: the mock stream ended with no mock left for the entry,
+	// and without the agent's word that it had sent all it had (its end
+	// marker): the agent went with mocks it had not sent, so the mock is
+	// lost, not merely unmatched, and its test is revoked (endLost).
+	reasonStreamLost
 )
 
 // heldEntry is one mapping entry waiting for its mock, or handed back.
@@ -109,9 +115,14 @@ type mappingWaits struct {
 	wake chan struct{}
 	// ended is set once the mock stream is over: no outcome comes any more.
 	ended bool
-	// revoked are the tests revoked so far: their entries are not held. One
-	// name per revoked test, as the recording's own revoke set keeps.
-	revoked map[string]struct{}
+	// lost is set when the mock stream ended without the agent's word that it
+	// had sent all it had (endLost): an entry with no mock is a loss.
+	lost bool
+	// revokes are the recording's revokes, by the capture each is about
+	// (liveRevokes): an entry under a name that designates a capture the agent
+	// revoked is not held (heldOut). Set once by Start, before the waits are
+	// used; nil (a test's waits) holds every entry.
+	revokes *liveRevokes
 	// capSaid is set once the cap has turned an entry away.
 	capSaid bool
 	// limit is maxHeldMappingEntries, read once.
@@ -123,10 +134,9 @@ type mappingWaits struct {
 
 func newMappingWaits() *mappingWaits {
 	return &mappingWaits{
-		held:    map[string][]string{},
-		wake:    make(chan struct{}, 1),
-		revoked: map[string]struct{}{},
-		limit:   maxHeldMappingEntries,
+		held:  map[string][]string{},
+		wake:  make(chan struct{}, 1),
+		limit: maxHeldMappingEntries,
 	}
 }
 
@@ -157,8 +167,8 @@ func (w *mappingWaits) claim(test, tempID string, settle func() (models.MockEntr
 	switch {
 	case c.fate != fateUnknown:
 	case w.ended:
-		c.why = reasonEnded
-	case w.isRevoked(test):
+		c.why = w.endedWhy()
+	case w.revokes.heldOut(test):
 		c.why = reasonRevoked
 	case w.nHeld >= w.limit:
 		c.why = reasonCapFull
@@ -174,11 +184,6 @@ func (w *mappingWaits) claim(test, tempID string, settle func() (models.MockEntr
 		w.notify()
 	}
 	return c
-}
-
-func (w *mappingWaits) isRevoked(test string) bool {
-	_, ok := w.revoked[test]
-	return ok
 }
 
 // arrived tells the waits that tempID's mock has an outcome, published before
@@ -213,25 +218,27 @@ func (w *mappingWaits) handBack(tempID string, why lossReason) {
 	}
 }
 
-// revoke tells the waits these tests are revoked: they are deleted at the
-// recording's end, so nothing waits for their mocks any more. Their held
-// entries are handed back (they settle as reasonRevoked, unless their mock
-// came meanwhile), and a later entry of theirs is not held. It walks the held
-// entries once per call; revokes are rare (a capacity drop) and come a batch
-// of names per call.
+// revoke tells the waits a revoke took the captures these tests' names
+// designate (liveRevokes.revoke): they are deleted as soon as they can be, so
+// nothing waits for their mocks any more. Their held entries are handed back
+// (they settle as reasonRevoked, unless their mock came meanwhile). Whether a
+// later entry under the name is held is the capture's (heldOut). It walks the
+// held entries once per call; revokes are rare (a capacity drop) and come a
+// batch of names per call.
 func (w *mappingWaits) revoke(tests []string) {
 	if w == nil || len(tests) == 0 {
 		return
 	}
-	w.mu.Lock()
+	revoked := make(map[string]struct{}, len(tests))
 	for _, tn := range tests {
-		w.revoked[tn] = struct{}{}
+		revoked[tn] = struct{}{}
 	}
+	w.mu.Lock()
 	moved := false
 	for tempID, names := range w.held {
 		kept := names[:0]
 		for _, tn := range names {
-			if w.isRevoked(tn) {
+			if _, ok := revoked[tn]; ok {
 				w.ready = append(w.ready, heldEntry{test: tn, tempID: tempID, why: reasonRevoked})
 				w.nHeld--
 				moved = true
@@ -253,7 +260,22 @@ func (w *mappingWaits) revoke(tests []string) {
 
 // end tells the waits the mock stream is over. Every entry still held is
 // handed back: its mock never came. Idempotent.
-func (w *mappingWaits) end() {
+func (w *mappingWaits) end() { w.endWith(false) }
+
+// endLost is end for a mock stream the agent ended without its word that it
+// had sent all it had: every entry still held, and every later one whose mock
+// never came, is a loss (reasonStreamLost), and its test is revoked.
+func (w *mappingWaits) endLost() { w.endWith(true) }
+
+// endedWhy is why an entry of an ended stream has no mock; with w.mu held.
+func (w *mappingWaits) endedWhy() lossReason {
+	if w.lost {
+		return reasonStreamLost
+	}
+	return reasonEnded
+}
+
+func (w *mappingWaits) endWith(lost bool) {
 	if w == nil {
 		return
 	}
@@ -263,10 +285,12 @@ func (w *mappingWaits) end() {
 		return
 	}
 	w.ended = true
+	w.lost = lost
+	why := w.endedWhy()
 	moved := w.nHeld > 0
 	for tempID, tests := range w.held {
 		for _, tn := range tests {
-			w.ready = append(w.ready, heldEntry{test: tn, tempID: tempID, why: reasonEnded})
+			w.ready = append(w.ready, heldEntry{test: tn, tempID: tempID, why: why})
 		}
 	}
 	clear(w.held)
@@ -283,7 +307,8 @@ func (w *mappingWaits) end() {
 //
 //   - ready: the entries handed back that the consumer has not applied (a
 //     consumer wedged in a write, while the mock loop ended). Each keeps the
-//     why it was handed back with, but a revoked test's says reasonRevoked.
+//     why it was handed back with, but one under a name a revoke killed says
+//     reasonRevoked (liveRevokes.heldOut).
 //   - held: the entries whose mock was never told (a mock loop wedged in a
 //     save or a hook). Each says reasonAbandoned.
 //
@@ -299,7 +324,7 @@ func (w *mappingWaits) abandon() (ready, held []heldEntry) {
 	ready = w.ready
 	w.ready = nil
 	for i := range ready {
-		if w.isRevoked(ready[i].test) {
+		if w.revokes.heldOut(ready[i].test) {
 			ready[i].why = reasonRevoked
 		}
 	}

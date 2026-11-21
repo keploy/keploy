@@ -57,7 +57,7 @@ func startConsumerWith(t *testing.T, logger *zap.Logger) *consumerRun {
 	go func() {
 		c.done <- c.r.consumeMappingsFor(context.Background(), "set-0", c.mappings,
 			&c.correlationMap, &c.asyncMockIDs, &c.dropped, c.waits,
-			func(tn string) { c.revoked <- tn }, &c.shortPool,
+			func(tn string, _ []time.Time) { c.revoked <- tn }, &c.shortPool,
 			func(tn string, entries []models.MockEntry) {
 				for _, e := range entries {
 					c.mapped <- tn + "/" + e.Name

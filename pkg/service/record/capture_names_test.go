@@ -1,8 +1,10 @@
 package record
 
 import (
+	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,12 +205,33 @@ func TestConsumeMappings_CaptureIDLostMockRevokesItsSavedName(t *testing.T) {
 
 // A revoke that names a capture id deletes the test case saved under it,
 // and nothing for one that was not saved or never came.
-func TestRevokedToDelete_CaptureIDs(t *testing.T) {
-	names := newCaptureNames()
-	names.inserted(capA, "get-kind-alpha-1", nil)
-	names.inserted(capB, "", errors.New("refused"))
-	inserted := map[string]struct{}{"get-kind-alpha-1": {}, "test-1": {}}
-	got := revokedToDelete([]string{capA, capB, capC, "test-1"}, inserted, nil, names)
+func TestLiveRevokes_CaptureIDs(t *testing.T) {
+	td := &recTestDB{}
+	var mu sync.Mutex
+	count := 0
+	lr := startLiveRevokes(context.Background(), zap.NewNop(), td, "set", &mu, &count)
+	save := func(tc *models.TestCase, savedAs string, err error) {
+		c := lr.arrive(tc)
+		require.NotNil(t, c)
+		lr.saving(c, tc.Name)
+		held := tc.Name
+		if err == nil {
+			tc.Name = savedAs
+		}
+		lr.saved(c, held, tc, err)
+	}
+	save(&models.TestCase{Kind: models.HTTP, CaptureID: capA}, "get-kind-alpha-1", nil)
+	save(&models.TestCase{Kind: models.HTTP, CaptureID: capB}, "", errors.New("refused"))
+	save(&models.TestCase{Kind: models.HTTP, Name: "test-1"}, "test-1", nil)
+	lr.revoke(capA, capB, capC, "test-1")
+	deleted, _, left := lr.end()
+	for _, n := range left {
+		deleted[n] = struct{}{}
+	}
+	got := make([]string, 0, len(deleted))
+	for n := range deleted {
+		got = append(got, n)
+	}
 	slices.Sort(got)
 	assert.Equal(t, []string{"get-kind-alpha-1", "test-1"}, got)
 }
@@ -261,4 +284,96 @@ func TestStart_CaptureIDMappingFiledUnderTheStoredName(t *testing.T) {
 	// entry was dropped then, not given up with the consumer by the drain.
 	assert.Zero(t, logs.FilterMessageSnippet("made no progress").Len(),
 		"the recording's drain gave up a consumer still holding a capture's entry: %v", logs.All())
+}
+
+// A test case the agent sent with a capture id and no name is saved under the
+// name the store gives it, and the agent's revoke of it names the capture id.
+// Revoked while the recording goes on, it is deleted while the recording goes
+// on, as a named one is.
+func TestACaptureIDTestCaseRevokedAfterItIsSavedIsDeletedWhileTheRecordingGoesOn(t *testing.T) {
+	lr := startLiveRecordingWith(t, &recTestDB{autoName: "get-kind"})
+	at := time.Now().Add(-time.Minute)
+	lr.mock(savedMock("mock-1"))
+	lr.sendTestCase(&models.TestCase{Kind: models.HTTP, CaptureID: capA,
+		HTTPReq: models.HTTPReq{Timestamp: at}, HTTPResp: models.HTTPResp{Timestamp: at.Add(time.Millisecond)}})
+	waitForPersistedTestCase(t, lr.db, "get-kind-1")
+	lr.mock(liveRevokeFrame(capA))
+	lr.waitDeleted("get-kind-1")
+	lr.stop(true)
+	require.Equal(t, 1, lr.deletedCount("get-kind-1"), "a revoked test case is deleted once")
+}
+
+// A test case the agent sent with a capture id, revoked by it before it
+// arrives, is not saved, and its mapping is left out with it; the next
+// capture is saved.
+func TestACaptureIDTestCaseRevokedBeforeItArrivesIsNotSaved(t *testing.T) {
+	lr := startLiveRecordingWith(t, &recTestDB{autoName: "get-kind"})
+	at := time.Now().Add(-time.Minute)
+	lr.mock(savedMock("mock-1"))
+	lr.mock(liveRevokeFrame(capA))
+	lr.mock(savedMock("mock-2"))
+	lr.waitMockSaved("mock-2")
+	for i, id := range []string{capA, capB} {
+		req := at.Add(time.Duration(i) * time.Millisecond)
+		lr.sendTestCase(&models.TestCase{Kind: models.HTTP, CaptureID: id,
+			HTTPReq: models.HTTPReq{Timestamp: req}, HTTPResp: models.HTTPResp{Timestamp: req.Add(time.Millisecond)}})
+	}
+	lr.mapping(models.TestMockMapping{TestName: capA, MockIDs: []string{"mock-1"}})
+	lr.mapping(models.TestMockMapping{TestName: capB, MockIDs: []string{"mock-2"}})
+	waitForPersistedTestCase(t, lr.db, "get-kind-1")
+	lr.db.mu.Lock()
+	inserted := append([]string(nil), lr.db.inserted...)
+	lr.db.mu.Unlock()
+	lr.stop(true)
+	require.Equal(t, []string{"get-kind-1"}, inserted, "the capture revoked by its capture id before it arrived was saved")
+	require.Zero(t, lr.deletedCount("get-kind-1"), "a test case nobody revoked was deleted")
+}
+
+// savedNameCapture is a test case that came with a capture id and no name,
+// requested at at: its store names it as it saves it.
+func savedNameCapture(at time.Time) *models.TestCase {
+	return &models.TestCase{Kind: models.HTTP, CaptureID: capA,
+		HTTPReq: models.HTTPReq{Timestamp: at}, HTTPResp: models.HTTPResp{Timestamp: at.Add(time.Millisecond)}}
+}
+
+// A capture id's mapping is filed under its test case's saved name as soon as
+// captureNames knows the name, on the mapping consumer's goroutine, so the
+// recorder's revoke under that name can reach liveRevokes before the save is
+// told to it. A mock that never came (no time) cannot tell the capture: the
+// name is killed, and the capture saved under it is not kept.
+func TestAnUntoldRevokeUnderACapturesSavedNameBeforeItsSaveIsToldKeepsNoCapture(t *testing.T) {
+	td := &recTestDB{}
+	var mu sync.Mutex
+	count := 0
+	lr := startLiveRevokes(context.Background(), zap.NewNop(), td, "set", &mu, &count)
+	tc := savedNameCapture(time.Now().Add(-time.Minute))
+	c := lr.arrive(tc)
+	require.NotNil(t, c)
+	lr.saving(c, "")
+	lr.revokeLost("get-kind-1", []time.Time{{}})
+	tc.Name = "get-kind-1"
+	lr.saved(c, "", tc, nil)
+	waitTestDeleted(t, td, "get-kind-1")
+	_, _, left := lr.end()
+	require.Empty(t, left)
+}
+
+// The same with a lost mock whose time the capture's window holds: the capture
+// is deleted while the recording goes on, as one the revoke found saved.
+func TestALostTimeUnderACapturesSavedNameBeforeItsSaveIsToldDeletesItLive(t *testing.T) {
+	td := &recTestDB{}
+	var mu sync.Mutex
+	count := 0
+	lr := startLiveRevokes(context.Background(), zap.NewNop(), td, "set", &mu, &count)
+	at := time.Now().Add(-time.Minute)
+	tc := savedNameCapture(at)
+	c := lr.arrive(tc)
+	require.NotNil(t, c)
+	lr.saving(c, "")
+	lr.revokeLost("get-kind-1", []time.Time{at.Add(500 * time.Microsecond)})
+	tc.Name = "get-kind-1"
+	lr.saved(c, "", tc, nil)
+	waitTestDeleted(t, td, "get-kind-1")
+	_, _, left := lr.end()
+	require.Empty(t, left, "the capture was left for the end's delete")
 }
