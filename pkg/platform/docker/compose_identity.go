@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -71,11 +70,7 @@ func loadComposeIdentity(ctx context.Context, paths []string, scope ComposeScope
 	for _, f := range envFiles {
 		// compose takes an env file from the current directory, with a
 		// leading ~ expanded as the shell expands it.
-		abs, err := filepath.Abs(composepaths.ExpandUser(f))
-		if err != nil {
-			return nil, fmt.Errorf("resolve compose env file %q: %w", f, err)
-		}
-		files = append(files, abs)
+		files = append(files, composepaths.ExpandUser(f))
 	}
 	o, err := cli.NewProjectOptions(paths,
 		cli.WithWorkingDirectory(scope.ProjectDir),
@@ -83,16 +78,11 @@ func loadComposeIdentity(ctx context.Context, paths []string, scope ComposeScope
 		cli.WithEnvFiles(files...),
 		cli.WithDotEnv,
 		cli.WithName(scope.ProjectName),
-		// Every profile: a service's container is named the same whether or
-		// not its profile is active, and an inactive one is still a service
-		// keploy was asked for by name.
-		cli.WithProfiles([]string{"*"}),
 		// Nothing below changes a container's name, and each can fail a file
-		// compose itself runs: a service's env_file or label_file missing on
-		// this machine, a newer schema than this library's, a dependency on a
-		// service another file brings.
-		cli.WithResolvedPaths(false),
-		cli.WithNormalization(false),
+		// compose itself runs: a dependency on a service another file
+		// brings, a service's env_file or label_file missing on this
+		// machine, a newer schema than this library's. Normalization stays
+		// on: compose lowercases the project's name: as it names containers.
 		cli.WithConsistency(false),
 		cli.WithoutEnvironmentResolution,
 		cli.WithoutLabelsResolution,

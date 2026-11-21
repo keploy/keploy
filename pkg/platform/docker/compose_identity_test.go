@@ -170,12 +170,34 @@ func TestComposeIdentity_ContainerNameFromAVariable(t *testing.T) {
 		{name: "a container_name inherited through extends",
 			files:     map[string]string{"compose.yml": "services:\n  app:\n    extends:\n      file: base.yml\n      service: base\n", "base.yml": "services:\n  base:\n    image: x\n    container_name: ${APP_CONTAINER:-extended}\n"},
 			container: "extended", wantService: "app"},
+		{name: "no container_name: the project from name:, lowercased as compose names it",
+			files:     map[string]string{"compose.yml": "name: ${APP_PROJECT:-Parse.Server}\nservices:\n  app:\n    image: x\n"},
+			container: "parseserver-app-1", wantService: "app"},
+		{name: "no container_name: name: as written is not the project's name",
+			files:     map[string]string{"compose.yml": "name: Parse-Server\nservices:\n  app:\n    image: x\n"},
+			container: "Parse-Server-app-1", wantErr: "not found"},
+		{name: "no container_name: a bare replica number is not a container",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			container: "12", wantErr: "not found"},
+		{name: "a dependency on a service another file brings does not matter",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n    depends_on: [elsewhere]\n    container_name: ${APP_CONTAINER:-depends}\n"},
+			container: "depends", wantService: "app"},
+		{name: "a service's label_file missing on this machine does not matter",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n    label_file: absent.labels\n    container_name: ${APP_CONTAINER:-withlabelfile}\n"},
+			container: "withlabelfile", wantService: "app"},
+		{name: "a field newer than keploy's compose schema does not matter",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n    a_field_from_a_later_compose: true\n    container_name: ${APP_CONTAINER:-newschema}\n"},
+			container: "newschema", wantService: "app"},
+		{name: "an --env-file named from the home directory",
+			files: map[string]string{"compose.yml": parseServerShape, "home.env": "APP_CONTAINER=from-home\n"},
+			env:   map[string]string{"HOME": "<dir>"}, scope: ComposeScope{EnvFiles: []string{"~/home.env"}},
+			container: "from-home", wantService: "parse-server"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := composeProjectDir(t, tc.files)
 			for k, v := range tc.env {
-				t.Setenv(k, v)
+				t.Setenv(k, strings.ReplaceAll(v, "<dir>", dir))
 			}
 			t.Chdir(dir)
 			info, err := findIn(t, dir, []string{"compose.yml"}, tc.scope, tc.container)
@@ -241,6 +263,23 @@ func TestComposeIdentity_IncludedServiceIsRefused(t *testing.T) {
 	}
 	if _, err := findIn(t, dir, []string{"compose.yml"}, ComposeScope{}, "web"); err != nil {
 		t.Fatalf("the including file's own service: %v", err)
+	}
+}
+
+// --project-directory names the project and holds the .env compose reads, as
+// for compose, wherever the files are.
+func TestComposeIdentity_ProjectDirectory(t *testing.T) {
+	dir := composeProjectDir(t, map[string]string{
+		"compose.yml": "services:\n  app:\n    image: x\n  web:\n    image: y\n    container_name: ${APP_CONTAINER:-dflt}\n",
+		"pd/.env":     "APP_CONTAINER=from-pd\n",
+	})
+	t.Chdir(dir)
+	scope := ComposeScope{ProjectDir: filepath.Join(dir, "pd")}
+	for container, want := range map[string]string{"pd-app-1": "app", "from-pd": "web"} {
+		info, err := findIn(t, dir, []string{"compose.yml"}, scope, container)
+		if err != nil || info.AppServiceName != want {
+			t.Fatalf("FindContainerInComposeFiles(%q) = %v, %v; want service %q", container, info, err, want)
+		}
 	}
 }
 
