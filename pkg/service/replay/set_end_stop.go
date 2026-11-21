@@ -7,6 +7,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -82,10 +83,11 @@ func wholeSetIgnored(ignored map[string][]string, id string) bool {
 }
 
 // lastSetThatRuns is the index in testSets of the last set that begins its
-// session on the agent (noLaterSetRuns), -1 for none: its last test case
-// carries KEPLOY-LAST-TESTCASE, and its final attempt stops the application
-// --keep-app-alive keeps across sets (P101-c), or, with the proven switch
-// off, a docker compose stack reused across them (stopForSetEndRead). A set
+// session on the agent (noLaterSetRuns), -1 for none: the last test case it
+// sends (lastSentOf) carries KEPLOY-LAST-TESTCASE, and its final attempt
+// stops the application --keep-app-alive keeps across sets (P101-c), or,
+// with the proven switch off, a docker compose stack reused across them
+// (stopForSetEndRead). A set
 // wholly ignored (wholeSetIgnored), or with no test case, returns before it
 // begins one (RunTestSet) and runs nothing of the app's: a stop at the run's
 // teardown, after every read, would leave its closes in no verdict, and no
@@ -109,6 +111,35 @@ func (r *Replayer) lastSetThatRuns(ctx context.Context, testSets []string) int {
 		return i
 	}
 	return -1
+}
+
+// lastSentOf is the test case of tests, in the order a pass of the set runs
+// them, whose request the pass sends last, nil when it sends none. In the last
+// set that runs (noLaterSetRuns) it carries KEPLOY-LAST-TESTCASE: never a test
+// case the pass fails unsent, which sends no request. The pass fails unsent
+// one refused when the set loaded (refused), and one whose URL the base path
+// cannot replace (requestAtBasePath, as applyBasePath reads it). That URL is
+// read as the set loaded it, before BeforeTestCaseRun, which only decrypts
+// the values in it, never its scheme and host; a retry cycle's pass runs only
+// test cases an earlier pass sent, the base path in their URLs already. A
+// pass's tests hold no test case outside -t's named ones, nor an ignored one:
+// RunTestSet leaves those out before its first pass. A set that sends none of
+// its test cases has failed each one, so a run whose last set that runs is
+// such a set sends no header, on a run that has already failed.
+func (r *Replayer) lastSentOf(tests []*models.TestCase, refused map[string][]templates.Refusal) *models.TestCase {
+	for i := len(tests) - 1; i >= 0; i-- {
+		tc := tests[i]
+		if len(refused[tc.Name]) > 0 {
+			continue
+		}
+		if r.config.Test.BasePath != "" && tc.Kind == models.HTTP {
+			if _, err := requestAtBasePath(r.config.Test.BasePath, tc.HTTPReq); err != nil {
+				continue
+			}
+		}
+		return tc
+	}
+	return nil
 }
 
 // keepAliveStopper gives the app --keep-app-alive keeps across a run's sets a

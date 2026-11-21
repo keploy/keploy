@@ -669,11 +669,11 @@ type Replayer struct {
 	isLastTestCase bool
 	// noLaterSetRuns: no set after the one running begins its session on the
 	// agent (lastSetThatRuns): each is wholly ignored or has no test case.
-	// The set is then the last that runs, not only the last by its place: its
-	// last test case carries KEPLOY-LAST-TESTCASE (an SDK's finalization, its
-	// coverage among it), and its final attempt stops the application
-	// --keep-app-alive keeps across sets (P101-c), or, with the proven switch
-	// off, a docker compose stack reused across them.
+	// The set is then the last that runs, not only the last by its place: the
+	// last test case it sends (lastSentOf) carries KEPLOY-LAST-TESTCASE (an
+	// SDK's finalization, its coverage among it), and its final attempt stops
+	// the application --keep-app-alive keeps across sets (P101-c), or, with
+	// the proven switch off, a docker compose stack reused across them.
 	noLaterSetRuns bool
 	// noSetFollows: the set running is the run's last by its place: every
 	// other set of the run has returned, its report written, before it
@@ -4076,6 +4076,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// step learned there, the one cycle it learns in. nil while no retry
 	// cycle ran.
 	var firstCycleLearned map[string]models.MockState
+	// lastStream: the deferred streaming test case the streaming pass sends
+	// last (lastSentOf), in the last set that runs: it, not one of the
+	// passes before it, carries KEPLOY-LAST-TESTCASE. nil when that pass
+	// sends none: the last of the passes before it then carries it.
+	var lastStream *models.TestCase
+	if r.noLaterSetRuns {
+		deferred := make([]*models.TestCase, 0, len(streamingTests))
+		for _, st := range streamingTests {
+			deferred = append(deferred, st.testCase)
+		}
+		lastStream = r.lastSentOf(deferred, refusedTests)
+	}
 	itr := 1
 	if r.config.RetryPassing {
 		itr = 5
@@ -4156,6 +4168,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var currentSuccess int
 		currentPassingMocks := make(map[string]models.MockState)
 
+		// lastInPass: the test case whose request this pass sends last
+		// (lastSentOf), in the last set that runs, when the streaming pass
+		// after it sends none (lastStream). A retry cycle's pass sends it
+		// on its own last.
+		var lastInPass *models.TestCase
+		if r.noLaterSetRuns && lastStream == nil {
+			lastInPass = r.lastSentOf(testsToRun, refusedTests)
+		}
+
 		// Labelled so the two type-assertion failure paths inside
 		// `switch testCase.Kind` can leave the LOOP. A bare `break` there exits
 		// only the switch, and execution falls through to the scoring switch
@@ -4169,9 +4190,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		for idx, testCase := range testsToRun {
 			tmplPass.reach(testCase)
 
-			// The run's last test case, of the last set that runs
-			// (noLaterSetRuns), carries KEPLOY-LAST-TESTCASE.
-			if idx == len(testsToRun)-1 && r.noLaterSetRuns && len(streamingTests) == 0 {
+			// The run's last test case, the pass's last sent of the last
+			// set that runs (lastInPass), carries KEPLOY-LAST-TESTCASE.
+			if testCase == lastInPass {
 				r.isLastTestCase = true
 				testCase.IsLast = true
 			}
@@ -5412,9 +5433,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		for i, deferred := range streamingTests {
 			tc := deferred.testCase
 
-			// Set isLastTestCase on the last deferred streaming test: it is the true last
-			// test to execute in the entire run, so finalization must trigger here, not in Phase 1.
-			if i == len(streamingTests)-1 && r.noLaterSetRuns {
+			// The last deferred streaming test case the pass sends
+			// (lastStream) is the run's last test case, of the last set
+			// that runs: finalization triggers here, not in Phase 1.
+			if tc == lastStream {
 				r.isLastTestCase = true
 				tc.IsLast = true
 			}
