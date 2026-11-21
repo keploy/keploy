@@ -18,6 +18,10 @@ func TestWaitForSurvivor_RealTimerDrainsAcrossIdleWindowsThenStalls(t *testing.T
 			WaitForSurvivor(finished, delivered.Load, RelayDrainIdle)
 			close(done)
 		}()
+		defer func() {
+			close(finished)
+			<-done
+		}()
 
 		// Deliver bytes across three full production idle windows (90s total),
 		// each arriving before its window expires.
@@ -71,6 +75,10 @@ func TestWaitForSurvivor_RealTimerReturnsImmediatelyOnFinish(t *testing.T) {
 			WaitForSurvivor(finished, delivered.Load, RelayDrainIdle)
 			close(done)
 		}()
+		defer func() {
+			close(finished)
+			<-done
+		}()
 
 		time.Sleep(5 * time.Second)
 		finished <- struct{}{}
@@ -97,6 +105,10 @@ func TestWaitForSurvivor_ResetsFullIdleWindowAfterProgress(t *testing.T) {
 		go func() {
 			WaitForSurvivor(finished, delivered.Load, RelayDrainIdle)
 			close(done)
+		}()
+		defer func() {
+			close(finished)
+			<-done
 		}()
 
 		// Deliver once before the first tick so the timer resets, then stay

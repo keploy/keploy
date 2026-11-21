@@ -2,14 +2,13 @@ package util
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"net"
-	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/memconn"
 	"go.uber.org/zap"
 )
 
@@ -18,193 +17,6 @@ import (
 // RelayDrainIdle directly over in-memory half-closable conns, so none of them
 // race wall-clock sleeps against this value.
 const testDrainIdle = 400 * time.Millisecond
-
-var errMemConnReset = errors.New("read: connection reset by peer")
-
-// memStream is one unidirectional byte pipe of an in-memory net.Conn pair.
-// Every blocking wait uses bubble-local channels so testing/synctest treats
-// blocked Reads and Writes as durably blocked.
-type memStream struct {
-	data   chan []byte
-	closed chan struct{}
-
-	mu           sync.Mutex
-	isClosed     bool
-	readerClosed bool
-	reset        bool
-	closeErr     error
-	rem          []byte
-}
-
-func newMemStream() *memStream {
-	return &memStream{
-		data:   make(chan []byte, 64),
-		closed: make(chan struct{}),
-	}
-}
-
-func (s *memStream) write(p []byte) (int, error) {
-	select {
-	case <-s.closed:
-		return 0, net.ErrClosed
-	default:
-	}
-	if len(p) == 0 {
-		return 0, nil
-	}
-	cp := make([]byte, len(p))
-	copy(cp, p)
-	select {
-	case <-s.closed:
-		return 0, net.ErrClosed
-	case s.data <- cp:
-		return len(p), nil
-	}
-}
-
-func (s *memStream) read(p []byte) (int, error) {
-	if err := s.abortErr(); err != nil {
-		return 0, err
-	}
-	s.mu.Lock()
-	if len(s.rem) > 0 {
-		n := copy(p, s.rem)
-		s.rem = s.rem[n:]
-		s.mu.Unlock()
-		return n, nil
-	}
-	s.mu.Unlock()
-
-	// Drain already-buffered bytes before reporting a clean EOF so data
-	// written prior to CloseWrite is always delivered first.
-	select {
-	case chunk := <-s.data:
-		if err := s.abortErr(); err != nil {
-			return 0, err
-		}
-		return s.consume(p, chunk), nil
-	default:
-	}
-
-	select {
-	case chunk := <-s.data:
-		if err := s.abortErr(); err != nil {
-			return 0, err
-		}
-		return s.consume(p, chunk), nil
-	case <-s.closed:
-		if err := s.abortErr(); err != nil {
-			return 0, err
-		}
-		select {
-		case chunk := <-s.data:
-			return s.consume(p, chunk), nil
-		default:
-			s.mu.Lock()
-			err := s.closeErr
-			s.mu.Unlock()
-			if err == nil {
-				err = io.EOF
-			}
-			return 0, err
-		}
-	}
-}
-
-func (s *memStream) consume(p, chunk []byte) int {
-	n := copy(p, chunk)
-	if n < len(chunk) {
-		s.mu.Lock()
-		s.rem = append(s.rem[:0], chunk[n:]...)
-		s.mu.Unlock()
-	}
-	return n
-}
-
-func (s *memStream) abortErr() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.readerClosed {
-		return net.ErrClosed
-	}
-	if s.reset {
-		return s.closeErr
-	}
-	return nil
-}
-
-func (s *memStream) closeWrite() {
-	s.mu.Lock()
-	if !s.isClosed {
-		s.isClosed = true
-		s.closeErr = io.EOF
-		close(s.closed)
-	}
-	s.mu.Unlock()
-}
-
-func (s *memStream) resetWrite(err error) {
-	s.mu.Lock()
-	s.reset = true
-	if !s.isClosed {
-		s.isClosed = true
-		s.closeErr = err
-		close(s.closed)
-	} else if !s.readerClosed {
-		s.closeErr = err
-	}
-	s.mu.Unlock()
-}
-
-func (s *memStream) closeRead() {
-	s.mu.Lock()
-	s.readerClosed = true
-	if !s.isClosed {
-		s.isClosed = true
-		s.closeErr = net.ErrClosed
-		close(s.closed)
-	}
-	s.mu.Unlock()
-}
-
-// memConn is an in-memory net.Conn that supports independent half-close
-// (CloseWrite) and peer reset (Reset) without OS sockets, so RelayRawPassthrough
-// can be driven on real time.Timer and RelayDrainIdle inside testing/synctest.
-type memConn struct {
-	rd *memStream
-	wr *memStream
-}
-
-func newMemConnPair() (*memConn, *memConn) {
-	aToB := newMemStream()
-	bToA := newMemStream()
-	return &memConn{rd: bToA, wr: aToB}, &memConn{rd: aToB, wr: bToA}
-}
-
-func (c *memConn) Read(p []byte) (int, error)       { return c.rd.read(p) }
-func (c *memConn) Write(p []byte) (int, error)      { return c.wr.write(p) }
-func (c *memConn) CloseWrite() error                { c.wr.closeWrite(); return nil }
-func (c *memConn) LocalAddr() net.Addr              { return memAddr("mem") }
-func (c *memConn) RemoteAddr() net.Addr             { return memAddr("mem") }
-func (c *memConn) SetDeadline(time.Time) error      { return nil }
-func (c *memConn) SetReadDeadline(time.Time) error  { return nil }
-func (c *memConn) SetWriteDeadline(time.Time) error { return nil }
-
-func (c *memConn) Close() error {
-	c.rd.closeRead()
-	c.wr.closeWrite()
-	return nil
-}
-
-func (c *memConn) Reset() {
-	c.rd.closeRead()
-	c.wr.resetWrite(errMemConnReset)
-}
-
-type memAddr string
-
-func (a memAddr) Network() string { return string(a) }
-func (a memAddr) String() string  { return string(a) }
 
 func tcpPair(t *testing.T, ln net.Listener) (dialed, accepted net.Conn) {
 	t.Helper()
@@ -263,16 +75,16 @@ func (c *splitHalfConn) CloseWrite() error { return CloseWriteIfPossible(c.Conn)
 // never moves again, so the very first tick reads "stalled" and the drain
 // collapses back into a single fixed wait.
 type memRelayFixture struct {
-	appSide, appPeer   *memConn
-	destSide, destPeer *memConn
-	sender, receiver   *memConn
+	appSide, appPeer   *memconn.Conn
+	destSide, destPeer *memconn.Conn
+	sender, receiver   *memconn.Conn
 	relayDone          chan struct{}
 }
 
 func newMemRelayFixture(breakDest bool) *memRelayFixture {
 	f := &memRelayFixture{relayDone: make(chan struct{})}
-	f.appSide, f.appPeer = newMemConnPair()
-	f.destSide, f.destPeer = newMemConnPair()
+	f.appSide, f.appPeer = memconn.Pair()
+	f.destSide, f.destPeer = memconn.Pair()
 
 	clientConn, destConn := net.Conn(f.appSide), net.Conn(f.destSide)
 	if breakDest {
@@ -385,7 +197,7 @@ func TestRelayRawPassthrough_LetsTheSurvivorFinishAfterABreak(t *testing.T) {
 				}
 
 				// Go silent without closing: RelayRawPassthrough must stop
-				// within two idle windows (one to observe the final chunk's
+				// after two idle windows (one to observe the final chunk's
 				// byte count, one with no further progress).
 				silenceStart := time.Now()
 				select {
@@ -393,8 +205,8 @@ func TestRelayRawPassthrough_LetsTheSurvivorFinishAfterABreak(t *testing.T) {
 				case <-time.After(3 * RelayDrainIdle):
 					t.Fatal("RelayRawPassthrough never returned after the survivor stalled")
 				}
-				if wait := time.Since(silenceStart); wait > 2*RelayDrainIdle {
-					t.Fatalf("RelayRawPassthrough stalled after %v of silence, want <= %v", wait, 2*RelayDrainIdle)
+				if wait := time.Since(silenceStart); wait != 2*RelayDrainIdle {
+					t.Fatalf("RelayRawPassthrough stalled after %v of silence, want %v", wait, 2*RelayDrainIdle)
 				}
 				f.closeProxySides()
 				synctest.Wait()
@@ -656,12 +468,12 @@ func TestRelayRawPassthrough_ReturnsWhenOneDirectionBreaks(t *testing.T) {
 }
 
 // TestRelayRawPassthrough_ForwardsFINOnCleanEOF: a clean end of stream must
-// still propagate, or an EOF-delimited peer waits forever for a reply that
-// was already complete.
+// still propagate over real TCP, or an EOF-delimited peer waits forever for a
+// reply that was already complete.
 //
-// This one calls the exported entry point, so the wiring from
-// RelayRawPassthrough down to the copy loop is covered by a test too, not
-// only the parameterised form the timing tests use.
+// This calls the exported RelayRawPassthrough entry point directly on real TCP
+// sockets, complementing the in-memory synctest drain tests and the
+// parameterised liveness/write-error tests.
 func TestRelayRawPassthrough_ForwardsFINOnCleanEOF(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -986,8 +798,8 @@ func TestRelayRawPassthrough_ReplySurvivesTheClientFIN(t *testing.T) {
 // and any fixed grace/sleep on that branch without wall-clock flakiness.
 func TestRelayRawPassthrough_CleanThenResetReturnsPromptly(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		appSide, appPeer := newMemConnPair()
-		destSide, destPeer := newMemConnPair()
+		appSide, appPeer := memconn.Pair()
+		destSide, destPeer := memconn.Pair()
 		defer func() {
 			_ = appSide.Close()
 			_ = appPeer.Close()

@@ -3,209 +3,23 @@ package generic
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net"
-	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/memconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
-var errMemConnReset = errors.New("read: connection reset by peer")
-
-// memStream is one unidirectional byte pipe of an in-memory net.Conn pair.
-// Every blocking wait uses bubble-local channels so testing/synctest treats
-// blocked Reads and Writes as durably blocked.
-type memStream struct {
-	data   chan []byte
-	closed chan struct{}
-
-	mu           sync.Mutex
-	isClosed     bool
-	readerClosed bool
-	reset        bool
-	closeErr     error
-	rem          []byte
-}
-
-func newMemStream() *memStream {
-	return &memStream{
-		data:   make(chan []byte, 64),
-		closed: make(chan struct{}),
-	}
-}
-
-func (s *memStream) write(p []byte) (int, error) {
-	select {
-	case <-s.closed:
-		return 0, net.ErrClosed
-	default:
-	}
-	if len(p) == 0 {
-		return 0, nil
-	}
-	cp := make([]byte, len(p))
-	copy(cp, p)
-	select {
-	case <-s.closed:
-		return 0, net.ErrClosed
-	case s.data <- cp:
-		return len(p), nil
-	}
-}
-
-func (s *memStream) read(p []byte) (int, error) {
-	if err := s.abortErr(); err != nil {
-		return 0, err
-	}
-	s.mu.Lock()
-	if len(s.rem) > 0 {
-		n := copy(p, s.rem)
-		s.rem = s.rem[n:]
-		s.mu.Unlock()
-		return n, nil
-	}
-	s.mu.Unlock()
-
-	select {
-	case chunk := <-s.data:
-		if err := s.abortErr(); err != nil {
-			return 0, err
-		}
-		return s.consume(p, chunk), nil
-	default:
-	}
-
-	select {
-	case chunk := <-s.data:
-		if err := s.abortErr(); err != nil {
-			return 0, err
-		}
-		return s.consume(p, chunk), nil
-	case <-s.closed:
-		if err := s.abortErr(); err != nil {
-			return 0, err
-		}
-		select {
-		case chunk := <-s.data:
-			return s.consume(p, chunk), nil
-		default:
-			s.mu.Lock()
-			err := s.closeErr
-			s.mu.Unlock()
-			if err == nil {
-				err = io.EOF
-			}
-			return 0, err
-		}
-	}
-}
-
-func (s *memStream) consume(p, chunk []byte) int {
-	n := copy(p, chunk)
-	if n < len(chunk) {
-		s.mu.Lock()
-		s.rem = append(s.rem[:0], chunk[n:]...)
-		s.mu.Unlock()
-	}
-	return n
-}
-
-func (s *memStream) abortErr() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.readerClosed {
-		return net.ErrClosed
-	}
-	if s.reset {
-		return s.closeErr
-	}
-	return nil
-}
-
-func (s *memStream) closeWrite() {
-	s.mu.Lock()
-	if !s.isClosed {
-		s.isClosed = true
-		s.closeErr = io.EOF
-		close(s.closed)
-	}
-	s.mu.Unlock()
-}
-
-func (s *memStream) resetWrite(err error) {
-	s.mu.Lock()
-	s.reset = true
-	if !s.isClosed {
-		s.isClosed = true
-		s.closeErr = err
-		close(s.closed)
-	} else if !s.readerClosed {
-		s.closeErr = err
-	}
-	s.mu.Unlock()
-}
-
-func (s *memStream) closeRead() {
-	s.mu.Lock()
-	s.readerClosed = true
-	if !s.isClosed {
-		s.isClosed = true
-		s.closeErr = net.ErrClosed
-		close(s.closed)
-	}
-	s.mu.Unlock()
-}
-
-// memConn is an in-memory net.Conn supporting independent half-close
-// (CloseWrite) and peer reset (Reset) so encodeGeneric can be driven on its
-// real time.Timer and proxyutil.RelayDrainIdle inside testing/synctest.
-type memConn struct {
-	rd *memStream
-	wr *memStream
-}
-
-func newMemConnPair() (*memConn, *memConn) {
-	aToB := newMemStream()
-	bToA := newMemStream()
-	return &memConn{rd: bToA, wr: aToB}, &memConn{rd: aToB, wr: bToA}
-}
-
-func (c *memConn) Read(p []byte) (int, error)       { return c.rd.read(p) }
-func (c *memConn) Write(p []byte) (int, error)      { return c.wr.write(p) }
-func (c *memConn) CloseWrite() error                { c.wr.closeWrite(); return nil }
-func (c *memConn) LocalAddr() net.Addr              { return memAddr("mem") }
-func (c *memConn) RemoteAddr() net.Addr             { return memAddr("mem") }
-func (c *memConn) SetDeadline(time.Time) error      { return nil }
-func (c *memConn) SetReadDeadline(time.Time) error  { return nil }
-func (c *memConn) SetWriteDeadline(time.Time) error { return nil }
-
-func (c *memConn) Close() error {
-	c.rd.closeRead()
-	c.wr.closeWrite()
-	return nil
-}
-
-func (c *memConn) Reset() {
-	c.rd.closeRead()
-	c.wr.resetWrite(errMemConnReset)
-}
-
-type memAddr string
-
-func (a memAddr) Network() string { return string(a) }
-func (a memAddr) String() string  { return string(a) }
-
 // memProdPair returns an in-memory connected pair where the proxy side is
 // wrapped in SafeConn just as proxy.buildRecordSession wraps real sockets.
-func memProdPair(withReader bool) (peer *memConn, proxySide net.Conn, rawProxy *memConn) {
-	peer, rawProxy = newMemConnPair()
+func memProdPair(withReader bool) (peer *memconn.Conn, proxySide net.Conn, rawProxy *memconn.Conn) {
+	peer, rawProxy = memconn.Pair()
 	if withReader {
 		return peer, proxyutil.NewSafeConnWithReader(rawProxy, rawProxy, zap.NewNop()), rawProxy
 	}
@@ -274,7 +88,7 @@ func TestEncodeGeneric_DrainsTheSurvivorInBothDirections(t *testing.T) {
 				}()
 
 				clientConn, destConn := srcProxy, dstProxy
-				var sender, receiver *memConn
+				var sender, receiver *memconn.Conn
 				if tc.breakDest {
 					destConn = &splitReadConn{Conn: dstProxy, readErr: io.ErrUnexpectedEOF}
 					sender, receiver = clientApp, destSvc
