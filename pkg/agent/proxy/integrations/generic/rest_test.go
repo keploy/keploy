@@ -414,11 +414,13 @@ func TestAWholeRequestIsNotWaitedOn(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			eachSwitch(t, func(t *testing.T) {
 				app, proxySide := tcpPair(t)
+				watch := &socketWatch{Conn: proxySide}
 				done := make(chan error, 1)
 				go func() {
-					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), arriving(proxySide, len(c.send)), nil, c.store, models.OutgoingOptions{})
+					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), arriving(watch, len(c.send)), nil, c.store, models.OutgoingOptions{})
 				}()
 				readAnswer(t, app, "PONG")
+				watch.arm()
 				sent := time.Now()
 				if _, err := app.Write(c.send); err != nil {
 					t.Fatal(err)
@@ -428,11 +430,13 @@ func TestAWholeRequestIsNotWaitedOn(t *testing.T) {
 				} else {
 					awaitMiss(t, done)
 				}
-				// A parser that waited past the request's window for more
-				// bytes (a second, as one did) is not answered so soon, nor
-				// is one whose window grew to that.
-				if took := time.Since(sent); took > answeredWithin {
-					t.Fatalf("the request was answered %v after it was sent; its window is %v", took, quietWindow)
+				// The request is all in the socket when the parser reads its
+				// first bytes, so the parser waits on the empty socket only
+				// to its window's end. One that waited past the window for
+				// more bytes (a second, as one did) waits longer, as does
+				// one whose window grew.
+				if idle := watch.idled(); idle > quietWindow {
+					t.Fatalf("the parser waited %v on the empty socket for more of the request, answered %v after it was sent; its window is %v", idle, time.Since(sent), quietWindow)
 				}
 			})
 		})
