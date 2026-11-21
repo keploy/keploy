@@ -231,8 +231,9 @@ func TestBodyPrintIsOneForBodiesComparedTheSame(t *testing.T) {
 		return sum
 	}
 	many := `{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8}`
+	first := printOf(many)
 	for i := 0; i < 32; i++ {
-		if printOf(many) != printOf(many) {
+		if printOf(many) != first {
 			t.Fatalf("one body printed two ways")
 		}
 	}

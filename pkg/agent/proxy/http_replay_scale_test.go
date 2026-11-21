@@ -93,17 +93,17 @@ func serveScale(h integrations.Integrations, mm integrations.MockMemDb, i int) (
 	done := make(chan error, 1)
 	go func() {
 		done <- h.MockOutgoing(ctx, agent, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
-		agent.Close()
+		_ = agent.Close()
 	}()
 	go func() { _, _ = app.Write([]byte(scaleRaw(i))) }()
 	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
 	if err != nil {
-		app.Close()
+		_ = app.Close()
 		return "", fmt.Errorf("call %d: %w (integration: %v)", i, err, <-done)
 	}
 	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	app.Close()
+	_ = app.Close()
 	<-done
 	return string(body), err
 }

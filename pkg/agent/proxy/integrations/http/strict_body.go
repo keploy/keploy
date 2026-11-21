@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -38,27 +39,33 @@ var strictBodyFilings atomic.Int64
 // bodiesOf is the bucket key of ix filed by its recordings' bodies, filed on
 // the first call that reads it so and kept for the index's life: the index's
 // recordings are those of one staging generation, which a recording's change
-// moves.
-func (ix *strictIndex) bodiesOf(key string) *strictBodies {
-	ix.bodyMu.Lock()
-	defer ix.bodyMu.Unlock()
-	if b, ok := ix.bodies[key]; ok {
-		return b
+// moves. One call files at a time (bodyTurn), each recording's body in turn,
+// so a filing holds one decoded body; a call whose context ends while it
+// waits or files leaves with its error, and the bucket unfiled.
+func (ix *strictIndex) bodiesOf(ctx context.Context, key string) (*strictBodies, error) {
+	select {
+	case ix.bodyTurn <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	strictBodyFilings.Add(1)
+	defer func() { <-ix.bodyTurn }()
+	if b, ok := ix.bodies[key]; ok {
+		return b, nil
+	}
 	b := &strictBodies{byPrint: map[uint64][]int{}}
 	for _, p := range ix.byPath[key] {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if sum, ok := plainPrint(ix.entries[p]); ok {
 			b.byPrint[sum] = append(b.byPrint[sum], p)
 		} else {
 			b.rest = append(b.rest, p)
 		}
 	}
-	if ix.bodies == nil {
-		ix.bodies = map[string]*strictBodies{}
-	}
+	strictBodyFilings.Add(1)
 	ix.bodies[key] = b
-	return b
+	return b, nil
 }
 
 // of are the positions of the bucket a call whose body has the print sum may
