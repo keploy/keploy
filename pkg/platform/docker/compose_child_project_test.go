@@ -37,6 +37,8 @@ func TestServiceOfOutputReadsComposeNamesBackwards(t *testing.T) {
 		"app_1":     "", // the separator outside compatibility mode is -
 		"p-app-1":   "", // compose prints a default name without the project's prefix
 		"other-1":   "",
+		"7":         "", // a bare number is no replica's
+		"":          "", // nor is nothing a service's that names no container
 	} {
 		if got := ci.serviceOfOutput(name); got != want {
 			t.Errorf("serviceOfOutput(%q) = %q, want %q", name, got, want)

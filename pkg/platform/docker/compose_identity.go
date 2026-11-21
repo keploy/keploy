@@ -153,6 +153,11 @@ func resolveComposeIdentity(ctx context.Context, paths []string, content []byte,
 	if err != nil {
 		return nil, err
 	}
+	// The loader takes an empty name when validation is skipped (a name:
+	// whose variable is unset); compose refuses the project then.
+	if project.Name == "" {
+		return nil, errors.New("project name can't be empty. Use `--project-name` to set a valid name")
+	}
 	ident := &composeIdentity{project: project.Name, separator: composeContainerSeparator, containerNames: map[string]string{}}
 	if !scope.InProcess && (scope.Compatibility || composeStringToBool(o.Environment[composeCompatibilityEnv])) {
 		ident.separator = composeCompatibilitySeparator

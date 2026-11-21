@@ -185,6 +185,21 @@ func TestComposeIdentity_ContainerNameFromAVariable(t *testing.T) {
 		{name: "no container_name: a bare replica number is not a container",
 			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
 			container: "12", wantErr: "not found"},
+		{name: "no container_name: the project's prefix then a bare number is not a container",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			container: "proj-12", wantErr: "not found"},
+		{name: "no container_name: <service>-<number> without the project's prefix is not a container",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			container: "app-1", wantErr: "not found"},
+		{name: "name: from an unset variable: refused, as compose refuses it",
+			files:     map[string]string{"compose.yml": "name: ${APP_PROJECT}\nservices:\n  app:\n    image: x\n"},
+			container: "proj-app-1", wantErr: "project name can't be empty"},
+		{name: "name: that is not a string: refused, as compose refuses it",
+			files:     map[string]string{"compose.yml": "name: [a, b]\nservices:\n  app:\n    image: x\n"},
+			container: "proj-app-1", wantErr: "into string"},
+		{name: "COMPOSE_COMPATIBILITY=y, a yes as compose reads one",
+			files: map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			env:   map[string]string{composeCompatibilityEnv: " Y "}, container: "proj_app_1", wantService: "app"},
 		{name: "a dependency on a service another file brings does not matter",
 			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n    depends_on: [elsewhere]\n    container_name: ${APP_CONTAINER:-depends}\n"},
 			container: "depends", wantService: "app"},
@@ -324,13 +339,18 @@ func TestComposeIdentity_IncludedServiceIsRefused(t *testing.T) {
 	}
 }
 
-// An empty in-memory document names no container.
+// An empty in-memory document names no container, and none is read from
+// keploy's own standard input in its place (what `-f -` reads to compose).
 func TestComposeIdentity_EmptyDocumentIsRefused(t *testing.T) {
-	if _, err := findInContent(t, "", ComposeScope{}, "app"); err == nil || !strings.Contains(err.Error(), "empty") {
+	const empty = "the compose document is empty"
+	if _, err := findInContent(t, "", ComposeScope{}, "app"); err == nil || !strings.HasSuffix(err.Error(), ": "+empty) {
 		t.Fatalf("got %v, want the empty document refused", err)
 	}
-	if _, err := findInContent(t, "services: [not a map", ComposeScope{}, "app"); err == nil {
-		t.Fatal("a document that is not compose YAML was read")
+	if _, err := StartComposeChildOutput(context.Background(), nil, ComposeScope{}); err == nil || err.Error() != empty {
+		t.Fatalf("child output of no document: got %v, want %q", err, empty)
+	}
+	if _, err := findInContent(t, "services: [not a map", ComposeScope{}, "app"); err == nil || !strings.Contains(err.Error(), "failed to parse in-memory compose YAML") {
+		t.Fatalf("got %v, want a document that is not YAML refused as such", err)
 	}
 }
 
