@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
+	"golang.org/x/net/http/httpguts"
 )
 
 type proxyStop func() error
@@ -727,13 +728,107 @@ func (h *goTCPIngressHook) bindIngress(ctx context.Context, network, addr string
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
+// prefaceKind is what a connection's first bytes say it carries.
+type prefaceKind int
+
+const (
+	prefaceUndecided prefaceKind = iota // the bytes so far begin more than one of the kinds below
+	prefaceTLS                          // a TLS handshake record: relayed to the app's TLS (relayTLS)
+	prefaceH2                           // HTTP/2's client preface: gRPC (grpc.RecordIncoming)
+	prefaceHTTP1                        // an HTTP/1 request line's method and its space
+	prefaceOther                        // none of them: relayed to the app unread (relayUnread)
+)
+
+// readPreface reads a connection's first bytes as they come, until they say
+// what it carries (kindOf), and at most len(clientPreface). It used to wait
+// for all of those 24 bytes, whatever they were. So a client whose first
+// message is shorter and that waits for the answer before sending more
+// waited for ever: an HTTP/1.0 request with no header (18 bytes), or a
+// binary protocol's hello (PostgreSQL's 8-byte SSLRequest, to a database
+// the tests started). Every kind is told well within the bytes such a
+// client sends first: a TLS record by its 5-byte header, an HTTP/1 request
+// by its method, a binary protocol by its first byte that no method has.
+// A connection that ends first is what it read (kindOf of the end).
+func readPreface(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, prefaceKind, error) {
+	buf := make([]byte, 0, len(clientPreface))
+	for {
+		got, err := util.AppendAvailableBytes(ctx, logger, conn, buf)
+		buf = got
+		full := len(buf) == cap(buf)
+		// At the end kindOf is never prefaceUndecided.
+		if k := kindOf(buf, full || err != nil); k != prefaceUndecided {
+			return buf, k, err
+		}
+	}
+}
+
+// kindOf is what b, a connection's first bytes, says it carries; at the end
+// (the connection's end, or all len(clientPreface) bytes read) never
+// prefaceUndecided. HTTP/2's preface ("PRI * HTTP/2.0...") also begins an
+// HTTP/1 request line, whose method is PRI, so it is told only by all of
+// it, as before. An HTTP/1 request line begins with its method, a token
+// (RFC 9110 5.6.2), and a space: a byte that is neither, or a token that
+// does not end in a space within the bytes read, is not one. Such a
+// connection, and one that ends before it says what it is, is relayed to
+// the app unread, as without keploy (prefaceOther): read as an HTTP/1
+// request, its bytes were lost, the ingress closed it, and its client
+// failed (Gradle's, to the daemon it forks: "The first result from the
+// daemon was empty").
+func kindOf(b []byte, end bool) prefaceKind {
+	if len(b) == 0 {
+		if end {
+			return prefaceOther
+		}
+		return prefaceUndecided
+	}
+	if b[0] == tlsHandshakeRecord {
+		switch {
+		case pTls.IsTLSHandshake(b):
+			return prefaceTLS
+		case !end && tlsRecordPrefix(b):
+			return prefaceUndecided
+		}
+		return prefaceOther
+	}
+	if strings.HasPrefix(clientPreface, string(b)) {
+		switch {
+		case len(b) == len(clientPreface):
+			return prefaceH2
+		case !end:
+			return prefaceUndecided
+		}
+	}
+	method := 0
+	for method < len(b) && httpguts.IsTokenRune(rune(b[method])) {
+		method++
+	}
+	switch {
+	case method == len(b) && !end:
+		return prefaceUndecided
+	case method > 0 && method < len(b) && b[method] == ' ':
+		return prefaceHTTP1
+	}
+	return prefaceOther
+}
+
+// tlsHandshakeRecord is the first byte of a TLS handshake record, and so of
+// every ClientHello.
+const tlsHandshakeRecord = 0x16
+
+// tlsRecordPrefix is whether b, shorter than a TLS record header, begins one
+// that pTls.IsTLSHandshake takes: 0x16, then major version 3, then a minor
+// version up to 3.
+func tlsRecordPrefix(b []byte) bool {
+	return len(b) < 5 && b[0] == tlsHandshakeRecord && (len(b) < 2 || b[1] == 0x03) && (len(b) < 3 || b[2] <= 0x03)
+}
+
 func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
 	defer clientConn.Close()
 	// The connection's calls are the session's the ingress serves as it is
 	// taken: its lines tag their paths under that session's key.
 	ctx = pm.withLogKeys(ctx)
 
-	preface, err := util.ReadRequiredBytes(ctx, logger, clientConn, len(clientPreface))
+	preface, kind, err := readPreface(ctx, logger, clientConn)
 	if err == io.EOF && len(preface) == 0 {
 		return
 	}
@@ -741,11 +836,15 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		utils.LogError(logger, err, "error reading initial bytes from client connection")
 		return
 	}
-	if pTls.IsTLSHandshake(preface) {
+	switch kind {
+	case prefaceTLS:
 		pm.relayTLS(ctx, clientConn, preface, newAppAddr, logger, appPort)
 		return
+	case prefaceOther:
+		pm.relayUnread(ctx, clientConn, preface, newAppAddr, logger)
+		return
 	}
-	if bytes.HasPrefix(preface, []byte(clientPreface)) {
+	if kind == prefaceH2 {
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
 		// newAppAddr holds the port Keploy moved the application to, not the port
@@ -808,6 +907,29 @@ func (pm *IngressProxyManager) relayTLS(ctx context.Context, clientConn net.Conn
 	} else {
 		logger.Debug(tlsRelayedWarning, zap.Uint16("port", appPort))
 	}
+	util.RelayRawPassthrough(newReplayConn(preface, clientConn), upConn)
+}
+
+// relayUnread relays a connection whose first bytes (preface, read from
+// clientConn) are not HTTP, HTTP/2 or TLS (prefaceOther) to the app, both
+// ways, unread, as it would reach the app without keploy: nothing keploy
+// records as a test case is on it. A connection between the run's own
+// processes reaches the ingress so (the live handler takes every call to a
+// listener of the run's tree): Gradle's client to the daemon it forks, an
+// IDE's or build tool's control channel, a database the tests started.
+func (pm *IngressProxyManager) relayUnread(ctx context.Context, clientConn net.Conn, preface []byte, newAppAddr string, logger *zap.Logger) {
+	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
+	upConn, err := pm.dialApp(ctx, finalAppAddr, clientConn)
+	if err != nil {
+		pm.logAppDialFailure(logger, "Failed to connect to the application to relay a connection that is not HTTP to it. Verify that the application is listening on the resolved address and port.",
+			err, zap.String("final_app_addr", finalAppAddr))
+		return
+	}
+	defer func() {
+		_ = upConn.Close()
+	}()
+	logger.Debug("a connection to the app that is not HTTP, HTTP/2 or TLS was relayed to it unread: keploy records HTTP and gRPC calls as test cases, and none is on it",
+		zap.String("final_app_addr", finalAppAddr))
 	util.RelayRawPassthrough(newReplayConn(preface, clientConn), upConn)
 }
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.uber.org/zap"
 )
@@ -201,9 +202,16 @@ func (pm *IngressProxyManager) dialAppHere(ctx context.Context, d *net.Dialer, a
 // alike), or one that is the namespace's own now (util.IsLocalAddr). For
 // any other address, one that cannot be asked about and one that is not an
 // IP address, it is the appUnreachableError that says why no dial is made
-// there.
+// there. addr is read as keploy's proxy writes a destination
+// (containerkey.ParseAddrPort): a Java client's connection to an IPv4
+// address comes on a dual-stack socket, and the proxy writes its
+// destination as [a.b.c.d]:p, which netip.ParseAddrPort refuses. Read so,
+// the live handler refused every such call to a listener of the run's own
+// tree as not an IP address, and closed the client's connection unread:
+// Gradle's client, whose daemon it forks, failed with "The first result
+// from the daemon was empty".
 func offHost(addr string) error {
-	ap, err := netip.ParseAddrPort(addr)
+	ap, err := containerkey.ParseAddrPort(addr)
 	if err != nil {
 		return &appUnreachableError{dialed: addr, why: whyNotAnIP}
 	}
@@ -528,7 +536,7 @@ func (pm *IngressProxyManager) probeApp(wait *appWait, d *net.Dialer) (string, n
 // listens there, an appUnreachableError when the app listens only where no
 // connection reaches, or the error that kept the tables from being read.
 func (pm *IngressProxyManager) findListener(addr string) (string, error) {
-	dialed, err := netip.ParseAddrPort(addr)
+	dialed, err := containerkey.ParseAddrPort(addr) // as offHost reads it
 	if err != nil {
 		return "", err
 	}
