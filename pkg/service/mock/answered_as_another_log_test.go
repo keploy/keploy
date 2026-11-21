@@ -51,9 +51,9 @@ func TestACallAnsweredWithAnotherCallsRecordingIsLoggedByItsShape(t *testing.T) 
 		PathTag:       tag,
 		ClosestMock:   "mock-1",
 		Answer:        models.AnswerOtherID,
-		Differs:       []string{"url.path.3"},
-		Diff:          "GET /reset/" + token + "/confirm/7 was answered with the recording of GET /reset/" + token + "/confirm/1: no recording has the call's path",
-		NextSteps:     `If the call is a new input, record it (keploy mock record) so it is answered with its own recording. If the app makes a new id there on every run, mark it as url noise in keploy.yml, under test.globalNoise.global.url: {"^/reset/` + token + `/confirm/[0-9]+$": []}; each run's call is then answered with this recording as its own.`,
+		Differs:       []string{"url.path.3", "url.query." + token},
+		Diff:          "GET /reset/" + token + "/confirm/7 was answered with the recording of GET /reset/" + token + "/confirm/1: no recording has the call's URL, which differs from that recording's only at values that look like ids (url.path.3, url.query." + token + ")",
+		NextSteps:     `If the call is a new input, record it (keploy mock record) so it is answered with its own recording. If the app makes a new id there on every run, mark it as url noise in keploy.yml, under test.globalNoise.global.url: {"^/reset/` + token + `/confirm/[0-9]+$": [], "^[0-9]{10,}$": []}; each run's call is then answered with this recording as its own. An entry for a query value masks every query value of its shape, in every call.`,
 	}
 	field := "body.sessions." + token + ".user"
 	body := models.UnmatchedCall{Protocol: "HTTP", Destination: "users:8080", ActualSummary: "POST /search", ClosestMock: "mock-2",
@@ -107,8 +107,10 @@ func TestACallAnsweredWithAnotherCallsRecordingIsLoggedByItsShape(t *testing.T) 
 	if !strings.Contains(reason, "2 call(s) were answered with the recording of another call") || !strings.Contains(reason, tag) || !strings.Contains(reason, "answered with recording mock-1 (other_id)") {
 		t.Errorf("the INFO line's reason %q does not name the call by its path tag and its recording", reason)
 	}
-	if len(differs) != 2 || !slices.Equal(differs[0], []string{"url.path.3"}) || !slices.Equal(differs[1], []string{models.FieldShape(field), "body.data.id"}) || models.FieldShape(field) == field {
-		t.Errorf("the WARNs' differs fields are %q, want [url.path.3] and [%s body.data.id]", differs, models.FieldShape(field))
+	// A query parameter is named by its shape: a parameter's name can be a
+	// value (url.query.{}).
+	if len(differs) != 2 || !slices.Equal(differs[0], []string{"url.path.3", "url.query.{}"}) || !slices.Equal(differs[1], []string{models.FieldShape(field), "body.data.id"}) || models.FieldShape(field) == field {
+		t.Errorf("the WARNs' differs fields are %q, want [url.path.3 url.query.{}] and [%s body.data.id]", differs, models.FieldShape(field))
 	}
 	// The body WARN's next step names each requestbody entry's key as its
 	// differs names the field, without the root: data.id, and the token's

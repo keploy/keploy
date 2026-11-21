@@ -200,7 +200,7 @@ func TestTheClosestOfSeveralBodiesIsReportedAsAnsweredWithAnotherCallsRecording(
 	}
 }
 
-// idSegmentsDiffering names each segment that differs, by the learn step's
+// idPlacesDiffering names each segment that differs, by the learn step's
 // place names, and none of the segments that are the same.
 func TestIDSegmentsDiffering(t *testing.T) {
 	for _, tc := range []struct {
@@ -211,8 +211,8 @@ func TestIDSegmentsDiffering(t *testing.T) {
 		{"/orgs/7/users/1", "/orgs/8/users/2", []string{"url.path.1", "url.path.3"}},
 		{"/users/1", "/users/1", nil},
 	} {
-		if got := idSegmentsDiffering(tc.rec, tc.live); !slices.Equal(got, tc.want) {
-			t.Errorf("idSegmentsDiffering(%q, %q) = %q, want %q", tc.rec, tc.live, got, tc.want)
+		if got := idPlacesDiffering(tc.rec, tc.live, nil, nil, nil); !slices.Equal(got, tc.want) {
+			t.Errorf("idPlacesDiffering(%q, %q) = %q, want %q", tc.rec, tc.live, got, tc.want)
 		}
 	}
 }
@@ -267,7 +267,7 @@ func reportedServedAnother(input *req, x *models.Mock, answer string, call integ
 			got = append(got, w.MismatchReport())
 		}
 	})
-	reportServedAnother(ctx, input, x, servedAs{answer: answer}, call)
+	reportServedAnother(ctx, input, x, servedAs{answer: answer}, call, nil)
 	return got
 }
 

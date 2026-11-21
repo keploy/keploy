@@ -27,18 +27,17 @@ func formSearchCall(body string) string {
 // names after its "test.globalNoise.global.requestbody: ".
 func keployYmlRequestBodyNoise(t *testing.T, next string) map[string]map[string][]string {
 	t.Helper()
-	const marker = "test.globalNoise.global.requestbody: "
-	i := strings.Index(next, marker)
-	if i < 0 {
-		t.Fatalf("the next step %q does not name %q", next, marker)
-	}
-	rest := next[i+len(marker):]
-	end := strings.Index(rest, "}")
-	if !strings.HasPrefix(rest, "{") || end < 0 {
-		t.Fatalf("the next step %q names no YAML mapping after %q", next, marker)
-	}
+	return keployYmlGlobalNoise(t, next, "requestbody")
+}
+
+// keployYmlGlobalNoise is the global noise keploy reads, as the CLI reads
+// keploy.yml (loader.Read, then Unmarshal), from a keploy.yml whose
+// test.globalNoise.global.<kind> is the flow mapping the next step next
+// names after its "test.globalNoise.global.<kind>: ".
+func keployYmlGlobalNoise(t *testing.T, next, kind string) map[string]map[string][]string {
+	t.Helper()
 	dir := t.TempDir()
-	yml := "test:\n  globalNoise:\n    global:\n      requestbody: " + rest[:end+1] + "\n"
+	yml := "test:\n  globalNoise:\n    global:\n      " + kind + ": " + flowMappingAfter(t, next, "test.globalNoise.global."+kind+": ") + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "keploy.yml"), []byte(yml), 0o600); err != nil {
 		t.Fatal(err)
 	}

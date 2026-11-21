@@ -18,20 +18,37 @@ import (
 // entries a user copies into keploy.yml.
 func noiseEntriesIn(t *testing.T, next, marker string) map[string][]string {
 	t.Helper()
+	var entries map[string][]string
+	if err := yamlLib.Unmarshal([]byte(flowMappingAfter(t, next, marker)), &entries); err != nil || len(entries) == 0 {
+		t.Fatalf("the next step's mapping after %q is no YAML mapping of noise entries: %v", marker, err)
+	}
+	return entries
+}
+
+// flowMappingAfter is the YAML flow mapping a next step names after marker,
+// whole: up to the first "}" at which it reads as a mapping of noise
+// entries (a url-noise key can hold braces: ^[0-9]{10,}$).
+func flowMappingAfter(t *testing.T, next, marker string) string {
+	t.Helper()
 	i := strings.Index(next, marker)
 	if i < 0 {
 		t.Fatalf("the next step %q does not name %q", next, marker)
 	}
 	rest := next[i+len(marker):]
-	end := strings.Index(rest, "}")
-	if !strings.HasPrefix(rest, "{") || end < 0 {
+	if !strings.HasPrefix(rest, "{") {
 		t.Fatalf("the next step %q names no YAML mapping after %q", next, marker)
 	}
-	var entries map[string][]string
-	if err := yamlLib.Unmarshal([]byte(rest[:end+1]), &entries); err != nil || len(entries) == 0 {
-		t.Fatalf("the next step's %q is no YAML mapping of noise entries: %v", rest[:end+1], err)
+	for end := 0; end < len(rest); end++ {
+		if rest[end] != '}' {
+			continue
+		}
+		var entries map[string][]string
+		if yamlLib.Unmarshal([]byte(rest[:end+1]), &entries) == nil && len(entries) > 0 {
+			return rest[:end+1]
+		}
 	}
-	return entries
+	t.Fatalf("the next step %q names no YAML mapping after %q", next, marker)
+	return ""
 }
 
 // searchRecordings records each of bodies as POST /search, answered
