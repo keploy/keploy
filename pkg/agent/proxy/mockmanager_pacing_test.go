@@ -793,7 +793,15 @@ func TestCarryOverLeavesUnregisteredKindsAlone(t *testing.T) {
 				mm.MarkMockAsUsed(*m)
 			}
 			for _, st := range mm.GetConsumedMocks() {
+				// When it was served is the clock's, not the carry-over's:
+				// where it answered stays in the trace.
 				st.Timestamp = 0
+				if st.AnsweredOutsideAt != 0 {
+					st.AnsweredOutsideAt = 1
+				}
+				for j := range st.AnsweredIn {
+					st.AnsweredIn[j].First = 0
+				}
 				trace = append(trace, fmt.Sprintf("  consumed %+v", st))
 			}
 		}

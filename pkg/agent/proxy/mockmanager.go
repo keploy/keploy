@@ -173,6 +173,15 @@ type MockManager struct {
 	consumedMu    sync.Mutex
 	consumedList  []models.MockState
 	consumedIndex map[string]int
+	// answeredWin is, by mock name, every test window open at its serves
+	// since the last consumed read, each with when it first answered there,
+	// and when it first answered outside every one (noteAnsweredInLocked), drained
+	// with consumedList; answeredInHeld counts the window ids it holds, at most
+	// answeredInMax. Guarded by consumedMu. windows is the test windows the
+	// agent holds open, the proxy's (shareWindows), else the manager's own.
+	answeredWin    map[string]*answeredWins
+	answeredInHeld int
+	windows        *testWindows
 	// consumedPersistent accumulates the LATEST MockState per mock name across
 	// the whole session and is NEVER drained (unlike consumedList, which
 	// GetConsumedMocks empties). It lets the agent apply filterOutDeleted from
@@ -698,6 +707,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		hitIdx:              make(map[string]*atomic.Uint64),
 		windowSig:           make(chan struct{}),
 		carry:               newCarryOverPool(),
+		windows:             newTestWindows(),
 		logger:              logger,
 	}
 	mm.setGen.Store(1)
@@ -5578,6 +5588,7 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 	if m.servedCount != nil {
 		m.servedCount[mock.Name]++
 	}
+	m.noteAnsweredInLocked(mock.Name, time.Now().UnixNano())
 	m.consumedMu.Unlock()
 	return nil
 }
@@ -5596,12 +5607,17 @@ func (m *MockManager) ServedCounts() map[string]uint64 {
 
 // GetConsumedMocks returns and drains the list of mocks that were consumed
 // since the last call, in the order they were first intercepted from the
-// network.
+// network, each with every test window it answered in since then
+// (models.MockState.AnsweredIn).
 func (m *MockManager) GetConsumedMocks() []models.MockState {
 	m.consumedMu.Lock()
-	out := append([]models.MockState(nil), m.consumedList...)
+	out := make([]models.MockState, len(m.consumedList))
+	for i, s := range m.consumedList {
+		out[i] = m.withAnsweredInLocked(s)
+	}
 	m.consumedList = m.consumedList[:0]
 	m.consumedIndex = make(map[string]int)
+	m.dropAnsweredInLocked()
 	m.consumedMu.Unlock()
 	return out
 }
@@ -5817,6 +5833,7 @@ func (m *MockManager) dropPreviousSetConsumes() {
 	dropped := len(m.consumedList)
 	m.consumedList = m.consumedList[:0]
 	m.consumedIndex = make(map[string]int)
+	m.dropAnsweredInLocked()
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
 	}

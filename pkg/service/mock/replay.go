@@ -1,6 +1,7 @@
 package mock
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -1072,6 +1073,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		At:            started.UTC().Truncate(time.Second),
 		MocksDigest:   digest,
 		Tests:         counts.tests,
+		Answered:      counts.answered,
 		Live:          m.live,
 		Mocked:        m.mocked,
 		Real:          realRun,
@@ -2706,6 +2708,9 @@ type replayCounts struct {
 	// incomplete (models.UnreadCause), when missed is -1.
 	missesUnread string
 	tests        []TestReceipt
+	// answered is every recording served, with where and when it answered
+	// (TestsReceipt.Answered); nil when that was not read in full.
+	answered []RecordingAnswers
 	// learnedPool is what the learn step wrote onto mocks no test consumed.
 	learnedPool []string
 	// learnedElsewhere is what it wrote onto recordings from calls made in
@@ -2994,7 +2999,18 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	} else if provenswitch.On() {
 		counts.uncharged = unchargedMisses(misses)
 	}
-	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
+	// A test's count of answers and the recordings that gave them are known
+	// only when the agent said every test window each answer was served in
+	// (answersPlaced), and only for a test whose answers the agent's read
+	// carries (withWorkerAnswersUnread).
+	placed := consumedErr == nil && answersPlaced(consumed)
+	counts.tests = withEnded(withRealListed(withReal(withEvidence(withWorkerAnswersUnread(testReceipts(flows, placed, missesErr == nil), detail.windows), detail.windows), detail.windows), m.realListed), detail.windows)
+	// Every answer, where and when, whatever test it fell in or none: one a
+	// test's line does not name (served between tests, or in another test)
+	// may still have shaped what the test did after it.
+	if placed {
+		counts.answered = answeredWhere(consumed, detail.windows)
+	}
 	// Under the proven switch a miss whose closest recording another test
 	// owns names that test, as keploy test's replay does (markRecordedIn):
 	// judging lists it as the root of the test's entry.
@@ -3032,9 +3048,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.tests = failUnmadeTrails(counts.tests, notMadeByName(counts.requiredNotMade), counts.trailsUnread)
 		counts.ruleUses = ruleUses(placed, counts.tests, consumed, consumedErr == nil, m.repeats, misses, missesErr == nil)
 	}
-	for i := range counts.tests {
-		counts.tests[i].Learned = learned.byTest[counts.tests[i].Name]
-	}
+	withLearned(counts.tests, learned)
 	counts.learnedPool = learned.pool
 	counts.learnedElsewhere = learned.elsewhere
 	counts.learnErr = learnErr
@@ -3376,8 +3390,67 @@ func withBegan(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt 
 	return tests
 }
 
-// testReceipts is each test's line in the receipt: its verdict and what it
-// used and missed. A count the agent did not report in full is -1.
+// withEnded sets each test's Ended: when the latest of its windows ended,
+// or zero when one of them did not.
+func withEnded(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt {
+	ended := make(map[string]time.Time, len(windows))
+	cut := make(map[string]bool)
+	for _, w := range windows {
+		if w.End.IsZero() {
+			cut[w.Name] = true
+		} else if w.End.After(ended[w.Name]) {
+			ended[w.Name] = w.End
+		}
+	}
+	for i := range tests {
+		if e, ok := ended[tests[i].Name]; ok && !cut[tests[i].Name] {
+			tests[i].Ended = e.UTC()
+		}
+	}
+	return tests
+}
+
+// answeredWhere is every recording consumed holds, in its order, with each
+// place it answered and when it first answered there
+// (TestsReceipt.Answered): the test of each window it answered in (windows'
+// Seq), each test once at its earliest answer over its runs; and no test
+// ("") at its first answer outside every window, or in a window that is
+// none of windows' (said as no test's, so a reader compares it by time
+// with every test). Its places are in the order it first answered there.
+func answeredWhere(consumed []models.MockState, windows []models.ScopeWindow) []RecordingAnswers {
+	bySeq := make(map[uint64]string)
+	for _, w := range windows {
+		bySeq[w.Seq] = w.Name // no answer names 0: the agent's ids start at 1
+	}
+	out := make([]RecordingAnswers, 0, len(consumed))
+	for _, c := range consumed {
+		first := make(map[string]int64)
+		note := func(test string, at int64) {
+			if prev, ok := first[test]; !ok || at < prev {
+				first[test] = at
+			}
+		}
+		for _, a := range c.AnsweredIn {
+			note(bySeq[a.Seq], a.First)
+		}
+		if c.AnsweredOutsideAt != 0 {
+			note("", c.AnsweredOutsideAt)
+		}
+		r := RecordingAnswers{Mock: c.Name}
+		for test, at := range first {
+			r.In = append(r.In, AnswerPlace{Test: test, First: time.Unix(0, at).UTC()})
+		}
+		slices.SortFunc(r.In, func(x, y AnswerPlace) int {
+			return cmp.Or(x.First.Compare(y.First), strings.Compare(x.Test, y.Test))
+		})
+		out = append(out, r)
+	}
+	return out
+}
+
+// testReceipts is each test's line in the receipt: its verdict, what it
+// used and missed, and the recordings that answered it. A count the agent
+// did not report in full is -1, and names no recording.
 func testReceipts(flows []FlowMocks, consumedKnown, missesKnown bool) []TestReceipt {
 	if len(flows) == 0 {
 		return nil
@@ -3385,7 +3458,9 @@ func testReceipts(flows []FlowMocks, consumedKnown, missesKnown bool) []TestRece
 	out := make([]TestReceipt, 0, len(flows))
 	for _, f := range flows {
 		t := TestReceipt{Name: f.Flow, Outcome: f.Outcome, Random: f.Random, Consumed: len(f.Consumed), Missed: len(f.Missed)}
-		if !consumedKnown {
+		if consumedKnown {
+			t.AnsweredBy = answeredBy(f.Consumed)
+		} else {
 			t.Consumed = -1
 		}
 		if !missesKnown {
@@ -3394,6 +3469,63 @@ func testReceipts(flows []FlowMocks, consumedKnown, missesKnown bool) []TestRece
 		out = append(out, t)
 	}
 	return out
+}
+
+// answersPlaced reports whether the agent said, of every mock it served,
+// every test window it answered in, so attributeMocks put it under each test
+// it answered. Otherwise no test's count of answers, nor which recordings
+// gave them, is known, and a test's line must say so (-1) rather than count
+// or name too few: an agent that keeps a recording's first serve alone (an
+// older one) names a recording that answered several tests under one of
+// them, and one that could not keep every window a recording answered in
+// (models.MockState.AnsweredInLost) names it under some of them.
+func answersPlaced(consumed []models.MockState) bool {
+	for _, c := range consumed {
+		if !answeredInKnown(c) || c.AnsweredInLost > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// answeredInKnown reports whether the agent said where c answered: in test
+// windows (models.MockState.AnsweredIn), outside every one, or both.
+func answeredInKnown(c models.MockState) bool {
+	return len(c.AnsweredIn) > 0 || c.AnsweredOutsideAt != 0
+}
+
+// withWorkerAnswersUnread marks unread (-1, naming no recording) the
+// answers of each test that ran in one of several test workers
+// (models.ScopeWindow.Instance): a worker's calls are answered from a mock
+// manager of its own, whose consumed mocks the agent's read does not carry,
+// so the line would count and name too few.
+func withWorkerAnswersUnread(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt {
+	inWorker := make(map[string]bool)
+	for _, w := range windows {
+		if w.Instance != 0 {
+			inWorker[w.Name] = true
+		}
+	}
+	for i := range tests {
+		if inWorker[tests[i].Name] {
+			tests[i].Consumed, tests[i].AnsweredBy = -1, nil
+		}
+	}
+	return tests
+}
+
+// answeredBy is the recordings that served consumed, by name, each once, in
+// the order consumed lists them (TestReceipt.AnsweredBy).
+func answeredBy(consumed []models.MockState) []string {
+	var names []string
+	seen := make(map[string]bool, len(consumed))
+	for _, c := range consumed {
+		if !seen[c.Name] {
+			seen[c.Name] = true
+			names = append(names, c.Name)
+		}
+	}
+	return names
 }
 
 // servedMockPoller is an optional extension of Instrumentation, asserted rather
