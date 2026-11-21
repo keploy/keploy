@@ -577,7 +577,7 @@ func serveTreeCallTo(t *testing.T, synchronous, real bool, tcpAddr *net.TCPAddr)
 	go func() {
 		defer close(lc.served)
 		defer func() { _ = lc.proxy.Close() }() // as handleConnection does once it returns
-		if served, _, err := p.serveTreeListener(context.Background(), lc.proxy, dest, addr, "1"); !served || err != nil {
+		if served, _, err := p.serveTreeListener(context.Background(), lc.proxy, dest, addr, "1", nil, treeListener{}); !served || err != nil {
 			kinds <- fmt.Sprintf("not served (served %v, err %v)", served, err)
 		}
 	}()

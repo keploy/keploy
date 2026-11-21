@@ -52,7 +52,7 @@ func TestServeTreeListenerKeepsRecordedDepOnMockPath(t *testing.T) {
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
-	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1", nil, treeListener{})
 	if served || err != nil {
 		t.Fatalf("a recorded outside dependency must stay on the mock path (served=false), got served=%v err=%v", served, err)
 	}
@@ -99,7 +99,7 @@ func TestServeTreeListenerPassesSelfCallToRealHandler(t *testing.T) {
 	}
 	events := make(chan event, 2)
 	go func() {
-		served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1", nil, treeListener{})
 		events <- event{served: served, err: err}
 	}()
 
@@ -138,7 +138,7 @@ func TestServeTreeListenerClosesDownUnrecordedLocalPort(t *testing.T) {
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
-	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1", nil, treeListener{})
 	if !served || err != nil {
 		t.Fatalf("a down, unrecorded local port is closed (served=true, nil err), got served=%v err=%v", served, err)
 	}
@@ -172,7 +172,7 @@ func TestServeTreeListenerListsAStoppedLocalPortTheStoreSeeds(t *testing.T) {
 				dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 				_, srv := net.Pipe()
 				t.Cleanup(func() { _ = srv.Close() })
-				served, outside, err := p.serveTreeListener(context.Background(), srv, dest, addr, "1")
+				served, outside, err := p.serveTreeListener(context.Background(), srv, dest, addr, "1", nil, treeListener{})
 				if err != nil {
 					t.Fatalf("%s: %v", addr, err)
 				}
@@ -228,7 +228,7 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 		_ = cli.Close()
 		done := make(chan error, 1)
 		go func() {
-			served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+			served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1", nil, treeListener{})
 			if err == nil && !served {
 				err = fmt.Errorf("not passed through")
 			}
@@ -312,7 +312,7 @@ func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
 	defer cli.Close()
 	done := make(chan struct{})
 	go func() {
-		_, _, _ = p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		_, _, _ = p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1", nil, treeListener{})
 		close(done)
 	}()
 	if got, want := awaitEvent(t, seen, "OnProcess being told the listener's owner"), (Process{Pid: uint32(os.Getpid())}); got != want {

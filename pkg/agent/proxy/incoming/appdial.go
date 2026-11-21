@@ -232,6 +232,14 @@ func offHost(addr string) error {
 // there is none to watch): first where it was found listening for addr, if
 // it was (listensAt), else at addr.
 func (pm *IngressProxyManager) dialApp(ctx context.Context, addr string, client net.Conn) (net.Conn, error) {
+	if conn := util.PredialedFrom(ctx).Take(addr); conn != nil {
+		// The live handler's call, whose handshake keploy held until its
+		// own dial of addr connected: that connection is the call's, the
+		// one the app accepted for it. A second dial is a connection the
+		// caller never made, and a listener that takes one connection and
+		// closes (a Gradle daemon's for its test worker) has none to give.
+		return conn, nil
+	}
 	target := pm.listenerFound(addr)
 	d := net.Dialer{Control: pm.appDialControl(false)}
 	for {

@@ -2932,8 +2932,11 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 	// same record redirect_proxy_map copies and dstAddr below is built from,
 	// so the two addresses are the same string.
 	var predialed *util.Predialed
+	// The listener the hold found at the destination as it dialed it
+	// (treeListenerAt), for serveTreeListener.
+	var heldListener treeListener
 	if end, ok := clientEnd(remoteAddr); ok {
-		predialed = p.predials.take(end)
+		predialed, heldListener = p.predials.takeWith(end)
 	}
 	defer predialed.CloseIfUnused()
 	appConn := srcConn
@@ -3228,7 +3231,7 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 	// handler starts may outlive the connection (LiveHandler). While
 	// serveTreeListener runs, parserCtx ends only as ctx does: no parser has
 	// joined parserErrGrp yet, and its cancel is the deferred one above.
-	served, outside, err := p.serveTreeListener(withLifeOf(ctx, parserCtx), srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
+	served, outside, err := p.serveTreeListener(withLifeOf(ctx, parserCtx), srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID), predialed, heldListener)
 	if served {
 		return err
 	}
@@ -7558,26 +7561,33 @@ func (p *Proxy) closeDependencyConns() {
 // its mocked-local row (without its test), for the caller to list once it
 // knows the call is recorded or mocked. ctx is the one the live handler is
 // handed (LiveHandler): the connection's values with the proxy's life.
-func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, conn string) (served bool, outside *models.MockedRow, err error) {
+//
+// pre is the connection the handshake hold dialed for the call, and held
+// the listener it found as it did (treeListenerAt): when pre was dialed at
+// dstAddr, the destination accepted the call, so it is served over pre, by
+// the live handler too (util.WithPredialed), and its listener is held's,
+// asked again only when the hold found none. A listener that takes one
+// connection and closes has accepted pre and is gone: asked here alone, the
+// call was closed as one nothing accepted, and its listener, which had
+// accepted pre, failed writing to it (a Gradle daemon to its test worker:
+// "Broken pipe"); dialed again, the listener saw a connection the caller
+// never made.
+func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, conn string, pre *util.Predialed, held treeListener) (served bool, outside *models.MockedRow, err error) {
 	if !p.mockMode || p.IsDocker || p.appPID == 0 {
 		return false, nil, nil
 	}
-	host, _, err := net.SplitHostPort(dstAddr)
-	if err != nil {
+	ip, ok := treeListenerIP(dstAddr)
+	if !ok {
 		return false, nil, nil
 	}
-	ip := net.ParseIP(host)
-	if !ownIP(ip) {
-		return false, nil, nil
+	accepted := pre.Addr() == dstAddr
+	owner, listening := held.owner, held.found
+	if !accepted || !held.found {
+		owner, listening = listenerOwner(ip, dest.Port)
 	}
-	if ip.IsUnspecified() {
-		if ip.To4() != nil {
-			ip = net.IPv4(127, 0, 0, 1)
-		} else {
-			ip = net.IPv6loopback
-		}
+	if accepted {
+		listening = true // its listener accepted the hold's dial: it listened
 	}
-	owner, listening := listenerOwner(ip, dest.Port)
 	if !listening && ip != nil && ip.IsLoopback() && (!recorded.has(dest.Port) || recorded.child(dest.Port)) {
 		if _, isReal := p.realLabelAt(dstAddr); isReal {
 			// A mock.real destination nothing listens at is mock.real's
@@ -7692,10 +7702,10 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 			// test's use, with no use point (Tracker.SentLive).
 			srcConn = &treeRealConn{Conn: srcConn, p: p, label: realLabel, id: realID, from: realOrigin(dest), live: true}
 		}
-		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
+		p.live(util.WithPredialed(ctx, pre), srcConn, dstAddr, uint16(dest.Port))
 		return true, nil, nil
 	}
-	dstConn, err := util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
+	dstConn, err := util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: pre})
 	if isReal && err == nil {
 		// DialDestination falls back to the other loopback family when the
 		// app's address refuses: that reaches an address an IP-literal
@@ -7719,6 +7729,29 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	}
 	util.RelayRawPassthrough(srcConn, dstConn)
 	return true, nil, nil
+}
+
+// treeListenerIP is the address serveTreeListener asks listenerOwner about
+// for a call to dstAddr: its IP when it is this machine's own (ownIP), the
+// loopback of its family for the unspecified address; ok is false for any
+// other.
+func treeListenerIP(dstAddr string) (net.IP, bool) {
+	host, _, err := net.SplitHostPort(dstAddr)
+	if err != nil {
+		return nil, false
+	}
+	ip := net.ParseIP(host)
+	if !ownIP(ip) {
+		return nil, false
+	}
+	if ip.IsUnspecified() {
+		if ip.To4() != nil {
+			ip = net.IPv4(127, 0, 0, 1)
+		} else {
+			ip = net.IPv6loopback
+		}
+	}
+	return ip, true
 }
 
 // withNoiseEngine attaches the mock-noise Engine built from a parser's DECLARED
