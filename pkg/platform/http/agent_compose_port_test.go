@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"strings"
@@ -123,6 +124,26 @@ func TestComposeFailingOtherwiseLeavesTheAgentWhereItIs(t *testing.T) {
 	}
 	if *draws != 0 || a.conf.AgentURI() != "http://localhost:16789/agent" {
 		t.Fatalf("%d draws, agent at %q; want it left where it was", *draws, a.conf.AgentURI())
+	}
+
+	// No other port to draw, or an address with no host to move: the
+	// agent is left where it was, and the error says why.
+	a, _, _ = composeAgentOn(t, "http://localhost:16789/agent")
+	containerPort = func(...uint32) (uint32, error) { return 0, errors.New("every port is taken") }
+	if to, err := a.composeAgentPortRefused(context.Background(), "failed to bind host port 127.0.0.1:16789/tcp: address already in use"); to != 0 || err == nil || !strings.Contains(err.Error(), "every port is taken") {
+		t.Fatalf("composeAgentPortRefused with no port to draw = %d, %v; want the draw's error", to, err)
+	}
+	if a.conf.AgentURI() != "http://localhost:16789/agent" || a.conf.Agent.AgentPort != 16789 {
+		t.Fatalf("with no port to draw the agent is at %q port %d; want it left where it was", a.conf.AgentURI(), a.conf.Agent.AgentPort)
+	}
+	for _, uri := range []string{"", "localhost:16789"} {
+		a, _, _ = composeAgentOn(t, uri)
+		if to, err := a.composeAgentPortRefused(context.Background(), "failed to bind host port 127.0.0.1:16789/tcp: address already in use"); to != 0 || err == nil {
+			t.Fatalf("composeAgentPortRefused at %q = %d, %v; want an error", uri, to, err)
+		}
+		if a.conf.AgentURI() != uri || a.conf.Agent.AgentPort != 16789 {
+			t.Fatalf("an agent at %q was moved to %q port %d", uri, a.conf.AgentURI(), a.conf.Agent.AgentPort)
+		}
 	}
 
 	cut, cancel := context.WithCancel(context.Background())
