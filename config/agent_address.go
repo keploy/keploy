@@ -28,7 +28,9 @@ var agentAddresses sync.Map // weak.Pointer[Config] -> *atomic.Pointer[string]
 // that a move is followed.
 func (c *Config) AgentURI() string {
 	if h, ok := agentAddresses.Load(weak.Make(c)); ok {
-		return *h.(*atomic.Pointer[string]).Load()
+		if p := h.(*atomic.Pointer[string]).Load(); p != nil {
+			return *p
+		}
 	}
 	return c.Agent.AgentURI
 }
@@ -46,4 +48,14 @@ func (c *Config) SetAgentURI(uri string) {
 		return
 	}
 	runtime.AddCleanup(c, func(key weak.Pointer[Config]) { agentAddresses.Delete(key) }, key)
+}
+
+// ResetAgentURI drops any address stored for c by SetAgentURI so AgentURI
+// reads c.Agent.AgentURI again. Callers that zero and reuse a Config in place
+// (such as a process-wide default singleton across tests) call this so a
+// previous run's address does not survive the reset.
+func (c *Config) ResetAgentURI() {
+	if h, ok := agentAddresses.Load(weak.Make(c)); ok {
+		h.(*atomic.Pointer[string]).Store(nil)
+	}
 }
