@@ -3,6 +3,7 @@ package learn
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -145,6 +146,7 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 			}
 		}()
 	}
+	stopped := false
 	err := src(func(m *models.Mock) bool {
 		if m == nil {
 			return true
@@ -157,6 +159,7 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 		if ch == nil {
 			s.inFlight.Release(w)
 			free <- struct{}{}
+			stopped = true
 			return false
 		}
 		next <- read{x: x, ch: ch, rest: !mine, w: w}
@@ -164,7 +167,83 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 	})
 	close(next)
 	wg.Wait()
+	if err != nil || stopped {
+		return err
+	}
+	return dc.stageFilters(src, readers)
+}
+
+// stageFilters is warmSet's second pass, once its first read every
+// recording src visits within the set's budget: the set's filter of each
+// one's words (stageFilter), by readers readers at once, in recorded
+// order, so the set's first call that reads a word's places builds none
+// of them while its client waits. It comes after the first pass, not in
+// it, so the parts that pass keeps of every recording keep the room they
+// had with no filter staged, and it takes only the budget's spare: where
+// a filter does not fit that way (filtersPast), it stops, and the calls
+// build that one and the rest, or scan them, as with no staging. It reads
+// only payloads the set's store still keeps (Raw.kept), and loads none
+// again: a recording whose payload it let go is left to the calls too
+// (filterLeft). A first pass the budget or the set's end stopped short has
+// no second: the calls build the filters as with no staging. It stops at
+// the set's end too.
+func (dc *DriftCache) stageFilters(src func(visit func(*models.Mock) bool) error, readers int) error {
+	s := dc.set
+	type read struct {
+		x Raw
+		w int64
+	}
+	next := make(chan read, readers)
+	var wg sync.WaitGroup
+	var full atomic.Bool
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := range next {
+				if !full.Load() {
+					if x, kept := r.x.kept(); !kept {
+						dc.filterLeft()
+					} else if !dc.stageFilter(x) {
+						full.Store(true)
+					}
+				}
+				s.inFlight.Release(r.w)
+			}
+		}()
+	}
+	err := src(func(m *models.Mock) bool {
+		if m == nil {
+			return true
+		}
+		if full.Load() || !s.open() {
+			return false
+		}
+		x := dc.LazyRawOf(m, false, withAnswer(m))
+		w := readWeight(x, stageCost)
+		s.reserve(w)
+		next <- read{x: x, w: w}
+		return true
+	})
+	close(next)
+	wg.Wait()
 	return err
+}
+
+// filterLeft counts a recording the staging's second pass (stageFilters)
+// left its filter to the calls of, its payload no longer kept.
+func (dc *DriftCache) filterLeft() {
+	dc.set.mu.Lock()
+	dc.set.filtersPast++
+	dc.set.mu.Unlock()
+}
+
+// open reports whether s still keeps what its staging reads: the set has
+// not ended (NewSet), and its held tier has room (take).
+func (s *setDerived) open() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.held.room()
 }
 
 // withAnswer loads m with its recorded answer, one the agent parked on disk
@@ -191,10 +270,16 @@ func withAnswer(m *models.Mock) func() (*models.Mock, error) {
 // decoded for the set (Decoded: each first read, and each read again after
 // it was let go), the set's budget (setBudget), and whether the tiers that
 // let none go (held, forms) were full, past which the set's payloads are
-// read once per test. Err is why the staging stopped short of the set where src failed
-// (the on-disk store, mid-read): its calls then read the rest themselves.
+// read once per test. Filters are the recordings whose word filter the
+// staging built for the set (stageFilters), and FiltersPast those it left
+// to the calls (their filter did not fit the budget's spare, or the set no
+// longer kept their payload): the calls that ask one of them a word build
+// it, or scan the recording, as with no staging. Err is why
+// the staging stopped short of the set where src failed (the on-disk
+// store, mid-read): its calls then read the rest themselves.
 type SetUse struct {
 	Staged, Called, Finished, Readers, Decoded int
+	Filters, FiltersPast                       int
 	Held, Words, Forms, Bodies, Budget         int64
 	HeldFull, FormsFull                        bool
 	Err                                        error
@@ -206,6 +291,7 @@ func (s *setDerived) use() SetUse {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return SetUse{Staged: s.staged, Called: s.called, Finished: s.finished, Decoded: s.bodies.loads, Held: s.held.used, Words: s.words.used, Forms: s.forms.used,
+	return SetUse{Staged: s.staged, Called: s.called, Finished: s.finished, Decoded: s.bodies.loads, Filters: s.filters, FiltersPast: s.filtersPast,
+		Held: s.held.used, Words: s.words.used, Forms: s.forms.used,
 		Bodies: s.bodies.kept.used, Budget: s.budget.limit, HeldFull: s.held.full, FormsFull: s.forms.full}
 }

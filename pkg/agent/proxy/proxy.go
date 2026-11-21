@@ -5569,7 +5569,9 @@ func (p *Proxy) WarmLearnSet() error {
 
 // logSetUse logs, once the set's staging ends, what it read and what the
 // set's tiers keep (learn.SetUse): the line a round reads to see whether the
-// set fit its budget. A staging that stopped short because the set's
+// set fit its budget. Where some recordings' word filters did not fit it
+// (learn.SetUse.FiltersPast, or the set's parts filled it first: HeldFull),
+// a Debug line says so: their calls build them as with no staging. A staging that stopped short because the set's
 // recordings could not be read (learn.SetUse.Err) is logged at Warn with
 // that error: its calls read the rest on their answer path. A channel
 // closed with no use (no tracker) read nothing and logs nothing.
@@ -5580,7 +5582,8 @@ func (p *Proxy) logSetUse(done <-chan learn.SetUse) {
 	}
 	fields := []zap.Field{
 		zap.Int("read_at_staging", u.Staged), zap.Int("read_by_calls", u.Called), zap.Int("finished_at_staging", u.Finished), zap.Int("staging_readers", u.Readers),
-		zap.Int("payloads_decoded", u.Decoded), zap.Int64("kept_held_bytes", u.Held), zap.Int64("kept_words_bytes", u.Words),
+		zap.Int("payloads_decoded", u.Decoded), zap.Int("filters_at_staging", u.Filters), zap.Int("filters_past_budget", u.FiltersPast),
+		zap.Int64("kept_held_bytes", u.Held), zap.Int64("kept_words_bytes", u.Words),
 		zap.Int64("kept_forms_bytes", u.Forms), zap.Int64("kept_payload_bytes", u.Bodies), zap.Int64("set_budget_bytes", u.Budget), zap.Bool("held_full", u.HeldFull), zap.Bool("forms_full", u.FormsFull),
 	}
 	if u.Err != nil {
@@ -5589,6 +5592,10 @@ func (p *Proxy) logSetUse(done <-chan learn.SetUse) {
 		return
 	}
 	p.logger.Info("the learn step read the test set's recordings as it was staged, before its calls read them", fields...)
+	if u.FiltersPast > 0 || u.HeldFull {
+		p.logger.Debug("the learn step's staging kept no word filter of some of the test set's recordings: they did not fit the set's budget, so the calls that ask them a word build their filters, or scan them, as with no staging",
+			zap.Int("filters_past_budget", u.FiltersPast), zap.Int("filters_at_staging", u.Filters), zap.Int64("set_budget_bytes", u.Budget))
+	}
 }
 
 // warmLearnSet is WarmLearnSet's gate and its read: the staging's channel

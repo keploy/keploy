@@ -837,6 +837,14 @@ func TestOutcomeCostACallScansEachPlaceOnceForEachWordItAsks(t *testing.T) {
 // it made for a word (heldScans), the words it asked of filters
 // (filterLookups) and the places its words' checks read (placeAsks).
 func costSet(n int) (got [2]string, builds [2]int, scans, lookups, asks [2]int64) {
+	got, builds, scans, lookups, asks, _ = costSetStaged(n, false)
+	return got, builds, scans, lookups, asks
+}
+
+// costSetStaged is costSet, its set staged first where stage says so
+// (WarmSet over its recordings, in order, waited for): use is what the
+// staging read and built (SetUse), zero with no staging.
+func costSetStaged(n int, stage bool) (got [2]string, builds [2]int, scans, lookups, asks [2]int64, use SetUse) {
 	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
 	mocks := make([]*models.Mock, n)
 	for i := range mocks {
@@ -848,6 +856,9 @@ func costSet(n int) (got [2]string, builds [2]int, scans, lookups, asks [2]int64
 	}
 	tr := NewTracker()
 	tr.NewSet()
+	if stage {
+		use = <-tr.WarmSet(srcOf(mocks))
+	}
 	built := func(dc *DriftCache) int {
 		fs := filtersOf(dc.set)
 		fs.mu.Lock()
@@ -862,7 +873,7 @@ func costSet(n int) (got [2]string, builds [2]int, scans, lookups, asks [2]int64
 		builds[c], scans[c], lookups[c], asks[c] = built(dc)-b, heldScans.Load()-sc, filterLookups.Load()-l, placeAsks.Load()-a
 		tr.End()
 	}
-	return got, builds, scans, lookups, asks
+	return got, builds, scans, lookups, asks, use
 }
 
 // A set builds the filter of each recording's words once, at the first call
@@ -2264,7 +2275,7 @@ func TestOutcomeCostThePostingsCountWhatTheyHoldOnTheBudget(t *testing.T) {
 					if c.list {
 						buildLists(fss[i], s, &listsEntry{}, lists[k])
 					} else {
-						postRuns(fss[i], s, &filterEntry{}, []string{texts[k]})
+						postRuns(fss[i], &readerIndex{set: s}, &filterEntry{}, []string{texts[k]})
 					}
 				}
 			}
@@ -2973,7 +2984,7 @@ func TestOutcomeCostEveryBudgetedStructureHoldsNoMoreThanItCounts(t *testing.T) 
 			h0 := liveHeap()
 			for c := range copies {
 				for k := range ins[c] {
-					postRuns(fss[c], ss[c], &filterEntry{}, []string{ins[c][k]})
+					postRuns(fss[c], &readerIndex{set: ss[c]}, &filterEntry{}, []string{ins[c][k]})
 				}
 			}
 			held = liveHeap() - h0
@@ -3706,25 +3717,26 @@ func TestOutcomeCostAFilterEntryAnotherCallMadeIsKeptAndCountedOnce(t *testing.T
 	fs := &setFilters{of: map[string]*filterEntry{}, texts: map[filterTextKey]*filterEntry{}, fieldTexts: map[fieldsTextKey]*fieldsEntry{}}
 	used := func() int64 { s.mu.Lock(); defer s.mu.Unlock(); return s.budget.used }
 	u := used()
-	won := newSetEntry(fs, s, fs.of, "mock-1", strings.Clone, 100, &filterEntry{})
+	x := &readerIndex{set: s}
+	won := newSetEntry(fs, x, fs.of, "mock-1", strings.Clone, 100, &filterEntry{})
 	if won == nil || fs.of["mock-1"] != won || used()-u != 100 {
 		t.Fatalf("the first call's entry %v, stored %v, counted %d bytes; want an entry, stored, 100 counted", won != nil, won != nil && fs.of["mock-1"] == won, used()-u)
 	}
-	lost := newSetEntry(fs, s, fs.of, "mock-1", strings.Clone, 100, &filterEntry{})
+	lost := newSetEntry(fs, x, fs.of, "mock-1", strings.Clone, 100, &filterEntry{})
 	if lost != won || fs.of["mock-1"] != won || len(fs.of) != 1 || used()-u != 100 {
 		t.Errorf("a call that finds the entry another made gets it back %v, leaves it stored %v (%d entries), and the set counts %d bytes; want the entry, stored, 1 entry, 100 counted", lost == won, fs.of["mock-1"] == won, len(fs.of), used()-u)
 	}
 	k := filterTextKey{n: filterTextMin, a: 1, b: 2}
 	u = used()
-	won = newSetEntry(fs, s, fs.texts, k, sameKey, 60, &filterEntry{byText: true})
-	lost = newSetEntry(fs, s, fs.texts, k, sameKey, 60, &filterEntry{byText: true})
+	won = newSetEntry(fs, x, fs.texts, k, sameKey, 60, &filterEntry{byText: true})
+	lost = newSetEntry(fs, x, fs.texts, k, sameKey, 60, &filterEntry{byText: true})
 	if won == nil || !won.byText || lost != won || fs.texts[k] != won || len(fs.texts) != 1 || used()-u != 60 {
 		t.Errorf("by text: the entry made %v (by text: %v), the later call's is it %v, stored %v (%d entries), %d bytes counted; want one entry by text, both calls', 60 counted", won != nil, won != nil && won.byText, lost == won, fs.texts[k] == won, len(fs.texts), used()-u)
 	}
 	fk := fieldsTextKey{n: 3, fields: 1, a: 1, b: 2}
 	u = used()
-	made := newSetEntry(fs, s, fs.fieldTexts, fk, sameKey, 70, &fieldsEntry{})
-	if other := newSetEntry(fs, s, fs.fieldTexts, fk, sameKey, 70, &fieldsEntry{}); made == nil || other != made || fs.fieldTexts[fk] != made || len(fs.fieldTexts) != 1 || used()-u != 70 {
+	made := newSetEntry(fs, x, fs.fieldTexts, fk, sameKey, 70, &fieldsEntry{})
+	if other := newSetEntry(fs, x, fs.fieldTexts, fk, sameKey, 70, &fieldsEntry{}); made == nil || other != made || fs.fieldTexts[fk] != made || len(fs.fieldTexts) != 1 || used()-u != 70 {
 		t.Errorf("a field view: the entry made %v, the later call's is it %v, stored %v (%d entries), %d bytes counted; want one entry, both calls', 70 counted", made != nil, other == made, fs.fieldTexts[fk] == made, len(fs.fieldTexts), used()-u)
 	}
 }

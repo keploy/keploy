@@ -71,9 +71,12 @@ type readerIndex struct {
 	dc                 *DriftCache
 	set                *setDerived
 	budget, used, peak int64
-	seed               maphash.Seed
-	texts              map[uint64][]*readerEntry
-	unreadTexts        int
+	// spare: the index is a staging's (stageFilter), and counts on the
+	// set's budget only what it has spare (readerIndex.setClaim).
+	spare       bool
+	seed        maphash.Seed
+	texts       map[uint64][]*readerEntry
+	unreadTexts int
 	// momentAsks counts the instants holdsMoment asks byMoment of: what
 	// keeps a call's work near linear in the instants it decides.
 	momentAsks int
@@ -175,21 +178,33 @@ func newReaderIndex(dc *DriftCache) *readerIndex {
 // words, then the payloads, each read again where asked for), and past the
 // budget still it counts none.
 func (x *readerIndex) claim(n int64) bool {
-	if x.used+n > x.budget || x.set != nil && !setClaim(x.set, n) {
+	if x.used+n > x.budget || x.set != nil && !x.setClaim(n) {
 		return false
 	}
 	x.used += n
 	return true
 }
 
+// setClaim counts n bytes more on the set's budget for what x keeps there
+// (setClaim): a call's index has the set let go of what it is past its
+// budget first, and a staging's (spare) counts only what the budget has
+// spare, so the filters it builds ahead of the calls never take the room
+// of the parts the set keeps.
+func (x *readerIndex) setClaim(n int64) bool { return setClaimBy(x.set, n, !x.spare) }
+
 // setClaim counts n bytes more on s's one budget, as a tier that lets none
 // go keeps there (tier.keep): it first has the set let go of what it is past
 // its budget (budget.letGo), and past the budget still it counts none.
-func setClaim(s *setDerived, n int64) bool {
+func setClaim(s *setDerived, n int64) bool { return setClaimBy(s, n, true) }
+
+// setClaimBy is setClaim, letting go of what the set is past its budget
+// only where letGo says so: else n is counted only where the budget has it
+// spare.
+func setClaimBy(s *setDerived, n int64, letGo bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b := s.budget
-	if need := b.used + n - b.limit; need > 0 && b.letGo != nil {
+	if need := b.used + n - b.limit; need > 0 && letGo && b.letGo != nil {
 		b.letGo(need)
 	}
 	if b.used+n > b.limit {
@@ -668,6 +683,42 @@ func (t *readerText) setFilter() wordFilter {
 	return e.f
 }
 
+// stageFilter builds the set's filter of x's words (setFilter), x being a
+// recording the set's staging reads (stageFilters), as the set's first call
+// that asks it a word would build it: by its identity (idEntry), from its
+// payload, kept on the set's budget, its words posted (postRuns). Before,
+// the set's first call that read a word's places (decider.places) built
+// the filter of every recording before it while its client waited
+// (api-server's mongo round: up to 84 ms of one call). A call that asks
+// one while it is being built waits for that build (setFilter's once), as
+// it waits for another call's. It reads through an index of its own,
+// released at once: it keeps nothing past the set's entry, as a call's
+// index keeps nothing past its call. It takes only what the set's budget
+// has spare (readerIndex.spare): it has the set let go of nothing. A
+// filter that does not fit that way is counted (filtersPast), and false:
+// the calls that ask it build it, or scan the recording, as before. A
+// recording with no identity has no entry by it, and is left to the calls.
+func (dc *DriftCache) stageFilter(x Raw) bool {
+	s := dc.set
+	if s == nil || x.id == "" {
+		return true
+	}
+	ix := newReaderIndex(dc)
+	ix.spare = true
+	defer ix.release()
+	t := ix.textOf(x)
+	built := t.setFilter() != nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if built {
+		s.filters++
+	} else if !t.rawUnread {
+		s.filtersPast++
+		return false
+	}
+	return true
+}
+
 // idEntry is the set's entry for the filter of t's recording's words, by
 // its id: the one there, or one made and counted on the set's budget as the
 // set holds it (filterEntryBytes, filterIDSlotBytes, the id's letters, and
@@ -684,7 +735,7 @@ func (t *readerText) idEntry(fs *setFilters) *filterEntry {
 	if first {
 		n += filterIDGroupBytes
 	}
-	return newSetEntry(fs, t.x.set, fs.of, id, strings.Clone, n, &filterEntry{})
+	return newSetEntry(fs, t.x, fs.of, id, strings.Clone, n, &filterEntry{})
 }
 
 // newSetEntry is m's entry at k, made where m holds none yet: n counted on
@@ -692,10 +743,11 @@ func (t *readerText) idEntry(fs *setFilters) *filterEntry {
 // key(k), fs's lock held: one of the set's filter entries (filterEntry) or
 // field views (fieldsEntry). A call that finds the entry another call made
 // meanwhile gives its count back.
-func newSetEntry[K comparable, E any](fs *setFilters, s *setDerived, m map[K]*E, k K, key func(K) K, n int64, made *E) *E {
-	if !setClaim(s, n) {
+func newSetEntry[K comparable, E any](fs *setFilters, x *readerIndex, m map[K]*E, k K, key func(K) K, n int64, made *E) *E {
+	if !x.setClaim(n) {
 		return nil
 	}
+	s := x.set
 	fs.mu.Lock()
 	e := m[k]
 	if e == nil {
@@ -744,7 +796,7 @@ func (t *readerText) textEntry(fs *setFilters) *filterEntry {
 	if first {
 		n += filterTextGroupBytes
 	}
-	return newSetEntry(fs, t.x.set, fs.texts, k, sameKey[filterTextKey], n, &filterEntry{byText: true})
+	return newSetEntry(fs, t.x, fs.texts, k, sameKey[filterTextKey], n, &filterEntry{byText: true})
 }
 
 // sameKey is k: a map's key that holds nothing to copy for the set to keep
@@ -780,10 +832,10 @@ func (t *readerText) buildFilter() wordFilter {
 		fs.builds++
 	}
 	fs.mu.Unlock()
-	if !setClaim(t.x.set, allocBytes(uintptr(cap(f))*unsafe.Sizeof(f[0]), false)) {
+	if !t.x.setClaim(allocBytes(uintptr(cap(f))*unsafe.Sizeof(f[0]), false)) {
 		return nil
 	}
-	postRuns(fs, t.x.set, t.filter, forms)
+	postRuns(fs, t.x, t.filter, forms)
 	return f
 }
 
@@ -798,7 +850,7 @@ func (t *readerText) buildFilter() wordFilter {
 // postings keep no text alive. A run another text posts between the count
 // and the posting takes one id, less than its count: the postings never
 // hold more than they counted, and never let a run go.
-func postRuns(fs *setFilters, s *setDerived, e *filterEntry, forms []string) {
+func postRuns(fs *setFilters, x *readerIndex, e *filterEntry, forms []string) {
 	seen := map[string]bool{}
 	for _, text := range forms {
 		eachWord(text, func(run string) { seen[run] = true })
@@ -812,7 +864,7 @@ func postRuns(fs *setFilters, s *setDerived, e *filterEntry, forms []string) {
 		n += postBytes(run, fs.runs[run] == nil)
 	}
 	fs.mu.Unlock()
-	if !setClaim(s, n) {
+	if !x.setClaim(n) {
 		return
 	}
 	fs.mu.Lock()
@@ -994,13 +1046,13 @@ func (t *readerText) shortEntry() *filterEntry {
 		if first {
 			n += filterIDGroupBytes
 		}
-		if e = newSetEntry(fs, t.x.set, fs.short, s, strings.Clone, n, &filterEntry{byText: true}); e == nil {
+		if e = newSetEntry(fs, t.x, fs.short, s, strings.Clone, n, &filterEntry{byText: true}); e == nil {
 			return nil
 		}
 	}
 	e.once.Do(func() {
 		e.id = -1
-		postRuns(fs, t.x.set, e, textForms(s))
+		postRuns(fs, t.x, e, textForms(s))
 	})
 	return e
 }
@@ -1326,7 +1378,7 @@ func (t *readerText) setFields() (fieldWords, bool) {
 	if t.raw != nil {
 		b = t.raw.payload()
 	}
-	e := fieldsEntryOf(fs, t.x.set, b)
+	e := fieldsEntryOf(fs, t.x, b)
 	if e == nil {
 		t.held = &b
 		return fieldWords{}, false
@@ -1345,7 +1397,7 @@ func (t *readerText) setFields() (fieldWords, bool) {
 // and counted on the set's budget as the set holds it (fieldsEntryBytes,
 // fieldsTextSlotBytes, and the map's first group for the first;
 // newSetEntry). nil where b was not read or that does not fit.
-func fieldsEntryOf(fs *setFilters, s *setDerived, b rawBody) *fieldsEntry {
+func fieldsEntryOf(fs *setFilters, x *readerIndex, b rawBody) *fieldsEntry {
 	if !b.read {
 		return nil
 	}
@@ -1360,7 +1412,7 @@ func fieldsEntryOf(fs *setFilters, s *setDerived, b rawBody) *fieldsEntry {
 	if first {
 		n += fieldsTextGroupBytes
 	}
-	return newSetEntry(fs, s, fs.fieldTexts, k, sameKey[fieldsTextKey], n, &fieldsEntry{})
+	return newSetEntry(fs, x, fs.fieldTexts, k, sameKey[fieldsTextKey], n, &fieldsEntry{})
 }
 
 // buildSetFields is the field view of b, t's payload, for the set
@@ -1382,7 +1434,7 @@ func (t *readerText) buildSetFields(fs *setFilters, b rawBody) (fieldWords, bool
 	if !fits {
 		return fieldWords{}, false
 	}
-	if !setClaim(x.set, n) {
+	if !x.setClaim(n) {
 		fs.mu.Lock()
 		fs.fieldsUsed -= n
 		fs.mu.Unlock()

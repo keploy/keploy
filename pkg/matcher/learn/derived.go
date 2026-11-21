@@ -119,6 +119,12 @@ type setDerived struct {
 	// the staging read the rest of (stageRest), for the rows and the
 	// agent's log (SetUse).
 	staged, called, finished int
+	// filters and filtersPast are the recordings whose word filter the
+	// staging built for the set (stageFilters), and those it left to its
+	// calls, which build them as before: their filter did not fit the
+	// set's budget, or the set no longer kept their payload. For the rows
+	// and the agent's log (SetUse).
+	filters, filtersPast int
 	// reads are the parts of the set's recordings read (derive), by tier
 	// and part, for the rows.
 	reads map[readTally]int

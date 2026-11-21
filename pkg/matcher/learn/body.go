@@ -78,6 +78,30 @@ func (s *rawSource) body() rawBody {
 	return s.store.get(s.id, s.name, s.load)
 }
 
+// kept is x holding the payload the set's store keeps of its recording
+// (holding), and true; false, and x, where the store keeps none of it now
+// (never loaded, or let go past the budget) or x is read now: it loads
+// nothing.
+func (x Raw) kept() (Raw, bool) {
+	if x.src == nil || x.src.store == nil {
+		return x, false
+	}
+	st := x.src.store
+	st.mu.Lock()
+	sl := st.kept.find(x.id, partBody)
+	var b rawBody
+	if sl != nil {
+		b = sl.p
+	}
+	st.mu.Unlock()
+	if sl == nil {
+		return x, false
+	}
+	x = x.holding()
+	x.src.held.body, x.src.held.ok = b, true
+	return x, true
+}
+
 // holding is x reading its payload at most once, where a part first needs
 // it, and holding it for each part read after, whatever the set's store
 // lets go meanwhile: what one reader reads the parts of a recording from
