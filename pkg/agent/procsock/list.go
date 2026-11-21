@@ -6,13 +6,11 @@ import (
 	"fmt"
 )
 
-// Proc is one process as proc_info's short BSD record shows it: its parent,
-// its process group and whether it has exited and waits to be reaped.
+// Proc is one process as proc_info's short BSD record shows it: its parent
+// and its process group. Only a process that has not exited has a record
+// (see Info).
 type Proc struct {
 	PID, PPID, PGID int
-	// Zombie is a process that has exited and waits for its parent to
-	// reap it (XNU's SZOMB).
-	Zombie bool
 }
 
 // How proc_info lists processes and lays out their short records, from
@@ -23,8 +21,6 @@ const (
 	shortBSDInfoSize   = 64 // sizeof(struct proc_bsdshortinfo)
 	offShortPPID       = 4  // pbsi_ppid
 	offShortPGID       = 8  // pbsi_pgid
-	offShortStatus     = 12 // pbsi_status
-	sZomb              = 5  // SZOMB
 	pidSize            = 4  // a pid_t in the list
 	maxListPIDsRetries = 4
 	listPIDsHeadroom   = 64
@@ -70,9 +66,8 @@ func shortRecord(pid int, rec []byte, n int) (Proc, error) {
 		return Proc{}, fmt.Errorf("process %d's record is %d bytes, not %d", pid, n, shortBSDInfoSize)
 	}
 	return Proc{
-		PID:    pid,
-		PPID:   int(binary.LittleEndian.Uint32(rec[offShortPPID:])),
-		PGID:   int(binary.LittleEndian.Uint32(rec[offShortPGID:])),
-		Zombie: binary.LittleEndian.Uint32(rec[offShortStatus:]) == sZomb,
+		PID:  pid,
+		PPID: int(binary.LittleEndian.Uint32(rec[offShortPPID:])),
+		PGID: int(binary.LittleEndian.Uint32(rec[offShortPGID:])),
 	}, nil
 }

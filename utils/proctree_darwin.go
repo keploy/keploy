@@ -16,7 +16,7 @@ import (
 // /proc/<pid>/status" -- an ERROR in an interrupt that had otherwise gone as
 // it should, which an editor driving keploy shows in red.
 
-// procRecord reads a process's parent, group and state (procsock.Info).
+// procRecord reads a process's parent and group (procsock.Info).
 var procRecord = procsock.Info
 
 // findChildPIDs returns every descendant of parentPID, and how to read each
@@ -31,8 +31,9 @@ var procRecord = procsock.Info
 // of every group in the tree, so such an interrupt logged "failed to find
 // unique process groups: no such process" at ERROR, and fell back to
 // signalling each pid as if it led a group. A process whose record cannot be
-// read, one that has gone or is exiting, is not in the table, so not in the
-// tree: no signal reaches it any more.
+// read, one that has exited (a zombie too) or gone, is not in the table, so
+// not in the tree: no signal reaches it any more. A zombie has no children
+// to lose: the kernel gives them to launchd when their parent exits.
 func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 	pids, err := procsock.PIDs()
 	if err != nil {
@@ -53,11 +54,12 @@ func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 func groupReached(int, syscall.Signal) []Reached { return nil }
 
 // GroupRunsOn reports whether a process of process group pgid runs: one
-// proc_info lists in that group (procsock.GroupPIDs) whose record says it has
-// not exited. A zombie has exited, and so has a process whose record cannot
-// be read (gone, or exiting); a list keploy cannot read says none runs. A native application's command leads a process group of its own
-// (ExecuteCommand), so once the command has exited, a process it started that
-// is still in its group is the application running on.
+// proc_info lists in that group (procsock.GroupPIDs) whose record can be
+// read. A process that has exited, a zombie too, or gone has no record; a
+// list keploy cannot read says none runs. A native application's command
+// leads a process group of its own (ExecuteCommand), so once the command has
+// exited, a process it started that is still in its group is the application
+// running on.
 func GroupRunsOn(pgid int) bool {
 	if pgid <= 1 {
 		return false
@@ -67,7 +69,7 @@ func GroupRunsOn(pgid int) bool {
 		return false
 	}
 	for _, pid := range pids {
-		if p, err := procRecord(pid); err == nil && !p.Zombie {
+		if _, err := procRecord(pid); err == nil {
 			return true
 		}
 	}

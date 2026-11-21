@@ -162,7 +162,9 @@ func listPIDs(kind, arg int) ([]int, error) {
 }
 
 // Info reads process pid's short BSD record, which any user may read. A
-// process that has gone, or is exiting, answers ESRCH.
+// process that has exited answers ESRCH, as one that has gone does: a
+// zombie its parent has not reaped yet too, since proc_info reads a zombie's
+// record only when its argument asks for zombies, and Info's does not.
 func Info(pid int) (Proc, error) {
 	buf := make([]byte, shortBSDInfoSize)
 	n, err := procInfo(procInfoCallPIDInfo, pid, procPIDTShortBSDInfo, 0, buf)
