@@ -2762,10 +2762,15 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		// A form is refused only by the patterns that guard it (named
 		// above); its other fields are no reason. (A call that is not JSON
 		// against a JSON recording differs whole, which names no field.)
+		// A field only one side holds is named missing on the other
+		// (sides.kind), any other as changed in value.
 		if pkg.IsJSON([]byte(mockReq.Body)) {
-			for _, p := range h.bodyFieldsDiffering(closestMock, mocknoise.NewJSONBody(diffBody), userBodyNoise) {
+			live := mocknoise.NewJSONBody(diffBody)
+			recorded, _ := h.ownBodies.read(closestMock) // mockReq is its request
+			oneSide := fieldsOnOneSide(closestMock, recorded.json(), live)
+			for _, p := range h.bodyFieldsDiffering(closestMock, live, userBodyNoise) {
 				if !slices.ContainsFunc(fieldDiffs, func(d models.MockFieldDiff) bool { return d.Path == p }) {
-					fieldDiffs = append(fieldDiffs, models.MockFieldDiff{Path: p, Kind: models.DiffKindValueChanged})
+					fieldDiffs = append(fieldDiffs, models.MockFieldDiff{Path: p, Kind: oneSide[p].kind()})
 				}
 			}
 		}

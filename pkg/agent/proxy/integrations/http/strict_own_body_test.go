@@ -166,3 +166,44 @@ func TestStrictNoiseMissNamesNoFieldItsNoiseCovers(t *testing.T) {
 		t.Fatalf("the call was reported %+v under strict noise, want one %q miss naming body.ids[] alone", got.reports, models.MatchPhaseStrict)
 	}
 }
+
+// A strict miss names a field only one side holds, which the diffs of the
+// bodies with the learned noise left out, or of arrays read as one element,
+// do not, as missing on the other side: missing_in_live where
+// only the recording holds it, missing_in_mock where only the call does,
+// and as changed in value where each holds it in an element of an array
+// the other's lacks it in. Before, each was named changed in value.
+func TestStrictNoiseMissNamesAFieldOnOneSideByItsSide(t *testing.T) {
+	setProven(t, false)
+	for _, tc := range []struct {
+		name     string
+		learned  map[string][]string
+		recorded string
+		call     string
+		path     string
+		kind     models.MockFieldDiffKind
+	}{
+		{name: "a learned field only the call has", learned: map[string][]string{"body.ts": {}}, recorded: `{"q":"ada"}`, call: `{"q":"ada","ts":7}`, path: "body.ts", kind: models.DiffKindMissingInMock},
+		{name: "a field only the recording's element before the last has", recorded: `{"items":[{"x":1},{"x":1}]}`, call: `{"items":[{"x":1},{"y":1}]}`, path: "body.items[].x", kind: models.DiffKindMissingInLive},
+		{name: "a field each side has in an element the other's lacks it in", recorded: `{"items":[{"x":1,"y":1},{"x":2}]}`, call: `{"items":[{"x":1},{"x":2,"y":1}]}`, path: "body.items[].y", kind: models.DiffKindValueChanged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHTTP()
+			db := searchRecordings(t, h, tc.learned, tc.recorded)
+			got := serveReportedWith(t, h, db, models.OutgoingOptions{MockNoiseStrict: true}, searchCall(tc.call))
+			m := got.strictMisses()
+			if len(m) != 1 {
+				t.Fatalf("%s against %s was reported %+v under strict noise, want one %q miss", tc.call, tc.recorded, got.reports, models.MatchPhaseStrict)
+			}
+			var named []models.MockFieldDiff
+			for _, d := range m[0].FieldDiffs {
+				if d.Path == tc.path {
+					named = append(named, d)
+				}
+			}
+			if len(named) != 1 || named[0].Kind != tc.kind {
+				t.Fatalf("%s against %s: the miss names %s as %+v (all: %+v), want it once as %s", tc.call, tc.recorded, tc.path, named, m[0].FieldDiffs, tc.kind)
+			}
+		})
+	}
+}
