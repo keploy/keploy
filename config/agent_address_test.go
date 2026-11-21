@@ -26,6 +26,14 @@ func TestTheAgentAddressIsTheCallersUntilSetThenTheLastSet(t *testing.T) {
 	if got := c.AgentURI(); got != "http://localhost:40002/agent" {
 		t.Fatalf("AgentURI() = %q; want the address set last, http://localhost:40002/agent", got)
 	}
+	c.ResetAgentURI()
+	if got := c.AgentURI(); got != "http://10.0.0.7:8096/agent" {
+		t.Fatalf("AgentURI() = %q after ResetAgentURI; want the caller's Agent.AgentURI", got)
+	}
+	c.SetAgentURI("http://localhost:40003/agent")
+	if got := c.AgentURI(); got != "http://localhost:40003/agent" {
+		t.Fatalf("AgentURI() = %q after SetAgentURI following reset; want http://localhost:40003/agent", got)
+	}
 }
 
 // A copy of a Config is a Config of its own: a move of the copy's agent (the
