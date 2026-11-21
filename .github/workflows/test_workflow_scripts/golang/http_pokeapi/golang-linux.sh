@@ -18,6 +18,64 @@ fi
 
 rm -rf keploy/
 
+workflow_root="${GITHUB_WORKSPACE:-${PWD%/samples-*}}"
+pokeapi_stub_addr="127.0.0.1:18080"
+pokeapi_stub_dir=$(mktemp -d)
+pokeapi_stub_bin="$pokeapi_stub_dir/pokeapi-stub"
+pokeapi_stub_log="$PWD/pokeapi_stub.log"
+pokeapi_stub_pid=""
+
+stop_pokeapi_stub() {
+    if [ -n "$pokeapi_stub_pid" ]; then
+        kill "$pokeapi_stub_pid" 2>/dev/null || true
+        wait "$pokeapi_stub_pid" 2>/dev/null || true
+        pokeapi_stub_pid=""
+    fi
+    if [ -n "$pokeapi_stub_dir" ] && [ -d "$pokeapi_stub_dir" ]; then
+        rm -f "$pokeapi_stub_bin"
+        rmdir "$pokeapi_stub_dir"
+        pokeapi_stub_dir=""
+    fi
+}
+trap stop_pokeapi_stub EXIT
+
+# Keep recordings deterministic and independent of pokeapi.co. The checked-out
+# sample currently has a constant base URL, so point that disposable source
+# tree at the local fixture before building it.
+pokeapi_client="internal/pokeapi/poke_req.go"
+live_base_url='const baseURL = "https://pokeapi.co/api/v2"'
+stub_base_url="const baseURL = \"http://${pokeapi_stub_addr}/api/v2\""
+if [ "$(grep -Fxc "$live_base_url" "$pokeapi_client")" -ne 1 ]; then
+    echo "::error::could not find the expected PokeAPI base URL in $pokeapi_client"
+    exit 1
+fi
+sed -i "s|^${live_base_url}$|${stub_base_url}|" "$pokeapi_client"
+if ! grep -Fxq "$stub_base_url" "$pokeapi_client"; then
+    echo "::error::failed to point the sample at the local PokeAPI stub"
+    exit 1
+fi
+
+go build -o "$pokeapi_stub_bin" "$workflow_root/.github/workflows/test_workflow_scripts/golang/http_pokeapi/pokeapi_stub/main.go"
+"$pokeapi_stub_bin" -addr "$pokeapi_stub_addr" >"$pokeapi_stub_log" 2>&1 &
+pokeapi_stub_pid=$!
+
+pokeapi_stub_ready=false
+for _ in {1..20}; do
+    if curl --fail --silent --max-time 2 "http://${pokeapi_stub_addr}/healthz" >/dev/null; then
+        pokeapi_stub_ready=true
+        break
+    fi
+    if ! kill -0 "$pokeapi_stub_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+if [ "$pokeapi_stub_ready" != true ]; then
+    echo "::error::the local PokeAPI stub did not become ready"
+    cat "$pokeapi_stub_log"
+    exit 1
+fi
+
 # Build go binary. The retry lives in go-retry.sh now; the flake it exists for
 # was first seen here — keploy/keploy#4077 run 24631193918/job/72018929505,
 # a TLS handshake timeout fetching github.com/go-chi/chi@v1.5.5.
@@ -37,42 +95,84 @@ test:
         global: {"body": {"updated_at":[]}}
 KEPLOY_CFG
 
+stop_keploy() {
+    local pids
+    pids=$(pgrep keploy || true)
+    if [ -n "$pids" ]; then
+        echo "$pids Keploy PID"
+        echo "Killing Keploy"
+        sudo kill $pids || true
+    fi
+}
+
+request_failed() {
+    echo "::error::$1"
+    stop_keploy
+}
+
 send_request() {
-    local index=$1  
+    local index=$1
+    local response
+    local location
+    local pokemon
 
     sleep 6
     app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://localhost:8080/api/locations; then
+    for _ in {1..20}; do
+        if curl --fail --silent --max-time 5 http://localhost:8080/api/locations >/dev/null; then
             app_started=true
+            break
         fi
-        sleep 3
+        sleep 1
     done
-    
+    if [ "$app_started" != true ]; then
+        request_failed "the http-pokeapi sample did not become ready"
+        return 1
+    fi
+
     echo "App started"
-    
-    response=$(curl -s -X GET http://localhost:8080/api/locations)
 
-    # Extract any location from the reponse
-    location=$(echo "$response" | jq -r ".location[$index]")
-    
-    response=$(curl -s -X GET http://localhost:8080/api/locations/$location)
+    if ! response=$(curl --fail-with-body --silent --show-error --max-time 20 http://localhost:8080/api/locations); then
+        request_failed "GET /api/locations failed while recording: ${response:-no response body}"
+        return 1
+    fi
 
-    # Extract any pokemon from the response
-    pokemon=$(echo "$response" | jq -r ".[$index]")
-    
-    curl -s -X GET http://localhost:8080/api/greet
+    # Extract any location from the response and reject missing fixture data.
+    if ! location=$(printf '%s' "$response" | jq -er ".location[$index] | select(type == \"string\" and length > 0)"); then
+        request_failed "GET /api/locations returned no location at index $index"
+        return 1
+    fi
 
-    curl -s -X GET http://localhost:8080/api/greet?format=html
+    if ! response=$(curl --fail-with-body --silent --show-error --max-time 20 "http://localhost:8080/api/locations/$location"); then
+        request_failed "GET /api/locations/$location failed while recording: ${response:-no response body}"
+        return 1
+    fi
 
-    curl -s -X GET http://localhost:8080/api/greet?format=xml
+    # Validate that the detail response contains the data the sample exposes.
+    if ! pokemon=$(printf '%s' "$response" | jq -er ".[$index] | select(type == \"string\" and length > 0)"); then
+        request_failed "GET /api/locations/$location returned no Pokemon at index $index"
+        return 1
+    fi
+    echo "Selected $pokemon from $location"
+
+    if ! curl --fail-with-body --silent --show-error --max-time 20 http://localhost:8080/api/greet >/dev/null; then
+        request_failed "GET /api/greet failed while recording"
+        return 1
+    fi
+
+    if ! curl --fail-with-body --silent --show-error --max-time 20 'http://localhost:8080/api/greet?format=html' >/dev/null; then
+        request_failed "GET /api/greet?format=html failed while recording"
+        return 1
+    fi
+
+    if ! curl --fail-with-body --silent --show-error --max-time 20 'http://localhost:8080/api/greet?format=xml' >/dev/null; then
+        request_failed "GET /api/greet?format=xml failed while recording"
+        return 1
+    fi
 
     # Wait for 7 seconds for Keploy to record the tcs and mocks.
     sleep 7
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID"
-    echo "Killing Keploy"
-    sudo kill $pid
+    stop_keploy
 }
 
 record_iterations() {
@@ -81,6 +181,7 @@ record_iterations() {
     for i in {1..2}; do
         local app_name="http-pokeapi_${i}${label}"
         send_request "$i" &
+        local request_pid=$!
         # shellcheck disable=SC2086
         "$RECORD_BIN" record $extra_flags -c "./http-pokeapi" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
         if grep "ERROR" "${app_name}.txt"; then
@@ -93,8 +194,12 @@ record_iterations() {
           cat "${app_name}.txt"
           exit 1
         fi
+        if ! wait "$request_pid"; then
+            echo "::error::request driver failed during recording iteration ${i}${label:+ (json)}"
+            cat "$pokeapi_stub_log"
+            exit 1
+        fi
         sleep 5
-        wait
         echo "Recorded test case and mocks for iteration ${i}${label:+ (json)}"
     done
 }
@@ -107,6 +212,11 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 if json_pass_supported; then
     record_iterations "--storage-format json"
 fi
+
+# A replay must be served by Keploy's mocks. Taking the fixture down here also
+# turns a missed mock into a connection failure instead of a false pass.
+stop_pokeapi_stub
+trap - EXIT
 
 # The strict mock-window replay further down runs only for a replay binary
 # from a build artifact (download-binary's build/keploy or
@@ -180,8 +290,8 @@ fi
 # The same recordings under strict mock windows. KEPLOY_STRICT_MOCK_WINDOW=1
 # gates off DeriveLifetime's lax promotion, so the recorder's HTTP_CLIENT tag
 # makes these HTTP mocks per-test, and the agent parks per-test mocks on disk
-# with every response of 8 KiB or more (here the 14.8-16 KB body of the one
-# location area each set fetches) stored apart from its mock, to be loaded
+# with every response of 8 KiB or more (here the 10 KiB-padded response of the
+# local location-area fixture) stored apart from its mock, to be loaded
 # when it is served. A replay that served such a mock without loading its
 # response gave the application no reply, and the test that made the call
 # failed.
