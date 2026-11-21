@@ -26,6 +26,7 @@ func TestGroupRunsInReadsEachProcessOfTheGroup(t *testing.T) {
 	proc := fstest.MapFS{
 		"20/stat":   statLine(20, "sh", 'Z', 1, 20),     // a zombie leader
 		"21/stat":   statLine(21, "server", 'S', 1, 20), // the server it left
+		"80/stat":   statLine(80, "server", 'Z', 1, 80), // main thread exited, another runs
 		"30/stat":   statLine(30, "sh", 'Z', 1, 30),     // zombies only
 		"31/stat":   statLine(31, "worker", 'Z', 1, 30),
 		"40/stat":   statLine(40, "app", 'X', 1, 40), // dead
@@ -34,22 +35,23 @@ func TestGroupRunsInReadsEachProcessOfTheGroup(t *testing.T) {
 		"self/stat": statLine(70, "self", 'R', 1, 70),
 		"1/stat":    statLine(1, "init", 'S', 0, 1),
 	}
-	for pgid, want := range map[int]bool{20: true, 30: false, 40: false, 51: true, 50: false, 60: false, 70: false, 1: false, 0: false} {
-		got, err := groupRunsIn(proc, pgid, nil)
+	threadRuns := func(pid int) bool { return pid == 80 }
+	for pgid, want := range map[int]bool{20: true, 30: false, 40: false, 51: true, 50: false, 60: false, 70: false, 1: false, 0: false, 80: true} {
+		got, err := groupRunsIn(proc, pgid, nil, threadRuns)
 		if err != nil || got != want {
 			t.Errorf("groupRunsIn(%d) = %v, %v; want %v", pgid, got, err, want)
 		}
 	}
-	if got, err := groupRunsIn(failingFS{}, 20, nil); !errors.Is(err, fs.ErrPermission) || got {
+	if got, err := groupRunsIn(failingFS{}, 20, nil, threadRuns); !errors.Is(err, fs.ErrPermission) || got {
 		t.Errorf("groupRunsIn of a /proc that cannot be listed = %v, %v; want the error", got, err)
 	}
 	// The server the zombie leader left, handed to the caller as it ignored
 	// the signal (its pid and the start time statLine gives), is not
 	// waited for; the same pid with another start time is another process.
-	if got, err := groupRunsIn(proc, 20, []Reached{{PID: 21, Start: 77, Ignores: true}}); err != nil || got {
+	if got, err := groupRunsIn(proc, 20, []Reached{{PID: 21, Start: 77, Ignores: true}}, threadRuns); err != nil || got {
 		t.Errorf("groupRunsIn(20) without the server handed over = %v, %v; want false", got, err)
 	}
-	if got, err := groupRunsIn(proc, 20, []Reached{{PID: 21, Start: 78, Ignores: true}}); err != nil || !got {
+	if got, err := groupRunsIn(proc, 20, []Reached{{PID: 21, Start: 78, Ignores: true}}, threadRuns); err != nil || !got {
 		t.Errorf("groupRunsIn(20) with another process of pid 21 handed over = %v, %v; want true", got, err)
 	}
 }
@@ -118,5 +120,23 @@ func TestGroupGoneWaitsForEachProcessItsSignalReached(t *testing.T) {
 	case <-gone:
 	case <-time.After(time.Minute):
 		t.Fatal("the group was not gone once each of its processes had exited")
+	}
+}
+
+// A process whose main thread has exited while another thread of it runs
+// on reads Z in its stat, but has not exited: it holds its files (a
+// SIGKILLed Go server's port, until its last thread is gone). Neither
+// isProcessRunning nor the group wait (zombieRuns) takes it for exited.
+func TestAZombieMainThreadWithAThreadRunningHasNotExited(t *testing.T) {
+	cmd := startMainThreadExited(t)
+	pid := cmd.Process.Pid
+	if exitedUnreaped(pid) {
+		t.Errorf("exitedUnreaped(%d): a process a thread of which runs is taken for a zombie", pid)
+	}
+	if running, err := isProcessRunning(pid); err != nil || !running {
+		t.Errorf("isProcessRunning(%d) = %v, %v; want true", pid, running, err)
+	}
+	if !zombieRuns(pid) {
+		t.Errorf("zombieRuns(%d): the thread of it that runs is not seen", pid)
 	}
 }

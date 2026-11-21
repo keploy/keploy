@@ -74,12 +74,23 @@ func readProcTable(proc fs.FS) (procTable, error) {
 }
 
 // exitedUnreaped reports whether pid is a zombie: it has exited, and waits
-// for its parent to reap it (state Z in its stat). kill(2) of a zombie
-// succeeds, as of a process that runs, so the interrupt asks this too: a
-// group leader that is a zombie has exited, and costs the interrupt no grace
-// wait and no SIGKILL. A stat that cannot be read or parsed is no zombie.
+// for its parent to reap it (state Z in its stat, and no thread of it runs).
+// kill(2) of a zombie succeeds, as of a process that runs, so the interrupt
+// asks this too: a group leader that is a zombie has exited, and costs the
+// interrupt no grace wait and no SIGKILL. A stat that cannot be read or
+// parsed is no zombie. Nor is a process whose main thread exited while
+// another thread of it runs on: its stat reads Z, but it holds its files (a
+// SIGKILLed Go server's port, until its last thread has exited), and a
+// stop that took it for exited returned with its port still bound.
 func exitedUnreaped(pid int) bool {
-	return exitedUnreapedIn(os.DirFS("/proc"), pid)
+	return exitedUnreapedIn(os.DirFS("/proc"), pid) && !zombieRuns(pid)
+}
+
+// zombieRuns reports whether process pid, whose main thread is a zombie,
+// still runs: a thread of it runs (RunningThread), or that cannot be read.
+func zombieRuns(pid int) bool {
+	_, runs, err := RunningThread("/proc", pid)
+	return err != nil || runs
 }
 
 // exitedUnreapedIn is exitedUnreaped over proc, a /proc.
@@ -97,11 +108,12 @@ func exitedUnreapedIn(proc fs.FS, pid int) bool {
 // zombie nor dead, and that is not one of except (its pid and start time). A
 // /proc that cannot be listed is an error.
 func groupRunsExcept(pgid int, except []Reached) (bool, error) {
-	return groupRunsIn(os.DirFS("/proc"), pgid, except)
+	return groupRunsIn(os.DirFS("/proc"), pgid, except, zombieRuns)
 }
 
-// groupRunsIn is groupRunsExcept over proc, a /proc.
-func groupRunsIn(proc fs.FS, pgid int, except []Reached) (bool, error) {
+// groupRunsIn is groupRunsExcept over proc, a /proc, with zombieRuns telling
+// whether a process whose stat reads Z runs on in a thread of it.
+func groupRunsIn(proc fs.FS, pgid int, except []Reached, zombieRuns func(pid int) bool) (bool, error) {
 	if pgid <= 1 {
 		return false, nil
 	}
@@ -120,8 +132,11 @@ func groupRunsIn(proc fs.FS, pgid int, except []Reached) (bool, error) {
 			continue
 		}
 		stat, ok := ParseProcStat(line)
-		if ok && stat.PGRP == pgid && stat.State != 'Z' && stat.State != 'X' &&
-			!slices.Contains(except, Reached{PID: pid, Start: stat.StartTime, Ignores: true}) {
+		if !ok || stat.PGRP != pgid || stat.State == 'X' ||
+			slices.Contains(except, Reached{PID: pid, Start: stat.StartTime, Ignores: true}) {
+			continue
+		}
+		if stat.State != 'Z' || zombieRuns(pid) {
 			return true, nil
 		}
 	}
