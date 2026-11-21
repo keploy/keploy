@@ -68,6 +68,13 @@ jobs:
           chmod +x keploy/.github/workflows/test_workflow_scripts/sampling/run-sampling-test.sh
           keploy/.github/workflows/test_workflow_scripts/sampling/run-sampling-test.sh
 
+      - name: Run sampling slot-release test
+        env:
+          KEPLOY_BIN: ${{ github.workspace }}/keploy/keploy
+        run: |
+          chmod +x keploy/.github/workflows/test_workflow_scripts/sampling/run-sampling-slot-test.sh
+          keploy/.github/workflows/test_workflow_scripts/sampling/run-sampling-slot-test.sh
+
       - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -77,5 +84,8 @@ jobs:
             samples-go/sampling-test/record.log
             samples-go/sampling-test/keploy/
             samples-go/sampling-test/curl-results/
+            ${{ runner.temp }}/sampling-slot/slot-record.log
+            ${{ runner.temp }}/sampling-slot/keploy/
+            ${{ runner.temp }}/sampling-slot/out/
           retention-days: 7
           if-no-files-found: ignore

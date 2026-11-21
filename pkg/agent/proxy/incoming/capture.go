@@ -25,9 +25,16 @@ type captureBuffer struct {
 	// come after the pause has ended, so this is what says the exchange was
 	// lost to it rather than to the size budget.
 	lostToPause bool
+	// onCut, when set, runs on the goroutine that writes the buffer as its
+	// capture is cut short (by its limit or a pause), which is once: a
+	// capture cut short takes no more. Its exchange is known never captured
+	// from then on.
+	onCut func()
 }
 
-func newCaptureBuffer(limit int) *captureBuffer {
+// newCaptureBuffer is a variable so that a test can see the captures an
+// exchange makes.
+var newCaptureBuffer = func(limit int) *captureBuffer {
 	return &captureBuffer{limit: limit}
 }
 
@@ -50,31 +57,59 @@ func (b *captureBuffer) Write(p []byte) (int, error) {
 	// drain. The caller's Truncated() check then naturally drops the
 	// in-flight test case.
 	if isIngressRecordingPaused() {
-		b.truncated = true
 		b.lostToPause = true
 		b.buf = bytes.Buffer{}
+		b.cutShort()
 		return len(p), nil
 	}
 
 	if b.limit <= 0 {
-		b.truncated = true
+		b.cutShort()
 		return len(p), nil
 	}
 
 	remaining := b.limit - b.buf.Len()
 	if remaining <= 0 {
-		b.truncated = true
+		b.cutShort()
 		return len(p), nil
 	}
 
 	if len(p) > remaining {
-		b.truncated = true
 		_, _ = b.buf.Write(p[:remaining])
+		b.cutShort()
 		return len(p), nil
 	}
 
 	_, _ = b.buf.Write(p)
 	return len(p), nil
+}
+
+// cutShort marks the capture cut short and runs its onCut.
+func (b *captureBuffer) cutShort() {
+	b.truncated = true
+	if b.onCut != nil {
+		b.onCut()
+	}
+}
+
+// drop lets go of a capture its exchange will not record: what it holds is
+// given up now, and what the tee writes after is counted (Total) but not kept.
+// The exchange reads it as cut short (Truncated). A nil buffer (no body, or
+// capture off) holds nothing.
+func (b *captureBuffer) drop() {
+	if b == nil {
+		return
+	}
+	b.truncated = true
+	b.buf = bytes.Buffer{}
+}
+
+// held is what the capture holds, in bytes. A nil buffer holds nothing.
+func (b *captureBuffer) held() int {
+	if b == nil {
+		return 0
+	}
+	return b.buf.Cap()
 }
 
 func (b *captureBuffer) Bytes() []byte {

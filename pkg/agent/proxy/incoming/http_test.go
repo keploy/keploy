@@ -500,14 +500,33 @@ func TestSerializeCapturedResponseRoundTrip(t *testing.T) {
 	}
 }
 
+// packageCaptureHookSem is the package's own capture semaphore, the one the
+// agent captures on.
+var packageCaptureHookSem = captureHookSem
+
 // stubCaptureHook replaces the package-level CaptureHook for the duration
 // of a test so the test can observe capture calls without running the
 // full parser + yaml-persist stack.
+//
+// The test's captures also take their slots from a capture semaphore of
+// their own, as large as the package's, unless the test set one before. A
+// test that fails with a slot given back twice leaves the last give-back
+// waiting on that semaphore for ever. On the package's shared one, that
+// waiter would take the slot of the next take of any later test, whose own
+// last give-back would then wait in turn: every test after it that captures
+// on the package's semaphore would hang until go test's -timeout. A failed
+// test's handler that takes its slot only after the test's cleanup has put
+// the package's semaphore back still takes it there: that cannot be closed
+// while the semaphore is a package variable.
 func stubCaptureHook(t *testing.T, fn hooksUtils.CaptureFunc) {
 	t.Helper()
 	prev := hooksUtils.CaptureHook
 	hooksUtils.CaptureHook = fn
 	t.Cleanup(func() { hooksUtils.CaptureHook = prev })
+	if captureHookSem == packageCaptureHookSem {
+		captureHookSem = make(chan struct{}, captureHookConcurrency)
+		t.Cleanup(func() { captureHookSem = packageCaptureHookSem })
+	}
 }
 
 // TestHandleHttp1Connection_ChunkedExchangeIsCaptured is a regression test
@@ -880,7 +899,7 @@ func TestHandleHttp1Connection_ForcedCloseIsNotRecorded(t *testing.T) {
 				sampling:    mode == "sampled",
 				samplingSem: make(chan struct{}, 1),
 			}
-			t.Cleanup(pm.captures.Wait) // every capture it started is over before the next test swaps a hook or a semaphore
+			t.Cleanup(func() { waitCaptures(t, pm) }) // every capture it started is over before the next test swaps a hook or a semaphore
 
 			ln, err := net.Listen("tcp4", "127.0.0.1:0")
 			if err != nil {
@@ -1133,8 +1152,8 @@ func TestBothIngressLoopsDriveTheForcedPause(t *testing.T) {
 				ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
 				client, done := ingressPipeOn(t, ctx, pm, app, make(chan struct{}, 1), nil)
 				pausedExchange(t, client, bufio.NewReader(client), path, true)
-				<-done
-				pm.captures.Wait()
+				waitBounded(t, done, path+"'s handler")
+				waitCaptures(t, pm)
 				cancel()
 			}
 			close(captured)
@@ -1186,7 +1205,7 @@ func TestHandleHttp1ZeroCopy_ASampledConnectionReadsThePauseAsItsRequestComes(t 
 		captured <- req.URL.Path
 	})
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 2)}
-	t.Cleanup(pm.captures.Wait)
+	t.Cleanup(func() { waitCaptures(t, pm) })
 	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
 	defer cancel()
 	upConn, err := net.Dial("tcp4", strings.TrimPrefix(upstream.URL, "http://"))
@@ -1200,8 +1219,8 @@ func TestHandleHttp1ZeroCopy_ASampledConnectionReadsThePauseAsItsRequestComes(t 
 		pm.handleHttp1ZeroCopy(ctx, firstReadConn{Conn: server, read: &read}, upConn, pm.logger, pm.tcChan, 8080, true, func() {})
 	}()
 	pausedExchange(t, client, bufio.NewReader(client), "/sampled", true)
-	<-done
-	pm.captures.Wait()
+	waitBounded(t, done, "the sampled connection's handler")
+	waitCaptures(t, pm)
 	select {
 	case p := <-captured:
 		if p != "/sampled" {
