@@ -232,17 +232,20 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		if !routeMatched {
 			phase = models.MatchPhaseSchema
 		}
-		for _, f := range closestDiffs {
-			switch {
-			case f.clock:
+		// Each field refused for a reason of its own, once, with the
+		// reason the miss's report gives it (fieldReasons): a field the
+		// patterns refused at many places (an array's elements) is one line,
+		// so the log stays small however many values miss.
+		for _, r := range fieldReasons(closestDiffs) {
+			if r.clock {
 				// A read of the application's clock the closest recording
 				// learned that this call does not hold: why, legibly.
-				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
-			case f.why != "":
-				// A field keploy.yml's noise lets vary only within
-				// patterns, one side's value outside them.
-				h.Logger.Warn("a keploy.yml noise pattern does not excuse a field", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
+				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", r.Field), zap.String("reason", r.Why))
+				continue
 			}
+			// A field keploy.yml's noise lets vary only within patterns, a
+			// side's values outside them.
+			h.Logger.Warn("a keploy.yml noise pattern does not excuse a field", zap.String("mock", closest.Name), zap.String("field", r.Field), zap.String("reason", r.Why))
 		}
 		diag = &matchDiag{phase: phase, candidates: len(comparedPool), pool: comparedPool, live: &live, closest: closest, differs: closestDiffs}
 		if closest != nil && routeMatched {
@@ -628,7 +631,7 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest string, d
 		WithComparedDestinations(comparedDests).
 		WithPhase(phase, candidateCount).
 		WithClosest(closest.Name, diffs).
-		WithGuarded(guardedPaths(diag.differs)...).
+		WithPatternMisses(patternMisses(diag.differs)...).
 		WithoutNoise(payloadHashPaths()...).
 		WithRenderedRequests(
 			renderMockRequest(closest.Spec.HTTPReq, closest.Noise),
@@ -641,14 +644,14 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest string, d
 	return r
 }
 
-// guardedPaths are the report paths of fields keploy.yml's noise guards with
-// patterns that a side's value is outside of: those with a reason that is no
-// refused read of the application's clock (strictField.why).
-func guardedPaths(fields []strictField) []string {
-	var out []string
+// patternMisses are, of fields, those keploy.yml's noise guards with
+// patterns that a side's value is outside of, each with those patterns and
+// that side (strictField.pattern), for the miss's hint to name.
+func patternMisses(fields []strictField) []mismatch.PatternMiss {
+	var out []mismatch.PatternMiss
 	for _, f := range fields {
-		if f.why != "" && !f.clock {
-			out = append(out, f.diff.Path)
+		if f.pattern != nil {
+			out = append(out, *f.pattern)
 		}
 	}
 	return out
@@ -670,12 +673,58 @@ func payloadHashPaths() []string {
 
 // reasonsOf are, of fields, those refused for a reason of their own (a
 // learned read of the application's clock the call does not carry:
-// clockDiffs), each named by its shape, with that reason, once.
+// clockDiffs; a value outside the patterns keploy.yml's noise guards a
+// field with: strictField.pattern), each named by its shape, with that
+// reason, once (fieldReasons).
 func reasonsOf(fields []strictField) []models.FieldReason {
 	var out []models.FieldReason
+	for _, r := range fieldReasons(fields) {
+		out = append(out, r.FieldReason)
+	}
+	return out
+}
+
+// fieldReason is a field's reason, and whether it is of a learned read of
+// the application's clock (strictField.clock).
+type fieldReason struct {
+	models.FieldReason
+	clock bool
+}
+
+// fieldReasons are, of fields, those refused for a reason of their own,
+// each named by its shape, with that reason, once. A field the patterns
+// refused at many places (an array's elements share its shape) has one
+// reason, of the values of every one of them (mismatch.PatternMiss.Fold),
+// which names a few shapes a side and counts the rest: a field's reason
+// stays small however many values miss.
+func fieldReasons(fields []strictField) []fieldReason {
+	var out []fieldReason
+	// facts[i] is the refusal by patterns out[i] says, folded over each
+	// place of its field; nil for a reason of another kind.
+	var facts []*mismatch.PatternMiss
+	at := map[string]int{} // a field's shape and patterns: its index in out
 	for _, f := range fields {
-		if r := (models.FieldReason{Field: f.shape, Why: f.why}); f.shape != "" && f.why != "" && !slices.Contains(out, r) {
-			out = append(out, r)
+		switch {
+		case f.shape == "" || f.why == "":
+		case f.pattern == nil:
+			r := fieldReason{FieldReason: models.FieldReason{Field: f.shape, Why: f.why}, clock: f.clock}
+			if !slices.Contains(out, r) {
+				out, facts = append(out, r), append(facts, nil)
+			}
+		default:
+			key := strings.Join(append([]string{f.shape}, f.pattern.Patterns...), "\x00")
+			if i, seen := at[key]; seen {
+				facts[i].Fold(*f.pattern)
+				continue
+			}
+			p := *f.pattern
+			at[key] = len(out)
+			out, facts = append(out, fieldReason{FieldReason: models.FieldReason{Field: f.shape}}), append(facts, &p)
+		}
+	}
+	for i, p := range facts {
+		if p != nil {
+			out[i].Why = p.Why(out[i].Field)
 		}
 	}
 	return out
