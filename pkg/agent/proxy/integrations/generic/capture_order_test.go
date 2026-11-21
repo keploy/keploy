@@ -269,17 +269,26 @@ func (r *recording) recorded(pair string) bool {
 // mock it was handed is on the channel.
 func (r *recording) takeMocks() {
 	r.t.Helper()
+	r.got = append(r.got, takeHandedOn(r.t, r.mgr, r.mocks)...)
+}
+
+// takeHandedOn takes every mock on mocks, and, once mgr has none on their
+// way to it (SyncMockManager.OutQueued), every mock mgr was handed: what a
+// parser that has done all it can has handed on, whichever way.
+func takeHandedOn(t *testing.T, mgr *syncMock.SyncMockManager, mocks <-chan *models.Mock) []*models.Mock {
+	t.Helper()
+	var got []*models.Mock
 	bound := time.Now().Add(waitBound)
 	for {
-		queued := r.mgr.OutQueued()
-		for len(r.mocks) > 0 {
-			r.got = append(r.got, <-r.mocks)
+		queued := mgr.OutQueued()
+		for len(mocks) > 0 {
+			got = append(got, <-mocks)
 		}
 		if !queued {
-			return
+			return got
 		}
 		if time.Now().After(bound) {
-			r.t.Fatal("the manager never put on the channel the mocks it had on their way to it")
+			t.Fatal("the manager never put on the channel the mocks it had on their way to it")
 		}
 		time.Sleep(time.Millisecond) // a yield between looks
 	}
@@ -298,34 +307,68 @@ func (r *recording) takeMocks() {
 // goroutines for longer than any time a row waits.
 func (r *recording) awaitRest() {
 	r.t.Helper()
+	awaitParserRest(r.t, r.loop, r.created)
+}
+
+// awaitLoopRest waits until a row's pairChunkEvents, run on the goroutine
+// whose stack header begins loop (loopHeader), has done all it can with what
+// the row put on its events: it has taken every one (events is empty), and is
+// blocked on a channel. It takes no timer, so it then does nothing more until
+// the row puts an event, ends events or begins the stop. A row driving the
+// loop runs no merge or readers.
+func awaitLoopRest(t *testing.T, loop string, events chan chunkEvent) {
+	t.Helper()
+	bound := time.Now().Add(waitBound)
+	for len(events) > 0 {
+		if time.Now().After(bound) {
+			t.Fatal("the parser's main loop never took the events the row put")
+		}
+		time.Sleep(time.Millisecond) // a yield between looks
+	}
+	awaitParserRest(t, loop, "")
+}
+
+// loopHeader is the start of the stack header of the calling goroutine, as
+// awaitParserRest names a parser's main loop by it.
+func loopHeader() string {
+	return fmt.Sprintf("goroutine %d [", goroutineID())
+}
+
+// awaitParserRest waits until, in one look at every goroutine, a parser's
+// main loop (the goroutine whose stack header begins loop) and each
+// goroutine still alive whose creation line is created (none when created is
+// empty) are blocked on a channel (parserAtRest).
+func awaitParserRest(t *testing.T, loop, created string) {
+	t.Helper()
 	bound := time.Now().Add(waitBound)
 	for {
-		atRest, looping := r.atRest()
+		atRest, looping := parserAtRest(loop, created)
 		if !looping {
-			r.t.Fatal("the parser's main loop returned with its streams open")
+			t.Fatal("the parser's main loop returned with its input open")
 		}
 		if atRest {
 			return
 		}
 		if time.Now().After(bound) {
-			r.t.Fatal("the parser never came to rest with what the row had done")
+			t.Fatal("the parser never came to rest with what the row had done")
 		}
 		time.Sleep(time.Millisecond) // a yield between looks
 	}
 }
 
-// atRest reports whether, in one look at every goroutine, the recording's
-// main loop and each of the merge and the readers still alive are blocked on
-// a channel, and whether the main loop is still alive.
-func (r *recording) atRest() (atRest, looping bool) {
+// parserAtRest reports whether, in one look at every goroutine, the goroutine
+// whose stack header begins loop and each one still alive whose creation line
+// is created (none when created is empty) are blocked on a channel, and
+// whether the loop's goroutine is still alive.
+func parserAtRest(loop, created string) (atRest, looping bool) {
 	atRest = true
 	for _, g := range strings.Split(allStacks(), "\n\n") {
 		lines := strings.Split(g, "\n")
 		switch {
-		case strings.HasPrefix(lines[0], r.loop):
+		case strings.HasPrefix(lines[0], loop):
 			looping = true
 			atRest = atRest && blockedOnAChannel(lines[0])
-		case createdBy(lines, r.created):
+		case created != "" && createdBy(lines, created):
 			atRest = atRest && blockedOnAChannel(lines[0])
 		}
 	}

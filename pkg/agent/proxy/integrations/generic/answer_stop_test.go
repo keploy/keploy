@@ -140,19 +140,27 @@ func TestV2_TheStopDecidesAnAnswerTeedAheadOfItsRequestAtOnce(t *testing.T) {
 				Ctx: syncMock.NewContext(context.Background(), mgr), ClientConnID: "c", DestStream: dest}
 			events := make(chan chunkEvent, 4)
 			done := make(chan error, 1)
-			go func() { done <- pairChunkEvents(events, sess, zap.NewNop()) }()
+			loop := make(chan string, 1)
+			go func() {
+				loop <- loopHeader()
+				done <- pairChunkEvents(events, sess, zap.NewNop())
+			}()
 			ahead := stopChunk(fakeconn.FromDest, answer, 2, t0.Add(time.Second))
 			ahead.through = int64(len(answer))
 			req := stopChunk(fakeconn.FromClient, "GET", 1, t0)
 			req.through = int64(len("GET"))
 			events <- ahead
 			events <- req
-			// The exchange is held: its answer may go on.
+			// The exchange is held: its answer may go on. Looked at once the
+			// parser has done all it can with the two chunks, not after a
+			// time: a loaded box can stop it for longer than any time waited,
+			// and an exchange handed on after that would pass unseen.
+			awaitLoopRest(t, <-loop, events)
 			select {
 			case m := <-mocks:
 				close(events)
 				t.Fatalf("the exchange was handed on before the stop: %v", m.Spec.GenericResponses)
-			case <-time.After(100 * time.Millisecond):
+			default:
 			}
 			mgr.BacklogBefore(t0.Add(10 * time.Second)) // the stop begins
 			var m *models.Mock
