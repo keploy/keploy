@@ -21,7 +21,10 @@ import (
 // words that it sent the client its TCP FIN, and how often it was asked
 // before one.
 type finSentRecorder struct {
-	closed      bool
+	closed bool
+	// inner, when it can say whether the connection closed before the
+	// proxy's FIN (finSentSocket: Windows' socket), answers for it.
+	inner       clientSocket
 	told, asked atomic.Int32
 }
 
@@ -29,7 +32,13 @@ func (*finSentRecorder) look() clientLook        { return clientLook{said: clien
 func (*finSentRecorder) written() (uint64, bool) { return 0, false }
 func (s *finSentRecorder) proxyFINSent()         { s.told.Add(1) }
 func (s *finSentRecorder) toldTimes() int32      { return s.told.Load() }
-func (s *finSentRecorder) closedBeforeFIN() bool { s.asked.Add(1); return s.closed }
+func (s *finSentRecorder) closedBeforeFIN() bool {
+	s.asked.Add(1)
+	if f, ok := s.inner.(finSentSocket); ok {
+		return f.closedBeforeFIN()
+	}
+	return s.closed
+}
 
 // The client's socket is told of the proxy's FIN when the half-close of the
 // client conn reached its TCP socket, through the wrappers over it, and not
