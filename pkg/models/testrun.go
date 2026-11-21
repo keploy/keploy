@@ -936,12 +936,14 @@ const (
 	// AnswerByKind: a background write answered by its write kind, unchecked.
 	AnswerByKind = "by_kind"
 	// AnswerOtherID: with the proven switch off, no recording had the call's
-	// path, and the call was answered with the recording of a path that
-	// differs from it only at segments that look like ids (all digits, a
-	// uuid, long hex, a long token), each of one shape on both sides: the
-	// recording of another call, GET /users/1 for GET /users/3. ClosestMock
-	// names the recording, Diff names its call, and Differs the segments
-	// (url.path.<i>). Where OutgoingOptions.DisableAutoURLDynamic is set,
+	// URL, and the call was answered with the recording of a URL that
+	// differs from it only at path segments or query values that look like
+	// ids (all digits, a uuid, long hex, a long token; a query's digit run
+	// of 10 or more), each of one shape on both sides: the recording of
+	// another call, GET /users/1 for GET /users/3, GET /orders?id=<uuid> for
+	// GET /orders?id=<another uuid>. ClosestMock names the recording, Diff
+	// names its call, and Differs the places (url.path.<i>,
+	// url.query.<name>). Where OutgoingOptions.DisableAutoURLDynamic is set,
 	// such a call is a miss instead.
 	AnswerOtherID = "other_id"
 	// AnswerClosestBody: with the proven switch off, the call was answered

@@ -2,17 +2,21 @@ package http
 
 import (
 	"context"
+	"maps"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // servedAs is how matchCascade served a call with the proven switch off
@@ -138,7 +142,7 @@ func (h *HTTP) noteFieldsOnOneSide(how *servedAs, x *models.Mock, live *mocknois
 // urlNoiseEntry is the keploy.yml url-noise key (test.globalNoise.global.url,
 // a regex MatchURLPath masks a path with) that makes recorded, a recorded
 // path, match each path that differs from it only at the segments differs
-// names (idSegmentsDiffering's url.path.<i>): anchored to the whole path,
+// names (idPlacesDiffering's url.path.<i>): anchored to the whole path,
 // every other segment as it is, an all-digit segment as [0-9]+ and any other
 // as [^/]+. It is written Go-quoted, which YAML reads as the same string.
 func urlNoiseEntry(recorded string, differs []string) string {
@@ -172,19 +176,130 @@ func requestBodyNoiseEntries(fields []string) string {
 	return strings.Join(entries, ", ")
 }
 
-// idSegmentsDiffering names the segments at which recorded and live, two
-// paths of as many segments, differ, as the learn step names a path's
-// places (url.path.<i>, the first segment after the leading "/" at 0).
-func idSegmentsDiffering(recorded, live string) []string {
-	rs := strings.Split(strings.TrimPrefix(recorded, "/"), "/")
-	ls := strings.Split(strings.TrimPrefix(live, "/"), "/")
+// idPlacesDiffering names where the call differs from x, the recording it
+// was served, at the places SchemaMatch's second pass lets an id differ:
+// each segment at which recordedPath and livePath, two paths of as many
+// segments, differ, as the learn step names a path's places (url.path.<i>,
+// the first segment after the leading "/" at 0), in path order; then each
+// query parameter whose values differ once keploy.yml's url noise (noise)
+// is masked in both, as QueryParamsMatch compares them (a repeated
+// parameter's in any order), named as the learn step and the strict
+// comparison name one (url.query.<name>), by name. keploy's own parameters
+// (keploy*), which no pass compares, are not named.
+func idPlacesDiffering(recordedPath, livePath string, recordedQuery map[string]string, liveQuery url.Values, noise []*regexp.Regexp) []string {
+	rs := strings.Split(strings.TrimPrefix(recordedPath, "/"), "/")
+	ls := strings.Split(strings.TrimPrefix(livePath, "/"), "/")
 	var out []string
 	for i := range rs {
 		if i < len(ls) && rs[i] != ls[i] {
 			out = append(out, "url.path."+strconv.Itoa(i))
 		}
 	}
+	for _, name := range slices.Sorted(maps.Keys(recordedQuery)) {
+		if strings.HasPrefix(strings.ToLower(name), "keploy") {
+			continue
+		}
+		if rv, lv := queryMembersDiffering(recordedQuery[name], liveQuery[name], noise); len(rv)+len(lv) > 0 {
+			out = append(out, "url.query."+name)
+		}
+	}
 	return out
+}
+
+// queryMembersDiffering are the members of recorded, a recorded query
+// parameter's value (", "-joined, as pkg.URLParams keeps a repeated one),
+// and of live, the call's values of it, each masked with noise
+// (maskAndSort), that the other side does not hold as often: none where
+// the two hold the same values in any order, as QueryParamsMatch compares
+// them.
+func queryMembersDiffering(recorded string, live []string, noise []*regexp.Regexp) (rec, lv []string) {
+	rv, av := maskAndSort(strings.Split(recorded, ", "), noise), maskAndSort(live, noise)
+	left := map[string]int{}
+	for _, v := range av {
+		left[v]++
+	}
+	for _, v := range rv {
+		if left[v] > 0 {
+			left[v]--
+			continue
+		}
+		rec = append(rec, v)
+	}
+	for _, v := range av {
+		if left[v] > 0 {
+			left[v]--
+			lv = append(lv, v)
+		}
+	}
+	return rec, lv
+}
+
+// queryNoiseEntries are the keploy.yml url-noise keys (test.globalNoise
+// .global.url) that mask the values of the query parameters differs names
+// (url.query.<name>), each Go-quoted, which YAML reads as the same string,
+// once each, in the order differs names them: QueryParamsMatch masks each
+// query value with every url-noise regex, so a key anchored to a whole
+// value of the shape of the members that differ (queryValueEntry) masks
+// them, on both sides, in each run, and no path (each begins with "/").
+// A member of no id shape, which the second pass never lets differ (a
+// value keploy.yml's noise already masks in part), is given none.
+func queryNoiseEntries(recordedQuery map[string]string, liveQuery url.Values, differs []string, noise []*regexp.Regexp) []string {
+	var out []string
+	for _, d := range differs {
+		name, ok := strings.CutPrefix(d, "url.query.")
+		if !ok {
+			continue
+		}
+		rv, lv := queryMembersDiffering(recordedQuery[name], liveQuery[name], noise)
+		members := slices.Concat(rv, lv)
+		for _, m := range members {
+			if c := queryValueTypeClass(m); c != "" {
+				if e := strconv.Quote(queryValueEntry(c, members)); !slices.Contains(out, e) {
+					out = append(out, e)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// queryValueEntry is the url-noise regex that matches a whole query value
+// of class, a dynamic type-class queryValueTypeClass gives: the class's own
+// shape (a digit run of minDynamicQueryDigits or more, a uuid, long hex),
+// and for a long token, its letters and digits and each other character
+// members (the values that differ) hold, as many as the shortest of them
+// (a token's class counts at least 16 bytes; the regex counts characters).
+func queryValueEntry(class string, members []string) string {
+	switch class {
+	case "digits":
+		return "^[0-9]{" + strconv.Itoa(minDynamicQueryDigits) + ",}$"
+	case "uuid":
+		return reSegUUID.String()
+	case "hex":
+		return reSegLongHex.String()
+	}
+	least, others := 16, map[rune]bool{}
+	for _, m := range members {
+		if queryValueTypeClass(m) != class {
+			continue
+		}
+		least = min(least, utf8.RuneCountInString(m))
+		for _, r := range m {
+			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
+				others[r] = true
+			}
+		}
+	}
+	var set strings.Builder
+	for _, r := range slices.Sorted(maps.Keys(others)) {
+		if r > ' ' && r < utf8.RuneSelf-1 {
+			// ASCII punctuation: RE2 reads it escaped as itself.
+			set.WriteString(`\` + string(r))
+			continue
+		}
+		set.WriteString(`\x{` + strconv.FormatInt(int64(r), 16) + `}`)
+	}
+	return "^[0-9A-Za-z" + set.String() + "]{" + strconv.Itoa(least) + ",}$"
 }
 
 // reportServedAnother reports, in-band (models.ReportAnswer), a call
@@ -193,8 +308,9 @@ func idSegmentsDiffering(recorded, live string) []string {
 // differs at): ClosestMock names x, Diff says which call x recorded, Differs
 // where the two differ, and NextSteps the two ways to give the call its own
 // recording: record it, a new input; or, where what differs changes on every
-// run, the keploy.yml noise entry that makes x its own (urlNoiseEntry,
-// requestBodyNoiseEntries). The call is served either way; the report is
+// run, the keploy.yml noise entries that make x its own (urlNoiseEntry for
+// the path, queryNoiseEntries for the query, both under urlNoise, keploy.yml's
+// url noise the call was matched with; requestBodyNoiseEntries). The call is served either way; the report is
 // what keeps keploy mock replay from counting it as the call's own answer.
 // A how with no such answer (a call served its own recording, or one no
 // pass served) reports nothing.
@@ -207,7 +323,7 @@ func idSegmentsDiffering(recorded, live string) []string {
 // the one mode a call is served so, the decode marks no call (the zero
 // CallRound), its misses included: the report is placed as they are, by
 // when it reaches the proxy.
-func reportServedAnother(ctx context.Context, input *req, x *models.Mock, how servedAs, call integrations.CallRound) {
+func reportServedAnother(ctx context.Context, input *req, x *models.Mock, how servedAs, call integrations.CallRound, urlNoise []string) {
 	answer := how.answer
 	if !models.AnsweredAsAnother(answer) || x == nil || x.Spec.HTTPReq == nil {
 		return
@@ -235,14 +351,28 @@ func reportServedAnother(ctx context.Context, input *req, x *models.Mock, how se
 	recordedCall := string(x.Spec.HTTPReq.Method) + " " + recordedPath
 	switch answer {
 	case models.AnswerOtherID:
-		livePath := ""
+		livePath, liveQuery := "", url.Values(nil)
 		if input.url != nil {
-			livePath = input.url.Path
+			livePath, liveQuery = input.url.Path, input.url.Query()
 		}
-		r.Differs = idSegmentsDiffering(recordedPath, livePath)
-		r.Diff = liveCall + " was answered with the recording of " + recordedCall + ": no recording has the call's path, which differs from that recording's only at segments that look like ids (" + strings.Join(r.Differs, ", ") + ")"
-		r.NextSteps = "If the call is a new input, record it (keploy mock record) so it is answered with its own recording. " +
-			"If the app makes a new id there on every run, mark it as url noise in keploy.yml, under test.globalNoise.global.url: {" + urlNoiseEntry(recordedPath, r.Differs) + ": []}; each run's call is then answered with this recording as its own."
+		// The patterns were compiled, and an invalid one logged, as the
+		// passes matched the call: the cache gives them back.
+		recordedQuery, noise := x.Spec.HTTPReq.URLParams, compileURLNoise(zap.NewNop(), urlNoise)
+		r.Differs = idPlacesDiffering(recordedPath, livePath, recordedQuery, liveQuery, noise)
+		r.Diff = liveCall + " was answered with the recording of " + recordedCall + ": no recording has the call's URL, which differs from that recording's only at values that look like ids (" + strings.Join(r.Differs, ", ") + ")"
+		var entries []string
+		if slices.ContainsFunc(r.Differs, func(d string) bool { return strings.HasPrefix(d, "url.path.") }) {
+			entries = append(entries, urlNoiseEntry(recordedPath, r.Differs))
+		}
+		query := queryNoiseEntries(recordedQuery, liveQuery, r.Differs, noise)
+		entries = append(entries, query...)
+		r.NextSteps = "If the call is a new input, record it (keploy mock record) so it is answered with its own recording."
+		if len(entries) > 0 {
+			r.NextSteps += " If the app makes a new id there on every run, mark it as url noise in keploy.yml, under test.globalNoise.global.url: {" + strings.Join(entries, ": [], ") + ": []}; each run's call is then answered with this recording as its own."
+		}
+		if len(query) > 0 {
+			r.NextSteps += " An entry for a query value masks every query value of its shape, in every call."
+		}
 	case models.AnswerClosestBody:
 		r.Differs = how.fields
 		if len(r.Differs) == 0 {

@@ -98,8 +98,9 @@ func answeredAsAnotherLogNote(calls []models.UnmatchedCall) string {
 
 // differsLogShape is differs, where a call differs from the recording it
 // was answered with, as a log line names them: a path segment by its place
-// (url.path.<i>, keploy's own name), a body field in its shape
-// (models.FieldShape: a map's key in a path can be a value).
+// (url.path.<i>, keploy's own name), a query parameter and a body field in
+// their shape (models.FieldShape: a parameter's name, or a map's key in a
+// path, can be a value: url.query.{}).
 func differsLogShape(differs []string) []string {
 	out := make([]string, 0, len(differs))
 	for _, d := range differs {
