@@ -33,6 +33,16 @@ REQS_PER_BURST_PER_CONN = 3
 IDLE_GAP_SEC = 5
 TIMEOUT_SEC = 10
 MAX_DROP_PCT = float(os.environ.get("MAX_DROP_PCT", "5"))
+# Optional FLOOR — when set, drop_pct must be >= MIN_DROP_PCT for the
+# run to be considered "the bug is reproducing as expected." This is
+# how the record_with_latest matrix leg keeps demonstrating the bug
+# without hiding behind continue-on-error: if a future release of
+# keploy:latest contains the fix, drop_pct collapses to ~0%, the floor
+# assertion fails, and CI loudly tells the operator to clean up the
+# leg (see issue #4169). Empty / unset → no floor (the record_with_build
+# leg uses only MAX_DROP_PCT).
+MIN_DROP_PCT_RAW = os.environ.get("MIN_DROP_PCT", "").strip()
+MIN_DROP_PCT = float(MIN_DROP_PCT_RAW) if MIN_DROP_PCT_RAW else None
 
 
 def open_conn():
@@ -89,9 +99,24 @@ print(
 
 if drop_pct > MAX_DROP_PCT:
     print(
-        f"::error::drop rate {drop_pct:.1f}% exceeds threshold "
-        f"{MAX_DROP_PCT}% — half-close race regression"
+        f"::error::drop rate {drop_pct:.1f}% exceeds MAX threshold "
+        f"{MAX_DROP_PCT}% — half-close race regression (the fix has "
+        f"regressed under the binary being tested)"
     )
     sys.exit(1)
 
-print(f"OK: drop rate {drop_pct:.1f}% within threshold {MAX_DROP_PCT}%")
+if MIN_DROP_PCT is not None and drop_pct < MIN_DROP_PCT:
+    # Tripwire for the record_with_latest leg. The leg is supposed to
+    # demonstrate the bug; when the bug stops reproducing, that means
+    # the fix has shipped in keploy:latest and this matrix entry is
+    # now redundant. See issue #4169 for the cleanup checklist.
+    print(
+        f"::error::drop rate {drop_pct:.1f}% is BELOW the MIN floor "
+        f"{MIN_DROP_PCT}% — the upstream-pool half-close bug is no "
+        f"longer reproducing under this binary. If this fired on the "
+        f"record_with_latest leg, the fix has reached keploy:latest "
+        f"and you should remove this matrix entry per #4169."
+    )
+    sys.exit(1)
+
+print(f"OK: drop rate {drop_pct:.1f}% within thresholds (max={MAX_DROP_PCT}%, min={MIN_DROP_PCT})")
