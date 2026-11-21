@@ -1533,7 +1533,7 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		if snapshot != nil {
 			members = snapshot(pid, sig)
 		}
-		err := signalGroup(logger, -pid, sig)
+		sent, err := signalGroup(logger, -pid, sig)
 		if err != nil {
 			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
 			// The group was not asked to stop: what ends it now (the
@@ -1556,8 +1556,15 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		// leader, or one it left in its group, such as the server of
 		// `sh -c 'server &'` whose sh no one reaps (a zombie leader). One
 		// the caller was handed, as it ignored the signal, is the caller's.
+		// Where the signal went to each process by its pid (macOS), one
+		// that joined the group after it is sent it at the wait's next
+		// read of the group, once (signalJoined).
 		handed := handedOver(pid, members)
-		waitForGroupExit(pid, handed, TreeInterruptGrace, logger)
+		var joined func()
+		if signalJoined != nil {
+			joined = func() { signalJoined(logger, pid, sig, sent) }
+		}
+		waitForGroupExit(pid, handed, TreeInterruptGrace, logger, joined)
 		// If it ignored the graceful signal (or was too contention-slow to exit
 		// within the wait), escalate to SIGKILL so it cannot keep holding resources
 		// (e.g. a listening port) and race the next app start with
@@ -1569,10 +1576,10 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			if killed == "" {
 				killed = fmt.Sprintf("a process of it had not exited %s later (the grace keploy's stop gives each of its process groups), so keploy killed it", TreeInterruptGrace)
 			}
-			if killErr := signalGroup(logger, -pid, syscall.SIGKILL); killErr != nil {
+			if _, killErr := signalGroup(logger, -pid, syscall.SIGKILL); killErr != nil {
 				logger.Error("error sending SIGKILL to the process group id", zap.Int("pgid", pid), zap.Error(killErr))
 			} else {
-				waitForGroupExit(pid, handed, 3*time.Second, logger)
+				waitForGroupExit(pid, handed, 3*time.Second, logger, nil)
 			}
 		}
 	}
@@ -1581,11 +1588,25 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 
 // processTree and signalGroup are the tree interrupt's reads of the process
 // tree and its signals to a process group (on macOS, signalGroupByMembers);
-// a test fails them.
+// a test fails them. signalGroup says which processes its signal reached by
+// their pids (sent) where it signals each process by its pid (macOS), and
+// nil where its one signal went to the group, as Linux's does.
+//
+// signalJoined, where it is set (macOS, signalJoinedMembers), is the group
+// wait's signal, at each of its reads, to each process of group pgid that
+// joined it after signalGroup's signal sig reached the others: sig once to
+// each that sent does not name, which it then names.
 var (
-	processTree = findChildPIDs
-	signalGroup = SendSignal
+	processTree  = findChildPIDs
+	signalGroup  = signalGroupAsOne
+	signalJoined func(logger *zap.Logger, pgid int, sig syscall.Signal, sent map[int]bool)
 )
+
+// signalGroupAsOne is SendSignal of a process group (pid < 0): one signal,
+// which reaches each process of it.
+func signalGroupAsOne(logger *zap.Logger, pid int, sig syscall.Signal) (map[int]bool, error) {
+	return nil, SendSignal(logger, pid, sig)
+}
 
 // groupExitPoll is how often waitForGroupExit reads whether a group runs.
 const groupExitPoll = 100 * time.Millisecond
@@ -1593,10 +1614,14 @@ const groupExitPoll = 100 * time.Millisecond
 // waitForGroupExit waits until no process of process group pgid runs but
 // those in except (groupRunning), or timeout has passed. A group whose state
 // cannot be read is waited for no more: the caller reads it again, and says
-// why.
-func waitForGroupExit(pgid int, except []Reached, timeout time.Duration, logger *zap.Logger) {
+// why. joined, if set, is called at each read, before it: it signals what
+// joined the group since the last (signalJoined).
+func waitForGroupExit(pgid int, except []Reached, timeout time.Duration, logger *zap.Logger, joined func()) {
 	deadline := time.Now().Add(timeout)
 	for {
+		if joined != nil {
+			joined()
+		}
 		if running, err := groupRunning(pgid, except); err != nil || !running {
 			logger.Debug("Process group exited", zap.Int("pgid", pgid), zap.Error(err))
 			return

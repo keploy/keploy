@@ -214,7 +214,7 @@ func TestTheStopsSignalToAGroupReachesEachProcessWithNoFalseRefusal(t *testing.T
 			return slices.DeleteFunc(pids, func(p int) bool { return p == late }), err
 		}, nil)
 		logger, noError := quiet(t)
-		if err := signalGroupByMembers(logger, -leader, syscall.SIGKILL); err != nil {
+		if _, err := signalGroupByMembers(logger, -leader, syscall.SIGKILL); err != nil {
 			t.Fatalf("SIGKILL of group %d answered %v; want none", leader, err)
 		}
 		noError()
@@ -227,7 +227,7 @@ func TestTheStopsSignalToAGroupReachesEachProcessWithNoFalseRefusal(t *testing.T
 		leader, leaderEnded := startSleep(t, 0)
 		member, memberEnded := startSleep(t, leader)
 		stubProcessReads(t, func(int) ([]int, error) { return nil, syscall.EIO }, nil)
-		if err := signalGroupByMembers(zap.NewNop(), -leader, syscall.SIGINT); err != nil {
+		if _, err := signalGroupByMembers(zap.NewNop(), -leader, syscall.SIGINT); err != nil {
 			t.Fatalf("SIGINT of group %d answered %v; want none", leader, err)
 		}
 		if !endsWithin(leaderEnded, 5*time.Second) || !endsWithin(memberEnded, 5*time.Second) {
@@ -249,7 +249,7 @@ func TestTheStopsSignalToAGroupReachesEachProcessWithNoFalseRefusal(t *testing.T
 			}
 		}
 		logger, noError := quiet(t)
-		if err := signalGroupByMembers(logger, -z, syscall.SIGKILL); err != nil {
+		if _, err := signalGroupByMembers(logger, -z, syscall.SIGKILL); err != nil {
 			t.Errorf("SIGKILL of group %d, a zombie's only, answered %v; want none", z, err)
 		}
 		noError()
@@ -264,7 +264,7 @@ func TestTheStopsSignalToAGroupReachesEachProcessWithNoFalseRefusal(t *testing.T
 		stubProcessReads(t, func(int) ([]int, error) { return []int{g}, nil },
 			map[int]procsock.Proc{g: {PID: g, PPID: 1, PGID: g}})
 		logger, noError := quiet(t)
-		if err := signalGroupByMembers(logger, -g, syscall.SIGINT); err != nil {
+		if _, err := signalGroupByMembers(logger, -g, syscall.SIGINT); err != nil {
 			t.Errorf("SIGINT of group %d, whose only process exited after its list was read, answered %v; want none", g, err)
 		}
 		noError()
@@ -280,7 +280,7 @@ func TestTheStopsSignalToAGroupReachesEachProcessWithNoFalseRefusal(t *testing.T
 		stubProcessReads(t, func(int) ([]int, error) { return []int{1, app}, nil },
 			map[int]procsock.Proc{1: {PID: 1, PPID: 0, PGID: app}})
 		logger, noError := quiet(t)
-		if err := signalGroupByMembers(logger, -app, 0); err != nil {
+		if _, err := signalGroupByMembers(logger, -app, 0); err != nil {
 			t.Errorf("signal 0 to group %d answered %v; want none: it reached %d, though not launchd", app, err, app)
 		}
 		noError()

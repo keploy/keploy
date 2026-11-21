@@ -114,11 +114,18 @@ func exitedUnreaped(pid int) bool {
 	return err == nil && p.Zombie
 }
 
-func init() { signalGroup = signalGroupByMembers }
+func init() {
+	signalGroup = signalGroupByMembers
+	signalJoined = signalJoinedMembers
+}
 
 // memberSignalWait is how long the stop waits on macOS for one kill(2) before
 // it goes on without it (killWithin).
 const memberSignalWait = time.Second
+
+// killMember is the stop's kill(2) of one process of a group on macOS
+// (killWithin); a test answers it.
+var killMember = killWithin
 
 // errKillWaits is killWithin's answer for a kill(2) that had not returned.
 var errKillWaits = errors.New("the signal waits in the kernel for a posix_spawn that is held")
@@ -143,20 +150,24 @@ var errKillWaits = errors.New("the signal waits in the kernel for a posix_spawn 
 // Only SIGKILL goes to the group as well, to reach a process that joined it
 // after its list was read. Another signal would reach each process twice, and
 // an app that takes a second SIGINT as "stop now" would cut its own graceful
-// exit short; a process that joined the group late and runs on is waited for
-// (groupRunning) and killed after the grace. A group whose list cannot be
-// read is signalled as a group, as before.
-func signalGroupByMembers(logger *zap.Logger, pid int, sig syscall.Signal) error {
+// exit short. A process that joins the group after its list was read is sent
+// sig once by the group's wait instead (signalJoinedMembers, from sent: each
+// pid this signal went to), and, if it runs on, killed after the grace. A
+// group whose list cannot be read is signalled as a group, as before, and
+// sent is nil: what joins it later is not told from what that signal reached.
+func signalGroupByMembers(logger *zap.Logger, pid int, sig syscall.Signal) (sent map[int]bool, err error) {
 	pgid := -pid
 	members, err := groupMembers(pgid)
 	if err != nil {
 		logger.Debug("keploy could not list the process group; it signals the group", zap.Int("pgid", pgid), zap.Error(err))
-		return SendSignal(logger, pid, sig)
+		return nil, SendSignal(logger, pid, sig)
 	}
+	sent = make(map[int]bool, len(members))
 	reached := 0
 	var refused error
 	for _, member := range members {
-		switch err := killWithin(member, sig, memberSignalWait); {
+		sent[member] = true
+		switch err := killMember(member, sig, memberSignalWait); {
 		case err == nil:
 			reached++
 		case errors.Is(err, errKillWaits):
@@ -184,12 +195,41 @@ func signalGroupByMembers(logger *zap.Logger, pid int, sig syscall.Signal) error
 	}
 	if reached == 0 && refused != nil {
 		logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(refused))
-		return refused
+		return nil, refused
 	}
 	if len(members) == 0 {
 		logger.Debug("no process of the process group runs; it has exited", zap.Int("pgid", pgid), zap.String("signal", sig.String()))
 	}
-	return nil
+	return sent, nil
+}
+
+// signalJoinedMembers is the group wait's signal on macOS to what joined
+// process group pgid after the stop's signal sig went to each of its
+// processes by its pid (signalGroupByMembers, which named each in sent): each
+// process of the group that runs and that sent does not name is sent sig, by
+// its pid, once, and named. So a process forked into the group after its list
+// was read is asked to stop as the others were, with one signal, and is
+// killed only once the grace has passed. A list that cannot be read signals
+// none: the wait reads it again. With no sent (the stop's signal went to the
+// group as one, its list unread) it signals none: what that signal reached
+// is not known, and a second signal would reach each again.
+func signalJoinedMembers(logger *zap.Logger, pgid int, sig syscall.Signal, sent map[int]bool) {
+	if sent == nil {
+		return
+	}
+	members, err := groupMembers(pgid)
+	if err != nil {
+		return
+	}
+	for _, member := range members {
+		if sent[member] {
+			continue
+		}
+		sent[member] = true
+		err := killMember(member, sig, memberSignalWait)
+		logger.Debug("signalled a process that joined the process group after its signal",
+			zap.Int("pgid", pgid), zap.Int("pid", member), zap.String("signal", sig.String()), zap.Error(err))
+	}
 }
 
 // killWithin is kill(2) of pid with sig, waited for wait at most: a kill that
