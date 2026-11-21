@@ -3,6 +3,7 @@ package http
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,49 +81,78 @@ func (e *publishRefused) Is(target error) bool { return target == utils.ErrPortT
 
 // publishRefusedBy is err, the end of the agent's `docker run`, as a
 // publishRefused where the run exited engineRunFailed and its output (said)
-// has the engine's refusal of the agent's port, port: a line that names
-// 127.0.0.1:port (agentPortPublish) and says it is taken, in Docker's words
-// ("Bind for 127.0.0.1:P failed: port is already allocated", "failed to bind
-// host port for 127.0.0.1:P:...: address already in use", "listen tcp4
-// 127.0.0.1:P: bind: address already in use") or podman's ("rootlessport
-// listen tcp 127.0.0.1:P: bind: address already in use"). Any other end is
-// err as it is: the refusal of another port (an application's, which keploy
-// did not pick) is not a start that would go otherwise on another agent port.
+// refuses the agent's port, port, in words an engine says of a host port
+// another socket holds (takenPortWordings), naming 127.0.0.1:port
+// (agentPortPublish). Words keploy does not know for that fail closed: a run
+// that exited engineRunFailed with a line naming that address in other words
+// is not taken for a taken port, nor started again, and its error shows the
+// line. Any other end is err as it is: the refusal of another port (an
+// application's, which keploy did not pick) is not a start that would go
+// otherwise on another agent port.
 func publishRefusedBy(err error, said string, port uint32) error {
 	var ee interface{ ExitCode() int }
 	if !errors.As(err, &ee) || ee.ExitCode() != engineRunFailed {
 		return err
 	}
-	line, ok := publishRefusalLine(said, port)
-	if !ok {
-		return err
+	line, known := publishRefusalLine(said, "127.0.0.1:"+strconv.FormatUint(uint64(port), 10))
+	switch {
+	case known:
+		return &publishRefused{
+			msg: fmt.Sprintf("the container engine could not publish the keploy agent's port: %s, saying %q: %v", utils.PortTaken(port), line, err),
+			err: err,
+		}
+	case line != "":
+		return fmt.Errorf("%w; the container engine said %q of the keploy agent's port %d, in words keploy does not know for a taken port, so it does not start the agent again", err, line, port)
 	}
-	return &publishRefused{
-		msg: fmt.Sprintf("the container engine could not publish the keploy agent's %s, saying %q: %v", utils.PortTaken(port), line, err),
-		err: err,
-	}
+	return err
 }
 
-// publishRefusalLine is the last line of said that refuses port on
-// 127.0.0.1 as taken (publishRefusedBy), trimmed.
-func publishRefusalLine(said string, port uint32) (string, bool) {
-	addr := "127.0.0.1:" + strconv.FormatUint(uint64(port), 10)
+// takenPortWordings are the words in which the container engines refuse to
+// publish a host port another socket holds, each a regular expression of the
+// line around the address refused (%s, 127.0.0.1:P quoted), which a fixed
+// character other than a digit follows:
+//   - Docker, the port published by another container: "Bind for
+//     127.0.0.1:P failed: port is already allocated";
+//   - Docker 29, a host process holding it: "failed to bind host port
+//     127.0.0.1:P/tcp: address already in use";
+//   - Docker before 29, without its userland proxy: "failed to bind host port
+//     for 127.0.0.1:P:172.17.0.2:P/tcp: address already in use";
+//   - a Go listener on the host that could not bind it, in Linux's and macOS's
+//     words or in Windows' (WSAEADDRINUSE): Docker's userland proxy ("listen
+//     tcp4 127.0.0.1:P: bind: address already in use"), podman's rootlessport
+//     ("rootlessport listen tcp 127.0.0.1:P: bind: address already in use"),
+//     and Docker Desktop on macOS and on Windows ("Ports are not available:
+//     exposing port TCP 127.0.0.1:P -> 0.0.0.0:0: listen tcp 127.0.0.1:P:
+//     bind: Only one usage of each socket address (protocol/network
+//     address/port) is normally permitted.").
+var takenPortWordings = []string{
+	`Bind for %s failed: port is already allocated`,
+	`failed to bind host port %s/tcp: address already in use`,
+	`failed to bind host port for %s:\S+/tcp: address already in use`,
+	`listen tcp4? %s: bind: (?:address already in use|Only one usage of each socket address \(protocol/network address/port\) is normally permitted)`,
+}
+
+// publishRefusalLine is the last line of said, trimmed, that refuses addr in
+// one of takenPortWordings (known), or else the last that names addr, with
+// no digit after it, in other words; "" where none names it.
+func publishRefusalLine(said, addr string) (line string, known bool) {
+	quoted := regexp.QuoteMeta(addr)
+	wordings := make([]*regexp.Regexp, len(takenPortWordings))
+	for i, w := range takenPortWordings {
+		wordings[i] = regexp.MustCompile(fmt.Sprintf(w, quoted))
+	}
+	names := regexp.MustCompile(quoted + `(?:[^0-9]|$)`)
 	lines := strings.Split(said, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if !strings.Contains(line, "already allocated") && !strings.Contains(line, "address already in use") {
-			continue
+		l := strings.TrimSpace(lines[i])
+		for _, w := range wordings {
+			if w.MatchString(l) {
+				return l, true
+			}
 		}
-		for rest := line; ; {
-			at := strings.Index(rest, addr)
-			if at < 0 {
-				break
-			}
-			rest = rest[at+len(addr):]
-			if rest == "" || rest[0] < '0' || rest[0] > '9' {
-				return line, true
-			}
+		if line == "" && names.MatchString(l) {
+			line = l
 		}
 	}
-	return "", false
+	return line, false
 }
