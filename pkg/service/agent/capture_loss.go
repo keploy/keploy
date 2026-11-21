@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+
+	"go.uber.org/zap"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
@@ -20,7 +24,59 @@ import (
 // (design v14 §3.2) adds its kind here. With neither source able to
 // count it gives models.ErrCaptureLossesUnsupported, "unknown"; a count that
 // could not be read is its own error.
+//
+// This is what GET /agent/capturelosses answers, the run's own verdict's
+// read: the counts (captureCounts), and every loss the wire made the run's
+// (runsOwn), which no count holds -- a close counted in a test process's
+// gap between tests, charged to no test, still fails the replay it was
+// counted in, or leaves it not judged. The tests' own charges read the
+// counts alone.
 func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	out, err := a.captureCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	a.provenMu.Lock()
+	run, at := a.runsOwn, maps.Clone(a.proven.runsAt)
+	a.provenMu.Unlock()
+	return withCounted(out, run, at), nil
+}
+
+// withCounted is counts with each of run's losses added to the count of
+// its kind (a kind none of counts has, appended): one count per kind, as
+// models.CaptureLosses.Since reads them. A count is named by its newest
+// loss: run's words name it only when this session made a loss of its kind
+// that names what it lost the run's (at, provenWire.runsAt) and the count
+// has not grown past what was read with it; a count otherwise keeps its own
+// words, and a kind none of counts has keeps none of an earlier session's.
+func withCounted(counts, run models.CaptureLosses, at map[models.CaptureLossKind]uint64) models.CaptureLosses {
+	if len(run) == 0 {
+		return counts
+	}
+	out := append(models.CaptureLosses(nil), counts...)
+	for _, r := range run {
+		read, newest := at[r.Kind]
+		i := slices.IndexFunc(out, func(c models.CaptureLoss) bool { return c.Kind == r.Kind })
+		if i < 0 {
+			if !newest {
+				r = models.CaptureLoss{Kind: r.Kind, Count: r.Count, Err: r.Err}
+			}
+			out = append(out, r)
+			continue
+		}
+		newest = newest && out[i].Count <= read
+		out[i].Count += r.Count
+		if newest && r.What != "" {
+			out[i].SetWhatOf(r)
+		}
+	}
+	return out
+}
+
+// captureCounts is CaptureLosses's counts: the hooks', the proxy's, the
+// listener's and a downstream build's. Each test's charge, and the run's
+// mark, count from them.
+func (a *Agent) captureCounts(ctx context.Context) (models.CaptureLosses, error) {
 	// Every report the kernel made before this read is counted first, so a
 	// call the application made before it is in it (a test's end, the run's
 	// last read), however late the agent's goroutines run.
@@ -156,7 +212,7 @@ type captureLossMark struct {
 // markCaptureLosses reads the counts the run's tests are counted from. Called
 // as a session starts.
 func (a *Agent) markCaptureLosses(ctx context.Context) captureLossMark {
-	at, err := a.CaptureLosses(ctx)
+	at, err := a.captureCounts(ctx)
 	if err != nil {
 		return captureLossMark{err: err}
 	}
@@ -172,19 +228,49 @@ func (a *Agent) markCaptureLosses(ctx context.Context) captureLossMark {
 // run on it (design v14 §7.5: evidence charged to no test). A standing state
 // (unix_unseen) is kept by every mark and is in it whatever was charged.
 func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	// First, the proxy counts the close of every connection the run's stop
+	// ended (DrainCaptureLosses): a loss of one is in this read, the
+	// session's last, never only the log line of a later session's reset.
+	// One it could not finish fails the read, below, once the one-process
+	// switch is off.
+	drainErr := a.DrainCaptureLosses(ctx)
 	// What the listener dropped after the last test is counted first
 	// (closeDropsGap), as every loss after it is.
 	a.closeDropsGap(ctx)
-	// Read first: a loss the proxy counted before the counts are read
-	// is in this answer whichever way it was counted.
-	taken := a.takeOwnedLosses()
-	a.provenMu.Lock()
-	for _, o := range taken {
-		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
+	// The session's last read: no test of a run of one test process is
+	// begun after it, so a close of a connection of no worker's is counted
+	// again (coreAgent.PairedBytesBeginner), as the session's reset counts
+	// it -- one counted during the session's teardown is in the counts
+	// before the next session's mark, said as the proxy counts it, and no
+	// later session's. Told before the take below, so one the proxy stamped
+	// before it is taken here: the run's.
+	if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
+		pb.PairedBytesOneProcess(false)
 	}
-	mark, charged, outside, owned := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside, a.proven.ownedRun
+	if drainErr != nil {
+		return nil, drainErr
+	}
+	// Taken first: a loss the proxy counted before the counts are read
+	// is in this answer whichever way it was counted.
+	var runs models.CaptureLosses
+	for _, o := range a.takeOwnedLosses() {
+		runs = append(runs, o.Loss)
+	}
+	a.provenMu.Lock()
+	// Kept for a worker's open test whose end never charged them.
+	for id, kept := range a.proven.ownedOpen {
+		runs = append(runs, kept...)
+		delete(a.proven.ownedOpen, id)
+	}
+	mark, charged, outside := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside
 	a.provenMu.Unlock()
 	_, now, err := a.captureLossesSince(ctx, mark, nil)
+	// The run's, with the counts read with them (none, when the read
+	// failed), and kept whatever it gave.
+	a.provenMu.Lock()
+	a.runsLocked(runs, now, err == nil)
+	owned := a.proven.ownedRun
+	a.provenMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -200,43 +286,179 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 	return uncharged, nil
 }
 
-// takeOwnedLosses takes, once each, the losses the proxy counted that a test
-// whose end was cut short owned (coreAgent.OwnedLossTaker), after those the
-// session before left unread (resetSession): none from a proxy that does not
-// tell them apart, whose counts hold every loss.
-func (a *Agent) takeOwnedLosses() []coreAgent.OwnedLoss {
-	a.provenMu.Lock()
-	out := a.proven.ownedLeft
-	a.proven.ownedLeft = nil
-	a.provenMu.Unlock()
-	if t, ok := a.Proxy.(coreAgent.OwnedLossTaker); ok && a.Proxy != nil {
-		out = append(out, t.TakeOwnedLosses()...)
+// DrainCaptureLosses waits until the proxy has counted the close of every
+// connection whose application end has ended, or whose close it has begun
+// (coreAgent.PairedBytesDrainer): keploy test asks at a test set's end, once
+// the set's application has stopped and before it reads the set's losses,
+// and the session's last read (UnchargedCaptureLosses) drains first. A loss
+// of a close the application's stop made is then in that read, never in a
+// later set's or session's. nil from a proxy that does not drain.
+func (a *Agent) DrainCaptureLosses(ctx context.Context) error {
+	d, ok := a.Proxy.(coreAgent.PairedBytesDrainer)
+	if !ok {
+		return nil
 	}
-	return out
+	if err := d.PairedBytesDrain(ctx); err != nil {
+		return fmt.Errorf("keploy could not count the close of every connection the application's stop ended: %w", err)
+	}
+	return nil
 }
 
-// boundOwnedLeft bounds the losses a session leaves unread to the next run
-// (resetSession) as the proxy bounds those it keeps untaken: with no reader
-// (an older keploy on a long-lived agent) they would grow by a session's at
-// every reset. It keeps the first coreAgent.MaxOwnedLosses, the oldest, and
-// counts every one past them in one entry of its kind, the run's; none is
-// dropped, and no kind is counted as another.
-func boundOwnedLeft(left []coreAgent.OwnedLoss) []coreAgent.OwnedLoss {
-	if len(left) <= coreAgent.MaxOwnedLosses {
-		return left
-	}
-	out := left[:coreAgent.MaxOwnedLosses:coreAgent.MaxOwnedLosses]
-	at := make(map[models.CaptureLossKind]int)
-	for _, o := range left[coreAgent.MaxOwnedLosses:] {
-		i, ok := at[o.Loss.Kind]
-		if !ok {
-			i = len(out)
-			at[o.Loss.Kind] = i
-			out = append(out, coreAgent.OwnedLoss{Loss: models.CaptureLoss{Kind: o.Loss.Kind, What: coreAgent.OwnedLossesPastTheBound}})
+// runsLocked makes l, losses this session counted, the run's: charged to no
+// test (ownedRun, UnchargedCaptureLosses) and in the run's own count
+// (runsOwn, CaptureLosses), which no count of the proxy's holds. at is the
+// counts read with them, and read says that read worked: each kind's count
+// read there is noted with the newest of l that names what it lost (runsAt),
+// so a later count of the kind is named by its own words (withCounted). A
+// read that failed notes nothing, and leaves the note an earlier read of this
+// session made. With provenMu held.
+func (a *Agent) runsLocked(l, at models.CaptureLosses, read bool) {
+	a.proven.ownedRun = a.proven.ownedRun.Plus(l)
+	a.runsOwn = a.runsOwn.Plus(l)
+	for _, r := range l {
+		if r.What == "" || !read {
+			continue
 		}
-		out[i].Loss.Count += o.Loss.Count
+		if a.proven.runsAt == nil {
+			a.proven.runsAt = map[models.CaptureLossKind]uint64{}
+		}
+		a.proven.runsAt[r.Kind] = kindCount(at, r.Kind)
 	}
-	return out
+}
+
+// takeOwnedLosses takes, once each, the losses the proxy counted that a test
+// whose end was cut short owned (coreAgent.OwnedLossTaker), or that a close
+// of a worker's connection charged (OwnedLoss.Open). None from a proxy that
+// does not tell them apart, whose counts hold every loss. Only the open
+// session's: one the proxy stamped with an earlier session
+// (coreAgent.PairedBytesSessioner) was made in a session that is over, which
+// took everything it could, and no test of this one caused it; it is logged,
+// once, and charges no run or test of this session. One of a session of the
+// keploy test run open is kept for its next take, as the set's that session
+// served (keepEarlierSetLocked).
+func (a *Agent) takeOwnedLosses() []coreAgent.OwnedLoss {
+	t, ok := a.Proxy.(coreAgent.OwnedLossTaker)
+	if !ok || a.Proxy == nil {
+		return nil
+	}
+	taken := t.TakeOwnedLosses()
+	if _, stamps := a.Proxy.(coreAgent.PairedBytesSessioner); !stamps || len(taken) == 0 {
+		return taken
+	}
+	mine := make([]coreAgent.OwnedLoss, 0, len(taken))
+	var earlier []coreAgent.OwnedLoss
+	a.provenMu.Lock()
+	for _, o := range taken {
+		if o.Session == a.session {
+			mine = append(mine, o)
+			continue
+		}
+		a.keepEarlierSetLocked(o.Session, o.Test, o.Loss)
+		earlier = append(earlier, o)
+	}
+	a.provenMu.Unlock()
+	for _, o := range earlier {
+		a.logEarlierSessionsLoss(o.Session, o.Test, o.Loss, lateLoss)
+	}
+	return mine
+}
+
+// noteSessionSetLocked notes that session, the one a reset begins, serves
+// set (models.TestSetSession; the zero value from a client that names none:
+// a record, keploy mock, an older keploy test, whose run is ""). A run other
+// than the one noted so far starts afresh: an earlier run's sessions, and the
+// losses kept for its takes, are no set of this one's, whose sets may have
+// the same names. Only the latest models.MaxSessionSets sessions' names are
+// held (below that many, the key dropped wraps to one no session has). With
+// provenMu held.
+func (a *Agent) noteSessionSetLocked(session uint64, set models.TestSetSession) {
+	if set.Run != a.setRun {
+		a.setRun, a.setRunFrom, a.sessionSets, a.earlierSets = set.Run, session, nil, nil
+	}
+	if a.sessionSets == nil {
+		a.sessionSets = map[uint64]string{}
+	}
+	a.sessionSets[session] = set.Set
+	delete(a.sessionSets, session-models.MaxSessionSets)
+}
+
+// keepEarlierSetLocked keeps l, a loss session made (in test, "" where no
+// test is known), for keploy test's next take (TakeOwnedCaptureLosses), when
+// session, an earlier session than the one open, is of the keploy test run
+// the open one serves: a verdict of the set it served that came after that
+// set's end, named by that set ("" when its name is no longer held,
+// models.MaxSessionSets). Nothing for a session of no keploy test run's, or
+// of an earlier run's: no take of now could report it. Past
+// coreAgent.MaxOwnedLosses, one entry per set and kind, naming no test,
+// counts the rest. With provenMu held.
+func (a *Agent) keepEarlierSetLocked(session uint64, test string, l models.CaptureLoss) {
+	if a.setRun == "" || session < a.setRunFrom {
+		return
+	}
+	set := a.sessionSets[session]
+	if len(a.earlierSets) >= coreAgent.MaxOwnedLosses {
+		for i := coreAgent.MaxOwnedLosses; i < len(a.earlierSets); i++ {
+			if e := &a.earlierSets[i]; e.Set == set && e.Loss.Kind == l.Kind {
+				e.Loss.Count += l.Count
+				return
+			}
+		}
+		a.earlierSets = append(a.earlierSets, models.OwnedCaptureLoss{EarlierSession: true, Set: set,
+			Loss: models.CaptureLoss{Kind: l.Kind, Count: l.Count, What: coreAgent.OwnedLossesPastTheBound}})
+		return
+	}
+	a.earlierSets = append(a.earlierSets, models.OwnedCaptureLoss{Test: test, Loss: l, EarlierSession: true, Set: set})
+}
+
+// lateLoss and leftLoss are the two ways a loss of an earlier session reaches
+// none of the open session's verdicts (logEarlierSessionsLoss): counted after
+// its session was reset, from a connection that session used, or counted in
+// it and never read by it.
+const (
+	lateLoss = "it was counted after that session ended, on a connection that session used"
+	leftLoss = "the session counted it and never read it (it ended before its last read, or made none)"
+)
+
+// logEarlierSessionsLoss logs, at warning level, a loss l that session, an
+// earlier session than the one open, made (in test, where keploy knows it),
+// which charges no run or test of a later session, and why it reached none of
+// that session's verdicts (lateLoss, leftLoss).
+func (a *Agent) logEarlierSessionsLoss(session uint64, test string, l models.CaptureLoss, why string) {
+	msg := "keploy could not capture a call on a connection of an earlier session's; it charges no run or test of a later session"
+	next := "the earlier session's tests may have made calls keploy neither recorded nor mocked: run them again, and check the agent's log for why the connection ended"
+	if l.Kind.NotJudged() {
+		msg = "keploy could not tell whether a connection of an earlier session's carried a call it did not capture; it charges no run or test of a later session"
+		next = models.AppBytesUntoldRemedy
+	}
+	f := []zap.Field{zap.Uint64("session", session), zap.String("kind", string(l.Kind)),
+		zap.Uint64("count", l.Count), zap.String("what", l.LogWhat()), zap.String("why", why), zap.String("next_step", next)}
+	if test != "" {
+		f = append(f, zap.String("test", test))
+	}
+	a.logger.Warn(msg, f...)
+}
+
+// leftLossesLocked is what the session a reset ends counted that no read of
+// it took (resetSession): taken, the proxy's last, each naming the test it
+// was counted in where keploy knows it (a cut-short end's own, or the test
+// of the worker its close was stamped with that was open at that epoch),
+// then those kept for its tests still open (ownedOpen), by test. With
+// provenMu held, before the reset clears the session's state.
+func (a *Agent) leftLossesLocked(taken []coreAgent.OwnedLoss) []coreAgent.OwnedLoss {
+	left := make([]coreAgent.OwnedLoss, 0, len(taken))
+	for _, o := range taken {
+		owner := o.Test
+		if t := a.proven.open[o.Worker]; o.Open && t.epoch == o.Epoch {
+			owner = t.id
+		}
+		left = append(left, coreAgent.OwnedLoss{Test: owner, Loss: o.Loss})
+	}
+	for _, id := range slices.Sorted(maps.Keys(a.proven.ownedOpen)) {
+		for _, c := range a.proven.ownedOpen[id] {
+			left = append(left, coreAgent.OwnedLoss{Test: id, Loss: c})
+		}
+	}
+	return left
 }
 
 // TakeOwnedCaptureLosses takes, once each, the losses a test whose end was
@@ -244,12 +466,18 @@ func boundOwnedLeft(left []coreAgent.OwnedLoss) []coreAgent.OwnedLoss {
 // at the set's end. keploy test reaches no end that charges them
 // (chargeCaptureLosses), and they are in none of the counts it reads, so
 // this is its only report of them. A test's own is "between test cases" for
-// a pool call's (endingTestCase), "" for the run's.
+// a pool call's (endingTestCase), "" for the run's. Then those of the run's
+// earlier sessions, each naming the set it served
+// (models.OwnedCaptureLoss.EarlierSession, keepEarlierSetLocked).
 func (a *Agent) TakeOwnedCaptureLosses(context.Context) ([]models.OwnedCaptureLoss, error) {
 	var out []models.OwnedCaptureLoss
 	for _, o := range a.takeOwnedLosses() {
 		out = append(out, models.OwnedCaptureLoss{Test: o.Test, Loss: o.Loss})
 	}
+	a.provenMu.Lock()
+	out = append(out, a.earlierSets...)
+	a.earlierSets = nil
+	a.provenMu.Unlock()
 	return out, nil
 }
 
@@ -296,7 +524,7 @@ func (a *Agent) captureLossesSince(ctx context.Context, mark captureLossMark, te
 		}
 		return nil, nil, fmt.Errorf("at the start of the run: %w", mark.err)
 	}
-	now, err = a.CaptureLosses(ctx)
+	now, err = a.captureCounts(ctx)
 	if err != nil {
 		// Hooks that counted at the run's start and no longer can: the count
 		// was lost, which is not "never counted".

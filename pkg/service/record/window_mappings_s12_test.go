@@ -65,7 +65,7 @@ func TestWindowMappingsRouteAnInFlightWriteAndMarkTheSet(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	t.Cleanup(replay.RegisterS12Serving(func() bool { return true }))
 	db := &markingMappingDB{}
-	s12Recording(t).write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+	s12Recording(t).write(context.Background(), zap.NewNop(), db, "test-set-0", true, 0)
 
 	if len(db.batches) != 1 {
 		t.Fatalf("batches %v; want one", db.batches)
@@ -116,7 +116,7 @@ func TestWindowMappingsRouteOnlyForASetTheyMark(t *testing.T) {
 				enabled := *tc.enabled
 				t.Cleanup(replay.RegisterS12Serving(func() bool { return enabled }))
 			}
-			s12Recording(t).write(context.Background(), zap.NewNop(), tc.store, "test-set-0", nil, true, 0)
+			s12Recording(t).write(context.Background(), zap.NewNop(), tc.store, "test-set-0", true, 0)
 			var rec *recMappingDB
 			switch db := tc.store.(type) {
 			case *markingMappingDB:
@@ -149,12 +149,12 @@ func TestWindowMappingsMarkASetTheAgentMapped(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	t.Cleanup(replay.RegisterS12Serving(func() bool { return true }))
 	db := &markingMappingDB{}
-	s12Recording(t).write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 3)
+	s12Recording(t).write(context.Background(), zap.NewNop(), db, "test-set-0", true, 3)
 	if len(db.marks) != 1 || len(db.batches) != 0 {
 		t.Fatalf("marks %v, batches %v; want the set marked and nothing derived", db.marks, db.batches)
 	}
 	db = &markingMappingDB{}
-	s12Windows().write(context.Background(), zap.NewNop(), db, "test-set-0", nil, false, 3)
+	s12Windows().write(context.Background(), zap.NewNop(), db, "test-set-0", false, 3)
 	if len(db.marks) != 0 {
 		t.Fatalf("a recording whose drain timed out was marked: %v", db.marks)
 	}
@@ -225,7 +225,7 @@ func TestARoutedWritesLineSaysKeployRunsInAPIDNamespaceOfItsOwn(t *testing.T) {
 	rec.addMock(insert)
 	db := &markingMappingDB{}
 	core, logs := observer.New(zapcore.InfoLevel)
-	rec.write(context.Background(), zap.New(core), db, "test-set-0", nil, true, 0)
+	rec.write(context.Background(), zap.New(core), db, "test-set-0", true, 0)
 	if len(db.worker) != 1 || db.worker[0].Name != "mock-6" {
 		t.Fatalf("worker scope %+v; want mock-6 routed", db.worker)
 	}
@@ -250,7 +250,9 @@ func TestARoutedWritesLineForATestNotKeptUndoesByDeleting(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	t.Cleanup(replay.RegisterS12Serving(func() bool { return true }))
 	db := &markingMappingDB{}
-	s12Recording(t).write(context.Background(), zap.NewNop(), db, "test-set-0", map[string]struct{}{"post-url-1": {}}, true, 0)
+	w := s12Recording(t)
+	loseTests(w, "post-url-1")
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", true, 0)
 	if len(db.worker) != 1 || db.worker[0].Name != "mock-6" {
 		t.Fatalf("worker scope %+v; want mock-6 routed", db.worker)
 	}

@@ -11,6 +11,39 @@ import (
 
 type OutgoingReq struct {
 	OutgoingOptions OutgoingOptions `json:"outgoingOptions"`
+	// TestSet is, from keploy test, the test set the session serves and the
+	// run it is of (TestSetSession), the zero value from any other client
+	// and from an older one, which sends none. It travels
+	// beside OutgoingOptions, not in them: they are held by value in each
+	// connection's supervisor.Session, whose 640 B size class has no room
+	// left (TestASessionStaysInThe640ByteSizeClass).
+	TestSet TestSetSession `json:"testSet"`
+}
+
+// TestSetSession names the test set a session of keploy test's serves, and
+// the run it is of: a token keploy test draws as its run starts, so an agent
+// kept from an earlier run tells that run's sets from this one's, whose sets
+// may have the same names. The agent stamps a capture loss it finds after
+// that session ended with the set (OwnedCaptureLoss.EarlierSession), and
+// keploy test reports it as that set's.
+type TestSetSession struct {
+	Run string `json:"run"`
+	Set string `json:"set"`
+}
+
+type testSetSessionKey struct{}
+
+// WithTestSetSession is ctx carrying s, the test set a MockOutgoing under it
+// starts a session for (OutgoingReq.TestSet).
+func WithTestSetSession(ctx context.Context, s TestSetSession) context.Context {
+	return context.WithValue(ctx, testSetSessionKey{}, s)
+}
+
+// TestSetSessionOf is the test set WithTestSetSession put in ctx: the zero
+// value for none.
+func TestSetSessionOf(ctx context.Context) TestSetSession {
+	s, _ := ctx.Value(testSetSessionKey{}).(TestSetSession)
+	return s
 }
 
 type IncomingReq struct {
@@ -112,6 +145,14 @@ type TestMockMapping struct {
 	// recording's client asked it to end its streams (StreamEndPath) and it
 	// has put on the stream all it had: no test or mocks of its own.
 	StreamEnd bool `json:"stream_end,omitempty" yaml:"-"`
+	// RequestedAt dates the mapping as the agent owes it to a recording's
+	// stop (BacklogBefore): the request time of the test it maps, or, for a
+	// later delta to a past test's mapping, the earliest request time among
+	// the mocks it adds. A recording that stops while its app goes on serving
+	// judges the mapping by it, as it judges test cases and mocks by theirs:
+	// one dated after the stop is of a request made after it, and not part of
+	// the recording. Zero from an agent that does not say.
+	RequestedAt time.Time `json:"requested_at,omitzero" yaml:"-"`
 }
 
 // ScopeReq is the body of POST /agent/scope/begin and /agent/scope/end — a
@@ -1315,6 +1356,26 @@ type AfterTestRunReq struct {
 	TestSetIDs []string     `json:"testSetIDs"`
 	Coverage   TestCoverage `json:"coverage"`
 }
+
+// AppStartsAnewReq tells the agent that keploy starts the application anew
+// for the test set TestSetID: no process of an earlier application runs on.
+// FirstRecorded is the earliest instant one of the set's test cases was
+// recorded at (its request's), zero where the set has none.
+type AppStartsAnewReq struct {
+	TestSetID     string    `json:"testSetID"`
+	FirstRecorded time.Time `json:"firstRecorded"`
+}
+
+// ClockRunReq hands the agent the run id of the process that started it
+// (POST /agent/hooks/clock-run): Run, never empty.
+type ClockRunReq struct {
+	Run string `json:"run"`
+}
+
+// NoTimelineHooks is the body of the 501 an agent of a keploy that has the
+// clock-run route answers it with when its hooks keep no clock timeline
+// (OSS's own, and a native macOS or Windows agent's), so take no run id.
+const NoTimelineHooks = "no timeline hooks in this agent: it keeps no clock timeline, so it takes no run id"
 
 type AppStart struct {
 	At   time.Time `json:"at"`

@@ -548,6 +548,7 @@ var (
 	_ agent.AcceptCounter      = (*Proxy)(nil)
 	_ agent.ListenerCountTaker = (*Proxy)(nil)
 	_ agent.PairedBytesWaiter  = (*Proxy)(nil)
+	_ agent.PairedBytesSettler = (*Proxy)(nil)
 	_ agent.PairedBytesChecker = (*Proxy)(nil)
 	_ agent.CountingReporter   = (*Proxy)(nil)
 )

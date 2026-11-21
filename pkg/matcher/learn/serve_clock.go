@@ -11,12 +11,14 @@ import (
 // A call no recording answered is a background miss when it is the same
 // request as one of the set's background recordings, apart from its reads
 // of the application's clock (models.MockMismatchReport.Background). A read
-// of the clock holds on the call's span: from the latest call keploy served
-// before it to its arrival, on the application's clock. Under the proven
-// switch the learn tracker on the parser's ctx tells it (ClockSpanOf). With
-// the switch off the tracker is fed no serve and is put on no parser's ctx,
-// and that stays so: a ServeClock tells the span instead, from the serves
-// the store notes to it, and is read by CallSpanOf alone. Nothing the learn
+// of the clock holds on one of the call's spans: from the running set's
+// begin to its arrival, on the application's clock (CallSpansOf), and, for
+// CallSpanOf, from the latest call keploy served before it. Under the
+// proven switch the learn tracker on the parser's ctx tells them
+// (ClockSpansOf, ClockSpanOf). With the switch off the tracker is fed no
+// serve and is put on no parser's ctx, and that stays so: a ServeClock
+// tells them instead, from the set's begin and the serves the store notes
+// to it, and is read by CallSpansOf and CallSpanOf alone. Nothing the learn
 // step learns reads it.
 
 // serveClockKept is how many serves a ServeClock keeps: a call whose span
@@ -36,6 +38,9 @@ type ServeClock struct {
 	// instant, which starts no span.
 	served [serveClockKept]time.Time
 	next   int
+	// set is the real instant the running test set began (NewSetAt), zero
+	// before the first: a background call's span starts there (SpansOf).
+	set time.Time
 }
 
 // serveNow is the clock a ServeClock notes a serve by.
@@ -64,6 +69,21 @@ func (c *ServeClock) Served() {
 	c.mu.Unlock()
 }
 
+// NewSet notes that a test set begins now (NewSetAt).
+func (c *ServeClock) NewSet() { c.NewSetAt(serveNow()) }
+
+// NewSetAt notes that a test set began at the real instant at: a later
+// background call's span starts there (SpansOf). The application reads its
+// clock for a call of the set after the set began.
+func (c *ServeClock) NewSetAt(at time.Time) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.set = at
+	c.mu.Unlock()
+}
+
 // SpanTo is the span on the application's clock of a call that reached
 // keploy at arrival: from the latest serve noted before arrival, of any
 // flow, to arrival, where the application's clock ran as one between them
@@ -85,6 +105,36 @@ func (c *ServeClock) SpanTo(arrival time.Time) (Span, bool) {
 	}
 	c.mu.Unlock()
 	return lc.span(arrival)
+}
+
+// SpansOf is the spans on the application's clock of a background call
+// that reached keploy at arrival (CallSpansOf): the one span from the
+// running set's begin (NewSetAt) to arrival, where the application's clock
+// ran as one between them, never from a serve. A background poller's read
+// of its clock is ordered with no call keploy serves, not even a run of
+// the same poll: several goroutines may run one poll, sending the same
+// request, and keploy cannot tell them apart. Any serve made between the
+// read and the arrival (the open test's call, a worker's, another poller's)
+// would start the span after the read. false with no clock, before any set
+// began, for a call that reached keploy before the running set began, and
+// where the clock did not run as one since the set's begin: with the
+// switch off the hooks tell a clock only where nothing moves it
+// (agent.BackgroundClockSetter).
+func (c *ServeClock) SpansOf(arrival time.Time) ([]Span, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	clock, set := c.clock, c.set
+	c.mu.Unlock()
+	if clock == nil {
+		return nil, false
+	}
+	s, ok := liveClock{clock: clock}.from(set, arrival)
+	if !ok {
+		return nil, false
+	}
+	return []Span{s}, true
 }
 
 type serveClockKey struct{}
@@ -109,4 +159,27 @@ func CallSpanOf(ctx context.Context, arrival time.Time) (Span, bool) {
 		return c.SpanTo(arrival)
 	}
 	return ClockSpanOf(ctx, arrival, nil)
+}
+
+// CallSpansOf is the spans on the application's clock of a background
+// call that reached keploy at arrival, for the same check alone: its read
+// of the clock holds in one of them (EpochOffset.HoldsIn). Each is bounded
+// by the running set's begin, never by a serve: keploy cannot tell which
+// call a background poller's read of the clock is ordered after, and a
+// serve made between the read and the arrival would start a span after the
+// read (Tracker.BackgroundSpans under the switch, ServeClock.SpansOf with
+// it off). Under the switch, where the clock moved after the set's begin,
+// they hold what it showed from there to the move that began the run to
+// arrival, one span per offset in force, so a value a move jumped over
+// holds in none. The serve clock's is one span: with the switch off the
+// hooks tell a clock only where nothing moves it. false where neither
+// tells one.
+func CallSpansOf(ctx context.Context, arrival time.Time) ([]Span, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	if c, ok := ctx.Value(serveClockKey{}).(*ServeClock); ok {
+		return c.SpansOf(arrival)
+	}
+	return ClockSpansOf(ctx, arrival)
 }

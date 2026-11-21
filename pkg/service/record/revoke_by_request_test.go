@@ -1,8 +1,10 @@
 package record
 
 import (
+	"context"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,12 +23,30 @@ func TestARevokeFindsATestCaseSentWithNoNameByItsRequestTime(t *testing.T) {
 	at := time.Date(2026, 11, 8, 8, 27, 56, 322384000, time.UTC)
 	other := at.Add(time.Millisecond)
 	literal := models.RevokeNameByRequest(at.Add(time.Hour))
-	inserted := map[string]struct{}{"test-1": {}, "post-customers-939": {}, "post-customers-940": {}, "get-healthz-1": {}, literal: {}}
-	byRequest := map[int64][]string{
-		at.UnixNano():    {"post-customers-939", "post-customers-940"},
-		other.UnixNano(): {"get-healthz-1"},
+	td := &recTestDB{}
+	var mu sync.Mutex
+	count := 0
+	lr := startLiveRevokes(context.Background(), zap.NewNop(), td, "set", &mu, &count)
+	save := func(sent, savedAs string, req time.Time) {
+		tc := &models.TestCase{Name: sent, Kind: models.HTTP, HTTPReq: models.HTTPReq{Timestamp: req}, HTTPResp: models.HTTPResp{Timestamp: req.Add(time.Millisecond)}}
+		c := lr.arrive(tc)
+		if c == nil {
+			t.Fatalf("test case %q was refused before any revoke", savedAs)
+		}
+		lr.saving(c, tc.Name)
+		held := tc.Name
+		tc.Name = savedAs
+		lr.saved(c, held, tc, nil)
+		mu.Lock()
+		count++
+		mu.Unlock()
 	}
-	got := revokedToDelete([]string{
+	save("test-1", "test-1", at.Add(-time.Second))
+	save("", "post-customers-939", at)
+	save("", "post-customers-940", at)
+	save("", "get-healthz-1", other)
+	save(literal, literal, at.Add(-2*time.Second))
+	lr.revoke(
 		"test-1",
 		models.RevokeNameByRequest(at),
 		models.RevokeNameByRequest(at),
@@ -34,12 +54,31 @@ func TestARevokeFindsATestCaseSentWithNoNameByItsRequestTime(t *testing.T) {
 		models.RevokeNameByRequest(at.Add(time.Second)),
 		"never-saved",
 		literal,
-	}, inserted, byRequest)
+	)
+	// What the live deletes have not reached by the end, the end deletes.
+	deleted, notRecorded, left := lr.end()
+	for _, n := range left {
+		deleted[n] = struct{}{}
+	}
+	got := make([]string, 0, len(deleted))
+	for n := range deleted {
+		got = append(got, n)
+	}
 	slices.Sort(got)
 	want := []string{literal, "post-customers-939", "post-customers-940", "test-1"}
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Fatalf("deletes %v, want %v", got, want)
+	}
+	td.mu.Lock()
+	asked := append(append([]string(nil), td.deleted...), left...)
+	td.mu.Unlock()
+	slices.Sort(asked)
+	if !slices.Equal(asked, want) {
+		t.Fatalf("deleted live %v and left to the end %v, want each of %v once", td.deleted, left, want)
+	}
+	if notRecorded != 0 {
+		t.Fatalf("%d test cases counted as not recorded; none came after a revoke", notRecorded)
 	}
 	if req, ok := models.RequestOfRevokeName(models.RevokeNameByRequest(at)); !ok || req != at.UnixNano() {
 		t.Fatalf("a revoke name by request time reads back as %d, %v", req, ok)

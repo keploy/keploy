@@ -598,7 +598,10 @@ func (k httpKnown) ExcusedPair(rec, live learn.Leaf, inRec, inLive bool) (bool, 
 	switch {
 	case strings.HasPrefix(ref.Noise, "body."):
 		path := strings.TrimPrefix(ref.Noise, "body.")
-		if !both && k.n.body.Covers(path, "", false) ||
+		// A leaf only the live request has is excused by an entry that does
+		// not name id keys (CoversAdded).
+		if inRec && !inLive && k.n.body.Covers(path, "", false) ||
+			!inRec && k.n.body.CoversAdded(path) ||
 			both && k.n.body.Covers(path, noiseText(rec), scalarLeaf(rec)) && k.n.body.Covers(path, noiseText(live), scalarLeaf(live)) {
 			return true, false
 		}
@@ -3259,11 +3262,15 @@ func inRecordedOrder(mocks []*models.Mock) []*models.Mock {
 }
 
 // recordedFirst is inRecordedOrder's order: a before b when a was recorded
-// first, or at the same instant with a name that sorts first.
+// first, or at the same instant with the lower number mockdb gave it as it
+// wrote it (models.CompareRecordedNumbers), or a name that sorts first.
 func recordedFirst(a, b *models.Mock) bool {
 	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
 	if !ta.Equal(tb) {
 		return ta.Before(tb)
+	}
+	if c := models.CompareRecordedNumbers(a.Name, b.Name); c != 0 {
+		return c < 0
 	}
 	return a.Name < b.Name
 }

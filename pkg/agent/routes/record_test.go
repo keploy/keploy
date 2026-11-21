@@ -416,3 +416,59 @@ func TestHandleIncoming_ATestCaseWithNoRequestTimeIsCheckedOverItsRecording(t *t
 		})
 	}
 }
+
+// A test case that comes with a capture id and no name (a request captured
+// without --sync, for a client that reads capture ids) is known to the stream
+// by its capture id: one sent before a mock any test may need is lost, whose
+// window reaches past that mock's request, is revoked by it, which the
+// recording translates to the name it saved the test case under. Keyed by its
+// empty name, it could not be revoked at all.
+func TestHandleIncoming_ATestCaseWithACaptureIDIsRevokedByIt(t *testing.T) {
+	mgr := syncmgr.Get()
+	mgr.SetWatermark(nil)
+	mgr.SetRevokeCapable(true)
+	t.Cleanup(func() { mgr.SetRevokeCapable(false) })
+	start := newLateStretch()
+	tcs := make(chan *models.TestCase, 1)
+	names := streamOf(t, openStream(t, tcs))
+	mgr.SetOutputChannel(make(chan *models.Mock)) // a consumer that takes nothing
+	t.Cleanup(func() { mgr.SetOutputChannel(make(chan *models.Mock, 1)) })
+
+	id := models.CaptureIDPrefix + "routes-1"
+	tcs <- &models.TestCase{CaptureID: id, Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{Timestamp: start.Add(-time.Second)}, HTTPResp: models.HTTPResp{Timestamp: start.Add(time.Second)}}
+	if _, ok := nextStreamed(t, names); !ok {
+		t.Fatal("the test case with a capture id was not streamed")
+	}
+	shared := &models.Mock{Kind: models.Kind("Kafka"), ConnectionID: "lost-session-capture-id",
+		Spec: models.MockSpec{Metadata: map[string]string{"type": "config"}, ReqTimestampMock: start, ResTimestampMock: start.Add(time.Millisecond)}}
+	shared.DeriveLifetime()
+	mgr.SendConfigMock(shared)
+	mgr.CloseOutChan()
+	if !mgr.WasMockDroppedForTC(id) {
+		t.Fatal("a test case sent with a capture id before a mock it may need was lost was not revoked by its capture id")
+	}
+	close(tcs)
+}
+
+// A test case whose capture id owns a mock that was dropped (its test was
+// revoked by that id before the stream reached it) is left out: the stream
+// asks by the capture id. Asked by its empty name, it was streamed without
+// the mock.
+func TestHandleIncoming_ATestCaseWhoseCaptureIDLostAMockIsLeftOut(t *testing.T) {
+	mgr := syncmgr.Get()
+	mgr.SetWatermark(nil)
+	start := newStretch()
+	id := models.CaptureIDPrefix + "routes-dropped"
+	mgr.RevokeTestCase(id)
+	tcs := make(chan *models.TestCase, 2)
+	resp := openStream(t, tcs)
+	tcs <- &models.TestCase{CaptureID: id, Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{Timestamp: start}, HTTPResp: models.HTTPResp{Timestamp: start.Add(time.Millisecond)}}
+	tcs <- &models.TestCase{Name: "kept", Kind: models.HTTP,
+		HTTPReq: models.HTTPReq{Timestamp: start.Add(time.Second)}, HTTPResp: models.HTTPResp{Timestamp: start.Add(time.Second + time.Millisecond)}}
+	close(tcs)
+	if got := streamedNames(t, resp); len(got) != 1 || got[0] != "kept" {
+		t.Fatalf("streamed %q, want only [kept]: the test case whose capture id lost a mock was streamed", got)
+	}
+}

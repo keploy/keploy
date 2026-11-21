@@ -316,6 +316,14 @@ type OutgoingOptions struct {
 	// lost, cannot be revoked, and the agent says it may stay recorded
 	// without the mock. Record path only.
 	SupportsRevokeByRequest bool
+	// SupportsCaptureIDs is a capability flag set by the CLI on the /outgoing
+	// request: when true, the CLI reads capture ids (models.CaptureIDPrefix).
+	// It names a test case that came with a CaptureID as it saves it, and
+	// files every mapping entry and revoke that names the CaptureID under
+	// that name. The agent gives a request captured without --sync a capture
+	// id ONLY when this is true; an older CLI keeps getting such test cases,
+	// and their mappings, with no name. Record path only.
+	SupportsCaptureIDs bool
 	// ReadsSetEnds is a capability flag set by the CLI on the replay
 	// session's /mock request: when true, the CLI reads each of its test
 	// sets' end with a set's end read (WithSetEndRead) and fails the set

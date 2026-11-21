@@ -242,7 +242,7 @@ func (a *Agent) noteReadsUnsettled() {
 // cannot be read are a read that cannot vouch; hooks that count no losses at
 // all leave the read as it is, as the switch does.
 func (a *Agent) lostSinceLastRead(ctx context.Context) error {
-	losses, err := a.CaptureLosses(ctx)
+	losses, err := a.captureCounts(ctx)
 	if errors.Is(err, models.ErrCaptureLossesUnsupported) {
 		return nil
 	}

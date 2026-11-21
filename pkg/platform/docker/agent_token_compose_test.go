@@ -80,6 +80,51 @@ func TestGetAlias_LinuxNamesTheToken(t *testing.T) {
 	require.True(t, launched, "the client does not know it launched this agent, so it will never check it enforces the token")
 }
 
+// TestAgentLaunch_EveryRunKindNamesTheRunToken: the compose agent service and
+// the linux `docker run` alias name the run's token in a record, a test, and
+// keploy mock's record and replay, so every docker and compose agent of a run
+// gets the token this process presents (the client fills the value in from
+// its own environment: TestPrepareDockerCommand_GivesTheClientTheTokenTheAliasNames,
+// and app's TestRun_OnlyTheComposeCommandStartsAnAgentWithTheToken for every
+// agent a compose test-set restart starts). An agent handed no token serves
+// its control-plane API to any caller that reaches its port
+// (routes.ConsumeSessionToken), so no run kind may start one without it.
+func TestAgentLaunch_EveryRunKindNamesTheRunToken(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts models.SetupOptions
+	}{
+		{"record", models.SetupOptions{Mode: models.MODE_RECORD}},
+		{"test", models.SetupOptions{Mode: models.MODE_TEST}},
+		{"mock record", models.SetupOptions{Mode: models.MODE_RECORD, MockMode: true}},
+		{"mock replay", models.SetupOptions{Mode: models.MODE_TEST, MockMode: true}},
+	} {
+		t.Run("compose "+tc.name, func(t *testing.T) {
+			opts := tc.opts
+			opts.AgentPort, opts.KeployContainer, opts.AgentURI = 16789, "keploy-agent", "http://localhost:16789/agent"
+			serviceNode, err := (&Impl{logger: zap.NewNop(), conf: &config.Config{}}).GenerateKeployAgentService(opts)
+			require.NoError(t, err)
+			var svc struct {
+				Environment []string `yaml:"environment"`
+			}
+			raw, err := yaml.Marshal(serviceNode)
+			require.NoError(t, err)
+			require.NoError(t, yaml.Unmarshal(raw, &svc), "the generated node must be valid compose YAML")
+			require.Contains(t, svc.Environment, token.Env, "a %s run's compose agent service does not ask compose for the run's token", tc.name)
+		})
+		t.Run("docker "+tc.name, func(t *testing.T) {
+			if runtime.GOOS != "linux" {
+				t.Skip("getAlias switches on runtime.GOOS; the linux arm only executes here")
+			}
+			opts := tc.opts
+			opts.AgentPort, opts.KeployContainer, opts.AgentURI = 16790, "keploy-test", "http://localhost:16790/agent"
+			alias, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
+			require.NoError(t, err)
+			require.Contains(t, strings.Fields(alias), token.Env, "a %s run's docker agent is not given the run's token", tc.name)
+		})
+	}
+}
+
 // TestLinuxDockerClient_TheDockerClientGetsTheToken runs each way the linux
 // alias can start docker, through PrepareDockerCommand as keploy does, against
 // a `docker` that reports the token it was given and a `sudo` that does what

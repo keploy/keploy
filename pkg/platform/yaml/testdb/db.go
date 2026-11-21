@@ -878,6 +878,13 @@ type encodedTestCase struct {
 // The JSON path skips the yaml.Node intermediate entirely — this is where the
 // big win comes from.
 func (ts *TestYaml) encodeTestCase(tc *models.TestCase, name string) (encodedTestCase, error) {
+	// The encoder adds the time-shaped noise it finds to the case's own noise
+	// map, so the caller's case carries what was written. A case can come with
+	// no map (one created from the dashboard and read back from a store): it
+	// gets one here, so it leaves the write as a case that came with one does.
+	if tc.Noise == nil {
+		tc.Noise = map[string][]string{}
+	}
 	if ts.Format == yaml.FormatJSON {
 		jsonTc, err := EncodeTestcaseJSON(*tc, ts.logger)
 		if err != nil {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +36,9 @@ type MockReader struct {
 	// the document last read starts (see DocOffset).
 	pos      int64
 	docStart int64
+	// pinned is the file as Pin found it: the reader reads none of the
+	// file's bytes past its length then, and Stat says it.
+	pinned os.FileInfo
 }
 
 // NewMockReader creates a reader that accumulates lines until "---" delimiter.
@@ -305,9 +309,39 @@ func (r *MockReader) DocOffset() int64 {
 }
 
 // Stat is the file the reader reads, as os.SameFile tells it from a file put
-// in its place since.
+// in its place since; for a pinned reader, as it was when it was pinned (Pin).
 func (r *MockReader) Stat() (os.FileInfo, error) {
+	if r.pinned != nil {
+		return r.pinned, nil
+	}
 	return r.file.Stat()
+}
+
+// Pin has the reader read the file only up to its length now, or, given at
+// (what an earlier Pin of the same file returned), up to its length then.
+// Called before the first read. A mock file is only ever appended to between
+// the rewrites that replace it, each append a whole document under the file's
+// lock, so a reader pinned while that lock is held against appends reads a
+// whole file that no append changes, however long its read takes and however
+// much is appended meanwhile: the read no longer needs the lock. A file put in
+// place of the one at was taken of, or one shorter than it was, is refused.
+func (r *MockReader) Pin(at os.FileInfo) (os.FileInfo, error) {
+	if r.pos != 0 || r.done {
+		return nil, errors.New("a mock reader is pinned before it reads")
+	}
+	info, err := r.file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if at != nil {
+		if !os.SameFile(info, at) || info.Size() < at.Size() {
+			return nil, fmt.Errorf("the mock file %s was replaced or cut since it was first read", r.path)
+		}
+		info = at
+	}
+	r.pinned = info
+	r.reader = bufio.NewReader(io.LimitReader(r.file, info.Size()))
+	return info, nil
 }
 
 // Path returns the path of the file the reader reads.

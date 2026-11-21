@@ -30,6 +30,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -227,6 +228,29 @@ type Agent struct {
 	// taking scopeMu.
 	provenMu sync.Mutex
 	proven   provenWire
+	// runsOwn is every loss of a session's own the wire made the run's
+	// (provenWire.ownedRun: a cut-short end's, or a close counted in a
+	// worker's gap between tests), for the agent's life, under provenMu. No
+	// count of the proxy's holds one, so CaptureLosses adds them: the run's
+	// own verdict (mock replay's and mock record's count of what the agent
+	// could not capture while the test command ran) has every loss of the
+	// run, those charged to no test among them. A session's reset keeps it,
+	// as every count is kept.
+	runsOwn models.CaptureLosses
+	// session numbers the agent's sessions, each reset moving it on (0
+	// before the first), with the wire held: the log of a loss a session
+	// left unread names the session it was counted in (resetSession).
+	session uint64
+	// setRun is the keploy test run whose sessions sessionSets names
+	// (models.TestSetSession.Run), "" for none, and setRunFrom its first
+	// session: sessionSets has, for each of its latest sessions
+	// (models.MaxSessionSets), the test set it served. earlierSets are the
+	// losses of that run's earlier sessions that keploy test's next take
+	// returns, each naming its set (keepEarlierSetLocked). Under provenMu.
+	setRun      string
+	setRunFrom  uint64
+	sessionSets map[uint64]string
+	earlierSets []models.OwnedCaptureLoss
 	// instanceGen is, for each keploy instance id, the generation its next
 	// claim gets (coreAgent.InstanceValue), for the agent's life: a session's
 	// reset keeps it, so no claim of an id is stamped with the value of an
@@ -765,6 +789,9 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	// And whether it finds a revoked test case sent with no name (the async
 	// capture names none) by its request time.
 	syncMock.Get().SetRevokeByRequest(opts.SupportsRevokeByRequest)
+	// And whether it reads capture ids: only then is a request captured
+	// without --sync given one, which its mappings and test case carry.
+	syncMock.Get().SetCaptureIDs(opts.SupportsCaptureIDs)
 
 	return m, nil
 }
@@ -1414,6 +1441,13 @@ func (a *Agent) wireAppClock() {
 			run = realAppClockRun
 		}
 		rs.SetAppClockRun(run)
+	}
+	if ss, ok := a.Proxy.(coreAgent.AppClockShownSetter); ok {
+		var shown func(from, to time.Time) ([]learn.Span, bool)
+		if sr, tells := ActiveHooks.(AppClockShownReader); tells && reads {
+			shown = sr.AppClockShown
+		}
+		ss.SetAppClockShown(shown)
 	}
 	if reads {
 		s.SetAppClock(r.AppClock)

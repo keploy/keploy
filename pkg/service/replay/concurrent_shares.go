@@ -334,7 +334,9 @@ func (p *exactPlan) shareConcurrent(mappings map[string][]models.MockEntry) map[
 		}
 		narrowed[test] = keep
 	}
-	// The candidates of each test, in recorded order.
+	// The candidates of each test, in recorded order: by request time, then
+	// by the number mockdb gave each as it wrote it
+	// (models.CompareRecordedNumbers: mock-9 before mock-10), then by name.
 	var names []string
 	for name := range sp.conc.entries {
 		if sp.candidate(name) {
@@ -345,6 +347,9 @@ func (p *exactPlan) shareConcurrent(mappings map[string][]models.MockEntry) map[
 		a, b := sp.info[names[i]].mock, sp.info[names[j]].mock
 		if !a.Spec.ReqTimestampMock.Equal(b.Spec.ReqTimestampMock) {
 			return a.Spec.ReqTimestampMock.Before(b.Spec.ReqTimestampMock)
+		}
+		if c := models.CompareRecordedNumbers(names[i], names[j]); c != 0 {
+			return c < 0
 		}
 		return names[i] < names[j]
 	})

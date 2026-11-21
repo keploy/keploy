@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -252,6 +253,9 @@ type SyncMockManager struct {
 	// request of its comes before it (RecordingFrom). Atomic, so a test
 	// case's checks never wait on mu behind a long walk.
 	recordingFrom atomic.Int64
+	// ended is the recording that has ended, while none has started since
+	// (recording_end.go): what the agent captures then no recording takes.
+	ended recordingEnd
 
 	// resolvedTestCount is the number of UNIQUE recorded test cases resolved so
 	// far (incremented once per kept ResolveRange — duplicates skipped by static
@@ -544,6 +548,15 @@ type SyncMockManager struct {
 	// (OutgoingOptions.SupportsRevokeByRequest): the stream then notes such
 	// a test case sent under the name a revoke gives it (sentName).
 	revokeByRequest atomic.Bool
+	// captureIDs is set (SetCaptureIDs) when the client reads capture ids
+	// (OutgoingOptions.SupportsCaptureIDs): NewCaptureID gives one only then.
+	captureIDs atomic.Bool
+	// captureSeq numbers the capture ids NewCaptureID gives; captureNonce,
+	// drawn once per manager (captureOnce), keeps them apart from those an
+	// earlier agent process gave in the same recording.
+	captureSeq   atomic.Uint64
+	captureOnce  sync.Once
+	captureNonce string
 
 	// pendingRevokes is the FIFO of dropped-TC names still to be emitted to the
 	// CLI as RevokedTests control frames. Appended by recordDroppedTC when a
@@ -940,6 +953,30 @@ func (m *SyncMockManager) NextTestID() int64 {
 	return m.testCounter.Add(1)
 }
 
+// SetCaptureIDs says whether the client reads capture ids
+// (OutgoingOptions.SupportsCaptureIDs), as GetOutgoing reads it beside
+// SetRevokeByRequest. Nil-safe.
+func (m *SyncMockManager) SetCaptureIDs(v bool) {
+	if m == nil {
+		return
+	}
+	m.captureIDs.Store(v)
+}
+
+// NewCaptureID gives the identity of a request captured without --sync and
+// without a name of its own (models.CaptureIDPrefix): the name its kept
+// resolve maps its mocks to and owns them by, and its test case's CaptureID.
+// The recorder names the test case as it saves it and files all of it under
+// that name. "" when the client does not read capture ids (SetCaptureIDs), so
+// such a request is resolved and sent with no name, as before. Nil-safe.
+func (m *SyncMockManager) NewCaptureID() string {
+	if m == nil || !m.captureIDs.Load() {
+		return ""
+	}
+	m.captureOnce.Do(func() { m.captureNonce = generateRandomString(8) })
+	return models.CaptureIDPrefix + m.captureNonce + "-" + strconv.FormatUint(m.captureSeq.Add(1), 10)
+}
+
 // SetOutputChannel plugs an outgoing mock channel into the manager.
 // Only resets outChanClosed when the channel pointer changes —
 // re-setting the same pointer after CloseOutChan must NOT reopen
@@ -1054,6 +1091,42 @@ func (m *SyncMockManager) SetMappingChannel(streamCtx context.Context, ch chan<-
 	// stream starts with no drainer and the next overflow spawns a fresh one.
 	m.mappingDraining = false
 	m.mappingOverflowMu.Unlock()
+}
+
+// ForwardMappingChannel copies this manager's mapping channel and stream
+// context onto dst, so dst's resolves emit mappings to the same recorder
+// stream. It is a no-op when this manager has no channel (SetMappingChannel
+// was not called yet), dst is nil, or dst already has the same channel
+// (safe for repeated calls — no overflow is dropped and no generation is
+// bumped when the channel has not changed).
+func (m *SyncMockManager) ForwardMappingChannel(dst *SyncMockManager) {
+	if m == nil || dst == nil {
+		return
+	}
+	m.mappingOverflowMu.Lock()
+	ch := m.mappingStreamCh
+	streamCtx := m.mappingStreamCtx
+	m.mappingOverflowMu.Unlock()
+	if ch == nil {
+		return
+	}
+	// What the client reads goes with its stream: dst names a request
+	// captured without --sync by a capture id only when the client reads
+	// them (NewCaptureID), else its mapping would name what the client never
+	// binds to a test case. Copied on every call, before the skip below, as
+	// the client says it (GetOutgoing) apart from opening the stream.
+	dst.SetCaptureIDs(m.captureIDs.Load())
+	// Skip when dst already has this channel: SetMappingChannel is not
+	// idempotent (it clears the overflow queue and bumps the generation
+	// on every call), so calling it again with the same channel would
+	// silently drop queued mappings under backpressure.
+	dst.mappingOverflowMu.Lock()
+	already := dst.mappingStreamCh == ch
+	dst.mappingOverflowMu.Unlock()
+	if already {
+		return
+	}
+	dst.SetMappingChannel(streamCtx, ch)
 }
 
 // sendMapping hands a mapping to the recorder without ever blocking the capture
@@ -3115,6 +3188,12 @@ const (
 	// first request, or by SendConfigMock at any time) that found the mocks
 	// queued for the consumer at their byte bound.
 	MockDroppedOutputFull MockDrop = "the mocks queued for the consumer already hold their byte bound"
+	// MockDroppedNoRecording is a mock of a call the application made after
+	// its recording ended (EndRecording) and before another started: no
+	// recording takes it. Counted with the calls left uncaptured, and not
+	// said per mock (sayNotCaptured); it leaves out no test case, as no
+	// recording holds one of its time.
+	MockDroppedNoRecording MockDrop = "no recording takes it: the last one ended and none has started since"
 )
 
 // Dropped reports whether d is a drop, not MockTaken.
@@ -3259,6 +3338,11 @@ func (m *SyncMockManager) DropsSince(mark DropMark) SessionDrops {
 // parser that says it kept a mock must ask this, through supervisor.Session's
 // EmitMockOutcome: EmitMock returns nil for a mock dropped here.
 func (m *SyncMockManager) AddMock(mock *models.Mock) MockDrop {
+	// No recording takes a call made after the last one ended
+	// (recording_end.go).
+	if m.refuseEnded() {
+		return MockDroppedNoRecording
+	}
 	// Unification (Phase 1): resolve the live mock's Lifetime immediately
 	// on entry so the buffered mock carries a correctly-typed
 	// TestModeInfo.Lifetime into whichever downstream consumer drains
@@ -3412,6 +3496,9 @@ func (m *SyncMockManager) SendConfigMock(mock *models.Mock) MockDrop {
 	if m == nil {
 		return MockDroppedOutputClosed
 	}
+	if m.refuseEnded() {
+		return MockDroppedNoRecording
+	}
 	m.totalAdded.Add(1)
 	m.noteSending(mock)
 	return m.send(mock, "", func(bool) { m.sent(mock) })
@@ -3442,6 +3529,9 @@ func (m *SyncMockManager) CloseOutChan() {
 	if m == nil {
 		return
 	}
+	// The agent is stopping: what it left uncaptured since its recording
+	// ended, if one has, is said now (recording_end.go).
+	m.SayNotCaptured()
 	// Graceful-stop drain: flush every still-attributable buffered mock
 	// before sealing the channel. The periodic flush ticker stops one step
 	// earlier in shutdown, so a late-decoded teardown mock would otherwise be
@@ -3651,12 +3741,7 @@ func (m *SyncMockManager) FlushOwnedWindows() {
 	// queue's lock, and tells each mock's outcome under locks of its own.
 	m.sendTaken(mocksToSend)
 	if mappingChan != nil {
-		for tn, ids := range lateMappings {
-			if len(ids) == 0 {
-				continue
-			}
-			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids}, paidLate[tn])
-		}
+		m.sendLateMappings(mappingChan, lateMappings, paidLate)
 	}
 	// Deliver any queued deferred-orphan revokes on the same open stream. Runs
 	// on EVERY tick (the proxy invokes FlushOwnedWindows periodically and
@@ -4908,6 +4993,8 @@ func (m *SyncMockManager) StartRecordSession() {
 	m.recordingFrom.Store(time.Now().UnixNano())
 	m.mu.Unlock()
 	m.EndStoppedRecording()
+	// A recording that ended (EndRecording) is over: this one captures.
+	m.ResumeRecording()
 }
 
 // RecordingFrom is when the current recording started (StartRecordSession):
@@ -5029,11 +5116,7 @@ func (m *SyncMockManager) EndStoppedRecording() {
 	m.settlePool()
 	m.sendTaken(send)
 	if mappingChan != nil {
-		for tn, ids := range late {
-			if len(ids) > 0 {
-				m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids}, paidLate[tn])
-			}
-		}
+		m.sendLateMappings(mappingChan, late, paidLate)
 	}
 	if ce := m.dropLogger().Check(zap.DebugLevel, "diag/syncMock: a stopped recording ended: gave up the requests its stop found in flight, which are no requests of the next one"); ce != nil {
 		ce.Write(append(append([]zap.Field{zap.Int("given_up", gaveUp), zap.Int("owed_handed_on", len(send)), zap.Int("owed_let_go", letGo)}, t.fields()...), hold.fields()...)...)
@@ -6277,6 +6360,8 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		mappingEntry = &models.TestMockMapping{
 			TestName: testName,
 			MockIDs:  associatedMockIDs,
+			// Dated as it is owed (oweMapping, below): by its request.
+			RequestedAt: start,
 		}
 	}
 
@@ -6380,12 +6465,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 	// silently deleted the mocks the original resolution recorded — see
 	// mergeMockEntries in the mapping store.
 	if mappingChan != nil {
-		for tn, ids := range lateMappings {
-			if len(ids) == 0 {
-				continue
-			}
-			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids}, paidLate[tn])
-		}
+		m.sendLateMappings(mappingChan, lateMappings, paidLate)
 	}
 }
 
@@ -6565,23 +6645,18 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	// queue's lock, and tells each mock's outcome under locks of its own.
 	m.sendTaken(mocksToSend)
 	if mappingChan != nil {
-		for tn, ids := range lateMappings {
-			if len(ids) == 0 {
-				continue
-			}
-			m.sendMapping(mappingChan, models.TestMockMapping{TestName: tn, MockIDs: ids}, paidLate[tn])
-		}
+		m.sendLateMappings(mappingChan, lateMappings, paidLate)
 	}
 }
 
 type DedupJob struct {
 	ReqTimestamp time.Time
 	ResTimestamp time.Time
-	// TestName is the recorder-side test identifier anchored to this
-	// dedup bucket. Populated at ResolveJob time so the internal
-	// ResolveRange call below forwards a non-empty testName into the
-	// TestMockMapping entry when enableMapping is true. Left empty for
-	// the early-exit defer path where no test identity is established.
+	// TestName is the name this job's request is known by: its
+	// Keploy-Test-Name, or the capture id it was given (NewCaptureID), which
+	// its test case carries too. Set at ResolveJob time, so the ResolveRange
+	// below maps the job's mocks to it and owns them by it. Empty only for
+	// a request with neither (a client that does not read capture ids).
 	TestName    string
 	Resolved    bool
 	IsDuplicate bool
@@ -6625,13 +6700,11 @@ func (dq *DedupQueue) Enqueue(reqTime time.Time) *DedupJob {
 
 // ResolveJob marks a job as resolved and attempts to process the queue from the head.
 //
-// testName is the caller's anchor for this specific job: under async
-// capture.go the header-derived Keploy-Test-Name flows in so the
-// downstream ResolveRange → TestMockMapping entry is stamped with the
-// same test identity the sync branch would have synthesised. Empty
-// testName is legal (early-exit defer, no-mapping callers) — it falls
-// through to the unchanged historical behaviour and ResolveRange simply
-// emits an anonymous mapping entry (or none, when mapping is false).
+// testName is the name the job's request is known by (DedupJob.TestName):
+// its Keploy-Test-Name or its capture id, which its test case carries, so the
+// recorder files the job's mapping entry under the name it saves that test
+// case with. Empty only for a request with neither (a client that does not
+// read capture ids): its entry then has no name, as before.
 func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp time.Time, testName string, enableMapping bool, mockMgr *SyncMockManager) {
 	dq.mu.Lock()
 	defer dq.mu.Unlock()

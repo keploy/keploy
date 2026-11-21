@@ -1361,11 +1361,14 @@ func (k strictKnown) formDiffs(rec, live string) []strictField {
 	var out []strictField
 	for _, key := range sortedNames(names) {
 		path, shape := "body."+key, "body."+shapeKey(key)
-		if k.n.body.Covers(key, "", false) {
-			continue
-		}
 		rv, inRec := rf[key]
 		lv, inLive := lf[key]
+		// A key only the live body has is excused by an entry that does not
+		// name id keys (CoversAdded); one that does speaks for the recorded
+		// keys.
+		if inRec && k.n.body.Covers(key, "", false) || !inRec && k.n.body.CoversAdded(key) {
+			continue
+		}
 		switch {
 		case !inLive:
 			out = append(out, k.oneSided(key, shape, models.DiffKindMissingInLive, "live", nil))
@@ -1619,7 +1622,11 @@ func (k strictKnown) jsonDiffs(r, l interface{}, exact, risk, shape string, lear
 			switch {
 			case inRec && inLive:
 				k.jsonDiffs(rc, lc, exact+"."+key, childRisk, childShape, learned, out)
-			case k.n.body.Covers(childRisk, scalarText(rc), false) || (inRec && isScalar(rc) && k.redacted(scalarText(rc)) && !k.guards(childRisk)):
+			// A member only the live body has is excused by an entry that
+			// does not name id keys (CoversAdded): one that does speaks for
+			// the recorded members, and a new id is none of them.
+			case inRec && (k.n.body.Covers(childRisk, scalarText(rc), false) || isScalar(rc) && k.redacted(scalarText(rc)) && !k.guards(childRisk)),
+				!inRec && k.n.body.CoversAdded(childRisk):
 			case !inLive:
 				*out = append(*out, k.oneSided(childRisk, childShape, models.DiffKindMissingInLive, "live", rc))
 			default:
