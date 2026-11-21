@@ -129,3 +129,16 @@ func TestFormReqBodyNoiseReadsAKeyAsTheStrictComparisonDoes(t *testing.T) {
 		t.Errorf("the call's own check's form drift is %v, want body.admin, by its decoded name", d)
 	}
 }
+
+// fieldsOnOneSide names each form key only one form holds by the side that
+// holds it, by its decoded name, and a key both hold by none.
+func TestFieldsOnOneSideNamesAFormKeyByItsSide(t *testing.T) {
+	h := newHTTP()
+	db := formRecordings(t, h, "q=ada&ad%6Din=1")
+	recorded, _ := h.ownBodies.read(db.mocks[0])
+	got := fieldsOnOneSide(db.mocks[0], recorded.json(), mocknoise.NewJSONBody([]byte("q=bob&userId=1")))
+	want := map[string]sides{"body.admin": onlyRecorded, "body.userId": onlyLive}
+	if len(got) != len(want) || got["body.admin"] != want["body.admin"] || got["body.userId"] != want["body.userId"] {
+		t.Fatalf("fields on one side of the form q=bob&userId=1 against q=ada&ad%%6Din=1 = %v, want %v", got, want)
+	}
+}

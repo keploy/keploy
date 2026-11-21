@@ -129,14 +129,15 @@ func TestDecodedJSONFieldsDifferingNamesEachOnceSorted(t *testing.T) {
 }
 
 // DecodedJSONFieldsOnOneSide names only the fields one document holds and the
-// other does not, whichever side holds them, at any depth both share, and
+// other does not, by the side that holds them, at any depth both share, and
 // none that both hold with another value, of another type, or as arrays of
-// another length.
+// another length. A field each side holds in an element where the other's
+// lacks it is named on both sides.
 func TestDecodedJSONFieldsOnOneSide(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		exp, act string
-		want     []string
+		name             string
+		exp, act         string
+		onlyExp, onlyAct []string
 	}{
 		{name: "the same document in another order", exp: `{"q":"ada","f":{"x":1}}`, act: `{"f":{"x":1},"q":"ada"}`},
 		{name: "a value differs", exp: `{"q":"ada"}`, act: `{"q":"bob"}`},
@@ -144,12 +145,13 @@ func TestDecodedJSONFieldsOnOneSide(t *testing.T) {
 		{name: "an object against a scalar", exp: `{"f":{"x":1}}`, act: `{"f":1}`},
 		{name: "an array of another length", exp: `{"ids":[{"a":1}]}`, act: `{"ids":[{"a":1},{"b":2}]}`},
 		{name: "documents of another kind", exp: `[1]`, act: `{"a":1}`},
-		{name: "a field only the live call has", exp: `{"name":"ada"}`, act: `{"name":"ada","role":"admin"}`, want: []string{"role"}},
-		{name: "a field only the recording has", exp: `{"name":"ada","role":"admin"}`, act: `{"name":"ada"}`, want: []string{"role"}},
-		{name: "a null field one side has", exp: `{"q":1,"x":null}`, act: `{"q":1}`, want: []string{"x"}},
-		{name: "nested, on each side, beside a value that differs", exp: `{"user":{"name":"ada","role":"admin"},"n":1}`, act: `{"user":{"name":"ada","age":3},"n":2}`, want: []string{"user.age", "user.role"}},
-		{name: "in an array's elements of one length", exp: `{"items":[{"a":1}]}`, act: `{"items":[{"a":1,"b":2}]}`, want: []string{"items[].b"}},
-		{name: "an object only one side has, once", exp: `{"q":1}`, act: `{"q":1,"f":{"y":2}}`, want: []string{"f"}},
+		{name: "a field only the live call has", exp: `{"name":"ada"}`, act: `{"name":"ada","role":"admin"}`, onlyAct: []string{"role"}},
+		{name: "a field only the recording has", exp: `{"name":"ada","role":"admin"}`, act: `{"name":"ada"}`, onlyExp: []string{"role"}},
+		{name: "a null field one side has", exp: `{"q":1,"x":null}`, act: `{"q":1}`, onlyExp: []string{"x"}},
+		{name: "nested, on each side, beside a value that differs", exp: `{"user":{"name":"ada","role":"admin"},"n":1}`, act: `{"user":{"name":"ada","age":3},"n":2}`, onlyExp: []string{"user.role"}, onlyAct: []string{"user.age"}},
+		{name: "in an array's elements of one length", exp: `{"items":[{"a":1}]}`, act: `{"items":[{"a":1,"b":2}]}`, onlyAct: []string{"items[].b"}},
+		{name: "in other elements of an array, on each side", exp: `{"items":[{"x":1,"y":1},{"x":2}]}`, act: `{"items":[{"x":1},{"x":2,"y":1}]}`, onlyExp: []string{"items[].y"}, onlyAct: []string{"items[].y"}},
+		{name: "an object only one side has, once", exp: `{"q":1}`, act: `{"q":1,"f":{"y":2}}`, onlyAct: []string{"f"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var exp, act interface{}
@@ -159,9 +161,9 @@ func TestDecodedJSONFieldsOnOneSide(t *testing.T) {
 			if err := json.Unmarshal([]byte(tc.act), &act); err != nil {
 				t.Fatal(err)
 			}
-			got := DecodedJSONFieldsOnOneSide(exp, act)
-			if !slices.Equal(got, tc.want) || (got == nil) != (tc.want == nil) {
-				t.Fatalf("%s against %s: fields on one side %#v, want %#v", tc.act, tc.exp, got, tc.want)
+			onlyExp, onlyAct := DecodedJSONFieldsOnOneSide(exp, act)
+			if !slices.Equal(onlyExp, tc.onlyExp) || (onlyExp == nil) != (tc.onlyExp == nil) || !slices.Equal(onlyAct, tc.onlyAct) || (onlyAct == nil) != (tc.onlyAct == nil) {
+				t.Fatalf("%s against %s: fields only the recording has %#v, only the live call %#v, want %#v and %#v", tc.act, tc.exp, onlyExp, onlyAct, tc.onlyExp, tc.onlyAct)
 			}
 		})
 	}

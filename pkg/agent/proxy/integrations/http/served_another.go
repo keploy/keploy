@@ -132,7 +132,7 @@ func (h *HTTP) noteFieldsOnOneSide(how *servedAs, x *models.Mock, live *mocknois
 	}
 	drift := mocknoise.SameCallDrift(httpNoiseAdapter{}, x, recorded.json(), true, live, userBodyNoise)
 	for p := range drift {
-		if oneSide[p] {
+		if oneSide[p] != 0 {
 			how.answer, how.fields = models.AnswerClosestBody, bodyFieldsOf(drift)
 			return
 		}

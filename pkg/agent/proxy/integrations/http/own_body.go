@@ -77,40 +77,69 @@ func bodiesCompared(m *models.Mock, recorded, live *mocknoise.JSONBody) (rv, lv 
 	return nil, nil, false, isFormURLEncoded(m.Spec.HTTPReq.Header)
 }
 
+// sides is which of two request bodies, a recording's and a call's, holds a
+// field the other does not: onlyRecorded, onlyLive, or both (each holds it
+// in an element of an array where the other's lacks it).
+type sides uint8
+
+const (
+	onlyRecorded sides = 1 << iota
+	onlyLive
+)
+
+// kind is the MockFieldDiffKind a miss names a field s's sides hold by: a
+// field only the recording holds is missing in the live call, one only the
+// call holds is missing in the recording, and one each holds where the
+// other does not, or both hold, differs in value.
+func (s sides) kind() models.MockFieldDiffKind {
+	switch s {
+	case onlyRecorded:
+		return models.DiffKindMissingInLive
+	case onlyLive:
+		return models.DiffKindMissingInMock
+	}
+	return models.DiffKindValueChanged
+}
+
 // fieldsOnOneSide names, "body."-prefixed as DiffBothWays names drift, the
 // fields only one of recorded and live, m's recorded request body and the
-// call's, holds, whichever side it is, read with no noise and compared as
-// DiffBothWays compares the two (bodiesCompared): JSON fields as
-// matcher.DecodedJSONFieldsOnOneSide names them, or form keys whose decoded
-// name (formKeyName) the other form holds by no key, by that name, as
-// DiffBothWays names a form key's drift. None where the two have no fields
-// to compare.
-func fieldsOnOneSide(m *models.Mock, recorded, live *mocknoise.JSONBody) map[string]bool {
+// call's, holds, by the side that holds each, read with no noise and
+// compared as DiffBothWays compares the two (bodiesCompared): JSON fields
+// as matcher.DecodedJSONFieldsOnOneSide names them, or form keys whose
+// decoded name (formKeyName) the other form holds by no key, by that name,
+// as DiffBothWays names a form key's drift. None where the two have no
+// fields to compare.
+func fieldsOnOneSide(m *models.Mock, recorded, live *mocknoise.JSONBody) map[string]sides {
 	rv, lv, asJSON, asForm := bodiesCompared(m, recorded, live)
-	out := map[string]bool{}
+	out := map[string]sides{}
 	switch {
 	case asJSON:
-		for _, p := range matcher.DecodedJSONFieldsOnOneSide(rv, lv) {
-			out["body."+p] = true
+		onlyRec, onlyCall := matcher.DecodedJSONFieldsOnOneSide(rv, lv)
+		for _, p := range onlyRec {
+			out["body."+p] |= onlyRecorded
+		}
+		for _, p := range onlyCall {
+			out["body."+p] |= onlyLive
 		}
 	case asForm:
-		formKeysOnOneSide(string(recorded.Raw()), string(live.Raw()), out)
-		formKeysOnOneSide(string(live.Raw()), string(recorded.Raw()), out)
+		formKeysOnOneSide(string(recorded.Raw()), string(live.Raw()), out, onlyRecorded)
+		formKeysOnOneSide(string(live.Raw()), string(recorded.Raw()), out, onlyLive)
 	}
 	return out
 }
 
-// formKeysOnOneSide adds to out the decoded name (formKeyName) of each key
-// the form body holds that other, the other form, holds by no key that
-// decodes to it, as DiffBothWays names a form key's drift.
-func formKeysOnOneSide(body, other string, out map[string]bool) {
+// formKeysOnOneSide adds to out, as held by side, the decoded name
+// (formKeyName) of each key the form body holds that other, the other form,
+// holds by no key that decodes to it, as DiffBothWays names a form key's
+// drift.
+func formKeysOnOneSide(body, other string, out map[string]sides, side sides) {
 	names := map[string]bool{}
 	for _, k := range formRawKeys(other) {
 		names[formKeyName(k)] = true
 	}
 	for _, k := range formRawKeys(body) {
 		if !names[formKeyName(k)] {
-			out["body."+formKeyName(k)] = true
+			out["body."+formKeyName(k)] |= side
 		}
 	}
 }
