@@ -966,6 +966,12 @@ func handedMembers(reached []utils.Reached) []member {
 // it runs, it holds the stop for no more than the others' way out and the
 // stall after it. From the kill on, each is on the kill's way out, and the
 // progress of each is read.
+//
+// One on a way out of its own that makes progress for as long as it runs (it
+// handles SIGTERM, and then writes to storage for good) holds the stop with
+// no fixed bound, as the application's own exit holds keploy's stop of it,
+// but never silently: past the stall window the stop says, once and then
+// every stopSayEvery, which it waits for and how to end the wait (waitNote).
 func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, moved *utils.TeardownScope) (stallKill string) {
 	pids := make([]int, 0, len(ms))
 	var stopping []int
@@ -983,6 +989,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 	ignored := ignoresSigtermNow(ms)
 	signalAll(ms, syscall.SIGTERM, false, acting)
 	signalAll(ms, syscall.SIGCONT, false, nil) // a stopped one handles it now
+	waits := newWaitNote(time.Now())
 	notice := utils.NewStopNowNotice(stopOffer)
 	defer notice.Withdraw()
 	t := time.NewTicker(stopCheck)
@@ -1034,6 +1041,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 			logger.Info("keploy waits for the daemons the application left running to stop, as long as they make progress on their way out; press Ctrl+C again to kill them now",
 				zap.Ints("pids", left))
 		}
+		waits.check(logger, ms, time.Now(), killed, offering)
 		if meter.Advance(look()) {
 			moved.Note()
 			continue
@@ -1173,6 +1181,137 @@ func describe(ms []member) string {
 		return "a process"
 	}
 	return strings.Join(names, ", ")
+}
+
+// stopSayEvery is how often a stop of the daemons that waits on past its
+// stall window says again what it waits for (waitNote). A variable for the
+// tests.
+var stopSayEvery = 30 * time.Second
+
+// waitNote is a stop of the daemons' word on what it waits for, once it has
+// waited for the stall window (stopStall) since it asked them to stop: as the
+// window passes it reads each member that runs (readExitMark, one at a
+// time), and at the next check, then every stopSayEvery, it says each it
+// waits for (its pid and command), what that one did since the reading
+// before (doneSince), and how to end the wait (endWaitBy). Owned by the
+// stop's own loop.
+type waitNote struct {
+	due   time.Time
+	read  time.Time
+	marks map[[2]uint64]utils.ExitMark // each member's at the last reading; nil before the first
+}
+
+// newWaitNote is the waitNote of a stop that asked its members to stop at
+// asked.
+func newWaitNote(asked time.Time) *waitNote {
+	return &waitNote{due: asked.Add(stopStall())}
+}
+
+// check is called at each check of the stop, now: killed is whether the
+// stop killed its members, offering whether a press of Ctrl+C kills them
+// now (utils.StopNowNotice).
+func (n *waitNote) check(logger *zap.Logger, ms []member, now time.Time, killed, offering bool) {
+	if now.Before(n.due) {
+		return
+	}
+	marks := map[[2]uint64]utils.ExitMark{}
+	var waiting []string
+	for _, m := range ms {
+		if m.exited() {
+			continue
+		}
+		key := [2]uint64{uint64(m.pid), m.start}
+		mark := readExitMark([]utils.Reached{{PID: m.pid, Start: m.start}})
+		marks[key] = mark
+		if before, ok := n.marks[key]; ok {
+			waiting = append(waiting, commandOf(m.pid)+": "+doneSince(before, mark))
+		}
+	}
+	first, since := n.marks == nil, now.Sub(n.read)
+	n.marks, n.read = marks, now
+	if first {
+		// What each does is said from the next check on, against this.
+		n.due = now
+		return
+	}
+	n.due = now.Add(stopSayEvery)
+	if len(waiting) == 0 {
+		return
+	}
+	logger.Warn("keploy is still waiting for the daemons the application left running to exit after it asked them to stop: it waits for as long as they make progress on their way out",
+		zap.Strings("waiting_for", waiting), zap.String("seen_over", saidSince(since)), zap.String("next_step", endWaitBy(killed, offering)))
+}
+
+// endWaitBy is how the user ends a stop's wait for its members (waitNote):
+// killed is whether the stop killed them, offering whether a press of
+// Ctrl+C kills them now.
+func endWaitBy(killed, offering bool) string {
+	switch {
+	case killed:
+		return "keploy killed them and waits for the kernel to let them go; it goes on without one that makes no progress on its way out"
+	case offering:
+		return "press Ctrl+C again to kill them now"
+	default:
+		return "press Ctrl+C (it stops keploy's run), then again once keploy says another press kills them"
+	}
+}
+
+// doneSince says what a process did on its way out between its readings
+// before and now (utils.ExitMark): the storage its threads read or wrote,
+// the threads it ended, the files it closed (where both readings of its
+// files settled).
+func doneSince(before, now utils.ExitMark) string {
+	var done []string
+	var io uint64
+	for tid, n := range now.IO {
+		if n > before.IO[tid] {
+			io += n - before.IO[tid]
+		}
+	}
+	if io > 0 {
+		done = append(done, fmt.Sprintf("still reading or writing storage (%d bytes)", io))
+	}
+	if now.Threads < before.Threads {
+		done = append(done, fmt.Sprintf("ended %d of its threads", before.Threads-now.Threads))
+	}
+	if !now.FilesUnsettled && !before.FilesUnsettled && now.Fds < before.Fds {
+		done = append(done, fmt.Sprintf("closed %d of its files", before.Fds-now.Fds))
+	}
+	if len(done) == 0 {
+		return "no progress on its way out"
+	}
+	return strings.Join(done, ", ")
+}
+
+// saidSince is how long a waitNote's readings spanned, as it says it.
+func saidSince(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
+}
+
+// commandOf names process pid by its pid and command line (its comm where
+// that cannot be read, as of a kernel thread), cut to a line's length.
+func commandOf(pid int) string {
+	name := "process " + strconv.Itoa(pid)
+	cmd := ""
+	if b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline"); err == nil {
+		cmd = strings.TrimSpace(strings.ReplaceAll(string(b), "\x00", " "))
+	}
+	if cmd == "" {
+		if b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm"); err == nil {
+			cmd = strings.TrimSpace(string(b))
+		}
+	}
+	const most = 160
+	if len(cmd) > most {
+		cmd = strings.ToValidUTF8(cmd[:most], "") + "..."
+	}
+	if cmd == "" {
+		return name
+	}
+	return name + " (" + cmd + ")"
 }
 
 // exited reports whether m has exited: its pidfd is readable then.
