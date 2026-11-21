@@ -444,7 +444,7 @@ func TestOnWindowsAConnectionTheProxyClosedNeedsNoCountsAndItsCloseReadsThem(t *
 	}{{appSends{done: 18, started: 40}, 18}, {appSends{done: 18, started: 40, pending: 1}, 40}} {
 		pc.wroteAtClose.Store(nil)
 		f.set(c.s, nil)
-		p.noteWroteAtClose(pc)
+		p.noteWroteAtClose(t.Context(), pc)
 		if w := pc.wroteAtClose.Load(); w == nil || w.want != c.want {
 			t.Fatalf("the close read %+v from %+v; want %d", w, c.s, c.want)
 		}
@@ -554,10 +554,12 @@ func TestOnWindowsAConnectionClosedShortIsSettledOnlyByWhatItsCloseRead(t *testi
 
 // TestOnWindowsACloseWhoseCountsCannotBeReadChargesThatConnectionAlone: a
 // proxy-first close while the counts cannot be read (a process of the run
-// had not said what it holds) charges that connection's loss to the test
-// open then, never a test whose bytes had all arrived before it; once the
-// counts can be read again (that process exited), a later wait on another
-// connection is judged, not unknown.
+// had not said what it holds) cannot tell what the application wrote, as a
+// close whose TCP table or sock_diag read fails on macOS and Linux: the tests
+// that connection could have served (the test open then, and test-1, whose
+// end on it was cut short) are left without a verdict (app_bytes_untold),
+// never failed as a loss keploy saw; once the counts can be read again (that
+// process exited), a later wait on another connection is judged, not unknown.
 func TestOnWindowsACloseWhoseCountsCannotBeReadChargesThatConnectionAlone(t *testing.T) {
 	p := &Proxy{logger: zap.NewNop(), settleReads: true}
 	f := &fakeSends{}
@@ -572,20 +574,21 @@ func TestOnWindowsACloseWhoseCountsCannotBeReadChargesThatConnectionAlone(t *tes
 	if err != nil || len(pcs) != 1 {
 		t.Fatalf("paired: %d, %v", len(pcs), err)
 	}
-	// test-1's end was cut short with all 18 bytes it wrote arrived: none of
-	// what the close may have lost is test-1's.
+	// test-1's end on it was cut short: a close that cannot tell what was
+	// written charges every test the connection could have served, as on
+	// Linux and macOS.
 	pcs[0].cutShort("test-1", 18)
 	f.set(appSends{}, errors.New("process 4242 of the run has not said HELLO"))
-	p.noteWroteAtClose(pcs[0])
-	if !pcs[0].lost.Load() || pcs[0].wroteAtClose.Load() != nil {
-		t.Fatalf("the close: lost %v, wrote %+v; want the connection's loss charged, nothing read",
-			pcs[0].lost.Load(), pcs[0].wroteAtClose.Load())
+	p.noteWroteAtClose(t.Context(), pcs[0])
+	if !pcs[0].untold.Load() || pcs[0].lost.Load() || pcs[0].wroteAtClose.Load() != nil {
+		t.Fatalf("the close: untold %v, lost %v, wrote %+v; want the connection's close charged as untold, no loss, nothing read",
+			pcs[0].untold.Load(), pcs[0].lost.Load(), pcs[0].wroteAtClose.Load())
 	}
-	if l := p.losses.Snapshot(); len(l) != 1 || l[0].Kind != models.CaptureLossAppBytesLost {
-		t.Fatalf("losses %+v; want the closed connection's one", l)
+	if l := p.losses.Snapshot(); len(l) != 1 || l[0].Kind != models.CaptureLossAppBytesUntold {
+		t.Fatalf("losses %+v; want the open test's one untold close", l)
 	}
-	if got := ownersOf(p); len(got) != 0 {
-		t.Fatalf("the loss is owned by %q; want the open test's alone (test-1's bytes had all arrived)", got)
+	if owned := p.TakeOwnedLosses(); len(owned) != 1 || owned[0].Test != "test-1" || owned[0].Loss.Kind != models.CaptureLossAppBytesUntold {
+		t.Fatalf("owned %+v; want one untold close of test-1's", owned)
 	}
 	if err := p.paired.failure(); err != nil {
 		t.Fatalf("every wait is unknown after one close: %v", err)

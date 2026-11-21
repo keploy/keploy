@@ -6,12 +6,10 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"net"
 	"syscall"
 	"unsafe"
 
-	"go.uber.org/zap"
 	"golang.org/x/sys/windows"
 
 	"go.keploy.io/server/v3/pkg/agent"
@@ -196,8 +194,9 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 // what the wait wants: settled when its side had received, as the close
 // read it, everything the application had written as the close began
 // (noteWroteAtClose, whose count is never below the wait's), or when the
-// close charged what it tossed or what was on its way (pairedConn.lost: that
-// loss is the bytes', pairClosing). Anything else cannot be told.
+// close charged what it tossed (pairedConn.lost: that loss is the bytes',
+// pairClosing). Anything else cannot be told: a close that could not tell
+// what was on its way (closeUnknown) settles nothing, as on Linux and macOS.
 func (p *Proxy) closedReached(pc *pairedConn, ps proxySide) (bool, error) {
 	if w := pc.wroteAtClose.Load(); w != nil && ps.received >= w.want {
 		return true, nil
@@ -211,15 +210,15 @@ func (p *Proxy) closedReached(pc *pairedConn, ps proxySide) (bool, error) {
 // noteWroteAtClose records what the application had written to pc as the
 // proxy begins closing it (pairClosing), from the shim's counts. A side that
 // has taken the application's FIN needs no record: nothing is written after
-// it. Hooks that count no send calls leave every wait unknown from then on,
-// said in one line (closeUnknown), as on Linux: no count is ever read. Counts
-// of this connection that cannot be read now (its process is gone, or another
-// process may send on its socket, or one of the run has not said what it
-// holds yet) are this connection's alone: whatever the application wrote
-// past what its side had received may have been on its way and tossed, a
-// loss charged as the close's (pairLost); a later wait reads its own
-// connections' counts.
-func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
+// it. Counts that cannot be read, from hooks that count no send calls or for
+// this connection now (its process is gone, or another process may send on
+// its socket, or one of the run has not said what it holds yet), leave the
+// close unable to tell what the application wrote, as a TCP table or
+// sock_diag read that fails does on macOS and Linux (closeUnknown): the tests
+// this connection could have served are left without a verdict, and no
+// other. A later wait reads its own connections' counts; hooks that count no
+// send calls leave every wait unknown (PairedBytesErr).
+func (p *Proxy) noteWroteAtClose(_ context.Context, pc *pairedConn) {
 	ps := readProxySide(pc.conn)
 	if ps.err == nil && peerEnded(ps.state) {
 		return
@@ -231,11 +230,7 @@ func (p *Proxy) noteWroteAtClose(pc *pairedConn) {
 	}
 	s, err := appSent(sc, pc)
 	if err != nil {
-		low := uint64(1)
-		if ps.err == nil {
-			low = dataReceived(ps) + 1
-		}
-		p.pairLost(pc, low, math.MaxUint64, "keploy's proxy closed a connection whose send counts keploy's shim could not give: whether bytes the application wrote were still on their way, and tossed, cannot be told", zap.Error(err))
+		p.closeUnknown(pc, fmt.Errorf("%w: keploy's shim could not give the send counts of the application's end of a connection to the proxy, %s, as the proxy closes it: %v", models.ErrProxyConnsUnsupported, pc.app, err))
 		return
 	}
 	w := sentWrote(s)
@@ -395,9 +390,10 @@ func readUnread(conn *net.TCPConn) (int, error) {
 	return int(n), ierr
 }
 
-// PairedBytesErr says whether the waits can be answered: not once a close
-// left what was written unknown (closeUnknown), nor with hooks that count no
-// send calls.
+// PairedBytesErr says whether the waits can be answered: not once the
+// proxy's listener has closed, nor with hooks that count no send calls. A
+// close that could not tell what was written (closeUnknown) charges its own
+// connection's tests and leaves the other waits answerable.
 func (p *Proxy) PairedBytesErr() error {
 	p.paired.mu.Lock()
 	err := p.paired.err
