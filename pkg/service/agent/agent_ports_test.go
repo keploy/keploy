@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -143,6 +145,37 @@ func TestHookLetsTheProxyMoveOffTakenPortsBeforeItStarts(t *testing.T) {
 				c.Agent.ProxyPort != 61001 || c.Agent.DnsPort != 61002 || c.ProxyPort != 61001 || c.DNSPort != 61002 {
 				t.Fatalf("%s, docker %v: the hooks were told %v, the config holds agent %d/%d, root %d/%d; want [[61001 61002]] in all", mode, docker, hk.told, c.Agent.ProxyPort, c.Agent.DnsPort, c.ProxyPort, c.DNSPort)
 			}
+		}
+	}
+}
+
+// takenProxy is a proxy whose start fails on a port another socket took
+// (utils.ErrPortTaken), as a proxy that may not move off it fails.
+type takenProxy struct{ startedProxy }
+
+func (p *takenProxy) StartProxy(ctx context.Context, opts coreAgent.ProxyOptions) error {
+	_ = p.startedProxy.StartProxy(ctx, opts)
+	return utils.PortTakenError(errors.New("the proxy's port 16789 is taken by pid 7 (x): bind: address already in use"))
+}
+
+// A proxy whose start fails on a taken port fails the agent's start as one:
+// Hook's error is utils.ErrPortTaken, which the agent's report of its start
+// says (utils.FailBoot), and the CLI starts it again at once on other ports.
+func TestHookFailsOnATakenProxyPortAsATakenPort(t *testing.T) {
+	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+		px := &takenProxy{}
+		a := &Agent{logger: zap.NewNop(), Hooks: loadedHooks{}, Proxy: px, config: &config.Config{}}
+		grp, ctx := errgroup.WithContext(context.Background())
+		ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, grp))
+
+		err := a.Hook(ctx, models.HookOptions{Mode: mode})
+		cancel()
+		_ = grp.Wait()
+		if px.opts == nil {
+			t.Fatalf("%s: the agent never started its proxy", mode)
+		}
+		if !errors.Is(err, utils.ErrPortTaken) || !strings.Contains(err.Error(), "port 16789 is taken") {
+			t.Fatalf("%s: Hook = %v; want utils.ErrPortTaken, saying the proxy's port is taken", mode, err)
 		}
 	}
 }
