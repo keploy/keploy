@@ -117,6 +117,17 @@ func TestInterruptProcessTreeReachesTheGroupOfAZombie(t *testing.T) {
 	if err := SendSignal(logger, 1, 0); !errors.Is(err, syscall.EPERM) {
 		t.Errorf("signalling launchd answered %v; want EPERM", err)
 	}
+	var refused []int64
+	for _, e := range logs.FilterLevelExact(zap.ErrorLevel).All() {
+		pid, _ := e.ContextMap()["pid"].(int64)
+		refused = append(refused, pid)
+	}
+	if want := []int64{int64(-second), 1}; !slices.Equal(refused, want) {
+		t.Errorf("the three signals logged ERROR for pids %v; want %v: the invalid signal's and launchd's, not the zombies' group's", refused, want)
+	}
+	if n := logs.FilterMessage("the process group has exited; its zombies wait to be reaped").Len(); n != 1 {
+		t.Errorf("the group of zombies only %d was said to have exited %d times; want once", second, n)
+	}
 	if !exitedUnreaped(first) || exitedUnreaped(cmd.Process.Pid) || exitedUnreaped(sleep) {
 		t.Errorf("exitedUnreaped: zombie %d %v, runner %d %v, sleep %d %v; want true, false, false",
 			first, exitedUnreaped(first), cmd.Process.Pid, exitedUnreaped(cmd.Process.Pid), sleep, exitedUnreaped(sleep))
