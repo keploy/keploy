@@ -78,6 +78,14 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 		}
 	}
 
+	// The request body's language hint is decided above, by the request's own
+	// content type. It must not be revisited from the response's content type:
+	// a multipart (form-data) request answered by a JSON response would then be
+	// emitted with mode:"formdata" AND options.raw.language:"json" — two
+	// contradictory claims about the same body. PostmanResponse carries no body
+	// metadata of its own (its Body is just text), so there is nothing a
+	// response content type should set here.
+
 	// Extract Response Headers
 	for key, header := range http.Response.Header {
 		response.Header = append(response.Header, map[string]string{
@@ -91,15 +99,6 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 	response.Body = http.Response.Body
 	response.OriginalRequest = &request
 	response.Name = http.Response.StatusMessage
-
-	if strings.Contains(http.Response.Header["Content-Type"], "application/json") {
-		request.Body.Options = map[string]interface{}{
-			"raw": map[string]interface{}{
-				"headerFamily": "json",
-				"language":     "json",
-			},
-		}
-	}
 
 	// Extract the last segment of the path as the name
 	pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
