@@ -101,7 +101,8 @@ func TestTheWalkToTheClientsSocketEndsOnACycleOfWrappers(t *testing.T) {
 // Through a relay: the client's FIN forwarded to the destination tells the
 // client's socket nothing; the destination's FIN forwarded to the client
 // tells it once, asked first whether the connection had closed: one that
-// had (a client's reset) is half-closed all the same, and told nothing.
+// had (a client's reset) is taken as over, not half-closed, and told nothing;
+// the client reads the end of the stream at the relay's close.
 func TestTheRelayTellsTheClientsSocketWhenItForwardsTheDestinationsFIN(t *testing.T) {
 	t.Parallel()
 	for _, closed := range []bool{false, true} {

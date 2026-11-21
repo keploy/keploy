@@ -38,6 +38,18 @@ func resetClientOnClose(ctx context.Context, c net.Conn, grace time.Duration) bo
 	}
 	s := newTCPClientSocket(rc, nil)
 	s.beginFrom(a)
+	return resetOnceAcked(ctx, s, grace, func() bool {
+		return tc.SetLinger(0) == nil && resetCloser(c).Close() == nil
+	})
+}
+
+// resetOnceAcked is resetClientOnClose's wait on the client's socket s: it
+// resets the socket (reset) once s says the connection is closed or the
+// client acknowledged every byte written, and reports reset's answer. It
+// reports false, and resets nothing, at once when s cannot say (a write went
+// around the count, or a look is unknown), and once grace has passed or ctx
+// ends.
+func resetOnceAcked(ctx context.Context, s *tcpClientSocket, grace time.Duration, reset func() bool) bool {
 	bound := time.NewTimer(max(grace, 0))
 	defer bound.Stop()
 	wait := firstLookAgain
@@ -52,7 +64,7 @@ func resetClientOnClose(ctx context.Context, c net.Conn, grace time.Duration) bo
 			return false
 		}
 		if l.said == clientClosed || l.acked >= n {
-			return tc.SetLinger(0) == nil && resetCloser(c).Close() == nil
+			return reset()
 		}
 		look.Reset(wait)
 		select {
