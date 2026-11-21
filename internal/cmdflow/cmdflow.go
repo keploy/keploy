@@ -15,10 +15,12 @@ import (
 	"go/printer"
 	"go/token"
 	"io/fs"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Kind is what a value holds of the command: none, its text with its
@@ -249,6 +251,33 @@ func Files(root string, skip []string) (int, error) {
 	return n, err
 }
 
+// importName is the name a file refers to the package at import path p by
+// when its import gives none, as goimports assumes it (its
+// ImportPathToAssumedName), the package clause the syntax alone cannot read:
+// the path's last element, the one before it when that is a major version
+// (github.com/k0kubun/pp/v3 is pp, math/rand/v2 is rand), less a leading
+// "go-", up to its first character that cannot be in a name (gopkg.in/yaml.v3
+// is yaml, go-shellwords is shellwords). goimports names an import whose
+// package is called otherwise (specs-go/v1's v1), so a file it formats
+// names each import by this or by its own name. The last element whole, as
+// this read it before, made yaml.Unmarshal(data, &n) a call of the module's
+// methods named Unmarshal, and pp.Sprint's text none of what it was given.
+func importName(p string) string {
+	dir, base := path.Split(p)
+	if v, ok := strings.CutPrefix(base, "v"); ok && dir != "" {
+		if _, err := strconv.Atoi(v); err == nil {
+			base = path.Base(dir)
+		}
+	}
+	base = strings.TrimPrefix(base, "go-")
+	for i, r := range base {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			return base[:i]
+		}
+	}
+	return base
+}
+
 func walk(root string, skip []string, each func(path string) error) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -289,7 +318,7 @@ func (t *tracer) load(root string) error {
 		fi := &file{dir: rel, imports: map[string]string{}, ast: f}
 		for _, im := range f.Imports {
 			p := strings.Trim(im.Path.Value, `"`)
-			name := p[strings.LastIndex(p, "/")+1:]
+			name := importName(p)
 			if im.Name != nil {
 				name = im.Name.Name
 			}
