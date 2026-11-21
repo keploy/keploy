@@ -1480,15 +1480,47 @@ func replaceBase(newURL, oldURL string, withPath bool) (string, error) {
 	return scheme + "://" + host + path + rest, nil
 }
 
+// mergeMaps adds map2's noise to map1, a test case's noise map, and returns
+// map1, made first when it is nil (a case created with no noise, from the
+// dashboard, has none, and an entry assigned in a nil map panics). A field's
+// entry is either a list of patterns the field's value is excused by, or
+// empty: the field is excused whatever it reads (ignore-always). So:
+//   - a field already ignore-always stays ignore-always, whatever is added:
+//     adding a pattern would narrow it, and the replay would start failing
+//     on values it excused before;
+//   - adding ignore-always to a field with patterns makes it ignore-always;
+//   - patterns are unioned, each once, in the order each first appears: the
+//     field's own first, then the added ones.
 func mergeMaps(map1, map2 map[string][]string) map[string][]string {
-	for key, values := range map2 {
-		if _, exists := map1[key]; exists {
-			map1[key] = append(map1[key], values...)
-		} else {
-			map1[key] = values
+	if map1 == nil {
+		map1 = make(map[string][]string, len(map2))
+	}
+	for key, added := range map2 {
+		existing, exists := map1[key]
+		if (exists && len(existing) == 0) || len(added) == 0 {
+			map1[key] = []string{}
+			continue
 		}
+		map1[key] = appendNewPatterns(existing, added)
 	}
 	return map1
+}
+
+// appendNewPatterns is the union of patterns and added: each pattern once,
+// in the order it first appears, patterns' first.
+func appendNewPatterns(patterns, added []string) []string {
+	out := make([]string, 0, len(patterns)+len(added))
+	seen := make(map[string]struct{}, len(patterns)+len(added))
+	for _, list := range [][]string{patterns, added} {
+		for _, p := range list {
+			if _, dup := seen[p]; dup {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func removeFromMap(map1, map2 map[string][]string) map[string][]string {
