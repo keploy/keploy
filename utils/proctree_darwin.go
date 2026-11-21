@@ -16,6 +16,9 @@ import (
 // /proc/<pid>/status" -- an ERROR in an interrupt that had otherwise gone as
 // it should, which an editor driving keploy shows in red.
 
+// procRecord reads a process's parent, group and state (procsock.Info).
+var procRecord = procsock.Info
+
 // findChildPIDs returns every descendant of parentPID, and how to read each
 // one's process group -- both from one snapshot of the process table, taken
 // by procTable.tree. The table is the processes proc_info lists, each with
@@ -37,7 +40,7 @@ func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 	}
 	table := newProcTable(len(pids))
 	for _, pid := range pids {
-		if p, err := procsock.Info(pid); err == nil {
+		if p, err := procRecord(pid); err == nil {
 			table.add(p.PID, p.PPID, p.PGID)
 		}
 	}
@@ -64,7 +67,7 @@ func GroupRunsOn(pgid int) bool {
 		return false
 	}
 	for _, pid := range pids {
-		if p, err := procsock.Info(pid); err == nil && !p.Zombie {
+		if p, err := procRecord(pid); err == nil && !p.Zombie {
 			return true
 		}
 	}

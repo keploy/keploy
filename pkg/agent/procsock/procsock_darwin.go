@@ -4,7 +4,6 @@ package procsock
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"net/netip"
 	"unsafe"
@@ -134,15 +133,6 @@ func parseTCP(b []byte) (TCP, bool) {
 	}, true
 }
 
-// Proc is one process as proc_info's short BSD record shows it: its parent,
-// its process group and whether it has exited and waits to be reaped.
-type Proc struct {
-	PID, PPID, PGID int
-	// Zombie is a process that has exited and waits for its parent to
-	// reap it (XNU's SZOMB).
-	Zombie bool
-}
-
 // The processes are listed and read through proc_info too, never through
 // the kern.proc sysctls that list them (kern.proc.all, .pgrp, .uid and the
 // others ps(1) reads). Those wait, uninterruptibly, for every process they
@@ -156,14 +146,6 @@ const (
 	procAllPIDs          = 1  // PROC_ALL_PIDS
 	procPGRPOnly         = 2  // PROC_PGRP_ONLY
 	procPIDTShortBSDInfo = 13 // PROC_PIDT_SHORTBSDINFO: struct proc_bsdshortinfo
-	shortBSDInfoSize     = 64 // sizeof(struct proc_bsdshortinfo)
-	offShortPPID         = 4  // pbsi_ppid
-	offShortPGID         = 8  // pbsi_pgid
-	offShortStatus       = 12 // pbsi_status
-	sZomb                = 5  // SZOMB, bsd/sys/proc.h
-	pidSize              = 4  // a pid_t in the list
-	maxListPIDsRetries   = 4
-	listPIDsHeadroom     = 64
 )
 
 // PIDs lists every process (libproc's proc_listallpids).
@@ -174,30 +156,9 @@ func PIDs() ([]int, error) { return listPIDs(procAllPIDs, 0) }
 func GroupPIDs(pgid int) ([]int, error) { return listPIDs(procPGRPOnly, pgid) }
 
 func listPIDs(kind, arg int) ([]int, error) {
-	size, err := procInfo(procInfoCallListPIDs, kind, arg, 0, nil)
-	if err != nil {
-		return nil, err
-	}
-	for try := 0; try < maxListPIDsRetries; try++ {
-		buf := make([]byte, size+listPIDsHeadroom*pidSize)
-		n, err := procInfo(procInfoCallListPIDs, kind, arg, 0, buf)
-		if err != nil {
-			return nil, err
-		}
-		if n >= len(buf) {
-			// The table may have grown past the buffer: list it again.
-			size = n * 2
-			continue
-		}
-		var pids []int
-		for off := 0; off+pidSize <= n; off += pidSize {
-			if pid := int(int32(binary.LittleEndian.Uint32(buf[off:]))); pid > 0 {
-				pids = append(pids, pid)
-			}
-		}
-		return pids, nil
-	}
-	return nil, errors.New("the process table kept growing while it was listed")
+	return readPIDs(func(buf []byte) (int, error) {
+		return procInfo(procInfoCallListPIDs, kind, arg, 0, buf)
+	})
 }
 
 // Info reads process pid's short BSD record, which any user may read. A
@@ -208,13 +169,5 @@ func Info(pid int) (Proc, error) {
 	if err != nil {
 		return Proc{}, err
 	}
-	if n < shortBSDInfoSize {
-		return Proc{}, fmt.Errorf("process %d's record is %d bytes, not %d", pid, n, shortBSDInfoSize)
-	}
-	return Proc{
-		PID:    pid,
-		PPID:   int(binary.LittleEndian.Uint32(buf[offShortPPID:])),
-		PGID:   int(binary.LittleEndian.Uint32(buf[offShortPGID:])),
-		Zombie: binary.LittleEndian.Uint32(buf[offShortStatus:]) == sZomb,
-	}, nil
+	return shortRecord(pid, buf, n)
 }
