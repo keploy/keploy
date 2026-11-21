@@ -70,16 +70,23 @@ func TestShapedRunsShapesAsEveryRunWould(t *testing.T) {
 		"header", "X-Trace2", "bind", "$1", "literal", "3", "John Smith", "jane@example", "com", "", "line1", "id(x", "k=v", "{}",
 		u + "[0]", "1700000000[1]", "x y", "x", "a:b"}
 	marks := []string{".", ".", ".", " ", ", ", "[", "[]", "(", ")", ": ", "'", "=", "{", "}", "s"}
+	// Few fields, so paths repeat runs of fields (the automaton's shared
+	// states), with an SQL place and a header's name to read as one.
+	few := []string{"a", "b", u, "7", "literal", "3", "header", "a:b", "x y", u + "[0]"}
 	rng := rand.New(rand.NewSource(5143))
 	pick := func(xs []string) string { return xs[rng.Intn(len(xs))] }
-	for c := 0; c < 30000; c++ {
+	for c := 0; c < 60000; c++ {
+		alphabet := fields
+		if c%2 == 1 {
+			alphabet = few
+		}
 		var paths []string
-		var named []string
+		var runs [][]string
 		for range 1 + rng.Intn(3) {
-			n := 1 + rng.Intn(7)
+			n := 1 + rng.Intn(9)
 			fs := make([]string, n)
 			for k := range fs {
-				fs[k] = pick(fields)
+				fs[k] = pick(alphabet)
 			}
 			p := strings.Join(fs, ".")
 			if FieldShape(p) != p {
@@ -88,17 +95,31 @@ func TestShapedRunsShapesAsEveryRunWould(t *testing.T) {
 					paths = append(paths, q)
 				}
 			}
-			named = append(named, fs...)
+			runs = append(runs, fs)
 		}
 		if len(paths) == 0 {
 			continue
 		}
 		var b strings.Builder
-		for range 1 + rng.Intn(14) {
-			if rng.Intn(3) > 0 {
-				b.WriteString(pick(named))
-			} else {
-				b.WriteString(pick(fields))
+		for range 1 + rng.Intn(10) {
+			switch fs := runs[rng.Intn(len(runs))]; rng.Intn(4) {
+			case 0:
+				b.WriteString(pick(alphabet))
+			default:
+				// A run of a path: whole, its last field without its
+				// indexes, or one field swapped.
+				i := rng.Intn(len(fs))
+				j := i + 1 + rng.Intn(len(fs)-i)
+				run := append([]string(nil), fs[i:j]...)
+				switch rng.Intn(4) {
+				case 0:
+					if k := strings.IndexByte(run[len(run)-1], '['); k > 0 {
+						run[len(run)-1] = run[len(run)-1][:k]
+					}
+				case 1:
+					run[rng.Intn(len(run))] = pick(alphabet)
+				}
+				b.WriteString(strings.Join(run, "."))
 			}
 			b.WriteString(pick(marks))
 		}
