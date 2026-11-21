@@ -38,10 +38,11 @@ func heldTCPPort(t *testing.T) uint32 {
 	return p
 }
 
-// freeAtProbe gives the test a draw of ports that proxyPorts' check
-// (availablePort) finds free: each is held from its draw until the test ends
-// (holdPort), and the check is utils.EnsureFreePort with a probe that says
-// such a port is free and every other port is taken, as heldTCPPort's are.
+// freeAtProbe gives the test a draw of ports that proxyPorts' checks
+// (availablePort, availableDNSPort) find free: each is held from its draw
+// until the test ends (holdPort), and the checks are utils.EnsureFreePort and
+// utils.EnsureFreeDNSPort with a probe that says such a port is free and
+// every other port is taken, as heldTCPPort's are.
 // No port a row calls free is ever let go of, so no other process can take
 // one before the check, and a port drawn later is never one drawn before it.
 // The ports the check draws in place of a taken one are real draws.
@@ -53,17 +54,26 @@ func heldTCPPort(t *testing.T) uint32 {
 func freeAtProbe(t *testing.T) func() uint32 {
 	t.Helper()
 	free := map[uint32]bool{}
-	was := availablePort
-	t.Cleanup(func() { availablePort = was })
-	availablePort = func(port uint32, exclude ...uint32) (uint32, error) {
+	checks(t, func(port uint32, exclude ...uint32) (uint32, error) {
 		return utils.EnsureFreePort(func(p uint32) bool { return free[p] }, port, exclude...)
-	}
+	}, func(port uint32, exclude ...uint32) (uint32, error) {
+		return utils.EnsureFreeDNSPort(func(p uint32) bool { return free[p] }, port, exclude...)
+	})
 	return func() uint32 {
 		t.Helper()
 		p, _ := holdPort(t)
 		free[p] = true
 		return p
 	}
+}
+
+// checks sets proxyPorts' checks of the proxy's port (availablePort) and the
+// DNS server's (availableDNSPort) for the test.
+func checks(t *testing.T, proxy, dns func(port uint32, exclude ...uint32) (uint32, error)) {
+	t.Helper()
+	p, d := availablePort, availableDNSPort
+	t.Cleanup(func() { availablePort, availableDNSPort = p, d })
+	availablePort, availableDNSPort = proxy, dns
 }
 
 // onLinux sets agentRunsOnLinux for the test.
@@ -169,6 +179,34 @@ func TestANativeAgentOffLinuxIsMovedOffATakenPortAndTheMoveSaid(t *testing.T) {
 			}
 		})
 	}
+	// The DNS server binds its port over UDP and over TCP: a port a UDP
+	// socket alone holds is taken, and the DNS server moves off it, said. The
+	// proxy's check, over TCP, finds both ports free, as they are over TCP;
+	// the DNS server's is the real one. Checked over TCP alone, the port was
+	// kept, the agent's start failed on it, and each start again was handed
+	// it again.
+	t.Run("DNS server taken over UDP alone", func(t *testing.T) {
+		pc, err := net.ListenPacket("udp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = pc.Close() })
+		dns := uint32(pc.LocalAddr().(*net.UDPAddr).Port)
+		proxy, agentPort := heldTCPPort(t), heldTCPPort(t)
+		was := availablePort
+		t.Cleanup(func() { availablePort = was })
+		availablePort = func(port uint32, exclude ...uint32) (uint32, error) {
+			return utils.EnsureFreePort(func(p uint32) bool { return p == proxy || p == dns }, port, exclude...)
+		}
+		a, logs := portsClient(proxy, dns)
+		gotProxy, gotDNS, err := a.proxyPorts(false, agentPort)
+		if err != nil || gotProxy != proxy || gotDNS == dns || gotDNS == proxy || gotDNS == agentPort {
+			t.Fatalf("proxyPorts = %d, %d, %v with the DNS server's %d held over UDP; want the proxy kept on %d and the DNS server moved to a port of its own", gotProxy, gotDNS, err, dns, proxy)
+		}
+		if logs.Len() != 1 || !strings.HasPrefix(logs.All()[0].Message, fmt.Sprintf("the DNS server's port %d ", dns)) {
+			t.Fatalf("said %v; want the DNS server's move off %d alone", logs.All(), dns)
+		}
+	})
 	t.Run("the DNS server's port is the proxy's", func(t *testing.T) {
 		proxy := freeAtProbe(t)()
 		a, _ := portsClient(proxy, proxy)
@@ -184,9 +222,7 @@ func TestANativeAgentOffLinuxIsMovedOffATakenPortAndTheMoveSaid(t *testing.T) {
 	// that a port nothing held was taken.
 	t.Run("a moved proxy is not handed the DNS server's port", func(t *testing.T) {
 		const taken, dns, spare, agentPort uint32 = 61000, 64000, 65000, 40000
-		was := availablePort
-		t.Cleanup(func() { availablePort = was })
-		availablePort = func(port uint32, exclude ...uint32) (uint32, error) {
+		band := func(port uint32, exclude ...uint32) (uint32, error) {
 			if port != taken && !slices.Contains(exclude, port) {
 				return port, nil
 			}
@@ -197,6 +233,7 @@ func TestANativeAgentOffLinuxIsMovedOffATakenPortAndTheMoveSaid(t *testing.T) {
 			}
 			return 0, errors.New("no port")
 		}
+		checks(t, band, band)
 		a, logs := portsClient(taken, dns)
 		gotProxy, gotDNS, err := a.proxyPorts(false, agentPort)
 		if err != nil || gotProxy != spare || gotDNS != dns {
@@ -229,15 +266,14 @@ func TestANativeAgentOffLinuxIsMovedOffATakenPortAndTheMoveSaid(t *testing.T) {
 	})
 	for _, server := range []string{"proxy", "DNS server"} {
 		t.Run("no port for the "+server, func(t *testing.T) {
-			was := availablePort
-			t.Cleanup(func() { availablePort = was })
 			exhausted := errors.New("no port")
-			availablePort = func(port uint32, exclude ...uint32) (uint32, error) {
+			check := func(port uint32, exclude ...uint32) (uint32, error) {
 				if (server == "proxy") == (port == 16789) {
 					return 0, exhausted
 				}
 				return port, nil
 			}
+			checks(t, check, check)
 			a, _ := portsClient(16789, 26789)
 			_, _, err := a.proxyPorts(false, 40000)
 			if !errors.Is(err, exhausted) || !strings.Contains(err.Error(), "the "+server) {

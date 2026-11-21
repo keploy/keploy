@@ -4043,23 +4043,27 @@ func (a *AgentClient) proxyPorts(docker bool, agentPort uint32) (proxyPort, dnsP
 	if dnsPort != proxyPort {
 		proxyExclude = append(proxyExclude, dnsPort)
 	}
-	if proxyPort, err = a.portOrMove("proxy", proxyPort, proxyExclude...); err != nil {
+	if proxyPort, err = a.portOrMove("proxy", availablePort, proxyPort, proxyExclude...); err != nil {
 		return 0, 0, err
 	}
-	if dnsPort, err = a.portOrMove("DNS server", dnsPort, agentPort, proxyPort); err != nil {
+	if dnsPort, err = a.portOrMove("DNS server", availableDNSPort, dnsPort, agentPort, proxyPort); err != nil {
 		return 0, 0, err
 	}
 	return proxyPort, dnsPort, nil
 }
 
-// availablePort is utils.EnsureAvailablePorts, for portOrMove.
-var availablePort = utils.EnsureAvailablePorts
+// availablePort and availableDNSPort are utils.EnsureAvailablePorts and
+// utils.EnsureAvailableDNSPort, for portOrMove: the proxy's port is checked
+// over TCP, the DNS server's over UDP and TCP, the sockets each binds. The
+// DNS server's was checked over TCP alone: a port a UDP socket held was kept,
+// the agent's start failed on it, and each start again was handed it again.
+var availablePort, availableDNSPort = utils.EnsureAvailablePorts, utils.EnsureAvailableDNSPort
 
 // portOrMove is port where the CLI can bind it, and otherwise a free port
-// other than exclude (utils.EnsureAvailablePorts), with the move said as the
-// agent says its own.
-func (a *AgentClient) portOrMove(server string, port uint32, exclude ...uint32) (uint32, error) {
-	moved, err := availablePort(port, exclude...)
+// other than exclude, as available says (availablePort, availableDNSPort),
+// with the move said as the agent says its own.
+func (a *AgentClient) portOrMove(server string, available func(port uint32, exclude ...uint32) (uint32, error), port uint32, exclude ...uint32) (uint32, error) {
+	moved, err := available(port, exclude...)
 	if err != nil {
 		return 0, fmt.Errorf("failed to find a port for the %s: %w", server, err)
 	}
