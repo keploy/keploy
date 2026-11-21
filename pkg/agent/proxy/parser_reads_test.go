@@ -374,3 +374,32 @@ func TestParserReads_ARunCoversItsChunksWhicheverWayTheirStampsLie(t *testing.T)
 		t.Errorf("left out %v, want %v", r.conn.spans, want)
 	}
 }
+
+// leaveOut says what it left out: how many chunks, and the earliest and the
+// latest instants of the spans over their runs, a run reaching back on a wall
+// clock stepped back included. The record path names the test cases a cut at
+// the stop cost by it (warnStopCut).
+func TestParserReads_LeaveOutSaysTheWindowOfWhatItLeftOut(t *testing.T) {
+	const grace = 100 * time.Millisecond
+	t0 := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) time.Time { return t0.Add(d) }
+	for _, tc := range []struct {
+		name     string
+		at       []time.Time
+		from, to time.Time
+	}{
+		{"none", nil, time.Time{}, time.Time{}},
+		{"one run", []time.Time{at(0), at(50 * time.Millisecond)}, at(0), at(150 * time.Millisecond)},
+		{"two runs", []time.Time{at(0), at(time.Second)}, at(0), at(time.Second + grace)},
+		{"a later run reaching back on a clock stepped back", []time.Time{at(time.Second), at(3 * time.Second), at(0)}, at(0), at(3*time.Second + grace)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spans := 0
+			p := &parserReads{idleGrace: grace, leftOut: func(time.Time, time.Time) { spans++ }}
+			got := p.leaveOut(tc.at)
+			if got.chunks != len(tc.at) || !got.from.Equal(tc.from) || !got.to.Equal(tc.to) {
+				t.Errorf("left out %d chunks from %v to %v (%d spans), want %d from %v to %v", got.chunks, got.from, got.to, spans, len(tc.at), tc.from, tc.to)
+			}
+		})
+	}
+}

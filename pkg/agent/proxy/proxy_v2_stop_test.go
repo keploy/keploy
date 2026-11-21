@@ -19,6 +19,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -232,6 +233,14 @@ type stopHarness struct {
 
 func newStopHarness(t *testing.T, parser integrations.Integrations, logger *zap.Logger) *stopHarness {
 	t.Helper()
+	return newStopHarnessWithClock(t, parser, logger, nil)
+}
+
+// newStopHarnessWithClock is newStopHarness with the clock of the record
+// path's supervisor (Proxy.supervisorClock) set to clk: nil is the process's
+// own.
+func newStopHarnessWithClock(t *testing.T, parser integrations.Integrations, logger *zap.Logger, clk stall.Clock) *stopHarness {
+	t.Helper()
 	supervisor.ResetLeftOutWarningsForTest()
 	h := &stopHarness{mgr: syncMock.New(nil), done: make(chan error, 1)}
 	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), h.mgr), 30*time.Second)
@@ -266,6 +275,7 @@ func newStopHarness(t *testing.T, parser integrations.Integrations, logger *zap.
 		recordBufferQueueSize:      64,
 		recordBufferStallGrace:     2 * time.Second,
 		recordBufferHalfCloseGrace: 200 * time.Millisecond,
+		supervisorClock:            clk,
 	}
 	go func() {
 		h.done <- p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, integrations.HTTP,

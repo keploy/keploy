@@ -229,15 +229,25 @@ func (p *parserReads) beforeCutoff(at time.Time) bool {
 	return p.cutoff.IsZero() || wall(at).Before(p.cutoff)
 }
 
+// leftOutRequests is what leaveOut left out: how many unread client chunks,
+// and the earliest and latest instants of the spans over them. Zero when it
+// left out none.
+type leftOutRequests struct {
+	chunks   int
+	from, to time.Time
+}
+
 // parserReturned says the parser's Run has returned: the parser returned on
 // its own, or it was retired, after a stop, and may still be reading. Call it
 // before the tees are paused: a chunk refused by a paused tee is told of as
-// not teed, which counts as after the return.
-func (p *parserReads) parserReturned() {
+// not teed, which counts as after the return. It returns what the return left
+// out; a chunk teed before the return and told of only after it is left out
+// later, as it is told of (carried), and is not in it.
+func (p *parserReads) parserReturned() leftOutRequests {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.returned {
-		return
+		return leftOutRequests{}
 	}
 	p.returned = true
 	if p.client != nil {
@@ -265,12 +275,14 @@ func (p *parserReads) parserReturned() {
 			at = append(at, c.at)
 		}
 	}
-	p.leaveOut(at)
+	return p.leaveOut(at)
 }
 
 // leaveOut records the closed spans over the runs of the unread client chunks
-// read at `at`, in stream order (so in the order the relay read them).
-func (p *parserReads) leaveOut(at []time.Time) {
+// read at `at`, in stream order (so in the order the relay read them), and
+// returns what it left out.
+func (p *parserReads) leaveOut(at []time.Time) leftOutRequests {
+	left := leftOutRequests{chunks: len(at)}
 	spans := 0
 	for k := 0; k < len(at); {
 		start, last := wall(at[k]), wall(at[k])
@@ -283,11 +295,19 @@ func (p *parserReads) leaveOut(at []time.Time) {
 				start = t
 			}
 		}
-		p.leftOut(start, last.Add(p.idleGrace))
+		end := last.Add(p.idleGrace)
+		p.leftOut(start, end)
+		// A run starts past the grace after the one before, so the last one
+		// ends latest; a wall clock stepped back can start one earlier.
+		if spans == 0 || start.Before(left.from) {
+			left.from = start
+		}
+		left.to = end
 		spans++
 	}
 	if spans > 0 && p.logger != nil {
 		p.logger.Debug("left out the requests a connection's parser returned without recording",
 			zap.Int("chunks", len(at)), zap.Int("spans", spans), zap.Time("from", at[0]))
 	}
+	return left
 }

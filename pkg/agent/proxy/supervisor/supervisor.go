@@ -55,8 +55,10 @@ type Config struct {
 	// read both its streams to their end may make no progress on what it
 	// read (Session.handedOver: a record handed over or reported, a mock
 	// held, bytes folded) before Run aborts it. While it makes progress,
-	// Run waits for it, up to the stop's deadline (StopDeadline). It is
-	// time the process could run (Clock), as HangBudget is. Default 1s.
+	// Run waits for it, however long that takes: only a StopDeadline its
+	// caller sets cuts it. It is time the process could run (Clock), as
+	// HangBudget is, so a starved agent does not abort a parser it did not
+	// run. Default 1s.
 	FoldWindow time.Duration
 
 	// MemCap is the per-connection byte cap on parser-owned buffers.
@@ -141,8 +143,9 @@ type Supervisor struct {
 	// stop) Run waits for its parser to return, or to hang, or, once it has
 	// read both its streams to their end, to make no progress for its fold
 	// window (Config.FoldWindow), and aborts it on none of those before
-	// this is closed. nil: the stop has no deadline of its own here (the
-	// process's end bounds it).
+	// this is closed. nil, as the proxy's record path leaves it: the stop
+	// has no deadline on the wall clock, and only a parser's lack of
+	// progress ends the wait (the process's end bounds it).
 	StopDeadline <-chan struct{}
 
 	// suspended, once set, permanently disarms the hang watchdog for
@@ -347,12 +350,16 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		// captured for it before the stop, and the relay's teardown ends its
 		// streams once it has handed all of that on: the parser reads it
 		// (it ends on its streams' end, not on its context's) and returns.
-		// So the supervisor waits for an event, never for a time: a grace
-		// measured on the wall clock decides nothing on a starved agent,
-		// where the parser is not run within it, and aborting it then cut
-		// short what it had not read yet. It aborts the parser only once
-		// that costs nothing captured, or once the stop's own deadline says
-		// the wait is over:
+		// So the supervisor waits for an event, or for the parser to make no
+		// progress, never for the wall clock: a grace measured on the wall
+		// clock decides nothing on a starved agent, where the parser is not
+		// run within it, and aborting it then cut short what it had not read
+		// yet. Its two bounds are spells of no progress on the time the
+		// process could run (the fold window, the hang budget), so a parser
+		// that makes progress, however slowly, is waited for. It aborts the
+		// parser only once that costs nothing captured, once the parser
+		// makes no progress, or once a stop deadline its caller set says the
+		// wait is over:
 		//   - the parser has read both its streams to their end
 		//     (fakeconn.FakeConn.ReadToEnd), and has then made no progress
 		//     on what it read for its fold window (foldWatch): nothing of
@@ -360,7 +367,8 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		//     over, so whatever it waits on costs nothing captured. One
 		//     still handing over what it read is waited for: an abort then
 		//     lost every record it had not handed over yet;
-		//   - the stop's overall deadline passed (StopDeadline): what the
+		//   - the stop's overall deadline passed (StopDeadline, when its
+		//     caller set one; the proxy's record path sets none): what the
 		//     parser has not read by then is left out, with its span, as
 		//     everything a retired parser never read is; and a parser that
 		//     had read both its streams to their end, and was still in its
@@ -371,7 +379,8 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		//     what the parser still has to read (watchTheStop), not by the
 		//     pending flag a recorded mock clears: a parser that records a
 		//     mock and then stalls with captured bytes unread is hung, and
-		//     is retired, never waited on silently.
+		//     is retired, never waited on silently. The record path says
+		//     which test cases that cut left out (proxy's warnStopCut).
 		// The abort fires SessionOnAbort, whose closes unblock a parser
 		// parked in a read of a stream the relay has not ended: the
 		// goroutine does not leak, and the relay's tees do not stay armed.

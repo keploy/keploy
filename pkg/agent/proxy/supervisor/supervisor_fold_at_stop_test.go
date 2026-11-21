@@ -621,3 +621,91 @@ func TestSession_ProgressOnANilSessionIsANoOp(t *testing.T) {
 		}()
 	}
 }
+
+// Whether the stop's deadline cut a parser that had read both its streams to
+// their end is asked of the streams, not of whether Run has taken their ends
+// yet: a select picks among ready cases at random, so with the deadline
+// already passed when the stop comes, and both streams read before it, Run can
+// take the deadline before either end. The cut is said every time.
+func TestRun_AtTheStopDeadlineSaysTheCutWhicheverReadyCaseRunTakesFirst(t *testing.T) {
+	t.Parallel()
+	for i := 0; i < 20; i++ {
+		client, dest := newBehindProducer(), newBehindProducer()
+		go client.run([]string{"request"})
+		go dest.run([]string{"answer"})
+		core, logs := observer.New(zapcore.DebugLevel)
+		s := New(Config{Logger: zap.New(core), HangBudget: time.Hour, FoldWindow: time.Hour})
+		deadline := make(chan struct{})
+		close(deadline) // passed before the stop
+		s.StopDeadline = deadline
+		sess := &Session{ClientStream: client.fc, DestStream: dest.fc, ClientConnID: "43", Mocks: make(chan *models.Mock, 1)}
+		ctx, cancel := context.WithCancel(context.Background())
+		// The parser returns only once Run has: its return is no ready case.
+		unpark := make(chan struct{})
+		resc := make(chan Result, 1)
+		go func() {
+			resc <- s.Run(ctx, func(context.Context, *Session) error {
+				readBoth(sess)
+				cancel() // the stop, once both streams are read to their end
+				<-unpark
+				return nil
+			}, sess)
+		}()
+		select {
+		case <-resc:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatalf("run %d: Run did not return once the stop's deadline had passed", i)
+		}
+		close(unpark)
+		cancel()
+		if n := logs.FilterMessage(FoldCutWarnMsg).Len(); n != 1 {
+			t.Fatalf("run %d: %d WARNs of the cut, want 1: the parser had read both its streams to their end", i, n)
+		}
+	}
+}
+
+// The progress mark shares its word with the session's peer-end marks
+// (peerEnds): noting progress, and taking it, leaves them as they were, set or
+// not. The HTTP recorder reads EndFollowedStop; the relay sets ServerSpokeUnasked
+// and the first peer to end.
+func TestSession_ProgressLeavesThePeerEndMarksAlone(t *testing.T) {
+	t.Parallel()
+	type marks struct {
+		followed, unasked, firstOK bool
+		first                      fakeconn.Direction
+		noFault                    NoFaultEnd
+		client, dest               PeerEnd
+	}
+	read := func(s *Session) marks {
+		first, ok := s.FirstPeerEnded()
+		return marks{s.EndFollowedStop(), s.ServerSpokeUnasked(), ok, first, s.ClientEndNoFault(), s.PeerEnded(fakeconn.FromClient), s.PeerEnded(fakeconn.FromDest)}
+	}
+	for _, set := range []bool{false, true} {
+		s := &Session{Mocks: make(chan *models.Mock, 8)}
+		if set {
+			s.MarkPeerEndedBy(fakeconn.FromDest, true, EndAtStop)
+			s.peerEnds.Or(spokeUnaskedBit)
+		}
+		want := read(s)
+		if set && (!want.followed || !want.unasked || !want.firstOK) {
+			t.Fatalf("the marks did not take: %+v", want)
+		}
+		for name, op := range map[string]func(){
+			"EmitMock":          func() { _ = s.EmitMock(&models.Mock{Kind: models.HTTP}) },
+			"ReportLeftOut":     func() { s.ReportLeftOut(&models.Mock{Kind: models.HTTP}, "x") },
+			"ReportLeftOutPart": func() { s.ReportLeftOutPart(time.Now(), time.Now()) },
+			"MockHeld":          s.MockHeld,
+			"Folded":            s.Folded,
+			"takeHandedOver":    func() { s.takeHandedOver() },
+		} {
+			op()
+			if got := read(s); got != want {
+				t.Errorf("marks set %v: after %s the peer-end marks are %+v, want %+v", set, name, got, want)
+			}
+		}
+		s.Folded()
+		if !s.takeHandedOver() || s.takeHandedOver() {
+			t.Errorf("marks set %v: the progress mark is not taken once", set)
+		}
+	}
+}

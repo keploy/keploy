@@ -50,6 +50,7 @@ import (
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -600,6 +601,11 @@ type Proxy struct {
 	// negative disables half-close, so it is NOT clamped to zero the way
 	// recordBufferStallGrace is.
 	recordBufferHalfCloseGrace time.Duration
+
+	// supervisorClock is the clock of recordViaSupervisor's supervisors
+	// (supervisor.Config.Clock): nil is the process's own runnable clock;
+	// tests run it slower or faster than the wall clock.
+	supervisorClock stall.Clock
 
 	// capture follows the relays of the connections whose parser is
 	// recording, for the recording's capture watermark
