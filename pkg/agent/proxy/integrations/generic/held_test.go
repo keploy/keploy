@@ -571,13 +571,13 @@ func (c *refills) Read(p []byte) (int, error) {
 }
 
 // A request whose application refills the socket as fast as the parser
-// reads it, once the parser was held past its window, ends 2 MiB past the
-// parser's look, within one read, said in one Warn that names the client
-// (what it read before the look, more than one read, is not counted):
-// the read-on's count of the socket's bytes never falls to what it held at
-// the look. It read on, holding the request, for as long as the
-// application wrote. The request is the parser's first and the store is
-// empty, so its miss compares 2 MiB with nothing.
+// reads it, once the parser was held past its window, ends 2 MiB beyond what
+// the socket held at the parser's look, within one read, said in one Warn
+// that names the client (what it read before the look, more than one read,
+// is not counted): the read-on's count of the socket's bytes never falls to
+// what it held at the look. It read on, holding the request, for as long as
+// the application wrote. The request is the parser's first and the store is
+// empty, so its miss compares the read-on with nothing.
 func TestARequestWhoseSenderRefillsEveryReadEndsAtTheReadOnLimit(t *testing.T) {
 	eachSwitch(t, func(t *testing.T) {
 		app, proxySide := tcpPair(t)
@@ -597,8 +597,9 @@ func TestARequestWhoseSenderRefillsEveryReadEndsAtTheReadOnLimit(t *testing.T) {
 		if !looked {
 			t.Fatal("the parser never looked at what the socket holds")
 		}
-		if after < 2<<20 || after >= 2<<20+pUtil.ReadChunkSize {
-			t.Fatalf("the parser read %d bytes past its look; want 2 MiB, within one read", after)
+		want := conn.held + 2<<20
+		if after < want || after >= want+pUtil.ReadChunkSize {
+			t.Fatalf("the parser read %d bytes past its look; want %d (what the socket held plus 2 MiB), within one read", after, want)
 		}
 		warns := logs.FilterMessageSnippet("never paused").All()
 		if len(warns) != 1 || logs.Len() != 1 {

@@ -25,12 +25,13 @@ import (
 // from.
 const quietWindow = 10 * time.Millisecond
 
-// readOnLimit is the most a request's read-on returns past its look at the
-// socket, in the bytes its reads return: 64 of the parser's reads. The
-// read-on ends once the socket has given what it held at the look, counted
-// in the socket's bytes, and a sender that puts back into the socket what
-// each read takes from it never lets that count fall: the request ends
-// here, said in a Warn, and it is never held growing without bound.
+// readOnLimit is the most a request's read-on returns past what the socket
+// held at its look, in the bytes its reads return: 64 of the parser's reads
+// beyond that total. The read-on ends once the socket has given what it held
+// at the look, counted in the socket's bytes, and a sender that puts back
+// into the socket what each read takes from it never lets that count fall:
+// the request ends here, said in a Warn, and it is never held growing
+// without bound.
 const readOnLimit = 64 * pUtil.ReadChunkSize
 
 // decodeGeneric answers the client's requests from the mocks, on a goroutine,
@@ -82,12 +83,14 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				first, begun = start, false
 			}
 			// looked: the parser looked, past the request's window, at what
-			// the socket under clientConn holds unread; left is what of
-			// that the socket has still to give, in the socket's bytes.
+			// the socket under clientConn holds unread; lookTotal is what
+			// it held then, and left is what of that the socket has still
+			// to give, in the socket's bytes.
 			// drained: the socket has given it all, and the parser reads,
 			// without waiting, what a layer above the socket still holds.
 			// readOn: what the reads past the look returned.
 			looked, left, drained, readOn := false, int64(0), false, 0
+			var lookTotal int64
 
 			// To read the stream of request packets from the client. The
 			// connection's end is its EOF, which ReadBytes returns at the
@@ -136,7 +139,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					break
 				}
 				if looked {
-					if readOn += len(buffer); readOn >= readOnLimit {
+					if readOn += len(buffer); int64(readOn) >= lookTotal+readOnLimit {
 						logger.Warn("a generic request's bytes never paused once its window had passed: the client wrote into the connection as fast as the proxy read it, so the request ends here, after the most the proxy reads past its window, and is matched as read",
 							zap.Any("client", clientConn.RemoteAddr()),
 							zap.Int("bytesReadPastWindow", readOn))
@@ -199,11 +202,12 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// It looks once, so a request whose bytes never pause still
 				// ends: once the socket has given what it held then (less
 				// what arrived as each read took), or, for a sender that
-				// refills the socket as each read takes, at readOnLimit.
+				// refills the socket as each read takes, at readOnLimit
+				// beyond what the socket held at the look.
 				if timeout && !first.IsZero() {
 					if unread := pUtil.UnreadBytes(clientConn); unread > 0 {
 						if !looked {
-							looked, left = true, unread
+							looked, left, lookTotal = true, unread, unread
 						}
 						deadline = time.Now().Add(quietWindow)
 						if err := clientConn.SetReadDeadline(deadline); err != nil {
