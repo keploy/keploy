@@ -43,3 +43,19 @@ func TestComposeIdentity_UnsetVariableIsNotReportedTwice(t *testing.T) {
 		t.Fatalf("keploy's read of the files reported the unset variable: %q", written)
 	}
 }
+
+// compose places a document on its standard input in the current directory,
+// and refuses it when that directory no longer exists: so does keploy, rather
+// than resolving it from nowhere. (Linux: a removed directory cannot be the
+// current one's name there.)
+func TestComposeIdentity_InMemoryFromARemovedDirectoryIsRefused(t *testing.T) {
+	dir := composeProjectDir(t, nil)
+	t.Setenv("COMPOSE_DISABLE_ENV_FILE", "1")
+	t.Chdir(dir)
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findInContent(t, "name: named\nservices:\n  app:\n    image: x\n    container_name: c\n", ComposeScope{}, "c"); err == nil {
+		t.Fatal("a document was resolved from a current directory that does not exist")
+	}
+}
