@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
-	"syscall"
 	"testing"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -185,7 +185,7 @@ func TestAConnectionTheKernelDidNotNoteAsKeploysIsNotUsed(t *testing.T) {
 	if _, err := io.WriteString(c, "GET /hello HTTP/1.1\r\nHost: app\r\nConnection: close\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !neterr.IsPeerReset(err) {
 		t.Fatalf("read %v, want the call closed", err)
 	}
 	if err := <-got; !errors.Is(err, io.EOF) {
@@ -227,7 +227,7 @@ func TestASteeredCallKeployCannotMarkIsNotDialed(t *testing.T) {
 	if _, err := io.WriteString(c, "GET /hello HTTP/1.1\r\nHost: app\r\nConnection: close\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !neterr.IsPeerReset(err) {
 		t.Fatalf("read %v, want the call closed", err)
 	}
 	select {
