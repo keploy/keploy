@@ -111,6 +111,32 @@ func TestKeploysRulesNameWhatTheModuleHas(t *testing.T) {
 	}
 }
 
+// An import with no name of its own is named as goimports assumes its
+// package is: by its path's last element, the one before a major version,
+// less a leading "go-", up to a character no name holds.
+func TestImportNameIsThePackagesName(t *testing.T) {
+	for p, want := range map[string]string{
+		"strings":                  "strings",
+		"go.uber.org/zap":          "zap",
+		"gopkg.in/yaml.v3":         "yaml",
+		"github.com/k0kubun/pp/v3": "pp",
+		"math/rand/v2":             "rand",
+		"github.com/go-chi/chi/v5": "chi",
+		"github.com/pavlo-v-chernykh/keystore-go/v4": "keystore",
+		"github.com/mattn/go-shellwords":             "shellwords",
+		"golang.org/x/net/http2":                     "http2",
+		"example.com/snake_case":                     "snake_case",
+		"example.com/vfoo":                           "vfoo",
+		"example.com/v":                              "v",
+		// A path of one element is its own name, a version's or not.
+		"v2": "v2",
+	} {
+		if got := importName(p); got != want {
+			t.Errorf("importName(%q) = %q, want %q", p, got, want)
+		}
+	}
+}
+
 // fixture is a module of its own, read by Trace alone (never built): every
 // line marked FOUND must be found, and no other.
 var fixture = map[string]string{
@@ -463,6 +489,34 @@ func Shown(cfg *config.Config) {
 func show(s string)         { fmt.Println(s) } // FOUND
 func showRedacted(s string) { fmt.Println(s) }
 `,
+	// Packages whose import path ends in a version: each is named as its
+	// package clause names it, as a file that gives it no name of its own
+	// refers to it.
+	"versioned/versioned.go": `package versioned
+
+import (
+	"github.com/k0kubun/pp/v3"
+	"gopkg.in/yaml.v3"
+
+	"example.com/fx/config"
+	"go.uber.org/zap"
+)
+
+// codec has a method of the name of yaml's Unmarshal: a call of yaml's
+// is not a call of it.
+type codec struct{ logger *zap.Logger }
+
+func (c codec) Unmarshal(data []byte, v any) error {
+	c.logger.Info("decoded", zap.String("data", string(data)))
+	return nil
+}
+
+func Versioned(logger *zap.Logger, cfg *config.Config) {
+	logger.Info("pretty", zap.String("cmd", pp.Sprint(cfg.Command))) // FOUND
+	var n yaml.Node
+	_ = yaml.Unmarshal([]byte(cfg.Command), &n)
+}
+`,
 }
 
 var fixtureRules = Rules{
@@ -514,7 +568,7 @@ func TestTraceFindsEveryLineThatTakesTheCommand(t *testing.T) {
 			t.Errorf("%s takes the command, and Trace did not find it", at)
 		}
 	}
-	if len(want) != 72 {
-		t.Errorf("the fixture marks %d lines, want 72", len(want))
+	if len(want) != 73 {
+		t.Errorf("the fixture marks %d lines, want 73", len(want))
 	}
 }
