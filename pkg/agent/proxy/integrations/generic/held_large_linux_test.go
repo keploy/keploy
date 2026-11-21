@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -187,15 +188,22 @@ func assertHeldLargeRequestAnsweredWhole(t *testing.T, app, proxySide net.Conn, 
 
 // A request whose parser is held past its window after 1000 bytes, with the
 // whole rest already in the socket (the application paused and waits for its
-// answer), is answered whole even when the unread rest exceeds readOnLimit
-// (2 MiB), and no "never paused" Warn is logged: the read-on cap counts only
-// bytes read beyond what the socket held at the parser's look. Exercised both
-// with an explicit 4 MiB socket buffer (where rmem_max allows it) and on a
-// warmed default-sysctl loopback socket whose buffer kernel autotuning grew.
+// answer), is answered whole even when the unread rest sits at or exceeds
+// readOnLimit (2 MiB), and no "never paused" Warn is logged: the read-on cap
+// counts only bytes read beyond what the socket held at the parser's first
+// look. Exercised both with an explicit 4 MiB socket buffer (where rmem_max
+// allows it; 1 MiB is a control, 2 MiB and 2 MiB+1 pin the cap boundary, and
+// 3 MiB exceeds it) and on a warmed default-sysctl loopback socket whose buffer
+// kernel autotuning grew.
+//
+// On default-sysctl runners the 4 MiB subtests skip and only the warm subtest
+// runs (and can skip if autotuning stays below 2 MiB); the refill row in
+// held_test.go pins the cap arithmetic deterministically on every OS and
+// socket buffer size.
 func TestAHeldRequestOverTheReadOnLimitIsAnsweredWhole(t *testing.T) {
 	t.Run("with a 4 MiB socket buffer", func(t *testing.T) {
-		for _, size := range []int{1 << 20, 3 << 20} {
-			t.Run(fmt.Sprintf("%d KiB", size>>10), func(t *testing.T) {
+		for _, size := range []int{1 << 20, 1000 + 2<<20, 1000 + 2<<20 + 1, 3 << 20} {
+			t.Run(fmt.Sprintf("%d B", size), func(t *testing.T) {
 				if ok, got, rb := socketCanHold(t, 4<<20, size); !ok {
 					t.Skipf("the socket held only %d of %d bytes (SO_RCVBUF %d)", got, size, rb)
 				}
@@ -234,5 +242,125 @@ func TestAHeldRequestOverTheReadOnLimitIsAnsweredWhole(t *testing.T) {
 			req := varied(size, true)
 			assertHeldLargeRequestAnsweredWhole(t, app, proxySide, req)
 		})
+	})
+}
+
+// slowPastLook sleeps briefly before each read past the parser's first look so
+// reading a multi-MiB rest outlasts the request window many times over and the
+// parser looks at the socket again (as under load or -race), while counting
+// the exact bytes returned past that first look until the answer is sent.
+type slowPastLook struct {
+	*heldPast
+	cmu      sync.Mutex
+	pastLook int
+}
+
+func (c *slowPastLook) Read(p []byte) (int, error) {
+	c.heldPast.mu.Lock()
+	phase, replied := c.heldPast.phase, c.heldPast.repliedAfterLook
+	c.heldPast.mu.Unlock()
+	if phase >= 3 && !replied {
+		time.Sleep(time.Millisecond)
+	}
+	n, err := c.heldPast.Read(p)
+	c.heldPast.mu.Lock()
+	phase, replied = c.heldPast.phase, c.heldPast.repliedAfterLook
+	c.heldPast.mu.Unlock()
+	if phase >= 3 && !replied {
+		c.cmu.Lock()
+		c.pastLook += n
+		c.cmu.Unlock()
+	}
+	return n, err
+}
+
+// pairHolding returns a loopback TCP pair whose proxy socket can hold at least
+// n bytes unread (with 128 KiB to spare): an explicit 8 MiB receive buffer
+// where rmem_max allows it, or else a warm autotuned pair (up to 3 tries).
+// Skips when neither can hold n bytes.
+func pairHolding(t *testing.T, n int) (*net.TCPConn, net.Conn) {
+	t.Helper()
+	app, proxySide := tcpPair(t)
+	_ = proxySide.(*net.TCPConn).SetReadBuffer(8 << 20)
+	probe := make(chan error, 1)
+	go func() {
+		_, err := app.Write(make([]byte, 16<<20))
+		probe <- err
+	}()
+	var held, last int64
+	stable := 0
+	until(func() bool {
+		held = pUtil.UnreadBytes(proxySide)
+		if held > 0 && held == last {
+			stable++
+		} else {
+			stable, last = 0, held
+		}
+		return stable > 50
+	})
+	if _, err := io.CopyN(io.Discard, proxySide, 16<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-probe; err != nil {
+		t.Fatal(err)
+	}
+	if held >= int64(n)+128<<10 {
+		return app, proxySide
+	}
+	_ = app.Close()
+	_ = proxySide.Close()
+	best := held
+	for range 3 {
+		app, proxySide, held = warmLoopbackPair(t)
+		if held >= int64(n)+128<<10 {
+			return app, proxySide
+		}
+		_ = app.Close()
+		_ = proxySide.Close()
+		best = max(best, held)
+	}
+	t.Skipf("no socket here holds %d bytes unread (at most %d)", n, best)
+	return nil, nil
+}
+
+// A paused client's 3 MiB rest, read on over many windows so the parser looks
+// at the socket again as it reads, is read whole with no "never paused" Warn:
+// the read-on cap counts past the FIRST look's total, not a later look's.
+func TestAPausedRequestReadOnOverManyWindowsIsReadWhole(t *testing.T) {
+	eachSwitch(t, func(t *testing.T) {
+		const want = 3 << 20
+		app, proxySide := pairHolding(t, want)
+		req := varied(1000+want, true)
+		recorded := recordedAs("mock-big", req)
+		recorded.TestModeInfo.IsFiltered = true
+		recorded.Spec.GenericResponses = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: "BIGOK"}}}}
+		store := eofStore{mocks: []*models.Mock{
+			recordedExchange("mock-ping", "PING", "PONG"),
+			recorded,
+		}}
+		conn := &slowPastLook{heldPast: &heldPast{Conn: proxySide, cut: 1000, rest: want}}
+		core, logs := observer.New(zapcore.WarnLevel)
+		done := make(chan error, 1)
+		go func() {
+			done <- decodeGeneric(context.Background(), zap.New(core), []byte("PING"), conn, nil, store, models.OutgoingOptions{})
+		}()
+		readAnswerBeforeEnd(t, app, done, logs, proxySide, "PONG")
+		wrote := make(chan error, 1)
+		go func() {
+			_, err := app.Write(req)
+			wrote <- err
+		}()
+		readAnswerBeforeEnd(t, app, done, logs, proxySide, "BIGOK")
+		if err := <-wrote; err != nil {
+			t.Fatal(err)
+		}
+		conn.cmu.Lock()
+		past := conn.pastLook
+		conn.cmu.Unlock()
+		if never := logs.FilterMessageSnippet("never paused").Len(); past != want || never != 0 {
+			t.Fatalf("read %d bytes past the look of %d, %d never-paused Warns", past, want, never)
+		}
+		_ = app.Close()
+		awaitEnd(t, done, "a connection the application closed")
 	})
 }
