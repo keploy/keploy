@@ -84,25 +84,26 @@ func (t *Tools) normalizeTestSet(ctx context.Context, testRun string, testSet co
 	}
 
 	// Normalize test cases
-	err = t.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
-	if err != nil {
-		return err
-	}
+	normErr := t.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
 
-	// Re-sanitize after normalization if it was originally sanitized
+	// Re-sanitize if it was originally sanitized, whether or not normalizing
+	// worked: desanitizing put the secrets back in the test files and removed
+	// secret.yaml, so a set left as it is when normalizing fails (no report to
+	// read, a test case that cannot be written) would be committed with them.
+	// Cancelling the command must not skip it either.
 	if desanitized {
 		testSetDir := filepath.Join(t.config.Path, testSetID)
-		err = t.SanitizeTestSetDir(ctx, testSetDir)
+		err = t.SanitizeTestSetDir(context.WithoutCancel(ctx), testSetDir)
 		if err != nil {
 			t.logger.Error("Failed to re-sanitize test set after normalization",
 				zap.String("testSetID", testSetID),
 				zap.Error(err))
-			return fmt.Errorf("failed to re-sanitize test set %s: %w", testSetID, err)
+			return errors.Join(normErr, fmt.Errorf("failed to re-sanitize test set %s: %w", testSetID, err))
 		}
 		t.logger.Info("Re-sanitized test set after normalization",
 			zap.String("testSetID", testSetID))
 	}
-	return nil
+	return normErr
 }
 
 func (t *Tools) addLastUpdatedToContext(ctx context.Context) context.Context {
