@@ -36,6 +36,24 @@ func TestExtractCommandFromArgs(t *testing.T) {
 
 		// Everything after -- is positional, not a flag.
 		{"terminator", []string{"keploy", "record", "-c", "./app", "--", "-c", "docker compose up"}, "./app"},
+
+		// A trailing dangling -c/--command after an earlier valid one resets
+		// the value rather than keeping the stale command.
+		{"dangling -c after valid command", []string{"keploy", "record", "-c", "docker compose up", "-c"}, ""},
+		{"dangling --command after valid command", []string{"keploy", "record", "-c", "docker compose up", "--command"}, ""},
+
+		// Values of other value-taking flags that happen to start with "-c"
+		// must not be mistaken for the -c shorthand.
+		{"flag value starting with -c", []string{"keploy", "record", "--app-name", "-ci"}, ""},
+		{"flag value starting with -c after valid -c", []string{"keploy", "record", "-c", "docker compose up", "--app-name", "-ci"}, "docker compose up"},
+		{"camelCase value flag with -c value", []string{"keploy", "record", "--appName", "-ci"}, ""},
+		{"short value flag with -c value alone", []string{"keploy", "record", "-p", "-cache"}, ""},
+		{"short value flag with -c value after valid -c", []string{"keploy", "record", "-c", "python app.py", "-p", "-cache"}, "python app.py"},
+		{"language short flag with -c value after valid -c", []string{"keploy", "test", "-c", "docker compose up", "-l", "-custom"}, "docker compose up"},
+		{"equals form of value flag does not consume following -c", []string{"keploy", "record", "--app-name=-ci", "-c", "docker compose up"}, "docker compose up"},
+		{"boolean flag before -c is not treated as value-taking", []string{"keploy", "record", "--debug", "-c", "docker compose up"}, "docker compose up"},
+		{"boolean flag before joined -c is not treated as value-taking", []string{"keploy", "record", "--debug", "-cdocker compose up"}, "docker compose up"},
+		{"NoOptDefVal flag before -c does not consume -c", []string{"keploy", "record", "--enable-sampling", "-c", "docker compose up"}, "docker compose up"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

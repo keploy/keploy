@@ -203,6 +203,7 @@ func TestShouldReexecWithSudo_JudgesTheCommandCobraRuns(t *testing.T) {
 		{"a docker command after a native one", []string{"keploy", "record", "-c", "python app.py", "-c", "docker compose up"}, true},
 		{"a native command after a docker one", []string{"keploy", "record", "-c", "docker compose up", "-c", "python app.py"}, false},
 		{"a docker command joined to the shorthand", []string{"keploy", "record", "-cdocker compose up"}, true},
+		{"a docker command followed by another flag whose value starts with -c", []string{"keploy", "record", "-c", "docker compose up", "--app-name", "-ci"}, true},
 	}
 	orig := os.Args
 	defer func() { os.Args = orig }()
