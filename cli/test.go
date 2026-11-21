@@ -15,7 +15,7 @@ func init() {
 	Register("test", Test)
 }
 
-func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Test(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var testCmd = &cobra.Command{
 		Use:     "test",
 		Short:   "run the recorded testcases and execute assertions",
@@ -28,6 +28,12 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			// returns nil, as the replay's own do (Replayer.Start): it is
 			// logged already, and a returned error would have cobra print
 			// usage on top of it. `return nil` alone exited 0 with no test run.
+			release, locked := acquireRunLock(logger, conf)
+			if !locked {
+				return nil
+			}
+			defer release()
+
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
