@@ -2627,23 +2627,28 @@ func TestAnotherZonesFileAtAZonesPathIsUnknownWhereverItsBytesCameFrom(t *testin
 	}
 	// Mounted from a host's file: the process's own mounts tell, and the
 	// refusal names the zone the mount's source names, never its path.
-	for i, m := range []struct{ src, why string }{
-		{"/home/alice/zoneinfo/Africa/Casablanca", `is a file mounted from the zone file of "Africa/Casablanca"`},
-		{"/home/alice/localtime", "is a file mounted from a file whose path names no zone (a copy)"},
-	} {
-		proc := t.TempDir()
-		pid := strconv.Itoa(970 + i)
-		fakeProc(t, proc, pid, "500", nil, map[string][]byte{zi + "Europe/Berlin": other}, link("Europe/Berlin"))
-		mounts := rootMount + "700 600 252:0 " + m.src + " /usr/share/zoneinfo/Europe/Berlin ro,relatime - xfs /dev/sda1 rw\n"
-		if err := os.WriteFile(filepath.Join(proc, pid, "mountinfo"), []byte(mounts), 0o644); err != nil {
-			t.Fatal(err)
+	t.Run("mounted", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("no mount table off Linux")
 		}
-		z, err := ReadProcZone(proc, uint32(970+i))
-		refused(t, "Europe/Berlin's file mounted from "+m.src, z.Loc, err, []string{m.why})
-		if err != nil && strings.Contains(err.Error(), "/home/alice") {
-			t.Errorf("Europe/Berlin's file mounted from %s: %v; want no host path in it", m.src, err)
+		for i, m := range []struct{ src, why string }{
+			{"/home/alice/zoneinfo/Africa/Casablanca", `is a file mounted from the zone file of "Africa/Casablanca"`},
+			{"/home/alice/localtime", "is a file mounted from a file whose path names no zone (a copy)"},
+		} {
+			proc := t.TempDir()
+			pid := strconv.Itoa(970 + i)
+			fakeProc(t, proc, pid, "500", nil, map[string][]byte{zi + "Europe/Berlin": other}, link("Europe/Berlin"))
+			mounts := rootMount + "700 600 252:0 " + m.src + " /usr/share/zoneinfo/Europe/Berlin ro,relatime - xfs /dev/sda1 rw\n"
+			if err := os.WriteFile(filepath.Join(proc, pid, "mountinfo"), []byte(mounts), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			z, err := ReadProcZone(proc, uint32(970+i))
+			refused(t, "Europe/Berlin's file mounted from "+m.src, z.Loc, err, []string{m.why})
+			if err != nil && strings.Contains(err.Error(), "/home/alice") {
+				t.Errorf("Europe/Berlin's file mounted from %s: %v; want no host path in it", m.src, err)
+			}
 		}
-	}
+	})
 }
 
 // A file mounted from a host's file of an alias of its zone (Asia/Calcutta,
@@ -2653,6 +2658,9 @@ func TestAnotherZonesFileAtAZonesPathIsUnknownWhereverItsBytesCameFrom(t *testin
 // keploy reads otherwise (America/Detroit over America/New_York: apart
 // from 1970 to 1975) is not, whatever its file holds.
 func TestAZoneFileMountedFromAnAliasOfItsZoneIsItsZone(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("no mount table off Linux")
+	}
 	zi := "usr/share/zoneinfo/"
 	for i, row := range []struct {
 		zone, src string
