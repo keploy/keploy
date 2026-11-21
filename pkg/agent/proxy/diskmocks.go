@@ -714,6 +714,61 @@ func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) 
 	return nil
 }
 
+// RangeRecordedOfKindsBefore visits what RangeRecordedBefore visits of the
+// kinds named, in its order (request time), decoding only those: a
+// recording of any other kind is never read. Where the store lists every
+// kind named (diskListsKind: each kind under the proven switch), they are
+// read from that listing, each name's last record once, as RangeKind
+// reads them; while one kind named is not listed, every record is decoded
+// and those of other kinds are skipped, as RangeRecordedBefore reads them.
+// For the parsers' warm of a staged set (Proxy.WarmRecordedSet), which
+// reads only the kinds a parser warms: an HTTP-only set is never decoded
+// for a Mongo warm.
+func (d *DiskMocks) RangeRecordedOfKindsBefore(t time.Time, kinds []models.Kind, visit func(m *models.Mock) bool) error {
+	for _, k := range kinds {
+		if !diskListsKind(k) {
+			return d.RangeRecordedBefore(t, func(m *models.Mock) bool {
+				if m != nil && !slices.Contains(kinds, m.Kind) {
+					return true
+				}
+				return visit(m)
+			})
+		}
+	}
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	cut := t.UnixNano()
+	var sel []diskEntry
+	seen := map[string]bool{}
+	for _, k := range kinds {
+		for _, name := range d.byKind[k] {
+			if seen[name] || d.kindOf[name] != k {
+				continue
+			}
+			seen[name] = true
+			if e, ok := d.byName[name]; ok && e.reqTsNano <= cut {
+				sel = append(sel, e)
+			}
+		}
+	}
+	d.mu.Unlock()
+	sortRecorded(sel, entryRequest)
+	keep := d.keeper.Load()
+	for _, e := range sel {
+		m, err := d.recordedAt(e, keep)
+		if err != nil {
+			return err
+		}
+		if !visit(m) {
+			return nil
+		}
+	}
+	return nil
+}
+
 // RecordingKeeper keeps a recording key names as decode reads it, for the
 // learn step's reads of the set's recordings (learn.Tracker.KeepRecording):
 // size is about the bytes the decoded recording holds. It hands each read a

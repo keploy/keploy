@@ -1081,9 +1081,12 @@ type LearnSetWarmer interface {
 // once the set is staged and its on-disk recordings are set, starts that
 // read in the background, in replay and in record's full round alike, and
 // returns at once. A set staged after it stops it. Nothing it reads is
-// served: it fills only the parsers' caches.
+// served: it fills only the parsers' caches. ofKinds reads the set's
+// on-disk recordings of the kinds named, by request time, decoding only
+// those (proxy.DiskMocks.RangeRecordedOfKindsBefore); nil where the set
+// keeps none on disk.
 type RecordedSetWarmer interface {
-	WarmRecordedSet() error
+	WarmRecordedSet(ofKinds func(t time.Time, kinds []models.Kind, visit func(*models.Mock) bool) error) error
 }
 
 // LearnEndSetter is implemented by a proxy whose learn step a keploy test

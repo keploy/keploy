@@ -244,7 +244,7 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	// The parsers read the set's recordings ahead of its calls, in replay
 	// and in record's full round alike (on the learn step's walk there).
 	if w, ok := a.Proxy.(coreAgent.RecordedSetWarmer); ok {
-		if err := w.WarmRecordedSet(); err != nil {
+		if err := w.WarmRecordedSet(a.diskRecordedOfKinds()); err != nil {
 			return false, fmt.Errorf("read the recording's mocks ahead of its calls: %w", err)
 		}
 	}
@@ -609,7 +609,7 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// The parsers read the set's recordings ahead of its calls (in
 		// record's full round on the learn step's walk).
 		if w, ok := a.Proxy.(coreAgent.RecordedSetWarmer); ok {
-			if err := w.WarmRecordedSet(); err != nil {
+			if err := w.WarmRecordedSet(a.diskRecordedOfKinds()); err != nil {
 				return fmt.Errorf("read the test set's recordings ahead of its calls: %w", err)
 			}
 		}
@@ -820,6 +820,17 @@ func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) 
 		return nil
 	}
 	return disk.RangeRecordedBefore
+}
+
+// diskRecordedOfKinds is the on-disk store's reader of the staged set's
+// recordings of the kinds named (DiskMocks.RangeRecordedOfKindsBefore),
+// for the parsers' warm of the set; nil when the set keeps none on disk.
+func (a *Agent) diskRecordedOfKinds() func(t time.Time, kinds []models.Kind, visit func(*models.Mock) bool) error {
+	disk := a.stagedDisk()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeRecordedOfKindsBefore
 }
 
 // serveWorkerExactly tells the proxy which of the set's worker-scope mocks

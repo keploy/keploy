@@ -1472,6 +1472,16 @@ func recordingID(mk *models.Mock) string {
 // before the first test's own on disk, so with few readers (an agent of
 // two CPUs) a test could open before the recordings its calls read were.
 func (m *MockManager) rangeRecordedInOrder(t time.Time, visit func(*models.Mock) bool) error {
+	m.exact.before.mu.Lock()
+	src := m.exact.before.src
+	m.exact.before.mu.Unlock()
+	return m.rangeRecordedInOrderFrom(src, t, visit)
+}
+
+// rangeRecordedInOrderFrom is rangeRecordedInOrder with the disk's
+// recordings read from src (nil: the trees' alone): the parsers' warm
+// (WarmRecordedSet) reads there only the kinds it warms.
+func (m *MockManager) rangeRecordedInOrderFrom(src func(t time.Time, visit func(*models.Mock) bool) error, t time.Time, visit func(*models.Mock) bool) error {
 	seen := map[string]bool{}
 	var trees []*models.Mock
 	for _, mk := range m.StagedMocks() {
@@ -1497,9 +1507,6 @@ func (m *MockManager) rangeRecordedInOrder(t time.Time, visit func(*models.Mock)
 		}
 		return true
 	}
-	m.exact.before.mu.Lock()
-	src := m.exact.before.src
-	m.exact.before.mu.Unlock()
 	if src != nil {
 		err := src(t, func(mk *models.Mock) bool {
 			if mk == nil || mk.Spec.ReqTimestampMock.After(t) {
