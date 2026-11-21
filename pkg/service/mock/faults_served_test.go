@@ -62,6 +62,8 @@ func TestTheReplaySummaryNamesEachFaultServed(t *testing.T) {
 		"the wait read one, the end the rest":     {inst: outcomeInstr{consumed: consumed[:2]}, wait: consumed[2:]},
 		"the wait read one, the end cut short":    {inst: partialConsumed{outcomeInstr{consumed: consumed[:2]}}, wait: consumed[2:]},
 		"the wait read one, the end read nothing": {inst: partialConsumed{outcomeInstr{}}, wait: consumed},
+		// A fault both reads carry was served, and is named, once.
+		"the wait and the end both read two": {inst: outcomeInstr{consumed: consumed}, wait: consumed[1:]},
 		// The agent did not finish its end of the run: nothing more is
 		// read, and what the wait read was still served.
 		"the wait read all, the end did not finish": {inst: settleInstr{outcomeInstr: outcomeInstr{consumed: consumed}, calls: &calls, err: errors.New("agent gone")}, wait: consumed, proven: true},
