@@ -216,17 +216,15 @@ func TestParseEphemeralPortRange(t *testing.T) {
 // that coincidence correspondingly more likely.
 func TestEnsureAvailablePortsHonoursTheExclusionSet(t *testing.T) {
 	// A port that IS free: without the exclusion set it is returned unchanged.
-	// This test holds it, so that no other process takes it before the check,
-	// and the check's probe says it is free (EnsureFreePort).
-	free, err := GetAvailablePort()
+	// This test holds it from the kernel's pick on, so that no other process
+	// takes it before the check, and the check's probe says it is free
+	// (EnsureFreePort).
+	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
-		t.Fatalf("GetAvailablePort: %v", err)
-	}
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", free))
-	if err != nil {
-		t.Fatalf("hold the drawn port %d: %v", free, err)
+		t.Fatalf("hold a free port: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	free := uint32(ln.Addr().(*net.TCPAddr).Port)
 	isFree := func(port uint32) bool { return port == free }
 
 	if got, err := EnsureFreePort(isFree, free); err != nil || got != free {
@@ -247,15 +245,12 @@ func TestEnsureAvailablePortsHonoursTheExclusionSet(t *testing.T) {
 // EnsureAvailablePorts is EnsureFreePort with a TCP probe listener on the port:
 // a port this test holds is taken, and another is drawn in its place.
 func TestEnsureAvailablePortsMovesOffAHeldPort(t *testing.T) {
-	held, err := GetAvailablePort()
+	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
-		t.Fatalf("GetAvailablePort: %v", err)
-	}
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", held))
-	if err != nil {
-		t.Fatalf("hold the drawn port %d: %v", held, err)
+		t.Fatalf("hold a free port: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	held := uint32(ln.Addr().(*net.TCPAddr).Port)
 	if got, err := EnsureAvailablePorts(held); err != nil || got == held || got == 0 {
 		t.Fatalf("EnsureAvailablePorts(%d) = %d, %v while this test holds it; want another port", held, got, err)
 	}
