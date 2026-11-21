@@ -162,7 +162,7 @@ func TestALearnedCallReadsTheIndexOfItsOwnGeneration(t *testing.T) {
 	// neither.
 	db.gen = 3
 	for i := 0; i < 2; i++ {
-		_, ok := h.learnIx.of(db, db, n, "GET", "a", func() ([]*models.Mock, []*models.Mock, error) {
+		_, ok, _ := h.learnIx.of(context.Background(), db, db, n, "GET", "a", 0, false, func() ([]*models.Mock, []*models.Mock, error) {
 			db.gen = 4
 			return db.perTest, nil, nil
 		})
@@ -172,10 +172,10 @@ func TestALearnedCallReadsTheIndexOfItsOwnGeneration(t *testing.T) {
 		db.gen = 3
 	}
 	db.gen = integrations.RestagedGeneration
-	if _, ok := h.learnIx.of(db, db, n, "GET", "a", func() ([]*models.Mock, []*models.Mock, error) { return db.perTest, nil, nil }); ok {
+	if _, ok, _ := h.learnIx.of(context.Background(), db, db, n, "GET", "a", 0, false, func() ([]*models.Mock, []*models.Mock, error) { return db.perTest, nil, nil }); ok {
 		t.Fatal("a store held to a staging that moved was read through an index")
 	}
-	if _, ok := h.learnIx.of(db, db, n, "GET", "a", func() ([]*models.Mock, []*models.Mock, error) { return db.perTest, nil, nil }); ok {
+	if _, ok, _ := h.learnIx.of(context.Background(), db, db, n, "GET", "a", 0, false, func() ([]*models.Mock, []*models.Mock, error) { return db.perTest, nil, nil }); ok {
 		t.Fatal("a store held to a staging that moved built an index")
 	}
 }
@@ -191,18 +191,21 @@ func TestAnIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 	verifyOff(t)
 	rng := rand.New(rand.NewSource(11))
 	paths := []string{"/v1/item/1", "/v2/item/1", "/v1/item/2", "/v1/item", "/v1/user/1", "/v3/item/7"}
-	compared, grouped := 0, 0
+	compared, grouped, narrowed, narrowedGrouped := 0, 0, 0, 0
 	for round := 0; round < 400; round++ {
 		urlNoise := []string(nil)
 		if rng.Intn(2) == 0 {
 			urlNoise = []string{`v[0-9]+`}
 		}
-		n := h.newLearnNoise(models.OutgoingOptions{Learn: true}, nil, urlNoise)
+		n := h.newLearnNoise(models.OutgoingOptions{Learn: true}, learnBodyNoiseOf(rng), urlNoise)
 		var perTest, session []*models.Mock
 		for i := 0; i < 2+rng.Intn(14); i++ {
 			method := []string{"GET", "POST"}[rng.Intn(2)]
-			m := learnRecorded(fmt.Sprintf("r%d-%d", round, i), time.Duration(rng.Intn(4)), method, paths[rng.Intn(len(paths))], "", nil, `{}`)
-			switch rng.Intn(6) {
+			body, header := learnBodyOf(rng)
+			m := learnRecorded(fmt.Sprintf("r%d-%d", round, i), time.Duration(rng.Intn(4)), method, paths[rng.Intn(len(paths))], body, header, `{}`)
+			switch rng.Intn(7) {
+			case 3:
+				m.Spec.ReqBodyNoise = map[string][]string{"body.a": {}}
 			case 0:
 				m.Spec.ReqBodyNoise = map[string][]string{"url.path.2": {}}
 			case 1:
@@ -229,8 +232,9 @@ func TestAnIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 			if len(db.perTest) > 0 && rng.Intn(3) == 0 {
 				_ = db.DeleteFilteredMock(*db.perTest[rng.Intn(len(db.perTest))])
 			}
-			in := live([]string{"GET", "POST"}[rng.Intn(2)], paths[rng.Intn(len(paths))], "", nil)
+			in := learnCallOf(rng, paths, append(slices.Clone(perTest), session...))
 			lp := liveParts(ctx, in)
+			narrows := learnNarrows(n, lp, append(slices.Clone(perTest), session...))
 			ls := n.shape(lp, sameDest)
 			r, err := h.learnReads(db, learn.TrackerFrom(ctx))
 			if err != nil {
@@ -239,8 +243,8 @@ func TestAnIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 			sc := r.scope(lp, ls, n, true)
 			want, wantOwner := exactGroup(ls, sc, false), sc.owner()
 			// Twice: the generation's second read builds the index.
-			_, _, _ = h.learnedGroupOf(db, db, learn.TrackerFrom(ctx), lp, ls, n, false)
-			got, gotOwner, err := h.learnedGroupOf(db, db, learn.TrackerFrom(ctx), lp, ls, n, false)
+			_, _, _ = h.learnedGroupOf(ctx, db, db, learn.TrackerFrom(ctx), lp, ls, n, false)
+			got, gotOwner, err := h.learnedGroupOf(ctx, db, db, learn.TrackerFrom(ctx), lp, ls, n, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -259,10 +263,16 @@ func TestAnIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 			if len(want) > 0 {
 				grouped++
 			}
+			if narrows {
+				narrowed++
+				if len(want) > 0 {
+					narrowedGrouped++
+				}
+			}
 		}
 	}
-	if grouped < compared/5 {
-		t.Fatalf("only %d of %d calls had a group: the row compares too little", grouped, compared)
+	if grouped < compared/5 || narrowed < compared/20 || narrowedGrouped < 30 {
+		t.Fatalf("%d of %d calls had a group, %d were read through a bucket their body's print narrowed, %d of those had a group: the row compares too little", grouped, compared, narrowed, narrowedGrouped)
 	}
 }
 
@@ -279,7 +289,7 @@ func TestAnIndexThatLostAMatchPanicsInVerifyMode(t *testing.T) {
 	lp := liveParts(context.Background(), in)
 	ls := n.shape(lp, sameDest)
 	for i := 0; i < 2; i++ {
-		if g, _, err := h.learnedGroupOf(db, db, nil, lp, ls, n, false); err != nil || len(g) != 1 {
+		if g, _, err := h.learnedGroupOf(context.Background(), db, db, nil, lp, ls, n, false); err != nil || len(g) != 1 {
 			t.Fatalf("group %v err %v; want mock-0", strictNames(g), err)
 		}
 	}
@@ -293,7 +303,7 @@ func TestAnIndexThatLostAMatchPanicsInVerifyMode(t *testing.T) {
 			t.Fatalf("recovered %v; want the verify mode's panic", r)
 		}
 	}()
-	_, _, _ = h.learnedGroupOf(db, db, nil, lp, ls, n, false)
+	_, _, _ = h.learnedGroupOf(context.Background(), db, db, nil, lp, ls, n, false)
 }
 
 // An index is read with the url noise it was built with: a call of the same
@@ -308,7 +318,7 @@ func TestALearnedCallReadsTheIndexOfItsOwnURLNoise(t *testing.T) {
 	in := live("GET", "/v1/item/1", "", nil)
 	lp := liveParts(context.Background(), in)
 	for i, n := range []learnNoise{masked, masked, plain, plain, masked} {
-		g, _, err := h.learnedGroupOf(db, db, nil, lp, n.shape(lp, sameDest), n, false)
+		g, _, err := h.learnedGroupOf(context.Background(), db, db, nil, lp, n.shape(lp, sameDest), n, false)
 		if err != nil || len(g) != 1 {
 			t.Fatalf("call %d: group %v err %v; want mock-0", i, strictNames(g), err)
 		}

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -43,21 +44,38 @@ func postItems(size int) []*models.Mock {
 	return mocks
 }
 
+// postStore is a store of the per-test recordings mocks: of a staging
+// generation's reads, or, with view, of an open test's that owns them
+// (viewDb), each declaring a source of no recording but where declares says
+// it may.
+func postStore(view, declares bool, mocks []*models.Mock) integrations.MockMemDb {
+	if view {
+		db := newViewDb(mocks, nil)
+		db.declares = declares
+		return db
+	}
+	db := newOwnGenDb(mocks, nil)
+	db.declares = declares
+	return db
+}
+
 // A strict POST compares only the recordings of its path whose body may be
-// its own: at 100 recordings of POST /item and at 2000 alike, a call looks at
-// one recording (each call compared every unanswered recording of the path,
-// so a replay of n calls cost n²), and the bucket is filed by its bodies
-// once. Where the replay may declare a source of a recording, which may let
-// a body field change, the call compares the whole bucket, as before.
+// its own: at 100 recordings of POST /item and at 2000 alike, of a staging
+// generation and of an open test's own, a call looks at one recording (each
+// of the open test's own is read in both its tiers' reads: two; each call
+// compared every unanswered recording of the path, so a replay of n calls
+// cost n²), and the bucket is filed by its bodies once. Where the replay may
+// declare a source of a recording, which may let a body field change, the
+// call compares the whole bucket, as before.
 func TestAStrictPOSTLooksOnlyAtTheRecordingsOfItsBody(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
 	for _, size := range []int{100, 2000} {
-		for _, declares := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%d/declares=%v", size, declares), func(t *testing.T) {
+		for _, c := range []struct{ view, declares bool }{{false, false}, {false, true}, {true, false}, {true, true}} {
+			view, declares := c.view, c.declares
+			t.Run(fmt.Sprintf("%d/view=%v/declares=%v", size, view, declares), func(t *testing.T) {
 				h := newHTTP()
-				db := newOwnGenDb(postItems(size), nil)
-				db.declares = declares
+				db := postStore(view, declares, postItems(size))
 				for i := 0; i < 2; i++ {
 					strictMatchOf(t, h, postCall("application/json", postBody(i)), db, db, nil)
 				}
@@ -72,6 +90,9 @@ func TestAStrictPOSTLooksOnlyAtTheRecordingsOfItsBody(t *testing.T) {
 				want := int64(1)
 				if declares {
 					want = int64(size - 2) // the two calls before took theirs
+				}
+				if view {
+					want *= 2
 				}
 				if visits != want {
 					t.Fatalf("a POST that is one recording of %d looked at %d; want %d", size, visits, want)
@@ -114,14 +135,15 @@ func TestAStrictPOSTIsServedTheRecordingOfItsBodyInAnotherForm(t *testing.T) {
 		{`{"n":1e2}`, `{"n":100.0}`},
 		{`{"n":1e400}`, `{"n":10e399}`},
 	} {
-		t.Run(c.live, func(t *testing.T) {
-			h := newHTTP()
-			mocks := append(postItems(8), postItem("form", "application/json", c.rec, 9*time.Millisecond))
-			db := newOwnGenDb(mocks, nil)
-			if served := strictMatchOf(t, h, postCall("application/json", c.live), db, db, nil); served == nil || served.Name != "form" {
-				t.Fatalf("served %v; want form", served)
-			}
-		})
+		for _, view := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/view=%v", c.live, view), func(t *testing.T) {
+				h := newHTTP()
+				db := postStore(view, false, append(postItems(8), postItem("form", "application/json", c.rec, 9*time.Millisecond)))
+				if served := strictMatchOf(t, h, postCall("application/json", c.live), db, db, nil); served == nil || served.Name != "form" {
+					t.Fatalf("served %v; want form", served)
+				}
+			})
+		}
 	}
 }
 
@@ -151,14 +173,16 @@ func TestAStrictPOSTOfARecordingThatComparesItsBodyOtherwiseIsServed(t *testing.
 		{"form", form, "application/x-www-form-urlencoded", "b=2&a=1", nil},
 		{"keploy.yml body noise", declared, "application/json", `{"id":"x1","extra":7}`, map[string][]string{"extra": {}}},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			h := newHTTP()
-			db := newOwnGenDb(append(postItems(8), c.rec), nil)
-			ok, served, _, err := h.matchOf(context.Background(), postCall(c.ct, c.live), db, db, nil, c.bodyNoise, nil, true, false, false, true, true)
-			if err != nil || !ok || served.Name != "it" {
-				t.Fatalf("served %v (ok %v, err %v); want it", served, ok, err)
-			}
-		})
+		for _, view := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/view=%v", c.name, view), func(t *testing.T) {
+				h := newHTTP()
+				db := postStore(view, false, append(postItems(8), c.rec))
+				ok, served, _, err := h.matchOf(context.Background(), postCall(c.ct, c.live), db, db, nil, c.bodyNoise, nil, true, false, false, true, true)
+				if err != nil || !ok || served.Name != "it" {
+					t.Fatalf("served %v (ok %v, err %v); want it", served, ok, err)
+				}
+			})
+		}
 	}
 }
 
@@ -172,9 +196,11 @@ func TestAStrictPOSTFitsBothFiledAndUnfiledRecordingsInThePoolsOrder(t *testing.
 	learned := postItem("learned", "application/json", `{"id":"x1","t":1}`, 0)
 	learned.Spec.ReqBodyNoise = map[string][]string{"body.id": {}}
 	plain := postItem("plain", "application/json", `{"id":"x2","t":1}`, time.Millisecond)
-	db := newOwnGenDb([]*models.Mock{learned, plain}, nil)
-	if served := strictMatchOf(t, newHTTP(), postCall("application/json", `{"t":1,"id":"x2"}`), db, db, nil); served == nil || served.Name != "learned" {
-		t.Fatalf("served %v; want learned, the first the call fits", served)
+	for _, view := range []bool{false, true} {
+		db := postStore(view, false, []*models.Mock{learned, plain})
+		if served := strictMatchOf(t, newHTTP(), postCall("application/json", `{"t":1,"id":"x2"}`), db, db, nil); served == nil || served.Name != "learned" {
+			t.Fatalf("view=%v: served %v; want learned, the first the call fits", view, served)
+		}
 	}
 }
 

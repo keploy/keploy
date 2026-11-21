@@ -20,57 +20,75 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// strictBodies is one bucket of a strictIndex (its byPath entry) filed by
-// the bodies of its recordings: the positions of the recordings whose body
-// compares plainly (plainPrint) by their body's print, and the positions of
-// the others (rest), each in the pool's order. A call whose body has a print
-// may be only the recordings of that print and the rest: of a recording that
-// compares its body plainly, strictDiff finds no difference in the body only
-// where the call's body has the recording's print (bodyPrint).
-type strictBodies struct {
+// bodyBucket is one bucket of an index filed by the bodies of its recordings
+// (bodyFilings.file): the positions of the recordings whose body the pass
+// compares plainly by their body's print, and the positions of the others
+// (rest), each in the bucket's order, which its positions increase in. A
+// call whose body has a print may be only the recordings of that print and
+// the rest: of a recording whose body the pass compares plainly, it finds no
+// difference in the body only where the call's body has the recording's
+// print. The strict pass files its recordings by plainPrint, the learn step
+// by learnPlainPrint.
+type bodyBucket struct {
 	byPrint map[uint64][]int
 	rest    []int
 }
 
-// strictBodyFilings counts the buckets filed by their recordings' bodies: what
-// the rows count to see that a bucket is filed once, on its first call.
-var strictBodyFilings atomic.Int64
+// bodyFilings are the buckets of one index filed by their recordings'
+// bodies, each on the first call that reads it so, kept for the index's
+// life: an index's recordings never change while it lasts (those of one
+// staging generation, of one shared part, or of one test's view). One call
+// files at a time (turn), each recording's body in turn, so a filing holds
+// one decoded body; a call whose context ends while it waits or files leaves
+// with its error, and the bucket unfiled. filings counts the buckets filed:
+// what the rows count to see that a bucket is filed once, on its first call.
+type bodyFilings struct {
+	turn    chan struct{}
+	filed   map[string]*bodyBucket
+	filings *atomic.Int64
+}
 
-// bodiesOf is the bucket key of ix filed by its recordings' bodies, filed on
-// the first call that reads it so and kept for the index's life: the index's
-// recordings are those of one staging generation, which a recording's change
-// moves. One call files at a time (bodyTurn), each recording's body in turn,
-// so a filing holds one decoded body; a call whose context ends while it
-// waits or files leaves with its error, and the bucket unfiled.
-func (ix *strictIndex) bodiesOf(ctx context.Context, key string) (*strictBodies, error) {
+func newBodyFilings(filings *atomic.Int64) *bodyFilings {
+	return &bodyFilings{turn: make(chan struct{}, 1), filed: map[string]*bodyBucket{}, filings: filings}
+}
+
+// strictBodyFilings and learnBodyFilings count the buckets the strict pass
+// and the learn step filed by their recordings' bodies.
+var strictBodyFilings, learnBodyFilings atomic.Int64
+
+// file is the bucket key of the index, its positions ps in the bucket's
+// order, filed by print: a recording's print at a position, false where the
+// pass compares that recording's body otherwise. A bucket is filed once, on
+// the first call that reads it so; key names it.
+func (f *bodyFilings) file(ctx context.Context, key string, ps []int, print func(p int) (uint64, bool)) (*bodyBucket, error) {
 	select {
-	case ix.bodyTurn <- struct{}{}:
+	case f.turn <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	defer func() { <-ix.bodyTurn }()
-	if b, ok := ix.bodies[key]; ok {
+	defer func() { <-f.turn }()
+	if b, ok := f.filed[key]; ok {
 		return b, nil
 	}
-	b := &strictBodies{byPrint: map[uint64][]int{}}
-	for _, p := range ix.byPath[key] {
+	b := &bodyBucket{byPrint: map[uint64][]int{}}
+	for _, p := range ps {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if sum, ok := plainPrint(ix.entries[p]); ok {
+		if sum, ok := print(p); ok {
 			b.byPrint[sum] = append(b.byPrint[sum], p)
 		} else {
 			b.rest = append(b.rest, p)
 		}
 	}
-	strictBodyFilings.Add(1)
-	ix.bodies[key] = b
+	f.filings.Add(1)
+	f.filed[key] = b
 	return b, nil
 }
 
 // of are the positions of the bucket a call whose body has the print sum may
-// be, in the pool's order.
-func (b *strictBodies) of(sum uint64) []int {
+// be, in the bucket's order.
+func (b *bodyBucket) of(sum uint64) []int {
 	same := b.byPrint[sum]
 	if len(b.rest) == 0 {
 		return same
@@ -84,8 +102,8 @@ func (b *strictBodies) of(sum uint64) []int {
 }
 
 // livePrint is the print of a strict call's body where its bucket is read by
-// its recordings' bodies (bodiesOf), ok false where the call compares every
-// recording of its bucket: where keploy.yml declares noise of request bodies
+// its recordings' bodies (bodyFilings.file), ok false where the call
+// compares every recording of its bucket: where keploy.yml declares noise of request bodies
 // (an entry excuses a member only the live body has, CoversAdded, or a value
 // its patterns cover), where the replay may declare a source of a recording
 // (a declared clock rule lets a field of its body change, clocksWith; the
@@ -142,8 +160,14 @@ func bodyClock(clocks map[string]models.ClockOffset) bool {
 // scalar is one redacted reports (the recorded side's), or a number does not
 // parse.
 func bodyPrint(body []byte, redacted func(string) bool) (uint64, bool) {
-	h := fnv.New64a()
 	v, isJSON := decodeJSONDoc(body)
+	return printBody(body, v, isJSON, redacted)
+}
+
+// printBody is bodyPrint of body, v its JSON document where isJSON
+// (decodeJSONDoc).
+func printBody(body []byte, v interface{}, isJSON bool, redacted func(string) bool) (uint64, bool) {
+	h := fnv.New64a()
 	if !isJSON {
 		_, _ = h.Write([]byte{'R'})
 		_, _ = h.Write(body)
