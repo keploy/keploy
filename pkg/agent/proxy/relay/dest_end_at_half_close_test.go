@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -300,12 +301,13 @@ func (c *heldClient) Read(p []byte) (int, error) {
 func (c *heldClient) NetConn() net.Conn { return c.TCPConn }
 
 // The client resets the connection as the relay forwards the destination's
-// FIN: its socket could not say so before the half-close (closedBeforeFIN),
-// and the half-close of the client conn then fails, the connection being over.
+// FIN. Windows' socket says so before the half-close (closedBeforeFIN), and
+// the relay takes the connection as over; Linux's and macOS's are not asked,
+// and their half-close of the client conn fails, the connection being over.
 // No FIN went, so the client's socket is not told of one (noteClientFINSent):
 // told, a Windows socket would take one of its bytes in flight for a FIN the
-// client never got. The relay drains as for a half-close, and its log says the
-// FIN was not forwarded.
+// client never got. On every OS the relay drains as for a half-close, and its
+// log says the FIN was not forwarded.
 func TestAClientsResetAsTheDestinationsFINIsForwardedIsNoFINSent(t *testing.T) {
 	app, proxyClient := loopbackPair(t)
 	proxyServer, server := loopbackPair(t)
@@ -336,7 +338,7 @@ func TestAClientsResetAsTheDestinationsFINIsForwardedIsNoFINSent(t *testing.T) {
 		}
 	}}
 	r := New(cfg, client, connseq.NewUpstream(proxyServer))
-	s := &finSentRecorder{}
+	s := &finSentRecorder{inner: r.client}
 	r.client = s
 	done := runRelay(t, r)
 	if err := server.(*net.TCPConn).CloseWrite(); err != nil {
@@ -368,6 +370,51 @@ func TestAClientsResetAsTheDestinationsFINIsForwardedIsNoFINSent(t *testing.T) {
 	}
 	if over, ok := entries[0].ContextMap()["over"]; !ok || over == "" {
 		t.Fatalf("the relay drained with the FIN forwarded (fields %v), want it not forwarded: the client's connection was over", entries[0].ContextMap())
+	}
+	if got := s.asked.Load(); got != 1 {
+		t.Fatalf("the client's socket was asked %d times before the half-close, want once", got)
+	}
+	if got := s.toldTimes(); got != 0 {
+		t.Fatalf("the client's socket was told %d times of a FIN that was not sent, want none", got)
+	}
+}
+
+// A client socket that says its connection closed before the proxy's FIN
+// (closedBeforeFIN) is not half-closed, on every OS: the relay takes the
+// connection as over, as a failed half-close says on Linux and macOS, where a
+// half-close would succeed on Windows and send nothing. Here the client is in
+// fact open, so the FIN a half-close would send would reach it: it reads
+// none. The client's socket is not told of a FIN, and the relay drains as for
+// a half-close, its log saying the FIN was not forwarded.
+func TestAClientSocketThatSaysItsConnectionClosedIsNotHalfClosed(t *testing.T) {
+	app, proxyClient := loopbackPair(t)
+	proxyServer, server := loopbackPair(t)
+	t.Cleanup(func() { _ = app.Close(); _ = proxyClient.Close(); _ = proxyServer.Close(); _ = server.Close() })
+	const drainMsg = "draining the opposite direction"
+	core, logs := observer.New(zapcore.DebugLevel)
+	r := New(Config{Logger: zap.New(core)}, proxyClient, connseq.NewUpstream(proxyServer))
+	s := &finSentRecorder{closed: true}
+	r.client = s
+	done := runRelay(t, r)
+	if err := server.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for logs.FilterMessageSnippet(drainMsg).Len() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = app.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if n, err := app.Read(make([]byte, 1)); n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("the client read %d byte(s), %v; want nothing, no FIN sent it", n, err)
+	}
+	_ = app.Close()
+	awaitDone(t, done, "the relay did not end")
+	entries := logs.FilterMessageSnippet(drainMsg).All()
+	if len(entries) == 0 {
+		t.Fatal("the relay did not drain for the destination's FIN")
+	}
+	if over, ok := entries[0].ContextMap()["over"].(string); !ok || !strings.Contains(over, "says its connection is closed") {
+		t.Fatalf("the relay drained with fields %v, want the FIN not forwarded, the client's socket saying its connection closed", entries[0].ContextMap())
 	}
 	if got := s.asked.Load(); got != 1 {
 		t.Fatalf("the client's socket was asked %d times before the half-close, want once", got)
