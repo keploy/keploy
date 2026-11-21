@@ -180,10 +180,12 @@ func TestMockManager_Wave2_BaseTimeStagingDoesNotFireFirstTest(t *testing.T) {
 // TestSetMocksWithWindow_InitialStaging_SeedsStartupTree covers the
 // Wave-3 C1/C3/H3 composite behaviour during Runner/Replayer's initial
 // BaseTime staging call. Pre-first-test fire, tier-aware parsers (the
-// v3 dispatcher) route every live query to the startup engine with no
-// fallback — so EVERY mock visible to the app during bootstrap must be
-// reachable via GetStartupMocks. Both per-test and session-tagged
-// inputs are copied into the startup pool here; the session tree is
+// v3 dispatcher) route every live query to the startup engine. With no
+// first recorded test known, as here, EVERY mock visible to the app during
+// bootstrap is reachable via GetStartupMocks: both per-test and
+// session-tagged inputs are copied into the startup pool (with a first test
+// known, only the session mocks recorded before it are, sessionMockForBoot;
+// see TestInitialStagingCopiesOnlyStartUpSessionMocksIntoTheStartUpTier); the session tree is
 // still populated normally so matchers that read GetSessionScopedMocks
 // directly see session-only (kept for post-first-test operation when
 // the dispatcher routes live queries to the session tier).
