@@ -30,7 +30,7 @@ func TestTheAgentDebugFileIsNotOpenedThroughALinkOutOfItsFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("KEPLOY_DEBUG_FILE", path)
-	f, sink := maybeAttachDebugFileSink(zap.NewNop())
+	f, sink := maybeAttachDebugFileSink(zap.NewNop(), []string{"agent", "--debug=true"})
 	if f != nil || sink != nil {
 		if sink != nil {
 			_ = sink.Flush()

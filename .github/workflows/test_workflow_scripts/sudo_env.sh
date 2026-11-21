@@ -39,8 +39,9 @@ VERIFY_LINE="the exact view's verify mode is on in this agent"
 # AGENT_LOG is for a compose app whose command attaches to its own service
 # alone (`docker compose up app`): compose then prints none of the agent's
 # lines, and the agent writes them to its debug file in the keploy folder
-# (keploy/agent-debug.log, KEPLOY_DEBUG_FILE), which each agent empties as it
-# starts, and creates readable by all (0644). The line passes there too. verify_ran removes AGENT_LOG once it has
+# (keploy/agent-debug.log, KEPLOY_DEBUG_FILE) when the run asks for it
+# (--debug), which each agent empties as it starts, and creates readable by all
+# (0644). The line passes there too. verify_ran removes AGENT_LOG once it has
 # read it, so a later run's check reads only what that run's own agent wrote,
 # and fails when it cannot remove it.
 verify_ran() {

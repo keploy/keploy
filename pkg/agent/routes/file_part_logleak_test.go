@@ -57,3 +57,48 @@ func TestHandleIncoming_LogsNoUploadsFileName(t *testing.T) {
 	}
 	logleak.Check(t, logs, s, "HandleIncoming streaming an upload")
 }
+
+// Streaming a test case whose upload file cannot be opened (or whose
+// Keploy-Test-Name header carries a value) must log neither the raw file path
+// nor the raw header value.
+func TestHandleIncoming_LogsNoUploadPathOnOpenErrorOrTestNameHeader(t *testing.T) {
+	const s = logleak.Canary
+	syncmgr.Get().SetWatermark(nil)
+	missingPath := filepath.Join(t.TempDir(), "passport-"+s+".pdf")
+	start := newStretch()
+	tc := &models.TestCase{
+		Name:          "header-" + s,
+		HasBinaryFile: true,
+		HTTPReq: models.HTTPReq{Timestamp: start, Form: []models.FormData{
+			{Key: "upload", FileNames: []string{"passport-" + s + ".pdf"}, Paths: []string{missingPath}},
+		}},
+		HTTPResp: models.HTTPResp{Timestamp: start.Add(time.Millisecond)},
+	}
+	tcs := make(chan *models.TestCase, 1)
+	logger, logs := logleak.Observe()
+	a := &Agent{logger: logger, svc: incomingSvc{tc: tcs}}
+	srv := httptest.NewServer(http.HandlerFunc(a.HandleIncoming))
+	t.Cleanup(srv.Close)
+	body, _ := json.Marshal(models.IncomingReq{})
+	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	tcs <- tc
+	close(tcs)
+	_, _ = streamedNamesOrDrain(resp)
+	if logs.FilterMessage("Starting binary file streaming for test case").Len() == 0 {
+		t.Fatal("precondition: start-streaming debug line not logged")
+	}
+	if logs.FilterMessage("failed to open file for streaming").Len() == 0 {
+		t.Fatal("precondition: open-error line not logged")
+	}
+	logleak.Check(t, logs, s, "HandleIncoming failed binary file open")
+}
+
+func streamedNamesOrDrain(resp *http.Response) ([]byte, error) {
+	var buf bytes.Buffer
+	_, err := buf.ReadFrom(resp.Body)
+	return buf.Bytes(), err
+}

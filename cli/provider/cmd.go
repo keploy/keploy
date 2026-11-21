@@ -428,6 +428,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 	case "agent":
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
+		if cmd.Flags().Lookup("debug-file") == nil {
+			cmd.Flags().Bool("debug-file", false, "Write this run's DEBUG log to the file KEPLOY_DEBUG_FILE names (--debug does it too)")
+			if err := cmd.Flags().MarkHidden("debug-file"); err != nil {
+				c.logger.Debug("failed to hide the debug-file flag", zap.Error(err))
+			}
+		}
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pid of the keploy client process; the launcher passes os.Getpid())")
 		cmd.Flags().String("client-pid-ns", "", "The pid namespace the keploy client runs in, beside --client-pid (set by keploy itself)")
