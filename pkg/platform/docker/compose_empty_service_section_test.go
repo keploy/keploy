@@ -1126,7 +1126,7 @@ services:
       - target: 80
         published: *pub
 `)
-		if len(ports) != 1 || ports[0] != "8080:80" {
+		if len(ports) != 1 || ports[0] != "{target: 80, published: 8080}" {
 			t.Errorf("published read through an alias came back %#v; the host port "+
 				"is dropped and only the container port is published", ports)
 		}
