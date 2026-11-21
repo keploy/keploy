@@ -31,6 +31,8 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/engine"
+	"go.keploy.io/server/v3/utils"
 )
 
 // healthPollInterval is how often the --health-url probe is retried while waiting for 2xx.
@@ -89,6 +91,34 @@ func httpHealthPoll(ctx context.Context, url string) bool {
 // On unparseable input we return a fixed placeholder — the operator
 // already gets the raw reason via the separate "reason" field in the
 // invalid-URL Error log, so we don't need to echo the raw string back.
+// targetLogName is a URL that names where the tests or a probe go (a base
+// path, a --health-url) as a log line names it: its scheme, its host by its
+// labels' shape beside its tag in the session ctx carries
+// (models.HostLogName: an IP address whole, with no tag) and its path's shape
+// (utils.URLPathShape), never its user, query or fragment. A host name is
+// traffic (an application's own name, a tenant's subdomain): the console and
+// the report name it whole. "" for "", and "<unparseable-url-withheld>" for
+// one that does not parse.
+func targetLogName(ctx context.Context, raw string) string {
+	return targetLogNameIn(models.LogKeys(ctx), raw)
+}
+
+// targetLogNameIn is targetLogName under keys (the process's for nil).
+func targetLogNameIn(keys *models.LogKeySession, raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u == nil {
+		return "<unparseable-url-withheld>"
+	}
+	out := keys.HostLogName(u.Host) + utils.URLPathShape(u)
+	if u.Scheme != "" {
+		out = u.Scheme + "://" + out
+	}
+	return out
+}
+
 func sanitizeHealthURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u == nil {
@@ -113,7 +143,13 @@ func sanitizeHealthURL(raw string) string {
 func validateHealthURL(s string) (string, bool) {
 	u, err := url.Parse(s)
 	if err != nil {
-		return err.Error(), false
+		// Why, never the URL: url.Parse's error quotes the URL whole, its
+		// host too, and the reason is logged (a host name is traffic).
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return ue.Err.Error(), false
+		}
+		return "not a URL", false
 	}
 	switch u.Scheme {
 	case "http", "https":
@@ -130,23 +166,25 @@ func validateHealthURL(s string) (string, bool) {
 
 // dockerPublishedHostPort returns the first host (ip, port) that a docker
 // `-p/--publish` mapping in cmd exposes on the host, so a docker-run replay can
-// gate on the app actually listening before firing requests. It reads each
+// gate on the app actually listening before firing requests. The mappings are
+// those of a docker or podman run (or create) in cmd, read from its own
+// options before the image (engine.Publishes): a native app's -p, or a
+// container's own argument after its image, is no mapping, and often a
+// password (./app -p <password>, sshpass -p <password>). It reads each
 // mapping as the shell hands it to docker (shellWord), then as docker does
 // (publishedHostAddr): `hostPort:containerPort` and
 // `hostIP:hostPort:containerPort`, an IPv6 hostIP bracketed or not, with an
 // optional `/tcp` suffix. It returns ok=false — keeping the pure --delay
-// behavior — for native apps (no -p), container-only publishes (random host
+// behavior — for native apps, container-only publishes (random host
 // port), port ranges and UDP or SCTP ports, so it never guesses a wrong port
-// to wait on. err is the first mapping it cannot read a host address from.
+// to wait on. err names the first mapping it cannot read a host address from
+// by its place among the command's mappings alone: the mapping is the user's
+// command, and its variables keploy's environment, which no log line takes.
 func dockerPublishedHostPort(cmd string) (host, port string, ok bool, err error) {
-	fields := strings.Fields(cmd)
-	for i := 0; i+1 < len(fields); i++ {
-		if fields[i] != "-p" && fields[i] != "--publish" {
-			continue
-		}
-		h, p, waitable, err := publishedHostAddr(shellWord(fields[i+1]))
+	for n, spec := range engine.Publishes(cmd) {
+		h, p, waitable, err := publishedHostAddr(shellWord(spec))
 		if err != nil {
-			return "", "", false, fmt.Errorf("-p %s: %w", fields[i+1], err)
+			return "", "", false, fmt.Errorf("docker reads no host address in the command's port mapping number %d (its -p or --publish)", n+1)
 		}
 		if waitable {
 			return h, p, true, nil
@@ -657,10 +695,10 @@ func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Confi
 			}
 			logger.Warn("app address did not accept a connection within the ceiling; firing tests anyway (replay may see status_code got=0)",
 				zap.String("gate", label),
-				zap.String("host", host),
+				zap.String("host", models.HostLogName(ctx, host)),
 				zap.String("port", port),
 				zap.Duration("ceiling", ceiling),
-				zap.Error(err))
+				zap.Error(models.HostsInError(ctx, err, host)))
 			return true
 		}
 		httpCeiling = time.Until(deadline)
@@ -690,7 +728,7 @@ func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Confi
 		// host cannot reach it (only on 127.0.0.1 behind a published port):
 		// it would never answer, so probe the set's next test instead.
 		logger.Debug("readiness gate: the host cannot reach the probed test's address; probing the next test",
-			zap.String("gate", label), zap.String("probeHost", probe.host), zap.String("probePort", probe.port))
+			zap.String("gate", label), zap.String("probeHost", models.HostLogName(ctx, probe.host)), zap.String("probePort", probe.port))
 		if probe = probe.src.nextTarget(hctx); !probe.ok {
 			logger.Debug("readiness gate: no HTTP test the host can reach; the TCP-accept stage stands", zap.String("gate", label))
 			return ctx.Err() == nil
@@ -702,17 +740,21 @@ func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Confi
 // (the application exited, or the user stopped keploy): it has no ceiling, so
 // an application that starts slowly on a loaded machine is waited for however
 // long it takes. When the first try is refused it says, once, that it waits
-// and what for.
+// and what for: the address's host name by its labels' shape beside its tag
+// in ctx's session (models.HostLogName; an IP address whole), in its line and
+// in the dial's error. A host name is traffic.
 func waitForAccept(ctx context.Context, logger *zap.Logger, label, host, port string) error {
 	addr := net.JoinHostPort(host, port)
 	return pkg.WaitForAccept(ctx, logger, addr, func(err error) {
-		logger.Info(fmt.Sprintf("waiting for the application to accept a connection on %s before the first test; the wait ends when it does, when the application exits, or when keploy is stopped", addr),
-			zap.String("gate", label), zap.Error(err))
+		logger.Info(fmt.Sprintf("waiting for the application to accept a connection on %s before the first test; the wait ends when it does, when the application exits, or when keploy is stopped", models.HostLogName(ctx, addr)),
+			zap.String("gate", label), zap.Error(models.HostsInError(ctx, err, host)))
 	})
 }
 
 // reportHTTPGate logs the outcome of gateOnAppAddress's HTTP stage against
-// probe and returns what the gate returns.
+// probe and returns what the gate returns. Its lines name the probed host by
+// its labels' shape beside its tag in ctx's session (models.HostLogName; an
+// IP address whole). err is the stage's end (ctx's), which names no host.
 func reportHTTPGate(ctx context.Context, logger *zap.Logger, label string, cfg *config.Config, ceiling time.Duration, probe httpProbeTarget, err error) bool {
 	if err != nil {
 		if ctx.Err() != nil {
@@ -720,7 +762,7 @@ func reportHTTPGate(ctx context.Context, logger *zap.Logger, label string, cfg *
 		}
 		logger.Warn("app accepted TCP but never completed an HTTP round-trip within --health-poll-timeout; firing tests anyway (replay may see status_code got=0)",
 			zap.String("gate", label),
-			zap.String("probeHost", probe.host),
+			zap.String("probeHost", models.HostLogName(ctx, probe.host)),
 			zap.String("probePort", probe.port),
 			zap.String("probePath", healthProbePathForLog(cfg.Test.HealthPath)),
 			zap.Duration("ceiling", ceiling),
@@ -729,7 +771,7 @@ func reportHTTPGate(ctx context.Context, logger *zap.Logger, label string, cfg *
 	}
 	logger.Debug("app readiness confirmed by a completed HTTP round-trip",
 		zap.String("gate", label),
-		zap.String("probeHost", probe.host),
+		zap.String("probeHost", models.HostLogName(ctx, probe.host)),
 		zap.String("probePort", probe.port),
 		zap.String("probePath", healthProbePathForLog(cfg.Test.HealthPath)))
 	return true
@@ -836,7 +878,7 @@ func (s *probeTargetSource) nextTarget(ctx context.Context) httpProbeTarget {
 		s.seen[key] = true
 		if s.reach != nil && probeTargetUnreachable(ctx, s.reach, host, port, tc.AppPort) {
 			s.logger.Debug("readiness gate: not probing a test the host cannot reach",
-				zap.String("testcase", tc.Name), zap.String("address", addr), zap.Uint16("appPort", tc.AppPort))
+				zap.String("testcase", tc.Name), zap.String("address", models.HostLogName(ctx, addr)), zap.Uint16("appPort", tc.AppPort))
 			continue
 		}
 		return httpProbeTarget{scheme: scheme, host: host, port: port, appPort: tc.AppPort, ok: true, src: s}
@@ -952,7 +994,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 	if healthURL != "" {
 		if reason, ok := validateHealthURL(healthURL); !ok {
 			logger.Error("invalid --health-url; falling back to fixed delay",
-				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+				zap.String("healthUrl", targetLogName(ctx, sanitizeHealthURL(healthURL))),
 				zap.String("reason", reason),
 				zap.String("next_step", "--health-url must be a full URL with scheme (http:// or https://) and host — fix it or omit to use --delay only"),
 			)
@@ -966,13 +1008,13 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			pollCeiling = config.DefaultHealthPollTimeout
 		}
 		logger.Info("polling application health endpoint before firing tests",
-			zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+			zap.String("healthUrl", targetLogName(ctx, sanitizeHealthURL(healthURL))),
 			zap.Duration("pollTimeout", pollCeiling),
 		)
 		began := time.Now()
 		if pollHealthURL(ctx, healthURL, pollCeiling) {
 			logger.Debug("health endpoint reported 2xx; proceeding",
-				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+				zap.String("healthUrl", targetLogName(ctx, sanitizeHealthURL(healthURL))),
 			)
 			return true
 		}
@@ -984,7 +1026,7 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			// it would end a wait with no limit: the fixed --delay, then
 			// the first test.
 			logger.Info("health probe timed out, falling back to fixed delay — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) or point --health-url at an endpoint that returns 2xx sooner",
-				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+				zap.String("healthUrl", targetLogName(ctx, sanitizeHealthURL(healthURL))),
 				zap.Duration("pollTimeout", pollCeiling),
 				zap.Duration("fallbackDelay", delay),
 			)
@@ -1002,14 +1044,14 @@ func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config
 			// URL, which the user asked for, stays what the wait is for,
 			// and it says every so often that it still waits.
 			logger.Info("the health URL has not answered 2xx within the poll timeout, and probing the app's address is disabled by configuration; the first test waits for the health URL to answer 2xx, the application to exit, or keploy to be stopped",
-				zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+				zap.String("healthUrl", targetLogName(ctx, sanitizeHealthURL(healthURL))),
 				zap.Duration("pollTimeout", pollCeiling),
 			)
-			defer sayStillWaiting(ctx, logger, "answer 2xx at "+sanitizeHealthURL(healthURL), healthURLWaitAddr(healthURL), began)()
+			defer sayStillWaiting(ctx, logger, "answer 2xx at "+targetLogName(ctx, sanitizeHealthURL(healthURL)), healthURLWaitAddr(healthURL), began)()
 			return pollHealthURL(ctx, healthURL, 0)
 		}
 		logger.Info("the health URL has not answered 2xx within the poll timeout; the first test waits instead for the application to accept a connection on its port — raise --health-poll-timeout (or test.healthPollTimeout in keploy.yml) to wait longer for the health URL",
-			zap.String("healthUrl", sanitizeHealthURL(healthURL)),
+			zap.String("healthUrl", targetLogName(ctx, sanitizeHealthURL(healthURL))),
 			zap.Duration("pollTimeout", pollCeiling),
 		)
 		return gateOnAppAddresses(ctx, logger, cfg, probe, healthURL)
@@ -1144,9 +1186,12 @@ func gateOnAppAddresses(ctx context.Context, logger *zap.Logger, cfg *config.Con
 	if addr := strings.TrimSpace(cfg.Test.AppReadyProbeAddr); addr != "" {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil || port == "" {
+			// Its error names the address ("address <addr>: missing port
+			// in address"): by its host's shape beside its tag, as the
+			// field does.
 			logger.Error("invalid test.appReadyProbeAddr; expected host:port — skipping the readiness probe",
-				zap.String("addr", addr),
-				zap.Error(err))
+				zap.String("addr", models.HostLogName(ctx, addr)),
+				zap.Error(models.HostsInError(ctx, utils.WithholdInput(err), addr)))
 		} else {
 			if host == "" {
 				host = "127.0.0.1" // ":<port>" shorthand → localhost, parity with the docker gate

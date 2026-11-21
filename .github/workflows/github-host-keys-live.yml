@@ -1,0 +1,36 @@
+name: GitHub host keys (live)
+
+# The pinned SSH host keys (.github/ssh/github_known_hosts) against GitHub
+# itself, with github-host-keys-live.sh: the pinned keys are the ones
+# api.github.com/meta lists, and github.com's SSH server proves each of them.
+# It fails when GitHub's published keys, or the keys its server proves, differ
+# from the pin. It needs the network, so it runs weekly, on demand, and on a
+# pull request that changes the pin or this check, never in a job that builds.
+# The offline checks of the pin are github-host-keys.yml.
+
+on:
+  pull_request:
+    paths:
+      - '.github/ssh/**'
+      - '.github/workflows/test_workflow_scripts/github-host-keys-live.sh'
+      - '.github/workflows/github-host-keys-live.yml'
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    # One API read and four SSH handshakes, each tried at most three times:
+    # at worst about 11 minutes of connect timeouts and waits between tries.
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the pinned keys against GitHub (its published list, and an SSH handshake per key)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash .github/workflows/test_workflow_scripts/github-host-keys-live.sh

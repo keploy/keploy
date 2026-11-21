@@ -30,6 +30,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -227,6 +228,29 @@ type Agent struct {
 	// taking scopeMu.
 	provenMu sync.Mutex
 	proven   provenWire
+	// runsOwn is every loss of a session's own the wire made the run's
+	// (provenWire.ownedRun: a cut-short end's, or a close counted in a
+	// worker's gap between tests), for the agent's life, under provenMu. No
+	// count of the proxy's holds one, so CaptureLosses adds them: the run's
+	// own verdict (mock replay's and mock record's count of what the agent
+	// could not capture while the test command ran) has every loss of the
+	// run, those charged to no test among them. A session's reset keeps it,
+	// as every count is kept.
+	runsOwn models.CaptureLosses
+	// session numbers the agent's sessions, each reset moving it on (0
+	// before the first), with the wire held: the log of a loss a session
+	// left unread names the session it was counted in (resetSession).
+	session uint64
+	// setRun is the keploy test run whose sessions sessionSets names
+	// (models.TestSetSession.Run), "" for none, and setRunFrom its first
+	// session: sessionSets has, for each of its latest sessions
+	// (models.MaxSessionSets), the test set it served. earlierSets are the
+	// losses of that run's earlier sessions that keploy test's next take
+	// returns, each naming its set (keepEarlierSetLocked). Under provenMu.
+	setRun      string
+	setRunFrom  uint64
+	sessionSets map[uint64]string
+	earlierSets []models.OwnedCaptureLoss
 	// instanceGen is, for each keploy instance id, the generation its next
 	// claim gets (coreAgent.InstanceValue), for the agent's life: a session's
 	// reset keeps it, so no claim of an id is stamped with the value of an
@@ -714,10 +738,12 @@ func (a *Agent) resetScopeState() {
 // beginLogKeySession begins a session's key for the path tags the agent's
 // lines name its calls by (models.LogKeySession), as a recording or a
 // replay's session begins: the ingress takes each connection from now under
-// it (SetLogKeySession), and the returned ctx, which the proxy's Record or
-// Mock is given, carries it to the proxy's session, whose connections are
-// tagged under it. A session another program serves through this agent's
-// proxy at the same time keeps the key of its own.
+// it (SetLogKeySession), the registry logs the processes the session's calls
+// come from under it (starts.Registry.SetLogKeySession), and the returned
+// ctx, which the proxy's Record or Mock is given, carries it to the proxy's
+// session, whose connections are tagged under it. A session another
+// program serves through this agent's proxy at the same time keeps the key
+// of its own.
 func (a *Agent) beginLogKeySession(ctx context.Context) context.Context {
 	keys := models.NewLogKeySession()
 	if s, ok := a.IncomingProxy.(interface {
@@ -725,6 +751,9 @@ func (a *Agent) beginLogKeySession(ctx context.Context) context.Context {
 	}); ok {
 		s.SetLogKeySession(keys)
 	}
+	// The record log names each process a call came from once, its command
+	// line's words tagged under the session (starts.Registry).
+	starts.Default.SetLogKeySession(keys)
 	return models.WithLogKeySession(ctx, keys)
 }
 
@@ -1039,10 +1068,11 @@ func (a *Agent) letProxyPortsMove() {
 
 func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	// keploy test's read of what was consumed after a set's last test, with
-	// the proven switch off, which reads no misses there: every answer held
-	// for a later place of the set is due (coreAgent.RunSetEnder). It files
-	// nothing: no parser holds a call for a set whose client reads no set's
-	// end (models.OutgoingOptions.ReadsSetEnds).
+	// the proven switch off, which reads the set's misses only after it, for
+	// the set's report: every answer held for a later place of the set is
+	// due (coreAgent.RunSetEnder). It files nothing: no parser holds a call
+	// for a set whose client does not say it reads each set's end
+	// (models.OutgoingOptions.ReadsSetEnds).
 	if models.SetEndRead(ctx) {
 		if e, ok := a.Proxy.(coreAgent.RunSetEnder); ok {
 			e.EndRunSet()
@@ -1408,6 +1438,13 @@ func (a *Agent) wireAppClock() {
 			run = realAppClockRun
 		}
 		rs.SetAppClockRun(run)
+	}
+	if ss, ok := a.Proxy.(coreAgent.AppClockShownSetter); ok {
+		var shown func(from, to time.Time) ([]learn.Span, bool)
+		if sr, tells := ActiveHooks.(AppClockShownReader); tells && reads {
+			shown = sr.AppClockShown
+		}
+		ss.SetAppClockShown(shown)
 	}
 	if reads {
 		s.SetAppClock(r.AppClock)

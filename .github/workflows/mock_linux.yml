@@ -184,7 +184,9 @@ jobs:
       # consume-once mocks (KEPLOY_STRICT_MOCK_WINDOW=1), a mock a test
       # consumed must not be served again after that test's end, on the
       # worker's pid; a control shows the same call is answered while the
-      # mock is unconsumed.
+      # mock is unconsumed. An HTTP/1.1 pipeline (20 reads of the counter in
+      # one write on one connection) must be recorded whole and replayed in
+      # turn.
       - name: Run mock-mode stateful-dependency e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -641,6 +643,21 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/body-kind/body-kind-linux.sh"
 
+      # A time field under a map keyed by ids (forty options keyed by UUIDs)
+      # is written into its test case once, as body.options.{id}.departAt,
+      # not once per id; keploy test honours it, and a field that is not a
+      # time stays compared under every id, including one whose name begins
+      # with another option's time field. A key the recording lacks (a new
+      # id, the time field under an id that did not carry it) is still a
+      # difference.
+      - name: Run noise id-keys e2e (one noise entry for a field under every id key)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/noise-id-keys/noise-id-keys-linux.sh"
+
       # A daemon the app starts (a child that starts it in a session of its
       # own and exits, as pg_ctl start does) stays a member of the run under
       # the proven switch (P146): its call is recorded, and replayed from its
@@ -657,7 +674,8 @@ jobs:
   # spellings) and keploy.yml's bypassRules in keploy record and keploy test,
   # and --disable-tele (no telemetry or crash-report lookup, in the CLI and in
   # the agent it starts); and a clean stop of the agent, which forces
-  # nothing. Its own job: the proven strict-HTTP job above is near its
+  # nothing; and the name keploy record gives an app it was given no name
+  # for. Its own job: the proven strict-HTTP job above is near its
   # timeout, as is mock-mode's. The disable-tele leg builds this checkout
   # with a crash tag, so Go comes from keploy's go.mod.
   cli_flags_linux:
@@ -707,6 +725,20 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/pass_through_ports/pass-through-ports-linux.sh"
+
+      # The name keploy record gives an app it was given no name for, in real
+      # git checkouts: the origin remote's repository name at the top folder,
+      # that name and the folder's path inside the repository in a mktemp
+      # folder of the checkout (it was the folder alone: "tmp.XXXXXXXXXX"),
+      # and the folder's name outside any repository. An existing project's
+      # keploy.yml that names no app keeps the folder's name, which keploy
+      # writes into it once, every other byte kept.
+      - name: Run record app-name e2e (named after the git repository)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/record-app-name-linux.sh"
 
       # keploy record --disable-tele looks no telemetry host up: the native
       # agent, a keploy process of its own that pings telemetry at its start,
@@ -862,7 +894,9 @@ jobs:
   # proxy's count of its accepts, through the proxy's real accept loop and the
   # agent's wait (what a test's end waits on). And a port the bind hooks
   # moved is held by keploy's park listener from the app's bind (BPF
-  # sk_lookup) until its forwarder listens. Root-only, so they are
+  # sk_lookup) until its forwarder listens. And a keploy command that runs
+  # the agent's own file (a verb run with `docker exec` in the agent's
+  # container) takes no place in the PID maps. Root-only, so they are
   # behind the pidmap_integration and proxyconns_integration tags (two
   # binaries) and never in `go test ./...`. amd64 and arm64: each runs its
   # own architecture's object.
@@ -914,10 +948,10 @@ jobs:
           # Both binaries run, whichever fails: one's failure does not hide
           # the other's results.
           rc=0
-          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestTheBindHooksMoveABindWhereTheWarningSays|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss|TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt|TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer|TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss|TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest|TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive|TestUnderTheSwitchABoundClientsAnswerIsCounted|TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff|TestUnderTheSwitchTheAgentSeesTheApplicationListen|TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime|TestUnderTheSwitchTheAgentCountsARestartAndNamesIt|TestARunTheMarkClearsAroundIsLetGoOfAtItsExit|TestAWindowRunOutlivingAFreshRunIsAFalseRestartToday|TestClearingAMapItsKeysChurnInGoesOn|TestTheSweepDeletesTheEntriesOfProcessesThatAreGone|TestTheSweepKeepsAZombiesEntriesUntilItIsReaped|TestTheKernelSaysWhetherItCountsSkippedRuns|TestTheHooksSayHowTheApplicationReleasedItsConnection|TestAWorkersForksAreInItsInstanceUntilItEnds|TestAnInstanceIsNotGivenToAProcessThatIsGone|TestAnIdsLostForksAreZeroedWhenItIsGiven|TestALaterClaimOfAnIdCarriesItsGeneration|TestTwoWorkersForksAreEachInItsOwnInstance|TestAnAgentInAPIDNamespaceOfItsOwnGivesNoInstance|TestUnloadingTheHooksDetachesTheInstanceFork' -test.v | tee /tmp/pidmap.out || rc=1
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestKeploysOwnCommandInTheAgentsContainerTakesNoPlace|TestTheBindHooksMoveABindWhereTheWarningSays|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss|TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt|TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer|TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss|TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest|TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive|TestUnderTheSwitchABoundClientsAnswerIsCounted|TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff|TestUnderTheSwitchTheAgentSeesTheApplicationListen|TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime|TestUnderTheSwitchTheAgentCountsARestartAndNamesIt|TestARunTheMarkClearsAroundIsLetGoOfAtItsExit|TestAWindowRunOutlivingAFreshRunIsAFalseRestartToday|TestClearingAMapItsKeysChurnInGoesOn|TestTheSweepDeletesTheEntriesOfProcessesThatAreGone|TestTheSweepKeepsAZombiesEntriesUntilItIsReaped|TestTheKernelSaysWhetherItCountsSkippedRuns|TestTheHooksSayHowTheApplicationReleasedItsConnection|TestAWorkersForksAreInItsInstanceUntilItEnds|TestAnInstanceIsNotGivenToAProcessThatIsGone|TestAnIdsLostForksAreZeroedWhenItIsGiven|TestALaterClaimOfAnIdCarriesItsGeneration|TestTwoWorkersForksAreEachInItsOwnInstance|TestAnAgentInAPIDNamespaceOfItsOwnGivesNoInstance|TestUnloadingTheHooksDetachesTheInstanceFork' -test.v | tee /tmp/pidmap.out || rc=1
           sudo /tmp/ingresshold.test -test.run 'TestAMovedPortIsHeldByTheParkUntilItsForwarderListens|TestAPortWhoseSocketWentIsNotHeld|TestAHoldThatCannotStartSaysTheWindowItLeaves|TestAYieldedPortIsItsListenersAndAStoppedParkHoldsNothing|TestTheHoldClosesOnlyBetweenItsCalls|TestTheHoldReadsTheIPv6AddressesTheAppsBindsTake|TestTheLookupParksWhereTheGoNotesSayTheAppsSocketsTakeCalls' -test.v | tee -a /tmp/pidmap.out || rc=1
           sudo /tmp/proxyconns.test -test.run 'TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified|TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff|TestTCPDNSNeverStopsTheProxyRouting|TestTwoConnectionsOnOnePortReachTheirOwnDependencies|TestAReusedSourcePortKeepsEachConnectionsOwnPairing|TestADroppedAppConnEventEndsAParkedWait|TestTheProxyReadsEachConnectionsOwnInstance' -test.v | tee -a /tmp/pidmap.out || rc=1
-          for t in TestAProcessThePIDMapRefusesIsReported TestTheBindHooksMoveABindWhereTheWarningSays TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive TestUnderTheSwitchABoundClientsAnswerIsCounted TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff TestUnderTheSwitchTheAgentSeesTheApplicationListen TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime TestUnderTheSwitchTheAgentCountsARestartAndNamesIt TestARunTheMarkClearsAroundIsLetGoOfAtItsExit TestAWindowRunOutlivingAFreshRunIsAFalseRestartToday TestClearingAMapItsKeysChurnInGoesOn TestTheSweepDeletesTheEntriesOfProcessesThatAreGone TestTheSweepKeepsAZombiesEntriesUntilItIsReaped TestTheKernelSaysWhetherItCountsSkippedRuns TestTheHooksSayHowTheApplicationReleasedItsConnection TestAWorkersForksAreInItsInstanceUntilItEnds TestAnInstanceIsNotGivenToAProcessThatIsGone TestAnIdsLostForksAreZeroedWhenItIsGiven TestALaterClaimOfAnIdCarriesItsGeneration TestTwoWorkersForksAreEachInItsOwnInstance TestAnAgentInAPIDNamespaceOfItsOwnGivesNoInstance TestUnloadingTheHooksDetachesTheInstanceFork TestAMovedPortIsHeldByTheParkUntilItsForwarderListens TestAPortWhoseSocketWentIsNotHeld TestAHoldThatCannotStartSaysTheWindowItLeaves TestAYieldedPortIsItsListenersAndAStoppedParkHoldsNothing TestTheHoldClosesOnlyBetweenItsCalls TestTheHoldReadsTheIPv6AddressesTheAppsBindsTake TestTheLookupParksWhereTheGoNotesSayTheAppsSocketsTakeCalls TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestAReusedSourcePortKeepsEachConnectionsOwnPairing TestADroppedAppConnEventEndsAParkedWait TestTheProxyReadsEachConnectionsOwnInstance; do
+          for t in TestAProcessThePIDMapRefusesIsReported TestKeploysOwnCommandInTheAgentsContainerTakesNoPlace TestTheBindHooksMoveABindWhereTheWarningSays TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive TestUnderTheSwitchABoundClientsAnswerIsCounted TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff TestUnderTheSwitchTheAgentSeesTheApplicationListen TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime TestUnderTheSwitchTheAgentCountsARestartAndNamesIt TestARunTheMarkClearsAroundIsLetGoOfAtItsExit TestAWindowRunOutlivingAFreshRunIsAFalseRestartToday TestClearingAMapItsKeysChurnInGoesOn TestTheSweepDeletesTheEntriesOfProcessesThatAreGone TestTheSweepKeepsAZombiesEntriesUntilItIsReaped TestTheKernelSaysWhetherItCountsSkippedRuns TestTheHooksSayHowTheApplicationReleasedItsConnection TestAWorkersForksAreInItsInstanceUntilItEnds TestAnInstanceIsNotGivenToAProcessThatIsGone TestAnIdsLostForksAreZeroedWhenItIsGiven TestALaterClaimOfAnIdCarriesItsGeneration TestTwoWorkersForksAreEachInItsOwnInstance TestAnAgentInAPIDNamespaceOfItsOwnGivesNoInstance TestUnloadingTheHooksDetachesTheInstanceFork TestAMovedPortIsHeldByTheParkUntilItsForwarderListens TestAPortWhoseSocketWentIsNotHeld TestAHoldThatCannotStartSaysTheWindowItLeaves TestAYieldedPortIsItsListenersAndAStoppedParkHoldsNothing TestTheHoldClosesOnlyBetweenItsCalls TestTheHoldReadsTheIPv6AddressesTheAppsBindsTake TestTheLookupParksWhereTheGoNotesSayTheAppsSocketsTakeCalls TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestAReusedSourcePortKeepsEachConnectionsOwnPairing TestADroppedAppConnEventEndsAParkedWait TestTheProxyReadsEachConnectionsOwnInstance; do
             grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; rc=1; }
           done
           exit $rc

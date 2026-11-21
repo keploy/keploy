@@ -96,7 +96,7 @@ func runReadyHelper(mode string) int {
 			return fail(err)
 		}
 		_ = unix.Close(fd)
-		child := exec.Command("/proc/self/exe", "-test.run=^$")
+		child := exec.Command(appExe(), "-test.run=^$")
 		child.Env = append(os.Environ(), readyHelperEnv+"=cpu")
 		child.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 		if err := child.Start(); err != nil {
@@ -136,7 +136,7 @@ func runReadyHelper(mode string) int {
 				// Start returns once the exec closed the child's
 				// close-on-exec descriptors, before the exec is done and its
 				// tracepoint has run; the child's "up" comes after both.
-				child := exec.Command("/proc/self/exe", "-test.run=^$", "-test.count=2")
+				child := exec.Command(appExe(), "-test.run=^$", "-test.count=2")
 				child.Env = append(os.Environ(), readyHelperEnv+"=sleeper-child")
 				child.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 				if _, err := child.StdinPipe(); err != nil {
@@ -342,7 +342,7 @@ func startReadyHelper(t *testing.T, cg, mode string) (io.Writer, *bufio.Reader, 
 		t.Fatal(err)
 	}
 	defer cgf.Close()
-	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	cmd := exec.Command(appExe(), "-test.run=^$")
 	cmd.Env = append(os.Environ(), readyHelperEnv+"="+mode)
 	// In a mount namespace of its own, as an application's container is: in
 	// Docker mode one in the agent's (this test's) is the agent's.

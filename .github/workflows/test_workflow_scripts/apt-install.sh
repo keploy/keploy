@@ -48,7 +48,8 @@
 #
 # GitHub's hosted Ubuntu images already ship such a list
 # (mirror+file:/etc/apt/apt-mirrors.txt), so there this leaves the sources as
-# they are. The WSL distro and stock Ubuntu containers have none.
+# they are, every one of them (A MACHINE WITH A LIST OF ITS OWN). The WSL
+# distro and stock Ubuntu containers have none.
 #
 # A MIRROR THAT IS UP BUT SLOW
 #
@@ -169,6 +170,25 @@
 # third-party repos such as Docker's or Microsoft's. Running it again is a
 # no-op: a rewritten URI no longer matches.
 #
+# A MACHINE WITH A LIST OF ITS OWN
+#
+# Nothing at all is rewritten on a machine that has a mirror list of its own
+# for the Ubuntu archive: a list other than this script's, named by an Ubuntu
+# entry that apt reads (not in a comment, not in a disabled stanza), with at
+# least one mirror and only Ubuntu archive mirrors in it. Its owner has chosen
+# its mirrors and their order, so an Ubuntu entry there that names a host
+# directly is that owner's choice too, and stays.
+#
+# The hosted images GitHub runs in AWS are such machines (ubuntu-26.04
+# 20261111.82.6, seen on 2026-11-16 beside the Azure ones' 20261111.196.1). Their
+# list has the region's ec2.archive.ubuntu.com mirror first, and their
+# resolute-security entry names a host directly. Pointing that entry at this
+# script's list sent it to azure first, from AWS, and changed the image's
+# sources for every later step of the job. Left as it is, that entry has no
+# mirror to fail over to, as the image has it: a slice of the update that runs
+# out puts the next mirror of the image's list in front, which serves the
+# other entries, and the budget bounds that entry as it bounds the rest.
+#
 # Nothing is rewritten on a self-hosted runner (RUNNER_ENVIRONMENT=self-hosted).
 # That machine outlives the job and its apt setup belongs to its owner, who may
 # not be in Azure at all. It still gets the bounded update and install, from
@@ -277,7 +297,14 @@ restore_mirror_lists() {
 trap 'restore_mirror_lists; rm -rf "$list_tmp" "$src_tmp" "$parts_dir" "$keep_dir"' EXIT
 
 use_mirror_list() {
-  local src
+  local src own
+  # Assigned on its own line, so that a source file the filter cannot read
+  # stops the script here.
+  own="$(own_mirror_lists)"
+  if [ -n "$own" ]; then
+    echo "apt-install: this machine has a mirror list of its own for the Ubuntu archive (${own//$'\n'/ }), so its apt sources are left as they are"
+    return 0
+  fi
   cat >"$list_tmp" <<'EOF'
 # Written by keploy's .github/workflows/test_workflow_scripts/apt-install.sh.
 # apt tries the mirror with the lowest priority: number first and moves to the
@@ -464,6 +491,27 @@ named_lists_awk='!/^[ \t]*#/ {
   for (i = 1; i <= NF; i++)
     if (match($i, /mirror\+file:\//)) print substr($i, RSTART + length("mirror+file:"))
 }'
+
+# Prints the machine's own mirror lists (A MACHINE WITH A LIST OF ITS OWN), one
+# a line: those the Ubuntu entries name, other than this script's. The filter
+# keeps an entry that names a list only when every mirror in that list is the
+# Ubuntu archive, and it skips comments and disabled stanzas, as apt does.
+own_mirror_lists() {
+  local src fmt rc
+  : >"$src_tmp"
+  for src in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+    [ -f "$src" ] || continue
+    fmt=list
+    case "$src" in *.sources) fmt=sources ;; esac
+    rc=0
+    as_root awk -v fmt="$fmt" "$ubuntu_entries_awk" "$src" >>"$src_tmp" || rc=$?
+    case "$rc" in
+      0 | 3) ;;
+      *) echo "apt-install: could not filter $src (exit $rc)" >&2; exit "$rc" ;;
+    esac
+  done
+  awk "$named_lists_awk" "$src_tmp" | sort -u | { grep -vxF "$mirror_list" || true; }
+}
 
 # Fills $lists with the mirror lists that the entries apt reads here name and
 # that can be reordered, and keeps a copy of each.

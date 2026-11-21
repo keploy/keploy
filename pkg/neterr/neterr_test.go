@@ -119,6 +119,33 @@ func TestIsConnRefused_RealDeadPort(t *testing.T) {
 	}
 }
 
+func TestIsAddrInUse_RealSecondBind(t *testing.T) {
+	// A second listener at the address and port of one that listens: the
+	// bind fails on every platform, with WSAEADDRINUSE (10048) on Windows,
+	// where syscall.EADDRINUSE is a value of Go's own.
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	again, err := net.Listen("tcp4", ln.Addr().String())
+	if err == nil {
+		_ = again.Close()
+		t.Fatalf("a second listener bound %s beside the first; the harness could not produce the error under test", ln.Addr())
+	}
+
+	if !IsAddrInUse(err) {
+		var errno syscall.Errno
+		errors.As(err, &errno)
+		t.Fatalf("IsAddrInUse(%v) = false; unwrapped errno = %d. "+
+			"On Windows a bind to a taken address is WSAEADDRINUSE (10048), not syscall.EADDRINUSE.",
+			err, uintptr(errno))
+	}
+	if IsConnRefused(err) || IsConnReset(err) {
+		t.Errorf("a bind's address-in-use classified as a refused or reset connection: %v", err)
+	}
+}
+
 func TestNilAndUnrelatedErrors(t *testing.T) {
 	for _, fn := range []struct {
 		name string
@@ -128,6 +155,7 @@ func TestNilAndUnrelatedErrors(t *testing.T) {
 		{"IsConnAborted", IsConnAborted},
 		{"IsBrokenPipe", IsBrokenPipe},
 		{"IsConnRefused", IsConnRefused},
+		{"IsAddrInUse", IsAddrInUse},
 	} {
 		if fn.f(nil) {
 			t.Errorf("%s(nil) = true, want false", fn.name)

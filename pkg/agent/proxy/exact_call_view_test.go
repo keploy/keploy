@@ -312,10 +312,12 @@ func TestASnapshotMarkedCallsMissReadsOnlyTheViewItsSnapshotRead(t *testing.T) {
 					if r, ok := held.(integrations.PerTestRanger); ok {
 						_ = r.RangePerTestMocksInWindow(func(*models.Mock) bool { walked++; return true })
 					}
+					ix := &integrations.MockIndex{Keys: func(*models.Mock) []string { return []string{"config"} }}
 					if r, ok := held.(integrations.SessionKeyReader); ok {
-						ix := &integrations.MockIndex{Keys: func(*models.Mock) []string { return []string{"config"} }}
 						_ = r.RangeSessionMocksWithKey(ix, "config", func(*models.Mock) bool { keyed++; return true })
 					}
+					keyedPerTest := 0
+					_ = held.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(ix, "config", func(*models.Mock) bool { keyedPerTest++; return true })
 					read := answeredNames(append(append(append([]*models.Mock{}, perTest...), session...), startup...))
 					has := func(name string) bool {
 						for _, n := range read {
@@ -327,8 +329,8 @@ func TestASnapshotMarkedCallsMissReadsOnlyTheViewItsSnapshotRead(t *testing.T) {
 					}
 					switch {
 					case when == "never":
-						if !has("mock-own1") || has("mock-own2") || has("mock-sess2") || walked == 0 || keyed == 0 {
-							t.Fatalf("with test-1's view in force the hold reads %v (walked %d, keyed %d); want test-1's mock-own1 and mock-sess1, none of test-2's", read, walked, keyed)
+						if !has("mock-own1") || has("mock-own2") || has("mock-sess2") || walked == 0 || keyed == 0 || keyedPerTest == 0 {
+							t.Fatalf("with test-1's view in force the hold reads %v (walked %d, keyed %d, keyed per-test %d); want test-1's mock-own1 and mock-sess1, none of test-2's", read, walked, keyed, keyedPerTest)
 						}
 					case ahead:
 						// Decided in the test the store opens next: it reads
@@ -337,8 +339,8 @@ func TestASnapshotMarkedCallsMissReadsOnlyTheViewItsSnapshotRead(t *testing.T) {
 							t.Fatalf("a call decided in the test the store opens next reads %v once test-2 began; want test-2's mock-own2", read)
 						}
 					default:
-						if len(read) > 0 || walked > 0 || keyed > 0 {
-							t.Fatalf("once %s the hold of a call its snapshot read in test-1's view reads %v (walked %d, keyed %d); want nothing", when, read, walked, keyed)
+						if len(read) > 0 || walked > 0 || keyed > 0 || keyedPerTest > 0 {
+							t.Fatalf("once %s the hold of a call its snapshot read in test-1's view reads %v (walked %d, keyed %d, keyed per-test %d); want nothing", when, read, walked, keyed, keyedPerTest)
 						}
 						if b, ok := held.(integrations.ExactBackground); ok {
 							if bg := b.Background(models.HTTP); len(bg) > 0 {
@@ -367,6 +369,78 @@ func TestASnapshotMarkedCallsMissReadsOnlyTheViewItsSnapshotRead(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// The per-test walks of a snapshot-marked call's miss
+// (integrations.DiagnoseInCallView) stop where the view its snapshot read was
+// replaced, though the walk began in it: test-1 owns mock-own1 and
+// mock-own1b, and the replay ends test-1 when the walk yields mock-own1. The
+// end is no staging, and mock-own1b is the call's view's own, so only the
+// view's replacement (viewGone) stops the walk before mock-own1b.
+func TestASnapshotMarkedCallsMissWalkStopsWhereItsViewWasReplaced(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		for _, walk := range []string{"per-test walk", "keyed per-test walk"} {
+			t.Run(map[bool]string{false: "the manager", true: "a scoped view"}[scoped]+"/"+walk, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, "1")
+				now := time.Now()
+				pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
+				own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
+				own1b := r3Mock("mock-own1b", now.Add(710*time.Millisecond), "POST", "/orders", `{"item":"quince"}`, `{"order":2}`)
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				mm.SeedRecordedWindows([]models.TestWindow{{Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)}})
+				mm.SetMocksWithWindow([]*models.Mock{pool, own1, own1b}, nil, models.BaseTime, now.Add(time.Hour))
+				mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-pool"}, nil)
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1"), roundMock(mm, "mock-own1b")})
+				var store integrations.MockMemDb = mm
+				if scoped {
+					store = &scopedMockDb{MockMemDb: mm}
+				}
+				snap, ok := integrations.SnapshotRound(store, integrations.RoundQuery{})
+				if !ok || snap.Test != "test-1" {
+					t.Fatalf("precondition: the snapshot read %q (ok %v); want test-1's view", snap.Test, ok)
+				}
+				held, restaged := integrations.HoldToRound(store, snap.CallRound())
+				held = integrations.DiagnoseInCallView(held)
+				ix := &integrations.MockIndex{Keys: func(*models.Mock) []string { return []string{"orders"} }}
+				walkWith := func(each func()) (yielded []string) {
+					t.Helper()
+					fn := func(mk *models.Mock) bool {
+						yielded = append(yielded, mk.Name)
+						each()
+						return true
+					}
+					var err error
+					if walk == "per-test walk" {
+						err = held.(integrations.PerTestRanger).RangePerTestMocksInWindow(fn)
+					} else {
+						err = held.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(ix, "orders", fn)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					return yielded
+				}
+				if got := walkWith(func() {}); len(got) < 2 || got[0] != "mock-own1" || got[1] != "mock-own1b" {
+					t.Fatalf("precondition: with test-1's view in force the walk yields %v; want mock-own1, then mock-own1b", got)
+				}
+				ended := false
+				got := walkWith(func() {
+					if !ended {
+						ended = true
+						mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+					}
+				})
+				if len(got) != 1 {
+					t.Fatalf("a walk whose view test-1's end replaced at its first yield yielded %v; want only mock-own1, read before the end", got)
+				}
+				if restaged() {
+					t.Error("a test's end is told a staging")
+				}
+			})
 		}
 	}
 }

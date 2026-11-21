@@ -385,7 +385,14 @@ func TestASessionReportsItsOwnDrops(t *testing.T) {
 		}
 		m.SetMemoryPressure(false)
 		m.CloseOutChan()
+		// Its request is made after the pause: the instant the pause's span
+		// closes is still the pause, and macOS reads the wall clock in
+		// microseconds, so a read right after the close can fall in its
+		// closing microsecond. One made a millisecond later is after the
+		// pause on every OS.
 		closed = addMockTo(prefix+"-closed", false)
+		closed.Spec.ReqTimestampMock = closed.Spec.ReqTimestampMock.Add(time.Millisecond)
+		closed.Spec.ResTimestampMock = closed.Spec.ResTimestampMock.Add(time.Millisecond)
 		if got := m.AddMock(closed); got != MockDroppedOutputClosed {
 			t.Fatalf("%s: a mock after the close: %q", prefix, got)
 		}

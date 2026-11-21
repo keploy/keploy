@@ -622,6 +622,9 @@ func TestTheListenPortIsTheContainerPortTheTestsHostPortPublishes(t *testing.T) 
 		{"docker run --publish=8081:80 app", 8081, 80},
 		{"docker run -p 3000 app", 3000, 3000}, // a random host port: nothing maps 3000
 		{"./app", 8080, 8080},
+		// A native app's -p, and a container's own after its image, map nothing.
+		{"./app -p 8080:3000", 8080, 8080},
+		{"docker run -p 9090:90 app -p 8080:3000", 8080, 8080},
 	} {
 		if got := listenPortFor(ctx, fakePublished{}, c.cmd, "", c.host); got != c.want {
 			t.Errorf("listenPortFor(%q, %d) = %d, want %d", c.cmd, c.host, got, c.want)
@@ -1274,7 +1277,9 @@ func TestUnderTheSwitchALongWaitSaysWhatItWaitsOn(t *testing.T) {
 		t.Fatalf("said it was waiting %d times, want every 2 wake-ups", len(said))
 	}
 	f := said[0].ContextMap()
-	if f["waitingFor"] != "a listen on :8080, where the set's first test dials localhost:8080" || f["newExecs"] != uint64(2) {
+	// The address by its host's shape beside its tag (HostLogName: the wait
+	// is handed no session, so the process's key), never whole.
+	if f["waitingFor"] != "a listen on :8080, where the set's first test dials "+models.HostLogName(context.Background(), "localhost:8080") || f["newExecs"] != uint64(2) {
 		t.Fatalf("said %v, want what it waits on and the two execs since the first look", f)
 	}
 }

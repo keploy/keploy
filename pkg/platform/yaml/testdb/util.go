@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -74,16 +75,45 @@ func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *z
 	if err != nil {
 		utils.LogError(logger, err, "error in flattening http response")
 	}
-	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
+	isTime := func(vals []string) bool {
 		for _, v := range vals {
 			if pkg.IsTime(v) {
 				return true
 			}
 		}
 		return pkg.IsTime(strings.Join(vals, ", "))
-	})
-	for _, v := range noiseFieldsFound {
-		noise[v] = []string{}
+	}
+	// A body field under a map keyed by ids is written once, naming every id
+	// key (matcher.NoiseIDKey), when it reads as a time under every one of
+	// them and that one entry silences, of this response's keys, exactly what
+	// the per-id ones would (matcher.CollapseIDKeyedPaths), and per id
+	// otherwise: one entry per id made a response keyed by a few dozen ids
+	// carry hundreds of entries for a handful of fields. A key a replay adds,
+	// a new id or the field under an id that lacked it, is never excused by
+	// it.
+	jsonBody := false
+	for k, vals := range m {
+		if strings.HasPrefix(k, "body.") {
+			jsonBody = true
+			continue
+		}
+		if isTime(vals) {
+			noise[k] = []string{}
+		}
+	}
+	if !jsonBody {
+		return
+	}
+	// The rule walks the parsed body: it judges the one entry against every
+	// node the entry would reach, objects, empty ones and nulls included,
+	// which the flattened map does not all list.
+	var doc interface{}
+	if err := json.Unmarshal([]byte(tc.HTTPResp.Body), &doc); err != nil {
+		utils.LogError(logger, err, "error in parsing http response body")
+		return
+	}
+	for _, rel := range matcher.CollapseIDKeyedPaths(doc, func(rel string) bool { return isTime(m["body."+rel]) }) {
+		noise["body."+rel] = []string{}
 	}
 }
 

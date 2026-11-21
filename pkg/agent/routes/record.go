@@ -203,6 +203,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// What of it no test was charged with (a loss after the last test).
 		r.Get("/capturelosses/uncharged", a.HandleUnchargedCaptureLosses)
 		r.Post("/capturelosses/owned", a.HandleOwnedCaptureLosses)
+		r.Post("/capturelosses/drain", a.HandleDrainCaptureLosses)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		// The application's listens and its start's progress, for keploy
 		// test's readiness under the proven switch (readiness.go).
@@ -233,6 +234,8 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
 		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
+		r.Post("/hooks/app-starts-anew", a.HandleAppStartsAnew)
+		r.Post("/hooks/clock-run", a.HandleClockRun)
 	})
 }
 
@@ -288,6 +291,52 @@ func (a *Agent) HandleBeforeTestSetCompose(w http.ResponseWriter, r *http.Reques
 
 	if err := agent.ActiveHooks.BeforeTestSetCompose(r.Context(), req.TestSetID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleAppStartsAnew tells the hooks that keploy starts the application
+// anew for a test set (agent.AppStartHook); hooks without the capability
+// have nothing to drop.
+func (a *Agent) HandleAppStartsAnew(w http.ResponseWriter, r *http.Request) {
+	var req models.AppStartsAnewReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if h, ok := agent.ActiveHooks.(agent.AppStartHook); ok {
+		if err := h.AppStartsAnew(r.Context(), req.TestSetID, req.FirstRecorded); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleClockRun hands the hooks the run id of the process that started the
+// agent (agent.ClockRunTaker). Hooks that take none keep no clock timeline
+// (OSS's own, and a native macOS or Windows agent's): they answer 501 with
+// NoTimelineHooks, which the starter takes as nothing to hand. 404 stays
+// what an agent older than the route answers. An id the hooks refuse is
+// answered 409 with their reason.
+func (a *Agent) HandleClockRun(w http.ResponseWriter, r *http.Request) {
+	h, ok := agent.ActiveHooks.(agent.ClockRunTaker)
+	if !ok {
+		http.Error(w, models.NoTimelineHooks, http.StatusNotImplemented)
+		return
+	}
+	var req models.ClockRunReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Run == "" {
+		http.Error(w, "the run id is empty", http.StatusBadRequest)
+		return
+	}
+	if err := h.TakeClockRun(r.Context(), req.Run); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	w.WriteHeader(http.StatusOK)

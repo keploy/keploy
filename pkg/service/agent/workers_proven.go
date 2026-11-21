@@ -217,6 +217,15 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 		taken[coreAgent.InstanceIDOf(v)] = true
 	}
 	a.provenMu.Unlock()
+	// A run of workers holds the session from here, also after a run of one
+	// test process that claimed it before (its process gone): a close of a
+	// connection no worker made (instance 0) is the run's count again, which
+	// charges the test open now (coreAgent.PairedBytesBeginner), never worker
+	// 0's, whose tests no claim of a worker begins. Told before the stale
+	// test's end reads its counts.
+	if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
+		pb.PairedBytesOneProcess(false)
+	}
 	if stale != "" {
 		a.failOpen(ctx, stale, "the test process exited while the test was open")
 	}

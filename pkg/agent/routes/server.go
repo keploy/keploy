@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/plaintcp"
@@ -85,7 +86,7 @@ func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocke
 		// failure a fresh start (which the CLI's retry is, on ports of its
 		// own) would meet again, and the start, taking no step while it
 		// waits for the port, is given up on as stalled, which retries.
-		if srvCtx.Err() == nil && !isAddrInUse(err) {
+		if srvCtx.Err() == nil && !neterr.IsAddrInUse(err) {
 			utils.FailBoot(fmt.Errorf("failed to start the agent's HTTP server on %s: %w", addr, err))
 		}
 		return
@@ -175,7 +176,7 @@ func listenWithRetry(ctx context.Context, logger *zap.Logger, addr string, budge
 		}
 		// Only "address already in use" is transient here; anything else is a
 		// real failure the operator must see now.
-		if !isAddrInUse(err) || !time.Now().Before(deadline) {
+		if !neterr.IsAddrInUse(err) || !time.Now().Before(deadline) {
 			return nil, err
 		}
 		logger.Warn("agent HTTP port is transiently in use (a previous session's agent is likely still releasing it); retrying bind",

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/internal/logleak"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -58,4 +59,25 @@ func TestCaptureLogsNoneOfTheCall(t *testing.T) {
 			logleak.Check(t, logs, s, "the capture")
 		})
 	}
+}
+
+// A gRPC call over the test case limit is said by its size, and its method by
+// the path's shape, as an HTTP call over the limit is: the path is the app's,
+// and the line is at ERROR.
+func TestCaptureGRPCOverTheLimitNamesTheMethodByItsShape(t *testing.T) {
+	const s = logleak.Canary
+	logger, logs := logleak.Observe()
+	stream := &pkg.HTTP2Stream{
+		GRPCReq: &models.GrpcReq{
+			Headers: models.GrpcHeaders{PseudoHeaders: map[string]string{":path": "/" + s + ".Orders/Get", ":authority": "app:9090", ":method": "POST", ":scheme": "http"}, OrdinaryHeaders: map[string]string{}},
+			Body:    models.GrpcLengthPrefixedMessage{DecodedData: strings.Repeat("c", MaxTestCaseSize) + s},
+		},
+		GRPCResp: &models.GrpcResp{},
+	}
+	CaptureGRPC(context.Background(), logger, make(chan *models.TestCase, 1), stream, 8080, false, false)
+	said := logs.FilterMessageSnippet("gRPC test case data exceeds 5MB limit").All()
+	if len(said) != 1 || said[0].ContextMap()["path"] != "/{}/{}" {
+		t.Fatalf("want one over-the-limit line naming the method by its shape, /{}/{}, got %+v", logs.All())
+	}
+	logleak.Check(t, logs, s, "the gRPC capture")
 }

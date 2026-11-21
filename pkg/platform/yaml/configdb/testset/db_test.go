@@ -220,6 +220,32 @@ func TestMetadataSurvivesTheRealDiskRoundTrip(t *testing.T) {
 	require.Equal(t, []string{"http://localhost:3000"}, got.AppOrigins)
 }
 
+// The mocks a recording's agent dropped (RecordMocksDropped) survive the
+// test-set's config.yaml, under their own key, for a replay to read.
+func TestTheRecordingsDroppedMocksSurviveTheRealDiskRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	db := New[*models.TestSet](zap.NewNop(), root)
+	ctx := context.Background()
+	dropped := models.MockDropSummary{ByPressure: 1, Capacity: 2, Named: []string{"Http2 mock of connection 7, asked at 2026-11-16T07:29:25Z: its request was made while the memory guard had paused recording"}}
+	require.NoError(t, db.Write(ctx, "test-set-0", &models.TestSet{PostScript: "make check", RecordMocksDropped: &dropped}))
+
+	raw, err := os.ReadFile(filepath.Join(root, "test-set-0", "config.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "recordMocksDropped:")
+	readBack, err := db.ReadForUpdate(ctx, "test-set-0")
+	require.NoError(t, err)
+	require.NotNil(t, readBack.RecordMocksDropped)
+	require.Equal(t, dropped, *readBack.RecordMocksDropped)
+	require.Equal(t, "make check", readBack.PostScript)
+
+	require.NoError(t, db.Write(ctx, "test-set-1", &models.TestSet{PostScript: "make check"}))
+	raw, err = os.ReadFile(filepath.Join(root, "test-set-1", "config.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "recordMocksDropped", "a recording that dropped nothing names no drop")
+}
+
 func TestWriteWarnsWhenItWouldDropAnyField(t *testing.T) {
 	// The loss is silent by nature: a test-set with no metadata, no
 	// appCommand and no scripts is the ordinary case, so nothing

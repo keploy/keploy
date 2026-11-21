@@ -19,6 +19,8 @@ import (
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // misses answers the harness's per-test GetMockErrors calls in test order:
@@ -47,17 +49,23 @@ func failedRead() ([]models.UnmatchedCall, error) {
 	return nil, errors.New("get mock errors returned status 500")
 }
 
-// A test whose misses could not all be read has no verdict under the switch,
-// and neither has its set: INTERNAL_ERR, with the tests named. With the switch
-// off the verdict is what it was (the set PASSED, no test unjudged), but the
-// test is marked MissesUnattributed: a miss may be missing from it, or read
-// with another test's, and nothing may learn noise from its set. The failure
-// was a Debug line, and the miss then masked.
+func incompleteReadOfNone() ([]models.UnmatchedCall, error) {
+	return nil, fmt.Errorf("%w (agent: keploy's error drain stopped)", models.ErrUnmatchedCallsUnread)
+}
+
+// A test whose misses could not all be read, and whose read returned none,
+// has no verdict under the switch, and neither has its set: INTERNAL_ERR, with
+// the tests named. One whose read returned a miss before it failed saw that
+// miss: it fails on it, and its set is judged (FAILED), never INTERNAL_ERR.
+// With the switch off the verdict is what it was (the set PASSED, no test
+// unjudged), but the test is marked MissesUnattributed: a miss may be missing
+// from it, or read with another test's, and nothing may learn noise from its
+// set. The failure was a Debug line, and the miss then masked.
 func TestRunTestSet_UnreadMissesLeaveTheSetUnjudged(t *testing.T) {
 	for _, read := range []struct {
 		name string
 		fn   func() ([]models.UnmatchedCall, error)
-	}{{"incomplete read", incompleteRead}, {"failed read", failedRead}} {
+	}{{"incomplete read", incompleteRead}, {"incomplete read of none", incompleteReadOfNone}, {"failed read", failedRead}} {
 		for _, on := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/switch=%v", read.name, on), func(t *testing.T) {
 				if on {
@@ -90,6 +98,25 @@ func TestRunTestSet_UnreadMissesLeaveTheSetUnjudged(t *testing.T) {
 				}
 				if len(unattributed) != 0 {
 					t.Fatalf("under the switch the unread test is UnmatchedCallsUnread, not MissesUnattributed: %v", unattributed)
+				}
+				if read.name == "incomplete read" {
+					// The read returned a miss: seen, it fails test-2, and
+					// the set is judged on it.
+					if status != models.TestSetStatusFailed {
+						t.Fatalf("status %s; a test whose misses read returned a miss before it failed fails on that miss, and its set is FAILED, not unjudged", status)
+					}
+					if h.replayer.notJudged("test-set-0") || strings.Contains(h.report.report.FailureReason, "not judged") {
+						t.Fatalf("the set is marked not judged (reason %q): the miss the read returned was seen, and judges it", h.report.report.FailureReason)
+					}
+					for _, r := range h.report.report.Tests {
+						if r.TestCaseID != "test-2" {
+							continue
+						}
+						if r.Status != models.TestStatusFailed || len(r.FailureInfo.UnmatchedCalls) != 1 || !r.FailureInfo.UnmatchedCallsUnread {
+							t.Fatalf("test-2: status %s, unmatched calls %d, unread %v; want FAILED on its one miss, still marked unread", r.Status, len(r.FailureInfo.UnmatchedCalls), r.FailureInfo.UnmatchedCallsUnread)
+						}
+					}
+					return
 				}
 				if status != models.TestSetStatusInternalErr {
 					t.Fatalf("status %s; a set with a test whose misses were not all read must be neither PASSED nor FAILED", status)
@@ -129,6 +156,40 @@ func TestAttachMockErrors_KeepsWhatAnIncompleteReadReturned(t *testing.T) {
 			}
 			if len(result.FailureInfo.UnmatchedCalls) != 1 || result.FailureInfo.UnmatchedCalls[0].ActualSummary != "GET /read" {
 				t.Fatalf("unmatched calls %+v; the calls the read did return must be kept", result.FailureInfo.UnmatchedCalls)
+			}
+		})
+	}
+}
+
+// The log of an incomplete read says what keploy does with it: under the
+// switch, a test it read a miss of fails on that miss, and one it read none
+// of leaves its set not judged; with the switch off, the miss may be missing.
+func TestAnIncompleteMissesReadLogsWhatItMeansForTheTest(t *testing.T) {
+	for _, tc := range []struct {
+		on   bool
+		read func() ([]models.UnmatchedCall, error)
+		want zapcore.Level
+		say  string
+	}{
+		{true, incompleteRead, zapcore.ErrorLevel, "it fails on the ones read"},
+		{true, incompleteReadOfNone, zapcore.ErrorLevel, "its test set is not judged"},
+		{false, incompleteRead, zapcore.WarnLevel, "a miss may be missing from this test"},
+		{false, incompleteReadOfNone, zapcore.WarnLevel, "a miss may be missing from this test"},
+	} {
+		v := ""
+		if tc.on {
+			v = "1"
+		}
+		t.Run(fmt.Sprintf("switch=%v/%s", tc.on, tc.say), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, v)
+			h := newPartialRunHarness(t, 1, 0)
+			core, logs := observer.New(zapcore.DebugLevel)
+			h.replayer.logger = zap.New(core)
+			h.instr.mockErrorsFor = misses(tc.read)
+			h.replayer.attachMockErrors(t.Context(), "test-set-0", "test-1", &models.TestResult{})
+			got := logs.FilterMessageSnippet("could not read every call this test made").All()
+			if len(got) != 1 || got[0].Level != tc.want || !strings.Contains(got[0].Message, tc.say) {
+				t.Fatalf("logged %+v; want one %v line that says %q", got, tc.want, tc.say)
 			}
 		})
 	}

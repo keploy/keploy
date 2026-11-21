@@ -74,21 +74,47 @@ func TestCaptureWindow_RendezvousNoLoss(t *testing.T) {
 	}
 }
 
-// TestCaptureWindow_BeginClearsStale proves BeginTestErrorCapture discards
-// misses retained before the window (startup / background traffic) so they
-// don't attach to the first test.
-func TestCaptureWindow_BeginClearsStale(t *testing.T) {
-	// With the proven switch off; on, the first test reads them as the set's
-	// (TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets).
-	t.Setenv(provenswitch.Env, "")
-	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+// A set's first test reads what was missed before it with no window open (its
+// application's startup) as the set's (models.UnmatchedCall.BeforeSet,
+// models.MissOutsideTest), a DNS lookup's too, with the proven switch on or
+// off: with it off they were dropped, and nothing the run wrote named them.
+func TestCaptureWindow_BeginHandsTheStartupsMissesOverAsTheSets(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			core, logs := observer.New(zap.DebugLevel)
+			p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 16)}
 
-	p.pendingMockErrors.addBounded(mockMiss("GET /background"), maxPendingMockErrors)
-	p.BeginTestErrorCapture()
+			dns := mockMiss("A db.internal.example.")
+			dns.MismatchReport.Protocol = "DNS"
+			p.pendingMockErrors.addBounded(dns, maxPendingMockErrors)
+			p.pendingMockErrors.addBounded(mockMiss("GET /config"), maxPendingMockErrors)
+			p.BeginTestErrorCapture()
+			p.errChannel <- mockMiss("POST /t1")
 
-	got, _ := p.GetMockErrors(context.Background())
-	if len(got) != 0 {
-		t.Fatalf("stale pre-window miss should be cleared on Begin, got %+v", got)
+			got, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatalf("GetMockErrors: %v", err)
+			}
+			read := map[string]models.UnmatchedCall{}
+			for _, c := range got {
+				read[c.ActualSummary] = c
+			}
+			if len(got) != 3 || len(read) != 3 {
+				t.Fatalf("the set's first test read %+v; want the startup's two misses and its own", got)
+			}
+			for _, name := range []string{"A db.internal.example.", "GET /config"} {
+				if c := read[name]; !c.BeforeSet || c.Kind != models.MissOutsideTest {
+					t.Errorf("the startup's miss %q reads %+v; want it marked BeforeSet, %s", name, c, models.MissOutsideTest)
+				}
+			}
+			if c := read["POST /t1"]; c.BeforeSet {
+				t.Errorf("the test's own miss reads %+v; want it unmarked", c)
+			}
+			if n := logs.FilterMessageSnippet("not attributed to a test").Len(); n != 0 {
+				t.Errorf("the startup's misses were said to be dropped (%d)", n)
+			}
+		})
 	}
 }
 
@@ -131,7 +157,8 @@ func TestCaptureWindow_ContinueCarriesTheGapsMisses(t *testing.T) {
 		t.Fatalf("test2 expected [SEND between tests, POST /t2], got %+v", got)
 	}
 
-	// And a test that begins instead (a set's first) does not inherit it.
+	// And a test that begins instead (a set's first) reads it as the set's,
+	// not its own.
 	p.errChannel <- mockMiss("SEND between tests")
 	deadline = time.Now().Add(5 * time.Second)
 	for p.pendingLen() == 0 {
@@ -141,57 +168,8 @@ func TestCaptureWindow_ContinueCarriesTheGapsMisses(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	p.BeginTestErrorCapture()
-	if got, _ := p.GetMockErrors(context.Background()); len(got) != 0 {
-		t.Fatalf("a set's first test must not inherit what was missed before it, got %+v", got)
-	}
-}
-
-// What a set's first test discards — misses made before it, with no window
-// open — is logged, with the calls by their shape (models.MissLogShape), so
-// no miss is dropped without a word.
-func TestCaptureWindow_BeginLogsWhatItDiscards(t *testing.T) {
-	// With the proven switch off; on, the first test reads them as the set's
-	// (TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets).
-	t.Setenv(provenswitch.Env, "")
-	core, logs := observer.New(zap.WarnLevel)
-	p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 16)}
-
-	p.pendingMockErrors.addBounded(mockMiss("GET /background"), maxPendingMockErrors)
-	p.BeginTestErrorCapture()
-
-	e := logs.FilterMessageSnippet("not attributed to a test").All()
-	if len(e) != 1 || e[0].ContextMap()["count"] != int64(1) {
-		t.Fatalf("want one Warn naming the discarded miss, got %+v", logs.All())
-	}
-	if calls, _ := e[0].ContextMap()["calls"].([]interface{}); len(calls) != 1 || calls[0] != "HTTP GET /{}" {
-		t.Fatalf("the Warn does not name the call: %+v", e[0].ContextMap())
-	}
-
-	// Nothing discarded, nothing said.
-	logs.TakeAll()
-	p.BeginTestErrorCapture()
-	if n := logs.Len(); n != 0 {
-		t.Fatalf("a Begin that discards nothing logged %d line(s)", n)
-	}
-
-	// DNS misses alone (an offline runner's upstream at the app's startup)
-	// are not warned about: the end-of-run summary leaves them out too.
-	dns := mockMiss("A example.com")
-	dns.MismatchReport.Protocol = "DNS"
-	p.pendingMockErrors.addBounded(dns, maxPendingMockErrors)
-	p.BeginTestErrorCapture()
-	if n := logs.Len(); n != 0 {
-		t.Fatalf("a DNS-only discard logged %d Warn line(s): %+v", n, logs.All())
-	}
-
-	// Nor are connections that sent nothing (models.MatchPhaseNoRequest):
-	// the end-of-run summary leaves them out of a green run too.
-	silent := mockMiss("connection phase: server greeting")
-	silent.MismatchReport.MatchPhase = models.MatchPhaseNoRequest
-	p.pendingMockErrors.addBounded(silent, maxPendingMockErrors)
-	p.BeginTestErrorCapture()
-	if n := logs.Len(); n != 0 {
-		t.Fatalf("a discard of connections that sent nothing logged %d Warn line(s): %+v", n, logs.All())
+	if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || !got[0].BeforeSet {
+		t.Fatalf("a set's first test must read what was missed before it as the set's, got %+v", got)
 	}
 }
 
@@ -295,8 +273,17 @@ func TestUnderTheSwitchAMissBeforeTheSetsFirstTestIsTheSets(t *testing.T) {
 // it as made before that set. A staging that is not a set's first since its
 // Mock (a test's window, a re-stage within the set) cuts nothing: what was
 // missed between two tests is the next test's.
-func TestUnderTheSwitchAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
+func TestAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) { missBeforeASetsMocksAreStagedIsNotTheSets(t, proven) })
+	}
+}
+
+// missBeforeASetsMocksAreStagedIsNotTheSets is
+// TestAMissBeforeASetsMocksAreStagedIsNotTheSets with the proven switch set
+// to proven.
+func missBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T, proven string) {
+	t.Setenv(provenswitch.Env, proven)
 	core, logs := observer.New(zap.WarnLevel)
 	p := New(zap.New(core), fakeDestInfo{}, config.New())
 	p.nsswitchData = []byte("preseeded-by-test") // Mock leaves the host's DNS alone
@@ -439,5 +426,41 @@ func TestAWithdrawnWindowEndsTheTrackersTestInTheManagersRound(t *testing.T) {
 	}
 	if snap.Phase != integrations.RoundInTest || snap.Test != "T2" {
 		t.Fatalf("the round reads phase %v, test %q (%s); want T2's test, the one the tracker began over the view", snap.Phase, snap.Test, snap.Boundary)
+	}
+}
+
+// What a set's staging cuts (cutMissesAtSetStart) is said, with the calls by
+// their shape (models.MissLogShape), so no miss is dropped without a word: at
+// Warn, but DNS misses alone and connections that sent nothing alone at
+// Debug, which the end-of-run summary leaves out of a green run too.
+func TestDroppedMissesAreSaidAtWarnButDNSOrSilentAloneAtDebug(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	p := &Proxy{logger: zap.New(core)}
+
+	p.logDroppedMisses(missesCutAtSetStart, []error{mockMiss("GET /background")})
+	e := logs.FilterMessageSnippet("not attributed to a test").All()
+	if len(e) != 1 || e[0].ContextMap()["count"] != int64(1) {
+		t.Fatalf("want one Warn naming the dropped miss, got %+v", logs.All())
+	}
+	if calls, _ := e[0].ContextMap()["calls"].([]interface{}); len(calls) != 1 || calls[0] != "HTTP GET /{}" {
+		t.Fatalf("the Warn does not name the call: %+v", e[0].ContextMap())
+	}
+
+	logs.TakeAll()
+	p.logDroppedMisses(missesCutAtSetStart, nil)
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("nothing dropped logged %d line(s)", n)
+	}
+	dns := mockMiss("A example.com")
+	dns.MismatchReport.Protocol = "DNS"
+	silent := mockMiss("connection phase: server greeting")
+	silent.MismatchReport.MatchPhase = models.MatchPhaseNoRequest
+	p.logDroppedMisses(missesCutAtSetStart, []error{dns, silent})
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("DNS misses and connections that sent nothing alone logged %d Warn line(s): %+v", n, logs.All())
+	}
+	p.logDroppedMisses(missesCutAtSetStart, []error{dns, mockMiss("GET /background")})
+	if n := logs.Len(); n != 1 {
+		t.Fatalf("a DNS miss beside a call that counts logged %d Warn line(s); want one", n)
 	}
 }
