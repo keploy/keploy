@@ -979,6 +979,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
+		WorkerMockRules: workerMockRulesForAgent(a.conf),
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -6579,4 +6580,16 @@ func startWithConsole(cmd *exec.Cmd, start func(*exec.Cmd) error) (*utils.ChildC
 		return nil, err
 	}
 	return console, nil
+}
+
+// workerMockRulesForAgent is the recording's worker-mock rules the agent's
+// manager applies (models.OutgoingReq.WorkerMockRules), read from the
+// config the recording runs with (config record.workerMocks; k8s-proxy fills
+// it from the deployment's stored rules): none under the proven switch, which
+// applies no worker-mock rule at record.
+func workerMockRulesForAgent(conf *config.Config) []models.WorkerMockRule {
+	if conf == nil || provenswitch.On() {
+		return nil
+	}
+	return conf.Record.WorkerMocks
 }

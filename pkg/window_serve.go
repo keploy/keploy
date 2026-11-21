@@ -156,12 +156,13 @@ const (
 	ruleReleased
 	ruleOutOfWindow
 	ruleLaxPromoted
+	ruleWorkerScope
 )
 
 // serve is the pool a rule hands its mock to.
 func (r serveRule) serve() WindowServe {
 	switch r {
-	case ruleWindowBoundInWindow, ruleUntimed, ruleInWindow, ruleInFlight:
+	case ruleWindowBoundInWindow, ruleUntimed, ruleInWindow, ruleInFlight, ruleWorkerScope:
 		return ServedPerTest
 	case ruleWindowBoundStartup, ruleStartup:
 		return ServedStartup
@@ -178,6 +179,12 @@ func (r serveRule) serve() WindowServe {
 // say why each is where it is. logger says when p's response is stamped
 // before its request (LeaveOutAnsweredBeforeAsked); nil says nothing.
 func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
+	// A worker-scope mock the replay serves to every test
+	// (models.ServeAsSession marks its copy): every window's, wherever it is
+	// placed. In the session pool it stays a session mock (ServeInWindow).
+	if p.TestModeInfo.Background {
+		return ruleWorkerScope
+	}
 	if models.WindowBound(p.Kind) {
 		switch placeWindowBound(p, w.Start, w.End, w.FirstStart) {
 		case windowBoundInWindow:

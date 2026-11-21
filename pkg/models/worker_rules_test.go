@@ -295,7 +295,7 @@ func TestARuleSuggestedFromAMockNamesItsCall(t *testing.T) {
 	pg := func(stmt string) *Mock {
 		return &Mock{Kind: PostgresV3, Spec: MockSpec{PostgresV3: &PostgresV3Spec{Type: PostgresV3TypeQuery, Query: &PostgresV3QuerySpec{SQLNormalized: stmt}}}}
 	}
-	mongo := &Mock{Kind: Mongo, Spec: MockSpec{Metadata: map[string]string{"destAddr": "mongo:27017"}}}
+	kafka := &Mock{Kind: KAFKA, Spec: MockSpec{Metadata: map[string]string{"destAddr": "kafka:9092"}}}
 	for _, row := range []struct {
 		name  string
 		mock  *Mock
@@ -326,8 +326,10 @@ func TestARuleSuggestedFromAMockNamesItsCall(t *testing.T) {
 			map[string]string{"query": `^SELECT \* FROM users WHERE id = \$1$`}},
 		{"Redis", redisMock(false, []string{"GET", "jwks:v1"}), redisMock(false, []string{"GET", "jwks:v1:old"}),
 			map[string]string{"command": "GET", "key": "^jwks:v1$"}},
-		{"another kind, by its destination", mongo, &Mock{Kind: Mongo, Spec: MockSpec{Metadata: map[string]string{"destAddr": "other:27017"}}},
-			map[string]string{"destination": "mongo:27017"}},
+		{"another kind, by its destination", kafka, &Mock{Kind: KAFKA, Spec: MockSpec{Metadata: map[string]string{"destAddr": "other:9092"}}},
+			map[string]string{"destination": "kafka:9092"}},
+		{"Mongo", mongoMsgMock("mongo:27017", `{"update":"jobs","ordered":true,"$db":"app"}`), mongoMsgMock("mongo:27017", `{"update":"users","ordered":true,"$db":"app"}`),
+			map[string]string{"command": "update", "collection": "jobs", "database": "app"}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			rule, err := SuggestWorkerMockRule(row.mock)
@@ -350,7 +352,7 @@ func TestARuleSuggestedFromAMockNamesItsCall(t *testing.T) {
 			}
 		})
 	}
-	if _, err := SuggestWorkerMockRule(&Mock{Kind: Mongo, Name: "mock-9"}); err == nil {
+	if _, err := SuggestWorkerMockRule(&Mock{Kind: KAFKA, Name: "mock-9"}); err == nil {
 		t.Fatal("a mock with no readable call and no destination got a rule")
 	}
 	// A mock whose invalid bytes became U+FFFD on the way (JSON does) gives
@@ -384,6 +386,10 @@ func TestARuleSuggestedFromAMockNamesItsCall(t *testing.T) {
 		"MySQL with several statements": mysqlMock("db:3306", "SET NAMES utf8mb4", "SHOW FULL FIELDS FROM users"),
 		"MySQL with no statement":       mysqlMock("db:3306"),
 		"Redis with two commands":       redisMock(false, []string{"GET", "a"}, []string{"SET", "a", "1"}),
+		// Mongo is read now: one it cannot read is refused, not widened to
+		// every call to its server.
+		"Mongo with no readable request": {Kind: Mongo, Name: "mock-9", Spec: MockSpec{Metadata: map[string]string{"destAddr": "mongo:27017"}}},
+		"Mongo with two calls":           mongoMsgMock("mongo:27017", `{"find":"a","$db":"app"}`, `{"find":"b","$db":"app"}`),
 	} {
 		if rule, err := SuggestWorkerMockRule(m); err == nil {
 			t.Fatalf("%s: got rule %+v; want it refused, not widened", name, rule)

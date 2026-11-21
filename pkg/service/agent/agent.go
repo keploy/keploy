@@ -769,6 +769,16 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	return m, nil
 }
 
+// SetBackgroundRules sets the worker-mock rules of the recording an
+// /outgoing request starts (models.OutgoingReq.WorkerMockRules), before its
+// first mock: the calls they name are kept from the manager's cleanups and
+// sent with no owner, one copy of each (syncMock background_calls.go). Nil
+// clears the last recording's. The manager ignores them under the proven
+// switch.
+func (a *Agent) SetBackgroundRules(rules []models.WorkerMockRule) {
+	syncMock.Get().SetBackgroundRules("", rules)
+}
+
 func (a *Agent) GetMapping(ctx context.Context) (<-chan models.TestMockMapping, error) {
 	mappingCh := make(chan models.TestMockMapping, 100)
 	a.Proxy.Mapping(ctx, mappingCh)
@@ -2034,6 +2044,18 @@ func (a *Agent) loadCarryOverLookahead(disk *proxyPkg.DiskMocks, params models.M
 
 // appendCarryOver adds the lookahead mocks the filtered slice does not hold
 // already (by name), marked per-test like the rest of it.
+// appendWorkerScope is filtered with the worker-scope mocks of unfiltered
+// (TestModeInfo.Background, set by models.ServeAsSession) appended: the same
+// mocks, also in the session pool.
+func appendWorkerScope(filtered, unfiltered []*models.Mock) []*models.Mock {
+	for _, m := range unfiltered {
+		if m != nil && m.TestModeInfo.Background {
+			filtered = append(filtered, m)
+		}
+	}
+	return filtered
+}
+
 func appendCarryOver(filtered, carry []*models.Mock) []*models.Mock {
 	if len(carry) == 0 {
 		return filtered
@@ -2515,6 +2537,12 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// SetMocksWithWindow files into that tier. filterOutDeleted below still
 	// drops the ones already consumed.
 	filteredMocks = appendCarryOver(filteredMocks, carryOver)
+	// The set's worker-scope mocks (models.ServeAsSession) are every test's:
+	// the session pool holds them, and so does each test's per-test pool, for
+	// the parsers that read only that one (Mongo matches a data call from it
+	// alone). The mock manager stages them into it whatever the window
+	// (pkg.serveRuleOf). Reusable, a parser keeps them when it serves one.
+	filteredMocks = appendWorkerScope(filteredMocks, unfilteredMocks)
 
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.AgentOwnsConsumed {

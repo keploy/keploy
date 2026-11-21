@@ -582,6 +582,11 @@ func (m *SyncMockManager) handOnPendingBefore(before time.Time) string {
 			return "a mock requested before it is owed back to its test, at the next flush"
 		}
 	}
+	for _, mk := range m.background {
+		if !mk.Spec.ReqTimestampMock.After(before) {
+			return "a background call requested before it is sent at the next flush"
+		}
+	}
 	m.sendingMu.Lock()
 	defer m.sendingMu.Unlock()
 	for _, at := range m.sending {

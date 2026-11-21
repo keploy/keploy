@@ -56,10 +56,10 @@ func TestServeAsSessionMovesTheWorkerMocksToTheSessionPool(t *testing.T) {
 	if moved == jwks {
 		t.Fatal("the stored mock must not be handed on: a copy is")
 	}
-	if ti := moved.TestModeInfo; ti.Lifetime != LifetimeSession || !ti.LifetimeDerived || ti.IsFiltered {
-		t.Fatalf("moved mock = %+v, want a derived session mock", ti)
+	if ti := moved.TestModeInfo; ti.Lifetime != LifetimeSession || !ti.LifetimeDerived || ti.IsFiltered || !ti.Background {
+		t.Fatalf("moved mock = %+v, want a derived session mock marked a worker-scope one", ti)
 	}
-	if jwks.TestModeInfo.Lifetime != LifetimePerTest || !jwks.TestModeInfo.IsFiltered {
+	if jwks.TestModeInfo.Lifetime != LifetimePerTest || !jwks.TestModeInfo.IsFiltered || jwks.TestModeInfo.Background {
 		t.Fatalf("the stored mock was written: %+v", jwks.TestModeInfo)
 	}
 	if f2, u2 := ServeAsSession([]*Mock{own}, []*Mock{cfg}, nil); len(f2) != 1 || len(u2) != 1 {

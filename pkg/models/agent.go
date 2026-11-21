@@ -11,6 +11,17 @@ import (
 
 type OutgoingReq struct {
 	OutgoingOptions OutgoingOptions `json:"outgoingOptions"`
+	// WorkerMockRules are the recording's worker-mock rules (config
+	// record.workerMocks), without the proven switch, which applies none at
+	// record. The agent's manager tags each mock a rule names
+	// (TestModeInfo.Background) and keeps it from its cleanups: a call the
+	// application makes on its own (a timer, a worker's poll) is otherwise
+	// dropped whenever it lands inside a static-dedup duplicate's request, or
+	// once it is older than the stale cutoff with no request to own it.
+	// Empty, the manager applies none; an agent from before it ignores it.
+	// Beside OutgoingOptions, not in it: each connection's supervisor.Session
+	// holds the options by value, at its size class.
+	WorkerMockRules []WorkerMockRule `json:"workerMockRules,omitempty"`
 }
 
 type IncomingReq struct {

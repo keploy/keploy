@@ -42,6 +42,9 @@ import (
 //   - PostgresV3: "query", a regex on the mock's normalized statement.
 //   - Redis: "command" (case-insensitive) and "key", a regex on its first
 //     argument; every command the mock records must match.
+//   - Mongo: "command" (case-insensitive: update, find, findAndModify, ...),
+//     "collection" and "database", globs on the namespace the command runs
+//     on; every request the mock records must match.
 //   - Http, Http2, MySQL, Redis: "response", an optional regex on what the
 //     call answered (the HTTP body; the MySQL result packets as JSON, column
 //     names and values included, so a quote or backslash in a value reads
@@ -84,10 +87,14 @@ var workerRuleKeys = map[Kind][]string{
 	MySQL:      {"query", "response"},
 	PostgresV3: {"query"},
 	REDIS:      {"command", "key", "response"},
+	Mongo:      {"command", "collection", "database"},
 }
 
 // workerRuleRegexKeys are the keys whose values are regexes.
 var workerRuleRegexKeys = map[string]bool{"pathregex": true, "query": true, "key": true, "response": true}
+
+// workerRuleGlobKeys are the keys whose values are globs (path.Match).
+var workerRuleGlobKeys = map[string]bool{"destination": true, "host": true, "path": true, "collection": true, "database": true}
 
 // workerRuleKinds are the kinds this tree records. A rule naming one of them
 // with another case (http for Http) is refused, as the typo it is; a kind not
@@ -172,7 +179,7 @@ func (r WorkerMockRule) Validate() []string {
 			} else if matchesEverything(v) {
 				problems = append(problems, fmt.Sprintf("its %s matches everything", k))
 			}
-		case k == "destination" || k == "host" || k == "path":
+		case workerRuleGlobKeys[k]:
 			if _, err := path.Match(v, ""); err != nil {
 				problems = append(problems, fmt.Sprintf("its %s is not a glob: %v", k, err))
 			}
@@ -192,7 +199,7 @@ func (r WorkerMockRule) Validate() []string {
 		case k == "response", strings.TrimSpace(v) == "":
 		case workerRuleRegexKeys[k] && matchesEverything(v):
 			regexAll = true // said above
-		case (k == "host" || k == "destination") && globMatchesEverything(k, v):
+		case workerRuleGlobKeys[k] && k != "path" && globMatchesEverything(k, v):
 		default:
 			naming++
 			if k != "method" && k != "command" {
@@ -284,26 +291,45 @@ func MatchWorkerMockRules(rules []WorkerMockRule, m *Mock) (string, bool) {
 	return "", false
 }
 
-// WorkerMockCallKey is the call m records: an HTTP request's method, host,
-// path and query, with a digest of its body when it has one; the statements
-// of a SQL mock and the commands of a Redis one, with the destination they
-// went to. Two mocks with one key record the same call (another worker's copy
-// of it), and one of them, served to every test for the session, answers it
-// for all. A mock whose call keploy cannot name (another kind, or one that
-// records no statement or command it reads) is a call of its own: its key
-// names the mock, so it is never taken for another's copy.
+// WorkerMockCallKey is the call m records (WorkerMockCallOf), or, for a mock
+// whose call keploy cannot name, a key naming the mock itself, so that it is
+// never taken for another's copy.
 func WorkerMockCallKey(m *Mock) string {
 	if m == nil {
 		return ""
 	}
+	if key, ok := WorkerMockCallOf(m); ok {
+		return key
+	}
+	return string(m.Kind) + "\x00mock\x00" + m.Name
+}
+
+// WorkerMockCallOf is the call m records: an HTTP request's method, host,
+// path and query, with a digest of its body when it has one; the statements
+// of a SQL mock and the commands of a Redis one, and the command and
+// namespace of each request of a Mongo one, with the destination they went
+// to. Two mocks with one key record the same call (another worker's copy of
+// it, or the next run of a timer's), and one of them, served to every test
+// for the session, answers it for all. ok is false for a mock whose call
+// keploy cannot name: another kind, or one that records no request it
+// reads.
+//
+// A Mongo call is named by its command, its namespace and the shape of what
+// it sends (the names of its filter's and its documents' fields, not their
+// values; mongoRequestShape): a timer's update that writes a new time each run is
+// one call, while an upsert of other fields of the same collection is
+// another, whose copy would not answer it.
+func WorkerMockCallOf(m *Mock) (string, bool) {
+	if m == nil {
+		return "", false
+	}
 	kind := string(m.Kind)
 	dest := strings.TrimSpace(m.Spec.Metadata["destAddr"])
-	own := kind + "\x00mock\x00" + m.Name
 	switch m.Kind {
 	case HTTP, HTTP2:
 		method, host, p, ok := httpCallOf(m)
 		if !ok {
-			return own
+			return "", false
 		}
 		query, body := httpQueryAndBodyOf(m)
 		parts := []string{kind, strings.ToUpper(method), strings.ToLower(host), p, query}
@@ -311,10 +337,10 @@ func WorkerMockCallKey(m *Mock) string {
 			sum := sha256.Sum256([]byte(body))
 			parts = append(parts, hex.EncodeToString(sum[:]))
 		}
-		return strings.Join(parts, "\x00")
+		return strings.Join(parts, "\x00"), true
 	case MySQL:
 		if st := mysqlStatements(m); len(st) > 0 {
-			return strings.Join(append([]string{kind, dest}, st...), "\x00")
+			return strings.Join(append([]string{kind, dest}, st...), "\x00"), true
 		}
 	case PostgresV3:
 		if st := postgresV3Statements(m); len(st) > 0 {
@@ -325,12 +351,12 @@ func WorkerMockCallKey(m *Mock) string {
 			if q := m.Spec.PostgresV3.Query; len(q.BindValues) > 0 || len(q.Literals) > 0 {
 				raw, err := json.Marshal(struct{ B, L PostgresV3Cells }{q.BindValues, q.Literals})
 				if err != nil {
-					return own
+					return "", false
 				}
 				sum := sha256.Sum256(raw)
 				parts = append(parts, hex.EncodeToString(sum[:]))
 			}
-			return strings.Join(parts, "\x00")
+			return strings.Join(parts, "\x00"), true
 		}
 	case REDIS:
 		if cmds := redisCommands(m); len(cmds) > 0 {
@@ -338,10 +364,14 @@ func WorkerMockCallKey(m *Mock) string {
 			for _, c := range cmds {
 				parts = append(parts, strings.Join(c, " "))
 			}
-			return strings.Join(parts, "\x00")
+			return strings.Join(parts, "\x00"), true
+		}
+	case Mongo:
+		if calls := mongoCallKeys(m); len(calls) > 0 {
+			return strings.Join(append([]string{kind, dest}, calls...), "\x00"), true
 		}
 	}
-	return own
+	return "", false
 }
 
 // httpQueryAndBodyOf is the query string and body of m's HTTP request.
@@ -382,6 +412,8 @@ func (r WorkerMockRule) Matches(m *Mock) bool {
 		request = r.matchesStatements(postgresV3Statements(m))
 	case REDIS:
 		request = r.matchesRedis(m)
+	case Mongo:
+		request = r.matchesMongo(m)
 	}
 	if !request {
 		return false
@@ -583,6 +615,40 @@ func (r WorkerMockRule) matchesRedis(m *Mock) bool {
 			return false
 		}
 		if keySet && (len(c) < 2 || !workerRegexMatches(key, c[1])) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchesMongo reports whether every request m records runs the rule's
+// command on a namespace its collection and database globs match. A mock
+// with a request keploy cannot read the command of matches no rule that
+// names one.
+func (r WorkerMockRule) matchesMongo(m *Mock) bool {
+	mt := r.match()
+	cmd, cmdSet := mt["command"]
+	coll, collSet := mt["collection"]
+	db, dbSet := mt["database"]
+	if !cmdSet && !collSet && !dbSet {
+		return true
+	}
+	calls := mongoCalls(m)
+	if len(calls) == 0 {
+		return false
+	}
+	globs := func(g, v string) bool {
+		ok, _ := path.Match(g, v)
+		return v != "" && ok
+	}
+	for _, c := range calls {
+		if cmdSet && !strings.EqualFold(c.command, cmd) {
+			return false
+		}
+		if collSet && !globs(coll, c.collection) {
+			return false
+		}
+		if dbSet && !globs(db, c.database) {
 			return false
 		}
 	}
@@ -857,7 +923,8 @@ func sortedKeys(m map[string]bool) []string {
 // for a user who points at a recorded mock and says "serve this to every
 // test": an HTTP call by its method, host and path (no query); a MySQL or
 // Postgres (PostgresV3) call by its statements, each whole; a Redis call by
-// its command and key. A mock none of that can be read from is named by its
+// its command and key; a Mongo call by its command and the namespace it runs
+// on. A mock none of that can be read from is named by its
 // destination, the broadest rule (DestinationOnly in api-server), which the
 // caller says is broad. The rule is read by the same extractors Matches
 // reads, and is returned only when it validates and matches m.
@@ -888,6 +955,8 @@ func SuggestWorkerMockRule(m *Mock) (WorkerMockRule, error) {
 		rule.Match, err = statementRule(m.Name, postgresV3Statements(m))
 	case REDIS:
 		rule.Match, err = redisRule(m.Name, redisCommands(m))
+	case Mongo:
+		rule.Match, err = mongoRule(m.Name, mongoCalls(m))
 	default:
 		// A kind whose call keploy does not read: its destination is all
 		// a rule can name.
@@ -970,6 +1039,30 @@ func redisRule(name string, commands [][]string) (map[string]string, error) {
 		return nil, fmt.Errorf("mock %s reads %d keys, more than a rule can name; mark it with a rule of your own instead", name, len(sorted))
 	}
 	out["key"] = q
+	return out, nil
+}
+
+// mongoRule names the one call the requests given run: its command, and the
+// collection and database it runs on, each a glob matching it alone. Refused
+// when they run more than one call: the matcher requires every request of a
+// mock to match, so naming one would leave the mock unmatched.
+func mongoRule(name string, calls []mongoCall) (map[string]string, error) {
+	if len(calls) == 0 || calls[0].command == "" {
+		return nil, fmt.Errorf("mock %s records no Mongo command keploy can name", name)
+	}
+	first := calls[0]
+	for _, c := range calls[1:] {
+		if !strings.EqualFold(c.command, first.command) || c.collection != first.collection || c.database != first.database {
+			return nil, fmt.Errorf("mock %s records more than one Mongo call; mark it with a rule of your own instead", name)
+		}
+	}
+	out := map[string]string{"command": first.command}
+	if first.collection != "" {
+		out["collection"] = globLiteral(first.collection)
+	}
+	if first.database != "" {
+		out["database"] = globLiteral(first.database)
+	}
 	return out, nil
 }
 

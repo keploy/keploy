@@ -10,7 +10,10 @@ import (
 // settledPrefix is how many of the buffer's first mocks the last pass over it
 // left settled: a per-test mock (not one any test may reuse,
 // attributedReusable, nor a startup one, isStartupMock) whose request no
-// window in the ring holds. Such a mock waits for a window to be resolved over
+// window in the ring holds. A call a worker-mock rule names is settled too: a
+// flush walks the prefix for the ones no request may claim any more only once
+// the oldest waiting is (sendDueSettledBackgroundLocked), so a recording with
+// a rule keeps the prefix a resolve steps over. Such a mock waits for a window to be resolved over
 // its request, or for the stale cutoff: nothing else moves it.
 //
 //   - ResolveRange decides it in full only when its window holds the request,
