@@ -8,7 +8,9 @@
 #   2. the project's .env sets the app's container_name: that name, and the
 #      default no longer names it;
 #   3. a service with no container_name: <project>-<service>-1, the project
-#      from a name: with capitals, lowercased as compose lowercases it.
+#      from a name: with capitals, lowercased as compose lowercases it;
+#   4. the same under --compatibility: <project>_<service>_1;
+#   5. the same with COMPOSE_COMPATIBILITY=true in the project's .env.
 # Each leg records one call and must write its test case; a keploy that
 # matches container_name as written ends at once with "container ... not
 # found in any of the provided docker-compose files".
@@ -37,7 +39,7 @@ ID=$$
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
 PORT=$(free_port) || exit 1
 # The variables the files name start unset, as a user's shell has them.
-unset APP_PROJECT APP_CONTAINER APP_PORT APP_NETWORK COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES
+unset APP_PROJECT APP_CONTAINER APP_PORT APP_NETWORK COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_COMPATIBILITY
 
 # Tear down only this run's projects, by their files. Never a blanket prune.
 cleanup() {
@@ -184,6 +186,14 @@ rm -f .env
 echo "== 3. no container_name: <project>-<service>-1, the project lowercased =="
 record noname "docker compose -f noname.yml up" "cecn-proj-$ID-app-1"
 cleanup
+echo "== 4. --compatibility: <project>_<service>_1 =="
+record compat "docker compose --compatibility -f noname.yml up" "cecn-proj-${ID}_app_1" "cecn-proj-$ID-app-1"
+cleanup
+echo "== 5. COMPOSE_COMPATIBILITY=true in the .env: <project>_<service>_1 =="
+printf 'COMPOSE_COMPATIBILITY=true\n' > .env
+record compatenv "docker compose -f noname.yml up" "cecn-proj-${ID}_app_1" "cecn-proj-$ID-app-1"
+cleanup
+rm -f .env
 
 # A race build reports a data race and carries on: fail on one in any leg.
 if grep -l "WARNING: DATA RACE" ./*.log; then

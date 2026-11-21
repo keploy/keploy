@@ -3,7 +3,6 @@ package docker
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"regexp"
 	"sync"
@@ -20,8 +19,8 @@ import (
 // compose prints each line a container prints as `<name><padding> | <line>`,
 // on its stdout for the container's stdout and on its stderr for the
 // container's stderr, where name is the container as compose names it in its
-// output (its container_name, else <service>-<number>) and the padding lines
-// the names up. Its own lines (progress, "Attaching to", "exited with code")
+// output (its container_name, else <service>-<number>, <service>_<number> in
+// compatibility mode) and the padding lines the names up. Its own lines (progress, "Attaching to", "exited with code")
 // carry no such prefix and are not kept. It is the line format of compose's
 // log formatter, the one the compose library's consumer reproduces
 // (composeLogConsumer), with its colour codes when compose colours it.
@@ -30,30 +29,22 @@ import (
 // project's tails, as ComposeRunner.Up does, so the tails hold that Up's
 // output alone, and a line an earlier Up's child still prints is not kept.
 type ComposeChildOutput struct {
-	project *composeChildProject
+	project *composeIdentity
 	run     uint64
 }
 
-// StartComposeChildOutput loads content as `docker compose` will, from
-// workingDir (the current directory when "") with envFiles (the command's
-// --env-file values) under projectName (compose's own precedence when ""),
-// to know the project's name and its services, and
-// starts a new run of that project's tails. It reads no daemon. Call it before
-// the child starts, and hand each of the child's output streams its own
-// Stream.
-func StartComposeChildOutput(ctx context.Context, content []byte, projectName, workingDir string, envFiles []string) (*ComposeChildOutput, error) {
-	if len(content) == 0 {
-		return nil, fmt.Errorf("compose content is empty")
-	}
-	absWorkingDir, err := composeWorkingDir(workingDir)
+// StartComposeChildOutput resolves content as `docker compose -f -` will in
+// scope (the command's -p, --project-directory, --env-file and
+// --compatibility), with compose's own library (loadComposeContentIdentity),
+// to know the project's name and its services' container names, and starts a
+// new run of that project's tails. It reads no daemon. Call it before the
+// child starts, and hand each of the child's output streams its own Stream.
+func StartComposeChildOutput(ctx context.Context, content []byte, scope ComposeScope) (*ComposeChildOutput, error) {
+	project, err := loadComposeContentIdentity(ctx, content, scope)
 	if err != nil {
 		return nil, err
 	}
-	project, err := loadComposeChildProject(content, projectName, absWorkingDir, envFiles)
-	if err != nil {
-		return nil, err
-	}
-	return &ComposeChildOutput{project: project, run: appOutput.startRun(project.name)}, nil
+	return &ComposeChildOutput{project: project, run: appOutput.startRun(project.project)}, nil
 }
 
 // Project is the compose project the child's output is kept under: the name
@@ -62,7 +53,7 @@ func (o *ComposeChildOutput) Project() string {
 	if o == nil || o.project == nil {
 		return ""
 	}
-	return o.project.name
+	return o.project.project
 }
 
 // Stream is a writer for one of the child's output streams, as keploy copies
@@ -220,7 +211,7 @@ func (w *composeChildStream) end() {
 			text = text[over:]
 		}
 		o := w.out
-		appOutput.record(o.project.name, o.run, w.name, o.project.serviceOf(w.name), string(text), w.lost)
+		appOutput.record(o.project.project, o.run, w.name, o.project.serviceOfOutput(w.name), string(text), w.lost)
 	}
 	w.name, w.skip, w.lost = "", false, 0
 	w.text = w.text[:0]

@@ -1,159 +1,178 @@
 package docker
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// serviceOf reads compose's container naming backwards from the document.
-//
-// Ported from apptail_test.go's TestServiceOfReadsComposeNamesBackwards, which
-// asked the same question of the compose-go project the in-process library
-// loaded. The library is gone; the question is not, because compose still
-// prints `<container> | line` and the tail still has to say which service that
-// is.
+// serviceOfOutput reads compose's container naming backwards, from the name
+// compose prints a container's lines under (its container_name, else its
+// name without the project's prefix).
 //
 // The cases that matter are the ambiguous ones. "app-1" is BOTH the default
 // name of service "app" replica 1 and a service in its own right, and an
-// explicit container_name must win over any default that could also claim it —
-// which is why the explicit pass runs over every service before the default
-// pass runs at all.
-func TestServiceOfReadsComposeNamesBackwards(t *testing.T) {
-	p := &composeChildProject{name: "p", containerNames: map[string]string{
+// explicit container_name must win over any default that could also claim it,
+// which is why every container_name is looked at before any default.
+func TestServiceOfOutputReadsComposeNamesBackwards(t *testing.T) {
+	ci := &composeIdentity{project: "p", separator: composeContainerSeparator, containerNames: map[string]string{
 		"app":   "",
 		"app-1": "",
 		"db":    "orders-db",
+		"web":   "app-2",
 	}}
 	for name, want := range map[string]string{
 		"app-1":     "app",
 		"app-12":    "app",
 		"app-1-1":   "app-1",
 		"orders-db": "db",
-		"db-1":      "", // db names its container, so the default cannot claim it
-		"app-":      "", // a number is required
+		"app-2":     "web", // web names its container so; app's replica 2 cannot claim it
+		"db-1":      "",    // db names its container, so the default cannot claim it
+		"app-":      "",    // a number is required
+		"app-0":     "",    // compose numbers replicas from 1
+		"app-01":    "",    // written as %d
 		"app-x":     "",
+		"app_1":     "", // the separator outside compatibility mode is -
+		"p-app-1":   "", // compose prints a default name without the project's prefix
 		"other-1":   "",
 	} {
-		if got := p.serviceOf(name); got != want {
-			t.Errorf("serviceOf(%q) = %q, want %q", name, got, want)
+		if got := ci.serviceOfOutput(name); got != want {
+			t.Errorf("serviceOfOutput(%q) = %q, want %q", name, got, want)
 		}
 	}
-	if (*composeChildProject)(nil).serviceOf("app-1") != "" {
+	compat := &composeIdentity{project: "p", separator: composeCompatibilitySeparator, containerNames: map[string]string{"app": "", "db": "orders-db"}}
+	for name, want := range map[string]string{"app_1": "app", "app_3": "app", "app-1": "", "orders-db": "db", "app_": ""} {
+		if got := compat.serviceOfOutput(name); got != want {
+			t.Errorf("in compatibility mode serviceOfOutput(%q) = %q, want %q", name, got, want)
+		}
+	}
+	if (*composeIdentity)(nil).serviceOfOutput("app-1") != "" {
 		t.Error("a nil project answered a service")
 	}
 }
 
-// THE DOCUMENT IS READ WITHOUT compose-go, so this pins what is read out of it:
-// every service, and the container_name only where one is set. A service that
-// sets none must still be PRESENT with "", because the <service>-<number>
-// fallback applies only to those.
-func TestLoadComposeChildProjectReadsServicesAndContainerNames(t *testing.T) {
-	doc := []byte(`
-services:
-  app:
-    image: shop:v1
-  db:
-    image: postgres:16
-    container_name: orders-db
-`)
-	p, err := loadComposeChildProject(doc, "proj", "/tmp/whatever", nil)
-	if err != nil {
-		t.Fatalf("load: %v", err)
+// childProject starts a compose child's output for doc in scope, with env set,
+// from a fresh current directory named My.Child holding files.
+func childProject(t *testing.T, doc string, files, env map[string]string, scope ComposeScope) (*ComposeChildOutput, error) {
+	t.Helper()
+	ForgetAppOutput()
+	t.Cleanup(ForgetAppOutput)
+	dir := composeProjectDir(t, files)
+	for k, v := range env {
+		t.Setenv(k, v)
 	}
-	if p.name != "proj" {
-		t.Errorf("name = %q, want proj", p.name)
-	}
-	if got, ok := p.containerNames["app"]; !ok || got != "" {
-		t.Errorf(`containerNames["app"] = %q, present=%v; a service with no container_name must be present with ""`, got, ok)
-	}
-	if p.containerNames["db"] != "orders-db" {
-		t.Errorf(`containerNames["db"] = %q, want orders-db`, p.containerNames["db"])
-	}
-	if p.serviceOf("app-1") != "app" || p.serviceOf("orders-db") != "db" {
-		t.Error("the loaded document does not answer the names compose prints")
-	}
-}
-
-// The project name follows compose's precedence. The caller's name wins,
-// because app.go has already resolved it from the command; the directory base
-// is the last resort and is normalised as compose normalises it.
-func TestComposeChildProjectNamePrecedence(t *testing.T) {
-	t.Setenv("COMPOSE_PROJECT_NAME", "from-env")
-	if got := composeChildProjectName("explicit", "fromdoc", "/srv/My_App", nil); got != "explicit" {
-		t.Errorf("explicit name = %q, want explicit", got)
-	}
-	if got := composeChildProjectName("  ", "fromdoc", "/srv/My_App", nil); got != "from-env" {
-		t.Errorf("env name = %q, want from-env", got)
-	}
-	t.Setenv("COMPOSE_PROJECT_NAME", "")
-	// The DOCUMENT's own name sits above the directory and below the
-	// environment -- the level the first cut of this reader missed, which
-	// TestComposeChildOutputProjectFollowsComposePrecedence caught.
-	if got := composeChildProjectName("", "fromdoc", "/srv/My_App", nil); got != "fromdoc" {
-		t.Errorf("document name = %q, want fromdoc", got)
-	}
-	if got := composeChildProjectName("", "", "/srv/My_App", nil); got != "my_app" {
-		t.Errorf("dir name = %q, want my_app (lower-cased, non-[a-z0-9_-] dropped)", got)
-	}
-}
-
-// A document keploy cannot read is an error, not an empty project: answering
-// with no services would make every container line unattributed and look like
-// a document that simply names none.
-func TestLoadComposeChildProjectRefusesAnUnreadableDocument(t *testing.T) {
-	if _, err := loadComposeChildProject([]byte("services: [this is not a map"), "p", "/tmp", nil); err == nil {
-		t.Error("an unparsable document loaded without error")
-	}
-}
-
-// THE ENV FILES COUNT TOWARDS THE PROJECT NAME, and this reader's first cut
-// dropped them -- caught by TestComposeChildTeeTakesTheProjectComposeTakes's
-// --env-file row ("project = app, want envfileproj").
-//
-// It matters because the name is what the tails are recorded UNDER: get it
-// wrong and the output is kept against a project nothing reads back, so a
-// crashed app shows no recent output at all.
-func TestComposeChildProjectNameReadsTheEnvFiles(t *testing.T) {
-	dir := t.TempDir()
-	envFile := filepath.Join(dir, "keploy.env")
-	if err := os.WriteFile(envFile, []byte("# a comment\n\nexport COMPOSE_PROJECT_NAME=\"envfileproj\"\n"), 0o600); err != nil {
+	named := filepath.Join(filepath.Dir(dir), "My.Child")
+	if err := os.Rename(dir, named); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(composeProjectNameEnv, "")
-	t.Setenv(composeEnvFilesEnv, "")
+	t.Chdir(named)
+	return StartComposeChildOutput(context.Background(), []byte(doc), scope)
+}
 
-	if got := composeChildProjectName("", "", dir, []string{envFile}); got != "envfileproj" {
-		t.Errorf("--env-file name = %q, want envfileproj", got)
-	}
-	// The SHELL beats a file: the caller checks the process environment first.
-	t.Setenv(composeProjectNameEnv, "fromshell")
-	if got := composeChildProjectName("", "", dir, []string{envFile}); got != "fromshell" {
-		t.Errorf("with the shell set, name = %q, want fromshell", got)
-	}
-	// And COMPOSE_ENV_FILES is read when no --env-file was given.
-	t.Setenv(composeProjectNameEnv, "")
-	t.Setenv(composeEnvFilesEnv, envFile)
-	if got := composeChildProjectName("", "", dir, nil); got != "envfileproj" {
-		t.Errorf("COMPOSE_ENV_FILES name = %q, want envfileproj", got)
+// The project the tails are kept under is the one `docker compose -f -` makes
+// of keploy's document: -p, else COMPOSE_PROJECT_NAME (keploy's environment,
+// else the env files'), else the document's name: interpolated and lowercased
+// as compose names containers, else the current directory's name, normalized.
+// The parse-server shape names its project from a variable with a default.
+func TestComposeChildOutputProjectIsTheOneComposeMakes(t *testing.T) {
+	const parseShape = "name: ${PARSE_PROJECT:-parse-server-mongo}\nservices:\n  parse-server:\n    image: x\n    container_name: ${APP_CONTAINER:-parse-server-mongo-app}\n"
+	for _, tc := range []struct {
+		name  string
+		doc   string
+		files map[string]string
+		env   map[string]string
+		scope ComposeScope
+		want  string
+	}{
+		{name: "name: ${VAR:-default}, unset: the default", doc: parseShape, want: "parse-server-mongo"},
+		{name: "name: ${VAR:-default}, set: the value, lowercased", doc: parseShape,
+			env: map[string]string{"PARSE_PROJECT": "PS.Lane"}, want: "pslane"},
+		{name: "name: ${VAR:-default}, set in the .env", doc: parseShape,
+			files: map[string]string{".env": "PARSE_PROJECT=from-dotenv\n"}, want: "from-dotenv"},
+		{name: "name: as written, lowercased", doc: "name: Parse.Server\nservices:\n  app:\n    image: x\n", want: "parseserver"},
+		{name: "-p beats name:", doc: parseShape, scope: ComposeScope{ProjectName: "flagged"}, want: "flagged"},
+		{name: "COMPOSE_PROJECT_NAME beats name:", doc: parseShape, env: map[string]string{composeProjectNameEnv: "fromenv"}, want: "fromenv"},
+		{name: "COMPOSE_PROJECT_NAME in an --env-file", doc: parseShape,
+			files: map[string]string{"keploy.env": "# a comment\n\nexport COMPOSE_PROJECT_NAME=\"envfileproj\"\n"},
+			scope: ComposeScope{EnvFiles: []string{"keploy.env"}}, want: "envfileproj"},
+		{name: "keploy's environment beats an --env-file", doc: parseShape,
+			files: map[string]string{"keploy.env": "COMPOSE_PROJECT_NAME=envfileproj\n"},
+			env:   map[string]string{composeProjectNameEnv: "fromshell"},
+			scope: ComposeScope{EnvFiles: []string{"keploy.env"}}, want: "fromshell"},
+		{name: "COMPOSE_PROJECT_NAME in COMPOSE_ENV_FILES", doc: parseShape,
+			files: map[string]string{"keploy.env": "COMPOSE_PROJECT_NAME=envfilesproj\n"},
+			env:   map[string]string{composeEnvFilesEnv: "keploy.env"}, want: "envfilesproj"},
+		{name: "COMPOSE_PROJECT_NAME in the .env", doc: parseShape,
+			files: map[string]string{".env": "COMPOSE_PROJECT_NAME=dotenvproj\n"}, want: "dotenvproj"},
+		{name: "no name: the directory's, normalized", doc: "services:\n  app:\n    image: x\n", want: "mychild"},
+		{name: "--project-directory names the directory", doc: "services:\n  app:\n    image: x\n",
+			files: map[string]string{"Sub_Dir/keep": ""}, scope: ComposeScope{ProjectDir: "Sub_Dir"}, want: "sub_dir"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, err := childProject(t, tc.doc, tc.files, tc.env, tc.scope)
+			if err != nil {
+				t.Fatalf("StartComposeChildOutput: %v", err)
+			}
+			if o.Project() != tc.want {
+				t.Fatalf("Project() = %q, want %q", o.Project(), tc.want)
+			}
+		})
 	}
 }
 
-// The project directory's .env is the last file compose reads, and only when
-// nothing named one. A missing .env is not an error -- compose runs without it.
-func TestComposeChildProjectNameFallsBackToDotEnv(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv(composeProjectNameEnv, "")
-	t.Setenv(composeEnvFilesEnv, "")
-	t.Setenv("COMPOSE_DISABLE_ENV_FILE", "")
+// A line is kept against the service compose printed it for: the
+// container_name the document sets from a variable, as compose resolves it,
+// and in compatibility mode a replica's <service>_<number>.
+func TestComposeChildOutputKeepsALineAgainstTheResolvedService(t *testing.T) {
+	const doc = "services:\n  parse-server:\n    image: x\n    container_name: ${APP_CONTAINER:-parse-server-mongo-app}\n  worker:\n    image: y\n"
+	for _, tc := range []struct {
+		name    string
+		files   map[string]string
+		env     map[string]string
+		scope   ComposeScope
+		printed string
+		service string
+	}{
+		{name: "a container_name's default", printed: "parse-server-mongo-app", service: "parse-server"},
+		{name: "a container_name from keploy's environment", env: map[string]string{"APP_CONTAINER": "psst-app"},
+			printed: "psst-app", service: "parse-server"},
+		{name: "a replica", printed: "worker-1", service: "worker"},
+		{name: "a replica under --compatibility", scope: ComposeScope{Compatibility: true}, printed: "worker_2", service: "worker"},
+		{name: "a replica under COMPOSE_COMPATIBILITY in the .env", files: map[string]string{".env": "COMPOSE_COMPATIBILITY=true\n"},
+			printed: "worker_1", service: "worker"},
+		{name: "a replica under COMPOSE_COMPATIBILITY=y", env: map[string]string{composeCompatibilityEnv: " Y "},
+			printed: "worker_1", service: "worker"},
+		{name: "COMPOSE_COMPATIBILITY false", env: map[string]string{composeCompatibilityEnv: "false"},
+			printed: "worker-1", service: "worker"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, err := childProject(t, doc, tc.files, tc.env, tc.scope)
+			if err != nil {
+				t.Fatalf("StartComposeChildOutput: %v", err)
+			}
+			write(t, o.Stream(), tc.printed+"  | boom\n")
+			if got := string(ServiceOutputTail(o.Project(), tc.service)); !strings.Contains(got, "boom") {
+				t.Fatalf("service %q's tail = %q, want the line %s printed", tc.service, got, tc.printed)
+			}
+		})
+	}
+}
 
-	if got := composeChildProjectName("", "", filepath.Join(dir, "My_Dir"), nil); got != "my_dir" {
-		t.Errorf("with no .env, name = %q, want the directory base", got)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("COMPOSE_PROJECT_NAME=dotenvproj\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := composeChildProjectName("", "", dir, nil); got != "dotenvproj" {
-		t.Errorf(".env name = %q, want dotenvproj", got)
+// A document keploy cannot resolve is an error, not an empty project:
+// answering with no services would make every container line unattributed and
+// look like a document that simply names none.
+func TestStartComposeChildOutputRefusesADocumentComposeRefuses(t *testing.T) {
+	for name, doc := range map[string]string{
+		"not YAML":                  "services: [this is not a map",
+		"a required variable unset": "services:\n  app:\n    image: x\n    container_name: ${APP_CONTAINER:?set APP_CONTAINER}\n",
+		"empty":                     "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := childProject(t, doc, nil, nil, ComposeScope{}); err == nil {
+				t.Fatal("the document loaded without error")
+			}
+		})
 	}
 }

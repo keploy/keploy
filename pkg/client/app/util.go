@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
@@ -355,6 +356,25 @@ func composeEnvFiles(cmd string) []string {
 		}
 	}
 	return files
+}
+
+// composeCompatibility reports whether the compose command's own options
+// (engine.ComposeOptions: before its subcommand, where compose takes them)
+// run it in compatibility mode: --compatibility, or --compatibility=V with V
+// true as compose's flag parser reads a bool (strconv.ParseBool), the last
+// one given winning. A --compatibility of another program, or after compose's
+// subcommand, is not compose's.
+func composeCompatibility(cmd string) bool {
+	on := false
+	for _, part := range engine.ComposeOptions(cmd) {
+		switch {
+		case part == "--compatibility":
+			on = true
+		case strings.HasPrefix(part, "--compatibility="):
+			on, _ = strconv.ParseBool(strings.TrimPrefix(part, "--compatibility="))
+		}
+	}
+	return on
 }
 
 // composeAbortFlag matches, with the space before it, a compose up flag that
