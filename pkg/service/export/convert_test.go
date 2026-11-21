@@ -1,6 +1,7 @@
 package export
 
 import (
+	"reflect"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -59,7 +60,7 @@ func requestBodyOf(t *testing.T, s *models.HTTPSchema) postmanimport.PostmanRequ
 	return req.Body
 }
 
-// TestConvertRequestBodyOptionsFollowTheRequestContentTypeLocks the body-language
+// TestConvertRequestBodyOptionsFollowTheRequestContentType locks the body-language
 // option to the REQUEST's content type. It used to be overwritten from the
 // RESPONSE's content type: the second `strings.Contains(Response.Header...)`
 // block set request.Body.Options, so a multipart (form-data) request paired
@@ -97,6 +98,16 @@ func TestConvertRequestBodyOptionsFollowTheRequestContentType(t *testing.T) {
 			form: nil, reqCT: "application/json", respCT: "text/plain",
 			wantMode: "raw", wantOpts: jsonOptions(),
 		},
+		{
+			name: "plain-text raw request, JSON response: options stay clear",
+			form: nil, reqCT: "text/plain", respCT: "application/json",
+			wantMode: "raw", wantOpts: nil,
+		},
+		{
+			name: "raw request without Content-Type, JSON response: options stay clear",
+			form: nil, reqCT: "", respCT: "application/json",
+			wantMode: "raw", wantOpts: nil,
+		},
 	}
 
 	for _, tc := range tests {
@@ -105,21 +116,8 @@ func TestConvertRequestBodyOptionsFollowTheRequestContentType(t *testing.T) {
 			if body.Mode != tc.wantMode {
 				t.Errorf("body mode = %q, want %q", body.Mode, tc.wantMode)
 			}
-			if tc.wantOpts == nil {
-				if body.Options != nil {
-					t.Errorf("request body options = %#v; want nil (the response content type must not set the request's body language)", body.Options)
-				}
-				return
-			}
-			if body.Options == nil {
-				t.Fatalf("request body options = nil; want %#v", tc.wantOpts)
-			}
-			raw, ok := body.Options["raw"].(map[string]interface{})
-			if !ok {
-				t.Fatalf("request body options = %#v; want a raw-language map", body.Options)
-			}
-			if raw["language"] != "json" {
-				t.Errorf("request body options raw.language = %v, want json", raw["language"])
+			if !reflect.DeepEqual(body.Options, tc.wantOpts) {
+				t.Errorf("request body options = %#v; want %#v", body.Options, tc.wantOpts)
 			}
 		})
 	}
