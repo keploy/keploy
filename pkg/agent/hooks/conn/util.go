@@ -308,7 +308,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	for _, fd := range formData {
 		if len(fd.Paths) > 0 {
 			hasBinaryFile = true
-			logger.Debug("Detected binary file in request form data", zap.String("key", fd.Key), zap.Strings("paths", fd.Paths))
+			logger.Debug("Detected binary file in request form data", zap.String("key", fd.Key), zap.Int("files", len(fd.Paths)))
 			break
 		}
 	}
@@ -578,7 +578,7 @@ func RemoveFormFiles(logger *zap.Logger, forms []models.FormData) {
 				continue
 			}
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				utils.LogError(logger, err, "failed to remove the file a form's file part was written to", zap.String("path", path))
+				utils.LogError(logger, models.FormFilePathsInError(err, path), "failed to remove the file a form's file part was written to", zap.String("path", models.FormFilePathLogText(path)))
 			}
 		}
 	}
@@ -684,7 +684,7 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 			}
 			content, err := os.ReadFile(path)
 			if err != nil {
-				utils.LogError(logger, err, "Error reading multipart temp file: the part goes without its file", zap.String("path", path))
+				utils.LogError(logger, models.FormFilePathsInError(err, path), "Error reading multipart temp file: the part goes without its file", zap.String("path", models.FormFilePathLogText(path)))
 				form.Paths[j] = ""
 				continue
 			}
@@ -694,7 +694,7 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 			form.FileContents[j] = content
 			form.Paths[j] = ""
 			if err := os.Remove(path); err != nil {
-				utils.LogError(logger, err, "Error removing temp file", zap.String("path", path))
+				utils.LogError(logger, models.FormFilePathsInError(err, path), "Error removing temp file", zap.String("path", models.FormFilePathLogText(path)))
 			}
 		}
 	}
@@ -770,11 +770,13 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// easily exceed this threshold.
 	totalSize := len(http2Stream.GRPCReq.Body.DecodedData) + len(http2Stream.GRPCResp.Body.DecodedData)
 	if totalSize > MaxTestCaseSize {
-		// The method by its path's shape, as an HTTP call over the limit is
-		// named by its request's: the path is the app's.
+		// The method by its path's shape and per-session tag, as an HTTP call
+		// over the limit is named by its request's: the path is the app's.
+		u := &url.URL{Path: http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]}
 		logger.Error("gRPC test case data exceeds 5MB limit, skipping capture",
 			zap.Int("totalSize", totalSize),
-			zap.String("path", utils.URLPathShape(&url.URL{Path: http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]})))
+			zap.String("path", utils.URLPathShape(u)),
+			utils.PathTagField(models.URLPathTag(ctx, http.MethodPost, u)))
 		return
 	}
 

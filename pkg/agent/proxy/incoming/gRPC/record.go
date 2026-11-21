@@ -5,6 +5,8 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 )
@@ -120,7 +123,7 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		done := parsedChunks
 		parsedChunks = nil
 		emitMu.Unlock()
-		emitCompleteStreams(logger, sm, captureStream)
+		emitCompleteStreams(ctx, logger, sm, captureStream)
 		for _, d := range done {
 			d()
 		}
@@ -539,7 +542,7 @@ func drainFrameChunks(ch <-chan frameChunk) {
 // pressure too, when capture leaves it out (CaptureGRPC): a pass that skipped
 // it would leave it for a later pass after the chunks it was built of were
 // released, so a stop told nothing was pending could be followed by it.
-func emitCompleteStreams(logger *zap.Logger, sm *pkg.DefaultStreamManager, capture func(*pkg.HTTP2Stream)) {
+func emitCompleteStreams(ctx context.Context, logger *zap.Logger, sm *pkg.DefaultStreamManager, capture func(*pkg.HTTP2Stream)) {
 	if capture == nil {
 		return
 	}
@@ -554,7 +557,10 @@ func emitCompleteStreams(logger *zap.Logger, sm *pkg.DefaultStreamManager, captu
 		if path, ok := stream.GRPCReq.Headers.PseudoHeaders[":path"]; ok {
 			method = path
 		}
-		logger.Debug("captured gRPC test case (passthrough)", zap.String("method", method))
+		u := &url.URL{Path: method}
+		logger.Debug("captured gRPC test case (passthrough)",
+			zap.String("method", utils.URLPathShape(u)),
+			utils.PathTagField(models.URLPathTag(ctx, http.MethodPost, u)))
 		capture(stream)
 		sm.CleanupStream(stream.ID)
 	}

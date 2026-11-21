@@ -875,7 +875,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 		// 2. Write file part if exists
 		if t.HasBinaryFile {
-			a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
+			a.logger.Debug("Starting binary file streaming for test case", zap.Int("form_parts", len(t.HTTPReq.Form)))
 			for _, form := range t.HTTPReq.Form {
 				for i, path := range form.Paths {
 					if path == "" {
@@ -900,7 +900,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 					f, err := os.Open(path)
 					if err != nil {
-						a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
+						a.logger.Error("failed to open file for streaming",
+							zap.String("path", models.FormFilePathLogText(path)),
+							zap.Error(models.FormFilePathsInError(err, path)))
 						return false
 					}
 					if _, err := io.Copy(filePart, f); err != nil {
