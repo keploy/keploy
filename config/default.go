@@ -106,6 +106,7 @@ test:
   allowEgress: []
 record:
   recordTimer: 0s
+  watch: false
   filters: []
   sync: false
   memoryLimit: 0
