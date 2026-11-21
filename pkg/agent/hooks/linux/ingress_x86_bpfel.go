@@ -16,16 +16,23 @@ import (
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	ingressMapAppBindSocks       = "app_bind_socks"
-	ingressMapAppPortBinds       = "app_port_binds"
-	ingressMapAppPortInfo        = "app_port_info"
-	ingressMapIngressForwarders  = "ingress_forwarders"
-	ingressMapIngressLookupStats = "ingress_lookup_stats"
-	ingressMapIngressPark        = "ingress_park"
-	ingressMapIngressYielded     = "ingress_yielded"
-	ingressMapPendingHolds       = "pending_holds"
-	ingressProgK_ingressLookup   = "k_ingress_lookup"
-	ingressProgK_ingressRelease  = "k_ingress_release"
+	ingressMapAppBindSocks          = "app_bind_socks"
+	ingressMapAppPortBinds          = "app_port_binds"
+	ingressMapAppPortInfo           = "app_port_info"
+	ingressMapIngressAgent          = "ingress_agent"
+	ingressMapIngressForwarders     = "ingress_forwarders"
+	ingressMapIngressLookupStats    = "ingress_lookup_stats"
+	ingressMapIngressOwn            = "ingress_own"
+	ingressMapIngressOwnSocks       = "ingress_own_socks"
+	ingressMapIngressPark           = "ingress_park"
+	ingressMapIngressYielded        = "ingress_yielded"
+	ingressMapPendingHolds          = "pending_holds"
+	ingressProgK_ingressAgentExit   = "k_ingress_agent_exit"
+	ingressProgK_ingressAgentKilled = "k_ingress_agent_killed"
+	ingressProgK_ingressLookup      = "k_ingress_lookup"
+	ingressProgK_ingressOwnConnect  = "k_ingress_own_connect"
+	ingressProgK_ingressRelease     = "k_ingress_release"
+	ingressProgK_ingressSeed        = "k_ingress_seed"
 )
 
 // loadIngress returns the embedded CollectionSpec for ingress.
@@ -70,8 +77,12 @@ type ingressSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type ingressProgramSpecs struct {
-	K_ingressLookup  *ebpf.ProgramSpec `ebpf:"k_ingress_lookup"`
-	K_ingressRelease *ebpf.ProgramSpec `ebpf:"k_ingress_release"`
+	K_ingressAgentExit   *ebpf.ProgramSpec `ebpf:"k_ingress_agent_exit"`
+	K_ingressAgentKilled *ebpf.ProgramSpec `ebpf:"k_ingress_agent_killed"`
+	K_ingressLookup      *ebpf.ProgramSpec `ebpf:"k_ingress_lookup"`
+	K_ingressOwnConnect  *ebpf.ProgramSpec `ebpf:"k_ingress_own_connect"`
+	K_ingressRelease     *ebpf.ProgramSpec `ebpf:"k_ingress_release"`
+	K_ingressSeed        *ebpf.ProgramSpec `ebpf:"k_ingress_seed"`
 }
 
 // ingressMapSpecs contains maps before they are loaded into the kernel.
@@ -81,8 +92,11 @@ type ingressMapSpecs struct {
 	AppBindSocks       *ebpf.MapSpec `ebpf:"app_bind_socks"`
 	AppPortBinds       *ebpf.MapSpec `ebpf:"app_port_binds"`
 	AppPortInfo        *ebpf.MapSpec `ebpf:"app_port_info"`
+	IngressAgent       *ebpf.MapSpec `ebpf:"ingress_agent"`
 	IngressForwarders  *ebpf.MapSpec `ebpf:"ingress_forwarders"`
 	IngressLookupStats *ebpf.MapSpec `ebpf:"ingress_lookup_stats"`
+	IngressOwn         *ebpf.MapSpec `ebpf:"ingress_own"`
+	IngressOwnSocks    *ebpf.MapSpec `ebpf:"ingress_own_socks"`
 	IngressPark        *ebpf.MapSpec `ebpf:"ingress_park"`
 	IngressYielded     *ebpf.MapSpec `ebpf:"ingress_yielded"`
 	PendingHolds       *ebpf.MapSpec `ebpf:"pending_holds"`
@@ -117,8 +131,11 @@ type ingressMaps struct {
 	AppBindSocks       *ebpf.Map `ebpf:"app_bind_socks"`
 	AppPortBinds       *ebpf.Map `ebpf:"app_port_binds"`
 	AppPortInfo        *ebpf.Map `ebpf:"app_port_info"`
+	IngressAgent       *ebpf.Map `ebpf:"ingress_agent"`
 	IngressForwarders  *ebpf.Map `ebpf:"ingress_forwarders"`
 	IngressLookupStats *ebpf.Map `ebpf:"ingress_lookup_stats"`
+	IngressOwn         *ebpf.Map `ebpf:"ingress_own"`
+	IngressOwnSocks    *ebpf.Map `ebpf:"ingress_own_socks"`
 	IngressPark        *ebpf.Map `ebpf:"ingress_park"`
 	IngressYielded     *ebpf.Map `ebpf:"ingress_yielded"`
 	PendingHolds       *ebpf.Map `ebpf:"pending_holds"`
@@ -129,8 +146,11 @@ func (m *ingressMaps) Close() error {
 		m.AppBindSocks,
 		m.AppPortBinds,
 		m.AppPortInfo,
+		m.IngressAgent,
 		m.IngressForwarders,
 		m.IngressLookupStats,
+		m.IngressOwn,
+		m.IngressOwnSocks,
 		m.IngressPark,
 		m.IngressYielded,
 		m.PendingHolds,
@@ -147,14 +167,22 @@ type ingressVariables struct {
 //
 // It can be passed to loadIngressObjects or ebpf.CollectionSpec.LoadAndAssign.
 type ingressPrograms struct {
-	K_ingressLookup  *ebpf.Program `ebpf:"k_ingress_lookup"`
-	K_ingressRelease *ebpf.Program `ebpf:"k_ingress_release"`
+	K_ingressAgentExit   *ebpf.Program `ebpf:"k_ingress_agent_exit"`
+	K_ingressAgentKilled *ebpf.Program `ebpf:"k_ingress_agent_killed"`
+	K_ingressLookup      *ebpf.Program `ebpf:"k_ingress_lookup"`
+	K_ingressOwnConnect  *ebpf.Program `ebpf:"k_ingress_own_connect"`
+	K_ingressRelease     *ebpf.Program `ebpf:"k_ingress_release"`
+	K_ingressSeed        *ebpf.Program `ebpf:"k_ingress_seed"`
 }
 
 func (p *ingressPrograms) Close() error {
 	return _IngressClose(
+		p.K_ingressAgentExit,
+		p.K_ingressAgentKilled,
 		p.K_ingressLookup,
+		p.K_ingressOwnConnect,
 		p.K_ingressRelease,
+		p.K_ingressSeed,
 	)
 }
 

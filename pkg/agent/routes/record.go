@@ -55,6 +55,14 @@ type Agent struct {
 // into /tmp on the host. Production code MUST NOT mutate it.
 var agentReadyFilePath = kdocker.AgentReadyFile
 
+// appReleasedFilePath is where MakeAgentReady notes that it released this
+// pod's application, with markAppReleased (kdocker.MarkAppReleased):
+// variables so tests write it elsewhere and see the call.
+var (
+	appReleasedFilePath = kdocker.AppReleasedFile
+	markAppReleased     = kdocker.MarkAppReleased
+)
+
 // massSuppressionPercent is the share of a session's test cases that must be
 // suppressed before the completion summary is raised from Info to Warn.
 //
@@ -432,6 +440,7 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	// --proven flag; the CLI refuses an agent whose switch is not its own
 	// (provenswitch.CheckAgent).
 	w.Header().Set(provenswitch.HealthHeader, provenswitch.State())
+	a.setCapabilities(w)
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
 }
@@ -1728,6 +1737,14 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.logger.Debug("Agent marked as ready", zap.String("file", agentReadyFilePath))
+	// The pod's application is released from here: an agent restarted in
+	// the pod is ready once its own start is over, as nothing has to start
+	// the application again (kdocker.AppReleasedFile). Without the note it
+	// waits for a release, as an agent of a new pod does.
+	if err := markAppReleased(appReleasedFilePath); err != nil {
+		a.logger.Warn("could not note that this pod's application was released; a restarted keploy agent then waits for the recorder's release before it is ready",
+			zap.String("file", appReleasedFilePath), zap.Error(err))
+	}
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))
