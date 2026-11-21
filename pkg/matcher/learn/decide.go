@@ -304,6 +304,9 @@ type Decision struct {
 	Clock          *models.ClockOffset
 	Refusal        *Refusal
 	Line           string
+	// Compact is Line's compact form for mocks.yaml ("[kind] k=v ..."), whose
+	// fixed explanation and undo template live once in mocks.yaml's header.
+	Compact string
 	// AnsweredAfter are the recordings whose answer holds Recorded that
 	// the decision set aside because they were asked at or before the
 	// call and answered after it: R's word there decided nothing.

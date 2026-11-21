@@ -4634,10 +4634,11 @@ func (dc *decider) learned(path string, at variables.Address, n int, r, f string
 	if dc.allScope {
 		from = dc.in.Landed.String()
 	}
-	return Decision{At: at, Recorded: r, Full: f, Outcome: o, Line: learnedLine(learnedWord{
+	lw := learnedWord{
 		Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f,
 		Outcome: o, Rule: rule, Places: places, From: from, Noise: noiseName(dc.in, path),
-	})}
+	}
+	return Decision{At: at, Recorded: r, Full: f, Outcome: o, Line: learnedLine(lw), Compact: compactLearnedLine(lw)}
 }
 
 // unreadWhy is why a call is refused where keploy read a recording of it

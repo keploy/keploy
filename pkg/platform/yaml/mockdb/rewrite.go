@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
@@ -292,12 +293,14 @@ type mockFileRewriter struct {
 	format     yaml.Format
 	targetPath string
 
-	tmp     *os.File
-	tmpPath string
-	w       *bufio.Writer
-	jsonEnc *json.Encoder
-	written int
-	done    bool
+	tmp       *os.File
+	tmpPath   string
+	w         *bufio.Writer
+	jsonEnc   *json.Encoder
+	written   int
+	headerLen int64
+	whyKinds  map[string]bool
+	done      bool
 	// incomplete is the source's incomplete last document, which commit
 	// moves aside (see copyDoc).
 	incomplete []byte
@@ -334,6 +337,7 @@ func (rw *mockFileRewriter) open() error {
 		if _, err := rw.w.WriteString(version); err != nil {
 			return err
 		}
+		rw.headerLen = int64(len(version))
 	}
 	return nil
 }
@@ -372,6 +376,12 @@ func (rw *mockFileRewriter) writeRaw(doc []byte) error {
 		if err := rw.open(); err != nil {
 			return err
 		}
+	}
+	if rw.format != yaml.FormatJSON {
+		if rw.written == 0 {
+			doc = learn.StripWhyHeader(doc)
+		}
+		rw.whyKinds = learn.MergeWhyKinds(rw.whyKinds, learn.WhyKindsInYAML(doc))
 	}
 	if rw.format != yaml.FormatJSON && rw.written > 0 {
 		if _, err := rw.w.WriteString("---\n"); err != nil {
@@ -421,6 +431,7 @@ func (rw *mockFileRewriter) write(mock *models.Mock) error {
 			return err
 		}
 	}
+	rw.whyKinds = learn.MergeWhyKinds(rw.whyKinds, learn.WhyKindsInVars(mock.Spec.Variables))
 	mockYaml, err := EncodeMock(mock, rw.logger)
 	if err != nil {
 		return err
@@ -491,6 +502,11 @@ func (rw *mockFileRewriter) replace() error {
 	if err := rw.w.Flush(); err != nil {
 		return err
 	}
+	if rw.format != yaml.FormatJSON && len(rw.whyKinds) > 0 {
+		if err := rw.prependWhyHeader(); err != nil {
+			return err
+		}
+	}
 	if err := rw.tmp.Sync(); err != nil {
 		return err
 	}
@@ -510,6 +526,49 @@ func (rw *mockFileRewriter) replace() error {
 		return err
 	}
 	rw.done = true
+	return nil
+}
+
+// prependWhyHeader rewrites rw.tmp into a sibling temp file carrying the
+// version comment, the per-kind learned-variable header block for rw.whyKinds,
+// and the spooled mock documents (streaming, bounded memory).
+func (rw *mockFileRewriter) prependWhyHeader() error {
+	header := learn.FormatWhyHeader(learn.SortedWhyKinds(rw.whyKinds))
+	if header == "" {
+		return nil
+	}
+	if _, err := rw.tmp.Seek(rw.headerLen, io.SeekStart); err != nil {
+		return err
+	}
+	dst, err := yaml.CreateTempInRecording(rw.root, rw.dir, rw.fileName+".*.tmp", 0o600)
+	if err != nil {
+		return err
+	}
+	dstPath := dst.Name()
+	bw := bufio.NewWriterSize(dst, 64<<10)
+	writeAll := func() error {
+		if version := utils.GetVersionAsComment(); version != "" {
+			if _, err := bw.WriteString(version); err != nil {
+				return err
+			}
+		}
+		if _, err := bw.WriteString(header); err != nil {
+			return err
+		}
+		if _, err := io.Copy(bw, rw.tmp); err != nil {
+			return err
+		}
+		return bw.Flush()
+	}
+	if err := writeAll(); err != nil {
+		_ = dst.Close()
+		_ = yaml.RemoveInRecording(rw.root, dstPath)
+		return err
+	}
+	oldPath := rw.tmpPath
+	_ = rw.tmp.Close()
+	_ = yaml.RemoveInRecording(rw.root, oldPath)
+	rw.tmp, rw.tmpPath = dst, dstPath
 	return nil
 }
 
