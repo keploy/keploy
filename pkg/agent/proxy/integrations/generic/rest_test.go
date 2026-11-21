@@ -51,12 +51,17 @@ func bigExchanges(req []byte) map[string]eofStore {
 // arrivesWhole is the proxy's end of a TCP connection whose next request, of
 // whole bytes written at once, reaches the parser whole: the read that would
 // give its first bytes waits until the socket holds all of them or, while it
-// holds none, until the read's deadline passes, as a read of an empty socket
-// waits. A write longer than a TCP segment (32 KiB on loopback) arrives in
-// segments, and a writer the scheduler stops between two for longer than a
-// window, as one was under -race on a loaded machine, brings the rest more
-// than a window after the first bytes: a request the window ends by design,
-// not one the parser was held in as it read.
+// holds none, until the read's deadline passes, and then times out without
+// reading, as a read of an empty socket does. It does not read the socket
+// then: Go marks a deadline passed only once the deadline's timer has run,
+// which a loaded machine runs late, and a read before that returns what has
+// come since, its first segment: the read after it would wait for a whole
+// request the socket no longer holds. A write longer than a TCP segment
+// (32 KiB on loopback) arrives in segments, and a writer the scheduler stops
+// between two for longer than a window, as one was under -race on a loaded
+// machine, brings the rest more than a window after the first bytes: a
+// request the window ends by design, not one the parser was held in as it
+// read.
 type arrivesWhole struct {
 	net.Conn
 	whole    int64
@@ -99,11 +104,12 @@ func (c *arrivesWhole) Read(p []byte) (int, error) {
 		}) {
 			return 0, errors.New("the request never reached the socket whole")
 		}
-		if held >= c.whole {
-			c.mu.Lock()
-			c.arrived = true
-			c.mu.Unlock()
+		if held < c.whole {
+			return 0, timedOut
 		}
+		c.mu.Lock()
+		c.arrived = true
+		c.mu.Unlock()
 	}
 	return c.Conn.Read(p)
 }
