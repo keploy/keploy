@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -134,15 +135,18 @@ func givenNextStep(g, mock string, diffs []MockFieldDiff) string {
 // names the fields that differed, and others (where a value was recorded),
 // and a map's keys can be values (an email, a user ID): each of the miss's
 // field paths, whole or without its "body." (as a learn step's reason may
-// name it), and every body path the text names (bodyPlace) keeps its shape,
-// so a key that may be a value is {}. The rest of the text stays: it is the
-// matcher's or the learn step's own words, and holds no value of the call.
+// name it), each run of their fields the text names as whole fields (a
+// keploy.yml entry a hint names), every body path the text names
+// (bodyPlace) and every run of fields holding keploy.yml's id key
+// (shapedText) keeps its shape, so a key that may be a value is {}. The
+// rest of the text stays: it is the matcher's or the learn step's own
+// words, and holds no value of the call.
 // (It was once replaced whole by a count of the fields, which hid the learn
 // step's reason from every in-test miss of the round.) Why a replay refused
 // a field for a reason of its own (a learned read of the application's
 // clock the call does not carry: FieldReasons) is added to it, as the
 // miss's reason says it, so the run's summary, which shows the next step,
-// says it too.
+// says it too: a few of them, and how many more (NamedWhys).
 func (m UnmatchedCall) SanitizedNextStep() string {
 	next := m.shapedNextStep()
 	var whys []string
@@ -151,6 +155,7 @@ func (m UnmatchedCall) SanitizedNextStep() string {
 			whys = append(whys, r.Why)
 		}
 	}
+	whys = NamedWhys(whys)
 	switch {
 	case len(whys) == 0:
 		return next
@@ -187,6 +192,23 @@ func keptVariableName(name string) bool {
 
 var learnedName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*(#[1-9][0-9]*)?$`)
 
+// maxNamedWhys is how many reasons of fields (FieldReasons) a next step or
+// a test's reason names at most (NamedWhys).
+const maxNamedWhys = 3
+
+// NamedWhys are whys as a next step or a test's reason names them: the
+// first maxNamedWhys, then how many more there are ("and 57 more
+// reasons"), so the text stays small however many fields a replay refused.
+func NamedWhys(whys []string) []string {
+	switch n := len(whys) - maxNamedWhys; {
+	case n == 1:
+		return append(slices.Clone(whys[:maxNamedWhys]), "and 1 more reason")
+	case n > 1:
+		return append(slices.Clone(whys[:maxNamedWhys]), "and "+strconv.Itoa(n)+" more reasons")
+	}
+	return whys
+}
+
 // shapedNextStep is m's own next step with every field path it names in its
 // shape, every quoted value {} and a refused word's line without its values
 // (adviceShape, as a log line has it: SanitizedNextStep).
@@ -199,7 +221,11 @@ func (m UnmatchedCall) shapedNextStep() string {
 
 // shapedText is text, a matcher's or a parser's own words about m, with
 // every field path it names in its shape: each of m's field diffs' paths
-// (whole or without its "body.") and every body path (bodyPlace).
+// (whole or without its "body."), each run of their whole fields where the
+// text names it as whole fields (shapedRuns: a keploy.yml entry a hint
+// names by a run of the path, "<id>.token" for sessions.<id>.token), every
+// body path (bodyPlace), and every run of fields that holds keploy.yml's id
+// key (idKeyRun: "accounts.{id}.<email>", an entry written by hand).
 func (m UnmatchedCall) shapedText(text string) string {
 	if text == "" {
 		return ""
@@ -222,12 +248,108 @@ func (m UnmatchedCall) shapedText(text string) string {
 			args = append(args, p, FieldShape(p))
 		}
 		text = strings.NewReplacer(args...).Replace(text)
+		text = shapedRuns(text, paths)
 	}
-	return bodyPlace.ReplaceAllStringFunc(text, func(p string) string {
+	text = bodyPlace.ReplaceAllStringFunc(text, func(p string) string {
 		// A sentence's full stop or a list's separator is not the path's.
 		trimmed := strings.TrimRight(p, ".,;:")
 		return FieldShape(trimmed) + p[len(trimmed):]
 	})
+	return idKeyRun.ReplaceAllStringFunc(text, idKeyRunShape)
+}
+
+// shapedRuns is text with each run of whole fields of paths (field paths
+// FieldShape changes) in its shape, where the text names it as whole
+// fields: beginning at the text's start, after a "." or after a mark that
+// ends a word (wordEnd), and ending at the text's end, at a ".", at an
+// index ("[") or at such a mark. A run is any of a path's fields in a row,
+// the last also without its indexes ("tags" of "tags[0]"), as a hint names
+// the keploy.yml entry that matched a field. The longest run at a place
+// wins, and a run FieldShape keeps (no field of it may be a value) is left.
+// So is a number alone: a text's counts are numbers ("and 3 more
+// reasons"), and a path's position ("docs.0.q") is shaped where the text
+// names it with the fields beside it.
+func shapedRuns(text string, paths []string) string {
+	runs := map[string]string{}
+	add := func(run string) {
+		if shape := FieldShape(run); shape != run && strings.Trim(run, "0123456789") != "" {
+			runs[run] = shape
+		}
+	}
+	for _, p := range paths {
+		fields := strings.Split(p, ".")
+		for i := range fields {
+			for j := i + 1; j <= len(fields); j++ {
+				run := strings.Join(fields[i:j], ".")
+				add(run)
+				if k := strings.IndexByte(fields[j-1], '['); k > 0 {
+					add(run[:len(run)-len(fields[j-1])+k])
+				}
+			}
+		}
+	}
+	longest := 0
+	for run := range runs {
+		longest = max(longest, len(run))
+	}
+	var b strings.Builder
+	for i := 0; i < len(text); {
+		end := -1
+		if i == 0 || text[i-1] == '.' || wordEnd(text[i-1]) {
+			// The longest run that begins here and ends at a field's end;
+			// a field may hold a space or a mark (a key "John Smith").
+			for j := i + 1; j <= min(len(text), i+longest); j++ {
+				if j < len(text) && text[j] != '.' && text[j] != '[' && !wordEnd(text[j]) {
+					continue
+				}
+				if _, ok := runs[text[i:j]]; ok {
+					end = j
+				}
+			}
+		}
+		if end < 0 {
+			b.WriteByte(text[i])
+			i++
+			continue
+		}
+		b.WriteString(runs[text[i:end]])
+		i = end
+	}
+	return b.String()
+}
+
+// wordEnd reports whether c ends a word that may name a field: a space or
+// a mark a field's name is not written with in keploy's words.
+func wordEnd(c byte) bool {
+	return strings.IndexByte(" \t\n\r,;:()'\"{}=", c) >= 0
+}
+
+// idKeyField is keploy.yml's id-key segment (matcher.NoiseIDKey): an entry
+// naming it names any id key at that level.
+const idKeyField = "{id}"
+
+// idKeyRun is a run of fields a text names, any of them keploy.yml's id
+// key (idKeyRunShape reads only a run that holds it): a keploy.yml entry a
+// hint names, written by hand, whose other fields may be values
+// ("accounts.{id}.jane@example.com").
+var idKeyRun = regexp.MustCompile(`(?:\{id\}|[^\s.,;:()'"{}=\[\]]+)(?:\[[0-9]{0,4}\])*(?:\.(?:\{id\}|[^\s.,;:()'"{}=\[\]]+)(?:\[[0-9]{0,4}\])*)*`)
+
+// idKeyRunShape is run, an idKeyRun, with each field but keploy.yml's id
+// key in its shape (FieldShape), when it holds that key; else run.
+func idKeyRunShape(run string) string {
+	fields := strings.Split(run, ".")
+	held := false
+	for i, f := range fields {
+		if strings.HasPrefix(f, idKeyField) {
+			held = true
+			continue
+		}
+		fields[i] = FieldShape(f)
+	}
+	if !held {
+		return run
+	}
+	return strings.Join(fields, ".")
 }
 
 // bodyPlace is a body field path as a matcher's or a learn step's text names
