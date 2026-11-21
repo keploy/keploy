@@ -216,7 +216,10 @@ func TestAJWTsTimeClaimsLearnedByFormAreCheckedAtReplay(t *testing.T) {
 		token      string
 		timeForm   bool
 		differs    []string
-		why        string // each differing field's reason holds it
+		why        string            // each differing field's reason holds it
+		notWhy     string            // and none holds it
+		body       string            // the call's body, where not notifyBody(token)
+		header     map[string]string // the call's headers beside its token's
 		headerPats map[string][]string
 		bodyPats   map[string][]string
 		sources    []models.DeclaredSource
@@ -236,11 +239,27 @@ func TestAJWTsTimeClaimsLearnedByFormAreCheckedAtReplay(t *testing.T) {
 		{name: "times moved, a body pattern the token is outside", token: claimJWT(hs256Head, moved, liveSig), timeForm: true, bodyPats: map[string][]string{"token": never}, differs: []string{"body.token"}},
 		{name: "times moved, a clock rule at the body token", token: claimJWT(hs256Head, moved, liveSig), timeForm: true,
 			sources: []models.DeclaredSource{{Rule: "token-clock", Kind: models.DeclaredSourceClock, Field: "body.token", Clock: plain}}, differs: []string{"body.token"}},
+		// A token's claims are read only where both runs hold a text: a
+		// number where the token was is a changed value, never a claim's
+		// time of no form.
+		{name: "a number where the body's token was", token: claimJWT(hs256Head, notifyClaims("svc-1", recCall, ""), recSig), body: `{"to":"u-1","token":17}`, timeForm: true,
+			differs: []string{"body.token"}, notWhy: "claim"},
+		// A header that holds no token's times is compared as any other:
+		// a content type of another parameter is the recorded one.
+		{name: "times moved, a content type of another parameter", token: claimJWT(hs256Head, moved, liveSig), header: map[string]string{"Content-Type": "application/json; charset=utf-8"}, timeForm: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("KEPLOY_PROVEN", "1")
 			rm := *m
-			in := live("POST", "/v1/notify", notifyBody(c.token), notifyHeader(c.token))
+			body := notifyBody(c.token)
+			if c.body != "" {
+				body = c.body
+			}
+			header := notifyHeader(c.token)
+			for k, v := range c.header {
+				header[k] = v
+			}
+			in := live("POST", "/v1/notify", body, header)
 			in.arrived = base.Add(2 * time.Second)
 			db := sourcedDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{&rm}, updateUnFilteredReturn: true}, timeForm: c.timeForm,
 				sources: map[string][]models.DeclaredSource{rm.Name: c.sources}}
@@ -273,6 +292,9 @@ func TestAJWTsTimeClaimsLearnedByFormAreCheckedAtReplay(t *testing.T) {
 			for _, f := range diag.differs {
 				if c.why != "" && !strings.Contains(f.why, c.why) {
 					t.Fatalf("%s refused for %q; want a reason that says %q", f.shape, f.why, c.why)
+				}
+				if c.notWhy != "" && strings.Contains(f.why, c.notWhy) {
+					t.Fatalf("%s refused for %q; want a reason that does not say %q", f.shape, f.why, c.notWhy)
 				}
 			}
 		})

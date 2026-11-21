@@ -211,6 +211,10 @@ func TestOnlyNoiseOrAnUnreadInstantIsLearnedAsAToken(t *testing.T) {
 		{what: "another claim as text, no window", ln: other("issued", text(recAt, "Z"), text(liveAt, "Z")), timeForm: true, noWindow: true},
 		{what: "another claim as text, a span of no start", ln: other("issued", text(recAt, "Z"), text(liveAt, "Z")), timeForm: true, noStart: true},
 		{what: "a NumericDate as text, no read of the clock", ln: other("iat", text(recAt.Add(-48*time.Hour), "Z"), text(liveAt.Add(-48*time.Hour), "Z")), timeForm: true},
+		// A NumericDate is a number in both runs: one a text in either run
+		// is a time here only as a read of the clock in its call's window.
+		{what: "a NumericDate a text as recorded, a number in round F, no read of the clock", ln: other("iat", text(recAt.Add(-48*time.Hour), "Z"), num(liveAt)), timeForm: true},
+		{what: "a NumericDate a number as recorded, a text in round F, no read of the clock", ln: other("iat", num(recAt), text(liveAt.Add(-48*time.Hour), "Z")), timeForm: true},
 	} {
 		win := w
 		switch {
