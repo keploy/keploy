@@ -953,7 +953,7 @@ func TestOneTestsCacheReadsEachCallsClockInItsOwnZoneWhicheverRanFirst(t *testin
 // read again.
 func TestAZoneFileMountedFromAnotherZonesIsUnknown(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("a zone file is read from the application's mount table, which only Linux has")
+		t.Skip("no mount table off Linux")
 	}
 	read := func(name string) []byte {
 		b, err := os.ReadFile("/usr/share/zoneinfo/" + name)
