@@ -737,7 +737,9 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	}
 
 	reqTime, resTime := http2Stream.GRPCReq.Timestamp, http2Stream.GRPCResp.Timestamp
-	testName := http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"]
+	// Read whatever its case: a real call sends it lowercase, as HTTP/2 does
+	// every header name (GrpcHeaders.Ordinary).
+	testName := http2Stream.GRPCReq.Headers.Ordinary("Keploy-Test-Name")
 	var isDuplicate bool
 	var schemaKey string
 	if GRPCCaptureHook != nil {

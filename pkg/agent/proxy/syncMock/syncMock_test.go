@@ -2519,3 +2519,92 @@ func TestARecordSessionStartsBeforeItsFirstRequest(t *testing.T) {
 		t.Fatalf("the new session starts %d test cases into its startup window, want 0", n)
 	}
 }
+
+// A manager gives capture ids only once its client says it reads them
+// (SetCaptureIDs): each one apart from every other it gave, and from another
+// manager's (another agent process's), all under CaptureIDPrefix. A nil
+// manager gives none.
+func TestNewCaptureIDOnlyForAClientThatReadsThem(t *testing.T) {
+	m := New(zap.NewNop())
+	if id := m.NewCaptureID(); id != "" {
+		t.Fatalf("a client that reads no capture ids was given %q", id)
+	}
+	m.SetCaptureIDs(true)
+	seen := map[string]bool{}
+	for i := 0; i < 100; i++ {
+		id := m.NewCaptureID()
+		if !models.IsCaptureID(id) {
+			t.Fatalf("capture id %q lacks the prefix", id)
+		}
+		if seen[id] {
+			t.Fatalf("capture id %q given twice", id)
+		}
+		seen[id] = true
+	}
+	other := New(zap.NewNop())
+	other.SetCaptureIDs(true)
+	if id := other.NewCaptureID(); seen[id] {
+		t.Fatalf("another manager gave %q, which this one gave too", id)
+	}
+	m.SetCaptureIDs(false)
+	if id := m.NewCaptureID(); id != "" {
+		t.Fatalf("a client that stopped reading capture ids was given %q", id)
+	}
+	var none *SyncMockManager
+	none.SetCaptureIDs(true)
+	if id := none.NewCaptureID(); id != "" {
+		t.Fatalf("a nil manager gave %q", id)
+	}
+}
+
+// A manager of its own (an agent runtime's, for one app) is given the
+// recorder's mapping stream by ForwardMappingChannel, and with it what the
+// recorder reads: it names a request captured without --sync by a capture id
+// only when the recorder reads them, and its mapping under that id reaches the
+// stream. Without that, its async requests' mappings would name "" again, or a
+// capture id the recorder never binds to a test case.
+func TestForwardMappingChannelCarriesWhetherTheClientReadsCaptureIDs(t *testing.T) {
+	global, app := New(zap.NewNop()), New(zap.NewNop())
+	global.SetCaptureIDs(true)
+	global.ForwardMappingChannel(app)
+	if id := app.NewCaptureID(); id != "" {
+		t.Fatalf("no stream was forwarded, yet the app's manager gave %q", id)
+	}
+	mapCh := make(chan models.TestMockMapping, 8)
+	global.SetMappingChannel(context.Background(), mapCh)
+	global.ForwardMappingChannel(app)
+	id := app.NewCaptureID()
+	if !models.IsCaptureID(id) {
+		t.Fatalf("the recorder reads capture ids, but the app's manager gave %q", id)
+	}
+
+	out := make(chan *models.Mock, 8)
+	app.SetOutputChannel(out)
+	app.SetFirstRequestSignaled()
+	start := time.Now().Add(-time.Second)
+	app.mu.Lock()
+	app.buffer = append(app.buffer, &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: start.Add(2 * time.Millisecond)}})
+	app.mu.Unlock()
+	app.ResolveRange(start, start.Add(5*time.Millisecond), id, true, true)
+	select {
+	case m := <-out:
+		select {
+		case mp := <-mapCh:
+			if mp.TestName != id || len(mp.MockIDs) != 1 || mp.MockIDs[0] != m.Name {
+				t.Fatalf("the recorder's stream got %+v, want %s owning %s", mp, id, m.Name)
+			}
+		default:
+			t.Fatal("the app's mapping never reached the recorder's stream")
+		}
+	default:
+		t.Fatal("the app's mock was not handed on")
+	}
+
+	// A recorder that does not read capture ids on the same stream (the flag
+	// is said apart from opening it): the app's manager gives none.
+	global.SetCaptureIDs(false)
+	global.ForwardMappingChannel(app)
+	if id := app.NewCaptureID(); id != "" {
+		t.Fatalf("the recorder stopped reading capture ids, yet the app's manager gave %q", id)
+	}
+}

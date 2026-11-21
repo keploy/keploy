@@ -95,6 +95,31 @@ func TestCaptureGRPCSynchronousRecordsAKeptCallAndEndsItsWindow(t *testing.T) {
 	}
 }
 
+// Without --sync a call that names its test case is handed on under that
+// name, which the recorder saves it with (it maps none of the call's mocks: a
+// classic capture without --sync resolves none). The name comes as a real gRPC
+// client sends it, lowercase (keploy-test-name): grpc-go lowercases every
+// metadata key, and HTTP/2 forbids an uppercase header name. Read as
+// "Keploy-Test-Name" only, it was never found, and the call went on with no
+// name.
+func TestCaptureGRPCWithoutSyncNamesACallByItsLowercaseKeployTestName(t *testing.T) {
+	mgr, w, _, _, start, _ := heldGRPCManager(t)
+	tcChan := make(chan *models.TestCase, 1)
+	call := grpcCall(start, time.Now())
+	call.GRPCReq.Headers.OrdinaryHeaders = map[string]string{"content-type": "application/grpc", "keploy-test-name": "named-call"}
+	ctx := syncMock.WithWindow(syncMock.NewContext(context.Background(), mgr), w)
+	CaptureGRPC(ctx, zap.NewNop(), tcChan, call, 50051, false, true)
+	var tc *models.TestCase
+	select {
+	case tc = <-tcChan:
+	default:
+		t.Fatal("the kept call was not handed on")
+	}
+	if tc.Name != "named-call" {
+		t.Fatalf("the test case is named %q: want the name its call gave (keploy-test-name)", tc.Name)
+	}
+}
+
 // A call with --sync whose window the manager gave up while it was in flight
 // is left out, counted, and nothing is resolved to it.
 func TestCaptureGRPCSynchronousLeavesOutAGivenUpCall(t *testing.T) {

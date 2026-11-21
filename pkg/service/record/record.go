@@ -454,7 +454,7 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // This form has no mock stream beside it: every mock's outcome is already
 // published, so an entry whose mock is unknown counts as uncorrelated at once.
 func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map) error {
-	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil, nil)
+	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil, nil, nil)
 }
 
 // consumeMappingsFor is consumeMappings beside a live mock stream, and telling
@@ -469,7 +469,15 @@ func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappin
 // Nothing here is bounded by a clock: on a loaded host a mock is saved long
 // after the mapping that names it, and giving up on a clock is what left such
 // a mock out of its test's mapping while it sat in the mocks file.
-func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry), marks *workerMarks) error {
+//
+// names binds the capture ids the recording's test cases came with to the
+// names they were saved under (captureNames): an entry naming a capture id is
+// filed under its test case's saved name, held until that test case is saved,
+// and dropped once it is known not to be (its mocks stay saved, in no test's
+// mapping, as a --sync recording leaves those of a request it did not
+// record); the function returns only once none is held. nil files every name
+// as it comes.
+func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry), marks *workerMarks, names *captureNames) error {
 	persistCtx := context.WithoutCancel(ctx)
 
 	// pending batches mappings so the file is rewritten once per batch instead of
@@ -595,6 +603,55 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 		}
 	}
 
+	// byCapture holds what settled for a capture id whose test case is not
+	// saved yet (names), one resolution per id, its parts merged.
+	byCapture := map[string]*mappingResolution{}
+	unsaved := 0 // capture ids whose entries were dropped: no saved test case
+	// file applies what settled for the test the agent named key under the
+	// name it was saved with: key itself, or its capture id's test case's
+	// name, once that is decided (names.nameOf).
+	file := func(key string, res mappingResolution) {
+		if names == nil || !models.IsCaptureID(key) {
+			apply(key, res)
+			return
+		}
+		if res.lost {
+			// Revoked under its saved name below; nothing of the id may
+			// wait for the lost mock either.
+			waits.revoke([]string{key})
+		}
+		name, decided := names.nameOf(key)
+		switch {
+		case !decided:
+			held := byCapture[key]
+			if held == nil {
+				byCapture[key] = &res
+				return
+			}
+			held.entries = mergeMockEntries(held.entries, res.entries)
+			held.lost = held.lost || res.lost
+			held.uncorrelated += res.uncorrelated
+		case name == "":
+			unsaved++
+		default:
+			apply(name, res)
+		}
+	}
+	// fileNamed files what byCapture holds for the ids decided since the
+	// last look.
+	fileNamed := func() {
+		for id, res := range byCapture {
+			if name, decided := names.nameOf(id); decided {
+				delete(byCapture, id)
+				if name == "" {
+					unsaved++
+					continue
+				}
+				apply(name, *res)
+			}
+		}
+	}
+
 	// applyReady settles the held entries handed back since the last look:
 	// their mock has an outcome now, or the mock stream ended without it.
 	applyReady := func() {
@@ -615,14 +672,15 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 			r.addSettled(res, e.test, e.tempID, entry, fate, e.why, asyncMockIDs)
 		}
 		for _, tn := range order {
-			apply(tn, *byTest[tn])
+			file(tn, *byTest[tn])
 		}
 	}
 
 	// Drain the mapping stream, and the held entries as their mocks arrive,
-	// until the stream is closed and nothing waits.
+	// until the stream is closed and nothing waits: no mock, and no test case
+	// to be saved.
 	in := mappings
-	for in != nil || !waits.settled() {
+	for in != nil || !waits.settled() || len(byCapture) > 0 {
 		select {
 		case mapping, ok := <-in:
 			if !ok {
@@ -632,10 +690,16 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 			r.frameProgress.Add(1)
 			r.mappingsStreamed.Add(1)
 			entries, lost, uncorrelated := r.resolveMappingEntries(mapping, correlationMap, asyncMockIDs, droppedMockIDs, waits)
-			apply(mapping.TestName, mappingResolution{entries: entries, lost: lost, uncorrelated: uncorrelated})
+			file(mapping.TestName, mappingResolution{entries: entries, lost: lost, uncorrelated: uncorrelated})
 		case <-waits.wakeCh():
 			applyReady()
+		case <-names.wakeCh():
+			fileNamed()
 		}
+	}
+	if unsaved > 0 {
+		r.logger.Debug("mapping entries of requests whose test case was not saved are left out: their mocks are saved, in no test's mapping",
+			zap.Int("entries", unsaved), zap.String("testSetID", testSetID))
 	}
 
 	// The stream is closed: persist whatever the last partial batch holds.
@@ -1782,6 +1846,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// (models.RevokeNameByRequest).
 	insertedByRequest := map[int64][]string{}
 	var insertedMu sync.Mutex
+	// The names the test cases that came with a capture id were saved under
+	// (captureNames): their mappings and revokes name the capture id.
+	names := newCaptureNames()
 	// Under the proven switch a recording made without --sync writes its
 	// mappings.yaml at the end, derived from its test windows; nil otherwise.
 	windowMaps := r.newWindowMappings()
@@ -2010,10 +2077,12 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			}
 			var res mappingResolution
 			r.addSettled(&res, e.test, e.tempID, entry, fate, why, &asyncMockIDs)
-			if res.uncorrelated > 0 {
-				prev, _ := shortPoolByTest.Load(e.test)
+			// Under the name its test case was saved with, when it came
+			// with a capture id; none when that test case was not saved.
+			if test, _ := names.nameOf(e.test); res.uncorrelated > 0 && (test != "" || e.test == "") {
+				prev, _ := shortPoolByTest.Load(test)
 				n, _ := prev.(int64)
-				shortPoolByTest.Store(e.test, n+int64(res.uncorrelated))
+				shortPoolByTest.Store(test, n+int64(res.uncorrelated))
 			}
 		}
 		// A handed-back entry with no mock keeps why it was handed back (the
@@ -2120,7 +2189,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		deletedSet := map[string]struct{}{}
 
 		insertedMu.Lock()
-		toDelete := revokedToDelete(revokedSnap, insertedNames, insertedByRequest)
+		toDelete := revokedToDelete(revokedSnap, insertedNames, insertedByRequest, names)
 		insertedMu.Unlock()
 		if len(toDelete) > 0 {
 			// DeleteTests is on the concrete *testdb.TestYaml but NOT on the record
@@ -2733,6 +2802,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
+		// Once no test case comes any more, a capture id with no saved test
+		// case has none, and what names it is left out.
+		defer names.end()
 		for testCase := range frames.Incoming {
 			r.frameProgress.Add(1)
 			// Skip curl generation for either form data requests or large body (>1MB)
@@ -2784,7 +2856,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			 */
 			uiJoinObserved.observe(testCase.AppPort)
 			err := r.testDB.InsertTestCase(persistCtx, testCase, newTestSetID, true)
-			// After the insert, which is what names an auto-named test case.
+			// After the insert, which is what names an auto-named test case:
+			// what names its capture id is filed under that name.
+			names.inserted(testCase.CaptureID, testCase.Name, err)
 			unreachablePorts.check(ctx, testCase)
 			if err != nil {
 				windowMaps.addLostTest(testCase)
@@ -3057,7 +3131,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				revokedNames[testName] = struct{}{}
 				revokedMu.Unlock()
 				mappingHolds.revoke([]string{testName})
-			}, &shortPoolByTest, capWatch.mapped, marks)
+			}, &shortPoolByTest, capWatch.mapped, marks, names)
 	})
 
 	// Every frame channel now has a reader, so the shutdown hand-over can no
@@ -3293,14 +3367,15 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			// (testCaseCapturedAt) cannot be told from one, and is left out
 			// too. Neither is its mapping (MAPPINGS).
 			opts.afterStop = func(tc *models.TestCase) {
-				postStopTests.Store(tc.Name, struct{}{})
+				postStopTests.Store(tc.AgentName(), struct{}{})
 				r.logger.Debug("not recording a test case served after the stop", zap.String("testCaseName", tc.Name))
 			}
 			// Keyed by the name the test case is handed over with: the
-			// agent's, which its mappings carry. Read before the hand-off,
-			// since the consumer's insert names an unnamed test case in place.
+			// agent's, which its mappings carry (its capture id when it came
+			// with one). Read before the hand-off, since the consumer's insert
+			// names an unnamed test case in place.
 			opts.handing = func(tc *models.TestCase) func() {
-				name := tc.Name
+				name := tc.AgentName()
 				return func() { recordedTests.Store(name, struct{}{}) }
 			}
 		}
@@ -3392,6 +3467,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		// (the async capture names none; this client names it as it saves
 		// it) by its request time (revokedToDelete).
 		SupportsRevokeByRequest: canDelete,
+		// And that it reads capture ids: it files what the agent names by a
+		// test case's capture id under the name it saves that test case with
+		// (captureNames), so a request captured without --sync is mapped to
+		// its own test case.
+		SupportsCaptureIDs: true,
 	})
 	if err != nil {
 
@@ -3906,7 +3986,7 @@ func (r *Recorder) sayFormPartsLeftOut(testSetID string) {
 // case the agent sent with no name (models.RevokeNameByRequest), which names
 // every saved test case whose window starts at that request time (byRequest).
 // A revoke that names none it saved deletes nothing.
-func revokedToDelete(revoked []string, inserted map[string]struct{}, byRequest map[int64][]string) []string {
+func revokedToDelete(revoked []string, inserted map[string]struct{}, byRequest map[int64][]string, names *captureNames) []string {
 	var out []string
 	seen := map[string]struct{}{}
 	add := func(n string) {
@@ -3916,6 +3996,14 @@ func revokedToDelete(revoked []string, inserted map[string]struct{}, byRequest m
 		}
 	}
 	for _, n := range revoked {
+		// A revoke names a test case that came with a capture id by it: it
+		// is the test case saved under its name, if one was.
+		if saved, _ := names.nameOf(n); saved != n {
+			if _, ok := inserted[saved]; ok && saved != "" {
+				add(saved)
+			}
+			continue
+		}
 		if _, ok := inserted[n]; ok {
 			add(n)
 			continue

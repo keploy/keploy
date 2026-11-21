@@ -789,6 +789,9 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	// And whether it finds a revoked test case sent with no name (the async
 	// capture names none) by its request time.
 	syncMock.Get().SetRevokeByRequest(opts.SupportsRevokeByRequest)
+	// And whether it reads capture ids: only then is a request captured
+	// without --sync given one, which its mappings and test case carry.
+	syncMock.Get().SetCaptureIDs(opts.SupportsCaptureIDs)
 
 	return m, nil
 }

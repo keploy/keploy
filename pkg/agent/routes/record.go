@@ -810,8 +810,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// above cannot catch it. Suppress by EXACT owning test name so a
 		// TC whose mock was capacity-dropped is not streamed mock-less
 		// (replay: match_phase=no_mocks), without over-suppressing any
-		// concurrent TC that kept all its mocks.
-		mockDropped := syncmgr.Get().WasMockDroppedForTC(t.Name)
+		// concurrent TC that kept all its mocks. A test case is known by
+		// its capture id when it has one (its mocks are owned by it).
+		mockDropped := syncmgr.Get().WasMockDroppedForTC(t.AgentName())
 
 		if hasPressure || hasOrphan || mockDropped {
 			tcsSuppressedSoFar++
@@ -834,7 +835,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// by name, and one
 		// lost since the checks above leaves it out here
 		// (SyncMockManager.SendingTestCase).
-		if !syncmgr.Get().SendingTestCase(t.Name, tcReqTime, tcRespTime) {
+		if !syncmgr.Get().SendingTestCase(t.AgentName(), tcReqTime, tcRespTime) {
 			tcsSuppressedSoFar++
 			a.logger.Debug("agent: TC suppressed — a mock it may need was lost: one any test of the recording may need, requested before its window ended, or one no test owns requested inside its window; not sent to CLI",
 				zap.String("tc_name", t.Name),

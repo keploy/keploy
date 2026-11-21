@@ -34,7 +34,7 @@ func TestARevokeFindsATestCaseSentWithNoNameByItsRequestTime(t *testing.T) {
 		models.RevokeNameByRequest(at.Add(time.Second)),
 		"never-saved",
 		literal,
-	}, inserted, byRequest)
+	}, inserted, byRequest, nil)
 	slices.Sort(got)
 	want := []string{literal, "post-customers-939", "post-customers-940", "test-1"}
 	slices.Sort(want)

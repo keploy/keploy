@@ -26,6 +26,7 @@ type consumerRun struct {
 	r               *Recorder
 	db              *recMappingDB
 	waits           *mappingWaits
+	names           *captureNames
 	correlationMap  sync.Map
 	asyncMockIDs    sync.Map
 	shortPool       sync.Map
@@ -46,6 +47,7 @@ func startConsumerWith(t *testing.T, logger *zap.Logger) *consumerRun {
 	c := &consumerRun{
 		db:       &recMappingDB{},
 		waits:    newMappingWaits(),
+		names:    newCaptureNames(),
 		mappings: make(chan models.TestMockMapping),
 		mapped:   make(chan string, 64),
 		revoked:  make(chan string, 64),
@@ -60,11 +62,12 @@ func startConsumerWith(t *testing.T, logger *zap.Logger) *consumerRun {
 				for _, e := range entries {
 					c.mapped <- tn + "/" + e.Name
 				}
-			}, nil)
+			}, nil, c.names)
 	}()
 	t.Cleanup(func() {
 		c.closeMappings()
 		c.waits.end()
+		c.names.end()
 		select {
 		case err := <-c.done:
 			assert.NoError(t, err)
