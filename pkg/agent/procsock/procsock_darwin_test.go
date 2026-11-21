@@ -3,6 +3,7 @@
 package procsock_test
 
 import (
+	"errors"
 	"os"
 	"slices"
 	"testing"
@@ -79,7 +80,7 @@ func TestProcessesAreReadWhileASpawnIsHeld(t *testing.T) {
 }
 
 // Info reads the short record: this process's parent and process group,
-// and a process that is not there answers an error.
+// and a process that is not there answers ESRCH, the kernel's own answer.
 func TestInfoReadsParentAndGroup(t *testing.T) {
 	p, err := procsock.Info(os.Getpid())
 	if err != nil {
@@ -88,7 +89,7 @@ func TestInfoReadsParentAndGroup(t *testing.T) {
 	if p.PID != os.Getpid() || p.PPID != os.Getppid() || p.PGID != unix.Getpgrp() || p.Zombie {
 		t.Fatalf("Info(self) = %+v; want pid %d, parent %d, group %d, not a zombie", p, os.Getpid(), os.Getppid(), unix.Getpgrp())
 	}
-	if _, err := procsock.Info(1 << 30); err == nil {
-		t.Fatal("Info of a pid no process has answered no error")
+	if _, err := procsock.Info(1 << 30); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("Info of a pid no process has answered %v; want ESRCH", err)
 	}
 }
