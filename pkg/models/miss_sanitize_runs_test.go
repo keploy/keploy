@@ -161,51 +161,91 @@ func TestTheNextStepShapesAnIDLongNumberAlone(t *testing.T) {
 	}
 }
 
-// Shaping a miss's next step costs about what its text and paths are long,
-// however deep its paths are: 25 field diffs 120, then 1000, fields deep
-// with an id mid-path, the text naming each whole and by runs around the id.
-// (Building every run of every path took 1.3 s and 650 MB at 120 fields.)
-func TestTheNextStepShapesDeepPathsInLinearCost(t *testing.T) {
+// Shaping a miss's next step grows with its paths' depth, not with its
+// square, in three shapes, each at a depth and at about 8 times it: 25
+// field diffs with an id mid-path, the text naming each whole and by runs
+// around the id (120 and 1000 fields deep); and one diff of keys "" and
+// "{}", or "y" and "x:y", nested 500 and 4000 deep and named whole, where
+// each place after a mark ("}", ":") begins a chain of kept fields. Bytes
+// are bounded (they do not move with the runner's load), and so is the
+// ratio of the fastest of 5 timings at the deeper depth to the shallower:
+// about 8 to 10 when the cost grows with depth, about 64 or more with its
+// square, so it must stay under 25. (Building every run of every path took
+// 1.3 s and 650 MB a call at 120 fields.)
+func TestShapingANextStepGrowsWithItsPathsDepthNotItsSquare(t *testing.T) {
 	u := "00000001-0000-4000-8000-000000000001"
-	for _, c := range []struct {
-		depth    int
-		maxBytes uint64
-		maxTime  time.Duration
-	}{
-		{120, 4 << 20, 250 * time.Millisecond},
-		{1000, 32 << 20, 2 * time.Second},
-	} {
-		segs := make([]string, c.depth)
+	diffs25 := func(depth int) UnmatchedCall {
+		segs := make([]string, depth)
 		for i := range segs {
 			segs[i] = "node"
 		}
-		segs[c.depth/2] = u
+		segs[depth/2] = u
 		var diffs []MockFieldDiff
 		var named []string
 		for n := 0; n < 25; n++ {
 			p := "body." + strings.Join(segs, ".") + fmt.Sprintf(".leaf%d", n)
 			diffs = append(diffs, MockFieldDiff{Path: p, Kind: DiffKindValueChanged})
-			named = append(named, p, strings.Join(segs[c.depth/2-3:c.depth/2+3], "."), strings.Join(segs[2:c.depth-2], "."))
+			named = append(named, p, strings.Join(segs[depth/2-3:depth/2+3], "."), strings.Join(segs[2:depth-2], "."))
 		}
-		m := UnmatchedCall{Protocol: "HTTP", NextSteps: "Only values drifted (" + strings.Join(named, ", ") + "). Re-record.", FieldDiffs: diffs}
-		out := m.SanitizedNextStep() // warm
-		if strings.Contains(out, u) {
-			t.Fatalf("depth %d: the id is in the next step: %q", c.depth, out)
+		return UnmatchedCall{Protocol: "HTTP", NextSteps: "Only values drifted (" + strings.Join(named, ", ") + "). Re-record.", FieldDiffs: diffs}
+	}
+	chain := func(first, key string) func(int) UnmatchedCall {
+		return func(depth int) UnmatchedCall {
+			p := "body.q." + first + "." + strings.Repeat(key+".", depth) + u
+			return UnmatchedCall{Protocol: "HTTP", NextSteps: "Only values drifted (" + p + "). Re-record.", FieldDiffs: []MockFieldDiff{{Path: p, Kind: DiffKindValueChanged}}}
 		}
-		const calls = 3
+	}
+	// cost is the bytes a call allocates and the fastest of 5 timings of
+	// reps calls, a call's share.
+	cost := func(m UnmatchedCall, reps int) (uint64, time.Duration) {
 		var before, after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&before)
-		start := time.Now()
-		for range calls {
-			m.SanitizedNextStep()
-		}
-		took := time.Since(start) / calls
+		m.SanitizedNextStep()
 		runtime.ReadMemStats(&after)
-		bytes := (after.TotalAlloc - before.TotalAlloc) / calls
-		t.Logf("depth %d: %v and %d KB a call", c.depth, took, bytes>>10)
-		if bytes > c.maxBytes || took > c.maxTime {
-			t.Fatalf("depth %d: a next step took %v and %d KB; want at most %v and %d KB", c.depth, took, bytes>>10, c.maxTime, c.maxBytes>>10)
+		fastest := time.Duration(1<<63 - 1)
+		for range 5 {
+			start := time.Now()
+			for range reps {
+				m.SanitizedNextStep()
+			}
+			fastest = min(fastest, time.Since(start)/time.Duration(reps))
+		}
+		return after.TotalAlloc - before.TotalAlloc, fastest
+	}
+	for _, c := range []struct {
+		name            string
+		call            func(int) UnmatchedCall
+		low, high       int
+		lowMax, highMax uint64 // bytes a call
+	}{
+		{"25 diffs, an id mid-path", diffs25, 120, 1000, 6 << 20, 48 << 20},
+		{`keys "" and "{}"`, chain("", "{}"), 500, 4000, 2 << 20, 12 << 20},
+		{`keys "y" and "x:y"`, chain("y", "x:y"), 500, 4000, 2 << 20, 12 << 20},
+	} {
+		low, high := c.call(c.low), c.call(c.high)
+		for _, m := range []UnmatchedCall{low, high} {
+			if out := m.SanitizedNextStep(); strings.Contains(out, u) {
+				t.Fatalf("%s: the id is in the next step: %q", c.name, out)
+			}
+		}
+		// Enough calls that the shallower timing is a few milliseconds.
+		reps := 1
+		if _, d := cost(low, 1); d < 2*time.Millisecond {
+			reps = int(2*time.Millisecond/max(d, time.Microsecond)) + 1
+		}
+		lowBytes, lowTime := cost(low, reps)
+		highBytes, highTime := cost(high, reps)
+		ratio := float64(highTime) / float64(max(lowTime, 1))
+		t.Logf("%s: depth %d %v and %d KB a call, depth %d %v and %d KB, time x%.1f",
+			c.name, c.low, lowTime, lowBytes>>10, c.high, highTime, highBytes>>10, ratio)
+		if lowBytes > c.lowMax || highBytes > c.highMax {
+			t.Errorf("%s: %d KB at depth %d and %d KB at %d a call; want at most %d KB and %d KB",
+				c.name, lowBytes>>10, c.low, highBytes>>10, c.high, c.lowMax>>10, c.highMax>>10)
+		}
+		if ratio >= 25 {
+			t.Errorf("%s: depth %d takes %.1f times what depth %d does (%v, %v); want under 25, as cost that grows with depth",
+				c.name, c.high, ratio, c.low, highTime, lowTime)
 		}
 	}
 }

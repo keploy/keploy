@@ -209,10 +209,11 @@ type runScan struct {
 	dots []int32 // where the text's "."s are
 	seg  []int32 // by segment: the id of the whole segment, -1 for none
 	// By segment s: how many segments before s are a field FieldShape
-	// changes (shapedSegs), and how many begin with such a field that ends
-	// inside them (shapedParts).
-	shapedSegs, shapedParts []int32
-	si                      int // the segment the scan is in
+	// changes (shapedSegs), and how many are such a field or begin with
+	// one that ends inside them (hotSegs). partSeg[s] is the last segment
+	// up to s that begins with such a field ending inside it, -1 for none.
+	shapedSegs, hotSegs, partSeg []int32
+	si                           int // the segment the scan is in
 
 	// Runs of whole segments from a segment's start, read as a window that
 	// only moves on: segments [wb, we] are the longest run from wb, read to
@@ -230,8 +231,12 @@ func newRunScan(r *runSet, text string) *runScan {
 	}
 	n := len(sc.dots) + 1
 	sc.seg = make([]int32, n)
-	sc.shapedSegs = make([]int32, n+1)
-	sc.shapedParts = make([]int32, n+1)
+	sc.shapedSegs, sc.hotSegs, sc.partSeg = make([]int32, n+1), make([]int32, n+1), make([]int32, n)
+	// An empty field is never shaped (FieldShape keeps ""); were it, any
+	// segment could end a run in one, so every segment would be hot.
+	empty, ok := r.ids[""]
+	emptyShaped := ok && r.shaped[empty]
+	last := int32(-1)
 	for s := range n {
 		start, end := sc.segStart(s), sc.segEnd(s)
 		sc.seg[s] = sc.id(start, end)
@@ -242,8 +247,12 @@ func newRunScan(r *runSet, text string) *runScan {
 				break
 			}
 		}
+		if shapedPart {
+			last = int32(s)
+		}
+		sc.partSeg[s] = last
 		sc.shapedSegs[s+1] = sc.shapedSegs[s] + b2i(shapedSeg)
-		sc.shapedParts[s+1] = sc.shapedParts[s] + b2i(shapedPart)
+		sc.hotSegs[s+1] = sc.hotSegs[s] + b2i(shapedSeg || shapedPart || emptyShaped)
 	}
 	sc.wb, sc.we = 0, -1
 	return sc
@@ -294,6 +303,11 @@ func (sc *runScan) partID(from, j, end int) int32 {
 // shapedIn reports whether a whole segment of [a, b] is a field FieldShape
 // changes.
 func (sc *runScan) shapedIn(a, b int) bool { return sc.shapedSegs[b+1] > sc.shapedSegs[a] }
+
+// hotIn reports whether a segment of [a, b] is a field FieldShape changes
+// or begins with one ending inside it: where a run of 3 fields or more
+// whose first field is kept can be one to shape.
+func (sc *runScan) hotIn(a, b int) bool { return sc.hotSegs[b+1] > sc.hotSegs[a] }
 
 // window is the longest run of whole segments from segment b (how many, 0
 // for none) and its state. b never goes back.
@@ -372,7 +386,20 @@ func (sc *runScan) longest(i int) int {
 		shaped = n > 0 && sc.shapedIn(si, si+n-1)
 	} else if nx, ok := r.next[runKey(0, id0)]; ok && id0 >= 0 {
 		n, st, shaped = 1, nx, r.shaped[id0]
-		for s := si + 1; s < len(sc.seg) && sc.seg[s] >= 0; s++ {
+		// The chain's whole segments are a run from segment si+1, so they
+		// end by the longest such run (window). A run of 3 fields or more
+		// here is one to shape only by a shaped field in a segment up to
+		// the one after that run (hotIn) when the first field is kept;
+		// with none, 3 fields are all the chain needs. Without that bound,
+		// each place after a mark in a long chain of kept fields ("{}",
+		// "x:y") read the rest of the chain again.
+		stop := len(sc.seg)
+		if !shaped && si+1 < len(sc.seg) {
+			if w, _ := sc.window(si + 1); !sc.hotIn(si+1, min(si+w+1, len(sc.seg)-1)) {
+				stop = min(stop, si+3)
+			}
+		}
+		for s := si + 1; s < stop && sc.seg[s] >= 0; s++ {
 			nx, ok := r.next[runKey(st, sc.seg[s])]
 			if !ok {
 				break
@@ -431,33 +458,42 @@ func (sc *runScan) longest(i int) int {
 		// next segment, or the k fields alone. The whole chain is no run to
 		// shape, so when it is 3 fields or more none of them is shaped, and
 		// a run of 3 or more of them is shaped only by a shaped last field
-		// ending inside its segment (shapedParts).
-		var states []int32 // the state of the chain's first m+1 fields, read only for such a last field
-		for k := n - 1; k >= 1; k-- {
-			if k == 1 || sc.shapedParts[si+k+1] > sc.shapedParts[si+k] {
-				at := r.next[runKey(0, id0)]
-				if k > 1 {
-					if states == nil {
-						states = make([]int32, n)
-						states[0] = at
-						for m := 1; m < n; m++ {
-							states[m] = r.next[runKey(states[m-1], sc.seg[si+m])]
-						}
-					}
-					at = states[k-1]
+		// ending inside its segment: only the k whose segment begins with
+		// one (partSeg) are read, longest first, then 2 fields and 1.
+		// stateOf is the state of the chain's first k fields; states holds
+		// them, read only for such a last field.
+		var states []int32
+		stateOf := func(k int) int32 {
+			if k == 1 {
+				return r.next[runKey(0, id0)]
+			}
+			if states == nil {
+				// The longest k is asked first.
+				states = make([]int32, k)
+				states[0] = r.next[runKey(0, id0)]
+				for m := 1; m < k; m++ {
+					states[m] = r.next[runKey(states[m-1], sc.seg[si+m])]
 				}
-				if j := lastPart(k, at, si+k, false); j > 0 {
+			}
+			return states[k-1]
+		}
+		for s := int(sc.partSeg[si+n-1]); s >= si+3; s = int(sc.partSeg[s-1]) {
+			if j := lastPart(s-si, stateOf(s-si), s, false); j > 0 {
+				return j
+			}
+		}
+		for k := min(n-1, 2); k >= 1; k-- {
+			if k == 1 || int(sc.partSeg[si+k]) == si+k {
+				if j := lastPart(k, stateOf(k), si+k, false); j > 0 {
 					return j
 				}
 			}
-			if k <= 2 {
-				b := int32(-1)
-				if k == 2 {
-					b = segID(1)
-				}
-				if sc.valid(i, sc.segEnd(si+k-1), k, id0, b, false) {
-					return sc.segEnd(si + k - 1)
-				}
+			b := int32(-1)
+			if k == 2 {
+				b = segID(1)
+			}
+			if sc.valid(i, sc.segEnd(si+k-1), k, id0, b, false) {
+				return sc.segEnd(si + k - 1)
 			}
 		}
 	}
