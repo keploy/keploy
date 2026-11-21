@@ -5,8 +5,10 @@ package relay
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -101,8 +103,8 @@ func TestTheWalkToTheClientsSocketEndsOnACycleOfWrappers(t *testing.T) {
 // Through a relay: the client's FIN forwarded to the destination tells the
 // client's socket nothing; the destination's FIN forwarded to the client
 // tells it once, asked first whether the connection had closed: one that
-// had (a client's reset) is taken as over, not half-closed, and told nothing;
-// the client reads the end of the stream at the relay's close.
+// had (a client's reset) is taken as over, not half-closed, and told nothing:
+// the client reads no FIN, and the relay ends all the same.
 func TestTheRelayTellsTheClientsSocketWhenItForwardsTheDestinationsFIN(t *testing.T) {
 	t.Parallel()
 	for _, closed := range []bool{false, true} {
@@ -138,7 +140,18 @@ func relayTellsTheDestinationsFIN(t *testing.T, closed bool) {
 	}
 	_ = server.(*net.TCPConn).CloseWrite()
 	_ = app.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if got, err := io.ReadAll(app); err != nil || string(got) != "answer" {
+	if closed {
+		// Its socket says the connection closed: the client reads the
+		// answer, and no FIN follows it.
+		got := make([]byte, len("answer"))
+		if _, err := io.ReadFull(app, got); err != nil || string(got) != "answer" {
+			t.Fatalf("the client read %q, %v, want the answer", got, err)
+		}
+		_ = app.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		if n, err := app.Read(make([]byte, 1)); n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("the client read %d byte(s), %v after the answer; want nothing, no FIN sent it", n, err)
+		}
+	} else if got, err := io.ReadAll(app); err != nil || string(got) != "answer" {
 		t.Fatalf("the client read %q, %v, want the answer and the proxy's FIN", got, err)
 	}
 	select {
