@@ -34,7 +34,6 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
 )
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
@@ -502,16 +501,16 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 // injects the keploy-agent service, serialises the result back to bytes, and
 // configures the command to pipe the content via stdin ("-f -").
 func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) error {
-	var compose docker.Compose
-	if err := yaml.Unmarshal(a.opts.InMemoryCompose, &compose); err != nil {
-		return fmt.Errorf("failed to parse in-memory compose YAML: %w", err)
-	}
-
-	serviceInfo, err := a.docker.FindContainerInCompose(&compose, a.container)
+	// Resolved as the command will run the document: `docker compose -f -`
+	// in its scope, or the in-process library when this build has one.
+	scope := composeScope(a.cmd.WholeUnredacted())
+	scope.InProcess = composeLibrarySupported()
+	serviceInfo, err := a.docker.FindContainerInCompose(ctx, a.opts.InMemoryCompose, scope, a.container)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to find container in in-memory compose")
 		return err
 	}
+	compose := serviceInfo.Compose
 
 	a.opts.AppPorts = serviceInfo.Ports
 	a.opts.AppNetworks = serviceInfo.Networks
@@ -519,13 +518,13 @@ func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) erro
 	a.composeService = serviceInfo.AppServiceName
 
 	// By its key, as the files path names it (SetupCompose).
-	if err := a.docker.ModifyComposeForAgent(&compose, a.opts, serviceInfo.AppServiceName); err != nil {
+	if err := a.docker.ModifyComposeForAgent(compose, a.opts, serviceInfo.AppServiceName); err != nil {
 		utils.LogError(a.logger, err, "failed to modify in-memory compose for keploy integration")
 		return err
 	}
 
 	if HookImpl != nil {
-		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, &compose, serviceInfo.AppServiceName)
+		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, compose, serviceInfo.AppServiceName)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during in-memory docker compose setup")
 			return err
@@ -535,16 +534,16 @@ func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) erro
 		}
 	}
 
-	content, err := a.docker.MarshalCompose(&compose)
+	content, err := a.docker.MarshalCompose(compose)
 	if err != nil {
 		return fmt.Errorf("failed to serialise modified compose to YAML: %w", err)
 	}
 	a.composeFileEnv = ""
-	a.setComposeSource("", content, &compose)
+	a.setComposeSource("", content, compose)
 
 	// Ensure the command uses stdin ("-f -"), its abort flags left out,
 	// and keploy does what they say (setComposeUserAbort).
-	a.setComposeUserAbort(a.cmd.WholeUnredacted(), &compose)
+	a.setComposeUserAbort(a.cmd.WholeUnredacted(), compose)
 	a.cmd = utils.NewAppCommand(ensureInMemoryComposeFlags(a.cmd.WholeUnredacted()))
 
 	a.logger.Info("Running application using in-memory Keploy-generated Docker Compose (no file written to disk)",
@@ -751,7 +750,7 @@ func (a *App) composeChildTee(ctx context.Context) []utils.ExecOption {
 		return nil
 	}
 	scope := composeScope(a.cmd.WholeUnredacted())
-	out, err := docker.StartComposeChildOutput(ctx, a.composeContent, scope.ProjectName, scope.ProjectDir, scope.EnvFiles)
+	out, err := docker.StartComposeChildOutput(ctx, a.composeContent, scope)
 	a.composeChildOut.Store(out)
 	if err != nil {
 		if a.composeChildWarned.CompareAndSwap(false, true) {
@@ -1091,13 +1090,14 @@ func normalizeComposeProjectName(s string) string {
 // composeScope is what the compose command cmd resolves its files in beyond
 // the files themselves (docker.ComposeScope): its -p, else the
 // COMPOSE_PROJECT_NAME its leading assignments set; its --project-directory;
-// and its --env-file values.
+// its --env-file values; and its --compatibility.
 func composeScope(cmd string) docker.ComposeScope {
 	projectName, projectDir := composeProjectScope(cmd)
 	if projectName == "" {
 		projectName = normalizeComposeProjectName(composeProjectEnvAssignment(cmd))
 	}
-	return docker.ComposeScope{ProjectName: projectName, ProjectDir: projectDir, EnvFiles: composeEnvFiles(cmd)}
+	return docker.ComposeScope{ProjectName: projectName, ProjectDir: projectDir, EnvFiles: composeEnvFiles(cmd),
+		Compatibility: composeCompatibility(cmd)}
 }
 
 // composeProjectEnvAssignment is COMPOSE_PROJECT_NAME as cmd's leading

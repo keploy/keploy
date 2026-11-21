@@ -110,9 +110,9 @@ type composeAppState struct {
 // THE APP'S CONTAINER IS THE ONE COMPOSE MADE FOR THE APP'S SERVICE (P101-b-n).
 //
 // keploy is given the app by a name (--container-name), which its setup finds
-// in the compose file as a service's container_name or as the service's key
-// (findContainerInServices). The key names no container: compose names a
-// service's container <project>-<service>-<n> unless it sets container_name.
+// in the compose files as the container compose names a service's, or as the
+// service's key. The key names no container: compose names a service's
+// container <project>-<service>-<n> unless it sets container_name.
 // And a name can reach a container that is not the app's: another stack's
 // with that name, or one whose ID begins with it (the daemon takes a unique
 // ID prefix for a name). keploy's stop at a set's end, read by that name,

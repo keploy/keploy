@@ -675,7 +675,7 @@ func TestModifyDockerRunRefusesAStart(t *testing.T) {
 func childStackOf(t *testing.T, project string) *docker.ComposeChildOutput {
 	t.Helper()
 	out, err := docker.StartComposeChildOutput(context.Background(),
-		[]byte("services:\n  app:\n    image: app\n"), project, t.TempDir(), nil)
+		[]byte("services:\n  app:\n    image: app\n"), docker.ComposeScope{ProjectName: project, ProjectDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("start compose child output: %v", err)
 	}

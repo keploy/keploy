@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -174,10 +175,11 @@ networks:
 	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	nets, ports, name, found := idc.findContainerInServices(&compose, "app")
-	if !found {
-		t.Fatalf("the app service was not found behind its alias")
+	info, err := idc.FindContainerInCompose(context.Background(), []byte(in), ComposeScope{}, "app")
+	if err != nil {
+		t.Fatalf("the app service was not found behind its alias: %v", err)
 	}
+	nets, ports, name := info.Networks, info.Ports, info.AppServiceName
 	if name != "app" {
 		t.Errorf("name = %q, want app", name)
 	}
@@ -266,7 +268,7 @@ func TestAddKeployAgent_RefusesADuplicate(t *testing.T) {
 }
 
 // TestServiceAlias_PortsReadThroughAnAliasedSection pins the section-level
-// resolution in findContainerInServices specifically.
+// resolution in serviceByKey specifically.
 //
 // The per-service resolution inside the loop covers `services: {app: *app}`,
 // where the section itself is a real mapping. It cannot help when the whole
@@ -286,11 +288,12 @@ services: *svcs
 	if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	_, ports, name, found := idc.findContainerInServices(&compose, "app")
-	if !found {
-		t.Fatalf("the app was not found behind a wholly-aliased `services:` section; " +
-			"the caller reports \"container not found\" on a file that declares it")
+	info, err := idc.FindContainerInCompose(context.Background(), []byte(in), ComposeScope{}, "app")
+	if err != nil {
+		t.Fatalf("the app was not found behind a wholly-aliased `services:` section; "+
+			"the caller reports \"container not found\" on a file that declares it: %v", err)
 	}
+	ports, name := info.Ports, info.AppServiceName
 	if name != "app" {
 		t.Errorf("name = %q, want app", name)
 	}
@@ -326,7 +329,7 @@ services:
 	}
 
 	// The gate the caller runs first; its ports feed opts.AppPorts.
-	_, ports, _, found := idc.findContainerInServices(&compose, "app")
+	_, ports, found := idc.serviceByKey(&compose, "app")
 	if !found || len(ports) == 0 {
 		t.Fatalf("gate did not resolve the aliased service: found=%v ports=%v", found, ports)
 	}
@@ -691,13 +694,14 @@ services:
 			if err := yaml.Unmarshal([]byte(tc.in), &compose); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			_, ports, _, found := idc.findContainerInServices(&compose, "myapp")
-			if !found {
-				t.Fatalf("the gate did not find the service")
+			info, err := idc.FindContainerInCompose(context.Background(), []byte(tc.in), ComposeScope{}, "myapp")
+			if err != nil || info.AppServiceName != "svc" {
+				t.Fatalf("the gate did not find the service: %v, %v", info, err)
 			}
+			compose = *info.Compose
 			opts := buildAgentOpts()
-			opts.AppPorts = ports
-			if err := idc.ModifyComposeForAgent(&compose, opts, "myapp"); err != nil {
+			opts.AppPorts = info.Ports
+			if err := idc.ModifyComposeForAgent(&compose, opts, info.AppServiceName); err != nil {
 				t.Fatalf("ModifyComposeForAgent: %v", err)
 			}
 			data, err := idc.MarshalCompose(&compose)
@@ -887,7 +891,7 @@ services:
 
 	// The gate runs first in production and resolves aliases as it goes — but it
 	// stops at the app, so `x` is untouched when the guard runs.
-	_, ports, _, _ := idc.findContainerInServices(&compose, "app")
+	_, ports, _ := idc.serviceByKey(&compose, "app")
 	opts.AppPorts = ports
 
 	err := idc.ModifyComposeForAgent(&compose, opts, "app")

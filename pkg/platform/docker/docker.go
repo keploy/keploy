@@ -387,18 +387,35 @@ func (idc *Impl) MarshalCompose(compose *Compose) ([]byte, error) {
 	return data, nil
 }
 
-// FindContainerInCompose searches for a container within an already-parsed Compose
-// structure. This is the in-memory equivalent of FindContainerInComposeFiles.
-func (idc *Impl) FindContainerInCompose(compose *Compose, containerName string) (*ComposeServiceInfo, error) {
-	networks, ports, service, found := idc.findContainerInServices(compose, containerName)
+// FindContainerInCompose is FindContainerInComposeFiles for content, the one
+// compose document keploy hands `docker compose -f -` (or its in-process
+// library): the service whose container is containerName, resolved as compose
+// resolves content in scope (loadComposeContentIdentity, serviceOf), with
+// that service's networks and ports as the document writes them, and the
+// document parsed for keploy to rewrite.
+func (idc *Impl) FindContainerInCompose(ctx context.Context, content []byte, scope ComposeScope, containerName string) (*ComposeServiceInfo, error) {
+	var compose Compose
+	if err := yaml.Unmarshal(content, &compose); err != nil {
+		return nil, fmt.Errorf("failed to parse in-memory compose YAML: %w", err)
+	}
+	ident, err := loadComposeContentIdentity(ctx, content, scope)
+	if err != nil {
+		return nil, fmt.Errorf("keploy could not resolve the in-memory compose document as docker compose does, so it cannot tell which service is container %q: %w", containerName, err)
+	}
+	service, err := ident.serviceOf(containerName)
+	if err != nil {
+		return nil, err
+	}
+	networks, ports, found := idc.serviceByKey(&compose, service)
 	if !found {
-		return nil, fmt.Errorf("container '%s' not found in compose", containerName)
+		// A service an included file brings is not keyed in the document.
+		return nil, fmt.Errorf("compose service %q, container %q, is not keyed in the in-memory compose document keploy rewrites (an included file's service cannot be rewritten)", service, containerName)
 	}
 	return &ComposeServiceInfo{
 		// ComposePath is intentionally empty — content lives in memory.
 		Networks:       networks,
 		Ports:          ports,
-		Compose:        compose,
+		Compose:        &compose,
 		AppServiceName: service,
 	}, nil
 }
@@ -563,48 +580,6 @@ func (idc *Impl) serviceByKey(compose *Compose, service string) ([]string, []str
 		return idc.extractServiceNetworks(node, service), idc.extractServicePorts(node), true
 	}
 	return nil, nil, false
-}
-
-// findContainerInServices searches for a container within the services of a compose file
-// This reuses the same iteration pattern as existing functions like SetPidContainer
-func (idc *Impl) findContainerInServices(compose *Compose, containerName string) ([]string, []string, string, bool) {
-	// This gate runs BEFORE ModifyComposeForAgent and its ports/networks become
-	// opts.AppPorts/AppNetworks. Read off an unresolved alias they come back
-	// empty, so the app's published port never reaches keploy-agent -- which
-	// publishes on the app's behalf under network_mode: service:keploy-agent --
-	// and the app is unreachable from the host.
-	resolveServiceAlias(&compose.Services)
-	if compose.Services.Content == nil {
-		return nil, nil, "", false
-	}
-
-	// Use the same iteration pattern as existing compose functions (services are key-value pairs)
-	for i := 0; i < len(compose.Services.Content); i += 2 {
-		if i+1 >= len(compose.Services.Content) {
-			break
-		}
-
-		serviceNameNode := compose.Services.Content[i]
-		serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
-		serviceName := serviceNameNode.Value
-
-		// Check for explicit container_name using the same pattern as existing functions
-		cn := serviceKeyThroughMerge(serviceContentNode, "container_name")
-		containerNameMatch := cn != nil && cn.Value == containerName
-
-		// If explicit container_name matches or service name matches, extract networks and ports
-		if containerNameMatch || serviceName == containerName {
-			// `ports:` and `networks:` are routinely put in a shared `x-*`
-			// fragment. Read off the unmerged node they come back empty, and the
-			// app is published on nothing and joins the wrong network.
-			idc.flattenMergeKeys(serviceContentNode)
-			networks := idc.extractServiceNetworks(serviceContentNode, serviceName)
-			ports := idc.extractServicePorts(serviceContentNode)
-			return networks, ports, serviceName, true
-		}
-	}
-
-	return nil, nil, "", false
 }
 
 // extractServiceNetworks extracts network names from a service's network configuration

@@ -19,7 +19,7 @@ import (
 // unset, and are as they were after the test.
 func composeProjectDir(t *testing.T, files map[string]string) string {
 	t.Helper()
-	for _, k := range []string{composeProjectNameEnv, composeEnvFilesEnv, "COMPOSE_DISABLE_ENV_FILE", "COMPOSE_PROFILES", "APP_CONTAINER", "APP_PROJECT"} {
+	for _, k := range []string{composeProjectNameEnv, composeEnvFilesEnv, "COMPOSE_DISABLE_ENV_FILE", "COMPOSE_PROFILES", composeCompatibilityEnv, "APP_CONTAINER", "APP_PROJECT", "PARSE_PROJECT"} {
 		if v, ok := os.LookupEnv(k); ok {
 			t.Cleanup(func() { _ = os.Setenv(k, v) })
 		} else {
@@ -51,6 +51,12 @@ func findIn(t *testing.T, dir string, files []string, scope ComposeScope, name s
 	}
 	idc := &Impl{logger: zap.NewNop(), conf: &config.Config{}}
 	return idc.FindContainerInComposeFiles(context.Background(), paths, scope, name)
+}
+
+func findInContent(t *testing.T, content string, scope ComposeScope, name string) (*ComposeServiceInfo, error) {
+	t.Helper()
+	idc := &Impl{logger: zap.NewNop(), conf: &config.Config{}}
+	return idc.FindContainerInCompose(context.Background(), []byte(content), scope, name)
 }
 
 // The parse-server sample's shape: every name is a variable with a default.
@@ -188,32 +194,78 @@ func TestComposeIdentity_ContainerNameFromAVariable(t *testing.T) {
 		{name: "a field newer than keploy's compose schema does not matter",
 			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n    a_field_from_a_later_compose: true\n    container_name: ${APP_CONTAINER:-newschema}\n"},
 			container: "newschema", wantService: "app"},
+		{name: "--compatibility: <project>_<service>_<number>",
+			files: map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			scope: ComposeScope{Compatibility: true}, container: "proj_app_1", wantService: "app"},
+		{name: "--compatibility: not <project>-<service>-<number>",
+			files: map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			scope: ComposeScope{Compatibility: true}, container: "proj-app-1", wantErr: `app: "proj_app_1"`},
+		{name: "no compatibility: not <project>_<service>_<number>",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			container: "proj_app_1", wantErr: `app: "proj-app-1"`},
+		{name: "COMPOSE_COMPATIBILITY in keploy's environment",
+			files: map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			env:   map[string]string{composeCompatibilityEnv: "true"}, container: "proj_app_2", wantService: "app"},
+		{name: "COMPOSE_COMPATIBILITY in the .env",
+			files:     map[string]string{"compose.yml": "services:\n  app:\n    image: x\n", ".env": "COMPOSE_COMPATIBILITY=1\n"},
+			container: "proj_app_1", wantService: "app"},
+		{name: "COMPOSE_COMPATIBILITY false",
+			files: map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			env:   map[string]string{composeCompatibilityEnv: "false"}, container: "proj-app-1", wantService: "app"},
+		{name: "compatibility mode leaves a container_name as it is",
+			files: map[string]string{"compose.yml": "services:\n  app:\n    image: x\n    container_name: ${APP_CONTAINER:-my-app}\n"},
+			scope: ComposeScope{Compatibility: true}, container: "my-app", wantService: "app"},
+		{name: "the in-process library has no compatibility mode",
+			files: map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			env:   map[string]string{composeCompatibilityEnv: "true"},
+			scope: ComposeScope{Compatibility: true, InProcess: true}, container: "proj-app-1", wantService: "app"},
+		{name: "-p that compose refuses: refused",
+			files: map[string]string{"compose.yml": "services:\n  app:\n    image: x\n"},
+			scope: ComposeScope{ProjectName: "Not.Valid"}, container: "app", wantErr: "Not.Valid"},
 		{name: "an --env-file named from the home directory",
 			files: map[string]string{"compose.yml": parseServerShape, "home.env": "APP_CONTAINER=from-home\n"},
 			env:   map[string]string{"HOME": "<dir>"}, scope: ComposeScope{EnvFiles: []string{"~/home.env"}},
 			container: "from-home", wantService: "parse-server"},
 	}
+	// Each row runs on the file (-f compose.yml) and on its content as the
+	// one in-memory document (-f -) from the same directory: compose names
+	// both alike, and so must keploy.
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := composeProjectDir(t, tc.files)
-			for k, v := range tc.env {
-				t.Setenv(k, strings.ReplaceAll(v, "<dir>", dir))
+		for _, inMemory := range []bool{false, true} {
+			mode := "files"
+			if inMemory {
+				mode = "in memory"
 			}
-			t.Chdir(dir)
-			info, err := findIn(t, dir, []string{"compose.yml"}, tc.scope, tc.container)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("FindContainerInComposeFiles(%q) = %v, %v; want an error with %q", tc.container, info, err, tc.wantErr)
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				dir := composeProjectDir(t, tc.files)
+				for k, v := range tc.env {
+					t.Setenv(k, strings.ReplaceAll(v, "<dir>", dir))
 				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("FindContainerInComposeFiles(%q): %v", tc.container, err)
-			}
-			if info.AppServiceName != tc.wantService {
-				t.Fatalf("FindContainerInComposeFiles(%q) found service %q, want %q", tc.container, info.AppServiceName, tc.wantService)
-			}
-		})
+				t.Chdir(dir)
+				var info *ComposeServiceInfo
+				var err error
+				if inMemory {
+					info, err = findInContent(t, tc.files["compose.yml"], tc.scope, tc.container)
+				} else {
+					info, err = findIn(t, dir, []string{"compose.yml"}, tc.scope, tc.container)
+				}
+				if tc.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+						t.Fatalf("find %q = %v, %v; want an error with %q", tc.container, info, err, tc.wantErr)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("find %q: %v", tc.container, err)
+				}
+				if info.AppServiceName != tc.wantService {
+					t.Fatalf("find %q found service %q, want %q", tc.container, info.AppServiceName, tc.wantService)
+				}
+				if info.Compose == nil || (inMemory && info.ComposePath != "") {
+					t.Fatalf("find %q gave document %v from %q", tc.container, info.Compose, info.ComposePath)
+				}
+			})
+		}
 	}
 }
 
@@ -264,6 +316,22 @@ func TestComposeIdentity_IncludedServiceIsRefused(t *testing.T) {
 	if _, err := findIn(t, dir, []string{"compose.yml"}, ComposeScope{}, "web"); err != nil {
 		t.Fatalf("the including file's own service: %v", err)
 	}
+	// So too for the in-memory document, its include read from the current
+	// directory as compose reads it.
+	_, err = findInContent(t, "include:\n  - inc.yml\nservices:\n  web:\n    image: x\n", ComposeScope{}, "included")
+	if err == nil || !strings.Contains(err.Error(), "not keyed in the in-memory compose document") {
+		t.Fatalf("in memory: got %v, want the include refused", err)
+	}
+}
+
+// An empty in-memory document names no container.
+func TestComposeIdentity_EmptyDocumentIsRefused(t *testing.T) {
+	if _, err := findInContent(t, "", ComposeScope{}, "app"); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("got %v, want the empty document refused", err)
+	}
+	if _, err := findInContent(t, "services: [not a map", ComposeScope{}, "app"); err == nil {
+		t.Fatal("a document that is not compose YAML was read")
+	}
 }
 
 // --project-directory names the project and holds the .env compose reads, as
@@ -279,6 +347,14 @@ func TestComposeIdentity_ProjectDirectory(t *testing.T) {
 		info, err := findIn(t, dir, []string{"compose.yml"}, scope, container)
 		if err != nil || info.AppServiceName != want {
 			t.Fatalf("FindContainerInComposeFiles(%q) = %v, %v; want service %q", container, info, err, want)
+		}
+		content, err := os.ReadFile(filepath.Join(dir, "compose.yml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err = findInContent(t, string(content), scope, container)
+		if err != nil || info.AppServiceName != want {
+			t.Fatalf("FindContainerInCompose(%q) = %v, %v; want service %q", container, info, err, want)
 		}
 	}
 }
