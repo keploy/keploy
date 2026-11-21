@@ -1,16 +1,17 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package relay
 
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"io"
 	"net"
 	"syscall"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/neterr"
 )
 
 // netConnOf wraps a conn and says so (NetConn), as tls.Conn does.
@@ -34,7 +35,9 @@ func tcpPair(t *testing.T) (app, proxy net.Conn) {
 		t.Fatal("accept failed")
 	}
 	t.Cleanup(func() { _ = app.Close(); _ = proxy.Close() })
-	return app, proxy
+	// The count from the accept, as the proxy puts it on every client it
+	// accepts (CountClientWrites): Windows reads what was written from it.
+	return app, CountClientWrites(proxy)
 }
 
 // smallWindowPair is tcpPair with the app's receive buffer set to 4096 bytes
@@ -52,7 +55,7 @@ func smallWindowPair(t *testing.T) (app, proxy net.Conn) {
 	d := net.Dialer{Control: func(_, _ string, rc syscall.RawConn) error {
 		var serr error
 		if err := rc.Control(func(fd uintptr) {
-			serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4096)
+			serr = setReceiveBuffer(fd, 4096)
 		}); err != nil {
 			return err
 		}
@@ -65,7 +68,9 @@ func smallWindowPair(t *testing.T) (app, proxy net.Conn) {
 		t.Fatal("accept failed")
 	}
 	t.Cleanup(func() { _ = app.Close(); _ = proxy.Close() })
-	return app, proxy
+	// The count from the accept, as the proxy puts it on every client it
+	// accepts (CountClientWrites): Windows reads what was written from it.
+	return app, CountClientWrites(proxy)
 }
 
 func TestResetClientOnCloseResetsWhenTheClientHoldsEveryByte(t *testing.T) {
@@ -83,8 +88,8 @@ func TestResetClientOnCloseResetsWhenTheClientHoldsEveryByte(t *testing.T) {
 	}
 	_ = proxy.Close()
 	_ = app.SetReadDeadline(time.Now().Add(10 * time.Second))
-	if _, err := app.Read(buf); !errors.Is(err, syscall.ECONNRESET) {
-		t.Errorf("the client read %v after the close; want ECONNRESET", err)
+	if _, err := app.Read(buf); !neterr.IsConnReset(err) {
+		t.Errorf("the client read %v after the close; want a reset", err)
 	}
 }
 
@@ -119,14 +124,14 @@ func TestResetClientOnCloseResetsUnderATLSLayerWithNoCloseNotify(t *testing.T) {
 	}
 	_ = srv.Close() // the proxy's close: the socket under it is closed already
 	_ = cli.SetReadDeadline(time.Now().Add(10 * time.Second))
-	if _, err := cli.Read(buf); !errors.Is(err, syscall.ECONNRESET) {
-		t.Errorf("the HTTPS client read %v after the close; want ECONNRESET, not the close_notify's clean end", err)
+	if _, err := cli.Read(buf); !neterr.IsConnReset(err) {
+		t.Errorf("the HTTPS client read %v after the close; want a reset, not the close_notify's clean end", err)
 	}
 }
 
 func TestResetClientOnCloseKeepsAFINWhileBytesAreOutstanding(t *testing.T) {
 	app, proxy := smallWindowPair(t)
-	_ = proxy.(*net.TCPConn).SetWriteBuffer(4096)
+	_ = tcpConnUnder(proxy).SetWriteBuffer(4096)
 	// Fill the way to the client, which reads nothing yet: the deadline
 	// only stops the write once nothing more fits.
 	chunk := make([]byte, 64<<10)
@@ -163,7 +168,7 @@ func TestResetClientOnCloseNotATCPSocket(t *testing.T) {
 // once, however long the grace: the close stays a FIN.
 func TestResetClientOnCloseStopsWaitingAtTheRecordingsStop(t *testing.T) {
 	_, proxy := smallWindowPair(t)
-	_ = proxy.(*net.TCPConn).SetWriteBuffer(4096)
+	_ = tcpConnUnder(proxy).SetWriteBuffer(4096)
 	chunk := make([]byte, 64<<10)
 	_ = proxy.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
 	for {
