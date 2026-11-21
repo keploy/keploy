@@ -74,4 +74,3 @@ func TestCopyDirContentsHoldsOneFileOpenAtATime(t *testing.T) {
 		}
 	}
 }
-
