@@ -86,7 +86,7 @@ func binaryApp(t *testing.T, helloLen int) (port int, got chan []byte) {
 		if err != nil {
 			return
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		hello := make([]byte, helloLen)
 		if helloLen > 0 {
 			if _, err := io.ReadFull(c, hello); err != nil {

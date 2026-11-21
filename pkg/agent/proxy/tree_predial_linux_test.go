@@ -221,3 +221,37 @@ func TestTheHandshakeHoldLooksOnlyAtAMockRunsLocalListeners(t *testing.T) {
 		t.Fatalf("a destination that is not this machine's was looked for: %+v", got)
 	}
 }
+
+// A tree call the live handler serves (a test's call to the app it started:
+// the listener's owner descends from the caller) is handed the hold's dial
+// with its context (util.WithPredialed): the handler's dial of the app takes
+// the connection the listener accepted for the call, not a second one the
+// caller never made.
+func TestALiveTreeCallIsHandedTheHoldsDial(t *testing.T) {
+	recorded.forget()
+	t.Cleanup(recorded.forget)
+	p := selfCallProxy()
+	handed := make(chan *util.Predialed, 1)
+	p.live = func(ctx context.Context, conn net.Conn, _ string, _ uint16) {
+		handed <- util.PredialedFrom(ctx)
+		_ = conn.Close()
+	}
+	addr, port, pre, _, _ := holdDial(t, false)
+	cli, srv := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close() })
+	// The listener is this process's, the run's own; its caller is this
+	// process's parent, which it descends from.
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getppid()), AgentNsPid: uint32(os.Getppid())}
+	served, _, err := p.serveTreeListener(context.Background(), srv, dest, addr, "1", pre, treeListener{owner: os.Getpid(), found: true})
+	if err != nil || !served {
+		t.Fatalf("serveTreeListener = %v, %v; want the call served by the live handler", served, err)
+	}
+	select {
+	case got := <-handed:
+		if got != pre {
+			t.Fatalf("the live handler was handed %v, want the hold's dial %v", got, pre)
+		}
+	default:
+		t.Fatal("the call was not handed to the live handler")
+	}
+}
