@@ -39,7 +39,7 @@ func (t *Tracker) WarmSet(src func(visit func(*models.Mock) bool) error) <-chan 
 		close(done)
 		return done
 	}
-	t.mu.Lock()
+	t.lock()
 	// A cache of its own, on the set's (newDrifts): what it reads past the
 	// set's budget it keeps for none of the set's tests, and lets go of as
 	// it ends.

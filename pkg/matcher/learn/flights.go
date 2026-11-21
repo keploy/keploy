@@ -130,7 +130,7 @@ func (t *Tracker) Lift() *Flight {
 		return nil
 	}
 	f := &Flight{t: t, at: time.Now()}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	for g := range t.aloft {
 		g.overlaps = append(g.overlaps, f)
@@ -200,7 +200,7 @@ func (f *Flight) LiftCaused() *Flight {
 	}
 	t := f.t
 	p := &Flight{t: t}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	crossed := map[*Flight]struct{}{f: {}}
 	cross := func(g *Flight) {
@@ -236,7 +236,7 @@ func (f *Flight) Land() {
 		return
 	}
 	t := f.t
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	if f.landed != 0 {
 		return
@@ -276,7 +276,7 @@ func (f *Flight) EndUntold() {
 		return
 	}
 	t := f.t
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	if f.untold != 0 {
 		return

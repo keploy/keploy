@@ -38,7 +38,7 @@ func (t *Tracker) KeepRecording(key string, size int64, decode func() (*models.M
 	if t == nil {
 		return decode()
 	}
-	t.mu.Lock()
+	t.lock()
 	s := t.derived
 	t.mu.Unlock()
 	return s.keepRecording(key, size, decode)
@@ -213,7 +213,7 @@ func (t *Tracker) RecordingDecodes() int {
 	if t == nil {
 		return 0
 	}
-	t.mu.Lock()
+	t.lock()
 	s := t.derived
 	t.mu.Unlock()
 	if s == nil {

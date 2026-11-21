@@ -19,7 +19,10 @@ import (
 // opens the next test's window, and the parsers find it on their
 // connection's context.
 type Tracker struct {
-	mu    sync.Mutex
+	mu sync.Mutex
+	// after is the calls' bookkeeping that waits for their answers to be
+	// written (AfterAnswer): every lock but its own settles it first.
+	after afterAnswer
 	epoch uint64
 	// setEpoch is the test number the running set began at (NewSet): its
 	// start-up's. A request of a lower number is of an earlier set.
@@ -283,7 +286,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	t.epoch++
 	t.setEpoch = t.epoch
 	t.served = nil
@@ -373,7 +376,7 @@ func (t *Tracker) waitGiven(done <-chan struct{}) bool {
 		case <-ch:
 		case <-done:
 		}
-		t.mu.Lock()
+		t.lock()
 		t.waiting--
 	}
 	return true
@@ -399,7 +402,7 @@ func (t *Tracker) OnUnreadClose(f func(waiting int)) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	t.onUnread = f
 	t.mu.Unlock()
 }
@@ -412,7 +415,7 @@ func (t *Tracker) OnAwait(f func()) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	t.onAwait = f
 	t.mu.Unlock()
 }
@@ -444,7 +447,7 @@ func (t *Tracker) AwaitRequest(ctx context.Context) error {
 	if t == nil {
 		return nil
 	}
-	t.mu.Lock()
+	t.lock()
 	ok := t.waitGiven(ctx.Done())
 	t.mu.Unlock()
 	if !ok {
@@ -480,7 +483,7 @@ func (t *Tracker) SetClientTests(on bool) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	t.clientTests = on
 	t.drifts.clientTests = on
 	t.mu.Unlock()
@@ -494,7 +497,7 @@ func (t *Tracker) ClientTests() bool {
 	if t == nil {
 		return false
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	return t.clientTests
 }
@@ -541,7 +544,7 @@ func (t *Tracker) setAppZone(loc *time.Location, named bool) {
 	if named {
 		name = models.ZoneNameOf(loc, time.Now())
 	}
-	t.mu.Lock()
+	t.lock()
 	t.appZone = loc
 	t.drifts.zone, t.drifts.zoneName, t.drifts.zoneNoName = loc, name, !named
 	t.mu.Unlock()
@@ -558,7 +561,7 @@ func (t *Tracker) RecordedBegin(at time.Time) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	t.nextRecBegan = at
 	t.mu.Unlock()
 }
@@ -577,7 +580,7 @@ func (t *Tracker) BeginAt(at time.Time) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	say := t.beginAt(at)
 	t.mu.Unlock()
 	say()
@@ -597,7 +600,7 @@ func (t *Tracker) BeginAwaitingAt(at time.Time) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	say := t.beginAt(at)
 	t.await()
 	t.mu.Unlock()
@@ -645,7 +648,7 @@ func (t *Tracker) Await() {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	if t.open && t.given == nil {
 		t.await()
 	}
@@ -705,7 +708,7 @@ func (t *Tracker) GiveRequest(req *models.TestRequest) {
 func (t *Tracker) give(e Earlier, recBegan time.Time) {
 	e.Given = true
 	e.Seen = append([]Seen(nil), e.Seen...)
-	t.mu.Lock()
+	t.lock()
 	if t.open && !recBegan.IsZero() && t.recBegan.IsZero() {
 		t.recBegan = recBegan
 	}
@@ -734,7 +737,7 @@ func (t *Tracker) GiveValue(e Earlier) {
 	}
 	e.Given, e.Gave = true, true
 	e.Seen = append([]Seen(nil), e.Seen...)
-	t.mu.Lock()
+	t.lock()
 	if t.open {
 		t.gave = append(t.gave, e)
 	}
@@ -749,7 +752,7 @@ func (t *Tracker) SetCases(cases []ClientCase) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	t.cases = caseCursor{cases: append([]ClientCase(nil), cases...), used: make([]bool, len(cases))}
 	t.mu.Unlock()
 }
@@ -762,7 +765,7 @@ func (t *Tracker) WantsIncoming() bool {
 	if t == nil {
 		return false
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	if !t.open {
 		return false
@@ -803,7 +806,7 @@ func (t *Tracker) IncomingWords(live *models.HTTPReq, unread string, words *Requ
 	if t == nil || live == nil || at.IsZero() {
 		return false
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	_, _, ok := t.pairIncomingLocked(live, unread, words, at)
 	return ok
@@ -832,7 +835,7 @@ func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time, passed func
 	if t == nil || live == nil || at.IsZero() {
 		return nil
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	k, c, ok := t.pairIncomingLocked(live, ComingUnread, nil, at)
 	if !ok {
@@ -843,7 +846,7 @@ func (t *Tracker) IncomingComing(live *models.HTTPReq, at time.Time, passed func
 	var once sync.Once
 	return func(live *models.HTTPReq, unread string, words *RequestWords) {
 		once.Do(func() {
-			t.mu.Lock()
+			t.lock()
 			defer t.mu.Unlock()
 			if t.incomingGen == gen && k < len(t.incoming) {
 				t.incoming[k] = incomingPlace(c, live, unread, t.keepWordsLocked(unread, words), at)
@@ -921,7 +924,7 @@ func (t *Tracker) End() {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	t.open = false
 	say := t.closeUnread()
 	t.mu.Unlock()
@@ -934,7 +937,7 @@ func (t *Tracker) Open() bool {
 	if t == nil {
 		return true
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	return t.open
 }
@@ -945,7 +948,7 @@ func (t *Tracker) Begun() bool {
 	if t == nil {
 		return true
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	return t.began
 }
@@ -1008,7 +1011,7 @@ func (t *Tracker) Placed() Placed {
 	if t == nil {
 		return Placed{}
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	before := append(make([]*models.Mock, 0, len(t.before)+len(t.outside)), t.before...)
 	seen := make(map[string]bool, len(t.before))
@@ -1125,7 +1128,7 @@ func (t *Tracker) servedIn(m *models.Mock, at, from time.Time, in *Flight, k ser
 	if f := t.serveOwner.Load(); f != nil && !m.IsProtocolPhase() {
 		mine = (*f)(m) == OwnerTest
 	}
-	t.mu.Lock()
+	t.lock()
 	if !m.IsProtocolPhase() {
 		i := sort.Search(len(t.servedAt), func(i int) bool { return t.servedAt[i].at.After(at) })
 		t.servedAt = append(t.servedAt, servedInstant{})
@@ -1603,7 +1606,7 @@ func (t *Tracker) Epoch() uint64 {
 	if t == nil {
 		return 0
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	return t.epoch
 }
@@ -1618,7 +1621,7 @@ func (t *Tracker) OpenEpoch() uint64 {
 	if t == nil {
 		return 0
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	if !t.open {
 		return 0
@@ -1633,7 +1636,7 @@ func (t *Tracker) Drifts() *DriftCache {
 	if t == nil {
 		return nil
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	return t.drifts
 }
@@ -1657,7 +1660,7 @@ func (t *Tracker) Answered(name string) bool {
 	if t == nil {
 		return false
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	return t.answered[name] != nil
 }
@@ -1670,7 +1673,7 @@ func (t *Tracker) Answer(n uint64, m *models.Mock) bool {
 	if t == nil {
 		return true
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	if !t.open || t.epoch != n || t.answered[m.Name] != nil {
 		return false
@@ -1688,7 +1691,7 @@ func (t *Tracker) AnsweredMocks() []*models.Mock {
 	if t == nil {
 		return nil
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	out := make([]*models.Mock, 0, len(t.answered))
 	for _, m := range t.answered {
@@ -1703,7 +1706,7 @@ func (t *Tracker) Unanswer(n uint64, name string) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	if t.epoch == n {
 		delete(t.answered, name)
 	}
@@ -1729,6 +1732,15 @@ func (t *Tracker) Unanswer(n uint64, name string) {
 // gave the application another view of (Earlier.View), it is
 // ServedMockLive of that view.
 func (t *Tracker) Served(n uint64, e Earlier) {
+	if t == nil {
+		return
+	}
+	t.settle()
+	t.servedBooked(n, e)
+}
+
+// servedBooked is Served without settling the after-answer queue: Book's.
+func (t *Tracker) servedBooked(n uint64, e Earlier) {
 	if t == nil {
 		return
 	}
@@ -1784,6 +1796,16 @@ func (t *Tracker) ServedMockAsRecorded(m *models.Mock) {
 	if t == nil || m == nil {
 		return
 	}
+	t.settle()
+	t.servedMockAsRecordedBooked(m)
+}
+
+// servedMockAsRecordedBooked is ServedMockAsRecorded without settling the
+// after-answer queue: Book's.
+func (t *Tracker) servedMockAsRecordedBooked(m *models.Mock) {
+	if t == nil || m == nil {
+		return
+	}
 	t.mu.Lock()
 	t.statedLocked(MockID(m))
 	t.mu.Unlock()
@@ -1811,6 +1833,16 @@ func (t *Tracker) ServedMockAsRecorded(m *models.Mock) {
 // cannot read: a later call refuses every word a value holds now that may
 // stand there (Raw.ServedChanged with none: fail closed).
 func (t *Tracker) ServedMockLive(m *models.Mock, key string, view func() (*models.Mock, error)) {
+	if t == nil || m == nil {
+		return
+	}
+	t.settle()
+	t.servedMockLiveBooked(m, key, view)
+}
+
+// servedMockLiveBooked is ServedMockLive without settling the after-answer
+// queue: Book's.
+func (t *Tracker) servedMockLiveBooked(m *models.Mock, key string, view func() (*models.Mock, error)) {
 	if t == nil || m == nil {
 		return
 	}
@@ -2035,7 +2067,7 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 		}
 		return name, true
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	if n < t.setEpoch {
 		return "", false
@@ -2090,7 +2122,7 @@ func (t *Tracker) RunName(n uint64, mock, place string, reserved map[string]bool
 		}
 		return name, true
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	if n < t.setEpoch {
 		return "", false
@@ -2137,7 +2169,7 @@ func (t *Tracker) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	t.appClock = f
 	t.drifts.appClock = f != nil
 	t.mu.Unlock()
@@ -2163,7 +2195,7 @@ func (t *Tracker) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	t.appClockRun = f
 	t.mu.Unlock()
 }
@@ -2181,7 +2213,7 @@ func (t *Tracker) SetAppClockShown(f func(from, to time.Time) ([]Span, bool)) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
+	t.lock()
 	t.appClockShown = f
 	t.mu.Unlock()
 }
@@ -2562,7 +2594,7 @@ func (t *Tracker) liveClockAt(arrival time.Time, sibling Siblings) (liveClock, t
 // read its clock for its siblings at once, before it sent any of them
 // (Siblings).
 func (t *Tracker) liveClockAtOf(arrival time.Time, own bool, sibling Siblings) (liveClock, time.Time) {
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	lc := liveClock{clock: t.appClock, run: t.appClockRun, shown: t.appClockShown, client: t.clientTests, open: t.open, set: t.setBegan, began: t.beganAt, zone: t.appZone}
 	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].at.Before(arrival) })
@@ -2762,7 +2794,7 @@ func (t *Tracker) BackgroundSpans(arrival time.Time) ([]Span, bool) {
 // background call (BackgroundSpans): how to read it, where its runs began,
 // what it showed, the set's begin and the app's zone.
 func (t *Tracker) backgroundClock() liveClock {
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	return liveClock{clock: t.appClock, run: t.appClockRun, shown: t.appClockShown, set: t.setBegan, zone: t.appZone}
 }
@@ -3075,7 +3107,7 @@ func (t *Tracker) SetAt() uint64 {
 	if t == nil {
 		return 0
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	return t.setEpoch
 }
@@ -3088,7 +3120,7 @@ func (t *Tracker) State() (number uint64, open, began bool) {
 	if t == nil {
 		return 0, true, true
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	return t.epoch, t.open, t.began
 }

@@ -1947,7 +1947,7 @@ func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
 	if t == nil || s.Side != Request {
 		return nil
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	place := s.Place
 	if place == "" && t.tookRequestLocked(mock) {
@@ -2011,7 +2011,7 @@ func (t *Tracker) RecBegan() time.Time {
 	if t == nil {
 		return time.Time{}
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	return t.recBegan
 }

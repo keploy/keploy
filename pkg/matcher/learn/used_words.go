@@ -16,7 +16,16 @@ import (
 // place's recorded text whole is answered with at that word. A word a
 // variable is bound at is the tracker's already (Name, BoundWords).
 func (t *Tracker) ServedNamed(n uint64, e Earlier, vars models.MockVariables, clocks map[string]models.ClockOffset) {
-	t.Served(n, Named(e, vars, clocks))
+	if t != nil {
+		t.settle()
+	}
+	t.servedNamedBooked(n, e, vars, clocks)
+}
+
+// servedNamedBooked is ServedNamed without settling the after-answer queue:
+// Book's.
+func (t *Tracker) servedNamedBooked(n uint64, e Earlier, vars models.MockVariables, clocks map[string]models.ClockOffset) {
+	t.servedBooked(n, Named(e, vars, clocks))
 	if t == nil {
 		return
 	}
@@ -80,7 +89,7 @@ func (t *Tracker) UsedWords(n uint64, mock string, s Seen) []BoundWord {
 	if t == nil || s.Side != Request {
 		return nil
 	}
-	t.mu.Lock()
+	t.lock()
 	defer t.mu.Unlock()
 	if t.epoch != n {
 		return nil
