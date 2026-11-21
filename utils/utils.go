@@ -836,30 +836,152 @@ func extractFlagFromArgs(args []string, names ...string) string {
 	return found
 }
 
-// ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
-// Returns empty string if not found.
+// keployValueLongFlags lists known value-taking keploy CLI long flags
+// (normalized by removing hyphens and lowercasing so both kebab-case and
+// camelCase spellings match). Used by ExtractCommandFromArgs so an argument
+// value starting with "-c" (e.g. `--app-name -ci`) is consumed by its owning
+// flag rather than mistaken for the `-c` shorthand. Flags with NoOptDefVal
+// (such as boolean flags and `--enable-sampling`) must NOT be listed here
+// because pflag never consumes the following argv token for them. Unknown
+// flags are left unskipped so newly added boolean flags before `-c` still work.
+var keployValueLongFlags = map[string]bool{
+	"allowegress":            true,
+	"apitimeout":             true,
+	"appid":                  true,
+	"appname":                true,
+	"basepath":               true,
+	"builddelay":             true,
+	"cajavahome":             true,
+	"clientlogfile":          true,
+	"clientpid":              true,
+	"clientpidns":            true,
+	"cmdtype":                true,
+	"configpath":             true,
+	"consumerstallgrace":     true,
+	"containername":          true,
+	"coveragereport":         true,
+	"coveragereportpath":     true,
+	"delay":                  true,
+	"dnsport":                true,
+	"dockerhost":             true,
+	"driven":                 true,
+	"flakycheckretry":        true,
+	"format":                 true,
+	"fromcontainer":          true,
+	"grpcport":               true,
+	"halfclosegrace":         true,
+	"healthpath":             true,
+	"healthpolltimeout":      true,
+	"healthscheme":           true,
+	"healthurl":              true,
+	"host":                   true,
+	"incomingproxyport":      true,
+	"jacocoagentpath":        true,
+	"keploycontainer":        true,
+	"keploynetwork":          true,
+	"language":               true,
+	"maxfailattempts":        true,
+	"maxmemoryperconn":       true,
+	"maxmemoryperconnection": true,
+	"memorylimit":            true,
+	"metadata":               true,
+	"mincoverage":            true,
+	"mode":                   true,
+	"mongopassword":          true,
+	"name":                   true,
+	"networkname":            true,
+	"onmiss":                 true,
+	"output":                 true,
+	"passthroughports":       true,
+	"path":                   true,
+	"port":                   true,
+	"protodir":               true,
+	"protofile":              true,
+	"protoinclude":           true,
+	"proxyport":              true,
+	"queuesize":              true,
+	"recordtimer":            true,
+	"reportpath":             true,
+	"run1":                   true,
+	"run2":                   true,
+	"runonly":                true,
+	"selectedtests":          true,
+	"serverport":             true,
+	"services":               true,
+	"sseport":                true,
+	"storageformat":          true,
+	"tc":                     true,
+	"teardownprogressfile":   true,
+	"testcase":               true,
+	"testrun":                true,
+	"tests":                  true,
+	"testsets":               true,
+	"tlsprivatekeypath":      true,
+	"tokenfile":              true,
+	"upstreamtlscacert":      true,
+	"upstreamtls.cacert":     true,
+	"urlmethods":             true,
+}
+
+var keployValueShortFlags = map[string]bool{
+	"-b": true, "-d": true, "-l": true, "-n": true,
+	"-o": true, "-p": true, "-r": true, "-s": true, "-t": true,
+}
+
+func isKnownKeployValueFlag(arg string) bool {
+	if strings.Contains(arg, "=") {
+		return false
+	}
+	if strings.HasPrefix(arg, "--") {
+		key := strings.ToLower(strings.ReplaceAll(arg[2:], "-", ""))
+		return keployValueLongFlags[key]
+	}
+	return keployValueShortFlags[arg]
+}
+
+// ExtractCommandFromArgs returns the value of -c/--command in raw argv, read
+// the way cobra reads it: the last occurrence wins, the shorthand takes its
+// value as the next argument or joined to it (-cVALUE, -c=VALUE), and nothing
+// after the "--" terminator is a flag. Returns "" when absent.
+//
+// Known value-taking keploy flags skip their following argument so values
+// beginning with "-c" (e.g. `--app-name -ci`) are not misread as the `-c`
+// shorthand.
+//
+// ShouldReexecWithSudo decides from this value whether keploy needs root,
+// before cobra parses anything. Reading another value than the one cobra runs
+// (the first of two -c, or none for -cVALUE) re-executes a native command
+// under sudo, or starts a docker command unprivileged, which then fails
+// writing /proc/sys/kernel/perf_event_paranoid.
 func ExtractCommandFromArgs(args []string) string {
+	found := ""
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-
-		// Check for -c or --command
-		if arg == "-c" || arg == "--command" {
-			// Next argument is the command value
+		switch {
+		case arg == "--":
+			return found
+		case arg == "-c" || arg == "--command":
+			found = ""
 			if i+1 < len(args) {
-				return args[i+1]
+				i++
+				found = args[i]
 			}
-			return ""
-		}
-
-		// Check for -c=value or --command=value format
-		if len(arg) > 3 && arg[:3] == "-c=" {
-			return arg[3:]
-		}
-		if len(arg) > 10 && arg[:10] == "--command=" {
-			return arg[10:]
+		case strings.HasPrefix(arg, "--command="):
+			found = arg[len("--command="):]
+		case strings.HasPrefix(arg, "-c"):
+			// pflag drops the "=" of -c=VALUE only when a value follows it:
+			// a bare -c= is the shorthand with the value "=".
+			found = arg[len("-c"):]
+			if len(found) > 1 && found[0] == '=' {
+				found = found[1:]
+			}
+		case isKnownKeployValueFlag(arg):
+			if i+1 < len(args) {
+				i++
+			}
 		}
 	}
-	return ""
+	return found
 }
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file.
