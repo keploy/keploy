@@ -58,11 +58,11 @@ import (
 //
 // Windows keeps no error on the socket for a reset in any state, and its read
 // returns the reset where the client's FIN came first, as macOS's does, with
-// its own code then (WSAECONNABORTED, not WSAECONNRESET: wintcpinfo.go's
-// resetAfterFIN). Its TCP_INFO says the reset from the connection's state and
-// counts instead
-// (wintcpinfo.go), which needs to know whether the proxy sent its own FIN:
-// the relay tells the socket when it does (noteClientFINSent).
+// its own code then (WSAECONNABORTED, not WSAECONNRESET, from that read or the
+// socket's next: wintcpinfo.go's resetAfterFIN). Its TCP_INFO says the reset
+// from the connection's state and counts instead (wintcpinfo.go), which needs
+// to know whether the proxy sent its own FIN: the relay tells the socket when
+// it does (noteClientFINSent).
 //
 // Only a client connection that is a TCP socket on Linux, macOS or Windows can
 // be asked (clientSocketOf). Elsewhere only a failed write's error is handed

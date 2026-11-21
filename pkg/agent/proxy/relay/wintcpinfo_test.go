@@ -182,6 +182,34 @@ func TestAWindowsClientWhoseWindowStaysClosedHasWhatItNeverTookRefused(t *testin
 	}
 }
 
+// A Windows socket's client took every byte written to it (so its close may
+// reset it: resetClientOnClose) only when each was sent once and none is in
+// flight, inside the counts' fence; an answer outside the fence, or one that
+// counts more bytes sent than were written, says nothing.
+func TestAWindowsSocketsClientTookEveryByteOnlyWhenNoneIsUnsentOrInFlight(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct {
+		name       string
+		info       winTCPInfo
+		written    uint64
+		all, known bool
+	}{
+		{"every byte sent and acknowledged", winTCPInfo{out: 10}, 10, true, true},
+		{"nothing written", winTCPInfo{}, 0, true, true},
+		{"bytes in flight", winTCPInfo{out: 10, inFlight: 3}, 10, false, true},
+		{"the proxy's FIN in flight", winTCPInfo{out: 10, inFlight: 1}, 10, false, true},
+		{"bytes the send buffer holds unsent", winTCPInfo{out: 7}, 10, false, true},
+		{"a window probe sent again, every byte acknowledged", winTCPInfo{out: 12, retrans: 2}, 10, true, true},
+		{"a write around the count", winTCPInfo{out: 11}, 10, false, false},
+		{"a fast retransmit", winTCPInfo{out: 10, fastRetrans: 1}, 10, false, false},
+		{"a timeout", winTCPInfo{out: 10, timeouts: 1}, 10, false, false},
+	} {
+		if all, known := row.info.tookAll(row.written); all != row.all || known != row.known {
+			t.Errorf("%s: tookAll(%d) = %v, %v; want %v, %v", row.name, row.written, all, known, row.all, row.known)
+		}
+	}
+}
+
 // The reset a Windows socket kept no error for, told from its state and
 // counts as Linux's socket keeps it: EPIPE in CLOSE_WAIT, ECONNRESET in every
 // other state; nothing where the connection may have closed cleanly, a
@@ -224,32 +252,46 @@ func winsockRead(errno syscall.Errno) error {
 }
 
 // A Windows read's reset is taken as one that came after the client's FIN
-// only in the case measured: WSAECONNABORTED on a connection CLOSED with a
-// byte in flight, no timeout episode and no FIN of the proxy's. Every other
+// only in the case measured: WSAECONNABORTED, from the read or the socket's
+// next read, on a connection CLOSED with a byte in flight, no timeout episode
+// and no FIN of the proxy's. The socket is read again only on such a
+// connection, and only when the read's own code does not say it. Every other
 // read is a reset, as before.
 func TestAWindowsReadsResetIsAfterTheClientsFINOnlyByItsCodeAndCounts(t *testing.T) {
 	t.Parallel()
+	const reset, netReset syscall.Errno = 10054, 10052
 	closed := winTCPInfo{state: wtcpClosed, out: 8, inFlight: 8}
 	for _, row := range []struct {
-		name    string
-		err     error
-		info    winTCPInfo
-		finSent bool
-		want    bool
+		name      string
+		err       error
+		info      winTCPInfo
+		finSent   bool
+		again     error // the next read's error, when the row asks again
+		wantAsked bool
+		want      bool
 	}{
-		{"WSAECONNABORTED, closed with the proxy's bytes in flight", winsockRead(wsaeConnAborted), closed, false, true},
-		{"the same, retransmitted once", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 8, retrans: 8}, false, true},
-		{"one byte in flight (a window probe's)", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 1}, false, true},
-		{"WSAECONNRESET: a reset with no FIN before", winsockRead(10054), closed, false, false},
-		{"WSAENETRESET", winsockRead(10052), closed, false, false},
-		{"a read that ended in no error", nil, closed, false, false},
-		{"a timeout episode", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 8, timeouts: 1}, false, false},
-		{"nothing in flight", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8}, false, false},
-		{"after the proxy's FIN", winsockRead(wsaeConnAborted), closed, true, false},
-		{"not closed", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpCloseWait, out: 8, inFlight: 8}, false, false},
+		{"WSAECONNABORTED, closed with the proxy's bytes in flight", winsockRead(wsaeConnAborted), closed, false, nil, false, true},
+		{"the same, retransmitted once", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 8, retrans: 8}, false, nil, false, true},
+		{"one byte in flight (a window probe's)", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 1}, false, nil, false, true},
+		{"WSAECONNRESET, the next read WSAECONNABORTED: the FIN came first", winsockRead(reset), closed, false, wsaeConnAborted, true, true},
+		{"WSAECONNRESET, the next read too: a reset with no FIN before", winsockRead(reset), closed, false, reset, true, false},
+		{"WSAECONNRESET, the next read cannot be made", winsockRead(reset), closed, false, nil, true, false},
+		{"WSAENETRESET, the next read WSAENETRESET", winsockRead(netReset), closed, false, netReset, true, false},
+		{"a read that ended in no error", nil, closed, false, nil, true, false},
+		{"a timeout episode", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 8, timeouts: 1}, false, nil, false, false},
+		{"a timeout episode, WSAECONNRESET", winsockRead(reset), winTCPInfo{state: wtcpClosed, out: 8, inFlight: 8, timeouts: 1}, false, wsaeConnAborted, false, false},
+		{"nothing in flight", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpClosed, out: 8}, false, nil, false, false},
+		{"nothing in flight, WSAECONNRESET", winsockRead(reset), winTCPInfo{state: wtcpClosed, out: 8}, false, wsaeConnAborted, false, false},
+		{"after the proxy's FIN", winsockRead(wsaeConnAborted), closed, true, nil, false, false},
+		{"after the proxy's FIN, WSAECONNRESET", winsockRead(reset), closed, true, wsaeConnAborted, false, false},
+		{"not closed", winsockRead(wsaeConnAborted), winTCPInfo{state: wtcpCloseWait, out: 8, inFlight: 8}, false, nil, false, false},
+		// A read of an open connection would wait: it is never made.
+		{"not closed, WSAECONNRESET", winsockRead(reset), winTCPInfo{state: wtcpCloseWait, out: 8, inFlight: 8}, false, wsaeConnAborted, false, false},
 	} {
-		if got := row.info.resetAfterFIN(row.err, row.finSent); got != row.want {
-			t.Errorf("%s: resetAfterFIN = %v, want %v", row.name, got, row.want)
+		asked := false
+		readAgain := func() error { asked = true; return row.again }
+		if got := row.info.resetAfterFIN(row.err, row.finSent, readAgain); got != row.want || asked != row.wantAsked {
+			t.Errorf("%s: resetAfterFIN = %v, asked again %v; want %v, asked again %v", row.name, got, asked, row.want, row.wantAsked)
 		}
 	}
 }
