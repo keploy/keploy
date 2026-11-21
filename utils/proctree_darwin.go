@@ -16,8 +16,13 @@ import (
 // /proc/<pid>/status" -- an ERROR in an interrupt that had otherwise gone as
 // it should, which an editor driving keploy shows in red.
 
-// procRecord reads a process's parent and group (procsock.Info).
-var procRecord = procsock.Info
+// procRecord reads a process's parent and group, a zombie's too
+// (procsock.InfoOrZombie), and groupPIDs lists a process group's processes
+// (procsock.GroupPIDs).
+var (
+	procRecord = procsock.InfoOrZombie
+	groupPIDs  = procsock.GroupPIDs
+)
 
 // findChildPIDs returns every descendant of parentPID, and how to read each
 // one's process group -- both from one snapshot of the process table, taken
@@ -30,10 +35,12 @@ var procRecord = procsock.Info
 // a process that exited after the snapshot was taken: that failed the lookup
 // of every group in the tree, so such an interrupt logged "failed to find
 // unique process groups: no such process" at ERROR, and fell back to
-// signalling each pid as if it led a group. A process whose record cannot be
-// read, one that has exited (a zombie too) or gone, is not in the table, so
-// not in the tree: no signal reaches it any more. A zombie has no children
-// to lose: the kernel gives them to launchd when their parent exits.
+// signalling each pid as if it led a group.
+//
+// A zombie is in the table, with its parent and group: it has exited, but a
+// group it led can still hold processes that run (its children, which the
+// kernel gave to launchd, stay in it), and the interrupt reaches them through
+// that group. A process that has gone is not in the table.
 func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 	pids, err := procsock.PIDs()
 	if err != nil {
@@ -54,24 +61,47 @@ func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 func groupReached(int, syscall.Signal) []Reached { return nil }
 
 // GroupRunsOn reports whether a process of process group pgid runs: one
-// proc_info lists in that group (procsock.GroupPIDs) whose record can be
-// read. A process that has exited, a zombie too, or gone has no record; a
-// list keploy cannot read says none runs. A native application's command
+// proc_info lists in that group (procsock.GroupPIDs) whose record says it has
+// not exited. A zombie has exited, and a process that has gone has no record;
+// a list keploy cannot read says none runs. A native application's command
 // leads a process group of its own (ExecuteCommand), so once the command has
 // exited, a process it started that is still in its group is the application
 // running on.
 func GroupRunsOn(pgid int) bool {
+	runs, err := groupRuns(pgid)
+	return err == nil && runs
+}
+
+// groupRuns is GroupRunsOn with the error of a list that cannot be read.
+func groupRuns(pgid int) (bool, error) {
 	if pgid <= 1 {
-		return false
+		return false, nil
 	}
-	pids, err := procsock.GroupPIDs(pgid)
+	pids, err := groupPIDs(pgid)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, pid := range pids {
-		if _, err := procRecord(pid); err == nil {
-			return true
+		if p, err := procRecord(pid); err == nil && !p.Zombie {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
+}
+
+// groupExited reports whether process group pgid holds no process that runs,
+// as its list reads now: a group of zombies only, or none. kill(2) of such a
+// group answers EPERM on macOS, as it does a group whose processes keploy
+// may not signal; a list keploy cannot read is not read as exited.
+func groupExited(pgid int) bool {
+	runs, err := groupRuns(pgid)
+	return err == nil && !runs
+}
+
+// exitedUnreaped reports whether pid is a zombie: it has exited, and waits
+// for its parent to reap it. kill(2) of a zombie succeeds, as of a process
+// that runs.
+func exitedUnreaped(pid int) bool {
+	p, err := procRecord(pid)
+	return err == nil && p.Zombie
 }

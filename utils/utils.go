@@ -1649,6 +1649,10 @@ func isProcessRunning(pid int) (bool, error) {
 		}
 		return true, nil
 	}
+	// A zombie has exited: it only waits for its parent to reap it.
+	if exitedUnreaped(pid) {
+		return false, nil
+	}
 
 	// No error means the process is running
 	return true, nil
