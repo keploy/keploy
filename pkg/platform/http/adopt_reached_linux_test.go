@@ -95,6 +95,24 @@ func TestStopHelperProcess(t *testing.T) {
 		<-terms
 		wayOut()
 		note(name + ".term")
+	case "stalls":
+		// Ignores SIGINT, takes SIGTERM, and never gets out.
+		signal.Ignore(syscall.SIGINT)
+		terms := make(chan os.Signal, 1)
+		signal.Notify(terms, syscall.SIGTERM)
+		note(name + ".ready")
+		<-terms
+		note(name + ".term")
+		for {
+			time.Sleep(time.Hour)
+		}
+	case "deaf":
+		// Ignores SIGINT and SIGTERM, and never gets out.
+		signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
+		note(name + ".ready")
+		for {
+			time.Sleep(time.Hour)
+		}
 	case "hangs":
 		// Acts on SIGINT, ignores SIGTERM, and never gets out.
 		signal.Ignore(syscall.SIGTERM)

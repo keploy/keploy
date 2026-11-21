@@ -1652,9 +1652,10 @@ func groupRunning(pgid int, except []Reached) (bool, error) {
 // handedOver is what of members, the processes of group leader's that its
 // signal reached (InterruptProcessTreeReached and InterruptProcessTreeStop
 // return them), the stop leaves to its caller: each that ignored the
-// signal, but the leader. The stop of what the app leaves behind asks those
-// with SIGTERM (adopt_linux.go, stopAdopted), and its interrupt neither
-// waits for them nor kills them. The leader, and every process the signal
+// signal, but the leader. Its interrupt neither waits for them nor kills
+// them: the caller ends each that runs on (adopt_linux.go, stopAdopted and
+// stopHanded: SIGTERM, then a kill once it makes no progress on its way
+// out, waited for), whether keploy adopted it or not. The leader, and every process the signal
 // reached that acts on it, the interrupt waits for. Where no snapshot is
 // read (InterruptProcessTreeKilled; macOS) nothing is handed over.
 func handedOver(leader int, members []Reached) []Reached {

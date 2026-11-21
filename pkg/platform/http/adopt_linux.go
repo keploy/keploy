@@ -639,6 +639,13 @@ type member struct {
 // their way out is a movement of moved, the teardown scope of the run whose
 // app left them (nil: none).
 func stopAdopted(logger *zap.Logger, reached []utils.Reached, moved *utils.TeardownScope) (why, left string) {
+	// What keploy's interrupt left to its caller ends with it, whether
+	// keploy adopted it or not (stopHanded).
+	defer func() {
+		if handed := stopHanded(logger, reached, moved); handed != "" && why == "" {
+			why = handed
+		}
+	}()
 	if !adopting.Load() {
 		if no := cannotAdopt.Load(); no != nil {
 			return "", "whatever the application left running: keploy cannot tell whether its processes ended (it could not adopt them: " + *no + ")"
@@ -803,36 +810,90 @@ func exePath(c child) string {
 // utils.Exited), or whose pid names another process by the time its pidfd is
 // opened, is left out.
 func members(pids []int) []member {
+	self := os.Getpid()
+	return membersOf(pids, func(_ int, st utils.ProcStat) bool { return st.PPID == self })
+}
+
+// membersOf is each process of tops that is, as is reads it, and every
+// process it runs, now, each named by a pidfd, as members reads them.
+func membersOf(tops []int, is func(pid int, st utils.ProcStat) bool) []member {
 	var ms []member
 	seen := map[int]bool{}
-	var add func(pid, parent int, top bool)
-	add = func(pid, parent int, top bool) {
+	var add func(pid int, is func(utils.ProcStat) bool, top bool)
+	add = func(pid int, is func(utils.ProcStat) bool, top bool) {
 		if seen[pid] {
 			return
 		}
 		seen[pid] = true
 		before, ok := utils.ReadProcStat(pid)
-		if !ok || before.PPID != parent || utils.Exited(pid, before) {
+		if !ok || !is(before) || utils.Exited(pid, before) {
 			return
 		}
 		fd, err := openPidfd(pid)
 		if err != nil {
 			return
 		}
-		if after, ok := utils.ReadProcStat(pid); !ok || after.StartTime != before.StartTime || after.PPID != parent {
+		if after, ok := utils.ReadProcStat(pid); !ok || after.StartTime != before.StartTime || !is(after) {
 			closePidfd(fd)
 			return
 		}
 		ms = append(ms, member{pid: pid, fd: fd, start: before.StartTime, pgrp: before.PGRP, leads: top && before.PGRP == pid})
 		for _, child := range processChildren(pid) {
-			add(child, pid, false)
+			add(child, func(st utils.ProcStat) bool { return st.PPID == pid }, false)
 		}
 	}
-	self := os.Getpid()
-	for _, pid := range pids {
-		add(pid, self, true)
+	for _, pid := range tops {
+		add(pid, func(st utils.ProcStat) bool { return is(pid, st) }, true)
 	}
 	return ms
+}
+
+// stopHanded ends what keploy's interrupt of the application left to its
+// caller (utils.InterruptProcessTreeReached, utils.InterruptProcessTreeStop):
+// each process of reached that ignored the interrupt. Each that runs on,
+// still the process the interrupt reached (its start time), and what it runs, is
+// asked to stop with SIGTERM, killed once it makes no progress on its way
+// out, and waited for (stopMembers), as a daemon keploy adopted is. So no
+// process the interrupt reached runs once the stop of the application is
+// over, where keploy adopts its daemons and where it does not (it could not:
+// cannotAdopt), or could not read them. Where the stop of the daemons ended
+// them already, none runs on, and it does nothing. One a stop killed and the
+// kernel holds without progress (leftToKernel) is not waited for again. It
+// says why it killed one for want of progress, as stopMembers does; "" when
+// it did not.
+func stopHanded(logger *zap.Logger, reached []utils.Reached, moved *utils.TeardownScope) string {
+	ms := handedMembers(reached)
+	if len(ms) == 0 {
+		return ""
+	}
+	defer func() {
+		for _, m := range ms {
+			closePidfd(m.fd)
+		}
+	}()
+	end := utils.BeginDaemonStop()
+	defer end()
+	return stopMembers(logger, ms, func(member) bool { return false }, moved)
+}
+
+// handedMembers is stopHanded's read of what of reached its interrupt left
+// to it: each that ignored the interrupt, is still the process it reached
+// (its start time), and is not held by the kernel after a stop's kill, and
+// what it runs (membersOf).
+func handedMembers(reached []utils.Reached) []member {
+	start := make(map[int]uint64, len(reached))
+	var pids []int
+	for _, r := range reached {
+		if !r.Ignores {
+			continue
+		}
+		if _, held := leftToKernel.Load([2]uint64{uint64(r.PID), r.Start}); held {
+			continue
+		}
+		start[r.PID] = r.Start
+		pids = append(pids, r.PID)
+	}
+	return membersOf(pids, func(pid int, st utils.ProcStat) bool { return st.StartTime == start[pid] })
 }
 
 // stopMembers asks ms to stop, but those acting on keploy's interrupt
