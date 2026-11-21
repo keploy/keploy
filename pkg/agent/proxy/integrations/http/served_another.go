@@ -211,8 +211,13 @@ func idPlacesDiffering(recordedPath, livePath string, recordedQuery map[string]s
 // and of live, the call's values of it, each masked with noise
 // (maskAndSort), that the other side does not hold as often: none where
 // the two hold the same values in any order, as QueryParamsMatch compares
-// them.
+// them. As there, values the recording keeps as the call's, joined, are
+// the same before any member is read: a value that holds ", " (?tag=a%2C%20b)
+// is kept as two members would be.
 func queryMembersDiffering(recorded string, live []string, noise []*regexp.Regexp) (rec, lv []string) {
+	if recorded == strings.Join(live, ", ") {
+		return nil, nil
+	}
 	rv, av := maskAndSort(strings.Split(recorded, ", "), noise), maskAndSort(live, noise)
 	left := map[string]int{}
 	for _, v := range av {
