@@ -2,16 +2,15 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
-	"syscall"
 	"testing"
 	"time"
 
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -523,8 +522,8 @@ func TestTheDNSServersBindIsAStageOfTheAgentsStart(t *testing.T) {
 		t.Cleanup(func() { _ = held.Close() })
 		begun := recordBootWork(t)
 		p := &Proxy{logger: zap.NewNop(), DNSPort: uint32(held.Addr().(*net.TCPAddr).Port)}
-		if err := start(p); !errors.Is(err, syscall.EADDRINUSE) {
-			t.Fatalf("startDNSServers on a port another socket holds: %v; want EADDRINUSE", err)
+		if err := start(p); !neterr.IsAddrInUse(err) {
+			t.Fatalf("startDNSServers on a port another socket holds: %v; want EADDRINUSE (WSAEADDRINUSE on Windows)", err)
 		}
 		assertOneOwnStage(t, begun(), "the DNS servers' bind")
 	})
