@@ -44,6 +44,7 @@ func TestAReadOfARefusedWorkerIsRefusedUntilItsTestEnds(t *testing.T) {
 			"GetSessionScopedMocks":     errOfRead(conn.GetSessionScopedMocks()),
 			"GetStartupMocks":           errOfRead(conn.GetStartupMocks()),
 			"RangePerTestMocksInWindow": conn.(integrations.PerTestRanger).RangePerTestMocksInWindow(func(*models.Mock) bool { return true }),
+			"RangePerTestMocksWithKey":  conn.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(liveCounterIndex, "counter", func(*models.Mock) bool { return true }),
 			"RangeSessionMocksWithKey":  liveKeyedErr(conn),
 		} {
 			if err == nil {
@@ -73,8 +74,8 @@ func TestAReadOfARefusedWorkerIsRefusedUntilItsTestEnds(t *testing.T) {
 
 // A call of a process a refused worker started (its app, or a program its
 // test runs) is refused, as the worker's own calls are: the proxy finds the
-// worker among the process's parents (parentOf). On macOS, which has no
-// /proc, it found none, and such a call was served the whole pool.
+// worker among the process's parents (starts.ParentOf). On macOS, which has
+// no /proc, it found none, and such a call was served the whole pool.
 func TestACallOfAProcessARefusedWorkerStartedIsRefused(t *testing.T) {
 	skipUnlessParentsRead(t)
 	starts.Default.Reset()
@@ -176,9 +177,9 @@ func TestALiveKeyedSessionWalkWithNoTestOpenShowsWhatItsReadsShow(t *testing.T) 
 	}
 }
 
-// With the marks, a walk of the per-test tier (MySQL's per-test lookup)
-// shows a connection the open test's recordings only, as its other reads do,
-// not every test's.
+// With the marks, a walk of the per-test tier (MySQL's per-test lookup),
+// and a keyed walk of it (Mongo's), shows a connection the open test's
+// recordings only, as its other reads do, not every test's.
 func TestALivePerTestWalkShowsOnlyTheOpenTestsMocks(t *testing.T) {
 	mgr := newCursorManager(t)
 	base := time.Now().Add(-time.Hour)
@@ -197,6 +198,16 @@ func TestALivePerTestWalkShowsOnlyTheOpenTestsMocks(t *testing.T) {
 	}
 	if got, want := strings.Join(names, ","), "b1,b2"; got != want {
 		t.Fatalf("during t2 a per-test walk showed %s, want %s", got, want)
+	}
+	names = nil
+	if err := conn.(integrations.PerTestKeyRanger).RangePerTestMocksWithKey(liveCounterIndex, "counter", func(mk *models.Mock) bool {
+		names = append(names, mk.Name)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(names, ","), "b1,b2"; got != want {
+		t.Fatalf("during t2 a keyed per-test walk showed %s, want %s", got, want)
 	}
 }
 

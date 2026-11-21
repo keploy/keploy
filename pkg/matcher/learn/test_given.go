@@ -2,9 +2,9 @@ package learn
 
 import (
 	"strconv"
-	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/textcut"
 )
 
 // A VALUE THE TEST GAVE.
@@ -107,9 +107,5 @@ func quoteGiven(v string) string {
 	if len(v) <= givenWhyValue {
 		return strconv.Quote(v)
 	}
-	cut := givenWhyValue
-	for cut > 0 && !utf8.RuneStart(v[cut]) {
-		cut--
-	}
-	return strconv.Quote(v[:cut]) + "... (" + strconv.Itoa(len(v)) + " bytes)"
+	return strconv.Quote(textcut.Prefix(v, givenWhyValue)) + "... (" + strconv.Itoa(len(v)) + " bytes)"
 }

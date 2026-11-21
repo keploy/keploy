@@ -183,9 +183,8 @@ func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string,
 		mockFileName = "mocks"
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
-	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
-	lock.RLock()
-	defer lock.RUnlock()
+	// No lock is held for the read, as for the replay's (readMockPoolsVisiting):
+	// a text file is read up to its length when it is pinned (live_pass.go).
 	out := map[string]models.SkippedMock{}
 	if gobPath := filepath.Join(path, mockFileName+".gob"); gobFileReadFirst(gobPath) {
 		mocks, _, err := readGobMocksCut(ys.MockPath, gobPath)
@@ -213,6 +212,9 @@ func (ys *MockYaml) SkippedMocks(ctx context.Context, testSetID string) (string,
 		return mockFileTried(path, mockFileName, ys.Format), nil
 	}
 	defer func() { _ = fr.Close() }()
+	if _, _, err := pinMockFile(path, mockFileName, fr.r, nil); err != nil {
+		return fr.Path(), nil
+	}
 	for {
 		d, err := fr.Next()
 		if err != nil {

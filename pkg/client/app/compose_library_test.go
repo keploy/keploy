@@ -23,50 +23,22 @@ import (
 // the two halves of this feature.
 //
 // ensureInMemoryComposeFlags decides which `up` flags the run carries;
-// composeUpSemantics is what the in-process path reads them back with. If the
-// two ever drift, the library path silently runs with different abort/exit-code
-// behaviour than the command string says — a stack that never aborts on app
-// exit, or an exit code that stops propagating — and nothing fails loudly.
+// composeUpSemantics is what the in-process path reads them back with. The run
+// carries no abort flag, the user's own left out too (compose_appstop.go), so
+// the library path runs as the CLI does with none: the stack runs on when a
+// container exits, and keploy, watching the app's container, ends the run.
 func TestComposeUpSemanticsAgreeWithTheInjectedFlags(t *testing.T) {
-	tests := []struct {
-		name               string
-		service            string
-		preferFailureAbort bool
-		wantExitCodeFrom   string
-		wantOnExit         docker.ComposeOnExit
-	}{
-		{
-			name:             "abort on container exit carries the app service",
-			service:          "app",
-			wantExitCodeFrom: "app",
-			wantOnExit:       docker.ComposeOnExitStop,
-		},
-		{
-			name:               "a completion dependency switches to abort-on-failure",
-			service:            "app",
-			preferFailureAbort: true,
-			wantExitCodeFrom:   "",
-			wantOnExit:         docker.ComposeOnExitFail,
-		},
-		{
-			name:             "no service means no --exit-code-from",
-			service:          "",
-			wantExitCodeFrom: "",
-			wantOnExit:       docker.ComposeOnExitStop,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cmd := ensureInMemoryComposeFlags("docker compose up", tt.service, tt.preferFailureAbort)
-			got := composeUpSemantics(cmd)
-
-			if got.ExitCodeFrom != tt.wantExitCodeFrom {
-				t.Errorf("ExitCodeFrom = %q, want %q (command was %q)", got.ExitCodeFrom, tt.wantExitCodeFrom, cmd)
-			}
-			if got.OnExit != tt.wantOnExit {
-				t.Errorf("OnExit = %v, want %v (command was %q)", got.OnExit, tt.wantOnExit, cmd)
-			}
-		})
+	for _, in := range []string{
+		"docker compose up",
+		"docker compose up --abort-on-container-exit --exit-code-from app",
+		"docker compose up --abort-on-container-failure",
+		"docker compose up --exit-code-from=app",
+	} {
+		cmd := ensureInMemoryComposeFlags(in)
+		got := composeUpSemantics(cmd)
+		if got.ExitCodeFrom != "" || got.OnExit != docker.ComposeOnExitIgnore {
+			t.Errorf("%q: ExitCodeFrom = %q, OnExit = %v, want none and ComposeOnExitIgnore (command was %q)", in, got.ExitCodeFrom, got.OnExit, cmd)
+		}
 	}
 }
 
@@ -87,8 +59,7 @@ func TestComposeUpSemanticsDefaultsToCascadeIgnore(t *testing.T) {
 }
 
 // TestComposeUpSemanticsReadsTheEqualsForm covers `--exit-code-from=app`, which
-// a user may write by hand; ensureComposeExitOnAppFailure leaves any
-// user-supplied flag untouched, so this form does reach the parser.
+// a user may write by hand: the parser reads it as the CLI does.
 func TestComposeUpSemanticsReadsTheEqualsForm(t *testing.T) {
 	got := composeUpSemantics("docker compose -f - up --abort-on-container-failure --exit-code-from=web")
 
@@ -118,6 +89,8 @@ func TestComposeProjectScopeReadsBothForms(t *testing.T) {
 		{"docker compose --project-directory=/srv/app -p flow -f - up", "flow", "/srv/app"},
 		{`docker compose -p "quoted" --project-directory '/srv/q' -f - up`, "quoted", "/srv/q"},
 		{`docker compose --project-name='quoted' --project-directory="/srv/q" -f - up`, "quoted", "/srv/q"},
+		{"docker compose -pflow --workdir /srv/app -f - up", "flow", "/srv/app"},
+		{"docker compose --workdir=/srv/app --insecure-registry r.example -p=flow up", "flow", "/srv/app"},
 	}
 	for _, tt := range tests {
 		name, dir := composeProjectScope(tt.cmd)
@@ -128,8 +101,9 @@ func TestComposeProjectScopeReadsBothForms(t *testing.T) {
 	}
 }
 
-// composeEnvFiles reads every --env-file the command gives, in order and in
-// both forms, without quotes; none when it gives none.
+// composeEnvFiles reads every --env-file of compose's own options, in order
+// and in both forms, without quotes; none when it gives none, and none of a
+// subcommand's, a container's or another program's.
 func TestComposeEnvFilesReadsEveryEnvFile(t *testing.T) {
 	for _, tt := range []struct {
 		cmd  string
@@ -137,7 +111,15 @@ func TestComposeEnvFilesReadsEveryEnvFile(t *testing.T) {
 	}{
 		{"docker compose -f - up", nil},
 		{"docker compose --env-file a.env -f - up", []string{"a.env"}},
-		{`docker compose --env-file=a.env --env-file "/srv/b.env" -f - up --env-file='c.env'`, []string{"a.env", "/srv/b.env", "c.env"}},
+		{`docker compose --env-file=a.env --env-file "/srv/b.env" -f - up`, []string{"a.env", "/srv/b.env"}},
+		{"sh -c 'docker compose --env-file a.env up'", []string{"a.env"}},
+		{"docker compose --env-file prod.env run --rm app node --env-file=.env.test test.js", []string{"prod.env"}},
+		// After the subcommand an --env-file is the subcommand's (compose
+		// refuses one after up), a container's, or another program's:
+		// compose reads none of them.
+		{"docker compose -f - up --env-file='c.env'", nil},
+		{"docker compose run --rm app node --env-file=.env.test test.js", nil},
+		{"docker compose up -d db && node --env-file=.env.local app.js && docker compose up app", nil},
 		{"docker compose -f - up --env-file", nil},
 	} {
 		if got := composeEnvFiles(tt.cmd); !reflect.DeepEqual(got, tt.want) {
@@ -170,7 +152,7 @@ func TestRunComposeInProcessClassifiesFailures(t *testing.T) {
 		a := &App{
 			logger:         zap.NewNop(),
 			composeContent: []byte("services: {}"),
-			cmd:            "docker compose -f - up",
+			cmd:            utils.NewAppCommand("docker compose -f - up"),
 			newComposeStack: func(context.Context) (composeStack, error) {
 				return nil, errors.New("malformed compose document")
 			},
@@ -188,7 +170,7 @@ func TestRunComposeInProcessClassifiesFailures(t *testing.T) {
 		a := &App{
 			logger:          zap.NewNop(),
 			composeContent:  []byte("services: {}"),
-			cmd:             "docker compose -f - up",
+			cmd:             utils.NewAppCommand("docker compose -f - up"),
 			newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
 		}
 
@@ -204,7 +186,7 @@ func TestRunComposeInProcessClassifiesFailures(t *testing.T) {
 		a := &App{
 			logger:          zap.NewNop(),
 			composeContent:  []byte("services: {}"),
-			cmd:             "docker compose -f - up",
+			cmd:             utils.NewAppCommand("docker compose -f - up"),
 			newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
 		}
 
@@ -238,7 +220,7 @@ func TestRunComposeInProcessTearsDownOnCancel(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          exitedInspector{},
 		composeContent:  []byte("services: {}"),
-		cmd:             "docker compose -f - up",
+		cmd:             utils.NewAppCommand("docker compose -f - up"),
 		container:       "user-app",
 		newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
 	}
@@ -291,21 +273,18 @@ func TestRunComposeInProcessTearsDownOnCancel(t *testing.T) {
 	}
 }
 
-// TestACancelledInProcessRunStopsTheAppAsTheSwitchSays pins which teardown a
-// cancelled in-process run takes. Under the proven switch keploy stops the app
-// itself (StopComposeApp): it looks for the app's container through the
-// compose project on its agent's container, and says so when it cannot find
-// it. With the switch off the app gets its grace (composeAppGrace): keploy
-// reads the app's container until it has exited and asks for no stop. Both
-// end in the same down, so a run that took the wrong one is seen only here.
-func TestACancelledInProcessRunStopsTheAppAsTheSwitchSays(t *testing.T) {
+// TestACancelledInProcessRunStopsTheAppInEveryMode pins the teardown a
+// cancelled in-process run takes, with the proven switch on and off alike:
+// keploy stops the app itself (StopComposeApp), looking for the app's
+// container through the compose project on its agent's container, and says
+// so when it cannot find it, then takes the stack down once.
+func TestACancelledInProcessRunStopsTheAppInEveryMode(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		proven string
-		stops  bool
 	}{
-		{name: "under the switch keploy stops the app itself", proven: "1", stops: true},
-		{name: "with the switch off the app gets its grace", proven: "", stops: false},
+		{name: "under the switch", proven: "1"},
+		{name: "with the switch off", proven: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, tc.proven)
@@ -321,7 +300,7 @@ func TestACancelledInProcessRunStopsTheAppAsTheSwitchSays(t *testing.T) {
 				logger:          zap.New(core),
 				docker:          d,
 				composeContent:  []byte("services: {}"),
-				cmd:             "docker compose -f - up",
+				cmd:             utils.NewAppCommand("docker compose -f - up"),
 				container:       "user-app",
 				composeService:  "app",
 				keployContainer: "keploy-v3",
@@ -349,12 +328,9 @@ func TestACancelledInProcessRunStopsTheAppAsTheSwitchSays(t *testing.T) {
 			}
 			const cannotStop = "keploy could not stop the application's container before taking its compose stack down"
 			warned := logs.FilterMessage(cannotStop).Len() == 1
-			if asked := d.askedAbout(a.keployContainer); asked != tc.stops || warned != tc.stops {
+			if asked := d.askedAbout(a.keployContainer); !asked || !warned {
 				t.Fatalf("keploy looked for the app's container through its agent's project: %v, and warned %q: %v; "+
-					"want both %v (the switch %q)", asked, cannotStop, warned, tc.stops, tc.proven)
-			}
-			if !tc.stops && !d.askedAbout(a.container) {
-				t.Fatalf("with the switch off keploy never read the app's container %q for its grace (inspected %v)", a.container, d.asked)
+					"want both (the switch %q)", asked, cannotStop, warned, tc.proven)
 			}
 		})
 	}
@@ -383,7 +359,7 @@ func TestComposeRunnerIsRebuiltWhenTheDocumentChanges(t *testing.T) {
 	a := &App{
 		logger:          zap.NewNop(),
 		composeContent:  []byte("services: {}"),
-		cmd:             "docker compose -f - up",
+		cmd:             utils.NewAppCommand("docker compose -f - up"),
 		newComposeStack: func(context.Context) (composeStack, error) { built++; return &fakeComposeStack{}, nil },
 	}
 
@@ -416,7 +392,7 @@ func TestARegisteredComposeStackRunsTheInMemoryDocument(t *testing.T) {
 		return &App{
 			logger:         zap.NewNop(),
 			kind:           utils.DockerCompose,
-			cmd:            "docker compose -p proj --project-directory /work --env-file a.env up",
+			cmd:            utils.NewAppCommand("docker compose -p proj --project-directory /work --env-file a.env up"),
 			composeContent: []byte("services: {app: {image: app}}"),
 		}
 	}
@@ -466,7 +442,7 @@ func TestARunDrivesTheInMemoryDocumentThroughTheRunner(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          &inspectRecorder{},
 		kind:            utils.DockerCompose,
-		cmd:             "docker compose -f - up",
+		cmd:             utils.NewAppCommand("docker compose -f - up"),
 		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
 		keployContainer: "keploy-v3",
 		container:       "app",
@@ -500,7 +476,7 @@ func TestALibraryStateReadAsksTheDaemonNothing(t *testing.T) {
 		logger:          zap.NewNop(),
 		docker:          rec,
 		composeContent:  []byte("services:\n  db:\n    image: postgres\n"),
-		cmd:             "docker compose -f - up",
+		cmd:             utils.NewAppCommand("docker compose -f - up"),
 		keployContainer: "keploy-v3",
 		container:       "user-app",
 		newComposeStack: func(context.Context) (composeStack, error) { return stack, nil },
@@ -540,7 +516,7 @@ func TestALibraryStateReadFeedsTheDependencyAbortRetry(t *testing.T) {
 				docker:          &inspectRecorder{},
 				kind:            utils.DockerCompose,
 				composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
-				cmd:             "docker compose -f - up",
+				cmd:             utils.NewAppCommand("docker compose -f - up"),
 				composeService:  "app",
 				keployContainer: "keploy-v3",
 				container:       "user-app",
@@ -573,7 +549,7 @@ func TestALibraryRunsRecentOutputIsReadUnderTheRunnersProject(t *testing.T) {
 	a := &App{
 		logger:          zap.NewNop(),
 		composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
-		cmd:             "docker compose -p orderflow -f - up",
+		cmd:             utils.NewAppCommand("docker compose -p orderflow -f - up"),
 		container:       "app",
 		composeService:  "app",
 		newComposeStack: func(context.Context) (composeStack, error) { return &fakeComposeStack{}, nil },
@@ -601,7 +577,7 @@ func TestALibraryDownProjectIgnoresTheCommandsAssignment(t *testing.T) {
 		logger:         zap.NewNop(),
 		docker:         &inspectRecorder{},
 		composeContent: []byte("services:\n  app:\n    image: alpine\n"),
-		cmd:            "COMPOSE_PROJECT_NAME=assigned docker compose -f - up",
+		cmd:            utils.NewAppCommand("COMPOSE_PROJECT_NAME=assigned docker compose -f - up"),
 	}
 	if got := a.composeDownProject(context.Background()); got != "" {
 		t.Fatalf("project %q; the library run never sees the command's assignment", got)
@@ -631,7 +607,7 @@ func TestALibraryDownProjectIsTheRunnersElseTheEnvironments(t *testing.T) {
 				logger:          zap.NewNop(),
 				docker:          &inspectRecorder{},
 				composeContent:  []byte("services:\n  app:\n    image: alpine\n"),
-				cmd:             "docker compose -f - up",
+				cmd:             utils.NewAppCommand("docker compose -f - up"),
 				newComposeStack: func(context.Context) (composeStack, error) { return tc.stack, nil },
 			}
 			if _, err := a.composeRunner(context.Background()); err != nil {
@@ -655,5 +631,33 @@ func TestNoRunnerIsBuiltWithoutAnInMemoryDocument(t *testing.T) {
 	}
 	if r, err := a.composeRunner(context.Background()); err == nil || r != nil || built != 0 {
 		t.Fatalf("composeRunner with no document = (%v, %v), builder ran %d times; want an error and no build", r, err, built)
+	}
+}
+
+// The in-process compose (Keploy Enterprise registers it) is handed the env
+// files compose's own options name, and none of another program's: given
+// node's --env-file=.env.test as compose's, the library loaded that file as
+// the stack's environment, and a line it could not parse was quoted in the
+// run's error.
+func TestTheLibraryIsHandedComposesOwnEnvFilesAlone(t *testing.T) {
+	var got []docker.ComposeStackSpec
+	stack := &fakeComposeStack{ps: []docker.ServiceState{{ID: "agent-id", Service: keployAgentComposeService}}}
+	docker.RegisterComposeStack(func(_ context.Context, spec docker.ComposeStackSpec) (docker.ComposeStack, error) {
+		got = append(got, spec)
+		return stack, nil
+	})
+	t.Cleanup(func() { docker.RegisterComposeStack(nil) })
+	for cmd, want := range map[string][]string{
+		"docker compose run --rm app node --env-file=.env.test test.js":                            nil,
+		"docker compose up -d db && node --env-file=.env.local app.js && docker compose up app":    nil,
+		"docker compose --env-file prod.env run --rm app node --env-file=.env.test test.js":        {"prod.env"},
+		"docker compose --env-file=a.env --env-file b.env -p proj up --env-file c.env --build app": {"a.env", "b.env"},
+	} {
+		got = nil
+		a := &App{logger: zap.NewNop(), kind: utils.DockerCompose, cmd: utils.NewAppCommand(cmd), composeContent: []byte("services: {app: {image: app}}")}
+		a.composeAgentContainerIDs(context.Background())
+		if len(got) != 1 || !reflect.DeepEqual(got[0].EnvFiles, want) {
+			t.Errorf("%q: the library was handed %v, want the env files %q", cmd, got, want)
+		}
 	}
 }

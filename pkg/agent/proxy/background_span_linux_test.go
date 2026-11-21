@@ -53,8 +53,9 @@ func TestTheServeClockNotesEveryServeButAProtocolPhases(t *testing.T) {
 
 // spanParser is a parser the test reaches through handleConnection: it
 // reports whether its connection's ctx tells a call's span for the
-// background check (learn.CallSpanOf), of a call arriving now.
-type spanParser struct{ saw chan bool }
+// background check (learn.CallSpanOf), and a background call's spans
+// (learn.CallSpansOf), of a call arriving now.
+type spanParser struct{ saw, sawSpans chan bool }
 
 func (spanParser) MatchType(context.Context, []byte) bool { return true }
 func (spanParser) RecordOutgoing(context.Context, *integrations.RecordSession) error {
@@ -62,22 +63,25 @@ func (spanParser) RecordOutgoing(context.Context, *integrations.RecordSession) e
 }
 func (s spanParser) MockOutgoing(ctx context.Context, _ net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
 	_, ok := learn.CallSpanOf(ctx, time.Now())
+	_, spans := learn.CallSpansOf(ctx, time.Now())
 	s.saw <- ok
+	s.sawSpans <- spans
 	return nil
 }
 func (spanParser) MockNoise() mocknoise.Adapter { return nil }
 
 // spanThrough hands a kept connection to handleConnection on a proxy whose
-// serve clock reads the real clock and noted a serve, and returns the proxy
-// and whether the parser's ctx told a call's span.
-func spanThrough(t *testing.T) (*Proxy, bool) {
+// serve clock reads the real clock and noted a serve, after the session's
+// Mock, and returns the proxy, whether the parser's ctx told a call's span,
+// and whether it told a background call's spans.
+func spanThrough(t *testing.T) (*Proxy, bool, bool) {
 	t.Helper()
 	cfg := config.New()
 	cfg.Agent.Mode = models.MODE_TEST
 	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, "127.0.0.1:50051")}, cfg)
 	p.SetBackgroundClock(bgRealClock)
 	p.serveClock.Served()
-	w := spanParser{saw: make(chan bool, 1)}
+	w := spanParser{saw: make(chan bool, 1), sawSpans: make(chan bool, 1)}
 	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.HTTP: w}
 	p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}
 	_ = p.Mock(context.Background(), models.OutgoingOptions{DisableMysqlAutoDetect: true, Mocking: true})
@@ -89,31 +93,38 @@ func spanThrough(t *testing.T) (*Proxy, bool) {
 		t.Fatal(err)
 	}
 	ok := awaitEvent(t, w.saw, "the parser being handed the connection")
+	spans := awaitEvent(t, w.sawSpans, "the parser reading a background call's spans")
 	if err := awaitEvent(t, done, "handleConnection returning"); err != nil {
 		t.Fatalf("handleConnection: %v", err)
 	}
-	return p, ok
+	return p, ok, spans
 }
 
 // With the proven switch off the session's manager notes its serves to the
 // proxy's serve clock, and a parser reads a call's span for the background
-// check on it, through its connection's ctx. Under the switch neither: the
-// manager notes nothing to it, and the parser reads the learn tracker's span
-// (none here: the tracker was handed no clock).
+// check on it, through its connection's ctx; the session's Mock begins the
+// set on it, so a background call's spans start at the set's begin
+// (learn.ServeClock.SpansOf). Under the switch neither: the manager notes
+// nothing to it, and the parser reads the learn tracker's spans (none here:
+// the tracker was handed no clock). Mutation: begin no set on the serve
+// clock in Mock.
 func TestWithTheSwitchOffAParserReadsACallsSpanOnTheServeClock(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
-	p, ok := spanThrough(t)
+	p, ok, spans := spanThrough(t)
 	if !ok {
 		t.Fatal("the switch off: the parser's ctx tells no span on the serve clock")
+	}
+	if !spans {
+		t.Fatal("the switch off: the parser's ctx tells no background call's spans: the session's Mock began no set on the serve clock")
 	}
 	if got := p.getMockManager().serveClock.Load(); got != p.serveClock {
 		t.Fatalf("the switch off: the session's manager notes its serves to %p; want the proxy's serve clock %p", got, p.serveClock)
 	}
 
 	t.Setenv(provenswitch.Env, "1")
-	p, ok = spanThrough(t)
-	if ok {
-		t.Fatal("under the switch the parser's ctx told a span on the serve clock; want the tracker's alone")
+	p, ok, spans = spanThrough(t)
+	if ok || spans {
+		t.Fatalf("under the switch the parser's ctx told a span (%v) or spans (%v) on the serve clock; want the tracker's alone", ok, spans)
 	}
 	if got := p.getMockManager().serveClock.Load(); got != nil {
 		t.Fatal("under the switch the session's manager notes its serves to the serve clock")

@@ -155,7 +155,7 @@ func TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cgf.Close()
-	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	cmd := exec.Command(appExe(), "-test.run=^$")
 	cmd.Env = append(os.Environ(), udpHelperEnv+"="+strconv.Itoa(port))
 	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(cgf.Fd())}
 	stdin, _ := cmd.StdinPipe()
@@ -321,7 +321,7 @@ func TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer cgf.Close()
-	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	cmd := exec.Command(appExe(), "-test.run=^$")
 	cmd.Env = append(os.Environ(), udpHelperEnv+"="+strconv.Itoa(port))
 	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(cgf.Fd())}
 	stdin, _ := cmd.StdinPipe()
@@ -496,7 +496,7 @@ func startUDPHelper(t *testing.T, cg, arg string) (io.Writer, *bufio.Reader) {
 		t.Fatal(err)
 	}
 	defer cgf.Close()
-	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
+	cmd := exec.Command(appExe(), "-test.run=^$")
 	cmd.Env = append(os.Environ(), udpHelperEnv+"="+arg)
 	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(cgf.Fd())}
 	stdin, _ := cmd.StdinPipe()

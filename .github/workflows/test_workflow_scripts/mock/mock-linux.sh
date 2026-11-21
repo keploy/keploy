@@ -778,15 +778,22 @@ def test_app_stops(app):
 PY
 : > streamapp.log
 rm -f streamapp.pid
-sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_stream.py" --name e2e-stream --disable-tele 2>&1 | tee rec-stream.log
+# pytest's own output goes to a file of its own, so rec-stream.log is
+# keploy's console alone. pytest -q writes a dot for each test as it passes
+# and ends that line only when the run ends; keploy's console and pytest's
+# output share one stream, so a keploy line written between a dot and that
+# end begins after the dot (".🐰 Keploy: not recorded ..."), and the
+# console's lines below are read from where each begins.
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_stream.py > pytest-stream.log 2>&1" --name e2e-stream --disable-tele 2>&1 | tee rec-stream.log
 RC=${PIPESTATUS[0]}
+echo "pytest's output:"; cat pytest-stream.log
 verify_ran 1 rec-stream.log || FAIL=1
 # The app is pytest's, which stopped it; stop it here too if pytest did not.
 APP_PID=$(cat streamapp.pid 2>/dev/null)
 [ -n "$APP_PID" ] && grep -qs streamapp.py "/proc/$APP_PID/cmdline" && sudo kill "$APP_PID"
 # "3 passed in": a test keploy fails at its end is an error at its teardown
 # ("3 passed, 2 errors in").
-[ "$RC" -eq 0 ] && grep -q "3 passed in" rec-stream.log ||
+[ "$RC" -eq 0 ] && grep -q "3 passed in" pytest-stream.log ||
   { echo "FAIL: a client's hang-up on a quiet answer should leave its test judged (exit 0, 3 passed), got $RC"; FAIL=1; }
 GAVE=$(grep -c "made no progress settling" rec-stream.log)
 [ "$GAVE" -eq 0 ] || { echo "FAIL: keploy's agent gave up settling a test's calls ($GAVE line(s)): the client's hang-up held the test's end"; FAIL=1; }

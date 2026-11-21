@@ -97,6 +97,16 @@ type TestCase struct {
 	// each capture, not be inferred from mutable registries. Never set by
 	// agents or on the wire ("-" everywhere).
 	SourceNode string `json:"-" yaml:"-" bson:"-"`
+	// CaptureID is the identity the agent gave this test case's request when
+	// it captured it without --sync and without a Keploy-Test-Name: its
+	// mocks' mapping entries, their owner and any revoke of it name it so
+	// (CaptureIDPrefix). The test case itself is sent with no Name; the
+	// recorder names it as it saves it and files what names the CaptureID
+	// under that name. It rides only the agent's test-case stream; yaml/bson
+	// "-" keeps it out of stored test cases. Empty for a test case with a
+	// name of its own, and for a client that does not read capture ids
+	// (OutgoingOptions.SupportsCaptureIDs).
+	CaptureID string `json:"capture_id,omitempty" yaml:"-" bson:"-"`
 	// ExpectedRewrite is set only on the copy of a test case a replay hands
 	// to SimulateRequest for one send (replay's toSend), by a hook that
 	// rewrote that copy's expected body before the answer is compared with
@@ -128,6 +138,16 @@ type RewrittenPlace struct {
 
 func (tc *TestCase) GetKind() string {
 	return string(tc.Kind)
+}
+
+// AgentName is the name the agent knows tc by, and names it by in its
+// mappings and revokes: its CaptureID when it has one, else its Name (which a
+// recorder may change as it saves it).
+func (tc *TestCase) AgentName() string {
+	if tc.CaptureID != "" {
+		return tc.CaptureID
+	}
+	return tc.Name
 }
 
 // CompletedAt is when the test case's exchange was complete, from the wire

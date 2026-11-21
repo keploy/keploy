@@ -147,14 +147,14 @@ func TestARunPushesItsListOnceAndKeepsItAfter(t *testing.T) {
 	inst := &pushInst{}
 	r := realReplayer(inst, "db:5432")
 	for range 3 {
-		require.NoError(t, r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}))
+		require.NoError(t, r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{}))
 	}
 	require.Equal(t, []string{"push", "mock", "keep", "mock", "keep", "mock"}, inst.calls)
 
 	inst = &pushInst{}
 	r = realReplayer(inst, "db:5432")
 	r.noAgent = true
-	require.NoError(t, r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}))
+	require.NoError(t, r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{}))
 	require.Equal(t, []string{"mock"}, inst.calls)
 }
 

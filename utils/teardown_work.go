@@ -56,7 +56,9 @@ type workProbe interface {
 	// moved reports whether the stage has made progress since the last call:
 	// its thread, or a process it runs, scheduled since then, or runnable
 	// now. The first call, and one that cannot tell, report true: progress
-	// that cannot be seen is never taken for none.
+	// that cannot be seen is never taken for none. Runnable is the kernel's
+	// word: a goroutine the Go scheduler has yet to run has its thread
+	// parked, which is none (boot.go: a beat).
 	moved() bool
 	// release lets the thread go; the work's own goroutine calls it as the
 	// work ends.

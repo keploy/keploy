@@ -1,0 +1,76 @@
+name: setup-java-maven/jdk
+description: "Set up the Temurin JDK that jdks.txt pins for a major version: the runner image's own copy when it is exactly that build, else its release archive, checked against its published sha256 on every run and kept in the Actions cache under that digest"
+
+# The JDK half of setup-java-maven, which uses it; a job that builds no Maven
+# project uses it alone. It is the one place that runs actions/setup-java
+# (check-setup-java.sh, in the lint workflow, says why), and it runs it only
+# on a JDK jdk.sh has pinned: the runner image's copy of exactly the pinned
+# build (source image: setup-java, asked for that exact build, finds it in
+# the tool cache and downloads nothing), or the archive jdk.sh has checked
+# (source archive, distribution jdkfile). jdk.sh says how the source is
+# chosen, what each step checks and how a failure reads; jdks.txt how to
+# move a JDK. Its tests (jdk.tests.sh) run in the lint workflow.
+#
+# Only main saves the archive. This repository's Actions cache is over its
+# 10 GB limit, and an entry nobody has read for about two hours is evicted:
+# an entry a pull request saves serves only that pull request's later runs,
+# and pushes out other entries, while main's is read by every pull request's
+# run, which keeps it in the cache while they run. When it has been evicted,
+# the archive is downloaded and checked, as on a first run.
+inputs:
+  java-version:
+    required: true
+    description: "The JDK's major version (8, 17); jdks.txt pins each to one Temurin build"
+
+runs:
+  using: composite
+  steps:
+    - name: Pinned JDK
+      id: pin
+      shell: bash
+      env:
+        JDK_JAVA_VERSION: ${{ inputs.java-version }}
+      run: bash "$GITHUB_ACTION_PATH/jdk.sh" pin
+
+    # The runner image's own copy of exactly the pinned build.
+    - if: steps.pin.outputs.source == 'image'
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: ${{ steps.pin.outputs.version }}
+        mvn-toolchain-id: temurin_${{ inputs.java-version }}
+
+    - name: Restore the JDK archive
+      id: cache
+      if: steps.pin.outputs.source == 'archive'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.pin.outputs.dir }}
+        key: ${{ steps.pin.outputs.key }}
+
+    - name: Check the JDK archive, or download it
+      if: steps.pin.outputs.source == 'archive'
+      shell: bash
+      env:
+        JDK_JAVA_VERSION: ${{ inputs.java-version }}
+        JDK_CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: bash "$GITHUB_ACTION_PATH/jdk.sh" fetch
+
+    # Only an archive that passed the check above is here to save.
+    - name: Save the JDK archive
+      if: steps.pin.outputs.source == 'archive' && steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.pin.outputs.dir }}
+        key: ${{ steps.pin.outputs.key }}
+
+    # Maven's toolchains.xml keeps the vendor and id setup-java's temurin
+    # distribution gives it (temurin, temurin_17); its version is the build's.
+    - if: steps.pin.outputs.source == 'archive'
+      uses: actions/setup-java@v4
+      with:
+        distribution: jdkfile
+        jdkFile: ${{ steps.pin.outputs.file }}
+        java-version: ${{ steps.pin.outputs.version }}
+        mvn-toolchain-vendor: temurin
+        mvn-toolchain-id: temurin_${{ inputs.java-version }}

@@ -1,8 +1,12 @@
 package replayer
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/stretchr/testify/require"
 
 	"go.keploy.io/server/v3/internal/logleak"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
@@ -34,6 +38,33 @@ func TestSQLLogShapeShowsNoLiteral(t *testing.T) {
 	long := "SELECT " + strings.Repeat("a, ", 200) + "'" + s + "'"
 	if got := sqlLogShape(long); len(got) > maxLoggedSQL+3 || strings.Contains(got, s) {
 		t.Errorf("a long statement is shown as %d bytes; want at most %d, no literal", len(got), maxLoggedSQL+3)
+	}
+}
+
+// A name with non-ASCII characters at the maxLoggedSQL limit is never cut
+// inside one: the shape either stops after a whole character or moves its
+// cut back to one's first byte. The name starts 1 to 3 bytes before the
+// limit, so the shape stops exactly at it or writes a character past it.
+func TestSQLLogShapeNeverSplitsACharacter(t *testing.T) {
+	const head = "SELECT "
+	for name, ident := range map[string]string{
+		"hindi (3-byte characters)":   strings.Repeat("ग्राहक", 4),
+		"accents (2-byte characters)": strings.Repeat("é", 20),
+	} {
+		for back := 1; back <= 3; back++ {
+			t.Run(fmt.Sprintf("%s, %d bytes back", name, back), func(t *testing.T) {
+				pad := maxLoggedSQL - back - len(head)
+				require.Positive(t, pad)
+				sql := head + strings.Repeat("a", pad) + ident + " FROM customers"
+				got := sqlLogShape(sql)
+				require.Truef(t, utf8.ValidString(got), "the shape splits a character: %q", got)
+				require.Truef(t, strings.HasSuffix(got, "..."), "the shape does not say it was cut: %q", got)
+				kept := strings.TrimSuffix(got, "...")
+				require.Truef(t, strings.HasPrefix(sql, kept), "the shape is not the start of the statement: %q", kept)
+				require.LessOrEqual(t, len(kept), maxLoggedSQL)
+				require.GreaterOrEqual(t, len(kept), maxLoggedSQL-3)
+			})
+		}
 	}
 }
 

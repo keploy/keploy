@@ -65,7 +65,7 @@ func TestTheSessionSaysItReadsSetEndsOnlyUnderTheSwitch(t *testing.T) {
 		provenOn(t, on)
 		f := &latchInstr{}
 		r := &Replayer{logger: zap.NewNop(), instrumentation: f}
-		if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{}); err != nil {
+		if err := r.mockOutgoingForTestSet(context.Background(), "test-set-0", models.OutgoingOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		if f.opts.ReadsSetEnds != on {

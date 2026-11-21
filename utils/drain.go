@@ -92,6 +92,16 @@ func DrainErrGroupProgressOn(clk stall.Clock, logger *zap.Logger, name string, g
 	return drainErrGroupProgress(clk, logger, name, g, bound, progress, nil)
 }
 
+// AwaitProgressOn waits for done as a drain of name waits for its group to
+// join (DrainErrGroupProgressOn): for as long as progress() keeps changing,
+// and, said as that drain's give-up, gives done up once it has not changed for
+// bound in the time this process could run on clk (nil: its own runnable
+// clock). It reports whether it gave done up: a stop keploy waits out before
+// its own teardown (an application's exit) costs at most what its drain would.
+func AwaitProgressOn(clk stall.Clock, logger *zap.Logger, name string, done <-chan struct{}, bound time.Duration, progress func() uint64) (gaveUp bool) {
+	return drainUntil(clk, logger, name, done, bound, progress, nil)
+}
+
 // drainErrGroupProgress is DrainErrGroupProgress on clk (nil: the process's
 // own runnable clock). watch, if set, is handed each wait's meter before the
 // wait's first look (waitWhileProgressing): a test reads the stall the drain

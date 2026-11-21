@@ -536,7 +536,7 @@ func TestAServedCallBuildsNoDebugEntryWithDebugOff(t *testing.T) {
 		t.Skip("the allocation budgets are Linux's, without -race")
 	}
 	// Allocations of a call with a 16 B body and answer.
-	smallBudget, ok := map[string]float64{"amd64": 105, "arm64": 105}[runtime.GOARCH]
+	smallBudget, ok := map[string]float64{"amd64": 102, "arm64": 102}[runtime.GOARCH]
 	if !ok {
 		t.Skipf("no allocation budget for %s", runtime.GOARCH)
 	}

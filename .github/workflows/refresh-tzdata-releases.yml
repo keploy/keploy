@@ -1,0 +1,78 @@
+# Keeps keploy's table of IANA's zone data releases current. learn's zone
+# reader takes an application's zone file as its zone where some release of
+# tzdata keploy knows (pkg/models/zonereleases_data.go) reads its offsets so,
+# or the application's own tzdata.zi does. A release IANA publishes after the
+# table was written is known to keploy only through that tzdata.zi, so this
+# job writes the table again weekly (tools/zonereleases, which builds every
+# release with its zic and checks keploy's reading of each release's source
+# against it) and opens a PR when IANA has published one.
+name: Refresh tzdata releases
+
+on:
+  schedule:
+    - cron: "41 4 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: refresh-tzdata-releases
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Write the table again
+        id: gen
+        run: |
+          set -euo pipefail
+          old=$(sed -n 's/^\tZoneReleasesLast  = "\(.*\)"$/\1/p' pkg/models/zonereleases_data.go)
+          go generate ./pkg/models/
+          new=$(sed -n 's/^\tZoneReleasesLast  = "\(.*\)"$/\1/p' pkg/models/zonereleases_data.go)
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          if git diff --quiet; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+          git diff --stat
+          echo "tzdata releases: $old -> $new"
+
+      # PRs opened with GITHUB_TOKEN do not trigger other workflows, so the
+      # zone tests run here before anything is proposed.
+      - name: Test the zone readers
+        if: steps.gen.outputs.changed == 'true'
+        run: go test -count=1 ./pkg/models/ ./pkg/matcher/learn/ ./pkg/agent/containerkey/ ./tools/zonereleases/
+
+      - name: Open a PR (an issue if Actions may not open PRs)
+        if: steps.gen.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLD: ${{ steps.gen.outputs.old }}
+          NEW: ${{ steps.gen.outputs.new }}
+        run: |
+          set -euo pipefail
+          branch="chore/tzdata-releases-${NEW}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "already proposed on $branch"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -s -am "fix(models): read zone files of tzdata ${NEW}"
+          git push origin "$branch"
+          body="Writes keploy's table of IANA's tzdata releases again (go generate ./pkg/models/): ${OLD} -> ${NEW}. Each release's tarballs were checked against their pinned sha256 (tools/zonereleases/tzdata.sha256; a new release's are pinned here), and keploy's reading of each release's source against the files its zic wrote. The zone tests passed in the workflow run (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
+
+          This PR was opened with GITHUB_TOKEN, so CI does not start on its own: close and reopen it (or push to the branch) to run the full checks."
+          gh pr create --base main --head "$branch" --title "fix(models): read zone files of tzdata ${NEW}" --body "$body" \
+            || gh issue create --title "Refresh tzdata releases: ${NEW} is available" \
+                 --body "${body}
+
+          Opening the PR failed (Actions may not be allowed to create PRs in this repo); branch ${branch} holds the change."

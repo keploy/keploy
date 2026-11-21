@@ -52,7 +52,8 @@ type mockService struct {
 	// KEPLOY_SHIM_CTRL=… <command>` -- and that launch line is not the user's
 	// command: recorded in the replay receipt it leaked a temp path, and
 	// `keploy mock status` handed it back to agents as the command to run.
-	userCommand string
+	// Held as utils.AppCommand: a log line names it by its program.
+	userCommand utils.AppCommand
 	// claims are, under the proven switch, the run's claims (windows with
 	// Claim set), which readWindows takes out of the windows it returns: a
 	// record tags each pool mock with the key of the claim it was made
@@ -128,7 +129,7 @@ func New(
 		store:           store,
 		hooks:           hooks,
 		config:          cfg,
-		userCommand:     cfg.Command,
+		userCommand:     utils.NewAppCommand(cfg.Command),
 	}
 }
 

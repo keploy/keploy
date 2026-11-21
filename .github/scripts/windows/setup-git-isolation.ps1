@@ -7,8 +7,10 @@
 .DESCRIPTION
   Called at the start of every self-hosted Windows job. Seeds a per-job
   gitconfig from the global one (if present), removes any inherited
-  SSH redirect settings that would break HTTPS-based checkout, populates
-  a per-job known_hosts via ssh-keyscan, and exports both env vars.
+  SSH redirect settings that would break HTTPS-based checkout, writes a
+  per-job known_hosts from GitHub's published host keys pinned in
+  .github/ssh/github_known_hosts (no network call), and exports both env
+  vars.
 
   GIT_SSH_COMMAND still honors SSH_AUTH_SOCK, so webfactory/ssh-agent
   keys remain accessible.
@@ -85,11 +87,16 @@ git config --file $gitConfig core.eol lf
 if ($LASTEXITCODE -ne 0) { throw "Failed to set core.eol in per-job gitconfig (exit code $LASTEXITCODE)" }
 
 # --- Per-run SSH known_hosts ---
-$knownHosts = Join-Path $isoDir 'known_hosts'
-$hostKeys = ssh-keyscan github.com 2>$null
-if ([string]::IsNullOrWhiteSpace(($hostKeys | Out-String))) {
-    throw "ssh-keyscan did not return any host keys for github.com. Check network access from this runner."
+# GitHub's published host keys, from the repository, never from the network:
+# `ssh-keyscan github.com` here failed the job whenever the runner's DNS
+# blipped ("getaddrinfo github.com: No such host is known"), and it trusts
+# whatever answers on port 22.
+$pinnedKeys = Join-Path (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'ssh') 'github_known_hosts'
+$hostKeys = @(Get-Content -LiteralPath $pinnedKeys | Where-Object { $_ -match '^github\.com ' })
+if ($hostKeys.Count -eq 0) {
+    throw "No github.com host keys in $pinnedKeys."
 }
+$knownHosts = Join-Path $isoDir 'known_hosts'
 $hostKeys | Out-File -FilePath $knownHosts -Encoding ascii
 
 # --- Export env vars ---

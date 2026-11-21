@@ -63,6 +63,15 @@ name: Linux CI scripts
 # exit, the failed test sets and tests of the test run it wrote, and the
 # command's log; under `bash -e` the lane ended at that command with none of
 # them, and an echo-sql record, its exit taken as tee's, did not stop it.
+#
+# And macos/notarize-darwin.tests.sh: the signing, submission and wait of
+# release.yml's build-darwin job, against stand-ins for codesign and
+# notarytool. A failure on Apple's side (HTTP 5xx, "try again later") or the
+# network is tried again, a poll about the same submission; a refusal is not;
+# the wait ends at its bound with the submission id and the rerun that resumes
+# it; only Apple's Accepted for the zip that was sent writes the binary. And
+# build-darwin's steps: the state is kept before the wait, and a rerun skips
+# the build, signing and submission.
 
 on:
   push:
@@ -94,6 +103,9 @@ on:
       - '.github/workflows/test_workflow_scripts/sudo_env.sh'
       - '.github/workflows/test_workflow_scripts/hang_guard.sh'
       - '.github/workflows/golang_docker.yml'
+      - '.github/scripts/macos/notarize-darwin.sh'
+      - '.github/scripts/macos/notarize-darwin.tests.sh'
+      - '.github/workflows/release.yml'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
@@ -122,6 +134,9 @@ on:
       - '.github/workflows/test_workflow_scripts/sudo_env.sh'
       - '.github/workflows/test_workflow_scripts/hang_guard.sh'
       - '.github/workflows/golang_docker.yml'
+      - '.github/scripts/macos/notarize-darwin.sh'
+      - '.github/scripts/macos/notarize-darwin.tests.sh'
+      - '.github/workflows/release.yml'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -131,11 +146,13 @@ jobs:
   apt-install:
     # Eleven ubuntu containers that fetch the package lists once or more each
     # (through the stub, which asks the real mirror for each list only the
-    # first time), one that builds the test repository, and two with no
-    # network. About seven minutes of a run are waits the cases are made of:
-    # against the stub, the 45 s limits of two controls, seven slices of 20 s
-    # and two budgets of 90 s; in each of the two offline containers, under a
-    # minute of slices and budgets of 1 to 8 s. The fetching and installing
+    # first time), one that builds the test repository, and six with no
+    # network: per image, one for the rewrite cases and one short one with a
+    # source file root cannot read. About seven minutes of a run are waits the
+    # cases are made of: against the stub, the 45 s limits of two controls,
+    # seven slices of 20 s and two budgets of 90 s; in each of the three
+    # offline rewrite containers, under a minute of slices and budgets of 1 to
+    # 8 s. The fetching and installing
     # comes on top, and how long that takes on a runner is in the job's own
     # history, not here.
     #
@@ -155,7 +172,10 @@ jobs:
   # packages.microsoft.com source. The update must not read that source, and
   # must not delete the lists of the sources it does not read. The image
   # already has a mirror list of its own, so no file under /etc/apt may
-  # change.
+  # change: in Azure, where every Ubuntu entry names that list, and in AWS,
+  # where the -security entry names a host instead (apt-install.sh, A MACHINE
+  # WITH A LIST OF ITS OWN). Which of the two a run got is in its Set up job
+  # step, under Runner Image Provisioner (Cloud:).
   apt-install-on-runner:
     timeout-minutes: 15
     runs-on: ubuntu-latest
@@ -183,6 +203,12 @@ jobs:
           snap >"$RUNNER_TEMP/etc-apt.after"
           if ! diff "$RUNNER_TEMP/etc-apt.before" "$RUNNER_TEMP/etc-apt.after"; then
             echo "::error::apt-install.sh changed /etc/apt (above) on an image that already has a mirror list"
+            exit 1
+          fi
+          # That nothing changed is the rule's doing, not that no entry here
+          # names a host the script would rewrite.
+          if ! grep -qF 'apt-install: this machine has a mirror list of its own for the Ubuntu archive (/etc/apt/apt-mirrors.txt)' "$RUNNER_TEMP/apt.log"; then
+            echo "::error::apt-install.sh did not say it found the image's mirror list /etc/apt/apt-mirrors.txt"
             exit 1
           fi
           # Without the update's per-item lines the check below would pass on
@@ -239,7 +265,7 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh
 
   installer:
-    # Forty-four cases, under bash and under zsh; a few seconds. The one on a
+    # Forty-eight cases, under bash and under zsh; a few seconds. The one on a
     # terminal (script(1), in bsdutils on ubuntu) bounds itself at 120 s per
     # shell, so both hanging still leave the log time to show.
     timeout-minutes: 8
@@ -291,3 +317,14 @@ jobs:
         # Runs even when the gin_mongo step failed, so one run reports both.
         if: ${{ !cancelled() }}
         run: bash .github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker.tests.sh
+
+  notarize-darwin:
+    # Two hundred and forty checks against stand-ins, about ten seconds:
+    # only the bound cases wait, 2 s each, for real.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test notarize-darwin.sh (Apple's transient failures are tried again on the same submission; a rerun resumes it; only Accepted for the zip sent writes the binary)
+        run: bash .github/scripts/macos/notarize-darwin.tests.sh

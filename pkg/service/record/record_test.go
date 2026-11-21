@@ -499,10 +499,16 @@ type recTestDB struct {
 	// autoName, when set, names a test case that comes with no name, as the
 	// YAML store does: autoName-N, N its place among those saved.
 	autoName string
+	// beforeInsert, when set, runs as each insert begins, before the store
+	// takes the test case. Set at construction.
+	beforeInsert func(tc *models.TestCase)
 }
 
 func (d *recTestDB) GetAllTestSetIDs(context.Context) ([]string, error) { return nil, nil }
 func (d *recTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ string, _ bool) error {
+	if d.beforeInsert != nil {
+		d.beforeInsert(tc)
+	}
 	if d.insertErr != nil {
 		return d.insertErr
 	}
@@ -744,6 +750,11 @@ func TestStart_UnencodableMockIsSkippedAndItsTestRevoked(t *testing.T) {
 
 	sendTest("test-1")
 	sendTest("test-2")
+	// Saved before their mappings come: a test case revoked before it is
+	// saved is never saved (liveRevokes), and this row is about the delete of
+	// one that was.
+	waitForPersistedTestCase(t, testDB, "test-1")
+	waitForPersistedTestCase(t, testDB, "test-2")
 
 	// test-1 owns the dropped mock; test-2 is healthy and must be untouched.
 	sendMapping("test-1", "mock-good-1", "mock-bad")
@@ -843,7 +854,7 @@ func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
 		t.Fatal("recorder never consumed the test case")
 	}
 	// "ghost" was never streamed as a mock, so it never correlates — the
-	// pre-existing "Failed to correlate mock mapping" path.
+	// pre-existing unmapped-entry path (addSettled).
 	select {
 	case f.mappings <- models.TestMockMapping{TestName: "test-1", MockIDs: []string{"mock-1", "ghost"}}:
 	case <-time.After(10 * time.Second):
@@ -947,6 +958,13 @@ func TestStart_AgentRevokedTestIsNotCountedAsShortPool(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("recorder never consumed the mapping")
 	}
+	// The recording must be demonstrably under way before it is stopped;
+	// otherwise this cancel races Start's consumers starting and the
+	// require.NoError below asserts on that race. See
+	// waitForPersistedTestCase. Waited for before the revoke: a test case
+	// revoked before it is saved is never saved (liveRevokes).
+	waitForPersistedTestCase(t, testDB, "test-1")
+
 	// ...but the AGENT then revokes it via its own control frame.
 	send(&models.Mock{
 		Version: models.GetVersion(),
@@ -954,12 +972,6 @@ func TestStart_AgentRevokedTestIsNotCountedAsShortPool(t *testing.T) {
 		Kind:    models.RevokedTests,
 		Spec:    models.MockSpec{Metadata: map[string]string{"revoked_tests": "test-1"}},
 	})
-
-	// The recording must be demonstrably under way before it is stopped;
-	// otherwise this cancel races Start's consumers starting and the
-	// require.NoError below asserts on that race. See
-	// waitForPersistedTestCase.
-	waitForPersistedTestCase(t, testDB, "test-1")
 
 	cancel()
 	close(f.outgoing)
@@ -1182,16 +1194,17 @@ func TestStart_FailedRevokeKeepsTheTestInTheShortPoolCount(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("recorder never consumed the mapping")
 	}
+	// The recording must be demonstrably under way before it is stopped;
+	// otherwise this cancel races Start's consumers starting and the
+	// require.NoError below asserts on that race. See
+	// waitForPersistedTestCase. Waited for before the revoke: a test case
+	// revoked before it is saved is never saved (liveRevokes).
+	waitForPersistedTestCase(t, &testDB.recTestDB, "test-1")
+
 	send(&models.Mock{
 		Version: models.GetVersion(), Name: "revoke-frame", Kind: models.RevokedTests,
 		Spec: models.MockSpec{Metadata: map[string]string{"revoked_tests": "test-1"}},
 	})
-
-	// The recording must be demonstrably under way before it is stopped;
-	// otherwise this cancel races Start's consumers starting and the
-	// require.NoError below asserts on that race. See
-	// waitForPersistedTestCase.
-	waitForPersistedTestCase(t, &testDB.recTestDB, "test-1")
 
 	cancel()
 	close(f.outgoing)
