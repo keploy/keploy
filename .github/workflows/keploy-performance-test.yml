@@ -81,10 +81,12 @@ jobs:
           ref: ${{ env.PETCLINIC_REF }}
           path: petclinic
 
+      # The JDK build jdks.txt pins for PETCLINIC_JAVA: the runner image's own
+      # copy of exactly that build, else its checked and cached archive (the
+      # action says how), like k6 below.
       - name: Setup Java ${{ env.PETCLINIC_JAVA }}
-        uses: actions/setup-java@v4
+        uses: ./keploy/.github/actions/setup-java-maven/jdk
         with:
-          distribution: 'temurin'
           java-version: ${{ env.PETCLINIC_JAVA }}
 
       - name: Setup Go
