@@ -741,7 +741,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						zap.Int("candidates", report.CandidateCount),
 						zap.String("closest", report.ClosestMock),
 						zap.Strings("differs", models.MissLogDiffers(report)),
-						zap.String("next_step", models.MissLogNextStep(report)))
+						zap.Stringer("next_step", models.LazyMissLogNextStep(report)))
 				}
 
 				// On-miss policy (keploy mock replay --on-miss): passthrough or

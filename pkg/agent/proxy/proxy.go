@@ -7021,7 +7021,7 @@ func (p *Proxy) sendMockNotFoundErrorFrom(ctx context.Context, err error, pid, i
 			zap.String("match_phase", r.MatchPhase),
 			zap.Int("candidates", r.CandidateCount),
 			zap.String("closest", r.ClosestMock),
-			zap.String("next_step", models.MissLogNextStep(r)),
+			zap.Stringer("next_step", models.LazyMissLogNextStep(r)),
 		}
 		// destination_scope is greppable in a node-wide agent log:
 		// "not_in_compared_set" is the one value that says "nothing this miss

@@ -258,71 +258,16 @@ func (m UnmatchedCall) shapedText(text string) string {
 	return idKeyRun.ReplaceAllStringFunc(text, idKeyRunShape)
 }
 
-// shapedRuns is text with each run of whole fields of paths (field paths
-// FieldShape changes) in its shape, where the text names it as whole
-// fields: beginning at the text's start, after a "." or after a mark that
-// ends a word (wordEnd), and ending at the text's end, at a ".", at an
-// index ("[") or at such a mark. A run is any of a path's fields in a row,
-// the last also without its indexes ("tags" of "tags[0]"), as a hint names
-// the keploy.yml entry that matched a field. The longest run at a place
-// wins, and a run FieldShape keeps (no field of it may be a value) is left.
-// So is a number alone: a text's counts are numbers ("and 3 more
-// reasons"), and a path's position ("docs.0.q") is shaped where the text
-// names it with the fields beside it.
-func shapedRuns(text string, paths []string) string {
-	runs := map[string]string{}
-	add := func(run string) {
-		if shape := FieldShape(run); shape != run && strings.Trim(run, "0123456789") != "" {
-			runs[run] = shape
-		}
-	}
-	for _, p := range paths {
-		fields := strings.Split(p, ".")
-		for i := range fields {
-			for j := i + 1; j <= len(fields); j++ {
-				run := strings.Join(fields[i:j], ".")
-				add(run)
-				if k := strings.IndexByte(fields[j-1], '['); k > 0 {
-					add(run[:len(run)-len(fields[j-1])+k])
-				}
-			}
-		}
-	}
-	longest := 0
-	for run := range runs {
-		longest = max(longest, len(run))
-	}
-	var b strings.Builder
-	for i := 0; i < len(text); {
-		end := -1
-		if i == 0 || text[i-1] == '.' || wordEnd(text[i-1]) {
-			// The longest run that begins here and ends at a field's end;
-			// a field may hold a space or a mark (a key "John Smith").
-			for j := i + 1; j <= min(len(text), i+longest); j++ {
-				if j < len(text) && text[j] != '.' && text[j] != '[' && !wordEnd(text[j]) {
-					continue
-				}
-				if _, ok := runs[text[i:j]]; ok {
-					end = j
-				}
-			}
-		}
-		if end < 0 {
-			b.WriteByte(text[i])
-			i++
-			continue
-		}
-		b.WriteString(runs[text[i:end]])
-		i = end
-	}
-	return b.String()
-}
-
 // wordEnd reports whether c ends a word that may name a field: a space or
 // a mark a field's name is not written with in keploy's words.
-func wordEnd(c byte) bool {
-	return strings.IndexByte(" \t\n\r,;:()'\"{}=", c) >= 0
-}
+func wordEnd(c byte) bool { return wordEnds[c] }
+
+var wordEnds = func() (t [256]bool) {
+	for _, c := range []byte(" \t\n\r,;:()'\"{}=") {
+		t[c] = true
+	}
+	return t
+}()
 
 // idKeyField is keploy.yml's id-key segment (matcher.NoiseIDKey): an entry
 // naming it names any id key at that level.
