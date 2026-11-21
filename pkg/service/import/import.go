@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -455,7 +456,7 @@ func extractURL(url interface{}) string {
 func processUrlencodedBody(body []map[string]interface{}) string {
 	keyValues := []string{}
 	for _, item := range body {
-		keyValues = append(keyValues, item["key"].(string)+"="+item["value"].(string))
+		keyValues = append(keyValues, url.QueryEscape(item["key"].(string))+"="+url.QueryEscape(item["value"].(string)))
 	}
 	return strings.Join(keyValues, "&")
 }

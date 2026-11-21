@@ -3,12 +3,16 @@ package postmanimport
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"go.uber.org/zap"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestItemsContainerUnmarshal_DoesNotTreatFoldersAsRequests(t *testing.T) {
@@ -100,4 +104,79 @@ func TestAnImportedTestIsWrittenOnlyInsideTheRecording(t *testing.T) {
 	if entries, err := os.ReadDir(out); err != nil || len(entries) != 0 {
 		t.Fatalf("the import left %v (%v) outside the recording", entries, err)
 	}
+}
+
+func TestProcessUrlencodedBody_PreservesFieldBoundaries(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     []map[string]interface{}
+		wantBody string
+		want     url.Values
+	}{
+		{
+			name: "reserved characters in values stay inside their own field",
+			body: []map[string]interface{}{
+				{"key": "name", "value": "A&B+C"},
+				{"key": "email", "value": "dev+test@example.com"},
+			},
+			wantBody: "name=A%26B%2BC&email=dev%2Btest%40example.com",
+			want: url.Values{
+				"name":  {"A&B+C"},
+				"email": {"dev+test@example.com"},
+			},
+		},
+		{
+			name: "reserved characters in keys stay inside their own field",
+			body: []map[string]interface{}{
+				{"key": "a&b=c", "value": "1#2"},
+			},
+			wantBody: "a%26b%3Dc=1%232",
+			want: url.Values{
+				"a&b=c": {"1#2"},
+			},
+		},
+		{
+			name: "plain fields are left readable",
+			body: []map[string]interface{}{
+				{"key": "name", "value": "Alice"},
+			},
+			wantBody: "name=Alice",
+			want:     url.Values{"name": {"Alice"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := processUrlencodedBody(tt.body)
+			assert.Equal(t, tt.wantBody, got)
+
+			parsed, err := url.ParseQuery(got)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, parsed)
+		})
+	}
+}
+
+func TestConstructRequest_UrlencodedBodyReachesTheTestcaseEncoded(t *testing.T) {
+	req := &PostmanRequest{
+		Method: "POST",
+		URL:    "https://api.example.test/form",
+		Body: PostmanRequestBody{
+			Mode: "urlencoded",
+			Urlencoded: []map[string]interface{}{
+				{"key": "name", "value": "A&B+C"},
+				{"key": "email", "value": "dev+test@example.com"},
+			},
+		},
+	}
+
+	got := constructRequest(req, nil)
+
+	assert.Equal(t, "name=A%26B%2BC&email=dev%2Btest%40example.com", got.Body)
+	parsed, err := url.ParseQuery(got.Body)
+	require.NoError(t, err)
+	assert.Equal(t, url.Values{
+		"name":  {"A&B+C"},
+		"email": {"dev+test@example.com"},
+	}, parsed)
 }
