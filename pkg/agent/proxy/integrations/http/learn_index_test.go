@@ -24,6 +24,8 @@ type genDb struct {
 	gen   uint64
 	spent map[string]bool
 	reads int
+	// declares is what DeclaresSources reports.
+	declares bool
 	// refused counts the claims refused (DeleteFilteredMock of a mock the
 	// per-test read no longer holds).
 	refused int
@@ -47,6 +49,11 @@ func (d *genDb) ExactServing() bool                         { return true }
 func (d *genDb) StagingGeneration() uint64                  { return d.gen }
 func (d *genDb) StagingGenerationByKind(models.Kind) uint64 { return d.gen }
 func (d *genDb) MockSpent(name string) bool                 { return d.spent[name] }
+
+// DeclaresSources is integrations.SourcesDeclarer's: genDb's replay declares
+// a source of no recording, but where declares says it may.
+func (d *genDb) DeclaresSources() bool { return d.declares }
+
 func (d *genDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	d.reads++
 	return d.learnDb.GetPerTestMocksInWindow()

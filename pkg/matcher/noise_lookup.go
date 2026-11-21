@@ -35,6 +35,10 @@ func NewNoiseLookup(noise map[string][]string) NoiseLookup {
 	return NoiseLookup{idx: buildNoiseIndex(noise, nil)}
 }
 
+// Empty reports whether the lookup holds no entry: it then covers no leaf
+// (Covers, CoversAdded) and names none (Patterns).
+func (l NoiseLookup) Empty() bool { return len(l.idx.entries) == 0 }
+
 // Covers reports whether the leaf at path is noise. value is its text when it
 // is a scalar (scalar true); a container is excused only by an entry with no
 // patterns.

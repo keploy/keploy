@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -46,6 +47,11 @@ type strictIndex struct {
 	// read's.
 	vars     []*models.Mock
 	varSplit int
+	// bodies are buckets of byPath filed by their recordings' bodies
+	// (bodiesOf), each on the first call that reads it so; bodyMu guards
+	// them.
+	bodyMu sync.Mutex
+	bodies map[string]*strictBodies
 }
 
 // strictIndexBuilds counts the strict indexes built, and strictVisits the
@@ -88,9 +94,15 @@ func buildStrictIndex(gen uint64, perTest, session []*models.Mock, n strictNoise
 }
 
 // positions are the entries a call of the sieve's method and masked path may
-// be (strictSieve.mayBe), in the pool's order.
-func (ix *strictIndex) positions(s strictSieve) []int {
-	exact, wild := ix.byPath[s.method+" "+s.masked], ix.wild[s.method]
+// be (strictSieve.mayBe), in the pool's order: of its bucket, where the call's
+// body has a print (body, livePrint), only the recordings of that print and
+// those whose body does not compare plainly (bodiesOf).
+func (ix *strictIndex) positions(s strictSieve, body uint64, printed bool) []int {
+	key := s.method + " " + s.masked
+	exact, wild := ix.byPath[key], ix.wild[s.method]
+	if printed && len(exact) > 0 {
+		exact = ix.bodiesOf(key).of(body)
+	}
 	if len(wild) == 0 {
 		return exact
 	}
@@ -215,8 +227,9 @@ func (l strictLook) variables(mockSpent func(string) bool, spent func(*models.Mo
 // of an open test's shared part the pool is the per-test read (the test's
 // unanswered recordings, then the tier's shared part) then the session read
 // (the test's unanswered recordings, then the tier's shared part less those).
-func (l strictLook) candidates(s strictSieve, n strictNoise, mockSpent func(string) bool, spent func(*models.Mock) bool) []*models.Mock {
-	ps := l.ix.positions(s)
+// body and printed are the call's body's print (livePrint).
+func (l strictLook) candidates(s strictSieve, body uint64, printed bool, mockSpent func(string) bool, spent func(*models.Mock) bool) []*models.Mock {
+	ps := l.ix.positions(s, body, printed)
 	var owned []*models.Mock
 	if l.shared {
 		// l.owned is the test's own the call may be already (strictOwned.at).
@@ -347,7 +360,8 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 		}
 	}
 	live := liveDestination(ctx, input)
-	cands := look.candidates(sieve, n, mockSpent, spent)
+	body, printed := livePrint(db, n, input.body)
+	cands := look.candidates(sieve, body, printed, mockSpent, spent)
 	strictVisits.Add(int64(len(cands)))
 	var fits []*models.Mock
 	for _, m := range cands {
