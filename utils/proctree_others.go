@@ -21,3 +21,7 @@ func groupReached(int, syscall.Signal) []Reached { return nil }
 
 // GroupRunsOn reads no process group here: none runs, as far as keploy knows.
 func GroupRunsOn(int) bool { return false }
+
+// exitedUnreaped reads no process state here: no process is known to be a
+// zombie.
+func exitedUnreaped(int) bool { return false }

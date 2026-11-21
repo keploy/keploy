@@ -165,9 +165,18 @@ func listPIDs(kind, arg int) ([]int, error) {
 // process that has exited answers ESRCH, as one that has gone does: a
 // zombie its parent has not reaped yet too, since proc_info reads a zombie's
 // record only when its argument asks for zombies, and Info's does not.
-func Info(pid int) (Proc, error) {
+func Info(pid int) (Proc, error) { return shortInfo(pid, 0) }
+
+// InfoOrZombie reads process pid's short BSD record as Info does, and a
+// zombie's too (Proc.Zombie): its argument asks proc_info for zombies, which
+// it finds through proc_find_zombref. That waits only while another thread
+// reaps or reads that same zombie, never for a held spawn. Only a process
+// that has gone answers ESRCH.
+func InfoOrZombie(pid int) (Proc, error) { return shortInfo(pid, 1) }
+
+func shortInfo(pid int, zombies uint64) (Proc, error) {
 	buf := make([]byte, shortBSDInfoSize)
-	n, err := procInfo(procInfoCallPIDInfo, pid, procPIDTShortBSDInfo, 0, buf)
+	n, err := procInfo(procInfoCallPIDInfo, pid, procPIDTShortBSDInfo, zombies, buf)
 	if err != nil {
 		return Proc{}, err
 	}

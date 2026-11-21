@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 
@@ -34,9 +35,9 @@ func TestProcessesAreReadWhileASpawnIsHeld(t *testing.T) {
 	}
 
 	type result struct {
-		pids, group []int
-		holder      procsock.Proc
-		err         error
+		pids, group  []int
+		holder, held procsock.Proc
+		err          error
 	}
 	done := make(chan result, 1)
 	go func() {
@@ -49,6 +50,9 @@ func TestProcessesAreReadWhileASpawnIsHeld(t *testing.T) {
 			p, err := procsock.Info(pid)
 			if err == nil && pid == h.Holder {
 				r.holder = p
+			}
+			if p, err := procsock.InfoOrZombie(pid); err == nil && pid == h.Holder {
+				r.held = p
 			}
 			_, _ = procsock.SocketFDs(pid)
 		}
@@ -65,6 +69,9 @@ func TestProcessesAreReadWhileASpawnIsHeld(t *testing.T) {
 		}
 		if r.holder.PPID != os.Getpid() {
 			t.Fatalf("Info(holder %d) = %+v; want this process %d as its parent", h.Holder, r.holder, os.Getpid())
+		}
+		if r.held != r.holder {
+			t.Fatalf("InfoOrZombie(holder %d) = %+v; want %+v, as Info read it", h.Holder, r.held, r.holder)
 		}
 		if !slices.Contains(r.group, os.Getpid()) || !slices.Contains(r.group, h.Holder) {
 			t.Fatalf("GroupPIDs(%d) = %v; want this process %d and the holder %d", unix.Getpgrp(), r.group, os.Getpid(), h.Holder)
@@ -96,10 +103,11 @@ func TestInfoReadsParentAndGroup(t *testing.T) {
 }
 
 // A process that has exited and waits for its parent to reap it, a zombie,
-// has no record: Info answers ESRCH, as for a process that has gone. What
-// reads the records (GroupRunsOn, the interrupt's tree) counts on it.
+// has no record Info reads: it answers ESRCH, as for a process that has gone.
+// InfoOrZombie reads it, with its parent and the group it led, as a zombie.
 func TestInfoOfAZombieAnswersESRCH(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -120,5 +128,16 @@ func TestInfoOfAZombieAnswersESRCH(t *testing.T) {
 	}
 	if p, err := procsock.Info(pid); !errors.Is(err, unix.ESRCH) {
 		t.Fatalf("Info(zombie %d) = %+v, %v; want ESRCH", pid, p, err)
+	}
+	want := procsock.Proc{PID: pid, PPID: os.Getpid(), PGID: pid, Zombie: true}
+	if p, err := procsock.InfoOrZombie(pid); err != nil || p != want {
+		t.Fatalf("InfoOrZombie(zombie %d) = %+v, %v; want %+v", pid, p, err, want)
+	}
+	self := procsock.Proc{PID: os.Getpid(), PPID: os.Getppid(), PGID: unix.Getpgrp()}
+	if p, err := procsock.InfoOrZombie(os.Getpid()); err != nil || p != self {
+		t.Fatalf("InfoOrZombie(self) = %+v, %v; want %+v", p, err, self)
+	}
+	if _, err := procsock.InfoOrZombie(1 << 30); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("InfoOrZombie of a pid no process has answered %v; want ESRCH", err)
 	}
 }

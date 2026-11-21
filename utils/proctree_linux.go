@@ -72,6 +72,13 @@ func readProcTable(proc fs.FS) (procTable, error) {
 	return table, nil
 }
 
+// exitedUnreaped and groupExited read no zombie on Linux: kill(2) of a
+// zombie, or of a group of zombies only, succeeds there, so their signals
+// need no such reading, and a zombie counts as running until it is reaped,
+// as it always has here.
+func exitedUnreaped(int) bool { return false }
+func groupExited(int) bool    { return false }
+
 // groupReached is each process of process group pgid as /proc shows it now,
 // and whether it ignores sig: what a signal sent to the group next reaches.
 // A process that exits as /proc is read, a zombie, and a process whose
