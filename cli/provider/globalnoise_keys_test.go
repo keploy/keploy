@@ -45,3 +45,27 @@ func TestPreProcessFlagsReadsGlobalNoiseKeysAsWritten(t *testing.T) {
 		t.Fatalf("test.globalNoise read as\n%#v\nwant\n%#v", cfg.Test.GlobalNoise, want)
 	}
 }
+
+// Where keploy.yml has no test.globalNoise, the override's is read as
+// written too: its url regex keeps its case and a requestbody key its dot.
+// Mutation: Files.Merge keeps the test.globalNoise it held before the
+// override (none), so keploy unmarshals viper's copy of the override's.
+func TestPreProcessFlagsReadsAnOverridesGlobalNoiseAsWrittenWhereKeployYmlHasNone(t *testing.T) {
+	configDir := writeKeployYML(t, "test:\n  delay: 7\n")
+	appDir := t.TempDir()
+	override := filepath.Join(appDir, filepath.Base(appDir)+".keploy.yml")
+	if err := os.WriteFile(override, []byte("test:\n  globalNoise:\n    global:\n      url: {\"^/Users/[0-9]+$\": []}\n      requestbody: {\"data.Id\": []}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := preProcessIn(t, configDir, appDir)
+	if err != nil {
+		t.Fatalf("PreProcessFlags: %v", err)
+	}
+	want := config.GlobalNoise{"url": {`^/Users/[0-9]+$`: {}}, "requestbody": {"data.Id": {}}}
+	if !reflect.DeepEqual(cfg.Test.GlobalNoise.Global, want) || len(cfg.Test.GlobalNoise.Testsets) != 0 {
+		t.Fatalf("test.globalNoise read as\n%#v\nwant global\n%#v", cfg.Test.GlobalNoise, want)
+	}
+	if cfg.Test.Delay != 7 {
+		t.Fatalf("test.delay read as %d, want keploy.yml's 7", cfg.Test.Delay)
+	}
+}
