@@ -185,3 +185,23 @@ func TestWhyKindsInYAMLAndStripHeaderAreIdempotent(t *testing.T) {
 		t.Fatalf("StripWhyHeader corrupted non-header comments:\n%s", stripped)
 	}
 }
+
+func TestDecidePopulatesCompactLineResolvableThroughHeader(t *testing.T) {
+	ds := Decide(oInput("body.cmd.filter.appId", "6a7f20f8-1111-2222-3333-444455556666", "6c8db4e9-1111-2222-3333-444455556666", nil, nil))
+	if len(ds) != 1 || ds[0].Outcome != OutcomeFresh {
+		t.Fatalf("unexpected Decide output: %+v", ds)
+	}
+	got := CompactLine(ds[0])
+	if !strings.HasPrefix(got, "["+WhyKindFresh+"] ") || got == ds[0].Line {
+		t.Fatalf("CompactLine(d) = %q (Line=%q); want compact [fresh] line", got, ds[0].Line)
+	}
+	hdr := ParseWhyHeader([]byte(FormatWhyHeader([]string{WhyKindFresh})))
+	res, ok := ResolveWhy(hdr, got)
+	if !ok || res.Kind != WhyKindFresh || !strings.Contains(res.Rule, "no place before the call shows it") ||
+		!strings.Contains(res.Undo, `test.globalNoise.global.requestbody: {"cmd.filter.appId": []}`) {
+		t.Fatalf("CompactLine(d) did not resolve through header: ok=%v %+v", ok, res)
+	}
+	if fb := CompactLine(Decision{Line: "fallback line"}); fb != "fallback line" {
+		t.Fatalf("CompactLine fallback = %q, want fallback line", fb)
+	}
+}
