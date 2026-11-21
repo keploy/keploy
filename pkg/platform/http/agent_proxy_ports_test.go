@@ -17,30 +17,17 @@ import (
 	"go.keploy.io/server/v3/utils"
 )
 
-// drawPort is where the rows draw their ports: utils.GetAvailablePort, which
-// closes its probe listener before it returns, so two draws can return one
-// port.
-var drawPort = utils.GetAvailablePort
-
-// holdPort draws a free port and holds it with a TCP listener until the test
-// ends. A draw that returns a port held already, by this test or another
-// process, cannot bind it and draws again, so no two ports a row holds meet.
+// holdPort holds a free port, one the kernel picks (":0"), with a TCP
+// listener until the test ends: no other process can take it once it is
+// picked, and no two ports a row holds meet.
 func holdPort(t *testing.T) (uint32, net.Listener) {
 	t.Helper()
-	for i := 0; i < 16; i++ {
-		p, err := drawPort()
-		if err != nil {
-			t.Fatalf("GetAvailablePort: %v", err)
-		}
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
-		if err != nil {
-			continue // held since it was drawn
-		}
-		t.Cleanup(func() { _ = ln.Close() })
-		return p, ln
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("hold a free port: %v", err)
 	}
-	t.Fatal("could not hold a free port")
-	return 0, nil
+	t.Cleanup(func() { _ = ln.Close() })
+	return uint32(ln.Addr().(*net.TCPAddr).Port), ln
 }
 
 // heldTCPPort is a free port this test then holds with a TCP listener, as
@@ -153,29 +140,6 @@ func TestANativeAgentOffLinuxIsMovedOffATakenPortAndTheMoveSaid(t *testing.T) {
 		}
 	}
 	t.Run("free ports kept, nothing said", freeKept)
-	// Two draws return one port now and then (drawPort). Forced here: the
-	// second draw returns the first's port, held by then, and is drawn again.
-	t.Run("free ports kept when two draws return one port", func(t *testing.T) {
-		was := drawPort
-		t.Cleanup(func() { drawPort = was })
-		var first uint32
-		draws := 0
-		drawPort = func() (uint32, error) {
-			draws++
-			if draws == 2 {
-				return first, nil
-			}
-			p, err := was()
-			if draws == 1 {
-				first = p
-			}
-			return p, err
-		}
-		freeKept(t)
-		if draws < 4 {
-			t.Fatalf("%d draws; want the second one's port, the first's, drawn again", draws)
-		}
-	})
 	for _, server := range []string{"proxy", "DNS server"} {
 		t.Run(server+" taken", func(t *testing.T) {
 			free := freeAtProbe(t)
