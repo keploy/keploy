@@ -68,11 +68,11 @@ func TestShapedRunsShapesAsEveryRunWould(t *testing.T) {
 	u := "00000001-0000-4000-8000-000000000001"
 	fields := []string{"body", "node", "a", "b", "sessions", u, "token", "1", "7", "1700000000", "tags[0]", "tags", "[0]",
 		"header", "X-Trace2", "bind", "$1", "literal", "3", "John Smith", "jane@example", "com", "", "line1", "id(x", "k=v", "{}",
-		u + "[0]", "1700000000[1]", "x y", "x", "a:b"}
+		u + "[0]", "1700000000[1]", "x y", "x", "a:b", "{", "{[0]"}
 	marks := []string{".", ".", ".", " ", ", ", "[", "[]", "(", ")", ": ", "'", "=", "{", "}", "s"}
 	// Few fields, so paths repeat runs of fields (the automaton's shared
 	// states), with an SQL place and a header's name to read as one.
-	few := []string{"a", "b", u, "7", "literal", "3", "header", "a:b", "x y", u + "[0]"}
+	few := []string{"a", "b", u, "7", "literal", "3", "header", "a:b", "x y", u + "[0]", "{}", "{"}
 	rng := rand.New(rand.NewSource(5143))
 	pick := func(xs []string) string { return xs[rng.Intn(len(xs))] }
 	for c := 0; c < 60000; c++ {
@@ -127,6 +127,27 @@ func TestShapedRunsShapesAsEveryRunWould(t *testing.T) {
 		if got, want := shapedRuns(text, paths), shapedRunsByEveryRun(text, paths); got != want {
 			t.Fatalf("paths %q, text %q:\nshapedRuns    %q\nevery run     %q", paths, text, got, want)
 		}
+	}
+}
+
+// A key "{}" is kept whole, but its start "{" is shaped where a path holds
+// "{" as a field, so a run "a.b.{" that a text names inside "a.b.{}" is
+// shaped though the longer run "a.b.{}.c" around it is none to shape.
+func TestTheNextStepShapesAShapedStartOfAKeptField(t *testing.T) {
+	u := "00000001-0000-4000-8000-000000000001"
+	v := "00000002-0000-4000-8000-000000000002"
+	paths := []string{"b.{}.c." + u, "a.b.{", "a.b.{}." + u}
+	text := "a.b.{}.c." + u
+	if got, want := shapedRuns(text, paths), shapedRunsByEveryRun(text, paths); got != want || got != "a.b.{}}.c.{}" {
+		t.Errorf("shapedRuns %q; every run %q, want a.b.{}}.c.{}", got, want)
+	}
+	m := UnmatchedCall{Protocol: "HTTP", NextSteps: "entries for a.b.{}.c." + v + " differ", FieldDiffs: []MockFieldDiff{
+		{Path: "body.x.a.b.{}." + u, Kind: DiffKindValueChanged},
+		{Path: "body.y.a.b.{", Kind: DiffKindValueChanged},
+		{Path: "body.z.b.{}.c." + v, Kind: DiffKindValueChanged},
+	}}
+	if got, want := m.SanitizedNextStep(), "entries for a.b.{}}.c.{} differ"; got != want {
+		t.Errorf("next step %q; want %q", got, want)
 	}
 }
 
