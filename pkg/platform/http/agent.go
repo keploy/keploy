@@ -624,6 +624,13 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 		a.logger.Warn("the keploy agent did not record some requests: it was short of memory when they came, and its memory guard had paused recording; each connection's requests after the pause are recorded",
 			zap.Uint64("requests", p.Requests), zap.Int("connections", p.Connections))
 	}
+	if p := s.NotRecordedWhilePaused; p.Requests > 0 || s.SuppressedByPause > 0 || s.MocksDropped.ByControlPlanePause > 0 {
+		// Asked for, so not a warning: the agent was not short of anything.
+		a.logger.Info("the keploy agent did not record some requests: its control plane had paused recording when they came, or they were in flight as it paused or resumed it; requests after the resume are recorded",
+			zap.Uint64("requests", p.Requests), zap.Int("connections", p.Connections),
+			zap.Int("test_cases_left_out", s.SuppressedByPause),
+			zap.Int64("mocks_dropped", s.MocksDropped.ByControlPlanePause))
+	}
 	if d := s.MocksDropped; d.Dropped() {
 		a.logger.Warn(models.MocksDroppedSaid,
 			zap.Int64("by_memory_pressure", d.ByPressure), zap.Uint64("for_the_output", d.Capacity),

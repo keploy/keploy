@@ -36,11 +36,19 @@ type notRecordedUnderPressure struct {
 // It counts what no other count does: a request whose window the pause gave up
 // and that its capture then kept is told as left out (Window.Keep), so a
 // caller notes here only a request it never brought to Keep.
+//
+// A request the pause cost when the control plane's pause was the only one in
+// force (pauseCauseLatest) is counted apart (NotRecordedWhilePaused), not here:
+// the agent was not short of memory, and its summary must not say it was.
+// Callers need not tell the two apart.
 func (m *SyncMockManager) NoteNotRecordedUnderPressure(conn string) {
 	if m == nil {
 		return
 	}
 	s := &m.notRecorded
+	if pauseCauseLatest() == PauseCauseExternal {
+		s = &m.notRecordedPaused
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.total++
@@ -75,7 +83,22 @@ func (m *SyncMockManager) NotRecordedUnderPressure() PressureSkips {
 	if m == nil {
 		return PressureSkips{}
 	}
-	s := &m.notRecorded
+	return m.notRecorded.read()
+}
+
+// NotRecordedWhilePaused is NotRecordedUnderPressure for the requests an
+// ingress did not record because the control plane had paused recording when
+// they came (PauseCauseExternal): what NoteNotRecordedUnderPressure counted
+// while that pause was the only one in force. Nil-safe.
+func (m *SyncMockManager) NotRecordedWhilePaused() PressureSkips {
+	if m == nil {
+		return PressureSkips{}
+	}
+	return m.notRecordedPaused.read()
+}
+
+// read returns a copy of what s has counted.
+func (s *notRecordedUnderPressure) read() PressureSkips {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := PressureSkips{Total: s.total, Other: s.other}

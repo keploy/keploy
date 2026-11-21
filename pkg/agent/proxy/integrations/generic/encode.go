@@ -42,6 +42,25 @@ type captureStream struct {
 	mu      sync.Mutex
 	stopped bool // nothing more is queued; ch is closed
 	open    int  // directions not ended yet
+
+	// client and dest are the connection's two sides, for a pause of the
+	// control plane's to track once it stops the capture (demoteForPause);
+	// untrack ends that tracking, as the connection's forwarding ends.
+	client, dest net.Conn
+	untrack      func()
+}
+
+// forwardingEnded is called as the connection's forwarding ends: a
+// connection a pause stopped the capture of is no longer tracked for the
+// resume to reset.
+func (c *captureStream) forwardingEnded() {
+	c.mu.Lock()
+	untrack := c.untrack
+	c.untrack = nil
+	c.mu.Unlock()
+	if untrack != nil {
+		untrack()
+	}
 }
 
 func newCaptureStream(size, directions int) *captureStream {
@@ -56,7 +75,7 @@ func (c *captureStream) add(fromClient bool, p []byte) {
 	if c.stopped {
 		return
 	}
-	if memoryguard.IsRecordingPaused() {
+	if memoryguard.IsRecordingPaused() && c.demoteForPause() {
 		c.stopLocked()
 		return
 	}
@@ -67,6 +86,23 @@ func (c *captureStream) add(fromClient bool, p []byte) {
 	default:
 		c.stopLocked()
 	}
+}
+
+// demoteForPause reports whether a pause of recording ends the capture, c.mu
+// held: always under the memory guard's pause; under a pause the control
+// plane asked for, only when the connection can be tracked for the resume to
+// reset (proxyutil.DemoteForPause), since nothing captures it again once its
+// capture has stopped. A stream with no connections to track (a test's) stops
+// as it always did.
+func (c *captureStream) demoteForPause() bool {
+	if c.client == nil || c.dest == nil {
+		return true
+	}
+	demote, done := proxyutil.DemoteForPause(c.client, c.dest)
+	if demote {
+		c.untrack = done
+	}
+	return demote
 }
 
 // stopLocked ends the capture, c.mu held: the mock maker gets what was
@@ -131,15 +167,24 @@ func encodeGenericWithDrain(ctx context.Context, logger *zap.Logger, reqBuf []by
 		return err
 	}
 
-	// If recording is already paused, pure passthrough.
+	// If recording is already paused, pure passthrough: tracked, under a
+	// pause the control plane asked for, so that the resume resets the
+	// connection (proxyutil.DemoteForPause); when it cannot be tracked, the
+	// connection is captured as ever, and the mock manager drops what it
+	// makes of the pause.
 	if memoryguard.IsRecordingPaused() {
-		return forwardBidirectional(clientConn, destConn)
+		if demote, done := proxyutil.DemoteForPause(clientConn, destConn); demote {
+			defer done()
+			return forwardBidirectional(clientConn, destConn)
+		}
 	}
 
 	// The capture stream, both directions in order (captureStream); a
 	// background goroutine reads it to create mocks. Buffered to absorb
 	// brief processing delays without blocking forwarding.
 	stream := newCaptureStream(512, 2)
+	stream.client, stream.dest = clientConn, destConn
+	defer stream.forwardingEnded()
 
 	// The initial request buffer, forwarded above before either copy began,
 	// so before any answer to it was read: first on the stream.
