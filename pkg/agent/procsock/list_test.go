@@ -112,31 +112,37 @@ func TestReadPIDsAnswersTheListsError(t *testing.T) {
 	}
 }
 
+// record lays out a struct proc_bsdshortinfo as <sys/proc_info.h> has it,
+// written out here rather than from the reader's own constants: 64 bytes,
+// pbsi_pid at 0, pbsi_ppid at 4, pbsi_pgid at 8, pbsi_status at 12.
 func record(ppid, pgid, status uint32) []byte {
-	rec := make([]byte, shortBSDInfoSize)
-	binary.LittleEndian.PutUint32(rec[0:], 0xffffffff) // pbsi_pid's slot: not read
-	binary.LittleEndian.PutUint32(rec[offShortPPID:], ppid)
-	binary.LittleEndian.PutUint32(rec[offShortPGID:], pgid)
-	binary.LittleEndian.PutUint32(rec[offShortStatus:], status)
+	rec := make([]byte, 64)
+	for i := range rec {
+		rec[i] = 0xee
+	}
+	binary.LittleEndian.PutUint32(rec[0:], 0xffffffff) // pbsi_pid: not read
+	binary.LittleEndian.PutUint32(rec[4:], ppid)
+	binary.LittleEndian.PutUint32(rec[8:], pgid)
+	binary.LittleEndian.PutUint32(rec[12:], status)
 	return rec
 }
 
 func TestShortRecordReadsParentGroupAndState(t *testing.T) {
-	const sRun = 2 // SRUN
+	const sRun, sZombie = 2, 5 // SRUN, SZOMB: bsd/sys/proc.h
 	for _, c := range []struct {
 		status uint32
 		want   Proc
 	}{
 		{sRun, Proc{PID: 50, PPID: 3, PGID: 40}},
-		{sZomb, Proc{PID: 50, PPID: 3, PGID: 40, Zombie: true}},
+		{sZombie, Proc{PID: 50, PPID: 3, PGID: 40, Zombie: true}},
 	} {
-		got, err := shortRecord(50, record(3, 40, c.status), shortBSDInfoSize)
+		got, err := shortRecord(50, record(3, 40, c.status), 64)
 		if err != nil || got != c.want {
 			t.Errorf("status %d: shortRecord = %+v, %v; want %+v", c.status, got, err, c.want)
 		}
 	}
 	// A record shorter than the struct is not read.
-	if got, err := shortRecord(50, record(3, 40, sRun), shortBSDInfoSize-1); err == nil {
+	if got, err := shortRecord(50, record(3, 40, sRun), 63); err == nil {
 		t.Errorf("a short record read as %+v; want an error", got)
 	}
 }
