@@ -690,18 +690,21 @@ func skipMessage(kind models.SkipKind, reason string) string {
 	return skipLine(kind, capBytes(models.SkipReasonOneLine(reason), maxSkipMessageReason))
 }
 
-// skipLine says a case was skipped, as what kind of skip, and why: a test
-// skipped for that run only, or until it is re-recorded, is not called
-// quarantined. A quarantine, and a kind keploy does not know, get a
-// quarantine's words, as every skip did before there were kinds.
+// skipLine says a case was skipped, as what kind of skip, and why: only a
+// quarantine is called quarantined, in the words every skip had before there
+// were kinds. A test skipped for that run only, or until it is re-recorded,
+// says so, and a kind keploy does not know (models.SkipOther) says only that
+// keploy skipped it.
 func skipLine(kind models.SkipKind, reason string) string {
 	switch kind {
+	case models.SkipQuarantined:
+		return "quarantined by keploy (" + reason + ")"
 	case models.SkipThisRunOnly:
 		return "skipped by keploy for this run only (" + reason + ")"
 	case models.SkipUntilRerecorded:
 		return "skipped by keploy until it is re-recorded (" + reason + ")"
 	}
-	return "quarantined by keploy (" + reason + ")"
+	return "skipped by keploy (" + reason + ")"
 }
 
 // maxSkipMessageReason bounds the reason in a <skipped message>: a

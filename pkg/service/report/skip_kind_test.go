@@ -41,8 +41,13 @@ func forEachSwitchMode(t *testing.T, f func(t *testing.T)) {
 	}
 }
 
+// aLaterKind is a kind of skip this keploy does not know, as a later keploy
+// could write into a report.
+const aLaterKind = models.SkipKind("a_later_kind")
+
 // Each kind of skip a test can have, with the words the test's line and
-// JUnit say it in, before its reason.
+// JUnit say it in, before its reason; a kind keploy does not know is said
+// only as skipped by keploy.
 var skipKindLines = []struct {
 	kind  models.SkipKind
 	words string
@@ -50,6 +55,7 @@ var skipKindLines = []struct {
 	{models.SkipQuarantined, "quarantined by keploy ("},
 	{models.SkipThisRunOnly, "skipped by keploy for this run only ("},
 	{models.SkipUntilRerecorded, "skipped by keploy until it is re-recorded ("},
+	{aLaterKind, "skipped by keploy ("},
 }
 
 // A test skipped for this run only (keploy test --judge's rerun skipping a
@@ -340,25 +346,56 @@ func TestASkippedTestsFailedWriteIsReturned(t *testing.T) {
 	})
 }
 
-// A kind keploy does not know is said as a quarantine, as a skip of no kind
-// is: in the test's line, in JUnit and in the summary.
-func TestAnUnknownSkipKindIsSaidAsBefore(t *testing.T) {
+// A kind keploy does not know (one a later keploy wrote into a report) is
+// never called quarantined: the test's line and JUnit say only that keploy
+// skipped it, and the summary counts and lists it apart from a quarantine
+// beside it, after the kinds keploy knows.
+func TestAnUnknownSkipKindIsSaidAsSkippedNotQuarantined(t *testing.T) {
 	forEachSwitchMode(t, func(t *testing.T) {
-		row := models.TestResult{Kind: models.HTTP, TestCaseID: "test-u", Name: "test-set-1", Status: models.TestStatusIgnored, SkipReason: "why u", SkipKind: models.SkipKind("a_later_kind")}
+		row := models.TestResult{Kind: models.HTTP, TestCaseID: "test-u", Name: "test-set-1", Status: models.TestStatusIgnored, SkipReason: "why u", SkipKind: aLaterKind}
 		r := New(zap.NewNop(), &config.Config{DisableANSI: true}, nil, nil)
 		var buf bytes.Buffer
 		r.out = bufio.NewWriter(&buf)
 		if err := r.printTests(context.Background(), []models.TestResult{row}); err != nil {
 			t.Fatalf("printTests: %v", err)
 		}
-		if out := buf.String(); !strings.Contains(out, "  quarantined by keploy (why u)\n") {
+		if out := buf.String(); !strings.Contains(out, "  skipped by keploy (why u)\n") || strings.Contains(out, "quarantined") {
 			t.Fatalf("the test's line:\n%s", out)
 		}
-		if s := ignoredSkip(row); s.Message != "quarantined by keploy (why u)" {
+		if s := ignoredSkip(row); s.Message != "skipped by keploy (why u)" {
 			t.Fatalf("JUnit message %q", s.Message)
 		}
-		if skipped := skippedTests(map[string]*models.TestReport{"test-set-1": {Tests: []models.TestResult{row}}}); len(skipped) != 1 || len(skipped[models.SkipQuarantined]) != 1 {
-			t.Fatalf("summary: %v; want it quarantined", skipped)
+
+		// Read back from a report file, beside a quarantine.
+		raw := "tests:\n" +
+			"  - kind: Http\n    name: test-set-1\n    status: IGNORED\n    test_case_id: test-q\n    skip_reason: \"manual: why q\"\n" +
+			"  - kind: Http\n    name: test-set-1\n    status: IGNORED\n    test_case_id: test-u\n    skip_reason: why u\n    skip_kind: a_later_kind\n"
+		var rep models.TestReport
+		if err := yaml.Unmarshal([]byte(raw), &rep); err != nil {
+			t.Fatalf("read the report: %v", err)
+		}
+		if len(rep.Tests) != 2 || rep.Tests[1].SkipKind != aLaterKind {
+			t.Fatalf("read back %+v; want the later kind kept", rep.Tests)
+		}
+		reports := map[string]*models.TestReport{"test-set-1": &rep}
+		skipped := skippedTests(reports)
+		if len(skipped[models.SkipQuarantined]) != 1 || len(skipped[models.SkipOther]) != 1 || len(skipped) != 2 {
+			t.Fatalf("summary: %v; want the quarantine and the later kind apart", skipped)
+		}
+		buf.Reset()
+		r.out = bufio.NewWriter(&buf)
+		if err := r.printSummary(reports); err != nil {
+			t.Fatalf("printSummary: %v", err)
+		}
+		out := buf.String()
+		for _, want := range []string{
+			"\tTotal test quarantined: 1\n\tTotal test skipped by keploy for other reasons: 1\n",
+			"\nQUARANTINED TEST CASES:\n\t- test-set-1/test-q: manual: why q\n" +
+				"\nTEST CASES SKIPPED BY KEPLOY FOR OTHER REASONS:\n\t- test-set-1/test-u: why u\n",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("want %q:\n%s", want, out)
+			}
 		}
 	})
 }

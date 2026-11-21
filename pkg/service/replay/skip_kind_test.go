@@ -310,18 +310,28 @@ func TestRunTestSet_FullyIgnoredSetRowsCarryTheirKind(t *testing.T) {
 	}
 }
 
-// A kind keploy does not know is listed with the quarantined, as a skip of no
-// kind is: no skip with a reason drops out of the summary.
-func TestQuarantinedSummary_AnUnknownKindIsListedAsBefore(t *testing.T) {
+// A kind keploy does not know is never called quarantined: it is said, at
+// Debug, as a skip for another reason, and listed last, apart from a
+// quarantine beside it. No skip with a reason drops out of the summary.
+func TestQuarantinedSummary_AnUnknownKindIsListedApartNotQuarantined(t *testing.T) {
 	for _, m := range switchModes {
 		t.Run(m.name, func(t *testing.T) {
 			setProvenSwitch(t, m.on)
 			h := newPartialRunHarness(t, 1, 0)
-			h.replayer.config.Test.SkipReasons = skipReasonsFor("set-a", map[string]string{"t-1": "why one"})
+			h.replayer.config.Test.SkipReasons = skipReasonsFor("set-a", map[string]string{"t-1": "why one", "t-2": "manual: why two"})
 			h.replayer.config.Test.SkipKinds = map[string]map[string]models.SkipKind{"set-a": {"t-1": models.SkipKind("a_later_kind")}}
+			core, logs := observer.New(zap.DebugLevel)
+			h.replayer.logger = zap.New(core)
 			h.replayer.noteQuarantined("set-a", "t-1", "why one")
-			if got, want := h.replayer.quarantinedSummary(), quarantineHeading(m.on, "1")+"\t\tset-a/t-1: why one\n"; got != want {
+			h.replayer.noteQuarantined("set-a", "t-2", "manual: why two")
+			want := quarantineHeading(m.on, "1") + "\t\tset-a/t-2: manual: why two\n" +
+				"\n\tTests skipped by keploy for other reasons: 1\n\t\tset-a/t-1: why one\n"
+			if got := h.replayer.quarantinedSummary(); got != want {
 				t.Fatalf("summary\n%q\nwant\n%q", got, want)
+			}
+			said := logs.FilterField(zap.String("testcase", "t-1")).All()
+			if len(said) != 1 || said[0].Message != "skipping a test for another reason" {
+				t.Fatalf("said %+v; want one Debug line of a skip for another reason", said)
 			}
 		})
 	}

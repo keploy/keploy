@@ -75,29 +75,32 @@ func (r *Replayer) forgetQuarantined() {
 
 // skipWords are what the run says of a skip of kind: at Debug, as it skips
 // the test, and as the heading of the run summary's block of such skips. A
-// skip that is no quarantine is not called one. A quarantine, and a kind
-// keploy does not know, get a quarantine's words, which name the proven
-// switch only when the switch is on, as they did before skips had kinds.
+// skip that is no quarantine is not called one. A quarantine gets the words
+// it had before skips had kinds, which name the proven switch only when the
+// switch is on, and a kind keploy does not know (models.SkipOther) says only
+// that keploy skipped the test.
 func skipWords(kind models.SkipKind) (said, heading string) {
 	switch kind {
+	case models.SkipQuarantined:
+		if provenswitch.On() {
+			return "skipping a quarantined test (" + provenswitch.Env + "=1)", "Quarantined tests, skipped by keploy (" + provenswitch.Env + "=1)"
+		}
+		return "skipping a test for a reason", "Tests skipped by keploy for a reason"
 	case models.SkipThisRunOnly:
 		return "skipping a test for this run only", "Tests skipped by keploy for this run only, not quarantined"
 	case models.SkipUntilRerecorded:
 		return "skipping a test until it is re-recorded", "Tests skipped by keploy until they are re-recorded, not quarantined"
 	}
-	if provenswitch.On() {
-		return "skipping a quarantined test (" + provenswitch.Env + "=1)", "Quarantined tests, skipped by keploy (" + provenswitch.Env + "=1)"
-	}
-	return "skipping a test for a reason", "Tests skipped by keploy for a reason"
+	return "skipping a test for another reason", "Tests skipped by keploy for other reasons"
 }
 
 // quarantinedSummary is the run summary's list of the tests it skipped for a
 // reason, one block per kind of skip (models.SkipKinds, the quarantined
 // first), each under its heading (skipWords) and by test set and test, each
 // test with its reason on one line; "" when it skipped none. A kind keploy
-// does not know is listed with the quarantined (models.SkipKind.Said), and a
-// run that skipped only quarantined tests prints what it printed before
-// skips had kinds.
+// does not know is listed last, apart from the quarantined
+// (models.SkipOther), and a run that skipped only quarantined tests prints
+// what it printed before skips had kinds.
 func (r *Replayer) quarantinedSummary() string {
 	r.quarantinedMu.Lock()
 	byKind := make(map[models.SkipKind][][2]string)

@@ -481,15 +481,19 @@ type skippedTest struct{ set, test, reason string }
 
 // skipSummaryWords are the summary's words for the tests skipped as kind: its
 // count's, and its list's heading. A quarantine's are what they were before
-// skips had kinds.
+// skips had kinds, and only a quarantine's say quarantined: the tests of a
+// kind keploy does not know (models.SkipOther) are counted and listed as
+// skipped by keploy for other reasons.
 func skipSummaryWords(kind models.SkipKind) (total, heading string) {
 	switch kind {
+	case models.SkipQuarantined:
+		return "Total test quarantined", "QUARANTINED TEST CASES:"
 	case models.SkipThisRunOnly:
 		return "Total test skipped for this run only", "TEST CASES SKIPPED FOR THIS RUN ONLY:"
 	case models.SkipUntilRerecorded:
 		return "Total test skipped until re-recorded", "TEST CASES SKIPPED UNTIL RE-RECORDED:"
 	}
-	return "Total test quarantined", "QUARANTINED TEST CASES:"
+	return "Total test skipped by keploy for other reasons", "TEST CASES SKIPPED BY KEPLOY FOR OTHER REASONS:"
 }
 
 // skippedTestsBlock is the summary's list of tests under heading, each with
@@ -508,8 +512,8 @@ func skippedTestsBlock(heading string, tests []skippedTest) string {
 
 // skippedTests are the IGNORED tests of the reports that carry a skip reason,
 // by the kind they are said as (models.SkipKind.Said: a kind keploy does not
-// know with the quarantined, as skipLine says it), each kind's by test set
-// and then in report order.
+// know as models.SkipOther, apart from the quarantined, as skipLine says it),
+// each kind's by test set and then in report order.
 func skippedTests(reports map[string]*models.TestReport) map[models.SkipKind][]skippedTest {
 	names := make([]string, 0, len(reports))
 	for name := range reports {
