@@ -521,6 +521,46 @@ func TestATestsLineNamesEveryRecordingThatAnsweredIt(t *testing.T) {
 	}
 }
 
+// drainInstr answers each consumed read from a real mock manager, which
+// hands back only what was consumed since its last read, as the agent's
+// does.
+type drainInstr struct {
+	outcomeInstr
+	mm *proxy.MockManager
+}
+
+func (d drainInstr) GetConsumedMocks(context.Context) ([]models.MockState, error) {
+	return d.mm.GetConsumedMocks(), nil
+}
+
+// A test's line names a recording once when two consumed reads both carry
+// it under that test: the wait for the series the run owes reads what was
+// consumed once the test command has exited (readOwedSeries), and the run's
+// end reads again what was consumed after that (withSeriesRead). A test
+// left open when its command exited (its process died mid-test) holds its
+// window open through the wait, so a recording that answered it before the
+// wait's read and again after is in both reads, each under that window.
+func TestATestsLineNamesARecordingOnceWhenTwoReadsCarryIt(t *testing.T) {
+	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	serve := func(name string, lt models.Lifetime) {
+		t.Helper()
+		require.True(t, mm.MarkMockAsUsed(models.Mock{Name: name, Kind: models.HTTP, TestModeInfo: models.TestModeInfo{Lifetime: lt}}), name)
+	}
+	mm.OpenTestWindow(1) // pkg.TestA, open when the test command exited
+	serve("mock-21", models.LifetimeSession)
+	m := &mockService{logger: zap.NewNop(), config: &config.Config{}, instrumentation: drainInstr{mm: mm}}
+	m.readOwedSeries(context.Background(), nil) // the wait's read
+	require.Len(t, m.seriesRead, 1)
+	serve("mock-21", models.LifetimeSession) // the application runs on
+	serve("mock-10", models.LifetimePerTest)
+	mm.CloseTestWindow(1) // the run's end fails and closes it
+	windows := []models.ScopeWindow{{Name: "pkg.TestA", Seq: 1, Start: time.Unix(10, 0), End: time.Unix(50, 0), Outcome: models.ScopeOutcomeFailed}}
+	counts := m.reportOutcome(context.Background(), 2, replayDetail{set: "s", windows: windows, expected: map[string][]models.MockEntry{"pkg.TestA": {{Name: "mock-10"}}}}, func() bool { return false })
+	require.Len(t, counts.tests, 1, "%+v", counts.tests)
+	require.Equal(t, []string{"mock-21", "mock-10"}, counts.tests[0].AnsweredBy, "mock-21 once, though both reads carry it under pkg.TestA")
+}
+
 // A recording that answered while no test window was open (a background
 // call between two tests, or after the last) is named on no test's line,
 // yet the application may keep its answer and send it on in a later test's
