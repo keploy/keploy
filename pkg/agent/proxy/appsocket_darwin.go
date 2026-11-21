@@ -7,8 +7,6 @@ import (
 	"net/netip"
 	"sync/atomic"
 
-	"golang.org/x/sys/unix"
-
 	"go.keploy.io/server/v3/pkg/agent/procsock"
 )
 
@@ -75,16 +73,12 @@ var heldSocketsRead = readHeldSockets
 var heldSocketRead = procsock.Socket
 
 func readHeldSockets() (map[[2]netip.AddrPort]heldSocket, error) {
-	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	pids, err := procsock.PIDs()
 	if err != nil {
 		return nil, fmt.Errorf("list the processes whose descriptor tables hold the application's sockets: %v", err)
 	}
 	by := map[[2]netip.AddrPort]heldSocket{}
-	for i := range procs {
-		pid := int(procs[i].Proc.P_pid)
-		if pid <= 0 {
-			continue
-		}
+	for _, pid := range pids {
 		fds, err := procsock.SocketFDs(pid)
 		if err != nil {
 			continue

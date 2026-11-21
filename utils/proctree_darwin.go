@@ -5,7 +5,7 @@ package utils
 import (
 	"syscall"
 
-	"golang.org/x/sys/unix"
+	"go.keploy.io/server/v3/pkg/agent/procsock"
 )
 
 // The process tree InterruptProcessTree signals, read from the kernel's
@@ -17,25 +17,29 @@ import (
 // it should, which an editor driving keploy shows in red.
 
 // findChildPIDs returns every descendant of parentPID, and how to read each
-// one's process group -- both from one snapshot of the process table (sysctl
-// kern.proc.all), taken by procTable.tree.
+// one's process group -- both from one snapshot of the process table, taken
+// by procTable.tree. The table is the processes proc_info lists, each with
+// the parent and group its short record holds (procsock), never the kern.proc
+// sysctls: those wait for any process on the machine that is held in an exec
+// or a posix_spawn, and an interrupt waited with them.
 //
-// The groups come from that snapshot, not from getpgid(2). getpgid refuses a
-// zombie with ESRCH -- a child its parent has not waited for yet, which a
-// test that starts a subprocess and never waits for it leaves behind -- and
-// cannot find a process that exited after the snapshot was taken. Either
-// failed the lookup of every group in the tree, so such an interrupt logged
-// "failed to find unique process groups: no such process" at ERROR, and fell
-// back to signalling each pid as if it led a group. The table holds every
-// process's group, a zombie's included.
+// The groups come from that snapshot, not from getpgid(2), which cannot find
+// a process that exited after the snapshot was taken: that failed the lookup
+// of every group in the tree, so such an interrupt logged "failed to find
+// unique process groups: no such process" at ERROR, and fell back to
+// signalling each pid as if it led a group. A process whose record cannot be
+// read, one that has gone or is exiting, is not in the table, so not in the
+// tree: no signal reaches it any more.
 func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
-	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	pids, err := procsock.PIDs()
 	if err != nil {
 		return nil, nil, err
 	}
-	table := newProcTable(len(procs))
-	for _, p := range procs {
-		table.add(int(p.Proc.P_pid), int(p.Eproc.Ppid), int(p.Eproc.Pgid))
+	table := newProcTable(len(pids))
+	for _, pid := range pids {
+		if p, err := procsock.Info(pid); err == nil {
+			table.add(p.PID, p.PPID, p.PGID)
+		}
 	}
 	children, groupOf := table.tree(parentPID)
 	return children, groupOf, nil
@@ -46,27 +50,23 @@ func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 func groupReached(int, syscall.Signal) []Reached { return nil }
 
 // GroupRunsOn reports whether a process of process group pgid runs: one
-// the kernel's process table holds in that group (sysctl kern.proc.pgrp
-// reads that group alone) that has not exited. A zombie has exited, and a table keploy cannot read says none
-// runs. A native application's command leads a process group of its own
+// proc_info lists in that group (procsock.GroupPIDs) whose record says it has
+// not exited. A zombie has exited, and so has a process whose record cannot
+// be read (gone, or exiting); a list keploy cannot read says none runs. A native application's command leads a process group of its own
 // (ExecuteCommand), so once the command has exited, a process it started that
 // is still in its group is the application running on.
 func GroupRunsOn(pgid int) bool {
 	if pgid <= 1 {
 		return false
 	}
-	procs, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", pgid)
+	pids, err := procsock.GroupPIDs(pgid)
 	if err != nil {
 		return false
 	}
-	for _, p := range procs {
-		if p.Proc.P_stat != sZomb {
+	for _, pid := range pids {
+		if p, err := procsock.Info(pid); err == nil && !p.Zombie {
 			return true
 		}
 	}
 	return false
 }
-
-// sZomb is XNU's p_stat of a process that has exited and waits for its
-// parent to reap it (bsd/sys/proc.h SZOMB).
-const sZomb = 5

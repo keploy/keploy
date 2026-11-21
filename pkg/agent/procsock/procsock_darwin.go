@@ -4,6 +4,7 @@ package procsock
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net/netip"
 	"unsafe"
@@ -131,4 +132,89 @@ func parseTCP(b []byte) (TCP, bool) {
 		State:  uint8(binary.LittleEndian.Uint32(b[offTCPState:])),
 		SndCC:  binary.LittleEndian.Uint32(b[offSndCC:]),
 	}, true
+}
+
+// Proc is one process as proc_info's short BSD record shows it: its parent,
+// its process group and whether it has exited and waits to be reaped.
+type Proc struct {
+	PID, PPID, PGID int
+	// Zombie is a process that has exited and waits for its parent to
+	// reap it (XNU's SZOMB).
+	Zombie bool
+}
+
+// The processes are listed and read through proc_info too, never through
+// the kern.proc sysctls that list them (kern.proc.all, .pgrp, .uid and the
+// others ps(1) reads). Those wait, uninterruptibly, for every process they
+// list that is in the middle of an exec or a posix_spawn, whoever owns it: a
+// spawn held in its file actions, such as an open of a FIFO no one reads,
+// holds every such listing on the machine, ps(1)'s included, for as long as
+// it is held, and keploy's agent stopped answering with it. proc_info's list
+// and short record wait on no other process.
+const (
+	procInfoCallListPIDs = 1  // PROC_INFO_CALL_LISTPIDS
+	procAllPIDs          = 1  // PROC_ALL_PIDS
+	procPGRPOnly         = 2  // PROC_PGRP_ONLY
+	procPIDTShortBSDInfo = 13 // PROC_PIDT_SHORTBSDINFO: struct proc_bsdshortinfo
+	shortBSDInfoSize     = 64 // sizeof(struct proc_bsdshortinfo)
+	offShortPPID         = 4  // pbsi_ppid
+	offShortPGID         = 8  // pbsi_pgid
+	offShortStatus       = 12 // pbsi_status
+	sZomb                = 5  // SZOMB, bsd/sys/proc.h
+	pidSize              = 4  // a pid_t in the list
+	maxListPIDsRetries   = 4
+	listPIDsHeadroom     = 64
+)
+
+// PIDs lists every process (libproc's proc_listallpids).
+func PIDs() ([]int, error) { return listPIDs(procAllPIDs, 0) }
+
+// GroupPIDs lists the processes of process group pgid, a zombie's included
+// (libproc's proc_listpids with PROC_PGRP_ONLY).
+func GroupPIDs(pgid int) ([]int, error) { return listPIDs(procPGRPOnly, pgid) }
+
+func listPIDs(kind, arg int) ([]int, error) {
+	size, err := procInfo(procInfoCallListPIDs, kind, arg, 0, nil)
+	if err != nil {
+		return nil, err
+	}
+	for try := 0; try < maxListPIDsRetries; try++ {
+		buf := make([]byte, size+listPIDsHeadroom*pidSize)
+		n, err := procInfo(procInfoCallListPIDs, kind, arg, 0, buf)
+		if err != nil {
+			return nil, err
+		}
+		if n >= len(buf) {
+			// The table may have grown past the buffer: list it again.
+			size = n * 2
+			continue
+		}
+		var pids []int
+		for off := 0; off+pidSize <= n; off += pidSize {
+			if pid := int(int32(binary.LittleEndian.Uint32(buf[off:]))); pid > 0 {
+				pids = append(pids, pid)
+			}
+		}
+		return pids, nil
+	}
+	return nil, errors.New("the process table kept growing while it was listed")
+}
+
+// Info reads process pid's short BSD record, which any user may read. A
+// process that has gone, or is exiting, answers ESRCH.
+func Info(pid int) (Proc, error) {
+	buf := make([]byte, shortBSDInfoSize)
+	n, err := procInfo(procInfoCallPIDInfo, pid, procPIDTShortBSDInfo, 0, buf)
+	if err != nil {
+		return Proc{}, err
+	}
+	if n < shortBSDInfoSize {
+		return Proc{}, fmt.Errorf("process %d's record is %d bytes, not %d", pid, n, shortBSDInfoSize)
+	}
+	return Proc{
+		PID:    pid,
+		PPID:   int(binary.LittleEndian.Uint32(buf[offShortPPID:])),
+		PGID:   int(binary.LittleEndian.Uint32(buf[offShortPGID:])),
+		Zombie: binary.LittleEndian.Uint32(buf[offShortStatus:]) == sZomb,
+	}, nil
 }

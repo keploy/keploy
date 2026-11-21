@@ -11,6 +11,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/procsock/spawnhold"
 )
 
 // The kernel names this process as the holder of the client end of its own
@@ -182,4 +185,46 @@ func holdConnFrom(t *testing.T, addr string) (*exec.Cmd, string) {
 		t.Fatalf("the holding child said nothing: %v", err)
 	}
 	return c, strings.TrimSpace(line)
+}
+
+// While a posix_spawn anywhere on the machine is held in the kernel, the
+// holder of a connection is still found at once: reading the processes'
+// descriptor tables waits for no other process. Listing them through the
+// kern.proc sysctls waited for the held spawn, and the agent with it.
+func TestTCPOwnerAnswersWhileASpawnIsHeld(t *testing.T) {
+	spawnhold.Hold(t)
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	c, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	s, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	self := netip.MustParseAddrPort(c.LocalAddr().String())
+	peer := netip.MustParseAddrPort(c.RemoteAddr().String())
+	type owner struct {
+		pid int
+		err error
+	}
+	done := make(chan owner, 1)
+	go func() {
+		pid, err := tcpOwner(self, peer)
+		done <- owner{pid, err}
+	}()
+	select {
+	case o := <-done:
+		if o.err != nil || o.pid != os.Getpid() {
+			t.Fatalf("tcpOwner(%s -> %s) = %d, %v; want this process %d", self, peer, o.pid, o.err, os.Getpid())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("tcpOwner waited for the held spawn")
+	}
 }
