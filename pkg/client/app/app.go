@@ -75,6 +75,16 @@ type App struct {
 	// onAgentRestart, when set, sets keploy's agent up again after the
 	// compose retry's `up` started it again; see SetOnAgentRestart.
 	onAgentRestart func(ctx context.Context) error
+	// agentAddressOf, when set, is where the agent's address is read
+	// (SetAgentAddress); onAgentPortRefused, when set, moves the agent off a
+	// port compose could not publish (SetOnAgentPortRefused), and upSaid
+	// keeps what the up running now printed, for it (upMovingTheAgent).
+	agentAddressOf     func() string
+	onAgentPortRefused func(ctx context.Context, said string) (uint32, error)
+	upSaid             atomic.Pointer[upOutput]
+	// composeDoc is the compose document the run's compose reads
+	// (setComposeSource), which a move of the agent's port rewrites.
+	composeDoc *docker.Compose
 	// holdAgentRelease, when set, holds the releases of the app the run
 	// asked for until the func it returns is called; see
 	// SetAgentReleaseHold.
@@ -706,7 +716,11 @@ func (a *App) composeOutputProject() string {
 // with keploy's own compose document on its stdin when there is one, and that
 // document's containers' output kept in their tails (composeChildTee).
 func (a *App) executeCommand(ctx context.Context, runCmd string, runEnv []string, cancel func(*exec.Cmd) func() error) utils.CmdError {
-	return utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cancel, 25*time.Second, a.composeContent, runEnv, a.composeChildTee(ctx)...)
+	opts := a.composeChildTee(ctx)
+	if said := a.upSaid.Load(); said != nil {
+		opts = append(opts, utils.WithOutputAlso(said))
+	}
+	return utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cancel, 25*time.Second, a.composeContent, runEnv, opts...)
 }
 
 // composeChildTee is the output tee for the `docker compose` child that runs
@@ -1299,6 +1313,7 @@ func (a *App) sweepProjectNetworks(project string) {
 func (a *App) setComposeSource(file string, content []byte, compose *docker.Compose) {
 	a.composeFile = file
 	a.composeContent = content
+	a.composeDoc = compose
 	a.composeServices = composeServiceNames(compose)
 
 	// Drop any runner built from the PREVIOUS document. Keeping it would point
@@ -2327,7 +2342,7 @@ func (a *App) withAgentToken(cmd string) (string, []string) {
 		}
 		return cmd, nil
 	}
-	token.RecordLaunch(a.opts.AgentURI)
+	token.RecordLaunch(a.agentAddress())
 	cmd, _ = agentTokenCommand(cmd, effectiveUID() == 0, append([]string{token.Env}, mock...)...)
 	return cmd, docker.AgentTokenEnv()
 }
@@ -2511,7 +2526,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// `docker run`, a native command — is the USER's command and keeps the
 	// existing shell-out: it may carry flags and shell syntax keploy does not
 	// model, and it is not keploy's to reinterpret.
-	executeApp := func(runCmd string, runEnv []string) utils.CmdError {
+	upOnce := func(runCmd string, runEnv []string) utils.CmdError {
 		if a.kind == utils.DockerCompose {
 			// Until it returns, keploy's stops of the stack stop what the
 			// up starts after them (stopComposeLateStarters).
@@ -2523,6 +2538,13 @@ func (a *App) run(ctx context.Context) models.AppError {
 		// An up that reported 0 is read for a dependency's crash that ended
 		// it before compose started the app (composeAbortReportedZero).
 		return a.composeAbortReportedZero(ctx, a.executeCommand(ctx, runCmd, runEnv, cmdCancel))
+	}
+	// An up that compose ended because it could not publish keploy's
+	// agent's port on the host is run again with the agent on another port,
+	// its launch recorded at its new address (upMovingTheAgent).
+	executeApp := func(runCmd string, runEnv []string) utils.CmdError {
+		return a.upMovingTheAgent(ctx, func() utils.CmdError { return upOnce(runCmd, runEnv) },
+			func() utils.CmdError { return upOnce(a.withAgentToken(userCmd)) })
 	}
 
 	var err error

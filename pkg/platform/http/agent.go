@@ -5396,6 +5396,8 @@ type restartHooks interface {
 	SetAgentReleaseHold(func(ctx context.Context) (resume func(failed error)))
 	SetAgentReleaseRefusal(func(failed error))
 	SetAgentHeldRelease(func(ctx context.Context, current func(ctx context.Context) bool) error)
+	SetAgentAddress(func() string)
+	SetOnAgentPortRefused(func(ctx context.Context, said string) (uint32, error))
 }
 
 // registerApp makes the application client of this run and keeps it as the
@@ -5425,6 +5427,11 @@ func (a *AgentClient) handRestartHooks(app restartHooks) {
 	app.SetAgentHeldRelease(func(ctx context.Context, current func(ctx context.Context) bool) error {
 		return a.session().releaseHeld(ctx, current)
 	})
+	// The application client reads the agent's address where this client
+	// does (config's AgentURI), and has it moved when compose could not
+	// publish the agent's port (composeAgentPortRefused).
+	app.SetAgentAddress(a.conf.AgentURI)
+	app.SetOnAgentPortRefused(a.composeAgentPortRefused)
 }
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {

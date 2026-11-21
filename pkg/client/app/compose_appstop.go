@@ -708,10 +708,11 @@ var composeAgentProbe = &http.Client{Transport: &http.Transport{Proxy: nil, Disa
 // An agent keploy has no address for answers nothing. The request's error
 // is not logged: it holds the URI, which may hold a password.
 func (a *App) composeAgentAnswers(ctx context.Context) bool {
-	if a.opts.AgentURI == "" {
+	uri := a.agentAddress()
+	if uri == "" {
 		return false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(a.opts.AgentURI, "/")+"/health", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(uri, "/")+"/health", nil)
 	if err != nil {
 		return false
 	}
