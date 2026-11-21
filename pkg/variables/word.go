@@ -20,6 +20,7 @@ import (
 //	body.resourceKey[0]#1           the second word of a JSON scalar
 //	header.Authorization|jwt.sub    the sub claim of a JWT, whole
 //	header.Authorization|jwtsig     the signature of a JWT, whole
+//	header.Authorization|bearer     the token of "Bearer <token>", whole
 //	header.Cookie|cookie.sid#0      the first word of the cookie sid
 //	url.query.cursor|b64url|pct#2   the third word of a base64url cursor's
 //	                                percent-decoded text
@@ -46,6 +47,11 @@ import (
 //	               keep its form, base64url of the length it replaces
 //	cookie.<name>  the value of the one pair named <name> in a Cookie or
 //	               Set-Cookie value
+//	bearer         the token of an Authorization value of the Bearer
+//	               scheme ("Bearer <token>", the scheme in any case), read
+//	               whole, '.' and '=' among its letters (a JWT, a key); a
+//	               write there keeps the scheme and the spaces after it, and
+//	               must be a token of that form (token68, RFC 7235)
 //	token.<n>      the n-th token of the text, from 0 (EachToken): a run of
 //	               the base64 alphabets, '+', '/', '-' and '_' among its
 //	               letters, read whole, wherever its own '-' and '_' fall
@@ -61,8 +67,8 @@ import (
 // does (Parse).
 
 // Step is one decode step of a word address: "pct", "json", "b64", "b64url",
-// "jwtsig", "jwt.<claim>", "cookie.<name>", "token.<n>" or "urltoken.<n>",
-// its name unescaped.
+// "jwtsig", "bearer", "jwt.<claim>", "cookie.<name>", "token.<n>" or
+// "urltoken.<n>", its name unescaped.
 type Step string
 
 // The steps with no argument.
@@ -74,6 +80,9 @@ const (
 	// StepJWTSig opens a JWT's signature. A claim's name follows "jwt.",
 	// so no claim step is ever written so.
 	StepJWTSig Step = "jwtsig"
+	// StepBearer opens the token of an Authorization value of the Bearer
+	// scheme (bearerToken).
+	StepBearer Step = "bearer"
 )
 
 // The prefixes of the steps with one: a JWT's claim, a cookie and a token
@@ -200,7 +209,7 @@ func parseAddress(s string) (Address, error) {
 		n := nameEnd(rest, 1)
 		st := Step(unescapeName(rest[1:n]))
 		if !st.valid() {
-			return Address{}, fmt.Errorf("not a word address: %q: step %q (want pct, json, b64, b64url, jwtsig, jwt.<claim>, cookie.<name> or token.<n>)", s, rest[1:n])
+			return Address{}, fmt.Errorf("not a word address: %q: step %q (want pct, json, b64, b64url, jwtsig, bearer, jwt.<claim>, cookie.<name> or token.<n>)", s, rest[1:n])
 		}
 		a.Steps = append(a.Steps, st)
 		rest = rest[n:]
@@ -259,7 +268,7 @@ func nameEnd(s string, i int) int {
 
 func (st Step) valid() bool {
 	switch {
-	case st == StepPct || st == StepJSON || st == StepB64 || st == StepB64URL || st == StepJWTSig:
+	case st == StepPct || st == StepJSON || st == StepB64 || st == StepB64URL || st == StepJWTSig || st == StepBearer:
 		return true
 	case strings.HasPrefix(string(st), jwtPrefix):
 		return len(st) > len(jwtPrefix)
@@ -342,8 +351,8 @@ func wordAt(text string, n int) (string, bool) {
 // one value leaf, would change what the other names. Their steps in
 // common are decoded first, so two words of one decoded text are two
 // places. Under a step that re-encodes its text (b64, b64url, a JSON
-// string, a JWT) a word stands in the whole text it decodes from; pct and
-// cookie steps keep the bytes around it. Two words with no byte in common
+// string, a JWT) a word stands in the whole text it decodes from; pct,
+// cookie and bearer steps keep the bytes around it. Two words with no byte in common
 // still overlap where one would rewrite what the other's steps read:
 // under a pct step, a word holding a byte of an escape (written, the
 // escape decodes to something else, or a decoded word's escapes become
@@ -400,10 +409,10 @@ func moves(steps []Step, n int, other []Step) bool {
 
 // reencodes reports whether st writes its text anew (b64, b64url, a JSON
 // string or number, a JWT claim), not a word for a word: pct, a cookie's
-// value and a token keep the bytes around what they write.
+// value, a bearer token and a token keep the bytes around what they write.
 func reencodes(st Step) bool {
 	_, _, token := st.tokenIndex()
-	return st != StepPct && !strings.HasPrefix(string(st), cookiePrefix) && !token
+	return st != StepPct && st != StepBearer && !strings.HasPrefix(string(st), cookiePrefix) && !token
 }
 
 // holdsEscape reports whether [lo, hi) of text holds a byte of a "%XX"
@@ -480,6 +489,10 @@ func wordSpan(text string, steps []Step, n int) (lo, hi int, ok bool) {
 	case st == StepJWTSig:
 		// Written whole, in the token's last part: the bytes before it stay.
 		at, _ := jwtSignature(text)
+		return at + lo, at + hi, true
+	case st == StepBearer:
+		// After the scheme and its spaces, which stay.
+		at, _ := bearerToken(text)
 		return at + lo, at + hi, true
 	}
 	return 0, len(text), true
@@ -647,6 +660,13 @@ func splice(st Step, text, inner, next string) (string, bool) {
 		if ok && SignatureForm(inner, next) {
 			return text[:at] + next, true
 		}
+	case st == StepBearer:
+		// The scheme and the spaces after it as written. ReplaceWord reads
+		// the write back, so a value that is no token68 there (empty, or
+		// one with a space or a ',') is refused: the value stays one
+		// Bearer credential.
+		at, _ := bearerToken(text)
+		return text[:at] + next, true
 	}
 	return "", false
 }
@@ -693,6 +713,10 @@ func Decode(st Step, text string) (string, bool) {
 		if at, ok := jwtSignature(text); ok {
 			return text[at:], true
 		}
+	case st == StepBearer:
+		if at, ok := bearerToken(text); ok {
+			return text[at:], true
+		}
 	case strings.HasPrefix(string(st), jwtPrefix):
 		parts := strings.Split(text, ".")
 		if len(parts) != 3 {
@@ -717,6 +741,36 @@ func Decode(st Step, text string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// bearerToken is where the token of text, an Authorization value of the
+// Bearer scheme, starts: text is "Bearer", in any case (an auth scheme's
+// case is no part of it, RFC 7235), one or more spaces, then a token68 to
+// its end. ok is false where text is no such value: another scheme, no
+// space after it, no token, or a token that is no token68 (one that holds a
+// space, a ',' or a '"': auth-params, or two values).
+func bearerToken(text string) (at int, ok bool) {
+	const scheme = "bearer "
+	if !strings.EqualFold(text[:min(len(text), len(scheme))], scheme) {
+		return 0, false
+	}
+	at = len(text) - len(strings.TrimLeft(text[len(scheme):], " "))
+	return at, token68(text[at:])
+}
+
+// token68 reports whether s is a token68 (RFC 7235): one or more letters,
+// digits, '-', '.', '_', '~', '+' or '/', then any number of '='.
+func token68(s string) bool {
+	t := strings.TrimRight(s, "=")
+	if t == "" {
+		return false
+	}
+	for i := 0; i < len(t); i++ {
+		if c := t[i]; !isWordByte(c) && !strings.ContainsRune("-._~+/", rune(c)) {
+			return false
+		}
+	}
+	return true
 }
 
 // IsTokenByte reports whether c is a byte of the base64 alphabets, standard
