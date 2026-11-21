@@ -2668,8 +2668,10 @@ func gitTop() string {
 // ReplayOutcome is what a replay produced, for a wrapping build that meters or
 // reports usage. Counts only; no payloads, no destinations.
 type ReplayOutcome struct {
-	SetName  string
-	Loaded   int
+	SetName string
+	Loaded  int
+	// Consumed is how many recordings the run consumed, each once however
+	// many of the run's reads of the agent carried it (consumedReads).
 	Consumed int
 	Missed   int
 	// Cases is each recorded request replayed, with the app's answer compared to the recording.
@@ -2789,7 +2791,7 @@ func composeUnsettled(why string) error {
 // agent answer" flag makes a half-answer indistinguishable from no answer, and
 // then reports a run whose misses were never read as a clean one.
 func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail replayDetail, stopped func() bool) replayCounts {
-	var consumed, elsewhere []models.MockState
+	var elsewhere []models.MockState
 	var misses []models.UnmatchedCall
 	var consumedErr, missesErr, settleErr error
 	// Under docker compose the runner exiting is what stops the whole project,
@@ -2800,7 +2802,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	fromCompose = fromCompose && m.isDockerCompose()
 	if fromCompose {
 		outcome, err := composeOutcome.ComposeAgentOutcome()
-		consumed, misses, consumedErr, missesErr = outcome.Consumed, outcome.Missed, err, err
+		// The account is the run's end's read, added to what the run read
+		// before it as that read is.
+		m.consumed.add(outcome.Consumed)
+		misses, consumedErr, missesErr = outcome.Missed, err, err
 		elsewhere = outcome.LearnedElsewhere
 		// The agent stopped with the project: its account carries no count
 		// of the series' repeats, and the RULE USED lines say so.
@@ -2833,13 +2838,10 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				// so no test is judged on it.
 				settleErr = m.settleRun(outcomeCtx)
 				if consumedErr = settleErr; consumedErr == nil {
-					consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
+					var read []models.MockState
+					read, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
+					m.consumed.add(read)
 				}
-				// What the wait for the owed series read was served,
-				// whatever this read gives: a read cut short still names
-				// each fault served (logFaultsServed), and every verdict
-				// on consumed reads it only when consumedErr is nil.
-				consumed = m.withSeriesRead(consumed)
 				if len(m.placed) > 0 {
 					m.repeats = readSeriesRepeats(outcomeCtx, m.instrumentation)
 				}
@@ -2859,6 +2861,12 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				return nil
 			})
 	}
+	// What the run consumed is every read's, each recording once
+	// (consumedReads): what the wait for the owed series read was served,
+	// whatever the end's read gives. A read cut short still names each fault
+	// served (logFaultsServed), and every verdict on consumed reads it only
+	// when consumedErr is nil.
+	consumed := m.consumed.list()
 	if consumedErr == nil && m.config.Mock.EmitMockEvents {
 		// Flush the tail. The poll loop stops when the runner exits, so
 		// anything served in the last poll interval would be counted in the

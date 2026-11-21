@@ -46,7 +46,7 @@ func TestTheReplaySummaryNamesEachFaultServed(t *testing.T) {
 		"mock-3: upstream sent the head and 10 body bytes, then closed, as recorded",
 	}
 	// The wait for the owed series may have read some before the run's end
-	// (seriesRead): those were served too, whatever the end's read gives.
+	// (m.consumed): those were served too, whatever the end's read gives.
 	type read struct {
 		inst Instrumentation
 		wait []models.MockState
@@ -71,7 +71,8 @@ func TestTheReplaySummaryNamesEachFaultServed(t *testing.T) {
 				t.Setenv(provenswitch.Env, "1")
 			}
 			core, logs := observer.New(zap.InfoLevel)
-			m := &mockService{config: &config.Config{}, logger: zap.New(core), instrumentation: c.inst, seriesRead: c.wait}
+			m := &mockService{config: &config.Config{}, logger: zap.New(core), instrumentation: c.inst}
+			m.consumed.add(c.wait)
 			m.reportOutcome(context.Background(), 4, replayDetail{set: "s", faults: faults}, func() bool { return false })
 			var got []string
 			for _, e := range logs.FilterMessage("served a mock's fault").All() {
