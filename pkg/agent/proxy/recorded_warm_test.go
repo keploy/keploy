@@ -187,6 +187,9 @@ func TestALaterSetStopsTheWarmOfTheLastOne(t *testing.T) {
 	if !first.warm(m) {
 		t.Fatal("the first warm stopped before a later set was staged")
 	}
+	if !first.warm(nil) || first.warmed != 1 {
+		t.Fatal("a nil recording ended the warm or was counted warmed")
+	}
 	second := p.newSetWarm()
 	if first.warm(m) || !first.stopped {
 		t.Fatal("the first warm went on after a later set was staged")
@@ -378,6 +381,22 @@ func TestAResidentSetsWarmIsHandedItsTreesRecordings(t *testing.T) {
 	}
 	if want := []string{"tree-0", "tree-2"}; !warmedNames(got, want) {
 		t.Fatalf("mongo warmer handed %v, want %v (recorded order)", got, want)
+	}
+}
+
+// A closed store's read of the kinds named says so, as RangeRecordedBefore
+// does, even where it holds none of those kinds.
+func TestAClosedStoresReadOfKindsSaysItIsClosed(t *testing.T) {
+	provenswitch.Pin(true)
+	t.Cleanup(provenswitch.Unpin)
+	d, _, _ := warmStore(t, models.HTTP, models.HTTP)
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	visited := 0
+	err := d.RangeRecordedOfKindsBefore(time.Unix(1000, 0), []models.Kind{models.Mongo}, func(*models.Mock) bool { visited++; return true })
+	if err == nil || visited != 0 {
+		t.Fatalf("a closed store's read of Mongo: err %v, %d visited; want its closed error and none", err, visited)
 	}
 }
 
