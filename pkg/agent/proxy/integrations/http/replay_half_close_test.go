@@ -33,6 +33,7 @@ import (
 // heldReplay is a serve of one mock to an app on a real socket.
 type heldReplay struct {
 	app   net.Conn
+	proxy net.Conn // the proxy's end of app's connection
 	marks *idleMarks
 	done  <-chan error
 	stop  context.CancelFunc
@@ -78,7 +79,24 @@ func replayTo(t *testing.T, m *models.Mock, request string,
 		_ = proxy.Close()
 		done <- err
 	}()
-	return heldReplay{app: app, marks: marks, done: done, stop: cancel}
+	return heldReplay{app: app, proxy: proxy, marks: marks, done: done, stop: cancel}
+}
+
+// appResets has the app, which half-closed, reset its connection: it closes
+// its socket abortively (SO_LINGER 0), and the next bytes sent it meet its
+// reset. Linux and macOS send the reset at that close; Windows sends none
+// there once the socket has sent its FIN (measured on Windows 11: the app's
+// end stays in FIN_WAIT_2 and the proxy's in CLOSE_WAIT), only at bytes that
+// reach the closed socket, which every OS resets. The serve itself writes
+// nothing more to an app it holds past its FIN, so on Windows such an app's
+// close shows on the wire as no more than a plain close does on every OS:
+// the hold ends at the run's end or at its recording's next answer.
+func (r heldReplay) appResets(t *testing.T) {
+	t.Helper()
+	resetConn(t, r.app)
+	// The serve may have let the connection go already at the close's reset
+	// (Linux, macOS): a write to a socket reset or closed fails, as it may.
+	_, _ = r.proxy.Write([]byte("bytes the app will not take"))
 }
 
 // held waits until the serve holds the half-closed app's connection past its
@@ -173,7 +191,7 @@ func halfClosedAtRecord(t *testing.T, shape string, readOn bool) *models.Mock {
 // never passes on an end it may not have had. Its FIN reaches the proxy
 // before the answer is written, or after it: the serve holds on past it
 // either way, marked idle, until a reset, here the app's (it closes with
-// the rest unread), or the run's end.
+// the rest unread: heldReplay.appResets), or the run's end.
 func TestReplay_AHalfClosedAppsHeldAnswerIsHeldPastItsFIN(t *testing.T) {
 	for _, shape := range partAnswers {
 		for _, readOn := range []bool{false, true} {
@@ -204,7 +222,7 @@ func TestReplay_AHalfClosedAppsHeldAnswerIsHeldPastItsFIN(t *testing.T) {
 							}
 							r.stillHeld(t, "before the app's own timeout")
 							if end == "the app resets" {
-								resetConn(t, r.app)
+								r.appResets(t)
 							} else {
 								r.stop()
 							}
