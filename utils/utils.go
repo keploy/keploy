@@ -1645,24 +1645,287 @@ func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
 	return 0, fmt.Errorf("failed to allocate new port: %w", err)
 }
 
-func EnsureRmBeforeName(cmd string) string {
-	parts := strings.Split(cmd, " ")
-	rmIndex := -1
-	nameIndex := -1
+type shellWord struct {
+	start int
+	value string
+}
 
-	for i, part := range parts {
-		if part == "--rm" {
-			rmIndex = i
-		} else if part == "--name" {
-			nameIndex = i
-			break // Assuming --name will always have an argument, we can break here
+func isShellSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// scanShellWords tokenizes a POSIX-like shell command into words with their
+// starting byte offsets in cmd, respecting single quotes, double quotes, and
+// backslash escapes. Returns ok=false on an unterminated quote or trailing
+// backslash.
+func scanShellWords(cmd string) ([]shellWord, bool) {
+	var words []shellWord
+	n := len(cmd)
+	i := 0
+	for i < n {
+		for i < n {
+			if isShellSpace(cmd[i]) {
+				i++
+				continue
+			}
+			if cmd[i] == '\\' && i+1 < n && cmd[i+1] == '\n' {
+				i += 2
+				continue
+			}
+			break
+		}
+		if i >= n {
+			break
+		}
+
+		start := i
+		var b strings.Builder
+
+		for i < n {
+			c := cmd[i]
+			if isShellSpace(c) {
+				break
+			}
+			switch c {
+			case '\'':
+				i++
+				closeIdx := strings.IndexByte(cmd[i:], '\'')
+				if closeIdx < 0 {
+					return nil, false
+				}
+				b.WriteString(cmd[i : i+closeIdx])
+				i += closeIdx + 1
+			case '"':
+				i++
+				closed := false
+				for i < n {
+					dc := cmd[i]
+					if dc == '"' {
+						i++
+						closed = true
+						break
+					}
+					if dc == '\\' && i+1 < n {
+						next := cmd[i+1]
+						switch next {
+						case '"', '\\', '$', '`':
+							b.WriteByte(next)
+							i += 2
+							continue
+						case '\n':
+							i += 2
+							continue
+						}
+					}
+					b.WriteByte(dc)
+					i++
+				}
+				if !closed {
+					return nil, false
+				}
+			case '\\':
+				if i+1 >= n {
+					return nil, false
+				}
+				if cmd[i+1] == '\n' {
+					i += 2
+					continue
+				}
+				b.WriteByte(cmd[i+1])
+				i += 2
+			default:
+				b.WriteByte(c)
+				i++
+			}
+		}
+
+		words = append(words, shellWord{start: start, value: b.String()})
+	}
+	return words, true
+}
+
+func shellBaseName(word string) string {
+	if idx := strings.LastIndexAny(word, "/\\"); idx >= 0 {
+		return word[idx+1:]
+	}
+	return word
+}
+
+func isEnvAssignment(word string) bool {
+	eq := strings.IndexByte(word, '=')
+	return eq > 0 && !strings.HasPrefix(word, "-")
+}
+
+var sudoValueLongFlags = map[string]bool{
+	"--user": true, "--group": true, "--host": true, "--prompt": true,
+	"--close-from": true, "--chdir": true, "--chroot": true, "--role": true,
+	"--type": true, "--other-user": true, "--command-timeout": true,
+}
+
+const sudoValueShortFlags = "CDRTUghprtu"
+
+var dockerGlobalBoolFlags = map[string]bool{
+	"-D": true, "--debug": true, "--tls": true, "--tlsverify": true,
+	"-v": true, "--version": true, "-h": true, "--help": true,
+	"-r": true, "--remote": true, "--rootless-cni": true,
+	"--syslog": true, "--transient-store": true,
+}
+
+var dockerRunBoolFlags = map[string]bool{
+	"--detach": true, "--rm": true, "--interactive": true, "--tty": true,
+	"--privileged": true, "--init": true, "--read-only": true,
+	"--publish-all": true, "--no-healthcheck": true, "--oom-kill-disable": true,
+	"--disable-content-trust": true, "--quiet": true, "--help": true,
+	"--replace": true, "--rmi": true, "--no-hosts": true, "--env-host": true,
+	"--read-only-tmpfs": true, "--http-proxy": true, "--sig-proxy": true,
+	"--use-api-socket": true, "--tls-verify": true, "--no-hostname": true,
+	"--passwd": true, "--rootfs": true, "--unsetenv-all": true,
+}
+
+const dockerRunValueShortFlags = "acehlmpuvw"
+
+func sudoFlagTakesNext(opt string) bool {
+	if strings.Contains(opt, "=") {
+		return false
+	}
+	if strings.HasPrefix(opt, "--") {
+		return sudoValueLongFlags[opt]
+	}
+	letters := opt[1:]
+	at := strings.IndexAny(letters, sudoValueShortFlags)
+	return at >= 0 && at == len(letters)-1
+}
+
+func dockerRunOptionsStart(words []shellWord) int {
+	i := 0
+	for i < len(words) && isEnvAssignment(words[i].value) {
+		i++
+	}
+	if i < len(words) && strings.EqualFold(shellBaseName(words[i].value), "sudo") {
+		i++
+		for i < len(words) && strings.HasPrefix(words[i].value, "-") && words[i].value != "-" {
+			opt := words[i].value
+			i++
+			if opt == "--" {
+				break
+			}
+			if sudoFlagTakesNext(opt) {
+				i++
+			}
+		}
+		for i < len(words) && isEnvAssignment(words[i].value) {
+			i++
 		}
 	}
-	if rmIndex == -1 && nameIndex != -1 {
-		parts = append(parts[:nameIndex], append([]string{"--rm"}, parts[nameIndex:]...)...)
+	if i >= len(words) {
+		return -1
+	}
+	prog := strings.TrimSuffix(strings.ToLower(shellBaseName(words[i].value)), ".exe")
+	if prog != "docker" && prog != "podman" {
+		return -1
+	}
+	i++
+
+	for i < len(words) && strings.HasPrefix(words[i].value, "-") && words[i].value != "-" {
+		opt := words[i].value
+		i++
+		if opt == "--" {
+			break
+		}
+		if strings.Contains(opt, "=") || dockerGlobalBoolFlags[opt] {
+			continue
+		}
+		if strings.HasPrefix(opt, "--") {
+			i++
+		} else {
+			letters := opt[1:]
+			if at := strings.IndexAny(letters, "Hcl"); at >= 0 && at == len(letters)-1 {
+				i++
+			}
+		}
+	}
+	if i >= len(words) {
+		return -1
+	}
+	sub := strings.ToLower(words[i].value)
+	if sub == "container" {
+		i++
+		if i >= len(words) || !strings.EqualFold(words[i].value, "run") {
+			return -1
+		}
+		return i + 1
+	}
+	if sub == "run" {
+		return i + 1
+	}
+	return -1
+}
+
+func dockerRunFlagTakesNext(w string) bool {
+	if strings.Contains(w, "=") {
+		return false
+	}
+	if strings.HasPrefix(w, "--") {
+		return !dockerRunBoolFlags[w]
+	}
+	letters := w[1:]
+	at := strings.IndexAny(letters, dockerRunValueShortFlags)
+	return at >= 0 && at == len(letters)-1
+}
+
+func EnsureRmBeforeName(cmd string) string {
+	words, ok := scanShellWords(cmd)
+	if !ok {
+		return cmd
+	}
+	optStart := dockerRunOptionsStart(words)
+	if optStart < 0 {
+		return cmd
 	}
 
-	return strings.Join(parts, " ")
+	hasRm := false
+	nameStart := -1
+
+	for i := optStart; i < len(words); i++ {
+		w := words[i].value
+		if w == "--" || w == "-" || !strings.HasPrefix(w, "-") {
+			// Stop at the image name (or end-of-options marker): everything
+			// after this belongs to the container command, not docker run.
+			break
+		}
+
+		if w == "--rm" || strings.HasPrefix(w, "--rm=") {
+			hasRm = true
+			continue
+		}
+
+		if w == "--name" {
+			if i+1 < len(words) {
+				if nameStart == -1 && words[i+1].value != "" {
+					nameStart = words[i].start
+				}
+				i++ // consume --name's value
+			}
+			continue
+		}
+		if val, ok := strings.CutPrefix(w, "--name="); ok {
+			// Docker accepts both "--name app" and "--name=app"
+			// (see dockerLongFlagValue).
+			if nameStart == -1 && val != "" {
+				nameStart = words[i].start
+			}
+			continue
+		}
+
+		if dockerRunFlagTakesNext(w) {
+			i++
+		}
+	}
+
+	if !hasRm && nameStart != -1 {
+		return cmd[:nameStart] + "--rm " + cmd[nameStart:]
+	}
+	return cmd
 }
 
 // dockerLongFlagValue returns the value of the first occurrence of any of
