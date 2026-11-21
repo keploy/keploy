@@ -223,6 +223,11 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 	testCounter := 0
 	var itemsToProcess []TestData
 
+	// Postman lets two folders share a name, and both write to the test set of
+	// that name, so numbering is kept per test set: the second folder's tests
+	// follow the first's instead of overwriting test-1, test-2, and so on.
+	folderCounters := make(map[string]int)
+
 	if len(collection.Items.PostmanItems) > 0 {
 		for _, item := range collection.Items.PostmanItems {
 			if len(item.Item) == 0 {
@@ -237,17 +242,17 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 			testSetPath := filepath.Join(cwd, "keploy", testSet)
 			testsPath := filepath.Join(testSetPath, "tests")
 
+			folderCounter := folderCounters[testSet]
 			for _, testItem := range item.Item {
 				if err := pi.processEmptyResponse(&testItem, globalVariables, basePath); err != nil {
 					return err
 				}
 
-				if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &testCounter); err != nil {
+				if err := pi.writeTestData(testItem, filepath.Join(cwd, "keploy"), testsPath, globalVariables, &folderCounter); err != nil {
 					return fmt.Errorf("failed to write test data: %w", err)
 				}
 			}
-
-			testCounter = 0
+			folderCounters[testSet] = folderCounter
 		}
 	}
 
