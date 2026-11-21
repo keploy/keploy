@@ -5,6 +5,7 @@ package utils
 import (
 	"io/fs"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -89,6 +90,42 @@ func exitedUnreapedIn(proc fs.FS, pid int) bool {
 	}
 	stat, ok := ParseProcStat(line)
 	return ok && stat.State == 'Z'
+}
+
+// groupRunsExcept reports whether a process of process group pgid runs, as
+// /proc shows it now: one in that group whose stat says it is neither a
+// zombie nor dead, and that is not one of except (its pid and start time). A
+// /proc that cannot be listed is an error.
+func groupRunsExcept(pgid int, except []Reached) (bool, error) {
+	return groupRunsIn(os.DirFS("/proc"), pgid, except)
+}
+
+// groupRunsIn is groupRunsExcept over proc, a /proc.
+func groupRunsIn(proc fs.FS, pgid int, except []Reached) (bool, error) {
+	if pgid <= 1 {
+		return false, nil
+	}
+	entries, err := fs.ReadDir(proc, ".")
+	if err != nil {
+		return false, err
+	}
+	buf := make([]byte, statBufSize)
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || !entry.IsDir() {
+			continue
+		}
+		line, err := readStat(proc, entry.Name(), buf)
+		if err != nil {
+			continue
+		}
+		stat, ok := ParseProcStat(line)
+		if ok && stat.PGRP == pgid && stat.State != 'Z' && stat.State != 'X' &&
+			!slices.Contains(except, Reached{PID: pid, Start: stat.StartTime, Ignores: true}) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // groupExited reads no group on Linux: kill(2) of a group of zombies only

@@ -28,6 +28,7 @@ import (
 // and every keploy on the machine waiting on it.
 const holderC = `#include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,7 +42,8 @@ static void *release(void *secs) {
   return NULL;
 }
 int main(int argc, char **argv) {
-  if (argc != 3) return 2;
+  if (argc != 3 && argc != 4) return 2;
+  if (argc == 4) signal(SIGINT, SIG_IGN);
   fifo = argv[1];
   pthread_t th;
   if (pthread_create(&th, NULL, release, argv[2]) != 0) return 2;
@@ -71,12 +73,29 @@ type Held struct {
 	fifo          string
 	out           *bufio.Reader
 	cmd           *exec.Cmd
+	// stopped: the test ends the holder itself (HoldInGroup), and Release
+	// only makes sure nothing stays held or runs.
+	stopped bool
 }
 
 // Hold starts a holder and returns once its spawn is in the kernel. The
 // cleanup releases the spawn and waits for the holder. It skips the test
 // where no C compiler is installed.
 func Hold(t *testing.T) *Held {
+	t.Helper()
+	return hold(t, false, false)
+}
+
+// HoldInGroup is Hold with a holder that leads a process group of its own,
+// as keploy starts an app, for a test that stops it: ignoreSIGINT has it
+// ignore SIGINT. Its cleanup releases the spawn and kills the holder by its
+// pid, whatever the test left.
+func HoldInGroup(t *testing.T, ignoreSIGINT bool) *Held {
+	t.Helper()
+	return hold(t, true, ignoreSIGINT)
+}
+
+func hold(t *testing.T, group, ignoreSIGINT bool) *Held {
 	t.Helper()
 	cc, err := exec.LookPath("cc")
 	if err != nil {
@@ -93,7 +112,14 @@ func Hold(t *testing.T) *Held {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(bin, fifo, strconv.Itoa(int(selfRelease/time.Second)))
+	args := []string{fifo, strconv.Itoa(int(selfRelease / time.Second))}
+	if ignoreSIGINT {
+		args = append(args, "ignore-sigint")
+	}
+	cmd := exec.Command(bin, args...)
+	if group {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +127,7 @@ func Hold(t *testing.T) *Held {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	h := &Held{Holder: cmd.Process.Pid, fifo: fifo, out: bufio.NewReader(pipe), cmd: cmd}
+	h := &Held{Holder: cmd.Process.Pid, fifo: fifo, out: bufio.NewReader(pipe), cmd: cmd, stopped: group}
 	// Registered after the holder starts, so it runs before t.TempDir's
 	// removal: the FIFO is opened while it is still there.
 	t.Cleanup(func() { h.Release(t) })
@@ -144,6 +170,12 @@ func (h *Held) Release(t *testing.T) {
 		t.Errorf("open the spawn holder's FIFO to release its spawn: %v", err)
 	} else {
 		defer func() { _ = r.Close() }()
+	}
+	if h.stopped {
+		// The test has stopped it, or tried: it is gone, or ends now.
+		_ = syscall.Kill(h.Holder, syscall.SIGKILL)
+		_ = cmd.Wait()
+		return
 	}
 	if l, err := h.out.ReadString('\n'); err != nil || strings.TrimSpace(l) != "spawned 0" {
 		t.Errorf("the released spawn holder said %q, %v; want spawned 0", l, err)

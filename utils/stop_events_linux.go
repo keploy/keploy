@@ -770,12 +770,12 @@ func ExitOf(p Reached) (<-chan struct{}, func()) {
 }
 
 // stopGroupByEvents is interruptProcessTree's wait, under the switch, for a
-// process group it signalled: its leader's exit event (as its signal reached
-// it, members), while the group makes progress. It kills the group on a stall,
+// process group it signalled: the exit event of each process its signal
+// reached (members, groupGone), while the group makes progress. It kills the group on a stall,
 // or at the user's press, and says why; "" when the group exited, or was gone
 // by the kill.
 func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached, moved *TeardownScope) (killed string) {
-	exited, release := leaderExited(leader, members)
+	exited, release := groupGone(waitedFor(leader, members))
 	defer release()
 	var why string
 	switch end, bound := WaitExitByEvents(logger, exited, members, moved); end {
@@ -802,15 +802,39 @@ func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached, moved 
 	return why
 }
 
-// leaderExited is ExitOf a group's leader as its signal reached it
-// (members): a leader not among them (gone, or a zombie, by then) has exited.
-func leaderExited(leader int, members []Reached) (<-chan struct{}, func()) {
-	for _, m := range members {
-		if m.PID == leader {
-			return ExitOf(m)
-		}
+// groupGone is a channel closed once each of members, a group's processes as
+// its signal reached them (ExitOf each), has exited, and the func that
+// releases the watch. A group counts as exited only when no process of it
+// that its signal reached runs, its leader or not: a leader that is a zombie
+// (`sh -c 'server &'` whose sh no one reaps) is not among them, and the
+// server it left in its group is waited for. With no members (a group of
+// zombies only) it is closed at once.
+func groupGone(members []Reached) (<-chan struct{}, func()) {
+	gone, done := make(chan struct{}), make(chan struct{})
+	exits := make([]<-chan struct{}, len(members))
+	releases := make([]func(), len(members))
+	for i, m := range members {
+		exits[i], releases[i] = ExitOf(m)
 	}
-	return ExitOf(Reached{})
+	go func() {
+		for _, exit := range exits {
+			select {
+			case <-exit:
+			case <-done:
+				return
+			}
+		}
+		close(gone)
+	}()
+	var once sync.Once
+	return gone, func() {
+		once.Do(func() {
+			close(done)
+			for _, release := range releases {
+				release()
+			}
+		})
+	}
 }
 
 func init() { groupStopByEvents = stopGroupByEvents }

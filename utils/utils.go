@@ -1340,8 +1340,9 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 // CTRL_BREAK, and was force-killed (taskkill /F). A stop that could not tell
 // that the tree had exited without a kill says so too: one whose signal could
 // not be sent, whose force-kill failed, or whose state it could not read. As
-// InterruptProcessTree, it waits for each group's leader, not for the rest of
-// the group.
+// InterruptProcessTree, it waits for each group until no process of it runs
+// (groupRunning): a leader that has exited can leave processes in its group
+// that run on, and a group of zombies only has exited.
 func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
 	killed, _, err = interruptProcessTree(logger, ppid, sig, nil, false, nil)
 	return killed, err
@@ -1368,8 +1369,9 @@ func InterruptProcessTreeReached(logger *zap.Logger, ppid int, sig syscall.Signa
 
 // InterruptProcessTreeStop is InterruptProcessTreeReached for a stop that
 // waits on the app's exit, not for a number of seconds (a test set's end, a
-// recording's end, under the proven switch): it waits for each group's
-// leader to exit, on its exit event (Linux, stop_events_linux.go), and kills
+// recording's end, under the proven switch): it waits for each process its
+// signal reached in each group to exit, on its exit event (Linux,
+// stop_events_linux.go), and kills
 // a group only when it made no progress on its way out for StopStallBudget
 // of the time both it and keploy could run (ExitClock). A starved group,
 // whether the host is or only the group is, takes as long as it takes.
@@ -1382,14 +1384,15 @@ func InterruptProcessTreeStop(logger *zap.Logger, ppid int, sig syscall.Signal, 
 }
 
 // groupStopByEvents, where it is set (Linux), is how InterruptProcessTreeStop
-// waits for a group it signalled: until its leader exits, while its members
+// waits for a group it signalled: until each of its members exits, while they
 // (as the signal reached them) make progress. It kills the group on a stall,
 // or at the user's Ctrl+C, and says why ("" when it did not kill).
 // Each step the group takes on its way out is a movement of moved.
 var groupStopByEvents func(logger *zap.Logger, leader int, members []Reached, moved *TeardownScope) (killed string)
 
 // TreeInterruptGrace is how long InterruptProcessTree waits for each process
-// group of the tree to exit after its signal before it sends SIGKILL.
+// group of the tree to exit (no process of it runs) after its signal before
+// it sends SIGKILL.
 const TreeInterruptGrace = 3 * time.Second
 
 // windowsInterruptGrace is how long InterruptProcessTree waits on Windows for
@@ -1549,26 +1552,27 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			}
 			continue
 		}
-		// Wait for this particular process to exit with a timeout of 3 seconds
-		err = waitForProcessExit(pid, TreeInterruptGrace, logger)
-		if err != nil {
-			logger.Error("error waiting for process to exit", zap.Int("pid", pid), zap.Error(err))
-		}
+		// Wait, up to the grace, until no process of the group runs: its
+		// leader, or one it left in its group, such as the server of
+		// `sh -c 'server &'` whose sh no one reaps (a zombie leader). One
+		// the caller was handed, as it ignored the signal, is the caller's.
+		handed := handedOver(pid, members)
+		waitForGroupExit(pid, handed, TreeInterruptGrace, logger)
 		// If it ignored the graceful signal (or was too contention-slow to exit
 		// within the wait), escalate to SIGKILL so it cannot keep holding resources
 		// (e.g. a listening port) and race the next app start with
 		// "address already in use" (the go-docker-timefreeze flake).
-		if running, rerr := isProcessRunning(pid); rerr != nil {
+		if running, rerr := groupRunning(pid, handed); rerr != nil {
 			logger.Debug("could not verify process state after graceful signal", zap.Int("pid", pid), zap.Error(rerr))
 		} else if running {
 			logger.Debug("process still alive after graceful signal; escalating to SIGKILL", zap.Int("pgid", pid))
 			if killed == "" {
 				killed = fmt.Sprintf("a process of it had not exited %s later (the grace keploy's stop gives each of its process groups), so keploy killed it", TreeInterruptGrace)
 			}
-			if killErr := SendSignal(logger, -pid, syscall.SIGKILL); killErr != nil {
+			if killErr := signalGroup(logger, -pid, syscall.SIGKILL); killErr != nil {
 				logger.Error("error sending SIGKILL to the process group id", zap.Int("pgid", pid), zap.Error(killErr))
 			} else {
-				_ = waitForProcessExit(pid, 3*time.Second, logger)
+				waitForGroupExit(pid, handed, 3*time.Second, logger)
 			}
 		}
 	}
@@ -1576,11 +1580,78 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 }
 
 // processTree and signalGroup are the tree interrupt's reads of the process
-// tree and its signals to a process group; a test fails them.
+// tree and its signals to a process group (on macOS, signalGroupByMembers);
+// a test fails them.
 var (
 	processTree = findChildPIDs
 	signalGroup = SendSignal
 )
+
+// groupExitPoll is how often waitForGroupExit reads whether a group runs.
+const groupExitPoll = 100 * time.Millisecond
+
+// waitForGroupExit waits until no process of process group pgid runs but
+// those in except (groupRunning), or timeout has passed. A group whose state
+// cannot be read is waited for no more: the caller reads it again, and says
+// why.
+func waitForGroupExit(pgid int, except []Reached, timeout time.Duration, logger *zap.Logger) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if running, err := groupRunning(pgid, except); err != nil || !running {
+			logger.Debug("Process group exited", zap.Int("pgid", pgid), zap.Error(err))
+			return
+		}
+		if time.Now().After(deadline) {
+			logger.Debug("Timed out waiting for process group to exit", zap.Int("pgid", pgid))
+			return
+		}
+		time.Sleep(groupExitPoll)
+	}
+}
+
+// groupRunning reports whether a process of process group pgid has not
+// exited: its leader, pid pgid, runs (isProcessRunning; a zombie has
+// exited), or another process of its group does (groupRuns). A group counts
+// as exited only when no process of it runs: a leader that has exited,
+// reaped or a zombie, can leave processes in its group that run on, as
+// `sh -c 'server &'` leaves its server, and those can still hold the app's
+// port. A group of zombies only has exited, and costs no wait. A process of
+// except (handedOver), named by its pid and start time, is not counted.
+func groupRunning(pgid int, except []Reached) (bool, error) {
+	if running, err := isProcessRunning(pgid); err != nil || running {
+		return running, err
+	}
+	return groupRunsExcept(pgid, except)
+}
+
+// handedOver is what of members, the processes of group leader's that its
+// signal reached (InterruptProcessTreeReached and InterruptProcessTreeStop
+// return them), the stop leaves to its caller: each that ignored the
+// signal, but the leader. The stop of what the app leaves behind asks those
+// with SIGTERM (adopt_linux.go, stopAdopted), and its interrupt neither
+// waits for them nor kills them. The leader, and every process the signal
+// reached that acts on it, the interrupt waits for. Where no snapshot is
+// read (InterruptProcessTreeKilled; macOS) nothing is handed over.
+func handedOver(leader int, members []Reached) []Reached {
+	var handed []Reached
+	for _, m := range members {
+		if m.Ignores && m.PID != leader {
+			handed = append(handed, m)
+		}
+	}
+	return handed
+}
+
+// waitedFor is members without what handedOver leaves to the caller.
+func waitedFor(leader int, members []Reached) []Reached {
+	var waited []Reached
+	for _, m := range members {
+		if !m.Ignores || m.PID == leader {
+			waited = append(waited, m)
+		}
+	}
+	return waited
+}
 
 // waitForProcessExit waits for the process to exit or times out after the specified duration
 func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) error {
