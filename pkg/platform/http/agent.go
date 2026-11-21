@@ -271,8 +271,8 @@ func (r *agentRun) sudoRanAgent(context.Context) bool {
 
 // newNativeAgentCommand, newNativeAgentPTYCommand, sudoCredentialsCached and
 // needsAgentPTY are how a native agent's command is made (without a PTY, and
-// on one), whether sudo has cached credentials, and whether its start needs a
-// PTY: variables for tests.
+// on one), whether sudo has cached credentials, and whether its start (or a
+// Docker agent's `docker run`) needs a PTY: variables for tests.
 var (
 	newNativeAgentCommand    = agentUtils.NewAgentCommand
 	newNativeAgentPTYCommand = agentUtils.NewAgentCommandForPTY
@@ -4568,7 +4568,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	said := &outputTail{}
 
 	// Check if we need PTY for interactive input (e.g., sudo password on Linux)
-	if agentUtils.NeedsPTY() {
+	if needsAgentPTY() {
 		return a.startInDockerWithPTY(ctx, logger, cmd, said, opts.AgentPort)
 	}
 
