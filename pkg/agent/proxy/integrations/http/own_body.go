@@ -2,11 +2,13 @@ package http
 
 import (
 	"maps"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"weak"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -158,25 +160,23 @@ func formRawKeys(body string) []string {
 	return out
 }
 
-// ownBodiesMaxBytes bounds the recorded request bodies ownBodies keeps:
-// past it, it starts again from none. A recording's body read whole takes a
-// few times its bytes.
-const ownBodiesMaxBytes = 8 << 20
-
 // ownBodies keeps, for sameCallBodies, each recording's request body as
 // the recording holds it, its print (ownRead.printOf) and, once a
 // comparison has read it whole, that read (ownRead.json), so a call that
 // reaches the fuzzy fallback reads only its own body, not every
-// recording's again. A recording is kept by its pointer, which a store
-// gives the same on every read while it holds the recording, beside the
-// body it was read from: a recording whose body is not that one is read
-// again. Up to ownBodiesMaxBytes of bodies, so recordings a store let go
-// of are let go of here too. Safe for concurrent use: a kept read is only
-// read, and a print or a whole read is published whole (atomic.Pointer).
+// recording's again, however large the pool. A recording is kept by a weak
+// pointer to it (weak.Make), which is the same for each read of the
+// recording while a store holds it and keeps nothing alive, beside the body
+// it was read from: a recording whose body is not that one is read again.
+// What is kept of a recording goes when the recording does: the runtime
+// calls forget once nothing holds the recording (runtime.AddCleanup), so
+// the reads of a test set the store let go of are let go of with it, and
+// the recordings a store holds are each read once, never again per call.
+// Safe for concurrent use: a kept read is only read, and a print or a
+// whole read is published whole (atomic.Pointer).
 type ownBodies struct {
-	mu    sync.Mutex
-	bytes int
-	of    map[*models.Mock]ownBody
+	mu sync.Mutex
+	of map[weak.Pointer[models.Mock]]ownBody
 }
 
 type ownBody struct {
@@ -209,20 +209,32 @@ func (o *ownBodies) read(m *models.Mock) (*ownRead, bool) {
 	if m.Spec.HTTPReq == nil {
 		return noRead, false
 	}
-	body := m.Spec.HTTPReq.Body
+	body, key := m.Spec.HTTPReq.Body, weak.Make(m)
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	b, ok := o.of[m]
-	if ok && b.body == body {
+	b, kept := o.of[key]
+	if kept && b.body == body {
 		return b.read, true
 	}
-	if o.of == nil || o.bytes+len(body) > ownBodiesMaxBytes {
-		o.of, o.bytes = map[*models.Mock]ownBody{}, 0
+	if o.of == nil {
+		o.of = map[weak.Pointer[models.Mock]]ownBody{}
 	}
 	read := &ownRead{body: body}
-	o.bytes += len(body)
-	o.of[m] = ownBody{body: body, read: read}
+	o.of[key] = ownBody{body: body, read: read}
+	if !kept {
+		// One cleanup for each recording kept: a body read again replaces
+		// what is kept under the key the cleanup forgets.
+		runtime.AddCleanup(m, o.forget, key)
+	}
 	return read, true
+}
+
+// forget lets go of what o keeps of the recording key points to, which
+// nothing holds any more.
+func (o *ownBodies) forget(key weak.Pointer[models.Mock]) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.of, key)
 }
 
 // json is r's body read whole (mocknoise.NewReadJSONBody), read the first
