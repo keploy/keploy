@@ -30,6 +30,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -1437,6 +1438,13 @@ func (a *Agent) wireAppClock() {
 			run = realAppClockRun
 		}
 		rs.SetAppClockRun(run)
+	}
+	if ss, ok := a.Proxy.(coreAgent.AppClockShownSetter); ok {
+		var shown func(from, to time.Time) ([]learn.Span, bool)
+		if sr, tells := ActiveHooks.(AppClockShownReader); tells && reads {
+			shown = sr.AppClockShown
+		}
+		ss.SetAppClockShown(shown)
 	}
 	if reads {
 		s.SetAppClock(r.AppClock)

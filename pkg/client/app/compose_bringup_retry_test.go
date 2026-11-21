@@ -216,7 +216,7 @@ func TestKeploysStopOfTheComposeAppKeepsItsFirstStart(t *testing.T) {
 			if got := a.composeApp.appStartedAt.Load(); got != first.UnixNano() {
 				t.Fatalf("keploy's stop kept the first start %d; want %d", got, first.UnixNano())
 			}
-			if _, err := a.StartComposeApp(context.Background()); err != nil {
+			if _, err := a.StartComposeApp(context.Background(), noNotice); err != nil {
 				t.Fatal(err)
 			}
 			if a.composeExitBeforeApp(context.Background(), first.Add(time.Second).UnixNano()) {

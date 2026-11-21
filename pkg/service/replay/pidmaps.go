@@ -485,11 +485,12 @@ func (r *Replayer) markCaptureLosses(ctx context.Context) {
 // so): the bases are then the latest read's process's from its start, all it
 // counted (more, never less), not left with a process gone, which would
 // leave every later test unjudged until the application starts anew again.
-func (r *Replayer) appStartsAnew() {
+// It reports whether the application starts anew: false where it runs on.
+func (r *Replayer) appStartsAnew() bool {
 	if r.lossAppRunsOn {
 		r.lossAppRunsOn = false
 		r.lossAppKept = r.lossAppRunsOnWhy
-		return
+		return false
 	}
 	r.lossAppBase, r.lossAppKept = nil, ""
 	if r.lossMark.known {
@@ -500,6 +501,7 @@ func (r *Replayer) appStartsAnew() {
 		r.lossRunBase = r.lossAppBase
 		r.lossBasesAgent = r.lossAgent
 	}
+	return true
 }
 
 // agentsStartedBeforeApp is an optional Instrumentation extension: whether an

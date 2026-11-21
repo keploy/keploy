@@ -468,7 +468,7 @@ func TestAnExitWhileKeployHoldsTheAppStoppedIsKeploysOwnInEveryMode(t *testing.T
 			if said := own(); len(said) != 1 || said[0].ContextMap()["service"] != "worker" || said[0].ContextMap()["exitCode"] != int64(1) {
 				t.Fatalf("said %v; want once, of the worker's exit 1 (the tidy exit 0 ends nothing, and the app's 130 in keploy's stop is not the flags')", said)
 			}
-			if _, err := r.a.StartComposeApp(context.Background()); err != nil {
+			if _, err := r.a.StartComposeApp(context.Background(), noNotice); err != nil {
 				t.Fatalf("keploy's start of the app: %v", err)
 			}
 			r.d.mu.Lock()

@@ -114,3 +114,16 @@ func (e EpochOffset) Holds(live string, s Span) bool {
 	}
 	return v.Sub(s.To.Truncate(res)) <= e.Hi && e.Lo <= v.Sub(s.From.Truncate(res))
 }
+
+// HoldsIn reports whether live holds in one of spans (Holds): the spans of
+// one call on a clock that moved while the application could have read it
+// for the call (CallSpansOf), each a stretch the clock showed. None holds
+// in no span.
+func (e EpochOffset) HoldsIn(live string, spans []Span) bool {
+	for _, s := range spans {
+		if e.Holds(live, s) {
+			return true
+		}
+	}
+	return false
+}

@@ -145,8 +145,9 @@ type Proxy struct {
 	caseBinds caseBinds
 	// serveClock tells, with the proven switch off, a call's span on the
 	// application's clock for the background check alone (learn.
-	// CallSpanOf): the managers note their serves to it, and the parsers
-	// find it on their connection's context. The learn tracker, which tells
+	// CallSpanOf, learn.CallSpansOf): the managers note their serves to it,
+	// Mock notes each test set's begin to it, and the parsers find it on
+	// their connection's context. The learn tracker, which tells
 	// it under the switch, is fed nothing with it off.
 	serveClock *learn.ServeClock
 	// procZones reads the zone each application process writes a wall
@@ -4729,6 +4730,10 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		// tracker alone; the set's staging reads the tracker's set itself
 		// (MockManager.SetTrackerSetAt).
 		p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+	} else {
+		// With the switch off the background check bounds a call's read of
+		// the app's clock by the set's begin (learn.ServeClock.SpansOf).
+		p.serveClock.NewSet()
 	}
 	if mm := p.getMockManager(); mm == nil {
 		p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
@@ -5429,6 +5434,14 @@ func (p *Proxy) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
 }
 
 var _ agent.AppClockRunSetter = (*Proxy)(nil)
+
+// SetAppClockShown makes the learn tracker read what the app's clock showed
+// between two real instants (agent.AppClockShownSetter).
+func (p *Proxy) SetAppClockShown(f func(from, to time.Time) ([]learn.Span, bool)) {
+	p.learnTracker.SetAppClockShown(f)
+}
+
+var _ agent.AppClockShownSetter = (*Proxy)(nil)
 
 // ServeExactTestConcurrent implements agent.ExactConcurrentServer (exact.go).
 func (p *Proxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
