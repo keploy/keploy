@@ -204,7 +204,7 @@ func TestComposeExtraHostsMoveToKeployAgent(t *testing.T) {
 			if err := yaml.Unmarshal([]byte(in), &compose); err != nil {
 				t.Fatal(err)
 			}
-			if err := idc.modifyAppServiceForKeploy(&compose, "app", tc.hostGateway); err != nil {
+			if err := idc.modifyAppServiceForKeploy(&compose, "app", "app", tc.hostGateway); err != nil {
 				t.Fatal(err)
 			}
 			svcs := composeOut(t, idc, &compose)
@@ -226,7 +226,7 @@ func TestComposeExtraHostsOfAnotherShapeAreRefused(t *testing.T) {
 	if err := yaml.Unmarshal([]byte("services:\n  app:\n    image: alpine:3.21\n    extra_hosts: db.test\n  keploy-agent:\n    image: keploy/agent\n"), &compose); err != nil {
 		t.Fatal(err)
 	}
-	if err := idc.modifyAppServiceForKeploy(&compose, "app", true); err == nil || !strings.Contains(err.Error(), "extra_hosts") {
+	if err := idc.modifyAppServiceForKeploy(&compose, "app", "app", true); err == nil || !strings.Contains(err.Error(), "extra_hosts") {
 		t.Fatalf("an extra_hosts keploy cannot read was taken: %v", err)
 	}
 }
