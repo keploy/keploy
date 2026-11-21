@@ -837,6 +837,14 @@ func TestOutcomeCostACallScansEachPlaceOnceForEachWordItAsks(t *testing.T) {
 // it made for a word (heldScans), the words it asked of filters
 // (filterLookups) and the places its words' checks read (placeAsks).
 func costSet(n int) (got [2]string, builds [2]int, scans, lookups, asks [2]int64) {
+	got, builds, scans, lookups, asks, _ = costSetStaged(n, false)
+	return got, builds, scans, lookups, asks
+}
+
+// costSetStaged is costSet, its set staged first where stage says so
+// (WarmSet over its recordings, in order, waited for): use is what the
+// staging read (SetUse), zero with no staging.
+func costSetStaged(n int, stage bool) (got [2]string, builds [2]int, scans, lookups, asks [2]int64, use SetUse) {
 	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
 	mocks := make([]*models.Mock, n)
 	for i := range mocks {
@@ -848,6 +856,9 @@ func costSet(n int) (got [2]string, builds [2]int, scans, lookups, asks [2]int64
 	}
 	tr := NewTracker()
 	tr.NewSet()
+	if stage {
+		use = <-tr.WarmSet(srcOf(mocks))
+	}
 	built := func(dc *DriftCache) int {
 		fs := filtersOf(dc.set)
 		fs.mu.Lock()
@@ -862,7 +873,7 @@ func costSet(n int) (got [2]string, builds [2]int, scans, lookups, asks [2]int64
 		builds[c], scans[c], lookups[c], asks[c] = built(dc)-b, heldScans.Load()-sc, filterLookups.Load()-l, placeAsks.Load()-a
 		tr.End()
 	}
-	return got, builds, scans, lookups, asks
+	return got, builds, scans, lookups, asks, use
 }
 
 // A set builds the filter of each recording's words once, at the first call
