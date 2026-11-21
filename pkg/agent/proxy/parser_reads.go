@@ -69,8 +69,10 @@ import (
 // span, and its requests the parser never read that were captured before the
 // stop are left out here. A recording that is stopping
 // (Session.RecordingStopping) tears the connection down with it, and what it
-// carries from the recording's stop on is no loss; the requests captured
-// before it, while the recording ran, still are.
+// carries after the recording's stop is no loss; the requests captured
+// before it, while the recording ran, still are, and so are those captured
+// at the stop's very clock reading, which may have come before it
+// (beforeCutoff).
 type parserReads struct {
 	mu        sync.Mutex
 	conn      unrecordedConn
@@ -228,10 +230,15 @@ func (p *parserReads) keep(through int64, at time.Time) {
 	p.unread = append(p.unread, carriedChunk{through: through, at: at})
 }
 
-// beforeCutoff reports whether a chunk read at `at` came before the stop or
-// the recording's stop that bounds what the return leaves out.
+// beforeCutoff reports whether a chunk read at `at` may have come before the
+// stop or the recording's stop that bounds what the return leaves out: read
+// before it, or at its very reading. A clock read in steps (Windows') gives a
+// chunk the app sent just before the stop the stop's own reading, and nothing
+// else covers such a chunk after the recording's stop, so the test case over
+// it would be saved without its mocks. One read at the stop's instant is left
+// out, the fail-closed side.
 func (p *parserReads) beforeCutoff(at time.Time) bool {
-	return p.cutoff.IsZero() || wall(at).Before(p.cutoff)
+	return p.cutoff.IsZero() || !wall(at).After(p.cutoff)
 }
 
 // leftOutRequests is what leaveOut left out: how many unread client chunks,

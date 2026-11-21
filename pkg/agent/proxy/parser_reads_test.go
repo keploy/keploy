@@ -288,6 +288,45 @@ func TestParserReads_TheRequestsBeforeTheRecordingsStopAreLeftOutAndNoneAfter(t 
 	}
 }
 
+// A request the relay read at the very clock reading the recording's stop
+// took is left out, as one before the stop, whether the relay told of it
+// before the return or after: a clock read in steps (Windows') gives a request
+// the app sent just before the stop the stop's own reading, and nothing else
+// covers it, so taken as after the stop the test case over it was saved
+// without its mocks. Here the stop cut the parser short, so it goes to the
+// stop cut's recorder, and the return counts it.
+func TestParserReads_ARequestReadAtTheRecordingsStopReadingIsLeftOut(t *testing.T) {
+	want := []string{span(msAfter(50), msAfter(50).Add(readsIdleGrace))}
+	for _, toldAfter := range []bool{false, true} {
+		r := newReadsUnderTest()
+		var cut []string
+		r.carry(fakeconn.FromClient, 0, 5) // read
+		r.streams.read.Store(5)
+		unread := r.tee(fakeconn.FromClient, 4) // unread, read at the stop's own reading
+		if !toldAfter {
+			r.carried(fakeconn.FromClient, msAfter(50), true, unread)
+		}
+		r.recordingStopped(msAfter(50))
+		r.conn.stopping = true
+		left := r.parserReturned(func(start, end time.Time) { cut = append(cut, span(start, end)) })
+		if toldAfter {
+			r.carried(fakeconn.FromClient, msAfter(50), true, unread)
+		}
+		if fmt.Sprint(cut) != fmt.Sprint(want) || len(r.conn.spans) != 0 {
+			t.Errorf("told of after the return: %v; left out %v as the stop cut's and %v otherwise, want %v as the stop cut's alone", toldAfter, cut, r.conn.spans, want)
+		}
+		// Told of after the return, it is left out as it is told of, and is
+		// not in what the return counts.
+		wantN := 1
+		if toldAfter {
+			wantN = 0
+		}
+		if left.chunks != wantN {
+			t.Errorf("told of after the return: %v; the return counts %d chunks left out, want %d", toldAfter, left.chunks, wantN)
+		}
+	}
+}
+
 // Before the parser returns, every chunk is noted as the connection's traffic
 // (the stops before the return go by it), and the requests the parser has
 // read are let go of as more come: what is kept is bounded by what is in the
