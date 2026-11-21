@@ -23,18 +23,20 @@
 #              answered with that recording as its own, the receipt
 #              isolated, and the replay passes
 #
-# Then a second record of GET /Users/<id> (a path with capitals) and two
-# POST /orders whose JSON body holds the order id at data.id, and two
+# Then a second record of GET /Users/<id> (a path with capitals), two
+# POST /orders whose JSON body holds the order id at data.id, and a GET
+# /orders?id=<uuid> of a uuid the script makes for each run, and two
 # replays of new ids:
-#   names      GET /Users/3 and POST /orders of a new data.id: both served
-#              another call's recording, and the next steps name a url
-#              noise key with capitals and a request-body noise key with a
-#              dot on the console, while the WARNs keep the calls' path
-#              tokens out of the log
-#   names-yml  the same with both keys in keploy.yml and --strict: keploy
-#              loads them as written (the case kept, the dotted key one
-#              field) and answers each call with that recording as its
-#              own, and the replay passes
+#   names      GET /Users/3, POST /orders of a new data.id and GET
+#              /orders?id=<a new uuid>: each served another call's
+#              recording, and the next steps name a url noise key with
+#              capitals, a url noise key for the query's uuid and a
+#              request-body noise key with a dot on the console, while the
+#              WARNs keep the calls' path tokens out of the log
+#   names-yml  the same with the three keys in keploy.yml and --strict:
+#              keploy loads them as written (the case kept, the dotted key
+#              one field, the uuid's braces kept) and answers each call
+#              with that recording as its own, and the replay passes
 #
 # Runs without the proven switch only: under it the matcher serves only a
 # call's own recording, and a replay under it needs a build that judges each
@@ -90,9 +92,12 @@ fail() { echo "FAIL: $*"; FAIL=1; }
 # The dependency answers GET /users/<id> with that user.
 cat > depserver.py <<'PY'
 import http.server, json, socketserver, sys
+from urllib.parse import parse_qs, urlsplit
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        uid = self.path.rsplit("/", 1)[-1]
+        u = urlsplit(self.path)
+        q = parse_qs(u.query)
+        uid = q["id"][0] if "id" in q else u.path.rsplit("/", 1)[-1]
         body = json.dumps({"id": uid, "name": "user " + uid}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -131,7 +136,8 @@ PY
 
 # The second test calls GET /Users/<id> for each id in USERS, then POSTs
 # /orders {"data": {"id": <id>, "item": <item>}} for each id:item in
-# ORDERS; it writes the ids it was answered with to GOT.
+# ORDERS, then GETs /orders?id=<QUERY>; it writes the ids it was answered
+# with to GOT.
 cat > test_orders.py <<PY
 import json, os, urllib.request
 def test_orders():
@@ -147,6 +153,9 @@ def test_orders():
         with urllib.request.urlopen(req, timeout=5) as r:
             assert r.status == 200
             got.append(str(json.load(r)["created"]))
+    with urllib.request.urlopen(base + "/orders?id=" + os.environ["QUERY"], timeout=5) as r:
+        assert r.status == 200
+        got.append(str(json.load(r)["id"]))
     with open(os.environ["GOT"], "w") as f:
         f.write(" ".join(got))
 PY
@@ -178,7 +187,7 @@ replay() {
   rm -f "$ROOT/got-$label"
   echo "== $label: replay, users $users${flag:+, $flag}, the dependency stopped =="
   # shellcheck disable=SC2086 # flag is one word or none
-  sudo env PATH="$PATH" "${SUDO_ENV[@]}" USERS="$users" ORDERS="${ORDERS:-}" GOT="$ROOT/got-$label" "$RECORD_BIN" mock replay -c "$CMD" --name "$SET" --disable-tele $flag 2>&1 | tee "$LOG"
+  sudo env PATH="$PATH" "${SUDO_ENV[@]}" USERS="$users" ORDERS="${ORDERS:-}" QUERY="${QUERY:-}" GOT="$ROOT/got-$label" "$RECORD_BIN" mock replay -c "$CMD" --name "$SET" --disable-tele $flag 2>&1 | tee "$LOG"
   RC=${PIPESTATUS[0]}
   echo "$label: replay exit=$RC, answered with ids '$(cat "$ROOT/got-$label" 2>/dev/null)'"
 }
@@ -186,11 +195,27 @@ replay() {
 # passed: the last replay exited 0 and its test passed.
 passed() { [ "$RC" -eq 0 ] && grep -q "1 passed" "$LOG"; }
 
-# noise_entry KIND FILE: the first test.globalNoise.global.KIND entry a
-# console next step in FILE names, whole. Only the console's "  next step:"
-# lines carry it whole: the WARN's next_step is in log form, its keys shaped.
+# noise_entry KIND FILE: the test.globalNoise.global.KIND entries the
+# console's next steps in FILE name, each whole and once, in the order first
+# named, as one mapping ({"k1": [], "k2": []}); empty when none names one.
+# Only the console's "  next step:" lines carry them whole: the WARN's
+# next_step is in log form, its keys shaped. A key may hold braces (a uuid
+# regex's {8}) and a mapping several keys, so each mapping is read as JSON,
+# which the next steps' Go-quoted keys are.
 noise_entry() {
-  grep '^  next step: ' "$2" | grep -o "test\\.globalNoise\\.global\\.$1: {\"[^\"]*\": \\[\\]}" | head -1 | sed "s/^test\\.globalNoise\\.global\\.$1: //"
+  grep '^  next step: ' "$2" | python3 -c '
+import json, sys
+prefix = "test.globalNoise.global." + sys.argv[1] + ": "
+keys = []
+for line in sys.stdin:
+    i = line.find(prefix)
+    while i >= 0:
+        mapping, end = json.JSONDecoder().raw_decode(line, i + len(prefix))
+        keys += [k for k in mapping if k not in keys]
+        i = line.find(prefix, end)
+if keys:
+    print("{" + ", ".join(json.dumps(k) + ": []" for k in keys) + "}")
+' "$1"
 }
 
 # 1. own: each call is answered with its own recording, and nothing says
@@ -258,7 +283,10 @@ fi
 SET=orders
 CMD="python3 -m pytest -q -p no:cacheprovider test_orders.py"
 RECEIPT="keploy/orders/last-replay.yaml"
-echo "== record GET /Users/1 and POST /orders of data.id a1 and a2 =="
+# newuuid: a uuid made for this run, as an app makes an order id.
+newuuid() { python3 -c 'import uuid; print(uuid.uuid4())'; }
+QUERY=$(newuuid)
+echo "== record GET /Users/1, POST /orders of data.id a1 and a2, GET /orders?id=$QUERY =="
 : > dep.log
 python3 depserver.py "$PORT" >dep.log 2>&1 &
 DEP_PID=$!
@@ -266,36 +294,45 @@ until grep -qx ready dep.log 2>/dev/null; do
   kill -0 "$DEP_PID" 2>/dev/null || { echo "FAIL: the dependency exited before it listened"; cat dep.log; exit 1; }
   sleep 0.1
 done
-sudo env PATH="$PATH" "${SUDO_ENV[@]}" USERS="1" ORDERS="a1:pen a2:book" GOT="$ROOT/got-record2" "$RECORD_BIN" mock record -c "$CMD" --name orders --disable-tele 2>&1 | tee rec2.log
+sudo env PATH="$PATH" "${SUDO_ENV[@]}" USERS="1" ORDERS="a1:pen a2:book" QUERY="$QUERY" GOT="$ROOT/got-record2" "$RECORD_BIN" mock record -c "$CMD" --name orders --disable-tele 2>&1 | tee rec2.log
 rc=${PIPESTATUS[0]}
 kill "$DEP_PID" 2>/dev/null; wait "$DEP_PID" 2>/dev/null; DEP_PID=""
 [ "$rc" -eq 0 ] || { echo "FAIL: the second record exited $rc, want 0"; exit 1; }
-mocks=$(http_mocks_are keploy/orders/mocks.yaml 3) || { echo "FAIL: expected 3 Http mocks and no other kind but DNS: $mocks"; exit 1; }
+mocks=$(http_mocks_are keploy/orders/mocks.yaml 4) || { echo "FAIL: expected 4 Http mocks and no other kind but DNS: $mocks"; exit 1; }
 echo "recorded: $mocks"
 grep -qE '^ +url: "?[^ ]*/Users/1"?$' keploy/orders/mocks.yaml || { echo "FAIL: no recording of GET /Users/1"; sed -n "s/^ *url: //p" keploy/orders/mocks.yaml; exit 1; }
+RECQUERY=$QUERY
 
 ORDERS="n7:book"
+QUERY=$(newuuid)
 replay names "3"
-passed || fail "names: the replay failed (exit $RC); without --strict both calls are served another call's recording, want it to pass"
-[ "$(cat "$ROOT/got-names" 2>/dev/null)" = "1 a2" ] || fail "names: the calls were answered with ids '$(cat "$ROOT/got-names" 2>/dev/null)', want '1 a2' (user 1's and the book order's recordings)"
-grep -q 'mock replay summary.*"missed": 0.*"answered_as_another": 2' "$LOG" || fail "names: the summary does not say missed 0 and answered_as_another 2"
+passed || fail "names: the replay failed (exit $RC); without --strict each call is served another call's recording, want it to pass"
+[ "$(cat "$ROOT/got-names" 2>/dev/null)" = "1 a2 $RECQUERY" ] || fail "names: the calls were answered with ids '$(cat "$ROOT/got-names" 2>/dev/null)', want '1 a2 $RECQUERY' (user 1's, the book order's and the recorded query's recordings)"
+grep -q 'mock replay summary.*"missed": 0.*"answered_as_another": 3' "$LOG" || fail "names: the summary does not say missed 0 and answered_as_another 3"
 grep -qE '^ +answer: closest_body$' "$RECEIPT" || fail "names: the receipt's answeredAsAnother does not say closest_body"
 grep -qE '^ +- body\.data\.id$' "$RECEIPT" || fail "names: the receipt's answeredAsAnother does not name body.data.id"
+grep -qE '^ +- url\.query\.id$' "$RECEIPT" || fail "names: the receipt's answeredAsAnother does not name url.query.id for GET /orders?id=$QUERY"
+grep -q "^  next step: .*An entry for a query value masks every query value of its shape, in every call\." "$LOG" || fail "names: the console's next step for GET /orders?id=$QUERY does not say its entry masks every query value of its shape"
 URLKEY=$(noise_entry url "$LOG")
 BODYKEY=$(noise_entry requestbody "$LOG")
-[ "$URLKEY" = '{"^/Users/[0-9]+$": []}' ] || fail "names: the next step for GET /Users/3 names url noise '$URLKEY', want '{\"^/Users/[0-9]+\$\": []}'"
+UUIDKEY='"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$": []'
+case "$URLKEY" in
+  '{"^/Users/[0-9]+$": [], '"$UUIDKEY"'}' | '{'"$UUIDKEY"', "^/Users/[0-9]+$": []}') ;;
+  *) fail "names: the next steps for GET /Users/3 and GET /orders?id=$QUERY name url noise '$URLKEY', want the entries {\"^/Users/[0-9]+\$\": []} and {$UUIDKEY}" ;;
+esac
 [ "$BODYKEY" = '{"data.id": []}' ] || fail "names: the next step for POST /orders names request-body noise '$BODYKEY', want '{\"data.id\": []}'"
 # The WARNs name each call in log form: no path token of the call reaches the log.
 if grep 'an outgoing call was answered with the recording of another call' "$LOG" | grep -q 'Users'; then
   fail "names: a WARN for a call answered with another call's recording carries the path token Users, want the call in log form"
 fi
 if [ -n "$URLKEY" ] && [ -n "$BODYKEY" ]; then
-  echo "== names-yml: keploy.yml url $URLKEY, requestbody $BODYKEY =="
+  QUERY=$(newuuid)
+  echo "== names-yml: keploy.yml url $URLKEY, requestbody $BODYKEY, GET /orders?id=$QUERY =="
   printf 'test:\n  globalNoise:\n    global:\n      url: %s\n      requestbody: %s\n' "$URLKEY" "$BODYKEY" > keploy.yml
   replay names-yml "3" --strict
   rm -f keploy.yml
   passed || fail "names-yml: with the noise keys the next steps name, the replay under --strict failed (exit $RC), want it to pass"
-  [ "$(cat "$ROOT/got-names-yml" 2>/dev/null)" = "1 a2" ] || fail "names-yml: the calls were answered with ids '$(cat "$ROOT/got-names-yml" 2>/dev/null)', want '1 a2'"
+  [ "$(cat "$ROOT/got-names-yml" 2>/dev/null)" = "1 a2 $RECQUERY" ] || fail "names-yml: the calls were answered with ids '$(cat "$ROOT/got-names-yml" 2>/dev/null)', want '1 a2 $RECQUERY'"
   if grep -q "answered with the recording of another call" "$LOG"; then fail "names-yml: a call is still said to be answered with another call's recording"; fi
   grep -q 'mock replay summary.*"missed": 0' "$LOG" || fail "names-yml: the summary does not say missed 0"
   grep -qx 'isolated: true' "$RECEIPT" || fail "names-yml: the receipt does not prove the run isolated"
