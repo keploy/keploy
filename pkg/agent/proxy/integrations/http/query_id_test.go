@@ -44,6 +44,8 @@ func TestAnotherIDInTheQueryIsNamedAndItsNoiseMakesTheRecordingItsOwn(t *testing
 		{"a token id beside a page that is the same", "/orders?page=2&ref=ord_8ab071aa4d5a130a", "/orders?page=2&ref=ord_dcce109751713323", []string{"url.query.ref"}, []string{`^[0-9A-Za-z\_]{16,}$`}},
 		{"two uuid ids, one entry", "/orders?a=" + queryUUID1 + "&b=" + queryUUID1, "/orders?a=" + queryUUID2 + "&b=" + queryUUID2, []string{"url.query.a", "url.query.b"}, []string{uuid}},
 		{"a repeated parameter, one member differs", "/orders?tag=a&tag=" + queryUUID1, "/orders?tag=" + queryUUID2 + "&tag=a", []string{"url.query.tag"}, []string{uuid}},
+		{"a uuid query id beside a Keploy parameter in capitals", "/orders?id=" + queryUUID1 + "&Keploy-Run=1", "/orders?id=" + queryUUID2 + "&Keploy-Run=2", []string{"url.query.id"}, []string{uuid}},
+		{"a repeated parameter, a long number the same in both", "/orders?tag=12345678901234&tag=" + queryUUID1, "/orders?tag=" + queryUUID2 + "&tag=12345678901234", []string{"url.query.tag"}, []string{uuid}},
 		{"a repeated parameter of a uuid and a token", "/orders?tag=ord_8ab071aa4d5a130a&tag=" + queryUUID1, "/orders?tag=" + queryUUID2 + "&tag=ord_dcce109751713323", []string{"url.query.tag"}, []string{uuid, `^[0-9A-Za-z\_]{16,}$`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
