@@ -57,22 +57,28 @@ const (
 	// quarantine holds it, and every run skips it until a new recording of
 	// it is vouched for (a cloud replay skips a test with no mapping entry).
 	SkipUntilRerecorded SkipKind = "until_rerecorded"
+	// SkipOther is what a skip of a kind keploy does not know is said as (one
+	// a later keploy wrote into a report): skipped by keploy, which every
+	// skip is, and nothing more. A kind is named only for a skip that is not
+	// a plain quarantine, so it is never called quarantined; it is listed and
+	// counted apart from the kinds keploy knows.
+	SkipOther SkipKind = "other"
 )
 
 // SkipKinds returns the kinds of skip keploy says apart, in the order a
-// summary lists them: the quarantined first, as before there were kinds. Each
-// call returns a new slice, so no caller can change the order another reads.
+// summary lists them: the quarantined first, as before there were kinds, and
+// the kinds keploy does not know (SkipOther) last. Each call returns a new
+// slice, so no caller can change the order another reads.
 func SkipKinds() []SkipKind {
-	return []SkipKind{SkipQuarantined, SkipThisRunOnly, SkipUntilRerecorded}
+	return []SkipKind{SkipQuarantined, SkipThisRunOnly, SkipUntilRerecorded, SkipOther}
 }
 
 // Said is the kind a skip of kind k is said as: k when keploy knows it, and
-// SkipQuarantined for a kind it does not (one a later keploy wrote into a
-// report), whose skip is said as every skip was before there were kinds.
+// SkipOther for a kind it does not.
 func (k SkipKind) Said() SkipKind {
 	switch k {
-	case SkipThisRunOnly, SkipUntilRerecorded:
+	case SkipQuarantined, SkipThisRunOnly, SkipUntilRerecorded:
 		return k
 	}
-	return SkipQuarantined
+	return SkipOther
 }
