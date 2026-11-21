@@ -689,8 +689,8 @@ func (idc *Impl) parsePortsNode(portsNode *yaml.Node) []string {
 			if portNode.Kind == yaml.ScalarNode && !isEmptyNode(portNode) {
 				ports = append(ports, portNode.Value)
 			} else if portNode.Kind == yaml.MappingNode {
-				// Extended format within array: ports: [{ target: 80, published: 8080 }]
-				portMapping := idc.parseExtendedPortMapping(portNode)
+				// Long syntax: ports: [{ target: 80, published: 8080, host_ip: 127.0.0.1 }]
+				portMapping := composePortEntry(portNode)
 				if portMapping != "" {
 					ports = append(ports, portMapping)
 				}
@@ -698,7 +698,7 @@ func (idc *Impl) parsePortsNode(portsNode *yaml.Node) []string {
 		}
 	case yaml.MappingNode:
 		// Extended format: ports: { target: 80, published: 8080 }
-		portMapping := idc.parseExtendedPortMapping(portsNode)
+		portMapping := composePortEntry(portsNode)
 		if portMapping != "" {
 			ports = []string{portMapping}
 		}
@@ -713,43 +713,57 @@ func (idc *Impl) parsePortsNode(portsNode *yaml.Node) []string {
 	return ports
 }
 
-// parseExtendedPortMapping parses extended port mapping format { target: 80, published: 8080, protocol: tcp }
-func (idc *Impl) parseExtendedPortMapping(portNode *yaml.Node) string {
-	var target, published, protocol string
+// composePortEntry is a long-syntax ports entry (target, published, host_ip,
+// protocol, mode, name, app_protocol) as one string of AppPorts: the entry as
+// the file writes it, in YAML's flow style, every field and every variable
+// kept, aliases read through. keploy-agent takes it back as the same mapping
+// (agentPortNode), so compose resolves it there exactly as it would have on
+// the app. Rewritten as "published:target", host_ip was lost and a port the
+// user bound to 127.0.0.1 was published on every interface.
+func composePortEntry(entry *yaml.Node) string {
+	out, err := yaml.Marshal(flowCopy(entry))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
 
-	for i := 0; i < len(portNode.Content); i += 2 {
-		if i+1 >= len(portNode.Content) {
-			break
-		}
+// flowCopy is a copy of n with every alias replaced by a copy of what it
+// names, no anchors or comments, and collections in flow style: a node that
+// marshals, alone, to what n reads as.
+func flowCopy(n *yaml.Node) *yaml.Node {
+	n = aliasTarget(n)
+	if n == nil {
+		return nil
+	}
+	c := *n
+	c.Anchor = ""
+	c.HeadComment, c.LineComment, c.FootComment = "", "", ""
+	if c.Kind == yaml.MappingNode || c.Kind == yaml.SequenceNode {
+		c.Style = yaml.FlowStyle
+	}
+	c.Content = make([]*yaml.Node, len(n.Content))
+	for i, child := range n.Content {
+		c.Content[i] = flowCopy(child)
+	}
+	return &c
+}
 
-		keyNode := portNode.Content[i]
-		valueNode := aliasTarget(portNode.Content[i+1])
-
-		if keyNode.Kind == yaml.ScalarNode && valueNode.Kind == yaml.ScalarNode {
-			switch keyNode.Value {
-			case "target":
-				target = valueNode.Value
-			case "published":
-				published = valueNode.Value
-			case "protocol":
-				protocol = valueNode.Value
-			}
+// agentPortNode is keploy-agent's ports entry for port, one of AppPorts: the
+// mapping a long-syntax entry was (composePortEntry), else the short-syntax
+// string as written. A short-syntax port never starts with "{".
+func agentPortNode(port string) *yaml.Node {
+	if strings.HasPrefix(port, "{") {
+		var doc yaml.Node
+		if err := yaml.Unmarshal([]byte(port), &doc); err == nil && len(doc.Content) == 1 && doc.Content[0].Kind == yaml.MappingNode {
+			return doc.Content[0]
 		}
 	}
-
-	// Build the port mapping string
-	if target != "" && published != "" {
-		mapping := fmt.Sprintf("%s:%s", published, target)
-		if protocol != "" && protocol != "tcp" {
-			mapping = fmt.Sprintf("%s/%s", mapping, protocol)
-		}
-		return mapping
-	} else if target != "" {
-		// Only target specified (internal port)
-		return target
+	return &yaml.Node{
+		Kind:  yaml.ScalarNode,
+		Value: port,
+		Style: yaml.DoubleQuotedStyle, // Force double quotes for port strings
 	}
-
-	return ""
 }
 
 // generateKeployVolumes creates the standard volume mappings for Keploy containers
@@ -1150,11 +1164,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if len(ports) > 0 {
 		portsNode := &yaml.Node{Kind: yaml.SequenceNode}
 		for _, port := range ports {
-			portsNode.Content = append(portsNode.Content, &yaml.Node{
-				Kind:  yaml.ScalarNode,
-				Value: port,
-				Style: yaml.DoubleQuotedStyle, // Force double quotes for port strings
-			})
+			portsNode.Content = append(portsNode.Content, agentPortNode(port))
 		}
 		serviceNode.Content = append(serviceNode.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: "ports"},
