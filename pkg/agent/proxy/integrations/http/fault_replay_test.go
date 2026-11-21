@@ -17,6 +17,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -101,6 +102,9 @@ func replaying(t *testing.T, h *HTTP, mocks ...*models.Mock) (net.Conn, <-chan e
 func replayingHeld(t *testing.T, h *HTTP, mocks ...*models.Mock) heldReplay {
 	t.Helper()
 	app, proxy := loopback(t)
+	// The count from the accept, as the proxy puts it on every client it
+	// accepts (relay.CountClientWrites).
+	proxy = relay.CountClientWrites(proxy)
 	marks := newIdleMarks()
 	ctx, cancel := context.WithCancel(integrations.WithRequestHolder(context.Background(), marks))
 	returned := make(chan error, 1)
