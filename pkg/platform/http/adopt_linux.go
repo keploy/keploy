@@ -903,6 +903,14 @@ func handedMembers(reached []utils.Reached) []member {
 // held by the kernel without progress for as long (leftToKernel, which the
 // next read of the daemons says, adoptedRunning). stallKill says why it
 // killed for want of progress; "" when it did not.
+//
+// Their progress is that of those on a way out of their own (hasWayOut).
+// One that ignores the SIGTERM it is asked to stop with is on none: what it
+// does as it runs on (storage it reads and writes, files it opens and
+// closes, threads it ends) is no progress on a way out, so however busily
+// it runs, it holds the stop for no more than the others' way out and the
+// stall after it. From the kill on, each is on the kill's way out, and the
+// progress of each is read.
 func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, moved *utils.TeardownScope) (stallKill string) {
 	pids := make([]int, 0, len(ms))
 	var stopping []int
@@ -931,18 +939,21 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 	clock, meter, stopMeter := utils.NewExitMeter(procs, stopStall())
 	defer stopMeter()
 	var uncompared utils.FilesUncomparedNote
+	killed, offering := false, false
 	look := func() utils.ExitMark {
-		m := markExit(ms)
+		m := markExit(ms, func(mb member) bool { return killed || hasWayOut(mb, acting, ignored) })
 		uncompared.Say(logger, m)
 		return m
 	}
 	meter.Advance(look())
-	killed, offering := false, false
 	kill := func(why string) {
 		logger.Warn(why, zap.Ints("pids", running(ms)))
 		killMembers(ms)
 		killed = true
 		meter.Reset()
+		// The mark is of each of them from now on (look), set afresh: a
+		// reading of more processes than the one before is no step back.
+		meter.Rebase(look())
 		// What is left the kill ends, or the kernel holds: no press
 		// does more, and a closed channel read again would spin.
 		notice.Withdraw()
@@ -1032,16 +1043,21 @@ func signalAll(ms []member, sig syscall.Signal, every bool, skip func(member) bo
 	}
 }
 
+// hasWayOut reports whether member m of a stop is on a way out of its own,
+// which a kill would cut: it acts on keploy's interrupt, or it did not
+// ignore SIGTERM when the stop asked it to stop with it (ignored).
+func hasWayOut(m member, acting func(member) bool, ignored map[[2]uint64]bool) bool {
+	return acting(m) || !ignored[[2]uint64{uint64(m.pid), m.start}]
+}
+
 // cutBy splits the members of ms still running by whether a kill now cuts
-// their way out: cut, those acting on keploy's interrupt and those that did
-// not ignore SIGTERM when the stop asked them to stop with it (ignored);
-// uncut, the rest.
+// their way out (hasWayOut): cut, those on one; uncut, the rest.
 func cutBy(ms []member, acting func(member) bool, ignored map[[2]uint64]bool) (cut, uncut []member) {
 	for _, m := range ms {
 		if m.exited() {
 			continue
 		}
-		if acting(m) || !ignored[[2]uint64{uint64(m.pid), m.start}] {
+		if hasWayOut(m, acting, ignored) {
 			cut = append(cut, m)
 		} else {
 			uncut = append(uncut, m)
@@ -1122,17 +1138,22 @@ func running(ms []member) []int {
 	return pids
 }
 
-// markExit reads how far a stop's members are on their way out
-// (utils.ExitMark): those whose pidfd shows them exited are not read.
-func markExit(ms []member) utils.ExitMark {
+// markExit reads how far the members of a stop's ms that read holds for
+// are on their way out (utils.ExitMark): those whose pidfd shows them
+// exited are not read.
+func markExit(ms []member, read func(member) bool) utils.ExitMark {
 	procs := make([]utils.Reached, 0, len(ms))
 	for _, mb := range ms {
-		if !mb.exited() {
+		if read(mb) && !mb.exited() {
 			procs = append(procs, utils.Reached{PID: mb.pid, Start: mb.start})
 		}
 	}
-	return utils.MarkExit(procs)
+	return readExitMark(procs)
 }
+
+// readExitMark is markExit's read of processes (utils.MarkExit): a test
+// reads marks of its own.
+var readExitMark = utils.MarkExit
 
 // processChildren is the processes pid runs: its threads' children lists, or,
 // where the kernel keeps none, every process whose parent it is.
