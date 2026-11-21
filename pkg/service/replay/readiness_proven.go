@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -895,30 +894,8 @@ func firstDialTarget(ctx context.Context, testCfg config.Test, testCases []*mode
 				return sc, h, p, true
 			}
 		case models.GRPC_EXPORT:
-			// Where the test is sent (pkg.SimulateGRPC, as the replay hooks
-			// configure it): test.host for the authority's host, its app
-			// port, test.grpcPort, replaceWith, and the one host port its
-			// app port is published on.
-			authority := tc.GrpcReq.Headers.PseudoHeaders[":authority"]
-			if authority == "" {
-				continue
-			}
-			h := testCfg.Host
-			if h == "" {
-				h = "localhost"
-			}
-			port := testCfg.GRPCPort
-			if ps, ok := testCfg.Protocol["grpc"]; ok && ps.Port > 0 {
-				port = ps.Port
-			}
-			urlReplacements, portMappings := mergeReplaceWith(testCfg, testSetID)
-			target, err := pkg.ResolveTestTarget(authority, urlReplacements, portMappings, h, tc.AppPort, port, false, logger.With(zap.String("testcase", tc.Name)))
-			if err != nil {
-				continue
-			}
-			target = pkg.PublishedTarget(ctx, pkg.SimulationConfig{ConfigPort: port, URLReplacements: urlReplacements, PortMappings: portMappings, PublishedPort: published}, authority, target, tc.AppPort, false)
-			if th, tp, err := net.SplitHostPort(target); err == nil && tp != "" {
-				return "", th, tp, true
+			if h, p, ok := resolveGRPCProbeTarget(ctx, testCfg, tc, testSetID, logger, published); ok {
+				return "", h, p, true
 			}
 		}
 	}
