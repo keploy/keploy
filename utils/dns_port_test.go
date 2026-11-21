@@ -119,8 +119,8 @@ func TestTheOSsPickForADNSPortIsFreeOverUDP(t *testing.T) {
 
 	picks = osPicks(t, 40002)
 	asked = udpPicks(t, false, 40002)
-	if got, err := availablePortAbove(unknown, 0, false); err != nil || got != 40002 || len(*asked) != 0 {
-		t.Fatalf("got port %d, err %v, after UDP binds on %v; want 40002, the OS's pick, with no UDP bind", got, err, *asked)
+	if got, err := availablePortAbove(unknown, 0, false); err != nil || got != 40002 || len(*picks) != 1 || len(*asked) != 0 {
+		t.Fatalf("got port %d, err %v, after %d picks and UDP binds on %v; want 40002, the OS's one pick, with no UDP bind", got, err, len(*picks), *asked)
 	}
 
 	all := []int{}
@@ -188,7 +188,7 @@ func TestADNSPortHeldOverUDPAloneIsMovedOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pc.Close()
+	defer func() { _ = pc.Close() }()
 	held := uint32(pc.LocalAddr().(*net.UDPAddr).Port)
 	if isDNSPortAvailable(held) {
 		t.Fatalf("isDNSPortAvailable(%d) while this test holds it over UDP; want false", held)
