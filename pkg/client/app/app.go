@@ -405,7 +405,7 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 
 	newPath := "docker-compose-tmp.yaml"
 
-	serviceInfo, err := a.docker.FindContainerInComposeFiles(paths, a.container)
+	serviceInfo, err := a.docker.FindContainerInComposeFiles(ctx, paths, composeScope(a.cmd.WholeUnredacted()), a.container)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to find container in compose files")
 		return err
@@ -422,13 +422,16 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	a.composeService = serviceInfo.AppServiceName
 	compose := serviceInfo.Compose
 
-	err = a.docker.ModifyComposeForAgent(compose, a.opts, a.container)
+	// The service is named by its KEY from here on, not by a.container: the
+	// file may write the app's container_name as a variable
+	// (`${APP_CONTAINER:-app}`), which only the resolved model matches.
+	err = a.docker.ModifyComposeForAgent(compose, a.opts, serviceInfo.AppServiceName)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to modify compose for keploy integration")
 		return err
 	}
 	if HookImpl != nil {
-		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, compose, a.container)
+		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, compose, serviceInfo.AppServiceName)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during docker compose setup")
 			return err
@@ -515,13 +518,14 @@ func (a *App) setupComposeInMemory(ctx context.Context, extraArgs []string) erro
 	a.opts.ExtraArgs = extraArgs
 	a.composeService = serviceInfo.AppServiceName
 
-	if err := a.docker.ModifyComposeForAgent(&compose, a.opts, a.container); err != nil {
+	// By its key, as the files path names it (SetupCompose).
+	if err := a.docker.ModifyComposeForAgent(&compose, a.opts, serviceInfo.AppServiceName); err != nil {
 		utils.LogError(a.logger, err, "failed to modify in-memory compose for keploy integration")
 		return err
 	}
 
 	if HookImpl != nil {
-		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, &compose, a.container)
+		changed, err := HookImpl.BeforeDockerComposeSetup(ctx, &compose, serviceInfo.AppServiceName)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during in-memory docker compose setup")
 			return err
@@ -746,12 +750,8 @@ func (a *App) composeChildTee(ctx context.Context) []utils.ExecOption {
 	if len(a.composeContent) == 0 || a.useComposeLibrary() {
 		return nil
 	}
-	whole := a.cmd.WholeUnredacted()
-	projectName, projectDir := composeProjectScope(whole)
-	if projectName == "" {
-		projectName = normalizeComposeProjectName(composeProjectEnvAssignment(whole))
-	}
-	out, err := docker.StartComposeChildOutput(ctx, a.composeContent, projectName, projectDir, composeEnvFiles(whole))
+	scope := composeScope(a.cmd.WholeUnredacted())
+	out, err := docker.StartComposeChildOutput(ctx, a.composeContent, scope.ProjectName, scope.ProjectDir, scope.EnvFiles)
 	a.composeChildOut.Store(out)
 	if err != nil {
 		if a.composeChildWarned.CompareAndSwap(false, true) {
@@ -1086,6 +1086,18 @@ func normalizeComposeProjectName(s string) string {
 		}
 	}
 	return strings.TrimLeft(b.String(), "_-")
+}
+
+// composeScope is what the compose command cmd resolves its files in beyond
+// the files themselves (docker.ComposeScope): its -p, else the
+// COMPOSE_PROJECT_NAME its leading assignments set; its --project-directory;
+// and its --env-file values.
+func composeScope(cmd string) docker.ComposeScope {
+	projectName, projectDir := composeProjectScope(cmd)
+	if projectName == "" {
+		projectName = normalizeComposeProjectName(composeProjectEnvAssignment(cmd))
+	}
+	return docker.ComposeScope{ProjectName: projectName, ProjectDir: projectDir, EnvFiles: composeEnvFiles(cmd)}
 }
 
 // composeProjectEnvAssignment is COMPOSE_PROJECT_NAME as cmd's leading

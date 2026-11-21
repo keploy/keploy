@@ -49,7 +49,7 @@ type composeOnly struct {
 	docker.Client
 }
 
-func (composeOnly) FindContainerInComposeFiles(paths []string, _ string) (*docker.ComposeServiceInfo, error) {
+func (composeOnly) FindContainerInComposeFiles(_ context.Context, paths []string, _ docker.ComposeScope, _ string) (*docker.ComposeServiceInfo, error) {
 	return &docker.ComposeServiceInfo{AppServiceName: "app", ComposePath: paths[0], Compose: &docker.Compose{}}, nil
 }
 

@@ -18,7 +18,7 @@ type Client interface {
 	CreateVolume(ctx context.Context, volumeName string, recreate bool, driverOpts map[string]string) error
 
 	// New functions for finding containers in compose files
-	FindContainerInComposeFiles(composePaths []string, containerName string) (*ComposeServiceInfo, error)
+	FindContainerInComposeFiles(ctx context.Context, composePaths []string, scope ComposeScope, containerName string) (*ComposeServiceInfo, error)
 
 	// Function for generating keploy-agent service configuration
 	ModifyComposeForAgent(compose *Compose, opts models.SetupOptions, appContainerName string) error

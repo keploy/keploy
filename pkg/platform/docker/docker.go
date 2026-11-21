@@ -511,22 +511,29 @@ type ServiceConfig struct {
 	Ports         interface{} `yaml:"ports,omitempty"`
 }
 
-// FindContainerInComposeFiles searches through multiple Docker Compose files to find a specific container
-// and returns the compose file path along with the networks of that service.
-// It searches for containers by both explicit container_name and service name.
-// This function integrates with the existing Compose structure and reuses existing parsing logic.
-func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerName string) (*ComposeServiceInfo, error) {
+// FindContainerInComposeFiles finds the compose service whose container is
+// containerName and the first of composePaths that defines it, with that
+// service's networks and ports as the file writes them.
+//
+// Which service it is comes from the files resolved as docker compose resolves
+// them in scope (loadComposeIdentity, serviceOf): interpolated, merged in
+// order, extends and include followed. The file is the first that keys the
+// service, the one keploy rewrites in the command's place.
+func (idc *Impl) FindContainerInComposeFiles(ctx context.Context, composePaths []string, scope ComposeScope, containerName string) (*ComposeServiceInfo, error) {
+	ident, err := loadComposeIdentity(ctx, composePaths, scope)
+	if err != nil {
+		return nil, fmt.Errorf("keploy could not resolve the compose files %v as docker compose does, so it cannot tell which service is container %q: %w (keploy reads its own environment and the env files compose reads: --env-file, COMPOSE_ENV_FILES, the project's .env; not an assignment in the command, so export such a variable or put it in an env file)", composePaths, containerName, err)
+	}
+	service, err := ident.serviceOf(containerName)
+	if err != nil {
+		return nil, err
+	}
 	for _, composePath := range composePaths {
-		// Use the existing ReadComposeFile method
 		compose, err := idc.ReadComposeFile(composePath)
 		if err != nil {
-			idc.logger.Debug("failed to read compose file, skipping", zap.String("path", composePath), zap.Error(err))
-			continue // Skip files that can't be read
+			return nil, fmt.Errorf("read compose file %s: %w", composePath, err)
 		}
-
-		// Search through services using the existing Compose structure
-		networks, ports, service, found := idc.findContainerInServices(compose, containerName)
-		if found {
+		if networks, ports, found := idc.serviceByKey(compose, service); found {
 			return &ComposeServiceInfo{
 				ComposePath:    composePath,
 				Networks:       networks,
@@ -536,8 +543,26 @@ func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerNam
 			}, nil
 		}
 	}
+	return nil, fmt.Errorf("compose service %q, container %q, is not keyed in any of the files %v keploy rewrites (an included file's service cannot be rewritten); name the file that defines it with -f", service, containerName, composePaths)
+}
 
-	return nil, fmt.Errorf("container '%s' not found in any of the provided docker-compose files", containerName)
+// serviceByKey is the networks and ports of the service keyed service in
+// compose, read through YAML aliases and merge keys, and whether compose has
+// it.
+func (idc *Impl) serviceByKey(compose *Compose, service string) ([]string, []string, bool) {
+	resolveServiceAlias(&compose.Services)
+	for i := 0; i+1 < len(compose.Services.Content); i += 2 {
+		if compose.Services.Content[i].Value != service {
+			continue
+		}
+		node := resolveServiceAlias(compose.Services.Content[i+1])
+		// `ports:` and `networks:` are routinely put in a shared `x-*`
+		// fragment. Read off the unmerged node they come back empty, and the
+		// app is published on nothing and joins the wrong network.
+		idc.flattenMergeKeys(node)
+		return idc.extractServiceNetworks(node, service), idc.extractServicePorts(node), true
+	}
+	return nil, nil, false
 }
 
 // findContainerInServices searches for a container within the services of a compose file
@@ -1467,36 +1492,45 @@ func (idc *Impl) findServiceNodeAndName(compose *Compose, appIdentifier string) 
 		return nil, "", fmt.Errorf("no services found")
 	}
 
-	for i := 0; i < len(compose.Services.Content); i += 2 {
-		if i+1 >= len(compose.Services.Content) {
-			break // odd Content: guarded like the sibling loops rather than panicking
-		}
-		serviceNameNode := compose.Services.Content[i]
-		// Resolved at the loop top, not at either return, so the container_name
-		// match below scans real content instead of an alias's empty Content.
-		serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
-		serviceName := serviceNameNode.Value
-
-		// Check 1: Does the Service Key match?
-		if serviceName == appIdentifier {
-			return serviceContentNode, serviceName, nil
-		}
-
-		// Check 2: Does the container_name match? Read through an alias and
-		// through `<<`: on the alias node's own Value the comparison is against
-		// the anchor NAME, and an inherited container_name is not in Content at
-		// all -- either way the lookup misses and keploy aborts with "failed to
-		// find target service" on a file docker compose accepts.
-		if cn := serviceKeyThroughMerge(serviceContentNode, "container_name"); cn != nil &&
-			cn.Value == appIdentifier {
-			return serviceContentNode, serviceName, nil
+	// Every service's key is checked before any container_name. keploy's setup
+	// hands this the app's service KEY (FindContainerInComposeFiles), and
+	// another service's container_name may be that same word (`db:
+	// {container_name: web}` beside `web:`): checked service by service, db
+	// was taken for web.
+	for _, byKey := range []bool{true, false} {
+		// i+1 bounds the loop: odd Content is guarded like the sibling loops
+		// rather than panicking.
+		for i := 0; i+1 < len(compose.Services.Content); i += 2 {
+			serviceName := compose.Services.Content[i].Value
+			// Resolved before either check, so the container_name match
+			// scans real content instead of an alias's empty Content.
+			serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
+			if byKey {
+				if serviceName == appIdentifier {
+					return serviceContentNode, serviceName, nil
+				}
+				continue
+			}
+			// Read through an alias and through `<<`: on the alias node's own
+			// Value the comparison is against the anchor NAME, and an
+			// inherited container_name is not in Content at all -- either way
+			// the lookup misses and keploy aborts with "failed to find target
+			// service" on a file docker compose accepts.
+			if cn := serviceKeyThroughMerge(serviceContentNode, "container_name"); cn != nil &&
+				cn.Value == appIdentifier {
+				return serviceContentNode, serviceName, nil
+			}
 		}
 	}
 	return nil, "", fmt.Errorf("service not found")
 }
 
 // ModifyComposeForAgent modifies an existing Docker Compose file to integrate with Keploy agent
-// It adds the keploy-agent service and modifies the specified app container to depend on it
+// It adds the keploy-agent service and modifies the specified app container to depend on it.
+//
+// appContainerName names the app's service: its key (what keploy's setup
+// passes, FindContainerInComposeFiles having resolved it) or its
+// container_name as the file writes it.
 func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOptions, appContainerName string) error {
 
 	targetServiceNode, serviceName, err := idc.findServiceNodeAndName(compose, appContainerName)
@@ -1557,7 +1591,14 @@ func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOption
 	}
 
 	// Now modify the app container to integrate with keploy-agent
-	err = idc.modifyAppServiceForKeploy(compose, appContainerName, opts.HostGateway)
+	// The hook is handed the name the run selects the app by
+	// (--container-name), which is what a downstream hook compares; only a
+	// caller that gives none hands it the name it gave here.
+	hookName := opts.Container
+	if hookName == "" {
+		hookName = appContainerName
+	}
+	err = idc.modifyAppServiceForKeploy(compose, serviceName, hookName, opts.HostGateway)
 	if err != nil {
 		return fmt.Errorf("failed to modify app service: %w", err)
 	}
@@ -1567,7 +1608,7 @@ func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOption
 // modifyAppServiceForKeploy modifies the app service to depend on keploy-agent
 // and share namespaces. hostGateway says the daemon resolves host-gateway:
 // keploy-agent then maps host.docker.internal to it (moveExtraHostsToAgent).
-func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName string, hostGateway bool) error {
+func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, service, hookName string, hostGateway bool) error {
 	if compose.Services.Content == nil {
 		return fmt.Errorf("no services found in compose file")
 	}
@@ -1577,38 +1618,21 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 		return fmt.Errorf("keploy-agent service not found: %w", err)
 	}
 
-	// Find the app service by container name or service name
-	for i := 0; i < len(compose.Services.Content); i += 2 {
-		if i+1 >= len(compose.Services.Content) {
-			break
-		}
-
-		serviceNameNode := compose.Services.Content[i]
+	// Find the app service by its key, the one findServiceNodeAndName chose.
+	// Matched again on the name keploy was given, the scan could take another
+	// service: one whose container_name is the app's key, or the app's
+	// container_name written as a variable (`${APP_CONTAINER:-app}`), which
+	// left the app entirely unwired -- no `pid:`, no `network_mode:`, no
+	// `depends_on:`, no CA variables -- and keploy recorded NOTHING.
+	//
+	// The scan steps by key/value pairs: stepping by ONE, a service with the
+	// literal string "container_name" in VALUE position followed by a key
+	// equal to the app's name matched it, and keploy wired that service
+	// instead of the app.
+	for i := 0; i+1 < len(compose.Services.Content); i += 2 {
 		serviceContentNode := resolveServiceAlias(compose.Services.Content[i+1])
-		serviceName := serviceNameNode.Value
 
-		// Check if this is the target app service.
-		//
-		// Read through an alias and through `<<`. Requiring the value to be a
-		// ScalarNode is what made `container_name: *appname` miss: the match
-		// failed, the whole block below was skipped, and the service was left
-		// entirely unwired -- no `pid:`, no `network_mode:`, no `depends_on:`, no
-		// CA variables. keploy then records NOTHING, on a compose file docker
-		// accepts and which findServiceNodeAndName had already matched.
-		//
-		// The old scan also stepped by ONE rather than by two, so a service with
-		// the literal string "container_name" in VALUE position followed by a key
-		// equal to the app's name matched it -- and keploy wired that service
-		// instead of the app. Stepping by key/value pairs closes that too.
-		cn := serviceKeyThroughMerge(serviceContentNode, "container_name")
-		isTargetService := cn != nil && cn.Value == appContainerName
-
-		// If no explicit container_name, check service name
-		if !isTargetService && serviceName == appContainerName {
-			isTargetService = true
-		}
-
-		if isTargetService {
+		if compose.Services.Content[i].Value == service {
 			// The app will share the keploy-agent network namespace, so resolver
 			// settings must move to keploy-agent. Leaving them on the app either
 			// makes Compose reject the config (dns + network_mode conflict) or
@@ -1660,12 +1684,12 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 			// (-javaagent in JAVA_TOOL_OPTIONS). The app shares keploy-agent's PID
 			// AND network namespace (set above), so the JVM reaches the JSSE
 			// listener on 127.0.0.1 and its PID is directly resolvable — no jattach.
-			// Pass appContainerName (the --container-name value the downstream
-			// matches on), NOT serviceName (the compose map key): this service may
+			// Pass hookName (the --container-name value the downstream
+			// matches on), NOT service (the compose map key): this service may
 			// have been selected by its container_name, in which case the key differs
 			// and the app hook would silently miss.
 			if ComposeServiceHook != nil {
-				ComposeServiceHook(appContainerName, serviceContentNode)
+				ComposeServiceHook(hookName, serviceContentNode)
 			}
 
 			break

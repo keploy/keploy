@@ -588,7 +588,7 @@ func (d abortSetupDocker) FindContainerInCompose(c *docker.Compose, _ string) (*
 	return &docker.ComposeServiceInfo{AppServiceName: "app", Compose: c}, nil
 }
 
-func (d abortSetupDocker) FindContainerInComposeFiles([]string, string) (*docker.ComposeServiceInfo, error) {
+func (d abortSetupDocker) FindContainerInComposeFiles(context.Context, []string, docker.ComposeScope, string) (*docker.ComposeServiceInfo, error) {
 	return &docker.ComposeServiceInfo{AppServiceName: "app", Compose: d.compose}, nil
 }
 
