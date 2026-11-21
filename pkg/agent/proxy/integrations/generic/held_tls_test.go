@@ -22,11 +22,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// answeredWithin is how soon after it could be a request is answered in these
-// rows: 500 ms, an absolute bound, so a window or a read-on deadline that
-// grew to a second fails them. A request waits about one window (10 ms).
-const answeredWithin = 500 * time.Millisecond
-
 // tlsApp is the application's end beneath its TLS, or its end over TCP.
 // While withholding, what TLS writes through it is kept (kept) instead of
 // sent, for the row to send.
@@ -62,7 +57,19 @@ func (c *tlsApp) sentSoFar() int {
 // the socket after the request had all come up from it (want bytes on the
 // wire), the parser having asked the socket what it holds, with a deadline
 // still ahead: each a wait on an empty socket for bytes the request does not
-// have. The parser's answer disarms it.
+// have. The parser's answer, written through it or through a layer above it
+// (tlsHeld), disarms it.
+//
+// Armed, it also adds up how long the parser's reads waited on the empty
+// socket, from the read that gave the request's first bytes until the
+// answer (idled): a read that timed out with its deadline still ahead when
+// it began waited from then to the deadline, as a read of a socket that
+// holds bytes gives them at once; the spans are joined where they overlap.
+// The rows bound that, not the time the request took to be answered: under
+// -race on a loaded machine, reading and matching a 40 KiB request took the
+// parser half a second (one row's 500 ms bound failed 1 run in 200, at
+// 504 ms) with no longer wait, while a parser whose window or read-on
+// deadline grew to a second waits that long on the socket on any machine.
 type socketWatch struct {
 	net.Conn
 
@@ -73,6 +80,10 @@ type socketWatch struct {
 	taken    int
 	want     int
 	waits    int
+	// counting: armed, and the request's first bytes have come.
+	counting bool
+	idle     time.Duration
+	idleEnd  time.Time
 }
 
 func (s *socketWatch) NetConn() net.Conn {
@@ -103,21 +114,51 @@ func (s *socketWatch) Read(p []byte) (int, error) {
 	if s.armed && s.asked && s.want > 0 && s.taken >= s.want && time.Now().Before(s.deadline) {
 		s.waits++
 	}
+	deadline, began := s.deadline, time.Now()
 	s.mu.Unlock()
 	n, err := s.Conn.Read(p)
 	s.mu.Lock()
 	if s.armed {
 		s.taken += n
+		var ne net.Error
+		if s.counting && errors.As(err, &ne) && ne.Timeout() {
+			if began.Before(s.idleEnd) {
+				began = s.idleEnd
+			}
+			if deadline.After(began) {
+				s.idle += deadline.Sub(began)
+				s.idleEnd = deadline
+			}
+		}
+		if n > 0 {
+			s.counting = true
+		}
 	}
 	s.mu.Unlock()
 	return n, err
+}
+
+// Write is the parser's answer: it disarms the watch before a byte of it
+// can reach the application.
+func (s *socketWatch) Write(p []byte) (int, error) {
+	s.disarm()
+	return s.Conn.Write(p)
 }
 
 // arm starts the count, before the request's first bytes are sent.
 func (s *socketWatch) arm() {
 	s.mu.Lock()
 	s.armed, s.asked, s.taken, s.want, s.waits = true, false, 0, 0, 0
+	s.counting, s.idle, s.idleEnd = false, 0, time.Time{}
 	s.mu.Unlock()
+}
+
+// idled is how long the parser's reads waited on the empty socket from the
+// request's first bytes until its answer.
+func (s *socketWatch) idled() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idle
 }
 
 // expect sets the request's bytes on the wire, once all are sent.
@@ -185,9 +226,9 @@ func tlsPair(t *testing.T, fullRecords, buffered bool) (*tls.Conn, *tlsApp, *tls
 // waits until three windows have passed since the deadline last set and the
 // app has written the rest (wrote, the count still again), then reads for
 // real: its deadline has passed, so TLS gives what it holds whole or times
-// out on the socket, as a held parser's read does. released is when that
-// read went on. It gives the connection beneath (NetConn), as the proxy's
-// wrappers do. Its answers disarm watch, when it has one.
+// out on the socket, as a held parser's read does. It gives the connection
+// beneath (NetConn), as the proxy's wrappers do. Its answers disarm watch,
+// when it has one.
 type tlsHeld struct {
 	net.Conn
 	raw          net.Conn
@@ -201,7 +242,6 @@ type tlsHeld struct {
 	phase    int
 	read     int
 	deadline time.Time
-	released time.Time
 }
 
 func (c *tlsHeld) NetConn() net.Conn { return c.Conn }
@@ -262,7 +302,7 @@ func (c *tlsHeld) Read(p []byte) (int, error) {
 			return 0, errors.New("the deadline never passed, or the rest never came")
 		}
 		c.mu.Lock()
-		c.phase, c.released = 2, time.Now()
+		c.phase = 2
 		c.mu.Unlock()
 	}
 	n, err := c.Conn.Read(p)
@@ -355,8 +395,8 @@ func TestAHeldRequestOverTLSIsAnsweredWhole(t *testing.T) {
 					conn.watch.expect(appSide.sentSoFar() - onWire)
 					close(conn.wrote)
 					readAnswer(t, app, "BIGOK")
-					if took := time.Since(sentAt); took > answeredWithin {
-						t.Fatalf("answered %v after it was sent", took)
+					if idle := conn.watch.idled(); idle > quietWindow {
+						t.Fatalf("the parser waited %v on the empty socket for the request, answered %v after it was sent; its window is %v", idle, time.Since(sentAt), quietWindow)
 					}
 					if n := conn.watch.waited(); n > 0 {
 						t.Fatalf("%d reads waited on the socket once the request had all come up from it", n)
@@ -381,7 +421,7 @@ func answering(m *models.Mock, answer string) *models.Mock {
 // first bytes, and the record's read waits for its rest until the deadline
 // it read on with, one window, then the request is answered without it. The
 // record is the next request's once it comes. A read-on deadline of a second
-// answered a second late, and of an hour not at all.
+// waited a second on the empty socket, and of an hour was never answered.
 func TestATLSRecordStillComingAsTheParserReadsOnIsNotWaitedFor(t *testing.T) {
 	req := varied(33000, true)
 	head, tail := req[:32<<10], req[32<<10:]
@@ -393,13 +433,14 @@ func TestATLSRecordStillComingAsTheParserReadsOnIsNotWaitedFor(t *testing.T) {
 	for _, buf := range []bool{false, true} {
 		t.Run(fmt.Sprintf("through a buffered reader: %v", buf), func(t *testing.T) {
 			eachSwitch(t, func(t *testing.T) {
-				app, appSide, srv, raw, _ := tlsPair(t, true, buf)
+				app, appSide, srv, raw, watch := tlsPair(t, true, buf)
 				conn := &tlsHeld{Conn: srv, raw: raw, cut: len(head), ready: make(chan struct{}), wrote: make(chan struct{})}
 				done := make(chan error, 1)
 				go func() {
 					done <- decodeGeneric(context.Background(), zap.NewNop(), []byte("PING"), conn, nil, store, models.OutgoingOptions{})
 				}()
 				readAnswer(t, app, "PONG")
+				watch.arm()
 				// Two full records.
 				if _, err := app.Write(head); err != nil {
 					t.Fatal(err)
@@ -424,11 +465,8 @@ func TestATLSRecordStillComingAsTheParserReadsOnIsNotWaitedFor(t *testing.T) {
 				}
 				close(conn.wrote)
 				readAnswer(t, app, "HEADOK")
-				conn.mu.Lock()
-				released := conn.released
-				conn.mu.Unlock()
-				if took := time.Since(released); took > answeredWithin {
-					t.Fatalf("answered %v after the parser read on", took)
+				if idle := watch.idled(); idle > quietWindow {
+					t.Fatalf("the parser waited %v on the empty socket for the record's rest; its window is %v", idle, quietWindow)
 				}
 				if _, err := appSide.Conn.Write(record[len(record)-10:]); err != nil {
 					t.Fatal(err)
