@@ -3,10 +3,14 @@
 package utils
 
 import (
+	"os"
 	"os/exec"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/procsock"
 )
 
 // startGroup starts command under sh as the leader of a process group of
@@ -73,5 +77,38 @@ func TestGroupRunsOnReadsNoGroupBelowTwo(t *testing.T) {
 		if GroupRunsOn(pgid) {
 			t.Fatalf("GroupRunsOn(%d) said it runs", pgid)
 		}
+	}
+}
+
+// A process whose record cannot be read, one that has gone or is exiting
+// between the list and the read, does not run on, and the tree leaves it out.
+func TestAProcessWhoseRecordCannotBeReadRunsNoLonger(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+	})
+	waitUntil(t, "the sleep to show in its group", func() bool { return GroupRunsOn(pid) })
+	if kids, _, err := findChildPIDs(os.Getpid()); err != nil || !slices.Contains(kids, pid) {
+		t.Fatalf("findChildPIDs(this process) = %v, %v; want the sleep %d", kids, err, pid)
+	}
+	read := procRecord
+	t.Cleanup(func() { procRecord = read })
+	procRecord = func(p int) (procsock.Proc, error) {
+		if p == pid {
+			return procsock.Proc{}, syscall.ESRCH
+		}
+		return read(p)
+	}
+	if GroupRunsOn(pid) {
+		t.Fatal("the group's one process cannot be read: GroupRunsOn said it runs")
+	}
+	if kids, _, err := findChildPIDs(os.Getpid()); err != nil || slices.Contains(kids, pid) {
+		t.Fatalf("findChildPIDs(this process) = %v, %v; want no sleep %d", kids, err, pid)
 	}
 }
