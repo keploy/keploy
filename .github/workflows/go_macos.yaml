@@ -76,6 +76,14 @@ jobs:
       - name: Test the relay's client socket reading on darwin
         run: go test -count=1 ./pkg/agent/proxy/relay/ ./pkg/agent/proxy/supervisor/
 
+      # keploy lists the processes and reads each one's parent and group
+      # through proc_info (procsock), never through the kern.proc sysctls,
+      # which wait for any process on the machine held in an exec or a
+      # posix_spawn. These rows hold a spawn in the kernel and read every
+      # process while it is held; only a Mac can run them.
+      - name: Test the process listing on darwin
+        run: go test -count=1 ./pkg/agent/procsock/...
+
       # The proven flow on macOS: the claimant's start time and zombie state
       # from the kernel's process table (claimer_darwin.go), the caller read
       # from the process socket tables (caller_darwin.go), and the proxy's
