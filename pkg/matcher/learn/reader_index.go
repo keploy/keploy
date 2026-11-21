@@ -698,9 +698,19 @@ func (t *readerText) setFilter() wordFilter {
 // filter that does not fit that way is counted (filtersPast), and false:
 // the calls that ask it build it, or scan the recording, as before. A
 // recording with no identity has no entry by it, and is left to the calls.
+// It builds the filter from the decoding of the text the set keeps
+// (keptForms), so the staging decodes no payload twice: a recording whose
+// text the set keeps no decoding of is left to the calls too, counted
+// (filtersPast), and true, as the set's budget did not stop it.
 func (dc *DriftCache) stageFilter(x Raw) bool {
 	s := dc.set
 	if s == nil || x.id == "" {
+		return true
+	}
+	if _, ok := s.keptDecoded(x.id); !ok {
+		s.mu.Lock()
+		s.filtersPast++
+		s.mu.Unlock()
 		return true
 	}
 	ix := newReaderIndex(dc)
@@ -813,9 +823,14 @@ func (t *readerText) buildFilter() wordFilter {
 	if !ok {
 		return nil
 	}
-	// Its forms derived for the build alone (textForms), as a scan past the
-	// budget derives them: the set keeps none of them for the filter.
-	forms := textForms(s)
+	// Its forms read from the decoding the set keeps of its recording's
+	// text (keptForms), so building the filter decodes it no second time;
+	// where the set keeps none, derived for the build alone (textForms), as
+	// a scan past the budget derives them.
+	forms, kept := t.keptForms(s)
+	if !kept {
+		forms = textForms(s)
+	}
 	n := 0
 	for _, text := range forms {
 		eachWord(text, func(string) { n++ })
@@ -837,6 +852,23 @@ func (t *readerText) buildFilter() wordFilter {
 	}
 	postRuns(fs, t.x, t.filter, forms)
 	return f
+}
+
+// keptForms are the declared forms of text (textForms), t's recording's
+// text as read, from the decoding of it the set keeps (setDerived.
+// keptDecoded): the same forms, as decodeForms of the same text, the
+// recording's (Raw.id fixes its text for the set), so the filter built from
+// them is the one built from textForms. false where t has no recording's
+// identity or the set keeps no decoding of its text: it decodes nothing.
+func (t *readerText) keptForms(text string) ([]string, bool) {
+	if t.raw == nil || t.raw.id == "" || t.x.set == nil {
+		return nil, false
+	}
+	d, ok := t.x.set.keptDecoded(t.raw.id)
+	if !ok {
+		return nil, false
+	}
+	return d.formsOf(text), true
 }
 
 // postRuns adds e's words, each run of letters and digits of every form of

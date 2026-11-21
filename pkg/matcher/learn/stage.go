@@ -273,8 +273,9 @@ func withAnswer(m *models.Mock) func() (*models.Mock, error) {
 // read once per test. Filters are the recordings whose word filter the
 // staging built for the set (stageFilters), and FiltersPast those it left
 // to the calls (their filter did not fit the budget's spare, or the set no
-// longer kept their payload): the calls that ask one of them a word build
-// it, or scan the recording, as with no staging. Err is why
+// longer kept their payload, or kept no decoding of its text): the calls
+// that ask one of them a word build it, or scan the recording, as with no
+// staging. Err is why
 // the staging stopped short of the set where src failed (the on-disk
 // store, mid-read): its calls then read the rest themselves.
 type SetUse struct {

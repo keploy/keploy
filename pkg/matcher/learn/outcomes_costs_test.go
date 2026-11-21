@@ -845,7 +845,12 @@ func costSet(n int) (got [2]string, builds [2]int, scans, lookups, asks [2]int64
 // (WarmSet over its recordings, in order, waited for): use is what the
 // staging read and built (SetUse), zero with no staging.
 func costSetStaged(n int, stage bool) (got [2]string, builds [2]int, scans, lookups, asks [2]int64, use SetUse) {
-	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
+	return costSetOf(costMocks(n), stage)
+}
+
+// costMocks are costSet's n recordings: n GETs, one of which (the middle
+// one) holds the recorded word.
+func costMocks(n int) []*models.Mock {
 	mocks := make([]*models.Mock, n)
 	for i := range mocks {
 		name, body, at := fmt.Sprintf("mock-%d", i), fmt.Sprintf(`{"note":"Item %d of the run","ref":"Ref-%05d"}`, i, i), eRecAt.Add(-time.Duration(n-i)*time.Millisecond)
@@ -854,6 +859,12 @@ func costSetStaged(n int, stage bool) (got [2]string, builds [2]int, scans, look
 		}
 		mocks[i] = getAnswer(name, fmt.Sprintf("http://api/items/%d", i), body, at)
 	}
+	return mocks
+}
+
+// costSetOf is costSetStaged over the recordings mocks (costMocks).
+func costSetOf(mocks []*models.Mock, stage bool) (got [2]string, builds [2]int, scans, lookups, asks [2]int64, use SetUse) {
+	const rec, live = "ids a1b2c3d4 b2c3d4e5 c3d4e5f6 d4e5f6a7 e5f6a7b8", "ids f0e9d8c7 e9d8c7b6 d8c7b6a5 c7b6a5f4 b6a5f4e3"
 	tr := NewTracker()
 	tr.NewSet()
 	if stage {

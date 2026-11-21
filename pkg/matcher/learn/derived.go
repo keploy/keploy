@@ -122,8 +122,9 @@ type setDerived struct {
 	// filters and filtersPast are the recordings whose word filter the
 	// staging built for the set (stageFilters), and those it left to its
 	// calls, which build them as before: their filter did not fit the
-	// set's budget, or the set no longer kept their payload. For the rows
-	// and the agent's log (SetUse).
+	// set's budget, or the set no longer kept their payload or kept no
+	// decoding of its text (keptDecoded). For the rows and the agent's log
+	// (SetUse).
 	filters, filtersPast int
 	// reads are the parts of the set's recordings read (derive), by tier
 	// and part, for the rows.
@@ -1187,6 +1188,20 @@ func (dc *DriftCache) decodedOf(s *setDerived, y Raw) (string, decoded) {
 		}
 		return decodeForms(text).clone()
 	}, func(e *formParts, d decoded) { e.d[i] = d }, func(d decoded) int64 { return d.size() })
+}
+
+// keptDecoded is the decoding of the text of the recording id (its text as
+// recorded, its stamps kept: decodedOf of its withoutStamps) that s keeps,
+// and true; false where s keeps none of it now. It decodes nothing and
+// waits for no read: a decoding being read is not kept yet. The forms tier
+// lets none go (tier.keep), so one kept stays kept for the set.
+func (s *setDerived) keptDecoded(id string) (decoded, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sl := s.forms.find(id, partDecoded); sl != nil {
+		return sl.p.d[0], true
+	}
+	return decoded{}, false
 }
 
 // searchedKeys are the keys of the instants searched(x, false) holds, in
