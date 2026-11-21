@@ -69,10 +69,11 @@ func TestAConnectionsFirstBytesSayWhatItCarries(t *testing.T) {
 }
 
 // binaryApp is an app on 127.0.0.1 that speaks a protocol that is not HTTP,
-// as Gradle's daemon does to its client: it takes an 8-byte hello and
-// answers it at once, then takes what comes up to the client's end and
-// answers with its length. got has every byte the app was sent.
-func binaryApp(t *testing.T) (port int, got chan []byte) {
+// as Gradle's daemon does to its client: it takes a hello of helloLen bytes
+// and answers it at once (none: no answer), then takes what comes up to the
+// client's end and answers with its length. got has every byte the app was
+// sent.
+func binaryApp(t *testing.T, helloLen int) (port int, got chan []byte) {
 	t.Helper()
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -86,14 +87,16 @@ func binaryApp(t *testing.T) (port int, got chan []byte) {
 			return
 		}
 		defer c.Close()
-		hello := make([]byte, 8)
-		if _, err := io.ReadFull(c, hello); err != nil {
-			got <- nil
-			return
-		}
-		if _, err := c.Write([]byte("N")); err != nil {
-			got <- nil
-			return
+		hello := make([]byte, helloLen)
+		if helloLen > 0 {
+			if _, err := io.ReadFull(c, hello); err != nil {
+				got <- nil
+				return
+			}
+			if _, err := c.Write([]byte("N")); err != nil {
+				got <- nil
+				return
+			}
 		}
 		rest, _ := io.ReadAll(c)
 		_, _ = fmt.Fprintf(c, "took %d", len(rest))
@@ -106,66 +109,88 @@ func binaryApp(t *testing.T) (port int, got chan []byte) {
 // process of its tree to a listener of another) that is not HTTP reaches the
 // app unread, both ways, at the address the proxy writes a dual-stack
 // socket's destination in ([127.0.0.1]:p, a Java client's): its client's
-// 8-byte hello is answered before it sends more, and every byte it sends,
-// those no HTTP request has among them, reaches the app as it was sent.
-// Nothing is recorded. Before, the ingress refused that address as not an
-// IP address and closed the call; given another, it waited for 24 bytes the
-// client never sent before its answer, and read the rest as an HTTP/1
-// request, dropping it: Gradle's client, to the daemon it forks, failed
-// with "The first result from the daemon was empty".
+// hello is answered before it sends more, and every byte it sends, those no
+// HTTP request has among them, reaches the app as it was sent. Nothing is
+// recorded. The hello is a binary protocol's (its first byte is no
+// method's: PostgreSQL's 8-byte SSLRequest), or more bytes than HTTP/2's
+// preface, all of them a method's characters (they say what they carry
+// once 24 have come), or none: the client sends two such bytes and ends its
+// side before they say what they carry. Before, the ingress refused that
+// address as not an IP address and closed the call; given another, it
+// waited for 24 bytes the client never sent before its answer, and read the
+// rest as an HTTP/1 request, dropping it: Gradle's client, to the daemon it
+// forks, failed with "The first result from the daemon was empty".
 func TestACallBetweenTheRunsOwnProcessesThatIsNotHTTPReachesTheAppUnread(t *testing.T) {
-	for _, sync := range []bool{false, true} {
-		t.Run(map[bool]string{false: "zero-copy", true: "synchronous"}[sync], func(t *testing.T) {
-			stubIngressPaused(t, func() bool { return false })
-			var captured atomic.Int32
-			stubCaptureHook(t, func(context.Context, *zap.Logger, chan *models.TestCase, *http.Request, *http.Response, time.Time, time.Time, models.IncomingOptions, bool, bool, uint16) {
-				captured.Add(1)
+	for _, c := range []struct {
+		name        string
+		hello, body []byte
+	}{
+		{"a binary hello", []byte{0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f}, []byte("\x00\x01binary\r\n\r\nGET / HTTP/1.1\r\n\r\n\xff")},
+		{"a hello of a method's characters longer than the preface", []byte(strings.Repeat("A", len(clientPreface)+6)), []byte("rest")},
+		{"bytes that end before they say what they carry", nil, []byte("GE")},
+	} {
+		for _, sync := range []bool{false, true} {
+			t.Run(c.name+"/"+map[bool]string{false: "zero-copy", true: "synchronous"}[sync], func(t *testing.T) {
+				testANotHTTPCallReachesTheAppUnread(t, sync, c.hello, c.body)
 			})
-			core, logs := observer.New(zapcore.DebugLevel)
-			cfg := &config.Config{}
-			cfg.Agent.RecordRequests = true
-			cfg.Agent.Synchronous = sync
-			pm := New(zap.New(core), nil, cfg)
-			t.Cleanup(pm.captures.Wait)
-			port, got := binaryApp(t)
-			client, proxied := loopbackPair(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			served := make(chan struct{})
-			go func() {
-				defer close(served)
-				pm.ServeLive(ctx, proxied, fmt.Sprintf("[127.0.0.1]:%d", port), uint16(port))
-			}()
-			_ = client.SetDeadline(time.Now().Add(20 * time.Second)) // a call that hangs fails, not the run
-			hello := []byte{0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f}
-			if _, err := client.Write(hello); err != nil {
-				t.Fatal(err)
-			}
-			answer := make([]byte, 1)
-			if _, err := io.ReadFull(client, answer); err != nil || string(answer) != "N" {
-				t.Fatalf("the hello's answer = %q, %v; want the app's N, before the client sends more", answer, err)
-			}
-			body := []byte("\x00\x01binary\r\n\r\nGET / HTTP/1.1\r\n\r\n\xff")
-			if _, err := client.Write(body); err != nil {
-				t.Fatal(err)
-			}
-			_ = client.(*net.TCPConn).CloseWrite()
-			end, err := io.ReadAll(client)
-			if err != nil || string(end) != fmt.Sprintf("took %d", len(body)) {
-				t.Fatalf("the app's last answer = %q, %v; want %q", end, err, fmt.Sprintf("took %d", len(body)))
-			}
-			if sent := <-got; !bytes.Equal(sent, append(hello, body...)) {
-				t.Fatalf("the app was sent %q, want the client's %q", sent, append(hello, body...))
-			}
-			<-served
-			pm.captures.Wait()
-			if n := captured.Load(); n != 0 {
-				t.Fatalf("%d calls captured from a connection that is not HTTP, want none", n)
-			}
-			if n := logs.FilterMessage("Failed to read client request; ignoring this connection. Verify the client is sending valid HTTP if this persists.").Len(); n != 0 {
-				t.Fatal("the connection was read as HTTP/1")
-			}
-		})
+		}
+	}
+}
+
+// testANotHTTPCallReachesTheAppUnread is one call of
+// TestACallBetweenTheRunsOwnProcessesThatIsNotHTTPReachesTheAppUnread: the
+// client sends hello and waits for its answer (none for an empty hello),
+// then sends body and ends its side.
+func testANotHTTPCallReachesTheAppUnread(t *testing.T, sync bool, hello, body []byte) {
+	stubIngressPaused(t, func() bool { return false })
+	var captured atomic.Int32
+	stubCaptureHook(t, func(context.Context, *zap.Logger, chan *models.TestCase, *http.Request, *http.Response, time.Time, time.Time, models.IncomingOptions, bool, bool, uint16) {
+		captured.Add(1)
+	})
+	core, logs := observer.New(zapcore.DebugLevel)
+	cfg := &config.Config{}
+	cfg.Agent.RecordRequests = true
+	cfg.Agent.Synchronous = sync
+	pm := New(zap.New(core), nil, cfg)
+	t.Cleanup(pm.captures.Wait)
+	port, got := binaryApp(t, len(hello))
+	client, proxied := loopbackPair(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		pm.ServeLive(ctx, proxied, fmt.Sprintf("[127.0.0.1]:%d", port), uint16(port))
+	}()
+	_ = client.SetDeadline(time.Now().Add(20 * time.Second)) // a call that hangs fails, not the run
+	if len(hello) > 0 {
+		if _, err := client.Write(hello); err != nil {
+			t.Fatal(err)
+		}
+		answer := make([]byte, 1)
+		if _, err := io.ReadFull(client, answer); err != nil || string(answer) != "N" {
+			t.Fatalf("the hello's answer = %q, %v; want the app's N, before the client sends more", answer, err)
+		}
+	}
+	if _, err := client.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.(*net.TCPConn).CloseWrite()
+	end, err := io.ReadAll(client)
+	if err != nil || string(end) != fmt.Sprintf("took %d", len(body)) {
+		t.Fatalf("the app's last answer = %q, %v; want %q", end, err, fmt.Sprintf("took %d", len(body)))
+	}
+	want := append(append([]byte(nil), hello...), body...)
+	if sent := <-got; !bytes.Equal(sent, want) {
+		t.Fatalf("the app was sent %q, want the client's %q", sent, want)
+	}
+	<-served
+	pm.captures.Wait()
+	if n := captured.Load(); n != 0 {
+		t.Fatalf("%d calls captured from a connection that is not HTTP, want none", n)
+	}
+	if n := logs.FilterMessage("Failed to read client request; ignoring this connection. Verify the client is sending valid HTTP if this persists.").Len(); n != 0 {
+		t.Fatal("the connection was read as HTTP/1")
 	}
 }
 
