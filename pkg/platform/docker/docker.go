@@ -805,6 +805,39 @@ func (idc *Impl) generateKeployVolumes() []string {
 // it as they were given.
 func composeLiteral(s string) string { return strings.ReplaceAll(s, "$", "$$") }
 
+// debugFileRequested reports whether this compose run asked for the agent's
+// debug file: either the CLI's own --debug is on, or ExtraArgs turns --debug
+// or --debug-file on (for example, a cloud replay's support bundle).
+func debugFileRequested(conf *config.Config, extraArgs []string) bool {
+	if conf != nil && conf.Debug {
+		return true
+	}
+	return extraFlagOn(extraArgs, "debug") || extraFlagOn(extraArgs, "debug-file")
+}
+
+// extraFlagOn reports whether args (before any "--" terminator) leave the
+// boolean flag name turned on. The last occurrence decides.
+func extraFlagOn(args []string, name string) bool {
+	on := false
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		if a == "--"+name || a == "-"+name {
+			on = true
+			continue
+		}
+		for _, p := range []string{"--" + name + "=", "-" + name + "="} {
+			if v, ok := strings.CutPrefix(a, p); ok {
+				if b, err := strconv.ParseBool(v); err == nil {
+					on = b
+				}
+			}
+		}
+	}
+	return on
+}
+
 // GenerateKeployAgentService creates a Docker Compose service configuration for keploy-agent
 // based on the SetupOptions and returns it as a yaml.Node that can be appended to a compose file
 func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Node, error) {
@@ -890,10 +923,13 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	volumes := idc.generateKeployVolumes()
 	volumes = append(volumes, fmt.Sprintf("%s:%s", KeployTLSVolumeName, KeployTLSMountPath))
 
-	// Bind-mount the host keploy folder + wire KEPLOY_DEBUG_FILE so the
-	// agent's debug-level log lands on the host. Skip when the host
-	// path is empty (e.g. very early bootstrap before Validate runs)
-	// or relative (Docker rejects relative bind-source paths).
+	// Bind-mount the host keploy folder + wire KEPLOY_DEBUG_FILE only when
+	// this run asked for the agent's debug log (--debug, or --debug-file
+	// passed via ExtraArgs). Leaving it off by default avoids mounting the
+	// repository's keploy folder into the agent container and avoids writing
+	// agent-debug.log into keploy/ or keploy/test-set-N/ on normal runs.
+	// Skip when the host path is empty (e.g. very early bootstrap before
+	// Validate runs) or relative (Docker rejects relative bind-source paths).
 	//
 	// Docker follows a link at the bind source on the host, and the agent
 	// writes there as root. git keeps links, so the keploy folder may be a
@@ -904,7 +940,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// written where it leads. Made here, it is the user's, not a folder the
 	// daemon makes as root for a missing bind source.
 	const agentDebugMount = "/keploy-host"
-	if keployHostPath != "" && filepath.IsAbs(keployHostPath) {
+	if debugFileRequested(idc.conf, opts.ExtraArgs) && keployHostPath != "" && filepath.IsAbs(keployHostPath) {
 		if r, err := utils.MkdirOpenRecordingDir(keployHostPath, 0o755); err != nil {
 			idc.logger.Warn("the keploy folder is not mounted into the agent container, so the agent's debug log is not kept",
 				zap.String("keployFolder", keployHostPath), zap.Error(err))

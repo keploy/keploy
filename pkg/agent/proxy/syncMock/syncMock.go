@@ -317,7 +317,8 @@ type SyncMockManager struct {
 	// (sentClaimDone). They are not kept back: what is in the buffer at a stop
 	// is not counted as pending (BacklogBefore), and a mock kept there was lost
 	// when the stream closed first. Pruned once no request in flight can take
-	// one (pruneSentClaimedLocked); at most maxSentClaimed.
+	// one (pruneSentClaimedLocked; under SetWindowsOpenLate, owner-less notes
+	// also stay claimable within StaleHorizon); at most maxSentClaimed.
 	sentClaimed []sentClaim
 	// sentClaimedEvicted counts the notes forgotten at the bound
 	// (evictSentClaimedLocked).
@@ -5602,12 +5603,15 @@ const maxSentClaimed = 1 << 16
 
 // startupClaimedLocked reports whether a request still in flight, other than
 // self's, may take a startup mock no resolved window owns: it started at or
-// before the mock was requested. The resolve of a request that claims it
-// (openClaimLocked) takes it, or, past a request's yield, that request's own,
-// which takes what no other request claims: a streaming response yields at
-// its headers, and the mocks its body's handler requests are still its.
-// Caller holds m.mu.
-func (m *SyncMockManager) startupClaimedLocked(mk *models.Mock, self *Window) bool {
+// before the mock was requested, or, for an owner-less mock when windows may
+// open after the app has read their requests (SetWindowsOpenLate), the mock is
+// still within StaleHorizon (the same age bound ResolveRange retains an unowned
+// non-startup mock for a late-opening request). The resolve of a request that
+// claims it (openClaimLocked) takes it, or, past a request's yield, that
+// request's own, which takes what no other request claims: a streaming response
+// yields at its headers, and the mocks its body's handler requests are still
+// its. Caller holds m.mu.
+func (m *SyncMockManager) startupClaimedLocked(mk *models.Mock, self *Window, owner *resolvedWindow) bool {
 	at := mk.Spec.ReqTimestampMock
 	if at.IsZero() {
 		return false
@@ -5617,7 +5621,7 @@ func (m *SyncMockManager) startupClaimedLocked(mk *models.Mock, self *Window) bo
 			return true
 		}
 	}
-	return false
+	return owner == nil && m.windowsOpenLate && !at.Before(time.Now().Add(-StaleHorizon))
 }
 
 // noteSentClaimedLocked is told of a startup mock a rescue sends with no owner,
@@ -5633,7 +5637,7 @@ func (m *SyncMockManager) startupClaimedLocked(mk *models.Mock, self *Window) bo
 // An answer the client never read is never noted (mapsTo): no mapping lists
 // it, and its drop costs no test a call. Caller holds m.mu.
 func (m *SyncMockManager) noteSentClaimedLocked(mk *models.Mock, self *Window, owner *resolvedWindow) bool {
-	if !mapsTo(mk) || !m.startupClaimedLocked(mk, self) {
+	if !mapsTo(mk) || !m.startupClaimedLocked(mk, self, owner) {
 		return false
 	}
 	if len(m.sentClaimed) >= maxSentClaimed {
@@ -5683,7 +5687,7 @@ func (m *SyncMockManager) sayEvicted(e evictedNotes) {
 	ce.Write(zap.Int("forgotten", e.forgotten), zap.Int("forgottenFollowed", e.followed),
 		zap.Uint64("forgottenSoFar", m.sentClaimedEvicted.Load()),
 		zap.Int("bound", maxSentClaimed),
-		zap.String("next_step", "a request in flight since the recording's start (a long stream) keeps every startup mock after it claimable; end it, or record past the startup window, and re-record the test cases this run saved"))
+		zap.String("next_step", "a request in flight since the recording's start (a long stream) or high startup-mock traffic under late-opening windows (retained for StaleHorizon) keeps startup mocks claimable; end the long request, or record past the startup window, and re-record the test cases this run saved"))
 }
 
 // cutHeld is a mock the hold let go of that it held at the stale cutoff
@@ -5823,7 +5827,8 @@ func (m *SyncMockManager) sentClaimDoneFor(name string, at time.Time, delivered 
 }
 
 // pruneSentClaimedLocked forgets the startup mocks sent for a claim that no
-// request in flight can take any more: none started at or before them, or,
+// request in flight can take any more: none started at or before them (nor,
+// when windows may open late, are they still within StaleHorizon), or,
 // for one that goes back to a resolved kept window (sentClaim.owner), none
 // claims it (openClaimLocked). Such a one goes back to that window once its
 // send has finished: into its test's mapping, by late (as handOwedLocked hands
@@ -5831,13 +5836,17 @@ func (m *SyncMockManager) sentClaimDoneFor(name string, at time.Time, delivered 
 // test took is kept until its send has finished (sentClaimDone). Caller holds
 // m.mu.
 func (m *SyncMockManager) pruneSentClaimedLocked(late *map[string][]string) {
+	var cutoff time.Time
+	if m.windowsOpenLate && len(m.sentClaimed) > 0 {
+		cutoff = time.Now().Add(-StaleHorizon)
+	}
 	k := 0
 	for _, c := range m.sentClaimed {
 		stays := c.takenBy != ""
 		switch {
 		case stays:
 		case c.owner == nil:
-			stays = m.openClaimsStartupLocked(c.at)
+			stays = m.openClaimsStartupLocked(c.at, cutoff)
 		case m.openClaimLocked(c.at, nil) || c.sent == claimSending:
 			stays = true
 		case m.goneLocked(c.owner.recording):
@@ -5863,10 +5872,15 @@ func (m *SyncMockManager) pruneSentClaimedLocked(late *map[string][]string) {
 }
 
 // openClaimsStartupLocked reports whether a request in flight started at or
-// before at: the earliest open one did. Caller holds m.mu.
-func (m *SyncMockManager) openClaimsStartupLocked(at time.Time) bool {
+// before at (the earliest open one did), or, when windows may open late
+// (SetWindowsOpenLate), at is still within StaleHorizon (not before cutoff).
+// Caller holds m.mu.
+func (m *SyncMockManager) openClaimsStartupLocked(at, cutoff time.Time) bool {
 	w := m.earliestOpenLocked()
-	return w != nil && !w.start.After(at)
+	if w != nil && !w.start.After(at) {
+		return true
+	}
+	return m.windowsOpenLate && !at.Before(cutoff)
 }
 
 // ResolveRange resolves the test window [start, end]: kept (keep), its mocks

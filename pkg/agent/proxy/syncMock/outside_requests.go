@@ -41,8 +41,11 @@ func (m *SyncMockManager) stampOutsideRequestsLocked(mock *models.Mock) {
 // them. The mock of a call such a request made can then reach m before that
 // request's window opens, so from now on m marks no mock outside the requests
 // (stampOutsideRequestsLocked): that ingress tells them itself, from how far its
-// capture has got. Call it before the ingress can open a window on m, so that no
-// window of its has ended here first. It cannot be undone.
+// capture has got. It also keeps startup mocks rescued within StaleHorizon
+// claimable by the late-opening window that spans them (startupClaimedLocked,
+// openClaimsStartupLocked), instead of dropping them when no window is open
+// yet. Call it before the ingress can open a window on m, so that no window of
+// its has ended here first. It cannot be undone.
 func (m *SyncMockManager) SetWindowsOpenLate() {
 	if m == nil {
 		return

@@ -18,6 +18,22 @@ import (
 	"go.uber.org/zap"
 )
 
+// quietWindow is a request's window: the request is what the parser reads
+// within it from its first bytes, with what the socket holds unread once it
+// has passed, and a round with no request ends after it.
+// The generic protocol has no framing the parser could read a request's end
+// from.
+const quietWindow = 10 * time.Millisecond
+
+// readOnLimit is the most a request's read-on returns past what the socket
+// held at its look, in the bytes its reads return: 64 of the parser's reads
+// beyond that total. The read-on ends once the socket has given what it held
+// at the look, counted in the socket's bytes, and a sender that puts back
+// into the socket what each read takes from it never lets that count fall:
+// the request ends here, said in a Warn, and it is never held growing
+// without bound.
+const readOnLimit = 64 * pUtil.ReadChunkSize
+
 // decodeGeneric answers the client's requests from the mocks, on a goroutine,
 // and returns only once that goroutine has returned, ctx's end included: then
 // its read or write of clientConn is ended (pUtil.InterruptOnDone), and it is
@@ -25,7 +41,13 @@ import (
 // leave the goroutine reading, matching and logging after it had returned.
 func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	defer pUtil.InterruptOnDone(ctx, clientConn)()
-	genericRequests := [][]byte{reqBuf}
+	// The first round's request begins with reqBuf, the bytes the proxy
+	// read. A parser handed none has no request until it reads one: a round
+	// that reads nothing is no request.
+	var genericRequests [][]byte
+	if len(reqBuf) > 0 {
+		genericRequests = [][]byte{reqBuf}
+	}
 	logger.Debug("Into the generic parser in test mode")
 	// The requests it has read are held from the read on: it reads on with
 	// a deadline before it matches them, blocked reading while it holds them
@@ -36,6 +58,8 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	if len(reqBuf) > 0 {
 		release, holding = integrations.HoldRequest(ctx), true
 	}
+	// begun: the first round begins with the request's first bytes.
+	begun := len(reqBuf) > 0
 	errCh := make(chan error, 1)
 	go func(errCh chan error, genericRequests [][]byte) {
 		defer close(errCh)
@@ -43,17 +67,49 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		for {
 			// Since protocol packets have to be parsed for checking stream end,
 			// clientConnection have deadline for read to determine the end of stream.
-			err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+			// The round waits one window from its start for a request.
+			start := time.Now()
+			deadline := start.Add(quietWindow)
+			err := clientConn.SetReadDeadline(deadline)
 			if err != nil {
 				utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 				return
 			}
+			// first is when the parser read the request's first bytes: the
+			// round's start for a round that begins with them (reqBuf), and
+			// zero until they come.
+			var first time.Time
+			if begun {
+				first, begun = start, false
+			}
+			// looked: the parser looked, past the request's window, at what
+			// the socket under clientConn holds unread; lookTotal is what
+			// it held then, and left is what of that the socket has still
+			// to give, in the socket's bytes.
+			// drained: the socket has given it all, and the parser reads,
+			// without waiting, what a layer above the socket still holds.
+			// readOn: what the reads past the look returned.
+			looked, left, drained, readOn := false, int64(0), false, 0
+			var lookTotal int64
 
 			// To read the stream of request packets from the client. The
 			// connection's end is its EOF, which ReadBytes returns at the
 			// read that gets it.
 			ended := false
 			for {
+				// Past the look, a read is counted at the socket: what it
+				// holds unread before the read less what it holds after.
+				// Through TLS, or a buffered reader, a read returns bytes in
+				// other units than it takes from the socket (a record's
+				// plaintext, or what a layer read ahead), so what it returned
+				// says nothing of what the socket gave. What arrives as the
+				// read takes is not counted as taken, so left can only fall
+				// short of what the socket gave: the parser never stops
+				// short of what it held at the look.
+				var before int64
+				if looked {
+					before = pUtil.UnreadBytes(clientConn)
+				}
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				netErr, isNet := err.(net.Error)
 				timeout := isNet && netErr.Timeout()
@@ -73,10 +129,96 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						release, holding = integrations.HoldRequest(ctx), true
 					}
 					genericRequests = append(genericRequests, buffer)
+					if first.IsZero() {
+						first = time.Now()
+					}
 				}
-				if timeout || atEOF {
-					logger.Debug("the timeout for the client read in generic or EOF")
-					ended = atEOF
+				if atEOF {
+					logger.Debug("the client closed the generic connection")
+					ended = true
+					break
+				}
+				if looked {
+					if readOn += len(buffer); int64(readOn) >= lookTotal+readOnLimit {
+						logger.Warn("a generic request's bytes never paused once its window had passed: the client wrote into the connection as fast as the proxy read it, so the request ends here, after the most the proxy reads past its window, and is matched as read",
+							zap.Any("client", clientConn.RemoteAddr()),
+							zap.Int("bytesReadPastWindow", readOn))
+						break
+					}
+				}
+				// Draining reads have a deadline that has passed: each gives
+				// what a layer above the socket holds whole (a TLS record,
+				// a buffered reader's bytes), and the first that would read
+				// the socket times out at once.
+				if drained {
+					if timeout {
+						break
+					}
+					continue
+				}
+				if looked {
+					if took := before - pUtil.UnreadBytes(clientConn); took > 0 {
+						left -= took
+					}
+					// The socket has given what it held at the look. The
+					// layers above it may hold some of it (a TLS layer reads
+					// ahead of its record): read without waiting.
+					if left <= 0 {
+						drained = true
+						if err := clientConn.SetReadDeadline(time.Unix(1, 0)); err != nil {
+							utils.LogError(logger, err, "failed to set the read deadline for the client conn")
+							return
+						}
+						continue
+					}
+				}
+				// A deadline that passed before the request's window did
+				// (one window from its first bytes, as the parser read
+				// them) is not the request's end: the bytes came late in
+				// the round, or the parser was held past the deadline
+				// while the rest sat in the socket, and a read whose
+				// deadline passed returns its timeout without reading what
+				// the socket holds. The parser reads on to the window's
+				// end.
+				if timeout && deadline.Before(first.Add(quietWindow)) {
+					deadline = first.Add(quietWindow)
+					if err := clientConn.SetReadDeadline(deadline); err != nil {
+						utils.LogError(logger, err, "failed to set the read deadline for the client conn")
+						return
+					}
+					continue
+				}
+				// Past the window, the bytes the socket holds unread came
+				// before the parser looked: a parser held past the window's
+				// deadline too, between two reads, would have cut the
+				// request there. They are the request's: the parser reads
+				// on until the socket has given as many bytes as it held at
+				// its first look, each read with a deadline one window from
+				// when it is set, so a read held past one reads on while the
+				// socket still holds some, and one that finds the socket
+				// empty at its deadline ends the request. A read times out
+				// only once no layer above the socket holds anything whole
+				// to give, so what the socket holds is all there is to read.
+				// It looks once, so a request whose bytes never pause still
+				// ends: once the socket has given what it held then (less
+				// what arrived as each read took), or, for a sender that
+				// refills the socket as each read takes, at readOnLimit
+				// beyond what the socket held at the look.
+				if timeout && !first.IsZero() {
+					if unread := pUtil.UnreadBytes(clientConn); unread > 0 {
+						if !looked {
+							looked, left, lookTotal = true, unread, unread
+						}
+						deadline = time.Now().Add(quietWindow)
+						if err := clientConn.SetReadDeadline(deadline); err != nil {
+							utils.LogError(logger, err, "failed to set the read deadline for the client conn")
+							return
+						}
+						continue
+					}
+				}
+				if timeout {
+					logger.Debug("the timeout for the client read in generic")
 					break
 				}
 			}
