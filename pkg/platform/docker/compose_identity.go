@@ -144,12 +144,15 @@ func resolveComposeIdentity(ctx context.Context, paths []string, content []byte,
 	if err != nil {
 		return nil, err
 	}
-	var project *composetypes.Project
-	if content == nil {
-		project, err = o.LoadProject(ctx)
-	} else {
-		project, err = loadComposeContent(ctx, o, content, loadOptions)
-	}
+	project, err := loadSchemaUnchecked(func(extra ...func(*loader.Options)) (*composetypes.Project, error) {
+		if content == nil {
+			if err := cli.WithLoadOptions(extra...)(o); err != nil {
+				return nil, err
+			}
+			return o.LoadProject(ctx)
+		}
+		return loadComposeContent(ctx, o, content, append(loadOptions[:len(loadOptions):len(loadOptions)], extra...))
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +169,28 @@ func resolveComposeIdentity(ctx context.Context, paths []string, content []byte,
 		ident.containerNames[name] = svc.ContainerName
 	}
 	return ident, nil
+}
+
+// loadSchemaUnchecked is load(), which loads with compose's schema unchecked
+// (resolveComposeIdentity's SkipValidation). compose-go's normalizer asserts the
+// types the schema guarantees, so a document the schema refuses (a service's
+// `volumes:` or `networks:` left empty, a service with no body) panics there,
+// where compose, which checks the schema first, says why. Such a document is
+// loaded once more with the schema checked, and that load's error is the one
+// compose gives.
+func loadSchemaUnchecked(load func(extra ...func(*loader.Options)) (*composetypes.Project, error)) (*composetypes.Project, error) {
+	project, failure, err := func() (p *composetypes.Project, failure any, err error) {
+		defer func() { failure = recover() }()
+		p, err = load()
+		return p, nil, err
+	}()
+	if failure == nil {
+		return project, err
+	}
+	if _, err := load(func(lo *loader.Options) { lo.SkipValidation = false }); err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("compose's loader failed on the document: %v", failure)
 }
 
 // loadComposeContent is o.LoadProject for content as the one document `-f -`

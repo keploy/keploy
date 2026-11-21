@@ -856,11 +856,12 @@ services:
 // a user service named keploy-agent produces NO container-name clash and docker
 // accepts the generated file without complaint.
 //
-// The damage is in keploy's own lookup. findServiceNodeAndName("keploy-agent")
-// matches on container_name too and reaches the user's service first, so the
-// app's `dns` is MOVED onto an unrelated service — overwriting the dns that
-// service declared for itself — while the agent that owns the network namespace
-// gets none. A recording made this way is quietly wrong rather than absent.
+// The damage is in a lookup of the agent that takes a service by key or
+// container_name, service by service, as the enterprise compose hook's does on
+// the document next: it reaches the user's service first and makes the agent's
+// edits there. (findServiceNodeAndName takes every key first, so keploy's own
+// dns move reaches the agent.) A recording made this way is quietly wrong
+// rather than absent.
 //
 // Driven through the full pipeline, which is also the only place the ordering
 // matters: the lookups that resolve service aliases in place stop as soon as
