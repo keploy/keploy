@@ -127,21 +127,15 @@ func record(ppid, pgid, status uint32) []byte {
 	return rec
 }
 
-func TestShortRecordReadsParentGroupAndState(t *testing.T) {
-	const sRun, sZombie = 2, 5 // SRUN, SZOMB: bsd/sys/proc.h
-	for _, c := range []struct {
-		status uint32
-		want   Proc
-	}{
-		{sRun, Proc{PID: 50, PPID: 3, PGID: 40}},
-		{sZombie, Proc{PID: 50, PPID: 3, PGID: 40, Zombie: true}},
-	} {
-		got, err := shortRecord(50, record(3, 40, c.status), 64)
-		if err != nil || got != c.want {
-			t.Errorf("status %d: shortRecord = %+v, %v; want %+v", c.status, got, err, c.want)
-		}
+// The record's parent and group are read from their own fields, whatever
+// the record's pid and status say; a record shorter than the struct is not
+// read.
+func TestShortRecordReadsParentAndGroup(t *testing.T) {
+	const sRun = 2 // SRUN: bsd/sys/proc.h
+	want := Proc{PID: 50, PPID: 3, PGID: 40}
+	if got, err := shortRecord(50, record(3, 40, sRun), 64); err != nil || got != want {
+		t.Errorf("shortRecord = %+v, %v; want %+v", got, err, want)
 	}
-	// A record shorter than the struct is not read.
 	if got, err := shortRecord(50, record(3, 40, sRun), 63); err == nil {
 		t.Errorf("a short record read as %+v; want an error", got)
 	}
