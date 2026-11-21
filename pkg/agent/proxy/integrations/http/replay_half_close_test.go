@@ -187,11 +187,11 @@ func halfClosedAtRecord(t *testing.T, shape string, readOn bool) *models.Mock {
 // Recorded, then replayed: an app that half-closed and gave up after part of
 // the answer sees at replay what it saw at record, the part, then nothing
 // until its own timeout. One that read on to the upstream's end sees the
-// same at replay, the stated limit: its test fails by its own timeout, and
-// never passes on an end it may not have had. Its FIN reaches the proxy
-// before the answer is written, or after it: the serve holds on past it
-// either way, marked idle, until a reset, here the app's (it closes with
-// the rest unread: heldReplay.appResets), or the run's end.
+// same at replay, the part, then nothing: its test fails closed, by its own
+// timeout, and never passes on an end it may not have had. Its FIN reaches
+// the proxy before the answer is written, or after it: the serve holds on
+// past it either way, marked idle, until a reset, here the app's (it closes
+// with the rest unread: heldReplay.appResets), or the run's end.
 func TestReplay_AHalfClosedAppsHeldAnswerIsHeldPastItsFIN(t *testing.T) {
 	for _, shape := range partAnswers {
 		for _, readOn := range []bool{false, true} {
