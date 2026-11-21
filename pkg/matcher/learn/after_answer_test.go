@@ -249,3 +249,27 @@ func TestAfterAnswerANilTrackerBooksAtOnce(t *testing.T) {
 		t.Fatalf("a nil tracker did not run the bookkeeping at once")
 	}
 }
+
+// TestAfterAnswerWaitingCountsTheQueueWithoutBookingIt: Waiting says how many
+// items are queued and not yet booked, and reading it books none of them;
+// a read of the tracker books them all, and a nil tracker has none.
+func TestAfterAnswerWaitingCountsTheQueueWithoutBookingIt(t *testing.T) {
+	tr := NewTracker()
+	ran := 0
+	for i := 0; i < 3; i++ {
+		tr.AfterAnswer(func(Book) { ran++ })
+	}
+	for i := 0; i < 2; i++ {
+		if w := tr.Waiting(); w != 3 || ran != 0 {
+			t.Fatalf("Waiting %d with %d booked; want 3 waiting, none booked", w, ran)
+		}
+	}
+	tr.Placed()
+	if w := tr.Waiting(); w != 0 || ran != 3 {
+		t.Fatalf("Waiting %d with %d booked after a read; want none waiting, 3 booked", w, ran)
+	}
+	var none *Tracker
+	if w := none.Waiting(); w != 0 {
+		t.Fatalf("a nil tracker has %d waiting; want none", w)
+	}
+}

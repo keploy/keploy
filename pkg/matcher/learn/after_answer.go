@@ -106,6 +106,18 @@ func (t *Tracker) Kick() {
 	go t.work()
 }
 
+// Waiting is how many calls' bookkeeping (AfterAnswer) is queued and not yet
+// booked. It reads the queue without settling it, so it can say whether a
+// call's answer was written before its bookkeeping ran, and whether the
+// worker a Kick started has booked it, with no read of the tracker that
+// would book it first. A nil tracker has none waiting.
+func (t *Tracker) Waiting() int {
+	if t == nil {
+		return 0
+	}
+	return int(t.after.pending.Load())
+}
+
 // work drains the queue until it is empty, and is the worker no more.
 func (t *Tracker) work() {
 	a := &t.after
