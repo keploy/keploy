@@ -79,10 +79,18 @@ func (s *consumer) scoresForMocks(mocks []*models.OpenAPI, mockSet map[string]mo
 	}
 	// Loop through each mock in the provided list of mocks.
 	for _, mock := range mocks {
-		// Initialize the mock's score to 0.0 and store the mock's data in the mockSet map.
+		// Seed the mock at the matcher's "not a candidate" score, not at 0.
+		// 0 is a score a candidate really earns: schemaSimilarity reports the
+		// fraction of what the mock's response requires that the test provides,
+		// so a test that shares the endpoint, the method, the parameters and the
+		// request body but none of the response fields scores 0 - a contract
+		// violation, and the one this command exists to report. Seeding 0 made
+		// the `candidateScore > current` gate drop that candidate, leaving the
+		// mock with no test set and no test name, which ValidateMockAgainstTests
+		// then printed as MISSED and never explained with a diff.
 		// 'mockSet' is a map where the key is the mock title and the value is the SchemaInfo structure containing score and data.
 		mockSet[mock.Info.Title] = models.SchemaInfo{
-			Score: 0.0,
+			Score: schemaMatcher.NOTCANDIDATE,
 			Data:  *mock, // Store the mock data here.
 		}
 
@@ -153,8 +161,10 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 			// Iterate over each mock in the mockTest map
 			for _, mockInfo := range mockTest {
 
-				// Print validation information only if the score is not zero
-				if mockInfo.Score != 0.0 {
+				// Print validation information only when a candidate test was
+				// found. A score below 0 is the matcher's "not a candidate"
+				// sentinel: there is no test/name pair to print.
+				if mockInfo.Score >= 0 {
 					fmt.Print("Validating '")
 					fmt.Print(serviceColor(service)) // Print the service name in blue
 					fmt.Printf("': (%s)/%s for (%s)/%s\n", mockSetID, mockInfo.Data.Info.Title, mockInfo.TestSetID, mockInfo.Name)
@@ -178,8 +188,12 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 					fmt.Print(successColor("passed")) // Print "passed" in green
 					fmt.Printf(" for the test '%s' / mock '%s'\n", mockInfo.Name, mockInfo.Data.Info.Title)
 					fmt.Println("--------------------------------------------------------------------")
-					// Case 2: If the score is between 0 and 1.0, the mock failed the validation
-				} else if mockInfo.Score > 0.0 {
+					// Case 2: If the score is between 0 and 1.0, the mock failed the validation.
+					// A score of exactly 0 belongs here too: the test reached the same
+					// endpoint with the same request, yet provides none of the response
+					// fields the mock requires. That is a failed contract check, not a
+					// missing test, and it is the case the diff below is rendered for.
+				} else if mockInfo.Score >= 0.0 {
 					// Retrieve the Status struct for the given mockSetID
 					status := serviceSummary.TestSets[mockSetID]
 
@@ -208,8 +222,10 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 						return models.Summary{}, err
 					}
 
-					// Case 3: If the score is 0.0, there was no matching test case found
-				} else if mockInfo.Score == 0.0 {
+					// Case 3: A score below 0 is the matcher's "not a candidate"
+					// sentinel: no recorded test reached this mock's endpoint at
+					// all, so there was no matching test case found.
+				} else {
 					// Retrieve the Status struct for the given mockSetID
 					status := serviceSummary.TestSets[mockSetID]
 
