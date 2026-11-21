@@ -256,16 +256,16 @@ type slowPastLook struct {
 }
 
 func (c *slowPastLook) Read(p []byte) (int, error) {
-	c.heldPast.mu.Lock()
-	phase, replied := c.heldPast.phase, c.heldPast.repliedAfterLook
-	c.heldPast.mu.Unlock()
+	c.mu.Lock()
+	phase, replied := c.phase, c.repliedAfterLook
+	c.mu.Unlock()
 	if phase >= 3 && !replied {
 		time.Sleep(time.Millisecond)
 	}
 	n, err := c.heldPast.Read(p)
-	c.heldPast.mu.Lock()
-	phase, replied = c.heldPast.phase, c.heldPast.repliedAfterLook
-	c.heldPast.mu.Unlock()
+	c.mu.Lock()
+	phase, replied = c.phase, c.repliedAfterLook
+	c.mu.Unlock()
 	if phase >= 3 && !replied {
 		c.cmu.Lock()
 		c.pastLook += n
