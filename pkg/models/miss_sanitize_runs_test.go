@@ -149,6 +149,22 @@ func TestTheNextStepShapesAShapedStartOfAKeptField(t *testing.T) {
 	if got, want := m.SanitizedNextStep(), "entries for a.b.{}}.c.{} differ"; got != want {
 		t.Errorf("next step %q; want %q", got, want)
 	}
+	// Deeper in a run of kept fields, the start "{" ends the run at the
+	// nearest "{}" whose start follows it (the farther one's follows no
+	// path). The run of another path that begins inside it ("b.c.{}...7")
+	// is then not read from there: the first text's count 7 stays, and the
+	// second's is shaped by the run "d.{}.7" after it.
+	for _, c := range []struct {
+		paths      []string
+		text, want string
+	}{
+		{[]string{"a.b.c.{}", "a.b.c.{", "b.c.{}.7"}, "a.b.c.{}.7", "a.b.c.{}}.7"},
+		{[]string{"a.b.c.{}.d.{}", "a.b.c.{", "b.c.{}.d.{}.7"}, "a.b.c.{}.d.{}.7", "a.b.c.{}}.d.{}.{}"},
+	} {
+		if got, want := shapedRuns(c.text, c.paths), shapedRunsByEveryRun(c.text, c.paths); got != want || got != c.want {
+			t.Errorf("paths %q, text %q: shapedRuns %q; every run %q, want %q", c.paths, c.text, got, want, c.want)
+		}
+	}
 }
 
 // A number as long as an id that a path holds is shaped where the text names
