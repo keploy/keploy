@@ -157,6 +157,7 @@ type recording struct {
 	done    chan error
 	got     []*models.Mock
 	created string // the creation line of the parser's merge and readers
+	loop    string // the start of the stack header of the parser's main loop's goroutine
 }
 
 func startRecording(t *testing.T, plan []fakeconn.Chunk, viaSyncMock bool) *recording {
@@ -188,14 +189,17 @@ func startRecordingUnder(t *testing.T, plan []fakeconn.Chunk, viaSyncMock, withO
 	}
 	r := &recording{t: t, order: order, streams: [2]*fakeconn.FakeConn{sess.ClientStream, sess.DestStream},
 		chans: [2]chan fakeconn.Chunk{clientCh, destCh}, mocks: mocks, mgr: mgr, done: make(chan error, 1)}
-	created := make(chan string, 1)
+	id := make(chan int64, 1)
 	go func() {
 		// RecordOutgoing runs encodeGenericV2 on this goroutine, which
-		// starts the merge and the readers.
-		created <- fmt.Sprintf("created by %s in goroutine %d", funcName(encodeGenericV2), goroutineID())
+		// starts the merge and the readers and then runs the main loop
+		// (pairChunkEvents).
+		id <- goroutineID()
 		r.done <- dispatch(t, sess)
 	}()
-	r.created = <-created
+	loop := <-id
+	r.created = fmt.Sprintf("created by %s in goroutine %d", funcName(encodeGenericV2), loop)
+	r.loop = fmt.Sprintf("goroutine %d [", loop)
 	return r
 }
 
@@ -231,22 +235,111 @@ func (r *recording) taken(c fakeconn.Chunk) {
 	}
 }
 
-// recorded waits up to within for a mock whose pairs (pairsOf) include pair.
-func (r *recording) recorded(pair string, within time.Duration) bool {
-	bound := time.After(within)
-	for {
-		for _, p := range pairsOf(r.got) {
-			if p == pair {
-				return true
-			}
-		}
-		select {
-		case m := <-r.mocks:
-			r.got = append(r.got, m)
-		case <-bound:
-			return false
+// putAtRest puts c on its stream, and waits until the parser has done all it
+// can with it (awaitRest): the merge has taken c before any chunk put after
+// it, so even chunks it cannot place (no capture number, or a session with no
+// capture order), which it hands on in the order it takes them, reach the
+// pairing in the order put. That c's reader has taken it off its stream
+// (taken) is not enough: the reader may still hold it, and a chunk put on the
+// other stream after it can reach the merge first.
+func (r *recording) putAtRest(c fakeconn.Chunk) {
+	r.put(c)
+	r.awaitRest()
+}
+
+// recorded reports whether a mock whose pairs (pairsOf) include pair has been
+// recorded once the parser has done all it can with what the row has done
+// (awaitRest): a mock it has not handed on by then, it hands on only once the
+// row does more.
+func (r *recording) recorded(pair string) bool {
+	r.t.Helper()
+	r.awaitRest()
+	r.takeMocks()
+	for _, p := range pairsOf(r.got) {
+		if p == pair {
+			return true
 		}
 	}
+	return false
+}
+
+// takeMocks takes every mock the parser has handed on so far: those on the
+// channel, and, handed to the manager, those still on their way to it
+// (SyncMockManager.OutQueued). Once the manager has none on their way, every
+// mock it was handed is on the channel.
+func (r *recording) takeMocks() {
+	r.t.Helper()
+	bound := time.Now().Add(waitBound)
+	for {
+		queued := r.mgr.OutQueued()
+		for len(r.mocks) > 0 {
+			r.got = append(r.got, <-r.mocks)
+		}
+		if !queued {
+			return
+		}
+		if time.Now().After(bound) {
+			r.t.Fatal("the manager never put on the channel the mocks it had on their way to it")
+		}
+		time.Sleep(time.Millisecond) // a yield between looks
+	}
+}
+
+// awaitRest waits until the recording's parser has done all it can with what
+// the row has done, and waits on the row: in one look at every goroutine, its
+// main loop and each of the merge and the readers still alive are blocked on
+// a channel. The parser takes no timer, so it then does nothing more until
+// the row puts a chunk, ends a stream, stops the recording or changes the
+// capture order: each reader waits on a read with nothing buffered, or holds
+// a chunk the merge cannot take yet; the merge has handed on every chunk it
+// can place; and the loop has taken every chunk handed on, and handed on every
+// mock it could make of them, or waits for an answer chunk the merge holds.
+// It replaces a wait for a time: a loaded box can stop the parser's
+// goroutines for longer than any time a row waits.
+func (r *recording) awaitRest() {
+	r.t.Helper()
+	bound := time.Now().Add(waitBound)
+	for {
+		atRest, looping := r.atRest()
+		if !looping {
+			r.t.Fatal("the parser's main loop returned with its streams open")
+		}
+		if atRest {
+			return
+		}
+		if time.Now().After(bound) {
+			r.t.Fatal("the parser never came to rest with what the row had done")
+		}
+		time.Sleep(time.Millisecond) // a yield between looks
+	}
+}
+
+// atRest reports whether, in one look at every goroutine, the recording's
+// main loop and each of the merge and the readers still alive are blocked on
+// a channel, and whether the main loop is still alive.
+func (r *recording) atRest() (atRest, looping bool) {
+	atRest = true
+	for _, g := range strings.Split(allStacks(), "\n\n") {
+		lines := strings.Split(g, "\n")
+		switch {
+		case strings.HasPrefix(lines[0], r.loop):
+			looping = true
+			atRest = atRest && blockedOnAChannel(lines[0])
+		case createdBy(lines, r.created):
+			atRest = atRest && blockedOnAChannel(lines[0])
+		}
+	}
+	return atRest && looping, looping
+}
+
+// blockedOnAChannel reports whether a stack's header says it waits on a
+// channel: a send, a receive or a select.
+func blockedOnAChannel(header string) bool {
+	if parkedOnAChannel(header) {
+		return true
+	}
+	i := strings.IndexByte(header, '[')
+	return i >= 0 && strings.HasPrefix(header[i+1:], "chan receive")
 }
 
 // stop begins the recording's stop, as its ask of what is pending does: the
@@ -331,8 +424,11 @@ func (r *recording) awaitReaders(n int) {
 	}
 }
 
-// end ends both streams, as the relay's teardown does, and waits for the
-// parser to return.
+// end ends both streams, as the relay's teardown does, waits for the parser
+// to return, and takes every mock it handed on (takeMocks). The parser hands
+// on each mock before it returns, so they are all there to take: none comes
+// later, and none is left behind by a wait for a time that a loaded box
+// outlasts between two looks.
 func (r *recording) end() orderedRun {
 	r.t.Helper()
 	r.endStream(0)
@@ -347,27 +443,20 @@ func (r *recording) end() orderedRun {
 	case <-time.After(10 * time.Second): // only turns a hang into a failure
 		return out
 	}
-	for drained := false; !drained; {
-		select {
-		case m := <-r.mocks:
-			r.got = append(r.got, m)
-		case <-time.After(50 * time.Millisecond):
-			drained = true
-		}
-	}
+	r.takeMocks()
 	out.recorded, out.leftOut = r.got, r.mgr.MocksLeftOut()
 	return out
 }
 
 // runInReadOrder records a connection under the capture order of plan,
 // putting the chunks of puts on their streams in that order, each once the
-// reader of its stream has taken every chunk put before it, so the readers
-// hand them on in the order put; then it ends both streams.
+// parser has done all it can with every chunk put before it (putAtRest), so
+// the merge takes them in the order put; then it ends both streams.
 func runInReadOrder(t *testing.T, plan, puts []fakeconn.Chunk, viaSyncMock bool) orderedRun {
 	t.Helper()
 	r := startRecording(t, plan, viaSyncMock)
 	for _, c := range puts {
-		r.put(c)
+		r.putAtRest(c)
 	}
 	return r.end()
 }
@@ -459,7 +548,7 @@ func TestV2_AnAnswerTakenAfterTheClientsEndWaitsOnNoClientChunk(t *testing.T) {
 			r.awaitReaders(1)
 			r.put(resps[1])
 			r.stop()
-			ok := r.recorded("req1|resp1", 5*time.Second)
+			ok := r.recorded("req1|resp1")
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded at the stop with the dest's stream open, its answer taken after the client's end (recorded %q by the end)", pairsOf(got.recorded))
@@ -498,7 +587,7 @@ func TestV2_AHeldAnswerGoesOnAheadOfAnUnnumberedChunkReceivedAfterIt(t *testing.
 			r.awaitWaiting(1)
 			r.awaitMergeWaits()
 			r.push(reqs[2])
-			ok := r.recorded("req1|resp1", 5*time.Second)
+			ok := r.recorded("req1|resp1")
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded with the streams open, its answer held ahead of an unnumbered request received after it (recorded %q by the end)", pairsOf(got.recorded))
@@ -594,9 +683,11 @@ func TestV2_TheMergeWaitsForAChunkOnItsStreamItsReaderHasNotHandedOn(t *testing.
 // (refused), the second exchange's mock is recorded with the streams still
 // open; and so is one whose chunks have no number (a producer that does not
 // number them, merged as read), and one recorded on a session with no capture
-// order (Session.Order unset: merged as read). An answer the merge kept back
-// is one the parser has not read: the stop cannot hand its exchange on, and
-// waits on the parser.
+// order (Session.Order unset: merged as read). The merge takes such chunks in
+// the order they reach it, not the order their readers took them off their
+// streams, so those two put each chunk once the parser is at rest
+// (putAtRest). An answer the merge kept back is one the parser has not read:
+// the stop cannot hand its exchange on, and waits on the parser.
 func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 	for _, viaSyncMock := range []bool{true, false} {
 		// The connection's first exchange: the merge knows the client's
@@ -611,7 +702,7 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			r.put(reqs[0])
 			r.put(resps[0])
 			r.stop()
-			ok := r.recorded("req0|resp0", 5*time.Second)
+			ok := r.recorded("req0|resp0")
 			r.put(reqs[1])
 			r.put(resps[1])
 			got := r.end()
@@ -633,7 +724,7 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			r.put(resps[1])
 			r.order.accept(refused, 0)
 			r.stop()
-			ok := r.recorded("req1|resp1", 5*time.Second)
+			ok := r.recorded("req1|resp1")
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded at the stop with the streams open, once nothing captured before its answer could come (recorded %q by the end)", pairsOf(got.recorded))
@@ -646,11 +737,11 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			}
 			r := startRecording(t, nil, viaSyncMock)
 			for i := range reqs {
-				r.put(reqs[i])
-				r.put(resps[i])
+				r.putAtRest(reqs[i])
+				r.putAtRest(resps[i])
 			}
 			r.stop()
-			ok := r.recorded("req1|resp1", 5*time.Second)
+			ok := r.recorded("req1|resp1")
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded at the stop with the streams open (recorded %q by the end)", pairsOf(got.recorded))
@@ -661,11 +752,11 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			plan := []fakeconn.Chunk{reqs[0], resps[0], reqs[1], resps[1]}
 			r := startRecordingUnder(t, plan, viaSyncMock, false)
 			for i := range reqs {
-				r.put(reqs[i])
-				r.put(resps[i])
+				r.putAtRest(reqs[i])
+				r.putAtRest(resps[i])
 			}
 			r.stop()
-			ok := r.recorded("req1|resp1", 5*time.Second)
+			ok := r.recorded("req1|resp1")
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded at the stop with the streams open, on a session that cannot say its capture order (recorded %q by the end)", pairsOf(got.recorded))

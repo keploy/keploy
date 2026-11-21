@@ -212,12 +212,12 @@ func TestV2_TheStopWaitsForAnAnswerChunkItsReaderTookBeforeItDecides(t *testing.
 			r.push(tail) // the dest's reader has taken it
 			r.awaitMergeWaits()
 			r.stop()
-			if r.recorded("request-longer-than-its-answer|head", 200*time.Millisecond) {
+			if r.recorded("request-longer-than-its-answer|head") {
 				r.end()
 				t.Fatal("the stop handed the exchange on cut, without the answer chunk its reader had taken")
 			}
 			r.order.accept(unsaid, 0) // never on its stream: the merge hands the tail on
-			if !r.recorded("request-longer-than-its-answer|head,tail", waitBound) {
+			if !r.recorded("request-longer-than-its-answer|head,tail") {
 				r.end()
 				t.Fatalf("the exchange was not handed on whole once the merge handed the tail on: %q", pairsOf(r.got))
 			}
