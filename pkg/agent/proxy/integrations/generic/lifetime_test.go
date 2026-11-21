@@ -75,25 +75,21 @@ func TestTheRecordersStateAConnectionsPreambleSessionAndTheRestPerTest(t *testin
 		}
 	})
 	t.Run("v2", func(t *testing.T) {
-		clientCh := make(chan fakeconn.Chunk, 3)
-		destCh := make(chan fakeconn.Chunk, 3)
-		go func() {
-			for i, x := range []string{"hello", "get a", "get b"} {
-				at := time.Unix(int64(1000+10*i), 0)
-				clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ReadAt: at}
-				time.Sleep(10 * time.Millisecond)
-				destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok " + x), WrittenAt: at.Add(time.Second)}
-				time.Sleep(10 * time.Millisecond)
-			}
-			close(clientCh)
-			close(destCh)
-		}()
-		sess, mocks := newV2Session(t, clientCh, destCh)
-		if err := dispatch(t, sess); err != nil {
-			t.Fatal(err)
+		// Unnumbered chunks on a session with no capture order: the merge
+		// hands them on in the order it takes them, so each goes on its
+		// stream once the parser has done all it can with the one before
+		// it (putAtRest).
+		r := startRecordingUnder(t, nil, false, false)
+		for i, x := range []string{"hello", "get a", "get b"} {
+			at := time.Unix(int64(1000+10*i), 0)
+			r.putAtRest(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ReadAt: at})
+			r.putAtRest(fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok " + x), WrittenAt: at.Add(time.Second)})
 		}
-		close(mocks)
-		if s := statedOf(drainMocks(mocks)); !equal(s, want) {
+		run := r.end()
+		if !run.returned {
+			t.Fatal("the parser did not return once both streams ended")
+		}
+		if s := statedOf(run.recorded); !equal(s, want) {
 			t.Fatalf("stated %v, want %v", s, want)
 		}
 	})
