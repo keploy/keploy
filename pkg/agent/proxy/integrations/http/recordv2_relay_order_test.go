@@ -98,6 +98,10 @@ func loopback(t *testing.T) (dialed, accepted net.Conn) {
 func newRelayedConn(t *testing.T) *relayedConn {
 	t.Helper()
 	app, src := loopback(t)
+	// The count from the accept, as the proxy puts it on every client it
+	// accepts (relay.CountClientWrites): Windows' reset of the client reads
+	// what was written to it from it.
+	src = relay.CountClientWrites(src)
 	dst, dest := loopback(t)
 	core, logs := observer.New(zapcore.DebugLevel)
 	return &relayedConn{app: app, dest: dest, src: src, dst: dst, mocks: make(chan *models.Mock, 8), spans: &spanLog{},

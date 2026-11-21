@@ -126,7 +126,11 @@ func TestTheClientsEndBeforeTheDestinationsIsToldByALookAtItsSocket(t *testing.T
 			t.Parallel()
 			app, proxyClient := loopbackPair(t)
 			proxyServer, server := loopbackPair(t)
-			gate := &gatedConn{Conn: &proxyutil.Conn{Conn: proxyClient, Reader: proxyClient, Logger: zap.NewNop()}, release: make(chan struct{})}
+			// The count from the accept, as the proxy puts it on every
+			// client it accepts (CountClientWrites): Windows' reset of the
+			// client reads what was written to it from it.
+			counted := CountClientWrites(proxyClient)
+			gate := &gatedConn{Conn: &proxyutil.Conn{Conn: counted, Reader: counted, Logger: zap.NewNop()}, release: make(chan struct{})}
 			var releaseOnce sync.Once
 			release := func() { releaseOnce.Do(func() { close(gate.release) }) }
 			if !row.unread {
