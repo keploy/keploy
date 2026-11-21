@@ -533,13 +533,14 @@ func (d drainInstr) GetConsumedMocks(context.Context) ([]models.MockState, error
 	return d.mm.GetConsumedMocks(), nil
 }
 
-// A test's line names a recording once when two consumed reads both carry
-// it under that test: the wait for the series the run owes reads what was
-// consumed once the test command has exited (readOwedSeries), and the run's
-// end reads again what was consumed after that (withSeriesRead). A test
-// left open when its command exited (its process died mid-test) holds its
-// window open through the wait, so a recording that answered it before the
-// wait's read and again after is in both reads, each under that window.
+// A test's line names and counts a recording once, and the set's answered
+// lists it once, when two consumed reads both carry it under that test: the
+// wait for the series the run owes reads what was consumed once the test
+// command has exited (readOwedSeries), and the run's end reads again what
+// was consumed after that (withSeriesRead). A test left open when its
+// command exited (its process died mid-test) holds its window open through
+// the wait, so a recording that answered it before the wait's read and
+// again after is in both reads, each under that window.
 func TestATestsLineNamesARecordingOnceWhenTwoReadsCarryIt(t *testing.T) {
 	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
@@ -552,13 +553,25 @@ func TestATestsLineNamesARecordingOnceWhenTwoReadsCarryIt(t *testing.T) {
 	m := &mockService{logger: zap.NewNop(), config: &config.Config{}, instrumentation: drainInstr{mm: mm}}
 	m.readOwedSeries(context.Background(), nil) // the wait's read
 	require.Len(t, m.seriesRead, 1)
-	serve("mock-21", models.LifetimeSession) // the application runs on
+	require.Len(t, m.seriesRead[0].AnsweredIn, 1)
+	firstAt := m.seriesRead[0].AnsweredIn[0].First
+	// The application runs on: a later serve, at a time that is not the
+	// first's.
+	time.Sleep(2 * time.Millisecond)
+	serve("mock-21", models.LifetimeSession)
 	serve("mock-10", models.LifetimePerTest)
 	mm.CloseTestWindow(1) // the run's end fails and closes it
 	windows := []models.ScopeWindow{{Name: "pkg.TestA", Seq: 1, Start: time.Unix(10, 0), End: time.Unix(50, 0), Outcome: models.ScopeOutcomeFailed}}
 	counts := m.reportOutcome(context.Background(), 2, replayDetail{set: "s", windows: windows, expected: map[string][]models.MockEntry{"pkg.TestA": {{Name: "mock-10"}}}}, func() bool { return false })
 	require.Len(t, counts.tests, 1, "%+v", counts.tests)
 	require.Equal(t, []string{"mock-21", "mock-10"}, counts.tests[0].AnsweredBy, "mock-21 once, though both reads carry it under pkg.TestA")
+	require.Equal(t, 2, counts.tests[0].Consumed, "consumed counts the recordings answeredBy names")
+	require.Len(t, counts.answered, 2, "%+v", counts.answered)
+	require.Len(t, counts.answered[1].In, 1, "%+v", counts.answered)
+	require.Equal(t, []RecordingAnswers{
+		{Mock: "mock-21", In: []AnswerPlace{{Test: "pkg.TestA", First: time.Unix(0, firstAt).UTC()}}},
+		{Mock: "mock-10", In: []AnswerPlace{{Test: "pkg.TestA", First: counts.answered[1].In[0].First}}},
+	}, counts.answered, "the set lists mock-21 once, at its first answer, the one the wait read")
 }
 
 // A recording that answered while no test window was open (a background
