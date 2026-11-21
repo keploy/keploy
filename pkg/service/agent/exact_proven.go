@@ -241,6 +241,13 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("read the recording's mocks for the learn step: %w", err)
 		}
 	}
+	// The parsers read the set's recordings ahead of its calls, in replay
+	// and in record's full round alike (on the learn step's walk there).
+	if w, ok := a.Proxy.(coreAgent.RecordedSetWarmer); ok {
+		if err := w.WarmRecordedSet(); err != nil {
+			return false, fmt.Errorf("read the recording's mocks ahead of its calls: %w", err)
+		}
+	}
 	return true, nil
 }
 
@@ -597,6 +604,13 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		if w, ok := a.Proxy.(coreAgent.LearnSetWarmer); ok {
 			if err := w.WarmLearnSet(); err != nil {
 				return fmt.Errorf("read the test set's recordings for the learn step: %w", err)
+			}
+		}
+		// The parsers read the set's recordings ahead of its calls (in
+		// record's full round on the learn step's walk).
+		if w, ok := a.Proxy.(coreAgent.RecordedSetWarmer); ok {
+			if err := w.WarmRecordedSet(); err != nil {
+				return fmt.Errorf("read the test set's recordings ahead of its calls: %w", err)
 			}
 		}
 		bg := a.settleBackground(ex)

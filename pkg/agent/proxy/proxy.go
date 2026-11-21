@@ -139,6 +139,9 @@ type Proxy struct {
 	// whenever its error capture window opens (openTestErrorCapture). Under
 	// the proven switch the parsers find it on their connection's context.
 	learnTracker *learn.Tracker
+	// recordedWarm numbers the sets whose recordings the parsers' warmers
+	// read ahead of the calls (WarmRecordedSet).
+	recordedWarm recordedWarms
 	// caseBinds are the running client test's recorded requests and the
 	// variables of the test bound at them, which its requests bind as they
 	// reach the application (TakeClientCases, bindCase).
@@ -5603,8 +5606,17 @@ func (p *Proxy) warmLearnSet() (<-chan learn.SetUse, error) {
 	if !provenswitch.On() || !m.learns() {
 		return nil, nil
 	}
+	// The parsers' warmers read each recording on the same walk
+	// (WarmRecordedSet reads none of its own in this round), so the disk's
+	// recordings are read once for both.
+	w := p.newSetWarm()
 	return p.learnTracker.WarmSet(func(visit func(*models.Mock) bool) error {
-		return m.rangeRecordedInOrder(lastRecorded, visit)
+		if w == nil {
+			return m.rangeRecordedInOrder(lastRecorded, visit)
+		}
+		err := m.rangeRecordedInOrder(lastRecorded, w.wrap(visit))
+		w.log(p.logger)
+		return err
 	}), nil
 }
 

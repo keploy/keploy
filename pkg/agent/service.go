@@ -1075,6 +1075,17 @@ type LearnSetWarmer interface {
 	WarmLearnSet() error
 }
 
+// RecordedSetWarmer is implemented by a proxy that hands the staged set's
+// recordings, under exact serving, to the parsers that read them ahead of
+// the calls (integrations.RegisterRecordingWarmer): WarmRecordedSet, called
+// once the set is staged and its on-disk recordings are set, starts that
+// read in the background, in replay and in record's full round alike, and
+// returns at once. A set staged after it stops it. Nothing it reads is
+// served: it fills only the parsers' caches.
+type RecordedSetWarmer interface {
+	WarmRecordedSet() error
+}
+
 // LearnEndSetter is implemented by a proxy whose learn step a keploy test
 // filter can end for the rest of a test set (models.MockFilterParams.
 // LearnEnded): SetLearnEnded says whether it has ended. The agent sets it from
