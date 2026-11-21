@@ -2518,13 +2518,13 @@ func TestAGroupsLeaderIsWaitedForAsTheSignalReachedIt(t *testing.T) {
 		{"its pid naming another process", []Reached{{PID: pid, Start: st.StartTime + 1}}, true},
 		{"the one reached, running", []Reached{{PID: pid, Start: st.StartTime}}, false},
 	} {
-		exited, release := groupGone(tc.members)
+		exited, release := groupGone(pid, tc.members)
 		if got := isClosed(exited); got != tc.exited {
 			t.Fatalf("%s: exited %v, want %v", tc.name, got, tc.exited)
 		}
 		release()
 	}
-	exited, release := groupGone([]Reached{{PID: pid, Start: st.StartTime}})
+	exited, release := groupGone(pid, []Reached{{PID: pid, Start: st.StartTime}})
 	defer release()
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	select {

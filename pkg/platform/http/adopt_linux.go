@@ -340,17 +340,28 @@ func procChildrenIn(root string, parent int) ([]child, error) {
 		if gone || st.PPID != parent {
 			continue
 		}
-		c := child{pid: pid, start: st.StartTime}
-		if st.State == 'Z' {
-			tid, runs, err := utils.RunningThread(root, pid)
-			if err != nil {
-				return nil, fmt.Errorf("read the threads of process %d, whose main thread exited: %w", pid, err)
-			}
-			c.zombie, c.thread = !runs, tid
+		c, err := childOf(root, pid, st)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// childOf is process pid of the /proc at root, whose stat is st, as a child
+// of this process: whether it is a zombie, and, where its main thread exited
+// while another thread runs on, that thread.
+func childOf(root string, pid int, st utils.ProcStat) (child, error) {
+	c := child{pid: pid, start: st.StartTime}
+	if st.State == 'Z' {
+		tid, runs, err := utils.RunningThread(root, pid)
+		if err != nil {
+			return child{}, fmt.Errorf("read the threads of process %d, whose main thread exited: %w", pid, err)
+		}
+		c.zombie, c.thread = !runs, tid
+	}
+	return c, nil
 }
 
 // procStat reads process pid's stat from the /proc at root
@@ -471,45 +482,28 @@ func fdinfoPath() string {
 	return "/proc/self/fdinfo"
 }
 
-// ownFds is the pidfds the adopter itself holds (a reap's zombies, a stop's
-// daemons): no sign that a child is one os/exec waits for. An adopted
-// zombie a stop held a pidfd on was taken for keploy's own, and not reaped
-// until a later child's exit. Changed, and read by heldPidfds, under its
-// lock: an fd leaves it before it is closed, so its number, given again to
-// a pidfd of os/exec's, is never skipped.
-var ownFds = struct {
-	sync.Mutex
-	m map[int]bool
-}{m: map[int]bool{}}
-
-// openPidfd opens a pidfd on pid for the adopter (ownFds).
-func openPidfd(pid int) (int, error) {
-	ownFds.Lock()
-	defer ownFds.Unlock()
-	fd, err := unix.PidfdOpen(pid, 0)
-	if err == nil {
-		ownFds.m[fd] = true
-	}
-	return fd, err
-}
+// openPidfd opens a pidfd on pid for the adopter (a reap's zombies, a stop's
+// daemons), one keploy's own (utils.OpenOwnPidfd): no sign that a child is
+// one os/exec waits for. An adopted zombie a stop held a pidfd on was taken
+// for keploy's own, and not reaped until a later child's exit.
+func openPidfd(pid int) (int, error) { return utils.OpenOwnPidfd(pid) }
 
 // closePidfd closes a pidfd openPidfd opened.
-func closePidfd(fd int) {
-	ownFds.Lock()
-	defer ownFds.Unlock()
-	delete(ownFds.m, fd)
-	_ = unix.Close(fd)
+func closePidfd(fd int) { utils.CloseOwnPidfd(fd) }
+
+// heldPidfds is the set of pids this process holds a pidfd for, but those it
+// opened to watch a process (utils.WithOwnPidfds: the adopter's, and the
+// interrupt's): a pidfd's fdinfo names its process ("Pid:"), and no other
+// kind of fd has that line. A read that fails is an error, never a smaller
+// set (a zombie of this process's own taken for adopted would be reaped from
+// under its Wait); an fd closed meanwhile is no pidfd held.
+func heldPidfds() (held map[int]bool, err error) {
+	utils.WithOwnPidfds(func(skip map[int]bool) { held, err = heldPidfdsBut(skip) })
+	return held, err
 }
 
-// heldPidfds is the set of pids this process holds a pidfd for, but the
-// adopter's own (ownFds): a pidfd's fdinfo names its process ("Pid:"), and no
-// other kind of fd has that line. A read that fails is an error, never a
-// smaller set (a zombie of this process's own taken for adopted would be
-// reaped from under its Wait); an fd closed meanwhile is no pidfd held.
-func heldPidfds() (map[int]bool, error) {
-	ownFds.Lock()
-	defer ownFds.Unlock()
-	skip := ownFds.m
+// heldPidfdsBut is heldPidfds with skip the fds it does not read.
+func heldPidfdsBut(skip map[int]bool) (map[int]bool, error) {
 	held := map[int]bool{}
 	dir := fdinfoPath()
 	fds, err := os.ReadDir(dir)
@@ -773,27 +767,88 @@ func adoptedRunning(logger *zap.Logger) (adoptedRead, error) {
 	self, selfErr := os.Stat("/proc/self/exe")
 	read := adoptedRead{settled: settled}
 	for _, c := range children {
-		if c.zombie || held[c.pid] {
-			continue
-		}
-		if _, gone := leftToKernel.Load([2]uint64{uint64(c.pid), c.start}); gone {
+		switch kind, err := daemonOf(c, held, self, selfErr); kind {
+		case daemonHeld:
 			read.held = append(read.held, c.pid)
-			continue
-		}
-		exe, err := os.Stat(exePath(c))
-		if err != nil {
+		case daemonUnseen:
 			logger.Info("keploy cannot see what a daemon the application left running is (it is not dumpable, or another user's), and leaves it running",
 				zap.Int("pid", c.pid), zap.Error(err))
 			read.unseen = append(read.unseen, c.pid)
-			continue
+		case daemonStopped:
+			read.pids = append(read.pids, c.pid)
 		}
-		if selfErr == nil && os.SameFile(exe, self) {
-			continue // keploy's own
-		}
-		read.pids = append(read.pids, c.pid)
 	}
 	return read, nil
 }
+
+// daemonKind is what adoptedRunning makes of a child of this process.
+type daemonKind int
+
+const (
+	// notDaemon is a zombie, or keploy's own: one it holds a pidfd on (a
+	// child it started), or one that runs keploy's executable.
+	notDaemon daemonKind = iota
+	// daemonHeld is one a stop killed that the kernel holds (leftToKernel):
+	// said, not waited for again.
+	daemonHeld
+	// daemonUnseen is one whose executable keploy cannot read (it is not
+	// dumpable, or another user's): said, and left running.
+	daemonUnseen
+	// daemonStopped is a daemon keploy stops (stopAdopted).
+	daemonStopped
+)
+
+// daemonOf is what adoptedRunning makes of child c: held is the pidfds this
+// process holds (heldPidfds), self and selfErr its executable's stat. For a
+// daemon it cannot see, it says why.
+func daemonOf(c child, held map[int]bool, self os.FileInfo, selfErr error) (daemonKind, error) {
+	if c.zombie || held[c.pid] {
+		return notDaemon, nil
+	}
+	if _, gone := leftToKernel.Load([2]uint64{uint64(c.pid), c.start}); gone {
+		return daemonHeld, nil
+	}
+	exe, err := os.Stat(exePath(c))
+	if err != nil {
+		return daemonUnseen, err
+	}
+	if selfErr == nil && os.SameFile(exe, self) {
+		return notDaemon, nil
+	}
+	return daemonStopped, nil
+}
+
+// endsWithTheDaemons is keploy's answer to its interrupt of the application
+// (utils.LeaveToDaemonStop): whether process pid, started at start, is a
+// daemon this process adopted whose stop (stopAdopted, which follows the
+// interrupt in every run, agent.go) ends it, or one the kernel holds after a
+// stop's kill, which no wait ends. It reads the process as adoptedRunning
+// reads each child (daemonOf), so the interrupt leaves to that stop only
+// what it ends. Where keploy adopts nothing, or the process, its threads or
+// this process's pidfds cannot be read, it is not one: the interrupt waits
+// for it.
+func endsWithTheDaemons(pid int, start uint64) bool {
+	if !adopting.Load() {
+		return false
+	}
+	st, gone, err := procStat("/proc", pid)
+	if err != nil || gone || st.StartTime != start || st.PPID != os.Getpid() {
+		return false
+	}
+	c, err := childOf("/proc", pid, st)
+	if err != nil {
+		return false
+	}
+	held, err := heldPidfds()
+	if err != nil {
+		return false
+	}
+	self, selfErr := os.Stat("/proc/self/exe")
+	kind, _ := daemonOf(c, held, self, selfErr)
+	return kind == daemonStopped || kind == daemonHeld
+}
+
+func init() { utils.LeaveToDaemonStop(endsWithTheDaemons) }
 
 // exePath is where what child c runs is read: its /proc/<pid>/exe, or, where
 // its main thread exited while another runs on (whose exe reads as none, its

@@ -736,19 +736,19 @@ func ExitOf(p Reached) (<-chan struct{}, func()) {
 	if p.PID <= 0 {
 		return gone()
 	}
-	fd, err := unix.PidfdOpen(p.PID, 0)
+	fd, err := OpenOwnPidfd(p.PID)
 	if err != nil {
 		return gone()
 	}
 	// The pidfd first, then its pid's start: a pid reused before the open
 	// shows another start time. Once open, the pidfd names this process.
 	if st, ok := ReadProcStat(p.PID); !ok || st.StartTime != p.Start {
-		unix.Close(fd)
+		CloseOwnPidfd(fd)
 		return gone()
 	}
 	exited, done := make(chan struct{}), make(chan struct{})
 	go func() {
-		defer unix.Close(fd)
+		defer CloseOwnPidfd(fd)
 		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 		for {
 			// The poll returns on the exit; its bound only lets the watch
@@ -775,7 +775,7 @@ func ExitOf(p Reached) (<-chan struct{}, func()) {
 // or at the user's press, and says why; "" when the group exited, or was gone
 // by the kill.
 func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached, moved *TeardownScope) (killed string) {
-	exited, release := groupGone(waitedFor(leader, members))
+	exited, release := groupGone(leader, waitedFor(leader, members))
 	defer release()
 	var why string
 	switch end, bound := WaitExitByEvents(logger, exited, members, moved); end {
@@ -803,13 +803,17 @@ func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached, moved 
 }
 
 // groupGone is a channel closed once each of members, a group's processes as
-// its signal reached them (ExitOf each), has exited, and the func that
+// its signal reached them (ExitOf each), has exited, or, but leader, is one
+// keploy's stop of the daemons ends (LeaveToDaemonStop), and the func that
 // releases the watch. A group counts as exited only when no process of it
 // that its signal reached runs, its leader or not: a leader that is a zombie
 // (`sh -c 'server &'` whose sh no one reaps) is not among them, and the
 // server it left in its group is waited for. With no members (a group of
-// zombies only) it is closed at once.
-func groupGone(members []Reached) (<-chan struct{}, func()) {
+// zombies only) it is closed at once. A process becomes one keploy adopted
+// when the parent it had exits, as a shell that dies on the interrupt at
+// once (`app & wait`) leaves its app: each wait watches that exit too
+// (leftOnParentExit).
+func groupGone(leader int, members []Reached) (<-chan struct{}, func()) {
 	gone, done := make(chan struct{}), make(chan struct{})
 	exits := make([]<-chan struct{}, len(members))
 	releases := make([]func(), len(members))
@@ -817,10 +821,16 @@ func groupGone(members []Reached) (<-chan struct{}, func()) {
 		exits[i], releases[i] = ExitOf(m)
 	}
 	go func() {
-		for _, exit := range exits {
-			select {
-			case <-exit:
-			case <-done:
+		for i, exit := range exits {
+			if members[i].PID == leader {
+				select {
+				case <-exit:
+				case <-done:
+					return
+				}
+				continue
+			}
+			if !leftOnParentExit(members[i], exit, done) {
 				return
 			}
 		}
@@ -834,6 +844,36 @@ func groupGone(members []Reached) (<-chan struct{}, func()) {
 				release()
 			}
 		})
+	}
+}
+
+// leftOnParentExit waits until process m exits (exit, its ExitOf) or is one
+// keploy's stop of the daemons ends (leftToDaemonStop), which it reads at
+// first and again each time the parent m runs under exits (ExitOf of it): a
+// process is adopted only as its parent exits. It returns false once done is
+// closed first. One whose parent cannot be read is waited for to exit.
+func leftOnParentExit(m Reached, exit, done <-chan struct{}) bool {
+	for {
+		if leftToDaemonStop(m.PID, m.Start) {
+			return true
+		}
+		var parentExit <-chan struct{}
+		release := func() {}
+		if st, ok := ReadProcStat(m.PID); ok && st.StartTime == m.Start && st.PPID > 1 {
+			if parent, ok := ReadProcStat(st.PPID); ok {
+				parentExit, release = ExitOf(Reached{PID: st.PPID, Start: parent.StartTime})
+			}
+		}
+		select {
+		case <-exit:
+			release()
+			return true
+		case <-done:
+			release()
+			return false
+		case <-parentExit:
+			release()
+		}
 	}
 }
 

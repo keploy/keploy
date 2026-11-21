@@ -191,11 +191,11 @@ func userWorker(flags uint64) bool {
 // keploy's, or no procfs at all).
 func groupExitedIn(root string) func(pid int) (exited, known bool) {
 	return func(pid int) (bool, bool) {
-		fd, err := unix.PidfdOpen(pid, 0)
+		fd, err := OpenOwnPidfd(pid)
 		if err != nil {
 			return false, false
 		}
-		defer func() { _ = unix.Close(fd) }()
+		defer CloseOwnPidfd(fd)
 		info, err := os.ReadFile(root + "/self/fdinfo/" + strconv.Itoa(fd))
 		if err != nil || !fdinfoNames(info, pid) {
 			return false, false

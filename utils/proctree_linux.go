@@ -108,12 +108,19 @@ func exitedUnreapedIn(proc fs.FS, pid int) bool {
 // zombie nor dead, and that is not one of except (its pid and start time). A
 // /proc that cannot be listed is an error.
 func groupRunsExcept(pgid int, except []Reached) (bool, error) {
-	return groupRunsIn(os.DirFS("/proc"), pgid, except, zombieRuns)
+	return groupRunsIn(os.DirFS("/proc"), pgid, except, zombieRuns, leftToDaemonStop)
 }
 
 // groupRunsIn is groupRunsExcept over proc, a /proc, with zombieRuns telling
-// whether a process whose stat reads Z runs on in a thread of it.
-func groupRunsIn(proc fs.FS, pgid int, except []Reached, zombieRuns func(pid int) bool) (bool, error) {
+// whether a process whose stat reads Z runs on in a thread of it, and
+// leftToDaemons whether keploy's stop of the daemons ends a process
+// (LeaveToDaemonStop; nil: none). A process of the group that runs is not
+// counted when it, or a process it runs under, as proc's parents show, is
+// one of except, or, but the group's leader, one leftToDaemons ends: what a
+// process the caller or the stop of the daemons ends runs, they end with it
+// (stopHanded and stopAdopted read each one's children), and a shell left so
+// that starts a `sleep` each second would keep the group running for good.
+func groupRunsIn(proc fs.FS, pgid int, except []Reached, zombieRuns func(pid int) bool, leftToDaemons func(pid int, start uint64) bool) (bool, error) {
 	if pgid <= 1 {
 		return false, nil
 	}
@@ -122,6 +129,8 @@ func groupRunsIn(proc fs.FS, pgid int, except []Reached, zombieRuns func(pid int
 		return false, err
 	}
 	buf := make([]byte, statBufSize)
+	table := make(map[int]ProcStat, len(entries))
+	var group []int
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil || !entry.IsDir() {
@@ -132,11 +141,42 @@ func groupRunsIn(proc fs.FS, pgid int, except []Reached, zombieRuns func(pid int
 			continue
 		}
 		stat, ok := ParseProcStat(line)
-		if !ok || stat.PGRP != pgid || stat.State == 'X' ||
-			slices.Contains(except, Reached{PID: pid, Start: stat.StartTime, Ignores: true}) {
+		if !ok {
 			continue
 		}
-		if stat.State != 'Z' || zombieRuns(pid) {
+		table[pid] = stat
+		if stat.PGRP == pgid && stat.State != 'X' {
+			group = append(group, pid)
+		}
+	}
+	// left reports whether process pid, or one it runs under, is one the
+	// caller or the stop of the daemons ends. The walk ends at a parent proc
+	// does not show, at init, and after as many steps as proc has processes
+	// (a loop of parents, as a /proc read while it changes can show).
+	left := func(pid int) bool {
+		for p, n := pid, 0; n <= len(table); n++ {
+			st, ok := table[p]
+			if !ok {
+				return false
+			}
+			if slices.Contains(except, Reached{PID: p, Start: st.StartTime, Ignores: true}) {
+				return true
+			}
+			if p != pgid && leftToDaemons != nil && leftToDaemons(p, st.StartTime) {
+				return true
+			}
+			if st.PPID <= 1 {
+				return false
+			}
+			p = st.PPID
+		}
+		return false
+	}
+	for _, pid := range group {
+		if stat := table[pid]; stat.State == 'Z' && !zombieRuns(pid) {
+			continue
+		}
+		if !left(pid) {
 			return true, nil
 		}
 	}
