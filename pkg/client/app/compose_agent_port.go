@@ -138,7 +138,8 @@ func composeUpEnded(cmdErr utils.CmdError, inProcess bool) bool {
 // moveComposeAgent moves keploy's agent's service, in the run's compose
 // document, from port from to port to (docker.MoveComposeAgentPort), and puts
 // the document where the next up reads it: the file keploy wrote, or the
-// document it hands compose.
+// document it hands compose (setComposeSource, which starts the compose
+// library's runner and the containers' output tails of that document anew).
 func (a *App) moveComposeAgent(from, to uint32) error {
 	if a.docker == nil {
 		return errors.New("keploy has no container engine client to write the compose document with")
@@ -150,7 +151,6 @@ func (a *App) moveComposeAgent(from, to uint32) error {
 		if err := a.docker.WriteComposeFile(a.composeDoc, a.composeFile); err != nil {
 			return fmt.Errorf("failed to write the compose file %s: %w", a.composeFile, err)
 		}
-		a.setComposeSource(a.composeFile, nil, a.composeDoc)
 	} else {
 		content, err := a.docker.MarshalCompose(a.composeDoc)
 		if err != nil {

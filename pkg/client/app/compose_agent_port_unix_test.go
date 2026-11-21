@@ -186,6 +186,14 @@ func upsSaying(a *App, said string, end func() utils.CmdError, runs *int) func()
 	}
 }
 
+// noRedo is an up that must not run: the agent was not moved.
+func noRedo(t *testing.T) func() utils.CmdError {
+	return func() utils.CmdError {
+		t.Error("the up ran again")
+		return utils.CmdError{}
+	}
+}
+
 func movingApp(t *testing.T, file bool) (*App, *movingAgent) {
 	t.Helper()
 	a := &App{logger: zap.NewNop(), docker: &composeWriter{}, kind: utils.DockerCompose, opts: models.SetupOptions{AgentPort: 16789}}
@@ -219,7 +227,7 @@ func TestOnlyComposesOwnFailureIsReadForARefusedPublish(t *testing.T) {
 			a, agent := movingApp(t, true)
 			runs := 0
 			want := end(t)
-			got := a.upMovingTheAgent(context.Background(), upsSaying(a, agentPortRefusal, func() utils.CmdError { return want }, &runs), nil)
+			got := a.upMovingTheAgent(context.Background(), upsSaying(a, agentPortRefusal, func() utils.CmdError { return want }, &runs), noRedo(t))
 			require.Equal(t, want, got)
 			require.Equal(t, 1, runs)
 			require.Empty(t, agent.said)
@@ -245,7 +253,7 @@ func TestTheAgentIsMovedOnlyWhenTheAgentClientMovesIt(t *testing.T) {
 	a, agent := movingApp(t, true)
 	runs := 0
 	end := refused(t)
-	got := a.upMovingTheAgent(context.Background(), upsSaying(a, "dependency failed to start", end, &runs), nil)
+	got := a.upMovingTheAgent(context.Background(), upsSaying(a, "dependency failed to start", end, &runs), noRedo(t))
 	require.Equal(t, end(), got)
 	require.Equal(t, 1, runs)
 	require.Len(t, agent.said, 1)
@@ -255,7 +263,7 @@ func TestTheAgentIsMovedOnlyWhenTheAgentClientMovesIt(t *testing.T) {
 		return 0, errors.New("in words keploy does not know for a taken port")
 	})
 	runs = 0
-	got = a.upMovingTheAgent(context.Background(), upsSaying(a, agentPortRefusal, refused(t), &runs), nil)
+	got = a.upMovingTheAgent(context.Background(), upsSaying(a, agentPortRefusal, refused(t), &runs), noRedo(t))
 	require.Equal(t, 1, runs)
 	require.ErrorContains(t, got.Err, "does not know")
 	var ee *exec.ExitError
@@ -264,7 +272,7 @@ func TestTheAgentIsMovedOnlyWhenTheAgentClientMovesIt(t *testing.T) {
 	a, agent = movingApp(t, true)
 	a.composeDoc = &docker.Compose{}
 	runs = 0
-	got = a.upMovingTheAgent(context.Background(), upsSaying(a, agentPortRefusal, refused(t), &runs), func() utils.CmdError { t.Fatal("ran again"); return utils.CmdError{} })
+	got = a.upMovingTheAgent(context.Background(), upsSaying(a, agentPortRefusal, refused(t), &runs), noRedo(t))
 	require.Equal(t, 1, runs)
 	require.ErrorContains(t, got.Err, "could not move its agent")
 	require.Len(t, agent.said, 1)
@@ -273,7 +281,7 @@ func TestTheAgentIsMovedOnlyWhenTheAgentClientMovesIt(t *testing.T) {
 	cancel()
 	a, agent = movingApp(t, true)
 	runs = 0
-	a.upMovingTheAgent(cut, upsSaying(a, agentPortRefusal, refused(t), &runs), nil)
+	a.upMovingTheAgent(cut, upsSaying(a, agentPortRefusal, refused(t), &runs), noRedo(t))
 	require.Equal(t, 1, runs)
 	require.Empty(t, agent.said)
 
@@ -284,7 +292,7 @@ func TestTheAgentIsMovedOnlyWhenTheAgentClientMovesIt(t *testing.T) {
 		a, agent = movingApp(t, true)
 		edit(a)
 		runs = 0
-		a.upMovingTheAgent(context.Background(), upsSaying(a, agentPortRefusal, refused(t), &runs), nil)
+		a.upMovingTheAgent(context.Background(), upsSaying(a, agentPortRefusal, refused(t), &runs), noRedo(t))
 		require.Equal(t, 1, runs, name)
 		require.Empty(t, agent.said, name)
 		require.Nil(t, a.upSaid.Load(), name)

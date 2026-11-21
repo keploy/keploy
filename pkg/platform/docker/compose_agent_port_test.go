@@ -36,8 +36,8 @@ func agentComposeFor(t *testing.T, in string) (*Impl, *Compose) {
 // proxy's and DNS server's ports, another service's environment.
 func TestMoveComposeAgentPortMovesThePublishThePortAndTheTestsAddress(t *testing.T) {
 	for name, in := range map[string]string{
-		"a list environment": "services:\n  app:\n    image: alpine:3.21\n    ports: [\"8080:8080\"]\n    environment:\n      - A=1\n  db:\n    image: alpine:3.21\n    environment:\n      - KEPLOY_MOCK_AGENT=http://localhost:16789\n",
-		"a map environment":  "services:\n  app:\n    image: alpine:3.21\n    ports: [\"8080:8080\"]\n    environment:\n      A: \"1\"\n  db:\n    image: alpine:3.21\n    environment:\n      KEPLOY_MOCK_AGENT: http://localhost:16789\n",
+		"a list environment": "services:\n  app:\n    image: alpine:3.21\n    ports: [\"8080:8080\"]\n    environment:\n      - A=1\n  db:\n    image: alpine:3.21\n    environment:\n      - KEPLOY_MOCK_AGENT=http://localhost:16789\n  other:\n    image: alpine:3.21\n    environment:\n      - KEPLOY_MOCK_AGENT=http://elsewhere:16789\n",
+		"a map environment":  "services:\n  app:\n    image: alpine:3.21\n    ports: [\"8080:8080\"]\n    environment:\n      A: \"1\"\n  db:\n    image: alpine:3.21\n    environment:\n      KEPLOY_MOCK_AGENT: http://localhost:16789\n  other:\n    image: alpine:3.21\n    environment:\n      KEPLOY_MOCK_AGENT: http://elsewhere:16789\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			idc, compose := agentComposeFor(t, in)
@@ -71,6 +71,9 @@ func TestMoveComposeAgentPortMovesThePublishThePortAndTheTestsAddress(t *testing
 			}
 			if got := envOf(svcs["db"]["environment"])["KEPLOY_MOCK_AGENT"]; got != "http://localhost:20001" {
 				t.Fatalf("db's KEPLOY_MOCK_AGENT %q, want the agent's new address", got)
+			}
+			if got := envOf(svcs["other"]["environment"])["KEPLOY_MOCK_AGENT"]; got != "http://elsewhere:16789" {
+				t.Fatalf("another address in KEPLOY_MOCK_AGENT became %q; want it kept", got)
 			}
 		})
 	}
