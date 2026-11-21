@@ -345,6 +345,26 @@ func TestTheReadOfKindsNamedIsTheWalkOfEveryKindOfThose(t *testing.T) {
 	}
 }
 
+// The read of kinds stops at the visit that says no, as the walk of every
+// kind does: it decodes no recording past it, so a warm whose warmers are
+// all full reads no more of its set from the disk.
+func TestTheReadOfKindsNamedStopsAtTheVisitThatSaysNo(t *testing.T) {
+	provenswitch.Pin(true)
+	t.Cleanup(provenswitch.Unpin)
+	kinds := []models.Kind{models.Mongo, models.HTTP, models.Mongo, models.Mongo, models.HTTP, models.Mongo}
+	d, _, _ := warmStore(t, kinds...)
+	visited := 0
+	if err := d.RangeRecordedOfKindsBefore(time.Unix(1000, 0), []models.Kind{models.Mongo}, func(*models.Mock) bool {
+		visited++
+		return visited < 2
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if visited != 2 || d.RecordedReads() != 2 {
+		t.Fatalf("the read visited %d and decoded %d after its second visit said no: want 2 of each", visited, d.RecordedReads())
+	}
+}
+
 // A set kept all in the trees has no on-disk source (nil): the warm hands
 // the trees' recordings of its kind on, in recorded order, all the same.
 func TestAResidentSetsWarmIsHandedItsTreesRecordings(t *testing.T) {
