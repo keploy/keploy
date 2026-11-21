@@ -241,9 +241,25 @@ func newStopHarness(t *testing.T, parser integrations.Integrations, logger *zap.
 // own.
 func newStopHarnessWithClock(t *testing.T, parser integrations.Integrations, logger *zap.Logger, clk stall.Clock) *stopHarness {
 	t.Helper()
+	return newStopHarnessOn(t, parser, logger, clk, syncMock.New(nil))
+}
+
+// newStopHarnessOn is newStopHarnessWithClock on the manager mgr, which the
+// record path's context carries (syncMock.NewContext), as a multi-app
+// caller's does. A nil mgr is the process's own (syncMock.Get), which the
+// record path reaches as the agent's does, with no manager on its context:
+// the one the record route checks its test cases against (routes/record.go).
+func newStopHarnessOn(t *testing.T, parser integrations.Integrations, logger *zap.Logger, clk stall.Clock, mgr *syncMock.SyncMockManager) *stopHarness {
+	t.Helper()
 	supervisor.ResetLeftOutWarningsForTest()
-	h := &stopHarness{mgr: syncMock.New(nil), done: make(chan error, 1)}
-	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), h.mgr), 30*time.Second)
+	h := &stopHarness{mgr: mgr, done: make(chan error, 1)}
+	ctx := context.Background()
+	if mgr == nil {
+		h.mgr = syncMock.Get()
+	} else {
+		ctx = syncMock.NewContext(ctx, mgr)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	t.Cleanup(cancel)
 	h.cancel = cancel
 
