@@ -26,18 +26,20 @@ func markUnmatchedCallsUnread(result *models.TestResult) {
 }
 
 // testsWithUnreadMisses names the tests of a set whose unmatched calls could
-// not all be read (FailureInfo.UnmatchedCallsUnread), in result order. Under
-// the proven switch a miss fails its test, so such a test has no verdict and
-// neither has its set: RunTestSet reports the set INTERNAL_ERR, which is
-// neither PASSED nor FAILED, and nothing reading the report can take it for
-// either. With the switch off it is always nil.
+// not all be read (FailureInfo.UnmatchedCallsUnread) and whose read returned
+// none, in result order. Under the proven switch a miss fails its test, so
+// such a test has no verdict and neither has its set: RunTestSet reports the
+// set INTERNAL_ERR, which is neither PASSED nor FAILED, and nothing reading
+// the report can take it for either. A read that returned a miss before it
+// failed saw that miss: the test fails on it whatever the rest of the read
+// could not tell, and is not named. With the switch off it is always nil.
 func testsWithUnreadMisses(results []models.TestResult) []string {
 	if !provenswitch.On() {
 		return nil
 	}
 	var out []string
 	for _, r := range results {
-		if r.FailureInfo.UnmatchedCallsUnread {
+		if r.FailureInfo.UnmatchedCallsUnread && len(r.FailureInfo.UnmatchedCalls) == 0 {
 			out = append(out, r.TestCaseID)
 		}
 	}

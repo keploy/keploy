@@ -89,10 +89,21 @@ type provenWire struct {
 	// what it lost: the run's, naming the connection and the test, and
 	// no later test's (UnchargedCaptureLosses).
 	ownedRun models.CaptureLosses
-	// ownedLeft are losses cut-short ends owned that the session before
-	// counted and no read took: the run's, which the next read takes
-	// (takeOwnedLosses), never dropped.
-	ownedLeft []coreAgent.OwnedLoss
+	// ownedOpen are, by test ID, losses the proxy counted at a close of a
+	// connection of that test's worker while the test was open
+	// (coreAgent.OwnedLoss's Worker), taken at another worker's test's end:
+	// that test's end charges them (chargeCaptureLosses, which every end
+	// reaches, the wire held), and they are the run's when the run's
+	// uncharged losses are read with that test still open
+	// (UnchargedCaptureLosses).
+	ownedOpen map[string]models.CaptureLosses
+	// runsAt is, by kind, the count of that kind (captureCounts) read with
+	// the newest loss of the kind that names what it lost and that this
+	// session made the run's (runsLocked): the kind's count in the run's own
+	// count takes that loss's words only while the count has not grown past
+	// it (withCounted), so a count is named by its newest loss, and never by
+	// a loss an earlier session counted, whose entry the reset drops.
+	runsAt map[models.CaptureLossKind]uint64
 	// claim is the live claim; zero when none.
 	claim claimant
 	// workers is, in a run whose claims declared more than one test worker,
@@ -268,6 +279,10 @@ func (o recordedOrder) learnsOnto(id string) bool {
 type scopeTest struct {
 	id    string
 	start time.Time
+	// epoch is its worker's test epoch the proxy began it at
+	// (coreAgent.PairedBytesBeginner): a close of its worker's connection
+	// stamped with it is this test's (chargeCaptureLosses).
+	epoch uint64
 }
 
 // openOf is the ID of the test instance inst has open, "" when none is.
@@ -414,19 +429,49 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	// What the run's tests count their capture losses from: read before
 	// provenMu, which is never held while calling into the hooks.
 	losses := a.markCaptureLosses(ctx)
-	// Losses an earlier session's cut-short ends owned that no read took
-	// are this session's to report, as the run's: none of its tests is the
-	// test that owned them, which only their words still name.
-	// Bounded, as the proxy's are, while no read takes them.
-	left := a.takeOwnedLosses()
-	for i := range left {
-		left[i].Test = ""
+	// No process of this session has claimed it: a close of a connection of
+	// no worker's is in the counts again, after the mark (in this session's,
+	// whichever test it charges), until a run of one test process claims it
+	// (ClaimInstance). One the proxy stamped as the last session's process's
+	// before this is taken just below: the session before's.
+	if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
+		pb.PairedBytesOneProcess(false)
 	}
-	left = boundOwnedLeft(left)
+	// The losses the session before counted that no read of it took: a
+	// cut-short end's or a close of its connections counted after its last
+	// read (in its teardown), or in a session that never made one, and
+	// those kept for its tests still open (ownedOpen). That session is over
+	// and they came before this session's mark, so no test of a later
+	// session caused them: each is logged once, with what it was, the test
+	// it was counted in where keploy knows it and the session, and charges
+	// no later session's run or test (leftLossesLocked). keploy test's owned
+	// take reads them only within the session they were counted in, but for
+	// one of a session of the same keploy test run: its next take returns it
+	// as the set's that session served (keepEarlierSetLocked), a verdict of
+	// that set's that came after its end.
+	taken := a.takeOwnedLosses()
 	a.provenMu.Lock()
+	left := a.leftLossesLocked(taken)
 	workers := a.workerIDs()
-	a.proven = provenWire{losses: losses, ownedLeft: left}
+	a.proven = provenWire{losses: losses}
+	session := a.session
+	a.session++
+	next := a.session
+	a.noteSessionSetLocked(next, models.TestSetSessionOf(ctx))
+	for _, l := range left {
+		a.keepEarlierSetLocked(session, l.Test, l.Loss)
+	}
 	a.provenMu.Unlock()
+	// The proxy stamps each loss counted from here with the session its
+	// connection was used in: one the session before used is taken in this
+	// one as that session's, logged and charged to nothing
+	// (takeOwnedLosses).
+	if ps, ok := a.Proxy.(coreAgent.PairedBytesSessioner); ok {
+		ps.PairedBytesSession(next)
+	}
+	for _, l := range left {
+		a.logEarlierSessionsLoss(session, l.Test, l.Loss, leftLoss)
+	}
 	// The previous session's workers are no workers of this one.
 	a.endInstances(workers)
 	if provenswitch.On() {
@@ -564,6 +609,15 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		if h, ok := a.Hooks.(coreAgent.ShimReporter); ok {
 			h.ShimClaimedBy(caller)
 		}
+		// A close of this process's connection is its open test's from
+		// here, at the epoch the test began at, and the run's in the gap
+		// between its tests (coreAgent.PairedBytesBeginner): told before the
+		// read below, so one counted before it is in the counts read there,
+		// which its first test does not count, and one after it is stamped
+		// with an epoch no test began at until the first begin.
+		if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
+			pb.PairedBytesOneProcess(true)
+		}
 		// A failed TLS handshake before this claim is the run's -- charged
 		// to no test (UnchargedCaptureLosses), and in the run's own verdict,
 		// which counts every loss while the command ran -- as its misses
@@ -572,7 +626,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		// read below (closeDropsGapHeld: the claim holds the wire). A read
 		// that fails leaves that test to count from the previous test's end.
 		a.closeDropsGapHeld(ctx)
-		if now, err := a.CaptureLosses(ctx); err == nil {
+		if now, err := a.captureCounts(ctx); err == nil {
 			a.provenMu.Lock()
 			a.proven.testLosses = now
 			a.provenMu.Unlock()
@@ -1475,7 +1529,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// charges it the other test's too (chargeCaptureLosses).
 	var from models.CaptureLosses
 	if overlaps {
-		from, _ = a.CaptureLosses(ctx)
+		from, _ = a.captureCounts(ctx)
 	}
 	a.NoteScope(id, 0, dir, false)
 	seed := a.beginSeed(id, models.NormalizeScopeSeed(req.Seed))
@@ -1534,11 +1588,20 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		// to from here are this test's.
 		t.BeginTestOf(worker)
 	}
+	// A close of its worker's connection the proxy counts from here until
+	// its end's settle is done is stamped with the epoch it begins at, and
+	// is its own (chargeCaptureLosses); one counted before, in the gap
+	// since its worker's previous test, is stamped with an older one, and
+	// is the run's. Moved after every settle of the begin's.
+	var epoch uint64
+	if pb, ok := a.Proxy.(coreAgent.PairedBytesBeginner); ok {
+		epoch = pb.PairedBytesBegun(worker)
+	}
 	a.provenMu.Lock()
 	if a.proven.open == nil {
 		a.proven.open = map[uint32]scopeTest{}
 	}
-	a.proven.open[worker] = scopeTest{id: id, start: boundaryTime(at)} // its window's start (BeginScopeAt)
+	a.proven.open[worker] = scopeTest{id: id, start: boundaryTime(at), epoch: epoch} // its window's start (BeginScopeAt)
 	if from != nil {
 		if a.proven.openFrom == nil {
 			a.proven.openFrom = map[string]models.CaptureLosses{}
@@ -1806,7 +1869,9 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 
 // endTest records a test's outcome and evidence and closes its window. A
 // read that failed is an error, and the test is recorded failed with it: a
-// test keploy could not judge never passes. A test that skipped itself is
+// test keploy could not judge never passes. One that failed after it found
+// a miss is no error: the miss fails the test (seenMiss), and its reason
+// names the read's error. A test that skipped itself is
 // not failed for the recorded calls it then never made.
 func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	var ev *models.ScopeEvidence
@@ -1850,6 +1915,15 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		// session: each name whole, no tag (a tag names a host only in its
 		// session).
 		ev.Incomplete = append(ev.Incomplete, models.UntaggedIncomplete(incomplete)...)
+	}
+	if readErr != nil && seenMiss(ev) {
+		// The read failed part way, after it found a miss: that miss was
+		// seen, and fails the test whatever the rest of the read could not
+		// tell. The test keeps that verdict, with the read's error named in
+		// front of its reason, as a note of keploy's (why), and its end
+		// answers it failed: it is not unread.
+		why = strings.TrimPrefix(why+"; keploy could not read all of what "+id+" did: "+readErr.Error(), "; ")
+		readErr = nil
 	}
 	switch {
 	case readErr != nil:
@@ -1905,15 +1979,19 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		} else {
 			why += "; " + note
 		}
-		if readErr == nil {
-			readErr = settleErr
-		}
 		// Unsettled, what the test did cannot all have been read: it has
-		// no verdict of its own.
-		if ev == nil {
-			ev = &models.ScopeEvidence{}
+		// no verdict of its own, unless keploy saw it miss a call. That
+		// miss fails it whatever else keploy could not tell, so it keeps
+		// its verdict, with the note, and its end answers it failed.
+		if !seenMiss(ev) {
+			if readErr == nil {
+				readErr = settleErr
+			}
+			if ev == nil {
+				ev = &models.ScopeEvidence{}
+			}
+			ev.Unread = true
 		}
-		ev.Unread = true
 	}
 	if why != "" {
 		if ev == nil {
@@ -1953,6 +2031,26 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	return ev, outcome, readErr
 }
 
+// seenMiss reports whether ev holds a call of the test that keploy answered
+// with no recording: definite evidence that fails the test. Nothing keploy
+// cannot tell (the rest of a read that failed after it found the miss, a
+// call it cannot settle, a count it cannot read) takes it back into "not
+// judged" (endTest).
+func seenMiss(ev *models.ScopeEvidence) bool {
+	return ev != nil && len(ev.Misses) > 0
+}
+
+// kindCount is how many of l's losses are of kind k.
+func kindCount(l models.CaptureLosses, k models.CaptureLossKind) uint64 {
+	var n uint64
+	for _, c := range l {
+		if c.Kind == k {
+			n += c.Count
+		}
+	}
+	return n
+}
+
 // chargeCaptureLosses adds to a test's evidence what the agent could not
 // capture that the test is charged (design v14 §3.2): a loss since the run
 // began taints the test open when it happened and every later one, but for a
@@ -1981,18 +2079,48 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	lost, now, err := a.captureLossesSince(ctx, mark, test)
 	// What a cut-short end owned that was counted since: this test's when
 	// it is the owner (its own end was cut short, and the loss counted
-	// before this read), the run's otherwise. None is in the counts, so
-	// none is charged to this test by them.
+	// before this read), the run's otherwise. A close of a worker's
+	// connection (coreAgent.OwnedLoss's Open; worker 0's in a run of one
+	// test process) is the test of that worker
+	// open at the epoch it was stamped with alone: this test's when it is
+	// that test, kept for that test's end when another worker's test is
+	// (ownedOpen), and the run's when that worker's open test began at
+	// another epoch, or none is open: counted in the worker's gap between
+	// tests, it is no test's, and never its next test's. None is in the
+	// counts, so none is charged to this test by them, and none to another
+	// worker's test.
 	var mine models.CaptureLosses
-	for _, o := range a.takeOwnedLosses() {
-		if o.Test == id && err == nil {
+	taken := a.takeOwnedLosses()
+	a.provenMu.Lock()
+	for _, o := range taken {
+		owner := o.Test
+		if o.Open {
+			if t := a.proven.open[o.Worker]; t.epoch == o.Epoch {
+				owner = t.id
+			}
+			if owner != "" && owner != id {
+				if a.proven.ownedOpen == nil {
+					a.proven.ownedOpen = map[string]models.CaptureLosses{}
+				}
+				a.proven.ownedOpen[owner] = a.proven.ownedOpen[owner].Plus(models.CaptureLosses{o.Loss})
+				continue
+			}
+		}
+		if owner == id && err == nil {
 			mine = mine.Plus(models.CaptureLosses{o.Loss})
 			continue
 		}
-		a.provenMu.Lock()
-		a.proven.ownedRun = a.proven.ownedRun.Plus(models.CaptureLosses{o.Loss})
-		a.provenMu.Unlock()
+		a.runsLocked(models.CaptureLosses{o.Loss}, now, err == nil)
 	}
+	if kept := a.proven.ownedOpen[id]; len(kept) > 0 {
+		delete(a.proven.ownedOpen, id)
+		if err == nil {
+			mine = mine.Plus(kept)
+		} else {
+			a.runsLocked(kept, now, err == nil)
+		}
+	}
+	a.provenMu.Unlock()
 	if !a.replaying() {
 		// A record charges a container read the daemon did not answer by
 		// the mock its stamp marked (unreadMock), its own test's whenever
@@ -2039,8 +2167,12 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	}
 	if err != nil {
 		ev.Reason = strings.TrimSpace("keploy: keploy could not tell whether every call of " + id + " was captured: " + err.Error() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
-		// As a test whose evidence could not be read: no verdict of its own.
-		ev.Unread = true
+		// As a test whose evidence could not be read: no verdict of its
+		// own, unless keploy saw it miss a call, which fails it whatever
+		// else keploy could not tell.
+		if !seenMiss(ev) {
+			ev.Unread = true
+		}
 		if a.replaying() {
 			outcome = models.ScopeOutcomeFailed
 		}
@@ -2052,6 +2184,17 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 	// Evidence the test's harness and the receipts keep past this session:
 	// each host whole, no tag (a tag names a host only in its session).
 	judged, notJudged := lost.Untagged().Split()
+	if untold := kindCount(notJudged, models.CaptureLossAppBytesUntold); untold > 0 && seenMiss(ev) {
+		// A close of the proxy's that keploy could not account for leaves
+		// a test without a verdict only when keploy saw nothing fail it: a
+		// miss keploy saw is definite, and the test stays failed on it, the
+		// close named in its reason, never in what leaves it unjudged.
+		notJudged = notJudged.Without(models.CaptureLossAppBytesUntold)
+		ev.Reason = strings.TrimSpace(ev.Reason + " " + fmt.Sprintf("keploy also cannot tell whether bytes the application wrote to %d connection(s) this test used were on their way when keploy's proxy closed them; the call keploy saw miss fails the test whatever they held.", untold))
+		if len(judged) == 0 && len(notJudged) == 0 {
+			return ev, outcome
+		}
+	}
 	ev.CannotCapture = notJudged
 	if len(judged) == 0 {
 		if ev.Reason == "" {

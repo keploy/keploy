@@ -131,7 +131,13 @@ type trackedConn struct {
 	// once as Close begins, while the socket can still be read
 	// (pairbytes.go).
 	beforeClose func()
-	closeOnce   sync.Once
+	// pairUse, when set (by the accept, before the handler runs), counts
+	// each read of it that moved bytes, and each write of bytes as it
+	// begins, for the paired connection it is (pairedConn.used); pairRead,
+	// set with it, counts the bytes its reads returned (pairedConn.read).
+	pairUse   *atomic.Uint64
+	pairRead  *atomic.Uint64
+	closeOnce sync.Once
 	// closing: its Close has begun. A read from then on is the close's own
 	// (pairClosing reads through the TLS layer what the socket holds) or one
 	// the close is ending, never its handler waiting for the application:
@@ -485,6 +491,10 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
 		c.lift()
+		c.noteUse()
+		if c.pairRead != nil {
+			c.pairRead.Add(uint64(n))
+		}
 	}
 	c.returned(n, errors.Is(err, io.EOF))
 	if n == 0 && (err == nil || isTimeout(err) || errors.Is(err, io.EOF)) {
@@ -511,12 +521,24 @@ func (c *trackedConn) Write(b []byte) (int, error) {
 	var f *learn.Flight
 	if len(b) > 0 {
 		f = c.land()
+		// Counted before the bytes go out, as the landing is: the
+		// application may read them, and its test end, before this
+		// goroutine runs again (pairedConn.usedSinceEnd).
+		c.noteUse()
 	}
 	n, err := c.Conn.Write(b)
 	if err != nil {
 		f.EndUntold()
 	}
 	return n, err
+}
+
+// noteUse counts a read of c that moved bytes, or a write of bytes as it
+// begins (pairUse).
+func (c *trackedConn) noteUse() {
+	if c.pairUse != nil {
+		c.pairUse.Add(1)
+	}
 }
 
 // lift is a read of c that returned bytes: the start of a request in

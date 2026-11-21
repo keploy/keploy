@@ -111,3 +111,21 @@ func TestFailingUnmadeTrailsLeavesEveryOtherTestAsTheRunWroteIt(t *testing.T) {
 	require.Equal(t, TestReceipt{Name: "o::TestB", Outcome: models.ScopeOutcomePassed}, got[1], "a test with no trailing write gets no evidence")
 	require.Equal(t, TestReceipt{Name: "o::TestC", Outcome: models.ScopeOutcomeFailed}, got[2])
 }
+
+// A test keploy saw miss a call stays failed on that miss when keploy could
+// not read whether the run made its trailing writes: it is not unread, and
+// its reason says what keploy could not read after the miss's. A test with
+// no miss is unread, as before.
+func TestATrailedTestKeploySawMissStaysFailed(t *testing.T) {
+	got := failUnmadeTrails([]TestReceipt{
+		{Name: "o::TestA", Outcome: models.ScopeOutcomeFailed, Evidence: &models.ScopeEvidence{
+			Reason: "keploy: a miss", Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /a"}}}},
+		{Name: "o::TestB", Outcome: models.ScopeOutcomePassed},
+	}, nil, map[string]bool{"o::TestA": true, "o::TestB": true})
+	require.Equal(t, models.ScopeOutcomeFailed, got[0].Outcome)
+	require.False(t, got[0].Evidence.Unread, "a miss keploy saw keeps the test's verdict")
+	require.Len(t, got[0].Evidence.Misses, 1)
+	require.Equal(t, "keploy: a miss; "+trailsUnreadReason, got[0].Evidence.Reason)
+	require.True(t, got[1].Evidence.Unread, "no miss: keploy could not tell")
+	require.Equal(t, trailsUnreadReason, got[1].Evidence.Reason)
+}

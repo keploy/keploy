@@ -2773,6 +2773,7 @@ func (p *Proxy) acceptedConn(ctx context.Context, raw net.Conn) (clientConn net.
 			clientConn = tracked
 		}
 		tracked.beforeClose = func() { p.pairClosing(ctx, raw, tracked) }
+		tracked.pairUse, tracked.pairRead = p.paired.useOf(raw), p.paired.readOf(raw)
 	}
 	return clientConn, tracked
 }
@@ -2960,6 +2961,12 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 		p.logger.Debug("the destination is ipv6")
 		dstAddr = destAddr(destInfo)
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
+	}
+
+	// A drain that gives up on the connection's close names where it went
+	// (PairedBytesDrain).
+	if tracked != nil {
+		p.paired.destined(tracked, dstAddr)
 	}
 
 	//get the session rule

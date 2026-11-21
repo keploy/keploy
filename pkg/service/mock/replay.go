@@ -955,7 +955,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// failure, but nothing proves the run isolated either.
 	if t := lostNotJudged.Untagged().NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
 		captureUnverified, captureUnverifiedLog = t, lostNotJudged.NotJudgedLogText()
-		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, a TLS client abandoned its handshake, the kernel dropped connection attempts at keploy's proxy listener, or the Docker daemon did not answer keploy's read of a container a call reached ("+provenswitch.Env+"=1)",
+		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, a TLS client abandoned its handshake, the kernel dropped connection attempts at keploy's proxy listener, the Docker daemon did not answer keploy's read of a container a call reached, or keploy's proxy closed a connection without being able to tell whether bytes the application wrote to it were still on their way ("+provenswitch.Env+"=1)",
 			zap.String("mock-set", name), zap.String("reason", lostNotJudged.NotJudgedLogText()),
 			zap.String("next_step", lostNotJudged.NotJudgedRemedy()))
 		utils.SayWhole(m.console, "mock set "+name+", what keploy cannot capture", lostNotJudged.NotJudgedLogText(), lostNotJudged.NotJudgedText())
@@ -2037,7 +2037,8 @@ const trailsUnreadReason = "keploy could not read which recordings the run used,
 // made for, naming each such recording as one of its calls the run did not
 // make (models.ScopeEvidence.Unconsumed), in name order, and leaves each
 // test of unread unread: keploy could not read whether the run made its
-// trailing series.
+// trailing series. One whose evidence holds a miss keploy saw stays failed
+// on it, with that note, and is not unread.
 func failUnmadeTrails(tests []TestReceipt, unmade map[string]string, unread map[string]bool) []TestReceipt {
 	for i := range tests {
 		t := &tests[i]
@@ -2059,7 +2060,12 @@ func failUnmadeTrails(tests []TestReceipt, unmade map[string]string, unread map[
 			t.Evidence.Unconsumed = append(t.Evidence.Unconsumed, names...)
 		}
 		if trailed {
-			t.Evidence.Unread = true
+			// A miss keploy saw fails the test whatever keploy could not
+			// read of the run: the test keeps that verdict, with the note,
+			// and is not unread.
+			if len(t.Evidence.Misses) == 0 {
+				t.Evidence.Unread = true
+			}
 			t.Evidence.Reason = strings.TrimPrefix(t.Evidence.Reason+"; "+trailsUnreadReason, "; ")
 		}
 	}
@@ -3149,7 +3155,9 @@ func mergeCaptureLosses(a, b models.CaptureLosses) models.CaptureLosses {
 
 // withEvidence puts on each test's line the evidence the proven wire charged
 // to it at its end (models.ScopeWindow.Evidence). A test that ran more than
-// once keeps the evidence of every attempt: one failed attempt fails it.
+// once keeps the evidence of every attempt: one failed attempt fails it. A
+// miss keploy saw in any attempt fails it, though another attempt could not
+// be read: it is unread only when no attempt saw a miss.
 func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt {
 	var byName map[string]*models.ScopeEvidence
 	for _, w := range windows {
@@ -3166,17 +3174,24 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 			ev = &models.ScopeEvidence{Reason: w.Evidence.Reason}
 			byName[w.Name] = ev
 		}
+		switch {
+		case len(w.Evidence.Misses) > 0 && len(ev.Misses) == 0:
+			// A miss keploy saw, in any attempt, fails the test whatever
+			// another attempt could not tell: the test is failed on it,
+			// with the reason of the first attempt that saw one, and is
+			// never unread.
+			ev.Unread, ev.Reason = false, w.Evidence.Reason
+		case w.Evidence.Unread && !ev.Unread && len(ev.Misses) == 0:
+			// Else one attempt keploy could not read leaves the test
+			// unread, with that attempt's reason.
+			ev.Unread, ev.Reason = true, w.Evidence.Reason
+		}
 		ev.Misses = append(ev.Misses, w.Evidence.Misses...)
 		ev.Unconsumed = append(ev.Unconsumed, w.Evidence.Unconsumed...)
 		ev.Incomplete = append(ev.Incomplete, w.Evidence.Incomplete...)
 		// One attempt its harness failed on its own makes what keploy saw
 		// of every attempt no evidence of where the app makes its calls.
 		ev.FailedOnItsOwn = ev.FailedOnItsOwn || w.Evidence.FailedOnItsOwn
-		// One attempt keploy could not read leaves the test unread, with
-		// that attempt's reason.
-		if w.Evidence.Unread && !ev.Unread {
-			ev.Unread, ev.Reason = true, w.Evidence.Reason
-		}
 		// Counts since the run began: each attempt carries the run's, so
 		// keep one per kind, the latest (largest); a test's own kinds,
 		// each attempt's, added.
