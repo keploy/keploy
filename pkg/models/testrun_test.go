@@ -231,6 +231,7 @@ func TestTheNextStepShapesTheRunsOfAFieldsPath(t *testing.T) {
 		// number alone ending a sentence ("7.") stays a count.
 		{"a field that is only an index", "body.docs.7.[0]", "docs.7.[0] differs, in 7 of 7.", "docs.{}.[0] differs, in 7 of 7."},
 		{"a header's name is kept", "header.X-Trace2", "X-Trace2 differs", "X-Trace2 differs"},
+		{"a header's name that is no name, fields after it", "body.header.a:b.c.d." + u, "entries for header.a:b.c.d differ", "entries for header.{}.c.d differ"},
 	} {
 		m := UnmatchedCall{Protocol: "HTTP", NextSteps: c.hint, FieldDiffs: []MockFieldDiff{{Path: c.path, Kind: DiffKindValueChanged}}}
 		if got := m.SanitizedNextStep(); got != c.want {

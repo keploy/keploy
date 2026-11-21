@@ -209,10 +209,9 @@ type runScan struct {
 	dots []int32 // where the text's "."s are
 	seg  []int32 // by segment: the id of the whole segment, -1 for none
 	// By segment s: how many segments before s are a field FieldShape
-	// changes (shapedSegs), and how many begin with such a field that ends
-	// inside them (shapedParts).
-	shapedSegs, shapedParts []int32
-	si                      int // the segment the scan is in
+	// changes.
+	shapedSegs []int32
+	si         int // the segment the scan is in
 
 	// Runs of whole segments from a segment's start, read as a window that
 	// only moves on: segments [wb, we] are the longest run from wb, read to
@@ -231,19 +230,9 @@ func newRunScan(r *runSet, text string) *runScan {
 	n := len(sc.dots) + 1
 	sc.seg = make([]int32, n)
 	sc.shapedSegs = make([]int32, n+1)
-	sc.shapedParts = make([]int32, n+1)
 	for s := range n {
-		start, end := sc.segStart(s), sc.segEnd(s)
-		sc.seg[s] = sc.id(start, end)
-		shapedSeg, shapedPart := sc.seg[s] >= 0 && r.shaped[sc.seg[s]], false
-		for j := start + 1; j < end && j-start <= r.maxLen; j++ {
-			if id := sc.partID(start, j, end); id >= 0 && r.shaped[id] {
-				shapedPart = true
-				break
-			}
-		}
-		sc.shapedSegs[s+1] = sc.shapedSegs[s] + b2i(shapedSeg)
-		sc.shapedParts[s+1] = sc.shapedParts[s] + b2i(shapedPart)
+		sc.seg[s] = sc.id(sc.segStart(s), sc.segEnd(s))
+		sc.shapedSegs[s+1] = sc.shapedSegs[s] + b2i(sc.seg[s] >= 0 && r.shaped[sc.seg[s]])
 	}
 	sc.wb, sc.we = 0, -1
 	return sc
@@ -427,37 +416,15 @@ func (sc *runScan) longest(i int) int {
 		if sc.valid(i, sc.segEnd(last), n, id0, second, shaped) {
 			return sc.segEnd(last)
 		}
-		// Shorter: the chain's first k fields, then a field's start of the
-		// next segment, or the k fields alone. The whole chain is no run to
-		// shape, so when it is 3 fields or more none of them is shaped, and
-		// a run of 3 or more of them is shaped only by a shaped last field
-		// ending inside its segment (shapedParts).
-		var states []int32 // the state of the chain's first m+1 fields, read only for such a last field
-		for k := n - 1; k >= 1; k-- {
-			if k == 1 || sc.shapedParts[si+k+1] > sc.shapedParts[si+k] {
-				at := r.next[runKey(0, id0)]
-				if k > 1 {
-					if states == nil {
-						states = make([]int32, n)
-						states[0] = at
-						for m := 1; m < n; m++ {
-							states[m] = r.next[runKey(states[m-1], sc.seg[si+m])]
-						}
-					}
-					at = states[k-1]
-				}
-				if j := lastPart(k, at, si+k, false); j > 0 {
-					return j
-				}
-			}
-			if k <= 2 {
-				b := int32(-1)
-				if k == 2 {
-					b = segID(1)
-				}
-				if sc.valid(i, sc.segEnd(si+k-1), k, id0, b, false) {
-					return sc.segEnd(si + k - 1)
-				}
+		// Shorter. When the whole chain is no run to shape, none of its
+		// fields is shaped, but for a header's name that is no name read
+		// as two fields: "header.a:b.c" is no run to shape, "header.a:b"
+		// is ("header.{}"). A field FieldShape keeps is names, separators
+		// and indexes, and so is any start of it up to a field's end, so
+		// no other shorter run beginning here is one to shape.
+		if n >= 2 {
+			if j := lastPart(1, r.next[runKey(0, id0)], si+1, false); j > 0 {
+				return j
 			}
 		}
 	}
