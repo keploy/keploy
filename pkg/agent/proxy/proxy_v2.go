@@ -39,7 +39,7 @@ func warnStopCut(logger *zap.Logger, parserType integrations.IntegrationType, cl
 	next := "the parser had read every request this connection carried before the stop: only the exchange it was in may lack its mock"
 	if leftOut.chunks > 0 {
 		fields = append(fields, zap.Time("test_cases_from", leftOut.from), zap.Time("test_cases_to", leftOut.to))
-		next = "every test case whose request or answer came between test_cases_from and test_cases_to is left out of the recording, rather than saved without its mocks"
+		next = "every test case whose request or answer came between test_cases_from and test_cases_to is left out of the recording, rather than saved without its mocks: the agent names them by test case as the recording ends"
 	}
 	fields = append(fields, zap.String("next_step", next+". The parser made no progress for its hang budget of the time the agent could run, so it was cut: re-run with --debug for why"))
 	logger.Warn(stopCutWarnMsg, fields...)
@@ -599,15 +599,24 @@ func (p *Proxy) recordViaSupervisor(
 	// answer reads it, and they open no span then. Called before the tees are
 	// paused below: a chunk a paused tee refuses is told of as after the
 	// return.
-	leftOut := reads.parserReturned()
-	if result.Status == supervisor.StatusHung && svSess.RecordingStopping() {
-		// The one way the stop cuts a parser that still had captured bytes
-		// to read: it made no progress on them for its hang budget, on the
-		// time the process could run. What it had not read of the requests
-		// captured before the stop was just left out, and the test cases
-		// over them with it. The "parser retired" WARN above is not logged
-		// for a stopping recording, and the supervisor logs the hang at
-		// Debug: said here, so no stop drops a test case silently.
+	//
+	// A hang as the recording stops is the one way the stop cuts a parser
+	// that still had captured bytes to read: it made no progress on them for
+	// its hang budget, on the time the process could run. What it had not
+	// read of the requests captured before the stop is left out as the stop
+	// cut's (Session.RecordStopCutWindow), and the test cases over them with
+	// it: routes/record.go names them at WARN, once per stop.
+	var cutAtStop func(start, end time.Time)
+	stopCut := result.Status == supervisor.StatusHung && svSess.RecordingStopping()
+	if stopCut {
+		cutAtStop = svSess.RecordStopCutWindow
+	}
+	leftOut := reads.parserReturned(cutAtStop)
+	if stopCut {
+		// The "parser retired" WARN above is not logged for a stopping
+		// recording, and the supervisor logs the hang at Debug: said here,
+		// with the connection and the window of what it cost, so no stop
+		// drops a test case silently.
 		warnStopCut(logger, parserType, svSess.ClientConnID, leftOut)
 	}
 	// Only now does the watermark stop following the connection: a test case

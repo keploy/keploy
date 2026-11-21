@@ -101,6 +101,11 @@ type parserReads struct {
 	read     int64
 	teedAt   [2]int64
 	cutoff   time.Time
+	// cutAtStop, set by parserReturned when the recording's stop cut the
+	// parser short, is where the spans the return leaves out go instead of
+	// leftOut (Session.RecordStopCutWindow), those told of after it too:
+	// nil when the return was no such cut.
+	cutAtStop func(start, end time.Time)
 
 	// unread[head:] holds, until the parser returns, the client chunks it had
 	// not read when last looked at, in stream order.
@@ -242,14 +247,18 @@ type leftOutRequests struct {
 // before the tees are paused: a chunk refused by a paused tee is told of as
 // not teed, which counts as after the return. It returns what the return left
 // out; a chunk teed before the return and told of only after it is left out
-// later, as it is told of (carried), and is not in it.
-func (p *parserReads) parserReturned() leftOutRequests {
+// later, as it is told of (carried), and is not in it. cutAtStop is nil, or,
+// when the recording's stop cut the parser short (the hang watchdog found it
+// making no progress after the stop), where the spans the return leaves out
+// go instead of leftOut, now and as they are told of.
+func (p *parserReads) parserReturned(cutAtStop func(start, end time.Time)) leftOutRequests {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.returned {
 		return leftOutRequests{}
 	}
 	p.returned = true
+	p.cutAtStop = cutAtStop
 	if p.client != nil {
 		p.read = p.client.ReadThrough()
 	}
@@ -280,9 +289,14 @@ func (p *parserReads) parserReturned() leftOutRequests {
 
 // leaveOut records the closed spans over the runs of the unread client chunks
 // read at `at`, in stream order (so in the order the relay read them), and
-// returns what it left out.
+// returns what it left out. They go to cutAtStop when the return was a cut at
+// the stop, else to leftOut.
 func (p *parserReads) leaveOut(at []time.Time) leftOutRequests {
 	left := leftOutRequests{chunks: len(at)}
+	record := p.leftOut
+	if p.cutAtStop != nil {
+		record = p.cutAtStop
+	}
 	spans := 0
 	for k := 0; k < len(at); {
 		start, last := wall(at[k]), wall(at[k])
@@ -296,7 +310,7 @@ func (p *parserReads) leaveOut(at []time.Time) leftOutRequests {
 			}
 		}
 		end := last.Add(p.idleGrace)
-		p.leftOut(start, end)
+		record(start, end)
 		// A run starts past the grace after the one before, so the last one
 		// ends latest; a wall clock stepped back can start one earlier.
 		if spans == 0 || start.Before(left.from) {

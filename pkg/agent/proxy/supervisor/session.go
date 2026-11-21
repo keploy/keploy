@@ -875,6 +875,26 @@ func (s *Session) RecordOrphanWindow(start, end time.Time) {
 	s.manager().RecordOrphanWindow(start, end)
 }
 
+// RecordStopCutWindow records [start, end] as a span of requests the
+// session's parser never read because the recording's stop cut it short: the
+// hang watchdog found it making no progress after the stop on what its
+// connection carried before the stop. It is an orphan span, as
+// RecordOrphanWindow records one, and on the session's manager a stop cut's
+// too (SyncMockManager.RecordStopCutWindow), by which routes/record.go names
+// at WARN the test cases it leaves out. A caller that keeps its own spans
+// (Orphans: a DaemonSet agent, per pod) gets it as an orphan span alone: it
+// leaves out the same test cases, which are not named by test case there.
+func (s *Session) RecordStopCutWindow(start, end time.Time) {
+	if s == nil {
+		return
+	}
+	if s.Orphans != nil {
+		s.Orphans.Record(start, end)
+		return
+	}
+	s.manager().RecordStopCutWindow(start, end)
+}
+
 // manager is the SyncMockManager this session's mocks, counts and spans go to:
 // Mgr, the per-app manager a multi-app caller sets, or the package-global one
 // (syncMock.Get) when Mgr is nil, the single-session default. It is the one

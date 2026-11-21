@@ -224,7 +224,8 @@ func TestRecordViaSupervisor_AParserBehindAtTheStopOnAStarvedAgentKeepsEveryRequ
 // budget, on the time the agent could run (here a clock a hundred times as
 // fast as the wall clock: its minute in under a second). The request it never
 // read is left out (a test case over it is left out, not saved without its
-// mock), and one WARN names the connection and the test cases that cost: those
+// mock) as the stop cut's, by which the recording names that test case as it
+// ends, and one WARN names the connection and the test cases that cost: those
 // over the window of the requests it left out, which holds the request.
 func TestRecordViaSupervisor_AParserStuckAtTheStopIsCutAndTheTestCasesItCostAreNamed(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
@@ -240,6 +241,9 @@ func TestRecordViaSupervisor_AParserStuckAtTheStopIsCutAndTheTestCasesItCostAreN
 	}
 
 	h.requireInASpan(t, r, "before the stop, which the stuck parser never read")
+	if !h.mgr.WasStopCutInWindow(r.sent, r.arrived) {
+		t.Error("the request the stuck parser never read is left out, but not as the stop cut's: the recording does not name the test case over it")
+	}
 	cut := logs.FilterMessage(stopCutWarnMsg).All()
 	if len(cut) != 1 {
 		t.Fatalf("%d WARNs say the stop cut the parser, want 1", len(cut))
@@ -264,13 +268,13 @@ func TestRecordViaSupervisor_AParserStuckAtTheStopIsCutAndTheTestCasesItCostAreN
 
 // A parser the hang watchdog cuts while the recording runs is said to leave
 // its connection unrecorded ("parser retired"), not to have been cut by the
-// stop.
+// stop: the request it never read is left out, and not as the stop cut's.
 func TestRecordViaSupervisor_AParserStuckBeforeTheStopIsNotSaidCutByTheStop(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	parser := behindAtTheStopParser{stuck: stuckUntilTheEnd(t), lost: &atomic.Int64{}, out: make(chan int, 1)}
 	h := newStopHarnessWithClock(t, parser, zap.New(core), newScaledClock(100))
 
-	h.send(t, "GET /stuck HTTP/1.1\r\n\r\n")
+	r := h.send(t, "GET /stuck HTTP/1.1\r\n\r\n")
 	waitUntilT(t, 30*time.Second, "the hang watchdog retires the stuck parser", func() bool {
 		return logs.FilterMessageSnippet("parser retired").Len() > 0
 	})
@@ -278,6 +282,10 @@ func TestRecordViaSupervisor_AParserStuckBeforeTheStopIsNotSaidCutByTheStop(t *t
 
 	if n := logs.FilterMessage(stopCutWarnMsg).Len(); n != 0 {
 		t.Errorf("%d WARNs say the recording's stop cut a parser retired while it ran", n)
+	}
+	h.requireInASpan(t, r, "while the recording ran, which the retired parser never read")
+	if h.mgr.WasStopCutInWindow(r.sent, r.arrived) {
+		t.Error("the request a parser retired while the recording ran never read is left out as the stop cut's: the recording names its test case as cut by the stop")
 	}
 }
 

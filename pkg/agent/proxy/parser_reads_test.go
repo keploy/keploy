@@ -106,7 +106,7 @@ func TestParserReads_ARequestTheParserReadIsRecordedWheneverTheRelayTellsOfIt(t 
 		}
 		r.streams.read.Store(5)
 		before := len(r.conn.notes)
-		r.parserReturned()
+		r.parserReturned(nil)
 		if toldAfter {
 			r.carried(fakeconn.FromClient, msAfter(0), true, through)
 		}
@@ -131,12 +131,38 @@ func TestParserReads_ARequestTheParserNeverReadIsLeftOutWheneverTheRelayTellsOfI
 			r.carried(fakeconn.FromClient, msAfter(10), true, unread)
 		}
 		r.streams.read.Store(5)
-		r.parserReturned()
+		r.parserReturned(nil)
 		if toldAfter {
 			r.carried(fakeconn.FromClient, msAfter(10), true, unread)
 		}
 		if fmt.Sprint(r.conn.spans) != fmt.Sprint(want) {
 			t.Errorf("told of after the return: %v; left out %v, want %v: from the unread request to the idle grace past it", toldAfter, r.conn.spans, want)
+		}
+	}
+}
+
+// A return the recording's stop cut short (the hang watchdog found the parser
+// making no progress after the stop) leaves out what the parser never read as
+// the stop cut's (cutAtStop), whether the relay told of it before the return
+// or after, and none of it as a span of another kind: the recording names the
+// test cases over the stop cut's spans. A request it read is in neither.
+func TestParserReads_ACutAtTheStopLeavesOutWhatTheParserNeverReadAsTheStopCuts(t *testing.T) {
+	want := []string{span(msAfter(10), msAfter(10).Add(readsIdleGrace))}
+	for _, toldAfter := range []bool{false, true} {
+		r := newReadsUnderTest()
+		var cut []string
+		r.carry(fakeconn.FromClient, 0, 5)
+		unread := r.tee(fakeconn.FromClient, 4)
+		if !toldAfter {
+			r.carried(fakeconn.FromClient, msAfter(10), true, unread)
+		}
+		r.streams.read.Store(5)
+		r.parserReturned(func(start, end time.Time) { cut = append(cut, span(start, end)) })
+		if toldAfter {
+			r.carried(fakeconn.FromClient, msAfter(10), true, unread)
+		}
+		if fmt.Sprint(cut) != fmt.Sprint(want) || len(r.conn.spans) != 0 {
+			t.Errorf("told of after the return: %v; left out %v as the stop cut's and %v otherwise, want %v as the stop cut's alone", toldAfter, cut, r.conn.spans, want)
 		}
 	}
 }
@@ -152,7 +178,7 @@ func TestParserReads_TheRequestsTheParserDidNotReadAreLeftOutOnlyWhileTheConnect
 	r.carry(fakeconn.FromClient, 600, 4) // within the grace of the last
 	r.carry(fakeconn.FromClient, 9000, 4)
 	r.streams.read.Store(5)
-	r.parserReturned()
+	r.parserReturned(nil)
 	want := []string{
 		span(msAfter(100), msAfter(600).Add(readsIdleGrace)),
 		span(msAfter(9000), msAfter(9000).Add(readsIdleGrace)),
@@ -168,7 +194,7 @@ func TestParserReads_ARequestTheParserReadInPartIsNotRecorded(t *testing.T) {
 	r := newReadsUnderTest()
 	r.carry(fakeconn.FromClient, 0, 10)
 	r.streams.read.Store(4)
-	r.parserReturned()
+	r.parserReturned(nil)
 	if want := span(msAfter(0), msAfter(0).Add(readsIdleGrace)); len(r.conn.spans) != 1 || r.conn.spans[0] != want {
 		t.Errorf("left out %v, want %s: the parser read 4 of the request's 10 bytes", r.conn.spans, want)
 	}
@@ -190,7 +216,7 @@ func TestParserReads_ServerBytesTheParserDidNotReadLeaveNothingOut(t *testing.T)
 			r.carried(fakeconn.FromDest, msAfter(10), true, goodbye)
 		}
 		before := len(r.conn.notes)
-		r.parserReturned()
+		r.parserReturned(nil)
 		if toldAfter {
 			r.carried(fakeconn.FromDest, msAfter(10), true, goodbye)
 		}
@@ -208,7 +234,7 @@ func TestParserReads_EveryChunkAfterTheReturnIsNoted(t *testing.T) {
 	r.carry(fakeconn.FromClient, 0, 5)
 	r.streams.read.Store(5)
 	before := len(r.conn.notes)
-	r.parserReturned()
+	r.parserReturned(nil)
 	r.carry(fakeconn.FromClient, 30, 4)
 	r.carry(fakeconn.FromDest, 35, 4)
 	r.carried(fakeconn.FromClient, msAfter(40), false, r.streams.teed[fakeconn.FromClient].Load())
@@ -232,7 +258,7 @@ func TestParserReads_AStopBeforeTheReturnLeavesTheRequestsBeforeItToTheReturn(t 
 	r.carry(fakeconn.FromClient, 60, 4) // unread, after it
 	r.streams.read.Store(5)
 	before := len(r.conn.notes)
-	r.parserReturned()
+	r.parserReturned(nil)
 	r.carried(fakeconn.FromClient, msAfter(0), true, 5)
 	if want := []string{span(msAfter(10), msAfter(10).Add(readsIdleGrace))}; fmt.Sprint(r.conn.spans) != fmt.Sprint(want) {
 		t.Errorf("left out %v, want %v: the unread request captured before the stop, and not the one after it", r.conn.spans, want)
@@ -255,7 +281,7 @@ func TestParserReads_TheRequestsBeforeTheRecordingsStopAreLeftOutAndNoneAfter(t 
 	r.carry(fakeconn.FromClient, 60, 4)   // unread, as it stopped
 	late := r.tee(fakeconn.FromClient, 4) // unread, as it stopped, told of after the return
 	r.conn.stopping = true
-	r.parserReturned()
+	r.parserReturned(nil)
 	r.carried(fakeconn.FromClient, msAfter(70), true, late)
 	if want := []string{span(msAfter(10), msAfter(10).Add(readsIdleGrace))}; fmt.Sprint(r.conn.spans) != fmt.Sprint(want) {
 		t.Errorf("left out %v, want %v", r.conn.spans, want)
@@ -279,8 +305,8 @@ func TestParserReads_BeforeTheReturnEveryChunkIsNotedAndTheReadOnesLetGo(t *test
 	if kept := len(r.unread) - r.head; kept > 1 || len(r.unread) > 2 {
 		t.Errorf("%d requests kept in a backing array of %d, want at most the one not yet seen read", kept, len(r.unread))
 	}
-	r.parserReturned()
-	r.parserReturned()
+	r.parserReturned(nil)
+	r.parserReturned(nil)
 	if r.conn.stops != 1 || len(r.conn.spans) != 0 {
 		t.Errorf("the connection was stopped %d times and left out %v, want one stop and nothing left out: the parser read every request", r.conn.stops, r.conn.spans)
 	}
@@ -301,7 +327,7 @@ func TestParserReads_ARequestBeforeAnEarlierStopIsLeftOutWheneverTheRelayTellsOf
 		}
 		r.stop(msAfter(50))
 		r.streams.read.Store(5)
-		r.parserReturned()
+		r.parserReturned(nil)
 		if toldAfter {
 			r.carried(fakeconn.FromClient, msAfter(10), true, unread)
 		}
@@ -319,7 +345,7 @@ func TestParserReads_ARecordingStoppingButNotYetStampedStopsAtTheReturn(t *testi
 	r.carry(fakeconn.FromClient, 10, 4)
 	r.streams.read.Store(5)
 	r.conn.stopping = true
-	r.parserReturned()
+	r.parserReturned(nil)
 	if want := []string{span(msAfter(10), msAfter(10).Add(readsIdleGrace))}; fmt.Sprint(r.conn.spans) != fmt.Sprint(want) {
 		t.Errorf("left out %v, want %v", r.conn.spans, want)
 	}
@@ -339,7 +365,7 @@ func TestParserReads_TheEarlierOfTheTwoStopsBoundsTheReturn(t *testing.T) {
 	r.carry(fakeconn.FromClient, 40, 4) // unread, after the recording's stop
 	r.stop(msAfter(50))
 	r.conn.stopping = true
-	r.parserReturned()
+	r.parserReturned(nil)
 	if want := []string{span(msAfter(10), msAfter(10).Add(readsIdleGrace))}; fmt.Sprint(r.conn.spans) != fmt.Sprint(want) {
 		t.Errorf("left out %v, want %v: only the request before the recording's stop", r.conn.spans, want)
 	}
@@ -358,7 +384,7 @@ func TestParserReads_AParserBehindItsStreamKeepsWhatItHasNotReadInOrder(t *testi
 	if kept := len(r.unread) - r.head; kept != 5 {
 		t.Fatalf("%d chunks kept, want the 5 the parser has not read", kept)
 	}
-	r.parserReturned()
+	r.parserReturned(nil)
 	if want := []string{span(msAfter(70), msAfter(110).Add(readsIdleGrace))}; fmt.Sprint(r.conn.spans) != fmt.Sprint(want) {
 		t.Errorf("left out %v, want %v: from the first chunk the parser did not read", r.conn.spans, want)
 	}
@@ -369,7 +395,7 @@ func TestParserReads_ARunCoversItsChunksWhicheverWayTheirStampsLie(t *testing.T)
 	r := newReadsUnderTest()
 	r.carry(fakeconn.FromClient, 1000, 4)
 	r.carry(fakeconn.FromClient, 500, 4)
-	r.parserReturned()
+	r.parserReturned(nil)
 	if want := []string{span(msAfter(500), msAfter(1000).Add(readsIdleGrace))}; fmt.Sprint(r.conn.spans) != fmt.Sprint(want) {
 		t.Errorf("left out %v, want %v", r.conn.spans, want)
 	}
