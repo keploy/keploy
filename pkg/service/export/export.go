@@ -67,14 +67,13 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 	} else {
 		request.Body.Mode = "raw"
 		request.Body.Raw = http.Request.Body
-	}
-
-	if strings.Contains(http.Request.Header["Content-Type"], "application/json") {
-		request.Body.Options = map[string]interface{}{
-			"raw": map[string]interface{}{
-				"headerFamily": "json",
-				"language":     "json",
-			},
+		if strings.Contains(http.Request.Header["Content-Type"], "application/json") {
+			request.Body.Options = map[string]interface{}{
+				"raw": map[string]interface{}{
+					"headerFamily": "json",
+					"language":     "json",
+				},
+			}
 		}
 	}
 
@@ -91,15 +90,6 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 	response.Body = http.Response.Body
 	response.OriginalRequest = &request
 	response.Name = http.Response.StatusMessage
-
-	if strings.Contains(http.Response.Header["Content-Type"], "application/json") {
-		request.Body.Options = map[string]interface{}{
-			"raw": map[string]interface{}{
-				"headerFamily": "json",
-				"language":     "json",
-			},
-		}
-	}
 
 	// Extract the last segment of the path as the name
 	pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
