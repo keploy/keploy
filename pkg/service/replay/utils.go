@@ -704,7 +704,7 @@ func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Confi
 		httpCeiling = time.Until(deadline)
 	}
 
-	if !probe.ok || httpCeiling <= 0 {
+	if !probe.ok || probe.tcpOnly || httpCeiling <= 0 {
 		return true
 	}
 
@@ -788,14 +788,19 @@ func healthProbePathForLog(configured string) string {
 	return configured
 }
 
-// httpProbeTarget is the address a recorded HTTP test case actually dials, used
-// as the target of the readiness gate's HTTP stage.
+// httpProbeTarget is the address a recorded test case actually dials, used as
+// the target of the readiness gate (an HTTP round-trip for HTTP sets, or
+// TCP-accept only when tcpOnly is true for non-HTTP sets such as gRPC).
 type httpProbeTarget struct {
 	scheme, host, port string
 	// appPort is the app's port the test was recorded on, which port leads
 	// to; 0 when not known.
 	appPort uint16
 	ok      bool
+	// tcpOnly marks an address the set's tests dial whose kind has no
+	// HTTP round-trip to gate on (a gRPC test set): the TCP-accept stage
+	// is the whole gate.
+	tcpOnly bool
 	// src, when set, is where the target came from: the gate asks it again
 	// while probing, and takes the set's next target from it when the host
 	// turns out unable to reach this one.
@@ -841,6 +846,90 @@ func resolveTestSetProbeTarget(ctx context.Context, testCfg config.Test, testCas
 		reach: reach, published: published, seen: map[string]bool{},
 	}
 	return src.nextTarget(ctx)
+}
+
+// probeTargetForSet is the readiness gate's target for a test set: the
+// round-trip probe an HTTP set's resolved target allows, or, when no reachable
+// HTTP test resolves, the first reachable non-HTTP (gRPC) target, which is
+// gated on its accepting a connection (tcpOnly).
+//
+// A gRPC test set has no HTTP round-trip to gate on, so resolveTestSetProbeTarget
+// answers ok=false for it and the first test would otherwise fire when --delay
+// expires, ready or not: a loaded runner answers its first tests with
+// "connection refused", which reads as a failure rather than as an app that was
+// not up. A gRPC server has no health URL to point --health-url at, so the
+// address the test itself dials is the only evidence available.
+//
+// Just like HTTP targets, gRPC targets are filtered through reach so an
+// unpublished/unreachable Docker port is skipped rather than blocking
+// waitForAccept indefinitely.
+func probeTargetForSet(ctx context.Context, testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger, reach pkg.AppPortReachability, published func(context.Context, string, uint16) uint16) httpProbeTarget {
+	if probe := resolveTestSetProbeTarget(ctx, testCfg, testCases, testSetID, logger, reach, published); probe.ok {
+		return probe
+	}
+	seen := map[string]bool{}
+	for _, tc := range testCases {
+		host, port, ok := resolveGRPCProbeTarget(ctx, testCfg, tc, testSetID, logger, published)
+		if !ok {
+			continue
+		}
+		addr := net.JoinHostPort(host, port)
+		key := addr + " for " + strconv.Itoa(int(tc.AppPort))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if reach != nil && probeTargetUnreachable(ctx, reach, host, port, tc.AppPort) {
+			if logger != nil {
+				logger.Debug("readiness gate: not probing a test the host cannot reach",
+					zap.String("testcase", tc.Name), zap.String("address", models.HostLogName(ctx, addr)), zap.Uint16("appPort", tc.AppPort))
+			}
+			continue
+		}
+		return httpProbeTarget{host: host, port: port, appPort: tc.AppPort, ok: true, tcpOnly: true}
+	}
+	return httpProbeTarget{}
+}
+
+// resolveGRPCProbeTarget resolves the host and port a recorded gRPC test case
+// dials, mirroring pkg.SimulateGRPC (test.host, test.grpcPort / protocol.grpc,
+// replaceWith, and any dynamically published host port).
+func resolveGRPCProbeTarget(ctx context.Context, testCfg config.Test, tc *models.TestCase, testSetID string, logger *zap.Logger, published func(context.Context, string, uint16) uint16) (host, port string, ok bool) {
+	if tc == nil || tc.Kind != models.GRPC_EXPORT {
+		return "", "", false
+	}
+	authority := tc.GrpcReq.Headers.PseudoHeaders[":authority"]
+	if authority == "" {
+		return "", "", false
+	}
+	h := testCfg.Host
+	if h == "" {
+		h = "localhost"
+	}
+	grpcPort := testCfg.GRPCPort
+	if ps, has := testCfg.Protocol["grpc"]; has && ps.Port > 0 {
+		grpcPort = ps.Port
+	}
+	urlReplacements, portMappings := mergeReplaceWith(testCfg, testSetID)
+	l := logger
+	if l == nil {
+		l = zap.NewNop()
+	}
+	target, err := pkg.ResolveTestTarget(authority, urlReplacements, portMappings, h, tc.AppPort, grpcPort, false, l.With(zap.String("testcase", tc.Name)))
+	if err != nil {
+		return "", "", false
+	}
+	target = pkg.PublishedTarget(ctx, pkg.SimulationConfig{
+		ConfigPort:      grpcPort,
+		URLReplacements: urlReplacements,
+		PortMappings:    portMappings,
+		PublishedPort:   published,
+	}, authority, target, tc.AppPort, false)
+	th, tp, err := net.SplitHostPort(target)
+	if err != nil || th == "" || tp == "" {
+		return "", "", false
+	}
+	return th, tp, true
 }
 
 // probeTargetSource walks a test set's HTTP tests, in order, for readiness-gate
