@@ -480,6 +480,10 @@ func recordWithAnEmptyChunk(t *testing.T, req, resp string, inReq, inResp int) [
 	}
 	send(c.client, fakeconn.FromClient, req, inReq)
 	send(c.dest, fakeconn.FromDest, resp, inResp)
+	// The destination's stream ends with the upstream's close, which the
+	// relay reads and says (Session.MarkPeerEnded) before it ends the
+	// stream: a body read to the stream's end ends there.
+	c.sess.MarkPeerEnded(fakeconn.FromDest, false)
 	mocks, err := c.run(t)
 	if err != nil {
 		t.Fatalf("recordV2 = %v", err)
