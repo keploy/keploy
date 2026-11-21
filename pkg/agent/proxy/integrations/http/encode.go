@@ -154,9 +154,19 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 
 		for {
 			if memoryguard.IsRecordingPaused() {
-				h.Logger.Debug("memory pressure detected, stopping HTTP recording and falling back to passthrough")
-				relayRawPassthrough(clientConn, destConn)
-				return nil
+				// The connection is relayed unread from here to its end:
+				// under the memory guard's pause, as ever; under a pause
+				// the control plane asked for, only when the relay can be
+				// tracked, so that the resume resets it and the
+				// application's reconnection is recorded
+				// (pUtil.DemoteForPause). Otherwise it goes on parsing.
+				if demote, done := pUtil.DemoteForPause(clientConn, destConn); demote {
+					h.Logger.Debug("recording is paused, stopping HTTP recording on this connection and falling back to passthrough",
+						zap.String("pause_cause", memoryguard.PauseCause()))
+					relayRawPassthrough(clientConn, destConn)
+					done()
+					return nil
+				}
 			}
 
 			// The whole header section first (relayed as it is read): only

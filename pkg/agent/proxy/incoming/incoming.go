@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/utils/plaintcp"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -693,6 +694,13 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 	// taken: its lines tag their paths under that session's key.
 	ctx = pm.withLogKeys(ctx)
 
+	// The control plane has paused recording: a new connection is spliced to
+	// the app unread, with no HTTP or gRPC framing, and reset at the resume
+	// (splicePaused). One atomic load when recording was never paused.
+	if memoryguard.ExternalPausedNow() && pm.splicePaused(ctx, clientConn, newAppAddr, logger) {
+		return
+	}
+
 	preface, err := util.ReadRequiredBytes(ctx, logger, clientConn, len(clientPreface))
 	if err == io.EOF && len(preface) == 0 {
 		return
@@ -732,6 +740,52 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 	} else {
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
 	}
+}
+
+// splicePaused relays a connection that arrived while the control plane had
+// paused recording (memoryguard.SetExternalPause) to the app, both ways,
+// unread: nothing frames it as HTTP or gRPC, so nothing of it can be recorded
+// and nothing about it is changed. It reports false, having read and dialled
+// nothing, when the connection cannot be tracked (the resume is in progress):
+// the caller then handles it as ever, and the pause costs its requests one by
+// one.
+//
+// Nothing can put the framing back on a spliced connection, so it is tracked
+// (util.DefaultPausePassthroughs) and the resume resets it: its client
+// reconnects, and the new connection's requests are recorded. Left open, a
+// keep-alive connection would stay unrecorded for the rest of its life.
+func (pm *IngressProxyManager) splicePaused(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger) bool {
+	pc, ok := util.DefaultPausePassthroughs.Begin(clientConn)
+	if !ok {
+		return false
+	}
+	defer pc.Done()
+	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
+	upConn, err := pm.dialApp(ctx, finalAppAddr, clientConn)
+	if err != nil {
+		pm.logAppDialFailure(logger, "Failed to connect to the application to pass a connection through to it while recording is paused. Verify that the application is listening on the resolved address and port.",
+			err, zap.String("final_app_addr", finalAppAddr))
+		return true
+	}
+	defer func() {
+		_ = upConn.Close()
+	}()
+	if !pc.Add(upConn) {
+		// Recording resumed while the app was being dialled, and the reset
+		// took the client's side: its reconnection is recorded.
+		util.ResetConn(upConn)
+		return true
+	}
+	logger.Debug("recording is paused by the control plane, so this connection to the app is passed through unread and none of its requests is recorded; it is reset when recording resumes, so its client reconnects under capture",
+		zap.String("final_app_addr", finalAppAddr))
+	// The relay does not watch ctx: the ingress's stop ends it.
+	stop := context.AfterFunc(ctx, func() {
+		_ = clientConn.Close()
+		_ = upConn.Close()
+	})
+	defer stop()
+	util.RelayRawPassthrough(clientConn, upConn)
+	return true
 }
 
 // tlsRelayedWarning is what the ingress says of a TLS connection it relayed

@@ -155,6 +155,38 @@ type TestMockMapping struct {
 	RequestedAt time.Time `json:"requested_at,omitzero" yaml:"-"`
 }
 
+// RecordPausePath and RecordResumePath are the agent's routes, under its
+// /agent prefix, by which its control plane pauses recording on a running
+// agent and resumes it, without restarting it: POST both. While paused the
+// agent passes the application's traffic through and records no test case and
+// no mock. Both answer with an AgentResp and are idempotent. An agent built
+// before them answers 404.
+const (
+	RecordPausePath  = "/record/pause"
+	RecordResumePath = "/record/resume"
+)
+
+// AgentCapabilitiesHeader is the header of the agent's /agent/health answer
+// that lists what the agent can do beyond its first API, comma-separated, so
+// a control plane can tell before it asks. CapabilityRecordPause is the pause
+// and resume of recording (RecordPausePath).
+const (
+	AgentCapabilitiesHeader = "X-Keploy-Agent-Capabilities"
+	CapabilityRecordPause   = "record-pause"
+)
+
+// RecordPausedHeader is the header of the agent's /agent/health answer that
+// says whether its control plane has paused recording: "true" or "false". The
+// pause is the agent process's memory, so an agent that restarted answers
+// "false", and its control plane asks again.
+const RecordPausedHeader = "X-Keploy-Record-Paused"
+
+// RecordPauseReq is the body of POST /agent/record/pause. The body is
+// optional: Reason is free text for the agent's logs ("rollout").
+type RecordPauseReq struct {
+	Reason string `json:"reason,omitempty"`
+}
+
 // ScopeReq is the body of POST /agent/scope/begin and /agent/scope/end — a
 // test-runner plugin / glue-code marks a named per-test scope so the mock flow
 // can attribute captured mocks to a test (record) or restrict the served pool
@@ -1501,6 +1533,17 @@ type StreamEndSummary struct {
 	// NotRecordedUnderPressure: requests not recorded because the memory
 	// guard had paused recording when they came.
 	NotRecordedUnderPressure PressureSkipSummary `json:"not_recorded_under_pressure,omitzero"`
+	// NotRecordedWhilePaused: requests not recorded because the agent's
+	// control plane had paused recording when they came (RecordPausePath).
+	// Apart from NotRecordedUnderPressure: the agent was not short of memory.
+	// Requests on a connection that arrived during the pause are not in it:
+	// the agent passes such a connection through unread, so it cannot count
+	// them.
+	NotRecordedWhilePaused PressureSkipSummary `json:"not_recorded_while_paused,omitzero"`
+	// SuppressedByPause: those of TestCasesSuppressed left out because their
+	// window overlapped a pause the control plane asked for, and no memory
+	// pause.
+	SuppressedByPause int `json:"tcs_suppressed_by_control_plane_pause,omitempty"`
 	// MocksDropped: mocks the agent dropped as their parsers handed them over
 	// or after, which the recording does not hold.
 	MocksDropped MockDropSummary `json:"mocks_dropped,omitzero"`
@@ -1517,9 +1560,17 @@ type MockDropSummary struct {
 	ByPressure int64    `json:"by_memory_pressure" bson:"by_memory_pressure" yaml:"byMemoryPressure"`
 	Capacity   uint64   `json:"for_the_output" bson:"for_the_output" yaml:"forTheOutput"`
 	Named      []string `json:"first_dropped,omitempty" bson:"first_dropped,omitempty" yaml:"firstDropped,omitempty"`
+	// ByControlPlanePause is the mocks dropped because the agent's control
+	// plane had paused recording as their requests were made
+	// (RecordPausePath). Apart from ByPressure, and not a drop Dropped
+	// reports: the pause was asked for, and the recording holds no test case
+	// that overlaps it, so none needs these mocks.
+	ByControlPlanePause int64 `json:"by_control_plane_pause,omitempty" bson:"by_control_plane_pause,omitempty" yaml:"byControlPlanePause,omitempty"`
 }
 
-// Dropped reports whether d counts a dropped mock.
+// Dropped reports whether d counts a dropped mock that a test case of the
+// recording may need: one dropped for a pause the control plane asked for
+// (ByControlPlanePause) is not one.
 func (d MockDropSummary) Dropped() bool { return d.ByPressure > 0 || d.Capacity > 0 }
 
 // PressureSkipSummary is how many requests a recording did not record

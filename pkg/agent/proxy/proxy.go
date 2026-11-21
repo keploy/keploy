@@ -35,6 +35,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/acceptcount"
 	"go.keploy.io/server/v3/pkg/agent/captureloss"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
@@ -193,6 +194,9 @@ type Proxy struct {
 	agentMode             models.Mode
 	noSessionDests        noSessionDests
 	noSessionPassthroughs noSessionPassthroughs
+	// recordPauseMu makes the control plane's pause and resume of recording
+	// one step each (record_pause.go).
+	recordPauseMu sync.Mutex
 	// failedDests rate-limits the log line for a dependency that refused a
 	// held connection.
 	failedDests failedDests
@@ -2981,6 +2985,26 @@ func (p *Proxy) serveConnection(ctx context.Context, srcConn net.Conn, hosts *co
 			p.paired.servedWithoutSession(tracked)
 		}
 		return p.serveWithoutSession(ctx, srcConn, dstAddr, predialed)
+	}
+
+	// The control plane has paused recording (record_pause.go): a new
+	// connection is relayed unread from here, before anything reads it, TLS
+	// interception and the parsers' matching included, and is tracked so the
+	// resume resets it. One atomic load when recording was never paused. A
+	// connection the registry refuses (the resume is in progress) is handled
+	// as ever. Nothing on it is captured, so its close is no loss
+	// (pairClosing), as with no session. A session that passes everything
+	// through anyway (global passthrough, without the opportunistic TLS
+	// intercept that takes precedence over it) is left to do so below: the
+	// resume has nothing to put such a connection back under.
+	passesAll := p.GlobalPassthrough && !rule.OutgoingOptions.OpportunisticTLSIntercept
+	if rule.Mode == models.MODE_RECORD && !passesAll && memoryguard.ExternalPausedNow() {
+		if pc, ok := util.DefaultPausePassthroughs.Begin(srcConn); ok {
+			if tracked != nil {
+				p.paired.servedWithoutSession(tracked)
+			}
+			return p.servePaused(ctx, pc, srcConn, dstAddr, predialed)
+		}
 	}
 
 	// The proven model names a container destination by its container key,

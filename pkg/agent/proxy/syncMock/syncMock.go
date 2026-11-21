@@ -593,12 +593,19 @@ type SyncMockManager struct {
 	// pressureDropped / totalAdded track mocks dropped vs added under memory
 	// pressure. Both are atomic so they can be read without holding m.mu.
 	pressureDropped atomic.Int64
+	// pauseDropped is pressureDropped's twin for the mocks dropped for a
+	// pause the control plane asked for (PauseCauseExternal): counted apart,
+	// so a recording paused on request is not reported as short of memory.
+	pauseDropped atomic.Int64
 	// totalAdded is the mocks taken (AddMock, SendConfigMock), less those
 	// dropped since for pressure or for the output (SessionDrops.Added).
 	totalAdded atomic.Int64
 	// notRecorded counts the requests an ingress did not record because the
 	// memory guard had paused recording (NoteNotRecordedUnderPressure).
 	notRecorded notRecordedUnderPressure
+	// notRecordedPaused is notRecorded for a pause the control plane asked
+	// for (NotRecordedWhilePaused).
+	notRecordedPaused notRecordedUnderPressure
 
 	// leftOut counts the mocks a session routed here left out
 	// because a parser could not record them (NoteMockLeftOut): their capture
@@ -3199,6 +3206,26 @@ const (
 // Dropped reports whether d is a drop, not MockTaken.
 func (d MockDrop) Dropped() bool { return d != MockTaken }
 
+// droppedWhilePausedWhy is MockDroppedUnderPressure's reason in a report when
+// the pause was the control plane's (PauseCauseExternal), not the memory
+// guard's. The MockDrop a caller gets back is MockDroppedUnderPressure either
+// way: what it must do with the drop is the same.
+const droppedWhilePausedWhy = "its request was made while the control plane had paused recording; the recording leaves out the test cases that overlap the pause"
+
+// heldLetGoWhilePaused is heldLetGo's twin for a pause the control plane
+// asked for.
+const heldLetGoWhilePaused = "the control plane paused recording and the agent let go of the mocks it held for the requests in flight; a kept request among them is left out"
+
+// pausedDropWhy is why a mock requested at reqTime is dropped for a pause,
+// and the pause's cause: the memory guard's reason unless a control-plane
+// pause alone covers reqTime.
+func pausedDropWhy(reqTime time.Time) (string, PauseCause) {
+	if PauseCauseIn(reqTime, reqTime) == PauseCauseExternal {
+		return droppedWhilePausedWhy, PauseCauseExternal
+	}
+	return string(MockDroppedUnderPressure), PauseCauseMemory
+}
+
 // heldLetGo is why memory pressure drops a mock held for a request in flight
 // (giveUpForPressureLocked). Its request may predate the pause, so the pause's
 // spans need not cover it: the window that may own it is given up instead.
@@ -3210,6 +3237,25 @@ const heldLetGo = "the agent was short of memory and let go of the mocks it held
 // at Debug, taking no sample, as it costs no test case. Each names the mock and
 // why. Called with no lock held.
 func (m *SyncMockManager) reportPressureDrop(mock *models.Mock, why string) {
+	m.reportPausedDrop(mock, why, PauseCauseMemory)
+}
+
+// reportPausedDrop is reportPressureDrop for either cause of a pause: the
+// memory guard's drop is counted in pressureDropped and said as memory
+// pressure, the control plane's in pauseDropped and said as that, so neither
+// is reported as the other.
+func (m *SyncMockManager) reportPausedDrop(mock *models.Mock, why string, cause PauseCause) {
+	if cause == PauseCauseExternal {
+		// What the pause is for, and no test case of the recording needs the
+		// mock (each that overlaps the pause is left out): counted, said at
+		// Debug, and neither named among the session's lost mocks nor taken
+		// from the sampling of memory pressure's warnings.
+		m.pauseDropped.Add(1)
+		if ce := m.dropLogger().Check(zapcore.DebugLevel, "syncMock: dropped a mock captured while the control plane had paused recording: the recording does not hold it, nor the test cases that overlap the pause"); ce != nil {
+			ce.Write(dropFields(mock, 0, why)...)
+		}
+		return
+	}
 	m.pressureDropped.Add(1)
 	m.nameDrop(mock, why)
 	var n uint64
@@ -3262,8 +3308,8 @@ func dnsQuestion(mock *models.Mock) string {
 // DropMark is where a manager's drop counts stood as a recording session
 // opened (StartDropSession).
 type DropMark struct {
-	added, pressure, testCases int64
-	capacity                   uint64
+	added, pressure, paused, testCases int64
+	capacity                           uint64
 }
 
 // SessionDrops is what a recording session's summary reports of the mocks its
@@ -3277,6 +3323,10 @@ type SessionDrops struct {
 	// Pressure is the mocks dropped for memory pressure, as they were handed
 	// over or after.
 	Pressure int64
+	// ControlPlanePause is the mocks dropped because their requests were
+	// made while the control plane had paused recording (PauseCauseExternal),
+	// or were held for a request in flight as it paused it. Not in Pressure.
+	ControlPlanePause int64
 	// Capacity is the mocks dropped for the output: closed or never set, at
 	// its byte bound, or its consumer stalled.
 	Capacity uint64
@@ -3310,6 +3360,7 @@ func (m *SyncMockManager) StartDropSession() DropMark {
 	return DropMark{
 		added:     m.totalAdded.Load(),
 		pressure:  m.pressureDropped.Load(),
+		paused:    m.pauseDropped.Load(),
 		capacity:  m.dropCount.Load(),
 		testCases: m.droppedTCsRecorded.Load(),
 	}
@@ -3319,10 +3370,11 @@ func (m *SyncMockManager) StartDropSession() DropMark {
 // since. Added stops at 0: this session can drop mocks an earlier one added.
 func (m *SyncMockManager) DropsSince(mark DropMark) SessionDrops {
 	d := SessionDrops{
-		Added:     max(m.totalAdded.Load()-mark.added, 0),
-		Pressure:  m.pressureDropped.Load() - mark.pressure,
-		Capacity:  m.dropCount.Load() - mark.capacity,
-		TestCases: m.droppedTCsRecorded.Load() - mark.testCases,
+		Added:             max(m.totalAdded.Load()-mark.added, 0),
+		Pressure:          m.pressureDropped.Load() - mark.pressure,
+		ControlPlanePause: m.pauseDropped.Load() - mark.paused,
+		Capacity:          m.dropCount.Load() - mark.capacity,
+		TestCases:         m.droppedTCsRecorded.Load() - mark.testCases,
 	}
 	m.dropNamesMu.Lock()
 	defer m.dropNamesMu.Unlock()
@@ -3375,7 +3427,8 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) MockDrop {
 	m.mu.Lock()
 	if m.lostToPressureLocked(mock) {
 		m.mu.Unlock()
-		m.reportPressureDrop(mock, string(MockDroppedUnderPressure))
+		why, cause := pausedDropWhy(mock.Spec.ReqTimestampMock)
+		m.reportPausedDrop(mock, why, cause)
 		return MockDroppedUnderPressure
 	}
 	// Mock is being kept — count it as successfully added.
@@ -3896,6 +3949,10 @@ const (
 	// next, and the one it began in ended without it: Keep reports false, and
 	// tells no loss.
 	LostToStop
+	// LostToControlPlanePause: the control plane paused recording, and the
+	// pause let go of mocks it may own, as memory pressure does. Last, so
+	// the causes before it keep their numbers.
+	LostToControlPlanePause
 )
 
 func (c LossCause) String() string {
@@ -3904,6 +3961,8 @@ func (c LossCause) String() string {
 		return "hold_bound"
 	case LostToMemoryPressure:
 		return "memory_pressure"
+	case LostToControlPlanePause:
+		return "control_plane_pause"
 	case LostToStop:
 		return "recording_stopped"
 	}
@@ -4823,7 +4882,10 @@ func (m *SyncMockManager) fitHoldLocked(t *dropTally) (gaveUp []*Window) {
 // window is being resolved this moment (Claim, ResolveKept): what it may own is
 // kept for it. Returns the mocks dropped and the windows given up. Caller holds
 // mu.
-func (m *SyncMockManager) giveUpForPressureLocked() (dropped []*models.Mock, gaveUp []*Window) {
+//
+// cause is the pause's: LostToMemoryPressure, or LostToControlPlanePause for
+// a pause the control plane asked for.
+func (m *SyncMockManager) giveUpForPressureLocked(cause LossCause) (dropped []*models.Mock, gaveUp []*Window) {
 	n := len(m.held)
 	if n == 0 {
 		return nil, nil
@@ -4843,7 +4905,7 @@ func (m *SyncMockManager) giveUpForPressureLocked() (dropped []*models.Mock, gav
 		}
 	}
 	for _, w := range gaveUp {
-		w.givenUp, w.cause = true, LostToMemoryPressure
+		w.givenUp, w.cause = true, cause
 		heap.Remove(&m.open, w.idx)
 		m.windowLeftLocked(w)
 		m.noteGivenUpInFlightLocked(w)
@@ -4891,6 +4953,10 @@ func (m *SyncMockManager) reportLeftOut(w *Window, cause LossCause) {
 		if cause == LostToMemoryPressure {
 			msg, next = "syncMock: left a kept request out of the recording: memory pressure let go of mocks it may have made while it was in flight",
 				"the agent was short of memory while the request was in flight and let go of the mocks it held for the requests in flight. The request is left out rather than recorded without mocks it may have made; the memory guard's lines in this log say how close the agent ran to its limit (--memory-limit)"
+		}
+		if cause == LostToControlPlanePause {
+			msg, next = "syncMock: left a kept request out of the recording: it was in flight as the control plane paused recording, and the pause let go of mocks it may have made",
+				"nothing to do: the control plane paused recording (POST /agent/record/pause) while the request was in flight. It is left out rather than recorded without mocks it may have made; requests that come after the control plane resumes recording are recorded as ever"
 		}
 		m.dropLogger().Warn(msg,
 			zap.Stringer("cause", cause),
@@ -5424,6 +5490,15 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	// ends it no earlier (Spans).
 	now := time.Now()
 
+	// Why recording is paused, for what this lets go: the memory guard's
+	// pause unless the control plane's is the only one in force
+	// (PauseCauseNow, which memoryguard notes before it calls here).
+	pauseCause := PauseCauseNow()
+	lossCause := LostToMemoryPressure
+	if pauseCause == PauseCauseExternal {
+		lossCause = LostToControlPlanePause
+	}
+
 	m.mu.Lock()
 	wasEnabled := m.memoryPause
 	m.memoryPause = enabled
@@ -5489,7 +5564,7 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 		// has left: the agent is short of memory. The requests that may own
 		// what it drops are given up, so none is recorded without its mocks
 		// (giveUpForPressureLocked).
-		heldGone, pressureGaveUp = m.giveUpForPressureLocked()
+		heldGone, pressureGaveUp = m.giveUpForPressureLocked(lossCause)
 		heldDropped = len(heldGone)
 		m.publishHoldLocked()
 		clearedFromBuffer += heldDropped
@@ -5511,16 +5586,25 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	// Dropped, so no longer added (SessionDrops).
 	m.totalAdded.Add(-int64(len(wiped) + len(heldGone)))
 	for _, mk := range wiped {
-		m.reportPressureDrop(mk, string(MockDroppedUnderPressure))
+		why, cause := pausedDropWhy(mk.Spec.ReqTimestampMock)
+		m.reportPausedDrop(mk, why, cause)
+	}
+	heldWhy := heldLetGo
+	if pauseCause == PauseCauseExternal {
+		heldWhy = heldLetGoWhilePaused
 	}
 	for _, mk := range heldGone {
-		m.reportPressureDrop(mk, heldLetGo)
+		m.reportPausedDrop(mk, heldWhy, pauseCause)
 	}
-	m.reportGivenUp(pressureGaveUp, LostToMemoryPressure)
+	m.reportGivenUp(pressureGaveUp, lossCause)
 	if heldDropped > 0 {
 		// On every tick that drops some, not only the transition below: the
 		// hold keeps filling while pressure lasts.
-		m.dropLogger().Debug("diag/syncMock: memory pressure let go of the mocks held for requests in flight",
+		heldMsg := "diag/syncMock: memory pressure let go of the mocks held for requests in flight"
+		if pauseCause == PauseCauseExternal {
+			heldMsg = "diag/syncMock: the control plane's pause of recording let go of the mocks held for requests in flight"
+		}
+		m.dropLogger().Debug(heldMsg,
 			zap.Int("dropped_given_up", heldDropped),
 			zap.Int("windows_given_up", len(pressureGaveUp)))
 	}
@@ -5532,13 +5616,22 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 	if logger := m.dropLogger(); logger != nil {
 		if enabled && !wasEnabled {
 			// Pressure just turned ON (false→true transition)
-			logger.Debug("agent: memory pressure activated — pressure-request mocks dropped, calm-captured kept",
+			onMsg := "agent: memory pressure activated — pressure-request mocks dropped, calm-captured kept"
+			if pauseCause == PauseCauseExternal {
+				onMsg = "agent: the control plane paused recording — mocks requested during the pause dropped, those captured before it kept"
+			}
+			logger.Debug(onMsg,
 				zap.Int("mocks_cleared_from_buffer", clearedFromBuffer),
 				zap.Int64("mocks_dropped_so_far", m.pressureDropped.Load()),
 				zap.Int64("mocks_added_so_far", m.totalAdded.Load()),
 			)
 		} else if !enabled && wasEnabled {
-			logger.Debug("agent: memory pressure cleared",
+			offMsg := "agent: memory pressure cleared"
+			if pauseCause == PauseCauseExternal {
+				offMsg = "agent: the control plane's pause of recording ended"
+			}
+			logger.Debug(offMsg,
+				zap.Int64("mocks_dropped_by_control_plane_pause", m.pauseDropped.Load()),
 				zap.Int64("mocks_dropped_total", m.pressureDropped.Load()),
 				zap.Int64("mocks_added_total", m.totalAdded.Load()),
 			)

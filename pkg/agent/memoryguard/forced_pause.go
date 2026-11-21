@@ -15,15 +15,16 @@ import (
 // the order of ingress requests, not by memory: "<from>:<to>" pauses
 // recording as the agent reads its from-th ingress HTTP/1 request (counting
 // from 1) and ends the pause as it reads its to-th, so requests from to to-1
-// come during the pause. The pause is the guard's own (applyPausedState): the
-// recording flag and every mock manager's pressure span move together, as
-// under real memory pressure. Request to is read as the pause ends, so its
+// come during the pause. The pause is applied as the guard's own is
+// (applyPauseReason): the recording flag and every mock manager's pressure
+// span move together, as under real memory pressure. Request to is read as the pause ends, so its
 // window overlaps the pause, and the recording leaves its test case out with
 // those the pause overlapped. It is read once, as the agent starts
 // (Start). It exists so that a test or a lane can put a pause exactly where
 // it wants one, on any machine, instead of waiting for memory to run short.
-// Real memory pressure while it is set still pauses and resumes recording
-// as it always does, and can end the forced pause early.
+// It is a reason for a pause of its own (reasonForced): real memory pressure
+// while it is set still pauses recording as it always does, and recording
+// resumes once neither holds it paused.
 const ForcePauseEnv = "KEPLOY_DEBUG_FORCE_PAUSE"
 
 // forcedPauseKnob is a parsed ForcePauseEnv and the count of ingress requests
@@ -105,11 +106,11 @@ func IngressRequest() {
 	k.seen++
 	switch k.seen {
 	case k.from:
-		applyPausedState(true)
+		applyPauseReason(reasonForced, true, "")
 		k.logger.Info("Pausing keploy-agent recording, forced by "+ForcePauseEnv,
 			zap.Uint64("ingress_request", k.seen))
 	case k.to:
-		applyPausedState(false)
+		applyPauseReason(reasonForced, false, "")
 		k.logger.Info("Cleared keploy-agent memory pressure, forced by "+ForcePauseEnv,
 			zap.Uint64("ingress_request", k.seen))
 	}
@@ -127,6 +128,6 @@ func SetForcedPauseForTest(v string) (restore func()) {
 	configureForcedPause(v, nil)
 	return func() {
 		forcedPause.Store(nil)
-		applyPausedState(false)
+		applyPauseReason(reasonForced, false, "")
 	}
 }

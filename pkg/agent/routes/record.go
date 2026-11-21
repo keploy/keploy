@@ -220,6 +220,10 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/agent/ready", a.MakeAgentReady)
 		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		r.Post("/stop-begun", a.HandleStopBegun)
+		// The control plane's pause and resume of recording on a running
+		// agent (record_pause.go). Behind the router's auth, as every route.
+		r.Post(models.RecordPausePath, a.HandleRecordPause)
+		r.Post(models.RecordResumePath, a.HandleRecordResume)
 		// Long-lived streaming endpoints. /pcap/traffic emits a
 		// pcap-format byte stream (file header + one record per
 		// packet) over chunked transfer-encoding; /pcap/keylog
@@ -432,6 +436,9 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	// --proven flag; the CLI refuses an agent whose switch is not its own
 	// (provenswitch.CheckAgent).
 	w.Header().Set(provenswitch.HealthHeader, provenswitch.State())
+	// What this agent can do beyond its first API, and whether its control
+	// plane has paused recording (record_pause.go).
+	a.setRecordPauseHeaders(w.Header())
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
 }
@@ -685,6 +692,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// The requests the ingress did not record because the memory guard had
 	// paused recording (NoteNotRecordedUnderPressure), counted the same way.
 	notRecordedBefore := syncmgr.Get().NotRecordedUnderPressure()
+	// And those it did not record because the agent's control plane had
+	// paused recording (NotRecordedWhilePaused): counted apart, so a
+	// recording paused on request is not reported as short of memory.
+	notRecordedPausedBefore := syncmgr.Get().NotRecordedWhilePaused()
 	// The requests the ingress served and was recording whose test cases
 	// never reached this stream's queue because the ingress stopped first
 	// (NoteNotHandedOn), counted the same way.
@@ -759,7 +770,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// forever during shutdown when no test cases are arriving.
 	var tcsSentSoFar int       // TCs sent to CLI this session
 	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's HTTP window, or its mock was capacity-dropped
-	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
+	// Those of them left out for a pause the control plane asked for alone:
+	// no memory pause, hole or dropped mock was in their window.
+	var tcsSuppressedByPause int
+	var tcsUnsettled int // TCs the hold's bound released before their verdict was final
 	// A body that is not UTF-8 goes as a body object only to a client that
 	// says it reads one (models.BodyEncodingHeader); to any other client, one
 	// built before it among them, each test case goes as encoding/json writes it.
@@ -816,7 +830,14 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 		if hasPressure || hasOrphan || mockDropped {
 			tcsSuppressedSoFar++
-			a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
+			// The pause that overlapped it, named for what it was: the
+			// memory guard's, or one the control plane asked for.
+			pausedByControlPlane := hasPressure && syncmgr.PauseCauseIn(spanFrom, spanTo) == syncmgr.PauseCauseExternal
+			if pausedByControlPlane && !hasOrphan && !mockDropped {
+				tcsSuppressedByPause++
+			}
+			a.logger.Debug("agent: TC suppressed — a pause of recording (memory pressure, or the control plane's: paused_by_control_plane) or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
+				zap.Bool("paused_by_control_plane", pausedByControlPlane),
 				zap.String("tc_name", t.Name),
 				zap.Int64("tc_req_ms", tcReqTime.UnixMilli()),
 				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
@@ -1068,6 +1089,19 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("connections", notRecorded.Connections()),
 				zap.Strings("connections_most", notRecorded.Most(maxNamedPressureConns)))
 		}
+		// Read once: the line and the summary say the same.
+		notRecordedPaused := syncmgr.Get().NotRecordedWhilePaused().Since(notRecordedPausedBefore)
+		if notRecordedPaused.Total > 0 || tcsSuppressedByPause > 0 {
+			// Asked for, so Info: each came while the control plane had
+			// paused recording, or was in flight at the pause's start or
+			// end. The agent was not short of memory.
+			a.logger.Info("agent: some requests were not recorded: the control plane had paused recording when they came (POST /agent/record/pause), or they were in flight as it paused or resumed it; requests after the resume are recorded",
+				zap.Uint64("requests_not_recorded_while_paused", notRecordedPaused.Total),
+				zap.Int("connections", notRecordedPaused.Connections()),
+				zap.Strings("connections_most", notRecordedPaused.Most(maxNamedPressureConns)),
+				zap.Int("tcs_suppressed_by_control_plane_pause", tcsSuppressedByPause),
+				zap.String("note", "requests on connections that arrived during the pause are not counted: the agent passed those connections through unread"))
+		}
 		// Read once (sessionLost): the warnings, the summary and the end
 		// marker say the same.
 		notHandedOn, unnamedConns, tlsRelayedConns, drops := sessionLost()
@@ -1126,6 +1160,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			zap.Int("orphan_spans_closed", orphanClosed),
 			zap.Int("orphan_ranges_still_open", orphanOpen),
 			zap.Int64("mocks_dropped_by_pressure", drops.Pressure),
+			// What a pause the control plane asked for cost, apart from
+			// what memory pressure did: the pressure_* spans above count
+			// the pauses of both.
+			zap.Int64("mocks_dropped_by_control_plane_pause", drops.ControlPlanePause),
+			zap.Uint64("tcs_not_recorded_while_paused", notRecordedPaused.Total),
+			zap.Int("tcs_suppressed_by_control_plane_pause", tcsSuppressedByPause),
 			// Requests the ingress did not record because the memory guard
 			// had paused recording when they came (the WARN above names
 			// their connections).
@@ -1260,15 +1300,21 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					n := syncmgr.Get().NotRecordedUnderPressure().Since(notRecordedBefore)
 					return models.PressureSkipSummary{Requests: n.Total, Connections: n.Connections()}
 				}(),
+				NotRecordedWhilePaused: func() models.PressureSkipSummary {
+					n := syncmgr.Get().NotRecordedWhilePaused().Since(notRecordedPausedBefore)
+					return models.PressureSkipSummary{Requests: n.Total, Connections: n.Connections()}
+				}(),
+				SuppressedByPause:  tcsSuppressedByPause,
 				NotHandedOn:        notHandedOn,
 				UnnamedCallerConns: unnamedConns,
 				TLSRelayedConns:    tlsRelayedConns,
 				Unsettled:          tcsUnsettled,
 				MassSuppressed:     massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
 				MocksDropped: models.MockDropSummary{
-					ByPressure: drops.Pressure,
-					Capacity:   drops.Capacity,
-					Named:      drops.Named,
+					ByPressure:          drops.Pressure,
+					Capacity:            drops.Capacity,
+					Named:               drops.Named,
+					ByControlPlanePause: drops.ControlPlanePause,
 				},
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
