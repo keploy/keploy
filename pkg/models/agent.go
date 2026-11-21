@@ -145,6 +145,14 @@ type TestMockMapping struct {
 	// recording's client asked it to end its streams (StreamEndPath) and it
 	// has put on the stream all it had: no test or mocks of its own.
 	StreamEnd bool `json:"stream_end,omitempty" yaml:"-"`
+	// RequestedAt dates the mapping as the agent owes it to a recording's
+	// stop (BacklogBefore): the request time of the test it maps, or, for a
+	// later delta to a past test's mapping, the earliest request time among
+	// the mocks it adds. A recording that stops while its app goes on serving
+	// judges the mapping by it, as it judges test cases and mocks by theirs:
+	// one dated after the stop is of a request made after it, and not part of
+	// the recording. Zero from an agent that does not say.
+	RequestedAt time.Time `json:"requested_at,omitzero" yaml:"-"`
 }
 
 // ScopeReq is the body of POST /agent/scope/begin and /agent/scope/end — a

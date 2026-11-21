@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -65,6 +66,11 @@ func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocke
 	go func() {
 		<-srvCtx.Done()
 		logger.Info("Shutting down agent HTTP server")
+		// The agent is stopping: what it left uncaptured since its last
+		// recording ended, if one has, is said now, once (syncMock
+		// SayNotCaptured). A sidecar's proxyless agent stops without the
+		// proxy's teardown, which says it too.
+		syncmgr.Get().SayNotCaptured()
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

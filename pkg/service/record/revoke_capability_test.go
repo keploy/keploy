@@ -20,12 +20,15 @@ type revokeAskInstr struct {
 	asked []bool
 	// byRequest is what it asked for SupportsRevokeByRequest.
 	byRequest []bool
+	// captureIDs is what it asked for SupportsCaptureIDs.
+	captureIDs []bool
 }
 
 func (d *revokeAskInstr) GetOutgoing(ctx context.Context, o models.OutgoingOptions) (<-chan *models.Mock, error) {
 	d.mu.Lock()
 	d.asked = append(d.asked, o.SupportsDroppedRevoke)
 	d.byRequest = append(d.byRequest, o.SupportsRevokeByRequest)
+	d.captureIDs = append(d.captureIDs, o.SupportsCaptureIDs)
 	d.mu.Unlock()
 	return d.fakeInstr.GetOutgoing(ctx, o)
 }
@@ -80,13 +83,16 @@ func TestGetTestAndMockChans_AsksForRevokesOnlyWhenItsStoreDeletes(t *testing.T)
 				time.Sleep(time.Millisecond)
 			}
 			inst.mu.Lock()
-			got, byReq := inst.asked, inst.byRequest
+			got, byReq, ids := inst.asked, inst.byRequest, inst.captureIDs
 			inst.mu.Unlock()
 			if len(got) != 1 || got[0] != tc.want {
 				t.Errorf("the mock stream was asked SupportsDroppedRevoke %v, want [%v]", got, tc.want)
 			}
 			if len(byReq) != 1 || byReq[0] != tc.want {
 				t.Errorf("the mock stream was asked SupportsRevokeByRequest %v, want [%v]: only a store that deletes finds a revoked test case by its request time", byReq, tc.want)
+			}
+			if len(ids) != 1 || !ids[0] {
+				t.Errorf("the mock stream was asked SupportsCaptureIDs %v, want [true]: the recording files every capture id under its test case's saved name, whatever its store", ids)
 			}
 			close(f.incoming)
 			close(f.outgoing)

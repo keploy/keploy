@@ -492,3 +492,35 @@ func TestTimeShapedIDEntryExcusesNoKeyTheRecordingLacks(t *testing.T) {
 		})
 	}
 }
+
+// A test case can reach the encoder with no noise map at all: a test case
+// created from the dashboard (its form sends no noise), or any stored case
+// decoded from JSON whose "noise" is absent or null. With the proven switch
+// off the encoder adds the response's time-shaped fields (a Date header) as
+// noise, and it must add them to a map, not to the nil one: assigning to an
+// entry of a nil map panics, and that panic took down the k8s-proxy laying out
+// such a case for a replay. The case is written with the same noise as one
+// that came with an empty map.
+func TestATestCaseWithNoNoiseMapIsWrittenWithItsTimeShapedNoise(t *testing.T) {
+	for _, format := range []string{"yaml", "json"} {
+		t.Run(format, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "")
+			tc := timeShapedTestCase(time.Now())
+			tc.Noise = nil
+			var back *models.TestCase
+			if p := panicOf(func() { back = writeAndReadBack(t, tc, format) }); p != nil {
+				t.Fatalf("writing a test case that has no noise map panicked: %v", p)
+			}
+			if !reflect.DeepEqual(back.Noise, timeShapedNoise) {
+				t.Fatalf("the test case was written with noise %v, want every time-looking field %v, as a case with an empty map gets", back.Noise, timeShapedNoise)
+			}
+		})
+	}
+}
+
+// panicOf runs f and returns what it panicked with, or nil.
+func panicOf(f func()) (p any) {
+	defer func() { p = recover() }()
+	f()
+	return nil
+}

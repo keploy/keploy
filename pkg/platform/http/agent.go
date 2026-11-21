@@ -926,21 +926,38 @@ func (a *AgentClient) readIncomingJSON(ctx context.Context, res *http.Response, 
 // the wire.
 const mockHandoffBuffer = 1024
 
-// mockHandoffGrace bounds how long the decoder waits for the consumer to take a
-// mock before giving up on it, in the time this process could run
-// (utils/stall), not wall time: a CLI starved of CPU has a consumer that could
-// not run either. Only reachable if the consumer has stopped draining
-// entirely; a busy one drains in milliseconds.
+// mockHandoffGrace bounds how long the decoder still offers a mock it holds
+// once the stream's own client has ended the stream (its context is done), in
+// the time this process could run (utils/stall), not wall time: a CLI starved
+// of CPU has a consumer that could not run either. The recording's drain ends
+// the stream and then reads on what was already queued, so the mock in hand
+// is still taken then; a consumer that has gone takes nothing, and the mock is
+// dropped, said at ERROR. A live stream never uses it: see handOff.
 const mockHandoffGrace = 30 * time.Second
 
-// handOff offers m to ch, and reports whether it was taken before ch's reader
-// took nothing for grace of the time the process could run (on clk; nil: the
-// process's own).
-func handOff[T any](ch chan<- T, m T, clk stall.Clock, grace time.Duration) bool {
+// handOff offers m to ch and reports whether it was taken.
+//
+// While ctx, the stream's own context, is live, it waits for ch's reader for as
+// long as that takes. A consumer that is slow (a mock file whose lock a whole
+// file rewrite holds) is back-pressure, never a reason to give the stream up:
+// the decoder stops reading, the agent's write blocks behind it, and the agent
+// accounts for what it cannot hold (its stall bound drops a mock and leaves
+// out, or revokes, the test cases that own it). Giving up here instead dropped
+// a mock unaccounted and ended the mock stream for the rest of the recording,
+// while its test cases went on being saved without mocks.
+//
+// Once ctx is done the stream is over, and m is offered for grace more of the
+// time the process could run (on clk; nil: the process's own).
+func handOff[T any](ctx context.Context, ch chan<- T, m T, clk stall.Clock, grace time.Duration) bool {
 	select {
 	case ch <- m:
 		return true
 	default:
+	}
+	select {
+	case ch <- m:
+		return true
+	case <-ctx.Done():
 	}
 	meter := stall.NewMeter(clk, grace)
 	defer meter.Stop()
@@ -1035,11 +1052,11 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 			stream.close()
 		}()
 		for {
-			dropped := a.readMocks(res, mockChan, ended)
+			stop := a.readMocks(ctx, res, mockChan, ended)
 			if err := res.Body.Close(); err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getoutgoing")
 			}
-			if dropped {
+			if stop {
 				return nil
 			}
 			var ok bool
@@ -1055,14 +1072,19 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 }
 
 // readMocks hands the mocks of one outgoing stream to mockChan until the
-// stream ends. It reports whether it dropped one because the consumer stopped
-// taking them, or the agent ended the stream with its end marker (ended is
-// set), after which the stream must not go on.
-func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock, ended *atomic.Bool) (stop bool) {
+// stream ends. It reports whether the stream must not go on: the agent ended it
+// with its end marker (ended is set), or its client ended it (ctx, the
+// stream's own context, is done). A consumer that is slow to take a mock is
+// waited for (handOff), never a reason to end the stream.
+func (a *AgentClient) readMocks(ctx context.Context, res *http.Response, mockChan chan<- *models.Mock, ended *atomic.Bool) (stop bool) {
 	decoder := gob.NewDecoder(res.Body)
 	for {
 		var mock models.Mock
 		if err := decoder.Decode(&mock); err != nil {
+			if ctx.Err() != nil {
+				// The stream's client ended it: its read was cut.
+				return true
+			}
 			if utils.IsShutdownError(err) {
 				// End of the stream or connection closed during shutdown
 				break
@@ -1083,20 +1105,18 @@ func (a *AgentClient) readMocks(res *http.Response, mockChan chan<- *models.Mock
 		// mockChan <- &mock }`, which threw away a mock already decoded
 		// into our own address space the moment the capture context was
 		// cancelled - silently, with agent-side accounting still reporting
-		// success. Cancellation is the wrong thing to consult here: the
-		// consumer persists on an uncancellable context, so it can always
-		// accept, and the only reason it might not have yet is that it is
-		// busy writing the previous mock.
+		// success. The consumer persists on an uncancellable context, and
+		// the recording's drain reads on what was queued after it ends the
+		// stream, so a mock in hand is still offered then (handOff).
 		//
-		// So always try to deliver, bounded so a genuinely dead consumer
-		// cannot hang the stream. Anything still dropped is data loss and
-		// is logged as an error, because the alternative - a mock set
-		// indistinguishable from one where the call never happened - is
-		// what made this class of bug take an investigation to find.
-		if !handOff(mockChan, &mock, nil, mockHandoffGrace) {
-			utils.LogError(a.logger, nil, "dropping a decoded mock: the consumer did not accept it in time",
+		// What is still dropped is data loss and is logged as an error,
+		// because the alternative - a mock set indistinguishable from one
+		// where the call never happened - is what made this class of bug
+		// take an investigation to find.
+		if !handOff(ctx, mockChan, &mock, nil, mockHandoffGrace) {
+			utils.LogError(a.logger, nil, "dropping a decoded mock: the recording ended the mock stream and took no more mocks from it",
 				zap.String("mock", mock.Name), zap.String("kind", string(mock.Kind)),
-				zap.Duration("waited", mockHandoffGrace))
+				zap.Duration("offered_after_the_end", mockHandoffGrace))
 			return true
 		}
 	}

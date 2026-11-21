@@ -24,13 +24,14 @@ import (
 
 // buildHTTPSchema assembles the HTTPSchema that will live in a doc's Spec,
 // plus, with the proven switch off, performs the time-shaped noisy-field
-// detection that mutates tc.Noise (addTimeShapedNoise). This is the
-// "meaningful work" shared between the YAML and JSON encode paths; it does
-// not touch any yaml.Node or produce any serialized bytes.
+// detection that mutates tc.Noise (addTimeShapedNoise; a case with no noise
+// map gets the noise in a map of its own). This is the "meaningful work"
+// shared between the YAML and JSON encode paths; it does not touch any
+// yaml.Node or produce any serialized bytes.
 func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 	noise := tc.Noise
 	if !provenswitch.On() {
-		addTimeShapedNoise(tc, noise, logger)
+		noise = addTimeShapedNoise(tc, noise, logger)
 	}
 
 	httpSchema := models.HTTPSchema{
@@ -70,7 +71,12 @@ func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 // The Date header a server mints on every answer is not asserted either way:
 // the replay forgives it by its name (models.IsVolatileResponseHeader, unless
 // --disableAutoHeaderNoise), never by its value.
-func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *zap.Logger) {
+//
+// It returns the map it added to: noise itself, or a new one when noise is
+// nil. A test case can come with no noise map at all (one created from the
+// dashboard, whose form sends none, read back from the store), and an entry
+// assigned in a nil map panics.
+func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *zap.Logger) map[string][]string {
 	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
 	if err != nil {
 		utils.LogError(logger, err, "error in flattening http response")
@@ -82,6 +88,11 @@ func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *z
 			}
 		}
 		return pkg.IsTime(strings.Join(vals, ", "))
+	}
+	// A case with no noise map gets one here, before the header loop's first
+	// write; every exit below returns it.
+	if noise == nil {
+		noise = map[string][]string{}
 	}
 	// A body field under a map keyed by ids is written once, naming every id
 	// key (matcher.NoiseIDKey), when it reads as a time under every one of
@@ -102,7 +113,7 @@ func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *z
 		}
 	}
 	if !jsonBody {
-		return
+		return noise
 	}
 	// The rule walks the parsed body: it judges the one entry against every
 	// node the entry would reach, objects, empty ones and nulls included,
@@ -110,11 +121,12 @@ func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *z
 	var doc interface{}
 	if err := json.Unmarshal([]byte(tc.HTTPResp.Body), &doc); err != nil {
 		utils.LogError(logger, err, "error in parsing http response body")
-		return
+		return noise
 	}
 	for _, rel := range matcher.CollapseIDKeyedPaths(doc, func(rel string) bool { return isTime(m["body."+rel]) }) {
 		noise["body."+rel] = []string{}
 	}
+	return noise
 }
 
 // specMetadata builds the spec-level Metadata map carrying the fields that

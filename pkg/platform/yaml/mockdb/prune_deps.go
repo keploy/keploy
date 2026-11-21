@@ -201,6 +201,9 @@ func (p *pruneDeps) keepAlso() map[int]keptAlso {
 // it as an async epoch or a kept mock requires it (keepAlso).
 type pruneVerdict struct {
 	keeps func(*models.Mock) bool
+	// unread is set while the pass judges mocks past where the round read
+	// the file (MockYaml.readUpTo): each is kept.
+	unread bool
 	// keepAlso is the first pass's keepAlso, for the second pass; nil in the
 	// first.
 	keepAlso map[int]keptAlso
@@ -224,7 +227,7 @@ type pruneVerdict struct {
 func (v *pruneVerdict) judge(m *models.Mock) (bool, error) {
 	place := v.place
 	v.place++
-	kept := v.keeps(m)
+	kept := v.unread || v.keeps(m)
 	if v.keepAlso == nil {
 		v.deps.observe(m, kept)
 		return kept, nil
