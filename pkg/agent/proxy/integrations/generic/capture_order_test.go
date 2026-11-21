@@ -3,7 +3,9 @@ package generic
 import (
 	"context"
 	"fmt"
+	"runtime/pprof"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -157,7 +159,7 @@ type recording struct {
 	done    chan error
 	got     []*models.Mock
 	created string // the creation line of the parser's merge and readers
-	loop    string // the start of the stack header of the parser's main loop's goroutine
+	loop    int64  // the id of the parser's main loop's goroutine (asParserLoop)
 }
 
 func startRecording(t *testing.T, plan []fakeconn.Chunk, viaSyncMock bool) *recording {
@@ -194,12 +196,11 @@ func startRecordingUnder(t *testing.T, plan []fakeconn.Chunk, viaSyncMock, withO
 		// RecordOutgoing runs encodeGenericV2 on this goroutine, which
 		// starts the merge and the readers and then runs the main loop
 		// (pairChunkEvents).
-		id <- goroutineID()
+		id <- asParserLoop()
 		r.done <- dispatch(t, sess)
 	}()
-	loop := <-id
-	r.created = fmt.Sprintf("created by %s in goroutine %d", funcName(encodeGenericV2), loop)
-	r.loop = fmt.Sprintf("goroutine %d [", loop)
+	r.loop = <-id
+	r.created = fmt.Sprintf("created by %s in goroutine %d", funcName(encodeGenericV2), r.loop)
 	return r
 }
 
@@ -296,8 +297,9 @@ func takeHandedOn(t *testing.T, mgr *syncMock.SyncMockManager, mocks <-chan *mod
 
 // awaitRest waits until the recording's parser has done all it can with what
 // the row has done, and waits on the row: in one look at every goroutine, its
-// main loop and each of the merge and the readers still alive are blocked on
-// a channel. The parser takes no timer, so it then does nothing more until
+// main loop and every goroutine of it still alive (parserAtRest: the merge,
+// the readers, the manager's drainer) are blocked on a channel. The parser
+// takes no timer, so it then does nothing more until
 // the row puts a chunk, ends a stream, stops the recording or changes the
 // capture order: each reader waits on a read with nothing buffered, or holds
 // a chunk the merge cannot take yet; the merge has handed on every chunk it
@@ -307,16 +309,17 @@ func takeHandedOn(t *testing.T, mgr *syncMock.SyncMockManager, mocks <-chan *mod
 // goroutines for longer than any time a row waits.
 func (r *recording) awaitRest() {
 	r.t.Helper()
-	awaitParserRest(r.t, r.loop, r.created)
+	awaitParserRest(r.t, r.loop)
 }
 
 // awaitLoopRest waits until a row's pairChunkEvents, run on the goroutine
-// whose stack header begins loop (loopHeader), has done all it can with what
-// the row put on its events: it has taken every one (events is empty), and is
-// blocked on a channel. It takes no timer, so it then does nothing more until
-// the row puts an event, ends events or begins the stop. A row driving the
-// loop runs no merge or readers.
-func awaitLoopRest(t *testing.T, loop string, events chan chunkEvent) {
+// loop (asParserLoop), has done all it can with what the row put on its
+// events: it has taken every one (events is empty), and it and every
+// goroutine of it still alive are blocked on a channel (parserAtRest). It
+// takes no timer, so it then does nothing more until the row puts an event,
+// ends events or begins the stop. A row driving the loop runs no merge or
+// readers.
+func awaitLoopRest(t *testing.T, loop int64, events chan chunkEvent) {
 	t.Helper()
 	bound := time.Now().Add(waitBound)
 	for len(events) > 0 {
@@ -325,24 +328,34 @@ func awaitLoopRest(t *testing.T, loop string, events chan chunkEvent) {
 		}
 		time.Sleep(time.Millisecond) // a yield between looks
 	}
-	awaitParserRest(t, loop, "")
+	awaitParserRest(t, loop)
 }
 
-// loopHeader is the start of the stack header of the calling goroutine, as
-// awaitParserRest names a parser's main loop by it.
-func loopHeader() string {
-	return fmt.Sprintf("goroutine %d [", goroutineID())
+// parserLabel is the key of the goroutine label asParserLoop puts on a
+// parser's main loop: a goroutine inherits its starter's labels, so every
+// goroutine the loop starts, and every one they start, carries it, even once
+// its starter has ended. A stack's header prints it (GODEBUG
+// tracebacklabels, on by default since go 1.27, the go of this module).
+const parserLabel = "parserloop"
+
+// asParserLoop names the calling goroutine a parser's main loop for
+// awaitParserRest, and returns its id: it puts parserLabel on it, so the
+// parser's goroutines are known by it whatever starts them.
+func asParserLoop() int64 {
+	id := goroutineID()
+	pprof.SetGoroutineLabels(pprof.WithLabels(context.Background(),
+		pprof.Labels(parserLabel, strconv.FormatInt(id, 10))))
+	return id
 }
 
-// awaitParserRest waits until, in one look at every goroutine, a parser's
-// main loop (the goroutine whose stack header begins loop) and each
-// goroutine still alive whose creation line is created (none when created is
-// empty) are blocked on a channel (parserAtRest).
-func awaitParserRest(t *testing.T, loop, created string) {
+// awaitParserRest waits until, in one look at every goroutine, the parser
+// whose main loop is the goroutine loop (asParserLoop) is at rest
+// (parserAtRest).
+func awaitParserRest(t *testing.T, loop int64) {
 	t.Helper()
 	bound := time.Now().Add(waitBound)
 	for {
-		atRest, looping := parserAtRest(loop, created)
+		atRest, looping := parserAtRest(loop)
 		if !looping {
 			t.Fatal("the parser's main loop returned with its input open")
 		}
@@ -357,22 +370,236 @@ func awaitParserRest(t *testing.T, loop, created string) {
 }
 
 // parserAtRest reports whether, in one look at every goroutine, the goroutine
-// whose stack header begins loop and each one still alive whose creation line
-// is created (none when created is empty) are blocked on a channel, and
-// whether the loop's goroutine is still alive.
-func parserAtRest(loop, created string) (atRest, looping bool) {
-	atRest = true
-	for _, g := range strings.Split(allStacks(), "\n\n") {
+// loop and every goroutine of its parser still alive are blocked on a
+// channel, and whether loop is still alive. A goroutine is the parser's when
+// it carries loop's parserLabel, or when its creation line ("created by FUNC
+// in goroutine N") names loop or a goroutine of the parser: one whose labels
+// were replaced. Every one counts, whatever function started it: one left
+// out could hand a mock on while the rest wait, and a row's check that
+// nothing was handed on yet would pass falsely. A stack it cannot read makes
+// it report no rest.
+func parserAtRest(loop int64) (atRest, looping bool) {
+	return restIn(allStacks(), loop)
+}
+
+// restIn is parserAtRest of the stacks of every goroutine, as
+// runtime.Stack prints them.
+func restIn(stacks string, loop int64) (atRest, looping bool) {
+	type goroutine struct {
+		header   string
+		starter  int64 // the goroutine its creation line names, 0 if none
+		labelled bool  // it carries loop's parserLabel
+	}
+	label := parserLabel + ": " + strconv.FormatInt(loop, 10)
+	all := map[int64]goroutine{}
+	read := true
+	for _, g := range strings.Split(stacks, "\n\n") {
+		if strings.TrimSpace(g) == "" {
+			continue
+		}
 		lines := strings.Split(g, "\n")
-		switch {
-		case strings.HasPrefix(lines[0], loop):
-			looping = true
-			atRest = atRest && blockedOnAChannel(lines[0])
-		case created != "" && createdBy(lines, created):
-			atRest = atRest && blockedOnAChannel(lines[0])
+		id, ok := stackID(lines[0])
+		if !ok {
+			read = false
+			continue
+		}
+		all[id] = goroutine{header: lines[0], starter: starterOf(lines), labelled: hasLabel(lines[0], label)}
+	}
+	// ofParser walks up the starters still alive: a starter is older than
+	// what it starts, so the walk ends; len(all) steps only bound it.
+	ofParser := func(id int64) bool {
+		for range len(all) + 1 {
+			g, alive := all[id]
+			if id == loop || (alive && g.labelled) {
+				return true
+			}
+			if !alive {
+				return false
+			}
+			id = g.starter
+		}
+		return false
+	}
+	_, looping = all[loop]
+	atRest = read && looping
+	for id, g := range all {
+		if ofParser(id) {
+			atRest = atRest && blockedOnAChannel(g.header)
 		}
 	}
-	return atRest && looping, looping
+	return atRest, looping
+}
+
+// stackID is the id a stack's header ("goroutine N [STATE]...") names.
+func stackID(header string) (int64, bool) {
+	rest, ok := strings.CutPrefix(header, "goroutine ")
+	if !ok {
+		return 0, false
+	}
+	n, _, ok := strings.Cut(rest, " ")
+	if !ok {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(n, 10, 64)
+	return id, err == nil && id > 0
+}
+
+// starterOf is the goroutine a stack's creation line ("created by FUNC in
+// goroutine N") names, 0 if it has none.
+func starterOf(lines []string) int64 {
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "created by ") {
+			continue
+		}
+		i := strings.LastIndex(l, " in goroutine ")
+		if i < 0 {
+			return 0
+		}
+		id, err := strconv.ParseInt(l[i+len(" in goroutine "):], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return id
+	}
+	return 0
+}
+
+// hasLabel reports whether a stack's header ("goroutine N [STATE] {K: V,
+// ...}:") carries the label item ("K: V").
+func hasLabel(header, item string) bool {
+	_, labels, ok := strings.Cut(header, "] {")
+	if !ok {
+		return false
+	}
+	for _, l := range strings.Split(strings.TrimSuffix(labels, "}:"), ", ") {
+		if l == item {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTheRestCheckCountsEveryGoroutineOfTheParser: parserAtRest, on which
+// every row's check that nothing was handed on yet rests, counts every
+// goroutine the parser's main loop starts, and every one they start,
+// whatever function starts it, so none can hand a mock on unseen while the
+// rest wait. Each case starts one goroutine that is busy (held in a
+// WaitGroup's wait: not on a channel, as one handing a mock on) beside a
+// loop waiting on a channel, so the parser is not at rest; once it waits on
+// a channel too, the parser is, but not in a look with a stack the check
+// cannot read.
+func TestTheRestCheckCountsEveryGoroutineOfTheParser(t *testing.T) {
+	cases := []struct {
+		name string
+		// start runs on the loop's goroutine and starts busy there or
+		// further down. It returns the id of a goroutine it started that
+		// ends at once, and of one that then waits on stop, for the row to
+		// wait for (0: none).
+		start func(busy func(), stop <-chan struct{}) (ended, waiting int64)
+	}{
+		{"a closure the loop starts", func(busy func(), _ <-chan struct{}) (int64, int64) {
+			go busy()
+			return 0, 0
+		}},
+		{"one started by a goroutine of the parser that has ended", func(busy func(), _ <-chan struct{}) (int64, int64) {
+			starter := make(chan int64, 1)
+			go func() {
+				go busy()
+				starter <- goroutineID()
+			}()
+			return <-starter, 0
+		}},
+		{"one the loop starts that replaced its labels", func(busy func(), _ <-chan struct{}) (int64, int64) {
+			go func() {
+				pprof.SetGoroutineLabels(context.Background())
+				busy()
+			}()
+			return 0, 0
+		}},
+		{"one started by a goroutine the loop starts that replaced its labels", func(busy func(), stop <-chan struct{}) (int64, int64) {
+			starter := make(chan int64, 1)
+			go func() {
+				pprof.SetGoroutineLabels(context.Background())
+				go busy()
+				starter <- goroutineID()
+				<-stop
+			}()
+			return 0, <-starter
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var held sync.WaitGroup
+			held.Add(1)
+			letGo := sync.OnceFunc(held.Done)
+			stop := make(chan struct{})
+			end := sync.OnceFunc(func() { close(stop) })
+			loopID, busyID, done := make(chan int64, 1), make(chan int64, 1), make(chan struct{})
+			others := make(chan [2]int64, 1)
+			go func() {
+				defer close(done)
+				loopID <- asParserLoop()
+				ended, waiting := c.start(func() {
+					busyID <- goroutineID()
+					held.Wait() // busy until the row lets it go
+					<-stop
+				}, stop)
+				others <- [2]int64{ended, waiting}
+				<-stop
+			}()
+			t.Cleanup(func() {
+				letGo()
+				end()
+				<-done
+			})
+			loop := <-loopID
+			o := <-others
+			<-busyID // started, its labels as the case leaves them
+			// Every goroutine of the parser but the busy one has ended or
+			// waits on a channel: only the busy one keeps it from rest.
+			if o[0] != 0 {
+				awaitGoroutine(t, o[0], "ended", func(_ string, alive bool) bool { return !alive })
+			}
+			for _, id := range []int64{loop, o[1]} {
+				if id != 0 {
+					awaitGoroutine(t, id, "waited on a channel", func(header string, alive bool) bool {
+						return alive && blockedOnAChannel(header)
+					})
+				}
+			}
+			if atRest, looping := parserAtRest(loop); atRest || !looping {
+				t.Fatalf("with a goroutine of the parser busy: at rest %v, looping %v; want not at rest, looping", atRest, looping)
+			}
+			letGo()
+			awaitParserRest(t, loop)
+			if atRest, _ := restIn(allStacks()+"\n\nnot a goroutine's stack\n", loop); atRest {
+				t.Fatal("a stack the rest check cannot read left the parser at rest")
+			}
+		})
+	}
+}
+
+// awaitGoroutine waits until done holds of the goroutine id: of its stack's
+// header, and of whether it is alive.
+func awaitGoroutine(t *testing.T, id int64, what string, done func(header string, alive bool) bool) {
+	t.Helper()
+	bound := time.Now().Add(waitBound)
+	for {
+		header, alive := "", false
+		for _, g := range strings.Split(allStacks(), "\n\n") {
+			if got, ok := stackID(g); ok && got == id {
+				header, _, _ = strings.Cut(g, "\n")
+				alive = true
+			}
+		}
+		if done(header, alive) {
+			return
+		}
+		if time.Now().After(bound) {
+			t.Fatalf("setup: goroutine %d never %s", id, what)
+		}
+		time.Sleep(time.Millisecond) // a yield between looks
+	}
 }
 
 // blockedOnAChannel reports whether a stack's header says it waits on a

@@ -140,9 +140,9 @@ func TestV2_TheStopDecidesAnAnswerTeedAheadOfItsRequestAtOnce(t *testing.T) {
 				Ctx: syncMock.NewContext(context.Background(), mgr), ClientConnID: "c", DestStream: dest}
 			events := make(chan chunkEvent, 4)
 			done := make(chan error, 1)
-			loop := make(chan string, 1)
+			loop := make(chan int64, 1)
 			go func() {
-				loop <- loopHeader()
+				loop <- asParserLoop()
 				done <- pairChunkEvents(events, sess, zap.NewNop())
 			}()
 			ahead := stopChunk(fakeconn.FromDest, answer, 2, t0.Add(time.Second))
