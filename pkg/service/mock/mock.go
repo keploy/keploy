@@ -281,7 +281,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 	})
 
 	m.logger.Info("waiting for the keploy-agent compose service to come up",
-		zap.String("agent-uri", pkg.ShownAgentURI(m.config.Agent.AgentURI)))
+		zap.String("agent-uri", pkg.ShownAgentURI(m.config.AgentURI())))
 
 	// The wait follows the agent container's BOOT, which is exactly what this
 	// waits on, as keploy record's same wait does: it lasts while the start
@@ -293,7 +293,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 	agentCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	agentReadyCh := make(chan bool, 1)
-	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh)
+	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.AgentURI, agentReadyCh)
 	agentStart := pkg.WatchAgentStart(agentCtx, m.instrumentation)
 
 	select {

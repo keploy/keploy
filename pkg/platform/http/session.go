@@ -695,7 +695,7 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 
 // session is the session of the agent this client talks to.
 func (a *AgentClient) session() *agentSession {
-	return sessionFor(a.conf.Agent.AgentURI)
+	return sessionFor(a.conf.AgentURI())
 }
 
 // setUpRestartedAgent sets up the agent docker compose started again, once it
@@ -714,11 +714,11 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	// (App.retryComposeUp). So the app ran against none of the process it
 	// replaced, whether or not the setup below takes: the replay counts
 	// what this one counts from its start (AgentStartedBeforeApp).
-	instancesAt(agentHost(a.conf.Agent.AgentURI)).startedBeforeApp()
+	instancesAt(agentHost(a.conf.AgentURI())).startedBeforeApp()
 	// A docker-mode agent that restarted holds no container list, nor the
 	// names its networks answer.
 	a.pushContainers(ctx)
-	forgetNetworkNames(a.conf.Agent.AgentURI)
+	forgetNetworkNames(a.conf.AgentURI())
 	a.pushNetworkNames(ctx)
 	if err := s.reapply(ctx, a.logger); err != nil {
 		return err
@@ -729,7 +729,7 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	// and the app starts behind this agent's readiness, put back last. So
 	// what a watch of the agent's process keeps to (a test set's evidence)
 	// is all on this one.
-	instancesAt(agentHost(a.conf.Agent.AgentURI)).accept()
+	instancesAt(agentHost(a.conf.AgentURI())).accept()
 	s.setUpDone()
 	return nil
 }
@@ -752,7 +752,7 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 	defer tick.Stop()
 	for {
 		probe, cancelProbe := context.WithTimeout(ctx, 500*time.Millisecond)
-		req, err := newAgentRequest(probe, http.MethodGet, a.conf.Agent.AgentURI+"/health", nil)
+		req, err := newAgentRequest(probe, http.MethodGet, a.conf.AgentURI()+"/health", nil)
 		if err == nil {
 			if res, err := doAgent(&a.client, req); err == nil {
 				_ = res.Body.Close()
@@ -766,10 +766,10 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("keploy's agent, started again by docker compose, did not answer at %s: %w",
-				pkg.ShownAgentURI(a.conf.Agent.AgentURI), ctx.Err())
+				pkg.ShownAgentURI(a.conf.AgentURI()), ctx.Err())
 		case err := <-start:
 			return fmt.Errorf("keploy's agent, started again by docker compose, did not come up at %s: %w",
-				pkg.ShownAgentURI(a.conf.Agent.AgentURI), err)
+				pkg.ShownAgentURI(a.conf.AgentURI()), err)
 		case <-tick.C:
 		}
 	}
@@ -865,7 +865,7 @@ func (a *AgentClient) streamRequestOf(method, path string, body []byte) streamRe
 		if body != nil {
 			rd = bytes.NewReader(body)
 		}
-		req, err := newAgentRequest(ctx, method, a.conf.Agent.AgentURI+path, rd)
+		req, err := newAgentRequest(ctx, method, a.conf.AgentURI()+path, rd)
 		if err != nil {
 			return nil, err
 		}

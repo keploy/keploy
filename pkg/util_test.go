@@ -2627,7 +2627,7 @@ func TestAgentHealthTicker_ReachesAnAgentSlowerThanTheFirstCheck(t *testing.T) {
 	defer cancel()
 
 	readyCh := make(chan bool, 1)
-	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh)
+	go AgentHealthTicker(ctx, zap.NewNop(), func() string { return srv.URL + "/agent" }, readyCh)
 
 	ready, open := <-readyCh
 	require.True(t, open && ready, "the agent answered every health check in 750ms and was never found ready")

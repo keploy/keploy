@@ -42,7 +42,7 @@ func (a *AgentClient) pushContainers(ctx context.Context) {
 	if !provenswitch.On() {
 		return
 	}
-	uri := a.conf.Agent.AgentURI
+	uri := a.conf.AgentURI()
 	v, ok := containerPushers.Load(uri)
 	if !ok {
 		takes, older, err := a.agentTakesContainers(ctx, uri)

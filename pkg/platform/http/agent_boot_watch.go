@@ -565,7 +565,7 @@ func (a *AgentClient) nameAgentContainer(name string) {
 	c := &namedContainer{name: name}
 	a.mu.Lock()
 	a.agentContainer, a.agentContainerAt = c, ""
-	if uri := a.conf.Agent.AgentURI; uri != "" {
+	if uri := a.conf.AgentURI(); uri != "" {
 		a.agentContainerAt = agentHost(uri)
 	}
 	at := a.agentContainerAt
@@ -1132,8 +1132,8 @@ func (a *AgentClient) watchAgent(ctx context.Context, endOnExit bool) (errs <-ch
 		if run.bootPrompt {
 			running = run.sudoRanAgent
 		}
-	case a.conf != nil && a.conf.Agent.AgentURI != "":
-		return a.watchAgentAt(ctx, a.conf.Agent.AgentURI)
+	case a.conf != nil && a.conf.AgentURI() != "":
+		return a.watchAgentAt(ctx, a.conf.AgentURI())
 	default:
 		return nil, nil
 	}

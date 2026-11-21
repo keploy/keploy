@@ -166,7 +166,7 @@ func (w *instanceWatch) Stop() {
 // WatchAgentInstance begins a watch of which agent process answers at this
 // client's agent address (models.AgentInstanceWatch).
 func (a *AgentClient) WatchAgentInstance() models.AgentInstanceWatch {
-	return instancesAt(agentHost(a.conf.Agent.AgentURI)).watch()
+	return instancesAt(agentHost(a.conf.AgentURI())).watch()
 }
 
 // AgentStartedBeforeApp reports whether the agent process instance
@@ -179,7 +179,7 @@ func (a *AgentClient) WatchAgentInstance() models.AgentInstanceWatch {
 // kubelet started again under a running application included, and for ""
 // (an answer that names none).
 func (a *AgentClient) AgentStartedBeforeApp(instance string) bool {
-	return instancesAt(agentHost(a.conf.Agent.AgentURI)).wasStartedBeforeApp(instance)
+	return instancesAt(agentHost(a.conf.AgentURI())).wasStartedBeforeApp(instance)
 }
 
 // agentHost is the host:port of the agent URI uri, as its requests carry it.

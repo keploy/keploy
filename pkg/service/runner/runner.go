@@ -378,7 +378,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	// is still settling — firing MockOutgoing immediately produces a
 	// "connect: connection refused" on the agent URL. Mirrors replay's
 	// pre-MockOutgoing AgentHealthTicker gate (replay.go:939-952).
-	if r.config != nil && r.config.Agent.AgentURI != "" {
+	if r.config != nil && r.config.AgentURI() != "" {
 		// The gate follows the agent's start, as the record and replay gates
 		// do, not a clock: it lasts while the start makes progress (and while
 		// the engine has not run the agent's container yet), and ends once the
@@ -388,7 +388,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		// waited out the whole of it for one that had stopped.
 		agentCtx, cancel := context.WithCancel(gCtx)
 		agentReadyCh := make(chan bool, 1)
-		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh)
+		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.AgentURI, agentReadyCh)
 		agentStart := r.instrumentation.WatchAgentStart(agentCtx)
 		select {
 		case <-gCtx.Done():
@@ -399,7 +399,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			if gCtx.Err() != nil {
 				return nil, gCtx.Err()
 			}
-			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", keployPkg.ShownAgentURI(r.config.Agent.AgentURI), err)
+			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", keployPkg.ShownAgentURI(r.config.AgentURI()), err)
 		case ready, ok := <-agentReadyCh:
 			if !ok || !ready {
 				cancel()

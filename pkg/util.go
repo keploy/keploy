@@ -3780,7 +3780,11 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 // for it, off this goroutine and after the readiness signal, so the check never
 // spends the caller's readiness budget. That check can log at error level, which
 // keploy's CI treats as fatal.
-func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool) {
+//
+// agentURI is read at each check, not once: a compose start that moves the
+// agent off a port the engine refused to publish moves the address the next
+// check reaches (config.(*Config).AgentURI).
+func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI func() string, agentReadyCh chan<- bool) {
 	defer close(agentReadyCh)
 	agentHealthTicker(ctx, logger, wallClock{}, agentURI, func(http.Header) bool {
 		select {
@@ -3797,7 +3801,7 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 // so the caller reads what that same answer said, with no second request that
 // an agent which has since stopped answering, or a budget that has since run
 // out, could fail. A receive that gets nil means ctx ended first.
-func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI string, answers chan<- http.Header) {
+func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI func() string, answers chan<- http.Header) {
 	defer close(answers)
 	agentHealthTicker(ctx, logger, wallClock{}, agentURI, func(header http.Header) bool {
 		select {
@@ -3851,12 +3855,12 @@ func (wallClock) WithTimeout(ctx context.Context, d time.Duration) (context.Cont
 // port forward may, is followed at once): an agent up a few milliseconds
 // after keploy started it is found then, and one slow to start within about
 // AgentHealthEvery of coming up. All of it is timed by clock.
-func agentHealthTicker(ctx context.Context, logger *zap.Logger, clock agentHealthClock, agentURI string, ready func(http.Header) bool) {
+func agentHealthTicker(ctx context.Context, logger *zap.Logger, clock agentHealthClock, agentURI func() string, ready func(http.Header) bool) {
 	// No client-wide timeout: each check waits as long as `wait` (below).
 	client := &http.Client{}
 	wait := agentHealthFirstWait
 	// Said once, not at each check: twenty a second would bury the log.
-	logger.Debug("Checking agent health", zap.String("url", ShownAgentURI(agentURI+"/health")), zap.Duration("every", AgentHealthEvery))
+	logger.Debug("Checking agent health", zap.String("url", ShownAgentURI(agentURI()+"/health")), zap.Duration("every", AgentHealthEvery))
 
 	pause := agentHealthFirstLook
 	for {
@@ -3864,13 +3868,17 @@ func agentHealthTicker(ctx context.Context, logger *zap.Logger, clock agentHealt
 			return
 		}
 		began := clock.Now()
+		// Read at each check: a compose start moves the agent off a port
+		// the engine would not publish (config.(*Config).AgentURI), and the
+		// next check reaches it where it moved.
+		uri := agentURI()
 		checkCtx, cancel := clock.WithTimeout(ctx, wait)
-		header := agentHealthAnswer(checkCtx, logger, client, agentURI)
+		header := agentHealthAnswer(checkCtx, logger, client, uri)
 		timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 		cancel()
 		if next := nextAgentHealthWait(wait, timedOut); next != wait {
 			logger.Debug("agent health check ran out of time; the next one waits longer",
-				zap.String("agentURI", ShownAgentURI(agentURI)), zap.Duration("waited", wait), zap.Duration("next_wait", next))
+				zap.String("agentURI", ShownAgentURI(uri)), zap.Duration("waited", wait), zap.Duration("next_wait", next))
 			wait = next
 		}
 		if header == nil {
@@ -3887,7 +3895,7 @@ func agentHealthTicker(ctx context.Context, logger *zap.Logger, clock agentHealt
 			// the caller cancels this context as soon as it has its
 			// answer, which would cancel the check before it could
 			// report anything.
-			go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
+			go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, uri)
 		}
 		return
 	}

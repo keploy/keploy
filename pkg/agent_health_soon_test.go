@@ -242,7 +242,7 @@ func startOn(t *testing.T, h *healthAgent) *tickerRun {
 	ready := make(chan bool, 1)
 	go func() {
 		defer close(ready)
-		agentHealthTicker(ctx, zap.NewNop(), clock, srv.URL+"/agent", func(http.Header) bool {
+		agentHealthTicker(ctx, zap.NewNop(), clock, func() string { return srv.URL + "/agent" }, func(http.Header) bool {
 			select {
 			case ready <- true:
 				return true

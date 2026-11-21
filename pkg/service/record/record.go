@@ -2616,7 +2616,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	if r.config.CommandType == string(utils.DockerCompose) {
 
-		r.logger.Info("Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", pkg.ShownAgentURI(r.config.Agent.AgentURI)))
+		r.logger.Info("Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", pkg.ShownAgentURI(r.config.AgentURI())))
 
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
@@ -2638,7 +2638,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh)
+		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.AgentURI, agentReadyCh)
 		agentStart := pkg.WatchAgentStart(agentCtx, r.instrumentation)
 
 		select {
