@@ -73,12 +73,36 @@ var (
 // caRunLockWarned keeps the warning that a run took no lock to one per process.
 var caRunLockWarned atomic.Bool
 
-// warnNoCARunLock says, once per process, that this run took no lock, and why:
-// the failure the lock prevents can then come back.
-func warnNoCARunLock(logger *zap.Logger, why string, fields ...zap.Field) {
+// caRunLockTry is tryLockFile; a variable so tests can make a try fail.
+var caRunLockTry = tryLockFile
+
+// errCARunLockHeld is waitForLock's error when its file stayed held through
+// caRunLockWait.
+var errCARunLockHeld = errors.New("still held")
+
+// warnNoCARunLock says, once per process, that this run took no lock, why, what
+// that risks (the failure the lock prevents can then come back), and how to fix
+// it (fix).
+func warnNoCARunLock(logger *zap.Logger, why, fix string, fields ...zap.Field) {
 	if caRunLockWarned.CompareAndSwap(false, true) {
-		logger.Warn("keploy could not take this run's lock ("+why+"), so another keploy run on this host may remove this run's CA from the trust stores while it runs, and the app's TLS calls then fail", fields...)
+		logger.Warn("keploy could not take this run's lock ("+why+"), so another keploy run on this host may remove this run's CA from the trust stores while it runs, and the app's TLS calls then fail. "+fix, fields...)
 	}
+}
+
+// caRunIDFix says how to fix an id that cannot name a lock file. Only a CA
+// keploy reuses from its CA key directory (KEPLOY_CA_KEY_DIR on Kubernetes, the
+// user's on Windows) can carry one: the id is the end of its common name, and
+// a CA keploy makes has a hex id.
+func caRunIDFix() string {
+	return fmt.Sprintf("To fix it, remove the CA keploy reuses (%s and %s in its CA key directory) so that keploy makes its own, or give that CA a common name of %q followed by letters, digits, '-' and '_' only.",
+		caKeyFileName, caCertFileName, caCNPrefix)
+}
+
+// caRunLockHeldFix says how to fix a run's lock file that another process
+// kept locked: that process (holder, as storeLockHolder names it) goes on and
+// lets go, or ends.
+func caRunLockHeldFix(path, holder string) string {
+	return fmt.Sprintf("To fix it, let the process that holds the lock on %s go on, or end it: %s.", path, holder)
 }
 
 // caRunLockName is the name id's lock files start with: id in lower case (a JDK
@@ -104,8 +128,8 @@ func caRunLockName(id string) (name string, ok bool) {
 // taken (the id cannot name a lock file, the directory cannot be made, the
 // file cannot be opened, or it stays held past caRunLockWait or cannot be
 // locked), the run goes on unprotected, as every run did before these locks,
-// and says so once (warnNoCARunLock); when ctx ends first, the run is stopping,
-// and it says so only at Debug.
+// and says so once, with how to fix it (warnNoCARunLock); when ctx ends first,
+// the run is stopping, and it says so only at Debug.
 func holdCARunLock(ctx context.Context, logger *zap.Logger, id string) {
 	caRunLock.mu.Lock()
 	defer caRunLock.mu.Unlock()
@@ -115,14 +139,14 @@ func holdCARunLock(ctx context.Context, logger *zap.Logger, id string) {
 	releaseCARunLockLocked()
 	name, ok := caRunLockName(id)
 	if !ok {
-		warnNoCARunLock(logger, "its id cannot name a lock file", zap.String("run_id", id))
-		return
-	}
-	if err := os.MkdirAll(caRunsDir, 0o755); err != nil {
-		warnNoCARunLock(logger, "the directory of keploy runs' locks cannot be made", zap.String("dir", caRunsDir), zap.Error(err))
+		warnNoCARunLock(logger, "its id cannot name a lock file", caRunIDFix(), zap.String("run_id", id))
 		return
 	}
 	path := filepath.Join(caRunsDir, fmt.Sprintf("%s.%d.lock", name, os.Getpid()))
+	if err := os.MkdirAll(caRunsDir, 0o755); err != nil {
+		warnNoCARunLock(logger, "the directory of keploy runs' locks cannot be made", lockFix(path, "read and write"), zap.String("dir", caRunsDir), zap.Error(err))
+		return
+	}
 	// 0600: on Linux only root, whose runs sweep, opens it (a sweep that
 	// cannot open a lock file counts its run as live). On Windows the mode
 	// only decides the read-only attribute, which 0600 leaves unset; the
@@ -130,10 +154,16 @@ func holdCARunLock(ctx context.Context, logger *zap.Logger, id string) {
 	// #nosec G304 -- the path is caRunsDir and a name caRunLockName checked.
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
-		warnNoCARunLock(logger, "its lock file cannot be opened", zap.String("path", path), zap.Error(err))
+		warnNoCARunLock(logger, "its lock file cannot be opened", lockFix(path, "read and write"), zap.String("path", path), zap.Error(err))
 		return
 	}
 	if err := waitForLock(ctx, f); err != nil {
+		// Who holds it, read while the file is open (storeLockHolder reads
+		// the kernel's table of locks by the open file's id).
+		holder := ""
+		if errors.Is(err, errCARunLockHeld) {
+			holder = storeLockHolder(f)
+		}
 		// The file stays (on Windows its holder has it open).
 		_ = f.Close()
 		if ctx.Err() != nil {
@@ -143,7 +173,11 @@ func holdCARunLock(ctx context.Context, logger *zap.Logger, id string) {
 			logger.Debug("this run stopped before it had its lock", zap.String("path", path), zap.Error(err))
 			return
 		}
-		warnNoCARunLock(logger, "its lock file stayed held by another process, or could not be locked", zap.String("path", path), zap.Error(err))
+		if errors.Is(err, errCARunLockHeld) {
+			warnNoCARunLock(logger, "its lock file stayed held by another process", caRunLockHeldFix(path, holder), zap.String("path", path), zap.Error(err))
+			return
+		}
+		warnNoCARunLock(logger, "its lock file could not be locked", lockFix(path, "read and write"), zap.String("path", path), zap.Error(err))
 		return
 	}
 	caRunLock.id, caRunLock.path, caRunLock.f = id, path, f
@@ -155,7 +189,7 @@ func holdCARunLock(ctx context.Context, logger *zap.Logger, id string) {
 func waitForLock(ctx context.Context, f *os.File) error {
 	deadline := time.Now().Add(caRunLockWait)
 	for {
-		locked, err := tryLockFile(f)
+		locked, err := caRunLockTry(f)
 		if err != nil {
 			return err
 		}
@@ -163,7 +197,7 @@ func waitForLock(ctx context.Context, f *os.File) error {
 			return nil
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("still held after %s", caRunLockWait)
+			return fmt.Errorf("%w after %s", errCARunLockHeld, caRunLockWait)
 		}
 		select {
 		case <-ctx.Done():

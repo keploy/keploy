@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,23 +173,42 @@ func TestCARunLockWithoutTheDirectory(t *testing.T) {
 	}
 }
 
-// A run that can take no lock says why: its id names no lock file, the lock
-// directory cannot be made (a file holds a name on its path), or its lock file
-// cannot be opened (a directory holds its name).
+// A run that can take no lock says why, and how to fix it: its id names no
+// lock file (the CA keploy reuses to remove, or its common name to change), the
+// lock directory cannot be made (a file holds a name on its path), or its lock
+// file cannot be opened (a directory holds its name): the lock's directory, the
+// directory above it and the lock's file, with the access each needs.
 func TestCARunLockWarnsWhyItTookNone(t *testing.T) {
 	useRunsDir(t)
 	t.Cleanup(func() { caRunLockWarned.Store(false) })
-	notDir := filepath.Join(caRunsDir, "a-file")
+	runs := caRunsDir
+	notDir := filepath.Join(runs, "a-file")
 	if err := os.WriteFile(notDir, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(ownLockFile("0a1b2c"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, row := range []struct{ dir, id, why string }{
-		{caRunsDir, "abc.def", "its id cannot name a lock file"},
-		{filepath.Join(notDir, "runs"), "0a1b2c", "the directory of keploy runs' locks cannot be made"},
-		{caRunsDir, "0a1b2c", "its lock file cannot be opened"},
+	// pathFix is what the warning says for a lock file in dir.
+	pathFix := func(dir string) []string {
+		path := filepath.Join(dir, "0a1b2c."+strconv.Itoa(os.Getpid())+".lock")
+		return []string{
+			"make the directory " + dir + " (write access to " + filepath.Dir(dir) + ")",
+			"create the file " + path + " (write access to " + dir + ")",
+			"or create that file with read and write access for that user",
+			"keep " + dir + " on a file system that supports file locks",
+		}
+	}
+	for _, row := range []struct {
+		dir, id, why string
+		fix          []string
+	}{
+		{runs, "abc.def", "its id cannot name a lock file", []string{
+			"remove the CA keploy reuses (ca.key and ca.crt in its CA key directory) so that keploy makes its own",
+			`or give that CA a common name of "Keploy MITM CA " followed by letters, digits, '-' and '_' only`,
+		}},
+		{filepath.Join(notDir, "runs"), "0a1b2c", "the directory of keploy runs' locks cannot be made", pathFix(filepath.Join(notDir, "runs"))},
+		{runs, "0a1b2c", "its lock file cannot be opened", pathFix(runs)},
 	} {
 		caRunsDir = row.dir
 		caRunLockWarned.Store(false)
@@ -198,6 +219,12 @@ func TestCARunLockWarnsWhyItTookNone(t *testing.T) {
 		}
 		if logs.Len() != 1 || logs.FilterMessageSnippet("("+row.why+")").Len() != 1 {
 			t.Fatalf("id %q in %s: warnings %v, want one saying %q", row.id, row.dir, logs.All(), row.why)
+		}
+		msg := logs.All()[0].Message
+		for _, want := range append([]string{"the app's TLS calls then fail. To fix it, "}, row.fix...) {
+			if !strings.Contains(msg, want) {
+				t.Errorf("id %q in %s: the warning %q does not say %q", row.id, row.dir, msg, want)
+			}
 		}
 	}
 }
@@ -246,7 +273,7 @@ func TestCARunLockWaitsForAFileHeldByAnother(t *testing.T) {
 	caRunLockWarned.Store(false)
 	oldWait := caRunLockWait
 	t.Cleanup(func() { caRunLockWarned.Store(false); caRunLockWait = oldWait })
-	const warn = "keploy could not take this run's lock (its lock file stayed held by another process, or could not be locked)"
+	const warn = "keploy could not take this run's lock (its lock file stayed held by another process)"
 
 	// Each row's bound: generous where the run must take its lock (a slow
 	// runner only makes it wait longer), and short where it must give up.
@@ -285,6 +312,45 @@ func TestCARunLockWaitsForAFileHeldByAnother(t *testing.T) {
 		}
 		if n := logs.FilterMessageSnippet(warn).Len(); n != 1 || logs.Len() != 1 {
 			t.Fatalf("warnings %v, want the one saying the file stayed held", logs.All())
+		}
+		// It names the fix: the process that holds the file, which on Linux
+		// the kernel's table of locks names (here this process, through
+		// its other handle). Windows does not tell who holds a lock.
+		msg := logs.All()[0].Message
+		want := "To fix it, let the process that holds the lock on " + ownLockFile("0a1b2c") + " go on, or end it: "
+		if runtime.GOOS == "linux" {
+			want += "process " + strconv.Itoa(os.Getpid()) + " ("
+		} else {
+			want += storeLockHolderUnknown + "."
+		}
+		if !strings.Contains(msg, want) {
+			t.Fatalf("the warning %q does not say %q", msg, want)
+		}
+	})
+
+	t.Run("a try fails", func(t *testing.T) {
+		caRunLockWarned.Store(false)
+		caRunLockWait = 30 * time.Second
+		old := caRunLockTry
+		caRunLockTry = func(*os.File) (bool, error) { return false, errors.New("injected") }
+		t.Cleanup(func() { caRunLockTry = old })
+		core, logs := observer.New(zapcore.WarnLevel)
+		holdCARunLock(context.Background(), zap.New(core), "0a1b2c")
+		if caRunLock.f != nil {
+			t.Fatal("the run holds a lock whose try failed")
+		}
+		const failed = "keploy could not take this run's lock (its lock file could not be locked)"
+		if n := logs.FilterMessageSnippet(failed).Len(); n != 1 || logs.Len() != 1 {
+			t.Fatalf("warnings %v, want the one saying the file could not be locked", logs.All())
+		}
+		msg := logs.All()[0].Message
+		for _, want := range []string{
+			"or create that file with read and write access for that user",
+			"keep " + caRunsDir + " on a file system that supports file locks",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the warning %q does not say %q", msg, want)
+			}
 		}
 	})
 

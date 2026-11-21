@@ -238,21 +238,22 @@ func waitForStoreLock(ctx context.Context, logger *zap.Logger, f *os.File, path 
 // warnNoStoreLock says, once per process, that a change of a trust store ran
 // without the store lock, why (err), what that risks (keploy runs on this host
 // that change one store at once race, and one may undo another's change), and
-// how to give the runs the lock (storeLockFix).
+// how to give the runs the lock (lockFix).
 func warnNoStoreLock(logger *zap.Logger, path string, err error) {
 	if storeLockWarned.CompareAndSwap(false, true) {
-		logger.Warn("keploy could not take the trust stores' lock, so it changes trust stores without it: keploy runs on this host that change the same trust store at the same time race, and one may undo another's change. "+storeLockFix(path),
+		logger.Warn("keploy could not take the trust stores' lock, so it changes trust stores without it: keploy runs on this host that change the same trust store at the same time race, and one may undo another's change. "+lockFix(path, "read"),
 			zap.String("lock", path), zap.Error(err))
 	}
 }
 
-// storeLockFix says what the store lock at path needs so that a run can take
-// it, as lockStores takes it: its directory, which a run makes when it is
-// missing (write access to the directory above it), and its file, which a run
-// creates in that directory (write access to it) or opens to read when it is
-// there, and then locks.
-func storeLockFix(path string) string {
+// lockFix says what the lock file at path needs so that a run can take its
+// lock, as the store lock (lockStores) and a run's own lock (holdCARunLock)
+// are taken: its directory, which a run makes when it is missing (write access
+// to the directory above it), and its file, which a run creates in that
+// directory (write access to it) or opens with access ("read" for the store
+// lock, "read and write" for a run's own) when it is there, and then locks.
+func lockFix(path, access string) string {
 	dir := filepath.Dir(path)
-	return fmt.Sprintf("To fix it, let the user keploy runs as make the directory %s (write access to %s), or make it for that user; let it create the file %s (write access to %s), or create that file with read access for that user; and keep %s on a file system that supports file locks.",
-		dir, filepath.Dir(dir), path, dir, dir)
+	return fmt.Sprintf("To fix it, let the user keploy runs as make the directory %s (write access to %s), or make it for that user; let it create the file %s (write access to %s), or create that file with %s access for that user; and keep %s on a file system that supports file locks.",
+		dir, filepath.Dir(dir), path, dir, access, dir)
 }
