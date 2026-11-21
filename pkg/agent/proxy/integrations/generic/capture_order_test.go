@@ -3,7 +3,9 @@ package generic
 import (
 	"context"
 	"fmt"
+	"runtime/pprof"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -157,6 +159,7 @@ type recording struct {
 	done    chan error
 	got     []*models.Mock
 	created string // the creation line of the parser's merge and readers
+	loop    int64  // the id of the parser's main loop's goroutine (asParserLoop)
 }
 
 func startRecording(t *testing.T, plan []fakeconn.Chunk, viaSyncMock bool) *recording {
@@ -188,14 +191,16 @@ func startRecordingUnder(t *testing.T, plan []fakeconn.Chunk, viaSyncMock, withO
 	}
 	r := &recording{t: t, order: order, streams: [2]*fakeconn.FakeConn{sess.ClientStream, sess.DestStream},
 		chans: [2]chan fakeconn.Chunk{clientCh, destCh}, mocks: mocks, mgr: mgr, done: make(chan error, 1)}
-	created := make(chan string, 1)
+	id := make(chan int64, 1)
 	go func() {
 		// RecordOutgoing runs encodeGenericV2 on this goroutine, which
-		// starts the merge and the readers.
-		created <- fmt.Sprintf("created by %s in goroutine %d", funcName(encodeGenericV2), goroutineID())
+		// starts the merge and the readers and then runs the main loop
+		// (pairChunkEvents).
+		id <- asParserLoop()
 		r.done <- dispatch(t, sess)
 	}()
-	r.created = <-created
+	r.loop = <-id
+	r.created = fmt.Sprintf("created by %s in goroutine %d", funcName(encodeGenericV2), r.loop)
 	return r
 }
 
@@ -231,22 +236,380 @@ func (r *recording) taken(c fakeconn.Chunk) {
 	}
 }
 
-// recorded waits up to within for a mock whose pairs (pairsOf) include pair.
-func (r *recording) recorded(pair string, within time.Duration) bool {
-	bound := time.After(within)
-	for {
-		for _, p := range pairsOf(r.got) {
-			if p == pair {
-				return true
-			}
-		}
-		select {
-		case m := <-r.mocks:
-			r.got = append(r.got, m)
-		case <-bound:
-			return false
+// putAtRest puts c on its stream, and waits until the parser has done all it
+// can with it (awaitRest): the merge has taken c before any chunk put after
+// it, so even chunks it cannot place (no capture number, or a session with no
+// capture order), which it hands on in the order it takes them, reach the
+// pairing in the order put. That c's reader has taken it off its stream
+// (taken) is not enough: the reader may still hold it, and a chunk put on the
+// other stream after it can reach the merge first.
+func (r *recording) putAtRest(c fakeconn.Chunk) {
+	r.put(c)
+	r.awaitRest()
+}
+
+// recorded reports whether a mock whose pairs (pairsOf) include pair has been
+// recorded once the parser has done all it can with what the row has done
+// (awaitRest): a mock it has not handed on by then, it hands on only once the
+// row does more.
+func (r *recording) recorded(pair string) bool {
+	r.t.Helper()
+	r.awaitRest()
+	r.takeMocks()
+	for _, p := range pairsOf(r.got) {
+		if p == pair {
+			return true
 		}
 	}
+	return false
+}
+
+// takeMocks takes every mock the parser has handed on so far: those on the
+// channel, and, handed to the manager, those still on their way to it
+// (SyncMockManager.OutQueued). Once the manager has none on their way, every
+// mock it was handed is on the channel.
+func (r *recording) takeMocks() {
+	r.t.Helper()
+	r.got = append(r.got, takeHandedOn(r.t, r.mgr, r.mocks)...)
+}
+
+// takeHandedOn takes every mock on mocks, and, once mgr has none on their
+// way to it (SyncMockManager.OutQueued), every mock mgr was handed: what a
+// parser that has done all it can has handed on, whichever way.
+func takeHandedOn(t *testing.T, mgr *syncMock.SyncMockManager, mocks <-chan *models.Mock) []*models.Mock {
+	t.Helper()
+	var got []*models.Mock
+	bound := time.Now().Add(waitBound)
+	for {
+		queued := mgr.OutQueued()
+		for len(mocks) > 0 {
+			got = append(got, <-mocks)
+		}
+		if !queued {
+			return got
+		}
+		if time.Now().After(bound) {
+			t.Fatal("the manager never put on the channel the mocks it had on their way to it")
+		}
+		time.Sleep(time.Millisecond) // a yield between looks
+	}
+}
+
+// awaitRest waits until the recording's parser has done all it can with what
+// the row has done, and waits on the row: in one look at every goroutine, its
+// main loop and every goroutine of it still alive (parserAtRest: the merge,
+// the readers, the manager's drainer) are blocked on a channel. The parser
+// takes no timer, so it then does nothing more until
+// the row puts a chunk, ends a stream, stops the recording or changes the
+// capture order: each reader waits on a read with nothing buffered, or holds
+// a chunk the merge cannot take yet; the merge has handed on every chunk it
+// can place; and the loop has taken every chunk handed on, and handed on every
+// mock it could make of them, or waits for an answer chunk the merge holds.
+// It replaces a wait for a time: a loaded box can stop the parser's
+// goroutines for longer than any time a row waits.
+func (r *recording) awaitRest() {
+	r.t.Helper()
+	awaitParserRest(r.t, r.loop)
+}
+
+// awaitLoopRest waits until a row's pairChunkEvents, run on the goroutine
+// loop (asParserLoop), has done all it can with what the row put on its
+// events: it has taken every one (events is empty), and it and every
+// goroutine of it still alive are blocked on a channel (parserAtRest). It
+// takes no timer, so it then does nothing more until the row puts an event,
+// ends events or begins the stop. A row driving the loop runs no merge or
+// readers.
+func awaitLoopRest(t *testing.T, loop int64, events chan chunkEvent) {
+	t.Helper()
+	bound := time.Now().Add(waitBound)
+	for len(events) > 0 {
+		if time.Now().After(bound) {
+			t.Fatal("the parser's main loop never took the events the row put")
+		}
+		time.Sleep(time.Millisecond) // a yield between looks
+	}
+	awaitParserRest(t, loop)
+}
+
+// parserLabel is the key of the goroutine label asParserLoop puts on a
+// parser's main loop: a goroutine inherits its starter's labels, so every
+// goroutine the loop starts, and every one they start, carries it, even once
+// its starter has ended. A stack's header prints it (GODEBUG
+// tracebacklabels, on by default since go 1.27, the go of this module).
+const parserLabel = "parserloop"
+
+// asParserLoop names the calling goroutine a parser's main loop for
+// awaitParserRest, and returns its id: it puts parserLabel on it, so the
+// parser's goroutines are known by it whatever starts them.
+func asParserLoop() int64 {
+	id := goroutineID()
+	pprof.SetGoroutineLabels(pprof.WithLabels(context.Background(),
+		pprof.Labels(parserLabel, strconv.FormatInt(id, 10))))
+	return id
+}
+
+// awaitParserRest waits until, in one look at every goroutine, the parser
+// whose main loop is the goroutine loop (asParserLoop) is at rest
+// (parserAtRest).
+func awaitParserRest(t *testing.T, loop int64) {
+	t.Helper()
+	bound := time.Now().Add(waitBound)
+	for {
+		atRest, looping := parserAtRest(loop)
+		if !looping {
+			t.Fatal("the parser's main loop returned with its input open")
+		}
+		if atRest {
+			return
+		}
+		if time.Now().After(bound) {
+			t.Fatal("the parser never came to rest with what the row had done")
+		}
+		time.Sleep(time.Millisecond) // a yield between looks
+	}
+}
+
+// parserAtRest reports whether, in one look at every goroutine, the goroutine
+// loop and every goroutine of its parser still alive are blocked on a
+// channel, and whether loop is still alive. A goroutine is the parser's when
+// it carries loop's parserLabel, or when its creation line ("created by FUNC
+// in goroutine N") names loop or a goroutine of the parser: one whose labels
+// were replaced. Every one counts, whatever function started it: one left
+// out could hand a mock on while the rest wait, and a row's check that
+// nothing was handed on yet would pass falsely. A stack it cannot read makes
+// it report no rest.
+func parserAtRest(loop int64) (atRest, looping bool) {
+	return restIn(allStacks(), loop)
+}
+
+// restIn is parserAtRest of the stacks of every goroutine, as
+// runtime.Stack prints them.
+func restIn(stacks string, loop int64) (atRest, looping bool) {
+	type goroutine struct {
+		header   string
+		starter  int64 // the goroutine its creation line names, 0 if none
+		labelled bool  // it carries loop's parserLabel
+	}
+	label := parserLabel + ": " + strconv.FormatInt(loop, 10)
+	all := map[int64]goroutine{}
+	read := true
+	for _, g := range strings.Split(stacks, "\n\n") {
+		if strings.TrimSpace(g) == "" {
+			continue
+		}
+		lines := strings.Split(g, "\n")
+		id, ok := stackID(lines[0])
+		if !ok {
+			read = false
+			continue
+		}
+		all[id] = goroutine{header: lines[0], starter: starterOf(lines), labelled: hasLabel(lines[0], label)}
+	}
+	// ofParser walks up the starters still alive: a starter is older than
+	// what it starts, so the walk ends; len(all) steps only bound it.
+	ofParser := func(id int64) bool {
+		for range len(all) + 1 {
+			g, alive := all[id]
+			if id == loop || (alive && g.labelled) {
+				return true
+			}
+			if !alive {
+				return false
+			}
+			id = g.starter
+		}
+		return false
+	}
+	_, looping = all[loop]
+	atRest = read && looping
+	for id, g := range all {
+		if ofParser(id) {
+			atRest = atRest && blockedOnAChannel(g.header)
+		}
+	}
+	return atRest, looping
+}
+
+// stackID is the id a stack's header ("goroutine N [STATE]...") names.
+func stackID(header string) (int64, bool) {
+	rest, ok := strings.CutPrefix(header, "goroutine ")
+	if !ok {
+		return 0, false
+	}
+	n, _, ok := strings.Cut(rest, " ")
+	if !ok {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(n, 10, 64)
+	return id, err == nil && id > 0
+}
+
+// starterOf is the goroutine a stack's creation line ("created by FUNC in
+// goroutine N") names, 0 if it has none.
+func starterOf(lines []string) int64 {
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "created by ") {
+			continue
+		}
+		i := strings.LastIndex(l, " in goroutine ")
+		if i < 0 {
+			return 0
+		}
+		id, err := strconv.ParseInt(l[i+len(" in goroutine "):], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return id
+	}
+	return 0
+}
+
+// hasLabel reports whether a stack's header ("goroutine N [STATE] {K: V,
+// ...}:") carries the label item ("K: V").
+func hasLabel(header, item string) bool {
+	_, labels, ok := strings.Cut(header, "] {")
+	if !ok {
+		return false
+	}
+	for _, l := range strings.Split(strings.TrimSuffix(labels, "}:"), ", ") {
+		if l == item {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTheRestCheckCountsEveryGoroutineOfTheParser: parserAtRest, on which
+// every row's check that nothing was handed on yet rests, counts every
+// goroutine the parser's main loop starts, and every one they start,
+// whatever function starts it, so none can hand a mock on unseen while the
+// rest wait. Each case starts one goroutine that is busy (held in a
+// WaitGroup's wait: not on a channel, as one handing a mock on) beside a
+// loop waiting on a channel, so the parser is not at rest; once it waits on
+// a channel too, the parser is, but not in a look with a stack the check
+// cannot read.
+func TestTheRestCheckCountsEveryGoroutineOfTheParser(t *testing.T) {
+	cases := []struct {
+		name string
+		// start runs on the loop's goroutine and starts busy there or
+		// further down. It returns the id of a goroutine it started that
+		// ends at once, and of one that then waits on stop, for the row to
+		// wait for (0: none).
+		start func(busy func(), stop <-chan struct{}) (ended, waiting int64)
+	}{
+		{"a closure the loop starts", func(busy func(), _ <-chan struct{}) (int64, int64) {
+			go busy()
+			return 0, 0
+		}},
+		{"one started by a goroutine of the parser that has ended", func(busy func(), _ <-chan struct{}) (int64, int64) {
+			starter := make(chan int64, 1)
+			go func() {
+				go busy()
+				starter <- goroutineID()
+			}()
+			return <-starter, 0
+		}},
+		{"one the loop starts that replaced its labels", func(busy func(), _ <-chan struct{}) (int64, int64) {
+			go func() {
+				pprof.SetGoroutineLabels(context.Background())
+				busy()
+			}()
+			return 0, 0
+		}},
+		{"one started by a goroutine the loop starts that replaced its labels", func(busy func(), stop <-chan struct{}) (int64, int64) {
+			starter := make(chan int64, 1)
+			go func() {
+				pprof.SetGoroutineLabels(context.Background())
+				go busy()
+				starter <- goroutineID()
+				<-stop
+			}()
+			return 0, <-starter
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var held sync.WaitGroup
+			held.Add(1)
+			letGo := sync.OnceFunc(held.Done)
+			stop := make(chan struct{})
+			end := sync.OnceFunc(func() { close(stop) })
+			loopID, busyID, done := make(chan int64, 1), make(chan int64, 1), make(chan struct{})
+			others := make(chan [2]int64, 1)
+			go func() {
+				defer close(done)
+				loopID <- asParserLoop()
+				ended, waiting := c.start(func() {
+					busyID <- goroutineID()
+					held.Wait() // busy until the row lets it go
+					<-stop
+				}, stop)
+				others <- [2]int64{ended, waiting}
+				<-stop
+			}()
+			t.Cleanup(func() {
+				letGo()
+				end()
+				<-done
+			})
+			loop := <-loopID
+			o := <-others
+			<-busyID // started, its labels as the case leaves them
+			// Every goroutine of the parser but the busy one has ended or
+			// waits on a channel: only the busy one keeps it from rest.
+			if o[0] != 0 {
+				awaitGoroutine(t, o[0], "ended", func(_ string, alive bool) bool { return !alive })
+			}
+			for _, id := range []int64{loop, o[1]} {
+				if id != 0 {
+					awaitGoroutine(t, id, "waited on a channel", func(header string, alive bool) bool {
+						return alive && blockedOnAChannel(header)
+					})
+				}
+			}
+			if atRest, looping := parserAtRest(loop); atRest || !looping {
+				t.Fatalf("with a goroutine of the parser busy: at rest %v, looping %v; want not at rest, looping", atRest, looping)
+			}
+			letGo()
+			awaitParserRest(t, loop)
+			if atRest, _ := restIn(allStacks()+"\n\nnot a goroutine's stack\n", loop); atRest {
+				t.Fatal("a stack the rest check cannot read left the parser at rest")
+			}
+		})
+	}
+}
+
+// awaitGoroutine waits until done holds of the goroutine id: of its stack's
+// header, and of whether it is alive.
+func awaitGoroutine(t *testing.T, id int64, what string, done func(header string, alive bool) bool) {
+	t.Helper()
+	bound := time.Now().Add(waitBound)
+	for {
+		header, alive := "", false
+		for _, g := range strings.Split(allStacks(), "\n\n") {
+			if got, ok := stackID(g); ok && got == id {
+				header, _, _ = strings.Cut(g, "\n")
+				alive = true
+			}
+		}
+		if done(header, alive) {
+			return
+		}
+		if time.Now().After(bound) {
+			t.Fatalf("setup: goroutine %d never %s", id, what)
+		}
+		time.Sleep(time.Millisecond) // a yield between looks
+	}
+}
+
+// blockedOnAChannel reports whether a stack's header says it waits on a
+// channel: a send, a receive or a select.
+func blockedOnAChannel(header string) bool {
+	if parkedOnAChannel(header) {
+		return true
+	}
+	i := strings.IndexByte(header, '[')
+	return i >= 0 && strings.HasPrefix(header[i+1:], "chan receive")
 }
 
 // stop begins the recording's stop, as its ask of what is pending does: the
@@ -331,8 +694,11 @@ func (r *recording) awaitReaders(n int) {
 	}
 }
 
-// end ends both streams, as the relay's teardown does, and waits for the
-// parser to return.
+// end ends both streams, as the relay's teardown does, waits for the parser
+// to return, and takes every mock it handed on (takeMocks). The parser hands
+// on each mock before it returns, so they are all there to take: none comes
+// later, and none is left behind by a wait for a time that a loaded box
+// outlasts between two looks.
 func (r *recording) end() orderedRun {
 	r.t.Helper()
 	r.endStream(0)
@@ -347,27 +713,20 @@ func (r *recording) end() orderedRun {
 	case <-time.After(10 * time.Second): // only turns a hang into a failure
 		return out
 	}
-	for drained := false; !drained; {
-		select {
-		case m := <-r.mocks:
-			r.got = append(r.got, m)
-		case <-time.After(50 * time.Millisecond):
-			drained = true
-		}
-	}
+	r.takeMocks()
 	out.recorded, out.leftOut = r.got, r.mgr.MocksLeftOut()
 	return out
 }
 
 // runInReadOrder records a connection under the capture order of plan,
 // putting the chunks of puts on their streams in that order, each once the
-// reader of its stream has taken every chunk put before it, so the readers
-// hand them on in the order put; then it ends both streams.
+// parser has done all it can with every chunk put before it (putAtRest), so
+// the merge takes them in the order put; then it ends both streams.
 func runInReadOrder(t *testing.T, plan, puts []fakeconn.Chunk, viaSyncMock bool) orderedRun {
 	t.Helper()
 	r := startRecording(t, plan, viaSyncMock)
 	for _, c := range puts {
-		r.put(c)
+		r.putAtRest(c)
 	}
 	return r.end()
 }
@@ -459,7 +818,7 @@ func TestV2_AnAnswerTakenAfterTheClientsEndWaitsOnNoClientChunk(t *testing.T) {
 			r.awaitReaders(1)
 			r.put(resps[1])
 			r.stop()
-			ok := r.recorded("req1|resp1", 5*time.Second)
+			ok := r.recorded("req1|resp1")
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded at the stop with the dest's stream open, its answer taken after the client's end (recorded %q by the end)", pairsOf(got.recorded))
@@ -498,7 +857,7 @@ func TestV2_AHeldAnswerGoesOnAheadOfAnUnnumberedChunkReceivedAfterIt(t *testing.
 			r.awaitWaiting(1)
 			r.awaitMergeWaits()
 			r.push(reqs[2])
-			ok := r.recorded("req1|resp1", 5*time.Second)
+			ok := r.recorded("req1|resp1")
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded with the streams open, its answer held ahead of an unnumbered request received after it (recorded %q by the end)", pairsOf(got.recorded))
@@ -594,9 +953,11 @@ func TestV2_TheMergeWaitsForAChunkOnItsStreamItsReaderHasNotHandedOn(t *testing.
 // (refused), the second exchange's mock is recorded with the streams still
 // open; and so is one whose chunks have no number (a producer that does not
 // number them, merged as read), and one recorded on a session with no capture
-// order (Session.Order unset: merged as read). An answer the merge kept back
-// is one the parser has not read: the stop cannot hand its exchange on, and
-// waits on the parser.
+// order (Session.Order unset: merged as read). The merge takes such chunks in
+// the order they reach it, not the order their readers took them off their
+// streams, so those two put each chunk once the parser is at rest
+// (putAtRest). An answer the merge kept back is one the parser has not read:
+// the stop cannot hand its exchange on, and waits on the parser.
 func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 	for _, viaSyncMock := range []bool{true, false} {
 		// The connection's first exchange: the merge knows the client's
@@ -611,7 +972,7 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			r.put(reqs[0])
 			r.put(resps[0])
 			r.stop()
-			ok := r.recorded("req0|resp0", 5*time.Second)
+			ok := r.recorded("req0|resp0")
 			r.put(reqs[1])
 			r.put(resps[1])
 			got := r.end()
@@ -633,7 +994,7 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			r.put(resps[1])
 			r.order.accept(refused, 0)
 			r.stop()
-			ok := r.recorded("req1|resp1", 5*time.Second)
+			ok := r.recorded("req1|resp1")
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded at the stop with the streams open, once nothing captured before its answer could come (recorded %q by the end)", pairsOf(got.recorded))
@@ -646,11 +1007,11 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			}
 			r := startRecording(t, nil, viaSyncMock)
 			for i := range reqs {
-				r.put(reqs[i])
-				r.put(resps[i])
+				r.putAtRest(reqs[i])
+				r.putAtRest(resps[i])
 			}
 			r.stop()
-			ok := r.recorded("req1|resp1", 5*time.Second)
+			ok := r.recorded("req1|resp1")
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded at the stop with the streams open (recorded %q by the end)", pairsOf(got.recorded))
@@ -661,11 +1022,11 @@ func TestV2_AnAnswerGoesOnOnceNothingCapturedBeforeItCanCome(t *testing.T) {
 			plan := []fakeconn.Chunk{reqs[0], resps[0], reqs[1], resps[1]}
 			r := startRecordingUnder(t, plan, viaSyncMock, false)
 			for i := range reqs {
-				r.put(reqs[i])
-				r.put(resps[i])
+				r.putAtRest(reqs[i])
+				r.putAtRest(resps[i])
 			}
 			r.stop()
-			ok := r.recorded("req1|resp1", 5*time.Second)
+			ok := r.recorded("req1|resp1")
 			got := r.end()
 			if !ok {
 				t.Fatalf("req1's mock was not recorded at the stop with the streams open, on a session that cannot say its capture order (recorded %q by the end)", pairsOf(got.recorded))
