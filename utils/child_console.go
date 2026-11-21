@@ -118,14 +118,19 @@ func (c *ChildConsole) Started() {
 
 // Exited writes out, cut, everything the child wrote before it exited, its
 // last line too if it left it unended, and returns: it does not wait for a
-// process the child left running (whose output goes on being copied). Call it
-// once cmd.Wait has returned.
+// process the child left running (whose output goes on being copied). Where
+// a tee is set and the pipe has no read deadline (Windows), it waits for the
+// copy to reach EOF so everything the exited child printed has reached the
+// tee before Exited returns. Call it once cmd.Wait has returned.
 func (c *ChildConsole) Exited() {
 	if c == nil {
 		return
 	}
 	for _, cp := range c.copies {
 		cp.Drain()
+		if c.tee != nil && !cp.canDrain {
+			<-cp.Done()
+		}
 	}
 }
 
