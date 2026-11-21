@@ -46,6 +46,18 @@ func warmSet(t *testing.T) (all []*models.Mock, src warmSourceFunc, walked chan 
 	return all, src, walked, &n
 }
 
+// awaitWalk waits for the warm's walk of the set to end, and fails the row
+// when no walk ends: a warm that never walks the set fails here, not by
+// hanging the package's run until its timeout.
+func awaitWalk(t *testing.T, walked <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-walked:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the warm never walked the staged set")
+	}
+}
+
 // warmer registers a warmer of kind that keeps up to room recordings and
 // says it is full at the next one, and returns the names it was handed.
 func warmer(t *testing.T, kind models.Kind, room int) *[]string {
@@ -80,7 +92,7 @@ func TestTheStagedSetIsHandedToEachKindsWarmerInRecordedOrderUntilAllAreFull(t *
 	if err := p.WarmRecordedSet(src); err != nil {
 		t.Fatal(err)
 	}
-	<-walked
+	awaitWalk(t, walked)
 	if want := []string{"mock-a", "mock-c"}; !warmedNames(*mongo, want) {
 		t.Fatalf("mongo warmer handed %v, want %v (in order, none after it said full)", *mongo, want)
 	}
@@ -102,7 +114,7 @@ func TestAWarmerWithRoomIsHandedEveryRecordingOfItsKind(t *testing.T) {
 	if err := proxyWithSet().WarmRecordedSet(src); err != nil {
 		t.Fatal(err)
 	}
-	<-walked
+	awaitWalk(t, walked)
 	if want := []string{"mock-a", "mock-c", "mock-d", "mock-f"}; !warmedNames(*mongo, want) {
 		t.Fatalf("mongo warmer handed %v, want %v", *mongo, want)
 	}
@@ -158,6 +170,11 @@ func TestInRecordsFullRoundTheWarmRidesTheLearnStagingsWalk(t *testing.T) {
 	p.mockManager.exact.pairs.Store(true)
 	if err := p.WarmRecordedSet(src); err != nil {
 		t.Fatal(err)
+	}
+	// A warm of its own is numbered as it begins, before its walk starts in
+	// the background: none numbered is none begun, with no wait on a walk.
+	if g := p.recordedWarm.gen.Load(); g != 0 {
+		t.Fatalf("the warm began %d set warm(s) of its own in record's full round, want none: the staging's walk is the only one", g)
 	}
 	if *handed != 0 {
 		t.Fatalf("the warm walked %d recordings of its own in record's full round, want none", *handed)
@@ -282,7 +299,7 @@ func TestAnHTTPOnlySetsWarmReadsNoRecordingFromDisk(t *testing.T) {
 	if err := proxyWithSet().WarmRecordedSet(src); err != nil {
 		t.Fatal(err)
 	}
-	<-walked
+	awaitWalk(t, walked)
 	if n := d.RecordedReads(); n != 0 || len(*mongo) != 0 {
 		t.Fatalf("the warm decoded %d recordings from disk and handed on %v: want none of an HTTP-only set", n, *mongo)
 	}
@@ -303,7 +320,7 @@ func TestAMixedSetsWarmReadsOnlyTheWarmedKindFromDiskInRecordedOrder(t *testing.
 	if err := proxyWithSet().WarmRecordedSet(src); err != nil {
 		t.Fatal(err)
 	}
-	<-walked
+	awaitWalk(t, walked)
 	if n := d.RecordedReads(); n != 4 {
 		t.Fatalf("the warm decoded %d recordings from disk, want its 4 Mongo ones", n)
 	}
