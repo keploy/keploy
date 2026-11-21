@@ -575,6 +575,31 @@ func TestNew_DefaultsTheFoldWindow(t *testing.T) {
 	}
 }
 
+// On a Config's clock there is no process clock to hold (New sets holdClk
+// only with the process clock): the fold watch starts and stops without one.
+func TestFoldWatch_OnAConfigsClockStartsAndStopsWithoutAProcessClock(t *testing.T) {
+	t.Parallel()
+	s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour, Clock: &stall.ManualClock{}})
+	defer s.Close()
+	var w *foldWatch
+	for _, step := range []struct {
+		name string
+		do   func()
+	}{
+		{"start", func() { w = s.watchTheFold(&Session{}) }},
+		{"stop", func() { w.stop() }},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("the fold watch's %s on a Config's clock panicked: %v", step.name, r)
+				}
+			}()
+			step.do()
+		}()
+	}
+}
+
 // The hand-overs that note progress stay nil-safe.
 func TestSession_ProgressOnANilSessionIsANoOp(t *testing.T) {
 	t.Parallel()
