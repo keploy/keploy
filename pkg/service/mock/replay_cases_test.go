@@ -96,6 +96,25 @@ func TestAttributeMocksUsesTheTestRunningAtTheTime(t *testing.T) {
 	require.Nil(t, attributeMocks(replayWindows, nil, nil, nil))
 }
 
+// An older agent says only when it first served a mock in each read, so two
+// reads that both carry a recording give it two times: in one test's window,
+// it is put under that test once; in two tests' windows, under each.
+func TestAttributeMocksPutsARecordingTwoReadsCarryUnderATestOnce(t *testing.T) {
+	expected := map[string][]models.MockEntry{"pkg.TestA": {{Name: "mock-0"}}, "pkg.TestB": {{Name: "mock-1"}}}
+	consumed := []models.MockState{
+		{Name: "mock-0", Kind: models.HTTP, Timestamp: runnerT0.Add(10 * time.Millisecond).UnixNano()},
+		{Name: "mock-1", Kind: models.HTTP, Timestamp: runnerT0.Add(20 * time.Millisecond).UnixNano()},
+		{Name: "mock-0", Kind: models.HTTP, Timestamp: runnerT0.Add(60 * time.Millisecond).UnixNano()},  // the next read's
+		{Name: "mock-1", Kind: models.HTTP, Timestamp: runnerT0.Add(250 * time.Millisecond).UnixNano()}, // the next read's
+	}
+	out := attributeMocks(replayWindows, expected, consumed, nil)
+	require.Len(t, out, 2)
+	require.Equal(t, "pkg.TestA", out[0].Flow)
+	require.Equal(t, []string{"mock-0", "mock-1"}, answeredBy(out[0].Consumed), "each once under pkg.TestA")
+	require.Equal(t, "pkg.TestB", out[1].Flow)
+	require.Equal(t, []string{"mock-1"}, answeredBy(out[1].Consumed))
+}
+
 // A replay with requests on compares what the app answered with the recorded cases and says which mocks each test used.
 func TestReplayOutcomeCarriesTheCasesAndTheMocksPerTest(t *testing.T) {
 	instr := newRunnerInstr(t, sequentialMarks()...)
