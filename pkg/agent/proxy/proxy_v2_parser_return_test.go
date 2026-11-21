@@ -283,7 +283,8 @@ func TestRecordViaSupervisorLeavesNothingOutForServerBytesItsParserReturnedWitho
 //   - reads.follow comes before the relay runs, or no chunk is kept;
 //   - reads.parserReturned() comes after sv.Run and before the teardown's
 //     r.PauseTees(), or the chunks the paused tees refuse are told of before
-//     the return.
+//     the return; what it left out is kept (leftOut), for the WARN of a cut
+//     at the stop (warnStopCut).
 func TestRecordViaSupervisorWiresParserReads(t *testing.T) {
 	t.Parallel()
 	fields, _ := relayConfigLiteral(t)
@@ -324,7 +325,7 @@ func TestRecordViaSupervisorWiresParserReads(t *testing.T) {
 			relayAt = i
 		case strings.HasPrefix(src, "result := sv.Run("):
 			runAt = i
-		case src == "reads.parserReturned()":
+		case src == "leftOut := reads.parserReturned()":
 			returnedAt = i
 		case src == "r.PauseTees()":
 			pausedAt = i
