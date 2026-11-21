@@ -112,3 +112,20 @@ func TestAProcessWhoseRecordCannotBeReadRunsNoLonger(t *testing.T) {
 		t.Fatalf("findChildPIDs(this process) = %v, %v; want no sleep %d", kids, err, pid)
 	}
 }
+
+// A group whose list cannot be read has not exited, as far as keploy knows:
+// a refused signal to it stays an error. Nor does it run on.
+func TestAGroupWhoseListCannotBeReadHasNotExited(t *testing.T) {
+	cmd := startGroup(t, "exec sleep 60")
+	pgid := cmd.Process.Pid
+	waitUntil(t, "the sleep to show in its group", func() bool { return GroupRunsOn(pgid) })
+	if groupExited(pgid) {
+		t.Fatalf("group %d runs a sleep: groupExited said it has exited", pgid)
+	}
+	list := groupPIDs
+	t.Cleanup(func() { groupPIDs = list })
+	groupPIDs = func(int) ([]int, error) { return nil, syscall.EINVAL }
+	if groupExited(pgid) || GroupRunsOn(pgid) {
+		t.Fatalf("group %d's list cannot be read: groupExited %v, GroupRunsOn %v; want neither", pgid, groupExited(pgid), GroupRunsOn(pgid))
+	}
+}

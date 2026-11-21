@@ -72,12 +72,29 @@ func readProcTable(proc fs.FS) (procTable, error) {
 	return table, nil
 }
 
-// exitedUnreaped and groupExited read no zombie on Linux: kill(2) of a
-// zombie, or of a group of zombies only, succeeds there, so their signals
-// need no such reading, and a zombie counts as running until it is reaped,
-// as it always has here.
-func exitedUnreaped(int) bool { return false }
-func groupExited(int) bool    { return false }
+// exitedUnreaped reports whether pid is a zombie: it has exited, and waits
+// for its parent to reap it (state Z in its stat). kill(2) of a zombie
+// succeeds, as of a process that runs, so the interrupt asks this too: a
+// group leader that is a zombie has exited, and costs the interrupt no grace
+// wait and no SIGKILL. A stat that cannot be read or parsed is no zombie.
+func exitedUnreaped(pid int) bool {
+	return exitedUnreapedIn(os.DirFS("/proc"), pid)
+}
+
+// exitedUnreapedIn is exitedUnreaped over proc, a /proc.
+func exitedUnreapedIn(proc fs.FS, pid int) bool {
+	line, err := readStat(proc, strconv.Itoa(pid), make([]byte, statBufSize))
+	if err != nil {
+		return false
+	}
+	stat, ok := ParseProcStat(line)
+	return ok && stat.State == 'Z'
+}
+
+// groupExited reads no group on Linux: kill(2) of a group of zombies only
+// succeeds there, so a signal Linux refuses a group is never one of a group
+// that has exited.
+func groupExited(int) bool { return false }
 
 // groupReached is each process of process group pgid as /proc shows it now,
 // and whether it ignores sig: what a signal sent to the group next reaches.

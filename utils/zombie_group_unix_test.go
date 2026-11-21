@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build linux || darwin
 
 package utils
 
@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,7 +25,8 @@ import (
 // harness that runs `server &` in a new session and never waits for it does.
 // The first starts `sleep 300` in its group and exits; the second exits at
 // once. Both stay in the process table as zombies, and the sleep, whose
-// parent is now launchd, lives on in the first one's group. The runner
+// parent is now init (launchd on macOS), lives on in the first one's
+// group. The runner
 // writes "first sleep second" to a file, then waits to be interrupted.
 func buildGroupLeavingRunner(t *testing.T) string {
 	t.Helper()
@@ -69,9 +71,10 @@ func main(){
 
 // A zombie in the application's tree that led a process group of its own is
 // how the interrupt reaches that group: the sleep in it, whose parent is now
-// launchd, must not outlive the interrupt. And a zombie has exited: a group
-// it leads costs the interrupt no grace wait and no SIGKILL, and a group of
-// zombies only, which macOS answers EPERM, is no ERROR.
+// init (launchd on macOS), must not outlive the interrupt. And a zombie has
+// exited, on Linux as on macOS: a group it leads costs the interrupt no grace
+// wait and no SIGKILL, and a group of zombies only is no ERROR (macOS answers
+// its signal EPERM; Linux delivers it).
 func TestInterruptProcessTreeReachesTheGroupOfAZombie(t *testing.T) {
 	bin := buildGroupLeavingRunner(t)
 	pidFile := filepath.Join(t.TempDir(), "pids")
@@ -104,8 +107,9 @@ func TestInterruptProcessTreeReachesTheGroupOfAZombie(t *testing.T) {
 	}
 
 	// The second zombie's group holds no process that runs: its signal is
-	// no refusal, but a signal macOS refuses for another reason still is,
-	// and so is EPERM from a process keploy may not signal (launchd).
+	// no refusal, but a signal refused for another reason still is, and on
+	// macOS so is EPERM from a process keploy may not signal (launchd). Only
+	// macOS refuses the zombies' group, and says why it lets that pass.
 	core, logs := observer.New(zap.DebugLevel)
 	logger := zap.New(core)
 	if err := SendSignal(logger, -second, 0); err != nil {
@@ -114,19 +118,23 @@ func TestInterruptProcessTreeReachesTheGroupOfAZombie(t *testing.T) {
 	if err := SendSignal(logger, -second, syscall.Signal(999)); !errors.Is(err, syscall.EINVAL) {
 		t.Errorf("an invalid signal to the group of zombies only %d answered %v; want EINVAL", second, err)
 	}
-	if err := SendSignal(logger, 1, 0); !errors.Is(err, syscall.EPERM) {
-		t.Errorf("signalling launchd answered %v; want EPERM", err)
+	wantRefused, wantSaid := []int64{int64(-second)}, 0
+	if runtime.GOOS == "darwin" {
+		if err := SendSignal(logger, 1, 0); !errors.Is(err, syscall.EPERM) {
+			t.Errorf("signalling launchd answered %v; want EPERM", err)
+		}
+		wantRefused, wantSaid = append(wantRefused, 1), 1
 	}
 	var refused []int64
 	for _, e := range logs.FilterLevelExact(zap.ErrorLevel).All() {
 		pid, _ := e.ContextMap()["pid"].(int64)
 		refused = append(refused, pid)
 	}
-	if want := []int64{int64(-second), 1}; !slices.Equal(refused, want) {
-		t.Errorf("the three signals logged ERROR for pids %v; want %v: the invalid signal's and launchd's, not the zombies' group's", refused, want)
+	if !slices.Equal(refused, wantRefused) {
+		t.Errorf("the signals logged ERROR for pids %v; want %v: the invalid signal's (and launchd's on macOS), not the zombies' group's", refused, wantRefused)
 	}
-	if n := logs.FilterMessage("the process group has exited; its zombies wait to be reaped").Len(); n != 1 {
-		t.Errorf("the group of zombies only %d was said to have exited %d times; want once", second, n)
+	if n := logs.FilterMessage("the process group has exited; its zombies wait to be reaped").Len(); n != wantSaid {
+		t.Errorf("the group of zombies only %d was said to have exited %d times; want %d", second, n, wantSaid)
 	}
 	if !exitedUnreaped(first) || exitedUnreaped(cmd.Process.Pid) || exitedUnreaped(sleep) {
 		t.Errorf("exitedUnreaped: zombie %d %v, runner %d %v, sleep %d %v; want true, false, false",
@@ -165,22 +173,5 @@ func TestInterruptProcessTreeReachesTheGroupOfAZombie(t *testing.T) {
 		if time.Now().After(end) {
 			t.Fatalf("the sleep %d, in the zombie %d's group, outlived the interrupt of the application's tree", sleep, first)
 		}
-	}
-}
-
-// A group whose list cannot be read has not exited, as far as keploy knows:
-// a refused signal to it stays an error. Nor does it run on.
-func TestAGroupWhoseListCannotBeReadHasNotExited(t *testing.T) {
-	cmd := startGroup(t, "exec sleep 60")
-	pgid := cmd.Process.Pid
-	waitUntil(t, "the sleep to show in its group", func() bool { return GroupRunsOn(pgid) })
-	if groupExited(pgid) {
-		t.Fatalf("group %d runs a sleep: groupExited said it has exited", pgid)
-	}
-	list := groupPIDs
-	t.Cleanup(func() { groupPIDs = list })
-	groupPIDs = func(int) ([]int, error) { return nil, syscall.EINVAL }
-	if groupExited(pgid) || GroupRunsOn(pgid) {
-		t.Fatalf("group %d's list cannot be read: groupExited %v, GroupRunsOn %v; want neither", pgid, groupExited(pgid), GroupRunsOn(pgid))
 	}
 }
