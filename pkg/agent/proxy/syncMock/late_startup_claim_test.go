@@ -358,3 +358,218 @@ func TestLateStartupClaimCapacityDropRevokesClaimingTest(t *testing.T) {
 		t.Fatalf("test-late-dropped mapping names %q, which was dropped", call.Name)
 	}
 }
+
+func sentClaimCount(mgr *SyncMockManager) int {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	return len(mgr.sentClaimed)
+}
+
+// A mock well inside StaleHorizon (5.5 s old) must stay claimable across a
+// flush tick and be mapped by its late window: pins the size of StaleHorizon
+// from below so a tightened bound (e.g. 1 s) fails.
+func TestLateStartupClaimHorizonNotTightened(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	mgr.SetWindowsOpenLate()
+
+	start := time.Now().Add(-StaleHorizon + 1500*time.Millisecond)
+	m := httpMockAt(start.Add(10 * time.Millisecond))
+	mgr.AddMock(m)
+	mgr.FlushOwnedWindows() // rescue + note
+	mgr.FlushOwnedWindows() // prune pass with no window open
+
+	w := mgr.OpenWindow(start, nil)
+	w.Keep()
+	mgr.ResolveKept(w, start, start.Add(30*time.Millisecond), "test-horizon", true)
+	w.Close()
+	if !mappedIDs(maps, "test-horizon")[m.Name] {
+		t.Fatal("a 5.5 s old startup mock was not claimable by its late window")
+	}
+}
+
+// Many startup mocks rescued with no window open: once they pass StaleHorizon a
+// flush tick forgets every note (memory bounded by age, not only maxSentClaimed).
+func TestLateStartupClaimNotesAgeOut(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 4096)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	mgr.SetWindowsOpenLate()
+
+	// Just inside StaleHorizon now; outside it 300 ms later.
+	old := time.Now().Add(-StaleHorizon + 200*time.Millisecond)
+	for i := 0; i < 2000; i++ {
+		mgr.AddMock(httpMockAt(old.Add(time.Duration(i) * time.Microsecond)))
+	}
+	mgr.FlushOwnedWindows()
+	if n := sentClaimCount(mgr); n != 2000 {
+		t.Fatalf("fixture: %d notes, want 2000", n)
+	}
+	time.Sleep(300 * time.Millisecond)
+	mgr.FlushOwnedWindows()
+	if n := sentClaimCount(mgr); n != 0 {
+		t.Fatalf("%d notes left past StaleHorizon, want 0", n)
+	}
+}
+
+// Boundaries of the [start, end] take in takeSentClaimedLocked: a mock 1 ns
+// before start or 1 ns after end is not mapped; one exactly at start or exactly
+// at end is mapped.
+func TestLateStartupClaimWindowBoundaries(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	mgr.SetWindowsOpenLate()
+
+	start := time.Now().Add(-500 * time.Millisecond)
+	end := start.Add(30 * time.Millisecond)
+	before := httpMockAt(start.Add(-time.Nanosecond))
+	atStart := httpMockAt(start)
+	atEnd := httpMockAt(end)
+	after := httpMockAt(end.Add(time.Nanosecond))
+	for _, m := range []*models.Mock{before, atStart, atEnd, after} {
+		mgr.AddMock(m)
+	}
+	mgr.FlushOwnedWindows()
+	mgr.FlushOwnedWindows()
+
+	w := mgr.OpenWindow(start, nil)
+	w.Keep()
+	mgr.ResolveKept(w, start, end, "test-bounds", true)
+	w.Close()
+
+	got := mappedIDs(maps, "test-bounds")
+	if got[before.Name] || got[after.Name] {
+		t.Fatalf("mapped a mock outside [start,end]: %v", got)
+	}
+	if !got[atStart.Name] || !got[atEnd.Name] {
+		t.Fatalf("did not map the mocks exactly at start/end: %v (start %q end %q)", got, atStart.Name, atEnd.Name)
+	}
+}
+
+// The late-open StaleHorizon fallback applies only to owner-less notes: an
+// owner-bound note (yielded-window return path, owner != nil) is not noted
+// through the horizon clause when no other open window spans it.
+func TestLateStartupClaimOwnerBoundNotNotedViaHorizon(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	mgr.SetWindowsOpenLate()
+
+	now := time.Now()
+	mk := httpMockAt(now.Add(-100 * time.Millisecond))
+	mk.Name = "mock-owner-bound"
+	owner := &resolvedWindow{start: now.Add(-time.Second), end: now, testName: "test-owner", mapping: true, keep: true}
+	mgr.mu.Lock()
+	noted := mgr.noteSentClaimedLocked(mk, nil, owner)
+	n := len(mgr.sentClaimed)
+	mgr.mu.Unlock()
+	if noted || n != 0 {
+		t.Fatalf("owner-bound mock noted=%v len=%d under SetWindowsOpenLate with no spanning open window, want false/0", noted, n)
+	}
+}
+
+// Two late windows that both span one rescued startup mock: the first kept
+// resolve takes it and the second never maps it (no double mapping), in either
+// resolve order.
+func TestLateStartupClaimOverlappingWindowsMapOnce(t *testing.T) {
+	t.Parallel()
+	for _, innerFirst := range []bool{true, false} {
+		out := make(chan *models.Mock, 16)
+		maps := make(chan models.TestMockMapping, 16)
+		mgr := lateMockTestManager(out, maps, true)
+		mgr.SetWindowsOpenLate()
+
+		base := time.Now().Add(-500 * time.Millisecond)
+		at := func(ms int) time.Time { return base.Add(time.Duration(ms) * time.Millisecond) }
+		m := httpMockAt(at(50))
+		mgr.AddMock(m)
+		mgr.FlushOwnedWindows()
+		mgr.FlushOwnedWindows()
+
+		resolve := func(s, e int, name string) {
+			w := mgr.OpenWindow(at(s), nil)
+			w.Keep()
+			mgr.ResolveKept(w, at(s), at(e), name, true)
+			w.Close()
+		}
+		if innerFirst {
+			resolve(40, 60, "inner")
+			resolve(0, 100, "outer")
+		} else {
+			resolve(0, 100, "outer")
+			resolve(40, 60, "inner")
+		}
+		got := allMapped(maps)
+		n := 0
+		for _, ids := range got {
+			if ids[m.Name] {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("innerFirst=%v: mock mapped by %d tests (%v), want exactly 1", innerFirst, n, got)
+		}
+		if left := sentClaimCount(mgr); left != 0 {
+			t.Fatalf("innerFirst=%v: %d notes left, want 0", innerFirst, left)
+		}
+	}
+}
+
+// A static-dedup duplicate's resolve over a rescued note does not take it; the
+// kept late window that spans it still does.
+func TestLateStartupClaimDuplicateDoesNotTake(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	mgr.SetWindowsOpenLate()
+
+	base := time.Now().Add(-500 * time.Millisecond)
+	at := func(ms int) time.Time { return base.Add(time.Duration(ms) * time.Millisecond) }
+	m := httpMockAt(at(50))
+	mgr.AddMock(m)
+	mgr.FlushOwnedWindows()
+	mgr.ResolveRange(at(40), at(60), "test-0", false, true)
+	mgr.FlushOwnedWindows()
+
+	w := mgr.OpenWindow(at(45), nil)
+	w.Keep()
+	mgr.ResolveKept(w, at(45), at(55), "test-kept", true)
+	w.Close()
+
+	got := allMapped(maps)
+	if got["test-0"][m.Name] {
+		t.Fatal("a duplicate's resolve mapped the note")
+	}
+	if !got["test-kept"][m.Name] {
+		t.Fatalf("the kept late window did not map the note: %v", got)
+	}
+}
+
+// An untaken owner-less note never holds a stop's or a test's wait: PendingIn
+// over its range is false.
+func TestLateStartupClaimPendingInIgnoresUntakenNote(t *testing.T) {
+	t.Parallel()
+	out := make(chan *models.Mock, 16)
+	maps := make(chan models.TestMockMapping, 16)
+	mgr := lateMockTestManager(out, maps, true)
+	mgr.SetWindowsOpenLate()
+
+	start := time.Now().Add(-300 * time.Millisecond)
+	m := httpMockAt(start.Add(10 * time.Millisecond))
+	mgr.AddMock(m)
+	mgr.FlushOwnedWindows()
+	waitOutQueue(t, mgr)
+	if n := sentClaimCount(mgr); n != 1 {
+		t.Fatalf("fixture: %d notes, want 1", n)
+	}
+	if mgr.PendingIn(start, start.Add(30*time.Millisecond)) {
+		t.Fatal("PendingIn waits on an untaken owner-less note")
+	}
+}
