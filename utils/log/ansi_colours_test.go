@@ -55,6 +55,11 @@ func logKeployColours(logger *zap.Logger) {
 func TestKeployColoursAreByteIdentical(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("TMPDIR", t.TempDir()) // New() creates its log file there.
+	// fatih/color respects NO_COLOR (https://no-color.org) and TERM=dumb.
+	// Isolate the test environment so color assertions are hermetic regardless
+	// of environment variables set on the developer machine or in CI.
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
 	origNoColor, origAnsiDisabled := color.NoColor, models.IsAnsiDisabled
 	t.Cleanup(TestOnlyResetSink) // the lazy os.Stdout, which PrimarySink would report as an explicit one
 	t.Cleanup(func() { color.NoColor, models.IsAnsiDisabled = origNoColor, origAnsiDisabled })
