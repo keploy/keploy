@@ -597,6 +597,15 @@ func TestRecordViaSupervisor_TrafficAfterAnIdleCloseOpensNoSpanAsTheRecordingSto
 		return open == 0
 	})
 	before, _, _ := h.mgr.OrphanRangeCount()
+	// The span ended at a reading of the wall clock no later than this one,
+	// and a span overlaps a window that starts at its end. A coarse wall
+	// clock (Windows reads it in steps of about 0.3 ms) can give the stop
+	// that very reading, and the span closed before the stop would then
+	// read as one after it: the stop is taken at a later reading.
+	closedBy := time.Now().Round(0)
+	for !time.Now().Round(0).After(closedBy) {
+		time.Sleep(time.Millisecond)
+	}
 
 	stopped := time.Now()
 	h.cancel()
