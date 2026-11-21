@@ -33,6 +33,9 @@ func TestSetupPicksADockerAgentsPortAsAContainersPort(t *testing.T) {
 	if reflect.ValueOf(availablePort).Pointer() != reflect.ValueOf(utils.EnsureAvailablePorts).Pointer() {
 		t.Fatal("availablePort is not utils.EnsureAvailablePorts")
 	}
+	if reflect.ValueOf(availableDNSPort).Pointer() != reflect.ValueOf(utils.EnsureAvailableDNSPort).Pointer() {
+		t.Fatal("availableDNSPort is not utils.EnsureAvailableDNSPort")
+	}
 	defer func(h, c func(...uint32) (uint32, error)) { hostPort, containerPort = h, c }(hostPort, containerPort)
 	stop := errors.New("stop at the agent's port")
 	var picked []string

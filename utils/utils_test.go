@@ -104,13 +104,13 @@ func TestGetAvailablePortSkipsPortsAlreadyHeld(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 	held := uint32(ln.Addr().(*net.TCPAddr).Port)
 
-	if free, err := probePort(held); free || err != nil {
+	if free, err := probePort(held, false); free || err != nil {
 		t.Fatalf("probePort(%d) = %v, %v while this test listens on it; want false, nil", held, free, err)
 	}
 
 	defer func(r func() (uint32, uint32, bool)) { hostEphemeralRange = r }(hostEphemeralRange)
 	hostEphemeralRange = func() (uint32, uint32, bool) { return 1024, held - 1, true }
-	probed := drawsAndProbes(t, []uint32{0}, probePort) // the draw lands on held, as does the scan's start
+	probed := drawsAndProbes(t, []uint32{0}, func(p uint32) (bool, error) { return probePort(p, false) }) // the draw lands on held, as does the scan's start
 	port, err := GetAvailablePort()
 	if err != nil {
 		t.Fatalf("GetAvailablePort: %v", err)

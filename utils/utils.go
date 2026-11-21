@@ -1758,7 +1758,15 @@ func GetAvailablePort() (uint32, error) {
 // fail with a port free, in a band whose free ports were an excluded one and
 // one other: most draws returned the excluded one.
 func GetAvailablePortExcept(exclude ...uint32) (uint32, error) {
-	return availablePortAbove(hostEphemeralRange, 0, exclude...)
+	return availablePortAbove(hostEphemeralRange, 0, false, exclude...)
+}
+
+// GetAvailableDNSPortExcept is GetAvailablePortExcept for a DNS server's
+// port, which the server binds over UDP and over TCP: a port either socket
+// holds is passed over. A port free over TCP alone failed the server's UDP
+// bind.
+func GetAvailableDNSPortExcept(exclude ...uint32) (uint32, error) {
+	return availablePortAbove(hostEphemeralRange, 0, true, exclude...)
 }
 
 // hostEphemeralRange reads the host's ephemeral port range for
@@ -1788,14 +1796,15 @@ func GetAvailableContainerPort() (uint32, error) {
 // GetAvailableContainerPortExcept is GetAvailableContainerPort never
 // returning one of exclude, as GetAvailablePortExcept.
 func GetAvailableContainerPortExcept(exclude ...uint32) (uint32, error) {
-	return availablePortAbove(hostEphemeralRange, containerEphemeralHi, exclude...)
+	return availablePortAbove(hostEphemeralRange, containerEphemeralHi, false, exclude...)
 }
 
 // availablePortAbove is GetAvailablePort with the host's ephemeral range read
 // by ephemeral (ephemeralPortRange's signature), whose candidates are above
 // floor too, and never one of exclude: the search skips those, it does not
-// draw again after it returns one.
-func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32, exclude ...uint32) (uint32, error) {
+// draw again after it returns one. With udp, a candidate is free only where a
+// UDP socket binds it too (GetAvailableDNSPortExcept).
+func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint32, udp bool, exclude ...uint32) (uint32, error) {
 	top := floor
 	if _, ephemeralHi, known := ephemeral(); known && ephemeralHi < 65535 && ephemeralHi > top {
 		top = ephemeralHi
@@ -1820,7 +1829,7 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 			if slices.Contains(exclude, lo+off) {
 				continue
 			}
-			free, err := portProbe(lo + off)
+			free, err := portProbe(lo+off, udp)
 			if err != nil {
 				return 0, err
 			}
@@ -1837,7 +1846,7 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 			if slices.Contains(exclude, port) {
 				continue
 			}
-			free, err := portProbe(port)
+			free, err := portProbe(port, udp)
 			if err != nil {
 				return 0, err
 			}
@@ -1853,32 +1862,57 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 	// is strictly better than no port at all, and this is the historical
 	// behaviour. A container's port that then meets one of the resolver's
 	// fails the agent's start at its bind, as no port at all would.
-	return osAssignedPort(exclude)
+	return osAssignedPort(exclude, udp)
 }
 
 // osAssignedPort is a port the OS assigns (a listener on ":0", let go before
-// it returns) other than exclude. A pick in exclude stays held while the OS
-// is asked again, so the OS cannot hand it back, and len(exclude)+1 asks
-// always reach a port outside it.
-func osAssignedPort(exclude []uint32) (uint32, error) {
+// it returns) other than exclude, and, with udp, one a UDP socket binds too.
+// A pick in exclude, or one a UDP socket holds, stays held while the OS is
+// asked again, so the OS cannot hand it back: len(exclude)+1 asks always reach
+// a port outside exclude, and udpHeldPicks more pass over as many picks held
+// over UDP, the OS's picks being its own ephemeral ports, which a UDP socket
+// seldom holds.
+func osAssignedPort(exclude []uint32, udp bool) (uint32, error) {
 	var held []net.Listener
 	defer func() {
 		for _, ln := range held {
 			_ = ln.Close()
 		}
 	}()
-	for i := 0; i <= len(exclude); i++ {
+	asks := len(exclude) + 1
+	if udp {
+		asks += udpHeldPicks
+	}
+	for i := 0; i < asks; i++ {
 		ln, err := portListen(context.Background(), "tcp", ":0")
 		if err != nil {
 			return 0, fmt.Errorf("failed to find available port: %w", err)
 		}
 		held = append(held, ln)
-		if port := uint32(ln.Addr().(*net.TCPAddr).Port); !slices.Contains(exclude, port) {
+		port := uint32(ln.Addr().(*net.TCPAddr).Port)
+		if slices.Contains(exclude, port) {
+			continue
+		}
+		if !udp {
+			return port, nil
+		}
+		free, err := udpFree(port)
+		if err != nil {
+			return 0, err
+		}
+		if free {
 			return port, nil
 		}
 	}
+	if udp {
+		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, in %d of the OS's picks", exclude, asks)
+	}
 	return 0, fmt.Errorf("failed to find a port other than %v", exclude)
 }
+
+// udpHeldPicks is how many of the OS's picks held over UDP osAssignedPort
+// passes over for a DNS server's port before it fails.
+const udpHeldPicks = 8
 
 // randomProbes is how many candidates availablePortAbove draws at random
 // before it scans: with half the ports held, all 32 miss about once in four
@@ -1894,6 +1928,9 @@ var portOffset, portProbe = randomOffset, probePort
 // interface.
 var portListen = plaintcp.Listen
 
+// udpListen opens udpFree's UDP sockets.
+var udpListen = net.ListenPacket
+
 // randomOffset is a random offset in [0, span), and false where no random
 // number could be read.
 func randomOffset(span uint32) (uint32, bool) {
@@ -1905,16 +1942,37 @@ func randomOffset(span uint32) (uint32, bool) {
 }
 
 // probePort says whether port is free: whether a plain TCP listener binds it,
-// which it then lets go. A failed Close leaves this process holding the port
-// for its lifetime, so the candidate is unusable AND leaked: that is an
-// error, not a candidate passed over, which would leak one fd per candidate.
-func probePort(port uint32) (bool, error) {
+// and, with udp, a UDP socket too while the listener holds it (udpFree); it
+// then lets them go. A failed Close leaves this process holding the port for
+// its lifetime, so the candidate is unusable AND leaked: that is an error,
+// not a candidate passed over, which would leak one fd per candidate.
+func probePort(port uint32, udp bool) (bool, error) {
 	ln, err := portListen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return false, nil
 	}
+	free := true
+	if udp {
+		if free, err = udpFree(port); err != nil {
+			_ = ln.Close()
+			return false, err
+		}
+	}
 	if err := ln.Close(); err != nil {
 		return false, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+	}
+	return free, nil
+}
+
+// udpFree says whether a UDP socket binds port, which it then lets go; a
+// failed Close is an error, as probePort's.
+func udpFree(port uint32) (bool, error) {
+	pc, err := udpListen("udp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false, nil
+	}
+	if err := pc.Close(); err != nil {
+		return false, fmt.Errorf("failed to release probe socket on UDP port %d: %w", port, err)
 	}
 	return true, nil
 }
@@ -1951,6 +2009,23 @@ func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
 	return EnsureFreePort(isPortAvailable, port, exclude...)
 }
 
+// EnsureAvailableDNSPort is EnsureAvailablePorts for a DNS server's port,
+// which the server binds over UDP and over TCP: port is kept only where both
+// bind it, and the port drawn in its place is free over both
+// (GetAvailableDNSPortExcept). A check over TCP alone kept a port a UDP
+// socket held, and the DNS server's start failed on it, as each start again
+// did, handed the same port.
+func EnsureAvailableDNSPort(port uint32, exclude ...uint32) (uint32, error) {
+	return EnsureFreeDNSPort(isDNSPortAvailable, port, exclude...)
+}
+
+// isDNSPortAvailable says whether a DNS server binds port: a plain TCP
+// listener and a UDP socket both (probePort).
+func isDNSPortAvailable(port uint32) bool {
+	free, _ := probePort(port, true) // false on any error
+	return free
+}
+
 // EnsureFreePort is EnsureAvailablePorts with free saying whether port is
 // free, in place of a probe listener on it. A test that calls a port free
 // holds it with a listener of its own, so that no other process can take it,
@@ -1958,10 +2033,22 @@ func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
 // probe could be taken by another process before the probe bound it, and the
 // port would then move with the test's answer wrong.
 func EnsureFreePort(free func(port uint32) bool, port uint32, exclude ...uint32) (uint32, error) {
+	return ensureFree(free, GetAvailablePortExcept, port, exclude...)
+}
+
+// EnsureFreeDNSPort is EnsureAvailableDNSPort with free in place of its
+// probe, as EnsureFreePort.
+func EnsureFreeDNSPort(free func(port uint32) bool, port uint32, exclude ...uint32) (uint32, error) {
+	return ensureFree(free, GetAvailableDNSPortExcept, port, exclude...)
+}
+
+// ensureFree is port where free says so and it is not one of exclude, and
+// otherwise draw's port.
+func ensureFree(free func(port uint32) bool, draw func(exclude ...uint32) (uint32, error), port uint32, exclude ...uint32) (uint32, error) {
 	if !slices.Contains(exclude, port) && free(port) {
 		return port, nil
 	}
-	newPort, err := GetAvailablePortExcept(exclude...)
+	newPort, err := draw(exclude...)
 	if err != nil {
 		return 0, fmt.Errorf("failed to allocate new port: %w", err)
 	}

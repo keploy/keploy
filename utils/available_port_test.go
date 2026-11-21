@@ -38,7 +38,7 @@ func TestAContainersPortIsAboveTheContainersEphemeralRange(t *testing.T) {
 	} {
 		below := false
 		for i := 0; i < 50; i++ {
-			p, err := availablePortAbove(func() (uint32, uint32, bool) { return 32768, c.hi, c.known }, c.floor)
+			p, err := availablePortAbove(func() (uint32, uint32, bool) { return 32768, c.hi, c.known }, c.floor, false)
 			if err != nil || p <= c.above {
 				t.Fatalf("%s: got port %d, err %v; want one above %d", c.name, p, err, c.above)
 			}
@@ -67,7 +67,7 @@ func TestAContainersPortIsAboveTheContainersEphemeralRange(t *testing.T) {
 	}
 	for i := 0; i < 50; i++ {
 		// An unknown range's numbers are not read, whatever they are.
-		p, err := availablePortAbove(func() (uint32, uint32, bool) { return 32768, 49999, false }, 0)
+		p, err := availablePortAbove(func() (uint32, uint32, bool) { return 32768, 49999, false }, 0, false)
 		if err != nil || uint64(p) < lo || uint64(p) > hi {
 			t.Fatalf("the host, an unknown host range: got port %d, err %v; want the OS's pick, in %d-%d", p, err, lo, hi)
 		}
@@ -111,7 +111,7 @@ func drawsAndProbes(t *testing.T, offsets []uint32, free func(port uint32) (bool
 		return off, true
 	}
 	probed := &[]uint32{}
-	portProbe = func(port uint32) (bool, error) {
+	portProbe = func(port uint32, _ bool) (bool, error) {
 		*probed = append(*probed, port)
 		return free(port)
 	}
@@ -126,7 +126,7 @@ func TestAPortIsDrawnAgainPastARunOfHeldPorts(t *testing.T) {
 	ephemeral := func() (uint32, uint32, bool) { return 32768, 60999, true }
 	pastTheRun := func(port uint32) (bool, error) { return port >= 63000, nil } // 61000-62999 held
 	probed := drawsAndProbes(t, []uint32{3, 1500, 2500}, pastTheRun)
-	if p, err := availablePortAbove(ephemeral, 0); err != nil || p != 63500 || len(*probed) != 3 {
+	if p, err := availablePortAbove(ephemeral, 0, false); err != nil || p != 63500 || len(*probed) != 3 {
 		t.Fatalf("got port %d, err %v, after %d probes; want 63500, the third draw, after 61003 and 62500", p, err, len(*probed))
 	}
 
@@ -139,13 +139,13 @@ func TestAPortIsDrawnAgainPastARunOfHeldPorts(t *testing.T) {
 		misses[i] = 7
 	}
 	probed = drawsAndProbes(t, misses, only(61006))
-	if p, err := availablePortAbove(ephemeral, 0); err != nil || p != 61006 || len(*probed) != randomProbes+4536 {
+	if p, err := availablePortAbove(ephemeral, 0, false); err != nil || p != 61006 || len(*probed) != randomProbes+4536 {
 		t.Fatalf("got port %d, err %v, after %d probes; want 61006, after %d draws and a scan of all 4536 ports from 61007", p, err, len(*probed), randomProbes)
 	}
 
 	// No random number: the ports from the bottom.
 	probed = drawsAndProbes(t, nil, only(61002))
-	if p, err := availablePortAbove(ephemeral, 0); err != nil || p != 61002 || len(*probed) != 3 {
+	if p, err := availablePortAbove(ephemeral, 0, false); err != nil || p != 61002 || len(*probed) != 3 {
 		t.Fatalf("got port %d, err %v, after probing %v; want 61002, the third from 61000", p, err, *probed)
 	}
 
@@ -162,7 +162,7 @@ func TestAPortIsDrawnAgainPastARunOfHeldPorts(t *testing.T) {
 			}
 			return true, nil
 		})
-		if p, err := availablePortAbove(ephemeral, 0); !errors.Is(err, broken) {
+		if p, err := availablePortAbove(ephemeral, 0, false); !errors.Is(err, broken) {
 			t.Fatalf("draws %v: got port %d, err %v; want the probe's error at %d", c.offsets, p, err, c.failing)
 		}
 	}
@@ -267,7 +267,7 @@ func osPicks(t *testing.T, ports ...int) *[]*pickListener {
 func TestTheOSsPickIsNeverAnExcludedPort(t *testing.T) {
 	unknown := func() (uint32, uint32, bool) { return 0, 0, false }
 	picks := osPicks(t, 40001, 40002)
-	if got, err := availablePortAbove(unknown, 0, 40001); err != nil || got != 40002 || len(*picks) != 2 {
+	if got, err := availablePortAbove(unknown, 0, false, 40001); err != nil || got != 40002 || len(*picks) != 2 {
 		t.Fatalf("got port %d, err %v, after %d picks; want 40002, the second pick, the excluded 40001 passed over", got, err, len(*picks))
 	}
 	for _, l := range *picks {
@@ -277,7 +277,7 @@ func TestTheOSsPickIsNeverAnExcludedPort(t *testing.T) {
 	}
 
 	picks = osPicks(t, 40001, 40001, 40001, 40001)
-	if got, err := availablePortAbove(unknown, 0, 40001, 40003); err == nil || len(*picks) != 3 {
+	if got, err := availablePortAbove(unknown, 0, false, 40001, 40003); err == nil || len(*picks) != 3 {
 		t.Fatalf("got port %d, err %v, after %d picks; want an error after 3 picks, each the excluded 40001", got, err, len(*picks))
 	}
 }
@@ -301,7 +301,7 @@ func TestPortProbesArePlainTCP(t *testing.T) {
 		known bool
 	}{{"a probe above the range", true}, {"the OS's pick", false}} {
 		opened = 0
-		if _, err := availablePortAbove(func() (uint32, uint32, bool) { return 32768, 60999, c.known }, 0); err != nil {
+		if _, err := availablePortAbove(func() (uint32, uint32, bool) { return 32768, 60999, c.known }, 0, false); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		if opened == 0 {
