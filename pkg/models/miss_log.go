@@ -86,6 +86,15 @@ func MissLogNextStep(r *MockMismatchReport) string {
 	return adviceShape(r.NextSteps, r.FieldDiffs, logPaths(r.LogPathTag()))
 }
 
+// LazyMissLogNextStep is r's next step as a log line carries it
+// (MissLogNextStep), shaped only when a line that holds it is written
+// (zap.Stringer): a Debug line that is off shapes nothing.
+func LazyMissLogNextStep(r *MockMismatchReport) fmt.Stringer { return lazyNextStep{r} }
+
+type lazyNextStep struct{ r *MockMismatchReport }
+
+func (l lazyNextStep) String() string { return MissLogNextStep(l.r) }
+
 // advicePaths is how advice's shaping writes a URL path it quotes. Evidence
 // (zero: evidence) writes its shape, each segment {}. A log line
 // (logPaths) about a call with a path tag writes it as keploy's console and
