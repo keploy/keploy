@@ -167,6 +167,12 @@ exit 0
 	}
 	daemon.said <- container.WaitResponse{}
 	within(t, "the run's end once the daemon answered", func() { <-exited })
+	// Its hold on the drains ends with it, not at the bound.
+	within(t, "the release of the run's hold on the drains", func() {
+		for utils.AgentStopInProgress() {
+			time.Sleep(time.Millisecond)
+		}
+	})
 	within(t, "the replay drain", func() {
 		if <-drained {
 			t.Error("the replay drain gave up on the run's end")

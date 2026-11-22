@@ -90,7 +90,7 @@ func (w *engineWait) begin(logger *zap.Logger, name string, moved *utils.Teardow
 					return
 				}
 				if m.Expired() {
-					logger.Warn("The container engine's daemon has not answered keploy's stop of its agent container within keploy's bound: keploy stops waiting for it, and the container may still run",
+					logger.Warn("The container engine's daemon has not answered keploy's stop of its agent container within keploy's bound: keploy stops waiting for it, and the container may still run. Remove it yourself once the daemon answers: "+engine.Active().CLI+" rm -f "+name,
 						zap.String("container", name), zap.Duration("bound", daemonAnswerStall))
 					w.stop(errDaemonSilent)
 					return

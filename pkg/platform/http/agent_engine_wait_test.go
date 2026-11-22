@@ -60,7 +60,12 @@ func TestEngineWaitEndsAtItsBoundSinceTheTeardownLastMoved(t *testing.T) {
 		t.Fatal("begin, again, or begun does not give the wait's one context")
 	}
 	looked(&w)
-	clk.Advance(50 * time.Second)
+	clk.Advance(engineWaitSay - time.Second)
+	looked(&w)
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("the wait said %v before %v without a movement", logs.All(), engineWaitSay)
+	}
+	clk.Advance(50*time.Second - engineWaitSay + time.Second)
 	looked(&w)
 	if said := logs.FilterLevelExact(zapcore.InfoLevel).All(); len(said) != 1 ||
 		!strings.Contains(said[0].Message, "to stop keploy's agent container") || !strings.Contains(said[0].Message, daemonAnswerStall.String()) {
@@ -105,8 +110,16 @@ func TestEngineWaitEndReleasesItsHold(t *testing.T) {
 	if n := logs.Len(); n != 0 {
 		t.Fatalf("an ended wait said %d lines: %v", n, logs.All())
 	}
+	// A begin after end holds nothing and says nothing, even with its
+	// bound already passed at its first look.
+	prev := daemonAnswerStall
+	daemonAnswerStall = 0
+	t.Cleanup(func() { daemonAnswerStall = prev })
 	var after engineWait
 	after.end()
-	_ = after.begin(zap.NewNop(), engineWaitContainer, nil)
+	_ = after.begin(zap.New(core), engineWaitContainer, nil)
 	within(t, "a begin after end", func() { <-after.ended })
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("a wait begun after its end said %v", logs.All())
+	}
 }
