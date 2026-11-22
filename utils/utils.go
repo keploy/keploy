@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net"
 	"net/http"
@@ -1153,13 +1154,121 @@ func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	return path
 }
 
-// makeDirectory creates a directory if not exists with all user access
-func makeDirectory(path string) error {
-	err := os.MkdirAll(path, 0777)
+// MkdirAllForUser creates path and any missing parent directories with perm
+// using os.OpenRoot (refusing symlinks escaping the anchor directory). When
+// running under sudo, it restores ownership of only the directories newly
+// created by this call to the invoking user via open file descriptors in
+// bottom-up order, avoiding symlink-following chown races as root.
+func MkdirAllForUser(logger *zap.Logger, path string, perm os.FileMode) error {
+	if path == "" {
+		return os.MkdirAll(path, perm)
+	}
+	clean := filepath.Clean(path)
+	perm = perm.Perm()
+
+	var base string
+	var relParts []string
+	if !filepath.IsAbs(clean) {
+		parts := strings.Split(filepath.ToSlash(clean), "/")
+		i := 0
+		for i < len(parts) && (parts[i] == "." || parts[i] == "..") {
+			i++
+		}
+		if i == 0 {
+			base = "."
+		} else {
+			base = filepath.FromSlash(strings.Join(parts[:i], "/"))
+		}
+		relParts = parts[i:]
+	} else {
+		parent := filepath.Dir(clean)
+		if parent == clean {
+			// Filesystem root already exists.
+			return nil
+		}
+		relParts = append(relParts, filepath.Base(clean))
+		base = parent
+		for {
+			if _, err := os.Lstat(base); err == nil {
+				break
+			}
+			nextParent := filepath.Dir(base)
+			if nextParent == base {
+				break
+			}
+			relParts = append(relParts, filepath.Base(base))
+			base = nextParent
+		}
+		for i, j := 0, len(relParts)-1; i < j; i, j = i+1, j-1 {
+			relParts[i], relParts[j] = relParts[j], relParts[i]
+		}
+	}
+
+	r, err := os.OpenRoot(base)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = r.Close() }()
+
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	type createdDir struct {
+		f    *os.File
+		path string
+	}
+	var created []createdDir
+	defer func() {
+		for i := len(created) - 1; i >= 0; i-- {
+			RestoreFileOwnershipOf(logger, created[i].f, created[i].path)
+			_ = created[i].f.Close()
+		}
+	}()
+
+	cur := r
+	defer func() {
+		if cur != nil && cur != r {
+			_ = cur.Close()
+		}
+	}()
+	at := base
+	for _, seg := range relParts {
+		if seg == "" || seg == "." {
+			continue
+		}
+		mkErr := cur.Mkdir(seg, perm)
+		didCreate := mkErr == nil
+		next, err := cur.OpenRoot(seg)
+		if err != nil {
+			if mkErr != nil && !errors.Is(mkErr, fs.ErrExist) {
+				return mkErr
+			}
+			return err
+		}
+		nextPath := filepath.Join(at, seg)
+		if didCreate {
+			if linfo, lerr := cur.Lstat(seg); lerr == nil && linfo.IsDir() && linfo.Mode()&os.ModeSymlink == 0 {
+				if f, ferr := cur.Open(seg); ferr == nil {
+					if finfo, serr := f.Stat(); serr == nil && os.SameFile(linfo, finfo) {
+						created = append(created, createdDir{f: f, path: nextPath})
+					} else {
+						_ = f.Close()
+					}
+				}
+			}
+		}
+		if cur != r {
+			_ = cur.Close()
+		}
+		cur, at = next, nextPath
+	}
 	return nil
+}
+
+// makeDirectory creates a directory if not exists with standard permissions (0o755)
+func makeDirectory(path string) error {
+	return MkdirAllForUser(nil, path, 0o755)
 }
 
 // SetCoveragePath takes a goCovPath and sets the coverage path accordingly.
@@ -1173,7 +1282,7 @@ func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
 			return "", err
 		}
 		goCovPath = currentPath + "/coverage-reports"
-		if err := makeDirectory(goCovPath); err != nil {
+		if err := MkdirAllForUser(logger, goCovPath, 0o755); err != nil {
 			LogError(logger, err, "failed to create coverage-reports directory", zap.String("CoverageReportPath", goCovPath))
 			return "", err
 		}

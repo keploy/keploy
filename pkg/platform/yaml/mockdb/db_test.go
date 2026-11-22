@@ -36,6 +36,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -855,5 +856,95 @@ func TestInsertMock_HandsTheDocumentWithTheFileUnlocked(t *testing.T) {
 	}
 	if readBack != 1 {
 		t.Fatalf("the receiver read back %d mocks, want the 1 just written", readBack)
+	}
+}
+
+func TestResolveMockFileMode(t *testing.T) {
+	dir := t.TempDir()
+	nonExistent := filepath.Join(dir, "new-mock.yaml")
+	mode, err := resolveMockFileMode(dir, nonExistent)
+	if err != nil {
+		t.Fatalf("resolveMockFileMode on non-existent file failed: %v", err)
+	}
+	if mode != 0o644 {
+		t.Errorf("resolveMockFileMode for new file = %o, want 0o644", mode)
+	}
+
+	existing := filepath.Join(dir, "existing-mock.yaml")
+	if err := os.WriteFile(existing, []byte("test"), 0o600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	info, err := os.Stat(existing)
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+	mode, err = resolveMockFileMode(dir, existing)
+	if err != nil {
+		t.Fatalf("resolveMockFileMode on existing file failed: %v", err)
+	}
+	if runtime.GOOS != "windows" && mode != 0o600 {
+		t.Errorf("resolveMockFileMode for existing file = %o, want 0o600", mode)
+	}
+	if mode != info.Mode().Perm() {
+		t.Errorf("resolveMockFileMode for existing file = %o, want %o", mode, info.Mode().Perm())
+	}
+}
+
+func TestMockDBDirectoryAndGobModesUnderZeroUmask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+	oldMask := utils.SetUmask()
+	defer utils.RestoreUmask(oldMask)
+
+	root := t.TempDir()
+	ys := New(zap.NewNop(), root, "mocks")
+
+	// 1. gobReopenLocked creates mock directory with 0o755 and mocks.gob with 0o644.
+	gobDir := filepath.Join(root, "gob-set")
+	if err := ys.gobReopenLocked(gobDir, "mocks"); err != nil {
+		t.Fatalf("gobReopenLocked failed: %v", err)
+	}
+	ys.gobFinishFileLocked()
+	if info, err := os.Stat(gobDir); err != nil {
+		t.Fatalf("stat gobDir: %v", err)
+	} else if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("gobReopenLocked dir mode = %o, want 0o755", got)
+	}
+	if info, err := os.Stat(filepath.Join(gobDir, "mocks.gob")); err != nil {
+		t.Fatalf("stat mocks.gob: %v", err)
+	} else if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("gobReopenLocked mocks.gob mode = %o, want 0o644", got)
+	}
+
+	// 2. mockFileRewriter.open creates its directory with 0o755.
+	rwDir := filepath.Join(root, "rewrite-set")
+	rw := newMockFileRewriter(zap.NewNop(), root, rwDir, "mocks", yaml.FormatYAML)
+	if err := rw.open(); err != nil {
+		t.Fatalf("mockFileRewriter.open failed: %v", err)
+	}
+	rw.discard()
+	if info, err := os.Stat(rwDir); err != nil {
+		t.Fatalf("stat rwDir: %v", err)
+	} else if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("mockFileRewriter dir mode = %o, want 0o755", got)
+	}
+
+	// 3. PromoteStagedSet creates target set directory with 0o755.
+	stagingDir := filepath.Join(root, "staging-set")
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatalf("mkdir stagingDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stagingDir, "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\n"), 0o644); err != nil {
+		t.Fatalf("write staged mocks.yaml: %v", err)
+	}
+	if err := ys.PromoteStagedSet(context.Background(), "staging-set", "promoted-set"); err != nil {
+		t.Fatalf("PromoteStagedSet failed: %v", err)
+	}
+	targetDir := filepath.Join(root, "promoted-set")
+	if info, err := os.Stat(targetDir); err != nil {
+		t.Fatalf("stat targetDir: %v", err)
+	} else if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("PromoteStagedSet targetDir mode = %o, want 0o755", got)
 	}
 }

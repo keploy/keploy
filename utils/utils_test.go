@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -400,6 +402,110 @@ func TestGetGitHubRelease_RefusesAnythingButARelease(t *testing.T) {
 	if err != nil || got.TagName != "v3.6.200" || len(got.Assets) != 1 || got.Assets[0].Digest != "sha256:ab" {
 		t.Errorf("getGitHubRelease = %+v, %v; want the release with its asset digest", got, err)
 	}
+}
+
+func TestMakeDirectory(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		oldMask := SetUmask()
+		defer RestoreUmask(oldMask)
+	}
+	base := t.TempDir()
+	parent := filepath.Join(base, "testdir")
+	dir := filepath.Join(parent, "nested")
+	if err := makeDirectory(dir); err != nil {
+		t.Fatalf("makeDirectory failed: %v", err)
+	}
+	for _, p := range []string{parent, dir} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat on created directory %q failed: %v", p, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("expected directory at %q, got file", p)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+			t.Errorf("makeDirectory(%q) mode = %o, want 0o755", p, info.Mode().Perm())
+		}
+	}
+}
+
+func TestMkdirAllForUser_EdgeCases(t *testing.T) {
+	t.Run("empty path returns error", func(t *testing.T) {
+		if err := MkdirAllForUser(zap.NewNop(), "", 0o755); err == nil {
+			t.Fatal("MkdirAllForUser(\"\") succeeded; want error")
+		}
+	})
+
+	t.Run("pre-existing directory preserves mode", func(t *testing.T) {
+		existing := filepath.Join(t.TempDir(), "existing")
+		if err := os.Mkdir(existing, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := MkdirAllForUser(zap.NewNop(), existing, 0o755); err != nil {
+			t.Fatalf("MkdirAllForUser on existing dir failed: %v", err)
+		}
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(existing)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			if got := info.Mode().Perm(); got != 0o700 {
+				t.Errorf("existing dir mode = %o, want 0o700 preserved", got)
+			}
+		}
+	})
+
+	t.Run("existing regular file at target or ancestor returns error", func(t *testing.T) {
+		base := t.TempDir()
+		filePath := filepath.Join(base, "regular-file")
+		if err := os.WriteFile(filePath, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		if err := MkdirAllForUser(zap.NewNop(), filePath, 0o755); err == nil {
+			t.Error("MkdirAllForUser on existing file succeeded; want error")
+		}
+		if err := MkdirAllForUser(zap.NewNop(), filepath.Join(filePath, "child"), 0o755); err == nil {
+			t.Error("MkdirAllForUser beneath existing file succeeded; want error")
+		}
+	})
+
+	t.Run("symlink escaping base directory is refused", func(t *testing.T) {
+		base := t.TempDir()
+		outside := t.TempDir()
+		work := filepath.Join(base, "work")
+		if err := os.MkdirAll(work, 0o755); err != nil {
+			t.Fatalf("mkdir work: %v", err)
+		}
+		link := filepath.Join(work, "target")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+		t.Chdir(work)
+		if err := MkdirAllForUser(zap.NewNop(), filepath.Join("target", "site", "keployE2E"), 0o755); err == nil {
+			t.Fatal("MkdirAllForUser followed escaping symlink; want error")
+		}
+		if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+			t.Fatalf("escaping symlink created entries outside base: %v (err=%v)", entries, err)
+		}
+	})
+
+	t.Run("existing child beneath read-only parent succeeds", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("read-only parent permission test requires non-root POSIX")
+		}
+		parent := filepath.Join(t.TempDir(), "ro-parent")
+		child := filepath.Join(parent, "existing-child")
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatalf("mkdir child: %v", err)
+		}
+		if err := os.Chmod(parent, 0o555); err != nil {
+			t.Fatalf("chmod parent: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+		if err := MkdirAllForUser(zap.NewNop(), child, 0o755); err != nil {
+			t.Fatalf("MkdirAllForUser on existing child under read-only parent failed: %v", err)
+		}
+	})
 }
 
 func TestReplaceHost(t *testing.T) {
