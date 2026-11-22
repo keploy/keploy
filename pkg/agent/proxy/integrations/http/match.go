@@ -311,6 +311,20 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 		var scope varScope
 		if provenswitch.On() {
 			scope = readVarScope(mockDb)
+			// Under the switch with no exact view a call is compared with
+			// the recordings that may be it (keyedStrictRead), as the
+			// passes below compare the whole pool; one they do not answer
+			// reads it.
+			served, retry, err := h.keyedStrictRead(ctx, input, mockDb, scope, strict, headerNoise, userBodyNoise, urlNoise, statefulMocks)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if retry {
+				continue
+			}
+			if served != nil {
+				return true, served, nil, nil
+			}
 		}
 
 		// Fetch HTTP mocks from BOTH pools:
