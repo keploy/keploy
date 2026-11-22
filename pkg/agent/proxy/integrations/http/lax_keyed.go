@@ -176,6 +176,7 @@ func (h *HTTP) keyedLaxRead(input *req, mockDb integrations.MockMemDb, urlNoise 
 			utils.LogError(h.Logger, err, "failed to get per-test mocks")
 			return nil, errKeyedRead
 		}
+		//nolint:staticcheck // SA1019: the whole read's own session read (matchCascade), whose pool a miss reports.
 		sessionMocks, err := mockDb.GetSessionMocks()
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get session mocks")
