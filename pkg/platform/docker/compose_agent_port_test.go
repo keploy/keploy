@@ -164,3 +164,42 @@ func agentList(c *Compose, key string) *yaml.Node {
 	}
 	return &yaml.Node{}
 }
+
+// ComposePublishedHostPorts extracts every static host port published by
+// non-agent services (short syntax with or without bind IP/IPv6/proto, port
+// ranges, long syntax, and YAML aliases) while ignoring dynamic publishes and
+// keploy-agent itself.
+func TestComposePublishedHostPortsExtractsStaticHostPorts(t *testing.T) {
+	doc := `
+x-shared-ports: &shared_ports
+  - "61509:9000"
+services:
+  keploy-agent:
+    image: keploy:dev
+    ports:
+      - "127.0.0.1:61999:61999"
+  app:
+    image: alpine:3.21
+    ports:
+      - "61500:80"
+      - "127.0.0.1:61501:80/tcp"
+      - "[::1]:61502:80/udp"
+      - "61503-61505:8000-8002"
+      - "8080"
+      - ":8081"
+      - "127.0.0.1::8082"
+      - target: 90
+        published: 61506
+        protocol: tcp
+      - target: 91
+        published: "61507-61508"
+  worker:
+    image: alpine:3.21
+    ports: *shared_ports
+`
+	got := ComposePublishedHostPortsFromYAML([]byte(doc))
+	want := []uint32{61500, 61501, 61502, 61503, 61504, 61505, 61506, 61507, 61508, 61509}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ComposePublishedHostPortsFromYAML = %v; want %v", got, want)
+	}
+}

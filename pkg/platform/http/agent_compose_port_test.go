@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -367,4 +368,77 @@ func TestComposeMoveThenRestartReappliesSessionOnMovedAddress(t *testing.T) {
 	if rep, replaced := watch.Replacement(); replaced {
 		t.Fatalf("watch saw replacement %+v after setUpRestartedAgent accepted the moved agent", rep)
 	}
+}
+
+// Both Setup's initial draw and composeAgentPortRefused's move draw exclude
+// host ports statically published by other services in the compose document,
+// whether the compose document is in memory or on disk.
+func TestComposeAgentPortExcludesDocumentPublishedHostPorts(t *testing.T) {
+	composeYAML := []byte("services:\n  api:\n    image: alpine:3.21\n    ports:\n      - \"61550:8080\"\n      - \"127.0.0.1:61551:8081/tcp\"\n")
+	stop := errors.New("stop at the agent's port")
+
+	t.Run("in-memory compose excluded on Setup draw", func(t *testing.T) {
+		was := containerPort
+		t.Cleanup(func() { containerPort = was })
+		var gotKeep []uint32
+		containerPort = func(k ...uint32) (uint32, error) {
+			gotKeep = append([]uint32(nil), k...)
+			return 0, stop
+		}
+		conf := &config.Config{}
+		conf.ProxyPort, conf.DNSPort = 16790, 16791
+		a := &AgentClient{logger: zap.NewNop(), conf: conf}
+		opts := models.SetupOptions{
+			CommandType:     "docker-compose",
+			InMemoryCompose: composeYAML,
+		}
+		if err := a.Setup(context.Background(), "docker compose up", opts); !errors.Is(err, stop) {
+			t.Fatalf("Setup = %v; want %v", err, stop)
+		}
+		if !slices.Contains(gotKeep, 61550) || !slices.Contains(gotKeep, 61551) {
+			t.Fatalf("Setup's agentPortFor excluded %v; want document published ports 61550 and 61551 included", gotKeep)
+		}
+	})
+
+	t.Run("on-disk compose file excluded on Setup draw and move draw", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "compose.yaml")
+		if err := os.WriteFile(path, composeYAML, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		was := containerPort
+		t.Cleanup(func() { containerPort = was })
+		var setupKeep []uint32
+		containerPort = func(k ...uint32) (uint32, error) {
+			setupKeep = append([]uint32(nil), k...)
+			return 0, stop
+		}
+		conf := &config.Config{}
+		conf.Agent.AgentURI = "http://localhost:16789/agent"
+		conf.Agent.AgentPort, conf.Agent.ProxyPort, conf.Agent.DnsPort = 16789, 16790, 16791
+		conf.ProxyPort, conf.DNSPort = 16790, 16791
+		a := &AgentClient{logger: zap.NewNop(), conf: conf}
+		opts := models.SetupOptions{CommandType: "docker-compose"}
+		if err := a.Setup(context.Background(), "docker compose -f "+path+" up", opts); !errors.Is(err, stop) {
+			t.Fatalf("Setup = %v; want %v", err, stop)
+		}
+		if !slices.Contains(setupKeep, 61550) || !slices.Contains(setupKeep, 61551) {
+			t.Fatalf("Setup's agentPortFor excluded %v; want document published ports 61550 and 61551 included", setupKeep)
+		}
+
+		// Now verify composeAgentPortRefused also excludes the stored compose static ports.
+		a.addressAgent("http://localhost:16789/agent")
+		var moveKeep []uint32
+		containerPort = func(k ...uint32) (uint32, error) {
+			moveKeep = append([]uint32(nil), k...)
+			return 20001, nil
+		}
+		refusal := "Error response from daemon: failed to set up container networking: failed to bind host port 127.0.0.1:16789/tcp: address already in use"
+		if to, err := a.composeAgentPortRefused(context.Background(), refusal); err != nil || to != 20001 {
+			t.Fatalf("composeAgentPortRefused = %d, %v; want 20001", to, err)
+		}
+		if !slices.Contains(moveKeep, 61550) || !slices.Contains(moveKeep, 61551) {
+			t.Fatalf("move draw excluded %v; want document published ports 61550 and 61551 included", moveKeep)
+		}
+	})
 }

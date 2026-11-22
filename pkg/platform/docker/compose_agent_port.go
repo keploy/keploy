@@ -2,7 +2,10 @@ package docker
 
 import (
 	"fmt"
+	"os"
+	"slices"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -98,4 +101,180 @@ func movedScalar(slot **yaml.Node, value string) {
 	n := *aliasTarget(*slot)
 	n.Value, n.Anchor = value, ""
 	*slot = &n
+}
+
+// FindComposeFiles returns the compose file paths named on cmd (-f / --file),
+// or the first default compose filename present in the working directory.
+func FindComposeFiles(cmd string) []string {
+	args := strings.Fields(cmd)
+	var paths []string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case (args[i] == "-f" || args[i] == "--file") && i+1 < len(args):
+			paths = append(paths, args[i+1])
+			i++
+		case strings.HasPrefix(args[i], "-f="):
+			if p := strings.TrimPrefix(args[i], "-f="); p != "" {
+				paths = append(paths, p)
+			}
+		case strings.HasPrefix(args[i], "--file="):
+			if p := strings.TrimPrefix(args[i], "--file="); p != "" {
+				paths = append(paths, p)
+			}
+		}
+	}
+	if len(paths) > 0 {
+		return paths
+	}
+	for _, name := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"} {
+		if _, err := os.Stat(name); err == nil {
+			return []string{name}
+		}
+	}
+	return nil
+}
+
+// ComposePublishedHostPorts returns the sorted, deduplicated host ports
+// statically published by non-agent services in compose (both short syntax
+// such as "61500:80" or "127.0.0.1:61500-61502:8000-8002/tcp" and long syntax
+// with a "published" field). Dynamic container-only publishes ("80", ":80")
+// and keploy-agent's own service are ignored.
+func ComposePublishedHostPorts(compose *Compose) []uint32 {
+	if compose == nil {
+		return nil
+	}
+	seen := map[uint32]struct{}{}
+	addPortRange := func(spec string) {
+		for _, p := range parseComposeHostPortRange(spec) {
+			seen[p] = struct{}{}
+		}
+	}
+	for _, e := range effectiveServiceEntries(&compose.Services) {
+		if aliasTarget(e.key).Value == "keploy-agent" {
+			continue
+		}
+		svc := aliasTarget(e.value)
+		if svc == nil || svc.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i+1 < len(svc.Content); i += 2 {
+			if aliasTarget(svc.Content[i]).Value != "ports" {
+				continue
+			}
+			ports := aliasTarget(svc.Content[i+1])
+			if ports == nil || ports.Kind != yaml.SequenceNode {
+				continue
+			}
+			for _, item := range ports.Content {
+				node := aliasTarget(item)
+				switch node.Kind {
+				case yaml.ScalarNode:
+					addPortRange(shortPublishHostPort(node.Value))
+				case yaml.MappingNode:
+					for j := 0; j+1 < len(node.Content); j += 2 {
+						if aliasTarget(node.Content[j]).Value == "published" {
+							addPortRange(aliasTarget(node.Content[j+1]).Value)
+						}
+					}
+				}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]uint32, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// ComposePublishedHostPortsFromYAML parses a compose YAML document and returns
+// ComposePublishedHostPorts, or nil if content is empty or unparseable.
+func ComposePublishedHostPortsFromYAML(content []byte) []uint32 {
+	if len(content) == 0 {
+		return nil
+	}
+	var c Compose
+	if err := yaml.Unmarshal(content, &c); err != nil {
+		return nil
+	}
+	return ComposePublishedHostPorts(&c)
+}
+
+// ComposePublishedHostPortsFromFiles reads each compose file in paths
+// (skipping unreadable or unparseable files) and returns the sorted,
+// deduplicated host ports statically published across them.
+func ComposePublishedHostPortsFromFiles(paths []string) []uint32 {
+	if len(paths) == 0 {
+		return nil
+	}
+	seen := map[uint32]struct{}{}
+	for _, p := range paths {
+		if p == "" || p == "-" {
+			continue
+		}
+		b, err := os.ReadFile(p) //nolint:gosec // user-supplied compose file path from the compose command
+		if err != nil {
+			continue
+		}
+		for _, port := range ComposePublishedHostPortsFromYAML(b) {
+			seen[port] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]uint32, 0, len(seen))
+	for port := range seen {
+		out = append(out, port)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// shortPublishHostPort extracts the host port (or start-end range) from a
+// compose short-syntax port string ([ip:]host[-end]:container[-end][/proto]).
+// Returns "" for container-only or dynamic host ports ("80", ":80", "127.0.0.1::80").
+func shortPublishHostPort(spec string) string {
+	s := strings.TrimSpace(spec)
+	if s == "" {
+		return ""
+	}
+	s, _, _ = strings.Cut(s, "/")
+	colon := strings.LastIndexByte(s, ':')
+	if colon <= 0 {
+		return ""
+	}
+	hostPart := s[:colon]
+	if ipSep := strings.LastIndexByte(hostPart, ':'); ipSep >= 0 {
+		return hostPart[ipSep+1:]
+	}
+	return hostPart
+}
+
+func parseComposeHostPortRange(spec string) []uint32 {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil
+	}
+	if a, b, ok := strings.Cut(spec, "-"); ok {
+		start, err1 := strconv.ParseUint(strings.TrimSpace(a), 10, 16)
+		end, err2 := strconv.ParseUint(strings.TrimSpace(b), 10, 16)
+		if err1 != nil || err2 != nil || start == 0 || end == 0 || start > end {
+			return nil
+		}
+		out := make([]uint32, 0, end-start+1)
+		for p := start; p <= end; p++ {
+			out = append(out, uint32(p))
+		}
+		return out
+	}
+	p, err := strconv.ParseUint(spec, 10, 16)
+	if err != nil || p == 0 {
+		return nil
+	}
+	return []uint32{uint32(p)}
 }

@@ -45,7 +45,11 @@ func (a *AgentClient) composeAgentPortRefused(ctx context.Context, said string) 
 		return 0, err
 	}
 	taken := utils.PortTaken(from)
-	to, err := agentPortFor(true, a.conf.Agent.ProxyPort, a.conf.Agent.DnsPort, from)
+	staticPorts := a.composeStaticPortsSnapshot()
+	keep := make([]uint32, 0, 3+len(staticPorts))
+	keep = append(keep, a.conf.Agent.ProxyPort, a.conf.Agent.DnsPort, from)
+	keep = append(keep, staticPorts...)
+	to, err := agentPortFor(true, keep...)
 	if err != nil {
 		return 0, fmt.Errorf("docker compose could not publish the keploy agent's port: %s, saying %q, and keploy found no other port for it: %w", taken, line, err)
 	}
@@ -95,6 +99,15 @@ func (a *AgentClient) moveAgentAddress(uri string) {
 		forgetContainers(oldURI)
 		forgetNetworkNames(oldURI)
 	}
+}
+
+func (a *AgentClient) composeStaticPortsSnapshot() []uint32 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.composeStaticPorts) == 0 {
+		return nil
+	}
+	return append([]uint32(nil), a.composeStaticPorts...)
 }
 
 // agentURIOn is uri, the agent's address, on port: the same scheme, host and

@@ -92,6 +92,11 @@ type AgentClient struct {
 	// watches its start.
 	agentContainer   *namedContainer
 	agentContainerAt string
+	// composeStaticPorts holds the host ports statically published by other
+	// services in the current compose document (under mu), excluded from both
+	// Setup's initial draw and composeAgentPortRefused's move draw so keploy's
+	// agent never takes a port another service in the same compose up publishes.
+	composeStaticPorts []uint32
 
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
@@ -3997,15 +4002,33 @@ func agentPortFor(docker bool, keep ...uint32) (uint32, error) {
 }
 
 // agentPorts picks the ports a new agent's server (agentPortFor), proxy and
-// DNS server (proxyPorts) listen on.
-func (a *AgentClient) agentPorts(docker bool) (agentPort, proxyPort, dnsPort uint32, err error) {
-	if agentPort, err = agentPortFor(docker, a.conf.ProxyPort, a.conf.DNSPort); err != nil {
+// DNS server (proxyPorts) listen on. extraKeep holds any additional ports the
+// agent's own port must stay off (such as host ports statically published by
+// other services in a compose document).
+func (a *AgentClient) agentPorts(docker bool, extraKeep ...uint32) (agentPort, proxyPort, dnsPort uint32, err error) {
+	keep := make([]uint32, 0, 2+len(extraKeep))
+	keep = append(keep, a.conf.ProxyPort, a.conf.DNSPort)
+	keep = append(keep, extraKeep...)
+	if agentPort, err = agentPortFor(docker, keep...); err != nil {
 		return 0, 0, 0, fmt.Errorf("failed to find available port for agent: %w", err)
 	}
 	if proxyPort, dnsPort, err = a.proxyPorts(docker, agentPort); err != nil {
 		return 0, 0, 0, err
 	}
 	return agentPort, proxyPort, dnsPort, nil
+}
+
+// composeExcludedPorts returns the host ports statically published by other
+// services in the compose document for a docker compose run, so agentPortFor
+// does not draw one before docker compose up binds it.
+func composeExcludedPorts(cmd string, opts models.SetupOptions) []uint32 {
+	if utils.CmdType(opts.CommandType) != utils.DockerCompose {
+		return nil
+	}
+	if len(opts.InMemoryCompose) > 0 {
+		return kdocker.ComposePublishedHostPortsFromYAML(opts.InMemoryCompose)
+	}
+	return kdocker.ComposePublishedHostPortsFromFiles(kdocker.FindComposeFiles(cmd))
 }
 
 // agentRunsOnLinux says whether a native agent, one Setup starts as a process
@@ -4092,7 +4115,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// container.
 	a.forgetAgentContainer()
 
-	agentPort, proxyPort, dnsPort, err := a.agentPorts(isDockerCmd)
+	composeStatic := composeExcludedPorts(cmd, opts)
+	a.mu.Lock()
+	a.composeStaticPorts = composeStatic
+	a.mu.Unlock()
+
+	agentPort, proxyPort, dnsPort, err := a.agentPorts(isDockerCmd, composeStatic...)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to find the agent's ports")
 		return err
