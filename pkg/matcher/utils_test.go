@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -744,7 +745,7 @@ func TestJsonContains_DecimalsArraysAndLargeIntegers(t *testing.T) {
 
 func TestMixedFloat64AndJSONNumber_PreparedAndNoisePath(t *testing.T) {
 	// NewValidatedJSON, JSONMatchKey, CollectJSONFields/CountJSONFieldDiffs with mixed float64 vs json.Number.
-	expDoc := map[string]interface{}{"price": 0.1, "count": float64(1), "zero": -0.0}
+	expDoc := map[string]interface{}{"price": 0.1, "count": float64(1), "zero": math.Copysign(0, -1)}
 	actDoc, err := UnmarshallJSON(`{"price": 0.1, "count": 1.0, "zero": 0}`, nil)
 	if err != nil {
 		t.Fatalf("UnmarshallJSON: %v", err)
