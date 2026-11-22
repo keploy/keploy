@@ -79,7 +79,7 @@ func (c *ChildConsole) file(dst *os.File) (*os.File, error) {
 	if c.tee == nil && !keployLog.CutsChildOutput() {
 		return dst, nil
 	}
-	r, w, err := os.Pipe()
+	r, w, err := childConsolePipe()
 	if err != nil {
 		return nil, fmt.Errorf("make the pipe the child's output is cut through: %w", err)
 	}
@@ -118,19 +118,14 @@ func (c *ChildConsole) Started() {
 
 // Exited writes out, cut, everything the child wrote before it exited, its
 // last line too if it left it unended, and returns: it does not wait for a
-// process the child left running (whose output goes on being copied). Where
-// a tee is set and the pipe has no read deadline (Windows), it waits for the
-// copy to reach EOF so everything the exited child printed has reached the
-// tee before Exited returns. Call it once cmd.Wait has returned.
+// process the child left running (whose output goes on being copied). Call it
+// once cmd.Wait has returned.
 func (c *ChildConsole) Exited() {
 	if c == nil {
 		return
 	}
 	for _, cp := range c.copies {
 		cp.Drain()
-		if c.tee != nil && !cp.canDrain {
-			<-cp.Done()
-		}
 	}
 }
 
@@ -180,8 +175,8 @@ func StartChildOutputCopy(dst io.Writer, src *os.File, keep bool) *ChildOutputCo
 // returns. Call it once the child has exited: what it wrote is then all in
 // src. It reads no more than src held when it began, so a process the child
 // left running that writes on cannot keep it from returning. Without
-// deadlines on src (no poller, as on Windows) it returns at once and the
-// copy goes on to src's end.
+// deadlines on src (no poller) it returns at once and the copy goes on to
+// src's end.
 func (c *ChildOutputCopy) Drain() {
 	c.drainOnce.Do(func() {
 		// Not a time budget: a deadline in the past is how a read blocked

@@ -155,8 +155,8 @@ jobs:
       # which must answer the directory a Windows run is in. Only these tests
       # of ./utils/ run here: the package as a whole has not been shown to
       # pass on Windows.
-      - name: Test the Windows stop and working directory (amd64)
-        run: go test -count=1 -run "TestTheWindowsStopSaysItKilled|TestGetLastDirectory" ./utils/
+      - name: Test the Windows stop, working directory, and child console pipe (amd64)
+        run: go test -count=1 -run "TestTheWindowsStopSaysItKilled|TestGetLastDirectory|TestChildConsoleWindowsDrainsWithoutWaitingForAGrandchildHoldingThePipe" ./utils/
         shell: cmd
 
       # The agent's start on Windows, which has no PTY: what the command
