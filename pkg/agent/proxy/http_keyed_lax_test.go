@@ -25,7 +25,12 @@ import (
 //     second pass, of auto-detected id segments;
 //   - urlnoise: a GET whose token segment differs, under url noise that
 //     masks it;
-//   - miss: a GET of the group's prefix no recording has.
+//   - miss: a GET of the group's prefix no recording has;
+//   - pass2: a GET whose token segment differs, under the same url noise,
+//     and whose id query value differs from its recording's. The first pass
+//     refuses that recording (the value), and its id-masked path is not the
+//     call's (the token), so the second pass, which relaxes the value, reads
+//     the whole pool. In this shape's set each token GET carries an id query.
 
 const laxURLNoise = "/s/tok[a-z]+"
 
@@ -60,19 +65,28 @@ func laxCall(shape string, j int) (method, path, body string, answer int) {
 		return "GET", "/shop-" + slug + "/r/" + strconv.Itoa(5000000+j), "", 4*j + 2
 	case "urlnoise":
 		return "GET", "/shop-" + slug + "/s/tok" + slug + "live", "", 4*j + 3
+	case "pass2":
+		return "GET", "/shop-" + slug + "/s/tok" + slug + "live?id=" + strconv.Itoa(1_700_000_500_000+j), "", 4*j + 3
 	}
 	return "GET", "/shop-" + slug + "/none", "", -1
 }
 
 func laxOpts(shape string) models.OutgoingOptions {
-	if shape != "urlnoise" {
+	if shape != "urlnoise" && shape != "pass2" {
 		return models.OutgoingOptions{}
 	}
 	return models.OutgoingOptions{NoiseConfig: map[string]map[string][]string{"url": {laxURLNoise: nil}}}
 }
 
-func laxMock(i int, at time.Time) *models.Mock {
+// laxMock is recording i of shape's set: laxRecorded's, with an id query on
+// each token GET of the pass2 set.
+func laxMock(shape string, i int, at time.Time) *models.Mock {
 	method, path, body := laxRecorded(i)
+	var params map[string]string
+	if shape == "pass2" && i%4 == 3 {
+		id := strconv.Itoa(1_700_000_000_000 + i/4)
+		path, params = path+"?id="+id, map[string]string{"id": id}
+	}
 	hdr := map[string]string{"Host": "upstream"}
 	if body != "" {
 		hdr["Content-Type"] = "application/json"
@@ -87,7 +101,7 @@ func laxMock(i int, at time.Time) *models.Mock {
 			Metadata: map[string]string{"type": models.HTTPClient},
 			HTTPReq: &models.HTTPReq{
 				Method: models.Method(method), ProtoMajor: 1, ProtoMinor: 1,
-				URL: "http://upstream" + path, Header: hdr, Body: body,
+				URL: "http://upstream" + path, URLParams: params, Header: hdr, Body: body,
 			},
 			HTTPResp: &models.HTTPResp{
 				StatusCode: 200,
@@ -102,12 +116,12 @@ func laxMock(i int, at time.Time) *models.Mock {
 	return m
 }
 
-// stageLax installs a fresh copy of the n-recording lax set as the serving
-// window.
-func stageLax(mm *MockManager, n int, at time.Time) {
+// stageLax installs a fresh copy of shape's n-recording lax set as the
+// serving window.
+func stageLax(mm *MockManager, shape string, n int, at time.Time) {
 	mocks := make([]*models.Mock, n)
 	for i := range mocks {
-		mocks[i] = laxMock(i, at)
+		mocks[i] = laxMock(shape, i, at)
 	}
 	mm.SetMocksWithWindow(mocks, nil, at.Add(-time.Second), at.Add(time.Duration(n)*time.Millisecond+time.Second))
 }
@@ -142,7 +156,7 @@ func TestAProvenOffLaxCallReadsOnlyItsPathsRecordings(t *testing.T) {
 			h := httpint.New(zap.NewNop())
 			mm := NewMockManager(nil, nil, zap.NewNop())
 			defer mm.Close()
-			stageLax(mm, n, at)
+			stageLax(mm, shape, n, at)
 			walks := watchWalks(t, mm.filtered)
 			for k := 0; k < 48; k++ {
 				j := (k * 7919) % (n / 4)
@@ -295,7 +309,7 @@ func TestAKeyedLaxReadAnswersAsTheWholeRead(t *testing.T) {
 // in a stride through the groups. The first call after a staging builds the
 // indexes the shape reads and is timed apart, as first-ns.
 func BenchmarkHTTPReplayLaxPerCall(b *testing.B) {
-	for _, shape := range []string{"fuzzy", "id", "urlnoise", "miss"} {
+	for _, shape := range []string{"fuzzy", "id", "urlnoise", "miss", "pass2"} {
 		for _, n := range []int{1000, 10000} {
 			b.Run(shape+"/n="+strconv.Itoa(n), func(b *testing.B) {
 				b.Setenv("KEPLOY_PROVEN", "0")
@@ -311,7 +325,7 @@ func BenchmarkHTTPReplayLaxPerCall(b *testing.B) {
 					first := k%per == 0
 					if first {
 						b.StopTimer()
-						stageLax(mm, n, at)
+						stageLax(mm, shape, n, at)
 					}
 					j := ((k % per) * 7919) % (n / 4)
 					t0 := time.Now()
