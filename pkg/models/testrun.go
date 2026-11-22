@@ -147,10 +147,16 @@ type TestResult struct {
 	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
 	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
 	// SkipReason says why keploy skipped this test: set on an IGNORED result
-	// whose skip carried a reason (a quarantine, with its class and why), and
-	// rendered into the JUnit <skipped> message and the text report. Empty for
-	// every other result, and for a test skipped without one.
+	// whose skip carried a reason (a quarantine, with its class and why, or a
+	// skip of another kind: SkipKind), and rendered into the JUnit <skipped>
+	// message and the text report. Empty for every other result, and for a
+	// test skipped without one.
 	SkipReason string `json:"skip_reason,omitempty" yaml:"skip_reason,omitempty"`
+	// SkipKind is the kind of the skip SkipReason gives the reason for: empty
+	// for a quarantine (SkipQuarantined), and for every result without a
+	// reason; SkipThisRunOnly for a test skipped for that run only, and
+	// SkipUntilRerecorded for one skipped until it is recorded again.
+	SkipKind SkipKind `json:"skip_kind,omitempty" yaml:"skip_kind,omitempty"`
 	// MockMismatches captures expected vs actually-consumed mocks for THIS test.
 	// Distinct from FailureInfo.MockMismatch (which only fires when the mock
 	// pool diverged AND the test case is OBSOLETE) — this field is set for
@@ -203,12 +209,13 @@ type TestResult struct {
 	// A later call that sent another value failed the test case as a miss.
 	// Absent when none was bound.
 	Variables []VariableBinding `json:"variables,omitempty" yaml:"variables,omitempty"`
-	// Answers are, under the proven switch, the answered calls
-	// (UnmatchedCall.Answer) charged to this test's window, or to the gap
-	// before it, as misses are: a pairing record's full round
-	// made, a background write answered by its kind. They never fail the
-	// test, nor land in FailureInfo.UnmatchedCalls. Absent when there is
-	// none.
+	// Answers are the answered calls (UnmatchedCall.Answer) charged to this
+	// test's window, or to the gap before it, as misses are: under the
+	// proven switch a pairing record's full round made and a background
+	// write answered by its kind; with it off a call answered with the
+	// recording of another call (AnsweredAsAnother: other_id,
+	// closest_body). They never fail the test, nor land in
+	// FailureInfo.UnmatchedCalls. Absent when there is none.
 	Answers []UnmatchedCall `json:"answers,omitempty" yaml:"answers,omitempty"`
 	// Rewritten are the places of the expected response a replay hook
 	// rewrote for this send before the answer was compared with it
@@ -933,14 +940,47 @@ const (
 )
 
 // The answers an answered call reports (UnmatchedCall.Answer,
-// MockMismatchReport.Answer, ReportAnswer), under the proven switch.
+// MockMismatchReport.Answer, ReportAnswer): the first two under the proven
+// switch, the last two with it off.
 const (
 	// AnswerProvisional: record's full round paired the call with a recording
 	// another test owns and answered it with that recording.
 	AnswerProvisional = "provisional"
 	// AnswerByKind: a background write answered by its write kind, unchecked.
 	AnswerByKind = "by_kind"
+	// AnswerOtherID: with the proven switch off, no recording had the call's
+	// URL, and the call was answered with the recording of a URL that
+	// differs from it only at path segments or query values that look like
+	// ids (all digits, a uuid, long hex, a long token; a query's digit run
+	// of 10 or more), each of one shape on both sides: the recording of
+	// another call, GET /users/1 for GET /users/3, GET /orders?id=<uuid> for
+	// GET /orders?id=<another uuid>. ClosestMock names the recording, Diff
+	// names its call, and Differs the places (url.path.<i>,
+	// url.query.<name>). Where OutgoingOptions.DisableAutoURLDynamic is set,
+	// such a call is a miss instead.
+	AnswerOtherID = "other_id"
+	// AnswerClosestBody: with the proven switch off, the call was answered
+	// with the recording whose request body is closest to the call's, of the
+	// recordings of its method and path, none of whose bodies is the call's
+	// outside its noise (keploy.yml's request-body noise and the noise the
+	// record learned; JSON compared field by field): the recording of
+	// another call. Where one recording of its method and path is left to
+	// serve it, only a field one of the two bodies holds and the other
+	// does not, outside that noise, makes it another call's; values alone
+	// that differ keep it served as the call's own, with no report.
+	// ClosestMock names the recording, Diff names its call,
+	// and Differs the body fields the call differs from it at ("body.ts"),
+	// or "body" for bodies with no fields to compare.
+	AnswerClosestBody = "closest_body"
 )
+
+// AnsweredAsAnother reports whether answer says the call was answered with
+// the recording of another call (AnswerOtherID, AnswerClosestBody): served,
+// so no miss, and no test's verdict reads it, but nothing shows the call's
+// own answer was served.
+func AnsweredAsAnother(answer string) bool {
+	return answer == AnswerOtherID || answer == AnswerClosestBody
+}
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),
 // as the learn step decides them (package matcher/learn).

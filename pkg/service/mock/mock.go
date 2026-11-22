@@ -98,9 +98,10 @@ type mockService struct {
 	// repeats is what the run's end read of how many calls in tests each
 	// series answered past its recorded count (readSeriesRepeats).
 	repeats seriesRepeats
-	// seriesRead is what the agent consumed that the wait for the series the
-	// run owes read (awaitRequiredSeries), before the run's end's read.
-	seriesRead []models.MockState
+	// consumed is what the agent consumed, as every read of the run read it
+	// (the wait for the series the run owes, awaitRequiredSeries, then the
+	// run's end, reportOutcome), each recording once.
+	consumed consumedReads
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil

@@ -151,15 +151,18 @@ type Session struct {
 	RouteMocksViaSyncMock bool
 	// peerEnds: how each side of the connection ended, which ended first
 	// (MarkPeerEndedBy; peerEndFirstShift), and whether that first end
-	// records no fault (EndFollowedStop) and, from noFaultEndShift, which
-	// such end it was (FirstEndNoFault); whether the server spoke unasked
-	// before the current request (ServerSpokeUnasked); and, from
+	// records no fault (EndFollowedStop); whether the server spoke unasked
+	// before the current request (ServerSpokeUnasked); whether the
+	// destination's stream ended where the client stopped taking it
+	// (endedWhereClientStoppedBit); whether the client had ended its side
+	// before the destination's end reached it (ClientEndedBeforeDest); from
 	// endedWithConnectionShift, one bit per fakeconn.Direction: that stream
-	// ended because its connection did (MarkEndedWithConnection); and, from
-	// clientEndErrnoShift, the errno the client's socket gave after the
-	// relay was done with it (MarkClientEndError). Internal;
-	// one word here, in the padding after the bools, so a Session stays in
-	// its size class with clientStopped.
+	// ended because its connection did (MarkEndedWithConnection); from
+	// clientEndShift, which end that records no fault the client's own end
+	// was, first or not (ClientEndNoFault); and, from clientEndErrnoShift,
+	// the errno the client's socket gave after the relay was done with it
+	// (MarkClientEndError). Internal; one word here, in the padding after
+	// the bools, so a Session stays in its size class with clientStopped.
 	peerEnds atomic.Uint32
 
 	// --- Backward-compatibility (populated by the migration shim) ---
@@ -252,10 +255,6 @@ type Session struct {
 
 	// exchanges is NextRequest's state.
 	exchanges exchanges
-	// clientStopped is nil until the destination's stream ended where the
-	// client stopped taking it (MarkEndedWhereClientStopped), and then what
-	// reads the start of what the client refused there.
-	clientStopped atomic.Pointer[func() []byte]
 	// endedAtHole, per fakeconn.Direction: that stream ended at a capture
 	// hole, and why (MarkEndedAtHole). nil while it has not.
 	endedAtHole [2]atomic.Pointer[string]
@@ -390,41 +389,41 @@ func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {
 // never read, and a half-closed client that reset before its acknowledgement
 // went out may have read some of what was cut. The caller calls it before the
 // stream ends, so a parser that reaches the end sees it. Nil-safe.
-//
-// notTaken returns the start of what the client refused from there on, which
-// the stream does not hold, up to what reached the proxy after the client's
-// FIN (relay.Config.ClientStopped): all of it once the stream has ended.
-// NotTakenWhereClientStopped calls it.
-func (s *Session) MarkEndedWhereClientStopped(notTaken func() []byte) {
+func (s *Session) MarkEndedWhereClientStopped() {
 	if s == nil {
 		return
 	}
-	s.clientStopped.Store(&notTaken)
+	s.peerEnds.Or(endedWhereClientStoppedBit)
 }
 
 // EndedWhereClientStopped reports whether the destination's stream ended where
 // the client stopped taking it (MarkEndedWhereClientStopped). Nil-safe.
 func (s *Session) EndedWhereClientStopped() bool {
-	return s != nil && s.clientStopped.Load() != nil
+	return s != nil && s.peerEnds.Load()&endedWhereClientStoppedBit != 0
 }
 
-// NotTakenWhereClientStopped is the start of what the client refused where the
-// destination's stream ended (MarkEndedWhereClientStopped): bytes the
-// destination sent that the client never took, and the stream never held, up
-// to the first that reached the proxy after the client's FIN, which may be the
-// destination's answer to the client's close. A parser that reached the end of
-// the stream in the middle of a message reads in it how the destination went
-// on before it could know the client had closed. Nil while the stream has not
-// ended so, when nothing was given to read it, and for a nil session. The
-// caller must not change it.
-func (s *Session) NotTakenWhereClientStopped() []byte {
+// MarkClientEndedBeforeDest says the client had ended its side of the
+// connection (its FIN in, or the connection reset) before the destination's end
+// reached it: a look at the proxy's end of the client connection, taken as the
+// relay read the destination's end and before it forwarded it, found it so
+// (relay.Config.ClientEndedBeforeDest). The client's end then came first,
+// whichever of the two ends the relay read first: a destination that closes on
+// its own as the client closes can have its close read first on a busy host.
+// The caller calls it before the stream ends, so a parser that reaches the end
+// sees it. Nil-safe.
+func (s *Session) MarkClientEndedBeforeDest() {
 	if s == nil {
-		return nil
+		return
 	}
-	if p := s.clientStopped.Load(); p != nil && *p != nil {
-		return (*p)()
-	}
-	return nil
+	s.peerEnds.Or(clientEndedBeforeDestBit)
+}
+
+// ClientEndedBeforeDest reports whether the client had ended its side before
+// the destination's end reached it (MarkClientEndedBeforeDest). False where the
+// relay cannot look at the client's socket (off Linux), and where the
+// destination's end was never read. Nil-safe.
+func (s *Session) ClientEndedBeforeDest() bool {
+	return s != nil && s.peerEnds.Load()&clientEndedBeforeDestBit != 0
 }
 
 // StreamedBefore reports whether every chunk of dir captured before the chunk
@@ -475,9 +474,18 @@ const spokeUnaskedBit = 1 << (peerEndFirstShift + 2)
 // endFollowedStopBit, in peerEnds, after spokeUnaskedBit: EndFollowedStop.
 const endFollowedStopBit = 1 << (peerEndFirstShift + 3)
 
+// endedWhereClientStoppedBit, in peerEnds, after endFollowedStopBit:
+// EndedWhereClientStopped.
+const endedWhereClientStoppedBit = 1 << (peerEndFirstShift + 4)
+
+// clientEndedBeforeDestBit, in peerEnds, after endedWhereClientStoppedBit:
+// ClientEndedBeforeDest.
+const clientEndedBeforeDestBit = 1 << (peerEndFirstShift + 5)
+
 // EndFollowedStop reports whether the first end of the connection
 // (FirstPeerEnded) was the application's stop, which records no fault
-// (MarkPeerEndedBy, FirstEndNoFault says which): read after the recording's
+// (MarkPeerEndedBy; ClientEndNoFault says which, of the client's end): read
+// after the recording's
 // stop had begun (keploy stops the application only once it has told the
 // agent), the client's end as its process exited, or the client's end where
 // the hooks cannot say how the application released it (the proxy's
@@ -490,13 +498,13 @@ func (s *Session) EndFollowedStop() bool {
 	return s != nil && s.peerEnds.Load()&endFollowedStopBit != 0
 }
 
-// NoFaultEnd is which end that records no fault the first end of a
-// connection was (MarkPeerEndedBy, FirstEndNoFault), as the relay read it.
+// NoFaultEnd is which end that records no fault an end of a connection was
+// (MarkPeerEndedBy, ClientEndNoFault), as the relay read it.
 type NoFaultEnd uint32
 
 const (
-	// EndMayBeFault: the first end is none of the ones below (the
-	// application's giving up, the upstream's fault), or none has come.
+	// EndMayBeFault: the end is none of the ones below (the application's
+	// giving up, the upstream's fault), or none has come.
 	EndMayBeFault NoFaultEnd = iota
 	// EndAtStop: an end read once the recording's stop had begun.
 	EndAtStop
@@ -511,18 +519,24 @@ const (
 	EndUnjudged
 )
 
-// noFaultEndShift: peerEnds holds, from this bit, the first end's NoFaultEnd
-// in two bits, past MarkEndedWithConnection's bits.
-const noFaultEndShift = endedWithConnectionShift + 2
+// clientEndShift: peerEnds holds, from this bit, the client's own end's
+// NoFaultEnd in two bits, past MarkEndedWithConnection's bits.
+const clientEndShift = endedWithConnectionShift + 2
 
-// FirstEndNoFault reports which end that records no fault the connection's
-// first end was (MarkPeerEndedBy): EndMayBeFault where EndFollowedStop is
-// false. Nil-safe.
-func (s *Session) FirstEndNoFault() NoFaultEnd {
+// ClientEndNoFault reports which end that records no fault the client's own
+// end was (MarkPeerEndedBy, FromClient), whether or not it was the
+// connection's first: EndMayBeFault where it may be a fault, and while the
+// relay has not read it (PeerEnded(FromClient) is PeerOpen). A call the client
+// stopped taking is the client's to judge, by its own end, whichever end the
+// relay read first: an upstream that closes once it has sent its last bytes
+// (keep-alives off) closes on its own, and its forwarder can read that close
+// before the client's forwarder reads the client's FIN, which came before it.
+// Nil-safe.
+func (s *Session) ClientEndNoFault() NoFaultEnd {
 	if s == nil {
 		return EndMayBeFault
 	}
-	return NoFaultEnd(s.peerEnds.Load() >> noFaultEndShift & 3)
+	return NoFaultEnd(s.peerEnds.Load() >> clientEndShift & 3)
 }
 
 // ServerSpokeUnasked reports whether the server sent bytes that answer no
@@ -559,8 +573,8 @@ func (s *Session) MarkPeerEnded(dir fakeconn.Direction, reset bool) {
 // agent before they stop the application), the client's process was exiting
 // as its end was read (EndAtExit), or the hooks cannot say how the client
 // released its end (EndUnjudged), as the proxy's peerEndMarker reads it. Such
-// an end is not a fault (EndFollowedStop, FirstEndNoFault). Only the first
-// end's is kept. Nil-safe.
+// an end is not a fault: the first end's says so (EndFollowedStop), and the
+// client's, first or not, says which it was (ClientEndNoFault). Nil-safe.
 func (s *Session) MarkPeerEndedBy(dir fakeconn.Direction, reset bool, why NoFaultEnd) {
 	if s == nil || dir > fakeconn.FromDest {
 		return
@@ -576,10 +590,13 @@ func (s *Session) MarkPeerEndedBy(dir fakeconn.Direction, reset bool, why NoFaul
 			return
 		}
 		next := old | uint32(end)<<shift
+		if dir == fakeconn.FromClient {
+			next |= uint32(why) << clientEndShift
+		}
 		if (old>>peerEndFirstShift)&3 == 0 {
 			next |= (uint32(dir) + 1) << peerEndFirstShift
 			if why != EndMayBeFault {
-				next |= endFollowedStopBit | uint32(why)<<noFaultEndShift
+				next |= endFollowedStopBit
 			}
 		}
 		if s.peerEnds.CompareAndSwap(old, next) {
@@ -1183,10 +1200,11 @@ const leftOutWarnEvery = 10 * time.Second
 // leftOutCause, or past maxOpenKinds causes by leftOutClass.
 var leftOutWarns = NewWarnLimiters(leftOutWarnEvery)
 
-// ResetLeftOutWarningsForTest forgets every left-out WARN let through and
-// held back so far, so a test in another package (a parser's) can count the
-// ones it causes: the limit is process-wide. Production code never calls it.
-func ResetLeftOutWarningsForTest() { leftOutWarns.Reset() }
+// ResetLeftOutWarningsForTest forgets every left-out WARN, and every tunnel
+// WARN (ReportTunnel), let through and held back so far, so a test in another
+// package (a parser's) can count the ones it causes: the limits are
+// process-wide. Production code never calls it.
+func ResetLeftOutWarningsForTest() { leftOutWarns.Reset(); tunnelWarns.Reset() }
 
 // ReportLeftOut reports m as a mock left out of the recording, for reason: an
 // exchange its connection could not record. It has five callers, and each
@@ -1319,6 +1337,66 @@ func (s *Session) spanLeftOut(start, end time.Time) bool {
 	}
 	s.RecordOrphanWindow(start, end)
 	return true
+}
+
+// tunnelWarnEvery is how often ReportTunnel's WARN may be logged for each
+// host.
+const tunnelWarnEvery = 10 * time.Second
+
+// tunnelWarns limits ReportTunnel's WARN, process-wide, keyed by the tunnel's
+// host, or, past the hosts AllowOr keeps apart, by tunnelWarnOverflow.
+var tunnelWarns = NewWarnLimiters(tunnelWarnEvery)
+
+// tunnelWarnOverflow is the kind tunnelWarns limits a host under once it
+// keeps no more hosts apart.
+const tunnelWarnOverflow = "tunnel"
+
+// TunnelWarnMsg is ReportTunnel's line, at WARN, and at Debug for one the
+// limit holds back or one reported as the recording stops. Exported for a
+// parser's tests.
+const TunnelWarnMsg = "a CONNECT opened a tunnel on a recorded connection: the calls through the tunnel are not recorded"
+
+// tunnelNextStep is ReportTunnel's next_step. It promises the test cases' fate
+// only where it holds: keploy's proxy follows a connection whose parser has
+// returned, and leaves out the test cases recorded while it carries traffic
+// (syncMock.UnrecordedConn); a capture that does not follow it saves them.
+const tunnelNextStep = "the app's traffic is unaffected. From the CONNECT's 2xx answer on, the connection carries the " +
+	"tunnel's own protocol (TLS to the host, most often), which is no HTTP/1 exchange, so its recording ends at that " +
+	"answer and no call through the tunnel is recorded as a mock. keploy's proxy leaves out the test cases recorded " +
+	"while the connection carries the tunnel's traffic; a capture that does not follow the connection once its " +
+	"parser has returned saves them without these mocks, and their replay fails with no_mocks. keploy's proxy " +
+	"records the calls through a tunnel when the CONNECT is its connection's first request, as an app using an " +
+	"HTTP proxy sends it"
+
+// ReportTunnel reports that the connection's recording ends at a CONNECT's
+// 2xx, which opened a tunnel to host (the CONNECT's request-target): the
+// calls the tunnel carries are no HTTP/1 exchange its parser can record, and
+// it returns there, so a connection reports it once. It is logged at WARN once
+// per tunnelWarnEvery for each host, process-wide, with how many of that
+// host's were held back since the last such WARN (sameWarningsHeldBack), and
+// each one held back at Debug: a call that is not recorded must not be
+// silent, and an app that opens a tunnel per call must not log a line per
+// call. As the recording itself stops (RecordingStopping), the connection is
+// torn down with it, and no span opens for what it carries after: it is
+// logged at Debug, and the limit is not spent on it. Nil-safe.
+func (s *Session) ReportTunnel(host string) {
+	if s == nil || s.Logger == nil {
+		return
+	}
+	fields := []zap.Field{zap.String("connID", s.ClientConnID), zap.String("host", host)}
+	if s.RecordingStopping() {
+		s.Logger.Debug(TunnelWarnMsg, append(fields, zap.Bool("recordingStopping", true))...)
+		return
+	}
+	ok, held, _ := tunnelWarns.AllowOr(host, tunnelWarnOverflow)
+	if !ok {
+		s.Logger.Debug(TunnelWarnMsg, fields...)
+		return
+	}
+	if held > 0 {
+		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
+	}
+	s.Logger.Warn(TunnelWarnMsg, append(fields, zap.String("next_step", tunnelNextStep))...)
 }
 
 // ReportStoppedOn reports the exchange a parser stops on, as it returns
@@ -1481,19 +1559,23 @@ const (
 
 // LeftOutClientClosedPartway is the cause an HTTP/1 recorder leaves an
 // exchange out for when the client closed the connection partway through its
-// response: the relay ended the response's stream where the client stopped
-// taking it (EndedWhereClientStopped), and the response had not ended there.
-// The client gave up on the call (its timeout, a cancelled call) or wanted no
-// more of it, and the capture cannot tell which. Recorded as far as the client
-// had it, replay would serve a complete-looking shorter response to a call
-// that saw a timeout at record. Neither is a capture loss: the call itself did
-// not complete, so there is no whole exchange to record. Of class
-// leftOutClientClosed.
+// response and what it read is not recorded: it closed before the response's
+// head came whole (no response to record), the capture lost a chunk of it
+// (the mark comes before the reason), or the stream ended where the client
+// stopped taking it (EndedWhereClientStopped) with no fault of the client's
+// to record it with (a capture hole, or the recording's stop read on the
+// server's side where the relay never read the client's end). A response the
+// client read past its head, and
+// stopped reading, is recorded as far as it read it, with the fault
+// models.FaultStoppedReading, instead. The call itself did not complete, so
+// there is no whole exchange to record. Of class leftOutClientClosed.
 const LeftOutClientClosedPartway = "the client closed the connection partway through the response"
 
 // The reasons an HTTP/1 recorder leaves an exchange out for when the client's
-// end came first, partway through the response, and was an end that records
-// no fault (FirstEndNoFault): the response is not known to be whole (its
+// own end, partway through the response, was an end that records no fault
+// (ClientEndNoFault), whichever end the relay read first, where the client's
+// end came first or the destination's stream ended where the client stopped
+// taking it: the response is not known to be whole (its
 // framing had not ended, or its body is framed by the upstream's close, which
 // had not come), and no fault is known to record it with. Each is
 // LeftOutClientClosedPartway with a detail after its colon, so of its cause
@@ -1510,6 +1592,36 @@ const (
 	LeftOutPartwayUnjudged = LeftOutClientClosedPartway + ": the client's end cannot be judged on this platform " +
 		"(its hooks do not say how the application released the connection), so keploy cannot tell a whole answer from a cut one"
 )
+
+// LeftOutCloseNotRead is the reason an HTTP/1 recorder leaves an exchange out
+// for whose response's body ends where the upstream closes the connection (no
+// Content-Length, not chunked), when its read did not end at that close: the
+// response is not known to be whole, and no fault is known to record it with.
+// The stream was closed under the read (the supervisor's abort), or ended with
+// no side's end (the relay ends the stream so at the recording's stop, and
+// when its read of a side fails otherwise, as at a TLS record cut short), or
+// at the upstream's reset once the recording's stop had begun, which is not
+// the close that ends such a body. In an observe-only capture
+// (Opts.SkipTLSMITM), with no relay to see the upstream's close, it is a
+// stream that ended without the connection's end marked on it
+// (Session.EndedWithConnection): a capture whose close can overtake its
+// stream's tail does not mark it, so no close-delimited body such a capture
+// carries is recorded. Recorded as far as it came, replay would serve a
+// complete-looking shorter response. The text before its colon is its cause,
+// of class leftOutCloseNotRead.
+const LeftOutCloseNotRead = leftOutCloseNotReadCause + ": the response's body ends at that close, and its read ended before it"
+
+// leftOutCloseNotReadCause is LeftOutCloseNotRead's cause (leftOutCause).
+const leftOutCloseNotReadCause = "the upstream's close was not read"
+
+// LeftOutReadAborted is the reason an HTTP/1 recorder leaves an exchange out
+// whose response's stream the session closed under its read (the supervisor's
+// abort, once the parser's context has ended or the parser is retired) before
+// the response's end, as its Content-Length, its chunked framing or its head's
+// end sets it, came: what was read does not parse whole because the read was
+// cut there, which is no decode error, and it is not known to be whole.
+const LeftOutReadAborted = "the response's read was aborted partway through it: keploy closed the connection's capture " +
+	"before the response's end came"
 
 // maxLeftOutCause is the longest cause leftOutCause keeps of a reason.
 const maxLeftOutCause = 64
@@ -1566,6 +1678,9 @@ const (
 	// leftOutClientClosed is an exchange whose client closed the connection
 	// partway through the response (LeftOutClientClosedPartway).
 	leftOutClientClosed = "client_closed"
+	// leftOutCloseNotRead is an exchange whose response's body ends at the
+	// upstream's close, which its read did not reach (LeftOutCloseNotRead).
+	leftOutCloseNotRead = "close_not_read"
 	leftOutOther        = "other"
 )
 
@@ -1579,6 +1694,8 @@ func leftOutClass(cause string) string {
 		return leftOutReset
 	case LeftOutClientClosedPartway:
 		return leftOutClientClosed
+	case leftOutCloseNotReadCause:
+		return leftOutCloseNotRead
 	}
 	return leftOutOther
 }
@@ -1650,6 +1767,14 @@ func leftOutKnob(class string) string {
 			"recording's stop closed it, with the call in flight), so there is no whole exchange to " +
 			"record, and a replay cannot reproduce the cut; the capture lost nothing. If the call timed out, raise the " +
 			"app's timeout for it and re-record"
+	case leftOutCloseNotRead:
+		return "reason=the upstream's close was not read: the response has no Content-Length and is not chunked, " +
+			"so only the upstream's close ends its body, and its read ended before that close (the recording stopped, " +
+			"the upstream reset the connection, keploy's read of it broke or was aborted, or, in an observe-only " +
+			"capture, the capture's stream ended without the connection's end marked on it), so the body is not known " +
+			"to be whole and the exchange was left out to keep the recording true. No setting changes this: an " +
+			"exchange whose upstream closes the connection after the whole body is recorded where the capture sees " +
+			"that close, as keploy's proxy does, and an observe-only capture only where it marks the connection's end"
 	}
 	return "Re-run with --debug to see each mock left out and why it could not be recorded"
 }

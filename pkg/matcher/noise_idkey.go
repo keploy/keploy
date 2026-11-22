@@ -3,6 +3,8 @@ package matcher
 import (
 	"sort"
 	"strings"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // A response often holds a map keyed by ids rather than by field names: a
@@ -64,7 +66,7 @@ const NoiseIDKey = "{id}"
 // past any year, HTTP status, YYYYMMDD date or small serial id.
 const (
 	minIDHexLen    = 16
-	minIDDigitsLen = 10
+	minIDDigitsLen = models.IDKeyMinDigits
 )
 
 // IsIDKey reports whether an object key is an id rather than a field name: a

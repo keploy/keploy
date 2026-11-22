@@ -12,12 +12,11 @@ import (
 	"time"
 	"unsafe"
 
-	lru "github.com/hashicorp/golang-lru/v2"
-
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	// vitesslog must load before any vitess code logs: see that package.
 	_ "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/lru"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"vitess.io/vitess/go/vt/sqlparser"
@@ -518,7 +517,7 @@ func (l sqlLiterals) bytes() int {
 // pool's places are read for every command a debug line or a miss shows,
 // and each redacted recording the cache keeps is read once, not once per
 // command. Its values are shared: read them, never change them.
-var sqlLiteralsCache = func() *lru.TwoQueueCache[string, sqlLiteralsRead] {
+var sqlLiteralsCache = func() *lru.TwoQueue[string, sqlLiteralsRead] {
 	c, err := lru.New2Q[string, sqlLiteralsRead](queryShapeCacheSize)
 	if err != nil {
 		// Unreachable: New2Q only errors on a non-positive size.

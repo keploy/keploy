@@ -717,3 +717,36 @@ func TestACloseLossIsLoggedWholeWithNoHostsListed(t *testing.T) {
 		}
 	}
 }
+
+// A test in which the application carried data on a connection to a
+// dependency it opened while no keploy agent ran is that test's own loss: it
+// is left without a verdict (keploy cannot tell which of its calls went over
+// that connection), never failed, and a later test is charged nothing for
+// it. The text says the connection was opened while the agent was down, and
+// the remedy what to do.
+func TestAConnectionKeployDidNotSeeLeavesOnlyTheTestsItCarriedDataInNotJudged(t *testing.T) {
+	k := CaptureLossUnseenConnection
+	if !k.PerTest() || !k.NotJudged() || k.runScoped() || k.AppLife() || k.Evidence() || !k.namesNoHost() {
+		t.Fatal("a connection keploy did not see is the test's own, not judged, and names no host")
+	}
+	at := func(n uint64) CaptureLosses {
+		return CaptureLosses{{Kind: k, Count: n, What: "a connection from local port 41000 to 10.0.0.9:5432"}}
+	}
+	if got := at(3).Charged(SameBases(nil), at(2)); !reflect.DeepEqual(got, at(1)) {
+		t.Fatalf("Charged = %+v, want the one since the test began", got)
+	}
+	if got := at(3).Charged(SameBases(nil), at(3)); len(got) != 0 {
+		t.Fatalf("Charged = %+v: a later test is charged nothing", got)
+	}
+	judged, notJudged := at(1).Split()
+	if len(judged) != 0 || !reflect.DeepEqual(notJudged, at(1)) {
+		t.Fatalf("Split = %+v, %+v: not judged, never failed", judged, notJudged)
+	}
+	txt := notJudged.NotJudgedText()
+	if !strings.Contains(txt, "opened while no keploy agent ran") || !strings.Contains(txt, "neither recorded nor mocked") {
+		t.Fatalf("%q does not say the connection was opened while no agent ran and its calls were neither recorded nor mocked", txt)
+	}
+	if r := notJudged.NotJudgedRemedy(); r != UnseenConnectionRemedy {
+		t.Fatalf("NotJudgedRemedy = %q", r)
+	}
+}

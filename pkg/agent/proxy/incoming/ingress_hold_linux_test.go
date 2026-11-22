@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
@@ -340,5 +341,40 @@ func TestAYieldedPortLogsOnlyItsWarn(t *testing.T) {
 		if !held && (len(errs) != 1 || len(warns) != 0) {
 			t.Fatalf("without a hold, a taken port logged %d ERRORs and %d WARNs, want main's one ERROR: %v", len(errs), len(warns), logs.All())
 		}
+	}
+}
+
+// A forwarder stopped as its accept loop turns (between the loop's check of
+// its context and its next deadline) is stopped, not failed: nothing is
+// logged above DEBUG. StopIngress cancels the context, then closes the
+// listener; the loop's deadline then fails on the closed listener, which was
+// logged at ERROR (seen as a forwarder was stopped as it started).
+func TestAForwarderStoppedAsItsAcceptLoopTurnsLogsNoError(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+	g := newGoTCPIngressHook(pm)
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	saved := ingressAcceptTurn
+	t.Cleanup(func() { ingressAcceptTurn = saved })
+	ingressAcceptTurn = func() {
+		cancel()
+		_ = ln.Close()
+	}
+	done := make(chan struct{})
+	go func() {
+		g.acceptIngress(ctx, ln, "127.0.0.1:1", make(chan struct{}, 1), 1)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the accept loop did not end on its stop")
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a stop logged %v, want nothing above DEBUG", logs.All())
 	}
 }

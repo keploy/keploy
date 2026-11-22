@@ -115,14 +115,6 @@ func (w *captureTeeWriter) Write(p []byte) (int, error) {
 }
 
 func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	return encodeGenericWithDrain(ctx, logger, reqBuf, clientConn, destConn, mocks, opts, proxyutil.RelayDrainIdle)
-}
-
-// encodeGenericWithDrain is encodeGeneric with the survivor drain's idle
-// window as a parameter, so tests can drive the drain without waiting out
-// the production window. Production has exactly one caller, above, and it
-// always passes proxyutil.RelayDrainIdle.
-func encodeGenericWithDrain(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, drainIdle time.Duration) error {
 
 	// Forward initial request buffer to destination immediately.
 	_, err := destConn.Write(reqBuf)
@@ -214,7 +206,7 @@ func encodeGenericWithDrain(ctx context.Context, logger *zap.Logger, reqBuf []by
 		//
 		// A copy error is a peer/socket condition, not a parser fault, so
 		// the dispatcher still sees nil.
-		proxyutil.WaitForSurvivor(done, tees[1-res.idx].delivered, drainIdle)
+		proxyutil.WaitForSurvivor(done, tees[1-res.idx].delivered, proxyutil.RelayDrainIdle)
 		return nil
 	}
 

@@ -981,15 +981,19 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	configFile := loader.Find(configPath)
 	ConfigFile = configFile
 	viper.SetConfigType("yml")
+	// files keeps test.globalNoise as keploy.yml and the override write it,
+	// for the Unmarshal below: viper lowercases its keys and splits them on
+	// ".", and they are url regexes and field paths (loader.Files).
+	files := loader.New(viper.GetViper())
 	if configFile == "" {
 		IsConfigFileFound = false
 		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
 		// keploy.yml is a file of the repository keploy runs in, which a cloned
-		// repo decides: loader.Read is viper's read of it, bounded -- a FIFO,
+		// repo decides: files.Read is viper's read of it, bounded -- a FIFO,
 		// a link to /dev/zero or a file past keploy's limits is refused, where
 		// viper.ReadInConfig blocked for good or ran out of memory.
-		if err := loader.Read(viper.GetViper(), configFile); err != nil {
+		if err := files.Read(configFile); err != nil {
 			errMsg := "failed to read config file"
 			utils.LogError(c.logger, err, errMsg, zap.String("file", configFile))
 			return errors.New(errMsg)
@@ -1018,7 +1022,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 			// appName, or a given --app-name or KEPLOY_APPNAME, which no
 			// file overrides.
 			named := viper.GetString("appName")
-			if err := loader.Merge(viper.GetViper(), overridePath); err != nil {
+			if err := files.Merge(overridePath); err != nil {
 				errMsg := fmt.Sprintf("failed to merge override config file: %s", overridePath)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
@@ -1039,8 +1043,8 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		IsConfigFileFound = true
 	}
 
-	// 7) Unmarshal
-	if err := viper.Unmarshal(c.cfg); err != nil {
+	// 7) Unmarshal, with test.globalNoise as the files write it
+	if err := files.Unmarshal(c.cfg); err != nil {
 		errMsg := "failed to unmarshal the config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)

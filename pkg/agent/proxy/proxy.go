@@ -26,7 +26,6 @@ import (
 	"syscall"
 	"time"
 
-	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
@@ -45,6 +44,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/lru"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -407,7 +407,13 @@ type Proxy struct {
 	// fanning one lookup into many qualified names — would otherwise grow this
 	// forever in a long-lived agent. Allocated once in New and purged, never
 	// replaced, by ResetRecordedDNSMocks.
-	nodataRelayLogged *expirable.LRU[string, bool] // keyed by generateCacheKey
+	nodataRelayLogged *lru.Expirable[string, bool] // keyed by generateCacheKey
+
+	// unansweredForwardLogged dedupes the WARN for a query no upstream
+	// answered (logUnansweredForward) to once per (name,qtype) every 30
+	// minutes; the rest are Debug. Same shape, lifetime and reset as
+	// nodataRelayLogged.
+	unansweredForwardLogged *lru.Expirable[string, bool] // keyed by generateCacheKey
 
 	// The DNS servers, set by startDNSServers before anything serves or
 	// stops them.
@@ -470,7 +476,7 @@ type Proxy struct {
 	unnamedConnsLogged atomic.Int64
 
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
-	dnsCache *expirable.LRU[string, dnsCacheEntry]
+	dnsCache *lru.Expirable[string, dnsCacheEntry]
 
 	// recordedDNSMocks tracks DNS queries that have already been recorded
 	// to avoid recording duplicate mocks. Key format: "name:qtype:qclass",
@@ -1113,6 +1119,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		dnsCache:                  newDNSCache(),
 		recordedDNSMocks:          newRecordedDNSMocksCache(),
 		nodataRelayLogged:         newNodataRelayLogCache(),
+		unansweredForwardLogged:   newNodataRelayLogCache(),
 		mysqlPorts:                newMysqlPortRegistry(),
 		// dnsForwardTimeout is the per-forward deadline for upstream DNS
 		// exchanges. 2 s is long enough to absorb a single UDP retransmit
@@ -1659,23 +1666,23 @@ func (p *Proxy) GetIntegrations() map[integrations.IntegrationType]integrations.
 
 // ResetRecordedDNSMocks clears the per-session DNS deduplication trackers.
 // This should be called when starting a new recording session so DNS mocks are
-// recorded fresh, and so the once-per-(name,qtype) NODATA relay notice is
-// re-surfaced for the new session instead of being suppressed by state left
-// over from the previous one.
+// recorded fresh, and so the once-per-(name,qtype) notices (the NODATA relay
+// and the unanswered upstream forward) are re-surfaced for the new session
+// instead of being suppressed by state left over from the previous one.
 //
-// Purges in place rather than reallocating. expirable.NewLRU with a non-zero
-// TTL starts a janitor goroutine whose done channel is never closed (see the
-// note in hashicorp/golang-lru v2's expirable_lru.go), and that goroutine
-// captures the cache — so every replacement cache would strand a goroutine
-// AND pin the discarded entries beyond the reach of the GC. Purge keeps both
-// trackers at one allocation for the process lifetime, and avoids swapping a
-// pointer that the DNS handler goroutines read concurrently.
+// Purges in place rather than reallocating: the DNS handler goroutines read
+// the tracker pointers concurrently, so swapping in new trackers would race
+// with them. Purge keeps each tracker at one allocation for the process
+// lifetime.
 func (p *Proxy) ResetRecordedDNSMocks() {
 	if p.recordedDNSMocks != nil {
 		p.recordedDNSMocks.Purge()
 	}
 	if p.nodataRelayLogged != nil {
 		p.nodataRelayLogged.Purge()
+	}
+	if p.unansweredForwardLogged != nil {
+		p.unansweredForwardLogged.Purge()
 	}
 	p.logger.Debug("DNS deduplication trackers reset")
 }
@@ -2149,6 +2156,33 @@ func (p *Proxy) startContainerKeys(ctx context.Context) {
 	}
 }
 
+// logSetupCAFailure logs that the CA's install failed with err. Terminal: the
+// CA cannot be installed in this process and Keploy-proxied TLS will fail
+// cert-verify for every workload that gets routed through the proxy. Logged at
+// Error (not Warn) to match the severity, with a next_step so operators see
+// the likely fix without grepping source.
+func logSetupCAFailure(logger *zap.Logger, err error) {
+	nextStep := "Verify the agent container has write access to the " +
+		"shared /tmp/keploy-tls volume (docker/k8s mode) or " +
+		"to the host's CA trust store under /usr/local/share/" +
+		"ca-certificates or /etc/pki/ca-trust/source/anchors " +
+		"(native mode). Restart the agent after fixing."
+	if errors.Is(err, pTls.ErrStoreLockHeld) {
+		// The native Linux install's store update did not run because
+		// another process held the trust stores' lock past its bound: no
+		// access is missing.
+		nextStep = pTls.StoreLockHeldNextStep()
+	}
+	logger.Error(
+		"SetupCA failed — Keploy-proxied TLS will fail cert-verify. "+
+			"The /agent/ready endpoint will return 503 with this error "+
+			"so dependents don't wait forever for a readiness that "+
+			"will never come.",
+		zap.Error(err),
+		zap.String("next_step", nextStep),
+	)
+}
+
 // In proxy.go
 func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	p.bindContainerKeys(ctx)
@@ -2191,24 +2225,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	err = p.setupCA(ctx)
 	utils.BootStep("the CA's install is over")
 	if err != nil {
-		// Terminal: the CA cannot be installed in this process and
-		// Keploy-proxied TLS will fail cert-verify for every workload
-		// that gets routed through the proxy. Log at Error (not Warn)
-		// to match the severity, and include a next_step so operators
-		// see the likely fix without grepping source.
-		p.logger.Error(
-			"SetupCA failed — Keploy-proxied TLS will fail cert-verify. "+
-				"The /agent/ready endpoint will return 503 with this error "+
-				"so dependents don't wait forever for a readiness that "+
-				"will never come.",
-			zap.Error(err),
-			zap.String("next_step",
-				"Verify the agent container has write access to the "+
-					"shared /tmp/keploy-tls volume (docker/k8s mode) or "+
-					"to the host's CA trust store under /usr/local/share/"+
-					"ca-certificates or /etc/pki/ca-trust/source/anchors "+
-					"(native mode). Restart the agent after fixing."),
-		)
+		logSetupCAFailure(p.logger, err)
 		pTls.MarkCAFailed(err)
 	}
 
@@ -6083,12 +6100,24 @@ func isAnswerReport(err error) bool {
 	return errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.Answer != ""
 }
 
-// isByKindAnswer reports whether err is the report of a background write
-// answered by its kind (models.AnswerByKind): unchecked, read by
-// no judging, only counted in the reports.
+// isByKindAnswer reports whether err is the report of a call answered in a
+// way no verdict of keploy test reads: a background write answered by its
+// kind (models.AnswerByKind), unchecked, or, with the proven switch off, a
+// call answered with another call's recording (models.AnsweredAsAnother),
+// which only keploy mock replay reads. A loss of one leaves no read
+// incomplete (noteMissLost). With the switch off no parser reports any other
+// answer, so the answers' room (addBounded) holds only these: one is dropped
+// only once its window holds maxPendingMockErrors of them, each of which
+// keeps the replay from being counted as proven.
 func isByKindAnswer(err error) bool {
 	var pe models.ParserError
-	return errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.Answer == models.AnswerByKind
+	return errors.As(err, &pe) && pe.MismatchReport != nil && uncountedAnswer(pe.MismatchReport.Answer)
+}
+
+// uncountedAnswer reports whether answer is one no verdict of keploy test
+// reads (isByKindAnswer).
+func uncountedAnswer(answer string) bool {
+	return answer == models.AnswerByKind || models.AnsweredAsAnother(answer)
 }
 
 // noteAnswerDropped says that the report of a background write answered by
@@ -6104,6 +6133,12 @@ func (p *Proxy) noteAnswerDropped(err error) {
 	var pe models.ParserError
 	kind := ""
 	if errors.As(err, &pe) && pe.MismatchReport != nil {
+		if r := pe.MismatchReport; models.AnsweredAsAnother(r.Answer) {
+			p.logger.Warn("a call answered with another call's recording was not kept for its test's report: its window already holds as many such calls as it keeps, so the report lists fewer of them than were served; no test verdict reads them, and a mock replay is not counted as proven on the ones it holds",
+				zap.String("answer", r.Answer), zap.String("recorded", r.ClosestMock), zap.Int64("dropped", n),
+				zap.Int("kept", maxPendingMockErrors))
+			return
+		}
 		kind = pe.MismatchReport.WriteKind
 	}
 	p.logger.Warn("a background write answered by its kind was not kept for its test's report: no verdict reads it, but the count of writes the report says were answered unchecked is short of it",
@@ -6142,7 +6177,7 @@ func missCounts(err error) bool {
 	var pe models.ParserError
 	if errors.As(err, &pe) && pe.MismatchReport != nil {
 		r := pe.MismatchReport
-		return r.CountsAgainstTest() || (r.Answer != "" && r.Answer != models.AnswerByKind)
+		return r.CountsAgainstTest() || (r.Answer != "" && !uncountedAnswer(r.Answer))
 	}
 	return true
 }
@@ -7041,7 +7076,7 @@ func (p *Proxy) sendMockNotFoundErrorFrom(ctx context.Context, err error, pid, i
 			zap.String("match_phase", r.MatchPhase),
 			zap.Int("candidates", r.CandidateCount),
 			zap.String("closest", r.ClosestMock),
-			zap.String("next_step", models.MissLogNextStep(r)),
+			zap.Stringer("next_step", models.LazyMissLogNextStep(r)),
 		}
 		// destination_scope is greppable in a node-wide agent log:
 		// "not_in_compared_set" is the one value that says "nothing this miss
