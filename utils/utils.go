@@ -28,7 +28,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1669,48 +1668,6 @@ func handedOver(leader int, members []Reached) []Reached {
 		}
 	}
 	return handed
-}
-
-// daemonStopEnds is LeaveToDaemonStop's ends; nil where keploy adopts
-// nothing (off Linux, or before the CLI's adoption is set up).
-var daemonStopEnds atomic.Pointer[func(pid int, start uint64) bool]
-
-// LeaveToDaemonStop is how keploy's adoption of the processes an application
-// leaves behind (pkg/platform/http, Linux) tells the interrupt of the
-// application which processes of a group it signalled keploy adopted. ends
-// says, of a process named by its pid and start time, whether keploy's stop
-// of the application's daemons, which follows the interrupt in every run,
-// ends it: asks it to stop with SIGTERM (or waits for it, when it acts on
-// the interrupt already), kills it once it makes no progress on its way out,
-// and waits for it. A shell that dies on the interrupt at once (`app &
-// wait`) leaves its app so: adopted, still stopping. The interrupt neither
-// waits for such a process, but the group's leader, nor for what it runs,
-// nor kills it at its grace's end for itself: the stop of the daemons ends
-// each, as it ends what the interrupt handed its caller (handedOver). One
-// that stop would leave running (one keploy cannot see) the interrupt waits
-// for, as any other.
-func LeaveToDaemonStop(ends func(pid int, start uint64) bool) {
-	daemonStopEnds.Store(&ends)
-}
-
-// leftToDaemonStop is LeaveToDaemonStop's ends of process pid, started at
-// start; false where none is set.
-func leftToDaemonStop(pid int, start uint64) bool {
-	if ends := daemonStopEnds.Load(); ends != nil {
-		return (*ends)(pid, start)
-	}
-	return false
-}
-
-// waitedFor is members without what handedOver leaves to the caller.
-func waitedFor(leader int, members []Reached) []Reached {
-	var waited []Reached
-	for _, m := range members {
-		if !m.Ignores || m.PID == leader {
-			waited = append(waited, m)
-		}
-	}
-	return waited
 }
 
 // waitForProcessExit waits for the process to exit or times out after the specified duration

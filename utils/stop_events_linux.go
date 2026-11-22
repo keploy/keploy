@@ -769,6 +769,17 @@ func ExitOf(p Reached) (<-chan struct{}, func()) {
 	return exited, func() { once.Do(func() { close(done) }) }
 }
 
+// waitedFor is members without what handedOver leaves to the caller.
+func waitedFor(leader int, members []Reached) []Reached {
+	var waited []Reached
+	for _, m := range members {
+		if !m.Ignores || m.PID == leader {
+			waited = append(waited, m)
+		}
+	}
+	return waited
+}
+
 // stopGroupByEvents is interruptProcessTree's wait, under the switch, for a
 // process group it signalled: the exit event of each process its signal
 // reached (members, groupGone), while the group makes progress. It kills the group on a stall,
@@ -800,6 +811,37 @@ func stopGroupByEvents(logger *zap.Logger, leader int, members []Reached, moved 
 	// rule, and go on without it after.
 	WaitExitByEvents(logger, exited, members, moved)
 	return why
+}
+
+// daemonStopEnds is LeaveToDaemonStop's ends; nil where keploy adopts
+// nothing (a binary without pkg/platform/http, which sets it).
+var daemonStopEnds atomic.Pointer[func(pid int, start uint64) bool]
+
+// LeaveToDaemonStop is how keploy's adoption of the processes an application
+// leaves behind (pkg/platform/http, Linux) tells the interrupt of the
+// application which processes of a group it signalled keploy adopted. ends
+// says, of a process named by its pid and start time, whether keploy's stop
+// of the application's daemons, which follows the interrupt in every run,
+// ends it: asks it to stop with SIGTERM (or waits for it, when it acts on
+// the interrupt already), kills it once it makes no progress on its way out,
+// and waits for it. A shell that dies on the interrupt at once (`app &
+// wait`) leaves its app so: adopted, still stopping. The interrupt neither
+// waits for such a process, but the group's leader, nor for what it runs,
+// nor kills it at its grace's end for itself: the stop of the daemons ends
+// each, as it ends what the interrupt handed its caller (handedOver). One
+// that stop would leave running (one keploy cannot see) the interrupt waits
+// for, as any other.
+func LeaveToDaemonStop(ends func(pid int, start uint64) bool) {
+	daemonStopEnds.Store(&ends)
+}
+
+// leftToDaemonStop is LeaveToDaemonStop's ends of process pid, started at
+// start; false where none is set.
+func leftToDaemonStop(pid int, start uint64) bool {
+	if ends := daemonStopEnds.Load(); ends != nil {
+		return (*ends)(pid, start)
+	}
+	return false
 }
 
 // groupGone is a channel closed once each of members, a group's processes as
