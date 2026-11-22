@@ -44,10 +44,11 @@ func TestRun_AtTheStopAParserFoldingWhatItReadHandsOverEveryRecord(t *testing.T)
 
 	aborted := make(chan struct{})
 	var abortOnce sync.Once
-	s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour})
+	core, logs := observer.New(zapcore.DebugLevel)
+	s := New(Config{Logger: zap.New(core), HangBudget: time.Hour})
 	s.SessionOnAbort = func() { abortOnce.Do(func() { close(aborted) }) }
 	mocks := make(chan *models.Mock, n)
-	sess := &Session{ClientStream: client.fc, DestStream: dest.fc, Mocks: mocks}
+	sess := &Session{ClientStream: client.fc, DestStream: dest.fc, ClientConnID: "40", Mocks: mocks}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -75,6 +76,9 @@ func TestRun_AtTheStopAParserFoldingWhatItReadHandsOverEveryRecord(t *testing.T)
 	if res.Status != StatusCanceled || res.FallthroughToPassthrough || res.Err != nil {
 		t.Fatalf("result %+v, want canceled with the parser's own return, not retired", res)
 	}
+	if n := logs.FilterMessage(FoldIdleWarnMsg).Len() + logs.FilterMessage(FoldCutWarnMsg).Len(); n != 0 {
+		t.Fatalf("%d fold-cut WARNs for a parser that finished on its own, want 0", n)
+	}
 }
 
 // foldRig runs a parser under a supervisor on a ManualClock. At the stop the
@@ -85,6 +89,7 @@ type foldRig struct {
 	t       *testing.T
 	clk     *stall.ManualClock
 	sess    *Session
+	logs    *observer.ObservedLogs
 	ops     chan func()
 	did     chan struct{}
 	resc    chan Result
@@ -96,18 +101,20 @@ func newFoldRig(t *testing.T, window time.Duration, beforeEnd func(*Session)) *f
 	client, dest := newBehindProducer(), newBehindProducer()
 	go client.run([]string{"request"})
 	go dest.run([]string{"answer"})
+	core, logs := observer.New(zapcore.DebugLevel)
 	r := &foldRig{
 		t:       t,
 		clk:     &stall.ManualClock{},
+		logs:    logs,
 		ops:     make(chan func()),
 		did:     make(chan struct{}),
 		resc:    make(chan Result, 1),
 		aborted: make(chan struct{}),
 	}
 	var abortOnce sync.Once
-	s := New(Config{Logger: zap.NewNop(), HangBudget: time.Hour, FoldWindow: window, Clock: r.clk})
+	s := New(Config{Logger: zap.New(core), HangBudget: time.Hour, FoldWindow: window, Clock: r.clk})
 	s.SessionOnAbort = func() { abortOnce.Do(func() { close(r.aborted) }) }
-	r.sess = &Session{ClientStream: client.fc, DestStream: dest.fc, Mocks: make(chan *models.Mock, 64)}
+	r.sess = &Session{ClientStream: client.fc, DestStream: dest.fc, ClientConnID: "45", Mocks: make(chan *models.Mock, 64)}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() {
@@ -243,6 +250,10 @@ func TestRun_AtTheStopAParserIdleOnceItReadItAllIsAbortedOnceItsWindowPasses(t *
 	}
 	if res.Status != StatusCanceled || !res.FallthroughToPassthrough {
 		t.Fatalf("result %+v, want canceled and retired", res)
+	}
+	warns := r.logs.FilterMessage(FoldIdleWarnMsg).AllUntimed()
+	if len(warns) != 1 || warns[0].Level != zapcore.WarnLevel || warns[0].ContextMap()["clientConnID"] != "45" || warns[0].ContextMap()["fold_window"] != window {
+		t.Fatalf("fold-idle WARNs %+v, want one WARN naming clientConnID 45 and fold_window %s", warns, window)
 	}
 	close(r.ops)
 }
@@ -462,6 +473,9 @@ func TestRun_AtTheStopDeadlineCutsAParserStillFoldingAndSaysSo(t *testing.T) {
 	if len(warns) != 1 || warns[0].Level != zapcore.WarnLevel || warns[0].ContextMap()["clientConnID"] != "41" {
 		t.Fatalf("WARNs of the cut %+v, want one, naming the connection", warns)
 	}
+	if n := logs.FilterMessage(FoldIdleWarnMsg).Len(); n != 0 {
+		t.Fatalf("%d fold-idle WARNs on a deadline cut, want 0", n)
+	}
 }
 
 // A session without both streams has nothing to say its parser read both to
@@ -664,48 +678,83 @@ func TestRun_AtTheStopDeadlineSaysTheCutWhicheverReadyCaseRunTakesFirst(t *testi
 	}
 }
 
-// The progress mark shares its word with the session's peer-end marks
-// (peerEnds): noting progress, and taking it, leaves them as they were, set or
-// not. The HTTP recorder reads EndFollowedStop; the relay sets ServerSpokeUnasked
-// and the first peer to end.
+// Progress has its own atomic field (Session.progressed), never a bit in the
+// session's peer-end word (Session.peerEnds): noting progress, and taking it,
+// touches no peerEnds bit at all, whether peerEnds is clear, holds peer-end
+// marks (including EndedWhereClientStopped, ClientEndedBeforeDest,
+// EndFollowedStop, ServerSpokeUnasked and ClientEndNoFault), or has every bit
+// set. Checked by comparing the whole peerEnds word before and after every op.
 func TestSession_ProgressLeavesThePeerEndMarksAlone(t *testing.T) {
 	t.Parallel()
 	type marks struct {
-		followed, unasked, firstOK bool
-		first                      fakeconn.Direction
-		noFault                    NoFaultEnd
-		client, dest               PeerEnd
+		word                                          uint32
+		followed, unasked, clientStopped, clientFirst bool
+		firstOK                                       bool
+		first                                         fakeconn.Direction
+		noFault                                       NoFaultEnd
+		client, dest                                  PeerEnd
 	}
 	read := func(s *Session) marks {
 		first, ok := s.FirstPeerEnded()
-		return marks{s.EndFollowedStop(), s.ServerSpokeUnasked(), ok, first, s.ClientEndNoFault(), s.PeerEnded(fakeconn.FromClient), s.PeerEnded(fakeconn.FromDest)}
+		return marks{
+			word:          s.peerEnds.Load(),
+			followed:      s.EndFollowedStop(),
+			unasked:       s.ServerSpokeUnasked(),
+			clientStopped: s.EndedWhereClientStopped(),
+			clientFirst:   s.ClientEndedBeforeDest(),
+			firstOK:       ok,
+			first:         first,
+			noFault:       s.ClientEndNoFault(),
+			client:        s.PeerEnded(fakeconn.FromClient),
+			dest:          s.PeerEnded(fakeconn.FromDest),
+		}
 	}
-	for _, set := range []bool{false, true} {
-		s := &Session{Mocks: make(chan *models.Mock, 8)}
-		if set {
+	for _, tc := range []struct {
+		name  string
+		setup func(*Session)
+	}{
+		{name: "all-clear", setup: func(*Session) {}},
+		{name: "peer-end-marks", setup: func(s *Session) {
 			s.MarkPeerEndedBy(fakeconn.FromDest, true, EndAtStop)
+			s.MarkPeerEndedBy(fakeconn.FromClient, true, EndAtStop)
+			s.MarkEndedWhereClientStopped()
+			s.MarkClientEndedBeforeDest()
+			s.MarkEndedWithConnection(fakeconn.FromClient)
 			s.peerEnds.Or(spokeUnaskedBit)
-		}
-		want := read(s)
-		if set && (!want.followed || !want.unasked || !want.firstOK) {
-			t.Fatalf("the marks did not take: %+v", want)
-		}
-		for name, op := range map[string]func(){
-			"EmitMock":          func() { _ = s.EmitMock(&models.Mock{Kind: models.HTTP}) },
-			"ReportLeftOut":     func() { s.ReportLeftOut(&models.Mock{Kind: models.HTTP}, "x") },
-			"ReportLeftOutPart": func() { s.ReportLeftOutPart(time.Now(), time.Now()) },
-			"MockHeld":          s.MockHeld,
-			"Folded":            s.Folded,
-			"takeHandedOver":    func() { s.takeHandedOver() },
-		} {
-			op()
-			if got := read(s); got != want {
-				t.Errorf("marks set %v: after %s the peer-end marks are %+v, want %+v", set, name, got, want)
+		}},
+		{name: "all-bits-set", setup: func(s *Session) {
+			s.peerEnds.Store(^uint32(0))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := &Session{Mocks: make(chan *models.Mock, 8)}
+			tc.setup(s)
+			want := read(s)
+			if tc.name == "peer-end-marks" && (!want.followed || !want.unasked || !want.clientStopped || !want.clientFirst || !want.firstOK || want.noFault != EndAtStop) {
+				t.Fatalf("the marks did not take: %+v", want)
 			}
-		}
-		s.Folded()
-		if !s.takeHandedOver() || s.takeHandedOver() {
-			t.Errorf("marks set %v: the progress mark is not taken once", set)
-		}
+			for name, op := range map[string]func(){
+				"EmitMock":           func() { _ = s.EmitMock(&models.Mock{Kind: models.HTTP}) },
+				"EmitMockOnShutdown": func() { _ = s.EmitMockOnShutdown(&models.Mock{Kind: models.HTTP}) },
+				"ReportLeftOut":      func() { s.ReportLeftOut(&models.Mock{Kind: models.HTTP}, "x") },
+				"ReportLeftOutPart":  func() { s.ReportLeftOutPart(time.Now(), time.Now()) },
+				"MockHeld":           s.MockHeld,
+				"Folded":             s.Folded,
+				"takeHandedOver":     func() { s.takeHandedOver() },
+			} {
+				op()
+				if got := read(s); got != want {
+					t.Errorf("%s: after %s peerEnds is %#x (%+v), want %#x (%+v)", tc.name, name, got.word, got, want.word, want)
+				}
+			}
+			s.Folded()
+			if !s.takeHandedOver() || s.takeHandedOver() {
+				t.Errorf("%s: the progress mark is not taken once", tc.name)
+			}
+			if got := s.peerEnds.Load(); got != want.word {
+				t.Errorf("%s: after Folded+takeHandedOver peerEnds is %#x, want %#x", tc.name, got, want.word)
+			}
+		})
 	}
 }

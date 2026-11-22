@@ -137,11 +137,12 @@ func TestRun_AtTheStopAParserBehindItsCaptureReadsAllOfIt(t *testing.T) {
 // capture is left for it: the supervisor aborts one that still has not
 // returned and makes no progress on what it read (it waits on something
 // else) once its fold window has passed, on the process's own clock, and
-// says nothing of a cut. One that has read only one stream to its end is
-// aborted only once the stop's own deadline passes, and is not said to have
-// been cut while recording what it had read: it had not read it all.
-// (TestRun_AtTheStopAParserFoldingWhatItReadHandsOverEveryRecord: one that
-// makes progress is waited for.)
+// logs one WARN naming the connection and that a mock in progress was
+// dropped (FoldIdleWarnMsg), not the deadline's cut WARN (FoldCutWarnMsg).
+// One that has read only one stream to its end is aborted only once the
+// stop's own deadline passes, and logs neither fold WARN: it had not read
+// it all. (TestRun_AtTheStopAParserFoldingWhatItReadHandsOverEveryRecord:
+// one that makes progress is waited for.)
 func TestRun_AtTheStopAbortsAParserIdleOnceBothStreamsAreReadOrAtTheDeadline(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -164,7 +165,7 @@ func TestRun_AtTheStopAbortsAParserIdleOnceBothStreamsAreReadOrAtTheDeadline(t *
 			s.SessionOnAbort = func() { abortOnce.Do(func() { close(aborted) }) }
 			deadline := make(chan struct{})
 			s.StopDeadline = deadline
-			sess := &Session{ClientStream: client.fc, DestStream: dest.fc}
+			sess := &Session{ClientStream: client.fc, DestStream: dest.fc, ClientConnID: "44"}
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -212,7 +213,15 @@ func TestRun_AtTheStopAbortsAParserIdleOnceBothStreamsAreReadOrAtTheDeadline(t *
 				t.Fatal("Run did not return once the parser had read both its streams to their end and made no progress for its fold window, or the stop's deadline had passed")
 			}
 			if n := logs.FilterMessage(FoldCutWarnMsg).Len(); n != 0 {
-				t.Fatalf("%d WARNs of a cut fold for a parser that handed nothing over, or had not read both its streams", n)
+				t.Fatalf("%d deadline-cut WARNs for a parser cut by its fold window or that had not read both its streams", n)
+			}
+			idleWarns := logs.FilterMessage(FoldIdleWarnMsg).AllUntimed()
+			if tc.readDest {
+				if len(idleWarns) != 1 || idleWarns[0].Level != zapcore.WarnLevel || idleWarns[0].ContextMap()["clientConnID"] != "44" {
+					t.Fatalf("fold-idle WARNs %+v, want one WARN naming clientConnID 44", idleWarns)
+				}
+			} else if len(idleWarns) != 0 {
+				t.Fatalf("%d fold-idle WARNs for a parser that had not read both its streams", len(idleWarns))
 			}
 			select {
 			case <-aborted:

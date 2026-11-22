@@ -364,7 +364,8 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 		//     (fakeconn.FakeConn.ReadToEnd), and has then made no progress
 		//     on what it read for its fold window (foldWatch): nothing of
 		//     the capture is left for it to read, and it hands nothing
-		//     over, so whatever it waits on costs nothing captured. One
+		//     over, so it is aborted and a WARN names the connection and
+		//     says any mock in progress was dropped (warnFoldIdle). One
 		//     still handing over what it read is waited for: an abort then
 		//     lost every record it had not handed over yet;
 		//   - the stop's overall deadline passed (StopDeadline, when its
@@ -424,6 +425,7 @@ func (s *Supervisor) Run(ctx context.Context, fn ParserFunc, sess *Session) Resu
 				}
 			case <-look:
 				if fold.idle() {
+					s.warnFoldIdle(sess)
 					break wait
 				}
 				look = fold.look
@@ -527,6 +529,10 @@ func (w *foldWatch) idle() bool {
 // FoldCutWarnMsg is the WARN warnCut logs.
 const FoldCutWarnMsg = "the recording's stop deadline cut short a parser still recording what it had captured"
 
+// FoldIdleWarnMsg is the WARN warnFoldIdle logs when the fold window aborts a
+// parser that had read both its streams to their end and made no progress.
+const FoldIdleWarnMsg = "parser made no progress after reading both streams at the recording's stop; mock in progress dropped"
+
 // warnCut says, as the stop's deadline aborts sess's parser, which had read both
 // its streams to their end and was still within its fold window, that the
 // records it had not handed over by then are lost.
@@ -534,6 +540,17 @@ func (s *Supervisor) warnCut(sess *Session) {
 	s.cfg.Logger.Warn(FoldCutWarnMsg,
 		zap.String("clientConnID", sess.ClientConnID),
 		zap.String("next_step", "the parser had read everything this connection carried before the stop and was still handing over the records it made of it: the records it had not handed over by the stop's deadline are missing from the recording. Give the recording's stop more time, or record with less traffic in flight at the stop"),
+	)
+}
+
+// warnFoldIdle says, as the fold window aborts sess's parser after it read both
+// its streams to their end and made no progress, which connection was cut and
+// that any mock in progress was dropped.
+func (s *Supervisor) warnFoldIdle(sess *Session) {
+	s.cfg.Logger.Warn(FoldIdleWarnMsg,
+		zap.String("clientConnID", sess.ClientConnID),
+		zap.Duration("fold_window", s.cfg.FoldWindow),
+		zap.String("next_step", "the parser had read both streams of this connection to their end and made no progress for its fold window; any mock in progress was dropped"),
 	)
 }
 
