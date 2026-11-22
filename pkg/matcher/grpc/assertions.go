@@ -420,14 +420,11 @@ func assertionHeaderNames(value interface{}) ([]string, bool) {
 }
 
 func toInt(v interface{}) (int, error) {
-	const maxInt = int64(^uint(0) >> 1)
-	const minInt = -maxInt - 1
-
 	switch x := v.(type) {
 	case int:
 		return x, nil
 	case int64:
-		if x > maxInt || x < minInt {
+		if x > math.MaxInt || x < math.MinInt {
 			return 0, fmt.Errorf("value out of range for int: %d", x)
 		}
 		return int(x), nil
@@ -435,28 +432,14 @@ func toInt(v interface{}) (int, error) {
 		if math.IsNaN(x) || math.IsInf(x, 0) || math.Trunc(x) != x {
 			return 0, fmt.Errorf("non-integer float value: %v", x)
 		}
-		if x < float64(minInt) || x >= -float64(minInt) {
+		if x < float64(math.MinInt) || x >= -float64(math.MinInt) {
 			return 0, fmt.Errorf("value out of range for int: %v", x)
 		}
 		return int(x), nil
 	case json.Number:
-		i64, err := x.Int64()
-		if err != nil {
-			return 0, err
-		}
-		if i64 > maxInt || i64 < minInt {
-			return 0, fmt.Errorf("value out of range for int: %d", i64)
-		}
-		return int(i64), nil
+		return strconv.Atoi(strings.TrimSpace(string(x)))
 	case string:
-		i64, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		if i64 > maxInt || i64 < minInt {
-			return 0, fmt.Errorf("value out of range for int: %d", i64)
-		}
-		return int(i64), nil
+		return strconv.Atoi(strings.TrimSpace(x))
 	default:
 		return 0, fmt.Errorf("cannot convert %T to int", v)
 	}
