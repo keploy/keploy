@@ -3251,12 +3251,15 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	}
 	// In keploy mock's client tests (T2) a coarse answer outside the scope
 	// (gaveRefusal: two stamps in one cut by chance) yields to a coarse copy
-	// of a send of the scope (6, sameText): api-server's eventsV2 insert
-	// carries the app's creation second its own audit insert sent a moment
-	// before, while an earlier test's answers hold that second as its calls
-	// fell in it. The bind is checked at replay, so a replay whose two
-	// values differ misses (fail closed). keploy test's server tests (T1)
-	// refuse it as before.
+	// of a send of the scope (6, sameText) and to a plain read of the clock
+	// made since the test began (7, SinceTestBegin): api-server's eventsV2
+	// insert carries the app's creation second its own audit insert sent a
+	// moment before (which a clock rule declares as a read of the clock, so
+	// step 6 leaves it for step 7), while an earlier test's or worker's
+	// answer holds that second as its calls fell in it. Both step 6's bind
+	// and step 7's window are checked at replay, so a replay whose value
+	// differs misses (fail closed). keploy test's server tests (T1) refuse
+	// it as before.
 	if gaveRefusal != nil && !dc.dr.clientTests {
 		return *gaveRefusal
 	}
@@ -3287,9 +3290,6 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	if len(sameText) > 0 && !clockSrc(sameText) {
 		return dc.copied(path, at, n, c, sameText, copiedWhy)
 	}
-	if gaveRefusal != nil {
-		return *gaveRefusal
-	}
 
 	// 7. Since begin (client tests): a plain read the window from each
 	// run's test begin to the call holds (a read the application made
@@ -3314,6 +3314,9 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 				}
 			}
 		}
+	}
+	if gaveRefusal != nil {
+		return *gaveRefusal
 	}
 
 	if len(coarse) > 0 && (!clockSrc(coarse) || twoClockReads(coarse)) {

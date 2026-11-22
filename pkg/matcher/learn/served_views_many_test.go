@@ -22,7 +22,7 @@ import (
 func TestAPollServedManyTimesIsReadWithOneViewForEachAnswerItGave(t *testing.T) {
 	const (
 		path  = "bind.$8"
-		polls = 64
+		polls = maxLiveViews + 1
 	)
 	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
 	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}}
