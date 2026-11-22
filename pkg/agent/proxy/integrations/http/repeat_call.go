@@ -67,7 +67,63 @@ func repeatNoteOf(ctx context.Context, input *req, db integrations.MockMemDb, n 
 // identical recording does not explain a request the application changed, and
 // a note there would hide the change behind a cache. A store whose per-test
 // read fails counts as having one: no note is the side that hides nothing.
+//
+// A store that walks its per-test tier by key (integrations.PerTestKeyRanger)
+// is read under each of keys (ownKeyIndexes), up to the first such recording,
+// so a miss costs the same whatever the test or the set holds; any other is
+// read whole (ownRecordingInRead).
 func ownRecordingUnder(mockDb integrations.MockMemDb, keys []string) bool {
+	pr, ok := mockDb.(integrations.PerTestKeyRanger)
+	if !ok {
+		return ownRecordingInRead(mockDb, keys)
+	}
+	ix := ownKeyIndexes[0]
+	if provenswitch.On() {
+		ix = ownKeyIndexes[1]
+	}
+	// What the whole read keeps (ownRecordingInRead): not spent, and the
+	// open test's own; in a store that does not tell, every recording of
+	// its per-test read is (openTestOwner).
+	spent, _ := mockDb.(integrations.SpentReader)
+	owner, _ := mockDb.(integrations.TestOwner)
+	found := false
+	for _, key := range keys {
+		err := pr.RangePerTestMocksWithKey(ix, key, func(m *models.Mock) bool {
+			if (spent != nil && spent.Spent(m)) || (owner != nil && !owner.OwnedByOpenTest(m)) {
+				return true
+			}
+			found = true
+			return false
+		})
+		if err != nil || found {
+			return true
+		}
+	}
+	return false
+}
+
+// ownKeyIndexes file the HTTP recordings of a store's per-test tier under
+// their request keys (recordedRequestKeys), one index for each setting of
+// the proven switch, [0] off and [1] on: the keys of a recording whose learn
+// step read the application's clock in its path differ between the two
+// (requestKeysIn). A call reads the index of the setting it runs under, so
+// what an index files depends on the recording alone (integrations.MockIndex).
+var ownKeyIndexes = [2]*integrations.MockIndex{
+	{Keys: func(m *models.Mock) []string { return httpRequestKeysIn(m, false) }},
+	{Keys: func(m *models.Mock) []string { return httpRequestKeysIn(m, true) }},
+}
+
+// httpRequestKeysIn is requestKeysIn of an HTTP recording; none for a mock of
+// another kind, which the whole read leaves out (FilterHTTPMocks).
+func httpRequestKeysIn(m *models.Mock, proven bool) []string {
+	if m == nil || m.Kind != models.HTTP {
+		return nil
+	}
+	return requestKeysIn(m, proven)
+}
+
+// ownRecordingInRead is ownRecordingUnder of a whole per-test read.
+func ownRecordingInRead(mockDb integrations.MockMemDb, keys []string) bool {
 	perTest, err := mockDb.GetPerTestMocksInWindow()
 	if err != nil {
 		return true

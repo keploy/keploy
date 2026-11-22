@@ -2884,8 +2884,8 @@ func comparedDestinations(pool []*models.Mock, candidateCount int) []string {
 // against a recording of the same operation where there is one: the first
 // survivor of it, else the first survivor; in the pool, each key is named
 // with its operation (models.WithHTTPOperation), so one of the same
-// operation is nearer. A recording's operation is read once
-// (recordedOperations).
+// operation is nearer. A recording's operation and key are read once
+// (recordedOperations, recordedRoutes).
 func pickClosestCandidate(request *http.Request, liveOp string, schemaSurvivors, pool []*models.Mock) *models.Mock {
 	var survivor *models.Mock
 	for _, m := range schemaSurvivors {
@@ -2913,16 +2913,15 @@ func pickClosestCandidate(request *http.Request, liveOp string, schemaSurvivors,
 			if pass == 0 && string(mock.Spec.HTTPReq.Method) != request.Method {
 				continue
 			}
-			// Parse mock URL to extract just the path (mocks store full URL strings)
-			mockPath := mock.Spec.HTTPReq.URL
-			if parsed, err := parseRecordedURL(mock.Spec.HTTPReq.URL); err == nil {
-				mockPath = parsed.Path
-			}
-			mockKey := models.WithHTTPOperation(string(mock.Spec.HTTPReq.Method)+" "+mockPath, recordedOperations.of(mock.Spec.HTTPReq))
-			dist := levenshtein.ComputeDistance(actualKey, mockKey)
+			dist := levenshtein.ComputeDistance(actualKey, recordedRoutes.of(mock.Spec.HTTPReq))
 			if bestDist < 0 || dist < bestDist {
 				bestDist = dist
 				closest = mock
+			}
+			if bestDist == 0 {
+				// No later recording is nearer: the first of the call's
+				// own route is the closest.
+				break
 			}
 		}
 		if closest != nil {
