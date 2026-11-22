@@ -200,3 +200,35 @@ func TestConsumedReadsKeepOneEntryPerRecording(t *testing.T) {
 		{Name: "c", Timestamp: 3},
 	}, c.list())
 }
+
+// A service that replays again starts its run's consumed afresh: its second
+// run's receipt and summary count only what that run's reads carried, none
+// of the first run's.
+func TestASecondRunCountsOnlyItsOwnReads(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	core, logs := observer.New(zapcore.DebugLevel)
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path = keployDir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.New(core), instr, named("mock-0", "mock-1", "mock-3"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg)
+	var consumed []any
+	for _, read := range [][]models.MockState{instr.consumedMocks, {{Name: "mock-3"}}} {
+		instr.consumedMocks = read
+		_ = svc.Replay(context.Background())
+		for _, e := range logs.TakeAll() {
+			if e.Message == "mock replay summary" {
+				consumed = append(consumed, e.ContextMap()["consumed"])
+			}
+		}
+		require.Equal(t, len(read), mustReceipt(t, keployDir).Consumed)
+	}
+	require.Equal(t, []any{int64(2), int64(1)}, consumed)
+}

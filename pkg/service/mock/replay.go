@@ -49,6 +49,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// it, and the drain below waits while it moves (teardownDrain).
 	ctx, teardown := utils.NewTeardownScope(ctx)
 	m.ids = nil
+	// What the run consumed is this run's reads only: a service that
+	// replays again counts and meters none of an earlier run's.
+	m.consumed = consumedReads{}
 	name := m.setName()
 	requests := m.requests()
 	started := time.Now()
