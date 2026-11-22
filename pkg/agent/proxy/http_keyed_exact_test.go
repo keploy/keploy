@@ -207,16 +207,22 @@ func corpusType(body string) string {
 // corpusServe sends one call through the HTTP integration's replay path and
 // tells what it was answered: the status and body, or that it was not.
 func corpusServe(h integrations.Integrations, mm integrations.MockMemDb, method, path, body string) string {
+	return serveWith(h, mm, models.OutgoingOptions{}, "", method, path, body)
+}
+
+// serveWith is corpusServe under opts, the call carrying the header lines
+// extra too.
+func serveWith(h integrations.Integrations, mm integrations.MockMemDb, opts models.OutgoingOptions, extra, method, path, body string) string {
 	app, agent := net.Pipe()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- h.MockOutgoing(ctx, agent, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
+		done <- h.MockOutgoing(ctx, agent, &models.ConditionalDstCfg{}, mm, opts)
 		_ = agent.Close()
 	}()
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s HTTP/1.1\r\nHost: upstream\r\n", method, path)
+	fmt.Fprintf(&b, "%s %s HTTP/1.1\r\nHost: upstream\r\n%s", method, path, extra)
 	if body != "" {
 		fmt.Fprintf(&b, "Content-Length: %d\r\nContent-Type: %s\r\n", len(body), corpusType(body))
 	}
@@ -288,6 +294,77 @@ func TestAKeyedExactBodyPassAnswersAsTheWholeRead(t *testing.T) {
 			}
 			if proven == "" && (served < 200 || unwalked < served/2) {
 				t.Fatalf("the corpora served %d calls, %d without a whole read; the row needs most served, most of them by key", served, unwalked)
+			}
+		})
+	}
+}
+
+// keyedRowManager is a manager of the per-test recordings mocks, each dated
+// in the window in the given order.
+func keyedRowManager(t *testing.T, mocks ...*models.Mock) *MockManager {
+	t.Helper()
+	at := time.Unix(1_700_000_000, 0)
+	for i, m := range mocks {
+		m.Spec.ReqTimestampMock = at.Add(time.Duration(i+1) * time.Millisecond)
+		m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(500 * time.Microsecond)
+		m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived = models.LifetimePerTest, true
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetMocksWithWindow(mocks, nil, at, at.Add(time.Minute))
+	return mm
+}
+
+// keyedRowMock is recording i of the request method path body, with the
+// recorded headers extra besides Host and Content-Type, answered resp-i.
+func keyedRowMock(i int, method, path, body string, extra map[string]string) *models.Mock {
+	m, _ := corpusMock(rand.New(rand.NewSource(1)), i, time.Time{})
+	m.Spec.HTTPReq.Method, m.Spec.HTTPReq.URL, m.Spec.HTTPReq.Body = models.Method(method), "http://upstream"+path, body
+	m.Spec.HTTPReq.Header = map[string]string{"Host": "upstream", "Content-Type": corpusType(body)}
+	for k, v := range extra {
+		m.Spec.HTTPReq.Header[k] = v
+	}
+	m.TestModeInfo.Consume = models.ConsumeReuse
+	return m
+}
+
+// Under the proven switch no call is answered by the keyed exact-body pass,
+// which compares no header value: a recording of the call's very method,
+// path and body whose header holds another value is not served it (the
+// strict comparison refuses the value), while with the switch off the call
+// is served it, and under the switch a call of the recorded value is too.
+func TestAProvenCallIsNotAnsweredByTheKeyedExactBodyPass(t *testing.T) {
+	for _, c := range []struct {
+		proven, tenant string
+		served         bool
+	}{{"1", "t2", false}, {"1", "t1", true}, {"", "t2", true}} {
+		t.Run(fmt.Sprintf("proven=%s/tenant=%s", c.proven, c.tenant), func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", c.proven)
+			mm := keyedRowManager(t, keyedRowMock(0, "POST", "/a", `{"x":1}`, map[string]string{"X-Tenant": "t1"}))
+			got := serveWith(httpint.New(zap.NewNop()), mm, models.OutgoingOptions{}, "X-Tenant: "+c.tenant+"\r\n", "POST", "/a", `{"x":1}`)
+			if served := got == "200 resp-0"; served != c.served {
+				t.Fatalf("the call of X-Tenant %s was answered %q; want served %v", c.tenant, got, c.served)
+			}
+		})
+	}
+}
+
+// Under keploy.yml's url noise a call is answered by the whole read, which
+// reads recordings of other paths the noise lets match, in the pool's order:
+// of a recording of /a/2 and a later one of /a/1, both of the call's body, a
+// call of /a/1 under noise of the segment is served the first, as before the
+// keyed pass, and with no noise the one of its own path.
+func TestAnExactCallUnderURLNoiseIsAnsweredByTheWholeRead(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "")
+	for _, c := range []struct {
+		noise map[string]map[string][]string
+		want  string
+	}{{map[string]map[string][]string{"url": {"/a/[0-9]+": nil}}, "200 resp-0"}, {nil, "200 resp-1"}} {
+		t.Run(fmt.Sprintf("noise=%v", c.noise != nil), func(t *testing.T) {
+			mm := keyedRowManager(t, keyedRowMock(0, "POST", "/a/2", `{"x":1}`, nil), keyedRowMock(1, "POST", "/a/1", `{"x":1}`, nil))
+			got := serveWith(httpint.New(zap.NewNop()), mm, models.OutgoingOptions{NoiseConfig: c.noise}, "", "POST", "/a/1", `{"x":1}`)
+			if got != c.want {
+				t.Fatalf("the call of /a/1 was answered %q; want %q", got, c.want)
 			}
 		})
 	}

@@ -292,7 +292,8 @@ func TestAStrictPOSTIsServedTheRecordingOfItsBodyInAnotherForm(t *testing.T) {
 // noise of its body, one with a value the obfuscator redacted, a form, and,
 // where keploy.yml declares noise of request bodies, every recording. Each
 // is served a call whose body differs from it only where it may, in a bucket
-// of recordings of other bodies.
+// of recordings of other bodies, from its path's bucket: it reads no
+// recording of another path, as a read of the store would.
 func TestAStrictPOSTOfARecordingThatComparesItsBodyOtherwiseIsServed(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
@@ -316,10 +317,26 @@ func TestAStrictPOSTOfARecordingThatComparesItsBodyOtherwiseIsServed(t *testing.
 		for _, view := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/view=%v", c.name, view), func(t *testing.T) {
 				h := newHTTP()
-				db := postStore(view, false, append(postItems(8), c.rec))
-				ok, served, _, err := h.matchOf(context.Background(), postCall(c.ct, c.live), db, db, nil, c.bodyNoise, nil, true, false, false, true, true)
+				db := postStore(view, false, append(append(postItems(8), c.rec), strictItems("get", 200)...))
+				// The generation's second call builds its index.
+				for i := 0; i < 2; i++ {
+					if _, _, _, err := h.matchOf(context.Background(), postCall("application/json", postBody(i)), db, db, nil, c.bodyNoise, nil, true, false, false, true, true); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var ok bool
+				var served *models.Mock
+				var err error
+				visits := strictVisitsOf(func() {
+					ok, served, _, err = h.matchOf(context.Background(), postCall(c.ct, c.live), db, db, nil, c.bodyNoise, nil, true, false, false, true, true)
+				})
 				if err != nil || !ok || served.Name != "it" {
 					t.Fatalf("served %v (ok %v, err %v); want it", served, ok, err)
+				}
+				// The path's bucket is seven recordings now, each read in
+				// both tiers' reads of an open test's own.
+				if visits > 2*7 {
+					t.Fatalf("the call looked at %d recordings; want at most its path's bucket of 7, each in both reads", visits)
 				}
 			})
 		}
@@ -354,6 +371,12 @@ func TestPlainPrintFilesOnlyABodyThatComparesPlainly(t *testing.T) {
 	clocked.Spec.Clocks = map[string]models.ClockOffset{"body.t": {}}
 	headerClock := jsonMock()
 	headerClock.Spec.Clocks = map[string]models.ClockOffset{"header.date": {}}
+	// The learn step's places of an array body's member and of a whole
+	// scalar body: body[0].t and body.
+	arrayClock := postItem("m", "application/json", `[{"t":1}]`, 0)
+	arrayClock.Spec.Clocks = map[string]models.ClockOffset{"body[0].t": {}}
+	wholeClock := postItem("m", "application/json", `"2023-11-14T22:13:20Z"`, 0)
+	wholeClock.Spec.Clocks = map[string]models.ClockOffset{"body": {}}
 	redactedValue := jsonMock()
 	redactedValue.Spec.HTTPReq.Body = `{"id":"REDACTED_abc"}`
 	redactedValue.Noise = []string{`^REDACTED_abc$`}
@@ -373,6 +396,8 @@ func TestPlainPrintFilesOnlyABodyThatComparesPlainly(t *testing.T) {
 		{"noise of other values", otherNoise, true},
 		{"learned noise", learned, false},
 		{"body clock", clocked, false},
+		{"array body clock", arrayClock, false},
+		{"whole body clock", wholeClock, false},
 		{"redacted value", redactedValue, false},
 		{"redacted body", redactedBody, false},
 		{"form", postItem("m", "application/x-www-form-urlencoded; charset=utf-8", "a=1", 0), false},
